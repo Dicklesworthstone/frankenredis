@@ -87,3 +87,9 @@ required-features = ["bench-reference"]
 name = "resp3_bool_fixed"
 harness = false
 required-features = ["bench-reference"]
+
+# (frankenredis-vlis9) Same-binary A/B: small-length const-size bulk header vs the prior
+# always-fused header, on the per-element collection-reply loop (HGETALL/LRANGE shape).
+[[bench]]
+name = "encode_bulk_small_len"
+harness = false

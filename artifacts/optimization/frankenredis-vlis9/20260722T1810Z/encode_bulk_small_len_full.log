@@ -1,0 +1,552 @@
+  [2m2026-07-22T18:10:37.605171Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: vmi1149989 at root@212.90.121.76 (0 slots remaining after reservation, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:883 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:10:37.873763Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mStarting remote compilation pipeline for frankenredis (hash: 0fc5032b0aec6b98)[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:241 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:10:37.873862Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mPrepared dependency sync manifest for 15 roots[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:263 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:10:43.521003Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSyncing project to worker vmi1149989...[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:323 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:10:43.521133Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mLoaded 3 pattern(s) from .rchignore (total: 45)[0m
+    [2;3mat[0m rch/src/transfer.rs:968 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:10:43.521143Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis -> /data/projects/frankenredis on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1655 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:10:59.551725Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 16030ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1719 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:10:59.551847Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-bench -> /data/projects/frankenredis/crates/fr-bench on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1655 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:11:01.655406Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2103ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1719 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:11:01.655533Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-command -> /data/projects/frankenredis/crates/fr-command on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1655 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:11:03.735102Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2079ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1719 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:11:03.735301Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-config -> /data/projects/frankenredis/crates/fr-config on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1655 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:11:05.766910Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2031ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1719 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:11:05.767086Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-conformance -> /data/projects/frankenredis/crates/fr-conformance on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1655 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:11:07.743620Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1976ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1719 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:11:07.743862Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-eventloop -> /data/projects/frankenredis/crates/fr-eventloop on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1655 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:11:09.626876Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1882ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1719 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:11:09.626993Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-expire -> /data/projects/frankenredis/crates/fr-expire on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1655 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:11:11.557068Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1930ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1719 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:11:11.557233Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-persist -> /data/projects/frankenredis/crates/fr-persist on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1655 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:11:13.429034Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1871ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1719 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:11:13.429169Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-protocol -> /data/projects/frankenredis/crates/fr-protocol on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1655 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:11:15.388626Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1959ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1719 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:11:15.388738Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-repl -> /data/projects/frankenredis/crates/fr-repl on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1655 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:11:17.378501Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1989ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1719 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:11:17.378625Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-runtime -> /data/projects/frankenredis/crates/fr-runtime on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1655 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:11:19.236047Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1857ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1719 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:11:19.236155Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-sentinel -> /data/projects/frankenredis/crates/fr-sentinel on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1655 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:11:21.180580Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1944ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1719 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:11:21.180696Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-server -> /data/projects/frankenredis/crates/fr-server on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1655 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:11:22.997264Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1816ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1719 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:11:22.997391Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-simd -> /data/projects/frankenredis/crates/fr-simd on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1655 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:11:24.908107Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1910ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1719 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:11:24.908234Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenredis/crates/fr-store -> /data/projects/frankenredis/crates/fr-store on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:1655 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:11:26.818043Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1909ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1719 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:11:26.818082Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSync complete: 130241 files, 7193641 bytes in 43286ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:486 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:11:37.481436Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mExecuting command remotely: cargo bench -p fr-protocol --bench encode_bulk_small_len --profile release-perf --config 'profile.release-perf.lto=false'[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:529 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:11:37.481491Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /data/projects/frankenredis/target -> /data/projects/frankenredis/.rch-target-vmi1149989-pool-61266a3f47c8577a61eed453a2b9deed[0m
+    [2;3mat[0m rch/src/transfer.rs:856 [2;3mon[0m ThreadId(1)
+
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded wait-timeout v0.2.1
+  Downloaded bit-set v0.8.0
+  Downloaded rusty-fork v0.3.1
+  Downloaded bit-vec v0.8.0
+  Downloaded quick-error v1.2.3
+  Downloaded rand_xorshift v0.4.0
+  Downloaded autocfg v1.5.0
+  Downloaded errno v0.3.14
+  Downloaded cfg-if v1.0.4
+  Downloaded fastrand v2.4.1
+  Downloaded ppv-lite86 v0.2.21
+  Downloaded tempfile v3.27.0
+  Downloaded rustix v1.1.4
+  Downloaded fnv v1.0.7
+  Downloaded getrandom v0.3.4
+  Downloaded unarray v0.1.4
+  Downloaded getrandom v0.4.2
+  Downloaded once_cell v1.21.4
+  Downloaded rand v0.9.4
+  Downloaded bitflags v2.11.1
+  Downloaded num-traits v0.2.19
+  Downloaded rand_chacha v0.9.0
+  Downloaded rand_core v0.9.5
+  Downloaded proptest v1.11.0
+  Downloaded zerocopy v0.8.48
+  Downloaded regex-syntax v0.8.10
+  Downloaded libc v0.2.185
+  Downloaded linux-raw-sys v0.12.1
+   Compiling libc v0.2.185
+   Compiling cfg-if v1.0.4
+   Compiling getrandom v0.3.4
+   Compiling getrandom v0.4.2
+   Compiling zerocopy v0.8.48
+   Compiling rustix v1.1.4
+   Compiling linux-raw-sys v0.12.1
+   Compiling bitflags v2.11.1
+   Compiling autocfg v1.5.0
+   Compiling fastrand v2.4.1
+   Compiling once_cell v1.21.4
+   Compiling bit-vec v0.8.0
+   Compiling quick-error v1.2.3
+   Compiling fnv v1.0.7
+   Compiling regex-syntax v0.8.10
+   Compiling num-traits v0.2.19
+   Compiling unarray v0.1.4
+   Compiling fr-protocol v0.1.0 (/data/projects/frankenredis/crates/fr-protocol)
+   Compiling bit-set v0.8.0
+   Compiling wait-timeout v0.2.1
+   Compiling rand_core v0.9.5
+   Compiling rand_xorshift v0.4.0
+   Compiling rand v0.9.4
+   Compiling tempfile v3.27.0
+   Compiling rusty-fork v0.3.1
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_chacha v0.9.0
+   Compiling proptest v1.11.0
+    Finished `release-perf` profile [optimized + debuginfo] target(s) in 14.72s
+     Running benches/encode_bulk_small_len.rs (.rch-target-vmi1149989-pool-61266a3f47c8577a61eed453a2b9deed/release-perf/deps/encode_bulk_small_len-8677560c7f7e26f3)
+CORRECTNESS_GATE result=identical cases=614 known_literal=covered
+WORKER_ID vmi1149989
+BINARY_SHA256 both_arms=e1a91804c941a43a878bb90ad9de3bd8c058c095f6670102ad726d80213d2b32
+PROFILE_TABLE_BEGIN trial=1
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 106  of event 'instructions:u'
+# Event count (approx.): 853126
+#
+# Overhead  Command          Shared Object                           Symbol                                                        
+# ........  ...............  ......................................  ..............................................................
+#
+    87.33%  encode_bulk_sma  libc.so.6                               [.] __memmove_avx_unaligned_erms
+            |
+            ---__memmove_avx_unaligned_erms
+               |          
+               |--24.51%--0x8
+               |          0x7676767676767676
+               |          
+               |--21.64%--0x9
+               |          0x7676767676767676
+               |          
+               |--10.41%--0xb
+               |          0x7676767676767676
+               |          
+               |--9.24%--0x3f
+               |          0x7676767676767676
+               |          
+               |--7.15%--0x7
+               |          0x7676767676767676
+               |          
+               |--4.98%--0x2f
+               |          0x7676767676767676
+               |          
+               |--4.60%--0xa
+               |          0x7676767676767676
+               |          
+               |--3.18%--0x18
+               |          0x7676767676767676
+               |          
+                --1.58%--0x21
+                          0x7676767676767676
+
+     7.76%  encode_bulk_sma  encode_bulk_small_len-8677560c7f7e26f3  [.] fr_protocol::push_len_header::<true>
+            |
+            ---fr_protocol::push_len_header::<true>
+               |          
+               |--5.03%--0x18
+               |          0x7676767676767676
+               |          
+                --2.69%--0x9
+                          0x7676767676767676
+
+     4.03%  encode_bulk_sma  libc.so.6                               [.] __memmove_avx_unaligned
+            |
+            ---__memmove_avx_unaligned
+               |          
+               |--2.46%--0x3f
+               |          0x7676767676767676
+               |          
+                --1.53%--0x8
+                          0x7676767676767676
+
+     0.77%  encode_bulk_sma  encode_bulk_small_len-8677560c7f7e26f3  [.] fr_protocol::bench_encode_bulk_string_slice_small::<false>
+            |
+            ---fr_protocol::bench_encode_bulk_string_slice_small::<false>
+               |          
+               |--0.29%--0x9
+               |          0x7676767676767676
+               |          
+               |--0.18%--0x21
+               |          0x7676767676767676
+               |          
+               |--0.14%--0x8
+               |          0x7676767676767676
+               |          
+                --0.10%--0x3f
+                          0x7676767676767676
+
+     0.10%  encode_bulk_sma  encode_bulk_small_len-8677560c7f7e26f3  [.] encode_bulk_small_len::main
+            |
+            ---encode_bulk_small_len::main
+
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#
+
+PROFILE_TABLE_END trial=1
+PROFILE_SELF arm=reference trial=1 self_pct=0.7700
+PROFILE_TABLE_BEGIN trial=2
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 91  of event 'instructions:u'
+# Event count (approx.): 29668
+#
+# Overhead  Command          Shared Object                           Symbol                                                        
+# ........  ...............  ......................................  ..............................................................
+#
+    54.93%  encode_bulk_sma  libc.so.6                               [.] __memmove_avx_unaligned_erms
+            |
+            ---__memmove_avx_unaligned_erms
+               |          
+               |--16.12%--0x9
+               |          0x7676767676767676
+               |          
+               |--10.32%--0xb
+               |          0x7676767676767676
+               |          
+               |--9.41%--0x8
+               |          0x7676767676767676
+               |          
+               |--7.59%--0x3f
+               |          0x7676767676767676
+               |          
+               |--3.84%--0x2f
+               |          0x7676767676767676
+               |          
+               |--2.62%--0x7
+               |          0x7676767676767676
+               |          
+               |--2.42%--0x21
+               |          0x7676767676767676
+               |          
+               |--1.37%--0xa
+               |          0x7676767676767676
+               |          
+                --1.22%--0x18
+                          0x7676767676767676
+
+    14.31%  encode_bulk_sma  libc.so.6                               [.] __memmove_avx_unaligned
+            |
+            ---__memmove_avx_unaligned
+               |          
+               |--3.97%--0x2f
+               |          0x7676767676767676
+               |          
+               |--3.60%--0x9
+               |          0x7676767676767676
+               |          
+               |--2.69%--0x8
+               |          0x7676767676767676
+               |          
+               |--2.67%--0x3f
+               |          0x7676767676767676
+               |          
+                --1.38%--0x68
+                          0x7676767676767676
+
+    13.72%  encode_bulk_sma  encode_bulk_small_len-8677560c7f7e26f3  [.] fr_protocol::push_len_header::<true>
+            |
+            ---fr_protocol::push_len_header::<true>
+               |          
+               |--6.66%--0x9
+               |          0x7676767676767676
+               |          
+               |--3.90%--0xb
+               |          0x7676767676767676
+               |          
+               |--1.28%--0x68
+               |          0x7676767676767676
+               |          
+               |--1.08%--0x21
+               |          0x7676767676767676
+               |          
+               |--0.57%--0xa
+               |          0x7676767676767676
+               |          
+                --0.23%--0x8
+                          0x7676767676767676
+
+    13.50%  encode_bulk_sma  encode_bulk_small_len-8677560c7f7e26f3  [.] fr_protocol::bench_encode_bulk_string_slice_small::<false>
+            |
+            ---fr_protocol::bench_encode_bulk_string_slice_small::<false>
+               |          
+               |--5.14%--0x9
+               |          0x7676767676767676
+               |          
+               |--4.37%--0x7
+               |          0x7676767676767676
+               |          
+               |--2.53%--0x8
+               |          0x7676767676767676
+               |          
+                --1.34%--0x2f
+                          0x7676767676767676
+
+     3.54%  encode_bulk_sma  encode_bulk_small_len-8677560c7f7e26f3  [.] encode_bulk_small_len::main
+            |
+            ---encode_bulk_small_len::main
+               |          
+               |--1.34%--0x2f
+               |          0x7676767676767676
+               |          
+               |--1.33%--0x9
+               |          0x7676767676767676
+               |          
+                --0.80%--0xb
+                          0x7676767676767676
+
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#
+
+PROFILE_TABLE_END trial=2
+PROFILE_SELF arm=reference trial=2 self_pct=13.5000
+PROFILE_TABLE_BEGIN trial=3
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 97  of event 'instructions:u'
+# Event count (approx.): 39845
+#
+# Overhead  Command          Shared Object                           Symbol                                                        
+# ........  ...............  ......................................  ..............................................................
+#
+    78.15%  encode_bulk_sma  libc.so.6                               [.] __memmove_avx_unaligned_erms
+            |
+            ---__memmove_avx_unaligned_erms
+               |          
+               |--22.59%--0x8
+               |          0x7676767676767676
+               |          
+               |--18.79%--0x9
+               |          0x7676767676767676
+               |          
+               |--11.23%--0xb
+               |          0x7676767676767676
+               |          
+               |--6.98%--0x68
+               |          0x7676767676767676
+               |          
+               |--5.00%--0xa
+               |          0x7676767676767676
+               |          
+               |--3.85%--0x18
+               |          0x7676767676767676
+               |          
+               |--3.77%--0x7
+               |          0x7676767676767676
+               |          
+               |--2.54%--0x21
+               |          0x7676767676767676
+               |          
+               |--2.17%--0x2f
+               |          0x7676767676767676
+               |          
+                --1.23%--0x3f
+                          0x7676767676767676
+
+     8.65%  encode_bulk_sma  encode_bulk_small_len-8677560c7f7e26f3  [.] fr_protocol::push_len_header::<true>
+            |
+            ---fr_protocol::push_len_header::<true>
+               |          
+               |--3.65%--0xb
+               |          0x7676767676767676
+               |          
+               |--1.28%--0x9
+               |          0x7676767676767676
+               |          
+               |--1.27%--0x21
+               |          0x7676767676767676
+               |          
+               |--1.24%--0x8
+               |          0x7676767676767676
+               |          
+                --1.20%--0x68
+                          0x7676767676767676
+
+     5.04%  encode_bulk_sma  encode_bulk_small_len-8677560c7f7e26f3  [.] fr_protocol::bench_encode_bulk_string_slice_small::<false>
+            |
+            ---fr_protocol::bench_encode_bulk_string_slice_small::<false>
+               |          
+               |--1.43%--0xb
+               |          0x7676767676767676
+               |          
+               |--1.30%--0x9
+               |          0x7676767676767676
+               |          
+               |--1.17%--0x8
+               |          0x7676767676767676
+               |          
+                --1.15%--0x68
+                          0x7676767676767676
+
+     4.96%  encode_bulk_sma  libc.so.6                               [.] __memmove_avx_unaligned
+            |
+            ---__memmove_avx_unaligned
+               |          
+               |--3.70%--0x2f
+               |          0x7676767676767676
+               |          
+                --1.26%--0x68
+                          0x7676767676767676
+
+     3.20%  encode_bulk_sma  encode_bulk_small_len-8677560c7f7e26f3  [.] encode_bulk_small_len::main
+            |
+            ---encode_bulk_small_len::main
+               |          
+               |--2.54%--0xb
+               |          0x7676767676767676
+               |          
+                --0.64%--0x68
+                          0x7676767676767676
+
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#
+
+PROFILE_TABLE_END trial=3
+PROFILE_SELF arm=reference trial=3 self_pct=5.0400
+PROFILE_SELF_SUMMARY arm=reference trials=3 median_self_pct=5.0400 self_cv_pct=82.1855 samples=[0.77, 5.04, 13.5]
+INSTRUCTIONS round=1 order=[0, 1, 2] candidate_a=455310763 candidate_b=455311006 reference=808810961 null_ratio=0.999999466 reference_over_candidate=1.776393239
+INSTRUCTIONS round=2 order=[0, 2, 1] candidate_a=455310869 candidate_b=455310889 reference=808810664 null_ratio=0.999999956 reference_over_candidate=1.776392173
+INSTRUCTIONS round=3 order=[2, 0, 1] candidate_a=455310881 candidate_b=455310221 reference=808810789 null_ratio=1.000001450 reference_over_candidate=1.776392401
+INSTRUCTIONS round=4 order=[2, 1, 0] candidate_a=455310825 candidate_b=455310569 reference=808810939 null_ratio=1.000000562 reference_over_candidate=1.776392949
+INSTRUCTIONS round=5 order=[1, 2, 0] candidate_a=455310934 candidate_b=455310070 reference=808811163 null_ratio=1.000001898 reference_over_candidate=1.776393015
+INSTRUCTIONS round=6 order=[1, 0, 2] candidate_a=455310080 candidate_b=455310636 reference=808810740 null_ratio=0.999998779 reference_over_candidate=1.776395418
+INSTRUCTIONS round=7 order=[0, 1, 2] candidate_a=455310960 candidate_b=455311119 reference=808810713 null_ratio=0.999999651 reference_over_candidate=1.776391926
+INSTRUCTIONS round=8 order=[0, 2, 1] candidate_a=455310645 candidate_b=455310207 reference=808810501 null_ratio=1.000000962 reference_over_candidate=1.776392689
+INSTRUCTIONS round=9 order=[2, 0, 1] candidate_a=455310652 candidate_b=455311021 reference=808810960 null_ratio=0.999999190 reference_over_candidate=1.776393670
+INSTRUCTIONS round=10 order=[2, 1, 0] candidate_a=455310958 candidate_b=455310869 reference=808810646 null_ratio=1.000000195 reference_over_candidate=1.776391786
+INSTRUCTIONS round=11 order=[1, 2, 0] candidate_a=455310724 candidate_b=455311007 reference=808810591 null_ratio=0.999999378 reference_over_candidate=1.776392578
+INSTRUCTIONS round=12 order=[1, 0, 2] candidate_a=455310635 candidate_b=455310823 reference=808811097 null_ratio=0.999999587 reference_over_candidate=1.776394037
+INSTRUCTIONS round=13 order=[0, 1, 2] candidate_a=455311058 candidate_b=455310879 reference=808810762 null_ratio=1.000000393 reference_over_candidate=1.776391651
+INSTRUCTIONS round=14 order=[0, 2, 1] candidate_a=455311168 candidate_b=455310648 reference=808811033 null_ratio=1.000001142 reference_over_candidate=1.776391817
+INSTRUCTIONS round=15 order=[2, 0, 1] candidate_a=455310727 candidate_b=455310995 reference=808810715 null_ratio=0.999999411 reference_over_candidate=1.776392839
+INSTRUCTIONS round=16 order=[2, 1, 0] candidate_a=455310554 candidate_b=455310528 reference=808810669 null_ratio=1.000000057 reference_over_candidate=1.776393413
+INSTRUCTIONS round=17 order=[1, 2, 0] candidate_a=455310554 candidate_b=455310448 reference=808811044 null_ratio=1.000000233 reference_over_candidate=1.776394237
+INSTRUCTIONS round=18 order=[1, 0, 2] candidate_a=455310639 candidate_b=455310616 reference=808810987 null_ratio=1.000000051 reference_over_candidate=1.776393780
+INSTRUCTIONS round=19 order=[0, 1, 2] candidate_a=455310735 candidate_b=455310553 reference=808810721 null_ratio=1.000000400 reference_over_candidate=1.776392821
+INSTRUCTIONS round=20 order=[0, 2, 1] candidate_a=455310035 candidate_b=455310114 reference=808810726 null_ratio=0.999999826 reference_over_candidate=1.776395563
+INSTRUCTIONS round=21 order=[2, 0, 1] candidate_a=455311255 candidate_b=455311243 reference=808810243 null_ratio=1.000000026 reference_over_candidate=1.776389742
+INSTRUCTIONS round=22 order=[2, 1, 0] candidate_a=455310323 candidate_b=455310974 reference=808810819 null_ratio=0.999998570 reference_over_candidate=1.776394644
+INSTRUCTIONS round=23 order=[1, 2, 0] candidate_a=455310119 candidate_b=455310862 reference=808811606 null_ratio=0.999998368 reference_over_candidate=1.776397168
+INSTRUCTIONS round=24 order=[1, 0, 2] candidate_a=455310651 candidate_b=455310425 reference=808810437 null_ratio=1.000000496 reference_over_candidate=1.776392525
+INSTRUCTIONS_SUMMARY rounds=24 null_median=1.000000051 null_p05=0.999998570 null_p95=1.000001450 null_cv_pct=0.000084 reference_over_candidate_median=1.776392949 speedup_cv_pct=0.000084
+  [2m2026-07-22T18:11:58.903537Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRemote command finished: exit=0 in 21421ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:653 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:11:58.903917Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRetrieving build artifacts...[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:702 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:11:58.903953Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/frankenredis on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:2373 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:11:58.904006Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mLoaded 3 retrieval exclude pattern(s) from .rchignore (total: 8)[0m
+    [2;3mat[0m rch/src/transfer.rs:1078 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:12:00.932872Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 2028ms (1 files, 13054 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2428 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:12:00.932895Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mArtifacts retrieved: 1 files, 13054 bytes in 2028ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:735 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:12:00.932997Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/frankenredis/.rch-target-vmi1149989-pool-61266a3f47c8577a61eed453a2b9deed on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:2373 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:12:03.132981Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 2199ms (66 files, 1436 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2428 [2;3mon[0m ThreadId(1)
+
+  [2m2026-07-22T18:12:03.133005Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mCustom CARGO_TARGET_DIR artifacts retrieved: 66 files, 1436 bytes in 2199ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:859 [2;3mon[0m ThreadId(1)
+
+[RCH] remote vmi1149989 (85.5s)

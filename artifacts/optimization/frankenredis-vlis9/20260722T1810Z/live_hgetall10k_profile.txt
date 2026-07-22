@@ -1,0 +1,61 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 3K of event 'cycles:P'
+# Event count (approx.): 10900166052
+#
+# Overhead  Command       Shared Object     Symbol                                                                                                                          
+# ........  ............  ................  ................................................................................................................................
+#
+    26.70%  frankenredis  frankenredis      [.] fr_protocol::encode_bulk_string_slice
+            |          
+            |--8.52%--__memmove_avx_unaligned_erms
+            |          0x40000
+            |          
+            |--6.23%--fr_protocol::encode_bulk_string_slice
+            |          0x40000
+            |          
+            |--5.63%--<fr_store::packed_set::HashFieldMapIter as core::iter::traits::iterator::Iterator>::next
+            |          0x40000
+            |          
+            |--2.53%--<fr_store::packed_set::CompactFieldMap>::get_index
+            |          |          
+            |           --1.78%--0x40000
+            |          
+            |--2.13%--fr_protocol::push_len_header::<true>
+            |          0x40000
+            |          
+             --1.63%--<fr_store::Store>::hgetall_borrow_scan_impl::<true, <fr_runtime::Runtime>::execute_plain_hgetall_borrowed_into::{closure#0}>
+                       0x40000
+
+    22.23%  frankenredis  frankenredis      [.] fr_protocol::push_len_header::<true>
+            |          
+            |--8.52%--__memmove_avx_unaligned_erms
+            |          |          
+            |           --8.49%--0x40000
+            |          
+            |--4.47%--<fr_store::packed_set::HashFieldMapIter as core::iter::traits::iterator::Iterator>::next
+            |          0x40000
+            |          
+            |--4.23%--fr_protocol::encode_bulk_string_slice
+            |          0x40000
+            |          
+            |--2.19%--<fr_store::packed_set::CompactFieldMap>::get_index
+            |          |          
+            |           --1.46%--0x40000
+            |          
+            |--1.58%--fr_protocol::push_len_header::<true>
+            |          0x40000
+            |          
+             --1.07%--<fr_store::Store>::hgetall_borrow_scan_impl::<true, <fr_runtime::Runtime>::execute_plain_hgetall_borrowed_into::{closure#0}>
+                       0x40000
+
+    17.59%  frankenredis  frankenredis      [.] <fr_store::packed_set::CompactFieldMap>::get_index
+            |          
+            |--7.45%--__memmove_avx_unaligned_erms
+            |          0x40000
+            |          
+            |--5.27%--fr_protocol::encode_bulk_string_slice
+ad389808120799656da03cf8e46fc7a68a13195e352b7171166ebf1bc606b241  /tmp/fr_ctl_3cp5v.bin

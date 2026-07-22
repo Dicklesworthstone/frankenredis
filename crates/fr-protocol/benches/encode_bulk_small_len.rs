@@ -1,9 +1,12 @@
-//! Profile-verified same-binary proof for the fused RESP length-header primitive.
+//! Same-binary proof for the small-length const-size bulk header path in
+//! `encode_bulk_string_slice` (frankenredis-vlis9).
 //!
-//! Candidate frames `<prefix><n>\r\n` in one stack buffer and appends it with a single
-//! `extend_from_slice`. Reference retains the exact prior three-call path (`extend(prefix)`,
-//! `push_usize`, `\r\n`). Both arms share the same `write_u64_digits` digit core, so the emitted
-//! bytes are identical; only the number of `extend_from_slice` calls differs.
+//! Candidate emits `$<len>\r\n` for `len < 100` as one const-length `extend_from_slice`
+//! (no per-element `reserve`, no `ilog10`, no stack-buffer build); reference is the exact
+//! prior shape (`reserve` + fused `push_len_header`). Bodies are written identically in
+//! both arms. The workload is the per-element collection-reply loop (HGETALL / LRANGE /
+//! SMEMBERS shape) where the live HGETALL(10k) profile put `push_len_header` at 22.2% and
+//! `encode_bulk_string_slice` at 26.7% self.
 
 use std::{
     env,
@@ -13,12 +16,14 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use fr_protocol::bench_push_len_header;
+use fr_protocol::bench_encode_bulk_string_slice_small;
 
-const PROFILE_REPEATS: usize = 5_000_000;
+const PROFILE_REPEATS: usize = 400_000;
 const PROFILE_TRIALS: usize = 3;
-const STAT_REPEATS: usize = 3_000_000;
+const STAT_REPEATS: usize = 250_000;
 const STAT_ROUNDS: usize = 24;
+
+const FILLER: &[u8] = &[b'v'; 128];
 
 #[derive(Clone, Copy)]
 enum Arm {
@@ -43,49 +48,36 @@ impl Arm {
     }
 }
 
-// Realistic reply length headers: a bulk-string `$len` dominated mix (short values are common),
-// interleaved array `*count` and map `%pairs` headers, with a couple of larger magnitudes.
-const CORPUS: [(u8, u64); 16] = [
-    (b'$', 5),
-    (b'*', 2),
-    (b'$', 12),
-    (b'$', 0),
-    (b'$', 3),
-    (b'*', 4),
-    (b'$', 32),
-    (b'$', 1),
-    (b'%', 2),
-    (b'$', 128),
-    (b'$', 7),
-    (b'*', 16),
-    (b'$', 256),
-    (b'$', 2),
-    (b'$', 64),
-    (b'$', 1024),
-];
-
-fn encode(prefix: u8, n: u64, arm: Arm, out: &mut Vec<u8>) {
-    match arm {
-        Arm::Candidate => bench_push_len_header::<true>(out, prefix, n),
-        Arm::Reference => bench_push_len_header::<false>(out, prefix, n),
-    }
-}
+// Element bodies per simulated reply: dominated by the HGETALL field/value widths
+// (one- and two-digit lengths), with a two-digit cluster and one >=100 fallback element
+// so the fallback stays exercised (and its neutrality is part of the measurement).
+const ELEMENT_LENS: [usize; 16] = [7, 9, 8, 11, 9, 10, 8, 9, 24, 33, 47, 63, 9, 8, 11, 104];
+const ELEMENTS_PER_REPLY: usize = 20;
 
 fn run_loop(arm: Arm, repeats: usize) {
-    // One reusable buffer whose capacity stabilizes after the first iteration, so the timed delta
-    // is purely the per-call `extend_from_slice` count (1 fused vs 3 reference), never allocation.
-    let mut out: Vec<u8> = Vec::with_capacity(64);
+    // One reusable buffer whose capacity stabilizes after the first reply, so the timed
+    // delta is per-element header emission, never allocation.
+    let mut out: Vec<u8> = Vec::with_capacity(16 * 1024);
     let mut checksum: u64 = 0;
     for _ in 0..repeats {
-        for (prefix, n) in black_box(CORPUS) {
-            out.clear();
-            encode(black_box(prefix), black_box(n), arm, &mut out);
-            let last = out.len() - 1;
-            checksum = checksum
-                .wrapping_add(out.len() as u64)
-                .wrapping_add(out[0] as u64)
-                .wrapping_add(out[last] as u64);
+        out.clear();
+        for slot in 0..ELEMENTS_PER_REPLY {
+            let len = ELEMENT_LENS[slot % ELEMENT_LENS.len()];
+            let body = black_box(&FILLER[..len]);
+            match arm {
+                Arm::Candidate => {
+                    bench_encode_bulk_string_slice_small::<true>(Some(body), false, &mut out);
+                }
+                Arm::Reference => {
+                    bench_encode_bulk_string_slice_small::<false>(Some(body), false, &mut out);
+                }
+            }
         }
+        let last = out.len() - 1;
+        checksum = checksum
+            .wrapping_add(out.len() as u64)
+            .wrapping_add(out[0] as u64)
+            .wrapping_add(out[last] as u64);
     }
     black_box(checksum);
 }
@@ -147,7 +139,7 @@ fn profile_trial(executable: &Path, trial: usize) -> Result<f64, String> {
         .map_err(|error| format!("invalid system time: {error}"))?
         .as_nanos();
     let data = env::temp_dir().join(format!(
-        "fr_push_len_header_{}_{}_{}.data",
+        "fr_encode_bulk_small_{}_{}_{}.data",
         process::id(),
         trial,
         stamp
@@ -206,8 +198,8 @@ fn profile_trial(executable: &Path, trial: usize) -> Result<f64, String> {
     println!("PROFILE_TABLE_BEGIN trial={trial}\n{stdout}\nPROFILE_TABLE_END trial={trial}");
     let line = stdout
         .lines()
-        .find(|line| line.contains("fr_protocol::bench_push_len_header"))
-        .ok_or("profile has no exact reference header frame; workload INVALID")?;
+        .find(|line| line.contains("fr_protocol::bench_encode_bulk_string_slice_small"))
+        .ok_or("profile has no reference bulk-slice frame; workload INVALID")?;
     let self_pct = line
         .split_whitespace()
         .next()
@@ -281,35 +273,28 @@ fn perf_instructions(executable: &Path, arm: Arm) -> Result<u64, String> {
 }
 
 fn correctness_gate() {
-    let mut fused = Vec::new();
-    let mut old = Vec::new();
-    for &prefix in b"$*~%>|=" {
-        for n in 0_u64..=300_000 {
-            fused.clear();
-            old.clear();
-            bench_push_len_header::<true>(&mut fused, prefix, n);
-            bench_push_len_header::<false>(&mut old, prefix, n);
-            assert_eq!(fused, old, "header differs for prefix={prefix} n={n}");
+    let payload: Vec<u8> = (0..=1100_usize).map(|i| (i % 251) as u8).collect();
+    let mut cases = 0_usize;
+    for resp3 in [false, true] {
+        for len in (0..=300).chain([511, 512, 999, 1000, 1100]) {
+            let mut fast = b"X".to_vec();
+            let mut slow = b"X".to_vec();
+            bench_encode_bulk_string_slice_small::<true>(Some(&payload[..len]), resp3, &mut fast);
+            bench_encode_bulk_string_slice_small::<false>(Some(&payload[..len]), resp3, &mut slow);
+            assert_eq!(fast, slow, "bulk slice differs len={len} resp3={resp3}");
+            cases += 1;
         }
-        for &n in &[
-            u64::from(u32::MAX),
-            u64::MAX - 1,
-            u64::MAX,
-            9_999_999_999,
-            1_000_000_000_000,
-        ] {
-            fused.clear();
-            old.clear();
-            bench_push_len_header::<true>(&mut fused, prefix, n);
-            bench_push_len_header::<false>(&mut old, prefix, n);
-            assert_eq!(fused, old, "header differs for boundary prefix={prefix} n={n}");
-        }
+        let mut fast = Vec::new();
+        let mut slow = Vec::new();
+        bench_encode_bulk_string_slice_small::<true>(None, resp3, &mut fast);
+        bench_encode_bulk_string_slice_small::<false>(None, resp3, &mut slow);
+        assert_eq!(fast, slow, "nil bulk differs resp3={resp3}");
+        cases += 1;
     }
-    // Appends to a non-empty destination (never overwrites earlier reply bytes).
-    let mut buf = b"PRE".to_vec();
-    bench_push_len_header::<true>(&mut buf, b'$', 42);
-    assert_eq!(buf, b"PRE$42\r\n");
-    println!("CORRECTNESS_GATE len_header_fused_matches_three_call=bit_identical");
+    let mut known = Vec::new();
+    bench_encode_bulk_string_slice_small::<true>(Some(b"hi"), false, &mut known);
+    assert_eq!(known, b"$2\r\nhi\r\n");
+    println!("CORRECTNESS_GATE result=identical cases={cases} known_literal=covered");
 }
 
 fn run_instruction_ab(executable: &Path) -> Result<(), String> {
@@ -351,7 +336,9 @@ fn run_instruction_ab(executable: &Path) -> Result<(), String> {
         "INSTRUCTIONS_SUMMARY rounds={STAT_ROUNDS} null_median={null_median:.9} null_p05={null_p05:.9} null_p95={null_p95:.9} null_cv_pct={null_cv_pct:.6} reference_over_candidate_median={effect_median:.9} speedup_cv_pct={effect_cv_pct:.6}"
     );
     if (null_median - 1.0).abs() >= 0.02 {
-        return Err(format!("null median exposes harness bias: {null_median:.9}"));
+        return Err(format!(
+            "null median exposes harness bias: {null_median:.9}"
+        ));
     }
     if effect_median <= null_p95 || effect_median <= 1.01 {
         return Err(format!(

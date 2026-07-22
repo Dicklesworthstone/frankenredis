@@ -269,16 +269,57 @@ pub fn bench_encode_bulk_string<const FUSED: bool>(bytes: &[u8], out: &mut Vec<u
 /// letting hot reply paths skip materializing an owned `Vec<u8>` just to hand
 /// it to the frame encoder.
 pub fn encode_bulk_string_slice(value: Option<&[u8]>, resp3: bool, out: &mut Vec<u8>) {
+    encode_bulk_string_slice_impl::<true>(value, resp3, out);
+}
+
+/// (frankenredis-vlis9) `SMALL_FAST = true` emits the `$<len>\r\n` header for `len < 100` as a
+/// single const-length `extend_from_slice` — a compile-time-size store with no stack-buffer
+/// build, no per-element `reserve`, and no `ilog10` — because collection replies (HGETALL /
+/// LRANGE / SMEMBERS / ZRANGE) emit one such header per element and their lengths are almost
+/// always one or two digits. `SMALL_FAST = false` is the exact prior shape, kept for the
+/// same-binary A/B in `benches/encode_bulk_small_len.rs`.
+#[inline]
+fn encode_bulk_string_slice_impl<const SMALL_FAST: bool>(
+    value: Option<&[u8]>,
+    resp3: bool,
+    out: &mut Vec<u8>,
+) {
     match value {
         Some(bytes) => {
-            out.reserve(1 + decimal_usize_len(bytes.len()) + 2 + bytes.len() + 2);
-            push_len_header::<true>(out, b'$', bytes.len() as u64);
+            let len = bytes.len();
+            if SMALL_FAST && len < 10 {
+                out.extend_from_slice(&[b'$', b'0' + len as u8, b'\r', b'\n']);
+            } else if SMALL_FAST && len < 100 {
+                let pair = len * 2;
+                out.extend_from_slice(&[
+                    b'$',
+                    DIGIT_PAIRS[pair],
+                    DIGIT_PAIRS[pair + 1],
+                    b'\r',
+                    b'\n',
+                ]);
+            } else {
+                out.reserve(1 + decimal_usize_len(len) + 2 + len + 2);
+                push_len_header::<true>(out, b'$', len as u64);
+            }
             out.extend_from_slice(bytes);
             out.extend_from_slice(b"\r\n");
         }
         None if resp3 => out.extend_from_slice(b"_\r\n"),
         None => out.extend_from_slice(b"$-1\r\n"),
     }
+}
+
+/// Bench hook for the same-binary A/B in `benches/encode_bulk_small_len.rs`. `SMALL_FAST = false`
+/// forces the prior always-fused-header path. Not on a production path.
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_encode_bulk_string_slice_small<const SMALL_FAST: bool>(
+    value: Option<&[u8]>,
+    resp3: bool,
+    out: &mut Vec<u8>,
+) {
+    encode_bulk_string_slice_impl::<SMALL_FAST>(value, resp3, out);
 }
 
 /// Write a RESP aggregate header for an array (`*N\r\n`) or, when `resp3_set`,
@@ -2695,8 +2736,9 @@ mod d2string_edge_cases {
 mod tests {
     use super::{
         BorrowedCommandArgsKind, BorrowedCommandFrame, MAX_LINE_LENGTH, ParserConfig, RespFrame,
-        RespParseError, bench_encode_integer, bench_parse_bulk_slice, bench_parse_frame_len_line,
-        bench_parse_multibulk_count, bench_push_len_header, decimal_u64_len, decimal_usize_len,
+        RespParseError, bench_encode_bulk_string_slice_small, bench_encode_integer,
+        bench_parse_bulk_slice, bench_parse_frame_len_line, bench_parse_multibulk_count,
+        bench_push_len_header, decimal_u64_len, decimal_usize_len,
         encode_aggregate_header, encode_bulk_string_slice, encode_map_header, encode_redis_double,
         format_redis_double, parse_command_args_borrowed_into, parse_command_frame,
         parse_command_frame_borrowed, parse_frame, parse_frame_with_config,
@@ -2845,6 +2887,51 @@ mod tests {
         }
     }
 
+    // (frankenredis-vlis9) The small-length const-size bulk header path must be byte-identical to
+    // the prior always-fused-header shape across a dense length scan spanning both fast-path
+    // boundaries (len < 10, len < 100) and the fallback, for both RESP versions and the None arms.
+    #[test]
+    fn small_len_bulk_header_matches_reference() {
+        let payload: Vec<u8> = (0..=1100_usize).map(|i| (i % 251) as u8).collect();
+        let mut lens: Vec<usize> = (0..=300).collect();
+        lens.extend_from_slice(&[301, 511, 512, 999, 1000, 1023, 1100]);
+        for resp3 in [false, true] {
+            for &len in &lens {
+                let mut fast = b"X".to_vec();
+                let mut slow = b"X".to_vec();
+                bench_encode_bulk_string_slice_small::<true>(
+                    Some(&payload[..len]),
+                    resp3,
+                    &mut fast,
+                );
+                bench_encode_bulk_string_slice_small::<false>(
+                    Some(&payload[..len]),
+                    resp3,
+                    &mut slow,
+                );
+                assert_eq!(fast, slow, "bulk slice differs len={len} resp3={resp3}");
+            }
+            let mut fast = Vec::new();
+            let mut slow = Vec::new();
+            bench_encode_bulk_string_slice_small::<true>(None, resp3, &mut fast);
+            bench_encode_bulk_string_slice_small::<false>(None, resp3, &mut slow);
+            assert_eq!(fast, slow, "nil bulk differs resp3={resp3}");
+        }
+        // Known literals pin the wire format at each width.
+        let mut out = Vec::new();
+        encode_bulk_string_slice(Some(b""), false, &mut out);
+        assert_eq!(out, b"$0\r\n\r\n");
+        out.clear();
+        encode_bulk_string_slice(Some(b"123456789"), false, &mut out);
+        assert_eq!(out, b"$9\r\n123456789\r\n");
+        out.clear();
+        encode_bulk_string_slice(Some(b"0123456789"), false, &mut out);
+        assert_eq!(out, b"$10\r\n0123456789\r\n");
+        out.clear();
+        encode_bulk_string_slice(Some(&[b'a'; 100]), false, &mut out);
+        assert!(out.starts_with(b"$100\r\n") && out.ends_with(b"\r\n") && out.len() == 108);
+    }
+
     // The fused single-buffer length header (`<prefix><n>\r\n` in one extend_from_slice) must be
     // byte-identical to the prior `extend(prefix) + push_usize + extend("\r\n")` shape across every
     // RESP prefix and a dense scan of small lengths plus the digit-width boundaries and u64 edge.
@@ -2868,7 +2955,7 @@ mod tests {
         for n in 0_u64..=5000 {
             sample.push(n);
         }
-        for &prefix in &[b'$', b'*', b'~', b'%', b'>', b'|', b'='] {
+        for &prefix in b"$*~%>|=" {
             for &n in &sample {
                 let mut fused = Vec::new();
                 let mut old = Vec::new();

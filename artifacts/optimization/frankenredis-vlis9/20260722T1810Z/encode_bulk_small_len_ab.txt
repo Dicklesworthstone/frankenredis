@@ -1,0 +1,32 @@
+CORRECTNESS_GATE result=identical cases=614 known_literal=covered
+WORKER_ID vmi1149989
+BINARY_SHA256 both_arms=e1a91804c941a43a878bb90ad9de3bd8c058c095f6670102ad726d80213d2b32
+PROFILE_SELF arm=reference trial=1 self_pct=0.7700
+PROFILE_SELF arm=reference trial=2 self_pct=13.5000
+PROFILE_SELF arm=reference trial=3 self_pct=5.0400
+PROFILE_SELF_SUMMARY arm=reference trials=3 median_self_pct=5.0400 self_cv_pct=82.1855 samples=[0.77, 5.04, 13.5]
+INSTRUCTIONS round=1 order=[0, 1, 2] candidate_a=455310763 candidate_b=455311006 reference=808810961 null_ratio=0.999999466 reference_over_candidate=1.776393239
+INSTRUCTIONS round=2 order=[0, 2, 1] candidate_a=455310869 candidate_b=455310889 reference=808810664 null_ratio=0.999999956 reference_over_candidate=1.776392173
+INSTRUCTIONS round=3 order=[2, 0, 1] candidate_a=455310881 candidate_b=455310221 reference=808810789 null_ratio=1.000001450 reference_over_candidate=1.776392401
+INSTRUCTIONS round=4 order=[2, 1, 0] candidate_a=455310825 candidate_b=455310569 reference=808810939 null_ratio=1.000000562 reference_over_candidate=1.776392949
+INSTRUCTIONS round=5 order=[1, 2, 0] candidate_a=455310934 candidate_b=455310070 reference=808811163 null_ratio=1.000001898 reference_over_candidate=1.776393015
+INSTRUCTIONS round=6 order=[1, 0, 2] candidate_a=455310080 candidate_b=455310636 reference=808810740 null_ratio=0.999998779 reference_over_candidate=1.776395418
+INSTRUCTIONS round=7 order=[0, 1, 2] candidate_a=455310960 candidate_b=455311119 reference=808810713 null_ratio=0.999999651 reference_over_candidate=1.776391926
+INSTRUCTIONS round=8 order=[0, 2, 1] candidate_a=455310645 candidate_b=455310207 reference=808810501 null_ratio=1.000000962 reference_over_candidate=1.776392689
+INSTRUCTIONS round=9 order=[2, 0, 1] candidate_a=455310652 candidate_b=455311021 reference=808810960 null_ratio=0.999999190 reference_over_candidate=1.776393670
+INSTRUCTIONS round=10 order=[2, 1, 0] candidate_a=455310958 candidate_b=455310869 reference=808810646 null_ratio=1.000000195 reference_over_candidate=1.776391786
+INSTRUCTIONS round=11 order=[1, 2, 0] candidate_a=455310724 candidate_b=455311007 reference=808810591 null_ratio=0.999999378 reference_over_candidate=1.776392578
+INSTRUCTIONS round=12 order=[1, 0, 2] candidate_a=455310635 candidate_b=455310823 reference=808811097 null_ratio=0.999999587 reference_over_candidate=1.776394037
+INSTRUCTIONS round=13 order=[0, 1, 2] candidate_a=455311058 candidate_b=455310879 reference=808810762 null_ratio=1.000000393 reference_over_candidate=1.776391651
+INSTRUCTIONS round=14 order=[0, 2, 1] candidate_a=455311168 candidate_b=455310648 reference=808811033 null_ratio=1.000001142 reference_over_candidate=1.776391817
+INSTRUCTIONS round=15 order=[2, 0, 1] candidate_a=455310727 candidate_b=455310995 reference=808810715 null_ratio=0.999999411 reference_over_candidate=1.776392839
+INSTRUCTIONS round=16 order=[2, 1, 0] candidate_a=455310554 candidate_b=455310528 reference=808810669 null_ratio=1.000000057 reference_over_candidate=1.776393413
+INSTRUCTIONS round=17 order=[1, 2, 0] candidate_a=455310554 candidate_b=455310448 reference=808811044 null_ratio=1.000000233 reference_over_candidate=1.776394237
+INSTRUCTIONS round=18 order=[1, 0, 2] candidate_a=455310639 candidate_b=455310616 reference=808810987 null_ratio=1.000000051 reference_over_candidate=1.776393780
+INSTRUCTIONS round=19 order=[0, 1, 2] candidate_a=455310735 candidate_b=455310553 reference=808810721 null_ratio=1.000000400 reference_over_candidate=1.776392821
+INSTRUCTIONS round=20 order=[0, 2, 1] candidate_a=455310035 candidate_b=455310114 reference=808810726 null_ratio=0.999999826 reference_over_candidate=1.776395563
+INSTRUCTIONS round=21 order=[2, 0, 1] candidate_a=455311255 candidate_b=455311243 reference=808810243 null_ratio=1.000000026 reference_over_candidate=1.776389742
+INSTRUCTIONS round=22 order=[2, 1, 0] candidate_a=455310323 candidate_b=455310974 reference=808810819 null_ratio=0.999998570 reference_over_candidate=1.776394644
+INSTRUCTIONS round=23 order=[1, 2, 0] candidate_a=455310119 candidate_b=455310862 reference=808811606 null_ratio=0.999998368 reference_over_candidate=1.776397168
+INSTRUCTIONS round=24 order=[1, 0, 2] candidate_a=455310651 candidate_b=455310425 reference=808810437 null_ratio=1.000000496 reference_over_candidate=1.776392525
+INSTRUCTIONS_SUMMARY rounds=24 null_median=1.000000051 null_p05=0.999998570 null_p95=1.000001450 null_cv_pct=0.000084 reference_over_candidate_median=1.776392949 speedup_cv_pct=0.000084
