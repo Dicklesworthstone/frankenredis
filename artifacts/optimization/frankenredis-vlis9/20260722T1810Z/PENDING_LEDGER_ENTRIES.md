@@ -125,3 +125,22 @@ nightly newly flags in fr-simd:795 — dependency of fr-store, blocked everyone'
 FOLLOW-UP CANDIDATES in the same vein (unmined): #[inline] on the still-uninlined
 CompactFieldMapIter::next / HashFieldMapIter::next call boundaries (10.88% + 3.61% self frames);
 cfm_decode fusion of the two range computations.
+
+## 2026-07-22: SHIPPED — #[inline] on the packed_set per-element call boundaries; 14.32% fewer end-to-end instructions on P1 HGETALL(10k) (frankenredis-citbb)
+
+NEGATIVE-LEDGER-FIRST: no prior row covers inline annotations in fr-store (grep empty). Reopen
+evidence: the post-pipsm candidate profile still showed the per-element access chain as SEPARATE
+frames (CompactFieldMapIter::next 10.88%, cfm_decode 5.85%, HashFieldMapIter::next 3.61%) — a
+non-inlined call boundary paid 20k+ times per HGETALL(10k) reply. Change: #[inline] on
+CompactFieldMap::get_index, CompactFieldMapIter::next, HashFieldMapIter::next, cfm_decode —
+attributes only, zero semantics. MEASURED (hash-bracketed builds ctl 25e9d780/cand a9084d8c, 5
+order-balanced reps): cand/ctl instructions:u = 0.85683 (**14.32% fewer end-to-end**), null/ctl
+1.000006 spread +/-0.00003 — effect ~5000x the floor. Inlining fused sink->iter->get_index->
+cfm_decode->read_varint into one loop and unlocked cross-function optimization worth ~3x the
+varint fast path alone. Frame check: all three frames GONE. fr now 4.90x fewer instructions than
+redis 7.2.4 on identical HGETALL(10k) work (12.86B -> 6.64B per 3000 replies across today's three
+levers). Gates: fr-store 877+aux green, clippy --all-targets green, benchmark_gate PASS. Details:
+artifacts/optimization/frankenredis-citbb/20260722T2125Z/. LESSON (reusable): after any hot-loop
+fast-path ships in this crate, re-profile for surviving call-boundary frames — #[inline] on tiny
+pub(crate)/iterator fns has repeatedly been left on the table because LLVM won't inline across
+codegen units without the hint at lto=false.

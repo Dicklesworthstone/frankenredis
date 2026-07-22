@@ -1,0 +1,21 @@
+frankenredis-citbb — #[inline] on packed_set per-element call boundaries — KEEP
+Annotated: CompactFieldMap::get_index, CompactFieldMapIter::next, HashFieldMapIter::next,
+cfm_decode (attributes only; zero semantic surface). Arms hash-bracketed on identical tree
+snapshot (HEAD d5d44b24d + stable peer WIP):
+  control  sha256 25e9d780074b9f02d8df670d42273a29568cfe1f... (/tmp/fr_i_ctl.bin)
+  candidate sha256 a9084d8c37448c1f6dd96a6ccada5abbb6cf2c54... (/tmp/fr_i_cand.bin)
+instructions:u per 3000-reply `redis-benchmark -c50 -n3000 HGETALL bigh` (10k-field hash),
+ctl core2 / cand core3 / null(ctl bin) core4, client 6,7, 5 order-balanced reps:
+rep  ctl           cand          null(A/A)
+1    7754191664    6643908898    7754296018
+2    7754175488    6644117093    7753959089
+3    7754108618    6643693182    7754159478
+4    7754099150    6643994931    7754042024
+5    7754049485    6644005376    7754284788
+ctl median 7.75411B cv 0.0007% | cand median 6.64399B cv 0.002% | null median 7.75416B
+null/ctl ~1.000006 (spread +/-0.00003) | cand/ctl = 0.85683 -> 14.32% fewer instructions
+Frame check (cand): CompactFieldMapIter::next / get_index / cfm_decode frames GONE (inlined);
+HashFieldMapIter::next absorbs the chain at 12.88% of the smaller total.
+Cross-engine: redis 7.2.4 = 32.539B on identical work -> fr now 4.90x fewer instructions.
+Control equals prior pipsm candidate (7.754B vs 7.753B) — implicit proof the d5d44b24d lint
+riders were behavior-neutral.

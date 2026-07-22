@@ -909,6 +909,7 @@ pub enum HashFieldMapIter<'a> {
 
 impl<'a> Iterator for HashFieldMapIter<'a> {
     type Item = (&'a [u8], &'a [u8]);
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             HashFieldMapIter::Packed(it) => it.next(),
@@ -974,6 +975,7 @@ const CFM_EMPTY: u32 = 0;
 const CFM_TOMB: u32 = 1;
 
 #[allow(dead_code)]
+#[inline]
 fn cfm_decode(buf: &[u8], off: u32) -> (std::ops::Range<usize>, std::ops::Range<usize>) {
     let off = off as usize;
     let (flen, p) = read_varint(buf, off);
@@ -1265,6 +1267,7 @@ impl CompactFieldMap {
 
     /// The (field, value) at insertion-order index `idx`.
     #[must_use]
+    #[inline]
     pub(crate) fn get_index(&self, idx: usize) -> Option<(&[u8], &[u8])> {
         let off = *self.order.get(idx)?;
         let (fr, vr) = cfm_decode(&self.buf, off);
@@ -1405,6 +1408,7 @@ pub struct CompactFieldMapIter<'a> {
 #[allow(dead_code)]
 impl<'a> Iterator for CompactFieldMapIter<'a> {
     type Item = (&'a [u8], &'a [u8]);
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         let pair = self.map.get_index(self.pos)?;
         self.pos += 1;

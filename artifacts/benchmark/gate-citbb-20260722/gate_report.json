@@ -1,0 +1,431 @@
+{
+  "config": {
+    "bind": "127.0.0.1",
+    "clients": 50,
+    "datasize": 3,
+    "keyspace": 10000,
+    "mode": "hardened",
+    "port": 26403,
+    "requests": 100000
+  },
+  "failing_workloads": [],
+  "generated_at_ms": 1784755311964,
+  "passed": true,
+  "schema_version": "frankenredis_benchmark_gate/v1",
+  "thresholds": {
+    "p99_regression_pct": 10.0,
+    "throughput_drop_pct": 15.0
+  },
+  "workloads": [
+    {
+      "baseline_path": "/data/projects/frankenredis/baselines/frankenredis_v0.1.0_set.json",
+      "candidate_path": "/data/projects/frankenredis/artifacts/benchmark/gate-citbb-20260722/candidate/set.json",
+      "comparison": {
+        "candidate": {
+          "clients": 50,
+          "ops_sec": 100704.6102181838,
+          "p50_us": 453.0,
+          "p95_us": 676.0,
+          "p999_us": 1342.0,
+          "p99_us": 801.0,
+          "pipeline": 1,
+          "server": "frankenredis",
+          "server_version": "candidate",
+          "source": "/data/projects/frankenredis/artifacts/benchmark/gate-citbb-20260722/candidate/set.json",
+          "total_requests": 100000,
+          "total_time_sec": 0.993,
+          "workload": "set"
+        },
+        "metrics": {
+          "ops_sec": {
+            "candidate": 100704.6102181838,
+            "delta": 99463.68071560042,
+            "delta_pct": 8015.256346838068,
+            "reference": 1240.9295025833799
+          },
+          "p50_us": {
+            "candidate": 453.0,
+            "delta": -41946.0,
+            "delta_pct": -98.9315785749664,
+            "reference": 42399.0
+          },
+          "p95_us": {
+            "candidate": 676.0,
+            "delta": -50235.0,
+            "delta_pct": -98.67219264991849,
+            "reference": 50911.0
+          },
+          "p999_us": {
+            "candidate": 1342.0,
+            "delta": -66561.0,
+            "delta_pct": -98.023651385064,
+            "reference": 67903.0
+          },
+          "p99_us": {
+            "candidate": 801.0,
+            "delta": -58046.0,
+            "delta_pct": -98.63884310160246,
+            "reference": 58847.0
+          },
+          "total_time_sec": {
+            "candidate": 0.993,
+            "delta": -79.59100000000001,
+            "delta_pct": -98.76774545815547,
+            "reference": 80.584
+          }
+        },
+        "reference": {
+          "clients": 50,
+          "ops_sec": 1240.9295025833799,
+          "p50_us": 42399.0,
+          "p95_us": 50911.0,
+          "p999_us": 67903.0,
+          "p99_us": 58847.0,
+          "pipeline": 1,
+          "server": "frankenredis",
+          "server_version": "v0.1.0",
+          "source": "/data/projects/frankenredis/baselines/frankenredis_v0.1.0_set.json",
+          "total_requests": 100000,
+          "total_time_sec": 80.584,
+          "workload": "set"
+        }
+      },
+      "comparison_path": "/data/projects/frankenredis/artifacts/benchmark/gate-citbb-20260722/compare/set.json",
+      "comparison_text_path": "/data/projects/frankenredis/artifacts/benchmark/gate-citbb-20260722/compare/set.txt",
+      "failures": [],
+      "ops_sec_delta_pct": 8015.256346838068,
+      "p99_delta_pct": -98.63884310160246,
+      "raw_report_path": "/data/projects/frankenredis/artifacts/benchmark/gate-citbb-20260722/raw/set.json",
+      "status": "pass",
+      "workload": "set"
+    },
+    {
+      "baseline_path": "/data/projects/frankenredis/baselines/frankenredis_v0.1.0_get.json",
+      "candidate_path": "/data/projects/frankenredis/artifacts/benchmark/gate-citbb-20260722/candidate/get.json",
+      "comparison": {
+        "candidate": {
+          "clients": 50,
+          "ops_sec": 86338.51701587337,
+          "p50_us": 542.0,
+          "p95_us": 727.0,
+          "p999_us": 933.0,
+          "p99_us": 806.0,
+          "pipeline": 1,
+          "server": "frankenredis",
+          "server_version": "candidate",
+          "source": "/data/projects/frankenredis/artifacts/benchmark/gate-citbb-20260722/candidate/get.json",
+          "total_requests": 100000,
+          "total_time_sec": 1.158,
+          "workload": "get"
+        },
+        "metrics": {
+          "ops_sec": {
+            "candidate": 86338.51701587337,
+            "delta": 85133.86360192017,
+            "delta_pct": 7067.083579047356,
+            "reference": 1204.6534139532027
+          },
+          "p50_us": {
+            "candidate": 542.0,
+            "delta": -41761.0,
+            "delta_pct": -98.71876699052076,
+            "reference": 42303.0
+          },
+          "p95_us": {
+            "candidate": 727.0,
+            "delta": -44680.0,
+            "delta_pct": -98.39892527583852,
+            "reference": 45407.0
+          },
+          "p999_us": {
+            "candidate": 933.0,
+            "delta": -61594.0,
+            "delta_pct": -98.507844611128,
+            "reference": 62527.0
+          },
+          "p99_us": {
+            "candidate": 806.0,
+            "delta": -50841.0,
+            "delta_pct": -98.43940596743278,
+            "reference": 51647.0
+          },
+          "total_time_sec": {
+            "candidate": 1.158,
+            "delta": -81.853,
+            "delta_pct": -98.60500415607571,
+            "reference": 83.011
+          }
+        },
+        "reference": {
+          "clients": 50,
+          "ops_sec": 1204.6534139532027,
+          "p50_us": 42303.0,
+          "p95_us": 45407.0,
+          "p999_us": 62527.0,
+          "p99_us": 51647.0,
+          "pipeline": 1,
+          "server": "frankenredis",
+          "server_version": "v0.1.0",
+          "source": "/data/projects/frankenredis/baselines/frankenredis_v0.1.0_get.json",
+          "total_requests": 100000,
+          "total_time_sec": 83.011,
+          "workload": "get"
+        }
+      },
+      "comparison_path": "/data/projects/frankenredis/artifacts/benchmark/gate-citbb-20260722/compare/get.json",
+      "comparison_text_path": "/data/projects/frankenredis/artifacts/benchmark/gate-citbb-20260722/compare/get.txt",
+      "failures": [],
+      "ops_sec_delta_pct": 7067.083579047356,
+      "p99_delta_pct": -98.43940596743278,
+      "raw_report_path": "/data/projects/frankenredis/artifacts/benchmark/gate-citbb-20260722/raw/get.json",
+      "status": "pass",
+      "workload": "get"
+    },
+    {
+      "baseline_path": "/data/projects/frankenredis/baselines/frankenredis_v0.1.0_mixed.json",
+      "candidate_path": "/data/projects/frankenredis/artifacts/benchmark/gate-citbb-20260722/candidate/mixed.json",
+      "comparison": {
+        "candidate": {
+          "clients": 50,
+          "ops_sec": 90549.72161909718,
+          "p50_us": 530.0,
+          "p95_us": 692.0,
+          "p999_us": 1196.0,
+          "p99_us": 827.0,
+          "pipeline": 1,
+          "server": "frankenredis",
+          "server_version": "candidate",
+          "source": "/data/projects/frankenredis/artifacts/benchmark/gate-citbb-20260722/candidate/mixed.json",
+          "total_requests": 100000,
+          "total_time_sec": 1.104,
+          "workload": "mixed"
+        },
+        "metrics": {
+          "ops_sec": {
+            "candidate": 90549.72161909718,
+            "delta": 89390.49104710307,
+            "delta_pct": 7711.191647864635,
+            "reference": 1159.2305719941078
+          },
+          "p50_us": {
+            "candidate": 530.0,
+            "delta": -42349.0,
+            "delta_pct": -98.76396371184029,
+            "reference": 42879.0
+          },
+          "p95_us": {
+            "candidate": 692.0,
+            "delta": -52491.0,
+            "delta_pct": -98.69883233364045,
+            "reference": 53183.0
+          },
+          "p999_us": {
+            "candidate": 1196.0,
+            "delta": -92819.0,
+            "delta_pct": -98.727862575121,
+            "reference": 94015.0
+          },
+          "p99_us": {
+            "candidate": 827.0,
+            "delta": -64964.0,
+            "delta_pct": -98.74298916265143,
+            "reference": 65791.0
+          },
+          "total_time_sec": {
+            "candidate": 1.104,
+            "delta": -85.16,
+            "delta_pct": -98.72020773439674,
+            "reference": 86.264
+          }
+        },
+        "reference": {
+          "clients": 50,
+          "ops_sec": 1159.2305719941078,
+          "p50_us": 42879.0,
+          "p95_us": 53183.0,
+          "p999_us": 94015.0,
+          "p99_us": 65791.0,
+          "pipeline": 1,
+          "server": "frankenredis",
+          "server_version": "v0.1.0",
+          "source": "/data/projects/frankenredis/baselines/frankenredis_v0.1.0_mixed.json",
+          "total_requests": 100000,
+          "total_time_sec": 86.264,
+          "workload": "mixed"
+        }
+      },
+      "comparison_path": "/data/projects/frankenredis/artifacts/benchmark/gate-citbb-20260722/compare/mixed.json",
+      "comparison_text_path": "/data/projects/frankenredis/artifacts/benchmark/gate-citbb-20260722/compare/mixed.txt",
+      "failures": [],
+      "ops_sec_delta_pct": 7711.191647864635,
+      "p99_delta_pct": -98.74298916265143,
+      "raw_report_path": "/data/projects/frankenredis/artifacts/benchmark/gate-citbb-20260722/raw/mixed.json",
+      "status": "pass",
+      "workload": "mixed"
+    },
+    {
+      "baseline_path": "/data/projects/frankenredis/baselines/frankenredis_v0.1.0_pipeline16.json",
+      "candidate_path": "/data/projects/frankenredis/artifacts/benchmark/gate-citbb-20260722/candidate/pipeline16.json",
+      "comparison": {
+        "candidate": {
+          "clients": 50,
+          "ops_sec": 1055364.1277469308,
+          "p50_us": 695.0,
+          "p95_us": 891.0,
+          "p999_us": 1308.0,
+          "p99_us": 1208.0,
+          "pipeline": 16,
+          "server": "frankenredis",
+          "server_version": "candidate",
+          "source": "/data/projects/frankenredis/artifacts/benchmark/gate-citbb-20260722/candidate/pipeline16.json",
+          "total_requests": 100000,
+          "total_time_sec": 0.094,
+          "workload": "pipeline16"
+        },
+        "metrics": {
+          "ops_sec": {
+            "candidate": 1055364.1277469308,
+            "delta": 1054142.7605088176,
+            "delta_pct": 86308.41958208721,
+            "reference": 1221.3672381131153
+          },
+          "p50_us": {
+            "candidate": 695.0,
+            "delta": -693064.0,
+            "delta_pct": -99.89982111943773,
+            "reference": 693759.0
+          },
+          "p95_us": {
+            "candidate": 891.0,
+            "delta": -795268.0,
+            "delta_pct": -99.8880876809783,
+            "reference": 796159.0
+          },
+          "p999_us": {
+            "candidate": 1308.0,
+            "delta": -877795.0,
+            "delta_pct": -99.85121197402353,
+            "reference": 879103.0
+          },
+          "p99_us": {
+            "candidate": 1208.0,
+            "delta": -855879.0,
+            "delta_pct": -99.85905748191257,
+            "reference": 857087.0
+          },
+          "total_time_sec": {
+            "candidate": 0.094,
+            "delta": -81.781,
+            "delta_pct": -99.88519083969466,
+            "reference": 81.875
+          }
+        },
+        "reference": {
+          "clients": 50,
+          "ops_sec": 1221.3672381131153,
+          "p50_us": 693759.0,
+          "p95_us": 796159.0,
+          "p999_us": 879103.0,
+          "p99_us": 857087.0,
+          "pipeline": 16,
+          "server": "frankenredis",
+          "server_version": "v0.1.0",
+          "source": "/data/projects/frankenredis/baselines/frankenredis_v0.1.0_pipeline16.json",
+          "total_requests": 100000,
+          "total_time_sec": 81.875,
+          "workload": "pipeline16"
+        }
+      },
+      "comparison_path": "/data/projects/frankenredis/artifacts/benchmark/gate-citbb-20260722/compare/pipeline16.json",
+      "comparison_text_path": "/data/projects/frankenredis/artifacts/benchmark/gate-citbb-20260722/compare/pipeline16.txt",
+      "failures": [],
+      "ops_sec_delta_pct": 86308.41958208721,
+      "p99_delta_pct": -99.85905748191257,
+      "raw_report_path": "/data/projects/frankenredis/artifacts/benchmark/gate-citbb-20260722/raw/pipeline16.json",
+      "status": "pass",
+      "workload": "pipeline16"
+    },
+    {
+      "baseline_path": "/data/projects/frankenredis/baselines/frankenredis_v0.1.0_incr.json",
+      "candidate_path": "/data/projects/frankenredis/artifacts/benchmark/gate-citbb-20260722/candidate/incr.json",
+      "comparison": {
+        "candidate": {
+          "clients": 50,
+          "ops_sec": 94904.20534171604,
+          "p50_us": 517.0,
+          "p95_us": 567.0,
+          "p999_us": 818.0,
+          "p99_us": 641.0,
+          "pipeline": 1,
+          "server": "frankenredis",
+          "server_version": "candidate",
+          "source": "/data/projects/frankenredis/artifacts/benchmark/gate-citbb-20260722/candidate/incr.json",
+          "total_requests": 100000,
+          "total_time_sec": 1.053,
+          "workload": "incr"
+        },
+        "metrics": {
+          "ops_sec": {
+            "candidate": 94904.20534171604,
+            "delta": 93727.61563832145,
+            "delta_pct": 7966.040784472961,
+            "reference": 1176.589703394577
+          },
+          "p50_us": {
+            "candidate": 517.0,
+            "delta": -44186.0,
+            "delta_pct": -98.84347806634901,
+            "reference": 44703.0
+          },
+          "p95_us": {
+            "candidate": 567.0,
+            "delta": -52904.0,
+            "delta_pct": -98.93961212619925,
+            "reference": 53471.0
+          },
+          "p999_us": {
+            "candidate": 818.0,
+            "delta": -117709.0,
+            "delta_pct": -99.30986188800864,
+            "reference": 118527.0
+          },
+          "p99_us": {
+            "candidate": 641.0,
+            "delta": -65918.0,
+            "delta_pct": -99.03694466563499,
+            "reference": 66559.0
+          },
+          "total_time_sec": {
+            "candidate": 1.053,
+            "delta": -83.938,
+            "delta_pct": -98.76104528714805,
+            "reference": 84.991
+          }
+        },
+        "reference": {
+          "clients": 50,
+          "ops_sec": 1176.589703394577,
+          "p50_us": 44703.0,
+          "p95_us": 53471.0,
+          "p999_us": 118527.0,
+          "p99_us": 66559.0,
+          "pipeline": 1,
+          "server": "frankenredis",
+          "server_version": "v0.1.0",
+          "source": "/data/projects/frankenredis/baselines/frankenredis_v0.1.0_incr.json",
+          "total_requests": 100000,
+          "total_time_sec": 84.991,
+          "workload": "incr"
+        }
+      },
+      "comparison_path": "/data/projects/frankenredis/artifacts/benchmark/gate-citbb-20260722/compare/incr.json",
+      "comparison_text_path": "/data/projects/frankenredis/artifacts/benchmark/gate-citbb-20260722/compare/incr.txt",
+      "failures": [],
+      "ops_sec_delta_pct": 7966.040784472961,
+      "p99_delta_pct": -99.03694466563499,
+      "raw_report_path": "/data/projects/frankenredis/artifacts/benchmark/gate-citbb-20260722/raw/incr.json",
+      "status": "pass",
+      "workload": "incr"
+    }
+  ]
+}
