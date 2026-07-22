@@ -792,8 +792,8 @@ unsafe fn bitnot_collect_avx2(src: &[u8], dst: *mut u8) {
             _mm256_storeu_si256(dst.add(off) as *mut __m256i, _mm256_xor_si256(s, ones));
             off += 32;
         }
-        for i in full..n {
-            *dst.add(i) = !src[i];
+        for (i, &s) in src.iter().enumerate().take(n).skip(full) {
+            *dst.add(i) = !s;
         }
     }
 }

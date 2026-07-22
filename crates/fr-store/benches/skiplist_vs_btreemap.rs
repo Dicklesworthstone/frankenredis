@@ -10,10 +10,11 @@
 //!   * CAND arm = an arena span-augmented skiplist — order AND O(log n) rank in ONE insert.
 //!
 //! ratio = skiplist / btreemap. DECISION:
-//!   * ratio < ~1.28  → skiplist gives rank for less than the treap tax BTreeMap must pay for it ⇒
-//!                      6lgnu net-WINS the write side (and also drops a whole structure). PURSUE.
-//!   * ratio >~ 1.55  → the skiplist's own span maintenance costs MORE than BTreeMap+treap ⇒ 6lgnu
-//!                      does NOT win insert; only ZRANK read latency remains. DEPRIORITIZE.
+//! * ratio < ~1.28 → skiplist gives rank for less than the treap tax BTreeMap must pay for it ⇒
+//!   6lgnu net-WINS the write side (and also drops a whole structure). PURSUE.
+//! * ratio >~ 1.55 → the skiplist's own span maintenance costs MORE than BTreeMap+treap ⇒ 6lgnu
+//!   does NOT win insert; only ZRANK read latency remains. DEPRIORITIZE.
+//!
 //! The skiplist's rank is asserted against a sorted oracle, so the timed insert includes REAL span
 //! maintenance (no free lunch from a rank-skipping prototype).
 //!
@@ -25,6 +26,8 @@ use std::hint::black_box;
 use std::sync::Arc;
 use std::time::Instant;
 
+type ScoredMember = (f64, Arc<[u8]>);
+
 const ROUNDS: usize = 41;
 const TARGET_SEGMENT_SECS: f64 = 0.010;
 const NULL_LO: f64 = 0.05;
@@ -35,7 +38,12 @@ fn members(n: usize) -> Vec<(f64, Arc<[u8]>)> {
     // distinct scores 0..n, member bytes stable; order permuted by a xorshift so inserts hit random
     // positions (not the sorted-append best case for either structure).
     let mut v: Vec<(f64, Arc<[u8]>)> = (0..n)
-        .map(|i| (i as f64, Arc::from(format!("m{i:07}").into_bytes().into_boxed_slice())))
+        .map(|i| {
+            (
+                i as f64,
+                Arc::from(format!("m{i:07}").into_bytes().into_boxed_slice()),
+            )
+        })
         .collect();
     let mut s = 0x2545_F491_4F6C_DD1D_u64 ^ (n as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     for i in (1..v.len()).rev() {
@@ -58,7 +66,9 @@ impl PartialOrd for OrdKey {
 }
 impl Ord for OrdKey {
     fn cmp(&self, o: &Self) -> std::cmp::Ordering {
-        self.0.total_cmp(&o.0).then_with(|| self.1.as_ref().cmp(o.1.as_ref()))
+        self.0
+            .total_cmp(&o.0)
+            .then_with(|| self.1.as_ref().cmp(o.1.as_ref()))
     }
 }
 
@@ -97,7 +107,12 @@ impl SkipList {
             forward: [NIL; MAX_LEVEL],
             span: [0; MAX_LEVEL],
         });
-        SkipList { nodes, level: 1, len: 0, rng: 0x9E37_79B9_7F4A_7C15 }
+        SkipList {
+            nodes,
+            level: 1,
+            len: 0,
+            rng: 0x9E37_79B9_7F4A_7C15,
+        }
     }
 
     #[inline]
@@ -159,8 +174,8 @@ impl SkipList {
             self.nodes[up].forward[i] = new_idx;
             self.nodes[up].span[i] = (rank[0] - rank[i]) + 1;
         }
-        for i in new_level..self.level {
-            self.nodes[update[i]].span[i] += 1;
+        for (i, &up) in update.iter().enumerate().take(self.level).skip(new_level) {
+            self.nodes[up].span[i] += 1;
         }
         self.nodes.push(node);
         self.len += 1;
@@ -217,7 +232,10 @@ fn main() {
             sl.insert(*sc, Arc::clone(mem));
         }
         let mut sorted: Vec<&(f64, Arc<[u8]>)> = items.iter().collect();
-        sorted.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.as_ref().cmp(b.1.as_ref())));
+        sorted.sort_by(|a, b| {
+            a.0.total_cmp(&b.0)
+                .then_with(|| a.1.as_ref().cmp(b.1.as_ref()))
+        });
         for (pos, (sc, mem)) in sorted.iter().enumerate() {
             assert_eq!(
                 sl.rank_of(*sc, mem.as_ref()),
@@ -225,18 +243,28 @@ fn main() {
                 "skiplist rank mismatch at sorted pos {pos}"
             );
         }
-        assert_eq!(build_btreemap(&items), build_skiplist(&items), "cardinality mismatch");
+        assert_eq!(
+            build_btreemap(&items),
+            build_skiplist(&items),
+            "cardinality mismatch"
+        );
     }
 
     println!(
         "\n{:<8} {:>7} {:>9} {:>16} {:>8} {:>14} {:>18}",
-        "size", "reps", "NULL med", "null p5..p95", "null cv%", "skiplist/btree", "verdict(vs treap-tax)"
+        "size",
+        "reps",
+        "NULL med",
+        "null p5..p95",
+        "null cv%",
+        "skiplist/btree",
+        "verdict(vs treap-tax)"
     );
 
     let sizes: &[(&str, usize)] = &[("n1k", 1_000), ("n5k", 5_000), ("n20k", 20_000)];
     for &(label, n) in sizes {
         let items = members(n);
-        let time = |f: fn(&[(f64, Arc<[u8]>)]) -> usize, reps: usize| -> f64 {
+        let time = |f: fn(&[ScoredMember]) -> usize, reps: usize| -> f64 {
             let start = Instant::now();
             let mut acc = 0usize;
             for _ in 0..reps {
@@ -250,7 +278,8 @@ fn main() {
         loop {
             let e = time(build_btreemap, reps);
             if e >= TARGET_SEGMENT_SECS || reps > 1 << 16 {
-                reps = ((reps as f64) * (TARGET_SEGMENT_SECS / e.max(1e-9)).max(1.0)).ceil() as usize;
+                reps =
+                    ((reps as f64) * (TARGET_SEGMENT_SECS / e.max(1e-9)).max(1.0)).ceil() as usize;
                 break;
             }
             reps *= 2;
@@ -260,7 +289,7 @@ fn main() {
         let mut ratios = Vec::with_capacity(ROUNDS);
         for round in 0..=ROUNDS {
             let swap = round % 2 == 1;
-            let pair = |bf: fn(&[(f64, Arc<[u8]>)]) -> usize, cf: fn(&[(f64, Arc<[u8]>)]) -> usize| {
+            let pair = |bf: fn(&[ScoredMember]) -> usize, cf: fn(&[ScoredMember]) -> usize| {
                 if swap {
                     let c = time(cf, reps);
                     c / time(bf, reps)

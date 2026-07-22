@@ -1,8 +1,8 @@
 //! Same-binary A/B for the LFU SMEMBERS keyspace-probe collapse on the ZERO-COPY production path
 //! (`smembers_borrow_scan`, the fr-runtime borrow-scan encoder). The non-LFU path already
 //! single-probes via `lookup_live_for_read_mut`; this folds the LFU path's `record_keyspace_lookup`
-//! + value `get_mut` into ONE `get_mut` (expiry peek + inline hit/miss + `rand_sample` drawn on a
-//! disjoint `&mut self.rng_seed` field split). SMEMBERS has no `contains_key` gate → 2 probes → 1.
+//! and value `get_mut` into ONE `get_mut` (expiry peek, inline hit/miss, and `rand_sample` drawn on
+//! a disjoint `&mut self.rng_seed` field split). SMEMBERS has no `contains_key` gate → 2 probes → 1.
 //! Byte/RNG/stat-identical (`smembers_borrow_scan_lfu_collapsed_matches_twoprobe`).
 //!
 //! SMEMBERS is non-mutating → repeatable. Each timed op loops SMEMBERS over small sets, summing

@@ -102,3 +102,26 @@ workload, or (b) an offload-forcing deterministic harness (fixed offload count p
 throttled-reader socket pair) achieves a null spread tight enough to decide a <=1% effect. The
 mechanism itself is real (Drained drops the allocation; inline flush retains it) — it is the
 MAGNITUDE that is below the floor.
+
+## 2026-07-22: SHIPPED — single-byte LEB128 fast path in packed_set::read_varint; 5.49% fewer end-to-end instructions on P1 HGETALL(10k) (frankenredis-pipsm)
+
+NEGATIVE-LEDGER-FIRST: vein switch per the graveyard protocol after the writev/batched-flush
+blocker (entries above). The ideww closure ("varint decode is a DELIBERATE RAM tradeoff — don't
+re-chase per-element compute") covers the FORMAT, not the decode implementation; the fresh
+post-vlis9 live profile named `CompactFieldMap::get_index` 14.46% + `HashFieldMapIter::next`
+10.93% self as the top user frames at P1 HGETALL(10k) — reopen evidence at the same standard as
+vlis9. `read_varint` had no single-byte fast path: every 1-byte length (the universal case for
+field/value lens) ran the generic shift-accumulate loop. Change: `read_varint_impl<const FAST>`
+returns `(byte, pos+1)` when `byte < 0x80`; multi-byte falls through to the EXACT prior loop;
+production routes `::<true>`; arena format untouched (byte-identical, one decoder, 31 call sites
+across the packed family). MEASURED: see
+artifacts/optimization/frankenredis-pipsm/20260722T2030Z/p1_hgetall_instructions_ab.txt —
+cand/ctl instructions:u = 0.94514 (5.49% fewer end-to-end), null/ctl 1.00010 ± 0.00005, effect
+~1000x the floor; hash-bracketed builds (ctl e15aaa93.../cand 0cdec1bc..., production-const-only
+diff, both arms in both binaries). fr now retires 4.20x fewer instructions than redis 7.2.4 on
+identical HGETALL(10k) work. Gates: exhaustive fast==slow varint gate test; fr-store 877+aux
+green; fr-store clippy green (required fixing a pre-existing needless_range_loop the current
+nightly newly flags in fr-simd:795 — dependency of fr-store, blocked everyone's gate).
+FOLLOW-UP CANDIDATES in the same vein (unmined): #[inline] on the still-uninlined
+CompactFieldMapIter::next / HashFieldMapIter::next call boundaries (10.88% + 3.61% self frames);
+cfm_decode fusion of the two range computations.

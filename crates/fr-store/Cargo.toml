@@ -73,6 +73,7 @@ harness = false
 [[bench]]
 name = "set_ex_rearm"
 harness = false
+required-features = ["bench-reference"]
 
 # Same-binary, null-gated instruction benchmark for plain PackedZSet::rank skipping each
 # non-returned record's score decode (ZRANK-miss full scan).

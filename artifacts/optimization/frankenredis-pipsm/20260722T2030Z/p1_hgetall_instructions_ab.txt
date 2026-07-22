@@ -1,0 +1,20 @@
+frankenredis-pipsm — packed_set read_varint single-byte LEB128 fast path — KEEP
+Arms hash-bracketed on identical tree snapshot (HEAD 45d8a394e+peers, fr-runtime WIP d9a75c91
+verified unchanged across BOTH builds):
+  control  sha256 e15aaa9354f34c1fa371bf7a36f46578a36db284347abe0c8319fae6243a0513 (impl::<false>)
+  candidate sha256 0cdec1bc7376914de959ce8d60d8655c72631b9dcbcf2ce37d4bfb54efc95592 (impl::<true>)
+Servers pinned ctl core2 / cand core3 / null(ctl bin) core4, client 6,7; 10k-field hash seeded
+identically; instructions:u per fixed `redis-benchmark -c50 -n3000 HGETALL bigh`, 5 order-balanced reps:
+rep  ctl           cand          null(A/A)
+1    8203411253    7753390909    8204188782
+2    8203298224    7753213189    8204034548
+3    8203238515    7753252720    8204128502
+4    8203013333    7753073323    8204026013
+5    8203145217    7753224919    8203907795
+ctl median 8.20324B cv~0.002% | cand median 7.75322B cv~0.001% | null median 8.20403B
+null/ctl ~1.00010 (spread ±~0.00005) | cand/ctl = 0.94514 -> 5.49% fewer instructions end-to-end
+Cross-engine same workload: redis 7.2.4 = 32.539B -> fr post-pipsm 4.20x fewer instructions.
+Frame attribution (cand live profile): get_index frame GONE (inlined); decode now cfm_decode 5.85%
++ CompactFieldMapIter::next 10.88% vs prior get_index 14.46% + iter 10.93%.
+Correctness: varint_fast_path_matches_generic_loop (dense 0..=4096 + all width boundaries + usize::MAX,
+offset + sequential-walk cursor identity); full fr-store suite 877+aux green.

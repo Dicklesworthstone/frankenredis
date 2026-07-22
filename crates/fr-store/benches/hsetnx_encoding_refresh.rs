@@ -22,7 +22,9 @@ const NULL_LO: f64 = 0.05;
 const NULL_HI: f64 = 0.95;
 
 fn fields_of(fields: usize) -> Vec<Vec<u8>> {
-    (0..fields).map(|i| format!("f{i:04}").into_bytes()).collect()
+    (0..fields)
+        .map(|i| format!("f{i:04}").into_bytes())
+        .collect()
 }
 
 #[inline(never)]
@@ -83,7 +85,7 @@ fn bench(label: &str, fields: usize) {
     let mut speeds = Vec::with_capacity(ROUNDS);
     for round in 0..=ROUNDS {
         let swap = round % 2 == 1;
-        let mut pair = |bf: fn(&[Vec<u8>]) -> u64, cf: fn(&[Vec<u8>]) -> u64| {
+        let pair = |bf: fn(&[Vec<u8>]) -> u64, cf: fn(&[Vec<u8>]) -> u64| {
             if swap {
                 let c = time(reps, &names, cf);
                 time(reps, &names, bf) / c

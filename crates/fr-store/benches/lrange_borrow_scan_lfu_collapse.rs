@@ -1,7 +1,7 @@
 //! Same-binary A/B for the LFU LRANGE keyspace-probe collapse on the ZERO-COPY production path
 //! (`lrange_borrow_scan`, the fr-runtime borrow-scan encoder). The non-LFU path already single-probes
-//! via `lookup_live_for_read_mut`; this adds the matching LFU fast path — fold `record_keyspace_lookup`
-//! + `contains_key` rand-gate + `get_mut` into ONE `get_mut` (expiry peek + inline hit/miss +
+//! via `lookup_live_for_read_mut`; this adds the matching LFU fast path — fold `record_keyspace_lookup`,
+//! the `contains_key` rand-gate, and `get_mut` into ONE `get_mut` (expiry peek, inline hit/miss, and
 //! `rand_sample` on a disjoint `&mut self.rng_seed` field split). 3 probes → 1. Byte/RNG/stat-identical
 //! (`lrange_borrow_scan_lfu_collapsed_matches_threeprobe`).
 //!

@@ -185,7 +185,26 @@ fn encode_varint_array(mut n: usize) -> ([u8; 10], usize) {
 }
 
 /// Read a LEB128 varint starting at `pos`; returns `(value, index_after_varint)`.
-fn read_varint(buf: &[u8], mut pos: usize) -> (usize, usize) {
+#[inline]
+fn read_varint(buf: &[u8], pos: usize) -> (usize, usize) {
+    read_varint_impl::<true>(buf, pos)
+}
+
+/// (frankenredis-pipsm) `FAST = true` returns single-byte varints (`< 0x80`) before entering
+/// the generic shift-accumulate loop. Field/value lengths are almost always < 128, and the
+/// arena read path (`cfm_decode` / `cfm_field_range` / probe walks) pays this decode two per
+/// entry on every collection read — the live post-vlis9 HGETALL(10k) profile puts
+/// `CompactFieldMap::get_index` at 14.46% self. Multi-byte varints fall through to the exact
+/// prior loop (one redundant, perfectly-predicted re-load of the first byte). `FAST = false`
+/// is the prior code, kept for the byte-identity gate test.
+#[inline]
+fn read_varint_impl<const FAST: bool>(buf: &[u8], mut pos: usize) -> (usize, usize) {
+    if FAST {
+        let byte = buf[pos];
+        if byte < 0x80 {
+            return (byte as usize, pos + 1);
+        }
+    }
     let mut result = 0usize;
     let mut shift = 0u32;
     loop {
@@ -5348,8 +5367,57 @@ mod tests {
     use super::{
         ChunkedList, CompactFieldMap, CompactStrSet, LIST_CHUNK_TARGET, ListChunk, ListRepr,
         ListValue, PACKED_MAX_ENTRIES, PACKED_STREAM_NODE_MAX_ENTRIES, PackedList, PackedStrMap,
-        PackedStrSet, PackedStreamFields, PackedStreamLog, PackedZSet, zset_cmp,
+        PackedStrSet, PackedStreamFields, PackedStreamLog, PackedZSet, read_varint_impl,
+        write_varint, zset_cmp,
     };
+
+    // (frankenredis-pipsm) The single-byte varint fast path must return exactly what the
+    // generic shift-accumulate loop returns — value AND cursor — for every encoding width,
+    // at offset 0 and after a prefix, walking multi-varint sequences.
+    #[test]
+    fn varint_fast_path_matches_generic_loop() {
+        let mut values: Vec<usize> = (0..=4096).collect();
+        for boundary in [
+            0x7f_usize,
+            0x80,
+            0x3fff,
+            0x4000,
+            0x001f_ffff,
+            0x0020_0000,
+            0x0fff_ffff,
+            0x1000_0000,
+            usize::MAX >> 1,
+            usize::MAX,
+        ] {
+            values.extend_from_slice(&[boundary.saturating_sub(1), boundary]);
+        }
+        let mut buf = vec![0xAAu8; 3]; // non-varint prefix padding
+        let mut positions = Vec::new();
+        for &v in &values {
+            positions.push(buf.len());
+            write_varint(&mut buf, v);
+        }
+        for (&v, &pos) in values.iter().zip(&positions) {
+            let fast = read_varint_impl::<true>(&buf, pos);
+            let slow = read_varint_impl::<false>(&buf, pos);
+            assert_eq!(
+                fast, slow,
+                "varint decode differs for value {v} at pos {pos}"
+            );
+            assert_eq!(fast.0, v, "decoded value wrong for {v}");
+        }
+        // Sequential walk with the fast path lands exactly where the slow walk lands.
+        let (mut pf, mut ps) = (3usize, 3usize);
+        for &v in &values {
+            let (fv, fnext) = read_varint_impl::<true>(&buf, pf);
+            let (sv, snext) = read_varint_impl::<false>(&buf, ps);
+            assert_eq!((fv, fnext), (sv, snext));
+            assert_eq!(fv, v);
+            pf = fnext;
+            ps = snext;
+        }
+        assert_eq!(pf, buf.len());
+    }
 
     #[test]
     fn list_lp_int_canonical_probe_matches_roundtrip_without_alloc_bssrh() {

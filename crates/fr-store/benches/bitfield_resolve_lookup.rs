@@ -26,8 +26,11 @@ fn build(n: usize) -> (HashMap<Vec<u8>, u64, RandomState>, Vec<u8>) {
     (m, target)
 }
 
+type BenchMap = HashMap<Vec<u8>, u64, RandomState>;
+
 #[inline(never)]
-fn resolve_double(m: &mut HashMap<Vec<u8>, u64, RandomState>, k: &[u8]) -> u64 {
+#[allow(clippy::collapsible_if)] // the double probe IS the reference arm under test
+fn resolve_double(m: &mut BenchMap, k: &[u8]) -> u64 {
     let present = m.get(k).is_some();
     if present {
         if let Some(v) = m.get_mut(k) {
@@ -38,7 +41,7 @@ fn resolve_double(m: &mut HashMap<Vec<u8>, u64, RandomState>, k: &[u8]) -> u64 {
     0
 }
 #[inline(never)]
-fn resolve_single(m: &mut HashMap<Vec<u8>, u64, RandomState>, k: &[u8]) -> u64 {
+fn resolve_single(m: &mut BenchMap, k: &[u8]) -> u64 {
     match m.get_mut(k) {
         Some(v) => {
             *v = v.wrapping_add(1);
@@ -48,7 +51,7 @@ fn resolve_single(m: &mut HashMap<Vec<u8>, u64, RandomState>, k: &[u8]) -> u64 {
     }
 }
 
-fn time(reps: usize, m: &mut HashMap<Vec<u8>, u64, RandomState>, k: &[u8], f: fn(&mut HashMap<Vec<u8>, u64, RandomState>, &[u8]) -> u64) -> f64 {
+fn time(reps: usize, m: &mut BenchMap, k: &[u8], f: fn(&mut BenchMap, &[u8]) -> u64) -> f64 {
     let start = Instant::now();
     let mut acc = 0u64;
     for _ in 0..reps {
@@ -87,7 +90,8 @@ fn bench(label: &str, n: usize) {
     let mut speeds = Vec::with_capacity(ROUNDS);
     for round in 0..=ROUNDS {
         let swap = round % 2 == 1;
-        let mut pair = |bf: fn(&mut HashMap<Vec<u8>, u64, RandomState>, &[u8]) -> u64, cf: fn(&mut HashMap<Vec<u8>, u64, RandomState>, &[u8]) -> u64| {
+        let mut pair = |bf: fn(&mut BenchMap, &[u8]) -> u64,
+                        cf: fn(&mut BenchMap, &[u8]) -> u64| {
             if swap {
                 let c = time(reps, &mut m, &target, cf);
                 time(reps, &mut m, &target, bf) / c
@@ -129,7 +133,10 @@ fn bench(label: &str, n: usize) {
 }
 
 fn main() {
-    println!("\n{:<12} {:>8} {:>9} {:>16} {:>8} {:>11} {:>16}", "keyspace", "reps", "NULL med", "null p5..p95", "null cv%", "cand/orig", "verdict");
+    println!(
+        "\n{:<12} {:>8} {:>9} {:>16} {:>8} {:>11} {:>16}",
+        "keyspace", "reps", "NULL med", "null p5..p95", "null cv%", "cand/orig", "verdict"
+    );
     bench("1k", 1000);
     bench("100k", 100_000);
 }

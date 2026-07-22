@@ -10,10 +10,10 @@
 //! subsequent ZADD). tax = warm/cold − 1.
 //!
 //! Interpretation guide (recorded so the 6lgnu decision is data-driven, not assumed):
-//!   * tax ≈ 0 (indistinguishable)  → the lazy treap is ~free on writes; 6lgnu's write-side win is
-//!                                     illusory, only ZRANK read latency is on the table. DEPRIORITIZE.
-//!   * tax large & gated            → keeping rank queryable during writes is genuinely expensive;
-//!                                     a fused skiplist could recover it for ZADD+ZRANK workloads.
+//! * tax ≈ 0 (indistinguishable) → the lazy treap is ~free on writes; 6lgnu's write-side win is
+//!   illusory, only ZRANK read latency is on the table. DEPRIORITIZE.
+//! * tax large & gated → keeping rank queryable during writes is genuinely expensive;
+//!   a fused skiplist could recover it for ZADD+ZRANK workloads.
 //!
 //! Same substrate as the cc bench roster: ONE binary, adjacent-pair interleave, black_box, reps
 //! calibrated once, median of paired ratios, null-gated (cold-vs-cold), cv reported never gated.

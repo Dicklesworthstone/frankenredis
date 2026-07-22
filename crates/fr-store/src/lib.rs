@@ -7619,14 +7619,13 @@ impl Store {
         if INCR
             && entry.has_flag(ENTRY_FORCE_SET_LISTPACK_ENCODING)
             && !entry.has_flag(ENTRY_FORCE_SET_HASHTABLE_ENCODING)
+            && let Value::Set(set) = &entry.value
         {
-            if let Value::Set(set) = &entry.value {
-                if set.len() > max_listpack_entries || added_member_max_len > max_listpack_value {
-                    entry.set_flag(ENTRY_FORCE_SET_HASHTABLE_ENCODING, true);
-                    entry.set_flag(ENTRY_FORCE_SET_LISTPACK_ENCODING, false);
-                }
-                return;
+            if set.len() > max_listpack_entries || added_member_max_len > max_listpack_value {
+                entry.set_flag(ENTRY_FORCE_SET_HASHTABLE_ENCODING, true);
+                entry.set_flag(ENTRY_FORCE_SET_LISTPACK_ENCODING, false);
             }
+            return;
         }
         Self::refresh_set_encoding_flags(
             entry,
@@ -12705,6 +12704,7 @@ impl Store {
         }
     }
 
+    #[allow(dead_code)] // digest-tracking helper retained for hardened-mode evidence paths
     fn refresh_entry_digest(&mut self, key: &[u8], old_hash: u64) {
         let Some(entry) = self.entries.get(key) else {
             return;
@@ -12715,6 +12715,7 @@ impl Store {
         );
     }
 
+    #[allow(dead_code)] // digest-tracking helper retained for hardened-mode evidence paths
     fn current_entry_digest(&self, key: &[u8]) -> Option<u64> {
         self.entries
             .get(key)
@@ -23067,12 +23068,13 @@ impl Store {
 
     /// A/B toggle for the LFU ZREVRANGE keyspace-probe collapse on the ZERO-COPY production path —
     /// the descending twin of [`Store::zrange_borrow_scan_impl`]. `COLLAPSE = true` (shipped) folds
-    /// the LFU path's three `entries` probes (`record_keyspace_lookup` + the `contains_key` rand-gate
-    /// + `get_mut`) into ONE `get_mut` (expiry peek + inline hit/miss + `rand_sample` on the disjoint
-    /// `&mut self.rng_seed` field split). Same as ZRANGE: the LFU bump runs unconditionally after a
-    /// keyspace hit (before the type check, so a present wrong-type key bumps), while `touch` fires
-    /// only inside the `SortedSet` arm on a NON-empty range; the only difference is the member stream
-    /// is `iter_desc()`. `false` retains the exact prior three-probe LFU path. Byte/RNG/stat-identical.
+    /// the LFU path's three `entries` probes (`record_keyspace_lookup`, the `contains_key`
+    /// rand-gate, and `get_mut`) into ONE `get_mut` (expiry peek, inline hit/miss, and
+    /// `rand_sample` on the disjoint `&mut self.rng_seed` field split). Same as ZRANGE: the LFU
+    /// bump runs unconditionally after a keyspace hit (before the type check, so a present
+    /// wrong-type key bumps), while `touch` fires only inside the `SortedSet` arm on a NON-empty
+    /// range; the only difference is the member stream is `iter_desc()`. `false` retains the
+    /// exact prior three-probe LFU path. Byte/RNG/stat-identical.
     fn zrevrange_borrow_scan_impl<const COLLAPSE: bool>(
         &mut self,
         key: &[u8],
@@ -24264,6 +24266,7 @@ impl Store {
     /// entry `get_mut`-first (one probe) without duplicating this block. A WRONGTYPE entry returns
     /// `(Err(WrongType), false, false)` so the caller's `touched`/`is_empty` tail runs its no-ops —
     /// byte-identical to the prior in-function `return Err(WrongType)`.
+    #[allow(clippy::too_many_arguments)]
     fn zincrby_apply_entry(
         entry: &mut Entry,
         member: Vec<u8>,
@@ -26525,6 +26528,7 @@ impl Store {
     /// (before the `Value::Stream` type check, so a present wrong-type key bumps), while `touch` fires
     /// only for a non-empty (`start <= end`) range via the shared `should_touch` tail. `false` retains
     /// the exact prior three-probe LFU path. Byte/RNG/stat-identical; same `XrangeReplyEvent` stream.
+    #[allow(clippy::too_many_arguments)]
     fn xrange_borrow_scan_impl<const COLLAPSE: bool>(
         &mut self,
         key: &[u8],
@@ -26783,7 +26787,7 @@ impl Store {
                     // byte-identical: same entries/order, and MEMORY USAGE + digest are computed from
                     // LIVE entries (not the raw dead-carrying arena). Small trims keep the targeted loop.
                     if to_remove.saturating_mul(2) >= entries.len() {
-                        let survivors: Vec<((u64, u64), Vec<(Vec<u8>, Vec<u8>)>)> = entries
+                        let survivors: Vec<_> = entries
                             .iter()
                             .skip(to_remove)
                             .map(|(id, fields)| (*id, fields.to_pairs()))
@@ -26852,7 +26856,7 @@ impl Store {
                     // b6afa3ad7). Byte-identical redis-visible state (entries/order + live-entry-based
                     // MEMORY USAGE + digest). Small trims keep the targeted remove loop.
                     if removed.saturating_mul(2) >= entries.len() {
-                        let survivors: Vec<((u64, u64), Vec<(Vec<u8>, Vec<u8>)>)> = entries
+                        let survivors: Vec<_> = entries
                             .iter()
                             .skip(removed)
                             .map(|(id, fields)| (*id, fields.to_pairs()))
@@ -45432,6 +45436,7 @@ mod tests {
             s
         }
         let inc = ScoreBound::Inclusive;
+        #[allow(clippy::type_complexity)]
         fn collect(
             s: &mut Store,
             collapse: bool,
@@ -45599,6 +45604,7 @@ mod tests {
             s
         }
         let inc = ScoreBound::Inclusive;
+        #[allow(clippy::type_complexity)]
         fn collect(
             s: &mut Store,
             collapse: bool,
@@ -47281,7 +47287,7 @@ mod tests {
             s
         }
         // Materialize the full XrangeReplyEvent stream into a comparable owned form.
-        #[allow(clippy::type_complexity)]
+        #[allow(clippy::type_complexity, clippy::too_many_arguments)]
         fn collect(
             s: &mut Store,
             collapse: bool,
@@ -52058,6 +52064,7 @@ mod tests {
         }
         let now = 10;
         // (key, start, end, unit)
+        #[allow(clippy::type_complexity)]
         let cases: &[(&[u8], Option<i64>, Option<i64>, BitRangeUnit)] = &[
             (b"bm", None, None, BitRangeUnit::Byte),      // full count
             (b"bm", Some(0), Some(0), BitRangeUnit::Byte), // first byte
@@ -52111,6 +52118,7 @@ mod tests {
 
         let now = 10;
         // (key, bit, start, end, unit)
+        #[allow(clippy::type_complexity)]
         let cases: &[(&[u8], bool, Option<i64>, Option<i64>, BitRangeUnit)] = &[
             (b"bm", true, None, None, BitRangeUnit::Byte),
             (b"bm", false, None, None, BitRangeUnit::Byte),
@@ -64305,6 +64313,7 @@ mod tests {
     /// `Reparse` into `Str` (i.e. string-encoding whenever the int fast path misses) would
     /// emit a string entry here and diverge from redis 7.2.4.
     #[test]
+    #[allow(clippy::excessive_precision)] // deliberate boundary constants beyond f64 precision
     fn zset_score_reparse_arm_is_load_bearing() {
         let score = 6.917529027641081856e18;
         assert!(matches!(
@@ -64327,6 +64336,7 @@ mod tests {
     /// classifier never routes a score there whose `d2string` render would in fact
     /// re-parse as a canonical i64 — that would silently flip the entry encoding.
     #[test]
+    #[allow(clippy::approx_constant, clippy::excessive_precision)] // test scores, not math constants
     fn zset_score_str_arm_never_hides_a_canonical_integer_render() {
         let mut scores: Vec<f64> = vec![
             0.0,

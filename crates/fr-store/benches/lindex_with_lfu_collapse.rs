@@ -34,10 +34,7 @@ fn build() -> (Store, Vec<Vec<u8>>) {
 }
 
 fn consume(result: Result<u64, fr_store::StoreError>) -> u64 {
-    match black_box(result) {
-        Ok(value) => value,
-        Err(_) => 0xd1b5_4a32_d192_ed03,
-    }
+    black_box(result).unwrap_or(0xd1b5_4a32_d192_ed03)
 }
 
 #[inline(never)]
