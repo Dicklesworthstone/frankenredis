@@ -4,6 +4,54 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-22: SHIPPED — reuse existing CLIENT session snapshot allocations; 47.414770% fewer instructions (frankenredis-okvud)
+
+NEGATIVE-LEDGER-FIRST + DISTINCT SEAM: exact searches of both ledgers and recent Git history
+found the earlier `4561be44f` removal of an inner per-command session clone, but no closed attempt
+at reusing the still-required server registry snapshot's allocations. The cold ZSET DUMP fusion
+WIP remained closed because its recorded lower-noise/larger-enclosing-cost retry predicate had not
+changed. This pass stayed out of the peer-owned output/writev path.
+
+PROFILE-FIRST + ALIEN PRIMITIVE: the literal-current profile from the preceding single-command
+runtime keep (worker `vmi1149989`, binary sha256
+`ca7537055d3fb84714c0b2100654515122b57e4b5a17f0fbbae66e13ed8883bb`) attributed **7.16%
+self-time** to exact `Runtime::record_client_session`. The graveyard's self-adjusting/incremental
+computation primitive (section 6.1) maps directly: update the existing materialized snapshot in
+place, retaining its heap capacity, while preserving a full-clone fallback for first insertion.
+The falsifier was an effect at or below the candidate/candidate null envelope or any snapshot-state
+divergence.
+
+ONE LEVER: `ClientSession` now supplies fieldwise `Clone::clone_from`, and
+`record_client_session` uses it when the client already exists. First insertion still performs the
+same full clone. The feature-gated frozen reference retains unconditional clone-and-insert. No
+command execution, reply/output, tracking, persistence, or replication behavior changed.
+
+FOREGROUND SAME-BINARY A/A+A/B: the first foreground build was inadmissible because its wrapper
+had zero self-time; no performance verdict used it. The repaired decisive run used one fail-closed
+RCH invocation on worker `vmi1227854` and executable sha256
+`215ed432c127b5779014420e9adb0a36324f7b6cea283d0a27523f0fa58a0d65`. Exact candidate
+`ClientSession::clone_from` and reference `ClientSession::clone` frames carried **84.42% / 51.54%
+self-time**, respectively, with zero lost samples. Nine position-balanced rounds measured
+candidate median **798,514,761** versus reference median **1,518,515,306** instructions, paired
+reference/candidate **1.901674587x**, or **47.414770% fewer instructions**. The A/A null median was
+`0.999999952`, p05..p95 `[0.999998798, 1.000001255]`, null CV **0.000083%**, and effect CV
+**0.000068%**.
+
+BEHAVIOR + GATES: a focused test constructs a nontrivial RESP3/DB/client-info/tracking/WATCH/MULTI
+session and proves the full in-place snapshot Debug representation exactly matches the frozen
+full-clone reference. The strict-remote focused test passed, the scoped release all-target check
+passed, and the complete strict-remote `fr-conformance` run exited 0 (194 library tests, 99 smoke
+tests, and all auxiliary asserting suites). This is an instruction result for repeated session
+snapshot replacement, not a whole-server throughput claim. Rollback is to restore derived `Clone`
+and unconditional `HashMap::insert`; the reference preserves that implementation verbatim. Scoped
+`fr-runtime --all-targets --features bench-reference --no-deps` Clippy also passed with
+`-D warnings` (dependency warnings remained non-fatal under `--no-deps`). Fail-closed RCH refused
+`cargo fmt --check` as a non-compilation command (`RCH-E301`) instead of falling back locally;
+direct Rust 2024 rustfmt found only pre-existing peer-owned formatting hunks after the owned test
+hunk was corrected, and `git diff --check` passed. UBS ran with Cargo-backed categories disabled;
+its monolithic-file baseline remained red (345 critical / 4,588 warning heuristics), with no
+finding specific to the changed production lines.
+
 ## 2026-07-22: SHIPPED — maintain CLIENT TRACKING BCAST membership only at mutations; 2.886257% fewer instructions (frankenredis-hqca6)
 
 NEGATIVE-LEDGER-FIRST + ALIEN PRIMITIVE: neither ledger nor the recent Git history contained a

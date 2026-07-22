@@ -21,6 +21,38 @@ enum Arm {
     Reference,
 }
 
+#[derive(Clone, Copy)]
+enum Lever {
+    Membership,
+    SnapshotReuse,
+}
+
+impl Lever {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Membership => "membership",
+            Self::SnapshotReuse => "snapshot-reuse",
+        }
+    }
+
+    fn from_env() -> Result<Self, String> {
+        match env::var("FR_BENCH_LEVER").as_deref() {
+            Ok("snapshot-reuse") => Ok(Self::SnapshotReuse),
+            Ok("membership") | Err(env::VarError::NotPresent) => Ok(Self::Membership),
+            Ok(value) => Err(format!("unknown FR_BENCH_LEVER {value:?}")),
+            Err(error) => Err(format!("invalid FR_BENCH_LEVER: {error}")),
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "membership" => Ok(Self::Membership),
+            "snapshot-reuse" => Ok(Self::SnapshotReuse),
+            _ => Err(format!("unknown lever {value:?}")),
+        }
+    }
+}
+
 impl Arm {
     const fn name(self) -> &'static str {
         match self {
@@ -37,33 +69,53 @@ impl Arm {
         }
     }
 
-    const fn profile_symbol(self) -> &'static str {
-        match self {
-            Self::Candidate => "<fr_runtime::Runtime>::record_client_session",
-            Self::Reference => "<fr_runtime::Runtime>::record_client_session_refresh_reference",
+    const fn profile_symbol(self, lever: Lever) -> &'static str {
+        match (lever, self) {
+            (Lever::Membership, Self::Candidate) => {
+                "<fr_runtime::Runtime>::record_client_session_insert_reference"
+            }
+            (Lever::Membership, Self::Reference) => {
+                "<fr_runtime::Runtime>::record_client_session_refresh_reference"
+            }
+            (Lever::SnapshotReuse, Self::Candidate) => {
+                "<fr_runtime::ClientSession as core::clone::Clone>::clone_from"
+            }
+            (Lever::SnapshotReuse, Self::Reference) => {
+                "<fr_runtime::ClientSession as core::clone::Clone>::clone"
+            }
         }
     }
 
-    const fn wrong_profile_symbol(self) -> &'static str {
-        match self {
-            Self::Candidate => "record_client_session_refresh_reference",
-            Self::Reference => "<fr_runtime::Runtime>::record_client_session ",
+    const fn wrong_profile_symbol(self, lever: Lever) -> &'static str {
+        match (lever, self) {
+            (Lever::Membership, Self::Candidate) => "record_client_session_refresh_reference",
+            (Lever::Membership, Self::Reference) => "record_client_session_insert_reference",
+            (Lever::SnapshotReuse, Self::Candidate) => {
+                "<fr_runtime::ClientSession as core::clone::Clone>::clone "
+            }
+            (Lever::SnapshotReuse, Self::Reference) => "clone_from",
         }
     }
 }
 
-fn record(runtime: &mut Runtime, session: &fr_runtime::ClientSession, arm: Arm) {
-    match arm {
-        Arm::Candidate => runtime.record_client_session(session),
-        Arm::Reference => runtime.record_client_session_refresh_reference(session),
+fn record(runtime: &mut Runtime, session: &fr_runtime::ClientSession, lever: Lever, arm: Arm) {
+    match (lever, arm) {
+        (Lever::Membership, Arm::Candidate) | (Lever::SnapshotReuse, Arm::Reference) => {
+            runtime.record_client_session_insert_reference(session);
+        }
+        (Lever::Membership, Arm::Reference) => {
+            runtime.record_client_session_refresh_reference(session);
+        }
+        (Lever::SnapshotReuse, Arm::Candidate) => runtime.record_client_session(session),
     }
 }
 
-fn run_loop(arm: Arm, repeats: usize) {
+fn run_loop(lever: Lever, arm: Arm, repeats: usize) {
     let mut runtime = Runtime::default_strict();
     let session = runtime.new_session();
+    record(&mut runtime, &session, lever, arm);
     for _ in 0..repeats {
-        record(black_box(&mut runtime), black_box(&session), arm);
+        record(black_box(&mut runtime), black_box(&session), lever, arm);
     }
     black_box(runtime);
 }
@@ -77,7 +129,7 @@ fn command(parts: &[&[u8]]) -> RespFrame {
     ))
 }
 
-fn bcast_sequence(arm: Arm) -> (RespFrame, Vec<fr_store::PubSubMessage>, RespFrame) {
+fn bcast_sequence(lever: Lever, arm: Arm) -> (RespFrame, Vec<fr_store::PubSubMessage>, RespFrame) {
     let mut runtime = Runtime::default_strict();
     let tracker = runtime.new_session();
     let writer = runtime.new_session();
@@ -87,14 +139,14 @@ fn bcast_sequence(arm: Arm) -> (RespFrame, Vec<fr_store::PubSubMessage>, RespFra
         1,
     );
     let tracker = runtime.swap_session(writer);
-    record(&mut runtime, &tracker, arm);
+    record(&mut runtime, &tracker, lever, arm);
     let write_reply = runtime.execute_frame(command(&[b"SET", b"hot:key", b"value"]), 2);
     let invalidations = runtime.drain_pubsub_for_client(tracker.client_id);
     let _ = runtime.swap_session(previous);
     (tracking_reply, invalidations, write_reply)
 }
 
-fn disabled_sequence(arm: Arm) -> Vec<fr_store::PubSubMessage> {
+fn disabled_sequence(lever: Lever, arm: Arm) -> Vec<fr_store::PubSubMessage> {
     let mut runtime = Runtime::default_strict();
     let tracker = runtime.new_session();
     let writer = runtime.new_session();
@@ -108,7 +160,7 @@ fn disabled_sequence(arm: Arm) -> Vec<fr_store::PubSubMessage> {
         RespFrame::SimpleString("OK".to_owned())
     );
     let tracker = runtime.swap_session(writer);
-    record(&mut runtime, &tracker, arm);
+    record(&mut runtime, &tracker, lever, arm);
     assert_eq!(
         runtime.execute_frame(command(&[b"SET", b"cold:key", b"value"]), 3),
         RespFrame::SimpleString("OK".to_owned())
@@ -118,9 +170,9 @@ fn disabled_sequence(arm: Arm) -> Vec<fr_store::PubSubMessage> {
     invalidations
 }
 
-fn correctness_gate() {
-    let candidate = bcast_sequence(Arm::Candidate);
-    let reference = bcast_sequence(Arm::Reference);
+fn correctness_gate(lever: Lever) {
+    let candidate = bcast_sequence(lever, Arm::Candidate);
+    let reference = bcast_sequence(lever, Arm::Reference);
     assert_eq!(candidate, reference);
     assert_eq!(
         candidate.1,
@@ -128,25 +180,26 @@ fn correctness_gate() {
             keys: vec![b"hot:key".to_vec()]
         }]
     );
-    assert_eq!(disabled_sequence(Arm::Candidate), Vec::new());
-    assert_eq!(disabled_sequence(Arm::Reference), Vec::new());
+    assert_eq!(disabled_sequence(lever, Arm::Candidate), Vec::new());
+    assert_eq!(disabled_sequence(lever, Arm::Reference), Vec::new());
     println!(
         "CORRECTNESS_GATE identical=true cases=bcast_enabled,bcast_disabled mutation_sites=client_tracking"
     );
 }
 
-fn child_args() -> Result<Option<(Arm, usize)>, String> {
+fn child_args() -> Result<Option<(Lever, Arm, usize)>, String> {
     let args = env::args().collect::<Vec<_>>();
     if args.get(1).map(String::as_str) != Some("--child") {
         return Ok(None);
     }
-    let arm = Arm::parse(args.get(2).ok_or("missing child arm")?)?;
+    let lever = Lever::parse(args.get(2).ok_or("missing child lever")?)?;
+    let arm = Arm::parse(args.get(3).ok_or("missing child arm")?)?;
     let repeats = args
-        .get(3)
+        .get(4)
         .ok_or("missing child repeat count")?
         .parse::<usize>()
         .map_err(|error| format!("invalid repeat count: {error}"))?;
-    Ok(Some((arm, repeats)))
+    Ok(Some((lever, arm, repeats)))
 }
 
 fn worker_id() -> String {
@@ -193,14 +246,15 @@ fn percentile(sorted: &[f64], percentile: f64) -> f64 {
     sorted[((sorted.len() - 1) as f64 * percentile).round() as usize]
 }
 
-fn profile_trial(executable: &Path, arm: Arm) -> Result<f64, String> {
+fn profile_trial(executable: &Path, lever: Lever, arm: Arm) -> Result<f64, String> {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| format!("invalid system time: {error}"))?
         .as_nanos();
     let data = env::temp_dir().join(format!(
-        "fr_runtime_tracking_membership_{}_{}_{}.data",
+        "fr_runtime_tracking_membership_{}_{}_{}_{}.data",
         process::id(),
+        lever.name(),
         arm.name(),
         stamp
     ));
@@ -225,7 +279,12 @@ fn profile_trial(executable: &Path, arm: Arm) -> Result<f64, String> {
         .arg(&data)
         .arg("--")
         .arg(executable)
-        .args(["--child", arm.name(), &PROFILE_REPEATS.to_string()])
+        .args([
+            "--child",
+            lever.name(),
+            arm.name(),
+            &PROFILE_REPEATS.to_string(),
+        ])
         .output()
         .map_err(|error| format!("perf record launch failed: {error}"))?;
     if !recorded.status.success() {
@@ -275,13 +334,13 @@ fn profile_trial(executable: &Path, arm: Arm) -> Result<f64, String> {
     }
     if stdout
         .lines()
-        .any(|line| line.contains(arm.wrong_profile_symbol()))
+        .any(|line| line.contains(arm.wrong_profile_symbol(lever)))
     {
         return Err(format!("{} profile executed wrong helper", arm.name()));
     }
     let line = stdout
         .lines()
-        .find(|line| line.contains(arm.profile_symbol()))
+        .find(|line| line.contains(arm.profile_symbol(lever)))
         .ok_or_else(|| format!("profile has no exact {} helper frame", arm.name()))?;
     let self_pct = line
         .split_whitespace()
@@ -296,7 +355,7 @@ fn profile_trial(executable: &Path, arm: Arm) -> Result<f64, String> {
     Ok(self_pct)
 }
 
-fn perf_instructions(executable: &Path, arm: Arm) -> Result<u64, String> {
+fn perf_instructions(executable: &Path, lever: Lever, arm: Arm) -> Result<u64, String> {
     let output = Command::new("timeout")
         .env("LC_ALL", "C")
         .args([
@@ -311,7 +370,12 @@ fn perf_instructions(executable: &Path, arm: Arm) -> Result<u64, String> {
             "--",
         ])
         .arg(executable)
-        .args(["--child", arm.name(), &STAT_REPEATS.to_string()])
+        .args([
+            "--child",
+            lever.name(),
+            arm.name(),
+            &STAT_REPEATS.to_string(),
+        ])
         .output()
         .map_err(|error| format!("perf stat launch failed: {error}"))?;
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -332,7 +396,7 @@ fn perf_instructions(executable: &Path, arm: Arm) -> Result<u64, String> {
         .map_err(|error| format!("invalid instruction count: {error}"))
 }
 
-fn run_instruction_ab(executable: &Path) -> Result<(), String> {
+fn run_instruction_ab(executable: &Path, lever: Lever) -> Result<(), String> {
     let mut nulls = Vec::with_capacity(STAT_ROUNDS);
     let mut effects = Vec::with_capacity(STAT_ROUNDS);
     let mut candidate_counts = Vec::with_capacity(STAT_ROUNDS);
@@ -349,7 +413,7 @@ fn run_instruction_ab(executable: &Path) -> Result<(), String> {
             } else {
                 Arm::Candidate
             };
-            counts[slot] = perf_instructions(executable, arm)?;
+            counts[slot] = perf_instructions(executable, lever, arm)?;
         }
         let null = counts[0] as f64 / counts[1] as f64;
         let effect = counts[2] as f64 / counts[0] as f64;
@@ -395,28 +459,30 @@ fn run_instruction_ab(executable: &Path) -> Result<(), String> {
 }
 
 fn main() -> Result<(), String> {
-    if let Some((arm, repeats)) = child_args()? {
-        run_loop(arm, repeats);
+    if let Some((lever, arm, repeats)) = child_args()? {
+        run_loop(lever, arm, repeats);
         return Ok(());
     }
+    let lever = Lever::from_env()?;
     let executable = env::current_exe()
         .map_err(|error| format!("could not resolve benchmark executable: {error}"))?;
     println!("WORKER_ID {}", worker_id());
     println!("BINARY_SHA256 both_arms={}", binary_sha256(&executable)?);
     println!(
-        "TRIGGER operation=record_client_session tracking_enabled=false tracking_bcast=false bcast_index_empty=true"
+        "TRIGGER lever={} operation=record_client_session existing_snapshot=true tracking_enabled=false tracking_bcast=false bcast_index_empty=true",
+        lever.name()
     );
-    correctness_gate();
+    correctness_gate(lever);
     for arm in [Arm::Candidate, Arm::Reference] {
         let warm = Command::new(&executable)
-            .args(["--child", arm.name(), "1000"])
+            .args(["--child", lever.name(), arm.name(), "1000"])
             .status()
             .map_err(|error| format!("warm-up launch failed: {error}"))?;
         if !warm.success() {
             return Err(format!("{} warm-up failed", arm.name()));
         }
-        let self_pct = profile_trial(&executable, arm)?;
+        let self_pct = profile_trial(&executable, lever, arm)?;
         println!("PROFILE_SELF arm={} self_pct={self_pct:.4}", arm.name());
     }
-    run_instruction_ab(&executable)
+    run_instruction_ab(&executable, lever)
 }

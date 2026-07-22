@@ -8,6 +8,48 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-22 CreamPeak: SHIPPED — reuse allocations in repeated CLIENT session snapshots (`frankenredis-okvud`)
+
+- **Negative-ledger-first / distinct seam:** exact ledger and recent-history searches found the
+  earlier `4561be44f` elimination of an inner per-command session clone, but not reuse of the
+  still-required server registry snapshot. The cold ZSET DUMP fusion WIP remained closed under its
+  unmet lower-noise/larger-enclosing-cost retry predicate. Peer-owned output/writev work was not
+  touched.
+- **Profile-first attribution:** the literal-current single-command profile from worker
+  `vmi1149989`, release binary sha256
+  `ca7537055d3fb84714c0b2100654515122b57e4b5a17f0fbbae66e13ed8883bb`, attributed **7.16%
+  self-time** to exact `Runtime::record_client_session`, proving the repeated existing-snapshot
+  trigger reached the proposed seam.
+- **Alien mapping / one lever:** apply section 6.1's self-adjusting/incremental-computation
+  primitive to the materialized client snapshot: fieldwise `ClientSession::clone_from` reuses the
+  destination's heap allocations; a missing client retains the complete full-clone insertion.
+  The bench-only frozen reference retains unconditional clone-and-insert.
+- **Same-worker same-binary A/A+A/B:** an initial executable was invalid evidence because the
+  profiled wrapper had zero self-time; no ratio from it was used. The repaired, decisive one-RCH
+  run used worker `vmi1227854`, executable sha256
+  `215ed432c127b5779014420e9adb0a36324f7b6cea283d0a27523f0fa58a0d65`, zero lost samples,
+  and exact candidate/reference frames with **84.42% / 51.54% self-time**. Nine position-balanced
+  rounds measured candidate median **798,514,761** versus reference median **1,518,515,306**
+  instructions: paired **1.901674587x**, or **47.414770% fewer**. A/A null median
+  **0.999999952**, p05..p95 **[0.999998798, 1.000001255]**, null CV **0.000083%**, effect CV
+  **0.000068%**.
+- **Behavior / boundary:** a focused rich-session test proves exact full-state equivalence between
+  in-place replacement and the frozen full-clone reference across RESP version, selected DB,
+  identity metadata, tracking, WATCH/MULTI queued state, and connection counters. First insertion
+  is unchanged. This is an instruction result for repeated snapshot replacement, not whole-server
+  throughput; command replies, output, persistence, replication, and tracking semantics are
+  untouched. Rollback restores derived `Clone` and unconditional insertion.
+- **Gates:** the strict-remote focused state test and scoped release all-target check passed. The
+  complete strict-remote `fr-conformance` invocation exited 0: 194 library tests, 99 smoke tests,
+  and every auxiliary asserting suite passed. Scoped `fr-runtime --all-targets --features
+  bench-reference --no-deps` Clippy passed with `-D warnings` (pre-existing dependency warnings
+  remained non-fatal under `--no-deps`). Fail-closed RCH refused `cargo fmt --check` as a
+  non-compilation command (`RCH-E301`) rather than running it locally; direct Rust 2024 rustfmt
+  found only pre-existing peer-owned formatting hunks after the owned test hunk was corrected, and
+  `git diff --check` passed. UBS ran with Cargo-backed categories disabled and remained baseline-red
+  on the monolithic runtime (345 critical / 4,588 warning heuristics), with no finding specific to
+  the changed production lines.
+
 ## 2026-07-22 CreamPeak: SHIPPED — update the CLIENT TRACKING BCAST index only at tracking/lifecycle mutations (`frankenredis-hqca6`)
 
 - **Negative-ledger-first / distinct seam:** exact searches of both ledgers and recent Git history

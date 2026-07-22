@@ -4942,7 +4942,7 @@ impl ServerState {
 }
 
 /// State that is clearly scoped to a single client session.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ClientSession {
     cluster_state: ClusterClientState,
     transaction_state: TransactionState,
@@ -4997,6 +4997,61 @@ pub struct ClientSession {
     /// `argv-mem` for the currently-executing client only (idle clients report
     /// 0, since upstream frees argv after each command). (frankenredis-clargvmem)
     last_argv_len_sum: usize,
+}
+
+impl Clone for ClientSession {
+    fn clone(&self) -> Self {
+        Self {
+            cluster_state: self.cluster_state.clone(),
+            transaction_state: self.transaction_state.clone(),
+            authenticated_user: self.authenticated_user.clone(),
+            selected_db: self.selected_db,
+            resp_protocol_version: self.resp_protocol_version,
+            client_id: self.client_id,
+            client_name: self.client_name.clone(),
+            client_lib_name: self.client_lib_name.clone(),
+            client_lib_ver: self.client_lib_ver.clone(),
+            client_no_evict: self.client_no_evict,
+            client_no_touch: self.client_no_touch,
+            client_tracking: self.client_tracking.clone(),
+            client_reply: self.client_reply.clone(),
+            peer_addr: self.peer_addr,
+            socket_fd: self.socket_fd,
+            qbuf_bytes: self.qbuf_bytes,
+            qbuf_free_bytes: self.qbuf_free_bytes,
+            output_buffer_bytes: self.output_buffer_bytes,
+            connected_at_ms: self.connected_at_ms,
+            last_interaction_ms: self.last_interaction_ms,
+            last_command_name: self.last_command_name.clone(),
+            last_argv_len_sum: self.last_argv_len_sum,
+        }
+    }
+
+    fn clone_from(&mut self, source: &Self) {
+        self.cluster_state.clone_from(&source.cluster_state);
+        self.transaction_state.clone_from(&source.transaction_state);
+        self.authenticated_user
+            .clone_from(&source.authenticated_user);
+        self.selected_db = source.selected_db;
+        self.resp_protocol_version = source.resp_protocol_version;
+        self.client_id = source.client_id;
+        self.client_name.clone_from(&source.client_name);
+        self.client_lib_name.clone_from(&source.client_lib_name);
+        self.client_lib_ver.clone_from(&source.client_lib_ver);
+        self.client_no_evict = source.client_no_evict;
+        self.client_no_touch = source.client_no_touch;
+        self.client_tracking.clone_from(&source.client_tracking);
+        self.client_reply.clone_from(&source.client_reply);
+        self.peer_addr = source.peer_addr;
+        self.socket_fd = source.socket_fd;
+        self.qbuf_bytes = source.qbuf_bytes;
+        self.qbuf_free_bytes = source.qbuf_free_bytes;
+        self.output_buffer_bytes = source.output_buffer_bytes;
+        self.connected_at_ms = source.connected_at_ms;
+        self.last_interaction_ms = source.last_interaction_ms;
+        self.last_command_name.clone_from(&source.last_command_name);
+        self.last_argv_len_sum = source.last_argv_len_sum;
+    }
 }
 
 impl Default for ClientSession {
@@ -6355,9 +6410,13 @@ impl Runtime {
         // index directly, so re-reconciling it on every post-command session
         // snapshot only repeated a BTreeSet lookup/removal on the common
         // tracking-disabled path.
-        self.server
-            .client_sessions
-            .insert(session.client_id, session.clone());
+        if let Some(snapshot) = self.server.client_sessions.get_mut(&session.client_id) {
+            snapshot.clone_from(session);
+        } else {
+            self.server
+                .client_sessions
+                .insert(session.client_id, session.clone());
+        }
         // (frankenredis-zfu61 perf) The clients.normal / clients.slaves memory
         // aggregates were re-summed over EVERY live session here — once per
         // pipelined batch, O(live-clients) plus a HashSet allocation, on the hot
@@ -6367,6 +6426,16 @@ impl Runtime {
         // sites (`refresh_client_memory_aggregates` is called from
         // handle_info_command and the MEMORY dispatch). The per-command snapshot
         // insert above is kept (CLIENT LIST/INFO still need it).
+    }
+
+    /// Frozen pre-allocation-reuse session snapshot path for same-binary benchmarks.
+    #[cfg(any(test, feature = "bench-reference"))]
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn record_client_session_insert_reference(&mut self, session: &ClientSession) {
+        self.server
+            .client_sessions
+            .insert(session.client_id, session.clone());
     }
 
     /// Frozen pre-optimization session snapshot path for same-binary benchmarks.
@@ -52139,6 +52208,70 @@ mod tests {
         assert_eq!(rt.drain_pubsub_for_client(tracker.client_id), Vec::new());
 
         let _writer = rt.swap_session(previous);
+    }
+
+    #[test]
+    fn client_session_in_place_snapshot_matches_full_clone() {
+        let mut source_runtime = Runtime::default_strict();
+        let source = source_runtime.new_session();
+        let previous = source_runtime.swap_session(source);
+        let _ = source_runtime.execute_frame(command(&[b"HELLO", b"3"]), 10);
+        let _ = source_runtime.execute_frame(command(&[b"SELECT", b"7"]), 11);
+        let _ = source_runtime.execute_frame(command(&[b"CLIENT", b"SETNAME", b"snapshot"]), 12);
+        let _ = source_runtime.execute_frame(
+            command(&[b"CLIENT", b"SETINFO", b"LIB-NAME", b"fr-test"]),
+            13,
+        );
+        let _ = source_runtime
+            .execute_frame(command(&[b"CLIENT", b"SETINFO", b"LIB-VER", b"9.8.7"]), 14);
+        let _ = source_runtime.execute_frame(
+            command(&[b"CLIENT", b"TRACKING", b"ON", b"BCAST", b"PREFIX", b"hot:"]),
+            15,
+        );
+        let _ = source_runtime.execute_frame(command(&[b"WATCH", b"watched"]), 16);
+        let _ = source_runtime.execute_frame(command(&[b"MULTI"]), 17);
+        let _ = source_runtime.execute_frame(command(&[b"SET", b"queued", b"value"]), 18);
+        let mut updated = source_runtime.swap_session(previous);
+        updated.cluster_state.asking = true;
+        updated.transaction_state.watch_dirty = true;
+        updated.transaction_state.exec_abort = true;
+        updated.authenticated_user = Some(b"snapshot-user".to_vec());
+        updated.client_no_evict = true;
+        updated.client_no_touch = true;
+        updated.peer_addr = Some("127.0.0.1:6379".parse().expect("valid peer address"));
+        updated.socket_fd = Some(42);
+        updated.qbuf_bytes = 17;
+        updated.qbuf_free_bytes = 31;
+        updated.output_buffer_bytes = 47;
+        updated.connected_at_ms = 5;
+        updated.last_interaction_ms = 18;
+        updated.last_argv_len_sum = 99;
+
+        let seed = ClientSession {
+            client_id: updated.client_id,
+            ..ClientSession::default()
+        };
+        let mut candidate = Runtime::default_strict();
+        let mut reference = Runtime::default_strict();
+        candidate.record_client_session(&seed);
+        reference.record_client_session_insert_reference(&seed);
+        candidate.record_client_session(&updated);
+        reference.record_client_session_insert_reference(&updated);
+
+        let candidate_snapshot = candidate
+            .server
+            .client_sessions
+            .get(&updated.client_id)
+            .expect("candidate snapshot");
+        let reference_snapshot = reference
+            .server
+            .client_sessions
+            .get(&updated.client_id)
+            .expect("reference snapshot");
+        assert_eq!(
+            format!("{candidate_snapshot:?}"),
+            format!("{reference_snapshot:?}")
+        );
     }
 
     #[test]
