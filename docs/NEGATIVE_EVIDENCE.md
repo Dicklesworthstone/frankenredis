@@ -4,6 +4,46 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-22: SHIPPED — maintain transaction snapshot activity; 13.640467% fewer instructions (frankenredis-6hb54)
+
+NEGATIVE-LEDGER-FIRST + PROFILE-FIRST: the prior transaction-pristine KEEP scans six fields; exact
+searches found no maintained transaction activity bit in either ledger or recent history. The
+immediately preceding literal-current stable-scalar-copy executable sha256
+`7ca9017adf1fc3c96fd0cdcface25587cee8f67926e864bfa5f1a3941b9774a8` attributed **15.20%
+self-time** to exact `TransactionState::clone_from`, selecting that measured scan.
+
+ALIEN PRIMITIVE + ONE LEVER: section 6.1's incremental-computation primitive materializes the
+transaction-pristine predicate as one maintained bit. WATCH/MULTI/queue activity sets it;
+UNWATCH, DISCARD, every EXEC exit, and RESET clear it only after the complete state is pristine.
+Snapshot cloning checks one bit per arm instead of flags plus two vector lengths. Active
+transactions retain the exact landed fieldwise copy; the same-binary reference freezes the old
+six-field scan, and every non-transaction snapshot path is shared.
+
+FOREGROUND SAME-BINARY A/A+A/B: one fail-closed RCH invocation on `vmi1264463`, executable sha256
+`852e9fcc74ba729ebd5e5739f01ee4ae2d06e33cc25ca089a720628c1b8d60f3`. Exact
+candidate/reference runtime wrappers carried **18.07% / 8.36% self-time**; candidate exact
+transaction clone carried **3.36%**, while the reference's exact frozen scan helper carried
+**7.89%** (201/280 samples, zero lost). Nine position-balanced rounds measured candidate median
+**430,517,051** versus reference median **498,517,113** instructions, paired reference/candidate
+**1.157950545x**, or **13.640467% fewer instructions**. The A/A null median was `1.000000295`,
+p05..p95 `[0.999997317, 1.000002111]`, null CV **0.000161%**, and effect CV **0.000105%**.
+
+BEHAVIOR + BOUNDARY: before timing, the same executable exercised WATCH, MULTI, and a queued SET
+and proved the complete populated transaction Debug representation identical between arms. The
+focused invariant proof covers default, WATCH/UNWATCH, queued MULTI/DISCARD, successful EXEC,
+wrong-arity EXEC cleanup, and RESET transitions. This is an instruction result for common
+transaction-pristine single-command registry snapshots, not transaction command throughput.
+Transaction replies, WATCH dirtying, queue ordering, persistence, and replication are unchanged.
+Rollback removes `has_activity`, its mutation maintenance, and the frozen scan reference.
+
+GATES: strict-remote focused transaction-invariant and rich-session snapshot proofs passed;
+strict-remote full `fr-conformance` passed (**194/194** library, **99/99** smoke, every auxiliary
+target, and live `core_transaction` **192/192**). Strict-remote scoped `fr-runtime --all-targets
+--features bench-reference --no-deps` Clippy passed with `-D warnings`. Direct Rust 2024 rustfmt
+passed the owned benchmark and reported only peer-owned drift outside the source hunk; `git diff
+--check` passed. Scoped UBS retained the monolithic-file baseline (**366 critical, 4,688 warnings,
+948 info**) with no finding specific to the production change.
+
 ## 2026-07-22: SHIPPED — separate scalar and allocation-bearing snapshot metadata; 3.196682% fewer instructions (frankenredis-k7raq)
 
 NEGATIVE-LEDGER-FIRST + PROFILE-FIRST: exact searches found no prior scalar-versus-allocation

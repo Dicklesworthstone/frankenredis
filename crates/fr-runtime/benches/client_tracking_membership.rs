@@ -32,6 +32,7 @@ enum Lever {
     StableMetadata,
     ClientIdCopy,
     StableScalarCopy,
+    TransactionActivity,
 }
 
 impl Lever {
@@ -46,6 +47,7 @@ impl Lever {
             Self::StableMetadata => "stable-metadata",
             Self::ClientIdCopy => "client-id-copy",
             Self::StableScalarCopy => "stable-scalar-copy",
+            Self::TransactionActivity => "transaction-activity",
         }
     }
 
@@ -59,6 +61,7 @@ impl Lever {
             Ok("stable-metadata") => Ok(Self::StableMetadata),
             Ok("client-id-copy") => Ok(Self::ClientIdCopy),
             Ok("stable-scalar-copy") => Ok(Self::StableScalarCopy),
+            Ok("transaction-activity") => Ok(Self::TransactionActivity),
             Ok("membership") | Err(env::VarError::NotPresent) => Ok(Self::Membership),
             Ok(value) => Err(format!("unknown FR_BENCH_LEVER {value:?}")),
             Err(error) => Err(format!("invalid FR_BENCH_LEVER: {error}")),
@@ -76,6 +79,7 @@ impl Lever {
             "stable-metadata" => Ok(Self::StableMetadata),
             "client-id-copy" => Ok(Self::ClientIdCopy),
             "stable-scalar-copy" => Ok(Self::StableScalarCopy),
+            "transaction-activity" => Ok(Self::TransactionActivity),
             _ => Err(format!("unknown lever {value:?}")),
         }
     }
@@ -153,6 +157,12 @@ impl Arm {
             (Lever::StableScalarCopy, Self::Reference) => {
                 "<fr_runtime::Runtime>::record_client_session_stable_scalar_copy_reference"
             }
+            (Lever::TransactionActivity, Self::Candidate) => {
+                "<fr_runtime::Runtime>::record_client_session"
+            }
+            (Lever::TransactionActivity, Self::Reference) => {
+                "<fr_runtime::Runtime>::record_client_session_transaction_activity_reference"
+            }
         }
     }
 
@@ -204,6 +214,12 @@ impl Arm {
             (Lever::StableScalarCopy, Self::Reference) => {
                 "<fr_runtime::Runtime>::record_client_session "
             }
+            (Lever::TransactionActivity, Self::Candidate) => {
+                "record_client_session_transaction_activity_reference"
+            }
+            (Lever::TransactionActivity, Self::Reference) => {
+                "<fr_runtime::Runtime>::record_client_session "
+            }
         }
     }
 }
@@ -244,6 +260,10 @@ fn record(runtime: &mut Runtime, session: &fr_runtime::ClientSession, lever: Lev
         (Lever::StableScalarCopy, Arm::Candidate) => runtime.record_client_session(session),
         (Lever::StableScalarCopy, Arm::Reference) => {
             runtime.record_client_session_stable_scalar_copy_reference(session);
+        }
+        (Lever::TransactionActivity, Arm::Candidate) => runtime.record_client_session(session),
+        (Lever::TransactionActivity, Arm::Reference) => {
+            runtime.record_client_session_transaction_activity_reference(session);
         }
     }
 }
@@ -427,7 +447,10 @@ fn correctness_gate(lever: Lever) {
     );
     assert_eq!(disabled_sequence(lever, Arm::Candidate), Vec::new());
     assert_eq!(disabled_sequence(lever, Arm::Reference), Vec::new());
-    if matches!(lever, Lever::TransactionReuse | Lever::TransactionPristine) {
+    if matches!(
+        lever,
+        Lever::TransactionReuse | Lever::TransactionPristine | Lever::TransactionActivity
+    ) {
         assert_eq!(
             transaction_snapshot(lever, Arm::Candidate),
             transaction_snapshot(lever, Arm::Reference)

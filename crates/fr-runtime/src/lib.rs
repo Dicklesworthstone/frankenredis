@@ -3856,6 +3856,7 @@ impl ReplicationRuntimeState {
 
 #[derive(Debug, Default)]
 struct TransactionState {
+    has_activity: bool,
     in_transaction: bool,
     executing_exec: bool,
     command_queue: Vec<Vec<Vec<u8>>>,
@@ -3868,6 +3869,7 @@ struct TransactionState {
 impl Clone for TransactionState {
     fn clone(&self) -> Self {
         Self {
+            has_activity: self.has_activity,
             in_transaction: self.in_transaction,
             executing_exec: self.executing_exec,
             command_queue: self.command_queue.clone(),
@@ -3888,6 +3890,11 @@ impl Clone for TransactionState {
 
 impl TransactionState {
     fn is_pristine(&self) -> bool {
+        debug_assert_eq!(self.has_activity, !self.is_pristine_scan());
+        !self.has_activity
+    }
+
+    fn is_pristine_scan(&self) -> bool {
         !self.in_transaction
             && !self.executing_exec
             && self.command_queue.is_empty()
@@ -3896,7 +3903,21 @@ impl TransactionState {
             && !self.exec_abort
     }
 
+    fn mark_active(&mut self) {
+        self.has_activity = true;
+    }
+
+    fn mark_pristine(&mut self) {
+        debug_assert!(self.is_pristine_scan());
+        self.has_activity = false;
+    }
+
+    fn refresh_activity(&mut self) {
+        self.has_activity = !self.is_pristine_scan();
+    }
+
     fn clone_from_fieldwise(&mut self, source: &Self) {
+        self.has_activity = source.has_activity;
         self.in_transaction = source.in_transaction;
         self.executing_exec = source.executing_exec;
         self.command_queue.clone_from(&source.command_queue);
@@ -3914,6 +3935,15 @@ impl TransactionState {
     #[cfg(any(test, feature = "bench-reference"))]
     #[inline(never)]
     fn clone_from_pristine_reference(&mut self, source: &Self) {
+        self.clone_from_fieldwise(source);
+    }
+
+    #[cfg(any(test, feature = "bench-reference"))]
+    #[inline(never)]
+    fn clone_from_activity_reference(&mut self, source: &Self) {
+        if self.is_pristine_scan() && source.is_pristine_scan() {
+            return;
+        }
         self.clone_from_fieldwise(source);
     }
 }
@@ -5186,6 +5216,13 @@ impl ClientSession {
     fn clone_from_transaction_pristine_reference(&mut self, source: &Self) {
         self.transaction_state
             .clone_from_pristine_reference(&source.transaction_state);
+        self.clone_non_transaction_fields_from::<true>(source);
+    }
+
+    #[cfg(any(test, feature = "bench-reference"))]
+    fn clone_from_transaction_activity_reference(&mut self, source: &Self) {
+        self.transaction_state
+            .clone_from_activity_reference(&source.transaction_state);
         self.clone_non_transaction_fields_from::<true>(source);
     }
 
@@ -6670,6 +6707,23 @@ impl Runtime {
     ) {
         if let Some(snapshot) = self.server.client_sessions.get_mut(&session.client_id) {
             snapshot.clone_from_transaction_pristine_reference(session);
+        } else {
+            self.server
+                .client_sessions
+                .insert(session.client_id, session.clone());
+        }
+    }
+
+    /// Frozen multi-field transaction-pristine scan for activity-bit benchmarks.
+    #[cfg(any(test, feature = "bench-reference"))]
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn record_client_session_transaction_activity_reference(
+        &mut self,
+        session: &ClientSession,
+    ) {
+        if let Some(snapshot) = self.server.client_sessions.get_mut(&session.client_id) {
+            snapshot.clone_from_transaction_activity_reference(session);
         } else {
             self.server
                 .client_sessions
@@ -17129,6 +17183,7 @@ impl Runtime {
             .transaction_state
             .watched_keys
             .push((physical, fp, mod_count));
+        self.session.transaction_state.mark_active();
         if !suppress_reply {
             out.extend_from_slice(b"+OK\r\n");
         }
@@ -17223,6 +17278,7 @@ impl Runtime {
         let start = self.chained_command_start();
         self.session.transaction_state.watched_keys.clear();
         self.session.transaction_state.watch_dirty = false;
+        self.session.transaction_state.mark_pristine();
         if !suppress_reply {
             out.extend_from_slice(b"+OK\r\n");
         }
@@ -43092,6 +43148,7 @@ replica_announced:1\r\n",
         self.session.transaction_state.in_transaction = true;
         self.session.transaction_state.exec_abort = false;
         self.session.transaction_state.command_queue.clear();
+        self.session.transaction_state.mark_active();
         RespFrame::SimpleString("OK".to_string())
     }
 
@@ -43109,6 +43166,7 @@ replica_announced:1\r\n",
                 self.session.transaction_state.command_queue.clear();
                 self.session.transaction_state.watched_keys.clear();
                 self.session.transaction_state.watch_dirty = false;
+                self.session.transaction_state.mark_pristine();
             }
             return RespFrame::Error(
                 "EXECABORT Transaction discarded because of: wrong number of arguments for 'exec' command"
@@ -43126,6 +43184,7 @@ replica_announced:1\r\n",
         if exec_abort {
             self.session.transaction_state.watched_keys.clear();
             self.session.transaction_state.watch_dirty = false;
+            self.session.transaction_state.mark_pristine();
             return RespFrame::Error(
                 "EXECABORT Transaction discarded because of previous errors.".to_string(),
             );
@@ -43150,6 +43209,7 @@ replica_announced:1\r\n",
         self.session.transaction_state.watch_dirty = false;
 
         if watch_failed {
+            self.session.transaction_state.mark_pristine();
             return RespFrame::Array(None);
         }
 
@@ -43334,6 +43394,7 @@ replica_announced:1\r\n",
             }
         }
         self.session.transaction_state.executing_exec = false;
+        self.session.transaction_state.mark_pristine();
 
         if transaction_dirty {
             // Upstream propagatePendingCommands wraps the queued effects in
@@ -43373,6 +43434,7 @@ replica_announced:1\r\n",
         self.session.transaction_state.command_queue.clear();
         self.session.transaction_state.watched_keys.clear();
         self.session.transaction_state.watch_dirty = false;
+        self.session.transaction_state.mark_pristine();
         RespFrame::SimpleString("OK".to_string())
     }
 
@@ -43394,6 +43456,7 @@ replica_announced:1\r\n",
                 .watched_keys
                 .push((physical, fp, mod_count));
         }
+        self.session.transaction_state.mark_active();
         RespFrame::SimpleString("OK".to_string())
     }
 
@@ -43405,6 +43468,7 @@ replica_announced:1\r\n",
         }
         self.session.transaction_state.watched_keys.clear();
         self.session.transaction_state.watch_dirty = false;
+        self.session.transaction_state.refresh_activity();
         RespFrame::SimpleString("OK".to_string())
     }
 
@@ -50214,6 +50278,7 @@ mod tests {
             .transaction_state
             .watched_keys
             .push((b"watched".to_vec(), 7, 0));
+        authenticated.transaction_state.mark_active();
         authenticated.cluster_state.mode = ClusterClientMode::ReadOnly;
         authenticated.cluster_state.asking = true;
 
@@ -52577,6 +52642,7 @@ mod tests {
         let mut stable_metadata_reference = Runtime::default_strict();
         let mut client_id_copy_reference = Runtime::default_strict();
         let mut stable_scalar_copy_reference = Runtime::default_strict();
+        let mut transaction_activity_reference = Runtime::default_strict();
         candidate.record_client_session(&seed);
         reference.record_client_session_insert_reference(&seed);
         transaction_reference.record_client_session(&seed);
@@ -52586,6 +52652,7 @@ mod tests {
         stable_metadata_reference.record_client_session(&seed);
         client_id_copy_reference.record_client_session(&seed);
         stable_scalar_copy_reference.record_client_session(&seed);
+        transaction_activity_reference.record_client_session(&seed);
         candidate.record_client_session(&updated);
         reference.record_client_session_insert_reference(&updated);
         transaction_reference.record_client_session_transaction_replace_reference(&updated);
@@ -52596,6 +52663,8 @@ mod tests {
         stable_metadata_reference.record_client_session_stable_metadata_reference(&updated);
         client_id_copy_reference.record_client_session_client_id_copy_reference(&updated);
         stable_scalar_copy_reference.record_client_session_stable_scalar_copy_reference(&updated);
+        transaction_activity_reference
+            .record_client_session_transaction_activity_reference(&updated);
 
         let candidate_snapshot = candidate
             .server
@@ -52642,6 +52711,11 @@ mod tests {
             .client_sessions
             .get(&updated.client_id)
             .expect("stable scalar copy reference snapshot");
+        let transaction_activity_reference_snapshot = transaction_activity_reference
+            .server
+            .client_sessions
+            .get(&updated.client_id)
+            .expect("transaction activity reference snapshot");
         assert_eq!(
             format!("{candidate_snapshot:?}"),
             format!("{reference_snapshot:?}")
@@ -52674,11 +52748,71 @@ mod tests {
             format!("{candidate_snapshot:?}"),
             format!("{stable_scalar_copy_reference_snapshot:?}")
         );
+        assert_eq!(
+            format!("{candidate_snapshot:?}"),
+            format!("{transaction_activity_reference_snapshot:?}")
+        );
 
         let mut general_clone = updated.clone();
         general_clone.client_id = updated.client_id.saturating_add(1);
         general_clone.clone_from(&updated);
         assert_eq!(general_clone.client_id, updated.client_id);
+    }
+
+    #[test]
+    fn transaction_activity_invariant_tracks_all_control_transitions() {
+        let mut rt = Runtime::default_strict();
+        assert!(rt.session.transaction_state.is_pristine());
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"WATCH", b"watched"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(!rt.session.transaction_state.is_pristine());
+        assert_eq!(
+            rt.execute_frame(command(&[b"UNWATCH"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(rt.session.transaction_state.is_pristine());
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"MULTI"]), 3),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"UNWATCH"]), 4),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(!rt.session.transaction_state.is_pristine());
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"key", b"value"]), 5),
+            RespFrame::SimpleString("QUEUED".to_string())
+        );
+        assert!(!rt.session.transaction_state.is_pristine());
+        assert_eq!(
+            rt.execute_frame(command(&[b"DISCARD"]), 6),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(rt.session.transaction_state.is_pristine());
+
+        let _ = rt.execute_frame(command(&[b"MULTI"]), 7);
+        let _ = rt.execute_frame(command(&[b"PING"]), 8);
+        assert!(matches!(
+            rt.execute_frame(command(&[b"EXEC"]), 9),
+            RespFrame::Array(Some(_))
+        ));
+        assert!(rt.session.transaction_state.is_pristine());
+
+        let _ = rt.execute_frame(command(&[b"MULTI"]), 10);
+        assert!(matches!(
+            rt.execute_frame(command(&[b"EXEC", b"extra"]), 11),
+            RespFrame::Error(_)
+        ));
+        assert!(rt.session.transaction_state.is_pristine());
+
+        let _ = rt.execute_frame(command(&[b"WATCH", b"watched"]), 12);
+        let _ = rt.execute_frame(command(&[b"RESET"]), 13);
+        assert!(rt.session.transaction_state.is_pristine());
     }
 
     #[test]
