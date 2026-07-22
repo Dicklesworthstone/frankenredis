@@ -1,0 +1,29 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 2K of event 'cycles:P'
+# Event count (approx.): 11064913036
+#
+# Overhead  Command          Shared Object      Symbol                                                                                                                                                                                                                                                                                            
+# ........  ...............  .................  ..................................................................................................................................................................................................................................................................................................
+#
+     3.00%  fr_cand_vlis9.b  [unknown]          [k] 0xffffffffaf6001bd
+     2.48%  fr_cand_vlis9.b  fr_cand_vlis9.bin  [.] frankenredis::process_buffered_frames
+     2.20%  fr_cand_vlis9.b  [vdso]             [.] 0x0000000000000983
+     2.13%  fr_cand_vlis9.b  [unknown]          [k] 0xffffffffaf70410b
+     1.78%  fr_cand_vlis9.b  fr_cand_vlis9.bin  [.] <fr_runtime::Runtime>::execute_plain_get_borrowed_into_with_default_read_gate
+     1.25%  fr_cand_vlis9.b  fr_cand_vlis9.bin  [.] frankenredis::main
+     1.10%  fr_cand_vlis9.b  [unknown]          [k] 0xffffffffaf987bc0
+     0.90%  fr_cand_vlis9.b  [unknown]          [k] 0xffffffffaf704109
+     0.75%  fr_cand_vlis9.b  fr_cand_vlis9.bin  [.] <hashbrown::map::HashMap<alloc::boxed::Box<[u8]>, fr_store::Entry, foldhash::quality::RandomState>>::get_mut::<[u8]>
+     0.70%  fr_cand_vlis9.b  fr_cand_vlis9.bin  [.] <fr_store::CommandHistogramTracker>::record_canonical_with_kind
+     0.67%  fr_cand_vlis9.b  fr_cand_vlis9.bin  [.] frankenredis::parse_borrowed_plain_set_bulk
+     0.62%  fr_cand_vlis9.b  libc.so.6          [.] __memset_avx2_unaligned_erms
+     0.53%  fr_cand_vlis9.b  [unknown]          [k] 0xffffffffaf600080
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#
