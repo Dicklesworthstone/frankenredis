@@ -1,0 +1,40 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 7K of event 'cycles:P'
+# Event count (approx.): 28262317764
+#
+# Overhead  Command          Shared Object      Symbol                                                                                                                                                                                                                                                                                            
+# ........  ...............  .................  ..................................................................................................................................................................................................................................................................................................
+#
+    16.41%  fr_cand_vlis9.b  [unknown]          [k] 0xffffffffaf6001bd
+            |          
+             --7.52%--0xffffffffaf6001c4
+                       __syscall_cancel_arch_end
+                       epoll_wait
+                       <mio::poll::Poll>::poll
+                       std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+                       main
+                       __libc_start_main@@GLIBC_2.34
+                       _start
+
+     6.19%  fr_cand_vlis9.b  fr_cand_vlis9.bin  [.] fr_protocol::encode_bulk_string_slice
+            |          
+            |--1.77%--fr_protocol::encode_bulk_string_slice
+            |          |          
+            |           --1.70%--0x40000
+            |          
+            |--1.61%--<fr_store::packed_set::CompactFieldMap>::get_index
+            |          |          
+            |           --1.17%--0x40000
+            |          
+             --1.53%--<fr_store::packed_set::HashFieldMapIter as core::iter::traits::iterator::Iterator>::next
+                       0x40000
+
+     4.68%  fr_cand_vlis9.b  fr_cand_vlis9.bin  [.] frankenredis::main
+            |          
+             --1.58%--0xffffffffaf6001c4
+                       __syscall_cancel_arch_end
+                       epoll_wait

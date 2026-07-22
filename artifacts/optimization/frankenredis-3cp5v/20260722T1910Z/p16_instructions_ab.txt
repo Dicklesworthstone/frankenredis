@@ -1,0 +1,24 @@
+frankenredis-3cp5v — writer-pool Drained completion returns write_buf capacity — REJECT (undecidable)
+Host: local (perf_event_paranoid=1). Servers pinned: ctl core 2 (port 23971), cand core 3 (23972),
+null=ctl-binary core 4 (23973); client cores 6,7. Workload (trigger-verified): redis-benchmark
+-c50 -P16 -n8000 HGETALL bigh (10k-field hash seeded identically on all three).
+Arms hash-bracketed on identical tree snapshot (HEAD e40d17234 + peer fr-runtime WIP fa0a3f97):
+  control  sha256 3497c2605bdbaea9c476755da6c1beadd467267b937f57942768b6e253008bd8
+  candidate sha256 c334486b152493d3f4ed2a0648589f7db56cdd70a355243edfb7f6e5e9542285
+(An earlier candidate build sha 3e80d666... was DISCARDED: peer WIP hash moved mid-build.)
+
+instructions:u per 8000-reply run (order-balanced, 6 reps):
+rep  ctl            cand           null(A/A)
+1    38176610784    38909795115    38443945060
+2    41749174044    38321714686    38519851295
+3    38636885986    39547220926    40809889195
+4    38220310271    38320459606    38244127740
+5    42383238656    40155615975    37855567307
+6    38826713140    38348668394    38099294418
+
+ctl  median 38.7318B cv 4.342% | cand median 38.6292B cv 1.805% | null median 38.3440B cv 2.548%
+NULL/CTL ratio median 0.9909, spread [0.8932, 1.0562]
+CAND/CTL ratio median 0.9952, spread [0.9179, 1.0236]  -> INSIDE null spread = UNDECIDABLE
+Profile ceiling pre-measurement: __memmove 1.13% self, drain_writer_completions 1.38% (P16 shape).
+Trigger evidence: writer-thread utime 0 ticks @ c50 P1 (5k replies); 12-13 ticks @ P16 (24k replies).
+Verdict: REJECT, hunk reverted. Retry predicate in docs/NEGATIVE_EVIDENCE.md entry.
