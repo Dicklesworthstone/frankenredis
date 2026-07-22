@@ -6347,8 +6347,14 @@ impl Runtime {
     }
 
     /// Update or insert a session snapshot used by multi-client CLIENT LIST.
+    #[cfg_attr(feature = "bench-reference", inline(never))]
     pub fn record_client_session(&mut self, session: &ClientSession) {
-        self.refresh_client_tracking_bcast_membership(session.client_id, &session.client_tracking);
+        // (frankenredis-hqca6 perf) `client_tracking_bcast_clients` is a
+        // derived index whose only state transitions are CLIENT TRACKING,
+        // RESET, and connection teardown. Those mutation sites update the
+        // index directly, so re-reconciling it on every post-command session
+        // snapshot only repeated a BTreeSet lookup/removal on the common
+        // tracking-disabled path.
         self.server
             .client_sessions
             .insert(session.client_id, session.clone());
@@ -6361,6 +6367,17 @@ impl Runtime {
         // sites (`refresh_client_memory_aggregates` is called from
         // handle_info_command and the MEMORY dispatch). The per-command snapshot
         // insert above is kept (CLIENT LIST/INFO still need it).
+    }
+
+    /// Frozen pre-optimization session snapshot path for same-binary benchmarks.
+    #[cfg(any(test, feature = "bench-reference"))]
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn record_client_session_refresh_reference(&mut self, session: &ClientSession) {
+        self.refresh_client_tracking_bcast_membership(session.client_id, &session.client_tracking);
+        self.server
+            .client_sessions
+            .insert(session.client_id, session.clone());
     }
 
     /// (frankenredis-zfu61) Recompute `stat_clients_normal_mem_bytes` and

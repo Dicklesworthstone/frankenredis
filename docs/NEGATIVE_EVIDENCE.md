@@ -4,6 +4,53 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-22: SHIPPED — maintain CLIENT TRACKING BCAST membership only at mutations; 2.886257% fewer instructions (frankenredis-hqca6)
+
+NEGATIVE-LEDGER-FIRST + ALIEN PRIMITIVE: neither ledger nor the recent Git history contained a
+closed attempt at `record_client_session` BCAST-index upkeep. The selected graveyard primitive is
+self-adjusting/incremental computation (section 6.1): keep the derived BCAST membership index
+current at the three state transitions that can change it (`CLIENT TRACKING`, `RESET`, and
+disconnect), instead of recomputing membership after every ordinary command snapshot. This is a
+low-complexity, low-risk micro lever on the live single-command server path; its falsifier was a
+same-binary effect at or below the candidate/candidate null envelope.
+
+PROFILE-FIRST on the literal unchanged implementation, strict remote release build on worker
+`vmi1149989`, binary sha256
+`34e35c3b9bfe796b5e96dbcd59295ca20bc7b3aa19c73d12d3a25e73e706c50e`: 269
+`instructions:u` samples, zero lost. Exact `Runtime::record_client_session` carried **14.13%
+self-time**, and the redundant empty `BTreeSet::remove` carried **4.17%**, proving that the
+tracking-disabled, empty-index trigger reached the proposed seam before the production edit.
+
+ONE LEVER: `record_client_session` now only clones/inserts the CLIENT LIST snapshot. The BCAST
+index was already updated synchronously by `CLIENT TRACKING`, explicitly cleared by `RESET`, and
+removed by both disconnect paths. The feature-gated frozen reference retains the complete old
+refresh-plus-snapshot implementation. No command parser, output/writev path, tracking predicate,
+invalidation payload, or session snapshot representation changed.
+
+FOREGROUND SAME-BINARY A/B: worker `vmi1149989`, one binary sha256
+`ca7537055d3fb84714c0b2100654515122b57e4b5a17f0fbbae66e13ed8883bb`. Both exact
+candidate/reference frames had non-zero self-time (**7.16% / 3.65%**) with zero lost samples.
+Nine position-balanced instruction rounds measured candidate median **1,524,514,410** versus
+reference median **1,568,514,962**, paired reference/candidate **1.028862574x**, or **2.886257%
+fewer instructions**. The candidate/candidate null median was `0.999999446`, p05..p95
+`[0.997376061, 1.000000645]`, null CV **0.123726%**, and effect CV **0.163526%**.
+
+BEHAVIOR: the same binary matched candidate/reference replies and invalidation queues with BCAST
+enabled, and proved both arms emit no invalidation after `CLIENT TRACKING OFF`. Existing runtime
+coverage pins BCAST removal on `RESET` and disconnect. The retained benchmark is the reproduction
+artifact. Rollback: restore the one membership-refresh call in `record_client_session`; all state
+transition handlers and observable Redis semantics remain unchanged.
+
+GATES: strict-remote focused lifecycle test passed; the complete `fr-conformance` release suite
+passed all **347** asserting tests, including 124/124 live `core_client` cases and the dedicated
+client-tracking smoke. Scoped `fr-runtime --all-targets --features bench-reference --no-deps`
+Clippy passed with `-D warnings`; direct Rust 2024 rustfmt and `git diff --check` passed. The
+workspace all-target check reached this lever successfully, then stopped on peer-owned
+`fr-store/benches/set_ex_rearm.rs` calls to three missing bench helpers. Dependency-inclusive
+Clippy likewise stopped on the pre-existing `fr-simd` `needless_range_loop` at `src/lib.rs:795`.
+UBS remained baseline-red on the monolithic runtime's existing test panic/security heuristics and
+reported no finding specific to the changed production lines.
+
 ## 2026-07-16: SHIPPED — index live-oracle fixture case names; 7.920713% fewer instructions (frankenredis-9e1kp)
 
 NEGATIVE-LEDGER-FIRST + FRESH-SUBSYSTEM PIVOT: robot triage exposed no unclaimed one-turn

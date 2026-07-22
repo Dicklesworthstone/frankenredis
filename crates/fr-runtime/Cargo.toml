@@ -96,3 +96,11 @@ required-features = ["bench-reference"]
 name = "set_xx_ok_reply_alloc"
 harness = false
 required-features = ["bench-reference"]
+
+# (frankenredis-hqca6) Literal-current profile, then same-binary proof, for maintaining the
+# CLIENT TRACKING BCAST derived index only when tracking state changes instead of on every
+# multi-client session snapshot.
+[[bench]]
+name = "client_tracking_membership"
+harness = false
+required-features = ["bench-reference"]

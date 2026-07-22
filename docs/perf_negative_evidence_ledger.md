@@ -8,6 +8,42 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-22 CreamPeak: SHIPPED — update the CLIENT TRACKING BCAST index only at tracking/lifecycle mutations (`frankenredis-hqca6`)
+
+- **Negative-ledger-first / distinct seam:** exact searches of both ledgers and recent Git history
+  found no closed `record_client_session` BCAST-membership lever. The cold ZSET DUMP fusion WIP is
+  still closed by `frankenredis-hdyw0`'s unmet lower-noise/larger-enclosing-cost retry predicate,
+  so it was not revived. This pass stayed out of the peer-owned pipeline/writev wall.
+- **Profile-first attribution:** literal-current `record_client_session` on strict-remote worker
+  `vmi1149989`, release binary sha256
+  `34e35c3b9bfe796b5e96dbcd59295ca20bc7b3aa19c73d12d3a25e73e706c50e`, produced
+  269 `instructions:u` samples with zero lost. The exact snapshot wrapper carried **14.13%
+  self-time** and its empty `BTreeSet::remove` carried **4.17%**.
+- **Alien mapping / one lever:** apply the graveyard's self-adjusting/incremental-computation
+  primitive (section 6.1) to the derived BCAST membership index. `CLIENT TRACKING`, `RESET`, and
+  connection teardown already maintain every transition; ordinary post-command snapshots now
+  only clone/insert the session. A bench-only frozen reference retains the old refresh-plus-insert.
+- **Same-worker same-binary A/A+A/B:** on `vmi1149989`, sha256
+  `ca7537055d3fb84714c0b2100654515122b57e4b5a17f0fbbae66e13ed8883bb`, exact
+  candidate/reference frames carried **7.16% / 3.65% self-time**, zero lost. Nine
+  position-balanced rounds measured candidate median **1,524,514,410** versus reference median
+  **1,568,514,962** instructions: paired **1.028862574x**, or **2.886257% fewer**. A/A null
+  median **0.999999446**, p05..p95 **[0.997376061, 1.000000645]**, null CV **0.123726%**,
+  effect CV **0.163526%**.
+- **Behavior / boundary:** same-binary checks matched replies and queued invalidations for BCAST
+  enabled and proved both arms remain silent after TRACKING OFF; existing tests pin RESET and
+  disconnect removal. This is an instruction result for the common session-snapshot operation,
+  not a whole-server throughput claim. Parser, output, invalidation matching, and snapshot data are
+  unchanged. Rollback is the single refresh call retained verbatim in the benchmark reference.
+- **Gates:** strict-remote focused lifecycle testing passed, as did all **347** asserting
+  `fr-conformance` release tests (including 124/124 live `core_client` and client-tracking smoke).
+  Scoped all-target `fr-runtime` Clippy with the bench-reference feature and `--no-deps` passed
+  under `-D warnings`; direct Rust 2024 rustfmt and `git diff --check` passed. The workspace
+  all-target check was blocked later by peer-owned `fr-store/benches/set_ex_rearm.rs` calls to
+  three absent bench helpers; dependency-inclusive Clippy was blocked by the pre-existing
+  `fr-simd` `needless_range_loop` at line 795. UBS remained baseline-red on existing monolithic
+  runtime test/security heuristics, with no finding attributable to this production diff.
+
 ## 2026-07-16 BlackThrush: SHIPPED — drop the per-SET `SimpleString("OK")` reply allocation on the borrowed plain-SET fast path (`frankenredis-4jhv4`)
 
 - **Fresh-subsystem pivot (last vein thinning):** the LFU probe-collapse and borrow-scan seams are
