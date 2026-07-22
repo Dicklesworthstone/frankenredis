@@ -25,6 +25,7 @@ enum Arm {
 enum Lever {
     Membership,
     SnapshotReuse,
+    TransactionReuse,
 }
 
 impl Lever {
@@ -32,12 +33,14 @@ impl Lever {
         match self {
             Self::Membership => "membership",
             Self::SnapshotReuse => "snapshot-reuse",
+            Self::TransactionReuse => "transaction-reuse",
         }
     }
 
     fn from_env() -> Result<Self, String> {
         match env::var("FR_BENCH_LEVER").as_deref() {
             Ok("snapshot-reuse") => Ok(Self::SnapshotReuse),
+            Ok("transaction-reuse") => Ok(Self::TransactionReuse),
             Ok("membership") | Err(env::VarError::NotPresent) => Ok(Self::Membership),
             Ok(value) => Err(format!("unknown FR_BENCH_LEVER {value:?}")),
             Err(error) => Err(format!("invalid FR_BENCH_LEVER: {error}")),
@@ -48,6 +51,7 @@ impl Lever {
         match value {
             "membership" => Ok(Self::Membership),
             "snapshot-reuse" => Ok(Self::SnapshotReuse),
+            "transaction-reuse" => Ok(Self::TransactionReuse),
             _ => Err(format!("unknown lever {value:?}")),
         }
     }
@@ -83,6 +87,12 @@ impl Arm {
             (Lever::SnapshotReuse, Self::Reference) => {
                 "<fr_runtime::ClientSession as core::clone::Clone>::clone"
             }
+            (Lever::TransactionReuse, Self::Candidate) => {
+                "<fr_runtime::TransactionState as core::clone::Clone>::clone_from"
+            }
+            (Lever::TransactionReuse, Self::Reference) => {
+                "<fr_runtime::TransactionState>::replace_from_clone_reference"
+            }
         }
     }
 
@@ -94,6 +104,10 @@ impl Arm {
                 "<fr_runtime::ClientSession as core::clone::Clone>::clone "
             }
             (Lever::SnapshotReuse, Self::Reference) => "clone_from",
+            (Lever::TransactionReuse, Self::Candidate) => "replace_from_clone_reference",
+            (Lever::TransactionReuse, Self::Reference) => {
+                "<fr_runtime::TransactionState as core::clone::Clone>::clone_from"
+            }
         }
     }
 }
@@ -107,6 +121,10 @@ fn record(runtime: &mut Runtime, session: &fr_runtime::ClientSession, lever: Lev
             runtime.record_client_session_refresh_reference(session);
         }
         (Lever::SnapshotReuse, Arm::Candidate) => runtime.record_client_session(session),
+        (Lever::TransactionReuse, Arm::Candidate) => runtime.record_client_session(session),
+        (Lever::TransactionReuse, Arm::Reference) => {
+            runtime.record_client_session_transaction_replace_reference(session);
+        }
     }
 }
 
@@ -170,6 +188,30 @@ fn disabled_sequence(lever: Lever, arm: Arm) -> Vec<fr_store::PubSubMessage> {
     invalidations
 }
 
+fn transaction_snapshot(lever: Lever, arm: Arm) -> String {
+    let mut runtime = Runtime::default_strict();
+    let session = runtime.new_session();
+    record(&mut runtime, &session, lever, arm);
+    let previous = runtime.swap_session(session);
+    assert_eq!(
+        runtime.execute_frame(command(&[b"WATCH", b"watched:key"]), 1),
+        RespFrame::SimpleString("OK".to_owned())
+    );
+    assert_eq!(
+        runtime.execute_frame(command(&[b"MULTI"]), 2),
+        RespFrame::SimpleString("OK".to_owned())
+    );
+    assert_eq!(
+        runtime.execute_frame(command(&[b"SET", b"queued:key", b"value"]), 3),
+        RespFrame::SimpleString("QUEUED".to_owned())
+    );
+    let updated = runtime.swap_session(previous);
+    record(&mut runtime, &updated, lever, arm);
+    runtime
+        .recorded_transaction_state_debug(updated.client_id)
+        .expect("recorded transaction snapshot")
+}
+
 fn correctness_gate(lever: Lever) {
     let candidate = bcast_sequence(lever, Arm::Candidate);
     let reference = bcast_sequence(lever, Arm::Reference);
@@ -182,8 +224,14 @@ fn correctness_gate(lever: Lever) {
     );
     assert_eq!(disabled_sequence(lever, Arm::Candidate), Vec::new());
     assert_eq!(disabled_sequence(lever, Arm::Reference), Vec::new());
+    if matches!(lever, Lever::TransactionReuse) {
+        assert_eq!(
+            transaction_snapshot(lever, Arm::Candidate),
+            transaction_snapshot(lever, Arm::Reference)
+        );
+    }
     println!(
-        "CORRECTNESS_GATE identical=true cases=bcast_enabled,bcast_disabled mutation_sites=client_tracking"
+        "CORRECTNESS_GATE identical=true cases=bcast_enabled,bcast_disabled,transaction_snapshot mutation_sites=client_tracking"
     );
 }
 

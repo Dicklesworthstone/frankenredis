@@ -8,6 +8,46 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-22 CreamPeak: SHIPPED — fieldwise `TransactionState::clone_from` in session snapshots (`frankenredis-r62lu`)
+
+- **Negative-ledger-first / fresh nested seam:** neither ledger contained a `TransactionState`,
+  command-queue, watched-key, or transaction `clone_from` attempt; recent Git history contained
+  only the original MULTI/EXEC and later runtime feature implementations. This is the next named
+  residual inside the landed outer snapshot reuse, not a retry of a closed lever.
+- **Profile-first attribution:** the literal-current outer-snapshot binary sha256
+  `215ed432c127b5779014420e9adb0a36324f7b6cea283d0a27523f0fa58a0d65` on
+  `vmi1227854` exposed watched-key Vec clone **3.11%**, `TransactionState` drop **1.95%**, and
+  nested command-queue Vec clone **1.24%** self-time.
+- **Alien mapping / one lever:** section 6.1's incremental-update primitive applies one level
+  deeper: assign the transaction booleans and `clone_from` its command-queue/watched-key Vecs so
+  their allocations survive repeated snapshots. The same-binary reference retains derived
+  Clone's default full replacement. Every non-transaction field update is shared.
+- **Same-worker same-binary A/A+A/B:** the first executable, sha256
+  `989ca49a5e8ae3d41ccb6427666e53334a3d916dcae7ebad17e6bc912b586c06`, stopped before
+  profiling because an overbroad correctness comparison included distinct global client IDs; no
+  ratio from it was used. The repaired one-RCH run used worker `vmi1227854`, executable sha256
+  `01a1ba67a756b1adbd30281a18dbe9758a20be4cd6f3adfe0626269ae788ddea`, and exact
+  candidate/reference frames with **2.95% / 45.26% self-time** (138/176 samples, zero lost). Nine
+  position-balanced rounds measured candidate median **766,515,455** versus reference median
+  **842,515,553** instructions: paired **1.099149913x**, or **9.020600% fewer**. A/A null median
+  **1.000000433**, p05..p95 **[0.999998951, 1.000001375]**, null CV **0.000069%**, effect CV
+  **0.000079%**.
+- **Behavior / boundary:** the same executable proved a populated WATCH/MULTI/queued SET
+  `TransactionState` Debug representation identical between candidate and frozen reference before
+  timing. The focused rich-session unit test matches the candidate against both full session clone
+  and frozen transaction replacement. This is an instruction result for repeated snapshots of the
+  common transaction-empty session, not whole-server or transaction-heavy throughput. Rollback
+  restores derived `Clone` and removes the bench reference.
+- **Gates:** strict-remote release all-target check and the focused rich-state unit test passed.
+  The complete strict-remote `fr-conformance` invocation exited 0: 194 library tests, 99 smoke
+  tests, and every auxiliary asserting suite passed; live `core_transaction` was 192/192. Scoped
+  `fr-runtime --all-targets --features bench-reference --no-deps` Clippy passed with `-D warnings`.
+  Fail-closed RCH continued to refuse `cargo fmt --check` as non-compilation (`RCH-E301`); direct
+  Rust 2024 rustfmt passed the benchmark and reported only the same peer-owned runtime hunks outside
+  this diff, while `git diff --check` passed. UBS ran with Cargo-backed categories disabled and
+  remained baseline-red on the monolithic runtime (345 critical / 4,603 warning heuristics), with
+  no finding specific to the changed production lines.
+
 ## 2026-07-22 CreamPeak: SHIPPED — reuse allocations in repeated CLIENT session snapshots (`frankenredis-okvud`)
 
 - **Negative-ledger-first / distinct seam:** exact ledger and recent-history searches found the

@@ -3854,7 +3854,7 @@ impl ReplicationRuntimeState {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 struct TransactionState {
     in_transaction: bool,
     executing_exec: bool,
@@ -3863,6 +3863,37 @@ struct TransactionState {
     watched_keys: Vec<(Vec<u8>, u64, u64)>,
     watch_dirty: bool,
     exec_abort: bool,
+}
+
+impl Clone for TransactionState {
+    fn clone(&self) -> Self {
+        Self {
+            in_transaction: self.in_transaction,
+            executing_exec: self.executing_exec,
+            command_queue: self.command_queue.clone(),
+            watched_keys: self.watched_keys.clone(),
+            watch_dirty: self.watch_dirty,
+            exec_abort: self.exec_abort,
+        }
+    }
+
+    #[cfg_attr(feature = "bench-reference", inline(never))]
+    fn clone_from(&mut self, source: &Self) {
+        self.in_transaction = source.in_transaction;
+        self.executing_exec = source.executing_exec;
+        self.command_queue.clone_from(&source.command_queue);
+        self.watched_keys.clone_from(&source.watched_keys);
+        self.watch_dirty = source.watch_dirty;
+        self.exec_abort = source.exec_abort;
+    }
+}
+
+impl TransactionState {
+    #[cfg(any(test, feature = "bench-reference"))]
+    #[inline(never)]
+    fn replace_from_clone_reference(&mut self, source: &Self) {
+        *self = source.clone();
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -5028,8 +5059,14 @@ impl Clone for ClientSession {
     }
 
     fn clone_from(&mut self, source: &Self) {
-        self.cluster_state.clone_from(&source.cluster_state);
         self.transaction_state.clone_from(&source.transaction_state);
+        self.clone_non_transaction_fields_from(source);
+    }
+}
+
+impl ClientSession {
+    fn clone_non_transaction_fields_from(&mut self, source: &Self) {
+        self.cluster_state.clone_from(&source.cluster_state);
         self.authenticated_user
             .clone_from(&source.authenticated_user);
         self.selected_db = source.selected_db;
@@ -5051,6 +5088,13 @@ impl Clone for ClientSession {
         self.last_interaction_ms = source.last_interaction_ms;
         self.last_command_name.clone_from(&source.last_command_name);
         self.last_argv_len_sum = source.last_argv_len_sum;
+    }
+
+    #[cfg(any(test, feature = "bench-reference"))]
+    fn clone_from_transaction_replace_reference(&mut self, source: &Self) {
+        self.transaction_state
+            .replace_from_clone_reference(&source.transaction_state);
+        self.clone_non_transaction_fields_from(source);
     }
 }
 
@@ -6436,6 +6480,29 @@ impl Runtime {
         self.server
             .client_sessions
             .insert(session.client_id, session.clone());
+    }
+
+    /// Frozen derived-Clone transaction replacement for same-binary benchmarks.
+    #[cfg(any(test, feature = "bench-reference"))]
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn record_client_session_transaction_replace_reference(&mut self, session: &ClientSession) {
+        if let Some(snapshot) = self.server.client_sessions.get_mut(&session.client_id) {
+            snapshot.clone_from_transaction_replace_reference(session);
+        } else {
+            self.server
+                .client_sessions
+                .insert(session.client_id, session.clone());
+        }
+    }
+
+    #[cfg(any(test, feature = "bench-reference"))]
+    #[doc(hidden)]
+    pub fn recorded_transaction_state_debug(&self, client_id: u64) -> Option<String> {
+        self.server
+            .client_sessions
+            .get(&client_id)
+            .map(|session| format!("{:?}", session.transaction_state))
     }
 
     /// Frozen pre-optimization session snapshot path for same-binary benchmarks.
@@ -52253,10 +52320,13 @@ mod tests {
         };
         let mut candidate = Runtime::default_strict();
         let mut reference = Runtime::default_strict();
+        let mut transaction_reference = Runtime::default_strict();
         candidate.record_client_session(&seed);
         reference.record_client_session_insert_reference(&seed);
+        transaction_reference.record_client_session(&seed);
         candidate.record_client_session(&updated);
         reference.record_client_session_insert_reference(&updated);
+        transaction_reference.record_client_session_transaction_replace_reference(&updated);
 
         let candidate_snapshot = candidate
             .server
@@ -52268,9 +52338,18 @@ mod tests {
             .client_sessions
             .get(&updated.client_id)
             .expect("reference snapshot");
+        let transaction_reference_snapshot = transaction_reference
+            .server
+            .client_sessions
+            .get(&updated.client_id)
+            .expect("transaction replacement reference snapshot");
         assert_eq!(
             format!("{candidate_snapshot:?}"),
             format!("{reference_snapshot:?}")
+        );
+        assert_eq!(
+            format!("{candidate_snapshot:?}"),
+            format!("{transaction_reference_snapshot:?}")
         );
     }
 

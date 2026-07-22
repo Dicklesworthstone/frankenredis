@@ -4,6 +4,52 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-22: SHIPPED — reuse transaction queue/watch allocations in session snapshots; 9.020600% fewer instructions (frankenredis-r62lu)
+
+NEGATIVE-LEDGER-FIRST + NEXT PROFILE RESIDUAL: exact searches of both ledgers found no
+`TransactionState`, command-queue, watched-key, or transaction `clone_from` attempt; recent history
+contained only the original MULTI/EXEC and later runtime feature implementations. In the literal
+current outer-snapshot KEEP profile (worker `vmi1227854`, binary sha256
+`215ed432c127b5779014420e9adb0a36324f7b6cea283d0a27523f0fa58a0d65`), exact
+transaction replacement residuals were visible as watched-key Vec clone **3.11%**,
+`TransactionState` drop **1.95%**, and nested command-queue Vec clone **1.24%** self-time.
+
+ALIEN PRIMITIVE + ONE LEVER: continue section 6.1's self-adjusting/incremental update one level
+deeper. Manual `TransactionState::clone_from` assigns its four booleans and reuses the existing
+command-queue and watched-key Vec storage. Ordinary `clone` remains fieldwise equivalent. The
+bench-only reference freezes derived Clone's default `*destination = source.clone()` behavior;
+both arms share the exact same non-transaction session update.
+
+FOREGROUND SAME-BINARY A/A+A/B: the first build (sha256
+`989ca49a5e8ae3d41ccb6427666e53334a3d916dcae7ebad17e6bc912b586c06`) stopped before
+profiling because its isomorphism gate compared globally allocated client IDs; no performance
+verdict used it. The repaired one-RCH run used worker `vmi1227854` and executable sha256
+`01a1ba67a756b1adbd30281a18dbe9758a20be4cd6f3adfe0626269ae788ddea`. Exact candidate
+`TransactionState::clone_from` and reference replacement frames carried **2.95% / 45.26%
+self-time** (138/176 samples, zero lost). Nine position-balanced rounds measured candidate median
+**766,515,455** versus reference median **842,515,553** instructions, paired
+reference/candidate **1.099149913x**, or **9.020600% fewer instructions**. The A/A null median was
+`1.000000433`, p05..p95 `[0.999998951, 1.000001375]`, null CV **0.000069%**, and effect CV
+**0.000079%**.
+
+BEHAVIOR + BOUNDARY: before timing, the same executable built a populated WATCH/MULTI/queued SET
+state and proved the complete `TransactionState` representation identical between arms. The
+focused rich-session unit proof also matches the candidate against both unconditional full-clone
+and frozen transaction-replacement snapshots. The strict-remote release all-target check and
+focused test passed. This is an instruction result for repeated snapshots of the common
+transaction-empty session; populated-state parity is proof, not a claim about transaction-heavy
+throughput. Rollback restores `#[derive(Clone)]` on `TransactionState` and removes the frozen
+reference path.
+
+GATES: the complete strict-remote `fr-conformance` invocation exited 0: 194 library tests, 99
+smoke tests, and every auxiliary asserting suite passed; live `core_transaction` was 192/192.
+Scoped `fr-runtime --all-targets --features bench-reference --no-deps` Clippy passed with
+`-D warnings`. Fail-closed RCH continued to refuse `cargo fmt --check` as non-compilation
+(`RCH-E301`); direct Rust 2024 rustfmt passed the benchmark and reported only the same peer-owned
+runtime hunks outside this diff, while `git diff --check` passed. UBS ran with Cargo-backed
+categories disabled and remained baseline-red on the monolithic runtime (345 critical / 4,603
+warning heuristics), with no finding specific to the changed production lines.
+
 ## 2026-07-22: SHIPPED — reuse existing CLIENT session snapshot allocations; 47.414770% fewer instructions (frankenredis-okvud)
 
 NEGATIVE-LEDGER-FIRST + DISTINCT SEAM: exact searches of both ledgers and recent Git history
