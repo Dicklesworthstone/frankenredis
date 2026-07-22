@@ -4,6 +4,47 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-22: SHIPPED — elide registry snapshot client-ID copy; 4.957004% fewer instructions (frankenredis-251h0)
+
+NEGATIVE-LEDGER-FIRST + PROFILE-FIRST: exact searches found no registry-key/client-ID copy
+specialization in either ledger or recent history. The immediately preceding literal-current
+executable sha256 `e3d4ddb86165f2c8d56cb14e9daca9cc245ee1bd6991bd3f90245b65dbdb9e18`
+attributed **13.08% self-time** to exact `ClientSession::stable_metadata_matches`, selecting the
+redundant identity comparison/copy inside that measured residual.
+
+ONE LEVER + INVARIANT: `client_sessions` is keyed by `session.client_id`; the update arm can only
+obtain the existing snapshot through that same key, and the insert arm puts snapshots under their
+own ID. A registry-only const specialization omits the client-ID comparison and assignment while
+retaining a debug assertion. General `Clone::clone_from` still copies a differing ID exactly, and
+the insert arm is unchanged.
+
+FOREGROUND SAME-BINARY A/A+A/B: one fail-closed RCH invocation on `vmi1264463`, executable sha256
+`69d3ede62436df03242cb367338db2f2e60914e3643326df8a0a1ce48e23b78e`. Exact
+candidate/reference runtime wrappers carried **25.72% / 9.43% self-time**; the exact reference
+`<true>` field-copy helper carried **16.54%** (216/281 samples, zero lost). Nine position-balanced
+rounds measured candidate median **498,516,467** versus reference median **524,516,357**
+instructions, paired reference/candidate **1.052155382x**, or **4.957004% fewer instructions**. The
+A/A null median was `0.999999577`, p05..p95 `[0.999996518, 1.000000664]`, null CV **0.000152%**,
+and effect CV **0.000237%**.
+
+BEHAVIOR + BOUNDARY: before timing, the same executable changed HELLO protocol, selected DB, client
+name, library name, and library version, and proved the complete recorded session Debug
+representation identical for changed and unchanged copies. The focused rich-session test covers
+all stable and volatile metadata, transaction, tracking, and command fields, and separately proves
+general `clone_from` still overwrites a deliberately mismatched ID. This is an instruction result
+for repeated single-command registry updates, not connection insertion, general cloning, or
+whole-server throughput. Rollback removes the registry-only specialization and restores general
+`clone_from`.
+
+GATES: strict-remote focused rich-session testing passed. The strict-remote full `fr-conformance`
+run passed all **194/194** library tests and every auxiliary target; smoke passed **98/99** before
+an oracle-side Redis timeout in `psync_with_zero_offset`, and an immediate strict-remote rerun of
+that exact live replication test passed **1/1**. Strict-remote scoped `fr-runtime --all-targets
+--features bench-reference --no-deps` Clippy passed with `-D warnings`. Direct Rust 2024 rustfmt
+passed the owned benchmark and reported only peer-owned drift outside the source hunk; `git diff
+--check` passed. Scoped UBS retained the monolithic-file baseline (**361 critical, 4,655 warnings,
+941 info**) with no finding specific to the production change.
+
 ## 2026-07-22: REJECT — inspect both CLIENT TRACKING states for pristine no-op; 4.194352% more instructions (frankenredis-7eruh)
 
 NEGATIVE-LEDGER-FIRST + DISTINCT SIBLING: `frankenredis-cyrt3` retained scalar copies while avoiding
