@@ -8,6 +8,33 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-22 CreamPeak: REJECT — scan both tracking states for a pristine bypass (`frankenredis-7eruh`)
+
+- **Negative-ledger-first / distinct sibling:** `frankenredis-cyrt3` retained scalar copies while
+  avoiding empty-prefix destruction inside `ClientTrackingState::clone_from`; neither ledger nor
+  recent history contained a whole-state pristine bypass. The literal-current stable-metadata KEEP
+  executable sha256 `d10253bc9a00e2666dce717ddda9260286ad77c2d4b175f791592c4319ac15b1`
+  exposed exact `ClientTrackingState::clone_from` at **12.87% self-time**.
+- **One lever / behavior:** the candidate inspected all seven tracking flags/options plus the prefix
+  set on destination and source, returning only when both were completely pristine. The reference
+  froze unconditional landed fieldwise `clone_from`; populated tracking and every other session
+  path were shared. The same executable proved populated `TRACKING ON BCAST PREFIX` state identical
+  before timing.
+- **Same-worker same-binary A/A+A/B:** one fail-closed RCH invocation on `vmi1264463`, executable
+  sha256 `e3d4ddb86165f2c8d56cb14e9daca9cc245ee1bd6991bd3f90245b65dbdb9e18`.
+  Exact candidate wrapper / pristine-check helper carried **3.69% / 12.55% self-time**; exact
+  reference wrapper / tracking clone carried **10.93% / 15.10%** (229/249 samples, zero lost). Nine
+  position-balanced rounds measured candidate median **546,516,905** versus reference median
+  **524,516,893** instructions. Reference/candidate **0.959744922x** means **4.194352% more
+  instructions**. A/A null median **1.000000620**, p05..p95 **[0.999997400, 1.000002058]**, null CV
+  **0.000139%**, effect CV **0.000092%**.
+- **Verdict / rollback:** the repeated field inspection costs more than the already-cheap scalar
+  copy. Source and benchmark changes were manually removed; evidence only ships.
+- **Retry condition (ledger-closed):** retry only after `ClientTrackingState` carries an
+  already-maintained single-bit pristine/activity invariant, so the common bypass requires at most
+  two flag loads and no per-snapshot scan of individual fields; then require a profile showing that
+  gate below the landed `clone_from` self-time and the same one-binary null-controlled benchmark.
+
 ## 2026-07-22 CreamPeak: SHIPPED — no-op unchanged stable client metadata snapshots (`frankenredis-eq13j`)
 
 - **Negative-ledger-first / fresh residual:** neither ledger nor recent history contained a stable
