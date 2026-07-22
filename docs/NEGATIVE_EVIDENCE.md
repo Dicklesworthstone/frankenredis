@@ -4,6 +4,48 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-22: SHIPPED — skip unchanged command-name snapshot copy; 4.954359% fewer instructions (frankenredis-jzhgo)
+
+NEGATIVE-LEDGER-FIRST + DISTINCT RESIDUAL: neither ledger contained a snapshot equality/no-op
+lever for `last_command_name`. The older `e2ff88651` KEEP reuses the active session's command-name
+construction buffer; this distinct consumer-side lever avoids recopying that already-built name
+into an unchanged registry snapshot. The literal-current tracking-reuse executable sha256
+`68ce1bf06b260af6a17bb15eea8f67b7ea60cc5e722178d04058f4a0481e64a5` exposed exact
+`String::clone_from` at **22.34% self-time** in the repeated snapshot path.
+
+ALIEN PRIMITIVE + ONE LEVER: section 6.1's incremental/no-op update compares destination/source
+command-name bytes and retains the snapshot buffer when they match. A changed command still uses
+the original `String::clone_from`. A bench-only reference freezes unconditional copying; every
+other session field shares one implementation.
+
+FOREGROUND SAME-BINARY A/A+A/B: one fail-closed RCH invocation selected worker `vmi1264463`,
+executable sha256 `79763ba9908bdf38f5ff5d11a6608d215cf55b1298f26895a6b5bbe2a6077161`.
+Exact candidate/reference runtime wrappers carried **9.33% / 8.52% self-time**, and the
+reference's eliminated exact `String::clone_from` carried **4.96%** (325/304 samples, zero lost).
+Nine position-balanced repeated-`PING` rounds measured candidate median **690,632,145** versus
+reference median **726,632,129** instructions, paired reference/candidate **1.052126109x**, or
+**4.954359% fewer instructions**. The A/A null median was `1.000000175`, p05..p95
+`[0.999998532, 1.000001600]`, null CV **0.000084%**, and effect CV **0.000051%**.
+
+BEHAVIOR + BOUNDARY: before timing, the same executable proved candidate/reference equality after
+both repeated `PING` and a changed `ECHO value`; the focused rich-session test compares the full
+snapshot with the frozen unconditional-copy reference. This is an instruction result for a
+repeated single-command stream, not whole-server throughput or alternating-command performance.
+A changed name still copies identical bytes. Replies, command statistics, CLIENT INFO/LIST,
+tracking, persistence, replication, and output are unchanged. Rollback removes the equality guard
+and frozen reference.
+
+GATES: the strict-remote focused rich-session test passed. The complete strict-remote
+`fr-conformance` invocation exited 0 on `ovh-b`: 194/194 library tests, 99/99 smoke tests, every
+auxiliary asserting suite and doc target; live `core_transaction` was 192/192. Scoped
+`fr-runtime --all-targets --features bench-reference --no-deps` Clippy passed with `-D warnings`;
+only pre-existing dependency warnings remained non-fatal under `--no-deps`. Fail-closed RCH's
+`cargo fmt --check` boundary remains `RCH-E301`; direct Rust 2024 rustfmt passed the benchmark,
+found no owned runtime-line issue, and reported only peer-owned runtime drift, while
+`git diff --check` passed. UBS ran with Cargo-backed categories disabled and remained baseline-red
+on the two monolithic files (346 critical / 4,626 warning / 922 info heuristics), with no finding
+specific to the changed production lines.
+
 ## 2026-07-22: SHIPPED — skip empty CLIENT TRACKING prefix-set replacement; 11.512337% fewer instructions (frankenredis-cyrt3)
 
 NEGATIVE-LEDGER-FIRST + DISTINCT RESIDUAL: neither ledger contained a `ClientTrackingState`,

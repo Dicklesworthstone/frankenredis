@@ -27,6 +27,7 @@ enum Lever {
     SnapshotReuse,
     TransactionReuse,
     TrackingReuse,
+    LastCommandReuse,
 }
 
 impl Lever {
@@ -36,6 +37,7 @@ impl Lever {
             Self::SnapshotReuse => "snapshot-reuse",
             Self::TransactionReuse => "transaction-reuse",
             Self::TrackingReuse => "tracking-reuse",
+            Self::LastCommandReuse => "last-command-reuse",
         }
     }
 
@@ -44,6 +46,7 @@ impl Lever {
             Ok("snapshot-reuse") => Ok(Self::SnapshotReuse),
             Ok("transaction-reuse") => Ok(Self::TransactionReuse),
             Ok("tracking-reuse") => Ok(Self::TrackingReuse),
+            Ok("last-command-reuse") => Ok(Self::LastCommandReuse),
             Ok("membership") | Err(env::VarError::NotPresent) => Ok(Self::Membership),
             Ok(value) => Err(format!("unknown FR_BENCH_LEVER {value:?}")),
             Err(error) => Err(format!("invalid FR_BENCH_LEVER: {error}")),
@@ -56,6 +59,7 @@ impl Lever {
             "snapshot-reuse" => Ok(Self::SnapshotReuse),
             "transaction-reuse" => Ok(Self::TransactionReuse),
             "tracking-reuse" => Ok(Self::TrackingReuse),
+            "last-command-reuse" => Ok(Self::LastCommandReuse),
             _ => Err(format!("unknown lever {value:?}")),
         }
     }
@@ -103,6 +107,12 @@ impl Arm {
             (Lever::TrackingReuse, Self::Reference) => {
                 "<fr_runtime::Runtime>::record_client_session_tracking_replace_reference"
             }
+            (Lever::LastCommandReuse, Self::Candidate) => {
+                "<fr_runtime::Runtime>::record_client_session"
+            }
+            (Lever::LastCommandReuse, Self::Reference) => {
+                "<fr_runtime::Runtime>::record_client_session_last_command_copy_reference"
+            }
         }
     }
 
@@ -122,6 +132,12 @@ impl Arm {
                 "record_client_session_tracking_replace_reference"
             }
             (Lever::TrackingReuse, Self::Reference) => {
+                "<fr_runtime::Runtime>::record_client_session "
+            }
+            (Lever::LastCommandReuse, Self::Candidate) => {
+                "record_client_session_last_command_copy_reference"
+            }
+            (Lever::LastCommandReuse, Self::Reference) => {
                 "<fr_runtime::Runtime>::record_client_session "
             }
         }
@@ -145,12 +161,26 @@ fn record(runtime: &mut Runtime, session: &fr_runtime::ClientSession, lever: Lev
         (Lever::TrackingReuse, Arm::Reference) => {
             runtime.record_client_session_tracking_replace_reference(session);
         }
+        (Lever::LastCommandReuse, Arm::Candidate) => runtime.record_client_session(session),
+        (Lever::LastCommandReuse, Arm::Reference) => {
+            runtime.record_client_session_last_command_copy_reference(session);
+        }
     }
 }
 
 fn run_loop(lever: Lever, arm: Arm, repeats: usize) {
     let mut runtime = Runtime::default_strict();
-    let session = runtime.new_session();
+    let session = if matches!(lever, Lever::LastCommandReuse) {
+        let session = runtime.new_session();
+        let previous = runtime.swap_session(session);
+        assert_eq!(
+            runtime.execute_frame(command(&[b"PING"]), 1),
+            RespFrame::SimpleString("PONG".to_owned())
+        );
+        runtime.swap_session(previous)
+    } else {
+        runtime.new_session()
+    };
     record(&mut runtime, &session, lever, arm);
     for _ in 0..repeats {
         record(black_box(&mut runtime), black_box(&session), lever, arm);
@@ -251,6 +281,20 @@ fn tracking_snapshot(lever: Lever, arm: Arm) -> String {
         .expect("recorded tracking snapshot")
 }
 
+fn last_command_snapshot(lever: Lever, arm: Arm, parts: &[&[u8]]) -> String {
+    let mut runtime = Runtime::default_strict();
+    let session = runtime.new_session();
+    record(&mut runtime, &session, lever, arm);
+    let previous = runtime.swap_session(session);
+    let _ = runtime.execute_frame(command(parts), 1);
+    let updated = runtime.swap_session(previous);
+    record(&mut runtime, &updated, lever, arm);
+    record(&mut runtime, &updated, lever, arm);
+    runtime
+        .recorded_last_command_name_debug(updated.client_id)
+        .expect("recorded last command name")
+}
+
 fn correctness_gate(lever: Lever) {
     let candidate = bcast_sequence(lever, Arm::Candidate);
     let reference = bcast_sequence(lever, Arm::Reference);
@@ -273,6 +317,16 @@ fn correctness_gate(lever: Lever) {
         assert_eq!(
             tracking_snapshot(lever, Arm::Candidate),
             tracking_snapshot(lever, Arm::Reference)
+        );
+    }
+    if matches!(lever, Lever::LastCommandReuse) {
+        assert_eq!(
+            last_command_snapshot(lever, Arm::Candidate, &[b"PING"]),
+            last_command_snapshot(lever, Arm::Reference, &[b"PING"])
+        );
+        assert_eq!(
+            last_command_snapshot(lever, Arm::Candidate, &[b"ECHO", b"value"]),
+            last_command_snapshot(lever, Arm::Reference, &[b"ECHO", b"value"])
         );
     }
     println!(

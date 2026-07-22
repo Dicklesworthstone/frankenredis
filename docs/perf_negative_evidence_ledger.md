@@ -8,6 +8,48 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-22 CreamPeak: SHIPPED — no-op unchanged command-name snapshots (`frankenredis-jzhgo`)
+
+- **Negative-ledger-first / distinct seam:** exact searches found no snapshot equality/no-op lever
+  for `last_command_name`. Commit `e2ff88651` reuses the active session's command-name construction
+  buffer, a distinct producer-side optimization; this lever avoids recopying that already-built
+  name into an unchanged registry snapshot.
+- **Profile-first attribution:** the literal-current tracking-reuse executable sha256
+  `68ce1bf06b260af6a17bb15eea8f67b7ea60cc5e722178d04058f4a0481e64a5` exposed exact
+  `String::clone_from` at **22.34% self-time** in the repeated snapshot path, selecting the next
+  nested allocation/copy residual rather than a closed dispatch, clock, or output family.
+- **Alien mapping / one lever:** section 6.1's incremental/no-op primitive: compare the destination
+  and source command-name bytes and retain the snapshot buffer untouched when they match; a changed
+  command still takes the original `String::clone_from`. The same-binary reference freezes the
+  unconditional copy, while every other session field shares one implementation.
+- **Same-worker same-binary A/A+A/B:** one fail-closed RCH invocation selected worker
+  `vmi1264463`; executable sha256
+  `79763ba9908bdf38f5ff5d11a6608d215cf55b1298f26895a6b5bbe2a6077161`. Exact
+  candidate/reference runtime wrappers carried **9.33% / 8.52% self-time**, and the reference's
+  eliminated exact `String::clone_from` carried **4.96%** (325/304 samples, zero lost). Nine
+  position-balanced repeated-`PING` rounds measured candidate median **690,632,145** versus
+  reference median **726,632,129** instructions: paired **1.052126109x**, or **4.954359% fewer**.
+  A/A null median **1.000000175**, p05..p95 **[0.999998532, 1.000001600]**, null CV
+  **0.000084%**, effect CV **0.000051%**.
+- **Behavior / boundary:** before timing, the same executable proved candidate/reference equality
+  after both repeated `PING` and a changed `ECHO value`; the focused rich-session test compares the
+  complete snapshot with the frozen unconditional-copy reference. This is an instruction result
+  for a repeated single-command stream, where the registry snapshot already contains the same
+  command name, not whole-server throughput or alternating-command performance. A changed name
+  still copies exactly the same bytes. Replies, command statistics, CLIENT INFO/LIST, tracking,
+  persistence, replication, and output are unchanged. Rollback removes the equality guard and the
+  frozen reference.
+- **Gates:** the strict-remote focused rich-session test passed. The complete strict-remote
+  `fr-conformance` invocation exited 0 on `ovh-b`: 194/194 library tests, 99/99 smoke tests, every
+  auxiliary asserting suite and doc target; live `core_transaction` was 192/192. Scoped
+  `fr-runtime --all-targets --features bench-reference --no-deps` Clippy passed with `-D warnings`;
+  only pre-existing dependency warnings remained non-fatal under `--no-deps`. Fail-closed RCH's
+  `cargo fmt --check` boundary remains `RCH-E301`; direct Rust 2024 rustfmt passed the benchmark,
+  found no owned runtime-line issue, and reported only peer-owned runtime drift, while
+  `git diff --check` passed. UBS ran with Cargo-backed categories disabled and remained baseline-red
+  on the two monolithic files (346 critical / 4,626 warning / 922 info heuristics), with no finding
+  specific to the changed production lines.
+
 ## 2026-07-22 CreamPeak: SHIPPED — no-op empty CLIENT TRACKING prefix snapshots (`frankenredis-cyrt3`)
 
 - **Negative-ledger-first / distinct seam:** neither ledger contained a `ClientTrackingState`,

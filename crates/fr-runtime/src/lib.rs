@@ -5071,6 +5071,13 @@ impl ClientSession {
     }
 
     fn clone_non_transaction_or_tracking_fields_from(&mut self, source: &Self) {
+        self.clone_fields_except_transaction_tracking_and_command_from(source);
+        if self.last_command_name != source.last_command_name {
+            self.last_command_name.clone_from(&source.last_command_name);
+        }
+    }
+
+    fn clone_fields_except_transaction_tracking_and_command_from(&mut self, source: &Self) {
         self.cluster_state.clone_from(&source.cluster_state);
         self.authenticated_user
             .clone_from(&source.authenticated_user);
@@ -5090,7 +5097,6 @@ impl ClientSession {
         self.output_buffer_bytes = source.output_buffer_bytes;
         self.connected_at_ms = source.connected_at_ms;
         self.last_interaction_ms = source.last_interaction_ms;
-        self.last_command_name.clone_from(&source.last_command_name);
         self.last_argv_len_sum = source.last_argv_len_sum;
     }
 
@@ -5106,6 +5112,14 @@ impl ClientSession {
         self.transaction_state.clone_from(&source.transaction_state);
         self.client_tracking = source.client_tracking.clone();
         self.clone_non_transaction_or_tracking_fields_from(source);
+    }
+
+    #[cfg(any(test, feature = "bench-reference"))]
+    fn clone_from_last_command_copy_reference(&mut self, source: &Self) {
+        self.transaction_state.clone_from(&source.transaction_state);
+        self.client_tracking.clone_from(&source.client_tracking);
+        self.clone_fields_except_transaction_tracking_and_command_from(source);
+        self.last_command_name.clone_from(&source.last_command_name);
     }
 }
 
@@ -6521,6 +6535,20 @@ impl Runtime {
         }
     }
 
+    /// Frozen unconditional command-name copy for same-binary benchmarks.
+    #[cfg(any(test, feature = "bench-reference"))]
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn record_client_session_last_command_copy_reference(&mut self, session: &ClientSession) {
+        if let Some(snapshot) = self.server.client_sessions.get_mut(&session.client_id) {
+            snapshot.clone_from_last_command_copy_reference(session);
+        } else {
+            self.server
+                .client_sessions
+                .insert(session.client_id, session.clone());
+        }
+    }
+
     #[cfg(any(test, feature = "bench-reference"))]
     #[doc(hidden)]
     pub fn recorded_transaction_state_debug(&self, client_id: u64) -> Option<String> {
@@ -6537,6 +6565,15 @@ impl Runtime {
             .client_sessions
             .get(&client_id)
             .map(|session| format!("{:?}", session.client_tracking))
+    }
+
+    #[cfg(any(test, feature = "bench-reference"))]
+    #[doc(hidden)]
+    pub fn recorded_last_command_name_debug(&self, client_id: u64) -> Option<String> {
+        self.server
+            .client_sessions
+            .get(&client_id)
+            .map(|session| session.last_command_name.clone())
     }
 
     /// Frozen pre-optimization session snapshot path for same-binary benchmarks.
@@ -52356,14 +52393,17 @@ mod tests {
         let mut reference = Runtime::default_strict();
         let mut transaction_reference = Runtime::default_strict();
         let mut tracking_reference = Runtime::default_strict();
+        let mut last_command_reference = Runtime::default_strict();
         candidate.record_client_session(&seed);
         reference.record_client_session_insert_reference(&seed);
         transaction_reference.record_client_session(&seed);
         tracking_reference.record_client_session(&seed);
+        last_command_reference.record_client_session(&seed);
         candidate.record_client_session(&updated);
         reference.record_client_session_insert_reference(&updated);
         transaction_reference.record_client_session_transaction_replace_reference(&updated);
         tracking_reference.record_client_session_tracking_replace_reference(&updated);
+        last_command_reference.record_client_session_last_command_copy_reference(&updated);
 
         let candidate_snapshot = candidate
             .server
@@ -52385,6 +52425,11 @@ mod tests {
             .client_sessions
             .get(&updated.client_id)
             .expect("tracking replacement reference snapshot");
+        let last_command_reference_snapshot = last_command_reference
+            .server
+            .client_sessions
+            .get(&updated.client_id)
+            .expect("last-command copy reference snapshot");
         assert_eq!(
             format!("{candidate_snapshot:?}"),
             format!("{reference_snapshot:?}")
@@ -52396,6 +52441,10 @@ mod tests {
         assert_eq!(
             format!("{candidate_snapshot:?}"),
             format!("{tracking_reference_snapshot:?}")
+        );
+        assert_eq!(
+            format!("{candidate_snapshot:?}"),
+            format!("{last_command_reference_snapshot:?}")
         );
     }
 
