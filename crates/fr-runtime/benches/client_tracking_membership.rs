@@ -28,6 +28,7 @@ enum Lever {
     TransactionReuse,
     TrackingReuse,
     LastCommandReuse,
+    TransactionPristine,
 }
 
 impl Lever {
@@ -38,6 +39,7 @@ impl Lever {
             Self::TransactionReuse => "transaction-reuse",
             Self::TrackingReuse => "tracking-reuse",
             Self::LastCommandReuse => "last-command-reuse",
+            Self::TransactionPristine => "transaction-pristine",
         }
     }
 
@@ -47,6 +49,7 @@ impl Lever {
             Ok("transaction-reuse") => Ok(Self::TransactionReuse),
             Ok("tracking-reuse") => Ok(Self::TrackingReuse),
             Ok("last-command-reuse") => Ok(Self::LastCommandReuse),
+            Ok("transaction-pristine") => Ok(Self::TransactionPristine),
             Ok("membership") | Err(env::VarError::NotPresent) => Ok(Self::Membership),
             Ok(value) => Err(format!("unknown FR_BENCH_LEVER {value:?}")),
             Err(error) => Err(format!("invalid FR_BENCH_LEVER: {error}")),
@@ -60,6 +63,7 @@ impl Lever {
             "transaction-reuse" => Ok(Self::TransactionReuse),
             "tracking-reuse" => Ok(Self::TrackingReuse),
             "last-command-reuse" => Ok(Self::LastCommandReuse),
+            "transaction-pristine" => Ok(Self::TransactionPristine),
             _ => Err(format!("unknown lever {value:?}")),
         }
     }
@@ -113,6 +117,12 @@ impl Arm {
             (Lever::LastCommandReuse, Self::Reference) => {
                 "<fr_runtime::Runtime>::record_client_session_last_command_copy_reference"
             }
+            (Lever::TransactionPristine, Self::Candidate) => {
+                "<fr_runtime::Runtime>::record_client_session"
+            }
+            (Lever::TransactionPristine, Self::Reference) => {
+                "<fr_runtime::Runtime>::record_client_session_transaction_pristine_reference"
+            }
         }
     }
 
@@ -140,6 +150,12 @@ impl Arm {
             (Lever::LastCommandReuse, Self::Reference) => {
                 "<fr_runtime::Runtime>::record_client_session "
             }
+            (Lever::TransactionPristine, Self::Candidate) => {
+                "record_client_session_transaction_pristine_reference"
+            }
+            (Lever::TransactionPristine, Self::Reference) => {
+                "<fr_runtime::Runtime>::record_client_session "
+            }
         }
     }
 }
@@ -164,6 +180,10 @@ fn record(runtime: &mut Runtime, session: &fr_runtime::ClientSession, lever: Lev
         (Lever::LastCommandReuse, Arm::Candidate) => runtime.record_client_session(session),
         (Lever::LastCommandReuse, Arm::Reference) => {
             runtime.record_client_session_last_command_copy_reference(session);
+        }
+        (Lever::TransactionPristine, Arm::Candidate) => runtime.record_client_session(session),
+        (Lever::TransactionPristine, Arm::Reference) => {
+            runtime.record_client_session_transaction_pristine_reference(session);
         }
     }
 }
@@ -307,7 +327,7 @@ fn correctness_gate(lever: Lever) {
     );
     assert_eq!(disabled_sequence(lever, Arm::Candidate), Vec::new());
     assert_eq!(disabled_sequence(lever, Arm::Reference), Vec::new());
-    if matches!(lever, Lever::TransactionReuse) {
+    if matches!(lever, Lever::TransactionReuse | Lever::TransactionPristine) {
         assert_eq!(
             transaction_snapshot(lever, Arm::Candidate),
             transaction_snapshot(lever, Arm::Reference)

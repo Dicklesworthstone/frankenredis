@@ -4,6 +4,47 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-22: SHIPPED — skip pristine transaction snapshot work; 20.564363% fewer instructions (frankenredis-vi2j2)
+
+NEGATIVE-LEDGER-FIRST + DISTINCT RESIDUAL: `frankenredis-r62lu` replaced destructive transaction
+replacement with unconditional fieldwise allocation reuse; neither ledger nor recent history
+contained a both-pristine no-op. In the literal-current command-name-reuse executable sha256
+`79763ba9908bdf38f5ff5d11a6608d215cf55b1298f26895a6b5bbe2a6077161` on
+`vmi1264463`, exact `TransactionState::clone_from` carried **9.31% self-time**, while its empty
+command-queue and watched-key clone paths carried **11.73% / 7.50%**.
+
+ALIEN PRIMITIVE + ONE LEVER: section 6.1's incremental/no-op update returns only when both
+destination and source transaction states are pristine: all flags false and both vectors empty.
+Every active, queued, watched, dirty, or aborted case retains the exact landed fieldwise clone.
+The same-binary reference freezes unconditional fieldwise cloning; all non-transaction fields are
+shared.
+
+FOREGROUND SAME-BINARY A/A+A/B: one fail-closed RCH invocation on worker `vmi1264463`, executable
+sha256 `5e8a70aa409c14327d6369ddb48a9f0d8326bb16588e7b48b7cf6a5809591a8e`. Exact
+candidate/reference wrappers carried **7.93% / 8.00% self-time**; the reference exposed exact
+command-queue clone **13.31%**, watched-key clone **7.48%**, and transaction helper **6.87%**
+(279/310 samples, zero lost). Nine position-balanced rounds measured candidate median
+**548,515,876** versus reference median **690,516,054** instructions, paired
+reference/candidate **1.258880823x**, or **20.564363% fewer instructions**. The A/A null median was
+`1.000000157`, p05..p95 `[0.999998438, 1.000002281]`, null CV **0.000095%**, and effect CV
+**0.000053%**.
+
+BEHAVIOR + BOUNDARY: before timing, the same executable exercised WATCH, MULTI, and a queued SET
+and proved populated transaction state identical between arms. The focused rich-session test
+compares the complete candidate snapshot with the frozen unconditional fieldwise reference. This
+is an instruction result for the common transaction-pristine single-command path, not
+transaction-heavy or whole-server throughput. Transaction replies, WATCH dirtying, EXEC/DISCARD
+ordering, command statistics, output, persistence, and replication are unchanged. Rollback removes
+`is_pristine` and the frozen reference.
+
+GATES: strict-remote focused `client_session_in_place_snapshot_matches_full_clone` passed; strict-
+remote scoped `clippy -p fr-runtime --all-targets --features bench-reference --no-deps -- -D
+warnings` passed; strict-remote full `fr-conformance` passed (**194/194** library, **99/99** smoke,
+all auxiliary targets, and live `core_transaction` **192/192**). Direct rustfmt passed for the owned
+benchmark; the monolithic runtime check reported only pre-existing drift outside the owned lines,
+and `git diff --check` passed. Scoped UBS retained the known repository baseline (**346 critical,
+4,632 warnings, 923 info**) with no finding in the owned production hunk.
+
 ## 2026-07-22: SHIPPED — skip unchanged command-name snapshot copy; 4.954359% fewer instructions (frankenredis-jzhgo)
 
 NEGATIVE-LEDGER-FIRST + DISTINCT RESIDUAL: neither ledger contained a snapshot equality/no-op

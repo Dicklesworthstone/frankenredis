@@ -8,6 +8,44 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-22 CreamPeak: SHIPPED — no-op pristine transaction snapshots (`frankenredis-vi2j2`)
+
+- **Negative-ledger-first / distinct retry predicate:** the earlier `frankenredis-r62lu` KEEP
+  replaced destructive transaction-state replacement with unconditional fieldwise allocation
+  reuse; neither ledger nor recent history contained a both-pristine no-op. Its newly measured
+  residual is therefore a distinct next primitive, not a retry of the old replacement strategy.
+- **Profile-first attribution:** the literal-current command-name-reuse executable sha256
+  `79763ba9908bdf38f5ff5d11a6608d215cf55b1298f26895a6b5bbe2a6077161` on
+  `vmi1264463` attributed **9.31% self-time** to exact `TransactionState::clone_from`, plus
+  **11.73% / 7.50%** to the empty command-queue / watched-key clone paths.
+- **Alien mapping / one lever:** section 6.1's incremental/no-op primitive now recognizes when
+  both destination and source transaction states are pristine: all flags false and both vectors
+  empty. Only that state pair returns without work; every active/queued/watched/dirty/aborted case
+  retains the landed fieldwise clone exactly. The same-binary reference freezes unconditional
+  fieldwise cloning, and all non-transaction session work is shared.
+- **Same-worker same-binary A/A+A/B:** one fail-closed RCH invocation on worker `vmi1264463`,
+  executable sha256 `5e8a70aa409c14327d6369ddb48a9f0d8326bb16588e7b48b7cf6a5809591a8e`.
+  Exact candidate/reference runtime wrappers carried **7.93% / 8.00% self-time**; the frozen
+  reference exposed exact command-queue clone **13.31%**, watched-key clone **7.48%**, and
+  transaction helper **6.87%** (279/310 samples, zero lost). Nine position-balanced rounds
+  measured candidate median **548,515,876** versus reference median **690,516,054** instructions:
+  paired **1.258880823x**, or **20.564363% fewer**. A/A null median **1.000000157**, p05..p95
+  **[0.999998438, 1.000002281]**, null CV **0.000095%**, effect CV **0.000053%**.
+- **Behavior / boundary:** before timing, the same executable exercised WATCH, MULTI, and a queued
+  SET and proved the complete populated transaction representation identical between arms. The
+  rich-session focused test compares the full candidate snapshot with the frozen unconditional
+  fieldwise reference. This is an instruction result for the common transaction-pristine
+  single-command path, not transaction-heavy or whole-server throughput. Transaction replies,
+  WATCH dirtying, EXEC/DISCARD ordering, command statistics, output, persistence, and replication
+  are unchanged. Rollback removes `is_pristine` and the frozen reference.
+- **Gates:** strict-remote focused `client_session_in_place_snapshot_matches_full_clone` passed;
+  strict-remote scoped `clippy -p fr-runtime --all-targets --features bench-reference --no-deps --
+  -D warnings` passed; strict-remote full `fr-conformance` passed (**194/194** library, **99/99**
+  smoke, all auxiliary targets, and live `core_transaction` **192/192**). Direct rustfmt passed for
+  the owned benchmark; the monolithic runtime check reported only pre-existing drift outside the
+  owned lines, and `git diff --check` passed. Scoped UBS retained the known repository baseline
+  (**346 critical, 4,632 warnings, 923 info**) with no finding in the owned production hunk.
+
 ## 2026-07-22 CreamPeak: SHIPPED — no-op unchanged command-name snapshots (`frankenredis-jzhgo`)
 
 - **Negative-ledger-first / distinct seam:** exact searches found no snapshot equality/no-op lever

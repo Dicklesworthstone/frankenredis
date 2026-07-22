@@ -3879,6 +3879,24 @@ impl Clone for TransactionState {
 
     #[cfg_attr(feature = "bench-reference", inline(never))]
     fn clone_from(&mut self, source: &Self) {
+        if self.is_pristine() && source.is_pristine() {
+            return;
+        }
+        self.clone_from_fieldwise(source);
+    }
+}
+
+impl TransactionState {
+    fn is_pristine(&self) -> bool {
+        !self.in_transaction
+            && !self.executing_exec
+            && self.command_queue.is_empty()
+            && self.watched_keys.is_empty()
+            && !self.watch_dirty
+            && !self.exec_abort
+    }
+
+    fn clone_from_fieldwise(&mut self, source: &Self) {
         self.in_transaction = source.in_transaction;
         self.executing_exec = source.executing_exec;
         self.command_queue.clone_from(&source.command_queue);
@@ -3886,13 +3904,17 @@ impl Clone for TransactionState {
         self.watch_dirty = source.watch_dirty;
         self.exec_abort = source.exec_abort;
     }
-}
 
-impl TransactionState {
     #[cfg(any(test, feature = "bench-reference"))]
     #[inline(never)]
     fn replace_from_clone_reference(&mut self, source: &Self) {
         *self = source.clone();
+    }
+
+    #[cfg(any(test, feature = "bench-reference"))]
+    #[inline(never)]
+    fn clone_from_pristine_reference(&mut self, source: &Self) {
+        self.clone_from_fieldwise(source);
     }
 }
 
@@ -5120,6 +5142,13 @@ impl ClientSession {
         self.client_tracking.clone_from(&source.client_tracking);
         self.clone_fields_except_transaction_tracking_and_command_from(source);
         self.last_command_name.clone_from(&source.last_command_name);
+    }
+
+    #[cfg(any(test, feature = "bench-reference"))]
+    fn clone_from_transaction_pristine_reference(&mut self, source: &Self) {
+        self.transaction_state
+            .clone_from_pristine_reference(&source.transaction_state);
+        self.clone_non_transaction_fields_from(source);
     }
 }
 
@@ -6542,6 +6571,23 @@ impl Runtime {
     pub fn record_client_session_last_command_copy_reference(&mut self, session: &ClientSession) {
         if let Some(snapshot) = self.server.client_sessions.get_mut(&session.client_id) {
             snapshot.clone_from_last_command_copy_reference(session);
+        } else {
+            self.server
+                .client_sessions
+                .insert(session.client_id, session.clone());
+        }
+    }
+
+    /// Frozen unconditional fieldwise transaction copy for same-binary benchmarks.
+    #[cfg(any(test, feature = "bench-reference"))]
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn record_client_session_transaction_pristine_reference(
+        &mut self,
+        session: &ClientSession,
+    ) {
+        if let Some(snapshot) = self.server.client_sessions.get_mut(&session.client_id) {
+            snapshot.clone_from_transaction_pristine_reference(session);
         } else {
             self.server
                 .client_sessions
@@ -52394,16 +52440,20 @@ mod tests {
         let mut transaction_reference = Runtime::default_strict();
         let mut tracking_reference = Runtime::default_strict();
         let mut last_command_reference = Runtime::default_strict();
+        let mut transaction_pristine_reference = Runtime::default_strict();
         candidate.record_client_session(&seed);
         reference.record_client_session_insert_reference(&seed);
         transaction_reference.record_client_session(&seed);
         tracking_reference.record_client_session(&seed);
         last_command_reference.record_client_session(&seed);
+        transaction_pristine_reference.record_client_session(&seed);
         candidate.record_client_session(&updated);
         reference.record_client_session_insert_reference(&updated);
         transaction_reference.record_client_session_transaction_replace_reference(&updated);
         tracking_reference.record_client_session_tracking_replace_reference(&updated);
         last_command_reference.record_client_session_last_command_copy_reference(&updated);
+        transaction_pristine_reference
+            .record_client_session_transaction_pristine_reference(&updated);
 
         let candidate_snapshot = candidate
             .server
@@ -52430,6 +52480,11 @@ mod tests {
             .client_sessions
             .get(&updated.client_id)
             .expect("last-command copy reference snapshot");
+        let transaction_pristine_reference_snapshot = transaction_pristine_reference
+            .server
+            .client_sessions
+            .get(&updated.client_id)
+            .expect("transaction pristine reference snapshot");
         assert_eq!(
             format!("{candidate_snapshot:?}"),
             format!("{reference_snapshot:?}")
@@ -52445,6 +52500,10 @@ mod tests {
         assert_eq!(
             format!("{candidate_snapshot:?}"),
             format!("{last_command_reference_snapshot:?}")
+        );
+        assert_eq!(
+            format!("{candidate_snapshot:?}"),
+            format!("{transaction_pristine_reference_snapshot:?}")
         );
     }
 
