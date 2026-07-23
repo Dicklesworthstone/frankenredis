@@ -1,0 +1,11 @@
+HRANDFIELD-no-count dispatch-floor — KEEP. Continues the dispatch-floor vein.
+Control process_buffered_frames 16.00% self at P16 (2nd-ranked unfloored read after ZRANGE).
+Arms hash-bracketed: ctl 0185db3370b4853ee68926917cb6fbdf08f104d9 (HEAD, HRANDFIELD unfloored) /
+cand d4344fd3d61072a770ab4163981454b15f73e651 (+HRANDFIELD floor arm, new 10-byte arm, arity 2).
+Commandstats-normalized instructions:u (-c50 -P16, perf -- sleep 6, calls-delta):
+  HRANDFIELD  ctl 8985.0 -> cand 3603.3 instr/op = 0.401x (2.49x fewer)
+  GET guard   ctl 1667.3 -> cand 1667.8 instr/op = 1.0003x (neutral)
+Byte-identical vs redis 7.2.4 (RNG — floor routes to identical executor+RNG): hit returns valid field;
+missing-key / wrongtype / RESP3-missing MATCH; HRANDFIELD key count and count WITHVALUES forms fall
+back to the unchanged generic path (verified array + field-value pair replies). FastEncodedReply via
+execute_plain_hrandfield_borrowed_into (field-clone-elim _into).

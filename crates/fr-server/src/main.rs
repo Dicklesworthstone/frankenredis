@@ -12252,6 +12252,7 @@ enum BorrowedDispatchFloorClass {
     Getrange,
     BitcountKey,
     Zrange,
+    Hrandfield,
 }
 
 struct BorrowedDispatchFloorToken<'a> {
@@ -12271,6 +12272,7 @@ enum BorrowedDispatchFloorCommand {
     Hdel,
     Hget,
     Hlen,
+    Hrandfield,
     Llen,
     Lpos,
     Lpush,
@@ -12353,6 +12355,12 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
         9 => match uppercase_ascii_token::<9>(token)? {
             [b'S', b'I', b'S', b'M', b'E', b'M', b'B', b'E', b'R'] => {
                 Some(BorrowedDispatchFloorCommand::Sismember)
+            }
+            _ => None,
+        },
+        10 => match uppercase_ascii_token::<10>(token)? {
+            [b'H', b'R', b'A', b'N', b'D', b'F', b'I', b'E', b'L', b'D'] => {
+                Some(BorrowedDispatchFloorCommand::Hrandfield)
             }
             _ => None,
         },
@@ -12648,6 +12656,9 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (3, BorrowedDispatchFloorCommand::Zscore) => Some(BorrowedDispatchFloorClass::Zscore),
         (2, BorrowedDispatchFloorCommand::Srandmember) => {
             Some(BorrowedDispatchFloorClass::Srandmember)
+        }
+        (2, BorrowedDispatchFloorCommand::Hrandfield) => {
+            Some(BorrowedDispatchFloorClass::Hrandfield)
         }
         (4, BorrowedDispatchFloorCommand::Getrange) => Some(BorrowedDispatchFloorClass::Getrange),
         // Only plain `*4 ZRANGE key start stop` floors; WITHSCORES/REV/LIMIT/
@@ -13706,6 +13717,41 @@ fn try_dispatch_floor_classified_action(
                             packet.key,
                             packet.start,
                             packet.end,
+                            ts,
+                            client_resp3,
+                            out,
+                        )
+                        .map(|()| packet.consumed)
+                },
+            );
+            if let Some(consumed) = hit {
+                Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Hrandfield => {
+            // HRANDFIELD (no count) mirrors SRANDMEMBER: the `_into` executor
+            // writes the single sampled field borrowed into `out` (field-clone
+            // elimination), so this is a FastEncodedReply. The floor routes to the
+            // SAME executor + RNG the generic path uses, so output is identical by
+            // construction. Parser+executor already shipped; only the routing is
+            // new. The `HRANDFIELD key count [WITHVALUES]` forms are distinct
+            // packets and fall through.
+            let hit = parse_borrowed_plain_hrandfield_packet(unparsed, &parser_config).and_then(
+                |packet| {
+                    let client_resp3 =
+                        runtime.client_session().resp_protocol_version() == 3;
+                    runtime
+                        .execute_plain_hrandfield_borrowed_into(
+                            packet.key,
                             ts,
                             client_resp3,
                             out,
@@ -34007,6 +34053,10 @@ mod tests {
         assert_eq!(
             borrowed_dispatch_floor_command(b"ZRANGE"),
             Some(BorrowedDispatchFloorCommand::Zrange)
+        );
+        assert_eq!(
+            borrowed_dispatch_floor_command(b"HRANDFIELD"),
+            Some(BorrowedDispatchFloorCommand::Hrandfield)
         );
         assert_eq!(
             borrowed_dispatch_floor_command(b"srandmember"),

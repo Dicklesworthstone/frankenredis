@@ -4,6 +4,30 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-23: SHIPPED — dispatch-floor front gate for HRANDFIELD key (no count); 2.49x fewer instructions on P16 (frankenredis-syqok)
+
+2nd-ranked unfloored read by dispatch cost (process_buffered_frames 16.00% self at P16, after ZRANGE).
+New 10-byte classifier arm, arity 2 ONLY — the `HRANDFIELD key count [WITHVALUES]` forms are distinct
+packets and fall through to the unchanged generic path. FastEncodedReply via the shipped
+field-clone-elim execute_plain_hrandfield_borrowed_into.
+
+MEASURED (commandstats-normalized instructions:u; hash-bracketed ctl 0185db33 / cand d4344fd3; -P16,
+perf -- sleep 6, calls-delta):
+  HRANDFIELD  ctl 8985.0 -> cand 3603.3 instr/op = 0.401x (2.49x fewer)
+  GET guard   ctl 1667.3 -> cand 1667.8 instr/op = 1.0003x (neutral)
+
+BYTE-IDENTICAL: RNG command, floor routes to the identical executor+RNG the generic path uses. Live vs
+redis 7.2.4: hit returns a valid field; missing-key/wrongtype/RESP3-missing MATCH; count and count
+WITHVALUES forms fall back (array + field-value replies verified). Gates: build green; 3/3 floor tests;
+fr-conformance FULLY GREEN (194+99); fr-server clippy-clean on hunk. Pre-existing unrelated failures
+(MSET fe57482f6, lua_eval clippy) not introduced. Artifacts:
+artifacts/optimization/frankenredis-syqok/20260723T2330Z/.
+
+SESSION DISPATCH-FLOOR TALLY (8 commands): ZSCORE 1.97x, HGET 1.88x, SISMEMBER 1.95x, SRANDMEMBER 2.74x,
+GETRANGE 1.62x, BITCOUNT 1.46x, ZRANGE 3.09x, HRANDFIELD 2.49x. Remaining unfloored by profile: BITPOS
+6.63% (~1.5x); SINTERCARD 4.97% is below the ~6% floor-worth line. The high-value read floors are now
+largely mined; the vein is approaching diminishing returns (remaining candidates <7% dispatch).
+
 ## 2026-07-23: SHIPPED — dispatch-floor front gate for plain ZRANGE key start stop; 3.09x fewer instructions on P16, the biggest floor win (frankenredis-8jcit)
 
 Top-ranked unfloored read by dispatch cost (process_buffered_frames 21.21% self at P16 — highest of
