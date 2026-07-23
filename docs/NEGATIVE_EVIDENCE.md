@@ -4,6 +4,30 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-23: SHIPPED — dispatch-floor front gate for SRANDMEMBER key (no count); 2.74x fewer instructions on P16 (frankenredis-ma4b8)
+
+Continues the reopened dispatch-floor vein (xymiw, 55c264677). Profiled the unfloored read candidates
+at P16: SRANDMEMBER had the biggest dispatch cost (process_buffered_frames 16.77% self, vs GETRANGE
+7.24% / BITCOUNT 6.46%), so it was the top target. Confirmed unfloored (no 11-byte SRANDMEMBER arm;
+only BITFIELD_RO). The borrowed parser (parse_borrowed_plain_srandmember_packet, `*2 SRANDMEMBER key`)
++ member-clone-elim executor (execute_plain_srandmember_borrowed_into, q38ap) already shipped; only the
+floor routing is new (11-byte classifier arm, arity 2, FastEncodedReply).
+
+MEASURED (commandstats-normalized instructions:u; hash-bracketed ctl 7c01c9e4 / cand 10afc29e on
+identical peer-WIP snapshot; -c50 -P16 sustained, perf -- sleep 6, cmdstat delta):
+  SRANDMEMBER  ctl 8413.1 -> cand 3067.1 instr/op = 0.365x (2.74x fewer)
+  GET guard    ctl 1665.0 -> cand 1660.8 instr/op = 0.9975x (neutral hot-path tax)
+
+BYTE-IDENTICAL: SRANDMEMBER is RNG, but the floor routes to the IDENTICAL executor+RNG the generic
+path uses, so output is identical by construction. Live vs redis 7.2.4: hit returns a valid set member;
+nil-key MATCH [], wrongtype MATCH [WRONGTYPE...], RESP3 nil MATCH []; the `SRANDMEMBER key count` array
+form falls through to the unchanged generic path (3 / -3-with-replacement verified). Gates: build green;
+dispatch_floor_recognizes_key_member_read_tokens (+SRANDMEMBER) + 2 pre-existing floor tests green (3/3);
+fr-conformance FULLY GREEN (194); fr-server clippy-clean on the hunk. Pre-existing unrelated failures
+(MSET fe57482f6 batch-test-pending, lua_eval floating-nightly clippy) NOT introduced. Artifacts:
+artifacts/optimization/frankenredis-q38ap/20260723T2130Z/. NEXT unfloored floor targets by profile:
+GETRANGE 7.24% / BITCOUNT 6.46% / HRANDFIELD / SINTERCARD — same 5-part recipe.
+
 ## 2026-07-23: SHIPPED — dispatch-floor front gate for key+member reads HGET/SISMEMBER/ZSCORE; ~1.9-2x fewer instructions each on P16 (frankenredis-xymiw)
 
 NEGATIVE-LEDGER-FIRST: the dispatch-floor family is a proven KEEP pattern (TTL 2.63x, MEMORY 4.20x,

@@ -12248,6 +12248,7 @@ enum BorrowedDispatchFloorClass {
     Zscore,
     Hget,
     Sismember,
+    Srandmember,
 }
 
 struct BorrowedDispatchFloorToken<'a> {
@@ -12276,6 +12277,7 @@ enum BorrowedDispatchFloorCommand {
     Scard,
     Setbit,
     Sismember,
+    Srandmember,
     Srem,
     Strlen,
     Ttl,
@@ -12367,6 +12369,19 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
                 b'R',
                 b'O',
             ] => Some(BorrowedDispatchFloorCommand::BitfieldRo),
+            [
+                b'S',
+                b'R',
+                b'A',
+                b'N',
+                b'D',
+                b'M',
+                b'E',
+                b'M',
+                b'B',
+                b'E',
+                b'R',
+            ] => Some(BorrowedDispatchFloorCommand::Srandmember),
             _ => None,
         },
         15 => match uppercase_ascii_token::<15>(token)? {
@@ -12618,6 +12633,9 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (4, BorrowedDispatchFloorCommand::Setbit) => Some(BorrowedDispatchFloorClass::Setbit),
         (4, BorrowedDispatchFloorCommand::Zcount) => Some(BorrowedDispatchFloorClass::Zcount),
         (3, BorrowedDispatchFloorCommand::Zscore) => Some(BorrowedDispatchFloorClass::Zscore),
+        (2, BorrowedDispatchFloorCommand::Srandmember) => {
+            Some(BorrowedDispatchFloorClass::Srandmember)
+        }
         (3, BorrowedDispatchFloorCommand::Hget) => Some(BorrowedDispatchFloorClass::Hget),
         (3, BorrowedDispatchFloorCommand::Sismember) => {
             Some(BorrowedDispatchFloorClass::Sismember)
@@ -13584,6 +13602,41 @@ fn try_dispatch_floor_classified_action(
                     consumed: packet.consumed,
                     response,
                 })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Srandmember => {
+            // SRANDMEMBER (no count) mirrors ZSCORE/HGET: the `_into` executor
+            // writes the single sampled member straight into `out` (member-clone
+            // elimination), so this is a FastEncodedReply. The floor routes to the
+            // SAME executor + RNG the generic path uses, so output is identical by
+            // construction. Parser+executor already shipped (frankenredis-q38ap);
+            // only the dispatch-floor routing is new. The `SRANDMEMBER key count`
+            // form (array reply) is a distinct packet and falls through.
+            let hit = parse_borrowed_plain_srandmember_packet(unparsed, &parser_config).and_then(
+                |packet| {
+                    let client_resp3 =
+                        runtime.client_session().resp_protocol_version() == 3;
+                    runtime
+                        .execute_plain_srandmember_borrowed_into(
+                            packet.key,
+                            ts,
+                            client_resp3,
+                            out,
+                        )
+                        .map(|()| packet.consumed)
+                },
+            );
+            if let Some(consumed) = hit {
+                Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,
@@ -33825,6 +33878,14 @@ mod tests {
         assert_eq!(
             borrowed_dispatch_floor_command(b"SISMEMBER"),
             Some(BorrowedDispatchFloorCommand::Sismember)
+        );
+        assert_eq!(
+            borrowed_dispatch_floor_command(b"SRANDMEMBER"),
+            Some(BorrowedDispatchFloorCommand::Srandmember)
+        );
+        assert_eq!(
+            borrowed_dispatch_floor_command(b"srandmember"),
+            Some(BorrowedDispatchFloorCommand::Srandmember)
         );
         assert_eq!(
             borrowed_dispatch_floor_command(b"SISMEMBERX"),

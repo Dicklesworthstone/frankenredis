@@ -1,0 +1,18 @@
+frankenredis-q38ap/ma4b8 — dispatch-floor for SRANDMEMBER key (no count) — KEEP
+Continues the xymiw dispatch-floor vein (55c264677). SRANDMEMBER had the biggest dispatch cost of
+the profiled unfloored reads (control process_buffered_frames 16.77% self at P16).
+
+Arms hash-bracketed on identical peer-WIP snapshot:
+  control  sha256 7c01c9e417e2fc9edcc139b2848dc1704d4d26ff (HEAD post-xymiw, SRANDMEMBER unfloored)
+  candidate sha256 10afc29e68e3997cbc1e2f36acb7a646b54eda4d (+SRANDMEMBER floor arm)
+
+Commandstats-normalized instructions:u (sustained -c50 -P16 background, perf -- sleep 6, calls-delta):
+  SRANDMEMBER  ctl 8413.1 -> cand 3067.1 instr/op = 0.365x (2.74x fewer)
+  GET guard    ctl 1665.0 -> cand 1660.8 instr/op = 0.9975x (neutral)
+
+Byte-identity (RNG command — floor routes to the IDENTICAL executor+RNG the generic path uses, so
+output is identical by construction): hit returns a valid set member (e96 in bigs); nil-key MATCH [],
+wrongtype MATCH [WRONGTYPE...], RESP3 nil MATCH []; SRANDMEMBER key count (array form) falls back to
+the unchanged generic path (3 members / -3 with-replacement verified). fr-conformance GREEN.
+11-byte classifier arm (alongside BITFIELD_RO); arity 2; FastEncodedReply via
+execute_plain_srandmember_borrowed_into (member-clone-elim _into path, already shipped q38ap).
