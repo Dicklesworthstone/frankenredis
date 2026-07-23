@@ -4,6 +4,36 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-23 FoggyOrchid: REJECT (premise) — the RESTORE listpack-re-walk "gap" is a measurement artifact; fr's eager span decode WINS the realistic RESTORE+read workload 0.89x. Closes c92f6/hm95r lazy-span lever.
+
+The RESTORE-in-isolation gap is real and stable (HEAD a135a4b9c/fr_d_cand vs vendored redis 7.2.4,
+96x40B quicklist2 listpack, socket-pipelined 40k-RESTORE window under `perf stat -e instructions:u`
+attached to each server pid, 3 reps, CV ~0.01%): fr 2.027B vs redis 0.737B = **2.749x more
+instructions** (fr ~50.7k/RESTORE, redis ~18.4k). Profile (fr, -F1999): the fr-specific cost is the
+eager listpack span decode cluster — decode_entry_value_span 13.38% + decode_value_spans 6.01% +
+list_lp_entry_bytes 3.26% (~22.6% self); redis with default `sanitize-dump-payload no` does
+lpValidateIntegrity(deep=0) (header check only, listpack.c:1363) and attaches the RAW listpack,
+paying ~0 at RESTORE.
+
+BUT the proposed lazy-span lever (hm95r: defer decode_value_spans to first index/iterate, mirroring
+redis shallow-attach) is a DEFERRAL, not a reduction — and it regresses the realistic workload.
+fr's eager decode buys O(1) span-indexed reads; redis's shallow attach forces an O(n) listpack
+forward-walk on EVERY read (lpGet/lpSeek). Measured end-to-end RESTORE+LRANGE(0,-1) on the same
+96-element list (20k iterations, 2 reps, CV ~0.002%): fr 1.405B vs redis 1.583B = **0.8879x — fr
+is 11% FASTER**. Decomposed: LRANGE-alone is fr ~19k vs redis ~61k instructions (fr's spans give a
+~3.2x read win). So fr already WINS every RESTORE-then-read pattern (MIGRATE target, backup reload
+into a serving instance, bulk load) — i.e. every real RESTORE, since a restored key that is never
+read is pathological. The lazy lever would trade fr's decisive read win for RESTORE-only parity,
+a net regression, and additionally requires reconciling corrupt-payload rejection vs
+sanitize-dump-payload semantics (real conformance risk). The shipped fused-growth-totals win
+(c92f6 lever 1, -2.71%) was the correct extent of safe work here.
+
+Both P1 beads (c92f6, hm95r) CLOSED. Retry predicate: reopen ONLY if a lazy/shallow RESTORE is
+gated behind a RESTORE-then-never-read fast path (e.g. a MIGRATE-target hint) that provably cannot
+regress the read path AND a live profile shows RESTORE >=3% of a real mixed workload — otherwise
+the eager decode stays as the measured-optimal design. Do not re-file the RESTORE-isolation gap as
+a loss; measure RESTORE+read.
+
 ## 2026-07-23 FoggyOrchid: SURFACE — fresh probe sweep: streams/LPUSH/set-algebra-STORE all fr-DOMINANT; SCAN "5.4x loss" is a fixed-cursor harness artifact, real-sweep residual 2.14x instructions at admin-op EV (no lever)
 
 Sole-producer probe cycle on HEAD a135a4b9c vs vendored redis 7.2.4 (pinned, interleaved,
