@@ -124,6 +124,10 @@ const DIGIT_PAIRS: [u8; 200] = build_digit_pairs();
 /// Write the decimal ASCII of `val` into `buf` ending at `buf[end]`, returning
 /// the start index. `buf` must be at least 20 bytes and `end == buf.len()`.
 /// Two digits per step via [`DIGIT_PAIRS`]. (frankenredis-itoa2)
+/// (frankenredis-c47rl) `#[inline]`: cross-crate callers (score/integer reply formatters in
+/// fr-store/fr-runtime) otherwise pay an un-inlined call per element at lto=false — the
+/// ZRANGE WITHSCORES(10k) profile showed this as a separate 6.22%-self frame.
+#[inline]
 pub fn write_u64_digits(buf: &mut [u8; 20], end: usize, mut val: u64) -> usize {
     let mut pos = end;
     while val >= 100 {
@@ -533,6 +537,7 @@ pub fn bench_encode_integer<const FUSED: bool>(n: i64, out: &mut Vec<u8>) {
 /// length): NaN/±inf, signed zero, and any integer-valued double in the i64
 /// fast-range. Byte-identical to the matching arms of [`push_redis_double_ascii`].
 /// Returns `None` for a genuinely fractional value, which needs `fpconv`.
+#[inline]
 fn try_format_redis_double_simple(value: f64, buf: &mut [u8; 24]) -> Option<usize> {
     if value.is_nan() {
         buf[..3].copy_from_slice(b"nan");
@@ -571,16 +576,56 @@ fn try_format_redis_double_simple(value: f64, buf: &mut [u8; 24]) -> Option<usiz
 /// is true, RESP2 bulk string otherwise. This is the allocation-free score
 /// reply primitive for hot zset paths.
 pub fn encode_redis_double(value: f64, resp3: bool, out: &mut Vec<u8>) {
+    encode_redis_double_impl::<true>(value, resp3, out);
+}
+
+/// Bench hook for the same-binary A/B in the frankenredis-c47rl proof. `FUSED = false` forces
+/// the prior five-append simple-path framing. Not on a production path.
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_encode_redis_double<const FUSED: bool>(value: f64, resp3: bool, out: &mut Vec<u8>) {
+    encode_redis_double_impl::<FUSED>(value, resp3, out);
+}
+
+/// (frankenredis-c47rl) `FUSED = true` frames the simple-path score in TWO appends: a
+/// const-length `$<n>\r\n` header (n <= 20, so one or two digits — the vlis9 recipe) and one
+/// `body+\r\n` extend with the terminator written into the stack buffer's tail (body bytes are
+/// still written exactly once — the formatter writes them, the single extend copies them).
+/// The prior shape paid five appends per score (`push($)` + `push_usize` + CRLF extend + body
+/// extend + CRLF extend) plus a `reserve`; ZRANGE WITHSCORES(10k) profiled it at 27.09% self
+/// with `write_u64_digits` a further 6.22% as an un-inlined frame. `FUSED = false` is the exact
+/// prior code for the byte-identity gate and the same-binary A/B.
+#[inline]
+fn encode_redis_double_impl<const FUSED: bool>(value: f64, resp3: bool, out: &mut Vec<u8>) {
     // Fast path — the overwhelmingly common zset scores (integer-valued) plus
     // the special constants format into a stack buffer, so the length-prefixed
-    // RESP2 reply can be written header-then-body IN ORDER. The prior code
-    // formatted the body into `out` first, then `resize`-zero-filled and
-    // `copy_within`-shifted the whole body forward to prepend `$<len>\r\n` — a
-    // per-score memmove that dominated multi-score replies (ZMSCORE/ZRANGE
-    // WITHSCORES/ZPOPMIN...). Redis's addReplyHumanLongDouble frames the same
-    // way (stack buffer, then bulk write). Byte-identical output.
+    // RESP2 reply can be written header-then-body IN ORDER. Redis's
+    // addReplyHumanLongDouble frames the same way (stack buffer, then bulk
+    // write). Byte-identical output.
     let mut buf = [0u8; 24];
     if let Some(n) = try_format_redis_double_simple(value, &mut buf) {
+        if FUSED {
+            // n <= 20 (19 digits + sign), so `buf[n..n + 2]` stays in bounds and the
+            // bulk length is always one or two decimal digits.
+            buf[n] = b'\r';
+            buf[n + 1] = b'\n';
+            if resp3 {
+                out.extend_from_slice(b",");
+            } else if n < 10 {
+                out.extend_from_slice(&[b'$', b'0' + n as u8, b'\r', b'\n']);
+            } else {
+                let pair = n * 2;
+                out.extend_from_slice(&[
+                    b'$',
+                    DIGIT_PAIRS[pair],
+                    DIGIT_PAIRS[pair + 1],
+                    b'\r',
+                    b'\n',
+                ]);
+            }
+            out.extend_from_slice(&buf[..n + 2]);
+            return;
+        }
         let body = &buf[..n];
         if resp3 {
             out.reserve(1 + n + 2);
@@ -2737,8 +2782,8 @@ mod tests {
     use super::{
         BorrowedCommandArgsKind, BorrowedCommandFrame, MAX_LINE_LENGTH, ParserConfig, RespFrame,
         RespParseError, bench_encode_bulk_string_slice_small, bench_encode_integer,
-        bench_parse_bulk_slice, bench_parse_frame_len_line, bench_parse_multibulk_count,
-        bench_push_len_header, decimal_u64_len, decimal_usize_len,
+        bench_encode_redis_double, bench_parse_bulk_slice, bench_parse_frame_len_line,
+        bench_parse_multibulk_count, bench_push_len_header, decimal_u64_len, decimal_usize_len,
         encode_aggregate_header, encode_bulk_string_slice, encode_map_header, encode_redis_double,
         format_redis_double, parse_command_args_borrowed_into, parse_command_frame,
         parse_command_frame_borrowed, parse_frame, parse_frame_with_config,
@@ -2885,6 +2930,54 @@ mod tests {
             let slow = bench_parse_bulk_slice::<false>(buf, 0, &config);
             assert_eq!(fast, slow, "differ for {:?}", String::from_utf8_lossy(buf));
         }
+    }
+
+    // (frankenredis-c47rl) The fused two-append simple-path double framing must be byte-identical
+    // to the prior five-append shape for every simple-path class (integers across the ±(i64::MAX/2)
+    // window, specials, signed zeros) AND for fractional fallbacks, in both RESP versions.
+    #[test]
+    fn fused_double_framing_matches_five_append() {
+        let mut values: Vec<f64> = vec![
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            9.0,
+            10.0,
+            99.0,
+            100.0,
+            1e15,
+            -1e15,
+            (i64::MAX / 2) as f64,
+            (-i64::MAX / 2) as f64,
+            ((i64::MAX / 2) as f64) * 2.0, // outside the int window -> fractional path
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+            3.5,
+            -0.125,
+            1.0e-3,
+            123456.789,
+        ];
+        for i in -3000_i32..=3000 {
+            values.push(f64::from(i));
+            values.push(f64::from(i) + 0.5);
+        }
+        for resp3 in [false, true] {
+            for &v in &values {
+                let mut fused = b"X".to_vec();
+                let mut old = b"X".to_vec();
+                bench_encode_redis_double::<true>(v, resp3, &mut fused);
+                bench_encode_redis_double::<false>(v, resp3, &mut old);
+                assert_eq!(fused, old, "double framing differs for {v} resp3={resp3}");
+            }
+        }
+        let mut out = Vec::new();
+        encode_redis_double(42.0, false, &mut out);
+        assert_eq!(out, b"$2\r\n42\r\n");
+        out.clear();
+        encode_redis_double(42.0, true, &mut out);
+        assert_eq!(out, b",42\r\n");
     }
 
     // (frankenredis-vlis9) The small-length const-size bulk header path must be byte-identical to

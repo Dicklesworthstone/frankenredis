@@ -4,6 +4,28 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-23: SHIPPED — encode_redis_double simple-path framing fusion (5 appends -> 2, const-size header, in-buffer CRLF); 15.82% fewer end-to-end instructions on P1 ZRANGE WITHSCORES(10k) (frankenredis-c47rl)
+
+NEGATIVE-LEDGER-FIRST: the 2026-07-13 write_i64_to_slice direct-write REJECT (+0.51% SUB-GATE)
+covers the DIGIT path and stays closed; the 2026-07-04 "RESP encode saturated" SURFACE predates
+the vlis9/pipsm/citbb disproofs and yields to fresh-profile reopen. Reopen evidence: ZRANGE
+WITHSCORES(10k, integral scores - the common case) profiled encode_redis_double at 27.09% self +
+write_u64_digits 6.22% on HEAD a052bf341; the simple-path arm paid FIVE appends per score
+(push($) + push_usize + CRLF extend + body extend + CRLF extend) plus a reserve. Change
+(encode_redis_double_impl<const FUSED>): const-size $<n>\r\n header (n <= 20 -> 1-2 digits, the
+vlis9 recipe) + \r\n written into the stack buffer tail + ONE body+CRLF extend - body bytes
+still written exactly once (the 2026-07-13 double-copy anti-pattern is avoided); RESP3 arm 3->2
+appends; fractional fallback untouched. Plus #[inline] on write_u64_digits (cross-crate callers)
+and try_format_redis_double_simple. MEASURED (hash-bracketed builds ctl 79394f59/cand 74f21574,
+5 order-balanced reps): cand/ctl instructions:u = 0.84177 (**15.82% fewer end-to-end**), null/ctl
+1.000005 - ~5000x the floor. BIT-IDENTICAL: fused_double_framing_matches_five_append (dense
++/-3000 integer+half corpus x resp3 + specials + signed zeros + int-window boundary + fractional
+fallback + pinned literals); fr-protocol 100 lib + golden green; clippy --all-targets green;
+benchmark_gate PASS (gate-c47rl-20260723). RESIDUAL: write_u64_digits remains a separate 6.95%
+frame despite the hint (LLVM declines the LUT loop); its direct-write shape is the +0.51%
+SUB-GATE REJECT - do not retry. Artifacts:
+artifacts/optimization/frankenredis-c47rl/20260723T0050Z/.
+
 ## 2026-07-22: SHIPPED — small-length const-size bulk header path in encode_bulk_string_slice; 1.7764x fewer instructions on the per-element encode loop (frankenredis-vlis9)
 
 NEGATIVE-LEDGER-FIRST: reply-encode was closed as "saturated, all single-pass" after bab278487

@@ -1,0 +1,18 @@
+frankenredis-c47rl — encode_redis_double simple-path framing fusion — KEEP
+Arms hash-bracketed (peer WIP stable across both builds):
+  control  sha256 79394f59d3bd7476b08196520922b64cb8daf625... (impl::<false>, /tmp/fr_d_ctl.bin)
+  candidate sha256 74f2157434e8495e4df1f3e79f36ee34e7b2f0dc... (impl::<true>, /tmp/fr_d_cand.bin)
+instructions:u per 3000-reply `redis-benchmark -c50 -n3000 ZRANGE bigz 0 -1 WITHSCORES`
+(10k members, integral scores 0..9999), ctl core2 / cand core3 / null(ctl bin) core4:
+rep  ctl            cand          null(A/A)
+1    10864294146    9145233202    10864168210
+2    10863954021    9144819972    10863913448
+3    10864035153    9144964318    10864000528
+4    10863926017    9144926186    10864015647
+5    10863943359    9144991825    10863929381
+ctl median 10.86395B cv 0.001% | cand median 9.14496B cv 0.002% | null median 10.86400B
+null/ctl ~1.000005 | cand/ctl = 0.84177 -> 15.82% fewer instructions end-to-end
+Candidate frame check: encode_redis_double 28.10% of the 16%-smaller total (framing fused);
+write_u64_digits STILL a separate 6.95% frame — the #[inline] hint did not collapse the
+two-digit-LUT loop; its direct-write replacement is the 2026-07-13 +0.51% SUB-GATE REJECT, so
+that residual stays closed.
