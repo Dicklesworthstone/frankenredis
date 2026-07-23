@@ -4,6 +4,28 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-23 FoggyOrchid: SURFACE — fresh probe sweep: streams/LPUSH/set-algebra-STORE all fr-DOMINANT; SCAN "5.4x loss" is a fixed-cursor harness artifact, real-sweep residual 2.14x instructions at admin-op EV (no lever)
+
+Sole-producer probe cycle on HEAD a135a4b9c vs vendored redis 7.2.4 (pinned, interleaved,
+c50): XADD 1.05-1.13x, XRANGE COUNT-100 1.71x, LPUSH 1.0-1.2x (the June-19 0.54x structural
+LPUSH loss is GONE — do not re-chase 99fwc from that table), SINTERSTORE 2.24x, SDIFFSTORE
+2.0x (the June-19 0.39-0.57x set-algebra STORE losses are GONE — a month of levers closed
+them). ONE apparent loss: `redis-benchmark ... SCAN 4096 COUNT 100` = 0.18x — but that shape
+re-issues a FIXED cursor, which the 3e92e/n9am7 resume caches cannot serve (entries are keyed
+by the PREVIOUSLY-RETURNED cursor and consumed on hit), so every call pays the O(cursor)
+skip-walk fallback. redis-benchmark cannot sweep cursors; real SCAN traffic does. REAL shape
+(5x full `redis-cli --scan --count 100` sweeps over a 15k-key DB, perf stat on the server):
+fr 191.4M instructions vs redis 89.6M = 2.14x more, wall 0.218s vs 0.155s (client-dominated)
+— an admin-frequency operation at ~38M instr/sweep absolute. Per the opportunity-matrix gate
+this is below lever threshold; recording instead of chasing. IF SCAN ever becomes hot-path:
+the residual is (a) take-on-hit + exact-cursor keying in scan_cache/db_scan_cache (defeated by
+same-cursor re-issue, concurrent sweeps beyond SCAN_CACHE_LRU_CAP, and any generation bump
+mid-sweep) and (b) the sorted-walk + per-key expiry/glob constant factor; a keep-on-hit
+bounded cache fixes only re-issue, arbitrary-cursor O(log n) needs an order-statistic index
+over ordered_keys (RAM + write cost — weigh against uhthd). Retry predicate: a live profile
+showing SCAN >=3% of a production-shaped mixed workload, or an operator-reported sweep-latency
+complaint.
+
 ## 2026-07-23: SHIPPED — encode_redis_double simple-path framing fusion (5 appends -> 2, const-size header, in-buffer CRLF); 15.82% fewer end-to-end instructions on P1 ZRANGE WITHSCORES(10k) (frankenredis-c47rl)
 
 NEGATIVE-LEDGER-FIRST: the 2026-07-13 write_i64_to_slice direct-write REJECT (+0.51% SUB-GATE)
