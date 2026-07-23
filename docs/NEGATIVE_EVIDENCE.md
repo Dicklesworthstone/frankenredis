@@ -4,6 +4,28 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-23: SHIPPED — dispatch-floor front gate for GETRANGE key start end; 1.62x fewer instructions on P16 (getrange-floor)
+
+Third command in the reopened dispatch-floor vein this session (after xymiw ZSCORE/HGET/SISMEMBER +
+ma4b8 SRANDMEMBER). GETRANGE was the 3rd-ranked unfloored read by dispatch cost (process_buffered_frames
+7.24% self at P16). 8-byte classifier arm (alongside BITFIELD), arity 4, FastEncodedReply via the
+already-shipped substring _into executor.
+
+MEASURED (commandstats-normalized instructions:u; hash-bracketed ctl e8e70772 / cand 3359e492; -P16,
+perf -- sleep 6, calls-delta):
+  GETRANGE   ctl 3958.0 -> cand 2448.5 instr/op = 0.619x (1.62x fewer)
+  GET guard  ctl 1660.7 -> cand 1665.9 instr/op = 1.0031x (neutral)
+The win tracks the lower dispatch cost (7.24% -> 1.62x, vs SRANDMEMBER 16.77% -> 2.74x, ZSCORE 12.68%
+-> 1.97x) — the dispatch-floor win magnitude is predictable from process_buffered_frames%.
+
+BYTE-IDENTICAL vs redis 7.2.4 (deterministic): 10/10 edge cases MATCH — positive/negative/full ranges,
+empty (start>end), out-of-bounds (positive & negative), single char, missing-key, wrongtype, RESP3.
+Gates: build green; 3/3 floor tests (dispatch_floor_recognizes_key_member_read_tokens +GETRANGE);
+fr-conformance FULLY GREEN (194+99); fr-server clippy-clean on hunk. Pre-existing unrelated failures
+(MSET fe57482f6, lua_eval clippy) not introduced. Artifacts:
+artifacts/optimization/frankenredis-getrange-floor/20260723T2200Z/. Remaining unfloored floor targets
+by profile: BITCOUNT 6.46%, then HRANDFIELD/SINTERCARD/BITPOS (profile first) — same 5-part recipe.
+
 ## 2026-07-23: SHIPPED — dispatch-floor front gate for SRANDMEMBER key (no count); 2.74x fewer instructions on P16 (frankenredis-ma4b8)
 
 Continues the reopened dispatch-floor vein (xymiw, 55c264677). Profiled the unfloored read candidates

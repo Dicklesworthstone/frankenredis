@@ -1,0 +1,10 @@
+GETRANGE dispatch-floor — KEEP. Continues the dispatch-floor vein (xymiw/ma4b8).
+Control process_buffered_frames 7.24% self at P16 (3rd-ranked unfloored read).
+Arms hash-bracketed: ctl e8e7077290674842a6dc77fca432a36df4d94882 (HEAD, GETRANGE unfloored) /
+cand 3359e492d090921a8fd0c594aa76c2df21ac4ff6 (+GETRANGE floor arm, 8-byte, arity 4).
+Commandstats-normalized instructions:u (-c50 -P16, perf -- sleep 6, calls-delta):
+  GETRANGE   ctl 3958.0 -> cand 2448.5 instr/op = 0.619x (1.62x fewer)
+  GET guard  ctl 1660.7 -> cand 1665.9 instr/op = 1.0031x (neutral)
+Byte-identical vs redis 7.2.4 (deterministic): 0..20 / neg -5..-1 / 0..-1 full / empty(5,2) /
+oob(100,200 & -100,-50) / single(0,0) / missing-key / wrongtype / RESP3 = 10/10 MATCH.
+FastEncodedReply via execute_plain_getrange_borrowed_into (substring _into, no BulkString(Vec)).

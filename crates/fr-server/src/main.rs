@@ -12249,6 +12249,7 @@ enum BorrowedDispatchFloorClass {
     Hget,
     Sismember,
     Srandmember,
+    Getrange,
 }
 
 struct BorrowedDispatchFloorToken<'a> {
@@ -12263,6 +12264,7 @@ enum BorrowedDispatchFloorCommand {
     BitfieldRo,
     Exists,
     Getex,
+    Getrange,
     Hdel,
     Hget,
     Hlen,
@@ -12352,6 +12354,9 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
         8 => match uppercase_ascii_token::<8>(token)? {
             [b'B', b'I', b'T', b'F', b'I', b'E', b'L', b'D'] => {
                 Some(BorrowedDispatchFloorCommand::Bitfield)
+            }
+            [b'G', b'E', b'T', b'R', b'A', b'N', b'G', b'E'] => {
+                Some(BorrowedDispatchFloorCommand::Getrange)
             }
             _ => None,
         },
@@ -12636,6 +12641,7 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (2, BorrowedDispatchFloorCommand::Srandmember) => {
             Some(BorrowedDispatchFloorClass::Srandmember)
         }
+        (4, BorrowedDispatchFloorCommand::Getrange) => Some(BorrowedDispatchFloorClass::Getrange),
         (3, BorrowedDispatchFloorCommand::Hget) => Some(BorrowedDispatchFloorClass::Hget),
         (3, BorrowedDispatchFloorCommand::Sismember) => {
             Some(BorrowedDispatchFloorClass::Sismember)
@@ -13602,6 +13608,41 @@ fn try_dispatch_floor_classified_action(
                     consumed: packet.consumed,
                     response,
                 })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Getrange => {
+            // GETRANGE mirrors ZSCORE/HGET: the `_into` executor encodes the
+            // substring slice straight into `out` (no BulkString(Vec) alloc), so
+            // this is a FastEncodedReply. Parser+executor already shipped; only the
+            // dispatch-floor routing is new. On a deferred/invalid range the
+            // executor writes nothing, so the fallback re-processes cleanly.
+            let hit = parse_borrowed_plain_getrange_packet(unparsed, &parser_config).and_then(
+                |packet| {
+                    let client_resp3 =
+                        runtime.client_session().resp_protocol_version() == 3;
+                    runtime
+                        .execute_plain_getrange_borrowed_into(
+                            packet.key,
+                            packet.start,
+                            packet.end,
+                            ts,
+                            client_resp3,
+                            out,
+                        )
+                        .map(|()| packet.consumed)
+                },
+            );
+            if let Some(consumed) = hit {
+                Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,
@@ -33882,6 +33923,10 @@ mod tests {
         assert_eq!(
             borrowed_dispatch_floor_command(b"SRANDMEMBER"),
             Some(BorrowedDispatchFloorCommand::Srandmember)
+        );
+        assert_eq!(
+            borrowed_dispatch_floor_command(b"GETRANGE"),
+            Some(BorrowedDispatchFloorCommand::Getrange)
         );
         assert_eq!(
             borrowed_dispatch_floor_command(b"srandmember"),
