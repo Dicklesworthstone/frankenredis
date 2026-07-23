@@ -1,0 +1,10 @@
+BITCOUNT-no-range dispatch-floor — KEEP (closes au36f with the GETRANGE half, ee36ce937).
+Control process_buffered_frames 6.46% self at P16 (4th-ranked unfloored read).
+Arms hash-bracketed: ctl b25255a9c4fca147acfedf35df1aa836b4e5c8c5 (HEAD post-GETRANGE, BITCOUNT unfloored) /
+cand feb71c9de3d7e1ddf7d042e1e907aeb3883ad1b1 (+BITCOUNT no-range floor arm, 8-byte, arity 2).
+Commandstats-normalized instructions:u (-c50 -P16, perf -- sleep 6, calls-delta):
+  BITCOUNT   ctl 3996.4 -> cand 2741.8 instr/op = 0.686x (1.46x fewer)
+  GET guard  ctl 1653.4 -> cand 1668.0 instr/op = 1.0088x (neutral, within noise)
+Byte-identical vs redis 7.2.4: no-range(6) / missing-key(0) / wrongtype(err) / range-form fallback(3) /
+range BIT unit(2) / RESP3(6) = 6/6 MATCH. Only *2 BITCOUNT key floors; range/unit arities fall back.
+FastReply via execute_plain_bitcount_borrowed(key, None, ts).

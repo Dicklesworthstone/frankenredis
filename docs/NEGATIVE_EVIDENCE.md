@@ -4,6 +4,29 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-23: SHIPPED — dispatch-floor front gate for BITCOUNT key (no range); 1.46x fewer instructions on P16, closes au36f (bitcount-floor)
+
+Completes frankenredis-au36f (GETRANGE half shipped ee36ce937). BITCOUNT-no-range was the 4th-ranked
+unfloored read by dispatch cost (process_buffered_frames 6.46% self at P16). 8-byte classifier arm
+(alongside BITFIELD/GETRANGE), arity 2 ONLY (range `*4` / unit `*5` forms fall through to the unchanged
+generic path); FastReply via execute_plain_bitcount_borrowed(key, None, ts).
+
+MEASURED (commandstats-normalized instructions:u; hash-bracketed ctl b25255a9 / cand feb71c9d; -P16,
+perf -- sleep 6, calls-delta):
+  BITCOUNT   ctl 3996.4 -> cand 2741.8 instr/op = 0.686x (1.46x fewer)
+  GET guard  ctl 1653.4 -> cand 1668.0 instr/op = 1.0088x (neutral, within noise)
+
+BYTE-IDENTICAL vs redis 7.2.4: no-range(6) / missing-key(0) / wrongtype(err) / range-form fallback(3) /
+range BIT unit(2) / RESP3(6) = 6/6 MATCH. Gates: build green; 3/3 floor tests; fr-conformance FULLY
+GREEN (194+99); fr-server clippy-clean on hunk. Pre-existing unrelated failures (MSET fe57482f6,
+lua_eval clippy) not introduced. Artifacts: artifacts/optimization/frankenredis-au36f/20260723T2230Z/.
+
+SESSION DISPATCH-FLOOR TALLY (6 commands, the vein I wrongly declared saturated 2 cycles ago):
+ZSCORE 1.97x, HGET 1.88x, SISMEMBER 1.95x (xymiw); SRANDMEMBER 2.74x (ma4b8); GETRANGE 1.62x, BITCOUNT
+1.46x (au36f). Win magnitude tracks process_buffered_frames% (16.77% -> 2.74x down to 6.46% -> 1.46x).
+NEXT unfloored targets: HRANDFIELD, SINTERCARD, BITPOS, ZRANGE(plain) — profile process_buffered_frames
+at P16 first (>~6% worth flooring), same 5-part recipe.
+
 ## 2026-07-23: SHIPPED — dispatch-floor front gate for GETRANGE key start end; 1.62x fewer instructions on P16 (getrange-floor)
 
 Third command in the reopened dispatch-floor vein this session (after xymiw ZSCORE/HGET/SISMEMBER +

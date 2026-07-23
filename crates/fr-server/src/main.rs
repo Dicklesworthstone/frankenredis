@@ -12250,6 +12250,7 @@ enum BorrowedDispatchFloorClass {
     Sismember,
     Srandmember,
     Getrange,
+    BitcountKey,
 }
 
 struct BorrowedDispatchFloorToken<'a> {
@@ -12260,6 +12261,7 @@ struct BorrowedDispatchFloorToken<'a> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BorrowedDispatchFloorCommand {
+    Bitcount,
     Bitfield,
     BitfieldRo,
     Exists,
@@ -12357,6 +12359,9 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             }
             [b'G', b'E', b'T', b'R', b'A', b'N', b'G', b'E'] => {
                 Some(BorrowedDispatchFloorCommand::Getrange)
+            }
+            [b'B', b'I', b'T', b'C', b'O', b'U', b'N', b'T'] => {
+                Some(BorrowedDispatchFloorCommand::Bitcount)
             }
             _ => None,
         },
@@ -12642,6 +12647,11 @@ fn classify_borrowed_dispatch_floor_packet_impl<
             Some(BorrowedDispatchFloorClass::Srandmember)
         }
         (4, BorrowedDispatchFloorCommand::Getrange) => Some(BorrowedDispatchFloorClass::Getrange),
+        // Only the no-range `*2 BITCOUNT key` form floors; range/unit forms
+        // (arity 4/5) fall through to the unchanged generic borrowed path.
+        (2, BorrowedDispatchFloorCommand::Bitcount) => {
+            Some(BorrowedDispatchFloorClass::BitcountKey)
+        }
         (3, BorrowedDispatchFloorCommand::Hget) => Some(BorrowedDispatchFloorClass::Hget),
         (3, BorrowedDispatchFloorCommand::Sismember) => {
             Some(BorrowedDispatchFloorClass::Sismember)
@@ -13603,6 +13613,30 @@ fn try_dispatch_floor_classified_action(
             if let Some(packet) = parse_borrowed_plain_sismember_packet(unparsed, &parser_config)
                 && let Some(response) =
                     runtime.execute_plain_sismember_borrowed(packet.key, packet.member, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::BitcountKey => {
+            // BITCOUNT key (no range) mirrors ZCOUNT: the borrowed executor
+            // returns an integer RespFrame (FastReply). Parser+executor already
+            // shipped; only the dispatch-floor routing is new (frankenredis-au36f).
+            // Range/unit forms are a distinct arity and fall through.
+            if let Some(packet) = parse_borrowed_plain_bitcount_packet(unparsed, &parser_config)
+                && let Some(response) =
+                    runtime.execute_plain_bitcount_borrowed(packet.key, None, ts)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -33927,6 +33961,10 @@ mod tests {
         assert_eq!(
             borrowed_dispatch_floor_command(b"GETRANGE"),
             Some(BorrowedDispatchFloorCommand::Getrange)
+        );
+        assert_eq!(
+            borrowed_dispatch_floor_command(b"BITCOUNT"),
+            Some(BorrowedDispatchFloorCommand::Bitcount)
         );
         assert_eq!(
             borrowed_dispatch_floor_command(b"srandmember"),
