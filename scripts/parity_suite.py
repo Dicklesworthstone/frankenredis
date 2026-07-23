@@ -125,6 +125,7 @@ PORT_BASED = [
     ("multikey_pop_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("tracking_invalidation_lifecycle_gate.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("client_tracking_differential_probe.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("multi_conn_differential_probe.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("digest_state_fuzz.py", [str(ORACLE_PORT), str(FR_PORT), "4", "1200"]),
     ("random_reply_differ.py", ["--oracle", str(ORACLE_PORT), "--fr", str(FR_PORT),
                                 "--seeds", "2", "--iters", "1200"]),
