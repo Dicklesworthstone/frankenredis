@@ -12251,6 +12251,7 @@ enum BorrowedDispatchFloorClass {
     Srandmember,
     Getrange,
     BitcountKey,
+    Zrange,
 }
 
 struct BorrowedDispatchFloorToken<'a> {
@@ -12289,6 +12290,7 @@ enum BorrowedDispatchFloorCommand {
     Xlen,
     Zcard,
     Zcount,
+    Zrange,
     Zrem,
     Zremrangebyrank,
     Zscore,
@@ -12339,6 +12341,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'M', b'E', b'M', b'O', b'R', b'Y'] => Some(BorrowedDispatchFloorCommand::Memory),
             [b'O', b'B', b'J', b'E', b'C', b'T'] => Some(BorrowedDispatchFloorCommand::Object),
             [b'Z', b'S', b'C', b'O', b'R', b'E'] => Some(BorrowedDispatchFloorCommand::Zscore),
+            [b'Z', b'R', b'A', b'N', b'G', b'E'] => Some(BorrowedDispatchFloorCommand::Zrange),
             _ => None,
         },
         7 => match uppercase_ascii_token::<7>(token)? {
@@ -12647,6 +12650,9 @@ fn classify_borrowed_dispatch_floor_packet_impl<
             Some(BorrowedDispatchFloorClass::Srandmember)
         }
         (4, BorrowedDispatchFloorCommand::Getrange) => Some(BorrowedDispatchFloorClass::Getrange),
+        // Only plain `*4 ZRANGE key start stop` floors; WITHSCORES/REV/LIMIT/
+        // BYSCORE/BYLEX forms are higher arity and fall through unchanged.
+        (4, BorrowedDispatchFloorCommand::Zrange) => Some(BorrowedDispatchFloorClass::Zrange),
         // Only the no-range `*2 BITCOUNT key` form floors; range/unit forms
         // (arity 4/5) fall through to the unchanged generic borrowed path.
         (2, BorrowedDispatchFloorCommand::Bitcount) => {
@@ -13642,6 +13648,38 @@ fn try_dispatch_floor_classified_action(
                     consumed: packet.consumed,
                     response,
                 })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Zrange => {
+            // Plain ZRANGE (no WITHSCORES/REV/LIMIT) encodes its member array
+            // straight into `out` via the `_into` executor (FastEncodedReply). The
+            // reply is a flat array, identical under RESP2/RESP3, so no resp3 flag.
+            // Parser+executor already shipped; only the dispatch-floor routing is
+            // new. Higher-arity option forms fall through to the generic path.
+            let hit = parse_borrowed_plain_zrange_packet(unparsed, &parser_config).and_then(
+                |packet| {
+                    runtime
+                        .execute_plain_zrange_borrowed_into(
+                            packet.key,
+                            packet.start,
+                            packet.end,
+                            ts,
+                            out,
+                        )
+                        .map(|()| packet.consumed)
+                },
+            );
+            if let Some(consumed) = hit {
+                Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,
@@ -33965,6 +34003,10 @@ mod tests {
         assert_eq!(
             borrowed_dispatch_floor_command(b"BITCOUNT"),
             Some(BorrowedDispatchFloorCommand::Bitcount)
+        );
+        assert_eq!(
+            borrowed_dispatch_floor_command(b"ZRANGE"),
+            Some(BorrowedDispatchFloorCommand::Zrange)
         );
         assert_eq!(
             borrowed_dispatch_floor_command(b"srandmember"),

@@ -4,6 +4,31 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-23: SHIPPED — dispatch-floor front gate for plain ZRANGE key start stop; 3.09x fewer instructions on P16, the biggest floor win (frankenredis-8jcit)
+
+Top-ranked unfloored read by dispatch cost (process_buffered_frames 21.21% self at P16 — highest of
+the whole candidate sweep). 6-byte classifier arm (alongside ZSCORE/etc.), arity 4 ONLY — the
+WITHSCORES/REV/LIMIT/BYSCORE/BYLEX option forms are higher arity and fall through to the unchanged
+generic path. FastEncodedReply via execute_plain_zrange_borrowed_into (flat member array, identical
+under RESP2/RESP3 so no resp3 flag).
+
+MEASURED (commandstats-normalized instructions:u; hash-bracketed ctl 808dcd40 / cand 0d76c5da; -P16,
+perf -- sleep 6, calls-delta):
+  ZRANGE     ctl 12877.0 -> cand 4173.7 instr/op = 0.324x (3.09x fewer)
+  GET guard  ctl 1663.2 -> cand 1668.7 instr/op = 1.0033x (neutral)
+
+BYTE-IDENTICAL vs redis 7.2.4: plain / full / negative / empty / oob / missing-key / wrongtype /
+WITHSCORES-fallback / REV-fallback / RESP3 = 10/10 MATCH. Gates: build green; 3/3 floor tests;
+fr-conformance FULLY GREEN (194+99); fr-server clippy-clean on hunk. Pre-existing unrelated failures
+(MSET fe57482f6, lua_eval clippy) not introduced. Artifacts:
+artifacts/optimization/frankenredis-8jcit/20260723T2300Z/.
+
+SESSION DISPATCH-FLOOR TALLY (7 commands): ZSCORE 1.97x, HGET 1.88x, SISMEMBER 1.95x, SRANDMEMBER
+2.74x, GETRANGE 1.62x, BITCOUNT 1.46x, ZRANGE 3.09x. The win magnitude is predictable from control
+process_buffered_frames% (ZRANGE 21.21% -> 3.09x ... BITCOUNT 6.46% -> 1.46x). Next unfloored by
+profile: HRANDFIELD (16.00% — big!), BITPOS (6.63%); SINTERCARD (4.97%) is below the ~6% floor-worth
+threshold. Same 5-part recipe.
+
 ## 2026-07-23: SHIPPED — dispatch-floor front gate for BITCOUNT key (no range); 1.46x fewer instructions on P16, closes au36f (bitcount-floor)
 
 Completes frankenredis-au36f (GETRANGE half shipped ee36ce937). BITCOUNT-no-range was the 4th-ranked

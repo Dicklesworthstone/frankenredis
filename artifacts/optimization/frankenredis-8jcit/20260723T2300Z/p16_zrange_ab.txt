@@ -1,0 +1,11 @@
+plain ZRANGE dispatch-floor — KEEP (biggest floor win yet). Top-ranked unfloored read
+(control process_buffered_frames 21.21% self at P16).
+Arms hash-bracketed: ctl 808dcd40e406f3686ef694f6f838de277605be54 (HEAD, ZRANGE unfloored) /
+cand 0d76c5da4747d3b2a4a10366dddc1aaf71808a13 (+plain-ZRANGE floor arm, 6-byte, arity 4).
+Commandstats-normalized instructions:u (-c50 -P16, perf -- sleep 6, calls-delta):
+  ZRANGE     ctl 12877.0 -> cand 4173.7 instr/op = 0.324x (3.09x fewer)
+  GET guard  ctl 1663.2 -> cand 1668.7 instr/op = 1.0033x (neutral)
+Byte-identical vs redis 7.2.4: plain 0..10 / full 0..-1 / neg -5..-1 / empty(10,5) / oob(100,200) /
+missing-key / wrongtype / WITHSCORES-fallback / REV-fallback / RESP3 = 10/10 MATCH. Only *4 ZRANGE
+key start stop floors; WITHSCORES/REV/LIMIT/BYSCORE/BYLEX (higher arity) fall back unchanged.
+FastEncodedReply via execute_plain_zrange_borrowed_into (flat array, RESP2/RESP3-identical, no resp3 flag).
