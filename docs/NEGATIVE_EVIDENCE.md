@@ -4,6 +4,36 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-23 FoggyOrchid: SURFACE — core + compute single-command surface re-confirmed SATURATED (parity-or-fr-superior); P16 throughput "losses" are the ledgered syscall-bound artifact; SORT reply-materialization characterized
+
+Sole-producer sweep on HEAD 126ff7f39 vs vendored redis 7.2.4 (pinned, fr core2/redis core3/client 6,7).
+INSTRUCTIONS:u is load-invariant and decisive; throughput ratios under -P are host-scheduling noise
+(the project_p16_pipeline_parity_syscall_bound lock-in).
+
+Core single-command (redis-benchmark -t, instructions:u per 1M -P16 window, 2 reps):
+- GET P16: fr 1.691B vs redis 3.463B = **0.488x** (fr uses <HALF redis's instructions; the 0.888x
+  throughput "loss" is pure syscall/epoll scheduling — no CPU lever exists, ledgered blocker).
+- INCR P16: fr 3.503B vs redis 3.761B = **0.929x** (fr 7% fewer; the 0.855x throughput is noise).
+- P1 GET/SET/INCR/HSET/LPUSH all 0.965-1.010x throughput = the syscall-bound plateau (known).
+
+Compute-heavy (instructions:u, -P8 so command work dominates — CAUTION: unpipelined -n<=100k
+perf-stat DID NOT ATTACH, gave a constant ~1.9M setup-only artifact across all commands; use -P8
++ -n>=200k):
+- SORT numeric (1000-elem list): fr 231.8B vs redis 316.8B = **0.73x — fr WINS**.
+- Set-algebra STORE, streams (XADD/XRANGE), LPUSH: all fr-dominant (prior sweep, unchanged).
+
+CONCLUSION: the reachable single-command CPU surface is saturated — no command where fr loses on
+instructions. The pipeline/writev lane remains the triple-ledgered syscall-bound blocker (fr already
+<0.5x redis instructions on pipelined GET). CHARACTERIZED (deferred, not a loss): SORT's plain-return
+reply materializes a `Vec<RespFrame>` (profile: from_iter 6.93% + RespFrame::encode_into 6.89%) +
+clones every element into an owned `Vec<Vec<u8>>` (3.49%) — the borrow-encode/reply-set-elimination
+vein (vlis9/HGETALL pattern) applies, but needs the full `execute_plain_sort_borrowed_into` path
+across fr-command/fr-runtime/fr-server and only widens an existing win (0.73x). Retry predicate for
+SORT: pursue only if a borrowed-into path is being added for a sibling command anyway (share the
+plumbing), or if SORT shows up >=5% of a real mixed profile. Next cycle: parity promotions (many P2/P3
+differ-register beads ready) or an alien-graveyard structural primitive — the micro-lever vein on
+reachable commands is mined out.
+
 ## 2026-07-23 FoggyOrchid: REJECT (premise) — the RESTORE listpack-re-walk "gap" is a measurement artifact; fr's eager span decode WINS the realistic RESTORE+read workload 0.89x. Closes c92f6/hm95r lazy-span lever.
 
 The RESTORE-in-isolation gap is real and stable (HEAD a135a4b9c/fr_d_cand vs vendored redis 7.2.4,
