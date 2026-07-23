@@ -4,6 +4,43 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-23: SHIPPED — dispatch-floor front gate for key+member reads HGET/SISMEMBER/ZSCORE; ~1.9-2x fewer instructions each on P16 (frankenredis-xymiw)
+
+NEGATIVE-LEDGER-FIRST: the dispatch-floor family is a proven KEEP pattern (TTL 2.63x, MEMORY 4.20x,
+SETBIT 3.69x, ZCOUNT 2.0x) — a command NOT in the floor pays ~29% process_buffered_frames matcher
+cost at P16. f9e5b76a8 SURFACE handed ZSCORE off to cod as the next target; cod is weekly-capped, so
+sole producer picked it up and extended to the two siblings the xymiw bead names (HGET/SISMEMBER —
+same key+member 3-arg read shape). Confirmed unfloored via the classifier code (6-byte arm had
+EXISTS/SETBIT/ZCOUNT/STRLEN/MEMORY/OBJECT but not ZSCORE; 4-byte lacked HGET; no 9-byte arm for
+SISMEMBER) and profile (control ZSCORE P16 process_buffered_frames 12.68% self). The borrowed
+parsers (parse_borrowed_plain_{zscore,hget,sismember}_packet) + executors
+(execute_plain_{zscore,hget}_borrowed_into, execute_plain_sismember_borrowed) ALREADY shipped; only
+the dispatch-floor routing is new. HGET/ZSCORE use the `_into` FastEncodedReply shape, SISMEMBER the
+RespFrame FastReply shape.
+
+MEASURED (commandstats-normalized instructions:u; sustained redis-benchmark -c50 -P16 in background,
+`perf stat -p <server> -- sleep 6`, instr/op = instr_window / cmdstat_<cmd>:calls delta; hash-bracketed
+builds ctl e56f5b2b / cand 1bdeca9f on identical peer-WIP snapshot):
+  ZSCORE     ctl 6125 -> cand 3111 instr/op = 0.508x (1.97x fewer)
+  HGET       ctl 6039 -> cand 3204 instr/op = 0.531x (1.88x fewer)
+  SISMEMBER  ctl 5805 -> cand 2972 instr/op = 0.512x (1.95x fewer)
+  GET guard  ctl 1665 -> cand 1672 instr/op = 1.004x (+0.4%, neutral hot-path tax)
+Profile (cand, sustained ZSCORE P16): process_buffered_frames 12.68% -> <2% self; top frame now the
+executor PackedZSet::locate 4.78% — the exact shipped collapse. MEASUREMENT TRAP banked: `perf stat
+-p PID -- redis-benchmark` and `-o FILE` give setup-only artifacts (~8M constant); the reliable form
+is `-p PID -- sleep N` + commandstats-delta normalization, and command words must be passed unquoted.
+
+BYTE-IDENTICAL (cand vs vendored redis 7.2.4, live): RESP2 hit/miss-member/miss-key/wrongtype x3
+commands = 12/12 MATCH; RESP3 (HELLO 3) ZSCORE=,25 / null=_ / HGET=$3 v25 / SISMEMBER=:1 = 4/4 MATCH.
+Floor routes exact *3 CMD key member only; wrong-arity/options/gated fall back to the unchanged
+generic path (byte-identity by construction — same parser+executor). Gates: cargo check/build green;
+focused test dispatch_floor_recognizes_key_member_read_tokens + the 2 pre-existing floor classifier
+tests green (3/3); fr-server clippy-clean on the hunk. PRE-EXISTING unrelated (NOT introduced): the
+borrowed_plain_mset test failure (fe57482f6 "batch-test pending") and 3 fr-command/lua_eval.rs
+floating-nightly clippy spans. Artifacts: artifacts/optimization/frankenredis-xymiw/20260723T2100Z/.
+Do NOT retry these executors/parsers (already optimal); remaining floor candidates need their own
+fresh top-frame profiles.
+
 ## 2026-07-23 FoggyOrchid: SURFACE — core + compute single-command surface re-confirmed SATURATED (parity-or-fr-superior); P16 throughput "losses" are the ledgered syscall-bound artifact; SORT reply-materialization characterized
 
 Sole-producer sweep on HEAD 126ff7f39 vs vendored redis 7.2.4 (pinned, fr core2/redis core3/client 6,7).

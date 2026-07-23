@@ -1,0 +1,28 @@
+frankenredis-xymiw — dispatch-floor for key+member reads HGET/SISMEMBER/ZSCORE — KEEP
+(f9e5b76a8 SURFACE handed ZSCORE to cod; cod weekly-capped, picked up by sole producer.)
+
+Arms hash-bracketed on identical peer-WIP snapshot (fr-runtime d9a75c91 unchanged across both):
+  control  sha256 e56f5b2bf558beb6ef3d8af4a7ab79e242ad6a34 (/tmp/fr_zf_ctl.bin, HEAD, unfloored)
+  candidate sha256 1bdeca9fb5f481de0af8599db645d4d7d9859938 (/tmp/fr_zf_cand.bin, +3 floor arms)
+
+Method: commandstats-normalized instructions:u. Sustained `redis-benchmark -c50 -P16` of each
+command in background; `perf stat -e instructions:u -p <server> -- sleep 6` measures the server;
+instr/op = instr_window / (cmdstat_<cmd>:calls delta over the window). Servers pinned ctl core2 /
+cand core3, client 6,7. (NOTE the perf-stat trap: `-p PID -- redis-benchmark` and `-o FILE` give
+setup-only artifacts; the reliable form is `-p PID -- sleep N` + calls-delta normalization.)
+
+command    ctl instr/op   cand instr/op   cand/ctl
+ZSCORE     6125.0         3111.1          0.508x  (1.97x fewer)
+HGET       6038.9         3203.6          0.531x  (1.88x fewer)
+SISMEMBER  5805.0         2971.9          0.512x  (1.95x fewer)
+GET guard  1665.0         1671.8          1.004x  (+0.4%, neutral hot-path tax)
+
+Profile (candidate, sustained ZSCORE P16, -F1999): process_buffered_frames dropped from control's
+12.68% self to <2% (below the percent-limit); top frame is now the executor PackedZSet::locate
+4.78% — the exact shipped dispatch-floor collapse (cf. TTL 2.63x, MEMORY 4.20x, SETBIT 3.69x).
+
+Byte-identity (candidate vs vendored redis 7.2.4, live): RESP2 hit/miss-member/miss-key/wrongtype
+for all 3 commands = 12/12 MATCH; RESP3 (HELLO 3) ZSCORE=,25 / null=_ / HGET bulk / SISMEMBER :1
+= 4/4 MATCH. Floor routes exact *3 CMD key member through the already-shipped
+parse_borrowed_plain_{zscore,hget,sismember}_packet + execute_plain_{...}_borrowed{,_into};
+wrong-arity/options/gated fall back to the unchanged generic path.

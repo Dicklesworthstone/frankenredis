@@ -12245,6 +12245,9 @@ enum BorrowedDispatchFloorClass {
     Zcard,
     Zremrangebyrank,
     Zcount,
+    Zscore,
+    Hget,
+    Sismember,
 }
 
 struct BorrowedDispatchFloorToken<'a> {
@@ -12260,6 +12263,7 @@ enum BorrowedDispatchFloorCommand {
     Exists,
     Getex,
     Hdel,
+    Hget,
     Hlen,
     Llen,
     Lpos,
@@ -12271,6 +12275,7 @@ enum BorrowedDispatchFloorCommand {
     Sadd,
     Scard,
     Setbit,
+    Sismember,
     Srem,
     Strlen,
     Ttl,
@@ -12280,6 +12285,7 @@ enum BorrowedDispatchFloorCommand {
     Zcount,
     Zrem,
     Zremrangebyrank,
+    Zscore,
 }
 
 fn uppercase_ascii_token<const N: usize>(token: &[u8]) -> Option<[u8; N]> {
@@ -12306,6 +12312,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'L', b'P', b'O', b'S'] => Some(BorrowedDispatchFloorCommand::Lpos),
             [b'S', b'A', b'D', b'D'] => Some(BorrowedDispatchFloorCommand::Sadd),
             [b'H', b'D', b'E', b'L'] => Some(BorrowedDispatchFloorCommand::Hdel),
+            [b'H', b'G', b'E', b'T'] => Some(BorrowedDispatchFloorCommand::Hget),
             [b'S', b'R', b'E', b'M'] => Some(BorrowedDispatchFloorCommand::Srem),
             [b'Z', b'R', b'E', b'M'] => Some(BorrowedDispatchFloorCommand::Zrem),
             _ => None,
@@ -12325,11 +12332,18 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'S', b'T', b'R', b'L', b'E', b'N'] => Some(BorrowedDispatchFloorCommand::Strlen),
             [b'M', b'E', b'M', b'O', b'R', b'Y'] => Some(BorrowedDispatchFloorCommand::Memory),
             [b'O', b'B', b'J', b'E', b'C', b'T'] => Some(BorrowedDispatchFloorCommand::Object),
+            [b'Z', b'S', b'C', b'O', b'R', b'E'] => Some(BorrowedDispatchFloorCommand::Zscore),
             _ => None,
         },
         7 => match uppercase_ascii_token::<7>(token)? {
             [b'P', b'F', b'C', b'O', b'U', b'N', b'T'] => {
                 Some(BorrowedDispatchFloorCommand::Pfcount)
+            }
+            _ => None,
+        },
+        9 => match uppercase_ascii_token::<9>(token)? {
+            [b'S', b'I', b'S', b'M', b'E', b'M', b'B', b'E', b'R'] => {
+                Some(BorrowedDispatchFloorCommand::Sismember)
             }
             _ => None,
         },
@@ -12603,6 +12617,11 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         }
         (4, BorrowedDispatchFloorCommand::Setbit) => Some(BorrowedDispatchFloorClass::Setbit),
         (4, BorrowedDispatchFloorCommand::Zcount) => Some(BorrowedDispatchFloorClass::Zcount),
+        (3, BorrowedDispatchFloorCommand::Zscore) => Some(BorrowedDispatchFloorClass::Zscore),
+        (3, BorrowedDispatchFloorCommand::Hget) => Some(BorrowedDispatchFloorClass::Hget),
+        (3, BorrowedDispatchFloorCommand::Sismember) => {
+            Some(BorrowedDispatchFloorClass::Sismember)
+        }
         (4, BorrowedDispatchFloorCommand::Zremrangebyrank) => {
             Some(BorrowedDispatchFloorClass::Zremrangebyrank)
         }
@@ -13468,6 +13487,98 @@ fn try_dispatch_floor_classified_action(
             if let Some(packet) = parse_borrowed_plain_zcount_packet(unparsed, &parser_config)
                 && let Some(response) =
                     runtime.execute_plain_zcount_borrowed(packet.key, packet.min, packet.max, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Zscore => {
+            // ZSCORE writes its score reply straight into `out` via the `_into`
+            // executor (encode_redis_double, no intermediate RespFrame), so this
+            // is a FastEncodedReply — not the FastReply shape ZCOUNT uses. The
+            // parser+executor already shipped; only the dispatch-floor routing is
+            // new (frankenredis-zscore-floor, the f9e5b76a8 handoff). On a
+            // parse/executor miss the executor writes nothing, so the fallback
+            // re-processes the same bytes cleanly.
+            let hit = parse_borrowed_plain_zscore_packet(unparsed, &parser_config).and_then(
+                |packet| {
+                    let client_resp3 =
+                        runtime.client_session().resp_protocol_version() == 3;
+                    runtime
+                        .execute_plain_zscore_borrowed_into(
+                            packet.key,
+                            packet.member,
+                            ts,
+                            client_resp3,
+                            out,
+                        )
+                        .map(|()| packet.consumed)
+                },
+            );
+            if let Some(consumed) = hit {
+                Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Hget => {
+            // HGET mirrors ZSCORE: the `_into` executor writes the borrowed
+            // field-value straight into `out` (no BulkString(Vec) alloc), so this
+            // is a FastEncodedReply. Parser+executor already shipped; only the
+            // dispatch-floor routing is new (frankenredis-xymiw).
+            let hit = parse_borrowed_plain_hget_packet(unparsed, &parser_config).and_then(
+                |packet| {
+                    let client_resp3 =
+                        runtime.client_session().resp_protocol_version() == 3;
+                    runtime
+                        .execute_plain_hget_borrowed_into(
+                            packet.key,
+                            packet.member,
+                            ts,
+                            client_resp3,
+                            out,
+                        )
+                        .map(|()| packet.consumed)
+                },
+            );
+            if let Some(consumed) = hit {
+                Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Sismember => {
+            // SISMEMBER mirrors ZCOUNT: the borrowed executor returns an integer
+            // RespFrame (FastReply). Parser+executor already shipped; only the
+            // dispatch-floor routing is new (frankenredis-xymiw).
+            if let Some(packet) = parse_borrowed_plain_sismember_packet(unparsed, &parser_config)
+                && let Some(response) =
+                    runtime.execute_plain_sismember_borrowed(packet.key, packet.member, ts)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -33691,6 +33802,37 @@ mod tests {
             RespFrame::Error("UNBLOCKED client unblocked via CLIENT UNBLOCK".to_string())
                 .to_bytes()
         );
+    }
+
+    #[test]
+    fn dispatch_floor_recognizes_key_member_read_tokens() {
+        // (frankenredis-xymiw) The floor classifier must recognize the exact
+        // key+member read tokens routed through the existing borrowed parsers +
+        // executors; case-insensitively, and only at their exact byte lengths.
+        use crate::{BorrowedDispatchFloorCommand, borrowed_dispatch_floor_command};
+        assert_eq!(
+            borrowed_dispatch_floor_command(b"ZSCORE"),
+            Some(BorrowedDispatchFloorCommand::Zscore)
+        );
+        assert_eq!(
+            borrowed_dispatch_floor_command(b"zscore"),
+            Some(BorrowedDispatchFloorCommand::Zscore)
+        );
+        assert_eq!(
+            borrowed_dispatch_floor_command(b"HGET"),
+            Some(BorrowedDispatchFloorCommand::Hget)
+        );
+        assert_eq!(
+            borrowed_dispatch_floor_command(b"SISMEMBER"),
+            Some(BorrowedDispatchFloorCommand::Sismember)
+        );
+        assert_eq!(
+            borrowed_dispatch_floor_command(b"SISMEMBERX"),
+            None,
+            "10-byte token must not match the 9-byte SISMEMBER arm"
+        );
+        assert_eq!(borrowed_dispatch_floor_command(b"ZSCOR"), None);
+        assert_eq!(borrowed_dispatch_floor_command(b"HGE"), None);
     }
 
     #[test]
