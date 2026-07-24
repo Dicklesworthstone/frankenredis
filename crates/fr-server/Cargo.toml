@@ -21,6 +21,7 @@ fr-repl = { path = "../fr-repl" }
 fr-persist = { path = "../fr-persist" }
 fr-command = { path = "../fr-command" }
 fr-eventloop = { path = "../fr-eventloop" }
+foldhash = "0.1"
 mio.workspace = true
 tikv-jemallocator = { workspace = true, optional = true }
 mimalloc = { workspace = true, optional = true }

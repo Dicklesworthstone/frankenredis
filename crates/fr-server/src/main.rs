@@ -317,6 +317,17 @@ impl BlockedWakeIndex {
     }
 }
 
+/// The per-connection registry, keyed by mio `Token` (a `usize` wrapper). The
+/// std default hasher SipHashes the token on every `get_mut(&token)` — one lookup
+/// per readable/writable event, on the hottest path in the server. Token values
+/// are server-assigned mio slab indices (never attacker-controlled), so a
+/// cryptographic hash buys nothing; `foldhash::fast` collapses the per-event hash
+/// to a couple of instructions. Same SipHash→foldhash swap the store already made
+/// for its stream side-map and script cache. Nothing depends on iteration order
+/// (both `clients.iter_mut()` sites — idle scan and replica backlog — are
+/// order-independent).
+type ClientMap = HashMap<Token, ClientConnection, foldhash::fast::RandomState>;
+
 /// Per-client connection state.
 struct ClientConnection {
     stream: TcpStream,
@@ -1246,7 +1257,7 @@ fn main() -> ExitCode {
     );
 
     let mut events = Events::with_capacity(1024);
-    let mut clients: HashMap<Token, ClientConnection> = HashMap::new();
+    let mut clients: ClientMap = ClientMap::default();
     let mut client_id_to_token: HashMap<u64, Token> = HashMap::new();
     let mut blocked_tokens: HashSet<Token> = HashSet::new();
     let mut blocked_wake_index = BlockedWakeIndex::default();
@@ -1723,7 +1734,7 @@ fn rebind_listeners(
 fn accept_connections(
     listener: &TcpListener,
     poll: &mut Poll,
-    clients: &mut HashMap<Token, ClientConnection>,
+    clients: &mut ClientMap,
     client_id_to_token: &mut HashMap<u64, Token>,
     next_handle: &mut usize,
     runtime: &mut Runtime,
@@ -1840,7 +1851,7 @@ fn accept_connections(
 /// (frankenredis)
 #[allow(clippy::too_many_arguments)]
 fn release_expired_client_pause(
-    clients: &mut HashMap<Token, ClientConnection>,
+    clients: &mut ClientMap,
     runtime: &mut Runtime,
     poll: &mut Poll,
     blocked_tokens: &mut HashSet<Token>,
@@ -2156,7 +2167,7 @@ fn continue_large_plain_set_read(
 #[allow(clippy::too_many_arguments)]
 fn handle_readable(
     token: Token,
-    clients: &mut HashMap<Token, ClientConnection>,
+    clients: &mut ClientMap,
     runtime: &mut Runtime,
     poll: &mut Poll,
     blocked_tokens: &mut HashSet<Token>,
@@ -23909,7 +23920,7 @@ fn blocked_timeout_response(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64)
 }
 
 struct CheckBlockedClientsContext<'a> {
-    clients: &'a mut HashMap<Token, ClientConnection>,
+    clients: &'a mut ClientMap,
     blocked_tokens: &'a mut HashSet<Token>,
     blocked_wake_index: &'a mut BlockedWakeIndex,
     closing_tokens: &'a mut HashSet<Token>,
@@ -24078,7 +24089,7 @@ fn check_blocked_clients(ctx: CheckBlockedClientsContext<'_>) {
 }
 
 struct PendingClientUnblocksContext<'a> {
-    clients: &'a mut HashMap<Token, ClientConnection>,
+    clients: &'a mut ClientMap,
     client_id_to_token: &'a HashMap<u64, Token>,
     blocked_tokens: &'a mut HashSet<Token>,
     blocked_wake_index: &'a mut BlockedWakeIndex,
@@ -24179,7 +24190,7 @@ fn apply_pending_client_unblocks(ctx: PendingClientUnblocksContext<'_>) {
 }
 
 struct DeferredBufferedClientsContext<'a> {
-    clients: &'a mut HashMap<Token, ClientConnection>,
+    clients: &'a mut ClientMap,
     blocked_tokens: &'a mut HashSet<Token>,
     blocked_wake_index: &'a mut BlockedWakeIndex,
     closing_tokens: &'a mut HashSet<Token>,
@@ -24473,7 +24484,7 @@ fn try_fulfill_blocked(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64) -> O
 }
 
 fn propagate_writes_to_replicas(
-    clients: &mut HashMap<Token, ClientConnection>,
+    clients: &mut ClientMap,
     runtime: &mut Runtime,
     poll: &mut Poll,
     write_tokens: &mut HashSet<Token>,
@@ -24525,7 +24536,7 @@ fn propagate_writes_to_replicas(
 /// Deliver pending Pub/Sub messages to all subscribed clients.
 /// Deliver MONITOR output to all monitor clients.
 fn deliver_monitor_output(
-    clients: &mut HashMap<Token, ClientConnection>,
+    clients: &mut ClientMap,
     client_id_to_token: &HashMap<u64, Token>,
     runtime: &mut Runtime,
     poll: &mut Poll,
@@ -24570,7 +24581,7 @@ fn deliver_monitor_output(
 }
 
 fn deliver_pubsub_messages(
-    clients: &mut HashMap<Token, ClientConnection>,
+    clients: &mut ClientMap,
     client_id_to_token: &HashMap<u64, Token>,
     runtime: &mut Runtime,
     poll: &mut Poll,
@@ -24889,7 +24900,7 @@ fn arm_main_writable(
 
 fn drain_writer_completions(
     writer_pool: Option<&WriterPool>,
-    clients: &mut HashMap<Token, ClientConnection>,
+    clients: &mut ClientMap,
     runtime: &mut Runtime,
     poll: &mut Poll,
     write_tokens: &mut HashSet<Token>,
@@ -24964,7 +24975,7 @@ fn prefix_writer_unsent_bytes(conn: &mut ClientConnection, mut unsent: Vec<u8>) 
 
 fn handle_writable(
     token: Token,
-    clients: &mut HashMap<Token, ClientConnection>,
+    clients: &mut ClientMap,
     runtime: &mut Runtime,
     write_tokens: &mut HashSet<Token>,
     closing_tokens: &mut HashSet<Token>,
@@ -32515,7 +32526,7 @@ mod tests {
         let listener = mio::net::TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
         let addr = listener.local_addr().unwrap();
 
-        let mut clients: HashMap<Token, crate::ClientConnection> = HashMap::new();
+        let mut clients: crate::ClientMap = crate::ClientMap::default();
         let mut client_id_to_token: HashMap<u64, Token> = HashMap::new();
         let mut next_handle = crate::MAX_LISTENERS;
 
@@ -32601,7 +32612,7 @@ mod tests {
             .to_bytes(),
         );
 
-        let mut clients: HashMap<Token, crate::ClientConnection> = HashMap::new();
+        let mut clients: crate::ClientMap = crate::ClientMap::default();
         clients.insert(token, conn);
         let mut blocked_tokens = HashSet::new();
         let mut blocked_wake_index = crate::BlockedWakeIndex::default();
@@ -32755,7 +32766,7 @@ mod tests {
             RespFrame::BulkString(Some(b"1000-0".to_vec()))
         );
 
-        let mut clients = HashMap::from([(token, conn)]);
+        let mut clients: crate::ClientMap = [(token, conn)].into_iter().collect();
         let mut poll = Poll::new().unwrap();
         let mut deferred_tokens = HashSet::new();
         check_blocked_clients(CheckBlockedClientsContext {
@@ -32898,7 +32909,7 @@ mod tests {
             RespFrame::BulkString(Some(b"2000-0".to_vec()))
         );
 
-        let mut clients = HashMap::from([(token, conn)]);
+        let mut clients: crate::ClientMap = [(token, conn)].into_iter().collect();
         let mut poll = Poll::new().unwrap();
         let mut deferred_tokens = HashSet::new();
         check_blocked_clients(CheckBlockedClientsContext {
@@ -33142,7 +33153,7 @@ mod tests {
         assert!(runtime.replication_primary_offset() > initial_offset);
 
         // 4. Propagate writes.
-        let mut clients = HashMap::new();
+        let mut clients: crate::ClientMap = crate::ClientMap::default();
         let token = Token(1); // ubs:ignore
         clients.insert(token, replica_conn);
         let mut write_tokens = HashSet::new();
@@ -33280,7 +33291,7 @@ mod tests {
 
         // 5. Propagate write to replica
         replica_conn.write_buf.clear();
-        let mut clients = HashMap::new();
+        let mut clients: crate::ClientMap = crate::ClientMap::default();
         let token = Token(1);
         clients.insert(token, replica_conn);
         let mut write_tokens = HashSet::new();
@@ -33306,7 +33317,7 @@ mod tests {
 
         // 7. Replica propagates write to sub-replica
         sub_replica_conn.write_buf.clear();
-        let mut sub_clients = HashMap::new();
+        let mut sub_clients: crate::ClientMap = crate::ClientMap::default();
         let sub_token = Token(2);
         sub_clients.insert(sub_token, sub_replica_conn);
         let mut sub_write_tokens = HashSet::new();
@@ -34033,7 +34044,7 @@ mod tests {
         std::io::Read::read_exact(&mut requester_peer, &mut requester_reply).unwrap();
         assert_eq!(requester_reply, *b":1\r\n");
 
-        let mut clients = HashMap::from([(blocked_token, blocked_conn)]);
+        let mut clients: crate::ClientMap = [(blocked_token, blocked_conn)].into_iter().collect();
         let client_id_to_token = HashMap::from([(blocked_client_id, blocked_token)]); // ubs:ignore
         let mut poll = Poll::new().unwrap();
         let mut deferred_tokens = HashSet::new();
@@ -34213,7 +34224,7 @@ mod tests {
         );
         let _ = runtime.swap_session(previous);
 
-        let mut clients = HashMap::from([(blocked_token, blocked_conn)]);
+        let mut clients: crate::ClientMap = [(blocked_token, blocked_conn)].into_iter().collect();
         let client_id_to_token = HashMap::from([(blocked_client_id, blocked_token)]); // ubs:ignore
         let mut blocked_tokens = HashSet::from([blocked_token]);
         let mut blocked_wake_index = crate::BlockedWakeIndex::default();
@@ -34317,7 +34328,7 @@ mod tests {
         );
         assert!(runtime.is_client_paused(21));
 
-        let mut clients = HashMap::from([(blocked_token, blocked_conn)]);
+        let mut clients: crate::ClientMap = [(blocked_token, blocked_conn)].into_iter().collect();
         let mut blocked_tokens = HashSet::from([blocked_token]);
         let mut blocked_wake_index = crate::BlockedWakeIndex::default();
         if let Some(blocked) = clients

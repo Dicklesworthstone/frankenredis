@@ -455,6 +455,7 @@ dependencies = [
 name = "fr-server"
 version = "0.1.0"
 dependencies = [
+ "foldhash",
  "fr-command",
  "fr-config",
  "fr-eventloop",
