@@ -327,6 +327,13 @@ impl BlockedWakeIndex {
 /// (both `clients.iter_mut()` sites — idle scan and replica backlog — are
 /// order-independent).
 type ClientMap = HashMap<Token, ClientConnection, foldhash::fast::RandomState>;
+/// The event-loop's per-tick token tracking sets (write/blocked/closing/paused/
+/// deferred). Keyed by mio `Token` (a `usize`); `write_tokens` is inserted/removed
+/// on every command via `drive_client_output`, so the std default SipHash on the
+/// token was a residual per-command cost after the `clients` map moved to foldhash.
+/// std `HashSet` iteration order is already randomized (RandomState is seeded), so
+/// nothing depends on order — foldhash keeps that property and drops the crypto hash.
+type TokenSet = HashSet<Token, foldhash::fast::RandomState>;
 
 /// Per-client connection state.
 struct ClientConnection {
@@ -1263,12 +1270,12 @@ fn main() -> ExitCode {
     // memset 8 KiB on every readable event). Only `buf[..n]` is ever consumed.
     let mut read_scratch = [0u8; 8192];
     let mut client_id_to_token: HashMap<u64, Token> = HashMap::new();
-    let mut blocked_tokens: HashSet<Token> = HashSet::new();
+    let mut blocked_tokens: TokenSet = TokenSet::default();
     let mut blocked_wake_index = BlockedWakeIndex::default();
-    let mut closing_tokens: HashSet<Token> = HashSet::new();
-    let mut write_tokens: HashSet<Token> = HashSet::new();
-    let mut paused_tokens: HashSet<Token> = HashSet::new();
-    let mut deferred_tokens: HashSet<Token> = HashSet::new();
+    let mut closing_tokens: TokenSet = TokenSet::default();
+    let mut write_tokens: TokenSet = TokenSet::default();
+    let mut paused_tokens: TokenSet = TokenSet::default();
+    let mut deferred_tokens: TokenSet = TokenSet::default();
     let mut replica_sync = ReplicaSyncState::new();
     // (frankenredis-jd75g) Client handles start above the reserved listener
     // token range (0..MAX_LISTENERS).
@@ -1860,12 +1867,12 @@ fn release_expired_client_pause(
     clients: &mut ClientMap,
     runtime: &mut Runtime,
     poll: &mut Poll,
-    blocked_tokens: &mut HashSet<Token>,
+    blocked_tokens: &mut TokenSet,
     blocked_wake_index: &mut BlockedWakeIndex,
-    closing_tokens: &mut HashSet<Token>,
-    write_tokens: &mut HashSet<Token>,
-    paused_tokens: &mut HashSet<Token>,
-    deferred_tokens: &mut HashSet<Token>,
+    closing_tokens: &mut TokenSet,
+    write_tokens: &mut TokenSet,
+    paused_tokens: &mut TokenSet,
+    deferred_tokens: &mut TokenSet,
     ts: u64,
     ts_us: u64,
     writer_pool: Option<&WriterPool>,
@@ -2035,7 +2042,7 @@ fn try_start_large_plain_set_read(conn: &mut ClientConnection, config: ParserCon
 fn continue_large_plain_set_read(
     conn: &mut ClientConnection,
     runtime: &mut Runtime,
-    closing_tokens: &mut HashSet<Token>,
+    closing_tokens: &mut TokenSet,
     token: Token,
 ) -> LargeSetReadProgress {
     let mut read_any = false;
@@ -2178,12 +2185,12 @@ fn handle_readable(
     clients: &mut ClientMap,
     runtime: &mut Runtime,
     poll: &mut Poll,
-    blocked_tokens: &mut HashSet<Token>,
+    blocked_tokens: &mut TokenSet,
     blocked_wake_index: &mut BlockedWakeIndex,
-    closing_tokens: &mut HashSet<Token>,
-    write_tokens: &mut HashSet<Token>,
-    paused_tokens: &mut HashSet<Token>,
-    deferred_tokens: &mut HashSet<Token>,
+    closing_tokens: &mut TokenSet,
+    write_tokens: &mut TokenSet,
+    paused_tokens: &mut TokenSet,
+    deferred_tokens: &mut TokenSet,
     ts: u64,
     ts_us: u64,
     writer_pool: Option<&WriterPool>,
@@ -2465,7 +2472,7 @@ fn handle_readable(
 fn record_deferred_buffered_token(
     token: Token,
     conn: &ClientConnection,
-    deferred_tokens: &mut HashSet<Token>,
+    deferred_tokens: &mut TokenSet,
     budget_exhausted: bool,
 ) {
     if budget_exhausted
@@ -2495,11 +2502,11 @@ fn process_buffered_frames(
     token: Token,
     conn: &mut ClientConnection,
     runtime: &mut Runtime,
-    blocked_tokens: &mut HashSet<Token>,
+    blocked_tokens: &mut TokenSet,
     blocked_wake_index: &mut BlockedWakeIndex,
-    closing_tokens: &mut HashSet<Token>,
-    write_tokens: &mut HashSet<Token>,
-    paused_tokens: &mut HashSet<Token>,
+    closing_tokens: &mut TokenSet,
+    write_tokens: &mut TokenSet,
+    paused_tokens: &mut TokenSet,
     ts: u64,
     ts_us: u64,
 ) -> bool {
@@ -22572,11 +22579,11 @@ fn process_argv_frame(
     argv: &[Vec<u8>],
     conn: &mut ClientConnection,
     runtime: &mut Runtime,
-    blocked_tokens: &mut HashSet<Token>,
+    blocked_tokens: &mut TokenSet,
     blocked_wake_index: &mut BlockedWakeIndex,
-    closing_tokens: &mut HashSet<Token>,
-    write_tokens: &mut HashSet<Token>,
-    paused_tokens: &mut HashSet<Token>,
+    closing_tokens: &mut TokenSet,
+    write_tokens: &mut TokenSet,
+    paused_tokens: &mut TokenSet,
     ts: u64,
     ts_us: u64,
 ) -> ProcessArgvAction {
@@ -22736,7 +22743,7 @@ fn disconnect_if_output_limit_exceeded(
     conn: &mut ClientConnection,
     output_hard_limit_cache: &mut Option<usize>,
     runtime: &Runtime,
-    closing_tokens: &mut HashSet<Token>,
+    closing_tokens: &mut TokenSet,
     token: Token,
 ) -> bool {
     // Zero pending output can never exceed a limit, so skip the limit lookup
@@ -22762,7 +22769,7 @@ fn disconnect_if_output_limit_exceeded(
 fn handle_parse_error(
     err: RespParseError,
     conn: &mut ClientConnection,
-    closing_tokens: &mut HashSet<Token>,
+    closing_tokens: &mut TokenSet,
     token: Token,
 ) -> bool {
     if err == RespParseError::Incomplete {
@@ -23982,14 +23989,14 @@ fn blocked_timeout_response(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64)
 
 struct CheckBlockedClientsContext<'a> {
     clients: &'a mut ClientMap,
-    blocked_tokens: &'a mut HashSet<Token>,
+    blocked_tokens: &'a mut TokenSet,
     blocked_wake_index: &'a mut BlockedWakeIndex,
-    closing_tokens: &'a mut HashSet<Token>,
-    paused_tokens: &'a mut HashSet<Token>,
+    closing_tokens: &'a mut TokenSet,
+    paused_tokens: &'a mut TokenSet,
     runtime: &'a mut Runtime,
     poll: &'a mut Poll,
-    write_tokens: &'a mut HashSet<Token>,
-    deferred_tokens: &'a mut HashSet<Token>,
+    write_tokens: &'a mut TokenSet,
+    deferred_tokens: &'a mut TokenSet,
     ts: u64,
     writer_pool: Option<&'a WriterPool>,
 }
@@ -24152,14 +24159,14 @@ fn check_blocked_clients(ctx: CheckBlockedClientsContext<'_>) {
 struct PendingClientUnblocksContext<'a> {
     clients: &'a mut ClientMap,
     client_id_to_token: &'a HashMap<u64, Token>,
-    blocked_tokens: &'a mut HashSet<Token>,
+    blocked_tokens: &'a mut TokenSet,
     blocked_wake_index: &'a mut BlockedWakeIndex,
-    closing_tokens: &'a mut HashSet<Token>,
-    paused_tokens: &'a mut HashSet<Token>,
+    closing_tokens: &'a mut TokenSet,
+    paused_tokens: &'a mut TokenSet,
     runtime: &'a mut Runtime,
     poll: &'a mut Poll,
-    write_tokens: &'a mut HashSet<Token>,
-    deferred_tokens: &'a mut HashSet<Token>,
+    write_tokens: &'a mut TokenSet,
+    deferred_tokens: &'a mut TokenSet,
     ts: u64,
     writer_pool: Option<&'a WriterPool>,
 }
@@ -24252,12 +24259,12 @@ fn apply_pending_client_unblocks(ctx: PendingClientUnblocksContext<'_>) {
 
 struct DeferredBufferedClientsContext<'a> {
     clients: &'a mut ClientMap,
-    blocked_tokens: &'a mut HashSet<Token>,
+    blocked_tokens: &'a mut TokenSet,
     blocked_wake_index: &'a mut BlockedWakeIndex,
-    closing_tokens: &'a mut HashSet<Token>,
-    write_tokens: &'a mut HashSet<Token>,
-    paused_tokens: &'a mut HashSet<Token>,
-    deferred_tokens: &'a mut HashSet<Token>,
+    closing_tokens: &'a mut TokenSet,
+    write_tokens: &'a mut TokenSet,
+    paused_tokens: &'a mut TokenSet,
+    deferred_tokens: &'a mut TokenSet,
     runtime: &'a mut Runtime,
     poll: &'a mut Poll,
     ts: u64,
@@ -24548,8 +24555,8 @@ fn propagate_writes_to_replicas(
     clients: &mut ClientMap,
     runtime: &mut Runtime,
     poll: &mut Poll,
-    write_tokens: &mut HashSet<Token>,
-    closing_tokens: &mut HashSet<Token>,
+    write_tokens: &mut TokenSet,
+    closing_tokens: &mut TokenSet,
     writer_pool: Option<&WriterPool>,
 ) {
     // Skip the O(connected-clients) sweep entirely when no replica is attached
@@ -24601,8 +24608,8 @@ fn deliver_monitor_output(
     client_id_to_token: &HashMap<u64, Token>,
     runtime: &mut Runtime,
     poll: &mut Poll,
-    write_tokens: &mut HashSet<Token>,
-    closing_tokens: &mut HashSet<Token>,
+    write_tokens: &mut TokenSet,
+    closing_tokens: &mut TokenSet,
     writer_pool: Option<&WriterPool>,
 ) {
     let output = runtime.drain_monitor_output();
@@ -24646,8 +24653,8 @@ fn deliver_pubsub_messages(
     client_id_to_token: &HashMap<u64, Token>,
     runtime: &mut Runtime,
     poll: &mut Poll,
-    write_tokens: &mut HashSet<Token>,
-    closing_tokens: &mut HashSet<Token>,
+    write_tokens: &mut TokenSet,
+    closing_tokens: &mut TokenSet,
     writer_pool: Option<&WriterPool>,
 ) {
     let pending_outboxes = runtime.drain_pubsub_outboxes();
@@ -24821,8 +24828,8 @@ fn frame_matches_suppressed_replication_reply(argv: &[Vec<u8>]) -> bool {
 struct OutputDriveContext<'a> {
     runtime: &'a mut Runtime,
     poll: &'a mut Poll,
-    write_tokens: &'a mut HashSet<Token>,
-    closing_tokens: &'a mut HashSet<Token>,
+    write_tokens: &'a mut TokenSet,
+    closing_tokens: &'a mut TokenSet,
     writer_pool: Option<&'a WriterPool>,
 }
 
@@ -24941,7 +24948,7 @@ fn arm_main_writable(
     token: Token,
     conn: &mut ClientConnection,
     poll: &mut Poll,
-    write_tokens: &mut HashSet<Token>,
+    write_tokens: &mut TokenSet,
 ) {
     if conn.has_pending_output() {
         write_tokens.insert(token);
@@ -24964,8 +24971,8 @@ fn drain_writer_completions(
     clients: &mut ClientMap,
     runtime: &mut Runtime,
     poll: &mut Poll,
-    write_tokens: &mut HashSet<Token>,
-    closing_tokens: &mut HashSet<Token>,
+    write_tokens: &mut TokenSet,
+    closing_tokens: &mut TokenSet,
 ) {
     let Some(pool) = writer_pool else {
         return;
@@ -25038,8 +25045,8 @@ fn handle_writable(
     token: Token,
     clients: &mut ClientMap,
     runtime: &mut Runtime,
-    write_tokens: &mut HashSet<Token>,
-    closing_tokens: &mut HashSet<Token>,
+    write_tokens: &mut TokenSet,
+    closing_tokens: &mut TokenSet,
     poll: &mut Poll,
     writer_pool: Option<&WriterPool>,
 ) {
@@ -30750,7 +30757,7 @@ mod tests {
         let runtime = Runtime::default_strict();
         let session = runtime.new_session();
         let mut conn = crate::ClientConnection::new(stream, session, 1_000);
-        let mut write_tokens = std::collections::HashSet::new();
+        let mut write_tokens = crate::TokenSet::default();
 
         crate::ensure_main_writable_disarmed(token, &mut conn, &mut poll);
         assert!(!conn.main_writable_armed);
@@ -32675,13 +32682,13 @@ mod tests {
 
         let mut clients: crate::ClientMap = crate::ClientMap::default();
         clients.insert(token, conn);
-        let mut blocked_tokens = HashSet::new();
+        let mut blocked_tokens = crate::TokenSet::default();
         let mut blocked_wake_index = crate::BlockedWakeIndex::default();
-        let mut closing_tokens = HashSet::new();
-        let mut write_tokens = HashSet::new();
-        let mut paused_tokens: HashSet<Token> = HashSet::new();
+        let mut closing_tokens = crate::TokenSet::default();
+        let mut write_tokens = crate::TokenSet::default();
+        let mut paused_tokens: crate::TokenSet = crate::TokenSet::default();
         paused_tokens.insert(token);
-        let mut deferred_tokens = HashSet::new();
+        let mut deferred_tokens = crate::TokenSet::default();
 
         // Pause active until ts=1000.
         runtime.server.client_pause_deadline_ms = 1_000;
@@ -32785,11 +32792,11 @@ mod tests {
             .to_bytes(),
         );
 
-        let mut blocked_tokens = HashSet::new();
+        let mut blocked_tokens = crate::TokenSet::default();
         let mut blocked_wake_index = crate::BlockedWakeIndex::default();
-        let mut closing_tokens = HashSet::new();
-        let mut write_tokens = HashSet::new();
-        let mut paused_tokens = HashSet::new();
+        let mut closing_tokens = crate::TokenSet::default();
+        let mut write_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::TokenSet::default();
 
         let session = std::mem::take(&mut conn.session);
         let prev = runtime.swap_session(session);
@@ -32831,7 +32838,7 @@ mod tests {
 
         let mut clients: crate::ClientMap = [(token, conn)].into_iter().collect();
         let mut poll = Poll::new().unwrap();
-        let mut deferred_tokens = HashSet::new();
+        let mut deferred_tokens = crate::TokenSet::default();
         check_blocked_clients(CheckBlockedClientsContext {
             clients: &mut clients,
             blocked_tokens: &mut blocked_tokens,
@@ -32928,11 +32935,11 @@ mod tests {
             .to_bytes(),
         );
 
-        let mut blocked_tokens = HashSet::new();
+        let mut blocked_tokens = crate::TokenSet::default();
         let mut blocked_wake_index = crate::BlockedWakeIndex::default();
-        let mut closing_tokens = HashSet::new();
-        let mut write_tokens = HashSet::new();
-        let mut paused_tokens = HashSet::new();
+        let mut closing_tokens = crate::TokenSet::default();
+        let mut write_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::TokenSet::default();
 
         let session = std::mem::take(&mut conn.session);
         let prev = runtime.swap_session(session);
@@ -32974,7 +32981,7 @@ mod tests {
 
         let mut clients: crate::ClientMap = [(token, conn)].into_iter().collect();
         let mut poll = Poll::new().unwrap();
-        let mut deferred_tokens = HashSet::new();
+        let mut deferred_tokens = crate::TokenSet::default();
         check_blocked_clients(CheckBlockedClientsContext {
             clients: &mut clients,
             blocked_tokens: &mut blocked_tokens,
@@ -33116,11 +33123,11 @@ mod tests {
         }
 
         let token = Token(1); // ubs:ignore
-        let mut blocked_tokens = HashSet::new();
+        let mut blocked_tokens = crate::TokenSet::default();
         let mut blocked_wake_index = crate::BlockedWakeIndex::default();
-        let mut closing_tokens = HashSet::new();
-        let mut write_tokens = HashSet::new();
-        let mut paused_tokens = HashSet::new();
+        let mut closing_tokens = crate::TokenSet::default();
+        let mut write_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::TokenSet::default();
 
         let prev = runtime.swap_session(std::mem::take(&mut conn.session));
         let budget_exhausted = crate::process_buffered_frames(
@@ -33219,8 +33226,8 @@ mod tests {
         let mut clients: crate::ClientMap = crate::ClientMap::default();
         let token = Token(1); // ubs:ignore
         clients.insert(token, replica_conn);
-        let mut write_tokens = HashSet::new();
-        let mut closing_tokens = HashSet::new();
+        let mut write_tokens = crate::TokenSet::default();
+        let mut closing_tokens = crate::TokenSet::default();
         let mut poll = mio::Poll::new().unwrap();
 
         propagate_writes_to_replicas(
@@ -33357,8 +33364,8 @@ mod tests {
         let mut clients: crate::ClientMap = crate::ClientMap::default();
         let token = Token(1);
         clients.insert(token, replica_conn);
-        let mut write_tokens = HashSet::new();
-        let mut closing_tokens = HashSet::new();
+        let mut write_tokens = crate::TokenSet::default();
+        let mut closing_tokens = crate::TokenSet::default();
         let mut poll = mio::Poll::new().unwrap();
 
         propagate_writes_to_replicas(
@@ -33383,8 +33390,8 @@ mod tests {
         let mut sub_clients: crate::ClientMap = crate::ClientMap::default();
         let sub_token = Token(2);
         sub_clients.insert(sub_token, sub_replica_conn);
-        let mut sub_write_tokens = HashSet::new();
-        let mut sub_closing_tokens = HashSet::new();
+        let mut sub_write_tokens = crate::TokenSet::default();
+        let mut sub_closing_tokens = crate::TokenSet::default();
 
         propagate_writes_to_replicas(
             &mut sub_clients,
@@ -33446,11 +33453,11 @@ mod tests {
 
         conn.read_buf.extend_from_slice(&unpause_bytes);
 
-        let mut blocked_tokens = HashSet::new();
+        let mut blocked_tokens = crate::TokenSet::default();
         let mut blocked_wake_index = crate::BlockedWakeIndex::default();
-        let mut closing_tokens = HashSet::new();
-        let mut write_tokens = HashSet::new();
-        let mut paused_tokens = HashSet::new();
+        let mut closing_tokens = crate::TokenSet::default();
+        let mut write_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::TokenSet::default();
         crate::process_buffered_frames(
             Token(1),
             &mut conn,
@@ -33512,11 +33519,11 @@ mod tests {
         let ping = RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"PING".to_vec()))]));
         conn.read_buf.extend_from_slice(&ping.to_bytes());
 
-        let mut blocked_tokens = HashSet::new();
+        let mut blocked_tokens = crate::TokenSet::default();
         let mut blocked_wake_index = crate::BlockedWakeIndex::default();
-        let mut closing_tokens = HashSet::new();
-        let mut write_tokens = HashSet::new();
-        let mut paused_tokens = HashSet::new();
+        let mut closing_tokens = crate::TokenSet::default();
+        let mut write_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::TokenSet::default();
         crate::process_buffered_frames(
             Token(1),
             &mut conn,
@@ -33576,11 +33583,11 @@ mod tests {
             conn.read_buf.extend_from_slice(&frame.to_bytes());
         }
 
-        let mut blocked_tokens = HashSet::new();
+        let mut blocked_tokens = crate::TokenSet::default();
         let mut blocked_wake_index = crate::BlockedWakeIndex::default();
-        let mut closing_tokens = HashSet::new();
-        let mut write_tokens = HashSet::new();
-        let mut paused_tokens = HashSet::new();
+        let mut closing_tokens = crate::TokenSet::default();
+        let mut write_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::TokenSet::default();
         let prev = runtime.swap_session(std::mem::take(&mut conn.session));
         crate::process_buffered_frames(
             Token(1),
@@ -33643,11 +33650,11 @@ mod tests {
             conn.read_buf.extend_from_slice(&frame.to_bytes());
         }
 
-        let mut blocked_tokens = HashSet::new();
+        let mut blocked_tokens = crate::TokenSet::default();
         let mut blocked_wake_index = crate::BlockedWakeIndex::default();
-        let mut closing_tokens = HashSet::new();
-        let mut write_tokens = HashSet::new();
-        let mut paused_tokens = HashSet::new();
+        let mut closing_tokens = crate::TokenSet::default();
+        let mut write_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::TokenSet::default();
         let prev = runtime.swap_session(std::mem::take(&mut conn.session));
         crate::process_buffered_frames(
             Token(1),
@@ -33703,11 +33710,11 @@ mod tests {
         ]));
         conn.read_buf.extend_from_slice(&set_frame.to_bytes());
 
-        let mut blocked_tokens = HashSet::new();
+        let mut blocked_tokens = crate::TokenSet::default();
         let mut blocked_wake_index = crate::BlockedWakeIndex::default();
-        let mut closing_tokens = HashSet::new();
-        let mut write_tokens = HashSet::new();
-        let mut paused_tokens = HashSet::new();
+        let mut closing_tokens = crate::TokenSet::default();
+        let mut write_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::TokenSet::default();
         let prev = runtime.swap_session(std::mem::take(&mut conn.session));
         crate::process_buffered_frames(
             Token(1),
@@ -33756,11 +33763,11 @@ mod tests {
         let time = RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"TIME".to_vec()))]));
         conn.read_buf.extend_from_slice(&time.to_bytes());
 
-        let mut blocked_tokens = HashSet::new();
+        let mut blocked_tokens = crate::TokenSet::default();
         let mut blocked_wake_index = crate::BlockedWakeIndex::default();
-        let mut closing_tokens = HashSet::new();
-        let mut write_tokens = HashSet::new();
-        let mut paused_tokens = HashSet::new();
+        let mut closing_tokens = crate::TokenSet::default();
+        let mut write_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::TokenSet::default();
         let prev = runtime.swap_session(std::mem::take(&mut conn.session));
         crate::process_buffered_frames(
             Token(1),
@@ -33827,11 +33834,11 @@ mod tests {
         conn.read_buf.extend_from_slice(&select_db1.to_bytes());
         conn.read_buf.extend_from_slice(&get.to_bytes());
 
-        let mut blocked_tokens = HashSet::new();
+        let mut blocked_tokens = crate::TokenSet::default();
         let mut blocked_wake_index = crate::BlockedWakeIndex::default();
-        let mut closing_tokens = HashSet::new();
-        let mut write_tokens = HashSet::new();
-        let mut paused_tokens = HashSet::new();
+        let mut closing_tokens = crate::TokenSet::default();
+        let mut write_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::TokenSet::default();
         let prev = runtime.swap_session(std::mem::take(&mut conn.session));
         crate::process_buffered_frames(
             Token(1),
@@ -33903,11 +33910,11 @@ mod tests {
         conn.read_buf.extend_from_slice(&select_db1.to_bytes());
         conn.read_buf.extend_from_slice(&get_k1.to_bytes());
 
-        let mut blocked_tokens = HashSet::new();
+        let mut blocked_tokens = crate::TokenSet::default();
         let mut blocked_wake_index = crate::BlockedWakeIndex::default();
-        let mut closing_tokens = HashSet::new();
-        let mut write_tokens = HashSet::new();
-        let mut paused_tokens = HashSet::new();
+        let mut closing_tokens = crate::TokenSet::default();
+        let mut write_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::TokenSet::default();
         let prev = runtime.swap_session(std::mem::take(&mut conn.session));
         crate::process_buffered_frames(
             Token(1),
@@ -33955,11 +33962,11 @@ mod tests {
         let quit = RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"QUIT".to_vec()))]));
         conn.read_buf.extend_from_slice(&quit.to_bytes());
 
-        let mut blocked_tokens = HashSet::new();
+        let mut blocked_tokens = crate::TokenSet::default();
         let mut blocked_wake_index = crate::BlockedWakeIndex::default();
-        let mut closing_tokens = HashSet::new();
-        let mut write_tokens = HashSet::new();
-        let mut paused_tokens = HashSet::new();
+        let mut closing_tokens = crate::TokenSet::default();
+        let mut write_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::TokenSet::default();
         let prev = runtime.swap_session(std::mem::take(&mut conn.session));
         crate::process_buffered_frames(
             Token(1),
@@ -34001,11 +34008,11 @@ mod tests {
         let mut conn = ClientConnection::new(mio::net::TcpStream::from_std(stream), session, ts);
         conn.read_buf.extend_from_slice(b"*1\r\n$4\r\nPING\r\n");
 
-        let mut blocked_tokens = HashSet::new();
+        let mut blocked_tokens = crate::TokenSet::default();
         let mut blocked_wake_index = crate::BlockedWakeIndex::default();
-        let mut closing_tokens = HashSet::new();
-        let mut write_tokens = HashSet::new();
-        let mut paused_tokens = HashSet::new();
+        let mut closing_tokens = crate::TokenSet::default();
+        let mut write_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::TokenSet::default();
         crate::process_buffered_frames(
             Token(1),
             &mut conn,
@@ -34081,14 +34088,14 @@ mod tests {
             .to_bytes(),
         );
 
-        let mut blocked_tokens = HashSet::from([blocked_token]);
+        let mut blocked_tokens: crate::TokenSet = std::iter::once(blocked_token).collect();
         let mut blocked_wake_index = crate::BlockedWakeIndex::default();
         if let Some(blocked) = &blocked_conn.blocked {
             blocked_wake_index.insert(blocked_token, blocked);
         }
-        let mut closing_tokens = HashSet::new();
-        let mut write_tokens = HashSet::new();
-        let mut paused_tokens = HashSet::new();
+        let mut closing_tokens = crate::TokenSet::default();
+        let mut write_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::TokenSet::default();
 
         crate::process_buffered_frames(
             Token(2),
@@ -34110,7 +34117,7 @@ mod tests {
         let mut clients: crate::ClientMap = [(blocked_token, blocked_conn)].into_iter().collect();
         let client_id_to_token = HashMap::from([(blocked_client_id, blocked_token)]); // ubs:ignore
         let mut poll = Poll::new().unwrap();
-        let mut deferred_tokens = HashSet::new();
+        let mut deferred_tokens = crate::TokenSet::default();
 
         apply_pending_client_unblocks(PendingClientUnblocksContext {
             clients: &mut clients,
@@ -34289,7 +34296,7 @@ mod tests {
 
         let mut clients: crate::ClientMap = [(blocked_token, blocked_conn)].into_iter().collect();
         let client_id_to_token = HashMap::from([(blocked_client_id, blocked_token)]); // ubs:ignore
-        let mut blocked_tokens = HashSet::from([blocked_token]);
+        let mut blocked_tokens: crate::TokenSet = std::iter::once(blocked_token).collect();
         let mut blocked_wake_index = crate::BlockedWakeIndex::default();
         if let Some(blocked) = clients
             .get(&blocked_token)
@@ -34297,11 +34304,11 @@ mod tests {
         {
             blocked_wake_index.insert(blocked_token, blocked);
         }
-        let mut closing_tokens = HashSet::new();
-        let mut paused_tokens = HashSet::new();
-        let mut write_tokens = HashSet::new();
+        let mut closing_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::TokenSet::default();
+        let mut write_tokens = crate::TokenSet::default();
         let mut poll = Poll::new().unwrap();
-        let mut deferred_tokens = HashSet::new();
+        let mut deferred_tokens = crate::TokenSet::default();
 
         apply_pending_client_unblocks(PendingClientUnblocksContext {
             clients: &mut clients,
@@ -34392,7 +34399,7 @@ mod tests {
         assert!(runtime.is_client_paused(21));
 
         let mut clients: crate::ClientMap = [(blocked_token, blocked_conn)].into_iter().collect();
-        let mut blocked_tokens = HashSet::from([blocked_token]);
+        let mut blocked_tokens: crate::TokenSet = std::iter::once(blocked_token).collect();
         let mut blocked_wake_index = crate::BlockedWakeIndex::default();
         if let Some(blocked) = clients
             .get(&blocked_token)
@@ -34400,11 +34407,11 @@ mod tests {
         {
             blocked_wake_index.insert(blocked_token, blocked);
         }
-        let mut closing_tokens = HashSet::new();
-        let mut paused_tokens = HashSet::new();
-        let mut write_tokens = HashSet::new();
+        let mut closing_tokens = crate::TokenSet::default();
+        let mut paused_tokens = crate::TokenSet::default();
+        let mut write_tokens = crate::TokenSet::default();
         let mut poll = Poll::new().unwrap();
-        let mut deferred_tokens = HashSet::new();
+        let mut deferred_tokens = crate::TokenSet::default();
 
         check_blocked_clients(CheckBlockedClientsContext {
             clients: &mut clients,
