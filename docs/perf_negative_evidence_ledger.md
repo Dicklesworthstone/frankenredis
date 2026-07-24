@@ -8,6 +8,48 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-23 CreamPeak: SHIPPED — share immutable authenticated-user snapshot bytes (`frankenredis-fduxc`)
+
+- **Negative-ledger-first / profile-first:** exact ledger and recent-history searches found no
+  authenticated-user structural-sharing lever. The preceding literal-current snapshot profile
+  attributed **10.84% self-time** to exact `ClientSession::allocation_metadata_matches`, selecting
+  the authenticated-user byte comparison and clone inside that measured residual. Pipeline
+  writev, dispatch-floor, protocol-output, and cold DUMP work remained outside this lane.
+- **One lever / invariant:** authenticated session identity is now `Option<Arc<[u8]>>`. Successful
+  AUTH and default-user initialization create a new immutable allocation; registry snapshots share
+  it with `Arc::clone`. The allocation-metadata gate tests pointer identity before falling back to
+  exact content equality, preserving behavior for distinct equal allocations. The frozen
+  same-binary reference deep-copies the user bytes and retains content-only comparison; every
+  transaction, tracking, scalar, volatile, and command-name path is shared.
+- **Same-worker same-binary A/A+A/B:** one fail-closed RCH invocation on `hz1`, executable sha256
+  `c37a390f7588f3b687c64f9bfefacac2edb62f02c9cca1a9d21d010414ca8d72`.
+  Exact candidate/reference allocation matchers carried **14.39% / 13.21% self-time**
+  (189/199 samples, zero lost); candidate `Runtime::record_client_session` carried **37.05%**.
+  Nine position-balanced rounds over two million records measured candidate median
+  **368,521,313** versus reference median **434,521,838** instructions: paired
+  **1.179095685x**, or **15.189241% fewer**. A/A null median **1.000000594**, p05..p95
+  **[0.999999037, 1.000003484]**, null CV **0.000129%**, effect CV **0.000122%**.
+- **Behavior / boundary:** before timing, the executable proved identical complete session
+  snapshots while also proving the candidate shares the source user allocation and the reference
+  does not. The focused rich-session test passed with changed auth, cluster, transaction, tracking,
+  client, and volatile state. This is an instruction result for repeated existing-client registry
+  snapshots with unchanged authenticated identity, not AUTH-command or whole-server throughput.
+  Changed identities still perform exact byte comparison before replacement. Rollback restores
+  `Option<Vec<u8>>`, byte-only equality, and deep `clone_from`.
+- **Methodology note:** an initial preflight selected the default membership lever because RCH did
+  not forward the local `FR_BENCH_LEVER`; its trigger exposed the mismatch before any result was
+  admitted. The harness now accepts the lever as an explicit argument, and only the command-line
+  `auth-user-share` rerun above is evidence for this row.
+- **Gates:** strict-remote focused snapshot proof passed **1/1**. Strict-remote full
+  `fr-conformance` passed **194/194** library tests, **99/99** smoke tests, every auxiliary target,
+  live `core_acl` **130/130**, live `core_client` **124/124**, and live `core_scripting` **272/272**.
+  Strict-remote workspace all-target check and scoped `fr-runtime --all-targets --features
+  bench-reference --no-deps` Clippy passed; workspace `-D warnings` remains blocked only by
+  pre-existing `fr-command/src/lua_eval.rs` dead-code and collapsible-if findings. Direct Rust 2024
+  rustfmt passed the benchmark and reported only existing drift outside the owned runtime hunk;
+  `git diff --check` passed. Cargo-disabled scoped UBS retained the monolithic-file baseline
+  (**371 critical, 4,696 warnings, 952 info**) with no finding specific to the production change.
+
 ## 2026-07-22 CreamPeak: SHIPPED — maintain a transaction snapshot activity invariant (`frankenredis-6hb54`)
 
 - **Negative-ledger-first / profile-first:** the prior transaction-pristine KEEP scans six fields;

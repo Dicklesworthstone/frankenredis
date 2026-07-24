@@ -33,6 +33,7 @@ enum Lever {
     ClientIdCopy,
     StableScalarCopy,
     TransactionActivity,
+    AuthUserShare,
 }
 
 impl Lever {
@@ -48,6 +49,7 @@ impl Lever {
             Self::ClientIdCopy => "client-id-copy",
             Self::StableScalarCopy => "stable-scalar-copy",
             Self::TransactionActivity => "transaction-activity",
+            Self::AuthUserShare => "auth-user-share",
         }
     }
 
@@ -62,6 +64,7 @@ impl Lever {
             Ok("client-id-copy") => Ok(Self::ClientIdCopy),
             Ok("stable-scalar-copy") => Ok(Self::StableScalarCopy),
             Ok("transaction-activity") => Ok(Self::TransactionActivity),
+            Ok("auth-user-share") => Ok(Self::AuthUserShare),
             Ok("membership") | Err(env::VarError::NotPresent) => Ok(Self::Membership),
             Ok(value) => Err(format!("unknown FR_BENCH_LEVER {value:?}")),
             Err(error) => Err(format!("invalid FR_BENCH_LEVER: {error}")),
@@ -80,6 +83,7 @@ impl Lever {
             "client-id-copy" => Ok(Self::ClientIdCopy),
             "stable-scalar-copy" => Ok(Self::StableScalarCopy),
             "transaction-activity" => Ok(Self::TransactionActivity),
+            "auth-user-share" => Ok(Self::AuthUserShare),
             _ => Err(format!("unknown lever {value:?}")),
         }
     }
@@ -163,6 +167,12 @@ impl Arm {
             (Lever::TransactionActivity, Self::Reference) => {
                 "<fr_runtime::Runtime>::record_client_session_transaction_activity_reference"
             }
+            (Lever::AuthUserShare, Self::Candidate) => {
+                "<fr_runtime::ClientSession>::allocation_metadata_matches"
+            }
+            (Lever::AuthUserShare, Self::Reference) => {
+                "<fr_runtime::ClientSession>::allocation_metadata_matches_content_reference"
+            }
         }
     }
 
@@ -220,6 +230,12 @@ impl Arm {
             (Lever::TransactionActivity, Self::Reference) => {
                 "<fr_runtime::Runtime>::record_client_session "
             }
+            (Lever::AuthUserShare, Self::Candidate) => {
+                "allocation_metadata_matches_content_reference"
+            }
+            (Lever::AuthUserShare, Self::Reference) => {
+                "<fr_runtime::ClientSession>::allocation_metadata_matches "
+            }
         }
     }
 }
@@ -264,6 +280,10 @@ fn record(runtime: &mut Runtime, session: &fr_runtime::ClientSession, lever: Lev
         (Lever::TransactionActivity, Arm::Candidate) => runtime.record_client_session(session),
         (Lever::TransactionActivity, Arm::Reference) => {
             runtime.record_client_session_transaction_activity_reference(session);
+        }
+        (Lever::AuthUserShare, Arm::Candidate) => runtime.record_client_session(session),
+        (Lever::AuthUserShare, Arm::Reference) => {
+            runtime.record_client_session_auth_user_share_reference(session);
         }
     }
 }
@@ -474,7 +494,10 @@ fn correctness_gate(lever: Lever) {
     }
     if matches!(
         lever,
-        Lever::StableMetadata | Lever::ClientIdCopy | Lever::StableScalarCopy
+        Lever::StableMetadata
+            | Lever::ClientIdCopy
+            | Lever::StableScalarCopy
+            | Lever::AuthUserShare
     ) {
         assert_eq!(
             stable_metadata_snapshot(lever, Arm::Candidate),
@@ -762,7 +785,10 @@ fn main() -> Result<(), String> {
         run_loop(lever, arm, repeats);
         return Ok(());
     }
-    let lever = Lever::from_env()?;
+    let lever = match env::args().nth(1) {
+        Some(value) => Lever::parse(&value)?,
+        None => Lever::from_env()?,
+    };
     let executable = env::current_exe()
         .map_err(|error| format!("could not resolve benchmark executable: {error}"))?;
     println!("WORKER_ID {}", worker_id());

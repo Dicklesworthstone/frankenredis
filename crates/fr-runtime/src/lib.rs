@@ -4,7 +4,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt::Write as _,
     sync::{
-        OnceLock,
+        Arc, OnceLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -5029,7 +5029,7 @@ impl ServerState {
 pub struct ClientSession {
     cluster_state: ClusterClientState,
     transaction_state: TransactionState,
-    authenticated_user: Option<Vec<u8>>,
+    authenticated_user: Option<Arc<[u8]>>,
     /// Per-client selected database. SELECT support lands later, but the state
     /// must already be session-scoped before multiple concurrent clients exist.
     selected_db: usize,
@@ -5149,11 +5149,22 @@ impl ClientSession {
         self.clone_volatile_metadata_from(source);
     }
 
+    #[inline(never)]
     fn allocation_metadata_matches(&self, source: &Self) -> bool {
-        self.authenticated_user == source.authenticated_user
+        self.authenticated_user_matches(source)
             && self.client_name == source.client_name
             && self.client_lib_name == source.client_lib_name
             && self.client_lib_ver == source.client_lib_ver
+    }
+
+    fn authenticated_user_matches(&self, source: &Self) -> bool {
+        match (&self.authenticated_user, &source.authenticated_user) {
+            (Some(current), Some(updated)) => {
+                Arc::ptr_eq(current, updated) || current.as_ref() == updated.as_ref()
+            }
+            (None, None) => true,
+            (Some(_), None) | (None, Some(_)) => false,
+        }
     }
 
     fn clone_allocation_metadata_from(&mut self, source: &Self) {
@@ -5269,6 +5280,44 @@ impl ClientSession {
             self.last_command_name.clone_from(&source.last_command_name);
         }
     }
+
+    #[cfg(any(test, feature = "bench-reference"))]
+    #[inline(never)]
+    fn allocation_metadata_matches_content_reference(&self, source: &Self) -> bool {
+        self.authenticated_user.as_deref() == source.authenticated_user.as_deref()
+            && self.client_name == source.client_name
+            && self.client_lib_name == source.client_lib_name
+            && self.client_lib_ver == source.client_lib_ver
+    }
+
+    #[cfg(any(test, feature = "bench-reference"))]
+    fn clone_allocation_metadata_content_reference(&mut self, source: &Self) {
+        self.authenticated_user = source.authenticated_user.as_deref().map(Arc::from);
+        self.client_name.clone_from(&source.client_name);
+        self.client_lib_name.clone_from(&source.client_lib_name);
+        self.client_lib_ver.clone_from(&source.client_lib_ver);
+    }
+
+    #[cfg(any(test, feature = "bench-reference"))]
+    fn clone_from_auth_user_share_reference(&mut self, source: &Self) {
+        self.transaction_state.clone_from(&source.transaction_state);
+        self.client_tracking.clone_from(&source.client_tracking);
+        if !self.allocation_metadata_matches_content_reference(source) {
+            self.clone_allocation_metadata_content_reference(source);
+        }
+        self.clone_scalar_metadata_from::<false>(source);
+        self.clone_volatile_metadata_from(source);
+        if self.last_command_name != source.last_command_name {
+            self.last_command_name.clone_from(&source.last_command_name);
+        }
+    }
+
+    #[cfg(any(test, feature = "bench-reference"))]
+    fn clone_with_distinct_authenticated_user_reference(&self) -> Self {
+        let mut snapshot = self.clone();
+        snapshot.authenticated_user = self.authenticated_user.as_deref().map(Arc::from);
+        snapshot
+    }
 }
 
 impl Default for ClientSession {
@@ -5349,7 +5398,7 @@ impl ClientSession {
         {
             self.authenticated_user = Some(username);
         } else if !auth_state.auth_required() {
-            self.authenticated_user = Some(DEFAULT_AUTH_USER.to_vec());
+            self.authenticated_user = Some(Arc::from(DEFAULT_AUTH_USER));
         } else {
             self.authenticated_user = None;
         }
@@ -6770,6 +6819,21 @@ impl Runtime {
             self.server
                 .client_sessions
                 .insert(session.client_id, session.clone());
+        }
+    }
+
+    /// Frozen distinct-allocation content comparison for authenticated-user sharing benchmarks.
+    #[cfg(any(test, feature = "bench-reference"))]
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn record_client_session_auth_user_share_reference(&mut self, session: &ClientSession) {
+        if let Some(snapshot) = self.server.client_sessions.get_mut(&session.client_id) {
+            snapshot.clone_from_auth_user_share_reference(session);
+        } else {
+            self.server.client_sessions.insert(
+                session.client_id,
+                session.clone_with_distinct_authenticated_user_reference(),
+            );
         }
     }
 
@@ -36115,7 +36179,7 @@ impl Runtime {
         if two_arg_form {
             match self.authenticate_user_by_acl(username, password) {
                 Ok(()) => {
-                    self.session.authenticated_user = Some(username.to_vec());
+                    self.session.authenticated_user = Some(Arc::from(username));
                     RespFrame::SimpleString("OK".to_string())
                 }
                 Err(AuthFailure::WrongPass) => {
@@ -36251,7 +36315,7 @@ impl Runtime {
             // (br-frankenredis-authnopass)
             match self.authenticate_user_by_acl(username, password) {
                 Ok(()) => {
-                    self.session.authenticated_user = Some(username.to_vec());
+                    self.session.authenticated_user = Some(Arc::from(username));
                 }
                 Err(AuthFailure::WrongPass) | Err(AuthFailure::NotConfigured) => {
                     self.record_acl_auth_denied();
@@ -36302,7 +36366,7 @@ impl Runtime {
             return Err(AuthFailure::WrongPass);
         }
 
-        self.session.authenticated_user = Some(username.to_vec());
+        self.session.authenticated_user = Some(Arc::from(username));
         Ok(())
     }
 
@@ -40327,7 +40391,7 @@ impl Runtime {
                     continue;
                 }
                 if let Some(user) = &filter_user
-                    && session.authenticated_user.as_ref() != Some(user)
+                    && session.authenticated_user.as_deref() != Some(user.as_slice())
                 {
                     continue;
                 }
@@ -50269,7 +50333,7 @@ mod tests {
         assert!(!authenticated.is_authenticated());
         assert!(!isolated.is_authenticated());
 
-        authenticated.authenticated_user = Some(DEFAULT_AUTH_USER.to_vec());
+        authenticated.authenticated_user = Some(std::sync::Arc::from(DEFAULT_AUTH_USER));
         authenticated.selected_db = 5;
         authenticated.resp_protocol_version = 3;
         authenticated.client_name = Some(b"alpha".to_vec());
@@ -52617,7 +52681,7 @@ mod tests {
         updated.cluster_state.asking = true;
         updated.transaction_state.watch_dirty = true;
         updated.transaction_state.exec_abort = true;
-        updated.authenticated_user = Some(b"snapshot-user".to_vec());
+        updated.authenticated_user = Some(std::sync::Arc::from(b"snapshot-user".as_slice()));
         updated.client_no_evict = true;
         updated.client_no_touch = true;
         updated.peer_addr = Some("127.0.0.1:6379".parse().expect("valid peer address"));
@@ -52643,6 +52707,7 @@ mod tests {
         let mut client_id_copy_reference = Runtime::default_strict();
         let mut stable_scalar_copy_reference = Runtime::default_strict();
         let mut transaction_activity_reference = Runtime::default_strict();
+        let mut auth_user_share_reference = Runtime::default_strict();
         candidate.record_client_session(&seed);
         reference.record_client_session_insert_reference(&seed);
         transaction_reference.record_client_session(&seed);
@@ -52653,6 +52718,7 @@ mod tests {
         client_id_copy_reference.record_client_session(&seed);
         stable_scalar_copy_reference.record_client_session(&seed);
         transaction_activity_reference.record_client_session(&seed);
+        auth_user_share_reference.record_client_session_auth_user_share_reference(&seed);
         candidate.record_client_session(&updated);
         reference.record_client_session_insert_reference(&updated);
         transaction_reference.record_client_session_transaction_replace_reference(&updated);
@@ -52665,6 +52731,7 @@ mod tests {
         stable_scalar_copy_reference.record_client_session_stable_scalar_copy_reference(&updated);
         transaction_activity_reference
             .record_client_session_transaction_activity_reference(&updated);
+        auth_user_share_reference.record_client_session_auth_user_share_reference(&updated);
 
         let candidate_snapshot = candidate
             .server
@@ -52716,6 +52783,11 @@ mod tests {
             .client_sessions
             .get(&updated.client_id)
             .expect("transaction activity reference snapshot");
+        let auth_user_share_reference_snapshot = auth_user_share_reference
+            .server
+            .client_sessions
+            .get(&updated.client_id)
+            .expect("authenticated-user sharing reference snapshot");
         assert_eq!(
             format!("{candidate_snapshot:?}"),
             format!("{reference_snapshot:?}")
@@ -52752,6 +52824,30 @@ mod tests {
             format!("{candidate_snapshot:?}"),
             format!("{transaction_activity_reference_snapshot:?}")
         );
+        assert_eq!(
+            format!("{candidate_snapshot:?}"),
+            format!("{auth_user_share_reference_snapshot:?}")
+        );
+        assert!(std::sync::Arc::ptr_eq(
+            candidate_snapshot
+                .authenticated_user
+                .as_ref()
+                .expect("candidate authenticated user"),
+            updated
+                .authenticated_user
+                .as_ref()
+                .expect("updated authenticated user")
+        ));
+        assert!(!std::sync::Arc::ptr_eq(
+            auth_user_share_reference_snapshot
+                .authenticated_user
+                .as_ref()
+                .expect("reference authenticated user"),
+            updated
+                .authenticated_user
+                .as_ref()
+                .expect("updated authenticated user")
+        ));
 
         let mut general_clone = updated.clone();
         general_clone.client_id = updated.client_id.saturating_add(1);

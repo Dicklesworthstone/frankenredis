@@ -4,6 +4,35 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-23: SHIPPED — share immutable authenticated-user snapshot bytes; 15.19% fewer instructions (`frankenredis-fduxc`)
+
+Profile-first single-command registry work: exact `ClientSession::allocation_metadata_matches`
+previously carried 10.84% self-time. Session identity is now immutable `Arc<[u8]>`; repeated
+registry snapshots share it and test pointer identity before exact content fallback. Successful
+AUTH/default-user initialization still creates a fresh allocation, while changed identities retain
+byte-exact replacement behavior. Pipeline writev and output/protocol work were explicitly excluded.
+
+MEASURED same-worker/same-binary on `hz1`, sha256
+`c37a390f7588f3b687c64f9bfefacac2edb62f02c9cca1a9d21d010414ca8d72`: exact
+candidate/reference matchers carried 14.39%/13.21% self-time (189/199 samples, zero lost). Nine
+position-balanced two-million-record rounds measured candidate 368,521,313 versus frozen
+deep-copy/content-reference 434,521,838 median instructions, **1.179095685x / 15.189241% fewer**.
+Null median 1.000000594, p05..p95 [0.999999037, 1.000003484], null CV 0.000129%, effect CV
+0.000122%. The initial environment-selected preflight was discarded when its trigger revealed that
+RCH had selected the default membership lever; only the explicit `auth-user-share` argument rerun
+is admitted.
+
+PARITY/GATES: complete Debug snapshots were identical, with candidate pointer sharing and reference
+allocation distinction proved. Focused invariant 1/1; full fr-conformance 194/194 library + 99/99
+smoke + every auxiliary target; live ACL 130/130, CLIENT 124/124, SCRIPTING 272/272. Workspace
+all-target check and scoped runtime Clippy `-D warnings` pass. Workspace Clippy remains blocked only
+by pre-existing `fr-command/src/lua_eval.rs` dead-code/collapsible-if findings. Direct Rust 2024
+rustfmt passes the benchmark and reports only existing drift outside the owned runtime hunk;
+`git diff --check` passes. Cargo-disabled scoped UBS retains the monolithic-file baseline (371
+critical, 4,696 warnings, 952 info) with no finding specific to the production change. Boundary:
+repeated existing-client snapshots, not AUTH or whole-server throughput. Rollback restores
+`Vec<u8>` identity storage and byte-only clone/equality.
+
 ## 2026-07-23: SHIPPED — dispatch-floor front gate for BITPOS key bit (no range); 1.49x fewer instructions on P16 (frankenredis-qd9jd)
 
 Last worthwhile floor target per the profile ranking (process_buffered_frames 6.63% self at P16, on par
