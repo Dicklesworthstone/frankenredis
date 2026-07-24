@@ -2494,6 +2494,14 @@ fn process_buffered_frames(
     let mut argv_scratch: Vec<Vec<u8>> = Vec::new();
     let mut plain_get_read_gate_cache: Option<bool> = None;
     let mut plain_write_gate_cache: Option<bool> = None;
+    // Per-batch memo of this client's output hard limit. effective_output_hard_limit
+    // does is_replica + is_pubsub_client lookups + a config read; the value can only
+    // change when the client's class changes (SUBSCRIBE / REPLCONF / CONFIG), all of
+    // which go through the generic path and reset the gate caches. This memo is
+    // invalidated (set to None) at exactly those same sites, so it is reused only
+    // across a run of plain fast-path commands — the common pipelined GET/SET batch,
+    // where frames 2..N would otherwise recompute the identical limit every iteration.
+    let mut output_hard_limit_cache: Option<usize> = None;
 
     // (frankenredis-7grsy) Begin a fresh command-timing chain for this batch.
     // The chained fast-path timer reuses one command's end-instant as the next
@@ -2528,18 +2536,22 @@ fn process_buffered_frames(
         // lookups + config read) — at batch start on a drained connection pending
         // is 0, so the common fast path skips it entirely.
         let pending_output = conn.pending_output_bytes();
-        if pending_output > 0
-            && pending_output > runtime.effective_output_hard_limit(conn.session.client_id)
-        {
-            eprintln!("warn: client write buffer exceeded limit, disconnecting");
-            conn.closing = true;
-            closing_tokens.insert(token);
-            break;
+        if pending_output > 0 {
+            let client_id = conn.session.client_id;
+            let output_hard_limit = *output_hard_limit_cache
+                .get_or_insert_with(|| runtime.effective_output_hard_limit(client_id));
+            if pending_output > output_hard_limit {
+                eprintln!("warn: client write buffer exceeded limit, disconnecting");
+                conn.closing = true;
+                closing_tokens.insert(token);
+                break;
+            }
         }
 
         if let Some(cmd) = conn.owned_plain_sets.pop_front() {
             processed_frames = processed_frames.saturating_add(1);
             plain_get_read_gate_cache = None;
+            output_hard_limit_cache = None;
             plain_write_gate_cache = None;
             match runtime.execute_plain_set_owned_or_return(cmd.key, cmd.value, ts) {
                 Ok(response) => {
@@ -2611,6 +2623,7 @@ fn process_buffered_frames(
                     .is_some()
                 {
                     plain_get_read_gate_cache = None;
+                    output_hard_limit_cache = None;
                     processed_frames = processed_frames.saturating_add(1);
                     consumed_total += consumed;
                     continue;
@@ -2628,6 +2641,7 @@ fn process_buffered_frames(
                     processed_frames = processed_frames.saturating_add(1);
                     if !command_frame_can_move_to_argv(&frame) {
                         plain_get_read_gate_cache = None;
+                        output_hard_limit_cache = None;
                         plain_write_gate_cache = None;
                         let response = runtime.execute_frame_with_unix_time_us(&frame, ts, ts_us);
                         let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
@@ -2638,6 +2652,7 @@ fn process_buffered_frames(
                     let argv = fr_command::argv_from_frame(frame)
                         .expect("command frame prevalidated for argv move");
                     plain_get_read_gate_cache = None;
+                    output_hard_limit_cache = None;
                     plain_write_gate_cache = None;
                     match process_argv_frame(
                         token,
@@ -11165,6 +11180,7 @@ fn process_buffered_frames(
                 Ok(BorrowedMultibulkAction::FastReply { consumed, response }) => {
                     processed_frames = processed_frames.saturating_add(1);
                     plain_get_read_gate_cache = None;
+                    output_hard_limit_cache = None;
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                     if !runtime.suppress_current_network_reply() {
                         encode_client_reply(&response, client_resp3, &mut conn.write_buf);
@@ -11187,6 +11203,7 @@ fn process_buffered_frames(
                     // RESP3), written directly rather than through an allocated frame.
                     processed_frames = processed_frames.saturating_add(1);
                     plain_get_read_gate_cache = None;
+                    output_hard_limit_cache = None;
                     if !runtime.suppress_current_network_reply() {
                         conn.write_buf.extend_from_slice(b"+OK\r\n");
                     }
@@ -11214,6 +11231,7 @@ fn process_buffered_frames(
                     }
                     let argv = &argv_scratch[..argv_len];
                     plain_get_read_gate_cache = None;
+                    output_hard_limit_cache = None;
                     plain_write_gate_cache = None;
                     match process_argv_frame(
                         token,
@@ -11277,6 +11295,7 @@ fn process_buffered_frames(
                 }
                 if !command_frame_can_move_to_argv(&frame) {
                     plain_get_read_gate_cache = None;
+                    output_hard_limit_cache = None;
                     plain_write_gate_cache = None;
                     let response = runtime.execute_frame_with_unix_time_us(&frame, ts, ts_us);
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
@@ -11287,6 +11306,7 @@ fn process_buffered_frames(
                 let argv = fr_command::argv_from_frame(frame)
                     .expect("command frame prevalidated for argv move");
                 plain_get_read_gate_cache = None;
+                output_hard_limit_cache = None;
                 plain_write_gate_cache = None;
                 match process_argv_frame(
                     token,
