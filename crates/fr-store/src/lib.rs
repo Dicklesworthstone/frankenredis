@@ -13260,11 +13260,29 @@ impl Store {
                     self.db_expires_counts[db] = self.db_expires_counts[db].saturating_sub(1);
                 }
             }
+            // (frankenredis-ne7sg) A collection emptied in place — the whole-key-removal
+            // case of ZREM/SREM/ZPOP/SPOP/HDEL/LPOP/… — was hashed into running_digest
+            // with its FULL contents, but the entry we hold here is now empty. XORing
+            // out the empty entry's hash would never remove the full-contents hash and
+            // leaves running_digest wrong while digest_stale stays false. An empty
+            // collection can never persist as a key, so an empty entry at removal ALWAYS
+            // means a mutate-to-empty caller: mark the digest stale for a full recompute
+            // rather than an incorrect incremental XOR. Clean removals (DEL / expiry of a
+            // non-empty entry, string values) keep the fast incremental path.
+            let mutated_to_empty = match &entry.value {
+                Value::Hash(h) => h.len() == 0,
+                Value::List(l) => l.len() == 0,
+                Value::Set(s) => s.is_empty(),
+                Value::SortedSet(zs) => zs.is_empty(),
+                Value::Stream(_) | Value::String(_) | Value::Integer(_) => false,
+            };
             // (frankenredis-8x1i9) Skip the O(value) removed-entry hash when the
             // digest is already stale — update_digest_hashes would discard it and
             // DEBUG DIGEST recomputes via full scan. Preserve the mutation count.
             if self.digest_stale {
                 self.bump_digest_mutations();
+            } else if mutated_to_empty {
+                Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
             } else {
                 self.update_digest_hashes(
                     Some(Self::entry_state_digest(key, &entry, old_expiry)),
