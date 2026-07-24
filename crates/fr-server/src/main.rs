@@ -2562,7 +2562,8 @@ fn process_buffered_frames(
                     drain_pending_pubsub_to_connection(runtime, conn);
                     if disconnect_if_output_limit_exceeded(
                         conn,
-                        runtime.effective_output_hard_limit(conn.session.client_id),
+                        &mut output_hard_limit_cache,
+                        runtime,
                         closing_tokens,
                         token,
                     ) {
@@ -2588,7 +2589,8 @@ fn process_buffered_frames(
                         ProcessArgvAction::Continue => {
                             if disconnect_if_output_limit_exceeded(
                                 conn,
-                                runtime.effective_output_hard_limit(conn.session.client_id),
+                                &mut output_hard_limit_cache,
+                                runtime,
                                 closing_tokens,
                                 token,
                             ) {
@@ -2671,7 +2673,8 @@ fn process_buffered_frames(
                             consumed_total += consumed;
                             if disconnect_if_output_limit_exceeded(
                                 conn,
-                                runtime.effective_output_hard_limit(conn.session.client_id),
+                                &mut output_hard_limit_cache,
+                                runtime,
                                 closing_tokens,
                                 token,
                             ) {
@@ -11169,7 +11172,8 @@ fn process_buffered_frames(
                     consumed_total += consumed;
                     if disconnect_if_output_limit_exceeded(
                         conn,
-                        runtime.effective_output_hard_limit(conn.session.client_id),
+                        &mut output_hard_limit_cache,
+                        runtime,
                         closing_tokens,
                         token,
                     ) {
@@ -11189,7 +11193,8 @@ fn process_buffered_frames(
                     consumed_total += consumed;
                     if disconnect_if_output_limit_exceeded(
                         conn,
-                        runtime.effective_output_hard_limit(conn.session.client_id),
+                        &mut output_hard_limit_cache,
+                        runtime,
                         closing_tokens,
                         token,
                     ) {
@@ -11211,7 +11216,8 @@ fn process_buffered_frames(
                     consumed_total += consumed;
                     if disconnect_if_output_limit_exceeded(
                         conn,
-                        runtime.effective_output_hard_limit(conn.session.client_id),
+                        &mut output_hard_limit_cache,
+                        runtime,
                         closing_tokens,
                         token,
                     ) {
@@ -11250,7 +11256,8 @@ fn process_buffered_frames(
                             consumed_total += consumed;
                             if disconnect_if_output_limit_exceeded(
                                 conn,
-                                runtime.effective_output_hard_limit(conn.session.client_id),
+                                &mut output_hard_limit_cache,
+                                runtime,
                                 closing_tokens,
                                 token,
                             ) {
@@ -22712,11 +22719,23 @@ fn drain_pending_pubsub_to_connection(runtime: &mut Runtime, conn: &mut ClientCo
 
 fn disconnect_if_output_limit_exceeded(
     conn: &mut ClientConnection,
-    output_buffer_limit: usize,
+    output_hard_limit_cache: &mut Option<usize>,
+    runtime: &Runtime,
     closing_tokens: &mut HashSet<Token>,
     token: Token,
 ) -> bool {
-    if conn.pending_output_bytes() > output_buffer_limit {
+    // Zero pending output can never exceed a limit, so skip the limit lookup
+    // entirely. Otherwise reuse the per-batch memo (populated by the loop-top
+    // check or an earlier post-append check in this batch) so a pipelined write
+    // run computes effective_output_hard_limit once per batch, not per command.
+    let pending_output = conn.pending_output_bytes();
+    if pending_output == 0 {
+        return false;
+    }
+    let client_id = conn.session.client_id;
+    let output_hard_limit = *output_hard_limit_cache
+        .get_or_insert_with(|| runtime.effective_output_hard_limit(client_id));
+    if pending_output > output_hard_limit {
         eprintln!("warn: client write buffer exceeded limit, disconnecting");
         conn.closing = true;
         closing_tokens.insert(token);
