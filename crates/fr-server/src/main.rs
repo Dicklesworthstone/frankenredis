@@ -12254,6 +12254,7 @@ enum BorrowedDispatchFloorClass {
     Zrange,
     Hrandfield,
     BitposKeyBit,
+    Incr,
 }
 
 struct BorrowedDispatchFloorToken<'a> {
@@ -12275,6 +12276,7 @@ enum BorrowedDispatchFloorCommand {
     Hget,
     Hlen,
     Hrandfield,
+    Incr,
     Llen,
     Lpos,
     Lpush,
@@ -12327,6 +12329,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'H', b'G', b'E', b'T'] => Some(BorrowedDispatchFloorCommand::Hget),
             [b'S', b'R', b'E', b'M'] => Some(BorrowedDispatchFloorCommand::Srem),
             [b'Z', b'R', b'E', b'M'] => Some(BorrowedDispatchFloorCommand::Zrem),
+            [b'I', b'N', b'C', b'R'] => Some(BorrowedDispatchFloorCommand::Incr),
             _ => None,
         },
         5 => match uppercase_ascii_token::<5>(token)? {
@@ -12668,6 +12671,7 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (3, BorrowedDispatchFloorCommand::Bitpos) => {
             Some(BorrowedDispatchFloorClass::BitposKeyBit)
         }
+        (2, BorrowedDispatchFloorCommand::Incr) => Some(BorrowedDispatchFloorClass::Incr),
         (4, BorrowedDispatchFloorCommand::Getrange) => Some(BorrowedDispatchFloorClass::Getrange),
         // Only plain `*4 ZRANGE key start stop` floors; WITHSCORES/REV/LIMIT/
         // BYSCORE/BYLEX forms are higher arity and fall through unchanged.
@@ -13734,6 +13738,32 @@ fn try_dispatch_floor_classified_action(
             );
             if let Some(consumed) = hit {
                 Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Incr => {
+            // INCR mirrors ZCOUNT: the borrowed executor returns an integer
+            // RespFrame (FastReply). It is a WRITE, but the executor enforces the
+            // same write gate / AOF / replication / keyspace-notify path the
+            // generic route uses (identical to the shipped SETBIT/SADD floors);
+            // on a gate/type/overflow failure it returns None and the fallback
+            // re-processes byte-exactly. Parser+executor already shipped; only the
+            // dispatch-floor routing is new (frankenredis-incr-floor).
+            if let Some(packet) = parse_borrowed_plain_incr_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_incr_borrowed(packet.key, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,
@@ -34095,6 +34125,10 @@ mod tests {
         assert_eq!(
             borrowed_dispatch_floor_command(b"BITPOS"),
             Some(BorrowedDispatchFloorCommand::Bitpos)
+        );
+        assert_eq!(
+            borrowed_dispatch_floor_command(b"INCR"),
+            Some(BorrowedDispatchFloorCommand::Incr)
         );
         assert_eq!(
             borrowed_dispatch_floor_command(b"srandmember"),
