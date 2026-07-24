@@ -5216,6 +5216,35 @@ impl ClientSession {
     }
 
     #[cfg(any(test, feature = "bench-reference"))]
+    fn clone_from_tracking_activity_reference(&mut self, source: &Self) {
+        self.transaction_state.clone_from(&source.transaction_state);
+        self.clone_tracking_activity_reference(source);
+        self.clone_non_transaction_or_tracking_fields_from::<false>(source);
+    }
+
+    #[cfg(any(test, feature = "bench-reference"))]
+    #[inline(never)]
+    fn clone_tracking_activity_reference(&mut self, source: &Self) {
+        let current = &mut self.client_tracking;
+        let updated = &source.client_tracking;
+        current.enabled = updated.enabled;
+        current.redirect = updated.redirect;
+        current.bcast = updated.bcast;
+        current.optin = updated.optin;
+        current.optout = updated.optout;
+        current.caching = updated.caching;
+        current.noloop = updated.noloop;
+        if updated.prefixes.is_empty() {
+            if !current.prefixes.is_empty() {
+                current.prefixes.clear();
+            }
+        } else {
+            current.prefixes.clone_from(&updated.prefixes);
+        }
+        current.has_activity = updated.has_activity;
+    }
+
+    #[cfg(any(test, feature = "bench-reference"))]
     fn clone_from_last_command_copy_reference(&mut self, source: &Self) {
         self.transaction_state.clone_from(&source.transaction_state);
         self.client_tracking.clone_from(&source.client_tracking);
@@ -6773,6 +6802,20 @@ impl Runtime {
     ) {
         if let Some(snapshot) = self.server.client_sessions.get_mut(&session.client_id) {
             snapshot.clone_from_transaction_activity_reference(session);
+        } else {
+            self.server
+                .client_sessions
+                .insert(session.client_id, session.clone());
+        }
+    }
+
+    /// Frozen unconditional tracking-state copy for activity-bit benchmarks.
+    #[cfg(any(test, feature = "bench-reference"))]
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn record_client_session_tracking_activity_reference(&mut self, session: &ClientSession) {
+        if let Some(snapshot) = self.server.client_sessions.get_mut(&session.client_id) {
+            snapshot.clone_from_tracking_activity_reference(session);
         } else {
             self.server
                 .client_sessions

@@ -8,6 +8,48 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-23 CreamPeak: SHIPPED — maintain CLIENT TRACKING snapshot activity (`frankenredis-b1lxu`)
+
+- **Retry predicate satisfied / profile-first:** the earlier `frankenredis-7eruh` REJECT measured
+  an all-field pristine scan below its null-control floor and permits a retry only after
+  `ClientTrackingState` has an already-maintained single-bit activity invariant. On the literal
+  current auth-sharing executable sha256
+  `1eeb3e92c7568c549ce2b82e9a72d468d7cbd18cbbe0b35089670043bd0dbd46`, exact
+  `ClientTrackingState::clone_from` carried **12.49% self-time**, selecting that explicit retry
+  rather than another speculative scan. Pipeline/writev, server output, and dispatch-floor work
+  remained outside this lane.
+- **One lever / invariant:** `ClientTrackingState::has_activity` is false only for the exact
+  default tracking state. TRACKING ON, redirect-only OFF state, prefix/OPTIN/OPTOUT/NOLOOP/BCAST
+  parsing, and caching mutations maintain it; default/reset state clears it by ordinary
+  `Default`. Snapshot cloning returns immediately when both source and destination are pristine.
+  If either arm is active, it performs the exact prior fieldwise copy and prefix `clone_from`.
+  Debug assertions recompute the predicate off the timed release path. The same-binary reference
+  freezes the unconditional old field copy; all non-tracking snapshot work is shared.
+- **Same-worker same-binary A/A+A/B:** one fail-closed RCH invocation on `vmi1264463`, executable
+  sha256 `f9a73ff3025d5be94058f954e75c160078ac83572b38ec6d17238d84daa53bce`.
+  Exact candidate `ClientTrackingState::clone_from` carried **5.50% self-time**, and exact frozen
+  `ClientSession::clone_tracking_activity_reference` carried **27.37%**, with zero lost samples.
+  Nine position-balanced rounds measured candidate median **368,516,362** versus reference median
+  **392,516,556** instructions: paired **1.065126643x**, or **6.1145% fewer**. A/A null median
+  **0.999999083**, p05..p95 **[0.999997487, 1.000003422]**, null CV **0.000167%**, effect CV
+  **0.000116%**.
+- **Behavior / boundary:** before timing, the same executable populated BCAST tracking state and
+  proved the complete candidate/reference session snapshots identical. The focused invariant
+  proof covers default, active, active-to-pristine, and pristine-to-pristine clone transitions;
+  focused store and command tracking tests pass. This is an instruction result for the common
+  pristine CLIENT TRACKING state in repeated single-command registry snapshots, not CLIENT
+  command or whole-server throughput. Active tracking retains the old exact copy. Rollback removes
+  `has_activity`, its parser/caching maintenance, and the frozen reference.
+- **Gates:** strict-remote tracking goldens passed **19/19**. Strict-remote full
+  `fr-conformance` passed **194/194** library tests, **99/99** smoke tests, every auxiliary target,
+  live `core_client` **124/124**, and live `core_scripting` **272/272**. Strict-remote workspace
+  all-target check and scoped store/runtime all-target Clippy with `-D warnings` passed. Workspace
+  Clippy remains blocked only by the pre-existing `fr-command/src/lua_eval.rs` unused `values`
+  method and collapsible-if findings. Fail-closed RCH correctly refuses non-compilation
+  `cargo fmt` with RCH-E301; direct Rust 2024 formatting checks and `git diff --check` cover the
+  owned hunks. Cargo-disabled scoped UBS retained the three-monolith baseline (**1,241 critical,
+  33,386 warnings, 4,235 info**) with no sampled finding in the activity-bit changes.
+
 ## 2026-07-24 cc(Opus): BLOCKER (re-verified 4th time) — pipeline writev architecturally inapplicable; large-value framing gap CLOSED
 
 - **Measured, fresh today (code + live perf + interleaved fr-vs-redis ratio).** The architectural

@@ -5597,6 +5597,9 @@ pub struct ClientTrackingState {
     pub caching: Option<bool>,
     pub noloop: bool,
     pub prefixes: BTreeSet<Vec<u8>>,
+    /// Maintained non-default-state predicate for the hot session-snapshot path.
+    #[doc(hidden)]
+    pub has_activity: bool,
 }
 
 impl Clone for ClientTrackingState {
@@ -5610,10 +5613,16 @@ impl Clone for ClientTrackingState {
             caching: self.caching,
             noloop: self.noloop,
             prefixes: self.prefixes.clone(),
+            has_activity: self.has_activity,
         }
     }
 
     fn clone_from(&mut self, source: &Self) {
+        debug_assert_eq!(self.has_activity, self.fields_have_activity());
+        debug_assert_eq!(source.has_activity, source.fields_have_activity());
+        if !self.has_activity && !source.has_activity {
+            return;
+        }
         self.enabled = source.enabled;
         self.redirect = source.redirect;
         self.bcast = source.bcast;
@@ -5628,6 +5637,20 @@ impl Clone for ClientTrackingState {
         } else {
             self.prefixes.clone_from(&source.prefixes);
         }
+        self.has_activity = source.has_activity;
+    }
+}
+
+impl ClientTrackingState {
+    fn fields_have_activity(&self) -> bool {
+        self.enabled
+            || self.redirect.is_some()
+            || self.bcast
+            || self.optin
+            || self.optout
+            || self.caching.is_some()
+            || self.noloop
+            || !self.prefixes.is_empty()
     }
 }
 
@@ -39463,13 +39486,13 @@ mod quicklist_dump_fix_tests {
 mod tests {
     use super::HllEncoding;
     use super::{
-        BitRangeUnit, DUMP_CRC64_LEN, DUMP_TRAILER_LEN, DUMP_VERSION_LEN, Entry,
-        EvictionLoopFailure, EvictionLoopStatus, EvictionSafetyGateState, ExpireTimeValue, HLL_P,
-        HLL_REDIS_DENSE_ENCODING, HLL_REDIS_DENSE_SIZE, HLL_REDIS_HEADER_SIZE, HLL_REDIS_MAGIC,
-        HLL_REDIS_SPARSE_ENCODING, HLL_REDIS_SPARSE_MAX_BYTES, HLL_REGISTERS, HLL_SPARSE_XZERO_BIT,
-        HashFieldMap, HashFieldTtl, HashFieldTtlCondition, HashFieldTtlSet, HashFieldTtlUnit,
-        LFU_INIT_VAL, LatencySample, MaxmemoryPolicy, MaxmemoryPressureLevel, NOTIFY_EVICTED,
-        NOTIFY_EXPIRED, NOTIFY_GENERIC, NOTIFY_KEYEVENT, PttlValue, RDB_DUMP_VERSION,
+        BitRangeUnit, ClientTrackingState, DUMP_CRC64_LEN, DUMP_TRAILER_LEN, DUMP_VERSION_LEN,
+        Entry, EvictionLoopFailure, EvictionLoopStatus, EvictionSafetyGateState, ExpireTimeValue,
+        HLL_P, HLL_REDIS_DENSE_ENCODING, HLL_REDIS_DENSE_SIZE, HLL_REDIS_HEADER_SIZE,
+        HLL_REDIS_MAGIC, HLL_REDIS_SPARSE_ENCODING, HLL_REDIS_SPARSE_MAX_BYTES, HLL_REGISTERS,
+        HLL_SPARSE_XZERO_BIT, HashFieldMap, HashFieldTtl, HashFieldTtlCondition, HashFieldTtlSet,
+        HashFieldTtlUnit, LFU_INIT_VAL, LatencySample, MaxmemoryPolicy, MaxmemoryPressureLevel,
+        NOTIFY_EVICTED, NOTIFY_EXPIRED, NOTIFY_GENERIC, NOTIFY_KEYEVENT, PttlValue, RDB_DUMP_VERSION,
         RDB_OPCODE_FUNCTION2, RDB_TYPE_HASH, RDB_TYPE_HASH_LISTPACK, RDB_TYPE_HASH_ZIPLIST,
         RDB_TYPE_HASH_ZIPMAP, RDB_TYPE_LIST, RDB_TYPE_LIST_QUICKLIST, RDB_TYPE_LIST_QUICKLIST_2,
         RDB_TYPE_LIST_ZIPLIST, RDB_TYPE_SET, RDB_TYPE_SET_INTSET, RDB_TYPE_SET_LISTPACK,
@@ -39496,6 +39519,28 @@ mod tests {
             noack,
             count,
         }
+    }
+
+    #[test]
+    fn client_tracking_activity_invariant_covers_clone_transitions() {
+        let pristine = ClientTrackingState::default();
+        assert!(!pristine.has_activity);
+
+        let active = ClientTrackingState {
+            enabled: true,
+            bcast: true,
+            prefixes: [b"hot:".to_vec()].into(),
+            has_activity: true,
+            ..ClientTrackingState::default()
+        };
+        let mut snapshot = ClientTrackingState::default();
+        snapshot.clone_from(&active);
+        assert_eq!(snapshot, active);
+
+        snapshot.clone_from(&pristine);
+        assert_eq!(snapshot, pristine);
+        snapshot.clone_from(&pristine);
+        assert_eq!(snapshot, pristine);
     }
 
     fn function_library_snapshot(store: &Store) -> Vec<(String, String, Vec<u8>, Vec<String>)> {

@@ -45,7 +45,7 @@ fn parse_migrate_and_snapshot(test_name: &str, args: &[&str]) {
     let argv = to_argv(args);
     match parse_migrate_request(&argv) {
         Ok(result) => {
-            let actual = format!("{:#?}", result);
+            let actual = format!("{result:#?}");
             assert_golden(test_name, &actual);
         }
         Err(e) => {
@@ -59,7 +59,7 @@ fn parse_tracking_and_snapshot(test_name: &str, args: &[&str]) {
     let argv = to_argv(args);
     match parse_client_tracking_state(&argv) {
         Ok(result) => {
-            let actual = format!("{:#?}", result);
+            let actual = format!("{result:#?}\n");
             assert_golden(test_name, &actual);
         }
         Err(e) => {

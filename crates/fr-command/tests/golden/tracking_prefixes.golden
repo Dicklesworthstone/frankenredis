@@ -20,4 +20,5 @@ ClientTrackingState {
             58,
         ],
     },
+    has_activity: true,
 }

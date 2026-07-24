@@ -7,4 +7,5 @@ ClientTrackingState {
     caching: None,
     noloop: false,
     prefixes: {},
+    has_activity: false,
 }

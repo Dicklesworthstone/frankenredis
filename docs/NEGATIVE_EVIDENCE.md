@@ -4,6 +4,37 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-23: SHIPPED — maintain CLIENT TRACKING snapshot activity; 6.11% fewer instructions (`frankenredis-b1lxu`)
+
+Profile-first registry work: on the literal current auth-sharing build, exact
+`ClientTrackingState::clone_from` carried 12.49% self-time. The earlier
+`frankenredis-7eruh` REJECT forbade another field scan unless tracking gained an already-maintained
+single-bit activity invariant; this lever satisfies that explicit retry predicate. The parser and
+caching mutations now maintain `has_activity`, and pristine-to-pristine registry snapshots return
+after two bit checks. Active snapshots retain the exact old fieldwise copy, frozen in the
+same-binary reference arm. Pipeline/writev and server output were untouched.
+
+MEASURED same-worker/same-binary on `vmi1264463`, sha256
+`f9a73ff3025d5be94058f954e75c160078ac83572b38ec6d17238d84daa53bce`: exact candidate
+`ClientTrackingState::clone_from` carried 5.50% self-time and the frozen reference helper carried
+27.37%, with zero lost samples. Nine position-balanced rounds measured candidate median
+368,516,362 versus reference median 392,516,556 instructions, **1.065126643x / 6.1145% fewer**.
+Null median 0.999999083, p05..p95 [0.999997487, 1.000003422], null CV 0.000167%, effect CV
+0.000116%.
+
+PARITY/GATES: the same executable proved identical populated BCAST tracking snapshots before
+timing. The invariant test covers pristine, active, active-to-pristine, and pristine-to-pristine
+clone transitions; focused `fr-store` and `fr-command` tracking tests plus tracking goldens 19/19
+pass. Full `fr-conformance` passed 194/194 library tests, 99/99 smoke, every auxiliary target, live
+`core_client` 124/124, and live `core_scripting` 272/272. Workspace all-target check and scoped
+store/runtime all-target Clippy `-D warnings` pass. Workspace Clippy remains blocked only by the
+pre-existing Lua dead-code/collapsible-if findings. Fail-closed RCH refuses non-compilation
+`cargo fmt`; direct formatting and `git diff --check` cover the owned hunks. Cargo-disabled scoped
+UBS retained the monolithic baseline (1,241 critical, 33,386 warnings, 4,235 info) with no sampled
+finding in the activity-bit changes. Boundary: repeated pristine CLIENT TRACKING state inside
+single-command registry snapshots; active tracking keeps the old copy behavior. Rollback removes
+`has_activity`, its parser/caching maintenance, and the same-binary frozen reference.
+
 ## 2026-07-23: SHIPPED — preserve RPUSH listpack-conversion node boundaries (`frankenredis-2udek`)
 
 The Redis 7.2.4 boundary differ isolated seed 2026 trial 232: 70 elements produced DUMP lengths

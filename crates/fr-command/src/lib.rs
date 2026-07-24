@@ -22530,6 +22530,7 @@ pub fn parse_client_tracking_state(argv: &[Vec<u8>]) -> Result<ClientTrackingSta
         return Ok(ClientTrackingState {
             enabled: false,
             redirect,
+            has_activity: redirect.is_some(),
             ..ClientTrackingState::default()
         });
     }
@@ -22573,6 +22574,7 @@ pub fn parse_client_tracking_state(argv: &[Vec<u8>]) -> Result<ClientTrackingSta
         caching: None,
         noloop,
         prefixes,
+        has_activity: true,
     })
 }
 
@@ -22641,6 +22643,7 @@ pub fn apply_client_caching_mode(
 ) -> Result<(), CommandError> {
     validate_client_caching_mode(mode, tracking)?;
     tracking.caching = Some(mode.eq_ignore_ascii_case("YES"));
+    tracking.has_activity = true;
     Ok(())
 }
 
@@ -78960,6 +78963,7 @@ mod tests {
                     caching: None,
                     noloop: self.noloop,
                     prefixes,
+                    has_activity: true,
                 }
             }
         }

@@ -9,4 +9,5 @@ ClientTrackingState {
     prefixes: {
         [],
     },
+    has_activity: true,
 }
