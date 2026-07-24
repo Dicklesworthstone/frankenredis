@@ -8,6 +8,44 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-24 CreamPeak: BLOCKER — session-snapshot micro-lever profile is saturated (`frankenredis-6oavn`)
+
+- **Literal-current profile:** after the tracking-activity and named-metadata KEEPs, the
+  named-metadata candidate executable sha256
+  `e8e9acc00ef29d5a6cc0d80e085afac3be87d49847d84cb872c63ceea65caab1` left these top symbolized
+  snapshot frames: `clone_non_transaction_or_tracking_fields_from::<false>` **16.06%** (composite
+  wrapper), `Runtime::record_client_session` **9.62%** (wrapper), exact
+  `ClientTrackingState::clone_from` **9.23%**, exact `TransactionState::clone_from` **8.13%**, and
+  exact `ClientSession::allocation_metadata_matches` **5.17%**. The exact frozen allocation
+  matcher was **5.03%**; profiles lost zero samples.
+- **Why no third lever is admissible:** every exact leaf is now an already-mined invariant:
+  tracking has the maintained `has_activity` fast return, transactions have the maintained
+  activity fast return, and allocation matching is reduced to authenticated-user identity plus
+  the maintained named-metadata bits. The composite wrapper's remaining work is direct scalar and
+  per-command volatile stores plus the already-landed unchanged-command-name guard. Earlier
+  same-binary results already selected and shipped the stable/allocation split, redundant
+  client-ID omission, authenticated-user sharing, and command-name reuse; an unmaintained
+  all-field scan was proven inferior in the tracking REJECT. Unsymbolized libc aggregation cannot
+  select or profile-verify one Rust lever. Editing any of these again without a new exact leaf
+  would violate the profile-first and one-lever rules.
+- **End-to-end boundary:** the current sole-producer cross-engine sweep already records reachable
+  core commands at parity or below Redis 7.2.4's instruction cost (for example P16 GET **0.488x**
+  and INCR **0.929x** FrankenRedis/Redis). The remaining wall-throughput surface is the separately
+  owned and ledgered syscall/pipeline lane, which this lane did not touch. This profile blocker is
+  therefore specific to further single-command session-snapshot micro cuts, not a claim that no
+  structural work can ever exist.
+- **Parity promotions completed before stop:** LFU write/reaccess passed its three hard
+  differentials, Lua `coroutine.yield` passed nine hard cases, quicklist DUMP boundary passed
+  **120/120** and entered the canonical suite, and the current default live parity suite passed
+  **600/600**.
+- **Retry predicates (ledger-closed):** resume only if (1) a literal-current profile exposes a
+  non-wrapper, not-already-mined snapshot leaf at **>=5% exact self-time**; (2) a fully audited
+  maintained generation/dirty invariant covers every stable/volatile metadata mutation without an
+  on-snapshot field scan; or (3) a fresh live cross-engine instruction sweep finds a reachable
+  command where FrankenRedis again spends more CPU than Redis 7.2.4. Any retry still requires one
+  remote binary, within-routine interleaved A/A+A/B, exact nonzero profile self-time, null control,
+  CV below 5%, and complete session/conformance parity.
+
 ## 2026-07-23 CreamPeak: SHIPPED — maintain named CLIENT metadata activity (`frankenredis-0i01g`)
 
 - **Negative-ledger-first / profile-first:** exact searches found no prior client-name/library

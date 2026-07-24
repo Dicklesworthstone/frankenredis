@@ -4,6 +4,28 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-24: BLOCKER — session-snapshot micro profile saturated (`frankenredis-6oavn`)
+
+The literal-current named-metadata candidate executable
+`e8e9acc00ef29d5a6cc0d80e085afac3be87d49847d84cb872c63ceea65caab1` leaves only composite
+wrappers or already-mined exact leaves: non-transaction wrapper 16.06%, record wrapper 9.62%,
+tracking clone 9.23%, transaction clone 8.13%, and allocation matcher 5.17% (frozen reference
+5.03%, zero lost samples). Tracking and transaction now have maintained activity invariants;
+allocation matching is reduced to shared-auth identity plus the maintained named-metadata bits.
+The wrapper remainder is direct scalar/per-command-volatile stores and the already-landed
+command-name guard. Prior same-binary KEEPs already cover the stable/allocation split, client-ID
+omission, auth sharing, and command-name reuse; an unmaintained state scan is ledger-REJECTED.
+Unsymbolized libc aggregation cannot select one profile-verifiable Rust lever.
+
+The live cross-engine ledger already has reachable core commands at or below Redis 7.2.4 CPU
+(P16 GET 0.488x and INCR 0.929x instructions); the remaining throughput wall is the separately
+owned syscall/pipeline lane. Parity promotion also cleared LFU write/reaccess (3 hard cases), Lua
+`coroutine.yield` (9), quicklist DUMP boundary (120/120, promoted), and the full current default
+suite (600/600). RETRY only on a new non-wrapper snapshot leaf at >=5% exact self-time, a fully
+audited maintained generation/dirty invariant with no snapshot scan, or a fresh live command where
+FrankenRedis again exceeds Redis CPU. Preserve the one-remote-binary interleaved A/A+A/B, null
+control, exact profile, CV<5%, and full parity requirements.
+
 ## 2026-07-23: SHIPPED — maintain named CLIENT metadata activity; 4.46% fewer instructions (`frankenredis-0i01g`)
 
 Profile-first continuation from the tracking-activity KEEP: the literal candidate profile left
