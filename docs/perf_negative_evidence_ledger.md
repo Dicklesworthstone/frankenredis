@@ -8,6 +8,33 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-24 cc(Opus): BLOCKER (re-verified 4th time) — pipeline writev architecturally inapplicable; large-value framing gap CLOSED
+
+- **Measured, fresh today (code + live perf + interleaved fr-vs-redis ratio).** The architectural
+  output/IO lane ("pipeline writev in fr-eventloop/fr-server", README's stale 33-47% wall) has no
+  reachable lever:
+  - **writev BLOCKER:** fr-server encodes ALL pipelined replies into ONE contiguous per-connection
+    `write_buf` and flushes with a single `stream.write(&write_buf[write_pos..])` (main.rs try_flush
+    ~L453-486). Zero separate buffers to gather ⇒ writev/IoSlice has nothing to coalesce; it is a
+    strictly-equal-or-worse rewrite of an already-one-syscall-per-batch path (this is why the
+    2026-07-10 strace saw perfect 16-cmd/syscall coalescing). `grep -rniE 'writev|write_vectored|
+    IoSlice' crates/fr-server crates/fr-eventloop` = 0 matches; fr-eventloop is dependency-free
+    policy helpers, not the IO buffer path. RETRY PREDICATE (still false): only reopen if the reply
+    path is ever restructured to hold multiple non-contiguous buffers per connection.
+  - flush reclaim = frankenredis-d5nez (no-memmove) already shipped; reply-encode = vlis9/citbb/
+    c47rl/pipsm SATURATED.
+- **POSITIVE — large-value framing gap CLOSED (don't re-chase bead qesp3):** interleaved fr(core3)
+  vs redis 7.2.4(core2), client core6 (dedicated cores, connected_slaves:0), `-t set -q -c8 -n3000
+  -d<sz>`: 4MB ratio 0.998/1.048/1.074 = PARITY (was 0.39-0.79x); 1MB 1.12-1.31x fr-faster; 256KB
+  1.08-1.13x fr-faster. Read-side direct-read (577ad4535) + later IO work closed it. TRAP: pinning
+  redis-server to the client's core makes redis look 1.8-2.5x slower (contention) — give each
+  server a dedicated core distinct from the client.
+- **SET -P16 whole-server profile:** no flush/write/output frame in top 22; remaining fr-server
+  surface = dispatch machinery (process_buffered_frames 3.40% + parse_borrowed_multibulk 1.47%),
+  attacked per-command via the dispatch-floor front gate (single-command = cod's lane); no
+  batch-level architectural lever remains that doesn't cross into fr_runtime (unbuildable via rch)
+  or per-command territory. Artifacts: artifacts/optimization/frankenredis-writev-blocker/20260724T0130Z/.
+
 ## 2026-07-23 CreamPeak: SHIPPED — share immutable authenticated-user snapshot bytes (`frankenredis-fduxc`)
 
 - **Negative-ledger-first / profile-first:** exact ledger and recent-history searches found no
