@@ -2521,8 +2521,15 @@ fn process_buffered_frames(
             break;
         }
 
-        // Check write buffer limit before processing more frames.
-        if conn.pending_output_bytes() > runtime.effective_output_hard_limit(conn.session.client_id)
+        // Check write buffer limit before processing more frames. Zero pending
+        // output can never exceed a limit (limits are >= 0; the default class
+        // hard==0 maps to usize::MAX), so short-circuit before the per-frame
+        // effective_output_hard_limit computation (is_replica + is_pubsub_client
+        // lookups + config read) — at batch start on a drained connection pending
+        // is 0, so the common fast path skips it entirely.
+        let pending_output = conn.pending_output_bytes();
+        if pending_output > 0
+            && pending_output > runtime.effective_output_hard_limit(conn.session.client_id)
         {
             eprintln!("warn: client write buffer exceeded limit, disconnecting");
             conn.closing = true;
