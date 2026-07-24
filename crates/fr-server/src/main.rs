@@ -1258,6 +1258,10 @@ fn main() -> ExitCode {
 
     let mut events = Events::with_capacity(1024);
     let mut clients: ClientMap = ClientMap::default();
+    // Reused 8 KiB read staging buffer, zeroed once here and passed to every
+    // handle_readable call instead of a fresh per-call stack array (which would
+    // memset 8 KiB on every readable event). Only `buf[..n]` is ever consumed.
+    let mut read_scratch = [0u8; 8192];
     let mut client_id_to_token: HashMap<u64, Token> = HashMap::new();
     let mut blocked_tokens: HashSet<Token> = HashSet::new();
     let mut blocked_wake_index = BlockedWakeIndex::default();
@@ -1371,6 +1375,7 @@ fn main() -> ExitCode {
                             ts,
                             ts_us,
                             writer_pool.as_ref(),
+                            &mut read_scratch,
                         );
                     }
                     if event.is_writable() {
@@ -1475,6 +1480,7 @@ fn main() -> ExitCode {
             ts,
             ts_us,
             writer_pool.as_ref(),
+            &mut read_scratch,
         );
 
         // (frankenredis-pkdgs) In Sentinel mode, actively PING + INFO the
@@ -1863,6 +1869,7 @@ fn release_expired_client_pause(
     ts: u64,
     ts_us: u64,
     writer_pool: Option<&WriterPool>,
+    read_scratch: &mut [u8],
 ) {
     if paused_tokens.is_empty() || runtime.is_client_paused(ts) {
         return;
@@ -1887,6 +1894,7 @@ fn release_expired_client_pause(
                 ts,
                 ts_us,
                 writer_pool,
+                read_scratch,
             );
         }
     }
@@ -2179,6 +2187,13 @@ fn handle_readable(
     ts: u64,
     ts_us: u64,
     writer_pool: Option<&WriterPool>,
+    // A single 8 KiB read staging buffer, allocated and zeroed ONCE by the event
+    // loop and reused for every readable event, instead of a fresh `[0u8; 8192]`
+    // per call. The safe `Read::read` API needs an initialized buffer, so a stack
+    // array would memset 8 KiB on every command (a top non-clock frame in the GET
+    // profile); a reused buffer is initialized once. Only `buf[..n]` is ever read,
+    // so stale bytes past `n` are never observed — behaviour is identical.
+    read_scratch: &mut [u8],
 ) {
     let Some(conn) = clients.get_mut(&token) else {
         return;
@@ -2192,7 +2207,7 @@ fn handle_readable(
     // edge-triggered readiness — any command/pipeline larger than what one
     // event delivered (≈ >16KB in practice) stranded its tail bytes and hung
     // the connection. (frankenredis-apg7r, reverts the read-side no-drain)
-    let mut buf = [0u8; 8192];
+    let buf: &mut [u8] = read_scratch;
     let mut read_any = false;
     if conn.large_set_read.is_some() {
         match continue_large_plain_set_read(conn, runtime, closing_tokens, token) {
@@ -2220,7 +2235,7 @@ fn handle_readable(
     const LARGE_CHUNK: usize = 64 * 1024;
     let mut switch_to_direct = false;
     while conn.large_set_read.is_none() {
-        match conn.stream.read(&mut buf) {
+        match conn.stream.read(&mut *buf) {
             Ok(0) => {
                 // Client disconnected.
                 conn.closing = true;
@@ -32686,6 +32701,7 @@ mod tests {
             500,
             500_000,
             None,
+            &mut [0u8; 8192],
         );
         assert!(
             paused_tokens.contains(&token),
@@ -32710,6 +32726,7 @@ mod tests {
             2_000,
             2_000_000,
             None,
+            &mut [0u8; 8192],
         );
         assert!(
             paused_tokens.is_empty(),
