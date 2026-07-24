@@ -12253,6 +12253,7 @@ enum BorrowedDispatchFloorClass {
     BitcountKey,
     Zrange,
     Hrandfield,
+    BitposKeyBit,
 }
 
 struct BorrowedDispatchFloorToken<'a> {
@@ -12266,6 +12267,7 @@ enum BorrowedDispatchFloorCommand {
     Bitcount,
     Bitfield,
     BitfieldRo,
+    Bitpos,
     Exists,
     Getex,
     Getrange,
@@ -12344,6 +12346,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'O', b'B', b'J', b'E', b'C', b'T'] => Some(BorrowedDispatchFloorCommand::Object),
             [b'Z', b'S', b'C', b'O', b'R', b'E'] => Some(BorrowedDispatchFloorCommand::Zscore),
             [b'Z', b'R', b'A', b'N', b'G', b'E'] => Some(BorrowedDispatchFloorCommand::Zrange),
+            [b'B', b'I', b'T', b'P', b'O', b'S'] => Some(BorrowedDispatchFloorCommand::Bitpos),
             _ => None,
         },
         7 => match uppercase_ascii_token::<7>(token)? {
@@ -12659,6 +12662,11 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         }
         (2, BorrowedDispatchFloorCommand::Hrandfield) => {
             Some(BorrowedDispatchFloorClass::Hrandfield)
+        }
+        // Only the no-range `*3 BITPOS key bit` form floors; start/range/unit
+        // forms (arity 4/5/6) fall through to the unchanged generic path.
+        (3, BorrowedDispatchFloorCommand::Bitpos) => {
+            Some(BorrowedDispatchFloorClass::BitposKeyBit)
         }
         (4, BorrowedDispatchFloorCommand::Getrange) => Some(BorrowedDispatchFloorClass::Getrange),
         // Only plain `*4 ZRANGE key start stop` floors; WITHSCORES/REV/LIMIT/
@@ -13726,6 +13734,32 @@ fn try_dispatch_floor_classified_action(
             );
             if let Some(consumed) = hit {
                 Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::BitposKeyBit => {
+            // BITPOS key bit (no range) mirrors ZCOUNT: the borrowed executor
+            // returns an integer RespFrame (FastReply). Parser+executor already
+            // shipped; only the dispatch-floor routing is new. The executor defers
+            // a malformed bit-arg to the generic path, so the fallback stays
+            // byte-exact; start/range/unit forms are a distinct arity and fall
+            // through.
+            if let Some(packet) = parse_borrowed_plain_bitpos_packet(unparsed, &parser_config)
+                && let Some(response) =
+                    runtime.execute_plain_bitpos_borrowed(packet.key, packet.bit, None, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,
@@ -34057,6 +34091,10 @@ mod tests {
         assert_eq!(
             borrowed_dispatch_floor_command(b"HRANDFIELD"),
             Some(BorrowedDispatchFloorCommand::Hrandfield)
+        );
+        assert_eq!(
+            borrowed_dispatch_floor_command(b"BITPOS"),
+            Some(BorrowedDispatchFloorCommand::Bitpos)
         );
         assert_eq!(
             borrowed_dispatch_floor_command(b"srandmember"),

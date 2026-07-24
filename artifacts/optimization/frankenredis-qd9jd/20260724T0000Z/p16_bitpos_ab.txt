@@ -1,0 +1,11 @@
+BITPOS key bit (no range) dispatch-floor — KEEP. Last worthwhile floor target (6.63% dispatch).
+Arms hash-bracketed: ctl f9ffcc8b7cc4a7c899f3cd5942b7a25a4ccc3f24 (HEAD, BITPOS unfloored) /
+cand 954a90cefb775d74f2df427270552011a6771d62 (+BITPOS key-bit floor arm, 6-byte, arity 3).
+Commandstats-normalized instructions:u (-c50 -P16, perf -- sleep 6, calls-delta):
+  BITPOS     ctl 3831.6 -> cand 2564.3 instr/op = 0.669x (1.49x fewer)
+  GET guard  ctl 1661.9 -> cand 1661.9 instr/op = 1.000x (neutral; an earlier +1.6% reading was a
+             ctl outlier-low, re-measured to exact parity)
+Byte-identical vs redis 7.2.4: bit1(100)/bit0(0)/missing-b1(-1)/missing-b0(0)/wrongtype/bad-bit(err)/
+start-fallback/range-fallback/BIT-unit-fallback = 9/9 MATCH. Only *3 BITPOS key bit floors; start/range/
+unit (arity 4/5/6) fall back. FastReply via execute_plain_bitpos_borrowed(key, bit, None, ts) (defers
+malformed bit-arg to generic, so fallback stays byte-exact).

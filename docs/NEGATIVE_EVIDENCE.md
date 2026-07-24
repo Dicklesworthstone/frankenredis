@@ -4,6 +4,33 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-23: SHIPPED — dispatch-floor front gate for BITPOS key bit (no range); 1.49x fewer instructions on P16 (frankenredis-qd9jd)
+
+Last worthwhile floor target per the profile ranking (process_buffered_frames 6.63% self at P16, on par
+with BITCOUNT 6.46%). 6-byte classifier arm, arity 3 ONLY — start/range/unit forms (arity 4/5/6) fall
+through unchanged. FastReply via execute_plain_bitpos_borrowed(key, bit, None, ts) (which itself defers a
+malformed bit-arg to the generic path, keeping the fallback byte-exact).
+
+MEASURED (commandstats-normalized instructions:u; hash-bracketed ctl f9ffcc8b / cand 954a90ce; -P16,
+perf -- sleep 6, calls-delta):
+  BITPOS     ctl 3831.6 -> cand 2564.3 instr/op = 0.669x (1.49x fewer)
+  GET guard  ctl 1661.9 -> cand 1661.9 instr/op = 1.000x (neutral; a first +1.6% reading was a ctl
+             outlier-low, re-measured to exact parity)
+
+BYTE-IDENTICAL vs redis 7.2.4: bit1(100)/bit0(0)/missing-key-b1(-1)/missing-key-b0(0)/wrongtype/
+bad-bit(err)/start-fallback/range-fallback/BIT-unit-fallback = 9/9 MATCH. Gates: build green; 3/3 floor
+tests; fr-conformance FULLY GREEN (194+99); fr-server clippy-clean on hunk. Pre-existing unrelated
+failures (MSET fe57482f6, lua_eval clippy) not introduced. Artifacts:
+artifacts/optimization/frankenredis-qd9jd/20260724T0000Z/.
+
+DISPATCH-FLOOR VEIN COMPLETE (9 commands this session): ZSCORE 1.97x, HGET 1.88x, SISMEMBER 1.95x,
+SRANDMEMBER 2.74x, GETRANGE 1.62x, BITCOUNT 1.46x, ZRANGE 3.09x, HRANDFIELD 2.49x, BITPOS 1.49x. All
+remaining unfloored reads profile below the ~6% process_buffered_frames floor-worth threshold
+(SINTERCARD 4.97%, etc.), so the win would be <1.4x — not worth the classifier-arm tax. The hot read
+surface is now fully floored. NEXT CYCLE should re-profile a MIXED/realistic workload for a fresh
+hotspot or pivot veins (structural fr-store/RAM, or a correctness/parity sweep); do NOT keep adding
+floor arms below ~6% dispatch.
+
 ## 2026-07-23: SHIPPED — dispatch-floor front gate for HRANDFIELD key (no count); 2.49x fewer instructions on P16 (frankenredis-syqok)
 
 2nd-ranked unfloored read by dispatch cost (process_buffered_frames 16.00% self at P16, after ZRANGE).
