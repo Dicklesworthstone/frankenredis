@@ -3467,6 +3467,16 @@ fn quicklist_packed_node_accepts_local(
 struct ChunkedList {
     chunks: VecDeque<ListChunk>,
     len: usize,
+    /// Number of leading elements in the listpack node that Redis preserves
+    /// when an RPUSH command converts an existing listpack to quicklist.
+    ///
+    /// Redis decides that conversion from the pre-command listpack byte size
+    /// plus the batch's raw value lengths, then appends the existing listpack
+    /// as one node even when its precise encoded size is a few bytes over the
+    /// configured node budget. The chunk layout is an internal implementation
+    /// detail and may have split that logical node earlier, so DUMP/RDB
+    /// synthesis must retain this command-history boundary explicitly.
+    rpush_conversion_prefix_len: usize,
 }
 
 pub(crate) struct RetainedListpackChunk<'a> {
@@ -3547,6 +3557,10 @@ impl ChunkedList {
     }
 
     fn push_front_with_fill(&mut self, elem: Vec<u8>, fill: i64) {
+        // A later head insertion can create or extend nodes before the
+        // conversion prefix. Fall back to ordinary boundary synthesis rather
+        // than retaining a stale leading-node claim.
+        self.rpush_conversion_prefix_len = 0;
         if let Some(front) = self.chunks.front_mut()
             && front.accepts_append(&elem, fill)
         {
@@ -3565,6 +3579,10 @@ impl ChunkedList {
     fn pop_front(&mut self) -> Option<Vec<u8>> {
         let out = self.chunks.front_mut()?.make_mut().remove(0);
         self.len -= 1;
+        self.rpush_conversion_prefix_len = self
+            .rpush_conversion_prefix_len
+            .saturating_sub(1)
+            .min(self.len);
         if self.chunks.front().is_some_and(ListChunk::is_empty) {
             self.chunks.pop_front();
         }
@@ -3574,6 +3592,7 @@ impl ChunkedList {
     fn pop_back(&mut self) -> Option<Vec<u8>> {
         let out = self.chunks.back_mut()?.make_mut().pop()?;
         self.len -= 1;
+        self.rpush_conversion_prefix_len = self.rpush_conversion_prefix_len.min(self.len);
         if self.chunks.back().is_some_and(ListChunk::is_empty) {
             self.chunks.pop_back();
         }
@@ -3587,11 +3606,13 @@ impl ChunkedList {
         let Some(chunk) = self.chunks.get_mut(chunk_idx) else {
             return false;
         };
+        self.rpush_conversion_prefix_len = 0;
         chunk.make_mut()[local_idx] = elem;
         true
     }
 
     fn insert(&mut self, idx: usize, elem: Vec<u8>) {
+        self.rpush_conversion_prefix_len = 0;
         if idx >= self.len {
             self.push_back(elem);
             return;
@@ -3613,6 +3634,7 @@ impl ChunkedList {
 
     fn remove(&mut self, idx: usize) -> Option<Vec<u8>> {
         let (chunk_idx, local_idx) = self.locate(idx)?;
+        self.rpush_conversion_prefix_len = 0;
         let out = self.chunks[chunk_idx].make_mut().remove(local_idx);
         self.len -= 1;
         if self.chunks[chunk_idx].is_empty() {
@@ -3622,6 +3644,7 @@ impl ChunkedList {
     }
 
     fn retain(&mut self, mut keep: impl FnMut(&[u8]) -> bool) {
+        self.rpush_conversion_prefix_len = 0;
         let mut next = ChunkedList::default();
         for elem in self.iter() {
             if keep(elem) {
@@ -4073,6 +4096,32 @@ impl ListValue {
         }
     }
 
+    /// RPUSH-specific command-level conversion accounting.
+    ///
+    /// When a later RPUSH converts an existing listpack, Redis retains that
+    /// complete pre-command listpack as the first quicklist node. Its precise
+    /// encoded size can exceed the configured budget because the conversion
+    /// probe uses raw batch bytes. Record the prefix length so persistence can
+    /// reproduce that historical node instead of re-splitting all values.
+    pub fn note_rpush_command_grow(
+        &mut self,
+        lp_before_command: u64,
+        raw_add: u64,
+        added_count: usize,
+        fill: i64,
+    ) {
+        let was_forced = self.forced_quicklist;
+        self.note_command_grow(lp_before_command, raw_add, fill);
+        if !was_forced && self.forced_quicklist {
+            let prefix_len = self.len().saturating_sub(added_count);
+            if prefix_len != 0
+                && let ListRepr::Deque(list) = &mut self.repr
+            {
+                Arc::make_mut(list).rpush_conversion_prefix_len = prefix_len;
+            }
+        }
+    }
+
     /// Apply redis's LSET-time conversion. `lsetCommand` runs
     /// `listTypeTryConversionAppend(o, value)` — `LIST_CONV_GROWING` over the
     /// CURRENT full listpack plus the new value's raw length, with
@@ -4126,6 +4175,9 @@ impl ListValue {
         };
         if below_half {
             self.forced_quicklist = false;
+            if let ListRepr::Deque(list) = &mut self.repr {
+                Arc::make_mut(list).rpush_conversion_prefix_len = 0;
+            }
         }
     }
 
@@ -4469,6 +4521,42 @@ impl ListValue {
     }
 
     pub(crate) fn quicklist_packed_nodes(&self, fill: i64) -> Option<Vec<QuicklistPackedNode<'_>>> {
+        if let ListRepr::Deque(list) = &self.repr {
+            let prefix_len = list.rpush_conversion_prefix_len.min(self.len());
+            if prefix_len != 0 {
+                let mut nodes = Vec::new();
+                let mut entries = Vec::new();
+                let mut node_bytes = LIST_LP_OVERHEAD;
+                for (index, elem) in self.iter().enumerate() {
+                    if index >= prefix_len
+                        && !entries.is_empty()
+                        && !quicklist_packed_node_accepts_local(
+                            entries.len(),
+                            node_bytes,
+                            elem.len(),
+                            fill,
+                        )
+                    {
+                        let blob = fr_persist::encode_listpack_strings_blob(&entries)?;
+                        nodes.push(QuicklistPackedNode {
+                            bytes: Cow::Owned(blob),
+                        });
+                        entries.clear();
+                        node_bytes = LIST_LP_OVERHEAD;
+                    }
+                    node_bytes += list_lp_entry_bytes(elem);
+                    entries.push(elem);
+                }
+                if !entries.is_empty() {
+                    let blob = fr_persist::encode_listpack_strings_blob(&entries)?;
+                    nodes.push(QuicklistPackedNode {
+                        bytes: Cow::Owned(blob),
+                    });
+                }
+                return (!nodes.is_empty()).then_some(nodes);
+            }
+        }
+
         let ListRepr::Deque(list) = &self.repr else {
             return None;
         };

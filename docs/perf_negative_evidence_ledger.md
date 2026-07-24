@@ -35,6 +35,46 @@ turns). Keep claims honest — mark which.
   batch-level architectural lever remains that doesn't cross into fr_runtime (unbuildable via rch)
   or per-command territory. Artifacts: artifacts/optimization/frankenredis-writev-blocker/20260724T0130Z/.
 
+## 2026-07-23 CreamPeak: SHIPPED — preserve RPUSH listpack-conversion node boundaries (`frankenredis-2udek`)
+
+- **Exact residual / root cause:** the ledger-first Redis 7.2.4 boundary differ found one DUMP and
+  one serialized-length divergence at seed 2026 trial 232: 70 elements, Redis/FrankenRedis payload
+  lengths **10,312/10,324** and serialized lengths **10,301/10,313**. Redis evaluates an RPUSH
+  batch's conversion against the pre-command listpack size plus raw value lengths, then preserves
+  that complete listpack as the first quicklist node. FrankenRedis retained the conversion state
+  but later reconstructed nodes from individual elements, incorrectly re-splitting Redis's 50/20
+  node history as 49/21.
+- **One parity lever:** large-list `ChunkedList` now records only the leading element count when an
+  RPUSH command causes the false-to-true listpack-to-quicklist transition. DUMP and RDB synthesis
+  first reproduce that historical node, then apply ordinary Redis append admission to subsequent
+  elements. Tail pushes/pops maintain the prefix; front or structural mutations clear it rather
+  than risk stale history. Restored quicklists and all common lists retain the zero/default path.
+- **Byte-exact differential proof:** the fail-closed RCH-built `frankenredis` executable sha256
+  `e93edda4651a88cbbcd0e6cbfbf6eb444bac23c9425e2933cd1dc0069d34df36` matched vendored Redis
+  7.2.4 over seeds **2026, 2027, and 42**, 600 trials each: **1,800/1,800 DUMP payloads** and
+  **1,800/1,800 serialized lengths**, zero divergences. The regression fixture uses a first RPUSH
+  of 50 values x 163 bytes (raw conversion probe 8,157 bytes, exact listpack 8,357 bytes) plus a
+  tail RPUSH; it proves two QUICKLIST_2 packed nodes, exact first-node contents and size, and
+  RESTORE round-trip.
+- **Performance boundary:** this is a correctness promotion, not a throughput claim. It adds one
+  `usize` only to the already-large `ChunkedList` representation. Lists without the rare recorded
+  conversion boundary take the existing packed-node synthesis path unchanged; the recorded path
+  deliberately builds owned node blobs to reproduce Redis bytes.
+- **Gates:** fail-closed remote focused quicklist tests passed **2/2**. Full `fr-store` completed
+  **875 semantic tests green**; three unrelated embedded timing-threshold tests failed under worker
+  contention (`foldhash_generic_set_membership`, `record_keyspace_lookup`, and
+  `zset_index_slice_treap`). Scoped release all-target check and scoped `fr-store` Clippy with
+  `-D warnings` passed. Full `fr-conformance` passed **194/194** library tests, every auxiliary
+  target, and **98/99** smoke tests; the sole upstream `PFDEBUG SELFTEST` timeout passed immediately
+  when retried alone on a different remote worker. Live list parity was **206/206**.
+- **Workspace blockers outside the lane:** workspace check reaches the peer-owned `fr-server` test
+  target and fails on eight `std::HashMap` versus `foldhash::HashMap` type mismatches. Workspace
+  Clippy is blocked earlier by the pre-existing `fr-command/src/lua_eval.rs` unused `values` method
+  and collapsible-if findings. The scoped production crate is clean; pipeline/writev and server
+  output files were not touched. Cargo-disabled scoped UBS reported the monolithic baseline
+  (**361 critical, 9,598 warnings, 2,295 info**) with no sampled finding in the new
+  conversion-boundary code.
+
 ## 2026-07-23 CreamPeak: SHIPPED — share immutable authenticated-user snapshot bytes (`frankenredis-fduxc`)
 
 - **Negative-ledger-first / profile-first:** exact ledger and recent-history searches found no

@@ -4,6 +4,31 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-23: SHIPPED — preserve RPUSH listpack-conversion node boundaries (`frankenredis-2udek`)
+
+The Redis 7.2.4 boundary differ isolated seed 2026 trial 232: 70 elements produced DUMP lengths
+10,312/10,324 and serialized lengths 10,301/10,313. Redis converts once per RPUSH command and keeps
+the complete pre-command listpack as the first quicklist node; FrankenRedis later re-split that
+history element-by-element as 49/21 instead of Redis's 50/20.
+
+Large-list state now records the leading element count only when RPUSH causes the listpack-to-
+quicklist transition. DUMP/RDB synthesis reproduces that historical node before applying ordinary
+append admission; structural or front mutations clear the marker. The fail-closed RCH-built
+executable sha256 `e93edda4651a88cbbcd0e6cbfbf6eb444bac23c9425e2933cd1dc0069d34df36`
+matched Redis across seeds 2026, 2027, and 42: **1,800/1,800 byte-exact DUMPs** and **1,800/1,800
+serialized lengths**. A 50 x 163-byte regression proves Redis's exact 8,357-byte first listpack
+node, the tail node, and RESTORE round-trip.
+
+This is a parity promotion, not a performance claim: one `usize` is added only to `ChunkedList`,
+and the zero/default common path is unchanged. Focused tests 2/2, scoped release check and scoped
+Clippy `-D warnings` pass. Full conformance library 194/194 plus all auxiliaries passed; smoke was
+98/99 because upstream Redis timed out on `PFDEBUG SELFTEST`, and that sole case passed on isolated
+retry on another worker. Full store had 875 semantic tests green and three unrelated timing-
+threshold failures. Workspace gates remain blocked outside this lane by peer-owned `fr-server`
+test map-type errors and pre-existing Lua lint findings. Pipeline/writev files were untouched.
+Cargo-disabled scoped UBS retained the monolithic baseline (361 critical, 9,598 warnings, 2,295
+info) with no sampled finding in the new conversion-boundary code.
+
 ## 2026-07-23: SHIPPED — share immutable authenticated-user snapshot bytes; 15.19% fewer instructions (`frankenredis-fduxc`)
 
 Profile-first single-command registry work: exact `ClientSession::allocation_metadata_matches`

@@ -17059,7 +17059,12 @@ impl Store {
                             raw_add += bytes.len() as u64;
                             l.push_back_borrowed(bytes);
                         }
-                        l.note_command_grow(lp_pre, raw_add, self.list_max_listpack_size);
+                        l.note_rpush_command_grow(
+                            lp_pre,
+                            raw_add,
+                            values.len(),
+                            self.list_max_listpack_size,
+                        );
                         let len = l.len();
                         Self::mark_digest_stale_fields(
                             &mut self.digest_stale,
@@ -17080,9 +17085,10 @@ impl Store {
                     raw_add += bytes.len() as u64;
                     l.push_back_borrowed(bytes);
                 }
-                l.note_command_grow(
+                l.note_rpush_command_grow(
                     ListValue::empty_listpack_bytes(),
                     raw_add,
+                    values.len(),
                     self.list_max_listpack_size,
                 );
                 let len = l.len();
@@ -17135,7 +17141,7 @@ impl Store {
                             raw_add += v.len() as u64;
                             l.push_back(v);
                         }
-                        l.note_command_grow(lp_pre, raw_add, self.list_max_listpack_size);
+                        l.note_rpush_command_grow(lp_pre, raw_add, n, self.list_max_listpack_size);
                         let len = l.len();
                         Self::mark_digest_stale_fields(
                             &mut self.digest_stale,
@@ -17155,9 +17161,10 @@ impl Store {
                     raw_add += v.len() as u64;
                     l.push_back(v);
                 }
-                l.note_command_grow(
+                l.note_rpush_command_grow(
                     ListValue::empty_listpack_bytes(),
                     raw_add,
+                    n,
                     self.list_max_listpack_size,
                 );
                 let len = l.len();
@@ -18995,7 +19002,12 @@ impl Store {
                             raw_add += v.len() as u64;
                             l.push_back_borrowed(v);
                         }
-                        l.note_command_grow(lp_pre, raw_add, self.list_max_listpack_size);
+                        l.note_rpush_command_grow(
+                            lp_pre,
+                            raw_add,
+                            values.len(),
+                            self.list_max_listpack_size,
+                        );
                         let len = l.len();
                         if !values.is_empty() {
                             Self::mark_digest_stale_fields(
@@ -69767,6 +69779,54 @@ mod tests {
         let mut restored = Store::new();
         restored.restore_key(b"l", 0, &payload, false, 100).unwrap();
         assert_eq!(restored.lrange(b"l", 0, -1, 100).unwrap(), items);
+    }
+
+    #[test]
+    fn dump_quicklist2_preserves_rpush_conversion_prefix_node() {
+        let mut store = Store::new();
+        // Redis's command-level listpack conversion probe counts raw bytes:
+        // 7 + 50 * 163 = 8,157, so this first RPUSH remains one listpack.
+        // The exact encoded listpack is 8,357 bytes and therefore exceeds the
+        // default 8 KiB quicklist-node budget. A later RPUSH converts the
+        // existing listpack to quicklist and preserves all 50 entries as its
+        // first node rather than re-splitting them at 49/1.
+        let first_batch = vec![vec![b'a'; 163]; 50];
+        let tail = vec![b't'; 10];
+        store.rpush(b"l", &first_batch, 100).unwrap();
+        store.rpush(b"l", std::slice::from_ref(&tail), 101).unwrap();
+
+        let payload = store.dump_key(b"l", 101).unwrap();
+        let data_end = payload.len() - DUMP_TRAILER_LEN;
+        assert_eq!(payload[0], RDB_TYPE_LIST_QUICKLIST_2);
+        let mut cursor = 1;
+        let (node_count, consumed) = decode_length(&payload, cursor).unwrap();
+        cursor += consumed;
+        assert_eq!(node_count, 2);
+
+        let (container, consumed) = decode_length(&payload, cursor).unwrap();
+        cursor += consumed;
+        assert_eq!(container, 2);
+        let (first_node, consumed) = decode_rdb_string(&payload, cursor, data_end).unwrap();
+        cursor += consumed;
+        assert_eq!(first_node.len(), 8_357);
+        assert_eq!(decode_listpack_strings(&first_node).unwrap(), first_batch);
+
+        let (container, consumed) = decode_length(&payload, cursor).unwrap();
+        cursor += consumed;
+        assert_eq!(container, 2);
+        let (second_node, consumed) = decode_rdb_string(&payload, cursor, data_end).unwrap();
+        cursor += consumed;
+        assert_eq!(
+            decode_listpack_strings(&second_node).unwrap(),
+            vec![tail.clone()]
+        );
+        assert_eq!(cursor, data_end);
+
+        let mut restored = Store::new();
+        restored.restore_key(b"l", 0, &payload, false, 101).unwrap();
+        let mut expected = first_batch;
+        expected.push(tail);
+        assert_eq!(restored.lrange(b"l", 0, -1, 101).unwrap(), expected);
     }
 
     #[test]
