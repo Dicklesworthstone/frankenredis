@@ -13364,6 +13364,12 @@ impl Store {
                 .remove(&(key.to_vec(), field.clone()));
         }
         if reaped > 0 {
+            // Reaping fields mutated the hash in place, so the running digest can no
+            // longer be updated incrementally — mark it stale (frankenredis-tstqi).
+            // Otherwise a fresh digest taken before the lazy reap disagrees with a full
+            // scan. The whole-hash-emptied case additionally flows through
+            // internal_entries_remove below (which also stales it, ne7sg).
+            Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
             self.dirty = self.dirty.saturating_add(reaped as u64);
             self.stat_expired_keys = self.stat_expired_keys.saturating_add(reaped as u64);
             *self
@@ -13408,6 +13414,11 @@ impl Store {
             became_empty = map.is_empty();
         }
         if removed {
+            // In-place field removal invalidates incremental digest tracking; mark the
+            // digest stale so a fresh digest taken before this lazy reap still matches a
+            // full scan (frankenredis-tstqi). Emptied-hash case also flows through
+            // internal_entries_remove below (ne7sg).
+            Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
             self.dirty = self.dirty.saturating_add(1);
             self.stat_expired_keys = self.stat_expired_keys.saturating_add(1);
             let entry = self
@@ -41852,6 +41863,36 @@ mod tests {
             .expect("xadd 2");
         store.xtrim(b"stream", 1, None, 0).expect("xtrim");
         assert_digest_matches(&mut store);
+    }
+
+    #[test]
+    fn fresh_digest_matches_full_scan_after_lazy_hash_field_expiry_reap() {
+        // frankenredis-tstqi: a running digest made fresh while a hash still holds a
+        // field with an unelapsed TTL must still match a full scan after the field is
+        // lazily reaped. The reap mutates the hash in place; before the fix it did not
+        // stale the incrementally-tracked digest, so the next fresh digest drifted.
+        let mut store = Store::new();
+        store
+            .hset(b"h", b"keep".to_vec(), b"v1".to_vec(), 0)
+            .expect("hset keep");
+        store
+            .hset(b"h", b"gone".to_vec(), b"v2".to_vec(), 0)
+            .expect("hset gone");
+        // `gone` expires at t=1000; both fields are present at t=0.
+        store.hash_field_set_abs_expiry(b"h", b"gone", 1_000, HashFieldTtlCondition::None, 0);
+
+        // Make the running digest fresh with BOTH fields still present.
+        let before = format!("{:016x}", store.state_digest_full_scan());
+        assert_eq!(store.state_digest(), before);
+
+        // Advance past the deadline and trigger the lazy reap (partial: `keep` remains).
+        let reaped = store.drop_expired_hash_fields(b"h", 2_000);
+        assert_eq!(reaped, 1, "the expired field should be reaped");
+        assert_eq!(store.hlen(b"h", 2_000).expect("hlen"), 1, "keep survives");
+
+        // The fresh digest must now agree with a full scan.
+        let expected = format!("{:016x}", store.state_digest_full_scan());
+        assert_eq!(store.state_digest(), expected);
     }
 
     #[test]
