@@ -207,6 +207,7 @@ PORT_BASED = [
     ("intset_width_dump_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("set_listpack_dump_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("list_quicklist_dump_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("quicklist_dump_boundary_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("stream_dump_byte_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("string_encoding_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("int_encoded_byteops_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
@@ -219,7 +220,7 @@ PORT_BASED = [
     ("restore_corrupt_payload_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("restore_corruption_fuzz.py", [str(ORACLE_PORT), str(FR_PORT), "2500"]),
     # orphaned-but-passing gates CI-registered 2026-06-18 (cc): standard <oracle> <fr>,
-    # deterministic + fast, verified PASS (quicklist_dump_boundary excluded — known gap).
+    # deterministic + fast, verified PASS.
     ("resp_protocol_probe.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("eval_compile_error_line_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("function_load_compile_error_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
