@@ -8,6 +8,46 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-23 CreamPeak: SHIPPED — maintain named CLIENT metadata activity (`frankenredis-0i01g`)
+
+- **Negative-ledger-first / profile-first:** exact searches found no prior client-name/library
+  metadata activity invariant. The immediately preceding tracking-activity candidate profile
+  attributed **12.83% self-time** to exact `ClientSession::allocation_metadata_matches`, selecting
+  its three remaining Option comparisons. Pipeline/writev, server output, and dispatch-floor work
+  remained outside this lane.
+- **One lever / invariant:** `ClientSession::has_named_metadata` is false exactly when client name,
+  library name, and library version are all absent. CLIENT SETNAME, HELLO SETNAME, CLIENT SETINFO,
+  RESET, default, `Clone`, and allocation-metadata copies maintain it. When both source and
+  destination are unnamed, the allocation gate checks the already-optimized authenticated-user
+  identity then skips all three Option comparisons. If either snapshot carries named metadata, it
+  executes the exact previous comparisons. Debug assertions recompute the invariant off the timed
+  release path; the same-binary reference freezes the old all-field matcher.
+- **Same-worker same-binary A/A+A/B:** one fail-closed RCH invocation on `hetzner1`, executable
+  sha256 `e8e9acc00ef29d5a6cc0d80e085afac3be87d49847d84cb872c63ceea65caab1`. Exact candidate and
+  frozen-reference matchers carried **5.17% / 5.03% self-time**, with zero lost samples. Nine
+  position-balanced rounds measured candidate median **342,521,204** versus reference median
+  **358,521,359** instructions: paired **1.046712810x**, or **4.462811% fewer**. A/A null median
+  **0.999999323**, p05..p95 **[0.999995898, 1.000004096]**, null CV **0.000216%**, effect CV
+  **0.000154%**.
+- **Behavior / boundary:** before timing, the same executable changed client name, library name,
+  library version, protocol, DB, peer address, socket FD, and timestamps, then proved complete
+  candidate/reference snapshots identical. The focused invariant test covers CLIENT SETNAME,
+  HELLO SETNAME, empty clears, CLIENT SETINFO, and RESET's deliberate preservation of library
+  metadata. This is an instruction result for repeated snapshots of the common unnamed client,
+  not CLIENT command or whole-server throughput. Named/library clients keep the old exact
+  comparisons. Rollback removes `has_named_metadata`, its mutation maintenance, and the frozen
+  all-field matcher.
+- **Gates:** the focused invariant and full-session snapshot tests passed. Strict-remote
+  `fr-conformance` passed its 194-test library, all auxiliary targets, 99-test smoke target,
+  live-client 124/124, and scripting 272/272. Strict-remote workspace all-target `cargo check`
+  passed; scoped `fr-runtime` all-target `cargo clippy --features bench-reference --no-deps
+  -- -D warnings` passed. Workspace Clippy stops only in the peer-owned Lua surface at one unused
+  `LuaGlobals::values` method and two `collapsible_if` diagnostics; none is in this lever's files.
+  Fail-closed RCH refused local `cargo fmt --check` with `RCH-E301`; direct nightly rustfmt on the
+  changed benchmark and `git diff --check` passed. Cargo-disabled UBS scanned the runtime monolith
+  and reported its existing 374-critical/4,665-warning/917-info baseline, with no sampled finding
+  on this lever's changed lines.
+
 ## 2026-07-23 CreamPeak: SHIPPED — maintain CLIENT TRACKING snapshot activity (`frankenredis-b1lxu`)
 
 - **Retry predicate satisfied / profile-first:** the earlier `frankenredis-7eruh` REJECT measured

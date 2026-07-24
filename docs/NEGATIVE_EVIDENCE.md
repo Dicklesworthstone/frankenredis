@@ -4,6 +4,36 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-23: SHIPPED — maintain named CLIENT metadata activity; 4.46% fewer instructions (`frankenredis-0i01g`)
+
+Profile-first continuation from the tracking-activity KEEP: the literal candidate profile left
+exact `ClientSession::allocation_metadata_matches` at 12.83% self-time. Exact ledger searches found
+no prior client-name/library activity invariant. `ClientSession` now maintains one
+`has_named_metadata` bit across CLIENT SETNAME, HELLO SETNAME, CLIENT SETINFO, RESET, default, and
+snapshot copies. When both snapshots have no client name or library metadata, the allocation gate
+skips three Option comparisons; populated metadata retains the exact old comparisons. Pipeline,
+writev, and server output were untouched.
+
+MEASURED same-worker/same-binary on `hetzner1`, sha256
+`e8e9acc00ef29d5a6cc0d80e085afac3be87d49847d84cb872c63ceea65caab1`: exact candidate and frozen
+reference matchers carried 5.17%/5.03% self-time with zero lost samples. Nine position-balanced
+rounds measured candidate median 342,521,204 versus reference median 358,521,359 instructions,
+**1.046712810x / 4.462811% fewer**. Null median 0.999999323, p05..p95
+[0.999995898, 1.000004096], null CV 0.000216%, effect CV 0.000154%.
+
+PARITY/GATES: the same executable proved identical populated client-name/library snapshots before
+timing. The focused invariant test covers SETNAME, HELLO SETNAME, empty clears, SETINFO, and
+RESET's deliberate library-metadata preservation. Boundary: repeated snapshots for the common
+unnamed client; named/library clients keep the old byte/string comparisons. Rollback removes
+`has_named_metadata`, its mutation maintenance, and the same-binary frozen matcher.
+Strict-remote full conformance passed (194-test library, auxiliary targets, 99-test smoke,
+live-client 124/124, scripting 272/272), workspace all-target check passed, and scoped
+`fr-runtime` all-target Clippy with `-D warnings` passed. Workspace Clippy remains blocked only by
+the peer-owned Lua unused-method/collapsible-if diagnostics. Fail-closed RCH refused local cargo
+fmt; direct nightly rustfmt plus `git diff --check` passed. Cargo-disabled UBS reported the
+runtime monolith's existing 374-critical/4,665-warning/917-info baseline with no sampled finding
+on this lever's changed lines.
+
 ## 2026-07-23: SHIPPED — maintain CLIENT TRACKING snapshot activity; 6.11% fewer instructions (`frankenredis-b1lxu`)
 
 Profile-first registry work: on the literal current auth-sharing build, exact

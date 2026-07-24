@@ -28,6 +28,7 @@ enum Lever {
     TransactionReuse,
     TrackingReuse,
     TrackingActivity,
+    NamedMetadataActivity,
     LastCommandReuse,
     TransactionPristine,
     StableMetadata,
@@ -45,6 +46,7 @@ impl Lever {
             Self::TransactionReuse => "transaction-reuse",
             Self::TrackingReuse => "tracking-reuse",
             Self::TrackingActivity => "tracking-activity",
+            Self::NamedMetadataActivity => "named-metadata-activity",
             Self::LastCommandReuse => "last-command-reuse",
             Self::TransactionPristine => "transaction-pristine",
             Self::StableMetadata => "stable-metadata",
@@ -61,6 +63,7 @@ impl Lever {
             Ok("transaction-reuse") => Ok(Self::TransactionReuse),
             Ok("tracking-reuse") => Ok(Self::TrackingReuse),
             Ok("tracking-activity") => Ok(Self::TrackingActivity),
+            Ok("named-metadata-activity") => Ok(Self::NamedMetadataActivity),
             Ok("last-command-reuse") => Ok(Self::LastCommandReuse),
             Ok("transaction-pristine") => Ok(Self::TransactionPristine),
             Ok("stable-metadata") => Ok(Self::StableMetadata),
@@ -81,6 +84,7 @@ impl Lever {
             "transaction-reuse" => Ok(Self::TransactionReuse),
             "tracking-reuse" => Ok(Self::TrackingReuse),
             "tracking-activity" => Ok(Self::TrackingActivity),
+            "named-metadata-activity" => Ok(Self::NamedMetadataActivity),
             "last-command-reuse" => Ok(Self::LastCommandReuse),
             "transaction-pristine" => Ok(Self::TransactionPristine),
             "stable-metadata" => Ok(Self::StableMetadata),
@@ -140,6 +144,12 @@ impl Arm {
             }
             (Lever::TrackingActivity, Self::Reference) => {
                 "<fr_runtime::ClientSession>::clone_tracking_activity_reference"
+            }
+            (Lever::NamedMetadataActivity, Self::Candidate) => {
+                "<fr_runtime::ClientSession>::allocation_metadata_matches"
+            }
+            (Lever::NamedMetadataActivity, Self::Reference) => {
+                "<fr_runtime::ClientSession>::allocation_metadata_matches_named_activity_reference"
             }
             (Lever::LastCommandReuse, Self::Candidate) => {
                 "<fr_runtime::Runtime>::record_client_session"
@@ -208,6 +218,12 @@ impl Arm {
             (Lever::TrackingActivity, Self::Reference) => {
                 "<fr_store::ClientTrackingState as core::clone::Clone>::clone_from"
             }
+            (Lever::NamedMetadataActivity, Self::Candidate) => {
+                "allocation_metadata_matches_named_activity_reference"
+            }
+            (Lever::NamedMetadataActivity, Self::Reference) => {
+                "<fr_runtime::ClientSession>::allocation_metadata_matches "
+            }
             (Lever::LastCommandReuse, Self::Candidate) => {
                 "record_client_session_last_command_copy_reference"
             }
@@ -274,6 +290,10 @@ fn record(runtime: &mut Runtime, session: &fr_runtime::ClientSession, lever: Lev
         (Lever::TrackingActivity, Arm::Candidate) => runtime.record_client_session(session),
         (Lever::TrackingActivity, Arm::Reference) => {
             runtime.record_client_session_tracking_activity_reference(session);
+        }
+        (Lever::NamedMetadataActivity, Arm::Candidate) => runtime.record_client_session(session),
+        (Lever::NamedMetadataActivity, Arm::Reference) => {
+            runtime.record_client_session_named_metadata_activity_reference(session);
         }
         (Lever::LastCommandReuse, Arm::Candidate) => runtime.record_client_session(session),
         (Lever::LastCommandReuse, Arm::Reference) => {
@@ -516,6 +536,7 @@ fn correctness_gate(lever: Lever) {
             | Lever::ClientIdCopy
             | Lever::StableScalarCopy
             | Lever::AuthUserShare
+            | Lever::NamedMetadataActivity
     ) {
         assert_eq!(
             stable_metadata_snapshot(lever, Arm::Candidate),

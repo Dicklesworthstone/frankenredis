@@ -5043,6 +5043,8 @@ pub struct ClientSession {
     client_lib_name: Option<String>,
     /// Client library version set via CLIENT SETINFO LIB-VER (Redis 7.2+).
     client_lib_ver: Option<String>,
+    /// Maintained predicate for client name/library metadata.
+    has_named_metadata: bool,
     /// Flags: client no-evict mode.
     client_no_evict: bool,
     /// Flags: client no-touch mode.
@@ -5094,6 +5096,7 @@ impl Clone for ClientSession {
             client_name: self.client_name.clone(),
             client_lib_name: self.client_lib_name.clone(),
             client_lib_ver: self.client_lib_ver.clone(),
+            has_named_metadata: self.has_named_metadata,
             client_no_evict: self.client_no_evict,
             client_no_touch: self.client_no_touch,
             client_tracking: self.client_tracking.clone(),
@@ -5151,10 +5154,26 @@ impl ClientSession {
 
     #[inline(never)]
     fn allocation_metadata_matches(&self, source: &Self) -> bool {
+        debug_assert_eq!(self.has_named_metadata, self.fields_have_named_metadata());
+        debug_assert_eq!(
+            source.has_named_metadata,
+            source.fields_have_named_metadata()
+        );
         self.authenticated_user_matches(source)
-            && self.client_name == source.client_name
-            && self.client_lib_name == source.client_lib_name
-            && self.client_lib_ver == source.client_lib_ver
+            && ((!self.has_named_metadata && !source.has_named_metadata)
+                || (self.client_name == source.client_name
+                    && self.client_lib_name == source.client_lib_name
+                    && self.client_lib_ver == source.client_lib_ver))
+    }
+
+    fn fields_have_named_metadata(&self) -> bool {
+        self.client_name.is_some()
+            || self.client_lib_name.is_some()
+            || self.client_lib_ver.is_some()
+    }
+
+    fn refresh_named_metadata_activity(&mut self) {
+        self.has_named_metadata = self.fields_have_named_metadata();
     }
 
     fn authenticated_user_matches(&self, source: &Self) -> bool {
@@ -5173,6 +5192,7 @@ impl ClientSession {
         self.client_name.clone_from(&source.client_name);
         self.client_lib_name.clone_from(&source.client_lib_name);
         self.client_lib_ver.clone_from(&source.client_lib_ver);
+        self.has_named_metadata = source.has_named_metadata;
     }
 
     fn clone_scalar_metadata_from<const COPY_CLIENT_ID: bool>(&mut self, source: &Self) {
@@ -5320,11 +5340,21 @@ impl ClientSession {
     }
 
     #[cfg(any(test, feature = "bench-reference"))]
+    #[inline(never)]
+    fn allocation_metadata_matches_named_activity_reference(&self, source: &Self) -> bool {
+        self.authenticated_user_matches(source)
+            && self.client_name == source.client_name
+            && self.client_lib_name == source.client_lib_name
+            && self.client_lib_ver == source.client_lib_ver
+    }
+
+    #[cfg(any(test, feature = "bench-reference"))]
     fn clone_allocation_metadata_content_reference(&mut self, source: &Self) {
         self.authenticated_user = source.authenticated_user.as_deref().map(Arc::from);
         self.client_name.clone_from(&source.client_name);
         self.client_lib_name.clone_from(&source.client_lib_name);
         self.client_lib_ver.clone_from(&source.client_lib_ver);
+        self.has_named_metadata = source.has_named_metadata;
     }
 
     #[cfg(any(test, feature = "bench-reference"))]
@@ -5333,6 +5363,20 @@ impl ClientSession {
         self.client_tracking.clone_from(&source.client_tracking);
         if !self.allocation_metadata_matches_content_reference(source) {
             self.clone_allocation_metadata_content_reference(source);
+        }
+        self.clone_scalar_metadata_from::<false>(source);
+        self.clone_volatile_metadata_from(source);
+        if self.last_command_name != source.last_command_name {
+            self.last_command_name.clone_from(&source.last_command_name);
+        }
+    }
+
+    #[cfg(any(test, feature = "bench-reference"))]
+    fn clone_from_named_metadata_activity_reference(&mut self, source: &Self) {
+        self.transaction_state.clone_from(&source.transaction_state);
+        self.client_tracking.clone_from(&source.client_tracking);
+        if !self.allocation_metadata_matches_named_activity_reference(source) {
+            self.clone_allocation_metadata_from(source);
         }
         self.clone_scalar_metadata_from::<false>(source);
         self.clone_volatile_metadata_from(source);
@@ -5361,6 +5405,7 @@ impl Default for ClientSession {
             client_name: None,
             client_lib_name: None,
             client_lib_ver: None,
+            has_named_metadata: false,
             client_no_evict: false,
             client_no_touch: false,
             client_tracking: ClientTrackingState::default(),
@@ -5446,6 +5491,7 @@ impl ClientSession {
         self.selected_db = 0;
         self.resp_protocol_version = 2;
         self.client_name = None;
+        self.refresh_named_metadata_activity();
         // Note: client_lib_name and client_lib_ver are NOT cleared - they
         // represent the client library, not per-session state.
         self.client_no_evict = false;
@@ -6816,6 +6862,23 @@ impl Runtime {
     pub fn record_client_session_tracking_activity_reference(&mut self, session: &ClientSession) {
         if let Some(snapshot) = self.server.client_sessions.get_mut(&session.client_id) {
             snapshot.clone_from_tracking_activity_reference(session);
+        } else {
+            self.server
+                .client_sessions
+                .insert(session.client_id, session.clone());
+        }
+    }
+
+    /// Frozen all-name-field matcher for named-metadata activity benchmarks.
+    #[cfg(any(test, feature = "bench-reference"))]
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn record_client_session_named_metadata_activity_reference(
+        &mut self,
+        session: &ClientSession,
+    ) {
+        if let Some(snapshot) = self.server.client_sessions.get_mut(&session.client_id) {
+            snapshot.clone_from_named_metadata_activity_reference(session);
         } else {
             self.server
                 .client_sessions
@@ -36387,6 +36450,7 @@ impl Runtime {
 
         if let Some(client_name) = next_client_name {
             self.session.client_name = client_name;
+            self.session.refresh_named_metadata_activity();
         }
         self.session.resp_protocol_version = protocol_version;
         build_hello_response(protocol_version, self.session.client_id)
@@ -40151,6 +40215,7 @@ impl Runtime {
             } else {
                 self.session.client_name = Some(argv[2].clone());
             }
+            self.session.refresh_named_metadata_activity();
             RespFrame::SimpleString("OK".to_string())
         } else if sub.eq_ignore_ascii_case("GETNAME") {
             if argv.len() != 2 {
@@ -40278,6 +40343,7 @@ impl Runtime {
                     ));
                 }
                 self.session.client_lib_name = if val.is_empty() { None } else { Some(val) };
+                self.session.refresh_named_metadata_activity();
             } else if attr.eq_ignore_ascii_case("LIB-VER") {
                 if val.bytes().any(|b| b <= b' ') {
                     return RespFrame::Error(format!(
@@ -40285,6 +40351,7 @@ impl Runtime {
                     ));
                 }
                 self.session.client_lib_ver = if val.is_empty() { None } else { Some(val) };
+                self.session.refresh_named_metadata_activity();
             } else {
                 return RespFrame::Error(format!("ERR Unrecognized option '{attr}'"));
             }
@@ -52896,6 +52963,55 @@ mod tests {
         general_clone.client_id = updated.client_id.saturating_add(1);
         general_clone.clone_from(&updated);
         assert_eq!(general_clone.client_id, updated.client_id);
+    }
+
+    #[test]
+    fn named_metadata_activity_invariant_tracks_client_mutations() {
+        let mut rt = Runtime::default_strict();
+        assert!(!rt.session.has_named_metadata);
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"SETNAME", b"alpha"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(rt.session.has_named_metadata);
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"SETNAME", b""]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(!rt.session.has_named_metadata);
+
+        assert!(matches!(
+            rt.execute_frame(command(&[b"HELLO", b"3", b"SETNAME", b"hello"]), 3),
+            RespFrame::Map(Some(_))
+        ));
+        assert!(rt.session.has_named_metadata);
+        assert!(matches!(
+            rt.execute_frame(command(&[b"HELLO", b"2", b"SETNAME", b""]), 4),
+            RespFrame::Array(Some(_))
+        ));
+        assert!(!rt.session.has_named_metadata);
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CLIENT", b"SETINFO", b"LIB-NAME", b"fr-test"]),
+                5,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(rt.session.has_named_metadata);
+        assert_eq!(
+            rt.execute_frame(command(&[b"RESET"]), 6),
+            RespFrame::SimpleString("RESET".to_string())
+        );
+        assert!(
+            rt.session.has_named_metadata,
+            "RESET preserves library metadata"
+        );
+        assert_eq!(
+            rt.session.has_named_metadata,
+            rt.session.fields_have_named_metadata()
+        );
     }
 
     #[test]
