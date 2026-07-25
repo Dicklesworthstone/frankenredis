@@ -7,7 +7,7 @@ edition = "2024"
 fr-protocol = { version = "0.1.0", path = "../fr-protocol" }
 fr-sentinel = { version = "0.1.0", path = "../fr-sentinel" }
 fr-store = { version = "0.1.0", path = "../fr-store" }
-foldhash = "0.1"
+foldhash = "0.2"
 icu_collator = "2.2.0"
 icu_locale_core = "2.2.0"
 serde_json.workspace = true
@@ -21,7 +21,7 @@ bench-reference = []
 
 [dev-dependencies]
 proptest.workspace = true
-criterion = "0.5"
+criterion = "0.8"
 
 [[bench]]
 name = "lua_eval"

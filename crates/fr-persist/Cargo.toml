@@ -17,7 +17,7 @@ fr-simd = { version = "0.1.0", path = "../fr-simd" }
 
 [dev-dependencies]
 proptest.workspace = true
-criterion = "0.5"
+criterion = "0.8"
 
 # (frankenredis VERIFY phase, cc) Server-free, degradation-immune criterion bench of the RDB
 # encode+decode path — exercises the presize/direct-emit encode levers + the decode-string-move

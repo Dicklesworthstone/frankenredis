@@ -16,7 +16,7 @@ serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = "0.8"
 
 [[bench]]
 name = "keyed_write_vs_redis"

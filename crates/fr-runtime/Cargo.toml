@@ -7,7 +7,7 @@ edition = "2024"
 bench-reference = []
 
 [dependencies]
-foldhash = "0.1"
+foldhash = "0.2"
 hex.workspace = true
 fr-command = { version = "0.1.0", path = "../fr-command" }
 fr-config = { version = "0.1.0", path = "../fr-config" }

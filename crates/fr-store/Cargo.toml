@@ -10,7 +10,7 @@ fr-persist = { version = "0.1.0", path = "../fr-persist" }
 fr-sentinel = { version = "0.1.0", path = "../fr-sentinel" }
 fr-simd = { version = "0.1.0", path = "../fr-simd" }
 indexmap = "2"
-foldhash = "0.1"
+foldhash = "0.2"
 libc.workspace = true
 
 [features]
@@ -18,7 +18,7 @@ bench-reference = []
 
 [dev-dependencies]
 proptest.workspace = true
-criterion = "0.5"
+criterion = "0.8"
 
 [[bench]]
 name = "store_read"

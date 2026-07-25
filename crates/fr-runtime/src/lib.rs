@@ -67732,7 +67732,18 @@ mod tests {
         ) else {
             unreachable!("expected EVAL ACL failure");
         };
-        assert!(err.contains("NOPERM User antirez has no permissions to run the 'incr' command"));
+        // A command-level ACL denial raised INSIDE a Lua script is wrapped as
+        // "ERR ACL failure in script: <msg>" rather than the bare "NOPERM <msg>"
+        // a direct client denial uses — see the frankenredis-aclscriptwrap note
+        // in fr-command, which verified this against vendored redis 7.2.4. This
+        // assertion previously expected the unwrapped NOPERM form and was left
+        // behind when that wrapping landed.
+        assert!(
+            err.contains(
+                "ACL failure in script: User antirez has no permissions to run the 'incr' command"
+            ),
+            "script ACL denial should surface the wrapped in-script message, got: {err}"
+        );
         assert_eq!(
             rt.execute_frame(command(&[b"AUTH", b"default", b""]), 4),
             RespFrame::SimpleString("OK".to_string())
