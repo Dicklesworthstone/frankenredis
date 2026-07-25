@@ -25,6 +25,9 @@ golden_checksums.txt
 storage.sqlite3
 storage.sqlite3-*
 rustc-ice-*.txt
+# Bench harness scratch: records the absolute path of the locally-built
+# reference server binary, so its contents are meaningless on another machine.
+crates/fr-bench/orig_server_bin.txt
 perf.data
 perf.data.*
 --graph-format.svg
