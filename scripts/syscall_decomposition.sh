@@ -31,7 +31,7 @@
 # directly comparable and the process-startup cost is paid once.
 set -euo pipefail
 
-BENCH_T=set; PIPE=16; CLIENTS=50; SECS=6; ROUNDS=5
+BENCH_T=set; PIPE=16; CLIENTS=50; SECS=6; ROUNDS=5; KEYSPACE=100000
 FR_BIN="${FR_BIN:-/tmp/fr_azm_base}"
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -40,6 +40,7 @@ while [ $# -gt 0 ]; do
     -c) CLIENTS="$2"; shift 2;;
     -s) SECS="$2"; shift 2;;
     -R) ROUNDS="$2"; shift 2;;
+    -r) KEYSPACE="$2"; shift 2;;
     --bin) FR_BIN="$2"; shift 2;;
     *) echo "unknown arg $1" >&2; exit 2;;
   esac
@@ -105,7 +106,7 @@ measure() {
   local port="$1" pid="$2" wl="$3" pipe="$4" out
   # shellcheck disable=SC2046  # deliberate word splitting of the arg builders
   taskset -c $CLIENT_CORE "$REDIS_BENCH" -p "$port" $(bench_head "$wl") -n 100000000 \
-      -c "$CLIENTS" -P "$pipe" -r 100000 $(bench_tail "$wl") >/dev/null 2>&1 &
+      -c "$CLIENTS" -P "$pipe" -r "$KEYSPACE" $(bench_tail "$wl") >/dev/null 2>&1 &
   local bpid=$!
   sleep 1                                    # let the connection storm settle
   local ops0; ops0=$(ops_done "$port")
@@ -134,7 +135,7 @@ for WL in ${BENCH_T//,/ }; do
   for p in $FR_PORT $RD_PORT $FR2_PORT; do
     # shellcheck disable=SC2046
     taskset -c $CLIENT_CORE "$REDIS_BENCH" -p $p $(bench_head "$WL") -n 200000 -c 8 -P 16 \
-        -r 100000 $(bench_tail "$WL") >/dev/null 2>&1 || true
+        -r "$KEYSPACE" $(bench_tail "$WL") >/dev/null 2>&1 || true
   done
   # `-P` also accepts a comma list. Sweeping pipeline depth on a fixed workload
   # separates the two costs that a single depth conflates: per-op instructions

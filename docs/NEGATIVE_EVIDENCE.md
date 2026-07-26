@@ -131,12 +131,50 @@ Profile-attributed on the realistic TTL workload; not implemented here because
 `crates/fr-store/src/lib.rs` is under an exclusive NobleOsprey reservation. Recording the full
 evidence and the exact hunk so it is not lost.
 
-- **Profile.** `SET key:__rand_int__ xxx EX 100`, `-P16 -c50 -r100000`, 100k-key steady state,
-  23,817 samples, fr DSO 45.24% of cycles (`artifacts/optimization/campaign-20260725-cc/`). Top fr
-  frames: `mi_free` 8.85%, `internal_entries_insert_with_expiry_impl::<true>` 5.93%,
-  `canonical_string_value` 4.82%, **`HashMap<Box<[u8]>, NonZero<u64>>::contains_key` 3.98%**,
-  `process_buffered_frames` 3.26%, **`cached_entry_memory_usage_bytes` 1.80%**,
-  `estimate_value_memory_usage_bytes` 0.26%.
+- **Profile A — TTL-bearing SET.** `SET key:__rand_int__ xxx EX 100`, `-P16 -c50 -r100000`, 100k-key
+  steady state, 23,817 samples, fr DSO 45.24% of cycles
+  (`artifacts/optimization/campaign-20260725-cc/`). Top fr frames: `mi_free` 8.85%,
+  `internal_entries_insert_with_expiry_impl::<true>` 5.93%, `canonical_string_value` 4.82%,
+  **`HashMap<Box<[u8]>, NonZero<u64>>::contains_key` 3.98%**, `process_buffered_frames` 3.26%,
+  **`cached_entry_memory_usage_bytes` 1.80%**, `estimate_value_memory_usage_bytes` 0.26%.
+- **Profile B — INCR, where the defect is far more exposed.** `-t incr -P16 -c50 -r100000`, 11,208
+  samples, fr DSO 25.60% of cycles:
+
+  | frame | % of TOTAL cycles |
+  |---|---|
+  | **`Store::cached_entry_memory_usage_bytes`** | **9.74** |
+  | `process_buffered_frames` | 2.82 |
+  | **`Store::record_ops_sec_sample`** | **1.29** |
+  | `Runtime::execute_plain_incr_borrowed` | 1.25 |
+  | `Runtime::plain_borrowed_default_key_write_allows` | 1.14 |
+  | `Store::incrby_existing_or_insert` | 0.69 |
+
+  `cached_entry_memory_usage_bytes` + `record_ops_sec_sample` + `estimate_value_memory_usage_bytes`
+  ≈ **11.3% of total server cycles ≈ 44% of all fr userland cycles** — the single largest userland
+  cost centre in the server, on a workload whose actual command path is 1.25%. It is the same
+  defect as Profile A's 3.98% + 1.80%, simply more visible once the command itself is cheap.
+- **Why it should be gated on CYCLES, not instruction count.** A random-access probe across a
+  100k-entry map has poor IPC, so this costs far more cycles than instructions — consistent with
+  the unpipelined TTL-SET signature above (fr uses 0.924x the instructions but 1.060x the CPU-ns).
+  **An instruction-count-only A/B will therefore understate this lever.**
+- **ATTEMPTED source-free corroboration — INCONCLUSIVE, reported in full.** A keyspace-size
+  differential (`-t incr -P16 -c50`, servers restarted per size) should show fr's per-op cost
+  scaling with keyspace while redis's — whose `used_memory` is an O(1) allocator counter — does not:
+
+  | keyspace | fr instr:u/op | fr CPU ns/op | redis CPU ns/op | A/A null (ops/s) |
+  |---|---|---|---|---|
+  | 1,000 | 1,729.4 | 723.2 | 920.7 | **0.557** |
+  | 10,000 | 1,737.6 | 790.0 | 936.3 | **0.528** |
+  | 100,000 | 1,919.9 | 982.1 | 1,359.4 | **0.494** |
+
+  The 1k→10k step matches the prediction (fr CPU ns/op +9.2% against redis's +1.7%, with fr's
+  instruction count flat at +0.5%). The 10k→100k step does **not**: redis's CPU ns/op rises 45%
+  against fr's 24%, the opposite of the predicted ordering. Host load climbed from ~10 to >30
+  across the sweep and the **A/A null on ops/s sat at 0.49-0.56 for every point** — i.e. two
+  identical fr processes differed by ~2x, so this sweep cannot decide anything at all. It is
+  recorded here in full rather than truncated to the supporting step. **The evidence for this
+  lever is the two symbolized profiles and the code reading; the keyspace differential is not
+  evidence and must be re-run on a quiet host before it is cited.**
 - **Mechanism.** `Store::record_ops_sec_sample` (`crates/fr-store/src/lib.rs`, ~L7119) — documented
   "call this once per server-hz tick (e.g. every 100ms at 10hz)" — runs:
 
