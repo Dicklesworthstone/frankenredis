@@ -51,7 +51,38 @@ REDIS_SERVER="$ROOT/legacy_redis_code/redis/src/redis-server"
 REDIS_BENCH="$ROOT/legacy_redis_code/redis/src/redis-benchmark"
 REDIS_CLI="$ROOT/legacy_redis_code/redis/src/redis-cli"
 FR_PORT=27311; RD_PORT=27312; FR2_PORT=27313
-FR_CORE=40; RD_CORE=41; FR2_CORE=42; CLIENT_CORE=44
+# Cores are overridable because this is a SHARED host: peers pin their own
+# head-to-head benchmarks, and a peer landing on the fr arm's core silently
+# halves that arm. Defaults are a starting point, not a reservation.
+FR_CORE="${FR_CORE:-40}"; RD_CORE="${RD_CORE:-41}"
+FR2_CORE="${FR2_CORE:-42}"; CLIENT_CORE="${CLIENT_CORE:-44}"
+
+# --- core-contention preflight ----------------------------------------------
+# A foreign process pinned to one arm's core does NOT look like noise: it looks
+# like a clean, reproducible, wrong answer. On 2026-07-25 a peer's
+# `cand-headtohead` sat on core 40 at 53% and drove the fr-vs-fr A/A null to
+# 0.556 — two identical binaries differing 2x — while instructions:u/op stayed
+# at 0.98, i.e. every throughput ratio from that window was invalid and every
+# instruction ratio was fine. Refuse to start rather than emit that quietly.
+check_core() {
+  local core="$1" role="$2" busy
+  busy=$(ps -eo psr,pcpu,comm --no-headers \
+         | awk -v c="$core" '$1==c && $2>10 && $3!~/^(fr_azm|frankenredis|redis-server|redis-benchmark|perf)$/ {printf "%s(%.0f%%) ", $3, $2}')
+  if [ -n "$busy" ]; then
+    echo "PREFLIGHT FAIL: core $core ($role) is contended by: $busy" >&2
+    echo "  Pick a free core, e.g.  FR_CORE=51 RD_CORE=52 FR2_CORE=54 CLIENT_CORE=47 $0 ..." >&2
+    echo "  Free-ish cores right now:" >&2
+    for c in $(seq 0 $(($(nproc) - 1))); do
+      u=$(ps -eo psr,pcpu --no-headers | awk -v c="$c" '$1==c {s+=$2} END {printf "%.0f", s+0}')
+      [ "$u" -lt 5 ] && printf '    core %s (%s%%)\n' "$c" "$u" >&2
+    done | head -8
+    exit 3
+  fi
+}
+check_core "$FR_CORE" "fr arm"
+check_core "$RD_CORE" "redis arm"
+check_core "$FR2_CORE" "A/A null arm"
+check_core "$CLIENT_CORE" "client"
 
 # --- harness contract part 1: identify the exact ELF under test -------------
 echo "== binaries under test =="
@@ -67,6 +98,18 @@ FR_PID=""; RD_PID=""; FR2_PID=""
 trap cleanup EXIT
 
 start_servers() {
+  # A previous run killed mid-flight skips its EXIT trap and leaves its servers
+  # bound. The new servers then fail to bind, the script happily measures the
+  # STALE processes (which no client is driving), and every counter comes back
+  # 0 — a silent zero, not an error. Refuse to start on a busy port.
+  for p in $FR_PORT $RD_PORT $FR2_PORT; do
+    if ss -ltn 2>/dev/null | grep -q ":$p "; then
+      echo "PREFLIGHT FAIL: port $p is already bound — a previous run left servers behind." >&2
+      echo "  Clear them first:" >&2
+      echo "    for p in \$(ss -ltnp | grep -E ':2731[123]' | grep -oP 'pid=\\K[0-9]+' | sort -u); do kill -9 \$p; done" >&2
+      exit 4
+    fi
+  done
   taskset -c $FR_CORE "$FR_BIN" --port $FR_PORT >/tmp/azm_fr.log 2>&1 &
   FR_PID=$!
   taskset -c $FR2_CORE "$FR_BIN" --port $FR2_PORT >/tmp/azm_fr2.log 2>&1 &
@@ -160,6 +203,12 @@ for WL in ${BENCH_T//,/ }; do
         esac
         read -r sc iu ik cs tc ops <<<"$(measure "$port" "$pid" "$WL" "$P")"
         if [ "${ops:-0}" -le 0 ]; then echo "round $r arm $arm: NO OPS — skipping"; continue; fi
+        # A zeroed counter is a broken measurement, not a fast one. Fail loudly:
+        # silently dividing by it prints 0.00 instr/op, which reads like a win.
+        if [ -z "${iu:-}" ] || [ "${iu:-0}" = "0" ]; then
+          echo "ABORT round $r arm $arm: perf returned no instructions:u — counters unavailable" >&2
+          exit 5
+        fi
         awk -v wl="$WL/P$P" -v r="$r" -v arm="$arm" -v sc="$sc" -v iu="$iu" -v ik="$ik" \
             -v cs="$cs" -v tc="$tc" -v ops="$ops" -v secs="$SECS" -v out="$RESULTS" 'BEGIN{
           # perf -x, reports task-clock in NANOseconds (raw counter units), not msec.

@@ -157,24 +157,39 @@ evidence and the exact hunk so it is not lost.
   100k-entry map has poor IPC, so this costs far more cycles than instructions — consistent with
   the unpipelined TTL-SET signature above (fr uses 0.924x the instructions but 1.060x the CPU-ns).
   **An instruction-count-only A/B will therefore understate this lever.**
-- **ATTEMPTED source-free corroboration — INCONCLUSIVE, reported in full.** A keyspace-size
-  differential (`-t incr -P16 -c50`, servers restarted per size) should show fr's per-op cost
-  scaling with keyspace while redis's — whose `used_memory` is an O(1) allocator counter — does not:
+- **ATTEMPTED source-free corroboration — the instrument DOES NOT WORK. Reported in full.**
+  A keyspace-size differential (`-t incr -P16 -c50`) should, if the scan dominates, show fr's per-op
+  cost scaling with keyspace while redis's — whose `used_memory` is an O(1) allocator counter — does
+  not. Run twice.
 
-  | keyspace | fr instr:u/op | fr CPU ns/op | redis CPU ns/op | A/A null (ops/s) |
-  |---|---|---|---|---|
-  | 1,000 | 1,729.4 | 723.2 | 920.7 | **0.557** |
-  | 10,000 | 1,737.6 | 790.0 | 936.3 | **0.528** |
-  | 100,000 | 1,919.9 | 982.1 | 1,359.4 | **0.494** |
+  **Run 1 (contended cores) is void and is recorded only so it is not re-derived.** A/A null on
+  ops/s sat at **0.49-0.56** at every point: two identical fr processes differing ~2x. Root cause
+  was NOT general load — it was a peer's `cand-headtohead` pinned at 53% to **core 40, the fr arm's
+  core**, while the A/A arm on core 42 ran free. `instructions:u/op` was unaffected (A/A 0.98) and
+  every cycle-based column was garbage. `scripts/syscall_decomposition.sh` now refuses to start on a
+  contended core and names the offending process; it also refuses when a previous run left its
+  servers bound (which silently measures idle servers and reports 0.00 instr/op — a zero that reads
+  like a win).
 
-  The 1k→10k step matches the prediction (fr CPU ns/op +9.2% against redis's +1.7%, with fr's
-  instruction count flat at +0.5%). The 10k→100k step does **not**: redis's CPU ns/op rises 45%
-  against fr's 24%, the opposite of the predicted ordering. Host load climbed from ~10 to >30
-  across the sweep and the **A/A null on ops/s sat at 0.49-0.56 for every point** — i.e. two
-  identical fr processes differed by ~2x, so this sweep cannot decide anything at all. It is
-  recorded here in full rather than truncated to the supporting step. **The evidence for this
-  lever is the two symbolized profiles and the code reading; the keyspace differential is not
-  evidence and must be re-run on a quiet host before it is cited.**
+  **Run 2, on verified-idle cores 56/57/58/60, A/A null fr/fr2 = 1.00 ± 0.4%:**
+
+  | keyspace | fr CPU ns/op | redis CPU ns/op | fr÷redis | fr cpu_util | redis cpu_util |
+  |---|---|---|---|---|---|
+  | 1,000 | 825.7 | 866.2 | **0.953** | 93.3% | 100.0% |
+  | 100,000 | 958.7 | 1,070.3 | **0.896** | 87.0% | 95.3% |
+
+  fr gets **relatively better** as the keyspace grows (0.953 → 0.896), the opposite of the
+  prediction, on a clean harness. **The differential is therefore not merely noisy — it is the
+  wrong instrument.** Keyspace size confounds the background scan with ordinary data-structure
+  scaling (hash-table size, cache pressure, probe depth), and the two engines scale differently, so
+  the method cannot isolate the scan's contribution no matter how quiet the host is. Recording this
+  so nobody spends another turn on it.
+- **What this does and does not change.** The evidence for the lever is the two symbolized profiles
+  (`cached_entry_memory_usage_bytes` at 9.74% of total cycles on INCR, 1.80% + a 3.98%
+  `expiry_deadlines` probe on TTL-SET) and the code reading showing the result is discarded on
+  Linux. Those stand. What the failed differential removes is any claim about the *end-to-end*
+  magnitude: **only the direct A/B on the source change can size this**, which needs
+  `crates/fr-store/src/lib.rs`. Do not re-attempt the keyspace proxy.
 - **Mechanism.** `Store::record_ops_sec_sample` (`crates/fr-store/src/lib.rs`, ~L7119) — documented
   "call this once per server-hz tick (e.g. every 100ms at 10hz)" — runs:
 
