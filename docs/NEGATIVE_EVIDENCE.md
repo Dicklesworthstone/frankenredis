@@ -83,6 +83,72 @@ BOLD-VERIFY pass. The canonical long-form project ledger remains
   runtime flag remain off by default; the implementation and harness are retained only as a
   reproducible experimental substrate.
 
+## 2026-07-26 AzureMouse (cc/STRUCTURAL): OPEN LOSS — `XADD` with `MAXLEN` trimming is 2.3x SLOWER than redis 7.2.4; a 7-argument command falls off every borrowed fast path (`frankenredis-fcp4q`)
+
+The first workload found at HEAD where FrankenRedis is decisively behind. It was invisible to every
+previous sweep because the built-in `redis-benchmark -t xadd` measures the wrong thing.
+
+- **How it was found.** A broad head-to-head across `redis-benchmark`'s FULL default suite
+  (`scripts/broad_headtohead.sh`, 21 tests) rather than the four-command spot check the 2026-07-26
+  re-measurement used. fr won 17 of 21. Four flagged below 0.97x — and **three of those four were
+  refuted** when re-run through the A/A-null harness (PING 0.669 → 1.0016 at P1 with a null of
+  0.9997; PING_MBULK likewise; SPOP 0.891 → 0.9873 **inside** its null band). The broad screen has
+  no null arm and over-reports; treat it as triage, never as a verdict. XADD is the one that
+  survived.
+- **The measurement that matters is the BOUNDED stream.** The built-in `-t xadd` appends to an
+  **unbounded** stream, so both engines degrade together and it reports only 0.90x. Real deployments
+  always trim — an untrimmed stream is a memory leak — so the steady-state shape is
+  `XADD mystream MAXLEN ~ 1000 * field value`. On that shape, `-P16 -c50`, verified-idle cores:
+
+  | metric | fr | redis 7.2.4 | fr/redis | A/A null |
+  |---|---|---|---|---|
+  | ops/s | 141,901 | 330,963 | **0.4288** [0.3513, 0.4342] | 1.0291 [1.0169, 1.4170] |
+  | instructions:u/op | 26,539 | 14,628 | **1.8142** | 0.9996 |
+  | instructions:k/op | 1,914 | 1,550 | 1.2349 | 0.9954 |
+  | CPU ns/op | 7,047 | 3,018 | **2.3347** | 0.9727 |
+
+  fr executes **81% more user instructions**, so this is genuinely more work — not the
+  fewer-instructions-more-cycles memory-stall shape seen elsewhere in this ledger.
+- **Profile-first attribution** (19,959 samples; **fr DSO 77.05% of cycles**, so the workload is
+  compute-bound in fr's own code, unlike the ~90%-kernel P1 shapes):
+
+  | frame | self-time |
+  |---|---|
+  | `frankenredis::process_buffered_frames` | **19.87%** |
+  | `parse_borrowed_plain_key_arg2_packet` | 2.15% |
+  | `Runtime::execute_frame_internal` | 2.08% |
+  | `parse_borrowed_plain_key_arg3_packet` | 1.46% |
+  | `Runtime::dispatch_with_client_context` | 1.44% |
+  | `parse_borrowed_plain_key_arg1_packet` | 1.37% |
+  | `fr_command::xadd` | 1.33% |
+  | `parse_command_args_borrowed_into` | 1.00% |
+  | **`PackedStreamLog::remove` (the actual MAXLEN trim)** | **0.99%** |
+  | `parse_borrowed_plain_key_arg4/arg5/keys_multi` | 0.77 / 0.57 / 0.52% |
+
+- **MECHANISM — the trim is not the problem, the dispatch is.** `XADD key MAXLEN ~ N * field value`
+  is **7 arguments**. It matches no exact-N borrowed fast path, so fr pays to *try and fail* the
+  arg1/arg2/arg3/arg4/arg5/keys_multi parsers in sequence (~6.3% of cycles in failing parses alone)
+  and then falls through to full generic dispatch — `parse_command_args_borrowed_into` +
+  `copy_borrowed_argv_into_scratch` + `execute_frame_internal` + `dispatch_with_client_context`.
+  The MAXLEN trim itself is 0.99%.
+- **Relation to prior art — this is a NEW instance, not a re-derivation.** The exact-N borrowed
+  parser cliff is known (`project_exact_n_borrowed_parser_dispatch_cliff`), and the ledger already
+  carries `2026-07-09 cod_fr: KEEP — dispatch-floor routes VARIADIC WRITES at 9-18 values` and
+  `2026-07-01 CrimsonHawk: KEEP SMISMEMBER borrowed fast-path cap 8→32`. Neither covers a stream
+  append with **option arguments**. It also contradicts `2026-07-23 FoggyOrchid: SURFACE — fresh
+  probe sweep: streams/LPUSH/set-algebra-STORE all fr-DOMINANT` — that sweep did not test a trimmed
+  stream.
+- **Candidate levers (NOT implemented; handed over with attribution):**
+  1. A borrowed fast path for the common `XADD key [MAXLEN|MINID [~|=] N] * field value` shape.
+  2. Short-circuit the parser cascade **on argument count**, so a 7-argument command does not first
+     attempt five parsers that can only match 1-5 arguments. That fix is command-agnostic and would
+     pay on every long-argument command, not just XADD.
+- **Retry/close predicate:** close only when a bounded-XADD A/B on the shape above moves ops/s
+  fr/redis above 0.90x with an A/A null below 1.05x, AND `process_buffered_frames` self-time on that
+  profile falls below 10%. Evidence:
+  `artifacts/optimization/campaign-20260725-cc/profile-xadd-maxlen.txt`,
+  `xadd-maxlen-loss-20260726.tsv`.
+
 ## 2026-07-26 AzureMouse (cc/STRUCTURAL): SURFACE — re-measured honest state at HEAD; BOTH previously named unpipelined residuals are CLOSED, and my own published figures understated fr
 
 Re-measurement, not a lever. Recorded because the 2026-07-25 rows below are now **stale in

@@ -147,9 +147,16 @@ bench_tail() { case "$1" in cmd:*) echo "${1#cmd:}" | tr '+' ' ' ;; *) echo "" ;
 
 measure() {
   local port="$1" pid="$2" wl="$3" pipe="$4" out
+  # `cmd:` workloads legitimately contain glob metacharacters — a stream id is
+  # literally `*`, and XADD MAXLEN takes `~`. Unquoted expansion let the shell
+  # glob-expand them into filenames, so the benchmark silently ran nothing and
+  # the harness reported ops/s = 0 with a garbage per-op divisor. Disable
+  # globbing across the expansion; word splitting is still wanted.
+  set -f
   # shellcheck disable=SC2046  # deliberate word splitting of the arg builders
   taskset -c $CLIENT_CORE "$REDIS_BENCH" -p "$port" $(bench_head "$wl") -n 100000000 \
       -c "$CLIENTS" -P "$pipe" -r "$KEYSPACE" $(bench_tail "$wl") >/dev/null 2>&1 &
+  set +f
   local bpid=$!
   sleep 1                                    # let the connection storm settle
   local ops0; ops0=$(ops_done "$port")
@@ -176,9 +183,11 @@ RESULTS=/tmp/azm_syscall_decomp.tsv; : > "$RESULTS"
 for WL in ${BENCH_T//,/ }; do
   # warm every engine on THIS workload so no round pays first-touch/rehash cost
   for p in $FR_PORT $RD_PORT $FR2_PORT; do
+    set -f
     # shellcheck disable=SC2046
     taskset -c $CLIENT_CORE "$REDIS_BENCH" -p $p $(bench_head "$WL") -n 200000 -c 8 -P 16 \
         -r "$KEYSPACE" $(bench_tail "$WL") >/dev/null 2>&1 || true
+    set +f
   done
   # `-P` also accepts a comma list. Sweeping pipeline depth on a fixed workload
   # separates the two costs that a single depth conflates: per-op instructions
@@ -202,7 +211,12 @@ for WL in ${BENCH_T//,/ }; do
           redis) port=$RD_PORT;  pid=$RD_PID ;;
         esac
         read -r sc iu ik cs tc ops <<<"$(measure "$port" "$pid" "$WL" "$P")"
-        if [ "${ops:-0}" -le 0 ]; then echo "round $r arm $arm: NO OPS — skipping"; continue; fi
+        if [ "${ops:-0}" -le 0 ]; then
+          echo "ABORT round $r arm $arm: benchmark executed ZERO operations." >&2
+          echo "  A workload that runs nothing yields meaningless per-op divisors." >&2
+          echo "  Check the workload token for shell metacharacters (* ~ ?)." >&2
+          exit 7
+        fi
         # A zeroed counter is a broken measurement, not a fast one. Fail loudly:
         # silently dividing by it prints 0.00 instr/op, which reads like a win.
         if [ -z "${iu:-}" ] || [ "${iu:-0}" = "0" ]; then
