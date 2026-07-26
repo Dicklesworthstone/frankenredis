@@ -14,6 +14,7 @@ use fr_runtime::Runtime;
 const PROFILE_REPEATS: usize = 5_000_000;
 const STAT_REPEATS: usize = 2_000_000;
 const STAT_ROUNDS: usize = 9;
+const BOOTSTRAP_RESAMPLES: usize = 20_000;
 
 #[derive(Clone, Copy)]
 enum Arm {
@@ -607,6 +608,28 @@ fn percentile(sorted: &[f64], percentile: f64) -> f64 {
     sorted[((sorted.len() - 1) as f64 * percentile).round() as usize]
 }
 
+fn bootstrap_median_ci(samples: &[f64]) -> (f64, f64) {
+    let mut state = 0x5eed_f00d_cafe_babe_u64;
+    for sample in samples {
+        state ^= sample.to_bits().wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        state = state.rotate_left(17);
+    }
+    let mut scratch = vec![0.0; samples.len()];
+    let mut medians = Vec::with_capacity(BOOTSTRAP_RESAMPLES);
+    for _ in 0..BOOTSTRAP_RESAMPLES {
+        for value in &mut scratch {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            let draw = state.wrapping_mul(0x2545_f491_4f6c_dd1d);
+            *value = samples[(draw as usize) % samples.len()];
+        }
+        medians.push(median(&mut scratch));
+    }
+    medians.sort_by(f64::total_cmp);
+    (percentile(&medians, 0.025), percentile(&medians, 0.975))
+}
+
 fn profile_trial(executable: &Path, lever: Lever, arm: Arm) -> Result<f64, String> {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -798,24 +821,38 @@ fn run_instruction_ab(executable: &Path, lever: Lever) -> Result<(), String> {
     let reference_median = median(&mut reference_counts);
     let null_p05 = percentile(&nulls, 0.05);
     let null_p95 = percentile(&nulls, 0.95);
+    let (null_ci95_low, null_ci95_high) = bootstrap_median_ci(&nulls);
+    let (effect_ci95_low, effect_ci95_high) = bootstrap_median_ci(&effects);
+    let null_radius = (1.0 - null_ci95_low)
+        .abs()
+        .max((null_ci95_high - 1.0).abs());
+    let gate_high = 1.0 + 2.0 * null_radius;
     println!(
-        "INSTRUCTIONS_SUMMARY rounds={STAT_ROUNDS} candidate_median={candidate_median:.0} reference_median={reference_median:.0} null_median={null_median:.9} null_p05={null_p05:.9} null_p95={null_p95:.9} null_cv_pct={null_cv_pct:.6} reference_over_candidate_median={effect_median:.9} speedup_cv_pct={effect_cv_pct:.6}"
+        "INSTRUCTIONS_SUMMARY rounds={STAT_ROUNDS} candidate_median={candidate_median:.0} \
+reference_median={reference_median:.0} null_median={null_median:.9} \
+null_p05={null_p05:.9} null_p95={null_p95:.9} null_ci95_low={null_ci95_low:.9} \
+null_ci95_high={null_ci95_high:.9} bootstrap_resamples={BOOTSTRAP_RESAMPLES} \
+null_cv_pct={null_cv_pct:.6} reference_over_candidate_median={effect_median:.9} \
+effect_ci95_low={effect_ci95_low:.9} effect_ci95_high={effect_ci95_high:.9} \
+speedup_cv_pct={effect_cv_pct:.6} margin2x_high={gate_high:.9} \
+cv_used_as_provenance_only=true"
     );
-    if null_cv_pct >= 5.0 || effect_cv_pct >= 5.0 {
+    if !(null_ci95_low <= 1.0 && 1.0 <= null_ci95_high) {
         return Err(format!(
-            "CV gate failed: null={null_cv_pct:.6}% effect={effect_cv_pct:.6}%"
+            "A/A bootstrap median CI does not bracket 1.0: \
+[{null_ci95_low:.9}, {null_ci95_high:.9}]"
         ));
     }
-    if (null_median - 1.0).abs() >= 0.02 {
+    if effect_ci95_low <= gate_high || effect_median <= 1.01 {
         return Err(format!(
-            "null median exposes harness bias: {null_median:.9}"
+            "candidate failed median-CI keep gate: effect={effect_median:.9}, \
+CI low={effect_ci95_low:.9}, 2x null ceiling={gate_high:.9}"
         ));
     }
-    if effect_median <= null_p95 || effect_median <= 1.01 {
-        return Err(format!(
-            "candidate failed keep gate: effect={effect_median:.9}, null_p95={null_p95:.9}"
-        ));
-    }
+    println!(
+        "DECISION verdict=KEEP gate=bootstrap_median_ci95 two_x_margin=true \
+cv_used_as_provenance_only=true"
+    );
     Ok(())
 }
 

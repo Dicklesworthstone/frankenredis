@@ -40,11 +40,8 @@ const LPOS_NULL_SAMPLES: usize = 10;
 const LPOS_STAT_SAMPLES: usize = 10;
 const STAT_ROUNDS: usize = 160;
 const PROFILE_ROUNDS: usize = 1_000;
-#[cfg(feature = "perf-ab-object-idletime-floor")]
-const MAX_CV_PCT: f64 = 5.0;
+const BOOTSTRAP_RESAMPLES: usize = 20_000;
 const KEEP_GATE_RATIO: f64 = 0.99;
-#[cfg(feature = "perf-ab-object-idletime-floor")]
-const GUARD_RATIO_TOLERANCE: f64 = 0.01;
 #[cfg(feature = "perf-ab-object-idletime-floor")]
 const REQUEST: &[u8] = b"*3\r\n$6\r\nOBJECT\r\n$8\r\nIDLETIME\r\n$1\r\nk\r\n";
 #[cfg(feature = "perf-ab-object-idletime-floor")]
@@ -284,7 +281,6 @@ fn mean_cv(samples: &[f64]) -> (f64, f64) {
     (mean, variance.sqrt() / mean * 100.0)
 }
 
-#[cfg(feature = "perf-ab-lpos-floor")]
 fn quantile(samples: &[f64], q: f64) -> f64 {
     assert!(!samples.is_empty(), "quantile requires samples");
     assert!((0.0..=1.0).contains(&q), "quantile must be in [0, 1]");
@@ -301,9 +297,30 @@ fn quantile(samples: &[f64], q: f64) -> f64 {
     }
 }
 
-#[cfg(feature = "perf-ab-lpos-floor")]
 fn median(samples: &[f64]) -> f64 {
     quantile(samples, 0.5)
+}
+
+fn bootstrap_median_ci(samples: &[f64]) -> (f64, f64) {
+    let mut state = 0x5eed_f00d_cafe_babe_u64;
+    for sample in samples {
+        state ^= sample.to_bits().wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        state = state.rotate_left(17);
+    }
+    let mut scratch = vec![0.0; samples.len()];
+    let mut medians = Vec::with_capacity(BOOTSTRAP_RESAMPLES);
+    for _ in 0..BOOTSTRAP_RESAMPLES {
+        for value in &mut scratch {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            let draw = state.wrapping_mul(0x2545_f491_4f6c_dd1d);
+            *value = samples[(draw as usize) % samples.len()];
+        }
+        medians.push(median(&scratch));
+    }
+    medians.sort_by(f64::total_cmp);
+    (quantile(&medians, 0.025), quantile(&medians, 0.975))
 }
 
 fn pin_client_and_select_server_core() -> usize {
@@ -650,24 +667,54 @@ candidate_object_idletime_floor_self_pct={candidate_floor_self:.4}"
     let (guard_orig_mean, guard_orig_cv_pct) = mean_cv(&guard.orig);
     let (guard_candidate_mean, guard_candidate_cv_pct) = mean_cv(&guard.candidate);
     let (guard_ratio_mean, guard_ratio_cv_pct) = mean_cv(&guard.ratio);
+    let (guard_ci95_low, guard_ci95_high) = bootstrap_median_ci(&guard.ratio);
     println!(
         "INSTRUCTIONS_SUMMARY label=guard_getbit orig_mean={guard_orig_mean:.3} \
 orig_cv_pct={guard_orig_cv_pct:.6} candidate_mean={guard_candidate_mean:.3} \
 candidate_cv_pct={guard_candidate_cv_pct:.6} candidate_over_orig={guard_ratio_mean:.9} \
-ratio_cv_pct={guard_ratio_cv_pct:.6}"
-    );
-    assert!(guard_orig_cv_pct < MAX_CV_PCT, "guard ORIG CV gate failed");
-    assert!(
-        guard_candidate_cv_pct < MAX_CV_PCT,
-        "guard candidate CV gate failed"
+ratio_ci95_low={guard_ci95_low:.9} ratio_ci95_high={guard_ci95_high:.9} \
+ratio_cv_pct={guard_ratio_cv_pct:.6} bootstrap_resamples={BOOTSTRAP_RESAMPLES} \
+cv_used_as_provenance_only=true"
     );
     assert!(
-        guard_ratio_cv_pct < MAX_CV_PCT,
-        "guard paired-ratio CV gate failed"
+        guard_ci95_low <= 1.0 && 1.0 <= guard_ci95_high,
+        "shared-path guard bootstrap median CI does not bracket 1.0: \
+[{guard_ci95_low:.9}, {guard_ci95_high:.9}]"
     );
+
+    let null = measure_interleaved(
+        &binary,
+        &root,
+        server_core,
+        InterleavedMeasurement {
+            label: "object_idletime_null",
+            request: REQUEST,
+            samples: STAT_SAMPLES,
+            left_mode: Arm::Orig,
+            right_mode: Arm::Orig,
+            extra_setup: None,
+        },
+    );
+    let null_median = median(&null.ratio);
+    let (null_ci95_low, null_ci95_high) = bootstrap_median_ci(&null.ratio);
+    let (_, null_left_cv_pct) = mean_cv(&null.orig);
+    let (_, null_right_cv_pct) = mean_cv(&null.candidate);
+    let (_, null_ratio_cv_pct) = mean_cv(&null.ratio);
     assert!(
-        (guard_ratio_mean - 1.0).abs() < GUARD_RATIO_TOLERANCE,
-        "shared-path guard is not neutral: {guard_ratio_mean:.9}"
+        null_ci95_low <= 1.0 && 1.0 <= null_ci95_high,
+        "OBJECT IDLETIME A/A bootstrap median CI does not bracket 1.0: \
+[{null_ci95_low:.9}, {null_ci95_high:.9}]"
+    );
+    let null_radius = (1.0 - null_ci95_low)
+        .abs()
+        .max((null_ci95_high - 1.0).abs());
+    let gate_low = 1.0 - 2.0 * null_radius;
+    println!(
+        "NULL_SUMMARY label=object_idletime median={null_median:.9} \
+ci95_low={null_ci95_low:.9} ci95_high={null_ci95_high:.9} \
+left_cv_pct={null_left_cv_pct:.6} right_cv_pct={null_right_cv_pct:.6} \
+ratio_cv_pct={null_ratio_cv_pct:.6} margin2x_low={gate_low:.9} \
+bootstrap_resamples={BOOTSTRAP_RESAMPLES} cv_used_as_provenance_only=true"
     );
 
     let target = measure_interleaved(
@@ -686,18 +733,26 @@ ratio_cv_pct={guard_ratio_cv_pct:.6}"
     let (orig_mean, orig_cv_pct) = mean_cv(&target.orig);
     let (candidate_mean, candidate_cv_pct) = mean_cv(&target.candidate);
     let (ratio_mean, ratio_cv_pct) = mean_cv(&target.ratio);
+    let candidate_median = median(&target.ratio);
+    let (candidate_ci95_low, candidate_ci95_high) = bootstrap_median_ci(&target.ratio);
     println!(
         "INSTRUCTIONS_SUMMARY label=object_idletime orig_mean={orig_mean:.3} \
 orig_cv_pct={orig_cv_pct:.6} candidate_mean={candidate_mean:.3} \
 candidate_cv_pct={candidate_cv_pct:.6} candidate_over_orig={ratio_mean:.9} \
-ratio_cv_pct={ratio_cv_pct:.6}"
+candidate_over_orig_median={candidate_median:.9} \
+candidate_ci95_low={candidate_ci95_low:.9} candidate_ci95_high={candidate_ci95_high:.9} \
+ratio_cv_pct={ratio_cv_pct:.6} null_median={null_median:.9} \
+null_ci95_low={null_ci95_low:.9} null_ci95_high={null_ci95_high:.9} \
+margin2x_low={gate_low:.9} cv_used_as_provenance_only=true"
     );
-    assert!(orig_cv_pct < MAX_CV_PCT, "ORIG CV gate failed");
-    assert!(candidate_cv_pct < MAX_CV_PCT, "candidate CV gate failed");
-    assert!(ratio_cv_pct < MAX_CV_PCT, "paired-ratio CV gate failed");
     assert!(
-        ratio_mean < KEEP_GATE_RATIO,
-        "1% instruction keep gate failed: {ratio_mean:.9}"
+        candidate_ci95_high < gate_low && candidate_median < KEEP_GATE_RATIO,
+        "median-CI keep gate failed: candidate median={candidate_median:.9}, \
+CI high={candidate_ci95_high:.9}, 2x null floor={gate_low:.9}"
+    );
+    println!(
+        "DECISION label=object_idletime verdict=KEEP gate=bootstrap_median_ci95 \
+two_x_margin=true cv_used_as_provenance_only=true"
     );
 }
 
@@ -793,17 +848,25 @@ candidate_lpos_floor_self_pct={candidate_floor_self:.4}"
     let null_median = median(&null.ratio);
     let null_p05 = quantile(&null.ratio, 0.05);
     let null_p95 = quantile(&null.ratio, 0.95);
+    let (null_ci95_low, null_ci95_high) = bootstrap_median_ci(&null.ratio);
     let (_, null_left_cv_pct) = mean_cv(&null.orig);
     let (_, null_right_cv_pct) = mean_cv(&null.candidate);
     let (_, null_ratio_cv_pct) = mean_cv(&null.ratio);
+    let null_radius = (1.0 - null_ci95_low)
+        .abs()
+        .max((null_ci95_high - 1.0).abs());
+    let gate_low = 1.0 - 2.0 * null_radius;
     println!(
         "NULL_SUMMARY label=lpos median={null_median:.9} p05={null_p05:.9} \
-p95={null_p95:.9} left_cv_pct={null_left_cv_pct:.6} \
-right_cv_pct={null_right_cv_pct:.6} ratio_cv_pct={null_ratio_cv_pct:.6}"
+p95={null_p95:.9} ci95_low={null_ci95_low:.9} ci95_high={null_ci95_high:.9} \
+left_cv_pct={null_left_cv_pct:.6} right_cv_pct={null_right_cv_pct:.6} \
+ratio_cv_pct={null_ratio_cv_pct:.6} margin2x_low={gate_low:.9} \
+bootstrap_resamples={BOOTSTRAP_RESAMPLES} cv_used_as_provenance_only=true"
     );
     assert!(
-        (null_median - 1.0).abs() < 0.02,
-        "LPOS null median exposes a harness bias: {null_median:.9}"
+        null_ci95_low <= 1.0 && 1.0 <= null_ci95_high,
+        "LPOS A/A bootstrap median CI does not bracket 1.0: \
+[{null_ci95_low:.9}, {null_ci95_high:.9}]"
     );
 
     let target = measure_interleaved(
@@ -822,6 +885,7 @@ right_cv_pct={null_right_cv_pct:.6} ratio_cv_pct={null_ratio_cv_pct:.6}"
     let candidate_median = median(&target.ratio);
     let candidate_p05 = quantile(&target.ratio, 0.05);
     let candidate_p95 = quantile(&target.ratio, 0.95);
+    let (candidate_ci95_low, candidate_ci95_high) = bootstrap_median_ci(&target.ratio);
     let (orig_mean, orig_cv_pct) = mean_cv(&target.orig);
     let (candidate_mean, candidate_cv_pct) = mean_cv(&target.candidate);
     let (ratio_mean, ratio_cv_pct) = mean_cv(&target.ratio);
@@ -831,14 +895,18 @@ orig_cv_pct={orig_cv_pct:.6} candidate_mean={candidate_mean:.3} \
 candidate_cv_pct={candidate_cv_pct:.6} ratio_mean={ratio_mean:.9} \
 ratio_cv_pct={ratio_cv_pct:.6} candidate_median={candidate_median:.9} \
 candidate_p05={candidate_p05:.9} candidate_p95={candidate_p95:.9} \
-null_median={null_median:.9} null_p05={null_p05:.9} null_p95={null_p95:.9}"
+candidate_ci95_low={candidate_ci95_low:.9} candidate_ci95_high={candidate_ci95_high:.9} \
+null_median={null_median:.9} null_p05={null_p05:.9} null_p95={null_p95:.9} \
+null_ci95_low={null_ci95_low:.9} null_ci95_high={null_ci95_high:.9} \
+margin2x_low={gate_low:.9} cv_used_as_provenance_only=true"
     );
     assert!(
-        candidate_median < null_p05,
-        "candidate median {candidate_median:.9} does not clear null floor {null_p05:.9}"
+        candidate_ci95_high < gate_low && candidate_median < KEEP_GATE_RATIO,
+        "median-CI keep gate failed: candidate median={candidate_median:.9}, \
+CI high={candidate_ci95_high:.9}, 2x null floor={gate_low:.9}"
     );
-    assert!(
-        candidate_median < KEEP_GATE_RATIO,
-        "1% instruction keep gate failed: {candidate_median:.9}"
+    println!(
+        "DECISION label=lpos verdict=KEEP gate=bootstrap_median_ci95 \
+two_x_margin=true cv_used_as_provenance_only=true"
     );
 }

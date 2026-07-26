@@ -5,7 +5,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -23,7 +23,8 @@ const DEFAULT_DATASIZE: usize = 3;
 const DEFAULT_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_READ_PERCENT: u8 = 50;
 const HISTOGRAM_MAX_US: u64 = 60_000_000;
-const REPORT_SCHEMA_VERSION: &str = "fr_bench_report/v1";
+const REPORT_SCHEMA_VERSION: &str = "fr_bench_report/v2";
+const BOOTSTRAP_RESAMPLES: usize = 20_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Workload {
@@ -178,8 +179,8 @@ struct BenchmarkConfig {
     timeout_ms: u64,
     json_out: Option<PathBuf>,
     key_prefix: String,
-    // (frankenredis keep-gate) Number of measured trials; >1 yields a run-to-run cv_pct
-    // so the batch ratchet can reject noisy results (cv_pct > 5 is not keep-eligible).
+    // Number of measured trials. CV is descriptive provenance only; the report's
+    // bootstrap median CI is the uncertainty input consumed by comparison harnesses.
     trials: usize,
 }
 
@@ -299,6 +300,7 @@ impl BenchmarkConfig {
 #[derive(Debug, Clone, Serialize)]
 struct BenchmarkReport {
     schema_version: &'static str,
+    harness_elf_sha256: String,
     generated_at_ms: u64,
     host: String,
     port: u16,
@@ -313,10 +315,14 @@ struct BenchmarkReport {
     key_prefix: String,
     total_time_ms: u64,
     ops_per_sec: f64,
-    // (frankenredis keep-gate) median ops/sec is reported above; these capture run-to-run
-    // stability so the ratchet can drop noisy results. cv_pct > 5 => not keep-eligible.
+    // Median ops/sec is reported above. CV remains provenance only: accept/reject
+    // decisions require a same-invocation A/A null and the bootstrap median CI.
     trials: usize,
     cv_pct: f64,
+    cv_used_as_provenance_only: bool,
+    bootstrap_resamples: usize,
+    ops_per_sec_ci95_low: f64,
+    ops_per_sec_ci95_high: f64,
     ops_per_sec_samples: Vec<f64>,
     bytes_sent: u64,
     bytes_received: u64,
@@ -597,6 +603,15 @@ impl Lcg {
 }
 
 fn main() -> ExitCode {
+    let harness_elf_sha256 = match harness_elf_sha256() {
+        Ok(sha256) => sha256,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!("BENCH_ELF_SHA256 arms=single-target sha256={harness_elf_sha256}");
+
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         print!("{}", help_text());
@@ -611,7 +626,7 @@ fn main() -> ExitCode {
         }
     };
 
-    match run(&config) {
+    match run(&config, harness_elf_sha256) {
         Ok(report) => {
             print_summary(&report);
             if let Some(path) = &config.json_out
@@ -637,9 +652,8 @@ struct TrialResult {
     total_time_ms: u64,
 }
 
-/// (frankenredis keep-gate) Run-to-run coefficient of variation as a percentage of the
-/// mean (sample stddev / mean * 100). 0 for <2 samples. The batch ratchet treats > 5% as
-/// noise (not keep-eligible).
+/// Run-to-run coefficient of variation as a percentage of the mean (sample stddev /
+/// mean * 100). This is reported as provenance and is never a verdict threshold.
 fn coefficient_of_variation_pct(samples: &[f64]) -> f64 {
     if samples.len() < 2 {
         return 0.0;
@@ -657,6 +671,70 @@ fn coefficient_of_variation_pct(samples: &[f64]) -> f64 {
         .sum::<f64>()
         / (samples.len() as f64 - 1.0);
     variance.sqrt() / mean * 100.0
+}
+
+fn median(samples: &mut [f64]) -> f64 {
+    samples.sort_by(f64::total_cmp);
+    let middle = samples.len() / 2;
+    if samples.len().is_multiple_of(2) {
+        (samples[middle - 1] + samples[middle]) / 2.0
+    } else {
+        samples[middle]
+    }
+}
+
+fn percentile(sorted: &[f64], percentile: f64) -> f64 {
+    sorted[((sorted.len() - 1) as f64 * percentile).round() as usize]
+}
+
+/// Deterministic percentile-bootstrap CI for the sample median. A comparison
+/// harness must combine this with its same-invocation A/A null before deciding.
+fn bootstrap_median_ci(samples: &[f64]) -> (f64, f64) {
+    debug_assert!(!samples.is_empty());
+    if samples.len() == 1 {
+        return (samples[0], samples[0]);
+    }
+
+    let mut state = 0x5eed_f00d_cafe_babe_u64;
+    for sample in samples {
+        state ^= sample.to_bits().wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        state = state.rotate_left(17);
+    }
+    let mut scratch = vec![0.0; samples.len()];
+    let mut medians = Vec::with_capacity(BOOTSTRAP_RESAMPLES);
+    for _ in 0..BOOTSTRAP_RESAMPLES {
+        for value in &mut scratch {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            let draw = state.wrapping_mul(0x2545_f491_4f6c_dd1d);
+            *value = samples[(draw as usize) % samples.len()];
+        }
+        medians.push(median(&mut scratch));
+    }
+    medians.sort_by(f64::total_cmp);
+    (percentile(&medians, 0.025), percentile(&medians, 0.975))
+}
+
+fn harness_elf_sha256() -> Result<String, String> {
+    let executable =
+        std::env::current_exe().map_err(|error| format!("resolve harness ELF: {error}"))?;
+    let output = Command::new("sha256sum")
+        .arg(&executable)
+        .output()
+        .map_err(|error| format!("hash harness ELF {}: {error}", executable.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "sha256sum failed for {}: {}",
+            executable.display(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .next()
+        .map(str::to_owned)
+        .ok_or_else(|| "sha256sum emitted no harness ELF digest".to_string())
 }
 
 /// One measured trial: spawn the client workers, merge their latency histograms, and
@@ -710,7 +788,7 @@ fn run_one_trial(config: &BenchmarkConfig) -> Result<TrialResult, String> {
     })
 }
 
-fn run(config: &BenchmarkConfig) -> Result<BenchmarkReport, String> {
+fn run(config: &BenchmarkConfig, harness_elf_sha256: String) -> Result<BenchmarkReport, String> {
     prepare_workload(config)?;
 
     let trials = config.trials.max(1);
@@ -721,6 +799,7 @@ fn run(config: &BenchmarkConfig) -> Result<BenchmarkReport, String> {
 
     let ops_per_sec_samples: Vec<f64> = results.iter().map(|r| r.ops_per_sec).collect();
     let cv_pct = coefficient_of_variation_pct(&ops_per_sec_samples);
+    let (ops_per_sec_ci95_low, ops_per_sec_ci95_high) = bootstrap_median_ci(&ops_per_sec_samples);
 
     // Report the MEDIAN trial (by ops/sec) as representative — robust to a single
     // cold-start or scheduling outlier, matching the ratchet's median+MAD discipline.
@@ -740,6 +819,7 @@ fn run(config: &BenchmarkConfig) -> Result<BenchmarkReport, String> {
 
     Ok(BenchmarkReport {
         schema_version: REPORT_SCHEMA_VERSION,
+        harness_elf_sha256,
         generated_at_ms: unix_time_ms(),
         host: config.host.clone(),
         port: config.port,
@@ -756,6 +836,10 @@ fn run(config: &BenchmarkConfig) -> Result<BenchmarkReport, String> {
         ops_per_sec,
         trials,
         cv_pct,
+        cv_used_as_provenance_only: true,
+        bootstrap_resamples: BOOTSTRAP_RESAMPLES,
+        ops_per_sec_ci95_low,
+        ops_per_sec_ci95_high,
         ops_per_sec_samples,
         bytes_sent,
         bytes_received,
@@ -1188,16 +1272,13 @@ fn print_summary(report: &BenchmarkReport) {
         report.clients, report.requests, report.pipeline, report.keyspace, report.datasize
     );
     println!(
-        "elapsed: {} ms  throughput: {:.2} ops/sec (median of {} trial(s), cv={:.2}%{})",
+        "elapsed: {} ms  throughput: {:.2} ops/sec (median of {} trial(s), bootstrap 95% CI [{:.2}, {:.2}], cv={:.2}% provenance-only)",
         report.total_time_ms,
         report.ops_per_sec,
         report.trials,
-        report.cv_pct,
-        if report.trials > 1 && report.cv_pct > 5.0 {
-            " NOISY: not keep-eligible"
-        } else {
-            ""
-        }
+        report.ops_per_sec_ci95_low,
+        report.ops_per_sec_ci95_high,
+        report.cv_pct
     );
     println!(
         "latency(us): min={} p50={} p95={} p99={} p999={} max={} mean={:.2}",
@@ -1235,7 +1316,7 @@ OPTIONS:\n\
   --password <PASS>        Optional password for AUTH\n\
   --timeout-ms <MS>        Socket read/write timeout (default: {DEFAULT_TIMEOUT_MS})\n\
   --json-out <PATH>        Write the JSON report to this path\n\
-  --trials <N>             Measured trials; >1 reports run-to-run cv_pct (keep-gate: >5pct is noise) (default: 1)\n\
+  --trials <N>             Measured trials; reports bootstrap median CI plus provenance-only cv_pct (default: 1)\n\
   --key-prefix <PREFIX>    Prefix used for benchmark keys (default: auto-generated)\n\
   --help, -h               Show this help\n"
     )
@@ -1288,8 +1369,9 @@ fn unix_time_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        BenchmarkConfig, CommandKind, ExpectationKind, ResponseExpectation, Workload, argv_frame,
-        benchmark_key, list_prefill_per_key, value_for_request,
+        BenchmarkConfig, CommandKind, ExpectationKind, REPORT_SCHEMA_VERSION, ResponseExpectation,
+        Workload, argv_frame, benchmark_key, bootstrap_median_ci, coefficient_of_variation_pct,
+        list_prefill_per_key, value_for_request,
     };
     use fr_protocol::RespFrame;
 
@@ -1333,6 +1415,15 @@ mod tests {
         assert_eq!(parsed.pipeline, 4);
         assert_eq!(parsed.read_percent, 75);
         assert_eq!(parsed.password.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn report_contract_keeps_cv_as_provenance_and_emits_median_ci() {
+        let samples = [80.0, 100.0, 120.0, 145.0, 175.0, 220.0];
+        assert!(coefficient_of_variation_pct(&samples) > 5.0);
+        let (low, high) = bootstrap_median_ci(&samples);
+        assert!(low <= 132.5 && 132.5 <= high);
+        assert_eq!(REPORT_SCHEMA_VERSION, "fr_bench_report/v2");
     }
 
     #[test]

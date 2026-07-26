@@ -1,13 +1,14 @@
 //! Same-binary A/B for the `SORT ... ALPHA` comparator.
 //!
-//! One parent invocation profiles the bench-only ORIG arm, alternates eight ORIG/CAND
-//! `perf stat instructions:u` pairs, checks CV and the keep gate, then runs AB/BA Criterion
-//! blocks in one group. This is deliberately a custom `harness = false` main: separate Cargo
-//! invocations would let RCH choose different workers and invalidate the ratio.
+//! One parent invocation profiles the bench-only ORIG arm, then position-balances an
+//! ORIG/ORIG A/A null with ORIG/CAND `perf stat instructions:u`. The keep gate uses a
+//! bootstrap median CI and 2x null margin; CV is provenance only. This is deliberately a
+//! custom `harness = false` main: separate Cargo invocations would let RCH choose different
+//! workers and invalidate the ratio.
 
 use std::{
     cmp::Ordering,
-    env,
+    env, fs,
     hint::black_box,
     path::{Path, PathBuf},
     process::{self, Command},
@@ -16,14 +17,15 @@ use std::{
 
 use criterion::{BenchmarkId, Criterion};
 use icu_collator::CollatorBorrowed;
+use sha2::{Digest, Sha256};
 
 const PROFILE_REPEATS: usize = 50;
 const STAT_REPEATS: usize = 100;
-const STAT_PAIRS: usize = 8;
+const STAT_ROUNDS: usize = 12;
 const STAT_LEN: usize = 32;
 const CORPUS_COUNT: usize = 1_000;
 const KEEP_GATE_RATIO: f64 = 0.99;
-const MAX_CV_PCT: f64 = 5.0;
+const BOOTSTRAP_RESAMPLES: usize = 20_000;
 
 #[derive(Clone, Copy, Debug)]
 enum Arm {
@@ -297,6 +299,56 @@ fn mean_cv(samples: &[f64]) -> Result<(f64, f64), String> {
     Ok((mean, variance.sqrt() / mean * 100.0))
 }
 
+fn median(samples: &mut [f64]) -> f64 {
+    samples.sort_by(f64::total_cmp);
+    let middle = samples.len() / 2;
+    if samples.len().is_multiple_of(2) {
+        (samples[middle - 1] + samples[middle]) / 2.0
+    } else {
+        samples[middle]
+    }
+}
+
+fn percentile(sorted: &[f64], percentile: f64) -> f64 {
+    sorted[((sorted.len() - 1) as f64 * percentile).round() as usize]
+}
+
+fn bootstrap_median_ci(samples: &[f64]) -> (f64, f64) {
+    let mut state = 0x5eed_f00d_cafe_babe_u64;
+    for sample in samples {
+        state ^= sample.to_bits().wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        state = state.rotate_left(17);
+    }
+    let mut scratch = vec![0.0; samples.len()];
+    let mut medians = Vec::with_capacity(BOOTSTRAP_RESAMPLES);
+    for _ in 0..BOOTSTRAP_RESAMPLES {
+        for value in &mut scratch {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            let draw = state.wrapping_mul(0x2545_f491_4f6c_dd1d);
+            *value = samples[(draw as usize) % samples.len()];
+        }
+        medians.push(median(&mut scratch));
+    }
+    medians.sort_by(f64::total_cmp);
+    (percentile(&medians, 0.025), percentile(&medians, 0.975))
+}
+
+fn executable_sha256(executable: &Path) -> Result<String, String> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let bytes = fs::read(executable)
+        .map_err(|error| format!("could not read {}: {error}", executable.display()))?;
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let mut digest = String::with_capacity(64);
+    for byte in hasher.finalize() {
+        digest.push(char::from(HEX[usize::from(byte >> 4)]));
+        digest.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    Ok(digest)
+}
+
 fn run_instruction_ab(executable: &Path) -> Result<(), String> {
     println!(
         "A_B_HOST={} executable={}",
@@ -307,61 +359,74 @@ fn run_instruction_ab(executable: &Path) -> Result<(), String> {
     println!("ORIG_REACHABILITY from_utf8_self_pct={from_utf8_self_pct:.4}");
     run_warmup(executable)?;
 
-    let mut orig = Vec::with_capacity(STAT_PAIRS);
-    let mut candidate = Vec::with_capacity(STAT_PAIRS);
-    for pair in 0..STAT_PAIRS {
-        let order = if pair % 2 == 0 {
-            [Arm::Orig, Arm::Candidate]
-        } else {
-            [Arm::Candidate, Arm::Orig]
-        };
-        let mut pair_orig = None;
-        let mut pair_candidate = None;
-        for arm in order {
-            let count = perf_instructions(executable, arm)?;
-            match arm {
-                Arm::Orig => pair_orig = Some(count),
-                Arm::Candidate => pair_candidate = Some(count),
-            }
+    let mut nulls = Vec::with_capacity(STAT_ROUNDS);
+    let mut effects = Vec::with_capacity(STAT_ROUNDS);
+    let mut orig = Vec::with_capacity(STAT_ROUNDS);
+    let mut candidate = Vec::with_capacity(STAT_ROUNDS);
+    for round in 0..STAT_ROUNDS {
+        let mut counts = [0_u64; 3];
+        let mut order = [round % 3, (round + 1) % 3, (round + 2) % 3];
+        if round % 2 == 1 {
+            order.reverse();
         }
-        let pair_orig = pair_orig.ok_or("missing ORIG count")?;
-        let pair_candidate = pair_candidate.ok_or("missing candidate count")?;
+        for slot in order {
+            let arm = if slot == 2 { Arm::Candidate } else { Arm::Orig };
+            counts[slot] = perf_instructions(executable, arm)?;
+        }
+        let null = counts[0] as f64 / counts[1] as f64;
+        let effect = counts[2] as f64 / counts[0] as f64;
         println!(
-            "INSTRUCTIONS pair={} order={}/{} orig={} candidate={} candidate_over_orig={:.9}",
-            pair + 1,
-            order[0].name(),
-            order[1].name(),
-            pair_orig,
-            pair_candidate,
-            pair_candidate as f64 / pair_orig as f64
+            "INSTRUCTIONS round={} order={order:?} orig_a={} orig_b={} candidate={} \
+null_ratio={null:.9} candidate_over_orig={effect:.9}",
+            round + 1,
+            counts[0],
+            counts[1],
+            counts[2]
         );
-        orig.push(pair_orig as f64);
-        candidate.push(pair_candidate as f64);
+        nulls.push(null);
+        effects.push(effect);
+        orig.push(counts[0] as f64);
+        candidate.push(counts[2] as f64);
     }
 
-    let ratios: Vec<f64> = candidate
-        .iter()
-        .zip(&orig)
-        .map(|(candidate, orig)| candidate / orig)
-        .collect();
     let (orig_mean, orig_cv_pct) = mean_cv(&orig)?;
     let (candidate_mean, candidate_cv_pct) = mean_cv(&candidate)?;
-    let (ratio_mean, ratio_cv_pct) = mean_cv(&ratios)?;
+    let (_, null_cv_pct) = mean_cv(&nulls)?;
+    let (_, effect_cv_pct) = mean_cv(&effects)?;
+    let null_median = median(&mut nulls);
+    let effect_median = median(&mut effects);
+    let (null_ci95_low, null_ci95_high) = bootstrap_median_ci(&nulls);
+    let (effect_ci95_low, effect_ci95_high) = bootstrap_median_ci(&effects);
+    let null_radius = (1.0 - null_ci95_low)
+        .abs()
+        .max((null_ci95_high - 1.0).abs());
+    let gate_low = 1.0 - 2.0 * null_radius;
     println!(
         "INSTRUCTIONS_SUMMARY orig_mean={orig_mean:.3} orig_cv_pct={orig_cv_pct:.6} \
 candidate_mean={candidate_mean:.3} candidate_cv_pct={candidate_cv_pct:.6} \
-candidate_over_orig={ratio_mean:.9} ratio_cv_pct={ratio_cv_pct:.6}"
+null_median={null_median:.9} null_ci95_low={null_ci95_low:.9} \
+null_ci95_high={null_ci95_high:.9} null_cv_pct={null_cv_pct:.6} \
+candidate_over_orig_median={effect_median:.9} effect_ci95_low={effect_ci95_low:.9} \
+effect_ci95_high={effect_ci95_high:.9} effect_cv_pct={effect_cv_pct:.6} \
+margin2x_low={gate_low:.9} bootstrap_resamples={BOOTSTRAP_RESAMPLES} \
+cv_used_as_provenance_only=true"
     );
-    if orig_cv_pct >= MAX_CV_PCT || candidate_cv_pct >= MAX_CV_PCT || ratio_cv_pct >= MAX_CV_PCT {
+    if !(null_ci95_low <= 1.0 && 1.0 <= null_ci95_high) {
         return Err(format!(
-            "CV gate failed: orig={orig_cv_pct:.3}% candidate={candidate_cv_pct:.3}% ratio={ratio_cv_pct:.3}%"
+            "A/A bootstrap median CI does not bracket 1.0: \
+[{null_ci95_low:.9}, {null_ci95_high:.9}]"
         ));
     }
-    if ratio_mean >= KEEP_GATE_RATIO {
+    if effect_ci95_high >= gate_low || effect_median >= KEEP_GATE_RATIO {
         return Err(format!(
-            "1% instruction keep gate failed: candidate/orig={ratio_mean:.9}"
+            "median-CI keep gate failed: candidate/orig median={effect_median:.9}, \
+CI high={effect_ci95_high:.9}, 2x null floor={gate_low:.9}"
         ));
     }
+    println!(
+        "DECISION verdict=KEEP gate=bootstrap_median_ci95 two_x_margin=true \
+cv_used_as_provenance_only=true"
+    );
     Ok(())
 }
 
@@ -409,6 +474,14 @@ fn main() {
     }
 
     let executable: PathBuf = env::current_exe().expect("current bench executable path");
+    let sha256 =
+        executable_sha256(&executable).unwrap_or_else(|error| panic!("ELF hash failed: {error}"));
+    println!(
+        "BENCH_ELF_SHA256 arms=orig_a,orig_b,candidate sha256={sha256} bytes={}",
+        fs::metadata(&executable)
+            .expect("bench executable metadata")
+            .len()
+    );
     run_instruction_ab(&executable).unwrap_or_else(|error| panic!("A/B INVALID: {error}"));
     let mut criterion = Criterion::default().configure_from_args();
     run_criterion(&mut criterion);

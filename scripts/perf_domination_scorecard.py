@@ -9,8 +9,9 @@ Reporting capstone for the perf apparatus. Reads the two machine-checkable basel
                                                     from memory_baseline_capture.py)
 and emits a markdown scorecard answering "is fr beating redis 7.2.4, measured honestly?":
 per-cell win/loss, throughput geomean, RAM geomean, headline win-rate, and the cells where
-fr still loses (the remaining domination gaps). Noisy throughput cells (cv_pct > 5) are
-excluded from the verdict (not keep-eligible), matching the keep-gate.
+fr still loses (the remaining domination gaps). Throughput verdicts require the v2
+same-invocation A/A null plus bootstrap median-CI contract. CV is displayed as provenance
+and never excludes or admits a cell.
 
 Pure JSON->markdown; runs anywhere (no servers). Prints "run the baseline scripts first"
 when a baseline is missing, so it is safe to land before the first batch capture.
@@ -40,22 +41,23 @@ def _latest_sweep():
 def _parse_sweep(path):
     """Parse a 'cmd  redis  fr  redis/fr  verdict' sweep into {cmd: fr_over_redis}."""
     out = {}
-    for line in open(path):
-        parts = line.split()
-        if len(parts) < 3 or parts[0] in ("cmd", "==") or line.startswith("=="):
-            continue
-        try:
-            redis_ops, fr_ops = float(parts[1]), float(parts[2])
-        except ValueError:
-            continue
-        if redis_ops > 0:
-            out[parts[0]] = fr_ops / redis_ops
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            parts = line.split()
+            if len(parts) < 3 or parts[0] in ("cmd", "==") or line.startswith("=="):
+                continue
+            try:
+                redis_ops, fr_ops = float(parts[1]), float(parts[2])
+            except ValueError:
+                continue
+            if redis_ops > 0:
+                out[parts[0]] = fr_ops / redis_ops
     return out
 
 
 def _load(path):
     try:
-        with open(path) as fh:
+        with open(path, encoding="utf-8") as fh:
             return json.load(fh)
     except Exception:
         return None
@@ -92,38 +94,66 @@ def main():
         report = "\n".join(lines)
         print(report)
         if out_path:
-            open(out_path, "w").write(report + "\n")
+            with open(out_path, "w", encoding="utf-8") as fh:
+                fh.write(report + "\n")
         return
 
     # ---- Throughput pillar ----
     if thru:
         cells = thru.get("cells", {})
-        rated = {k: c for k, c in cells.items()
-                 if isinstance(c, dict) and "fr_over_redis" in c and not c.get("noisy")}
-        noisy = [k for k, c in cells.items() if isinstance(c, dict) and c.get("noisy")]
-        wins = sum(1 for c in rated.values() if c["fr_over_redis"] >= 1.0)
+        measured = {
+            k: c for k, c in cells.items()
+            if isinstance(c, dict) and "fr_over_redis" in c
+        }
+        rated = {
+            k: c for k, c in measured.items()
+            if c.get("verdict") in ("FR_WIN", "FR_LOSS")
+        }
+        undecidable = {
+            k: c for k, c in measured.items()
+            if c.get("verdict") not in ("FR_WIN", "FR_LOSS")
+        }
+        wins = sum(1 for c in rated.values() if c["verdict"] == "FR_WIN")
         gm = _geomean([c["fr_over_redis"] for c in rated.values()])
         lines += [
-            "## Throughput (fr/redis ops/sec; >=1.0 = fr wins)", "",
-            f"- Cells rated: **{len(rated)}** (excluding {len(noisy)} noisy cv>5% cells)",
-            f"- fr wins (>=1.0x): **{wins}/{len(rated)}**"
+            "## Throughput (fr/redis ops/sec; median-CI verdict)", "",
+            f"- Cells measured: **{len(measured)}**",
+            f"- Cells decisive after same-invocation A/A + 2x null margin: **{len(rated)}**",
+            f"- Cells undecidable or legacy-unprovenanced: **{len(undecidable)}**",
+            f"- fr wins: **{wins}/{len(rated)}**"
             + (f" ({100*wins//max(len(rated),1)}%)" if rated else ""),
             f"- Throughput geomean: **{gm:.3f}x**" if gm else "- Throughput geomean: n/a",
             "",
-            "| workload@depth | fr/redis | fr cv% | verdict |",
-            "|---|---|---|---|",
+            "| workload@depth | fr/redis median | effect CI95 | null CI95 | effect cv% (provenance) | verdict |",
+            "|---|---|---|---|---|---|",
         ]
-        for k in sorted(rated):
-            c = rated[k]
-            v = "WIN" if c["fr_over_redis"] >= 1.0 else "loss"
-            lines.append(f"| {k} | {c['fr_over_redis']:.3f} | {c.get('fr_cv_pct','?')} | {v} |")
-        losers = sorted((k for k, c in rated.items() if c["fr_over_redis"] < 1.0),
+        for k in sorted(measured):
+            c = measured[k]
+            effect_ci = (
+                f"[{c['effect_ci95_low']:.3f}, {c['effect_ci95_high']:.3f}]"
+                if "effect_ci95_low" in c else "missing"
+            )
+            null_ci = (
+                f"[{c['null_ci95_low']:.3f}, {c['null_ci95_high']:.3f}]"
+                if "null_ci95_low" in c else "missing"
+            )
+            lines.append(
+                f"| {k} | {c['fr_over_redis']:.3f} | {effect_ci} | {null_ci} | "
+                f"{c.get('effect_cv_pct', c.get('fr_cv_pct', '?'))} | "
+                f"{c.get('verdict', 'BLOCKED_LEGACY_NO_NULL')} |"
+            )
+        losers = sorted((k for k, c in rated.items() if c["verdict"] == "FR_LOSS"),
                         key=lambda k: rated[k]["fr_over_redis"])
         if losers:
             lines += ["", "**Throughput gaps (fr slower):** "
                       + ", ".join(f"{k}={rated[k]['fr_over_redis']:.2f}x" for k in losers[:10])]
-        if noisy:
-            lines += ["", f"_Noisy (excluded): {', '.join(sorted(noisy))}_"]
+        if undecidable:
+            lines += [
+                "",
+                "_Undecidable (not silently dropped by CV): "
+                + ", ".join(sorted(undecidable))
+                + "_",
+            ]
         lines.append("")
     else:
         lines += ["## Throughput", "", "_comprehensive_bench.latest.json missing — run perf_baseline_capture.py._", ""]
@@ -150,7 +180,8 @@ def main():
                 lines += ["", "**Throughput gaps (fr slower in this sweep):** "
                           + ", ".join(f"{c}={sweep[c]:.2f}x" for c in slow)]
             lines += ["", "_Note: a point-in-time artifact sweep, not the ratcheted "
-                      ".bench-history baseline; run perf_baseline_capture.py for the keep-gated matrix._", ""]
+                      ".bench-history baseline; run perf_baseline_capture.py for the "
+                      "same-invocation median-CI matrix._", ""]
 
     # ---- RAM pillar ----
     if mem:
@@ -183,7 +214,8 @@ def main():
     report = "\n".join(lines)
     print(report)
     if out_path:
-        open(out_path, "w").write(report + "\n")
+        with open(out_path, "w", encoding="utf-8") as fh:
+            fh.write(report + "\n")
 
 
 if __name__ == "__main__":

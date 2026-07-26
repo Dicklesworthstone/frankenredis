@@ -4,6 +4,78 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-26 NobleOsprey (cod/MEASURE): KEEP — Meta-Lever 2 makes ELF provenance + same-invocation A/A + bootstrap median-CI the executable harness contract (`frankenredis-rkvg2`)
+
+- **Ledger-first routing, before any source edit.** The negative ledger was grepped for the fresh
+  P16 INCR frames and every proposed harness surface. A new profile at commit `e244fe019`, exact
+  server ELF SHA-256
+  **`bf77a301bc75afa3794db9c463b50b59b5e53c9d658db9ffc087aff1665d5300`**, ran
+  `redis-benchmark -t incr -P16 -c50 -r100000` for 12 seconds with **10,000 samples,
+  46.2 billion cycles, and zero lost samples**. The attributed application frames were
+  `process_buffered_frames` **2.73% self** (even perfect elimination caps whole-program speedup at
+  **1.0281x**), `execute_plain_incr_borrowed` **1.43%** (Amdahl ceiling **1.0145x**), the default
+  write gate **1.23%**, `__memcmp` **1.20%**, `incrby_existing_or_insert` **0.92%**, and the
+  hash-table `get_mut` leaf **0.65%**. All are already adjudicated in this ledger: the clock count
+  is exactly ~1/op and cannot be removed, while the true-hit key lookup is semantically required.
+  **VALID-PROFILE HOLD; no speculative production edit was made.** Concrete retry predicate:
+  reopen INCR only if a fresh profile exposes a different exact leaf at **>=5% self-time** or a
+  substrate change removes counted work; a reshuffle inside these sub-3% frames is not admissible.
+- **Broad sweep is routing evidence, not a verdict.** A same-host five-trial P16 screen of the
+  current server against vendored Redis produced median fr/redis ratios:
+  `SET 1.03`, `GET 1.00`, `INCR 0.99`, `LPUSH 1.06`, `RPUSH 0.99`, `LPOP 1.74`,
+  `RPOP 0.99`, `SADD 1.01`, `HSET 1.18`, `SPOP 0.99`, `ZADD 0.95`,
+  `LRANGE_100 1.00`, and `MSET 1.97`. Because this scout had no A/A arm, none of the
+  near-1.0 values is called a win or loss. Concrete retry predicate: any selected cell must first
+  survive the v2 position-balanced A/A+A/B matrix below; never ledger a verdict from this screen.
+- **`fr-bench` v2 provenance.** Every process hashes its own executable before argument parsing,
+  prints `BENCH_ELF_SHA256`, and embeds that digest in JSON together with all raw throughput
+  samples, a deterministic 20,000-resample bootstrap 95% CI for the median, and the explicit
+  `cv_used_as_provenance_only=true` marker. Strict-remote `cargo run -- --help` on worker `hz1`
+  exercised the pre-network path and self-reported debug harness ELF SHA-256
+  **`18e6f53195ca46c02f0494f2ad4abd532ea93978853f9f9ea7cce8e5d162a1e9`**.
+  The matrix refuses a child report whose schema, self-reported SHA, or unique key prefix does not
+  match the parent invocation.
+- **Same-invocation A/A is mandatory.** `perf_baseline_capture.py` now owns two identical
+  FrankenRedis servers plus the Redis arm for the complete run. Each cell executes at least six
+  rounds covering all six three-arm position permutations, uses one unique per-round key prefix,
+  records raw arm/null/effect samples, and computes the paired A/A ratio and fr/redis effect in
+  that one top-level invocation. Missing A/A is `BLOCKED_NO_NULL`; an A/A median CI that does not
+  bracket 1.0 is `BLOCKED_NULL_BIAS`. Legacy v1 baselines are displayed but cannot silently ratchet
+  or contribute to the domination scorecard.
+- **Median-CI gate, never CV.** The only decisive cell verdicts are `FR_WIN` and `FR_LOSS`, issued
+  when the effect bootstrap CI clears an explicit **2x** symmetric radius derived from the A/A
+  bootstrap CI. Otherwise the cell is `INDETERMINATE`. CV remains visible provenance and is absent
+  from the decision API. The self-test mechanically proves both directions: a low-CV row without
+  A/A is blocked, while a computed high-CV row is admitted when its effect CI clears the 2x null
+  envelope. `perf_domination_scorecard.py` likewise rates only those v2 decisive verdicts and
+  prints every undecidable/legacy cell instead of dropping it.
+- **Hard-gate consumer audit.** Executable CV verdicts were removed from the fr-bench report
+  consumer and the three remaining standalone harnesses:
+  `sort_alpha_compare`, `client_tracking_membership`, and
+  `object_idletime_floor_ab` (both OBJECT IDLETIME and LPOS modes). Each now records CV only,
+  bootstraps the effect median, and requires a same-invocation A/A CI plus 2x null margin. A
+  repository search for `if/assert` CV gates now finds only the ledger-resurrection classifiers
+  and the regression test that deliberately constructs CV above 5%.
+- **Quality proof.** Strict-remote `fr-bench` tests passed **8/8**. Strict-remote scoped checks
+  passed for `sort_alpha_compare`, `client_tracking_membership`, and both independent
+  `object_idletime_floor_ab` feature modes. `fr-bench` passed Clippy with full `-D warnings`;
+  command/runtime/server harnesses passed `-D warnings` after allowing only three enumerated
+  pre-existing dependency lint classes (`fr-store` `len_zero`, `lua_eval` `dead_code` and
+  `collapsible_if`). RCH correctly refused local fallback for non-compilation `cargo fmt --check`
+  (`RCH-E301`); direct nightly rustfmt, Python syntax compilation, the orchestration self-test, and
+  `git diff --check` passed. Scoped UBS found and fixed three unclosed scorecard file handles. Its
+  remaining critical heuristics were reviewed: three CLI-supplied executables are canonicalized and
+  executable-checked, launched with argv and no shell, then terminated/waited in `finally`; eight
+  `panic!` sites deliberately fail closed inside feature-gated measurement tests; and the alleged
+  secret comparison is the literal `--child` bench-mode selector. Its `json.load` warnings are all
+  inside enclosing `try` blocks.
+- **Verdict and retry predicate.** **KEEP** the harness contract; this is infrastructure, not a
+  runtime speed claim. A future replacement may alter the bootstrap method only if it preserves
+  same-invocation position-balanced A/A, a declared null-derived margin, raw samples, and exact
+  self-reported ELF hashes, and adds adversarial tests proving that neither low CV nor high CV can
+  independently determine a verdict. Any new consumer that lacks one of those properties is
+  **BLOCKED**, not grandfathered.
+
 ## 2026-07-26 NobleOsprey (cod/MEASURE): REJECT (VALID-AB) — synchronous io_uring cross-connection SEND batching removes submissions but makes P1 SET 8.78% slower (`frankenredis-ev947`, `frankenredis-mpc9m`)
 
 - **Negative-ledger-first / retry predicate admitted.** Before implementation, both ledgers were
