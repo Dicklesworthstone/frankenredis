@@ -110,12 +110,17 @@ the remaining work actually is.
   | `GET key` | 1 | 0.9826 | 0.8637 | 0.9561 | 0.9974 |
 
 - **The two named residuals, both decidable against their A/A nulls:**
-  1. **TTL-bearing SET at P1: 0.899x.** Note its shape — fr executes **fewer** user instructions
-     (0.924x) while burning **more** CPU time per operation (1.060x). Fewer instructions and more
-     cycles is a memory-stall signature, not a code-length one, and it points at fr's key
-     duplication across `entries` / `expiry_deadlines` / `volatile_keys` (three owned copies of
-     every TTL'd key, where redis's `db->expires` shares one sds pointer). That is the same root
-     cause as the ledgered 4.49x keyspace RAM gap (`uhthd`).
+  1. **TTL-bearing SET at P1: 0.899x — and it is KEYSPACE-DEPENDENT.** Note its shape: fr executes
+     **fewer** user instructions (0.924x) while burning **more** CPU time per operation (1.060x).
+     Fewer instructions and more cycles is a memory-stall signature, not a code-length one, and it
+     points at fr's key duplication across `entries` / `expiry_deadlines` / `volatile_keys` (three
+     owned copies of every TTL'd key, where redis's `db->expires` shares one sds pointer) — the
+     same root cause as the ledgered 4.49x keyspace RAM gap (`uhthd`). **Confirmed by shrinking the
+     keyspace:** re-run on an independent core set at `-r 5000`, the same ratio is **0.9837**
+     against 0.899 at `-r 100000` (A/A null 1.0023). The loss largely evaporates when the working
+     set fits, so this is a footprint symptom, not a TTL-command-path defect. Attack `uhthd`.
+     (Same conclusion the `frankenredis-iujfh` investigation reached independently from the clock
+     side.)
   2. **INCR at P1: 1.169x user instructions**, LPUSH 1.299x. LPUSH is NOT steady-state under
      `redis-benchmark -t lpush` (it pushes to one unbounded key, so the two engines are not
      comparing equal states) — do not ledger LPUSH as a lever without a bounded-list harness.
@@ -124,6 +129,134 @@ the remaining work actually is.
   P1 workload attributes >1% of TOTAL cycles to a named fr per-event frame. Today it does not: at
   P1 the fr DSO is 7% of cycles, so the entire per-event path is inside the host's kernel noise.
   Measure `E` at P16 or on a quiet kernel (no auditd/nftables) before spending a turn on it.
+
+## 2026-07-25 AzureMouse (cc/STRUCTURAL): REJECT (characterized non-lever) — fr's elevated INCR `clock_gettime` share is NOT extra clock calls; every command already makes exactly ONE per op (`frankenredis-iujfh`)
+
+Filed as an open lever, chased to ground, closed. The whole arc is recorded — including the two
+framings I got wrong — because the end state saves the next agent a wasted turn: **there is no
+clock-call lever in the INCR path.** Found by chasing a DSO-split outlier I had initially set aside
+as a possible artefact; it reproduces and survives the control that matters.
+
+**THE ANSWER, measured by an exact call count (uprobe on `Timespec::now` + an `INFO commandstats`
+ops delta over the same window):**
+
+| workload (`-r 100000` unless noted) | **`Timespec::now` calls/op** | vdso % of cycles |
+|---|---|---|
+| INCR `-r 1` | **1.019** | 3.08 |
+| INCR | **1.004** | 11.09 |
+| SET | **1.016** | 3.28 |
+| GET | **1.016** | 2.91 |
+
+**Every command already makes exactly one clock read per operation, and the count does not move
+with keyspace.** fr is at the floor the code implies. The elevated INCR *share* is that same single
+call costing ~391 cycles instead of ~104 — a cache/TLB residency effect on the vdso `vvar` page and
+code, evicted by the surrounding access pattern, not additional work. Removing clock reads from the
+INCR path cannot help: there is one, and SET/GET have the same one. The residual is a second-order
+symptom of the keyspace working-set footprint, already tracked as the 4.49x keyspace RAM gap
+(`uhthd`) — attack that, not the clock. No production source was changed; the probe ships as
+`scripts/incr_vdso_rate_probe.sh`.
+
+**Retry predicate:** re-open ONLY if a `Timespec::now` uprobe count exceeds **1.10 calls/op** on any
+workload, OR if vdso cycles/op at `-r 1` (the cache-warm floor, 103.5 today) rises above ~150 —
+either would mean genuinely added clock work rather than cache pressure.
+
+**Method note worth keeping.** Four hypotheses died here and the decisive instrument was an exact
+**call count**, not a share, a rate, or a callchain. Callchains were useless: the release binary
+omits frame pointers so perf invented callers (it blamed `HashMap::get_mut` and `TcpStream::write`
+for the vdso frame), and `--call-graph dwarf,16384` could not chain out of the vdso either. When a
+profile says "N% of cycles in X", the first question is **how many times X is entered** — a uprobe
+answers it in two minutes and would have skipped every wrong framing below.
+
+The falsification trail, in order:
+
+- **Measurement.** fr binary sha256 `4df05cded722cb07fd474e4b74418fec9b9a7646a43afb9ae5032d90a29a61a4`,
+  server on idle core 56, client on 60, `-P16 -c50 -r100000`, a FRESH server per run, core
+  contention preflight green. `[vdso]` share of TOTAL server cycles (`clocksource=tsc`, so this is
+  the fast userspace path, not a syscall — the syscall census independently shows 0.13/op):
+
+  | engine + workload | vdso % of total cycles |
+  |---|---|
+  | **fr INCR** | **12.45 / 13.09 / 14.43 / 16.52** (four independent runs) |
+  | **fr INCRBY** | **9.62** |
+  | fr SET | 3.28 |
+  | fr GET | 2.91 |
+  | **redis 7.2.4 INCR — the control, identical workload/client** | **3.26** |
+  | redis 7.2.4 GET | 4.75 |
+
+  So this is **not** a property of the workload, the client, the host or the profiler: vendored
+  redis runs the same benchmark at 3.26%. It is specific to frankenredis's integer-increment write
+  family, a 3-5x outlier against both fr's own other commands and the incumbent.
+- **The excess is KEYSPACE-SCALED, not per-command.** This corrects my own first reading of it
+  (recorded here rather than quietly dropped: I initially framed it as "~5 clock reads per INCR"
+  and named two per-command candidates — both are now ruled out, because neither scales with
+  keyspace). Same binary, same command, same cores, only `-r` varies:
+
+  | `redis-benchmark -t incr` keyspace | fr vdso % of total cycles |
+  |---|---|
+  | `-r 1` (a single hot counter) | **3.19** |
+  | `-r 1000` | **13.12** |
+  | `-r 100000` | **17.59** |
+
+  At one key INCR sits exactly on the fr SET/GET baseline (3.28 / 2.91). The whole effect appears
+  between 1 and 1,000 keys and then saturates.
+- **What that combination rules out.** It is not a per-command clock read in the INCR path (flat at
+  `-r 1`). It is not a generic keyspace effect either — **fr SET at the same `-r 100000` is 3.28%**.
+  It is something that scales with distinct-key count *and* is specific to the increment path.
+  Specifically ruled out:
+  - `ServerState::run_active_expire_cycle` — called on every INCR and does read `Instant::now()`,
+    so it was the obvious suspect. Its `frankenredis-bk7pi` `count_expiring_keys() == 0` guard
+    fires, verified directly: `INFO keyspace` on an INCR-loaded server reports
+    `db0:keys=86580,expires=0`. It early-returns before the clock read.
+  - `Runtime::chained_command_start` adjacency (`crates/fr-runtime/src/lib.rs:5803`) and the
+    unconditional `Instant::now()` on the generic dispatch path
+    (`crates/fr-runtime/src/lib.rs:34052`) — my two original candidates. Both are per-command and
+    would not vary with `-r`.
+  - `Entry::replace_with_integer_write` → `refresh_db_add_metadata` reads no clock; it consumes the
+    `now_ms` already threaded in.
+- **Localization state.** A `-C force-frame-pointers=yes` rebuild (ELF sha256
+  `44e7762fd5c5f9b3074dbcb407def8c0dce36aea7cdae0d4511bb7bff2833b44`; same source, same worker,
+  different sha ⇒ the flag reached the compiler) makes callchains resolve to
+  `main → handle_readable → process_buffered_frames`, and shows `Store::incrby_existing_or_insert`
+  at **8.35% children / 0.74% self** — the cost is in one of its callees, and its source reads no
+  clock. Note the sampled vdso offset `0x983` is **below the first exported vdso symbol**
+  (`__vdso_gettimeofday` at `0x11a0`), i.e. it is the shared internal time core that
+  `clock_gettime`, `gettimeofday` and `time` all funnel into — so the caller need not be
+  `Instant::now`.
+- **ALLOCATOR RULED OUT (falsification test, not an argument).** mimalloc consults the vdso for
+  per-CPU heap selection and purge timing and is heap-size dependent, which fit the keyspace
+  scaling, so it was the leading suspect. Rebuilt `-p fr-server --no-default-features` (ELF sha256
+  `13c3c8ebd72e02513068f65d49e48f567839e90dd396fc706368f56124ce7943`, **0 mimalloc symbols**,
+  system allocator) and re-profiled the identical workload: vdso **15.47%**, against mimalloc's
+  17.59%. The effect survives removing the allocator entirely.
+- **Fixed-RATE vs PER-OPERATION — resolved by measuring the absolute rate.** Every share above is a
+  fraction of total cycles, so a fixed-rate cost (one read per event-loop iteration or on a timer)
+  divided by a smaller ops/s would masquerade as per-op growth. Measured directly —
+  `cycles` from `perf stat` and ops from an `INFO commandstats` delta over the *same* window, then
+  `vdso cycles/s = share x cycles/s`:
+
+  | `-r` | ops/s | cycles/s | vdso % | vdso cycles/s | **vdso cycles/op** |
+  |---|---|---|---|---|---|
+  | 1 | 1,126,216 | 3.78e9 | 3.08 | 1.17e8 | **103.5** |
+  | 1,000 | 1,137,968 | 3.84e9 | 6.09 | 2.34e8 | **205.4** |
+  | 100,000 | 1,108,622 | 3.91e9 | 11.09 | 4.33e8 | **390.8** |
+
+  **Throughput is flat** (1.11-1.14M ops/s across all three), which removes the confound entirely:
+  the shares are directly comparable, and vdso cycles *per operation* genuinely scales **3.8x** with
+  keyspace. So this is real per-operation work, **not** a timer artefact — it does not fold into
+  the `frankenredis-va3z0` 10 Hz family.
+- **Final step — the call count, which decided it.** ~103 cycles/op at `-r 1` is almost exactly one
+  vdso clock read; ~391 at `-r 100000`. A vdso `clock_gettime` is data-independent (reads the TSC,
+  applies a fixed transform), so it cannot become 3.8x dearer on its own. Two possibilities remained
+  — INCR issues ~4 reads/op at large keyspace, or it issues the same ~1 read at 4x the cache cost —
+  and only a COUNT distinguishes them. `perf probe -x <bin> --add tsnow=<Timespec::now>` plus
+  `perf stat -e probe:tsnow` against an ops delta over the same window gives **1.019 calls/op at
+  `-r 1` and 1.004 at `-r 100000`, with SET 1.016 and GET 1.016**. The count is flat. **Option 1 is
+  falsified; the reads are already at the floor.** See the verdict at the top of this entry.
+- **Retry/close predicate:** close only when the absolute vdso cycles/second is compared across the
+  `-r` sweep AND a named call site is attributed (uprobe on the vdso entry, or a per-call counter),
+  AND removing it moves the `-t incr -P16 -r100000` vdso share to within 2x of the fr SET/GET
+  baseline (3.0-3.3%) with an A/A null below 1.02x. **Do NOT re-attempt: the per-command
+  hypotheses (falsified by the `-r` sweep) or the allocator (falsified by the no-mimalloc build).**
 
 ## 2026-07-25 AzureMouse (cc/STRUCTURAL): OPEN LEVER (handed to cod lane — `crates/fr-store` under peer lease) — `used_memory` is recomputed by a FULL keyspace scan on a 10 Hz timer and the result is discarded
 
