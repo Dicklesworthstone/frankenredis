@@ -8,7 +8,7 @@
 //! 2026-07-13 REVERTED ledger entry).
 
 use std::{
-    env,
+    env, fs,
     hint::black_box,
     path::Path,
     process::{self, Command},
@@ -16,11 +16,13 @@ use std::{
 };
 
 use fr_protocol::bench_encode_bulk_string;
+use sha2::{Digest, Sha256};
 
 const PROFILE_REPEATS: usize = 3_000_000;
 const PROFILE_TRIALS: usize = 3;
 const STAT_REPEATS: usize = 2_000_000;
 const STAT_ROUNDS: usize = 24;
+const BOOTSTRAP_RESAMPLES: usize = 20_000;
 
 // 64 bytes of body filler; each reply borrows a prefix of it.
 const FILLER: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ+/=";
@@ -60,7 +62,7 @@ fn encode(body_len: usize, arm: Arm, out: &mut Vec<u8>) {
     }
 }
 
-fn run_loop(arm: Arm, repeats: usize) {
+fn run_loop(arm: Arm, repeats: usize) -> u64 {
     // One reusable buffer whose capacity stabilizes after the first iteration, so the timed delta
     // is purely the header path (1 fused extend vs 3 reference), never allocation.
     let mut out: Vec<u8> = Vec::with_capacity(256);
@@ -76,7 +78,7 @@ fn run_loop(arm: Arm, repeats: usize) {
                 .wrapping_add(out[last] as u64);
         }
     }
-    black_box(checksum);
+    black_box(checksum)
 }
 
 fn child_args() -> Result<Option<(Arm, usize)>, String> {
@@ -93,22 +95,18 @@ fn child_args() -> Result<Option<(Arm, usize)>, String> {
     Ok(Some((arm, repeats)))
 }
 
-fn binary_sha256(executable: &Path) -> Result<String, String> {
-    let output = Command::new("sha256sum")
-        .arg(executable)
-        .output()
-        .map_err(|error| format!("could not launch sha256sum: {error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "sha256sum failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
+fn binary_identity(executable: &Path) -> Result<(String, usize), String> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let bytes = fs::read(executable)
+        .map_err(|error| format!("could not read {}: {error}", executable.display()))?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let mut digest = String::with_capacity(64);
+    for byte in hasher.finalize() {
+        digest.push(char::from(HEX[usize::from(byte >> 4)]));
+        digest.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
-    String::from_utf8_lossy(&output.stdout)
-        .split_whitespace()
-        .next()
-        .map(str::to_owned)
-        .ok_or_else(|| "sha256sum emitted no digest".to_owned())
+    Ok((digest, bytes.len()))
 }
 
 fn cv(samples: &[f64]) -> f64 {
@@ -122,12 +120,40 @@ fn cv(samples: &[f64]) -> f64 {
 }
 
 fn median(samples: &mut [f64]) -> f64 {
-    samples.sort_by(|left, right| left.partial_cmp(right).expect("sample is not NaN"));
-    samples[samples.len() / 2]
+    samples.sort_by(f64::total_cmp);
+    let middle = samples.len() / 2;
+    if samples.len().is_multiple_of(2) {
+        (samples[middle - 1] + samples[middle]) / 2.0
+    } else {
+        samples[middle]
+    }
 }
 
 fn percentile(sorted: &[f64], percentile: f64) -> f64 {
     sorted[((sorted.len() - 1) as f64 * percentile).round() as usize]
+}
+
+fn bootstrap_median_ci(samples: &[f64]) -> (f64, f64) {
+    assert!(!samples.is_empty());
+    let mut state = 0x4d59_5df4_d0f3_3173_u64;
+    for sample in samples {
+        state ^= sample.to_bits().wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        state = state.rotate_left(17);
+    }
+    let mut scratch = vec![0.0; samples.len()];
+    let mut medians = Vec::with_capacity(BOOTSTRAP_RESAMPLES);
+    for _ in 0..BOOTSTRAP_RESAMPLES {
+        for value in &mut scratch {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            let draw = state.wrapping_mul(0x2545_f491_4f6c_dd1d);
+            *value = samples[(draw as usize) % samples.len()];
+        }
+        medians.push(median(&mut scratch));
+    }
+    medians.sort_by(f64::total_cmp);
+    (percentile(&medians, 0.025), percentile(&medians, 0.975))
 }
 
 fn profile_trial(executable: &Path, trial: usize) -> Result<f64, String> {
@@ -219,7 +245,8 @@ fn run_profile(executable: &Path) -> Result<(), String> {
         .filter(|hostname| !hostname.is_empty())
         .unwrap_or_else(|| "unknown".into());
     println!("WORKER_ID {hostname}");
-    println!("BINARY_SHA256 both_arms={}", binary_sha256(executable)?);
+    let (sha256, bytes) = binary_identity(executable)?;
+    println!("BINARY_SHA256 both_arms={sha256} bytes={bytes}");
     for arm in [Arm::Reference, Arm::Candidate] {
         let status = Command::new(executable)
             .args(["--child", arm.name(), "10000"])
@@ -272,6 +299,8 @@ fn perf_instructions(executable: &Path, arm: Arm) -> Result<u64, String> {
 fn correctness_gate() {
     let mut fused = Vec::new();
     let mut old = Vec::new();
+    let mut fused_checksum = 0_u64;
+    let mut old_checksum = 0_u64;
     for body_len in 0..=FILLER.len() {
         let body = &FILLER[..body_len];
         fused.clear();
@@ -279,12 +308,21 @@ fn correctness_gate() {
         bench_encode_bulk_string::<true>(body, &mut fused);
         bench_encode_bulk_string::<false>(body, &mut old);
         assert_eq!(fused, old, "bulk string reply differs body_len={body_len}");
+        for byte in &fused {
+            fused_checksum = fused_checksum.rotate_left(5) ^ u64::from(*byte);
+        }
+        for byte in &old {
+            old_checksum = old_checksum.rotate_left(5) ^ u64::from(*byte);
+        }
     }
     // A known reply is byte-exact RESP.
     let mut r = Vec::new();
     bench_encode_bulk_string::<true>(b"hello", &mut r);
     assert_eq!(r, b"$5\r\nhello\r\n");
-    println!("CORRECTNESS_GATE bulk_string_fused_matches_three_call=bit_identical");
+    assert_eq!(fused_checksum, old_checksum);
+    println!(
+        "CORRECTNESS_GATE bulk_string_fused_matches_three_call=bit_identical checksum={fused_checksum:016x}"
+    );
 }
 
 fn run_instruction_ab(executable: &Path) -> Result<(), String> {
@@ -298,16 +336,16 @@ fn run_instruction_ab(executable: &Path) -> Result<(), String> {
         }
         for slot in order {
             let arm = if slot == 2 {
-                Arm::Reference
-            } else {
                 Arm::Candidate
+            } else {
+                Arm::Reference
             };
             counts[slot] = perf_instructions(executable, arm)?;
         }
         let null = counts[0] as f64 / counts[1] as f64;
-        let effect = counts[2] as f64 / counts[0] as f64;
+        let effect = counts[0] as f64 / counts[2] as f64;
         println!(
-            "INSTRUCTIONS round={} order={order:?} candidate_a={} candidate_b={} reference={} null_ratio={null:.9} reference_over_candidate={effect:.9}",
+            "INSTRUCTIONS round={} order={order:?} reference_a={} reference_b={} candidate={} null_ratio={null:.9} reference_over_candidate={effect:.9}",
             round + 1,
             counts[0],
             counts[1],
@@ -318,31 +356,46 @@ fn run_instruction_ab(executable: &Path) -> Result<(), String> {
     }
     let null_cv_pct = cv(&nulls);
     let effect_cv_pct = cv(&effects);
+    let (null_ci95_low, null_ci95_high) = bootstrap_median_ci(&nulls);
     let null_median = median(&mut nulls);
     let effect_median = median(&mut effects);
     let null_p05 = percentile(&nulls, 0.05);
     let null_p95 = percentile(&nulls, 0.95);
+    let null_ci_radius = (null_ci95_low - 1.0)
+        .abs()
+        .max((null_ci95_high - 1.0).abs());
+    let decisive_keep_threshold = (1.0 + 2.0 * null_ci_radius).max(1.01);
     println!(
-        "INSTRUCTIONS_SUMMARY rounds={STAT_ROUNDS} null_median={null_median:.9} null_p05={null_p05:.9} null_p95={null_p95:.9} null_cv_pct={null_cv_pct:.6} reference_over_candidate_median={effect_median:.9} speedup_cv_pct={effect_cv_pct:.6}"
+        "INSTRUCTIONS_SUMMARY rounds={STAT_ROUNDS} null_median={null_median:.9} null_ci95_low={null_ci95_low:.9} null_ci95_high={null_ci95_high:.9} bootstrap_resamples={BOOTSTRAP_RESAMPLES} null_p05={null_p05:.9} null_p95={null_p95:.9} null_cv_pct={null_cv_pct:.6} reference_over_candidate_median={effect_median:.9} speedup_cv_pct={effect_cv_pct:.6} decisive_keep_threshold={decisive_keep_threshold:.9}"
     );
     if (null_median - 1.0).abs() >= 0.02 {
-        return Err(format!("null median exposes harness bias: {null_median:.9}"));
-    }
-    if effect_median <= null_p95 || effect_median <= 1.01 {
         return Err(format!(
-            "candidate failed keep gate: effect={effect_median:.9}, null_p95={null_p95:.9}"
+            "null median exposes harness bias: {null_median:.9}"
         ));
     }
+    if effect_median <= null_ci95_high || effect_median < decisive_keep_threshold {
+        return Err(format!(
+            "candidate failed median-CI keep gate: effect={effect_median:.9}, null_ci95=[{null_ci95_low:.9},{null_ci95_high:.9}], two_x_margin_threshold={decisive_keep_threshold:.9}"
+        ));
+    }
+    println!(
+        "DECISION verdict=KEEP gate=median_ci_95 two_x_margin=true cv_used_as_provenance_only=true"
+    );
     Ok(())
 }
 
 fn main() -> Result<(), String> {
     if let Some((arm, repeats)) = child_args()? {
-        run_loop(arm, repeats);
+        black_box(run_loop(arm, repeats));
         return Ok(());
     }
     let executable = env::current_exe()
         .map_err(|error| format!("could not resolve bench executable: {error}"))?;
+    let (sha256, bytes) = binary_identity(&executable)?;
+    println!(
+        "bench_elf_sha256={sha256} ({bytes} bytes) {}",
+        executable.display()
+    );
     correctness_gate();
     run_profile(&executable).map_err(|error| format!("PROFILE INVALID: {error}"))?;
     run_instruction_ab(&executable).map_err(|error| format!("A/B INVALID: {error}"))

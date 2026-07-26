@@ -8,6 +8,41 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-25 NobleOsprey: HARNESS KEEP — Meta-Lever 2 parts 1–3 on the bulk-string encoder resurrection bench (`frankenredis-ohsk5`)
+
+- **Ledger-first target:** the 2026-06-28 rejection of two `encode_bulk_string_slice`
+  rewrites had no same-invocation A/A null or executable provenance. The preserved
+  `encode_bulk_string_fastpath` same-binary comparator was therefore upgraded before the row was
+  trusted again; no production encoder code changed.
+- **Contract adoption:** the outer bench now hashes its own `env::current_exe()` bytes with SHA-256
+  and emits the digest as output line one. Its position-balanced three-slot loop measures
+  `reference/reference` A/A and `reference/candidate` A/B in the same invocation. It takes the
+  median of per-round ratios and computes a deterministic 20,000-resample bootstrap 95% CI on the
+  null median. `cv` is reported only as provenance. A KEEP must clear the null CI with a 2× margin
+  and the repository's absolute **1.01×** minimum.
+- **Exact remote evidence:** one fail-closed RCH invocation on worker `vmi1167313`, self-reported
+  ELF SHA-256 `39a0eb228afb7b9dfa026a1b61ac29a2050d1b8e9d5c08fffd347346b7e2f600`
+  (**658,536 bytes**). The frozen reference encoder carried **37.20% median exact self-time**
+  across three zero-lost-sample profiles. Twenty-four position-balanced rounds produced A/A null
+  median **0.999999986**, bootstrap 95% CI **[0.999999963, 1.000000030]**, null CV
+  **0.000042%**, and reference/candidate median **1.165771450×** with effect CV
+  **0.000046%**. The shipped fused header therefore uses **14.220% fewer instructions** on the
+  declared 0–64-byte GET/HGET reply corpus and clears the 2× CI-margin gate.
+- **Source bracket:** the bench source was SHA-256
+  `1275bbf93da65c5d8ca1efe447ed8eae85c025eeb3f89bb420486e4378e078ed` immediately
+  before the final RCH invocation; the same hash is required again at staging.
+- **Behavior proof:** candidate and frozen reference encoded every body length `0..=64`
+  byte-identically; the printed folded-output checksum was `c19a791e7bbbd766`, and the known
+  `hello` reply remained exactly `$5\r\nhello\r\n`.
+- **Worker routing note:** an earlier fail-closed attempt self-reported ELF
+  `b654a834893e5131d49562f08d92bc9961a72db99d88e9aaca0135ee0abed181` on `ovh-a`, then
+  correctly stopped before timing because `perf_event_paranoid=4`. It is instrument
+  inadmissibility, not performance evidence.
+- **Retry predicate:** rerun only if `bench_encode_bulk_string::<false>` falls below **5% exact
+  self-time** on this corpus, LLVM/Rust changes either arm's machine code, or the same-invocation
+  A/A bootstrap CI expands beyond **[0.995, 1.005]**. Any rerun must retain first-line self-hash,
+  the printed checksum, and the median-CI 2×-margin gate; never substitute a `cv` threshold.
+
 ## 2026-07-24 CreamPeak: BLOCKER — session-snapshot micro-lever profile is saturated (`frankenredis-6oavn`)
 
 - **Literal-current profile:** after the tracking-activity and named-metadata KEEPs, the
