@@ -6022,8 +6022,11 @@ pub struct Store {
     /// xpending_summary cross-checks the cache against a fresh scan in test/dev.
     // (perf) foldhash — fr-internal memoization cache, not a Redis dict; the (stream-key, group)
     // key's stream-key half is already foldhash-hashed in the keyspace. See stream-maps (tudak).
-    stream_pel_summary_cache:
-        HashMap<StreamPelSummaryCacheKey, StreamPelSummaryCacheValue, foldhash::quality::RandomState>,
+    stream_pel_summary_cache: HashMap<
+        StreamPelSummaryCacheKey,
+        StreamPelSummaryCacheValue,
+        foldhash::quality::RandomState,
+    >,
     /// Per-stream last-generated-id set by XSETID (may be higher than max entry).
     stream_last_ids: HashMap<Vec<u8>, StreamId, foldhash::quality::RandomState>,
     /// Per-stream cumulative entries-added counter used by XINFO.
@@ -8026,7 +8029,8 @@ impl Store {
         if !self.lfu_tracking_enabled() {
             let lfu_decay = self.lfu_decay_time;
             let lfu_log_factor = self.lfu_log_factor;
-            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            {
                 self.drop_if_expired(key, now_ms);
                 self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
                 return Ok(None);
@@ -8069,7 +8073,8 @@ impl Store {
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
         if COLLAPSE {
-            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            {
                 self.drop_if_expired(key, now_ms);
                 self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
                 return Ok(None);
@@ -8184,17 +8189,42 @@ impl Store {
         self.dirty = self.dirty.saturating_add(1);
     }
 
+    #[cfg_attr(feature = "bench-reference", inline(never))]
     pub fn set_plain_borrowed(&mut self, key: &[u8], value: &[u8], now_ms: u64) {
+        self.set_plain_borrowed_expiry_guard_impl::<true>(key, value, now_ms);
+    }
+
+    /// Bench-only reference for the pre-guard SET path: always execute
+    /// `drop_if_expired` before the overwrite, even when the store has no TTL-bearing keys.
+    #[cfg(feature = "bench-reference")]
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn set_plain_borrowed_expiry_reference_bench(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        now_ms: u64,
+    ) {
+        self.set_plain_borrowed_expiry_guard_impl::<false>(key, value, now_ms);
+    }
+
+    #[inline(always)]
+    fn set_plain_borrowed_expiry_guard_impl<const GUARD: bool>(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        now_ms: u64,
+    ) {
         // (CrimsonHawk) With no volatile keys (expires_count==0) drop_if_expired can never
         // evict, so its return value == entries.contains_key(key). Use the single
         // contains_key probe and skip drop_if_expired's SECOND lookup (the expiry_ms map
         // probe) + the expired-key eviction/notification/propagation machinery. Byte-
         // identical: an expired key requires a TTL, which keeps expires_count>0 and takes
         // the full drop path. This is the LIVE SET/GETSET/MSET write path (fr-runtime).
-        let key_present = if self.expires_count != 0 {
-            self.drop_if_expired(key, now_ms)
-        } else {
+        let key_present = if GUARD && self.expires_count == 0 {
             self.entries.contains_key(key)
+        } else {
+            self.drop_if_expired(key, now_ms)
         };
         if !key_present {
             let mut entry = Entry::new(canonical_string_value_from_slice(value), now_ms);
@@ -8392,12 +8422,10 @@ impl Store {
                 } else {
                     0
                 };
-                let old = std::mem::replace(
-                    &mut entry.value,
-                    canonical_string_value_from_slice(value),
-                )
-                .into_string_owned()
-                .expect("string-like value exposes owned bytes");
+                let old =
+                    std::mem::replace(&mut entry.value, canonical_string_value_from_slice(value))
+                        .into_string_owned()
+                        .expect("string-like value exposes owned bytes");
                 entry.last_access_ms = lru_access_millis(now_ms);
                 entry.lfu_freq = next_lfu_freq;
                 entry.lfu_last_touch_min = lfu_access_minutes(now_ms);
@@ -8931,7 +8959,8 @@ impl Store {
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
         if COLLAPSE {
-            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            {
                 self.drop_if_expired(key, now_ms);
                 self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
                 return false;
@@ -9442,7 +9471,8 @@ impl Store {
                             let rs = Self::lcg_next_seed(&mut self.rng_seed);
                             entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rs);
                         }
-                        let r = Self::append_apply(entry, value, max_len, now_ms, lfu_tracking_enabled);
+                        let r =
+                            Self::append_apply(entry, value, max_len, now_ms, lfu_tracking_enabled);
                         self.bump_digest_mutations();
                         Some(r)
                     }
@@ -9457,7 +9487,8 @@ impl Store {
                             let rs = Self::lcg_next_seed(&mut self.rng_seed);
                             entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rs);
                         }
-                        let r = Self::append_apply(entry, value, max_len, now_ms, lfu_tracking_enabled);
+                        let r =
+                            Self::append_apply(entry, value, max_len, now_ms, lfu_tracking_enabled);
                         let new_hash = Self::entry_state_digest(key, entry, expiry);
                         self.update_digest_hashes(Some(old_hash), Some(new_hash));
                         Some(r)
@@ -9541,7 +9572,8 @@ impl Store {
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
         if COLLAPSE {
-            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            {
                 self.drop_if_expired(key, now_ms);
                 self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
                 return Ok(0);
@@ -9710,13 +9742,21 @@ impl Store {
 
     #[doc(hidden)]
     #[must_use]
-    pub fn mget_lfu_collapsed_bench(&mut self, keys: &[&[u8]], now_ms: u64) -> Vec<Option<Vec<u8>>> {
+    pub fn mget_lfu_collapsed_bench(
+        &mut self,
+        keys: &[&[u8]],
+        now_ms: u64,
+    ) -> Vec<Option<Vec<u8>>> {
         self.mget_lfu_impl::<true>(keys, now_ms)
     }
 
     #[doc(hidden)]
     #[must_use]
-    pub fn mget_lfu_threeprobe_bench(&mut self, keys: &[&[u8]], now_ms: u64) -> Vec<Option<Vec<u8>>> {
+    pub fn mget_lfu_threeprobe_bench(
+        &mut self,
+        keys: &[&[u8]],
+        now_ms: u64,
+    ) -> Vec<Option<Vec<u8>>> {
         self.mget_lfu_impl::<false>(keys, now_ms)
     }
 
@@ -10083,13 +10123,7 @@ impl Store {
                 None => Ok(Vec::new()),
             };
         }
-        self.getrange_with_lfu_impl::<true, Vec<u8>>(
-            key,
-            start,
-            end,
-            now_ms,
-            <[u8]>::to_vec,
-        )
+        self.getrange_with_lfu_impl::<true, Vec<u8>>(key, start, end, now_ms, <[u8]>::to_vec)
     }
 
     /// Resolve a GETRANGE (`start`, `end`) pair against a string of length
@@ -10593,7 +10627,14 @@ impl Store {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
-                Self::setbit_apply(entry, byte_idx, bit_idx, value, now_ms, lfu_tracking_enabled)
+                Self::setbit_apply(
+                    entry,
+                    byte_idx,
+                    bit_idx,
+                    value,
+                    now_ms,
+                    lfu_tracking_enabled,
+                )
             })
         };
 
@@ -10687,7 +10728,8 @@ impl Store {
             }
         };
         if COLLAPSE {
-            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            {
                 self.drop_if_expired(key, now_ms);
                 self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
                 return Ok(false);
@@ -11204,7 +11246,11 @@ impl Store {
         let Some(entry) = self.entries.get_mut(key) else {
             for op in ops {
                 match *op {
-                    BitfieldOp::Get { offset, bits, signed } => {
+                    BitfieldOp::Get {
+                        offset,
+                        bits,
+                        signed,
+                    } => {
                         results.push(Some(bitfield_read(&[], offset, bits, signed)));
                     }
                     _ => unreachable!("has_write implies the key was created above"),
@@ -11214,9 +11260,21 @@ impl Store {
         };
         for (idx, op) in ops.iter().enumerate() {
             let (offset, bits, signed) = match *op {
-                BitfieldOp::Get { offset, bits, signed }
-                | BitfieldOp::Set { offset, bits, signed }
-                | BitfieldOp::Incrby { offset, bits, signed } => (offset, bits, signed),
+                BitfieldOp::Get {
+                    offset,
+                    bits,
+                    signed,
+                }
+                | BitfieldOp::Set {
+                    offset,
+                    bits,
+                    signed,
+                }
+                | BitfieldOp::Incrby {
+                    offset,
+                    bits,
+                    signed,
+                } => (offset, bits, signed),
             };
             if let BitfieldOp::Get { .. } = *op {
                 let bytes = entry
@@ -11250,7 +11308,11 @@ impl Store {
                         bitfield_write(bytes, offset, bits, write_value);
                         let changed = old_len != bytes.len()
                             || old_unsigned != bitfield_read(bytes, offset, bits, false);
-                        (Some(if is_set { old_unsigned } else { write_value }), changed, true)
+                        (
+                            Some(if is_set { old_unsigned } else { write_value }),
+                            changed,
+                            true,
+                        )
                     }
                     None => {
                         // OVERFLOW FAIL: reserve-extend, no value written, reply nil.
@@ -11269,11 +11331,15 @@ impl Store {
                     entry.clear_entry_flags();
                     entry.set_flag(ENTRY_FORCE_RAW_ENCODING, true);
                     entry.modification_count = entry.modification_count.wrapping_add(1);
-                    Self::mark_digest_stale_fields(&mut self.digest_stale, &mut self.digest_mutations);
+                    Self::mark_digest_stale_fields(
+                        &mut self.digest_stale,
+                        &mut self.digest_mutations,
+                    );
                     if had_expiry {
                         self.expires_count = self.expires_count.saturating_add(1);
                         if db < self.database_count {
-                            self.db_expires_counts[db] = self.db_expires_counts[db].saturating_add(1);
+                            self.db_expires_counts[db] =
+                                self.db_expires_counts[db].saturating_add(1);
                         }
                     }
                 }
@@ -11750,7 +11816,8 @@ impl Store {
         now_ms: u64,
     ) -> Option<ValueType> {
         let entry = if COLLAPSE {
-            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            {
                 self.drop_if_expired(key, now_ms);
                 self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
                 return None;
@@ -12241,7 +12308,11 @@ impl Store {
             None
         };
         // (cc_fr) expires_count-guard the source-TTL read: no TTL anywhere ⇒ None. Byte-identical.
-        let moved_expiry = if self.expires_count != 0 { self.expiry_ms(key) } else { None };
+        let moved_expiry = if self.expires_count != 0 {
+            self.expiry_ms(key)
+        } else {
+            None
+        };
         let Some(mut entry) = self.internal_entries_remove(key) else {
             return Err(StoreError::KeyNotFound);
         };
@@ -12318,7 +12389,11 @@ impl Store {
             None
         };
         // (cc_fr) expires_count-guard the source-TTL read: no TTL anywhere ⇒ None. Byte-identical.
-        let moved_expiry = if self.expires_count != 0 { self.expiry_ms(key) } else { None };
+        let moved_expiry = if self.expires_count != 0 {
+            self.expiry_ms(key)
+        } else {
+            None
+        };
         let Some(mut entry) = self.internal_entries_remove(key) else {
             return Err(StoreError::KeyNotFound);
         };
@@ -12924,7 +12999,8 @@ impl Store {
                     let Some((canonical_key, _)) = self.entries.get_key_value(key) else {
                         return;
                     };
-                    self.expiry_deadlines.insert(canonical_key.clone(), deadline);
+                    self.expiry_deadlines
+                        .insert(canonical_key.clone(), deadline);
                 }
             }
             None => {
@@ -14256,7 +14332,11 @@ impl Store {
                 // listpack threshold. (cc_fr) O(1) incremental: only the entry count + this new
                 // field/value can promote a listpack hash — no O(n) rescan of existing fields.
                 Self::refresh_hash_encoding_after_insert::<INCR>(
-                    entry, field_len, value_len, max_entries, max_value,
+                    entry,
+                    field_len,
+                    value_len,
+                    max_entries,
+                    max_value,
                 );
                 Ok(is_new)
             }
@@ -14678,7 +14758,11 @@ impl Store {
                             let is_new = m.insert_borrowed(field, value);
                             entry.touch_write(now_ms, false);
                             Self::refresh_hash_encoding_after_insert::<INCR>(
-                                entry, field_len, value_len, max_entries, max_value,
+                                entry,
+                                field_len,
+                                value_len,
+                                max_entries,
+                                max_value,
                             );
                             Ok(is_new)
                         }
@@ -14692,7 +14776,11 @@ impl Store {
                         };
                         entry.touch_write(now_ms, false);
                         Self::refresh_hash_encoding_after_insert::<INCR>(
-                            &mut entry, field_len, value_len, max_entries, max_value,
+                            &mut entry,
+                            field_len,
+                            value_len,
+                            max_entries,
+                            max_value,
                         );
                         self.internal_entries_insert(key.to_vec(), entry);
                         Ok(is_new)
@@ -14705,7 +14793,11 @@ impl Store {
                         let is_new = m.insert_borrowed(field, value);
                         entry.touch_write(now_ms, false);
                         Self::refresh_hash_encoding_after_insert::<INCR>(
-                            entry, field_len, value_len, max_entries, max_value,
+                            entry,
+                            field_len,
+                            value_len,
+                            max_entries,
+                            max_value,
                         );
                         Ok(is_new)
                     }
@@ -14749,7 +14841,11 @@ impl Store {
                 // (frankenredis-yp503) Lock the encoding into hashtable
                 // once the hash crosses either listpack threshold.
                 Self::refresh_hash_encoding_after_insert::<INCR>(
-                    entry, field_len, value_len, max_entries, max_value,
+                    entry,
+                    field_len,
+                    value_len,
+                    max_entries,
+                    max_value,
                 );
                 Ok(is_new)
             }
@@ -14868,7 +14964,8 @@ impl Store {
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
         if COLLAPSE && self.hash_field_expires.is_empty() {
-            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            {
                 self.drop_if_expired(key, now_ms);
                 self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
                 return Ok(f(None));
@@ -15228,7 +15325,8 @@ impl Store {
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
         if COLLAPSE && self.hash_field_expires.is_empty() {
-            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            {
                 self.drop_if_expired(key, now_ms);
                 self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
                 return Ok(0);
@@ -15276,12 +15374,20 @@ impl Store {
     }
 
     #[doc(hidden)]
-    pub fn hlen_lfu_collapsed_bench(&mut self, key: &[u8], now_ms: u64) -> Result<usize, StoreError> {
+    pub fn hlen_lfu_collapsed_bench(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
         self.hlen_lfu_impl::<true>(key, now_ms)
     }
 
     #[doc(hidden)]
-    pub fn hlen_lfu_threeprobe_bench(&mut self, key: &[u8], now_ms: u64) -> Result<usize, StoreError> {
+    pub fn hlen_lfu_threeprobe_bench(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
         self.hlen_lfu_impl::<false>(key, now_ms)
     }
 
@@ -15378,8 +15484,7 @@ impl Store {
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
         if COLLAPSE && self.hash_field_expires.is_empty() {
-            if self.expires_count != 0
-                && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
                 self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
@@ -15527,8 +15632,7 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         if COLLAPSE && self.hash_field_expires.is_empty() {
             // LFU here (non-LFU handled above). Fold record + contains_key + get_mut into ONE probe.
-            if self.expires_count != 0
-                && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
                 self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
@@ -15657,8 +15761,7 @@ impl Store {
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
         if COLLAPSE && self.hash_field_expires.is_empty() {
-            if self.expires_count != 0
-                && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
                 self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
@@ -16200,7 +16303,11 @@ impl Store {
                 // incremental: only the entry count + this new field/value can promote a listpack
                 // hash — no O(n) rescan of the guaranteed-small existing fields.
                 Self::refresh_hash_encoding_after_insert::<INCR>(
-                    entry, field_len, value_len, max_entries, max_value,
+                    entry,
+                    field_len,
+                    value_len,
+                    max_entries,
+                    max_value,
                 );
                 Ok(true)
             } else {
@@ -16284,7 +16391,8 @@ impl Store {
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
         if COLLAPSE && self.hash_field_expires.is_empty() {
-            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            {
                 self.drop_if_expired(key, now_ms);
                 self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
                 return Ok(0);
@@ -17592,7 +17700,8 @@ impl Store {
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
         if COLLAPSE {
-            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            {
                 self.drop_if_expired(key, now_ms);
                 self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
                 return Ok(0);
@@ -17643,12 +17752,20 @@ impl Store {
     }
 
     #[doc(hidden)]
-    pub fn llen_lfu_collapsed_bench(&mut self, key: &[u8], now_ms: u64) -> Result<usize, StoreError> {
+    pub fn llen_lfu_collapsed_bench(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
         self.llen_lfu_impl::<true>(key, now_ms)
     }
 
     #[doc(hidden)]
-    pub fn llen_lfu_threeprobe_bench(&mut self, key: &[u8], now_ms: u64) -> Result<usize, StoreError> {
+    pub fn llen_lfu_threeprobe_bench(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
         self.llen_lfu_impl::<false>(key, now_ms)
     }
 
@@ -17789,8 +17906,7 @@ impl Store {
         let lfu_log_factor = self.lfu_log_factor;
         if COLLAPSE {
             // LFU here (non-LFU handled above). Fold record + contains_key + get_mut into ONE probe.
-            if self.expires_count != 0
-                && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
                 self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
@@ -18121,8 +18237,7 @@ impl Store {
             // Fold record_keyspace_lookup + contains_key rand-gate + get_mut into ONE probe. Peek the
             // expiry only when a key can carry one; the drop/hit-miss accounting matches
             // record_keyspace_lookup exactly (present ⇒ hit, absent/reaped ⇒ miss).
-            if self.expires_count != 0
-                && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
                 self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
@@ -18732,9 +18847,7 @@ impl Store {
                     if DIRECT_REPLY {
                         l.push_front(val.take().expect("popped value is present"));
                     } else {
-                        l.push_front_borrowed(
-                            val.as_deref().expect("popped value is present"),
-                        );
+                        l.push_front_borrowed(val.as_deref().expect("popped value is present"));
                     }
                     l.note_command_grow(lp_pre, val_len as u64, self.list_max_listpack_size);
                     Self::mark_digest_stale_fields(
@@ -19233,9 +19346,7 @@ impl Store {
                         } else if DIRECT_REPLY {
                             l.push_back(val.take().expect("popped value is present"));
                         } else {
-                            l.push_back_borrowed(
-                                val.as_deref().expect("popped value is present"),
-                            );
+                            l.push_back_borrowed(val.as_deref().expect("popped value is present"));
                         }
                         l.note_command_grow(lp_pre, val_len as u64, self.list_max_listpack_size);
                         Self::mark_digest_stale_fields(
@@ -19254,9 +19365,7 @@ impl Store {
                     if DIRECT_REPLY {
                         l.push_front(val.take().expect("popped value is present"));
                     } else {
-                        l.push_front_borrowed(
-                            val.as_deref().expect("popped value is present"),
-                        );
+                        l.push_front_borrowed(val.as_deref().expect("popped value is present"));
                     }
                 } else if DIRECT_REPLY {
                     l.push_back(val.take().expect("popped value is present"));
@@ -19447,11 +19556,8 @@ impl Store {
                             // (frankenredis-md7ti) O(1) incremental refresh for the hot
                             // repeated-SADD-to-a-listpack-set path — see the fn doc. On an
                             // already-listpack set the O(n) member-length re-scan is elided.
-                            let added_member_max_len = members
-                                .iter()
-                                .map(|m| m.as_ref().len())
-                                .max()
-                                .unwrap_or(0);
+                            let added_member_max_len =
+                                members.iter().map(|m| m.as_ref().len()).max().unwrap_or(0);
                             Self::refresh_set_encoding_flags_after_insert::<true>(
                                 entry,
                                 added_member_max_len,
@@ -19683,8 +19789,7 @@ impl Store {
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
         if COLLAPSE {
-            if self.expires_count != 0
-                && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
                 self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
@@ -19792,7 +19897,8 @@ impl Store {
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
         if COLLAPSE {
-            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            {
                 self.drop_if_expired(key, now_ms);
                 self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
                 return Ok(0);
@@ -19837,12 +19943,20 @@ impl Store {
     }
 
     #[doc(hidden)]
-    pub fn scard_lfu_collapsed_bench(&mut self, key: &[u8], now_ms: u64) -> Result<usize, StoreError> {
+    pub fn scard_lfu_collapsed_bench(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
         self.scard_lfu_impl::<true>(key, now_ms)
     }
 
     #[doc(hidden)]
-    pub fn scard_lfu_twoprobe_bench(&mut self, key: &[u8], now_ms: u64) -> Result<usize, StoreError> {
+    pub fn scard_lfu_twoprobe_bench(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
         self.scard_lfu_impl::<false>(key, now_ms)
     }
 
@@ -22370,8 +22484,7 @@ impl Store {
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
         if COLLAPSE {
-            if self.expires_count != 0
-                && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
                 self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
@@ -22476,7 +22589,8 @@ impl Store {
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
         if COLLAPSE {
-            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict {
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            {
                 self.drop_if_expired(key, now_ms);
                 self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
                 return Ok(0);
@@ -22527,12 +22641,20 @@ impl Store {
     }
 
     #[doc(hidden)]
-    pub fn zcard_lfu_collapsed_bench(&mut self, key: &[u8], now_ms: u64) -> Result<usize, StoreError> {
+    pub fn zcard_lfu_collapsed_bench(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
         self.zcard_lfu_impl::<true>(key, now_ms)
     }
 
     #[doc(hidden)]
-    pub fn zcard_lfu_threeprobe_bench(&mut self, key: &[u8], now_ms: u64) -> Result<usize, StoreError> {
+    pub fn zcard_lfu_threeprobe_bench(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
         self.zcard_lfu_impl::<false>(key, now_ms)
     }
 
@@ -22612,8 +22734,7 @@ impl Store {
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
         if COLLAPSE {
-            if self.expires_count != 0
-                && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
                 self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
@@ -22735,8 +22856,7 @@ impl Store {
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
         if COLLAPSE {
-            if self.expires_count != 0
-                && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
                 self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
@@ -22834,8 +22954,7 @@ impl Store {
         now_ms: u64,
     ) -> Result<Option<(usize, f64)>, StoreError> {
         if COLLAPSE_REVERSE_LFU && reverse && self.lfu_tracking_enabled() {
-            if self.expires_count != 0
-                && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
                 self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
@@ -23028,8 +23147,7 @@ impl Store {
                 }
             }
         } else if COLLAPSE {
-            if self.expires_count != 0
-                && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
                 self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
@@ -23157,8 +23275,7 @@ impl Store {
                 }
             }
         } else if COLLAPSE {
-            if self.expires_count != 0
-                && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
                 self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
@@ -23495,8 +23612,7 @@ impl Store {
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
         if COLLAPSE {
-            if self.expires_count != 0
-                && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
                 self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
@@ -23652,8 +23768,7 @@ impl Store {
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
         if COLLAPSE {
-            if self.expires_count != 0
-                && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
                 self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
@@ -23823,8 +23938,7 @@ impl Store {
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
         if COLLAPSE {
-            if self.expires_count != 0
-                && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
                 self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
@@ -23999,8 +24113,7 @@ impl Store {
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
         if COLLAPSE {
-            if self.expires_count != 0
-                && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
                 self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
@@ -24450,7 +24563,14 @@ impl Store {
             // hset_borrowed. `GETMUT_FIRST == false` keeps the old `internal_entry` (the diff ref).
             match self.entries.get_mut(key) {
                 Some(entry) => Self::zincrby_apply_entry(
-                    entry, member, delta, &opts, now_ms, false, zset_max_entries, zset_max_value,
+                    entry,
+                    member,
+                    delta,
+                    &opts,
+                    now_ms,
+                    false,
+                    zset_max_entries,
+                    zset_max_value,
                 ),
                 None => {
                     self.internal_entries_insert(
@@ -24462,7 +24582,14 @@ impl Store {
                         .get_mut(key)
                         .expect("zset entry inserted above must exist");
                     Self::zincrby_apply_entry(
-                        entry, member, delta, &opts, now_ms, false, zset_max_entries, zset_max_value,
+                        entry,
+                        member,
+                        delta,
+                        &opts,
+                        now_ms,
+                        false,
+                        zset_max_entries,
+                        zset_max_value,
                     )
                 }
             }
@@ -24470,7 +24597,14 @@ impl Store {
             let entry =
                 self.internal_entry(key, || Value::SortedSet(Box::new(SortedSet::new())), now_ms);
             Self::zincrby_apply_entry(
-                entry, member, delta, &opts, now_ms, false, zset_max_entries, zset_max_value,
+                entry,
+                member,
+                delta,
+                &opts,
+                now_ms,
+                false,
+                zset_max_entries,
+                zset_max_value,
             )
         };
 
@@ -25650,24 +25784,24 @@ impl Store {
                     // full `run` Vec (score_bound_range) + a separate rank re-scan — the SCORE
                     // follow-up to d96c0a456's packed drain. Full keeps the score_bound_range path.
                     // Byte-identical: same start rank + count, same drained members.
-                    let removed_count = if let Some((start, count)) =
-                        zs.packed_score_range_span(min, max)
-                    {
-                        zs.remove_rank_range(start, count)
-                    } else {
-                        let run = zs.score_bound_range(min, max, false);
-                        let removed_count = run.len();
-                        if let Some(start) =
-                            run.first().and_then(|(m, s)| zs.contiguous_run_start(m, *s))
-                        {
-                            zs.remove_rank_range(start, removed_count);
+                    let removed_count =
+                        if let Some((start, count)) = zs.packed_score_range_span(min, max) {
+                            zs.remove_rank_range(start, count)
                         } else {
-                            for (m, _) in &run {
-                                zs.remove(m);
+                            let run = zs.score_bound_range(min, max, false);
+                            let removed_count = run.len();
+                            if let Some(start) = run
+                                .first()
+                                .and_then(|(m, s)| zs.contiguous_run_start(m, *s))
+                            {
+                                zs.remove_rank_range(start, removed_count);
+                            } else {
+                                for (m, _) in &run {
+                                    zs.remove(m);
+                                }
                             }
-                        }
-                        removed_count
-                    };
+                            removed_count
+                        };
                     let is_empty = zs.is_empty();
                     if removed_count > 0 {
                         self.dirty = self.dirty.saturating_add(removed_count as u64);
@@ -25720,7 +25854,9 @@ impl Store {
                     // contiguous rank span; multi-score lex falls to the same iter+filter run).
                     let run = zs.lex_range_asc(min, max);
                     let removed_count = run.len();
-                    if let Some(start) = run.first().and_then(|(m, s)| zs.contiguous_run_start(m, *s))
+                    if let Some(start) = run
+                        .first()
+                        .and_then(|(m, s)| zs.contiguous_run_start(m, *s))
                     {
                         zs.remove_rank_range(start, removed_count);
                     } else {
@@ -26278,7 +26414,34 @@ impl Store {
         );
     }
 
+    #[cfg_attr(feature = "bench-reference", inline(never))]
     pub fn xadd(
+        &mut self,
+        key: &[u8],
+        id: StreamId,
+        fields: &[StreamField],
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        self.xadd_expiry_guard_impl::<true>(key, id, fields, now_ms)
+    }
+
+    /// Bench-only reference for the pre-guard XADD path: always execute the bare
+    /// `drop_if_expired` probe before the stream lookup.
+    #[cfg(feature = "bench-reference")]
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn xadd_expiry_reference_bench(
+        &mut self,
+        key: &[u8],
+        id: StreamId,
+        fields: &[StreamField],
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        self.xadd_expiry_guard_impl::<false>(key, id, fields, now_ms)
+    }
+
+    #[inline(always)]
+    fn xadd_expiry_guard_impl<const GUARD: bool>(
         &mut self,
         key: &[u8],
         id: StreamId,
@@ -26289,7 +26452,7 @@ impl Store {
         // below re-probes (and XADD auto-creates the stream when absent), so drop's no-TTL
         // fast-exit contains_key is pure overhead when nothing is volatile. Byte-identical
         // (no volatile key ⇒ none expired). XADD is a hot stream-append write.
-        if self.expires_count != 0 {
+        if !GUARD || self.expires_count != 0 {
             self.drop_if_expired(key, now_ms);
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
@@ -26420,7 +26583,11 @@ impl Store {
     /// identical: same hit/miss accounting (get_mut Some ⇒ hit, absent/reaped ⇒ miss), single
     /// present-key draw, LFU bump + touch, WRONGTYPE. `false` is the prior three-probe path. Mirrors
     /// `lpos_impl`; the non-LFU path already single-probes via `lookup_live_for_read_mut`.
-    fn xlen_impl<const COLLAPSE: bool>(&mut self, key: &[u8], now_ms: u64) -> Result<usize, StoreError> {
+    fn xlen_impl<const COLLAPSE: bool>(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
         // (CrimsonHawk) Non-LFU single-lookup collapse — see `scard`. Byte-identical.
         if !self.lfu_tracking_enabled() {
             return match self.lookup_live_for_read_mut(key, now_ms) {
@@ -26440,8 +26607,7 @@ impl Store {
         if COLLAPSE {
             // Fold record_keyspace_lookup + contains_key rand-gate + get_mut into ONE probe. Peek the
             // expiry only when a key can carry one; hit/miss matches record_keyspace_lookup exactly.
-            if self.expires_count != 0
-                && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
                 self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
@@ -26612,8 +26778,7 @@ impl Store {
                 }
             }
         } else if COLLAPSE {
-            if self.expires_count != 0
-                && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
+            if self.expires_count != 0 && evaluate_expiry(now_ms, self.expiry_ms(key)).should_evict
             {
                 self.drop_if_expired(key, now_ms);
                 self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
@@ -28906,7 +29071,11 @@ impl Store {
 
         // Include dest if it already holds an HLL, and preserve its TTL
         self.drop_if_expired(dest, now_ms);
-        let existing_ttl = if self.expires_count != 0 { self.expiry_ms(dest) } else { None };
+        let existing_ttl = if self.expires_count != 0 {
+            self.expiry_ms(dest)
+        } else {
+            None
+        };
         if let Some(entry) = self.entries.get(dest) {
             let Some(data) = entry.value.string_bytes() else {
                 return Err(StoreError::WrongType);
@@ -30700,6 +30869,7 @@ impl Store {
     }
 
     /// SSCAN: cursor-based iteration over set members.
+    #[cfg_attr(feature = "bench-reference", inline(never))]
     pub fn sscan(
         &mut self,
         key: &[u8],
@@ -30808,6 +30978,7 @@ impl Store {
     /// `next_cursor`. `Cursor` is sunk FIRST so the `[cursor, [members]]` reply can be written in
     /// order; the members are collected into a `Vec<Cow>` (borrowed on hashtable) only to defer them
     /// past the cursor. Byte-identical member sequence + cursor.
+    #[cfg_attr(feature = "bench-reference", inline(never))]
     pub fn sscan0_borrow_scan(
         &mut self,
         key: &[u8],
@@ -35036,7 +35207,9 @@ pub struct BenchSetListpackDump(SetValue);
 #[doc(hidden)]
 #[must_use]
 pub fn bench_set_listpack_dump_strings(members: &[Vec<u8>]) -> BenchSetListpackDump {
-    BenchSetListpackDump(SetValue::Generic(GenericSet::from_unique_str_members(members)))
+    BenchSetListpackDump(SetValue::Generic(GenericSet::from_unique_str_members(
+        members,
+    )))
 }
 
 #[doc(hidden)]
@@ -39521,21 +39694,22 @@ mod tests {
         HLL_REDIS_MAGIC, HLL_REDIS_SPARSE_ENCODING, HLL_REDIS_SPARSE_MAX_BYTES, HLL_REGISTERS,
         HLL_SPARSE_XZERO_BIT, HashFieldMap, HashFieldTtl, HashFieldTtlCondition, HashFieldTtlSet,
         HashFieldTtlUnit, LFU_INIT_VAL, LatencySample, MaxmemoryPolicy, MaxmemoryPressureLevel,
-        NOTIFY_EVICTED, NOTIFY_EXPIRED, NOTIFY_GENERIC, NOTIFY_KEYEVENT, PttlValue, RDB_DUMP_VERSION,
-        RDB_OPCODE_FUNCTION2, RDB_TYPE_HASH, RDB_TYPE_HASH_LISTPACK, RDB_TYPE_HASH_ZIPLIST,
-        RDB_TYPE_HASH_ZIPMAP, RDB_TYPE_LIST, RDB_TYPE_LIST_QUICKLIST, RDB_TYPE_LIST_QUICKLIST_2,
-        RDB_TYPE_LIST_ZIPLIST, RDB_TYPE_SET, RDB_TYPE_SET_INTSET, RDB_TYPE_SET_LISTPACK,
-        RDB_TYPE_STREAM_LISTPACKS_3, RDB_TYPE_STRING, RDB_TYPE_ZSET, RDB_TYPE_ZSET_2,
-        RDB_TYPE_ZSET_LISTPACK, RDB_TYPE_ZSET_ZIPLIST, REDIS_OBJECT_OVERHEAD_BYTES,
-        REDIS_SCORE_BYTES, RestoreMetadata, ScoreBound, SetValue, SmallStr, Store, StoreError,
-        StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimOptions, StreamClaimReply,
-        StreamGroupReadCursor, StreamGroupReadOptions, StreamPendingEntry, Value, ValueType,
-        decode_length, decode_listpack_strings, decode_rdb_string, encode_db_key,
-        encode_hash_listpack_dump, encode_intset, encode_length, encode_listpack_strings,
-        encode_set_listpack_dump, estimate_listpack_entry_bytes, estimate_listpack_score_bytes,
-        estimate_set_memory_usage_bytes, hll_encode, hll_encode_sparse_create_from_pfadd, hll_hash,
-        hll_rho, hll_sparse_decode, integer_decimal_bytes, lfu_access_minutes, lfu_elapsed_minutes,
-        redis_allocation_size, redis_score_to_string, set_int_to_bytes, ziplist_integer_bytes,
+        NOTIFY_EVICTED, NOTIFY_EXPIRED, NOTIFY_GENERIC, NOTIFY_KEYEVENT, PttlValue,
+        RDB_DUMP_VERSION, RDB_OPCODE_FUNCTION2, RDB_TYPE_HASH, RDB_TYPE_HASH_LISTPACK,
+        RDB_TYPE_HASH_ZIPLIST, RDB_TYPE_HASH_ZIPMAP, RDB_TYPE_LIST, RDB_TYPE_LIST_QUICKLIST,
+        RDB_TYPE_LIST_QUICKLIST_2, RDB_TYPE_LIST_ZIPLIST, RDB_TYPE_SET, RDB_TYPE_SET_INTSET,
+        RDB_TYPE_SET_LISTPACK, RDB_TYPE_STREAM_LISTPACKS_3, RDB_TYPE_STRING, RDB_TYPE_ZSET,
+        RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK, RDB_TYPE_ZSET_ZIPLIST,
+        REDIS_OBJECT_OVERHEAD_BYTES, REDIS_SCORE_BYTES, RestoreMetadata, ScoreBound, SetValue,
+        SmallStr, Store, StoreError, StreamAutoClaimOptions, StreamAutoClaimReply,
+        StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions,
+        StreamPendingEntry, Value, ValueType, decode_length, decode_listpack_strings,
+        decode_rdb_string, encode_db_key, encode_hash_listpack_dump, encode_intset, encode_length,
+        encode_listpack_strings, encode_set_listpack_dump, estimate_listpack_entry_bytes,
+        estimate_listpack_score_bytes, estimate_set_memory_usage_bytes, hll_encode,
+        hll_encode_sparse_create_from_pfadd, hll_hash, hll_rho, hll_sparse_decode,
+        integer_decimal_bytes, lfu_access_minutes, lfu_elapsed_minutes, redis_allocation_size,
+        redis_score_to_string, set_int_to_bytes, ziplist_integer_bytes,
     };
 
     fn group_read_options(
@@ -40232,9 +40406,15 @@ mod tests {
 
         // EXPIRE re-arm (relative + absolute): membership unchanged → view stays clean.
         assert!(store.expire_milliseconds(b"k", 200_000, 0));
-        assert!(!store.volatile_keys_dirty, "EXPIRE re-arm must not dirty the clean view");
+        assert!(
+            !store.volatile_keys_dirty,
+            "EXPIRE re-arm must not dirty the clean view"
+        );
         assert!(store.expire_at_milliseconds(b"k", 300_000, 0));
-        assert!(!store.volatile_keys_dirty, "EXPIREAT re-arm must not dirty the clean view");
+        assert!(
+            !store.volatile_keys_dirty,
+            "EXPIREAT re-arm must not dirty the clean view"
+        );
         assert!(store.volatile_keys.contains(b"k".as_slice()));
         assert!(store.expiry_ms(b"k").is_some());
 
@@ -40451,7 +40631,10 @@ mod tests {
         assert_eq!(on.del(&del_keys, 0), 2);
         assert!(on.exists_no_stat(b"c", 0));
         assert!(!on.exists_no_stat(b"a", 0));
-        assert_eq!(on.take_last_del_removed(), vec![b"a".to_vec(), b"b".to_vec()]);
+        assert_eq!(
+            on.take_last_del_removed(),
+            vec![b"a".to_vec(), b"b".to_vec()]
+        );
 
         // Observable post-state matches between the two configs.
         assert_eq!(off.entries, on.entries);
@@ -40660,7 +40843,12 @@ mod tests {
             let mut s_orig = build();
             let r_new = s_new.expire_milliseconds(key, ms, now);
             let r_orig = s_orig.expire_milliseconds_orig(key, ms, now);
-            assert_eq!(r_new, r_orig, "return for {:?}/{ms}", String::from_utf8_lossy(key));
+            assert_eq!(
+                r_new,
+                r_orig,
+                "return for {:?}/{ms}",
+                String::from_utf8_lossy(key)
+            );
             assert_eq!(
                 s_new.pttl(key, now),
                 s_orig.pttl(key, now),
@@ -41265,10 +41453,10 @@ mod tests {
         let (mi, mle, mlv) = (512_usize, 4_usize, 8_usize);
         // (members present AFTER the add [strings → generic/listpack], length of the just-added one)
         let cases: &[(&[&[u8]], usize)] = &[
-            (&[b"aa", b"bb", b"cc"], 2),               // all short → stays listpack
-            (&[b"aa", b"bb", b"toolongvalue"], 12),    // new member > max_value → hashtable
-            (&[b"a", b"b", b"c", b"d", b"e"], 1),      // count 5 > max_entries 4 → hashtable
-            (&[b"aa"], 2),                             // single short → listpack
+            (&[b"aa", b"bb", b"cc"], 2),            // all short → stays listpack
+            (&[b"aa", b"bb", b"toolongvalue"], 12), // new member > max_value → hashtable
+            (&[b"a", b"b", b"c", b"d", b"e"], 1),   // count 5 > max_entries 4 → hashtable
+            (&[b"aa"], 2),                          // single short → listpack
         ];
         for &(members, new_len) in cases {
             let build = || {
@@ -41284,7 +41472,9 @@ mod tests {
             let mut inc = build();
             let mut full = build();
             Store::refresh_set_encoding_flags_after_insert::<true>(&mut inc, new_len, mi, mle, mlv);
-            Store::refresh_set_encoding_flags_after_insert::<false>(&mut full, new_len, mi, mle, mlv);
+            Store::refresh_set_encoding_flags_after_insert::<false>(
+                &mut full, new_len, mi, mle, mlv,
+            );
             assert_eq!(
                 inc.has_flag(super::ENTRY_FORCE_SET_HASHTABLE_ENCODING),
                 full.has_flag(super::ENTRY_FORCE_SET_HASHTABLE_ENCODING),
@@ -42036,8 +42226,14 @@ mod tests {
 
                 assert_eq!(actual.expires_count, expected.expires_count, "{seed:?}");
                 assert_eq!(actual.db_key_counts, expected.db_key_counts, "{seed:?}");
-                assert_eq!(actual.db_expires_counts, expected.db_expires_counts, "{seed:?}");
-                assert_eq!(actual.expiry_deadlines, expected.expiry_deadlines, "{seed:?}");
+                assert_eq!(
+                    actual.db_expires_counts, expected.db_expires_counts,
+                    "{seed:?}"
+                );
+                assert_eq!(
+                    actual.expiry_deadlines, expected.expiry_deadlines,
+                    "{seed:?}"
+                );
                 assert_eq!(
                     actual.expiry_deadline_counts, expected.expiry_deadline_counts,
                     "{seed:?}"
@@ -42115,12 +42311,7 @@ mod tests {
                     );
                 }
                 Seed::ExpiredString => {
-                    store.set(
-                        b"k".to_vec(),
-                        b"old heap payload".to_vec(),
-                        Some(10),
-                        100,
-                    );
+                    store.set(b"k".to_vec(), b"old heap payload".to_vec(), Some(10), 100);
                 }
                 Seed::Integer => {
                     store.set(b"k".to_vec(), b"42".to_vec(), Some(5_000), 100);
@@ -42163,8 +42354,14 @@ mod tests {
                 assert_eq!(actual_result, expected_result, "{seed:?} {value:?}");
                 assert_eq!(actual.expires_count, expected.expires_count, "{seed:?}");
                 assert_eq!(actual.db_key_counts, expected.db_key_counts, "{seed:?}");
-                assert_eq!(actual.db_expires_counts, expected.db_expires_counts, "{seed:?}");
-                assert_eq!(actual.expiry_deadlines, expected.expiry_deadlines, "{seed:?}");
+                assert_eq!(
+                    actual.db_expires_counts, expected.db_expires_counts,
+                    "{seed:?}"
+                );
+                assert_eq!(
+                    actual.expiry_deadlines, expected.expiry_deadlines,
+                    "{seed:?}"
+                );
                 assert_eq!(
                     actual.expiry_deadline_counts, expected.expiry_deadline_counts,
                     "{seed:?}"
@@ -43482,8 +43679,9 @@ mod tests {
         ];
         for &total in &[0usize, 1, 5, 64, 200] {
             for &(start, stop) in ranges {
-                let members: Vec<(f64, Vec<u8>)> =
-                    (0..total).map(|i| (i as f64, format!("m{i:05}").into_bytes())).collect();
+                let members: Vec<(f64, Vec<u8>)> = (0..total)
+                    .map(|i| (i as f64, format!("m{i:05}").into_bytes()))
+                    .collect();
                 let mut store = Store::new();
                 if total > 0 {
                     store.zadd(b"z", &members, 0).unwrap();
@@ -43493,8 +43691,11 @@ mod tests {
                 store.zremrangebyrank(b"z", start, stop, 1).unwrap();
                 let after = store.zrange(b"z", 0, -1, 1).unwrap();
                 let drop: std::collections::HashSet<&Vec<u8>> = removed_range.iter().collect();
-                let expected: Vec<Vec<u8>> =
-                    before.iter().filter(|m| !drop.contains(m)).cloned().collect();
+                let expected: Vec<Vec<u8>> = before
+                    .iter()
+                    .filter(|m| !drop.contains(m))
+                    .cloned()
+                    .collect();
                 assert_eq!(after, expected, "total={total} start={start} stop={stop}");
             }
         }
@@ -43521,8 +43722,9 @@ mod tests {
         ];
         for &total in &[0usize, 1, 5, 64, 200] {
             for (ri, &(min, max)) in ranges.iter().enumerate() {
-                let members: Vec<(f64, Vec<u8>)> =
-                    (0..total).map(|i| (i as f64, format!("m{i:05}").into_bytes())).collect();
+                let members: Vec<(f64, Vec<u8>)> = (0..total)
+                    .map(|i| (i as f64, format!("m{i:05}").into_bytes()))
+                    .collect();
                 let mut store = Store::new();
                 if total > 0 {
                     store.zadd(b"z", &members, 0).unwrap();
@@ -43533,8 +43735,11 @@ mod tests {
                 let after = store.zrange(b"z", 0, -1, 0).unwrap();
                 assert_eq!(removed, removed_range.len(), "count total={total} ri={ri}");
                 let drop: std::collections::HashSet<&Vec<u8>> = removed_range.iter().collect();
-                let expected: Vec<Vec<u8>> =
-                    before.iter().filter(|m| !drop.contains(m)).cloned().collect();
+                let expected: Vec<Vec<u8>> = before
+                    .iter()
+                    .filter(|m| !drop.contains(m))
+                    .cloned()
+                    .collect();
                 assert_eq!(after, expected, "residual total={total} ri={ri}");
             }
         }
@@ -43556,8 +43761,9 @@ mod tests {
         ];
         for &total in &[0usize, 1, 5, 64, 200] {
             for (ri, &(min, max)) in ranges.iter().enumerate() {
-                let members: Vec<(f64, Vec<u8>)> =
-                    (0..total).map(|i| (0.0, format!("m{i:05}").into_bytes())).collect();
+                let members: Vec<(f64, Vec<u8>)> = (0..total)
+                    .map(|i| (0.0, format!("m{i:05}").into_bytes()))
+                    .collect();
                 let mut store = Store::new();
                 if total > 0 {
                     store.zadd(b"z", &members, 0).unwrap();
@@ -43568,8 +43774,11 @@ mod tests {
                 let after = store.zrange(b"z", 0, -1, 0).unwrap();
                 assert_eq!(removed, removed_range.len(), "count total={total} ri={ri}");
                 let drop: std::collections::HashSet<&Vec<u8>> = removed_range.iter().collect();
-                let expected: Vec<Vec<u8>> =
-                    before.iter().filter(|m| !drop.contains(m)).cloned().collect();
+                let expected: Vec<Vec<u8>> = before
+                    .iter()
+                    .filter(|m| !drop.contains(m))
+                    .cloned()
+                    .collect();
                 assert_eq!(after, expected, "residual total={total} ri={ri}");
             }
         }
@@ -44279,9 +44488,7 @@ mod tests {
                 store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
                 store.lfu_decay_time = 0;
             }
-            store
-                .zadd(b"packed", &[(1.0, b"a".to_vec())], 1)
-                .unwrap();
+            store.zadd(b"packed", &[(1.0, b"a".to_vec())], 1).unwrap();
             store.zset_max_listpack_entries = 1;
             let full_pairs: Vec<(f64, Vec<u8>)> = (0..512)
                 .map(|i| (f64::from(i), format!("m{i:04}").into_bytes()))
@@ -44289,9 +44496,7 @@ mod tests {
             store.zadd(b"full", &full_pairs, 1).unwrap();
             store.zadd(b"live", &[(1.0, b"a".to_vec())], 1).unwrap();
             assert!(store.expire_at_milliseconds(b"live", 100, 1));
-            store
-                .zadd(b"expired", &[(1.0, b"a".to_vec())], 1)
-                .unwrap();
+            store.zadd(b"expired", &[(1.0, b"a".to_vec())], 1).unwrap();
             assert!(store.expire_at_milliseconds(b"expired", 5, 1));
             store.set(b"str".to_vec(), b"v".to_vec(), None, 1);
             store
@@ -44318,9 +44523,8 @@ mod tests {
                 for repeat in 0..repeats {
                     let got = collapsed.zcount_lfu_collapsed_bench(key, min, max, now);
                     let expected = prior.zcount_lfu_threeprobe_bench(key, min, max, now);
-                    let tag = format!(
-                        "lfu={lfu} key={key:?} min={min:?} max={max:?} repeat={repeat}"
-                    );
+                    let tag =
+                        format!("lfu={lfu} key={key:?} min={min:?} max={max:?} repeat={repeat}");
                     assert_eq!(got, expected, "result {tag}");
                     assert_eq!(collapsed.rng_seed, prior.rng_seed, "rng_seed {tag}");
                     assert_eq!(
@@ -44331,8 +44535,16 @@ mod tests {
                         collapsed.stat_keyspace_misses, prior.stat_keyspace_misses,
                         "misses {tag}"
                     );
-                    assert_eq!(collapsed.entries.get(key), prior.entries.get(key), "entry {tag}");
-                    assert_eq!(collapsed.expiry_ms(key), prior.expiry_ms(key), "expiry {tag}");
+                    assert_eq!(
+                        collapsed.entries.get(key),
+                        prior.entries.get(key),
+                        "entry {tag}"
+                    );
+                    assert_eq!(
+                        collapsed.expiry_ms(key),
+                        prior.expiry_ms(key),
+                        "expiry {tag}"
+                    );
                     assert_eq!(
                         collapsed.expires_count, prior.expires_count,
                         "expires_count {tag}"
@@ -44342,8 +44554,7 @@ mod tests {
                         "expired stats {tag}"
                     );
                     assert_eq!(
-                        collapsed.lazy_expired_propagation,
-                        prior.lazy_expired_propagation,
+                        collapsed.lazy_expired_propagation, prior.lazy_expired_propagation,
                         "lazy expiry {tag}"
                     );
                     assert_eq!(collapsed.dirty, prior.dirty, "dirty {tag}");
@@ -45192,7 +45403,11 @@ mod tests {
             }
             s.zadd(
                 b"z",
-                &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec()), (3.0, b"c".to_vec())],
+                &[
+                    (1.0, b"a".to_vec()),
+                    (2.0, b"b".to_vec()),
+                    (3.0, b"c".to_vec()),
+                ],
                 1,
             )
             .unwrap();
@@ -45243,8 +45458,15 @@ mod tests {
                 assert_eq!(ma, mb, "members {tag}");
                 assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
                 assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits {tag}");
-                assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses {tag}");
-                assert_eq!(a.object_freq(b"z", now), b.object_freq(b"z", now), "freq {tag}");
+                assert_eq!(
+                    a.stat_keyspace_misses, b.stat_keyspace_misses,
+                    "misses {tag}"
+                );
+                assert_eq!(
+                    a.object_freq(b"z", now),
+                    b.object_freq(b"z", now),
+                    "freq {tag}"
+                );
                 assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
             }
         }
@@ -45265,7 +45487,11 @@ mod tests {
             }
             s.zadd(
                 b"z",
-                &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec()), (3.0, b"c".to_vec())],
+                &[
+                    (1.0, b"a".to_vec()),
+                    (2.0, b"b".to_vec()),
+                    (3.0, b"c".to_vec()),
+                ],
                 1,
             )
             .unwrap();
@@ -45316,8 +45542,15 @@ mod tests {
                 assert_eq!(ma, mb, "members {tag}");
                 assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
                 assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits {tag}");
-                assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses {tag}");
-                assert_eq!(a.object_freq(b"z", now), b.object_freq(b"z", now), "freq {tag}");
+                assert_eq!(
+                    a.stat_keyspace_misses, b.stat_keyspace_misses,
+                    "misses {tag}"
+                );
+                assert_eq!(
+                    a.object_freq(b"z", now),
+                    b.object_freq(b"z", now),
+                    "freq {tag}"
+                );
                 assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
             }
         }
@@ -45459,7 +45692,11 @@ mod tests {
             }
             s.zadd(
                 b"z",
-                &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec()), (3.0, b"c".to_vec())],
+                &[
+                    (1.0, b"a".to_vec()),
+                    (2.0, b"b".to_vec()),
+                    (3.0, b"c".to_vec()),
+                ],
                 1,
             )
             .unwrap();
@@ -45520,7 +45757,11 @@ mod tests {
                         a.stat_keyspace_misses, b.stat_keyspace_misses,
                         "misses {tag}"
                     );
-                    assert_eq!(a.object_freq(b"z", now), b.object_freq(b"z", now), "freq {tag}");
+                    assert_eq!(
+                        a.object_freq(b"z", now),
+                        b.object_freq(b"z", now),
+                        "freq {tag}"
+                    );
                     assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
                 }
             }
@@ -45542,7 +45783,11 @@ mod tests {
             }
             s.zadd(
                 b"z",
-                &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec()), (3.0, b"c".to_vec())],
+                &[
+                    (1.0, b"a".to_vec()),
+                    (2.0, b"b".to_vec()),
+                    (3.0, b"c".to_vec()),
+                ],
                 1,
             )
             .unwrap();
@@ -45598,8 +45843,15 @@ mod tests {
                 assert_eq!(pa, pb, "pairs {tag}");
                 assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
                 assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits {tag}");
-                assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses {tag}");
-                assert_eq!(a.object_freq(b"z", now), b.object_freq(b"z", now), "freq {tag}");
+                assert_eq!(
+                    a.stat_keyspace_misses, b.stat_keyspace_misses,
+                    "misses {tag}"
+                );
+                assert_eq!(
+                    a.object_freq(b"z", now),
+                    b.object_freq(b"z", now),
+                    "freq {tag}"
+                );
                 assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
             }
         }
@@ -45655,7 +45907,9 @@ mod tests {
                 SmembersScanEvent::Member(m) => members.push(m.to_vec()),
             };
             let r = if collapse {
-                s.zrangebyscore_members_limit_borrow_scan(key, min, max, rev, offset, take, now, &mut sink)
+                s.zrangebyscore_members_limit_borrow_scan(
+                    key, min, max, rev, offset, take, now, &mut sink,
+                )
             } else {
                 s.zrangebyscore_members_limit_borrow_scan_lfu_threeprobe_bench(
                     key, min, max, rev, offset, take, now, &mut sink,
@@ -45680,15 +45934,23 @@ mod tests {
                     let mut a = build(lfu);
                     let mut b = build(lfu);
                     let (ra, la, ma) = collect(&mut a, true, key, min, max, rev, offset, take, now);
-                    let (rb, lb, mb) = collect(&mut b, false, key, min, max, rev, offset, take, now);
+                    let (rb, lb, mb) =
+                        collect(&mut b, false, key, min, max, rev, offset, take, now);
                     let tag = format!("lfu={lfu} rev={rev} key={key:?} off={offset} take={take}");
                     assert_eq!(ra, rb, "result {tag}");
                     assert_eq!(la, lb, "lens {tag}");
                     assert_eq!(ma, mb, "members {tag}");
                     assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
                     assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits {tag}");
-                    assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses {tag}");
-                    assert_eq!(a.object_freq(b"z", now), b.object_freq(b"z", now), "freq {tag}");
+                    assert_eq!(
+                        a.stat_keyspace_misses, b.stat_keyspace_misses,
+                        "misses {tag}"
+                    );
+                    assert_eq!(
+                        a.object_freq(b"z", now),
+                        b.object_freq(b"z", now),
+                        "freq {tag}"
+                    );
                     assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
                 }
             }
@@ -45710,7 +45972,11 @@ mod tests {
             }
             s.zadd(
                 b"z",
-                &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec()), (3.0, b"c".to_vec())],
+                &[
+                    (1.0, b"a".to_vec()),
+                    (2.0, b"b".to_vec()),
+                    (3.0, b"c".to_vec()),
+                ],
                 1,
             )
             .unwrap();
@@ -45765,8 +46031,15 @@ mod tests {
                 assert_eq!(pa, pb, "pairs {tag}");
                 assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
                 assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits {tag}");
-                assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses {tag}");
-                assert_eq!(a.object_freq(b"z", now), b.object_freq(b"z", now), "freq {tag}");
+                assert_eq!(
+                    a.stat_keyspace_misses, b.stat_keyspace_misses,
+                    "misses {tag}"
+                );
+                assert_eq!(
+                    a.object_freq(b"z", now),
+                    b.object_freq(b"z", now),
+                    "freq {tag}"
+                );
                 assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
             }
         }
@@ -47413,7 +47686,12 @@ mod tests {
             count: Option<usize>,
             rev: bool,
             now: u64,
-        ) -> (Result<(), StoreError>, Vec<usize>, Vec<(u64, u64, usize)>, Vec<Vec<u8>>) {
+        ) -> (
+            Result<(), StoreError>,
+            Vec<usize>,
+            Vec<(u64, u64, usize)>,
+            Vec<Vec<u8>>,
+        ) {
             let mut counts = Vec::new();
             let mut starts: Vec<(u64, u64, usize)> = Vec::new();
             let mut fields: Vec<Vec<u8>> = Vec::new();
@@ -47425,7 +47703,9 @@ mod tests {
             let r = if collapse {
                 s.xrange_borrow_scan(key, start, end, count, now, rev, &mut sink)
             } else {
-                s.xrange_borrow_scan_lfu_threeprobe_bench(key, start, end, count, now, rev, &mut sink)
+                s.xrange_borrow_scan_lfu_threeprobe_bench(
+                    key, start, end, count, now, rev, &mut sink,
+                )
             };
             (r, counts, starts, fields)
         }
@@ -47448,12 +47728,20 @@ mod tests {
                     let mut b = build(lfu);
                     let ra = collect(&mut a, true, key, start, end, count, rev, now);
                     let rb = collect(&mut b, false, key, start, end, count, rev, now);
-                    let tag = format!("lfu={lfu} rev={rev} key={key:?} {start:?}..{end:?} c={count:?}");
+                    let tag =
+                        format!("lfu={lfu} rev={rev} key={key:?} {start:?}..{end:?} c={count:?}");
                     assert_eq!(ra, rb, "events {tag}");
                     assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
                     assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits {tag}");
-                    assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses {tag}");
-                    assert_eq!(a.object_freq(b"st", now), b.object_freq(b"st", now), "freq {tag}");
+                    assert_eq!(
+                        a.stat_keyspace_misses, b.stat_keyspace_misses,
+                        "misses {tag}"
+                    );
+                    assert_eq!(
+                        a.object_freq(b"st", now),
+                        b.object_freq(b"st", now),
+                        "freq {tag}"
+                    );
                     assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
                 }
             }
@@ -48081,7 +48369,12 @@ mod tests {
             let mut s_orig = build();
             let r_new = s_new.getset(key.to_vec(), b"NEWVAL", 2_000);
             let r_orig = s_orig.getset_orig(key.to_vec(), b"NEWVAL", 2_000);
-            assert_eq!(r_new, r_orig, "return for {:?}", String::from_utf8_lossy(key));
+            assert_eq!(
+                r_new,
+                r_orig,
+                "return for {:?}",
+                String::from_utf8_lossy(key)
+            );
             assert_eq!(
                 s_new.get(key, 2_000).ok(),
                 s_orig.get(key, 2_000).ok(),
@@ -48139,22 +48432,46 @@ mod tests {
         // Populated with the target key + a decoy: both remove the target, keep the decoy.
         let mut sn = Store::new();
         let mut so = Store::new();
-        sn.mem_estimate_cache.borrow_mut().insert(b"k".to_vec(), (1, 2));
-        sn.mem_estimate_cache.borrow_mut().insert(b"other".to_vec(), (3, 4));
-        so.mem_estimate_cache.borrow_mut().insert(b"k".to_vec(), (1, 2));
-        so.mem_estimate_cache.borrow_mut().insert(b"other".to_vec(), (3, 4));
+        sn.mem_estimate_cache
+            .borrow_mut()
+            .insert(b"k".to_vec(), (1, 2));
+        sn.mem_estimate_cache
+            .borrow_mut()
+            .insert(b"other".to_vec(), (3, 4));
+        so.mem_estimate_cache
+            .borrow_mut()
+            .insert(b"k".to_vec(), (1, 2));
+        so.mem_estimate_cache
+            .borrow_mut()
+            .insert(b"other".to_vec(), (3, 4));
         sn.invalidate_write_side_caches(b"k");
         so.invalidate_write_side_caches_orig(b"k");
         assert_eq!(
             sn.mem_estimate_cache.borrow().get(b"k".as_slice()).copied(),
             so.mem_estimate_cache.borrow().get(b"k".as_slice()).copied()
         );
-        assert!(sn.mem_estimate_cache.borrow().get(b"k".as_slice()).is_none());
-        assert_eq!(
-            sn.mem_estimate_cache.borrow().get(b"other".as_slice()).copied(),
-            so.mem_estimate_cache.borrow().get(b"other".as_slice()).copied()
+        assert!(
+            sn.mem_estimate_cache
+                .borrow()
+                .get(b"k".as_slice())
+                .is_none()
         );
-        assert!(sn.mem_estimate_cache.borrow().get(b"other".as_slice()).is_some());
+        assert_eq!(
+            sn.mem_estimate_cache
+                .borrow()
+                .get(b"other".as_slice())
+                .copied(),
+            so.mem_estimate_cache
+                .borrow()
+                .get(b"other".as_slice())
+                .copied()
+        );
+        assert!(
+            sn.mem_estimate_cache
+                .borrow()
+                .get(b"other".as_slice())
+                .is_some()
+        );
     }
 
     /// (BlackThrush) The scalar-write invalidation skips the mem_estimate_cache remove; that is
@@ -48178,14 +48495,24 @@ mod tests {
         // entry untouched; the scalar-skip invalidation matches the full one on such a key (miss).
         let mut a = Store::new();
         let mut b = Store::new();
-        a.mem_estimate_cache.borrow_mut().insert(b"big:hash".to_vec(), (7, 4096));
-        b.mem_estimate_cache.borrow_mut().insert(b"big:hash".to_vec(), (7, 4096));
+        a.mem_estimate_cache
+            .borrow_mut()
+            .insert(b"big:hash".to_vec(), (7, 4096));
+        b.mem_estimate_cache
+            .borrow_mut()
+            .insert(b"big:hash".to_vec(), (7, 4096));
         let counter: &[u8] = b"counter:42";
         a.invalidate_write_side_caches_scalar(counter);
         b.invalidate_write_side_caches(counter);
         assert_eq!(
-            a.mem_estimate_cache.borrow().get(b"big:hash".as_slice()).copied(),
-            b.mem_estimate_cache.borrow().get(b"big:hash".as_slice()).copied(),
+            a.mem_estimate_cache
+                .borrow()
+                .get(b"big:hash".as_slice())
+                .copied(),
+            b.mem_estimate_cache
+                .borrow()
+                .get(b"big:hash".as_slice())
+                .copied(),
             "scalar-skip and full invalidation agree on a key absent from the cache"
         );
         assert_eq!(a.mem_estimate_cache.borrow().len(), 1);
@@ -48198,17 +48525,27 @@ mod tests {
     fn scalar_insert_via_shared_path_skips_mem_estimate_cache() {
         let mut s = Store::new();
         // A co-resident collection's cached estimate.
-        s.mem_estimate_cache.borrow_mut().insert(b"big:coll".to_vec(), (3, 9999));
+        s.mem_estimate_cache
+            .borrow_mut()
+            .insert(b"big:coll".to_vec(), (3, 9999));
         // SET a scalar with a TTL (routes through internal_entries_insert_with_expiry).
         s.set(b"scalar".to_vec(), b"hello".to_vec(), Some(60_000), 0);
         assert_eq!(
-            s.mem_estimate_cache.borrow().get(b"big:coll".as_slice()).copied(),
+            s.mem_estimate_cache
+                .borrow()
+                .get(b"big:coll".as_slice())
+                .copied(),
             Some((3, 9999)),
             "scalar insert must not disturb a co-resident collection's cached estimate"
         );
         // The scalar itself is never cached (String is not an expensive estimate), and it was
         // actually stored.
-        assert!(s.mem_estimate_cache.borrow().get(b"scalar".as_slice()).is_none());
+        assert!(
+            s.mem_estimate_cache
+                .borrow()
+                .get(b"scalar".as_slice())
+                .is_none()
+        );
         assert!(s.entries.contains_key(b"scalar".as_slice()));
     }
 
@@ -48219,14 +48556,24 @@ mod tests {
         let mut s = Store::new();
         // Seed the key so SET KEEPTTL takes the OVERWRITE branch (which invalidates).
         s.set_plain_borrowed(b"scalar", b"old", 0);
-        s.mem_estimate_cache.borrow_mut().insert(b"big:coll".to_vec(), (3, 9999));
+        s.mem_estimate_cache
+            .borrow_mut()
+            .insert(b"big:coll".to_vec(), (3, 9999));
         s.set_keep_ttl_borrowed(b"scalar", b"a-new-longer-value", 1);
         assert_eq!(
-            s.mem_estimate_cache.borrow().get(b"big:coll".as_slice()).copied(),
+            s.mem_estimate_cache
+                .borrow()
+                .get(b"big:coll".as_slice())
+                .copied(),
             Some((3, 9999)),
             "SET KEEPTTL overwrite must not disturb a co-resident collection's cached estimate"
         );
-        assert!(s.mem_estimate_cache.borrow().get(b"scalar".as_slice()).is_none());
+        assert!(
+            s.mem_estimate_cache
+                .borrow()
+                .get(b"scalar".as_slice())
+                .is_none()
+        );
     }
 
     #[test]
@@ -48237,11 +48584,11 @@ mod tests {
         // Compare value, pttl, and expires_count on parallel stores.
         type Case = (&'static [u8], &'static [u8], Option<u64>, bool);
         let cases: &[Case] = &[
-            (b"fresh", b"v1", None, false),      // new, no TTL
+            (b"fresh", b"v1", None, false),        // new, no TTL
             (b"fresh", b"v2", Some(5_000), false), // new, with TTL
-            (b"seed", b"v3", None, true),        // overwrite (had no TTL), no TTL
-            (b"seed", b"v4", Some(7_000), true), // overwrite (had no TTL), add TTL (new deadline)
-            (b"seedttl", b"v5", None, true),     // overwrite that CLEARS a prior TTL
+            (b"seed", b"v3", None, true),          // overwrite (had no TTL), no TTL
+            (b"seed", b"v4", Some(7_000), true),   // overwrite (had no TTL), add TTL (new deadline)
+            (b"seedttl", b"v5", None, true),       // overwrite that CLEARS a prior TTL
             (b"rearm", b"v6", Some(9_000), true), // overwrite that RE-ARMS a prior TTL (get_mut path)
         ];
         for &(key, val, ttl, prior) in cases {
@@ -50316,15 +50663,30 @@ mod tests {
             let r = h(&mut s, b"h", b"f".to_vec(), b"nv".to_vec(), 2);
             (r, s)
         };
-        for case in ["new_key", "existing_field", "new_field_existing_hash", "wrongtype"] {
+        for case in [
+            "new_key",
+            "existing_field",
+            "new_field_existing_hash",
+            "wrongtype",
+        ] {
             for fresh in [false, true] {
                 let (ra, mut a) = build(Store::hsetnx, case, fresh);
                 let (rb, mut b) = build(Store::hsetnx_ensure_entry_ref, case, fresh);
                 assert_eq!(ra, rb, "result @ {case} fresh={fresh}");
                 assert_eq!(a.dirty, b.dirty, "dirty @ {case} fresh={fresh}");
-                assert_eq!(a.digest_mutations, b.digest_mutations, "digmut @ {case} fresh={fresh}");
-                assert_eq!(a.digest_stale, b.digest_stale, "digstale @ {case} fresh={fresh}");
-                assert_eq!(a.state_digest(), b.state_digest(), "digest @ {case} fresh={fresh}");
+                assert_eq!(
+                    a.digest_mutations, b.digest_mutations,
+                    "digmut @ {case} fresh={fresh}"
+                );
+                assert_eq!(
+                    a.digest_stale, b.digest_stale,
+                    "digstale @ {case} fresh={fresh}"
+                );
+                assert_eq!(
+                    a.state_digest(),
+                    b.state_digest(),
+                    "digest @ {case} fresh={fresh}"
+                );
             }
         }
     }
@@ -50380,12 +50742,8 @@ mod tests {
                     let mut collapsed = build(lfu, fresh, case);
                     let mut prior = build(lfu, fresh, case);
                     let got = collapsed.hsetnx(b"h", b"f".to_vec(), b"new".to_vec(), now);
-                    let expected = prior.hsetnx_lfu_twoprobe_bench(
-                        b"h",
-                        b"f".to_vec(),
-                        b"new".to_vec(),
-                        now,
-                    );
+                    let expected =
+                        prior.hsetnx_lfu_twoprobe_bench(b"h", b"f".to_vec(), b"new".to_vec(), now);
                     let tag = format!("case={case} lfu={lfu} fresh={fresh}");
                     assert_eq!(got, expected, "result {tag}");
                     assert_eq!(collapsed.rng_seed, prior.rng_seed, "rng_seed {tag}");
@@ -50402,7 +50760,11 @@ mod tests {
                         prior.entries.get(b"h".as_slice()),
                         "entry {tag}"
                     );
-                    assert_eq!(collapsed.expiry_ms(b"h"), prior.expiry_ms(b"h"), "expiry {tag}");
+                    assert_eq!(
+                        collapsed.expiry_ms(b"h"),
+                        prior.expiry_ms(b"h"),
+                        "expiry {tag}"
+                    );
                     assert_eq!(
                         collapsed.expires_count, prior.expires_count,
                         "expires_count {tag}"
@@ -50412,8 +50774,7 @@ mod tests {
                         "expired stats {tag}"
                     );
                     assert_eq!(
-                        collapsed.lazy_expired_propagation,
-                        prior.lazy_expired_propagation,
+                        collapsed.lazy_expired_propagation, prior.lazy_expired_propagation,
                         "lazy expiry {tag}"
                     );
                     assert_eq!(collapsed.dirty, prior.dirty, "dirty {tag}");
@@ -50461,15 +50822,30 @@ mod tests {
             let r = h(&mut s, b"h", b"f", b"2.25", 2.25, 2);
             (r, s)
         };
-        for case in ["new_key", "existing_counter", "wrongtype", "non_float_field"] {
+        for case in [
+            "new_key",
+            "existing_counter",
+            "wrongtype",
+            "non_float_field",
+        ] {
             for fresh in [false, true] {
                 let (ra, mut a) = build(Store::hincrbyfloat_text, case, fresh);
                 let (rb, mut b) = build(Store::hincrbyfloat_text_ensure_entry_ref, case, fresh);
                 assert_eq!(ra, rb, "result @ {case} fresh={fresh}");
                 assert_eq!(a.dirty, b.dirty, "dirty @ {case} fresh={fresh}");
-                assert_eq!(a.digest_mutations, b.digest_mutations, "digmut @ {case} fresh={fresh}");
-                assert_eq!(a.digest_stale, b.digest_stale, "digstale @ {case} fresh={fresh}");
-                assert_eq!(a.state_digest(), b.state_digest(), "digest @ {case} fresh={fresh}");
+                assert_eq!(
+                    a.digest_mutations, b.digest_mutations,
+                    "digmut @ {case} fresh={fresh}"
+                );
+                assert_eq!(
+                    a.digest_stale, b.digest_stale,
+                    "digstale @ {case} fresh={fresh}"
+                );
+                assert_eq!(
+                    a.state_digest(),
+                    b.state_digest(),
+                    "digest @ {case} fresh={fresh}"
+                );
             }
         }
     }
@@ -50496,7 +50872,8 @@ mod tests {
                     s.hset_borrowed(b"h", b"f", b"abc".to_vec(), 1).unwrap();
                 }
                 "overflow" => {
-                    s.hset_borrowed(b"h", b"f", i64::MAX.to_string().into_bytes(), 1).unwrap();
+                    s.hset_borrowed(b"h", b"f", i64::MAX.to_string().into_bytes(), 1)
+                        .unwrap();
                 }
                 _ => unreachable!(),
             }
@@ -50522,7 +50899,10 @@ mod tests {
                     a.digest_mutations, b.digest_mutations,
                     "digest_mutations @ {case} fresh={fresh}"
                 );
-                assert_eq!(a.digest_stale, b.digest_stale, "digest_stale @ {case} fresh={fresh}");
+                assert_eq!(
+                    a.digest_stale, b.digest_stale,
+                    "digest_stale @ {case} fresh={fresh}"
+                );
                 assert_eq!(
                     a.state_digest(),
                     b.state_digest(),
@@ -50591,7 +50971,10 @@ mod tests {
             let (rb, mut b) = build(Store::hincrby_rescan, case);
             assert_eq!(ra, rb, "result @ {case}");
             assert_eq!(a.dirty, b.dirty, "dirty @ {case}");
-            assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations @ {case}");
+            assert_eq!(
+                a.digest_mutations, b.digest_mutations,
+                "digest_mutations @ {case}"
+            );
             assert_eq!(a.state_digest(), b.state_digest(), "state_digest @ {case}");
             assert_eq!(
                 a.object_encoding(b"h", 3),
@@ -50700,7 +51083,10 @@ mod tests {
             let (rb, mut b) = build(Store::hsetnx_rescan, case);
             assert_eq!(ra, rb, "result @ {case}");
             assert_eq!(a.dirty, b.dirty, "dirty @ {case}");
-            assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations @ {case}");
+            assert_eq!(
+                a.digest_mutations, b.digest_mutations,
+                "digest_mutations @ {case}"
+            );
             assert_eq!(a.state_digest(), b.state_digest(), "state_digest @ {case}");
             assert_eq!(
                 a.object_encoding(b"h", 3),
@@ -50762,7 +51148,10 @@ mod tests {
             let (rb, mut b) = build(Store::hincrbyfloat_text_rescan, case);
             assert_eq!(ra, rb, "result @ {case}");
             assert_eq!(a.dirty, b.dirty, "dirty @ {case}");
-            assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations @ {case}");
+            assert_eq!(
+                a.digest_mutations, b.digest_mutations,
+                "digest_mutations @ {case}"
+            );
             assert_eq!(a.state_digest(), b.state_digest(), "state_digest @ {case}");
             assert_eq!(
                 a.object_encoding(b"h", 3),
@@ -50824,7 +51213,10 @@ mod tests {
             let (rb, mut b) = build(Store::hset_rescan, case);
             assert_eq!(ra, rb, "result @ {case}");
             assert_eq!(a.dirty, b.dirty, "dirty @ {case}");
-            assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations @ {case}");
+            assert_eq!(
+                a.digest_mutations, b.digest_mutations,
+                "digest_mutations @ {case}"
+            );
             assert_eq!(a.state_digest(), b.state_digest(), "state_digest @ {case}");
             assert_eq!(
                 a.object_encoding(b"h", 3),
@@ -51395,8 +51787,9 @@ mod tests {
         // < / == / > len.
         for &total in &[0usize, 1, 5, 64, 200] {
             for &popn in &[0usize, 1, 3, total / 2, total, total + 5] {
-                let members: Vec<(f64, Vec<u8>)> =
-                    (0..total).map(|i| (i as f64, format!("m{i:05}").into_bytes())).collect();
+                let members: Vec<(f64, Vec<u8>)> = (0..total)
+                    .map(|i| (i as f64, format!("m{i:05}").into_bytes()))
+                    .collect();
                 let k = popn.min(total);
                 // ZPOPMIN: k lowest, ascending.
                 {
@@ -51405,8 +51798,9 @@ mod tests {
                         store.zadd(b"z", &members, 0).unwrap();
                     }
                     let got = store.zpopmin_count(b"z", popn, 1).unwrap();
-                    let want: Vec<(Vec<u8>, f64)> =
-                        (0..k).map(|i| (format!("m{i:05}").into_bytes(), i as f64)).collect();
+                    let want: Vec<(Vec<u8>, f64)> = (0..k)
+                        .map(|i| (format!("m{i:05}").into_bytes(), i as f64))
+                        .collect();
                     assert_eq!(got, want, "zpopmin total={total} popn={popn}");
                     assert_eq!(
                         store.zrange(b"z", 0, -1, 1).unwrap().len(),
@@ -51586,31 +51980,27 @@ mod tests {
             let mut prior = build();
             let borrowed_sink_calls = std::cell::Cell::new(0usize);
             let prior_sink_calls = std::cell::Cell::new(0usize);
-            let ra = borrowed.getrange_with_lfu_collapsed_bench(
-                key,
-                start,
-                end,
-                now,
-                |slice| {
-                    borrowed_sink_calls.set(borrowed_sink_calls.get() + 1);
-                    slice.to_vec()
-                },
-            );
+            let ra = borrowed.getrange_with_lfu_collapsed_bench(key, start, end, now, |slice| {
+                borrowed_sink_calls.set(borrowed_sink_calls.get() + 1);
+                slice.to_vec()
+            });
             let rb = allocating.getrange(key, start, end, now);
-            let rc = prior.getrange_with_lfu_threeprobe_bench(
-                key,
-                start,
-                end,
-                now,
-                |slice| {
-                    prior_sink_calls.set(prior_sink_calls.get() + 1);
-                    slice.to_vec()
-                },
-            );
+            let rc = prior.getrange_with_lfu_threeprobe_bench(key, start, end, now, |slice| {
+                prior_sink_calls.set(prior_sink_calls.get() + 1);
+                slice.to_vec()
+            });
             assert_eq!(ra.is_err(), rc.is_err(), "borrowed error key={key:?}");
             assert_eq!(rb.is_err(), rc.is_err(), "allocating error key={key:?}");
-            assert_eq!(ra.as_ref().ok(), rc.as_ref().ok(), "borrowed bytes key={key:?}");
-            assert_eq!(rb.as_ref().ok(), rc.as_ref().ok(), "allocating bytes key={key:?}");
+            assert_eq!(
+                ra.as_ref().ok(),
+                rc.as_ref().ok(),
+                "borrowed bytes key={key:?}"
+            );
+            assert_eq!(
+                rb.as_ref().ok(),
+                rc.as_ref().ok(),
+                "allocating bytes key={key:?}"
+            );
             assert_eq!(
                 borrowed_sink_calls.get(),
                 prior_sink_calls.get(),
@@ -51661,7 +52051,8 @@ mod tests {
             let mut s = Store::new();
             s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
             s.lfu_decay_time = 0;
-            s.hset(b"hash", b"f".to_vec(), b"hello".to_vec(), 1).unwrap();
+            s.hset(b"hash", b"f".to_vec(), b"hello".to_vec(), 1)
+                .unwrap();
             s.set(b"str".to_vec(), b"v".to_vec(), None, 1); // wrong type
             s.set(b"ttl".to_vec(), b"x".to_vec(), Some(5), 1); // expired at now=10
             s
@@ -51679,12 +52070,26 @@ mod tests {
             let mut b = build();
             let ra = a.hstrlen_lfu_collapsed_bench(key, field, now);
             let rb = b.hstrlen_lfu_threeprobe_bench(key, field, now);
-            assert_eq!(ra.is_err(), rb.is_err(), "is_err key={key:?} field={field:?}");
+            assert_eq!(
+                ra.is_err(),
+                rb.is_err(),
+                "is_err key={key:?} field={field:?}"
+            );
             assert_eq!(ra.ok(), rb.ok(), "value key={key:?} field={field:?}");
             assert_eq!(a.rng_seed, b.rng_seed, "rng_seed key={key:?}");
-            assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits key={key:?}");
-            assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses key={key:?}");
-            assert_eq!(a.object_freq(b"hash", now), b.object_freq(b"hash", now), "freq key={key:?}");
+            assert_eq!(
+                a.stat_keyspace_hits, b.stat_keyspace_hits,
+                "hits key={key:?}"
+            );
+            assert_eq!(
+                a.stat_keyspace_misses, b.stat_keyspace_misses,
+                "misses key={key:?}"
+            );
+            assert_eq!(
+                a.object_freq(b"hash", now),
+                b.object_freq(b"hash", now),
+                "freq key={key:?}"
+            );
         }
     }
 
@@ -51845,8 +52250,15 @@ mod tests {
                 assert_eq!(ma, mb, "members {tag}");
                 assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
                 assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits {tag}");
-                assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses {tag}");
-                assert_eq!(a.object_freq(b"lst", now), b.object_freq(b"lst", now), "freq {tag}");
+                assert_eq!(
+                    a.stat_keyspace_misses, b.stat_keyspace_misses,
+                    "misses {tag}"
+                );
+                assert_eq!(
+                    a.object_freq(b"lst", now),
+                    b.object_freq(b"lst", now),
+                    "freq {tag}"
+                );
                 assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
             }
         }
@@ -51903,8 +52315,15 @@ mod tests {
                 assert_eq!(ma, mb, "members {tag}");
                 assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
                 assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits {tag}");
-                assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses {tag}");
-                assert_eq!(a.object_freq(b"h", now), b.object_freq(b"h", now), "freq {tag}");
+                assert_eq!(
+                    a.stat_keyspace_misses, b.stat_keyspace_misses,
+                    "misses {tag}"
+                );
+                assert_eq!(
+                    a.object_freq(b"h", now),
+                    b.object_freq(b"h", now),
+                    "freq {tag}"
+                );
                 assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
             }
         }
@@ -51963,8 +52382,15 @@ mod tests {
                 assert_eq!(ma, mb, "members {tag}");
                 assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
                 assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits {tag}");
-                assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses {tag}");
-                assert_eq!(a.object_freq(b"s", now), b.object_freq(b"s", now), "freq {tag}");
+                assert_eq!(
+                    a.stat_keyspace_misses, b.stat_keyspace_misses,
+                    "misses {tag}"
+                );
+                assert_eq!(
+                    a.object_freq(b"s", now),
+                    b.object_freq(b"s", now),
+                    "freq {tag}"
+                );
                 assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
             }
         }
@@ -52025,8 +52451,15 @@ mod tests {
                     assert_eq!(ma, mb, "members {tag}");
                     assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
                     assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits {tag}");
-                    assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses {tag}");
-                    assert_eq!(a.object_freq(b"h", now), b.object_freq(b"h", now), "freq {tag}");
+                    assert_eq!(
+                        a.stat_keyspace_misses, b.stat_keyspace_misses,
+                        "misses {tag}"
+                    );
+                    assert_eq!(
+                        a.object_freq(b"h", now),
+                        b.object_freq(b"h", now),
+                        "freq {tag}"
+                    );
                     assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
                 }
             }
@@ -52065,8 +52498,15 @@ mod tests {
                 assert_eq!(ra, rb, "result {tag}");
                 assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
                 assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits {tag}");
-                assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses {tag}");
-                assert_eq!(a.object_freq(b"h", now), b.object_freq(b"h", now), "freq {tag}");
+                assert_eq!(
+                    a.stat_keyspace_misses, b.stat_keyspace_misses,
+                    "misses {tag}"
+                );
+                assert_eq!(
+                    a.object_freq(b"h", now),
+                    b.object_freq(b"h", now),
+                    "freq {tag}"
+                );
                 assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
             }
         }
@@ -52105,8 +52545,15 @@ mod tests {
                 assert_eq!(ra, rb, "result {tag}");
                 assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
                 assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits {tag}");
-                assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses {tag}");
-                assert_eq!(a.object_freq(b"strm", now), b.object_freq(b"strm", now), "freq {tag}");
+                assert_eq!(
+                    a.stat_keyspace_misses, b.stat_keyspace_misses,
+                    "misses {tag}"
+                );
+                assert_eq!(
+                    a.object_freq(b"strm", now),
+                    b.object_freq(b"strm", now),
+                    "freq {tag}"
+                );
                 assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
             }
         }
@@ -52151,8 +52598,15 @@ mod tests {
                 assert_eq!(ra, rb, "result {tag}");
                 assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
                 assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits {tag}");
-                assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses {tag}");
-                assert_eq!(a.object_freq(b"lst", now), b.object_freq(b"lst", now), "freq {tag}");
+                assert_eq!(
+                    a.stat_keyspace_misses, b.stat_keyspace_misses,
+                    "misses {tag}"
+                );
+                assert_eq!(
+                    a.object_freq(b"lst", now),
+                    b.object_freq(b"lst", now),
+                    "freq {tag}"
+                );
                 assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
             }
         }
@@ -52182,14 +52636,14 @@ mod tests {
         // (key, start, end, unit)
         #[allow(clippy::type_complexity)]
         let cases: &[(&[u8], Option<i64>, Option<i64>, BitRangeUnit)] = &[
-            (b"bm", None, None, BitRangeUnit::Byte),      // full count
-            (b"bm", Some(0), Some(0), BitRangeUnit::Byte), // first byte
-            (b"bm", Some(0), Some(7), BitRangeUnit::Bit),  // bit range
+            (b"bm", None, None, BitRangeUnit::Byte),         // full count
+            (b"bm", Some(0), Some(0), BitRangeUnit::Byte),   // first byte
+            (b"bm", Some(0), Some(7), BitRangeUnit::Bit),    // bit range
             (b"bm", Some(-1), Some(-1), BitRangeUnit::Byte), // last byte (negative)
-            (b"si", None, None, BitRangeUnit::Byte),       // integer-encoded string
-            (b"absent", None, None, BitRangeUnit::Byte),   // absent -> 0
-            (b"lst", None, None, BitRangeUnit::Byte),      // WRONGTYPE (bump then WrongType)
-            (b"ttl", None, None, BitRangeUnit::Byte),      // expired -> 0
+            (b"si", None, None, BitRangeUnit::Byte),         // integer-encoded string
+            (b"absent", None, None, BitRangeUnit::Byte),     // absent -> 0
+            (b"lst", None, None, BitRangeUnit::Byte),        // WRONGTYPE (bump then WrongType)
+            (b"ttl", None, None, BitRangeUnit::Byte),        // expired -> 0
         ];
         for lfu in [true, false] {
             for &(key, start, end, unit) in cases {
@@ -52201,8 +52655,15 @@ mod tests {
                 assert_eq!(ra, rb, "result {tag}");
                 assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
                 assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits {tag}");
-                assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses {tag}");
-                assert_eq!(a.object_freq(b"bm", now), b.object_freq(b"bm", now), "freq {tag}");
+                assert_eq!(
+                    a.stat_keyspace_misses, b.stat_keyspace_misses,
+                    "misses {tag}"
+                );
+                assert_eq!(
+                    a.object_freq(b"bm", now),
+                    b.object_freq(b"bm", now),
+                    "freq {tag}"
+                );
                 assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
             }
         }
@@ -52334,9 +52795,16 @@ mod tests {
                 let tag = format!("lfu={lfu} key={key:?} count={count}");
                 assert_eq!(ra, rb, "result {tag}");
                 assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
-                assert_eq!(a.object_freq(b"lst", now), b.object_freq(b"lst", now), "freq {tag}");
+                assert_eq!(
+                    a.object_freq(b"lst", now),
+                    b.object_freq(b"lst", now),
+                    "freq {tag}"
+                );
                 assert_eq!(a.dirty, b.dirty, "dirty {tag}");
-                assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations {tag}");
+                assert_eq!(
+                    a.digest_mutations, b.digest_mutations,
+                    "digest_mutations {tag}"
+                );
                 assert_eq!(a.digest_stale, b.digest_stale, "digest_stale {tag}");
                 assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
             }
@@ -52375,13 +52843,13 @@ mod tests {
         let now = 10;
         // (key, count)
         let cases: &[(&[u8], usize)] = &[
-            (b"lst", 0),      // no-op pop (empty result, no removal)
-            (b"lst", 2),      // partial pop
-            (b"lst", 1),      // single pop
-            (b"lst", 100),    // pop-all -> removes key
-            (b"absent", 3),   // absent -> Ok(None)
-            (b"str", 1),      // WRONGTYPE (draw + bump then WrongType)
-            (b"ttl", 1),      // expired -> Ok(None)
+            (b"lst", 0),    // no-op pop (empty result, no removal)
+            (b"lst", 2),    // partial pop
+            (b"lst", 1),    // single pop
+            (b"lst", 100),  // pop-all -> removes key
+            (b"absent", 3), // absent -> Ok(None)
+            (b"str", 1),    // WRONGTYPE (draw + bump then WrongType)
+            (b"ttl", 1),    // expired -> Ok(None)
         ];
         for lfu in [true, false] {
             for &(key, count) in cases {
@@ -52392,9 +52860,16 @@ mod tests {
                 let tag = format!("lfu={lfu} key={key:?} count={count}");
                 assert_eq!(ra, rb, "result {tag}");
                 assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
-                assert_eq!(a.object_freq(b"lst", now), b.object_freq(b"lst", now), "freq {tag}");
+                assert_eq!(
+                    a.object_freq(b"lst", now),
+                    b.object_freq(b"lst", now),
+                    "freq {tag}"
+                );
                 assert_eq!(a.dirty, b.dirty, "dirty {tag}");
-                assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations {tag}");
+                assert_eq!(
+                    a.digest_mutations, b.digest_mutations,
+                    "digest_mutations {tag}"
+                );
                 assert_eq!(a.digest_stale, b.digest_stale, "digest_stale {tag}");
                 assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
             }
@@ -52432,9 +52907,16 @@ mod tests {
                 let tag = format!("lfu={lfu} key={key:?}");
                 assert_eq!(ra, rb, "result {tag}");
                 assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
-                assert_eq!(a.object_freq(b"lst", now), b.object_freq(b"lst", now), "freq {tag}");
+                assert_eq!(
+                    a.object_freq(b"lst", now),
+                    b.object_freq(b"lst", now),
+                    "freq {tag}"
+                );
                 assert_eq!(a.dirty, b.dirty, "dirty {tag}");
-                assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations {tag}");
+                assert_eq!(
+                    a.digest_mutations, b.digest_mutations,
+                    "digest_mutations {tag}"
+                );
                 assert_eq!(a.digest_stale, b.digest_stale, "digest_stale {tag}");
                 assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
             }
@@ -52470,9 +52952,16 @@ mod tests {
                 let tag = format!("lfu={lfu} key={key:?}");
                 assert_eq!(ra, rb, "result {tag}");
                 assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
-                assert_eq!(a.object_freq(b"lst", now), b.object_freq(b"lst", now), "freq {tag}");
+                assert_eq!(
+                    a.object_freq(b"lst", now),
+                    b.object_freq(b"lst", now),
+                    "freq {tag}"
+                );
                 assert_eq!(a.dirty, b.dirty, "dirty {tag}");
-                assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations {tag}");
+                assert_eq!(
+                    a.digest_mutations, b.digest_mutations,
+                    "digest_mutations {tag}"
+                );
                 assert_eq!(a.digest_stale, b.digest_stale, "digest_stale {tag}");
                 assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
             }
@@ -52510,9 +52999,16 @@ mod tests {
                 let tag = format!("lfu={lfu} key={key:?}");
                 assert_eq!(ra, rb, "result {tag}");
                 assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
-                assert_eq!(a.object_freq(b"lst", now), b.object_freq(b"lst", now), "freq {tag}");
+                assert_eq!(
+                    a.object_freq(b"lst", now),
+                    b.object_freq(b"lst", now),
+                    "freq {tag}"
+                );
                 assert_eq!(a.dirty, b.dirty, "dirty {tag}");
-                assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations {tag}");
+                assert_eq!(
+                    a.digest_mutations, b.digest_mutations,
+                    "digest_mutations {tag}"
+                );
                 assert_eq!(a.digest_stale, b.digest_stale, "digest_stale {tag}");
                 assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
             }
@@ -52539,11 +53035,11 @@ mod tests {
         let now = 10;
         // (key, members) — includes an all-duplicate add (added=0, still draws+bumps).
         let cases: &[(&[u8], &[&[u8]])] = &[
-            (b"s", &[b"c", b"d"]),   // add new
-            (b"s", &[b"a", b"b"]),   // all duplicates -> added 0
-            (b"absent", &[b"x"]),    // create
-            (b"str", &[b"x"]),       // wrong type
-            (b"ttl", &[b"x"]),       // expired -> create
+            (b"s", &[b"c", b"d"]), // add new
+            (b"s", &[b"a", b"b"]), // all duplicates -> added 0
+            (b"absent", &[b"x"]),  // create
+            (b"str", &[b"x"]),     // wrong type
+            (b"ttl", &[b"x"]),     // expired -> create
         ];
         for lfu in [true, false] {
             for &(key, members) in cases {
@@ -52554,9 +53050,16 @@ mod tests {
                 let tag = format!("lfu={lfu} key={key:?} members={members:?}");
                 assert_eq!(ra, rb, "result {tag}");
                 assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
-                assert_eq!(a.object_freq(b"s", now), b.object_freq(b"s", now), "freq {tag}");
+                assert_eq!(
+                    a.object_freq(b"s", now),
+                    b.object_freq(b"s", now),
+                    "freq {tag}"
+                );
                 assert_eq!(a.dirty, b.dirty, "dirty {tag}");
-                assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations {tag}");
+                assert_eq!(
+                    a.digest_mutations, b.digest_mutations,
+                    "digest_mutations {tag}"
+                );
                 assert_eq!(a.digest_stale, b.digest_stale, "digest_stale {tag}");
                 assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
             }
@@ -52584,7 +53087,7 @@ mod tests {
         let now = 10;
         // (key, field, value)
         let cases: &[(&[u8], &[u8], &[u8])] = &[
-            (b"h", b"f1", b"v1"),   // new field on existing hash
+            (b"h", b"f1", b"v1"),    // new field on existing hash
             (b"h", b"f0", b"v0new"), // overwrite existing field
             (b"absent", b"f", b"v"), // create
             (b"str", b"f", b"v"),    // wrong type (draws+bumps then WRONGTYPE)
@@ -52599,9 +53102,16 @@ mod tests {
                 let tag = format!("lfu={lfu} key={key:?} field={field:?}");
                 assert_eq!(ra, rb, "result {tag}");
                 assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
-                assert_eq!(a.object_freq(b"h", now), b.object_freq(b"h", now), "freq {tag}");
+                assert_eq!(
+                    a.object_freq(b"h", now),
+                    b.object_freq(b"h", now),
+                    "freq {tag}"
+                );
                 assert_eq!(a.dirty, b.dirty, "dirty {tag}");
-                assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations {tag}");
+                assert_eq!(
+                    a.digest_mutations, b.digest_mutations,
+                    "digest_mutations {tag}"
+                );
                 assert_eq!(a.digest_stale, b.digest_stale, "digest_stale {tag}");
                 assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
             }
@@ -52638,9 +53148,16 @@ mod tests {
                 let tag = format!("lfu={lfu} key={key:?}");
                 assert_eq!(ra, rb, "result {tag}");
                 assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
-                assert_eq!(a.object_freq(b"lst", now), b.object_freq(b"lst", now), "freq {tag}");
+                assert_eq!(
+                    a.object_freq(b"lst", now),
+                    b.object_freq(b"lst", now),
+                    "freq {tag}"
+                );
                 assert_eq!(a.dirty, b.dirty, "dirty {tag}");
-                assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations {tag}");
+                assert_eq!(
+                    a.digest_mutations, b.digest_mutations,
+                    "digest_mutations {tag}"
+                );
                 assert_eq!(a.digest_stale, b.digest_stale, "digest_stale {tag}");
                 assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
             }
@@ -52676,9 +53193,16 @@ mod tests {
                 let tag = format!("lfu={lfu} key={key:?}");
                 assert_eq!(ra, rb, "result {tag}");
                 assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
-                assert_eq!(a.object_freq(b"lst", now), b.object_freq(b"lst", now), "freq {tag}");
+                assert_eq!(
+                    a.object_freq(b"lst", now),
+                    b.object_freq(b"lst", now),
+                    "freq {tag}"
+                );
                 assert_eq!(a.dirty, b.dirty, "dirty {tag}");
-                assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations {tag}");
+                assert_eq!(
+                    a.digest_mutations, b.digest_mutations,
+                    "digest_mutations {tag}"
+                );
                 assert_eq!(a.digest_stale, b.digest_stale, "digest_stale {tag}");
                 assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
             }
@@ -52716,9 +53240,16 @@ mod tests {
                 let tag = format!("lfu={lfu} key={key:?}");
                 assert_eq!(ra, rb, "result {tag}");
                 assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
-                assert_eq!(a.object_freq(b"lst", now), b.object_freq(b"lst", now), "freq {tag}");
+                assert_eq!(
+                    a.object_freq(b"lst", now),
+                    b.object_freq(b"lst", now),
+                    "freq {tag}"
+                );
                 assert_eq!(a.dirty, b.dirty, "dirty {tag}");
-                assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations {tag}");
+                assert_eq!(
+                    a.digest_mutations, b.digest_mutations,
+                    "digest_mutations {tag}"
+                );
                 assert_eq!(a.digest_stale, b.digest_stale, "digest_stale {tag}");
                 assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
             }
@@ -52738,9 +53269,14 @@ mod tests {
                 s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
                 s.lfu_decay_time = 0;
             }
-            s.rpush(b"lst", &[b"a".to_vec(), b"b".to_vec(), b"a".to_vec(), b"c".to_vec()], 1)
-                .unwrap();
-            s.rpush(b"allx", &[b"x".to_vec(), b"x".to_vec()], 1).unwrap(); // LREM 0 x -> empties
+            s.rpush(
+                b"lst",
+                &[b"a".to_vec(), b"b".to_vec(), b"a".to_vec(), b"c".to_vec()],
+                1,
+            )
+            .unwrap();
+            s.rpush(b"allx", &[b"x".to_vec(), b"x".to_vec()], 1)
+                .unwrap(); // LREM 0 x -> empties
             s.set(b"str".to_vec(), b"v".to_vec(), None, 1); // wrong type
             s.set(b"ttl".to_vec(), b"x".to_vec(), Some(5), 1); // expired at now=10
             s
@@ -52748,13 +53284,13 @@ mod tests {
         let now = 10;
         // (key, count, value)
         let cases: &[(&[u8], i64, &[u8])] = &[
-            (b"lst", 1, b"a"),   // remove first "a"
-            (b"lst", 0, b"z"),   // absent value -> scans, removes nothing (non-growing)
-            (b"lst", -2, b"a"),  // remove from tail
-            (b"allx", 0, b"x"),  // remove all -> empties -> removes key
+            (b"lst", 1, b"a"),    // remove first "a"
+            (b"lst", 0, b"z"),    // absent value -> scans, removes nothing (non-growing)
+            (b"lst", -2, b"a"),   // remove from tail
+            (b"allx", 0, b"x"),   // remove all -> empties -> removes key
             (b"absent", 0, b"a"), // absent key -> Ok(0), no draw
-            (b"str", 0, b"a"),   // wrong type
-            (b"ttl", 0, b"a"),   // expired -> absent -> Ok(0)
+            (b"str", 0, b"a"),    // wrong type
+            (b"ttl", 0, b"a"),    // expired -> absent -> Ok(0)
         ];
         for lfu in [true, false] {
             for &(key, count, value) in cases {
@@ -52765,9 +53301,16 @@ mod tests {
                 let tag = format!("lfu={lfu} key={key:?} count={count} value={value:?}");
                 assert_eq!(ra, rb, "result {tag}");
                 assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
-                assert_eq!(a.object_freq(b"lst", now), b.object_freq(b"lst", now), "freq {tag}");
+                assert_eq!(
+                    a.object_freq(b"lst", now),
+                    b.object_freq(b"lst", now),
+                    "freq {tag}"
+                );
                 assert_eq!(a.dirty, b.dirty, "dirty {tag}");
-                assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations {tag}");
+                assert_eq!(
+                    a.digest_mutations, b.digest_mutations,
+                    "digest_mutations {tag}"
+                );
                 assert_eq!(a.digest_stale, b.digest_stale, "digest_stale {tag}");
                 assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
             }
@@ -52821,9 +53364,16 @@ mod tests {
                     let tag = format!("after={after} lfu={lfu} key={key:?} pivot={pivot:?}");
                     assert_eq!(ra, rb, "result {tag}");
                     assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
-                    assert_eq!(a.object_freq(b"lst", now), b.object_freq(b"lst", now), "freq {tag}");
+                    assert_eq!(
+                        a.object_freq(b"lst", now),
+                        b.object_freq(b"lst", now),
+                        "freq {tag}"
+                    );
                     assert_eq!(a.dirty, b.dirty, "dirty {tag}");
-                    assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations {tag}");
+                    assert_eq!(
+                        a.digest_mutations, b.digest_mutations,
+                        "digest_mutations {tag}"
+                    );
                     assert_eq!(a.digest_stale, b.digest_stale, "digest_stale {tag}");
                     assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
                 }
@@ -52861,10 +53411,20 @@ mod tests {
                 assert_eq!(ra, rb, "result {tag}");
                 assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
                 assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits {tag}");
-                assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses {tag}");
-                assert_eq!(a.object_freq(b"k", now), b.object_freq(b"k", now), "freq {tag}");
+                assert_eq!(
+                    a.stat_keyspace_misses, b.stat_keyspace_misses,
+                    "misses {tag}"
+                );
+                assert_eq!(
+                    a.object_freq(b"k", now),
+                    b.object_freq(b"k", now),
+                    "freq {tag}"
+                );
                 assert_eq!(a.dirty, b.dirty, "dirty {tag}");
-                assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations {tag}");
+                assert_eq!(
+                    a.digest_mutations, b.digest_mutations,
+                    "digest_mutations {tag}"
+                );
                 assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
             }
         }
@@ -52903,14 +53463,14 @@ mod tests {
         let now = 10;
         // (key, start, stop)
         let cases: &[(&[u8], i64, i64)] = &[
-            (b"lst", 0, -1),  // no-op keep-all (notify fires, no dirty)
-            (b"lst", 1, 3),   // front trim (drop index 0)
-            (b"lst", 0, 0),   // keep first only
-            (b"lst", 5, 10),  // out of range -> clear + remove key
-            (b"lst", -2, -1), // keep last two
+            (b"lst", 0, -1),    // no-op keep-all (notify fires, no dirty)
+            (b"lst", 1, 3),     // front trim (drop index 0)
+            (b"lst", 0, 0),     // keep first only
+            (b"lst", 5, 10),    // out of range -> clear + remove key
+            (b"lst", -2, -1),   // keep last two
             (b"absent", 0, -1), // absent -> Ok(())
-            (b"str", 0, -1),  // WRONGTYPE (draw + bump then WrongType)
-            (b"ttl", 0, -1),  // expired -> Ok(())
+            (b"str", 0, -1),    // WRONGTYPE (draw + bump then WrongType)
+            (b"ttl", 0, -1),    // expired -> Ok(())
         ];
         for lfu in [true, false] {
             for &(key, start, stop) in cases {
@@ -52921,9 +53481,16 @@ mod tests {
                 let tag = format!("lfu={lfu} key={key:?} {start}..{stop}");
                 assert_eq!(ra, rb, "result {tag}");
                 assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
-                assert_eq!(a.object_freq(b"lst", now), b.object_freq(b"lst", now), "freq {tag}");
+                assert_eq!(
+                    a.object_freq(b"lst", now),
+                    b.object_freq(b"lst", now),
+                    "freq {tag}"
+                );
                 assert_eq!(a.dirty, b.dirty, "dirty {tag}");
-                assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations {tag}");
+                assert_eq!(
+                    a.digest_mutations, b.digest_mutations,
+                    "digest_mutations {tag}"
+                );
                 assert_eq!(a.digest_stale, b.digest_stale, "digest_stale {tag}");
                 assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
             }
@@ -52953,13 +53520,13 @@ mod tests {
         let now = 10;
         // (key, value)
         let cases: &[(&[u8], &[u8])] = &[
-            (b"str", b"WORLD"),  // append to existing string (grows)
-            (b"str", b""),       // empty append (no-op growth, still a write)
-            (b"si", b"99"),      // append to integer-encoded string (materialize + raw)
-            (b"absent", b"AB"),  // create new string
-            (b"absent", b""),    // create empty string
-            (b"lst", b"AB"),     // WRONGTYPE (draw + bump then WrongType)
-            (b"ttl", b"AB"),     // expired -> create
+            (b"str", b"WORLD"), // append to existing string (grows)
+            (b"str", b""),      // empty append (no-op growth, still a write)
+            (b"si", b"99"),     // append to integer-encoded string (materialize + raw)
+            (b"absent", b"AB"), // create new string
+            (b"absent", b""),   // create empty string
+            (b"lst", b"AB"),    // WRONGTYPE (draw + bump then WrongType)
+            (b"ttl", b"AB"),    // expired -> create
         ];
         for lfu in [true, false] {
             for force_fresh in [false, true] {
@@ -52975,9 +53542,16 @@ mod tests {
                     let tag = format!("lfu={lfu} fresh={force_fresh} key={key:?} val={value:?}");
                     assert_eq!(ra, rb, "result {tag}");
                     assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
-                    assert_eq!(a.object_freq(b"str", now), b.object_freq(b"str", now), "freq {tag}");
+                    assert_eq!(
+                        a.object_freq(b"str", now),
+                        b.object_freq(b"str", now),
+                        "freq {tag}"
+                    );
                     assert_eq!(a.dirty, b.dirty, "dirty {tag}");
-                    assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations {tag}");
+                    assert_eq!(
+                        a.digest_mutations, b.digest_mutations,
+                        "digest_mutations {tag}"
+                    );
                     assert_eq!(a.digest_stale, b.digest_stale, "digest_stale {tag}");
                     assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
                 }
@@ -53009,15 +53583,15 @@ mod tests {
         let now = 10;
         // (key, offset, value)
         let cases: &[(&[u8], usize, &[u8])] = &[
-            (b"str", 0, b"HE"),       // in-bounds overwrite (non-extending)
-            (b"str", 3, b"WORLD"),    // extend past end (overlap + tail)
-            (b"str", 8, b"Z"),        // gap past end (zero-fill gap + value)
-            (b"str", 1, b""),         // empty value -> current length, no mutation
-            (b"si", 0, b"9"),         // setrange on integer-encoded string (materialize + raw)
-            (b"absent", 2, b"AB"),    // create new string with leading zeros
-            (b"absent", 0, b""),      // empty value on absent -> Ok(0), no create
-            (b"lst", 0, b"AB"),       // WRONGTYPE (draw + bump then WrongType)
-            (b"ttl", 0, b"AB"),       // expired -> create
+            (b"str", 0, b"HE"),    // in-bounds overwrite (non-extending)
+            (b"str", 3, b"WORLD"), // extend past end (overlap + tail)
+            (b"str", 8, b"Z"),     // gap past end (zero-fill gap + value)
+            (b"str", 1, b""),      // empty value -> current length, no mutation
+            (b"si", 0, b"9"),      // setrange on integer-encoded string (materialize + raw)
+            (b"absent", 2, b"AB"), // create new string with leading zeros
+            (b"absent", 0, b""),   // empty value on absent -> Ok(0), no create
+            (b"lst", 0, b"AB"),    // WRONGTYPE (draw + bump then WrongType)
+            (b"ttl", 0, b"AB"),    // expired -> create
         ];
         for lfu in [true, false] {
             for force_fresh in [false, true] {
@@ -53033,9 +53607,16 @@ mod tests {
                     let tag = format!("lfu={lfu} fresh={force_fresh} key={key:?} off={offset}");
                     assert_eq!(ra, rb, "result {tag}");
                     assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
-                    assert_eq!(a.object_freq(b"str", now), b.object_freq(b"str", now), "freq {tag}");
+                    assert_eq!(
+                        a.object_freq(b"str", now),
+                        b.object_freq(b"str", now),
+                        "freq {tag}"
+                    );
                     assert_eq!(a.dirty, b.dirty, "dirty {tag}");
-                    assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations {tag}");
+                    assert_eq!(
+                        a.digest_mutations, b.digest_mutations,
+                        "digest_mutations {tag}"
+                    );
                     assert_eq!(a.digest_stale, b.digest_stale, "digest_stale {tag}");
                     assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
                 }
@@ -53068,14 +53649,14 @@ mod tests {
         let now = 10;
         // (key, offset, value)
         let cases: &[(&[u8], usize, bool)] = &[
-            (b"bm", 1, true),    // set an unset bit in-bounds (changed)
-            (b"bm", 0, true),    // set an already-set bit (unchanged)
-            (b"bm", 2, false),   // clear a set bit (changed)
-            (b"bm", 40, true),   // set a bit past the end (grow / resize)
-            (b"si", 1, true),    // setbit on an integer-encoded string (materialize + raw)
+            (b"bm", 1, true),     // set an unset bit in-bounds (changed)
+            (b"bm", 0, true),     // set an already-set bit (unchanged)
+            (b"bm", 2, false),    // clear a set bit (changed)
+            (b"bm", 40, true),    // set a bit past the end (grow / resize)
+            (b"si", 1, true),     // setbit on an integer-encoded string (materialize + raw)
             (b"absent", 5, true), // create new bitmap
-            (b"lst", 0, true),   // WRONGTYPE (draw + bump then WrongType)
-            (b"ttl", 0, true),   // expired -> create
+            (b"lst", 0, true),    // WRONGTYPE (draw + bump then WrongType)
+            (b"ttl", 0, true),    // expired -> create
         ];
         for lfu in [true, false] {
             for force_fresh in [false, true] {
@@ -53091,9 +53672,16 @@ mod tests {
                     let tag = format!("lfu={lfu} fresh={force_fresh} key={key:?} off={offset}");
                     assert_eq!(ra, rb, "result {tag}");
                     assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
-                    assert_eq!(a.object_freq(b"bm", now), b.object_freq(b"bm", now), "freq {tag}");
+                    assert_eq!(
+                        a.object_freq(b"bm", now),
+                        b.object_freq(b"bm", now),
+                        "freq {tag}"
+                    );
                     assert_eq!(a.dirty, b.dirty, "dirty {tag}");
-                    assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations {tag}");
+                    assert_eq!(
+                        a.digest_mutations, b.digest_mutations,
+                        "digest_mutations {tag}"
+                    );
                     assert_eq!(a.digest_stale, b.digest_stale, "digest_stale {tag}");
                     assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
                 }
@@ -53126,13 +53714,13 @@ mod tests {
         }
         let now = 10;
         let cases: &[(&[u8], &[&[u8]])] = &[
-            (b"h3", &[b"f".as_slice()]),                     // present, remove 1
-            (b"h3", &[b"missing".as_slice()]),               // present, remove 0
-            (b"h3", &[b"f".as_slice(), b"g", b"nope"]),      // present, remove 2 of 3
-            (b"h1", &[b"only".as_slice()]),                  // remove to empty (key removed)
-            (b"absent", &[b"f".as_slice()]),                 // absent key
-            (b"str", &[b"f".as_slice()]),                    // wrong type
-            (b"ttl", &[b"f".as_slice()]),                    // expired key
+            (b"h3", &[b"f".as_slice()]),                // present, remove 1
+            (b"h3", &[b"missing".as_slice()]),          // present, remove 0
+            (b"h3", &[b"f".as_slice(), b"g", b"nope"]), // present, remove 2 of 3
+            (b"h1", &[b"only".as_slice()]),             // remove to empty (key removed)
+            (b"absent", &[b"f".as_slice()]),            // absent key
+            (b"str", &[b"f".as_slice()]),               // wrong type
+            (b"ttl", &[b"f".as_slice()]),               // expired key
         ];
         for lfu in [true, false] {
             // `force_fresh` calls state_digest() first (digest_stale = false) so the collapse takes
@@ -53149,15 +53737,26 @@ mod tests {
                     }
                     let ra = a.hdel(key, fields, now);
                     let rb = b.hdel_lfu_twoprobe_bench(key, fields, now);
-                    let tag = format!("lfu={lfu} fresh={force_fresh} key={key:?} fields={fields:?}");
+                    let tag =
+                        format!("lfu={lfu} fresh={force_fresh} key={key:?} fields={fields:?}");
                     assert_eq!(ra.is_err(), rb.is_err(), "is_err {tag}");
                     assert_eq!(ra.ok(), rb.ok(), "value {tag}");
                     assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
                     assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits {tag}");
-                    assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses {tag}");
-                    assert_eq!(a.object_freq(b"h3", now), b.object_freq(b"h3", now), "freq {tag}");
+                    assert_eq!(
+                        a.stat_keyspace_misses, b.stat_keyspace_misses,
+                        "misses {tag}"
+                    );
+                    assert_eq!(
+                        a.object_freq(b"h3", now),
+                        b.object_freq(b"h3", now),
+                        "freq {tag}"
+                    );
                     assert_eq!(a.dirty, b.dirty, "dirty {tag}");
-                    assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations {tag}");
+                    assert_eq!(
+                        a.digest_mutations, b.digest_mutations,
+                        "digest_mutations {tag}"
+                    );
                     assert_eq!(a.digest_stale, b.digest_stale, "digest_stale {tag}");
                     assert_eq!(a.state_digest(), b.state_digest(), "state_digest {tag}");
                 }
@@ -53175,7 +53774,8 @@ mod tests {
             let mut s = Store::new();
             s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
             s.lfu_decay_time = 0;
-            s.hset(b"hash", b"f".to_vec(), b"hello".to_vec(), 1).unwrap();
+            s.hset(b"hash", b"f".to_vec(), b"hello".to_vec(), 1)
+                .unwrap();
             s.set(b"str".to_vec(), b"v".to_vec(), None, 1); // wrong type
             s.set(b"ttl".to_vec(), b"x".to_vec(), Some(5), 1); // expired at now=10
             s
@@ -53193,12 +53793,26 @@ mod tests {
             let mut b = build();
             let ra = a.hexists_lfu_collapsed_bench(key, field, now);
             let rb = b.hexists_lfu_threeprobe_bench(key, field, now);
-            assert_eq!(ra.is_err(), rb.is_err(), "is_err key={key:?} field={field:?}");
+            assert_eq!(
+                ra.is_err(),
+                rb.is_err(),
+                "is_err key={key:?} field={field:?}"
+            );
             assert_eq!(ra.ok(), rb.ok(), "value key={key:?} field={field:?}");
             assert_eq!(a.rng_seed, b.rng_seed, "rng_seed key={key:?}");
-            assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits key={key:?}");
-            assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses key={key:?}");
-            assert_eq!(a.object_freq(b"hash", now), b.object_freq(b"hash", now), "freq key={key:?}");
+            assert_eq!(
+                a.stat_keyspace_hits, b.stat_keyspace_hits,
+                "hits key={key:?}"
+            );
+            assert_eq!(
+                a.stat_keyspace_misses, b.stat_keyspace_misses,
+                "misses key={key:?}"
+            );
+            assert_eq!(
+                a.object_freq(b"hash", now),
+                b.object_freq(b"hash", now),
+                "freq key={key:?}"
+            );
         }
     }
 
@@ -53227,9 +53841,19 @@ mod tests {
             assert_eq!(ra.is_err(), rb.is_err(), "is_err key={key:?}");
             assert_eq!(ra.ok(), rb.ok(), "value key={key:?}");
             assert_eq!(a.rng_seed, b.rng_seed, "rng_seed key={key:?}");
-            assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits key={key:?}");
-            assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses key={key:?}");
-            assert_eq!(a.object_freq(b"hash", now), b.object_freq(b"hash", now), "freq key={key:?}");
+            assert_eq!(
+                a.stat_keyspace_hits, b.stat_keyspace_hits,
+                "hits key={key:?}"
+            );
+            assert_eq!(
+                a.stat_keyspace_misses, b.stat_keyspace_misses,
+                "misses key={key:?}"
+            );
+            assert_eq!(
+                a.object_freq(b"hash", now),
+                b.object_freq(b"hash", now),
+                "freq key={key:?}"
+            );
         }
     }
 
@@ -53262,12 +53886,33 @@ mod tests {
             let mut b = build();
             let ra = a.hget_with_lfu_collapsed_bench(key, field, now, |o| o.map(<[u8]>::to_vec));
             let rb = b.hget_with_lfu_threeprobe_bench(key, field, now, |o| o.map(<[u8]>::to_vec));
-            assert_eq!(ra.is_err(), rb.is_err(), "is_err key={key:?} field={field:?}");
-            assert_eq!(ra.ok().flatten(), rb.ok().flatten(), "value key={key:?} field={field:?}");
-            assert_eq!(a.rng_seed, b.rng_seed, "rng_seed key={key:?} field={field:?}");
-            assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits key={key:?}");
-            assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses key={key:?}");
-            assert_eq!(a.object_freq(b"hash", now), b.object_freq(b"hash", now), "freq");
+            assert_eq!(
+                ra.is_err(),
+                rb.is_err(),
+                "is_err key={key:?} field={field:?}"
+            );
+            assert_eq!(
+                ra.ok().flatten(),
+                rb.ok().flatten(),
+                "value key={key:?} field={field:?}"
+            );
+            assert_eq!(
+                a.rng_seed, b.rng_seed,
+                "rng_seed key={key:?} field={field:?}"
+            );
+            assert_eq!(
+                a.stat_keyspace_hits, b.stat_keyspace_hits,
+                "hits key={key:?}"
+            );
+            assert_eq!(
+                a.stat_keyspace_misses, b.stat_keyspace_misses,
+                "misses key={key:?}"
+            );
+            assert_eq!(
+                a.object_freq(b"hash", now),
+                b.object_freq(b"hash", now),
+                "freq"
+            );
         }
     }
 
@@ -53314,9 +53959,7 @@ mod tests {
                 for repeat in 0..repeats {
                     let ra = a.zrank_lfu_collapsed_bench(key, member, now);
                     let rb = b.zrank_lfu_threeprobe_bench(key, member, now);
-                    let tag = format!(
-                        "lfu={lfu} key={key:?} member={member:?} repeat={repeat}"
-                    );
+                    let tag = format!("lfu={lfu} key={key:?} member={member:?} repeat={repeat}");
                     assert_eq!(ra, rb, "result {tag}");
                     assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
                     assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits {tag}");
@@ -53385,9 +54028,7 @@ mod tests {
                 for repeat in 0..repeats {
                     let ra = a.zrevrank_lfu_collapsed_bench(key, member, now);
                     let rb = b.zrevrank_lfu_threeprobe_bench(key, member, now);
-                    let tag = format!(
-                        "lfu={lfu} key={key:?} member={member:?} repeat={repeat}"
-                    );
+                    let tag = format!("lfu={lfu} key={key:?} member={member:?} repeat={repeat}");
                     assert_eq!(ra, rb, "result {tag}");
                     assert_eq!(a.rng_seed, b.rng_seed, "rng_seed {tag}");
                     assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits {tag}");
@@ -53424,21 +54065,13 @@ mod tests {
                 store.lfu_decay_time = 0;
             }
             store.zset_max_listpack_entries = 1;
+            store.zadd(b"packed", &[(1.25, b"m".to_vec())], 1).unwrap();
             store
-                .zadd(b"packed", &[(1.25, b"m".to_vec())], 1)
-                .unwrap();
-            store
-                .zadd(
-                    b"full",
-                    &[(2.5, b"m".to_vec()), (3.5, b"n".to_vec())],
-                    1,
-                )
+                .zadd(b"full", &[(2.5, b"m".to_vec()), (3.5, b"n".to_vec())], 1)
                 .unwrap();
             store.zadd(b"live", &[(4.5, b"m".to_vec())], 1).unwrap();
             assert!(store.expire_at_milliseconds(b"live", 100, 1));
-            store
-                .zadd(b"expired", &[(5.5, b"m".to_vec())], 1)
-                .unwrap();
+            store.zadd(b"expired", &[(5.5, b"m".to_vec())], 1).unwrap();
             assert!(store.expire_at_milliseconds(b"expired", 5, 1));
             store.set(b"str".to_vec(), b"v".to_vec(), None, 1);
             store
@@ -53464,8 +54097,7 @@ mod tests {
                     let collapsed_result = collapsed.zrank_withscore(key, member, true, now);
                     let prior_result =
                         prior.zrevrank_withscore_lfu_threeprobe_bench(key, member, now);
-                    let tag =
-                        format!("lfu={lfu} key={key:?} member={member:?} repeat={repeat}");
+                    let tag = format!("lfu={lfu} key={key:?} member={member:?} repeat={repeat}");
                     assert_eq!(collapsed_result, prior_result, "result {tag}");
                     assert_eq!(collapsed.rng_seed, prior.rng_seed, "rng_seed {tag}");
                     assert_eq!(
@@ -53481,7 +54113,11 @@ mod tests {
                         prior.entries.get(key),
                         "entry {tag}"
                     );
-                    assert_eq!(collapsed.expiry_ms(key), prior.expiry_ms(key), "expiry {tag}");
+                    assert_eq!(
+                        collapsed.expiry_ms(key),
+                        prior.expiry_ms(key),
+                        "expiry {tag}"
+                    );
                     assert_eq!(
                         collapsed.expires_count, prior.expires_count,
                         "expires_count {tag}"
@@ -53491,8 +54127,7 @@ mod tests {
                         "expired stats {tag}"
                     );
                     assert_eq!(
-                        collapsed.lazy_expired_propagation,
-                        prior.lazy_expired_propagation,
+                        collapsed.lazy_expired_propagation, prior.lazy_expired_propagation,
                         "lazy expiry {tag}"
                     );
                     assert_eq!(collapsed.dirty, prior.dirty, "dirty {tag}");
@@ -53581,7 +54216,8 @@ mod tests {
             let mut s = Store::new();
             s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
             s.lfu_decay_time = 0;
-            s.zadd(b"zs", &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec())], 1).unwrap();
+            s.zadd(b"zs", &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec())], 1)
+                .unwrap();
             s.set(b"str".to_vec(), b"v".to_vec(), None, 1); // wrong type
             s.set(b"ttl".to_vec(), b"x".to_vec(), Some(5), 1); // expired at now=10
             s
@@ -53595,9 +54231,19 @@ mod tests {
             assert_eq!(ra.is_err(), rb.is_err(), "is_err key={key:?}");
             assert_eq!(ra.ok(), rb.ok(), "value key={key:?}");
             assert_eq!(a.rng_seed, b.rng_seed, "rng_seed key={key:?}");
-            assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits key={key:?}");
-            assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses key={key:?}");
-            assert_eq!(a.object_freq(b"zs", now), b.object_freq(b"zs", now), "freq key={key:?}");
+            assert_eq!(
+                a.stat_keyspace_hits, b.stat_keyspace_hits,
+                "hits key={key:?}"
+            );
+            assert_eq!(
+                a.stat_keyspace_misses, b.stat_keyspace_misses,
+                "misses key={key:?}"
+            );
+            assert_eq!(
+                a.object_freq(b"zs", now),
+                b.object_freq(b"zs", now),
+                "freq key={key:?}"
+            );
         }
     }
 
@@ -53625,9 +54271,19 @@ mod tests {
             assert_eq!(ra.is_err(), rb.is_err(), "is_err key={key:?}");
             assert_eq!(ra.ok(), rb.ok(), "value key={key:?}");
             assert_eq!(a.rng_seed, b.rng_seed, "rng_seed key={key:?}");
-            assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits key={key:?}");
-            assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses key={key:?}");
-            assert_eq!(a.object_freq(b"set", now), b.object_freq(b"set", now), "freq key={key:?}");
+            assert_eq!(
+                a.stat_keyspace_hits, b.stat_keyspace_hits,
+                "hits key={key:?}"
+            );
+            assert_eq!(
+                a.stat_keyspace_misses, b.stat_keyspace_misses,
+                "misses key={key:?}"
+            );
+            assert_eq!(
+                a.object_freq(b"set", now),
+                b.object_freq(b"set", now),
+                "freq key={key:?}"
+            );
         }
     }
 
@@ -53708,7 +54364,8 @@ mod tests {
             let mut s = Store::new();
             s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
             s.lfu_decay_time = 0;
-            s.rpush(b"list", &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()], 1).unwrap();
+            s.rpush(b"list", &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()], 1)
+                .unwrap();
             s.set(b"str".to_vec(), b"v".to_vec(), None, 1); // wrong type
             s.set(b"ttl".to_vec(), b"x".to_vec(), Some(5), 1); // expired at now=10 (evicted before type check)
             s
@@ -53722,9 +54379,19 @@ mod tests {
             assert_eq!(ra.is_err(), rb.is_err(), "is_err key={key:?}");
             assert_eq!(ra.ok(), rb.ok(), "value key={key:?}");
             assert_eq!(a.rng_seed, b.rng_seed, "rng_seed key={key:?}");
-            assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits key={key:?}");
-            assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses key={key:?}");
-            assert_eq!(a.object_freq(b"list", now), b.object_freq(b"list", now), "freq key={key:?}");
+            assert_eq!(
+                a.stat_keyspace_hits, b.stat_keyspace_hits,
+                "hits key={key:?}"
+            );
+            assert_eq!(
+                a.stat_keyspace_misses, b.stat_keyspace_misses,
+                "misses key={key:?}"
+            );
+            assert_eq!(
+                a.object_freq(b"list", now),
+                b.object_freq(b"list", now),
+                "freq key={key:?}"
+            );
         }
     }
 
@@ -53750,9 +54417,19 @@ mod tests {
             let rb = b.exists_lfu_twoprobe_bench(key, now);
             assert_eq!(ra, rb, "result key={key:?}");
             assert_eq!(a.rng_seed, b.rng_seed, "rng_seed key={key:?}");
-            assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits key={key:?}");
-            assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses key={key:?}");
-            assert_eq!(a.object_freq(b"str", now), b.object_freq(b"str", now), "freq key={key:?}");
+            assert_eq!(
+                a.stat_keyspace_hits, b.stat_keyspace_hits,
+                "hits key={key:?}"
+            );
+            assert_eq!(
+                a.stat_keyspace_misses, b.stat_keyspace_misses,
+                "misses key={key:?}"
+            );
+            assert_eq!(
+                a.object_freq(b"str", now),
+                b.object_freq(b"str", now),
+                "freq key={key:?}"
+            );
         }
     }
 
@@ -53779,8 +54456,14 @@ mod tests {
             let rb = b.value_type_lfu_twoprobe_bench(key, now);
             assert_eq!(ra, rb, "type key={key:?}");
             assert_eq!(a.rng_seed, b.rng_seed, "rng_seed key={key:?}");
-            assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits key={key:?}");
-            assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses key={key:?}");
+            assert_eq!(
+                a.stat_keyspace_hits, b.stat_keyspace_hits,
+                "hits key={key:?}"
+            );
+            assert_eq!(
+                a.stat_keyspace_misses, b.stat_keyspace_misses,
+                "misses key={key:?}"
+            );
         }
     }
 
@@ -53809,9 +54492,19 @@ mod tests {
                 assert_eq!(ra.is_err(), rb.is_err(), "is_err key={key:?} off={off}");
                 assert_eq!(ra.ok(), rb.ok(), "value key={key:?} off={off}");
                 assert_eq!(a.rng_seed, b.rng_seed, "rng_seed key={key:?} off={off}");
-                assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits key={key:?}");
-                assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses key={key:?}");
-                assert_eq!(a.object_freq(b"bits", now), b.object_freq(b"bits", now), "freq");
+                assert_eq!(
+                    a.stat_keyspace_hits, b.stat_keyspace_hits,
+                    "hits key={key:?}"
+                );
+                assert_eq!(
+                    a.stat_keyspace_misses, b.stat_keyspace_misses,
+                    "misses key={key:?}"
+                );
+                assert_eq!(
+                    a.object_freq(b"bits", now),
+                    b.object_freq(b"bits", now),
+                    "freq"
+                );
             }
         }
     }
@@ -53840,9 +54533,19 @@ mod tests {
             assert_eq!(ra.is_err(), rb.is_err(), "is_err key={key:?}");
             assert_eq!(ra.ok(), rb.ok(), "value key={key:?}");
             assert_eq!(a.rng_seed, b.rng_seed, "rng_seed key={key:?}");
-            assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits key={key:?}");
-            assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses key={key:?}");
-            assert_eq!(a.object_freq(b"str", now), b.object_freq(b"str", now), "freq key={key:?}");
+            assert_eq!(
+                a.stat_keyspace_hits, b.stat_keyspace_hits,
+                "hits key={key:?}"
+            );
+            assert_eq!(
+                a.stat_keyspace_misses, b.stat_keyspace_misses,
+                "misses key={key:?}"
+            );
+            assert_eq!(
+                a.object_freq(b"str", now),
+                b.object_freq(b"str", now),
+                "freq key={key:?}"
+            );
         }
     }
 
@@ -53874,9 +54577,19 @@ mod tests {
                 "value key={key:?}"
             );
             assert_eq!(a.rng_seed, b.rng_seed, "rng_seed key={key:?}");
-            assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits key={key:?}");
-            assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses key={key:?}");
-            assert_eq!(a.object_freq(b"str", now), b.object_freq(b"str", now), "freq key={key:?}");
+            assert_eq!(
+                a.stat_keyspace_hits, b.stat_keyspace_hits,
+                "hits key={key:?}"
+            );
+            assert_eq!(
+                a.stat_keyspace_misses, b.stat_keyspace_misses,
+                "misses key={key:?}"
+            );
+            assert_eq!(
+                a.object_freq(b"str", now),
+                b.object_freq(b"str", now),
+                "freq key={key:?}"
+            );
         }
     }
 
@@ -53891,7 +54604,12 @@ mod tests {
             s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
             s.lfu_decay_time = 0;
             for i in 0..64usize {
-                s.set(format!("s{i:03}").into_bytes(), format!("v{i}").into_bytes(), None, 1);
+                s.set(
+                    format!("s{i:03}").into_bytes(),
+                    format!("v{i}").into_bytes(),
+                    None,
+                    1,
+                );
             }
             s.rpush(b"list", &[b"a".to_vec()], 1).unwrap(); // non-string ⇒ None but still a hit+bump
             s.set(b"ttl".to_vec(), b"x".to_vec(), Some(5), 1); // expired at now=10
@@ -53917,7 +54635,11 @@ mod tests {
         assert_eq!(a.stat_keyspace_hits, b.stat_keyspace_hits, "hits");
         assert_eq!(a.stat_keyspace_misses, b.stat_keyspace_misses, "misses");
         for probe in [b"s000".as_slice(), b"s010", b"s063", b"list"] {
-            assert_eq!(a.object_freq(probe, now), b.object_freq(probe, now), "object_freq {probe:?}");
+            assert_eq!(
+                a.object_freq(probe, now),
+                b.object_freq(probe, now),
+                "object_freq {probe:?}"
+            );
         }
     }
 
@@ -54003,7 +54725,10 @@ mod tests {
                     let ra = a.spop_count(b"s", count, 2).unwrap();
                     let rb = b.spop_count_loop_ref(b"s", count, 2).unwrap();
                     assert_eq!(ra, rb, "result lfu={lfu} n={n} count={count}");
-                    assert_eq!(a.rng_seed, b.rng_seed, "rng_seed lfu={lfu} n={n} count={count}");
+                    assert_eq!(
+                        a.rng_seed, b.rng_seed,
+                        "rng_seed lfu={lfu} n={n} count={count}"
+                    );
                     assert_eq!(a.dirty, b.dirty, "dirty lfu={lfu} n={n} count={count}");
                     assert_eq!(
                         a.digest_mutations, b.digest_mutations,
@@ -54040,7 +54765,10 @@ mod tests {
         {
             let mut a = Store::new();
             let mut b = Store::new();
-            assert_eq!(a.spop_count(b"nope", 0, 2).unwrap(), b.spop_count_loop_ref(b"nope", 0, 2).unwrap());
+            assert_eq!(
+                a.spop_count(b"nope", 0, 2).unwrap(),
+                b.spop_count_loop_ref(b"nope", 0, 2).unwrap()
+            );
             assert_eq!(a.rng_seed, b.rng_seed, "count0 rng_seed");
         }
         // Wrong type: rand_val drawn before the type check, then WRONGTYPE.
@@ -55373,8 +56101,9 @@ mod tests {
             (-70, -50),
         ];
         for &total in &[0usize, 1, 4, 10, 128, 200] {
-            let elems: Vec<Vec<u8>> =
-                (0..total).map(|i| format!("e{i:04}").into_bytes()).collect();
+            let elems: Vec<Vec<u8>> = (0..total)
+                .map(|i| format!("e{i:04}").into_bytes())
+                .collect();
             for &(start, stop) in ranges {
                 let want = {
                     let mut r = Store::new();
@@ -55526,14 +56255,9 @@ mod tests {
                     .unwrap();
                 let mut encoded_value = None;
                 let moved = direct
-                    .lmove_with(
-                        b"src",
-                        destination,
-                        wherefrom,
-                        whereto,
-                        2,
-                        |value| encoded_value = Some(value.to_vec()),
-                    )
+                    .lmove_with(b"src", destination, wherefrom, whereto, 2, |value| {
+                        encoded_value = Some(value.to_vec())
+                    })
                     .unwrap();
 
                 assert!(moved);
@@ -55545,7 +56269,10 @@ mod tests {
                         "list parity same_key={same_key} from={wherefrom:?} to={whereto:?}"
                     );
                     assert_eq!(direct.pttl(key, 2), owned.pttl(key, 2));
-                    assert_eq!(direct.object_encoding(key, 2), owned.object_encoding(key, 2));
+                    assert_eq!(
+                        direct.object_encoding(key, 2),
+                        owned.object_encoding(key, 2)
+                    );
                     assert_eq!(direct.object_freq(key, 2), owned.object_freq(key, 2));
                 }
                 assert_eq!(direct.state_digest(), owned.state_digest());
@@ -55557,14 +56284,8 @@ mod tests {
         let mut sink_called = false;
         assert!(
             !direct
-                .lmove_with(
-                    b"missing",
-                    b"dst",
-                    b"LEFT",
-                    b"RIGHT",
-                    3,
-                    |_| sink_called = true,
-                )
+                .lmove_with(b"missing", b"dst", b"LEFT", b"RIGHT", 3, |_| sink_called =
+                    true,)
                 .unwrap()
         );
         assert!(!sink_called);
@@ -55828,7 +56549,13 @@ mod tests {
                 .collect()
         }
         // (n, long): small listpack, boundary, large skiplist by count, skiplist by value width.
-        for (n, long) in [(1usize, false), (8, false), (128, false), (600, false), (40, true)] {
+        for (n, long) in [
+            (1usize, false),
+            (8, false),
+            (128, false),
+            (600, false),
+            (40, true),
+        ] {
             let mut pairs = shape(n, long);
             // Include a -0.0 member so canonicalize_zero_score is exercised on both paths.
             pairs.push((-0.0, b"zzz_zero".to_vec()));
@@ -55855,11 +56582,22 @@ mod tests {
                 "n={n} long={long}: ordered members/scores diverged"
             );
             assert_eq!(
-                borrowed.entries.get(b"z".as_slice()).unwrap().modification_count,
-                owned.entries.get(b"z".as_slice()).unwrap().modification_count,
+                borrowed
+                    .entries
+                    .get(b"z".as_slice())
+                    .unwrap()
+                    .modification_count,
+                owned
+                    .entries
+                    .get(b"z".as_slice())
+                    .unwrap()
+                    .modification_count,
                 "n={n} long={long}: modification_count diverged"
             );
-            assert_eq!(borrowed.dirty, owned.dirty, "n={n} long={long}: dirty diverged");
+            assert_eq!(
+                borrowed.dirty, owned.dirty,
+                "n={n} long={long}: dirty diverged"
+            );
         }
     }
 
@@ -55910,8 +56648,16 @@ mod tests {
                 "n={n} w={w}: LRANGE diverged"
             );
             assert_eq!(
-                borrowed.entries.get(b"l".as_slice()).unwrap().modification_count,
-                owned.entries.get(b"l".as_slice()).unwrap().modification_count,
+                borrowed
+                    .entries
+                    .get(b"l".as_slice())
+                    .unwrap()
+                    .modification_count,
+                owned
+                    .entries
+                    .get(b"l".as_slice())
+                    .unwrap()
+                    .modification_count,
                 "n={n} w={w}: modification_count diverged"
             );
             assert_eq!(borrowed.dirty, owned.dirty, "n={n} w={w}: dirty diverged");
@@ -56523,8 +57269,15 @@ mod tests {
                 a.digest_mutations, b.digest_mutations,
                 "digest_mutations mismatch @ {case}"
             );
-            assert_eq!(a.digest_stale, b.digest_stale, "digest_stale mismatch @ {case}");
-            assert_eq!(a.state_digest(), b.state_digest(), "state_digest mismatch @ {case}");
+            assert_eq!(
+                a.digest_stale, b.digest_stale,
+                "digest_stale mismatch @ {case}"
+            );
+            assert_eq!(
+                a.state_digest(),
+                b.state_digest(),
+                "state_digest mismatch @ {case}"
+            );
         }
     }
 
@@ -56548,7 +57301,14 @@ mod tests {
                 }
                 "count_promote" => {
                     for i in 0..512u32 {
-                        hset(&mut s, b"h", format!("f{i:04}").as_bytes(), b"v".to_vec(), 1).unwrap();
+                        hset(
+                            &mut s,
+                            b"h",
+                            format!("f{i:04}").as_bytes(),
+                            b"v".to_vec(),
+                            1,
+                        )
+                        .unwrap();
                     }
                     // 513th distinct field crosses hash-max-listpack-entries (512).
                     hset(&mut s, b"h", b"f9999", b"v".to_vec(), 2)
@@ -56585,7 +57345,11 @@ mod tests {
                 a.digest_mutations, b.digest_mutations,
                 "digest_mutations mismatch @ {case}"
             );
-            assert_eq!(a.state_digest(), b.state_digest(), "state_digest mismatch @ {case}");
+            assert_eq!(
+                a.state_digest(),
+                b.state_digest(),
+                "state_digest mismatch @ {case}"
+            );
             assert_eq!(
                 a.object_encoding(b"h", 3),
                 b.object_encoding(b"h", 3),
@@ -56600,8 +57364,7 @@ mod tests {
         // hash scan. This covers every promotion trigger, an oversized duplicate whose final
         // short value requires the reference fallback, an already-promoted hash, and the LFU
         // branch that replays per-field frequency bumps before applying the same refresh.
-        type HsetMany =
-            fn(&mut Store, &[u8], &[&[u8]], u64) -> Result<usize, StoreError>;
+        type HsetMany = fn(&mut Store, &[u8], &[&[u8]], u64) -> Result<usize, StoreError>;
         let build = |hset: HsetMany, case: &str| -> (Result<usize, StoreError>, Store) {
             let mut s = Store::new();
             let big_field = vec![b'f'; 80];
@@ -56609,41 +57372,28 @@ mod tests {
             let r = match case {
                 "small_overwrite" => {
                     for i in 0..64u32 {
-                        s.hset_borrowed(
-                            b"h",
-                            format!("f{i:04}").as_bytes(),
-                            b"old".to_vec(),
-                            1,
-                        )
-                        .unwrap();
+                        s.hset_borrowed(b"h", format!("f{i:04}").as_bytes(), b"old".to_vec(), 1)
+                            .unwrap();
                     }
                     hset(&mut s, b"h", &[b"f0000", b"new", b"f0001", b"new"], 2)
                 }
                 "count_promote" => {
                     for i in 0..512u32 {
-                        s.hset_borrowed(
-                            b"h",
-                            format!("f{i:04}").as_bytes(),
-                            b"v".to_vec(),
-                            1,
-                        )
-                        .unwrap();
+                        s.hset_borrowed(b"h", format!("f{i:04}").as_bytes(), b"v".to_vec(), 1)
+                            .unwrap();
                     }
                     hset(&mut s, b"h", &[b"fnew", b"v"], 2)
                 }
                 "value_promote" => {
-                    s.hset_borrowed(b"h", b"pre", b"v".to_vec(), 1)
-                        .unwrap();
+                    s.hset_borrowed(b"h", b"pre", b"v".to_vec(), 1).unwrap();
                     hset(&mut s, b"h", &[b"f", big_value.as_slice()], 2)
                 }
                 "field_promote" => {
-                    s.hset_borrowed(b"h", b"pre", b"v".to_vec(), 1)
-                        .unwrap();
+                    s.hset_borrowed(b"h", b"pre", b"v".to_vec(), 1).unwrap();
                     hset(&mut s, b"h", &[big_field.as_slice(), b"v"], 2)
                 }
                 "oversized_duplicate_final_short" => {
-                    s.hset_borrowed(b"h", b"pre", b"v".to_vec(), 1)
-                        .unwrap();
+                    s.hset_borrowed(b"h", b"pre", b"v".to_vec(), 1).unwrap();
                     hset(
                         &mut s,
                         b"h",
@@ -56657,13 +57407,8 @@ mod tests {
                 }
                 "lfu_small_overwrite" => {
                     for i in 0..64u32 {
-                        s.hset_borrowed(
-                            b"h",
-                            format!("f{i:04}").as_bytes(),
-                            b"old".to_vec(),
-                            1,
-                        )
-                        .unwrap();
+                        s.hset_borrowed(b"h", format!("f{i:04}").as_bytes(), b"old".to_vec(), 1)
+                            .unwrap();
                     }
                     s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
                     s.lfu_decay_time = 0;
@@ -56691,7 +57436,11 @@ mod tests {
                 "digest_mutations mismatch @ {case}"
             );
             assert_eq!(a.rng_seed, b.rng_seed, "RNG mismatch @ {case}");
-            assert_eq!(a.state_digest(), b.state_digest(), "state mismatch @ {case}");
+            assert_eq!(
+                a.state_digest(),
+                b.state_digest(),
+                "state mismatch @ {case}"
+            );
             assert_eq!(
                 a.object_encoding(b"h", 3),
                 b.object_encoding(b"h", 3),
@@ -61691,40 +62440,130 @@ mod tests {
             u64,
         ) -> Result<Option<f64>, StoreError>;
         fn opt(nx: bool, gt: bool, lt: bool) -> super::ZaddOptions {
-            super::ZaddOptions { nx, xx: false, gt, lt, ch: false }
+            super::ZaddOptions {
+                nx,
+                xx: false,
+                gt,
+                lt,
+                ch: false,
+            }
         }
         let build = |z: Zincr, case: &str| -> (Vec<Result<Option<f64>, StoreError>>, Store) {
             let mut s = Store::new();
             let mut rs = Vec::new();
             match case {
                 "new_then_incr" => {
-                    rs.push(z(&mut s, b"z", b"m".to_vec(), 5.0, opt(false, false, false), 1));
-                    rs.push(z(&mut s, b"z", b"m".to_vec(), 2.5, opt(false, false, false), 1));
+                    rs.push(z(
+                        &mut s,
+                        b"z",
+                        b"m".to_vec(),
+                        5.0,
+                        opt(false, false, false),
+                        1,
+                    ));
+                    rs.push(z(
+                        &mut s,
+                        b"z",
+                        b"m".to_vec(),
+                        2.5,
+                        opt(false, false, false),
+                        1,
+                    ));
                 }
                 "nx_skip_existing" => {
-                    rs.push(z(&mut s, b"z", b"m".to_vec(), 5.0, opt(false, false, false), 1));
-                    rs.push(z(&mut s, b"z", b"m".to_vec(), 2.0, opt(true, false, false), 1));
+                    rs.push(z(
+                        &mut s,
+                        b"z",
+                        b"m".to_vec(),
+                        5.0,
+                        opt(false, false, false),
+                        1,
+                    ));
+                    rs.push(z(
+                        &mut s,
+                        b"z",
+                        b"m".to_vec(),
+                        2.0,
+                        opt(true, false, false),
+                        1,
+                    ));
                 }
                 "gt_gate" => {
-                    rs.push(z(&mut s, b"z", b"m".to_vec(), 5.0, opt(false, false, false), 1));
-                    rs.push(z(&mut s, b"z", b"m".to_vec(), -1.0, opt(false, true, false), 1));
-                    rs.push(z(&mut s, b"z", b"m".to_vec(), 3.0, opt(false, true, false), 1));
+                    rs.push(z(
+                        &mut s,
+                        b"z",
+                        b"m".to_vec(),
+                        5.0,
+                        opt(false, false, false),
+                        1,
+                    ));
+                    rs.push(z(
+                        &mut s,
+                        b"z",
+                        b"m".to_vec(),
+                        -1.0,
+                        opt(false, true, false),
+                        1,
+                    ));
+                    rs.push(z(
+                        &mut s,
+                        b"z",
+                        b"m".to_vec(),
+                        3.0,
+                        opt(false, true, false),
+                        1,
+                    ));
                 }
                 "lt_gate" => {
-                    rs.push(z(&mut s, b"z", b"m".to_vec(), 5.0, opt(false, false, false), 1));
-                    rs.push(z(&mut s, b"z", b"m".to_vec(), 1.0, opt(false, false, true), 1));
+                    rs.push(z(
+                        &mut s,
+                        b"z",
+                        b"m".to_vec(),
+                        5.0,
+                        opt(false, false, false),
+                        1,
+                    ));
+                    rs.push(z(
+                        &mut s,
+                        b"z",
+                        b"m".to_vec(),
+                        1.0,
+                        opt(false, false, true),
+                        1,
+                    ));
                 }
                 "multi_member" => {
                     for (m, d) in [("a", 1.0), ("b", 2.0), ("c", -3.0), ("a", 0.5)] {
-                        rs.push(z(&mut s, b"z", m.as_bytes().to_vec(), d, opt(false, false, false), 1));
+                        rs.push(z(
+                            &mut s,
+                            b"z",
+                            m.as_bytes().to_vec(),
+                            d,
+                            opt(false, false, false),
+                            1,
+                        ));
                     }
                 }
                 "wrongtype" => {
                     s.set(b"z".to_vec(), b"str".to_vec(), None, 1);
-                    rs.push(z(&mut s, b"z", b"m".to_vec(), 1.0, opt(false, false, false), 1));
+                    rs.push(z(
+                        &mut s,
+                        b"z",
+                        b"m".to_vec(),
+                        1.0,
+                        opt(false, false, false),
+                        1,
+                    ));
                 }
                 "nan_reject" => {
-                    rs.push(z(&mut s, b"z", b"m".to_vec(), f64::INFINITY, opt(false, false, false), 1));
+                    rs.push(z(
+                        &mut s,
+                        b"z",
+                        b"m".to_vec(),
+                        f64::INFINITY,
+                        opt(false, false, false),
+                        1,
+                    ));
                     rs.push(z(
                         &mut s,
                         b"z",
@@ -61751,7 +62590,10 @@ mod tests {
             let (rb, mut b) = build(Store::zincrby_with_options_internal_entry_ref, case);
             assert_eq!(ra, rb, "results @ {case}");
             assert_eq!(a.dirty, b.dirty, "dirty @ {case}");
-            assert_eq!(a.digest_mutations, b.digest_mutations, "digest_mutations @ {case}");
+            assert_eq!(
+                a.digest_mutations, b.digest_mutations,
+                "digest_mutations @ {case}"
+            );
             assert_eq!(a.digest_stale, b.digest_stale, "digest_stale @ {case}");
             assert_eq!(a.state_digest(), b.state_digest(), "state_digest @ {case}");
         }
@@ -62226,7 +63068,11 @@ mod tests {
                 b.memory_usage_for_key(b"st", 3),
                 "memory @ max_len={max_len}"
             );
-            assert_eq!(a.state_digest(), b.state_digest(), "digest @ max_len={max_len}");
+            assert_eq!(
+                a.state_digest(),
+                b.state_digest(),
+                "digest @ max_len={max_len}"
+            );
         }
     }
 
@@ -62272,7 +63118,11 @@ mod tests {
                 for i in (removed as u64 + 1)..=N {
                     b.xadd(b"st", (i, 0), &fields(i), 1).unwrap();
                 }
-                assert_eq!(a.xlen(b"st", 3).unwrap(), b.xlen(b"st", 3).unwrap(), "xlen @ {tag}");
+                assert_eq!(
+                    a.xlen(b"st", 3).unwrap(),
+                    b.xlen(b"st", 3).unwrap(),
+                    "xlen @ {tag}"
+                );
                 assert_eq!(
                     a.xrange(b"st", (0, 0), (u64::MAX, u64::MAX), None, 3),
                     b.xrange(b"st", (0, 0), (u64::MAX, u64::MAX), None, 3),
@@ -66586,13 +67436,18 @@ mod tests {
             let mut fresh = Store::new();
             build_hash(&mut fresh);
             mutate(&mut fresh);
-            assert_eq!(after, fresh.dump_key(b"h", 6), "hash DUMP cache stale after {name}");
+            assert_eq!(
+                after,
+                fresh.dump_key(b"h", 6),
+                "hash DUMP cache stale after {name}"
+            );
         }
         check_hash("hset_insert", |s| {
             s.hset(b"h", b"f5".to_vec(), b"55".to_vec(), 10).unwrap();
         });
         check_hash("hset_overwrite", |s| {
-            s.hset(b"h", b"f1".to_vec(), b"NEWVAL".to_vec(), 10).unwrap();
+            s.hset(b"h", b"f1".to_vec(), b"NEWVAL".to_vec(), 10)
+                .unwrap();
         });
         check_hash("hdel", |s| {
             s.hdel(b"h", &[b"f2"], 10).unwrap();
@@ -66627,7 +67482,11 @@ mod tests {
             let mut fresh = Store::new();
             build_set(&mut fresh);
             mutate(&mut fresh);
-            assert_eq!(after, fresh.dump_key(b"s", 6), "set DUMP cache stale after {name}");
+            assert_eq!(
+                after,
+                fresh.dump_key(b"s", 6),
+                "set DUMP cache stale after {name}"
+            );
         }
         check_set("sadd_str", |s| {
             s.sadd(b"s", &[b"zzz".to_vec()], 10).unwrap();
@@ -66653,9 +67512,17 @@ mod tests {
             let after = cached.dump_key(b"is", 6);
             let mut fresh = Store::new();
             fresh
-                .sadd(b"is", &[b"1".to_vec(), b"2".to_vec(), b"30".to_vec(), b"4".to_vec()], 1)
+                .sadd(
+                    b"is",
+                    &[b"1".to_vec(), b"2".to_vec(), b"30".to_vec(), b"4".to_vec()],
+                    1,
+                )
                 .unwrap();
-            assert_eq!(after, fresh.dump_key(b"is", 6), "intset DUMP cache stale after sadd");
+            assert_eq!(
+                after,
+                fresh.dump_key(b"is", 6),
+                "intset DUMP cache stale after sadd"
+            );
         }
 
         // Config-change invalidation: shrinking hash-max-listpack-entries flips a cached listpack
@@ -66677,23 +67544,35 @@ mod tests {
                     .unwrap();
             }
             fresh.hash_max_listpack_entries = 4;
-            assert_eq!(after, fresh.dump_key(b"hc", 6), "hash DUMP cache stale after config change");
+            assert_eq!(
+                after,
+                fresh.dump_key(b"hc", 6),
+                "hash DUMP cache stale after config change"
+            );
         }
         // Same for a set: shrinking set-max-listpack-entries flips listpack -> hashtable.
         {
             let mut cached = Store::new();
             for i in 0..10u32 {
-                cached.sadd(b"sc", &[format!("m{i:03}").into_bytes()], 1).unwrap();
+                cached
+                    .sadd(b"sc", &[format!("m{i:03}").into_bytes()], 1)
+                    .unwrap();
             }
             let _ = cached.dump_key(b"sc", 5);
             cached.set_max_listpack_entries = 4;
             let after = cached.dump_key(b"sc", 6);
             let mut fresh = Store::new();
             for i in 0..10u32 {
-                fresh.sadd(b"sc", &[format!("m{i:03}").into_bytes()], 1).unwrap();
+                fresh
+                    .sadd(b"sc", &[format!("m{i:03}").into_bytes()], 1)
+                    .unwrap();
             }
             fresh.set_max_listpack_entries = 4;
-            assert_eq!(after, fresh.dump_key(b"sc", 6), "set DUMP cache stale after config change");
+            assert_eq!(
+                after,
+                fresh.dump_key(b"sc", 6),
+                "set DUMP cache stale after config change"
+            );
         }
     }
 
@@ -66730,7 +67609,10 @@ mod tests {
             mutate(&mut fresh); // never DUMP'd before mutating -> no cache
             let after_fresh = fresh.dump_key(b"l", 6);
 
-            assert_eq!(after_cached, after_fresh, "list DUMP cache stale after {name}");
+            assert_eq!(
+                after_cached, after_fresh,
+                "list DUMP cache stale after {name}"
+            );
         }
         check("rpush", |s| {
             s.rpush(b"l", &[b"zz".to_vec()], 10).unwrap();
@@ -66777,8 +67659,16 @@ mod tests {
             let mut fresh = Store::new();
             build_pair(&mut fresh);
             mv(&mut fresh);
-            assert_eq!(src_c, fresh.dump_key(b"l", 6), "source DUMP cache stale after {name}");
-            assert_eq!(dst_c, fresh.dump_key(b"d", 6), "dest DUMP cache stale after {name}");
+            assert_eq!(
+                src_c,
+                fresh.dump_key(b"l", 6),
+                "source DUMP cache stale after {name}"
+            );
+            assert_eq!(
+                dst_c,
+                fresh.dump_key(b"d", 6),
+                "dest DUMP cache stale after {name}"
+            );
         }
         check_move("rpoplpush", |s| {
             s.rpoplpush(b"l", b"d", 10).unwrap();
@@ -66795,7 +67685,11 @@ mod tests {
         assert_eq!(d1, d2, "repeated list DUMP (cache hit) diverged");
         let mut fresh = Store::new();
         build_base(&mut fresh);
-        assert_eq!(d2, fresh.dump_key(b"l", 6), "cached list DUMP != fresh encode");
+        assert_eq!(
+            d2,
+            fresh.dump_key(b"l", 6),
+            "cached list DUMP != fresh encode"
+        );
     }
 
     #[test]
@@ -66824,17 +67718,43 @@ mod tests {
         }
         let sequences: &[&[Spec]] = &[
             &[Spec::Set(0, 8, false, 200)],
-            &[Spec::Get(0, 8, false), Spec::Set(0, 8, false, 42), Spec::Get(0, 8, false)],
-            &[Spec::Set(0, 8, false, 10), Spec::Set(8, 8, false, 20), Spec::Set(0, 4, false, 3)],
-            &[Spec::Incrby(0, 8, false, 5), Spec::Incrby(0, 8, false, 3), Spec::Get(0, 8, false)],
-            &[Spec::Set(0, 8, true, -5), Spec::Get(0, 8, true), Spec::Incrby(0, 8, true, -3)],
+            &[
+                Spec::Get(0, 8, false),
+                Spec::Set(0, 8, false, 42),
+                Spec::Get(0, 8, false),
+            ],
+            &[
+                Spec::Set(0, 8, false, 10),
+                Spec::Set(8, 8, false, 20),
+                Spec::Set(0, 4, false, 3),
+            ],
+            &[
+                Spec::Incrby(0, 8, false, 5),
+                Spec::Incrby(0, 8, false, 3),
+                Spec::Get(0, 8, false),
+            ],
+            &[
+                Spec::Set(0, 8, true, -5),
+                Spec::Get(0, 8, true),
+                Spec::Incrby(0, 8, true, -3),
+            ],
             &[Spec::Fail(0, 8), Spec::Get(0, 8, false)],
-            &[Spec::Set(0, 8, false, 7), Spec::Fail(16, 8), Spec::Get(0, 8, false), Spec::Set(24, 8, false, 9)],
+            &[
+                Spec::Set(0, 8, false, 7),
+                Spec::Fail(16, 8),
+                Spec::Get(0, 8, false),
+                Spec::Set(24, 8, false, 9),
+            ],
             &[Spec::Set(100, 16, false, 1000), Spec::Get(100, 16, false)],
             &[Spec::Get(0, 8, false), Spec::Set(0, 8, false, 1)],
-            &[Spec::Incrby(3, 13, true, -100), Spec::Get(3, 13, true), Spec::Set(3, 13, true, 42)],
+            &[
+                Spec::Incrby(3, 13, true, -100),
+                Spec::Get(3, 13, true),
+                Spec::Set(3, 13, true, 42),
+            ],
         ];
-        let presets: &[Option<&[u8]>] = &[None, Some(&[0xA5, 0x5A, 0x0F][..]), Some(&[0xFF; 8][..])];
+        let presets: &[Option<&[u8]>] =
+            &[None, Some(&[0xA5, 0x5A, 0x0F][..]), Some(&[0xFF; 8][..])];
 
         for (si, seq) in sequences.iter().enumerate() {
             for (pi, preset) in presets.iter().enumerate() {
@@ -66857,12 +67777,16 @@ mod tests {
                     for op in seq.iter() {
                         match *op {
                             Spec::Get(off, bits, signed) => ref_results.push(Some(
-                                refs.bitfield_get_no_stat(b"k", off, bits, signed, ts).unwrap(),
+                                refs.bitfield_get_no_stat(b"k", off, bits, signed, ts)
+                                    .unwrap(),
                             )),
                             Spec::Set(off, bits, signed, v) => {
                                 let old = refs.bitfield_set(b"k", off, bits, v, ts).unwrap();
-                                ref_results
-                                    .push(Some(if signed { sign_ext(old, bits) } else { old }));
+                                ref_results.push(Some(if signed {
+                                    sign_ext(old, bits)
+                                } else {
+                                    old
+                                }));
                             }
                             Spec::Incrby(off, bits, signed, incr) => {
                                 let r = refs
@@ -66873,7 +67797,8 @@ mod tests {
                                 ref_results.push(r);
                             }
                             Spec::Fail(off, bits) => {
-                                refs.bitfield_reserve_for_write(b"k", off, bits, ts).unwrap();
+                                refs.bitfield_reserve_for_write(b"k", off, bits, ts)
+                                    .unwrap();
                                 ref_results.push(None);
                             }
                         }
@@ -66885,10 +67810,26 @@ mod tests {
                     let ops: Vec<BitfieldOp> = seq
                         .iter()
                         .map(|op| match *op {
-                            Spec::Get(off, bits, signed) => BitfieldOp::Get { offset: off, bits, signed },
-                            Spec::Set(off, bits, signed, _) => BitfieldOp::Set { offset: off, bits, signed },
-                            Spec::Incrby(off, bits, signed, _) => BitfieldOp::Incrby { offset: off, bits, signed },
-                            Spec::Fail(off, bits) => BitfieldOp::Set { offset: off, bits, signed: false },
+                            Spec::Get(off, bits, signed) => BitfieldOp::Get {
+                                offset: off,
+                                bits,
+                                signed,
+                            },
+                            Spec::Set(off, bits, signed, _) => BitfieldOp::Set {
+                                offset: off,
+                                bits,
+                                signed,
+                            },
+                            Spec::Incrby(off, bits, signed, _) => BitfieldOp::Incrby {
+                                offset: off,
+                                bits,
+                                signed,
+                            },
+                            Spec::Fail(off, bits) => BitfieldOp::Set {
+                                offset: off,
+                                bits,
+                                signed: false,
+                            },
                         })
                         .collect();
                     let raw = cand
@@ -67054,7 +67995,8 @@ mod tests {
                                 _ => {}
                             }
                             // OLD: get_no_stat + compute + set / reserve.
-                            let res_a = match a.bitfield_get_no_stat(key, offset, bits, signed, now) {
+                            let res_a = match a.bitfield_get_no_stat(key, offset, bits, signed, now)
+                            {
                                 Ok(cur) => match tc(cur, param) {
                                     Some(v) => {
                                         a.bitfield_set(key, offset, bits, v, now).map(|_| Some(v))

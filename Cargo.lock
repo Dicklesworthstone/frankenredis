@@ -489,6 +489,7 @@ dependencies = [
  "indexmap",
  "libc",
  "proptest",
+ "sha2",
 ]
 
 [[package]]

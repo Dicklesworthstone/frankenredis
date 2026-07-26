@@ -11009,3 +11009,54 @@ seven `fr-expire` unit tests passed remotely. Targeted all-target Clippy with `-
 RCH fail-closed correctly refused `cargo fmt --check` as a non-compilation command; direct
 non-compiling `rustfmt --check` over the two owned Rust files passed. Every compiling Cargo command
 used `RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec --`; no local Cargo fallback occurred.
+
+## 2026-07-25 NobleOsprey: RESURRECTED / KEEP — corrected median-CI reruns vindicate shipped SSCAN clone elimination and SET/XADD no-TTL guards
+
+The Meta-Lever 1 audit marked the historical SCAN exhaustion surface plus the SET and XADD
+`drop_if_expired` rows VOID: their original multi-connection ratios sat inside their own era noise
+floors. The levers subsequently shipped through `1caaa386e` / `2ac912161`, `4038f4d31`, and
+`2c6b05472`; this rerun adjudicates those shipped forms rather than silently removing the void
+rows from the audit.
+
+One fail-closed remote invocation on worker `vmi1167313` used release ELF SHA-256
+`1ca99429a0fc923aeff7ada4fe7f7bdfd0e6e2795f2d1eb05c81f64275240fcc` (1,140,144
+bytes). The executable self-reported that identity before any correctness, profile, or timing
+output. In that same invocation, each scenario ran three exact-reference `perf record` trials
+(zero lost samples), then 24 position-balanced `instructions:u` rounds containing two reference
+slots (A/A) and one candidate slot (A/B). Decisions use only the bootstrap 95% CI of the A/A
+median with a 2x margin; CV is provenance only.
+
+- **SSCAN member clone elimination:** byte-identical cursor/member sequence, checksum
+  `cff799c195ebeac5`; exact reference `Store::sscan` self-time
+  `5.21/5.24/4.70%` (median **5.21%**). Reference/candidate instructions median
+  **1.336612166x**, or **25.184% fewer** candidate instructions. A/A median
+  `1.000000001`, bootstrap CI **[0.999999888, 1.000000122]**; null CV
+  `0.000067%`, effect CV `0.000096%`. **KEEP / superseded VOID.**
+- **SET no-TTL expiry guard:** state-identical, digest `b272939ee82bb118`; exact
+  `set_plain_borrowed_expiry_reference_bench` self-time `13.06/15.13/12.85%`
+  (median **13.06%**). Reference/candidate instructions median **1.043165328x**, or
+  **4.138% fewer** candidate instructions. A/A median `1.000000133`, bootstrap CI
+  **[0.999999846, 1.000000383]**; null CV `0.000080%`, effect CV
+  `0.000051%`. **KEEP / historical row resurrected.**
+- **XADD no-TTL expiry guard:** state-identical, digest `affcfec2879d08eb`; exact
+  `xadd_expiry_reference_bench` self-time `2.47/3.08/1.92%` (median **2.47%**).
+  Reference/candidate instructions median **1.109453446x**, or **9.866% fewer**
+  candidate instructions. A/A median `1.000000539`, bootstrap CI
+  **[0.999999843, 1.000001148]**; null CV `0.000121%`, effect CV
+  `0.000150%`. The profile-share spread is recorded but does not gate the decision; every trial
+  had non-zero exact-frame self-time and zero lost samples. **KEEP / historical row
+  resurrected.**
+
+The first attempted invocation is **INVALID, not a result**: its trial-2 profile parser selected a
+call-stack line containing `Store::sscan` before the numeric table row and stopped before any A/A
+or A/B timing. The parser now accepts only a target-symbol line whose first field is a parseable
+percentage; the successful ELF above contains that correction. Harness source SHA-256 is
+`6bf0ec448ee7432f70e87df565c988d4a7d37e7c49a832325ac8b8071f492d7e`.
+
+Concrete retry predicates: rerun SSCAN only after changes to `sscan`, `sscan0_borrow_scan`, packed
+set iteration/encoding, allocator, or release codegen; rerun SET after changes to
+`set_plain_borrowed`, expiry-count bookkeeping, the keyspace map, allocator, or release codegen;
+rerun XADD after changes to `xadd`, packed-stream insertion, expiry-count bookkeeping, the keyspace
+map, allocator, or release codegen. In every case invalidate rather than compare if the exact
+reference frame has zero self-time/lost samples, the A/A median CI no longer brackets 1.0, or the
+candidate effect falls inside twice that run's CI radius.

@@ -19,6 +19,7 @@ bench-reference = []
 [dev-dependencies]
 proptest.workspace = true
 criterion = "0.8"
+sha2.workspace = true
 
 [[bench]]
 name = "store_read"
@@ -853,3 +854,10 @@ harness = false
 [[bench]]
 name = "command_histogram_chain_tax"
 harness = false
+
+# Meta-Lever 1 resurrection queue rows 3-5: shipped SCAN clone elimination plus SET/XADD
+# no-TTL expiry guards, measured in one self-hashing A/A+A/B median-CI invocation.
+[[bench]]
+name = "resurrection_store_top5"
+harness = false
+required-features = ["bench-reference"]
