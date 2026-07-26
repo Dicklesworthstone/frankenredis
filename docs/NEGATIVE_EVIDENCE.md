@@ -83,6 +83,54 @@ BOLD-VERIFY pass. The canonical long-form project ledger remains
   runtime flag remain off by default; the implementation and harness are retained only as a
   reproducible experimental substrate.
 
+## 2026-07-26 AzureMouse (cc/STRUCTURAL): SURFACE — re-measured honest state at HEAD; BOTH previously named unpipelined residuals are CLOSED, and my own published figures understated fr
+
+Re-measurement, not a lever. Recorded because the 2026-07-25 rows below are now **stale in
+FrankenRedis's disfavour** and the README was quoting them.
+
+- **Why re-measure.** Everything I published on 2026-07-25 came from binary
+  `4df05cded722cb07…`, which predates three landed changes: the 10 Hz discarded `used_memory`
+  keyspace scan removal (`cc5d8dd18`, the defect I surfaced as `va3z0`), the post-scan INCR residual
+  (`4a1dc258d`), and four re-adjudicated expiry/scan guards from the resurrection queue
+  (`ed188cc85`, `f66c64018`). Holding a Lane M measurement window while publishing numbers from a
+  superseded ELF is not defensible.
+- **Setup.** `scripts/syscall_decomposition.sh`, fr `bf77a301bc75afa3794db9c463b50b59b5e53c9d658db9ffc087aff1665d5300`
+  at `e244fe019` vs vendored redis 7.2.4 `e837dbb2…`, servers on verified-idle cores 24/25 with the
+  A/A arm on 26 and client on 27 (each core's SMT sibling also idle), host load 8.35, 3 rounds,
+  alternating arm order, median of per-round ratios. **A/A nulls 0.979-1.011 throughout** — the
+  tightest this harness has produced.
+
+  | workload | P | ops/s fr/redis | instructions:u/op | CPU ns/op | A/A null (ops/s) |
+  |---|---|---|---|---|---|
+  | `SET .. EX 100` | 16 | **1.4632** | 0.4077 | 0.6849 | 0.9920 |
+  | SET | 16 | **1.3329** | 0.3601 | 0.7508 | 0.9880 |
+  | INCR | 16 | **1.2548** | 0.3603 | 0.8009 | 0.9993 |
+  | GET | 16 | **1.0287** | 0.4282 | 0.9317 | 0.9791 |
+  | GET | 1 | 0.9982 | 0.7873 | **0.9701** | 0.9898 |
+  | INCR | 1 | 0.9905 | **0.6543** | **0.9691** | 0.9898 |
+  | SET | 1 | 0.9887 | **0.6339** | **0.9674** | 0.9861 |
+  | `SET .. EX 100` | 1 | 0.9855 | **0.6144** | **0.9686** | 0.9885 |
+
+- **Both named residuals from 2026-07-25 are CLOSED.**
+  1. **Unpipelined INCR: 1.1686 → 0.6543 instructions:u/op.** It was the one workload where fr
+     executed *more* user instructions than redis; it now executes **35% fewer**. That is a 44%
+     improvement on the ratio, and it is the direct payoff of removing the 10 Hz full-keyspace scan
+     — which was 9.74% of total cycles on exactly this workload.
+  2. **Unpipelined TTL-bearing SET: CPU ns/op 1.0601 → 0.9686, ops/s 0.899 → 0.9855.** The
+     "fewer instructions but more cycles" memory-stall signature I recorded is gone.
+  fr now uses fewer user instructions per operation than redis **on every one of the eight
+  measurements**, ranging 0.36x to 0.79x, and less CPU per operation on all eight.
+- **Honest caveat on the unpipelined `ops/s` column.** All arms sit at ~74-75k because a single-core
+  `redis-benchmark` saturates there while the server still has headroom — measured directly on
+  2026-07-25 as client 100.1% of a core against server 83.1%. So `ops/s ~0.99` at P1 is a **client
+  ceiling, not a server limit**, and no server-side lever can move it. `CPU ns/op` is the
+  client-independent statement. Anyone quoting unpipelined throughput from this harness must say so;
+  building a client that is not the bottleneck is a prerequisite for any further P1 claim.
+- **Retry predicate:** re-measure and re-publish whenever a change lands that a profile attributes
+  >2% of total cycles to, or whenever the README's figures are more than ~20 commits behind HEAD.
+  The failure mode this row exists to prevent is the one that started this campaign: a README
+  quoting an ELF nobody runs any more.
+
 ## 2026-07-25 AzureMouse (cc/STRUCTURAL): REJECT (premise) — the campaign's io_uring submission-batching lever has nothing to amortize; fr is 1.25x FASTER than redis 7.2.4 at P16 SET and at parity unpipelined (`frankenredis-e947v`)
 
 - **Negative-ledger-first.** Grepped both ledgers for `io_uring` before proposing anything: 1 mention

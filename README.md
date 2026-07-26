@@ -130,6 +130,8 @@ Numbers below are from the standard `fr-bench` workload (50 clients, 100k reques
 
 **Re-measured 2026-07-25** with `scripts/syscall_decomposition.sh`: vendored `redis-benchmark` drives *both* engines (the incumbent's own client, so neither side gets a home-field tool), each server pinned to its own dedicated core with the client on a third, arm order alternated every round, statistic = median of per-round ratios, and a second FrankenRedis process measured in the same invocation as an A/A null control. Both binaries identified by ELF SHA-256 in the artifact.
 
+*Superseded by the 2026-07-26 re-measurement below; kept because the prose that followed it referenced these figures.*
+
 | Workload | Pipeline | ops/s FR ÷ Redis 7.2.4 | user instructions/op | CPU ns/op | A/A null (ops/s) |
 |---|---|---|---|---|---|
 | SET                  | 16 | **1.251** | 0.385 | 0.772 | 1.005 |
@@ -141,9 +143,35 @@ Numbers below are from the standard `fr-bench` workload (50 clients, 100k reques
 | INCR                 | 1  | 0.945 | 1.169 | 1.003 | 0.999 |
 | `SET key val EX 100` | 1  | 0.899 | 0.924 | 1.060 | 0.996 |
 
+**Re-measured 2026-07-26 at `e244fe019`** (binary sha256 `bf77a301…`), same harness, on verified-idle
+cores. The figures above predated three landed changes — the 10 Hz discarded `used_memory` keyspace
+scan (`cc5d8dd18`), the post-scan INCR residual (`4a1dc258d`), and four re-adjudicated expiry/scan
+guards — so they understate current performance:
+
+| Workload | Pipeline | ops/s FR ÷ Redis 7.2.4 | user instructions/op | CPU ns/op | A/A null (ops/s) |
+|---|---|---|---|---|---|
+| `SET key val EX 100` | 16 | **1.463** | 0.408 | 0.685 | 0.992 |
+| SET                  | 16 | **1.333** | 0.360 | 0.751 | 0.988 |
+| INCR                 | 16 | **1.255** | 0.360 | 0.801 | 0.999 |
+| GET                  | 16 | **1.029** | 0.428 | 0.932 | 0.979 |
+| GET                  | 1  | 0.998 | 0.787 | **0.970** | 0.990 |
+| INCR                 | 1  | 0.991 | **0.654** | **0.969** | 0.990 |
+| SET                  | 1  | 0.989 | **0.634** | **0.967** | 0.986 |
+| `SET key val EX 100` | 1  | 0.986 | **0.614** | **0.969** | 0.989 |
+
+**Both previously named residuals are gone.** Unpipelined INCR was 1.169× Redis's user instructions
+per operation and is now **0.654×**; TTL-bearing SET was 1.060× Redis's CPU-ns per operation and is
+now **0.969×**. FrankenRedis now executes **1.3–2.8× fewer user instructions per operation than
+Redis 7.2.4 on every workload measured**, and uses less CPU per operation on all eight.
+
+Read the unpipelined `ops/s` column as a **client ceiling, not a server limit**: all arms sit at
+~74–75k ops/s because a single-core `redis-benchmark` saturates there while the server still has
+headroom (measured: client 100.1% of a core, server 83.1%). `CPU ns/op` is the client-independent
+statement, and it is 0.967–0.970 in FrankenRedis's favour.
+
 **The `pipeline=16` gap is closed and reversed.** FrankenRedis is now *faster* than Redis 7.2.4 at depth 16 on every workload measured, and executes 1.9–2.6× fewer user-mode instructions per operation everywhere. The `writev` explanation the previous text gave for that gap was wrong on its own terms: the reply path already coalesces an entire pipelined batch into **one** `write` syscall, which is why a syscall census measures **0.13 syscalls per operation at depth 16 for both engines** — there is nothing left for scatter-gather to coalesce. `docs/NEGATIVE_EVIDENCE.md` records that blocker four separate times.
 
-Unpipelined, the two engines are within a few percent, with two named residuals where FrankenRedis is behind: **INCR** (1.17× Redis's user instructions per operation) and **TTL-bearing SET** (0.899× throughput). Read those unpipelined ratios with one caveat: at `pipeline=1` on this host **~90% of server cycles are kernel** — loopback TCP plus the machine's `auditd`/`nftables`/`conntrack` configuration — and *both* engines pay ~28,000 kernel instructions per operation, within 1% of each other. Unpipelined ratios are therefore dominated by cost neither engine controls.
+Unpipelined, the two engines are within a few percent on throughput, and FrankenRedis is ahead on every per-operation cost measure. Read those unpipelined ratios with one caveat: at `pipeline=1` on this host **~90% of server cycles are kernel** — loopback TCP plus the machine's `auditd`/`nftables`/`conntrack` configuration — and *both* engines pay ~28,000 kernel instructions per operation, within 1% of each other. Unpipelined ratios are therefore dominated by cost neither engine controls, which is also why a userland win there moves `ops/s` so little.
 
 Raw rounds, symbolized profiles and the harness: `artifacts/optimization/campaign-20260725-cc/`.
 
@@ -1581,7 +1609,7 @@ In strict mode, the default decision for every threat class is `FailClosed` with
 Honest list of what FrankenRedis does *not* do today. The roadmap below tracks closure.
 
 - **No multi-node cluster sharding.** The `CLUSTER` command surface is implemented for single-node mode (slot map, NODES, INFO, KEYSLOT, etc.), but FrankenRedis does not yet do CRC16 slot rebalancing or live shard migration across multiple FrankenRedis processes.
-- **Two named unpipelined residuals.** Re-measured 2026-07-25 (see [Performance](#performance)): pipelined throughput now *leads* Redis 7.2.4 — `pipeline=16` SET **1.25×**, TTL-bearing SET **1.49×**, GET **1.24×** — and the `writev` scatter-gather item that used to sit here was retired as a refuted premise: the write path already emits one `write` syscall per pipelined batch, measured at 0.13 syscalls/op for both engines. What remains is unpipelined: INCR costs 1.17× Redis's user instructions per operation, and TTL-bearing SET runs at 0.899× Redis's throughput.
+- **No named workload where FrankenRedis is behind Redis 7.2.4 on per-operation cost.** Re-measured 2026-07-26 (see [Performance](#performance)): `pipeline=16` throughput leads — TTL-bearing SET **1.46×**, SET **1.33×**, INCR **1.26×**, GET **1.03×** — and unpipelined, FrankenRedis uses **0.967–0.970× the CPU per operation** and **0.61–0.79× the user instructions**. The two residuals listed here previously (unpipelined INCR at 1.17× Redis's instructions, TTL-bearing SET at 0.899× throughput) were closed by the 10 Hz `used_memory` scan removal and the post-scan INCR work. The `writev` scatter-gather item was retired earlier as a refuted premise: the write path already emits one `write` syscall per pipelined batch, measured at 0.13 syscalls/op for both engines. **io_uring batched submission was tried and rejected** (`frankenredis-ev947`): it removed 5.7× of the submission syscalls and still ran 8.78% slower.
 - **Wire-level TLS delegated to operational layer.** TLS configuration parsing and validation are wired through `fr-config` / `fr-runtime`, but the listener accepts plaintext only. **This is a deliberate scope decision:** TLS termination is a transport concern, not Redis protocol parity. All 241 commands behave identically over TLS or plaintext. Use `stunnel`, `spiped`, or your load balancer/reverse-proxy for TLS termination — this is the standard production pattern anyway.
 - **Hash field TTL commands are intentionally not exposed.** The `HEXPIRE`/`HTTL`/`HPERSIST` family is a Redis 7.4 feature; FrankenRedis targets 7.2.4 parity. The storage-layer representation exists (`hash_field_expires` on `Store`, `RDB_TYPE_HASH_WITH_TTLS` round-trip) for forward compatibility.
 - **Maxmemory eviction samples randomly, not into a sorted pool.** `sampled_eviction_candidate_keys` randomly samples up to `sample_limit` keys (default 5, matching upstream's `maxmemory-samples`), then picks the best LRU/LFU/TTL candidate from that sample. Upstream merges samples into a sorted `EVPOOL_SIZE = 16` pool across eviction rounds; FrankenRedis samples fresh each round.
@@ -1593,7 +1621,7 @@ Honest list of what FrankenRedis does *not* do today. The roadmap below tracks c
 ## Roadmap
 
 1. **Multi-node cluster sharding**: CRC16 slot allocation, slot migration, MOVED/ASK redirects, gossip.
-2. **Unpipelined INCR and TTL-bearing SET** — the two workloads where a null-controlled 2026-07-25 re-measurement still shows FrankenRedis behind Redis 7.2.4. (The `writev` scatter-gather item that stood here was retired: a syscall census measured 0.13 syscalls/op at `pipeline=16` for *both* engines, so there is nothing for scatter-gather to coalesce, and FrankenRedis now leads at that depth.)
+2. **Unpipelined throughput is client-bound in our harness, not server-bound** — a single-core `redis-benchmark` saturates at ~75k ops/s while the server still has headroom, so `pipeline=1` `ops/s` cannot currently show a server-side win. Building a client that is not the bottleneck is the prerequisite for any further unpipelined claim. (Two earlier items were retired here: `writev` scatter-gather, because a syscall census measured 0.13 syscalls/op at `pipeline=16` for *both* engines; and the unpipelined INCR / TTL-SET residuals, both closed by 2026-07-26.)
 3. **Wire-level `rustls` termination** in `fr-server`, to fully realize the TLS configuration framework that already exists in `fr-config`/`fr-runtime`.
 4. **RaptorQ-everywhere sidecar** for self-healing durability of long-lived state snapshots, fixture bundles, and reproducibility ledgers.
 5. **Asupersync-backed runtime adapter** and **FrankenTUI operator dashboard adapter** for the deployment story.
@@ -1817,7 +1845,7 @@ Not yet. The `fr-sentinel` crate currently exposes the state machine, command su
 
 ### How is performance trending?
 
-Re-measured 2026-07-25 against vendored Redis 7.2.4, with `redis-benchmark` driving both engines on dedicated cores, arm order alternated per round, median of per-round ratios, and an A/A null control in the same invocation: **`pipeline=16` throughput leads Redis — 1.25× on SET, 1.49× on TTL-bearing SET, 1.24× on GET, 1.06× on INCR** — with 1.9–2.6× fewer user-mode instructions per operation across every workload measured. Unpipelined the two engines are within a few percent, with two residuals still favouring Redis: INCR (1.17× the user instructions per operation) and TTL-bearing SET (0.899× throughput). Each optimization round produces an `ISOMORPHISM_PROOF_*.md` artifact next to before/after flamegraphs under `artifacts/optimization/` so nothing changes observable behavior to gain a few microseconds.
+Re-measured 2026-07-26 at `e244fe019` against vendored Redis 7.2.4, with `redis-benchmark` driving both engines on verified-idle cores, arm order alternated per round, median of per-round ratios, and an A/A null control in the same invocation (nulls 0.979–0.999): **`pipeline=16` throughput leads Redis — 1.46× on TTL-bearing SET, 1.33× on SET, 1.26× on INCR, 1.03× on GET** — with **1.3–2.8× fewer user-mode instructions per operation on every workload measured**. Unpipelined, throughput is within ~1.5% but pinned by a client ceiling rather than the server, and FrankenRedis uses 0.967–0.970× the CPU per operation; the two residuals reported on 2026-07-25 (unpipelined INCR, TTL-bearing SET) are both closed. Each optimization round produces an `ISOMORPHISM_PROOF_*.md` artifact next to before/after flamegraphs under `artifacts/optimization/` so nothing changes observable behavior to gain a few microseconds.
 
 ### Where does the parity bar come from?
 
