@@ -4,6 +4,176 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-25 AzureMouse (cc/STRUCTURAL): REJECT (premise) — the campaign's io_uring submission-batching lever has nothing to amortize; fr is 1.25x FASTER than redis 7.2.4 at P16 SET and at parity unpipelined (`frankenredis-e947v`)
+
+- **Negative-ledger-first.** Grepped both ledgers for `io_uring` before proposing anything: 1 mention
+  in this file, 0 in `docs/perf_negative_evidence_ledger.md` — a fresh lever, not a re-derivation.
+  The adjacent prior art is the 4x-re-verified `2026-07-24 cc(Opus)` writev BLOCKER, which asserts
+  fr already coalesces a whole pipelined batch into ONE `write` syscall. `PERF_CAMPAIGN_2026-07-25`
+  asserts the opposite ("you are paying a syscall per poll cycle that Redis amortizes") and
+  prescribes io_uring on that basis. Both cannot be true, and neither had ever been measured with
+  syscall COUNTERS.
+- **Profile-first attribution, before writing any io_uring.** Measure what io_uring would attack:
+  syscalls per operation. New harness `scripts/syscall_decomposition.sh` counts
+  `raw_syscalls:sys_enter` (tracepoint, not `strace` — no ~100x interposition tax) alongside the
+  `instructions:u` / `instructions:k` split, context-switch rate and task-clock, on the SERVER
+  process, under identical fixed work.
+- **Same-host interleaved A/B + A/A null, one invocation.** fr
+  `4df05cded722cb07fd474e4b74418fec9b9a7646a43afb9ae5032d90a29a61a4` (release +
+  `strip=false debug=1`, retrieved via fail-closed rch) on core 40; vendored redis 7.2.4
+  `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7` (`--save '' --appendonly no`)
+  on core 41; a SECOND fr on core 42 as the A/A null arm; `redis-benchmark` client on core 44.
+  Arm order alternates every round; statistic = MEDIAN of per-round ratios.
+
+  **P16 SET, `-c50 -r100000`, 5 rounds, 6 s windows:**
+
+  | metric | fr | redis 7.2.4 | fr/redis | A/A null fr/fr2 |
+  |---|---|---|---|---|
+  | ops/s | 1,073,542 | 834,024 | **1.2511** [1.2344, 1.3786] | 1.0054 [0.9925, 1.0241] |
+  | syscalls/op | 0.1638 | 0.1252 | 1.3068 | 0.9981 |
+  | instructions:u/op | 2,216 | 5,762 | **0.3847** | 1.0013 |
+  | instructions:k/op | 1,550 | 1,519 | 1.0237 | 0.9952 |
+  | CPU ns/op | 919 | 1,191 | 0.7717 | 0.9944 |
+
+  **P1 `-c50`, 3 rounds, 5 s windows — the "71-83% unpipelined" claim:**
+
+  | workload | ops/s fr/redis | instructions:u/op fr/redis | CPU ns/op fr/redis | A/A null (instr:u) |
+  |---|---|---|---|---|
+  | SET | 1.0052 | 0.8961 | 0.9343 | 0.9877 |
+  | GET | 1.0086 | 0.7678 | 0.9346 | 1.0070 |
+  | INCR | 0.9452 | **1.1686** | 1.0027 | 0.9990 |
+  | LPUSH | 0.9360 | **1.2995** | 1.0277 | 0.9965 |
+  | SADD | 0.9960 | 1.0810 | 0.9738 | 0.9980 |
+
+- **Verdict — the premise is REFUTED twice over.**
+  1. **There is no submission-path syscall to amortize.** At P16 both engines already run at
+     0.13-0.16 syscalls/op, i.e. ~6-8 operations per syscall. io_uring's headline benefit is
+     removing per-cycle submission syscalls; that syscall does not exist here. `instructions:k/op`
+     is at parity (1.024x), so the kernel side is not a differentiator either. An io_uring rewrite
+     would attack a cost centre measuring 0.16 syscalls/op against a command path measuring 2,216
+     user instructions/op.
+  2. **The gap the campaign was built on is stale, not open.** fr is 1.25x FASTER than redis at P16
+     SET, not 0.33-0.47x, and unpipelined it is 0.93-1.03x on CPU-ns/op, not 0.71-0.83x. Those
+     figures came from `README.md`, quoting `baselines/*.json` captured **2026-04-07** — before
+     roughly a thousand perf commits — and attributed the gap to "the lack of `writev`
+     scatter-gather", a cause this ledger has since refuted four times. README corrected this turn.
+- **Rollback:** none required; no production source was touched. Harness ships as
+  `scripts/syscall_decomposition.sh`; raw rounds under
+  `artifacts/optimization/campaign-20260725-cc/`.
+- **Retry predicate (concrete).** Re-open the io_uring submission-batching lever only if BOTH hold:
+  (1) a `raw_syscalls:sys_enter` census on the fr-server process shows **> 1.0 syscalls per
+  operation** at the pipeline depth under test, AND (2) `instructions:k/op` for fr exceeds redis's
+  by **> 1.15x** on the same workload with the A/A null floor below 1.02x. Neither holds today at
+  P1 (2.9 syscalls/op but instructions:k at 1.004x parity — the syscalls are the same syscalls
+  redis makes) or at P16 (0.16 syscalls/op). A third, independent opening would be a workload that
+  forces fr's write path into many small non-contiguous per-connection buffers, which is also the
+  writev BLOCKER's retry predicate.
+
+## 2026-07-25 AzureMouse (cc/STRUCTURAL): SURFACE — the per-command/per-event cost split, and the two workloads where fr is genuinely behind (`frankenredis-e947v`)
+
+Companion to the entry above; this is the positive half of the same measurement and it names where
+the remaining work actually is.
+
+- **`I(P) = C + E/P` decomposition.** Per-operation user instructions were measured at pipeline
+  depths 1, 2, 4, 8, 16 on one fixed workload and least-squares fitted, which separates the two
+  costs a single depth conflates: `C` = per-COMMAND instructions, `E` = per-EVENT (per epoll
+  wakeup: read syscall, session swap/snapshot, flush) instructions.
+
+  | GET | per-command C | per-event E | R^2 |
+  |---|---|---|---|
+  | fr | **1,081.7** | **3,727.5** | 1.0000 |
+  | redis 7.2.4 | 2,834.2 | 3,089.1 | 0.9999 |
+  | fr (A/A null arm) | 1,079.7 | 3,725.4 | 1.0000 |
+
+  The A/A arm reproduces fr's fit to within 0.2%, so `C` and `E` are decidable quantities, not
+  artefacts. **fr's command path is 2.6x cheaper than redis's; its per-event path is 1.21x more
+  expensive.** That is the only userland quantity on which fr is behind, and at P1 it is 77% of
+  fr's user instructions per operation. INCR fits the same shape with C=1,692 / E=5,366 (R^2 0.983)
+  against redis's C=4,734 / E=3,068.
+- **HOST CAVEAT that bounds every unpipelined ratio here.** On `thinkstation1`, at P1, **~90% of
+  server cycles are kernel** (loopback TCP plus this box's `auditd` / `nftables` / `conntrack`
+  configuration: `nft_do_chain` 1.94%, `__audit_syscall_exit` 1.14%, `audit_reset_context` 1.14%,
+  `nf_hook_slow` 0.90%, and siblings, ~9.2% of total cycles in audit+netfilter alone). Both engines
+  pay ~28,000 kernel instructions per operation there, within 1% of each other. Any userland lever
+  is diluted ~7-10x end-to-end at P1, which is why `instructions:u` — not wall-clock throughput —
+  is the right statistic for a lever A/B on this host. At P16 the kernel share falls to ~81% of
+  cycles / ~43% of instructions.
+- **Realistic-workload sweep, including one the repo had never benchmarked.** `redis-benchmark`
+  cannot express a TTL-bearing write through `-t`, so `scripts/syscall_decomposition.sh` grew a
+  `cmd:` form for literal commands. TTL-bearing SET is how most real deployments write to Redis.
+
+  | workload | P | ops/s fr/redis | instr:u/op fr/redis | CPU ns/op fr/redis | A/A null (ops/s) |
+  |---|---|---|---|---|---|
+  | `SET key val EX 100` | 16 | **1.4876** [1.4368, 1.5015] | 0.4368 | 0.6756 | 1.0534 |
+  | `SET key val EX 100` | 1 | **0.8990** [0.8963, 0.9121] | 0.9242 | **1.0601** | 0.9960 |
+  | `GET key` | 16 | 1.2396 | 0.5171 | 0.8183 | 1.0095 |
+  | `GET key` | 1 | 0.9826 | 0.8637 | 0.9561 | 0.9974 |
+
+- **The two named residuals, both decidable against their A/A nulls:**
+  1. **TTL-bearing SET at P1: 0.899x.** Note its shape — fr executes **fewer** user instructions
+     (0.924x) while burning **more** CPU time per operation (1.060x). Fewer instructions and more
+     cycles is a memory-stall signature, not a code-length one, and it points at fr's key
+     duplication across `entries` / `expiry_deadlines` / `volatile_keys` (three owned copies of
+     every TTL'd key, where redis's `db->expires` shares one sds pointer). That is the same root
+     cause as the ledgered 4.49x keyspace RAM gap (`uhthd`).
+  2. **INCR at P1: 1.169x user instructions**, LPUSH 1.299x. LPUSH is NOT steady-state under
+     `redis-benchmark -t lpush` (it pushes to one unbounded key, so the two engines are not
+     comparing equal states) — do not ledger LPUSH as a lever without a bounded-list harness.
+- **Retry/extension predicate:** the `E` residual (638 instructions/event vs redis) is worth a
+  structural swing only while it stays above ~300 instructions/event AND a symbolized profile of a
+  P1 workload attributes >1% of TOTAL cycles to a named fr per-event frame. Today it does not: at
+  P1 the fr DSO is 7% of cycles, so the entire per-event path is inside the host's kernel noise.
+  Measure `E` at P16 or on a quiet kernel (no auditd/nftables) before spending a turn on it.
+
+## 2026-07-25 AzureMouse (cc/STRUCTURAL): OPEN LEVER (handed to cod lane — `crates/fr-store` under peer lease) — `used_memory` is recomputed by a FULL keyspace scan on a 10 Hz timer and the result is discarded
+
+Profile-attributed on the realistic TTL workload; not implemented here because
+`crates/fr-store/src/lib.rs` is under an exclusive NobleOsprey reservation. Recording the full
+evidence and the exact hunk so it is not lost.
+
+- **Profile.** `SET key:__rand_int__ xxx EX 100`, `-P16 -c50 -r100000`, 100k-key steady state,
+  23,817 samples, fr DSO 45.24% of cycles (`artifacts/optimization/campaign-20260725-cc/`). Top fr
+  frames: `mi_free` 8.85%, `internal_entries_insert_with_expiry_impl::<true>` 5.93%,
+  `canonical_string_value` 4.82%, **`HashMap<Box<[u8]>, NonZero<u64>>::contains_key` 3.98%**,
+  `process_buffered_frames` 3.26%, **`cached_entry_memory_usage_bytes` 1.80%**,
+  `estimate_value_memory_usage_bytes` 0.26%.
+- **Mechanism.** `Store::record_ops_sec_sample` (`crates/fr-store/src/lib.rs`, ~L7119) — documented
+  "call this once per server-hz tick (e.g. every 100ms at 10hz)" — runs:
+
+  ```rust
+  let used_memory = self.estimate_memory_usage_bytes();          // O(n) FULL keyspace scan
+  let used_memory_rss = read_rss_bytes().unwrap_or(used_memory); // on Linux ALWAYS Some(..)
+  self.observe_memory_sample(used_memory_rss);                   // the scan result is DISCARDED
+  ```
+
+  `estimate_memory_usage_bytes` returns its memoized value only while
+  `mutations - cached_dirty < threshold`, and `threshold` is **64** whenever `maxmemory == 0` (the
+  default). Above that it walks every entry, calling `cached_entry_memory_usage_bytes` per key,
+  which calls `key_has_expiry` — one `expiry_deadlines` hash probe **per key per scan**. At 890k
+  ops/s over a 100k keyspace that is 10 full scans/second = ~1,000,000 entry visits/second, i.e.
+  **~1.1 whole-keyspace hash probes per client operation**, and it scales with keyspace size, so it
+  is invisible on a small-keyspace bench. On Linux `read_rss_bytes()` reads `/proc/self/status` and
+  returns `Some`, so **every one of those scans is thrown away**.
+- **The ONE lever (exact hunk):**
+  `let used_memory_rss = read_rss_bytes().unwrap_or_else(|| self.estimate_memory_usage_bytes());`
+- **Behavior-preservation argument.** The value handed to `observe_memory_sample` is identical in
+  both arms by construction. The only difference is the *side effect* of the discarded call:
+  refreshing the `cached_memory_usage_bytes` / `cached_memory_usage_dirty` memo. Every consumer of
+  that memo (`INFO memory`, `MEMORY STATS`, `MEMORY USAGE`, `classify_maxmemory_pressure`) calls
+  `estimate_memory_usage_bytes` itself and recomputes exactly when
+  `mutations - cached_dirty >= threshold`. So readers observe a value under the SAME staleness
+  bound as today — in fact never staler, since without the timer refresh a reader is more likely to
+  exceed the threshold and recompute exactly. The cost moves from a 10 Hz timer on the hot path to
+  cold admin commands. Non-Linux targets, where `read_rss_bytes()` returns `None`, are byte-for-byte
+  unchanged: the estimate is still computed, just lazily.
+- **Rollback:** restore `.unwrap_or(used_memory)` and the eager `let used_memory = ...`.
+- **Gate before shipping:** prove `INFO memory used_memory` / `used_memory_rss` /
+  `used_memory_peak` and `MEMORY STATS` identical across the two arms on a 100k-key TTL keyspace,
+  then A/B on the `cmd:SET+key:__rand_int__+xxx+EX+100 -P16` shape with the A/A null arm in the
+  same invocation. Predicted effect: removal of ~4-6% of TOTAL server cycles on a 100k-key
+  keyspace, growing with keyspace size. **If the measured effect is below the A/A null floor on a
+  100k keyspace, re-measure at 1M keys before rejecting — the cost is O(keyspace).**
+
 ## 2026-07-24: BLOCKER — session-snapshot micro profile saturated (`frankenredis-6oavn`)
 
 The literal-current named-metadata candidate executable
