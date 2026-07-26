@@ -220,19 +220,36 @@ Three things this changes or confirms:
 The broadcast's lesson is that ledger integrity **decays**: frankensqlite, which
 audited once and then mechanically enforced the check, sits at 1.7%; repos that
 audited once and moved on sit at 25-91%. So `scripts/perf_candidate_preflight.py`
-makes both failure modes hard to commit:
+makes all three integrity failures hard to commit:
 
 ```sh
-# Refuse a lever whose ground a prior REJECT row already covers.  exit 2 = BLOCKED
-scripts/perf_candidate_preflight.py check-candidate drop_if_expired
+# Grep both ledgers for a prior row on the proposed surface, print the row's
+# concrete retry predicate when present, and stop until it has been read.
+# exit 0 = clear; exit 2 = BLOCKED
+scripts/perf_candidate_preflight.py check-candidate 'drop_if_expired'
 
 # Refuse a NEW REJECT entry that records neither an A/A null nor a counted
 # mechanism — the VOID-NONULL class, 124 of our 125.  exit 3 = REJECTED
-git diff --cached -U0 -- docs/NEGATIVE_EVIDENCE.md \
+#
+# The same check refuses a NEW KEEP/SHIPPED entry without an explicitly labelled
+# executing-binary/ELF SHA-256.  exit 4 = REJECTED
+git diff --cached -U0 -- \
+  docs/NEGATIVE_EVIDENCE.md docs/perf_negative_evidence_ledger.md \
   | scripts/perf_candidate_preflight.py check-entry -
+
+# Install the repository-local plugin into the existing pre-commit chain runner.
+# Installation refuses to overwrite an existing plugin.
+scripts/perf_candidate_preflight.py install-hook
 ```
 
-Both modes normalise whitespace before matching, because the ledgers hard-wrap at
-~100 columns and a raw-text grep scores a wrapped `Null\nmedian` as *no null
-recorded* — the first run of the original audit made exactly that mistake and
-reported a 95% void rate against a true 69.4%.
+The active checkout installs the gate as
+`.git/hooks/hooks.d/pre-commit/60-perf-ledger.py`; the existing pre-commit chain
+runner invokes it for every commit that stages either ledger. The plugin passes
+only the staged diff to `check-entry`, so an old unaudited row cannot satisfy a
+new one. A mention such as “no A/A null” is deliberately not evidence, and a
+source hash or commit hash is deliberately not a binary hash.
+
+Both ledger modes normalise whitespace before matching, because the ledgers
+hard-wrap at ~100 columns and a raw-text grep scores a wrapped `Null\nmedian` as
+*no null recorded* — the first run of the original audit made exactly that
+mistake and reported a 95% void rate against a true 69.4%.
