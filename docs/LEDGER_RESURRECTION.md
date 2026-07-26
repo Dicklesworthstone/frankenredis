@@ -165,3 +165,74 @@ a new structural lever at ~6% of total cycles. The corrected substrate also resu
 generated queue's shipped SSCAN clone elimination as a fourth KEEP. The lesson generalises: the
 highest-value output of a ledger resurrection is sometimes the resurrected row, and sometimes the
 profile you are forced to take in order to rank it.
+
+---
+
+## RE-AUDIT 2026-07-26 — frankenfs six-class taxonomy adopted verbatim
+
+The fleet broadcast of 2026-07-26 replaced the ad-hoc scheme above with the
+frankenfs taxonomy. Re-running both ledgers under it (`scripts/ledger_resurrection_audit6.py`):
+
+| Class | Count |
+|---|---:|
+| Entries parsed | 1,233 |
+| — KEEP | 638 |
+| — SURVEY | 166 |
+| — UNKNOWN (unparsable heading verdict) | 249 |
+| **REJECT — audited** | **180** |
+| VALID-AB | 23 |
+| VALID-MECHANISM | 32 |
+| VALID-PROFILE | 0 |
+| **VOID-NONULL** | **124** |
+| VOID-CV | 1 |
+| VOID-ZEROSELF | 0 |
+| **VOID total** | **125 / 180 = 69.4%** |
+| Rows carrying a binary sha256 | 21 / 180 = 11.7% |
+
+**Scoreboard line:** `frankenredis | 1233 | 180 | 125 | 69.4 | 5 | 3 | 1.1095`
+
+Three things this changes or confirms:
+
+1. **The CV gate is not the epidemic here either.** VOID-NONULL 124 against
+   VOID-CV **1**, matching frankenfs's 214-vs-4 shape. The binary-sha rate also
+   matches almost exactly (11.7% here, 10.9% there), which points at a fleet-wide
+   era effect — 2026-06 prose rows written before null controls were adopted —
+   rather than a per-repo discipline difference.
+2. **`VALID-MECHANISM` moved the headline by 40 points, definitionally.** The
+   ad-hoc audit above reported 29.7% void; this reports 69.4% on the *same*
+   ledgers. Nothing new was discovered. The old scheme called "no null but a large
+   claimed effect" sound-with-incomplete-provenance, where VOID-NONULL correctly
+   calls a near-1.0 no-null row undecided; conversely VALID-MECHANISM correctly
+   rescued 32 rows the old scheme would have voided, because this repo's
+   convention is `instructions:u` A/Bs and an instruction ratio of ~1.00 does
+   establish "no work was removed" without a null. **Cross-repo void rates are
+   only comparable if every repo applied VALID-MECHANISM** — a repo measuring
+   instructions will otherwise look worse than one measuring wall time.
+3. **Ranking by target-frame self-time is impossible from these rows: 1 of 125
+   void rows records one.** The workaround remains the live-profile join described
+   above, which is what surfaced `frankenredis-va3z0` — the row ranked #1 scored
+   0.38% on a TTL-free profile, and profiling the workload that actually routes
+   through it found a 10 Hz discarded full-keyspace `used_memory` scan at 9.74% of
+   total cycles instead. That was landed as `cc5d8dd18`.
+
+## Institutionalization — the audit is now a gate, not an event
+
+The broadcast's lesson is that ledger integrity **decays**: frankensqlite, which
+audited once and then mechanically enforced the check, sits at 1.7%; repos that
+audited once and moved on sit at 25-91%. So `scripts/perf_candidate_preflight.py`
+makes both failure modes hard to commit:
+
+```sh
+# Refuse a lever whose ground a prior REJECT row already covers.  exit 2 = BLOCKED
+scripts/perf_candidate_preflight.py check-candidate drop_if_expired
+
+# Refuse a NEW REJECT entry that records neither an A/A null nor a counted
+# mechanism — the VOID-NONULL class, 124 of our 125.  exit 3 = REJECTED
+git diff --cached -U0 -- docs/NEGATIVE_EVIDENCE.md \
+  | scripts/perf_candidate_preflight.py check-entry -
+```
+
+Both modes normalise whitespace before matching, because the ledgers hard-wrap at
+~100 columns and a raw-text grep scores a wrapped `Null\nmedian` as *no null
+recorded* — the first run of the original audit made exactly that mistake and
+reported a 95% void rate against a true 69.4%.
