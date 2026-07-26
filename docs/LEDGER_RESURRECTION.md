@@ -155,10 +155,13 @@ TTL-subsystem lever on a TTL-free profile would repeat the error the audit exist
 | # | Status | Outcome |
 |---|---|---|
 | 1 | **Re-ranked, not re-run — and that is the finding.** | Profiling the workload that actually exercises it (`SET key val EX 100`, `-P16 -c50`, 100k-key steady state, 23,817 samples, fr DSO 45.24% of cycles) scores the active-expire clone loop at **0.38% of total cycles**. The lever is real and its rejection was void, but it is not where the TTL workload's cost is. The same profile instead attributed **~6% of total server cycles** to a previously unnamed structural defect: `used_memory` recomputed by a full keyspace scan on a 10 Hz timer, whose result is then discarded because `read_rss_bytes()` always succeeds on Linux. Full evidence, exact hunk, behavior-preservation argument and gate are in `docs/NEGATIVE_EVIDENCE.md` under *"OPEN LEVER … `used_memory` is recomputed by a FULL keyspace scan on a 10 Hz timer"*. Not implemented here: `crates/fr-store/src/lib.rs` is under an exclusive peer reservation; handed to the cod lane on thread `perf-campaign-20260725`. |
-| 2–5 | Handed to the cod lane | Ranked queue sent on thread `perf-campaign-20260725` with target frames, bench paths, and the note that #2's and #4/#5's benches were reverted with their candidates and must be rebuilt. |
+| 2 | **Re-run / REJECT** | The restored direct `write_i64_to_slice` candidate is byte-identical but now decisively worse: reference/candidate **0.979436579x** (about 2.10% more candidate instructions). A/A median **1.000000032**, bootstrap 95% median CI **[0.999999981, 1.000000153]**; exact reference self-time **14.48/16.42/15.71%**, zero lost samples; ELF `eba60f9…b036`. Production remains on tmp+copy. |
+| 3 | **Re-run / KEEP** | LFU ZRANGEBYLEX 2→1 is decisive on the corrected substrate: reference/candidate **1.093620068x** (8.560% fewer instructions). A/A median **1.000013534**, bootstrap 95% median CI **[0.999978684, 1.000089043]**; exact reference self-time **13.10/13.32/14.71%**, zero lost samples; ELF `88f1a9c6…13f1`. The collapsed production path ships. |
+| 4–5 | **Re-run / KEEP** | SET and XADD no-TTL expiry guards are decisive under the corrected harness: SET **1.043165328x** (4.138% fewer instructions), XADD **1.109453446x** (9.866% fewer). Their A/A bootstrap CIs are **[0.999999846, 1.000000383]** and **[0.999999843, 1.000001148]**; exact reference self-time is **13.06%** and **2.47%** median, zero lost samples; shared ELF `1ca99429…0fcc`. Both shipped forms stand. |
 
-**Resurrection yield so far:** 195 audited · 58 void (57 VOID + 1 GATE-VOID, **29.7%**) · 1 re-ranked
-under a corrected workload · 1 new structural lever surfaced *by* the re-ranking, at ~6% of total
-cycles — roughly 16x the self-time of the entry that led us to it. The lesson generalises: the
-highest-value output of a ledger resurrection is not always the resurrected row. It is the profile
-you are forced to take in order to rank it.
+**Resurrection yield:** 195 audited · 58 void (57 VOID + 1 GATE-VOID, **29.7%**) · hand-checked
+top five fully adjudicated: **3 KEEPs**, **1 REJECT**, and **1 profile-driven re-rank** that surfaced
+a new structural lever at ~6% of total cycles. The corrected substrate also resurrected the
+generated queue's shipped SSCAN clone elimination as a fourth KEEP. The lesson generalises: the
+highest-value output of a ledger resurrection is sometimes the resurrected row, and sometimes the
+profile you are forced to take in order to rank it.

@@ -25298,7 +25298,37 @@ impl Store {
     /// via [`SortedSet::lex_range_refs`], streaming `Len(count)` then each borrowed
     /// `Member(&[u8])` with no per-member `Vec<u8>` clone. `Len(0)` for missing;
     /// `Err(WrongType)` for a non-zset value; `Err` on invalid lex bounds.
+    #[cfg_attr(feature = "bench-reference", inline(never))]
     pub fn zrangebylex_members_borrow_scan(
+        &mut self,
+        key: &[u8],
+        min: &[u8],
+        max: &[u8],
+        rev: bool,
+        now_ms: u64,
+        sink: impl FnMut(SmembersScanEvent<'_>),
+    ) -> Result<(), StoreError> {
+        self.zrangebylex_members_borrow_scan_impl::<true>(key, min, max, rev, now_ms, sink)
+    }
+
+    /// Frozen two-probe LFU reference for the Meta-Lever 1 resurrection harness.
+    #[cfg(feature = "bench-reference")]
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn zrangebylex_members_borrow_scan_lfu_twoprobe_bench(
+        &mut self,
+        key: &[u8],
+        min: &[u8],
+        max: &[u8],
+        rev: bool,
+        now_ms: u64,
+        sink: impl FnMut(SmembersScanEvent<'_>),
+    ) -> Result<(), StoreError> {
+        self.zrangebylex_members_borrow_scan_impl::<false>(key, min, max, rev, now_ms, sink)
+    }
+
+    #[inline(always)]
+    fn zrangebylex_members_borrow_scan_impl<const COLLAPSE: bool>(
         &mut self,
         key: &[u8],
         min: &[u8],
@@ -25318,7 +25348,7 @@ impl Store {
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
         let lfu_decay = self.lfu_decay_time;
         let lfu_log_factor = self.lfu_log_factor;
-        let rand_sample = if lfu_tracking_enabled && self.entries.contains_key(key) {
+        let rand_sample = if !COLLAPSE && lfu_tracking_enabled && self.entries.contains_key(key) {
             self.next_rand()
         } else {
             0
@@ -25326,7 +25356,12 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
-                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
+                    let sample = if COLLAPSE {
+                        Self::lcg_next_seed(&mut self.rng_seed)
+                    } else {
+                        rand_sample
+                    };
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, sample);
                 }
                 match &entry.value {
                     Value::SortedSet(zs) => {

@@ -11060,3 +11060,67 @@ rerun XADD after changes to `xadd`, packed-stream insertion, expiry-count bookke
 map, allocator, or release codegen. In every case invalidate rather than compare if the exact
 reference frame has zero self-time/lost samples, the A/A median CI no longer brackets 1.0, or the
 candidate effect falls inside twice that run's CI radius.
+
+## 2026-07-25 NobleOsprey: RESURRECTED / REJECT — direct `write_i64_to_slice` is now a decisive regression
+
+The Meta-Lever 1 audit identified the 2026-07-13 direct caller-slice integer writer as the ledger's
+only GATE-VOID: its original 1.005097x result was real and tight but was discarded solely by an
+arbitrary 1% magnitude threshold. The exact tmp-buffer-and-copy reference and direct final-position
+candidate were therefore restored without changing the design. Production remains on the
+reference after this corrected adjudication.
+
+One fail-closed remote invocation on worker `vmi1167313` used release ELF SHA-256
+`eba60f9ee8910417789372c34a18e99baa40eee0ebe4899b268ec75c9cb3b036` (650,144
+bytes), self-reported on line one before correctness, profiling, or timing. Exhaustive parity over
+`[-300000, 300000]` plus signed integer boundaries was byte- and length-identical, checksum
+`ec65615d21bab68e`. Three exact-reference `instructions:u` profiles had zero lost samples and
+attributed `bench_write_i64_to_slice::<false>` **14.48/16.42/15.71% self**
+(median **15.71%**), with `write_u64_digits` separately visible at 24.80–26.49%.
+
+The same invocation then ran 24 position-balanced rounds with two tmp+copy reference slots (A/A)
+and one direct candidate slot (A/B). The A/A median was **1.000000032**, bootstrap 95% median CI
+**[0.999999981, 1.000000153]**, null CV `0.000058%`. Reference/candidate instructions were
+**0.979436579x** (effect CV `0.000075%`): the direct path uses about **2.100% more**
+instructions. The decision used only the A/A median CI with a 2x radius
+(`1.000000306` threshold); CV is provenance only. **REJECT.** This is a corrected result, not a
+continuation of the old arbitrary 1% gate.
+
+Harness source SHA-256 is
+`64fa698af5585312842707639b7d837afad04ca42b99301e921f8b0c15ad3736`.
+Concrete retry predicate: revisit only after a compiler/codegen change to `ilog10`,
+`write_u64_digits`, or small fixed-size copies, or when a profile shows a materially different
+digit-length distribution in the live `encode_redis_double` caller; any retry must retain one-ELF
+A/A+A/B measurement, exact-frame non-zero self-time with zero lost samples, and the median-CI gate.
+
+## 2026-07-25 NobleOsprey: RESURRECTED / KEEP — LFU ZRANGEBYLEX borrow-scan 2→1
+
+The Meta-Lever 1 audit voided the 2026-07-14 LFU
+`zrangebylex_members_borrow_scan` rejection: its directional 1.101x result sat inside the old
+multi-connection null band and recorded neither an ELF identity nor target-frame self-time. The
+same primitive was restored as a const-generic same-binary pair: production folds the LFU
+`contains_key` random-sample gate into the subsequent `get_mut` using the disjoint `rng_seed`
+field; the frozen reference retains the literal two-probe path. Validation, expiry, RNG advance,
+LFU bump, lex-range allocation/ordering, touch, sink sequence, and errors are unchanged.
+
+One fail-closed remote invocation on worker `vmi1167313` used release ELF SHA-256
+`88f1a9c6f6b3c4437d7e170125990edd148ef8c6e7b8819010ff026cac6413f1`
+(1,292,144 bytes), self-reported on line one. A 4,096-key allkeys-LFU fixture with three equal-score
+members per key proved identical sink bytes and full state digest, checksum `f40d119e5fbd2d4f`.
+Three exact-reference `instructions:u` profiles had zero lost samples and attributed
+`zrangebylex_members_borrow_scan_lfu_twoprobe_bench` **13.10/13.32/14.71% self**
+(median **13.32%**); the removed `contains_key` was independently **20.96% self** in trial one.
+
+The same invocation ran 24 position-balanced A/A+A/B rounds. Reference/candidate instructions were
+**1.093620068x**, or **8.560% fewer candidate instructions**. The A/A median was
+**1.000013534**, bootstrap 95% median CI **[0.999978684, 1.000089043]**, null CV
+`0.012349%`, effect CV `0.011223%`. The median-CI 2x threshold was `1.000178086`; CV
+was provenance only. **KEEP / historical VOID superseded.** The harness was also corrected to
+remove its stale `.max(1.01)` magnitude floor, so all four store resurrection decisions are now
+strictly median-CI gated.
+
+Harness source SHA-256 is
+`f3c38de317a6b007818622ce01a6a676001176b0ac3d1b32c8af69d442ef4751`.
+Concrete retry predicate: rerun after changes to `zrangebylex_members_borrow_scan`,
+`lex_range_refs`, LFU RNG/bump semantics, the keyspace map/hash implementation, allocator, or
+release codegen; invalidate if exact reference self-time becomes zero, samples are lost, the A/A
+median CI does not bracket 1.0, or the A/B effect fails the 2x CI-radius threshold.

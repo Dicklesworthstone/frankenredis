@@ -16,7 +16,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use fr_store::{SscanReplyEvent, Store, StreamField};
+use fr_store::{MaxmemoryPolicy, SmembersScanEvent, SscanReplyEvent, Store, StreamField};
 use sha2::{Digest, Sha256};
 
 const STAT_ROUNDS: usize = 24;
@@ -28,16 +28,23 @@ enum Scenario {
     ScanClone,
     SetExpiry,
     XaddExpiry,
+    ZrangebylexLfu,
 }
 
 impl Scenario {
-    const ALL: [Self; 3] = [Self::ScanClone, Self::SetExpiry, Self::XaddExpiry];
+    const ALL: [Self; 4] = [
+        Self::ScanClone,
+        Self::SetExpiry,
+        Self::XaddExpiry,
+        Self::ZrangebylexLfu,
+    ];
 
     const fn name(self) -> &'static str {
         match self {
             Self::ScanClone => "scan_clone",
             Self::SetExpiry => "set_expiry",
             Self::XaddExpiry => "xadd_expiry",
+            Self::ZrangebylexLfu => "zrangebylex_lfu",
         }
     }
 
@@ -46,6 +53,7 @@ impl Scenario {
             Self::ScanClone => "::sscan",
             Self::SetExpiry => "set_plain_borrowed_expiry_reference_bench",
             Self::XaddExpiry => "xadd_expiry_reference_bench",
+            Self::ZrangebylexLfu => "zrangebylex_members_borrow_scan_lfu_twoprobe_bench",
         }
     }
 
@@ -54,6 +62,7 @@ impl Scenario {
             Self::ScanClone => 200_000,
             Self::SetExpiry => 2_000_000,
             Self::XaddExpiry => 300_000,
+            Self::ZrangebylexLfu => 200_000,
         }
     }
 
@@ -62,6 +71,7 @@ impl Scenario {
             Self::ScanClone => 2_000_000,
             Self::SetExpiry => 20_000_000,
             Self::XaddExpiry => 2_000_000,
+            Self::ZrangebylexLfu => 2_000_000,
         }
     }
 
@@ -257,11 +267,82 @@ fn run_xadd(arm: Arm, repeats: usize) -> u64 {
     black_box(checksum)
 }
 
+fn build_lex_store() -> (Store, Vec<Vec<u8>>) {
+    const KEYSPACE: usize = 4_096;
+    let mut store = Store::new();
+    store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+    store.lfu_decay_time = 0;
+    let mut keys = Vec::with_capacity(KEYSPACE);
+    for index in 0..KEYSPACE {
+        let key = format!("lex:{index:08}").into_bytes();
+        store
+            .zadd(
+                &key,
+                &[
+                    (1.0, b"member-a".to_vec()),
+                    (1.0, b"member-b".to_vec()),
+                    (1.0, b"member-c".to_vec()),
+                ],
+                1_000,
+            )
+            .expect("lex fixture ZADD succeeds");
+        keys.push(key);
+    }
+    (store, keys)
+}
+
+fn lex_once(store: &mut Store, key: &[u8], arm: Arm) -> u64 {
+    let mut checksum = 0xcbf2_9ce4_8422_2325_u64;
+    let mut sink = |event: SmembersScanEvent<'_>| match event {
+        SmembersScanEvent::Len(len) => {
+            checksum = fold_word(checksum, len as u64);
+        }
+        SmembersScanEvent::Member(member) => {
+            checksum = fold_bytes(checksum, member);
+        }
+    };
+    match arm {
+        Arm::Reference => store
+            .zrangebylex_members_borrow_scan_lfu_twoprobe_bench(
+                black_box(key),
+                black_box(b"-"),
+                black_box(b"+"),
+                false,
+                2_000,
+                &mut sink,
+            )
+            .expect("reference ZRANGEBYLEX succeeds"),
+        Arm::Candidate => store
+            .zrangebylex_members_borrow_scan(
+                black_box(key),
+                black_box(b"-"),
+                black_box(b"+"),
+                false,
+                2_000,
+                &mut sink,
+            )
+            .expect("candidate ZRANGEBYLEX succeeds"),
+    }
+    checksum
+}
+
+fn run_lex(arm: Arm, repeats: usize) -> u64 {
+    let (mut store, keys) = build_lex_store();
+    let mut checksum = 0_u64;
+    for index in 0..repeats {
+        checksum =
+            checksum.wrapping_add(lex_once(&mut store, &keys[index & (keys.len() - 1)], arm));
+    }
+    let digest = store.state_digest();
+    black_box(fold_bytes(checksum, digest.as_bytes()))
+}
+
 fn run_loop(scenario: Scenario, arm: Arm, repeats: usize) -> u64 {
     match scenario {
         Scenario::ScanClone => run_scan(arm, repeats),
         Scenario::SetExpiry => run_set(arm, repeats),
         Scenario::XaddExpiry => run_xadd(arm, repeats),
+        Scenario::ZrangebylexLfu => run_lex(arm, repeats),
     }
 }
 
@@ -278,6 +359,16 @@ fn child_args() -> Result<Option<(Scenario, Arm, usize)>, String> {
         .parse()
         .map_err(|error| format!("invalid child repeat count: {error}"))?;
     Ok(Some((scenario, arm, repeats)))
+}
+
+fn selected_scenarios() -> Result<Vec<Scenario>, String> {
+    let args: Vec<String> = env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--scenario") {
+        return Ok(vec![Scenario::parse(
+            args.get(2).ok_or("missing selected scenario")?,
+        )?]);
+    }
+    Ok(Scenario::ALL.to_vec())
 }
 
 fn cv(samples: &[f64]) -> f64 {
@@ -362,6 +453,25 @@ fn correctness_gate(scenario: Scenario) {
             assert_eq!(candidate_digest, reference_digest, "XADD state differs");
             println!(
                 "CORRECTNESS scenario={} result=state_identical checksum={reference_digest}",
+                scenario.name()
+            );
+        }
+        Scenario::ZrangebylexLfu => {
+            let (mut reference, keys) = build_lex_store();
+            let (mut candidate, candidate_keys) = build_lex_store();
+            let reference_result = lex_once(&mut reference, &keys[0], Arm::Reference);
+            let candidate_result = lex_once(&mut candidate, &candidate_keys[0], Arm::Candidate);
+            assert_eq!(
+                candidate_result, reference_result,
+                "ZRANGEBYLEX output differs"
+            );
+            assert_eq!(
+                candidate.state_digest(),
+                reference.state_digest(),
+                "ZRANGEBYLEX LFU state differs"
+            );
+            println!(
+                "CORRECTNESS scenario={} result=state_and_bytes_identical checksum={reference_result:016x}",
                 scenario.name()
             );
         }
@@ -558,7 +668,7 @@ fn run_instruction_ab(executable: &Path, scenario: Scenario) -> Result<(), Strin
     let null_ci_radius = (null_ci95_low - 1.0)
         .abs()
         .max((null_ci95_high - 1.0).abs());
-    let decisive_threshold = (1.0 + 2.0 * null_ci_radius).max(1.01);
+    let decisive_threshold = 1.0 + 2.0 * null_ci_radius;
     let verdict = if effect_median >= decisive_threshold {
         "KEEP"
     } else if effect_median.recip() >= decisive_threshold {
@@ -599,7 +709,7 @@ fn main() -> Result<(), String> {
         .unwrap_or_else(|| "unknown".into());
     println!("WORKER_ID {hostname}");
 
-    for scenario in Scenario::ALL {
+    for scenario in selected_scenarios()? {
         correctness_gate(scenario);
         run_profile(&executable, scenario)
             .map_err(|error| format!("PROFILE INVALID scenario={}: {error}", scenario.name()))?;

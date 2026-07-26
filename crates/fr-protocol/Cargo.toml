@@ -47,6 +47,13 @@ harness = false
 name = "encode_bulk_string_fastpath"
 harness = false
 
+# Meta-Lever 1 GATE-VOID resurrection: direct caller-slice integer digits versus the frozen
+# temporary-buffer-and-copy reference, in one self-hashing A/A+A/B median-CI invocation.
+[[bench]]
+name = "write_i64_to_slice_fastpath"
+harness = false
+required-features = ["bench-reference"]
+
 # Same-binary A/B for the inbound per-argument bulk-length parse (every command argument): fused
 # single-pass scan+accumulate vs the prior read_line + parse_i64_strict two-pass.
 [[bench]]

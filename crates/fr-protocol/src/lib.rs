@@ -451,12 +451,46 @@ pub fn push_redis_double_ascii(out: &mut Vec<u8>, value: f64) {
 /// returning the byte length. Byte-identical to [`push_i64`] (same
 /// `write_u64_digits` core, same leading `-`), but into a caller-owned stack
 /// slice so a length-prefixed reply can be framed without a memmove.
+#[cfg_attr(feature = "bench-reference", inline(never))]
 fn write_i64_to_slice(n: i64, buf: &mut [u8]) -> usize {
+    write_i64_to_slice_impl::<false>(n, buf)
+}
+
+#[inline(always)]
+fn write_i64_to_slice_impl<const DIRECT: bool>(n: i64, buf: &mut [u8]) -> usize {
     let (neg, val) = if n < 0 {
         (true, (n as i128).unsigned_abs() as u64)
     } else {
         (false, n as u64)
     };
+    if DIRECT {
+        let digits = decimal_u64_len(val);
+        let total = usize::from(neg) + digits;
+        let mut pos = total;
+        let mut remaining = val;
+        while remaining >= 100 {
+            let pair = (remaining % 100) as usize * 2;
+            remaining /= 100;
+            pos -= 2;
+            buf[pos] = DIGIT_PAIRS[pair];
+            buf[pos + 1] = DIGIT_PAIRS[pair + 1];
+        }
+        if remaining < 10 {
+            pos -= 1;
+            buf[pos] = b'0' + remaining as u8;
+        } else {
+            let pair = remaining as usize * 2;
+            pos -= 2;
+            buf[pos] = DIGIT_PAIRS[pair];
+            buf[pos + 1] = DIGIT_PAIRS[pair + 1];
+        }
+        if neg {
+            buf[0] = b'-';
+        }
+        debug_assert_eq!(pos, usize::from(neg));
+        return total;
+    }
+
     let mut tmp = [0u8; 20];
     let pos = write_u64_digits(&mut tmp, 20, val);
     let digits = &tmp[pos..];
@@ -467,6 +501,14 @@ fn write_i64_to_slice(n: i64, buf: &mut [u8]) -> usize {
     }
     buf[i..i + digits.len()].copy_from_slice(digits);
     i + digits.len()
+}
+
+/// Same-binary resurrection hook for the direct `write_i64_to_slice` digit path.
+#[cfg(feature = "bench-reference")]
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_write_i64_to_slice<const DIRECT: bool>(n: i64, buf: &mut [u8; 24]) -> usize {
+    write_i64_to_slice_impl::<DIRECT>(n, buf)
 }
 
 /// Frame a RESP integer reply (`:<n>\r\n`) into `out`. `FUSED == true` (production) builds the
