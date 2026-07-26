@@ -693,6 +693,7 @@ OPTIONS:\n\
   --masteruser <USERNAME>    Authenticate to the configured primary as this ACL user\n\
   --masterauth <PASSWORD>    Authenticate to the configured primary with this password\n\
   --enable-debug-command <VALUE>  Allow DEBUG commands: no | local | yes (default: no, matches upstream Redis 7.2)\n\
+  --io-uring-output          Opt in to batched io_uring writes (requires io-uring-writes feature)\n\
   --help                     Show this help\n"
     )
 }
@@ -936,6 +937,8 @@ fn main() -> ExitCode {
     let mut cli_rdb = false;
     let mut cli_enable_debug_command: Option<String> = None;
     let mut sentinel_mode = false;
+    #[cfg(feature = "io-uring-writes")]
+    let mut io_uring_output = false;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -1053,6 +1056,19 @@ fn main() -> ExitCode {
                     return ExitCode::from(1);
                 }
                 cli_enable_debug_command = Some(args[i].clone());
+            }
+            "--io-uring-output" => {
+                #[cfg(feature = "io-uring-writes")]
+                {
+                    io_uring_output = true;
+                }
+                #[cfg(not(feature = "io-uring-writes"))]
+                {
+                    eprintln!(
+                        "error: --io-uring-output requires a build with the io-uring-writes feature"
+                    );
+                    return ExitCode::from(1);
+                }
             }
             "--help" | "-h" => {
                 print!("{}", server_help_text());
@@ -1242,6 +1258,31 @@ fn main() -> ExitCode {
             None
         }
     };
+
+    // (io-uring-writes) Batched write submission is both feature-gated and
+    // runtime-opt-in. A feature-enabled binary without --io-uring-output takes
+    // the behaviorally unchanged mio path, which is the same-ELF control arm.
+    // An explicit request fails closed if the kernel cannot create a ring.
+    #[cfg(feature = "io-uring-writes")]
+    let mut uring_writer = if io_uring_output {
+        match fr_uring::BatchWriter::new(fr_uring::DEFAULT_RING_ENTRIES) {
+            Ok(writer) => {
+                URING_WRITES_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
+                eprintln!("io_uring batched output enabled");
+                Some(writer)
+            }
+            Err(e) => {
+                eprintln!("error: --io-uring-output requested but ring creation failed: {e}");
+                return ExitCode::from(1);
+            }
+        }
+    } else {
+        None
+    };
+    #[cfg(feature = "io-uring-writes")]
+    let mut uring_batched: Vec<Token> = Vec::new();
+    #[cfg(feature = "io-uring-writes")]
+    let mut uring_outcomes: Vec<fr_uring::SendOutcome> = Vec::new();
 
     // (frankenredis-jd75g) Bind one listener per configured address. Startup
     // binds the single configured bind address; CONFIG SET bind can later grow
@@ -1547,6 +1588,25 @@ fn main() -> ExitCode {
             &mut write_tokens,
             &mut closing_tokens,
         );
+
+        // (io-uring-writes) One `io_uring_enter` for every connection that
+        // accumulated a reply during this iteration, replacing one `sendto` per
+        // connection. This sits after every event-loop output producer and the
+        // final writer-pool drain so Pub/Sub, unblock, replication, MONITOR, and
+        // normal command replies all reach the same end-of-iteration batch.
+        #[cfg(feature = "io-uring-writes")]
+        if let Some(writer) = uring_writer.as_mut() {
+            flush_uring_batch(
+                writer,
+                &mut clients,
+                &mut runtime,
+                &mut poll,
+                &mut write_tokens,
+                &mut closing_tokens,
+                &mut uring_batched,
+                &mut uring_outcomes,
+            );
+        }
 
         // Clean up clients marked for closing whose write buffers are drained.
         let to_remove: Vec<Token> = closing_tokens
@@ -24825,6 +24885,207 @@ fn frame_matches_suppressed_replication_reply(argv: &[Vec<u8>]) -> bool {
     }
 }
 
+/// Whether the io_uring batched-write path is live for this process.
+///
+/// Set once at startup and never again, so a relaxed load is sufficient. It is a
+/// process-global rather than a field on `OutputDriveContext` deliberately: the
+/// value is immutable after startup and threading it through all ten context
+/// construction sites would add churn to the hot path for no behavioural gain.
+#[cfg(feature = "io-uring-writes")]
+static URING_WRITES_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[inline]
+fn uring_writes_active() -> bool {
+    #[cfg(feature = "io-uring-writes")]
+    {
+        URING_WRITES_ACTIVE.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    #[cfg(not(feature = "io-uring-writes"))]
+    {
+        false
+    }
+}
+
+/// Submit every connection with pending output as ONE `io_uring` batch.
+///
+/// Called once per event-loop iteration, after readiness has been dispatched.
+/// Applies exactly the semantics `ClientConnection::try_flush` applies per
+/// connection — advance `write_pos`, clear on full drain, arm WRITABLE on
+/// WouldBlock, close on error — so the observable byte stream and per-connection
+/// ordering are identical to the inline path. The only difference is that the
+/// kernel is entered once instead of once per ready connection.
+#[cfg(feature = "io-uring-writes")]
+#[allow(clippy::too_many_arguments)]
+fn flush_uring_batch(
+    writer: &mut fr_uring::BatchWriter,
+    clients: &mut ClientMap,
+    runtime: &mut Runtime,
+    poll: &mut Poll,
+    write_tokens: &mut TokenSet,
+    closing_tokens: &mut TokenSet,
+    batched: &mut Vec<Token>,
+    outcomes: &mut Vec<fr_uring::SendOutcome>,
+) {
+    // `try_flush` loops until the socket returns WouldBlock, so a multi-megabyte
+    // reply drains within a single event-loop iteration. A batch that sent once
+    // per connection per iteration would instead advance by one socket buffer per
+    // poll cycle — with WRITABLE disarmed that degrades to timer-driven progress
+    // and stalls large replies for seconds. So round-trip the batch until every
+    // connection is either drained or genuinely WouldBlock, which preserves the
+    // drain semantics exactly while still costing one `io_uring_enter` per round
+    // rather than one syscall per connection.
+    //
+    // Rounds are bounded so a pathological writer cannot starve the rest of the
+    // event loop; whatever remains keeps its place in `write_tokens` and, having
+    // been armed WRITABLE on WouldBlock, is driven by epoll on the next tick.
+    const MAX_DRAIN_ROUNDS: usize = 64;
+    for _ in 0..MAX_DRAIN_ROUNDS {
+        if !flush_uring_round(
+            writer,
+            clients,
+            runtime,
+            poll,
+            write_tokens,
+            closing_tokens,
+            batched,
+            outcomes,
+        ) {
+            break;
+        }
+    }
+
+    // LIVENESS: anything still holding bytes after the bounded rounds — a reply
+    // larger than the rounds could drain — must be handed back to epoll, exactly
+    // as the inline path does. Without this the connection sits with WRITABLE
+    // disarmed and no pending readable event, so its remainder is driven only by
+    // the poll timeout: multi-megabyte replies then crawl and clients time out.
+    // (Found by the byte-identity differ at 8 concurrent connections before any
+    // timing was taken — the inline `try_flush` loops to WouldBlock, so parity
+    // requires either draining fully or re-arming.)
+    let stragglers: Vec<Token> = write_tokens.iter().copied().collect();
+    for token in stragglers {
+        let Some(conn) = clients.get_mut(&token) else {
+            continue;
+        };
+        if conn.closing || conn.write_failed || conn.writer_in_flight() {
+            continue;
+        }
+        if conn.write_pos < conn.write_buf.len() {
+            arm_main_writable(token, conn, poll, write_tokens);
+        }
+    }
+}
+
+/// One submit/apply round. Returns true when at least one connection wrote bytes
+/// and still has more pending, i.e. another round is worthwhile.
+#[cfg(feature = "io-uring-writes")]
+#[allow(clippy::too_many_arguments)]
+fn flush_uring_round(
+    writer: &mut fr_uring::BatchWriter,
+    clients: &mut ClientMap,
+    runtime: &mut Runtime,
+    poll: &mut Poll,
+    write_tokens: &mut TokenSet,
+    closing_tokens: &mut TokenSet,
+    batched: &mut Vec<Token>,
+    outcomes: &mut Vec<fr_uring::SendOutcome>,
+) -> bool {
+    use std::os::fd::AsRawFd;
+
+    if write_tokens.is_empty() {
+        return false;
+    }
+    batched.clear();
+
+    // Phase 1 — borrow `clients` immutably to build the job list. The borrow
+    // ends with `jobs` at the close of this block, which is what lets phase 2
+    // take `&mut clients`.
+    {
+        let mut jobs: Vec<fr_uring::SendJob<'_>> = Vec::with_capacity(write_tokens.len());
+        for token in write_tokens.iter() {
+            let Some(conn) = clients.get(token) else {
+                continue;
+            };
+            // A writer-pool job already owns this connection's buffer; batching
+            // it too would duplicate bytes on the wire.
+            if conn.writer_in_flight() || conn.closing || conn.write_failed {
+                continue;
+            }
+            let pending = &conn.write_buf[conn.write_pos..];
+            if pending.is_empty() {
+                continue;
+            }
+            jobs.push(fr_uring::SendJob {
+                fd: conn.stream.as_raw_fd(),
+                bytes: pending,
+            });
+            batched.push(*token);
+        }
+        if jobs.is_empty() {
+            return false;
+        }
+        if writer.send_batch(&jobs, outcomes).is_err() {
+            // The all-or-nothing queue push failed before publishing any SQE.
+            // Leave every buffer untouched and let the next iteration retry; the
+            // connections stay in `write_tokens`, so nothing is dropped.
+            return false;
+        }
+    }
+
+    // Phase 2 — apply outcomes in request order.
+    let mut progressed = false;
+    for (index, token) in batched.iter().enumerate() {
+        let Some(outcome) = outcomes.get(index).copied() else {
+            break;
+        };
+        let Some(conn) = clients.get_mut(token) else {
+            continue;
+        };
+        match outcome {
+            // Preserve `ClientConnection::try_flush` semantics: a zero-length
+            // successful send for a non-empty buffer is WriteZero, not a reason
+            // to keep the connection armed forever.
+            fr_uring::SendOutcome::Wrote(0) => {
+                conn.write_failed = true;
+                conn.closing = true;
+                closing_tokens.insert(*token);
+            }
+            fr_uring::SendOutcome::Wrote(n) => {
+                conn.write_pos += n;
+                if conn.write_pos >= conn.write_buf.len() {
+                    // Full drain: same reclaim as `try_flush` — clear, no memmove.
+                    conn.write_buf.clear();
+                    conn.write_pos = 0;
+                    runtime.note_write_event();
+                    write_tokens.remove(token);
+                    conn.session.output_buffer_bytes = 0;
+                    ensure_main_writable_disarmed(*token, conn, poll);
+                } else {
+                    // Short write: the unsent suffix stays put and this token
+                    // stays in `write_tokens`, so the next round re-batches the
+                    // remainder from the advanced cursor. `n > 0` means the
+                    // socket accepted bytes, so another round can make progress.
+                    conn.session.output_buffer_bytes = conn.pending_output_bytes();
+                    progressed |= n > 0;
+                }
+            }
+            fr_uring::SendOutcome::WouldBlock => {
+                // Socket buffer full — hand the retry back to epoll, exactly as
+                // the inline path does on `ErrorKind::WouldBlock`.
+                arm_main_writable(*token, conn, poll, write_tokens);
+                conn.session.output_buffer_bytes = conn.pending_output_bytes();
+            }
+            fr_uring::SendOutcome::Failed(_) => {
+                conn.write_failed = true;
+                conn.closing = true;
+                closing_tokens.insert(*token);
+            }
+        }
+    }
+    progressed
+}
+
 struct OutputDriveContext<'a> {
     runtime: &'a mut Runtime,
     poll: &'a mut Poll,
@@ -24849,6 +25110,24 @@ fn drive_client_output(
     if conn.write_buf.is_empty() {
         ctx.write_tokens.remove(&token);
         conn.session.output_buffer_bytes = 0;
+        ensure_main_writable_disarmed(token, conn, ctx.poll);
+        return;
+    }
+
+    // (io-uring-writes) When batched submission is active, do NOT write here.
+    // The measured shape at `-P1 -c50` is one `sendto` per operation — 229,740
+    // calls, 47.4% of wall time — while a single `epoll_wait` already reports
+    // ~48 ready connections. Deferring to the end-of-iteration batch turns those
+    // ~48 submission syscalls into one `io_uring_enter`. The bytes and the
+    // per-connection ordering are unchanged: the buffer and `write_pos` are left
+    // exactly as the inline path would have found them, `write_tokens` still
+    // marks this connection as having pending output, and `flush_uring_batch`
+    // applies the same short-write / WouldBlock / error handling `try_flush`
+    // does. WRITABLE stays disarmed because the batch, not epoll, drives the
+    // retry — a WouldBlock outcome re-arms it.
+    if allow_sync_fallback && uring_writes_active() {
+        ctx.write_tokens.insert(token);
+        conn.session.output_buffer_bytes = conn.pending_output_bytes();
         ensure_main_writable_disarmed(token, conn, ctx.poll);
         return;
     }

@@ -1,0 +1,16 @@
+[package]
+name = "fr-uring"
+version = "0.1.0"
+edition = "2024"
+
+# NOTE: this crate deliberately does NOT declare `#![forbid(unsafe_code)]`.
+# It is the single audited unsafe boundary for io_uring submission, so that
+# `fr-server` (which does forbid it) can batch socket writes without relaxing
+# its own guarantee. The entire unsafe surface is one all-or-nothing
+# `sq.push_multiple` call in `BatchWriter::submit_chunk`, with its soundness
+# argument written out on
+# `send_batch` and covered by the tests in this crate.
+
+[dependencies]
+io-uring = "0.7.13"
+libc.workspace = true

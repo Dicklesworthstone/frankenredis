@@ -15,6 +15,7 @@ members = [
   "crates/fr-runtime",
   "crates/fr-sentinel",
   "crates/fr-server",
+  "crates/fr-uring",
 ]
 
 [workspace.package]

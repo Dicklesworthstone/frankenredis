@@ -8,6 +8,85 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-07-26 NobleOsprey (cod/MEASURE): REJECT (VALID-AB) — synchronous io_uring cross-connection SEND batching removes submissions but makes P1 SET 8.78% slower (`frankenredis-ev947`, `frankenredis-mpc9m`)
+
+- **Negative-ledger-first / retry predicate admitted.** Before implementation, both ledgers were
+  grepped for `io_uring`, `submission batching`, `send_batch`, and `push_multiple`. The only prior
+  io_uring verdict is the 2026-07-25 P16 premise REJECT: an already-contiguous per-connection
+  pipeline has nothing to gather at 0.13–0.16 syscalls/op. Its independent reopening predicate was
+  a workload with many small non-contiguous buffers. Lane M supplied exactly that distinct surface:
+  P1 with 50 simultaneously ready connections, where the measured baseline performs one SEND
+  submission per operation. This row does **not** reopen P16 or the already-rejected `writev`
+  family.
+- **One default-off swing.** New workspace crate `fr-uring` isolates the single audited
+  `SubmissionQueue::push_multiple` unsafe boundary behind a safe `BatchWriter`. Feature
+  `io-uring-writes` only compiles support; runtime flag `--io-uring-output` is also required and
+  fails closed if ring creation fails. The exact same feature-built server ELF without the flag is
+  the mio control. No default behavior changes.
+- **Counted mechanism and behavior proof.** The structural census moved output submissions from
+  **1.000/op to 0.176/op** (**5.7x fewer**) while a pre-timing differential sent **15.9 MB** of
+  replies at 1/8/50 connections, including 1 MiB and 4 MiB values and deep pipelines, with
+  byte-identical output and identical `DEBUG DIGEST`. The final harness additionally compares every
+  fixed-work SET reply byte to its RESP oracle before it can time the result. The mechanism is real;
+  the verdict below says that removing it does not pay in this synchronous design.
+- **Exact same-invocation evidence.** One strict-remote invocation on worker `vmi1264463`
+  (Linux **6.17.0-40**) built and ran one server ELF, SHA-256
+  **`63759f24b67145ba0556e7dca64a7897cd4c42ed51053b6c43342d4cb9ea2f8c`**, and one
+  harness ELF, SHA-256
+  **`4a6172f781c4387ed3d3f2cb371a0c4b85ac94c41946be34661303198f3a71df`**.
+  The server core was 0.2% busy and client core 2.8% busy at admission. `perf` then attributed
+  **0.27% exact self-time** to `__do_sys_io_uring_enter` with **0 lost samples**, proving the
+  candidate reached the intended path. Each of 64 samples ran all six arm permutations, swapped
+  the two mio control identities, interleaved after every 25 groups, fixed each arm at 200,000
+  operations, and counted both wall time and `/proc/<pid>/stat` user+system CPU ticks. `cv` was
+  printed only as provenance.
+- **Median-CI gate, never CV.** This row's ratio is `mio/io_uring`, not the ledger's usual
+  fr/redis ratio, so below 1.0 means the candidate is slower. Wall A/A null median was
+  **0.995359365**, bootstrap 95% CI **[0.980729553, 1.010529659]**, yielding the
+  prespecified 2x null margin **[0.961459105, 1.038540895]**. The A/B median was
+  **0.919263265**, CI **[0.908668386, 0.927098622]**: wholly beyond the losing edge, a formal
+  **REJECT** and an **8.78% median wall regression**. CPU A/A was **0.995023143**
+  [0.982160601, 1.010033445], 2x margin [0.964321202, 1.035678798]; CPU A/B was
+  **0.959164828** [0.941602068, 0.971335007], therefore **HOLD**, not misreported as a reject.
+  Null/effect CVs were wall 5.8815%/4.6733% and CPU 4.8816%/4.6011%; they did not gate either
+  verdict.
+- **Full adjudication trail — no hidden discarded result.**
+
+  | attempt | result | concrete retry predicate / disposition |
+  |---|---|---|
+  | arm-sized blocks | **INVALID**, A/A median 1.057 | Interleave within each sample; executed with 25-group slices. |
+  | first interleaved P1 run | **HOLD**, null 0.99695 [0.96117, 1.02920], A/B 0.89876 [0.89365, 0.93143] | Balance control identity and increase samples; executed. |
+  | 12-sample all-configuration scout | steering only; its source was superseded before adjudication | Re-run the final source rather than ledger a stale-binary verdict; executed. |
+  | 31-pair final-source run | **INVALID**, A/A median 0.97804 outside the ±2% admission bound | Swap mio A/B identities every sample and use an even pair count; executed. |
+  | 32-pair balanced run | wall **HOLD**, A/B 0.90042 [0.87965, 0.91085] vs 2x null edge 0.90040; CPU **HOLD**, 0.93103 [0.91317, 0.95238] vs edge 0.93060 | Predeclare 64 balanced samples on the same worker and unchanged source; executed above. |
+
+- **Why it loses.** `push_multiple` does remove the submission calls, but `send_batch` immediately
+  calls `submit_and_wait` and synchronously drains every CQE before the event loop can resume.
+  Completion bookkeeping and forced wait/enter serialization cost more wall time than the SEND
+  syscalls removed. The CPU HOLD is recorded honestly and does not rescue a wall CI that is wholly
+  beyond the A/A-derived reject boundary.
+- **Correctness and quality gates.** Strict-remote `fr-uring` release-perf tests passed **6/6**,
+  including real-ring availability, oversized batches, closed peers, and a saturated socket that
+  must return `WouldBlock` without hidden internal polling. Strict-remote workspace all-target
+  `cargo check` passed. Strict-remote scoped `-D warnings` Clippy passed for all `fr-uring` targets
+  and the feature-built `frankenredis` binary. Strict-remote `fr-conformance` passed **194/194**
+  library tests, every auxiliary target, and **99/99** smoke tests. Workspace Clippy stops in
+  peer-owned `fr-store` at two pre-existing `len() == 0` diagnostics; neither is in this lever's
+  files. Fail-closed RCH correctly refused local fallback for non-compilation `cargo fmt --check`
+  (`RCH-E301`); direct nightly rustfmt passed the two new Rust files, the new `main.rs` sections
+  were already formatted, and `git diff --check` passed. Cargo-disabled UBS retained the monolith's
+  heuristic baseline (279 critical / 2,194 warning / 339 info); reviewed lane hits were test
+  panics, a test-only configurable profiler command, and bounds-checked CQE indexing, not a new
+  production defect.
+- **Concrete retry predicate.** Do **not** retry synchronous `submit_and_wait` batching. Reopen only
+  after either (a) an owned in-flight reply-buffer registry makes CQ draining asynchronous across
+  event-loop iterations, with lifetime/close/cancellation invariants tested, or (b) an SQPOLL
+  configuration demonstrates that submission does not enter the kernel synchronously. Re-run at
+  least the same **64** balanced samples, 200,000 ops/arm/sample, same-ELF A/A+A/B, byte oracle,
+  non-zero exact target self-time, and bootstrap-median 2x-null gate. Until then the feature and
+  runtime flag remain off by default; the implementation and harness are retained only as a
+  reproducible experimental substrate.
+
 ## 2026-07-25 NobleOsprey: HARNESS KEEP — Meta-Lever 2 parts 1–3 on the bulk-string encoder resurrection bench (`frankenredis-ohsk5`)
 
 - **Ledger-first target:** the 2026-06-28 rejection of two `encode_bulk_string_slice`

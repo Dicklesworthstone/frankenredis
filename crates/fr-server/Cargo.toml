@@ -21,6 +21,7 @@ fr-repl = { path = "../fr-repl" }
 fr-persist = { path = "../fr-persist" }
 fr-command = { path = "../fr-command" }
 fr-eventloop = { path = "../fr-eventloop" }
+fr-uring = { path = "../fr-uring", optional = true }
 foldhash = "0.2"
 mio.workspace = true
 tikv-jemallocator = { workspace = true, optional = true }
@@ -29,6 +30,27 @@ mimalloc = { workspace = true, optional = true }
 [features]
 # mimalloc by default: 63.6% vs 36.5% geomean parity, 70x better p99 tails
 default = ["mimalloc"]
+# io_uring batched write submission for the UNPIPELINED regime. Default OFF.
+#
+# A 2026-07-25 `perf trace -s` census at `-P1 -c50` found one `sendto` per
+# operation (229,740 calls = 47.4% of wall time) while a single `epoll_wait`
+# already reports ~48 ready connections. This feature defers those per-connection
+# writes to the end of the event-loop iteration and submits them as ONE
+# `io_uring_enter`. Vendored Redis 7.2.4 measures the same shape (one `write` per
+# op, 44.8% of wall) and its per-client write loop cannot batch this way. The
+# experiment tests that structural opening; the synchronous implementation's
+# measured REJECT and asynchronous-only retry predicate are recorded in
+# docs/NEGATIVE_EVIDENCE.md (2026-07-26).
+#
+# Explicitly NOT a pipelined-throughput lever: at `-P16` the same census measures
+# 0.13-0.16 syscalls/op for both engines because a whole batch already coalesces
+# into one write. See docs/NEGATIVE_EVIDENCE.md 2026-07-25.
+#
+# The feature only compiles support. Runtime activation additionally requires
+# `--io-uring-output`; an explicit request fails closed if ring creation fails.
+# Without the flag, the exact same ELF takes the behaviorally unchanged `mio`
+# control path.
+io-uring-writes = ["dep:fr-uring"]
 jemalloc = ["dep:tikv-jemallocator"]
 mimalloc = ["dep:mimalloc"]
 # Measurement-only control arm for the one-binary OBJECT IDLETIME floor A/B.
