@@ -11582,7 +11582,19 @@ impl Runtime {
         let failed = matches!(reply, RespFrame::Error(_));
 
         self.record_plain_xadd_borrowed_metrics(
-            key, field, value, elapsed_us, now_ms, packet_id, failed,
+            || {
+                vec![
+                    b"XADD".to_vec(),
+                    key.to_vec(),
+                    b"*".to_vec(),
+                    field.to_vec(),
+                    value.to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
         );
 
         let lazy_evicted = self.server.store.take_lazy_expired_propagation();
@@ -11608,38 +11620,150 @@ impl Runtime {
         Some(reply)
     }
 
+    /// Borrowed fast path for the steady-state stream shape used in production:
+    /// `XADD key MAXLEN ~ N * field value`. It shares the exact approximate
+    /// MAXLEN trim helper with the generic handler, but skips the failed
+    /// exact-arity parser cascade, owned argv copy, and generic command router.
+    ///
+    /// Only the common one-field, auto-ID, approximate/no-LIMIT form is served.
+    /// Every malformed value, alternate option form, explicit ID, disabling
+    /// runtime state, or lookup failure returns `None` before mutation and is
+    /// reprocessed by the generic path for byte-exact diagnostics.
     #[allow(clippy::too_many_arguments)]
-    fn record_plain_xadd_borrowed_metrics(
+    pub fn execute_plain_xadd_maxlen_approx_borrowed(
         &mut self,
         key: &[u8],
+        maxlen_keyword: &[u8],
+        approx_keyword: &[u8],
+        threshold_arg: &[u8],
+        id_arg: &[u8],
         field: &[u8],
         value: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if self.policy.gate.max_array_len < 8
+            || self.policy.gate.max_bulk_len < b"XADD".len()
+            || !maxlen_keyword.eq_ignore_ascii_case(b"MAXLEN")
+            || approx_keyword != b"~"
+            || id_arg != b"*"
+            || [
+                key,
+                maxlen_keyword,
+                approx_keyword,
+                threshold_arg,
+                id_arg,
+                field,
+                value,
+            ]
+            .into_iter()
+            .any(|arg| arg.len() > self.policy.gate.max_bulk_len)
+        {
+            return None;
+        }
+        let max_len = fr_command::parse_i64_arg(threshold_arg)
+            .ok()
+            .filter(|value| *value >= 0)
+            .and_then(|value| usize::try_from(value).ok())?;
+
+        // Match the generic ordering: parse options, then resolve the write
+        // lookup/auto-ID, then enter the conservative default-write gate.
+        let last_id = self.server.store.xlast_id_no_stat(key, now_ms).ok()?;
+        let id = fr_command::next_auto_stream_id(last_id, now_ms)?;
+        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("xadd");
+        self.session.last_argv_len_sum = b"XADD".len()
+            + key.len()
+            + maxlen_keyword.len()
+            + approx_keyword.len()
+            + threshold_arg.len()
+            + id_arg.len()
+            + field.len()
+            + value.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let fields: Vec<(Vec<u8>, Vec<u8>)> = vec![(field.to_vec(), value.to_vec())];
+        let reply = match self.server.store.xadd(key, id, &fields, now_ms) {
+            Ok(()) => {
+                // Inline trimming removes entries but, like upstream XADD, must
+                // not add dirty units beyond the append itself.
+                let dirty_after_add = self.server.store.dirty;
+                let removed = fr_command::apply_xadd_maxlen_trim_after_add(
+                    &mut self.server.store,
+                    key,
+                    max_len,
+                    true,
+                    false,
+                    None,
+                    now_ms,
+                );
+                self.server.store.dirty = dirty_after_add;
+                self.server.store.last_xadd_trimmed = removed > 0;
+                RespFrame::BulkString(Some(fr_command::format_stream_id(id)))
+            }
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let elapsed_us = self.finish_chained_command(start);
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_xadd_borrowed_metrics(
+            || {
+                vec![
+                    b"XADD".to_vec(),
+                    key.to_vec(),
+                    maxlen_keyword.to_vec(),
+                    approx_keyword.to_vec(),
+                    threshold_arg.to_vec(),
+                    id_arg.to_vec(),
+                    field.to_vec(),
+                    value.to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_reply(&reply);
+        Some(reply)
+    }
+
+    fn record_plain_xadd_borrowed_metrics(
+        &mut self,
+        build_argv: impl Fn() -> Vec<Vec<u8>>,
         elapsed_us: u64,
         now_ms: u64,
         packet_id: u64,
         failed: bool,
     ) {
         let mut argv: Option<Vec<Vec<u8>>> = None;
-        let build = |key: &[u8], field: &[u8], value: &[u8]| -> Vec<Vec<u8>> {
-            vec![
-                b"XADD".to_vec(),
-                key.to_vec(),
-                b"*".to_vec(),
-                field.to_vec(),
-                value.to_vec(),
-            ]
-        };
         if self.server.store.slowlog_log_slower_than_us >= 0
             && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
         {
-            let argv_ref = argv.get_or_insert_with(|| build(key, field, value));
+            let argv_ref = argv.get_or_insert_with(&build_argv);
             self.record_slowlog(argv_ref, elapsed_us, now_ms);
         }
 
         let threshold_ms = self.server.store.latency_tracker.threshold_ms;
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
-            let argv_ref = argv.get_or_insert_with(|| build(key, field, value));
+            let argv_ref = argv.get_or_insert_with(&build_argv);
             self.server
                 .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
@@ -11656,7 +11780,7 @@ impl Runtime {
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
-            let argv_ref = argv.get_or_insert_with(|| build(key, field, value));
+            let argv_ref = argv.get_or_insert_with(build_argv);
             self.record_threat_event(ThreatEventInput {
                 now_ms,
                 packet_id,
@@ -18766,18 +18890,14 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        let result = self.server.store.lmove_with(
-            src,
-            dst,
-            wherefrom,
-            whereto,
-            now_ms,
-            |value| {
+        let result = self
+            .server
+            .store
+            .lmove_with(src, dst, wherefrom, whereto, now_ms, |value| {
                 if !suppress_reply {
                     encode_bulk_string_slice(Some(value), resp3, out);
                 }
-            },
-        );
+            });
         let elapsed_us = self.finish_chained_command(start);
         let mut error_reply = None;
         match result {
@@ -45116,21 +45236,10 @@ mod tests {
         }
 
         let fast_reply = fast
-            .execute_plain_set_opt_get_borrowed(
-                b"hot",
-                b"new heap payload",
-                b"KEEPTTL",
-                20,
-            )
+            .execute_plain_set_opt_get_borrowed(b"hot", b"new heap payload", b"KEEPTTL", 20)
             .expect("borrowed SET KEEPTTL GET should engage");
         let generic_reply = generic.execute_frame(
-            command(&[
-                b"SET",
-                b"hot",
-                b"new heap payload",
-                b"KEEPTTL",
-                b"GET",
-            ]),
+            command(&[b"SET", b"hot", b"new heap payload", b"KEEPTTL", b"GET"]),
             20,
         );
         assert_eq!(fast_reply, generic_reply);
@@ -45162,10 +45271,8 @@ mod tests {
         let fast_reply = fast
             .execute_plain_set_opt_get_borrowed(b"list", b"new", b"KEEPTTL", 50)
             .expect("borrowed SET KEEPTTL GET wrongtype should engage");
-        let generic_reply = generic.execute_frame(
-            command(&[b"SET", b"list", b"new", b"KEEPTTL", b"GET"]),
-            50,
-        );
+        let generic_reply =
+            generic.execute_frame(command(&[b"SET", b"list", b"new", b"KEEPTTL", b"GET"]), 50);
         assert_eq!(fast_reply, generic_reply);
         assert!(matches!(
             fast_reply,
@@ -46186,7 +46293,12 @@ mod tests {
     fn plain_lmove_borrowed_into_matches_generic() {
         for (case, wherefrom, whereto, resp3) in [
             ("distinct_ll", b"LEFT".as_slice(), b"LEFT".as_slice(), false),
-            ("distinct_lr", b"LEFT".as_slice(), b"RIGHT".as_slice(), false),
+            (
+                "distinct_lr",
+                b"LEFT".as_slice(),
+                b"RIGHT".as_slice(),
+                false,
+            ),
             ("rotate_rl", b"RIGHT".as_slice(), b"LEFT".as_slice(), false),
             ("rotate_rr", b"RIGHT".as_slice(), b"RIGHT".as_slice(), false),
             ("missing", b"RIGHT".as_slice(), b"LEFT".as_slice(), true),
@@ -46225,19 +46337,11 @@ mod tests {
             let mut got = Vec::new();
             direct
                 .execute_plain_lmove_borrowed_into(
-                    src,
-                    dst,
-                    wherefrom,
-                    whereto,
-                    ts,
-                    resp3,
-                    &mut got,
+                    src, dst, wherefrom, whereto, ts, resp3, &mut got,
                 )
                 .expect("LMOVE _into fast path should engage");
-            let reply = generic.execute_frame(
-                command(&[b"LMOVE", src, dst, wherefrom, whereto]),
-                ts,
-            );
+            let reply =
+                generic.execute_frame(command(&[b"LMOVE", src, dst, wherefrom, whereto]), ts);
             let mut want = Vec::new();
             if resp3 {
                 reply.encode_into_resp3(&mut want);

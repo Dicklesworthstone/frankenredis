@@ -3984,7 +3984,6 @@ pub fn bench_classify6_match(cmd: &[u8]) -> u32 {
     }
 }
 
-
 #[doc(hidden)]
 #[inline(never)]
 pub fn bench_classify4_linear(cmd: &[u8]) -> u32 {
@@ -9015,23 +9014,15 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     // runs for `~` even WITHOUT an explicit LIMIT — upstream is not a no-op, so
     // `XADD ... MAXLEN ~ N` trims on every add (and `~ 0` clears the stream).
     if let Some(max_len) = trim_maxlen {
-        let effective_max_len = if trim_approx {
-            // xlen returns Result<usize, StoreError>; on error, fall through to a
-            // no-op (effective_max_len = current_len means "trim to current").
-            let current_len = store.xlen(&argv[1], now_ms).unwrap_or(max_len);
-            let approx_limit = if limit_given {
-                trim_limit_usize
-            } else {
-                Some(STREAM_APPROX_TRIM_DEFAULT_LIMIT)
-            };
-            stream_approx_trim_target(current_len, max_len, approx_limit)
-        } else {
-            max_len
-        };
-        let pass_limit = if trim_approx { None } else { trim_limit_usize };
-        let removed = store
-            .xtrim(&argv[1], effective_max_len, pass_limit, now_ms)
-            .unwrap_or(0);
+        let removed = apply_xadd_maxlen_trim_after_add(
+            store,
+            &argv[1],
+            max_len,
+            trim_approx,
+            limit_given,
+            trim_limit_usize,
+            now_ms,
+        );
         trimmed_entries = trimmed_entries.saturating_add(removed);
     }
     // (frankenredis-8t4vl.1) Inline MINID trim mirrors XTRIM MINID and upstream
@@ -9322,6 +9313,43 @@ const STREAM_NODE_MAX_ENTRIES: usize = 100;
 /// Default LIMIT applied to an approximate (`~`) trim with no explicit LIMIT,
 /// mirroring upstream's `args->limit = 100 * server.stream_node_max_entries`.
 const STREAM_APPROX_TRIM_DEFAULT_LIMIT: usize = 100 * STREAM_NODE_MAX_ENTRIES;
+
+/// Apply the MAXLEN portion of an inline XADD trim after the entry has already
+/// been appended. Shared with the runtime's borrowed
+/// `XADD key MAXLEN ~ N * field value` path so the fast and generic routes use
+/// one implementation of Redis's whole-node approximate trimming semantics.
+///
+/// This helper intentionally does not restore `dirty` or set
+/// `last_xadd_trimmed`: both callers combine MAXLEN with their surrounding XADD
+/// accounting after this function returns the exact removal count.
+#[doc(hidden)]
+pub fn apply_xadd_maxlen_trim_after_add(
+    store: &mut Store,
+    key: &[u8],
+    max_len: usize,
+    trim_approx: bool,
+    limit_given: bool,
+    trim_limit: Option<usize>,
+    now_ms: u64,
+) -> usize {
+    let effective_max_len = if trim_approx {
+        // xlen returns Result<usize, StoreError>; on error, mirror the generic
+        // path's no-op fallback (trim to the current length).
+        let current_len = store.xlen(key, now_ms).unwrap_or(max_len);
+        let approx_limit = if limit_given {
+            trim_limit
+        } else {
+            Some(STREAM_APPROX_TRIM_DEFAULT_LIMIT)
+        };
+        stream_approx_trim_target(current_len, max_len, approx_limit)
+    } else {
+        max_len
+    };
+    let pass_limit = if trim_approx { None } else { trim_limit };
+    store
+        .xtrim(key, effective_max_len, pass_limit, now_ms)
+        .unwrap_or(0)
+}
 
 /// Mirror upstream `t_stream.c::streamTrim`'s approximate (`~`) eviction: it
 /// removes WHOLE rax nodes (each holding up to `STREAM_NODE_MAX_ENTRIES`
@@ -19230,10 +19258,7 @@ fn command_docs_requested_row_scan(cmd_name: &str, store: &Store) -> Option<Comm
 /// Resolve a top-level docs name through the canonical index, retaining the
 /// ordered subcommand scan for namespaced fallbacks.
 #[cfg_attr(feature = "bench-reference", inline(never))]
-fn command_docs_requested_row_indexed(
-    cmd_name: &str,
-    store: &Store,
-) -> Option<CommandMetadataRow> {
+fn command_docs_requested_row_indexed(cmd_name: &str, store: &Store) -> Option<CommandMetadataRow> {
     if let Some(index) = command_table_index(cmd_name.as_bytes()) {
         let row = COMMAND_TABLE[index];
         if command_table_row_is_visible(row.0, store) {
@@ -27404,8 +27429,18 @@ fn bitfield_cmd(
     // by `bitfield_apply_ops_matches_per_op_reference_across_matrix`).
     enum BfMeta {
         Get,
-        Set { value: i64, signed: bool, bits: u8, mode: BitfieldOverflow },
-        Incrby { incr: i64, signed: bool, bits: u8, mode: BitfieldOverflow },
+        Set {
+            value: i64,
+            signed: bool,
+            bits: u8,
+            mode: BitfieldOverflow,
+        },
+        Incrby {
+            incr: i64,
+            signed: bool,
+            bits: u8,
+            mode: BitfieldOverflow,
+        },
     }
     let mut store_ops: Vec<fr_store::BitfieldOp> = Vec::new();
     let mut metas: Vec<BfMeta> = Vec::new();
@@ -27435,7 +27470,11 @@ fn bitfield_cmd(
                     ));
                 }
             };
-            store_ops.push(fr_store::BitfieldOp::Get { offset: bit_offset, bits, signed });
+            store_ops.push(fr_store::BitfieldOp::Get {
+                offset: bit_offset,
+                bits,
+                signed,
+            });
             metas.push(BfMeta::Get);
             i += 3;
         } else if sub.eq_ignore_ascii_case("SET") {
@@ -27464,8 +27503,17 @@ fn bitfield_cmd(
             // passed to `bitfield_apply_ops` (SET: signed via bitfield_signed_set_resolve, unsigned
             // via bitfield_clamp_with_overflow with the value<0 positive-overflow hint; FAIL =>
             // reserve-extend without writing => nil).
-            store_ops.push(fr_store::BitfieldOp::Set { offset: bit_offset, bits, signed });
-            metas.push(BfMeta::Set { value, signed, bits, mode: overflow_mode });
+            store_ops.push(fr_store::BitfieldOp::Set {
+                offset: bit_offset,
+                bits,
+                signed,
+            });
+            metas.push(BfMeta::Set {
+                value,
+                signed,
+                bits,
+                mode: overflow_mode,
+            });
             i += 4;
         } else if sub.eq_ignore_ascii_case("INCRBY") {
             if i + 3 >= argv.len() {
@@ -27492,8 +27540,17 @@ fn bitfield_cmd(
 
             // Clamp/overflow (current+incr via bitfield_clamp_with_overflow, FAIL => nil) now runs
             // in the resolver below, applied under the single fused lookup.
-            store_ops.push(fr_store::BitfieldOp::Incrby { offset: bit_offset, bits, signed });
-            metas.push(BfMeta::Incrby { incr: increment, signed, bits, mode: overflow_mode });
+            store_ops.push(fr_store::BitfieldOp::Incrby {
+                offset: bit_offset,
+                bits,
+                signed,
+            });
+            metas.push(BfMeta::Incrby {
+                incr: increment,
+                signed,
+                bits,
+                mode: overflow_mode,
+            });
             i += 4;
         } else if sub.eq_ignore_ascii_case("OVERFLOW") {
             if i + 1 >= argv.len() {
@@ -27526,7 +27583,12 @@ fn bitfield_cmd(
     // clamp/overflow exactly as the per-op path did (byte-identical, `bitfield_apply_ops` gate).
     let raw = store
         .bitfield_apply_ops(key, &store_ops, now_ms, |idx, current| match &metas[idx] {
-            BfMeta::Set { value, signed, bits, mode } => {
+            BfMeta::Set {
+                value,
+                signed,
+                bits,
+                mode,
+            } => {
                 let (clamped, overflowed) = if *signed {
                     bitfield_signed_set_resolve(*value, *bits, *mode)
                 } else {
@@ -27538,7 +27600,12 @@ fn bitfield_cmd(
                     Some(clamped)
                 }
             }
-            BfMeta::Incrby { incr, signed, bits, mode } => {
+            BfMeta::Incrby {
+                incr,
+                signed,
+                bits,
+                mode,
+            } => {
                 let (new_val, i64_overflowed) = current.overflowing_add(*incr);
                 let (clamped, overflowed) =
                     bitfield_clamp_with_overflow(new_val, i64_overflowed, *bits, *signed, *mode);
@@ -27557,9 +27624,11 @@ fn bitfield_cmd(
         .map(|(meta, r)| match meta {
             BfMeta::Get => RespFrame::Integer(r.expect("GET always yields a value")),
             BfMeta::Set { signed, bits, .. } => match r {
-                Some(old) => {
-                    RespFrame::Integer(if *signed { bitfield_sign_extend(old, *bits) } else { old })
-                }
+                Some(old) => RespFrame::Integer(if *signed {
+                    bitfield_sign_extend(old, *bits)
+                } else {
+                    old
+                }),
                 None => RespFrame::BulkString(None),
             },
             BfMeta::Incrby { .. } => match r {
@@ -36446,7 +36515,10 @@ mod tests {
                 }
             }
         }
-        assert!(checked > 10_000, "grid should be dense (was {checked} pairs)");
+        assert!(
+            checked > 10_000,
+            "grid should be dense (was {checked} pairs)"
+        );
     }
 
     #[test]
@@ -58926,13 +58998,21 @@ mod tests {
                 ("30", "3", "thirty"),
             ] {
                 dispatch_argv(
-                    &[b"SET".to_vec(), format!("weight_{k}").into_bytes(), w.as_bytes().to_vec()],
+                    &[
+                        b"SET".to_vec(),
+                        format!("weight_{k}").into_bytes(),
+                        w.as_bytes().to_vec(),
+                    ],
                     &mut s,
                     0,
                 )
                 .unwrap();
                 dispatch_argv(
-                    &[b"SET".to_vec(), format!("data_{k}").into_bytes(), d.as_bytes().to_vec()],
+                    &[
+                        b"SET".to_vec(),
+                        format!("data_{k}").into_bytes(),
+                        d.as_bytes().to_vec(),
+                    ],
                     &mut s,
                     0,
                 )
@@ -58946,14 +59026,34 @@ mod tests {
             vec![b(b"SORT"), b(b"nums"), b(b"DESC")],
             vec![b(b"SORT"), b(b"nums"), b(b"LIMIT"), b(b"1"), b(b"3")],
             vec![b(b"SORT"), b(b"words"), b(b"ALPHA")],
-            vec![b(b"SORT"), b(b"words"), b(b"ALPHA"), b(b"DESC"), b(b"LIMIT"), b(b"0"), b(b"2")],
+            vec![
+                b(b"SORT"),
+                b(b"words"),
+                b(b"ALPHA"),
+                b(b"DESC"),
+                b(b"LIMIT"),
+                b(b"0"),
+                b(b"2"),
+            ],
             vec![b(b"SORT"), b(b"nums"), b(b"BY"), b(b"weight_*")],
             vec![
-                b(b"SORT"), b(b"nums"), b(b"BY"), b(b"weight_*"), b(b"GET"), b(b"data_*"), b(b"GET"),
+                b(b"SORT"),
+                b(b"nums"),
+                b(b"BY"),
+                b(b"weight_*"),
+                b(b"GET"),
+                b(b"data_*"),
+                b(b"GET"),
                 b(b"#"),
             ],
             vec![b(b"SORT"), b(b"nums"), b(b"STORE"), b(b"dest")],
-            vec![b(b"SORT"), b(b"words"), b(b"ALPHA"), b(b"STORE"), b(b"dest")],
+            vec![
+                b(b"SORT"),
+                b(b"words"),
+                b(b"ALPHA"),
+                b(b"STORE"),
+                b(b"dest"),
+            ],
         ];
         for argv in &variants {
             let mut s_ref = seed();

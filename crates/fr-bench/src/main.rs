@@ -35,6 +35,9 @@ enum Workload {
     Lpop,
     Hset,
     Hget,
+    // Bounded steady-state stream append. A single hot stream is maintained
+    // around 1,000 entries with approximate MAXLEN trimming.
+    XaddMaxlen,
     // (frankenredis-087qq) GET against integer-encoded string values prefilled by INCRBY.
     // This isolates Value::Integer / int-object materialization instead of ordinary
     // byte-string GET.
@@ -99,6 +102,9 @@ impl Workload {
         if value.eq_ignore_ascii_case("hget") {
             return Some(Self::Hget);
         }
+        if value.eq_ignore_ascii_case("xadd-maxlen") || value.eq_ignore_ascii_case("xadd_maxlen") {
+            return Some(Self::XaddMaxlen);
+        }
         if value.eq_ignore_ascii_case("integer-get") || value.eq_ignore_ascii_case("int-get") {
             return Some(Self::IntegerGet);
         }
@@ -134,6 +140,7 @@ impl Workload {
             Self::Lpop => "lpop",
             Self::Hset => "hset",
             Self::Hget => "hget",
+            Self::XaddMaxlen => "xadd-maxlen",
             Self::IntegerGet => "integer-get",
             Self::Mixed => "mixed",
             Self::ZrangeWithscores => "zrange-withscores",
@@ -154,6 +161,7 @@ enum CommandKind {
     Lpop,
     Hset,
     Hget,
+    XaddMaxlen,
     IntegerGet,
     ZrangeWithscores,
     Lrange,
@@ -869,7 +877,11 @@ fn prepare_workload(config: &BenchmarkConfig) -> Result<(), String> {
         Workload::Hgetall => HASH_BENCH_FIELDS.saturating_mul(config.keyspace),
         Workload::Smembers => SET_BENCH_MEMBERS.saturating_mul(config.keyspace),
         Workload::Dump => config.keyspace,
-        Workload::Set | Workload::Incr | Workload::Lpush | Workload::Hset => 0,
+        Workload::Set
+        | Workload::Incr
+        | Workload::Lpush
+        | Workload::Hset
+        | Workload::XaddMaxlen => 0,
     };
 
     if prep_count == 0 {
@@ -1032,7 +1044,11 @@ fn prepare_workload(config: &BenchmarkConfig) -> Result<(), String> {
                 flush_prepare_batch(&mut client, &mut batch)?;
             }
         }
-        Workload::Set | Workload::Incr | Workload::Lpush | Workload::Hset => {}
+        Workload::Set
+        | Workload::Incr
+        | Workload::Lpush
+        | Workload::Hset
+        | Workload::XaddMaxlen => {}
     }
 
     if !batch.is_empty() {
@@ -1103,6 +1119,7 @@ fn select_command_kind(workload: Workload, read_percent: u8, rng: &mut Lcg) -> C
         Workload::Lpop => CommandKind::Lpop,
         Workload::Hset => CommandKind::Hset,
         Workload::Hget => CommandKind::Hget,
+        Workload::XaddMaxlen => CommandKind::XaddMaxlen,
         Workload::IntegerGet => CommandKind::IntegerGet,
         Workload::ZrangeWithscores => CommandKind::ZrangeWithscores,
         Workload::Lrange => CommandKind::Lrange,
@@ -1134,6 +1151,7 @@ fn build_command(
         CommandKind::Lpop => ResponseExpectation::NON_ERROR,
         CommandKind::Hset => ResponseExpectation::INTEGER,
         CommandKind::Hget => ResponseExpectation::NON_ERROR,
+        CommandKind::XaddMaxlen => ResponseExpectation::NON_ERROR,
         CommandKind::IntegerGet => ResponseExpectation::NON_ERROR,
         CommandKind::ZrangeWithscores => ResponseExpectation::NON_ERROR,
         CommandKind::Lrange => ResponseExpectation::NON_ERROR,
@@ -1170,6 +1188,18 @@ fn build_command(
                 .unwrap_or_else(|| value_template.to_vec()),
         ],
         CommandKind::Hget => vec![b"HGET".to_vec(), key, b"field".to_vec()],
+        CommandKind::XaddMaxlen => vec![
+            b"XADD".to_vec(),
+            key,
+            b"MAXLEN".to_vec(),
+            b"~".to_vec(),
+            b"1000".to_vec(),
+            b"*".to_vec(),
+            b"field".to_vec(),
+            request_index
+                .map(|idx| value_for_request(value_template, idx))
+                .unwrap_or_else(|| value_template.to_vec()),
+        ],
         CommandKind::IntegerGet => vec![b"GET".to_vec(), key],
         // (frankenredis-n2u1g) full-range WITHSCORES read; the prefill ZADDs
         // ZSET_BENCH_MEMBERS integer-scored members per key.
@@ -1204,12 +1234,20 @@ fn argv_frame(argv: Vec<Vec<u8>>) -> RespFrame {
 }
 
 fn benchmark_key(prefix: &str, kind: CommandKind, key_index: usize) -> Vec<u8> {
+    // A bounded stream benchmark must reach its steady-state trim threshold.
+    // Keep one shared hot stream instead of spreading requests over keyspace.
+    let key_index = if kind == CommandKind::XaddMaxlen {
+        0
+    } else {
+        key_index
+    };
     let family = match kind {
         CommandKind::Set | CommandKind::Get => "string",
         CommandKind::Incr => "counter",
         CommandKind::IntegerGet => "intstring",
         CommandKind::Lpush | CommandKind::Lpop | CommandKind::Lrange => "list",
         CommandKind::Hset | CommandKind::Hget | CommandKind::Hgetall => "hash",
+        CommandKind::XaddMaxlen => "xadd-maxlen",
         CommandKind::ZrangeWithscores => "zset",
         CommandKind::Smembers => "set",
         CommandKind::Dump => "dumpzset",
@@ -1309,7 +1347,7 @@ OPTIONS:\n\
   --pipeline <N>           Pipeline depth per client (default: {DEFAULT_PIPELINE})\n\
   --keyspace <N>           Number of benchmark keys (default: {DEFAULT_KEYSPACE})\n\
   --datasize <BYTES>       Value size for write workloads (default: {DEFAULT_DATASIZE})\n\
-  --workload <KIND>        set|get|integer-get|incr|lpush|lpop|hset|hget|mixed|zrange-withscores|lrange|hgetall|smembers|dump (default: set)\n\
+  --workload <KIND>        set|get|integer-get|incr|lpush|lpop|hset|hget|xadd-maxlen|mixed|zrange-withscores|lrange|hgetall|smembers|dump (default: set)\n\
   --read-percent <N>       Read ratio for mixed workload, 0-100 (default: {DEFAULT_READ_PERCENT})\n\
   --db <N>                 Database number to select (default: 0)\n\
   --username <USER>        Optional ACL username for AUTH\n\
@@ -1381,6 +1419,7 @@ mod tests {
         assert_eq!(Workload::parse("GET"), Some(Workload::Get));
         assert_eq!(Workload::parse("int-get"), Some(Workload::IntegerGet));
         assert_eq!(Workload::parse("INTEGER-GET"), Some(Workload::IntegerGet));
+        assert_eq!(Workload::parse("XADD-MAXLEN"), Some(Workload::XaddMaxlen));
         assert_eq!(Workload::parse("mixed"), Some(Workload::Mixed));
         assert_eq!(Workload::parse("nope"), None);
     }
@@ -1451,6 +1490,10 @@ mod tests {
         assert_eq!(
             benchmark_key("fr:bench", CommandKind::IntegerGet, 7),
             b"fr:bench:intstring:7".to_vec()
+        );
+        assert_eq!(
+            benchmark_key("fr:bench", CommandKind::XaddMaxlen, 99),
+            b"fr:bench:xadd-maxlen:0".to_vec()
         );
     }
 

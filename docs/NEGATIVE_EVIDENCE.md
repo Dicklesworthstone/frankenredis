@@ -4,6 +4,91 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-26 NobleOsprey (cod/MEASURE): KEEP — exact borrowed `XADD MAXLEN ~` dispatch closes the only major-incumbent loss (`frankenredis-fcp4q`)
+
+- **Ledger-first reopening was admissible.** Before editing, the preflight was run for
+  `XADD MAXLEN`, `exact-N borrowed parser dispatch cliff`, and
+  `execute_plain_xadd_borrowed`; the matching rows were then read by hand. The old bare-XADD
+  fast path covers only `XADD key * field value`, while the open `fcp4q` row explicitly identified
+  the option-bearing `XADD key MAXLEN ~ 1000 * field value` shape as uncovered and supplied the
+  close predicate used below. This does not reopen the exhausted stream-side-map/get-mut vein.
+- **One attributed lever.** The dispatch-floor classifier now recognizes only the exact
+  eight-element RESP array `XADD key MAXLEN ~ N * field value`, borrows its seven arguments
+  directly from the input packet, and calls
+  `Runtime::execute_plain_xadd_maxlen_approx_borrowed`. The runtime validates every option and
+  numeric threshold before mutation, preserves the generic path's auto-ID, write-gate, dirty,
+  command-stat, error, eviction, and propagation accounting, and shares
+  `apply_xadd_maxlen_trim_after_add` with the generic command handler. Alternate IDs, option forms,
+  field counts, invalid values, and disabled runtime states fall through to generic dispatch.
+  `fr-bench` and the institutional workload matrix now name this bounded steady-state workload as
+  `xadd-maxlen`.
+- **Exact binary provenance and same-invocation substrate.** The measured candidate server ELF
+  SHA-256 was
+  **`9985720e5bcf19a065df1cfe0aa7b373eb947d4649c9638d0e6fee5a2211c451`**; the
+  control and identical A/A-null server ELF SHA-256 was
+  **`df8d935133ad7a301da22c38a331acefbb4fd3f985847f1a80ee6ce53d412437`**;
+  vendored Redis 7.2.4 was
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+  The harness self-reported ELF SHA-256
+  **`b970573c93251cd804874be8a8ebde3ac878964dfe9322a6d7aa7e09b4944c3a`**.
+  One top-level invocation on `thinkstation1` launched fresh sequential arms on the same selected
+  server core, used four verified-quiet client cores, covered eight fully position-balanced orders
+  (every arm in every position twice), and ran P16/c50 with one hot stream, a 50,000-operation
+  warm-up, and 300,000 measured operations per arm per round.
+- **Raw throughput evidence (ops/s).**
+
+  | round | control | candidate | identical null | Redis |
+  |---:|---:|---:|---:|---:|
+  | 1 | 257,261.41 | 914,732.72 | 253,896.50 | 618,057.84 |
+  | 2 | 250,997.33 | 951,309.11 | 259,400.69 | 623,989.70 |
+  | 3 | 237,706.11 | 612,279.93 | 241,612.10 | 596,134.80 |
+  | 4 | 256,099.50 | 948,262.88 | 258,891.70 | 625,385.80 |
+  | 5 | 249,870.67 | 959,132.69 | 253,071.07 | 624,849.84 |
+  | 6 | 256,217.12 | 939,141.47 | 255,271.56 | 614,238.69 |
+  | 7 | 259,048.33 | 957,176.58 | 251,666.47 | 608,811.87 |
+  | 8 | 255,891.37 | 904,119.55 | 259,675.69 | 626,855.60 |
+
+- **Bootstrap median-CI gate, never CV.** The deterministic 20,000-resample A/A null median was
+  **1.011855510**, 95% CI **[0.986920269, 1.016432013]**, producing the prespecified
+  two-times-null gate **[0.967135973, 1.032864027]**. Candidate/control was
+  **3.680192810x**, CI **[3.533216263, 3.790116453]**, a decisive `FR_WIN`.
+  Candidate/Redis was **1.520421815x**, CI **[1.442309122, 1.534981092]**; the
+  unmodified control reproduced the incumbent loss at **0.408860320x**, CI
+  **[0.399889148, 0.417129569]**. CV was retained as provenance only and did not influence any
+  verdict. This clears the open row's `fr/redis >0.90` and A/A `<1.05` conditions by wide margins.
+- **Profile-attributed closure.** The post-change debug/unstripped profile ELF SHA-256 was
+  **`a633cfe7b4b487aa831d556d0fccad284fb2f51d7d7b9083b45f2b808586a65d`**.
+  The P16/c50 profile captured **19,806 samples, 40.768 billion cycles, and zero lost samples**;
+  DSO attribution was kernel 49.00%, candidate 42.44%, libc 7.15%, and vDSO 1.40%.
+  `process_buffered_frames` fell from the open row's **19.87% self-time** to **2.76%**, closing its
+  `<10%` predicate. Its local Amdahl ceiling therefore fell from **1.2480x** to **1.0284x**.
+  The end-to-end gain exceeds that single-frame ceiling because the exact route also removes the
+  generic router, owned argv work, and the cascade of failed exact-arity parsers distributed across
+  other frames. The remaining named frames were `memmove` 5.29%,
+  `PackedStreamLog::remove` 3.58%, the new runtime path 2.90%, the default write gate 1.98%,
+  `PackedStreamLog::insert` 1.28%, the exact packet parser 1.26%, and the shared trim helper 0.73%.
+- **Correctness and quality proof.** The exact-token classifier test and upstream approximate-trim
+  model test passed under strict-remote RCH. `stream_id_trim_differ.py` passed byte-for-byte against
+  vendored Redis for explicit/automatic stream IDs, error ordering, NOMKSTREAM, MAXLEN exact and
+  approximate, MINID, and XTRIM. Strict-remote `fr-conformance` passed **194/194** library tests,
+  every auxiliary target, and **99/99** smoke tests; its live-oracle stream matrix passed
+  **217/217**. The scoped no-dependency Clippy gate passed `-D warnings` after allowing only three
+  enumerated pre-existing diagnostics (`dead_code`, `unused_imports`, and
+  `clippy::collapsible_if`). The unmodified full Clippy gate stops in peer-owned `fr-store` at two
+  pre-existing `len() == 0` findings. Direct nightly rustfmt check, Python parse/help checks, and
+  `git diff --check` passed. UBS completed its Python scan and timed out its Rust module after the
+  fixed 300-second monolith budget. Its Python critical heuristics are the already-adjudicated
+  harness launchers: each CLI-supplied executable is canonicalized and executable-checked, invoked
+  with an argv array and no shell, then terminated and waited in `finally`; this lever changes only
+  the workload list in that script and adds no subprocess surface.
+- **Verdict and concrete retry predicate.** **KEEP.** The major-incumbent loss is closed and the
+  `fcp4q` bead can be retired. Reopen this exact one-field `MAXLEN ~` route only if a fresh bounded
+  XADD profile exposes a new exact leaf at **>=5% self-time** and a same-invocation A/A+A/B run
+  falls below **0.90x Redis**. Treat `MINID`, `LIMIT`, multi-field, and explicit-ID forms as
+  separate surfaces; pursue one only after that exact workload independently loses below 0.90x
+  Redis with a valid A/A null and counted/profiled work. Do not propose another stream
+  side-map/get-mut lever without satisfying its existing ledger retry predicate.
+
 ## 2026-07-26 NobleOsprey (cod/MEASURE): KEEP — Meta-Lever 2 makes ELF provenance + same-invocation A/A + bootstrap median-CI the executable harness contract (`frankenredis-rkvg2`)
 
 - **Ledger-first routing, before any source edit.** The negative ledger was grepped for the fresh

@@ -12368,6 +12368,7 @@ enum BorrowedDispatchFloorClass {
     Strlen,
     Ttl,
     Type,
+    XaddMaxlenApprox,
     Xlen,
     Zcard,
     Zremrangebyrank,
@@ -12420,6 +12421,7 @@ enum BorrowedDispatchFloorCommand {
     Strlen,
     Ttl,
     Type,
+    Xadd,
     Xlen,
     Zcard,
     Zcount,
@@ -12457,6 +12459,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'S', b'R', b'E', b'M'] => Some(BorrowedDispatchFloorCommand::Srem),
             [b'Z', b'R', b'E', b'M'] => Some(BorrowedDispatchFloorCommand::Zrem),
             [b'I', b'N', b'C', b'R'] => Some(BorrowedDispatchFloorCommand::Incr),
+            [b'X', b'A', b'D', b'D'] => Some(BorrowedDispatchFloorCommand::Xadd),
             _ => None,
         },
         5 => match uppercase_ascii_token::<5>(token)? {
@@ -12595,6 +12598,7 @@ fn borrowed_dispatch_floor_command_pre_lpos(token: &[u8]) -> Option<BorrowedDisp
         [b'H', b'D', b'E', b'L'] => Some(BorrowedDispatchFloorCommand::Hdel),
         [b'S', b'R', b'E', b'M'] => Some(BorrowedDispatchFloorCommand::Srem),
         [b'Z', b'R', b'E', b'M'] => Some(BorrowedDispatchFloorCommand::Zrem),
+        [b'X', b'A', b'D', b'D'] => Some(BorrowedDispatchFloorCommand::Xadd),
         _ => None,
     }
 }
@@ -12764,6 +12768,11 @@ fn classify_borrowed_dispatch_floor_packet_impl<
             Some(BorrowedDispatchFloorClass::Exists(array_len - 1))
         }
         (2, BorrowedDispatchFloorCommand::Type) => Some(BorrowedDispatchFloorClass::Type),
+        // Steady-state bounded stream append:
+        // XADD key MAXLEN ~ N * field value (8 multibulk elements).
+        (8, BorrowedDispatchFloorCommand::Xadd) => {
+            Some(BorrowedDispatchFloorClass::XaddMaxlenApprox)
+        }
         (2, BorrowedDispatchFloorCommand::Xlen) => Some(BorrowedDispatchFloorClass::Xlen),
         (2, BorrowedDispatchFloorCommand::Strlen) => Some(BorrowedDispatchFloorClass::Strlen),
         (2, BorrowedDispatchFloorCommand::Llen) => Some(BorrowedDispatchFloorClass::Llen),
@@ -12795,9 +12804,7 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         }
         // Only the no-range `*3 BITPOS key bit` form floors; start/range/unit
         // forms (arity 4/5/6) fall through to the unchanged generic path.
-        (3, BorrowedDispatchFloorCommand::Bitpos) => {
-            Some(BorrowedDispatchFloorClass::BitposKeyBit)
-        }
+        (3, BorrowedDispatchFloorCommand::Bitpos) => Some(BorrowedDispatchFloorClass::BitposKeyBit),
         (2, BorrowedDispatchFloorCommand::Incr) => Some(BorrowedDispatchFloorClass::Incr),
         (4, BorrowedDispatchFloorCommand::Getrange) => Some(BorrowedDispatchFloorClass::Getrange),
         // Only plain `*4 ZRANGE key start stop` floors; WITHSCORES/REV/LIMIT/
@@ -12809,9 +12816,7 @@ fn classify_borrowed_dispatch_floor_packet_impl<
             Some(BorrowedDispatchFloorClass::BitcountKey)
         }
         (3, BorrowedDispatchFloorCommand::Hget) => Some(BorrowedDispatchFloorClass::Hget),
-        (3, BorrowedDispatchFloorCommand::Sismember) => {
-            Some(BorrowedDispatchFloorClass::Sismember)
-        }
+        (3, BorrowedDispatchFloorCommand::Sismember) => Some(BorrowedDispatchFloorClass::Sismember),
         (4, BorrowedDispatchFloorCommand::Zremrangebyrank) => {
             Some(BorrowedDispatchFloorClass::Zremrangebyrank)
         }
@@ -13210,6 +13215,39 @@ fn try_dispatch_floor_classified_action(
             {
                 Ok(BorrowedMultibulkAction::FastReply { consumed, response })
             } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::XaddMaxlenApprox => {
+            if let Some(packet) =
+                parse_borrowed_plain_xadd_maxlen_approx_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_xadd_maxlen_approx_borrowed(
+                    packet.key,
+                    packet.maxlen_keyword,
+                    packet.approx_keyword,
+                    packet.threshold,
+                    packet.id,
+                    packet.field,
+                    packet.value,
+                    ts,
+                )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                // The arity/command classifier is intentionally cheap. Any
+                // alternate XADD option shape or malformed argument goes
+                // straight to the eventual generic borrowed route, preserving
+                // exact diagnostics while skipping irrelevant parser probes.
                 parse_borrowed_multibulk_action(
                     unparsed,
                     parser_config,
@@ -13701,10 +13739,9 @@ fn try_dispatch_floor_classified_action(
             // new (frankenredis-zscore-floor, the f9e5b76a8 handoff). On a
             // parse/executor miss the executor writes nothing, so the fallback
             // re-processes the same bytes cleanly.
-            let hit = parse_borrowed_plain_zscore_packet(unparsed, &parser_config).and_then(
-                |packet| {
-                    let client_resp3 =
-                        runtime.client_session().resp_protocol_version() == 3;
+            let hit =
+                parse_borrowed_plain_zscore_packet(unparsed, &parser_config).and_then(|packet| {
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                     runtime
                         .execute_plain_zscore_borrowed_into(
                             packet.key,
@@ -13714,8 +13751,7 @@ fn try_dispatch_floor_classified_action(
                             out,
                         )
                         .map(|()| packet.consumed)
-                },
-            );
+                });
             if let Some(consumed) = hit {
                 Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
             } else {
@@ -13734,10 +13770,9 @@ fn try_dispatch_floor_classified_action(
             // field-value straight into `out` (no BulkString(Vec) alloc), so this
             // is a FastEncodedReply. Parser+executor already shipped; only the
             // dispatch-floor routing is new (frankenredis-xymiw).
-            let hit = parse_borrowed_plain_hget_packet(unparsed, &parser_config).and_then(
-                |packet| {
-                    let client_resp3 =
-                        runtime.client_session().resp_protocol_version() == 3;
+            let hit =
+                parse_borrowed_plain_hget_packet(unparsed, &parser_config).and_then(|packet| {
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                     runtime
                         .execute_plain_hget_borrowed_into(
                             packet.key,
@@ -13747,8 +13782,7 @@ fn try_dispatch_floor_classified_action(
                             out,
                         )
                         .map(|()| packet.consumed)
-                },
-            );
+                });
             if let Some(consumed) = hit {
                 Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
             } else {
@@ -13815,8 +13849,8 @@ fn try_dispatch_floor_classified_action(
             // reply is a flat array, identical under RESP2/RESP3, so no resp3 flag.
             // Parser+executor already shipped; only the dispatch-floor routing is
             // new. Higher-arity option forms fall through to the generic path.
-            let hit = parse_borrowed_plain_zrange_packet(unparsed, &parser_config).and_then(
-                |packet| {
+            let hit =
+                parse_borrowed_plain_zrange_packet(unparsed, &parser_config).and_then(|packet| {
                     runtime
                         .execute_plain_zrange_borrowed_into(
                             packet.key,
@@ -13826,8 +13860,7 @@ fn try_dispatch_floor_classified_action(
                             out,
                         )
                         .map(|()| packet.consumed)
-                },
-            );
+                });
             if let Some(consumed) = hit {
                 Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
             } else {
@@ -13847,10 +13880,9 @@ fn try_dispatch_floor_classified_action(
             // this is a FastEncodedReply. Parser+executor already shipped; only the
             // dispatch-floor routing is new. On a deferred/invalid range the
             // executor writes nothing, so the fallback re-processes cleanly.
-            let hit = parse_borrowed_plain_getrange_packet(unparsed, &parser_config).and_then(
-                |packet| {
-                    let client_resp3 =
-                        runtime.client_session().resp_protocol_version() == 3;
+            let hit =
+                parse_borrowed_plain_getrange_packet(unparsed, &parser_config).and_then(|packet| {
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                     runtime
                         .execute_plain_getrange_borrowed_into(
                             packet.key,
@@ -13861,8 +13893,7 @@ fn try_dispatch_floor_classified_action(
                             out,
                         )
                         .map(|()| packet.consumed)
-                },
-            );
+                });
             if let Some(consumed) = hit {
                 Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
             } else {
@@ -13938,15 +13969,9 @@ fn try_dispatch_floor_classified_action(
             // packets and fall through.
             let hit = parse_borrowed_plain_hrandfield_packet(unparsed, &parser_config).and_then(
                 |packet| {
-                    let client_resp3 =
-                        runtime.client_session().resp_protocol_version() == 3;
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                     runtime
-                        .execute_plain_hrandfield_borrowed_into(
-                            packet.key,
-                            ts,
-                            client_resp3,
-                            out,
-                        )
+                        .execute_plain_hrandfield_borrowed_into(packet.key, ts, client_resp3, out)
                         .map(|()| packet.consumed)
                 },
             );
@@ -13973,15 +13998,9 @@ fn try_dispatch_floor_classified_action(
             // form (array reply) is a distinct packet and falls through.
             let hit = parse_borrowed_plain_srandmember_packet(unparsed, &parser_config).and_then(
                 |packet| {
-                    let client_resp3 =
-                        runtime.client_session().resp_protocol_version() == 3;
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                     runtime
-                        .execute_plain_srandmember_borrowed_into(
-                            packet.key,
-                            ts,
-                            client_resp3,
-                            out,
-                        )
+                        .execute_plain_srandmember_borrowed_into(packet.key, ts, client_resp3, out)
                         .map(|()| packet.consumed)
                 },
             );
@@ -17145,6 +17164,58 @@ fn parse_borrowed_plain_key_arg5_packet<'a>(
         c,
         d,
         e,
+    })
+}
+
+/// Fixed borrowed parser for the eight-element steady-state stream append:
+/// `XADD key MAXLEN ~ N * field value`.
+///
+/// The parser only establishes the command/arity and borrows all seven
+/// arguments. The runtime validates the option tokens and numeric threshold;
+/// on any miss the dispatch floor falls directly to generic borrowed dispatch.
+struct BorrowedPlainXaddMaxlenApproxPacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+    maxlen_keyword: &'a [u8],
+    approx_keyword: &'a [u8],
+    threshold: &'a [u8],
+    id: &'a [u8],
+    field: &'a [u8],
+    value: &'a [u8],
+}
+
+fn parse_borrowed_plain_xadd_maxlen_approx_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainXaddMaxlenApproxPacket<'a>> {
+    if config.max_array_len < 8 || config.max_bulk_len < b"XADD".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*8\r\n$4\r\n").and_then(|rest| {
+        rest.get(..4)
+            .filter(|command| command.eq_ignore_ascii_case(b"XADD"))
+            .map(|_| input.len() - rest.len() + 4)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (maxlen_keyword, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (approx_keyword, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (threshold, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (id, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (field, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (value, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainXaddMaxlenApproxPacket {
+        consumed,
+        key,
+        maxlen_keyword,
+        approx_keyword,
+        threshold,
+        id,
+        field,
+        value,
     })
 }
 
@@ -31137,6 +31208,29 @@ mod tests {
                 &cfg,
             ),
             Some(super::BorrowedDispatchFloorClass::Xlen)
+        );
+        let xadd_maxlen =
+            b"*8\r\n$4\r\nxAdD\r\n$1\r\ns\r\n$6\r\nMaXlEn\r\n$1\r\n~\r\n$4\r\n1000\r\n$1\r\n*\r\n$1\r\nf\r\n$1\r\nv\r\n";
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(xadd_maxlen, &cfg),
+            Some(super::BorrowedDispatchFloorClass::XaddMaxlenApprox)
+        );
+        let packet = super::parse_borrowed_plain_xadd_maxlen_approx_packet(xadd_maxlen, &cfg)
+            .expect("bounded XADD packet parses");
+        assert_eq!(packet.consumed, xadd_maxlen.len());
+        assert_eq!(packet.key, b"s");
+        assert_eq!(packet.maxlen_keyword, b"MaXlEn");
+        assert_eq!(packet.approx_keyword, b"~");
+        assert_eq!(packet.threshold, b"1000");
+        assert_eq!(packet.id, b"*");
+        assert_eq!(packet.field, b"f");
+        assert_eq!(packet.value, b"v");
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*5\r\n$4\r\nXADD\r\n$1\r\ns\r\n$1\r\n*\r\n$1\r\nf\r\n$1\r\nv\r\n",
+                &cfg,
+            ),
+            None
         );
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(

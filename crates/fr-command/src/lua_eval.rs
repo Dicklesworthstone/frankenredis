@@ -17706,7 +17706,7 @@ end
 
     #[test]
     fn json_decode_integer_fast_path_matches_float_parser() {
-        use super::{json_to_lua_value, LuaValue};
+        use super::{LuaValue, json_to_lua_value};
         // parse_number's integer fast path must yield exactly the same f64 (bit-for-bit) as the
         // full dec2flt float parser for every pure-integer token — including 2^53±1, i64 boundaries
         // (which overflow into the fallback), and -0.
@@ -17717,12 +17717,12 @@ end
             "-1".into(),
             "42".into(),
             "-42".into(),
-            "9007199254740992".into(),      // 2^53 (exactly representable)
-            "9007199254740993".into(),      // 2^53 + 1 (not exact — rounds)
-            "9223372036854775807".into(),   // i64::MAX
-            "9223372036854775808".into(),   // i64::MAX + 1 → i64 overflow, float fallback
-            "-9223372036854775808".into(),  // i64::MIN
-            "99999999999999999999".into(),  // 20 digits, far over i64
+            "9007199254740992".into(),     // 2^53 (exactly representable)
+            "9007199254740993".into(),     // 2^53 + 1 (not exact — rounds)
+            "9223372036854775807".into(),  // i64::MAX
+            "9223372036854775808".into(),  // i64::MAX + 1 → i64 overflow, float fallback
+            "-9223372036854775808".into(), // i64::MIN
+            "99999999999999999999".into(), // 20 digits, far over i64
         ];
         for i in -5000..5000i64 {
             cases.push(i.to_string());
