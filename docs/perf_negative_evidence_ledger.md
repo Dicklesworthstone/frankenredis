@@ -11185,3 +11185,43 @@ scheduler, allocator, target OS, or release codegen. A non-Linux retry must exer
 fallback. Invalidate rather than compare if the exact eager-reference frame has zero self-time or
 lost samples, the A/A median CI does not bracket 1.0, or the A/B effect fails the 2x CI-radius
 threshold. Rollback is the literal eager `let used_memory = ...; rss.unwrap_or(used_memory)` pair.
+
+## 2026-07-25 NobleOsprey: FRONTIER / HOLD — post-memory-fix INCR residual is the retained single keyspace lookup
+
+This is a profile result, not a REJECT and not an A/B claim. After
+`cc5d8dd18567b44a8652aa7fb761b08375cc546b` removed the discarded 10 Hz modeled-memory scan,
+the old INCR profile was stale, so the exact current server was rebuilt with symbols before another
+lever was proposed. The fail-closed build ran on `vmi1149989`; the retrieved release ELF was
+SHA-256 `c0d5b49a700a92889d2bdc7b9823bebff56a814dbf58ecbf9edd3bf00bf3e563`
+(57 MiB, `debug_info`, not stripped). Both profiles ran on `thinkstation1`, server core 56 and
+client core 60, with `redis-benchmark -t incr -P 16 -c 50 -r 100000` against the same ELF.
+
+The first ten-second `cycles:u` profile captured **19,463 samples with zero lost**. Exact self-time
+leaders were the retained keyspace `HashMap::get_mut::<[u8]>` **13.53%**,
+`__memcmp_avx2_movbe` **7.82%**, `process_buffered_frames` **11.34%**,
+`Runtime::execute_plain_incr_borrowed` **3.84%**, `run_active_expire_cycle` **2.55%**,
+`parse_borrowed_plain_incr_packet` **2.27%**, the default write gate **2.07%**, and
+`Store::incrby_existing_or_insert` **1.18%**. Perf-data SHA-256 is
+`8601829d2f41f05082915c70a374fa71dba3963836eb1153580515d6798e7f73`.
+
+An independent eight-second DWARF-callchain profile captured **7,922 samples with zero lost** and
+resolved the apparent compare cost: `HashMap::get_mut` was **25.79% self** and
+`__memcmp_avx2_movbe` **16.57% self**, with the latter's callchain wholly under the former's
+actual-hit byte equality. `process_buffered_frames` was **8.58%**, while the dispatch-floor token
+classifier leaf was only **0.52%**; `Store::incrby_existing_or_insert` was **1.60%**. Perf-data
+SHA-256 is `6dc2b9e1fd66a1a9c22d062bd205166e74b4de38794c6cf7d2b701519f5ffe84`.
+
+Ledger grep closed the tempting duplicate: INCR's former expiry plus value double probe already
+shipped as the 2026-06-29 single-lookup KEEP (about **1.97x**), and the current source performs
+exactly one `entries.get_mut`. The clock family is independently closed by the exact
+**1.004 calls/op** large-keyspace proof. A custom short-key equality/raw-entry experiment would
+require changing the canonical keyspace-map substrate merely to avoid the equality check on a true
+hit; that is not an isolated frontier lever. No source was edited.
+
+**Concrete retry predicate:** reopen only after (1) the canonical keyspace map/key representation or
+hasher changes; (2) a safe exact borrowed-lookup API can replace the true-hit byte comparison
+without changing the map substrate; (3) a fresh call-count profile shows more than one keyspace
+probe per successful INCR; or (4) a literal-current profile names a different non-wrapper leaf at
+at least **5% self-time**. Any candidate still requires one-ELF same-invocation A/A+A/B, zero-lost
+exact-function profiling, and the median-CI gate. Lane M now switches to the separately attributed
+submission/syscall vein.
