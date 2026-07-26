@@ -7047,6 +7047,53 @@ impl Store {
         self.stat_used_memory_peak = self.stat_used_memory_peak.max(used_memory_rss);
     }
 
+    #[cfg_attr(feature = "bench-reference", inline(never))]
+    fn observe_periodic_memory_sample(&mut self, rss_bytes: Option<usize>) {
+        // (frankenredis-va3z0) On Linux, the 10 Hz sampler has a live RSS value, so an
+        // eager modeled-memory estimate is discarded. Keep the O(n) keyspace walk as
+        // the fail-closed fallback for targets where RSS is unavailable, but do not
+        // execute it when procfs already supplied the value we record.
+        let used_memory_rss = rss_bytes.unwrap_or_else(|| self.estimate_memory_usage_bytes());
+        self.observe_memory_sample(used_memory_rss);
+    }
+
+    /// Bench-only candidate entry point for the periodic RSS sample. The caller
+    /// supplies the RSS read so the same-binary A/B isolates only eager versus
+    /// lazy modeled-memory fallback.
+    #[cfg(feature = "bench-reference")]
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn record_memory_sample_lazy_bench(&mut self, rss_bytes: Option<usize>) {
+        self.observe_periodic_memory_sample(rss_bytes);
+    }
+
+    /// Bench-only reference for the pre-va3z0 periodic RSS sample: compute the
+    /// modeled-memory fallback eagerly even when `rss_bytes` is present.
+    #[cfg(feature = "bench-reference")]
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn record_memory_sample_eager_reference_bench(&mut self, rss_bytes: Option<usize>) {
+        let used_memory = self.estimate_memory_usage_bytes();
+        let used_memory_rss = rss_bytes.unwrap_or(used_memory);
+        self.observe_memory_sample(used_memory_rss);
+    }
+
+    /// Put the modeled-memory memo at the same 64-mutation stale boundary that
+    /// triggers the production keyspace walk when maxmemory is disabled.
+    #[cfg(feature = "bench-reference")]
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn bench_force_memory_estimate_stale(&self) {
+        let mutations = self
+            .dirty
+            .saturating_add(self.stat_evicted_keys)
+            .saturating_add(self.stat_expired_keys);
+        self.cached_memory_usage_bytes
+            .set(self.cached_memory_usage_bytes.get().max(1));
+        self.cached_memory_usage_dirty
+            .set(mutations.saturating_sub(64));
+    }
+
     /// (frankenredis-jrqgd) Record a per-client read/write buffer size
     /// sample. Bumps `stat_clients_recent_max_input_buffer` /
     /// `stat_clients_recent_max_output_buffer` to the running max. Mirrors
@@ -7119,9 +7166,7 @@ impl Store {
         self.eventloop_last_sample_cycles = self.stat_eventloop_cycles;
         self.eventloop_last_sample_duration_usec = self.stat_eventloop_duration_sum_usec;
 
-        let used_memory = self.estimate_memory_usage_bytes();
-        let used_memory_rss = read_rss_bytes().unwrap_or(used_memory);
-        self.observe_memory_sample(used_memory_rss);
+        self.observe_periodic_memory_sample(read_rss_bytes());
 
         self.ops_sec_idx = (self.ops_sec_idx + 1) % 16;
     }
@@ -72368,6 +72413,44 @@ mod tests {
 
         assert!(store.stat_used_memory_rss > 0);
         assert_eq!(store.stat_used_memory_peak, store.stat_used_memory_rss);
+    }
+
+    #[cfg(feature = "bench-reference")]
+    #[test]
+    fn periodic_memory_sample_lazy_fallback_matches_eager_reference() {
+        let build = || {
+            let mut store = Store::new();
+            for index in 0..256 {
+                store.set(
+                    format!("ttl:{index:08}").into_bytes(),
+                    b"value".to_vec(),
+                    Some(100_000),
+                    1_000,
+                );
+            }
+            store
+        };
+        let mut reference = build();
+        let mut candidate = build();
+        reference.bench_force_memory_estimate_stale();
+        candidate.bench_force_memory_estimate_stale();
+
+        reference.record_memory_sample_eager_reference_bench(Some(64 * 1024 * 1024));
+        candidate.record_memory_sample_lazy_bench(Some(64 * 1024 * 1024));
+
+        assert_eq!(
+            candidate.stat_used_memory_rss,
+            reference.stat_used_memory_rss
+        );
+        assert_eq!(
+            candidate.stat_used_memory_peak,
+            reference.stat_used_memory_peak
+        );
+        assert_eq!(
+            candidate.estimate_memory_usage_bytes(),
+            reference.estimate_memory_usage_bytes()
+        );
+        assert_eq!(candidate.state_digest(), reference.state_digest());
     }
 
     #[test]

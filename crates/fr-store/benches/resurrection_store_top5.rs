@@ -29,14 +29,16 @@ enum Scenario {
     SetExpiry,
     XaddExpiry,
     ZrangebylexLfu,
+    UsedMemoryRssLazy,
 }
 
 impl Scenario {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 5] = [
         Self::ScanClone,
         Self::SetExpiry,
         Self::XaddExpiry,
         Self::ZrangebylexLfu,
+        Self::UsedMemoryRssLazy,
     ];
 
     const fn name(self) -> &'static str {
@@ -45,6 +47,7 @@ impl Scenario {
             Self::SetExpiry => "set_expiry",
             Self::XaddExpiry => "xadd_expiry",
             Self::ZrangebylexLfu => "zrangebylex_lfu",
+            Self::UsedMemoryRssLazy => "used_memory_rss_lazy",
         }
     }
 
@@ -54,6 +57,16 @@ impl Scenario {
             Self::SetExpiry => "set_plain_borrowed_expiry_reference_bench",
             Self::XaddExpiry => "xadd_expiry_reference_bench",
             Self::ZrangebylexLfu => "zrangebylex_members_borrow_scan_lfu_twoprobe_bench",
+            Self::UsedMemoryRssLazy => "record_memory_sample_eager_reference_bench",
+        }
+    }
+
+    const fn perf_event(self) -> &'static str {
+        match self {
+            Self::UsedMemoryRssLazy => "cycles:u",
+            Self::ScanClone | Self::SetExpiry | Self::XaddExpiry | Self::ZrangebylexLfu => {
+                "instructions:u"
+            }
         }
     }
 
@@ -63,6 +76,7 @@ impl Scenario {
             Self::SetExpiry => 2_000_000,
             Self::XaddExpiry => 300_000,
             Self::ZrangebylexLfu => 200_000,
+            Self::UsedMemoryRssLazy => 12,
         }
     }
 
@@ -72,6 +86,7 @@ impl Scenario {
             Self::SetExpiry => 20_000_000,
             Self::XaddExpiry => 2_000_000,
             Self::ZrangebylexLfu => 2_000_000,
+            Self::UsedMemoryRssLazy => 40,
         }
     }
 
@@ -337,12 +352,51 @@ fn run_lex(arm: Arm, repeats: usize) -> u64 {
     black_box(fold_bytes(checksum, digest.as_bytes()))
 }
 
+const MEMORY_KEYSPACE: usize = 100_000;
+const FIXED_RSS_BYTES: usize = 64 * 1024 * 1024;
+
+fn build_memory_store() -> Store {
+    let mut store = Store::new();
+    for index in 0..MEMORY_KEYSPACE {
+        let key = format!("ttl:{index:08}").into_bytes();
+        store.set(key, b"value".to_vec(), Some(100_000_000), 1_000);
+    }
+    store
+}
+
+fn memory_sample_once(store: &mut Store, arm: Arm) -> u64 {
+    store.bench_force_memory_estimate_stale();
+    match arm {
+        Arm::Reference => {
+            store.record_memory_sample_eager_reference_bench(Some(FIXED_RSS_BYTES));
+        }
+        Arm::Candidate => {
+            store.record_memory_sample_lazy_bench(Some(FIXED_RSS_BYTES));
+        }
+    }
+    fold_word(
+        store.stat_used_memory_rss as u64,
+        store.stat_used_memory_peak as u64,
+    )
+}
+
+fn run_memory_sample(arm: Arm, repeats: usize) -> u64 {
+    let mut store = build_memory_store();
+    let mut checksum = 0_u64;
+    for _ in 0..repeats {
+        checksum = checksum.wrapping_add(memory_sample_once(&mut store, arm));
+    }
+    black_box(&store);
+    black_box(checksum)
+}
+
 fn run_loop(scenario: Scenario, arm: Arm, repeats: usize) -> u64 {
     match scenario {
         Scenario::ScanClone => run_scan(arm, repeats),
         Scenario::SetExpiry => run_set(arm, repeats),
         Scenario::XaddExpiry => run_xadd(arm, repeats),
         Scenario::ZrangebylexLfu => run_lex(arm, repeats),
+        Scenario::UsedMemoryRssLazy => run_memory_sample(arm, repeats),
     }
 }
 
@@ -475,6 +529,31 @@ fn correctness_gate(scenario: Scenario) {
                 scenario.name()
             );
         }
+        Scenario::UsedMemoryRssLazy => {
+            let mut reference = build_memory_store();
+            let mut candidate = build_memory_store();
+            let reference_result = memory_sample_once(&mut reference, Arm::Reference);
+            let candidate_result = memory_sample_once(&mut candidate, Arm::Candidate);
+            assert_eq!(
+                candidate_result, reference_result,
+                "periodic RSS and peak stats differ"
+            );
+            let reference_modeled = reference.estimate_memory_usage_bytes();
+            let candidate_modeled = candidate.estimate_memory_usage_bytes();
+            assert_eq!(
+                candidate_modeled, reference_modeled,
+                "modeled used_memory differs"
+            );
+            assert_eq!(
+                candidate.state_digest(),
+                reference.state_digest(),
+                "TTL keyspace state differs"
+            );
+            println!(
+                "CORRECTNESS scenario={} result=info_memory_and_state_identical checksum={reference_result:016x} modeled_bytes={reference_modeled} keyspace={MEMORY_KEYSPACE}",
+                scenario.name()
+            );
+        }
     }
 }
 
@@ -501,7 +580,7 @@ fn profile_trial(executable: &Path, scenario: Scenario, trial: usize) -> Result<
             "-F",
             "997",
             "-e",
-            "instructions:u",
+            scenario.perf_event(),
             "-g",
             "-o",
         ])
@@ -588,10 +667,17 @@ fn run_profile(executable: &Path, scenario: Scenario) -> Result<f64, String> {
     Ok(median_self_pct)
 }
 
-fn perf_instructions(executable: &Path, scenario: Scenario, arm: Arm) -> Result<u64, String> {
+fn perf_counter(executable: &Path, scenario: Scenario, arm: Arm) -> Result<u64, String> {
     let output = Command::new("perf")
         .env("LC_ALL", "C")
-        .args(["stat", "--no-big-num", "-x,", "-e", "instructions:u", "--"])
+        .args([
+            "stat",
+            "--no-big-num",
+            "-x,",
+            "-e",
+            scenario.perf_event(),
+            "--",
+        ])
         .arg(executable)
         .args([
             "--child",
@@ -611,15 +697,15 @@ fn perf_instructions(executable: &Path, scenario: Scenario, arm: Arm) -> Result<
             let fields: Vec<_> = line.split(',').collect();
             fields
                 .iter()
-                .any(|field| field.trim().contains("instructions"))
+                .any(|field| field.trim().contains(scenario.perf_event()))
                 .then(|| fields[0].trim())
         })
-        .ok_or_else(|| format!("instructions:u missing: {stderr}"))?
+        .ok_or_else(|| format!("{} missing: {stderr}", scenario.perf_event()))?
         .parse()
-        .map_err(|error| format!("invalid instruction count: {error}"))
+        .map_err(|error| format!("invalid perf count: {error}"))
 }
 
-fn run_instruction_ab(executable: &Path, scenario: Scenario) -> Result<(), String> {
+fn run_perf_ab(executable: &Path, scenario: Scenario) -> Result<(), String> {
     for arm in [Arm::Reference, Arm::Candidate] {
         let status = Command::new(executable)
             .args(["--child", scenario.name(), arm.name(), "100"])
@@ -644,13 +730,14 @@ fn run_instruction_ab(executable: &Path, scenario: Scenario) -> Result<(), Strin
             } else {
                 Arm::Reference
             };
-            counts[slot] = perf_instructions(executable, scenario, arm)?;
+            counts[slot] = perf_counter(executable, scenario, arm)?;
         }
         let null = counts[0] as f64 / counts[1] as f64;
         let effect = counts[0] as f64 / counts[2] as f64;
         println!(
-            "INSTRUCTIONS scenario={} round={} order={order:?} reference_a={} reference_b={} candidate={} null_ratio={null:.9} reference_over_candidate={effect:.9}",
+            "PERF_COUNT scenario={} event={} round={} order={order:?} reference_a={} reference_b={} candidate={} null_ratio={null:.9} reference_over_candidate={effect:.9}",
             scenario.name(),
+            scenario.perf_event(),
             round + 1,
             counts[0],
             counts[1],
@@ -677,8 +764,9 @@ fn run_instruction_ab(executable: &Path, scenario: Scenario) -> Result<(), Strin
         "NULL"
     };
     println!(
-        "INSTRUCTIONS_SUMMARY scenario={} rounds={STAT_ROUNDS} null_median={null_median:.9} null_ci95_low={null_ci95_low:.9} null_ci95_high={null_ci95_high:.9} bootstrap_resamples={BOOTSTRAP_RESAMPLES} null_cv_pct={null_cv_pct:.6} reference_over_candidate_median={effect_median:.9} effect_cv_pct={effect_cv_pct:.6} decisive_threshold={decisive_threshold:.9}",
-        scenario.name()
+        "PERF_COUNT_SUMMARY scenario={} event={} rounds={STAT_ROUNDS} null_median={null_median:.9} null_ci95_low={null_ci95_low:.9} null_ci95_high={null_ci95_high:.9} bootstrap_resamples={BOOTSTRAP_RESAMPLES} null_cv_pct={null_cv_pct:.6} reference_over_candidate_median={effect_median:.9} effect_cv_pct={effect_cv_pct:.6} decisive_threshold={decisive_threshold:.9}",
+        scenario.name(),
+        scenario.perf_event()
     );
     println!(
         "DECISION scenario={} verdict={verdict} gate=median_ci_95 two_x_margin=true cv_used_as_provenance_only=true",
@@ -713,7 +801,7 @@ fn main() -> Result<(), String> {
         correctness_gate(scenario);
         run_profile(&executable, scenario)
             .map_err(|error| format!("PROFILE INVALID scenario={}: {error}", scenario.name()))?;
-        run_instruction_ab(&executable, scenario)
+        run_perf_ab(&executable, scenario)
             .map_err(|error| format!("A/B INVALID scenario={}: {error}", scenario.name()))?;
     }
     Ok(())

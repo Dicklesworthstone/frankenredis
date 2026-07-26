@@ -11124,3 +11124,64 @@ Concrete retry predicate: rerun after changes to `zrangebylex_members_borrow_sca
 `lex_range_refs`, LFU RNG/bump semantics, the keyspace map/hash implementation, allocator, or
 release codegen; invalidate if exact reference self-time becomes zero, samples are lost, the A/A
 median CI does not bracket 1.0, or the A/B effect fails the 2x CI-radius threshold.
+
+## 2026-07-25 NobleOsprey: FRONTIER / KEEP — make the 10 Hz modeled-memory scan a lazy RSS fallback (`frankenredis-va3z0`)
+
+Ledger-first routing took the profile-attributed OPEN lever in `docs/NEGATIVE_EVIDENCE.md`, not the
+already-refuted keyspace-size proxy. On a 100k-key INCR workload,
+`Store::cached_entry_memory_usage_bytes` had consumed **9.74% of total server cycles** and
+`Store::record_ops_sec_sample` another **1.29%**; TTL SET independently exposed the same scan. The
+source explained the attribution: every 100 ms, `record_ops_sec_sample` eagerly called the O(n)
+`estimate_memory_usage_bytes`, then discarded that result because Linux
+`read_rss_bytes()` returned `Some`.
+
+**ONE LEVER:** the production sampler now evaluates the modeled estimate only as the RSS fallback:
+`rss_bytes.unwrap_or_else(|| self.estimate_memory_usage_bytes())`. Linux records the same procfs RSS
+without walking the keyspace; targets where RSS is unavailable still run the identical estimate.
+The only removed side effect is an otherwise-unobserved memo refresh. Every modeled-memory consumer
+calls `estimate_memory_usage_bytes` itself and therefore retains the same 64-mutation staleness
+bound.
+
+The same-binary harness extended `resurrection_store_top5` with a `cycles:u` scenario because the
+profiled random hash walk is latency-bound. Its source SHA-256 is
+`3430237e46616c2b4662d7c043b4449d425e4c42669e3752fbdf8d19da45ca93`. A 100,000-key TTL fixture
+forced the modeled-memory memo to the real 64-mutation stale boundary before every sample. The
+reference eagerly scanned; the candidate received the same successful 64 MiB RSS reading and
+skipped the fallback. Before timing, RSS, peak RSS, modeled `used_memory` (**9,600,000 bytes**), TTL
+state, and full store digest were identical.
+
+One fail-closed remote invocation on worker `vmi1149989` used release ELF SHA-256
+`d88675104e93c24d6edbd9b489c9cdb95a8b5cc80333ca44a1f401d93880578a` (1,325,592 bytes),
+self-reported on line one. Three exact-reference `cycles:u` profiles lost zero samples and
+attributed `record_memory_sample_eager_reference_bench` **1.72/1.34/0.34% self** (median
+**1.34%**); the called scan was independently visible, with the per-key expiry-map
+`contains_key` leaf reaching **77.01% self**.
+
+The same invocation ran 24 position-balanced rounds containing two eager reference slots (A/A) and
+one lazy candidate slot (A/B). The A/A median was **1.028971080**, with bootstrap 95% median CI
+**[0.920702885, 1.058750797]**. The reference/candidate cycles median was
+**3.976742810x**. The decision used only twice the null-CI radius, yielding a
+**1.158594230x** threshold; the candidate clears it decisively. Null CV (**14.263965%**) and effect
+CV (**14.478369%**) are recorded as shared-worker provenance only and did not gate the result.
+**KEEP.**
+
+Invalid infrastructure attempts are not results: a pinned `hz2` reservation and a pressured
+`vmi1167313` reservation timed out before execution; an admitted `hz2` run passed correctness and
+self-reported ELF `768632537665ba3edcdc7b948f57e19f4337767d8eea393d710983f49aab6d66` but stopped
+before profiling because that worker lacks `perf`; `ovh-b` could not admit the requested slots; and
+`vmi1152480` failed its project-root preflight. No attempt fell back locally.
+
+Final strict-remote gates were green: the focused lazy/eager parity test passed 1/1, the
+feature-enabled library plus exact bench target passed Clippy with `-D warnings`, workspace
+all-target check passed, and `fr-conformance` passed all **347 asserting tests** (194 library, 99
+smoke, 54 auxiliary/integration). Live oracle included strings 294/294, lists 206/206, zsets
+324/324, streams 217/217, objects 116/116, COPY 102/102, and generic commands 232/232. Its known
+non-asserting surface remained one CONFIG value mismatch, eight replication ID/offset mismatches,
+and two transport timeouts.
+
+Concrete retry predicate: rerun after changes to `record_ops_sec_sample`, `read_rss_bytes`,
+`estimate_memory_usage_bytes` or its staleness threshold, expiry/keyspace hashing, the 10 Hz
+scheduler, allocator, target OS, or release codegen. A non-Linux retry must exercise the `None`
+fallback. Invalidate rather than compare if the exact eager-reference frame has zero self-time or
+lost samples, the A/A median CI does not bracket 1.0, or the A/B effect fails the 2x CI-radius
+threshold. Rollback is the literal eager `let used_memory = ...; rss.unwrap_or(used_memory)` pair.
