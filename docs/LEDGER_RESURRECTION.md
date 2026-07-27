@@ -260,6 +260,21 @@ their A/A controls, executing-ELF hashes, counted mechanisms, and byte/state
 proofs stand. This correction changes the historical queue and its ranking; it
 does not fabricate replacement measurements.
 
+### Corrected top-five reconciliation
+
+The corrected ranking was reconciled against the later ledger before launching
+new work. This is not a claim that an old void row became valid retroactively:
+the first three surfaces have a later, independently admissible successor, while
+the final two still fail their own concrete retry predicates.
+
+| rank | corrected void surface | disposition at audited HEAD |
+|---:|---|---|
+| 1 | packed descending ZREVRANGE temporary `Vec::from_iter` (row 177) | **RESURRECTED / KEEP already stands.** The later exact `packed_zset_index_slice_desc` rerun used one executable (`796e4814…3dbca`), a same-invocation A/A CI of `[0.999997754, 1.000002038]`, raw-score bit identity, and exact old-helper profile attribution. It measured **2.484048x** reference/candidate and removed the full temporary. Reopen only if a same-invocation current-ELF rerun fails bit identity or its candidate median CI intersects the A/A decision band. |
+| 2 | LFU ZREVRANK WITHSCORE removable `contains_key` (row 178) | **RESURRECTED / KEEP already stands.** The later exact rerun used one executable (`62828e48…48589`), same-invocation A/A controls, full state/output identity, and non-zero exact frames. It measured **1.875x** at n32 and **1.726x** at n256, both outside their null controls. Reopen only if a current exact-input profile no longer names the redundant probe or a same-invocation state-identical rerun falls inside its A/A decision band. |
+| 3 | LZF `common_prefix_len` routing (row 164) | **RESURRECTED / KEEP revalidated under the current contract.** The existing end-to-end compressor bench now self-reports its executing ELF and uses same-invocation A/A bootstrap median CIs. ELF `041f0ed7…a9c6b`, 81 rounds: `runs_256x24` measured **1.075040x** against a **1.067814x** threshold; `onebyte_8k` measured **1.194136x** against **1.093208x**. `runs_512x12` and both structured/text guards were NULL, never adverse. All five compressed outputs were byte-identical; CV was provenance only. Reopen only if a current end-to-end DUMP profile no longer routes long match tails through this helper or a same-invocation current-ELF rerun loses byte identity or falls inside the A/A decision band. |
+| 4 | direct multi-member GEOHASH reply encoder (row 24) | **RETRY PREDICATE NOT MET.** The verified target `RespFrame::encode_into` is only **3.22% self-time**, matching the old near-1.0 result's Amdahl ceiling. Do not rebuild the reverted candidate until a fresh production-path profile names reply allocation/materialization as a dominant frame rather than dispatch/server-loop noise. |
+| 5 | cached WAIT ACK snapshot accessor (row 122) | **RETRY PREDICATE NOT MET.** The reference refresh was **2.98% self-time**, but the candidate accessor had zero exact self-time and the harness correctly admitted no A/B ratio. Do not rebuild the reverted candidate until both arms resolve in a larger shared named frame, or the exact candidate frame acquires non-zero self-time on the production WAIT workload. |
+
 ## Institutionalization — the audit is now a gate, not an event
 
 The broadcast's lesson is that ledger integrity **decays**: frankensqlite, which

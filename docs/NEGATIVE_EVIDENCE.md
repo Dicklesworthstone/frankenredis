@@ -37,6 +37,101 @@ Never promote `ledger_resurrection_audit6.py` output beyond triage without
 reading every queued parent row, and run
 `scripts/perf_candidate_preflight.py self-test` whenever its predicates change.
 
+## 2026-07-27 OliveFinch (cod/MEASURE): KEEP revalidated — LZF long-tail SIMD routing clears the current ELF+A/A+median-CI contract
+
+- **Why this top-five row was rerun.** Corrected resurrection row 164's later
+  end-to-end `lzf_compress` result already carried a same-binary A/A null and a
+  byte-identity proof, so its measured result was not discarded. Its surviving
+  bench nevertheless predated the institutional contract: it printed no
+  executing-ELF hash and decided against empirical p5/p95 bounds. The existing
+  `lzf_prefix_simd` bench was upgraded in place before rerunning; production
+  compression code was not changed.
+- **Self-reported executable and behavior proof.** One strict-remote invocation
+  on `vmi1153651` self-reported executing bench ELF SHA-256
+  **`041f0ed78ec083922df2842825b1e5aeb96b33e12789498f5a61f66ed66a9c6b`**.
+  Before timing, candidate and exact scalar reference emitted byte-identical
+  compressed output for all five long-run, structured, and text-like inputs.
+  The standing production profile attribution remains applicable:
+  `lzf_compress` was about **79%** of the run-heavy DUMP path, and the bench
+  directly invokes both const-selected compressor arms on that same input
+  class.
+- **Same-invocation A/A bootstrap 95% median-CI gate, never CV.** Each shape ran
+  81 position-balanced rounds in the same process. The decision threshold was
+  `max(1.01, 1 + 2 × A/A CI radius)`; every A/A bootstrap CI bracketed 1.0.
+  One invocation contained both A/A and A/B; for `runs_256x24`, the A/A null
+  median was **0.986220270** and its bootstrap 95% median CI was
+  **[0.966093074, 1.007252220]**. The bootstrap median-CI gate determined every
+  verdict.
+
+  | shape | reference/candidate median | A/A null median | A/A bootstrap 95% median CI | threshold | verdict |
+  |---|---:|---:|---:|---:|---|
+  | `runs_256x24` | **1.075040131x** | 0.986220270 | `[0.966093074, 1.007252220]` | 1.067813852x | **KEEP** |
+  | `runs_512x12` | 1.033891064x | 1.003356576 | `[0.987459683, 1.026039087]` | 1.052078175x | NULL |
+  | `onebyte_8k` | **1.194135844x** | 0.981906780 | `[0.953395802, 1.009864156]` | 1.093208397x | **KEEP** |
+  | `structured_512` | 1.007149294x | 0.996316319 | `[0.978851504, 1.021236579]` | 1.042473159x | NULL |
+  | `textish_8k` | 1.006827378x | 1.008189727 | `[0.980245186, 1.040673018]` | 1.081346036x | NULL |
+
+  CV was recorded as provenance only and never used to accept or refuse a
+  verdict. Two long-tail shapes cleared their bootstrap median-CI thresholds;
+  both unchanged-path guards were neutral.
+- **Disposition and concrete retry predicate.** The existing production KEEP
+  stands, now with current-contract provenance. Reopen only if a fresh
+  production DUMP profile no longer routes long match tails through
+  `lzf_compress`/`common_prefix_len`, or a same-invocation current-ELF rerun
+  either loses byte identity, places every long-tail median inside its A/A
+  decision band, or produces an adverse guard result outside that band.
+
+## 2026-07-27 OliveFinch (cod/MEASURE): SURFACE — current v2 matrix exposes no admissible incumbent loss
+
+- **Ledger-first vein switch.** After the corrected resurrection top five were
+  reconciled, both negative ledgers were searched for the standard matrix
+  surfaces. ZRANGE WITHSCORES, DUMP, HGETALL, and the scalar/list/hash paths are
+  mature or carry explicit profile predicates. The remaining
+  `frankenredis-b1o02` packed-hash representation is a multi-day structural
+  project; the associated persistence pre-size candidates were already
+  re-profiled on the correct SAVE path at a combined ceiling of at most **0.35%
+  self-time**. No such candidate was reopened.
+- **Current executable provenance and substrate.** A strict-remote release build
+  at `09b48b640` produced FrankenRedis ELF SHA-256
+  **`08c5782c34476f3c8566114adcd89c4b51e83b72784598eb36e581fffe4864a8`**
+  and `fr-bench` ELF SHA-256
+  **`96ec2f6db3e145257602b86941193c2d246a03eb56d68b073c875451b65b42ba`**;
+  vendored Redis 7.2.4 was
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+  One top-level invocation launched two identical FrankenRedis servers and
+  Redis, then ran every cell for six complete position-balanced rounds of
+  50,000 operations. Each cell computed an in-invocation A/A bootstrap 95%
+  median CI, required it to bracket 1.0, and classified the FrankenRedis/Redis
+  median CI against twice the null radius. CV was emitted as provenance only
+  and did not enter a decision.
+- **Complete routing result (42 cells): 0 `FR_LOSS`, 11 `FR_WIN`, 26
+  `INDETERMINATE`, 5 `BLOCKED_NULL_BIAS`.** The cell labels below include the
+  median FrankenRedis/Redis throughput ratio.
+
+  | status | cells |
+  |---|---|
+  | `FR_WIN` | `set@p128` 1.7770; `integer-get@p128` 1.7441; `xadd-maxlen@p16` 1.3888; `xadd-maxlen@p128` 1.5737; `lrange@p16` 1.6503; `lrange@p128` 1.8870; `hgetall@p16` 1.4258; `smembers@p16` 1.1892; `smembers@p128` 1.3473; `zrange-withscores@p16` 1.2509; `zrange-withscores@p128` 1.5376 |
+  | `INDETERMINATE` | `set@p1` 1.0268; `set@p16` 1.2824; `get@p1` 1.0825; `get@p128` 1.4291; `integer-get@p1` 1.0318; `integer-get@p16` 1.2024; `incr@p1` 1.0574; `incr@p16` 1.2306; `incr@p128` 1.4653; `hset@p1` 1.0375; `hset@p16` 1.0105; `hset@p128` 1.3011; `hget@p1` 1.0088; `hget@p16` 1.1437; `hget@p128` 1.7724; `lpush@p16` 1.0101; `lpush@p128` 0.9891; `xadd-maxlen@p1` 1.0797; `hgetall@p128` 0.8792; `smembers@p1` 1.0066; `zrange-withscores@p1` 1.0292; `dump@p1` 1.1234; `dump@p16` 1.2503; `dump@p128` 1.5828; `mixed@p1` 1.1514; `mixed@p128` 1.6845 |
+  | `BLOCKED_NULL_BIAS` | `get@p16` 1.2252; `lpush@p1` 1.0928; `lrange@p1` 1.0944; `hgetall@p1` 1.0312; `mixed@p16` 1.1460 |
+
+- **Adjudication.** The tracked
+  `.bench-history/comprehensive_bench.latest.json` remains legacy v1 and was
+  neither consulted as evidence nor overwritten. Its historical DUMP and MIXED
+  losses lack same-invocation A/A controls and do not describe this ELF. A
+  focused current-ELF `dump@p16` pre-scan also produced no loss (median
+  **1.288530x**, effect CI **[1.250910676, 1.387128853]**, A/A CI
+  **[0.923331795, 1.035034873]**, decision gate
+  **[0.846663590, 1.153336410]**), while the broader pass's wider null left that
+  cell indeterminate. With no admissible loss there is no profile target and no
+  production edit.
+- **Concrete retry predicate.** Reopen a standard matrix cell only when a fresh
+  current-ELF, same-invocation A/A run yields `FR_LOSS`: its entire
+  FrankenRedis/Redis bootstrap median CI must sit below the two-times-null gate.
+  Then profile that exact workload and executable, require a named non-zero
+  target frame plus computed Amdahl ceiling, and only then propose one lever.
+  New command/value shapes outside this matrix must first be added as separate
+  workload identities rather than generalized from an indeterminate cell.
+
 ## 2026-07-26 NobleOsprey (cod/MEASURE): KEEP — exact borrowed `XADD MAXLEN ~` dispatch closes the only major-incumbent loss (`frankenredis-fcp4q`)
 
 - **Ledger-first reopening was admissible.** Before editing, the preflight was run for

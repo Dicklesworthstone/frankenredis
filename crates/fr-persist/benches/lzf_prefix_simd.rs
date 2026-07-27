@@ -16,19 +16,22 @@
 //! text / structured payloads (the guards — must never regress). Both arms emit
 //! BYTE-IDENTICAL compressed bytes (asserted before timing).
 //!
-//! Substrate = the cc bench roster: ONE binary, adjacent-pair interleave (swap on
-//! odd rounds), black_box, reps calibrated per input, median of 41 paired ratios,
-//! gated on the candidate median outside the null (orig-vs-orig) p5..p95.
+//! Substrate = ONE self-identifying binary and ONE invocation, position-balanced
+//! A/A+A/B pairs, black_box on both input and result, and reps calibrated per
+//! input. Decisions use the larger of twice the bootstrap 95% null-median CI
+//! radius and an absolute 1.01 floor. CV is provenance only.
 
+use std::env;
 use std::hint::black_box;
+use std::path::Path;
+use std::process::Command;
 use std::time::Instant;
 
 use fr_persist::bench_lzf_compress;
 
 const ROUNDS: usize = 81;
 const TARGET_SEGMENT_SECS: f64 = 0.020;
-const NULL_LO: f64 = 0.05;
-const NULL_HI: f64 = 0.95;
+const BOOTSTRAP_RESAMPLES: usize = 20_000;
 
 /// Long repeated-run payload: `copies` back-to-back copies of a `unit`-byte pseudo
 /// -random block. Each copy matches the previous one for the full `unit` bytes, so
@@ -69,8 +72,22 @@ fn structured(n: usize) -> Vec<u8> {
 /// the realistic-corpus guard.
 fn textish(target: usize) -> Vec<u8> {
     const WORDS: &[&str] = &[
-        "the", "quick", "brown", "fox", "jumps", "over", "lazy", "dog", "redis",
-        "listpack", "quicklist", "compress", "value", "member", "score", "field",
+        "the",
+        "quick",
+        "brown",
+        "fox",
+        "jumps",
+        "over",
+        "lazy",
+        "dog",
+        "redis",
+        "listpack",
+        "quicklist",
+        "compress",
+        "value",
+        "member",
+        "score",
+        "field",
     ];
     let mut out = Vec::with_capacity(target + 16);
     let mut s: u32 = 0x9e37_79b9;
@@ -90,18 +107,77 @@ fn compress_cand(p: &[u8]) -> usize {
 }
 
 fn median(r: &mut [f64]) -> f64 {
-    r.sort_by(|a, b| a.partial_cmp(b).expect("no NaN"));
-    r[r.len() / 2]
+    r.sort_by(f64::total_cmp);
+    let middle = r.len() / 2;
+    if r.len().is_multiple_of(2) {
+        (r[middle - 1] + r[middle]) / 2.0
+    } else {
+        r[middle]
+    }
 }
+
 fn cv(r: &[f64]) -> f64 {
     let m = r.iter().sum::<f64>() / r.len() as f64;
     100.0 * (r.iter().map(|x| (x - m).powi(2)).sum::<f64>() / r.len() as f64).sqrt() / m
 }
-fn pct(sorted: &[f64], p: f64) -> f64 {
-    sorted[((sorted.len() - 1) as f64 * p).round() as usize]
+
+fn percentile(sorted: &[f64], percentile: f64) -> f64 {
+    sorted[((sorted.len() - 1) as f64 * percentile).round() as usize]
 }
 
-fn main() {
+fn bootstrap_median_ci(samples: &[f64]) -> (f64, f64) {
+    let mut state = 0x5eed_f00d_cafe_babe_u64;
+    for sample in samples {
+        state ^= sample.to_bits().wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        state = state.rotate_left(17);
+    }
+    let mut scratch = vec![0.0; samples.len()];
+    let mut medians = Vec::with_capacity(BOOTSTRAP_RESAMPLES);
+    for _ in 0..BOOTSTRAP_RESAMPLES {
+        for value in &mut scratch {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            let draw = state.wrapping_mul(0x2545_f491_4f6c_dd1d);
+            *value = samples[(draw as usize) % samples.len()];
+        }
+        medians.push(median(&mut scratch));
+    }
+    medians.sort_by(f64::total_cmp);
+    (percentile(&medians, 0.025), percentile(&medians, 0.975))
+}
+
+fn binary_sha256(executable: &Path) -> Result<String, String> {
+    let output = Command::new("sha256sum")
+        .arg(executable)
+        .output()
+        .map_err(|error| format!("could not launch sha256sum: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "sha256sum failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let digest = String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| "sha256sum emitted no digest".to_owned())?
+        .to_owned();
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!("sha256sum emitted invalid digest {digest:?}"));
+    }
+    Ok(digest)
+}
+
+fn main() -> Result<(), String> {
+    let executable = env::current_exe()
+        .map_err(|error| format!("could not resolve bench executable: {error}"))?;
+    let elf_sha256 = binary_sha256(&executable)?;
+    println!(
+        "bench_elf_sha256={elf_sha256} executable={}",
+        executable.display()
+    );
+
     let cases: &[(&str, Vec<u8>)] = &[
         ("runs_256x24", repeated_runs(256, 24)), // long tails -> AVX2 (expect WIN)
         ("runs_512x12", repeated_runs(512, 12)), // long tails -> AVX2 (expect WIN)
@@ -116,12 +192,22 @@ fn main() {
         let b = bench_lzf_compress::<true>(p, p.len());
         assert_eq!(a, b, "{label}: SIMD routing changed the compressed bytes");
     }
+    println!("CORRECTNESS_GATE lzf_compressed_output=byte_identical cases=5");
 
     println!(
-        "\n{:<16} {:>7} {:>9} {:>16} {:>8} {:>11} {:>16}",
-        "workload", "reps", "NULL med", "null p5..p95", "null cv%", "cand/orig", "verdict"
+        "\n{:<16} {:>7} {:>9} {:>24} {:>8} {:>11} {:>12} {:>8}",
+        "workload",
+        "reps",
+        "NULL med",
+        "null bootstrap CI95",
+        "null cv%",
+        "orig/cand",
+        "threshold",
+        "verdict"
     );
 
+    let mut long_tail_keeps = 0_usize;
+    let mut guard_rejects = 0_usize;
     for (label, p) in cases {
         let time = |f: &dyn Fn(&[u8]) -> usize, reps: usize| -> f64 {
             let start = Instant::now();
@@ -139,7 +225,8 @@ fn main() {
         loop {
             let e = time(&orig, reps);
             if e >= TARGET_SEGMENT_SECS || reps > 1 << 18 {
-                reps = ((reps as f64) * (TARGET_SEGMENT_SECS / e.max(1e-9)).max(1.0)).ceil() as usize;
+                reps =
+                    ((reps as f64) * (TARGET_SEGMENT_SECS / e.max(1e-9)).max(1.0)).ceil() as usize;
                 break;
             }
             reps *= 4;
@@ -148,9 +235,9 @@ fn main() {
         let mut nulls = Vec::with_capacity(ROUNDS);
         let mut speeds = Vec::with_capacity(ROUNDS);
         for round in 0..=ROUNDS {
-            let swap = round % 2 == 1;
+            let swap_within_pair = round % 2 == 1;
             let pair = |bf: &dyn Fn(&[u8]) -> usize, cf: &dyn Fn(&[u8]) -> usize| {
-                if swap {
+                if swap_within_pair {
                     let c = time(cf, reps);
                     time(bf, reps) / c
                 } else {
@@ -158,8 +245,12 @@ fn main() {
                     b / time(cf, reps)
                 }
             };
-            let nn = pair(&orig, &orig);
-            let sp = pair(&orig, &cand);
+            let (nn, sp) = if round % 4 < 2 {
+                (pair(&orig, &orig), pair(&orig, &cand))
+            } else {
+                let effect = pair(&orig, &cand);
+                (pair(&orig, &orig), effect)
+            };
             if round == 0 {
                 continue;
             }
@@ -167,26 +258,70 @@ fn main() {
             speeds.push(sp);
         }
 
+        let null_cv_pct = cv(&nulls);
+        let effect_cv_pct = cv(&speeds);
+        let (null_ci95_low, null_ci95_high) = bootstrap_median_ci(&nulls);
         let null_med = median(&mut nulls);
         let speedup = median(&mut speeds);
-        let lo = pct(&nulls, NULL_LO);
-        let hi = pct(&nulls, NULL_HI);
-        let verdict = if speedup > 1.0 && speedup > hi {
-            "WIN(avx2 tail)"
-        } else if speedup < 1.0 && speedup < lo {
-            "REGRESSION"
+        if null_ci95_low > 1.0 || null_ci95_high < 1.0 {
+            return Err(format!(
+                "{label}: A/A null CI does not bracket 1.0: \
+                 [{null_ci95_low:.9}, {null_ci95_high:.9}]"
+            ));
+        }
+        let null_radius = (null_ci95_low - 1.0)
+            .abs()
+            .max((null_ci95_high - 1.0).abs());
+        let decisive_threshold = (1.0 + 2.0 * null_radius).max(1.01);
+        let verdict = if speedup >= decisive_threshold {
+            "KEEP"
+        } else if speedup.recip() >= decisive_threshold {
+            "REJECT"
         } else {
-            "indistinguishable"
+            "NULL"
         };
+        if matches!(*label, "runs_256x24" | "runs_512x12" | "onebyte_8k") && verdict == "KEEP" {
+            long_tail_keeps += 1;
+        }
+        if matches!(*label, "structured_512" | "textish_8k") && verdict == "REJECT" {
+            guard_rejects += 1;
+        }
         println!(
-            "{:<16} {:>7} {:>9.4} {:>16} {:>8.2} {:>10.3}x {:>16}",
+            "{:<16} {:>7} {:>9.4} {:>24} {:>8.2} {:>10.3}x {:>12.3} {:>8}",
             label,
             reps,
             null_med,
-            format!("[{lo:.3}, {hi:.3}]"),
-            cv(&nulls),
+            format!("[{null_ci95_low:.4}, {null_ci95_high:.4}]"),
+            null_cv_pct,
             speedup,
+            decisive_threshold,
             verdict
         );
+        println!(
+            "MEDIAN_CI_EVIDENCE workload={label} rounds={ROUNDS} \
+             null_median={null_med:.9} null_ci95_low={null_ci95_low:.9} \
+             null_ci95_high={null_ci95_high:.9} \
+             reference_over_candidate_median={speedup:.9} \
+             decisive_threshold={decisive_threshold:.9} \
+             bootstrap_resamples={BOOTSTRAP_RESAMPLES} null_cv_pct={null_cv_pct:.6} \
+             effect_cv_pct={effect_cv_pct:.6} verdict={verdict} \
+             same_invocation_aa=true position_balanced=true \
+             absolute_floor=1.01 cv_used_as_provenance_only=true"
+        );
     }
+
+    if long_tail_keeps == 0 {
+        return Err("no long-tail workload cleared the median-CI KEEP gate".to_owned());
+    }
+    if guard_rejects != 0 {
+        return Err(format!(
+            "{guard_rejects} short-tail guard workload(s) cleared the REJECT gate"
+        ));
+    }
+    println!(
+        "DECISION verdict=KEEP long_tail_keeps={long_tail_keeps} guard_rejects={guard_rejects} \
+         gate=bootstrap_median_ci_95 two_x_margin=true absolute_floor=1.01 \
+         cv_used_as_provenance_only=true"
+    );
+    Ok(())
 }
