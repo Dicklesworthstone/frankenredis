@@ -27015,7 +27015,7 @@ mod tests {
     }
 
     #[test]
-    fn borrowed_plain_mset_packet_dispatcher_defers_unsupported_or_limited_inputs() {
+    fn borrowed_plain_mset_packet_dispatcher_handles_multi_and_defers_limited_inputs() {
         let cfg = ParserConfig::default();
         assert!(
             crate::parse_borrowed_plain_mset_packet(
@@ -27025,14 +27025,15 @@ mod tests {
             .is_none(),
             "single-pair MSET stays on the generic wrong-arity path"
         );
-        assert!(
-            crate::parse_borrowed_plain_mset_packet(
-                b"*19\r\n$4\r\nMSET\r\n$1\r\na\r\n$1\r\n1\r\n$1\r\nb\r\n$1\r\n2\r\n$1\r\nc\r\n$1\r\n3\r\n$1\r\nd\r\n$1\r\n4\r\n$1\r\ne\r\n$1\r\n5\r\n$1\r\nf\r\n$1\r\n6\r\n$1\r\ng\r\n$1\r\n7\r\n$1\r\nh\r\n$1\r\n8\r\n$1\r\ni\r\n$1\r\n9\r\n",
-                &cfg
-            )
-            .is_none(),
-            "nine-pair MSET stays on the generic parser"
+        let parsed = crate::parse_borrowed_plain_mset_packet(
+            b"*19\r\n$4\r\nMSET\r\n$1\r\na\r\n$1\r\n1\r\n$1\r\nb\r\n$1\r\n2\r\n$1\r\nc\r\n$1\r\n3\r\n$1\r\nd\r\n$1\r\n4\r\n$1\r\ne\r\n$1\r\n5\r\n$1\r\nf\r\n$1\r\n6\r\n$1\r\ng\r\n$1\r\n7\r\n$1\r\nh\r\n$1\r\n8\r\n$1\r\ni\r\n$1\r\n9\r\n",
+            &cfg,
         );
+        assert!(
+            matches!(&parsed, Some(crate::BorrowedPlainMsetPacket::Multi(_))),
+            "nine-pair MSET uses the shipped multi-pair parser"
+        );
+        assert_eq!(parsed.expect("multi-pair packet").pairs().len(), 9);
         assert!(
             crate::parse_borrowed_plain_mset_packet(
                 b"*017\r\n$4\r\nMSET\r\n$1\r\na\r\n$1\r\n1\r\n$1\r\nb\r\n$1\r\n2\r\n$1\r\nc\r\n$1\r\n3\r\n$1\r\nd\r\n$1\r\n4\r\n$1\r\ne\r\n$1\r\n5\r\n$1\r\nf\r\n$1\r\n6\r\n$1\r\ng\r\n$1\r\n7\r\n$1\r\nh\r\n$1\r\n8\r\n",
