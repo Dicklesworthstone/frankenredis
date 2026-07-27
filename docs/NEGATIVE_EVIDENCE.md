@@ -37,6 +37,37 @@ Never promote `ledger_resurrection_audit6.py` output beyond triage without
 reading every queued parent row, and run
 `scripts/perf_candidate_preflight.py self-test` whenever its predicates change.
 
+### Final remediation reconciliation (2026-07-27)
+
+The incident window contains **11 verdicts: 5 SOUND, 6 CORRECTED, 0
+RETRACTED**. Each CORRECTED verdict now maps to a landed remediation; none is
+left as a prose-only judgment.
+
+| corrected commit | defect found by the restored-tier audit | landed remediation |
+|---|---|---|
+| `74a5d20d9cab` | core/port placement and zero-counter failures were not fail-closed; the ad-hoc ledger aggregate was triage, not adjudication | `d13eeba7dee1` hardened `scripts/syscall_decomposition.sh`; `09b48b640` labels regex output as triage and supplies the hand-adjudicated manifest |
+| `0deaee58913e` | the keyspace-size differential could not isolate the discarded scan | `d13eeba7dee1` retracts the proxy as the wrong instrument while preserving the two symbolized profiles |
+| `f66c64018dbb` | both resurrection benches omitted the campaign's absolute 1.01 decision floor | `09b48b640` restores `max(1.01, 1 + 2 × null-CI radius)`, requires the null CI to bracket 1.0, and emits KEEP/NULL/REJECT tri-state decisions |
+| `4fab54ebf117` | one named `Timespec::now` uprobe was overextended into an all-vDSO cache/TLB explanation | `09b48b640` narrows the ledger conclusion and hardens `scripts/incr_vdso_rate_probe.sh`; the residual remains unattributed |
+| `112b133f80e8` | nested headings were split and 180 regex hits were presented as hand adjudication | `09b48b640` fixes exact-`##` parsing and records all 180 manual dispositions: 136 actual rejects, 107 void |
+| `04dffdd324d7` | weak null prose and any labelled hash could pass the purportedly mandatory gate | `09b48b640` requires same-invocation A/A bootstrap median CI, median-CI gating, never-CV provenance, self-reported executing-ELF SHA for a KEEP, and a concrete retry predicate; this final pass adds end-to-end exit-code fixtures |
+
+The downstream scan covered this ledger, the long-form performance ledger,
+`README.md`, `docs/perf_domination_scorecard.md`, and current Beads bodies. The
+tracked documents contained no live unqualified dependent claim. Three Beads
+records did: `frankenredis-nm6c9` still closed on the superseded 29.7% ad-hoc
+score, `frankenredis-va3z0` called the keyspace proxy merely inconclusive, and
+`frankenredis-iujfh` asserted the uncounted cache/TLB explanation. All three
+are corrected in the current Beads export.
+
+The gate proof is executable, not documentary. Its self-check now covers 19
+predicate and end-to-end cases. In particular, `check-entry` returns 3 for a
+near-1.0 row with weak “A/A present” prose, 3 for a null CI excluding 1.0, 4
+for a labelled but non-self-reported binary SHA, and 6 for a CV-gated verdict;
+it returns 0 for both a counted-mechanism rejection and a full-contract KEEP.
+The installed pre-commit plugin delegates the staged ledger diff to this same
+path.
+
 ## 2026-07-27 OliveFinch (cod/MEASURE): KEEP revalidated — LZF long-tail SIMD routing clears the current ELF+A/A+median-CI contract
 
 - **Why this top-five row was rerun.** Corrected resurrection row 164's later

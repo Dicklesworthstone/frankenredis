@@ -165,7 +165,8 @@ def concrete_retry(body):
     if excerpt is None:
         return False
     marker = RETRY_MARK_RE.search(excerpt)
-    assert marker is not None
+    if marker is None:
+        return False
     condition = excerpt[marker.end():].strip(" :.—-*")
     return len(condition) >= 20 and RETRY_CONDITION_RE.search(condition) is not None
 
@@ -286,8 +287,8 @@ def cv_used_as_gate(body):
     return False
 
 
-def check_entry(source):
-    text = sys.stdin.read() if source == "-" else Path(source).read_text(errors="replace")
+def check_entry_text(text):
+    """Check one proposed ledger addition and return the documented exit code."""
     # Accept a raw diff: consider only added lines.
     if text.lstrip().startswith(("diff --git", "@@", "+++", "---")):
         text = "\n".join(l[1:] for l in text.splitlines()
@@ -375,13 +376,24 @@ def check_entry(source):
     return 0
 
 
+def check_entry(source):
+    text = sys.stdin.read() if source == "-" else Path(source).read_text(errors="replace")
+    return check_entry_text(text)
+
+
 def self_test():
+    from contextlib import redirect_stdout
+    from io import StringIO
+
     sha = "a" * 64
-    valid = (
+    valid_timing = (
         "One top-level invocation interleaved A/A and A/B. "
         "A/A null median 1.000001; bootstrap 95% median CI [0.9998, 1.0002]. "
         "The bootstrap median-CI gate determined the verdict, never CV. "
-        f"The harness self-reported ELF SHA-256 {sha}. "
+    )
+    valid = (
+        valid_timing
+        + f"The harness self-reported ELF SHA-256 {sha}. "
         "Retry predicate: reopen only if a fresh profile exposes >=5% self-time."
     )
     checks = [
@@ -430,6 +442,65 @@ def self_test():
             "positive CV gate",
         ),
     ]
+
+    def entry_status(title, body):
+        with redirect_stdout(StringIO()):
+            return check_entry_text(f"## {title}\n{body}\n")
+
+    checks.extend([
+        (
+            entry_status(
+                "2099-01-01 cod: REJECT — weak near-one row",
+                "A/B ratio 1.001. A/A null present. "
+                "Retry predicate: reopen only if a fresh profile exposes "
+                ">=5% self-time.",
+            ) == 3,
+            "end-to-end VOID-NONULL refusal",
+        ),
+        (
+            entry_status(
+                "2099-01-01 cod: REJECT — biased null",
+                "One top-level invocation interleaved A/A and A/B. "
+                "A/A null median 1.02; bootstrap 95% median CI [1.01, 1.03]. "
+                "The bootstrap median-CI gate determined the verdict, never CV. "
+                "Retry predicate: reopen only if a fresh profile exposes "
+                ">=5% self-time.",
+            ) == 3,
+            "end-to-end contaminated-null refusal",
+        ),
+        (
+            entry_status(
+                "2099-01-01 cod: KEEP — labelled hash only",
+                f"{valid_timing} Binary SHA-256 {sha}. "
+                "Retry predicate: reopen only if a fresh profile exposes "
+                ">=5% self-time.",
+            ) == 4,
+            "end-to-end non-self-reported SHA refusal",
+        ),
+        (
+            entry_status(
+                "2099-01-01 cod: REJECT — CV gate",
+                f"{valid} CV < 5% was the verdict threshold.",
+            ) == 6,
+            "end-to-end CV-gate refusal",
+        ),
+        (
+            entry_status(
+                "2099-01-01 cod: REJECT — counted closure",
+                "instructions:u 1001 -> 1001, unchanged. "
+                "Retry predicate: reopen only if a fresh profile shows "
+                "instructions fall by >=2%.",
+            ) == 0,
+            "end-to-end counted-mechanism acceptance",
+        ),
+        (
+            entry_status(
+                "2099-01-01 cod: KEEP — full contract",
+                valid,
+            ) == 0,
+            "end-to-end full-contract KEEP acceptance",
+        ),
+    ])
     failed = [name for passed, name in checks if not passed]
     if failed:
         for name in failed:
