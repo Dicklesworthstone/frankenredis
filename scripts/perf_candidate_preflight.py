@@ -16,16 +16,24 @@ Two modes:
 
   check-entry <file>
       Refuse a NEW REJECT-class ledger entry that is unfalsifiable, i.e. that
-      records neither an A/A null control nor a counted mechanism. This is the
-      VOID-NONULL class that is 124 of this repo's 125 void rows, and the whole
-      point is to make writing another one impossible.
-      Also refuse a NEW KEEP-class entry without the executing binary's full
-      64-hex SHA-256.
-      exit 0 = admissible · exit 3 = bad REJECT · exit 4 = bad KEEP
+      records neither a same-invocation A/A bootstrap median CI nor a counted
+      mechanism. This is the VOID-NONULL class that is 100 of this repo's 107
+      void rows, and the whole point is to make writing another one impossible.
+      Also refuse a NEW KEEP-class entry without both the executing binary's
+      self-reported 64-hex SHA-256 and that same null-control contract. Any
+      timing verdict using CV as a gate is refused, as is any verdict without a
+      concrete retry predicate.
+      exit 0 = admissible · exit 3 = bad REJECT · exit 4 = bad KEEP provenance
+      exit 5 = incomplete timing contract · exit 6 = CV-gated verdict
+      exit 7 = missing retry predicate
 
   install-hook
       Install the check-entry gate into the repository's chain-runner pre-commit
       directory. Refuses to overwrite an existing plugin.
+
+  self-test
+      Exercise the null-CI, counted-mechanism, binary-self-report, and never-CV
+      predicates without reading or writing repository state.
 
 Wire `check-entry` into a pre-commit hook to close the loop:
 
@@ -46,10 +54,37 @@ REJECT_RE = re.compile(
     r"\b(REJECT|REJECTED|NEGATIVE|NO[- ]SHIP|UNDECIDABLE|DECLINED|INVALID"
     r"|REVERT|REVERTED|NOT WORTH|ABANDON)\b", re.IGNORECASE)
 KEEP_RE = re.compile(r"\b(KEEP|SHIPPED|LANDED|WIN|PROMOTED)\b", re.IGNORECASE)
-NULL_MEASUREMENT_RE = re.compile(
-    r"\b(?:A/A(?:\s+null)?|null(?:\s+control)?)\b"
-    r".{0,120}?\b(?:median|CI|confidence interval|band|floor|ratio|p0?5|p95)\b"
-    r".{0,80}?[-+]?\d+(?:\.\d+)?",
+NUMBER = r"[-+]?(?:\d+(?:\.\d+)?|\.\d+)"
+NULL_MEDIAN_CI_RE = re.compile(
+    rf"\bA/A(?:\s+null)?\b.{{0,500}}?\bmedian\b[^0-9+-]{{0,40}}"
+    rf"(?P<median>{NUMBER}).{{0,500}}?\bbootstrap(?:ped)?\b.{{0,80}}?"
+    rf"\b95%\s*(?:median\s*)?(?:CI|confidence interval)\b.{{0,80}}?"
+    rf"[\[(]\s*(?P<lo>{NUMBER})\s*[,;]\s*(?P<hi>{NUMBER})\s*[\])]",
+    re.IGNORECASE,
+)
+SAME_INVOCATION_RE = re.compile(
+    r"\b(?:same[- ]invocation|same (?:top-level )?invocation|"
+    r"single (?:top-level )?invocation|one (?:top-level )?invocation|"
+    r"within (?:one|the same) invocation)\b",
+    re.IGNORECASE,
+)
+MEDIAN_CI_GATE_RE = re.compile(
+    r"(?:\bbootstrap(?:ped)?\b.{0,80}?\bmedian[- ]CI\b.{0,80}?\b"
+    r"(?:gate|decision|verdict)\b|\b(?:gate|decision|verdict)\b.{0,80}?"
+    r"\bbootstrap(?:ped)?\b.{0,80}?\bmedian[- ]CI\b)",
+    re.IGNORECASE,
+)
+NEVER_CV_RE = re.compile(
+    r"(?:\bnever\s+(?:on\s+)?CV\b|\bCV\b.{0,100}?\b"
+    r"(?:provenance only|diagnostic only|did not influence|not used|"
+    r"never influenced|not a gate)\b|\b(?:not|never)\b.{0,60}?\bCV\b"
+    r".{0,60}?\b(?:gate|decision|verdict)\b)",
+    re.IGNORECASE,
+)
+CV_TOKEN_RE = re.compile(r"\bCV\b|coefficient of variation", re.IGNORECASE)
+CV_DECISION_RE = re.compile(
+    r"\b(?:gate|gated|threshold|cutoff|decision|verdict|reject(?:ed|ion)?|"
+    r"keep|decisive)\b",
     re.IGNORECASE,
 )
 MECHANISM_RE = re.compile(
@@ -63,9 +98,15 @@ COUNT_VALUE_RE = re.compile(
     r"\b(?:zero|one|two|three|unchanged|identical|same)\b)",
     re.IGNORECASE,
 )
-NEGATED_EVIDENCE_RE = re.compile(
-    r"\b(?:no|without|lacks?|lacking|missing|neither|not recorded|unrecorded|"
-    r"unavailable|not measured)\b",
+NEGATED_NULL_RE = re.compile(
+    r"(?:\b(?:no|without|missing|lacks?|lacking)\b.{0,35}?\bA/A\b|"
+    r"\bA/A\b.{0,35}?\b(?:missing|not recorded|unrecorded|unavailable|"
+    r"not measured)\b)",
+    re.IGNORECASE,
+)
+NEGATED_COUNT_RE = re.compile(
+    r"\b(?:not recorded|unrecorded|unavailable|not measured|measurement missing|"
+    r"count missing|without (?:a )?(?:count|measurement))\b",
     re.IGNORECASE,
 )
 BINARY_SHA_RE = re.compile(
@@ -74,8 +115,19 @@ BINARY_SHA_RE = re.compile(
     r"(?P<sha>[0-9a-f]{64})\b",
     re.IGNORECASE,
 )
+SELF_REPORT_RE = re.compile(
+    r"\b(?:self[- ]report(?:ed|s|ing)?|benchmark(?:ed|ing)?\s+"
+    r"(?:ELF|binary|executable)\s+(?:report(?:ed|s)|emit(?:ted|s))|"
+    r"bench_elf_sha256)\b",
+    re.IGNORECASE,
+)
 RETRY_MARK_RE = re.compile(
     r"\b(?:retry predicates?|retry condition|revisit only|do not retry unless)\b",
+    re.IGNORECASE,
+)
+RETRY_CONDITION_RE = re.compile(
+    r"(?:\b(?:if|only if|when|unless|until|after|changes?|lands?|exposes?|"
+    r"shows?|exceeds?|falls?|clears?|reaches?)\b|[<>]=?|==)",
     re.IGNORECASE,
 )
 
@@ -84,8 +136,7 @@ def normalised_entries(path):
     """Yield (title, whitespace-normalised body, line). Normalisation is not
     optional: both ledgers hard-wrap at ~100 columns, so a raw-text grep scores a
     wrapped `Null\\nmedian` as *no null recorded* — the exact error this gate
-    exists to prevent. Auditing raw text once reported a 95% void rate here
-    against a true 69.4%."""
+    exists to prevent."""
     if not path.exists():
         return
     text = path.read_text(encoding="utf-8", errors="replace")
@@ -106,6 +157,17 @@ def retry_excerpt(body):
     if next_bullet != -1:
         excerpt = excerpt[:next_bullet]
     return excerpt.strip()
+
+
+def concrete_retry(body):
+    """Require an actionable condition, not a bare `Retry predicate` label."""
+    excerpt = retry_excerpt(body)
+    if excerpt is None:
+        return False
+    marker = RETRY_MARK_RE.search(excerpt)
+    assert marker is not None
+    condition = excerpt[marker.end():].strip(" :.—-*")
+    return len(condition) >= 20 and RETRY_CONDITION_RE.search(condition) is not None
 
 
 def check_candidate(terms):
@@ -148,17 +210,25 @@ def added_entry_blocks(text):
 
 
 def measured_null(body):
-    """Require an actual A/A statistic.
+    """Require a same-invocation A/A bootstrap median CI that brackets 1.0.
 
     Merely writing `no A/A null control` must not satisfy the gate. Evidence is
-    considered in sentence-sized fragments so a later candidate ratio cannot
-    accidentally authenticate that negated statement.
+    bound to its A/A label, and a contaminated null whose CI excludes 1.0 is not
+    admissible evidence.
     """
-    fragments = re.split(r"(?<=[.!?;])\s+|\s+\|\s+", body)
-    for fragment in fragments:
-        if NEGATED_EVIDENCE_RE.search(fragment):
+    if not SAME_INVOCATION_RE.search(body):
+        return False
+    for match in NULL_MEDIAN_CI_RE.finditer(body):
+        prefix = body[max(0, match.start() - 80):match.start()]
+        if NEGATED_NULL_RE.search(prefix):
             continue
-        if NULL_MEASUREMENT_RE.search(fragment):
+        null_ci_span = body[match.end("median"):match.start("lo")]
+        if re.search(r"\b(?:A/B|candidate(?:/control)?|effect)\b", null_ci_span,
+                     re.IGNORECASE):
+            continue
+        lo = float(match.group("lo"))
+        hi = float(match.group("hi"))
+        if lo <= 1.0 <= hi:
             return True
     return False
 
@@ -168,9 +238,50 @@ def counted_mechanism(body):
     in the same clause."""
     fragments = re.split(r"(?<=[.!?;])\s+|\s+\|\s+", body)
     for fragment in fragments:
-        if NEGATED_EVIDENCE_RE.search(fragment):
+        if NEGATED_COUNT_RE.search(fragment):
             continue
         if MECHANISM_RE.search(fragment) and COUNT_VALUE_RE.search(fragment):
+            return True
+    return False
+
+
+def self_reported_binary_sha(body):
+    """Require the benchmarked executable to report its own full SHA-256.
+
+    A source-tree hash, commit hash, or a hash calculated later by prose does not
+    satisfy the harness contract.
+    """
+    for match in BINARY_SHA_RE.finditer(body):
+        context = body[max(0, match.start() - 180):match.end()]
+        if SELF_REPORT_RE.search(context):
+            return True
+    assignment = re.search(
+        r"\bbench_elf_sha256\s*[=:]\s*[`*]*[0-9a-f]{64}\b",
+        body,
+        re.IGNORECASE,
+    )
+    return assignment is not None
+
+
+def median_ci_gate(body):
+    """Require an explicit statement that the verdict gate is median-CI."""
+    return MEDIAN_CI_GATE_RE.search(body) is not None
+
+
+def never_cv_asserted(body):
+    """Require an explicit statement that CV is provenance, not a gate."""
+    return NEVER_CV_RE.search(body) is not None
+
+
+def cv_used_as_gate(body):
+    """Detect a positive CV decision rule while allowing explicit negations."""
+    fragments = re.split(r"(?<=[.!?;])\s+|\s+\|\s+", body)
+    for fragment in fragments:
+        if not CV_TOKEN_RE.search(fragment):
+            continue
+        if NEVER_CV_RE.search(fragment):
+            continue
+        if CV_DECISION_RE.search(fragment):
             return True
     return False
 
@@ -183,34 +294,72 @@ def check_entry(source):
                          if l.startswith("+") and not l.startswith("+++"))
     blocks = list(added_entry_blocks(text))
     rejects = []
-    keeps = []
+    keeps_without_sha = []
+    timing_contract = []
+    cv_gated = []
+    missing_retry = []
     for title, body in blocks:
-        if REJECT_RE.search(title) and not (
-            measured_null(body) or counted_mechanism(body)
-        ):
+        is_reject = REJECT_RE.search(title) is not None
+        is_keep = KEEP_RE.search(title) is not None
+        has_null = measured_null(body)
+        has_mechanism = counted_mechanism(body)
+
+        if is_reject and not (has_null or has_mechanism):
             rejects.append(title)
-        if KEEP_RE.search(title) and not BINARY_SHA_RE.search(body):
-            keeps.append(title)
+        if is_keep and not self_reported_binary_sha(body):
+            keeps_without_sha.append(title)
+        if is_keep and not has_null:
+            timing_contract.append((title, "missing same-invocation A/A bootstrap median CI"))
+        if (is_keep or (is_reject and has_null)) and not median_ci_gate(body):
+            timing_contract.append((title, "missing explicit bootstrap median-CI gate"))
+        if (is_keep or (is_reject and has_null)) and not never_cv_asserted(body):
+            timing_contract.append((title, "missing explicit never-CV decision statement"))
+        if (is_keep or is_reject) and cv_used_as_gate(body):
+            cv_gated.append(title)
+        if (is_keep or is_reject) and not concrete_retry(body):
+            missing_retry.append(title)
 
     if rejects:
         print("REJECTED: this REJECT-class entry records NEITHER an A/A null control")
         print("NOR a counted mechanism, so nobody can tell the lever from the harness.")
-        print("That is the VOID-NONULL class — 124 of this repo's 125 void rows.\n")
+        print("That is the VOID-NONULL class — 100 of this repo's 107 void rows.\n")
         for title in rejects:
             print(f"  offending heading: {title[:150]}")
         print("\nAdd ONE of:")
-        print("  * an A/A null control measured in the same invocation, with its band; or")
+        print("  * an A/A null measured in the same invocation, with a bootstrap")
+        print("    95% median CI that brackets 1.0; or")
         print("  * a COUNTED mechanism showing no work was removed — instructions,")
         print("    cycles, syscalls, allocations, faults, or an exact call count.")
         print("A near-1.0 wall-clock ratio on its own is not evidence of anything.")
         return 3
 
-    if keeps:
-        print("REJECTED: this KEEP-class entry has no full executing-binary SHA-256.")
-        for title in keeps:
+    if keeps_without_sha:
+        print("REJECTED: this KEEP-class entry has no self-reported executing-binary SHA-256.")
+        for title in keeps_without_sha:
             print(f"  offending heading: {title[:150]}")
-        print("\nRecord the 64-hex SHA-256 self-reported by the benchmarked ELF.")
+        print("\nRecord the full 64-hex SHA-256 emitted by the benchmarked ELF itself.")
         return 4
+
+    if cv_gated:
+        print("REJECTED: CV was used as a verdict gate; CV is provenance only.")
+        for title in cv_gated:
+            print(f"  offending heading: {title[:150]}")
+        return 6
+
+    if timing_contract:
+        print("REJECTED: incomplete Meta-Lever 2 timing contract.")
+        for title, reason in timing_contract:
+            print(f"  {title[:130]}: {reason}")
+        print("\nTiming verdicts require one invocation containing A/A and A/B,")
+        print("a bootstrap 95% median-CI gate, and an explicit never-CV statement.")
+        return 5
+
+    if missing_retry:
+        print("REJECTED: verdict entry has no concrete retry predicate.")
+        for title in missing_retry:
+            print(f"  offending heading: {title[:150]}")
+        print("\nName the measurable condition that would justify reopening the surface.")
+        return 7
 
     reviewed = [
         title
@@ -223,6 +372,70 @@ def check_entry(source):
             print(f"  - {title[:120]}")
     else:
         print("OK: no new REJECT- or KEEP-class entry in this change")
+    return 0
+
+
+def self_test():
+    sha = "a" * 64
+    valid = (
+        "One top-level invocation interleaved A/A and A/B. "
+        "A/A null median 1.000001; bootstrap 95% median CI [0.9998, 1.0002]. "
+        "The bootstrap median-CI gate determined the verdict, never CV. "
+        f"The harness self-reported ELF SHA-256 {sha}. "
+        "Retry predicate: reopen only if a fresh profile exposes >=5% self-time."
+    )
+    checks = [
+        (measured_null(valid), "valid null contract"),
+        (median_ci_gate(valid), "median-CI gate"),
+        (never_cv_asserted(valid), "never-CV assertion"),
+        (not cv_used_as_gate(valid), "never-CV is not a positive CV gate"),
+        (self_reported_binary_sha(valid), "self-reported ELF SHA"),
+        (concrete_retry(valid), "concrete retry predicate"),
+        (
+            not concrete_retry("Retry predicate: TBD."),
+            "bare retry label is not concrete",
+        ),
+        (
+            not measured_null(
+                "A/A null median 1.0; bootstrap 95% median CI [0.99, 1.01]."
+            ),
+            "null without same invocation",
+        ),
+        (
+            not measured_null(
+                "One invocation. A/A null median 1.02; "
+                "bootstrap 95% median CI [1.01, 1.03]."
+            ),
+            "contaminated null CI",
+        ),
+        (
+            not measured_null(
+                "One invocation. A/A null median 1.0. Candidate effect used a "
+                "bootstrap 95% median CI [0.99, 1.01]."
+            ),
+            "candidate CI cannot authenticate the null",
+        ),
+        (
+            counted_mechanism("instructions:u 1001 -> 1001, unchanged"),
+            "counted mechanism",
+        ),
+        (
+            not self_reported_binary_sha(
+                f"Source SHA-256 {sha}; benchmark provenance unavailable."
+            ),
+            "source hash is not binary self-report",
+        ),
+        (
+            cv_used_as_gate("CV < 5% was the rejection threshold and verdict gate."),
+            "positive CV gate",
+        ),
+    ]
+    failed = [name for passed, name in checks if not passed]
+    if failed:
+        for name in failed:
+            print(f"FAIL: {name}", file=sys.stderr)
+        return 1
+    print(f"OK: {len(checks)} preflight contract checks passed")
     return 0
 
 
@@ -305,6 +518,8 @@ def main(argv):
         return check_entry(argv[2] if len(argv) > 2 else "-")
     if mode == "install-hook":
         return install_hook()
+    if mode == "self-test":
+        return self_test()
     print(f"unknown mode {mode!r}", file=sys.stderr)
     return 64
 

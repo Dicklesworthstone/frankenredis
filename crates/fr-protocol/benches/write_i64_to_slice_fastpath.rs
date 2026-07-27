@@ -3,7 +3,8 @@
 //! The reference writes digits into a temporary `[u8; 20]` and copies them into the caller
 //! buffer. The candidate writes the identical bytes directly into their final caller-slice
 //! positions. One executable performs correctness, three exact-reference profiles, an A/A null,
-//! and A/B. The decision gate is the bootstrap 95% CI of the null median; CV is provenance only.
+//! and A/B. The decision threshold is the larger of twice the bootstrap 95% null-median CI
+//! radius and the absolute 1.01 floor; CV is provenance only.
 
 use std::{
     env, fs,
@@ -373,23 +374,24 @@ fn run_instruction_ab(executable: &Path) -> Result<(), String> {
     let radius = (null_ci95_low - 1.0)
         .abs()
         .max((null_ci95_high - 1.0).abs());
-    let keep_threshold = 1.0 + 2.0 * radius;
+    let decisive_threshold = (1.0 + 2.0 * radius).max(1.01);
     println!(
-        "INSTRUCTIONS_SUMMARY rounds={STAT_ROUNDS} null_median={null_median:.9} null_ci95_low={null_ci95_low:.9} null_ci95_high={null_ci95_high:.9} bootstrap_resamples={BOOTSTRAP_RESAMPLES} null_cv_pct={null_cv_pct:.6} reference_over_candidate_median={effect_median:.9} effect_cv_pct={effect_cv_pct:.6} median_ci_two_x_threshold={keep_threshold:.9}"
+        "INSTRUCTIONS_SUMMARY rounds={STAT_ROUNDS} null_median={null_median:.9} null_ci95_low={null_ci95_low:.9} null_ci95_high={null_ci95_high:.9} bootstrap_resamples={BOOTSTRAP_RESAMPLES} null_cv_pct={null_cv_pct:.6} reference_over_candidate_median={effect_median:.9} effect_cv_pct={effect_cv_pct:.6} decisive_threshold={decisive_threshold:.9}"
     );
     if null_ci95_low > 1.0 || null_ci95_high < 1.0 {
         return Err(format!(
             "A/A null CI does not bracket 1.0: [{null_ci95_low:.9}, {null_ci95_high:.9}]"
         ));
     }
-    if effect_median <= keep_threshold {
-        println!(
-            "DECISION verdict=REJECT gate=median_ci_95 two_x_margin=true cv_used_as_provenance_only=true"
-        );
-        return Ok(());
-    }
+    let verdict = if effect_median >= decisive_threshold {
+        "KEEP"
+    } else if effect_median.recip() >= decisive_threshold {
+        "REJECT"
+    } else {
+        "NULL"
+    };
     println!(
-        "DECISION verdict=KEEP gate=median_ci_95 two_x_margin=true cv_used_as_provenance_only=true"
+        "DECISION verdict={verdict} gate=median_ci_95 two_x_margin=true absolute_floor=1.01 cv_used_as_provenance_only=true"
     );
     Ok(())
 }

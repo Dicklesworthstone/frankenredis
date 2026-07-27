@@ -6,7 +6,8 @@
 //! - profile-verifies non-zero exact reference self-time;
 //! - measures reference/reference A/A and reference/candidate A/B in the same
 //!   position-balanced `perf stat` routine; and
-//! - gates only on the bootstrap 95% CI of the A/A median, never on CV.
+//! - gates on the larger of twice the bootstrap 95% A/A median-CI radius and
+//!   the absolute 1.01 floor, never on CV.
 
 use std::{
     env, fs,
@@ -755,7 +756,12 @@ fn run_perf_ab(executable: &Path, scenario: Scenario) -> Result<(), String> {
     let null_ci_radius = (null_ci95_low - 1.0)
         .abs()
         .max((null_ci95_high - 1.0).abs());
-    let decisive_threshold = 1.0 + 2.0 * null_ci_radius;
+    let decisive_threshold = (1.0 + 2.0 * null_ci_radius).max(1.01);
+    if null_ci95_low > 1.0 || null_ci95_high < 1.0 {
+        return Err(format!(
+            "A/A null CI does not bracket 1.0: [{null_ci95_low:.9}, {null_ci95_high:.9}]"
+        ));
+    }
     let verdict = if effect_median >= decisive_threshold {
         "KEEP"
     } else if effect_median.recip() >= decisive_threshold {
@@ -769,7 +775,7 @@ fn run_perf_ab(executable: &Path, scenario: Scenario) -> Result<(), String> {
         scenario.perf_event()
     );
     println!(
-        "DECISION scenario={} verdict={verdict} gate=median_ci_95 two_x_margin=true cv_used_as_provenance_only=true",
+        "DECISION scenario={} verdict={verdict} gate=median_ci_95 two_x_margin=true absolute_floor=1.01 cv_used_as_provenance_only=true",
         scenario.name()
     );
     Ok(())

@@ -171,56 +171,101 @@ profile you are forced to take in order to rank it.
 ## RE-AUDIT 2026-07-26 — frankenfs six-class taxonomy adopted verbatim
 
 The fleet broadcast of 2026-07-26 replaced the ad-hoc scheme above with the
-frankenfs taxonomy. Re-running both ledgers under it (`scripts/ledger_resurrection_audit6.py`):
+frankenfs taxonomy. Commit `112b133f80e81ff00ad7874641236cc66c136d1f`
+published the first result of `scripts/ledger_resurrection_audit6.py` as though
+its regular expressions had adjudicated the rows. That was wrong for two
+independent reasons:
 
-| Class | Count |
+1. the parser accepted every `##+` heading, so nested `###` evidence sections
+   were detached from their parent verdict; and
+2. the screen treated every heading containing a reject-like token as a
+   candidate verdict, even when it was a survey, a correction of an older row,
+   a cross-check, or a correctness-only veto.
+
+The published `180 REJECT / 125 VOID / 69.4%` result is therefore
+**RETRACTED as a verdict**. It remains only the mechanical queue snapshot at
+`112b133f80e81ff00ad7874641236cc66c136d1f`. Every one of those 180 queued
+blocks was subsequently read in full and adjudicated by hand. The six classes
+are applied only to actual performance-candidate verdicts; rows that are not
+such a verdict are kept in the manifest as `X`, not forced into one of the six
+classes.
+
+| Hand-adjudicated class | Count |
 |---|---:|
-| Entries parsed | 1,233 |
-| — KEEP | 638 |
-| — SURVEY | 166 |
-| — UNKNOWN (unparsable heading verdict) | 249 |
-| **REJECT — audited** | **180** |
-| VALID-AB | 23 |
-| VALID-MECHANISM | 32 |
-| VALID-PROFILE | 0 |
-| **VOID-NONULL** | **124** |
-| VOID-CV | 1 |
-| VOID-ZEROSELF | 0 |
-| **VOID total** | **125 / 180 = 69.4%** |
-| Rows carrying a binary sha256 | 21 / 180 = 11.7% |
+| Mechanical queue blocks read in full | **180** |
+| Excluded — not a performance-candidate reject (`X`) | **44** |
+| **Actual reject denominator** | **136** |
+| VALID-AB (`A`) | 17 |
+| VALID-MECHANISM (`M`) | 8 |
+| VALID-PROFILE (`P`) | 4 |
+| **VOID-NONULL (`N`)** | **100** |
+| VOID-CV (`C`) | **0** |
+| VOID-ZEROSELF (`Z`) | 7 |
+| **VOID total** | **107 / 136 = 78.7%** |
+| Rows carrying a labelled binary/ELF SHA-256 | **14 / 136 = 10.3%** |
 
-**Scoreboard line:** `frankenredis | 1233 | 180 | 125 | 69.4 | 5 | 3 | 1.1095`
+**Corrected scoreboard line:** `frankenredis | 136 | 107 | 78.7 | 14/136=10.3% | 5 | 3 | 1.1095`
 
-Three things this changes or confirms:
+The result now matches the fleet diagnosis for the right reason:
+VOID-NONULL is the epidemic (100 of 107 void rows), no row died only on a CV
+gate, and the binary-provenance rate is close to frankenfs's 10.9%.
+VALID-MECHANISM cuts both ways honestly: only eight rows actually counted a
+mechanism strongly enough to prove that no work was removed. A prose claim that
+something was “instruction-bound” is not a count.
 
-1. **The CV gate is not the epidemic here either.** VOID-NONULL 124 against
-   VOID-CV **1**, matching frankenfs's 214-vs-4 shape. The binary-sha rate also
-   matches almost exactly (11.7% here, 10.9% there), which points at a fleet-wide
-   era effect — 2026-06 prose rows written before null controls were adopted —
-   rather than a per-repo discipline difference.
-2. **`VALID-MECHANISM` moved the headline by 40 points, definitionally.** The
-   ad-hoc audit above reported 29.7% void; this reports 69.4% on the *same*
-   ledgers. Nothing new was discovered. The old scheme called "no null but a large
-   claimed effect" sound-with-incomplete-provenance, where VOID-NONULL correctly
-   calls a near-1.0 no-null row undecided; conversely VALID-MECHANISM correctly
-   rescued 32 rows the old scheme would have voided, because this repo's
-   convention is `instructions:u` A/Bs and an instruction ratio of ~1.00 does
-   establish "no work was removed" without a null. **Cross-repo void rates are
-   only comparable if every repo applied VALID-MECHANISM** — a repo measuring
-   instructions will otherwise look worse than one measuring wall time.
-3. **Ranking by target-frame self-time is impossible from these rows: 1 of 125
-   void rows records one.** The workaround remains the live-profile join described
-   above, which is what surfaced `frankenredis-va3z0` — the row ranked #1 scored
-   0.38% on a TTL-free profile, and profiling the workload that actually routes
-   through it found a 10 Hz discarded full-keyspace `used_memory` scan at 9.74% of
-   total cycles instead. That was landed as `cc5d8dd18`.
+### Durable per-row adjudication manifest
+
+Rows are numbered in the mechanical snapshot's stable order:
+`docs/NEGATIVE_EVIDENCE.md` first, then
+`docs/perf_negative_evidence_ledger.md`. There is exactly one code per queued
+row. Codes: `A` VALID-AB, `M` VALID-MECHANISM, `P` VALID-PROFILE, `N`
+VOID-NONULL, `C` VOID-CV, `Z` VOID-ZEROSELF, and `X` excluded because it is not
+a performance-candidate reject.
+
+```text
+001-020  M M M A A Z A N A X X X X A X A Z X X X
+021-040  N N P N X Z N N P N X N N X X N N X N N
+041-060  N N N N M M N N N N N N N N N N N N N Z
+061-080  N N N N N N N N N N N N N N N N X N N N
+081-100  N N N N N N X X X X N N N Z N N X N N N
+101-120  M X N N X M X N X X X X X X X X X X A A
+121-140  A Z A A X N N N N N N N N X N N N N N N
+141-160  P N N N N N N N N N N P N N N N N N X N
+161-180  Z X X N X X X X X X X M A A A A N N A A
+```
+
+The classifications most likely to be misread without the source row are:
+
+- rows 1, 2, 3, 45, 46, 101, 106, and 172 are VALID-MECHANISM because they
+  contain an actual syscall, instruction, or exact call count;
+- rows 23, 29, 141, and 152 are VALID-PROFILE because the rejection precedes
+  any source edit and names a non-zero frame plus its computed Amdahl ceiling;
+- rows 6, 17, 26, 60, 94, 122, and 161 are VOID-ZEROSELF because the workload
+  optimized the candidate away or never routed through the target;
+- row 8 mentions an A/A median but records no usable null CI, so it remains
+  VOID-NONULL; row 180 later supplies the valid rerun;
+- null-controlled regressions in rows 119-121 are VALID-AB: an adverse effect
+  outside the null is stronger rejection evidence than the taxonomy's minimum
+  “inside it” case; and
+- rows 177 and 178 aborted before a timed A/B and therefore remain
+  VOID-NONULL, despite carrying useful profile attribution.
+
+Among the newly corrected void set, the highest recorded target-frame
+self-times are row 177's temporary `Vec::from_iter` at 52.23%, row 178's
+`contains_key` attribution at 23.81%, row 164's `common_prefix_len` at up to
+11.4%, row 24's direct GEOHASH `RespFrame::encode_into` target at 3.22%, and
+row 122's WAIT reference refresh at 2.98% (whose candidate accessor had zero
+exact self-time). The earlier five resurrection reruns are not invalidated:
+their A/A controls, executing-ELF hashes, counted mechanisms, and byte/state
+proofs stand. This correction changes the historical queue and its ranking; it
+does not fabricate replacement measurements.
 
 ## Institutionalization — the audit is now a gate, not an event
 
 The broadcast's lesson is that ledger integrity **decays**: frankensqlite, which
 audited once and then mechanically enforced the check, sits at 1.7%; repos that
 audited once and moved on sit at 25-91%. So `scripts/perf_candidate_preflight.py`
-makes all three integrity failures hard to commit:
+makes the integrity failures hard to commit:
 
 ```sh
 # Grep both ledgers for a prior row on the proposed surface, print the row's
@@ -228,11 +273,14 @@ makes all three integrity failures hard to commit:
 # exit 0 = clear; exit 2 = BLOCKED
 scripts/perf_candidate_preflight.py check-candidate 'drop_if_expired'
 
-# Refuse a NEW REJECT entry that records neither an A/A null nor a counted
-# mechanism — the VOID-NONULL class, 124 of our 125.  exit 3 = REJECTED
+# Refuse a NEW REJECT entry that records neither a same-invocation A/A bootstrap
+# median CI nor a counted mechanism — the VOID-NONULL class, 100 of our 107.
+# exit 3 = REJECTED
 #
-# The same check refuses a NEW KEEP/SHIPPED entry without an explicitly labelled
-# executing-binary/ELF SHA-256.  exit 4 = REJECTED
+# The same check refuses a NEW KEEP/SHIPPED entry without both a self-reported
+# executing-binary/ELF SHA-256 and a same-invocation A/A bootstrap median CI.
+# It also refuses any verdict that uses CV as a decision gate or omits a
+# concrete retry predicate.
 git diff --cached -U0 -- \
   docs/NEGATIVE_EVIDENCE.md docs/perf_negative_evidence_ledger.md \
   | scripts/perf_candidate_preflight.py check-entry -
@@ -251,5 +299,8 @@ source hash or commit hash is deliberately not a binary hash.
 
 Both ledger modes normalise whitespace before matching, because the ledgers
 hard-wrap at ~100 columns and a raw-text grep scores a wrapped `Null\nmedian` as
-*no null recorded* — the first run of the original audit made exactly that
-mistake and reported a 95% void rate against a true 69.4%.
+*no null recorded*. The screen is deliberately labelled **triage only** and its
+exact-`##` parser preserves nested evidence under its parent row. Its built-in
+self-test exercises the same-invocation null-CI, counted-mechanism,
+self-reported-ELF, and never-CV rules before the pre-commit plugin delegates to
+it.

@@ -4,6 +4,39 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-27 NobleOsprey (cod/MEASURE): MODEL-INTEGRITY INCIDENT RE-AUDIT — 11-commit judgment report
+
+The provider silently ran this pane below the owner-required model tier from
+2026-07-25 20:40 through 2026-07-26 00:35. All 11 commits in that interval were
+therefore reread at the restored tier. Existing A/A samples, ELF hashes, counted
+mechanisms, profiles, and byte/state proofs were not rerun merely because of the
+model incident; the re-audit tested whether each workload really reached its
+target, whether the preservation proof was sound, whether each verdict cleared
+its own numbers, and whether uncovered code quality was acceptable.
+
+| Commit | Re-audit status and judgment |
+|---|---|
+| `8793f824e65b` | **SOUND** — harness-only change; the reference frame has 37.2% exact self-time, the parity corpus is byte-exact, A/A and A/B share one binary/invocation, and the 1.16577x effect clears both its bootstrap median-CI gate and the absolute 1.01 floor. |
+| `74a5d20d9cab` | **CORRECTED** — its P16 syscall/instruction premise remains valid and profile-routed, but arm placement and stale-server defenses were incomplete; `d13eeba7dee1` subsequently made ports, cores, and zero-instruction failures fail closed. Treat the original ad-hoc ledger aggregate as triage, not adjudication. |
+| `0deaee58913e` | **CORRECTED** — the `cached_entry_memory_usage_bytes` profile is real at 9.74% exact self-time, but the keyspace differential did not isolate that mechanism. `d13eeba7dee1` already retracted that differential as the wrong instrument; only the profile attribution stands. |
+| `d13eeba7dee1` | **SOUND** — it invalidates the contaminated run instead of laundering it, then hardens server identity, port ownership, core isolation, and counted-event checks. No production isomorphism is asserted. |
+| `ed188cc8591f` | **SOUND** — all five resurrection workloads route through their named branches. SSCAN preserves cursor/member order while removing only a clone; `expires_count == 0` proves no key can expire; the XADD store-level fixture reaches the same guard. Effects of 1.3366x, 1.0432x, and 1.1095x clear their null-CI gates. |
+| `f66c64018dbb` | **CORRECTED** — byte identity across the full integer corpus and LFU state/output identity are sound, and the 2.10% regression plus 8.56% instruction reduction justify their respective verdicts. The commit incorrectly removed the campaign's absolute 1.01 decision floor; both resurrection harnesses now enforce `max(2 × null-CI radius, 1.01)` and require the A/A CI to bracket 1.0. |
+| `4fab54ebf117` | **CORRECTED** — the uprobe does prove approximately one `Timespec::now` call per INCR, so an extra-call lever is refuted. It does not count every vDSO caller or prove the proposed cache/TLB explanation. The ledger claim is narrowed and the probe now self-reports its ELF, validates cores/port/operation counts, and kills only servers it started. |
+| `cc5d8dd18567` | **SOUND** — the Linux fast path returns the same successful RSS read and the fallback remains identical when RSS is unavailable; no cadence or externally visible memory semantics change. The named leaf is 1.34% exact self-time (77% inclusive), and a 3.9767x cycle effect is well outside the recorded null margin. |
+| `4a1dc258d62` | **SOUND** — profile-only closure on the exact current INCR ELF; the workload reaches one required `get_mut`, all named candidate frames are below 3% self-time, and the row correctly refuses a speculative edit with a >=5% retry predicate. |
+| `112b133f80e8` | **CORRECTED** — its six-class taxonomy is right, but its `##+` parser split nested evidence and its 180-row regex screen was wrongly published as hand adjudication. All 180 queued blocks have now been read; the corrected actual denominator is 136, with 107 void (78.7%), 100 VOID-NONULL, zero VOID-CV, and 14/136 labelled binary hashes. The durable row manifest is in `docs/LEDGER_RESURRECTION.md`. |
+| `04dffdd324d7` | **CORRECTED** — the hook satisfied the fleet's minimum shape but accepted weak null prose and any labelled binary hash, so “uncommittable” was too strong. It now requires a same-invocation A/A bootstrap 95% median CI bracketing 1.0, an explicit bootstrap median-CI decision gate, never-CV provenance, a self-reported executing-ELF SHA for every KEEP, and a concrete retry predicate; counted-mechanism rejections remain valid without a null. |
+
+**Concrete retry predicates for corrected claims.** Reopen the integer writer or
+LFU resurrection verdict only if a same-invocation rerun clears both its
+bootstrap median-CI decision band and the absolute 1.01 floor. Reopen the
+broader INCR vDSO/cache hypothesis only with an all-caller count or a named
+non-zero profile frame; the `Timespec::now` uprobe alone cannot support it.
+Never promote `ledger_resurrection_audit6.py` output beyond triage without
+reading every queued parent row, and run
+`scripts/perf_candidate_preflight.py self-test` whenever its predicates change.
+
 ## 2026-07-26 NobleOsprey (cod/MEASURE): KEEP — exact borrowed `XADD MAXLEN ~` dispatch closes the only major-incumbent loss (`frankenredis-fcp4q`)
 
 - **Ledger-first reopening was admissible.** Before editing, the preflight was run for
@@ -480,15 +513,16 @@ the remaining work actually is.
   P1 the fr DSO is 7% of cycles, so the entire per-event path is inside the host's kernel noise.
   Measure `E` at P16 or on a quiet kernel (no auditd/nftables) before spending a turn on it.
 
-## 2026-07-25 AzureMouse (cc/STRUCTURAL): REJECT (characterized non-lever) — fr's elevated INCR `clock_gettime` share is NOT extra clock calls; every command already makes exactly ONE per op (`frankenredis-iujfh`)
+## 2026-07-25 AzureMouse (cc/STRUCTURAL): REJECT (VALID-MECHANISM, corrected 2026-07-27) — INCR has no extra `Timespec::now` call to remove (`frankenredis-iujfh`)
 
 Filed as an open lever, chased to ground, closed. The whole arc is recorded — including the two
-framings I got wrong — because the end state saves the next agent a wasted turn: **there is no
-clock-call lever in the INCR path.** Found by chasing a DSO-split outlier I had initially set aside
-as a possible artefact; it reproduces and survives the control that matters.
+framings I got wrong — because the counted mechanism saves the next agent a wasted turn:
+**there is no extra `Timespec::now`-call lever in the measured INCR path.** This is deliberately
+narrower than the original heading. The uprobe counted one named Rust call site; it did not count
+every possible vDSO caller and does not identify why vDSO cycles/op increase with keyspace.
 
-**THE ANSWER, measured by an exact call count (uprobe on `Timespec::now` + an `INFO commandstats`
-ops delta over the same window):**
+**THE COUNTED MECHANISM (uprobe on `Timespec::now` + an `INFO commandstats` ops delta over the
+same window):**
 
 | workload (`-r 100000` unless noted) | **`Timespec::now` calls/op** | vdso % of cycles |
 |---|---|---|
@@ -497,18 +531,17 @@ ops delta over the same window):**
 | SET | **1.016** | 3.28 |
 | GET | **1.016** | 2.91 |
 
-**Every command already makes exactly one clock read per operation, and the count does not move
-with keyspace.** fr is at the floor the code implies. The elevated INCR *share* is that same single
-call costing ~391 cycles instead of ~104 — a cache/TLB residency effect on the vdso `vvar` page and
-code, evicted by the surrounding access pattern, not additional work. Removing clock reads from the
-INCR path cannot help: there is one, and SET/GET have the same one. The residual is a second-order
-symptom of the keyspace working-set footprint, already tracked as the 4.49x keyspace RAM gap
-(`uhthd`) — attack that, not the clock. No production source was changed; the probe ships as
-`scripts/incr_vdso_rate_probe.sh`.
+**The named `Timespec::now` site executes about once per operation, and its count does not move
+with keyspace.** That falsifies the proposed “remove extra `Timespec::now` calls from INCR” lever.
+It does **not** prove that all vDSO time belongs to this site, nor that cache/TLB eviction is the
+cause of the remaining 103→391 vDSO cycles/op slope. That residual remains unattributed and is not
+a source lever until another call site or counted hardware mechanism is named. No production
+source was changed; the rate probe ships as `scripts/incr_vdso_rate_probe.sh`.
 
-**Retry predicate:** re-open ONLY if a `Timespec::now` uprobe count exceeds **1.10 calls/op** on any
-workload, OR if vdso cycles/op at `-r 1` (the cache-warm floor, 103.5 today) rises above ~150 —
-either would mean genuinely added clock work rather than cache pressure.
+**Retry predicate:** re-open the `Timespec::now` lever only if its uprobe count exceeds **1.10
+calls/op** on a workload. Re-open the broader vDSO residual only with a count for another named
+entry point or hardware-counter evidence that attributes the keyspace-dependent per-call cost;
+vDSO share or cycles/op alone is routing evidence, not a mechanism verdict.
 
 **Method note worth keeping.** Four hypotheses died here and the decisive instrument was an exact
 **call count**, not a share, a rate, or a callchain. Callchains were useless: the release binary
@@ -594,19 +627,17 @@ The falsification trail, in order:
   the shares are directly comparable, and vdso cycles *per operation* genuinely scales **3.8x** with
   keyspace. So this is real per-operation work, **not** a timer artefact — it does not fold into
   the `frankenredis-va3z0` 10 Hz family.
-- **Final step — the call count, which decided it.** ~103 cycles/op at `-r 1` is almost exactly one
-  vdso clock read; ~391 at `-r 100000`. A vdso `clock_gettime` is data-independent (reads the TSC,
-  applies a fixed transform), so it cannot become 3.8x dearer on its own. Two possibilities remained
-  — INCR issues ~4 reads/op at large keyspace, or it issues the same ~1 read at 4x the cache cost —
-  and only a COUNT distinguishes them. `perf probe -x <bin> --add tsnow=<Timespec::now>` plus
+- **Final step — the call count, which decided the narrow lever.** The rate slope admitted at
+  least two explanations: extra calls at large keyspace, or a roughly constant named-call count
+  with unattributed cost elsewhere in/around the vDSO. Only a COUNT distinguishes the first.
+  `perf probe -x <bin> --add tsnow=<Timespec::now>` plus
   `perf stat -e probe:tsnow` against an ops delta over the same window gives **1.019 calls/op at
   `-r 1` and 1.004 at `-r 100000`, with SET 1.016 and GET 1.016**. The count is flat. **Option 1 is
-  falsified; the reads are already at the floor.** See the verdict at the top of this entry.
-- **Retry/close predicate:** close only when the absolute vdso cycles/second is compared across the
-  `-r` sweep AND a named call site is attributed (uprobe on the vdso entry, or a per-call counter),
-  AND removing it moves the `-t incr -P16 -r100000` vdso share to within 2x of the fr SET/GET
-  baseline (3.0-3.3%) with an A/A null below 1.02x. **Do NOT re-attempt: the per-command
-  hypotheses (falsified by the `-r` sweep) or the allocator (falsified by the no-mimalloc build).**
+  falsified for `Timespec::now`; the broader vDSO cost remains unattributed.**
+- **Retry/close predicate:** do not re-attempt the per-command `Timespec::now` hypotheses unless
+  that named uprobe exceeds 1.10 calls/op. A broader retry must attribute another named vDSO caller
+  or a counted cache/TLB mechanism, then use a same-invocation A/A null before making a causal
+  performance claim.
 
 ## 2026-07-25 AzureMouse (cc/STRUCTURAL): OPEN LEVER (handed to cod lane — `crates/fr-store` under peer lease) — `used_memory` is recomputed by a FULL keyspace scan on a 10 Hz timer and the result is discarded
 

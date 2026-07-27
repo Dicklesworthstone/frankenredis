@@ -2,8 +2,10 @@
 """Re-audit both frankenredis ledgers under the frankenfs six-class taxonomy.
 
 Adopted verbatim per the 2026-07-26 fleet broadcast, replacing my own V1-V6
-scheme. The screen below is TRIAGE, not a verdict; the head of the queue is
-hand-adjudicated afterwards.
+scheme. The screen below is TRIAGE, not a verdict. Every flagged row must be
+read and adjudicated by hand; the durable adjudication for snapshot
+`112b133f80e81ff00ad7874641236cc66c136d1f` is in
+`docs/LEDGER_RESURRECTION.md`.
 
   VALID-PROFILE    rejected before any source edit, on a named frame with
                    non-zero self-time plus a computed Amdahl ceiling
@@ -19,16 +21,17 @@ This repo's convention is instructions:u A/Bs, so VALID-MECHANISM is expected to
 carry real weight here. The broadcast is explicit that it cuts both ways, so it
 is applied only when the row names a counted quantity AND reports it unchanged.
 """
-import json
 import re
-import sys
 from collections import Counter
 from pathlib import Path
 
-ROOT = Path("/data/projects/frankenredis")
+ROOT = Path(__file__).resolve().parent.parent
 LEDGERS = ["NEGATIVE_EVIDENCE.md", "perf_negative_evidence_ledger.md"]
 
-HDR = re.compile(r"^##+ (.+)$", re.M)
+# A ledger entry starts at exactly `## `. Nested `###` headings are part of the
+# parent entry. Treating both as entries split evidence away from its verdict and
+# was the root cause of the superseded 180-row regex "audit".
+HDR = re.compile(r"^## (?!#)(.+)$", re.M)
 REJECT_RE = re.compile(
     r"\b(REJECT|REJECTED|NEGATIVE|NO[- ]SHIP|UNDECIDABLE|DECLINED|INVALID"
     r"|REVERT|REVERTED|NOT WORTH|ABANDON)\b", re.I)
@@ -91,7 +94,10 @@ def audit():
             claimed = min(ratios, key=lambda r: abs(r - 1.0)) if ratios else None
             near_one = claimed is not None and abs(claimed - 1.0) <= 0.10
 
-            # Order matters: the broadcast's classes are tested most-specific first.
+            # These are triage hints only. Regex cannot decide whether the named
+            # mechanism was actually counted, whether a heading is merely a
+            # survey/correction, or whether the workload routed through the target.
+            # Order matters only for producing a useful hand-review queue.
             if st_max is not None and st_max < 0.1:
                 cls = "VOID-ZEROSELF"
             elif cv_only:
@@ -118,6 +124,9 @@ def audit():
 def main():
     rows, t = audit()
     audited = t["REJECT"]
+    if audited == 0:
+        print("no REJECT-like headings found; refusing to report percentages")
+        return 1
     void = sum(t[k] for k in ("VOID-NONULL", "VOID-CV", "VOID-ZEROSELF"))
     valid = sum(t[k] for k in ("VALID-AB", "VALID-MECHANISM", "VALID-PROFILE"))
     print(f"entries parsed         {t['parsed']}")
@@ -130,14 +139,14 @@ def main():
     print(f"\nVOID total             {void} / {audited} = {100*void/audited:.1f}%")
     print(f"VALID total            {valid}")
     sha = sum(1 for r in rows if r["sha"])
-    print(f"rows with binary sha   {sha} / {audited} = {100*sha/audited:.1f}%")
-    Path("audit6.json").write_text(json.dumps(rows, indent=1))
+    print(f"rows with any 64-hex hash (triage only) {sha} / {audited} = {100*sha/audited:.1f}%")
     q = sorted((r for r in rows if r["cls"].startswith("VOID") and r["self_time"]),
                key=lambda r: -r["self_time"])
     print("\n-- VOID rows carrying a recorded target self-time (rank by it) --")
     for r in q[:10]:
         print(f'  {r["self_time"]:6.2f}%  {r["cls"]:<14} {r["file"][:14]}:{r["line"]:<6} {r["title"][:66]}')
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
