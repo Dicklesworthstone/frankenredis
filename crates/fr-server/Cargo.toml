@@ -62,6 +62,13 @@ perf-ab-lpos-floor = []
 # The control process sets FR_PERF_AB_XADD_LIMIT_FLOOR_ORIG=1; production builds
 # do not compile the environment-controlled bypass.
 perf-ab-xadd-limit-floor = []
+# Measurement-only control arm for the one-binary XADD MINID approximate
+# no-op guard. The control process sets FR_PERF_AB_XTRIM_MINID_NOOP_ORIG=1;
+# production builds compile only the candidate path.
+perf-ab-xtrim-minid-noop = [
+    "fr-runtime/perf-ab-xtrim-minid-noop",
+    "fr-command/perf-ab-xtrim-minid-noop",
+]
 # Measurement-only frozen arm for replica-prefix extraction A/Bs.
 bench-reference = []
 

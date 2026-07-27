@@ -33,6 +33,123 @@ Redis arm and numeric ratio; a SELF-SPEEDUP needs the heading label and cannot
 mark itself as campaign output. Missing or contradictory classification exits
 **8**.
 
+## 2026-07-27 MossyBluff (cod/MEASURE): SELF-SPEEDUP KEEP — skip the impossible `XADD MINID ~` stale-floor scan (`frankenredis-e9r23`)
+
+- **Claim class: SELF-SPEEDUP. Campaign output: no.** This is a maintenance
+  KEEP. The candidate also ran against the actual vendored Redis 7.2.4 server
+  in the same invocation, but that competitive result is INDETERMINATE and is
+  not a campaign win.
+- **Ledger-first admission and complete scout disposition.** Both negative
+  ledgers and the preflight gate were searched for `XADD`, `MINID`,
+  `xtrim_minid_approx`, and the stream-ID surface before editing. The shipped
+  bounded-XADD row explicitly leaves MINID and multiple-field forms as
+  separate workload identities, requiring a fresh current-ELF loss and exact
+  profile. One position-balanced current-ELF scout invocation ran two
+  FrankenRedis arms and live Redis for six distinct XADD forms at 60,000
+  requests, 50 clients, and pipeline 16. The executable hashes were
+  FrankenRedis
+  **`57e8ec88f902f6917b28bf64e256a6d3b6f76f8c3f2228bf97844910f24746e2`**,
+  Redis
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**,
+  and redis-benchmark
+  **`8931ebb4de7ea5ae700bf4cf866ad246535743496318ad4e19b46af1c58d7a0b`**.
+
+  | workload | FrankenRedis/Redis median and bootstrap 95% median CI | A/A bootstrap 95% median CI | disposition and concrete retry predicate |
+  |---|---|---|---|
+  | `XADD xs MINID ~ 0-0 * f v` | **0.031688290x** [0.031180554, 0.031969149] | 0.992258597x [0.888690203, 1.016015884] | **FR_LOSS**, below gate [0.777380407, 1.222619593]; admitted the exact profile and lever below. |
+  | `XADD xs MINID = 0-0 * f v` | 1.025318664x [0.853036454, 1.071428567] | [0.937037047, 1.249690091] | **INDETERMINATE**; reopen only when a fresh effect CI lies wholly outside its two-times-null gate. |
+  | `XADD xs MAXLEN = 1000 * f v` | 2.213442070x [2.116854917, 2.299212525] | [1.000000000, 1.055403849] | **FR_WIN**; reopen only when a fresh current-ELF effect CI falls below 0.90x Redis. |
+  | `XADD xs MAXLEN ~ 1000 * f1 v1 f2 v2` | 0.935374765x [0.892213027, 1.026515171] | [1.007633582, 1.061426504] | **BLOCKED_NULL_BIAS**; retry only in a run whose A/A CI brackets 1.0. |
+  | `XADD xs * f1 v1 f2 v2` | 0.436842020x [0.422388259, 0.451897023] | [0.984076416, 1.018812247] | **FR_LOSS, separate vein**; edit only after an exact profile names a distinct >=5% self-time frame and computes its Amdahl ceiling. |
+  | `XADD xs NOMKSTREAM * f v` | 0.423831315x [0.420833352, 0.428569002] | [0.992246264, 1.031824742] | **FR_LOSS, separate vein**; use the same exact-profile >=5% predicate and do not generalize this MINID lever to NOMKSTREAM. |
+
+  The bootstrap median-CI gate determined every scout disposition, never CV.
+  The two unmined losses remain explicit next-vein candidates rather than being
+  hidden by this KEEP.
+- **Exact pre-profile and Amdahl ceiling.** The exact stale-floor workload
+  appended to one growing stream while every `MINID ~ 0-0` trim was a
+  mathematical no-op. The control profile used the same feature-built ELF as
+  the final A/B, self-reported executing that ELF, recorded 17,000 samples and
+  71.036 billion cycles with zero lost samples, and is stored at
+  `/tmp/frankenredis-minid-control-e9r23-20260727T1610.perf.data` with SHA-256
+  **`4055bd4fe3f3fbc439c93c2583bbd992ee02c71a7f5311ab67cc3aba195ae090`**.
+  The named `Vec<(u64,u64)>::from_iter` frame reached through
+  `Store::xtrim_minid_approx` held **67.34% self-time**, a single-frame Amdahl
+  ceiling of **3.0619x**. Its scan/copy surface plus `memmove` held **90.30%**
+  self-time, a surface ceiling of **10.3093x**. The workload therefore reached
+  the edited function and attributed the loss to collecting every stream ID,
+  not to a zero-self or wrong-workload proxy.
+- **One lever and preservation proof.** Stream IDs are sorted. Approximate
+  MINID removes a whole head node only when that node's last ID is below the
+  threshold; therefore, if the stream's first ID is already at or above the
+  threshold, no node can qualify. The candidate returns zero before collecting
+  all IDs in exactly that case. Empty streams are also unchanged (`0`
+  removals), and every case with `first_id < min_id` takes the old algorithm
+  byte-for-byte. Production builds compile the guard as a constant path; the
+  environment selector exists only under the measurement feature.
+- **Behavior gates.** The focused strict-remote store run passed all three
+  `stream_xtrim_minid_approx` tests, including a new 250-entry boundary test
+  that checks zero removals, unchanged dirty count, and identical XRANGE state
+  for thresholds below and at the first ID. The live
+  `stream_id_trim_differ.py` gate now covers stale approximate-MINID thresholds
+  below and at the first ID; the complete XADD/XTRIM stream-ID suite remained
+  byte-exact against vendored Redis 7.2.4. The strict-remote conformance run
+  passed 194 library tests, 99 smoke tests, all auxiliary tests, and doc-tests.
+- **One-binary A/A+A/B+incumbent measurement.** Invocation
+  `minid-competitive-rps-3887383-1785182444` ran control, control-null,
+  candidate, and live Redis through all 24 arm permutations. Every server was
+  pinned in turn to logical CPU 13 / physical core 13; the client ran on
+  logical CPU 4 / physical core 4. Each arm started with explicit ID `1000-0`,
+  then executed 30,000 requests of
+  `XADD xs MINID ~ 0-0 * f v` at 50 clients and pipeline 16, finishing at
+  XLEN 30,001. Control, null, and candidate self-reported the same executing
+  server ELF SHA-256
+  **`69ca1b56a0e303ffd912d92cf008c3f3a88e04435e06df0e046251069e375dbd`**;
+  Redis self-reported
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+  One top-level invocation interleaved A/A and A/B with the incumbent beside
+  them.
+
+  | arm / ratio | median | bootstrap 95% median CI |
+  |---|---:|---:|
+  | control throughput | 31,023.820 ops/s | — |
+  | control-null throughput | 30,800.855 ops/s | — |
+  | candidate throughput | 517,241.410 ops/s | — |
+  | Redis throughput | 526,315.810 ops/s | — |
+  | A/A null | **0.996363746x** | **[0.987225694, 1.009307134]** |
+  | candidate/control self-speedup | **16.572180191x** | **[16.327585254, 16.859650747]** |
+  | candidate/Redis competitive ratio | **0.982456244x** | **[0.966101626, 0.991228122]** |
+  | control/Redis | 0.058397436x | [0.057851252, 0.059670783] |
+
+  The A/A null median was **0.996363746** and its bootstrap 95% median CI was
+  **[0.987225694, 1.009307134]**, which brackets 1.0. Twice its radius produced
+  the decision gate **[0.974451388, 1.025548612]**. The self-speedup CI clears
+  that gate, so the maintenance change is a KEEP. The candidate/Redis CI
+  overlaps the gate, so the competitive result is **INDETERMINATE** and
+  campaign output remains **no**. The bootstrap median-CI gate determined the
+  verdict, never CV.
+- **Harness adjudication.** An earlier invocation
+  (`minid-competitive-3864353-1785182323`) mistakenly selected the CSV
+  `avg_latency_ms` field while labelling it as throughput. That run is
+  **INVALID-INSTRUMENTATION** and licenses no conclusion. Its concrete retry
+  predicate was to parse the header-labelled `rps` field and repeat the same
+  four-arm 24-permutation design; the valid invocation above executed that
+  retry immediately.
+- **Post-profile and disposition.** The candidate profile self-reported the
+  same decision ELF, recorded 16,000 samples and 40.802 billion cycles with
+  zero lost samples, and is stored at
+  `/tmp/frankenredis-minid-candidate-e9r23-20260727T1605.perf.data` with
+  SHA-256
+  **`e9b1b2413fab7823a3d938ea4105773783df8fc63b26818012aef1990564e0c2`**.
+  The old specialized collection frame disappeared; the changed
+  `Store::xtrim_minid_approx` frame remained on the exact hot path at **0.80%
+  self-time**. **KEEP as SELF-SPEEDUP maintenance, not competitive campaign
+  output.** Reopen this exact stale-floor lever only if a fresh same-invocation
+  candidate/control CI no longer clears its A/A gate, a stream differential
+  fails, or a fresh candidate/Redis CI lies wholly outside the gate. Pursue the
+  bare-multifield and NOMKSTREAM losses only through their distinct profile
+  predicates above.
+
 ## 2026-07-27 MossyBluff (cod/MEASURE): SURFACE — focused current-ELF `HGETALL@P128` does not reproduce an incumbent loss
 
 - **Why this cell was rerun.** The broad current-v2 matrix left

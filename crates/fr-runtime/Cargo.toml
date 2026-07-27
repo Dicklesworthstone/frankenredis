@@ -5,6 +5,10 @@ edition = "2024"
 
 [features]
 bench-reference = []
+perf-ab-xtrim-minid-noop = [
+    "fr-command/perf-ab-xtrim-minid-noop",
+    "fr-store/perf-ab-xtrim-minid-noop",
+]
 
 [dependencies]
 foldhash = "0.2"

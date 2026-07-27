@@ -27214,6 +27214,22 @@ impl Store {
     /// `LIMIT 0`, or the unbounded default the command layer maps to a finite
     /// cap). Unlike the exact path this can also drop the partial tail node when
     /// its last ID is below the threshold. (frankenredis-8t4vl)
+    #[cfg(feature = "perf-ab-xtrim-minid-noop")]
+    #[inline]
+    fn xtrim_minid_noop_guard_enabled() -> bool {
+        static ORIG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        !*ORIG.get_or_init(|| match std::env::var("FR_PERF_AB_XTRIM_MINID_NOOP_ORIG") {
+            Ok(value) => value == "1",
+            Err(_) => false,
+        })
+    }
+
+    #[cfg(not(feature = "perf-ab-xtrim-minid-noop"))]
+    #[inline(always)]
+    const fn xtrim_minid_noop_guard_enabled() -> bool {
+        true
+    }
+
     pub fn xtrim_minid_approx(
         &mut self,
         key: &[u8],
@@ -27229,6 +27245,18 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &mut entry.value {
                 Value::Stream(entries) => {
+                    // Stream IDs are sorted. Approximate MINID can remove a
+                    // whole head node only when that node's last ID is below
+                    // `min_id`; if even the stream's first ID is at or above
+                    // the threshold, no node can qualify. The old path still
+                    // collected every live ID into a Vec before discovering
+                    // this certain no-op, making a stale MINID threshold O(n)
+                    // on every XADD.
+                    if Self::xtrim_minid_noop_guard_enabled()
+                        && entries.first_id().is_none_or(|first_id| first_id >= min_id)
+                    {
+                        return Ok(0);
+                    }
                     let ids: Vec<StreamId> = entries.keys().copied().collect();
                     let len = ids.len();
                     let mut removed = 0usize;
@@ -63362,6 +63390,36 @@ mod tests {
             150
         );
         assert_eq!(store.xlen(b"s", 0).unwrap(), 0);
+    }
+
+    #[test]
+    fn stream_xtrim_minid_approx_skips_impossible_prefix_e9r23() {
+        let mut store = Store::new();
+        for i in 0..250u64 {
+            store
+                .xadd(b"s", (1000 + i, 0), &[(b"f".to_vec(), vec![i as u8])], 0)
+                .unwrap();
+        }
+        let before = store
+            .xrange(b"s", (0, 0), (u64::MAX, u64::MAX), None, 0)
+            .unwrap();
+        let dirty_before = store.dirty;
+
+        for min_id in [(0, 0), (999, u64::MAX), (1000, 0)] {
+            assert_eq!(
+                store
+                    .xtrim_minid_approx(b"s", min_id, Some(10_000), 1)
+                    .unwrap(),
+                0
+            );
+            assert_eq!(store.dirty, dirty_before);
+            assert_eq!(
+                store
+                    .xrange(b"s", (0, 0), (u64::MAX, u64::MAX), None, 1)
+                    .unwrap(),
+                before
+            );
+        }
     }
 
     /// A LIMIT smaller than a node evicts nothing (whole-node granularity), and

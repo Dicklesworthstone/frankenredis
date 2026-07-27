@@ -18,6 +18,7 @@ serde_json.workspace = true
 
 [features]
 bench-reference = []
+perf-ab-xtrim-minid-noop = ["fr-store/perf-ab-xtrim-minid-noop"]
 
 [dev-dependencies]
 proptest.workspace = true
