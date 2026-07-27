@@ -18,10 +18,12 @@ and trim counts.)
 Usage: stream_id_trim_differ.py <oracle_port> <fr_port>
        Exit 0 = byte-exact, 1 = divergence.
 """
+import re
 import socket
 import sys
 import time
 
+STREAM_ID_BULK = re.compile(rb"\$\d+\r\n\d+-\d+\r\n")
 
 def cmd(s,*a):
     o=b"*%d\r\n"%len(a)
@@ -34,6 +36,12 @@ def run_differ(od, fr):
     def chk(label,*c):
         ro,rf=cmd(od,*c),cmd(fr,*c)
         if ro!=rf: fails.append(f"{label}: redis={ro[:80]!r} fr={rf[:80]!r}")
+    def chk_auto_ids(label,*c):
+        ro,rf=cmd(od,*c),cmd(fr,*c)
+        normalized_oracle, oracle_ids = STREAM_ID_BULK.subn(b"$ID\r\n", ro)
+        normalized_fr, fr_ids = STREAM_ID_BULK.subn(b"$ID\r\n", rf)
+        if oracle_ids == 0 or fr_ids == 0 or normalized_oracle != normalized_fr:
+            fails.append(f"{label}: redis={ro[:80]!r} fr={rf[:80]!r}")
     each("FLUSHALL")
     each("DEL","st")
     chk("xadd_explicit","XADD","st","5-5","f","v")
@@ -44,6 +52,9 @@ def run_differ(od, fr):
     each("DEL","st2")
     chk("xadd_00_empty","XADD","st2","0-0","f","v")
     chk("xadd_01_empty","XADD","st2","0-1","f","v")
+    each("DEL","auto2")
+    chk_auto_ids("xadd_auto_two_fields","XADD","auto2","*","f1","v1","f2","v2")
+    chk_auto_ids("xrange_auto_two_fields","XRANGE","auto2","-","+")
     chk("xadd_nomkstream","XADD","nope","NOMKSTREAM","*","f","v"); chk("nomk_noexist","EXISTS","nope")
     each("DEL","s3"); each("XADD","s3","10-0","f","v")
     chk("xsetid_lower_err","XSETID","s3","5-0")

@@ -11518,33 +11518,37 @@ impl Runtime {
         }
     }
 
-    /// (CrimsonHawk) Borrowed fast path for the bare `XADD key * field value`
-    /// (auto-id, exactly one field/value, no NOMKSTREAM/MAXLEN/MINID). Mirrors the
-    /// generic handler's happy path by REUSING its helpers verbatim — so the
-    /// auto-id and reply are byte-identical: `store.xlast_id_no_stat` (write-lookup,
-    /// no keyspace_hits bump) → `fr_command::next_auto_stream_id` → `store.xadd`
+    /// Borrowed fast path for bare auto-ID XADD with exactly one or two
+    /// field/value pairs and no NOMKSTREAM/MAXLEN/MINID. Mirrors the generic
+    /// handler's happy path by reusing its helpers verbatim — so the auto-id and
+    /// reply are byte-identical: `store.xlast_id_no_stat` (write-lookup, no
+    /// keyspace_hits bump) → `fr_command::next_auto_stream_id` → `store.xadd`
     /// (which bumps dirty once + maintains the last_id/entries_added side-maps) →
-    /// reply `fr_command::format_stream_id(id)`. Profiled as ~22% generic-dispatch
-    /// tax (no fast path); this removes it (the structural 3-hash-lookup + the
-    /// used_memory estimate remain). DEFERS (None → generic, exact error/behavior)
-    /// on: id != "*", a wrongtype/lookup error, id-space exhaustion, or any
-    /// disabling state (notify/repl/AOF/etc via the default-write-gate). The parser
-    /// only matches the 5-element form, so NOMKSTREAM/MAXLEN/MINID/explicit-id/
-    /// multi-field never reach here.
+    /// reply `fr_command::format_stream_id(id)`.
+    ///
+    /// DEFERS (None → generic, exact error/behavior) on: any other field count,
+    /// id != "*", a wrongtype/lookup error, id-space exhaustion, or any disabling
+    /// state (notify/repl/AOF/etc via the default-write-gate). Exact-arity server
+    /// parsers ensure option-bearing and explicit-ID forms never reach here.
     pub fn execute_plain_xadd_borrowed(
         &mut self,
         key: &[u8],
         id_arg: &[u8],
-        field: &[u8],
-        value: &[u8],
+        borrowed_fields: &[(&[u8], &[u8])],
         now_ms: u64,
     ) -> Option<RespFrame> {
+        if !(1..=2).contains(&borrowed_fields.len()) {
+            return None;
+        }
+        let array_len = 3 + borrowed_fields.len() * 2;
         if id_arg != b"*"
-            || self.policy.gate.max_array_len < 5
+            || self.policy.gate.max_array_len < array_len
             || self.policy.gate.max_bulk_len < b"XADD".len()
             || key.len() > self.policy.gate.max_bulk_len
-            || field.len() > self.policy.gate.max_bulk_len
-            || value.len() > self.policy.gate.max_bulk_len
+            || borrowed_fields.iter().any(|(field, value)| {
+                field.len() > self.policy.gate.max_bulk_len
+                    || value.len() > self.policy.gate.max_bulk_len
+            })
         {
             return None;
         }
@@ -11564,8 +11568,13 @@ impl Runtime {
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
         self.session.last_command_name.clear();
         self.session.last_command_name.push_str("xadd");
-        self.session.last_argv_len_sum =
-            b"XADD".len() + key.len() + id_arg.len() + field.len() + value.len();
+        self.session.last_argv_len_sum = b"XADD".len()
+            + key.len()
+            + id_arg.len()
+            + borrowed_fields
+                .iter()
+                .map(|(field, value)| field.len() + value.len())
+                .sum::<usize>();
         let packet_id = next_packet_id();
 
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
@@ -11573,7 +11582,10 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        let fields: Vec<(Vec<u8>, Vec<u8>)> = vec![(field.to_vec(), value.to_vec())];
+        let fields: Vec<(Vec<u8>, Vec<u8>)> = borrowed_fields
+            .iter()
+            .map(|&(field, value)| (field.to_vec(), value.to_vec()))
+            .collect();
         let reply = match self.server.store.xadd(key, id, &fields, now_ms) {
             Ok(()) => RespFrame::BulkString(Some(fr_command::format_stream_id(id))),
             Err(err) => CommandError::Store(err).to_resp(),
@@ -11583,13 +11595,11 @@ impl Runtime {
 
         self.record_plain_xadd_borrowed_metrics(
             || {
-                vec![
-                    b"XADD".to_vec(),
-                    key.to_vec(),
-                    b"*".to_vec(),
-                    field.to_vec(),
-                    value.to_vec(),
-                ]
+                let mut argv = vec![b"XADD".to_vec(), key.to_vec(), b"*".to_vec()];
+                for &(field, value) in borrowed_fields {
+                    argv.extend([field.to_vec(), value.to_vec()]);
+                }
+                argv
             },
             elapsed_us,
             now_ms,
@@ -49201,6 +49211,73 @@ mod tests {
                     b"*",
                     b"field",
                     b"value",
+                    1,
+                )
+                .is_none()
+        );
+        assert_eq!(
+            deferred.execute_frame(command(&[b"XLEN", b"s"]), 2),
+            RespFrame::Integer(0)
+        );
+    }
+
+    #[test]
+    fn plain_xadd_two_fields_borrowed_matches_generic() {
+        let mut fast = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+
+        for now_ms in 1..=64 {
+            let fast_reply = fast
+                .execute_plain_xadd_borrowed(
+                    b"s",
+                    b"*",
+                    &[(b"first", b"value-1"), (b"second", b"value-2")],
+                    now_ms,
+                )
+                .expect("valid two-field XADD uses borrowed path");
+            let generic_reply = generic.execute_frame(
+                command(&[
+                    b"XADD", b"s", b"*", b"first", b"value-1", b"second", b"value-2",
+                ]),
+                now_ms,
+            );
+            assert_eq!(fast_reply, generic_reply, "append now_ms={now_ms}");
+        }
+
+        for query in [
+            &[b"XLEN".as_slice(), b"s".as_slice()][..],
+            &[
+                b"XRANGE".as_slice(),
+                b"s".as_slice(),
+                b"-".as_slice(),
+                b"+".as_slice(),
+            ][..],
+            &[b"XINFO".as_slice(), b"STREAM".as_slice(), b"s".as_slice()][..],
+        ] {
+            assert_eq!(
+                fast.execute_frame(command(query), 100),
+                generic.execute_frame(command(query), 100),
+                "query={query:?}",
+            );
+        }
+        assert_eq!(fast.server.store.dirty, generic.server.store.dirty);
+        assert_eq!(
+            fast.server.store.stat_total_commands_processed,
+            generic.server.store.stat_total_commands_processed
+        );
+
+        let mut deferred = Runtime::default_strict();
+        assert!(
+            deferred
+                .execute_plain_xadd_borrowed(b"s", b"*", &[], 1)
+                .is_none()
+        );
+        assert!(
+            deferred
+                .execute_plain_xadd_borrowed(
+                    b"s",
+                    b"*",
+                    &[(b"a", b"1"), (b"b", b"2"), (b"c", b"3")],
                     1,
                 )
                 .is_none()

@@ -5984,9 +5984,12 @@ fn process_buffered_frames(
                     b"XADD",
                 ) {
                     // XADD key * field value: key=key, a=id("*"), b=field, c=value.
-                    if let Some(response) = runtime
-                        .execute_plain_xadd_borrowed(packet.key, packet.a, packet.b, packet.c, ts)
-                    {
+                    if let Some(response) = runtime.execute_plain_xadd_borrowed(
+                        packet.key,
+                        packet.a,
+                        &[(packet.b, packet.c)],
+                        ts,
+                    ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -12368,6 +12371,7 @@ enum BorrowedDispatchFloorClass {
     Strlen,
     Ttl,
     Type,
+    XaddTwoFields,
     XaddMaxlenApprox,
     Xlen,
     Zcard,
@@ -12770,6 +12774,9 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (2, BorrowedDispatchFloorCommand::Type) => Some(BorrowedDispatchFloorClass::Type),
         // Steady-state bounded stream append, with or without an explicit cap:
         // XADD key MAXLEN ~ N [LIMIT M] * field value (8 or 10 elements).
+        (7, BorrowedDispatchFloorCommand::Xadd) if xadd_two_fields_floor_enabled() => {
+            Some(BorrowedDispatchFloorClass::XaddTwoFields)
+        }
         (8, BorrowedDispatchFloorCommand::Xadd) => {
             Some(BorrowedDispatchFloorClass::XaddMaxlenApprox)
         }
@@ -12887,6 +12894,27 @@ fn xadd_limit_floor_enabled() -> bool {
 #[cfg(not(feature = "perf-ab-xadd-limit-floor"))]
 #[inline(always)]
 const fn xadd_limit_floor_enabled() -> bool {
+    true
+}
+
+/// Preserve the exact pre-lever classification in the measurement ELF. Each
+/// benchmark arm launches that ELF in a fresh process and selects the control
+/// before its first packet is classified.
+#[cfg(feature = "perf-ab-xadd-two-fields-floor")]
+#[inline]
+fn xadd_two_fields_floor_enabled() -> bool {
+    static ORIG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    !*ORIG.get_or_init(
+        || match std::env::var("FR_PERF_AB_XADD_TWO_FIELDS_FLOOR_ORIG") {
+            Ok(value) => value == "1",
+            Err(_) => false,
+        },
+    )
+}
+
+#[cfg(not(feature = "perf-ab-xadd-two-fields-floor"))]
+#[inline(always)]
+const fn xadd_two_fields_floor_enabled() -> bool {
     true
 }
 
@@ -13231,6 +13259,33 @@ fn try_dispatch_floor_classified_action(
 ) -> Option<Result<BorrowedMultibulkAction, RespParseError>> {
     let class = classify_borrowed_dispatch_floor_packet(unparsed, &parser_config)?;
     Some(match class {
+        BorrowedDispatchFloorClass::XaddTwoFields => {
+            if let Some(packet) = parse_borrowed_plain_key_arg5_packet(
+                unparsed,
+                &parser_config,
+                b"*7\r\n$4\r\n",
+                b"XADD",
+            ) && let Some(response) = runtime.execute_plain_xadd_borrowed(
+                packet.key,
+                packet.a,
+                &[(packet.b, packet.c), (packet.d, packet.e)],
+                ts,
+            ) {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
         BorrowedDispatchFloorClass::KeyedValuesWrite(values) => {
             if let Some((consumed, response)) =
                 dispatch_floor_keyed_values_write(values, unparsed, &parser_config, runtime, ts)
@@ -31295,6 +31350,24 @@ mod tests {
             ),
             None
         );
+        let xadd_two_fields =
+            b"*7\r\n$4\r\nxAdD\r\n$1\r\ns\r\n$1\r\n*\r\n$2\r\nf1\r\n$2\r\nv1\r\n$2\r\nf2\r\n$2\r\nv2\r\n";
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(xadd_two_fields, &cfg),
+            Some(super::BorrowedDispatchFloorClass::XaddTwoFields)
+        );
+        let packet = super::parse_borrowed_plain_key_arg5_packet(
+            xadd_two_fields,
+            &cfg,
+            b"*7\r\n$4\r\n",
+            b"XADD",
+        )
+        .expect("two-field XADD packet parses");
+        assert_eq!(packet.consumed, xadd_two_fields.len());
+        assert_eq!(packet.key, b"s");
+        assert_eq!(packet.a, b"*");
+        assert_eq!((packet.b, packet.c), (b"f1".as_slice(), b"v1".as_slice()));
+        assert_eq!((packet.d, packet.e), (b"f2".as_slice(), b"v2".as_slice()));
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(
                 b"*4\r\n$15\r\nzReMrAnGeByRaNk\r\n$1\r\nz\r\n$1\r\n0\r\n$1\r\n1\r\n",

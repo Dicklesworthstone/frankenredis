@@ -33,6 +33,117 @@ Redis arm and numeric ratio; a SELF-SPEEDUP needs the heading label and cannot
 mark itself as campaign output. Missing or contradictory classification exits
 **8**.
 
+## 2026-07-27 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — exact borrowed dispatch for bare two-field `XADD` (`frankenredis-azqyj`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes.** This is a measured
+  throughput win against the actual vendored Redis 7.2.4 incumbent, not merely
+  a before/after self-speedup.
+- **Ledger-first admission.** Before proposing the lever, both negative ledgers
+  and `perf_candidate_preflight.py` were searched for `XADD`, multi-field
+  dispatch, `execute_plain_xadd_borrowed`, and the exact packet-parser surface.
+  The gate printed the prior one-field bare-XADD and bounded-XADD rows and their
+  retry predicates. Those rows explicitly excluded multiple-field forms, so the
+  exact seven-element `XADD key * f1 v1 f2 v2` shape remained a distinct
+  workload identity, admissible only after a current-ELF incumbent loss and
+  exact-workload profile.
+- **Current-ELF loss and exact pre-profile.** A position-balanced
+  same-invocation scout measured the unedited seven-element form at
+  **0.436842020x Redis**, bootstrap 95% median CI
+  **[0.422388259, 0.451897023]**, while its A/A null CI was
+  **[0.984076416, 1.018812247]**. The loss therefore cleared the null-derived
+  gate. The exact pre-profile used source HEAD
+  `170403005b5941b25215d3104e5ca1b0c975410b`, self-reported the executing
+  FrankenRedis ELF SHA-256
+  **`69ca1b56a0e303ffd912d92cf008c3f3a88e04435e06df0e046251069e375dbd`**,
+  recorded 16,000 samples and 55.715 billion cycles with zero lost samples,
+  and is stored at
+  `/tmp/frankenredis-xadd-multifield-170403005-20260727T1640.perf.data`
+  with SHA-256
+  **`699aadcef4fdd07ff5b461d2f6ea342ccb8b5b30be04cab4ba4c907295019d58`**.
+  `process_buffered_frames` held **17.79% self-time** (single-frame Amdahl
+  ceiling **1.2164x**) and `__memcmp_avx2_movbe` held **15.49%**
+  (**1.1833x**); together the missed-classifier/parser surface held **33.28%**
+  (**1.4988x**). The generic route was also present by name:
+  `execute_frame_internal` 1.58%, `fr_command::xadd` 1.41%,
+  `dispatch_with_client_context` 1.24%,
+  `parse_command_args_borrowed_into` 1.20%, and
+  `copy_borrowed_argv_into_scratch` 1.05%. The workload therefore executed the
+  intended path with non-zero self-time and attributed the loss before editing.
+- **One lever and behavior-preservation proof.** The server now classifies only
+  the exact seven-element XADD packet and passes its two borrowed field/value
+  pairs to the existing plain auto-ID XADD runtime path. That path still reuses
+  the generic handler's state-changing helpers in the same order:
+  `xlast_id_no_stat` → `next_auto_stream_id` → `Store::xadd` →
+  `format_stream_id`. It preserves the same command accounting, dirty count,
+  last-ID and entries-added maps, and reply construction. Explicit IDs,
+  NOMKSTREAM, MAXLEN, MINID, zero pairs, and three-or-more pairs all defer to
+  the generic path. Production compiles the candidate classification as a
+  constant; the environment-controlled bypass exists only in the measurement
+  feature.
+- **Behavior and quality gates.** A 64-append runtime parity test compared every
+  candidate reply against generic dispatch at the same `now_ms`, then compared
+  XLEN, XRANGE, XINFO STREAM, dirty count, and total-command accounting; the
+  zero- and three-pair deferral boundaries also passed. The exact-token server
+  classifier/parser test passed. `stream_id_trim_differ.py` now exercises this
+  auto-ID two-field route against live Redis, normalizing only the generated
+  IDs; both the XADD reply shape and resulting XRANGE state matched, and the
+  complete stream-ID/trim suite remained byte-exact. Strict-remote workspace
+  check and workspace clippy with `-D warnings` passed. Strict-remote
+  `fr-conformance` passed **194/194** library tests, all auxiliary targets,
+  **217/217** live-oracle stream cases, **99/99** smoke tests, and doc-tests.
+- **One-binary A/A+A/B+incumbent measurement.** One top-level same invocation,
+  `xadd-two-fields-competitive-74543-1785185331`, ran control, control-null,
+  candidate, and the live vendored Redis 7.2.4 server through all 24 arm
+  permutations. Each server ran in turn on logical CPU 31 / physical core 31;
+  the client ran on logical CPU 29 / physical core 29. Every arm executed
+  30,000 requests of `XADD xs * f1 v1 f2 v2` at 50 clients and pipeline 16 and
+  finished at XLEN 30,000. Control, control-null, and candidate all
+  self-reported the same executing ELF SHA-256
+  **`8ec48cd1bf871fe6671e474db7c46c2fd5006e882bbccc755f0330f5795fec87`**
+  via `/proc/PID/exe`; the live Redis arm self-reported
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**,
+  and redis-benchmark was
+  **`8931ebb4de7ea5ae700bf4cf866ad246535743496318ad4e19b46af1c58d7a0b`**.
+
+  | arm / ratio | median | bootstrap 95% median CI |
+  |---|---:|---:|
+  | control throughput | 265,486.72 ops/s | — |
+  | control-null throughput | 265,486.72 ops/s | — |
+  | candidate throughput | 1,111,111.12 ops/s | — |
+  | live Redis throughput | 769,230.75 ops/s | — |
+  | A/A null | **1.000000000x** | **[1.000000000, 1.008928507]** |
+  | candidate/control self-speedup | **4.185185308x** | **[4.185185308, 4.185185308]** |
+  | FrankenRedis/Redis competitive ratio | **1.444444492x** | **[1.444444492, 1.444444492]** |
+  | control/Redis | 0.345132745x | [0.345132745, 0.345132745] |
+
+  The A/A null was measured in that same invocation: median
+  **1.000000000**, bootstrap 95% median CI
+  **[1.000000000, 1.008928507]**, which brackets 1.0. Twice its radius produced
+  the decision gate **[0.982142986, 1.017857014]**. The self-speedup is
+  maintenance evidence; the candidate/live-Redis CI is the competitive result
+  and lies wholly above the gate, so this is a campaign KEEP. The
+  redis-benchmark readings are quantized at this throughput, which explains the
+  point CIs; the position-balanced A/A null remains the admissibility control.
+  Arm and ratio CVs are provenance only. The bootstrap median-CI gate
+  determined the verdict, never CV.
+- **Post-profile and disposition.** The exact candidate profile self-reported
+  the decision ELF above, recorded 14,000 samples and 26.479 billion cycles
+  with zero lost samples, and is stored at
+  `/tmp/frankenredis-xadd-two-fields-candidate-8ec48cd1-20260727T1650.perf.data`
+  with SHA-256
+  **`65860455a750994f53d77150abc500992782b5de5d339127b088f33e996290a7`**.
+  The new `execute_plain_xadd_borrowed` frame held **3.47% self-time**,
+  proving the measured workload traversed the edited path.
+  `process_buffered_frames` fell to **4.51%** (remaining ceiling **1.0472x**);
+  the old generic parser/router frames were absent above 0.1% except
+  `execute_frame_internal` at 0.01%. **KEEP as COMPETITIVE campaign output.**
+  Retry predicate: reopen this exact bare auto-ID two-field route only if a
+  fresh same-invocation FrankenRedis/Redis bootstrap median CI lies wholly
+  below its A/A-derived gate, or if the live two-field stream differential
+  fails. Treat three-or-more fields and every option-bearing XADD form as
+  separate surfaces requiring their own ledger grep, current-ELF loss, and
+  exact profile.
+
 ## 2026-07-27 MossyBluff (cod/MEASURE): SELF-SPEEDUP KEEP — skip the impossible `XADD MINID ~` stale-floor scan (`frankenredis-e9r23`)
 
 - **Claim class: SELF-SPEEDUP. Campaign output: no.** This is a maintenance
