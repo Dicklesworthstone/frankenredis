@@ -1,11 +1,12 @@
 #![forbid(unsafe_code)]
 
-//! Same-ELF, same-invocation A/A + A/B gate for the flagged io_uring output path.
+//! Same-invocation A/A + A/B + live-incumbent gate for flagged io_uring output.
 //!
 //! The harness deliberately drives many established connections as a group:
 //! every client writes before any client reads. At pipeline depth 1 this gives
-//! the event loop a cross-connection submission batch; at depth 16 it also
-//! exercises FrankenRedis's existing per-connection reply coalescing.
+//! the event loop a cross-connection submission batch. Two byte-identical mio
+//! processes provide the null control, the same FrankenRedis ELF with the
+//! runtime flag is the candidate, and vendored Redis is the live incumbent.
 //!
 //! Run only through strict remote RCH on one explicitly selected worker:
 //!
@@ -42,16 +43,18 @@ enum Arm {
     MioA,
     MioB,
     IoUring,
+    Redis,
 }
 
 impl Arm {
-    const ALL: [Self; 3] = [Self::MioA, Self::MioB, Self::IoUring];
+    const ALL: [Self; 4] = [Self::MioA, Self::MioB, Self::IoUring, Self::Redis];
 
     const fn index(self) -> usize {
         match self {
             Self::MioA => 0,
             Self::MioB => 1,
             Self::IoUring => 2,
+            Self::Redis => 3,
         }
     }
 
@@ -60,6 +63,7 @@ impl Arm {
             Self::MioA => "mio_a",
             Self::MioB => "mio_b",
             Self::IoUring => "io_uring",
+            Self::Redis => "redis",
         }
     }
 }
@@ -170,7 +174,13 @@ struct Server {
 }
 
 impl Server {
-    fn spawn(binary: &Path, arm: Arm, root: &Path, server_core: usize) -> Self {
+    fn spawn(
+        fr_binary: &Path,
+        redis_binary: &Path,
+        arm: Arm,
+        root: &Path,
+        server_core: usize,
+    ) -> Self {
         let runtime_dir = root.join(arm.name());
         fs::create_dir_all(&runtime_dir).expect("create unique server runtime directory");
         let stderr_path = runtime_dir.join("stderr.log");
@@ -179,8 +189,15 @@ impl Server {
         let mut command = Command::new("taskset");
         command
             .args(["-c", &server_core.to_string()])
-            .arg(binary)
+            .arg(if matches!(arm, Arm::Redis) {
+                redis_binary
+            } else {
+                fr_binary
+            })
             .args(["--bind", "127.0.0.1", "--port", &port.to_string()]);
+        if matches!(arm, Arm::Redis) {
+            command.args(["--save", "", "--appendonly", "no"]);
+        }
         if matches!(arm, Arm::IoUring) {
             command.arg(
                 std::env::var("FR_URING_AB_FLAG").unwrap_or_else(|_| IO_URING_FLAG.to_owned()),
@@ -191,7 +208,7 @@ impl Server {
             .stdout(Stdio::null())
             .stderr(Stdio::from(stderr));
 
-        let child = command.spawn().expect("spawn same-ELF server arm");
+        let child = command.spawn().expect("spawn benchmark server arm");
         let mut server = Self {
             arm,
             child,
@@ -264,6 +281,10 @@ impl Server {
             "candidate process did not receive {flag}"
         );
         println!("CANDIDATE_FLAG pid={} flag={flag}", self.pid());
+    }
+
+    fn executing_elf_sha256(&self) -> String {
+        hash_path(&PathBuf::from(format!("/proc/{}/exe", self.child.id())))
     }
 }
 
@@ -353,7 +374,7 @@ fn exchange_one(server: &mut Server, request: &[u8], expected: &[u8]) {
 }
 
 fn prefill_and_warm(
-    servers: &mut [Server; 3],
+    servers: &mut [Server; 4],
     workload: Workload,
     pipeline: usize,
     packets: &WorkloadPackets,
@@ -378,17 +399,21 @@ struct Sample {
     mio_a_ns: f64,
     mio_b_ns: f64,
     io_uring_ns: f64,
+    redis_ns: f64,
     null_ratio: f64,
-    speedup: f64,
+    self_speedup: f64,
+    competitive_speedup: f64,
     mio_a_cpu_ticks: u64,
     mio_b_cpu_ticks: u64,
     io_uring_cpu_ticks: u64,
+    redis_cpu_ticks: u64,
     cpu_null_ratio: f64,
-    cpu_speedup: f64,
+    cpu_self_speedup: f64,
+    cpu_competitive_speedup: f64,
 }
 
 fn measure_configuration(
-    servers: &mut [Server; 3],
+    servers: &mut [Server; 4],
     workload: Workload,
     pipeline: usize,
     samples: usize,
@@ -397,13 +422,31 @@ fn measure_configuration(
     // Every permutation appears inside every measured sample. Each arm runs only
     // INTERLEAVE_GROUPS client groups before control passes to the next arm, so
     // host-frequency and queue drift cannot alias onto a multi-second arm block.
-    const ORDERS: [[Arm; 3]; 6] = [
-        [Arm::MioA, Arm::MioB, Arm::IoUring],
-        [Arm::MioA, Arm::IoUring, Arm::MioB],
-        [Arm::MioB, Arm::MioA, Arm::IoUring],
-        [Arm::MioB, Arm::IoUring, Arm::MioA],
-        [Arm::IoUring, Arm::MioA, Arm::MioB],
-        [Arm::IoUring, Arm::MioB, Arm::MioA],
+    const ORDERS: [[Arm; 4]; 24] = [
+        [Arm::MioA, Arm::MioB, Arm::IoUring, Arm::Redis],
+        [Arm::MioA, Arm::MioB, Arm::Redis, Arm::IoUring],
+        [Arm::MioA, Arm::IoUring, Arm::MioB, Arm::Redis],
+        [Arm::MioA, Arm::IoUring, Arm::Redis, Arm::MioB],
+        [Arm::MioA, Arm::Redis, Arm::MioB, Arm::IoUring],
+        [Arm::MioA, Arm::Redis, Arm::IoUring, Arm::MioB],
+        [Arm::MioB, Arm::MioA, Arm::IoUring, Arm::Redis],
+        [Arm::MioB, Arm::MioA, Arm::Redis, Arm::IoUring],
+        [Arm::MioB, Arm::IoUring, Arm::MioA, Arm::Redis],
+        [Arm::MioB, Arm::IoUring, Arm::Redis, Arm::MioA],
+        [Arm::MioB, Arm::Redis, Arm::MioA, Arm::IoUring],
+        [Arm::MioB, Arm::Redis, Arm::IoUring, Arm::MioA],
+        [Arm::IoUring, Arm::MioA, Arm::MioB, Arm::Redis],
+        [Arm::IoUring, Arm::MioA, Arm::Redis, Arm::MioB],
+        [Arm::IoUring, Arm::MioB, Arm::MioA, Arm::Redis],
+        [Arm::IoUring, Arm::MioB, Arm::Redis, Arm::MioA],
+        [Arm::IoUring, Arm::Redis, Arm::MioA, Arm::MioB],
+        [Arm::IoUring, Arm::Redis, Arm::MioB, Arm::MioA],
+        [Arm::Redis, Arm::MioA, Arm::MioB, Arm::IoUring],
+        [Arm::Redis, Arm::MioA, Arm::IoUring, Arm::MioB],
+        [Arm::Redis, Arm::MioB, Arm::MioA, Arm::IoUring],
+        [Arm::Redis, Arm::MioB, Arm::IoUring, Arm::MioA],
+        [Arm::Redis, Arm::IoUring, Arm::MioA, Arm::MioB],
+        [Arm::Redis, Arm::IoUring, Arm::MioB, Arm::MioA],
     ];
 
     let packets = WorkloadPackets::new(workload, pipeline);
@@ -426,8 +469,8 @@ ops_per_arm_sample={actual_ops}",
         let swap_controls = sample_index % 2 == 1;
         let mio_a_slot = usize::from(swap_controls);
         let mio_b_slot = usize::from(!swap_controls);
-        let cpu_before = std::array::from_fn::<_, 3, _>(|index| servers[index].cpu_ticks());
-        let mut elapsed = [Duration::ZERO; 3];
+        let cpu_before = std::array::from_fn::<_, 4, _>(|index| servers[index].cpu_ticks());
+        let mut elapsed = [Duration::ZERO; 4];
         let mut groups_done = 0usize;
         let mut interleave_index = 0usize;
         while groups_done < groups {
@@ -438,6 +481,7 @@ ops_per_arm_sample={actual_ops}",
                     Arm::MioA => mio_a_slot,
                     Arm::MioB => mio_b_slot,
                     Arm::IoUring => Arm::IoUring.index(),
+                    Arm::Redis => Arm::Redis.index(),
                 };
                 elapsed[arm.index()] += time_block(
                     &mut servers[server_slot],
@@ -449,40 +493,50 @@ ops_per_arm_sample={actual_ops}",
             groups_done += block_groups;
             interleave_index += 1;
         }
-        let cpu_after = std::array::from_fn::<_, 3, _>(|index| servers[index].cpu_ticks());
+        let cpu_after = std::array::from_fn::<_, 4, _>(|index| servers[index].cpu_ticks());
         let cpu_delta =
-            std::array::from_fn::<_, 3, _>(|index| cpu_after[index] - cpu_before[index]);
+            std::array::from_fn::<_, 4, _>(|index| cpu_after[index] - cpu_before[index]);
         let mio_a_cpu_ticks = cpu_delta[mio_a_slot];
         let mio_b_cpu_ticks = cpu_delta[mio_b_slot];
         let io_uring_cpu_ticks = cpu_delta[Arm::IoUring.index()];
+        let redis_cpu_ticks = cpu_delta[Arm::Redis.index()];
         assert!(
-            mio_a_cpu_ticks > 0 && mio_b_cpu_ticks > 0 && io_uring_cpu_ticks > 0,
+            mio_a_cpu_ticks > 0
+                && mio_b_cpu_ticks > 0
+                && io_uring_cpu_ticks > 0
+                && redis_cpu_ticks > 0,
             "each server arm must accrue CPU ticks"
         );
         let mio_a_ns = elapsed[Arm::MioA.index()].as_nanos() as f64;
         let mio_b_ns = elapsed[Arm::MioB.index()].as_nanos() as f64;
         let io_uring_ns = elapsed[Arm::IoUring.index()].as_nanos() as f64;
+        let redis_ns = elapsed[Arm::Redis.index()].as_nanos() as f64;
         let mio_center_ns = (mio_a_ns * mio_b_ns).sqrt();
         let result = Sample {
             mio_a_ns,
             mio_b_ns,
             io_uring_ns,
+            redis_ns,
             null_ratio: mio_a_ns / mio_b_ns,
-            speedup: mio_center_ns / io_uring_ns,
+            self_speedup: mio_center_ns / io_uring_ns,
+            competitive_speedup: redis_ns / io_uring_ns,
             mio_a_cpu_ticks,
             mio_b_cpu_ticks,
             io_uring_cpu_ticks,
+            redis_cpu_ticks,
             cpu_null_ratio: mio_a_cpu_ticks as f64 / mio_b_cpu_ticks as f64,
-            cpu_speedup: (mio_a_cpu_ticks as f64 * mio_b_cpu_ticks as f64).sqrt()
+            cpu_self_speedup: (mio_a_cpu_ticks as f64 * mio_b_cpu_ticks as f64).sqrt()
                 / io_uring_cpu_ticks as f64,
+            cpu_competitive_speedup: redis_cpu_ticks as f64 / io_uring_cpu_ticks as f64,
         };
         println!(
             "SAMPLE workload={} pipeline={pipeline} sample={} order={:?} \
 control_slots={} \
-mio_a_ns_per_op={:.3} mio_b_ns_per_op={:.3} io_uring_ns_per_op={:.3} \
-null_a_over_b={:.9} mio_over_io_uring={:.9} \
-mio_a_cpu_ticks={} mio_b_cpu_ticks={} io_uring_cpu_ticks={} \
-cpu_null_a_over_b={:.9} cpu_mio_over_io_uring={:.9}",
+mio_a_ns_per_op={:.3} mio_b_ns_per_op={:.3} io_uring_ns_per_op={:.3} redis_ns_per_op={:.3} \
+null_a_over_b={:.9} mio_over_io_uring={:.9} fr_io_uring_over_redis={:.9} \
+mio_a_cpu_ticks={} mio_b_cpu_ticks={} io_uring_cpu_ticks={} redis_cpu_ticks={} \
+cpu_null_a_over_b={:.9} cpu_mio_over_io_uring={:.9} \
+cpu_fr_io_uring_over_redis={:.9}",
             workload.name(),
             sample_index + 1,
             ORDERS[sample_index % ORDERS.len()],
@@ -490,13 +544,17 @@ cpu_null_a_over_b={:.9} cpu_mio_over_io_uring={:.9}",
             result.mio_a_ns / actual_ops as f64,
             result.mio_b_ns / actual_ops as f64,
             result.io_uring_ns / actual_ops as f64,
+            result.redis_ns / actual_ops as f64,
             result.null_ratio,
-            result.speedup,
+            result.self_speedup,
+            result.competitive_speedup,
             result.mio_a_cpu_ticks,
             result.mio_b_cpu_ticks,
             result.io_uring_cpu_ticks,
+            result.redis_cpu_ticks,
             result.cpu_null_ratio,
-            result.cpu_speedup,
+            result.cpu_self_speedup,
+            result.cpu_competitive_speedup,
         );
         output.push(result);
     }
@@ -567,6 +625,7 @@ enum Verdict {
 
 fn adjudicate_ratios(
     metric: &str,
+    ratio_name: &str,
     workload: Workload,
     pipeline: usize,
     null: &[f64],
@@ -595,7 +654,7 @@ fn adjudicate_ratios(
         "MEDIAN_CI_GATE metric={metric} workload={} pipeline={pipeline} verdict={verdict:?} \
 null_median={null_median:.9} null_ci95=[{null_ci_low:.9},{null_ci_high:.9}] \
 null_cv_pct={null_cv_pct:.6} margin2x=[{gate_low:.9},{gate_high:.9}] \
-mio_over_io_uring_median={candidate_median:.9} \
+{ratio_name}_median={candidate_median:.9} \
 candidate_ci95=[{candidate_ci_low:.9},{candidate_ci_high:.9}] \
 candidate_cv_pct={candidate_cv_pct:.6}",
         workload.name()
@@ -609,14 +668,22 @@ null median {null_median:.9} exposes position bias or core contamination",
     verdict
 }
 
-fn adjudicate(workload: Workload, pipeline: usize, samples: &[Sample]) -> (Verdict, Verdict) {
+fn adjudicate(
+    workload: Workload,
+    pipeline: usize,
+    samples: &[Sample],
+) -> (Verdict, Verdict, Verdict, Verdict) {
     let wall_null = samples
         .iter()
         .map(|sample| sample.null_ratio)
         .collect::<Vec<_>>();
     let wall_candidate = samples
         .iter()
-        .map(|sample| sample.speedup)
+        .map(|sample| sample.self_speedup)
+        .collect::<Vec<_>>();
+    let wall_competitive = samples
+        .iter()
+        .map(|sample| sample.competitive_speedup)
         .collect::<Vec<_>>();
     let cpu_null = samples
         .iter()
@@ -624,11 +691,16 @@ fn adjudicate(workload: Workload, pipeline: usize, samples: &[Sample]) -> (Verdi
         .collect::<Vec<_>>();
     let cpu_candidate = samples
         .iter()
-        .map(|sample| sample.cpu_speedup)
+        .map(|sample| sample.cpu_self_speedup)
+        .collect::<Vec<_>>();
+    let cpu_competitive = samples
+        .iter()
+        .map(|sample| sample.cpu_competitive_speedup)
         .collect::<Vec<_>>();
     (
         adjudicate_ratios(
             "wall_ns_per_op",
+            "mio_over_io_uring",
             workload,
             pipeline,
             &wall_null,
@@ -636,10 +708,27 @@ fn adjudicate(workload: Workload, pipeline: usize, samples: &[Sample]) -> (Verdi
         ),
         adjudicate_ratios(
             "cpu_ticks_per_fixed_work",
+            "cpu_mio_over_io_uring",
             workload,
             pipeline,
             &cpu_null,
             &cpu_candidate,
+        ),
+        adjudicate_ratios(
+            "wall_ns_per_op",
+            "fr_io_uring_over_redis",
+            workload,
+            pipeline,
+            &wall_null,
+            &wall_competitive,
+        ),
+        adjudicate_ratios(
+            "cpu_ticks_per_fixed_work",
+            "cpu_fr_io_uring_over_redis",
+            workload,
+            pipeline,
+            &cpu_null,
+            &cpu_competitive,
         ),
     )
 }
@@ -722,30 +811,43 @@ fn profile_io_uring_path(candidate: &mut Server, root: &Path, profile_seconds: u
         "profile lost samples: {lost}"
     );
 
-    let targets = [
-        "fr_uring::BatchWriter::send_batch",
-        "fr_uring::BatchWriter::submit_chunk",
-        "io_uring::submit::Submitter::enter",
+    let owned_targets = ["BatchWriter>::submit_owned", "BatchWriter>::drain_owned"];
+    let surface_targets = [
+        owned_targets[0],
+        owned_targets[1],
+        "frankenredis::submit_uring_batch",
+        "frankenredis::drain_uring_completions",
+        "io_uring::submit::Submitter>::submit_and_wait",
         "io_uring_enter",
     ];
     let mut matched = Vec::new();
-    let mut max_self_pct = 0.0_f64;
+    let mut owned_self_pct = 0.0_f64;
+    let mut surface_self_pct = 0.0_f64;
     for line in report.lines() {
-        if targets.iter().any(|target| line.contains(target))
+        if surface_targets.iter().any(|target| line.contains(target))
             && let Some(raw_pct) = line.split_whitespace().next()
             && let Ok(pct) = raw_pct.trim_end_matches('%').parse::<f64>()
         {
-            max_self_pct = max_self_pct.max(pct);
+            surface_self_pct += pct;
+            if owned_targets.iter().any(|target| line.contains(target)) {
+                owned_self_pct += pct;
+            }
             matched.push(line.trim().to_owned());
         }
     }
     assert!(
-        max_self_pct > 0.0,
-        "profile did not attribute non-zero self-time to the io_uring path"
+        owned_self_pct > 0.0,
+        "profile did not attribute non-zero self-time to owned submit/CQ drain"
     );
+    assert!(
+        surface_self_pct < 100.0,
+        "invalid aggregate io_uring self-time: {surface_self_pct}%"
+    );
+    let amdahl_ceiling = 1.0 / (1.0 - surface_self_pct / 100.0);
     println!(
-        "PROFILE_REACHABILITY target=io_uring_output max_self_pct={max_self_pct:.4} \
-lost_samples=0 rows={matched:?}"
+        "PROFILE_REACHABILITY target=async_owned_io_uring_output \
+owned_self_pct={owned_self_pct:.4} surface_self_pct={surface_self_pct:.4} \
+amdahl_elimination_ceiling={amdahl_ceiling:.6}x lost_samples=0 rows={matched:?}"
     );
 }
 
@@ -938,14 +1040,40 @@ fn command_output(command: &str, args: &[&str]) -> Output {
 #[ignore = "strict-remote pinned-worker performance gate; run explicitly"]
 fn io_uring_submission_same_elf_null_then_ab() {
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_frankenredis"));
+    let redis_binary = std::env::var_os("FR_URING_REDIS_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../legacy_redis_code/redis/src/redis-server")
+        });
+    assert!(
+        redis_binary.is_file(),
+        "vendored Redis executable is missing: {}",
+        redis_binary.display()
+    );
     let harness = std::env::current_exe().expect("locate running harness ELF");
-    // First benchmark-authored line: both the server under test and the harness
-    // identify their exact ELFs before any measurement is taken.
+    // First benchmark-authored line: the executing harness identifies its own
+    // ELF before any child process is started.
     println!(
-        "BENCH_ELF_SHA256 server={} harness={} arms=mio_a,mio_b,io_uring",
-        hash_path(&binary),
+        "HARNESS_ELF_SELF_REPORT sha256={} arms=mio_a,mio_b,io_uring,redis",
         hash_path(&harness)
     );
+    let redis_version = command_output(
+        redis_binary
+            .to_str()
+            .expect("vendored Redis executable path must be UTF-8"),
+        &["--version"],
+    );
+    assert!(
+        redis_version.status.success(),
+        "vendored Redis --version must succeed"
+    );
+    let redis_version = String::from_utf8(redis_version.stdout).expect("Redis version is UTF-8");
+    assert!(
+        redis_version.contains("v=7.2.4"),
+        "expected vendored Redis 7.2.4, got {redis_version:?}"
+    );
+    println!("INCUMBENT_VERSION {}", redis_version.trim());
 
     let hostname = command_output("hostname", &[]);
     assert!(hostname.status.success(), "hostname failed");
@@ -958,6 +1086,10 @@ fn io_uring_submission_same_elf_null_then_ab() {
     println!(
         "WORKER_ID host={hostname} kernel={kernel} io_uring_disabled={}",
         disabled.trim()
+    );
+    println!(
+        "DECISION_CONTRACT same_invocation_aa=true live_redis_arm=true \
+bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
     );
 
     let samples = parse_usize_env("FR_URING_AB_SAMPLES", DEFAULT_SAMPLES);
@@ -979,10 +1111,30 @@ fn io_uring_submission_same_elf_null_then_ab() {
     println!("ARTIFACT_ROOT {}", root.display());
 
     let mut servers = [
-        Server::spawn(&binary, Arm::MioA, &root, server_core),
-        Server::spawn(&binary, Arm::MioB, &root, server_core),
-        Server::spawn(&binary, Arm::IoUring, &root, server_core),
+        Server::spawn(&binary, &redis_binary, Arm::MioA, &root, server_core),
+        Server::spawn(&binary, &redis_binary, Arm::MioB, &root, server_core),
+        Server::spawn(&binary, &redis_binary, Arm::IoUring, &root, server_core),
+        Server::spawn(&binary, &redis_binary, Arm::Redis, &root, server_core),
     ];
+    let server_hashes = Arm::ALL.map(|arm| servers[arm.index()].executing_elf_sha256());
+    assert_eq!(
+        server_hashes[Arm::MioA.index()],
+        server_hashes[Arm::MioB.index()],
+        "A/A controls must execute the same ELF"
+    );
+    assert_eq!(
+        server_hashes[Arm::MioA.index()],
+        server_hashes[Arm::IoUring.index()],
+        "control and candidate must execute the same FrankenRedis ELF"
+    );
+    for arm in Arm::ALL {
+        println!(
+            "SERVER_ELF_SELF_REPORT arm={} pid={} sha256={}",
+            arm.name(),
+            servers[arm.index()].child.id(),
+            server_hashes[arm.index()]
+        );
+    }
     servers[Arm::IoUring.index()].assert_flag_reached_process();
     profile_io_uring_path(&mut servers[Arm::IoUring.index()], &root, profile_seconds);
 

@@ -33,6 +33,108 @@ Redis arm and numeric ratio; a SELF-SPEEDUP needs the heading label and cannot
 mark itself as campaign output. Missing or contradictory classification exits
 **8**.
 
+## 2026-07-27 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — asynchronous owned-buffer `io_uring` CQ batching leads Redis on P1 SET (`frankenredis-zwd0m`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes.** The campaign result is the
+  measured FrankenRedis/Redis throughput ratio against the actual vendored
+  Redis 7.2.4 server running as a live side-by-side arm in the same invocation.
+  The same-ELF mio/io_uring comparison below is a SELF-SPEEDUP maintenance
+  measurement only, and its verdict is HOLD.
+- **Ledger-first admission.** Before source work, both negative ledgers and the
+  preflight were searched for `io_uring`, `submit_owned`, CQ draining,
+  submission batching, and the P1 output surface; every hit was read by hand.
+  The controlling 2026-07-26 row was a VALID-AB REJECT of synchronous
+  `submit_and_wait`: wall regressed 8.78% even though submissions fell from
+  1.000/op to 0.176/op. It admitted a retry only if an owned in-flight buffer
+  registry provided asynchronous CQ draining across event-loop iterations plus
+  lifetime, close, and cancellation tests. This lever satisfies that condition
+  and does not reopen the separately closed P16/writev vein.
+- **One default-off lever.** `BatchWriter::submit_owned` moves each reply
+  `Vec<u8>` into a fixed registry slot before publishing its SQE, submits the
+  complete SQ without waiting for a CQE, and returns each buffer and caller tag
+  from `drain_owned`. The event loop drains CQEs at iteration boundaries,
+  restores a partial or `EAGAIN` suffix ahead of any newer reply, retains a
+  closing client until its owned bytes complete, and never mixes writer-pool,
+  borrowed-ring, or owned-ring lifetimes. Both Cargo feature
+  `io-uring-writes` and runtime flag `--io-uring-output` remain default-off.
+- **Soundness and behavior proof.** The crate's only unsafe operation remains
+  the private all-or-nothing `SubmissionQueue::push_multiple`; every pointed-to
+  allocation stays owned by a fixed slot until its unique CQE, and `Drop`
+  synchronously drains outstanding slots. A final source review caught that a
+  successful `io_uring_enter` may consume only an SQ prefix; the final code
+  loops until all published entries are kernel-owned and aborts on an
+  unrecoverable post-publication error. The authoritative measurement below
+  used that corrected ELF. Fourteen real-ring tests cover capacity and
+  validation refusal, arbitrary completion tags, partial cursors, closed peers,
+  saturated sockets, borrowed/owned exclusion, source-FD close after submit,
+  synchronous-cancel races, and drop-time drain. Two server tests prove
+  old-before-new reply ordering and deferred close. The harness black-boxed
+  requests and verified the exact RESP reply for all **6.4 million operations
+  per arm** before admitting timing.
+- **Quality gates.** Strict-remote `fr-uring` tests passed **14/14**. The
+  feature-enabled `frankenredis` binary passed **223/223** tests, including both
+  async CQ lifecycle tests. `fr-conformance` passed **194/194** library tests,
+  every auxiliary target, and **99/99** smoke/integration tests. Strict-remote
+  workspace all-target `cargo check`, feature-target `cargo check`, workspace
+  `-D warnings` Clippy, and feature-target `-D warnings` Clippy all passed.
+  Direct `rustfmt --check`, `git diff --check`, the 40-case ledger preflight
+  self-test, and Cargo-disabled UBS also passed.
+- **Profile attribution.** The exact P1 SET candidate profile on
+  `vmi1227854` (Linux 6.17.0-35) recorded approximately 2,000 `cycles` samples,
+  **9,940,121,018 cycles**, and zero lost samples. Owned submit plus drain held
+  **0.61% self-time** (`submit_owned` 0.46%, `drain_owned` 0.15%);
+  `drain_uring_completions` held another 0.21% and the io_uring submitter 0.10%.
+  The complete named surface was **0.92% self-time**, for a computed
+  full-elimination Amdahl ceiling of **1.009285x**. The profile artifact is
+  `/data/projects/frankenredis/.rch-tmp/fr_io_uring_submission_ab_1907834_1785194247241839574/io_uring_profile.data`
+  on that worker, SHA-256
+  **`185a72e3dcf13266839fca6fbb47f77c408a338d5c5dcebb652d33665b69a793`**.
+- **Counted mechanism.** A separate current-ELF P1 SET counter window on the
+  same worker completed **434,233 operations** in three seconds while recording
+  **274,713 `io_uring_enter` calls**, or **0.632639620 submissions/op**. Direct
+  `sendto` and `write` syscall counts were both zero. Thus the final async path
+  really batches submissions; the competitive verdict still comes solely from
+  the null-controlled decision run below.
+- **One-invocation A/A+A/B+incumbent decision.** One top-level invocation ran
+  two identical mio controls, the same FrankenRedis ELF with the io_uring flag,
+  and live vendored Redis through all 24 four-arm permutations in every sample.
+  It used 32 samples, 200,000 SET operations per arm/sample, 50 clients,
+  pipeline 1, and 25-group within-sample interleaving on worker
+  `vmi1227854`; client CPU 0 and server CPU 9 are separate physical cores.
+  The harness self-reported executing ELF SHA-256
+  **`85949ff3ae892dcf4e8116bee7a0b3086cd5e9dffb36fa15ff9c9802be90f3cc`**.
+  All three live FrankenRedis processes self-reported the same `/proc/PID/exe`
+  SHA-256
+  **`0257d1b4bfd7f597245f6df54bb26a98c1b8c96a3b27db7d8b3d17a9973035b4`**.
+  The incumbent identified itself as Redis 7.2.4 and self-reported
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+  The same-invocation A/A null median was **0.996708000x**, bootstrap
+  95% median CI **[0.990259889, 1.005608129]**, which brackets 1.0.
+
+  | decision ratio | median | bootstrap 95% median CI | verdict |
+  |---|---:|---:|---|
+  | A/A mio control/null, wall | **0.996708000x** | **[0.990259889, 1.005608129]** | valid null |
+  | mio/io_uring SELF-SPEEDUP maintenance, wall | 1.005640080x | [0.995146900, 1.016813970] | HOLD |
+  | FrankenRedis/Redis throughput | **1.074948992x** | **[1.068904021, 1.085938533]** | **KEEP** |
+  | FrankenRedis/Redis CPU efficiency | **1.063493841x** | **[1.060000000, 1.076923077]** | **KEEP** |
+
+  The wall null produced the prespecified two-radius gate
+  **[0.980519779, 1.019480221]**; the competitive CI lies wholly above it.
+  The bootstrap median-CI gate determined every verdict, never CV. Wall null
+  CV 2.241383% and competitive CV 3.116192% are provenance only. The
+  same-ELF self-speedup CI remains inside the gate, so no maintenance speedup is
+  claimed.
+- **Disposition and retry predicate.** **KEEP as COMPETITIVE campaign output.**
+  Reopen the competitive claim after changes to the owned slot registry,
+  submit/CQ lifecycle, event-loop output ordering, io-uring crate or kernel,
+  Redis incumbent, allocator, or release codegen; also rerun if a fresh
+  same-invocation FrankenRedis/Redis CI is not wholly above its A/A-derived
+  gate. Invalidate rather than compare if `/proc/PID/exe` identities differ,
+  the owned frames have zero self-time or lost samples, or any reply differs.
+  Reopen the maintenance-only mio/io_uring HOLD only if its own bootstrap CI
+  clears the same null-derived gate; it still cannot become campaign output
+  without the live incumbent arm.
+
 ## 2026-07-27 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — extend approximate-MAXLEN borrowed dispatch to exact two-field `XADD` (`frankenredis-m7hk3`)
 
 - **Claim class: COMPETITIVE. Campaign output: yes.** The campaign result is

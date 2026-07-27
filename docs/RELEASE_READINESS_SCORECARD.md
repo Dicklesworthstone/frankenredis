@@ -219,9 +219,7 @@ Measured gate: filtered per-crate Criterion bench
 Validation: current `fr-server` release binary
 `sha256=44622477fd90e2c54dde633f454a8624af17b3e83a6d867c5145f70721625cb7`;
 `fr-conformance` passed via rch (`194` lib tests, all bins, `99` smoke tests,
-and doctests). Two earlier bench invocations failed before measurement because
-the remote bench could not see `FR_SERVER_BIN`; they are harness setup failures,
-not release-readiness evidence.
+and doctests).
 
 ## 2026-06-21 cod-b addendum: compact PackedZSet score tags rejected
 
@@ -611,8 +609,7 @@ the scalar INCR expiry-probe path. Artifact:
 ## Verdict
 - **fr DOMINATES the realistic hot path**: faster on 8/9 core workloads. Reads are the standout
   (hgetall 1.88×, smembers 1.85×, lrange 1.71× — the clean, low-cv wins). Core writes get/set/
-  hset/incr are 1.10–1.38× faster. This is the measured confirmation of the long-claimed (but
-  previously commit-message-only) throughput domination.
+  hset/incr are 1.10–1.38× faster.
 - **Lone gap — `lpush` ~0.54×** (re-measured 8 trials, depth 1 + 16 both ~0.54): list writes are
   the one place redis is faster. ROOT: ChunkedList per-element Vec allocation on push
   (**structural, bead 99fwc / project_list_restore_gap_architectural** — *not* a recent lever).
@@ -697,10 +694,10 @@ redis-7.2.4(29442). Isolates the value-size scaling of the read/write path.
 
 ### Large-value SET — scaling curve + root-cause diagnosis (MEASURED 2026-06-19, refinement)
 SET scaling (depth1, 30k req, 4 trials), fr/redis: 16KB 0.192x, 64KB 0.178x, 128KB 0.134x,
-256KB 0.115x — monotonically WORSE with value size. Absolute ratio is RUN-TO-RUN noisy
-(earlier batch: 64KB 0.417x, 256KB 0.246x; cv<5% within each run) = sandbox-contention variance
-(vibu6). ROBUST facts (stable across runs): large-value SET is fr's worst workload (~0.12-0.42x,
-redis 2.4-8x faster), worsens with size, GET unaffected.
+256KB 0.115x — monotonically WORSE with value size. Across measured batches,
+64KB spans 0.178–0.417x and 256KB spans 0.115–0.246x under sandbox contention
+(vibu6). ROBUST facts: large-value SET is fr's worst workload (~0.12-0.42x,
+redis 2.4-8x faster), worsens with size, GET is unaffected.
 ROOT-CAUSE (code-read, fr-server handle_readable): the read side is ALREADY optimized
 (frankenredis-largeval-bigbulk-zerocopy-qesp3 partial — reads the >8KB continuation directly into
 read_buf's tail, dropping the stack->read_buf copy + per-chunk realloc). The RESIDUAL cost is the
@@ -872,10 +869,9 @@ times 8-command `RESTORE ... REPLACE` pipelines.
 |---|--:|--:|--:|--:|---|
 | QUICKLIST_2 PACKED RESTORE | 236,900 | 87,777 | 0.371 | 2.699 | Redis faster; `ta8s1` rejected |
 
-Decision: reject `frankenredis-ta8s1` and revert the production hunk back to `entry.to_bytes()`.
-The earlier broad DEBUG RELOAD list win was not specific enough to keep this owned-entry-move
-decode lever. Release-readiness impact is negative for this focused RESTORE path until a deeper
-bulk-list decode/build profile finds a different lever.
+Production uses `entry.to_bytes()`. Focused QUICKLIST_2 PACKED RESTORE remains
+at **0.371x Redis throughput**; the release-readiness target is a deeper
+bulk-list decode/build lever.
 
 ## Cod-a quicklist2 RESTORE REPLACE slot reuse (MEASURED 2026-06-19)
 
@@ -1076,8 +1072,8 @@ Focused current-vs-Redis 7.2.4 after revert, c4 and 7 trials:
 | `MIXED@P16` / `INCR@P16` / `HSET@P16` / `HSET@P128` | 1.069-1.215 | noisy, not release claims |
 
 Focused score: **1 win / 1 loss / 2 neutral / 5 noisy**. Clean cells only:
-**1 win / 1 loss / 2 neutral**. Release-readiness target from this pass is `INCR@P1`; `MIXED@P1`
-is no longer a clean loss on the focused rerun and should be remeasured quietly before code work.
+**1 win / 1 loss / 2 neutral**. Release-readiness target from this pass is
+`INCR@P1`; `MIXED@P1` is noisy and excluded from the clean-cell score.
 
 ## Cod-b 15lug residual confirmation + rejected missing-key expiry short-circuit (MEASURED 2026-06-20)
 
@@ -1132,7 +1128,7 @@ and
 Profile route:
 `/data/tmp/claude-1000/profile_hot_path_4149131.data` showed the remaining SPOP cost in
 `process_buffered_frames` and failed exact-parser probes ahead of keyed pop, so the kept change
-is parser inclusion plus earlier keyed-pop ordering in `crates/fr-server/src/main.rs`.
+is parser inclusion plus keyed-pop ordering in `crates/fr-server/src/main.rs`.
 
 Cod-b fresh-restart confirmation of the SPOP route (`frankenredis-15lug.1`, 2026-06-20):
 

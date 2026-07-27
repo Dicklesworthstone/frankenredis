@@ -757,9 +757,9 @@ candidate sweep, so the source hunk was reverted.
 | final SPOP-focused vs current-control, 11 trials | spop | 1.30 | confirmed keep |
 | final SPOP-focused vs Redis 7.2.4, 11 trials | spop | 1.00 | confirmed parity |
 
-SPOP is no longer a focused parity-floor loss on this gate. `LPUSH`/`RPUSH`
-remain residual list-write gaps in the Redis-relative guard and should be
-handled as a separate measured lane.
+SPOP measures **1.00–1.06x Redis** on the focused gate. `LPUSH`/`RPUSH` remain
+residual list-write gaps in the Redis-relative guard and belong to a separate
+measured lane.
 
 Scorecard impact: the focused `SPOP` parity-floor loss is cleared for the Redis C-client gate.
 The remaining measured P16/c50 residual in this lane is list push, especially `LPUSH`, not SPOP.
@@ -1160,11 +1160,11 @@ dispatch path** (`lib.rs:16217`, the entire long tail + writes) still did
 Fix: added `chained_command_start_pre()` (adjacency `prev_seq == seq`, since the
 generic path reads the clock BEFORE the command increments
 `stat_total_commands_processed`, vs the fast paths' post-increment `+1`) and
-routed the generic path through it + `finish_chained_command`. Reuses the prior
-command's end-instant as this command's start → **1 clock read/cmd**. Also fixes
-a latent chain break (generic commands previously left `last_command_end` stale,
-forcing the next fast-path command to re-read). Robust to a command incrementing
-the counter by !=1 (recorded post-count always equals the next pre-count).
+routed the generic path through it + `finish_chained_command`. It reuses the
+prior command's end-instant as this command's start and keeps
+`last_command_end` current for the next fast-path command: **1 clock read/cmd**.
+The adjacency check remains robust when a command increments the counter by
+more than one because the recorded post-count equals the next pre-count.
 
 Correctness: `cargo test -p fr-runtime --lib commandstat` (7) + `histogram` (1) +
 `-p fr-server process_buffered_frames` (4, incl `uses_microsecond_clock_for_time`)

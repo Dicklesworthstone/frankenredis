@@ -35,12 +35,10 @@ default = ["mimalloc"]
 # A 2026-07-25 `perf trace -s` census at `-P1 -c50` found one `sendto` per
 # operation (229,740 calls = 47.4% of wall time) while a single `epoll_wait`
 # already reports ~48 ready connections. This feature defers those per-connection
-# writes to the end of the event-loop iteration and submits them as ONE
-# `io_uring_enter`. Vendored Redis 7.2.4 measures the same shape (one `write` per
-# op, 44.8% of wall) and its per-client write loop cannot batch this way. The
-# experiment tests that structural opening; the synchronous implementation's
-# measured REJECT and asynchronous-only retry predicate are recorded in
-# docs/NEGATIVE_EVIDENCE.md (2026-07-26).
+# writes to the end of the event-loop iteration and submits them as one SQ
+# publication. Owned reply buffers stay registered until asynchronous CQ drain.
+# Vendored Redis 7.2.4 measures the same shape (one `write` per op, 44.8% of
+# wall) and its per-client write loop cannot batch this way.
 #
 # Explicitly NOT a pipelined-throughput lever: at `-P16` the same census measures
 # 0.13-0.16 syscalls/op for both engines because a whole batch already coalesces

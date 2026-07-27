@@ -7,9 +7,8 @@ edition = "2024"
 # It is the single audited unsafe boundary for io_uring submission, so that
 # `fr-server` (which does forbid it) can batch socket writes without relaxing
 # its own guarantee. The entire unsafe surface is one all-or-nothing
-# `sq.push_multiple` call in `BatchWriter::submit_chunk`, with its soundness
-# argument written out on
-# `send_batch` and covered by the tests in this crate.
+# `sq.push_multiple` call in the private `push_entries` helper. Its borrowed and
+# owned callers carry separate soundness arguments and real-ring tests.
 
 [dependencies]
 io-uring = "0.7.13"

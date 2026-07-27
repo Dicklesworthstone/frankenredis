@@ -28,6 +28,123 @@ Every new KEEP declares exactly one class:
 modified entries in both ledger files. It also preserves the ELF self-report,
 A/A bootstrap median-CI, never-CV, counted-mechanism, and retry-predicate gates.
 
+## 2026-07-27 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — asynchronous owned-buffer `io_uring` CQ batching leads live Redis on P1 SET (`frankenredis-zwd0m`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes.** The result that counts is
+  FrankenRedis/Redis throughput against the actual vendored Redis 7.2.4 server
+  running as a live arm in the same invocation. Candidate versus the unchanged
+  FrankenRedis mio path is SELF-SPEEDUP maintenance evidence only; it is a HOLD,
+  not a campaign claim.
+- **Prior row and exact reopening predicate.** Ledger/preflight searches for
+  `io_uring`, `submission batching`, `send_batch`, `submit_owned`, and CQ
+  draining were completed before source work, and each match was adjudicated
+  manually. The controlling 2026-07-26 VALID-AB row counted a real mechanism
+  (1.000 SEND submission/op became 0.176/op) but rejected the synchronous
+  `submit_and_wait` design at 0.919263265x mio/io_uring wall, an 8.78%
+  regression. It permitted a retry only after an owned in-flight reply-buffer
+  registry made CQ draining asynchronous across event-loop iterations with
+  lifetime, close, and cancellation invariants tested. That is exactly this
+  design. The P16 and writev rows remain closed because an already-coalesced
+  pipeline is a different surface.
+- **Implementation and lifetime proof.** `BatchWriter` now owns a fixed registry
+  of reply buffers. `submit_owned` validates the entire batch, moves each
+  `Vec<u8>` into its slot before constructing the SQE, publishes with the
+  crate's one private `push_multiple` unsafe boundary, consumes the full SQ
+  without waiting for CQEs, and returns buffers plus stable caller tags only
+  after completion. The final review fixed a subtle partial-publication case:
+  `io_uring_enter` may report a successfully consumed SQ prefix, so the
+  authoritative code loops until every published entry is kernel-owned and
+  fail-closes on a non-recoverable post-publication error. `Drop` waits for and
+  drains every outstanding CQE before slots can release their allocations.
+  Borrowed sends are refused while any owned send is in flight.
+- **Server isomorphism.** At iteration boundaries, the server drains arbitrary
+  CQ order by token. A full write reclaims the old allocation; a partial write
+  or `EAGAIN` restores the old unsent suffix before bytes produced after
+  submission; a failed write follows the existing close path. Writer-pool and
+  ring ownership are mutually exclusive. A closing client remains registered
+  while ring-owned bytes are outstanding, so its socket FD cannot be reused
+  before all SQEs are consumed and completed. Both compile feature
+  `io-uring-writes` and runtime flag `--io-uring-output` remain default-off.
+- **Behavior evidence.** Fourteen strict-remote real-ring tests passed,
+  including queue capacity/validation preservation, completion-tag identity,
+  partial cursor, closed peer, saturated socket, borrowed/owned exclusion,
+  closing the source FD after submit, a synchronous-cancel race, and writer drop
+  with an in-flight buffer. Two feature-gated server tests passed for
+  old-before-new reply ordering and closing-client retention. The decision
+  harness black-boxed input and result and checked each fixed SET reply against
+  its exact RESP oracle: 32 samples x 200,000 operations = **6.4 million
+  verified replies per arm**, 25.6 million across the four arms.
+- **Quality gates.** Strict-remote `fr-uring` tests passed **14/14**. The
+  feature-enabled `frankenredis` binary passed **223/223** tests, including both
+  async CQ lifecycle tests. `fr-conformance` passed **194/194** library tests,
+  every auxiliary target, and **99/99** smoke/integration tests. Strict-remote
+  workspace all-target `cargo check`, feature-target `cargo check`, workspace
+  `-D warnings` Clippy, and feature-target `-D warnings` Clippy all passed.
+  Direct `rustfmt --check`, `git diff --check`, the 40-case ledger preflight
+  self-test, and Cargo-disabled UBS also passed.
+- **Profile-verified target and ceiling.** Worker `vmi1227854`, kernel
+  6.17.0-35, provided `perf` and enabled io_uring. The exact final candidate
+  profile recorded approximately 2,000 `cycles` samples,
+  **9,940,121,018 cycles**, and zero lost samples.
+  `<fr_uring::BatchWriter>::submit_owned` held 0.46% self-time,
+  `drain_owned` 0.15%, `frankenredis::drain_uring_completions` 0.21%, and the
+  io_uring submitter 0.10%. Owned operations therefore held **0.61%**, while
+  the complete named surface held **0.92%**, giving a computed
+  full-elimination Amdahl ceiling of **1.009285x**. The remote artifact
+  `/data/projects/frankenredis/.rch-tmp/fr_io_uring_submission_ab_1907834_1785194247241839574/io_uring_profile.data`
+  has SHA-256
+  **`185a72e3dcf13266839fca6fbb47f77c408a338d5c5dcebb652d33665b69a793`**.
+- **Counted current mechanism.** A separate P1 SET `perf stat` window used the
+  exact final server ELF and flag on the same worker. Across **434,233 SET
+  operations** it counted **274,713 `sys_enter_io_uring_enter` events**
+  (**0.632639620 submissions/op**) and zero `sys_enter_sendto` or
+  `sys_enter_write` events. This is counted proof that the final path batches
+  submission rather than merely appearing in a sampled profile; it is not a
+  substitute for the same-invocation competitive timing gate.
+- **Executing provenance.** Before profiling or timing, the harness
+  self-reported its executing ELF SHA-256
+  **`85949ff3ae892dcf4e8116bee7a0b3086cd5e9dffb36fa15ff9c9802be90f3cc`**.
+  The two mio controls and io_uring candidate each self-reported the identical
+  live `/proc/PID/exe` SHA-256
+  **`0257d1b4bfd7f597245f6df54bb26a98c1b8c96a3b27db7d8b3d17a9973035b4`**.
+  The side-by-side incumbent printed Redis server v=7.2.4 and self-reported
+  SHA-256
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+- **Same-invocation decision.** One top-level strict-remote invocation ran all
+  four live processes on worker `vmi1227854`. Client CPU 0 and server CPU 9
+  were distinct physical cores and quiet at admission. Every sample ran all 24
+  four-arm permutations, physically swapped the two control identities, and
+  interleaved after 25 groups. The workload was SET, pipeline 1, 50 clients,
+  32 samples, and 200,000 operations per arm/sample.
+  The same-invocation A/A null median was **0.996708000x**, bootstrap
+  95% median CI **[0.990259889, 1.005608129]**, which brackets 1.0.
+
+  | ratio | median | bootstrap 95% median CI | 2x-null verdict |
+  |---|---:|---:|---|
+  | wall A/A control/null | **0.996708000x** | **[0.990259889, 1.005608129]** | valid |
+  | wall mio/io_uring SELF-SPEEDUP maintenance | 1.005640080x | [0.995146900, 1.016813970] | HOLD |
+  | CPU mio/io_uring SELF-SPEEDUP maintenance | 1.007757257x | [1.000000000, 1.017029583] | HOLD |
+  | FrankenRedis/Redis throughput | **1.074948992x** | **[1.068904021, 1.085938533]** | **KEEP** |
+  | FrankenRedis/Redis CPU efficiency | **1.063493841x** | **[1.060000000, 1.076923077]** | **KEEP** |
+
+  Wall A/A yielded gate **[0.980519779, 1.019480221]**; CPU A/A median
+  1.000000000 and CI [0.989826482, 1.000000000] yielded gate
+  [0.979652964, 1.020347036]. Both live-incumbent CIs lie wholly above their
+  gates. Both same-ELF maintenance CIs remain inside them. The bootstrap
+  median-CI gate determined every verdict, never CV. CV was provenance only:
+  wall null/competitive 2.241383%/3.116192% and CPU
+  null/competitive 1.630481%/2.866122%.
+- **Disposition and concrete retry predicate.** **KEEP as COMPETITIVE campaign
+  output.** Re-run after changes to the owned registry, complete-SQ publication,
+  CQ lifecycle, event-loop output ordering, `io-uring`, kernel, allocator,
+  release codegen, or the vendored Redis incumbent. Reopen this exact claim if
+  a fresh same-invocation FrankenRedis/Redis bootstrap CI is not wholly above
+  its A/A-derived gate. Invalidate rather than compare when the three
+  FrankenRedis `/proc/PID/exe` hashes differ, the owned target frames have zero
+  self-time or lost samples, or any RESP reply diverges. The maintenance-only
+  mio/io_uring HOLD may be retried only when its own CI clears the null gate,
+  but it cannot count as campaign output without a live incumbent arm.
+
 ## 2026-07-26 NobleOsprey (cod/MEASURE): REJECT (VALID-AB) — synchronous io_uring cross-connection SEND batching removes submissions but makes P1 SET 8.78% slower (`frankenredis-ev947`, `frankenredis-mpc9m`)
 
 - **Negative-ledger-first / retry predicate admitted.** Before implementation, both ledgers were
