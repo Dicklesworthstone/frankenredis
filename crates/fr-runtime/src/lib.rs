@@ -11519,31 +11519,38 @@ impl Runtime {
     }
 
     /// Borrowed fast path for bare auto-ID XADD with exactly one or two
-    /// field/value pairs and no NOMKSTREAM/MAXLEN/MINID. Mirrors the generic
-    /// handler's happy path by reusing its helpers verbatim — so the auto-id and
-    /// reply are byte-identical: `store.xlast_id_no_stat` (write-lookup, no
-    /// keyspace_hits bump) → `fr_command::next_auto_stream_id` → `store.xadd`
-    /// (which bumps dirty once + maintains the last_id/entries_added side-maps) →
-    /// reply `fr_command::format_stream_id(id)`.
+    /// field/value pairs, plus the exact one-field NOMKSTREAM form. Mirrors the
+    /// generic handler's happy path by reusing its helpers verbatim — so the
+    /// auto-id and reply are byte-identical:
+    /// `store.xlast_id[_with_existence]_no_stat` (write-lookup, no keyspace_hits
+    /// bump) → `fr_command::next_auto_stream_id` → `store.xadd` (which bumps
+    /// dirty once + maintains the last_id/entries_added side-maps) → reply
+    /// `fr_command::format_stream_id(id)`. NOMKSTREAM on a missing key returns
+    /// the same nil reply without creating the stream.
     ///
     /// DEFERS (None → generic, exact error/behavior) on: any other field count,
     /// id != "*", a wrongtype/lookup error, id-space exhaustion, or any disabling
     /// state (notify/repl/AOF/etc via the default-write-gate). Exact-arity server
-    /// parsers ensure option-bearing and explicit-ID forms never reach here.
+    /// parsers ensure unsupported option-bearing and explicit-ID forms never
+    /// reach here.
     pub fn execute_plain_xadd_borrowed(
         &mut self,
         key: &[u8],
+        nomkstream_arg: Option<&[u8]>,
         id_arg: &[u8],
         borrowed_fields: &[(&[u8], &[u8])],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        if !(1..=2).contains(&borrowed_fields.len()) {
+        let nomkstream = nomkstream_arg.is_some();
+        if !(1..=2).contains(&borrowed_fields.len()) || (nomkstream && borrowed_fields.len() != 1) {
             return None;
         }
-        let array_len = 3 + borrowed_fields.len() * 2;
-        if id_arg != b"*"
+        let array_len = 3 + usize::from(nomkstream) + borrowed_fields.len() * 2;
+        if nomkstream_arg.is_some_and(|arg| !arg.eq_ignore_ascii_case(b"NOMKSTREAM"))
+            || id_arg != b"*"
             || self.policy.gate.max_array_len < array_len
             || self.policy.gate.max_bulk_len < b"XADD".len()
+            || nomkstream_arg.is_some_and(|arg| arg.len() > self.policy.gate.max_bulk_len)
             || key.len() > self.policy.gate.max_bulk_len
             || borrowed_fields.iter().any(|(field, value)| {
                 field.len() > self.policy.gate.max_bulk_len
@@ -11552,11 +11559,22 @@ impl Runtime {
         {
             return None;
         }
-        // Resolve the auto-id BEFORE any state change (xlast_id_no_stat is a
-        // read-only write-lookup); bail to the generic path on a wrongtype/lookup
-        // error (exact reply) or id-space exhaustion.
-        let last_id = self.server.store.xlast_id_no_stat(key, now_ms).ok()?;
-        let id = fr_command::next_auto_stream_id(last_id, now_ms)?;
+        // Resolve existence/auto-id BEFORE any state change. These are read-only
+        // write-lookups; bail to generic on wrongtype/lookup error or ID-space
+        // exhaustion so it remains responsible for the exact diagnostic.
+        let (stream_exists, last_id) = if nomkstream {
+            self.server
+                .store
+                .xlast_id_with_existence_no_stat(key, now_ms)
+                .ok()?
+        } else {
+            (true, self.server.store.xlast_id_no_stat(key, now_ms).ok()?)
+        };
+        let id = if stream_exists {
+            Some(fr_command::next_auto_stream_id(last_id, now_ms)?)
+        } else {
+            None
+        };
         if !self.plain_borrowed_default_key_write_allows(now_ms) {
             return None;
         }
@@ -11570,6 +11588,7 @@ impl Runtime {
         self.session.last_command_name.push_str("xadd");
         self.session.last_argv_len_sum = b"XADD".len()
             + key.len()
+            + nomkstream_arg.map_or(0, <[u8]>::len)
             + id_arg.len()
             + borrowed_fields
                 .iter()
@@ -11582,20 +11601,28 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        let fields: Vec<(Vec<u8>, Vec<u8>)> = borrowed_fields
-            .iter()
-            .map(|&(field, value)| (field.to_vec(), value.to_vec()))
-            .collect();
-        let reply = match self.server.store.xadd(key, id, &fields, now_ms) {
-            Ok(()) => RespFrame::BulkString(Some(fr_command::format_stream_id(id))),
-            Err(err) => CommandError::Store(err).to_resp(),
+        let reply = if let Some(id) = id {
+            let fields: Vec<(Vec<u8>, Vec<u8>)> = borrowed_fields
+                .iter()
+                .map(|&(field, value)| (field.to_vec(), value.to_vec()))
+                .collect();
+            match self.server.store.xadd(key, id, &fields, now_ms) {
+                Ok(()) => RespFrame::BulkString(Some(fr_command::format_stream_id(id))),
+                Err(err) => CommandError::Store(err).to_resp(),
+            }
+        } else {
+            RespFrame::BulkString(None)
         };
         let elapsed_us = self.finish_chained_command(start);
         let failed = matches!(reply, RespFrame::Error(_));
 
         self.record_plain_xadd_borrowed_metrics(
             || {
-                let mut argv = vec![b"XADD".to_vec(), key.to_vec(), b"*".to_vec()];
+                let mut argv = vec![b"XADD".to_vec(), key.to_vec()];
+                if let Some(arg) = nomkstream_arg {
+                    argv.push(arg.to_vec());
+                }
+                argv.push(b"*".to_vec());
                 for &(field, value) in borrowed_fields {
                     argv.extend([field.to_vec(), value.to_vec()]);
                 }
@@ -49230,6 +49257,7 @@ mod tests {
             let fast_reply = fast
                 .execute_plain_xadd_borrowed(
                     b"s",
+                    None,
                     b"*",
                     &[(b"first", b"value-1"), (b"second", b"value-2")],
                     now_ms,
@@ -49269,13 +49297,14 @@ mod tests {
         let mut deferred = Runtime::default_strict();
         assert!(
             deferred
-                .execute_plain_xadd_borrowed(b"s", b"*", &[], 1)
+                .execute_plain_xadd_borrowed(b"s", None, b"*", &[], 1)
                 .is_none()
         );
         assert!(
             deferred
                 .execute_plain_xadd_borrowed(
                     b"s",
+                    None,
                     b"*",
                     &[(b"a", b"1"), (b"b", b"2"), (b"c", b"3")],
                     1,
@@ -49285,6 +49314,112 @@ mod tests {
         assert_eq!(
             deferred.execute_frame(command(&[b"XLEN", b"s"]), 2),
             RespFrame::Integer(0)
+        );
+    }
+
+    #[test]
+    fn plain_xadd_nomkstream_borrowed_matches_generic() {
+        let mut fast = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+
+        let missing_fast = fast
+            .execute_plain_xadd_borrowed(
+                b"s",
+                Some(b"NoMkStReAm"),
+                b"*",
+                &[(b"field", b"value")],
+                1,
+            )
+            .expect("exact NOMKSTREAM form uses borrowed path");
+        let missing_generic = generic.execute_frame(
+            command(&[b"XADD", b"s", b"NoMkStReAm", b"*", b"field", b"value"]),
+            1,
+        );
+        assert_eq!(missing_fast, RespFrame::BulkString(None));
+        assert_eq!(missing_fast, missing_generic);
+        assert_eq!(fast.server.store.dirty, generic.server.store.dirty);
+
+        for runtime in [&mut fast, &mut generic] {
+            assert_eq!(
+                runtime.execute_frame(command(&[b"XADD", b"s", b"1000-0", b"seed", b"value"]), 2,),
+                RespFrame::BulkString(Some(b"1000-0".to_vec()))
+            );
+        }
+
+        for now_ms in 3..=66 {
+            let fast_reply = fast
+                .execute_plain_xadd_borrowed(
+                    b"s",
+                    Some(b"NOMKSTREAM"),
+                    b"*",
+                    &[(b"field", b"value")],
+                    now_ms,
+                )
+                .expect("existing-stream NOMKSTREAM uses borrowed path");
+            let generic_reply = generic.execute_frame(
+                command(&[b"XADD", b"s", b"NOMKSTREAM", b"*", b"field", b"value"]),
+                now_ms,
+            );
+            assert_eq!(fast_reply, generic_reply, "append now_ms={now_ms}");
+        }
+
+        for query in [
+            &[b"XLEN".as_slice(), b"s".as_slice()][..],
+            &[
+                b"XRANGE".as_slice(),
+                b"s".as_slice(),
+                b"-".as_slice(),
+                b"+".as_slice(),
+            ][..],
+            &[b"XINFO".as_slice(), b"STREAM".as_slice(), b"s".as_slice()][..],
+        ] {
+            assert_eq!(
+                fast.execute_frame(command(query), 100),
+                generic.execute_frame(command(query), 100),
+                "query={query:?}",
+            );
+        }
+        assert_eq!(fast.server.store.dirty, generic.server.store.dirty);
+        assert_eq!(
+            fast.server.store.stat_total_commands_processed,
+            generic.server.store.stat_total_commands_processed
+        );
+
+        let mut deferred = Runtime::default_strict();
+        deferred.execute_frame(command(&[b"SET", b"s", b"not-a-stream"]), 1);
+        assert!(
+            deferred
+                .execute_plain_xadd_borrowed(
+                    b"s",
+                    Some(b"NOMKSTREAM"),
+                    b"*",
+                    &[(b"field", b"value")],
+                    2,
+                )
+                .is_none(),
+            "wrongtype remains the generic path's diagnostic",
+        );
+        assert!(
+            deferred
+                .execute_plain_xadd_borrowed(
+                    b"other",
+                    Some(b"NOT-NOMKSTREAM"),
+                    b"*",
+                    &[(b"field", b"value")],
+                    3,
+                )
+                .is_none()
+        );
+        assert!(
+            deferred
+                .execute_plain_xadd_borrowed(
+                    b"other",
+                    Some(b"NOMKSTREAM"),
+                    b"*",
+                    &[(b"a", b"1"), (b"b", b"2")],
+                    4,
+                )
+                .is_none()
         );
     }
 

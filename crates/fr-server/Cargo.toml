@@ -66,6 +66,10 @@ perf-ab-xadd-limit-floor = []
 # The control process sets FR_PERF_AB_XADD_TWO_FIELDS_FLOOR_ORIG=1; production
 # builds compile only the candidate classification.
 perf-ab-xadd-two-fields-floor = []
+# Measurement-only control arm for the exact one-field XADD NOMKSTREAM floor.
+# The control process sets FR_PERF_AB_XADD_NOMKSTREAM_FLOOR_ORIG=1; production
+# builds compile only the candidate classification.
+perf-ab-xadd-nomkstream-floor = []
 # Measurement-only control arm for the one-binary XADD MINID approximate
 # no-op guard. The control process sets FR_PERF_AB_XTRIM_MINID_NOOP_ORIG=1;
 # production builds compile only the candidate path.

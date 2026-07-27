@@ -33,6 +33,131 @@ Redis arm and numeric ratio; a SELF-SPEEDUP needs the heading label and cannot
 mark itself as campaign output. Missing or contradictory classification exits
 **8**.
 
+## 2026-07-27 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — exact borrowed dispatch for one-field `XADD NOMKSTREAM` (`frankenredis-0tl03`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes.** This is a measured
+  FrankenRedis/Redis throughput win against the actual vendored Redis 7.2.4
+  incumbent, run side-by-side in the same invocation. The much larger
+  candidate/control result is recorded only as a SELF-SPEEDUP maintenance
+  result and is not the competitive claim.
+- **Ledger-first admission.** Before proposing the lever, both negative ledgers
+  and `perf_candidate_preflight.py` were searched for `XADD`, `NOMKSTREAM`,
+  `execute_plain_xadd_borrowed`, and the exact six-element parser surface. Four
+  hits were read by hand: the new two-field row explicitly defers NOMKSTREAM,
+  the bounded-XADD row calls it a separate surface, the older one-field
+  bare-XADD row explicitly excludes it, and the `arg4` parser match belongs to
+  an unrelated sorted-set row. The current MINID scout had already established
+  this exact workload as a distinct incumbent loss at **0.423831315x Redis**,
+  bootstrap 95% median CI **[0.420833352, 0.428569002]**, with an A/A null CI
+  **[0.992246264, 1.031824742]**. Those predicates admitted only a current exact
+  profile before editing.
+- **Exact pre-profile and Amdahl ceiling.** The pre-seeded steady-state workload
+  was `XADD xs NOMKSTREAM * f v`, not the missing-key nil path. The production
+  source was HEAD `d019160cd1e9ceea93b3b53b7ed04d355e5d57fe`; the executing
+  FrankenRedis ELF self-reported SHA-256
+  **`d6c96b9ee3b4482fd2ee4890688a9b98b49323098770b8456ef8083ca7ca77fd`**.
+  The profile recorded 18,000 samples and 61.946 billion cycles with zero lost
+  samples and is stored at
+  `/tmp/frankenredis-xadd-nomkstream-control-d019160cd-20260727T1712.perf.data`
+  with SHA-256
+  **`a5ed59ca6946d352c4d8f5b2c0a630ba67c5c1fe31423d1445a1e38452a64a2a`**.
+  `process_buffered_frames` held **18.46% self-time** (single-frame Amdahl
+  ceiling **1.2264x**) and `__memcmp_avx2_movbe` held **14.52%**
+  (**1.1699x**); together the missed classifier/parser surface held **32.98%**
+  (**1.4921x**). The generic route was present by name:
+  `execute_frame_internal` 1.63%, `fr_command::xadd` 1.44%, the command table
+  1.43%, argument-3 parsing 1.23%, `dispatch_with_client_context` 1.15%,
+  `parse_command_args_borrowed_into` 1.02%, the classifier 0.93%, argv scratch
+  copying 0.73%, and argument-4 parsing 0.64%. The exact workload therefore
+  traversed the intended path with non-zero self-time before any edit.
+- **One lever and behavior-preservation proof.** The server now classifies only
+  the exact six-element `XADD key NOMKSTREAM * field value` packet and passes
+  its borrowed slices to the existing plain XADD runtime path. The path uses
+  the generic handler's exact helpers and ordering:
+  `xlast_id_with_existence_no_stat` → `next_auto_stream_id` → `Store::xadd` →
+  `format_stream_id`. A missing stream returns the same nil bulk reply without
+  creation; an existing stream preserves last-ID, entries-added, dirty-count,
+  command-accounting, expiry, slowlog, latency, and propagation machinery.
+  Wrongtype, a non-NOMKSTREAM token, explicit IDs, multiple field/value pairs,
+  and every option combination defer before mutation to generic dispatch for
+  the exact diagnostic. Production compiles the candidate classification as a
+  constant; the environment-controlled control arm exists only in the
+  measurement feature.
+- **Behavior and quality gates.** A focused runtime test compared missing-key
+  nil/no-create behavior and 64 existing-stream appends against generic
+  dispatch at identical timestamps, then compared XLEN, XRANGE, XINFO STREAM,
+  dirty count, and total-command accounting. It also proved wrongtype, invalid
+  keyword, and two-field NOMKSTREAM deferral. The exact-token server
+  classifier/parser test passed. The live `stream_id_trim_differ.py` gate now
+  checks existing-stream NOMKSTREAM auto-ID and resulting XRANGE state while
+  retaining its missing-key nil/no-create check; the complete stream ID and
+  trim suite passed byte-for-byte against vendored Redis 7.2.4. Direct rustfmt
+  and Python syntax checks, strict-remote workspace check, and strict-remote
+  workspace clippy with `-D warnings` passed. Strict-remote `fr-conformance`
+  passed **194/194** library tests, all auxiliary targets, **217/217** live
+  stream-oracle cases, **99/99** smoke tests, and doc-tests.
+- **Short valid retry, then decision run.** The first same-invocation
+  24-permutation run, `xadd-nomkstream-competitive-283779-1785187413`, used
+  30,000 requests per arm. Its A/A null median was **1.000000000000** with
+  bootstrap 95% median CI **[0.977941107689, 1.015151559141]**, yielding gate
+  **[0.955882215377, 1.044117784623]**. Candidate/control was
+  **2.762967794057x** [2.639999968320, 2.812500028125], but
+  FrankenRedis/Redis was **0.969583327458x**
+  [0.923076896000, 0.979591904000], which intersects that null-derived gate.
+  This was a valid **INDETERMINATE**, not a reject. The admissible next action
+  was a longer otherwise-identical same-invocation run to amortize startup
+  transients; the decision run below executed it immediately.
+- **One-binary A/A+A/B+incumbent decision measurement.** One top-level same
+  invocation, `xadd-nomkstream-competitive-long-289459-1785187518`, ran
+  control, control-null, candidate, and the live vendored Redis 7.2.4 server
+  through all 24 arm permutations. Each server ran in turn on logical CPU 31 /
+  physical core 31; the client ran on logical CPU 29 / physical core 29. Each
+  arm pre-seeded `XADD xs 1000-0 seed value`, then executed 120,000 requests of
+  `XADD xs NOMKSTREAM * f v` at 50 clients and pipeline 16 and finished at XLEN
+  120,001. Control, control-null, and candidate all self-reported the same
+  executing FrankenRedis ELF SHA-256
+  **`4285f4e959248955f0c7da5bf1f044268edfc521f3e36bc3b9e7c60e1fec1953`**
+  via `/proc/PID/exe`. The live Redis arm reported
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**,
+  and redis-benchmark was
+  **`8931ebb4de7ea5ae700bf4cf866ad246535743496318ad4e19b46af1c58d7a0b`**.
+
+  | arm / ratio | median | bootstrap 95% median CI |
+  |---|---:|---:|
+  | control throughput | 257,515.485 ops/s | — |
+  | control-null throughput | 256,410.270 ops/s | — |
+  | candidate throughput | 944,881.880 ops/s | — |
+  | live Redis throughput | 670,391.060 ops/s | — |
+  | A/A null | **1.001061606701x** | **[0.987179576519, 1.006535991245]** |
+  | candidate/control SELF-SPEEDUP maintenance | **3.650928887591x** | **[3.606299225220, 3.692913483997]** |
+  | FrankenRedis/Redis competitive ratio | **1.401574774885x** | **[1.381679397603, 1.422561585923]** |
+  | control/Redis | 0.386684198447x | [0.382653388719, 0.388286338425] |
+
+  The same-invocation A/A null median was **1.001061606701** and its bootstrap
+  95% median CI was **[0.987179576519, 1.006535991245]**, which brackets 1.0.
+  Twice its radius produced the decision gate
+  **[0.974359153038, 1.025640846962]**. The candidate/Redis competitive CI lies
+  wholly above that gate, so this is a campaign KEEP. Candidate/control is a
+  SELF-SPEEDUP maintenance result only. Arm and ratio CVs are provenance only
+  (control 1.2828%, null 1.8515%, candidate 6.2464%, Redis 1.7063%); the
+  bootstrap median-CI gate determined the verdict, never CV.
+- **Post-profile and disposition.** The exact candidate profile self-reported
+  the decision ELF above, recorded 5,000 samples and 8.690 billion cycles with
+  zero lost samples, and is stored at
+  `/tmp/frankenredis-xadd-nomkstream-candidate-4285f4e9-20260727T1725.perf.data`
+  with SHA-256
+  **`a046793e4cfc4367f753132a01e13f4a5215ca10de0c466b4e541039d0382d88`**.
+  The new `execute_plain_xadd_borrowed` frame held **5.90% self-time**, proving
+  the measured workload traversed the edited path. `process_buffered_frames`
+  fell to **4.80%** (remaining ceiling **1.0504x**); the former generic parser
+  and dispatch frames were absent above 0.01%, except
+  `execute_frame_internal` at 0.02%. **KEEP as COMPETITIVE campaign output.**
+  Retry predicate: reopen this exact existing-stream, one-field, auto-ID
+  NOMKSTREAM route only if a fresh same-invocation FrankenRedis/Redis bootstrap
+  median CI lies wholly below its A/A-derived gate, or if the live NOMKSTREAM
+  stream differential fails. Treat missing-key-heavy mixes, multiple fields,
+  and every additional XADD option combination as distinct profiled surfaces.
+
 ## 2026-07-27 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — exact borrowed dispatch for bare two-field `XADD` (`frankenredis-azqyj`)
 
 - **Claim class: COMPETITIVE. Campaign output: yes.** This is a measured
