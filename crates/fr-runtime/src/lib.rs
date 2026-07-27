@@ -11657,16 +11657,18 @@ impl Runtime {
         Some(reply)
     }
 
-    /// Borrowed fast path for the steady-state stream shape used in production:
-    /// `XADD key MAXLEN ~ N [LIMIT M] * field value`. It shares the exact
-    /// approximate MAXLEN trim helper with the generic handler, but skips the
-    /// failed exact-arity parser cascade, owned argv copy, and generic router.
+    /// Borrowed fast path for steady-state approximate stream bounds:
+    /// `XADD key MAXLEN ~ N * field value`,
+    /// `XADD key MAXLEN ~ N LIMIT M * field value`, and
+    /// `XADD key MAXLEN ~ N * field1 value1 field2 value2`.
+    /// It shares the exact approximate MAXLEN trim helper with the generic
+    /// handler, but skips the failed exact-arity parser cascade, owned argv
+    /// copy, and generic router.
     ///
-    /// Only the common one-field, auto-ID, approximate form, optionally with a
-    /// non-negative LIMIT, is served. Every malformed value, alternate option
-    /// form, explicit ID, disabling runtime state, or lookup failure returns
-    /// `None` before mutation and is reprocessed by generic dispatch for exact
-    /// diagnostics.
+    /// Only one or two field/value pairs are served; LIMIT remains one-field
+    /// only. Every malformed value, alternate option form, explicit ID,
+    /// disabling runtime state, or lookup failure returns `None` before
+    /// mutation and is reprocessed by generic dispatch for exact diagnostics.
     #[allow(clippy::too_many_arguments)]
     pub fn execute_plain_xadd_maxlen_approx_borrowed(
         &mut self,
@@ -11677,14 +11679,20 @@ impl Runtime {
         limit_keyword: Option<&[u8]>,
         limit_arg: Option<&[u8]>,
         id_arg: &[u8],
-        field: &[u8],
-        value: &[u8],
+        borrowed_fields: &[(&[u8], &[u8])],
         now_ms: u64,
     ) -> Option<RespFrame> {
         if limit_keyword.is_some() != limit_arg.is_some() {
             return None;
         }
-        let array_len = if limit_keyword.is_some() { 10 } else { 8 };
+        let limit_present = limit_keyword.is_some();
+        if !matches!(
+            (borrowed_fields.len(), limit_present),
+            (1, false) | (1, true) | (2, false)
+        ) {
+            return None;
+        }
+        let array_len = 6 + borrowed_fields.len() * 2 + usize::from(limit_present) * 2;
         if self.policy.gate.max_array_len < array_len
             || self.policy.gate.max_bulk_len < b"XADD".len()
             || !maxlen_keyword.eq_ignore_ascii_case(b"MAXLEN")
@@ -11692,17 +11700,13 @@ impl Runtime {
             || id_arg != b"*"
             || limit_keyword.is_some_and(|arg| arg.len() > self.policy.gate.max_bulk_len)
             || limit_arg.is_some_and(|arg| arg.len() > self.policy.gate.max_bulk_len)
-            || [
-                key,
-                maxlen_keyword,
-                approx_keyword,
-                threshold_arg,
-                id_arg,
-                field,
-                value,
-            ]
-            .into_iter()
-            .any(|arg| arg.len() > self.policy.gate.max_bulk_len)
+            || [key, maxlen_keyword, approx_keyword, threshold_arg, id_arg]
+                .into_iter()
+                .any(|arg| arg.len() > self.policy.gate.max_bulk_len)
+            || borrowed_fields.iter().any(|(field, value)| {
+                field.len() > self.policy.gate.max_bulk_len
+                    || value.len() > self.policy.gate.max_bulk_len
+            })
         {
             return None;
         }
@@ -11749,8 +11753,10 @@ impl Runtime {
             + limit_keyword.map_or(0, <[u8]>::len)
             + limit_arg.map_or(0, <[u8]>::len)
             + id_arg.len()
-            + field.len()
-            + value.len();
+            + borrowed_fields
+                .iter()
+                .map(|(field, value)| field.len() + value.len())
+                .sum::<usize>();
         let packet_id = next_packet_id();
 
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
@@ -11758,7 +11764,10 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
 
         let start = self.chained_command_start();
-        let fields: Vec<(Vec<u8>, Vec<u8>)> = vec![(field.to_vec(), value.to_vec())];
+        let fields: Vec<(Vec<u8>, Vec<u8>)> = borrowed_fields
+            .iter()
+            .map(|&(field, value)| (field.to_vec(), value.to_vec()))
+            .collect();
         let reply = match self.server.store.xadd(key, id, &fields, now_ms) {
             Ok(()) => {
                 // Inline trimming removes entries but, like upstream XADD, must
@@ -11795,7 +11804,10 @@ impl Runtime {
                     argv.push(keyword.to_vec());
                     argv.push(arg.to_vec());
                 }
-                argv.extend([id_arg.to_vec(), field.to_vec(), value.to_vec()]);
+                argv.push(id_arg.to_vec());
+                for &(field, value) in borrowed_fields {
+                    argv.extend([field.to_vec(), value.to_vec()]);
+                }
                 argv
             },
             elapsed_us,
@@ -49186,8 +49198,7 @@ mod tests {
                     Some(b"LIMIT"),
                     Some(b"100"),
                     b"*",
-                    b"field",
-                    b"value",
+                    &[(b"field", b"value")],
                     now_ms,
                 )
                 .expect("valid LIMIT-bearing XADD uses borrowed path");
@@ -49236,8 +49247,99 @@ mod tests {
                     Some(b"LIMIT"),
                     Some(b"-1"),
                     b"*",
-                    b"field",
-                    b"value",
+                    &[(b"field", b"value")],
+                    1,
+                )
+                .is_none()
+        );
+        assert_eq!(
+            deferred.execute_frame(command(&[b"XLEN", b"s"]), 2),
+            RespFrame::Integer(0)
+        );
+    }
+
+    #[test]
+    fn plain_xadd_maxlen_two_fields_borrowed_matches_generic() {
+        let mut fast = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+
+        // Cross stream-node boundaries so approximate trimming performs real
+        // removal while every retained entry carries both field/value pairs.
+        for now_ms in 1..=250 {
+            let fast_reply = fast
+                .execute_plain_xadd_maxlen_approx_borrowed(
+                    b"s",
+                    b"MAXLEN",
+                    b"~",
+                    b"100",
+                    None,
+                    None,
+                    b"*",
+                    &[(b"first", b"value-1"), (b"second", b"value-2")],
+                    now_ms,
+                )
+                .expect("valid two-field bounded XADD uses borrowed path");
+            let generic_reply = generic.execute_frame(
+                command(&[
+                    b"XADD", b"s", b"MAXLEN", b"~", b"100", b"*", b"first", b"value-1", b"second",
+                    b"value-2",
+                ]),
+                now_ms,
+            );
+            assert_eq!(fast_reply, generic_reply, "append now_ms={now_ms}");
+        }
+
+        for query in [
+            &[b"XLEN".as_slice(), b"s".as_slice()][..],
+            &[
+                b"XRANGE".as_slice(),
+                b"s".as_slice(),
+                b"-".as_slice(),
+                b"+".as_slice(),
+            ][..],
+            &[b"XINFO".as_slice(), b"STREAM".as_slice(), b"s".as_slice()][..],
+        ] {
+            assert_eq!(
+                fast.execute_frame(command(query), 300),
+                generic.execute_frame(command(query), 300),
+                "query={query:?}",
+            );
+        }
+        assert_eq!(fast.server.store.dirty, generic.server.store.dirty);
+        assert_eq!(
+            fast.server.store.stat_total_commands_processed,
+            generic.server.store.stat_total_commands_processed
+        );
+
+        // LIMIT plus two pairs and three pairs without LIMIT are outside the
+        // exact admitted shapes and must defer before changing state.
+        let mut deferred = Runtime::default_strict();
+        assert!(
+            deferred
+                .execute_plain_xadd_maxlen_approx_borrowed(
+                    b"s",
+                    b"MAXLEN",
+                    b"~",
+                    b"100",
+                    Some(b"LIMIT"),
+                    Some(b"100"),
+                    b"*",
+                    &[(b"a", b"1"), (b"b", b"2")],
+                    1,
+                )
+                .is_none()
+        );
+        assert!(
+            deferred
+                .execute_plain_xadd_maxlen_approx_borrowed(
+                    b"s",
+                    b"MAXLEN",
+                    b"~",
+                    b"100",
+                    None,
+                    None,
+                    b"*",
+                    &[(b"a", b"1"), (b"b", b"2"), (b"c", b"3")],
                     1,
                 )
                 .is_none()

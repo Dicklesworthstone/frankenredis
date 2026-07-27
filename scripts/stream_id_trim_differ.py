@@ -71,6 +71,11 @@ def run_differ(od, fr):
     each("DEL","ml2")
     for i in range(1,21): each("XADD","ml2","MAXLEN","~",str(5),f"{i}-0","f","v")
     chk("xlen_maxlen_approx","XLEN","ml2")
+    each("DEL","ml2_fields")
+    for _ in range(250):
+        chk_auto_ids("xadd_maxlen_approx_two_fields","XADD","ml2_fields","MAXLEN","~","100","*","f1","v1","f2","v2")
+    chk("xlen_maxlen_approx_two_fields","XLEN","ml2_fields")
+    chk_auto_ids("xrange_maxlen_approx_two_fields","XRANGE","ml2_fields","-","+")
     each("DEL","ml_limit")
     for _ in range(250): each("XADD","ml_limit","MAXLEN","~","100","LIMIT","100","*","f","v")
     chk("xlen_maxlen_approx_limit100","XLEN","ml_limit")

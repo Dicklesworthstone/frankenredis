@@ -62,6 +62,10 @@ perf-ab-lpos-floor = []
 # The control process sets FR_PERF_AB_XADD_LIMIT_FLOOR_ORIG=1; production builds
 # do not compile the environment-controlled bypass.
 perf-ab-xadd-limit-floor = []
+# Measurement-only control arm for the exact two-field XADD MAXLEN approximate
+# floor. The control process sets FR_PERF_AB_XADD_MAXLEN_TWO_FIELDS_FLOOR_ORIG=1;
+# production builds compile only the candidate parser branch.
+perf-ab-xadd-maxlen-two-fields-floor = []
 # Measurement-only control arm for the exact two-field bare XADD dispatch floor.
 # The control process sets FR_PERF_AB_XADD_TWO_FIELDS_FLOOR_ORIG=1; production
 # builds compile only the candidate classification.

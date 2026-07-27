@@ -12902,6 +12902,26 @@ const fn xadd_limit_floor_enabled() -> bool {
     true
 }
 
+/// Preserve the exact pre-lever ten-element parser fallback in the measurement
+/// ELF while leaving the already-shipped one-field LIMIT path enabled.
+#[cfg(feature = "perf-ab-xadd-maxlen-two-fields-floor")]
+#[inline]
+fn xadd_maxlen_two_fields_floor_enabled() -> bool {
+    static ORIG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    !*ORIG.get_or_init(
+        || match std::env::var("FR_PERF_AB_XADD_MAXLEN_TWO_FIELDS_FLOOR_ORIG") {
+            Ok(value) => value == "1",
+            Err(_) => false,
+        },
+    )
+}
+
+#[cfg(not(feature = "perf-ab-xadd-maxlen-two-fields-floor"))]
+#[inline(always)]
+const fn xadd_maxlen_two_fields_floor_enabled() -> bool {
+    true
+}
+
 /// Preserve the exact pre-lever classification in the measurement ELF. Each
 /// benchmark arm launches that ELF in a fresh process and selects the control
 /// before its first packet is classified.
@@ -13362,7 +13382,13 @@ fn try_dispatch_floor_classified_action(
         BorrowedDispatchFloorClass::XaddMaxlenApprox => {
             if let Some(packet) =
                 parse_borrowed_plain_xadd_maxlen_approx_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_xadd_maxlen_approx_borrowed(
+            {
+                let second_pair = packet
+                    .second_pair
+                    .unwrap_or((b"".as_slice(), b"".as_slice()));
+                let fields = [(packet.field, packet.value), second_pair];
+                let field_count = 1 + usize::from(packet.second_pair.is_some());
+                if let Some(response) = runtime.execute_plain_xadd_maxlen_approx_borrowed(
                     packet.key,
                     packet.maxlen_keyword,
                     packet.approx_keyword,
@@ -13370,15 +13396,23 @@ fn try_dispatch_floor_classified_action(
                     packet.limit_keyword,
                     packet.limit,
                     packet.id,
-                    packet.field,
-                    packet.value,
+                    &fields[..field_count],
                     ts,
-                )
-            {
-                Ok(BorrowedMultibulkAction::FastReply {
-                    consumed: packet.consumed,
-                    response,
-                })
+                ) {
+                    Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: packet.consumed,
+                        response,
+                    })
+                } else {
+                    parse_borrowed_multibulk_action(
+                        unparsed,
+                        parser_config,
+                        runtime,
+                        ts,
+                        out,
+                        argv_scratch,
+                    )
+                }
             } else {
                 // The arity/command classifier is intentionally cheap. Any
                 // alternate XADD option shape or malformed argument goes
@@ -17303,8 +17337,9 @@ fn parse_borrowed_plain_key_arg5_packet<'a>(
     })
 }
 
-/// Fixed borrowed parser for the steady-state stream append:
-/// `XADD key MAXLEN ~ N [LIMIT M] * field value`.
+/// Fixed borrowed parser for steady-state approximate stream bounds:
+/// `XADD key MAXLEN ~ N [LIMIT M] * field value`, plus the exact
+/// `XADD key MAXLEN ~ N * field1 value1 field2 value2` form.
 ///
 /// The parser only establishes the command/arity and borrows the arguments.
 /// The runtime validates the option tokens, threshold, and optional limit; on
@@ -17320,6 +17355,7 @@ struct BorrowedPlainXaddMaxlenApproxPacket<'a> {
     id: &'a [u8],
     field: &'a [u8],
     value: &'a [u8],
+    second_pair: Option<(&'a [u8], &'a [u8])>,
 }
 
 fn parse_borrowed_plain_xadd_maxlen_approx_packet<'a>(
@@ -17329,7 +17365,7 @@ fn parse_borrowed_plain_xadd_maxlen_approx_packet<'a>(
     if config.max_array_len < 8 || config.max_bulk_len < b"XADD".len() {
         return None;
     }
-    let (prefix, has_limit) = if input.starts_with(b"*8\r\n$4\r\n") {
+    let (prefix, extended) = if input.starts_with(b"*8\r\n$4\r\n") {
         (b"*8\r\n$4\r\n".as_slice(), false)
     } else if config.max_array_len >= 10 && input.starts_with(b"*10\r\n$4\r\n") {
         (b"*10\r\n$4\r\n".as_slice(), true)
@@ -17349,17 +17385,22 @@ fn parse_borrowed_plain_xadd_maxlen_approx_packet<'a>(
     let (maxlen_keyword, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     let (approx_keyword, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     let (threshold, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
-    let (limit_keyword, limit, next) = if has_limit {
-        let (limit_keyword, next) =
-            parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
-        let (limit, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
-        (Some(limit_keyword), Some(limit), next)
+    let (a, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (b, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (c, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (limit_keyword, limit, id, field, value, second_pair, consumed) = if extended {
+        let (d, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+        let (e, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+        if a.eq_ignore_ascii_case(b"LIMIT") {
+            (Some(a), Some(b), c, d, e, None, consumed)
+        } else if xadd_maxlen_two_fields_floor_enabled() {
+            (None, None, a, b, c, Some((d, e)), consumed)
+        } else {
+            return None;
+        }
     } else {
-        (None, None, next)
+        (None, None, a, b, c, None, next)
     };
-    let (id, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
-    let (field, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
-    let (value, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     Some(BorrowedPlainXaddMaxlenApproxPacket {
         consumed,
         key,
@@ -17371,6 +17412,7 @@ fn parse_borrowed_plain_xadd_maxlen_approx_packet<'a>(
         id,
         field,
         value,
+        second_pair,
     })
 }
 
@@ -31382,6 +31424,7 @@ mod tests {
         assert_eq!(packet.id, b"*");
         assert_eq!(packet.field, b"f");
         assert_eq!(packet.value, b"v");
+        assert_eq!(packet.second_pair, None);
         let xadd_maxlen_limit =
             b"*10\r\n$4\r\nxAdD\r\n$1\r\ns\r\n$6\r\nMaXlEn\r\n$1\r\n~\r\n$4\r\n1000\r\n$5\r\nLiMiT\r\n$3\r\n100\r\n$1\r\n*\r\n$1\r\nf\r\n$1\r\nv\r\n";
         assert_eq!(
@@ -31400,6 +31443,32 @@ mod tests {
         assert_eq!(packet.id, b"*");
         assert_eq!(packet.field, b"f");
         assert_eq!(packet.value, b"v");
+        assert_eq!(packet.second_pair, None);
+        let xadd_maxlen_two_fields =
+            b"*10\r\n$4\r\nxAdD\r\n$1\r\ns\r\n$6\r\nMaXlEn\r\n$1\r\n~\r\n$4\r\n1000\r\n$1\r\n*\r\n$2\r\nf1\r\n$2\r\nv1\r\n$2\r\nf2\r\n$2\r\nv2\r\n";
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(xadd_maxlen_two_fields, &cfg),
+            Some(super::BorrowedDispatchFloorClass::XaddMaxlenApprox)
+        );
+        let packet =
+            super::parse_borrowed_plain_xadd_maxlen_approx_packet(xadd_maxlen_two_fields, &cfg)
+                .expect("two-field bounded XADD packet parses");
+        assert_eq!(packet.consumed, xadd_maxlen_two_fields.len());
+        assert_eq!(packet.key, b"s");
+        assert_eq!(packet.maxlen_keyword, b"MaXlEn");
+        assert_eq!(packet.approx_keyword, b"~");
+        assert_eq!(packet.threshold, b"1000");
+        assert_eq!(packet.limit_keyword, None);
+        assert_eq!(packet.limit, None);
+        assert_eq!(packet.id, b"*");
+        assert_eq!(
+            (packet.field, packet.value),
+            (b"f1".as_slice(), b"v1".as_slice())
+        );
+        assert_eq!(
+            packet.second_pair,
+            Some((b"f2".as_slice(), b"v2".as_slice()))
+        );
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(
                 b"*5\r\n$4\r\nXADD\r\n$1\r\ns\r\n$1\r\n*\r\n$1\r\nf\r\n$1\r\nv\r\n",

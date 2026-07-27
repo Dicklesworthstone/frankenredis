@@ -33,6 +33,127 @@ Redis arm and numeric ratio; a SELF-SPEEDUP needs the heading label and cannot
 mark itself as campaign output. Missing or contradictory classification exits
 **8**.
 
+## 2026-07-27 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — extend approximate-MAXLEN borrowed dispatch to exact two-field `XADD` (`frankenredis-m7hk3`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes.** The campaign result is
+  the measured FrankenRedis/Redis throughput ratio against the actual vendored
+  Redis 7.2.4 server run side-by-side in the same invocation. The larger
+  candidate/control result below is a SELF-SPEEDUP maintenance measurement
+  only, not the competitive claim.
+- **Ledger-first admission and valid retry.** Before proposing the lever,
+  `perf_candidate_preflight.py` and both negative ledgers were searched for
+  `XADD xs MAXLEN`, the ten-element parser, and the approximate-trim surface.
+  Three hits were read by hand. The controlling row was the prior scout of this
+  exact `XADD xs MAXLEN ~ 1000 * f1 v1 f2 v2` shape: its old point estimate was
+  0.935x Redis, but it was `BLOCKED_NULL_BIAS` because the old A/A interval did
+  not bracket 1.0. The current-v2 matrix required a fresh same-ELF A/A, exact
+  profile, named frame, and Amdahl ceiling; the remaining hit was an unrelated
+  INCR meta-lever row.
+- **Current-ELF loss clears the old null blocker.** One top-level invocation,
+  `xadd-maxlen-two-field-scout-379135-1785188739402024214`, ran control,
+  identical control-null, and live vendored Redis through all six arm
+  permutations, repeated eight times (48 rounds). Each arm pre-seeded
+  `XADD xs 1000-0 seed value`, then executed 120,000 requests of
+  `XADD xs MAXLEN ~ 1000 * f1 v1 f2 v2` at 50 clients and pipeline 16; every
+  arm finished at XLEN 1,001. Control and null self-reported executing ELF
+  SHA-256
+  **`4285f4e959248955f0c7da5bf1f044268edfc521f3e36bc3b9e7c60e1fec1953`**;
+  Redis reported
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+  Control, null, and Redis medians were 476,190.47, 478,087.69, and
+  550,458.75 ops/s. The A/A median was **0.997999990538x**, bootstrap 95%
+  median CI **[0.988142044365, 1.011952287624]**, which brackets 1.0 and
+  yields the median-CI gate **[0.976095424753, 1.023904575247]**.
+  FrankenRedis/Redis was **0.866641994565x**, bootstrap 95% median CI
+  **[0.863367978517, 0.874267198518]**, a valid incumbent loss wholly below
+  that gate.
+- **Exact pre-profile and ceiling.** Before editing source at HEAD
+  `1f3cb3d23104060979758d28dfe89f6239f0e776`, the exact workload above
+  self-reported the same control ELF. Its profile is
+  `/tmp/frankenredis-xadd-maxlen-two-field-control-4285f4e9-20260727T1746.perf.data`,
+  SHA-256
+  **`306b059e9be5e8a01a72acb29be694d1445bd7f3b93f8ac6f0e7458a8854cef2`**:
+  10,426 samples, 44.006711362 billion cycles, zero lost. The workload really
+  traversed the target surface: `execute_frame_internal` held 3.59% self-time,
+  `fr_command::xadd` 3.06%, generic dispatch 2.20%, borrowed argv parsing
+  2.02%, argv copying 1.14%, and the failed specialized approximate-MAXLEN
+  parser 1.16%. That attributable **14.11%** gives a full-removal Amdahl
+  ceiling of **1.1643x**, enough to explain the 1.1539x gap to incumbent
+  parity.
+- **One lever and isomorphism proof.** The fixed borrowed parser now
+  disambiguates the existing ten-element one-field `LIMIT` form first and the
+  exact two-field/no-LIMIT form second. Production compiles the candidate
+  branch as a constant; the environment bypass exists only in the measurement
+  feature. The runtime admits exactly one pair with or without LIMIT, or two
+  pairs without LIMIT. Arity, token, policy, integer, lookup, auto-ID, and
+  default-write gates all execute before mutation; every alternate option,
+  explicit ID, malformed value, LIMIT-plus-two-pair form, and three-or-more
+  pair form defers to generic dispatch. The admitted form calls the same
+  `Store::xadd`, `apply_xadd_maxlen_trim_after_add`, reply formatting,
+  command-accounting, dirty-count, expiry, propagation, latency, and slowlog
+  machinery as the existing one-field borrowed route.
+- **Behavior proof.** A focused runtime test performed 250 paired fast/generic
+  appends across actual stream-node removals and compared every reply, XLEN,
+  XRANGE, XINFO STREAM, dirty count, and total-command accounting. It also
+  proves LIMIT-plus-two-pair and three-pair forms defer without state change.
+  Parser/classifier tests cover one-field, one-field LIMIT, and exact two-field
+  packet identity. The expanded live `stream_id_trim_differ.py` performed 250
+  two-field approximate-MAXLEN appends and compared normalized auto IDs, final
+  XLEN, and full XRANGE against Redis byte-for-byte; the entire stream gate
+  passed with the candidate and Redis `/proc/PID/exe` hashes above.
+- **One-binary A/A+A/B+incumbent decision measurement.** One top-level same
+  invocation, `xadd-maxlen-two-field-decision-440166-1785189637679325344`,
+  ran control, identical control-null, candidate, and the live vendored Redis
+  7.2.4 server through all 24 balanced arm permutations. Servers ran on CPU 31
+  and redis-benchmark on CPU 29. Each arm used the same pre-seed and exact
+  120,000-request workload as the scout, at 50 clients and pipeline 16, and
+  finished at XLEN 1,001. All three FrankenRedis arms self-reported the same
+  executing ELF SHA-256
+  **`70e1361bf1f1de6ea428563dc11bc14616197e306cf0de3ce0e50244ee603a63`**;
+  live Redis reported
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**
+  and redis-benchmark was
+  **`8931ebb4de7ea5ae700bf4cf866ad246535743496318ad4e19b46af1c58d7a0b`**.
+
+  | arm / ratio | median | bootstrap 95% median CI |
+  |---|---:|---:|
+  | control throughput | 466,926.06 ops/s | — |
+  | control-null throughput | 464,218.39 ops/s | — |
+  | candidate throughput | 781,767.28 ops/s | — |
+  | live Redis throughput | 545,454.56 ops/s | — |
+  | A/A control/null | **1.005832750400x** | **[0.980582394856, 1.013721688191]** |
+  | candidate/control SELF-SPEEDUP maintenance | **1.674284960664x** | **[1.651613033703, 1.717526309306]** |
+  | FrankenRedis/Redis competitive ratio | **1.433239975114x** | **[1.407774227583, 1.450650407326]** |
+  | control/Redis | 0.856031087173x | [0.832109526826, 0.863281171441] |
+
+  The A/A bootstrap median CI brackets 1.0. Twice its maximum displacement
+  from 1.0 produced the decision gate
+  **[0.961164789712, 1.038835210288]**. The candidate/live-Redis CI lies wholly
+  above that gate, so this is a competitive campaign KEEP. The
+  candidate/control CI is recorded only as SELF-SPEEDUP maintenance evidence.
+  CVs (control 2.8282%, null 2.8356%, candidate 1.9575%, Redis 1.5001%) are
+  provenance only: the verdict was gated on the bootstrap median CI, never CV.
+- **Post-profile, quality gates, and disposition.** The exact candidate
+  workload self-reported the decision ELF above and finished at XLEN 1,001.
+  Its profile is
+  `/tmp/frankenredis-xadd-maxlen-two-field-candidate-70e1361b-20260727T1804.perf.data`,
+  SHA-256
+  **`2e56103e8e9d6ad97fcb75db6b2fec735fbd5f2fe7e8fb3ac370fd831d88048c`**:
+  7,213 samples, 14.200024693 billion cycles, zero lost. The new
+  `execute_plain_xadd_maxlen_approx_borrowed` frame held **4.36% self-time**
+  and its exact parser held **2.15%**; `PackedStreamLog::remove` held 8.09%,
+  proving both the edited route and real trimming mechanism executed. Direct
+  rustfmt and Python syntax checks, strict-remote workspace check, and
+  strict-remote workspace clippy with `-D warnings` passed. Strict-remote
+  `fr-conformance` passed **194/194** library tests, every auxiliary target,
+  **217/217** live stream-oracle cases, **99/99** smoke tests, and doc-tests.
+  **KEEP as COMPETITIVE campaign output.** Retry predicate: reopen this exact
+  two-field/no-LIMIT approximate-MAXLEN shape only if a fresh same-invocation
+  FrankenRedis/Redis bootstrap median CI lies wholly below its A/A-derived
+  gate, or if the 250-append live stream differential diverges. Treat LIMIT
+  plus multiple fields, other trim modes, and additional field counts as
+  distinct profile-first surfaces.
+
 ## 2026-07-27 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — exact borrowed dispatch for one-field `XADD NOMKSTREAM` (`frankenredis-0tl03`)
 
 - **Claim class: COMPETITIVE. Campaign output: yes.** This is a measured
