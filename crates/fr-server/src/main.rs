@@ -33087,7 +33087,6 @@ mod tests {
     #[test]
     fn client_pause_releases_deferred_command_after_deadline() {
         use mio::{Poll, Token};
-        use std::collections::{HashMap, HashSet};
         use std::io::Read as _;
         use std::time::Duration;
 
@@ -33199,7 +33198,6 @@ mod tests {
     fn xread_blocked_client_unblocks_when_xadd_marks_stream_ready() {
         use crate::ClientConnection;
         use mio::{Poll, Token};
-        use std::collections::{HashMap, HashSet};
         use std::net::{TcpListener, TcpStream};
 
         let mut runtime = Runtime::default_strict();
@@ -33324,7 +33322,6 @@ mod tests {
     fn xreadgroup_blocked_client_unblocks_when_xadd_marks_stream_ready() {
         use crate::ClientConnection;
         use mio::{Poll, Token};
-        use std::collections::{HashMap, HashSet};
         use std::net::{TcpListener, TcpStream};
 
         let mut runtime = Runtime::default_strict();
@@ -33539,7 +33536,6 @@ mod tests {
         use crate::ClientConnection;
         use fr_runtime::Runtime;
         use mio::Token;
-        use std::collections::HashSet;
         use std::net::{TcpListener, TcpStream};
 
         let mut runtime = Runtime::default_strict();
@@ -33599,7 +33595,6 @@ mod tests {
         use fr_protocol::RespFrame;
         use fr_runtime::Runtime;
         use mio::Token;
-        use std::collections::{HashMap, HashSet};
         use std::net::{TcpListener, TcpStream};
 
         let mut runtime = Runtime::default_strict();
@@ -33697,7 +33692,6 @@ mod tests {
         use fr_protocol::RespFrame;
         use fr_runtime::Runtime;
         use mio::Token;
-        use std::collections::{HashMap, HashSet};
         use std::net::{TcpListener, TcpStream};
 
         let mut primary = Runtime::default_strict();
@@ -33856,7 +33850,6 @@ mod tests {
         use crate::ClientConnection;
         use fr_runtime::Runtime;
         use mio::Token;
-        use std::collections::HashSet;
         use std::net::{TcpListener, TcpStream};
 
         let mut runtime = Runtime::default_strict();
@@ -33927,7 +33920,6 @@ mod tests {
         use crate::ClientConnection;
         use fr_runtime::Runtime;
         use mio::Token;
-        use std::collections::HashSet;
         use std::net::{TcpListener, TcpStream};
 
         let mut runtime = Runtime::default_strict();
@@ -33984,7 +33976,6 @@ mod tests {
         use fr_protocol::RespFrame;
         use fr_runtime::Runtime;
         use mio::Token;
-        use std::collections::HashSet;
         use std::net::{TcpListener, TcpStream};
 
         fn frame(parts: &[&[u8]]) -> RespFrame {
@@ -34052,7 +34043,6 @@ mod tests {
         use fr_protocol::RespFrame;
         use fr_runtime::Runtime;
         use mio::Token;
-        use std::collections::HashSet;
         use std::net::{TcpListener, TcpStream};
 
         fn frame(parts: &[&[u8]]) -> RespFrame {
@@ -34118,7 +34108,6 @@ mod tests {
         use crate::ClientConnection;
         use fr_runtime::Runtime;
         use mio::Token;
-        use std::collections::HashSet;
         use std::net::{TcpListener, TcpStream};
 
         let mut runtime = Runtime::default_strict();
@@ -34182,7 +34171,6 @@ mod tests {
         use crate::ClientConnection;
         use fr_runtime::Runtime;
         use mio::Token;
-        use std::collections::HashSet;
         use std::net::{TcpListener, TcpStream};
 
         let mut runtime = Runtime::default_strict();
@@ -34234,7 +34222,6 @@ mod tests {
         use crate::ClientConnection;
         use fr_runtime::Runtime;
         use mio::Token;
-        use std::collections::HashSet;
         use std::net::{TcpListener, TcpStream};
 
         let mut runtime = Runtime::default_strict();
@@ -34302,7 +34289,6 @@ mod tests {
         use crate::ClientConnection;
         use fr_runtime::Runtime;
         use mio::Token;
-        use std::collections::HashSet;
         use std::net::{TcpListener, TcpStream};
 
         let mut runtime = Runtime::default_strict();
@@ -34382,7 +34368,6 @@ mod tests {
         use crate::ClientConnection;
         use fr_runtime::Runtime;
         use mio::Token;
-        use std::collections::HashSet;
         use std::net::{TcpListener, TcpStream};
 
         let mut runtime = Runtime::default_strict();
@@ -34427,7 +34412,6 @@ mod tests {
         use crate::ClientConnection;
         use fr_runtime::Runtime;
         use mio::Token;
-        use std::collections::HashSet;
         use std::net::{TcpListener, TcpStream};
 
         let mut runtime = Runtime::default_strict();
@@ -34470,7 +34454,7 @@ mod tests {
     fn client_unblock_error_mode_unblocks_blocked_connection() {
         use crate::{BlockedState, BlockingOp, ClientConnection};
         use mio::{Poll, Token};
-        use std::collections::{HashMap, HashSet};
+        use std::collections::HashMap;
         use std::net::{TcpListener, TcpStream};
 
         let mut runtime = Runtime::default_strict();
@@ -34664,7 +34648,7 @@ mod tests {
     fn client_unblock_tracks_paused_tokens_for_pipelined_commands() {
         use crate::{BlockedState, BlockingOp, ClientConnection};
         use mio::{Poll, Token};
-        use std::collections::{HashMap, HashSet};
+        use std::collections::HashMap;
         use std::net::{TcpListener, TcpStream};
 
         let mut runtime = Runtime::default_strict();
@@ -34788,7 +34772,6 @@ mod tests {
     fn blocked_client_timeout_tracks_paused_tokens_for_pipelined_commands() {
         use crate::{BlockedState, BlockingOp, ClientConnection};
         use mio::{Poll, Token};
-        use std::collections::{HashMap, HashSet};
         use std::net::{TcpListener, TcpStream};
 
         let mut runtime = Runtime::default_strict();

@@ -3539,10 +3539,6 @@ impl LuaGlobals {
                 .filter(|(key, _)| !self.overlay.contains_key(key.as_str())),
         )
     }
-
-    fn values(&self) -> impl Iterator<Item = &LuaValue> {
-        self.iter().map(|(_, value)| value)
-    }
 }
 
 impl<'a> IntoIterator for &'a LuaGlobals {
@@ -13598,12 +13594,11 @@ impl<'a> JsonParser<'a> {
         // the nearest f64, ties-to-even — but skips dec2flt, which a perf-record put at ~13% of
         // cjson.decode. The `i != 0` guard preserves -0.0 for the "-0" token (i64 parse drops the
         // sign), and an i64 overflow on a huge integer simply falls through to the float parser.
-        if is_integer {
-            if let Ok(i) = text.parse::<i64>() {
-                if i != 0 {
-                    return Ok(i as f64);
-                }
-            }
+        if is_integer
+            && let Ok(i) = text.parse::<i64>()
+            && i != 0
+        {
+            return Ok(i as f64);
         }
         text.parse::<f64>().map_err(|_| {
             format!(

@@ -13391,8 +13391,8 @@ impl Store {
             // rather than an incorrect incremental XOR. Clean removals (DEL / expiry of a
             // non-empty entry, string values) keep the fast incremental path.
             let mutated_to_empty = match &entry.value {
-                Value::Hash(h) => h.len() == 0,
-                Value::List(l) => l.len() == 0,
+                Value::Hash(h) => h.is_empty(),
+                Value::List(l) => l.is_empty(),
                 Value::Set(s) => s.is_empty(),
                 Value::SortedSet(zs) => zs.is_empty(),
                 Value::Stream(_) | Value::String(_) | Value::Integer(_) => false,

@@ -731,13 +731,12 @@ fn profile_io_uring_path(candidate: &mut Server, root: &Path, profile_seconds: u
     let mut matched = Vec::new();
     let mut max_self_pct = 0.0_f64;
     for line in report.lines() {
-        if targets.iter().any(|target| line.contains(target)) {
-            if let Some(raw_pct) = line.split_whitespace().next()
-                && let Ok(pct) = raw_pct.trim_end_matches('%').parse::<f64>()
-            {
-                max_self_pct = max_self_pct.max(pct);
-                matched.push(line.trim().to_owned());
-            }
+        if targets.iter().any(|target| line.contains(target))
+            && let Some(raw_pct) = line.split_whitespace().next()
+            && let Ok(pct) = raw_pct.trim_end_matches('%').parse::<f64>()
+        {
+            max_self_pct = max_self_pct.max(pct);
+            matched.push(line.trim().to_owned());
         }
     }
     assert!(

@@ -89,22 +89,22 @@ fn main() {
     // Single-arm mode for `perf stat -e instructions:u`: run ONE arm in a tight loop so an external
     // instruction count can compare arms directly (wallclock cannot resolve one cos/candidate).
     let arg = std::env::args().nth(1);
-    if let Some(a) = arg.as_deref() {
-        if a == "ref" || a == "cand" {
-            let hoist = a == "cand";
-            let mut acc = 0.0f64;
-            for i in 0..1_000usize {
-                let jitter = (i % 4096) as f64 * 1e-6;
-                acc += bench_geo_center_cos_distance_sum(
-                    CENTER_LON + jitter,
-                    CENTER_LAT + jitter,
-                    black_box(&cands),
-                    hoist,
-                );
-            }
-            println!("{a} checksum={:.6}", black_box(acc));
-            return;
+    if let Some(a) = arg.as_deref()
+        && (a == "ref" || a == "cand")
+    {
+        let hoist = a == "cand";
+        let mut acc = 0.0f64;
+        for i in 0..1_000usize {
+            let jitter = (i % 4096) as f64 * 1e-6;
+            acc += bench_geo_center_cos_distance_sum(
+                CENTER_LON + jitter,
+                CENTER_LAT + jitter,
+                black_box(&cands),
+                hoist,
+            );
         }
+        println!("{a} checksum={:.6}", black_box(acc));
+        return;
     }
 
     // Correctness: the two arms must be bit-identical sums.
