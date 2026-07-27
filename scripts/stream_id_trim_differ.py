@@ -7,24 +7,26 @@ stream top item"), the 0-0 special case ("must be greater than 0-0", even on an 
 stream), ms-* auto-sequence, NOMKSTREAM on a missing key (nil, no create); XSETID
 rejects a smaller ID ("smaller than the target stream top item"), accepts
 ENTRIESADDED/MAXDELETEDID, and FORCE is a syntax error in 7.2.4; MAXLEN exact trimming
-keeps the newest N, MAXLEN ~ does NOT trim below the radix-node threshold (kept count
-is deterministic for a fixed insert sequence), MINID trims by id, XTRIM MAXLEN/MINID
-return the trimmed count. (Complements stream_xinfo / stream_command_fuzz with the
-deterministic ID-error wording + trim counts.)
+keeps the newest N, MAXLEN ~ does NOT trim below the radix-node threshold, and an
+explicit LIMIT caps whole-node removal (kept counts are deterministic for a fixed
+insert sequence); MINID trims by id, XTRIM MAXLEN/MINID return the trimmed count.
+(Complements stream_xinfo / stream_command_fuzz with deterministic ID-error wording
+and trim counts.)
 
 Usage: stream_id_trim_differ.py <oracle_port> <fr_port>
        Exit 0 = byte-exact, 1 = divergence.
 """
-import socket, sys, time
-def conn(p): return socket.create_connection(("127.0.0.1",p),timeout=5)
+import socket
+import sys
+import time
+
+
 def cmd(s,*a):
     o=b"*%d\r\n"%len(a)
     for x in a: x=x if isinstance(x,bytes) else str(x).encode(); o+=b"$%d\r\n%s\r\n"%(len(x),x)
     s.sendall(o); time.sleep(0.02); return s.recv(1<<20)
-def main():
-    op=int(sys.argv[1]) if len(sys.argv)>1 else 16399
-    fp=int(sys.argv[2]) if len(sys.argv)>2 else 16400
-    od,fr=conn(op),conn(fp); fails=[]
+def run_differ(od, fr):
+    fails=[]
     def each(*c):
         for s in (od,fr): cmd(s,*c)
     def chk(label,*c):
@@ -52,6 +54,16 @@ def main():
     each("DEL","ml2")
     for i in range(1,21): each("XADD","ml2","MAXLEN","~",str(5),f"{i}-0","f","v")
     chk("xlen_maxlen_approx","XLEN","ml2")
+    each("DEL","ml_limit")
+    for _ in range(250): each("XADD","ml_limit","MAXLEN","~","100","LIMIT","100","*","f","v")
+    chk("xlen_maxlen_approx_limit100","XLEN","ml_limit")
+    each("DEL","ml_limit_small")
+    for _ in range(250): each("XADD","ml_limit_small","MAXLEN","~","100","LIMIT","50","*","f","v")
+    chk("xlen_maxlen_approx_limit50","XLEN","ml_limit_small")
+    chk("xadd_limit_negative","XADD","ml_err","MAXLEN","~","100","LIMIT","-1","*","f","v")
+    chk("xadd_limit_nonint","XADD","ml_err","MAXLEN","~","100","LIMIT","x","*","f","v")
+    chk("xadd_limit_requires_approx","XADD","ml_err","MAXLEN","=","100","LIMIT","100","*","f","v")
+    chk("xadd_limit_wrong_keyword","XADD","ml_err","MAXLEN","~","100","BOGUS","100","*","f","v")
     each("DEL","mi")
     for i in range(1,11): each("XADD","mi",f"{i}-0","f","v")
     each("XADD","mi","MINID","5","11-0","f","v")
@@ -63,5 +75,17 @@ def main():
         print(f"FAIL — {len(fails)} stream ID/trim divergence(s) vs redis 7.2.4:")
         for x in fails[:14]: print(f"  {x}")
         sys.exit(1)
-    print("PASS — stream ID-validation + trim semantics byte-exact vs redis 7.2.4 (XADD order/0-0/NOMKSTREAM, XSETID, MAXLEN exact+approx, MINID, XTRIM)")
+    print("PASS — stream ID-validation + trim semantics byte-exact vs redis 7.2.4 (XADD order/0-0/NOMKSTREAM, XSETID, MAXLEN exact+approx+LIMIT, MINID, XTRIM)")
+
+
+def main():
+    op=int(sys.argv[1]) if len(sys.argv)>1 else 16399
+    fp=int(sys.argv[2]) if len(sys.argv)>2 else 16400
+    with (
+        socket.create_connection(("127.0.0.1", op), timeout=5) as od,
+        socket.create_connection(("127.0.0.1", fp), timeout=5) as fr,
+    ):
+        run_differ(od, fr)
+
+
 if __name__=="__main__": main()

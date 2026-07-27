@@ -12768,9 +12768,12 @@ fn classify_borrowed_dispatch_floor_packet_impl<
             Some(BorrowedDispatchFloorClass::Exists(array_len - 1))
         }
         (2, BorrowedDispatchFloorCommand::Type) => Some(BorrowedDispatchFloorClass::Type),
-        // Steady-state bounded stream append:
-        // XADD key MAXLEN ~ N * field value (8 multibulk elements).
+        // Steady-state bounded stream append, with or without an explicit cap:
+        // XADD key MAXLEN ~ N [LIMIT M] * field value (8 or 10 elements).
         (8, BorrowedDispatchFloorCommand::Xadd) => {
+            Some(BorrowedDispatchFloorClass::XaddMaxlenApprox)
+        }
+        (10, BorrowedDispatchFloorCommand::Xadd) if xadd_limit_floor_enabled() => {
             Some(BorrowedDispatchFloorClass::XaddMaxlenApprox)
         }
         (2, BorrowedDispatchFloorCommand::Xlen) => Some(BorrowedDispatchFloorClass::Xlen),
@@ -12866,6 +12869,25 @@ fn lpos_floor_orig_enabled() -> bool {
         Ok(value) => value == "1",
         Err(_) => false,
     })
+}
+
+/// Keep the exact pre-lever ten-element XADD classification in the measurement
+/// ELF. Each benchmark arm launches that same ELF in a fresh process and selects
+/// the frozen control before the first packet is classified.
+#[cfg(feature = "perf-ab-xadd-limit-floor")]
+#[inline]
+fn xadd_limit_floor_enabled() -> bool {
+    static ORIG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    !*ORIG.get_or_init(|| match std::env::var("FR_PERF_AB_XADD_LIMIT_FLOOR_ORIG") {
+        Ok(value) => value == "1",
+        Err(_) => false,
+    })
+}
+
+#[cfg(not(feature = "perf-ab-xadd-limit-floor"))]
+#[inline(always)]
+const fn xadd_limit_floor_enabled() -> bool {
+    true
 }
 
 fn classify_borrowed_dispatch_floor_packet(
@@ -13233,6 +13255,8 @@ fn try_dispatch_floor_classified_action(
                     packet.maxlen_keyword,
                     packet.approx_keyword,
                     packet.threshold,
+                    packet.limit_keyword,
+                    packet.limit,
                     packet.id,
                     packet.field,
                     packet.value,
@@ -17167,18 +17191,20 @@ fn parse_borrowed_plain_key_arg5_packet<'a>(
     })
 }
 
-/// Fixed borrowed parser for the eight-element steady-state stream append:
-/// `XADD key MAXLEN ~ N * field value`.
+/// Fixed borrowed parser for the steady-state stream append:
+/// `XADD key MAXLEN ~ N [LIMIT M] * field value`.
 ///
-/// The parser only establishes the command/arity and borrows all seven
-/// arguments. The runtime validates the option tokens and numeric threshold;
-/// on any miss the dispatch floor falls directly to generic borrowed dispatch.
+/// The parser only establishes the command/arity and borrows the arguments.
+/// The runtime validates the option tokens, threshold, and optional limit; on
+/// any miss the dispatch floor falls directly to generic borrowed dispatch.
 struct BorrowedPlainXaddMaxlenApproxPacket<'a> {
     consumed: usize,
     key: &'a [u8],
     maxlen_keyword: &'a [u8],
     approx_keyword: &'a [u8],
     threshold: &'a [u8],
+    limit_keyword: Option<&'a [u8]>,
+    limit: Option<&'a [u8]>,
     id: &'a [u8],
     field: &'a [u8],
     value: &'a [u8],
@@ -17191,7 +17217,14 @@ fn parse_borrowed_plain_xadd_maxlen_approx_packet<'a>(
     if config.max_array_len < 8 || config.max_bulk_len < b"XADD".len() {
         return None;
     }
-    let mut cursor = input.strip_prefix(b"*8\r\n$4\r\n").and_then(|rest| {
+    let (prefix, has_limit) = if input.starts_with(b"*8\r\n$4\r\n") {
+        (b"*8\r\n$4\r\n".as_slice(), false)
+    } else if config.max_array_len >= 10 && input.starts_with(b"*10\r\n$4\r\n") {
+        (b"*10\r\n$4\r\n".as_slice(), true)
+    } else {
+        return None;
+    };
+    let mut cursor = input.strip_prefix(prefix).and_then(|rest| {
         rest.get(..4)
             .filter(|command| command.eq_ignore_ascii_case(b"XADD"))
             .map(|_| input.len() - rest.len() + 4)
@@ -17204,6 +17237,14 @@ fn parse_borrowed_plain_xadd_maxlen_approx_packet<'a>(
     let (maxlen_keyword, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     let (approx_keyword, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     let (threshold, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (limit_keyword, limit, next) = if has_limit {
+        let (limit_keyword, next) =
+            parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+        let (limit, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+        (Some(limit_keyword), Some(limit), next)
+    } else {
+        (None, None, next)
+    };
     let (id, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     let (field, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     let (value, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
@@ -17213,6 +17254,8 @@ fn parse_borrowed_plain_xadd_maxlen_approx_packet<'a>(
         maxlen_keyword,
         approx_keyword,
         threshold,
+        limit_keyword,
+        limit,
         id,
         field,
         value,
@@ -31222,6 +31265,26 @@ mod tests {
         assert_eq!(packet.maxlen_keyword, b"MaXlEn");
         assert_eq!(packet.approx_keyword, b"~");
         assert_eq!(packet.threshold, b"1000");
+        assert_eq!(packet.limit_keyword, None);
+        assert_eq!(packet.limit, None);
+        assert_eq!(packet.id, b"*");
+        assert_eq!(packet.field, b"f");
+        assert_eq!(packet.value, b"v");
+        let xadd_maxlen_limit =
+            b"*10\r\n$4\r\nxAdD\r\n$1\r\ns\r\n$6\r\nMaXlEn\r\n$1\r\n~\r\n$4\r\n1000\r\n$5\r\nLiMiT\r\n$3\r\n100\r\n$1\r\n*\r\n$1\r\nf\r\n$1\r\nv\r\n";
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(xadd_maxlen_limit, &cfg),
+            Some(super::BorrowedDispatchFloorClass::XaddMaxlenApprox)
+        );
+        let packet = super::parse_borrowed_plain_xadd_maxlen_approx_packet(xadd_maxlen_limit, &cfg)
+            .expect("LIMIT-bearing bounded XADD packet parses");
+        assert_eq!(packet.consumed, xadd_maxlen_limit.len());
+        assert_eq!(packet.key, b"s");
+        assert_eq!(packet.maxlen_keyword, b"MaXlEn");
+        assert_eq!(packet.approx_keyword, b"~");
+        assert_eq!(packet.threshold, b"1000");
+        assert_eq!(packet.limit_keyword, Some(b"LiMiT".as_slice()));
+        assert_eq!(packet.limit, Some(b"100".as_slice()));
         assert_eq!(packet.id, b"*");
         assert_eq!(packet.field, b"f");
         assert_eq!(packet.value, b"v");

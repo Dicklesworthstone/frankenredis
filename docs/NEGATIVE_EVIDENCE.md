@@ -4,6 +4,153 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## 2026-07-27 MossyBluff (cod/MEASURE): SURFACE — focused current-ELF `HGETALL@P128` does not reproduce an incumbent loss
+
+- **Why this cell was rerun.** The broad current-v2 matrix left
+  `hgetall@p128` indeterminate at a point estimate below Redis, so it was the
+  only standard matrix cell worth a longer focused check before switching to a
+  new workload identity. Both negative ledgers were searched first; their hash
+  representation and generic HGETALL rows require a fresh current-ELF loss and
+  exact-workload profile before another source lever.
+- **Executable and substrate.** The harness self-reported FrankenRedis server
+  ELF SHA-256
+  **`08c5782c34476f3c8566114adcd89c4b51e83b72784598eb36e581fffe4864a8`**,
+  `fr-bench` ELF SHA-256
+  **`96ec2f6db3e145257602b86941193c2d246a03eb56d68b073c875451b65b42ba`**,
+  and vendored Redis 7.2.4 ELF SHA-256
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+  One top-level invocation ran two identical FrankenRedis arms and Redis for 18
+  position-balanced rounds at 50 clients and pipeline 128.
+- **Median-CI result.** FrankenRedis/Redis throughput had median
+  **1.009208x** and bootstrap 95% median CI
+  **[1.005694129, 1.011314232]**. The in-invocation A/A null median was
+  **1.000632317**, bootstrap 95% median CI
+  **[0.998355493, 1.005291298]**, producing the two-times-null decision gate
+  **[0.989417404, 1.010582596]**. The effect overlaps that gate, so the result
+  is **INDETERMINATE**, not a loss and not a win. Effect CV was 4.86% as
+  provenance only; it never entered the decision.
+- **Concrete retry predicate.** Reopen `HGETALL@P128` only when a fresh
+  current-ELF, same-invocation run puts the entire FrankenRedis/Redis bootstrap
+  median CI below its two-times-A/A gate. Then profile that exact P128 fixture
+  and require a named target with non-zero self-time and a computed Amdahl
+  ceiling before editing.
+
+## 2026-07-27 MossyBluff (cod/MEASURE): KEEP — one-binary `XADD MAXLEN ~ … LIMIT …` borrowed dispatch closes the remaining option-shape incumbent loss (`frankenredis-dngxg`)
+
+- **Ledger-first admission.** `perf_candidate_preflight.py` and direct ledger
+  grep were run for `XADD LIMIT`, `XADD MAXLEN`, and the exact borrowed
+  dispatcher before proposing a lever. The existing eight-element
+  `XADD key MAXLEN ~ N * field value` KEEP explicitly treats LIMIT as a
+  separate workload identity and permits it only after a current-ELF result
+  below 0.90x Redis with a valid null and exact profile. This row satisfies
+  that predicate; it does not generalize to MINID, multiple fields, explicit
+  IDs, or another option order.
+- **Pre-change loss and executable provenance.** A single top-level invocation
+  ran two identical FrankenRedis arms and Redis for 18 position-balanced
+  200,000-request rounds of
+  `XADD key MAXLEN ~ 1000 LIMIT 100 * field value` at 50 clients and pipeline
+  16. The harness self-reported control server ELF SHA-256
+  **`08c5782c34476f3c8566114adcd89c4b51e83b72784598eb36e581fffe4864a8`**,
+  Redis server ELF SHA-256
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**,
+  and redis-benchmark ELF SHA-256
+  **`8931ebb4de7ea5ae700bf4cf866ad246535743496318ad4e19b46af1c58d7a0b`**.
+  FrankenRedis median throughput was 249,843.945 ops/s against Redis
+  650,408.185 ops/s. The A/A null median was **0.991945499**, bootstrap 95%
+  median CI **[0.986372290, 1.001246117]**; FrankenRedis/Redis median was
+  **0.383175433x**, bootstrap 95% median CI
+  **[0.381219715, 0.387183150]**, wholly below the median-CI decision gate
+  **[0.972744581, 1.027255419]**. Effect CV was 7.75% as provenance only,
+  never a gate.
+- **Exact pre-profile and Amdahl ceiling.** The exact control ELF produced
+  14,967 samples and 52.192 billion sampled cycles with zero lost samples.
+  Profile artifact
+  `/tmp/frankenredis-xadd-limit-a643f044.perf.data` has SHA-256
+  **`2cd14c0ba9dfe3f8342f45859d4658f818b453d92e08b5dd8e1151d105698468`**.
+  `process_buffered_frames` was **17.04% self-time**, for a maximum
+  single-frame Amdahl speedup of **1.2054x**. The failed exact-parser cascade
+  and generic route were visible around it, while
+  `Runtime::execute_frame_internal` and `fr_command::xadd` were 1.73% each and
+  `PackedStreamLog::remove` was only 1.50%. The workload therefore exercised
+  XADD and real trimming, but the dominant removable work was dispatch.
+- **One attributed lever and preservation argument.** The dispatch-floor
+  classifier now admits the exact ten-element RESP shape alongside the shipped
+  eight-element form. Its parser borrows the optional LIMIT keyword/value; the
+  runtime accepts only case-insensitive `LIMIT`, an approximate `~` MAXLEN,
+  non-negative threshold/limit, auto-ID `*`, and one field/value pair. Every
+  validation happens before mutation; alternate or malformed forms fall
+  directly to the unchanged generic route. Both routes call
+  `apply_xadd_maxlen_trim_after_add`, including Redis's `LIMIT 0` unlimited-cap
+  convention, and preserve dirty, command-stat, error, eviction, slowlog,
+  latency, and propagation accounting. A direct fast-vs-generic test compares
+  250 appends across stream-node boundaries plus XLEN, XRANGE, XINFO, dirty
+  count, and command statistics; malformed negative LIMIT defers without
+  mutation. The live differential adds LIMIT 100/50 kept-count cases and
+  negative, non-integer, non-approximate, and wrong-keyword diagnostics; all
+  replies and state matched vendored Redis byte-for-byte.
+- **One-binary A/A+A/B decision gate.** The first exploratory split-ELF result
+  was discarded from the verdict because this repository requires both arms
+  in one binary. A measurement-only feature therefore retains the exact
+  pre-lever classifier selection behind
+  `FR_PERF_AB_XADD_LIMIT_FLOOR_ORIG=1`; ordinary builds compile the candidate
+  as a constant path with no environment lookup. One top-level same invocation
+  contained A/A and A/B, using fresh processes of the exact same server ELF on
+  the same port/core for all 24 position-balanced arm permutations (50,000
+  warmup plus 200,000 measured requests per arm). The harness self-reported
+  executing server ELF SHA-256
+  **`57e8ec88f902f6917b28bf64e256a6d3b6f76f8c3f2228bf97844910f24746e2`**
+  for control, control-null, and candidate; Redis and redis-benchmark retained
+  the hashes above.
+
+  | arm / ratio | median | bootstrap 95% median CI |
+  |---|---:|---:|
+  | control throughput | 254,777.060 ops/s | — |
+  | control-null throughput | 252,684.875 ops/s | — |
+  | candidate throughput | 970,873.810 ops/s | — |
+  | Redis throughput | 560,224.120 ops/s | — |
+  | A/A null | **0.992438517x** | **[0.987368960, 1.005108535]** |
+  | candidate/control | **3.827669854x** | **[3.810679855, 3.862068886]** |
+  | candidate/Redis | **1.733027011x** | **[1.726829262, 1.755000030]** |
+  | control/Redis | 0.454490960x | [0.451080035, 0.457908183] |
+
+  For this decision run, the A/A null median was **0.992438517** and its
+  bootstrap 95% median CI was **[0.987368960, 1.005108535]**, which brackets
+  1.0. Twice `max(0.01, null-CI radius)` produced the gate
+  **[0.974737919, 1.025262081]**; both candidate CIs clear it completely. The
+  bootstrap median-CI gate determined the verdict, never CV. Ratio CVs (1.395%
+  null, 1.593% candidate/control, 1.636% candidate/Redis) are provenance only.
+- **Existing eight-element guard.** The same ELF also reran the already-shipped
+  no-LIMIT `XADD key MAXLEN ~ 1000 * field value` shape for 12
+  position-balanced rounds. Its A/A null median was **1.004999996**, bootstrap
+  95% median CI **[0.990024760, 1.012651902]**; FrankenRedis/Redis median was
+  **1.667504095x**, bootstrap 95% median CI
+  **[1.650883053, 1.770201951]**, wholly above its median-CI gate
+  **[0.974696196, 1.025303804]**. The null and effect CVs were 1.781% and
+  25.191% as provenance only; the bootstrap median-CI, never CV, determined
+  the guard verdict. Thus widening the runtime validator did not turn the
+  prior exact-shape KEEP into an incumbent loss.
+- **Same-ELF post-profile and gates.** The decision ELF itself appears in a
+  14,221-sample, 60.020-billion-cycle profile with zero lost samples; artifact
+  `/tmp/frankenredis-xadd-limit-same-elf-57e8ec88.perf.data` has SHA-256
+  **`63548206a7d6db3bbb4f75120b0a20d293ae920f05e45d88ced2094917bde727`**.
+  The changed
+  `Runtime::execute_plain_xadd_maxlen_approx_borrowed` frame is **3.84%
+  self-time** and its exact packet parser is 1.68%, proving this ELF contains
+  and executes the hunk. `process_buffered_frames` fell from 17.04% to
+  **3.93% self-time** (post Amdahl ceiling **1.0409x**); residual work moved to
+  stream-node removal/memmove rather than another failed dispatch cascade.
+  Strict-remote focused tests, feature release build, workspace check, scoped
+  Clippy, the 194-case conformance core, 217-case live stream oracle, and
+  99-case smoke suite pass.
+- **Disposition and concrete retry predicate.** **KEEP.** The exact LIMIT shape
+  moves from a valid **0.3832x** incumbent loss to a same-ELF
+  **3.8277x** candidate/control win and **1.7330x** Redis-positive result.
+  Reopen this exact ten-element route only if a fresh current-ELF,
+  same-invocation gate falls below 0.90x Redis or the differential finds a
+  behavior mismatch. Pursue a different XADD option shape or the new
+  stream-removal residual only after ledger preflight and an exact profile
+  names a distinct frame at >=5% self-time with a computed Amdahl ceiling.
+
 ## 2026-07-27 NobleOsprey (cod/MEASURE): MODEL-INTEGRITY INCIDENT RE-AUDIT — 11-commit judgment report
 
 The provider silently ran this pane below the owner-required model tier from

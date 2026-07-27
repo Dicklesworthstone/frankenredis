@@ -11621,14 +11621,15 @@ impl Runtime {
     }
 
     /// Borrowed fast path for the steady-state stream shape used in production:
-    /// `XADD key MAXLEN ~ N * field value`. It shares the exact approximate
-    /// MAXLEN trim helper with the generic handler, but skips the failed
-    /// exact-arity parser cascade, owned argv copy, and generic command router.
+    /// `XADD key MAXLEN ~ N [LIMIT M] * field value`. It shares the exact
+    /// approximate MAXLEN trim helper with the generic handler, but skips the
+    /// failed exact-arity parser cascade, owned argv copy, and generic router.
     ///
-    /// Only the common one-field, auto-ID, approximate/no-LIMIT form is served.
-    /// Every malformed value, alternate option form, explicit ID, disabling
-    /// runtime state, or lookup failure returns `None` before mutation and is
-    /// reprocessed by the generic path for byte-exact diagnostics.
+    /// Only the common one-field, auto-ID, approximate form, optionally with a
+    /// non-negative LIMIT, is served. Every malformed value, alternate option
+    /// form, explicit ID, disabling runtime state, or lookup failure returns
+    /// `None` before mutation and is reprocessed by generic dispatch for exact
+    /// diagnostics.
     #[allow(clippy::too_many_arguments)]
     pub fn execute_plain_xadd_maxlen_approx_borrowed(
         &mut self,
@@ -11636,16 +11637,24 @@ impl Runtime {
         maxlen_keyword: &[u8],
         approx_keyword: &[u8],
         threshold_arg: &[u8],
+        limit_keyword: Option<&[u8]>,
+        limit_arg: Option<&[u8]>,
         id_arg: &[u8],
         field: &[u8],
         value: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        if self.policy.gate.max_array_len < 8
+        if limit_keyword.is_some() != limit_arg.is_some() {
+            return None;
+        }
+        let array_len = if limit_keyword.is_some() { 10 } else { 8 };
+        if self.policy.gate.max_array_len < array_len
             || self.policy.gate.max_bulk_len < b"XADD".len()
             || !maxlen_keyword.eq_ignore_ascii_case(b"MAXLEN")
             || approx_keyword != b"~"
             || id_arg != b"*"
+            || limit_keyword.is_some_and(|arg| arg.len() > self.policy.gate.max_bulk_len)
+            || limit_arg.is_some_and(|arg| arg.len() > self.policy.gate.max_bulk_len)
             || [
                 key,
                 maxlen_keyword,
@@ -11664,6 +11673,21 @@ impl Runtime {
             .ok()
             .filter(|value| *value >= 0)
             .and_then(|value| usize::try_from(value).ok())?;
+        let (limit_given, trim_limit) = match (limit_keyword, limit_arg) {
+            (None, None) => (false, None),
+            (Some(keyword), Some(arg)) if keyword.eq_ignore_ascii_case(b"LIMIT") => {
+                let value = fr_command::parse_i64_arg(arg)
+                    .ok()
+                    .filter(|value| *value >= 0)?;
+                let limit = if value == 0 {
+                    None
+                } else {
+                    Some(usize::try_from(value).unwrap_or(usize::MAX))
+                };
+                (true, limit)
+            }
+            _ => return None,
+        };
 
         // Match the generic ordering: parse options, then resolve the write
         // lookup/auto-ID, then enter the conservative default-write gate.
@@ -11685,6 +11709,8 @@ impl Runtime {
             + maxlen_keyword.len()
             + approx_keyword.len()
             + threshold_arg.len()
+            + limit_keyword.map_or(0, <[u8]>::len)
+            + limit_arg.map_or(0, <[u8]>::len)
             + id_arg.len()
             + field.len()
             + value.len();
@@ -11706,8 +11732,8 @@ impl Runtime {
                     key,
                     max_len,
                     true,
-                    false,
-                    None,
+                    limit_given,
+                    trim_limit,
                     now_ms,
                 );
                 self.server.store.dirty = dirty_after_add;
@@ -11721,16 +11747,19 @@ impl Runtime {
 
         self.record_plain_xadd_borrowed_metrics(
             || {
-                vec![
+                let mut argv = vec![
                     b"XADD".to_vec(),
                     key.to_vec(),
                     maxlen_keyword.to_vec(),
                     approx_keyword.to_vec(),
                     threshold_arg.to_vec(),
-                    id_arg.to_vec(),
-                    field.to_vec(),
-                    value.to_vec(),
-                ]
+                ];
+                if let (Some(keyword), Some(arg)) = (limit_keyword, limit_arg) {
+                    argv.push(keyword.to_vec());
+                    argv.push(arg.to_vec());
+                }
+                argv.extend([id_arg.to_vec(), field.to_vec(), value.to_vec()]);
+                argv
             },
             elapsed_us,
             now_ms,
@@ -49101,6 +49130,85 @@ mod tests {
         assert!(rt.execute_plain_zscore_borrowed(b"z", b"a", 2).is_some());
         rt.execute_frame(command(&[b"SUBSCRIBE", b"ch"]), 3);
         assert!(rt.execute_plain_zscore_borrowed(b"z", b"a", 4).is_none());
+    }
+
+    #[test]
+    fn plain_xadd_maxlen_limit_borrowed_matches_generic() {
+        let mut fast = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+
+        // Cross two stream-node boundaries so LIMIT participates in actual
+        // whole-node approximate trimming instead of merely parsing.
+        for now_ms in 1..=250 {
+            let fast_reply = fast
+                .execute_plain_xadd_maxlen_approx_borrowed(
+                    b"s",
+                    b"MAXLEN",
+                    b"~",
+                    b"100",
+                    Some(b"LIMIT"),
+                    Some(b"100"),
+                    b"*",
+                    b"field",
+                    b"value",
+                    now_ms,
+                )
+                .expect("valid LIMIT-bearing XADD uses borrowed path");
+            let generic_reply = generic.execute_frame(
+                command(&[
+                    b"XADD", b"s", b"MAXLEN", b"~", b"100", b"LIMIT", b"100", b"*", b"field",
+                    b"value",
+                ]),
+                now_ms,
+            );
+            assert_eq!(fast_reply, generic_reply, "append now_ms={now_ms}");
+        }
+
+        for query in [
+            &[b"XLEN".as_slice(), b"s".as_slice()][..],
+            &[
+                b"XRANGE".as_slice(),
+                b"s".as_slice(),
+                b"-".as_slice(),
+                b"+".as_slice(),
+            ][..],
+            &[b"XINFO".as_slice(), b"STREAM".as_slice(), b"s".as_slice()][..],
+        ] {
+            assert_eq!(
+                fast.execute_frame(command(query), 300),
+                generic.execute_frame(command(query), 300),
+                "query={query:?}",
+            );
+        }
+        assert_eq!(fast.server.store.dirty, generic.server.store.dirty);
+        assert_eq!(
+            fast.server.store.stat_total_commands_processed,
+            generic.server.store.stat_total_commands_processed
+        );
+
+        // Invalid LIMIT must defer without changing state, leaving the generic
+        // path responsible for the exact diagnostic.
+        let mut deferred = Runtime::default_strict();
+        assert!(
+            deferred
+                .execute_plain_xadd_maxlen_approx_borrowed(
+                    b"s",
+                    b"MAXLEN",
+                    b"~",
+                    b"100",
+                    Some(b"LIMIT"),
+                    Some(b"-1"),
+                    b"*",
+                    b"field",
+                    b"value",
+                    1,
+                )
+                .is_none()
+        );
+        assert_eq!(
+            deferred.execute_frame(command(&[b"XLEN", b"s"]), 2),
+            RespFrame::Integer(0)
+        );
     }
 
     #[test]
