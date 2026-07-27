@@ -173,6 +173,8 @@ ubs_*.jsonl
 .beads/*.corrupt_*
 .beads/beads.db.rebuild_*
 .beads/beads.db.stale_*
+.beads/beads.db-fsqlite-ns-gate
+.beads/beads.db-fsqlite-ns-use
 .beads.recovery_*/
 .beads.snapshot_*/
 

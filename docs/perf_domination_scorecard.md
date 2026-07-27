@@ -1,5 +1,10 @@
 # FrankenRedis Perf-Domination Scorecard (vs redis 7.2.4)
 
+**Claim convention:** only a numeric ratio from a live Redis 7.2.4 arm running
+beside FrankenRedis in the same invocation is a competitive result. A
+FrankenRedis candidate/control improvement is a `SELF-SPEEDUP` maintenance
+result and is excluded from campaign-output counts.
+
 ## Focused cod-b quicklist2 RESTORE span-decode rejection (`frankenredis-uhthd`, 2026-06-21)
 
 - Bench: `restore_quicklist_vs_redis -- quicklist2_packed_restore` with
@@ -252,9 +257,8 @@ green.
 | `SDIFFSTORE` | `629.46 us` | `298.02 us` | `0.473x` | `2.112x` | win |
 | `SUNIONSTORE` | `6.6817 ms` | `5.8679 ms` | `0.878x` | `1.139x` | win |
 
-Set-algebra score: **3 wins / 0 losses / 0 neutral** vs Redis 7.2.4. This
-supersedes the previous cod-b set-algebra score of **2 wins / 1 loss / 0
-neutral** by turning SUNIONSTORE from `0.764x` throughput into `1.139x`.
+Set-algebra score: **3 wins / 0 losses / 0 neutral** vs Redis 7.2.4.
+SUNIONSTORE throughput is `1.139x` Redis.
 
 Gates: `cargo fmt -p fr-store -- --check`; RCH focused fr-store test; RCH
 `cargo check -p fr-store --all-targets`; RCH `cargo clippy -p fr-store
@@ -912,9 +916,9 @@ the project’s GET/SET Redis-relative wins and should not be retried without fr
 
 ## Cod-b cached borrowed write-gate verification (MEASURED 2026-06-20)
 
-Follow-up for `frankenredis-ohsk5`: the previously coded cached borrowed write gate
-(`d14e2b330`) is no longer pending. Current `HEAD` was measured against an inverse-control worktree
-with only that commit reverted, and against vendored Redis 7.2.4.
+The cached borrowed write gate (`d14e2b330`) is measured against an
+inverse-control worktree with only that commit reverted, and against vendored
+Redis 7.2.4.
 
 | Gate | Workload | Ratio | CV / trial quality | Verdict |
 |---|---|---:|---|---|

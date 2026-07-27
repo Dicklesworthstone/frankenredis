@@ -8,6 +8,26 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## Verdict and claim conventions
+
+This internal ledger keeps the full retraction and correction trail. Public
+spec-sheet documents (`README.md`, scorecards, website copy, and release notes)
+state only the current correct figure.
+
+Every new KEEP declares exactly one class:
+
+- `Claim class: SELF-SPEEDUP` and `Campaign output: no`, with `SELF-SPEEDUP`
+  visible in the heading, means FrankenRedis before/after maintenance. It is not
+  a competitive claim.
+- `Claim class: COMPETITIVE` and `Campaign output: yes` requires a numeric
+  FrankenRedis/Redis ratio and the actual vendored Redis 7.2.4 server running as
+  a live arm beside FrankenRedis in the same invocation. State the metric and
+  ratio direction. Only this class counts as campaign output.
+
+`scripts/perf_candidate_preflight.py check-staged` checks complete added or
+modified entries in both ledger files. It also preserves the ELF self-report,
+A/A bootstrap median-CI, never-CV, counted-mechanism, and retry-predicate gates.
+
 ## 2026-07-26 NobleOsprey (cod/MEASURE): REJECT (VALID-AB) — synchronous io_uring cross-connection SEND batching removes submissions but makes P1 SET 8.78% slower (`frankenredis-ev947`, `frankenredis-mpc9m`)
 
 - **Negative-ledger-first / retry predicate admitted.** Before implementation, both ledgers were

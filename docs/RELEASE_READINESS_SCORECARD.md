@@ -1,5 +1,10 @@
 # Release-Readiness Scorecard — frankenredis vs Redis 7.2.4 (MEASURED)
 
+**Claim convention:** competitive readiness claims require a numeric ratio from
+a live Redis 7.2.4 arm running beside FrankenRedis in the same invocation.
+FrankenRedis candidate/control improvements are `SELF-SPEEDUP` maintenance
+evidence and do not count as campaign output.
+
 **Date:** 2026-06-19 · **Agent:** cc · **Build:** `cargo build --release` (rch-offloaded) at
 origin/main `4cf73ebef` · **Harness:** `fr-bench --pipeline 16 --requests 300000 --trials 5`
 (8 for lpush) head-to-head, fr-release vs vendored `redis-server` 7.2.4, both on loopback.
@@ -648,7 +653,8 @@ This is the realistic head-to-head for the encode (cc presize/direct-emit) + dec
 ### Reads of this:
 - **WINS (measured, validate recent levers):** list RELOAD 0.731× in the broad save+load path,
   int-strings 0.929× (087qq itoa2), set 0.964×, intset parity. The focused `ta8s1` RESTORE
-  gate below supersedes the broad list read for that specific lever.
+  gate below is the applicable measurement for that specific lever; the broad
+  list read remains path-level evidence.
 - **LOSSES (measured, STRUCTURAL decode — NOT my levers):** zset 1.615× and hash 1.181× are the
   collection *build* (decode) side — zset's IndexMap (dict) + BTreeMap (sorted) dual-structure
   rebuild (uybhq, CoralOx) and hash's field-by-field map rebuild. cc's encode levers (zset

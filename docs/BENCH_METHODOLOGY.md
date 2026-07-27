@@ -105,11 +105,18 @@ self-time.** Both provenance failures have actually happened here:
 
 So every A/B row must record:
 
-1. a distinct `sha256` for each arm's binary; **and**
-2. a symbol- or frame-level check that the candidate actually contains the hunk —
-   `strings -a <bin> | grep -x <fn>` (use `-x`/`-w`: `grep -c zset_score_listpack_entry`
-   false-positives on `encode_zset_score_listpack_entry` from another crate), or the changed function
-   appearing in the candidate's own profile.
+1. the full SHA-256 self-reported by the executing benchmark/server process
+   before measurement; under the required one-binary design, the A/A and A/B
+   FrankenRedis arms intentionally report the same ELF hash; and
+2. a symbol-, selector-, or frame-level check that the one ELF really contains
+   and executes both paths — for example, both const-generic arm symbols, a
+   measurement-only selector with direct parity coverage, or the changed
+   function appearing with non-zero self-time in that ELF's profile.
+
+An external incumbent process is separate provenance: identify the vendored
+Redis 7.2.4 executable and hash it in the same invocation. A source hash,
+commit hash, post-hoc `sha256sum`, or a hash printed by the outer shell is not
+an executing-process self-report.
 
 A heading that says "rejected **and reverted**" must state whether the revert preceded the
 measurement.
@@ -120,7 +127,7 @@ A REJECT written without all four is inadmissible and must not be quoted:
 
 | field | why |
 |---|---|
-| **binary `sha256`, per arm** | proves the two arms were different binaries, and lets anyone reproduce |
+| **self-reported executing ELF `sha256`** | proves which one-binary A/A+A/B substrate ran; separately identify a live Redis incumbent arm when present |
 | **self-time of the function under test**, on the exact input used | proves the bench reached the code (and separates *never called* from *called but not hot*) |
 | **worker identity** | workers are not equal: `hz2` has no `perf`, `ovh-a` runs `perf_event_paranoid=4`, `hz1` works |
 | **`cv_pct`** | a ratio without a variance is not a measurement |
@@ -144,11 +151,17 @@ min_of ∈ {1,3}` showed `cv < 5%` is **unattainable on this hardware**; gating 
 measurements. Instead:
 
 1. Take the **median of the paired null ratio** — it must sit at ≈`1.00`.
-2. Take its **observed spread** (e.g. p5..p95).
-3. A claim is decidable only when the **candidate's median lies clearly outside that spread**.
+2. Bootstrap the paired A/A **median** and report its 95% confidence interval;
+   the interval must bracket 1.0 or the invocation is invalid.
+3. Derive the prespecified decision band from that median CI (this repo uses
+   twice the null-CI radius, plus any workload's declared absolute floor).
+4. A claim is decidable only when the candidate's bootstrap median CI lies
+   wholly outside that decision band.
 
-Report the **null median, the null spread, and the candidate median together**, plus `cv` as
-information (never as a threshold), the binary sha256, the self-time, and the worker id.
+Report the **null median and bootstrap median CI, the derived band, and the
+candidate median and bootstrap median CI together**, plus `cv` as information
+(never as a threshold), the executing ELF SHA-256, the self-time, and the
+worker id.
 
 **The null floor is per-function and per-size, not global.** Recalibrate it for the function you are
 actually measuring.
@@ -193,6 +206,37 @@ Criterion wall-clock A/B, with a server-dependent harness that resolved
 
 A bad REJECT hid a double-digit lever for two weeks. Across both ledgers, **70 REJECT rows record 3
 binary sha256s and 10 self-times.** Assume the rest are steering the search space until re-verified.
+
+## 7. Campaign output means a live incumbent comparison
+
+A before/after speedup of FrankenRedis against its own previous implementation
+is useful maintenance, not a campaign win. Ledger it as:
+
+```text
+Claim class: SELF-SPEEDUP
+Campaign output: no
+```
+
+Put `SELF-SPEEDUP` in the verdict heading and do not quote the result as a
+competitive claim.
+
+A campaign win must instead run the actual vendored Redis 7.2.4 server as a
+live arm beside FrankenRedis in the same top-level invocation and report a
+numeric FrankenRedis/Redis ratio:
+
+```text
+Claim class: COMPETITIVE
+Campaign output: yes
+```
+
+The entry must name the metric and ratio direction, carry the live incumbent
+arm's executable provenance, and still satisfy the one-ELF FrankenRedis A/A+A/B
+null contract above. A historical Redis number, a separate invocation, or a
+self-speedup followed by an unmeasured “beats Redis” inference is not
+competitive evidence.
+
+`scripts/perf_candidate_preflight.py check-staged` enforces these fields over
+complete added or modified entries in both verdict-bearing ledgers.
 
 ## Worker facts (verify, don't assume)
 

@@ -4,6 +4,35 @@ This file is the short-form evidence ledger requested for the 2026-06-20 cod-a
 BOLD-VERIFY pass. The canonical long-form project ledger remains
 `docs/perf_negative_evidence_ledger.md`.
 
+## Conventions
+
+**This ledger is the lab notebook. The README is the spec sheet.** Retraction
+history, withdrawn figures, refuted premises and dead levers belong *here*, where
+they stop the next agent re-deriving them. They do not belong in `README.md`,
+scorecards, website copy or release notes — those state the current correct
+number and nothing else. (Policy 1, 2026-07-27.)
+
+**Every KEEP must declare exactly one claim class** (Policy 2, 2026-07-27):
+
+- **`Claim class: SELF-SPEEDUP`** plus **`Campaign output: no`** — our code
+  measured against our own previous code. This is maintenance. Put
+  `SELF-SPEEDUP` in the heading; land it and ledger it, but never quote it as a
+  competitive claim.
+- **`Claim class: COMPETITIVE`** plus **`Campaign output: yes`** — a numeric
+  FrankenRedis/Redis ratio against the actual vendored Redis 7.2.4 server,
+  produced by a harness that runs the Redis arm side-by-side in the same
+  invocation. Only this class counts as campaign output.
+
+Rationale: across 369 campaign commits the fleet produced ~60 self-speedups and 3
+vs-incumbent wins, and all 3 came from a repo with a live incumbent arm. A number
+that never touched the incumbent cannot tell you whether you are winning.
+
+`scripts/perf_candidate_preflight.py check-staged` enforces the distinction
+across both verdict-bearing ledgers. A COMPETITIVE entry needs the named live
+Redis arm and numeric ratio; a SELF-SPEEDUP needs the heading label and cannot
+mark itself as campaign output. Missing or contradictory classification exits
+**8**.
+
 ## 2026-07-27 MossyBluff (cod/MEASURE): SURFACE — focused current-ELF `HGETALL@P128` does not reproduce an incumbent loss
 
 - **Why this cell was rerun.** The broad current-v2 matrix left
@@ -35,8 +64,11 @@ BOLD-VERIFY pass. The canonical long-form project ledger remains
   and require a named target with non-zero self-time and a computed Amdahl
   ceiling before editing.
 
-## 2026-07-27 MossyBluff (cod/MEASURE): KEEP — one-binary `XADD MAXLEN ~ … LIMIT …` borrowed dispatch closes the remaining option-shape incumbent loss (`frankenredis-dngxg`)
+## 2026-07-27 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — one-binary `XADD MAXLEN ~ … LIMIT …` borrowed dispatch closes the remaining option-shape incumbent loss (`frankenredis-dngxg`)
 
+- **Claim class: COMPETITIVE. Campaign output: yes.** The live vendored Redis
+  7.2.4 server ran beside both FrankenRedis arms in the same invocation, and
+  the numeric candidate/Redis ratio is reported below.
 - **Ledger-first admission.** `perf_candidate_preflight.py` and direct ledger
   grep were run for `XADD LIMIT`, `XADD MAXLEN`, and the exact borrowed
   dispatcher before proposing a lever. The existing eight-element

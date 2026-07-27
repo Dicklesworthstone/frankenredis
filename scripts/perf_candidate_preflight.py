@@ -6,7 +6,7 @@ which is why that repo sits at a 1.7% void rate while repos that audited once an
 moved on sit at 25-91%. The 2026-07-26 fleet broadcast's conclusion was that
 ledger integrity DECAYS, so the audit has to become a gate rather than an event.
 
-Two modes:
+Modes:
 
   check-candidate  <target symbol or phrase>...
       Refuse a lever whose ground has already been covered. Greps both ledgers
@@ -22,23 +22,32 @@ Two modes:
       Also refuse a NEW KEEP-class entry without both the executing binary's
       self-reported 64-hex SHA-256 and that same null-control contract. Any
       timing verdict using CV as a gate is refused, as is any verdict without a
-      concrete retry predicate.
-      exit 0 = admissible · exit 3 = bad REJECT · exit 4 = bad KEEP provenance
+      concrete retry predicate. Every KEEP must declare exactly one claim class:
+      COMPETITIVE requires a numeric FrankenRedis/Redis ratio from a live Redis
+      arm in the same invocation; SELF-SPEEDUP is maintenance and must explicitly
+      say it is not campaign output.
+      exit 0 = admissible · exit 3 = bad REJECT · exit 4 = bad KEEP
+      exit 8 = missing, contradictory, or unsupported KEEP claim class
       exit 5 = incomplete timing contract · exit 6 = CV-gated verdict
       exit 7 = missing retry predicate
+      exit 9 = verdict heading outside a configured ledger schema
+
+  check-staged
+      Inspect every added OR modified verdict entry in every repository ledger
+      path and supported heading schema. This is the pre-commit mode.
 
   install-hook
-      Install the check-entry gate into the repository's chain-runner pre-commit
-      directory. Refuses to overwrite an existing plugin.
+      Install or refresh this repository's owned ledger-gate plugin in the
+      chain-runner pre-commit directory. Refuses unrelated existing plugins.
 
   self-test
-      Exercise the null-CI, counted-mechanism, binary-self-report, and never-CV
-      predicates without reading or writing repository state.
+      Exercise the null-CI, counted-mechanism, binary-self-report, never-CV,
+      claim-class, and per-ledger-path predicates without writing repository
+      state.
 
-Wire `check-entry` into a pre-commit hook to close the loop:
+The pre-commit hook delegates to:
 
-    git diff --cached -U0 -- docs/NEGATIVE_EVIDENCE.md \\
-      | scripts/perf_candidate_preflight.py check-entry -
+    scripts/perf_candidate_preflight.py check-staged
 """
 import re
 import subprocess
@@ -46,10 +55,18 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-LEDGERS = [ROOT / "docs" / "NEGATIVE_EVIDENCE.md",
-           ROOT / "docs" / "perf_negative_evidence_ledger.md"]
+LEDGER_SCHEMAS = {
+    "docs/NEGATIVE_EVIDENCE.md": ("level-2", "level-3-verdict"),
+    "docs/perf_negative_evidence_ledger.md": ("level-2",),
+}
+LEDGERS = [ROOT / relative for relative in LEDGER_SCHEMAS]
 
-HDR = re.compile(r"^## (?!#)(.+)$", re.MULTILINE)
+LEVEL_2_HDR = re.compile(r"^## (?!#)(.+)$", re.MULTILINE)
+LEVEL_3_HDR = re.compile(r"^### (?!#)(.+)$", re.MULTILINE)
+HUNK_RE = re.compile(
+    r"^@@ -\d+(?:,\d+)? \+(?P<start>\d+)(?:,(?P<count>\d+))? @@",
+    re.MULTILINE,
+)
 REJECT_RE = re.compile(
     r"\b(REJECT|REJECTED|NEGATIVE|NO[- ]SHIP|UNDECIDABLE|DECLINED|INVALID"
     r"|REVERT|REVERTED|NOT WORTH|ABANDON)\b", re.IGNORECASE)
@@ -130,6 +147,46 @@ RETRY_CONDITION_RE = re.compile(
     r"shows?|exceeds?|falls?|clears?|reaches?)\b|[<>]=?|==)",
     re.IGNORECASE,
 )
+DATED_HEADING_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\b")
+
+
+def ledger_relative(path):
+    """Return a repository-relative ledger path, or None for free-form input."""
+    if path is None:
+        return None
+    candidate = Path(path)
+    if candidate.is_absolute():
+        try:
+            candidate = candidate.resolve().relative_to(ROOT.resolve())
+        except ValueError:
+            return None
+    return candidate.as_posix()
+
+
+def entry_heading_matches(text, path=None):
+    """Return supported verdict-entry headings in source order.
+
+    The short ledger historically contains both level-2 entries and
+    verdict-bearing level-3 entries. The canonical long ledger uses level 2;
+    its level-3 headings are evidence subsections and must stay attached to
+    their parent. Free-form `check-entry` input accepts both schemas.
+    """
+    relative = ledger_relative(path)
+    matches = [
+        (match.start(), match.end(), match.group(1))
+        for match in LEVEL_2_HDR.finditer(text)
+    ]
+    allow_level_3 = relative in (None, "docs/NEGATIVE_EVIDENCE.md")
+    if allow_level_3:
+        for match in LEVEL_3_HDR.finditer(text):
+            title = match.group(1)
+            if (
+                DATED_HEADING_RE.search(title)
+                or REJECT_RE.search(title)
+                or KEEP_RE.search(title)
+            ):
+                matches.append((match.start(), match.end(), title))
+    return sorted(matches)
 
 
 def normalised_entries(path):
@@ -140,8 +197,8 @@ def normalised_entries(path):
     if not path.exists():
         return
     text = path.read_text(encoding="utf-8", errors="replace")
-    pos = [(m.start(), m.group(1)) for m in HDR.finditer(text)]
-    for i, (start, title) in enumerate(pos):
+    pos = entry_heading_matches(text, path)
+    for i, (start, _heading_end, title) in enumerate(pos):
         end = pos[i + 1][0] if i + 1 < len(pos) else len(text)
         yield title, " ".join(text[start:end].split()), text[:start].count("\n") + 1
 
@@ -202,12 +259,12 @@ def check_candidate(terms):
     return 2
 
 
-def added_entry_blocks(text):
+def added_entry_blocks(text, path=None):
     """Yield each newly added heading with only its own added body."""
-    matches = list(HDR.finditer(text))
-    for index, match in enumerate(matches):
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-        yield match.group(1), " ".join(text[match.end():end].split())
+    matches = entry_heading_matches(text, path)
+    for index, (start, heading_end, title) in enumerate(matches):
+        end = matches[index + 1][0] if index + 1 < len(matches) else len(text)
+        yield title, " ".join(text[heading_end:end].split())
 
 
 def measured_null(body):
@@ -244,6 +301,72 @@ def counted_mechanism(body):
         if MECHANISM_RE.search(fragment) and COUNT_VALUE_RE.search(fragment):
             return True
     return False
+
+
+REDIS_RE = re.compile(
+    r"\b(?:(?:vendored|legacy)\s+)?redis(?:\s+7\.2\.4|-server|\s+server)?\b",
+    re.IGNORECASE,
+)
+INCUMBENT_RATIO_RE = re.compile(
+    rf"\b(?:FrankenRedis|candidate|fr)\s*(?:/|÷|vs\.?|against)\s*"
+    rf"(?:(?:vendored|legacy)\s+)?Redis(?:\s+7\.2\.4)?\b"
+    rf".{{0,160}}?(?P<ratio>{NUMBER})\s*[x×]",
+    re.IGNORECASE,
+)
+CLAIM_CLASS_RE = re.compile(
+    r"\bclaim\s+class\b\s*[*_`]*\s*[:=]\s*[*_`]*\s*"
+    r"(?P<class>COMPETITIVE|SELF[- ]SPEEDUP)\b",
+    re.IGNORECASE,
+)
+CAMPAIGN_OUTPUT_RE = re.compile(
+    r"\bcampaign\s+output\b\s*[*_`]*\s*[:=]\s*[*_`]*\s*"
+    r"(?P<answer>yes|no)\b",
+    re.IGNORECASE,
+)
+LIVE_ARM_RE = re.compile(
+    r"\b(?:arm|process|server|ran|runs|running|contained|included|"
+    r"side[- ]by[- ]side)\b",
+    re.IGNORECASE,
+)
+SELF_SPEEDUP_HEADING_RE = re.compile(r"\bSELF[- ]SPEEDUP\b", re.IGNORECASE)
+
+
+def claim_class(body):
+    """Return the one explicit KEEP claim class, or None if ambiguous/missing."""
+    classes = {
+        match.group("class").upper().replace(" ", "-")
+        for match in CLAIM_CLASS_RE.finditer(body)
+    }
+    return classes.pop() if len(classes) == 1 else None
+
+
+def campaign_output(body):
+    """Return the one explicit campaign-output answer, or None if contradictory."""
+    answers = {
+        match.group("answer").lower()
+        for match in CAMPAIGN_OUTPUT_RE.finditer(body)
+    }
+    return answers.pop() if len(answers) == 1 else None
+
+
+def incumbent_same_invocation(body):
+    """Bind a named Redis process/arm to the invocation, not merely to prose."""
+    for match in REDIS_RE.finditer(body):
+        context = body[max(0, match.start() - 260):match.end() + 260]
+        if SAME_INVOCATION_RE.search(context) and LIVE_ARM_RE.search(context):
+            return True
+    return False
+
+
+def incumbent_measured(body):
+    """Require a numeric ratio and live Redis arm in the same invocation.
+
+    Policy 2 (2026-07-27): a self-speedup — our own code before vs after — is
+    maintenance. Only a ratio against the actual legacy incumbent, produced by a
+    harness that runs the incumbent arm side-by-side in the same invocation,
+    counts as campaign output.
+    """
+    return INCUMBENT_RATIO_RE.search(body) is not None and incumbent_same_invocation(body)
 
 
 def self_reported_binary_sha(body):
@@ -287,13 +410,10 @@ def cv_used_as_gate(body):
     return False
 
 
-def check_entry_text(text):
-    """Check one proposed ledger addition and return the documented exit code."""
-    # Accept a raw diff: consider only added lines.
-    if text.lstrip().startswith(("diff --git", "@@", "+++", "---")):
-        text = "\n".join(l[1:] for l in text.splitlines()
-                         if l.startswith("+") and not l.startswith("+++"))
-    blocks = list(added_entry_blocks(text))
+def check_entry_blocks(blocks):
+    """Check already-parsed ledger blocks and return the documented exit code."""
+    blocks = list(blocks)
+    claim_errors = []
     rejects = []
     keeps_without_sha = []
     timing_contract = []
@@ -319,6 +439,53 @@ def check_entry_text(text):
             cv_gated.append(title)
         if (is_keep or is_reject) and not concrete_retry(body):
             missing_retry.append(title)
+
+        if is_keep:
+            classification = claim_class(body)
+            output = campaign_output(body)
+            if classification is None:
+                claim_errors.append((
+                    title,
+                    "declare exactly one `Claim class: COMPETITIVE|SELF-SPEEDUP`",
+                ))
+            elif classification == "COMPETITIVE":
+                if output != "yes":
+                    claim_errors.append((
+                        title,
+                        "COMPETITIVE requires `Campaign output: yes`",
+                    ))
+                if not incumbent_measured(body):
+                    claim_errors.append((
+                        title,
+                        (
+                            "COMPETITIVE requires a numeric FrankenRedis/Redis ratio "
+                            "and a named live Redis arm in the same invocation"
+                        ),
+                    ))
+                if SELF_SPEEDUP_HEADING_RE.search(title):
+                    claim_errors.append((
+                        title,
+                        "COMPETITIVE contradicts a SELF-SPEEDUP heading label",
+                    ))
+            elif classification == "SELF-SPEEDUP":
+                if output != "no":
+                    claim_errors.append((
+                        title,
+                        "SELF-SPEEDUP requires `Campaign output: no`",
+                    ))
+                if not SELF_SPEEDUP_HEADING_RE.search(title):
+                    claim_errors.append((
+                        title,
+                        "SELF-SPEEDUP must be visible in the entry heading",
+                    ))
+
+    if claim_errors:
+        print("REJECTED (Policy 2): invalid KEEP claim classification.")
+        print("A self-speedup is maintenance. Only a measured ratio against a live")
+        print("legacy Redis arm in the same invocation is campaign output.\n")
+        for title, reason in claim_errors:
+            print(f"  {title[:130]}: {reason}")
+        return 8
 
     if rejects:
         print("REJECTED: this REJECT-class entry records NEITHER an A/A null control")
@@ -368,17 +535,134 @@ def check_entry_text(text):
         if REJECT_RE.search(title) or KEEP_RE.search(title)
     ]
     if reviewed:
-        print("OK: all new verdict entries satisfy the ledger contract")
+        print("OK: all changed verdict entries satisfy the ledger contract")
         for title in reviewed:
             print(f"  - {title[:120]}")
     else:
-        print("OK: no new REJECT- or KEEP-class entry in this change")
+        print("OK: no changed REJECT- or KEEP-class entry in this change")
     return 0
+
+
+def check_entry_text(text, path=None):
+    """Check one proposed ledger addition and return the documented exit code."""
+    # Accept a raw diff: consider only added lines.
+    if text.lstrip().startswith(("diff --git", "@@", "+++", "---")):
+        text = "\n".join(l[1:] for l in text.splitlines()
+                         if l.startswith("+") and not l.startswith("+++"))
+    return check_entry_blocks(added_entry_blocks(text, path))
 
 
 def check_entry(source):
     text = sys.stdin.read() if source == "-" else Path(source).read_text(errors="replace")
-    return check_entry_text(text)
+    return check_entry_text(text, None if source == "-" else source)
+
+
+def changed_line_ranges(diff_text):
+    """Return inclusive staged-file line ranges touched by a zero-context diff."""
+    ranges = []
+    for match in HUNK_RE.finditer(diff_text):
+        start = int(match.group("start"))
+        count = int(match.group("count") or "1")
+        if count == 0:
+            ranges.append((max(1, start - 1), max(1, start)))
+        else:
+            ranges.append((start, start + count - 1))
+    return ranges
+
+
+def changed_entry_blocks(path, staged_text, diff_text):
+    """Recover complete staged entries for every added or modified hunk."""
+    ranges = changed_line_ranges(diff_text)
+    matches = entry_heading_matches(staged_text, path)
+    blocks = []
+    seen = set()
+    for index, (start, heading_end, title) in enumerate(matches):
+        end = matches[index + 1][0] if index + 1 < len(matches) else len(staged_text)
+        start_line = staged_text.count("\n", 0, start) + 1
+        end_line = staged_text.count("\n", 0, end)
+        if end == len(staged_text) and staged_text and not staged_text.endswith("\n"):
+            end_line += 1
+        end_line = max(start_line, end_line)
+        if not any(lo <= end_line and hi >= start_line for lo, hi in ranges):
+            continue
+        key = (start_line, title)
+        if key in seen:
+            continue
+        seen.add(key)
+        body = " ".join(staged_text[heading_end:end].split())
+        blocks.append((f"{ledger_relative(path)}:{start_line}: {title}", body))
+    return blocks
+
+
+def unsupported_verdict_headings(relative, diff_text):
+    """Refuse new verdict headings that no configured ledger schema can parse."""
+    bad = []
+    for raw in diff_text.splitlines():
+        if not raw.startswith("+") or raw.startswith("+++"):
+            continue
+        line = raw[1:]
+        match = re.match(r"^(?P<marks>#{2,6})\s+(?P<title>.+)$", line)
+        if match is None:
+            continue
+        title = match.group("title")
+        if not (REJECT_RE.search(title) or KEEP_RE.search(title)):
+            continue
+        level = len(match.group("marks"))
+        allowed = level == 2 or (
+            relative == "docs/NEGATIVE_EVIDENCE.md" and level == 3
+        )
+        if not allowed:
+            bad.append(line)
+    return bad
+
+
+def git_capture(argv, *, text=True):
+    return subprocess.run(
+        argv,
+        cwd=ROOT,
+        capture_output=True,
+        text=text,
+        check=False,
+        timeout=10,
+    )
+
+
+def check_staged():
+    """Check complete staged entries across every configured verdict path."""
+    blocks = []
+    unsupported = []
+    for relative in LEDGER_SCHEMAS:
+        diff = git_capture(["git", "diff", "--cached", "-U0", "--", relative])
+        if diff.returncode != 0:
+            print(
+                f"perf-ledger preflight: failed to inspect {relative}: "
+                f"{diff.stderr.strip()}",
+                file=sys.stderr,
+            )
+            return 2
+        if not diff.stdout:
+            continue
+        unsupported.extend(
+            (relative, heading)
+            for heading in unsupported_verdict_headings(relative, diff.stdout)
+        )
+        staged = git_capture(["git", "show", f":{relative}"])
+        if staged.returncode != 0:
+            print(
+                f"perf-ledger preflight: cannot read staged {relative}: "
+                f"{staged.stderr.strip()}",
+                file=sys.stderr,
+            )
+            return 2
+        blocks.extend(changed_entry_blocks(relative, staged.stdout, diff.stdout))
+
+    if unsupported:
+        print("REJECTED: verdict heading is outside the configured ledger schema.")
+        for relative, heading in unsupported:
+            print(f"  {relative}: {heading[:150]}")
+        print("\nUse `##` in either ledger, or the short ledger's historical `###` schema.")
+        return 9
+    return check_entry_blocks(blocks)
 
 
 def self_test():
@@ -396,6 +680,17 @@ def self_test():
         + f"The harness self-reported ELF SHA-256 {sha}. "
         "Retry predicate: reopen only if a fresh profile exposes >=5% self-time."
     )
+    competitive = (
+        valid
+        + " Claim class: COMPETITIVE. Campaign output: yes. "
+        "One top-level same invocation ran FrankenRedis and vendored Redis "
+        "7.2.4 as live server arms. Candidate/Redis median 1.250x."
+    )
+    self_speedup = (
+        valid
+        + " Claim class: SELF-SPEEDUP. Campaign output: no. "
+        "This maintenance result is not a competitive claim."
+    )
     checks = [
         (measured_null(valid), "valid null contract"),
         (median_ci_gate(valid), "median-CI gate"),
@@ -403,6 +698,11 @@ def self_test():
         (not cv_used_as_gate(valid), "never-CV is not a positive CV gate"),
         (self_reported_binary_sha(valid), "self-reported ELF SHA"),
         (concrete_retry(valid), "concrete retry predicate"),
+        (claim_class(competitive) == "COMPETITIVE", "competitive claim class"),
+        (campaign_output(competitive) == "yes", "campaign-output yes"),
+        (incumbent_measured(competitive), "same-invocation incumbent ratio"),
+        (claim_class(self_speedup) == "SELF-SPEEDUP", "self-speedup claim class"),
+        (campaign_output(self_speedup) == "no", "campaign-output no"),
         (
             not concrete_retry("Retry predicate: TBD."),
             "bare retry label is not concrete",
@@ -443,9 +743,28 @@ def self_test():
         ),
     ]
 
-    def entry_status(title, body):
+    def entry_status(title, body, marks="##"):
         with redirect_stdout(StringIO()):
-            return check_entry_text(f"## {title}\n{body}\n")
+            return check_entry_text(f"{marks} {title}\n{body}\n")
+
+    def staged_status(relative, heading, body):
+        staged = f"# Ledger\n\n{heading}\n{body}\n"
+        line_count = len(staged.splitlines())
+        diff = f"@@ -0,0 +1,{line_count} @@\n" + "\n".join(
+            f"+{line}" for line in staged.splitlines()
+        )
+        with redirect_stdout(StringIO()):
+            return check_entry_blocks(
+                changed_entry_blocks(relative, staged, diff)
+            )
+
+    def modified_status(relative, heading, body):
+        staged = f"# Ledger\n\n{heading}\n{body}\n"
+        diff = "@@ -4 +4 @@\n-old verdict body\n+changed verdict body"
+        with redirect_stdout(StringIO()):
+            return check_entry_blocks(
+                changed_entry_blocks(relative, staged, diff)
+            )
 
     checks.extend([
         (
@@ -473,7 +792,10 @@ def self_test():
                 "2099-01-01 cod: KEEP — labelled hash only",
                 f"{valid_timing} Binary SHA-256 {sha}. "
                 "Retry predicate: reopen only if a fresh profile exposes "
-                ">=5% self-time.",
+                ">=5% self-time. Claim class: COMPETITIVE. "
+                "Campaign output: yes. One top-level same invocation ran "
+                "FrankenRedis and vendored Redis 7.2.4 as live server arms. "
+                "Candidate/Redis median 1.250x.",
             ) == 4,
             "end-to-end non-self-reported SHA refusal",
         ),
@@ -495,12 +817,104 @@ def self_test():
         ),
         (
             entry_status(
-                "2099-01-01 cod: KEEP — full contract",
-                valid,
+                "2099-01-01 cod: COMPETITIVE KEEP — full contract",
+                competitive,
             ) == 0,
-            "end-to-end full-contract KEEP acceptance",
+            "end-to-end competitive KEEP acceptance",
+        ),
+        (
+            entry_status(
+                "2099-01-01 cod: KEEP — missing claim class",
+                valid,
+            ) == 8,
+            "KEEP without claim class refusal",
+        ),
+        (
+            entry_status(
+                "2099-01-01 cod: COMPETITIVE KEEP — no incumbent ratio",
+                valid
+                + " Claim class: COMPETITIVE. Campaign output: yes. "
+                "One top-level same invocation included a vendored Redis "
+                "7.2.4 server arm.",
+            ) == 8,
+            "competitive KEEP without numeric incumbent ratio refusal",
+        ),
+        (
+            entry_status(
+                "2099-01-01 cod: KEEP — hidden maintenance label",
+                self_speedup,
+            ) == 8,
+            "self-speedup missing heading label refusal",
+        ),
+        (
+            entry_status(
+                "2099-01-01 cod: SELF-SPEEDUP KEEP — contradictory output",
+                self_speedup.replace("Campaign output: no", "Campaign output: yes"),
+            ) == 8,
+            "self-speedup campaign-output contradiction refusal",
+        ),
+        (
+            entry_status(
+                "2099-01-01 cod: SELF-SPEEDUP KEEP — maintenance",
+                self_speedup,
+            ) == 0,
+            "end-to-end self-speedup KEEP acceptance",
         ),
     ])
+
+    invalid_provenance = competitive.replace(
+        f"The harness self-reported ELF SHA-256 {sha}.",
+        f"Binary SHA-256 {sha}.",
+    )
+    path_boundaries = [
+        (
+            "docs/NEGATIVE_EVIDENCE.md",
+            "## 2099-01-01 cod: COMPETITIVE KEEP — short level 2",
+            "short-ledger level-2",
+        ),
+        (
+            "docs/NEGATIVE_EVIDENCE.md",
+            "### 2099-01-01 cod: COMPETITIVE KEEP — short level 3",
+            "short-ledger level-3",
+        ),
+        (
+            "docs/perf_negative_evidence_ledger.md",
+            "## 2099-01-01 cod: COMPETITIVE KEEP — long level 2",
+            "long-ledger level-2",
+        ),
+    ]
+    for relative, heading, label in path_boundaries:
+        checks.extend([
+            (
+                staged_status(relative, heading, invalid_provenance) == 4,
+                f"{label} fail boundary",
+            ),
+            (
+                staged_status(relative, heading, competitive) == 0,
+                f"{label} pass boundary",
+            ),
+        ])
+    for relative, heading, label in (
+        path_boundaries[0],
+        path_boundaries[2],
+    ):
+        checks.extend([
+            (
+                modified_status(relative, heading, invalid_provenance) == 4,
+                f"{label} modified-entry fail boundary",
+            ),
+            (
+                modified_status(relative, heading, competitive) == 0,
+                f"{label} modified-entry pass boundary",
+            ),
+        ])
+    checks.append((
+        bool(unsupported_verdict_headings(
+            "docs/perf_negative_evidence_ledger.md",
+            "+### 2099-01-01 cod: KEEP — unsupported nested verdict",
+        )),
+        "long-ledger unsupported level-3 verdict refusal",
+    ))
     failed = [name for passed, name in checks if not passed]
     if failed:
         for name in failed:
@@ -510,29 +924,28 @@ def self_test():
     return 0
 
 
-HOOK = """#!/usr/bin/env python3
+HOOK_MARKER = "# frankenredis perf-ledger gate; owned by perf_candidate_preflight.py"
+HOOK = f"""#!/usr/bin/env python3
+{HOOK_MARKER}
 import subprocess
 import sys
 from pathlib import Path
 
-root = Path(subprocess.run(
-    ["git", "rev-parse", "--show-toplevel"],
-    capture_output=True, text=True, check=True, timeout=10,
-).stdout.strip())
-diff = subprocess.run(
-    ["git", "diff", "--cached", "-U0", "--",
-     "docs/NEGATIVE_EVIDENCE.md", "docs/perf_negative_evidence_ledger.md"],
-    cwd=root, capture_output=True, check=False, timeout=10,
+root = Path(
+    subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=10,
+    ).stdout.strip()
 )
-if diff.returncode != 0:
-    sys.stderr.write("perf-ledger pre-commit: failed to inspect staged ledgers\\n")
-    sys.exit(2)
-if not diff.stdout:
-    sys.exit(0)
 guard = root / "scripts" / "perf_candidate_preflight.py"
 result = subprocess.run(
-    [sys.executable, str(guard), "check-entry", "-"],
-    cwd=root, input=diff.stdout, check=False, timeout=10,
+    [sys.executable, str(guard), "check-staged"],
+    cwd=root,
+    check=False,
+    timeout=10,
 )
 sys.exit(result.returncode)
 """
@@ -553,8 +966,24 @@ def install_hook():
         return 2
     hook = git_dir / "hooks" / "hooks.d" / "pre-commit" / "60-perf-ledger.py"
     if hook.exists():
-        print(f"refusing to overwrite existing hook plugin: {hook}", file=sys.stderr)
-        return 1
+        current = hook.read_text(errors="replace")
+        owned = (
+            HOOK_MARKER in current
+            or (
+                "perf_candidate_preflight.py" in current
+                and "perf-ledger pre-commit" in current
+            )
+        )
+        if not owned:
+            print(f"refusing to overwrite unrelated hook plugin: {hook}", file=sys.stderr)
+            return 1
+        if current == HOOK:
+            print(f"already installed {hook}")
+            return 0
+        hook.write_text(HOOK)
+        hook.chmod(0o755)
+        print(f"refreshed {hook}")
+        return 0
     hook.parent.mkdir(parents=True, exist_ok=True)
     hook.write_text(HOOK)
     hook.chmod(0o755)
@@ -587,6 +1016,8 @@ def main(argv):
         return check_candidate(argv[2:])
     if mode == "check-entry":
         return check_entry(argv[2] if len(argv) > 2 else "-")
+    if mode == "check-staged":
+        return check_staged()
     if mode == "install-hook":
         return install_hook()
     if mode == "self-test":

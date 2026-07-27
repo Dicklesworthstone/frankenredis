@@ -295,10 +295,12 @@ scripts/perf_candidate_preflight.py check-candidate 'drop_if_expired'
 # The same check refuses a NEW KEEP/SHIPPED entry without both a self-reported
 # executing-binary/ELF SHA-256 and a same-invocation A/A bootstrap median CI.
 # It also refuses any verdict that uses CV as a decision gate or omits a
-# concrete retry predicate.
-git diff --cached -U0 -- \
-  docs/NEGATIVE_EVIDENCE.md docs/perf_negative_evidence_ledger.md \
-  | scripts/perf_candidate_preflight.py check-entry -
+# concrete retry predicate. Every KEEP must additionally declare exactly one:
+#   Claim class: SELF-SPEEDUP + Campaign output: no
+#   Claim class: COMPETITIVE + Campaign output: yes
+# COMPETITIVE also requires a numeric FrankenRedis/Redis ratio from the live
+# vendored Redis 7.2.4 arm in the same invocation.
+scripts/perf_candidate_preflight.py check-staged
 
 # Install the repository-local plugin into the existing pre-commit chain runner.
 # Installation refuses to overwrite an existing plugin.
@@ -307,10 +309,12 @@ scripts/perf_candidate_preflight.py install-hook
 
 The active checkout installs the gate as
 `.git/hooks/hooks.d/pre-commit/60-perf-ledger.py`; the existing pre-commit chain
-runner invokes it for every commit that stages either ledger. The plugin passes
-only the staged diff to `check-entry`, so an old unaudited row cannot satisfy a
-new one. A mention such as “no A/A null” is deliberately not evidence, and a
-source hash or commit hash is deliberately not a binary hash.
+runner invokes it for every commit that stages either ledger. The plugin
+recovers each complete added or modified staged entry from the index before
+checking it, so changing only a verdict body cannot bypass the heading parser
+and an old neighboring row cannot satisfy a new one. A mention such as “no A/A
+null” is deliberately not evidence, and a source hash or commit hash is
+deliberately not a binary hash.
 
 Both ledger modes normalise whitespace before matching, because the ledgers
 hard-wrap at ~100 columns and a raw-text grep scores a wrapped `Null\nmedian` as
@@ -318,4 +322,6 @@ hard-wrap at ~100 columns and a raw-text grep scores a wrapped `Null\nmedian` as
 exact-`##` parser preserves nested evidence under its parent row. Its built-in
 self-test exercises the same-invocation null-CI, counted-mechanism,
 self-reported-ELF, and never-CV rules before the pre-commit plugin delegates to
-it.
+it. Boundary fixtures cover level-2 verdicts in both ledgers plus the short
+ledger's historical level-3 verdict schema; an unsupported verdict heading
+fails closed.
