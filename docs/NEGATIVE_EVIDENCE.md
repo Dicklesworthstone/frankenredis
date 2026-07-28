@@ -33,6 +33,64 @@ Redis arm and numeric ratio; a SELF-SPEEDUP needs the heading label and cannot
 mark itself as campaign output. Missing or contradictory classification exits
 **8**.
 
+## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — current-HEAD saturated P16 `SET` is 1.2848x live Redis under the complete two-cycle harness (`frankenredis-9ffil`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes.** The campaign result is
+  io_uring FrankenRedis/Redis throughput against the actual vendored Redis
+  7.2.4 server running live beside both same-ELF A/A controls in one
+  invocation. The io_uring/mio comparison is SELF-SPEEDUP maintenance only.
+- **Ledger reopening and exact work.** Both ledgers and candidate preflight
+  were searched for the P16 pipeline, the historical 0.33-0.47x wall,
+  asynchronous CQ batching, client saturation, and SET. The prior strict row
+  measured 1.332480493x Redis with 32 samples and four client shards. Its
+  stated reopening basis is satisfied by the current 48-sample complete two-cycle
+  schedule, eight-shard client driver, hardened absolute A/A validity bound,
+  and current release codegen. This rerun does not reopen the rejected
+  synchronous submission or writev designs. Each fixed operation is exactly
+  `SET k v`; every reply was byte-checked as RESP2 `+OK`.
+- **Executing provenance, profile, and saturation.** Strict-remote
+  `vmi1149989` (Linux 6.17.0-40-generic) ran 48 samples x 200,000 replies/arm
+  at P16 with 50 persistent clients in eight pinned shards, a disjoint server
+  core, 125-group within-sample interleaving, and two complete 24-order
+  cycles. The executing harness self-reported ELF SHA-256
+  **`c7aa06c6dabf7a4f69b1472b00c06c29bf9fc560b79db742cb411cf6d4646f4d`**;
+  all three executing FrankenRedis arms self-reported ELF SHA-256
+  **`50e55d356eb90cb66fb696013d2a4f09cf5ddb7aae32f4021fee92469fbb8f05`**;
+  Redis self-reported ELF SHA-256
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+  The zero-lost selected-pipeline profile attributed **0.39% self-time** to
+  owned submit/drain and **0.83%** to the full asynchronous output surface,
+  an Amdahl elimination ceiling of **1.008369x**. Candidate/Redis median
+  server utilization was **98.888%/98.628%**.
+- **Bootstrap median-CI competitive verdict.** Wall A/A null median was
+  **0.996056770x**, bootstrap 95% median CI
+  **[0.953686267, 1.035393996]**, inside derived gate
+  **[0.907372534, 1.092627466]**. FrankenRedis/Redis throughput (Redis wall /
+  FrankenRedis wall) was **1.284808562x**, CI
+  **[1.261416813, 1.350349016]**: COMPETITIVE KEEP. CPU A/A median was
+  **1.002979883x**, CI **[0.964650502, 1.024807842]**, inside gate
+  **[0.929301004, 1.070698996]**; competitive CPU efficiency was
+  **1.274439584x**, CI **[1.257928596, 1.339334001]**: KEEP. This stronger
+  complete-cycle result supersedes 1.332480493x as the current pipeline
+  number; the original 0.33-0.47x wall is now a 1.2848x lead, a
+  **2.73-3.89x ratio reversal**.
+- **Maintenance disposition, invalid routes, and retry predicate.** Same-ELF
+  mio/io_uring wall self-speedup was HOLD at **1.105211093x**, CI
+  [1.089867380, 1.141852844], because its CI touches the A/A-derived gate; CPU
+  self-speedup was KEEP at **1.103751326x**, CI
+  [1.086420270, 1.129364103]. Neither is campaign output. Bootstrap median-CI
+  decided every verdict, never CV; CV is provenance only (wall null
+  9.022472%, self 8.550299%, competitive 8.890187%; CPU null 8.208736%,
+  self 8.024167%, competitive 8.342408%). An eight-physical-core worker and
+  an RCH hard-preflight failure emitted no samples and informed no ratio.
+  **Retry predicate:** re-run after changes to client sharding/pinning,
+  quiet-core or order scheduling, io_uring ownership/CQ draining, event-loop
+  output, exact SET parsing/execution/store work, Redis, kernel, allocator, or
+  release codegen, or if a fresh valid competitive CI overlaps 1.0. Any retry
+  must retain the exact P16 command/reply, live Redis arm, ELF self-reports,
+  same-invocation A/A, complete order cycles, zero-lost nonzero-self selected
+  profile, byte checking, and >=90% candidate/incumbent utilization.
+
 ## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — zero-delta `HINCRBY` on a pristine 500-field numeric hash is 3.7616x live Redis at saturated P16 (`frankenredis-6drix`)
 
 - **Claim class: COMPETITIVE. Campaign output: yes.** This is current io_uring
