@@ -12384,6 +12384,7 @@ enum BorrowedDispatchFloorClass {
     BitfieldRoTwoGet,
     BitfieldSet,
     Dbsize,
+    Echo,
     Exists(usize),
     Getex,
     GetexExpire,
@@ -12437,6 +12438,7 @@ enum BorrowedDispatchFloorCommand {
     BitfieldRo,
     Bitpos,
     Dbsize,
+    Echo,
     Exists,
     Getex,
     Getrange,
@@ -12488,6 +12490,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             .eq_ignore_ascii_case(b"TTL")
             .then_some(BorrowedDispatchFloorCommand::Ttl),
         4 => match uppercase_ascii_token::<4>(token)? {
+            [b'E', b'C', b'H', b'O'] => Some(BorrowedDispatchFloorCommand::Echo),
             [b'T', b'Y', b'P', b'E'] => Some(BorrowedDispatchFloorCommand::Type),
             [b'X', b'L', b'E', b'N'] => Some(BorrowedDispatchFloorCommand::Xlen),
             [b'H', b'L', b'E', b'N'] => Some(BorrowedDispatchFloorCommand::Hlen),
@@ -12828,6 +12831,9 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (1, BorrowedDispatchFloorCommand::Dbsize) if dbsize_floor_enabled() => {
             Some(BorrowedDispatchFloorClass::Dbsize)
         }
+        (2, BorrowedDispatchFloorCommand::Echo) if echo_floor_enabled() => {
+            Some(BorrowedDispatchFloorClass::Echo)
+        }
         (5, BorrowedDispatchFloorCommand::Bitfield) => Some(
             BorrowedDispatchFloorClass::BitfieldGet(PlainBitfieldGetCmd::Bitfield),
         ),
@@ -13074,6 +13080,25 @@ const fn dbsize_floor_enabled() -> bool {
     true
 }
 
+/// Preserve the exact pre-lever ECHO cascade route in the measurement ELF.
+/// The controls select it before their first packet; production builds compile
+/// only the front-dispatch route.
+#[cfg(feature = "perf-ab-echo-floor")]
+#[inline]
+fn echo_floor_enabled() -> bool {
+    static ORIG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    !*ORIG.get_or_init(|| match std::env::var("FR_PERF_AB_ECHO_FLOOR_ORIG") {
+        Ok(value) => value == "1",
+        Err(_) => false,
+    })
+}
+
+#[cfg(not(feature = "perf-ab-echo-floor"))]
+#[inline(always)]
+const fn echo_floor_enabled() -> bool {
+    true
+}
+
 /// Keep the exact pre-lever ten-element XADD classification in the measurement
 /// ELF. Each benchmark arm launches that same ELF in a fresh process and selects
 /// the frozen control before the first packet is classified.
@@ -13268,6 +13293,21 @@ fn dispatch_floor_fast_dbsize(
     let consumed = parse_borrowed_plain_dbsize_packet(unparsed, parser_config)?;
     let response = runtime.execute_plain_dbsize_borrowed(ts)?;
     Some((consumed, response))
+}
+
+#[cfg_attr(feature = "perf-ab-echo-floor", inline(never))]
+#[cfg_attr(not(feature = "perf-ab-echo-floor"), inline)]
+fn dispatch_floor_fast_echo_into(
+    unparsed: &[u8],
+    parser_config: &ParserConfig,
+    runtime: &mut Runtime,
+    ts: u64,
+    out: &mut Vec<u8>,
+) -> Option<usize> {
+    let packet = parse_borrowed_plain_echo_packet(unparsed, parser_config)?;
+    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+    runtime.execute_plain_echo_borrowed_into(packet.key, ts, client_resp3, out)?;
+    Some(packet.consumed)
 }
 
 #[cfg_attr(feature = "perf-ab-lpos-floor", inline(never))]
@@ -13943,6 +13983,22 @@ fn try_dispatch_floor_classified_action(
                 dispatch_floor_fast_dbsize(unparsed, &parser_config, runtime, ts)
             {
                 Ok(BorrowedMultibulkAction::FastReply { consumed, response })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Echo => {
+            if let Some(consumed) =
+                dispatch_floor_fast_echo_into(unparsed, &parser_config, runtime, ts, out)
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,
@@ -32186,6 +32242,20 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(b"*1\r\n$6\r\nDbSiZe\r\n", &cfg,),
             Some(super::BorrowedDispatchFloorClass::Dbsize)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*2\r\n$4\r\nEcHo\r\n$1\r\nx\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Echo)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$4\r\nECHO\r\n$1\r\nx\r\n$1\r\ny\r\n",
+                &cfg,
+            ),
+            None
         );
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(

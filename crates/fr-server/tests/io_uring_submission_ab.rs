@@ -31,14 +31,19 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const CLIENTS: usize = 50;
-// Four shards became client-bound once the OBJECT ENCODING floor cut the server
-// below one microsecond per command at P16. Five saturated the measured route at
-// 96.47%; the utilization guard remains authoritative for faster shapes.
-const DEFAULT_CLIENT_THREADS: usize = 5;
+// Four shards became client-bound below one microsecond per command at P16, and
+// even five left the ECHO floor at only 85.298% median server utilization. Nine
+// shards use the worker's remaining physical cores while keeping a disjoint
+// server core; the utilization guard remains authoritative.
+const DEFAULT_CLIENT_THREADS: usize = 9;
 const DEFAULT_SAMPLES: usize = 32;
 const DEFAULT_OPS_PER_SAMPLE: usize = 200_000;
 const DEFAULT_PROFILE_SECONDS: u64 = 3;
-const INTERLEAVE_GROUPS: usize = 25;
+// One group is only CLIENTS * pipeline operations. Twenty-five groups left a
+// sub-microsecond floor dominated by client-channel handoffs even with nine
+// pinned shards; 125 keeps each arm slice below one second while amortizing the
+// barrier enough to drive the server continuously.
+const INTERLEAVE_GROUPS: usize = 125;
 const QUIET_CORE_MAX_PCT: f64 = 5.0;
 const QUIET_CORE_PREFLIGHT_ATTEMPTS: usize = 20;
 const MIN_SERVER_UTIL_PCT: f64 = 90.0;
@@ -48,6 +53,7 @@ const BITFIELD_RO_TWO_GET_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_BITFIELD_RO_TWO_
 const OBJECT_ENCODING_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_OBJECT_ENCODING_FLOOR_ORIG";
 const OBJECT_REFCOUNT_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_OBJECT_REFCOUNT_FLOOR_ORIG";
 const DBSIZE_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_DBSIZE_FLOOR_ORIG";
+const ECHO_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_ECHO_FLOOR_ORIG";
 const SHUTDOWN: &[u8] = b"*2\r\n$8\r\nSHUTDOWN\r\n$6\r\nNOSAVE\r\n";
 const SET: &[u8] = b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n";
 const SET_REPLY: &[u8] = b"+OK\r\n";
@@ -71,6 +77,8 @@ const OBJECT_REFCOUNT: &[u8] = b"*3\r\n$6\r\nOBJECT\r\n$8\r\nREFCOUNT\r\n$8\r\no
 const OBJECT_REFCOUNT_REPLY: &[u8] = b":1\r\n";
 const DBSIZE: &[u8] = b"*1\r\n$6\r\nDBSIZE\r\n";
 const DBSIZE_REPLY: &[u8] = b":1\r\n";
+const ECHO: &[u8] = b"*2\r\n$4\r\nECHO\r\n$1\r\nx\r\n";
+const ECHO_REPLY: &[u8] = b"$1\r\nx\r\n";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Arm {
@@ -112,6 +120,7 @@ enum Workload {
     ObjectEncoding,
     ObjectRefcount,
     Dbsize,
+    Echo,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -122,6 +131,7 @@ enum CommandFloorAb {
     ObjectEncoding,
     ObjectRefcount,
     Dbsize,
+    Echo,
 }
 
 impl Workload {
@@ -135,6 +145,7 @@ impl Workload {
             Self::ObjectEncoding => "object-encoding",
             Self::ObjectRefcount => "object-refcount",
             Self::Dbsize => "dbsize",
+            Self::Echo => "echo",
         }
     }
 
@@ -173,6 +184,12 @@ impl Workload {
                 "parse_borrowed_plain_dbsize_packet",
                 "dbsize_in_db",
             ],
+            Self::Echo => &[
+                "frankenredis::process_buffered_frames",
+                "dispatch_floor_fast_echo_into",
+                "execute_plain_echo_borrowed_into",
+                "parse_borrowed_plain_echo_packet",
+            ],
             Self::Set | Self::Get | Self::Mixed => &[],
         }
     }
@@ -192,6 +209,7 @@ impl Workload {
                 "object-encoding" => Self::ObjectEncoding,
                 "object-refcount" => Self::ObjectRefcount,
                 "dbsize" => Self::Dbsize,
+                "echo" => Self::Echo,
                 other => panic!("unknown FR_URING_AB_WORKLOADS item: {other}"),
             })
             .collect()
@@ -278,6 +296,16 @@ impl WorkloadPackets {
             }
             Workload::Dbsize => {
                 let case = repeated_case(DBSIZE, DBSIZE_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::Echo => {
+                let case = repeated_case(ECHO, ECHO_REPLY, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -501,6 +529,10 @@ impl Server {
             && matches!(arm, Arm::MioA | Arm::MioB)
         {
             command.env(DBSIZE_FLOOR_CONTROL_ENV, "1");
+        }
+        if matches!(command_floor_ab, CommandFloorAb::Echo) && matches!(arm, Arm::MioA | Arm::MioB)
+        {
+            command.env(ECHO_FLOOR_CONTROL_ENV, "1");
         }
         command
             .current_dir(&runtime_dir)
@@ -1552,6 +1584,7 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
     let object_encoding_floor_ab = parse_bool_env("FR_URING_AB_OBJECT_ENCODING_FLOOR");
     let object_refcount_floor_ab = parse_bool_env("FR_URING_AB_OBJECT_REFCOUNT_FLOOR");
     let dbsize_floor_ab = parse_bool_env("FR_URING_AB_DBSIZE_FLOOR");
+    let echo_floor_ab = parse_bool_env("FR_URING_AB_ECHO_FLOOR");
     assert!(!workloads.is_empty(), "at least one workload is required");
     assert!(!pipelines.is_empty(), "at least one pipeline is required");
     #[cfg(not(feature = "perf-ab-bitpos-range-floor"))]
@@ -1583,12 +1616,18 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
         !dbsize_floor_ab,
         "FR_URING_AB_DBSIZE_FLOOR=1 requires --features perf-ab-dbsize-floor"
     );
+    #[cfg(not(feature = "perf-ab-echo-floor"))]
+    assert!(
+        !echo_floor_ab,
+        "FR_URING_AB_ECHO_FLOOR=1 requires --features perf-ab-echo-floor"
+    );
     assert!(
         usize::from(bitpos_range_floor_ab)
             + usize::from(bitfield_ro_two_get_floor_ab)
             + usize::from(object_encoding_floor_ab)
             + usize::from(object_refcount_floor_ab)
             + usize::from(dbsize_floor_ab)
+            + usize::from(echo_floor_ab)
             <= 1,
         "run only one command-shape floor experiment per invocation"
     );
@@ -1602,6 +1641,8 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
         CommandFloorAb::ObjectRefcount
     } else if dbsize_floor_ab {
         CommandFloorAb::Dbsize
+    } else if echo_floor_ab {
+        CommandFloorAb::Echo
     } else {
         CommandFloorAb::None
     };
@@ -1638,6 +1679,13 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
             workloads,
             [Workload::Dbsize],
             "the DBSIZE floor A/B must isolate the exact profiled workload"
+        );
+    }
+    if echo_floor_ab {
+        assert_eq!(
+            workloads,
+            [Workload::Echo],
+            "the ECHO floor A/B must isolate the exact profiled workload"
         );
     }
 
@@ -1779,6 +1827,18 @@ candidate=io_uring+dbsize_floor incumbent=vendored_redis_7.2.4"
         servers[Arm::MioA.index()].assert_environment_value(DBSIZE_FLOOR_CONTROL_ENV, Some("1"));
         servers[Arm::MioB.index()].assert_environment_value(DBSIZE_FLOOR_CONTROL_ENV, Some("1"));
         servers[Arm::IoUring.index()].assert_environment_value(DBSIZE_FLOOR_CONTROL_ENV, None);
+    } else if echo_floor_ab {
+        println!(
+            "ARM_SEMANTICS control_a=io_uring+frozen_pre_echo_floor \
+control_b=io_uring+frozen_pre_echo_floor \
+candidate=io_uring+echo_floor incumbent=vendored_redis_7.2.4"
+        );
+        for arm in [Arm::MioA, Arm::MioB, Arm::IoUring] {
+            servers[arm.index()].assert_flag_reached_process();
+        }
+        servers[Arm::MioA.index()].assert_environment_value(ECHO_FLOOR_CONTROL_ENV, Some("1"));
+        servers[Arm::MioB.index()].assert_environment_value(ECHO_FLOOR_CONTROL_ENV, Some("1"));
+        servers[Arm::IoUring.index()].assert_environment_value(ECHO_FLOOR_CONTROL_ENV, None);
     } else {
         println!(
             "ARM_SEMANTICS control_a=mio control_b=mio \
