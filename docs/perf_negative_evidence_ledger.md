@@ -28,6 +28,84 @@ Every new KEEP declares exactly one class:
 modified entries in both ledger files. It also preserves the ELF self-report,
 A/A bootstrap median-CI, never-CV, counted-mechanism, and retry-predicate gates.
 
+## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — inverted `LRANGE l 1 0` front dispatch is 1.2759x live Redis at saturated P16 (`frankenredis-wxitz`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes.** The competitive number is
+  candidate FrankenRedis/Redis throughput against the actual vendored Redis
+  7.2.4 server live beside both A/A controls in the same invocation. The
+  early-cascade/candidate result is a **SELF-SPEEDUP** maintenance result only.
+- **Admission and untouched baseline.** Exact-candidate preflight was clear,
+  then every broader LRANGE row was adjudicated by hand. The 2026-06-26
+  dispatch-hoist is **VALID-MECHANISM**: it counted moving LRANGE ahead of the
+  deep cascade and named whole-cascade reordering as its next step. This
+  lever fulfills that predicate. Borrow-scan single-lookup and LFU 3-to-1 are
+  distinct **VALID-MECHANISM** store levers already present; older broad rows
+  without current A/A and ELF identity do not decide exact inverted LRANGE.
+  Before the edit, fully reserved `vmi1227854` (Linux 6.17.0-35-generic) ran 48
+  x 200,000 byte-checked replies/arm at P16, 50 clients in nine pinned shards,
+  a dedicated server core, 125-group interleaving, and two full 24-order
+  cycles. Harness, FrankenRedis, and Redis ELF SHA-256 were
+  **`2f635ac52b181764252d51d3f9efbe77974f974504b4d3bb45b3df2260e951be`**,
+  **`49022f7b263861274967dbae2894a5b579cac4496e92d6a8db47efd2d2608c19`**,
+  and **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+  FrankenRedis/Redis utilization was 98.493%/98.180%.
+- **Profile-guided lever.** The zero-lost untouched profile attributed
+  **20.51% self-time** to the named pre-floor subset
+  (`process_buffered_frames` 16.34%, executor 2.33%, exact parser 1.84%), an
+  admission ceiling of **1.258020x** for that named subset. It is not a
+  complete-cascade ceiling: the front classifier also bypasses unnamed
+  parser/dispatch work. Async completion was 0.56%. Current
+  FrankenRedis/Redis throughput was **0.805927901x**, bootstrap 95% median CI
+  **[0.786059945, 0.828216749]**. The lever adds a case-insensitive arity-four
+  classifier and invokes the existing `parse_borrowed_plain_lrange_packet` and
+  `execute_plain_lrange_borrowed_into` functions before the generic cascade.
+  Parser refusal falls through, so parser, executor, store, error, expiry, LFU,
+  accounting, and reply behavior remain shared.
+- **Behavior proof and quality gates.** A live Redis 7.2.4 TCP differential
+  covers full, subrange, negative-index, out-of-range, inverted, missing,
+  WRONGTYPE, invalid bounds, and mixed-case LRANGE. The WRONGTYPE/inverted case
+  proves type checking still precedes the empty reply. Classifier mixed-case
+  and wrong-arity tests pass. Full conformance passed 194/194 library, 99/99
+  smoke/integration, every auxiliary target, and 206/206 live list cases.
+  Strict-remote workspace all-target check and Clippy with `-D warnings`,
+  changed-file rustfmt, and diff checks passed.
+- **Same executable and valid final invocation.** Fully reserved
+  `vmi1227854` ran the same fixed work and topology for 48 samples and two
+  complete order cycles. Both A/A controls selected io_uring plus the frozen
+  early-cascade route; the candidate selected io_uring plus front dispatch.
+  The harness self-reported ELF SHA-256
+  **`9cc6019acd846355dc1e6cd9ac365136feeea76669418890cce44c75d1bfc18c`**;
+  every executing FrankenRedis arm self-reported ELF SHA-256
+  **`3d38d0855e5ac87f42ca2e8cfd0672eae66dde8171f5eaee994e082abbf169b6`**;
+  Redis 7.2.4 self-reported ELF SHA-256
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+  Candidate/Redis utilization was 97.945%/98.041%. The zero-lost candidate
+  profile retained **8.61%** named command self-time
+  (`process_buffered_frames` 3.16%, parser 2.56%, executor 2.34%, front helper
+  0.55%) and 0.90% async self-time.
+- **Median-CI verdict.** Wall A/A null median was **0.993860099x**, bootstrap
+  95% median CI **[0.967491919, 1.023364801]**, within gate
+  **[0.934983838, 1.065016162]**. Candidate/Redis throughput was
+  **1.275859902x**, CI **[1.241735566, 1.302149691]**: COMPETITIVE KEEP.
+  Early-cascade/candidate was **1.611410155x**, CI
+  **[1.552140322, 1.660153532]**: SELF-SPEEDUP maintenance, not campaign
+  output. CPU A/A was **0.992306216x**, CI
+  **[0.969901018, 1.021053689]**; candidate/Redis CPU throughput was
+  **1.266899083x**, CI **[1.254431918, 1.300625947]**. Bootstrap median-CI
+  decided every verdict, never CV; CV is provenance only (wall null
+  11.845742%, self 12.965117%, competitive 17.817780%; CPU null 11.480342%,
+  self 12.829497%, competitive 17.434234%). One earlier setup invocation was
+  discarded in full because its A/A CI excluded 1.0; none of its candidate
+  numbers informed this verdict.
+- **Retry predicate.** Reopen after LRANGE parser/runtime/store semantics,
+  classifier or cascade architecture, Redis version, allocator, kernel,
+  io_uring harness, or release-codegen changes, or if a fresh valid
+  live-incumbent CI overlaps 1.0. Retain the populated list, exact
+  `LRANGE l 1 0` packet and byte-checked empty-array reply, live incumbent,
+  same-ELF self-reports, same-invocation A/A, complete order cycles, zero-lost
+  nonzero-self profile, and >=90% utilization. Rollback removes only the
+  `Lrange` classifier; the shared parser and executor remain.
+
 ## 2026-07-28 MossyBluff (cod/MEASURE): PROFILE REJECT — inverted-score `ZREMRANGEBYSCORE z +inf -inf` cannot close its incumbent gap (`frankenredis-2bdaj`)
 
 - **Admission and prior evidence.** Exact-candidate preflight was clear, then

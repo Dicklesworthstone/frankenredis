@@ -1008,6 +1008,46 @@ fn tcp_error_response() {
 }
 
 #[test]
+fn tcp_lrange_front_dispatch_matches_legacy_redis() {
+    let fr_port = reserve_port();
+    let redis_port = reserve_port();
+    let _fr_server = spawn_frankenredis(fr_port, None);
+    let _redis_server = spawn_legacy_redis(redis_port);
+    let mut fr = connect_client(fr_port);
+    let mut redis = connect_client(redis_port);
+
+    for command in [
+        &[b"DEL".as_slice(), b"l", b"str"][..],
+        &[b"RPUSH", b"l", b"a", b"b", b"c", b"d"],
+        &[b"SET", b"str", b"value"],
+    ] {
+        assert_eq!(
+            send_command(&mut fr, command),
+            send_command(&mut redis, command),
+            "setup diverged for {command:?}"
+        );
+    }
+
+    for command in [
+        &[b"LRANGE".as_slice(), b"l", b"0", b"-1"][..],
+        &[b"LRANGE", b"l", b"1", b"2"],
+        &[b"LrAnGe", b"l", b"-2", b"-1"],
+        &[b"LRANGE", b"l", b"8", b"12"],
+        &[b"LRANGE", b"l", b"1", b"0"],
+        &[b"LRANGE", b"missing", b"0", b"-1"],
+        &[b"LRANGE", b"str", b"1", b"0"],
+        &[b"LRANGE", b"l", b"invalid", b"0"],
+        &[b"LRANGE", b"l", b"0", b"invalid"],
+    ] {
+        assert_eq!(
+            send_command(&mut fr, command),
+            send_command(&mut redis, command),
+            "LRANGE front-dispatch reply diverged for {command:?}"
+        );
+    }
+}
+
+#[test]
 fn tcp_dbsize_and_flushdb() {
     let (port, server) = start_single_client_server();
 

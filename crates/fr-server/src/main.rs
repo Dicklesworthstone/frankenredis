@@ -12394,6 +12394,7 @@ enum BorrowedDispatchFloorClass {
     /// value count (5..=8) — the forms stranded ~1350 lines deep in the cascade.
     KeyedValuesWrite(usize),
     Llen,
+    Lrange,
     Lpos,
     MemoryUsage,
     ObjectEncoding,
@@ -12454,6 +12455,7 @@ enum BorrowedDispatchFloorCommand {
     Hrandfield,
     Incr,
     Llen,
+    Lrange,
     Lpos,
     Lpush,
     Memory,
@@ -12537,6 +12539,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'S', b'T', b'R', b'L', b'E', b'N'] => Some(BorrowedDispatchFloorCommand::Strlen),
             [b'M', b'E', b'M', b'O', b'R', b'Y'] => Some(BorrowedDispatchFloorCommand::Memory),
             [b'O', b'B', b'J', b'E', b'C', b'T'] => Some(BorrowedDispatchFloorCommand::Object),
+            [b'L', b'R', b'A', b'N', b'G', b'E'] => Some(BorrowedDispatchFloorCommand::Lrange),
             [b'Z', b'S', b'C', b'O', b'R', b'E'] => Some(BorrowedDispatchFloorCommand::Zscore),
             [b'Z', b'R', b'A', b'N', b'G', b'E'] => Some(BorrowedDispatchFloorCommand::Zrange),
             [b'X', b'R', b'A', b'N', b'G', b'E'] => Some(BorrowedDispatchFloorCommand::Xrange),
@@ -12868,6 +12871,9 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         }
         (4, BorrowedDispatchFloorCommand::Xrevrange) if xrevrange_zero_floor_enabled() => {
             Some(BorrowedDispatchFloorClass::XrevrangeZero)
+        }
+        (4, BorrowedDispatchFloorCommand::Lrange) if lrange_floor_enabled() => {
+            Some(BorrowedDispatchFloorClass::Lrange)
         }
         (5, BorrowedDispatchFloorCommand::Xtrim) if xtrim_minid_noop_floor_enabled() => {
             Some(BorrowedDispatchFloorClass::XtrimMinidNoop)
@@ -13263,6 +13269,26 @@ const fn xrevrange_zero_floor_enabled() -> bool {
     true
 }
 
+/// Preserve the current early-cascade route for arity-four `LRANGE` in the
+/// measurement ELF. Both controls select it before their first packet;
+/// production builds compile only the front-dispatch route, which reuses the
+/// same parser and runtime executor.
+#[cfg(feature = "perf-ab-lrange-floor")]
+#[inline]
+fn lrange_floor_enabled() -> bool {
+    static ORIG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    !*ORIG.get_or_init(|| match std::env::var("FR_PERF_AB_LRANGE_FLOOR_ORIG") {
+        Ok(value) => value == "1",
+        Err(_) => false,
+    })
+}
+
+#[cfg(not(feature = "perf-ab-lrange-floor"))]
+#[inline(always)]
+const fn lrange_floor_enabled() -> bool {
+    true
+}
+
 /// Keep the exact pre-lever ten-element XADD classification in the measurement
 /// ELF. Each benchmark arm launches that same ELF in a fresh process and selects
 /// the frozen control before the first packet is classified.
@@ -13581,6 +13607,20 @@ fn dispatch_floor_fast_xrevrange_zero_into(
     }
     let resp3 = runtime.client_session().resp_protocol_version() == 3;
     runtime.execute_plain_xrevrange_zero_borrowed_into(packet.key, ts, resp3, out)?;
+    Some(packet.consumed)
+}
+
+#[cfg_attr(feature = "perf-ab-lrange-floor", inline(never))]
+#[cfg_attr(not(feature = "perf-ab-lrange-floor"), inline)]
+fn dispatch_floor_fast_lrange_into(
+    unparsed: &[u8],
+    parser_config: &ParserConfig,
+    runtime: &mut Runtime,
+    ts: u64,
+    out: &mut Vec<u8>,
+) -> Option<usize> {
+    let packet = parse_borrowed_plain_lrange_packet(unparsed, parser_config)?;
+    runtime.execute_plain_lrange_borrowed_into(packet.key, packet.start, packet.end, ts, out)?;
     Some(packet.consumed)
 }
 
@@ -14367,6 +14407,22 @@ fn try_dispatch_floor_classified_action(
         BorrowedDispatchFloorClass::XrevrangeZero => {
             if let Some(consumed) =
                 dispatch_floor_fast_xrevrange_zero_into(unparsed, &parser_config, runtime, ts, out)
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Lrange => {
+            if let Some(consumed) =
+                dispatch_floor_fast_lrange_into(unparsed, &parser_config, runtime, ts, out)
             {
                 Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
             } else {
@@ -32740,6 +32796,20 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
                 &cfg,
             ),
             Some(super::BorrowedDispatchFloorClass::XrevrangeZero)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*4\r\n$6\r\nLrAnGe\r\n$1\r\nl\r\n$1\r\n1\r\n$1\r\n0\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Lrange)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$6\r\nLRANGE\r\n$1\r\nl\r\n$1\r\n0\r\n",
+                &cfg,
+            ),
+            None
         );
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(

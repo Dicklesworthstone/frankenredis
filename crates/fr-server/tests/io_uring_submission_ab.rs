@@ -64,6 +64,7 @@ const XDEL_MISSING_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_XDEL_MISSING_FLOOR_ORIG
 const XACK_MISSING_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_XACK_MISSING_FLOOR_ORIG";
 const XRANGE_ZERO_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_XRANGE_ZERO_FLOOR_ORIG";
 const XREVRANGE_ZERO_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_XREVRANGE_ZERO_FLOOR_ORIG";
+const LRANGE_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_LRANGE_FLOOR_ORIG";
 const XTRIM_MINID_NOOP_PREFILL_ENTRIES: usize = 1_000;
 const SHUTDOWN: &[u8] = b"*2\r\n$8\r\nSHUTDOWN\r\n$6\r\nNOSAVE\r\n";
 const SET: &[u8] = b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n";
@@ -79,6 +80,12 @@ const ZREMRANGEBYSCORE_INVERTED_PREFILL_REPLY: &[u8] = b"+OK\r\n:1\r\n:1\r\n";
 const ZREMRANGEBYSCORE_INVERTED: &[u8] =
     b"*4\r\n$16\r\nZREMRANGEBYSCORE\r\n$1\r\nz\r\n$4\r\n+inf\r\n$4\r\n-inf\r\n";
 const ZREMRANGEBYSCORE_INVERTED_REPLY: &[u8] = b":0\r\n";
+const LRANGE_INVERTED_PREFILL: &[u8] = b"*3\r\n$3\r\nSET\r\n$1\r\nl\r\n$4\r\nseed\r\n\
+*2\r\n$3\r\nDEL\r\n$1\r\nl\r\n\
+*3\r\n$5\r\nLPUSH\r\n$1\r\nl\r\n$1\r\nm\r\n";
+const LRANGE_INVERTED_PREFILL_REPLY: &[u8] = b"+OK\r\n:1\r\n:1\r\n";
+const LRANGE_INVERTED: &[u8] = b"*4\r\n$6\r\nLRANGE\r\n$1\r\nl\r\n$1\r\n1\r\n$1\r\n0\r\n";
+const LRANGE_INVERTED_REPLY: &[u8] = b"*0\r\n";
 const BITPOS_RANGE_PREFILL: &[u8] =
     b"*3\r\n$3\r\nSET\r\n$8\r\nbitpos:k\r\n$8\r\n\0\0\0\0\0\0\0\x80\r\n";
 const BITPOS_RANGE: &[u8] =
@@ -184,6 +191,7 @@ enum Workload {
     XreadAfterTail,
     PttlPersistent,
     ZremrangebyscoreInverted,
+    LrangeInverted,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -202,6 +210,7 @@ enum CommandFloorAb {
     XackMissingFloor,
     XrangeZeroFloor,
     XrevrangeZeroFloor,
+    LrangeFloor,
 }
 
 impl Workload {
@@ -228,6 +237,7 @@ impl Workload {
             Self::XreadAfterTail => "xread-after-tail",
             Self::PttlPersistent => "pttl-persistent",
             Self::ZremrangebyscoreInverted => "zremrangebyscore-inverted",
+            Self::LrangeInverted => "lrange-inverted",
         }
     }
 
@@ -378,6 +388,15 @@ impl Workload {
                 "fr_store::Store::zremrangebyscore",
                 "fr_store::SortedSet::score_bound_range",
             ],
+            Self::LrangeInverted => &[
+                "frankenredis::process_buffered_frames",
+                "__memcmp_avx2_movbe",
+                "dispatch_floor_fast_lrange_into",
+                "parse_borrowed_plain_lrange_packet",
+                "execute_plain_lrange_borrowed_into",
+                "fr_store::Store::lrange_borrow_scan",
+                "fr_store::normalize_index",
+            ],
             Self::Set | Self::Get | Self::Mixed => &[],
         }
     }
@@ -410,6 +429,7 @@ impl Workload {
                 "xread-after-tail" => Self::XreadAfterTail,
                 "pttl-persistent" => Self::PttlPersistent,
                 "zremrangebyscore-inverted" => Self::ZremrangebyscoreInverted,
+                "lrange-inverted" => Self::LrangeInverted,
                 other => panic!("unknown FR_URING_AB_WORKLOADS item: {other}"),
             })
             .collect()
@@ -630,6 +650,16 @@ impl WorkloadPackets {
                     ZREMRANGEBYSCORE_INVERTED_REPLY,
                     pipeline,
                 );
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::LrangeInverted => {
+                let case = repeated_case(LRANGE_INVERTED, LRANGE_INVERTED_REPLY, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -893,6 +923,11 @@ impl Server {
         {
             command.env(XREVRANGE_ZERO_FLOOR_CONTROL_ENV, "1");
         }
+        if matches!(command_floor_ab, CommandFloorAb::LrangeFloor)
+            && matches!(arm, Arm::MioA | Arm::MioB)
+        {
+            command.env(LRANGE_FLOOR_CONTROL_ENV, "1");
+        }
         command
             .current_dir(&runtime_dir)
             .stdout(Stdio::null())
@@ -1139,6 +1174,12 @@ fn prefill(servers: &mut [Server; 4], workload: Workload) {
                 server,
                 ZREMRANGEBYSCORE_INVERTED_PREFILL,
                 ZREMRANGEBYSCORE_INVERTED_PREFILL_REPLY,
+            );
+        } else if matches!(workload, Workload::LrangeInverted) {
+            exchange_one(
+                server,
+                LRANGE_INVERTED_PREFILL,
+                LRANGE_INVERTED_PREFILL_REPLY,
             );
         } else if let Some(case) = &seeded_stream {
             exchange_one(server, &case.request, &case.response);
@@ -2028,6 +2069,7 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
     let xack_missing_floor_ab = parse_bool_env("FR_URING_AB_XACK_MISSING_FLOOR");
     let xrange_zero_floor_ab = parse_bool_env("FR_URING_AB_XRANGE_ZERO_FLOOR");
     let xrevrange_zero_floor_ab = parse_bool_env("FR_URING_AB_XREVRANGE_ZERO_FLOOR");
+    let lrange_floor_ab = parse_bool_env("FR_URING_AB_LRANGE_FLOOR");
     assert!(!workloads.is_empty(), "at least one workload is required");
     assert!(!pipelines.is_empty(), "at least one pipeline is required");
     #[cfg(not(feature = "perf-ab-bitpos-range-floor"))]
@@ -2101,6 +2143,11 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
         "FR_URING_AB_XREVRANGE_ZERO_FLOOR=1 requires \
 --features perf-ab-xrevrange-zero-floor"
     );
+    #[cfg(not(feature = "perf-ab-lrange-floor"))]
+    assert!(
+        !lrange_floor_ab,
+        "FR_URING_AB_LRANGE_FLOOR=1 requires --features perf-ab-lrange-floor"
+    );
     assert!(
         usize::from(bitpos_range_floor_ab)
             + usize::from(bitfield_ro_two_get_floor_ab)
@@ -2115,6 +2162,7 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
             + usize::from(xack_missing_floor_ab)
             + usize::from(xrange_zero_floor_ab)
             + usize::from(xrevrange_zero_floor_ab)
+            + usize::from(lrange_floor_ab)
             <= 1,
         "run only one command-shape floor experiment per invocation"
     );
@@ -2144,6 +2192,8 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
         CommandFloorAb::XrangeZeroFloor
     } else if xrevrange_zero_floor_ab {
         CommandFloorAb::XrevrangeZeroFloor
+    } else if lrange_floor_ab {
+        CommandFloorAb::LrangeFloor
     } else {
         CommandFloorAb::None
     };
@@ -2236,6 +2286,13 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
             workloads,
             [Workload::XrevrangeZero],
             "the XREVRANGE zero interval floor A/B must isolate the exact profiled workload"
+        );
+    }
+    if lrange_floor_ab {
+        assert_eq!(
+            workloads,
+            [Workload::LrangeInverted],
+            "the LRANGE floor A/B must isolate the exact profiled workload"
         );
     }
 
@@ -2489,6 +2546,18 @@ candidate=io_uring+xrevrange_zero_dispatch_floor incumbent=vendored_redis_7.2.4"
             .assert_environment_value(XREVRANGE_ZERO_FLOOR_CONTROL_ENV, Some("1"));
         servers[Arm::IoUring.index()]
             .assert_environment_value(XREVRANGE_ZERO_FLOOR_CONTROL_ENV, None);
+    } else if lrange_floor_ab {
+        println!(
+            "ARM_SEMANTICS control_a=io_uring+early_cascade_lrange \
+control_b=io_uring+early_cascade_lrange \
+candidate=io_uring+lrange_front_dispatch incumbent=vendored_redis_7.2.4"
+        );
+        for arm in [Arm::MioA, Arm::MioB, Arm::IoUring] {
+            servers[arm.index()].assert_flag_reached_process();
+        }
+        servers[Arm::MioA.index()].assert_environment_value(LRANGE_FLOOR_CONTROL_ENV, Some("1"));
+        servers[Arm::MioB.index()].assert_environment_value(LRANGE_FLOOR_CONTROL_ENV, Some("1"));
+        servers[Arm::IoUring.index()].assert_environment_value(LRANGE_FLOOR_CONTROL_ENV, None);
     } else {
         println!(
             "ARM_SEMANTICS control_a=mio control_b=mio \

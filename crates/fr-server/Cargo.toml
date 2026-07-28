@@ -127,6 +127,10 @@ perf-ab-xrange-zero-floor = []
 # dispatch floor. Controls preserve the guarded generic reverse-range scan;
 # production builds compile only the invariant-backed empty-range route.
 perf-ab-xrevrange-zero-floor = []
+# Measurement-only control arm for the arity-four LRANGE front-dispatch floor.
+# Controls preserve the current early-cascade route; production builds compile
+# only the front classifier using the same parser and runtime executor.
+perf-ab-lrange-floor = []
 # Measurement-only frozen arm for replica-prefix extraction A/Bs.
 bench-reference = []
 
