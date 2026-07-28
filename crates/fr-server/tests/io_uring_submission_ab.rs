@@ -40,12 +40,14 @@ const DEFAULT_OPS_PER_SAMPLE: usize = 200_000;
 const DEFAULT_PROFILE_SECONDS: u64 = 3;
 const INTERLEAVE_GROUPS: usize = 25;
 const QUIET_CORE_MAX_PCT: f64 = 5.0;
+const QUIET_CORE_PREFLIGHT_ATTEMPTS: usize = 20;
 const MIN_SERVER_UTIL_PCT: f64 = 90.0;
 const IO_URING_FLAG: &str = "--io-uring-output";
 const BITPOS_RANGE_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_BITPOS_RANGE_FLOOR_ORIG";
 const BITFIELD_RO_TWO_GET_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_BITFIELD_RO_TWO_GET_FLOOR_ORIG";
 const OBJECT_ENCODING_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_OBJECT_ENCODING_FLOOR_ORIG";
 const OBJECT_REFCOUNT_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_OBJECT_REFCOUNT_FLOOR_ORIG";
+const DBSIZE_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_DBSIZE_FLOOR_ORIG";
 const SHUTDOWN: &[u8] = b"*2\r\n$8\r\nSHUTDOWN\r\n$6\r\nNOSAVE\r\n";
 const SET: &[u8] = b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n";
 const SET_REPLY: &[u8] = b"+OK\r\n";
@@ -67,6 +69,8 @@ const OBJECT_ENCODING_REPLY: &[u8] = b"$3\r\nint\r\n";
 const OBJECT_REFCOUNT_PREFILL: &[u8] = b"*3\r\n$3\r\nSET\r\n$8\r\nobject:k\r\n$5\r\nvalue\r\n";
 const OBJECT_REFCOUNT: &[u8] = b"*3\r\n$6\r\nOBJECT\r\n$8\r\nREFCOUNT\r\n$8\r\nobject:k\r\n";
 const OBJECT_REFCOUNT_REPLY: &[u8] = b":1\r\n";
+const DBSIZE: &[u8] = b"*1\r\n$6\r\nDBSIZE\r\n";
+const DBSIZE_REPLY: &[u8] = b":1\r\n";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Arm {
@@ -107,6 +111,7 @@ enum Workload {
     BitfieldRoTwoGet,
     ObjectEncoding,
     ObjectRefcount,
+    Dbsize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,6 +121,7 @@ enum CommandFloorAb {
     BitfieldRoTwoGet,
     ObjectEncoding,
     ObjectRefcount,
+    Dbsize,
 }
 
 impl Workload {
@@ -128,6 +134,7 @@ impl Workload {
             Self::BitfieldRoTwoGet => "bitfield-ro-two-get",
             Self::ObjectEncoding => "object-encoding",
             Self::ObjectRefcount => "object-refcount",
+            Self::Dbsize => "dbsize",
         }
     }
 
@@ -159,6 +166,13 @@ impl Workload {
                 "parse_borrowed_plain_object_refcount_packet",
                 "object_refcount",
             ],
+            Self::Dbsize => &[
+                "frankenredis::process_buffered_frames",
+                "dispatch_floor_fast_dbsize",
+                "execute_plain_dbsize_borrowed",
+                "parse_borrowed_plain_dbsize_packet",
+                "dbsize_in_db",
+            ],
             Self::Set | Self::Get | Self::Mixed => &[],
         }
     }
@@ -177,6 +191,7 @@ impl Workload {
                 "bitfield-ro-two-get" => Self::BitfieldRoTwoGet,
                 "object-encoding" => Self::ObjectEncoding,
                 "object-refcount" => Self::ObjectRefcount,
+                "dbsize" => Self::Dbsize,
                 other => panic!("unknown FR_URING_AB_WORKLOADS item: {other}"),
             })
             .collect()
@@ -253,6 +268,16 @@ impl WorkloadPackets {
             }
             Workload::ObjectRefcount => {
                 let case = repeated_case(OBJECT_REFCOUNT, OBJECT_REFCOUNT_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::Dbsize => {
+                let case = repeated_case(DBSIZE, DBSIZE_REPLY, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -471,6 +496,11 @@ impl Server {
             && matches!(arm, Arm::MioA | Arm::MioB)
         {
             command.env(OBJECT_REFCOUNT_FLOOR_CONTROL_ENV, "1");
+        }
+        if matches!(command_floor_ab, CommandFloorAb::Dbsize)
+            && matches!(arm, Arm::MioA | Arm::MioB)
+        {
+            command.env(DBSIZE_FLOOR_CONTROL_ENV, "1");
         }
         command
             .current_dir(&runtime_dir)
@@ -1291,73 +1321,79 @@ fn observed_core_loads() -> HashMap<usize, f64> {
 
 fn choose_and_pin_cores(client_threads: usize) -> (Vec<usize>, usize) {
     let allowed = allowed_cpus();
-    let loads = observed_core_loads();
-    let quiet = allowed
-        .iter()
-        .copied()
-        .filter(|cpu| {
-            sibling_group(*cpu)
-                .iter()
-                .all(|sibling| loads.get(sibling).copied().unwrap_or(0.0) < QUIET_CORE_MAX_PCT)
-        })
-        .collect::<Vec<_>>();
-    let mut claimed_siblings = HashSet::new();
-    let mut client_cores = Vec::with_capacity(client_threads);
-    for cpu in &quiet {
-        let siblings = sibling_group(*cpu);
-        if siblings
+    for attempt in 1..=QUIET_CORE_PREFLIGHT_ATTEMPTS {
+        let loads = observed_core_loads();
+        let quiet = allowed
             .iter()
-            .all(|sibling| !claimed_siblings.contains(sibling))
-        {
-            client_cores.push(*cpu);
-            claimed_siblings.extend(siblings);
-        }
-        if client_cores.len() == client_threads {
-            break;
-        }
-    }
-    assert_eq!(
-        client_cores.len(),
-        client_threads,
-        "worker has fewer than {client_threads} quiet physical client CPUs: \
-allowed={allowed:?} loads={loads:?} quiet={quiet:?}"
-    );
-    let server_core = quiet
-        .iter()
-        .rev()
-        .copied()
-        .find(|cpu| {
-            sibling_group(*cpu)
+            .copied()
+            .filter(|cpu| {
+                sibling_group(*cpu)
+                    .iter()
+                    .all(|sibling| loads.get(sibling).copied().unwrap_or(0.0) < QUIET_CORE_MAX_PCT)
+            })
+            .collect::<Vec<_>>();
+        let mut claimed_siblings = HashSet::new();
+        let mut client_cores = Vec::with_capacity(client_threads);
+        for cpu in &quiet {
+            let siblings = sibling_group(*cpu);
+            if siblings
                 .iter()
                 .all(|sibling| !claimed_siblings.contains(sibling))
-        })
-        .unwrap_or_else(|| {
-            panic!(
-                "worker has no quiet server CPU outside client SMT siblings: \
+            {
+                client_cores.push(*cpu);
+                claimed_siblings.extend(siblings);
+            }
+            if client_cores.len() == client_threads {
+                break;
+            }
+        }
+        let server_core = (client_cores.len() == client_threads)
+            .then(|| {
+                quiet.iter().rev().copied().find(|cpu| {
+                    sibling_group(*cpu)
+                        .iter()
+                        .all(|sibling| !claimed_siblings.contains(sibling))
+                })
+            })
+            .flatten();
+        let Some(server_core) = server_core else {
+            if attempt == QUIET_CORE_PREFLIGHT_ATTEMPTS {
+                panic!(
+                    "worker did not expose {client_threads} quiet physical client CPUs plus a \
+disjoint quiet server CPU after {attempt} attempts: allowed={allowed:?} loads={loads:?} \
 quiet={quiet:?} client_cores={client_cores:?} claimed_siblings={claimed_siblings:?}"
-            )
-        });
-    let client_mask = client_cores
-        .iter()
-        .map(usize::to_string)
-        .collect::<Vec<_>>()
-        .join(",");
-    let pin = Command::new("taskset")
-        .args(["-apc", &client_mask, &std::process::id().to_string()])
-        .output()
-        .expect("pin benchmark client process");
-    assert!(
-        pin.status.success(),
-        "client taskset failed: {}",
-        String::from_utf8_lossy(&pin.stderr)
-    );
-    println!(
-        "CPU_PREFLIGHT client_cores={client_cores:?} \
+                );
+            }
+            println!(
+                "CPU_PREFLIGHT_RETRY attempt={attempt}/{QUIET_CORE_PREFLIGHT_ATTEMPTS} \
+allowed={allowed:?} loads={loads:?} quiet={quiet:?} \
+client_cores={client_cores:?} claimed_siblings={claimed_siblings:?}"
+            );
+            continue;
+        };
+        let client_mask = client_cores
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let pin = Command::new("taskset")
+            .args(["-apc", &client_mask, &std::process::id().to_string()])
+            .output()
+            .expect("pin benchmark client process");
+        assert!(
+            pin.status.success(),
+            "client taskset failed: {}",
+            String::from_utf8_lossy(&pin.stderr)
+        );
+        println!(
+            "CPU_PREFLIGHT attempts={attempt} client_cores={client_cores:?} \
 client_siblings={claimed_siblings:?} \
 server={server_core} server_siblings={:?} allowed={allowed:?} loads={loads:?}",
-        sibling_group(server_core)
-    );
-    (client_cores, server_core)
+            sibling_group(server_core)
+        );
+        return (client_cores, server_core);
+    }
+    unreachable!("quiet-core preflight loop returns or panics");
 }
 
 fn unique_root() -> PathBuf {
@@ -1515,6 +1551,7 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
     let bitfield_ro_two_get_floor_ab = parse_bool_env("FR_URING_AB_BITFIELD_RO_TWO_GET_FLOOR");
     let object_encoding_floor_ab = parse_bool_env("FR_URING_AB_OBJECT_ENCODING_FLOOR");
     let object_refcount_floor_ab = parse_bool_env("FR_URING_AB_OBJECT_REFCOUNT_FLOOR");
+    let dbsize_floor_ab = parse_bool_env("FR_URING_AB_DBSIZE_FLOOR");
     assert!(!workloads.is_empty(), "at least one workload is required");
     assert!(!pipelines.is_empty(), "at least one pipeline is required");
     #[cfg(not(feature = "perf-ab-bitpos-range-floor"))]
@@ -1541,11 +1578,17 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
         "FR_URING_AB_OBJECT_REFCOUNT_FLOOR=1 requires \
 --features perf-ab-object-refcount-floor"
     );
+    #[cfg(not(feature = "perf-ab-dbsize-floor"))]
+    assert!(
+        !dbsize_floor_ab,
+        "FR_URING_AB_DBSIZE_FLOOR=1 requires --features perf-ab-dbsize-floor"
+    );
     assert!(
         usize::from(bitpos_range_floor_ab)
             + usize::from(bitfield_ro_two_get_floor_ab)
             + usize::from(object_encoding_floor_ab)
             + usize::from(object_refcount_floor_ab)
+            + usize::from(dbsize_floor_ab)
             <= 1,
         "run only one command-shape floor experiment per invocation"
     );
@@ -1557,6 +1600,8 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
         CommandFloorAb::ObjectEncoding
     } else if object_refcount_floor_ab {
         CommandFloorAb::ObjectRefcount
+    } else if dbsize_floor_ab {
+        CommandFloorAb::Dbsize
     } else {
         CommandFloorAb::None
     };
@@ -1586,6 +1631,13 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
             workloads,
             [Workload::ObjectRefcount],
             "the OBJECT REFCOUNT floor A/B must isolate the exact profiled workload"
+        );
+    }
+    if dbsize_floor_ab {
+        assert_eq!(
+            workloads,
+            [Workload::Dbsize],
+            "the DBSIZE floor A/B must isolate the exact profiled workload"
         );
     }
 
@@ -1715,6 +1767,18 @@ candidate=io_uring+object_refcount_floor incumbent=vendored_redis_7.2.4"
             .assert_environment_value(OBJECT_REFCOUNT_FLOOR_CONTROL_ENV, Some("1"));
         servers[Arm::IoUring.index()]
             .assert_environment_value(OBJECT_REFCOUNT_FLOOR_CONTROL_ENV, None);
+    } else if dbsize_floor_ab {
+        println!(
+            "ARM_SEMANTICS control_a=io_uring+frozen_pre_dbsize_floor \
+control_b=io_uring+frozen_pre_dbsize_floor \
+candidate=io_uring+dbsize_floor incumbent=vendored_redis_7.2.4"
+        );
+        for arm in [Arm::MioA, Arm::MioB, Arm::IoUring] {
+            servers[arm.index()].assert_flag_reached_process();
+        }
+        servers[Arm::MioA.index()].assert_environment_value(DBSIZE_FLOOR_CONTROL_ENV, Some("1"));
+        servers[Arm::MioB.index()].assert_environment_value(DBSIZE_FLOOR_CONTROL_ENV, Some("1"));
+        servers[Arm::IoUring.index()].assert_environment_value(DBSIZE_FLOOR_CONTROL_ENV, None);
     } else {
         println!(
             "ARM_SEMANTICS control_a=mio control_b=mio \

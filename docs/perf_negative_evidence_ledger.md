@@ -28,6 +28,74 @@ Every new KEEP declares exactly one class:
 modified entries in both ledger files. It also preserves the ELF self-report,
 A/A bootstrap median-CI, never-CV, counted-mechanism, and retry-predicate gates.
 
+## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — exact keyless `DBSIZE` front dispatch is 1.1263x live Redis at saturated P16 (`frankenredis-ohsk5.71`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes.** This is
+  FrankenRedis/Redis throughput against the actual vendored Redis 7.2.4 server
+  running live beside both A/A controls in the same invocation. The
+  frozen-cascade/candidate result is SELF-SPEEDUP maintenance only.
+- **Resurrection and baseline.** Both ledgers were searched and every DBSIZE
+  match hand-adjudicated before editing. The old 4.14x loss had no A/A, counted
+  mechanism, or executing ELF and is VOID-NONULL; its first-token/name-hash
+  reopening requirement is now satisfied. Later O(1) `db_key_counts` rows
+  cover the store, not the late parser route. The current zero-lost profile named
+  **23.48% self-time** in the exact command/dispatch surface and an Amdahl
+  ceiling of **1.306848x**. At 98.420%/94.218% FrankenRedis/Redis utilization,
+  baseline wall A/A was **0.991402981x**, bootstrap median CI
+  **[0.979639062, 1.006277262]**, gate
+  **[0.959278124, 1.040721876]**, and current io_uring/Redis throughput only
+  **0.304364967x**, CI **[0.292764785, 0.321423722]**. Baseline harness,
+  FrankenRedis, and Redis ELF SHA-256 values were respectively
+  **`2d0152f22b84613af72300d10ad2544abe83f2d03c4d9940895df1dd8b5608d0`**,
+  **`6fe4069ee0d8b06bf6ca9e65d4daa1700526b2b8eb36516b87e1fd4cee9bb039`**,
+  and
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+- **Lever and isomorphism.** Only canonical arity-1, case-insensitive `DBSIZE`
+  enters the front floor. It reuses the unchanged exact parser and borrowed
+  runtime executor from the later cascade; every refusal reaches the unchanged
+  generic dispatcher. Tests prove mixed-case admission, alternate-arity
+  fallback, empty/populated reply parity, and nonzero-DB refusal parity. The
+  feature-enabled 294-test server suite, focused runtime parity, strict-remote
+  workspace check, default and feature Clippy `-D warnings`, full conformance,
+  rustfmt, and diff checks passed.
+- **Same executable and fixed work.** Both io_uring controls selected the
+  compiled frozen cascade with `FR_PERF_AB_DBSIZE_FLOOR_ORIG=1`; candidate
+  omitted it, and the harness inspected live flags and environments. One
+  strict-remote invocation on fully reserved `vmi1227854` ran 32 x 200,000
+  byte-checked `:1\r\n` replies/arm with five pinned persistent-client shards,
+  a dedicated server core, all 24 arm orders, and within-sample interleaving.
+  The harness ELF self-reported SHA-256
+  **`5abb84bd381ffa9c6896b72ffd5e52e2ed95370dc457f4445873909ec6156f12`**;
+  every FrankenRedis process self-reported
+  **`fe98ae1185222c5e33e560005120731ed84f596ea8a6bc2cad08030b8dbe7dda`**,
+  and Redis self-reported
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+- **Profile and decision.** The final zero-lost profile retained **7.00%
+  self-time** in the named DBSIZE/dispatch surface and an Amdahl ceiling of
+  **1.075269x**. Candidate/Redis utilization was 90.847%/93.086%. Wall A/A
+  null median **0.997495029x**, bootstrap 95% median CI
+  **[0.991297305, 1.015717684]**, set gate
+  **[0.968564632, 1.031435368]**. Frozen cascade/candidate throughput was
+  **3.469169114x**, CI **[3.323730891, 3.711937345]**, a SELF-SPEEDUP.
+  FrankenRedis/Redis throughput was **1.126260821x**, CI
+  **[1.076043931, 1.236465827]**: **COMPETITIVE KEEP**. CPU A/A was
+  **0.998367284x**, CI **[0.990113156, 1.013721649]**; self-speedup CPU was
+  **3.825259147x**, CI **[3.592304913, 3.927749669]**; competitive CPU
+  efficiency was **1.137004924x**, CI **[1.086289904, 1.233490777]**.
+- **Harness and retry predicate.** Exact replies invalidated one accidental
+  two-key setup before timing. Two feature invocations then stopped before
+  timing on post-link core activity. Preflight now retries the unchanged 5%
+  quiet-core threshold for at most ten seconds and remains fail-closed. The
+  valid run cleared on attempt two. Bootstrap median-CI versus twice the
+  same-invocation A/A CI radius decided the result; CV is provenance only
+  (wall null 6.653473%, self 14.899718%, competitive 15.372402%) and never a
+  gate. **Retry predicate:** Re-run after changes to the classifier/parser/
+  executor, selected-DB or key-count semantics, expiration/metrics, io_uring,
+  client driver/pinning/preflight, Redis, allocator, kernel, or release codegen.
+  Invalidate if utilization is below 90%, named self-time becomes zero or loses
+  samples, exact replies or live ELF identities differ, environment selection
+  is wrong, or A/A validity fails.
+
 ## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — exact present-key `OBJECT REFCOUNT` front dispatch is 1.2439x live Redis at saturated P16 (`frankenredis-ohsk5.70`)
 
 - **Claim class: COMPETITIVE. Campaign output: yes.** This is

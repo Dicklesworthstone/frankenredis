@@ -12383,6 +12383,7 @@ enum BorrowedDispatchFloorClass {
     BitfieldGet(PlainBitfieldGetCmd),
     BitfieldRoTwoGet,
     BitfieldSet,
+    Dbsize,
     Exists(usize),
     Getex,
     GetexExpire,
@@ -12435,6 +12436,7 @@ enum BorrowedDispatchFloorCommand {
     Bitfield,
     BitfieldRo,
     Bitpos,
+    Dbsize,
     Exists,
     Getex,
     Getrange,
@@ -12509,6 +12511,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             _ => None,
         },
         6 => match uppercase_ascii_token::<6>(token)? {
+            [b'D', b'B', b'S', b'I', b'Z', b'E'] => Some(BorrowedDispatchFloorCommand::Dbsize),
             [b'E', b'X', b'I', b'S', b'T', b'S'] => Some(BorrowedDispatchFloorCommand::Exists),
             [b'S', b'E', b'T', b'B', b'I', b'T'] => Some(BorrowedDispatchFloorCommand::Setbit),
             [b'Z', b'C', b'O', b'U', b'N', b'T'] => Some(BorrowedDispatchFloorCommand::Zcount),
@@ -12612,6 +12615,7 @@ fn borrowed_dispatch_floor_command_pre_object_idletime(
         return borrowed_dispatch_floor_command(token);
     }
     match uppercase_ascii_token::<6>(token)? {
+        [b'D', b'B', b'S', b'I', b'Z', b'E'] => Some(BorrowedDispatchFloorCommand::Dbsize),
         [b'E', b'X', b'I', b'S', b'T', b'S'] => Some(BorrowedDispatchFloorCommand::Exists),
         [b'S', b'E', b'T', b'B', b'I', b'T'] => Some(BorrowedDispatchFloorCommand::Setbit),
         [b'Z', b'C', b'O', b'U', b'N', b'T'] => Some(BorrowedDispatchFloorCommand::Zcount),
@@ -12821,6 +12825,9 @@ fn classify_borrowed_dispatch_floor_packet_impl<
     let command =
         borrowed_dispatch_floor_command_for::<OBJECT_IDLETIME_FLOOR, LPOS_FLOOR>(token.command)?;
     match (token.array_len, command) {
+        (1, BorrowedDispatchFloorCommand::Dbsize) if dbsize_floor_enabled() => {
+            Some(BorrowedDispatchFloorClass::Dbsize)
+        }
         (5, BorrowedDispatchFloorCommand::Bitfield) => Some(
             BorrowedDispatchFloorClass::BitfieldGet(PlainBitfieldGetCmd::Bitfield),
         ),
@@ -13048,6 +13055,25 @@ const fn object_refcount_floor_enabled() -> bool {
     true
 }
 
+/// Preserve the exact pre-lever DBSIZE cascade route in the measurement ELF.
+/// The controls select it before their first packet; production builds compile
+/// only the front-dispatch route.
+#[cfg(feature = "perf-ab-dbsize-floor")]
+#[inline]
+fn dbsize_floor_enabled() -> bool {
+    static ORIG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    !*ORIG.get_or_init(|| match std::env::var("FR_PERF_AB_DBSIZE_FLOOR_ORIG") {
+        Ok(value) => value == "1",
+        Err(_) => false,
+    })
+}
+
+#[cfg(not(feature = "perf-ab-dbsize-floor"))]
+#[inline(always)]
+const fn dbsize_floor_enabled() -> bool {
+    true
+}
+
 /// Keep the exact pre-lever ten-element XADD classification in the measurement
 /// ELF. Each benchmark arm launches that same ELF in a fresh process and selects
 /// the frozen control before the first packet is classified.
@@ -13229,6 +13255,19 @@ fn dispatch_floor_fast_object_refcount(
     let packet = parse_borrowed_plain_object_refcount_packet(unparsed, parser_config)?;
     let response = runtime.execute_plain_object_refcount_borrowed(packet.key, ts)?;
     Some((packet.consumed, response))
+}
+
+#[cfg_attr(feature = "perf-ab-dbsize-floor", inline(never))]
+#[cfg_attr(not(feature = "perf-ab-dbsize-floor"), inline)]
+fn dispatch_floor_fast_dbsize(
+    unparsed: &[u8],
+    parser_config: &ParserConfig,
+    runtime: &mut Runtime,
+    ts: u64,
+) -> Option<(usize, RespFrame)> {
+    let consumed = parse_borrowed_plain_dbsize_packet(unparsed, parser_config)?;
+    let response = runtime.execute_plain_dbsize_borrowed(ts)?;
+    Some((consumed, response))
 }
 
 #[cfg_attr(feature = "perf-ab-lpos-floor", inline(never))]
@@ -13886,6 +13925,22 @@ fn try_dispatch_floor_classified_action(
         BorrowedDispatchFloorClass::ObjectRefcount => {
             if let Some((consumed, response)) =
                 dispatch_floor_fast_object_refcount(unparsed, &parser_config, runtime, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply { consumed, response })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Dbsize => {
+            if let Some((consumed, response)) =
+                dispatch_floor_fast_dbsize(unparsed, &parser_config, runtime, ts)
             {
                 Ok(BorrowedMultibulkAction::FastReply { consumed, response })
             } else {
@@ -32127,6 +32182,17 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
                 &cfg,
             ),
             Some(super::BorrowedDispatchFloorClass::ObjectRefcount)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(b"*1\r\n$6\r\nDbSiZe\r\n", &cfg,),
+            Some(super::BorrowedDispatchFloorClass::Dbsize)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*2\r\n$6\r\nDBSIZE\r\n$1\r\nx\r\n",
+                &cfg,
+            ),
+            None
         );
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(

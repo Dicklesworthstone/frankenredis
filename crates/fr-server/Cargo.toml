@@ -72,6 +72,10 @@ perf-ab-object-encoding-floor = []
 # The control processes set FR_PERF_AB_OBJECT_REFCOUNT_FLOOR_ORIG=1; production
 # builds compile only the front-dispatch candidate.
 perf-ab-object-refcount-floor = []
+# Measurement-only control arm for the exact keyless DBSIZE floor. The control
+# processes set FR_PERF_AB_DBSIZE_FLOOR_ORIG=1; production builds compile only
+# the front-dispatch candidate.
+perf-ab-dbsize-floor = []
 # Measurement-only control arm for the one-binary XADD MAXLEN LIMIT floor A/B.
 # The control process sets FR_PERF_AB_XADD_LIMIT_FLOOR_ORIG=1; production builds
 # do not compile the environment-controlled bypass.
