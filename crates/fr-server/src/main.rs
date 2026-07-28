@@ -12394,6 +12394,7 @@ enum BorrowedDispatchFloorClass {
     Llen,
     Lpos,
     MemoryUsage,
+    ObjectEncoding,
     ObjectIdletime,
     Pfcount,
     Scard,
@@ -12777,6 +12778,21 @@ fn borrowed_dispatch_floor_object_idletime(
         && rest.get(8..10).is_some_and(|ending| ending == b"\r\n")
 }
 
+fn borrowed_dispatch_floor_object_encoding(
+    token: &BorrowedDispatchFloorToken<'_>,
+    config: &ParserConfig,
+) -> bool {
+    if config.max_bulk_len < b"ENCODING".len() {
+        return false;
+    }
+    let Some(rest) = token.remaining.strip_prefix(b"$8\r\n") else {
+        return false;
+    };
+    rest.get(..8)
+        .is_some_and(|subcommand| subcommand.eq_ignore_ascii_case(b"ENCODING"))
+        && rest.get(8..10).is_some_and(|ending| ending == b"\r\n")
+}
+
 #[inline]
 fn classify_borrowed_dispatch_floor_packet_impl<
     const OBJECT_IDLETIME_FLOOR: bool,
@@ -12840,6 +12856,12 @@ fn classify_borrowed_dispatch_floor_packet_impl<
             if OBJECT_IDLETIME_FLOOR && borrowed_dispatch_floor_object_idletime(&token, config) =>
         {
             Some(BorrowedDispatchFloorClass::ObjectIdletime)
+        }
+        (3, BorrowedDispatchFloorCommand::Object)
+            if object_encoding_floor_enabled()
+                && borrowed_dispatch_floor_object_encoding(&token, config) =>
+        {
+            Some(BorrowedDispatchFloorClass::ObjectEncoding)
         }
         (4, BorrowedDispatchFloorCommand::Setbit) => Some(BorrowedDispatchFloorClass::Setbit),
         (4, BorrowedDispatchFloorCommand::Zcount) => Some(BorrowedDispatchFloorClass::Zcount),
@@ -12959,6 +12981,27 @@ fn bitfield_ro_two_get_floor_enabled() -> bool {
 #[cfg(not(feature = "perf-ab-bitfield-ro-two-get-floor"))]
 #[inline(always)]
 const fn bitfield_ro_two_get_floor_enabled() -> bool {
+    true
+}
+
+/// Preserve the exact pre-lever OBJECT ENCODING cascade route in the
+/// measurement ELF. The controls select it before their first packet;
+/// production builds compile only the front-dispatch route.
+#[cfg(feature = "perf-ab-object-encoding-floor")]
+#[inline]
+fn object_encoding_floor_enabled() -> bool {
+    static ORIG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    !*ORIG.get_or_init(
+        || match std::env::var("FR_PERF_AB_OBJECT_ENCODING_FLOOR_ORIG") {
+            Ok(value) => value == "1",
+            Err(_) => false,
+        },
+    )
+}
+
+#[cfg(not(feature = "perf-ab-object-encoding-floor"))]
+#[inline(always)]
+const fn object_encoding_floor_enabled() -> bool {
     true
 }
 
@@ -13115,6 +13158,21 @@ fn dispatch_floor_fast_object_idletime(
     }
     let response = runtime.execute_plain_object_stat_borrowed(packet.cmd, packet.key, ts)?;
     Some((packet.consumed, response))
+}
+
+#[cfg_attr(feature = "perf-ab-object-encoding-floor", inline(never))]
+#[cfg_attr(not(feature = "perf-ab-object-encoding-floor"), inline)]
+fn dispatch_floor_fast_object_encoding_into(
+    unparsed: &[u8],
+    parser_config: &ParserConfig,
+    runtime: &mut Runtime,
+    ts: u64,
+    out: &mut Vec<u8>,
+) -> Option<usize> {
+    let packet = parse_borrowed_plain_object_encoding_packet(unparsed, parser_config)?;
+    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+    runtime.execute_plain_object_encoding_borrowed_into(packet.key, ts, client_resp3, out)?;
+    Some(packet.consumed)
 }
 
 #[cfg_attr(feature = "perf-ab-lpos-floor", inline(never))]
@@ -13742,6 +13800,22 @@ fn try_dispatch_floor_classified_action(
                 dispatch_floor_fast_object_idletime(unparsed, &parser_config, runtime, ts)
             {
                 Ok(BorrowedMultibulkAction::FastReply { consumed, response })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::ObjectEncoding => {
+            if let Some(consumed) =
+                dispatch_floor_fast_object_encoding_into(unparsed, &parser_config, runtime, ts, out)
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,
@@ -31959,8 +32033,8 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             ),
             None
         );
-        // The floor lever is deliberately IDLETIME-only. Sibling OBJECT commands
-        // retain their unchanged borrowed-cascade route.
+        // Only the measured IDLETIME and ENCODING shapes floor. Sibling OBJECT
+        // commands retain their unchanged borrowed-cascade route.
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(
                 b"*3\r\n$6\r\nOBJECT\r\n$4\r\nFREQ\r\n$1\r\nk\r\n",
@@ -31980,7 +32054,7 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
                 b"*3\r\n$6\r\nOBJECT\r\n$8\r\nENCODING\r\n$1\r\nk\r\n",
                 &cfg,
             ),
-            None
+            Some(super::BorrowedDispatchFloorClass::ObjectEncoding)
         );
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(

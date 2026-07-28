@@ -31,7 +31,10 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const CLIENTS: usize = 50;
-const DEFAULT_CLIENT_THREADS: usize = 4;
+// Four shards became client-bound once the OBJECT ENCODING floor cut the server
+// below one microsecond per command at P16. Five saturated the measured route at
+// 96.47%; the utilization guard remains authoritative for faster shapes.
+const DEFAULT_CLIENT_THREADS: usize = 5;
 const DEFAULT_SAMPLES: usize = 32;
 const DEFAULT_OPS_PER_SAMPLE: usize = 200_000;
 const DEFAULT_PROFILE_SECONDS: u64 = 3;
@@ -41,6 +44,7 @@ const MIN_SERVER_UTIL_PCT: f64 = 90.0;
 const IO_URING_FLAG: &str = "--io-uring-output";
 const BITPOS_RANGE_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_BITPOS_RANGE_FLOOR_ORIG";
 const BITFIELD_RO_TWO_GET_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_BITFIELD_RO_TWO_GET_FLOOR_ORIG";
+const OBJECT_ENCODING_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_OBJECT_ENCODING_FLOOR_ORIG";
 const SHUTDOWN: &[u8] = b"*2\r\n$8\r\nSHUTDOWN\r\n$6\r\nNOSAVE\r\n";
 const SET: &[u8] = b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n";
 const SET_REPLY: &[u8] = b"+OK\r\n";
@@ -56,6 +60,9 @@ const BITFIELD_RO_TWO_GET_PREFILL: &[u8] =
 const BITFIELD_RO_TWO_GET: &[u8] = b"*8\r\n$11\r\nBITFIELD_RO\r\n$10\r\nbitfield:k\r\n\
 $3\r\nGET\r\n$2\r\nu8\r\n$1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n";
 const BITFIELD_RO_TWO_GET_REPLY: &[u8] = b"*2\r\n:18\r\n:52\r\n";
+const OBJECT_ENCODING_PREFILL: &[u8] = b"*3\r\n$3\r\nSET\r\n$8\r\nobject:k\r\n$2\r\n42\r\n";
+const OBJECT_ENCODING: &[u8] = b"*3\r\n$6\r\nOBJECT\r\n$8\r\nENCODING\r\n$8\r\nobject:k\r\n";
+const OBJECT_ENCODING_REPLY: &[u8] = b"$3\r\nint\r\n";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Arm {
@@ -94,6 +101,7 @@ enum Workload {
     Mixed,
     BitposRange,
     BitfieldRoTwoGet,
+    ObjectEncoding,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,6 +109,7 @@ enum CommandFloorAb {
     None,
     BitposRange,
     BitfieldRoTwoGet,
+    ObjectEncoding,
 }
 
 impl Workload {
@@ -111,6 +120,7 @@ impl Workload {
             Self::Mixed => "mixed",
             Self::BitposRange => "bitpos-range",
             Self::BitfieldRoTwoGet => "bitfield-ro-two-get",
+            Self::ObjectEncoding => "object-encoding",
         }
     }
 
@@ -130,6 +140,12 @@ impl Workload {
                 "parse_command_args_borrowed_into",
                 "copy_borrowed_argv_into_scratch",
             ],
+            Self::ObjectEncoding => &[
+                "frankenredis::process_buffered_frames",
+                "execute_plain_object_encoding_borrowed_into",
+                "parse_borrowed_plain_object_encoding_packet",
+                "object_encoding",
+            ],
             Self::Set | Self::Get | Self::Mixed => &[],
         }
     }
@@ -146,6 +162,7 @@ impl Workload {
                 "mixed" => Self::Mixed,
                 "bitpos-range" => Self::BitposRange,
                 "bitfield-ro-two-get" => Self::BitfieldRoTwoGet,
+                "object-encoding" => Self::ObjectEncoding,
                 other => panic!("unknown FR_URING_AB_WORKLOADS item: {other}"),
             })
             .collect()
@@ -202,6 +219,16 @@ impl WorkloadPackets {
             }
             Workload::BitfieldRoTwoGet => {
                 let case = repeated_case(BITFIELD_RO_TWO_GET, BITFIELD_RO_TWO_GET_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::ObjectEncoding => {
+                let case = repeated_case(OBJECT_ENCODING, OBJECT_ENCODING_REPLY, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -411,6 +438,11 @@ impl Server {
         {
             command.env(BITFIELD_RO_TWO_GET_FLOOR_CONTROL_ENV, "1");
         }
+        if matches!(command_floor_ab, CommandFloorAb::ObjectEncoding)
+            && matches!(arm, Arm::MioA | Arm::MioB)
+        {
+            command.env(OBJECT_ENCODING_FLOOR_CONTROL_ENV, "1");
+        }
         command
             .current_dir(&runtime_dir)
             .stdout(Stdio::null())
@@ -596,6 +628,8 @@ fn prefill(servers: &mut [Server; 4], workload: Workload) {
             exchange_one(server, BITPOS_RANGE_PREFILL, SET_REPLY);
         } else if matches!(workload, Workload::BitfieldRoTwoGet) {
             exchange_one(server, BITFIELD_RO_TWO_GET_PREFILL, SET_REPLY);
+        } else if matches!(workload, Workload::ObjectEncoding) {
+            exchange_one(server, OBJECT_ENCODING_PREFILL, SET_REPLY);
         }
     }
 }
@@ -1024,10 +1058,15 @@ fn profile_io_uring_path(
         .spawn()
         .expect("spawn perf record");
     thread::sleep(Duration::from_millis(500));
-    assert!(
-        perf.try_wait().expect("poll perf record").is_none(),
-        "perf record exited before profile workload"
-    );
+    if let Some(status) = perf.try_wait().expect("poll perf record") {
+        let mut stderr = String::new();
+        perf.stderr
+            .take()
+            .expect("capture early perf stderr")
+            .read_to_string(&mut stderr)
+            .expect("read early perf stderr");
+        panic!("perf record exited before profile workload: status={status} stderr={stderr}");
+    }
 
     let packets = Arc::new(WorkloadPackets::new(workload, pipeline));
     while perf
@@ -1183,29 +1222,40 @@ fn sibling_group(cpu: usize) -> Vec<usize> {
         .unwrap_or_else(|_| vec![cpu])
 }
 
+fn read_core_ticks() -> HashMap<usize, (u64, u64)> {
+    let stat = fs::read_to_string("/proc/stat").expect("read per-core CPU counters");
+    stat.lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let label = fields.next()?;
+            let cpu = label.strip_prefix("cpu")?.parse::<usize>().ok()?;
+            let ticks = fields
+                .take(8)
+                .map(|value| value.parse::<u64>().expect("parse /proc/stat CPU tick"))
+                .collect::<Vec<_>>();
+            assert!(
+                ticks.len() >= 4,
+                "per-core /proc/stat row has fewer than four counters: {line:?}"
+            );
+            let idle = ticks[3] + ticks.get(4).copied().unwrap_or(0);
+            Some((cpu, (ticks.iter().sum(), idle)))
+        })
+        .collect()
+}
+
 fn observed_core_loads() -> HashMap<usize, f64> {
-    let output = Command::new("ps")
-        .args(["-eLo", "psr=,pcpu=,pid=,comm="])
-        .output()
-        .expect("inspect per-thread CPU placement");
-    assert!(output.status.success(), "ps CPU preflight failed");
-    let mut loads = HashMap::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let mut fields = line.split_whitespace();
-        let Some(cpu) = fields.next().and_then(|value| value.parse::<usize>().ok()) else {
-            continue;
-        };
-        let Some(pct) = fields.next().and_then(|value| value.parse::<f64>().ok()) else {
-            continue;
-        };
-        let Some(pid) = fields.next().and_then(|value| value.parse::<u32>().ok()) else {
-            continue;
-        };
-        if pid != std::process::id() {
-            *loads.entry(cpu).or_insert(0.0) += pct;
-        }
-    }
-    loads
+    let before = read_core_ticks();
+    thread::sleep(Duration::from_millis(500));
+    let after = read_core_ticks();
+    after
+        .into_iter()
+        .filter_map(|(cpu, (total_after, idle_after))| {
+            let (total_before, idle_before) = before.get(&cpu).copied()?;
+            let total = total_after.saturating_sub(total_before);
+            let idle = idle_after.saturating_sub(idle_before).min(total);
+            (total != 0).then_some((cpu, 100.0 * (total - idle) as f64 / total as f64))
+        })
+        .collect()
 }
 
 fn choose_and_pin_cores(client_threads: usize) -> (Vec<usize>, usize) {
@@ -1432,6 +1482,7 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
     let pipelines = parse_pipelines();
     let bitpos_range_floor_ab = parse_bool_env("FR_URING_AB_BITPOS_RANGE_FLOOR");
     let bitfield_ro_two_get_floor_ab = parse_bool_env("FR_URING_AB_BITFIELD_RO_TWO_GET_FLOOR");
+    let object_encoding_floor_ab = parse_bool_env("FR_URING_AB_OBJECT_ENCODING_FLOOR");
     assert!(!workloads.is_empty(), "at least one workload is required");
     assert!(!pipelines.is_empty(), "at least one pipeline is required");
     #[cfg(not(feature = "perf-ab-bitpos-range-floor"))]
@@ -1446,14 +1497,25 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
         "FR_URING_AB_BITFIELD_RO_TWO_GET_FLOOR=1 requires \
 --features perf-ab-bitfield-ro-two-get-floor"
     );
+    #[cfg(not(feature = "perf-ab-object-encoding-floor"))]
     assert!(
-        !(bitpos_range_floor_ab && bitfield_ro_two_get_floor_ab),
+        !object_encoding_floor_ab,
+        "FR_URING_AB_OBJECT_ENCODING_FLOOR=1 requires \
+--features perf-ab-object-encoding-floor"
+    );
+    assert!(
+        usize::from(bitpos_range_floor_ab)
+            + usize::from(bitfield_ro_two_get_floor_ab)
+            + usize::from(object_encoding_floor_ab)
+            <= 1,
         "run only one command-shape floor experiment per invocation"
     );
     let command_floor_ab = if bitpos_range_floor_ab {
         CommandFloorAb::BitposRange
     } else if bitfield_ro_two_get_floor_ab {
         CommandFloorAb::BitfieldRoTwoGet
+    } else if object_encoding_floor_ab {
+        CommandFloorAb::ObjectEncoding
     } else {
         CommandFloorAb::None
     };
@@ -1469,6 +1531,13 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
             workloads,
             [Workload::BitfieldRoTwoGet],
             "the BITFIELD_RO two-GET floor A/B must isolate the exact profiled workload"
+        );
+    }
+    if object_encoding_floor_ab {
+        assert_eq!(
+            workloads,
+            [Workload::ObjectEncoding],
+            "the OBJECT ENCODING floor A/B must isolate the exact profiled workload"
         );
     }
 
@@ -1568,6 +1637,21 @@ candidate=io_uring+bitfield_ro_two_get_floor incumbent=vendored_redis_7.2.4"
             .assert_environment_value(BITFIELD_RO_TWO_GET_FLOOR_CONTROL_ENV, Some("1"));
         servers[Arm::IoUring.index()]
             .assert_environment_value(BITFIELD_RO_TWO_GET_FLOOR_CONTROL_ENV, None);
+    } else if object_encoding_floor_ab {
+        println!(
+            "ARM_SEMANTICS control_a=io_uring+frozen_pre_object_encoding_floor \
+control_b=io_uring+frozen_pre_object_encoding_floor \
+candidate=io_uring+object_encoding_floor incumbent=vendored_redis_7.2.4"
+        );
+        for arm in [Arm::MioA, Arm::MioB, Arm::IoUring] {
+            servers[arm.index()].assert_flag_reached_process();
+        }
+        servers[Arm::MioA.index()]
+            .assert_environment_value(OBJECT_ENCODING_FLOOR_CONTROL_ENV, Some("1"));
+        servers[Arm::MioB.index()]
+            .assert_environment_value(OBJECT_ENCODING_FLOOR_CONTROL_ENV, Some("1"));
+        servers[Arm::IoUring.index()]
+            .assert_environment_value(OBJECT_ENCODING_FLOOR_CONTROL_ENV, None);
     } else {
         println!(
             "ARM_SEMANTICS control_a=mio control_b=mio \

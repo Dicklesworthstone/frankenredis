@@ -33,6 +33,105 @@ Redis arm and numeric ratio; a SELF-SPEEDUP needs the heading label and cannot
 mark itself as campaign output. Missing or contradictory classification exits
 **8**.
 
+## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — exact present-key `OBJECT ENCODING` front dispatch is 1.2460x live Redis at saturated P16 (`frankenredis-ohsk5.69`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes.** The qualifying result is
+  FrankenRedis/Redis throughput against the actual vendored Redis 7.2.4 server
+  running live beside both null controls in the same invocation. The
+  frozen-cascade/candidate ratio is SELF-SPEEDUP maintenance only.
+- **Ledger resurrection and right-path proof.** Preflight searched both ledgers
+  before editing, then every exact OBJECT row was adjudicated by hand. The
+  2026-07-01 borrowed `_into` row retained a 0.827x competitive residual but
+  recorded neither A/A nor a live ELF identity; the 2026-07-02 0.62x row named
+  32% in `process_buffered_frames` but likewise lacked the modern artifacts;
+  the 2026-06-26 cascade hoist stopped at 0.809x Redis without A/A. Their
+  competitive conclusions are **VOID-NONULL**, while their behavior proofs and
+  routing evidence remain usable. The concrete common reopening requirement was a
+  structural first-token/command-hash dispatch substrate, which has since
+  landed. A literal-current saturated pre-edit profile then found **22.04%
+  self-time** in the named command/dispatch surface with zero lost samples:
+  `process_buffered_frames` 18.02%, the borrowed exact parser 2.09%, executor
+  1.33%, metrics 0.35%, and store 0.25%. The named-subset Amdahl elimination
+  ceiling was **1.282709x**.
+- **Pre-lever competitive state.** The admissible unchanged-binary run used 32
+  samples x 200,000 exact replies/arm at 97.699%/95.924%
+  FrankenRedis/Redis median utilization. Wall A/A null median was
+  **1.003471735x**, bootstrap 95% median CI
+  **[0.971493557, 1.046161078]**, giving gate
+  **[0.907677845, 1.092322155]**. Current io_uring/Redis throughput was only
+  **0.723655392x**, CI **[0.702791150, 0.734550693]**: a valid incumbent loss.
+  The executing harness self-reported ELF SHA-256
+  **`b16ec45eb4a19f3126cdd124f74f89c6a60fc8a70aa26c60412a0d8220b88b1f`**;
+  all FrankenRedis arms self-reported
+  **`db026ee10bc5337fc3cd8ddb2f0dfdd85e9c4a94b5c14888ff60e3b6d5fbba12`**,
+  and Redis self-reported
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+- **One exact lever and behavior preservation.** The floor recognizes only the
+  canonical arity-3 `OBJECT ENCODING key` packet with the exact ENCODING
+  subcommand. It reuses the unchanged
+  `parse_borrowed_plain_object_encoding_packet` and
+  `execute_plain_object_encoding_borrowed_into` functions from the later
+  cascade. Parser or semantic refusal falls back to the unchanged generic
+  dispatcher; `OBJECT FREQ`, `OBJECT REFCOUNT`, alternate arity, malformed
+  frames, missing keys, WRONGTYPE-independent encoding lookup, RESP3, command
+  metrics, expiration, and store semantics therefore retain their existing
+  paths. Classifier tests prove that only ENCODING enters this floor, and the
+  feature-enabled full `fr-server` suite passed 294 tests. Strict-remote
+  workspace check, default and feature-enabled workspace Clippy with
+  `-D warnings`, and full `fr-conformance` (194 library tests, 99 smoke tests,
+  and every auxiliary target) passed. Direct pinned-nightly rustfmt and diff
+  checks passed, as did all 40 ledger-preflight self-tests.
+- **Same-ELF causal design and fixed work.** The measurement feature compiles
+  the pre-lever cascade into the same server executable. Both A/A controls ran
+  io_uring with `FR_PERF_AB_OBJECT_ENCODING_FLOOR_ORIG=1`; the candidate ran
+  io_uring without it. The harness verified each live command line and
+  `/proc/PID/environ`. One fail-closed strict-remote invocation on
+  `vmi1149989` ran 32 paired samples x 200,000 byte-checked
+  `$3\r\nint\r\n` replies/arm (**6.4 million/arm**), 50 persistent clients in
+  five CPU-pinned shards, a dedicated server core, all 24 arm orders, and
+  within-sample interleaving. The executing harness self-reported ELF SHA-256
+  **`f1a1c2d75efb237048a5e9e754c7b76a5481235664971abb6e1d304327f409c3`**.
+  All FrankenRedis processes self-reported identical ELF SHA-256
+  **`5def3c1eac7a0acb6718b1d99cf3beb6ced2b6a8da969fa00d33b51dcec1fc4a`**;
+  Redis self-reported
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+- **Final profile and decision.** The candidate profile lost zero samples and
+  retained **9.63% self-time** in the named surface:
+  `process_buffered_frames` 3.21%, borrowed executor 2.05%, exact parser 1.62%,
+  classifier 0.95%, metrics 0.67%, floor 0.57%, and store 0.56%. Its
+  named-subset Amdahl ceiling was **1.106562x**; eliminated earlier cascade
+  frames are absent from that subset. Candidate/Redis median utilization was
+  **96.470%/96.978%**. Wall A/A null median was **0.998166616x**, bootstrap 95%
+  median CI **[0.975307861, 1.024479911]**, giving the prespecified two-radius
+  gate **[0.950615722, 1.049384278]**. Frozen cascade/candidate throughput was
+  **1.736409251x**, CI **[1.717363650, 1.794116022]**: SELF-SPEEDUP maintenance.
+  FrankenRedis/Redis throughput was **1.245972275x**, bootstrap 95% median CI
+  **[1.210067614, 1.287444820]**: **COMPETITIVE KEEP**. CPU A/A was
+  **1.001299904x**, CI **[0.970336759, 1.023804010]**; cascade/candidate CPU was
+  **1.747347410x**, CI **[1.728687866, 1.797457172]**; competitive CPU
+  efficiency was **1.244618212x**, CI **[1.214337472, 1.282822013]**.
+- **Harness correction and invalid attempts.** Four client shards drove the
+  optimized candidate to only 87.611% utilization, so that attempt was
+  invalidated and the measured default became five shards; the valid result
+  above reached 96.470%. The preflight now samples current per-core deltas from
+  `/proc/stat` for 500 ms instead of summing process-lifetime `ps` percentages
+  on each thread's last CPU. Full `-j 8` RCH reservation prevents peer jobs
+  entering nominally quiet cores between compile and measurement. Busy-core,
+  queue-timeout, and `perf_event_paranoid=4` attempts stopped before verdict;
+  early `perf record` failure now reports stderr. None fell back locally.
+- **Gate and concrete retry predicate.** The bootstrap median-CI gate against
+  twice the same-invocation A/A CI radius decided every timing verdict. CV is
+  provenance only (final wall null 5.692278%, maintenance 7.383335%,
+  competitive 7.486094%) and never a gate. Re-run after changes to the dispatch
+  classifier, exact parser/executor, OBJECT encoding semantics, store encoding
+  representation, expiration or metrics accounting, io_uring output, client
+  sharding/pinning, Redis incumbent, allocator, kernel, or release codegen.
+  Invalidate rather than compare if either server is below 90% median
+  utilization, the named command surface has zero self-time or lost samples,
+  any exact reply differs, live ELF hashes differ, the frozen environment is
+  absent from either null arm or present in the candidate, or the A/A validity
+  bound fails.
+
 ## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — exact two-GET `BITFIELD_RO` packed floor is 1.4058x live Redis at saturated P16 (`frankenredis-ohsk5.68`)
 
 - **Claim class: COMPETITIVE. Campaign output: yes.** The qualifying number is
