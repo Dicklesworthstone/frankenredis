@@ -33,6 +33,84 @@ Redis arm and numeric ratio; a SELF-SPEEDUP needs the heading label and cannot
 mark itself as campaign output. Missing or contradictory classification exits
 **8**.
 
+## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — impossible-ID `XRANGE xs 0-0 0-0` is 1.8488x live Redis at saturated P16 (`frankenredis-d0wmm`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes.** The qualifying number is
+  candidate FrankenRedis/Redis throughput against the actual vendored Redis
+  7.2.4 server running beside two generic-XRANGE controls in one invocation.
+  Generic/candidate is a **SELF-SPEEDUP** maintenance result only.
+- **Ledger admission and pre-edit baseline.** The preflight found 47 textual
+  hits spanning 12 unique rows, and every row was hand-adjudicated. The old
+  broad XRANGE wall rows are `VOID-NONULL` for this exact shape: they reported
+  near-1.0 effects without an A/A or counted mechanism. Valid clone/mechanism
+  rows concern large result materialization and do not close a zero-result
+  front-dispatch floor. Before editing production, fully reserved
+  `vmi1227854` ran 48 samples x 200,000 fixed replies/arm at P16 with 50
+  persistent clients, eight pinned shards, a dedicated server core, 125-group
+  within-sample interleaving, and two complete 24-order cycles. Its zero-lost
+  profile attributed **59.75% self-time** to the named command surface
+  (`execute_plain_xrange_borrowed_into` 49.14%,
+  `process_buffered_frames` 8.24%, exact parser 1.87%, bound parser 0.32%,
+  closure 0.18%), an Amdahl ceiling of **2.484472x**; async completion was only
+  0.35%. Current FrankenRedis/Redis throughput was **0.404787917x**, bootstrap
+  95% median CI **[0.390386964, 0.421561573]**. Baseline harness,
+  FrankenRedis, and Redis SHA-256 were
+  **`64eb43dcf4b2a1830559dfd6acb345d5e35219f999b3710956d9c0beae66b8a5`**,
+  **`fb71ca6566e80adc47dcc8b2a6c46bbdd414078c11a5055a6ca0bf6af64c7125`**,
+  and **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+- **One exact lever and behavior preservation.** A legal stream entry can
+  never have ID `0-0`, so this closed interval is always empty. The
+  case-insensitive arity-four classifier admits XRANGE packets to a guarded
+  helper, which accepts only two literal `0-0` bounds and falls through for
+  every other interval, malformed packet, arity, policy refusal, and
+  non-default session state. The runtime floor deliberately calls the same
+  `Store::xlen` O(1) live-key primitive, preserving lazy expiry, hit/miss
+  accounting, LFU RNG/bump, WRONGTYPE, stream touch, command/session metrics,
+  reply suppression, error accounting, and expired-key propagation while
+  removing bound parsing, range construction, and the provably empty walk.
+  RESP2/RESP3 parity covers live, missing, expired, and wrong-type keys, LFU
+  frequency, keyspace counters, dirty state, errors, and selected-DB fallback;
+  classifier tests cover mixed case, wrong arity, and nonzero fallback. The
+  exact live differential passed those states against Redis 7.2.4; full
+  conformance passed 194/194 library, 99/99 smoke, and 217/217 live-stream
+  cases, and the feature-enabled server suite passed 224/224 plus every
+  integration target.
+- **Same executable, same invocation, fixed work.** The final valid invocation
+  ran on `vmi1227854` (Linux 6.17.0-35-generic), with 48 x 200,000
+  byte-checked replies/arm, the same topology and two full order cycles. The
+  harness self-reported ELF SHA-256
+  **`03cb42d7d8f5e08d5566f66fc54826a189d84e27fd6fed211cf46bea929e4dac`**;
+  all three executing FrankenRedis arms self-reported ELF SHA-256
+  **`904b7e379696b59b9e1289eadf0bd0c2abddcfe981c120ae4e6e8459699acd2d`**;
+  Redis self-reported ELF SHA-256
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+  The candidate profile SHA-256 was
+  **`cc6fa59f81fc0c851cea58f24cc67d286d240fc733cf05f7ad85216a334cdf68`**,
+  had zero lost samples, and named **6.72% self-time** in the residual command
+  surface (Amdahl ceiling **1.072041x**); the async surface was 0.97%.
+  Candidate/Redis utilization was 98.177%/98.371%.
+- **Median-CI verdict.** Wall A/A null median was **1.016008367x**, bootstrap
+  95% median CI **[0.987867056, 1.032412630]**, inside its
+  **[0.935174740, 1.064825260]** gate. The qualifying
+  candidate/Redis throughput median was **1.848775212x**, CI
+  **[1.801600942, 1.954792196]**: COMPETITIVE KEEP. Generic/candidate was
+  **4.745268532x**, CI **[4.604003395, 4.863300632]**, and is maintenance.
+  CPU A/A was **1.016814523x**, CI **[0.987096651, 1.031322867]**;
+  candidate/Redis CPU throughput was **1.853062019x**, CI
+  **[1.834240240, 1.928924472]**. The bootstrap median-CI gate determined
+  every verdict, never CV; CV is provenance only (wall null 6.486618%,
+  competitive 10.562866%).
+- **Invalid launch and retry predicate.** An earlier command placed workload
+  variables outside the remote command; the remote environment stripped them,
+  so it started the default SET workload and was cancelled before completion.
+  It is not evidence. **Retry predicate:** Reopen after stream-ID validity,
+  XRANGE/XLEN lookup-touch-LFU-expiry semantics, parser/dispatch, runtime
+  policy/metrics, io_uring harness, Redis 7.2.4, allocator, kernel, or release
+  codegen changes. Invalidate any retry with low server utilization, a lost or
+  zero-self profile, reply/env/ELF mismatch, incomplete order cycles, or an A/A
+  bootstrap median CI outside its null gate. Rollback is removal of the
+  `XrangeZero` floor; the generic XRANGE path remains intact.
+
 ## 2026-07-28 MossyBluff (cod/MEASURE): PROFILE REJECT — exact impossible-ID `XCLAIM xs g c 0 0-0` cannot close its incumbent gap (`frankenredis-lguby`)
 
 - **Ledger admission.** The preflight found seven rows and every row was read

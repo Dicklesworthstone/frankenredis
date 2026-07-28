@@ -62,6 +62,7 @@ const XTRIM_MINID_NOOP_CONTROL_ENV: &str = "FR_PERF_AB_XTRIM_MINID_NOOP_ORIG";
 const XTRIM_MINID_NOOP_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_XTRIM_MINID_NOOP_FLOOR_ORIG";
 const XDEL_MISSING_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_XDEL_MISSING_FLOOR_ORIG";
 const XACK_MISSING_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_XACK_MISSING_FLOOR_ORIG";
+const XRANGE_ZERO_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_XRANGE_ZERO_FLOOR_ORIG";
 const XTRIM_MINID_NOOP_PREFILL_ENTRIES: usize = 1_000;
 const SHUTDOWN: &[u8] = b"*2\r\n$8\r\nSHUTDOWN\r\n$6\r\nNOSAVE\r\n";
 const SET: &[u8] = b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n";
@@ -102,6 +103,8 @@ const XACK_MISSING_REPLY: &[u8] = b":0\r\n";
 const XCLAIM_MISSING: &[u8] =
     b"*6\r\n$6\r\nXCLAIM\r\n$2\r\nxs\r\n$1\r\ng\r\n$1\r\nc\r\n$1\r\n0\r\n$3\r\n0-0\r\n";
 const XCLAIM_MISSING_REPLY: &[u8] = b"*0\r\n";
+const XRANGE_ZERO: &[u8] = b"*4\r\n$6\r\nXRANGE\r\n$2\r\nxs\r\n$3\r\n0-0\r\n$3\r\n0-0\r\n";
+const XRANGE_ZERO_REPLY: &[u8] = b"*0\r\n";
 const XGROUP_CREATE_XS_G: &[u8] =
     b"*5\r\n$6\r\nXGROUP\r\n$6\r\nCREATE\r\n$2\r\nxs\r\n$1\r\ng\r\n$3\r\n0-0\r\n";
 const XGROUP_CREATECONSUMER_XS_G_C: &[u8] = b"*5\r\n$6\r\nXGROUP\r\n$14\r\n\
@@ -154,6 +157,7 @@ enum Workload {
     XdelMissing,
     XackMissing,
     XclaimMissing,
+    XrangeZero,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -170,6 +174,7 @@ enum CommandFloorAb {
     XtrimMinidNoopFloor,
     XdelMissingFloor,
     XackMissingFloor,
+    XrangeZeroFloor,
 }
 
 impl Workload {
@@ -190,6 +195,7 @@ impl Workload {
             Self::XdelMissing => "xdel-missing",
             Self::XackMissing => "xack-missing",
             Self::XclaimMissing => "xclaim-missing",
+            Self::XrangeZero => "xrange-zero",
         }
     }
 
@@ -286,6 +292,15 @@ impl Workload {
                 "fr_store::Store::xclaim",
                 "fr_store::StreamGroup::insert_consumer",
             ],
+            Self::XrangeZero => &[
+                "frankenredis::process_buffered_frames",
+                "dispatch_floor_fast_xrange_zero",
+                "execute_plain_xrange_zero_borrowed_into",
+                "execute_plain_xrange_borrowed_into",
+                "parse_borrowed_plain_key_arg2_packet",
+                "fr_command::parse_stream_range_bound",
+                "fr_store::Store::xrange_borrow_scan",
+            ],
             Self::Set | Self::Get | Self::Mixed => &[],
         }
     }
@@ -312,6 +327,7 @@ impl Workload {
                 "xdel-missing" => Self::XdelMissing,
                 "xack-missing" => Self::XackMissing,
                 "xclaim-missing" => Self::XclaimMissing,
+                "xrange-zero" => Self::XrangeZero,
                 other => panic!("unknown FR_URING_AB_WORKLOADS item: {other}"),
             })
             .collect()
@@ -468,6 +484,16 @@ impl WorkloadPackets {
             }
             Workload::XclaimMissing => {
                 let case = repeated_case(XCLAIM_MISSING, XCLAIM_MISSING_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::XrangeZero => {
+                let case = repeated_case(XRANGE_ZERO, XRANGE_ZERO_REPLY, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -721,6 +747,11 @@ impl Server {
         {
             command.env(XACK_MISSING_FLOOR_CONTROL_ENV, "1");
         }
+        if matches!(command_floor_ab, CommandFloorAb::XrangeZeroFloor)
+            && matches!(arm, Arm::MioA | Arm::MioB)
+        {
+            command.env(XRANGE_ZERO_FLOOR_CONTROL_ENV, "1");
+        }
         command
             .current_dir(&runtime_dir)
             .stdout(Stdio::null())
@@ -931,6 +962,7 @@ fn prefill(servers: &mut [Server; 4], workload: Workload) {
             | Workload::XdelMissing
             | Workload::XackMissing
             | Workload::XclaimMissing
+            | Workload::XrangeZero
     )
     .then(seeded_stream_prefill);
     for server in servers.iter_mut() {
@@ -1822,6 +1854,7 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
     let xtrim_minid_noop_floor_ab = parse_bool_env("FR_URING_AB_XTRIM_MINID_NOOP_FLOOR");
     let xdel_missing_floor_ab = parse_bool_env("FR_URING_AB_XDEL_MISSING_FLOOR");
     let xack_missing_floor_ab = parse_bool_env("FR_URING_AB_XACK_MISSING_FLOOR");
+    let xrange_zero_floor_ab = parse_bool_env("FR_URING_AB_XRANGE_ZERO_FLOOR");
     assert!(!workloads.is_empty(), "at least one workload is required");
     assert!(!pipelines.is_empty(), "at least one pipeline is required");
     #[cfg(not(feature = "perf-ab-bitpos-range-floor"))]
@@ -1884,6 +1917,11 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
         !xack_missing_floor_ab,
         "FR_URING_AB_XACK_MISSING_FLOOR=1 requires --features perf-ab-xack-missing-floor"
     );
+    #[cfg(not(feature = "perf-ab-xrange-zero-floor"))]
+    assert!(
+        !xrange_zero_floor_ab,
+        "FR_URING_AB_XRANGE_ZERO_FLOOR=1 requires --features perf-ab-xrange-zero-floor"
+    );
     assert!(
         usize::from(bitpos_range_floor_ab)
             + usize::from(bitfield_ro_two_get_floor_ab)
@@ -1896,6 +1934,7 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
             + usize::from(xtrim_minid_noop_floor_ab)
             + usize::from(xdel_missing_floor_ab)
             + usize::from(xack_missing_floor_ab)
+            + usize::from(xrange_zero_floor_ab)
             <= 1,
         "run only one command-shape floor experiment per invocation"
     );
@@ -1921,6 +1960,8 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
         CommandFloorAb::XdelMissingFloor
     } else if xack_missing_floor_ab {
         CommandFloorAb::XackMissingFloor
+    } else if xrange_zero_floor_ab {
+        CommandFloorAb::XrangeZeroFloor
     } else {
         CommandFloorAb::None
     };
@@ -1999,6 +2040,13 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
             workloads,
             [Workload::XackMissing],
             "the XACK missing-ID floor A/B must isolate the exact profiled workload"
+        );
+    }
+    if xrange_zero_floor_ab {
+        assert_eq!(
+            workloads,
+            [Workload::XrangeZero],
+            "the XRANGE zero interval floor A/B must isolate the exact profiled workload"
         );
     }
 
@@ -2223,6 +2271,20 @@ candidate=io_uring+xack_missing_dispatch_floor incumbent=vendored_redis_7.2.4"
             .assert_environment_value(XACK_MISSING_FLOOR_CONTROL_ENV, Some("1"));
         servers[Arm::IoUring.index()]
             .assert_environment_value(XACK_MISSING_FLOOR_CONTROL_ENV, None);
+    } else if xrange_zero_floor_ab {
+        println!(
+            "ARM_SEMANTICS control_a=io_uring+generic_xrange_zero \
+control_b=io_uring+generic_xrange_zero \
+candidate=io_uring+xrange_zero_dispatch_floor incumbent=vendored_redis_7.2.4"
+        );
+        for arm in [Arm::MioA, Arm::MioB, Arm::IoUring] {
+            servers[arm.index()].assert_flag_reached_process();
+        }
+        servers[Arm::MioA.index()]
+            .assert_environment_value(XRANGE_ZERO_FLOOR_CONTROL_ENV, Some("1"));
+        servers[Arm::MioB.index()]
+            .assert_environment_value(XRANGE_ZERO_FLOOR_CONTROL_ENV, Some("1"));
+        servers[Arm::IoUring.index()].assert_environment_value(XRANGE_ZERO_FLOOR_CONTROL_ENV, None);
     } else {
         println!(
             "ARM_SEMANTICS control_a=mio control_b=mio \

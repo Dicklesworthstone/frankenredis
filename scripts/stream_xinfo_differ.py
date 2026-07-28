@@ -169,6 +169,24 @@ def main():
             print("oracle: %s" % no[:1500])
             print("fr    : %s" % nf[:1500])
             sys.exit(1)
+
+    # Exact impossible-stream-ID gate for the XRANGE empty-interval floor.
+    # Stream IDs can never equal 0-0, but live, missing, and wrong-type keys
+    # must retain their distinct lookup/touch/error behavior.
+    exact_xrange_zero_ops = [
+        ("XRANGE", "s1", "0-0", "0-0"),
+        ("XRANGE", "missing", "0-0", "0-0"),
+        ("XRANGE", "wrong", "0-0", "0-0"),
+    ]
+    for op in exact_xrange_zero_ops:
+        ro, rf = both(o, f, *op)
+        no, nf = normalize(ro), normalize(rf)
+        if no != nf:
+            print("=== EXACT XRANGE 0-0 DIVERGENCE ===")
+            print("op: %s" % " ".join(op))
+            print("oracle: %s" % no[:1500])
+            print("fr    : %s" % nf[:1500])
+            sys.exit(1)
     o.cmd("FLUSHALL")
     f.cmd("FLUSHALL")
 
@@ -239,7 +257,7 @@ def main():
             sys.exit(1)
 
     print(
-        "OK: exact XACK 0-0 + %d iters, seed %d — no divergence "
+        "OK: exact XACK/XRANGE 0-0 gates + %d iters, seed %d — no divergence "
         "(fr matches redis 7.2.4)" % (args.iters, args.seed)
     )
 
