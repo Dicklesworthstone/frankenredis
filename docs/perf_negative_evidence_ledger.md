@@ -28,6 +28,54 @@ Every new KEEP declares exactly one class:
 modified entries in both ledger files. It also preserves the ELF self-report,
 A/A bootstrap median-CI, never-CV, counted-mechanism, and retry-predicate gates.
 
+## 2026-07-28 MossyBluff (cod/MEASURE): PROFILE REJECT — inverted-score `ZREMRANGEBYSCORE z +inf -inf` cannot close its incumbent gap (`frankenredis-2bdaj`)
+
+- **Admission and prior evidence.** Exact-candidate preflight was clear, then
+  each ZREMRANGEBYSCORE row was adjudicated by hand. The old 1.673x
+  generic-to-borrowed row is **VOID-NONULL** for current competitive judgment,
+  with neither A/A nor a counted mechanism. The inverted-range guard proves
+  empty-range semantics, but its measured bulk-drain applies to nonempty
+  removals. The no-TTL guard is **VALID-MECHANISM** for one removed probe but
+  is already present. The front-dispatch BYRANK sibling is distinct.
+  Production remains untouched; every arm resets a one-member zset and
+  byte-checks the exact RESP2 `:0` result.
+- **One untouched-source invocation.** Fully reserved `vmi1227854`, Linux
+  6.17.0-35-generic, ran 48 x 200,000 byte-checked replies/arm at P16, 50
+  clients in nine pinned shards, a dedicated server core, 125-group
+  interleaving, and two full 24-order cycles. The harness self-reported ELF
+  SHA-256
+  **`4ef4ca70e665f976799c110c1bd349556d93d3b8db1e1181e9dca9b94af32c1b`**;
+  every FrankenRedis server self-reported ELF SHA-256
+  **`7af89372c1d8388cd6f9070c2ff04cf3eef8b927bd7c34ac96949655990139f2`**;
+  Redis 7.2.4 self-reported ELF SHA-256
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+  FrankenRedis/Redis utilization was 98.920%/98.037%.
+- **Profile rejection.** Zero lost samples attributed **26.84% self-time** to
+  the named by-score surface (`process_buffered_frames` 20.59%, exact key+2
+  parser 4.52%, borrowed executor 1.02%, score-bound parser 0.71%; store range
+  helpers were below the report floor), so perfect elimination is capped at
+  **1.366867x**. Async completion was 0.42%, ceiling 1.004218x. Current
+  FrankenRedis/Redis throughput was **0.365993558x**, bootstrap 95% CI
+  **[0.355583182, 0.378888238]**. Parity needs **2.732288528x**; the computed
+  best case is only **0.500264517x** Redis. No production floor was attempted.
+- **Null gate and retry predicate.** In the same invocation, wall A/A null
+  median was **1.016358498x**, bootstrap 95% median CI
+  **[0.984170176, 1.055429876]**, within gate
+  **[0.889140247, 1.110859753]**. CPU A/A was **1.015569173x**, CI
+  **[0.982532683, 1.055829769]**; CPU FrankenRedis/Redis throughput was
+  **0.363199030x**, CI **[0.353168363, 0.373984738]**. Bootstrap median-CI
+  decided the verdict, never CV; CV is provenance only (wall null 9.572560%,
+  competitive 10.551389%). The io_uring/mio self comparison was HOLD
+  (1.047065531x, CI [1.026619117, 1.067871890]) and is not campaign output. An
+  earlier setup attempt emitted no samples or verdict because its prefill was
+  not idempotent; the valid run reset the key. **Retry predicate:** Reopen only
+  if a literal-current zero-lost profile raises the complete
+  ZREMRANGEBYSCORE-specific Amdahl ceiling above **2.732288528x**, or after
+  sorted-set representation, score-bound parsing, command dispatch, Redis
+  semantics, allocator, kernel, or release-codegen changes. Retain the
+  populated zset, exact bounds and reply, live incumbent, binary self-reports,
+  same-invocation A/A, complete order cycles, and >=90% utilization.
+
 ## 2026-07-28 MossyBluff (cod/MEASURE): PROFILE REJECT — persistent-key `PTTL k` cannot close its incumbent gap (`frankenredis-mhjuy`)
 
 - **Admission and prior evidence.** Exact-surface preflight was clear, then

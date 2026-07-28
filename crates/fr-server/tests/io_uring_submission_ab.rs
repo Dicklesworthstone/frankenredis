@@ -72,6 +72,13 @@ const GET: &[u8] = b"*2\r\n$3\r\nGET\r\n$1\r\nk\r\n";
 const GET_REPLY: &[u8] = b"$1\r\nv\r\n";
 const PTTL_PERSISTENT: &[u8] = b"*2\r\n$4\r\nPTTL\r\n$1\r\nk\r\n";
 const PTTL_PERSISTENT_REPLY: &[u8] = b":-1\r\n";
+const ZREMRANGEBYSCORE_INVERTED_PREFILL: &[u8] = b"*3\r\n$3\r\nSET\r\n$1\r\nz\r\n$4\r\nseed\r\n\
+*2\r\n$3\r\nDEL\r\n$1\r\nz\r\n\
+*4\r\n$4\r\nZADD\r\n$1\r\nz\r\n$1\r\n1\r\n$1\r\nm\r\n";
+const ZREMRANGEBYSCORE_INVERTED_PREFILL_REPLY: &[u8] = b"+OK\r\n:1\r\n:1\r\n";
+const ZREMRANGEBYSCORE_INVERTED: &[u8] =
+    b"*4\r\n$16\r\nZREMRANGEBYSCORE\r\n$1\r\nz\r\n$4\r\n+inf\r\n$4\r\n-inf\r\n";
+const ZREMRANGEBYSCORE_INVERTED_REPLY: &[u8] = b":0\r\n";
 const BITPOS_RANGE_PREFILL: &[u8] =
     b"*3\r\n$3\r\nSET\r\n$8\r\nbitpos:k\r\n$8\r\n\0\0\0\0\0\0\0\x80\r\n";
 const BITPOS_RANGE: &[u8] =
@@ -176,6 +183,7 @@ enum Workload {
     XpendingZero,
     XreadAfterTail,
     PttlPersistent,
+    ZremrangebyscoreInverted,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -219,6 +227,7 @@ impl Workload {
             Self::XpendingZero => "xpending-zero",
             Self::XreadAfterTail => "xread-after-tail",
             Self::PttlPersistent => "pttl-persistent",
+            Self::ZremrangebyscoreInverted => "zremrangebyscore-inverted",
         }
     }
 
@@ -360,6 +369,15 @@ impl Workload {
                 "fr_store::Store::pttl",
                 "fr_store::Store::get_expires_at_ms",
             ],
+            Self::ZremrangebyscoreInverted => &[
+                "frankenredis::process_buffered_frames",
+                "__memcmp_avx2_movbe",
+                "execute_plain_zremrangebyscore_borrowed",
+                "parse_borrowed_plain_key_arg2_packet",
+                "fr_command::parse_score_bound",
+                "fr_store::Store::zremrangebyscore",
+                "fr_store::SortedSet::score_bound_range",
+            ],
             Self::Set | Self::Get | Self::Mixed => &[],
         }
     }
@@ -391,6 +409,7 @@ impl Workload {
                 "xpending-zero" => Self::XpendingZero,
                 "xread-after-tail" => Self::XreadAfterTail,
                 "pttl-persistent" => Self::PttlPersistent,
+                "zremrangebyscore-inverted" => Self::ZremrangebyscoreInverted,
                 other => panic!("unknown FR_URING_AB_WORKLOADS item: {other}"),
             })
             .collect()
@@ -597,6 +616,20 @@ impl WorkloadPackets {
             }
             Workload::PttlPersistent => {
                 let case = repeated_case(PTTL_PERSISTENT, PTTL_PERSISTENT_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::ZremrangebyscoreInverted => {
+                let case = repeated_case(
+                    ZREMRANGEBYSCORE_INVERTED,
+                    ZREMRANGEBYSCORE_INVERTED_REPLY,
+                    pipeline,
+                );
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -1101,6 +1134,12 @@ fn prefill(servers: &mut [Server; 4], workload: Workload) {
             exchange_one(server, OBJECT_ENCODING_PREFILL, SET_REPLY);
         } else if matches!(workload, Workload::ObjectRefcount) {
             exchange_one(server, OBJECT_REFCOUNT_PREFILL, SET_REPLY);
+        } else if matches!(workload, Workload::ZremrangebyscoreInverted) {
+            exchange_one(
+                server,
+                ZREMRANGEBYSCORE_INVERTED_PREFILL,
+                ZREMRANGEBYSCORE_INVERTED_PREFILL_REPLY,
+            );
         } else if let Some(case) = &seeded_stream {
             exchange_one(server, &case.request, &case.response);
         }

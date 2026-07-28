@@ -33,6 +33,59 @@ Redis arm and numeric ratio; a SELF-SPEEDUP needs the heading label and cannot
 mark itself as campaign output. Missing or contradictory classification exits
 **8**.
 
+## 2026-07-28 MossyBluff (cod/MEASURE): PROFILE REJECT — inverted-score `ZREMRANGEBYSCORE z +inf -inf` cannot close its incumbent gap (`frankenredis-2bdaj`)
+
+- **Ledger admission and prior-row adjudication.** Exact-candidate preflight was
+  clear, then every ZREMRANGEBYSCORE row was read by hand. The 2026-06-24
+  generic-to-borrowed 1.673x row is **VOID-NONULL** for current competitive
+  judgment: it records neither a same-invocation A/A nor a counted mechanism.
+  The 2026-07-03 inverted-range guard establishes required empty-range semantics
+  while its measured bulk-drain mechanism applies to nonempty removals. The
+  2026-07-04 expiry guard is **VALID-MECHANISM** for one removed no-TTL probe,
+  but does not adjudicate the exact packet. The existing command-token floor is
+  the BYRANK sibling only. Production remains untouched; every arm resets `z`,
+  inserts one scored member, and byte-checks the exact `:0` reply.
+- **Untouched-source invocation.** Fully reserved `vmi1227854` (Linux
+  6.17.0-35-generic) ran 48 samples x 200,000 fixed replies/arm at P16, with 50
+  persistent clients in nine pinned client shards, a dedicated server core,
+  125-group within-sample interleaving, and two complete 24-order cycles. The
+  harness self-reported ELF SHA-256
+  **`4ef4ca70e665f976799c110c1bd349556d93d3b8db1e1181e9dca9b94af32c1b`**;
+  every executing FrankenRedis arm self-reported ELF SHA-256
+  **`7af89372c1d8388cd6f9070c2ff04cf3eef8b927bd7c34ac96949655990139f2`**;
+  Redis 7.2.4 self-reported ELF SHA-256
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+  FrankenRedis/Redis utilization was 98.920%/98.037%.
+- **Profile decision before a lever.** The zero-lost profile attributed
+  **26.84% self-time** to the complete named by-score surface
+  (`process_buffered_frames` 20.59%, exact key+2 parser 4.52%, borrowed
+  executor 1.02%, score-bound parser 0.71%; store range helpers were below the
+  report floor), an Amdahl elimination ceiling of **1.366867x**. Async
+  completion was 0.42%, ceiling 1.004218x. Current FrankenRedis/Redis
+  throughput was **0.365993558x**, bootstrap 95% median CI
+  **[0.355583182, 0.378888238]**. Parity needs **2.732288528x**; even deleting
+  the complete named surface yields at most **0.500264517x** Redis. Production
+  therefore remains unchanged.
+- **Authenticated rejection and retry predicate.** In the same invocation,
+  wall A/A null median was **1.016358498x**, bootstrap 95% median CI
+  **[0.984170176, 1.055429876]**, inside gate
+  **[0.889140247, 1.110859753]**. CPU A/A was **1.015569173x**, CI
+  **[0.982532683, 1.055829769]**; CPU FrankenRedis/Redis throughput was
+  **0.363199030x**, CI **[0.353168363, 0.373984738]**. Bootstrap median-CI
+  decided the verdict, never CV; CV is provenance only (wall null 9.572560%,
+  competitive 10.551389%). The io_uring/mio self comparison was HOLD
+  (1.047065531x, CI [1.026619117, 1.067871890]) because it remains inside the
+  authenticated null margin; it is not campaign output. An earlier setup
+  attempt stopped before samples or verdict because its prefill was not
+  idempotent; the valid run explicitly reset the key. **Retry predicate:**
+  Reopen only if a literal-current zero-lost profile raises the complete
+  ZREMRANGEBYSCORE-specific Amdahl ceiling above **2.732288528x**, or after
+  sorted-set representation, score-bound parsing, command dispatch, Redis
+  semantics, allocator, kernel, or release-codegen changes. Any retry must
+  retain a populated zset, exact inverted bounds and reply, live Redis arm,
+  executable self-reports, same-invocation A/A, complete order cycles, and
+  >=90% server utilization.
+
 ## 2026-07-28 MossyBluff (cod/MEASURE): PROFILE REJECT — persistent-key `PTTL k` cannot close its incumbent gap (`frankenredis-mhjuy`)
 
 - **Ledger admission and prior-row adjudication.** Exact-surface preflight was
