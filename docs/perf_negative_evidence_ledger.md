@@ -28,6 +28,44 @@ Every new KEEP declares exactly one class:
 modified entries in both ledger files. It also preserves the ELF self-report,
 A/A bootstrap median-CI, never-CV, counted-mechanism, and retry-predicate gates.
 
+## 2026-07-28 MossyBluff (cod/MEASURE): PROFILE REJECT — exact impossible-ID `XCLAIM xs g c 0 0-0` cannot close its incumbent gap (`frankenredis-lguby`)
+
+- **Admission and fixture.** Seven preflight hits were read by hand. They concern
+  incidental correctness coverage, XREADGROUP consumer insertion, PEL storage,
+  and unrelated profile/cache hazards; none measures this exact front
+  parser/dispatch shape. The four-arm harness now creates the same 1,000-entry
+  stream, group, and consumer before timing and byte-checks every empty-array
+  response.
+- **One pre-edit invocation.** Production stayed untouched. Fully reserved
+  `vmi1227854` ran 48 x 200,000 replies/arm at P16, 50 clients in eight pinned
+  shards, a dedicated server core, 125-group interleaving, and two complete
+  24-order cycles. FrankenRedis/Redis utilization was 99.021%/98.460%. The
+  harness self-reported ELF SHA-256
+  **`df83e3b66c82110b2b466565a9ac88e83000eb11bfb0816bf385d256ca14360d`**;
+  every FrankenRedis server self-reported ELF SHA-256
+  **`f0286ea4a0eef9cb957766f6d240c6bc3ff4b7c1799a9bbda43c3100419ce637`**;
+  Redis self-reported ELF SHA-256
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+- **Profile rejection.** Zero lost samples attributed **18.10% self-time** to
+  the named XCLAIM surface (`process_buffered_frames` 15.32%, `xclaim` 1.52%,
+  key+4 parser 1.16%, reply collection 0.10%), so perfect elimination is capped
+  at **1.221001x**. Current FrankenRedis/Redis throughput was
+  **0.346787455x**, bootstrap 95% CI
+  **[0.342778932, 0.360766368]**. Parity needs **2.883611x**; the computed
+  best case is only **0.423428x**. No production floor was attempted.
+- **Null gate and retry predicate.** In the same invocation, wall A/A null
+  median was **1.005677646x**, bootstrap 95% median CI
+  **[0.989582866, 1.029059189]**; CPU A/A was **1.006086296x**, CI
+  **[0.990521131, 1.028697874]**. The bootstrap median-CI gate authenticated
+  the substrate. CV is provenance only (wall null 6.277498%, competitive
+  9.276752%) and never a decision gate. **Retry predicate:** Reopen only if a
+  literal-current zero-lost profile finds enough additional removable
+  XCLAIM-specific work to raise total Amdahl ceiling above **2.883611x**, or
+  after Redis/XCLAIM semantics, stream-group storage, parser/dispatch
+  architecture, allocator, kernel, or release codegen changes. Retain the live
+  incumbent, seeded consumer, binary self-reports, same-invocation A/A,
+  complete order cycles, and >=90% utilization.
+
 ## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — exact impossible-ID `XACK xs g 0-0` is 1.2198x live Redis at saturated P16 (`frankenredis-0c7bc`)
 
 - **Claim class: COMPETITIVE. Campaign output: yes.** This is

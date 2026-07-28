@@ -99,8 +99,13 @@ const XDEL_MISSING: &[u8] = b"*3\r\n$4\r\nXDEL\r\n$2\r\nxs\r\n$3\r\n0-0\r\n";
 const XDEL_MISSING_REPLY: &[u8] = b":0\r\n";
 const XACK_MISSING: &[u8] = b"*4\r\n$4\r\nXACK\r\n$2\r\nxs\r\n$1\r\ng\r\n$3\r\n0-0\r\n";
 const XACK_MISSING_REPLY: &[u8] = b":0\r\n";
+const XCLAIM_MISSING: &[u8] =
+    b"*6\r\n$6\r\nXCLAIM\r\n$2\r\nxs\r\n$1\r\ng\r\n$1\r\nc\r\n$1\r\n0\r\n$3\r\n0-0\r\n";
+const XCLAIM_MISSING_REPLY: &[u8] = b"*0\r\n";
 const XGROUP_CREATE_XS_G: &[u8] =
     b"*5\r\n$6\r\nXGROUP\r\n$6\r\nCREATE\r\n$2\r\nxs\r\n$1\r\ng\r\n$3\r\n0-0\r\n";
+const XGROUP_CREATECONSUMER_XS_G_C: &[u8] = b"*5\r\n$6\r\nXGROUP\r\n$14\r\n\
+CREATECONSUMER\r\n$2\r\nxs\r\n$1\r\ng\r\n$1\r\nc\r\n";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Arm {
@@ -148,6 +153,7 @@ enum Workload {
     XtrimMinidNoop,
     XdelMissing,
     XackMissing,
+    XclaimMissing,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -183,6 +189,7 @@ impl Workload {
             Self::XtrimMinidNoop => "xtrim-minid-noop",
             Self::XdelMissing => "xdel-missing",
             Self::XackMissing => "xack-missing",
+            Self::XclaimMissing => "xclaim-missing",
         }
     }
 
@@ -268,6 +275,17 @@ impl Workload {
                 "fr_store::Store::xack",
                 "fr_store::Store::invalidate_stream_pel_summary",
             ],
+            Self::XclaimMissing => &[
+                "frankenredis::process_buffered_frames",
+                "dispatch_floor_fast_xclaim_missing",
+                "execute_plain_xclaim_missing_borrowed",
+                "parse_borrowed_plain_key_arg4_packet",
+                "fr_runtime::Runtime::execute_internal",
+                "fr_command::execute_dispatch",
+                "fr_command::xclaim",
+                "fr_store::Store::xclaim",
+                "fr_store::StreamGroup::insert_consumer",
+            ],
             Self::Set | Self::Get | Self::Mixed => &[],
         }
     }
@@ -293,6 +311,7 @@ impl Workload {
                 "xtrim-minid-noop" => Self::XtrimMinidNoop,
                 "xdel-missing" => Self::XdelMissing,
                 "xack-missing" => Self::XackMissing,
+                "xclaim-missing" => Self::XclaimMissing,
                 other => panic!("unknown FR_URING_AB_WORKLOADS item: {other}"),
             })
             .collect()
@@ -439,6 +458,16 @@ impl WorkloadPackets {
             }
             Workload::XackMissing => {
                 let case = repeated_case(XACK_MISSING, XACK_MISSING_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::XclaimMissing => {
+                let case = repeated_case(XCLAIM_MISSING, XCLAIM_MISSING_REPLY, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -898,7 +927,10 @@ $1\r\nf\r\n$1\r\nv\r\n",
 fn prefill(servers: &mut [Server; 4], workload: Workload) {
     let seeded_stream = matches!(
         workload,
-        Workload::XtrimMinidNoop | Workload::XdelMissing | Workload::XackMissing
+        Workload::XtrimMinidNoop
+            | Workload::XdelMissing
+            | Workload::XackMissing
+            | Workload::XclaimMissing
     )
     .then(seeded_stream_prefill);
     for server in servers.iter_mut() {
@@ -914,8 +946,11 @@ fn prefill(servers: &mut [Server; 4], workload: Workload) {
         } else if let Some(case) = &seeded_stream {
             exchange_one(server, &case.request, &case.response);
         }
-        if matches!(workload, Workload::XackMissing) {
+        if matches!(workload, Workload::XackMissing | Workload::XclaimMissing) {
             exchange_one(server, XGROUP_CREATE_XS_G, SET_REPLY);
+        }
+        if matches!(workload, Workload::XclaimMissing) {
+            exchange_one(server, XGROUP_CREATECONSUMER_XS_G_C, b":1\r\n");
         }
     }
 }
