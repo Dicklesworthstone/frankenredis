@@ -12406,6 +12406,7 @@ enum BorrowedDispatchFloorClass {
     Ttl,
     Type,
     WaitZero,
+    XackMissing,
     XtrimMinidNoop,
     XdelMissing,
     XaddNomkstream,
@@ -12468,6 +12469,7 @@ enum BorrowedDispatchFloorCommand {
     Type,
     Wait,
     Xadd,
+    Xack,
     Xdel,
     Xtrim,
     Xlen,
@@ -12510,6 +12512,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'I', b'N', b'C', b'R'] => Some(BorrowedDispatchFloorCommand::Incr),
             [b'W', b'A', b'I', b'T'] => Some(BorrowedDispatchFloorCommand::Wait),
             [b'X', b'A', b'D', b'D'] => Some(BorrowedDispatchFloorCommand::Xadd),
+            [b'X', b'A', b'C', b'K'] => Some(BorrowedDispatchFloorCommand::Xack),
             [b'X', b'D', b'E', b'L'] => Some(BorrowedDispatchFloorCommand::Xdel),
             _ => None,
         },
@@ -12849,6 +12852,9 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (3, BorrowedDispatchFloorCommand::Xdel) if xdel_missing_floor_enabled() => {
             Some(BorrowedDispatchFloorClass::XdelMissing)
         }
+        (4, BorrowedDispatchFloorCommand::Xack) if xack_missing_floor_enabled() => {
+            Some(BorrowedDispatchFloorClass::XackMissing)
+        }
         (5, BorrowedDispatchFloorCommand::Xtrim) if xtrim_minid_noop_floor_enabled() => {
             Some(BorrowedDispatchFloorClass::XtrimMinidNoop)
         }
@@ -13178,6 +13184,27 @@ const fn xdel_missing_floor_enabled() -> bool {
     true
 }
 
+/// Preserve the current guarded generic route for exact
+/// `XACK key group 0-0` in the measurement ELF. Both controls select it before
+/// their first packet; production builds compile only the front floor.
+#[cfg(feature = "perf-ab-xack-missing-floor")]
+#[inline]
+fn xack_missing_floor_enabled() -> bool {
+    static ORIG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    !*ORIG.get_or_init(
+        || match std::env::var("FR_PERF_AB_XACK_MISSING_FLOOR_ORIG") {
+            Ok(value) => value == "1",
+            Err(_) => false,
+        },
+    )
+}
+
+#[cfg(not(feature = "perf-ab-xack-missing-floor"))]
+#[inline(always)]
+const fn xack_missing_floor_enabled() -> bool {
+    true
+}
+
 /// Keep the exact pre-lever ten-element XADD classification in the measurement
 /// ELF. Each benchmark arm launches that same ELF in a fresh process and selects
 /// the frozen control before the first packet is classified.
@@ -13437,6 +13464,23 @@ fn dispatch_floor_fast_xdel_missing(
         return None;
     }
     let response = runtime.execute_plain_xdel_missing_borrowed(packet.key, ts)?;
+    Some((packet.consumed, response))
+}
+
+#[cfg_attr(feature = "perf-ab-xack-missing-floor", inline(never))]
+#[cfg_attr(not(feature = "perf-ab-xack-missing-floor"), inline)]
+fn dispatch_floor_fast_xack_missing(
+    unparsed: &[u8],
+    parser_config: &ParserConfig,
+    runtime: &mut Runtime,
+    ts: u64,
+) -> Option<(usize, RespFrame)> {
+    let packet =
+        parse_borrowed_plain_key_arg2_packet(unparsed, parser_config, b"*4\r\n$4\r\n", b"XACK")?;
+    if packet.b != b"0-0" {
+        return None;
+    }
+    let response = runtime.execute_plain_xack_missing_borrowed(packet.key, packet.a, ts)?;
     Some((packet.consumed, response))
 }
 
@@ -14175,6 +14219,22 @@ fn try_dispatch_floor_classified_action(
         BorrowedDispatchFloorClass::XdelMissing => {
             if let Some((consumed, response)) =
                 dispatch_floor_fast_xdel_missing(unparsed, &parser_config, runtime, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply { consumed, response })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::XackMissing => {
+            if let Some((consumed, response)) =
+                dispatch_floor_fast_xack_missing(unparsed, &parser_config, runtime, ts)
             {
                 Ok(BorrowedMultibulkAction::FastReply { consumed, response })
             } else {
@@ -32479,6 +32539,29 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
                 &cfg,
             ),
             None
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*4\r\n$4\r\nXaCk\r\n$2\r\nxs\r\n$1\r\ng\r\n$3\r\n0-0\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::XackMissing)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$4\r\nXACK\r\n$2\r\nxs\r\n$1\r\ng\r\n",
+                &cfg,
+            ),
+            None
+        );
+        // The cheap classifier admits every arity-4 XACK packet; the exact
+        // helper accepts only ID 0-0 and falls through for every live ID.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*4\r\n$4\r\nXACK\r\n$2\r\nxs\r\n$1\r\ng\r\n$3\r\n1-0\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::XackMissing)
         );
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(

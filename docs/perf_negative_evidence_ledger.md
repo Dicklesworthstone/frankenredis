@@ -28,6 +28,95 @@ Every new KEEP declares exactly one class:
 modified entries in both ledger files. It also preserves the ELF self-report,
 A/A bootstrap median-CI, never-CV, counted-mechanism, and retry-predicate gates.
 
+## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — exact impossible-ID `XACK xs g 0-0` is 1.2198x live Redis at saturated P16 (`frankenredis-0c7bc`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes.** This is
+  FrankenRedis/Redis throughput against the actual vendored Redis 7.2.4 server
+  running live beside both generic-XACK A/A controls in the same invocation.
+  Generic/candidate is a SELF-SPEEDUP maintenance result only.
+- **Admission and pre-edit baseline.** The preflight returned eight rows, all
+  read by hand. They cover stream side-map hashing, bare expiry, incidental
+  profiles, `insert_consumer`, XACK's already-optimal borrowed
+  `pending.remove` store body, correctness, and the PEL `BTreeMap`; none
+  measured literal `XACK key group 0-0` at the front parser/dispatch surface.
+  A valid pre-edit run on fully reserved `vmi1149989` used
+  **48 x 200,000** byte-checked replies/arm, 50 clients in eight pinned shards,
+  125-group interleaving, and two complete 24-order cycles. It saturated
+  FrankenRedis/Redis at 99.031%/98.394%, named **20.90% self-time** in the
+  command surface with zero lost samples and a **1.264223x** Amdahl ceiling,
+  and measured wall A/A null median **0.998656973x**, bootstrap 95% median CI
+  **[0.970156172, 1.022463642]**, gate
+  **[0.940312343, 1.059687657]**. Current FrankenRedis/Redis throughput was
+  only **0.255565670x**, CI **[0.250604844, 0.267023151]**. Baseline harness,
+  FrankenRedis, Redis, and profile SHA-256 values were
+  **`eb8cb7dc8f47d8170bc8952b869583ea9644f97c5df010779d629ae66277d803`**,
+  **`ab13c2828c3bc0095cefd31a262b4196efb802baf3a44d11ad4f3c96280ca939`**,
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**,
+  and
+  **`5611f13fbe6106050dc48e5856d5bd43a6bc0d3fe4c7aa9eaf981e63c7fd8a99`**.
+- **Lever and isomorphism.** Since a live/pending stream entry can never be
+  `0-0`, a case-insensitive arity-four classifier admits XACK to a guarded
+  helper that accepts only the literal fourth argument `0-0`; every nonzero
+  ID, malformed packet, other arity, policy refusal, and non-default state
+  falls through. The runtime helper preserves generic XACK's deliberate
+  key/group-existence-before-ID-parse order via the same
+  `Store::stream_group_exists`, then calls the same
+  `Store::xack(key, group, &[(0,0)], now)` primitive. Missing key/group,
+  WRONGTYPE, lazy expiry, keyspace stats, PEL-summary invalidation, pending
+  counts, dirty behavior, command/session accounting, active expiry, reply
+  suppression, slowlog, latency, histograms, error/threat output, and
+  lazy-expiry propagation remain intact. Runtime parity covers live pending
+  state, missing group/key, WRONGTYPE, XPENDING/XINFO, counters, and
+  selected-DB fallback; classifier tests cover mixed case, wrong arity, and
+  nonzero fallback.
+- **Correctness and known unrelated residual.** The exact live
+  `stream_xinfo_differ.py` XACK-0-0 prelude passed byte/reply and
+  XPENDING/XINFO state parity against Redis 7.2.4. A 1,000-iteration broad run
+  passed that prelude, then reproduced the fuzzer's known nonzero-XREADGROUP
+  delivery-count residual at iteration 441; random XACK IDs there are 1..25 and
+  cannot enter this floor. The focused `--iters 0` gate passed. The
+  feature-enabled server suite passed 224/224 plus every integration target;
+  full conformance passed 194 library tests, 99 smoke tests, every auxiliary
+  target, and live streams 217/217. Workspace all-target check, default and
+  exact-feature Clippy with `-D warnings`, rustfmt, and diff checks passed.
+- **Same executable and fixed work.** Both controls selected the compiled
+  generic route using `FR_PERF_AB_XACK_MISSING_FLOOR_ORIG=1`; candidate omitted
+  it. One strict-remote invocation on fully reserved `vmi1149989` ran
+  **48 x 200,000** fixed replies/arm with 50 persistent clients, eight pinned
+  shards, a dedicated server core, 125-group interleaving, and two complete
+  24-order cycles. Candidate/Redis utilization was 98.807%/98.681%. The harness
+  self-reported ELF SHA-256
+  **`1dc58447d12e7bc6635d898a46bde7513e09345d4be73f46bca7fcf0174307e9`**;
+  every executing FrankenRedis server self-reported ELF SHA-256
+  **`3b5a1702e68d14904f8321db09b44f467b599dc8c3628d4b2eb88888d3aba507`**;
+  Redis self-reported ELF SHA-256
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+- **Profile and decision.** The zero-lost candidate profile retained
+  **7.52% self-time** in the named surface (exact parser 2.75%, borrowed
+  executor 2.05%, frame processor 1.92%, floor 0.80%) and a **1.081315x**
+  Amdahl ceiling. Profile SHA-256 was
+  **`f47c1993d7782d730c6c6f383ec1cd135343a8d4a7879cf99d6ba33d5792e2bd`**.
+  Wall A/A null median was **1.004312167x**, bootstrap 95% median CI
+  **[0.983340131, 1.022414643]**, gate
+  **[0.955170715, 1.044829285]**. Generic/candidate throughput was
+  **4.504216245x**, CI **[4.387815794, 4.589053304]**, a SELF-SPEEDUP.
+  FrankenRedis/Redis throughput was **1.219829443x**, CI
+  **[1.186124972, 1.279925230]**: **COMPETITIVE KEEP**. CPU A/A was
+  **1.001240635x**, CI **[0.982207140, 1.020475644]**; self-speedup CPU was
+  **4.506222488x**, CI **[4.410077149, 4.653010660]**; competitive CPU was
+  **1.224032182x**, CI **[1.190314245, 1.284108069]**.
+- **Gate and retry predicate.** Bootstrap median-CI against twice the
+  same-invocation A/A CI radius decided every result. CV is provenance only
+  (wall null 6.737692%, self 7.787473%, competitive 10.508142%) and never a
+  gate. **Retry predicate:** Re-run after changes to XACK
+  framing/classification, stream-ID or group-existence ordering,
+  `Store::stream_group_exists`, `Store::xack`, PEL-summary/consumer accounting,
+  write/expiry/metrics policy, io_uring, harness
+  client/order/pinning/preflight, Redis, allocator, kernel, or release codegen.
+  Invalidate below 90% utilization, on zero/lost named self-time,
+  reply/live-ELF/environment mismatch, an incomplete order cycle, or failed
+  A/A validity. Rollback removes only the `XackMissing` floor.
+
 ## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — exact stale-ID `XDEL xs 0-0` is 1.3938x live Redis at saturated P16 (`frankenredis-ohsk5.76`)
 
 - **Claim class: COMPETITIVE. Campaign output: yes.** The qualifying result is

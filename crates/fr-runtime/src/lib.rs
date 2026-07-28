@@ -11539,6 +11539,136 @@ impl Runtime {
         }
     }
 
+    /// Borrowed fast path for the exact impossible-pending-ID shape
+    /// `XACK key group 0-0`.
+    ///
+    /// A live stream entry, and therefore a pending entry, can never use 0-0.
+    /// The shared group-existence lookup remains first because generic XACK
+    /// returns zero for a missing key/group before parsing IDs and returns
+    /// WRONGTYPE for a non-stream key. When the group exists, the shared XACK
+    /// primitive still runs with the literal ID so PEL-summary invalidation,
+    /// expiry handling, side-map probes, accounting, and dirty semantics remain
+    /// identical; only argv/ID materialization and generic dispatch are skipped.
+    ///
+    /// The conservative default-write gate preserves every stateful surface
+    /// that needs generic dispatch. Returns `None` before command accounting or
+    /// mutation whenever generic dispatch is required.
+    pub fn execute_plain_xack_missing_borrowed(
+        &mut self,
+        key: &[u8],
+        group: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if self.policy.gate.max_array_len < 4
+            || self.policy.gate.max_bulk_len < b"XACK".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || group.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("xack");
+        self.session.last_argv_len_sum = b"XACK".len() + key.len() + group.len() + b"0-0".len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let reply = match self.server.store.stream_group_exists(key, group, now_ms) {
+            Ok(false) => RespFrame::Integer(0),
+            Ok(true) => match self.server.store.xack(key, group, &[(0, 0)], now_ms) {
+                Ok(acked) => RespFrame::Integer(i64::try_from(acked).unwrap_or(i64::MAX)),
+                Err(err) => CommandError::Store(err).to_resp(),
+            },
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let elapsed_us = self.finish_chained_command(start);
+
+        self.record_plain_xack_missing_borrowed_metrics(
+            key, group, elapsed_us, now_ms, packet_id, &reply,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_reply(&reply);
+        Some(reply)
+    }
+
+    fn record_plain_xack_missing_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        group: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        output: &RespFrame,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        let build = || {
+            vec![
+                b"XACK".to_vec(),
+                key.to_vec(),
+                group.to_vec(),
+                b"0-0".to_vec(),
+            ]
+        };
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(&build);
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(&build);
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if matches!(output, RespFrame::Error(_)) {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind("xack", elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(build);
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'XACK' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output,
+            });
+        }
+    }
+
     /// Borrowed fast path for the exact stale-ID shape `XDEL key 0-0`.
     /// Redis stream entries can never use 0-0. The initial write lookup is kept
     /// verbatim because it applies lazy expiry and touches live streams exactly
@@ -49651,6 +49781,94 @@ mod tests {
         assert!(
             selected_db
                 .execute_plain_xtrim_minid_noop_borrowed(b"s", 2)
+                .is_none(),
+            "non-default DB must retain generic namespacing"
+        );
+    }
+
+    #[test]
+    fn plain_xack_missing_borrowed_matches_generic() {
+        let mut fast = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut fast, &mut generic] {
+            assert!(matches!(
+                rt.execute_frame(command(&[b"XADD", b"s", b"1-0", b"f", b"v"]), 1),
+                RespFrame::BulkString(Some(_))
+            ));
+            assert_eq!(
+                rt.execute_frame(command(&[b"XGROUP", b"CREATE", b"s", b"g", b"0-0"]), 2),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert!(matches!(
+                rt.execute_frame(
+                    command(&[
+                        b"XREADGROUP",
+                        b"GROUP",
+                        b"g",
+                        b"c",
+                        b"COUNT",
+                        b"1",
+                        b"STREAMS",
+                        b"s",
+                        b">",
+                    ]),
+                    3,
+                ),
+                RespFrame::Array(Some(_))
+            ));
+            rt.execute_frame(command(&[b"SET", b"wrong", b"value"]), 4);
+        }
+
+        for (now_ms, (key, group)) in (100..).zip([
+            (b"s".as_slice(), b"g".as_slice()),
+            (b"s".as_slice(), b"missing-group".as_slice()),
+            (b"missing".as_slice(), b"g".as_slice()),
+            (b"wrong".as_slice(), b"g".as_slice()),
+        ]) {
+            let fast_reply = fast
+                .execute_plain_xack_missing_borrowed(key, group, now_ms)
+                .expect("default-state exact XACK uses borrowed path");
+            let generic_reply =
+                generic.execute_frame(command(&[b"XACK", key, group, b"0-0"]), now_ms);
+            assert_eq!(fast_reply, generic_reply, "key={key:?} group={group:?}");
+        }
+
+        for query in [
+            &[b"XPENDING".as_slice(), b"s".as_slice(), b"g".as_slice()][..],
+            &[b"XINFO".as_slice(), b"GROUPS".as_slice(), b"s".as_slice()][..],
+        ] {
+            assert_eq!(
+                fast.execute_frame(command(query), 200),
+                generic.execute_frame(command(query), 200),
+                "query={query:?}",
+            );
+        }
+        assert_eq!(fast.server.store.dirty, generic.server.store.dirty);
+        assert_eq!(
+            fast.server.store.stat_total_commands_processed,
+            generic.server.store.stat_total_commands_processed
+        );
+        assert_eq!(
+            fast.server.store.stat_total_error_replies,
+            generic.server.store.stat_total_error_replies
+        );
+        assert_eq!(
+            fast.server.store.stat_keyspace_hits,
+            generic.server.store.stat_keyspace_hits
+        );
+        assert_eq!(
+            fast.server.store.stat_keyspace_misses,
+            generic.server.store.stat_keyspace_misses
+        );
+
+        let mut selected_db = Runtime::default_strict();
+        assert_eq!(
+            selected_db.execute_frame(command(&[b"SELECT", b"1"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(
+            selected_db
+                .execute_plain_xack_missing_borrowed(b"s", b"g", 2)
                 .is_none(),
             "non-default DB must retain generic namespacing"
         );

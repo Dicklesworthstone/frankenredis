@@ -115,6 +115,10 @@ perf-ab-xtrim-minid-noop-floor = []
 # Controls preserve the guarded generic route; production builds compile only
 # the floor route.
 perf-ab-xdel-missing-floor = []
+# Measurement-only control arm for the exact `XACK key group 0-0` dispatch
+# floor. Controls preserve the guarded generic route; production builds compile
+# only the floor route.
+perf-ab-xack-missing-floor = []
 # Measurement-only frozen arm for replica-prefix extraction A/Bs.
 bench-reference = []
 

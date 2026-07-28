@@ -33,6 +33,111 @@ Redis arm and numeric ratio; a SELF-SPEEDUP needs the heading label and cannot
 mark itself as campaign output. Missing or contradictory classification exits
 **8**.
 
+## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — exact impossible-ID `XACK xs g 0-0` is 1.2198x live Redis at saturated P16 (`frankenredis-0c7bc`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes.** The qualifying result is
+  FrankenRedis/Redis throughput against the actual vendored Redis 7.2.4 server
+  running live beside both generic-XACK A/A controls in the same invocation.
+  Generic/candidate is a SELF-SPEEDUP maintenance result only.
+- **Ledger admission and current-state loss.** The preflight mechanically found
+  eight rows, and every row was hand-adjudicated before production was edited.
+  They cover the stream-group side-map hasher, the bare expiry guard, incidental
+  GEO/SCAN profiles, two `insert_consumer` rejects, XACK's already-optimal
+  borrowed `pending.remove` store body, consumer-group behavior parity, and the
+  PEL `BTreeMap` representation. None measured the exact front
+  parser/dispatch surface for live `XACK key group 0-0`; in particular, the
+  “XACK already optimal” row correctly closes allocation work *inside*
+  `Store::xack`, not the argv/router work before it. A pre-edit strict-remote
+  run on fully reserved `vmi1149989` used 48 samples x 200,000 byte-checked
+  replies/arm, 50 persistent clients in eight pinned shards, a dedicated
+  server core, 125-group within-sample interleaving, and two complete 24-order
+  cycles. FrankenRedis/Redis utilization was **99.031%/98.394%**. Its zero-lost
+  profile named **20.90% self-time** in the command surface
+  (`process_buffered_frames` 20.43%, `xack_cmd` 0.47%), an Amdahl elimination
+  ceiling of **1.264223x**; the async-output surface was only 0.12%. Wall A/A
+  null median was **0.998656973x**, bootstrap 95% median CI
+  **[0.970156172, 1.022463642]**, giving gate
+  **[0.940312343, 1.059687657]**. Current FrankenRedis/Redis throughput was only
+  **0.255565670x**, CI **[0.250604844, 0.267023151]**: incumbent REJECT.
+  Baseline harness, FrankenRedis, Redis, and profile SHA-256 values were
+  **`eb8cb7dc8f47d8170bc8952b869583ea9644f97c5df010779d629ae66277d803`**,
+  **`ab13c2828c3bc0095cefd31a262b4196efb802baf3a44d11ad4f3c96280ca939`**,
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**,
+  and
+  **`5611f13fbe6106050dc48e5856d5bd43a6bc0d3fe4c7aa9eaf981e63c7fd8a99`**.
+- **One exact lever and behavior preservation.** A live stream entry, and
+  therefore a pending entry, can never have ID `0-0`. The case-insensitive
+  arity-four classifier sends XACK packets to a guarded helper; that helper
+  accepts only the literal `0-0` fourth argument and falls through for every
+  live/nonzero ID, malformed packet, other arity, policy refusal, and
+  non-default session state. Generic XACK intentionally checks key/group
+  existence before parsing IDs, so the borrowed runtime helper preserves that
+  exact `Store::stream_group_exists` first step: missing key/group returns zero,
+  and a non-stream key returns WRONGTYPE. When the group exists, it invokes the
+  same `Store::xack(key, group, &[(0, 0)], now)` primitive, retaining expiry,
+  keyspace hits/misses, PEL-summary invalidation, group probes, pending counts,
+  and dirty behavior. Command/session accounting, active expiry, reply
+  suppression, error counts, slowlog, latency, histogram, threat-event output,
+  and lazy-expiry propagation are preserved; only argv/ID materialization and
+  generic routing are removed. Runtime parity covers a live pending ID plus
+  `0-0`, missing group, missing key, WRONGTYPE, XPENDING/XINFO state, dirty and
+  stats, and selected-DB fallback. Classifier tests cover mixed case, wrong
+  arity, and nonzero-ID fallback.
+- **Correctness evidence and known unrelated residual.** The feature-enabled
+  server suite passed **224/224** unit tests plus every integration target.
+  Full conformance passed **194** library tests, **99** smoke tests, and every
+  auxiliary target; its live stream oracle passed **217/217**. The expanded
+  live `stream_xinfo_differ.py` exact `XACK 0-0` prelude passed byte/reply and
+  XPENDING/XINFO state parity against Redis 7.2.4. The broader 1,000-iteration
+  existing stream fuzzer subsequently reproduced its known delivery-count
+  residual at iteration 441 on nonzero `XREADGROUP ... 0`; random XACK IDs in
+  that phase are 1..25 and cannot enter this literal-`0-0` floor. The focused
+  `--iters 0` exact gate passed independently. Strict-remote workspace
+  all-target check, default workspace Clippy, exact-feature all-target Clippy
+  with `-D warnings`, pinned-nightly rustfmt, and diff checks passed.
+- **Same-ELF causal design.** The measurement feature retains the complete
+  generic route in one server ELF. Both controls selected it before their first
+  packet using `FR_PERF_AB_XACK_MISSING_FLOOR_ORIG=1`; the candidate omitted
+  that variable, and the harness verified every live flag and environment. One
+  strict-remote invocation on fully reserved `vmi1149989` ran
+  **48 samples x 200,000 replies/arm**, 50 clients in eight pinned shards, a
+  dedicated server core, 125-group interleaving, and two complete 24-order
+  cycles. Candidate/Redis utilization was **98.807%/98.681%**. The harness ELF
+  self-reported SHA-256
+  **`1dc58447d12e7bc6635d898a46bde7513e09345d4be73f46bca7fcf0174307e9`**;
+  every executing FrankenRedis server ELF self-reported SHA-256
+  **`3b5a1702e68d14904f8321db09b44f467b599dc8c3628d4b2eb88888d3aba507`**;
+  Redis self-reported ELF SHA-256
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+- **Final profile and decision.** The zero-lost candidate profile retained
+  **7.52% self-time** in the named command surface
+  (exact parser 2.75%, borrowed executor 2.05%,
+  `process_buffered_frames` 1.92%, floor 0.80%), an Amdahl ceiling of
+  **1.081315x**. Its perf-data SHA-256 was
+  **`f47c1993d7782d730c6c6f383ec1cd135343a8d4a7879cf99d6ba33d5792e2bd`**.
+  Wall A/A null median was **1.004312167x**, bootstrap 95% median CI
+  **[0.983340131, 1.022414643]**, giving gate
+  **[0.955170715, 1.044829285]**. Generic/candidate throughput was
+  **4.504216245x**, CI **[4.387815794, 4.589053304]**: SELF-SPEEDUP
+  maintenance. FrankenRedis/Redis throughput was **1.219829443x**, CI
+  **[1.186124972, 1.279925230]**: **COMPETITIVE KEEP**. CPU A/A was
+  **1.001240635x**, CI **[0.982207140, 1.020475644]**; self-speedup CPU was
+  **4.506222488x**, CI **[4.410077149, 4.653010660]**; competitive CPU
+  efficiency was **1.224032182x**, CI
+  **[1.190314245, 1.284108069]**.
+- **Gate and retry predicate.** Bootstrap median-CI against twice the
+  same-invocation A/A CI radius decided every result. CV is provenance only
+  (wall null 6.737692%, self 7.787473%, competitive 10.508142%) and never a
+  gate. **Retry predicate:** Re-run after changes to XACK
+  framing/classification, stream-ID or group-existence ordering,
+  `Store::stream_group_exists`, `Store::xack`, PEL-summary/consumer accounting,
+  write/expiry/metrics policy, io_uring output, harness
+  client/order/pinning/preflight, Redis, allocator, kernel, or release codegen.
+  Invalidate below 90% utilization, on zero/lost named self-time,
+  reply/live-ELF/environment mismatch, an incomplete order cycle, or failed
+  A/A validity. Rollback removes only the `XackMissing` floor; the generic path
+  remains intact.
+
 ## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — exact stale-ID `XDEL xs 0-0` is 1.3938x live Redis at saturated P16 (`frankenredis-ohsk5.76`)
 
 - **Claim class: COMPETITIVE. Campaign output: yes.** The qualifying result is

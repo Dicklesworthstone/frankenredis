@@ -144,6 +144,34 @@ def main():
     consumers = ["c1", "c2"]
     log = []
 
+    # Exact impossible-pending-ID gate for the borrowed XACK floor. A stream
+    # entry can never be 0-0, but the command must still preserve group
+    # existence/error ordering, wrong-type behavior, and PEL state.
+    exact_xack_zero_ops = [
+        ("XADD", "s1", "1-0", "f", "v"),
+        ("XGROUP", "CREATE", "s1", "g1", "0-0"),
+        ("XREADGROUP", "GROUP", "g1", "c1", "STREAMS", "s1", ">"),
+        ("XACK", "s1", "g1", "0-0"),
+        ("XPENDING", "s1", "g1"),
+        ("XACK", "s1", "missing-group", "0-0"),
+        ("XACK", "missing", "g1", "0-0"),
+        ("SET", "wrong", "value"),
+        ("XACK", "wrong", "g1", "0-0"),
+        ("XINFO", "STREAM", "s1", "FULL", "COUNT", "0"),
+        ("XINFO", "GROUPS", "s1"),
+    ]
+    for op in exact_xack_zero_ops:
+        ro, rf = both(o, f, *op)
+        no, nf = normalize(ro), normalize(rf)
+        if no != nf:
+            print("=== EXACT XACK 0-0 DIVERGENCE ===")
+            print("op: %s" % " ".join(op))
+            print("oracle: %s" % no[:1500])
+            print("fr    : %s" % nf[:1500])
+            sys.exit(1)
+    o.cmd("FLUSHALL")
+    f.cmd("FLUSHALL")
+
     def rid():
         return "%d-%d" % (rng.randint(1, 25), rng.randint(0, 3))
 
@@ -210,7 +238,10 @@ def main():
         if check_divergence("iter %d: %s" % (it, " ".join(str(x) for x in op))):
             sys.exit(1)
 
-    print("OK: %d iters, seed %d — no divergence (fr matches redis 7.2.4)" % (args.iters, args.seed))
+    print(
+        "OK: exact XACK 0-0 + %d iters, seed %d — no divergence "
+        "(fr matches redis 7.2.4)" % (args.iters, args.seed)
+    )
 
 
 if __name__ == "__main__":
