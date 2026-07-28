@@ -187,6 +187,24 @@ def main():
             print("oracle: %s" % no[:1500])
             print("fr    : %s" % nf[:1500])
             sys.exit(1)
+
+    # Reverse-range mirror: both bounds are the impossible 0-0 stream ID, but
+    # lookup/touch/error behavior must still match the generic command.
+    exact_xrevrange_zero_ops = [
+        ("XREVRANGE", "s1", "0-0", "0-0"),
+        ("XREVRANGE", "missing", "0-0", "0-0"),
+        ("XREVRANGE", "wrong", "0-0", "0-0"),
+    ]
+    for op in exact_xrevrange_zero_ops:
+        ro, rf = both(o, f, *op)
+        no, nf = normalize(ro), normalize(rf)
+        if no != nf:
+            print("=== EXACT XREVRANGE 0-0 DIVERGENCE ===")
+            print("op: %s" % " ".join(op))
+            print("oracle: %s" % no[:1500])
+            print("fr    : %s" % nf[:1500])
+            sys.exit(1)
+
     o.cmd("FLUSHALL")
     f.cmd("FLUSHALL")
 
@@ -257,7 +275,7 @@ def main():
             sys.exit(1)
 
     print(
-        "OK: exact XACK/XRANGE 0-0 gates + %d iters, seed %d — no divergence "
+        "OK: exact XACK/XRANGE/XREVRANGE 0-0 gates + %d iters, seed %d — no divergence "
         "(fr matches redis 7.2.4)" % (args.iters, args.seed)
     )
 

@@ -28,6 +28,79 @@ Every new KEEP declares exactly one class:
 modified entries in both ledger files. It also preserves the ELF self-report,
 A/A bootstrap median-CI, never-CV, counted-mechanism, and retry-predicate gates.
 
+## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — impossible-ID `XREVRANGE xs 0-0 0-0` is 105.1630x live Redis at saturated P16 (`frankenredis-4o1gl`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes.** This is candidate
+  FrankenRedis/Redis throughput against the actual vendored Redis 7.2.4 server
+  live beside both generic-XREVRANGE A/A controls in one invocation.
+  Generic/candidate is a **SELF-SPEEDUP** maintenance result only.
+- **Admission and untouched baseline.** Nineteen preflight hits were
+  hand-adjudicated. Valid mechanism rows target bounded head scans, large
+  result materialization, lookup collapse, or ID formatting. The broad
+  XREVRANGE near-1.0 wall row and older dispatch A/B rows are
+  `VOID-NONULL` for exact `0-0..0-0`, with neither A/A nor a counted mechanism.
+  Fully reserved `vmi1227854` ran 48 x 200,000 byte-checked replies/arm at P16,
+  50 clients in eight pinned shards, a dedicated server core, 125-group
+  interleaving, and two complete 24-order cycles. A zero-lost profile named
+  **60.54% self-time** in the command surface
+  (`execute_plain_xrevrange_borrowed_into` 48.52%,
+  `process_buffered_frames` 9.68%, parser 2.11%, bound parser 0.23%), a
+  **2.534212x** Amdahl ceiling; async completion was 0.15%. Current generic
+  FrankenRedis/Redis throughput was **23.003500017x**, bootstrap 95% CI
+  **[22.478392446, 23.472202071]**. Baseline harness, FrankenRedis, and Redis
+  SHA-256 were
+  **`b3da48414094bca50cb20d7169529d142893820b688f8ad92786020f379d2950`**,
+  **`0136b8821373eabf391c28670564db46c4e3845a68264605e01775f512ae7d69`**,
+  and **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+- **Lever and isomorphism.** A legal stream ID cannot be `0-0`, so the exact
+  reverse closed interval is empty. A case-insensitive arity-four classifier
+  enters a helper that accepts only two literal `0-0` bounds; every other
+  interval, malformed frame, arity, policy refusal, and stateful session falls
+  through. The runtime floor retains `Store::xlen`, the same O(1) live-key
+  primitive, so expiry, hit/miss, LFU RNG/bump, WRONGTYPE, stream touch,
+  command/session accounting, reply suppression, errors, and propagation
+  remain shared while bound parsing, range construction, and the reverse walk
+  disappear. RESP2/RESP3 parity covers live/missing/expired/wrong-type keys,
+  LFU frequency, counters, dirty state, and selected-DB fallback; classifier
+  fallback tests pass. The exact live differential passed against Redis 7.2.4.
+  Full conformance passed 194/194 library, 99/99 smoke, every auxiliary target,
+  and 217/217 live streams; the feature-enabled server suite passed 224/224
+  plus every integration target. Workspace all-target check, exact-feature
+  Clippy with `-D warnings`, rustfmt, Python syntax parsing, and diff checks
+  passed.
+- **Same executable and valid final invocation.** Fully reserved
+  `vmi1227854`, Linux 6.17.0-35-generic, ran the same fixed work and topology
+  for 48 samples and two complete order cycles. Both controls selected
+  io_uring plus generic XREVRANGE and the candidate selected io_uring plus the
+  floor. The harness self-reported ELF SHA-256
+  **`be235467c01b5450ba0fb2c4f308a24f36333360a9b434bd32e5922177ae94d7`**;
+  every executing FrankenRedis arm self-reported ELF SHA-256
+  **`a7346bc6a936d6435c522bbb3aa89a827ebaa9a1791c53225e2944705237ab5e`**;
+  Redis self-reported ELF SHA-256
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+  The candidate profile SHA-256 was
+  **`545857fc1e1515eeded43e88e0b8bbe6d430a7b61da3e430a545adae24cde1c8`**,
+  with zero lost samples, **7.23%** residual command self-time
+  (**1.077935x** ceiling), and 0.96% async self-time. Candidate/Redis
+  utilization was 97.759%/98.748%.
+- **Median-CI verdict.** Wall A/A null median was **0.986251767x**, bootstrap
+  95% median CI **[0.968584227, 1.032193398]**, within gate
+  **[0.935613204, 1.064386796]**. Candidate/Redis throughput was
+  **105.162967197x**, CI **[101.644132867, 110.911574161]**:
+  COMPETITIVE KEEP. Generic/candidate was **4.724612695x**, CI
+  **[4.593123433, 4.958800465]**: SELF-SPEEDUP maintenance. CPU A/A was
+  **0.985932393x**, CI **[0.967490579, 1.032072248]**; candidate/Redis CPU was
+  **107.790570944x**, CI **[104.259454963, 111.902147604]**. Bootstrap
+  median-CI decided every verdict, never CV; CV is provenance only (wall null
+  7.890645%, competitive 13.558205%).
+- **Retry predicate.** Reopen after stream-ID validity, XREVRANGE/XLEN
+  lookup-touch-LFU-expiry semantics, parser/dispatch, runtime policy/metrics,
+  io_uring harness, Redis, allocator, kernel, or release codegen changes.
+  Invalidate low utilization, lost/zero-self profiles, reply/env/ELF
+  mismatches, incomplete order cycles, or an A/A bootstrap median CI outside
+  its null gate. Rollback removes the exact `XrevrangeZero` floor; generic
+  XREVRANGE remains.
+
 ## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — impossible-ID `XRANGE xs 0-0 0-0` is 1.8488x live Redis at saturated P16 (`frankenredis-d0wmm`)
 
 - **Claim class: COMPETITIVE. Campaign output: yes.** This is

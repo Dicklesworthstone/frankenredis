@@ -29001,6 +29001,86 @@ impl Runtime {
         Some(())
     }
 
+    /// Borrowed fast path for exact `XREVRANGE key 0-0 0-0`.
+    ///
+    /// Redis stream IDs can never equal 0-0, so the result is always an empty
+    /// array. `Store::xlen` is deliberately retained as the shared O(1)
+    /// live-key primitive: it has the same expiry, hit/miss, LFU bump/RNG,
+    /// WRONGTYPE, and stream-touch behavior as the generic non-inverted reverse
+    /// range scan. Only bound parsing, range construction, and the empty walk
+    /// are removed.
+    ///
+    /// Returns `None` before command accounting when a stateful runtime surface
+    /// requires generic dispatch.
+    pub fn execute_plain_xrevrange_zero_borrowed_into(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+    ) -> Option<()> {
+        if self.policy.gate.max_array_len < 4
+            || self.policy.gate.max_bulk_len < b"XREVRANGE".len()
+            || key.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+            return None;
+        }
+
+        let argv_len_sum = b"XREVRANGE".len() + key.len() + b"0-0".len() * 2;
+        let packet_id = self.plain_read_borrowed_preamble("xrevrange", argv_len_sum, now_ms);
+        let suppress_reply = self.suppress_current_network_reply();
+        let st = self.chained_command_start();
+        let result = self.server.store.xlen(key, now_ms);
+        let elapsed_us = self.finish_chained_command(st);
+
+        let mut error_reply = None;
+        match result {
+            Ok(_) => {
+                if !suppress_reply {
+                    fr_protocol::encode_aggregate_header(0, false, out);
+                }
+            }
+            Err(err) => {
+                let reply = CommandError::Store(err).to_resp();
+                if !suppress_reply {
+                    if resp3 {
+                        reply.encode_into_resp3(out);
+                    } else {
+                        reply.encode_into(out);
+                    }
+                }
+                error_reply = Some(reply);
+            }
+        }
+
+        let failed = error_reply.is_some();
+        self.record_plain_zremrange_borrowed_metrics(
+            "xrevrange",
+            "XREVRANGE",
+            || {
+                vec![
+                    b"XREVRANGE".to_vec(),
+                    key.to_vec(),
+                    b"0-0".to_vec(),
+                    b"0-0".to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        if let Some(reply) = &error_reply {
+            self.account_plain_borrowed_error_reply(reply);
+        }
+        Some(())
+    }
+
     /// (BlackThrush) Borrowed READ fast path for `XREVRANGE key end start [COUNT n]`.
     /// Reverse mirror of execute_plain_xrange_borrowed: the wire order is end then
     /// start (end parsed as the upper bound, start as the lower), and store.xrevrange
@@ -50046,6 +50126,103 @@ mod tests {
         assert!(
             selected_db
                 .execute_plain_xrange_zero_borrowed_into(b"s", 2, false, &mut Vec::new())
+                .is_none(),
+            "non-default DB must retain generic namespacing"
+        );
+    }
+
+    #[test]
+    fn plain_xrevrange_zero_borrowed_into_matches_generic() {
+        for resp3 in [false, true] {
+            let mut fast = Runtime::default_strict();
+            let mut generic = Runtime::default_strict();
+            for rt in [&mut fast, &mut generic] {
+                assert_eq!(
+                    rt.execute_frame(
+                        command(&[b"CONFIG", b"SET", b"maxmemory-policy", b"allkeys-lfu"]),
+                        1,
+                    ),
+                    RespFrame::SimpleString("OK".to_string())
+                );
+                assert!(matches!(
+                    rt.execute_frame(command(&[b"XADD", b"s", b"1-0", b"f", b"v"]), 2),
+                    RespFrame::BulkString(Some(_))
+                ));
+                assert!(matches!(
+                    rt.execute_frame(command(&[b"XADD", b"expired", b"1-0", b"f", b"v"]), 3),
+                    RespFrame::BulkString(Some(_))
+                ));
+                assert_eq!(
+                    rt.execute_frame(command(&[b"PEXPIRE", b"expired", b"1"]), 4),
+                    RespFrame::Integer(1)
+                );
+                assert_eq!(
+                    rt.execute_frame(command(&[b"SET", b"wrong", b"value"]), 5),
+                    RespFrame::SimpleString("OK".to_string())
+                );
+            }
+
+            for (now_ms, key) in (100..).zip([
+                b"s".as_slice(),
+                b"missing".as_slice(),
+                b"expired".as_slice(),
+                b"wrong".as_slice(),
+            ]) {
+                let mut fast_out = Vec::new();
+                fast.execute_plain_xrevrange_zero_borrowed_into(key, now_ms, resp3, &mut fast_out)
+                    .expect("default-state exact XREVRANGE uses borrowed path");
+                let mut generic_out = Vec::new();
+                generic
+                    .execute_plain_xrevrange_borrowed_into(
+                        key,
+                        b"0-0",
+                        b"0-0",
+                        None,
+                        now_ms,
+                        resp3,
+                        &mut generic_out,
+                    )
+                    .expect("default-state generic XREVRANGE uses borrowed path");
+                assert_eq!(fast_out, generic_out, "resp3={resp3} key={key:?}");
+            }
+
+            for query in [
+                &[b"XLEN".as_slice(), b"s".as_slice()][..],
+                &[b"OBJECT".as_slice(), b"FREQ".as_slice(), b"s".as_slice()][..],
+            ] {
+                assert_eq!(
+                    fast.execute_frame(command(query), 200),
+                    generic.execute_frame(command(query), 200),
+                    "resp3={resp3} query={query:?}",
+                );
+            }
+            assert_eq!(fast.server.store.dirty, generic.server.store.dirty);
+            assert_eq!(
+                fast.server.store.stat_total_commands_processed,
+                generic.server.store.stat_total_commands_processed
+            );
+            assert_eq!(
+                fast.server.store.stat_total_error_replies,
+                generic.server.store.stat_total_error_replies
+            );
+            assert_eq!(
+                fast.server.store.stat_keyspace_hits,
+                generic.server.store.stat_keyspace_hits
+            );
+            assert_eq!(
+                fast.server.store.stat_keyspace_misses,
+                generic.server.store.stat_keyspace_misses
+            );
+        }
+
+        let mut selected_db = Runtime::default_strict();
+        assert_eq!(
+            selected_db.execute_frame(command(&[b"SELECT", b"1"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(
+            selected_db
+                .execute_plain_xrevrange_zero_borrowed_into(b"s", 2, false, &mut Vec::new())
                 .is_none(),
             "non-default DB must retain generic namespacing"
         );

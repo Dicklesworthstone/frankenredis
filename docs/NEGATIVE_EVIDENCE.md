@@ -33,6 +33,90 @@ Redis arm and numeric ratio; a SELF-SPEEDUP needs the heading label and cannot
 mark itself as campaign output. Missing or contradictory classification exits
 **8**.
 
+## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — impossible-ID `XREVRANGE xs 0-0 0-0` is 105.1630x live Redis at saturated P16 (`frankenredis-4o1gl`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes.** The qualifying number is
+  candidate FrankenRedis/Redis throughput against the actual vendored Redis
+  7.2.4 server running beside two generic-XREVRANGE controls in one invocation.
+  Generic/candidate is a **SELF-SPEEDUP** maintenance result only.
+- **Ledger admission and pre-edit baseline.** The preflight found 19 textual
+  hits, and every unique row was read and adjudicated before production was
+  edited. The 2026-07-14 head-bounded reverse-scan reject, large-result
+  zero-copy rows, lookup-collapse row, and large-scan ID-formatting row are
+  `VALID-MECHANISM` but target distinct counted work. The broad 2026-06-28
+  XREVRANGE near-1.0 wall row and older dispatch A/B rows are
+  `VOID-NONULL` for this exact shape because they recorded neither an A/A null
+  nor a counted mechanism. On untouched source, fully reserved `vmi1227854`
+  ran 48 samples x 200,000 fixed replies/arm at P16 with 50 persistent clients,
+  eight pinned shards, a dedicated server core, 125-group within-sample
+  interleaving, and two complete 24-order cycles. Its zero-lost profile
+  attributed **60.54% self-time** to the named command surface
+  (`execute_plain_xrevrange_borrowed_into` 48.52%,
+  `process_buffered_frames` 9.68%, exact parser 2.11%, bound parser 0.23%),
+  an Amdahl ceiling of **2.534212x**; async completion was only 0.15%.
+  Current generic FrankenRedis/Redis throughput was already
+  **23.003500017x**, bootstrap 95% median CI
+  **[22.478392446, 23.472202071]**. Baseline harness, FrankenRedis, and Redis
+  SHA-256 were
+  **`b3da48414094bca50cb20d7169529d142893820b688f8ad92786020f379d2950`**,
+  **`0136b8821373eabf391c28670564db46c4e3845a68264605e01775f512ae7d69`**,
+  and **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+- **One exact lever and behavior preservation.** A legal stream entry can
+  never have ID `0-0`, so this reverse closed interval is always empty. The
+  case-insensitive arity-four classifier admits XREVRANGE packets to a guarded
+  helper, which accepts only two literal `0-0` bounds and falls through for
+  every other interval, malformed packet, arity, policy refusal, and
+  non-default session state. The runtime floor deliberately calls the same
+  `Store::xlen` O(1) live-key primitive, preserving lazy expiry, hit/miss
+  accounting, LFU RNG/bump, WRONGTYPE, stream touch, command/session metrics,
+  reply suppression, error accounting, and expired-key propagation while
+  removing bound parsing, range construction, and Redis's avoidable reverse
+  traversal. RESP2/RESP3 parity covers live, missing, expired, and wrong-type
+  keys, LFU frequency, keyspace counters, dirty state, errors, and selected-DB
+  fallback; classifier tests cover mixed case, wrong arity, and nonzero
+  fallback. The exact live differential passed those states against Redis
+  7.2.4. Full conformance passed 194/194 library, 99/99 smoke, every
+  auxiliary target, and 217/217 live-stream cases; the feature-enabled server
+  suite passed 224/224 plus every integration target. Strict-remote workspace
+  all-target check and exact-feature Clippy with `-D warnings`, rustfmt, Python
+  syntax parsing, and diff checks passed.
+- **Same executable, same invocation, fixed work.** The final valid invocation
+  ran on fully reserved `vmi1227854` (Linux 6.17.0-35-generic), with
+  48 x 200,000 byte-checked replies/arm, the same topology and two complete
+  order cycles. Both controls selected io_uring plus generic XREVRANGE; the
+  candidate selected io_uring plus the exact floor. The harness self-reported
+  ELF SHA-256
+  **`be235467c01b5450ba0fb2c4f308a24f36333360a9b434bd32e5922177ae94d7`**;
+  all three executing FrankenRedis arms self-reported ELF SHA-256
+  **`a7346bc6a936d6435c522bbb3aa89a827ebaa9a1791c53225e2944705237ab5e`**;
+  Redis self-reported ELF SHA-256
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+  The candidate profile SHA-256 was
+  **`545857fc1e1515eeded43e88e0b8bbe6d430a7b61da3e430a545adae24cde1c8`**,
+  had zero lost samples, and named **7.23% self-time** in the residual command
+  surface (parser 3.04%, frame processing 2.68%, runtime helper 0.92%,
+  dispatch helper 0.59%), an Amdahl ceiling of **1.077935x**; the async surface
+  was 0.96%. Candidate/Redis utilization was 97.759%/98.748%.
+- **Median-CI verdict.** Wall A/A null median was **0.986251767x**, bootstrap
+  95% median CI **[0.968584227, 1.032193398]**, inside its
+  **[0.935613204, 1.064386796]** gate. The qualifying
+  candidate/Redis throughput median was **105.162967197x**, CI
+  **[101.644132867, 110.911574161]**: COMPETITIVE KEEP.
+  Generic/candidate was **4.724612695x**, CI
+  **[4.593123433, 4.958800465]**, and is maintenance. CPU A/A was
+  **0.985932393x**, CI **[0.967490579, 1.032072248]**;
+  candidate/Redis CPU throughput was **107.790570944x**, CI
+  **[104.259454963, 111.902147604]**. The bootstrap median-CI gate determined
+  every verdict, never CV; CV is provenance only (wall null 7.890645%,
+  competitive 13.558205%).
+- **Concrete retry predicate.** Reopen after stream-ID validity,
+  XREVRANGE/XLEN lookup-touch-LFU-expiry semantics, parser/dispatch, runtime
+  policy/metrics, io_uring harness, Redis 7.2.4, allocator, kernel, or release
+  codegen changes. Invalidate any retry with low server utilization, a lost or
+  zero-self profile, reply/env/ELF mismatch, incomplete order cycles, or an A/A
+  bootstrap median CI outside its null gate. Rollback is removal of the
+  `XrevrangeZero` floor; the generic XREVRANGE path remains intact.
+
 ## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — impossible-ID `XRANGE xs 0-0 0-0` is 1.8488x live Redis at saturated P16 (`frankenredis-d0wmm`)
 
 - **Claim class: COMPETITIVE. Campaign output: yes.** The qualifying number is

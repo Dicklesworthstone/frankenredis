@@ -123,6 +123,10 @@ perf-ab-xack-missing-floor = []
 # floor. Controls preserve the guarded generic range scan; production builds
 # compile only the invariant-backed empty-range route.
 perf-ab-xrange-zero-floor = []
+# Measurement-only control arm for the exact `XREVRANGE key 0-0 0-0`
+# dispatch floor. Controls preserve the guarded generic reverse-range scan;
+# production builds compile only the invariant-backed empty-range route.
+perf-ab-xrevrange-zero-floor = []
 # Measurement-only frozen arm for replica-prefix extraction A/Bs.
 bench-reference = []
 
