@@ -33,6 +33,82 @@ Redis arm and numeric ratio; a SELF-SPEEDUP needs the heading label and cannot
 mark itself as campaign output. Missing or contradictory classification exits
 **8**.
 
+## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — saturated P16 SET is 1.3325x Redis after asynchronous CQ batching; saturated P1 is HOLD (`frankenredis-ohsk5.67`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes.** The campaign result is the
+  FrankenRedis/Redis throughput ratio against the actual vendored Redis 7.2.4
+  server running as a live side-by-side arm in the same invocation. The
+  mio/io_uring ratios are SELF-SPEEDUP maintenance measurements only and are
+  not campaign output.
+- **Ledger-first routing.** Both ledgers and the candidate preflight were
+  searched before this run for the P16 pipeline, io_uring/submission/CQ
+  batching, client saturation, and the old 33-47% Redis-relative wall. The
+  asynchronous owned-buffer CQ reopening condition had already been satisfied and
+  shipped. This row remeasures that landed design end-to-end; it does not reopen
+  the closed synchronous submission or writev implementations. The interim
+  three-round 1.4882x P16 screen remains routing/count evidence only: it had no
+  bootstrap median CI and its A/A point estimate was 0.9675. The strict result
+  below supersedes that screen for every competitive claim.
+- **Client-bound harness correction.** The prior P1 driver serialized all 50
+  connections through one client thread/core. The corrected one-invocation
+  harness keeps four persistent independent client shards on CPUs 0-3, pins
+  every server arm to separate CPU 9, samples `/proc/PID/schedstat` nanoseconds
+  only around active blocks, profiles the exact selected pipeline, and refuses
+  wall adjudication unless both FrankenRedis and Redis reach 90% median server
+  utilization. The older syscall-decomposition driver now also allocates real
+  multi-core client masks, checks every client CPU and SMT overlap, and exits
+  nonzero if any live server arm remains below 90%.
+- **Executing provenance and fixed work.** One strict-remote invocation on
+  `vmi1227854` (Linux 6.17.0-35) ran P1 and P16 through the same four live
+  processes: two byte-identical mio controls, the same FrankenRedis ELF with
+  `--io-uring-output`, and vendored Redis 7.2.4. Each configuration used 32
+  paired samples, 200,000 verified SET replies per arm/sample, 50 clients, four
+  client shards, all 24 four-arm orders, and 25-group within-sample
+  interleaving. The harness self-reported executing ELF SHA-256
+  **`9bdbd912f0a45b2a9689f0ea5ba7a72f368d4cca302ad7ba8770d91e5b4b85a4`**.
+  All three live FrankenRedis processes self-reported identical
+  `/proc/PID/exe` SHA-256
+  **`f2d002e3093a3c3c3844d947788f20e9b3c9cbdceedb209abd7488eb89b1bbc5`**;
+  the live Redis arm self-reported
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+- **Exact-path profile.** Both profiles lost zero samples. At P1, owned
+  submit/drain held **0.79% self-time** and the complete named io_uring surface
+  held **1.37%**, for a computed full-elimination Amdahl ceiling of
+  **1.013890x**. At P16 the corresponding self-times were **0.51%** and
+  **0.69%**, ceiling **1.006948x**. Thus the workload really traversed the
+  candidate path at both depths; the competitive result is an end-to-end
+  architectural comparison, not a claim that another local CQ micro-lever can
+  explain 33%.
+- **P1 corrected disposition.** Median server utilization was 95.497%
+  FrankenRedis and 94.592% Redis. Wall A/A median was **0.998650567x**, bootstrap 95%
+  median CI **[0.981654781, 1.007236542]**, producing the prespecified two-radius
+  gate **[0.963309561, 1.036690439]**. FrankenRedis/Redis throughput was
+  **1.033188422x**, CI **[1.020507161, 1.040742822]**: **HOLD**, because its CI
+  overlaps that gate. CPU efficiency was likewise HOLD at **1.026841612x**, CI
+  **[1.014294353, 1.032945023]**. This supersedes the old client-bound P1
+  1.0749x KEEP. The same-ELF mio/io_uring wall result was a maintenance-only
+  **1.088389867x** KEEP, CI **[1.078516369, 1.092996000]**.
+- **P16 competitive decision.** Median server utilization was 94.499%
+  FrankenRedis and 96.091% Redis. Wall A/A median was **1.005991370x**, bootstrap 95%
+  median CI **[0.974482976, 1.034635209]**, yielding gate
+  **[0.930729582, 1.069270418]**. FrankenRedis/Redis throughput
+  (Redis wall / FrankenRedis wall) was **1.332480493x**, bootstrap 95% median CI
+  **[1.280633581, 1.348506942]**: **KEEP**. CPU A/A was **1.010463099x**, CI
+  **[0.975627982, 1.027729816]**, and FrankenRedis/Redis CPU efficiency was
+  **1.334960630x**, CI **[1.295484652, 1.355296466]**: **KEEP**. The same-ELF
+  mio/io_uring wall result was maintenance-only HOLD at **1.041360833x**, CI
+  **[1.014584461, 1.071655740]**. The original 0.33-0.47x pipeline wall is now a
+  1.3325x lead, a **2.84-4.04x ratio reversal**.
+- **Decision rule and retry predicate.** Bootstrap median CI against twice the
+  same-invocation A/A CI radius determined every verdict. CV is provenance only
+  (P16 wall null 7.547112%, competitive 6.379070%) and never a gate. Re-run
+  after changes to client sharding/pinning, io_uring ownership or CQ draining,
+  event-loop output ordering, Redis incumbent, kernel, allocator, or release
+  codegen. Invalidate rather than compare if either server is below 90% median
+  utilization, any exact selected-pipeline frame has zero self-time or lost
+  samples, executing ELF identities differ, any reply differs, or the A/A
+  median fails the harness validity bound.
+
 ## 2026-07-27 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — asynchronous owned-buffer `io_uring` CQ batching leads Redis on P1 SET (`frankenredis-zwd0m`)
 
 - **Claim class: COMPETITIVE. Campaign output: yes.** The campaign result is the

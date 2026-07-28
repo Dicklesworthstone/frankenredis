@@ -61,11 +61,16 @@ FR2_CORE="${FR2_CORE:-42}"; CLIENT_CORE="${CLIENT_CORE:-44}"
 # unpipelined ops/s ratio taken that way measured the CLIENT, not the server, and
 # no server-side lever can move such a number. Drive the client across several
 # cores with --threads, and see the CLIENT-BOUND guard below.
-CLIENT_CORES="${CLIENT_CORES:-$CLIENT_CORE}"
 CLIENT_THREADS="${CLIENT_THREADS:-4}"
+CLIENT_CORES="${CLIENT_CORES:-}"
 # Extra server args for the fr arms, e.g. FR_ARGS=--io-uring-output. Applied to
 # BOTH fr arms so the A/A null stays a true same-configuration control.
 FR_ARGS="${FR_ARGS:-}"
+# Optional prefill run, applied identically to every arm before warmup. Shape
+# hunts over option-bearing commands (GETEX/EXPIRE XX/SETRANGE/COPY ...) are
+# meaningless against an empty keyspace: the command short-circuits on a missing
+# key and you measure the miss path, not the shape. Same `cmd:` grammar as -t.
+PREFILL="${PREFILL:-}"
 
 # --- core-contention preflight ----------------------------------------------
 # A foreign process pinned to one arm's core does NOT look like noise: it looks
@@ -74,6 +79,73 @@ FR_ARGS="${FR_ARGS:-}"
 # 0.556 — two identical binaries differing 2x — while instructions:u/op stayed
 # at 0.98, i.e. every throughput ratio from that window was invalid and every
 # instruction ratio was fine. Refuse to start rather than emit that quietly.
+expand_cpu_list() {
+  local list="$1" token start end
+  local -a tokens
+  IFS=',' read -r -a tokens <<<"$list"
+  for token in "${tokens[@]}"; do
+    if [[ "$token" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+      start="${BASH_REMATCH[1]}"
+      end="${BASH_REMATCH[2]}"
+      [ "$start" -le "$end" ] || { echo "invalid CPU range: $token" >&2; exit 2; }
+      seq "$start" "$end"
+    elif [[ "$token" =~ ^[0-9]+$ ]]; then
+      echo "$token"
+    else
+      echo "invalid CPU list item: $token" >&2
+      exit 2
+    fi
+  done
+}
+
+if [ -z "$CLIENT_CORES" ]; then
+  CLIENT_CORES=""
+  candidate="$CLIENT_CORE"
+  client_core_count=0
+  while [ "$client_core_count" -lt "$CLIENT_THREADS" ] && [ "$candidate" -lt "$(nproc)" ]; do
+    if [ "$candidate" -ne "$FR_CORE" ] && [ "$candidate" -ne "$RD_CORE" ] \
+        && [ "$candidate" -ne "$FR2_CORE" ]; then
+      CLIENT_CORES="${CLIENT_CORES:+$CLIENT_CORES,}$candidate"
+      client_core_count=$((client_core_count + 1))
+    fi
+    candidate=$((candidate + 1))
+  done
+fi
+mapfile -t CLIENT_CORE_VALUES < <(expand_cpu_list "$CLIENT_CORES")
+if [ "${#CLIENT_CORE_VALUES[@]}" -lt "$CLIENT_THREADS" ]; then
+  echo "PREFLIGHT FAIL: CLIENT_CORES='$CLIENT_CORES' exposes only ${#CLIENT_CORE_VALUES[@]} CPUs for CLIENT_THREADS=$CLIENT_THREADS" >&2
+  exit 2
+fi
+
+server_siblings=""
+for server_core in "$FR_CORE" "$RD_CORE" "$FR2_CORE"; do
+  sibling_file="/sys/devices/system/cpu/cpu${server_core}/topology/thread_siblings_list"
+  sibling_list="$server_core"
+  [ ! -r "$sibling_file" ] || sibling_list="$(<"$sibling_file")"
+  for sibling in $(expand_cpu_list "$sibling_list"); do
+    server_siblings="$server_siblings $sibling "
+  done
+done
+client_siblings=""
+for client_core in "${CLIENT_CORE_VALUES[@]}"; do
+  if [[ "$server_siblings" == *" $client_core "* ]]; then
+    echo "PREFLIGHT FAIL: client CPU $client_core shares a physical core with a server arm" >&2
+    exit 2
+  fi
+  sibling_file="/sys/devices/system/cpu/cpu${client_core}/topology/thread_siblings_list"
+  sibling_list="$client_core"
+  [ ! -r "$sibling_file" ] || sibling_list="$(<"$sibling_file")"
+  for sibling in $(expand_cpu_list "$sibling_list"); do
+    if [[ "$client_siblings" == *" $sibling "* ]]; then
+      echo "PREFLIGHT FAIL: CLIENT_CORES='$CLIENT_CORES' includes SMT siblings of the same physical core" >&2
+      exit 2
+    fi
+  done
+  for sibling in $(expand_cpu_list "$sibling_list"); do
+    client_siblings="$client_siblings $sibling "
+  done
+done
+
 check_core() {
   local core="$1" role="$2" busy
   busy=$(ps -eo psr,pcpu,comm --no-headers \
@@ -92,7 +164,10 @@ check_core() {
 check_core "$FR_CORE" "fr arm"
 check_core "$RD_CORE" "redis arm"
 check_core "$FR2_CORE" "A/A null arm"
-check_core "$CLIENT_CORE" "client"
+for client_core in "${CLIENT_CORE_VALUES[@]}"; do
+  check_core "$client_core" "client"
+done
+echo "client driver: threads=$CLIENT_THREADS cores=$CLIENT_CORES"
 
 # --- harness contract part 1: identify the exact ELF under test -------------
 echo "== binaries under test =="
@@ -204,6 +279,22 @@ measure() {
 start_servers
 RESULTS=/tmp/azm_syscall_decomp.tsv; : > "$RESULTS"
 
+if [ -n "$PREFILL" ]; then
+  echo "prefilling every arm with: $PREFILL"
+  for p in $FR_PORT $RD_PORT $FR2_PORT; do
+    set -f
+    # shellcheck disable=SC2046
+    taskset -c "$CLIENT_CORES" "$REDIS_BENCH" -p $p $(bench_head "$PREFILL") \
+        -n 300000 -c 16 -P 16 -r "$KEYSPACE" $(bench_tail "$PREFILL") >/dev/null 2>&1 || true
+    set +f
+  done
+  for p in $FR_PORT $RD_PORT $FR2_PORT; do
+    n=$("$REDIS_CLI" -p $p dbsize 2>/dev/null || echo 0)
+    [ "${n:-0}" -gt 0 ] || { echo "PREFILL FAIL: port $p still has dbsize=0" >&2; exit 9; }
+  done
+  echo "prefill dbsize: fr=$("$REDIS_CLI" -p $FR_PORT dbsize) redis=$("$REDIS_CLI" -p $RD_PORT dbsize) fr2=$("$REDIS_CLI" -p $FR2_PORT dbsize)"
+fi
+
 for WL in ${BENCH_T//,/ }; do
   # warm every engine on THIS workload so no round pays first-touch/rehash cost
   for p in $FR_PORT $RD_PORT $FR2_PORT; do
@@ -273,6 +364,7 @@ for line in open(sys.argv[1]):
                                ik=float(ik), cs=float(cs), ns=float(ns),
                                util=float(util))
 med_iu = {}
+client_bound = False
 for wl, rows in wl_rows.items():
     def med(arm, k):
         v = [d[arm][k] for d in rows.values() if arm in d]
@@ -288,12 +380,13 @@ for wl, rows in wl_rows.items():
         print(f'{label:>14}  fr={med("fr",k):>12.4f}  redis={med("redis",k):>12.4f}  '
               f'fr/redis={m:.4f} [{lo:.4f},{hi:.4f}]   A/A null fr/fr2={n:.4f} [{nlo:.4f},{nhi:.4f}]')
     med_iu[wl] = {a: med(a, 'iu') for a in ('fr', 'redis', 'fr2')}
-    ufr, urd = med('fr', 'util'), med('redis', 'util')
-    if ufr == ufr and urd == urd and max(ufr, urd) < 90.0:
-        print(f"  !! CLIENT-BOUND: peak server utilisation {max(ufr, urd):.1f}% of a core "
-              f"(fr {ufr:.1f}%, redis {urd:.1f}%).")
+    ufr, urd, ufr2 = med('fr', 'util'), med('redis', 'util'), med('fr2', 'util')
+    if all(u == u for u in (ufr, urd, ufr2)) and min(ufr, urd, ufr2) < 90.0:
+        client_bound = True
+        print(f"  !! CLIENT-BOUND: every server arm must reach 90% utilisation "
+              f"(fr {ufr:.1f}%, redis {urd:.1f}%, fr2 {ufr2:.1f}%).")
         print( "     The ops/s ratio above measures the CLIENT and CANNOT show a server-side")
-        print( "     effect. Do not quote it. Raise CLIENT_THREADS / CLIENT_CORES and re-run;")
+        print( "     effect. This invocation will fail. Raise CLIENT_THREADS / CLIENT_CORES;")
         print( "     instructions:u/op and ns_cpu/op remain valid as per-operation costs.")
 
 # --- I(P) = C + E/P least-squares fit, per (workload, arm) --------------------
@@ -322,4 +415,6 @@ for base, depths in bywl.items():
         r2 = 1 - ss_res/ss_tot if ss_tot else float('nan')
         print(f'  {arm:>5}:  per-command C = {C:9.1f} instr   '
               f'per-event E = {E:9.1f} instr   R^2 = {r2:.4f}')
+if client_bound:
+    raise SystemExit(10)
 PY

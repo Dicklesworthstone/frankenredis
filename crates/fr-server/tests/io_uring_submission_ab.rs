@@ -2,11 +2,12 @@
 
 //! Same-invocation A/A + A/B + live-incumbent gate for flagged io_uring output.
 //!
-//! The harness deliberately drives many established connections as a group:
-//! every client writes before any client reads. At pipeline depth 1 this gives
-//! the event loop a cross-connection submission batch. Two byte-identical mio
-//! processes provide the null control, the same FrankenRedis ELF with the
-//! runtime flag is the candidate, and vendored Redis is the live incumbent.
+//! The harness deliberately drives many established connections from persistent
+//! client shards. Every shard writes its clients before reading their replies;
+//! independent shards overlap so pipeline depth 1 can saturate the server rather
+//! than the client. Two byte-identical mio processes provide the null control,
+//! the same FrankenRedis ELF with the runtime flag is the candidate, and
+//! vendored Redis is the live incumbent.
 //!
 //! Run only through strict remote RCH on one explicitly selected worker:
 //!
@@ -22,15 +23,19 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const CLIENTS: usize = 50;
+const DEFAULT_CLIENT_THREADS: usize = 4;
 const DEFAULT_SAMPLES: usize = 32;
 const DEFAULT_OPS_PER_SAMPLE: usize = 200_000;
 const DEFAULT_PROFILE_SECONDS: u64 = 3;
 const INTERLEAVE_GROUPS: usize = 25;
 const QUIET_CORE_MAX_PCT: f64 = 5.0;
+const MIN_SERVER_UTIL_PCT: f64 = 90.0;
 const IO_URING_FLAG: &str = "--io-uring-output";
 const SHUTDOWN: &[u8] = b"*2\r\n$8\r\nSHUTDOWN\r\n$6\r\nNOSAVE\r\n";
 const SET: &[u8] = b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n";
@@ -165,11 +170,133 @@ fn mixed_case(pipeline: usize, start_with_get: bool) -> ExchangeCase {
     ExchangeCase { request, response }
 }
 
+enum ClientCommand {
+    Run {
+        packets: Arc<WorkloadPackets>,
+        groups: usize,
+        odd_first: bool,
+    },
+    Shutdown,
+}
+
+struct ClientWorker {
+    command: Sender<ClientCommand>,
+    complete: Receiver<()>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+struct ClientDriver {
+    workers: Vec<ClientWorker>,
+}
+
+impl ClientDriver {
+    fn new(port: u16, client_threads: usize) -> Self {
+        assert!(
+            (1..=CLIENTS).contains(&client_threads),
+            "client thread count must be in 1..={CLIENTS}"
+        );
+        let mut workers = Vec::with_capacity(client_threads);
+        for worker_index in 0..client_threads {
+            let client_count =
+                CLIENTS / client_threads + usize::from(worker_index < CLIENTS % client_threads);
+            let clients = (0..client_count).map(|_| connect(port)).collect();
+            let (command_tx, command_rx) = mpsc::channel();
+            let (complete_tx, complete_rx) = mpsc::channel();
+            let handle = thread::Builder::new()
+                .name(format!("bench-client-{worker_index}"))
+                .spawn(move || {
+                    client_worker(clients, command_rx, complete_tx);
+                })
+                .expect("spawn benchmark client worker");
+            workers.push(ClientWorker {
+                command: command_tx,
+                complete: complete_rx,
+                handle: Some(handle),
+            });
+        }
+        Self { workers }
+    }
+
+    fn run(&self, packets: &Arc<WorkloadPackets>, groups: usize, odd_first: bool) -> Duration {
+        let start = Instant::now();
+        for worker in &self.workers {
+            worker
+                .command
+                .send(ClientCommand::Run {
+                    packets: Arc::clone(packets),
+                    groups,
+                    odd_first,
+                })
+                .expect("dispatch benchmark client work");
+        }
+        for worker in &self.workers {
+            worker
+                .complete
+                .recv()
+                .expect("benchmark client worker completed");
+        }
+        start.elapsed()
+    }
+}
+
+impl Drop for ClientDriver {
+    fn drop(&mut self) {
+        for worker in &self.workers {
+            let _ = worker.command.send(ClientCommand::Shutdown);
+        }
+        for worker in &mut self.workers {
+            if let Some(handle) = worker.handle.take() {
+                handle.join().expect("join benchmark client worker");
+            }
+        }
+    }
+}
+
+fn client_worker(
+    mut clients: Vec<TcpStream>,
+    commands: Receiver<ClientCommand>,
+    complete: Sender<()>,
+) {
+    while let Ok(command) = commands.recv() {
+        let ClientCommand::Run {
+            packets,
+            groups,
+            odd_first,
+        } = command
+        else {
+            return;
+        };
+        let mut response = Vec::new();
+        for group in 0..groups {
+            let odd = (group % 2 == 1) ^ odd_first;
+            let case = if odd { &packets.odd } else { &packets.even };
+            let request = black_box(case.request.as_slice());
+            for client in &mut clients {
+                client.write_all(request).expect("write request group");
+            }
+            response.resize(case.response.len(), 0);
+            for client in &mut clients {
+                client
+                    .read_exact(&mut response)
+                    .expect("read complete response group");
+                assert_eq!(
+                    response, case.response,
+                    "server returned bytes that diverge from the RESP oracle"
+                );
+                black_box(response.as_slice());
+            }
+        }
+        complete
+            .send(())
+            .expect("report benchmark client completion");
+    }
+}
+
 struct Server {
     arm: Arm,
     child: Child,
     port: u16,
-    clients: Vec<TcpStream>,
+    clients: Option<ClientDriver>,
     stderr_path: PathBuf,
 }
 
@@ -180,6 +307,7 @@ impl Server {
         arm: Arm,
         root: &Path,
         server_core: usize,
+        client_threads: usize,
     ) -> Self {
         let runtime_dir = root.join(arm.name());
         fs::create_dir_all(&runtime_dir).expect("create unique server runtime directory");
@@ -213,11 +341,11 @@ impl Server {
             arm,
             child,
             port,
-            clients: Vec::new(),
+            clients: None,
             stderr_path,
         };
         server.wait_until_ready();
-        server.clients = (0..CLIENTS).map(|_| connect(port)).collect();
+        server.clients = Some(ClientDriver::new(port, client_threads));
         server
     }
 
@@ -225,23 +353,14 @@ impl Server {
         self.child.id()
     }
 
-    fn cpu_ticks(&self) -> u64 {
-        let stat = fs::read_to_string(format!("/proc/{}/stat", self.pid()))
-            .expect("read server process stat");
-        let close_paren = stat
-            .rfind(')')
-            .expect("server process stat contains command terminator");
-        // Fields after the command start at proc(5) field 3 (`state`), so
-        // indices 11 and 12 are fields 14/15: user and system CPU ticks.
-        let fields = stat[close_paren + 1..]
+    fn cpu_ns(&self) -> u64 {
+        fs::read_to_string(format!("/proc/{}/schedstat", self.pid()))
+            .expect("read server process schedstat")
             .split_whitespace()
-            .collect::<Vec<_>>();
-        assert!(fields.len() > 12, "server process stat has CPU fields");
-        let user = fields[11].parse::<u64>().expect("parse server user ticks");
-        let system = fields[12]
+            .next()
+            .expect("schedstat contains execution time")
             .parse::<u64>()
-            .expect("parse server system ticks");
-        user + system
+            .expect("parse server CPU nanoseconds")
     }
 
     fn wait_until_ready(&mut self) {
@@ -290,7 +409,7 @@ impl Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        self.clients.clear();
+        self.clients.take();
         if matches!(self.child.try_wait(), Ok(None)) {
             if let Ok(mut stream) = TcpStream::connect(("127.0.0.1", self.port)) {
                 let _ = stream.write_all(SHUTDOWN);
@@ -329,38 +448,17 @@ fn connect(port: u16) -> TcpStream {
     stream
 }
 
-fn exchange_group(server: &mut Server, case: &ExchangeCase) {
-    let request = black_box(case.request.as_slice());
-    for client in &mut server.clients {
-        client.write_all(request).expect("write request group");
-    }
-    let mut response = vec![0_u8; case.response.len()];
-    for client in &mut server.clients {
-        client
-            .read_exact(&mut response)
-            .expect("read complete response group");
-        assert_eq!(
-            response,
-            case.response,
-            "{} returned bytes that diverge from the RESP oracle",
-            server.arm.name()
-        );
-        black_box(response.as_slice());
-    }
-}
-
 fn time_block(
     server: &mut Server,
-    packets: &WorkloadPackets,
+    packets: &Arc<WorkloadPackets>,
     groups: usize,
     odd_first: bool,
 ) -> Duration {
-    let start = Instant::now();
-    for group in 0..groups {
-        let odd = (group % 2 == 1) ^ odd_first;
-        exchange_group(server, if odd { &packets.odd } else { &packets.even });
-    }
-    start.elapsed()
+    server
+        .clients
+        .as_ref()
+        .expect("benchmark clients initialized")
+        .run(packets, groups, odd_first)
 }
 
 fn exchange_one(server: &mut Server, request: &[u8], expected: &[u8]) {
@@ -377,7 +475,7 @@ fn prefill_and_warm(
     servers: &mut [Server; 4],
     workload: Workload,
     pipeline: usize,
-    packets: &WorkloadPackets,
+    packets: &Arc<WorkloadPackets>,
 ) {
     for server in servers.iter_mut() {
         exchange_one(server, SET, SET_REPLY);
@@ -403,10 +501,12 @@ struct Sample {
     null_ratio: f64,
     self_speedup: f64,
     competitive_speedup: f64,
-    mio_a_cpu_ticks: u64,
-    mio_b_cpu_ticks: u64,
-    io_uring_cpu_ticks: u64,
-    redis_cpu_ticks: u64,
+    mio_a_cpu_ns: u64,
+    mio_b_cpu_ns: u64,
+    io_uring_cpu_ns: u64,
+    redis_cpu_ns: u64,
+    io_uring_cpu_util_pct: f64,
+    redis_cpu_util_pct: f64,
     cpu_null_ratio: f64,
     cpu_self_speedup: f64,
     cpu_competitive_speedup: f64,
@@ -416,6 +516,7 @@ fn measure_configuration(
     servers: &mut [Server; 4],
     workload: Workload,
     pipeline: usize,
+    client_threads: usize,
     samples: usize,
     ops_per_sample: usize,
 ) -> Vec<Sample> {
@@ -449,14 +550,15 @@ fn measure_configuration(
         [Arm::Redis, Arm::IoUring, Arm::MioB, Arm::MioA],
     ];
 
-    let packets = WorkloadPackets::new(workload, pipeline);
+    let packets = Arc::new(WorkloadPackets::new(workload, pipeline));
     prefill_and_warm(servers, workload, pipeline, &packets);
     let groups = ops_per_sample.div_ceil(CLIENTS * pipeline).max(1);
     let actual_ops = groups * CLIENTS * pipeline;
     let mut output = Vec::with_capacity(samples);
 
     println!(
-        "CONFIG workload={} pipeline={pipeline} clients={CLIENTS} samples={samples} \
+        "CONFIG workload={} pipeline={pipeline} clients={CLIENTS} client_threads={client_threads} \
+samples={samples} \
 groups_per_arm_sample={groups} interleave_groups={INTERLEAVE_GROUPS} \
 ops_per_arm_sample={actual_ops}",
         workload.name()
@@ -469,8 +571,8 @@ ops_per_arm_sample={actual_ops}",
         let swap_controls = sample_index % 2 == 1;
         let mio_a_slot = usize::from(swap_controls);
         let mio_b_slot = usize::from(!swap_controls);
-        let cpu_before = std::array::from_fn::<_, 4, _>(|index| servers[index].cpu_ticks());
         let mut elapsed = [Duration::ZERO; 4];
+        let mut cpu_elapsed = [0_u64; 4];
         let mut groups_done = 0usize;
         let mut interleave_index = 0usize;
         while groups_done < groups {
@@ -483,29 +585,27 @@ ops_per_arm_sample={actual_ops}",
                     Arm::IoUring => Arm::IoUring.index(),
                     Arm::Redis => Arm::Redis.index(),
                 };
-                elapsed[arm.index()] += time_block(
+                let cpu_before = servers[server_slot].cpu_ns();
+                let block_elapsed = time_block(
                     &mut servers[server_slot],
                     &packets,
                     block_groups,
                     (groups_done % 2 == 1) ^ (sample_index % 2 == 1),
                 );
+                let cpu_after = servers[server_slot].cpu_ns();
+                elapsed[arm.index()] += block_elapsed;
+                cpu_elapsed[arm.index()] += cpu_after - cpu_before;
             }
             groups_done += block_groups;
             interleave_index += 1;
         }
-        let cpu_after = std::array::from_fn::<_, 4, _>(|index| servers[index].cpu_ticks());
-        let cpu_delta =
-            std::array::from_fn::<_, 4, _>(|index| cpu_after[index] - cpu_before[index]);
-        let mio_a_cpu_ticks = cpu_delta[mio_a_slot];
-        let mio_b_cpu_ticks = cpu_delta[mio_b_slot];
-        let io_uring_cpu_ticks = cpu_delta[Arm::IoUring.index()];
-        let redis_cpu_ticks = cpu_delta[Arm::Redis.index()];
+        let mio_a_cpu_ns = cpu_elapsed[Arm::MioA.index()];
+        let mio_b_cpu_ns = cpu_elapsed[Arm::MioB.index()];
+        let io_uring_cpu_ns = cpu_elapsed[Arm::IoUring.index()];
+        let redis_cpu_ns = cpu_elapsed[Arm::Redis.index()];
         assert!(
-            mio_a_cpu_ticks > 0
-                && mio_b_cpu_ticks > 0
-                && io_uring_cpu_ticks > 0
-                && redis_cpu_ticks > 0,
-            "each server arm must accrue CPU ticks"
+            mio_a_cpu_ns > 0 && mio_b_cpu_ns > 0 && io_uring_cpu_ns > 0 && redis_cpu_ns > 0,
+            "each server arm must accrue CPU time"
         );
         let mio_a_ns = elapsed[Arm::MioA.index()].as_nanos() as f64;
         let mio_b_ns = elapsed[Arm::MioB.index()].as_nanos() as f64;
@@ -520,21 +620,24 @@ ops_per_arm_sample={actual_ops}",
             null_ratio: mio_a_ns / mio_b_ns,
             self_speedup: mio_center_ns / io_uring_ns,
             competitive_speedup: redis_ns / io_uring_ns,
-            mio_a_cpu_ticks,
-            mio_b_cpu_ticks,
-            io_uring_cpu_ticks,
-            redis_cpu_ticks,
-            cpu_null_ratio: mio_a_cpu_ticks as f64 / mio_b_cpu_ticks as f64,
-            cpu_self_speedup: (mio_a_cpu_ticks as f64 * mio_b_cpu_ticks as f64).sqrt()
-                / io_uring_cpu_ticks as f64,
-            cpu_competitive_speedup: redis_cpu_ticks as f64 / io_uring_cpu_ticks as f64,
+            mio_a_cpu_ns,
+            mio_b_cpu_ns,
+            io_uring_cpu_ns,
+            redis_cpu_ns,
+            io_uring_cpu_util_pct: io_uring_cpu_ns as f64 / io_uring_ns * 100.0,
+            redis_cpu_util_pct: redis_cpu_ns as f64 / redis_ns * 100.0,
+            cpu_null_ratio: mio_a_cpu_ns as f64 / mio_b_cpu_ns as f64,
+            cpu_self_speedup: (mio_a_cpu_ns as f64 * mio_b_cpu_ns as f64).sqrt()
+                / io_uring_cpu_ns as f64,
+            cpu_competitive_speedup: redis_cpu_ns as f64 / io_uring_cpu_ns as f64,
         };
         println!(
             "SAMPLE workload={} pipeline={pipeline} sample={} order={:?} \
 control_slots={} \
 mio_a_ns_per_op={:.3} mio_b_ns_per_op={:.3} io_uring_ns_per_op={:.3} redis_ns_per_op={:.3} \
 null_a_over_b={:.9} mio_over_io_uring={:.9} fr_io_uring_over_redis={:.9} \
-mio_a_cpu_ticks={} mio_b_cpu_ticks={} io_uring_cpu_ticks={} redis_cpu_ticks={} \
+mio_a_cpu_ns={} mio_b_cpu_ns={} io_uring_cpu_ns={} redis_cpu_ns={} \
+io_uring_cpu_util_pct={:.3} redis_cpu_util_pct={:.3} \
 cpu_null_a_over_b={:.9} cpu_mio_over_io_uring={:.9} \
 cpu_fr_io_uring_over_redis={:.9}",
             workload.name(),
@@ -548,10 +651,12 @@ cpu_fr_io_uring_over_redis={:.9}",
             result.null_ratio,
             result.self_speedup,
             result.competitive_speedup,
-            result.mio_a_cpu_ticks,
-            result.mio_b_cpu_ticks,
-            result.io_uring_cpu_ticks,
-            result.redis_cpu_ticks,
+            result.mio_a_cpu_ns,
+            result.mio_b_cpu_ns,
+            result.io_uring_cpu_ns,
+            result.redis_cpu_ns,
+            result.io_uring_cpu_util_pct,
+            result.redis_cpu_util_pct,
             result.cpu_null_ratio,
             result.cpu_self_speedup,
             result.cpu_competitive_speedup,
@@ -673,6 +778,29 @@ fn adjudicate(
     pipeline: usize,
     samples: &[Sample],
 ) -> (Verdict, Verdict, Verdict, Verdict) {
+    let io_uring_util = samples
+        .iter()
+        .map(|sample| sample.io_uring_cpu_util_pct)
+        .collect::<Vec<_>>();
+    let redis_util = samples
+        .iter()
+        .map(|sample| sample.redis_cpu_util_pct)
+        .collect::<Vec<_>>();
+    let io_uring_util_median = median(&io_uring_util);
+    let redis_util_median = median(&redis_util);
+    println!(
+        "SERVER_SATURATION_GUARD workload={} pipeline={pipeline} \
+io_uring_cpu_util_median_pct={io_uring_util_median:.3} \
+redis_cpu_util_median_pct={redis_util_median:.3} minimum_pct={MIN_SERVER_UTIL_PCT:.3}",
+        workload.name()
+    );
+    assert!(
+        io_uring_util_median >= MIN_SERVER_UTIL_PCT && redis_util_median >= MIN_SERVER_UTIL_PCT,
+        "CLIENT-BOUND workload={} pipeline={pipeline}: server utilization \
+must reach {MIN_SERVER_UTIL_PCT:.1}% before wall throughput is admissible; \
+io_uring={io_uring_util_median:.3}% redis={redis_util_median:.3}%",
+        workload.name()
+    );
     let wall_null = samples
         .iter()
         .map(|sample| sample.null_ratio)
@@ -707,7 +835,7 @@ fn adjudicate(
             &wall_candidate,
         ),
         adjudicate_ratios(
-            "cpu_ticks_per_fixed_work",
+            "cpu_ns_per_fixed_work",
             "cpu_mio_over_io_uring",
             workload,
             pipeline,
@@ -723,7 +851,7 @@ fn adjudicate(
             &wall_competitive,
         ),
         adjudicate_ratios(
-            "cpu_ticks_per_fixed_work",
+            "cpu_ns_per_fixed_work",
             "cpu_fr_io_uring_over_redis",
             workload,
             pipeline,
@@ -733,8 +861,17 @@ fn adjudicate(
     )
 }
 
-fn profile_io_uring_path(candidate: &mut Server, root: &Path, profile_seconds: u64) {
-    let data = root.join("io_uring_profile.data");
+fn profile_io_uring_path(
+    candidate: &mut Server,
+    root: &Path,
+    profile_seconds: u64,
+    workload: Workload,
+    pipeline: usize,
+) {
+    let data = root.join(format!(
+        "io_uring_profile_{}_p{pipeline}.data",
+        workload.name()
+    ));
     assert!(!data.exists(), "refusing to overwrite {}", data.display());
     let mut perf = Command::new("perf")
         .env("LC_ALL", "C")
@@ -764,7 +901,7 @@ fn profile_io_uring_path(candidate: &mut Server, root: &Path, profile_seconds: u
         "perf record exited before profile workload"
     );
 
-    let packets = WorkloadPackets::new(Workload::Set, 1);
+    let packets = Arc::new(WorkloadPackets::new(workload, pipeline));
     while perf
         .try_wait()
         .expect("poll perf record workload")
@@ -846,8 +983,10 @@ fn profile_io_uring_path(candidate: &mut Server, root: &Path, profile_seconds: u
     let amdahl_ceiling = 1.0 / (1.0 - surface_self_pct / 100.0);
     println!(
         "PROFILE_REACHABILITY target=async_owned_io_uring_output \
+workload={} pipeline={pipeline} \
 owned_self_pct={owned_self_pct:.4} surface_self_pct={surface_self_pct:.4} \
-amdahl_elimination_ceiling={amdahl_ceiling:.6}x lost_samples=0 rows={matched:?}"
+amdahl_elimination_ceiling={amdahl_ceiling:.6}x lost_samples=0 rows={matched:?}",
+        workload.name()
     );
 }
 
@@ -909,7 +1048,7 @@ fn observed_core_loads() -> HashMap<usize, f64> {
     loads
 }
 
-fn choose_and_pin_cores() -> (usize, usize) {
+fn choose_and_pin_cores(client_threads: usize) -> (Vec<usize>, usize) {
     let allowed = allowed_cpus();
     let loads = observed_core_loads();
     let quiet = allowed
@@ -921,32 +1060,49 @@ fn choose_and_pin_cores() -> (usize, usize) {
                 .all(|sibling| loads.get(sibling).copied().unwrap_or(0.0) < QUIET_CORE_MAX_PCT)
         })
         .collect::<Vec<_>>();
-    assert!(
-        quiet.len() >= 2,
-        "worker has fewer than two quiet allowed CPUs: allowed={allowed:?} loads={loads:?}"
+    let mut claimed_siblings = HashSet::new();
+    let mut client_cores = Vec::with_capacity(client_threads);
+    for cpu in &quiet {
+        let siblings = sibling_group(*cpu);
+        if siblings
+            .iter()
+            .all(|sibling| !claimed_siblings.contains(sibling))
+        {
+            client_cores.push(*cpu);
+            claimed_siblings.extend(siblings);
+        }
+        if client_cores.len() == client_threads {
+            break;
+        }
+    }
+    assert_eq!(
+        client_cores.len(),
+        client_threads,
+        "worker has fewer than {client_threads} quiet physical client CPUs: \
+allowed={allowed:?} loads={loads:?} quiet={quiet:?}"
     );
-
-    let client_core = quiet[0];
-    let client_siblings = sibling_group(client_core)
-        .into_iter()
-        .collect::<HashSet<_>>();
     let server_core = quiet
         .iter()
         .rev()
         .copied()
-        .find(|cpu| !client_siblings.contains(cpu))
+        .find(|cpu| {
+            sibling_group(*cpu)
+                .iter()
+                .all(|sibling| !claimed_siblings.contains(sibling))
+        })
         .unwrap_or_else(|| {
             panic!(
                 "worker has no quiet server CPU outside client SMT siblings: \
-quiet={quiet:?} client_siblings={client_siblings:?}"
+quiet={quiet:?} client_cores={client_cores:?} claimed_siblings={claimed_siblings:?}"
             )
         });
+    let client_mask = client_cores
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
     let pin = Command::new("taskset")
-        .args([
-            "-apc",
-            &client_core.to_string(),
-            &std::process::id().to_string(),
-        ])
+        .args(["-apc", &client_mask, &std::process::id().to_string()])
         .output()
         .expect("pin benchmark client process");
     assert!(
@@ -955,11 +1111,12 @@ quiet={quiet:?} client_siblings={client_siblings:?}"
         String::from_utf8_lossy(&pin.stderr)
     );
     println!(
-        "CPU_PREFLIGHT client={client_core} client_siblings={client_siblings:?} \
+        "CPU_PREFLIGHT client_cores={client_cores:?} \
+client_siblings={claimed_siblings:?} \
 server={server_core} server_siblings={:?} allowed={allowed:?} loads={loads:?}",
         sibling_group(server_core)
     );
-    (client_core, server_core)
+    (client_cores, server_core)
 }
 
 fn unique_root() -> PathBuf {
@@ -1094,6 +1251,11 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
 
     let samples = parse_usize_env("FR_URING_AB_SAMPLES", DEFAULT_SAMPLES);
     assert!(samples >= 8, "median CI requires at least eight samples");
+    let client_threads = parse_usize_env("FR_URING_AB_CLIENT_THREADS", DEFAULT_CLIENT_THREADS);
+    assert!(
+        (1..=CLIENTS).contains(&client_threads),
+        "FR_URING_AB_CLIENT_THREADS must be in 1..={CLIENTS}"
+    );
     let ops_per_sample = parse_usize_env("FR_URING_AB_OPS_PER_SAMPLE", DEFAULT_OPS_PER_SAMPLE);
     let profile_seconds = parse_u64_env("FR_URING_AB_PROFILE_SECONDS", DEFAULT_PROFILE_SECONDS);
     let workloads = Workload::parse_list();
@@ -1106,15 +1268,43 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
         perf_version.status.success(),
         "worker must provide perf for profile attribution"
     );
-    let (_client_core, server_core) = choose_and_pin_cores();
+    let (_client_cores, server_core) = choose_and_pin_cores(client_threads);
     let root = unique_root();
     println!("ARTIFACT_ROOT {}", root.display());
 
     let mut servers = [
-        Server::spawn(&binary, &redis_binary, Arm::MioA, &root, server_core),
-        Server::spawn(&binary, &redis_binary, Arm::MioB, &root, server_core),
-        Server::spawn(&binary, &redis_binary, Arm::IoUring, &root, server_core),
-        Server::spawn(&binary, &redis_binary, Arm::Redis, &root, server_core),
+        Server::spawn(
+            &binary,
+            &redis_binary,
+            Arm::MioA,
+            &root,
+            server_core,
+            client_threads,
+        ),
+        Server::spawn(
+            &binary,
+            &redis_binary,
+            Arm::MioB,
+            &root,
+            server_core,
+            client_threads,
+        ),
+        Server::spawn(
+            &binary,
+            &redis_binary,
+            Arm::IoUring,
+            &root,
+            server_core,
+            client_threads,
+        ),
+        Server::spawn(
+            &binary,
+            &redis_binary,
+            Arm::Redis,
+            &root,
+            server_core,
+            client_threads,
+        ),
     ];
     let server_hashes = Arm::ALL.map(|arm| servers[arm.index()].executing_elf_sha256());
     assert_eq!(
@@ -1136,13 +1326,25 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
         );
     }
     servers[Arm::IoUring.index()].assert_flag_reached_process();
-    profile_io_uring_path(&mut servers[Arm::IoUring.index()], &root, profile_seconds);
 
     let mut verdicts = Vec::new();
     for workload in workloads {
         for pipeline in &pipelines {
-            let measured =
-                measure_configuration(&mut servers, workload, *pipeline, samples, ops_per_sample);
+            profile_io_uring_path(
+                &mut servers[Arm::IoUring.index()],
+                &root,
+                profile_seconds,
+                workload,
+                *pipeline,
+            );
+            let measured = measure_configuration(
+                &mut servers,
+                workload,
+                *pipeline,
+                client_threads,
+                samples,
+                ops_per_sample,
+            );
             verdicts.push((
                 workload.name(),
                 *pipeline,

@@ -28,6 +28,77 @@ Every new KEEP declares exactly one class:
 modified entries in both ledger files. It also preserves the ELF self-report,
 A/A bootstrap median-CI, never-CV, counted-mechanism, and retry-predicate gates.
 
+## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — saturated post-CQ P16 SET is 1.3325x live Redis; saturated P1 is HOLD (`frankenredis-ohsk5.67`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes.** The qualifying result is
+  FrankenRedis/Redis throughput against the actual vendored Redis 7.2.4 server
+  running beside FrankenRedis in the same invocation. All mio/io_uring numbers
+  are SELF-SPEEDUP maintenance evidence only.
+- **Ledger/preflight admission.** Searches covered P16, the historical
+  0.33-0.47x pipeline wall, client-bound P1, `io_uring`, submission/CQ batching,
+  and the synchronous/writev reopening conditions. The owned asynchronous CQ design
+  was already the admitted and shipped retry. This is the requested
+  end-to-end remeasurement of that landed architecture, not another source
+  lever in a closed vein. The interim three-round 1.4882x P16 screen remains
+  routing/count evidence only: it had no bootstrap median CI and its A/A point
+  estimate was 0.9675. The strict result below supersedes it for every
+  competitive claim.
+- **Harness repair.** Four persistent independent client shards now spread the
+  50 connections across CPUs 0-3 while each live server arm runs on separate
+  CPU 9. CPU work comes from schedstat nanoseconds bracketing each active block;
+  profiling uses the requested workload and pipeline; wall results fail closed
+  unless both incumbent and candidate medians exceed 90% server utilization.
+  The syscall-decomposition harness received the same policy: a real
+  multi-core client mask, per-core/SMT preflight, and nonzero exit when any of
+  its three server arms remains client-bound.
+- **One invocation and identities.** Strict-remote worker `vmi1227854`, kernel
+  6.17.0-35, ran P1 then P16 through two mio controls, one flagged io_uring
+  candidate, and live vendored Redis 7.2.4 without restarting them. Each
+  configuration used 32 paired samples x 200,000 SET operations/arm, 50
+  clients, four client shards, all 24 arm orders, and 25-group interleaving.
+  Every reply matched the RESP oracle. The running harness self-reported its
+  executing ELF SHA-256:
+  **`9bdbd912f0a45b2a9689f0ea5ba7a72f368d4cca302ad7ba8770d91e5b4b85a4`**.
+  All FrankenRedis `/proc/PID/exe` SHA-256:
+  **`f2d002e3093a3c3c3844d947788f20e9b3c9cbdceedb209abd7488eb89b1bbc5`**.
+  Redis `/proc/PID/exe` SHA-256:
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+- **Exact profile reachability.** Zero samples were lost. P1 attributed 0.79%
+  self-time to owned submit/drain and 1.37% to the full named io_uring surface
+  (Amdahl elimination ceiling **1.013890x**). P16 attributed 0.51% and 0.69%
+  respectively (ceiling **1.006948x**). Both benchmark configurations
+  therefore executed the selected code with non-zero self-time.
+- **P1 is no longer a competitive KEEP.** Candidate/incumbent server
+  utilization was 95.497%/94.592%. Wall A/A median **0.998650567x**, bootstrap
+  95% median CI **[0.981654781, 1.007236542]**, set the two-radius gate
+  **[0.963309561, 1.036690439]**. FrankenRedis/Redis throughput
+  **1.033188422x**, CI **[1.020507161, 1.040742822]**, overlaps that gate:
+  **HOLD**. CPU efficiency **1.026841612x**, CI
+  **[1.014294353, 1.032945023]**, is also HOLD. This saturated result supersedes
+  the prior client-bound 1.0749x P1 KEEP. The mio/io_uring wall KEEP
+  **1.088389867x**, CI **[1.078516369, 1.092996000]**, is explicitly
+  SELF-SPEEDUP maintenance, not campaign output.
+- **P16 competitive KEEP.** Candidate/incumbent server utilization was
+  94.499%/96.091%. Wall A/A median **1.005991370x**, bootstrap 95% median CI
+  **[0.974482976, 1.034635209]**, set gate
+  **[0.930729582, 1.069270418]**. FrankenRedis/Redis throughput (Redis wall /
+  FrankenRedis wall) was **1.332480493x**, bootstrap 95% median CI
+  **[1.280633581, 1.348506942]**: **KEEP**. CPU A/A median **1.010463099x**, CI
+  **[0.975627982, 1.027729816]**, and competitive CPU efficiency
+  **1.334960630x**, CI **[1.295484652, 1.355296466]**, also KEEP. The
+  mio/io_uring wall result **1.041360833x**, CI
+  **[1.014584461, 1.071655740]**, is maintenance-only HOLD. The old 0.33-0.47x
+  wall ratio has become 1.3325x, a **2.84-4.04x ratio reversal**.
+- **Gate and retry predicate.** Bootstrap median-CI versus twice the paired A/A
+  CI radius decided every result. CV is provenance only (P16 wall null
+  7.547112%, competitive 6.379070%) and never a gate. Re-run after a change
+  to client sharding/pinning, io_uring ownership/CQ lifecycle, event-loop
+  output ordering, Redis 7.2.4 arm, kernel, allocator, or release codegen.
+  Invalidate if either candidate/incumbent median server utilization is below
+  90%, the exact selected-pipeline profile has zero target self-time or lost
+  samples, live ELF identities differ, any RESP reply differs, or the A/A
+  median fails its validity bound.
+
 ## 2026-07-27 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — asynchronous owned-buffer `io_uring` CQ batching leads live Redis on P1 SET (`frankenredis-zwd0m`)
 
 - **Claim class: COMPETITIVE. Campaign output: yes.** The result that counts is
