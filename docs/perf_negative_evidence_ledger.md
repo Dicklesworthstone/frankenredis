@@ -28,6 +28,82 @@ Every new KEEP declares exactly one class:
 modified entries in both ledger files. It also preserves the ELF self-report,
 A/A bootstrap median-CI, never-CV, counted-mechanism, and retry-predicate gates.
 
+## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — exact stale-ID `XDEL xs 0-0` is 1.3938x live Redis at saturated P16 (`frankenredis-ohsk5.76`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes.** The qualifying result is
+  FrankenRedis/Redis throughput against the actual vendored Redis 7.2.4 server
+  running live beside both generic-XDEL A/A controls in the same invocation.
+  Generic/candidate is a SELF-SPEEDUP maintenance result only.
+- **Admission and pre-edit baseline.** Both ledgers were searched and every
+  XDEL or stream-delete row was hand-adjudicated. Existing rows concern
+  collection borrows, expiry guards, notification correctness, stream side-map
+  cleanup, tombstone persistence, or XADD storage; none measured this exact
+  live-server shape with an A/A null. A valid pre-edit run on fully reserved
+  `vmi1149989` saturated FrankenRedis/Redis at 99.118%/98.793%, named
+  **18.76% self-time** in the command surface with zero lost samples and a
+  **1.230921x** Amdahl ceiling, and measured wall A/A
+  **1.007811790x**, bootstrap median CI
+  **[0.992563970, 1.034328261]**, gate
+  **[0.931343479, 1.068656521]**. Current FrankenRedis/Redis throughput was
+  only **0.297038620x**, CI **[0.284947832, 0.309776463]**. Baseline harness,
+  FrankenRedis, Redis, and profile SHA-256 values were
+  **`0f74a18691d11ccc8340b2eb826a9548464fa7ca95a5b396075a57064bfe3b57`**,
+  **`adf854fe51d2f4c73dbdbe3fc0f726353f6e9ae3eab7f921e35f188f7682f585`**,
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**,
+  and
+  **`96023279733496a6bb71d2d149e59491816f25074de31e71c230d22d35fb71a9`**.
+- **Lever and isomorphism.** Since a live stream entry ID can never equal
+  `0-0`, a case-insensitive arity-three classifier admits only literal
+  `XDEL key 0-0` to the front floor. All other shapes and non-default states
+  fall through. The helper preserves generic XDEL's exact no-stat write lookup
+  (lazy expiry, wrong-type behavior, and live-stream touch) and calls the same
+  `Store::xdel` primitive; only argv/ID materialization and generic routing are
+  removed. Command/session/expiry/accounting/metrics and threat-event output
+  remain intact. Runtime parity covers populated, missing, wrong-type, and
+  selected-DB cases, XLEN/XRANGE state, counters, and replies. Classifier tests
+  cover mixed case and wrong arity. The exact populated-stream live-oracle case
+  passed byte/state parity against Redis 7.2.4. The feature-enabled server suite
+  passed **224/224** tests; full conformance passed **194** library tests,
+  **99** smoke tests, and every auxiliary target. Strict-remote workspace
+  all-target check, default workspace Clippy, exact-feature all-target Clippy
+  with `-D warnings`, pinned-nightly rustfmt, and diff checks passed.
+- **Same executable and fixed work.** Both controls selected the compiled
+  generic route with `FR_PERF_AB_XDEL_MISSING_FLOOR_ORIG=1`; candidate omitted
+  it. One strict-remote invocation on fully reserved `vmi1149989` ran
+  **48 x 200,000** byte-checked replies/arm with 50 persistent clients in eight
+  pinned shards, a dedicated server core, 125-group interleaving, and two
+  complete 24-order Latin cycles. Candidate/Redis utilization was
+  98.711%/98.758%. The harness self-reported ELF SHA-256
+  **`615b01d7be6b4a04fdecade0e6a72a12569af1dd0aca1b4de7a718dfacae7347`**;
+  every executing FrankenRedis server self-reported ELF SHA-256
+  **`c8f91ca45038392d2bdbec4573f72ed36888fd80c061c0cb64462d1cc777a670`**;
+  Redis self-reported ELF SHA-256
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+- **Profile and decision.** The zero-lost candidate profile retained
+  **7.99% self-time** in the named exact surface and a **1.086838x** Amdahl
+  ceiling. Profile SHA-256 was
+  **`ea3a24aece4924e1dcbacaafebd3b460bb999aafb7f7e1021576c0355e94ec4a`**.
+  Wall A/A null median was **0.997867126x**, bootstrap 95% median CI
+  **[0.961537302, 1.033612856]**, gate
+  **[0.923074604, 1.076925396]**. Generic/candidate throughput was
+  **4.821654131x**, CI **[4.614605408, 4.910565408]**, a SELF-SPEEDUP.
+  FrankenRedis/Redis throughput was **1.393818565x**, CI
+  **[1.335436595, 1.445892368]**: **COMPETITIVE KEEP**. CPU A/A was
+  **0.998547965x**, CI **[0.963886493, 1.031936066]**; self-speedup CPU was
+  **4.829442677x**, CI **[4.654662706, 4.924874035]**; competitive CPU was
+  **1.390504363x**, CI **[1.344770213, 1.442898068]**.
+- **Invalid preflight, gate, and retry predicate.** A nine-client-shard attempt
+  emitted no samples or verdict because worker load left no disjoint quiet
+  server core; the valid saturated run used eight. Bootstrap median-CI against
+  twice the A/A CI radius decided all results. CV is provenance only (wall null
+  7.484324%, self 9.001605%, competitive 11.451174%) and never a gate.
+  **Retry predicate:** Re-run after XDEL framing/classification, stream-ID
+  parsing, write lookup/touch or store-delete semantics, write/expiry/accounting,
+  io_uring, harness client/order/pinning/preflight, Redis, allocator, kernel, or
+  codegen changes. Invalidate below 90% utilization, on zero/lost named
+  self-time, reply/live-ELF/environment mismatch, an incomplete order cycle, or
+  failed A/A validity. Rollback removes only the `XdelMissing` floor.
+
 ## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — exact standalone `XTRIM xs MINID ~ 0-0` is 1.5432x live Redis at saturated P16 (`frankenredis-ohsk5.75`)
 
 - **Claim class: COMPETITIVE. Campaign output: yes.** The qualifying result is

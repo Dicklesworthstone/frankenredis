@@ -60,6 +60,7 @@ const ECHO_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_ECHO_FLOOR_ORIG";
 const WAIT_ZERO_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_WAIT_ZERO_FLOOR_ORIG";
 const XTRIM_MINID_NOOP_CONTROL_ENV: &str = "FR_PERF_AB_XTRIM_MINID_NOOP_ORIG";
 const XTRIM_MINID_NOOP_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_XTRIM_MINID_NOOP_FLOOR_ORIG";
+const XDEL_MISSING_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_XDEL_MISSING_FLOOR_ORIG";
 const XTRIM_MINID_NOOP_PREFILL_ENTRIES: usize = 1_000;
 const SHUTDOWN: &[u8] = b"*2\r\n$8\r\nSHUTDOWN\r\n$6\r\nNOSAVE\r\n";
 const SET: &[u8] = b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n";
@@ -93,6 +94,8 @@ const WAIT_ZERO_REPLY: &[u8] = b":0\r\n";
 const XTRIM_MINID_NOOP: &[u8] =
     b"*5\r\n$5\r\nXTRIM\r\n$2\r\nxs\r\n$5\r\nMINID\r\n$1\r\n~\r\n$3\r\n0-0\r\n";
 const XTRIM_MINID_NOOP_REPLY: &[u8] = b":0\r\n";
+const XDEL_MISSING: &[u8] = b"*3\r\n$4\r\nXDEL\r\n$2\r\nxs\r\n$3\r\n0-0\r\n";
+const XDEL_MISSING_REPLY: &[u8] = b":0\r\n";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Arm {
@@ -138,6 +141,7 @@ enum Workload {
     Unwatch,
     WaitZero,
     XtrimMinidNoop,
+    XdelMissing,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -152,6 +156,7 @@ enum CommandFloorAb {
     WaitZero,
     XtrimMinidNoop,
     XtrimMinidNoopFloor,
+    XdelMissingFloor,
 }
 
 impl Workload {
@@ -169,6 +174,7 @@ impl Workload {
             Self::Unwatch => "unwatch",
             Self::WaitZero => "wait-zero",
             Self::XtrimMinidNoop => "xtrim-minid-noop",
+            Self::XdelMissing => "xdel-missing",
         }
     }
 
@@ -232,6 +238,16 @@ impl Workload {
                 "fr_store::Store::xtrim_minid_approx",
                 "xtrim_minid_noop_guard_enabled",
             ],
+            Self::XdelMissing => &[
+                "frankenredis::process_buffered_frames",
+                "dispatch_floor_fast_xdel_missing",
+                "execute_plain_xdel_missing_borrowed",
+                "parse_borrowed_plain_key_arg1_packet",
+                "fr_runtime::Runtime::execute_internal",
+                "fr_command::execute_dispatch",
+                "fr_command::xdel",
+                "fr_store::Store::xdel",
+            ],
             Self::Set | Self::Get | Self::Mixed => &[],
         }
     }
@@ -255,6 +271,7 @@ impl Workload {
                 "unwatch" => Self::Unwatch,
                 "wait-zero" => Self::WaitZero,
                 "xtrim-minid-noop" => Self::XtrimMinidNoop,
+                "xdel-missing" => Self::XdelMissing,
                 other => panic!("unknown FR_URING_AB_WORKLOADS item: {other}"),
             })
             .collect()
@@ -381,6 +398,16 @@ impl WorkloadPackets {
             }
             Workload::XtrimMinidNoop => {
                 let case = repeated_case(XTRIM_MINID_NOOP, XTRIM_MINID_NOOP_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::XdelMissing => {
+                let case = repeated_case(XDEL_MISSING, XDEL_MISSING_REPLY, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -624,6 +651,11 @@ impl Server {
         {
             command.env(XTRIM_MINID_NOOP_FLOOR_CONTROL_ENV, "1");
         }
+        if matches!(command_floor_ab, CommandFloorAb::XdelMissingFloor)
+            && matches!(arm, Arm::MioA | Arm::MioB)
+        {
+            command.env(XDEL_MISSING_FLOOR_CONTROL_ENV, "1");
+        }
         command
             .current_dir(&runtime_dir)
             .stdout(Stdio::null())
@@ -802,7 +834,7 @@ fn exchange_one(server: &mut Server, request: &[u8], expected: &[u8]) {
     );
 }
 
-fn xtrim_minid_noop_prefill() -> ExchangeCase {
+fn seeded_stream_prefill() -> ExchangeCase {
     let mut request = Vec::new();
     let mut response = Vec::new();
 
@@ -828,8 +860,8 @@ $1\r\nf\r\n$1\r\nv\r\n",
 }
 
 fn prefill(servers: &mut [Server; 4], workload: Workload) {
-    let xtrim_minid_noop =
-        matches!(workload, Workload::XtrimMinidNoop).then(xtrim_minid_noop_prefill);
+    let seeded_stream = matches!(workload, Workload::XtrimMinidNoop | Workload::XdelMissing)
+        .then(seeded_stream_prefill);
     for server in servers.iter_mut() {
         exchange_one(server, SET, SET_REPLY);
         if matches!(workload, Workload::BitposRange) {
@@ -840,7 +872,7 @@ fn prefill(servers: &mut [Server; 4], workload: Workload) {
             exchange_one(server, OBJECT_ENCODING_PREFILL, SET_REPLY);
         } else if matches!(workload, Workload::ObjectRefcount) {
             exchange_one(server, OBJECT_REFCOUNT_PREFILL, SET_REPLY);
-        } else if let Some(case) = &xtrim_minid_noop {
+        } else if let Some(case) = &seeded_stream {
             exchange_one(server, &case.request, &case.response);
         }
     }
@@ -1711,6 +1743,7 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
     let wait_zero_floor_ab = parse_bool_env("FR_URING_AB_WAIT_ZERO_FLOOR");
     let xtrim_minid_noop_ab = parse_bool_env("FR_URING_AB_XTRIM_MINID_NOOP");
     let xtrim_minid_noop_floor_ab = parse_bool_env("FR_URING_AB_XTRIM_MINID_NOOP_FLOOR");
+    let xdel_missing_floor_ab = parse_bool_env("FR_URING_AB_XDEL_MISSING_FLOOR");
     assert!(!workloads.is_empty(), "at least one workload is required");
     assert!(!pipelines.is_empty(), "at least one pipeline is required");
     #[cfg(not(feature = "perf-ab-bitpos-range-floor"))]
@@ -1763,6 +1796,11 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
         "FR_URING_AB_XTRIM_MINID_NOOP_FLOOR=1 requires \
 --features perf-ab-xtrim-minid-noop-floor"
     );
+    #[cfg(not(feature = "perf-ab-xdel-missing-floor"))]
+    assert!(
+        !xdel_missing_floor_ab,
+        "FR_URING_AB_XDEL_MISSING_FLOOR=1 requires --features perf-ab-xdel-missing-floor"
+    );
     assert!(
         usize::from(bitpos_range_floor_ab)
             + usize::from(bitfield_ro_two_get_floor_ab)
@@ -1773,6 +1811,7 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
             + usize::from(wait_zero_floor_ab)
             + usize::from(xtrim_minid_noop_ab)
             + usize::from(xtrim_minid_noop_floor_ab)
+            + usize::from(xdel_missing_floor_ab)
             <= 1,
         "run only one command-shape floor experiment per invocation"
     );
@@ -1794,6 +1833,8 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
         CommandFloorAb::XtrimMinidNoop
     } else if xtrim_minid_noop_floor_ab {
         CommandFloorAb::XtrimMinidNoopFloor
+    } else if xdel_missing_floor_ab {
+        CommandFloorAb::XdelMissingFloor
     } else {
         CommandFloorAb::None
     };
@@ -1858,6 +1899,13 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
             workloads,
             [Workload::XtrimMinidNoop],
             "the XTRIM MINID no-op floor A/B must isolate the exact profiled workload"
+        );
+    }
+    if xdel_missing_floor_ab {
+        assert_eq!(
+            workloads,
+            [Workload::XdelMissing],
+            "the XDEL missing-ID floor A/B must isolate the exact profiled workload"
         );
     }
 
@@ -2052,6 +2100,21 @@ candidate=io_uring+xtrim_minid_noop_dispatch_floor incumbent=vendored_redis_7.2.
             .assert_environment_value(XTRIM_MINID_NOOP_FLOOR_CONTROL_ENV, Some("1"));
         servers[Arm::IoUring.index()]
             .assert_environment_value(XTRIM_MINID_NOOP_FLOOR_CONTROL_ENV, None);
+    } else if xdel_missing_floor_ab {
+        println!(
+            "ARM_SEMANTICS control_a=io_uring+generic_xdel_missing \
+control_b=io_uring+generic_xdel_missing \
+candidate=io_uring+xdel_missing_dispatch_floor incumbent=vendored_redis_7.2.4"
+        );
+        for arm in [Arm::MioA, Arm::MioB, Arm::IoUring] {
+            servers[arm.index()].assert_flag_reached_process();
+        }
+        servers[Arm::MioA.index()]
+            .assert_environment_value(XDEL_MISSING_FLOOR_CONTROL_ENV, Some("1"));
+        servers[Arm::MioB.index()]
+            .assert_environment_value(XDEL_MISSING_FLOOR_CONTROL_ENV, Some("1"));
+        servers[Arm::IoUring.index()]
+            .assert_environment_value(XDEL_MISSING_FLOOR_CONTROL_ENV, None);
     } else {
         println!(
             "ARM_SEMANTICS control_a=mio control_b=mio \
