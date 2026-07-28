@@ -70,6 +70,8 @@ const SET: &[u8] = b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n";
 const SET_REPLY: &[u8] = b"+OK\r\n";
 const GET: &[u8] = b"*2\r\n$3\r\nGET\r\n$1\r\nk\r\n";
 const GET_REPLY: &[u8] = b"$1\r\nv\r\n";
+const PTTL_PERSISTENT: &[u8] = b"*2\r\n$4\r\nPTTL\r\n$1\r\nk\r\n";
+const PTTL_PERSISTENT_REPLY: &[u8] = b":-1\r\n";
 const BITPOS_RANGE_PREFILL: &[u8] =
     b"*3\r\n$3\r\nSET\r\n$8\r\nbitpos:k\r\n$8\r\n\0\0\0\0\0\0\0\x80\r\n";
 const BITPOS_RANGE: &[u8] =
@@ -173,6 +175,7 @@ enum Workload {
     XrevrangeZero,
     XpendingZero,
     XreadAfterTail,
+    PttlPersistent,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -215,6 +218,7 @@ impl Workload {
             Self::XrevrangeZero => "xrevrange-zero",
             Self::XpendingZero => "xpending-zero",
             Self::XreadAfterTail => "xread-after-tail",
+            Self::PttlPersistent => "pttl-persistent",
         }
     }
 
@@ -348,6 +352,14 @@ impl Workload {
                 "fr_store::Store::xlast_id",
                 "fr_store::Store::xread_borrow_scan",
             ],
+            Self::PttlPersistent => &[
+                "frankenredis::process_buffered_frames",
+                "__memcmp_avx2_movbe",
+                "execute_plain_keymeta_borrowed",
+                "parse_borrowed_plain_pttl_packet",
+                "fr_store::Store::pttl",
+                "fr_store::Store::get_expires_at_ms",
+            ],
             Self::Set | Self::Get | Self::Mixed => &[],
         }
     }
@@ -378,6 +390,7 @@ impl Workload {
                 "xrevrange-zero" => Self::XrevrangeZero,
                 "xpending-zero" => Self::XpendingZero,
                 "xread-after-tail" => Self::XreadAfterTail,
+                "pttl-persistent" => Self::PttlPersistent,
                 other => panic!("unknown FR_URING_AB_WORKLOADS item: {other}"),
             })
             .collect()
@@ -574,6 +587,16 @@ impl WorkloadPackets {
             }
             Workload::XreadAfterTail => {
                 let case = repeated_case(XREAD_AFTER_TAIL, XREAD_AFTER_TAIL_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::PttlPersistent => {
+                let case = repeated_case(PTTL_PERSISTENT, PTTL_PERSISTENT_REPLY, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),

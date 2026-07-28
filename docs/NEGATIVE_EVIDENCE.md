@@ -33,6 +33,56 @@ Redis arm and numeric ratio; a SELF-SPEEDUP needs the heading label and cannot
 mark itself as campaign output. Missing or contradictory classification exits
 **8**.
 
+## 2026-07-28 MossyBluff (cod/MEASURE): PROFILE REJECT — persistent-key `PTTL k` cannot close its incumbent gap (`frankenredis-mhjuy`)
+
+- **Ledger admission and prior-row adjudication.** Exact-surface preflight was
+  clear, then every performance-relevant PTTL row was read by hand. The
+  2026-06-29 single-lookup row is **VALID-MECHANISM** because it counts removal
+  of one expiry-map probe and measures a 1.33x store-level self-speedup. The
+  2026-06-26 1.151x dispatch-hoist row is **VOID-NONULL** because its near-1.0
+  incumbent ratio has neither an A/A null nor a counted mechanism. The
+  2026-07-10 TTL floor is a distinct sibling whose own boundary explicitly
+  requires PTTL to be measured separately. This invocation leaves production
+  untouched, seeds the same persistent string in every arm, and byte-checks
+  the exact RESP2 `:-1` reply.
+- **Untouched-source invocation.** Fully reserved `vmi1227854` (Linux
+  6.17.0-35-generic) ran 48 samples x 200,000 fixed replies/arm at P16, with 50
+  persistent clients in nine pinned client shards, a dedicated server core,
+  125-group within-sample interleaving, and two complete 24-order cycles. The
+  harness self-reported ELF SHA-256
+  **`2458c003fb865129517034f70434cc9e5f01c01f58367c3f3168f26f3db46391`**;
+  every executing FrankenRedis arm self-reported ELF SHA-256
+  **`15b2f3830de1b89e5d027fa252c1a69cdc4b37d0c2587282b81fc65adb68f3d0`**;
+  Redis 7.2.4 self-reported ELF SHA-256
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+  FrankenRedis/Redis utilization was 98.506%/97.548%.
+- **Profile decision before a lever.** The zero-lost profile attributed only
+  **18.88% self-time** to the named PTTL surface
+  (`process_buffered_frames` 16.35%, keymeta executor 1.36%, and exact PTTL
+  parser 1.17%; `memcmp` and store expiry helpers were below the report floor),
+  an Amdahl elimination ceiling of **1.232742x**. Async completion was 0.49%,
+  ceiling 1.004924x. Current FrankenRedis/Redis throughput was
+  **0.663890913x**, bootstrap 95% median CI
+  **[0.642233930, 0.697724790]**. Parity needs **1.506271558x**; even deleting
+  the complete named surface yields at most **0.818406212x** Redis. Production
+  therefore remains unchanged.
+- **Authenticated rejection and retry predicate.** In the same invocation,
+  wall A/A null median was **1.018899328x**, bootstrap 95% median CI
+  **[0.990430760, 1.058908256]**, inside gate
+  **[0.882183487, 1.117816513]**. CPU A/A was **1.015839411x**, CI
+  **[0.984237081, 1.043016971]**; CPU FrankenRedis/Redis throughput was
+  **0.658494476x**, CI **[0.637552019, 0.682943920]**. Bootstrap median-CI
+  decided the verdict, never CV; CV is provenance only (wall null 13.556031%,
+  competitive 12.314684%). The io_uring/mio self comparison was HOLD
+  (1.053721652x, CI [1.036423449, 1.069097192]) because it remains inside the
+  authenticated null margin; it is not campaign output. **Retry predicate:**
+  Reopen only if a literal-current zero-lost profile raises the complete
+  PTTL-specific Amdahl ceiling above **1.506271558x**, or after expiry storage,
+  PTTL parser/dispatch, Redis semantics, allocator, kernel, or release-codegen
+  changes. Any retry must retain a persistent key, exact `PTTL k` packet and
+  reply, live Redis arm, executable self-reports, same-invocation A/A, complete
+  order cycles, and >=90% server utilization.
+
 ## 2026-07-28 MossyBluff (cod/MEASURE): PROFILE REJECT — exact `XREAD STREAMS xs 1000-0` tail poll cannot close its incumbent gap (`frankenredis-14nkm`)
 
 - **Ledger admission and prior-row adjudication.** The exact-phrase preflight
