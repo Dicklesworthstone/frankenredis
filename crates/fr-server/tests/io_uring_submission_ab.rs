@@ -54,6 +54,7 @@ const OBJECT_ENCODING_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_OBJECT_ENCODING_FLOO
 const OBJECT_REFCOUNT_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_OBJECT_REFCOUNT_FLOOR_ORIG";
 const DBSIZE_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_DBSIZE_FLOOR_ORIG";
 const ECHO_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_ECHO_FLOOR_ORIG";
+const WAIT_ZERO_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_WAIT_ZERO_FLOOR_ORIG";
 const SHUTDOWN: &[u8] = b"*2\r\n$8\r\nSHUTDOWN\r\n$6\r\nNOSAVE\r\n";
 const SET: &[u8] = b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n";
 const SET_REPLY: &[u8] = b"+OK\r\n";
@@ -81,6 +82,8 @@ const ECHO: &[u8] = b"*2\r\n$4\r\nECHO\r\n$1\r\nx\r\n";
 const ECHO_REPLY: &[u8] = b"$1\r\nx\r\n";
 const UNWATCH: &[u8] = b"*1\r\n$7\r\nUNWATCH\r\n";
 const UNWATCH_REPLY: &[u8] = b"+OK\r\n";
+const WAIT_ZERO: &[u8] = b"*3\r\n$4\r\nWAIT\r\n$1\r\n0\r\n$1\r\n0\r\n";
+const WAIT_ZERO_REPLY: &[u8] = b":0\r\n";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Arm {
@@ -124,6 +127,7 @@ enum Workload {
     Dbsize,
     Echo,
     Unwatch,
+    WaitZero,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -135,6 +139,7 @@ enum CommandFloorAb {
     ObjectRefcount,
     Dbsize,
     Echo,
+    WaitZero,
 }
 
 impl Workload {
@@ -150,6 +155,7 @@ impl Workload {
             Self::Dbsize => "dbsize",
             Self::Echo => "echo",
             Self::Unwatch => "unwatch",
+            Self::WaitZero => "wait-zero",
         }
     }
 
@@ -199,6 +205,12 @@ impl Workload {
                 "execute_plain_unwatch_borrowed_into",
                 "parse_borrowed_plain_unwatch_packet",
             ],
+            Self::WaitZero => &[
+                "frankenredis::process_buffered_frames",
+                "dispatch_floor_fast_wait_zero",
+                "execute_plain_wait_borrowed",
+                "parse_borrowed_plain_key_arg1_packet",
+            ],
             Self::Set | Self::Get | Self::Mixed => &[],
         }
     }
@@ -220,6 +232,7 @@ impl Workload {
                 "dbsize" => Self::Dbsize,
                 "echo" => Self::Echo,
                 "unwatch" => Self::Unwatch,
+                "wait-zero" => Self::WaitZero,
                 other => panic!("unknown FR_URING_AB_WORKLOADS item: {other}"),
             })
             .collect()
@@ -326,6 +339,16 @@ impl WorkloadPackets {
             }
             Workload::Unwatch => {
                 let case = repeated_case(UNWATCH, UNWATCH_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::WaitZero => {
+                let case = repeated_case(WAIT_ZERO, WAIT_ZERO_REPLY, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -553,6 +576,11 @@ impl Server {
         if matches!(command_floor_ab, CommandFloorAb::Echo) && matches!(arm, Arm::MioA | Arm::MioB)
         {
             command.env(ECHO_FLOOR_CONTROL_ENV, "1");
+        }
+        if matches!(command_floor_ab, CommandFloorAb::WaitZero)
+            && matches!(arm, Arm::MioA | Arm::MioB)
+        {
+            command.env(WAIT_ZERO_FLOOR_CONTROL_ENV, "1");
         }
         command
             .current_dir(&runtime_dir)
@@ -1605,6 +1633,7 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
     let object_refcount_floor_ab = parse_bool_env("FR_URING_AB_OBJECT_REFCOUNT_FLOOR");
     let dbsize_floor_ab = parse_bool_env("FR_URING_AB_DBSIZE_FLOOR");
     let echo_floor_ab = parse_bool_env("FR_URING_AB_ECHO_FLOOR");
+    let wait_zero_floor_ab = parse_bool_env("FR_URING_AB_WAIT_ZERO_FLOOR");
     assert!(!workloads.is_empty(), "at least one workload is required");
     assert!(!pipelines.is_empty(), "at least one pipeline is required");
     #[cfg(not(feature = "perf-ab-bitpos-range-floor"))]
@@ -1641,6 +1670,11 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
         !echo_floor_ab,
         "FR_URING_AB_ECHO_FLOOR=1 requires --features perf-ab-echo-floor"
     );
+    #[cfg(not(feature = "perf-ab-wait-zero-floor"))]
+    assert!(
+        !wait_zero_floor_ab,
+        "FR_URING_AB_WAIT_ZERO_FLOOR=1 requires --features perf-ab-wait-zero-floor"
+    );
     assert!(
         usize::from(bitpos_range_floor_ab)
             + usize::from(bitfield_ro_two_get_floor_ab)
@@ -1648,6 +1682,7 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
             + usize::from(object_refcount_floor_ab)
             + usize::from(dbsize_floor_ab)
             + usize::from(echo_floor_ab)
+            + usize::from(wait_zero_floor_ab)
             <= 1,
         "run only one command-shape floor experiment per invocation"
     );
@@ -1663,6 +1698,8 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
         CommandFloorAb::Dbsize
     } else if echo_floor_ab {
         CommandFloorAb::Echo
+    } else if wait_zero_floor_ab {
+        CommandFloorAb::WaitZero
     } else {
         CommandFloorAb::None
     };
@@ -1706,6 +1743,13 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
             workloads,
             [Workload::Echo],
             "the ECHO floor A/B must isolate the exact profiled workload"
+        );
+    }
+    if wait_zero_floor_ab {
+        assert_eq!(
+            workloads,
+            [Workload::WaitZero],
+            "the WAIT 0 0 floor A/B must isolate the exact profiled workload"
         );
     }
 
@@ -1859,6 +1903,18 @@ candidate=io_uring+echo_floor incumbent=vendored_redis_7.2.4"
         servers[Arm::MioA.index()].assert_environment_value(ECHO_FLOOR_CONTROL_ENV, Some("1"));
         servers[Arm::MioB.index()].assert_environment_value(ECHO_FLOOR_CONTROL_ENV, Some("1"));
         servers[Arm::IoUring.index()].assert_environment_value(ECHO_FLOOR_CONTROL_ENV, None);
+    } else if wait_zero_floor_ab {
+        println!(
+            "ARM_SEMANTICS control_a=io_uring+frozen_pre_wait_zero_floor \
+control_b=io_uring+frozen_pre_wait_zero_floor \
+candidate=io_uring+wait_zero_floor incumbent=vendored_redis_7.2.4"
+        );
+        for arm in [Arm::MioA, Arm::MioB, Arm::IoUring] {
+            servers[arm.index()].assert_flag_reached_process();
+        }
+        servers[Arm::MioA.index()].assert_environment_value(WAIT_ZERO_FLOOR_CONTROL_ENV, Some("1"));
+        servers[Arm::MioB.index()].assert_environment_value(WAIT_ZERO_FLOOR_CONTROL_ENV, Some("1"));
+        servers[Arm::IoUring.index()].assert_environment_value(WAIT_ZERO_FLOOR_CONTROL_ENV, None);
     } else {
         println!(
             "ARM_SEMANTICS control_a=mio control_b=mio \

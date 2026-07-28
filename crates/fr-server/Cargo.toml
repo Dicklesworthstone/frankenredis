@@ -80,6 +80,10 @@ perf-ab-dbsize-floor = []
 # processes set FR_PERF_AB_ECHO_FLOOR_ORIG=1; production builds compile only
 # the front-dispatch candidate.
 perf-ab-echo-floor = []
+# Measurement-only control arm for the exact `WAIT 0 0` dispatch floor. The
+# control processes set FR_PERF_AB_WAIT_ZERO_FLOOR_ORIG=1; production builds
+# compile only the front-dispatch candidate.
+perf-ab-wait-zero-floor = []
 # Measurement-only control arm for the one-binary XADD MAXLEN LIMIT floor A/B.
 # The control process sets FR_PERF_AB_XADD_LIMIT_FLOOR_ORIG=1; production builds
 # do not compile the environment-controlled bypass.

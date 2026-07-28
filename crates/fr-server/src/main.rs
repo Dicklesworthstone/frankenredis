@@ -12405,6 +12405,7 @@ enum BorrowedDispatchFloorClass {
     Strlen,
     Ttl,
     Type,
+    WaitZero,
     XaddNomkstream,
     XaddTwoFields,
     XaddMaxlenApprox,
@@ -12463,6 +12464,7 @@ enum BorrowedDispatchFloorCommand {
     Strlen,
     Ttl,
     Type,
+    Wait,
     Xadd,
     Xlen,
     Zcard,
@@ -12502,6 +12504,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'S', b'R', b'E', b'M'] => Some(BorrowedDispatchFloorCommand::Srem),
             [b'Z', b'R', b'E', b'M'] => Some(BorrowedDispatchFloorCommand::Zrem),
             [b'I', b'N', b'C', b'R'] => Some(BorrowedDispatchFloorCommand::Incr),
+            [b'W', b'A', b'I', b'T'] => Some(BorrowedDispatchFloorCommand::Wait),
             [b'X', b'A', b'D', b'D'] => Some(BorrowedDispatchFloorCommand::Xadd),
             _ => None,
         },
@@ -12834,6 +12837,9 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (2, BorrowedDispatchFloorCommand::Echo) if echo_floor_enabled() => {
             Some(BorrowedDispatchFloorClass::Echo)
         }
+        (3, BorrowedDispatchFloorCommand::Wait) if wait_zero_floor_enabled() => {
+            Some(BorrowedDispatchFloorClass::WaitZero)
+        }
         (5, BorrowedDispatchFloorCommand::Bitfield) => Some(
             BorrowedDispatchFloorClass::BitfieldGet(PlainBitfieldGetCmd::Bitfield),
         ),
@@ -13099,6 +13105,25 @@ const fn echo_floor_enabled() -> bool {
     true
 }
 
+/// Preserve the exact pre-lever `WAIT 0 0` cascade route in the measurement
+/// ELF. The controls select it before their first packet; production builds
+/// compile only the front-dispatch route.
+#[cfg(feature = "perf-ab-wait-zero-floor")]
+#[inline]
+fn wait_zero_floor_enabled() -> bool {
+    static ORIG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    !*ORIG.get_or_init(|| match std::env::var("FR_PERF_AB_WAIT_ZERO_FLOOR_ORIG") {
+        Ok(value) => value == "1",
+        Err(_) => false,
+    })
+}
+
+#[cfg(not(feature = "perf-ab-wait-zero-floor"))]
+#[inline(always)]
+const fn wait_zero_floor_enabled() -> bool {
+    true
+}
+
 /// Keep the exact pre-lever ten-element XADD classification in the measurement
 /// ELF. Each benchmark arm launches that same ELF in a fresh process and selects
 /// the frozen control before the first packet is classified.
@@ -13308,6 +13333,23 @@ fn dispatch_floor_fast_echo_into(
     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
     runtime.execute_plain_echo_borrowed_into(packet.key, ts, client_resp3, out)?;
     Some(packet.consumed)
+}
+
+#[cfg_attr(feature = "perf-ab-wait-zero-floor", inline(never))]
+#[cfg_attr(not(feature = "perf-ab-wait-zero-floor"), inline)]
+fn dispatch_floor_fast_wait_zero(
+    unparsed: &[u8],
+    parser_config: &ParserConfig,
+    runtime: &mut Runtime,
+    ts: u64,
+) -> Option<(usize, RespFrame)> {
+    let packet =
+        parse_borrowed_plain_key_arg1_packet(unparsed, parser_config, b"*3\r\n$4\r\n", b"WAIT")?;
+    if packet.key != b"0" || packet.arg != b"0" {
+        return None;
+    }
+    let response = runtime.execute_plain_wait_borrowed(packet.key, packet.arg, ts)?;
+    Some((packet.consumed, response))
 }
 
 #[cfg_attr(feature = "perf-ab-lpos-floor", inline(never))]
@@ -13999,6 +14041,22 @@ fn try_dispatch_floor_classified_action(
                 dispatch_floor_fast_echo_into(unparsed, &parser_config, runtime, ts, out)
             {
                 Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::WaitZero => {
+            if let Some((consumed, response)) =
+                dispatch_floor_fast_wait_zero(unparsed, &parser_config, runtime, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply { consumed, response })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,
@@ -32256,6 +32314,30 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
                 &cfg,
             ),
             None
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$4\r\nWaIt\r\n$1\r\n0\r\n$1\r\n0\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::WaitZero)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*2\r\n$4\r\nWAIT\r\n$1\r\n0\r\n",
+                &cfg,
+            ),
+            None
+        );
+        // The cheap classifier admits other arity-3 WAIT packets, but the
+        // exact-shape helper rejects them and the dispatcher falls through to
+        // the unchanged blocking/error path.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$4\r\nWAIT\r\n$1\r\n1\r\n$3\r\n100\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::WaitZero)
         );
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(

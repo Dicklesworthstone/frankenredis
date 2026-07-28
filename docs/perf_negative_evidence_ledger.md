@@ -28,6 +28,72 @@ Every new KEEP declares exactly one class:
 modified entries in both ledger files. It also preserves the ELF self-report,
 A/A bootstrap median-CI, never-CV, counted-mechanism, and retry-predicate gates.
 
+## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — exact no-replica `WAIT 0 0` front dispatch is 1.1446x live Redis at saturated P16 (`frankenredis-ohsk5.74`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes.** This is
+  FrankenRedis/Redis throughput against the actual vendored Redis 7.2.4 server
+  running live beside both A/A controls in the same invocation. The
+  frozen-cascade/candidate comparison is SELF-SPEEDUP maintenance only.
+- **Resurrection and baseline.** All relevant WAIT rows were hand-adjudicated.
+  The old immediate-WAIT 1.862x self result / 0.759x competitive result and the
+  later broad 2.96x loss had neither A/A, counted mechanism, nor executing ELF
+  identity and are **VOID-NONULL**. The valid current pre-edit run saturated
+  FrankenRedis/Redis at 98.922%/98.155%, named **25.04% self-time** in the WAIT
+  command surface with zero lost samples and a **1.334045x** Amdahl ceiling,
+  and measured wall A/A **0.995919429x**, bootstrap median CI
+  **[0.976754218, 1.020563887]**, gate
+  **[0.953508436, 1.046491564]**. FrankenRedis/Redis throughput was only
+  **0.428492178x**, CI **[0.418501129, 0.441567693]**. Baseline harness,
+  FrankenRedis, and Redis ELF SHA-256 values were
+  **`418ee3d5f2bd072e9428cd4b48cd72e90a413b4e34b449fa87d048b97b87d186`**,
+  **`c1a694ceb5601443da910e73cc223b5b63e3f9982c975c5951babc70a100ae00`**,
+  and
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+- **Lever and isomorphism.** The case-insensitive arity-three classifier
+  exposes WAIT at the front floor, but the helper accepts only literal RESP
+  arguments `0,0`, then reuses the unchanged exact borrowed parser and runtime
+  executor. Blocking `WAIT 1 100`, malformed/negative arguments, replica-role
+  and policy errors, and alternate arities fall through unchanged. The
+  feature-enabled server suite passed 224/224 tests; all 16 WAIT-filtered
+  runtime tests passed; full conformance passed 194 library tests, 99 smoke
+  tests, and every auxiliary target. Workspace all-target check, default
+  workspace Clippy, exact-feature all-target Clippy with `-D warnings`,
+  pinned-nightly rustfmt, and diff checks passed.
+- **Same executable and fixed work.** Both controls selected the frozen cascade
+  in the same io_uring server ELF with
+  `FR_PERF_AB_WAIT_ZERO_FLOOR_ORIG=1`; candidate omitted it, and the harness
+  verified flags/environments. One strict-remote invocation on fully reserved
+  `vmi1149989` ran 32 x 200,000 byte-checked replies/arm with 50 persistent
+  clients in nine pinned shards, a dedicated server core, every arm order, and
+  125-group within-sample interleaving. The harness ELF self-reported SHA-256
+  **`5fc29e024b140ffe3c5ea295571de23227850c9d8752e01534e5b0838871f499`**,
+  the executing FrankenRedis server ELF self-reported SHA-256
+  **`2ae45e6cbc90dbe500414cbe18b71a91c57eb3f036a317c32c60b066be9ff7c0`**,
+  and the Redis ELF self-reported SHA-256
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+- **Profile and decision.** The zero-lost candidate profile retained **7.20%
+  self-time** in the named surface and a **1.077586x** Amdahl ceiling.
+  Candidate/Redis utilization was 98.546%/98.291%. Wall A/A null median was
+  **1.002899395x**, bootstrap 95% median CI
+  **[0.979672829, 1.024989349]**, gate
+  **[0.950021302, 1.049978698]**. Frozen cascade/candidate throughput was
+  **2.619096823x**, CI **[2.540197311, 2.656927523]**, a SELF-SPEEDUP.
+  FrankenRedis/Redis throughput was **1.144571401x**, CI
+  **[1.108353759, 1.204483778]**: **COMPETITIVE KEEP**. CPU A/A was
+  **1.000945576x**, CI **[0.979544318, 1.023662051]**; self-speedup CPU was
+  **2.632050886x**, CI **[2.547926768, 2.673442841]**; competitive CPU
+  efficiency was **1.140318452x**, CI **[1.102937445, 1.197054695]**.
+- **Invalid attempts and retry predicate.** Attempts without nine disjoint
+  quiet client cores stopped before timing; a four-shard attempt was invalid at
+  only 87.575% Redis utilization. Bootstrap median-CI against twice the A/A CI
+  radius decided the valid result. CV is provenance only (wall null 9.390034%,
+  self 11.522806%, competitive 11.410708%). **Retry predicate:** Re-run after
+  dispatch/parser/WAIT blocking, replica, metrics, io_uring, harness/client,
+  Redis, allocator, kernel, or codegen changes. Invalidate below 90%
+  utilization or when named self-time is zero/lost, reply/live ELF/environment
+  identity differs, or A/A validity fails. Rollback removes the `WaitZero`
+  floor arm and leaves the prior borrowed route intact.
+
 ## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — current exact pristine `UNWATCH` is 1.2246x live Redis at saturated P16; no production lever (`frankenredis-ohsk5.73`)
 
 - **Claim class: COMPETITIVE. Campaign output: yes.** This is current
