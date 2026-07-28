@@ -33,6 +33,70 @@ Redis arm and numeric ratio; a SELF-SPEEDUP needs the heading label and cannot
 mark itself as campaign output. Missing or contradictory classification exits
 **8**.
 
+## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — same-value `HSET` on a pristine 500-field numeric hash is 4.9093x live Redis at saturated P16 (`frankenredis-d1hbr`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes.** This is current io_uring
+  FrankenRedis/Redis throughput against the actual vendored Redis 7.2.4 server
+  running live beside both A/A controls in the same invocation. Production
+  source was not changed; the authenticated harness gained this command shape.
+  The accompanying io_uring/mio comparison is **SELF-SPEEDUP** maintenance
+  only and remained HOLD.
+- **Ledger admission and structural fixture.** Exact candidate preflight for
+  `HSET h f250 1` on the named 500-field Redis-listpack surface was clear,
+  then every broader HSET row was read and adjudicated. Prior bulk-overlay,
+  incremental-refresh, LFU, get-mutate-first, bare-drop, and histogram rows
+  are counted-mechanism internal self-speedups on different or multi-pair
+  fixtures. Historical incumbent sweeps lack this current same-invocation A/A,
+  executing-ELF, profile, and exact-fixture contract. The idempotent fixture
+  resets `h`, inserts exactly 500 fields `f000` through `f499` with numeric
+  value `1`, asserts `HLEN h == 500` in every arm, and asserts Redis
+  `OBJECT ENCODING h == listpack`. The repeated command is exactly
+  `HSET h f250 1`: replacing the middle field with the same one-byte value
+  keeps state and representation stable while Redis scans and rewrites its
+  listpack entry and FrankenRedis directly addresses its promoted
+  `CompactFieldMap`. Every reply is byte-checked as RESP2 `:0`.
+- **Same executable, named profile, and fixed work.** Fully reserved
+  `vmi1153651` (Linux 6.17.0-41-generic) ran 48 samples x 200,000 replies/arm
+  at P16 with 50 persistent clients in eight pinned shards, one disjoint
+  server core, 125-group within-sample interleaving, and two complete 24-order
+  cycles. The executing harness self-reported ELF SHA-256
+  **`982d3877214bd3c1826ec5d47f513be2434e7dbce51164a4289ed3efcb6b4df2`**;
+  all three executing FrankenRedis arms self-reported ELF SHA-256
+  **`5379cdc2cbfeab3b9223601dcf3d394947bc6d0913ddacfbd70a69b29d04d12a`**;
+  Redis self-reported ELF SHA-256
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+  Candidate/Redis median utilization was **97.684%/98.367%**. A zero-lost
+  profile attributed **9.72% self-time** to the named HSET command surface
+  (`process_buffered_frames` 5.82%, `__memcmp_avx2_movbe` 2.51%, exact parser
+  1.39%), for an elimination ceiling of **1.107665x**. The full async-CQ
+  surface was 0.66%, owned io_uring self-time was 0.49%, and its Amdahl
+  ceiling was 1.006644x.
+- **Bootstrap median-CI competitive verdict.** Wall A/A null median was
+  **1.009959890x**, bootstrap 95% median CI
+  **[0.986641674, 1.061035643]**, inside gate
+  **[0.877928714, 1.122071286]**. io_uring FrankenRedis/Redis throughput
+  (Redis wall / FrankenRedis wall) was **4.909262652x**, CI
+  **[4.761780756, 4.960755003]**: COMPETITIVE KEEP. CPU A/A null median was
+  **1.014958152x**, CI **[0.971581511, 1.055733057]**, inside gate
+  **[0.888533886, 1.111466114]**; CPU FrankenRedis/Redis throughput was
+  **4.944188682x**, CI **[4.834244881, 5.037897716]**: KEEP. The ancillary
+  io_uring/mio SELF-SPEEDUP remained HOLD at **1.095530693x**, CI
+  [1.072269843, 1.118784834]; CPU likewise held at **1.091120621x**, CI
+  [1.067671753, 1.119236213], because both effects remain inside the
+  A/A-derived null margin. Neither is campaign output. Bootstrap median-CI
+  decided every verdict, never CV; CV is provenance only (wall null
+  13.695545%, self 19.255823%, competitive 12.814284%; CPU null 11.631410%,
+  self 15.631809%, competitive 9.983938%).
+- **Retry predicate.** Reopen after changes to Redis hash encoding thresholds,
+  the 500-field/numeric-value/target-position fixture, FrankenRedis's
+  128-field promotion or `CompactFieldMap`, HSET parser/runtime/store,
+  same-value replacement, digest or encoding-refresh handling, Redis version,
+  allocator, kernel, harness, or release codegen, or if a fresh valid
+  live-incumbent CI overlaps 1.0. Any retry must retain the pristine numeric
+  fixture, exact same-value replacement, HLEN/listpack assertions, exact `:0`,
+  live Redis arm, ELF self-reports, same-invocation A/A, complete order cycles,
+  zero-lost nonzero-self profile, byte checking, and >=90% server utilization.
+
 ## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — zero-delta `HINCRBYFLOAT` on a pristine 500-field numeric hash is 3.5028x live Redis at saturated P16 (`frankenredis-ggaqy`)
 
 - **Claim class: COMPETITIVE. Campaign output: yes.** This is current io_uring

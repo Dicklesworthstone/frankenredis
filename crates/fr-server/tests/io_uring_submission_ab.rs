@@ -108,6 +108,8 @@ const HGET_MISSING_FIELD: &[u8] = b"*3\r\n$4\r\nHGET\r\n$1\r\nh\r\n$6\r\nabsent\
 const HGET_MISSING_FIELD_REPLY: &[u8] = b"$-1\r\n";
 const HEXISTS_MISSING_FIELD: &[u8] = b"*3\r\n$7\r\nHEXISTS\r\n$1\r\nh\r\n$6\r\nabsent\r\n";
 const HEXISTS_MISSING_FIELD_REPLY: &[u8] = b":0\r\n";
+const HSET_SAME_VALUE: &[u8] = b"*4\r\n$4\r\nHSET\r\n$1\r\nh\r\n$4\r\nf250\r\n$1\r\n1\r\n";
+const HSET_SAME_VALUE_REPLY: &[u8] = b":0\r\n";
 const HSETNX_EXISTING_FIELD: &[u8] = b"*4\r\n$6\r\nHSETNX\r\n$1\r\nh\r\n$4\r\nf250\r\n$1\r\nv\r\n";
 const HSETNX_EXISTING_FIELD_REPLY: &[u8] = b":0\r\n";
 const HINCRBY_ZERO_DELTA: &[u8] = b"*4\r\n$7\r\nHINCRBY\r\n$1\r\nh\r\n$4\r\nf250\r\n$1\r\n0\r\n";
@@ -236,6 +238,7 @@ enum Workload {
     HdelMissingField,
     HgetMissingField,
     HexistsMissingField,
+    HsetSameValue,
     HsetnxExistingField,
     HincrbyZeroDelta,
     HincrbyfloatZeroDelta,
@@ -293,6 +296,7 @@ impl Workload {
             Self::HdelMissingField => "hdel-missing-field",
             Self::HgetMissingField => "hget-missing-field",
             Self::HexistsMissingField => "hexists-missing-field",
+            Self::HsetSameValue => "hset-same-value",
             Self::HsetnxExistingField => "hsetnx-existing-field",
             Self::HincrbyZeroDelta => "hincrby-zero-delta",
             Self::HincrbyfloatZeroDelta => "hincrbyfloat-zero-delta",
@@ -526,6 +530,19 @@ impl Workload {
                 "fr_store::packed_set::CompactFieldMap::lookup_slot",
                 "fr_store::packed_set::CompactFieldMap::lookup_slot_prehashed",
             ],
+            Self::HsetSameValue => &[
+                "frankenredis::process_buffered_frames",
+                "__memcmp_avx2_movbe",
+                "parse_borrowed_plain_hset_packet",
+                "fr_runtime::Runtime::execute_plain_hset_borrowed",
+                "fr_runtime::Runtime::execute_plain_hset_borrowed_with_default_write_gate",
+                "fr_store::Store::hset_borrowed",
+                "fr_store::Store::hset_borrowed_impl",
+                "fr_store::packed_set::HashFieldMap::insert_borrowed",
+                "fr_store::packed_set::CompactFieldMap::insert_borrowed",
+                "fr_store::packed_set::CompactFieldMap::lookup_slot",
+                "fr_store::packed_set::CompactFieldMap::lookup_slot_prehashed",
+            ],
             Self::HsetnxExistingField => &[
                 "frankenredis::process_buffered_frames",
                 "__memcmp_avx2_movbe",
@@ -630,6 +647,7 @@ impl Workload {
                 "hdel-missing-field" => Self::HdelMissingField,
                 "hget-missing-field" => Self::HgetMissingField,
                 "hexists-missing-field" => Self::HexistsMissingField,
+                "hset-same-value" => Self::HsetSameValue,
                 "hsetnx-existing-field" => Self::HsetnxExistingField,
                 "hincrby-zero-delta" => Self::HincrbyZeroDelta,
                 "hincrbyfloat-zero-delta" => Self::HincrbyfloatZeroDelta,
@@ -930,6 +948,16 @@ impl WorkloadPackets {
             Workload::HexistsMissingField => {
                 let case =
                     repeated_case(HEXISTS_MISSING_FIELD, HEXISTS_MISSING_FIELD_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::HsetSameValue => {
+                let case = repeated_case(HSET_SAME_VALUE, HSET_SAME_VALUE_REPLY, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -1586,6 +1614,7 @@ derived_listpack_bytes=3007",
             Workload::HdelMissingField
                 | Workload::HgetMissingField
                 | Workload::HexistsMissingField
+                | Workload::HsetSameValue
                 | Workload::HsetnxExistingField
                 | Workload::HincrbyZeroDelta
                 | Workload::HincrbyfloatZeroDelta
@@ -1594,7 +1623,9 @@ derived_listpack_bytes=3007",
         ) {
             let value = if matches!(
                 workload,
-                Workload::HincrbyZeroDelta | Workload::HincrbyfloatZeroDelta
+                Workload::HsetSameValue
+                    | Workload::HincrbyZeroDelta
+                    | Workload::HincrbyfloatZeroDelta
             ) {
                 "1"
             } else {
