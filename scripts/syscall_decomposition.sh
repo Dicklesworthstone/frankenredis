@@ -56,6 +56,16 @@ FR_PORT=27311; RD_PORT=27312; FR2_PORT=27313
 # halves that arm. Defaults are a starting point, not a reservation.
 FR_CORE="${FR_CORE:-40}"; RD_CORE="${RD_CORE:-41}"
 FR2_CORE="${FR2_CORE:-42}"; CLIENT_CORE="${CLIENT_CORE:-44}"
+# A SINGLE-CORE redis-benchmark saturates at ~75k ops/s while the server still
+# has headroom (measured 2026-07-25: client 100.1% of a core, server 83.1%). Every
+# unpipelined ops/s ratio taken that way measured the CLIENT, not the server, and
+# no server-side lever can move such a number. Drive the client across several
+# cores with --threads, and see the CLIENT-BOUND guard below.
+CLIENT_CORES="${CLIENT_CORES:-$CLIENT_CORE}"
+CLIENT_THREADS="${CLIENT_THREADS:-4}"
+# Extra server args for the fr arms, e.g. FR_ARGS=--io-uring-output. Applied to
+# BOTH fr arms so the A/A null stays a true same-configuration control.
+FR_ARGS="${FR_ARGS:-}"
 
 # --- core-contention preflight ----------------------------------------------
 # A foreign process pinned to one arm's core does NOT look like noise: it looks
@@ -110,9 +120,11 @@ start_servers() {
       exit 4
     fi
   done
-  taskset -c $FR_CORE "$FR_BIN" --port $FR_PORT >/tmp/azm_fr.log 2>&1 &
+  # shellcheck disable=SC2086
+  taskset -c $FR_CORE "$FR_BIN" --port $FR_PORT $FR_ARGS >/tmp/azm_fr.log 2>&1 &
   FR_PID=$!
-  taskset -c $FR2_CORE "$FR_BIN" --port $FR2_PORT >/tmp/azm_fr2.log 2>&1 &
+  # shellcheck disable=SC2086
+  taskset -c $FR2_CORE "$FR_BIN" --port $FR2_PORT $FR_ARGS >/tmp/azm_fr2.log 2>&1 &
   FR2_PID=$!
   taskset -c $RD_CORE "$REDIS_SERVER" --port $RD_PORT --save '' --appendonly no \
       --daemonize no >/tmp/azm_rd.log 2>&1 &
@@ -121,6 +133,17 @@ start_servers() {
   for p in "$FR_PORT" "$RD_PORT" "$FR2_PORT"; do
     "$REDIS_CLI" -p "$p" ping >/dev/null 2>&1 || { echo "FAIL: port $p not up"; exit 1; }
   done
+  if [ -n "$FR_ARGS" ]; then
+    for f in /tmp/azm_fr.log /tmp/azm_fr2.log; do
+      if grep -qiE "unavailable|ring creation failed|requires a build" "$f"; then
+        echo "PREFLIGHT FAIL: FR_ARGS='$FR_ARGS' did not take effect ($f):" >&2
+        grep -iE "unavailable|ring creation failed|requires a build" "$f" | head -2 >&2
+        echo "  A silently-degraded arm makes the comparison vacuous." >&2
+        exit 8
+      fi
+    done
+    echo "fr arms started with: $FR_ARGS"
+  fi
   echo "servers: fr=$FR_PID(core$FR_CORE,:$FR_PORT) fr2=$FR2_PID(core$FR2_CORE,:$FR2_PORT) redis=$RD_PID(core$RD_CORE,:$RD_PORT)"
 }
 
@@ -154,8 +177,9 @@ measure() {
   # globbing across the expansion; word splitting is still wanted.
   set -f
   # shellcheck disable=SC2046  # deliberate word splitting of the arg builders
-  taskset -c $CLIENT_CORE "$REDIS_BENCH" -p "$port" $(bench_head "$wl") -n 100000000 \
-      -c "$CLIENTS" -P "$pipe" -r "$KEYSPACE" $(bench_tail "$wl") >/dev/null 2>&1 &
+  taskset -c "$CLIENT_CORES" "$REDIS_BENCH" -p "$port" $(bench_head "$wl") -n 100000000 \
+      -c "$CLIENTS" -P "$pipe" -r "$KEYSPACE" --threads "$CLIENT_THREADS" \
+      $(bench_tail "$wl") >/dev/null 2>&1 &
   set +f
   local bpid=$!
   sleep 1                                    # let the connection storm settle
@@ -185,8 +209,8 @@ for WL in ${BENCH_T//,/ }; do
   for p in $FR_PORT $RD_PORT $FR2_PORT; do
     set -f
     # shellcheck disable=SC2046
-    taskset -c $CLIENT_CORE "$REDIS_BENCH" -p $p $(bench_head "$WL") -n 200000 -c 8 -P 16 \
-        -r "$KEYSPACE" $(bench_tail "$WL") >/dev/null 2>&1 || true
+    taskset -c "$CLIENT_CORES" "$REDIS_BENCH" -p $p $(bench_head "$WL") -n 200000 -c 8 -P 16 \
+        -r "$KEYSPACE" --threads "$CLIENT_THREADS" $(bench_tail "$WL") >/dev/null 2>&1 || true
     set +f
   done
   # `-P` also accepts a comma list. Sweeping pipeline depth on a fixed workload
@@ -229,8 +253,8 @@ for WL in ${BENCH_T//,/ }; do
           opss = ops/secs; nspop = tc/ops; util = 100.0*tc/(secs*1e9);
           printf "%-6s %-6s %10.0f %10.4f %12.1f %12.1f %8.0f %10.1f %8.1f%%\n",
                  r, arm, opss, sc/ops, iu/ops, ik/ops, cs/secs, nspop, util;
-          printf "%s\t%s\t%s\t%.0f\t%.6f\t%.2f\t%.2f\t%.1f\t%.2f\n",
-                 wl, r, arm, opss, sc/ops, iu/ops, ik/ops, cs/secs, nspop >> out;
+          printf "%s\t%s\t%s\t%.0f\t%.6f\t%.2f\t%.2f\t%.1f\t%.2f\t%.1f\n",
+                 wl, r, arm, opss, sc/ops, iu/ops, ik/ops, cs/secs, nspop, util >> out;
         }'
       done
     done
@@ -244,9 +268,10 @@ import sys, statistics as st
 from collections import defaultdict
 wl_rows = defaultdict(lambda: defaultdict(dict))
 for line in open(sys.argv[1]):
-    wl, r, arm, opss, sc, iu, ik, cs, ns = line.split('\t')
+    wl, r, arm, opss, sc, iu, ik, cs, ns, util = line.split('\t')
     wl_rows[wl][r][arm] = dict(opss=float(opss), sc=float(sc), iu=float(iu),
-                               ik=float(ik), cs=float(cs), ns=float(ns))
+                               ik=float(ik), cs=float(cs), ns=float(ns),
+                               util=float(util))
 med_iu = {}
 for wl, rows in wl_rows.items():
     def med(arm, k):
@@ -263,6 +288,13 @@ for wl, rows in wl_rows.items():
         print(f'{label:>14}  fr={med("fr",k):>12.4f}  redis={med("redis",k):>12.4f}  '
               f'fr/redis={m:.4f} [{lo:.4f},{hi:.4f}]   A/A null fr/fr2={n:.4f} [{nlo:.4f},{nhi:.4f}]')
     med_iu[wl] = {a: med(a, 'iu') for a in ('fr', 'redis', 'fr2')}
+    ufr, urd = med('fr', 'util'), med('redis', 'util')
+    if ufr == ufr and urd == urd and max(ufr, urd) < 90.0:
+        print(f"  !! CLIENT-BOUND: peak server utilisation {max(ufr, urd):.1f}% of a core "
+              f"(fr {ufr:.1f}%, redis {urd:.1f}%).")
+        print( "     The ops/s ratio above measures the CLIENT and CANNOT show a server-side")
+        print( "     effect. Do not quote it. Raise CLIENT_THREADS / CLIENT_CORES and re-run;")
+        print( "     instructions:u/op and ns_cpu/op remain valid as per-operation costs.")
 
 # --- I(P) = C + E/P least-squares fit, per (workload, arm) --------------------
 # Only runs when a workload was swept over >=3 pipeline depths.
