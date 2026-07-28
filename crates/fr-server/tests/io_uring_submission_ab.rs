@@ -111,6 +111,9 @@ const XREVRANGE_ZERO_REPLY: &[u8] = b"*0\r\n";
 const XPENDING_ZERO: &[u8] =
     b"*6\r\n$8\r\nXPENDING\r\n$2\r\nxs\r\n$1\r\ng\r\n$3\r\n0-0\r\n$3\r\n0-0\r\n$2\r\n10\r\n";
 const XPENDING_ZERO_REPLY: &[u8] = b"*0\r\n";
+const XREAD_AFTER_TAIL: &[u8] =
+    b"*4\r\n$5\r\nXREAD\r\n$7\r\nSTREAMS\r\n$2\r\nxs\r\n$6\r\n1000-0\r\n";
+const XREAD_AFTER_TAIL_REPLY: &[u8] = b"*-1\r\n";
 const XREADGROUP_ALL_XS_G_C: &[u8] = b"*9\r\n$10\r\nXREADGROUP\r\n$5\r\nGROUP\r\n\
 $1\r\ng\r\n$1\r\nc\r\n$5\r\nCOUNT\r\n$4\r\n1000\r\n$7\r\nSTREAMS\r\n$2\r\nxs\r\n\
 $1\r\n>\r\n";
@@ -169,6 +172,7 @@ enum Workload {
     XrangeZero,
     XrevrangeZero,
     XpendingZero,
+    XreadAfterTail,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -210,6 +214,7 @@ impl Workload {
             Self::XrangeZero => "xrange-zero",
             Self::XrevrangeZero => "xrevrange-zero",
             Self::XpendingZero => "xpending-zero",
+            Self::XreadAfterTail => "xread-after-tail",
         }
     }
 
@@ -335,6 +340,14 @@ impl Workload {
                 "fr_command::parse_stream_range_bound",
                 "fr_store::Store::xpending_entries",
             ],
+            Self::XreadAfterTail => &[
+                "frankenredis::process_buffered_frames",
+                "execute_plain_xread_single_borrowed_into",
+                "parse_borrowed_plain_xread_single_packet",
+                "fr_command::parse_stream_range_bound",
+                "fr_store::Store::xlast_id",
+                "fr_store::Store::xread_borrow_scan",
+            ],
             Self::Set | Self::Get | Self::Mixed => &[],
         }
     }
@@ -364,6 +377,7 @@ impl Workload {
                 "xrange-zero" => Self::XrangeZero,
                 "xrevrange-zero" => Self::XrevrangeZero,
                 "xpending-zero" => Self::XpendingZero,
+                "xread-after-tail" => Self::XreadAfterTail,
                 other => panic!("unknown FR_URING_AB_WORKLOADS item: {other}"),
             })
             .collect()
@@ -550,6 +564,16 @@ impl WorkloadPackets {
             }
             Workload::XpendingZero => {
                 let case = repeated_case(XPENDING_ZERO, XPENDING_ZERO_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::XreadAfterTail => {
+                let case = repeated_case(XREAD_AFTER_TAIL, XREAD_AFTER_TAIL_REPLY, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -1041,6 +1065,7 @@ fn prefill(servers: &mut [Server; 4], workload: Workload) {
             | Workload::XrangeZero
             | Workload::XrevrangeZero
             | Workload::XpendingZero
+            | Workload::XreadAfterTail
     )
     .then(seeded_stream_prefill);
     for server in servers.iter_mut() {
