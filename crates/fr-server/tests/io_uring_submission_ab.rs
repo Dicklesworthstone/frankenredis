@@ -86,6 +86,13 @@ const LRANGE_INVERTED_PREFILL: &[u8] = b"*3\r\n$3\r\nSET\r\n$1\r\nl\r\n$4\r\nsee
 const LRANGE_INVERTED_PREFILL_REPLY: &[u8] = b"+OK\r\n:1\r\n:1\r\n";
 const LRANGE_INVERTED: &[u8] = b"*4\r\n$6\r\nLRANGE\r\n$1\r\nl\r\n$1\r\n1\r\n$1\r\n0\r\n";
 const LRANGE_INVERTED_REPLY: &[u8] = b"*0\r\n";
+const HDEL_MISSING_HASH_FIELDS: usize = 500;
+const HDEL_MISSING_FIELD: &[u8] = b"*3\r\n$4\r\nHDEL\r\n$1\r\nh\r\n$6\r\nabsent\r\n";
+const HDEL_MISSING_FIELD_REPLY: &[u8] = b":0\r\n";
+const HDEL_MISSING_FIELD_HLEN: &[u8] = b"*2\r\n$4\r\nHLEN\r\n$1\r\nh\r\n";
+const HDEL_MISSING_FIELD_HLEN_REPLY: &[u8] = b":500\r\n";
+const HDEL_MISSING_FIELD_ENCODING: &[u8] = b"*3\r\n$6\r\nOBJECT\r\n$8\r\nENCODING\r\n$1\r\nh\r\n";
+const HDEL_MISSING_FIELD_REDIS_ENCODING_REPLY: &[u8] = b"$8\r\nlistpack\r\n";
 const BITPOS_RANGE_PREFILL: &[u8] =
     b"*3\r\n$3\r\nSET\r\n$8\r\nbitpos:k\r\n$8\r\n\0\0\0\0\0\0\0\x80\r\n";
 const BITPOS_RANGE: &[u8] =
@@ -192,6 +199,7 @@ enum Workload {
     PttlPersistent,
     ZremrangebyscoreInverted,
     LrangeInverted,
+    HdelMissingField,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -238,6 +246,7 @@ impl Workload {
             Self::PttlPersistent => "pttl-persistent",
             Self::ZremrangebyscoreInverted => "zremrangebyscore-inverted",
             Self::LrangeInverted => "lrange-inverted",
+            Self::HdelMissingField => "hdel-missing-field",
         }
     }
 
@@ -397,6 +406,16 @@ impl Workload {
                 "fr_store::Store::lrange_borrow_scan",
                 "fr_store::normalize_index",
             ],
+            Self::HdelMissingField => &[
+                "frankenredis::process_buffered_frames",
+                "__memcmp_avx2_movbe",
+                "parse_borrowed_plain_keyed_values1_packet",
+                "execute_plain_keyed_values_write_borrowed",
+                "fr_store::Store::hdel",
+                "fr_store::Store::hdel_impl",
+                "fr_store::Store::hdel_apply",
+                "fr_store::packed_set::CompactFieldMap::delete",
+            ],
             Self::Set | Self::Get | Self::Mixed => &[],
         }
     }
@@ -430,6 +449,7 @@ impl Workload {
                 "pttl-persistent" => Self::PttlPersistent,
                 "zremrangebyscore-inverted" => Self::ZremrangebyscoreInverted,
                 "lrange-inverted" => Self::LrangeInverted,
+                "hdel-missing-field" => Self::HdelMissingField,
                 other => panic!("unknown FR_URING_AB_WORKLOADS item: {other}"),
             })
             .collect()
@@ -660,6 +680,16 @@ impl WorkloadPackets {
             }
             Workload::LrangeInverted => {
                 let case = repeated_case(LRANGE_INVERTED, LRANGE_INVERTED_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::HdelMissingField => {
+                let case = repeated_case(HDEL_MISSING_FIELD, HDEL_MISSING_FIELD_REPLY, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -1146,6 +1176,26 @@ fn seeded_pending_prefill() -> ExchangeCase {
     ExchangeCase { request, response }
 }
 
+fn hdel_missing_field_prefill() -> ExchangeCase {
+    let mut request = b"*3\r\n$3\r\nSET\r\n$1\r\nh\r\n$4\r\nseed\r\n\
+*2\r\n$3\r\nDEL\r\n$1\r\nh\r\n"
+        .to_vec();
+    let header = format!(
+        "*{}\r\n$4\r\nHSET\r\n$1\r\nh\r\n",
+        HDEL_MISSING_HASH_FIELDS * 2 + 2
+    );
+    request.extend_from_slice(header.as_bytes());
+    for index in 0..HDEL_MISSING_HASH_FIELDS {
+        let field = format!("f{index:03}");
+        let pair = format!("$4\r\n{field}\r\n$1\r\nv\r\n");
+        request.extend_from_slice(pair.as_bytes());
+    }
+    ExchangeCase {
+        request,
+        response: format!("+OK\r\n:1\r\n:{HDEL_MISSING_HASH_FIELDS}\r\n").into_bytes(),
+    }
+}
+
 fn prefill(servers: &mut [Server; 4], workload: Workload) {
     let seeded_stream = matches!(
         workload,
@@ -1181,6 +1231,26 @@ fn prefill(servers: &mut [Server; 4], workload: Workload) {
                 LRANGE_INVERTED_PREFILL,
                 LRANGE_INVERTED_PREFILL_REPLY,
             );
+        } else if matches!(workload, Workload::HdelMissingField) {
+            let case = hdel_missing_field_prefill();
+            exchange_one(server, &case.request, &case.response);
+            exchange_one(
+                server,
+                HDEL_MISSING_FIELD_HLEN,
+                HDEL_MISSING_FIELD_HLEN_REPLY,
+            );
+            if matches!(server.arm, Arm::Redis) {
+                exchange_one(
+                    server,
+                    HDEL_MISSING_FIELD_ENCODING,
+                    HDEL_MISSING_FIELD_REDIS_ENCODING_REPLY,
+                );
+                println!(
+                    "FIXTURE_REPRESENTATION workload={} arm=redis fields={} encoding=listpack",
+                    workload.name(),
+                    HDEL_MISSING_HASH_FIELDS
+                );
+            }
         } else if let Some(case) = &seeded_stream {
             exchange_one(server, &case.request, &case.response);
         }
