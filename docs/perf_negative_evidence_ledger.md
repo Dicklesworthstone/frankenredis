@@ -28,6 +28,82 @@ Every new KEEP declares exactly one class:
 modified entries in both ledger files. It also preserves the ELF self-report,
 A/A bootstrap median-CI, never-CV, counted-mechanism, and retry-predicate gates.
 
+## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — exact standalone `XTRIM xs MINID ~ 0-0` is 1.5432x live Redis at saturated P16 (`frankenredis-ohsk5.75`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes.** The qualifying result is
+  FrankenRedis/Redis throughput against the actual vendored Redis 7.2.4 server
+  running live beside both A/A controls in the same invocation. The
+  frozen-cascade/candidate result is SELF-SPEEDUP maintenance only.
+- **Admission and pre-edit baseline.** Both ledgers were searched and every
+  XTRIM match was read. The nearby XADD-bundled `MINID ~ 0-0` guard did not
+  exercise standalone XTRIM dispatch and its competitive ratio was
+  null-undecidable; correctness/storage rows were distinct. A valid pre-edit
+  run on fully reserved `vmi1149989` saturated FrankenRedis/Redis at
+  99.008%/98.486%, named **20.96% self-time** in the command surface with zero
+  lost samples and a **1.265182x** Amdahl ceiling, and measured A/A
+  **1.001370548x**, bootstrap median CI
+  **[0.966099986, 1.025678325]**, gate
+  **[0.932199972, 1.067800028]**. The existing store guard was a
+  **1.381518316x** SELF-SPEEDUP, CI
+  **[1.357942073, 1.405564292]**, but current FrankenRedis/Redis throughput was
+  only **0.318060628x**, CI **[0.310322101, 0.326328984]**. Baseline harness,
+  FrankenRedis, and Redis ELF SHA-256 values were
+  **`5336c642f658588d3f39f589a732e342a164ff804eab6df3f389f99650125147`**,
+  **`14d974c062009eb0fb164da55a97a6c62ea1bad56678b2f0ec6da5815bc0fa29`**,
+  and
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**;
+  baseline profile SHA-256 was
+  **`f36dddc37cc72f3a54390dff0f66b7ae287faa0b2fe46c896752093dcdeb4338`**.
+- **Lever and isomorphism.** A case-insensitive arity-five classifier admits
+  only literal `XTRIM key MINID ~ 0-0` to the front floor. The helper preserves
+  the normal write/session/expiry/accounting/metrics gates and calls the same
+  `Store::xtrim_minid_approx` with the unchanged Redis-default LIMIT of 10,000.
+  Every other XTRIM shape and non-default state falls through. Runtime parity
+  covers populated, missing, wrong-type and selected-DB cases, observable
+  XRANGE/XLEN state, dirty/stat counters, and replies. Classifier tests cover
+  mixed case, wrong arity, and MAXLEN fallback. The exact live-oracle case
+  passed against Redis 7.2.4. The feature server suite passed 224/224; full
+  conformance passed 194 library tests, 99 smoke tests, and all auxiliary
+  targets. Workspace check, default and feature Clippy `-D warnings`, rustfmt,
+  and diff checks passed.
+- **Same executable and fixed work.** Both controls selected the compiled
+  frozen cascade using `FR_PERF_AB_XTRIM_MINID_NOOP_FLOOR_ORIG=1`; candidate
+  omitted it. One strict-remote invocation on fully reserved `vmi1149989` ran
+  **48 x 200,000** byte-checked replies/arm with 50 persistent clients in nine
+  pinned shards, a dedicated server core, 125-group interleaving, and two
+  complete 24-order Latin cycles. The harness ELF self-reported SHA-256
+  **`40ed537eac550ddd24b5172d99c32ea898168d1883b945b69cef9c516a8d5780`**,
+  every executing FrankenRedis server ELF self-reported SHA-256
+  **`f0253c657fe2ad44bcff2737df6c07c477debecc28022945400b24b4666dce76`**,
+  and Redis self-reported
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+- **Profile and decision.** The zero-lost candidate profile retained
+  **6.81% self-time** in the named surface and a **1.073077x** Amdahl ceiling.
+  Candidate/Redis utilization was 98.401%/98.561%. Wall A/A null median was
+  **1.006847582x**, bootstrap 95% median CI
+  **[0.973579668, 1.033424846]**, gate
+  **[0.933150307, 1.066849693]**. Frozen cascade/candidate throughput was
+  **4.789645731x**, CI **[4.673451968, 4.935241753]**, a SELF-SPEEDUP.
+  FrankenRedis/Redis throughput was **1.543187815x**, CI
+  **[1.517394029, 1.582001956]**: **COMPETITIVE KEEP**. CPU A/A was
+  **1.007004021x**, CI **[0.973994930, 1.034415294]**; self-speedup CPU was
+  **4.827990353x**, CI **[4.713465626, 4.958384968]**; competitive CPU was
+  **1.542006716x**, CI **[1.514249818, 1.582501148]**. Final profile SHA-256
+  was
+  **`50c531e8bceaa2db0a5b6d3941c224a5e73856332eaebaf5c83fc1a6fef987c8`**.
+- **Invalid run, gate, and retry predicate.** A 32-sample attempt emitted no
+  verdict because A/A median 1.026596922x exceeded the absolute 2% validity
+  bound despite its CI containing 1. Its eight-order tail was unbalanced, so
+  the harness now refuses sample counts outside complete 24-order cycles.
+  Bootstrap median-CI against twice the same-invocation A/A CI radius decided
+  the valid result. CV is provenance only (null 6.439223%, self 8.032021%,
+  competitive 7.833489%) and never a gate. **Retry predicate:** Re-run after
+  XTRIM parser/dispatch/store/default-LIMIT, write/expiry/accounting, io_uring,
+  harness order/client/pinning/preflight, Redis, allocator, kernel, or codegen
+  changes. Invalidate below 90% utilization, on zero/lost named self-time,
+  reply/live-ELF/environment mismatch, an incomplete order cycle, or failed
+  A/A validity. Rollback removes only the `XtrimMinidNoop` floor.
+
 ## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — exact no-replica `WAIT 0 0` front dispatch is 1.1446x live Redis at saturated P16 (`frankenredis-ohsk5.74`)
 
 - **Claim class: COMPETITIVE. Campaign output: yes.** This is

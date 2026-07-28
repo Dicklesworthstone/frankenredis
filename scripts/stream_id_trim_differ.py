@@ -10,8 +10,9 @@ ENTRIESADDED/MAXDELETEDID, and FORCE is a syntax error in 7.2.4; MAXLEN exact tr
 keeps the newest N, MAXLEN ~ does NOT trim below the radix-node threshold, and an
 explicit LIMIT caps whole-node removal (kept counts are deterministic for a fixed
 insert sequence); MINID trims by id, XTRIM MAXLEN/MINID return the trimmed count.
-(The approximate-MINID cases also cover thresholds at or below the stream's first
-ID, where trimming is provably a no-op.)
+(The approximate-MINID cases also cover XADD thresholds at or below the stream's
+first ID plus standalone `XTRIM key MINID ~ 0-0`, where trimming is provably a
+no-op.)
 (Complements stream_xinfo / stream_command_fuzz with deterministic ID-error wording
 and trim counts.)
 
@@ -94,6 +95,7 @@ def run_differ(od, fr):
     for i in range(1000,1250): each("XADD","mi_stale",f"{i}-0","f","v")
     chk("xadd_minid_approx_below_first","XADD","mi_stale","MINID","~","999-0","LIMIT","10000","2000-0","f","v")
     chk("xadd_minid_approx_at_first","XADD","mi_stale","MINID","~","1000-0","LIMIT","10000","2001-0","f","v")
+    chk("xtrim_minid_approx_zero_noop","XTRIM","mi_stale","MINID","~","0-0")
     chk("xlen_minid_approx_stale","XLEN","mi_stale")
     chk("xrange_minid_approx_stale","XRANGE","mi_stale","-","+","COUNT","2")
     chk("xtrim_maxlen3","XTRIM","mi","MAXLEN","3"); chk("xlen_trim3","XLEN","mi")

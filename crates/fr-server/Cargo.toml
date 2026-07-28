@@ -107,6 +107,10 @@ perf-ab-xtrim-minid-noop = [
     "fr-runtime/perf-ab-xtrim-minid-noop",
     "fr-command/perf-ab-xtrim-minid-noop",
 ]
+# Measurement-only control arm for the exact standalone
+# `XTRIM key MINID ~ 0-0` dispatch floor. Controls preserve the current
+# guarded generic route; production builds compile only the floor route.
+perf-ab-xtrim-minid-noop-floor = []
 # Measurement-only frozen arm for replica-prefix extraction A/Bs.
 bench-reference = []
 

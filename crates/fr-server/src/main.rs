@@ -12406,6 +12406,7 @@ enum BorrowedDispatchFloorClass {
     Ttl,
     Type,
     WaitZero,
+    XtrimMinidNoop,
     XaddNomkstream,
     XaddTwoFields,
     XaddMaxlenApprox,
@@ -12466,6 +12467,7 @@ enum BorrowedDispatchFloorCommand {
     Type,
     Wait,
     Xadd,
+    Xtrim,
     Xlen,
     Zcard,
     Zcount,
@@ -12514,6 +12516,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'Z', b'C', b'A', b'R', b'D'] => Some(BorrowedDispatchFloorCommand::Zcard),
             [b'L', b'P', b'U', b'S', b'H'] => Some(BorrowedDispatchFloorCommand::Lpush),
             [b'R', b'P', b'U', b'S', b'H'] => Some(BorrowedDispatchFloorCommand::Rpush),
+            [b'X', b'T', b'R', b'I', b'M'] => Some(BorrowedDispatchFloorCommand::Xtrim),
             _ => None,
         },
         6 => match uppercase_ascii_token::<6>(token)? {
@@ -12840,6 +12843,9 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (3, BorrowedDispatchFloorCommand::Wait) if wait_zero_floor_enabled() => {
             Some(BorrowedDispatchFloorClass::WaitZero)
         }
+        (5, BorrowedDispatchFloorCommand::Xtrim) if xtrim_minid_noop_floor_enabled() => {
+            Some(BorrowedDispatchFloorClass::XtrimMinidNoop)
+        }
         (5, BorrowedDispatchFloorCommand::Bitfield) => Some(
             BorrowedDispatchFloorClass::BitfieldGet(PlainBitfieldGetCmd::Bitfield),
         ),
@@ -13124,6 +13130,27 @@ const fn wait_zero_floor_enabled() -> bool {
     true
 }
 
+/// Preserve the current guarded generic route for standalone
+/// `XTRIM key MINID ~ 0-0` in the measurement ELF. Both controls select it
+/// before their first packet; production builds compile only the front floor.
+#[cfg(feature = "perf-ab-xtrim-minid-noop-floor")]
+#[inline]
+fn xtrim_minid_noop_floor_enabled() -> bool {
+    static ORIG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    !*ORIG.get_or_init(
+        || match std::env::var("FR_PERF_AB_XTRIM_MINID_NOOP_FLOOR_ORIG") {
+            Ok(value) => value == "1",
+            Err(_) => false,
+        },
+    )
+}
+
+#[cfg(not(feature = "perf-ab-xtrim-minid-noop-floor"))]
+#[inline(always)]
+const fn xtrim_minid_noop_floor_enabled() -> bool {
+    true
+}
+
 /// Keep the exact pre-lever ten-element XADD classification in the measurement
 /// ELF. Each benchmark arm launches that same ELF in a fresh process and selects
 /// the frozen control before the first packet is classified.
@@ -13349,6 +13376,23 @@ fn dispatch_floor_fast_wait_zero(
         return None;
     }
     let response = runtime.execute_plain_wait_borrowed(packet.key, packet.arg, ts)?;
+    Some((packet.consumed, response))
+}
+
+#[cfg_attr(feature = "perf-ab-xtrim-minid-noop-floor", inline(never))]
+#[cfg_attr(not(feature = "perf-ab-xtrim-minid-noop-floor"), inline)]
+fn dispatch_floor_fast_xtrim_minid_noop(
+    unparsed: &[u8],
+    parser_config: &ParserConfig,
+    runtime: &mut Runtime,
+    ts: u64,
+) -> Option<(usize, RespFrame)> {
+    let packet =
+        parse_borrowed_plain_key_arg3_packet(unparsed, parser_config, b"*5\r\n$5\r\n", b"XTRIM")?;
+    if !packet.a.eq_ignore_ascii_case(b"MINID") || packet.b != b"~" || packet.c != b"0-0" {
+        return None;
+    }
+    let response = runtime.execute_plain_xtrim_minid_noop_borrowed(packet.key, ts)?;
     Some((packet.consumed, response))
 }
 
@@ -14055,6 +14099,22 @@ fn try_dispatch_floor_classified_action(
         BorrowedDispatchFloorClass::WaitZero => {
             if let Some((consumed, response)) =
                 dispatch_floor_fast_wait_zero(unparsed, &parser_config, runtime, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply { consumed, response })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::XtrimMinidNoop => {
+            if let Some((consumed, response)) =
+                dispatch_floor_fast_xtrim_minid_noop(unparsed, &parser_config, runtime, ts)
             {
                 Ok(BorrowedMultibulkAction::FastReply { consumed, response })
             } else {
@@ -32338,6 +32398,30 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
                 &cfg,
             ),
             Some(super::BorrowedDispatchFloorClass::WaitZero)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*5\r\n$5\r\nXtRiM\r\n$2\r\nxs\r\n$5\r\nMINID\r\n$1\r\n~\r\n$3\r\n0-0\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::XtrimMinidNoop)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*4\r\n$5\r\nXTRIM\r\n$2\r\nxs\r\n$6\r\nMAXLEN\r\n$1\r\n1\r\n",
+                &cfg,
+            ),
+            None
+        );
+        // The cheap classifier admits every arity-5 XTRIM packet; the
+        // exact helper accepts only MINID ~ 0-0 and falls through unchanged
+        // for MAXLEN, exact MINID, alternate thresholds, and syntax errors.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*5\r\n$5\r\nXTRIM\r\n$2\r\nxs\r\n$6\r\nMAXLEN\r\n$1\r\n=\r\n$1\r\n1\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::XtrimMinidNoop)
         );
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(

@@ -36,7 +36,10 @@ const CLIENTS: usize = 50;
 // shards use the worker's remaining physical cores while keeping a disjoint
 // server core; the utilization guard remains authoritative.
 const DEFAULT_CLIENT_THREADS: usize = 9;
-const DEFAULT_SAMPLES: usize = 32;
+// Two complete 24-permutation order cycles keep every physical arm in every
+// position equally often. A partial tail can bias an otherwise identical A/A
+// pair; the median validity check caught that on the first XTRIM floor run.
+const DEFAULT_SAMPLES: usize = 48;
 const DEFAULT_OPS_PER_SAMPLE: usize = 200_000;
 const DEFAULT_PROFILE_SECONDS: u64 = 3;
 // One group is only CLIENTS * pipeline operations. Twenty-five groups left a
@@ -55,6 +58,9 @@ const OBJECT_REFCOUNT_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_OBJECT_REFCOUNT_FLOO
 const DBSIZE_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_DBSIZE_FLOOR_ORIG";
 const ECHO_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_ECHO_FLOOR_ORIG";
 const WAIT_ZERO_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_WAIT_ZERO_FLOOR_ORIG";
+const XTRIM_MINID_NOOP_CONTROL_ENV: &str = "FR_PERF_AB_XTRIM_MINID_NOOP_ORIG";
+const XTRIM_MINID_NOOP_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_XTRIM_MINID_NOOP_FLOOR_ORIG";
+const XTRIM_MINID_NOOP_PREFILL_ENTRIES: usize = 1_000;
 const SHUTDOWN: &[u8] = b"*2\r\n$8\r\nSHUTDOWN\r\n$6\r\nNOSAVE\r\n";
 const SET: &[u8] = b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n";
 const SET_REPLY: &[u8] = b"+OK\r\n";
@@ -84,6 +90,9 @@ const UNWATCH: &[u8] = b"*1\r\n$7\r\nUNWATCH\r\n";
 const UNWATCH_REPLY: &[u8] = b"+OK\r\n";
 const WAIT_ZERO: &[u8] = b"*3\r\n$4\r\nWAIT\r\n$1\r\n0\r\n$1\r\n0\r\n";
 const WAIT_ZERO_REPLY: &[u8] = b":0\r\n";
+const XTRIM_MINID_NOOP: &[u8] =
+    b"*5\r\n$5\r\nXTRIM\r\n$2\r\nxs\r\n$5\r\nMINID\r\n$1\r\n~\r\n$3\r\n0-0\r\n";
+const XTRIM_MINID_NOOP_REPLY: &[u8] = b":0\r\n";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Arm {
@@ -128,6 +137,7 @@ enum Workload {
     Echo,
     Unwatch,
     WaitZero,
+    XtrimMinidNoop,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -140,6 +150,8 @@ enum CommandFloorAb {
     Dbsize,
     Echo,
     WaitZero,
+    XtrimMinidNoop,
+    XtrimMinidNoopFloor,
 }
 
 impl Workload {
@@ -156,6 +168,7 @@ impl Workload {
             Self::Echo => "echo",
             Self::Unwatch => "unwatch",
             Self::WaitZero => "wait-zero",
+            Self::XtrimMinidNoop => "xtrim-minid-noop",
         }
     }
 
@@ -211,6 +224,14 @@ impl Workload {
                 "execute_plain_wait_borrowed",
                 "parse_borrowed_plain_key_arg1_packet",
             ],
+            Self::XtrimMinidNoop => &[
+                "frankenredis::process_buffered_frames",
+                "dispatch_floor_fast_xtrim_minid_noop",
+                "execute_plain_xtrim_minid_noop_borrowed",
+                "fr_command::xtrim",
+                "fr_store::Store::xtrim_minid_approx",
+                "xtrim_minid_noop_guard_enabled",
+            ],
             Self::Set | Self::Get | Self::Mixed => &[],
         }
     }
@@ -233,6 +254,7 @@ impl Workload {
                 "echo" => Self::Echo,
                 "unwatch" => Self::Unwatch,
                 "wait-zero" => Self::WaitZero,
+                "xtrim-minid-noop" => Self::XtrimMinidNoop,
                 other => panic!("unknown FR_URING_AB_WORKLOADS item: {other}"),
             })
             .collect()
@@ -349,6 +371,16 @@ impl WorkloadPackets {
             }
             Workload::WaitZero => {
                 let case = repeated_case(WAIT_ZERO, WAIT_ZERO_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::XtrimMinidNoop => {
+                let case = repeated_case(XTRIM_MINID_NOOP, XTRIM_MINID_NOOP_REPLY, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -582,6 +614,16 @@ impl Server {
         {
             command.env(WAIT_ZERO_FLOOR_CONTROL_ENV, "1");
         }
+        if matches!(command_floor_ab, CommandFloorAb::XtrimMinidNoop)
+            && matches!(arm, Arm::MioA | Arm::MioB)
+        {
+            command.env(XTRIM_MINID_NOOP_CONTROL_ENV, "1");
+        }
+        if matches!(command_floor_ab, CommandFloorAb::XtrimMinidNoopFloor)
+            && matches!(arm, Arm::MioA | Arm::MioB)
+        {
+            command.env(XTRIM_MINID_NOOP_FLOOR_CONTROL_ENV, "1");
+        }
         command
             .current_dir(&runtime_dir)
             .stdout(Stdio::null())
@@ -760,7 +802,34 @@ fn exchange_one(server: &mut Server, request: &[u8], expected: &[u8]) {
     );
 }
 
+fn xtrim_minid_noop_prefill() -> ExchangeCase {
+    let mut request = Vec::new();
+    let mut response = Vec::new();
+
+    // Make each prefill idempotent without accepting an arm-dependent DEL
+    // reply: SET guarantees that DEL removes exactly one key.
+    request.extend_from_slice(b"*3\r\n$3\r\nSET\r\n$2\r\nxs\r\n$4\r\nseed\r\n");
+    response.extend_from_slice(SET_REPLY);
+    request.extend_from_slice(b"*2\r\n$3\r\nDEL\r\n$2\r\nxs\r\n");
+    response.extend_from_slice(b":1\r\n");
+
+    for id in 1..=XTRIM_MINID_NOOP_PREFILL_ENTRIES {
+        let stream_id = format!("{id}-0");
+        let command = format!(
+            "*5\r\n$4\r\nXADD\r\n$2\r\nxs\r\n${}\r\n{stream_id}\r\n\
+$1\r\nf\r\n$1\r\nv\r\n",
+            stream_id.len()
+        );
+        request.extend_from_slice(command.as_bytes());
+        let reply = format!("${}\r\n{stream_id}\r\n", stream_id.len());
+        response.extend_from_slice(reply.as_bytes());
+    }
+    ExchangeCase { request, response }
+}
+
 fn prefill(servers: &mut [Server; 4], workload: Workload) {
+    let xtrim_minid_noop =
+        matches!(workload, Workload::XtrimMinidNoop).then(xtrim_minid_noop_prefill);
     for server in servers.iter_mut() {
         exchange_one(server, SET, SET_REPLY);
         if matches!(workload, Workload::BitposRange) {
@@ -771,6 +840,8 @@ fn prefill(servers: &mut [Server; 4], workload: Workload) {
             exchange_one(server, OBJECT_ENCODING_PREFILL, SET_REPLY);
         } else if matches!(workload, Workload::ObjectRefcount) {
             exchange_one(server, OBJECT_REFCOUNT_PREFILL, SET_REPLY);
+        } else if let Some(case) = &xtrim_minid_noop {
+            exchange_one(server, &case.request, &case.response);
         }
     }
 }
@@ -851,6 +922,10 @@ fn measure_configuration(
         [Arm::Redis, Arm::IoUring, Arm::MioA, Arm::MioB],
         [Arm::Redis, Arm::IoUring, Arm::MioB, Arm::MioA],
     ];
+    assert!(
+        samples.is_multiple_of(ORDERS.len()),
+        "sample count must contain complete 24-order cycles; got {samples}"
+    );
 
     let packets = Arc::new(WorkloadPackets::new(workload, pipeline));
     prefill_and_warm(servers, workload, pipeline, &packets);
@@ -1634,6 +1709,8 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
     let dbsize_floor_ab = parse_bool_env("FR_URING_AB_DBSIZE_FLOOR");
     let echo_floor_ab = parse_bool_env("FR_URING_AB_ECHO_FLOOR");
     let wait_zero_floor_ab = parse_bool_env("FR_URING_AB_WAIT_ZERO_FLOOR");
+    let xtrim_minid_noop_ab = parse_bool_env("FR_URING_AB_XTRIM_MINID_NOOP");
+    let xtrim_minid_noop_floor_ab = parse_bool_env("FR_URING_AB_XTRIM_MINID_NOOP_FLOOR");
     assert!(!workloads.is_empty(), "at least one workload is required");
     assert!(!pipelines.is_empty(), "at least one pipeline is required");
     #[cfg(not(feature = "perf-ab-bitpos-range-floor"))]
@@ -1675,6 +1752,17 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
         !wait_zero_floor_ab,
         "FR_URING_AB_WAIT_ZERO_FLOOR=1 requires --features perf-ab-wait-zero-floor"
     );
+    #[cfg(not(feature = "perf-ab-xtrim-minid-noop"))]
+    assert!(
+        !xtrim_minid_noop_ab,
+        "FR_URING_AB_XTRIM_MINID_NOOP=1 requires --features perf-ab-xtrim-minid-noop"
+    );
+    #[cfg(not(feature = "perf-ab-xtrim-minid-noop-floor"))]
+    assert!(
+        !xtrim_minid_noop_floor_ab,
+        "FR_URING_AB_XTRIM_MINID_NOOP_FLOOR=1 requires \
+--features perf-ab-xtrim-minid-noop-floor"
+    );
     assert!(
         usize::from(bitpos_range_floor_ab)
             + usize::from(bitfield_ro_two_get_floor_ab)
@@ -1683,6 +1771,8 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
             + usize::from(dbsize_floor_ab)
             + usize::from(echo_floor_ab)
             + usize::from(wait_zero_floor_ab)
+            + usize::from(xtrim_minid_noop_ab)
+            + usize::from(xtrim_minid_noop_floor_ab)
             <= 1,
         "run only one command-shape floor experiment per invocation"
     );
@@ -1700,6 +1790,10 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
         CommandFloorAb::Echo
     } else if wait_zero_floor_ab {
         CommandFloorAb::WaitZero
+    } else if xtrim_minid_noop_ab {
+        CommandFloorAb::XtrimMinidNoop
+    } else if xtrim_minid_noop_floor_ab {
+        CommandFloorAb::XtrimMinidNoopFloor
     } else {
         CommandFloorAb::None
     };
@@ -1750,6 +1844,20 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
             workloads,
             [Workload::WaitZero],
             "the WAIT 0 0 floor A/B must isolate the exact profiled workload"
+        );
+    }
+    if xtrim_minid_noop_ab {
+        assert_eq!(
+            workloads,
+            [Workload::XtrimMinidNoop],
+            "the XTRIM MINID no-op A/B must isolate the exact profiled workload"
+        );
+    }
+    if xtrim_minid_noop_floor_ab {
+        assert_eq!(
+            workloads,
+            [Workload::XtrimMinidNoop],
+            "the XTRIM MINID no-op floor A/B must isolate the exact profiled workload"
         );
     }
 
@@ -1915,6 +2023,35 @@ candidate=io_uring+wait_zero_floor incumbent=vendored_redis_7.2.4"
         servers[Arm::MioA.index()].assert_environment_value(WAIT_ZERO_FLOOR_CONTROL_ENV, Some("1"));
         servers[Arm::MioB.index()].assert_environment_value(WAIT_ZERO_FLOOR_CONTROL_ENV, Some("1"));
         servers[Arm::IoUring.index()].assert_environment_value(WAIT_ZERO_FLOOR_CONTROL_ENV, None);
+    } else if xtrim_minid_noop_ab {
+        println!(
+            "ARM_SEMANTICS control_a=io_uring+frozen_pre_xtrim_minid_noop_guard \
+control_b=io_uring+frozen_pre_xtrim_minid_noop_guard \
+candidate=io_uring+xtrim_minid_noop_guard incumbent=vendored_redis_7.2.4"
+        );
+        for arm in [Arm::MioA, Arm::MioB, Arm::IoUring] {
+            servers[arm.index()].assert_flag_reached_process();
+        }
+        servers[Arm::MioA.index()]
+            .assert_environment_value(XTRIM_MINID_NOOP_CONTROL_ENV, Some("1"));
+        servers[Arm::MioB.index()]
+            .assert_environment_value(XTRIM_MINID_NOOP_CONTROL_ENV, Some("1"));
+        servers[Arm::IoUring.index()].assert_environment_value(XTRIM_MINID_NOOP_CONTROL_ENV, None);
+    } else if xtrim_minid_noop_floor_ab {
+        println!(
+            "ARM_SEMANTICS control_a=io_uring+guarded_generic_xtrim_minid_noop \
+control_b=io_uring+guarded_generic_xtrim_minid_noop \
+candidate=io_uring+xtrim_minid_noop_dispatch_floor incumbent=vendored_redis_7.2.4"
+        );
+        for arm in [Arm::MioA, Arm::MioB, Arm::IoUring] {
+            servers[arm.index()].assert_flag_reached_process();
+        }
+        servers[Arm::MioA.index()]
+            .assert_environment_value(XTRIM_MINID_NOOP_FLOOR_CONTROL_ENV, Some("1"));
+        servers[Arm::MioB.index()]
+            .assert_environment_value(XTRIM_MINID_NOOP_FLOOR_CONTROL_ENV, Some("1"));
+        servers[Arm::IoUring.index()]
+            .assert_environment_value(XTRIM_MINID_NOOP_FLOOR_CONTROL_ENV, None);
     } else {
         println!(
             "ARM_SEMANTICS control_a=mio control_b=mio \
