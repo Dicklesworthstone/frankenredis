@@ -110,6 +110,8 @@ const HEXISTS_MISSING_FIELD: &[u8] = b"*3\r\n$7\r\nHEXISTS\r\n$1\r\nh\r\n$6\r\na
 const HEXISTS_MISSING_FIELD_REPLY: &[u8] = b":0\r\n";
 const HSETNX_EXISTING_FIELD: &[u8] = b"*4\r\n$6\r\nHSETNX\r\n$1\r\nh\r\n$4\r\nf250\r\n$1\r\nv\r\n";
 const HSETNX_EXISTING_FIELD_REPLY: &[u8] = b":0\r\n";
+const HINCRBY_ZERO_DELTA: &[u8] = b"*4\r\n$7\r\nHINCRBY\r\n$1\r\nh\r\n$4\r\nf250\r\n$1\r\n0\r\n";
+const HINCRBY_ZERO_DELTA_REPLY: &[u8] = b":1\r\n";
 const HSTRLEN_EXISTING_FIELD: &[u8] = b"*3\r\n$7\r\nHSTRLEN\r\n$1\r\nh\r\n$4\r\nf250\r\n";
 const HSTRLEN_EXISTING_FIELD_REPLY: &[u8] = b":1\r\n";
 const HMGET_EXISTING_MISSING: &[u8] =
@@ -232,6 +234,7 @@ enum Workload {
     HgetMissingField,
     HexistsMissingField,
     HsetnxExistingField,
+    HincrbyZeroDelta,
     HstrlenExistingField,
     HmgetExistingMissing,
 }
@@ -287,6 +290,7 @@ impl Workload {
             Self::HgetMissingField => "hget-missing-field",
             Self::HexistsMissingField => "hexists-missing-field",
             Self::HsetnxExistingField => "hsetnx-existing-field",
+            Self::HincrbyZeroDelta => "hincrby-zero-delta",
             Self::HstrlenExistingField => "hstrlen-existing-field",
             Self::HmgetExistingMissing => "hmget-existing-missing",
         }
@@ -529,6 +533,21 @@ impl Workload {
                 "fr_store::packed_set::CompactFieldMap::lookup_slot",
                 "fr_store::packed_set::CompactFieldMap::lookup_slot_prehashed",
             ],
+            Self::HincrbyZeroDelta => &[
+                "frankenredis::process_buffered_frames",
+                "__memcmp_avx2_movbe",
+                "parse_borrowed_plain_hincrby_packet",
+                "fr_runtime::Runtime::execute_plain_hincrby_borrowed",
+                "fr_store::Store::hincrby",
+                "fr_store::Store::hincrby_impl",
+                "fr_store::Store::with_mutated_or_created_entry",
+                "fr_store::packed_set::HashFieldMap::get",
+                "fr_store::packed_set::HashFieldMap::insert_borrowed",
+                "fr_store::packed_set::CompactFieldMap::get",
+                "fr_store::packed_set::CompactFieldMap::insert_borrowed",
+                "fr_store::packed_set::CompactFieldMap::lookup_slot",
+                "fr_store::packed_set::CompactFieldMap::lookup_slot_prehashed",
+            ],
             Self::HstrlenExistingField => &[
                 "frankenredis::process_buffered_frames",
                 "__memcmp_avx2_movbe",
@@ -592,6 +611,7 @@ impl Workload {
                 "hget-missing-field" => Self::HgetMissingField,
                 "hexists-missing-field" => Self::HexistsMissingField,
                 "hsetnx-existing-field" => Self::HsetnxExistingField,
+                "hincrby-zero-delta" => Self::HincrbyZeroDelta,
                 "hstrlen-existing-field" => Self::HstrlenExistingField,
                 "hmget-existing-missing" => Self::HmgetExistingMissing,
                 other => panic!("unknown FR_URING_AB_WORKLOADS item: {other}"),
@@ -900,6 +920,16 @@ impl WorkloadPackets {
             Workload::HsetnxExistingField => {
                 let case =
                     repeated_case(HSETNX_EXISTING_FIELD, HSETNX_EXISTING_FIELD_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::HincrbyZeroDelta => {
+                let case = repeated_case(HINCRBY_ZERO_DELTA, HINCRBY_ZERO_DELTA_REPLY, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -1414,7 +1444,8 @@ fn seeded_pending_prefill() -> ExchangeCase {
     ExchangeCase { request, response }
 }
 
-fn missing_field_hash_prefill() -> ExchangeCase {
+fn hash_prefill(value: &str) -> ExchangeCase {
+    assert_eq!(value.len(), 1, "hash fixture values must stay one byte");
     let mut request = b"*3\r\n$3\r\nSET\r\n$1\r\nh\r\n$4\r\nseed\r\n\
 *2\r\n$3\r\nDEL\r\n$1\r\nh\r\n"
         .to_vec();
@@ -1425,7 +1456,7 @@ fn missing_field_hash_prefill() -> ExchangeCase {
     request.extend_from_slice(header.as_bytes());
     for index in 0..MISSING_FIELD_HASH_FIELDS {
         let field = format!("f{index:03}");
-        let pair = format!("$4\r\n{field}\r\n$1\r\nv\r\n");
+        let pair = format!("$4\r\n{field}\r\n$1\r\n{value}\r\n");
         request.extend_from_slice(pair.as_bytes());
     }
     ExchangeCase {
@@ -1521,10 +1552,16 @@ derived_listpack_bytes=3007",
                 | Workload::HgetMissingField
                 | Workload::HexistsMissingField
                 | Workload::HsetnxExistingField
+                | Workload::HincrbyZeroDelta
                 | Workload::HstrlenExistingField
                 | Workload::HmgetExistingMissing
         ) {
-            let case = missing_field_hash_prefill();
+            let value = if matches!(workload, Workload::HincrbyZeroDelta) {
+                "1"
+            } else {
+                "v"
+            };
+            let case = hash_prefill(value);
             exchange_one(server, &case.request, &case.response);
             exchange_one(
                 server,
