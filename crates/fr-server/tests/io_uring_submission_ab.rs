@@ -91,6 +91,8 @@ const LINDEX_MIDDLE: &[u8] = b"*3\r\n$6\r\nLINDEX\r\n$1\r\nl\r\n$3\r\n250\r\n";
 const LINDEX_MIDDLE_REPLY: &[u8] = b"$4\r\nv250\r\n";
 const LSET_MIDDLE_SAME_VALUE: &[u8] = b"*4\r\n$4\r\nLSET\r\n$1\r\nl\r\n$3\r\n250\r\n$4\r\nv250\r\n";
 const LSET_MIDDLE_SAME_VALUE_REPLY: &[u8] = b"+OK\r\n";
+const LPOS_MIDDLE_ELEMENT: &[u8] = b"*3\r\n$4\r\nLPOS\r\n$1\r\nl\r\n$4\r\nv250\r\n";
+const LPOS_MIDDLE_ELEMENT_REPLY: &[u8] = b":250\r\n";
 const LINDEX_MIDDLE_LLEN: &[u8] = b"*2\r\n$4\r\nLLEN\r\n$1\r\nl\r\n";
 const LINDEX_MIDDLE_LLEN_REPLY: &[u8] = b":500\r\n";
 const LINDEX_MIDDLE_ENCODING: &[u8] = b"*3\r\n$6\r\nOBJECT\r\n$8\r\nENCODING\r\n$1\r\nl\r\n";
@@ -225,6 +227,7 @@ enum Workload {
     LrangeInverted,
     LindexMiddle,
     LsetMiddleSameValue,
+    LposMiddleElement,
     HdelMissingField,
     HgetMissingField,
     HexistsMissingField,
@@ -279,6 +282,7 @@ impl Workload {
             Self::LrangeInverted => "lrange-inverted",
             Self::LindexMiddle => "lindex-middle",
             Self::LsetMiddleSameValue => "lset-middle-same-value",
+            Self::LposMiddleElement => "lpos-middle-element",
             Self::HdelMissingField => "hdel-missing-field",
             Self::HgetMissingField => "hget-missing-field",
             Self::HexistsMissingField => "hexists-missing-field",
@@ -466,6 +470,19 @@ impl Workload {
                 "fr_store::packed_set::ChunkedList::set",
                 "fr_store::packed_set::ListChunk::set",
             ],
+            Self::LposMiddleElement => &[
+                "frankenredis::process_buffered_frames",
+                "__memcmp_avx2_movbe",
+                "frankenredis::dispatch_floor_fast_lpos",
+                "parse_borrowed_plain_lpos_packet",
+                "fr_runtime::Runtime::execute_plain_lpos_borrowed",
+                "fr_store::Store::lpos_full",
+                "fr_store::packed_set::ListValue::iter",
+                "fr_store::packed_set::ChunkedList::iter",
+                "fr_store::packed_set::ListValueIter::next",
+                "fr_store::packed_set::ChunkedListIter::next",
+                "fr_store::packed_set::ListChunkIter::next",
+            ],
             Self::HdelMissingField => &[
                 "frankenredis::process_buffered_frames",
                 "__memcmp_avx2_movbe",
@@ -570,6 +587,7 @@ impl Workload {
                 "lrange-inverted" => Self::LrangeInverted,
                 "lindex-middle" => Self::LindexMiddle,
                 "lset-middle-same-value" => Self::LsetMiddleSameValue,
+                "lpos-middle-element" => Self::LposMiddleElement,
                 "hdel-missing-field" => Self::HdelMissingField,
                 "hget-missing-field" => Self::HgetMissingField,
                 "hexists-missing-field" => Self::HexistsMissingField,
@@ -830,6 +848,16 @@ impl WorkloadPackets {
                     LSET_MIDDLE_SAME_VALUE_REPLY,
                     pipeline,
                 );
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::LposMiddleElement => {
+                let case = repeated_case(LPOS_MIDDLE_ELEMENT, LPOS_MIDDLE_ELEMENT_REPLY, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -1463,7 +1491,7 @@ fn prefill(servers: &mut [Server; 4], workload: Workload) {
             );
         } else if matches!(
             workload,
-            Workload::LindexMiddle | Workload::LsetMiddleSameValue
+            Workload::LindexMiddle | Workload::LsetMiddleSameValue | Workload::LposMiddleElement
         ) {
             let case = lindex_middle_prefill();
             exchange_one(server, &case.request, &case.response);

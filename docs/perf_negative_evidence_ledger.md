@@ -28,6 +28,70 @@ Every new KEEP declares exactly one class:
 modified entries in both ledger files. It also preserves the ELF self-report,
 A/A bootstrap median-CI, never-CV, counted-mechanism, and retry-predicate gates.
 
+## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — middle-element `LPOS` on a pristine 500-element list is 2.0821x live Redis at saturated P16 (`frankenredis-l4ynd`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes.** This is current io_uring
+  FrankenRedis/Redis throughput against the actual vendored Redis 7.2.4 server
+  running live beside both A/A controls in the same invocation. Production
+  source was not changed; the authenticated harness gained this command
+  shape. The accompanying io_uring/mio comparison is **SELF-SPEEDUP**
+  maintenance only and remained HOLD.
+- **Ledger admission and structural fixture.** Exact preflights for
+  `LPOS l v250`, `middle-element LPOS`, and `500-element LPOS` were clear,
+  then every broader LPOS row was read and adjudicated. Prior dispatch-floor
+  and allkeys-LFU rows are internal self-speedups on different fixtures with
+  counted mechanisms. Historical broad Redis sweeps have no current
+  same-invocation A/A, executing-ELF identity, named-frame profile, or exact
+  fixture contract, so they are routing evidence rather than verdicts for
+  this row. The idempotent fixture resets `l`, inserts exactly 500 four-byte
+  elements `v000` through `v499`, asserts `LLEN l == 500` in every arm, and
+  asserts Redis `OBJECT ENCODING l == listpack` with
+  `list-max-listpack-size == -2` and a derived 3,007-byte payload. The
+  repeated command is exactly `LPOS l v250`; every reply is byte-checked as
+  RESP2 `:250`.
+- **Same executable, named profile, and fixed work.** Fully reserved
+  `vmi1227854` (Linux 6.17.0-35-generic) ran 48 samples x 200,000
+  replies/arm at P16, 50 persistent clients in eight pinned shards, one
+  dedicated server core, 125-group within-sample interleaving, and two
+  complete 24-order cycles. The executing harness self-reported ELF SHA-256
+  **`1ff5e40fee18a52bb36ae0cee51e95b951223907a089130b94e8c7798bb9b687`**;
+  all three executing FrankenRedis arms self-reported ELF SHA-256
+  **`3b3c63cedc8bfe2d302ce2a98db772881310639858e831f997016f2b8b80c990`**;
+  Redis self-reported ELF SHA-256
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+  Candidate/Redis median utilization was 99.012%/98.742%. A zero-lost profile
+  attributed **1.84% self-time** to the named LPOS surface
+  (`process_buffered_frames` 1.21%, exact parser 0.48%, dispatch floor 0.15%),
+  for an elimination ceiling of **1.018745x**. The async-CQ surface was 0.24%
+  and owned io_uring self-time was 0.21%.
+- **Bootstrap median-CI competitive verdict.** Wall A/A null median was
+  **0.980505674x**, bootstrap 95% median CI
+  **[0.963629778, 1.010424640]**, inside gate
+  **[0.927259555, 1.072740445]**. io_uring FrankenRedis/Redis throughput was
+  **2.082120176x**, CI **[2.028334285, 2.169051429]**: COMPETITIVE KEEP. CPU
+  A/A null median was **0.982717996x**, CI
+  **[0.962098635, 1.010138786]**, inside gate
+  **[0.924197271, 1.075802729]**; CPU FrankenRedis/Redis throughput was
+  **2.076431213x**, CI **[2.020237906, 2.165820749]**. The ancillary
+  io_uring/mio SELF-SPEEDUP remained HOLD at 1.022582757x, CI
+  [0.988622536, 1.059455569]; CPU was likewise HOLD at 1.022564010x, CI
+  [0.988488834, 1.058628104]. Bootstrap median-CI decided every verdict,
+  never CV; CV is provenance only (wall null 9.067786%, self 7.011276%,
+  competitive 8.430917%; CPU null 8.944732%, self 6.997548%, competitive
+  8.407104%).
+- **Invalid boundary and retry predicate.** A preceding full invocation was
+  excluded because its wall A/A gate returned INVALID after second-cycle host
+  interference; none of its LPOS ratios informed this verdict. The valid
+  retry's quiet-core preflight rejected two core sets before server spawn and
+  passed on attempt three. Reopen after Redis list encoding or
+  `list-max-listpack-size`, the 500-element/value/target fixture,
+  FrankenRedis list representation or LPOS scan path, Redis version,
+  allocator, kernel, harness, or release-codegen changes, or if a fresh valid
+  live-incumbent CI overlaps 1.0. Any retry must retain LLEN/listpack/config
+  assertions, exact `:250`, the live Redis arm, ELF self-reports,
+  same-invocation A/A, complete order cycles, zero-lost nonzero-self profile,
+  byte checking, and >=90% server utilization.
+
 ## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — state-stable middle-index `LSET` on a pristine 500-element list is 1.7166x live Redis at saturated P16 (`frankenredis-0l1ap`)
 
 - **Claim class: COMPETITIVE. Campaign output: yes.** This is current io_uring
