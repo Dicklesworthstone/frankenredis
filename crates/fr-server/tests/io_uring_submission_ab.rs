@@ -89,6 +89,8 @@ const LRANGE_INVERTED_REPLY: &[u8] = b"*0\r\n";
 const LINDEX_MIDDLE_ELEMENTS: usize = 500;
 const LINDEX_MIDDLE: &[u8] = b"*3\r\n$6\r\nLINDEX\r\n$1\r\nl\r\n$3\r\n250\r\n";
 const LINDEX_MIDDLE_REPLY: &[u8] = b"$4\r\nv250\r\n";
+const LSET_MIDDLE_SAME_VALUE: &[u8] = b"*4\r\n$4\r\nLSET\r\n$1\r\nl\r\n$3\r\n250\r\n$4\r\nv250\r\n";
+const LSET_MIDDLE_SAME_VALUE_REPLY: &[u8] = b"+OK\r\n";
 const LINDEX_MIDDLE_LLEN: &[u8] = b"*2\r\n$4\r\nLLEN\r\n$1\r\nl\r\n";
 const LINDEX_MIDDLE_LLEN_REPLY: &[u8] = b":500\r\n";
 const LINDEX_MIDDLE_ENCODING: &[u8] = b"*3\r\n$6\r\nOBJECT\r\n$8\r\nENCODING\r\n$1\r\nl\r\n";
@@ -222,6 +224,7 @@ enum Workload {
     ZremrangebyscoreInverted,
     LrangeInverted,
     LindexMiddle,
+    LsetMiddleSameValue,
     HdelMissingField,
     HgetMissingField,
     HexistsMissingField,
@@ -275,6 +278,7 @@ impl Workload {
             Self::ZremrangebyscoreInverted => "zremrangebyscore-inverted",
             Self::LrangeInverted => "lrange-inverted",
             Self::LindexMiddle => "lindex-middle",
+            Self::LsetMiddleSameValue => "lset-middle-same-value",
             Self::HdelMissingField => "hdel-missing-field",
             Self::HgetMissingField => "hget-missing-field",
             Self::HexistsMissingField => "hexists-missing-field",
@@ -452,6 +456,16 @@ impl Workload {
                 "fr_store::packed_set::ChunkedList::locate",
                 "fr_store::packed_set::ListChunk::get",
             ],
+            Self::LsetMiddleSameValue => &[
+                "frankenredis::process_buffered_frames",
+                "__memcmp_avx2_movbe",
+                "parse_borrowed_plain_lset_packet",
+                "fr_runtime::Runtime::execute_plain_lset_borrowed",
+                "fr_store::Store::lset",
+                "fr_store::packed_set::ListValue::set",
+                "fr_store::packed_set::ChunkedList::set",
+                "fr_store::packed_set::ListChunk::set",
+            ],
             Self::HdelMissingField => &[
                 "frankenredis::process_buffered_frames",
                 "__memcmp_avx2_movbe",
@@ -555,6 +569,7 @@ impl Workload {
                 "zremrangebyscore-inverted" => Self::ZremrangebyscoreInverted,
                 "lrange-inverted" => Self::LrangeInverted,
                 "lindex-middle" => Self::LindexMiddle,
+                "lset-middle-same-value" => Self::LsetMiddleSameValue,
                 "hdel-missing-field" => Self::HdelMissingField,
                 "hget-missing-field" => Self::HgetMissingField,
                 "hexists-missing-field" => Self::HexistsMissingField,
@@ -801,6 +816,20 @@ impl WorkloadPackets {
             }
             Workload::LindexMiddle => {
                 let case = repeated_case(LINDEX_MIDDLE, LINDEX_MIDDLE_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::LsetMiddleSameValue => {
+                let case = repeated_case(
+                    LSET_MIDDLE_SAME_VALUE,
+                    LSET_MIDDLE_SAME_VALUE_REPLY,
+                    pipeline,
+                );
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -1432,7 +1461,10 @@ fn prefill(servers: &mut [Server; 4], workload: Workload) {
                 LRANGE_INVERTED_PREFILL,
                 LRANGE_INVERTED_PREFILL_REPLY,
             );
-        } else if matches!(workload, Workload::LindexMiddle) {
+        } else if matches!(
+            workload,
+            Workload::LindexMiddle | Workload::LsetMiddleSameValue
+        ) {
             let case = lindex_middle_prefill();
             exchange_one(server, &case.request, &case.response);
             exchange_one(server, LINDEX_MIDDLE_LLEN, LINDEX_MIDDLE_LLEN_REPLY);

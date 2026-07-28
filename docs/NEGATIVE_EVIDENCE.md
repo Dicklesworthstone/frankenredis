@@ -33,6 +33,74 @@ Redis arm and numeric ratio; a SELF-SPEEDUP needs the heading label and cannot
 mark itself as campaign output. Missing or contradictory classification exits
 **8**.
 
+## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — state-stable middle-index `LSET` on a pristine 500-element list is 1.7166x live Redis at saturated P16 (`frankenredis-0l1ap`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes.** This is current io_uring
+  FrankenRedis/Redis throughput against the actual vendored Redis 7.2.4 server
+  running as a live arm beside both A/A controls in the same invocation.
+  Production source was not changed; the authenticated harness gained this
+  command shape. The accompanying io_uring/mio ratio is a labeled
+  **SELF-SPEEDUP** maintenance result, not campaign output.
+- **Ledger admission and structural fixture.** Exact preflights for
+  `LSET l 250 v250`, `middle-index LSET`, `same-value LSET`, and
+  `500-element LSET` were clear, then all broader LSET rows were read and
+  adjudicated. The tiny-list allkeys-LFU probe-collapse reject is a distinct
+  internal self-speedup with its own null band; the arena-tail experiments
+  change list representation; and the old 200-element socket reconnaissance
+  has no same-invocation A/A, executing-ELF identity, named-frame profile, or
+  exact current fixture contract, so its 1.49x middle-index ratio is
+  unsupported routing evidence rather than a current verdict. The idempotent
+  fixture resets `l`, inserts exactly 500 four-byte elements `v000` through
+  `v499`, asserts `LLEN l == 500` in every arm, and asserts Redis
+  `OBJECT ENCODING l == listpack` with `list-max-listpack-size == -2` and a
+  derived 3,007-byte payload. The repeated command is exactly
+  `LSET l 250 v250`: replacing the middle element with identical bytes keeps
+  state and representation stable while exercising the write traversal. Every
+  reply is byte-checked as RESP2 `+OK`.
+- **Same executable, named profile, and fixed work.** Fully reserved
+  `vmi1227854` (Linux 6.17.0-35-generic) ran 48 samples x 200,000
+  replies/arm at P16, 50 persistent clients in eight pinned shards, one
+  dedicated server core, 125-group within-sample interleaving, and two
+  complete 24-order cycles. The executing harness self-reported ELF SHA-256
+  **`b0d021f3080194c85f378f376c39aeb21da2b1eed2ca000f55ba8344bf47a2d2`**;
+  all three executing FrankenRedis arms self-reported ELF SHA-256
+  **`5f5aca369d05dc2d27443b1f58d02f35c1b1615b8863806f698d83e36431d692`**;
+  Redis self-reported ELF SHA-256
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+  Candidate/Redis median utilization was 98.802%/98.645%. A zero-lost profile
+  attributed **20.54% self-time** to the named LSET surface
+  (`process_buffered_frames` 19.21%, exact LSET parser 1.33%), for an
+  elimination ceiling of **1.258495x**. The async-CQ surface was 0.07% and
+  owned io_uring self-time was 0.04%.
+- **Bootstrap median-CI competitive verdict.** Wall A/A null median was
+  **0.993264676x**, bootstrap 95% median CI
+  **[0.976114425, 1.011340064]**, inside gate
+  **[0.952228850, 1.047771150]**. FrankenRedis/Redis throughput was
+  **1.716599440x**, CI **[1.668790234, 1.782876928]**: COMPETITIVE KEEP. CPU
+  A/A null median was **0.998331874x**, CI
+  **[0.976233231, 1.014216157]**, inside gate
+  **[0.952466462, 1.047533538]**; CPU FrankenRedis/Redis throughput was
+  **1.713174758x**, CI **[1.667838876, 1.777505896]**. The ancillary
+  io_uring/mio SELF-SPEEDUP maintenance result was KEEP at
+  **1.063284853x**, CI **[1.050249826, 1.081291294]**; CPU was
+  **1.069048329x**, CI **[1.050843768, 1.081214568]**. Bootstrap median-CI
+  decided every verdict, never CV; CV is provenance only (wall null
+  8.717446%, self 4.786501%, competitive 7.269154%; CPU null 8.580853%, self
+  4.681690%, competitive 7.282220%).
+- **Discard boundary and retry predicate.** One setup-only launch omitted the
+  required `io-uring-writes` feature and stopped at candidate-server startup
+  before any timed sample; it contributes no number. In the valid invocation,
+  quiet-core attempt one was rejected before server spawn and attempt two
+  passed, so no partial measurement was mixed into the result. Reopen after
+  Redis list encoding or `list-max-listpack-size`, the 500-element/value/index
+  fixture, FrankenRedis list representation or middle-index replacement,
+  LSET parser/runtime/store/reply handling, Redis version, allocator, kernel,
+  harness, or release-codegen changes, or if a fresh valid live-incumbent CI
+  overlaps 1.0. Any retry must retain the state-stable same-value replacement,
+  LLEN/listpack/config assertions, exact `+OK`, live Redis arm, ELF
+  self-reports, same-invocation A/A, complete order cycles, zero-lost
+  nonzero-self profile, byte checking, and >=90% server utilization.
+
 ## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — two-field `HMGET` on a pristine 500-field hash is 3.2363x live Redis at saturated P16 (`frankenredis-8ey1v`)
 
 - **Claim class: COMPETITIVE. Campaign output: yes.** This is current io_uring
