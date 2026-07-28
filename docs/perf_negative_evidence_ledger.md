@@ -28,6 +28,51 @@ Every new KEEP declares exactly one class:
 modified entries in both ledger files. It also preserves the ELF self-report,
 A/A bootstrap median-CI, never-CV, counted-mechanism, and retry-predicate gates.
 
+## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — current exact pristine `UNWATCH` is 1.2246x live Redis at saturated P16; no production lever (`frankenredis-ohsk5.73`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes.** This is current
+  FrankenRedis/Redis throughput against the actual vendored Redis 7.2.4 server
+  running live beside both A/A controls in the same invocation. mio/io_uring
+  is SELF-SPEEDUP maintenance only and held.
+- **Resurrection and method.** All six ledger matches were read. Snapshot
+  activity and transaction-parity rows are distinct. The old 0.583x Redis-time
+  borrowed-path result and earlier 6.67x loss lacked A/A, a counted mechanism,
+  and executing ELF identity, so their competitive conclusions are
+  **VOID-NONULL**; their required first-token substrate now exists. Production
+  remained unchanged. One strict-remote invocation on fully reserved
+  `vmi1227854` ran 32 x 200,000 byte-checked pristine `UNWATCH` replies/arm,
+  50 clients in nine pinned shards, a dedicated server core, 125-group
+  within-sample interleaving, and all 24 orders. The harness self-reported
+  executing ELF SHA-256
+  **`489eadd8cdaa3821532b1e5c92655b1a372c67259898b3e90320c36cc7d7d1c3`**.
+  Every FrankenRedis process self-reported identical ELF SHA-256
+  **`a7bbb665f81f149f117d7752ffa1616a36505e93239c47727f1577ef2dea4dc7`**,
+  and Redis self-reported
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+- **Profile and decision.** The zero-lost profile named **5.71% self-time**
+  (`process_buffered_frames` 3.89%, exact executor 1.82%), Amdahl ceiling
+  **1.060558x**. The async surface was 0.91%, owned submit/drain 0.40%.
+  io_uring/Redis utilization was 96.788%/97.221%. Wall A/A null median
+  **0.993971247x**, bootstrap 95% median CI
+  **[0.952222887, 1.033817392]**, set gate
+  **[0.904445775, 1.095554225]**. mio/io_uring was **1.081030845x**, CI
+  **[1.020399067, 1.097695571]**, a maintenance HOLD. FrankenRedis/Redis
+  throughput was **1.224605500x**, CI
+  **[1.169954039, 1.267445828]**: **COMPETITIVE KEEP**. CPU A/A was
+  **0.993912244x**, CI **[0.966526250, 1.042737728]**; mio/io_uring CPU was
+  **1.066571652x**, CI **[1.002348691, 1.089855401]**, a HOLD; competitive CPU
+  efficiency was **1.251539251x**, CI **[1.162085281, 1.276949659]**.
+- **Disposition and retry predicate.** Async CQ batching already closed this
+  gap; a command floor is at most 5.71% maintenance, so none was added.
+  Bootstrap median-CI versus twice the same-invocation A/A CI radius decided
+  the result; CV is provenance only (wall null 15.498145%, maintenance
+  11.243411%, competitive 10.682027%) and never a gate. **Retry predicate:**
+  Re-run after exact parser/executor, transaction gate/state, first-token
+  dispatch, io_uring, client sharding/interleave/pinning/preflight, Redis,
+  allocator, kernel, or release-codegen changes. Invalidate below 90%
+  utilization or if named self-time is zero/lost, exact replies or live ELF
+  identities differ, or A/A validity fails.
+
 ## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — exact `ECHO` payload reflection is 1.2809x live Redis at saturated P16 (`frankenredis-ohsk5.72`)
 
 - **Claim class: COMPETITIVE. Campaign output: yes.** This is

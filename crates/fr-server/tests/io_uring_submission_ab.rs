@@ -79,6 +79,8 @@ const DBSIZE: &[u8] = b"*1\r\n$6\r\nDBSIZE\r\n";
 const DBSIZE_REPLY: &[u8] = b":1\r\n";
 const ECHO: &[u8] = b"*2\r\n$4\r\nECHO\r\n$1\r\nx\r\n";
 const ECHO_REPLY: &[u8] = b"$1\r\nx\r\n";
+const UNWATCH: &[u8] = b"*1\r\n$7\r\nUNWATCH\r\n";
+const UNWATCH_REPLY: &[u8] = b"+OK\r\n";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Arm {
@@ -121,6 +123,7 @@ enum Workload {
     ObjectRefcount,
     Dbsize,
     Echo,
+    Unwatch,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -146,6 +149,7 @@ impl Workload {
             Self::ObjectRefcount => "object-refcount",
             Self::Dbsize => "dbsize",
             Self::Echo => "echo",
+            Self::Unwatch => "unwatch",
         }
     }
 
@@ -190,6 +194,11 @@ impl Workload {
                 "execute_plain_echo_borrowed_into",
                 "parse_borrowed_plain_echo_packet",
             ],
+            Self::Unwatch => &[
+                "frankenredis::process_buffered_frames",
+                "execute_plain_unwatch_borrowed_into",
+                "parse_borrowed_plain_unwatch_packet",
+            ],
             Self::Set | Self::Get | Self::Mixed => &[],
         }
     }
@@ -210,6 +219,7 @@ impl Workload {
                 "object-refcount" => Self::ObjectRefcount,
                 "dbsize" => Self::Dbsize,
                 "echo" => Self::Echo,
+                "unwatch" => Self::Unwatch,
                 other => panic!("unknown FR_URING_AB_WORKLOADS item: {other}"),
             })
             .collect()
@@ -306,6 +316,16 @@ impl WorkloadPackets {
             }
             Workload::Echo => {
                 let case = repeated_case(ECHO, ECHO_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::Unwatch => {
+                let case = repeated_case(UNWATCH, UNWATCH_REPLY, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),

@@ -33,6 +33,64 @@ Redis arm and numeric ratio; a SELF-SPEEDUP needs the heading label and cannot
 mark itself as campaign output. Missing or contradictory classification exits
 **8**.
 
+## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — current exact pristine `UNWATCH` is 1.2246x live Redis at saturated P16; no production lever (`frankenredis-ohsk5.73`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes.** The qualifying result is
+  FrankenRedis/Redis throughput against the actual vendored Redis 7.2.4 server
+  running live beside both A/A controls in the same invocation. The
+  same-ELF mio/io_uring comparison is SELF-SPEEDUP maintenance only and held.
+- **Ledger resurrection.** Preflight found six UNWATCH rows and every one was
+  hand-adjudicated before the workload was added. The transaction-snapshot
+  activity rows and 16-sequence transaction-parity row are different surfaces.
+  The 2026-06-28 WATCH/UNWATCH borrowed-path row reported 0.583x Redis time, and
+  the broad transaction sweep reported a 6.67x loss before that path. Neither
+  carried a same-invocation A/A null, a counted mechanism, or executing ELF
+  identity, so their competitive conclusions are **VOID-NONULL**. Their
+  structural first-token/name-hash reopening requirement is now satisfied.
+- **Exact current-state design.** Production was not edited. The workload
+  repeatedly sends canonical `*1 $7 UNWATCH` on persistent pristine clients
+  and byte-checks every `+OK\r\n` reply. One strict-remote invocation on fully
+  reserved `vmi1227854` ran two byte-identical mio controls, the current
+  io_uring server, and live Redis through all 24 arm orders with within-sample
+  interleaving: 32 samples x 200,000 replies/arm, 50 clients in nine pinned
+  shards, a dedicated server core, and 125 interleave groups. The harness
+  self-reported ELF SHA-256
+  **`489eadd8cdaa3821532b1e5c92655b1a372c67259898b3e90320c36cc7d7d1c3`**;
+  all FrankenRedis processes self-reported identical ELF SHA-256
+  **`a7bbb665f81f149f117d7752ffa1616a36505e93239c47727f1577ef2dea4dc7`**,
+  and Redis self-reported
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+- **Right-path proof and decision.** The zero-lost profile found **5.71%
+  self-time** in the named command surface:
+  `process_buffered_frames` 3.89% and
+  `Runtime::execute_plain_unwatch_borrowed_into` 1.82%, for an Amdahl
+  elimination ceiling of **1.060558x**. The complete async-output surface was
+  0.91% self-time, with 0.40% in owned submit/drain. io_uring/Redis median
+  utilization was **96.788%/97.221%**. Wall A/A null median was
+  **0.993971247x**, bootstrap 95% median CI
+  **[0.952222887, 1.033817392]**, giving gate
+  **[0.904445775, 1.095554225]**. mio/io_uring was **1.081030845x**, CI
+  **[1.020399067, 1.097695571]**: maintenance HOLD. FrankenRedis/Redis
+  throughput was **1.224605500x**, bootstrap 95% median CI
+  **[1.169954039, 1.267445828]**: **COMPETITIVE KEEP**. CPU A/A was
+  **0.993912244x**, CI **[0.966526250, 1.042737728]**, with gate
+  **[0.914524544, 1.085475456]**; mio/io_uring CPU was **1.066571652x**, CI
+  **[1.002348691, 1.089855401]**, a HOLD; competitive CPU efficiency was
+  **1.251539251x**, CI **[1.162085281, 1.276949659]**.
+- **Disposition and gate.** Async CQ batching has already closed the old
+  UNWATCH competitive gap. A first-token floor could remove at most the current
+  5.71% named surface and would be maintenance, so no production change was
+  made. Bootstrap median-CI against twice the same-invocation A/A CI radius
+  decided every verdict. CV is provenance only (wall null 15.498145%,
+  maintenance 11.243411%, competitive 10.682027%) and never a gate.
+  **Retry predicate:** Re-run after changes to the UNWATCH exact parser or
+  executor, transaction read gate or watched-state semantics, first-token
+  dispatch, io_uring output, client sharding/interleave/pinning or quiet-core
+  selection, Redis incumbent, allocator, kernel, or release codegen. Invalidate
+  rather than compare if either server is below 90% median utilization, the
+  named surface has zero self-time or lost samples, any exact reply differs,
+  live ELF hashes differ, or the A/A validity bound fails.
+
 ## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — exact `ECHO` payload reflection is 1.2809x live Redis at saturated P16 (`frankenredis-ohsk5.72`)
 
 - **Claim class: COMPETITIVE. Campaign output: yes.** The qualifying result is
