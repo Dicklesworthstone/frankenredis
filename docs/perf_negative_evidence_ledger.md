@@ -28,6 +28,75 @@ Every new KEEP declares exactly one class:
 modified entries in both ledger files. It also preserves the ELF self-report,
 A/A bootstrap median-CI, never-CV, counted-mechanism, and retry-predicate gates.
 
+## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — existing-field `HSETNX` on a pristine 500-field hash is 2.3353x live Redis at saturated P16 (`frankenredis-2x1ld`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes.** The numeric result is
+  current io_uring FrankenRedis/Redis throughput against the actual vendored
+  Redis 7.2.4 server live beside both A/A controls in one invocation.
+  Production source remains untouched: this authenticates a command shape the
+  current hash representation already wins. The io_uring/mio SELF-SPEEDUP
+  comparison is maintenance only and remained HOLD.
+- **Admission and representation boundary.** Exact preflight searches for
+  `HSETNX h f250 v`, `500-field HSETNX`, `existing-field HSETNX`, and
+  `hash-listpack HSETNX` were clear, then all broader HSETNX rows were manually
+  adjudicated. The prior allkeys-LFU probe collapse, borrowed parser and
+  dispatch work, expiry guard, get-mut-first acquisition, and
+  incremental-digest rows are distinct **VALID-MECHANISM** levers. The old
+  live small-hash ratios near 0.81x and 0.866x have no A/A null or counted
+  mechanism and are **VOID-NONULL** for this representation wedge. The fixture
+  resets `h`, inserts exactly 500 four-byte fields `f000` through `f499` with
+  one-byte values, asserts `HLEN h == 500` in every arm, and asserts `OBJECT
+  ENCODING h == listpack` in Redis. Redis scans its compact representation for
+  `f250`; FrankenRedis has promoted above 128 fields to its open-addressed
+  `CompactFieldMap`. The repeated packet is exactly `HSETNX h f250 v`. Because
+  `f250` already exists, it is repeatable without mutation and every reply is
+  byte-checked as RESP2 `:0`.
+- **One formatted-source invocation.** Fully reserved `vmi1227854`, Linux
+  6.17.0-35-generic, ran 48 x 200,000 byte-checked replies/arm at P16, 50
+  clients in eight pinned shards, one dedicated server core, 125-group
+  interleaving, and two complete 24-order cycles. Eight shards left the
+  contaminated physical core unused; the measured saturation guard remained
+  authoritative. The harness self-reported ELF SHA-256
+  **`a44736dde4b49913f7d5a855f78d83c77b7d3215862950115a4d6b7685d0f3f9`**;
+  every FrankenRedis server self-reported ELF SHA-256
+  **`84feb2f428bf860575832e33c458ce765268478aa72c92fefbf3698d2221d43f`**;
+  Redis self-reported ELF SHA-256
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+  Candidate/Redis median utilization was 98.822%/98.784%. Zero lost samples
+  attributed **21.49% self-time** to the named HSETNX command surface
+  (`process_buffered_frames` 19.28%, exact parser 1.43%, borrowed executor
+  0.78%), an Amdahl elimination ceiling of **1.273723x**. Async CQ work was
+  0.51%, including 0.30% owned self-time.
+- **Null gate and competitive verdict.** Wall A/A null median was
+  **0.990197554x**, bootstrap 95% median CI
+  **[0.970883557, 1.002313696]**, inside gate
+  **[0.941767114, 1.058232886]**. io_uring FrankenRedis/Redis throughput was
+  **2.335339027x**, CI **[2.286986455, 2.378155881]**: COMPETITIVE KEEP. CPU
+  A/A was **0.990161668x**, CI **[0.973107732, 1.004859242]**, inside gate
+  **[0.946215465, 1.053784535]**; CPU FrankenRedis/Redis throughput was
+  **2.337166050x**, CI **[2.293351123, 2.382749466]**. The ancillary
+  io_uring/mio SELF-SPEEDUP was HOLD at 1.070350452x, CI
+  [1.041352993, 1.089913715]; CPU was likewise HOLD at 1.066329455x, CI
+  [1.038750663, 1.089528265]. Bootstrap median-CI decided every verdict, never
+  CV; CV is provenance only (wall null 5.714077%, self 6.727177%,
+  competitive 7.159576%; CPU null 5.747313%, self 6.556309%, competitive
+  7.115730%).
+- **Discarded invocations and retry predicate.** The first strict-remote
+  nine-shard invocation on `vmi1153651` was discarded wholesale because its
+  wall A/A median was 1.020584828x, outside the fixed 2% positional-null
+  tolerance; no candidate number from it informed this result. Two later
+  attempts there and one nine-shard attempt on `vmi1227854` stopped before
+  servers or timing because a contaminated core prevented reserving nine quiet
+  client cores plus a disjoint server core. Reopen after Redis hash encoding
+  thresholds, fixture field count/length/target position, FrankenRedis's
+  128-field promotion or `CompactFieldMap`, HSETNX parser/runtime/store
+  semantics, Redis version, allocator, kernel, harness, or release-codegen
+  changes, or if a new valid incumbent CI overlaps 1.0. Retain the pristine
+  500-field fixture, existing `f250`, explicit Redis listpack assertion, exact
+  `:0` reply, live incumbent, ELF self-reports, same-invocation A/A, complete
+  order cycles, zero-lost nonzero-self profile, byte checking, and >=90%
+  utilization.
+
 ## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — middle `LINDEX` on a 500-element compact list is 2.2426x live Redis at saturated P16 (`frankenredis-3smt2`)
 
 - **Claim class: COMPETITIVE. Campaign output: yes.** The numeric result is

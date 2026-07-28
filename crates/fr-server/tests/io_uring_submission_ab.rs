@@ -104,6 +104,8 @@ const HGET_MISSING_FIELD: &[u8] = b"*3\r\n$4\r\nHGET\r\n$1\r\nh\r\n$6\r\nabsent\
 const HGET_MISSING_FIELD_REPLY: &[u8] = b"$-1\r\n";
 const HEXISTS_MISSING_FIELD: &[u8] = b"*3\r\n$7\r\nHEXISTS\r\n$1\r\nh\r\n$6\r\nabsent\r\n";
 const HEXISTS_MISSING_FIELD_REPLY: &[u8] = b":0\r\n";
+const HSETNX_EXISTING_FIELD: &[u8] = b"*4\r\n$6\r\nHSETNX\r\n$1\r\nh\r\n$4\r\nf250\r\n$1\r\nv\r\n";
+const HSETNX_EXISTING_FIELD_REPLY: &[u8] = b":0\r\n";
 const MISSING_FIELD_HASH_HLEN: &[u8] = b"*2\r\n$4\r\nHLEN\r\n$1\r\nh\r\n";
 const MISSING_FIELD_HASH_HLEN_REPLY: &[u8] = b":500\r\n";
 const MISSING_FIELD_HASH_ENCODING: &[u8] = b"*3\r\n$6\r\nOBJECT\r\n$8\r\nENCODING\r\n$1\r\nh\r\n";
@@ -218,6 +220,7 @@ enum Workload {
     HdelMissingField,
     HgetMissingField,
     HexistsMissingField,
+    HsetnxExistingField,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -268,6 +271,7 @@ impl Workload {
             Self::HdelMissingField => "hdel-missing-field",
             Self::HgetMissingField => "hget-missing-field",
             Self::HexistsMissingField => "hexists-missing-field",
+            Self::HsetnxExistingField => "hsetnx-existing-field",
         }
     }
 
@@ -473,6 +477,18 @@ impl Workload {
                 "fr_store::packed_set::CompactFieldMap::lookup_slot",
                 "fr_store::packed_set::CompactFieldMap::lookup_slot_prehashed",
             ],
+            Self::HsetnxExistingField => &[
+                "frankenredis::process_buffered_frames",
+                "__memcmp_avx2_movbe",
+                "parse_borrowed_plain_hsetnx_packet",
+                "execute_plain_hsetnx_borrowed",
+                "fr_store::Store::hsetnx",
+                "fr_store::Store::hsetnx_impl",
+                "fr_store::packed_set::HashFieldMap::contains_key",
+                "fr_store::packed_set::CompactFieldMap::contains_key",
+                "fr_store::packed_set::CompactFieldMap::lookup_slot",
+                "fr_store::packed_set::CompactFieldMap::lookup_slot_prehashed",
+            ],
             Self::Set | Self::Get | Self::Mixed => &[],
         }
     }
@@ -510,6 +526,7 @@ impl Workload {
                 "hdel-missing-field" => Self::HdelMissingField,
                 "hget-missing-field" => Self::HgetMissingField,
                 "hexists-missing-field" => Self::HexistsMissingField,
+                "hsetnx-existing-field" => Self::HsetnxExistingField,
                 other => panic!("unknown FR_URING_AB_WORKLOADS item: {other}"),
             })
             .collect()
@@ -781,6 +798,17 @@ impl WorkloadPackets {
             Workload::HexistsMissingField => {
                 let case =
                     repeated_case(HEXISTS_MISSING_FIELD, HEXISTS_MISSING_FIELD_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::HsetnxExistingField => {
+                let case =
+                    repeated_case(HSETNX_EXISTING_FIELD, HSETNX_EXISTING_FIELD_REPLY, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -1367,7 +1395,10 @@ derived_listpack_bytes=3007",
             }
         } else if matches!(
             workload,
-            Workload::HdelMissingField | Workload::HgetMissingField | Workload::HexistsMissingField
+            Workload::HdelMissingField
+                | Workload::HgetMissingField
+                | Workload::HexistsMissingField
+                | Workload::HsetnxExistingField
         ) {
             let case = missing_field_hash_prefill();
             exchange_one(server, &case.request, &case.response);
