@@ -12381,6 +12381,7 @@ enum BorrowedMultibulkAction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BorrowedDispatchFloorClass {
     BitfieldGet(PlainBitfieldGetCmd),
+    BitfieldRoTwoGet,
     BitfieldSet,
     Exists(usize),
     Getex,
@@ -12797,6 +12798,9 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (5, BorrowedDispatchFloorCommand::BitfieldRo) => Some(
             BorrowedDispatchFloorClass::BitfieldGet(PlainBitfieldGetCmd::BitfieldRo),
         ),
+        (8, BorrowedDispatchFloorCommand::BitfieldRo) if bitfield_ro_two_get_floor_enabled() => {
+            Some(BorrowedDispatchFloorClass::BitfieldRoTwoGet)
+        }
         (array_len, BorrowedDispatchFloorCommand::Exists)
             if (2..=KEYS_MULTI_MAX + 1).contains(&array_len) =>
         {
@@ -12934,6 +12938,27 @@ fn bitpos_range_floor_enabled() -> bool {
 #[cfg(not(feature = "perf-ab-bitpos-range-floor"))]
 #[inline(always)]
 const fn bitpos_range_floor_enabled() -> bool {
+    true
+}
+
+/// Preserve the exact pre-lever arity-8 BITFIELD_RO classification in the
+/// measurement ELF. Both controls select the generic borrowed cascade before
+/// their first packet; production builds compile only the packed-floor route.
+#[cfg(feature = "perf-ab-bitfield-ro-two-get-floor")]
+#[inline]
+fn bitfield_ro_two_get_floor_enabled() -> bool {
+    static ORIG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    !*ORIG.get_or_init(
+        || match std::env::var("FR_PERF_AB_BITFIELD_RO_TWO_GET_FLOOR_ORIG") {
+            Ok(value) => value == "1",
+            Err(_) => false,
+        },
+    )
+}
+
+#[cfg(not(feature = "perf-ab-bitfield-ro-two-get-floor"))]
+#[inline(always)]
+const fn bitfield_ro_two_get_floor_enabled() -> bool {
     true
 }
 
@@ -13491,6 +13516,35 @@ fn try_dispatch_floor_classified_action(
                     packet.get_arg,
                     packet.enc_arg,
                     packet.offset_arg,
+                    ts,
+                )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::BitfieldRoTwoGet => {
+            if let Some(packet) =
+                parse_borrowed_plain_bitfield_ro_two_get_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_bitfield_ro_two_get_borrowed(
+                    packet.key,
+                    packet.get1,
+                    packet.enc1,
+                    packet.offset1,
+                    packet.get2,
+                    packet.enc2,
+                    packet.offset2,
                     ts,
                 )
             {
@@ -15922,6 +15976,55 @@ fn parse_borrowed_plain_bitfield_get_packet<'a>(
         get_arg,
         enc_arg,
         offset_arg,
+    })
+}
+
+struct BorrowedPlainBitfieldRoTwoGetPacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+    get1: &'a [u8],
+    enc1: &'a [u8],
+    offset1: &'a [u8],
+    get2: &'a [u8],
+    enc2: &'a [u8],
+    offset2: &'a [u8],
+}
+
+/// Exact packed-floor parser for
+/// `BITFIELD_RO key GET <enc1> <offset1> GET <enc2> <offset2>`.
+/// Validation of the two GET operations remains in the runtime executor; any
+/// malformed subcommand, encoding, or offset returns None there and falls
+/// through to the generic handler so Redis-compatible diagnostics are retained.
+fn parse_borrowed_plain_bitfield_ro_two_get_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainBitfieldRoTwoGetPacket<'a>> {
+    if config.max_array_len < 8 || config.max_bulk_len < b"BITFIELD_RO".len() {
+        return None;
+    }
+    let rest = input.strip_prefix(b"*8\r\n$11\r\n")?;
+    let command = rest.get(..11)?;
+    if !command.eq_ignore_ascii_case(b"BITFIELD_RO") || rest.get(11..13)? != b"\r\n" {
+        return None;
+    }
+    let mut cursor = input.len() - rest.len() + 13;
+    let (key, next1) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    cursor = next1;
+    let (get1, next2) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (enc1, next3) = parse_borrowed_plain_set_bulk(input, next2, config.max_bulk_len)?;
+    let (offset1, next4) = parse_borrowed_plain_set_bulk(input, next3, config.max_bulk_len)?;
+    let (get2, next5) = parse_borrowed_plain_set_bulk(input, next4, config.max_bulk_len)?;
+    let (enc2, next6) = parse_borrowed_plain_set_bulk(input, next5, config.max_bulk_len)?;
+    let (offset2, consumed) = parse_borrowed_plain_set_bulk(input, next6, config.max_bulk_len)?;
+    Some(BorrowedPlainBitfieldRoTwoGetPacket {
+        consumed,
+        key,
+        get1,
+        enc1,
+        offset1,
+        get2,
+        enc2,
+        offset2,
     })
 }
 
@@ -29567,6 +29670,43 @@ mod tests {
     }
 
     #[test]
+    fn borrowed_plain_bitfield_ro_two_get_packet_parser_accepts_exact_shape() {
+        let input = b"*8\r\n$11\r\nBiTfIeLd_Ro\r\n$2\r\nbf\r\n$3\r\nGET\r\n$2\r\nu8\r\n\
+$1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
+        let parsed =
+            crate::parse_borrowed_plain_bitfield_ro_two_get_packet(input, &ParserConfig::default())
+                .expect("canonical two-GET BITFIELD_RO packet should parse");
+        assert_eq!(parsed.consumed, input.len());
+        assert_eq!(parsed.key, b"bf");
+        assert_eq!(parsed.get1, b"GET");
+        assert_eq!(parsed.enc1, b"u8");
+        assert_eq!(parsed.offset1, b"0");
+        assert_eq!(parsed.get2, b"get");
+        assert_eq!(parsed.enc2, b"i16");
+        assert_eq!(parsed.offset2, b"#1");
+
+        assert!(
+            crate::parse_borrowed_plain_bitfield_ro_two_get_packet(
+                input,
+                &ParserConfig {
+                    max_array_len: 7,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_bitfield_ro_two_get_packet(
+                b"*08\r\n$11\r\nBITFIELD_RO\r\n",
+                &ParserConfig::default(),
+            )
+            .is_none(),
+            "noncanonical multibulk lengths stay on the generic parser"
+        );
+    }
+
+    #[test]
     fn borrowed_plain_bitfield_set_packet_parser_accepts_canonical_write() {
         let input =
             b"*6\r\n$8\r\nBITFIELD\r\n$2\r\nbf\r\n$3\r\nSET\r\n$2\r\nu8\r\n$1\r\n0\r\n$1\r\n1\r\n";
@@ -31914,6 +32054,14 @@ mod tests {
             Some(super::BorrowedDispatchFloorClass::BitfieldGet(
                 PlainBitfieldGetCmd::BitfieldRo
             ))
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*8\r\n$11\r\nBiTfIeLd_Ro\r\n$2\r\nbf\r\n$3\r\nGET\r\n$2\r\nu8\r\n\
+$1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::BitfieldRoTwoGet)
         );
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(

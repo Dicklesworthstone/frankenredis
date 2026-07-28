@@ -33,6 +33,111 @@ Redis arm and numeric ratio; a SELF-SPEEDUP needs the heading label and cannot
 mark itself as campaign output. Missing or contradictory classification exits
 **8**.
 
+## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — exact two-GET `BITFIELD_RO` packed floor is 1.4058x live Redis at saturated P16 (`frankenredis-ohsk5.68`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes.** The qualifying number is
+  FrankenRedis/Redis throughput against the actual vendored Redis 7.2.4 server
+  running as a live side-by-side arm in the same invocation. The frozen generic
+  route/candidate ratio is SELF-SPEEDUP maintenance evidence only.
+- **Ledger-first resurrection and right-path proof.** Both ledgers and
+  `perf_candidate_preflight.py` were searched before editing. The preflight
+  found the 2026-07-02 multi-GET BITFIELD resolve-once row and the later
+  single-op BITFIELD/BITFIELD_RO packed floors. Hand adjudication showed that
+  none covered exact arity-8 `BITFIELD_RO`: the multi-GET row retained
+  **24.9%** in `process_buffered_frames` and required structural first-token
+  dispatch, while the packed-floor row explicitly left multi-op forms generic.
+  That dispatch substrate has since landed, satisfying the structural
+  reopening condition. A literal-current saturated screen then attributed
+  **21.63%
+  self-time** to the named command/dispatch surface with zero lost samples:
+  `process_buffered_frames` 17.60%, `bitfield_ro_cmd` 1.63%, borrowed argv parse
+  1.34%, and scratch copy 1.06%. Its named-subset Amdahl elimination ceiling
+  was **1.275998x**. The ceiling excludes earlier cascade work skipped by the
+  candidate and is therefore reachability evidence, not a bound on the whole
+  dispatch lever.
+- **Pre-lever competitive state.** The admissible unchanged-binary run on
+  `vmi1227854` used 32 samples x 200,000 exact replies/arm. Candidate/Redis
+  server utilization was 98.639%/97.331%. Wall A/A median was
+  **0.998226508x**, bootstrap 95% median CI
+  **[0.988002707, 1.015016000]**, giving gate
+  **[0.969968001, 1.030031999]**. The current io_uring server reached only
+  **0.312627410x** Redis throughput, CI
+  **[0.301055546, 0.314091963]**. The executing harness SHA-256 was
+  **`88613071e2546da8ff8da5d008709a6a1d9589bce3ec40447c7caf67d22c8e23`**;
+  all FrankenRedis arms were
+  **`108c7f946d746b457d88922c765bb2a25d1605b583ec1894785101d631e83930`**,
+  and Redis was
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+- **One exact lever and behavior preservation.** The classifier now floors only
+  canonical arity-8
+  `BITFIELD_RO key GET enc1 offset1 GET enc2 offset2`. The packed parser borrows
+  all seven arguments; the runtime validates both GET operations, encodings,
+  and offsets before key access, applies the unchanged conservative read gate,
+  type-checks before accounting, records the one Redis-compatible keyspace
+  lookup, and resolves both reads through `bitfield_get_batch`. Any alternate,
+  malformed, write, overflow, policy-refused, or stateful form returns to the
+  unchanged generic handler and its exact diagnostics. Differential tests match
+  replies plus command, hit/miss, error, command-name, and argv-length
+  accounting for present string, missing key, and WRONGTYPE states; invalid
+  write/encoding forms prove generic fallback. The feature-enabled full
+  `fr-server` suite passed 294 tests (12 library, 224 binary, 58 integration)
+  with the remaining performance tests intentionally ignored. Strict-remote
+  workspace check, default and feature-enabled workspace Clippy with
+  `-D warnings`, and the full `fr-conformance` suite (194 library plus 99
+  smoke/integration tests and all auxiliary targets) passed. Direct
+  pinned-nightly `rustfmt --check`, `git diff --check`, and the 40-case ledger
+  preflight self-check passed.
+- **One-ELF causal design and fixed work.** The measurement feature freezes the
+  exact pre-lever arity-8 classification in the same executable. Both A/A
+  controls ran io_uring with
+  `FR_PERF_AB_BITFIELD_RO_TWO_GET_FLOOR_ORIG=1`; the candidate ran io_uring
+  without it. The harness verified all three command lines and live
+  `/proc/PID/environ` values. One fail-closed strict-remote invocation on
+  `vmi1227854` (Linux 6.17.0-35) ran 32 paired samples x 200,000 exactly checked
+  `*2\r\n:18\r\n:52\r\n` replies/arm (**6.4 million/arm**), 50 persistent
+  clients across four shards on CPUs 0-3, server CPU 9, all 24 arm orders, and
+  25-group within-sample interleaving. The executing harness ELF self-reported
+  SHA-256
+  **`2274c28d0f70678aa088b11ce9e4b75fcfa534ffee302d9a52d976e467e6bdf3`**.
+  All three live FrankenRedis server ELFs self-reported identical SHA-256
+  **`3a03cfab66e4c148f78e6a9a811e5304f000372423c69d8740ffc69c04601bf3`**;
+  the live Redis server ELF self-reported SHA-256
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+- **Final profile and decision.** The candidate profile lost zero samples and
+  retained **3.74% self-time** in the named command/dispatch subset
+  (`process_buffered_frames` 2.53%, `bitfield_get_batch` 1.21%), with named
+  Amdahl ceiling **1.038853x**; the generic parse/copy/handler frames were absent
+  because the measured candidate routed through the packed floor. The complete
+  io_uring surface was 0.71% self-time and owned submit/drain was 0.33%.
+  Candidate/Redis median utilization was 96.559%/97.357%. Wall A/A median was
+  **0.994538311x**, bootstrap 95% median CI
+  **[0.981686932, 1.022035469]**, giving the prespecified two-radius gate
+  **[0.955929062, 1.044070938]**. Frozen control/candidate throughput was
+  **4.586236618x**, CI **[4.395334261, 4.627283097]**: SELF-SPEEDUP
+  maintenance. FrankenRedis/Redis throughput was **1.405814403x**, bootstrap
+  95% median CI **[1.345390232, 1.438772194]**: **COMPETITIVE KEEP**. CPU A/A
+  median was **0.996742338x**, CI **[0.983839471, 1.020824192]**;
+  control/candidate CPU was **4.656633410x**, CI
+  **[4.500544305, 4.713645614]**, and competitive CPU efficiency was
+  **1.416832158x**, CI **[1.363435685, 1.434069076]**.
+- **Invalid attempts are not results.** The first packet used an incorrect key
+  bulk length and failed setup before timing; a corrected short pre-lever
+  screen failed A/A validity; one long attempt captured zero owned io_uring
+  profile samples; and one compile invocation left the ignored gate filtered
+  out. Each was repaired or retried without local fallback. The authoritative
+  pre-lever and final invocations above supersede them.
+- **Decision rule and retry predicate.** The bootstrap median-CI gate against
+  twice the same-invocation A/A CI radius decided every verdict. CV is
+  provenance only (final wall null 3.887648%, self-speedup 6.207783%,
+  competitive 6.441826%) and never a gate. Re-run after changes to the
+  dispatch-floor classifier, exact parser, BITFIELD_RO validation/accounting,
+  `bitfield_get_batch`, io_uring output, client sharding/pinning, Redis
+  incumbent, keyspace map, allocator, kernel, or release codegen. Invalidate
+  rather than compare if either server is below 90% median utilization, the
+  named command surface has zero self-time or lost samples, live ELF identities
+  differ, any exact reply differs, the frozen environment is absent from either
+  null arm or present in the candidate, or the A/A validity bound fails.
+
 ## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — exact ranged BITPOS front dispatch is 1.3323x live Redis at saturated P16 (`frankenredis-ohsk5.67`)
 
 - **Claim class: COMPETITIVE. Campaign output: yes.** The qualifying result is

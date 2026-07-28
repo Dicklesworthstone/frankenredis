@@ -60,6 +60,10 @@ perf-ab-lpos-floor = []
 # The control processes set FR_PERF_AB_BITPOS_RANGE_FLOOR_ORIG=1; production
 # builds compile only the candidate classification.
 perf-ab-bitpos-range-floor = []
+# Measurement-only control arm for the exact two-GET BITFIELD_RO packed floor.
+# The control processes set FR_PERF_AB_BITFIELD_RO_TWO_GET_FLOOR_ORIG=1;
+# production builds compile only the candidate classification.
+perf-ab-bitfield-ro-two-get-floor = []
 # Measurement-only control arm for the one-binary XADD MAXLEN LIMIT floor A/B.
 # The control process sets FR_PERF_AB_XADD_LIMIT_FLOOR_ORIG=1; production builds
 # do not compile the environment-controlled bypass.

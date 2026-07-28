@@ -685,6 +685,27 @@ fn plain_bitfield_set_owned_argv(
     ]
 }
 
+fn plain_bitfield_ro_two_get_owned_argv(
+    key: &[u8],
+    get1: &[u8],
+    enc1: &[u8],
+    offset1: &[u8],
+    get2: &[u8],
+    enc2: &[u8],
+    offset2: &[u8],
+) -> Vec<Vec<u8>> {
+    vec![
+        b"BITFIELD_RO".to_vec(),
+        key.to_vec(),
+        get1.to_vec(),
+        enc1.to_vec(),
+        offset1.to_vec(),
+        get2.to_vec(),
+        enc2.to_vec(),
+        offset2.to_vec(),
+    ]
+}
+
 /// `SRANDMEMBER key` / `HRANDFIELD key` / `ZRANDMEMBER key` — the no-count
 /// random-read forms that return a single random member as a bulk string (or
 /// nil for a missing/empty container). They lacked a borrow fast path and fell
@@ -29547,6 +29568,16 @@ impl Runtime {
         self.plain_borrowed_default_key_read_allows(now_ms)
     }
 
+    fn can_execute_plain_bitfield_ro_two_get_borrowed(&mut self, key: &[u8], now_ms: u64) -> bool {
+        if self.policy.gate.max_array_len < 8
+            || self.policy.gate.max_bulk_len < b"BITFIELD_RO".len()
+            || key.len() > self.policy.gate.max_bulk_len
+        {
+            return false;
+        }
+        self.plain_borrowed_default_key_read_allows(now_ms)
+    }
+
     fn can_execute_plain_bitfield_set_borrowed(&mut self, key: &[u8], now_ms: u64) -> bool {
         if self.policy.gate.max_array_len < 6
             || self.policy.gate.max_bulk_len < b"BITFIELD".len()
@@ -29832,6 +29863,143 @@ impl Runtime {
                 ),
                 input_source: ThreatInputDigestSource::Argv(&argv),
                 output: &RespFrame::Integer(0),
+            });
+        }
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    /// Borrowed packed-floor fast path for the exact two-read form
+    /// `BITFIELD_RO key GET <enc1> <offset1> GET <enc2> <offset2>`.
+    ///
+    /// Both operations are validated before any key access, then the key is
+    /// type-checked and counted once exactly like `bitfield_ro_cmd`. The two
+    /// values share `bitfield_get_batch`'s single resolved backing string.
+    /// Any alternate or invalid shape returns None to preserve generic errors.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_plain_bitfield_ro_two_get_borrowed(
+        &mut self,
+        key: &[u8],
+        get1: &[u8],
+        enc1: &[u8],
+        offset1: &[u8],
+        get2: &[u8],
+        enc2: &[u8],
+        offset2: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !get1.eq_ignore_ascii_case(b"GET") || !get2.eq_ignore_ascii_case(b"GET") {
+            return None;
+        }
+        let (signed1, bits1) = Self::bitfield_fast_parse_encoding(enc1)?;
+        let bit_offset1 = Self::bitfield_fast_parse_offset(offset1, bits1)?;
+        let (signed2, bits2) = Self::bitfield_fast_parse_encoding(enc2)?;
+        let bit_offset2 = Self::bitfield_fast_parse_offset(offset2, bits2)?;
+        if !self.can_execute_plain_bitfield_ro_two_get_borrowed(key, now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("bitfield_ro");
+        self.session.last_argv_len_sum = b"BITFIELD_RO".len()
+            + key.len()
+            + get1.len()
+            + enc1.len()
+            + offset1.len()
+            + get2.len()
+            + enc2.len()
+            + offset2.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let result = match self.server.store.peek_value_type(key, now_ms) {
+            None | Some(fr_store::ValueType::String) => {
+                // Redis performs one lookupKeyRead for the whole BITFIELD_RO.
+                let _ = self.server.store.exists_no_touch(key, now_ms);
+                Ok(self.server.store.bitfield_get_batch(
+                    key,
+                    &[(bit_offset1, bits1, signed1), (bit_offset2, bits2, signed2)],
+                    now_ms,
+                ))
+            }
+            Some(_) => Err(fr_store::StoreError::WrongType),
+        };
+        let elapsed_us = self.finish_chained_command(start);
+        let reply = match result {
+            Ok(values) => {
+                RespFrame::Array(Some(values.into_iter().map(RespFrame::Integer).collect()))
+            }
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+        let make_argv =
+            || plain_bitfield_ro_two_get_owned_argv(key, get1, enc1, offset1, get2, enc2, offset2);
+
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            self.record_slowlog(&make_argv(), elapsed_us, now_ms);
+        }
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            self.server
+                .record_latency_sample(&make_argv(), elapsed_us, now_ms);
+        }
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind("bitfield_ro", elapsed_us, kind);
+        }
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv = make_argv();
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'BITFIELD_RO' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(&argv),
+                output: &reply,
             });
         }
 
@@ -50744,6 +50912,89 @@ mod tests {
         assert_eq!(
             fast.session.last_argv_len_sum,
             generic.session.last_argv_len_sum
+        );
+    }
+
+    #[test]
+    fn plain_bitfield_ro_two_get_borrowed_matches_generic_semantics_and_accounting() {
+        fn assert_runtime_accounting_matches(fast: &Runtime, generic: &Runtime) {
+            assert_eq!(
+                fast.server.store.stat_total_commands_processed,
+                generic.server.store.stat_total_commands_processed
+            );
+            assert_eq!(
+                fast.server.store.stat_keyspace_hits,
+                generic.server.store.stat_keyspace_hits
+            );
+            assert_eq!(
+                fast.server.store.stat_keyspace_misses,
+                generic.server.store.stat_keyspace_misses
+            );
+            assert_eq!(
+                fast.server.store.stat_total_error_replies,
+                generic.server.store.stat_total_error_replies
+            );
+            assert_eq!(
+                fast.session.last_command_name,
+                generic.session.last_command_name
+            );
+            assert_eq!(
+                fast.session.last_argv_len_sum,
+                generic.session.last_argv_len_sum
+            );
+        }
+
+        for setup in [
+            Some(command(&[b"SET", b"bf", &[0xA5_u8, 0x5A_u8]])),
+            None,
+            Some(command(&[b"LPUSH", b"bf", b"x"])),
+        ] {
+            let mut fast = Runtime::default_strict();
+            let mut generic = Runtime::default_strict();
+            if let Some(frame) = setup.clone() {
+                fast.execute_frame(frame.clone(), 1);
+                generic.execute_frame(frame, 1);
+            }
+
+            let fast_reply = fast
+                .execute_plain_bitfield_ro_two_get_borrowed(
+                    b"bf", b"GET", b"u8", b"0", b"get", b"i8", b"8", 2,
+                )
+                .expect("valid exact two-GET shape should take the packed floor");
+            let generic_reply = generic.execute_frame(
+                command(&[
+                    b"BITFIELD_RO",
+                    b"bf",
+                    b"GET",
+                    b"u8",
+                    b"0",
+                    b"get",
+                    b"i8",
+                    b"8",
+                ]),
+                2,
+            );
+
+            assert_eq!(fast_reply, generic_reply);
+            assert_runtime_accounting_matches(&fast, &generic);
+        }
+
+        let mut runtime = Runtime::default_strict();
+        assert!(
+            runtime
+                .execute_plain_bitfield_ro_two_get_borrowed(
+                    b"bf", b"SET", b"u8", b"0", b"GET", b"u8", b"8", 1,
+                )
+                .is_none(),
+            "write subcommands must fall through to generic BITFIELD_RO validation"
+        );
+        assert!(
+            runtime
+                .execute_plain_bitfield_ro_two_get_borrowed(
+                    b"bf", b"GET", b"u64", b"0", b"GET", b"u8", b"8", 1,
+                )
+                .is_none(),
+            "invalid encodings must fall through for exact Redis diagnostics"
         );
     }
 

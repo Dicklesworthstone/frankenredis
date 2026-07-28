@@ -40,6 +40,7 @@ const QUIET_CORE_MAX_PCT: f64 = 5.0;
 const MIN_SERVER_UTIL_PCT: f64 = 90.0;
 const IO_URING_FLAG: &str = "--io-uring-output";
 const BITPOS_RANGE_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_BITPOS_RANGE_FLOOR_ORIG";
+const BITFIELD_RO_TWO_GET_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_BITFIELD_RO_TWO_GET_FLOOR_ORIG";
 const SHUTDOWN: &[u8] = b"*2\r\n$8\r\nSHUTDOWN\r\n$6\r\nNOSAVE\r\n";
 const SET: &[u8] = b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n";
 const SET_REPLY: &[u8] = b"+OK\r\n";
@@ -50,6 +51,11 @@ const BITPOS_RANGE_PREFILL: &[u8] =
 const BITPOS_RANGE: &[u8] =
     b"*5\r\n$6\r\nBITPOS\r\n$8\r\nbitpos:k\r\n$1\r\n1\r\n$1\r\n0\r\n$1\r\n7\r\n";
 const BITPOS_RANGE_REPLY: &[u8] = b":56\r\n";
+const BITFIELD_RO_TWO_GET_PREFILL: &[u8] =
+    b"*3\r\n$3\r\nSET\r\n$10\r\nbitfield:k\r\n$2\r\n\x12\x34\r\n";
+const BITFIELD_RO_TWO_GET: &[u8] = b"*8\r\n$11\r\nBITFIELD_RO\r\n$10\r\nbitfield:k\r\n\
+$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n";
+const BITFIELD_RO_TWO_GET_REPLY: &[u8] = b"*2\r\n:18\r\n:52\r\n";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Arm {
@@ -87,6 +93,14 @@ enum Workload {
     Get,
     Mixed,
     BitposRange,
+    BitfieldRoTwoGet,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CommandFloorAb {
+    None,
+    BitposRange,
+    BitfieldRoTwoGet,
 }
 
 impl Workload {
@@ -96,6 +110,7 @@ impl Workload {
             Self::Get => "get",
             Self::Mixed => "mixed",
             Self::BitposRange => "bitpos-range",
+            Self::BitfieldRoTwoGet => "bitfield-ro-two-get",
         }
     }
 
@@ -107,6 +122,13 @@ impl Workload {
                 "bitpos_impl",
                 "bitpos_full_bytes",
                 "parse_borrowed_plain_bitpos_range_packet",
+            ],
+            Self::BitfieldRoTwoGet => &[
+                "frankenredis::process_buffered_frames",
+                "fr_command::bitfield_ro_cmd",
+                "bitfield_get_batch",
+                "parse_command_args_borrowed_into",
+                "copy_borrowed_argv_into_scratch",
             ],
             Self::Set | Self::Get | Self::Mixed => &[],
         }
@@ -123,6 +145,7 @@ impl Workload {
                 "get" => Self::Get,
                 "mixed" => Self::Mixed,
                 "bitpos-range" => Self::BitposRange,
+                "bitfield-ro-two-get" => Self::BitfieldRoTwoGet,
                 other => panic!("unknown FR_URING_AB_WORKLOADS item: {other}"),
             })
             .collect()
@@ -169,6 +192,16 @@ impl WorkloadPackets {
             },
             Workload::BitposRange => {
                 let case = repeated_case(BITPOS_RANGE, BITPOS_RANGE_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::BitfieldRoTwoGet => {
+                let case = repeated_case(BITFIELD_RO_TWO_GET, BITFIELD_RO_TWO_GET_REPLY, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -342,7 +375,7 @@ impl Server {
         root: &Path,
         server_core: usize,
         client_threads: usize,
-        bitpos_range_floor_ab: bool,
+        command_floor_ab: CommandFloorAb,
     ) -> Self {
         let runtime_dir = root.join(arm.name());
         fs::create_dir_all(&runtime_dir).expect("create unique server runtime directory");
@@ -361,13 +394,22 @@ impl Server {
         if matches!(arm, Arm::Redis) {
             command.args(["--save", "", "--appendonly", "no"]);
         }
-        if !matches!(arm, Arm::Redis) && (matches!(arm, Arm::IoUring) || bitpos_range_floor_ab) {
+        if !matches!(arm, Arm::Redis)
+            && (matches!(arm, Arm::IoUring) || !matches!(command_floor_ab, CommandFloorAb::None))
+        {
             command.arg(
                 std::env::var("FR_URING_AB_FLAG").unwrap_or_else(|_| IO_URING_FLAG.to_owned()),
             );
         }
-        if bitpos_range_floor_ab && matches!(arm, Arm::MioA | Arm::MioB) {
+        if matches!(command_floor_ab, CommandFloorAb::BitposRange)
+            && matches!(arm, Arm::MioA | Arm::MioB)
+        {
             command.env(BITPOS_RANGE_FLOOR_CONTROL_ENV, "1");
+        }
+        if matches!(command_floor_ab, CommandFloorAb::BitfieldRoTwoGet)
+            && matches!(arm, Arm::MioA | Arm::MioB)
+        {
+            command.env(BITFIELD_RO_TWO_GET_FLOOR_CONTROL_ENV, "1");
         }
         command
             .current_dir(&runtime_dir)
@@ -552,6 +594,8 @@ fn prefill(servers: &mut [Server; 4], workload: Workload) {
         exchange_one(server, SET, SET_REPLY);
         if matches!(workload, Workload::BitposRange) {
             exchange_one(server, BITPOS_RANGE_PREFILL, SET_REPLY);
+        } else if matches!(workload, Workload::BitfieldRoTwoGet) {
+            exchange_one(server, BITFIELD_RO_TWO_GET_PREFILL, SET_REPLY);
         }
     }
 }
@@ -1387,6 +1431,7 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
     let workloads = Workload::parse_list();
     let pipelines = parse_pipelines();
     let bitpos_range_floor_ab = parse_bool_env("FR_URING_AB_BITPOS_RANGE_FLOOR");
+    let bitfield_ro_two_get_floor_ab = parse_bool_env("FR_URING_AB_BITFIELD_RO_TWO_GET_FLOOR");
     assert!(!workloads.is_empty(), "at least one workload is required");
     assert!(!pipelines.is_empty(), "at least one pipeline is required");
     #[cfg(not(feature = "perf-ab-bitpos-range-floor"))]
@@ -1395,11 +1440,35 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
         "FR_URING_AB_BITPOS_RANGE_FLOOR=1 requires \
 --features perf-ab-bitpos-range-floor"
     );
+    #[cfg(not(feature = "perf-ab-bitfield-ro-two-get-floor"))]
+    assert!(
+        !bitfield_ro_two_get_floor_ab,
+        "FR_URING_AB_BITFIELD_RO_TWO_GET_FLOOR=1 requires \
+--features perf-ab-bitfield-ro-two-get-floor"
+    );
+    assert!(
+        !(bitpos_range_floor_ab && bitfield_ro_two_get_floor_ab),
+        "run only one command-shape floor experiment per invocation"
+    );
+    let command_floor_ab = if bitpos_range_floor_ab {
+        CommandFloorAb::BitposRange
+    } else if bitfield_ro_two_get_floor_ab {
+        CommandFloorAb::BitfieldRoTwoGet
+    } else {
+        CommandFloorAb::None
+    };
     if bitpos_range_floor_ab {
         assert_eq!(
             workloads,
             [Workload::BitposRange],
             "the BITPOS range floor A/B must isolate the exact profiled workload"
+        );
+    }
+    if bitfield_ro_two_get_floor_ab {
+        assert_eq!(
+            workloads,
+            [Workload::BitfieldRoTwoGet],
+            "the BITFIELD_RO two-GET floor A/B must isolate the exact profiled workload"
         );
     }
 
@@ -1420,7 +1489,7 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
             &root,
             server_core,
             client_threads,
-            bitpos_range_floor_ab,
+            command_floor_ab,
         ),
         Server::spawn(
             &binary,
@@ -1429,7 +1498,7 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
             &root,
             server_core,
             client_threads,
-            bitpos_range_floor_ab,
+            command_floor_ab,
         ),
         Server::spawn(
             &binary,
@@ -1438,7 +1507,7 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
             &root,
             server_core,
             client_threads,
-            bitpos_range_floor_ab,
+            command_floor_ab,
         ),
         Server::spawn(
             &binary,
@@ -1447,7 +1516,7 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
             &root,
             server_core,
             client_threads,
-            bitpos_range_floor_ab,
+            command_floor_ab,
         ),
     ];
     let server_hashes = Arm::ALL.map(|arm| servers[arm.index()].executing_elf_sha256());
@@ -1484,6 +1553,21 @@ candidate=io_uring+bitpos_range_floor incumbent=vendored_redis_7.2.4"
             .assert_environment_value(BITPOS_RANGE_FLOOR_CONTROL_ENV, Some("1"));
         servers[Arm::IoUring.index()]
             .assert_environment_value(BITPOS_RANGE_FLOOR_CONTROL_ENV, None);
+    } else if bitfield_ro_two_get_floor_ab {
+        println!(
+            "ARM_SEMANTICS control_a=io_uring+frozen_pre_bitfield_ro_two_get_floor \
+control_b=io_uring+frozen_pre_bitfield_ro_two_get_floor \
+candidate=io_uring+bitfield_ro_two_get_floor incumbent=vendored_redis_7.2.4"
+        );
+        for arm in [Arm::MioA, Arm::MioB, Arm::IoUring] {
+            servers[arm.index()].assert_flag_reached_process();
+        }
+        servers[Arm::MioA.index()]
+            .assert_environment_value(BITFIELD_RO_TWO_GET_FLOOR_CONTROL_ENV, Some("1"));
+        servers[Arm::MioB.index()]
+            .assert_environment_value(BITFIELD_RO_TWO_GET_FLOOR_CONTROL_ENV, Some("1"));
+        servers[Arm::IoUring.index()]
+            .assert_environment_value(BITFIELD_RO_TWO_GET_FLOOR_CONTROL_ENV, None);
     } else {
         println!(
             "ARM_SEMANTICS control_a=mio control_b=mio \

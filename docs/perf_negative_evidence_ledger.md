@@ -28,6 +28,77 @@ Every new KEEP declares exactly one class:
 modified entries in both ledger files. It also preserves the ELF self-report,
 A/A bootstrap median-CI, never-CV, counted-mechanism, and retry-predicate gates.
 
+## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — exact two-GET `BITFIELD_RO` packed floor is 1.4058x live Redis at saturated P16 (`frankenredis-ohsk5.68`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes.** The campaign result is
+  FrankenRedis/Redis throughput against the actual vendored Redis 7.2.4 server
+  running live in the same invocation. The generic-route/candidate ratio is
+  SELF-SPEEDUP maintenance only.
+- **Ledger admission and baseline.** Preflight found prior single-op
+  BITFIELD/BITFIELD_RO floors and the 2026-07-02 multi-GET BITFIELD
+  resolve-once row. Hand review showed exact arity-8 BITFIELD_RO remained
+  generic and that the older row's reopening condition required structural
+  first-token dispatch, now shipped. A saturated current-binary profile named
+  **21.63% self-time** in `process_buffered_frames`, `bitfield_ro_cmd`, borrowed
+  argv parsing, and scratch copying, with zero lost samples and named-subset
+  Amdahl ceiling **1.275998x**. The valid pre-edit 32x200k run had wall A/A
+  **0.998226508x**, bootstrap median CI
+  **[0.988002707, 1.015016000]**, gate
+  **[0.969968001, 1.030031999]**, and only **0.312627410x** Redis throughput, CI
+  **[0.301055546, 0.314091963]**, at 98.639%/97.331% utilization.
+- **Lever and isomorphism.** Only canonical
+  `*8 BITFIELD_RO key GET enc1 offset1 GET enc2 offset2` enters the new packed
+  parser/executor. Both GETs, encodings, and offsets validate before access;
+  the runtime retains the conservative read gate, type-check-before-accounting,
+  one read lookup, lazy-expiry propagation, metrics/error bookkeeping, and
+  resolves the pair through `bitfield_get_batch`. Every alternate, malformed,
+  write, overflow, policy-refused, or stateful form falls through to the
+  unchanged generic handler. Differential tests matched replies and
+  command/keyspace/error/session accounting for present, missing, and WRONGTYPE
+  keys; invalid shapes proved fallback. The feature-enabled `fr-server` suite
+  passed 294 tests, and the focused runtime parity test passed. Strict-remote
+  workspace check, default and feature-enabled workspace Clippy with
+  `-D warnings`, and full `fr-conformance` passed; direct rustfmt/diff checks
+  and the 40-case ledger-preflight self-check also passed.
+- **Same-ELF execution and identities.** One strict-remote invocation on
+  `vmi1227854`, Linux 6.17.0-35, ran two io_uring controls with
+  `FR_PERF_AB_BITFIELD_RO_TWO_GET_FLOOR_ORIG=1`, one io_uring candidate without
+  it, and live Redis 7.2.4. The harness verified each command line and process
+  environment. It used 32 samples x 200,000 exact two-integer replies/arm
+  (**6.4 million/arm**), 50 clients in four CPU-pinned shards, server CPU 9, all
+  24 arm orders, and within-sample interleaving. The harness ELF self-reported
+  SHA-256:
+  **`2274c28d0f70678aa088b11ce9e4b75fcfa534ffee302d9a52d976e467e6bdf3`**.
+  All FrankenRedis server ELFs self-reported identical SHA-256:
+  **`3a03cfab66e4c148f78e6a9a811e5304f000372423c69d8740ffc69c04601bf3`**.
+  The Redis server ELF self-reported SHA-256:
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+- **Profile and decision.** Final candidate profile lost zero samples and named
+  **3.74% self-time** in `process_buffered_frames` plus
+  `bitfield_get_batch`, named Amdahl ceiling **1.038853x**; the displaced
+  generic parser/copy/handler frames were absent. Candidate/Redis utilization
+  was 96.559%/97.357%. Wall A/A null median **0.994538311x**, bootstrap 95%
+  median CI **[0.981686932, 1.022035469]**, gate
+  **[0.955929062, 1.044070938]**. Control/candidate throughput was
+  **4.586236618x**, CI **[4.395334261, 4.627283097]**, a SELF-SPEEDUP.
+  FrankenRedis/Redis throughput was **1.405814403x**, CI
+  **[1.345390232, 1.438772194]**: **COMPETITIVE KEEP**. CPU A/A was
+  **0.996742338x**, CI **[0.983839471, 1.020824192]**; control/candidate CPU was
+  **4.656633410x**, CI **[4.500544305, 4.713645614]**; competitive CPU
+  efficiency was **1.416832158x**, CI **[1.363435685, 1.434069076]**.
+- **Invalid attempts.** A malformed setup packet, an invalid short A/A screen,
+  a zero-sample 3-second ownership profile, and an invocation that left the
+  ignored test filtered out all stopped before an admissible verdict. None
+  fell back locally; the valid baseline and final runs supersede them.
+- **Gate and concrete retry predicate.** Bootstrap median-CI versus twice the
+  paired A/A CI radius decided every verdict; CV is provenance only (final wall
+  null 3.887648%, self 6.207783%, competitive 6.441826%). Re-run after changes
+  to the floor classifier/parser, BITFIELD_RO validation or accounting,
+  `bitfield_get_batch`, io_uring output, client driver/pinning, Redis incumbent,
+  keyspace map, allocator, kernel, or release codegen. Invalidate if saturation
+  falls below 90%, named self-time becomes zero or loses samples, ELF hashes or
+  exact replies differ, environment selection is wrong, or A/A validity fails.
+
 ## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — exact ranged BITPOS front dispatch is 1.3323x live Redis at saturated P16 (`frankenredis-ohsk5.67`)
 
 - **Claim class: COMPETITIVE. Campaign output: yes.** The campaign result is the
