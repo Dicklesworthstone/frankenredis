@@ -28,6 +28,71 @@ Every new KEEP declares exactly one class:
 modified entries in both ledger files. It also preserves the ELF self-report,
 A/A bootstrap median-CI, never-CV, counted-mechanism, and retry-predicate gates.
 
+## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — middle `LINDEX` on a 500-element compact list is 2.2426x live Redis at saturated P16 (`frankenredis-3smt2`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes.** The numeric result is
+  current io_uring FrankenRedis/Redis throughput against the actual vendored
+  Redis 7.2.4 server live beside both A/A controls in one invocation.
+  Production source remains untouched: this authenticates a command shape the
+  current list representation already wins. The io_uring/mio comparison is a
+  separate **SELF-SPEEDUP** maintenance KEEP, not campaign output.
+- **Admission and representation boundary.** Exact preflight searches for
+  `LINDEX l 250`, `500-element LINDEX`, `middle-index LINDEX`, and
+  `quicklist LINDEX` were clear, then all broader LINDEX rows were manually
+  adjudicated. The prior 4 KiB zero-copy reply, LFU two-to-one keyspace probe,
+  no-TTL lookup collapse, dispatch hoist, and accounting rows are distinct
+  **VALID-MECHANISM** levers; none covers this middle-index representation
+  wedge. The fixture resets `l`, pushes 500 unique four-byte noninteger values
+  `v000` through `v499`, asserts `LLEN l == 500` in every arm, and in Redis
+  asserts `OBJECT ENCODING l == listpack` and
+  `CONFIG GET list-max-listpack-size == -2`. The derived listpack is 3,007
+  bytes, below that 8 KiB policy, so Redis directly seeks through the compact
+  listpack. FrankenRedis has already promoted above 128 entries to its internal
+  `ChunkedList`, which locates and indexes a `ListChunk`. The exact repeated
+  packet is `LINDEX l 250`, byte-checked as `$4\r\nv250\r\n`.
+- **One formatted-source invocation.** Fully reserved `vmi1153651`, Linux
+  6.17.0-41-generic, ran 48 x 200,000 byte-checked replies/arm at P16, 50
+  clients in nine pinned shards, one dedicated server core, 125-group
+  interleaving, and two complete 24-order cycles. The harness self-reported ELF
+  SHA-256
+  **`e288141dd1b49ba567e3bc49b1bf21689fc13fe0d0b8a2725644c4a1ece19a5f`**;
+  every FrankenRedis server self-reported ELF SHA-256
+  **`733de2523ad3da4f1677bf37e705542937aaf934aa23033b25bd95aafb4fcf8b`**;
+  Redis self-reported ELF SHA-256
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+  Candidate/Redis median utilization was 97.390%/98.147%. Zero lost samples
+  attributed **25.38% self-time** to the named LINDEX command surface
+  (`process_buffered_frames` 13.42%, `memcmp` 8.14%, borrowed executor 2.87%,
+  exact parser 0.95%), an Amdahl elimination ceiling of **1.340123x**. Async CQ
+  work was 0.46%, including 0.23% owned self-time.
+- **Null gate and competitive verdict.** Wall A/A null median was
+  **1.008618122x**, bootstrap 95% median CI
+  **[0.976477566, 1.030302354]**, inside gate
+  **[0.939395293, 1.060604707]**. FrankenRedis/Redis throughput was
+  **2.242611727x**, CI **[2.156628485, 2.295419015]**: COMPETITIVE KEEP. CPU
+  A/A was **1.007362727x**, CI **[0.976588893, 1.036939762]**; CPU
+  FrankenRedis/Redis throughput was **2.238679676x**, CI
+  **[2.184706839, 2.292815282]**. The ancillary io_uring/mio
+  **SELF-SPEEDUP** was a maintenance KEEP at 1.142901239x, CI
+  [1.087599254, 1.162286612]; CPU was 1.143448994x, CI
+  [1.091987444, 1.163285128]. Bootstrap median-CI decided every verdict, never
+  CV; CV is provenance only (wall null 13.030342%, self 11.576873%,
+  competitive 11.762602%; CPU null 12.162950%, self 9.545763%, competitive
+  10.376413%).
+- **Discarded setup and retry predicate.** The preceding strict-remote setup
+  invocation stopped before profiling or timed samples because the new request
+  fixture declared four RESP array elements while supplying the three LINDEX
+  arguments. It produced no ratio; correcting the fixture cardinality preceded
+  the valid run above. Reopen after Redis list encoding or
+  `list-max-listpack-size`, fixture element count/length/index, FrankenRedis's
+  packed threshold, `ChunkedList` or `ListChunk`, LINDEX
+  parser/runtime/store semantics, Redis version, allocator, kernel, harness, or
+  release-codegen changes, or if a new valid incumbent CI overlaps 1.0. Retain
+  the exact 500 unique four-byte noninteger elements, index 250, exact `v250`
+  reply, explicit Redis listpack and `-2` assertions, live incumbent, ELF
+  self-reports, same-invocation A/A, complete order cycles, zero-lost
+  nonzero-self profile, byte checking, and >=90% utilization.
+
 ## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — pristine 500-field missing-field `HEXISTS` is 3.9742x live Redis at saturated P16 (`frankenredis-t9y4p`)
 
 - **Claim class: COMPETITIVE. Campaign output: yes.** This is current

@@ -86,6 +86,17 @@ const LRANGE_INVERTED_PREFILL: &[u8] = b"*3\r\n$3\r\nSET\r\n$1\r\nl\r\n$4\r\nsee
 const LRANGE_INVERTED_PREFILL_REPLY: &[u8] = b"+OK\r\n:1\r\n:1\r\n";
 const LRANGE_INVERTED: &[u8] = b"*4\r\n$6\r\nLRANGE\r\n$1\r\nl\r\n$1\r\n1\r\n$1\r\n0\r\n";
 const LRANGE_INVERTED_REPLY: &[u8] = b"*0\r\n";
+const LINDEX_MIDDLE_ELEMENTS: usize = 500;
+const LINDEX_MIDDLE: &[u8] = b"*3\r\n$6\r\nLINDEX\r\n$1\r\nl\r\n$3\r\n250\r\n";
+const LINDEX_MIDDLE_REPLY: &[u8] = b"$4\r\nv250\r\n";
+const LINDEX_MIDDLE_LLEN: &[u8] = b"*2\r\n$4\r\nLLEN\r\n$1\r\nl\r\n";
+const LINDEX_MIDDLE_LLEN_REPLY: &[u8] = b":500\r\n";
+const LINDEX_MIDDLE_ENCODING: &[u8] = b"*3\r\n$6\r\nOBJECT\r\n$8\r\nENCODING\r\n$1\r\nl\r\n";
+const LINDEX_MIDDLE_REDIS_ENCODING_REPLY: &[u8] = b"$8\r\nlistpack\r\n";
+const LINDEX_MIDDLE_CONFIG: &[u8] =
+    b"*3\r\n$6\r\nCONFIG\r\n$3\r\nGET\r\n$22\r\nlist-max-listpack-size\r\n";
+const LINDEX_MIDDLE_REDIS_CONFIG_REPLY: &[u8] =
+    b"*2\r\n$22\r\nlist-max-listpack-size\r\n$2\r\n-2\r\n";
 const MISSING_FIELD_HASH_FIELDS: usize = 500;
 const HDEL_MISSING_FIELD: &[u8] = b"*3\r\n$4\r\nHDEL\r\n$1\r\nh\r\n$6\r\nabsent\r\n";
 const HDEL_MISSING_FIELD_REPLY: &[u8] = b":0\r\n";
@@ -203,6 +214,7 @@ enum Workload {
     PttlPersistent,
     ZremrangebyscoreInverted,
     LrangeInverted,
+    LindexMiddle,
     HdelMissingField,
     HgetMissingField,
     HexistsMissingField,
@@ -252,6 +264,7 @@ impl Workload {
             Self::PttlPersistent => "pttl-persistent",
             Self::ZremrangebyscoreInverted => "zremrangebyscore-inverted",
             Self::LrangeInverted => "lrange-inverted",
+            Self::LindexMiddle => "lindex-middle",
             Self::HdelMissingField => "hdel-missing-field",
             Self::HgetMissingField => "hget-missing-field",
             Self::HexistsMissingField => "hexists-missing-field",
@@ -414,6 +427,18 @@ impl Workload {
                 "fr_store::Store::lrange_borrow_scan",
                 "fr_store::normalize_index",
             ],
+            Self::LindexMiddle => &[
+                "frankenredis::process_buffered_frames",
+                "__memcmp_avx2_movbe",
+                "parse_borrowed_plain_lindex_packet",
+                "execute_plain_lindex_borrowed_into",
+                "fr_store::Store::lindex_with",
+                "fr_store::Store::lindex_with_impl",
+                "fr_store::packed_set::ListValue::get",
+                "fr_store::packed_set::ChunkedList::get",
+                "fr_store::packed_set::ChunkedList::locate",
+                "fr_store::packed_set::ListChunk::get",
+            ],
             Self::HdelMissingField => &[
                 "frankenredis::process_buffered_frames",
                 "__memcmp_avx2_movbe",
@@ -481,6 +506,7 @@ impl Workload {
                 "pttl-persistent" => Self::PttlPersistent,
                 "zremrangebyscore-inverted" => Self::ZremrangebyscoreInverted,
                 "lrange-inverted" => Self::LrangeInverted,
+                "lindex-middle" => Self::LindexMiddle,
                 "hdel-missing-field" => Self::HdelMissingField,
                 "hget-missing-field" => Self::HgetMissingField,
                 "hexists-missing-field" => Self::HexistsMissingField,
@@ -714,6 +740,16 @@ impl WorkloadPackets {
             }
             Workload::LrangeInverted => {
                 let case = repeated_case(LRANGE_INVERTED, LRANGE_INVERTED_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::LindexMiddle => {
+                let case = repeated_case(LINDEX_MIDDLE, LINDEX_MIDDLE_REPLY, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -1251,6 +1287,26 @@ fn missing_field_hash_prefill() -> ExchangeCase {
     }
 }
 
+fn lindex_middle_prefill() -> ExchangeCase {
+    let mut request = b"*3\r\n$3\r\nSET\r\n$1\r\nl\r\n$4\r\nseed\r\n\
+*2\r\n$3\r\nDEL\r\n$1\r\nl\r\n"
+        .to_vec();
+    let header = format!(
+        "*{}\r\n$5\r\nRPUSH\r\n$1\r\nl\r\n",
+        LINDEX_MIDDLE_ELEMENTS + 2
+    );
+    request.extend_from_slice(header.as_bytes());
+    for index in 0..LINDEX_MIDDLE_ELEMENTS {
+        let element = format!("v{index:03}");
+        let value = format!("$4\r\n{element}\r\n");
+        request.extend_from_slice(value.as_bytes());
+    }
+    ExchangeCase {
+        request,
+        response: format!("+OK\r\n:1\r\n:{LINDEX_MIDDLE_ELEMENTS}\r\n").into_bytes(),
+    }
+}
+
 fn prefill(servers: &mut [Server; 4], workload: Workload) {
     let seeded_stream = matches!(
         workload,
@@ -1286,6 +1342,29 @@ fn prefill(servers: &mut [Server; 4], workload: Workload) {
                 LRANGE_INVERTED_PREFILL,
                 LRANGE_INVERTED_PREFILL_REPLY,
             );
+        } else if matches!(workload, Workload::LindexMiddle) {
+            let case = lindex_middle_prefill();
+            exchange_one(server, &case.request, &case.response);
+            exchange_one(server, LINDEX_MIDDLE_LLEN, LINDEX_MIDDLE_LLEN_REPLY);
+            if matches!(server.arm, Arm::Redis) {
+                exchange_one(
+                    server,
+                    LINDEX_MIDDLE_ENCODING,
+                    LINDEX_MIDDLE_REDIS_ENCODING_REPLY,
+                );
+                exchange_one(
+                    server,
+                    LINDEX_MIDDLE_CONFIG,
+                    LINDEX_MIDDLE_REDIS_CONFIG_REPLY,
+                );
+                println!(
+                    "FIXTURE_REPRESENTATION workload={} arm=redis elements={} \
+element_bytes=4 encoding=listpack list_max_listpack_size=-2 \
+derived_listpack_bytes=3007",
+                    workload.name(),
+                    LINDEX_MIDDLE_ELEMENTS
+                );
+            }
         } else if matches!(
             workload,
             Workload::HdelMissingField | Workload::HgetMissingField | Workload::HexistsMissingField
