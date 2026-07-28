@@ -12416,6 +12416,7 @@ enum BorrowedDispatchFloorClass {
     Zrange,
     Hrandfield,
     BitposKeyBit,
+    BitposRange,
     Incr,
 }
 
@@ -12845,9 +12846,13 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (2, BorrowedDispatchFloorCommand::Hrandfield) => {
             Some(BorrowedDispatchFloorClass::Hrandfield)
         }
-        // Only the no-range `*3 BITPOS key bit` form floors; start/range/unit
-        // forms (arity 4/5/6) fall through to the unchanged generic path.
+        // Exact no-range and byte-range BITPOS shapes have dedicated borrowed
+        // parsers/executors. Start-only and unit-qualified forms remain on the
+        // unchanged generic cascade.
         (3, BorrowedDispatchFloorCommand::Bitpos) => Some(BorrowedDispatchFloorClass::BitposKeyBit),
+        (5, BorrowedDispatchFloorCommand::Bitpos) if bitpos_range_floor_enabled() => {
+            Some(BorrowedDispatchFloorClass::BitposRange)
+        }
         (2, BorrowedDispatchFloorCommand::Incr) => Some(BorrowedDispatchFloorClass::Incr),
         (4, BorrowedDispatchFloorCommand::Getrange) => Some(BorrowedDispatchFloorClass::Getrange),
         // Only plain `*4 ZRANGE key start stop` floors; WITHSCORES/REV/LIMIT/
@@ -12909,6 +12914,27 @@ fn lpos_floor_orig_enabled() -> bool {
         Ok(value) => value == "1",
         Err(_) => false,
     })
+}
+
+/// Preserve the exact pre-lever arity-5 BITPOS classifier in the measurement
+/// ELF. Both controls select the frozen cascade before their first packet;
+/// production builds compile only the front-dispatch candidate.
+#[cfg(feature = "perf-ab-bitpos-range-floor")]
+#[inline]
+fn bitpos_range_floor_enabled() -> bool {
+    static ORIG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    !*ORIG.get_or_init(
+        || match std::env::var("FR_PERF_AB_BITPOS_RANGE_FLOOR_ORIG") {
+            Ok(value) => value == "1",
+            Err(_) => false,
+        },
+    )
+}
+
+#[cfg(not(feature = "perf-ab-bitpos-range-floor"))]
+#[inline(always)]
+const fn bitpos_range_floor_enabled() -> bool {
+    true
 }
 
 /// Keep the exact pre-lever ten-element XADD classification in the measurement
@@ -14157,6 +14183,34 @@ fn try_dispatch_floor_classified_action(
                 )
             }
         }
+        BorrowedDispatchFloorClass::BitposRange => {
+            // This is a pure route shortening: the exact parser and borrowed
+            // executor are the same functions used by the later cascade arm.
+            // Any malformed range, gate refusal, or semantic edge therefore
+            // falls back to the byte-identical generic borrowed dispatcher.
+            if let Some(packet) = parse_borrowed_plain_bitpos_range_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_bitpos_borrowed(
+                    packet.key,
+                    packet.bit,
+                    Some((packet.start, Some(packet.end), None)),
+                    ts,
+                )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
         BorrowedDispatchFloorClass::Hrandfield => {
             // HRANDFIELD (no count) mirrors SRANDMEMBER: the `_into` executor
             // writes the single sampled field borrowed into `out` (field-clone
@@ -14444,8 +14498,8 @@ struct BorrowedPlainBitposPacket<'a> {
     bit: &'a [u8],
 }
 
-// (frankenredis-qd9jd) Byte-prefix fast path for `BITPOS key bit`; ranged
-// BITPOS still falls through to generic borrowed dispatch for exact errors.
+// (frankenredis-qd9jd) Byte-prefix fast path for `BITPOS key bit`; each ranged
+// arity has a separate exact parser so malformed inputs preserve generic errors.
 fn parse_borrowed_plain_bitpos_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,
@@ -22795,12 +22849,10 @@ fn borrowed_plain_memory_usage_args<'a>(borrowed_args: &'a [&'a [u8]]) -> Option
     }
 }
 
-/// Only the no-range `BITCOUNT key` form (argc 2); ranged forms fall to generic.
-/// Only the no-range `BITPOS key bit` form (argc 3); ranged forms fall to generic.
-/// Recognizes `BITPOS key bit [start [end [BYTE|BIT]]]` (argc 3/4/5/6). Returns
-/// the borrowed key, bit arg, and the raw range args `(start, end?, unit?)`; the
-/// runtime parses them (and defers on a non-0/1 bit / malformed integer / bad
-/// unit) so generic dispatch owns every error reply.
+/// Generic-fallback recognizer for `BITPOS key bit [start [end [BYTE|BIT]]]`
+/// (argc 3/4/5/6). Returns the borrowed key, bit arg, and raw range arguments;
+/// the runtime parses them and defers on invalid input so generic dispatch owns
+/// every error reply.
 #[allow(clippy::type_complexity)]
 fn borrowed_plain_bitpos_args<'a>(
     borrowed_args: &'a [&'a [u8]],
@@ -31814,6 +31866,33 @@ mod tests {
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(
                 b"*5\r\n$6\r\nSETBIT\r\n$1\r\nb\r\n$1\r\n7\r\n$1\r\n1\r\n$1\r\nx\r\n",
+                &cfg,
+            ),
+            None
+        );
+        let bitpos_range =
+            b"*5\r\n$6\r\nbItPoS\r\n$8\r\nbitpos:k\r\n$1\r\n1\r\n$1\r\n0\r\n$1\r\n7\r\n";
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(bitpos_range, &cfg),
+            Some(super::BorrowedDispatchFloorClass::BitposRange)
+        );
+        let packet = super::parse_borrowed_plain_bitpos_range_packet(bitpos_range, &cfg)
+            .expect("exact BITPOS byte range packet parses");
+        assert_eq!(packet.consumed, bitpos_range.len());
+        assert_eq!(packet.key, b"bitpos:k");
+        assert_eq!(packet.bit, b"1");
+        assert_eq!(packet.start, b"0");
+        assert_eq!(packet.end, b"7");
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*4\r\n$6\r\nBITPOS\r\n$1\r\nb\r\n$1\r\n1\r\n$1\r\n0\r\n",
+                &cfg,
+            ),
+            None
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*6\r\n$6\r\nBITPOS\r\n$1\r\nb\r\n$1\r\n1\r\n$1\r\n0\r\n$1\r\n7\r\n$4\r\nBYTE\r\n",
                 &cfg,
             ),
             None

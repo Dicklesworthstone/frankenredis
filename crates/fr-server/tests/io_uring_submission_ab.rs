@@ -1,13 +1,15 @@
 #![forbid(unsafe_code)]
 
-//! Same-invocation A/A + A/B + live-incumbent gate for flagged io_uring output.
+//! Same-invocation A/A + A/B + live-incumbent gate for server throughput.
 //!
 //! The harness deliberately drives many established connections from persistent
 //! client shards. Every shard writes its clients before reading their replies;
 //! independent shards overlap so pipeline depth 1 can saturate the server rather
-//! than the client. Two byte-identical mio processes provide the null control,
-//! the same FrankenRedis ELF with the runtime flag is the candidate, and
-//! vendored Redis is the live incumbent.
+//! than the client. By default, two byte-identical mio processes provide the
+//! null control and the same FrankenRedis ELF with the runtime flag is the
+//! candidate. A command-shape experiment may instead put all three FrankenRedis
+//! processes on io_uring and select a frozen control route by environment before
+//! the first packet. Vendored Redis is always the live incumbent.
 //!
 //! Run only through strict remote RCH on one explicitly selected worker:
 //!
@@ -37,11 +39,17 @@ const INTERLEAVE_GROUPS: usize = 25;
 const QUIET_CORE_MAX_PCT: f64 = 5.0;
 const MIN_SERVER_UTIL_PCT: f64 = 90.0;
 const IO_URING_FLAG: &str = "--io-uring-output";
+const BITPOS_RANGE_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_BITPOS_RANGE_FLOOR_ORIG";
 const SHUTDOWN: &[u8] = b"*2\r\n$8\r\nSHUTDOWN\r\n$6\r\nNOSAVE\r\n";
 const SET: &[u8] = b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n";
 const SET_REPLY: &[u8] = b"+OK\r\n";
 const GET: &[u8] = b"*2\r\n$3\r\nGET\r\n$1\r\nk\r\n";
 const GET_REPLY: &[u8] = b"$1\r\nv\r\n";
+const BITPOS_RANGE_PREFILL: &[u8] =
+    b"*3\r\n$3\r\nSET\r\n$8\r\nbitpos:k\r\n$8\r\n\0\0\0\0\0\0\0\x80\r\n";
+const BITPOS_RANGE: &[u8] =
+    b"*5\r\n$6\r\nBITPOS\r\n$8\r\nbitpos:k\r\n$1\r\n1\r\n$1\r\n0\r\n$1\r\n7\r\n";
+const BITPOS_RANGE_REPLY: &[u8] = b":56\r\n";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Arm {
@@ -73,11 +81,12 @@ impl Arm {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Workload {
     Set,
     Get,
     Mixed,
+    BitposRange,
 }
 
 impl Workload {
@@ -86,6 +95,20 @@ impl Workload {
             Self::Set => "set",
             Self::Get => "get",
             Self::Mixed => "mixed",
+            Self::BitposRange => "bitpos-range",
+        }
+    }
+
+    const fn profile_targets(self) -> &'static [&'static str] {
+        match self {
+            Self::BitposRange => &[
+                "frankenredis::process_buffered_frames",
+                "execute_plain_bitpos_borrowed",
+                "bitpos_impl",
+                "bitpos_full_bytes",
+                "parse_borrowed_plain_bitpos_range_packet",
+            ],
+            Self::Set | Self::Get | Self::Mixed => &[],
         }
     }
 
@@ -99,6 +122,7 @@ impl Workload {
                 "set" => Self::Set,
                 "get" => Self::Get,
                 "mixed" => Self::Mixed,
+                "bitpos-range" => Self::BitposRange,
                 other => panic!("unknown FR_URING_AB_WORKLOADS item: {other}"),
             })
             .collect()
@@ -143,6 +167,16 @@ impl WorkloadPackets {
                 even: mixed_case(pipeline, false),
                 odd: mixed_case(pipeline, true),
             },
+            Workload::BitposRange => {
+                let case = repeated_case(BITPOS_RANGE, BITPOS_RANGE_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
         }
     }
 }
@@ -246,7 +280,7 @@ impl Drop for ClientDriver {
         }
         for worker in &mut self.workers {
             if let Some(handle) = worker.handle.take() {
-                handle.join().expect("join benchmark client worker");
+                let _ = handle.join();
             }
         }
     }
@@ -308,6 +342,7 @@ impl Server {
         root: &Path,
         server_core: usize,
         client_threads: usize,
+        bitpos_range_floor_ab: bool,
     ) -> Self {
         let runtime_dir = root.join(arm.name());
         fs::create_dir_all(&runtime_dir).expect("create unique server runtime directory");
@@ -326,10 +361,13 @@ impl Server {
         if matches!(arm, Arm::Redis) {
             command.args(["--save", "", "--appendonly", "no"]);
         }
-        if matches!(arm, Arm::IoUring) {
+        if !matches!(arm, Arm::Redis) && (matches!(arm, Arm::IoUring) || bitpos_range_floor_ab) {
             command.arg(
                 std::env::var("FR_URING_AB_FLAG").unwrap_or_else(|_| IO_URING_FLAG.to_owned()),
             );
+        }
+        if bitpos_range_floor_ab && matches!(arm, Arm::MioA | Arm::MioB) {
+            command.env(BITPOS_RANGE_FLOOR_CONTROL_ENV, "1");
         }
         command
             .current_dir(&runtime_dir)
@@ -387,9 +425,10 @@ impl Server {
     }
 
     fn assert_flag_reached_process(&self) {
-        if !matches!(self.arm, Arm::IoUring) {
-            return;
-        }
+        assert!(
+            !matches!(self.arm, Arm::Redis),
+            "Redis does not accept the FrankenRedis io_uring flag"
+        );
         let cmdline = fs::read(format!("/proc/{}/cmdline", self.pid()))
             .expect("read candidate process command line");
         let flag = std::env::var("FR_URING_AB_FLAG").unwrap_or_else(|_| IO_URING_FLAG.to_owned());
@@ -397,9 +436,41 @@ impl Server {
             cmdline
                 .split(|byte| *byte == 0)
                 .any(|arg| arg == flag.as_bytes()),
-            "candidate process did not receive {flag}"
+            "{} process did not receive {flag}",
+            self.arm.name()
         );
-        println!("CANDIDATE_FLAG pid={} flag={flag}", self.pid());
+        println!(
+            "FRANKENREDIS_FLAG arm={} pid={} flag={flag}",
+            self.arm.name(),
+            self.pid()
+        );
+    }
+
+    fn assert_environment_value(&self, name: &str, expected: Option<&str>) {
+        assert!(
+            !matches!(self.arm, Arm::Redis),
+            "Redis environment is outside the same-ELF control contract"
+        );
+        let environ = fs::read(format!("/proc/{}/environ", self.pid()))
+            .expect("read FrankenRedis process environment");
+        let prefix = format!("{name}=");
+        let actual = environ.split(|byte| *byte == 0).find_map(|entry| {
+            entry
+                .strip_prefix(prefix.as_bytes())
+                .map(|value| String::from_utf8_lossy(value).into_owned())
+        });
+        assert_eq!(
+            actual.as_deref(),
+            expected,
+            "{} process environment diverged for {name}",
+            self.arm.name()
+        );
+        println!(
+            "FRANKENREDIS_ENV arm={} pid={} name={name} value={:?}",
+            self.arm.name(),
+            self.pid(),
+            actual
+        );
     }
 
     fn executing_elf_sha256(&self) -> String {
@@ -468,7 +539,21 @@ fn exchange_one(server: &mut Server, request: &[u8], expected: &[u8]) {
     stream
         .read_exact(&mut response)
         .expect("read setup response");
-    assert_eq!(response, expected);
+    assert_eq!(
+        response,
+        expected,
+        "setup reply diverged for arm={}",
+        server.arm.name()
+    );
+}
+
+fn prefill(servers: &mut [Server; 4], workload: Workload) {
+    for server in servers.iter_mut() {
+        exchange_one(server, SET, SET_REPLY);
+        if matches!(workload, Workload::BitposRange) {
+            exchange_one(server, BITPOS_RANGE_PREFILL, SET_REPLY);
+        }
+    }
 }
 
 fn prefill_and_warm(
@@ -477,9 +562,7 @@ fn prefill_and_warm(
     pipeline: usize,
     packets: &Arc<WorkloadPackets>,
 ) {
-    for server in servers.iter_mut() {
-        exchange_one(server, SET, SET_REPLY);
-    }
+    prefill(servers, workload);
     let warm_ops = 20_000_usize;
     let warm_groups = warm_ops.div_ceil(CLIENTS * pipeline).max(8);
     for arm in Arm::ALL {
@@ -520,9 +603,9 @@ fn measure_configuration(
     samples: usize,
     ops_per_sample: usize,
 ) -> Vec<Sample> {
-    // Every permutation appears inside every measured sample. Each arm runs only
-    // INTERLEAVE_GROUPS client groups before control passes to the next arm, so
-    // host-frequency and queue drift cannot alias onto a multi-second arm block.
+    // The 24 permutations rotate across samples. Within a sample, each arm runs
+    // only INTERLEAVE_GROUPS client groups before control passes to the next arm,
+    // so host-frequency and queue drift cannot alias onto a multi-second block.
     const ORDERS: [[Arm; 4]; 24] = [
         [Arm::MioA, Arm::MioB, Arm::IoUring, Arm::Redis],
         [Arm::MioA, Arm::MioB, Arm::Redis, Arm::IoUring],
@@ -634,12 +717,13 @@ ops_per_arm_sample={actual_ops}",
         println!(
             "SAMPLE workload={} pipeline={pipeline} sample={} order={:?} \
 control_slots={} \
-mio_a_ns_per_op={:.3} mio_b_ns_per_op={:.3} io_uring_ns_per_op={:.3} redis_ns_per_op={:.3} \
-null_a_over_b={:.9} mio_over_io_uring={:.9} fr_io_uring_over_redis={:.9} \
-mio_a_cpu_ns={} mio_b_cpu_ns={} io_uring_cpu_ns={} redis_cpu_ns={} \
-io_uring_cpu_util_pct={:.3} redis_cpu_util_pct={:.3} \
-cpu_null_a_over_b={:.9} cpu_mio_over_io_uring={:.9} \
-cpu_fr_io_uring_over_redis={:.9}",
+control_a_ns_per_op={:.3} control_b_ns_per_op={:.3} candidate_ns_per_op={:.3} \
+redis_ns_per_op={:.3} null_control_a_over_b={:.9} \
+control_geomean_over_candidate={:.9} candidate_over_redis={:.9} \
+control_a_cpu_ns={} control_b_cpu_ns={} candidate_cpu_ns={} redis_cpu_ns={} \
+candidate_cpu_util_pct={:.3} redis_cpu_util_pct={:.3} \
+cpu_null_control_a_over_b={:.9} cpu_control_geomean_over_candidate={:.9} \
+cpu_candidate_over_redis={:.9}",
             workload.name(),
             sample_index + 1,
             ORDERS[sample_index % ORDERS.len()],
@@ -828,7 +912,7 @@ io_uring={io_uring_util_median:.3}% redis={redis_util_median:.3}%",
     (
         adjudicate_ratios(
             "wall_ns_per_op",
-            "mio_over_io_uring",
+            "control_geomean_over_candidate",
             workload,
             pipeline,
             &wall_null,
@@ -836,7 +920,7 @@ io_uring={io_uring_util_median:.3}% redis={redis_util_median:.3}%",
         ),
         adjudicate_ratios(
             "cpu_ns_per_fixed_work",
-            "cpu_mio_over_io_uring",
+            "cpu_control_geomean_over_candidate",
             workload,
             pipeline,
             &cpu_null,
@@ -844,7 +928,7 @@ io_uring={io_uring_util_median:.3}% redis={redis_util_median:.3}%",
         ),
         adjudicate_ratios(
             "wall_ns_per_op",
-            "fr_io_uring_over_redis",
+            "candidate_over_redis",
             workload,
             pipeline,
             &wall_null,
@@ -852,7 +936,7 @@ io_uring={io_uring_util_median:.3}% redis={redis_util_median:.3}%",
         ),
         adjudicate_ratios(
             "cpu_ns_per_fixed_work",
-            "cpu_fr_io_uring_over_redis",
+            "cpu_candidate_over_redis",
             workload,
             pipeline,
             &cpu_null,
@@ -988,6 +1072,38 @@ owned_self_pct={owned_self_pct:.4} surface_self_pct={surface_self_pct:.4} \
 amdahl_elimination_ceiling={amdahl_ceiling:.6}x lost_samples=0 rows={matched:?}",
         workload.name()
     );
+
+    let command_targets = workload.profile_targets();
+    if !command_targets.is_empty() {
+        let mut command_rows = Vec::new();
+        let mut command_self_pct = 0.0_f64;
+        for line in report.lines() {
+            if command_targets.iter().any(|target| line.contains(target))
+                && let Some(raw_pct) = line.split_whitespace().next()
+                && let Ok(pct) = raw_pct.trim_end_matches('%').parse::<f64>()
+            {
+                command_self_pct += pct;
+                command_rows.push(line.trim().to_owned());
+            }
+        }
+        assert!(
+            command_self_pct > 0.0,
+            "profile did not attribute non-zero self-time to workload={} targets={command_targets:?}",
+            workload.name()
+        );
+        assert!(
+            command_self_pct < 100.0,
+            "invalid aggregate command self-time: {command_self_pct}%"
+        );
+        let command_amdahl_ceiling = 1.0 / (1.0 - command_self_pct / 100.0);
+        println!(
+            "PROFILE_COMMAND_SURFACE workload={} pipeline={pipeline} \
+targets={command_targets:?} self_pct={command_self_pct:.4} \
+amdahl_elimination_ceiling={command_amdahl_ceiling:.6}x \
+lost_samples=0 rows={command_rows:?}",
+            workload.name()
+        );
+    }
 }
 
 fn parse_cpu_list(text: &str) -> Vec<usize> {
@@ -1170,6 +1286,16 @@ fn parse_u64_env(name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
+fn parse_bool_env(name: &str) -> bool {
+    match std::env::var(name) {
+        Ok(value) if value == "1" => true,
+        Ok(value) if value == "0" => false,
+        Ok(value) => panic!("{name} must be 0 or 1, got {value:?}"),
+        Err(std::env::VarError::NotPresent) => false,
+        Err(error) => panic!("invalid {name}: {error}"),
+    }
+}
+
 fn parse_pipelines() -> Vec<usize> {
     if std::env::var_os("FR_URING_AB_P1_ONLY").is_some() {
         return vec![1];
@@ -1260,8 +1386,22 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
     let profile_seconds = parse_u64_env("FR_URING_AB_PROFILE_SECONDS", DEFAULT_PROFILE_SECONDS);
     let workloads = Workload::parse_list();
     let pipelines = parse_pipelines();
+    let bitpos_range_floor_ab = parse_bool_env("FR_URING_AB_BITPOS_RANGE_FLOOR");
     assert!(!workloads.is_empty(), "at least one workload is required");
     assert!(!pipelines.is_empty(), "at least one pipeline is required");
+    #[cfg(not(feature = "perf-ab-bitpos-range-floor"))]
+    assert!(
+        !bitpos_range_floor_ab,
+        "FR_URING_AB_BITPOS_RANGE_FLOOR=1 requires \
+--features perf-ab-bitpos-range-floor"
+    );
+    if bitpos_range_floor_ab {
+        assert_eq!(
+            workloads,
+            [Workload::BitposRange],
+            "the BITPOS range floor A/B must isolate the exact profiled workload"
+        );
+    }
 
     let perf_version = command_output("perf", &["--version"]);
     assert!(
@@ -1280,6 +1420,7 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
             &root,
             server_core,
             client_threads,
+            bitpos_range_floor_ab,
         ),
         Server::spawn(
             &binary,
@@ -1288,6 +1429,7 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
             &root,
             server_core,
             client_threads,
+            bitpos_range_floor_ab,
         ),
         Server::spawn(
             &binary,
@@ -1296,6 +1438,7 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
             &root,
             server_core,
             client_threads,
+            bitpos_range_floor_ab,
         ),
         Server::spawn(
             &binary,
@@ -1304,6 +1447,7 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
             &root,
             server_core,
             client_threads,
+            bitpos_range_floor_ab,
         ),
     ];
     let server_hashes = Arm::ALL.map(|arm| servers[arm.index()].executing_elf_sha256());
@@ -1325,11 +1469,36 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
             server_hashes[arm.index()]
         );
     }
-    servers[Arm::IoUring.index()].assert_flag_reached_process();
+    if bitpos_range_floor_ab {
+        println!(
+            "ARM_SEMANTICS control_a=io_uring+frozen_pre_bitpos_range_floor \
+control_b=io_uring+frozen_pre_bitpos_range_floor \
+candidate=io_uring+bitpos_range_floor incumbent=vendored_redis_7.2.4"
+        );
+        for arm in [Arm::MioA, Arm::MioB, Arm::IoUring] {
+            servers[arm.index()].assert_flag_reached_process();
+        }
+        servers[Arm::MioA.index()]
+            .assert_environment_value(BITPOS_RANGE_FLOOR_CONTROL_ENV, Some("1"));
+        servers[Arm::MioB.index()]
+            .assert_environment_value(BITPOS_RANGE_FLOOR_CONTROL_ENV, Some("1"));
+        servers[Arm::IoUring.index()]
+            .assert_environment_value(BITPOS_RANGE_FLOOR_CONTROL_ENV, None);
+    } else {
+        println!(
+            "ARM_SEMANTICS control_a=mio control_b=mio \
+candidate=io_uring incumbent=vendored_redis_7.2.4"
+        );
+        servers[Arm::IoUring.index()].assert_flag_reached_process();
+    }
 
     let mut verdicts = Vec::new();
     for workload in workloads {
         for pipeline in &pipelines {
+            // Read-only/profiled workloads may require seeded server state.
+            // Prime every arm before profiling, then measure_configuration
+            // re-primes all four arms immediately before its warmup.
+            prefill(&mut servers, workload);
             profile_io_uring_path(
                 &mut servers[Arm::IoUring.index()],
                 &root,

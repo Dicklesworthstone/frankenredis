@@ -28,6 +28,87 @@ Every new KEEP declares exactly one class:
 modified entries in both ledger files. It also preserves the ELF self-report,
 A/A bootstrap median-CI, never-CV, counted-mechanism, and retry-predicate gates.
 
+## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — exact ranged BITPOS front dispatch is 1.3323x live Redis at saturated P16 (`frankenredis-ohsk5.67`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes.** The campaign result is the
+  FrankenRedis/Redis throughput ratio against the actual vendored Redis 7.2.4
+  server running as a live arm in the same invocation. The same-ELF
+  pre-route/candidate speedup is maintenance only.
+- **Ledger/preflight admission.** The candidate search found the 2026-07-23
+  no-range BITPOS floor, read it by hand, and did not generalize it beyond its
+  explicit arity-3 scope. That row left arities 4/5/6 on the late cascade and
+  named roughly 6% dispatch self-time as the next floor threshold. A saturated
+  literal-current P16 profile of exact arity 5 measured **17.15%** in the named
+  reachability subset: `process_buffered_frames` **11.52%**, exact range parser
+  **3.10%**, borrowed executor **2.17%**, store scanner only **0.36%**, zero lost
+  samples, and named-subset Amdahl ceiling **1.207001x**. This is not a
+  total-lever ceiling because the floor also skips unenumerated earlier cascade
+  parsers/classifiers. It satisfied that reopening condition on distinct ground.
+- **Current baseline.** Before the source edit, a valid same-invocation live
+  Redis screen on `vmi1227854` had 97.287%/97.286% candidate/incumbent
+  utilization. Wall A/A null median **1.007795508x**, bootstrap 95% median CI
+  **[0.977900264, 1.018961758]**, set gate
+  **[0.955800528, 1.044199472]**. FrankenRedis/Redis throughput
+  **1.078039914x**, CI **[1.034217589, 1.095953291]**, was HOLD. The profiler
+  and baseline are target-selection evidence only.
+- **Lever and isomorphism.** The new classifier arm recognizes only canonical
+  `*5 BITPOS key bit start end`. It calls the same exact range parser and
+  `execute_plain_bitpos_borrowed` invocation as the prior later-cascade arm;
+  every parser/semantic refusal reaches the unchanged generic fallback. The
+  measurement feature freezes the old classifier inside the candidate ELF.
+  Both A/A controls used io_uring plus
+  `FR_PERF_AB_BITPOS_RANGE_FLOOR_ORIG=1`; candidate used io_uring without that
+  environment entry. The harness inspected every live process's command line
+  and environment, so no io_uring/mio difference contaminates the shape A/B.
+  The post-measure Clippy repair is behavior-isomorphic for this run: it removes
+  a feature assertion whose condition was compile-time `true` in the measured
+  feature-on build and preserves that fail-closed check only for feature-off
+  builds. The measured branch, workload, process configuration, and server
+  source are unchanged.
+- **One invocation, fixed work, identities.** Fail-closed strict-remote worker
+  `vmi1227854`, Linux 6.17.0-35, ran two frozen controls, candidate, and live
+  vendored Redis 7.2.4. There were 32 paired samples x 200,000 exact replies per
+  arm (**6.4 million/arm**), 50 persistent clients in four shards on CPUs
+  0/1/2/4, server CPU 9, all 24 arm orders, and 25-group interleaving. Every
+  BITPOS reply was exactly `:56\r\n`. The executing harness self-reported ELF
+  SHA-256
+  **`c1744bdea50946a409508c6a5a75af7acda2ba1fdedff80b8e19f9c5a716a1ac`**.
+  All FrankenRedis processes self-reported `/proc/PID/exe` SHA-256
+  **`651a983f0346a7d321fc133232324418616a811e986c7c568fb8b989c8c93428`**;
+  Redis self-reported
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+- **Profile and competitive decision.** The final candidate profile lost zero
+  samples and measured **8.85%** in the named BITPOS/dispatch reachability subset:
+  `process_buffered_frames` 3.46%, borrowed executor 2.81%, exact parser 2.05%,
+  scanner 0.53%, named-subset Amdahl ceiling **1.097093x**. That subset excludes
+  cascade code absent from the candidate. The complete io_uring surface was
+  1.01% self-time. Candidate/Redis median server utilization was
+  96.465%/97.028%. Wall A/A null median **1.002914828x**, bootstrap 95% median
+  CI **[0.985970116, 1.047516956]**, set gate
+  **[0.904966089, 1.095033911]**. Frozen control/candidate throughput was
+  **1.247292566x**, CI **[1.199585385, 1.271696819]**, a SELF-SPEEDUP
+  maintenance result. FrankenRedis/Redis throughput (Redis wall / FrankenRedis
+  wall) was **1.332293549x**, bootstrap 95% median CI
+  **[1.280696087, 1.355886968]**: **COMPETITIVE KEEP**. CPU A/A null median was
+  **1.006471974x**, bootstrap 95% median CI
+  **[0.985630480, 1.051467544]**; control/candidate was **1.257501755x**, CI
+  **[1.233098241, 1.279702089]**, and competitive CPU efficiency was
+  **1.339339359x**, CI **[1.304348683, 1.368983137]**.
+- **Invalid attempts.** The short `vmi1149989` screen had invalid A/A 1.090x;
+  its deep retry found no quiet cores. `vmi1153651` was refused at
+  86.215%/86.059% server utilization. `vmi1152480` failed RCH project-root
+  preflight. They are routing failures, not verdicts, and none fell back local.
+- **Gate and retry predicate.** The bootstrap median-CI gate versus twice the
+  paired same-invocation A/A CI radius decided all timing verdicts. CV is
+  provenance only (wall null 6.188992%, competitive 5.870984%) and never a
+  gate. Re-run after changes to the dispatch classifier, exact range parser,
+  BITPOS borrowed executor/scanner, io_uring path, client driver or pinning,
+  Redis arm, kernel, allocator, or release codegen. Invalidate if either live
+  server median is below 90%, named target self-time is zero or samples are
+  lost, the live ELF hashes differ, any exact reply differs, the control
+  environment is not exclusive to both null arms, or the A/A validity bound
+  fails.
+
 ## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — saturated post-CQ P16 SET is 1.3325x live Redis; saturated P1 is HOLD (`frankenredis-ohsk5.67`)
 
 - **Claim class: COMPETITIVE. Campaign output: yes.** The qualifying result is

@@ -56,6 +56,10 @@ mimalloc = ["dep:mimalloc"]
 perf-ab-object-idletime-floor = []
 # Measurement-only control arm for the one-binary LPOS floor A/B.
 perf-ab-lpos-floor = []
+# Measurement-only control arm for the exact arity-5 BITPOS range floor.
+# The control processes set FR_PERF_AB_BITPOS_RANGE_FLOOR_ORIG=1; production
+# builds compile only the candidate classification.
+perf-ab-bitpos-range-floor = []
 # Measurement-only control arm for the one-binary XADD MAXLEN LIMIT floor A/B.
 # The control process sets FR_PERF_AB_XADD_LIMIT_FLOOR_ORIG=1; production builds
 # do not compile the environment-controlled bypass.

@@ -33,6 +33,99 @@ Redis arm and numeric ratio; a SELF-SPEEDUP needs the heading label and cannot
 mark itself as campaign output. Missing or contradictory classification exits
 **8**.
 
+## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — exact ranged BITPOS front dispatch is 1.3323x live Redis at saturated P16 (`frankenredis-ohsk5.67`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes.** The qualifying result is
+  FrankenRedis/Redis throughput against the actual vendored Redis 7.2.4 server
+  running as a live side-by-side arm in the same invocation. The frozen
+  pre-route/candidate ratio is SELF-SPEEDUP maintenance evidence only and is
+  not campaign output.
+- **Ledger-first admission and right-path proof.** Both ledgers and
+  `perf_candidate_preflight.py` were searched before proposing the exact
+  `BITPOS key bit start end` shape. The 2026-07-23 BITPOS row covered only
+  arity 3 (`BITPOS key bit`), explicitly left arities 4/5/6 on the later
+  cascade, and set a roughly 6% dispatch-self-time reopening threshold. A
+  literal-current saturated P16 screen cleared that predicate: the explicitly
+  named reachability subset carried **17.15% self-time**, including
+  `process_buffered_frames` **11.52%**, the exact range parser **3.10%**,
+  borrowed executor **2.17%**, and byte scanner only **0.36%**, with zero lost
+  samples and named-subset Amdahl elimination ceiling **1.207001x**. That is not
+  a total-lever ceiling: moving arity 5 to the floor also skips unenumerated
+  earlier cascade parsers/classifiers. Thus this is a dispatch lever on a
+  distinct hot command shape, not a retry of the no-range floor or a
+  store-scanner hypothesis.
+- **Pre-lever competitive state.** The admissible current-build screen on
+  `vmi1227854` saturated FrankenRedis/Redis at 97.287%/97.286%. Its
+  same-invocation wall A/A null median was **1.007795508x**, bootstrap 95% median
+  CI **[0.977900264, 1.018961758]**, and gate
+  **[0.955800528, 1.044199472]**. FrankenRedis/Redis throughput was
+  **1.078039914x**, CI **[1.034217589, 1.095953291]**: HOLD because the lower CI
+  overlapped the null-derived gate. This is target-selection evidence, not the
+  candidate result.
+- **One-ELF causal design and behavior preservation.** The one source lever
+  adds arity 5 to the existing borrowed dispatch floor. It invokes the exact
+  same `parse_borrowed_plain_bitpos_range_packet` and
+  `execute_plain_bitpos_borrowed(key, bit, (start, end, byte-unit))` calls as the
+  old later cascade; parser or semantic refusal falls back to the same generic
+  dispatcher. The benchmark compiled the pre-route classifier into that same
+  ELF: both null controls ran io_uring with
+  `FR_PERF_AB_BITPOS_RANGE_FLOOR_ORIG=1`, while the candidate ran io_uring
+  without it. The harness verified each live process's command line and
+  `/proc/PID/environ`, so the A/A and A/B isolate only dispatch position.
+  The post-measure Clippy repair is behavior-isomorphic for this invocation:
+  it removes an `assert!(cfg!(feature = "perf-ab-bitpos-range-floor"))` whose
+  condition was compile-time `true` in the measured feature build, while adding
+  the same fail-closed check only to feature-off builds. No measured feature-on
+  branch, workload, process configuration, or server source changed.
+- **Executing provenance and fixed work.** One fail-closed strict-remote
+  invocation on `vmi1227854` (Linux 6.17.0-35) ran two frozen controls, the
+  candidate, and live Redis 7.2.4. It used 32 paired samples, 200,000 exactly
+  verified `:56\r\n` replies per arm/sample (**6.4 million per arm**), 50
+  persistent clients across four shards pinned to CPUs 0/1/2/4, server CPU 9,
+  all 24 four-arm orders, and 25-group within-sample interleaving. The executing
+  harness self-reported ELF SHA-256
+  **`c1744bdea50946a409508c6a5a75af7acda2ba1fdedff80b8e19f9c5a716a1ac`**.
+  All three live FrankenRedis processes self-reported identical
+  `/proc/PID/exe` SHA-256
+  **`651a983f0346a7d321fc133232324418616a811e986c7c568fb8b989c8c93428`**;
+  Redis self-reported
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+- **Final profile and decision.** The candidate profile lost zero samples and
+  attributed **8.85% self-time** to the named BITPOS/dispatch reachability subset
+  (`process_buffered_frames` 3.46%, borrowed executor 2.81%, exact parser 2.05%,
+  scanner 0.53%), whose named-subset Amdahl ceiling is **1.097093x**; it does
+  not include the cascade code absent from the candidate. io_uring owned
+  submit/drain was 0.70% self and its complete surface 1.01%. Median server
+  utilization was 96.465% candidate and 97.028% Redis. Wall A/A null median was
+  **1.002914828x**, bootstrap 95% median CI
+  **[0.985970116, 1.047516956]**, yielding the prespecified two-radius gate
+  **[0.904966089, 1.095033911]**. Frozen control/candidate was
+  **1.247292566x**, CI **[1.199585385, 1.271696819]**: SELF-SPEEDUP maintenance.
+  FrankenRedis/Redis throughput (Redis wall / FrankenRedis wall) was
+  **1.332293549x**, bootstrap 95% median CI
+  **[1.280696087, 1.355886968]**: **COMPETITIVE KEEP**. CPU A/A null median was
+  **1.006471974x**, bootstrap 95% median CI
+  **[0.985630480, 1.051467544]**; control/candidate CPU was **1.257501755x**, CI
+  **[1.233098241, 1.279702089]**, and competitive CPU efficiency was
+  **1.339339359x**, CI **[1.304348683, 1.368983137]**.
+- **Invalid routing attempts are not results.** An 8-sample/50k-op screen on
+  `vmi1149989` failed the A/A validity bound at 1.090x; its longer retry found
+  no quiet cores. `vmi1153651` reached only 86.215%/86.059% median server
+  utilization and was refused as client-bound. `vmi1152480` failed RCH's
+  project-root preflight. None fell back locally; the valid run above satisfied
+  their predicates.
+- **Decision rule and retry predicate.** The bootstrap median-CI gate against
+  twice the same-invocation A/A CI radius determined every verdict. CV is
+  provenance only (wall null 6.188992%, competitive 5.870984%) and never a
+  gate. Re-run after changes to the dispatch-floor classifier, exact BITPOS
+  range parser, borrowed executor/store scanner, io_uring output path, client
+  sharding/pinning, Redis incumbent, kernel, allocator, or release codegen.
+  Invalidate rather than compare if either server is below 90% median
+  utilization, the named command frame has zero self-time or lost samples,
+  live ELF identities differ, any exact reply differs, the control environment
+  is absent from either null arm or present in the candidate, or the A/A median
+  fails the harness validity bound.
+
 ## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — saturated P16 SET is 1.3325x Redis after asynchronous CQ batching; saturated P1 is HOLD (`frankenredis-ohsk5.67`)
 
 - **Claim class: COMPETITIVE. Campaign output: yes.** The campaign result is the
