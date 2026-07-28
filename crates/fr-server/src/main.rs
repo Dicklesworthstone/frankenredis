@@ -12396,6 +12396,7 @@ enum BorrowedDispatchFloorClass {
     MemoryUsage,
     ObjectEncoding,
     ObjectIdletime,
+    ObjectRefcount,
     Pfcount,
     Scard,
     Setbit,
@@ -12793,6 +12794,21 @@ fn borrowed_dispatch_floor_object_encoding(
         && rest.get(8..10).is_some_and(|ending| ending == b"\r\n")
 }
 
+fn borrowed_dispatch_floor_object_refcount(
+    token: &BorrowedDispatchFloorToken<'_>,
+    config: &ParserConfig,
+) -> bool {
+    if config.max_bulk_len < b"REFCOUNT".len() {
+        return false;
+    }
+    let Some(rest) = token.remaining.strip_prefix(b"$8\r\n") else {
+        return false;
+    };
+    rest.get(..8)
+        .is_some_and(|subcommand| subcommand.eq_ignore_ascii_case(b"REFCOUNT"))
+        && rest.get(8..10).is_some_and(|ending| ending == b"\r\n")
+}
+
 #[inline]
 fn classify_borrowed_dispatch_floor_packet_impl<
     const OBJECT_IDLETIME_FLOOR: bool,
@@ -12862,6 +12878,12 @@ fn classify_borrowed_dispatch_floor_packet_impl<
                 && borrowed_dispatch_floor_object_encoding(&token, config) =>
         {
             Some(BorrowedDispatchFloorClass::ObjectEncoding)
+        }
+        (3, BorrowedDispatchFloorCommand::Object)
+            if object_refcount_floor_enabled()
+                && borrowed_dispatch_floor_object_refcount(&token, config) =>
+        {
+            Some(BorrowedDispatchFloorClass::ObjectRefcount)
         }
         (4, BorrowedDispatchFloorCommand::Setbit) => Some(BorrowedDispatchFloorClass::Setbit),
         (4, BorrowedDispatchFloorCommand::Zcount) => Some(BorrowedDispatchFloorClass::Zcount),
@@ -13002,6 +13024,27 @@ fn object_encoding_floor_enabled() -> bool {
 #[cfg(not(feature = "perf-ab-object-encoding-floor"))]
 #[inline(always)]
 const fn object_encoding_floor_enabled() -> bool {
+    true
+}
+
+/// Preserve the exact pre-lever OBJECT REFCOUNT cascade route in the
+/// measurement ELF. The controls select it before their first packet;
+/// production builds compile only the front-dispatch route.
+#[cfg(feature = "perf-ab-object-refcount-floor")]
+#[inline]
+fn object_refcount_floor_enabled() -> bool {
+    static ORIG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    !*ORIG.get_or_init(
+        || match std::env::var("FR_PERF_AB_OBJECT_REFCOUNT_FLOOR_ORIG") {
+            Ok(value) => value == "1",
+            Err(_) => false,
+        },
+    )
+}
+
+#[cfg(not(feature = "perf-ab-object-refcount-floor"))]
+#[inline(always)]
+const fn object_refcount_floor_enabled() -> bool {
     true
 }
 
@@ -13173,6 +13216,19 @@ fn dispatch_floor_fast_object_encoding_into(
     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
     runtime.execute_plain_object_encoding_borrowed_into(packet.key, ts, client_resp3, out)?;
     Some(packet.consumed)
+}
+
+#[cfg_attr(feature = "perf-ab-object-refcount-floor", inline(never))]
+#[cfg_attr(not(feature = "perf-ab-object-refcount-floor"), inline)]
+fn dispatch_floor_fast_object_refcount(
+    unparsed: &[u8],
+    parser_config: &ParserConfig,
+    runtime: &mut Runtime,
+    ts: u64,
+) -> Option<(usize, RespFrame)> {
+    let packet = parse_borrowed_plain_object_refcount_packet(unparsed, parser_config)?;
+    let response = runtime.execute_plain_object_refcount_borrowed(packet.key, ts)?;
+    Some((packet.consumed, response))
 }
 
 #[cfg_attr(feature = "perf-ab-lpos-floor", inline(never))]
@@ -13816,6 +13872,22 @@ fn try_dispatch_floor_classified_action(
                 dispatch_floor_fast_object_encoding_into(unparsed, &parser_config, runtime, ts, out)
             {
                 Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::ObjectRefcount => {
+            if let Some((consumed, response)) =
+                dispatch_floor_fast_object_refcount(unparsed, &parser_config, runtime, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply { consumed, response })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,
@@ -32033,8 +32105,8 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             ),
             None
         );
-        // Only the measured IDLETIME and ENCODING shapes floor. Sibling OBJECT
-        // commands retain their unchanged borrowed-cascade route.
+        // Only the measured IDLETIME, ENCODING, and REFCOUNT shapes floor.
+        // Sibling OBJECT commands retain their unchanged borrowed-cascade route.
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(
                 b"*3\r\n$6\r\nOBJECT\r\n$4\r\nFREQ\r\n$1\r\nk\r\n",
@@ -32045,6 +32117,20 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(
                 b"*3\r\n$6\r\nOBJECT\r\n$8\r\nREFCOUNT\r\n$1\r\nk\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::ObjectRefcount)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$6\r\nObJeCt\r\n$8\r\nReFcOuNt\r\n$1\r\nk\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::ObjectRefcount)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*4\r\n$6\r\nOBJECT\r\n$8\r\nREFCOUNT\r\n$1\r\nk\r\n$1\r\nx\r\n",
                 &cfg,
             ),
             None

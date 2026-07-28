@@ -45,6 +45,7 @@ const IO_URING_FLAG: &str = "--io-uring-output";
 const BITPOS_RANGE_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_BITPOS_RANGE_FLOOR_ORIG";
 const BITFIELD_RO_TWO_GET_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_BITFIELD_RO_TWO_GET_FLOOR_ORIG";
 const OBJECT_ENCODING_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_OBJECT_ENCODING_FLOOR_ORIG";
+const OBJECT_REFCOUNT_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_OBJECT_REFCOUNT_FLOOR_ORIG";
 const SHUTDOWN: &[u8] = b"*2\r\n$8\r\nSHUTDOWN\r\n$6\r\nNOSAVE\r\n";
 const SET: &[u8] = b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n";
 const SET_REPLY: &[u8] = b"+OK\r\n";
@@ -63,6 +64,9 @@ const BITFIELD_RO_TWO_GET_REPLY: &[u8] = b"*2\r\n:18\r\n:52\r\n";
 const OBJECT_ENCODING_PREFILL: &[u8] = b"*3\r\n$3\r\nSET\r\n$8\r\nobject:k\r\n$2\r\n42\r\n";
 const OBJECT_ENCODING: &[u8] = b"*3\r\n$6\r\nOBJECT\r\n$8\r\nENCODING\r\n$8\r\nobject:k\r\n";
 const OBJECT_ENCODING_REPLY: &[u8] = b"$3\r\nint\r\n";
+const OBJECT_REFCOUNT_PREFILL: &[u8] = b"*3\r\n$3\r\nSET\r\n$8\r\nobject:k\r\n$5\r\nvalue\r\n";
+const OBJECT_REFCOUNT: &[u8] = b"*3\r\n$6\r\nOBJECT\r\n$8\r\nREFCOUNT\r\n$8\r\nobject:k\r\n";
+const OBJECT_REFCOUNT_REPLY: &[u8] = b":1\r\n";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Arm {
@@ -102,6 +106,7 @@ enum Workload {
     BitposRange,
     BitfieldRoTwoGet,
     ObjectEncoding,
+    ObjectRefcount,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -110,6 +115,7 @@ enum CommandFloorAb {
     BitposRange,
     BitfieldRoTwoGet,
     ObjectEncoding,
+    ObjectRefcount,
 }
 
 impl Workload {
@@ -121,6 +127,7 @@ impl Workload {
             Self::BitposRange => "bitpos-range",
             Self::BitfieldRoTwoGet => "bitfield-ro-two-get",
             Self::ObjectEncoding => "object-encoding",
+            Self::ObjectRefcount => "object-refcount",
         }
     }
 
@@ -146,6 +153,12 @@ impl Workload {
                 "parse_borrowed_plain_object_encoding_packet",
                 "object_encoding",
             ],
+            Self::ObjectRefcount => &[
+                "frankenredis::process_buffered_frames",
+                "execute_plain_object_refcount_borrowed",
+                "parse_borrowed_plain_object_refcount_packet",
+                "object_refcount",
+            ],
             Self::Set | Self::Get | Self::Mixed => &[],
         }
     }
@@ -163,6 +176,7 @@ impl Workload {
                 "bitpos-range" => Self::BitposRange,
                 "bitfield-ro-two-get" => Self::BitfieldRoTwoGet,
                 "object-encoding" => Self::ObjectEncoding,
+                "object-refcount" => Self::ObjectRefcount,
                 other => panic!("unknown FR_URING_AB_WORKLOADS item: {other}"),
             })
             .collect()
@@ -229,6 +243,16 @@ impl WorkloadPackets {
             }
             Workload::ObjectEncoding => {
                 let case = repeated_case(OBJECT_ENCODING, OBJECT_ENCODING_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::ObjectRefcount => {
+                let case = repeated_case(OBJECT_REFCOUNT, OBJECT_REFCOUNT_REPLY, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -443,6 +467,11 @@ impl Server {
         {
             command.env(OBJECT_ENCODING_FLOOR_CONTROL_ENV, "1");
         }
+        if matches!(command_floor_ab, CommandFloorAb::ObjectRefcount)
+            && matches!(arm, Arm::MioA | Arm::MioB)
+        {
+            command.env(OBJECT_REFCOUNT_FLOOR_CONTROL_ENV, "1");
+        }
         command
             .current_dir(&runtime_dir)
             .stdout(Stdio::null())
@@ -630,6 +659,8 @@ fn prefill(servers: &mut [Server; 4], workload: Workload) {
             exchange_one(server, BITFIELD_RO_TWO_GET_PREFILL, SET_REPLY);
         } else if matches!(workload, Workload::ObjectEncoding) {
             exchange_one(server, OBJECT_ENCODING_PREFILL, SET_REPLY);
+        } else if matches!(workload, Workload::ObjectRefcount) {
+            exchange_one(server, OBJECT_REFCOUNT_PREFILL, SET_REPLY);
         }
     }
 }
@@ -1483,6 +1514,7 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
     let bitpos_range_floor_ab = parse_bool_env("FR_URING_AB_BITPOS_RANGE_FLOOR");
     let bitfield_ro_two_get_floor_ab = parse_bool_env("FR_URING_AB_BITFIELD_RO_TWO_GET_FLOOR");
     let object_encoding_floor_ab = parse_bool_env("FR_URING_AB_OBJECT_ENCODING_FLOOR");
+    let object_refcount_floor_ab = parse_bool_env("FR_URING_AB_OBJECT_REFCOUNT_FLOOR");
     assert!(!workloads.is_empty(), "at least one workload is required");
     assert!(!pipelines.is_empty(), "at least one pipeline is required");
     #[cfg(not(feature = "perf-ab-bitpos-range-floor"))]
@@ -1503,10 +1535,17 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
         "FR_URING_AB_OBJECT_ENCODING_FLOOR=1 requires \
 --features perf-ab-object-encoding-floor"
     );
+    #[cfg(not(feature = "perf-ab-object-refcount-floor"))]
+    assert!(
+        !object_refcount_floor_ab,
+        "FR_URING_AB_OBJECT_REFCOUNT_FLOOR=1 requires \
+--features perf-ab-object-refcount-floor"
+    );
     assert!(
         usize::from(bitpos_range_floor_ab)
             + usize::from(bitfield_ro_two_get_floor_ab)
             + usize::from(object_encoding_floor_ab)
+            + usize::from(object_refcount_floor_ab)
             <= 1,
         "run only one command-shape floor experiment per invocation"
     );
@@ -1516,6 +1555,8 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
         CommandFloorAb::BitfieldRoTwoGet
     } else if object_encoding_floor_ab {
         CommandFloorAb::ObjectEncoding
+    } else if object_refcount_floor_ab {
+        CommandFloorAb::ObjectRefcount
     } else {
         CommandFloorAb::None
     };
@@ -1538,6 +1579,13 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
             workloads,
             [Workload::ObjectEncoding],
             "the OBJECT ENCODING floor A/B must isolate the exact profiled workload"
+        );
+    }
+    if object_refcount_floor_ab {
+        assert_eq!(
+            workloads,
+            [Workload::ObjectRefcount],
+            "the OBJECT REFCOUNT floor A/B must isolate the exact profiled workload"
         );
     }
 
@@ -1652,6 +1700,21 @@ candidate=io_uring+object_encoding_floor incumbent=vendored_redis_7.2.4"
             .assert_environment_value(OBJECT_ENCODING_FLOOR_CONTROL_ENV, Some("1"));
         servers[Arm::IoUring.index()]
             .assert_environment_value(OBJECT_ENCODING_FLOOR_CONTROL_ENV, None);
+    } else if object_refcount_floor_ab {
+        println!(
+            "ARM_SEMANTICS control_a=io_uring+frozen_pre_object_refcount_floor \
+control_b=io_uring+frozen_pre_object_refcount_floor \
+candidate=io_uring+object_refcount_floor incumbent=vendored_redis_7.2.4"
+        );
+        for arm in [Arm::MioA, Arm::MioB, Arm::IoUring] {
+            servers[arm.index()].assert_flag_reached_process();
+        }
+        servers[Arm::MioA.index()]
+            .assert_environment_value(OBJECT_REFCOUNT_FLOOR_CONTROL_ENV, Some("1"));
+        servers[Arm::MioB.index()]
+            .assert_environment_value(OBJECT_REFCOUNT_FLOOR_CONTROL_ENV, Some("1"));
+        servers[Arm::IoUring.index()]
+            .assert_environment_value(OBJECT_REFCOUNT_FLOOR_CONTROL_ENV, None);
     } else {
         println!(
             "ARM_SEMANTICS control_a=mio control_b=mio \

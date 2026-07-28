@@ -68,6 +68,10 @@ perf-ab-bitfield-ro-two-get-floor = []
 # The control processes set FR_PERF_AB_OBJECT_ENCODING_FLOOR_ORIG=1; production
 # builds compile only the front-dispatch candidate.
 perf-ab-object-encoding-floor = []
+# Measurement-only control arm for the exact present-key OBJECT REFCOUNT floor.
+# The control processes set FR_PERF_AB_OBJECT_REFCOUNT_FLOOR_ORIG=1; production
+# builds compile only the front-dispatch candidate.
+perf-ab-object-refcount-floor = []
 # Measurement-only control arm for the one-binary XADD MAXLEN LIMIT floor A/B.
 # The control process sets FR_PERF_AB_XADD_LIMIT_FLOOR_ORIG=1; production builds
 # do not compile the environment-controlled bypass.
