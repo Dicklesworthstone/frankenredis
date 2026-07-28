@@ -108,6 +108,12 @@ const XRANGE_ZERO: &[u8] = b"*4\r\n$6\r\nXRANGE\r\n$2\r\nxs\r\n$3\r\n0-0\r\n$3\r
 const XRANGE_ZERO_REPLY: &[u8] = b"*0\r\n";
 const XREVRANGE_ZERO: &[u8] = b"*4\r\n$9\r\nXREVRANGE\r\n$2\r\nxs\r\n$3\r\n0-0\r\n$3\r\n0-0\r\n";
 const XREVRANGE_ZERO_REPLY: &[u8] = b"*0\r\n";
+const XPENDING_ZERO: &[u8] =
+    b"*6\r\n$8\r\nXPENDING\r\n$2\r\nxs\r\n$1\r\ng\r\n$3\r\n0-0\r\n$3\r\n0-0\r\n$2\r\n10\r\n";
+const XPENDING_ZERO_REPLY: &[u8] = b"*0\r\n";
+const XREADGROUP_ALL_XS_G_C: &[u8] = b"*9\r\n$10\r\nXREADGROUP\r\n$5\r\nGROUP\r\n\
+$1\r\ng\r\n$1\r\nc\r\n$5\r\nCOUNT\r\n$4\r\n1000\r\n$7\r\nSTREAMS\r\n$2\r\nxs\r\n\
+$1\r\n>\r\n";
 const XGROUP_CREATE_XS_G: &[u8] =
     b"*5\r\n$6\r\nXGROUP\r\n$6\r\nCREATE\r\n$2\r\nxs\r\n$1\r\ng\r\n$3\r\n0-0\r\n";
 const XGROUP_CREATECONSUMER_XS_G_C: &[u8] = b"*5\r\n$6\r\nXGROUP\r\n$14\r\n\
@@ -162,6 +168,7 @@ enum Workload {
     XclaimMissing,
     XrangeZero,
     XrevrangeZero,
+    XpendingZero,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -202,6 +209,7 @@ impl Workload {
             Self::XclaimMissing => "xclaim-missing",
             Self::XrangeZero => "xrange-zero",
             Self::XrevrangeZero => "xrevrange-zero",
+            Self::XpendingZero => "xpending-zero",
         }
     }
 
@@ -316,6 +324,17 @@ impl Workload {
                 "fr_command::parse_stream_range_bound",
                 "fr_store::Store::xrange_borrow_scan",
             ],
+            Self::XpendingZero => &[
+                "frankenredis::process_buffered_frames",
+                "dispatch_floor_fast_xpending_zero",
+                "execute_plain_xpending_zero_borrowed_into",
+                "parse_borrowed_plain_key_arg4_packet",
+                "fr_runtime::Runtime::execute_internal",
+                "fr_command::execute_dispatch",
+                "fr_command::xpending",
+                "fr_command::parse_stream_range_bound",
+                "fr_store::Store::xpending_entries",
+            ],
             Self::Set | Self::Get | Self::Mixed => &[],
         }
     }
@@ -344,6 +363,7 @@ impl Workload {
                 "xclaim-missing" => Self::XclaimMissing,
                 "xrange-zero" => Self::XrangeZero,
                 "xrevrange-zero" => Self::XrevrangeZero,
+                "xpending-zero" => Self::XpendingZero,
                 other => panic!("unknown FR_URING_AB_WORKLOADS item: {other}"),
             })
             .collect()
@@ -520,6 +540,16 @@ impl WorkloadPackets {
             }
             Workload::XrevrangeZero => {
                 let case = repeated_case(XREVRANGE_ZERO, XREVRANGE_ZERO_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::XpendingZero => {
+                let case = repeated_case(XPENDING_ZERO, XPENDING_ZERO_REPLY, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -986,6 +1016,21 @@ $1\r\nf\r\n$1\r\nv\r\n",
     ExchangeCase { request, response }
 }
 
+fn seeded_pending_prefill() -> ExchangeCase {
+    let request = XREADGROUP_ALL_XS_G_C.to_vec();
+    let mut response = Vec::new();
+    response.extend_from_slice(b"*1\r\n*2\r\n$2\r\nxs\r\n*1000\r\n");
+    for id in 1..=XTRIM_MINID_NOOP_PREFILL_ENTRIES {
+        let stream_id = format!("{id}-0");
+        let record = format!(
+            "*2\r\n${}\r\n{stream_id}\r\n*2\r\n$1\r\nf\r\n$1\r\nv\r\n",
+            stream_id.len()
+        );
+        response.extend_from_slice(record.as_bytes());
+    }
+    ExchangeCase { request, response }
+}
+
 fn prefill(servers: &mut [Server; 4], workload: Workload) {
     let seeded_stream = matches!(
         workload,
@@ -995,6 +1040,7 @@ fn prefill(servers: &mut [Server; 4], workload: Workload) {
             | Workload::XclaimMissing
             | Workload::XrangeZero
             | Workload::XrevrangeZero
+            | Workload::XpendingZero
     )
     .then(seeded_stream_prefill);
     for server in servers.iter_mut() {
@@ -1010,11 +1056,18 @@ fn prefill(servers: &mut [Server; 4], workload: Workload) {
         } else if let Some(case) = &seeded_stream {
             exchange_one(server, &case.request, &case.response);
         }
-        if matches!(workload, Workload::XackMissing | Workload::XclaimMissing) {
+        if matches!(
+            workload,
+            Workload::XackMissing | Workload::XclaimMissing | Workload::XpendingZero
+        ) {
             exchange_one(server, XGROUP_CREATE_XS_G, SET_REPLY);
         }
         if matches!(workload, Workload::XclaimMissing) {
             exchange_one(server, XGROUP_CREATECONSUMER_XS_G_C, b":1\r\n");
+        }
+        if matches!(workload, Workload::XpendingZero) {
+            let case = seeded_pending_prefill();
+            exchange_one(server, &case.request, &case.response);
         }
     }
 }

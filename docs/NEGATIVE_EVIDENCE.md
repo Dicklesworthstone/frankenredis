@@ -33,6 +33,56 @@ Redis arm and numeric ratio; a SELF-SPEEDUP needs the heading label and cannot
 mark itself as campaign output. Missing or contradictory classification exits
 **8**.
 
+## 2026-07-28 MossyBluff (cod/MEASURE): PROFILE REJECT — exact impossible-ID `XPENDING xs g 0-0 0-0 10` cannot close its incumbent gap (`frankenredis-xcvdx`)
+
+- **Ledger admission and real fixture.** The exact-phrase preflight was clear.
+  Every broader XPENDING row was then read by hand. The 2026-07-04 summary/
+  entries lookup-collapse row is a valid counted mechanism on a different
+  store probe; the 2026-06-28 PEL-representation row establishes logarithmic
+  storage rather than this front floor; the ID-formatting row applies only to
+  nonempty replies. The remaining hits are correctness/state-machine or RESP3
+  evidence. None measured this exact extended command. The harness creates
+  1,000 explicit stream entries, creates group `g`, delivers all 1,000 to
+  consumer `c`, and byte-checks the complete deterministic XREADGROUP setup
+  reply on all four arms before measuring the empty impossible interval.
+- **Untouched-source invocation.** Production source was not changed. Fully
+  reserved `vmi1227854` (Linux 6.17.0-35-generic) ran 48 samples x 200,000
+  fixed replies/arm at P16, with 50 persistent clients in nine pinned client
+  shards, a dedicated server core, 125-group within-sample interleaving, and
+  two complete 24-order cycles. The harness self-reported ELF SHA-256
+  **`0cd8d101cac80f1ba36d2e7d9bb37dbef90ba3e0c75620065b090c1e50a0008a`**;
+  every executing FrankenRedis arm self-reported ELF SHA-256
+  **`28b1461c9e2ba0cf09a4f021083bdb865af7400ee09b7b35fbbbd9245eaa175b`**;
+  Redis self-reported ELF SHA-256
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+  FrankenRedis/Redis utilization was 98.996%/98.501%.
+- **Profile decision before a lever.** The zero-lost profile attributed only
+  **19.50% self-time** to the named command surface
+  (`process_buffered_frames` 17.40%, `fr_command::xpending` 1.13%, borrowed
+  key+4 parser 0.86%, range-bound parser 0.11%), an Amdahl elimination ceiling
+  of **1.242236x**. Async completion was 0.36%, ceiling 1.003613x. Current
+  FrankenRedis/Redis throughput was **0.384503728x**, bootstrap 95% median CI
+  **[0.373586025, 0.400658140]**. Parity needs **2.600755018x**; even deleting
+  the complete named surface yields at most **0.477644373x** Redis. Production
+  therefore remains unchanged.
+- **Authenticated rejection and retry predicate.** In the same invocation,
+  wall A/A null median was **1.003772667x**, bootstrap 95% median CI
+  **[0.983770322, 1.038140715]**, inside gate
+  **[0.923718570, 1.076281430]**. CPU A/A was **1.003265952x**, CI
+  **[0.984861875, 1.037211608]**; CPU FrankenRedis/Redis throughput was
+  **0.382625880x**, CI **[0.370820411, 0.397121844]**. Bootstrap median-CI
+  decided the verdict, never CV; CV is provenance only (wall null 7.442384%,
+  competitive 9.507513%). Strict-remote workspace all-target check and Clippy
+  with `-D warnings`, rustfmt, and diff checks passed. **Retry predicate:**
+  Reopen only if a literal-current zero-lost profile identifies additional
+  removable XPENDING-specific frames
+  sufficient to raise the computed total Amdahl ceiling above
+  **2.600755018x**, or after Redis XPENDING semantics, PEL storage, parser/
+  dispatch architecture, allocator, kernel, or release codegen changes. Any
+  retry must retain the populated 1,000-entry PEL, exact interval, live Redis
+  arm, executable self-reports, same-invocation A/A, complete order cycles, and
+  >=90% server utilization.
+
 ## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — impossible-ID `XREVRANGE xs 0-0 0-0` is 105.1630x live Redis at saturated P16 (`frankenredis-4o1gl`)
 
 - **Claim class: COMPETITIVE. Campaign output: yes.** The qualifying number is
