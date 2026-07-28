@@ -91,6 +91,8 @@ const HDEL_MISSING_FIELD: &[u8] = b"*3\r\n$4\r\nHDEL\r\n$1\r\nh\r\n$6\r\nabsent\
 const HDEL_MISSING_FIELD_REPLY: &[u8] = b":0\r\n";
 const HGET_MISSING_FIELD: &[u8] = b"*3\r\n$4\r\nHGET\r\n$1\r\nh\r\n$6\r\nabsent\r\n";
 const HGET_MISSING_FIELD_REPLY: &[u8] = b"$-1\r\n";
+const HEXISTS_MISSING_FIELD: &[u8] = b"*3\r\n$7\r\nHEXISTS\r\n$1\r\nh\r\n$6\r\nabsent\r\n";
+const HEXISTS_MISSING_FIELD_REPLY: &[u8] = b":0\r\n";
 const MISSING_FIELD_HASH_HLEN: &[u8] = b"*2\r\n$4\r\nHLEN\r\n$1\r\nh\r\n";
 const MISSING_FIELD_HASH_HLEN_REPLY: &[u8] = b":500\r\n";
 const MISSING_FIELD_HASH_ENCODING: &[u8] = b"*3\r\n$6\r\nOBJECT\r\n$8\r\nENCODING\r\n$1\r\nh\r\n";
@@ -203,6 +205,7 @@ enum Workload {
     LrangeInverted,
     HdelMissingField,
     HgetMissingField,
+    HexistsMissingField,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -251,6 +254,7 @@ impl Workload {
             Self::LrangeInverted => "lrange-inverted",
             Self::HdelMissingField => "hdel-missing-field",
             Self::HgetMissingField => "hget-missing-field",
+            Self::HexistsMissingField => "hexists-missing-field",
         }
     }
 
@@ -432,6 +436,18 @@ impl Workload {
                 "fr_store::packed_set::CompactFieldMap::lookup_slot",
                 "fr_store::packed_set::CompactFieldMap::lookup_slot_prehashed",
             ],
+            Self::HexistsMissingField => &[
+                "frankenredis::process_buffered_frames",
+                "__memcmp_avx2_movbe",
+                "parse_borrowed_plain_hexists_packet",
+                "execute_plain_hexists_borrowed",
+                "fr_store::Store::hexists",
+                "fr_store::Store::lookup_live_for_read_mut",
+                "fr_store::packed_set::HashFieldMap::contains_key",
+                "fr_store::packed_set::CompactFieldMap::contains_key",
+                "fr_store::packed_set::CompactFieldMap::lookup_slot",
+                "fr_store::packed_set::CompactFieldMap::lookup_slot_prehashed",
+            ],
             Self::Set | Self::Get | Self::Mixed => &[],
         }
     }
@@ -467,6 +483,7 @@ impl Workload {
                 "lrange-inverted" => Self::LrangeInverted,
                 "hdel-missing-field" => Self::HdelMissingField,
                 "hget-missing-field" => Self::HgetMissingField,
+                "hexists-missing-field" => Self::HexistsMissingField,
                 other => panic!("unknown FR_URING_AB_WORKLOADS item: {other}"),
             })
             .collect()
@@ -717,6 +734,17 @@ impl WorkloadPackets {
             }
             Workload::HgetMissingField => {
                 let case = repeated_case(HGET_MISSING_FIELD, HGET_MISSING_FIELD_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::HexistsMissingField => {
+                let case =
+                    repeated_case(HEXISTS_MISSING_FIELD, HEXISTS_MISSING_FIELD_REPLY, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -1260,7 +1288,7 @@ fn prefill(servers: &mut [Server; 4], workload: Workload) {
             );
         } else if matches!(
             workload,
-            Workload::HdelMissingField | Workload::HgetMissingField
+            Workload::HdelMissingField | Workload::HgetMissingField | Workload::HexistsMissingField
         ) {
             let case = missing_field_hash_prefill();
             exchange_one(server, &case.request, &case.response);
