@@ -33,6 +33,72 @@ Redis arm and numeric ratio; a SELF-SPEEDUP needs the heading label and cannot
 mark itself as campaign output. Missing or contradictory classification exits
 **8**.
 
+## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — two-field `HMGET` on a pristine 500-field hash is 3.2363x live Redis at saturated P16 (`frankenredis-8ey1v`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes.** This is current io_uring
+  FrankenRedis/Redis throughput against the actual vendored Redis 7.2.4 server
+  live beside both A/A controls in one invocation. Production source was not
+  changed; only the authenticated harness gained this command shape. The
+  io_uring/mio SELF-SPEEDUP comparison is maintenance only and remained HOLD.
+- **Ledger admission and structural fixture.** Exact preflights for
+  `HMGET h f250 absent`, `500-field HMGET`, `two-field HMGET`, and
+  `hash-listpack HMGET` were clear, then every broader HMGET row was read and
+  adjudicated. The field-TTL allocation fast exit, key-lookup collapse,
+  per-field expiry-loop hoist, LFU three-to-one probe collapse, borrowed
+  zero-copy reply, and parser-cap rows are distinct **VALID-MECHANISM**
+  self-speedups. Historical 4-32-field Redis ratios are unsupported routing
+  evidence without this exact A/A/ELF/fixture contract; their response-encode
+  dilution also differs from this two-field shape. The idempotent fixture
+  resets `h`, inserts exactly 500 fields `f000` through `f499` with one-byte
+  values, asserts `HLEN h == 500` in every arm, and asserts
+  `OBJECT ENCODING h == listpack` in Redis. The exact repeatable command is
+  `HMGET h f250 absent`: Redis scans to the existing middle field and then
+  exhausts its listpack for the missing field, while FrankenRedis performs two
+  expected-O(1) lookups in the `CompactFieldMap` used above 128 fields. Every
+  reply is byte-checked as `*2\r\n$1\r\nv\r\n$-1\r\n`.
+- **Same executable, named profile, and fixed work.** Fully reserved
+  `vmi1227854` (Linux 6.17.0-35-generic) ran 48 samples x 200,000
+  replies/arm at P16, 50 persistent clients in eight pinned shards, one
+  dedicated server core, 125-group within-sample interleaving, and two
+  complete 24-order cycles. The harness self-reported ELF SHA-256
+  **`609e582c92358d4e42afd3d5ca3c49e7f281156e92e60f8cb20bdb23270b6ce3`**;
+  all three executing FrankenRedis arms self-reported ELF SHA-256
+  **`f257f794b59eb4026d3b08728dfc9e4e963f9f1cbecd09b80d455735fc0b30fb`**;
+  Redis self-reported ELF SHA-256
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+  Candidate/Redis median utilization was 98.741%/98.669%. A zero-lost profile
+  attributed **25.10% self-time** to the named HMGET surface
+  (`process_buffered_frames` 22.95%, exact parser 0.80%, borrowed executor
+  0.69%, store loop 0.66%), for an elimination ceiling of **1.335113x**. The
+  async CQ surface and owned self-time were both 0.11%.
+- **Median-CI competitive verdict.** Wall A/A null median was
+  **1.017555501x**, bootstrap 95% median CI
+  **[0.959351545, 1.036440886]**, inside gate
+  **[0.918703090, 1.081296910]**. io_uring FrankenRedis/Redis throughput was
+  **3.236272290x**, CI **[3.152897987, 3.295986119]**: COMPETITIVE KEEP. CPU
+  A/A null median was **1.017902849x**, CI
+  **[0.968148311, 1.033880382]**, inside gate
+  **[0.932239236, 1.067760764]**; CPU FrankenRedis/Redis throughput was
+  **3.243538643x**, CI **[3.150892626, 3.298309235]**. The ancillary
+  io_uring/mio SELF-SPEEDUP remained HOLD at 1.044955429x, CI
+  [1.012178737, 1.055276509]; CPU was likewise HOLD at 1.044878946x, CI
+  [1.013557204, 1.057100873]. Bootstrap median-CI decided every verdict, never
+  CV; CV is provenance only (wall null 8.615283%, self 7.460850%,
+  competitive 8.981879%; CPU null 8.470617%, self 7.288713%, competitive
+  8.563673%).
+- **Preflight and retry predicate.** The quiet-core preflight rejected its
+  first core set and retried before spawning any server or collecting any timed
+  sample; the second set passed, so no partial measurement was mixed into the
+  result. Reopen after Redis hash encoding thresholds, the
+  500-field/field-length/field-position fixture, FrankenRedis's 128-field
+  promotion or `CompactFieldMap`, HMGET parser/runtime/store/reply encoding,
+  Redis version, allocator, kernel, harness, or release-codegen changes, or if
+  a fresh valid live-incumbent CI overlaps 1.0. Any retry must retain the
+  pristine fixture, exact existing-plus-missing field order, Redis listpack
+  assertion, exact two-element reply, live Redis arm, ELF self-reports,
+  same-invocation A/A, complete order cycles, zero-lost nonzero-self profile,
+  byte checking, and >=90% server utilization.
+
 ## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — existing-field `HSTRLEN` on a pristine 500-field hash is 3.3009x live Redis at saturated P16 (`frankenredis-vcd1t`)
 
 - **Claim class: COMPETITIVE. Campaign output: yes.** This is current io_uring
