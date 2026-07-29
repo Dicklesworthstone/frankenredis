@@ -555,6 +555,44 @@ fn spawn_frankenredis(port: u16, primary_port: Option<u16>) -> ManagedChild {
     spawn_frankenredis_opts(port, primary_port, None, None)
 }
 
+fn spawn_frankenredis_sharded_set_get(port: u16, workers: usize) -> ManagedChild {
+    let log_dir = unique_temp_dir("frankenredis-sharded-set-get-log");
+    let log_path = log_dir.join("stderr.log");
+    let log_file = std::fs::File::create(&log_path).expect("create sharded server log file");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_frankenredis"));
+    command
+        .arg("--bind")
+        .arg("127.0.0.1")
+        .arg("--port")
+        .arg(port.to_string())
+        .arg("--mode")
+        .arg("strict")
+        .arg("--experimental-sharded-set-get-workers")
+        .arg(workers.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(log_file));
+    let mut child = ManagedChild::spawn(command, Some(log_path));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
+            break;
+        }
+        if let Some(status) = child.child.try_wait().expect("poll sharded server") {
+            panic!(
+                "sharded server exited before binding port {port} with {status}: {}",
+                child.log_contents().unwrap_or_default()
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "sharded server did not bind port {port}: {}",
+            child.log_contents().unwrap_or_default()
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    child
+}
+
 fn spawn_frankenredis_with_aof(port: u16) -> ManagedChild {
     let temp_dir = unique_temp_dir("frankenredis-aof-server");
     let aof_path = temp_dir.join("appendonly.aof");
@@ -979,6 +1017,49 @@ fn tcp_multiple_commands_pipelined() {
     );
     drop(client);
     server.join().expect("server thread");
+}
+
+#[test]
+fn sharded_set_get_p16_batches_match_legacy_redis() {
+    let fr_port = reserve_port();
+    let redis_port = reserve_port();
+    let _fr_server = spawn_frankenredis_sharded_set_get(fr_port, 8);
+    let _redis_server = spawn_legacy_redis(redis_port);
+    let mut fr = BufferedTcpClient::connect(fr_port);
+    let mut redis = BufferedTcpClient::connect(redis_port);
+    assert_ne!(
+        usize::from(fr_store::crc16_slot(b"a")) % 8,
+        usize::from(fr_store::crc16_slot(b"b")) % 8,
+        "fixture keys must cross a worker boundary"
+    );
+
+    let mut pipeline = Vec::new();
+    let mut command_count = 0usize;
+    for (key, value) in [
+        (b"a".as_slice(), b"value-a".as_slice()),
+        (b"b".as_slice(), b"value-b".as_slice()),
+    ] {
+        for _ in 0..8 {
+            pipeline.extend_from_slice(&encode_command(&[b"SET", key, value]));
+            pipeline.extend_from_slice(&encode_command(&[b"GET", key]));
+            command_count += 2;
+        }
+    }
+    pipeline.extend_from_slice(&encode_command(&[b"PING", b"after-batches"]));
+    command_count += 1;
+
+    fr.write_all(&pipeline);
+    redis.write_all(&pipeline);
+    let fr_responses = fr.read_responses(command_count);
+    let redis_responses = redis.read_responses(command_count);
+    assert_eq!(
+        fr_responses, redis_responses,
+        "P16 same-shard batches, the shard transition, and trailing local reply must preserve Redis order"
+    );
+    assert_eq!(
+        fr_responses.last(),
+        Some(&RespFrame::BulkString(Some(b"after-batches".to_vec())))
+    );
 }
 
 #[test]

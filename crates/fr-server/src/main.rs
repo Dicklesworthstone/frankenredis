@@ -55,13 +55,13 @@ const DEFAULT_MODE: &str = "strict";
 /// connection handles start at `MAX_LISTENERS`. Lets CONFIG SET bind rebind a
 /// multi-address listener set without colliding with client tokens.
 const MAX_LISTENERS: usize = 16;
-const WRITER_WAKE_TOKEN: Token = Token(usize::MAX);
-const SHARDED_SET_GET_WAKE_TOKEN: Token = Token(usize::MAX - 1);
+const BACKGROUND_WAKE_TOKEN: Token = Token(usize::MAX);
 const WRITER_POOL_WORKERS: usize = 2;
 const WRITER_QUEUE_BOUND: usize = 1024;
 const SHARDED_SET_GET_TOTAL_QUEUE_BOUND: usize = 65_536;
 const SHARDED_SET_GET_MAX_WORKERS: usize = 256;
 const SHARDED_SET_GET_MAX_IN_FLIGHT_PER_CLIENT: usize = 4_096;
+const SHARDED_SET_GET_MAX_COMMANDS_PER_BATCH: usize = 16;
 
 const REPLICA_ACK_INTERVAL_MS: u64 = 1_000;
 const REPLICA_RECONNECT_BACKOFF_MS: u64 = 250;
@@ -387,9 +387,9 @@ impl ShardedReplyOrder {
         self.next_sequence
     }
 
-    fn note_enqueued(&mut self) {
-        self.next_sequence = self.next_sequence.wrapping_add(1);
-        self.in_flight += 1;
+    fn note_enqueued(&mut self, count: usize) {
+        self.next_sequence = self.next_sequence.wrapping_add(count as u64);
+        self.in_flight += count;
     }
 
     fn complete_remote(&mut self, sequence: u64, response: Vec<u8>, out: &mut Vec<u8>) -> bool {
@@ -611,11 +611,10 @@ struct WriterPool {
 }
 
 impl WriterPool {
-    fn new(poll: &Poll) -> io::Result<Self> {
+    fn new(waker: Arc<Waker>) -> io::Result<Self> {
         let (job_tx, job_rx) = mpsc::sync_channel(WRITER_QUEUE_BOUND);
         let (completion_tx, completion_rx) = mpsc::channel();
         let shared_rx = Arc::new(Mutex::new(job_rx));
-        let waker = Arc::new(Waker::new(poll.registry(), WRITER_WAKE_TOKEN)?);
 
         for worker_idx in 0..WRITER_POOL_WORKERS {
             let rx = Arc::clone(&shared_rx);
@@ -689,10 +688,30 @@ struct ShardedSetGetJob {
     command: ShardedSetGetCommand,
 }
 
+#[derive(Clone, Copy)]
+struct ShardedSetGetBatchParse {
+    token: Token,
+    first_sequence: u64,
+    now_ms: u64,
+    worker_count: usize,
+    command_limit: usize,
+}
+
+struct ParsedShardedSetGetBatch {
+    shard: usize,
+    jobs: Vec<ShardedSetGetJob>,
+    consumed: usize,
+    first_command_consumed: usize,
+}
+
 struct ShardedSetGetCompletion {
     token: Token,
     sequence: u64,
     response: Vec<u8>,
+}
+
+struct ShardedSetGetCompletionBatch {
+    completions: Vec<ShardedSetGetCompletion>,
 }
 
 enum ShardedSetGetEnqueueError {
@@ -700,28 +719,97 @@ enum ShardedSetGetEnqueueError {
     Disconnected,
 }
 
+fn sharded_set_get_shard(key: &[u8], worker_count: usize) -> usize {
+    usize::from(fr_store::crc16_slot(key)) % worker_count
+}
+
+fn parse_sharded_set_get_batch(
+    input: &[u8],
+    parser_config: &ParserConfig,
+    parse: ShardedSetGetBatchParse,
+) -> Option<ParsedShardedSetGetBatch> {
+    debug_assert!(parse.worker_count > 0);
+    debug_assert!(parse.command_limit > 0);
+    let mut jobs = Vec::with_capacity(parse.command_limit);
+    let mut consumed_total = 0usize;
+    let mut batch_shard = None;
+    let mut first_command_consumed = 0usize;
+
+    while jobs.len() < parse.command_limit && consumed_total < input.len() {
+        let unparsed = &input[consumed_total..];
+        let (command, consumed) =
+            if let Some(packet) = parse_borrowed_plain_get_packet(unparsed, parser_config) {
+                (
+                    ShardedSetGetCommand::Get {
+                        key: packet.key.to_vec(),
+                    },
+                    packet.consumed,
+                )
+            } else if let Some(packet) = parse_borrowed_plain_set_packet(unparsed, parser_config) {
+                (
+                    ShardedSetGetCommand::Set {
+                        key: packet.key.to_vec(),
+                        value: packet.value.to_vec(),
+                    },
+                    packet.consumed,
+                )
+            } else {
+                break;
+            };
+        let shard = sharded_set_get_shard(command.key(), parse.worker_count);
+        if batch_shard.is_some_and(|expected| expected != shard) {
+            break;
+        }
+        batch_shard = Some(shard);
+        if jobs.is_empty() {
+            first_command_consumed = consumed;
+        }
+        let sequence = parse.first_sequence.wrapping_add(jobs.len() as u64);
+        jobs.push(ShardedSetGetJob {
+            token: parse.token,
+            sequence,
+            now_ms: parse.now_ms,
+            command,
+        });
+        consumed_total += consumed;
+    }
+
+    batch_shard.map(|shard| ParsedShardedSetGetBatch {
+        shard,
+        jobs,
+        consumed: consumed_total,
+        first_command_consumed,
+    })
+}
+
 /// Opt-in command-execution bus for the default-DB, exact SET/GET subset.
 ///
 /// Every key maps to exactly one worker-owned Runtime, so commands for one key
 /// remain FIFO and atomic without locks. Different keys can execute in parallel.
 /// The event-loop thread restores per-connection reply order when completions
-/// arrive. This deliberately is not a transparent full-server mode: startup
-/// rejects persistence/replication/config/auth surfaces and command dispatch
-/// rejects every stateful shape outside exact SET/GET.
+/// arrive. Up to 16 consecutive commands for one shard travel in a single job
+/// and completion envelope, amortizing channel synchronization and wakeups
+/// without moving any command across a shard boundary. This deliberately is not
+/// a transparent full-server mode: startup rejects persistence/replication/
+/// config/auth surfaces and command dispatch rejects every stateful shape
+/// outside exact SET/GET.
 struct ShardedSetGetPool {
-    jobs: Vec<mpsc::SyncSender<ShardedSetGetJob>>,
-    completions: Option<mpsc::Receiver<ShardedSetGetCompletion>>,
+    jobs: Vec<mpsc::SyncSender<Vec<ShardedSetGetJob>>>,
+    completions: Option<mpsc::Receiver<ShardedSetGetCompletionBatch>>,
     workers: Vec<thread::JoinHandle<()>>,
 }
 
 impl ShardedSetGetPool {
-    fn new(poll: &Poll, worker_count: usize) -> io::Result<Self> {
+    fn new(worker_count: usize, waker: Arc<Waker>) -> io::Result<Self> {
         debug_assert!(worker_count > 0);
-        let (completion_tx, completion_rx) = mpsc::sync_channel(SHARDED_SET_GET_TOTAL_QUEUE_BOUND);
-        let waker = Arc::new(Waker::new(poll.registry(), SHARDED_SET_GET_WAKE_TOKEN)?);
+        let completion_queue_bound =
+            SHARDED_SET_GET_TOTAL_QUEUE_BOUND.div_ceil(SHARDED_SET_GET_MAX_COMMANDS_PER_BATCH);
+        let (completion_tx, completion_rx) = mpsc::sync_channel(completion_queue_bound);
         let mut jobs = Vec::with_capacity(worker_count);
         let mut workers = Vec::with_capacity(worker_count);
-        let per_worker_queue_bound = SHARDED_SET_GET_TOTAL_QUEUE_BOUND.div_ceil(worker_count);
+        let per_worker_queue_bound = SHARDED_SET_GET_TOTAL_QUEUE_BOUND
+            .div_ceil(worker_count)
+            .div_ceil(SHARDED_SET_GET_MAX_COMMANDS_PER_BATCH);
 
         for worker_idx in 0..worker_count {
             let (job_tx, job_rx) = mpsc::sync_channel(per_worker_queue_bound);
@@ -745,9 +833,22 @@ impl ShardedSetGetPool {
         self.jobs.len()
     }
 
-    fn try_enqueue(&self, job: ShardedSetGetJob) -> Result<(), ShardedSetGetEnqueueError> {
-        let shard = usize::from(fr_store::crc16_slot(job.command.key())) % self.jobs.len();
-        match self.jobs[shard].try_send(job) {
+    fn shard_for_key(&self, key: &[u8]) -> usize {
+        sharded_set_get_shard(key, self.jobs.len())
+    }
+
+    fn try_enqueue_batch(
+        &self,
+        shard: usize,
+        jobs: Vec<ShardedSetGetJob>,
+    ) -> Result<(), ShardedSetGetEnqueueError> {
+        debug_assert!(!jobs.is_empty());
+        debug_assert!(jobs.len() <= SHARDED_SET_GET_MAX_COMMANDS_PER_BATCH);
+        debug_assert!(
+            jobs.iter()
+                .all(|job| self.shard_for_key(job.command.key()) == shard)
+        );
+        match self.jobs[shard].try_send(jobs) {
             Ok(()) => Ok(()),
             Err(mpsc::TrySendError::Full(_)) => Err(ShardedSetGetEnqueueError::Full),
             Err(mpsc::TrySendError::Disconnected(_)) => {
@@ -756,7 +857,7 @@ impl ShardedSetGetPool {
         }
     }
 
-    fn try_recv(&self) -> Result<ShardedSetGetCompletion, mpsc::TryRecvError> {
+    fn try_recv(&self) -> Result<ShardedSetGetCompletionBatch, mpsc::TryRecvError> {
         let Some(completions) = self.completions.as_ref() else {
             return Err(mpsc::TryRecvError::Disconnected);
         };
@@ -775,41 +876,47 @@ impl Drop for ShardedSetGetPool {
 }
 
 fn run_sharded_set_get_worker(
-    jobs: mpsc::Receiver<ShardedSetGetJob>,
-    completions: mpsc::SyncSender<ShardedSetGetCompletion>,
+    jobs: mpsc::Receiver<Vec<ShardedSetGetJob>>,
+    completions: mpsc::SyncSender<ShardedSetGetCompletionBatch>,
     waker: Arc<Waker>,
 ) {
     let mut runtime = Runtime::new(RuntimePolicy::default());
-    while let Ok(job) = jobs.recv() {
-        let response = match job.command {
-            ShardedSetGetCommand::Get { key } => {
-                let mut response = Vec::new();
-                if runtime
-                    .execute_plain_get_borrowed_into(&key, job.now_ms, false, &mut response)
-                    .is_none()
-                {
-                    response.extend_from_slice(
-                        b"-ERR sharded SET/GET worker rejected a default GET\r\n",
-                    );
+    while let Ok(batch) = jobs.recv() {
+        let mut batch_completions = Vec::with_capacity(batch.len());
+        for job in batch {
+            let response = match job.command {
+                ShardedSetGetCommand::Get { key } => {
+                    let mut response = Vec::new();
+                    if runtime
+                        .execute_plain_get_borrowed_into(&key, job.now_ms, false, &mut response)
+                        .is_none()
+                    {
+                        response.extend_from_slice(
+                            b"-ERR sharded SET/GET worker rejected a default GET\r\n",
+                        );
+                    }
+                    response
                 }
-                response
-            }
-            ShardedSetGetCommand::Set { key, value } => {
-                if runtime
-                    .execute_plain_set_borrowed_ok(&key, &value, job.now_ms)
-                    .is_some()
-                {
-                    b"+OK\r\n".to_vec()
-                } else {
-                    b"-ERR sharded SET/GET worker rejected a default SET\r\n".to_vec()
+                ShardedSetGetCommand::Set { key, value } => {
+                    if runtime
+                        .execute_plain_set_borrowed_ok(&key, &value, job.now_ms)
+                        .is_some()
+                    {
+                        b"+OK\r\n".to_vec()
+                    } else {
+                        b"-ERR sharded SET/GET worker rejected a default SET\r\n".to_vec()
+                    }
                 }
-            }
-        };
-        if completions
-            .send(ShardedSetGetCompletion {
+            };
+            batch_completions.push(ShardedSetGetCompletion {
                 token: job.token,
                 sequence: job.sequence,
                 response,
+            });
+        }
+        if completions
+            .send(ShardedSetGetCompletionBatch {
+                completions: batch_completions,
             })
             .is_err()
         {
@@ -1529,8 +1636,18 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    // mio permits exactly one Waker per Poll. Background pools share this
+    // registration and the event loop drains both completion queues whenever
+    // either producer wakes it.
+    let background_waker = match Waker::new(poll.registry(), BACKGROUND_WAKE_TOKEN) {
+        Ok(waker) => Arc::new(waker),
+        Err(e) => {
+            eprintln!("error: failed to create background completion waker: {e}");
+            return ExitCode::from(1);
+        }
+    };
     let sharded_set_get_pool = if let Some(worker_count) = sharded_set_get_workers {
-        match ShardedSetGetPool::new(&poll, worker_count) {
+        match ShardedSetGetPool::new(worker_count, Arc::clone(&background_waker)) {
             Ok(pool) => {
                 eprintln!(
                     "experimental key-sharded SET/GET execution enabled: workers={worker_count}"
@@ -1545,7 +1662,7 @@ fn main() -> ExitCode {
     } else {
         None
     };
-    let writer_pool = match WriterPool::new(&poll) {
+    let writer_pool = match WriterPool::new(background_waker) {
         Ok(pool) => Some(pool),
         Err(e) => {
             eprintln!("warn: writer handoff disabled: {e}");
@@ -1719,7 +1836,7 @@ fn main() -> ExitCode {
                         writer_pool.is_some(),
                     );
                 }
-                token if token == WRITER_WAKE_TOKEN => {
+                token if token == BACKGROUND_WAKE_TOKEN => {
                     drain_writer_completions(
                         writer_pool.as_ref(),
                         &mut clients,
@@ -1728,8 +1845,6 @@ fn main() -> ExitCode {
                         &mut write_tokens,
                         &mut closing_tokens,
                     );
-                }
-                token if token == SHARDED_SET_GET_WAKE_TOKEN => {
                     drain_sharded_set_get_completions(
                         sharded_set_get_pool.as_ref(),
                         &mut clients,
@@ -2218,24 +2333,14 @@ fn accept_connections(
 
         match listener.accept() {
             Ok((mut stream, peer_addr)) => {
-                if *next_handle < MAX_LISTENERS
-                    || matches!(
-                        Token(*next_handle),
-                        WRITER_WAKE_TOKEN | SHARDED_SET_GET_WAKE_TOKEN
-                    )
-                {
+                if *next_handle < MAX_LISTENERS || Token(*next_handle) == BACKGROUND_WAKE_TOKEN {
                     *next_handle = MAX_LISTENERS;
                 }
                 let conn_handle = Token(*next_handle);
                 *next_handle = next_handle.wrapping_add(1);
                 // Avoid colliding with the reserved listener token range
                 // (0..MAX_LISTENERS). (frankenredis-jd75g)
-                if *next_handle < MAX_LISTENERS
-                    || matches!(
-                        Token(*next_handle),
-                        WRITER_WAKE_TOKEN | SHARDED_SET_GET_WAKE_TOKEN
-                    )
-                {
+                if *next_handle < MAX_LISTENERS || Token(*next_handle) == BACKGROUND_WAKE_TOKEN {
                     *next_handle = MAX_LISTENERS;
                 }
 
@@ -2746,70 +2851,47 @@ fn dispatch_sharded_set_get_frames(
             break;
         }
 
+        let batch_limit = SHARDED_SET_GET_MAX_COMMANDS_PER_BATCH
+            .min(MAX_FRAMES_PER_CLIENT_TICK - processed_frames)
+            .min(SHARDED_SET_GET_MAX_IN_FLIGHT_PER_CLIENT - conn.sharded_replies.outstanding());
+        let parsed_batch = parse_sharded_set_get_batch(
+            &conn.read_buf[consumed_total..],
+            &parser_config,
+            ShardedSetGetBatchParse {
+                token,
+                first_sequence: conn.sharded_replies.proposed_sequence(),
+                now_ms: ts,
+                worker_count: pool.worker_count(),
+                command_limit: batch_limit,
+            },
+        );
+
+        if let Some(parsed_batch) = parsed_batch {
+            let batch_commands = parsed_batch.jobs.len();
+            match pool.try_enqueue_batch(parsed_batch.shard, parsed_batch.jobs) {
+                Ok(()) => {
+                    conn.sharded_replies.note_enqueued(batch_commands);
+                    consumed_total += parsed_batch.consumed;
+                    processed_frames += batch_commands;
+                    continue;
+                }
+                Err(ShardedSetGetEnqueueError::Full) => {
+                    deferred_tokens.insert(token);
+                    break;
+                }
+                Err(ShardedSetGetEnqueueError::Disconnected) => {
+                    let _ = conn
+                        .sharded_replies
+                        .complete_local(WORKER_GONE.to_vec(), &mut conn.write_buf);
+                    consumed_total += parsed_batch.first_command_consumed;
+                    conn.closing = true;
+                    closing_tokens.insert(token);
+                    break;
+                }
+            }
+        }
+
         let unparsed = &conn.read_buf[consumed_total..];
-        if let Some(packet) = parse_borrowed_plain_get_packet(unparsed, &parser_config) {
-            let job = ShardedSetGetJob {
-                token,
-                sequence: conn.sharded_replies.proposed_sequence(),
-                now_ms: ts,
-                command: ShardedSetGetCommand::Get {
-                    key: packet.key.to_vec(),
-                },
-            };
-            match pool.try_enqueue(job) {
-                Ok(()) => {
-                    conn.sharded_replies.note_enqueued();
-                    consumed_total += packet.consumed;
-                    processed_frames += 1;
-                    continue;
-                }
-                Err(ShardedSetGetEnqueueError::Full) => {
-                    deferred_tokens.insert(token);
-                    break;
-                }
-                Err(ShardedSetGetEnqueueError::Disconnected) => {
-                    let _ = conn
-                        .sharded_replies
-                        .complete_local(WORKER_GONE.to_vec(), &mut conn.write_buf);
-                    consumed_total += packet.consumed;
-                    conn.closing = true;
-                    closing_tokens.insert(token);
-                    break;
-                }
-            }
-        }
-        if let Some(packet) = parse_borrowed_plain_set_packet(unparsed, &parser_config) {
-            let job = ShardedSetGetJob {
-                token,
-                sequence: conn.sharded_replies.proposed_sequence(),
-                now_ms: ts,
-                command: ShardedSetGetCommand::Set {
-                    key: packet.key.to_vec(),
-                    value: packet.value.to_vec(),
-                },
-            };
-            match pool.try_enqueue(job) {
-                Ok(()) => {
-                    conn.sharded_replies.note_enqueued();
-                    consumed_total += packet.consumed;
-                    processed_frames += 1;
-                    continue;
-                }
-                Err(ShardedSetGetEnqueueError::Full) => {
-                    deferred_tokens.insert(token);
-                    break;
-                }
-                Err(ShardedSetGetEnqueueError::Disconnected) => {
-                    let _ = conn
-                        .sharded_replies
-                        .complete_local(WORKER_GONE.to_vec(), &mut conn.write_buf);
-                    consumed_total += packet.consumed;
-                    conn.closing = true;
-                    closing_tokens.insert(token);
-                    break;
-                }
-            }
-        }
         if let Some(packet) = parse_borrowed_plain_ping_packet(unparsed, &parser_config) {
             let response = if let Some(message) = packet.message {
                 let mut response = Vec::new();
@@ -2894,28 +2976,30 @@ fn drain_sharded_set_get_completions(
         return;
     };
     let mut touched: TokenSet = TokenSet::default();
-    while let Ok(completion) = pool.try_recv() {
-        let Some(conn) = clients.get_mut(&completion.token) else {
-            continue;
-        };
-        let output_before = conn.write_buf.len();
-        if !conn.sharded_replies.complete_remote(
-            completion.sequence,
-            completion.response,
-            &mut conn.write_buf,
-        ) {
-            conn.closing = true;
-            closing_tokens.insert(completion.token);
-            continue;
+    while let Ok(batch) = pool.try_recv() {
+        for completion in batch.completions {
+            let Some(conn) = clients.get_mut(&completion.token) else {
+                continue;
+            };
+            let output_before = conn.write_buf.len();
+            if !conn.sharded_replies.complete_remote(
+                completion.sequence,
+                completion.response,
+                &mut conn.write_buf,
+            ) {
+                conn.closing = true;
+                closing_tokens.insert(completion.token);
+                continue;
+            }
+            runtime.track_net_output_bytes(
+                conn.write_buf
+                    .len()
+                    .saturating_sub(output_before)
+                    .try_into()
+                    .unwrap_or(u64::MAX),
+            );
+            touched.insert(completion.token);
         }
-        runtime.track_net_output_bytes(
-            conn.write_buf
-                .len()
-                .saturating_sub(output_before)
-                .try_into()
-                .unwrap_or(u64::MAX),
-        );
-        touched.insert(completion.token);
     }
 
     for token in touched {
@@ -27252,9 +27336,7 @@ mod tests {
     #[test]
     fn sharded_reply_order_holds_out_of_order_completions() {
         let mut order = ShardedReplyOrder::default();
-        order.note_enqueued();
-        order.note_enqueued();
-        order.note_enqueued();
+        order.note_enqueued(3);
         assert_eq!(order.outstanding(), 3);
         let mut out = Vec::new();
 
@@ -27279,46 +27361,94 @@ mod tests {
     }
 
     #[test]
+    fn sharded_set_get_parser_batches_p16_without_crossing_shards() {
+        const GET_A: &[u8] = b"*2\r\n$3\r\nGET\r\n$1\r\na\r\n";
+        const GET_B: &[u8] = b"*2\r\n$3\r\nGET\r\n$1\r\nb\r\n";
+        let mut pipeline = GET_A.repeat(16);
+        pipeline.extend_from_slice(GET_B);
+        let worker_count = 8;
+        assert_ne!(
+            crate::sharded_set_get_shard(b"a", worker_count),
+            crate::sharded_set_get_shard(b"b", worker_count),
+            "fixture keys must route to different workers"
+        );
+
+        let parsed = crate::parse_sharded_set_get_batch(
+            &pipeline,
+            &ParserConfig::default(),
+            crate::ShardedSetGetBatchParse {
+                token: Token(71),
+                first_sequence: 41,
+                now_ms: 1,
+                worker_count,
+                command_limit: crate::SHARDED_SET_GET_MAX_COMMANDS_PER_BATCH,
+            },
+        )
+        .expect("parse same-shard P16 batch");
+
+        assert_eq!(parsed.jobs.len(), 16);
+        assert_eq!(parsed.consumed, GET_A.len() * 16);
+        assert_eq!(parsed.first_command_consumed, GET_A.len());
+        assert_eq!(parsed.jobs[0].sequence, 41);
+        assert_eq!(parsed.jobs[15].sequence, 56);
+        assert!(parsed.jobs.iter().all(|job| job.command.key() == b"a"));
+    }
+
+    #[test]
     fn sharded_set_get_pool_keeps_same_key_fifo() {
         let poll = mio::Poll::new().expect("create test poll");
-        let pool = ShardedSetGetPool::new(&poll, 2).expect("create two key shards");
-        for (sequence, command) in [
-            (
-                0,
-                ShardedSetGetCommand::Set {
+        let waker = std::sync::Arc::new(
+            mio::Waker::new(poll.registry(), crate::BACKGROUND_WAKE_TOKEN)
+                .expect("create shared background waker"),
+        );
+        let pool = ShardedSetGetPool::new(2, waker).expect("create two key shards");
+        let jobs = vec![
+            ShardedSetGetJob {
+                token: Token(71),
+                sequence: 0,
+                now_ms: 1,
+                command: ShardedSetGetCommand::Set {
                     key: b"k".to_vec(),
                     value: b"v".to_vec(),
                 },
-            ),
-            (1, ShardedSetGetCommand::Get { key: b"k".to_vec() }),
-        ] {
-            pool.try_enqueue(ShardedSetGetJob {
+            },
+            ShardedSetGetJob {
                 token: Token(71),
-                sequence,
+                sequence: 1,
                 now_ms: 1,
-                command,
-            })
-            .unwrap_or_else(|_| panic!("enqueue same-key job {sequence}"));
-        }
+                command: ShardedSetGetCommand::Get { key: b"k".to_vec() },
+            },
+        ];
+        let shard = pool.shard_for_key(b"k");
+        pool.try_enqueue_batch(shard, jobs)
+            .unwrap_or_else(|_| panic!("enqueue same-key batch"));
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        let mut completions = Vec::new();
-        while completions.len() < 2 && std::time::Instant::now() < deadline {
+        let completion_batch = loop {
             match pool.try_recv() {
-                Ok(completion) => completions.push(completion),
+                Ok(completion_batch) => break completion_batch,
                 Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "timed out waiting for sharded completion batch"
+                    );
                     thread::sleep(std::time::Duration::from_millis(1));
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     panic!("sharded worker completion channel disconnected")
                 }
             }
-        }
+        };
+        let completions = completion_batch.completions;
         assert_eq!(completions.len(), 2);
         assert_eq!(completions[0].sequence, 0);
         assert_eq!(completions[0].response, b"+OK\r\n");
         assert_eq!(completions[1].sequence, 1);
         assert_eq!(completions[1].response, b"$1\r\nv\r\n");
+        assert!(
+            matches!(pool.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)),
+            "two same-shard commands must produce one completion envelope"
+        );
     }
 
     #[test]

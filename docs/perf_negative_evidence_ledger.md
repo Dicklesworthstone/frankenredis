@@ -28,6 +28,47 @@ Every new KEEP declares exactly one class:
 modified entries in both ledger files. It also preserves the ELF self-report,
 A/A bootstrap median-CI, never-CV, counted-mechanism, and retry-predicate gates.
 
+## 2026-07-29 MossyBluff (cod/MEASURE): CODE-ONLY HOLD — P16 same-shard SET/GET queue envelopes are batched; exclusive trj verdict remains queued (`frankenredis-q01r6`)
+
+- **Claim class: DIAGNOSTIC. Campaign output: no. Decision: HOLD.** The
+  NEGATIVE_EVIDENCE scan found no prior verdict against queue-envelope batching.
+  The latest sharded profile instead routed work here: completion-channel send
+  was 2.39% self, job receive 1.45%, and CRC slot routing 1.39% at the
+  incomplete eight-worker point. This entry records implementation and
+  correctness evidence only. It has no timing ratio, A/A, profile, or
+  executing-ELF identity and therefore makes no performance or campaign claim.
+- **Counted mechanism.** Behind
+  `--experimental-sharded-set-get-workers`, up to 16 consecutive exact SET/GET
+  commands that map to one worker now travel as one FIFO job envelope and
+  return as one completion envelope. For the realistic same-key P16 shape, the
+  source-level count changes from **16 to 1 job-channel sends, 16 to 1
+  completion-channel sends, and 16 to 1 wake calls**. Batches stop before a
+  shard transition and remain bounded in command-equivalents. Per-connection
+  sequence numbers still advance once per command.
+- **Behavior and code-quality proof.** Unit coverage proves that a P16 parser
+  batch contains 16 commands, never crosses into the next shard, and produces
+  one completion envelope while preserving SET-then-GET FIFO. A live
+  differential starts the flagged FrankenRedis server and the actual vendored
+  Redis 7.2.4 server, sends two 16-command SET/GET pipelines on different
+  shards followed by a local PING, and matches all **33/33** replies in exact
+  order. That live startup check also exposed that the initial sharded
+  primitive attempted a second mio `Waker` on one `Poll`; writer and sharded
+  pools now share one background waker, and its event drains both queues.
+- **Validation.** Focused parser/pool tests passed 2/2; the live 33-response
+  Redis differential passed; strict-remote workspace check, workspace Clippy
+  with warnings denied, and the complete workspace test suite all exited zero.
+  Rustfmt and Git whitespace checks passed.
+- **Concrete retry predicate.** Do not assign a throughput verdict until
+  Frankensearch, FrankenPandas, and FrankenFS post `[trj] RELEASE`, then claim
+  `trj-booking` exclusively and rerun the realistic P16 independent-key and
+  hot-key controls at **1/2/4/8/16/32/64/128** requested workers. Admit a
+  competitive result only when the host-wide quiescence gate stays clear for
+  the whole invocation and every row records requested and actual-observed
+  workers, affinity/cpuset, host/core/thread/RAM/NUMA/ISA provenance, both
+  engine ELF self-reports, exact reply parity, same-invocation A/A, zero-lost
+  nonzero-self profiles, and a bootstrap median-CI effect beyond twice the
+  contemporaneous null margin. CV remains provenance only.
+
 ## 2026-07-29 MossyBluff (cod/MEASURE): DIAGNOSTIC HOLD — pre-booking sharded SET/GET routing activates 1/2/4/8 workers; exclusive trj baseline remains queued (`frankenredis-q01r6`)
 
 - **Claim class: DIAGNOSTIC. Campaign output: no. Decision: HOLD.** This
