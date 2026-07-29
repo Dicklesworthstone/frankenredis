@@ -110,6 +110,7 @@ const HEXISTS_MISSING_FIELD: &[u8] = b"*3\r\n$7\r\nHEXISTS\r\n$1\r\nh\r\n$6\r\na
 const HEXISTS_MISSING_FIELD_REPLY: &[u8] = b":0\r\n";
 const HKEYS_FIELDS: &[u8] = b"*2\r\n$5\r\nHKEYS\r\n$1\r\nh\r\n";
 const HVALS_FIELDS: &[u8] = b"*2\r\n$5\r\nHVALS\r\n$1\r\nh\r\n";
+const HGETALL_FIELDS: &[u8] = b"*2\r\n$7\r\nHGETALL\r\n$1\r\nh\r\n";
 const HSCAN_ALL_FIELDS: &[u8] =
     b"*5\r\n$5\r\nHSCAN\r\n$1\r\nh\r\n$1\r\n0\r\n$5\r\nCOUNT\r\n$4\r\n1000\r\n";
 const HSET_SAME_VALUE: &[u8] = b"*4\r\n$4\r\nHSET\r\n$1\r\nh\r\n$4\r\nf250\r\n$1\r\n1\r\n";
@@ -289,6 +290,7 @@ enum Workload {
     HexistsMissingField,
     HkeysFields,
     HvalsFields,
+    HgetallFields,
     HscanAllFields,
     HsetSameValue,
     HsetnxExistingField,
@@ -354,6 +356,7 @@ impl Workload {
             Self::HexistsMissingField => "hexists-missing-field",
             Self::HkeysFields => "hkeys-fields",
             Self::HvalsFields => "hvals-fields",
+            Self::HgetallFields => "hgetall-fields",
             Self::HscanAllFields => "hscan-all-fields",
             Self::HsetSameValue => "hset-same-value",
             Self::HsetnxExistingField => "hsetnx-existing-field",
@@ -617,6 +620,18 @@ impl Workload {
                 "fr_store::packed_set::CompactFieldMapIter::next",
                 "fr_protocol::encode_bulk_string_slice",
             ],
+            Self::HgetallFields => &[
+                "frankenredis::process_buffered_frames",
+                "__memcmp_avx2_movbe",
+                "parse_borrowed_plain_hgetall_packet",
+                "fr_runtime::Runtime::execute_plain_hgetall_borrowed_into",
+                "fr_store::Store::hgetall_borrow_scan",
+                "fr_store::Store::hgetall_borrow_scan_impl",
+                "fr_store::packed_set::HashFieldMapIter::next",
+                "fr_store::packed_set::CompactFieldMapIter::next",
+                "fr_protocol::encode_map_header",
+                "fr_protocol::encode_bulk_string_slice",
+            ],
             Self::HscanAllFields => &[
                 "frankenredis::process_buffered_frames",
                 "__memcmp_avx2_movbe",
@@ -819,6 +834,7 @@ impl Workload {
                 "hexists-missing-field" => Self::HexistsMissingField,
                 "hkeys-fields" => Self::HkeysFields,
                 "hvals-fields" => Self::HvalsFields,
+                "hgetall-fields" => Self::HgetallFields,
                 "hscan-all-fields" => Self::HscanAllFields,
                 "hset-same-value" => Self::HsetSameValue,
                 "hsetnx-existing-field" => Self::HsetnxExistingField,
@@ -1147,6 +1163,17 @@ impl WorkloadPackets {
             Workload::HvalsFields => {
                 let response = hvals_fields_reply();
                 let case = repeated_case(HVALS_FIELDS, &response, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::HgetallFields => {
+                let response = hgetall_fields_reply();
+                let case = repeated_case(HGETALL_FIELDS, &response, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -1805,6 +1832,16 @@ fn hvals_fields_reply() -> Vec<u8> {
     response
 }
 
+fn hgetall_fields_reply() -> Vec<u8> {
+    let mut response = format!("*{}\r\n", MISSING_FIELD_HASH_FIELDS * 2).into_bytes();
+    for index in 0..MISSING_FIELD_HASH_FIELDS {
+        let field = format!("f{index:03}");
+        let pair = format!("$4\r\n{field}\r\n$1\r\n1\r\n");
+        response.extend_from_slice(pair.as_bytes());
+    }
+    response
+}
+
 fn hscan_all_fields_reply() -> Vec<u8> {
     let mut response =
         format!("*2\r\n$1\r\n0\r\n*{}\r\n", MISSING_FIELD_HASH_FIELDS * 2).into_bytes();
@@ -1992,6 +2029,7 @@ derived_listpack_bytes=3007",
                 | Workload::HexistsMissingField
                 | Workload::HkeysFields
                 | Workload::HvalsFields
+                | Workload::HgetallFields
                 | Workload::HscanAllFields
                 | Workload::HsetSameValue
                 | Workload::HsetnxExistingField
@@ -2004,6 +2042,7 @@ derived_listpack_bytes=3007",
                 workload,
                 Workload::HkeysFields
                     | Workload::HvalsFields
+                    | Workload::HgetallFields
                     | Workload::HscanAllFields
                     | Workload::HsetSameValue
                     | Workload::HincrbyZeroDelta

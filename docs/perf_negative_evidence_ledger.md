@@ -28,6 +28,76 @@ Every new KEEP declares exactly one class:
 modified entries in both ledger files. It also preserves the ELF self-report,
 A/A bootstrap median-CI, never-CV, counted-mechanism, and retry-predicate gates.
 
+## 2026-07-29 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — ordered `HGETALL h` on a pristine 500-field numeric hash is 3.8107x live Redis at saturated P16 (`frankenredis-8e8r4`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes. Decision: KEEP.** Current
+  io_uring FrankenRedis ran against the actual vendored Redis 7.2.4 process
+  beside two identical mio A/A controls in one invocation. No production source
+  changed; the authenticated harness gained this command shape. The accompanying
+  io_uring/mio comparison is **SELF-SPEEDUP** maintenance only and remained
+  HOLD.
+- **Ledger admission and exact representation fixture.** Exact competitive
+  preflight for `HGETALL h` over the named 500-field representation wedge was
+  CLEAR, then every HGETALL row in both ledgers was read by hand. The prior
+  standard-matrix `HGETALL@P128` row permits another lever only after a fresh
+  loss on that identity; this distinct P16 fixture had no current-contract
+  incumbent verdict. Each arm resets `h`, inserts exactly `f000` through `f499`
+  in order with one-byte value `1`, and asserts `HLEN h == 500`. Redis also
+  asserts `OBJECT ENCODING h == listpack`. Every measured reply is checked byte
+  for byte as the exact RESP2 array of 1,000 alternating field/value elements.
+  The profile reached FrankenRedis's promoted internal
+  `HashFieldMapIter::next` at 16.38% self-time, proving that the measured arm
+  actually traversed the representation under test.
+- **Same executable, fixed work, and named profile.** Fully reserved
+  `vmi1149989` (Linux 6.17.0-40-generic) ran 48 samples x 20,000 replies/arm at
+  P16 with 50 persistent clients in eight pinned shards, one disjoint server
+  core, 25 client groups/arm/sample, five groups before each within-sample arm
+  rotation, and two complete 24-order cycles. The executing harness
+  self-reported ELF SHA-256
+  **`6eaf41f1bf48d007bb37a1777841163867fe9f658caaa2dd694c18d7227179b1`**;
+  all three executing FrankenRedis arms self-reported ELF SHA-256
+  **`6c560b1d91936399f1a1c19c7865bdce0627868082cfd0fc3024bcc20f83a331`**;
+  the executing Redis arm self-reported ELF SHA-256
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+  Median candidate/Redis utilization was **98.525%/98.724%**. The zero-lost
+  profile's conservative exact-target aggregate was **42.46% self-time**
+  (`encode_bulk_string_slice` 34.60%, `process_buffered_frames` 4.71%,
+  `__memcmp_avx2_movbe` 2.88%, exact HGETALL parser 0.14%, map header 0.13%),
+  for an Amdahl elimination ceiling of **1.737921x**. The top-self table also
+  named `HashFieldMapIter::next` at 16.38% and the exact runtime executor at
+  2.73%. Async CQ work was only 0.18% self-time, ceiling 1.001803x.
+- **Bootstrap median-CI verdict, never CV.** Wall A/A null median was
+  **1.013656030x**, bootstrap 95% median CI
+  **[0.982689116, 1.036366274]**, which brackets 1.0 and derives decision band
+  **[0.927267452, 1.072732548]**. FrankenRedis/Redis throughput (Redis wall time
+  divided by FrankenRedis wall time) was **3.810728927x**, CI
+  **[3.671336247, 3.941573788]**: COMPETITIVE KEEP. CPU A/A null median was
+  **1.015222353x**, CI **[0.983436414, 1.039615964]**, deriving band
+  **[0.920768072, 1.079231928]**; CPU FrankenRedis/Redis was
+  **3.822008094x**, CI **[3.683510005, 3.952165557]**: KEEP. The ancillary
+  io_uring/mio SELF-SPEEDUP was HOLD at **0.982947128x**, CI
+  **[0.969742978, 1.019715701]**; CPU was likewise HOLD at **0.984517860x**,
+  CI **[0.971711569, 1.021832639]**. Neither is campaign output. CV is
+  provenance only and never entered the decision (wall null 10.286933%,
+  self 7.253552%, competitive 7.956797%; CPU null 10.274356%, self 7.177354%,
+  competitive 7.887268%).
+- **Discarded setup attempts.** A compile-only run on `hz2` produced no timing.
+  The first `vmi1149989` invocation stopped in the quiet-core preflight before
+  profile or samples because ordinary benchmark environment variables were not
+  forwarded; `vmi1152480` was then refused fail-closed by RCH before building.
+  Neither licenses evidence. The admitted invocation explicitly allowlisted the
+  benchmark environment and completed every gate above.
+- **Concrete retry predicate.** Reopen only after a change to Redis hash
+  encoding thresholds, the exact 500-field numeric/order fixture,
+  FrankenRedis's 128-pair internal promotion or hash iterator, HGETALL
+  parser/runtime/store, aggregate or bulk reply encoding, field-TTL/LFU
+  handling, Redis version, allocator, kernel, harness, or release codegen, or
+  if a fresh valid live-incumbent CI overlaps 1.0. Any retry must retain the
+  pristine fixture, HLEN/listpack assertions, exact ordered 1,000-element
+  reply, live Redis arm, all ELF self-reports, same-invocation A/A, two complete
+  order cycles, within-sample rotation, zero-lost nonzero-self profile, and
+  >=90% median server utilization.
+
 ## 2026-07-29 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — steady-state mixed-representation `SUNIONSTORE dst small large_miss` is 15.5322x live Redis at saturated P16 (`frankenredis-gfj9l`)
 
 - **Claim class: COMPETITIVE. Campaign output: yes.** This is current io_uring
