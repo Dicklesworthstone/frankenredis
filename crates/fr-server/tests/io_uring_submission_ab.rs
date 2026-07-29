@@ -54,6 +54,11 @@ const DEFAULT_INTERLEAVE_GROUPS: usize = 125;
 const SHARDED_DEFAULT_INTERLEAVE_GROUPS: usize = 16;
 const QUIET_CORE_MAX_PCT: f64 = 5.0;
 const QUIET_CORE_PREFLIGHT_ATTEMPTS: usize = 20;
+// Host-wide scaling is admissible only when the entire original process
+// cpuset is quiet. This mirrors FrankenFS's fail-closed trj contract: picking
+// a few quiet cores does not prove that another benchmark is not consuming
+// the rest of the machine.
+const HOST_WIDE_MAX_BUSY_PCT: f64 = 20.0;
 const MIN_SERVER_UTIL_PCT: f64 = 90.0;
 const IO_URING_FLAG: &str = "--io-uring-output";
 const BITPOS_RANGE_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_BITPOS_RANGE_FLOOR_ORIG";
@@ -2848,6 +2853,13 @@ struct MeasurementConfig {
     interleave_groups: usize,
 }
 
+#[derive(Clone, Copy)]
+struct PacketMeasurement<'a> {
+    prepare_keyed: bool,
+    workload_shape: &'a str,
+    host_wide_allowed_cpus: Option<&'a [usize]>,
+}
+
 fn measure_configuration(
     servers: &mut [Server; 4],
     workload: Workload,
@@ -2860,8 +2872,11 @@ fn measure_configuration(
         pipeline,
         config,
         Arc::new(DriverPackets::shared(workload, pipeline)),
-        false,
-        "shared_hot_key",
+        PacketMeasurement {
+            prepare_keyed: false,
+            workload_shape: "shared_hot_key",
+            host_wide_allowed_cpus: None,
+        },
     )
 }
 
@@ -2871,9 +2886,13 @@ fn measure_configuration_with_packets(
     pipeline: usize,
     config: MeasurementConfig,
     packets: Arc<DriverPackets>,
-    prepare_keyed: bool,
-    workload_shape: &str,
+    packet_measurement: PacketMeasurement<'_>,
 ) -> Vec<Sample> {
+    let PacketMeasurement {
+        prepare_keyed,
+        workload_shape,
+        host_wide_allowed_cpus,
+    } = packet_measurement;
     let ClientShape {
         connections: clients,
         driver_threads: client_threads,
@@ -2941,6 +2960,12 @@ fn measure_configuration_with_packets(
         }
     } else {
         prefill_and_warm(servers, workload, pipeline, clients, &packets);
+    }
+    if let Some(allowed_cpus) = host_wide_allowed_cpus {
+        assert_host_wide_quiescence(
+            allowed_cpus,
+            &format!("before_{}_{}", workload.name(), workload_shape),
+        );
     }
     let groups = ops_per_sample.div_ceil(clients * pipeline).max(1);
     let actual_ops = groups * clients * pipeline;
@@ -3056,6 +3081,12 @@ cpu_candidate_over_redis={:.9}",
             result.cpu_competitive_speedup,
         );
         output.push(result);
+    }
+    if let Some(allowed_cpus) = host_wide_allowed_cpus {
+        assert_host_wide_quiescence(
+            allowed_cpus,
+            &format!("after_{}_{}", workload.name(), workload_shape),
+        );
     }
     output
 }
@@ -3725,6 +3756,48 @@ fn observed_core_loads() -> HashMap<usize, f64> {
         .collect()
 }
 
+fn host_wide_quiescence_violations(
+    allowed_cpus: &[usize],
+    loads: &HashMap<usize, f64>,
+) -> Vec<String> {
+    allowed_cpus
+        .iter()
+        .filter_map(|cpu| match loads.get(cpu) {
+            Some(load) if *load <= HOST_WIDE_MAX_BUSY_PCT => None,
+            Some(load) => Some(format!("cpu{cpu}={load:.1}%")),
+            None => Some(format!("cpu{cpu}=missing")),
+        })
+        .collect()
+}
+
+fn assert_host_wide_quiescence(allowed_cpus: &[usize], phase: &str) {
+    assert!(
+        !allowed_cpus.is_empty(),
+        "host-wide benchmark cpuset cannot be empty"
+    );
+    let loads = observed_core_loads();
+    let violations = host_wide_quiescence_violations(allowed_cpus, &loads);
+    assert!(
+        violations.is_empty(),
+        "host-wide benchmark lost exclusivity during {phase}; CPUs above \
+{HOST_WIDE_MAX_BUSY_PCT:.1}% busy or missing: {}",
+        violations.join(",")
+    );
+    let maximum_busy_pct = allowed_cpus
+        .iter()
+        .filter_map(|cpu| loads.get(cpu))
+        .copied()
+        .fold(0.0_f64, f64::max);
+    println!(
+        "HOST_WIDE_QUIESCENCE phase={phase} allowed_cpu_count={} \
+sampled_cpu_count={} maximum_busy_pct={maximum_busy_pct:.3} \
+limit_pct={HOST_WIDE_MAX_BUSY_PCT:.3} busy_cpu_count_above_limit=0 \
+verdict=clear loads={loads:?}",
+        allowed_cpus.len(),
+        loads.len()
+    );
+}
+
 fn current_process_cpu() -> usize {
     let stat = fs::read_to_string("/proc/self/stat").expect("read benchmark process stat");
     let after_comm = stat
@@ -4060,6 +4133,19 @@ fn median_ci_gate_rejects_tight_biased_null() {
 }
 
 #[test]
+fn host_wide_quiescence_accepts_only_complete_quiet_cpuset() {
+    let allowed = [0, 1, 2];
+    let quiet = HashMap::from([(0, 0.0), (1, 10.0), (2, HOST_WIDE_MAX_BUSY_PCT)]);
+    assert!(host_wide_quiescence_violations(&allowed, &quiet).is_empty());
+
+    let contaminated = HashMap::from([(0, 0.0), (1, HOST_WIDE_MAX_BUSY_PCT + 0.1), (4, 0.0)]);
+    let violations = host_wide_quiescence_violations(&allowed, &contaminated);
+    assert_eq!(violations.len(), 2);
+    assert!(violations.iter().any(|row| row.starts_with("cpu1=")));
+    assert!(violations.iter().any(|row| row == "cpu2=missing"));
+}
+
+#[test]
 #[ignore = "trj-only full server command-execution thread sweep; run explicitly"]
 fn sharded_set_get_server_thread_sweep_same_invocation() {
     let binary = std::env::var_os("FR_URING_FR_BIN")
@@ -4151,6 +4237,14 @@ interleave_groups={interleave_groups} groups_per_arm_sample={groups_per_arm_samp
     let profile_seconds = parse_u64_env("FR_SHARDED_PROFILE_SECONDS", DEFAULT_PROFILE_SECONDS);
     let (client_cpu_order, server_core, process_cpuset_cap) =
         choose_client_cpu_order(client_threads);
+    assert_eq!(
+        process_cpuset_cap.len(),
+        logical_threads,
+        "host-wide scaling requires access to every logical CPU; \
+process cpuset has {} of {logical_threads}",
+        process_cpuset_cap.len()
+    );
+    assert_host_wide_quiescence(&process_cpuset_cap, "initial_pre_pin");
     let client_affinity = pin_client_process(&client_cpu_order, client_threads);
     println!(
         "SCALING_HARDWARE_PROVENANCE host_identity={hostname} \
@@ -4304,8 +4398,11 @@ incumbent=vendored_redis_7.2.4"
                 pipeline,
                 measurement,
                 packets,
-                true,
-                "independent_key_per_connection",
+                PacketMeasurement {
+                    prepare_keyed: true,
+                    workload_shape: "independent_key_per_connection",
+                    host_wide_allowed_cpus: Some(&process_cpuset_cap),
+                },
             );
             let worker_cpu_ns_after = servers[Arm::IoUring.index()].sharded_worker_cpu_ns();
             let active_workers =
@@ -4343,8 +4440,11 @@ server_command_execution_threads={server_workers} verdict={verdict:?}",
             pipeline,
             measurement,
             hot_packets,
-            true,
-            "single_hot_key_control",
+            PacketMeasurement {
+                prepare_keyed: true,
+                workload_shape: "single_hot_key_control",
+                host_wide_allowed_cpus: Some(&process_cpuset_cap),
+            },
         );
         let worker_cpu_ns_after = servers[Arm::IoUring.index()].sharded_worker_cpu_ns();
         let active_workers =

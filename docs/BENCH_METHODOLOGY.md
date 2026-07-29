@@ -238,6 +238,27 @@ competitive evidence.
 `scripts/perf_candidate_preflight.py check-staged` enforces these fields over
 complete added or modified entries in both verdict-bearing ledgers.
 
+## 8. Host-wide scaling requires whole-cpuset exclusivity
+
+A host-wide scaling result is valid only when the harness proves that every
+logical CPU in its original process cpuset is quiet. Selecting a few quiet
+cores while another benchmark occupies the rest of the host is not
+exclusivity.
+
+The trj server-scaling harness therefore samples `/proc/stat` across the full
+original cpuset and fails closed when any allowed CPU is missing or exceeds
+20% busy:
+
+1. once before the benchmark process narrows its own client affinity;
+2. immediately before every measured workload configuration; and
+3. immediately after every measured workload configuration.
+
+Each successful check emits `HOST_WIDE_QUIESCENCE` with the phase, allowed and
+sampled CPU counts, maximum observed busy percentage, threshold, verdict, and
+per-CPU loads. A failed pre- or post-check invalidates the whole configuration;
+do not retain its ratios. This mechanical guard supplements, and does not
+replace, the exclusive `[trj] CLAIM` / `[trj] RELEASE` booking contract.
+
 ## Worker facts (verify, don't assume)
 
 - **Not all rch workers are equal.** `hz2` has no `perf` executable; `ovh-a` runs
