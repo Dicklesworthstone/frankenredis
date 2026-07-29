@@ -130,6 +130,8 @@ const PFMERGE_DENSE_SOURCE_ELEMENTS: usize = 4_096;
 const PFMERGE_DENSE_PREFILL_BATCH: usize = 256;
 const PFMERGE_TWO_DENSE: &[u8] = b"*4\r\n$7\r\nPFMERGE\r\n$3\r\ndst\r\n$2\r\nh1\r\n$2\r\nh2\r\n";
 const PFMERGE_TWO_DENSE_REPLY: &[u8] = b"+OK\r\n";
+const PFCOUNT_TWO_DENSE: &[u8] = b"*3\r\n$7\r\nPFCOUNT\r\n$2\r\nh1\r\n$2\r\nh2\r\n";
+const PFCOUNT_TWO_DENSE_REPLY: &[u8] = b":8173\r\n";
 const PFMERGE_H1_ENCODING: &[u8] = b"*3\r\n$7\r\nPFDEBUG\r\n$8\r\nENCODING\r\n$2\r\nh1\r\n";
 const PFMERGE_H2_ENCODING: &[u8] = b"*3\r\n$7\r\nPFDEBUG\r\n$8\r\nENCODING\r\n$2\r\nh2\r\n";
 const PFMERGE_DST_ENCODING: &[u8] = b"*3\r\n$7\r\nPFDEBUG\r\n$8\r\nENCODING\r\n$3\r\ndst\r\n";
@@ -262,6 +264,7 @@ enum Workload {
     HstrlenExistingField,
     HmgetExistingMissing,
     PfmergeTwoDense,
+    PfcountTwoDense,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -324,6 +327,7 @@ impl Workload {
             Self::HstrlenExistingField => "hstrlen-existing-field",
             Self::HmgetExistingMissing => "hmget-existing-missing",
             Self::PfmergeTwoDense => "pfmerge-two-dense",
+            Self::PfcountTwoDense => "pfcount-two-dense",
         }
     }
 
@@ -686,6 +690,22 @@ impl Workload {
                 "fr_store::hll_encode",
                 "fr_store::hll_encode_dense_registers",
             ],
+            Self::PfcountTwoDense => &[
+                "frankenredis::process_buffered_frames",
+                "__memcmp_avx2_movbe",
+                "parse_borrowed_multibulk_action",
+                "parse_command_args_borrowed_into",
+                "copy_borrowed_argv_into_scratch",
+                "fr_runtime::Runtime::execute_frame_internal",
+                "fr_command::execute_dispatch",
+                "fr_command::pfcount",
+                "fr_store::Store::pfcount",
+                "fr_store::hll_parse",
+                "fr_store::hll_merge_fold",
+                "fr_store::hll_merge_registers",
+                "fr_simd::max_bytes_inplace",
+                "fr_store::hll_estimate",
+            ],
             Self::Set | Self::Get | Self::Mixed => &[],
         }
     }
@@ -735,6 +755,7 @@ impl Workload {
                 "hstrlen-existing-field" => Self::HstrlenExistingField,
                 "hmget-existing-missing" => Self::HmgetExistingMissing,
                 "pfmerge-two-dense" => Self::PfmergeTwoDense,
+                "pfcount-two-dense" => Self::PfcountTwoDense,
                 other => panic!("unknown FR_URING_AB_WORKLOADS item: {other}"),
             })
             .collect()
@@ -1146,6 +1167,16 @@ impl WorkloadPackets {
             }
             Workload::PfmergeTwoDense => {
                 let case = repeated_case(PFMERGE_TWO_DENSE, PFMERGE_TWO_DENSE_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::PfcountTwoDense => {
+                let case = repeated_case(PFCOUNT_TWO_DENSE, PFCOUNT_TWO_DENSE_REPLY, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -1711,7 +1742,7 @@ fn lindex_middle_prefill() -> ExchangeCase {
     }
 }
 
-fn prefill_pfmerge_two_dense(server: &mut Server) {
+fn prefill_two_dense_hll_sources(server: &mut Server) {
     for key in ["h1", "h2", "dst"] {
         let reset = format!(
             "*3\r\n$3\r\nSET\r\n${}\r\n{key}\r\n$4\r\nseed\r\n\
@@ -1850,21 +1881,36 @@ derived_listpack_bytes=3007",
                     MISSING_FIELD_HASH_FIELDS
                 );
             }
-        } else if matches!(workload, Workload::PfmergeTwoDense) {
-            prefill_pfmerge_two_dense(server);
+        } else if matches!(
+            workload,
+            Workload::PfmergeTwoDense | Workload::PfcountTwoDense
+        ) {
+            prefill_two_dense_hll_sources(server);
             exchange_one(server, PFMERGE_H1_ENCODING, PFMERGE_DENSE_ENCODING_REPLY);
             exchange_one(server, PFMERGE_H2_ENCODING, PFMERGE_DENSE_ENCODING_REPLY);
-            exchange_one(server, PFMERGE_TWO_DENSE, PFMERGE_TWO_DENSE_REPLY);
-            exchange_one(server, PFMERGE_DST_ENCODING, PFMERGE_DENSE_ENCODING_REPLY);
-            exchange_one(server, PFMERGE_DST_COUNT, PFMERGE_DST_COUNT_REPLY);
-            println!(
-                "FIXTURE_REPRESENTATION workload={} arm={} sources=2 \
+            if matches!(workload, Workload::PfmergeTwoDense) {
+                exchange_one(server, PFMERGE_TWO_DENSE, PFMERGE_TWO_DENSE_REPLY);
+                exchange_one(server, PFMERGE_DST_ENCODING, PFMERGE_DENSE_ENCODING_REPLY);
+                exchange_one(server, PFMERGE_DST_COUNT, PFMERGE_DST_COUNT_REPLY);
+                println!(
+                    "FIXTURE_REPRESENTATION workload={} arm={} sources=2 \
 elements_per_source={} source_encoding=dense destination_encoding=dense \
 union_count=8173",
-                workload.name(),
-                server.arm.name(),
-                PFMERGE_DENSE_SOURCE_ELEMENTS
-            );
+                    workload.name(),
+                    server.arm.name(),
+                    PFMERGE_DENSE_SOURCE_ELEMENTS
+                );
+            } else {
+                exchange_one(server, PFCOUNT_TWO_DENSE, PFCOUNT_TWO_DENSE_REPLY);
+                println!(
+                    "FIXTURE_REPRESENTATION workload={} arm={} sources=2 \
+elements_per_source={} source_encoding=dense union_count=8173 \
+steady_state_register_cache=warmed_by_exact_assertion",
+                    workload.name(),
+                    server.arm.name(),
+                    PFMERGE_DENSE_SOURCE_ELEMENTS
+                );
+            }
         } else if let Some(case) = &seeded_stream {
             exchange_one(server, &case.request, &case.response);
         }
