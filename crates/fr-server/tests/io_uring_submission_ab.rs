@@ -132,6 +132,15 @@ const PFMERGE_TWO_DENSE: &[u8] = b"*4\r\n$7\r\nPFMERGE\r\n$3\r\ndst\r\n$2\r\nh1\
 const PFMERGE_TWO_DENSE_REPLY: &[u8] = b"+OK\r\n";
 const PFCOUNT_TWO_DENSE: &[u8] = b"*3\r\n$7\r\nPFCOUNT\r\n$2\r\nh1\r\n$2\r\nh2\r\n";
 const PFCOUNT_TWO_DENSE_REPLY: &[u8] = b":8173\r\n";
+const BITCOUNT_ONE_MIB_BYTES: usize = 1 << 20;
+const BITCOUNT_ONE_MIB: &[u8] = b"*2\r\n$8\r\nBITCOUNT\r\n$10\r\nbitcount:k\r\n";
+const BITCOUNT_ONE_MIB_REPLY: &[u8] = b":4194304\r\n";
+const BITCOUNT_ONE_MIB_GET: &[u8] = b"*2\r\n$3\r\nGET\r\n$10\r\nbitcount:k\r\n";
+const BITCOUNT_ONE_MIB_STRLEN: &[u8] = b"*2\r\n$6\r\nSTRLEN\r\n$10\r\nbitcount:k\r\n";
+const BITCOUNT_ONE_MIB_STRLEN_REPLY: &[u8] = b":1048576\r\n";
+const BITCOUNT_ONE_MIB_ENCODING: &[u8] =
+    b"*3\r\n$6\r\nOBJECT\r\n$8\r\nENCODING\r\n$10\r\nbitcount:k\r\n";
+const BITCOUNT_ONE_MIB_ENCODING_REPLY: &[u8] = b"$3\r\nraw\r\n";
 const PFMERGE_H1_ENCODING: &[u8] = b"*3\r\n$7\r\nPFDEBUG\r\n$8\r\nENCODING\r\n$2\r\nh1\r\n";
 const PFMERGE_H2_ENCODING: &[u8] = b"*3\r\n$7\r\nPFDEBUG\r\n$8\r\nENCODING\r\n$2\r\nh2\r\n";
 const PFMERGE_DST_ENCODING: &[u8] = b"*3\r\n$7\r\nPFDEBUG\r\n$8\r\nENCODING\r\n$3\r\ndst\r\n";
@@ -265,6 +274,7 @@ enum Workload {
     HmgetExistingMissing,
     PfmergeTwoDense,
     PfcountTwoDense,
+    BitcountOneMib,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -328,6 +338,7 @@ impl Workload {
             Self::HmgetExistingMissing => "hmget-existing-missing",
             Self::PfmergeTwoDense => "pfmerge-two-dense",
             Self::PfcountTwoDense => "pfcount-two-dense",
+            Self::BitcountOneMib => "bitcount-one-mib",
         }
     }
 
@@ -706,6 +717,18 @@ impl Workload {
                 "fr_simd::max_bytes_inplace",
                 "fr_store::hll_estimate",
             ],
+            Self::BitcountOneMib => &[
+                "frankenredis::process_buffered_frames",
+                "parse_borrowed_plain_bitcount_packet",
+                "fr_runtime::Runtime::execute_plain_bitcount_borrowed",
+                "fr_store::Store::bitcount",
+                "fr_store::Store::bitcount_impl",
+                "fr_store::Store::popcount_bytes",
+                "fr_simd::popcount_bytes",
+                "fr_simd::popcount_avx2",
+                "fr_simd::popcount_popcnt",
+                "fr_simd::popcount_scalar",
+            ],
             Self::Set | Self::Get | Self::Mixed => &[],
         }
     }
@@ -756,6 +779,7 @@ impl Workload {
                 "hmget-existing-missing" => Self::HmgetExistingMissing,
                 "pfmerge-two-dense" => Self::PfmergeTwoDense,
                 "pfcount-two-dense" => Self::PfcountTwoDense,
+                "bitcount-one-mib" => Self::BitcountOneMib,
                 other => panic!("unknown FR_URING_AB_WORKLOADS item: {other}"),
             })
             .collect()
@@ -1177,6 +1201,16 @@ impl WorkloadPackets {
             }
             Workload::PfcountTwoDense => {
                 let case = repeated_case(PFCOUNT_TWO_DENSE, PFCOUNT_TWO_DENSE_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::BitcountOneMib => {
+                let case = repeated_case(BITCOUNT_ONE_MIB, BITCOUNT_ONE_MIB_REPLY, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -1773,6 +1807,25 @@ fn prefill_two_dense_hll_sources(server: &mut Server) {
     }
 }
 
+fn bitcount_one_mib_prefill() -> ExchangeCase {
+    let mut request =
+        format!("*3\r\n$3\r\nSET\r\n$10\r\nbitcount:k\r\n${BITCOUNT_ONE_MIB_BYTES}\r\n")
+            .into_bytes();
+    request.resize(request.len() + BITCOUNT_ONE_MIB_BYTES, 0xaa);
+    request.extend_from_slice(b"\r\n");
+    ExchangeCase {
+        request,
+        response: SET_REPLY.to_vec(),
+    }
+}
+
+fn bitcount_one_mib_get_reply() -> Vec<u8> {
+    let mut response = format!("${BITCOUNT_ONE_MIB_BYTES}\r\n").into_bytes();
+    response.resize(response.len() + BITCOUNT_ONE_MIB_BYTES, 0xaa);
+    response.extend_from_slice(b"\r\n");
+    response
+}
+
 fn prefill(servers: &mut [Server; 4], workload: Workload) {
     let seeded_stream = matches!(
         workload,
@@ -1911,6 +1964,30 @@ steady_state_register_cache=warmed_by_exact_assertion",
                     PFMERGE_DENSE_SOURCE_ELEMENTS
                 );
             }
+        } else if matches!(workload, Workload::BitcountOneMib) {
+            let case = bitcount_one_mib_prefill();
+            exchange_one(server, &case.request, &case.response);
+            exchange_one(
+                server,
+                BITCOUNT_ONE_MIB_STRLEN,
+                BITCOUNT_ONE_MIB_STRLEN_REPLY,
+            );
+            exchange_one(
+                server,
+                BITCOUNT_ONE_MIB_ENCODING,
+                BITCOUNT_ONE_MIB_ENCODING_REPLY,
+            );
+            let get_reply = bitcount_one_mib_get_reply();
+            exchange_one(server, BITCOUNT_ONE_MIB_GET, &get_reply);
+            exchange_one(server, BITCOUNT_ONE_MIB, BITCOUNT_ONE_MIB_REPLY);
+            println!(
+                "FIXTURE_REPRESENTATION workload={} arm={} bytes={} byte_pattern=0xaa \
+encoding=raw exact_bitcount=4194304 full_get_byte_identity=verified \
+steady_state_cache=warmed_by_exact_assertion",
+                workload.name(),
+                server.arm.name(),
+                BITCOUNT_ONE_MIB_BYTES
+            );
         } else if let Some(case) = &seeded_stream {
             exchange_one(server, &case.request, &case.response);
         }

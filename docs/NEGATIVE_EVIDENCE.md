@@ -33,6 +33,73 @@ Redis arm and numeric ratio; a SELF-SPEEDUP needs the heading label and cannot
 mark itself as campaign output. Missing or contradictory classification exits
 **8**.
 
+## 2026-07-29 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — full-range `BITCOUNT bitcount:k` over an exact 1 MiB raw string is 9.5736x live Redis at saturated P16 (`frankenredis-wozj7`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes.** This is current io_uring
+  FrankenRedis/Redis throughput against the actual vendored Redis 7.2.4 server
+  running live beside both A/A controls in the same invocation. Production
+  source was not changed; the authenticated harness gained this command shape.
+  The accompanying io_uring/mio comparison is **SELF-SPEEDUP** maintenance
+  only and remained HOLD.
+- **Ledger admission and byte-exact fixture.** Exact candidate preflight for
+  full-range 1 MiB BITCOUNT was clear, then every broader BITCOUNT, popcount,
+  dispatch-floor, LFU, expiry, and SIMD ledger match was read and adjudicated.
+  Old live-Redis rows range from 0.477x wall direction to 3.35x, but predate
+  current runtime AVX2, no-TTL/LFU collapse, and dispatch-floor work and lack
+  the present same-invocation A/A, executing-ELF, exact-fixture,
+  complete-cycle, named-profile, and saturation contract. The 3.045--3.188x
+  runtime-AVX2 result is an internal **SELF-SPEEDUP**, while the rejected
+  multi-accumulator lever regressed to 0.578x throughput and is not an
+  incumbent verdict. The idempotent fixture SETs exactly 1,048,576 bytes of
+  `0xaa` at `bitcount:k`; every arm then asserts exact STRLEN, `raw` encoding,
+  a full byte-for-byte GET, and `BITCOUNT == 4,194,304`. Each measured P16
+  packet repeats that exact arity-two BITCOUNT request and byte-checks all 16
+  integer replies.
+- **Executing identity, named profile, and fixed work.** `vmi1227854` (Linux
+  6.17.0-35-generic) ran 48 samples x 12,000 replies/arm at P16 with 50
+  persistent clients in eight pinned shards, one disjoint server core, 15
+  client groups/arm/sample, three groups before each within-sample arm
+  rotation, and two complete 24-order cycles. The executing harness
+  self-reported ELF SHA-256
+  **`84f04e3276c875cb8f533a3e3f4aa72dabd0b57df33f01e741691ba3196dae9c`**;
+  all three executing FrankenRedis arms self-reported ELF SHA-256
+  **`9404873c8402d93acb14e9c62e758bccdbd26c040fc938a9aeb764b114346b2a`**;
+  Redis self-reported ELF SHA-256
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+  Candidate/Redis median utilization was **98.248%/98.618%**. A zero-lost
+  profile attributed **91.80% self-time** to the named BITCOUNT/popcount
+  surface (`fr_simd::popcount_avx2` 91.29%,
+  `process_buffered_frames` 0.37%, and the exact borrowed BITCOUNT parser
+  0.14%), for an elimination ceiling of **12.195122x**. The async-CQ surface
+  was 0.09%, with an elimination ceiling of 1.000901x.
+- **Bootstrap median-CI competitive verdict.** Wall A/A null median was
+  **1.005291683x**, bootstrap 95% median CI
+  **[0.984000886, 1.016505781]**, inside gate
+  **[0.966988438, 1.033011562]**. io_uring FrankenRedis/Redis throughput
+  (Redis wall / FrankenRedis wall) was **9.573646090x**, CI
+  **[9.455458544, 9.904323274]**: COMPETITIVE KEEP. CPU A/A null median was
+  **1.007183498x**, CI **[0.981768805, 1.015739911]**, inside gate
+  **[0.963537610, 1.036462390]**; CPU FrankenRedis/Redis throughput was
+  **9.613869875x**, CI **[9.522148834, 9.918454980]**: KEEP. The ancillary
+  io_uring/mio SELF-SPEEDUP remained HOLD at **1.035801135x**, CI
+  [1.025191677, 1.046628189]; CPU likewise held at **1.038650641x**, CI
+  [1.026919300, 1.049160475]. Neither is campaign output. Bootstrap median-CI
+  decided every verdict, never CV; CV is provenance only (wall null 5.696939%,
+  self 5.036147%, competitive 5.914015%; CPU null 5.631723%, self 4.875195%,
+  competitive 5.793866%).
+- **Retry predicate.** Reopen after changes to BITCOUNT semantics; the exact
+  1 MiB `0xaa` fixture or expected 4,194,304 count; FrankenRedis BITCOUNT
+  parser/runtime/store, expiry/LFU accounting, keyspace representation,
+  runtime SIMD dispatch or AVX2/popcnt/scalar kernels; Redis implementation or
+  version; allocator, kernel, harness, or release codegen; or if a fresh valid
+  live-incumbent CI overlaps 1.0. A new popcount lever additionally requires a
+  counted mechanism distinct from the rejected multi-accumulator route and
+  predicting at least 10% fewer instructions or cycles. Any retry must retain
+  exact length/encoding/full-GET/count/reply assertions, live Redis arm, ELF
+  self-reports, same-invocation A/A, complete order cycles, within-sample arm
+  rotation, zero-lost nonzero-self named profile, byte checking, and >=90%
+  median server utilization.
+
 ## 2026-07-29 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — steady-state `PFCOUNT h1 h2` over two disjoint dense HLLs is 6.1665x live Redis at saturated P16 (`frankenredis-1jeto`)
 
 - **Claim class: COMPETITIVE. Campaign output: yes.** This is current io_uring
