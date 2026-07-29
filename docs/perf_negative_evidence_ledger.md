@@ -28,6 +28,96 @@ Every new KEEP declares exactly one class:
 modified entries in both ledger files. It also preserves the ELF self-report,
 A/A bootstrap median-CI, never-CV, counted-mechanism, and retry-predicate gates.
 
+## 2026-07-29 MossyBluff (cod/MEASURE): COMPETITIVE SATURATION KEEP — P16 SET/mixed lead live Redis across 1–128 client drivers, but both command executors remain one thread (`frankenredis-q01r6`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes. Decision: KEEP.** One
+  fail-closed same invocation ran current io_uring FrankenRedis beside a live
+  actual vendored Redis 7.2.4 server and two byte-identical mio A/A controls.
+  FrankenRedis/Redis throughput was **1.250499620x** at the slowest valid point
+  and **1.306759798x** at the fastest. This valid competitive saturation
+  baseline is explicitly **not** a campaign multicore scaling result. The swept
+  count is client-driver threads; candidate, control, and incumbent each
+  executed commands on exactly **one** thread.
+- **Mandatory hardware and thread provenance.** Host identity
+  `threadripperje` (`trj`) was an AMD Ryzen Threadripper PRO 5995WX with one
+  socket, **64 physical cores / 128 logical threads**, 499 GiB RAM, one NUMA
+  node, Linux 6.17.0-41-generic, and runtime-detected
+  `avx2=true,fma=true,bmi2=true,vaes=true,avx512f=false`. Actual client-driver
+  counts were **1/2/4/8/16/32/64/128** with 128 persistent connections.
+  `/proc` cpuset was `0-127`; all four server processes were pinned to CPU 63
+  and its SMT sibling 127 was excluded from clients. Client affinity used
+  physical cores before SMT in this exact ordered range:
+  `0-32,34-37,40-62,64-96,98-101,104-126`. At 128 software drivers the
+  benchmark process shared those 120 preflight-clean logical CPUs. Candidate
+  and controls exposed 3 process threads but one command executor; Redis
+  exposed 5 process threads but one command executor.
+- **Fixed work and identity.** Each point ran SET and alternating SET/GET over
+  the same hot key at P16: 48 samples, 200,704 checked replies per arm/sample,
+  16 groups between within-sample rotations, and two complete 24-order cycles.
+  Every expected `+OK` and bulk-value reply was byte-checked. The executing
+  harness ELF self-reported SHA-256
+  **`189a699784c396ac17953daaa7225c9dff6adf46af86c4c81cb71a8ed8069647`**;
+  all three executing FrankenRedis server ELFs self-reported
+  **`7e4e6df000fe9907d0e44cf16f6a14863373c37f0f3662a4e30a8afbc85272f0`**;
+  the executing Redis server ELF self-reported
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+- **Bootstrap median-CI competitive curve, never CV.** Ratios are Redis wall
+  time divided by FrankenRedis wall time (>1 means FrankenRedis throughput is
+  higher). Parentheses contain bootstrap 95% CIs; each row's A/A median and CI
+  follow after the semicolon:
+
+  | client drivers actually used | SET fr/Redis | mixed fr/Redis | SET A/A | mixed A/A |
+  |---:|---:|---:|---:|---:|
+  | 1 | 1.293059972 [1.287321789, 1.301445295] | 1.287217387 [1.285554685, 1.295531282] | 0.999775798 [0.993950871, 1.007873503] | 1.001352089 [0.995750066, 1.006515481] |
+  | 2 | 1.302282397 [1.295410998, 1.305232688] | 1.277687396 [1.271606657, 1.283951015] | 1.002988752 [0.998495351, 1.005712593] | 0.998966770 [0.996848523, 1.003318748] |
+  | 4 | 1.306759798 [1.303471907, 1.310421007] | 1.290232827 [1.287600562, 1.292626178] | 0.999881236 [0.997802880, 1.005269839] | 0.997706060 [0.995417921, 0.999456789] |
+  | 8 | 1.290861398 [1.287865181, 1.292377774] | 1.274118719 [1.272883857, 1.276224456] | 1.001812949 [0.997716062, 1.004704900] | 0.998409535 [0.996656074, 1.003249985] |
+  | 16 | 1.277677026 [1.274459856, 1.278790176] | 1.260449530 [1.259329759, 1.262349948] | 1.000193011 [0.997619920, 1.003225049] | 1.001430756 [0.998967664, 1.004061606] |
+  | 32 | 1.266056414 [1.263490274, 1.268331931] | 1.250499620 [1.249573766, 1.252585240] | 0.998555377 [0.997235707, 1.002614342] | 1.001775207 [0.997995311, 1.003070669] |
+  | 64 | 1.269650192 [1.265163567, 1.274736163] | 1.252036832 [1.249091537, 1.254433957] | 0.999871939 [0.997147768, 1.004139330] | 0.998991209 [0.994925235, 1.005903874] |
+  | 128 | 1.292737747 [1.286575647, 1.297444171] | 1.257289875 [1.251732892, 1.262916287] | 1.002372495 [0.994709320, 1.006861782] | 1.000415335 [0.992638669, 1.002856825] |
+
+  The same-invocation SET A/A null median at one driver was **0.999775798**,
+  with bootstrap 95% median CI **[0.993950871, 1.007873503]**. Every competitive
+  effect cleared the bootstrap median-CI gate derived from twice its
+  contemporaneous A/A radius. CV was provenance only and never entered any
+  decision. Median candidate/Redis CPU utilization was already
+  95.900%/95.110% for one-driver SET and 96.232%/94.453% for one-driver mixed;
+  every remaining point was 97.100%–99.354%. Thus no point is a client-bound
+  false loss.
+- **Profile and curve adjudication.** All 16 `cycles:u` profiles had zero lost
+  samples and reached the exact server. At the endpoints,
+  `process_buffered_frames` carried nonzero self-time: SET
+  **3.16% → 3.46%** (Amdahl elimination ceilings **1.032631x → 1.035840x**)
+  and mixed **2.43% → 2.77%** (ceilings **1.024905x → 1.028489x**).
+  Command-specific SET/GET parser, runtime, and store frames were independently
+  visible. The io_uring output surface itself was only 0.11%–0.56% self
+  (maximum elimination ceiling **1.005632x**), so more CQ work cannot produce
+  the requested 5–10x. SET changed only **-0.024920%** from one to 128 drivers
+  and mixed changed **-2.324977%**; the full spans were under 3.22%. This is a
+  flat one-command-thread curve. The ancillary io_uring-over-mio result
+  (1.038853x–1.162719x) is SELF-SPEEDUP maintenance and is not campaign output.
+- **Artifacts and discarded infrastructure attempt.** The complete 928-line
+  log is
+  `/tmp/frankenredis-thread-scaling/full-q01r6-e6a220b1e-189a6997-r2.log`
+  on trj, SHA-256
+  **`6a9bc955d423f901ab3871566ad6b46c769e9ea1d60244d3520ed71e7c20a1a6`**.
+  The committed machine-readable baseline is
+  `baselines/trj_pipeline16_thread_saturation_20260729.json`. The preceding
+  invocation is INVALID, not a result: it stopped in quiet-core preflight
+  before servers, profiles, A/A, or timing because another 128-thread job
+  occupied trj.
+- **Concrete retry predicate.** Reopen as a multicore claim only after the
+  candidate actually executes commands on more than one server thread and the
+  fixture distributes independent keys across those executors while retaining
+  an explicit hot-key control. Also rerun after changes to server threading or
+  affinity, client-driver scheduling, SET/GET parser/runtime/store paths,
+  io_uring output, Redis version, kernel, allocator, harness, or release
+  codegen. Every retry must record physical/logical/actual threads, runtime
+  ISA, cpuset and affinity; retain all executable self-reports, live Redis,
+  same-invocation A/A, two complete order cycles, byte checks, zero-lost
+  nonzero-self profiles, >=90% utilization, and median-CI-only decisions.
+
 ## 2026-07-29 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — cached `ZINTERCARD 2 za zb` is 30.3186x live Redis at saturated P16 (`frankenredis-x0wum`)
 
 - **Claim class: COMPETITIVE. Campaign output: yes. Decision: KEEP.** Current

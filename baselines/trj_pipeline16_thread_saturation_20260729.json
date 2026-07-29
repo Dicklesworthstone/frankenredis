@@ -1,0 +1,250 @@
+{
+  "schema_version": "frankenredis_thread_saturation_baseline/v1",
+  "generated_at": "2026-07-29T04:38:55-04:00",
+  "classification": "client-driver saturation curve",
+  "claim_class": "COMPETITIVE",
+  "campaign_output": true,
+  "campaign_multicore_scaling_result": false,
+  "reason_not_multicore": "candidate, control, and incumbent each executed commands on exactly one thread; the swept thread count is the client-driver saturation axis",
+  "git_commit": "e6a220b1e24f819a1de89edde18046f4d03958b2",
+  "host": {
+    "identity": "threadripperje",
+    "ssh_alias": "trj",
+    "cpu_model": "AMD Ryzen Threadripper PRO 5995WX 64-Cores",
+    "sockets": 1,
+    "physical_cores": 64,
+    "logical_threads": 128,
+    "threads_per_core": 2,
+    "numa_nodes": 1,
+    "ram_gib": 499,
+    "kernel": "6.17.0-41-generic",
+    "runtime_detected_isa": {
+      "avx2": true,
+      "fma": true,
+      "bmi2": true,
+      "vaes": true,
+      "avx512f": false
+    }
+  },
+  "thread_counts": {
+    "client_driver_threads_actually_used": [1, 2, 4, 8, 16, 32, 64, 128],
+    "client_connections": 128,
+    "candidate_command_execution_threads": 1,
+    "control_command_execution_threads": 1,
+    "incumbent_command_execution_threads": 1,
+    "candidate_process_threads_observed": 3,
+    "incumbent_process_threads_observed": 5
+  },
+  "affinity": {
+    "process_cpuset_cap": "0-127",
+    "server_cpu_all_arms": 63,
+    "server_smt_sibling_excluded_from_clients": 127,
+    "client_cpu_order_ranges": ["0-32", "34-37", "40-62", "64-96", "98-101", "104-126"],
+    "client_process_affinity_by_thread_count": {
+      "1": "0",
+      "2": "0-1",
+      "4": "0-3",
+      "8": "0-7",
+      "16": "0-15",
+      "32": "0-31",
+      "64": "0-32,34-37,40-62,64-67",
+      "128": "0-32,34-37,40-62,64-96,98-101,104-126"
+    },
+    "client_affinity_note": "At 128 software driver threads the benchmark process was capped to the 120 quiet logical CPUs listed above; the scheduler shared those CPUs among the 128 drivers."
+  },
+  "executables": {
+    "harness_sha256": "189a699784c396ac17953daaa7225c9dff6adf46af86c4c81cb71a8ed8069647",
+    "frankenredis_sha256": "7e4e6df000fe9907d0e44cf16f6a14863373c37f0f3662a4e30a8afbc85272f0",
+    "redis_7_2_4_sha256": "e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7"
+  },
+  "invocation": {
+    "same_invocation_aa": true,
+    "live_redis_arm": true,
+    "bootstrap_median_ci_gate": true,
+    "cv_provenance_only": true,
+    "samples_per_point": 48,
+    "complete_order_cycles": 2,
+    "interleave_groups": 16,
+    "pipeline": 16,
+    "ops_per_arm_sample": 200704,
+    "workloads": {
+      "set": "sixteen repetitions of SET k v; exact +OK replies checked",
+      "mixed": "eight SET k v and eight GET k operations in alternating order; exact +OK and bulk-v replies checked"
+    },
+    "fixture_scope": "single hot key k",
+    "remote_log": "/tmp/frankenredis-thread-scaling/full-q01r6-e6a220b1e-189a6997-r2.log",
+    "remote_log_sha256": "6a9bc955d423f901ab3871566ad6b46c769e9ea1d60244d3520ed71e7c20a1a6",
+    "remote_log_lines": 928
+  },
+  "ratio_direction": "Redis wall time divided by FrankenRedis wall time; greater than 1.0 means FrankenRedis has higher throughput",
+  "points": [
+    {
+      "client_driver_threads": 1,
+      "workload": "set",
+      "frankenredis_over_redis_median": 1.293059972,
+      "bootstrap_ci95": [1.287321789, 1.301445295],
+      "aa_null_median": 0.999775798,
+      "aa_null_bootstrap_ci95": [0.993950871, 1.007873503],
+      "frankenredis_cpu_util_median_pct": 95.900,
+      "redis_cpu_util_median_pct": 95.110
+    },
+    {
+      "client_driver_threads": 1,
+      "workload": "mixed",
+      "frankenredis_over_redis_median": 1.287217387,
+      "bootstrap_ci95": [1.285554685, 1.295531282],
+      "aa_null_median": 1.001352089,
+      "aa_null_bootstrap_ci95": [0.995750066, 1.006515481],
+      "frankenredis_cpu_util_median_pct": 96.232,
+      "redis_cpu_util_median_pct": 94.453
+    },
+    {
+      "client_driver_threads": 2,
+      "workload": "set",
+      "frankenredis_over_redis_median": 1.302282397,
+      "bootstrap_ci95": [1.295410998, 1.305232688],
+      "aa_null_median": 1.002988752,
+      "aa_null_bootstrap_ci95": [0.998495351, 1.005712593],
+      "frankenredis_cpu_util_median_pct": 98.349,
+      "redis_cpu_util_median_pct": 97.107
+    },
+    {
+      "client_driver_threads": 2,
+      "workload": "mixed",
+      "frankenredis_over_redis_median": 1.277687396,
+      "bootstrap_ci95": [1.271606657, 1.283951015],
+      "aa_null_median": 0.998966770,
+      "aa_null_bootstrap_ci95": [0.996848523, 1.003318748],
+      "frankenredis_cpu_util_median_pct": 98.399,
+      "redis_cpu_util_median_pct": 97.100
+    },
+    {
+      "client_driver_threads": 4,
+      "workload": "set",
+      "frankenredis_over_redis_median": 1.306759798,
+      "bootstrap_ci95": [1.303471907, 1.310421007],
+      "aa_null_median": 0.999881236,
+      "aa_null_bootstrap_ci95": [0.997802880, 1.005269839],
+      "frankenredis_cpu_util_median_pct": 99.030,
+      "redis_cpu_util_median_pct": 98.306
+    },
+    {
+      "client_driver_threads": 4,
+      "workload": "mixed",
+      "frankenredis_over_redis_median": 1.290232827,
+      "bootstrap_ci95": [1.287600562, 1.292626178],
+      "aa_null_median": 0.997706060,
+      "aa_null_bootstrap_ci95": [0.995417921, 0.999456789],
+      "frankenredis_cpu_util_median_pct": 99.177,
+      "redis_cpu_util_median_pct": 98.262
+    },
+    {
+      "client_driver_threads": 8,
+      "workload": "set",
+      "frankenredis_over_redis_median": 1.290861398,
+      "bootstrap_ci95": [1.287865181, 1.292377774],
+      "aa_null_median": 1.001812949,
+      "aa_null_bootstrap_ci95": [0.997716062, 1.004704900],
+      "frankenredis_cpu_util_median_pct": 99.270,
+      "redis_cpu_util_median_pct": 99.124
+    },
+    {
+      "client_driver_threads": 8,
+      "workload": "mixed",
+      "frankenredis_over_redis_median": 1.274118719,
+      "bootstrap_ci95": [1.272883857, 1.276224456],
+      "aa_null_median": 0.998409535,
+      "aa_null_bootstrap_ci95": [0.996656074, 1.003249985],
+      "frankenredis_cpu_util_median_pct": 99.326,
+      "redis_cpu_util_median_pct": 99.236
+    },
+    {
+      "client_driver_threads": 16,
+      "workload": "set",
+      "frankenredis_over_redis_median": 1.277677026,
+      "bootstrap_ci95": [1.274459856, 1.278790176],
+      "aa_null_median": 1.000193011,
+      "aa_null_bootstrap_ci95": [0.997619920, 1.003225049],
+      "frankenredis_cpu_util_median_pct": 99.210,
+      "redis_cpu_util_median_pct": 99.188
+    },
+    {
+      "client_driver_threads": 16,
+      "workload": "mixed",
+      "frankenredis_over_redis_median": 1.260449530,
+      "bootstrap_ci95": [1.259329759, 1.262349948],
+      "aa_null_median": 1.001430756,
+      "aa_null_bootstrap_ci95": [0.998967664, 1.004061606],
+      "frankenredis_cpu_util_median_pct": 99.245,
+      "redis_cpu_util_median_pct": 99.268
+    },
+    {
+      "client_driver_threads": 32,
+      "workload": "set",
+      "frankenredis_over_redis_median": 1.266056414,
+      "bootstrap_ci95": [1.263490274, 1.268331931],
+      "aa_null_median": 0.998555377,
+      "aa_null_bootstrap_ci95": [0.997235707, 1.002614342],
+      "frankenredis_cpu_util_median_pct": 99.352,
+      "redis_cpu_util_median_pct": 99.208
+    },
+    {
+      "client_driver_threads": 32,
+      "workload": "mixed",
+      "frankenredis_over_redis_median": 1.250499620,
+      "bootstrap_ci95": [1.249573766, 1.252585240],
+      "aa_null_median": 1.001775207,
+      "aa_null_bootstrap_ci95": [0.997995311, 1.003070669],
+      "frankenredis_cpu_util_median_pct": 99.277,
+      "redis_cpu_util_median_pct": 99.270
+    },
+    {
+      "client_driver_threads": 64,
+      "workload": "set",
+      "frankenredis_over_redis_median": 1.269650192,
+      "bootstrap_ci95": [1.265163567, 1.274736163],
+      "aa_null_median": 0.999871939,
+      "aa_null_bootstrap_ci95": [0.997147768, 1.004139330],
+      "frankenredis_cpu_util_median_pct": 99.313,
+      "redis_cpu_util_median_pct": 99.220
+    },
+    {
+      "client_driver_threads": 64,
+      "workload": "mixed",
+      "frankenredis_over_redis_median": 1.252036832,
+      "bootstrap_ci95": [1.249091537, 1.254433957],
+      "aa_null_median": 0.998991209,
+      "aa_null_bootstrap_ci95": [0.994925235, 1.005903874],
+      "frankenredis_cpu_util_median_pct": 99.267,
+      "redis_cpu_util_median_pct": 99.163
+    },
+    {
+      "client_driver_threads": 128,
+      "workload": "set",
+      "frankenredis_over_redis_median": 1.292737747,
+      "bootstrap_ci95": [1.286575647, 1.297444171],
+      "aa_null_median": 1.002372495,
+      "aa_null_bootstrap_ci95": [0.994709320, 1.006861782],
+      "frankenredis_cpu_util_median_pct": 99.232,
+      "redis_cpu_util_median_pct": 99.215
+    },
+    {
+      "client_driver_threads": 128,
+      "workload": "mixed",
+      "frankenredis_over_redis_median": 1.257289875,
+      "bootstrap_ci95": [1.251732892, 1.262916287],
+      "aa_null_median": 1.000415335,
+      "aa_null_bootstrap_ci95": [0.992638669, 1.002856825],
+      "frankenredis_cpu_util_median_pct": 99.354,
+      "redis_cpu_util_median_pct": 99.258
+    }
+  ],
+  "curve_adjudication": {
+    "set_t1_to_t128_pct": -0.024920,
+    "mixed_t1_to_t128_pct": -2.324977,
+    "set_full_span_pct": 3.214974,
+    "mixed_full_span_pct": 3.177387,
+    "shape": "flat",
+    "conclusion": "More client driver threads do not create a scaling gain because both server command paths remain single-threaded. A real multicore retry must execute commands on more than one server thread and use independently sharded keys."
+  }
+}
