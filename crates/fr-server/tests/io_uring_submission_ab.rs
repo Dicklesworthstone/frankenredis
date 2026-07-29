@@ -182,6 +182,28 @@ const SINTERSTORE_LARGE_ENCODING: &[u8] =
 const SINTERSTORE_DST_MEMBERSHIP: &[u8] = b"*8\r\n$10\r\nSMISMEMBER\r\n$3\r\ndst\r\n\
 $1\r\n0\r\n$3\r\n256\r\n$3\r\n511\r\n$3\r\n512\r\n$4\r\n4095\r\n$4\r\n4096\r\n";
 const SINTERSTORE_DST_MEMBERSHIP_REPLY: &[u8] = b"*6\r\n:1\r\n:1\r\n:1\r\n:0\r\n:0\r\n:0\r\n";
+const ZINTERCARD_SOURCE_MEMBERS: usize = 4_096;
+const ZINTERCARD_SOURCE_B_START: usize = 2_048;
+const ZINTERCARD_INTERSECTION_MEMBERS: usize = 2_048;
+const ZINTERCARD_PREFILL_BATCH: usize = 256;
+const ZINTERCARD_CACHED: &[u8] = b"*4\r\n$10\r\nZINTERCARD\r\n$1\r\n2\r\n$2\r\nza\r\n$2\r\nzb\r\n";
+const ZINTERCARD_CACHED_REPLY: &[u8] = b":2048\r\n";
+const ZINTERCARD_ZA_CARD: &[u8] = b"*2\r\n$5\r\nZCARD\r\n$2\r\nza\r\n";
+const ZINTERCARD_ZB_CARD: &[u8] = b"*2\r\n$5\r\nZCARD\r\n$2\r\nzb\r\n";
+const ZINTERCARD_SOURCE_CARD_REPLY: &[u8] = b":4096\r\n";
+const ZINTERCARD_ZA_ENCODING: &[u8] = b"*3\r\n$6\r\nOBJECT\r\n$8\r\nENCODING\r\n$2\r\nza\r\n";
+const ZINTERCARD_ZB_ENCODING: &[u8] = b"*3\r\n$6\r\nOBJECT\r\n$8\r\nENCODING\r\n$2\r\nzb\r\n";
+const ZINTERCARD_SKIPLIST_ENCODING_REPLY: &[u8] = b"$8\r\nskiplist\r\n";
+const ZINTERCARD_ZA_BOUNDARIES: &[u8] = b"*8\r\n$7\r\nZMSCORE\r\n$2\r\nza\r\n\
+$1\r\n0\r\n$4\r\n2047\r\n$4\r\n2048\r\n$4\r\n4095\r\n$4\r\n4096\r\n$4\r\n6143\r\n";
+const ZINTERCARD_ZA_BOUNDARIES_REPLY: &[u8] =
+    b"*6\r\n$1\r\n0\r\n$4\r\n2047\r\n$4\r\n2048\r\n$4\r\n4095\r\n$-1\r\n$-1\r\n";
+const ZINTERCARD_ZB_BOUNDARIES: &[u8] = b"*9\r\n$7\r\nZMSCORE\r\n$2\r\nzb\r\n\
+$1\r\n0\r\n$4\r\n2047\r\n$4\r\n2048\r\n$4\r\n4095\r\n$4\r\n4096\r\n$4\r\n6143\r\n$4\r\n6144\r\n";
+const ZINTERCARD_ZB_BOUNDARIES_REPLY: &[u8] = b"*7\r\n$-1\r\n$-1\r\n$4\r\n2048\r\n\
+$4\r\n4095\r\n$4\r\n4096\r\n$4\r\n6143\r\n$-1\r\n";
+const ZINTERCARD_ZA_PTTL: &[u8] = b"*2\r\n$4\r\nPTTL\r\n$2\r\nza\r\n";
+const ZINTERCARD_ZB_PTTL: &[u8] = b"*2\r\n$4\r\nPTTL\r\n$2\r\nzb\r\n";
 const PFMERGE_H1_ENCODING: &[u8] = b"*3\r\n$7\r\nPFDEBUG\r\n$8\r\nENCODING\r\n$2\r\nh1\r\n";
 const PFMERGE_H2_ENCODING: &[u8] = b"*3\r\n$7\r\nPFDEBUG\r\n$8\r\nENCODING\r\n$2\r\nh2\r\n";
 const PFMERGE_DST_ENCODING: &[u8] = b"*3\r\n$7\r\nPFDEBUG\r\n$8\r\nENCODING\r\n$3\r\ndst\r\n";
@@ -320,6 +342,7 @@ enum Workload {
     SunionstoreMixed,
     SdiffstoreMixed,
     SinterstoreMixed,
+    ZintercardCached,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -388,6 +411,7 @@ impl Workload {
             Self::SunionstoreMixed => "sunionstore-mixed",
             Self::SdiffstoreMixed => "sdiffstore-mixed",
             Self::SinterstoreMixed => "sinterstore-mixed",
+            Self::ZintercardCached => "zintercard-cached",
         }
     }
 
@@ -853,6 +877,20 @@ impl Workload {
                 "fr_store::integer_decimal_bytes",
                 "fr_store::set_int_to_bytes",
             ],
+            Self::ZintercardCached => &[
+                "frankenredis::process_buffered_frames",
+                "__memcmp_avx2_movbe",
+                "parse_borrowed_multibulk_action",
+                "parse_command_args_borrowed_into",
+                "copy_borrowed_argv_into_scratch",
+                "fr_runtime::Runtime::execute_frame_internal",
+                "fr_command::execute_dispatch",
+                "fr_command::zintercard",
+                "fr_command::record_source_key_lookups",
+                "<fr_store::Store>::peek_value_type",
+                "<fr_store::Store>::zintercard_count_cached",
+                "<fr_store::Store>::zintercard_cache_hit",
+            ],
             Self::Set | Self::Get | Self::Mixed => &[],
         }
     }
@@ -908,6 +946,7 @@ impl Workload {
                 "sunionstore-mixed" => Self::SunionstoreMixed,
                 "sdiffstore-mixed" => Self::SdiffstoreMixed,
                 "sinterstore-mixed" => Self::SinterstoreMixed,
+                "zintercard-cached" => Self::ZintercardCached,
                 other => panic!("unknown FR_URING_AB_WORKLOADS item: {other}"),
             })
             .collect()
@@ -1380,6 +1419,16 @@ impl WorkloadPackets {
             }
             Workload::SinterstoreMixed => {
                 let case = repeated_case(SINTERSTORE_MIXED, SINTERSTORE_MIXED_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::ZintercardCached => {
+                let case = repeated_case(ZINTERCARD_CACHED, ZINTERCARD_CACHED_REPLY, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -2039,6 +2088,41 @@ fn prefill_mixed_setstore_sources(server: &mut Server, large_key: &str, large_st
     }
 }
 
+fn prefill_zintercard_sources(server: &mut Server) {
+    for key in ["za", "zb"] {
+        let reset = format!(
+            "*3\r\n$3\r\nSET\r\n${}\r\n{key}\r\n$4\r\nseed\r\n\
+*2\r\n$3\r\nDEL\r\n${}\r\n{key}\r\n",
+            key.len(),
+            key.len()
+        );
+        exchange_one(server, reset.as_bytes(), b"+OK\r\n:1\r\n");
+    }
+
+    for (key, start) in [("za", 0), ("zb", ZINTERCARD_SOURCE_B_START)] {
+        for batch_start in (0..ZINTERCARD_SOURCE_MEMBERS).step_by(ZINTERCARD_PREFILL_BATCH) {
+            let batch_end = (batch_start + ZINTERCARD_PREFILL_BATCH).min(ZINTERCARD_SOURCE_MEMBERS);
+            let header = format!(
+                "*{}\r\n$4\r\nZADD\r\n${}\r\n{key}\r\n",
+                (batch_end - batch_start) * 2 + 2,
+                key.len()
+            );
+            let mut request = header.into_bytes();
+            for offset in batch_start..batch_end {
+                let member = (start + offset).to_string();
+                let pair = format!(
+                    "${}\r\n{member}\r\n${}\r\n{member}\r\n",
+                    member.len(),
+                    member.len()
+                );
+                request.extend_from_slice(pair.as_bytes());
+            }
+            let response = format!(":{}\r\n", batch_end - batch_start);
+            exchange_one(server, &request, response.as_bytes());
+        }
+    }
+}
+
 fn prefill(servers: &mut [Server; 4], workload: Workload) {
     let seeded_stream = matches!(
         workload,
@@ -2203,6 +2287,46 @@ steady_state_cache=warmed_by_exact_assertion",
                 server.arm.name(),
                 BITCOUNT_ONE_MIB_BYTES
             );
+        } else if matches!(workload, Workload::ZintercardCached) {
+            prefill_zintercard_sources(server);
+            exchange_one(server, ZINTERCARD_ZA_CARD, ZINTERCARD_SOURCE_CARD_REPLY);
+            exchange_one(server, ZINTERCARD_ZB_CARD, ZINTERCARD_SOURCE_CARD_REPLY);
+            exchange_one(
+                server,
+                ZINTERCARD_ZA_ENCODING,
+                ZINTERCARD_SKIPLIST_ENCODING_REPLY,
+            );
+            exchange_one(
+                server,
+                ZINTERCARD_ZB_ENCODING,
+                ZINTERCARD_SKIPLIST_ENCODING_REPLY,
+            );
+            exchange_one(
+                server,
+                ZINTERCARD_ZA_BOUNDARIES,
+                ZINTERCARD_ZA_BOUNDARIES_REPLY,
+            );
+            exchange_one(
+                server,
+                ZINTERCARD_ZB_BOUNDARIES,
+                ZINTERCARD_ZB_BOUNDARIES_REPLY,
+            );
+            exchange_one(server, ZINTERCARD_ZA_PTTL, PTTL_PERSISTENT_REPLY);
+            exchange_one(server, ZINTERCARD_ZB_PTTL, PTTL_PERSISTENT_REPLY);
+            exchange_one(server, ZINTERCARD_CACHED, ZINTERCARD_CACHED_REPLY);
+            exchange_one(server, ZINTERCARD_CACHED, ZINTERCARD_CACHED_REPLY);
+            println!(
+                "FIXTURE_REPRESENTATION workload={} arm={} \
+source_a_members={} source_a_range=0..4095 source_a_encoding=skiplist \
+source_b_members={} source_b_range=2048..6143 source_b_encoding=skiplist \
+intersection_members={} source_pttl=-1 boundary_scores=verified \
+steady_state_result_cache=warmed_by_two_exact_assertions",
+                workload.name(),
+                server.arm.name(),
+                ZINTERCARD_SOURCE_MEMBERS,
+                ZINTERCARD_SOURCE_MEMBERS,
+                ZINTERCARD_INTERSECTION_MEMBERS
+            );
         } else if matches!(
             workload,
             Workload::SunionstoreMixed | Workload::SdiffstoreMixed | Workload::SinterstoreMixed
@@ -2356,7 +2480,10 @@ fn prefill_and_warm(
     prefill(servers, workload);
     let warm_ops: usize = if matches!(
         workload,
-        Workload::SunionstoreMixed | Workload::SdiffstoreMixed | Workload::SinterstoreMixed
+        Workload::SunionstoreMixed
+            | Workload::SdiffstoreMixed
+            | Workload::SinterstoreMixed
+            | Workload::ZintercardCached
     ) {
         3_200
     } else {

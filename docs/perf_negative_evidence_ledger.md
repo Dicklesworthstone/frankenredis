@@ -28,6 +28,85 @@ Every new KEEP declares exactly one class:
 modified entries in both ledger files. It also preserves the ELF self-report,
 A/A bootstrap median-CI, never-CV, counted-mechanism, and retry-predicate gates.
 
+## 2026-07-29 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — cached `ZINTERCARD 2 za zb` is 30.3186x live Redis at saturated P16 (`frankenredis-x0wum`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes. Decision: KEEP.** Current
+  io_uring FrankenRedis delivered **30.318559274x** the throughput of the actual
+  vendored Redis 7.2.4 server running beside two identical mio A/A controls in
+  one invocation. No production source changed; this commit authenticates the
+  existing dirty-guarded ZINTERCARD result capsule in the competitive harness.
+  Redis 7.2.4 instead enters its generic ZINTERCARD recomputation path for every
+  request. The accompanying io_uring/mio comparison is **SELF-SPEEDUP**
+  maintenance only and remained HOLD.
+- **Ledger adjudication and exact structural fixture.** Exact competitive
+  preflight for `ZINTERCARD` was CLEAR, then every matching row in both ledgers
+  was read by hand. One prior row was a 15-case byte-exact SINTERCARD/ZINTERCARD
+  correctness proof, not a performance claim. A second broad old-contract
+  sweep reported ZINTERCARD at roughly **12.5x** Redis, but lacked the present
+  same-invocation A/A, executing ELF identities, exact representation proof,
+  complete order cycles, named profile, and saturation contract. Every arm
+  resets `za` and `zb`; inserts numeric score/member pairs 0--4,095 into `za`
+  and 2,048--6,143 into `zb`; asserts both source cardinalities are 4,096 and
+  both Redis encodings are skiplist; verifies boundary scores and persistent
+  PTTL; and byte-checks two exact `:2048` replies before timing, warming the
+  steady-state cache. Each measured P16 packet then repeats that exact
+  `ZINTERCARD 2 za zb` request and byte-checks all 16 `:2048` replies.
+- **Executing identity, fixed work, and profile attribution.** Fully reserved
+  `vmi1153651` (Linux 6.17.0-41-generic) ran 48 samples x 12,800 replies/arm at
+  P16 with 50 persistent clients in eight pinned shards, one disjoint server
+  core, 16 client groups/arm/sample, four groups before each within-sample arm
+  rotation, and two complete 24-order cycles. The executing harness
+  self-reported ELF SHA-256
+  **`f812a6543035e4ac5f667ec23b163129268d91127a49870aa5ec841fbaa0ea2e`**;
+  all three executing FrankenRedis arms self-reported ELF SHA-256
+  **`ef9ad60a8190bb752252a09d3f11067747dc747838fdcdc050824e4de435ab8a`**;
+  Redis self-reported ELF SHA-256
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+  Candidate/Redis median utilization was **93.908%/98.082%**. A zero-lost
+  profile attributed **34.50% self-time** to the named ZINTERCARD command
+  surface (`process_buffered_frames` 15.98%, `__memcmp_avx2_movbe` 15.47%,
+  three exact parser/runtime rows at 0.99%/0.84%/0.67%,
+  `fr_command::zintercard` 0.34%, and
+  `Store::zintercard_count_cached` 0.21%), for an Amdahl elimination ceiling
+  of **1.526718x**. The named cache function's nonzero self-time proves that
+  the measured workload reached the intended steady-state path. Async CQ
+  output was only 0.27% self-time, ceiling 1.002707x.
+- **Bootstrap median-CI competitive verdict, never CV.** Wall A/A null median
+  was **0.997028562x**, bootstrap 95% median CI
+  **[0.968847413, 1.060868683]**, deriving decision band
+  **[0.878262634, 1.121737366]**. Redis wall time divided by FrankenRedis wall
+  time was **30.318559274x**, CI **[27.917204952, 32.231736685]**:
+  COMPETITIVE KEEP. CPU A/A null median was **1.003981843x**, CI
+  **[0.963336620, 1.064992206]**, deriving band
+  **[0.870015589, 1.129984411]**; CPU FrankenRedis/Redis throughput was
+  **32.974383297x**, CI **[31.181373545, 34.713781591]**: KEEP. The ancillary
+  io_uring/mio SELF-SPEEDUP was HOLD at **1.137658557x**, CI
+  **[1.060321596, 1.177136800]**; CPU was likewise HOLD at
+  **1.148588679x**, CI **[1.081554780, 1.189333805]**, because both intervals
+  overlap their A/A-derived bands. Neither is campaign output. CV is provenance
+  only and never entered the decision (wall null 27.286722%, self 26.736236%,
+  competitive 23.394768%; CPU null 24.905737%, self 30.560318%,
+  competitive 20.994217%).
+- **Discarded setup attempt.** The first invocation stopped before timing when
+  an exact ZMSCORE boundary assertion exposed an incorrect RESP array bulk
+  length (`$8` rather than `$7`) in the new harness fixture. The declaration
+  was corrected, and only the subsequent invocation—which passed every
+  cardinality, encoding, boundary, PTTL, reply, profile, utilization, and
+  timing gate—licenses this verdict.
+- **Concrete retry predicate.** Reopen after a change to ZINTERCARD semantics;
+  the exact two-source half-overlap fixture; sorted-set skiplist thresholds or
+  score/member representation; cache-key/source ordering, dirty generation, or
+  mutation invalidation; `Store::zintercard_count_cached`, source lookup,
+  parser/runtime/command dispatch; Redis implementation or version; allocator,
+  kernel, harness, or release codegen; or if a fresh valid live-incumbent CI
+  overlaps 1.0. A new implementation lever requires a fresh profile and a
+  counted mechanism predicting at least 10% fewer instructions or cycles. Any
+  retry must retain exact cardinality, encoding, boundary-score, PTTL, cache
+  warm-up, and reply assertions; live Redis arm; all ELF self-reports;
+  same-invocation A/A; complete order cycles; within-sample rotation; zero-lost
+  nonzero-self named profile; byte checking; and >=90% median server
+  utilization.
+
 ## 2026-07-29 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — mixed-hit `SINTERSTORE dst small large` is 3.2237x live Redis at saturated P16 (`frankenredis-mczzl`)
 
 - **Claim class: COMPETITIVE. Campaign output: yes. Decision: KEEP.** Current
