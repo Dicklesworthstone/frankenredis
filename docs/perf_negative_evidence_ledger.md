@@ -28,6 +28,91 @@ Every new KEEP declares exactly one class:
 modified entries in both ledger files. It also preserves the ELF self-report,
 A/A bootstrap median-CI, never-CV, counted-mechanism, and retry-predicate gates.
 
+## 2026-07-29 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — steady-state mixed-representation `SUNIONSTORE dst small large_miss` is 15.5322x live Redis at saturated P16 (`frankenredis-gfj9l`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes.** This is current io_uring
+  FrankenRedis/Redis throughput against the actual vendored Redis 7.2.4 server
+  running live beside both A/A controls in the same invocation. No production
+  source changed: the authenticated harness gained this command shape. The
+  accompanying io_uring/mio comparison is **SELF-SPEEDUP** maintenance only
+  and remained HOLD.
+- **Ledger admission and exact structural fixture.** Exact candidate preflight
+  for `SUNIONSTORE dst small large_miss` over a 512-member intset plus a
+  disjoint 4,096-member hashtable was clear, then every broader SUNIONSTORE,
+  set-union, set-encoding, direct-result, capacity, overwrite, expiry, and LFU
+  match was read and adjudicated. Legacy live-Redis rows range from roughly
+  1.14x to 7.3x by fixture, but lack the present same-invocation A/A,
+  executing-ELF, exact-representation, complete-cycle, named-profile, and
+  saturation contract. Current production already constructs a direct
+  `SetValue`, performs capacity-aware compaction, and replaces the destination
+  non-structurally; this row authenticates that design rather than retrying the
+  rejected delete/reinsert or reserve-tuning veins. The idempotent fixture
+  resets `small`, `large_miss`, and `dst`; loads integer members 0--511 into
+  `small` and 10,000--14,095 into `large_miss`; and in every arm asserts source
+  cardinalities 512/4,096, source encodings intset/hashtable, exact stored
+  cardinality 4,608, destination hashtable encoding, persistent destination
+  TTL, and boundary membership at 0, 511, 9,999, 10,000, 14,095, and 14,096.
+  It executes the union once before timing so every measured overwrite is the
+  same state-stable shape. Each P16 packet repeats that exact two-source
+  request and byte-checks all 16 `:4608` replies.
+- **Executing identity, named profile, and fixed work.** `vmi1149989` (Linux
+  6.17.0-40-generic) ran 48 samples x 12,800 replies/arm at P16 with 50
+  persistent clients in eight pinned shards, one disjoint server core, 16
+  client groups/arm/sample, four groups before each within-sample arm rotation,
+  and two complete 24-order cycles. RCH queue checks at launch and during the
+  run showed this as the only active RCH job on that worker. The executing
+  harness self-reported ELF SHA-256
+  **`8e58176608fb75dff417728073e8a194095e0171946c8435b3abdafc215ba5a5`**;
+  all three executing FrankenRedis arms self-reported ELF SHA-256
+  **`978b292dcec34e0b31fd3982c3a01f5062daf0d6211671155d460089f3cda435`**;
+  Redis self-reported ELF SHA-256
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+  Candidate/Redis median utilization was **98.771%/98.878%**. A zero-lost
+  profile attributed **69.02% self-time** to the named set-union/result-build
+  surface (`integer_decimal_bytes` 25.72%, `CompactFieldMap` insert 14.00%,
+  lookup 13.16%, append 8.11%, and compaction 3.02%, generic-set insert 1.79%,
+  `Store::sunion_value` 1.03%, `SetValue::insert_borrowed` 0.69%, buffered
+  dispatch 1.28%, the setstore executor 0.13%, and the exact parser 0.09%),
+  for an elimination ceiling of **3.227889x**. This proves the measured
+  workload reached the direct union build rather than merely exercising a
+  same-named command shell.
+- **Bootstrap median-CI competitive verdict.** Wall A/A null median was
+  **1.016504864x**, bootstrap 95% median CI
+  **[0.997047525, 1.032053238]**, inside gate
+  **[0.935893524, 1.064106476]**. io_uring FrankenRedis/Redis throughput
+  (Redis wall / FrankenRedis wall) was **15.532205338x**, CI
+  **[15.266981766, 15.956540076]**: COMPETITIVE KEEP. CPU A/A null median was
+  **1.015349262x**, CI **[0.997100771, 1.030184429]**, inside gate
+  **[0.939631141, 1.060368859]**; CPU FrankenRedis/Redis throughput was
+  **15.632023850x**, CI **[15.394752756, 15.969031012]**: KEEP. The ancillary
+  io_uring/mio SELF-SPEEDUP remained HOLD at **0.999921331x**, CI
+  [0.983758522, 1.027282325]; CPU likewise held at **0.998552297x**, CI
+  [0.985785088, 1.020834929]. Neither is campaign output. Bootstrap median-CI
+  decided every verdict, never CV; CV is provenance only (wall null 6.600934%,
+  self 5.787185%, competitive 6.890094%; CPU null 6.520197%, self 6.177934%,
+  competitive 7.858703%).
+- **Discarded attempts and retry predicate.** Compile-time type inference and
+  a malformed `$11` SMISMEMBER fixture verifier stopped before timed samples.
+  A corrected 48-sample pilot with 3,200 replies/arm and one group per arm
+  rotation was discarded wholesale because io_uring median server utilization
+  was only **87.448%** (Redis 96.073%); its concrete retry was the final
+  12,800-reply/four-group block above. Fully busy `vmi1227854` and
+  `vmi1153651` attempts stopped at quiet-core preflight, and pinned-worker queue
+  attempts timed out before execution; none supplied a verdict. Reopen after
+  changes to SUNIONSTORE semantics; set/intset/hashtable thresholds; the exact
+  512+4,096 disjoint fixture; integer-to-decimal conversion; `SetValue`,
+  `GenericSet`, or `CompactFieldMap` union/result construction; destination
+  overwrite, expiry/LFU accounting, parser/runtime/store dispatch; Redis
+  implementation or version; allocator, kernel, harness, or release codegen;
+  or if a fresh valid live-incumbent CI overlaps 1.0. A new implementation
+  lever requires a fresh profile and a counted mechanism predicting at least
+  10% fewer instructions or cycles; do not retry delete/reinsert or reserve
+  tweaks without that evidence. Any retry must retain exact cardinality,
+  encoding, TTL, boundary-membership, and reply assertions; state-stable
+  destination warm-up; live Redis arm; ELF self-reports; same-invocation A/A;
+  complete order cycles; within-sample arm rotation; zero-lost nonzero-self
+  named profile; byte checking; and >=90% median server utilization.
+
 ## 2026-07-29 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — full-range `BITCOUNT bitcount:k` over an exact 1 MiB raw string is 9.5736x live Redis at saturated P16 (`frankenredis-wozj7`)
 
 - **Claim class: COMPETITIVE. Campaign output: yes.** This is current io_uring

@@ -141,6 +141,30 @@ const BITCOUNT_ONE_MIB_STRLEN_REPLY: &[u8] = b":1048576\r\n";
 const BITCOUNT_ONE_MIB_ENCODING: &[u8] =
     b"*3\r\n$6\r\nOBJECT\r\n$8\r\nENCODING\r\n$10\r\nbitcount:k\r\n";
 const BITCOUNT_ONE_MIB_ENCODING_REPLY: &[u8] = b"$3\r\nraw\r\n";
+const SUNIONSTORE_SMALL_MEMBERS: usize = 512;
+const SUNIONSTORE_LARGE_MEMBERS: usize = 4_096;
+const SUNIONSTORE_LARGE_START: usize = 10_000;
+const SUNIONSTORE_PREFILL_BATCH: usize = 256;
+const SUNIONSTORE_MIXED: &[u8] =
+    b"*4\r\n$11\r\nSUNIONSTORE\r\n$3\r\ndst\r\n$5\r\nsmall\r\n$10\r\nlarge_miss\r\n";
+const SUNIONSTORE_MIXED_REPLY: &[u8] = b":4608\r\n";
+const SUNIONSTORE_SMALL_SCARD: &[u8] = b"*2\r\n$5\r\nSCARD\r\n$5\r\nsmall\r\n";
+const SUNIONSTORE_SMALL_SCARD_REPLY: &[u8] = b":512\r\n";
+const SUNIONSTORE_LARGE_SCARD: &[u8] = b"*2\r\n$5\r\nSCARD\r\n$10\r\nlarge_miss\r\n";
+const SUNIONSTORE_LARGE_SCARD_REPLY: &[u8] = b":4096\r\n";
+const SUNIONSTORE_DST_SCARD: &[u8] = b"*2\r\n$5\r\nSCARD\r\n$3\r\ndst\r\n";
+const SUNIONSTORE_DST_SCARD_REPLY: &[u8] = b":4608\r\n";
+const SUNIONSTORE_SMALL_ENCODING: &[u8] =
+    b"*3\r\n$6\r\nOBJECT\r\n$8\r\nENCODING\r\n$5\r\nsmall\r\n";
+const SUNIONSTORE_SMALL_ENCODING_REPLY: &[u8] = b"$6\r\nintset\r\n";
+const SUNIONSTORE_LARGE_ENCODING: &[u8] =
+    b"*3\r\n$6\r\nOBJECT\r\n$8\r\nENCODING\r\n$10\r\nlarge_miss\r\n";
+const SUNIONSTORE_DST_ENCODING: &[u8] = b"*3\r\n$6\r\nOBJECT\r\n$8\r\nENCODING\r\n$3\r\ndst\r\n";
+const SUNIONSTORE_HASHTABLE_ENCODING_REPLY: &[u8] = b"$9\r\nhashtable\r\n";
+const SUNIONSTORE_DST_MEMBERSHIP: &[u8] = b"*8\r\n$10\r\nSMISMEMBER\r\n$3\r\ndst\r\n\
+$1\r\n0\r\n$3\r\n511\r\n$4\r\n9999\r\n$5\r\n10000\r\n$5\r\n14095\r\n$5\r\n14096\r\n";
+const SUNIONSTORE_DST_MEMBERSHIP_REPLY: &[u8] = b"*6\r\n:1\r\n:1\r\n:0\r\n:1\r\n:1\r\n:0\r\n";
+const SUNIONSTORE_DST_PTTL: &[u8] = b"*2\r\n$4\r\nPTTL\r\n$3\r\ndst\r\n";
 const PFMERGE_H1_ENCODING: &[u8] = b"*3\r\n$7\r\nPFDEBUG\r\n$8\r\nENCODING\r\n$2\r\nh1\r\n";
 const PFMERGE_H2_ENCODING: &[u8] = b"*3\r\n$7\r\nPFDEBUG\r\n$8\r\nENCODING\r\n$2\r\nh2\r\n";
 const PFMERGE_DST_ENCODING: &[u8] = b"*3\r\n$7\r\nPFDEBUG\r\n$8\r\nENCODING\r\n$3\r\ndst\r\n";
@@ -275,6 +299,7 @@ enum Workload {
     PfmergeTwoDense,
     PfcountTwoDense,
     BitcountOneMib,
+    SunionstoreMixed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -339,6 +364,7 @@ impl Workload {
             Self::PfmergeTwoDense => "pfmerge-two-dense",
             Self::PfcountTwoDense => "pfcount-two-dense",
             Self::BitcountOneMib => "bitcount-one-mib",
+            Self::SunionstoreMixed => "sunionstore-mixed",
         }
     }
 
@@ -729,6 +755,29 @@ impl Workload {
                 "fr_simd::popcount_popcnt",
                 "fr_simd::popcount_scalar",
             ],
+            Self::SunionstoreMixed => &[
+                "frankenredis::process_buffered_frames",
+                "parse_borrowed_plain_key_arg2_packet",
+                "<fr_runtime::Runtime>::execute_plain_sunionstore_borrowed",
+                "<fr_runtime::Runtime>::execute_plain_setstore_borrowed",
+                "<fr_store::Store>::sunionstore",
+                "<fr_store::Store>::sunion_value",
+                "<fr_store::SetValue>::union_with",
+                "<fr_store::SetValue>::insert_borrowed",
+                "<fr_store::Store>::store_set_algebra_value",
+                "<fr_store::Store>::set_value_entry",
+                "<fr_store::SetValue>::from_index_set",
+                "<fr_store::packed_set::GenericSet>::insert_borrowed",
+                "<fr_store::packed_set::GenericSet>::shrink_to_fit",
+                "<fr_store::packed_set::CompactStrSet>::shrink_to_fit",
+                "<fr_store::packed_set::CompactFieldMap>::insert",
+                "<fr_store::packed_set::CompactFieldMap>::lookup_slot_prehashed",
+                "<fr_store::packed_set::CompactFieldMap>::append_entry",
+                "<fr_store::packed_set::CompactFieldMap>::maybe_compact",
+                "<fr_store::packed_set::CompactFieldMap>::rehash",
+                "<fr_store::Store>::internal_entries_insert",
+                "fr_store::integer_decimal_bytes",
+            ],
             Self::Set | Self::Get | Self::Mixed => &[],
         }
     }
@@ -780,6 +829,7 @@ impl Workload {
                 "pfmerge-two-dense" => Self::PfmergeTwoDense,
                 "pfcount-two-dense" => Self::PfcountTwoDense,
                 "bitcount-one-mib" => Self::BitcountOneMib,
+                "sunionstore-mixed" => Self::SunionstoreMixed,
                 other => panic!("unknown FR_URING_AB_WORKLOADS item: {other}"),
             })
             .collect()
@@ -1211,6 +1261,16 @@ impl WorkloadPackets {
             }
             Workload::BitcountOneMib => {
                 let case = repeated_case(BITCOUNT_ONE_MIB, BITCOUNT_ONE_MIB_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::SunionstoreMixed => {
+                let case = repeated_case(SUNIONSTORE_MIXED, SUNIONSTORE_MIXED_REPLY, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -1826,6 +1886,44 @@ fn bitcount_one_mib_get_reply() -> Vec<u8> {
     response
 }
 
+fn prefill_mixed_sunion_sources(server: &mut Server) {
+    for key in ["small", "large_miss", "dst"] {
+        let reset = format!(
+            "*3\r\n$3\r\nSET\r\n${}\r\n{key}\r\n$4\r\nseed\r\n\
+*2\r\n$3\r\nDEL\r\n${}\r\n{key}\r\n",
+            key.len(),
+            key.len()
+        );
+        exchange_one(server, reset.as_bytes(), b"+OK\r\n:1\r\n");
+    }
+
+    for (key, start, members) in [
+        ("small", 0, SUNIONSTORE_SMALL_MEMBERS),
+        (
+            "large_miss",
+            SUNIONSTORE_LARGE_START,
+            SUNIONSTORE_LARGE_MEMBERS,
+        ),
+    ] {
+        for batch_start in (0..members).step_by(SUNIONSTORE_PREFILL_BATCH) {
+            let batch_end = (batch_start + SUNIONSTORE_PREFILL_BATCH).min(members);
+            let header = format!(
+                "*{}\r\n$4\r\nSADD\r\n${}\r\n{key}\r\n",
+                batch_end - batch_start + 2,
+                key.len()
+            );
+            let mut request = header.into_bytes();
+            for offset in batch_start..batch_end {
+                let member = (start + offset).to_string();
+                let value = format!("${}\r\n{member}\r\n", member.len());
+                request.extend_from_slice(value.as_bytes());
+            }
+            let response = format!(":{}\r\n", batch_end - batch_start);
+            exchange_one(server, &request, response.as_bytes());
+        }
+    }
+}
+
 fn prefill(servers: &mut [Server; 4], workload: Workload) {
     let seeded_stream = matches!(
         workload,
@@ -1988,6 +2086,53 @@ steady_state_cache=warmed_by_exact_assertion",
                 server.arm.name(),
                 BITCOUNT_ONE_MIB_BYTES
             );
+        } else if matches!(workload, Workload::SunionstoreMixed) {
+            prefill_mixed_sunion_sources(server);
+            exchange_one(
+                server,
+                SUNIONSTORE_SMALL_SCARD,
+                SUNIONSTORE_SMALL_SCARD_REPLY,
+            );
+            exchange_one(
+                server,
+                SUNIONSTORE_LARGE_SCARD,
+                SUNIONSTORE_LARGE_SCARD_REPLY,
+            );
+            exchange_one(
+                server,
+                SUNIONSTORE_SMALL_ENCODING,
+                SUNIONSTORE_SMALL_ENCODING_REPLY,
+            );
+            exchange_one(
+                server,
+                SUNIONSTORE_LARGE_ENCODING,
+                SUNIONSTORE_HASHTABLE_ENCODING_REPLY,
+            );
+            exchange_one(server, SUNIONSTORE_MIXED, SUNIONSTORE_MIXED_REPLY);
+            exchange_one(server, SUNIONSTORE_DST_SCARD, SUNIONSTORE_DST_SCARD_REPLY);
+            exchange_one(
+                server,
+                SUNIONSTORE_DST_ENCODING,
+                SUNIONSTORE_HASHTABLE_ENCODING_REPLY,
+            );
+            exchange_one(
+                server,
+                SUNIONSTORE_DST_MEMBERSHIP,
+                SUNIONSTORE_DST_MEMBERSHIP_REPLY,
+            );
+            exchange_one(server, SUNIONSTORE_DST_PTTL, PTTL_PERSISTENT_REPLY);
+            println!(
+                "FIXTURE_REPRESENTATION workload={} arm={} \
+source_small_members={} source_small_encoding=intset \
+source_large_members={} source_large_encoding=hashtable disjoint=true \
+destination_members=4608 destination_encoding=hashtable \
+destination_pttl=-1 boundary_membership=verified \
+steady_state_destination=warmed_by_exact_assertion",
+                workload.name(),
+                server.arm.name(),
+                SUNIONSTORE_SMALL_MEMBERS,
+                SUNIONSTORE_LARGE_MEMBERS
+            );
         } else if let Some(case) = &seeded_stream {
             exchange_one(server, &case.request, &case.response);
         }
@@ -2014,7 +2159,11 @@ fn prefill_and_warm(
     packets: &Arc<WorkloadPackets>,
 ) {
     prefill(servers, workload);
-    let warm_ops = 20_000_usize;
+    let warm_ops: usize = if matches!(workload, Workload::SunionstoreMixed) {
+        3_200
+    } else {
+        20_000
+    };
     let warm_groups = warm_ops.div_ceil(CLIENTS * pipeline).max(8);
     for arm in Arm::ALL {
         time_block(
@@ -2495,6 +2644,22 @@ fn profile_io_uring_path(
     assert!(
         lost.trim_end().ends_with(" 0"),
         "profile lost samples: {lost}"
+    );
+    let top_self_rows = report
+        .lines()
+        .filter(|line| {
+            line.split_whitespace()
+                .next()
+                .and_then(|raw| raw.trim_end_matches('%').parse::<f64>().ok())
+                .is_some()
+        })
+        .take(32)
+        .map(str::trim)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    println!(
+        "PROFILE_TOP_SELF workload={} pipeline={pipeline} rows={top_self_rows:?}",
+        workload.name()
     );
 
     let owned_targets = ["BatchWriter>::submit_owned", "BatchWriter>::drain_owned"];
