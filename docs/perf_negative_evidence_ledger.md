@@ -28,6 +28,88 @@ Every new KEEP declares exactly one class:
 modified entries in both ledger files. It also preserves the ELF self-report,
 A/A bootstrap median-CI, never-CV, counted-mechanism, and retry-predicate gates.
 
+## 2026-07-29 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — selective literal-prefix KEYS is 428.994x live Redis at saturated P16 (`frankenredis-oboc2`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes.** The qualifying result is
+  FrankenRedis/Redis throughput against the actual vendored Redis 7.2.4 server
+  running as a live side-by-side arm in the same invocation. It applies only to
+  exact `KEYS tenant:needle:*` over the fixture below; it is not a claim about
+  general, suffix, wildcard-middle, or all-key KEYS.
+- **Ledger-first admission.** Both ledgers and
+  `perf_candidate_preflight.py check-candidate --competitive` were searched for
+  the exact workload and target surface before the run. The closest row,
+  `6ddda27f3`, is a SELF-SPEEDUP of the internal glob classifier and explicitly
+  says literal-prefix KEYS already range-prunes its ordered-key index. It never
+  measured a live Redis arm. Thus it predicted the structural shape but did not
+  settle the incumbent comparison.
+- **Exact fixed work and behavior.** Every arm held **50,002 persistent keys**:
+  50,000 `tenant:decoy:*` keys, one unrelated harness key, and exactly one
+  `tenant:needle:000000` key. Setup asserted exact DBSIZE, first/last decoy and
+  winner membership, winner PTTL `-1`, and the exact one-element RESP reply.
+  Warmup executed the same query before timing. Each of 48 samples issued
+  **1,600 verified commands per arm** through 50 persistent clients at P16.
+- **Executing and host provenance.** One fail-closed strict-remote invocation
+  ran on worker/host `vmi1293453` (Linux 6.17.0-40-generic), with **8 physical
+  cores / 8 logical threads**, **30,799,832 KiB RAM**, one NUMA node, seven
+  actual client-driver threads on CPUs 0-6, 50 connections, and every server
+  arm pinned to CPU 7 inside process cpuset 0-7. Runtime ISA was
+  `avx2=true,fma=true,bmi2=true,vaes=false,avx512f=false`. The VM exposed no
+  cpufreq driver, governor, EPP, boost, amd-pstate status, or intel-pstate turbo
+  control; the harness recorded `cpufreq_control_visible=false` before and
+  after and proved the unavailable policy state unchanged. Host-wide quiet
+  checks peaked at 9.804% busy, below the 20% fail-closed limit.
+- **Executable identities.** The executing harness self-reported ELF SHA-256
+  **`130e8f6742d885a04c79b09a1f26fc8d0983e3b82bb97e2ca6c9557676fb9e64`**.
+  Both null controls and the candidate self-reported the same live
+  FrankenRedis `/proc/PID/exe` SHA-256
+  **`cec70f9055809e7a735da48283e77a7c677cba4cd61ef84592e40ba8585e6905`**;
+  the live Redis 7.2.4 arm self-reported
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+- **Same-invocation nulls and competitive decision.** Candidate and Redis
+  median server utilization was 90.154% and 98.209%. The same-invocation wall
+  A/A null median was **0.986958395x**; bootstrap 95% median CI
+  **[0.946602464, 1.048782474]**, yielding the prespecified two-radius validity
+  band **[0.893204927, 1.106795073]**. FrankenRedis/Redis wall throughput was
+  **428.994005451x**, bootstrap 95% median CI
+  **[398.183329897, 458.574268949]**: **COMPETITIVE KEEP**. CPU A/A null median
+  was **1.009121669x**, bootstrap 95% median CI
+  **[0.970191009, 1.030628328]**; CPU efficiency was **474.869098615x**, CI
+  **[444.157073526, 505.884163663]**: **KEEP**.
+- **Maintenance-only io_uring result.** The same-ELF mio/io_uring wall ratio was
+  **1.024668797x**, CI **[0.993825904, 1.087984679]**, and the CPU ratio was
+  **1.065333223x**, CI **[1.030481929, 1.093209700]**. Both are **HOLD** against
+  the contemporaneous null margin and are SELF-SPEEDUP maintenance, not
+  campaign output.
+- **Profile and libc call-site attribution.** The exact candidate profile lost
+  zero samples. `process_buffered_frames` held 17.71% self-time, while the named
+  KEYS command/store target held **1.97% self-time**, for a computed target-only
+  Amdahl elimination ceiling of **1.020096x**; the complete io_uring surface
+  held 0.21%. A stripped libc page at offset family `0x198000` held **15.0408%
+  self-time** (424/2,819 samples). DWARF stacks plus `addr2line -i` on the exact
+  executing server ELF attributed its highest-weight callers to specific
+  parser-cascade sites: PEXPIRE packet parsing (138 + 36 samples), XRANGE
+  floor dispatch (30), and BITCOUNT packet parsing (23), rather than to the
+  KEYS BTree range. The harness now records this attribution automatically for
+  any libc memory leaf above 5% self-time instead of stopping at an unresolved
+  libc symbol.
+- **Invalid attempts are not results.** Two remote workers failed the
+  host-wide quiet gate before measurement, one failed RCH project-root
+  preflight, and one invocation did not transmit the workload environment
+  through RCH and therefore ran default SET/P1. None is used in this verdict;
+  the authoritative invocation above passed the exact workload, utilization,
+  fixture, identity, profile, and null gates.
+- **Decision rule and concrete retry predicate.** The bootstrap median-CI gate
+  against twice the same-invocation A/A CI radius determined every timing
+  verdict. Wall null CV 29.783329%, competitive CV 20.112505%, CPU null CV
+  27.148906%, and competitive CPU CV 18.837380% are provenance only and never
+  a gate. Re-run after changes to `keys_matching_in_db`, ordered-key range
+  maintenance, literal-prefix preparation/matching, command-parser dispatch,
+  allocator/codegen, key count or selectivity, pipeline depth, Redis version,
+  or host cpufreq visibility. Invalidate rather than compare if either server
+  is below 90% median utilization, the exact fixture/reply changes, either A/A
+  CI fails to bracket 1.0, ELF identities differ, host-wide exclusivity fails,
+  the named KEYS surface has zero self-time, or the profile loses samples.
+
 ## 2026-07-29 MossyBluff (cod/MEASURE): CODE-ONLY HOLD — P16 same-shard SET/GET queue envelopes are batched; exclusive trj verdict remains queued (`frankenredis-q01r6`)
 
 - **Claim class: DIAGNOSTIC. Campaign output: no. Decision: HOLD.** The

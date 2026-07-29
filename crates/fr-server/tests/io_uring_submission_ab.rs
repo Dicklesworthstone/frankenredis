@@ -60,6 +60,7 @@ const QUIET_CORE_PREFLIGHT_ATTEMPTS: usize = 20;
 // the rest of the machine.
 const HOST_WIDE_MAX_BUSY_PCT: f64 = 20.0;
 const MIN_SERVER_UTIL_PCT: f64 = 90.0;
+const HOT_LIBC_LEAF_MIN_SELF_PCT: f64 = 5.0;
 const IO_URING_FLAG: &str = "--io-uring-output";
 const BITPOS_RANGE_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_BITPOS_RANGE_FLOOR_ORIG";
 const BITFIELD_RO_TWO_GET_FLOOR_CONTROL_ENV: &str = "FR_PERF_AB_BITFIELD_RO_TWO_GET_FLOOR_ORIG";
@@ -242,6 +243,11 @@ const OBJECT_REFCOUNT: &[u8] = b"*3\r\n$6\r\nOBJECT\r\n$8\r\nREFCOUNT\r\n$8\r\no
 const OBJECT_REFCOUNT_REPLY: &[u8] = b":1\r\n";
 const DBSIZE: &[u8] = b"*1\r\n$6\r\nDBSIZE\r\n";
 const DBSIZE_REPLY: &[u8] = b":1\r\n";
+const KEYS_SELECTIVE_PREFIX_DECOYS: usize = 50_000;
+const KEYS_SELECTIVE_PREFIX_PREFILL_BATCH: usize = 256;
+const KEYS_SELECTIVE_PREFIX: &[u8] = b"*2\r\n$4\r\nKEYS\r\n$15\r\ntenant:needle:*\r\n";
+const KEYS_SELECTIVE_PREFIX_REPLY: &[u8] = b"*1\r\n$20\r\ntenant:needle:000000\r\n";
+const KEYS_SELECTIVE_PREFIX_PTTL: &[u8] = b"*2\r\n$4\r\nPTTL\r\n$20\r\ntenant:needle:000000\r\n";
 const ECHO: &[u8] = b"*2\r\n$4\r\nECHO\r\n$1\r\nx\r\n";
 const ECHO_REPLY: &[u8] = b"$1\r\nx\r\n";
 const UNWATCH: &[u8] = b"*1\r\n$7\r\nUNWATCH\r\n";
@@ -349,6 +355,7 @@ enum Workload {
     PfmergeTwoDense,
     PfcountTwoDense,
     BitcountOneMib,
+    KeysSelectivePrefix,
     SunionstoreMixed,
     SdiffstoreMixed,
     SinterstoreMixed,
@@ -418,6 +425,7 @@ impl Workload {
             Self::PfmergeTwoDense => "pfmerge-two-dense",
             Self::PfcountTwoDense => "pfcount-two-dense",
             Self::BitcountOneMib => "bitcount-one-mib",
+            Self::KeysSelectivePrefix => "keys-selective-prefix",
             Self::SunionstoreMixed => "sunionstore-mixed",
             Self::SdiffstoreMixed => "sdiffstore-mixed",
             Self::SinterstoreMixed => "sinterstore-mixed",
@@ -824,6 +832,12 @@ impl Workload {
                 "fr_simd::popcount_popcnt",
                 "fr_simd::popcount_scalar",
             ],
+            Self::KeysSelectivePrefix => &[
+                "<fr_runtime::Runtime>::handle_db_keys_command",
+                "<fr_store::Store>::keys_matching_in_db",
+                "fr_store::glob_literal_prefix",
+                "<fr_store::PreparedGlob>::matches",
+            ],
             Self::SunionstoreMixed => &[
                 "frankenredis::process_buffered_frames",
                 "parse_borrowed_plain_key_arg2_packet",
@@ -953,6 +967,7 @@ impl Workload {
                 "pfmerge-two-dense" => Self::PfmergeTwoDense,
                 "pfcount-two-dense" => Self::PfcountTwoDense,
                 "bitcount-one-mib" => Self::BitcountOneMib,
+                "keys-selective-prefix" => Self::KeysSelectivePrefix,
                 "sunionstore-mixed" => Self::SunionstoreMixed,
                 "sdiffstore-mixed" => Self::SdiffstoreMixed,
                 "sinterstore-mixed" => Self::SinterstoreMixed,
@@ -1399,6 +1414,17 @@ impl WorkloadPackets {
             }
             Workload::BitcountOneMib => {
                 let case = repeated_case(BITCOUNT_ONE_MIB, BITCOUNT_ONE_MIB_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::KeysSelectivePrefix => {
+                let case =
+                    repeated_case(KEYS_SELECTIVE_PREFIX, KEYS_SELECTIVE_PREFIX_REPLY, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -2447,6 +2473,41 @@ fn prefill_zintercard_sources(server: &mut Server) {
     }
 }
 
+fn prefill_selective_prefix_keys(server: &mut Server) {
+    exchange_one(
+        server,
+        b"*3\r\n$3\r\nSET\r\n$20\r\ntenant:needle:000000\r\n$1\r\nv\r\n",
+        SET_REPLY,
+    );
+
+    for batch_start in
+        (0..KEYS_SELECTIVE_PREFIX_DECOYS).step_by(KEYS_SELECTIVE_PREFIX_PREFILL_BATCH)
+    {
+        let batch_end =
+            (batch_start + KEYS_SELECTIVE_PREFIX_PREFILL_BATCH).min(KEYS_SELECTIVE_PREFIX_DECOYS);
+        let mut request =
+            format!("*{}\r\n$4\r\nMSET\r\n", 1 + 2 * (batch_end - batch_start)).into_bytes();
+        for index in batch_start..batch_end {
+            let key = format!("tenant:decoy:{index:06}");
+            push_resp_bulk(&mut request, key.as_bytes());
+            push_resp_bulk(&mut request, b"v");
+        }
+        exchange_one(server, &request, SET_REPLY);
+    }
+
+    let expected_dbsize = format!(":{}\r\n", KEYS_SELECTIVE_PREFIX_DECOYS + 2);
+    exchange_one(server, DBSIZE, expected_dbsize.as_bytes());
+
+    let last_decoy = format!("tenant:decoy:{:06}", KEYS_SELECTIVE_PREFIX_DECOYS - 1);
+    let mut boundary_request = b"*4\r\n$6\r\nEXISTS\r\n".to_vec();
+    push_resp_bulk(&mut boundary_request, b"tenant:decoy:000000");
+    push_resp_bulk(&mut boundary_request, last_decoy.as_bytes());
+    push_resp_bulk(&mut boundary_request, b"tenant:needle:000000");
+    exchange_one(server, &boundary_request, b":3\r\n");
+    exchange_one(server, KEYS_SELECTIVE_PREFIX_PTTL, PTTL_PERSISTENT_REPLY);
+    exchange_one(server, KEYS_SELECTIVE_PREFIX, KEYS_SELECTIVE_PREFIX_REPLY);
+}
+
 fn prefill(servers: &mut [Server; 4], workload: Workload) {
     let seeded_stream = matches!(
         workload,
@@ -2610,6 +2671,18 @@ steady_state_cache=warmed_by_exact_assertion",
                 workload.name(),
                 server.arm.name(),
                 BITCOUNT_ONE_MIB_BYTES
+            );
+        } else if matches!(workload, Workload::KeysSelectivePrefix) {
+            prefill_selective_prefix_keys(server);
+            println!(
+                "FIXTURE_REPRESENTATION workload={} arm={} \
+total_keys={} decoy_keys={} literal_prefix_candidates=1 exact_reply_keys=1 \
+matched_key_pttl=-1 boundary_membership=verified \
+steady_state_ordered_index=warmed_by_exact_assertion",
+                workload.name(),
+                server.arm.name(),
+                KEYS_SELECTIVE_PREFIX_DECOYS + 2,
+                KEYS_SELECTIVE_PREFIX_DECOYS
             );
         } else if matches!(workload, Workload::ZintercardCached) {
             prefill_zintercard_sources(server);
@@ -2803,7 +2876,9 @@ fn prefill_and_warm(
     packets: &Arc<DriverPackets>,
 ) {
     prefill(servers, workload);
-    let warm_ops: usize = if matches!(
+    let warm_ops: usize = if matches!(workload, Workload::KeysSelectivePrefix) {
+        1_600
+    } else if matches!(
         workload,
         Workload::SunionstoreMixed
             | Workload::SdiffstoreMixed
@@ -2814,7 +2889,11 @@ fn prefill_and_warm(
     } else {
         20_000
     };
-    let warm_groups = warm_ops.div_ceil(clients * pipeline).max(8);
+    let warm_groups = if matches!(workload, Workload::KeysSelectivePrefix) {
+        warm_ops.div_ceil(clients * pipeline).max(2)
+    } else {
+        warm_ops.div_ceil(clients * pipeline).max(8)
+    };
     for arm in Arm::ALL {
         time_block(
             &mut servers[arm.index()],
@@ -2865,6 +2944,7 @@ fn measure_configuration(
     workload: Workload,
     pipeline: usize,
     config: MeasurementConfig,
+    host_wide_allowed_cpus: &[usize],
 ) -> Vec<Sample> {
     measure_configuration_with_packets(
         servers,
@@ -2875,7 +2955,7 @@ fn measure_configuration(
         PacketMeasurement {
             prepare_keyed: false,
             workload_shape: "shared_hot_key",
-            host_wide_allowed_cpus: None,
+            host_wide_allowed_cpus: Some(host_wide_allowed_cpus),
         },
     )
 }
@@ -3299,6 +3379,230 @@ io_uring={io_uring_util_median:.3}% redis={redis_util_median:.3}%",
     )
 }
 
+fn aggregate_libc_self_pct(report: &str) -> f64 {
+    report
+        .lines()
+        .filter(|line| line.contains("libc.so"))
+        .filter_map(|line| {
+            line.split_whitespace()
+                .next()?
+                .trim_end_matches('%')
+                .parse::<f64>()
+                .ok()
+        })
+        .sum()
+}
+
+fn dso_offset(line: &str, marker: &str) -> Option<u64> {
+    let marker_start = line.find(marker)?;
+    let hex_start = marker_start + marker.len();
+    let hex = line[hex_start..]
+        .split(|character: char| !character.is_ascii_hexdigit())
+        .next()?;
+    (!hex.is_empty()).then(|| u64::from_str_radix(hex, 16).expect("perf DSO offset is hexadecimal"))
+}
+
+fn sampled_symbol(line: &str) -> Option<&str> {
+    line.split_once(" (")?.0.split_whitespace().nth(1)
+}
+
+#[derive(Debug, Default)]
+struct LibcLeafCallers {
+    samples: usize,
+    leaf_offsets: HashSet<u64>,
+    caller_counts: HashMap<u64, usize>,
+}
+
+#[derive(Debug)]
+struct DominantLibcLeafCallers {
+    identity: String,
+    samples: usize,
+    total_samples: usize,
+    leaf_offsets: Vec<u64>,
+    caller_counts: Vec<(u64, usize)>,
+}
+
+fn dominant_libc_leaf_callers(script: &str, executable: &Path) -> Option<DominantLibcLeafCallers> {
+    let executable_name = executable
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("profiled executable name must be UTF-8");
+    let executable_marker = format!("{executable_name}+0x");
+    let mut groups = HashMap::<String, LibcLeafCallers>::new();
+    let mut total_samples = 0usize;
+    let mut expecting_leaf = false;
+    let mut active_group = None::<String>;
+    let mut sample_callers = HashSet::<u64>::new();
+
+    for line in script.lines() {
+        let trimmed = line.trim();
+        if !trimmed.is_empty()
+            && trimmed.split_whitespace().count() == 1
+            && trimmed.parse::<u64>().is_ok()
+        {
+            total_samples += 1;
+            expecting_leaf = true;
+            active_group = None;
+            sample_callers.clear();
+            continue;
+        }
+        if trimmed.is_empty() {
+            continue;
+        }
+        if expecting_leaf {
+            expecting_leaf = false;
+            let Some(offset) = dso_offset(line, "libc.so.6+0x") else {
+                continue;
+            };
+            let symbol = sampled_symbol(line).unwrap_or("[unknown]");
+            let identity = if ["memcmp", "memcpy", "memmove", "memset"]
+                .iter()
+                .any(|family| symbol.contains(family))
+            {
+                format!("symbol:{symbol}")
+            } else if symbol == "[unknown]" || symbol.starts_with("0x") {
+                format!("unresolved_libc_page:0x{:x}", offset & !0xfff)
+            } else {
+                continue;
+            };
+            let group = groups.entry(identity.clone()).or_default();
+            group.samples += 1;
+            group.leaf_offsets.insert(offset);
+            active_group = Some(identity);
+            continue;
+        }
+        let Some(identity) = active_group.as_ref() else {
+            continue;
+        };
+        let Some(offset) = dso_offset(line, &executable_marker) else {
+            continue;
+        };
+        if sample_callers.insert(offset) {
+            *groups
+                .get_mut(identity)
+                .expect("active libc group exists")
+                .caller_counts
+                .entry(offset)
+                .or_default() += 1;
+        }
+    }
+
+    let (identity, group) = groups.into_iter().max_by_key(|(_, group)| group.samples)?;
+    let self_pct = 100.0 * group.samples as f64 / total_samples as f64;
+    if self_pct < HOT_LIBC_LEAF_MIN_SELF_PCT {
+        return None;
+    }
+    let mut leaf_offsets = group.leaf_offsets.into_iter().collect::<Vec<_>>();
+    leaf_offsets.sort_unstable();
+    let mut caller_counts = group.caller_counts.into_iter().collect::<Vec<_>>();
+    caller_counts.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    caller_counts.truncate(48);
+    Some(DominantLibcLeafCallers {
+        identity,
+        samples: group.samples,
+        total_samples,
+        leaf_offsets,
+        caller_counts,
+    })
+}
+
+fn attribute_hot_libc_leaf(candidate: &Server, data: &Path, self_report: &str, context: &str) {
+    let aggregate_libc_self_pct = aggregate_libc_self_pct(self_report);
+    if aggregate_libc_self_pct < HOT_LIBC_LEAF_MIN_SELF_PCT {
+        println!(
+            "PROFILE_LIBC_LEAF_ATTRIBUTION {context} \
+status=no_dominant_memory_leaf aggregate_libc_self_pct={aggregate_libc_self_pct:.4} \
+minimum_self_pct={HOT_LIBC_LEAF_MIN_SELF_PCT:.3}"
+        );
+        return;
+    }
+
+    let executable = fs::read_link(format!("/proc/{}/exe", candidate.pid()))
+        .expect("resolve profiled executable");
+    let script = Command::new("perf")
+        .env("LC_ALL", "C")
+        .args(["script", "-F", "period,ip,sym,dso,dsoff", "-i"])
+        .arg(data)
+        .output()
+        .expect("run perf script for dominant libc leaf");
+    assert!(
+        script.status.success(),
+        "perf script failed for libc caller attribution: {}",
+        String::from_utf8_lossy(&script.stderr)
+    );
+    let script = String::from_utf8(script.stdout).expect("perf script output is UTF-8");
+    let Some(callers) = dominant_libc_leaf_callers(&script, &executable) else {
+        println!(
+            "PROFILE_LIBC_LEAF_ATTRIBUTION {context} \
+status=no_single_dominant_libc_leaf aggregate_libc_self_pct={aggregate_libc_self_pct:.4} \
+minimum_self_pct={HOT_LIBC_LEAF_MIN_SELF_PCT:.3}"
+        );
+        return;
+    };
+    assert!(
+        !callers.caller_counts.is_empty(),
+        "DWARF call chains for {} did not reach the profiled executable",
+        callers.identity
+    );
+
+    let caller_offsets = callers
+        .caller_counts
+        .iter()
+        .map(|(offset, _)| format!("0x{offset:x}"))
+        .collect::<Vec<_>>();
+    let mut addr2line = Command::new("addr2line");
+    addr2line
+        .args(["-a", "-f", "-C", "-i", "-p", "-e"])
+        .arg(&executable)
+        .args(&caller_offsets);
+    let addr2line = addr2line
+        .output()
+        .expect("run addr2line for dominant libc leaf callers");
+    assert!(
+        addr2line.status.success(),
+        "addr2line failed for {}: {}",
+        callers.identity,
+        String::from_utf8_lossy(&addr2line.stderr)
+    );
+    let inline_callers = String::from_utf8(addr2line.stdout)
+        .expect("addr2line output is UTF-8")
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .take(256)
+        .map(str::trim)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let leaf_offsets = callers
+        .leaf_offsets
+        .iter()
+        .map(|offset| format!("0x{offset:x}"))
+        .collect::<Vec<_>>();
+    let weighted_callers = callers
+        .caller_counts
+        .iter()
+        .map(|(offset, count)| {
+            (
+                format!("0x{offset:x}"),
+                *count,
+                100.0 * *count as f64 / callers.samples as f64,
+            )
+        })
+        .collect::<Vec<_>>();
+    let self_pct = 100.0 * callers.samples as f64 / callers.total_samples as f64;
+
+    println!(
+        "PROFILE_LIBC_LEAF_ATTRIBUTION {context} leaf={} self_pct={self_pct:.4} \
+leaf_samples={} total_samples={} aggregate_libc_self_pct={aggregate_libc_self_pct:.4} \
+unwind=dwarf_8192 addr2line_inlines=true executing_elf_sha256={} \
+leaf_offsets={leaf_offsets:?} weighted_caller_offsets={weighted_callers:?} \
+inline_callers={inline_callers:?}",
+        callers.identity,
+        callers.samples,
+        callers.total_samples,
+        candidate.executing_elf_sha256()
+    );
+}
+
 fn profile_io_uring_path(
     candidate: &mut Server,
     root: &Path,
@@ -3323,7 +3627,7 @@ fn profile_io_uring_path(
             "cycles",
             "-g",
             "--call-graph",
-            "fp",
+            "dwarf,8192",
             "-p",
             &candidate.pid().to_string(),
             "-o",
@@ -3487,6 +3791,15 @@ lost_samples=0 rows={command_rows:?}",
             workload.name()
         );
     }
+    attribute_hot_libc_leaf(
+        candidate,
+        &data,
+        &report,
+        &format!(
+            "workload={} pipeline={pipeline} client_driver_threads={client_threads}",
+            workload.name()
+        ),
+    );
 }
 
 fn profile_sharded_set_get_path(
@@ -3519,7 +3832,7 @@ fn profile_sharded_set_get_path(
             "cycles",
             "-g",
             "--call-graph",
-            "fp",
+            "dwarf,8192",
             "-p",
             &candidate.pid().to_string(),
             "-o",
@@ -3635,6 +3948,15 @@ amdahl_elimination_ceiling={amdahl_ceiling:.6}x lost_samples=0 \
 targets={targets:?} rows={target_rows:?} top_self_rows={top_self_rows:?}",
         workload.name()
     );
+    attribute_hot_libc_leaf(
+        candidate,
+        &data,
+        &report,
+        &format!(
+            "workload={} pipeline={pipeline} server_command_execution_threads={server_workers}",
+            workload.name()
+        ),
+    );
 }
 
 fn parse_cpu_list(text: &str) -> Vec<usize> {
@@ -3685,6 +4007,97 @@ fn machine_topology() -> (usize, usize) {
         physical_cores.insert((package.trim().to_owned(), core.trim().to_owned()));
     }
     (physical_cores.len(), online.len())
+}
+
+fn machine_ram_kib() -> u64 {
+    fs::read_to_string("/proc/meminfo")
+        .expect("read machine memory provenance")
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.split_whitespace();
+            (fields.next()? == "MemTotal:").then(|| {
+                fields
+                    .next()
+                    .expect("MemTotal value is present")
+                    .parse::<u64>()
+                    .expect("MemTotal is an integer")
+            })
+        })
+        .expect("MemTotal is present")
+}
+
+fn machine_numa_nodes() -> usize {
+    fs::read_to_string("/sys/devices/system/node/online")
+        .map(|text| parse_cpu_list(&text).len())
+        .unwrap_or(1)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CpuFrequencyPolicy {
+    scaling_drivers: Vec<String>,
+    scaling_governors: Vec<String>,
+    energy_performance_preferences: Vec<String>,
+    boost: String,
+    amd_pstate_status: String,
+    intel_pstate_no_turbo: String,
+}
+
+fn read_policy_value(path: impl AsRef<Path>) -> String {
+    fs::read_to_string(path)
+        .map(|value| value.trim().to_owned())
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "unavailable".to_owned())
+}
+
+fn per_cpu_policy_values(cpus: &[usize], field: &str) -> Vec<String> {
+    let mut values = cpus
+        .iter()
+        .map(|cpu| read_policy_value(format!("/sys/devices/system/cpu/cpu{cpu}/cpufreq/{field}")))
+        .collect::<Vec<_>>();
+    values.sort();
+    values.dedup();
+    if values.is_empty() {
+        values.push("unavailable".to_owned());
+    }
+    values
+}
+
+fn cpu_frequency_policy(cpus: &[usize]) -> CpuFrequencyPolicy {
+    CpuFrequencyPolicy {
+        scaling_drivers: per_cpu_policy_values(cpus, "scaling_driver"),
+        scaling_governors: per_cpu_policy_values(cpus, "scaling_governor"),
+        energy_performance_preferences: per_cpu_policy_values(
+            cpus,
+            "energy_performance_preference",
+        ),
+        boost: read_policy_value("/sys/devices/system/cpu/cpufreq/boost"),
+        amd_pstate_status: read_policy_value("/sys/devices/system/cpu/amd_pstate/status"),
+        intel_pstate_no_turbo: read_policy_value("/sys/devices/system/cpu/intel_pstate/no_turbo"),
+    }
+}
+
+fn print_cpu_frequency_policy(phase: &str, cpus: &[usize], policy: &CpuFrequencyPolicy) {
+    let cpufreq_control_visible = policy
+        .scaling_drivers
+        .iter()
+        .any(|value| value != "unavailable")
+        && policy
+            .scaling_governors
+            .iter()
+            .any(|value| value != "unavailable");
+    println!(
+        "CPU_FREQUENCY_POLICY phase={phase} cpus_checked={cpus:?} \
+scaling_drivers={:?} scaling_governors={:?} \
+energy_performance_preferences={:?} boost={} amd_pstate_status={} \
+intel_pstate_no_turbo={} cpufreq_control_visible={cpufreq_control_visible}",
+        policy.scaling_drivers,
+        policy.scaling_governors,
+        policy.energy_performance_preferences,
+        policy.boost,
+        policy.amd_pstate_status,
+        policy.intel_pstate_no_turbo
+    );
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -3775,27 +4188,42 @@ fn assert_host_wide_quiescence(allowed_cpus: &[usize], phase: &str) {
         !allowed_cpus.is_empty(),
         "host-wide benchmark cpuset cannot be empty"
     );
-    let loads = observed_core_loads();
-    let violations = host_wide_quiescence_violations(allowed_cpus, &loads);
-    assert!(
-        violations.is_empty(),
-        "host-wide benchmark lost exclusivity during {phase}; CPUs above \
-{HOST_WIDE_MAX_BUSY_PCT:.1}% busy or missing: {}",
-        violations.join(",")
-    );
-    let maximum_busy_pct = allowed_cpus
-        .iter()
-        .filter_map(|cpu| loads.get(cpu))
-        .copied()
-        .fold(0.0_f64, f64::max);
-    println!(
-        "HOST_WIDE_QUIESCENCE phase={phase} allowed_cpu_count={} \
-sampled_cpu_count={} maximum_busy_pct={maximum_busy_pct:.3} \
+    for attempt in 1..=QUIET_CORE_PREFLIGHT_ATTEMPTS {
+        let loads = observed_core_loads();
+        let violations = host_wide_quiescence_violations(allowed_cpus, &loads);
+        if violations.is_empty() {
+            let maximum_busy_pct = allowed_cpus
+                .iter()
+                .filter_map(|cpu| loads.get(cpu))
+                .copied()
+                .fold(0.0_f64, f64::max);
+            println!(
+                "HOST_WIDE_QUIESCENCE phase={phase} attempts={attempt} \
+allowed_cpu_count={} sampled_cpu_count={} maximum_busy_pct={maximum_busy_pct:.3} \
 limit_pct={HOST_WIDE_MAX_BUSY_PCT:.3} busy_cpu_count_above_limit=0 \
 verdict=clear loads={loads:?}",
-        allowed_cpus.len(),
-        loads.len()
-    );
+                allowed_cpus.len(),
+                loads.len()
+            );
+            return;
+        }
+        if attempt == QUIET_CORE_PREFLIGHT_ATTEMPTS {
+            panic!(
+                "host-wide benchmark lost exclusivity during {phase} after {attempt} attempts; \
+CPUs above {HOST_WIDE_MAX_BUSY_PCT:.1}% busy or missing: {}",
+                violations.join(",")
+            );
+        }
+        println!(
+            "HOST_WIDE_QUIESCENCE_RETRY phase={phase} \
+attempt={attempt}/{QUIET_CORE_PREFLIGHT_ATTEMPTS} \
+allowed_cpu_count={} sampled_cpu_count={} \
+violations={violations:?} loads={loads:?}",
+            allowed_cpus.len(),
+            loads.len()
+        );
+    }
+    unreachable!("host-wide quiescence loop returns or panics");
 }
 
 fn current_process_cpu() -> usize {
@@ -4146,6 +4574,33 @@ fn host_wide_quiescence_accepts_only_complete_quiet_cpuset() {
 }
 
 #[test]
+fn dominant_libc_leaf_offsets_reach_specific_inlined_callers() {
+    let report = "\
+    18.21%  frankenredis  libc.so.6     [.] __memcmp_avx2_movbe
+     6.00%  frankenredis  frankenredis  [.] command_surface";
+    assert_eq!(aggregate_libc_self_pct(report), 18.21);
+
+    let script = "\
+         1
+  7f00 [unknown] (/usr/lib/libc.so.6+0x1983a4)
+  5500 caller_a (/build/release-perf/frankenredis+0x6e7351)
+  5600 caller_b (/build/release-perf/frankenredis+0x6df34b)
+         1
+  7f10 [unknown] (/usr/lib/libc.so.6+0x1986a1)
+  5700 caller_a (/build/release-perf/frankenredis+0x6e7351)
+         1
+  7f20 epoll_wait (/usr/lib/libc.so.6+0x1376d4)
+  5800 caller_c (/build/release-perf/frankenredis+0x735cce)";
+    let callers =
+        dominant_libc_leaf_callers(script, Path::new("/proc/123/exe/frankenredis")).unwrap();
+    assert_eq!(callers.identity, "unresolved_libc_page:0x198000");
+    assert_eq!(callers.samples, 2);
+    assert_eq!(callers.total_samples, 3);
+    assert_eq!(callers.leaf_offsets, [0x1983a4, 0x1986a1]);
+    assert_eq!(callers.caller_counts, [(0x6e7351, 2), (0x6df34b, 1)]);
+}
+
+#[test]
 #[ignore = "trj-only full server command-execution thread sweep; run explicitly"]
 fn sharded_set_get_server_thread_sweep_same_invocation() {
     let binary = std::env::var_os("FR_URING_FR_BIN")
@@ -4203,6 +4658,8 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
         "server thread scaling must execute on trj/threadripperje"
     );
     let (physical_cores, logical_threads) = machine_topology();
+    let ram_kib = machine_ram_kib();
+    let numa_nodes = machine_numa_nodes();
     assert_eq!(
         (physical_cores, logical_threads),
         (64, 128),
@@ -4244,11 +4701,18 @@ interleave_groups={interleave_groups} groups_per_arm_sample={groups_per_arm_samp
 process cpuset has {} of {logical_threads}",
         process_cpuset_cap.len()
     );
+    let initial_cpu_frequency_policy = cpu_frequency_policy(&process_cpuset_cap);
+    print_cpu_frequency_policy(
+        "initial_pre_measurement",
+        &process_cpuset_cap,
+        &initial_cpu_frequency_policy,
+    );
     assert_host_wide_quiescence(&process_cpuset_cap, "initial_pre_pin");
     let client_affinity = pin_client_process(&client_cpu_order, client_threads);
     println!(
         "SCALING_HARDWARE_PROVENANCE host_identity={hostname} \
 physical_cores={physical_cores} logical_threads={logical_threads} \
+ram_kib={ram_kib} numa_nodes={numa_nodes} \
 server_thread_counts_requested={server_thread_counts:?} \
 client_driver_threads_actual={client_threads} client_connections={clients} \
 runtime_detected_isa={} process_cpuset_cap={process_cpuset_cap:?} \
@@ -4360,6 +4824,7 @@ command_execution_threads={command_execution_threads} affinity_cpus={:?}",
         println!(
             "SCALING_POINT_PROVENANCE host_identity={hostname} \
 physical_cores={physical_cores} logical_threads={logical_threads} \
+ram_kib={ram_kib} numa_nodes={numa_nodes} \
 thread_count_actually_used={server_workers} \
 candidate_command_execution_threads={server_workers} \
 control_command_execution_threads=1 incumbent_command_execution_threads=1 \
@@ -4469,6 +4934,16 @@ server_command_execution_threads={server_workers} verdict={hot_verdict:?}"
             hot_verdict,
         ));
     }
+    let final_cpu_frequency_policy = cpu_frequency_policy(&process_cpuset_cap);
+    print_cpu_frequency_policy(
+        "final_post_measurement",
+        &process_cpuset_cap,
+        &final_cpu_frequency_policy,
+    );
+    assert_eq!(
+        initial_cpu_frequency_policy, final_cpu_frequency_policy,
+        "CPU frequency policy changed during the sharded scaling invocation"
+    );
     println!("SHARDED_SERVER_THREAD_VERDICT_MATRIX {verdicts:?}");
 }
 
@@ -4808,13 +5283,30 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
         );
     }
     let (physical_cores, logical_threads) = machine_topology();
+    let ram_kib = machine_ram_kib();
+    let numa_nodes = machine_numa_nodes();
     let (client_cpu_order, server_core, process_cpuset_cap) =
         choose_client_cpu_order(max_client_threads);
+    assert_eq!(
+        process_cpuset_cap.len(),
+        logical_threads,
+        "host-wide benchmarking requires access to every logical CPU; \
+process cpuset has {} of {logical_threads}",
+        process_cpuset_cap.len()
+    );
+    let initial_cpu_frequency_policy = cpu_frequency_policy(&process_cpuset_cap);
+    print_cpu_frequency_policy(
+        "initial_pre_measurement",
+        &process_cpuset_cap,
+        &initial_cpu_frequency_policy,
+    );
+    assert_host_wide_quiescence(&process_cpuset_cap, "initial_pre_pin");
     let initial_client_threads = client_thread_counts[0];
     let initial_client_affinity = pin_client_process(&client_cpu_order, initial_client_threads);
     println!(
         "SCALING_HARDWARE_PROVENANCE host_identity={hostname} \
 physical_cores={physical_cores} logical_threads={logical_threads} \
+ram_kib={ram_kib} numa_nodes={numa_nodes} \
 thread_counts_requested={client_thread_counts:?} \
 runtime_detected_isa={} process_cpuset_cap={process_cpuset_cap:?} \
 initial_client_affinity={initial_client_affinity:?} \
@@ -5119,6 +5611,7 @@ candidate=io_uring incumbent=vendored_redis_7.2.4"
         println!(
             "SCALING_POINT_PROVENANCE host_identity={hostname} \
 physical_cores={physical_cores} logical_threads={logical_threads} \
+ram_kib={ram_kib} numa_nodes={numa_nodes} \
 thread_count_actually_used={client_threads} \
 client_driver_threads_actual={client_threads} client_connections={clients} \
 candidate_command_execution_threads=1 control_command_execution_threads=1 \
@@ -5155,6 +5648,7 @@ client_affinity={client_affinity:?} server_affinity={:?}",
                         ops_per_sample,
                         interleave_groups,
                     },
+                    &process_cpuset_cap,
                 );
                 verdicts.push((
                     client_threads,
@@ -5168,5 +5662,15 @@ client_affinity={client_affinity:?} server_affinity={:?}",
 
     let final_loads = observed_core_loads();
     println!("FINAL_CORE_LOAD_SNAPSHOT {final_loads:?}");
+    let final_cpu_frequency_policy = cpu_frequency_policy(&process_cpuset_cap);
+    print_cpu_frequency_policy(
+        "final_post_measurement",
+        &process_cpuset_cap,
+        &final_cpu_frequency_policy,
+    );
+    assert_eq!(
+        initial_cpu_frequency_policy, final_cpu_frequency_policy,
+        "CPU frequency policy changed during the benchmark invocation"
+    );
     println!("VERDICT_MATRIX {verdicts:?}");
 }
