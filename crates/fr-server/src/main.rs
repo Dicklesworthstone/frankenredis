@@ -21,7 +21,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque};
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpStream as StdTcpStream};
 #[cfg(unix)]
@@ -56,8 +56,12 @@ const DEFAULT_MODE: &str = "strict";
 /// multi-address listener set without colliding with client tokens.
 const MAX_LISTENERS: usize = 16;
 const WRITER_WAKE_TOKEN: Token = Token(usize::MAX);
+const SHARDED_SET_GET_WAKE_TOKEN: Token = Token(usize::MAX - 1);
 const WRITER_POOL_WORKERS: usize = 2;
 const WRITER_QUEUE_BOUND: usize = 1024;
+const SHARDED_SET_GET_TOTAL_QUEUE_BOUND: usize = 65_536;
+const SHARDED_SET_GET_MAX_WORKERS: usize = 256;
+const SHARDED_SET_GET_MAX_IN_FLIGHT_PER_CLIENT: usize = 4_096;
 
 const REPLICA_ACK_INTERVAL_MS: u64 = 1_000;
 const REPLICA_RECONNECT_BACKOFF_MS: u64 = 250;
@@ -362,6 +366,71 @@ struct ClientConnection {
     blocked: Option<BlockedState>,
     /// If set, this client is a replica and this is the last offset sent to it.
     replication_sent_offset: Option<ReplOffset>,
+    /// Reply sequencing for the opt-in key-sharded SET/GET execution bus.
+    ///
+    /// Shards execute independently, so completions may arrive out of order.
+    /// This state holds those completions until every earlier command on the
+    /// same connection has completed, preserving Redis pipeline reply order.
+    sharded_replies: ShardedReplyOrder,
+}
+
+#[derive(Default)]
+struct ShardedReplyOrder {
+    next_sequence: u64,
+    next_emit_sequence: u64,
+    in_flight: usize,
+    pending: BTreeMap<u64, Vec<u8>>,
+}
+
+impl ShardedReplyOrder {
+    fn proposed_sequence(&self) -> u64 {
+        self.next_sequence
+    }
+
+    fn note_enqueued(&mut self) {
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+        self.in_flight += 1;
+    }
+
+    fn complete_remote(&mut self, sequence: u64, response: Vec<u8>, out: &mut Vec<u8>) -> bool {
+        let Some(remaining_in_flight) = self.in_flight.checked_sub(1) else {
+            return false;
+        };
+        if !self.insert_and_emit(sequence, response, out) {
+            return false;
+        }
+        self.in_flight = remaining_in_flight;
+        true
+    }
+
+    fn complete_local(&mut self, response: Vec<u8>, out: &mut Vec<u8>) -> bool {
+        let sequence = self.next_sequence;
+        if !self.insert_and_emit(sequence, response, out) {
+            return false;
+        }
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+        true
+    }
+
+    fn insert_and_emit(&mut self, sequence: u64, response: Vec<u8>, out: &mut Vec<u8>) -> bool {
+        if sequence < self.next_emit_sequence || self.pending.contains_key(&sequence) {
+            return false;
+        }
+        self.pending.insert(sequence, response);
+        while let Some(response) = self.pending.remove(&self.next_emit_sequence) {
+            out.extend_from_slice(&response);
+            self.next_emit_sequence = self.next_emit_sequence.wrapping_add(1);
+        }
+        true
+    }
+
+    fn outstanding(&self) -> usize {
+        self.in_flight + self.pending.len()
+    }
+
+    fn is_idle(&self) -> bool {
+        self.outstanding() == 0
+    }
 }
 
 struct OwnedPlainSetCommand {
@@ -446,6 +515,7 @@ impl ClientConnection {
             closing: false,
             blocked: None,
             replication_sent_offset: None,
+            sharded_replies: ShardedReplyOrder::default(),
         }
     }
 
@@ -470,7 +540,7 @@ impl ClientConnection {
     }
 
     fn output_drained_or_failed(&self) -> bool {
-        self.write_failed || !self.has_pending_output()
+        self.write_failed || (!self.has_pending_output() && self.sharded_replies.is_idle())
     }
 
     /// Try to flush the write buffer. Returns true if the buffer is fully
@@ -599,6 +669,156 @@ impl WriterPool {
     }
 }
 
+enum ShardedSetGetCommand {
+    Get { key: Vec<u8> },
+    Set { key: Vec<u8>, value: Vec<u8> },
+}
+
+impl ShardedSetGetCommand {
+    fn key(&self) -> &[u8] {
+        match self {
+            Self::Get { key } | Self::Set { key, .. } => key,
+        }
+    }
+}
+
+struct ShardedSetGetJob {
+    token: Token,
+    sequence: u64,
+    now_ms: u64,
+    command: ShardedSetGetCommand,
+}
+
+struct ShardedSetGetCompletion {
+    token: Token,
+    sequence: u64,
+    response: Vec<u8>,
+}
+
+enum ShardedSetGetEnqueueError {
+    Full,
+    Disconnected,
+}
+
+/// Opt-in command-execution bus for the default-DB, exact SET/GET subset.
+///
+/// Every key maps to exactly one worker-owned Runtime, so commands for one key
+/// remain FIFO and atomic without locks. Different keys can execute in parallel.
+/// The event-loop thread restores per-connection reply order when completions
+/// arrive. This deliberately is not a transparent full-server mode: startup
+/// rejects persistence/replication/config/auth surfaces and command dispatch
+/// rejects every stateful shape outside exact SET/GET.
+struct ShardedSetGetPool {
+    jobs: Vec<mpsc::SyncSender<ShardedSetGetJob>>,
+    completions: Option<mpsc::Receiver<ShardedSetGetCompletion>>,
+    workers: Vec<thread::JoinHandle<()>>,
+}
+
+impl ShardedSetGetPool {
+    fn new(poll: &Poll, worker_count: usize) -> io::Result<Self> {
+        debug_assert!(worker_count > 0);
+        let (completion_tx, completion_rx) = mpsc::sync_channel(SHARDED_SET_GET_TOTAL_QUEUE_BOUND);
+        let waker = Arc::new(Waker::new(poll.registry(), SHARDED_SET_GET_WAKE_TOKEN)?);
+        let mut jobs = Vec::with_capacity(worker_count);
+        let mut workers = Vec::with_capacity(worker_count);
+        let per_worker_queue_bound = SHARDED_SET_GET_TOTAL_QUEUE_BOUND.div_ceil(worker_count);
+
+        for worker_idx in 0..worker_count {
+            let (job_tx, job_rx) = mpsc::sync_channel(per_worker_queue_bound);
+            let tx = completion_tx.clone();
+            let wake = Arc::clone(&waker);
+            let handle = thread::Builder::new()
+                .name(format!("fr-set-get-shard-{worker_idx}"))
+                .spawn(move || run_sharded_set_get_worker(job_rx, tx, wake))?;
+            jobs.push(job_tx);
+            workers.push(handle);
+        }
+
+        Ok(Self {
+            jobs,
+            completions: Some(completion_rx),
+            workers,
+        })
+    }
+
+    fn worker_count(&self) -> usize {
+        self.jobs.len()
+    }
+
+    fn try_enqueue(&self, job: ShardedSetGetJob) -> Result<(), ShardedSetGetEnqueueError> {
+        let shard = usize::from(fr_store::crc16_slot(job.command.key())) % self.jobs.len();
+        match self.jobs[shard].try_send(job) {
+            Ok(()) => Ok(()),
+            Err(mpsc::TrySendError::Full(_)) => Err(ShardedSetGetEnqueueError::Full),
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                Err(ShardedSetGetEnqueueError::Disconnected)
+            }
+        }
+    }
+
+    fn try_recv(&self) -> Result<ShardedSetGetCompletion, mpsc::TryRecvError> {
+        let Some(completions) = self.completions.as_ref() else {
+            return Err(mpsc::TryRecvError::Disconnected);
+        };
+        completions.try_recv()
+    }
+}
+
+impl Drop for ShardedSetGetPool {
+    fn drop(&mut self) {
+        self.completions.take();
+        self.jobs.clear();
+        for handle in self.workers.drain(..) {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn run_sharded_set_get_worker(
+    jobs: mpsc::Receiver<ShardedSetGetJob>,
+    completions: mpsc::SyncSender<ShardedSetGetCompletion>,
+    waker: Arc<Waker>,
+) {
+    let mut runtime = Runtime::new(RuntimePolicy::default());
+    while let Ok(job) = jobs.recv() {
+        let response = match job.command {
+            ShardedSetGetCommand::Get { key } => {
+                let mut response = Vec::new();
+                if runtime
+                    .execute_plain_get_borrowed_into(&key, job.now_ms, false, &mut response)
+                    .is_none()
+                {
+                    response.extend_from_slice(
+                        b"-ERR sharded SET/GET worker rejected a default GET\r\n",
+                    );
+                }
+                response
+            }
+            ShardedSetGetCommand::Set { key, value } => {
+                if runtime
+                    .execute_plain_set_borrowed_ok(&key, &value, job.now_ms)
+                    .is_some()
+                {
+                    b"+OK\r\n".to_vec()
+                } else {
+                    b"-ERR sharded SET/GET worker rejected a default SET\r\n".to_vec()
+                }
+            }
+        };
+        if completions
+            .send(ShardedSetGetCompletion {
+                token: job.token,
+                sequence: job.sequence,
+                response,
+            })
+            .is_err()
+        {
+            return;
+        }
+        let _ = waker.wake();
+    }
+}
+
 fn flush_writer_job(job: WriterJob) -> WriterCompletion {
     let WriterJob {
         token,
@@ -701,6 +921,9 @@ OPTIONS:\n\
   --masterauth <PASSWORD>    Authenticate to the configured primary with this password\n\
   --enable-debug-command <VALUE>  Allow DEBUG commands: no | local | yes (default: no, matches upstream Redis 7.2)\n\
   --io-uring-output          Opt in to batched io_uring writes (requires io-uring-writes feature)\n\
+  --experimental-sharded-set-get-workers <N>\n\
+                             Run exact default-DB SET/GET on N key shards (1-{SHARDED_SET_GET_MAX_WORKERS});\n\
+                             permits local PING/QUIT and refuses every other command\n\
   --help                     Show this help\n"
     )
 }
@@ -944,6 +1167,7 @@ fn main() -> ExitCode {
     let mut cli_rdb = false;
     let mut cli_enable_debug_command: Option<String> = None;
     let mut sentinel_mode = false;
+    let mut sharded_set_get_workers: Option<usize> = None;
     #[cfg(feature = "io-uring-writes")]
     let mut io_uring_output = false;
     let mut i = 1;
@@ -1077,6 +1301,23 @@ fn main() -> ExitCode {
                     return ExitCode::from(1);
                 }
             }
+            "--experimental-sharded-set-get-workers" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("error: --experimental-sharded-set-get-workers requires a value");
+                    return ExitCode::from(1);
+                }
+                let workers = match args[i].parse::<usize>() {
+                    Ok(workers @ 1..=SHARDED_SET_GET_MAX_WORKERS) => workers,
+                    _ => {
+                        eprintln!(
+                            "error: sharded SET/GET worker count must be in 1..={SHARDED_SET_GET_MAX_WORKERS}"
+                        );
+                        return ExitCode::from(1);
+                    }
+                };
+                sharded_set_get_workers = Some(workers);
+            }
             "--help" | "-h" => {
                 print!("{}", server_help_text());
                 return ExitCode::SUCCESS;
@@ -1088,6 +1329,36 @@ fn main() -> ExitCode {
             }
         }
         i += 1;
+    }
+
+    if sharded_set_get_workers.is_some() {
+        let incompatible = if mode_str != "strict" {
+            Some("--mode hardened")
+        } else if sentinel_mode {
+            Some("--sentinel")
+        } else if config_path.is_some() {
+            Some("--config")
+        } else if aof_path.is_some() {
+            Some("--aof")
+        } else if rdb_path.is_some() {
+            Some("--rdb")
+        } else if replicaof.is_some() {
+            Some("--replicaof")
+        } else if masteruser.is_some() {
+            Some("--masteruser")
+        } else if masterauth.is_some() {
+            Some("--masterauth")
+        } else if cli_enable_debug_command.is_some() {
+            Some("--enable-debug-command")
+        } else {
+            None
+        };
+        if let Some(option) = incompatible {
+            eprintln!(
+                "error: {option} is incompatible with --experimental-sharded-set-get-workers"
+            );
+            return ExitCode::from(1);
+        }
     }
 
     let mut requirepass = None;
@@ -1229,7 +1500,7 @@ fn main() -> ExitCode {
     // (reply OK, rdb_last_bgsave_status:ok, but nothing written to disk) — a
     // data-loss surprise and a divergence from redis 7.2.4. A config file's
     // dir/dbfilename (via configured_rdb_path) or --rdb still wins when present.
-    if rdb_path.is_none() {
+    if rdb_path.is_none() && sharded_set_get_workers.is_none() {
         rdb_path = Some("dump.rdb".to_string());
     }
 
@@ -1257,6 +1528,22 @@ fn main() -> ExitCode {
             eprintln!("error: failed to create poll instance: {e}");
             return ExitCode::from(1);
         }
+    };
+    let sharded_set_get_pool = if let Some(worker_count) = sharded_set_get_workers {
+        match ShardedSetGetPool::new(&poll, worker_count) {
+            Ok(pool) => {
+                eprintln!(
+                    "experimental key-sharded SET/GET execution enabled: workers={worker_count}"
+                );
+                Some(pool)
+            }
+            Err(e) => {
+                eprintln!("error: failed to start sharded SET/GET workers: {e}");
+                return ExitCode::from(1);
+            }
+        }
+    } else {
+        None
     };
     let writer_pool = match WriterPool::new(&poll) {
         Ok(pool) => Some(pool),
@@ -1307,8 +1594,11 @@ fn main() -> ExitCode {
         };
 
     eprintln!(
-        "FrankenRedis v{} ready (mode={mode_str}, port={port})",
+        "FrankenRedis v{} ready (mode={mode_str}, port={port}, command_execution_threads={})",
         env!("CARGO_PKG_VERSION"),
+        sharded_set_get_pool
+            .as_ref()
+            .map_or(1, ShardedSetGetPool::worker_count),
     );
 
     let mut events = Events::with_capacity(1024);
@@ -1324,6 +1614,7 @@ fn main() -> ExitCode {
     let mut write_tokens: TokenSet = TokenSet::default();
     let mut paused_tokens: TokenSet = TokenSet::default();
     let mut deferred_tokens: TokenSet = TokenSet::default();
+    let mut sharded_deferred_tokens: TokenSet = TokenSet::default();
     let mut replica_sync = ReplicaSyncState::new();
     // (frankenredis-jd75g) Client handles start above the reserved listener
     // token range (0..MAX_LISTENERS).
@@ -1401,6 +1692,17 @@ fn main() -> ExitCode {
             &mut write_tokens,
             &mut closing_tokens,
         );
+        drain_sharded_set_get_completions(
+            sharded_set_get_pool.as_ref(),
+            &mut clients,
+            &mut runtime,
+            &mut poll,
+            &mut write_tokens,
+            &mut closing_tokens,
+            &mut sharded_deferred_tokens,
+            ts,
+            writer_pool.as_ref(),
+        );
 
         for event in events.iter() {
             match event.token() {
@@ -1427,24 +1729,53 @@ fn main() -> ExitCode {
                         &mut closing_tokens,
                     );
                 }
+                token if token == SHARDED_SET_GET_WAKE_TOKEN => {
+                    drain_sharded_set_get_completions(
+                        sharded_set_get_pool.as_ref(),
+                        &mut clients,
+                        &mut runtime,
+                        &mut poll,
+                        &mut write_tokens,
+                        &mut closing_tokens,
+                        &mut sharded_deferred_tokens,
+                        ts,
+                        writer_pool.as_ref(),
+                    );
+                }
                 conn_handle => {
                     if event.is_readable() {
-                        handle_readable(
-                            conn_handle,
-                            &mut clients,
-                            &mut runtime,
-                            &mut poll,
-                            &mut blocked_tokens,
-                            &mut blocked_wake_index,
-                            &mut closing_tokens,
-                            &mut write_tokens,
-                            &mut paused_tokens,
-                            &mut deferred_tokens,
-                            ts,
-                            ts_us,
-                            writer_pool.as_ref(),
-                            &mut read_scratch,
-                        );
+                        if let Some(pool) = sharded_set_get_pool.as_ref() {
+                            handle_sharded_set_get_readable(
+                                conn_handle,
+                                &mut clients,
+                                &mut runtime,
+                                &mut poll,
+                                &mut closing_tokens,
+                                &mut write_tokens,
+                                &mut sharded_deferred_tokens,
+                                ts,
+                                pool,
+                                writer_pool.as_ref(),
+                                &mut read_scratch,
+                            );
+                        } else {
+                            handle_readable(
+                                conn_handle,
+                                &mut clients,
+                                &mut runtime,
+                                &mut poll,
+                                &mut blocked_tokens,
+                                &mut blocked_wake_index,
+                                &mut closing_tokens,
+                                &mut write_tokens,
+                                &mut paused_tokens,
+                                &mut deferred_tokens,
+                                ts,
+                                ts_us,
+                                writer_pool.as_ref(),
+                                &mut read_scratch,
+                            );
+                        }
                     }
                     if event.is_writable() {
                         handle_writable(
@@ -1467,6 +1798,17 @@ fn main() -> ExitCode {
             &mut poll,
             &mut write_tokens,
             &mut closing_tokens,
+        );
+        drain_sharded_set_get_completions(
+            sharded_set_get_pool.as_ref(),
+            &mut clients,
+            &mut runtime,
+            &mut poll,
+            &mut write_tokens,
+            &mut closing_tokens,
+            &mut sharded_deferred_tokens,
+            ts,
+            writer_pool.as_ref(),
         );
 
         // Run active expiry cycle once per tick (fast cycle).
@@ -1655,6 +1997,7 @@ fn main() -> ExitCode {
                 write_tokens.remove(&token);
                 paused_tokens.remove(&token);
                 deferred_tokens.remove(&token);
+                sharded_deferred_tokens.remove(&token);
                 runtime.mark_client_unblocked(conn.session.client_id);
                 client_id_to_token.remove(&conn.session.client_id);
                 // Clean up Pub/Sub subscriptions and stats for this client.
@@ -1875,14 +2218,24 @@ fn accept_connections(
 
         match listener.accept() {
             Ok((mut stream, peer_addr)) => {
-                if *next_handle < MAX_LISTENERS || Token(*next_handle) == WRITER_WAKE_TOKEN {
+                if *next_handle < MAX_LISTENERS
+                    || matches!(
+                        Token(*next_handle),
+                        WRITER_WAKE_TOKEN | SHARDED_SET_GET_WAKE_TOKEN
+                    )
+                {
                     *next_handle = MAX_LISTENERS;
                 }
                 let conn_handle = Token(*next_handle);
                 *next_handle = next_handle.wrapping_add(1);
                 // Avoid colliding with the reserved listener token range
                 // (0..MAX_LISTENERS). (frankenredis-jd75g)
-                if *next_handle < MAX_LISTENERS || Token(*next_handle) == WRITER_WAKE_TOKEN {
+                if *next_handle < MAX_LISTENERS
+                    || matches!(
+                        Token(*next_handle),
+                        WRITER_WAKE_TOKEN | SHARDED_SET_GET_WAKE_TOKEN
+                    )
+                {
                     *next_handle = MAX_LISTENERS;
                 }
 
@@ -2263,6 +2616,393 @@ fn continue_large_plain_set_read(
                 closing_tokens.insert(token);
                 return LargeSetReadProgress::Closed;
             }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_sharded_set_get_readable(
+    token: Token,
+    clients: &mut ClientMap,
+    runtime: &mut Runtime,
+    poll: &mut Poll,
+    closing_tokens: &mut TokenSet,
+    write_tokens: &mut TokenSet,
+    deferred_tokens: &mut TokenSet,
+    ts: u64,
+    pool: &ShardedSetGetPool,
+    writer_pool: Option<&WriterPool>,
+    read_scratch: &mut [u8],
+) {
+    let Some(conn) = clients.get_mut(&token) else {
+        return;
+    };
+    if conn.closing {
+        return;
+    }
+
+    let mut read_any = false;
+    loop {
+        match conn.stream.read(&mut *read_scratch) {
+            Ok(0) => {
+                conn.closing = true;
+                closing_tokens.insert(token);
+                return;
+            }
+            Ok(n) => match validate_read_path(
+                conn.read_buf.len(),
+                n,
+                runtime.server.query_buffer_limit,
+                false,
+            ) {
+                Ok(_) => {
+                    conn.read_buf.extend_from_slice(&read_scratch[..n]);
+                    runtime.track_net_input_bytes(n as u64);
+                    read_any = true;
+                    if n < read_scratch.len() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "warn: sharded SET/GET client disconnected: {}",
+                        e.reason_code()
+                    );
+                    conn.closing = true;
+                    closing_tokens.insert(token);
+                    return;
+                }
+            },
+            Err(ref e) if e.kind() == ErrorKind::WouldBlock => break,
+            Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(e) => {
+                eprintln!("warn: sharded SET/GET client read error: {e}");
+                conn.closing = true;
+                closing_tokens.insert(token);
+                return;
+            }
+        }
+    }
+
+    if read_any {
+        runtime.note_read_event();
+    }
+    let output_before = conn.write_buf.len();
+    dispatch_sharded_set_get_frames(
+        token,
+        conn,
+        pool,
+        runtime.parser_config(),
+        closing_tokens,
+        deferred_tokens,
+        ts,
+    );
+    runtime.track_net_output_bytes(
+        conn.write_buf
+            .len()
+            .saturating_sub(output_before)
+            .try_into()
+            .unwrap_or(u64::MAX),
+    );
+    if conn.has_pending_output() {
+        drive_client_output(
+            token,
+            conn,
+            OutputDriveContext {
+                runtime,
+                poll,
+                write_tokens,
+                closing_tokens,
+                writer_pool,
+            },
+            true,
+        );
+    }
+}
+
+fn dispatch_sharded_set_get_frames(
+    token: Token,
+    conn: &mut ClientConnection,
+    pool: &ShardedSetGetPool,
+    parser_config: ParserConfig,
+    closing_tokens: &mut TokenSet,
+    deferred_tokens: &mut TokenSet,
+    ts: u64,
+) {
+    const UNSUPPORTED: &[u8] = b"-ERR experimental sharded SET/GET mode only accepts exact default-DB SET, GET, PING, and QUIT\r\n";
+    const WORKER_GONE: &[u8] = b"-ERR experimental sharded SET/GET worker disconnected\r\n";
+    const PROTOCOL_ERROR: &[u8] = b"-ERR Protocol error in experimental sharded SET/GET mode\r\n";
+
+    deferred_tokens.remove(&token);
+    let mut consumed_total = 0usize;
+    let mut processed_frames = 0usize;
+    let mut borrowed_args = Vec::new();
+
+    while consumed_total < conn.read_buf.len() && !conn.closing {
+        if processed_frames >= MAX_FRAMES_PER_CLIENT_TICK
+            || conn.sharded_replies.outstanding() >= SHARDED_SET_GET_MAX_IN_FLIGHT_PER_CLIENT
+        {
+            deferred_tokens.insert(token);
+            break;
+        }
+
+        let unparsed = &conn.read_buf[consumed_total..];
+        if let Some(packet) = parse_borrowed_plain_get_packet(unparsed, &parser_config) {
+            let job = ShardedSetGetJob {
+                token,
+                sequence: conn.sharded_replies.proposed_sequence(),
+                now_ms: ts,
+                command: ShardedSetGetCommand::Get {
+                    key: packet.key.to_vec(),
+                },
+            };
+            match pool.try_enqueue(job) {
+                Ok(()) => {
+                    conn.sharded_replies.note_enqueued();
+                    consumed_total += packet.consumed;
+                    processed_frames += 1;
+                    continue;
+                }
+                Err(ShardedSetGetEnqueueError::Full) => {
+                    deferred_tokens.insert(token);
+                    break;
+                }
+                Err(ShardedSetGetEnqueueError::Disconnected) => {
+                    let _ = conn
+                        .sharded_replies
+                        .complete_local(WORKER_GONE.to_vec(), &mut conn.write_buf);
+                    consumed_total += packet.consumed;
+                    conn.closing = true;
+                    closing_tokens.insert(token);
+                    break;
+                }
+            }
+        }
+        if let Some(packet) = parse_borrowed_plain_set_packet(unparsed, &parser_config) {
+            let job = ShardedSetGetJob {
+                token,
+                sequence: conn.sharded_replies.proposed_sequence(),
+                now_ms: ts,
+                command: ShardedSetGetCommand::Set {
+                    key: packet.key.to_vec(),
+                    value: packet.value.to_vec(),
+                },
+            };
+            match pool.try_enqueue(job) {
+                Ok(()) => {
+                    conn.sharded_replies.note_enqueued();
+                    consumed_total += packet.consumed;
+                    processed_frames += 1;
+                    continue;
+                }
+                Err(ShardedSetGetEnqueueError::Full) => {
+                    deferred_tokens.insert(token);
+                    break;
+                }
+                Err(ShardedSetGetEnqueueError::Disconnected) => {
+                    let _ = conn
+                        .sharded_replies
+                        .complete_local(WORKER_GONE.to_vec(), &mut conn.write_buf);
+                    consumed_total += packet.consumed;
+                    conn.closing = true;
+                    closing_tokens.insert(token);
+                    break;
+                }
+            }
+        }
+        if let Some(packet) = parse_borrowed_plain_ping_packet(unparsed, &parser_config) {
+            let response = if let Some(message) = packet.message {
+                let mut response = Vec::new();
+                fr_protocol::encode_bulk_string_slice(Some(message), false, &mut response);
+                response
+            } else {
+                b"+PONG\r\n".to_vec()
+            };
+            if !conn
+                .sharded_replies
+                .complete_local(response, &mut conn.write_buf)
+            {
+                conn.closing = true;
+                closing_tokens.insert(token);
+                break;
+            }
+            consumed_total += packet.consumed;
+            processed_frames += 1;
+            continue;
+        }
+
+        match fr_protocol::parse_command_args_borrowed_into(
+            unparsed,
+            &parser_config,
+            &mut borrowed_args,
+        ) {
+            Ok(parsed) => {
+                consumed_total += parsed.consumed;
+                processed_frames += 1;
+                if matches!(parsed.kind, BorrowedCommandArgsKind::NullArray)
+                    || borrowed_args.is_empty()
+                {
+                    continue;
+                }
+                if borrowed_args.len() == 1 && borrowed_args[0].eq_ignore_ascii_case(b"QUIT") {
+                    let _ = conn
+                        .sharded_replies
+                        .complete_local(b"+OK\r\n".to_vec(), &mut conn.write_buf);
+                    conn.closing = true;
+                    closing_tokens.insert(token);
+                    break;
+                }
+                if !conn
+                    .sharded_replies
+                    .complete_local(UNSUPPORTED.to_vec(), &mut conn.write_buf)
+                {
+                    conn.closing = true;
+                    closing_tokens.insert(token);
+                    break;
+                }
+            }
+            Err(RespParseError::Incomplete) => break,
+            Err(_) => {
+                let _ = conn
+                    .sharded_replies
+                    .complete_local(PROTOCOL_ERROR.to_vec(), &mut conn.write_buf);
+                conn.closing = true;
+                closing_tokens.insert(token);
+                break;
+            }
+        }
+    }
+
+    if consumed_total > 0 {
+        conn.read_buf.drain(..consumed_total);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn drain_sharded_set_get_completions(
+    pool: Option<&ShardedSetGetPool>,
+    clients: &mut ClientMap,
+    runtime: &mut Runtime,
+    poll: &mut Poll,
+    write_tokens: &mut TokenSet,
+    closing_tokens: &mut TokenSet,
+    deferred_tokens: &mut TokenSet,
+    ts: u64,
+    writer_pool: Option<&WriterPool>,
+) {
+    let Some(pool) = pool else {
+        return;
+    };
+    let mut touched: TokenSet = TokenSet::default();
+    while let Ok(completion) = pool.try_recv() {
+        let Some(conn) = clients.get_mut(&completion.token) else {
+            continue;
+        };
+        let output_before = conn.write_buf.len();
+        if !conn.sharded_replies.complete_remote(
+            completion.sequence,
+            completion.response,
+            &mut conn.write_buf,
+        ) {
+            conn.closing = true;
+            closing_tokens.insert(completion.token);
+            continue;
+        }
+        runtime.track_net_output_bytes(
+            conn.write_buf
+                .len()
+                .saturating_sub(output_before)
+                .try_into()
+                .unwrap_or(u64::MAX),
+        );
+        touched.insert(completion.token);
+    }
+
+    for token in touched {
+        let Some(conn) = clients.get_mut(&token) else {
+            continue;
+        };
+        if conn.has_pending_output() {
+            drive_client_output(
+                token,
+                conn,
+                OutputDriveContext {
+                    runtime,
+                    poll,
+                    write_tokens,
+                    closing_tokens,
+                    writer_pool,
+                },
+                true,
+            );
+        }
+    }
+
+    process_deferred_sharded_set_get_clients(
+        pool,
+        clients,
+        runtime,
+        poll,
+        write_tokens,
+        closing_tokens,
+        deferred_tokens,
+        ts,
+        writer_pool,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_deferred_sharded_set_get_clients(
+    pool: &ShardedSetGetPool,
+    clients: &mut ClientMap,
+    runtime: &mut Runtime,
+    poll: &mut Poll,
+    write_tokens: &mut TokenSet,
+    closing_tokens: &mut TokenSet,
+    deferred_tokens: &mut TokenSet,
+    ts: u64,
+    writer_pool: Option<&WriterPool>,
+) {
+    let tokens: Vec<Token> = deferred_tokens.iter().copied().collect();
+    for token in tokens {
+        let Some(conn) = clients.get_mut(&token) else {
+            deferred_tokens.remove(&token);
+            continue;
+        };
+        if conn.closing || conn.read_buf.is_empty() {
+            deferred_tokens.remove(&token);
+            continue;
+        }
+        let output_before = conn.write_buf.len();
+        dispatch_sharded_set_get_frames(
+            token,
+            conn,
+            pool,
+            runtime.parser_config(),
+            closing_tokens,
+            deferred_tokens,
+            ts,
+        );
+        runtime.track_net_output_bytes(
+            conn.write_buf
+                .len()
+                .saturating_sub(output_before)
+                .try_into()
+                .unwrap_or(u64::MAX),
+        );
+        if conn.has_pending_output() {
+            drive_client_output(
+                token,
+                conn,
+                OutputDriveContext {
+                    runtime,
+                    poll,
+                    write_tokens,
+                    closing_tokens,
+                    writer_pool,
+                },
+                true,
+            );
         }
     }
 }
@@ -26484,7 +27224,8 @@ mod tests {
     use crate::{
         BlockingOp, CheckBlockedClientsContext, InlineParseResult, PendingClientUnblocksContext,
         REPLICA_ACK_INTERVAL_MS, REPLICA_RECONNECT_BACKOFF_MS, ReplicaPrimaryConnection,
-        ReplicaSyncState, StartupConfig, apply_pending_client_unblocks, check_blocked_clients,
+        ReplicaSyncState, ShardedReplyOrder, ShardedSetGetCommand, ShardedSetGetJob,
+        ShardedSetGetPool, StartupConfig, apply_pending_client_unblocks, check_blocked_clients,
         check_subscription_mode_gate, command_frame_can_move_to_argv,
         consume_complete_replication_prefix, drain_replica_stream, drive_replica_sync,
         encode_eof_marked_replication_snapshot, encode_replication_snapshot, find_crlf,
@@ -26506,6 +27247,78 @@ mod tests {
 
     fn test_argv(frame: RespFrame) -> Vec<Vec<u8>> {
         fr_command::frame_to_argv(&frame).expect("test command frame should produce argv")
+    }
+
+    #[test]
+    fn sharded_reply_order_holds_out_of_order_completions() {
+        let mut order = ShardedReplyOrder::default();
+        order.note_enqueued();
+        order.note_enqueued();
+        order.note_enqueued();
+        assert_eq!(order.outstanding(), 3);
+        let mut out = Vec::new();
+
+        assert!(order.complete_remote(1, b"second".to_vec(), &mut out));
+        assert!(out.is_empty(), "sequence one must wait for sequence zero");
+        assert_eq!(
+            order.outstanding(),
+            3,
+            "out-of-order replies must remain part of the per-client bound"
+        );
+        assert!(order.complete_remote(0, b"first".to_vec(), &mut out));
+        assert_eq!(out, b"firstsecond");
+        assert_eq!(order.outstanding(), 1);
+        assert!(order.complete_remote(2, b"third".to_vec(), &mut out));
+        assert_eq!(out, b"firstsecondthird");
+        assert!(order.is_idle());
+        assert!(
+            !order.complete_remote(2, b"duplicate".to_vec(), &mut out),
+            "a completion without an in-flight command must fail closed"
+        );
+        assert_eq!(out, b"firstsecondthird");
+    }
+
+    #[test]
+    fn sharded_set_get_pool_keeps_same_key_fifo() {
+        let poll = mio::Poll::new().expect("create test poll");
+        let pool = ShardedSetGetPool::new(&poll, 2).expect("create two key shards");
+        for (sequence, command) in [
+            (
+                0,
+                ShardedSetGetCommand::Set {
+                    key: b"k".to_vec(),
+                    value: b"v".to_vec(),
+                },
+            ),
+            (1, ShardedSetGetCommand::Get { key: b"k".to_vec() }),
+        ] {
+            pool.try_enqueue(ShardedSetGetJob {
+                token: Token(71),
+                sequence,
+                now_ms: 1,
+                command,
+            })
+            .unwrap_or_else(|_| panic!("enqueue same-key job {sequence}"));
+        }
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut completions = Vec::new();
+        while completions.len() < 2 && std::time::Instant::now() < deadline {
+            match pool.try_recv() {
+                Ok(completion) => completions.push(completion),
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    panic!("sharded worker completion channel disconnected")
+                }
+            }
+        }
+        assert_eq!(completions.len(), 2);
+        assert_eq!(completions[0].sequence, 0);
+        assert_eq!(completions[0].response, b"+OK\r\n");
+        assert_eq!(completions[1].sequence, 1);
+        assert_eq!(completions[1].response, b"$1\r\nv\r\n");
     }
 
     #[test]

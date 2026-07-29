@@ -466,6 +466,7 @@ dependencies = [
  "fr-protocol",
  "fr-repl",
  "fr-runtime",
+ "fr-store",
  "fr-uring",
  "mimalloc",
  "mio",

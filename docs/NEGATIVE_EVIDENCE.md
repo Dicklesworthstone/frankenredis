@@ -33,6 +33,78 @@ Redis arm and numeric ratio; a SELF-SPEEDUP needs the heading label and cannot
 mark itself as campaign output. Missing or contradictory classification exits
 **8**.
 
+## 2026-07-29 MossyBluff (cod/MEASURE): DIAGNOSTIC HOLD — pre-booking sharded SET/GET routing activates 1/2/4/8 workers; exclusive trj baseline remains queued (`frankenredis-q01r6`)
+
+- **Claim class: DIAGNOSTIC. Campaign output: no. Decision: HOLD.** This
+  invocation preceded the exclusive `trj-booking` rule. Its results are retained
+  only as profile and harness-routing evidence; they are not an auditable
+  competitive baseline, do not support a multicore campaign claim, and must not
+  be quoted as one. Agent Mail message **#5889** records Frankensearch's active
+  claim, while **#5894** queues FrankenRedis at position 4 behind Frankensearch,
+  FrankenPandas, and FrankenFS.
+- **Mandatory provenance recorded by the harness.** Host
+  `threadripperje` was an AMD Ryzen Threadripper PRO 5995WX with **64 physical
+  cores / 128 logical threads**, 499 GiB RAM, one NUMA node, and runtime ISA
+  `avx2=true,fma=true,bmi2=true,vaes=true,avx512f=false`. The process cpuset was
+  `0-127`; controls and Redis were pinned to CPU 63, candidate affinity was
+  `0-127`, and 128 client drivers used the ordered 124-CPU client mask printed
+  in the artifact. Requested candidate workers **1/2/4/8** produced actual
+  observed active workers **1/2/4/8** for independent keys; the hot-key control
+  produced **1** active worker at every completed point. Candidate median CPU
+  utilization for independent SET/mixed was **199.466%/199.479%**,
+  **273.092%/273.753%**, **319.115%/295.754%**, and
+  **337.846%/312.313%**, respectively; Redis stayed at 99.395%--99.574%.
+- **Executing identity and fixed work.** The executing harness ELF
+  self-reported SHA-256
+  **`03ee1a64f1959545863130eb013b24bbad0dfcc48334e950a2dd8fc8895f14e4`**;
+  both controls and the sharded candidate self-reported server ELF SHA-256
+  **`4dab7c05c1885ca23c6ee0cf47a755a08b188654acd1af434ffcf516ec9c86eb`**;
+  the live vendored Redis 7.2.4 arm self-reported SHA-256
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+  Each workload used P16, 128 persistent clients/drivers, 48 samples, 200,704
+  byte-checked replies per arm/sample, two complete arm-order cycles, and two
+  byte-identical single-runtime A/A controls in the same invocation.
+- **Diagnostic wall ratios, median bootstrap CI only.** Ratios below are Redis
+  wall time divided by candidate wall time; greater than 1 means the candidate
+  was faster in this non-booked diagnostic. CV was provenance only and never a
+  decision gate.
+
+  | requested workers | observed independent/hot workers | independent SET | independent mixed | hot-key mixed |
+  |---:|---:|---:|---:|---:|
+  | 1 | 1 / 1 | 0.889183569 [0.874898241, 0.899070692] | 0.860421065 [0.843100722, 0.874061522] | 0.889011984 [0.868737513, 0.904032998] |
+  | 2 | 2 / 1 | 1.184535461 [1.142807471, 1.306145526] | 1.080613980 [1.068499816, 1.128139355] | 0.831274819 [0.770805412, 0.882063701] |
+  | 4 | 4 / 1 | 1.190542766 [1.179913875, 1.240228124] | 1.084824164 [1.040415173, 1.101324273] | 0.830524044 [0.813266206, 0.845149912] |
+  | 8 | 8 / not run | 1.139181792 [1.108591804, 1.174588099] | **INVALID** | not run |
+
+  All completed 1/2/4 workloads had A/A bootstrap median CIs bracketing 1.0
+  and cleared the gate derived from twice their contemporaneous null radius.
+  The 8-worker independent-mixed A/A CI
+  **[1.000295346, 1.006112297]** did not bracket 1.0, so the harness failed
+  closed and the entire 8-worker point is incomplete. No 16/32/64/128 point
+  ran.
+- **Profile routing, not a lever verdict.** Zero-lost `cycles:u` profiles
+  reached the named sharded SET/GET surface with nonzero self-time
+  **0.97%/0.76%/0.52%/0.47%** at requested 1/2/4/8 workers, yielding Amdahl
+  elimination ceilings **1.009795x/1.007658x/1.005227x/1.004722x**. The
+  candidate reached every requested worker, but total CPU topped out at about
+  3.4 cores. At 8 workers the visible overhead included completion-channel
+  send 2.39%, job receive 1.45%, CRC slot routing 1.39%, and allocator work;
+  this routes a later batching investigation but is not itself a measured
+  batching verdict.
+- **Artifact.** Local collected log
+  `/data/tmp/frankenredis-thread-scaling/collected-full-q01r6-03ee1a64-r1/run.log`,
+  SHA-256
+  **`3a4c1dc5986184148413258e458c938bb2406523931555018efad50502854342`**.
+- **Concrete retry predicate.** After Frankensearch, FrankenPandas, and
+  FrankenFS each post `[trj] RELEASE`, inspect thread `trj-booking`, post
+  `[trj] CLAIM frankenredis`, and rerun the entire
+  **1/2/4/8/16/32/64/128** sweep during that exclusive lease. Release trj
+  immediately on success or failure. Admit a baseline only if every row records
+  host/core/thread/RAM/NUMA identity, requested and actual-observed workers,
+  row affinity/cpuset, both engine SHA-256s, exact byte parity, same-invocation
+  A/A, zero-lost nonzero-self profiles, and a bootstrap median-CI effect beyond
+  twice the contemporaneous null margin.
+
 ## 2026-07-29 MossyBluff (cod/MEASURE): COMPETITIVE SATURATION KEEP — P16 SET/mixed lead live Redis across 1–128 client drivers, but both command executors remain one thread (`frankenredis-q01r6`)
 
 - **Claim class: COMPETITIVE. Campaign output: yes. Decision: KEEP.** One
@@ -43,6 +115,13 @@ mark itself as campaign output. Missing or contradictory classification exits
   baseline is explicitly **not** a campaign multicore scaling result. The swept
   count is client-driver threads; candidate, control, and incumbent each
   executed commands on exactly **one** thread.
+- **Integrity adjudication: 15/16 points valid.** The P16 mixed point at four
+  client drivers is **INVALID**, because its A/A bootstrap median CI
+  `[0.995417921, 0.999456789]` does not bracket 1.0; it is excluded from the
+  curve. The valid competitive range above is unchanged because its minimum
+  and maximum come from other points. The harness now makes this defect class
+  impossible to admit: a tight A/A CI that misses 1.0 fails the invocation even
+  when the null median remains within the gross 2% position-bias bound.
 - **Mandatory hardware and thread provenance.** Host identity
   `threadripperje` (`trj`) was an AMD Ryzen Threadripper PRO 5995WX with one
   socket, **64 physical cores / 128 logical threads**, 499 GiB RAM, one NUMA
@@ -75,7 +154,7 @@ mark itself as campaign output. Missing or contradictory classification exits
   |---:|---:|---:|---:|---:|
   | 1 | 1.293059972 [1.287321789, 1.301445295] | 1.287217387 [1.285554685, 1.295531282] | 0.999775798 [0.993950871, 1.007873503] | 1.001352089 [0.995750066, 1.006515481] |
   | 2 | 1.302282397 [1.295410998, 1.305232688] | 1.277687396 [1.271606657, 1.283951015] | 1.002988752 [0.998495351, 1.005712593] | 0.998966770 [0.996848523, 1.003318748] |
-  | 4 | 1.306759798 [1.303471907, 1.310421007] | 1.290232827 [1.287600562, 1.292626178] | 0.999881236 [0.997802880, 1.005269839] | 0.997706060 [0.995417921, 0.999456789] |
+  | 4 | 1.306759798 [1.303471907, 1.310421007] | **INVALID** — 1.290232827 [1.287600562, 1.292626178] | 0.999881236 [0.997802880, 1.005269839] | **INVALID** — 0.997706060 [0.995417921, 0.999456789] |
   | 8 | 1.290861398 [1.287865181, 1.292377774] | 1.274118719 [1.272883857, 1.276224456] | 1.001812949 [0.997716062, 1.004704900] | 0.998409535 [0.996656074, 1.003249985] |
   | 16 | 1.277677026 [1.274459856, 1.278790176] | 1.260449530 [1.259329759, 1.262349948] | 1.000193011 [0.997619920, 1.003225049] | 1.001430756 [0.998967664, 1.004061606] |
   | 32 | 1.266056414 [1.263490274, 1.268331931] | 1.250499620 [1.249573766, 1.252585240] | 0.998555377 [0.997235707, 1.002614342] | 1.001775207 [0.997995311, 1.003070669] |
@@ -83,9 +162,9 @@ mark itself as campaign output. Missing or contradictory classification exits
   | 128 | 1.292737747 [1.286575647, 1.297444171] | 1.257289875 [1.251732892, 1.262916287] | 1.002372495 [0.994709320, 1.006861782] | 1.000415335 [0.992638669, 1.002856825] |
 
   The same-invocation SET A/A null median at one driver was **0.999775798**,
-  with bootstrap 95% median CI **[0.993950871, 1.007873503]**. Every competitive
-  effect cleared the bootstrap median-CI gate derived from twice its
-  contemporaneous A/A radius. CV was provenance only and never entered any
+  with bootstrap 95% median CI **[0.993950871, 1.007873503]**. Every valid
+  competitive effect cleared the bootstrap median-CI gate derived from twice
+  its contemporaneous A/A radius. CV was provenance only and never entered any
   decision. Median candidate/Redis CPU utilization was already
   95.900%/95.110% for one-driver SET and 96.232%/94.453% for one-driver mixed;
   every remaining point was 97.100%–99.354%. Thus no point is a client-bound

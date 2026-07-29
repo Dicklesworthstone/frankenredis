@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 fr-runtime = { path = "../fr-runtime" }
+fr-store = { path = "../fr-store" }
 fr-config = { path = "../fr-config" }
 fr-protocol = { path = "../fr-protocol" }
 fr-repl = { path = "../fr-repl" }

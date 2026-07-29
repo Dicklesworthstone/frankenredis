@@ -48,6 +48,10 @@ const DEFAULT_PROFILE_SECONDS: u64 = 3;
 // pinned shards; 125 keeps each arm slice below one second while amortizing the
 // barrier enough to drive the server continuously.
 const DEFAULT_INTERLEAVE_GROUPS: usize = 125;
+// The trj sweep uses 128 clients at P16, so 200k requested operations are only
+// 98 client groups. Sixteen groups keep seven A/A/A/B/incumbent rotations
+// inside each full sample instead of degenerating to one sequential arm block.
+const SHARDED_DEFAULT_INTERLEAVE_GROUPS: usize = 16;
 const QUIET_CORE_MAX_PCT: f64 = 5.0;
 const QUIET_CORE_PREFLIGHT_ATTEMPTS: usize = 20;
 const MIN_SERVER_UTIL_PCT: f64 = 90.0;
@@ -1442,6 +1446,121 @@ impl WorkloadPackets {
     }
 }
 
+struct ConnectionPackets {
+    measured: WorkloadPackets,
+    setup: Option<ExchangeCase>,
+}
+
+struct DriverPackets {
+    connections: Vec<ConnectionPackets>,
+}
+
+impl DriverPackets {
+    fn shared(workload: Workload, pipeline: usize) -> Self {
+        Self {
+            connections: vec![ConnectionPackets {
+                measured: WorkloadPackets::new(workload, pipeline),
+                setup: None,
+            }],
+        }
+    }
+
+    fn keyed(workload: Workload, pipeline: usize, keys: &[Vec<u8>]) -> Self {
+        assert!(
+            matches!(workload, Workload::Set | Workload::Get | Workload::Mixed),
+            "keyed driver packets only support SET/GET/Mixed"
+        );
+        Self {
+            connections: keys
+                .iter()
+                .map(|key| {
+                    let set = keyed_set_command(key);
+                    let get = keyed_get_command(key);
+                    let measured = match workload {
+                        Workload::Set => {
+                            let case = repeated_case(&set, SET_REPLY, pipeline);
+                            WorkloadPackets {
+                                odd: ExchangeCase {
+                                    request: case.request.clone(),
+                                    response: case.response.clone(),
+                                },
+                                even: case,
+                            }
+                        }
+                        Workload::Get => {
+                            let case = repeated_case(&get, GET_REPLY, pipeline);
+                            WorkloadPackets {
+                                odd: ExchangeCase {
+                                    request: case.request.clone(),
+                                    response: case.response.clone(),
+                                },
+                                even: case,
+                            }
+                        }
+                        Workload::Mixed => WorkloadPackets {
+                            even: keyed_mixed_case(&set, &get, pipeline, false),
+                            odd: keyed_mixed_case(&set, &get, pipeline, true),
+                        },
+                        _ => unreachable!("keyed workload was prevalidated"),
+                    };
+                    ConnectionPackets {
+                        measured,
+                        setup: (!matches!(workload, Workload::Set)).then(|| ExchangeCase {
+                            request: set,
+                            response: SET_REPLY.to_vec(),
+                        }),
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    fn for_connection(&self, connection_index: usize) -> &ConnectionPackets {
+        if self.connections.len() == 1 {
+            &self.connections[0]
+        } else {
+            self.connections
+                .get(connection_index)
+                .expect("driver packet count covers every connection")
+        }
+    }
+}
+
+fn push_resp_bulk(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.extend_from_slice(format!("${}\r\n", bytes.len()).as_bytes());
+    out.extend_from_slice(bytes);
+    out.extend_from_slice(b"\r\n");
+}
+
+fn keyed_set_command(key: &[u8]) -> Vec<u8> {
+    let mut command = b"*3\r\n$3\r\nSET\r\n".to_vec();
+    push_resp_bulk(&mut command, key);
+    push_resp_bulk(&mut command, b"v");
+    command
+}
+
+fn keyed_get_command(key: &[u8]) -> Vec<u8> {
+    let mut command = b"*2\r\n$3\r\nGET\r\n".to_vec();
+    push_resp_bulk(&mut command, key);
+    command
+}
+
+fn keyed_mixed_case(set: &[u8], get: &[u8], pipeline: usize, start_with_get: bool) -> ExchangeCase {
+    let mut request = Vec::with_capacity(pipeline * set.len().max(get.len()));
+    let mut response = Vec::with_capacity(pipeline * SET_REPLY.len().max(GET_REPLY.len()));
+    for index in 0..pipeline {
+        let is_get = (index % 2 == 0) == start_with_get;
+        if is_get {
+            request.extend_from_slice(get);
+            response.extend_from_slice(GET_REPLY);
+        } else {
+            request.extend_from_slice(set);
+            response.extend_from_slice(SET_REPLY);
+        }
+    }
+    ExchangeCase { request, response }
+}
+
 fn repeated_case(request: &[u8], response: &[u8], pipeline: usize) -> ExchangeCase {
     ExchangeCase {
         request: request.repeat(pipeline),
@@ -1466,8 +1585,11 @@ fn mixed_case(pipeline: usize, start_with_get: bool) -> ExchangeCase {
 }
 
 enum ClientCommand {
+    Prepare {
+        packets: Arc<DriverPackets>,
+    },
     Run {
-        packets: Arc<WorkloadPackets>,
+        packets: Arc<DriverPackets>,
         groups: usize,
         odd_first: bool,
     },
@@ -1498,10 +1620,17 @@ impl ClientDriver {
             shape.connections
         );
         let mut workers = Vec::with_capacity(shape.driver_threads);
+        let mut next_connection_index = 0usize;
         for worker_index in 0..shape.driver_threads {
             let client_count = shape.connections / shape.driver_threads
                 + usize::from(worker_index < shape.connections % shape.driver_threads);
-            let clients = (0..client_count).map(|_| connect(port)).collect();
+            let clients = (0..client_count)
+                .map(|_| {
+                    let connection_index = next_connection_index;
+                    next_connection_index += 1;
+                    (connection_index, connect(port))
+                })
+                .collect();
             let (command_tx, command_rx) = mpsc::channel();
             let (complete_tx, complete_rx) = mpsc::channel();
             let handle = thread::Builder::new()
@@ -1519,7 +1648,24 @@ impl ClientDriver {
         Self { workers }
     }
 
-    fn run(&self, packets: &Arc<WorkloadPackets>, groups: usize, odd_first: bool) -> Duration {
+    fn prepare(&self, packets: &Arc<DriverPackets>) {
+        for worker in &self.workers {
+            worker
+                .command
+                .send(ClientCommand::Prepare {
+                    packets: Arc::clone(packets),
+                })
+                .expect("dispatch benchmark client setup");
+        }
+        for worker in &self.workers {
+            worker
+                .complete
+                .recv()
+                .expect("benchmark client setup completed");
+        }
+    }
+
+    fn run(&self, packets: &Arc<DriverPackets>, groups: usize, odd_first: bool) -> Duration {
         let start = Instant::now();
         for worker in &self.workers {
             worker
@@ -1555,11 +1701,34 @@ impl Drop for ClientDriver {
 }
 
 fn client_worker(
-    mut clients: Vec<TcpStream>,
+    mut clients: Vec<(usize, TcpStream)>,
     commands: Receiver<ClientCommand>,
     complete: Sender<()>,
 ) {
     while let Ok(command) = commands.recv() {
+        if let ClientCommand::Prepare { packets } = command {
+            let mut response = Vec::new();
+            for (connection_index, client) in &mut clients {
+                let Some(setup) = &packets.for_connection(*connection_index).setup else {
+                    continue;
+                };
+                client
+                    .write_all(&setup.request)
+                    .expect("write keyed benchmark setup");
+                response.resize(setup.response.len(), 0);
+                client
+                    .read_exact(&mut response)
+                    .expect("read keyed benchmark setup response");
+                assert_eq!(
+                    response, setup.response,
+                    "keyed setup diverged from the RESP oracle"
+                );
+            }
+            complete
+                .send(())
+                .expect("report benchmark setup completion");
+            continue;
+        }
         let ClientCommand::Run {
             packets,
             groups,
@@ -1571,13 +1740,17 @@ fn client_worker(
         let mut response = Vec::new();
         for group in 0..groups {
             let odd = (group % 2 == 1) ^ odd_first;
-            let case = if odd { &packets.odd } else { &packets.even };
-            let request = black_box(case.request.as_slice());
-            for client in &mut clients {
-                client.write_all(request).expect("write request group");
+            for (connection_index, client) in &mut clients {
+                let measured = &packets.for_connection(*connection_index).measured;
+                let case = if odd { &measured.odd } else { &measured.even };
+                client
+                    .write_all(black_box(case.request.as_slice()))
+                    .expect("write request group");
             }
-            response.resize(case.response.len(), 0);
-            for client in &mut clients {
+            for (connection_index, client) in &mut clients {
+                let measured = &packets.for_connection(*connection_index).measured;
+                let case = if odd { &measured.odd } else { &measured.even };
+                response.resize(case.response.len(), 0);
                 client
                     .read_exact(&mut response)
                     .expect("read complete response group");
@@ -1612,14 +1785,45 @@ impl Server {
         client_shape: ClientShape,
         command_floor_ab: CommandFloorAb,
     ) -> Self {
+        Self::spawn_with_options(
+            fr_binary,
+            redis_binary,
+            arm,
+            root,
+            &[server_core],
+            client_shape,
+            command_floor_ab,
+            None,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_with_options(
+        fr_binary: &Path,
+        redis_binary: &Path,
+        arm: Arm,
+        root: &Path,
+        server_cpus: &[usize],
+        client_shape: ClientShape,
+        command_floor_ab: CommandFloorAb,
+        sharded_set_get_workers: Option<usize>,
+        force_io_uring_output: bool,
+    ) -> Self {
+        assert!(!server_cpus.is_empty(), "server affinity cannot be empty");
         let runtime_dir = root.join(arm.name());
         fs::create_dir_all(&runtime_dir).expect("create unique server runtime directory");
         let stderr_path = runtime_dir.join("stderr.log");
         let stderr = File::create(&stderr_path).expect("create unique server stderr log");
         let port = free_port();
+        let server_cpu_list = server_cpus
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
         let mut command = Command::new("taskset");
         command
-            .args(["-c", &server_core.to_string()])
+            .args(["-c", &server_cpu_list])
             .arg(if matches!(arm, Arm::Redis) {
                 redis_binary
             } else {
@@ -1630,11 +1834,23 @@ impl Server {
             command.args(["--save", "", "--appendonly", "no"]);
         }
         if !matches!(arm, Arm::Redis)
-            && (matches!(arm, Arm::IoUring) || !matches!(command_floor_ab, CommandFloorAb::None))
+            && (force_io_uring_output
+                || (sharded_set_get_workers.is_none()
+                    && (matches!(arm, Arm::IoUring)
+                        || !matches!(command_floor_ab, CommandFloorAb::None))))
         {
             command.arg(
                 std::env::var("FR_URING_AB_FLAG").unwrap_or_else(|_| IO_URING_FLAG.to_owned()),
             );
+        }
+        if let Some(workers) = sharded_set_get_workers {
+            assert!(
+                !matches!(arm, Arm::Redis),
+                "Redis cannot receive FrankenRedis shard flags"
+            );
+            command
+                .arg("--experimental-sharded-set-get-workers")
+                .arg(workers.to_string());
         }
         if matches!(command_floor_ab, CommandFloorAb::BitposRange)
             && matches!(arm, Arm::MioA | Arm::MioB)
@@ -1741,13 +1957,29 @@ impl Server {
     }
 
     fn cpu_ns(&self) -> u64 {
-        fs::read_to_string(format!("/proc/{}/schedstat", self.pid()))
-            .expect("read server process schedstat")
-            .split_whitespace()
-            .next()
-            .expect("schedstat contains execution time")
-            .parse::<u64>()
-            .expect("parse server CPU nanoseconds")
+        let task_root = format!("/proc/{}/task", self.pid());
+        let mut total = 0_u64;
+        let mut observed = 0usize;
+        for entry in fs::read_dir(&task_root).expect("read server task directory") {
+            let entry = entry.expect("read server task entry");
+            let schedstat = match fs::read_to_string(entry.path().join("schedstat")) {
+                Ok(schedstat) => schedstat,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => panic!("read server task schedstat: {error}"),
+            };
+            let task_cpu_ns = schedstat
+                .split_whitespace()
+                .next()
+                .expect("task schedstat contains execution time")
+                .parse::<u64>()
+                .expect("parse task CPU nanoseconds");
+            total = total
+                .checked_add(task_cpu_ns)
+                .expect("aggregate server CPU time overflow");
+            observed += 1;
+        }
+        assert!(observed > 0, "server process exposed no measurable tasks");
+        total
     }
 
     fn wait_until_ready(&mut self) {
@@ -1795,6 +2027,34 @@ impl Server {
         );
     }
 
+    fn assert_sharded_set_get_workers_reached_process(&self, workers: usize) {
+        assert!(
+            !matches!(self.arm, Arm::Redis),
+            "Redis does not accept the FrankenRedis shard flag"
+        );
+        let cmdline = fs::read(format!("/proc/{}/cmdline", self.pid()))
+            .expect("read candidate process command line");
+        let args = cmdline
+            .split(|byte| *byte == 0)
+            .filter(|arg| !arg.is_empty())
+            .collect::<Vec<_>>();
+        let flag_index = args
+            .iter()
+            .position(|arg| *arg == b"--experimental-sharded-set-get-workers")
+            .expect("candidate process received the shard flag");
+        let expected_workers = workers.to_string();
+        assert_eq!(
+            args.get(flag_index + 1).copied(),
+            Some(expected_workers.as_bytes()),
+            "candidate process received the requested shard count"
+        );
+        println!(
+            "FRANKENREDIS_SHARD_FLAG arm={} pid={} workers={workers}",
+            self.arm.name(),
+            self.pid()
+        );
+    }
+
     fn assert_environment_value(&self, name: &str, expected: Option<&str>) {
         assert!(
             !matches!(self.arm, Arm::Redis),
@@ -1830,6 +2090,34 @@ impl Server {
         fs::read_dir(format!("/proc/{}/task", self.pid()))
             .expect("read server task directory")
             .count()
+    }
+
+    fn sharded_worker_cpu_ns(&self) -> HashMap<u32, u64> {
+        let mut cpu_ns = HashMap::new();
+        let task_root = format!("/proc/{}/task", self.pid());
+        for entry in fs::read_dir(&task_root).expect("read server task directory") {
+            let entry = entry.expect("read server task entry");
+            let tid = entry
+                .file_name()
+                .to_string_lossy()
+                .parse::<u32>()
+                .expect("task directory is a TID");
+            let comm =
+                fs::read_to_string(entry.path().join("comm")).expect("read server task comm");
+            if !comm.trim().starts_with("fr-set-get-sha") {
+                continue;
+            }
+            let schedstat = fs::read_to_string(entry.path().join("schedstat"))
+                .expect("read sharded worker schedstat");
+            let task_cpu_ns = schedstat
+                .split_whitespace()
+                .next()
+                .expect("sharded worker schedstat contains execution time")
+                .parse::<u64>()
+                .expect("parse sharded worker CPU nanoseconds");
+            cpu_ns.insert(tid, task_cpu_ns);
+        }
+        cpu_ns
     }
 
     fn affinity_cpus(&self) -> Vec<usize> {
@@ -1880,7 +2168,7 @@ fn connect(port: u16) -> TcpStream {
 
 fn time_block(
     server: &mut Server,
-    packets: &Arc<WorkloadPackets>,
+    packets: &Arc<DriverPackets>,
     groups: usize,
     odd_first: bool,
 ) -> Duration {
@@ -2507,7 +2795,7 @@ fn prefill_and_warm(
     workload: Workload,
     pipeline: usize,
     clients: usize,
-    packets: &Arc<WorkloadPackets>,
+    packets: &Arc<DriverPackets>,
 ) {
     prefill(servers, workload);
     let warm_ops: usize = if matches!(
@@ -2566,6 +2854,26 @@ fn measure_configuration(
     pipeline: usize,
     config: MeasurementConfig,
 ) -> Vec<Sample> {
+    measure_configuration_with_packets(
+        servers,
+        workload,
+        pipeline,
+        config,
+        Arc::new(DriverPackets::shared(workload, pipeline)),
+        false,
+        "shared_hot_key",
+    )
+}
+
+fn measure_configuration_with_packets(
+    servers: &mut [Server; 4],
+    workload: Workload,
+    pipeline: usize,
+    config: MeasurementConfig,
+    packets: Arc<DriverPackets>,
+    prepare_keyed: bool,
+    workload_shape: &str,
+) -> Vec<Sample> {
     let ClientShape {
         connections: clients,
         driver_threads: client_threads,
@@ -2614,14 +2922,33 @@ fn measure_configuration(
         "interleave group count must be positive"
     );
 
-    let packets = Arc::new(WorkloadPackets::new(workload, pipeline));
-    prefill_and_warm(servers, workload, pipeline, clients, &packets);
+    if prepare_keyed {
+        for arm in Arm::ALL {
+            servers[arm.index()]
+                .clients
+                .as_ref()
+                .expect("benchmark clients initialized")
+                .prepare(&packets);
+        }
+        let warm_groups = 20_000usize.div_ceil(clients * pipeline).max(8);
+        for arm in Arm::ALL {
+            time_block(
+                &mut servers[arm.index()],
+                &packets,
+                warm_groups,
+                matches!(workload, Workload::Mixed),
+            );
+        }
+    } else {
+        prefill_and_warm(servers, workload, pipeline, clients, &packets);
+    }
     let groups = ops_per_sample.div_ceil(clients * pipeline).max(1);
     let actual_ops = groups * clients * pipeline;
     let mut output = Vec::with_capacity(samples);
 
     println!(
-        "CONFIG workload={} pipeline={pipeline} clients={clients} client_threads={client_threads} \
+        "CONFIG workload={} workload_shape={workload_shape} pipeline={pipeline} \
+clients={clients} client_threads={client_threads} \
 samples={samples} \
 groups_per_arm_sample={groups} interleave_groups={interleave_groups} \
 ops_per_arm_sample={actual_ops}",
@@ -2696,7 +3023,8 @@ ops_per_arm_sample={actual_ops}",
             cpu_competitive_speedup: redis_cpu_ns as f64 / io_uring_cpu_ns as f64,
         };
         println!(
-            "SAMPLE workload={} pipeline={pipeline} client_driver_threads={client_threads} \
+            "SAMPLE workload={} workload_shape={workload_shape} pipeline={pipeline} \
+client_driver_threads={client_threads} \
 sample={} order={:?} \
 control_slots={} \
 control_a_ns_per_op={:.3} control_b_ns_per_op={:.3} candidate_ns_per_op={:.3} \
@@ -2812,7 +3140,8 @@ fn adjudicate_ratios(
     let gate_high = 1.0 + 2.0 * null_radius;
     let null_cv_pct = mean_cv_pct(null);
     let candidate_cv_pct = mean_cv_pct(candidate);
-    let invalid = (null_median - 1.0).abs() > 0.02;
+    let null_ci_brackets_one = null_ci_low <= 1.0 && null_ci_high >= 1.0;
+    let invalid = !null_ci_brackets_one || (null_median - 1.0).abs() > 0.02;
     let verdict = if invalid {
         Verdict::Invalid
     } else if candidate_ci_low > gate_high && candidate_median >= 1.01 {
@@ -2826,7 +3155,8 @@ fn adjudicate_ratios(
         "MEDIAN_CI_GATE metric={metric} workload={} pipeline={pipeline} \
 client_driver_threads={client_threads} verdict={verdict:?} \
 null_median={null_median:.9} null_ci95=[{null_ci_low:.9},{null_ci_high:.9}] \
-null_cv_pct={null_cv_pct:.6} margin2x=[{gate_low:.9},{gate_high:.9}] \
+null_ci_brackets_one={null_ci_brackets_one} null_cv_pct={null_cv_pct:.6} \
+margin2x=[{gate_low:.9},{gate_high:.9}] \
 {ratio_name}_median={candidate_median:.9} \
 candidate_ci95=[{candidate_ci_low:.9},{candidate_ci_high:.9}] \
 candidate_cv_pct={candidate_cv_pct:.6}",
@@ -2836,7 +3166,8 @@ candidate_cv_pct={candidate_cv_pct:.6}",
         !invalid,
         "INVALID A/A: metric={metric} workload={} pipeline={pipeline} \
 client_driver_threads={client_threads} \
-null median {null_median:.9} exposes position bias or core contamination",
+null median {null_median:.9} CI [{null_ci_low:.9},{null_ci_high:.9}] \
+must bracket 1.0 and remain within the 2% gross-bias guard",
         workload.name()
     );
     verdict
@@ -2983,7 +3314,7 @@ fn profile_io_uring_path(
         panic!("perf record exited before profile workload: status={status} stderr={stderr}");
     }
 
-    let packets = Arc::new(WorkloadPackets::new(workload, pipeline));
+    let packets = Arc::new(DriverPackets::shared(workload, pipeline));
     while perf
         .try_wait()
         .expect("poll perf record workload")
@@ -3125,6 +3456,154 @@ lost_samples=0 rows={command_rows:?}",
             workload.name()
         );
     }
+}
+
+fn profile_sharded_set_get_path(
+    candidate: &mut Server,
+    root: &Path,
+    profile_seconds: u64,
+    workload: Workload,
+    pipeline: usize,
+    server_workers: usize,
+    packets: &Arc<DriverPackets>,
+) {
+    candidate
+        .clients
+        .as_ref()
+        .expect("benchmark clients initialized")
+        .prepare(packets);
+    let data = root.join(format!(
+        "sharded_set_get_profile_{}_p{pipeline}_sw{server_workers}.data",
+        workload.name()
+    ));
+    assert!(!data.exists(), "refusing to overwrite {}", data.display());
+    let mut perf = Command::new("perf")
+        .env("LC_ALL", "C")
+        .args([
+            "record",
+            "-q",
+            "-F",
+            "997",
+            "-e",
+            "cycles",
+            "-g",
+            "--call-graph",
+            "fp",
+            "-p",
+            &candidate.pid().to_string(),
+            "-o",
+        ])
+        .arg(&data)
+        .args(["--", "sleep", &profile_seconds.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn sharded SET/GET perf record");
+    thread::sleep(Duration::from_millis(500));
+    if let Some(status) = perf.try_wait().expect("poll sharded perf record") {
+        let mut stderr = String::new();
+        perf.stderr
+            .take()
+            .expect("capture early sharded perf stderr")
+            .read_to_string(&mut stderr)
+            .expect("read early sharded perf stderr");
+        panic!(
+            "sharded perf record exited before profile workload: status={status} stderr={stderr}"
+        );
+    }
+    while perf
+        .try_wait()
+        .expect("poll sharded perf record workload")
+        .is_none()
+    {
+        time_block(candidate, packets, 32, false);
+    }
+    let perf_output = perf
+        .wait_with_output()
+        .expect("wait for sharded perf record");
+    assert!(
+        perf_output.status.success(),
+        "sharded perf record failed: {}",
+        String::from_utf8_lossy(&perf_output.stderr)
+    );
+
+    let report = Command::new("perf")
+        .env("LC_ALL", "C")
+        .args([
+            "report",
+            "--stdio",
+            "--no-children",
+            "--percent-limit",
+            "0",
+            "--call-graph",
+            "none",
+            "--sort",
+            "overhead,symbol,dso",
+            "-i",
+        ])
+        .arg(&data)
+        .output()
+        .expect("run sharded perf report");
+    assert!(
+        report.status.success(),
+        "sharded perf report failed: {}",
+        String::from_utf8_lossy(&report.stderr)
+    );
+    let report = String::from_utf8(report.stdout).expect("sharded perf report is UTF-8");
+    let lost = report
+        .lines()
+        .find(|line| line.contains("Total Lost Samples:"))
+        .expect("sharded perf report states lost-sample count");
+    assert!(
+        lost.trim_end().ends_with(" 0"),
+        "sharded profile lost samples: {lost}"
+    );
+    let top_self_rows = report
+        .lines()
+        .filter(|line| {
+            line.split_whitespace()
+                .next()
+                .and_then(|raw| raw.trim_end_matches('%').parse::<f64>().ok())
+                .is_some()
+        })
+        .take(32)
+        .map(str::trim)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let targets = [
+        "frankenredis::run_sharded_set_get_worker",
+        "Runtime::execute_plain_set_borrowed",
+        "Runtime::execute_plain_get_borrowed",
+        "Store::set_plain_borrowed",
+        "Store::get_string_bytes",
+    ];
+    let mut target_rows = Vec::new();
+    let mut target_self_pct = 0.0_f64;
+    for line in report.lines() {
+        if targets.iter().any(|target| line.contains(target))
+            && let Some(raw_pct) = line.split_whitespace().next()
+            && let Ok(pct) = raw_pct.trim_end_matches('%').parse::<f64>()
+        {
+            target_self_pct += pct;
+            target_rows.push(line.trim().to_owned());
+        }
+    }
+    assert!(
+        target_self_pct > 0.0,
+        "profile did not attribute non-zero self-time to the sharded command bus"
+    );
+    assert!(
+        target_self_pct < 100.0,
+        "invalid aggregate sharded command-bus self-time: {target_self_pct}%"
+    );
+    let amdahl_ceiling = 1.0 / (1.0 - target_self_pct / 100.0);
+    println!(
+        "PROFILE_SHARDED_COMMAND_SURFACE workload={} pipeline={pipeline} \
+server_command_execution_threads={server_workers} target_self_pct={target_self_pct:.4} \
+amdahl_elimination_ceiling={amdahl_ceiling:.6}x lost_samples=0 \
+targets={targets:?} rows={target_rows:?} top_self_rows={top_self_rows:?}",
+        workload.name()
+    );
 }
 
 fn parse_cpu_list(text: &str) -> Vec<usize> {
@@ -3456,6 +3935,71 @@ fn parse_client_thread_counts() -> Vec<usize> {
     counts
 }
 
+fn parse_sharded_server_thread_counts() -> Vec<usize> {
+    let value = std::env::var("FR_SHARDED_SERVER_THREAD_SWEEP")
+        .unwrap_or_else(|_| "1,2,4,8,16,32,64,128".to_owned());
+    let counts = value
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(|item| {
+            item.parse::<usize>()
+                .unwrap_or_else(|_| panic!("invalid FR_SHARDED_SERVER_THREAD_SWEEP item: {item}"))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !counts.is_empty(),
+        "sharded server thread sweep cannot be empty"
+    );
+    assert!(
+        counts.iter().all(|count| (1..=128).contains(count)),
+        "sharded server thread counts must be in 1..=128: {counts:?}"
+    );
+    assert!(
+        counts.windows(2).all(|pair| pair[0] < pair[1]),
+        "sharded server thread sweep must be strictly increasing: {counts:?}"
+    );
+    counts
+}
+
+fn balanced_shard_keys(connections: usize, workers: usize) -> Vec<Vec<u8>> {
+    let mut keys = Vec::with_capacity(connections);
+    let mut nonce = 0usize;
+    for connection in 0..connections {
+        let target = connection % workers;
+        loop {
+            let key = format!("mc:{target}:{nonce}").into_bytes();
+            nonce += 1;
+            if usize::from(fr_store::crc16_slot(&key)) % workers == target {
+                keys.push(key);
+                break;
+            }
+        }
+    }
+    let mut distribution = vec![0usize; workers];
+    for key in &keys {
+        distribution[usize::from(fr_store::crc16_slot(key)) % workers] += 1;
+    }
+    if connections >= workers {
+        assert!(
+            distribution.iter().all(|count| *count > 0),
+            "balanced fixture must route work to every shard: {distribution:?}"
+        );
+    }
+    println!(
+        "SHARD_KEY_DISTRIBUTION workers={workers} connections={connections} \
+distribution={distribution:?}"
+    );
+    keys
+}
+
+fn active_sharded_worker_count(before: &HashMap<u32, u64>, after: &HashMap<u32, u64>) -> usize {
+    after
+        .iter()
+        .filter(|(tid, ticks)| **ticks > before.get(tid).copied().unwrap_or(0))
+        .count()
+}
+
 fn parse_u64_env(name: &str, default: u64) -> u64 {
     std::env::var(name)
         .map(|value| {
@@ -3497,6 +4041,335 @@ fn command_output(command: &str, args: &[&str]) -> Output {
         .args(args)
         .output()
         .unwrap_or_else(|_| panic!("run {command}"))
+}
+
+#[test]
+#[should_panic(expected = "must bracket 1.0")]
+fn median_ci_gate_rejects_tight_biased_null() {
+    let null = [1.005_f64; 24];
+    let candidate = [1.20_f64; 24];
+    let _ = adjudicate_ratios(
+        "wall_ns_per_op",
+        "candidate_over_redis",
+        Workload::Set,
+        16,
+        128,
+        &null,
+        &candidate,
+    );
+}
+
+#[test]
+#[ignore = "trj-only full server command-execution thread sweep; run explicitly"]
+fn sharded_set_get_server_thread_sweep_same_invocation() {
+    let binary = std::env::var_os("FR_URING_FR_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_frankenredis")));
+    let redis_binary = std::env::var_os("FR_URING_REDIS_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../legacy_redis_code/redis/src/redis-server")
+        });
+    assert!(
+        binary.is_file(),
+        "FrankenRedis executable is missing: {}",
+        binary.display()
+    );
+    assert!(
+        redis_binary.is_file(),
+        "vendored Redis executable is missing: {}",
+        redis_binary.display()
+    );
+    let harness = std::env::current_exe().expect("locate running harness ELF");
+    println!(
+        "HARNESS_ELF_SELF_REPORT sha256={} \
+arms=control_a,control_b,sharded_candidate,vendored_redis_7.2.4",
+        hash_path(&harness)
+    );
+    println!(
+        "DECISION_CONTRACT same_invocation_aa=true live_redis_arm=true \
+bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
+    );
+
+    let redis_version = command_output(
+        redis_binary
+            .to_str()
+            .expect("vendored Redis executable path must be UTF-8"),
+        &["--version"],
+    );
+    assert!(
+        redis_version.status.success(),
+        "vendored Redis --version must succeed"
+    );
+    let redis_version = String::from_utf8(redis_version.stdout).expect("Redis version is UTF-8");
+    assert!(
+        redis_version.contains("v=7.2.4"),
+        "expected vendored Redis 7.2.4, got {redis_version:?}"
+    );
+    println!("INCUMBENT_VERSION {}", redis_version.trim());
+
+    let hostname = command_output("hostname", &[]);
+    assert!(hostname.status.success(), "hostname failed");
+    let hostname = String::from_utf8_lossy(&hostname.stdout).trim().to_owned();
+    assert_eq!(
+        hostname, "threadripperje",
+        "server thread scaling must execute on trj/threadripperje"
+    );
+    let (physical_cores, logical_threads) = machine_topology();
+    assert_eq!(
+        (physical_cores, logical_threads),
+        (64, 128),
+        "trj topology changed; do not publish ambiguous scaling evidence"
+    );
+    let server_thread_counts = parse_sharded_server_thread_counts();
+    let samples = parse_usize_env("FR_SHARDED_SAMPLES", DEFAULT_SAMPLES);
+    assert!(samples >= 24, "sharded sweep requires at least 24 samples");
+    assert!(
+        samples.is_multiple_of(24),
+        "sharded sweep requires complete 24-order cycles"
+    );
+    let clients = parse_usize_env("FR_SHARDED_CLIENTS", 128);
+    let client_threads = parse_usize_env("FR_SHARDED_CLIENT_THREADS", 128);
+    assert!(
+        (1..=clients).contains(&client_threads),
+        "client driver threads must be in 1..={clients}"
+    );
+    let pipeline = parse_usize_env("FR_SHARDED_PIPELINE", 16);
+    assert!(pipeline > 0, "pipeline depth must be positive");
+    let ops_per_sample = parse_usize_env("FR_SHARDED_OPS_PER_SAMPLE", DEFAULT_OPS_PER_SAMPLE);
+    let interleave_groups = parse_usize_env(
+        "FR_SHARDED_INTERLEAVE_GROUPS",
+        SHARDED_DEFAULT_INTERLEAVE_GROUPS,
+    );
+    let groups_per_arm_sample = ops_per_sample.div_ceil(clients * pipeline).max(1);
+    assert!(
+        interleave_groups < groups_per_arm_sample,
+        "sharded sweep must rotate arms within each sample: \
+interleave_groups={interleave_groups} groups_per_arm_sample={groups_per_arm_sample}"
+    );
+    let profile_seconds = parse_u64_env("FR_SHARDED_PROFILE_SECONDS", DEFAULT_PROFILE_SECONDS);
+    let (client_cpu_order, server_core, process_cpuset_cap) =
+        choose_client_cpu_order(client_threads);
+    let client_affinity = pin_client_process(&client_cpu_order, client_threads);
+    println!(
+        "SCALING_HARDWARE_PROVENANCE host_identity={hostname} \
+physical_cores={physical_cores} logical_threads={logical_threads} \
+server_thread_counts_requested={server_thread_counts:?} \
+client_driver_threads_actual={client_threads} client_connections={clients} \
+runtime_detected_isa={} process_cpuset_cap={process_cpuset_cap:?} \
+client_affinity={client_affinity:?} control_and_redis_affinity_cpu={server_core} \
+candidate_affinity={process_cpuset_cap:?}",
+        runtime_isa_features()
+    );
+    let root = unique_root();
+    println!("ARTIFACT_ROOT {}", root.display());
+    let client_shape = ClientShape {
+        connections: clients,
+        driver_threads: client_threads,
+    };
+    let measurement = MeasurementConfig {
+        client_shape,
+        samples,
+        ops_per_sample,
+        interleave_groups,
+    };
+    let mut verdicts = Vec::new();
+
+    for server_workers in server_thread_counts {
+        let point_root = root.join(format!("server_workers_{server_workers}"));
+        fs::create_dir_all(&point_root).expect("create server-thread point root");
+        let mut servers = [
+            Server::spawn_with_options(
+                &binary,
+                &redis_binary,
+                Arm::MioA,
+                &point_root,
+                &[server_core],
+                client_shape,
+                CommandFloorAb::None,
+                None,
+                true,
+            ),
+            Server::spawn_with_options(
+                &binary,
+                &redis_binary,
+                Arm::MioB,
+                &point_root,
+                &[server_core],
+                client_shape,
+                CommandFloorAb::None,
+                None,
+                true,
+            ),
+            Server::spawn_with_options(
+                &binary,
+                &redis_binary,
+                Arm::IoUring,
+                &point_root,
+                &process_cpuset_cap,
+                client_shape,
+                CommandFloorAb::None,
+                Some(server_workers),
+                true,
+            ),
+            Server::spawn_with_options(
+                &binary,
+                &redis_binary,
+                Arm::Redis,
+                &point_root,
+                &[server_core],
+                client_shape,
+                CommandFloorAb::None,
+                None,
+                false,
+            ),
+        ];
+        let server_hashes = Arm::ALL.map(|arm| servers[arm.index()].executing_elf_sha256());
+        assert_eq!(
+            server_hashes[Arm::MioA.index()],
+            server_hashes[Arm::MioB.index()],
+            "A/A controls must execute the same ELF"
+        );
+        assert_eq!(
+            server_hashes[Arm::MioA.index()],
+            server_hashes[Arm::IoUring.index()],
+            "control and sharded candidate must execute the same FrankenRedis ELF"
+        );
+        servers[Arm::IoUring.index()]
+            .assert_sharded_set_get_workers_reached_process(server_workers);
+        for arm in [Arm::MioA, Arm::MioB, Arm::IoUring] {
+            servers[arm.index()].assert_flag_reached_process();
+        }
+        let observed_worker_threads = servers[Arm::IoUring.index()].sharded_worker_cpu_ns().len();
+        assert_eq!(
+            observed_worker_threads, server_workers,
+            "candidate process must expose every requested command worker"
+        );
+        for arm in Arm::ALL {
+            let command_execution_threads = if matches!(arm, Arm::IoUring) {
+                server_workers
+            } else {
+                1
+            };
+            println!(
+                "SERVER_ELF_SELF_REPORT server_command_execution_threads={server_workers} \
+arm={} pid={} sha256={} process_threads_observed={} \
+command_execution_threads={command_execution_threads} affinity_cpus={:?}",
+                arm.name(),
+                servers[arm.index()].pid(),
+                server_hashes[arm.index()],
+                servers[arm.index()].observed_thread_count(),
+                servers[arm.index()].affinity_cpus()
+            );
+        }
+        println!(
+            "SCALING_POINT_PROVENANCE host_identity={hostname} \
+physical_cores={physical_cores} logical_threads={logical_threads} \
+thread_count_actually_used={server_workers} \
+candidate_command_execution_threads={server_workers} \
+control_command_execution_threads=1 incumbent_command_execution_threads=1 \
+client_driver_threads_actual={client_threads} client_connections={clients} \
+runtime_detected_isa={} process_cpuset_cap={process_cpuset_cap:?} \
+client_affinity={client_affinity:?} candidate_affinity={:?} \
+control_and_redis_affinity={:?} campaign_multicore_scaling_result=true",
+            runtime_isa_features(),
+            servers[Arm::IoUring.index()].affinity_cpus(),
+            servers[Arm::Redis.index()].affinity_cpus()
+        );
+        println!(
+            "ARM_SEMANTICS control_a=single_runtime_io_uring \
+control_b=single_runtime_io_uring candidate=key_sharded_exact_set_get_io_uring \
+incumbent=vendored_redis_7.2.4"
+        );
+
+        let independent_keys = balanced_shard_keys(clients, server_workers);
+        for workload in [Workload::Set, Workload::Mixed] {
+            let packets = Arc::new(DriverPackets::keyed(workload, pipeline, &independent_keys));
+            if matches!(workload, Workload::Mixed) {
+                profile_sharded_set_get_path(
+                    &mut servers[Arm::IoUring.index()],
+                    &point_root,
+                    profile_seconds,
+                    workload,
+                    pipeline,
+                    server_workers,
+                    &packets,
+                );
+            }
+            let worker_cpu_ns_before = servers[Arm::IoUring.index()].sharded_worker_cpu_ns();
+            let measured = measure_configuration_with_packets(
+                &mut servers,
+                workload,
+                pipeline,
+                measurement,
+                packets,
+                true,
+                "independent_key_per_connection",
+            );
+            let worker_cpu_ns_after = servers[Arm::IoUring.index()].sharded_worker_cpu_ns();
+            let active_workers =
+                active_sharded_worker_count(&worker_cpu_ns_before, &worker_cpu_ns_after);
+            assert_eq!(
+                active_workers, server_workers,
+                "independent-key fixture must execute on every requested shard"
+            );
+            println!(
+                "COUNTED_MECHANISM workload={} workload_shape=independent_key_per_connection \
+server_command_execution_threads={server_workers} active_command_workers={active_workers}",
+                workload.name()
+            );
+            let verdict = adjudicate(workload, pipeline, client_threads, &measured);
+            println!(
+                "SHARDED_SWEEP_VERDICT workload={} \
+workload_shape=independent_key_per_connection \
+server_command_execution_threads={server_workers} verdict={verdict:?}",
+                workload.name()
+            );
+            verdicts.push((
+                server_workers,
+                workload.name(),
+                "independent_key_per_connection",
+                verdict,
+            ));
+        }
+
+        let hot_keys = vec![b"mc:hot-key".to_vec(); clients];
+        let hot_packets = Arc::new(DriverPackets::keyed(Workload::Mixed, pipeline, &hot_keys));
+        let worker_cpu_ns_before = servers[Arm::IoUring.index()].sharded_worker_cpu_ns();
+        let hot_measured = measure_configuration_with_packets(
+            &mut servers,
+            Workload::Mixed,
+            pipeline,
+            measurement,
+            hot_packets,
+            true,
+            "single_hot_key_control",
+        );
+        let worker_cpu_ns_after = servers[Arm::IoUring.index()].sharded_worker_cpu_ns();
+        let active_workers =
+            active_sharded_worker_count(&worker_cpu_ns_before, &worker_cpu_ns_after);
+        assert_eq!(
+            active_workers, 1,
+            "single-hot-key control must execute on exactly one shard"
+        );
+        println!(
+            "COUNTED_MECHANISM workload=mixed workload_shape=single_hot_key_control \
+server_command_execution_threads={server_workers} active_command_workers={active_workers}"
+        );
+        let hot_verdict = adjudicate(Workload::Mixed, pipeline, client_threads, &hot_measured);
+        println!(
+            "SHARDED_SWEEP_VERDICT workload=mixed workload_shape=single_hot_key_control \
+server_command_execution_threads={server_workers} verdict={hot_verdict:?}"
+        );
+        verdicts.push((
+            server_workers,
+            Workload::Mixed.name(),
+            "single_hot_key_control",
+            hot_verdict,
+        ));
+    }
+    println!("SHARDED_SERVER_THREAD_VERDICT_MATRIX {verdicts:?}");
 }
 
 #[test]
