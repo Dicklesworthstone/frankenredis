@@ -173,6 +173,15 @@ const SDIFFSTORE_DST_SCARD_REPLY: &[u8] = b":512\r\n";
 const SDIFFSTORE_DST_MEMBERSHIP: &[u8] = b"*8\r\n$10\r\nSMISMEMBER\r\n$3\r\ndst\r\n\
 $1\r\n0\r\n$3\r\n256\r\n$3\r\n511\r\n$3\r\n512\r\n$5\r\n10000\r\n$5\r\n14095\r\n";
 const SDIFFSTORE_DST_MEMBERSHIP_REPLY: &[u8] = b"*6\r\n:1\r\n:1\r\n:1\r\n:0\r\n:0\r\n:0\r\n";
+const SINTERSTORE_MIXED: &[u8] =
+    b"*4\r\n$11\r\nSINTERSTORE\r\n$3\r\ndst\r\n$5\r\nsmall\r\n$5\r\nlarge\r\n";
+const SINTERSTORE_MIXED_REPLY: &[u8] = b":512\r\n";
+const SINTERSTORE_LARGE_SCARD: &[u8] = b"*2\r\n$5\r\nSCARD\r\n$5\r\nlarge\r\n";
+const SINTERSTORE_LARGE_ENCODING: &[u8] =
+    b"*3\r\n$6\r\nOBJECT\r\n$8\r\nENCODING\r\n$5\r\nlarge\r\n";
+const SINTERSTORE_DST_MEMBERSHIP: &[u8] = b"*8\r\n$10\r\nSMISMEMBER\r\n$3\r\ndst\r\n\
+$1\r\n0\r\n$3\r\n256\r\n$3\r\n511\r\n$3\r\n512\r\n$4\r\n4095\r\n$4\r\n4096\r\n";
+const SINTERSTORE_DST_MEMBERSHIP_REPLY: &[u8] = b"*6\r\n:1\r\n:1\r\n:1\r\n:0\r\n:0\r\n:0\r\n";
 const PFMERGE_H1_ENCODING: &[u8] = b"*3\r\n$7\r\nPFDEBUG\r\n$8\r\nENCODING\r\n$2\r\nh1\r\n";
 const PFMERGE_H2_ENCODING: &[u8] = b"*3\r\n$7\r\nPFDEBUG\r\n$8\r\nENCODING\r\n$2\r\nh2\r\n";
 const PFMERGE_DST_ENCODING: &[u8] = b"*3\r\n$7\r\nPFDEBUG\r\n$8\r\nENCODING\r\n$3\r\ndst\r\n";
@@ -310,6 +319,7 @@ enum Workload {
     BitcountOneMib,
     SunionstoreMixed,
     SdiffstoreMixed,
+    SinterstoreMixed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -377,6 +387,7 @@ impl Workload {
             Self::BitcountOneMib => "bitcount-one-mib",
             Self::SunionstoreMixed => "sunionstore-mixed",
             Self::SdiffstoreMixed => "sdiffstore-mixed",
+            Self::SinterstoreMixed => "sinterstore-mixed",
         }
     }
 
@@ -821,6 +832,27 @@ impl Workload {
                 "<fr_store::Store>::internal_entries_insert",
                 "fr_store::set_int_to_bytes",
             ],
+            Self::SinterstoreMixed => &[
+                "frankenredis::process_buffered_frames",
+                "parse_borrowed_plain_key_arg2_packet",
+                "<fr_runtime::Runtime>::execute_plain_sinterstore_borrowed",
+                "<fr_runtime::Runtime>::execute_plain_setstore_borrowed",
+                "<fr_store::Store>::sinterstore",
+                "<fr_store::Store>::sinter_prepare",
+                "<fr_store::Store>::sinter_value",
+                "<fr_store::SetValue>::retain_intersect",
+                "<fr_store::SetValue>::retain",
+                "<fr_store::SetValue>::contains",
+                "<fr_store::packed_set::GenericSet>::contains",
+                "<fr_store::packed_set::CompactStrSet>::contains",
+                "<fr_store::packed_set::CompactFieldMap>::contains_key",
+                "<fr_store::packed_set::CompactFieldMap>::lookup_slot_prehashed",
+                "<fr_store::Store>::store_set_algebra_value",
+                "<fr_store::Store>::set_value_entry",
+                "<fr_store::Store>::internal_entries_insert",
+                "fr_store::integer_decimal_bytes",
+                "fr_store::set_int_to_bytes",
+            ],
             Self::Set | Self::Get | Self::Mixed => &[],
         }
     }
@@ -875,6 +907,7 @@ impl Workload {
                 "bitcount-one-mib" => Self::BitcountOneMib,
                 "sunionstore-mixed" => Self::SunionstoreMixed,
                 "sdiffstore-mixed" => Self::SdiffstoreMixed,
+                "sinterstore-mixed" => Self::SinterstoreMixed,
                 other => panic!("unknown FR_URING_AB_WORKLOADS item: {other}"),
             })
             .collect()
@@ -1337,6 +1370,16 @@ impl WorkloadPackets {
             }
             Workload::SdiffstoreMixed => {
                 let case = repeated_case(SDIFFSTORE_MIXED, SDIFFSTORE_MIXED_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::SinterstoreMixed => {
+                let case = repeated_case(SINTERSTORE_MIXED, SINTERSTORE_MIXED_REPLY, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -1962,8 +2005,8 @@ fn bitcount_one_mib_get_reply() -> Vec<u8> {
     response
 }
 
-fn prefill_mixed_setstore_sources(server: &mut Server) {
-    for key in ["small", "large_miss", "dst"] {
+fn prefill_mixed_setstore_sources(server: &mut Server, large_key: &str, large_start: usize) {
+    for key in ["small", large_key, "dst"] {
         let reset = format!(
             "*3\r\n$3\r\nSET\r\n${}\r\n{key}\r\n$4\r\nseed\r\n\
 *2\r\n$3\r\nDEL\r\n${}\r\n{key}\r\n",
@@ -1975,11 +2018,7 @@ fn prefill_mixed_setstore_sources(server: &mut Server) {
 
     for (key, start, members) in [
         ("small", 0, SUNIONSTORE_SMALL_MEMBERS),
-        (
-            "large_miss",
-            SUNIONSTORE_LARGE_START,
-            SUNIONSTORE_LARGE_MEMBERS,
-        ),
+        (large_key, large_start, SUNIONSTORE_LARGE_MEMBERS),
     ] {
         for batch_start in (0..members).step_by(SUNIONSTORE_PREFILL_BATCH) {
             let batch_end = (batch_start + SUNIONSTORE_PREFILL_BATCH).min(members);
@@ -2166,29 +2205,50 @@ steady_state_cache=warmed_by_exact_assertion",
             );
         } else if matches!(
             workload,
-            Workload::SunionstoreMixed | Workload::SdiffstoreMixed
+            Workload::SunionstoreMixed | Workload::SdiffstoreMixed | Workload::SinterstoreMixed
         ) {
-            prefill_mixed_setstore_sources(server);
+            let (large_key, large_start) = if matches!(workload, Workload::SinterstoreMixed) {
+                ("large", 0)
+            } else {
+                ("large_miss", SUNIONSTORE_LARGE_START)
+            };
+            prefill_mixed_setstore_sources(server, large_key, large_start);
             exchange_one(
                 server,
                 SUNIONSTORE_SMALL_SCARD,
                 SUNIONSTORE_SMALL_SCARD_REPLY,
             );
-            exchange_one(
-                server,
-                SUNIONSTORE_LARGE_SCARD,
-                SUNIONSTORE_LARGE_SCARD_REPLY,
-            );
+            if matches!(workload, Workload::SinterstoreMixed) {
+                exchange_one(
+                    server,
+                    SINTERSTORE_LARGE_SCARD,
+                    SUNIONSTORE_LARGE_SCARD_REPLY,
+                );
+            } else {
+                exchange_one(
+                    server,
+                    SUNIONSTORE_LARGE_SCARD,
+                    SUNIONSTORE_LARGE_SCARD_REPLY,
+                );
+            }
             exchange_one(
                 server,
                 SUNIONSTORE_SMALL_ENCODING,
                 SUNIONSTORE_SMALL_ENCODING_REPLY,
             );
-            exchange_one(
-                server,
-                SUNIONSTORE_LARGE_ENCODING,
-                SUNIONSTORE_HASHTABLE_ENCODING_REPLY,
-            );
+            if matches!(workload, Workload::SinterstoreMixed) {
+                exchange_one(
+                    server,
+                    SINTERSTORE_LARGE_ENCODING,
+                    SUNIONSTORE_HASHTABLE_ENCODING_REPLY,
+                );
+            } else {
+                exchange_one(
+                    server,
+                    SUNIONSTORE_LARGE_ENCODING,
+                    SUNIONSTORE_HASHTABLE_ENCODING_REPLY,
+                );
+            }
             if matches!(workload, Workload::SunionstoreMixed) {
                 exchange_one(server, SUNIONSTORE_MIXED, SUNIONSTORE_MIXED_REPLY);
                 exchange_one(server, SUNIONSTORE_DST_SCARD, SUNIONSTORE_DST_SCARD_REPLY);
@@ -2215,7 +2275,7 @@ steady_state_destination=warmed_by_exact_assertion",
                     SUNIONSTORE_SMALL_MEMBERS,
                     SUNIONSTORE_LARGE_MEMBERS
                 );
-            } else {
+            } else if matches!(workload, Workload::SdiffstoreMixed) {
                 exchange_one(server, SDIFFSTORE_MIXED, SDIFFSTORE_MIXED_REPLY);
                 exchange_one(server, SUNIONSTORE_DST_SCARD, SDIFFSTORE_DST_SCARD_REPLY);
                 exchange_one(
@@ -2233,6 +2293,32 @@ steady_state_destination=warmed_by_exact_assertion",
                     "FIXTURE_REPRESENTATION workload={} arm={} \
 source_small_members={} source_small_encoding=intset \
 source_large_members={} source_large_encoding=hashtable disjoint=true \
+destination_members=512 destination_encoding=intset \
+destination_pttl=-1 boundary_membership=verified \
+steady_state_destination=warmed_by_exact_assertion",
+                    workload.name(),
+                    server.arm.name(),
+                    SUNIONSTORE_SMALL_MEMBERS,
+                    SUNIONSTORE_LARGE_MEMBERS
+                );
+            } else {
+                exchange_one(server, SINTERSTORE_MIXED, SINTERSTORE_MIXED_REPLY);
+                exchange_one(server, SUNIONSTORE_DST_SCARD, SDIFFSTORE_DST_SCARD_REPLY);
+                exchange_one(
+                    server,
+                    SUNIONSTORE_DST_ENCODING,
+                    SUNIONSTORE_SMALL_ENCODING_REPLY,
+                );
+                exchange_one(
+                    server,
+                    SINTERSTORE_DST_MEMBERSHIP,
+                    SINTERSTORE_DST_MEMBERSHIP_REPLY,
+                );
+                exchange_one(server, SUNIONSTORE_DST_PTTL, PTTL_PERSISTENT_REPLY);
+                println!(
+                    "FIXTURE_REPRESENTATION workload={} arm={} \
+source_small_members={} source_small_encoding=intset \
+source_large_members={} source_large_encoding=hashtable fully_contains_small=true \
 destination_members=512 destination_encoding=intset \
 destination_pttl=-1 boundary_membership=verified \
 steady_state_destination=warmed_by_exact_assertion",
@@ -2270,7 +2356,7 @@ fn prefill_and_warm(
     prefill(servers, workload);
     let warm_ops: usize = if matches!(
         workload,
-        Workload::SunionstoreMixed | Workload::SdiffstoreMixed
+        Workload::SunionstoreMixed | Workload::SdiffstoreMixed | Workload::SinterstoreMixed
     ) {
         3_200
     } else {

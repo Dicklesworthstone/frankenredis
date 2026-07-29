@@ -28,6 +28,84 @@ Every new KEEP declares exactly one class:
 modified entries in both ledger files. It also preserves the ELF self-report,
 A/A bootstrap median-CI, never-CV, counted-mechanism, and retry-predicate gates.
 
+## 2026-07-29 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — mixed-hit `SINTERSTORE dst small large` is 3.2237x live Redis at saturated P16 (`frankenredis-mczzl`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes. Decision: KEEP.** Current
+  io_uring FrankenRedis delivered **3.223663124x** the throughput of the actual
+  vendored Redis 7.2.4 server running beside two identical mio A/A controls in
+  one invocation. No production source changed; this commit authenticates the
+  repaired command shape in the competitive harness. The accompanying
+  io_uring/mio comparison is **SELF-SPEEDUP** maintenance only and remained
+  HOLD.
+- **Resurrection adjudication and exact fixture.** Exact competitive preflight
+  for `SINTERSTORE` was CLEAR, then every SINTERSTORE match in both ledgers was
+  read by hand. The exact historical 512-of-4,096 mixed-representation fixture
+  measured only **0.430x** live Redis before the direct-result and compact-set
+  repairs; later old-contract rows ranged from roughly parity to **2.56x**, but
+  none carried the current same-invocation A/A, executing ELF identities, exact
+  representation proof, complete order cycles, named profile, and saturation
+  contract. Every arm resets `small`, `large`, and `dst`; inserts integers
+  0--511 into `small` and 0--4,095 into `large`; asserts source cardinalities
+  512/4,096 and intset/hashtable encodings; runs the exact command once; and
+  asserts a 512-member intset destination, persistent PTTL, and membership
+  boundaries at 0, 256, 511, 512, 4,095, and 4,096. Each measured P16 packet
+  repeats that exact request and byte-checks all 16 `:512` replies.
+- **Executing identity, fixed work, and profile attribution.** Fully reserved
+  `vmi1153651` (Linux 6.17.0-41-generic) ran 48 samples x 12,800 replies/arm at
+  P16 with 50 persistent clients in eight pinned shards, one disjoint server
+  core, 16 client groups/arm/sample, four groups before each within-sample arm
+  rotation, and two complete 24-order cycles. The executing harness
+  self-reported ELF SHA-256
+  **`b5131bc5aaa7f374f0487579bff793c152a5959aec13a6456c909cba632791f9`**;
+  all three executing FrankenRedis arms self-reported ELF SHA-256
+  **`23bd588ca868b290a1853ccc4cfd7341dd857b788d744633fa3948806b0a2487`**;
+  Redis self-reported ELF SHA-256
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+  Candidate/Redis median utilization was **97.994%/98.175%**. A zero-lost
+  profile attributed **47.98% self-time** to the named SINTER/result surface
+  (`CompactFieldMap::lookup_slot_prehashed` 19.20%,
+  `integer_decimal_bytes` 17.87%, buffered dispatch 3.91%,
+  `SetValue::retain_intersect` 2.98%, `SetValue::contains` 2.71%,
+  setstore executor 0.41%, `Store::sinter_prepare` 0.32%, exact parser 0.27%,
+  internal insert 0.20%, result store 0.07%, and `Store::sinterstore` 0.04%),
+  for an Amdahl elimination ceiling of **1.922338x**. Async CQ output had only
+  0.07% self-time and a 1.000700x ceiling on this command-heavy shape.
+- **Bootstrap median-CI competitive verdict, never CV.** Wall A/A null median
+  was **0.993968478x**, bootstrap 95% median CI
+  **[0.977683735, 1.027212437]**, deriving decision band
+  **[0.945575126, 1.054424874]**. Redis wall time divided by FrankenRedis wall
+  time was **3.223663124x**, CI **[3.164444044, 3.296241068]**:
+  COMPETITIVE KEEP. CPU A/A null median was **0.991360870x**, CI
+  **[0.977460854, 1.024514162]**, deriving band
+  **[0.950971676, 1.049028324]**; CPU FrankenRedis/Redis throughput was
+  **3.213329209x**, CI **[3.164193302, 3.301203236]**: KEEP. The ancillary
+  io_uring/mio SELF-SPEEDUP was HOLD at **1.044608560x**, CI
+  **[1.031566979, 1.088551244]**; CPU was likewise HOLD at
+  **1.048061793x**, CI **[1.036345951, 1.085084436]**, because both intervals
+  overlap their A/A-derived bands. Neither is campaign output. CV is provenance
+  only and never entered the decision (wall null 9.246259%, self 8.022980%,
+  competitive 7.540506%; CPU null 8.634733%, self 7.815923%, competitive
+  7.498164%).
+- **Discarded infrastructure attempts.** Two compile-only reservations were
+  cancelled while queued behind unrelated fleet work, and `vmi1152480` was
+  refused fail-closed by RCH because its alias resolved to the wrong target.
+  None executed the harness or produced timing. The admitted invocation ran
+  strict-remote on idle `vmi1153651`, selected nine quiet physical cores on its
+  first preflight attempt, and completed every contract gate above.
+- **Concrete retry predicate.** Reopen after a change to SINTERSTORE semantics;
+  the exact 512-of-4,096 fully overlapping fixture; intset/hashtable thresholds;
+  `Store::sinter_prepare`, `SetValue::retain_intersect`, compact-set lookup,
+  integer conversion, direct-result construction, destination overwrite,
+  expiry/LFU, parser/runtime/store dispatch; Redis implementation or version;
+  allocator, kernel, harness, or release codegen; or if a fresh valid
+  live-incumbent CI overlaps 1.0. A new implementation lever requires a fresh
+  profile and a counted mechanism predicting at least 10% fewer instructions
+  or cycles. Any retry must retain exact cardinality, encoding, PTTL,
+  membership, and reply assertions; state-stable destination warm-up; live
+  Redis arm; all ELF self-reports; same-invocation A/A; complete order cycles;
+  within-sample rotation; zero-lost nonzero-self named profile; byte checking;
+  and >=90% median server utilization.
+
 ## 2026-07-29 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — mixed-representation `SDIFFSTORE dst small large_miss` is 2.8835x live Redis at saturated P16 (`frankenredis-ov0m1`)
 
 - **Claim class: COMPETITIVE. Campaign output: yes. Decision: KEEP.** Current
