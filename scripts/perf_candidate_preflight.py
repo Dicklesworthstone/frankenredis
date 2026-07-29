@@ -8,7 +8,7 @@ ledger integrity DECAYS, so the audit has to become a gate rather than an event.
 
 Modes:
 
-  check-candidate  <target symbol or phrase>...
+  check-candidate  [--competitive] <target symbol or phrase>...
       Refuse a lever whose ground has already been covered. Greps both ledgers
       for rows naming the target and prints each concrete retry predicate it can
       find.
@@ -228,31 +228,60 @@ def concrete_retry(body):
     return len(condition) >= 20 and RETRY_CONDITION_RE.search(condition) is not None
 
 
-def check_candidate(terms):
+def check_candidate(terms, competitive=False):
+    """Report prior ledger art for a proposed candidate.
+
+    `competitive=True` means the proposal is a vs-incumbent AUTHENTICATION: a
+    measurement of this surface against the live legacy incumbent. Only rows that
+    themselves measured the incumbent can settle that question, so only those
+    block.
+
+    Why the distinction exists (2026-07-28). Plain substring prior art conflates
+    two different questions. "I made SRANDMEMBER's dedup 2.1x faster" is a
+    SELF-SPEEDUP row; it says nothing about whether our SRANDMEMBER beats Redis's.
+    Before this split, ten candidate authentications were BLOCKED by 30-89 rows
+    apiece, every one of them a self-speedup — the gate was refusing exactly the
+    measurement that would have caught an frankensearch-class miss, where a 8.7x
+    deficit hid behind ~90 commits of unmeasured gates. A self-speedup row is
+    context for an authentication. It is not an answer to it.
+    """
     if not terms:
-        print("usage: check-candidate <symbol or phrase>...", file=sys.stderr)
+        print("usage: check-candidate [--competitive] <symbol or phrase>...", file=sys.stderr)
         return 64
-    hits = []
+    blocking, context = [], []
     for path in LEDGERS:
         for title, body, line in normalised_entries(path):
             for term in terms:
                 if term.lower() in body.lower():
-                    hits.append((
-                        path.name,
-                        line,
-                        title.strip(),
-                        term,
-                        retry_excerpt(body),
-                    ))
+                    hit = (path.name, line, title.strip(), term, retry_excerpt(body))
+                    # In competitive mode a row settles the question only if it
+                    # actually measured the incumbent side-by-side.
+                    if competitive and not incumbent_measured(body):
+                        context.append(hit)
+                    else:
+                        blocking.append(hit)
                     break
-    if not hits:
-        print(f"CLEAR: no ledger row names {terms}")
+
+    def render(hits, limit=12):
+        for name, line, title, term, retry in hits[:limit]:
+            print(f"  {name}:{line}  (matched {term!r})")
+            print(f"    {title[:150]}")
+            print(f"    retry: {retry[:500] if retry else '(none recorded)'}")
+
+    if not blocking:
+        if context:
+            print(f"CLEAR for a vs-incumbent authentication of {terms}.")
+            print(f"{len(context)} prior row(s) name this surface, but NONE measured the")
+            print("live incumbent — they are self-speedup or mechanism rows. That is")
+            print("context for your run, not an answer to it. Cite the closest one.\n")
+            render(context, limit=6)
+        else:
+            print(f"CLEAR: no ledger row names {terms}")
         return 0
-    print(f"BLOCKED: {len(hits)} prior ledger row(s) already cover this ground.\n")
-    for name, line, title, term, retry in hits[:12]:
-        print(f"  {name}:{line}  (matched {term!r})")
-        print(f"    {title[:150]}")
-        print(f"    retry: {retry[:500] if retry else '(none recorded)'}")
+    print(f"BLOCKED: {len(blocking)} prior ledger row(s) already cover this ground.\n")
+    render(blocking)
+    if context:
+        print(f"\n  (plus {len(context)} non-incumbent row(s) naming the same surface)")
     print("\nRead those rows before proceeding. If one is VOID (no A/A null and no")
     print("counted mechanism), say so explicitly in your new entry and cite it —")
     print("re-running a void row is legitimate; silently re-deriving it is not.")
@@ -1013,7 +1042,9 @@ def main(argv):
         return 64
     mode = argv[1]
     if mode == "check-candidate":
-        return check_candidate(argv[2:])
+        terms = argv[2:]
+        competitive = "--competitive" in terms
+        return check_candidate([t for t in terms if t != "--competitive"], competitive)
     if mode == "check-entry":
         return check_entry(argv[2] if len(argv) > 2 else "-")
     if mode == "check-staged":
