@@ -109,6 +109,7 @@ const HGET_MISSING_FIELD_REPLY: &[u8] = b"$-1\r\n";
 const HEXISTS_MISSING_FIELD: &[u8] = b"*3\r\n$7\r\nHEXISTS\r\n$1\r\nh\r\n$6\r\nabsent\r\n";
 const HEXISTS_MISSING_FIELD_REPLY: &[u8] = b":0\r\n";
 const HKEYS_FIELDS: &[u8] = b"*2\r\n$5\r\nHKEYS\r\n$1\r\nh\r\n";
+const HVALS_FIELDS: &[u8] = b"*2\r\n$5\r\nHVALS\r\n$1\r\nh\r\n";
 const HSET_SAME_VALUE: &[u8] = b"*4\r\n$4\r\nHSET\r\n$1\r\nh\r\n$4\r\nf250\r\n$1\r\n1\r\n";
 const HSET_SAME_VALUE_REPLY: &[u8] = b":0\r\n";
 const HSETNX_EXISTING_FIELD: &[u8] = b"*4\r\n$6\r\nHSETNX\r\n$1\r\nh\r\n$4\r\nf250\r\n$1\r\nv\r\n";
@@ -240,6 +241,7 @@ enum Workload {
     HgetMissingField,
     HexistsMissingField,
     HkeysFields,
+    HvalsFields,
     HsetSameValue,
     HsetnxExistingField,
     HincrbyZeroDelta,
@@ -299,6 +301,7 @@ impl Workload {
             Self::HgetMissingField => "hget-missing-field",
             Self::HexistsMissingField => "hexists-missing-field",
             Self::HkeysFields => "hkeys-fields",
+            Self::HvalsFields => "hvals-fields",
             Self::HsetSameValue => "hset-same-value",
             Self::HsetnxExistingField => "hsetnx-existing-field",
             Self::HincrbyZeroDelta => "hincrby-zero-delta",
@@ -545,6 +548,18 @@ impl Workload {
                 "fr_store::packed_set::CompactFieldMapFieldIter::next",
                 "fr_protocol::encode_bulk_string_slice",
             ],
+            Self::HvalsFields => &[
+                "frankenredis::process_buffered_frames",
+                "__memcmp_avx2_movbe",
+                "parse_borrowed_plain_hvals_packet",
+                "fr_runtime::Runtime::execute_plain_hcoll_borrowed_into",
+                "fr_store::Store::hcollection_borrow_scan",
+                "fr_store::Store::hcollection_borrow_scan_impl",
+                "fr_store::packed_set::HashFieldMap::values",
+                "fr_store::packed_set::HashFieldMapIter::next",
+                "fr_store::packed_set::CompactFieldMapIter::next",
+                "fr_protocol::encode_bulk_string_slice",
+            ],
             Self::HsetSameValue => &[
                 "frankenredis::process_buffered_frames",
                 "__memcmp_avx2_movbe",
@@ -663,6 +678,7 @@ impl Workload {
                 "hget-missing-field" => Self::HgetMissingField,
                 "hexists-missing-field" => Self::HexistsMissingField,
                 "hkeys-fields" => Self::HkeysFields,
+                "hvals-fields" => Self::HvalsFields,
                 "hset-same-value" => Self::HsetSameValue,
                 "hsetnx-existing-field" => Self::HsetnxExistingField,
                 "hincrby-zero-delta" => Self::HincrbyZeroDelta,
@@ -975,6 +991,17 @@ impl WorkloadPackets {
             Workload::HkeysFields => {
                 let response = hkeys_fields_reply();
                 let case = repeated_case(HKEYS_FIELDS, &response, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::HvalsFields => {
+                let response = hvals_fields_reply();
+                let case = repeated_case(HVALS_FIELDS, &response, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -1565,6 +1592,14 @@ fn hkeys_fields_reply() -> Vec<u8> {
     response
 }
 
+fn hvals_fields_reply() -> Vec<u8> {
+    let mut response = format!("*{MISSING_FIELD_HASH_FIELDS}\r\n").into_bytes();
+    for _ in 0..MISSING_FIELD_HASH_FIELDS {
+        response.extend_from_slice(b"$1\r\n1\r\n");
+    }
+    response
+}
+
 fn lindex_middle_prefill() -> ExchangeCase {
     let mut request = b"*3\r\n$3\r\nSET\r\n$1\r\nl\r\n$4\r\nseed\r\n\
 *2\r\n$3\r\nDEL\r\n$1\r\nl\r\n"
@@ -1652,6 +1687,7 @@ derived_listpack_bytes=3007",
                 | Workload::HgetMissingField
                 | Workload::HexistsMissingField
                 | Workload::HkeysFields
+                | Workload::HvalsFields
                 | Workload::HsetSameValue
                 | Workload::HsetnxExistingField
                 | Workload::HincrbyZeroDelta
@@ -1662,6 +1698,7 @@ derived_listpack_bytes=3007",
             let value = if matches!(
                 workload,
                 Workload::HkeysFields
+                    | Workload::HvalsFields
                     | Workload::HsetSameValue
                     | Workload::HincrbyZeroDelta
                     | Workload::HincrbyfloatZeroDelta

@@ -28,6 +28,70 @@ Every new KEEP declares exactly one class:
 modified entries in both ledger files. It also preserves the ELF self-report,
 A/A bootstrap median-CI, never-CV, counted-mechanism, and retry-predicate gates.
 
+## 2026-07-29 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — value-only `HVALS` on a pristine 500-field numeric hash is 3.3315x live Redis at saturated P16 (`frankenredis-1pfm1`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes.** This is current io_uring
+  FrankenRedis/Redis throughput against the actual vendored Redis 7.2.4 server
+  running live beside both A/A controls in the same invocation. Production
+  source was not changed; the authenticated harness gained this command shape.
+  The accompanying io_uring/mio comparison is **SELF-SPEEDUP** maintenance
+  only and remained HOLD.
+- **Ledger admission and structural fixture.** Exact candidate preflight for
+  `HVALS h` on the named 500-field Redis-listpack surface was clear, then every
+  broader HVALS/HKEYS/HGETALL row was read and adjudicated. Prior LFU collapse
+  and borrow-scan rows are internal self-speedups on two-field fixtures; the
+  older 5,000-field and N=16/128 incumbent observations lack this current
+  same-invocation A/A, executing-ELF, exact-fixture, complete-cycle, profile,
+  and saturation contract. The idempotent fixture resets `h`, inserts exactly
+  500 fields `f000` through `f499` with one-byte numeric value `1`, asserts
+  `HLEN h == 500` in every arm, and asserts Redis
+  `OBJECT ENCODING h == listpack`. FrankenRedis promotes its internal map after
+  128 pairs while preserving Redis-observable hash semantics. Every measured
+  reply is byte-checked as the exact RESP2 array of 500 one-byte `1` values.
+- **Same executable, named profile, and fixed work.** Fully reserved
+  `vmi1153651` (Linux 6.17.0-41-generic) ran 48 samples x 40,000 replies/arm at
+  P16 with 50 persistent clients in eight pinned shards, one disjoint server
+  core, 50 client groups/arm/sample, ten groups before each within-sample arm
+  rotation, and two complete 24-order cycles. The executing harness
+  self-reported ELF SHA-256
+  **`0e47ce5c95385cc6ea5d559fe1aca37e6c1814e296b9267550b346a212621ce7`**;
+  all three executing FrankenRedis arms self-reported ELF SHA-256
+  **`4094fb44b22d9d3f03592688bb13045c73b0fd53fa8bc21e6870207151282444`**;
+  Redis self-reported ELF SHA-256
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+  Candidate/Redis median utilization was **96.966%/97.676%**. A zero-lost
+  profile attributed **22.55% self-time** to the named HVALS command surface
+  (`encode_bulk_string_slice` 9.95%, `process_buffered_frames` 6.32%,
+  `__memcmp_avx2_movbe` 6.13%, exact parser 0.15%), for an elimination ceiling
+  of **1.291156x**. The full async-CQ surface was 0.34%, owned io_uring
+  self-time was 0.13%, and its Amdahl ceiling was 1.003412x.
+- **Bootstrap median-CI competitive verdict.** Wall A/A null median was
+  **0.989710863x**, bootstrap 95% median CI
+  **[0.956319878, 1.023262318]**, inside gate
+  **[0.912639756, 1.087360244]**. io_uring FrankenRedis/Redis throughput
+  (Redis wall / FrankenRedis wall) was **3.331501638x**, CI
+  **[3.224327296, 3.432587704]**: COMPETITIVE KEEP. CPU A/A null median was
+  **0.992073960x**, CI **[0.952233012, 1.024919551]**, inside gate
+  **[0.904466025, 1.095533975]**; CPU FrankenRedis/Redis throughput was
+  **3.370423651x**, CI **[3.288984451, 3.455614983]**: KEEP. The ancillary
+  io_uring/mio SELF-SPEEDUP remained HOLD at **1.067093261x**, CI
+  [1.053388584, 1.105585164]; CPU likewise held at **1.076125446x**, CI
+  [1.055046144, 1.106271155], because neither CI clears the A/A-derived null
+  margin. Neither is campaign output. Bootstrap median-CI decided every
+  verdict, never CV; CV is provenance only (wall null 13.420332%, self
+  10.820874%, competitive 10.044175%; CPU null 13.380548%, self 9.422691%,
+  competitive 9.136968%).
+- **Retry predicate.** Reopen after changes to Redis hash encoding thresholds,
+  the 500-field/numeric-value fixture, FrankenRedis's 128-pair internal
+  promotion or compact value iterator, HVALS parser/runtime/store, aggregate
+  or bulk reply encoding, field-TTL/LFU handling, Redis version, allocator,
+  kernel, harness, or release codegen, or if a fresh valid live-incumbent CI
+  overlaps 1.0. Any retry must retain the pristine numeric fixture,
+  HLEN/listpack assertions, exact 500-value reply, live Redis arm, ELF
+  self-reports, same-invocation A/A, complete order cycles, within-sample arm
+  rotation, zero-lost nonzero-self profile, byte checking, and >=90% median
+  server utilization.
+
 ## 2026-07-28 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — field-only `HKEYS` on a pristine 500-field numeric hash is 3.9312x live Redis at saturated P16 (`frankenredis-x9rzx`)
 
 - **Claim class: COMPETITIVE. Campaign output: yes.** This is current io_uring
