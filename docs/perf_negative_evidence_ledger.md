@@ -28,6 +28,73 @@ Every new KEEP declares exactly one class:
 modified entries in both ledger files. It also preserves the ELF self-report,
 A/A bootstrap median-CI, never-CV, counted-mechanism, and retry-predicate gates.
 
+## 2026-07-29 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — `PFMERGE dst h1 h2` over two disjoint dense HLLs is 4.0806x live Redis at saturated P16 (`frankenredis-7kr47`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes.** This is current io_uring
+  FrankenRedis/Redis throughput against the actual vendored Redis 7.2.4 server
+  running live beside both A/A controls in the same invocation. Production
+  source was not changed; the authenticated harness gained this command shape.
+  The accompanying io_uring/mio comparison is **SELF-SPEEDUP** maintenance
+  only and remained HOLD.
+- **Ledger admission and structural fixture.** Exact candidate preflight for
+  two-source dense-HLL `PFMERGE dst h1 h2` was clear, then every broader
+  PFMERGE/HLL ledger match was read and adjudicated. Prior accumulator,
+  dense-decode, and AVX2 rows are internal self-speedups; the missing-source
+  PFMERGE reject is a degenerate fixture; older live-Redis sweeps lack this
+  same-invocation A/A, executing-ELF, exact-fixture, complete-cycle, named
+  profile, and saturation contract. The idempotent fixture resets `h1`, `h2`,
+  and `dst`, loads 4,096 distinct `aNNNN` elements into `h1` and 4,096
+  distinct `bNNNN` elements into `h2`, and asserts `PFDEBUG ENCODING == dense`
+  for both sources and the destination in every arm. It performs the initial
+  merge, asserts exact `+OK`, and asserts `PFCOUNT dst == 8173`. Each measured
+  P16 packet repeats that exact merge and byte-checks all 16 `+OK` replies.
+- **Same executable, named profile, and fixed work.** `vmi1149989` (Linux
+  6.17.0-40-generic) ran 48 samples x 12,000 replies/arm at P16 with 50
+  persistent clients in eight pinned shards, one disjoint server core, 15
+  client groups/arm/sample, three groups before each within-sample arm
+  rotation, and two complete 24-order cycles. The executing harness
+  self-reported ELF SHA-256
+  **`f144effe60cd6e3b5eed97816987db829b728cf4227ede04580df3cf84580dbd`**;
+  all three executing FrankenRedis arms self-reported ELF SHA-256
+  **`c63fc20f96ea594a1ede51eb95f554fac9931081842add67f18591e4e9b445c6`**;
+  Redis self-reported ELF SHA-256
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**.
+  Candidate/Redis median utilization was **98.558%/98.722%**. A zero-lost
+  profile attributed **82.10% self-time** to the named PFMERGE/HLL command
+  surface (`hll_parse` 47.89%, `hll_encode` 26.21%,
+  `process_buffered_frames` 3.15%, AVX2 bytewise max 2.20%, memcmp 2.15%,
+  borrowed argv parsing/copy 0.29%, multibulk action 0.13%, merge fold 0.08%),
+  for an elimination ceiling of **5.586592x**. The full async-CQ surface was
+  0.09%, owned io_uring self-time was 0.01%, and its Amdahl ceiling was
+  1.000901x. The harness now gates pure output workloads on owned
+  submit/drain self-time and command-shape workloads on their named command
+  surface, so the profile always verifies the actual function under test.
+- **Bootstrap median-CI competitive verdict.** Wall A/A null median was
+  **0.986400282x**, bootstrap 95% median CI
+  **[0.960289879, 1.023334985]**, inside gate
+  **[0.920579758, 1.079420242]**. io_uring FrankenRedis/Redis throughput
+  (Redis wall / FrankenRedis wall) was **4.080551152x**, CI
+  **[4.005521312, 4.168228292]**: COMPETITIVE KEEP. CPU A/A null median was
+  **0.984893319x**, CI **[0.959937840, 1.013158149]**, inside gate
+  **[0.919875679, 1.080124321]**; CPU FrankenRedis/Redis throughput was
+  **4.089724609x**, CI **[4.015284573, 4.174324116]**: KEEP. The ancillary
+  io_uring/mio SELF-SPEEDUP remained HOLD at **1.021723864x**, CI
+  [0.988225986, 1.043429376]; CPU likewise held at **1.022328763x**, CI
+  [0.991709829, 1.042396034]. Neither is campaign output. Bootstrap median-CI
+  decided every verdict, never CV; CV is provenance only (wall null
+  10.292873%, self 10.326384%, competitive 9.570567%; CPU null 10.714134%,
+  self 9.601608%, competitive 8.779660%).
+- **Retry predicate.** Reopen after changes to Redis dense-HLL encoding or
+  PFMERGE semantics, the two-source 4,096+4,096 element fixture or expected
+  8,173 union, FrankenRedis HLL parse/encode/merge/cache behavior, SIMD max,
+  PFMERGE parser/runtime/store, reply encoding, Redis version, allocator,
+  kernel, harness, or release codegen, or if a fresh valid live-incumbent CI
+  overlaps 1.0. Any retry must retain the two disjoint dense sources,
+  dense-source/destination and exact-count assertions, exact `+OK` replies,
+  live Redis arm, ELF self-reports, same-invocation A/A, complete order
+  cycles, within-sample arm rotation, zero-lost nonzero-self named profile,
+  byte checking, and >=90% median server utilization.
+
 ## 2026-07-29 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — single-batch `HSCAN h 0 COUNT 1000` on a pristine 500-field numeric hash is 2.5757x live Redis at saturated P16 (`frankenredis-35lo2`)
 
 - **Claim class: COMPETITIVE. Campaign output: yes.** This is current io_uring

@@ -126,6 +126,16 @@ const HSTRLEN_EXISTING_FIELD_REPLY: &[u8] = b":1\r\n";
 const HMGET_EXISTING_MISSING: &[u8] =
     b"*4\r\n$5\r\nHMGET\r\n$1\r\nh\r\n$4\r\nf250\r\n$6\r\nabsent\r\n";
 const HMGET_EXISTING_MISSING_REPLY: &[u8] = b"*2\r\n$1\r\nv\r\n$-1\r\n";
+const PFMERGE_DENSE_SOURCE_ELEMENTS: usize = 4_096;
+const PFMERGE_DENSE_PREFILL_BATCH: usize = 256;
+const PFMERGE_TWO_DENSE: &[u8] = b"*4\r\n$7\r\nPFMERGE\r\n$3\r\ndst\r\n$2\r\nh1\r\n$2\r\nh2\r\n";
+const PFMERGE_TWO_DENSE_REPLY: &[u8] = b"+OK\r\n";
+const PFMERGE_H1_ENCODING: &[u8] = b"*3\r\n$7\r\nPFDEBUG\r\n$8\r\nENCODING\r\n$2\r\nh1\r\n";
+const PFMERGE_H2_ENCODING: &[u8] = b"*3\r\n$7\r\nPFDEBUG\r\n$8\r\nENCODING\r\n$2\r\nh2\r\n";
+const PFMERGE_DST_ENCODING: &[u8] = b"*3\r\n$7\r\nPFDEBUG\r\n$8\r\nENCODING\r\n$3\r\ndst\r\n";
+const PFMERGE_DENSE_ENCODING_REPLY: &[u8] = b"+dense\r\n";
+const PFMERGE_DST_COUNT: &[u8] = b"*2\r\n$7\r\nPFCOUNT\r\n$3\r\ndst\r\n";
+const PFMERGE_DST_COUNT_REPLY: &[u8] = b":8173\r\n";
 const MISSING_FIELD_HASH_HLEN: &[u8] = b"*2\r\n$4\r\nHLEN\r\n$1\r\nh\r\n";
 const MISSING_FIELD_HASH_HLEN_REPLY: &[u8] = b":500\r\n";
 const MISSING_FIELD_HASH_ENCODING: &[u8] = b"*3\r\n$6\r\nOBJECT\r\n$8\r\nENCODING\r\n$1\r\nh\r\n";
@@ -251,6 +261,7 @@ enum Workload {
     HincrbyfloatZeroDelta,
     HstrlenExistingField,
     HmgetExistingMissing,
+    PfmergeTwoDense,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -312,6 +323,7 @@ impl Workload {
             Self::HincrbyfloatZeroDelta => "hincrbyfloat-zero-delta",
             Self::HstrlenExistingField => "hstrlen-existing-field",
             Self::HmgetExistingMissing => "hmget-existing-missing",
+            Self::PfmergeTwoDense => "pfmerge-two-dense",
         }
     }
 
@@ -656,6 +668,24 @@ impl Workload {
                 "fr_store::packed_set::CompactFieldMap::lookup_slot",
                 "fr_store::packed_set::CompactFieldMap::lookup_slot_prehashed",
             ],
+            Self::PfmergeTwoDense => &[
+                "frankenredis::process_buffered_frames",
+                "__memcmp_avx2_movbe",
+                "parse_borrowed_multibulk_action",
+                "parse_command_args_borrowed_into",
+                "copy_borrowed_argv_into_scratch",
+                "fr_runtime::Runtime::execute_frame_internal",
+                "fr_command::execute_dispatch",
+                "fr_command::pfmerge",
+                "fr_store::Store::pfmerge",
+                "fr_store::hll_parse",
+                "fr_store::hll_decode_dense_registers",
+                "fr_store::hll_merge_fold",
+                "fr_store::hll_merge_registers",
+                "fr_simd::max_bytes_inplace",
+                "fr_store::hll_encode",
+                "fr_store::hll_encode_dense_registers",
+            ],
             Self::Set | Self::Get | Self::Mixed => &[],
         }
     }
@@ -704,6 +734,7 @@ impl Workload {
                 "hincrbyfloat-zero-delta" => Self::HincrbyfloatZeroDelta,
                 "hstrlen-existing-field" => Self::HstrlenExistingField,
                 "hmget-existing-missing" => Self::HmgetExistingMissing,
+                "pfmerge-two-dense" => Self::PfmergeTwoDense,
                 other => panic!("unknown FR_URING_AB_WORKLOADS item: {other}"),
             })
             .collect()
@@ -1105,6 +1136,16 @@ impl WorkloadPackets {
                     HMGET_EXISTING_MISSING_REPLY,
                     pipeline,
                 );
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::PfmergeTwoDense => {
+                let case = repeated_case(PFMERGE_TWO_DENSE, PFMERGE_TWO_DENSE_REPLY, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -1540,9 +1581,18 @@ fn exchange_one(server: &mut Server, request: &[u8], expected: &[u8]) {
     let mut stream = connect(server.port);
     stream.write_all(request).expect("write setup request");
     let mut response = vec![0_u8; expected.len()];
-    stream
-        .read_exact(&mut response)
-        .expect("read setup response");
+    if let Err(error) = stream.read_exact(&mut response) {
+        let prefix_len = request.len().min(128);
+        panic!(
+            "read setup response: arm={} request_len={} request_prefix={:?} \
+expected_len={} partial_response={:?}: {error}",
+            server.arm.name(),
+            request.len(),
+            &request[..prefix_len],
+            expected.len(),
+            response
+        );
+    }
     assert_eq!(
         response,
         expected,
@@ -1661,6 +1711,37 @@ fn lindex_middle_prefill() -> ExchangeCase {
     }
 }
 
+fn prefill_pfmerge_two_dense(server: &mut Server) {
+    for key in ["h1", "h2", "dst"] {
+        let reset = format!(
+            "*3\r\n$3\r\nSET\r\n${}\r\n{key}\r\n$4\r\nseed\r\n\
+*2\r\n$3\r\nDEL\r\n${}\r\n{key}\r\n",
+            key.len(),
+            key.len()
+        );
+        exchange_one(server, reset.as_bytes(), b"+OK\r\n:1\r\n");
+    }
+
+    for prefix in ['a', 'b'] {
+        let key = if prefix == 'a' { "h1" } else { "h2" };
+        for batch_start in (0..PFMERGE_DENSE_SOURCE_ELEMENTS).step_by(PFMERGE_DENSE_PREFILL_BATCH) {
+            let batch_end =
+                (batch_start + PFMERGE_DENSE_PREFILL_BATCH).min(PFMERGE_DENSE_SOURCE_ELEMENTS);
+            let header = format!(
+                "*{}\r\n$5\r\nPFADD\r\n$2\r\n{key}\r\n",
+                batch_end - batch_start + 2
+            );
+            let mut request = header.into_bytes();
+            for index in batch_start..batch_end {
+                let element = format!("{prefix}{index:04}");
+                let value = format!("$5\r\n{element}\r\n");
+                request.extend_from_slice(value.as_bytes());
+            }
+            exchange_one(server, &request, b":1\r\n");
+        }
+    }
+}
+
 fn prefill(servers: &mut [Server; 4], workload: Workload) {
     let seeded_stream = matches!(
         workload,
@@ -1769,6 +1850,21 @@ derived_listpack_bytes=3007",
                     MISSING_FIELD_HASH_FIELDS
                 );
             }
+        } else if matches!(workload, Workload::PfmergeTwoDense) {
+            prefill_pfmerge_two_dense(server);
+            exchange_one(server, PFMERGE_H1_ENCODING, PFMERGE_DENSE_ENCODING_REPLY);
+            exchange_one(server, PFMERGE_H2_ENCODING, PFMERGE_DENSE_ENCODING_REPLY);
+            exchange_one(server, PFMERGE_TWO_DENSE, PFMERGE_TWO_DENSE_REPLY);
+            exchange_one(server, PFMERGE_DST_ENCODING, PFMERGE_DENSE_ENCODING_REPLY);
+            exchange_one(server, PFMERGE_DST_COUNT, PFMERGE_DST_COUNT_REPLY);
+            println!(
+                "FIXTURE_REPRESENTATION workload={} arm={} sources=2 \
+elements_per_source={} source_encoding=dense destination_encoding=dense \
+union_count=8173",
+                workload.name(),
+                server.arm.name(),
+                PFMERGE_DENSE_SOURCE_ELEMENTS
+            );
         } else if let Some(case) = &seeded_stream {
             exchange_one(server, &case.request, &case.response);
         }
@@ -2302,10 +2398,16 @@ fn profile_io_uring_path(
             matched.push(line.trim().to_owned());
         }
     }
-    assert!(
-        owned_self_pct > 0.0,
-        "profile did not attribute non-zero self-time to owned submit/CQ drain"
-    );
+    let command_targets = workload.profile_targets();
+    // The profile gate follows the function under test. Pure output workloads
+    // target the owned io_uring path; command-shape workloads gate below on
+    // their named command surface while retaining async output as provenance.
+    if command_targets.is_empty() {
+        assert!(
+            owned_self_pct > 0.0,
+            "profile did not attribute non-zero self-time to owned submit/CQ drain"
+        );
+    }
     assert!(
         surface_self_pct < 100.0,
         "invalid aggregate io_uring self-time: {surface_self_pct}%"
@@ -2319,7 +2421,6 @@ amdahl_elimination_ceiling={amdahl_ceiling:.6}x lost_samples=0 rows={matched:?}"
         workload.name()
     );
 
-    let command_targets = workload.profile_targets();
     if !command_targets.is_empty() {
         let mut command_rows = Vec::new();
         let mut command_self_pct = 0.0_f64;
