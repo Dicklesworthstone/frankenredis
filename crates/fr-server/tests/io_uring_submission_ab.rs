@@ -46,7 +46,7 @@ const DEFAULT_PROFILE_SECONDS: u64 = 3;
 // sub-microsecond floor dominated by client-channel handoffs even with nine
 // pinned shards; 125 keeps each arm slice below one second while amortizing the
 // barrier enough to drive the server continuously.
-const INTERLEAVE_GROUPS: usize = 125;
+const DEFAULT_INTERLEAVE_GROUPS: usize = 125;
 const QUIET_CORE_MAX_PCT: f64 = 5.0;
 const QUIET_CORE_PREFLIGHT_ATTEMPTS: usize = 20;
 const MIN_SERVER_UTIL_PCT: f64 = 90.0;
@@ -108,6 +108,7 @@ const HGET_MISSING_FIELD: &[u8] = b"*3\r\n$4\r\nHGET\r\n$1\r\nh\r\n$6\r\nabsent\
 const HGET_MISSING_FIELD_REPLY: &[u8] = b"$-1\r\n";
 const HEXISTS_MISSING_FIELD: &[u8] = b"*3\r\n$7\r\nHEXISTS\r\n$1\r\nh\r\n$6\r\nabsent\r\n";
 const HEXISTS_MISSING_FIELD_REPLY: &[u8] = b":0\r\n";
+const HKEYS_FIELDS: &[u8] = b"*2\r\n$5\r\nHKEYS\r\n$1\r\nh\r\n";
 const HSET_SAME_VALUE: &[u8] = b"*4\r\n$4\r\nHSET\r\n$1\r\nh\r\n$4\r\nf250\r\n$1\r\n1\r\n";
 const HSET_SAME_VALUE_REPLY: &[u8] = b":0\r\n";
 const HSETNX_EXISTING_FIELD: &[u8] = b"*4\r\n$6\r\nHSETNX\r\n$1\r\nh\r\n$4\r\nf250\r\n$1\r\nv\r\n";
@@ -238,6 +239,7 @@ enum Workload {
     HdelMissingField,
     HgetMissingField,
     HexistsMissingField,
+    HkeysFields,
     HsetSameValue,
     HsetnxExistingField,
     HincrbyZeroDelta,
@@ -296,6 +298,7 @@ impl Workload {
             Self::HdelMissingField => "hdel-missing-field",
             Self::HgetMissingField => "hget-missing-field",
             Self::HexistsMissingField => "hexists-missing-field",
+            Self::HkeysFields => "hkeys-fields",
             Self::HsetSameValue => "hset-same-value",
             Self::HsetnxExistingField => "hsetnx-existing-field",
             Self::HincrbyZeroDelta => "hincrby-zero-delta",
@@ -530,6 +533,18 @@ impl Workload {
                 "fr_store::packed_set::CompactFieldMap::lookup_slot",
                 "fr_store::packed_set::CompactFieldMap::lookup_slot_prehashed",
             ],
+            Self::HkeysFields => &[
+                "frankenredis::process_buffered_frames",
+                "__memcmp_avx2_movbe",
+                "parse_borrowed_plain_hkeys_packet",
+                "fr_runtime::Runtime::execute_plain_hcoll_borrowed_into",
+                "fr_store::Store::hcollection_borrow_scan",
+                "fr_store::Store::hcollection_borrow_scan_impl",
+                "fr_store::packed_set::HashFieldMap::keys",
+                "fr_store::packed_set::HashFieldMapKeyIter::next",
+                "fr_store::packed_set::CompactFieldMapFieldIter::next",
+                "fr_protocol::encode_bulk_string_slice",
+            ],
             Self::HsetSameValue => &[
                 "frankenredis::process_buffered_frames",
                 "__memcmp_avx2_movbe",
@@ -647,6 +662,7 @@ impl Workload {
                 "hdel-missing-field" => Self::HdelMissingField,
                 "hget-missing-field" => Self::HgetMissingField,
                 "hexists-missing-field" => Self::HexistsMissingField,
+                "hkeys-fields" => Self::HkeysFields,
                 "hset-same-value" => Self::HsetSameValue,
                 "hsetnx-existing-field" => Self::HsetnxExistingField,
                 "hincrby-zero-delta" => Self::HincrbyZeroDelta,
@@ -948,6 +964,17 @@ impl WorkloadPackets {
             Workload::HexistsMissingField => {
                 let case =
                     repeated_case(HEXISTS_MISSING_FIELD, HEXISTS_MISSING_FIELD_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::HkeysFields => {
+                let response = hkeys_fields_reply();
+                let case = repeated_case(HKEYS_FIELDS, &response, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -1528,6 +1555,16 @@ fn hash_prefill(value: &str) -> ExchangeCase {
     }
 }
 
+fn hkeys_fields_reply() -> Vec<u8> {
+    let mut response = format!("*{MISSING_FIELD_HASH_FIELDS}\r\n").into_bytes();
+    for index in 0..MISSING_FIELD_HASH_FIELDS {
+        let field = format!("f{index:03}");
+        let value = format!("$4\r\n{field}\r\n");
+        response.extend_from_slice(value.as_bytes());
+    }
+    response
+}
+
 fn lindex_middle_prefill() -> ExchangeCase {
     let mut request = b"*3\r\n$3\r\nSET\r\n$1\r\nl\r\n$4\r\nseed\r\n\
 *2\r\n$3\r\nDEL\r\n$1\r\nl\r\n"
@@ -1614,6 +1651,7 @@ derived_listpack_bytes=3007",
             Workload::HdelMissingField
                 | Workload::HgetMissingField
                 | Workload::HexistsMissingField
+                | Workload::HkeysFields
                 | Workload::HsetSameValue
                 | Workload::HsetnxExistingField
                 | Workload::HincrbyZeroDelta
@@ -1623,7 +1661,8 @@ derived_listpack_bytes=3007",
         ) {
             let value = if matches!(
                 workload,
-                Workload::HsetSameValue
+                Workload::HkeysFields
+                    | Workload::HsetSameValue
                     | Workload::HincrbyZeroDelta
                     | Workload::HincrbyfloatZeroDelta
             ) {
@@ -1715,9 +1754,10 @@ fn measure_configuration(
     client_threads: usize,
     samples: usize,
     ops_per_sample: usize,
+    interleave_groups: usize,
 ) -> Vec<Sample> {
     // The 24 permutations rotate across samples. Within a sample, each arm runs
-    // only INTERLEAVE_GROUPS client groups before control passes to the next arm,
+    // only `interleave_groups` client groups before control passes to the next arm,
     // so host-frequency and queue drift cannot alias onto a multi-second block.
     const ORDERS: [[Arm; 4]; 24] = [
         [Arm::MioA, Arm::MioB, Arm::IoUring, Arm::Redis],
@@ -1749,6 +1789,10 @@ fn measure_configuration(
         samples.is_multiple_of(ORDERS.len()),
         "sample count must contain complete 24-order cycles; got {samples}"
     );
+    assert!(
+        interleave_groups > 0,
+        "interleave group count must be positive"
+    );
 
     let packets = Arc::new(WorkloadPackets::new(workload, pipeline));
     prefill_and_warm(servers, workload, pipeline, &packets);
@@ -1759,7 +1803,7 @@ fn measure_configuration(
     println!(
         "CONFIG workload={} pipeline={pipeline} clients={CLIENTS} client_threads={client_threads} \
 samples={samples} \
-groups_per_arm_sample={groups} interleave_groups={INTERLEAVE_GROUPS} \
+groups_per_arm_sample={groups} interleave_groups={interleave_groups} \
 ops_per_arm_sample={actual_ops}",
         workload.name()
     );
@@ -1776,7 +1820,7 @@ ops_per_arm_sample={actual_ops}",
         let mut groups_done = 0usize;
         let mut interleave_index = 0usize;
         while groups_done < groups {
-            let block_groups = (groups - groups_done).min(INTERLEAVE_GROUPS);
+            let block_groups = (groups - groups_done).min(interleave_groups);
             let order = ORDERS[(sample_index + interleave_index) % ORDERS.len()];
             for arm in order {
                 let server_slot = match arm {
@@ -2522,6 +2566,8 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
         "FR_URING_AB_CLIENT_THREADS must be in 1..={CLIENTS}"
     );
     let ops_per_sample = parse_usize_env("FR_URING_AB_OPS_PER_SAMPLE", DEFAULT_OPS_PER_SAMPLE);
+    let interleave_groups =
+        parse_usize_env("FR_URING_AB_INTERLEAVE_GROUPS", DEFAULT_INTERLEAVE_GROUPS);
     let profile_seconds = parse_u64_env("FR_URING_AB_PROFILE_SECONDS", DEFAULT_PROFILE_SECONDS);
     let workloads = Workload::parse_list();
     let pipelines = parse_pipelines();
@@ -3056,6 +3102,7 @@ candidate=io_uring incumbent=vendored_redis_7.2.4"
                 client_threads,
                 samples,
                 ops_per_sample,
+                interleave_groups,
             );
             verdicts.push((
                 workload.name(),
