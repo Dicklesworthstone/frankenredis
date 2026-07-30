@@ -4419,6 +4419,30 @@ lost_samples=0 rows={command_rows:?}",
     );
 }
 
+const SHARDED_PROFILE_TARGETS: [&str; 6] = [
+    "frankenredis::dispatch_sharded_set_get_frames",
+    "frankenredis::drain_sharded_set_get_completions",
+    "<fr_runtime::Runtime>::execute_plain_set_borrowed",
+    "<fr_runtime::Runtime>::execute_plain_get_borrowed",
+    "<fr_store::Store>::set_plain_borrowed",
+    "<fr_store::Store>::get_string_bytes",
+];
+
+fn matching_profile_self_time(report: &str, targets: &[&str]) -> (f64, Vec<String>) {
+    let mut rows = Vec::new();
+    let mut self_pct = 0.0_f64;
+    for line in report.lines() {
+        if targets.iter().any(|target| line.contains(target))
+            && let Some(raw_pct) = line.split_whitespace().next()
+            && let Ok(pct) = raw_pct.trim_end_matches('%').parse::<f64>()
+        {
+            self_pct += pct;
+            rows.push(line.trim().to_owned());
+        }
+    }
+    (self_pct, rows)
+}
+
 fn profile_sharded_set_get_path(
     candidate: &mut Server,
     root: &Path,
@@ -4531,24 +4555,8 @@ fn profile_sharded_set_get_path(
         .map(str::trim)
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    let targets = [
-        "frankenredis::run_sharded_set_get_worker",
-        "Runtime::execute_plain_set_borrowed",
-        "Runtime::execute_plain_get_borrowed",
-        "Store::set_plain_borrowed",
-        "Store::get_string_bytes",
-    ];
-    let mut target_rows = Vec::new();
-    let mut target_self_pct = 0.0_f64;
-    for line in report.lines() {
-        if targets.iter().any(|target| line.contains(target))
-            && let Some(raw_pct) = line.split_whitespace().next()
-            && let Ok(pct) = raw_pct.trim_end_matches('%').parse::<f64>()
-        {
-            target_self_pct += pct;
-            target_rows.push(line.trim().to_owned());
-        }
-    }
+    let (target_self_pct, target_rows) =
+        matching_profile_self_time(&report, &SHARDED_PROFILE_TARGETS);
     assert!(
         target_self_pct > 0.0,
         "profile did not attribute non-zero self-time to the sharded command bus"
@@ -4562,7 +4570,7 @@ fn profile_sharded_set_get_path(
         "PROFILE_SHARDED_COMMAND_SURFACE workload={} pipeline={pipeline} \
 server_command_execution_threads={server_workers} target_self_pct={target_self_pct:.4} \
 amdahl_elimination_ceiling={amdahl_ceiling:.6}x lost_samples=0 \
-targets={targets:?} rows={target_rows:?} top_self_rows={top_self_rows:?}",
+targets={SHARDED_PROFILE_TARGETS:?} rows={target_rows:?} top_self_rows={top_self_rows:?}",
         workload.name()
     );
     attribute_hot_libc_leaf(
@@ -5159,6 +5167,21 @@ fn command_output(command: &str, args: &[&str]) -> Output {
         .args(args)
         .output()
         .unwrap_or_else(|_| panic!("run {command}"))
+}
+
+#[test]
+fn sharded_profile_targets_match_current_rust_demangling() {
+    let report = "\
+     3.67%  [.] frankenredis::dispatch_sharded_set_get_frames
+     1.26%  [.] frankenredis::drain_sharded_set_get_completions
+     0.63%  [.] <fr_runtime::Runtime>::execute_plain_get_borrowed_into_with_default_read_gate
+     0.55%  [.] <fr_runtime::Runtime>::execute_plain_set_borrowed_with_default_write_gate
+     0.22%  [.] <fr_store::Store>::set_plain_borrowed
+     0.11%  [.] <fr_store::Store>::get_string_bytes
+    9.99%  [.] unrelated::hot_path";
+    let (self_pct, rows) = matching_profile_self_time(report, &SHARDED_PROFILE_TARGETS);
+    assert!((self_pct - 6.44).abs() < 1.0e-12);
+    assert_eq!(rows.len(), SHARDED_PROFILE_TARGETS.len());
 }
 
 #[test]
