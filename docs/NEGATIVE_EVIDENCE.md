@@ -24996,3 +24996,107 @@ need a capacity hint that does not add a scalar pass/classification to every inp
   disappear before any ratio is quoted. A future run must also record server CPU
   alongside ops/s: an ops/s ratio against a redis arm using 7.5 cores is not a
   statement about single-threaded execution and must not be published as one.
+## 2026-07-30 AzureMouse (cc/MEASURE): KEEP (SELF-SPEEDUP, maintenance — not campaign output) — sharded handoff wakeup storm found, counted and removed: eventfd writes/op fall 662x and stop scaling with worker count (`frankenredis-thr02`)
+
+- **Claim class: SELF-SPEEDUP. Campaign output: no.** This is maintenance under
+  Policy 2: it is our own code before versus after, not a ratio against the legacy
+  incumbent. The vs-incumbent scaling curve that would make it campaign output is
+  DEFERRED and explicitly not claimed here, because the host is at loadavg 152
+  with five concurrent rustc jobs and one quiet physical core; no throughput ratio
+  taken in that window would survive this repository's own core-contention gate.
+  What IS banked here is a COUNTED MECHANISM, which is a ratio of syscall counts
+  per operation and is insensitive to host load.
+
+- **Mechanism, counted before it was theorised.** `run_sharded_set_get_worker`
+  called `waker.wake()` unconditionally after every completion batch, from every
+  worker (crates/fr-server/src/main.rs:925 pre-fix). mio's `Waker::wake()` is a
+  write() to an eventfd, so that is one syscall per batch per worker plus an event
+  loop re-interrupted while it is already draining. The design comment claims 16
+  consecutive commands amortize one wakeup, and that claim holds ONLY at W=1: the
+  batch is a run of CONSECUTIVE same-shard commands on one connection, so with W
+  shards and scattered keys the expected run length collapses toward 1. Whole-job
+  perf census on the server process, denominator exact at ops=2N:
+
+  | arm | write/op before | write/op after | futex/op before | futex/op after |
+  |---|---|---|---|---|
+  | normal (no flag) | 0.0000 | 0.0000 | 0.0000 | 0.0000 |
+  | sharded W=1 | 0.0625 | 0.0016 | 0.0024 | 0.0043 |
+  | sharded W=8 | 0.8833 | 0.0015 | 1.1676 | 1.2768 |
+  | sharded W=32 | 0.9705 | 0.0015 | 1.7732 | 1.8056 |
+  | sharded W=128 | 0.9925 | 0.0015 | 1.9443 | 1.9519 |
+
+  0.0625 at W=1 is exactly 1/16, confirming the batch bound
+  SHARDED_SET_GET_MAX_COMMANDS_PER_BATCH is reached there. By W=128 the pre-fix
+  path bought 0.9925 eventfd writes per single operation. After the fix write/op is
+  FLAT at ~0.0015 at every worker count -- one wakeup per ~660 operations -- a 662x
+  reduction at W=128 and, more importantly, a cost that no longer scales with W.
+
+- **Same-invocation A/A and A/B on the counted metric, gated.**
+  `scripts/wake_syscall_ab.sh` runs three arms in ONE invocation at W=32 --
+  baseline, a SECOND baseline as the A/A null, and the candidate -- with arm order
+  rotating per round over 5 rounds, and refuses to start if the two binaries hash
+  alike so the A/B cannot be vacuous. write/op is a ratio of two counts with an
+  exact denominator (ops=2N), which is why this verdict is admissible at loadavg
+  20.7-117 where a wall-clock A/B would not be: a count does not dilate under
+  contention. Result: A/B effect cand/base write/op = 0.0015 with bootstrap 95%
+  median CI [0.0015, 0.0016]; A/A null null/base write/op = 1.0001 with bootstrap
+  95% median CI [0.9998, 1.0005]; median 0.970555 -> 0.001498, 647.8x fewer. The
+  decision gate is the bootstrap median-CI with a 2x null margin and the effect
+  clears it by 2061.7x. CV is provenance only: it was not used as a gate, a
+  threshold or a verdict anywhere in this row. The running-image digest of every
+  arm was re-read from /proc/<pid>/exe on every round and stayed constant.
+
+- **The fix.** An `Arc<AtomicBool>` wake-pending flag shared by the pool and every
+  worker. A worker issues the eventfd write only if it wins `swap(true, AcqRel)`;
+  `drain_sharded_set_get_completions` stores false BEFORE emptying the queue. That
+  order is what makes it safe: the completion is already published to the channel
+  before the flag is touched, so a completion arriving after the clear re-arms the
+  flag and produces its own wakeup rather than being stranded.
+
+- **Correctness proved BEFORE timing, and the first proof was vacuous.** Wake
+  coalescing fails by stranding a wakeup, which presents as a hang, so a
+  throughput number from an unverified binary is worthless. My first check used
+  `redis-cli --pipe` and reported PIPE FAIL on BOTH binaries: --pipe terminates its
+  stream with an ECHO sentinel and sharded mode refuses ECHO, so the check could
+  never have passed and proved nothing. Replaced with a raw-socket RESP driver that
+  writes 2000 interleaved SET/GET commands without reading, then verifies reply
+  COUNT and exact ORDER. Result on both binaries at W=1,2,8,32,128: job completes
+  under a hard 90s timeout, 20/20 deterministic keys exact, 4000/4000 replies in
+  exact order. W=128 starting was itself a fix to the probe: an earlier 2s startup
+  sleep reported "did not start" for 131 threads.
+
+- **What did NOT move, and it is now the dominant cost.** futex/op is unchanged
+  (1.9443 -> 1.9519 at W=128). The bounded `mpsc::sync_channel` pair -- one job
+  channel per worker plus ONE shared completion channel every worker clones --
+  still blocks and wakes per handoff. So the wakeup storm was one of two
+  coordination costs, and removing it does not by itself restore scaling. Any
+  expectation that this fix alone turns the path positive should be resisted until
+  the deferred curve is measured.
+
+- **Binaries, with provenance for the RUNNING image.** Both arms built locally at
+  `--profile release-perf` under the now-permitted Route 2 (df 288G free, one
+  reused target dir, no force_local, only the measurement artifact built locally),
+  so the builder identity is this host, thinkstation1, not a remote rch worker.
+  Each benchmarked executable self-reported its own digest by way of the kernel's
+  view of the mapped image: the running server's `/proc/<pid>/exe` was hashed while
+  it served, and agreed byte-for-byte with the staged file. Baseline: the running
+  server self-reported executing ELF sha256
+  6bb90828754f4922dcb84bb3ec4ad99004e34a77e067210890110a68c6b875ce. Candidate: the
+  running server self-reported executing ELF sha256
+  701ae4189dd28bd733fa7ce710159179e6c1cd29f17e3d9285a46675520f9595. Distinct
+  digests confirmed before either was timed, because several agents stage and
+  overwrite binaries in /tmp on this host and a path is not an identity.
+  `scripts/thread_scaling_headtohead.sh` now emits the running-image digest for
+  every arm on every run. Host thinkstation1, kernel 6.17.0-35-generic, AMD Ryzen
+  Threadripper PRO 5975WX 32-Cores / 64 threads.
+
+- **Retry predicate.** The deferred work is specific: re-run
+  `scripts/thread_scaling_headtohead.sh -W 0,1,8,32,128 -R 3 -n 2000000` with both
+  binaries against a live Redis 7.2.4 arm once at least 16 physical cores read
+  under 3% with idle SMT siblings, and gate on the bootstrap median CI with a 2x
+  null margin. Do NOT quote a throughput ratio for this fix before that runs. The
+  next mechanism to attack is the futex traffic above, and the condition for
+  attacking it is a count: futex/op must be shown to fall below ~0.1 for a
+  candidate to be worth timing, since at ~1.95 per operation it dominates whatever
+  the wakeup path now costs. Do not reopen the wakeup path itself: write/op is flat
+  at 0.0015 and no longer scales with W, so there is nothing left there to win.

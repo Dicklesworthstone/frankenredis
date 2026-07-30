@@ -129,9 +129,19 @@ sleep 2
 "$CLI" -p $RD_PORT ping >/dev/null 2>&1 || { echo "FAIL: redis not up"; tail -5 /tmp/azm_ts_redis.log; exit 6; }
 RD_THREADS=$(awk '/^Threads:/{print $2}' /proc/$RD_PID/status 2>/dev/null)
 echo "  redis observed threads at rest: $RD_THREADS"
+echo "  redis RUNNING-IMAGE sha256:     $(running_image_sha $RD_PID)"
+echo "  builder identity:               ${FR_BUILDER:-unrecorded — set FR_BUILDER}"
 echo
 
 observed_threads() { awk '/^Threads:/{print $2}' /proc/"$1"/status 2>/dev/null || echo 0; }
+
+# Provenance for the process that actually produced the numbers. Hashing the path
+# we launched proves only that a file with that name had that content; hashing
+# /proc/<pid>/exe hashes the image the KERNEL MAPPED for the running server, which
+# is what a reader needs when binaries are staged, rebuilt and swapped in /tmp by
+# several agents on one host. Recorded alongside where the binary was built,
+# because a binary of unknown origin is not evidence.
+running_image_sha() { sha256sum /proc/"$1"/exe 2>/dev/null | cut -d' ' -f1; }
 
 # Whole-job wall time: the JOB is the full SET test followed by the full GET test.
 # Returns aggregate ops/s over the whole job.
@@ -173,6 +183,7 @@ for W in ${WORKERS//,/ }; do
     kill -9 $FR_PID $FR2_PID 2>/dev/null || true
     continue
   fi
+  echo "  W=$W fr RUNNING-IMAGE sha256: $(running_image_sha $FR_PID)  (null arm: $(running_image_sha $FR2_PID))"
 
   for r in $(seq 1 "$ROUNDS"); do
     # Alternate arm order so a warming or drifting host cannot favour one engine.

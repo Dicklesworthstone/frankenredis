@@ -797,6 +797,18 @@ struct ShardedSetGetPool {
     jobs: Vec<mpsc::SyncSender<Vec<ShardedSetGetJob>>>,
     completions: Option<mpsc::Receiver<ShardedSetGetCompletionBatch>>,
     workers: Vec<thread::JoinHandle<()>>,
+    /// Set while an event-loop wakeup is already outstanding, so N workers
+    /// completing concurrently issue ONE eventfd write between them instead of N.
+    ///
+    /// The batching above only amortizes a wakeup when 16 CONSECUTIVE commands on
+    /// one connection happen to hash to the same shard. Measured whole-job on
+    /// 2026-07-30: at W=1 that always holds and costs 0.0625 write/op, exactly
+    /// 1/16. At W=8 consecutive commands scatter, the expected same-shard run
+    /// length falls to ~1, and the cost rises to 0.8836 write/op with 0.9683
+    /// futex/op; at W=32, 0.9705 and 1.7194. So the amortization evaporates
+    /// precisely where the parallelism is supposed to pay, and each operation
+    /// buys its own syscall.
+    wake_pending: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ShardedSetGetPool {
@@ -811,13 +823,16 @@ impl ShardedSetGetPool {
             .div_ceil(worker_count)
             .div_ceil(SHARDED_SET_GET_MAX_COMMANDS_PER_BATCH);
 
+        let wake_pending = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
         for worker_idx in 0..worker_count {
             let (job_tx, job_rx) = mpsc::sync_channel(per_worker_queue_bound);
             let tx = completion_tx.clone();
             let wake = Arc::clone(&waker);
+            let pending = Arc::clone(&wake_pending);
             let handle = thread::Builder::new()
                 .name(format!("fr-set-get-shard-{worker_idx}"))
-                .spawn(move || run_sharded_set_get_worker(job_rx, tx, wake))?;
+                .spawn(move || run_sharded_set_get_worker(job_rx, tx, wake, pending))?;
             jobs.push(job_tx);
             workers.push(handle);
         }
@@ -826,6 +841,7 @@ impl ShardedSetGetPool {
             jobs,
             completions: Some(completion_rx),
             workers,
+            wake_pending,
         })
     }
 
@@ -879,6 +895,7 @@ fn run_sharded_set_get_worker(
     jobs: mpsc::Receiver<Vec<ShardedSetGetJob>>,
     completions: mpsc::SyncSender<ShardedSetGetCompletionBatch>,
     waker: Arc<Waker>,
+    wake_pending: Arc<std::sync::atomic::AtomicBool>,
 ) {
     let mut runtime = Runtime::new(RuntimePolicy::default());
     while let Ok(batch) = jobs.recv() {
@@ -922,7 +939,14 @@ fn run_sharded_set_get_worker(
         {
             return;
         }
-        let _ = waker.wake();
+        // Coalesce: only the worker that flips the flag false->true pays the
+        // eventfd write. The drain clears it BEFORE emptying the queue, so a
+        // completion published after that clear always produces a fresh wakeup
+        // and cannot be stranded. The completion is already in the channel before
+        // the flag is touched, which is what makes that ordering safe.
+        if !wake_pending.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            let _ = waker.wake();
+        }
     }
 }
 
@@ -2975,6 +2999,11 @@ fn drain_sharded_set_get_completions(
     let Some(pool) = pool else {
         return;
     };
+    // Clear BEFORE draining. A worker that publishes a completion after this
+    // point re-arms the flag and issues its own wakeup, so the loop runs again;
+    // clearing after the drain instead would swallow exactly that wakeup.
+    pool.wake_pending
+        .store(false, std::sync::atomic::Ordering::Release);
     let mut touched: TokenSet = TokenSet::default();
     while let Ok(batch) = pool.try_recv() {
         for completion in batch.completions {
