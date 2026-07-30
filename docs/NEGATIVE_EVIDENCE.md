@@ -25100,3 +25100,67 @@ need a capacity hint that does not add a scalar pass/classification to every inp
   candidate to be worth timing, since at ~1.95 per operation it dominates whatever
   the wakeup path now costs. Do not reopen the wakeup path itself: write/op is flat
   at 0.0015 and no longer scales with W, so there is nothing left there to win.
+## 2026-07-30 AzureMouse (cc/MEASURE): REJECT — removing the wakeup storm does NOT restore sharded scaling; the shape is unchanged and futex/op is now confirmed dominant (`frankenredis-thr03`)
+
+- **Claim class: COMPETITIVE. Campaign output: no — this is a SCREEN, not a banked
+  verdict.** A live vendored Redis 7.2.4 arm ran side-by-side in the same
+  invocation as both FrankenRedis arms, but the window did not satisfy the
+  reopening condition I set in `frankenredis-thr02`, which demanded at least 16
+  physical cores under 3% with idle SMT siblings. Only 14 were available, so the server
+  cpuset was 10 physical cores. I am recording the result at screen standing rather
+  than quietly relaxing my own gate, which is the same standing my earlier 1.4882x
+  P16 reading correctly received. CV is provenance only and gated nothing here.
+
+- **The question.** `frankenredis-thr02` removed the counted eventfd wakeup storm
+  (647.8x fewer write/op, A/A null 1.0001) and predicted from futex/op that this
+  alone would not restore scaling. That prediction is now tested rather than
+  assumed.
+
+- **Result: the shape is unchanged.** Both binaries at `--profile release-perf`,
+  running-image digests re-read from /proc/<pid>/exe per arm; baseline
+  6bb90828754f4922..., candidate 701ae4189dd28bd7...; whole job SET then GET,
+  n=1,000,000 each, c=128, P=16, 3 rounds, arm order alternating.
+
+  | requested workers | observed threads | baseline fr/redis | candidate fr/redis | baseline fr ops/s | candidate fr ops/s |
+  |---|---|---|---|---|---|
+  | 0 (normal) | 3 | 0.8101 | 0.8109 | 760,691 | 759,932 |
+  | 1 | 4 | 0.8825 | 0.8822 | 939,390 | 939,284 |
+  | 8 | 11 | 0.3954 | 0.4223 | 354,572 | 371,123 |
+  | 32 | 35 | 0.3334 | 0.3488 | 312,822 | 371,234 |
+  | 128 | 131 | 0.3454 | 0.3189 | 290,052 | 339,600 |
+
+  Both curves still PEAK at W=1 and collapse at W>=8. The wakeup fix did not move
+  the peak, did not change the sign, and did not flatten the collapse.
+
+- **Why the apparent absolute gains are NOT claimed.** Candidate fr ops/s is
+  higher at W>=8 (+4.7% at W=8, +18.7% at W=32, +17.1% at W=128), which is the
+  direction the wakeup fix should push. But the A/A nulls in this window are wide:
+  0.8091, 0.8946, 0.9148, 1.0971, 1.1091 across rows, i.e. two identical binaries
+  differing by 8-11%. An effect of 5-19% measured against a null that wanders 11%
+  is not decidable, and the live redis arm itself ranged 839,513-1,064,637 ops/s
+  between runs on the same configuration, which is further evidence the window was
+  contended rather than the engines being unstable. Nothing in the ops/s columns
+  above should be quoted as a result.
+
+- **What IS established, by count rather than by timing.** The counted prediction
+  held: futex syscalls per operation were unchanged by the wakeup fix, 1.9443
+  before versus 1.9519 after at W=128, so no work was removed from that path and it
+  is now the dominant coordination cost. The bounded `mpsc::sync_channel` pair -- one job channel per worker plus
+  ONE shared completion channel that every worker clones -- blocks and wakes per
+  handoff, and at ~1.95 futex entries per operation it swamps the ~0.0015 eventfd
+  writes per operation that remain. The handoff defect was therefore TWO mechanisms,
+  not one; the wakeup half is closed and the channel half is open.
+
+- **Retry predicate.** Do not re-run this curve to look for a scaling win from the
+  wakeup fix alone: it is measured, the shape is unchanged, and the reason is
+  counted. The next candidate must attack the channel handoff, and the gate on it
+  is a count before any timing: futex/op must fall below ~0.1 at W=32 in
+  `scripts/wake_syscall_ab.sh` (extend it to count futex alongside write) before
+  the candidate is worth timing at all. Only then re-run
+  `scripts/thread_scaling_headtohead.sh -W 0,1,8,32,128`, and only in a window with
+  16+ physical cores under 3% with idle siblings, requiring every reported row to
+  carry an A/A null within 2% of 1.0 -- the rows above fail that bar and are the
+  reason it is now stated numerically. Independently blocked on
+  `frankenredis-sharded-command-surface-too-thin-z37kj`: the path serves only
+  SET/GET, so no realistic mixed-concurrency claim is available regardless of how
+  the handoff performs.
