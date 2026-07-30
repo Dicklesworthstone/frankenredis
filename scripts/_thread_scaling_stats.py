@@ -58,11 +58,32 @@ def main(path):
         nul = st.median(nulls)
         nul_lo, nul_hi = _bootstrap_median_ci(nulls)
 
-        # 2x null margin: the effect must clear twice the null's worst deviation.
+        # Gate, in three clauses (2026-07-30 fleet-corrected form):
+        #   1. the effect CI must be disjoint from the null CI;
+        #   2. the effect deviation must clear 2x the null's worst deviation;
+        #   3. the null MEDIAN must sit within 2% of 1.0.
+        #
+        # Clause 3 was missing here and it mattered. On 2026-07-30 a W=8 row scored
+        # DECIDABLE on a null whose MEDIAN was 0.9087 -- two identical binaries
+        # differing 9.1% -- because clauses 1 and 2 can both pass while the null is
+        # badly biased, so long as it is biased CONSISTENTLY. Clause 3 bounds
+        # arm-order bias directly.
+        #
+        # Deliberately NOT added: a veto when the null CI fails to straddle 1.0.
+        # That couples the verdict to the null's PRECISION with the sign inverted --
+        # a tighter, better null yields a narrower CI, which is MORE likely to fall
+        # entirely on one side of 1.0 and veto its own row. Audited here on
+        # 2026-07-30: our tightest null (0.073% spread, effect 1997x its half-width)
+        # straddles 1.0 only by a 3-above/2-below sign balance, and none of five
+        # leave-one-out subsets flipped it, so the verdicts are stable and no
+        # straddle clause is warranted. Null CIs are telemetry, never a veto.
         null_dev = max(abs(nul_hi - 1.0), abs(nul_lo - 1.0), 1e-9)
         eff_dev = abs(eff - 1.0)
         separated = eff_lo > nul_hi or eff_hi < nul_lo
-        if not separated:
+        null_median_ok = abs(nul - 1.0) <= 0.02
+        if not null_median_ok:
+            verdict = f"NULL-BIAS {nul:.3f}"
+        elif not separated:
             verdict = "IN-NULL"
         elif eff_dev >= 2.0 * null_dev:
             verdict = "DECIDABLE"

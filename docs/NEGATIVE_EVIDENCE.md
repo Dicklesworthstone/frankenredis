@@ -25164,3 +25164,57 @@ need a capacity hint that does not add a scalar pass/classification to every inp
   `frankenredis-sharded-command-surface-too-thin-z37kj`: the path serves only
   SET/GET, so no realistic mixed-concurrency claim is available regardless of how
   the handoff performs.
+## 2026-07-30 AzureMouse (cc/MEASURE): GATE AUDIT — A/A null straddle clause: present in the ledger gate, absent from the curve gate, verdicts stable, left in place; the MISSING third clause was the real gap
+
+Fleet broadcast 2026-07-30 (via frankenlibc) reported that an A/A null clause
+requiring each null's CI to INCLUDE 1.0 couples a verdict to the null's PRECISION
+with the sign inverted: a tighter, better null yields a narrower CI, which is more
+likely to fall entirely on one side of 1.0 and veto its own row. Audited both of
+this repository's gates. No timing claim is made in this entry.
+
+- **Curve gate, `scripts/_thread_scaling_stats.py`: clause ABSENT.** It required
+  (1) the effect CI disjoint from the null CI and (2) the effect deviation to clear
+  2x the null's worst deviation from 1.0. Neither is a straddle test, and the
+  coupling runs the correct way round: a tighter null makes clause 1 EASIER to
+  satisfy, not harder. Nothing to undo here.
+
+- **Ledger gate, `scripts/perf_candidate_preflight.py::measured_null`: clause
+  PRESENT** as `if lo <= 1.0 <= hi`, and it can refuse a row outright as
+  VOID-NONULL.
+
+- **Tested before touching it, to the standard the broadcast set.** Across the six
+  A/A nulls this lane has recorded, every one brackets 1.0, so the clause has never
+  actually fired. It is nonetheless close: three nulls bracket by margins of only
+  0.0002 to 0.0007, and the SMALLEST margin belongs to the BEST-measured row -- the
+  counted eventfd metric, whose null median sits 0.01% from 1.0 with a 0.073%
+  spread across five rounds. That row's five null ratios are 1.000307, 0.999815,
+  1.000484, 1.000125, 0.999751: it straddles by a 3-above/2-below sign balance
+  rather than by design, and a small consistent arm-order bias would put all five on
+  one side and veto an effect sitting 1997x the null half-width away. Leave-one-out
+  resampling of those five was run to see whether the verdict moves: 0 of 5 subsets
+  flipped, and the CI shifted at most 0.00018. So the latent risk is real and
+  identified, but THIS lane's verdicts are STABLE, which is the broadcast's own
+  stated condition for leaving the gate alone. Left unchanged deliberately. It
+  should be revisited if a future row's null CI excludes 1.0 while its median is
+  within 2% -- that is the signature, and it has not occurred here.
+
+- **The real gap was the clause I did NOT have.** The corrected rule's third
+  requirement, that each null MEDIAN sit within 2% of 1.0, was missing from the
+  curve gate, and it mattered: a W=8 row scored DECIDABLE on a null whose MEDIAN
+  was 0.9087, i.e. two identical binaries differing 9.1%. Clauses 1 and 2 can both
+  pass while a null is badly biased provided it is biased CONSISTENTLY, because a
+  consistent bias is also a NARROW bias. Added; that row now scores NULL-BIAS 0.909
+  and is no longer reportable.
+
+- **Integrity check, in the direction that makes it credible.** Adding the clause
+  produced no new wins anywhere. Its only effect on this lane's existing results was
+  to INVALIDATE one of my own previously DECIDABLE rows. A gate change that turned
+  losses into wins would be a loosening wearing a fix's clothing; this one cost me
+  a row, which is the expected sign.
+
+- **Reopening condition.** Revisit the ledger gate's straddle clause only on
+  evidence, not on argument: it must be shown to refuse a row whose null median is
+  within 2% of 1.0, at which point replace `lo <= 1.0 <= hi` with a median-based
+  bound rather than widening it. Do not remove it pre-emptively while this lane's
+  nulls continue to bracket 1.0, because until it misfires it is costing nothing and
+  every unnecessary edit to the admissibility gate is a chance to weaken it.

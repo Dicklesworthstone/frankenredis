@@ -53,6 +53,7 @@ CLIENTS=128
 PIPE=16
 KEYSPACE=100000
 REDIS_IO_THREADS=8
+CLIENT_THREADS="${CLIENT_THREADS:-8}"
 FR_BIN="${FR_BIN:-/data/tmp/cargo-target/release/frankenredis}"
 SERVER_CPUS="${SERVER_CPUS:-0-23,32-55}"
 CLIENT_CPUS="${CLIENT_CPUS:-24-31,56-63}"
@@ -115,6 +116,18 @@ for p in $FR_PORT $RD_PORT $FR2_PORT; do
   ss -ltn 2>/dev/null | grep -q ":$p " && { echo "PREFLIGHT FAIL: port $p bound" >&2; exit 5; }
 done
 
+observed_threads() { awk '/^Threads:/{print $2}' /proc/"$1"/status 2>/dev/null || echo 0; }
+
+# Provenance for the process that actually produced the numbers. Hashing the path
+# we launched proves only that a file with that name had that content; hashing
+# /proc/<pid>/exe hashes the image the KERNEL MAPPED for the running server, which
+# is what a reader needs when binaries are staged, rebuilt and swapped in /tmp by
+# several agents on one host. Recorded alongside where the binary was built,
+# because a binary of unknown origin is not evidence.
+running_image_sha() { sha256sum /proc/"$1"/exe 2>/dev/null | cut -d' ' -f1; }
+
+cpu_ticks() { awk '{print $14+$15}' /proc/"$1"/stat 2>/dev/null || echo 0; }
+
 PIDS=()
 cleanup() { for p in "${PIDS[@]:-}"; do [ -n "${p:-}" ] && kill -9 "$p" 2>/dev/null || true; done; }
 trap cleanup EXIT
@@ -133,27 +146,49 @@ echo "  redis RUNNING-IMAGE sha256:     $(running_image_sha $RD_PID)"
 echo "  builder identity:               ${FR_BUILDER:-unrecorded — set FR_BUILDER}"
 echo
 
-observed_threads() { awk '/^Threads:/{print $2}' /proc/"$1"/status 2>/dev/null || echo 0; }
-
-# Provenance for the process that actually produced the numbers. Hashing the path
-# we launched proves only that a file with that name had that content; hashing
-# /proc/<pid>/exe hashes the image the KERNEL MAPPED for the running server, which
-# is what a reader needs when binaries are staged, rebuilt and swapped in /tmp by
-# several agents on one host. Recorded alongside where the binary was built,
-# because a binary of unknown origin is not evidence.
-running_image_sha() { sha256sum /proc/"$1"/exe 2>/dev/null | cut -d' ' -f1; }
+# Physical-core count of a cpuset like "1,2,3,32,33,34": siblings c and c+32 share
+# a core, so the ceiling is the count of DISTINCT (c mod 32) values.
+cpuset_physical() {
+  echo "$1" | tr ',' '\n' | while read -r r; do
+    case "$r" in
+      *-*) seq "${r%%-*}" "${r##*-}" ;;
+      *)   echo "$r" ;;
+    esac
+  done | awk '{print $1 % 32}' | sort -u | grep -c .
+}
+CLIENT_PHYS=$(cpuset_physical "$CLIENT_CPUS")
+SERVER_PHYS=$(cpuset_physical "$SERVER_CPUS")
 
 # Whole-job wall time: the JOB is the full SET test followed by the full GET test.
-# Returns aggregate ops/s over the whole job.
+# Returns "ops/s server_cpu_pct client_cpu_pct".
+#
+# CPU is sampled because ops/s alone cannot tell a SERVER result from a CLIENT
+# ceiling. Measured 2026-07-30: with a 4-physical-core client, `fr normal` ran at
+# 32% of a core where a 6-core client had driven it to 89%, and the live redis arm
+# swung 759,785-1,062,711 ops/s on ONE configuration. A starved server produces
+# wide A/A nulls, because the variance being measured belongs to redis-benchmark.
 run_job() {
-  local port="$1" t0 t1
+  local port="$1" server_pid="$2" t0 t1 s0 s1 c0 c1 bp
+  s0=$(cpu_ticks "$server_pid")
   t0=$(date +%s.%N)
   taskset -c "$CLIENT_CPUS" "$BENCH" -p "$port" -t set,get -n "$TOTAL" \
-      -c "$CLIENTS" -P "$PIPE" -r "$KEYSPACE" --threads 8 >/dev/null 2>&1
+      -c "$CLIENTS" -P "$PIPE" -r "$KEYSPACE" --threads "$CLIENT_THREADS" >/dev/null 2>&1 &
+  bp=$!
+  # utime+stime of the benchmark process already aggregates all of its threads.
+  while kill -0 $bp 2>/dev/null; do
+    c1=$(cpu_ticks $bp)
+    sleep 0.2
+  done
+  wait $bp 2>/dev/null || true
   t1=$(date +%s.%N)
-  awk -v s="$t0" -v e="$t1" -v n="$TOTAL" 'BEGIN{d=e-s; printf "%.0f", (d>0)?(2*n)/d:0}'
+  s1=$(cpu_ticks "$server_pid")
+  awk -v s="$t0" -v e="$t1" -v n="$TOTAL" -v a="$s0" -v b="$s1" -v cc="${c1:-0}" 'BEGIN{
+    d=e-s;
+    printf "%.0f %.0f %.0f", (d>0)?(2*n)/d:0, (b-a)/(100*d)*100, cc/(100*d)*100
+  }'
 }
 
+CLIENT_BOUND_ROWS=0
 RES=/tmp/azm_thread_scaling.tsv; : > "$RES"
 printf '%-8s %-6s %12s %12s %12s %9s %8s\n' workers round 'fr ops/s' 'redis ops/s' 'fr2 ops/s' 'fr/redis' 'obs_thr'
 
@@ -188,21 +223,43 @@ for W in ${WORKERS//,/ }; do
   for r in $(seq 1 "$ROUNDS"); do
     # Alternate arm order so a warming or drifting host cannot favour one engine.
     if [ $((r % 2)) -eq 1 ]; then
-      a=$(run_job $FR_PORT);  b=$(run_job $RD_PORT); n2=$(run_job $FR2_PORT)
+      read -r a  a_scpu a_ccpu <<<"$(run_job $FR_PORT  $FR_PID)"
+      read -r b  b_scpu b_ccpu <<<"$(run_job $RD_PORT  $RD_PID)"
+      read -r n2 n_scpu n_ccpu <<<"$(run_job $FR2_PORT $FR2_PID)"
     else
-      b=$(run_job $RD_PORT);  a=$(run_job $FR_PORT); n2=$(run_job $FR2_PORT)
+      read -r b  b_scpu b_ccpu <<<"$(run_job $RD_PORT  $RD_PID)"
+      read -r a  a_scpu a_ccpu <<<"$(run_job $FR_PORT  $FR_PID)"
+      read -r n2 n_scpu n_ccpu <<<"$(run_job $FR2_PORT $FR2_PID)"
     fi
     # Threads observed AFTER load: worker threads may be created lazily.
     thr=$(observed_threads $FR_PID)
     ratio=$(awk -v x="$a" -v y="$b" 'BEGIN{printf "%.4f", (y>0)?x/y:0}')
-    printf '%-8s %-6s %12d %12d %12d %9s %8s\n' "$W" "$r" "$a" "$b" "$n2" "$ratio" "$thr"
+    # CLIENT-BOUND guard. The ceiling is the client cpuset's physical core count.
+    # If the client is near it while neither server is, ops/s describes
+    # redis-benchmark and the row is not a server measurement.
+    flag=$(awk -v cc="$a_ccpu" -v cb="$b_ccpu" -v cph="$CLIENT_PHYS" \
+               -v sa="$a_scpu" -v sb="$b_scpu" 'BEGIN{
+      ceil=cph*100; maxc=(cc>cb)?cc:cb; maxs=(sa>sb)?sa:sb;
+      if (ceil>0 && maxc >= 0.85*ceil && maxs < 0.85*ceil) printf "CLIENT-BOUND";
+      else printf "ok";
+    }')
+    printf '%-8s %-6s %12d %12d %12d %9s %8s  srv=%s%%/%s%% clt=%s%% %s\n' \
+      "$W" "$r" "$a" "$b" "$n2" "$ratio" "$thr" "$a_scpu" "$b_scpu" "$a_ccpu" "$flag"
     printf '%s\t%s\t%s\t%s\t%s\n' "$W" "$a" "$b" "$n2" "$thr" >> "$RES"
+    [ "$flag" = "CLIENT-BOUND" ] && CLIENT_BOUND_ROWS=$((CLIENT_BOUND_ROWS + 1))
   done
   kill -9 $FR_PID $FR2_PID 2>/dev/null || true
   sleep 1
 done
 
 python3 "$ROOT/scripts/_thread_scaling_stats.py" "$RES"
+if [ "$CLIENT_BOUND_ROWS" -gt 0 ]; then
+  echo
+  echo "!! $CLIENT_BOUND_ROWS row(s) were CLIENT-BOUND: the client cpuset ($CLIENT_PHYS physical"
+  echo "   cores) was near its ceiling while no server was. Those ops/s figures describe"
+  echo "   redis-benchmark, not either engine, and they are why an A/A null widens. Give the"
+  echo "   client more physical cores or lower -c/-P, then re-run before quoting any ratio."
+fi
 echo
 echo "host=$HOST kernel=$KERNEL cpu=$NPROC-thread fr_elf=${FR_SHA:0:16} redis_elf=${RD_SHA:0:16}"
 echo "SCOPE: SET/GET only. The sharded execution path refuses every other command."
