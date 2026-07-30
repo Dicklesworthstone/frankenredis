@@ -3682,7 +3682,11 @@ fn adjudicate_ratios(
     let null_cv_pct = mean_cv_pct(null);
     let candidate_cv_pct = mean_cv_pct(candidate);
     let null_ci_brackets_one = null_ci_low <= 1.0 && null_ci_high >= 1.0;
-    let invalid = !null_ci_brackets_one || (null_median - 1.0).abs() > 0.02;
+    // A precise null CI can sit narrowly to one side of 1.0 under a small,
+    // consistent arm-order bias. Requiring the CI itself to straddle 1.0 would
+    // perversely reject more precise nulls. Bound that bias by the null median
+    // instead; retain the CI and its straddle status as telemetry.
+    let invalid = (null_median - 1.0).abs() > 0.02;
     let verdict = if invalid {
         Verdict::Invalid
     } else if candidate_ci_low > gate_high && candidate_median >= 1.01 {
@@ -3708,7 +3712,7 @@ candidate_cv_pct={candidate_cv_pct:.6}",
         "INVALID A/A: metric={metric} workload={} pipeline={pipeline} \
 client_driver_threads={client_threads} \
 null median {null_median:.9} CI [{null_ci_low:.9},{null_ci_high:.9}] \
-must bracket 1.0 and remain within the 2% gross-bias guard",
+must remain within the 2% gross-bias guard; CI straddle is telemetry only",
         workload.name()
     );
     verdict
@@ -3751,10 +3755,8 @@ fn adjudicate_dual_null_ratios(
     let candidate_null_ci_brackets_one =
         candidate_null_ci_low <= 1.0 && candidate_null_ci_high >= 1.0;
     let redis_null_ci_brackets_one = redis_null_ci_low <= 1.0 && redis_null_ci_high >= 1.0;
-    let invalid = !candidate_null_ci_brackets_one
-        || !redis_null_ci_brackets_one
-        || (candidate_null_median - 1.0).abs() > 0.02
-        || (redis_null_median - 1.0).abs() > 0.02;
+    let invalid =
+        (candidate_null_median - 1.0).abs() > 0.02 || (redis_null_median - 1.0).abs() > 0.02;
     let verdict = if invalid {
         Verdict::Invalid
     } else if ratio_ci_low > gate_high && ratio_median >= 1.01 {
@@ -3790,8 +3792,8 @@ ratio_cv_pct={:.6}",
 client_driver_threads={client_threads}; candidate null median \
 {candidate_null_median:.9} CI [{candidate_null_ci_low:.9},{candidate_null_ci_high:.9}] \
 and Redis null median {redis_null_median:.9} \
-CI [{redis_null_ci_low:.9},{redis_null_ci_high:.9}] must each bracket 1.0 \
-and remain within the 2% gross-bias guard",
+CI [{redis_null_ci_low:.9},{redis_null_ci_high:.9}] must each remain within \
+the 2% gross-bias guard; CI straddle is telemetry only",
         workload.name()
     );
     verdict
@@ -5185,9 +5187,49 @@ fn sharded_profile_targets_match_current_rust_demangling() {
 }
 
 #[test]
-#[should_panic(expected = "must bracket 1.0")]
-fn median_ci_gate_rejects_tight_biased_null() {
+fn median_ci_gate_accepts_precise_non_straddling_null_with_small_bias() {
     let null = [1.005_f64; 24];
+    let candidate = [1.20_f64; 24];
+    assert_eq!(
+        adjudicate_ratios(
+            "wall_ns_per_op",
+            "candidate_over_redis",
+            Workload::Set,
+            16,
+            128,
+            &null,
+            &candidate,
+        ),
+        Verdict::Keep
+    );
+}
+
+#[test]
+fn dual_null_gate_accepts_precise_non_straddling_incumbent_null_with_small_bias() {
+    let candidate_null = [1.0_f64; 24];
+    let redis_null = [1.005_f64; 24];
+    let candidate_over_redis = [1.20_f64; 24];
+    assert_eq!(
+        adjudicate_dual_null_ratios(
+            "wall_ns_per_op",
+            "candidate_over_redis",
+            Workload::Set,
+            16,
+            128,
+            DualNullRatioSamples {
+                candidate_null: &candidate_null,
+                redis_null: &redis_null,
+                ratio: &candidate_over_redis,
+            },
+        ),
+        Verdict::Keep
+    );
+}
+
+#[test]
+#[should_panic(expected = "must remain within the 2% gross-bias guard")]
+fn median_ci_gate_rejects_grossly_biased_null() {
+    let null = [1.03_f64; 24];
     let candidate = [1.20_f64; 24];
     let _ = adjudicate_ratios(
         "wall_ns_per_op",
@@ -5201,10 +5243,10 @@ fn median_ci_gate_rejects_tight_biased_null() {
 }
 
 #[test]
-#[should_panic(expected = "must each bracket 1.0")]
-fn dual_null_gate_rejects_biased_incumbent_null() {
+#[should_panic(expected = "must each remain within the 2% gross-bias guard")]
+fn dual_null_gate_rejects_grossly_biased_incumbent_null() {
     let candidate_null = [1.0_f64; 24];
-    let redis_null = [1.005_f64; 24];
+    let redis_null = [1.03_f64; 24];
     let candidate_over_redis = [1.20_f64; 24];
     let _ = adjudicate_dual_null_ratios(
         "wall_ns_per_op",
@@ -5318,6 +5360,7 @@ vendored_redis_7.2.4_b",
         "DECISION_CONTRACT same_invocation=true independent_aa_per_arm=true \
 candidate_aa=true incumbent_aa=true live_redis_arm=true \
 bootstrap_median_ci_gate=true widest_null_margin=true \
+null_median_bias_guard_pct=2 null_ci_straddle_telemetry_only=true \
 cv_provenance_only=true never_cv_gate=true"
     );
 
