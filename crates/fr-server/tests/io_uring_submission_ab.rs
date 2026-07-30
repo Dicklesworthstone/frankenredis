@@ -43,6 +43,10 @@ const DEFAULT_CLIENT_THREADS: usize = 9;
 const DEFAULT_SAMPLES: usize = 48;
 const DEFAULT_OPS_PER_SAMPLE: usize = 200_000;
 const DEFAULT_PROFILE_SECONDS: u64 = 3;
+// A slow incumbent full-pass command can legitimately need more than ten
+// seconds to drain one P16 group. This is only a hang bound: timed wall
+// duration still includes every byte read below.
+const BENCH_CLIENT_IO_TIMEOUT: Duration = Duration::from_secs(60);
 // One group is only CLIENTS * pipeline operations. Twenty-five groups left a
 // sub-microsecond floor dominated by client-channel handoffs even with nine
 // pinned shards; 125 keeps each arm slice below one second while amortizing the
@@ -243,11 +247,19 @@ const OBJECT_REFCOUNT: &[u8] = b"*3\r\n$6\r\nOBJECT\r\n$8\r\nREFCOUNT\r\n$8\r\no
 const OBJECT_REFCOUNT_REPLY: &[u8] = b":1\r\n";
 const DBSIZE: &[u8] = b"*1\r\n$6\r\nDBSIZE\r\n";
 const DBSIZE_REPLY: &[u8] = b":1\r\n";
-const KEYS_SELECTIVE_PREFIX_DECOYS: usize = 50_000;
-const KEYS_SELECTIVE_PREFIX_PREFILL_BATCH: usize = 256;
+// Keep the incumbent's full-pass work per measured group constant while the
+// saturated P16 geometry uses 400 connections: 12,500 keys * 6,400 commands
+// matches the former 50,000 keys * 1,600 commands. The longer candidate block
+// amortizes client-driver handoff noise without making Redis timing cheaper.
+const SELECTIVE_PREFIX_DECOYS: usize = 12_500;
+const SELECTIVE_PREFIX_PREFILL_BATCH: usize = 256;
 const KEYS_SELECTIVE_PREFIX: &[u8] = b"*2\r\n$4\r\nKEYS\r\n$15\r\ntenant:needle:*\r\n";
 const KEYS_SELECTIVE_PREFIX_REPLY: &[u8] = b"*1\r\n$20\r\ntenant:needle:000000\r\n";
-const KEYS_SELECTIVE_PREFIX_PTTL: &[u8] = b"*2\r\n$4\r\nPTTL\r\n$20\r\ntenant:needle:000000\r\n";
+const SELECTIVE_PREFIX_PTTL: &[u8] = b"*2\r\n$4\r\nPTTL\r\n$20\r\ntenant:needle:000000\r\n";
+const SCAN_SELECTIVE_PREFIX: &[u8] = b"*6\r\n$4\r\nSCAN\r\n$1\r\n0\r\n$5\r\nMATCH\r\n\
+$15\r\ntenant:needle:*\r\n$5\r\nCOUNT\r\n$6\r\n100000\r\n";
+const SCAN_SELECTIVE_PREFIX_REPLY: &[u8] =
+    b"*2\r\n$1\r\n0\r\n*1\r\n$20\r\ntenant:needle:000000\r\n";
 const ECHO: &[u8] = b"*2\r\n$4\r\nECHO\r\n$1\r\nx\r\n";
 const ECHO_REPLY: &[u8] = b"$1\r\nx\r\n";
 const UNWATCH: &[u8] = b"*1\r\n$7\r\nUNWATCH\r\n";
@@ -356,6 +368,7 @@ enum Workload {
     PfcountTwoDense,
     BitcountOneMib,
     KeysSelectivePrefix,
+    ScanSelectivePrefix,
     SunionstoreMixed,
     SdiffstoreMixed,
     SinterstoreMixed,
@@ -426,6 +439,7 @@ impl Workload {
             Self::PfcountTwoDense => "pfcount-two-dense",
             Self::BitcountOneMib => "bitcount-one-mib",
             Self::KeysSelectivePrefix => "keys-selective-prefix",
+            Self::ScanSelectivePrefix => "scan-selective-prefix",
             Self::SunionstoreMixed => "sunionstore-mixed",
             Self::SdiffstoreMixed => "sdiffstore-mixed",
             Self::SinterstoreMixed => "sinterstore-mixed",
@@ -838,6 +852,12 @@ impl Workload {
                 "fr_store::glob_literal_prefix",
                 "<fr_store::PreparedGlob>::matches",
             ],
+            Self::ScanSelectivePrefix => &[
+                "<fr_runtime::Runtime>::handle_scan_command",
+                "<fr_store::Store>::scan_in_db",
+                "fr_store::glob_literal_prefix",
+                "<fr_store::PreparedGlob>::matches",
+            ],
             Self::SunionstoreMixed => &[
                 "frankenredis::process_buffered_frames",
                 "parse_borrowed_plain_key_arg2_packet",
@@ -968,6 +988,7 @@ impl Workload {
                 "pfcount-two-dense" => Self::PfcountTwoDense,
                 "bitcount-one-mib" => Self::BitcountOneMib,
                 "keys-selective-prefix" => Self::KeysSelectivePrefix,
+                "scan-selective-prefix" => Self::ScanSelectivePrefix,
                 "sunionstore-mixed" => Self::SunionstoreMixed,
                 "sdiffstore-mixed" => Self::SdiffstoreMixed,
                 "sinterstore-mixed" => Self::SinterstoreMixed,
@@ -1425,6 +1446,17 @@ impl WorkloadPackets {
             Workload::KeysSelectivePrefix => {
                 let case =
                     repeated_case(KEYS_SELECTIVE_PREFIX, KEYS_SELECTIVE_PREFIX_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::ScanSelectivePrefix => {
+                let case =
+                    repeated_case(SCAN_SELECTIVE_PREFIX, SCAN_SELECTIVE_PREFIX_REPLY, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -2189,10 +2221,10 @@ fn connect(port: u16) -> TcpStream {
         .set_nodelay(true)
         .expect("set benchmark client TCP_NODELAY");
     stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
+        .set_read_timeout(Some(BENCH_CLIENT_IO_TIMEOUT))
         .expect("set benchmark client read timeout");
     stream
-        .set_write_timeout(Some(Duration::from_secs(10)))
+        .set_write_timeout(Some(BENCH_CLIENT_IO_TIMEOUT))
         .expect("set benchmark client write timeout");
     stream
 }
@@ -2473,18 +2505,15 @@ fn prefill_zintercard_sources(server: &mut Server) {
     }
 }
 
-fn prefill_selective_prefix_keys(server: &mut Server) {
+fn prefill_selective_prefix_keyspace(server: &mut Server, workload: Workload) {
     exchange_one(
         server,
         b"*3\r\n$3\r\nSET\r\n$20\r\ntenant:needle:000000\r\n$1\r\nv\r\n",
         SET_REPLY,
     );
 
-    for batch_start in
-        (0..KEYS_SELECTIVE_PREFIX_DECOYS).step_by(KEYS_SELECTIVE_PREFIX_PREFILL_BATCH)
-    {
-        let batch_end =
-            (batch_start + KEYS_SELECTIVE_PREFIX_PREFILL_BATCH).min(KEYS_SELECTIVE_PREFIX_DECOYS);
+    for batch_start in (0..SELECTIVE_PREFIX_DECOYS).step_by(SELECTIVE_PREFIX_PREFILL_BATCH) {
+        let batch_end = (batch_start + SELECTIVE_PREFIX_PREFILL_BATCH).min(SELECTIVE_PREFIX_DECOYS);
         let mut request =
             format!("*{}\r\n$4\r\nMSET\r\n", 1 + 2 * (batch_end - batch_start)).into_bytes();
         for index in batch_start..batch_end {
@@ -2495,17 +2524,25 @@ fn prefill_selective_prefix_keys(server: &mut Server) {
         exchange_one(server, &request, SET_REPLY);
     }
 
-    let expected_dbsize = format!(":{}\r\n", KEYS_SELECTIVE_PREFIX_DECOYS + 2);
+    let expected_dbsize = format!(":{}\r\n", SELECTIVE_PREFIX_DECOYS + 2);
     exchange_one(server, DBSIZE, expected_dbsize.as_bytes());
 
-    let last_decoy = format!("tenant:decoy:{:06}", KEYS_SELECTIVE_PREFIX_DECOYS - 1);
+    let last_decoy = format!("tenant:decoy:{:06}", SELECTIVE_PREFIX_DECOYS - 1);
     let mut boundary_request = b"*4\r\n$6\r\nEXISTS\r\n".to_vec();
     push_resp_bulk(&mut boundary_request, b"tenant:decoy:000000");
     push_resp_bulk(&mut boundary_request, last_decoy.as_bytes());
     push_resp_bulk(&mut boundary_request, b"tenant:needle:000000");
     exchange_one(server, &boundary_request, b":3\r\n");
-    exchange_one(server, KEYS_SELECTIVE_PREFIX_PTTL, PTTL_PERSISTENT_REPLY);
-    exchange_one(server, KEYS_SELECTIVE_PREFIX, KEYS_SELECTIVE_PREFIX_REPLY);
+    exchange_one(server, SELECTIVE_PREFIX_PTTL, PTTL_PERSISTENT_REPLY);
+    match workload {
+        Workload::KeysSelectivePrefix => {
+            exchange_one(server, KEYS_SELECTIVE_PREFIX, KEYS_SELECTIVE_PREFIX_REPLY);
+        }
+        Workload::ScanSelectivePrefix => {
+            exchange_one(server, SCAN_SELECTIVE_PREFIX, SCAN_SELECTIVE_PREFIX_REPLY);
+        }
+        _ => unreachable!("selective-prefix fixture is only used by KEYS and SCAN"),
+    }
 }
 
 fn prefill(servers: &mut [Server; 4], workload: Workload) {
@@ -2672,8 +2709,11 @@ steady_state_cache=warmed_by_exact_assertion",
                 server.arm.name(),
                 BITCOUNT_ONE_MIB_BYTES
             );
-        } else if matches!(workload, Workload::KeysSelectivePrefix) {
-            prefill_selective_prefix_keys(server);
+        } else if matches!(
+            workload,
+            Workload::KeysSelectivePrefix | Workload::ScanSelectivePrefix
+        ) {
+            prefill_selective_prefix_keyspace(server, workload);
             println!(
                 "FIXTURE_REPRESENTATION workload={} arm={} \
 total_keys={} decoy_keys={} literal_prefix_candidates=1 exact_reply_keys=1 \
@@ -2681,8 +2721,8 @@ matched_key_pttl=-1 boundary_membership=verified \
 steady_state_ordered_index=warmed_by_exact_assertion",
                 workload.name(),
                 server.arm.name(),
-                KEYS_SELECTIVE_PREFIX_DECOYS + 2,
-                KEYS_SELECTIVE_PREFIX_DECOYS
+                SELECTIVE_PREFIX_DECOYS + 2,
+                SELECTIVE_PREFIX_DECOYS
             );
         } else if matches!(workload, Workload::ZintercardCached) {
             prefill_zintercard_sources(server);
@@ -2876,7 +2916,10 @@ fn prefill_and_warm(
     packets: &Arc<DriverPackets>,
 ) {
     prefill(servers, workload);
-    let warm_ops: usize = if matches!(workload, Workload::KeysSelectivePrefix) {
+    let warm_ops: usize = if matches!(
+        workload,
+        Workload::KeysSelectivePrefix | Workload::ScanSelectivePrefix
+    ) {
         1_600
     } else if matches!(
         workload,
@@ -2889,7 +2932,10 @@ fn prefill_and_warm(
     } else {
         20_000
     };
-    let warm_groups = if matches!(workload, Workload::KeysSelectivePrefix) {
+    let warm_groups = if matches!(
+        workload,
+        Workload::KeysSelectivePrefix | Workload::ScanSelectivePrefix
+    ) {
         warm_ops.div_ceil(clients * pipeline).max(2)
     } else {
         warm_ops.div_ceil(clients * pipeline).max(8)
