@@ -2970,6 +2970,47 @@ struct Sample {
     cpu_competitive_speedup: f64,
 }
 
+#[derive(Debug)]
+struct DualNullSample {
+    candidate_a_ns: f64,
+    candidate_b_ns: f64,
+    redis_a_ns: f64,
+    redis_b_ns: f64,
+    candidate_null_ratio: f64,
+    redis_null_ratio: f64,
+    competitive_speedup: f64,
+    candidate_a_cpu_ns: u64,
+    candidate_b_cpu_ns: u64,
+    redis_a_cpu_ns: u64,
+    redis_b_cpu_ns: u64,
+    candidate_a_cpu_util_pct: f64,
+    candidate_b_cpu_util_pct: f64,
+    redis_a_cpu_util_pct: f64,
+    redis_b_cpu_util_pct: f64,
+    cpu_candidate_null_ratio: f64,
+    cpu_redis_null_ratio: f64,
+    cpu_competitive_speedup: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum DualNullArm {
+    CandidateA,
+    CandidateB,
+    RedisA,
+    RedisB,
+}
+
+impl DualNullArm {
+    const fn index(self) -> usize {
+        match self {
+            Self::CandidateA => 0,
+            Self::CandidateB => 1,
+            Self::RedisA => 2,
+            Self::RedisB => 3,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct MeasurementConfig {
     client_shape: ClientShape,
@@ -3217,6 +3258,349 @@ cpu_candidate_over_redis={:.9}",
     output
 }
 
+fn measure_dual_null_configuration_with_packets(
+    servers: &mut [Server; 4],
+    workload: Workload,
+    pipeline: usize,
+    config: MeasurementConfig,
+    packets: Arc<DriverPackets>,
+    packet_measurement: PacketMeasurement<'_>,
+) -> Vec<DualNullSample> {
+    let PacketMeasurement {
+        prepare_keyed,
+        workload_shape,
+        host_wide_allowed_cpus,
+    } = packet_measurement;
+    assert!(
+        prepare_keyed,
+        "the sharded dual-null fixture requires per-connection keyed setup"
+    );
+    let ClientShape {
+        connections: clients,
+        driver_threads: client_threads,
+    } = config.client_shape;
+    let MeasurementConfig {
+        samples,
+        ops_per_sample,
+        interleave_groups,
+        ..
+    } = config;
+    const ORDERS: [[DualNullArm; 4]; 24] = [
+        [
+            DualNullArm::CandidateA,
+            DualNullArm::CandidateB,
+            DualNullArm::RedisA,
+            DualNullArm::RedisB,
+        ],
+        [
+            DualNullArm::CandidateA,
+            DualNullArm::CandidateB,
+            DualNullArm::RedisB,
+            DualNullArm::RedisA,
+        ],
+        [
+            DualNullArm::CandidateA,
+            DualNullArm::RedisA,
+            DualNullArm::CandidateB,
+            DualNullArm::RedisB,
+        ],
+        [
+            DualNullArm::CandidateA,
+            DualNullArm::RedisA,
+            DualNullArm::RedisB,
+            DualNullArm::CandidateB,
+        ],
+        [
+            DualNullArm::CandidateA,
+            DualNullArm::RedisB,
+            DualNullArm::CandidateB,
+            DualNullArm::RedisA,
+        ],
+        [
+            DualNullArm::CandidateA,
+            DualNullArm::RedisB,
+            DualNullArm::RedisA,
+            DualNullArm::CandidateB,
+        ],
+        [
+            DualNullArm::CandidateB,
+            DualNullArm::CandidateA,
+            DualNullArm::RedisA,
+            DualNullArm::RedisB,
+        ],
+        [
+            DualNullArm::CandidateB,
+            DualNullArm::CandidateA,
+            DualNullArm::RedisB,
+            DualNullArm::RedisA,
+        ],
+        [
+            DualNullArm::CandidateB,
+            DualNullArm::RedisA,
+            DualNullArm::CandidateA,
+            DualNullArm::RedisB,
+        ],
+        [
+            DualNullArm::CandidateB,
+            DualNullArm::RedisA,
+            DualNullArm::RedisB,
+            DualNullArm::CandidateA,
+        ],
+        [
+            DualNullArm::CandidateB,
+            DualNullArm::RedisB,
+            DualNullArm::CandidateA,
+            DualNullArm::RedisA,
+        ],
+        [
+            DualNullArm::CandidateB,
+            DualNullArm::RedisB,
+            DualNullArm::RedisA,
+            DualNullArm::CandidateA,
+        ],
+        [
+            DualNullArm::RedisA,
+            DualNullArm::CandidateA,
+            DualNullArm::CandidateB,
+            DualNullArm::RedisB,
+        ],
+        [
+            DualNullArm::RedisA,
+            DualNullArm::CandidateA,
+            DualNullArm::RedisB,
+            DualNullArm::CandidateB,
+        ],
+        [
+            DualNullArm::RedisA,
+            DualNullArm::CandidateB,
+            DualNullArm::CandidateA,
+            DualNullArm::RedisB,
+        ],
+        [
+            DualNullArm::RedisA,
+            DualNullArm::CandidateB,
+            DualNullArm::RedisB,
+            DualNullArm::CandidateA,
+        ],
+        [
+            DualNullArm::RedisA,
+            DualNullArm::RedisB,
+            DualNullArm::CandidateA,
+            DualNullArm::CandidateB,
+        ],
+        [
+            DualNullArm::RedisA,
+            DualNullArm::RedisB,
+            DualNullArm::CandidateB,
+            DualNullArm::CandidateA,
+        ],
+        [
+            DualNullArm::RedisB,
+            DualNullArm::CandidateA,
+            DualNullArm::CandidateB,
+            DualNullArm::RedisA,
+        ],
+        [
+            DualNullArm::RedisB,
+            DualNullArm::CandidateA,
+            DualNullArm::RedisA,
+            DualNullArm::CandidateB,
+        ],
+        [
+            DualNullArm::RedisB,
+            DualNullArm::CandidateB,
+            DualNullArm::CandidateA,
+            DualNullArm::RedisA,
+        ],
+        [
+            DualNullArm::RedisB,
+            DualNullArm::CandidateB,
+            DualNullArm::RedisA,
+            DualNullArm::CandidateA,
+        ],
+        [
+            DualNullArm::RedisB,
+            DualNullArm::RedisA,
+            DualNullArm::CandidateA,
+            DualNullArm::CandidateB,
+        ],
+        [
+            DualNullArm::RedisB,
+            DualNullArm::RedisA,
+            DualNullArm::CandidateB,
+            DualNullArm::CandidateA,
+        ],
+    ];
+    assert!(
+        samples.is_multiple_of(ORDERS.len()),
+        "sample count must contain complete 24-order cycles; got {samples}"
+    );
+    assert!(
+        interleave_groups > 0,
+        "interleave group count must be positive"
+    );
+
+    for server in servers.iter() {
+        server
+            .clients
+            .as_ref()
+            .expect("benchmark clients initialized")
+            .prepare(&packets);
+    }
+    let warm_groups = 20_000usize.div_ceil(clients * pipeline).max(8);
+    for server in servers.iter_mut() {
+        time_block(
+            server,
+            &packets,
+            warm_groups,
+            matches!(workload, Workload::Mixed),
+        );
+    }
+    if let Some(allowed_cpus) = host_wide_allowed_cpus {
+        assert_host_wide_quiescence(
+            allowed_cpus,
+            &format!("before_dual_null_{}_{}", workload.name(), workload_shape),
+        );
+    }
+    let groups = ops_per_sample.div_ceil(clients * pipeline).max(1);
+    let actual_ops = groups * clients * pipeline;
+    let mut output = Vec::with_capacity(samples);
+
+    println!(
+        "CONFIG_DUAL_NULL workload={} workload_shape={workload_shape} pipeline={pipeline} \
+clients={clients} client_threads={client_threads} samples={samples} \
+groups_per_arm_sample={groups} interleave_groups={interleave_groups} \
+ops_per_arm_sample={actual_ops} semantic_commands_per_arm_sample={actual_ops} \
+full_response_bytes_asserted=true",
+        workload.name()
+    );
+    for sample_index in 0..samples {
+        // Swap the two physical processes behind each logical A/A pair every
+        // sample. Persistent process-instance bias therefore cannot shift
+        // either candidate or incumbent null median.
+        let swap_pairs = sample_index % 2 == 1;
+        let candidate_a_slot = usize::from(swap_pairs);
+        let candidate_b_slot = usize::from(!swap_pairs);
+        let redis_a_slot = 2 + usize::from(swap_pairs);
+        let redis_b_slot = 2 + usize::from(!swap_pairs);
+        let mut elapsed = [Duration::ZERO; 4];
+        let mut cpu_elapsed = [0_u64; 4];
+        let mut groups_done = 0usize;
+        let mut interleave_index = 0usize;
+        while groups_done < groups {
+            let block_groups = (groups - groups_done).min(interleave_groups);
+            let order = ORDERS[(sample_index + interleave_index) % ORDERS.len()];
+            for arm in order {
+                let server_slot = match arm {
+                    DualNullArm::CandidateA => candidate_a_slot,
+                    DualNullArm::CandidateB => candidate_b_slot,
+                    DualNullArm::RedisA => redis_a_slot,
+                    DualNullArm::RedisB => redis_b_slot,
+                };
+                let cpu_before = servers[server_slot].cpu_ns();
+                let block_elapsed = time_block(
+                    &mut servers[server_slot],
+                    &packets,
+                    block_groups,
+                    (groups_done % 2 == 1) ^ (sample_index % 2 == 1),
+                );
+                let cpu_after = servers[server_slot].cpu_ns();
+                elapsed[arm.index()] += block_elapsed;
+                cpu_elapsed[arm.index()] += cpu_after - cpu_before;
+            }
+            groups_done += block_groups;
+            interleave_index += 1;
+        }
+
+        let candidate_a_cpu_ns = cpu_elapsed[DualNullArm::CandidateA.index()];
+        let candidate_b_cpu_ns = cpu_elapsed[DualNullArm::CandidateB.index()];
+        let redis_a_cpu_ns = cpu_elapsed[DualNullArm::RedisA.index()];
+        let redis_b_cpu_ns = cpu_elapsed[DualNullArm::RedisB.index()];
+        assert!(
+            candidate_a_cpu_ns > 0
+                && candidate_b_cpu_ns > 0
+                && redis_a_cpu_ns > 0
+                && redis_b_cpu_ns > 0,
+            "every candidate and Redis A/A arm must accrue CPU time"
+        );
+        let candidate_a_ns = elapsed[DualNullArm::CandidateA.index()].as_nanos() as f64;
+        let candidate_b_ns = elapsed[DualNullArm::CandidateB.index()].as_nanos() as f64;
+        let redis_a_ns = elapsed[DualNullArm::RedisA.index()].as_nanos() as f64;
+        let redis_b_ns = elapsed[DualNullArm::RedisB.index()].as_nanos() as f64;
+        let candidate_center_ns = (candidate_a_ns * candidate_b_ns).sqrt();
+        let redis_center_ns = (redis_a_ns * redis_b_ns).sqrt();
+        let result = DualNullSample {
+            candidate_a_ns,
+            candidate_b_ns,
+            redis_a_ns,
+            redis_b_ns,
+            candidate_null_ratio: candidate_a_ns / candidate_b_ns,
+            redis_null_ratio: redis_a_ns / redis_b_ns,
+            competitive_speedup: redis_center_ns / candidate_center_ns,
+            candidate_a_cpu_ns,
+            candidate_b_cpu_ns,
+            redis_a_cpu_ns,
+            redis_b_cpu_ns,
+            candidate_a_cpu_util_pct: candidate_a_cpu_ns as f64 / candidate_a_ns * 100.0,
+            candidate_b_cpu_util_pct: candidate_b_cpu_ns as f64 / candidate_b_ns * 100.0,
+            redis_a_cpu_util_pct: redis_a_cpu_ns as f64 / redis_a_ns * 100.0,
+            redis_b_cpu_util_pct: redis_b_cpu_ns as f64 / redis_b_ns * 100.0,
+            cpu_candidate_null_ratio: candidate_a_cpu_ns as f64 / candidate_b_cpu_ns as f64,
+            cpu_redis_null_ratio: redis_a_cpu_ns as f64 / redis_b_cpu_ns as f64,
+            cpu_competitive_speedup: (redis_a_cpu_ns as f64 * redis_b_cpu_ns as f64).sqrt()
+                / (candidate_a_cpu_ns as f64 * candidate_b_cpu_ns as f64).sqrt(),
+        };
+        println!(
+            "SAMPLE_DUAL_NULL workload={} workload_shape={workload_shape} \
+pipeline={pipeline} client_driver_threads={client_threads} sample={} \
+first_order={:?} physical_pair_slots={} \
+candidate_a_ns_per_op={:.3} candidate_b_ns_per_op={:.3} \
+redis_a_ns_per_op={:.3} redis_b_ns_per_op={:.3} \
+candidate_null_a_over_b={:.9} redis_null_a_over_b={:.9} \
+candidate_over_redis={:.9} \
+candidate_a_cpu_ns={} candidate_b_cpu_ns={} redis_a_cpu_ns={} redis_b_cpu_ns={} \
+candidate_a_cpu_util_pct={:.3} candidate_b_cpu_util_pct={:.3} \
+redis_a_cpu_util_pct={:.3} redis_b_cpu_util_pct={:.3} \
+cpu_candidate_null_a_over_b={:.9} cpu_redis_null_a_over_b={:.9} \
+cpu_candidate_over_redis={:.9}",
+            workload.name(),
+            sample_index + 1,
+            ORDERS[sample_index % ORDERS.len()],
+            if swap_pairs {
+                "candidate_BA,redis_BA"
+            } else {
+                "candidate_AB,redis_AB"
+            },
+            result.candidate_a_ns / actual_ops as f64,
+            result.candidate_b_ns / actual_ops as f64,
+            result.redis_a_ns / actual_ops as f64,
+            result.redis_b_ns / actual_ops as f64,
+            result.candidate_null_ratio,
+            result.redis_null_ratio,
+            result.competitive_speedup,
+            result.candidate_a_cpu_ns,
+            result.candidate_b_cpu_ns,
+            result.redis_a_cpu_ns,
+            result.redis_b_cpu_ns,
+            result.candidate_a_cpu_util_pct,
+            result.candidate_b_cpu_util_pct,
+            result.redis_a_cpu_util_pct,
+            result.redis_b_cpu_util_pct,
+            result.cpu_candidate_null_ratio,
+            result.cpu_redis_null_ratio,
+            result.cpu_competitive_speedup,
+        );
+        output.push(result);
+    }
+    if let Some(allowed_cpus) = host_wide_allowed_cpus {
+        assert_host_wide_quiescence(
+            allowed_cpus,
+            &format!("after_dual_null_{}_{}", workload.name(), workload_shape),
+        );
+    }
+    output
+}
+
 fn quantile(samples: &[f64], q: f64) -> f64 {
     assert!(!samples.is_empty(), "quantile requires samples");
     assert!((0.0..=1.0).contains(&q), "quantile must be in [0, 1]");
@@ -3330,6 +3714,89 @@ must bracket 1.0 and remain within the 2% gross-bias guard",
     verdict
 }
 
+struct DualNullRatioSamples<'a> {
+    candidate_null: &'a [f64],
+    redis_null: &'a [f64],
+    ratio: &'a [f64],
+}
+
+fn adjudicate_dual_null_ratios(
+    metric: &str,
+    ratio_name: &str,
+    workload: Workload,
+    pipeline: usize,
+    client_threads: usize,
+    samples: DualNullRatioSamples<'_>,
+) -> Verdict {
+    let DualNullRatioSamples {
+        candidate_null,
+        redis_null,
+        ratio,
+    } = samples;
+    let candidate_null_median = median(candidate_null);
+    let (candidate_null_ci_low, candidate_null_ci_high) = bootstrap_median_ci(candidate_null);
+    let redis_null_median = median(redis_null);
+    let (redis_null_ci_low, redis_null_ci_high) = bootstrap_median_ci(redis_null);
+    let ratio_median = median(ratio);
+    let (ratio_ci_low, ratio_ci_high) = bootstrap_median_ci(ratio);
+    let candidate_null_radius = (candidate_null_ci_low - 1.0)
+        .abs()
+        .max((candidate_null_ci_high - 1.0).abs());
+    let redis_null_radius = (redis_null_ci_low - 1.0)
+        .abs()
+        .max((redis_null_ci_high - 1.0).abs());
+    let widest_null_radius = candidate_null_radius.max(redis_null_radius);
+    let gate_low = 1.0 - 2.0 * widest_null_radius;
+    let gate_high = 1.0 + 2.0 * widest_null_radius;
+    let candidate_null_ci_brackets_one =
+        candidate_null_ci_low <= 1.0 && candidate_null_ci_high >= 1.0;
+    let redis_null_ci_brackets_one = redis_null_ci_low <= 1.0 && redis_null_ci_high >= 1.0;
+    let invalid = !candidate_null_ci_brackets_one
+        || !redis_null_ci_brackets_one
+        || (candidate_null_median - 1.0).abs() > 0.02
+        || (redis_null_median - 1.0).abs() > 0.02;
+    let verdict = if invalid {
+        Verdict::Invalid
+    } else if ratio_ci_low > gate_high && ratio_median >= 1.01 {
+        Verdict::Keep
+    } else if ratio_ci_high < gate_low {
+        Verdict::Reject
+    } else {
+        Verdict::Hold
+    };
+    println!(
+        "MEDIAN_CI_DUAL_NULL_GATE metric={metric} workload={} pipeline={pipeline} \
+client_driver_threads={client_threads} verdict={verdict:?} \
+candidate_null_median={candidate_null_median:.9} \
+candidate_null_ci95=[{candidate_null_ci_low:.9},{candidate_null_ci_high:.9}] \
+candidate_null_ci_brackets_one={candidate_null_ci_brackets_one} \
+candidate_null_cv_pct={:.6} \
+redis_null_median={redis_null_median:.9} \
+redis_null_ci95=[{redis_null_ci_low:.9},{redis_null_ci_high:.9}] \
+redis_null_ci_brackets_one={redis_null_ci_brackets_one} \
+redis_null_cv_pct={:.6} \
+margin2x_widest_null=[{gate_low:.9},{gate_high:.9}] \
+{ratio_name}_median={ratio_median:.9} \
+ratio_ci95=[{ratio_ci_low:.9},{ratio_ci_high:.9}] \
+ratio_cv_pct={:.6}",
+        workload.name(),
+        mean_cv_pct(candidate_null),
+        mean_cv_pct(redis_null),
+        mean_cv_pct(ratio)
+    );
+    assert!(
+        !invalid,
+        "INVALID A/A: metric={metric} workload={} pipeline={pipeline} \
+client_driver_threads={client_threads}; candidate null median \
+{candidate_null_median:.9} CI [{candidate_null_ci_low:.9},{candidate_null_ci_high:.9}] \
+and Redis null median {redis_null_median:.9} \
+CI [{redis_null_ci_low:.9},{redis_null_ci_high:.9}] must each bracket 1.0 \
+and remain within the 2% gross-bias guard",
+        workload.name()
+    );
+    verdict
+}
+
 fn adjudicate(
     workload: Workload,
     pipeline: usize,
@@ -3421,6 +3888,110 @@ io_uring={io_uring_util_median:.3}% redis={redis_util_median:.3}%",
             client_threads,
             &cpu_null,
             &cpu_competitive,
+        ),
+    )
+}
+
+fn adjudicate_dual_null(
+    workload: Workload,
+    pipeline: usize,
+    client_threads: usize,
+    samples: &[DualNullSample],
+) -> (Verdict, Verdict) {
+    let candidate_a_util = samples
+        .iter()
+        .map(|sample| sample.candidate_a_cpu_util_pct)
+        .collect::<Vec<_>>();
+    let candidate_b_util = samples
+        .iter()
+        .map(|sample| sample.candidate_b_cpu_util_pct)
+        .collect::<Vec<_>>();
+    let redis_a_util = samples
+        .iter()
+        .map(|sample| sample.redis_a_cpu_util_pct)
+        .collect::<Vec<_>>();
+    let redis_b_util = samples
+        .iter()
+        .map(|sample| sample.redis_b_cpu_util_pct)
+        .collect::<Vec<_>>();
+    let candidate_a_util_median = median(&candidate_a_util);
+    let candidate_b_util_median = median(&candidate_b_util);
+    let redis_a_util_median = median(&redis_a_util);
+    let redis_b_util_median = median(&redis_b_util);
+    println!(
+        "SERVER_SATURATION_DUAL_NULL_GUARD workload={} pipeline={pipeline} \
+client_driver_threads={client_threads} \
+candidate_a_cpu_util_median_pct={candidate_a_util_median:.3} \
+candidate_b_cpu_util_median_pct={candidate_b_util_median:.3} \
+redis_a_cpu_util_median_pct={redis_a_util_median:.3} \
+redis_b_cpu_util_median_pct={redis_b_util_median:.3} \
+minimum_pct={MIN_SERVER_UTIL_PCT:.3}",
+        workload.name()
+    );
+    assert!(
+        [
+            candidate_a_util_median,
+            candidate_b_util_median,
+            redis_a_util_median,
+            redis_b_util_median,
+        ]
+        .into_iter()
+        .all(|utilization| utilization >= MIN_SERVER_UTIL_PCT),
+        "CLIENT-BOUND workload={} pipeline={pipeline} \
+client_driver_threads={client_threads}: every candidate and Redis A/A arm must reach \
+{MIN_SERVER_UTIL_PCT:.1}% server utilization; candidate_a={candidate_a_util_median:.3}% \
+candidate_b={candidate_b_util_median:.3}% redis_a={redis_a_util_median:.3}% \
+redis_b={redis_b_util_median:.3}%",
+        workload.name()
+    );
+    let candidate_wall_null = samples
+        .iter()
+        .map(|sample| sample.candidate_null_ratio)
+        .collect::<Vec<_>>();
+    let redis_wall_null = samples
+        .iter()
+        .map(|sample| sample.redis_null_ratio)
+        .collect::<Vec<_>>();
+    let wall_competitive = samples
+        .iter()
+        .map(|sample| sample.competitive_speedup)
+        .collect::<Vec<_>>();
+    let candidate_cpu_null = samples
+        .iter()
+        .map(|sample| sample.cpu_candidate_null_ratio)
+        .collect::<Vec<_>>();
+    let redis_cpu_null = samples
+        .iter()
+        .map(|sample| sample.cpu_redis_null_ratio)
+        .collect::<Vec<_>>();
+    let cpu_competitive = samples
+        .iter()
+        .map(|sample| sample.cpu_competitive_speedup)
+        .collect::<Vec<_>>();
+    (
+        adjudicate_dual_null_ratios(
+            "wall_ns_per_op",
+            "candidate_over_redis",
+            workload,
+            pipeline,
+            client_threads,
+            DualNullRatioSamples {
+                candidate_null: &candidate_wall_null,
+                redis_null: &redis_wall_null,
+                ratio: &wall_competitive,
+            },
+        ),
+        adjudicate_dual_null_ratios(
+            "cpu_ns_per_fixed_work",
+            "cpu_candidate_over_redis",
+            workload,
+            pipeline,
+            client_threads,
+            DualNullRatioSamples {
+                candidate_null: &candidate_cpu_null,
+                redis_null: &redis_cpu_null,
+                ratio: &cpu_competitive,
+            },
         ),
     )
 }
@@ -4607,6 +5178,51 @@ fn median_ci_gate_rejects_tight_biased_null() {
 }
 
 #[test]
+#[should_panic(expected = "must each bracket 1.0")]
+fn dual_null_gate_rejects_biased_incumbent_null() {
+    let candidate_null = [1.0_f64; 24];
+    let redis_null = [1.005_f64; 24];
+    let candidate_over_redis = [1.20_f64; 24];
+    let _ = adjudicate_dual_null_ratios(
+        "wall_ns_per_op",
+        "candidate_over_redis",
+        Workload::Set,
+        16,
+        128,
+        DualNullRatioSamples {
+            candidate_null: &candidate_null,
+            redis_null: &redis_null,
+            ratio: &candidate_over_redis,
+        },
+    );
+}
+
+#[test]
+fn dual_null_gate_uses_the_wider_null_margin() {
+    let candidate_null = [
+        0.99_f64, 1.01, 0.99, 1.01, 0.99, 1.01, 0.99, 1.01, 0.99, 1.01, 0.99, 1.01, 0.99, 1.01,
+        0.99, 1.01, 0.99, 1.01, 0.99, 1.01, 0.99, 1.01, 0.99, 1.01,
+    ];
+    let redis_null = [1.0_f64; 24];
+    let candidate_over_redis = [1.015_f64; 24];
+    assert_eq!(
+        adjudicate_dual_null_ratios(
+            "wall_ns_per_op",
+            "candidate_over_redis",
+            Workload::Set,
+            16,
+            128,
+            DualNullRatioSamples {
+                candidate_null: &candidate_null,
+                redis_null: &redis_null,
+                ratio: &candidate_over_redis,
+            },
+        ),
+        Verdict::Hold
+    );
+}
+
+#[test]
 fn host_wide_quiescence_accepts_only_complete_quiet_cpuset() {
     let allowed = [0, 1, 2];
     let quiet = HashMap::from([(0, 0.0), (1, 10.0), (2, HOST_WIDE_MAX_BUSY_PCT)]);
@@ -4671,12 +5287,15 @@ fn sharded_set_get_server_thread_sweep_same_invocation() {
     let harness = std::env::current_exe().expect("locate running harness ELF");
     println!(
         "HARNESS_ELF_SELF_REPORT sha256={} \
-arms=control_a,control_b,sharded_candidate,vendored_redis_7.2.4",
+arms=sharded_candidate_a,sharded_candidate_b,vendored_redis_7.2.4_a,\
+vendored_redis_7.2.4_b",
         hash_path(&harness)
     );
     println!(
-        "DECISION_CONTRACT same_invocation_aa=true live_redis_arm=true \
-bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
+        "DECISION_CONTRACT same_invocation=true independent_aa_per_arm=true \
+candidate_aa=true incumbent_aa=true live_redis_arm=true \
+bootstrap_median_ci_gate=true widest_null_margin=true \
+cv_provenance_only=true never_cv_gate=true"
     );
 
     let redis_version = command_output(
@@ -4725,7 +5344,10 @@ bootstrap_median_ci_gate=true cv_provenance_only=true never_cv_gate=true"
         "client driver threads must be in 1..={clients}"
     );
     let pipeline = parse_usize_env("FR_SHARDED_PIPELINE", 16);
-    assert!(pipeline > 0, "pipeline depth must be positive");
+    assert_eq!(
+        pipeline, 16,
+        "q01r6 sharded scaling is pre-registered at pipeline depth 16"
+    );
     let ops_per_sample = parse_usize_env("FR_SHARDED_OPS_PER_SAMPLE", DEFAULT_OPS_PER_SAMPLE);
     let interleave_groups = parse_usize_env(
         "FR_SHARDED_INTERLEAVE_GROUPS",
@@ -4762,8 +5384,8 @@ ram_kib={ram_kib} numa_nodes={numa_nodes} \
 server_thread_counts_requested={server_thread_counts:?} \
 client_driver_threads_actual={client_threads} client_connections={clients} \
 runtime_detected_isa={} process_cpuset_cap={process_cpuset_cap:?} \
-client_affinity={client_affinity:?} control_and_redis_affinity_cpu={server_core} \
-candidate_affinity={process_cpuset_cap:?}",
+client_affinity={client_affinity:?} redis_affinity_cpu={server_core} \
+candidate_a_affinity={process_cpuset_cap:?} candidate_b_affinity={process_cpuset_cap:?}",
         runtime_isa_features()
     );
     let root = unique_root();
@@ -4783,34 +5405,27 @@ candidate_affinity={process_cpuset_cap:?}",
     for server_workers in server_thread_counts {
         let point_root = root.join(format!("server_workers_{server_workers}"));
         fs::create_dir_all(&point_root).expect("create server-thread point root");
+        let candidate_a_root = point_root.join("candidate_a");
+        let candidate_b_root = point_root.join("candidate_b");
+        let redis_a_root = point_root.join("redis_a");
+        let redis_b_root = point_root.join("redis_b");
         let mut servers = [
             Server::spawn_with_options(
                 &binary,
                 &redis_binary,
-                Arm::MioA,
-                &point_root,
-                &[server_core],
+                Arm::IoUring,
+                &candidate_a_root,
+                &process_cpuset_cap,
                 client_shape,
                 CommandFloorAb::None,
-                None,
-                true,
-            ),
-            Server::spawn_with_options(
-                &binary,
-                &redis_binary,
-                Arm::MioB,
-                &point_root,
-                &[server_core],
-                client_shape,
-                CommandFloorAb::None,
-                None,
+                Some(server_workers),
                 true,
             ),
             Server::spawn_with_options(
                 &binary,
                 &redis_binary,
                 Arm::IoUring,
-                &point_root,
+                &candidate_b_root,
                 &process_cpuset_cap,
                 client_shape,
                 CommandFloorAb::None,
@@ -4821,7 +5436,18 @@ candidate_affinity={process_cpuset_cap:?}",
                 &binary,
                 &redis_binary,
                 Arm::Redis,
-                &point_root,
+                &redis_a_root,
+                &[server_core],
+                client_shape,
+                CommandFloorAb::None,
+                None,
+                false,
+            ),
+            Server::spawn_with_options(
+                &binary,
+                &redis_binary,
+                Arm::Redis,
+                &redis_b_root,
                 &[server_core],
                 client_shape,
                 CommandFloorAb::None,
@@ -4829,42 +5455,62 @@ candidate_affinity={process_cpuset_cap:?}",
                 false,
             ),
         ];
-        let server_hashes = Arm::ALL.map(|arm| servers[arm.index()].executing_elf_sha256());
+        let server_hashes: [String; 4] =
+            std::array::from_fn(|index| servers[index].executing_elf_sha256());
         assert_eq!(
-            server_hashes[Arm::MioA.index()],
-            server_hashes[Arm::MioB.index()],
-            "A/A controls must execute the same ELF"
+            server_hashes[DualNullArm::CandidateA.index()],
+            server_hashes[DualNullArm::CandidateB.index()],
+            "candidate A/A arms must execute the same FrankenRedis ELF"
         );
         assert_eq!(
-            server_hashes[Arm::MioA.index()],
-            server_hashes[Arm::IoUring.index()],
-            "control and sharded candidate must execute the same FrankenRedis ELF"
+            server_hashes[DualNullArm::RedisA.index()],
+            server_hashes[DualNullArm::RedisB.index()],
+            "incumbent A/A arms must execute the same Redis ELF"
         );
-        servers[Arm::IoUring.index()]
-            .assert_sharded_set_get_workers_reached_process(server_workers);
-        for arm in [Arm::MioA, Arm::MioB, Arm::IoUring] {
-            servers[arm.index()].assert_flag_reached_process();
+        for index in [
+            DualNullArm::CandidateA.index(),
+            DualNullArm::CandidateB.index(),
+        ] {
+            servers[index].assert_sharded_set_get_workers_reached_process(server_workers);
+            servers[index].assert_flag_reached_process();
         }
-        let observed_worker_threads = servers[Arm::IoUring.index()].sharded_worker_cpu_ns().len();
-        assert_eq!(
-            observed_worker_threads, server_workers,
-            "candidate process must expose every requested command worker"
+        let candidate_worker_threads_observed = [
+            servers[DualNullArm::CandidateA.index()]
+                .sharded_worker_cpu_ns()
+                .len(),
+            servers[DualNullArm::CandidateB.index()]
+                .sharded_worker_cpu_ns()
+                .len(),
+        ];
+        assert!(
+            candidate_worker_threads_observed
+                .iter()
+                .all(|observed| *observed == server_workers),
+            "both candidate A/A processes must expose every requested command worker: \
+requested={server_workers} observed={candidate_worker_threads_observed:?}"
         );
-        for arm in Arm::ALL {
-            let command_execution_threads = if matches!(arm, Arm::IoUring) {
-                server_workers
-            } else {
-                1
-            };
+        for (role, index, command_execution_threads) in [
+            (
+                "sharded_candidate_a",
+                DualNullArm::CandidateA.index(),
+                server_workers,
+            ),
+            (
+                "sharded_candidate_b",
+                DualNullArm::CandidateB.index(),
+                server_workers,
+            ),
+            ("redis_a", DualNullArm::RedisA.index(), 1),
+            ("redis_b", DualNullArm::RedisB.index(), 1),
+        ] {
             println!(
-                "SERVER_ELF_SELF_REPORT server_command_execution_threads={server_workers} \
-arm={} pid={} sha256={} process_threads_observed={} \
-command_execution_threads={command_execution_threads} affinity_cpus={:?}",
-                arm.name(),
-                servers[arm.index()].pid(),
-                server_hashes[arm.index()],
-                servers[arm.index()].observed_thread_count(),
-                servers[arm.index()].affinity_cpus()
+                "SERVER_ELF_SELF_REPORT candidate_sweep_threads={server_workers} \
+arm={role} pid={} sha256={} process_threads_observed={} \
+command_execution_threads_actual={command_execution_threads} affinity_cpus={:?}",
+                servers[index].pid(),
+                server_hashes[index],
+                servers[index].observed_thread_count(),
+                servers[index].affinity_cpus()
             );
         }
         println!(
@@ -4872,20 +5518,25 @@ command_execution_threads={command_execution_threads} affinity_cpus={:?}",
 physical_cores={physical_cores} logical_threads={logical_threads} \
 ram_kib={ram_kib} numa_nodes={numa_nodes} \
 thread_count_actually_used={server_workers} \
-candidate_command_execution_threads={server_workers} \
-control_command_execution_threads=1 incumbent_command_execution_threads=1 \
+candidate_a_command_execution_threads={server_workers} \
+candidate_b_command_execution_threads={server_workers} \
+candidate_worker_threads_spawned_actual={candidate_worker_threads_observed:?} \
+incumbent_a_command_execution_threads=1 incumbent_b_command_execution_threads=1 \
 client_driver_threads_actual={client_threads} client_connections={clients} \
 runtime_detected_isa={} process_cpuset_cap={process_cpuset_cap:?} \
-client_affinity={client_affinity:?} candidate_affinity={:?} \
-control_and_redis_affinity={:?} campaign_multicore_scaling_result=true",
+client_affinity={client_affinity:?} candidate_a_affinity={:?} \
+candidate_b_affinity={:?} redis_a_affinity={:?} redis_b_affinity={:?} \
+campaign_multicore_scaling_result=true",
             runtime_isa_features(),
-            servers[Arm::IoUring.index()].affinity_cpus(),
-            servers[Arm::Redis.index()].affinity_cpus()
+            servers[DualNullArm::CandidateA.index()].affinity_cpus(),
+            servers[DualNullArm::CandidateB.index()].affinity_cpus(),
+            servers[DualNullArm::RedisA.index()].affinity_cpus(),
+            servers[DualNullArm::RedisB.index()].affinity_cpus()
         );
         println!(
-            "ARM_SEMANTICS control_a=single_runtime_io_uring \
-control_b=single_runtime_io_uring candidate=key_sharded_exact_set_get_io_uring \
-incumbent=vendored_redis_7.2.4"
+            "ARM_SEMANTICS candidate_a=key_sharded_exact_set_get_io_uring \
+candidate_b=key_sharded_exact_set_get_io_uring \
+incumbent_a=vendored_redis_7.2.4 incumbent_b=vendored_redis_7.2.4"
         );
 
         let independent_keys = balanced_shard_keys(clients, server_workers);
@@ -4893,7 +5544,7 @@ incumbent=vendored_redis_7.2.4"
             let packets = Arc::new(DriverPackets::keyed(workload, pipeline, &independent_keys));
             if matches!(workload, Workload::Mixed) {
                 profile_sharded_set_get_path(
-                    &mut servers[Arm::IoUring.index()],
+                    &mut servers[DualNullArm::CandidateA.index()],
                     &point_root,
                     profile_seconds,
                     workload,
@@ -4902,8 +5553,11 @@ incumbent=vendored_redis_7.2.4"
                     &packets,
                 );
             }
-            let worker_cpu_ns_before = servers[Arm::IoUring.index()].sharded_worker_cpu_ns();
-            let measured = measure_configuration_with_packets(
+            let candidate_worker_cpu_ns_before = [
+                servers[DualNullArm::CandidateA.index()].sharded_worker_cpu_ns(),
+                servers[DualNullArm::CandidateB.index()].sharded_worker_cpu_ns(),
+            ];
+            let measured = measure_dual_null_configuration_with_packets(
                 &mut servers,
                 workload,
                 pipeline,
@@ -4915,19 +5569,41 @@ incumbent=vendored_redis_7.2.4"
                     host_wide_allowed_cpus: Some(&process_cpuset_cap),
                 },
             );
-            let worker_cpu_ns_after = servers[Arm::IoUring.index()].sharded_worker_cpu_ns();
-            let active_workers =
-                active_sharded_worker_count(&worker_cpu_ns_before, &worker_cpu_ns_after);
-            assert_eq!(
-                active_workers, server_workers,
-                "independent-key fixture must execute on every requested shard"
+            let candidate_worker_cpu_ns_after = [
+                servers[DualNullArm::CandidateA.index()].sharded_worker_cpu_ns(),
+                servers[DualNullArm::CandidateB.index()].sharded_worker_cpu_ns(),
+            ];
+            let active_workers = [
+                active_sharded_worker_count(
+                    &candidate_worker_cpu_ns_before[0],
+                    &candidate_worker_cpu_ns_after[0],
+                ),
+                active_sharded_worker_count(
+                    &candidate_worker_cpu_ns_before[1],
+                    &candidate_worker_cpu_ns_after[1],
+                ),
+            ];
+            assert!(
+                active_workers
+                    .iter()
+                    .all(|active| *active == server_workers),
+                "independent-key fixture must execute on every requested shard in both \
+candidate A/A arms: requested={server_workers} active={active_workers:?}"
             );
             println!(
                 "COUNTED_MECHANISM workload={} workload_shape=independent_key_per_connection \
-server_command_execution_threads={server_workers} active_command_workers={active_workers}",
-                workload.name()
+server_command_execution_threads={server_workers} \
+candidate_a_active_command_workers={} candidate_b_active_command_workers={} \
+thread_count_actually_used_candidate_a={} thread_count_actually_used_candidate_b={} \
+semantic_commands_per_arm_sample={} queue_envelope_commands_per_same_shard_batch={pipeline}",
+                workload.name(),
+                active_workers[0],
+                active_workers[1],
+                active_workers[0],
+                active_workers[1],
+                groups_per_arm_sample * clients * pipeline
             );
-            let verdict = adjudicate(workload, pipeline, client_threads, &measured);
+            let verdict = adjudicate_dual_null(workload, pipeline, client_threads, &measured);
             println!(
                 "SHARDED_SWEEP_VERDICT workload={} \
 workload_shape=independent_key_per_connection \
@@ -4944,8 +5620,11 @@ server_command_execution_threads={server_workers} verdict={verdict:?}",
 
         let hot_keys = vec![b"mc:hot-key".to_vec(); clients];
         let hot_packets = Arc::new(DriverPackets::keyed(Workload::Mixed, pipeline, &hot_keys));
-        let worker_cpu_ns_before = servers[Arm::IoUring.index()].sharded_worker_cpu_ns();
-        let hot_measured = measure_configuration_with_packets(
+        let candidate_worker_cpu_ns_before = [
+            servers[DualNullArm::CandidateA.index()].sharded_worker_cpu_ns(),
+            servers[DualNullArm::CandidateB.index()].sharded_worker_cpu_ns(),
+        ];
+        let hot_measured = measure_dual_null_configuration_with_packets(
             &mut servers,
             Workload::Mixed,
             pipeline,
@@ -4957,18 +5636,39 @@ server_command_execution_threads={server_workers} verdict={verdict:?}",
                 host_wide_allowed_cpus: Some(&process_cpuset_cap),
             },
         );
-        let worker_cpu_ns_after = servers[Arm::IoUring.index()].sharded_worker_cpu_ns();
-        let active_workers =
-            active_sharded_worker_count(&worker_cpu_ns_before, &worker_cpu_ns_after);
-        assert_eq!(
-            active_workers, 1,
-            "single-hot-key control must execute on exactly one shard"
+        let candidate_worker_cpu_ns_after = [
+            servers[DualNullArm::CandidateA.index()].sharded_worker_cpu_ns(),
+            servers[DualNullArm::CandidateB.index()].sharded_worker_cpu_ns(),
+        ];
+        let active_workers = [
+            active_sharded_worker_count(
+                &candidate_worker_cpu_ns_before[0],
+                &candidate_worker_cpu_ns_after[0],
+            ),
+            active_sharded_worker_count(
+                &candidate_worker_cpu_ns_before[1],
+                &candidate_worker_cpu_ns_after[1],
+            ),
+        ];
+        assert!(
+            active_workers.iter().all(|active| *active == 1),
+            "single-hot-key control must execute on exactly one shard in both candidate A/A \
+arms: active={active_workers:?}"
         );
         println!(
             "COUNTED_MECHANISM workload=mixed workload_shape=single_hot_key_control \
-server_command_execution_threads={server_workers} active_command_workers={active_workers}"
+server_command_execution_threads={server_workers} \
+candidate_a_active_command_workers={} candidate_b_active_command_workers={} \
+thread_count_actually_used_candidate_a={} thread_count_actually_used_candidate_b={} \
+semantic_commands_per_arm_sample={} queue_envelope_commands_per_same_shard_batch={pipeline}",
+            active_workers[0],
+            active_workers[1],
+            active_workers[0],
+            active_workers[1],
+            groups_per_arm_sample * clients * pipeline
         );
-        let hot_verdict = adjudicate(Workload::Mixed, pipeline, client_threads, &hot_measured);
+        let hot_verdict =
+            adjudicate_dual_null(Workload::Mixed, pipeline, client_threads, &hot_measured);
         println!(
             "SHARDED_SWEEP_VERDICT workload=mixed workload_shape=single_hot_key_control \
 server_command_execution_threads={server_workers} verdict={hot_verdict:?}"
