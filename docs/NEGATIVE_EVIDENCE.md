@@ -25218,3 +25218,76 @@ this repository's gates. No timing claim is made in this entry.
   bound rather than widening it. Do not remove it pre-emptively while this lane's
   nulls continue to bracket 1.0, because until it misfires it is costing nothing and
   every unnecessary edit to the admissibility gate is a chance to weaken it.
+## 2026-07-30 AzureMouse (cc/MEASURE): REJECT — the wakeup fix pays only at W=1; the sharded scaling SHAPE is unchanged on a corrected instrument, and two rows are NULL-BIAS (`frankenredis-thr04`)
+
+- **Claim class: COMPETITIVE. Campaign output: no.** A live vendored Redis 7.2.4 arm
+  ran side-by-side with both FrankenRedis arms in the same invocation. This is the
+  third independent window for this question and the first on an instrument that
+  samples CPU, so the SHAPE conclusion is now well supported; the one row that
+  crosses 1.0 is explicitly NOT banked, for reasons given below. CV is provenance
+  only and gated nothing.
+
+- **Instrument defect found and fixed first, which is why earlier nulls were wide.**
+  The whole-job harness had no client-bound guard. Measured: with a 4-physical-core
+  client, `fr normal` ran at 32% of a core where a 6-core client had driven it to
+  89%, and the live redis arm swung 759,785-1,062,711 ops/s on ONE configuration. A
+  starved server produces wide A/A nulls because the variance being measured belongs
+  to redis-benchmark, not to either engine. The harness now samples server AND client
+  CPU per job and flags CLIENT-BOUND rows; rebalancing to a 6 physical core server
+  cpuset and a 6 physical core client took a smoke-test null to 1.0005.
+
+- **Candidate curve, corrected instrument, corrected gate.** Both arms
+  `--profile release-perf`; candidate running-image sha256
+  701ae4189dd28bd733fa7ce710159179e6c1cd29f17e3d9285a46675520f9595, re-read from
+  /proc/<pid>/exe per worker count; 5 rounds, arm order alternating, whole job SET
+  then GET n=1,000,000 each, c=128, P=16.
+
+  | requested workers | observed threads | fr ops/s | fr/redis | effect CI | A/A null | verdict |
+  |---|---|---|---|---|---|---|
+  | 0 (normal) | 3 | 743,615 | 0.9227 | [0.8457, 1.2280] | 0.9998 | IN-NULL |
+  | 1 | 4 | 878,055 | 1.1815 | [1.0889, 1.2700] | 1.0012 | DECIDABLE |
+  | 8 | 11 | 420,745 | 0.5658 | [0.4791, 0.6083] | 1.0000 | DECIDABLE |
+  | 32 | 35 | 345,744 | 0.4651 | [0.4448, 0.5009] | 0.9650 | NULL-BIAS |
+  | 128 | 131 | 322,631 | 0.4138 | [0.3799, 0.4338] | 1.0358 | NULL-BIAS |
+
+  Baseline in the same configuration, for comparison: W=0 0.9155, W=1 0.9239,
+  W=8 0.5910, W=32 0.3933, W=128 0.4292, with fr ops/s 744,321 / 744,183 / 460,910 /
+  345,464 / 345,594. (That baseline run was scored under the pre-correction gate; its
+  W=8 null median was 0.9087 and would now read NULL-BIAS.)
+
+- **What the fix bought, and where.** At W=1 the candidate does 878,055 ops/s against
+  the baseline's 744,183, +18%, which is where the counted wakeup reduction was
+  always going to show: at W=1 the pre-fix path paid 0.0625 write/op, exactly 1/16,
+  and the fix takes it to 0.0016. At W>=8 the two binaries are within noise of one
+  another with mixed signs (460,910 vs 420,745 at W=8; 345,464 vs 345,744 at W=32;
+  345,594 vs 322,631 at W=128), which is what the unchanged futex count predicted.
+
+- **The shape is unchanged, and that is the finding.** Both curves PEAK at W=1 and
+  collapse at W>=8. Adding execution threads still makes this path worse, in ratio
+  and in absolute throughput. Across three windows now the peak has never moved off
+  W=1. The prediction recorded in `frankenredis-thr02` -- that removing the wakeup
+  storm would not restore scaling because futex syscalls per operation were unchanged
+  at 1.9443 versus 1.9519 -- is confirmed by measurement rather than inference.
+
+- **Why the 1.1815x at W=1 is NOT banked, despite scoring DECIDABLE.** It clears the
+  2x null margin by only 1.10x (effect deviation 0.1815 against a null worst
+  deviation of 0.0822), its null CI is 8.6% wide at [0.9178, 1.0039], and the redis
+  arm read 743,676 ops/s in that row against 741,893-805,952 elsewhere in the same
+  run, i.e. at the low end of its own spread. A single row that crosses 1.0 on a
+  barely-cleared margin while the incumbent arm reads low is exactly the shape of a
+  false positive this lane has produced three times before (io_uring 1.43 -> 0.92,
+  HGETALL 1.45 -> 0.98, P16 1.49 -> 1.33). It is recorded as suggestive and needs a
+  dedicated confirmation run at W=1 only, with more rounds, before anyone quotes it.
+
+- **Retry predicate.** Do not re-run this curve for the wakeup fix: three windows
+  agree the shape is unchanged and the mechanism is counted. Two next steps, each
+  with a numeric precondition. (1) To bank the W=1 crossing, run W=0 and W=1 alone at
+  R=15 and require the effect CI to clear 2x the null worst deviation by at least 3x
+  with every null median within 1% of 1.0 and no CLIENT-BOUND row; it is a genuine
+  candidate because our own single-threaded path already leads single-threaded redis.
+  (2) To attack the remaining collapse, the target is the channel handoff, and the
+  gate is a COUNT before any timing: futex/op must fall below ~0.1 at W=32 in
+  `scripts/wake_syscall_ab.sh` before a candidate is worth timing at all. Any future
+  curve must report zero NULL-BIAS rows; the two above are not reportable and are
+  left visible rather than deleted so the bar stays legible. Independently blocked on
+  `frankenredis-sharded-command-surface-too-thin-z37kj` for any mixed-workload claim.
