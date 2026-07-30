@@ -25300,3 +25300,111 @@ this repository's gates. No timing claim is made in this entry.
   curve must report zero NULL-BIAS rows; the two above are not reportable and are
   left visible rather than deleted so the bar stays legible. Independently blocked on
   `frankenredis-sharded-command-surface-too-thin-z37kj` for any mixed-workload claim.
+
+## 2026-07-30 BlackThrush (cod/MEASURE): INVALID-HOLD — two booked full-curve attempts fail closed on CPU A/A; valid W1-W4 rows do not show independent-key scaling (`frankenredis-q01r6`)
+
+- **Claim class: COMPETITIVE. Campaign output: no.** The requested
+  W1/2/4/8/16/32/64/128 curve is inadmissible. Each attempt put two physical
+  sharded-candidate arms and two physical live vendored Redis 7.2.4 arms in one
+  24-order invocation, giving the candidate and incumbent independent A/A
+  controls. For one admitted example from that same invocation, A/A null median
+  0.991547392; bootstrap 95% median CI [0.952116057, 1.061522187]. The harness
+  admitted a cell only when both wall and CPU null medians remained within 2% of
+  1.0 and the effect bootstrap median CI cleared twice the widest null-CI radius.
+  The bootstrap median-CI gate determined each admitted verdict, never CV; CI
+  straddle and `cv_pct` were reported as telemetry only.
+
+- **Exact substrate and work.** Each cell used 48 samples, 128 actual client
+  driver threads/connections, P16, 16 within-sample interleave groups, and exactly
+  200,704 byte-checked semantic commands per arm/sample. That is 38,535,168
+  commands per four-arm cell. Attempt r3 executed ten measured cells before
+  failing (385,351,680 commands); unchanged retry r4 executed four
+  (154,140,672), for 539,492,352 measured-cell commands total, excluding
+  profile/probe work. The planned complete curve was 924,844,032 commands and is
+  not presented as executed.
+
+- **Executable and build provenance.** Both attempts used the same Route-1 pair
+  built strict-remote from `86054ed726b81125b397a251c6e23c1b7bd58da9`
+  with deterministic `--base`/`--clean-overlay` routing on RCH worker `hz2`.
+  FrankenRedis self-reported SHA-256
+  `4b939190557a65f8d3745e9b801288c5a980022c04a734e82f74bc0ac4429163`
+  (Build ID `09af3d7239480b379242536a7239a22a8d4bfa81`); the harness was
+  `2c5b2389db99337a6c616575e1ab08e4d225e6814d601f93244e3a5b8adfbaf4`
+  (Build ID `6ddc92b063cfa45373c994200eebd4044a7fdfc0`); live Redis 7.2.4
+  self-reported
+  `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+  (Build ID `4e8e60ce5416d7a8207e7fc8686cd7bf9b9a6342`). Remote/local
+  hashes matched before timing.
+
+- **Host and actual concurrency.** Both claims admitted `threadripperje`: AMD
+  Threadripper PRO 5995WX, 64 physical cores/128 logical threads, one NUMA node,
+  full CPU `0-127` process cpuset, `amd-pstate-epp`/`performance`, boost enabled,
+  and runtime ISA AVX2/FMA/BMI2/VAES with AVX512F absent. Initial host-wide
+  maximum busy was 1.961% for r3 and 2.041% for r4. Candidate process threads
+  observed were `workers + 3`; actual command workers in both candidate arms
+  exactly matched W. Both Redis processes observed five threads but exactly one
+  command-execution thread. The client side actually used 128 driver threads.
+  Independent keys activated W/W candidate workers; every hot-key control
+  activated exactly 1/1.
+
+- **The two fail-closed outcomes.**
+
+  | attempt | booked claim/release | complete admitted widths | terminal cell | candidate CPU A/A median | disposition |
+  |---|---|---|---|---:|---|
+  | r3 | `6748` / `6765` | W1, W2, W4 | W8 independent SET | 1.033100302 | INVALID; exit 101 before W8 mixed or higher |
+  | r4 | `6770` / `6774` | W1 | W2 independent SET | 0.977090968 | INVALID; exit 101 before W2 mixed or higher |
+
+  Both terminal wall nulls passed: r3 W8 was 1.014480109 and r4 W2 was
+  0.985107859. Their partial wall effect lines are therefore not admitted after
+  the corresponding CPU null invalidated the cell. The CPU bias failed at
+  different widths and changed sign across fresh invocations, so neither
+  selective-width continuation nor a terminal-width effect verdict is licensed.
+  The preregistered single unchanged retry is exhausted.
+
+- **Valid routing rows from r3.** Ratios are candidate/live-Redis wall throughput
+  with bootstrap 95% median CIs. Actual candidate command workers were W/W in
+  every independent row and 1/1 in every hot-key row.
+
+  | W | independent SET | independent SET/GET mixed | single-hot-key mixed |
+  |---:|---:|---:|---:|
+  | 1 | 1.219163374 [1.169178631, 1.258386536] | 1.282817029 [1.243436855, 1.304614222] | 1.205830469 [1.170252769, 1.263155126] |
+  | 2 | 1.214963893 [1.201695519, 1.244791792] | 1.152530005 [1.116385179, 1.201326264] | 1.293071039 [1.258698376, 1.345390952] |
+  | 4 | 1.135269736 [1.101964009, 1.174162424] | 1.188403607 [1.169930993, 1.205235404] | 1.291162640 [1.237386104, 1.327857975] |
+
+  These are valid partial rows, not a curve: independent SET declines through W4,
+  independent mixed has no monotonic gain, and hot-key controls remain in the same
+  broad band while correctly using one active shard. The fresh r4 W1 confirmation
+  agrees in direction: SET 1.390731304 [1.342639522, 1.488014586], independent
+  mixed 1.302327443 [1.267414955, 1.353587645], and hot-key mixed 1.373961208
+  [1.286905908, 1.420864335]. Its CPU verdicts were HOLD, HOLD, and HOLD; r3 CPU
+  rows were mixed HOLD/REJECT and do not establish a full CPU curve.
+
+- **Profile verification.** The exact r3 W1 mixed path lost zero samples and
+  reported 8.1600% named target self-time: sharded dispatch 4.53%, completion
+  drain 1.32%, runtime SET/GET 0.80%/0.70%, and store SET/GET 0.62%/0.19%.
+  Even eliminating all named target self-time has an Amdahl ceiling of only
+  1.088850x. The harness therefore executed the intended path, but another narrow
+  kernel tweak cannot be inferred to repair the missing scaling curve.
+
+- **Artifacts.** The complete local r3 evidence is
+  `/data/tmp/frankenredis-thread-scaling/collected-full-q01r6-4b939190-r3/run.log`,
+  SHA-256
+  `e204759ca9e495a01d15fffd413fbf0a2fc1ea172499288f654147e48ff42e01`;
+  its exit code is preserved as `101`. Its remote root was
+  `/data/tmp/frankenredis-thread-scaling/full-q01r6-4b939190-2c5b2389-r3`.
+  The immediately released r4 root remains
+  `/data/tmp/frankenredis-thread-scaling/full-q01r6-4b939190-2c5b2389-r4`;
+  no post-release host access was made.
+
+- **Conclusion and retry predicate.** This is INVALID/HOLD, not an effect REJECT
+  for W8-W128. Do not run another full curve until
+  `frankenredis-vag28` stabilizes the CPU A/A substrate off-curve. On an
+  exclusively booked, quiet trj, a candidate-null-only W2/W8 preflight must pass
+  **three consecutive fresh invocations**, each with 48 samples, all 24 order
+  rotations, sign-balanced identity swaps, host-wide quiescence, executable
+  identity, exact requested/actual worker witnesses, and both wall and CPU null
+  medians within 1% of 1.0. Only then run one fresh full four-arm curve, preserving
+  the actual live Redis incumbent and independent candidate/Redis A/A arms in that
+  same invocation. Until that predicate is met, the valid W1-W4 rows route away
+  from the premise that merely adding sharded workers improves independent-key
+  throughput.

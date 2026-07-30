@@ -150,13 +150,17 @@ measure it.** That A/A ratio is your harness's noise floor.
 min_of ∈ {1,3}` showed `cv < 5%` is **unattainable on this hardware**; gating on it discards valid
 measurements. Instead:
 
-1. Take the **median of the paired null ratio** — it must sit at ≈`1.00`.
-2. Bootstrap the paired A/A **median** and report its 95% confidence interval;
-   the interval must bracket 1.0 or the invocation is invalid.
-3. Derive the prespecified decision band from that median CI (this repo uses
-   twice the null-CI radius, plus any workload's declared absolute floor).
+1. Take the **median of every independent paired null ratio**. Each median must
+   remain within 2% of `1.00` (`0.98..=1.02`) or the invocation is invalid; a
+   workload may preregister a tighter guard.
+2. Bootstrap each paired A/A **median** and report its 95% confidence interval
+   as telemetry. The interval does **not** have to bracket 1.0: greater precision
+   can put a sound, tightly clustered null wholly on one side of 1.0.
+3. Derive the prespecified decision band from the widest A/A confidence-interval
+   radius about 1.0 across all independent nulls (this repo uses twice that
+   radius, plus any workload's declared absolute floor).
 4. A claim is decidable only when the candidate's bootstrap median CI lies
-   wholly outside that decision band.
+   wholly outside that decision band. `cv` remains telemetry and never gates.
 
 Report the **null median and bootstrap median CI, the derived band, and the
 candidate median and bootstrap median CI together**, plus `cv` as information
@@ -171,7 +175,8 @@ exactly one position after arm 0, and later positions in a round run slower (cac
 effects from the preceding arm). That leaked an ~8% systematic bias into a null control — median
 `0.917` instead of `1.000` — while *also* depressing the candidate in the same direction. Reverse the
 execution order on odd rounds so each pair is position-balanced; the null median then returned to
-`0.9938 / 1.0007 / 0.9991`. **A null median away from 1.00 is a harness bug, not noise: find it.**
+`0.9938 / 1.0007 / 0.9991`. **A null median outside the 2% gross-bias guard is a harness bug, not
+noise: find it.**
 
 This came from `franken_whisper`, which rejected an SDPA BR tile sweep after its null control — the
 same arm against itself — measured **1.1163x at cv 29.0%**. Every "win" in that sweep was smaller

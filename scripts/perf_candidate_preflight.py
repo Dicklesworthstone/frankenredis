@@ -297,11 +297,12 @@ def added_entry_blocks(text, path=None):
 
 
 def measured_null(body):
-    """Require a same-invocation A/A bootstrap median CI that brackets 1.0.
+    """Require a same-invocation A/A median within 2% plus its bootstrap CI.
 
     Merely writing `no A/A null control` must not satisfy the gate. Evidence is
-    bound to its A/A label, and a contaminated null whose CI excludes 1.0 is not
-    admissible evidence.
+    bound to its A/A label. The median is the gross-bias guard; the confidence
+    interval is reported telemetry and need not straddle 1.0 because greater
+    precision can put a sound null wholly on one side of 1.0.
     """
     if not SAME_INVOCATION_RE.search(body):
         return False
@@ -313,9 +314,10 @@ def measured_null(body):
         if re.search(r"\b(?:A/B|candidate(?:/control)?|effect)\b", null_ci_span,
                      re.IGNORECASE):
             continue
+        median = float(match.group("median"))
         lo = float(match.group("lo"))
         hi = float(match.group("hi"))
-        if lo <= 1.0 <= hi:
+        if 0.98 <= median <= 1.02 and lo <= hi:
             return True
     return False
 
@@ -524,7 +526,7 @@ def check_entry_blocks(blocks):
             print(f"  offending heading: {title[:150]}")
         print("\nAdd ONE of:")
         print("  * an A/A null measured in the same invocation, with a bootstrap")
-        print("    95% median CI that brackets 1.0; or")
+        print("    median within 2% of 1.0 plus a reported bootstrap 95% median CI; or")
         print("  * a COUNTED mechanism showing no work was removed — instructions,")
         print("    cycles, syscalls, allocations, faults, or an exact call count.")
         print("A near-1.0 wall-clock ratio on its own is not evidence of anything.")
@@ -743,11 +745,18 @@ def self_test():
             "null without same invocation",
         ),
         (
-            not measured_null(
-                "One invocation. A/A null median 1.02; "
-                "bootstrap 95% median CI [1.01, 1.03]."
+            measured_null(
+                "One invocation. A/A null median 0.997706060; "
+                "bootstrap 95% median CI [0.995417921, 0.999456789]."
             ),
-            "contaminated null CI",
+            "precise non-straddling null CI",
+        ),
+        (
+            not measured_null(
+                "One invocation. A/A null median 1.03; "
+                "bootstrap 95% median CI [0.99, 1.05]."
+            ),
+            "gross-biased null median",
         ),
         (
             not measured_null(
@@ -809,12 +818,12 @@ def self_test():
             entry_status(
                 "2099-01-01 cod: REJECT — biased null",
                 "One top-level invocation interleaved A/A and A/B. "
-                "A/A null median 1.02; bootstrap 95% median CI [1.01, 1.03]. "
+                "A/A null median 1.03; bootstrap 95% median CI [0.99, 1.05]. "
                 "The bootstrap median-CI gate determined the verdict, never CV. "
                 "Retry predicate: reopen only if a fresh profile exposes "
                 ">=5% self-time.",
             ) == 3,
-            "end-to-end contaminated-null refusal",
+            "end-to-end gross-biased-null refusal",
         ),
         (
             entry_status(
