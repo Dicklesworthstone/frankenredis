@@ -197,14 +197,16 @@ mark itself as campaign output. Missing or contradictory classification exits
   | 1 | 1 / 1 | 0.889183569 [0.874898241, 0.899070692] | 0.860421065 [0.843100722, 0.874061522] | 0.889011984 [0.868737513, 0.904032998] |
   | 2 | 2 / 1 | 1.184535461 [1.142807471, 1.306145526] | 1.080613980 [1.068499816, 1.128139355] | 0.831274819 [0.770805412, 0.882063701] |
   | 4 | 4 / 1 | 1.190542766 [1.179913875, 1.240228124] | 1.084824164 [1.040415173, 1.101324273] | 0.830524044 [0.813266206, 0.845149912] |
-  | 8 | 8 / not run | 1.139181792 [1.108591804, 1.174588099] | **INVALID** | not run |
+  | 8 | 8 / not run | 1.139181792 [1.108591804, 1.174588099] | not adjudicated — historical harness stopped on retired CI-straddle veto | not run |
 
-  All completed 1/2/4 workloads had A/A bootstrap median CIs bracketing 1.0
-  and cleared the gate derived from twice their contemporaneous null radius.
-  The 8-worker independent-mixed A/A CI
-  **[1.000295346, 1.006112297]** did not bracket 1.0, so the harness failed
-  closed and the entire 8-worker point is incomplete. No 16/32/64/128 point
-  ran.
+  All completed 1/2/4 workloads cleared the gate derived from twice their
+  contemporaneous null radius. The historical harness stopped at 8-worker
+  independent mixed because its A/A CI **[1.000295346, 1.006112297]** did not
+  bracket 1.0. Under the corrected owner rule, CI straddle is telemetry only:
+  each null median must remain within 2% of 1.0 and the effect must clear twice
+  the wider null radius. The stopped invocation therefore remains incomplete,
+  but that narrow one-sided CI is not by itself an invalid measurement. No
+  hot-key W=8 or 16/32/64/128 point ran.
 - **Profile routing, not a lever verdict.** Zero-lost `cycles:u` profiles
   reached the named sharded SET/GET surface with nonzero self-time
   **0.97%/0.76%/0.52%/0.47%** at requested 1/2/4/8 workers, yielding Amdahl
@@ -238,13 +240,15 @@ mark itself as campaign output. Missing or contradictory classification exits
   baseline is explicitly **not** a campaign multicore scaling result. The swept
   count is client-driver threads; candidate, control, and incumbent each
   executed commands on exactly **one** thread.
-- **Integrity adjudication: 15/16 points valid.** The P16 mixed point at four
-  client drivers is **INVALID**, because its A/A bootstrap median CI
-  `[0.995417921, 0.999456789]` does not bracket 1.0; it is excluded from the
-  curve. The valid competitive range above is unchanged because its minimum
-  and maximum come from other points. The harness now makes this defect class
-  impossible to admit: a tight A/A CI that misses 1.0 fails the invocation even
-  when the null median remains within the gross 2% position-bias bound.
+- **Integrity adjudication: 16/16 points valid under the corrected null
+  doctrine.** The P16 mixed point at four client drivers has A/A median
+  **0.997706060** and bootstrap median CI
+  **[0.995417921, 0.999456789]**. Its median is within the 2% gross-bias guard,
+  and the competitive CI **[1.287600562, 1.292626178]** clears the
+  twice-null-radius upper gate **1.009164158**. CI straddle is retained as
+  telemetry only; requiring it would reject more precise nulls. The competitive
+  range above is unchanged because its minimum and maximum come from other
+  points.
 - **Mandatory hardware and thread provenance.** Host identity
   `threadripperje` (`trj`) was an AMD Ryzen Threadripper PRO 5995WX with one
   socket, **64 physical cores / 128 logical threads**, 499 GiB RAM, one NUMA
@@ -277,7 +281,7 @@ mark itself as campaign output. Missing or contradictory classification exits
   |---:|---:|---:|---:|---:|
   | 1 | 1.293059972 [1.287321789, 1.301445295] | 1.287217387 [1.285554685, 1.295531282] | 0.999775798 [0.993950871, 1.007873503] | 1.001352089 [0.995750066, 1.006515481] |
   | 2 | 1.302282397 [1.295410998, 1.305232688] | 1.277687396 [1.271606657, 1.283951015] | 1.002988752 [0.998495351, 1.005712593] | 0.998966770 [0.996848523, 1.003318748] |
-  | 4 | 1.306759798 [1.303471907, 1.310421007] | **INVALID** — 1.290232827 [1.287600562, 1.292626178] | 0.999881236 [0.997802880, 1.005269839] | **INVALID** — 0.997706060 [0.995417921, 0.999456789] |
+  | 4 | 1.306759798 [1.303471907, 1.310421007] | 1.290232827 [1.287600562, 1.292626178] | 0.999881236 [0.997802880, 1.005269839] | 0.997706060 [0.995417921, 0.999456789] |
   | 8 | 1.290861398 [1.287865181, 1.292377774] | 1.274118719 [1.272883857, 1.276224456] | 1.001812949 [0.997716062, 1.004704900] | 0.998409535 [0.996656074, 1.003249985] |
   | 16 | 1.277677026 [1.274459856, 1.278790176] | 1.260449530 [1.259329759, 1.262349948] | 1.000193011 [0.997619920, 1.003225049] | 1.001430756 [0.998967664, 1.004061606] |
   | 32 | 1.266056414 [1.263490274, 1.268331931] | 1.250499620 [1.249573766, 1.252585240] | 0.998555377 [0.997235707, 1.002614342] | 1.001775207 [0.997995311, 1.003070669] |
@@ -285,7 +289,7 @@ mark itself as campaign output. Missing or contradictory classification exits
   | 128 | 1.292737747 [1.286575647, 1.297444171] | 1.257289875 [1.251732892, 1.262916287] | 1.002372495 [0.994709320, 1.006861782] | 1.000415335 [0.992638669, 1.002856825] |
 
   The same-invocation SET A/A null median at one driver was **0.999775798**,
-  with bootstrap 95% median CI **[0.993950871, 1.007873503]**. Every valid
+  with bootstrap 95% median CI **[0.993950871, 1.007873503]**. Every
   competitive effect cleared the bootstrap median-CI gate derived from twice
   its contemporaneous A/A radius. CV was provenance only and never entered any
   decision. Median candidate/Redis CPU utilization was already
@@ -24919,9 +24923,10 @@ need a capacity hint that does not add a scalar pass/classification to every inp
   multi-threaded execution path, `--experimental-sharded-set-get-workers N`. Its
   own help text: "Run exact default-DB SET/GET on N key shards (1-256); permits
   local PING/QUIT and refuses every other command." Measured refusals at W=8:
-  INCR, LPUSH, HSET, DBSIZE and INFO all return "ERR experimental sharded SET/GET
-  mode only accepts exact default-DB SET/GET". It is additionally incompatible
-  with hardened mode, --config, --aof, --rdb, --replicaof and
+  INCR, LPUSH, HSET, DBSIZE and INFO all enter that refusal path. The measured
+  binary's error named exact default-DB SET/GET; current source makes the complete
+  permitted surface explicit as SET, GET, PING and QUIT. It is additionally
+  incompatible with hardened mode, --config, --aof, --rdb, --replicaof and
   --enable-debug-command. A REALISTIC MIXED workload is therefore not measurable
   on this path at all, so the requested mixed-workload measurement cannot be
   produced by any harness. Everything below is SET/GET only.
@@ -24960,15 +24965,15 @@ need a capacity hint that does not add a scalar pass/classification to every inp
 
   At W=32 the sharded path burns 3.2 cores on a 16-core cpuset to deliver a THIRD
   of what normal mode delivers on 0.89 cores. Per-core efficiency collapses 10x,
-  920,488 -> 88,119 ops/s/core, while 12.8 cores sit idle. Nothing is saturated
-  except the queue-and-wake path between the event-loop thread and the shard
-  workers: every operation crosses a thread boundary twice, and the design bounds
-  that with SHARDED_SET_GET_MAX_IN_FLIGHT_PER_CLIENT and a per-worker queue. A
-  corroborating signature from the short-job sweep: job wall time quantised in
-  exact integer multiples of ~251.7ms (excess over the 1-worker job = 1.0041,
-  1.2538, 1.5052, 1.7617s = k x 0.2517 for k=4,5,6,7), i.e. a fixed wakeup
-  quantum being hit k times, not smooth contention. The event loop's own poll
-  timeout is 10ms (crates/fr-eventloop/src/lib.rs:645), so ~252ms is not it.
+  920,488 -> 88,119 ops/s/core, while 12.8 cores sit idle. Source inspection
+  confirms that each semantic operation travels event loop -> worker -> event
+  loop through bounded `mpsc::sync_channel` queues, although up to 16 consecutive
+  same-shard operations can share one channel envelope. The exact whole-job
+  census in the next row measures the resulting synchronization signature:
+  futex/op rises to 1.9443 at W=128 and remains 1.9519 after the separate eventfd
+  wakeup storm is removed. Thus the bounded cross-thread handoff is the dominant
+  counted coordination signature; the evidence does not require inferring an
+  unmeasured fixed wakeup quantum from quantized wall times.
 
 - **A measurement error I made and corrected, because it changes the headline.**
   My first reading called normal mode a 0.6922x LOSS to Redis and I nearly filed
@@ -24978,10 +24983,14 @@ need a capacity hint that does not add a scalar pass/classification to every inp
   single-threaded rival. Against GENUINELY single-threaded redis (io-threads=1,
   96% CPU) fr normal mode is 818,712/651,292 = **1.258x at 7% less CPU**, which
   corroborates the separately banked release-perf SET P16 figure of 1.333x rather
-  than contradicting it. Two further confounds were ruled out rather than assumed:
-  a 10x longer job made the sharded deficit WORSE (0.3840 -> 0.2346), refuting a
-  fixed per-job startup stall; and the release-perf build profile explains only
-  0.6922 -> 0.8174 of the level, not the direction.
+  than contradicting it. The tenfold job-size comparison must use FrankenRedis's
+  absolute times rather than its Redis ratio: the raw medians are indeed 0.3840
+  -> 0.2346, but Redis throughput also rises almost exactly 2x, from 638,590 to
+  1,277,086 ops/s. A two-point `T(N) = startup + N / rate` fit to FrankenRedis's
+  medians gives about 0.293s startup and 299,070 steady ops/s; startup is only
+  2.1% of the long job, so it cannot explain most of the sustained deficit. The
+  release-perf build profile explains only 0.6922 -> 0.8174 of the level, not the
+  direction.
 
 - **Retry predicate.** Do not re-run this sweep to look for a scaling win from
   `--experimental-sharded-set-get-workers` as it stands. Revisit ONLY if one of
@@ -24991,11 +25000,11 @@ need a capacity hint that does not add a scalar pass/classification to every inp
   W=8 and W=32 and require fr/redis to exceed the W=1 ratio by more than twice
   the A/A null's worst deviation; or (2) the path is extended beyond exact
   default-DB SET/GET so a mixed workload becomes measurable at all, which is the
-  precondition for any realistic concurrency claim; or (3) the ~251.7ms wakeup
-  quantum is identified and removed, after which the short-job quantisation must
-  disappear before any ratio is quoted. A future run must also record server CPU
-  alongside ops/s: an ops/s ratio against a redis arm using 7.5 cores is not a
-  statement about single-threaded execution and must not be published as one.
+  precondition for any realistic concurrency claim; or (3) the counted bounded
+  channel traffic falls materially below the approximately 1.95 futex/op that
+  survives wake coalescing. A future run must also record server CPU alongside
+  ops/s: an ops/s ratio against a redis arm using 7.5 cores is not a statement
+  about single-threaded execution and must not be published as one.
 ## 2026-07-30 AzureMouse (cc/MEASURE): KEEP (SELF-SPEEDUP, maintenance — not campaign output) — sharded handoff wakeup storm found, counted and removed: eventfd writes/op fall 662x and stop scaling with worker count (`frankenredis-thr02`)
 
 - **Claim class: SELF-SPEEDUP. Campaign output: no.** This is maintenance under

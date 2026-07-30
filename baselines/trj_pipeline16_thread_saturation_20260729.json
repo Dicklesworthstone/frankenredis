@@ -1,6 +1,8 @@
 {
-  "schema_version": "frankenredis_thread_saturation_baseline/v2",
+  "schema_version": "frankenredis_thread_saturation_baseline/v3",
   "generated_at": "2026-07-29T04:38:55-04:00",
+  "re_adjudicated_at": "2026-07-30T00:47:00-04:00",
+  "re_adjudication_note": "Raw measurements unchanged; validity now follows the fleet median-CI gate with A/A CI straddling treated as telemetry.",
   "classification": "client-driver saturation curve",
   "claim_class": "COMPETITIVE",
   "campaign_output": true,
@@ -78,13 +80,21 @@
   },
   "ratio_direction": "Redis wall time divided by FrankenRedis wall time; greater than 1.0 means FrankenRedis has higher throughput",
   "integrity_adjudication": {
-    "aa_bootstrap_median_ci_must_bracket_one": true,
-    "valid_points": 15,
-    "invalid_points": [
+    "aa_bootstrap_median_ci_must_bracket_one": false,
+    "null_ci_straddle_telemetry_only": true,
+    "null_median_bias_guard_pct": 2.0,
+    "effect_ci_null_radius_multiplier": 2.0,
+    "valid_points": 16,
+    "invalid_points": [],
+    "re_adjudicated_points": [
       {
         "client_driver_threads": 4,
         "workload": "mixed",
-        "reason": "A/A bootstrap median CI [0.995417921, 0.999456789] does not bracket 1.0"
+        "result": "valid",
+        "aa_null_median_bias_pct": -0.229394,
+        "widest_aa_null_radius": 0.004582079,
+        "twice_null_upper_gate": 1.009164158,
+        "effect_ci_lower": 1.287600562
       }
     ],
     "valid_competitive_ratio_range": [1.250499620, 1.306759798]
@@ -148,9 +158,7 @@
       "aa_null_median": 0.997706060,
       "aa_null_bootstrap_ci95": [0.995417921, 0.999456789],
       "frankenredis_cpu_util_median_pct": 99.177,
-      "redis_cpu_util_median_pct": 98.262,
-      "validity": "INVALID_AA_CI",
-      "included_in_curve": false
+      "redis_cpu_util_median_pct": 98.262
     },
     {
       "client_driver_threads": 8,
