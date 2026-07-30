@@ -24895,3 +24895,104 @@ mixed case, non-UTF-8 bytes, first-NUL truncation, empty directive names, and in
 VERDICT: REJECT. The production source was restored before commit; only the feature-gated candidate/reference
 reproduction harness remains. Do not repeat an eager full-input line count for this vector. A future attempt would
 need a capacity hint that does not add a scalar pass/classification to every input byte.
+## 2026-07-30 AzureMouse (cc/MEASURE): REJECT — the multi-threaded execution scaling premise is refuted; our sharded SET/GET path is a 2.3-3.0x LOSS against our own single-threaded path (`frankenredis-thr01`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes.** Every ratio below comes from
+  a live vendored Redis 7.2.4 arm started and driven in the same invocation as the
+  FrankenRedis arms by `scripts/thread_scaling_headtohead.sh`, plus a second
+  FrankenRedis arm at the same worker count as the A/A null. Host recorded on every
+  row: thinkstation1, kernel 6.17.0-35-generic, AMD Ryzen Threadripper PRO 5975WX
+  32-Cores / 64 threads. fr ELF sha256
+  bb902f938ccab7a5b3b5c0026ebc133a06488cb12714c4abd593704214f36338; redis ELF
+  sha256 e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7.
+  Gate is a bootstrap 95% median CI of per-round ratios with a 2x null margin.
+  CV is provenance only: it was not computed by this harness and did not influence
+  this verdict.
+
+- **The premise under test.** The campaign's largest remaining claim for this repo
+  was that redis-server is single-threaded by design on command execution, so a
+  concurrent whole-job workload should let our multi-threaded execution widen the
+  gap with thread count. That claim is REFUTED on this host, in two independent
+  ways.
+
+- **SCOPE, and it is the first half of the finding.** FrankenRedis has exactly one
+  multi-threaded execution path, `--experimental-sharded-set-get-workers N`. Its
+  own help text: "Run exact default-DB SET/GET on N key shards (1-256); permits
+  local PING/QUIT and refuses every other command." Measured refusals at W=8:
+  INCR, LPUSH, HSET, DBSIZE and INFO all return "ERR experimental sharded SET/GET
+  mode only accepts exact default-DB SET/GET". It is additionally incompatible
+  with hardened mode, --config, --aof, --rdb, --replicaof and
+  --enable-debug-command. A REALISTIC MIXED workload is therefore not measurable
+  on this path at all, so the requested mixed-workload measurement cannot be
+  produced by any harness. Everything below is SET/GET only.
+
+- **The curve, and its shape is the second half.** Whole-job wall clock (SET test
+  then GET test, n=2,000,000 each, c=128, P=16, r=100000, 8 client threads), all
+  three server arms sharing one 16-physical-core cpuset and measured one at a
+  time so core IDENTITY bias cannot enter. ACTUAL OBSERVED thread counts read from
+  /proc/<pid>/status, never assumed: W=1 -> 4 threads, W=8 -> 11, W=32 -> 35,
+  W=128 -> 131.
+
+  | requested workers | observed threads | fr/redis | bootstrap 95% median CI | A/A null | verdict |
+  |---|---|---|---|---|---|
+  | 0 (normal, no flag) | 3 | 0.6922 | [0.6416, 0.7843] | 1.0530 | DECIDABLE |
+  | 1 | 4 | 0.7837 | [0.7147, 0.7840] | 1.0570 | DECIDABLE |
+  | 8 | 11 | 0.2781 | [0.2631, 0.2964] | 1.1146 | DECIDABLE |
+  | 32 | 35 | 0.2346 | [0.2291, 0.2425] | 0.9645 | DECIDABLE |
+  | 128 | 131 | 0.2398 | [0.2393, 0.2561] | 1.0006 | DECIDABLE |
+
+  The ratio does not widen with thread count. It PEAKS at one worker and falls
+  monotonically, and fr's ABSOLUTE throughput falls with it: 819k -> 336k -> 293k
+  -> 264k ops/s as workers go 0 -> 8 -> 32 -> 128. Falling absolute throughput
+  while adding threads is not resource exhaustion; it is coordination cost.
+
+- **What saturates first: the cross-thread handoff, not CPU, network or io_uring.**
+  Counted mechanism, same job, throughput and server CPU sampled together from
+  /proc/<pid>/stat (two independent runs, agreeing within 4%):
+
+  | arm | threads | ops/s | server CPU | ops/s per core |
+  |---|---|---|---|---|
+  | redis io-threads=8 | 13 | 1,100,455 | 746% | 147,514 |
+  | redis io-threads=1 | 6 | 651,230 | 96% | 678,365 |
+  | fr normal | 3 | 819,234 | 89% | 920,488 |
+  | fr sharded W=8 | 11 | 350,638 | 286% | 122,601 |
+  | fr sharded W=32 | 35 | 277,576 | 315% | 88,119 |
+
+  At W=32 the sharded path burns 3.2 cores on a 16-core cpuset to deliver a THIRD
+  of what normal mode delivers on 0.89 cores. Per-core efficiency collapses 10x,
+  920,488 -> 88,119 ops/s/core, while 12.8 cores sit idle. Nothing is saturated
+  except the queue-and-wake path between the event-loop thread and the shard
+  workers: every operation crosses a thread boundary twice, and the design bounds
+  that with SHARDED_SET_GET_MAX_IN_FLIGHT_PER_CLIENT and a per-worker queue. A
+  corroborating signature from the short-job sweep: job wall time quantised in
+  exact integer multiples of ~251.7ms (excess over the 1-worker job = 1.0041,
+  1.2538, 1.5052, 1.7617s = k x 0.2517 for k=4,5,6,7), i.e. a fixed wakeup
+  quantum being hit k times, not smooth contention. The event loop's own poll
+  timeout is 10ms (crates/fr-eventloop/src/lib.rs:645), so ~252ms is not it.
+
+- **A measurement error I made and corrected, because it changes the headline.**
+  My first reading called normal mode a 0.6922x LOSS to Redis and I nearly filed
+  it that way. It is an artifact of the fairness instruction I was following:
+  giving redis-server its best honest configuration means --io-threads 8, and
+  redis then consumes 746% of a core -- 7.5 cores against our 0.89. That is not a
+  single-threaded rival. Against GENUINELY single-threaded redis (io-threads=1,
+  96% CPU) fr normal mode is 818,712/651,292 = **1.258x at 7% less CPU**, which
+  corroborates the separately banked release-perf SET P16 figure of 1.333x rather
+  than contradicting it. Two further confounds were ruled out rather than assumed:
+  a 10x longer job made the sharded deficit WORSE (0.3840 -> 0.2346), refuting a
+  fixed per-job startup stall; and the release-perf build profile explains only
+  0.6922 -> 0.8174 of the level, not the direction.
+
+- **Retry predicate.** Do not re-run this sweep to look for a scaling win from
+  `--experimental-sharded-set-get-workers` as it stands. Revisit ONLY if one of
+  these lands: (1) the sharded path stops crossing a thread boundary per
+  operation, e.g. shard-affine connection ownership so a connection's SET/GET is
+  executed on the thread that already owns the shard, at which point re-measure
+  W=8 and W=32 and require fr/redis to exceed the W=1 ratio by more than twice
+  the A/A null's worst deviation; or (2) the path is extended beyond exact
+  default-DB SET/GET so a mixed workload becomes measurable at all, which is the
+  precondition for any realistic concurrency claim; or (3) the ~251.7ms wakeup
+  quantum is identified and removed, after which the short-job quantisation must
+  disappear before any ratio is quoted. A future run must also record server CPU
+  alongside ops/s: an ops/s ratio against a redis arm using 7.5 cores is not a
+  statement about single-threaded execution and must not be published as one.
