@@ -195,6 +195,12 @@ const ZSCAN0_BOUNDARIES_REPLY: &[u8] = b"*3\r\n$1\r\n0\r\n$2\r\n15\r\n$-1\r\n";
 const SSCAN0_PTTL: &[u8] = b"*2\r\n$4\r\nPTTL\r\n$2\r\ns0\r\n";
 const HSCAN0_PTTL: &[u8] = b"*2\r\n$4\r\nPTTL\r\n$2\r\nh0\r\n";
 const ZSCAN0_PTTL: &[u8] = b"*2\r\n$4\r\nPTTL\r\n$2\r\nz0\r\n";
+const ZMPOP1_MEMBERS: usize = 129;
+const ZMPOP1_MIN: &[u8] = b"*4\r\n$5\r\nZMPOP\r\n$1\r\n1\r\n$2\r\nz0\r\n$3\r\nMIN\r\n";
+const ZMPOP1_MAX: &[u8] = b"*4\r\n$5\r\nZMPOP\r\n$1\r\n1\r\n$2\r\nz0\r\n$3\r\nMAX\r\n";
+const ZMPOP1_CARD_REPLY: &[u8] = b":129\r\n";
+const ZMPOP1_SKIPLIST_ENCODING_REPLY: &[u8] = b"$8\r\nskiplist\r\n";
+const ZMPOP1_BOUNDARIES_REPLY: &[u8] = b"*3\r\n$1\r\n0\r\n$3\r\n128\r\n$-1\r\n";
 const HSET_SAME_VALUE: &[u8] = b"*4\r\n$4\r\nHSET\r\n$1\r\nh\r\n$4\r\nf250\r\n$1\r\n1\r\n";
 const HSET_SAME_VALUE_REPLY: &[u8] = b":0\r\n";
 const HSETNX_EXISTING_FIELD: &[u8] = b"*4\r\n$6\r\nHSETNX\r\n$1\r\nh\r\n$4\r\nf250\r\n$1\r\nv\r\n";
@@ -440,6 +446,8 @@ enum Workload {
     SscanCursorZero,
     HscanCursorZero,
     ZscanCursorZero,
+    ZmpopOneMin,
+    ZmpopOneMax,
     HsetSameValue,
     HsetnxExistingField,
     HincrbyZeroDelta,
@@ -526,6 +534,8 @@ impl Workload {
             Self::SscanCursorZero => "sscan-cursor-zero",
             Self::HscanCursorZero => "hscan-cursor-zero",
             Self::ZscanCursorZero => "zscan-cursor-zero",
+            Self::ZmpopOneMin => "zmpop-one-min",
+            Self::ZmpopOneMax => "zmpop-one-max",
             Self::HsetSameValue => "hset-same-value",
             Self::HsetnxExistingField => "hsetnx-existing-field",
             Self::HincrbyZeroDelta => "hincrby-zero-delta",
@@ -925,6 +935,18 @@ impl Workload {
                 "fr_store::Store::zscan0_borrow_scan",
                 "fr_protocol::encode_bulk_string_slice",
             ],
+            Self::ZmpopOneMin => &[
+                "execute_plain_zmpop1_borrowed",
+                "Store::zpopmin",
+                "SortedSet::pop_min",
+                "FullSortedSet::pop_min",
+            ],
+            Self::ZmpopOneMax => &[
+                "execute_plain_zmpop1_borrowed",
+                "Store::zpopmax",
+                "SortedSet::pop_max",
+                "FullSortedSet::pop_max",
+            ],
             Self::HsetSameValue => &[
                 "frankenredis::process_buffered_frames",
                 "__memcmp_avx2_movbe",
@@ -1212,6 +1234,8 @@ impl Workload {
                 "sscan-cursor-zero" => Self::SscanCursorZero,
                 "hscan-cursor-zero" => Self::HscanCursorZero,
                 "zscan-cursor-zero" => Self::ZscanCursorZero,
+                "zmpop-one-min" => Self::ZmpopOneMin,
+                "zmpop-one-max" => Self::ZmpopOneMax,
                 "hset-same-value" => Self::HsetSameValue,
                 "hsetnx-existing-field" => Self::HsetnxExistingField,
                 "hincrby-zero-delta" => Self::HincrbyZeroDelta,
@@ -1686,6 +1710,9 @@ impl WorkloadPackets {
                     even: case,
                 }
             }
+            Workload::ZmpopOneMin | Workload::ZmpopOneMax => {
+                zmpop1_workload_packets(workload, pipeline, b"z0")
+            }
             Workload::HsetSameValue => {
                 let case = repeated_case(HSET_SAME_VALUE, HSET_SAME_VALUE_REPLY, pipeline);
                 Self {
@@ -1964,6 +1991,22 @@ impl DriverPackets {
             })
             .collect();
         (Self { connections }, server_setup)
+    }
+
+    fn keyed_zmpop(workload: Workload, pipeline: usize, keys: &[Vec<u8>]) -> Self {
+        assert!(
+            matches!(workload, Workload::ZmpopOneMin | Workload::ZmpopOneMax),
+            "keyed ZMPOP packets require a one-key MIN or MAX workload"
+        );
+        Self {
+            connections: keys
+                .iter()
+                .map(|key| ConnectionPackets {
+                    measured: zmpop1_workload_packets(workload, pipeline, key),
+                    setup: Some(zmpop1_prefill(key)),
+                })
+                .collect(),
+        }
     }
 
     fn for_connection(&self, connection_index: usize) -> &ConnectionPackets {
@@ -2979,6 +3022,113 @@ fn assert_scan0_fixture(server: &mut Server, workload: Workload) {
     exchange_one(server, pttl, PTTL_PERSISTENT_REPLY);
     let (request, response) = scan0_request_reply(workload);
     exchange_one(server, request, &response);
+}
+
+fn zmpop1_connection_keys(clients: usize) -> Vec<Vec<u8>> {
+    assert!(
+        clients <= 1_000_000,
+        "fixed-width ZMPOP connection keys support at most one million clients"
+    );
+    (0..clients)
+        .map(|index| format!("zm{index:06}").into_bytes())
+        .collect()
+}
+
+fn zmpop1_prefill(key: &[u8]) -> ExchangeCase {
+    let mut request = resp_command(&[b"SET", key, b"seed"]);
+    request.extend_from_slice(&resp_command(&[b"DEL", key]));
+    request.extend_from_slice(format!("*{}\r\n", ZMPOP1_MEMBERS * 2 + 2).as_bytes());
+    push_resp_bulk(&mut request, b"ZADD");
+    push_resp_bulk(&mut request, key);
+    for index in 0..ZMPOP1_MEMBERS {
+        push_resp_bulk(&mut request, index.to_string().as_bytes());
+        push_resp_bulk(&mut request, format!("m{index:03}").as_bytes());
+    }
+    ExchangeCase {
+        request,
+        response: format!("+OK\r\n:1\r\n:{ZMPOP1_MEMBERS}\r\n").into_bytes(),
+    }
+}
+
+fn zmpop1_pop_reply(key: &[u8], member: &[u8], score: &[u8]) -> Vec<u8> {
+    let mut response = b"*2\r\n".to_vec();
+    push_resp_bulk(&mut response, key);
+    response.extend_from_slice(b"*1\r\n*2\r\n");
+    push_resp_bulk(&mut response, member);
+    push_resp_bulk(&mut response, score);
+    response
+}
+
+fn zmpop1_cycle(workload: Workload, key: &[u8]) -> ExchangeCase {
+    let (direction, member, score): (&[u8], &[u8], &[u8]) = match workload {
+        Workload::ZmpopOneMin => (b"MIN", b"m000", b"0"),
+        Workload::ZmpopOneMax => (b"MAX", b"m128", b"128"),
+        _ => unreachable!("ZMPOP cycle requires a one-key MIN or MAX workload"),
+    };
+    let mut request = resp_command(&[b"ZMPOP", b"1", key, direction]);
+    request.extend_from_slice(&resp_command(&[b"ZADD", key, score, member]));
+    let mut response = zmpop1_pop_reply(key, member, score);
+    response.extend_from_slice(b":1\r\n");
+    ExchangeCase { request, response }
+}
+
+fn zmpop1_workload_packets(workload: Workload, pipeline: usize, key: &[u8]) -> WorkloadPackets {
+    let cycle = zmpop1_cycle(workload, key);
+    let case = repeated_case(&cycle.request, &cycle.response, pipeline);
+    WorkloadPackets {
+        odd: ExchangeCase {
+            request: case.request.clone(),
+            response: case.response.clone(),
+        },
+        even: case,
+    }
+}
+
+fn assert_zmpop1_fixture(server: &mut Server, workload: Workload, key: &[u8]) {
+    let card = resp_command(&[b"ZCARD", key]);
+    let encoding = resp_command(&[b"OBJECT", b"ENCODING", key]);
+    let boundaries = resp_command(&[b"ZMSCORE", key, b"m000", b"m128", b"absent"]);
+    let pttl = resp_command(&[b"PTTL", key]);
+    exchange_one(server, &card, ZMPOP1_CARD_REPLY);
+    exchange_one(server, &encoding, ZMPOP1_SKIPLIST_ENCODING_REPLY);
+    exchange_one(server, &boundaries, ZMPOP1_BOUNDARIES_REPLY);
+    exchange_one(server, &pttl, PTTL_PERSISTENT_REPLY);
+    let cycle = zmpop1_cycle(workload, key);
+    exchange_one(server, &cycle.request, &cycle.response);
+    exchange_one(server, &cycle.request, &cycle.response);
+    exchange_one(server, &card, ZMPOP1_CARD_REPLY);
+    exchange_one(server, &encoding, ZMPOP1_SKIPLIST_ENCODING_REPLY);
+    exchange_one(server, &boundaries, ZMPOP1_BOUNDARIES_REPLY);
+    exchange_one(server, &pttl, PTTL_PERSISTENT_REPLY);
+}
+
+fn prepare_and_assert_zmpop1_fixtures(
+    servers: &mut [Server; 4],
+    workload: Workload,
+    packets: &Arc<DriverPackets>,
+    keys: &[Vec<u8>],
+) {
+    for server in servers {
+        server
+            .clients
+            .as_ref()
+            .expect("benchmark clients initialized")
+            .prepare(packets);
+        for key in keys {
+            assert_zmpop1_fixture(server, workload, key);
+        }
+        println!(
+            "FIXTURE_REPRESENTATION workload={} arm={} independent_keys={} \
+members_per_key={} encoding=skiplist pttl=-1 boundary_scores=verified \
+measured_cycle=zmpop_one_key_no_count_then_zadd_reinsert \
+semantic_commands_per_operation=2 exact_pop_and_reinsert_replies=true \
+steady_state_cardinality_and_encoding=warmed_by_two_exact_cycles",
+            workload.name(),
+            server.arm.name(),
+            keys.len(),
+            ZMPOP1_MEMBERS
+        );
+    }
 }
 
 fn zrangebylex_range_reply() -> Vec<u8> {
@@ -4407,15 +4557,23 @@ fn measure_dual_null_configuration_with_packets(
     }
     let groups = ops_per_sample.div_ceil(clients * pipeline).max(1);
     let actual_ops = groups * clients * pipeline;
+    let semantic_commands_per_operation =
+        if matches!(workload, Workload::ZmpopOneMin | Workload::ZmpopOneMax) {
+            2
+        } else {
+            1
+        };
     let mut output = Vec::with_capacity(samples);
 
     println!(
         "CONFIG_DUAL_NULL workload={} workload_shape={workload_shape} pipeline={pipeline} \
 clients={clients} client_threads={client_threads} samples={samples} \
 groups_per_arm_sample={groups} interleave_groups={interleave_groups} \
-ops_per_arm_sample={actual_ops} semantic_commands_per_arm_sample={actual_ops} \
+operations_per_arm_sample={actual_ops} semantic_commands_per_operation={semantic_commands_per_operation} \
+semantic_commands_per_arm_sample={} \
 full_response_bytes_asserted=true",
-        workload.name()
+        workload.name(),
+        actual_ops * semantic_commands_per_operation
     );
     for sample_index in 0..samples {
         // Swap the two physical processes behind each logical A/A pair every
@@ -5173,6 +5331,32 @@ fn profile_io_uring_path(
     pipeline: usize,
     client_threads: usize,
 ) {
+    let packets = Arc::new(DriverPackets::shared(workload, pipeline));
+    profile_io_uring_path_with_packets(
+        candidate,
+        root,
+        profile_seconds,
+        workload,
+        pipeline,
+        client_threads,
+        &packets,
+    );
+}
+
+fn profile_io_uring_path_with_packets(
+    candidate: &mut Server,
+    root: &Path,
+    profile_seconds: u64,
+    workload: Workload,
+    pipeline: usize,
+    client_threads: usize,
+    packets: &Arc<DriverPackets>,
+) {
+    candidate
+        .clients
+        .as_ref()
+        .expect("benchmark clients initialized")
+        .prepare(packets);
     let data = root.join(format!(
         "io_uring_profile_{}_p{pipeline}_ct{client_threads}.data",
         workload.name()
@@ -5211,13 +5395,12 @@ fn profile_io_uring_path(
         panic!("perf record exited before profile workload: status={status} stderr={stderr}");
     }
 
-    let packets = Arc::new(DriverPackets::shared(workload, pipeline));
     while perf
         .try_wait()
         .expect("poll perf record workload")
         .is_none()
     {
-        time_block(candidate, &packets, 32, false);
+        time_block(candidate, packets, 32, false);
     }
     let perf_output = perf.wait_with_output().expect("wait for perf record");
     assert!(
@@ -6351,6 +6534,125 @@ fn zscan_cursor_zero_packet_has_exact_complete_reply() {
 }
 
 #[test]
+fn zmpop_one_key_packets_are_exact_closed_pop_reinsert_cycles() {
+    for (workload, pop_request, member, score) in [
+        (
+            Workload::ZmpopOneMin,
+            ZMPOP1_MIN,
+            b"m000".as_slice(),
+            b"0".as_slice(),
+        ),
+        (
+            Workload::ZmpopOneMax,
+            ZMPOP1_MAX,
+            b"m128".as_slice(),
+            b"128".as_slice(),
+        ),
+    ] {
+        let cycle = zmpop1_cycle(workload, b"z0");
+        let reinsert = resp_command(&[b"ZADD", b"z0", score, member]);
+        let mut expected_request = pop_request.to_vec();
+        expected_request.extend_from_slice(&reinsert);
+        let mut expected_response = zmpop1_pop_reply(b"z0", member, score);
+        expected_response.extend_from_slice(b":1\r\n");
+        assert_eq!(cycle.request, expected_request);
+        assert_eq!(cycle.response, expected_response);
+
+        let packets = WorkloadPackets::new(workload, 2);
+        let mut repeated_request = expected_request.clone();
+        repeated_request.extend_from_slice(&expected_request);
+        let mut repeated_response = expected_response.clone();
+        repeated_response.extend_from_slice(&expected_response);
+        assert_eq!(packets.even.request, repeated_request);
+        assert_eq!(packets.even.response, repeated_response);
+        assert_eq!(packets.odd.request, packets.even.request);
+        assert_eq!(packets.odd.response, packets.even.response);
+    }
+
+    let keys = zmpop1_connection_keys(2);
+    let packets = DriverPackets::keyed_zmpop(Workload::ZmpopOneMin, 2, &keys);
+    assert_eq!(packets.connections.len(), 2);
+    for (connection, key) in packets.connections.iter().zip(&keys) {
+        let setup = connection.setup.as_ref().expect("keyed ZMPOP setup");
+        assert_eq!(setup.response, b"+OK\r\n:1\r\n:129\r\n");
+        let expected = zmpop1_workload_packets(Workload::ZmpopOneMin, 2, key);
+        assert_eq!(connection.measured.even.request, expected.even.request);
+        assert_eq!(connection.measured.even.response, expected.even.response);
+    }
+}
+
+#[test]
+#[ignore = "requires live frankenredis and vendored Redis executables; run explicitly"]
+fn zmpop_one_key_cycles_match_server_and_live_redis() {
+    let binary = std::env::var_os("FR_URING_FR_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_frankenredis")));
+    let redis_binary = std::env::var_os("FR_URING_REDIS_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../legacy_redis_code/redis/src/redis-server")
+        });
+    assert!(binary.is_file(), "missing {}", binary.display());
+    assert!(redis_binary.is_file(), "missing {}", redis_binary.display());
+
+    let server_cpu = *allowed_cpus()
+        .first()
+        .expect("live ZMPOP smoke requires one allowed CPU");
+    let root = unique_root();
+    let client_shape = ClientShape {
+        connections: 4,
+        driver_threads: 2,
+    };
+    let keys = zmpop1_connection_keys(client_shape.connections);
+    for workload in [Workload::ZmpopOneMin, Workload::ZmpopOneMax] {
+        let packets = Arc::new(DriverPackets::keyed_zmpop(workload, 16, &keys));
+        for arm in [Arm::IoUring, Arm::Redis] {
+            let mut server = Server::spawn(
+                &binary,
+                &redis_binary,
+                arm,
+                &root.join(format!("{}_{}", workload.name(), arm.name())),
+                server_cpu,
+                client_shape,
+                CommandFloorAb::None,
+            );
+            server
+                .clients
+                .as_ref()
+                .expect("live ZMPOP clients initialized")
+                .prepare(&packets);
+            for key in &keys {
+                assert_zmpop1_fixture(&mut server, workload, key);
+            }
+            server
+                .clients
+                .as_ref()
+                .expect("live ZMPOP clients initialized")
+                .run(&packets, 32, false);
+            for key in &keys {
+                assert_zmpop1_fixture(&mut server, workload, key);
+            }
+            println!(
+                "ZMPOP1_LIVE_PARITY workload={} arm={} pid={} sha256={} \
+process_threads_observed={} command_execution_threads_actual=1 \
+connections_actual={} client_driver_threads_actual={} pipeline=16 groups=32 \
+independent_129_member_skiplist_keys={} exact_pop_reinsert_responses=true \
+post_state_cardinality_encoding_boundaries_pttl_exact=true",
+                workload.name(),
+                arm.name(),
+                server.pid(),
+                server.executing_elf_sha256(),
+                server.observed_thread_count(),
+                client_shape.connections,
+                client_shape.driver_threads,
+                keys.len()
+            );
+        }
+    }
+}
+
+#[test]
 fn zrangebylex_range_packet_has_exact_inclusive_reply() {
     let single_reply = zrangebylex_range_reply();
     assert_eq!(single_reply.len(), 11_018);
@@ -6861,6 +7163,18 @@ fn zscan_cursor_zero_dual_null_vs_redis() {
     run_exact_dual_null_vs_redis(Workload::ZscanCursorZero);
 }
 
+#[test]
+#[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
+fn zmpop_one_min_dual_null_vs_redis() {
+    run_exact_dual_null_vs_redis(Workload::ZmpopOneMin);
+}
+
+#[test]
+#[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
+fn zmpop_one_max_dual_null_vs_redis() {
+    run_exact_dual_null_vs_redis(Workload::ZmpopOneMax);
+}
+
 fn run_exact_dual_null_vs_redis(workload: Workload) {
     assert!(
         matches!(
@@ -6879,6 +7193,8 @@ fn run_exact_dual_null_vs_redis(workload: Workload) {
                 | Workload::SscanCursorZero
                 | Workload::HscanCursorZero
                 | Workload::ZscanCursorZero
+                | Workload::ZmpopOneMin
+                | Workload::ZmpopOneMax
         ),
         "competitive gate requires an authenticated exact workload"
     );
@@ -6961,6 +7277,10 @@ cv_provenance_only=true never_cv_gate=true"
         "FR_HSCAN0_AB"
     } else if matches!(workload, Workload::ZscanCursorZero) {
         "FR_ZSCAN0_AB"
+    } else if matches!(workload, Workload::ZmpopOneMin) {
+        "FR_ZMPOP1_MIN_AB"
+    } else if matches!(workload, Workload::ZmpopOneMax) {
+        "FR_ZMPOP1_MAX_AB"
     } else {
         "FR_ZRANGEBYLEX_AB"
     };
@@ -7101,16 +7421,27 @@ candidate_b=frankenredis_default_mio incumbent_a=vendored_redis_7.2.4 \
 incumbent_b=vendored_redis_7.2.4"
     );
 
-    prefill(&mut servers, workload);
-    profile_io_uring_path(
+    let zmpop_keys = matches!(workload, Workload::ZmpopOneMin | Workload::ZmpopOneMax)
+        .then(|| zmpop1_connection_keys(clients));
+    let packets = Arc::new(if let Some(keys) = &zmpop_keys {
+        DriverPackets::keyed_zmpop(workload, pipeline, keys)
+    } else {
+        DriverPackets::shared(workload, pipeline)
+    });
+    if let Some(keys) = &zmpop_keys {
+        prepare_and_assert_zmpop1_fixtures(&mut servers, workload, &packets, keys);
+    } else {
+        prefill(&mut servers, workload);
+    }
+    profile_io_uring_path_with_packets(
         &mut servers[0],
         &root,
         profile_seconds,
         workload,
         pipeline,
         client_threads,
+        &packets,
     );
-    let packets = Arc::new(DriverPackets::shared(workload, pipeline));
     let workload_shape = if matches!(workload, Workload::ZremrangebyrankNoop) {
         "equal_score_2000_member_skiplist_out_of_range_rank_delete_noop"
     } else if matches!(workload, Workload::ZremrangebylexNoop) {
@@ -7136,6 +7467,10 @@ incumbent_b=vendored_redis_7.2.4"
         Workload::HscanCursorZero | Workload::ZscanCursorZero
     ) {
         "literal_cursor_zero_no_options_16_pair_listpack_single_complete_reply"
+    } else if matches!(workload, Workload::ZmpopOneMin) {
+        "independent_129_member_skiplist_priority_queues_zmpop_one_min_then_exact_reinsert"
+    } else if matches!(workload, Workload::ZmpopOneMax) {
+        "independent_129_member_skiplist_priority_queues_zmpop_one_max_then_exact_reinsert"
     } else if matches!(workload, Workload::ZrangebylexRange) {
         "equal_score_2000_member_inclusive_1001_member_ascending_range"
     } else {
@@ -7153,7 +7488,7 @@ incumbent_b=vendored_redis_7.2.4"
         },
         packets,
         PacketMeasurement {
-            prepare_keyed: false,
+            prepare_keyed: zmpop_keys.is_some(),
             workload_shape,
             host_wide_allowed_cpus: Some(&process_cpuset_cap),
         },
@@ -7258,6 +7593,22 @@ source_b_members=4096 source_a_encoding=skiplist source_b_encoding=skiplist \
 source_pttl=-1 boundary_scores=verified result_shape={result_shape} \
 full_response_bytes_asserted=true",
             workload.name()
+        );
+    } else if let Some(keys) = &zmpop_keys {
+        for server in &mut servers {
+            for key in keys {
+                assert_zmpop1_fixture(server, workload, key);
+            }
+        }
+        println!(
+            "POST_MEASUREMENT_STATE workload={} arms=4 independent_keys={} \
+members_per_key={} encoding=skiplist pttl=-1 boundary_scores=verified \
+measured_cycle=zmpop_one_key_no_count_then_zadd_reinsert \
+semantic_commands_per_operation=2 exact_pop_and_reinsert_replies=true \
+cardinality_and_encoding_preserved=true",
+            workload.name(),
+            keys.len(),
+            ZMPOP1_MEMBERS
         );
     } else if matches!(
         workload,
