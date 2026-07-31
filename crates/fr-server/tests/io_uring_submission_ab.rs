@@ -88,6 +88,14 @@ const GET: &[u8] = b"*2\r\n$3\r\nGET\r\n$1\r\nk\r\n";
 const GET_REPLY: &[u8] = b"$1\r\nv\r\n";
 const PTTL_PERSISTENT: &[u8] = b"*2\r\n$4\r\nPTTL\r\n$1\r\nk\r\n";
 const PTTL_PERSISTENT_REPLY: &[u8] = b":-1\r\n";
+const BITOP_AND_TWO: &[u8] =
+    b"*5\r\n$5\r\nBITOP\r\n$3\r\nAND\r\n$2\r\nbd\r\n$3\r\nbo1\r\n$3\r\nbo2\r\n";
+const BITOP_NOT_ONE: &[u8] = b"*4\r\n$5\r\nBITOP\r\n$3\r\nNOT\r\n$2\r\nbd\r\n$3\r\nbo1\r\n";
+const BITOP_THREE_BYTE_REPLY: &[u8] = b":3\r\n";
+const BITOP_SOURCE_VALUE_REPLY: &[u8] = b"$3\r\nabc\r\n";
+const BITOP_NOT_VALUE_REPLY: &[u8] = b"$3\r\n\x9e\x9d\x9c\r\n";
+const STRING_TYPE_REPLY: &[u8] = b"+string\r\n";
+const THREE_BYTE_STRLEN_REPLY: &[u8] = b":3\r\n";
 const ZREMRANGEBYSCORE_INVERTED_PREFILL: &[u8] = b"*3\r\n$3\r\nSET\r\n$1\r\nz\r\n$4\r\nseed\r\n\
 *2\r\n$3\r\nDEL\r\n$1\r\nz\r\n\
 *4\r\n$4\r\nZADD\r\n$1\r\nz\r\n$1\r\n1\r\n$1\r\nm\r\n";
@@ -483,6 +491,8 @@ enum Workload {
     ZinterTwoKey,
     ZunionstoreTwoKey,
     ZinterstoreTwoKey,
+    BitopAndTwo,
+    BitopNotOne,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -573,6 +583,8 @@ impl Workload {
             Self::ZinterTwoKey => "zinter-two-key",
             Self::ZunionstoreTwoKey => "zunionstore-two-key",
             Self::ZinterstoreTwoKey => "zinterstore-two-key",
+            Self::BitopAndTwo => "bitop-and-two",
+            Self::BitopNotOne => "bitop-not-one",
         }
     }
 
@@ -1208,6 +1220,16 @@ impl Workload {
                 "execute_plain_zstore_borrowed",
                 "Store::zinterstore",
             ],
+            Self::BitopAndTwo => &[
+                "execute_plain_bitop_borrowed",
+                "Store::bitop",
+                "fr_simd::bitand_collect",
+            ],
+            Self::BitopNotOne => &[
+                "execute_plain_bitop_borrowed",
+                "Store::bitop",
+                "fr_simd::bitnot_collect",
+            ],
             Self::Set | Self::Get | Self::Mixed | Self::MixedFamilies => &[],
         }
     }
@@ -1285,6 +1307,8 @@ impl Workload {
                 "zinter-two-key" => Self::ZinterTwoKey,
                 "zunionstore-two-key" => Self::ZunionstoreTwoKey,
                 "zinterstore-two-key" => Self::ZinterstoreTwoKey,
+                "bitop-and-two" => Self::BitopAndTwo,
+                "bitop-not-one" => Self::BitopNotOne,
                 other => panic!("unknown FR_URING_AB_WORKLOADS item: {other}"),
             })
             .collect()
@@ -1944,6 +1968,26 @@ impl WorkloadPackets {
             }
             Workload::ZinterstoreTwoKey => {
                 let case = repeated_case(ZINTERSTORE_TWO_KEY, ZINTERSTORE_TWO_KEY_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::BitopAndTwo => {
+                let case = repeated_case(BITOP_AND_TWO, BITOP_THREE_BYTE_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::BitopNotOne => {
+                let case = repeated_case(BITOP_NOT_ONE, BITOP_THREE_BYTE_REPLY, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -3550,6 +3594,72 @@ steady_state_destination=warmed_by_two_exact_assertions",
     );
 }
 
+fn assert_bitop_sources(server: &mut Server) {
+    for key in [b"bo1".as_slice(), b"bo2".as_slice()] {
+        let key_type = resp_command(&[b"TYPE", key]);
+        exchange_one(server, &key_type, STRING_TYPE_REPLY);
+        let strlen = resp_command(&[b"STRLEN", key]);
+        exchange_one(server, &strlen, THREE_BYTE_STRLEN_REPLY);
+        let get = resp_command(&[b"GET", key]);
+        exchange_one(server, &get, BITOP_SOURCE_VALUE_REPLY);
+        let pttl = resp_command(&[b"PTTL", key]);
+        exchange_one(server, &pttl, PTTL_PERSISTENT_REPLY);
+    }
+}
+
+fn assert_bitop_destination(server: &mut Server, workload: Workload) {
+    let expected_value = match workload {
+        Workload::BitopAndTwo => BITOP_SOURCE_VALUE_REPLY,
+        Workload::BitopNotOne => BITOP_NOT_VALUE_REPLY,
+        _ => unreachable!("BITOP destination assertion requires a BITOP workload"),
+    };
+    let key_type = resp_command(&[b"TYPE", b"bd"]);
+    exchange_one(server, &key_type, STRING_TYPE_REPLY);
+    let strlen = resp_command(&[b"STRLEN", b"bd"]);
+    exchange_one(server, &strlen, THREE_BYTE_STRLEN_REPLY);
+    let get = resp_command(&[b"GET", b"bd"]);
+    exchange_one(server, &get, expected_value);
+    let pttl = resp_command(&[b"PTTL", b"bd"]);
+    exchange_one(server, &pttl, PTTL_PERSISTENT_REPLY);
+}
+
+fn prepare_bitop_fixture(server: &mut Server, workload: Workload) {
+    let mut source_setup = resp_command(&[b"SET", b"bo1", b"abc"]);
+    source_setup.extend_from_slice(&resp_command(&[b"SET", b"bo2", b"abc"]));
+    exchange_one(server, &source_setup, b"+OK\r\n+OK\r\n");
+
+    let mut destination_setup = resp_command(&[b"SET", b"bd", b"seed"]);
+    destination_setup.extend_from_slice(&resp_command(&[b"DEL", b"bd"]));
+    destination_setup.extend_from_slice(&resp_command(&[b"LPUSH", b"bd", b"x"]));
+    exchange_one(server, &destination_setup, b"+OK\r\n:1\r\n:1\r\n");
+    assert_bitop_sources(server);
+
+    let request = match workload {
+        Workload::BitopAndTwo => BITOP_AND_TWO,
+        Workload::BitopNotOne => BITOP_NOT_ONE,
+        _ => unreachable!("BITOP fixture requires a BITOP workload"),
+    };
+    exchange_one(server, request, BITOP_THREE_BYTE_REPLY);
+    assert_bitop_sources(server);
+    assert_bitop_destination(server, workload);
+    exchange_one(server, request, BITOP_THREE_BYTE_REPLY);
+    assert_bitop_destination(server, workload);
+    let operation = if matches!(workload, Workload::BitopAndTwo) {
+        "AND"
+    } else {
+        "NOT"
+    };
+    println!(
+        "FIXTURE_REPRESENTATION workload={} arm={} operation={operation} \
+source_bytes_each=3 source_value_hex=616263 source_type=string source_pttl=-1 \
+destination_initial_type=list destination_cross_type_overwrite=true \
+destination_bytes=3 destination_type=string destination_pttl=-1 \
+binary_destination_get_asserted=true steady_state_destination=warmed_by_two_exact_assertions",
+        workload.name(),
+        server.arm.name()
+    );
+}
+
 fn prefill_selective_prefix_keyspace(server: &mut Server, workload: Workload) {
     exchange_one(
         server,
@@ -3922,6 +4032,8 @@ steady_state_ordered_index=warmed_by_exact_assertion",
                 SELECTIVE_PREFIX_DECOYS + 2,
                 SELECTIVE_PREFIX_DECOYS
             );
+        } else if matches!(workload, Workload::BitopAndTwo | Workload::BitopNotOne) {
+            prepare_bitop_fixture(server, workload);
         } else if matches!(
             workload,
             Workload::ZunionstoreTwoKey | Workload::ZinterstoreTwoKey
@@ -6725,6 +6837,90 @@ exact_source_scores_destination_scores_order_and_pttl=true",
 }
 
 #[test]
+fn bitop_packets_have_exact_three_byte_replies() {
+    for (workload, request) in [
+        (Workload::BitopAndTwo, BITOP_AND_TWO),
+        (Workload::BitopNotOne, BITOP_NOT_ONE),
+    ] {
+        let packets = WorkloadPackets::new(workload, 2);
+        let mut expected_request = request.to_vec();
+        expected_request.extend_from_slice(request);
+        let mut expected_response = BITOP_THREE_BYTE_REPLY.to_vec();
+        expected_response.extend_from_slice(BITOP_THREE_BYTE_REPLY);
+        assert_eq!(packets.even.request, expected_request);
+        assert_eq!(packets.even.response, expected_response);
+        assert_eq!(packets.odd.request, packets.even.request);
+        assert_eq!(packets.odd.response, packets.even.response);
+    }
+}
+
+#[test]
+#[ignore = "requires live frankenredis and vendored Redis executables; run explicitly"]
+fn bitop_commands_match_server_and_live_redis() {
+    let binary = std::env::var_os("FR_URING_FR_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_frankenredis")));
+    let redis_binary = std::env::var_os("FR_URING_REDIS_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../legacy_redis_code/redis/src/redis-server")
+        });
+    assert!(binary.is_file(), "missing {}", binary.display());
+    assert!(redis_binary.is_file(), "missing {}", redis_binary.display());
+
+    let server_cpu = *allowed_cpus()
+        .first()
+        .expect("live BITOP smoke requires one allowed CPU");
+    let root = unique_root();
+    let client_shape = ClientShape {
+        connections: 4,
+        driver_threads: 2,
+    };
+    for workload in [Workload::BitopAndTwo, Workload::BitopNotOne] {
+        let packets = Arc::new(DriverPackets::shared(workload, 16));
+        for arm in [Arm::IoUring, Arm::Redis] {
+            let mut server = Server::spawn(
+                &binary,
+                &redis_binary,
+                arm,
+                &root.join(format!("{}_{}", workload.name(), arm.name())),
+                server_cpu,
+                client_shape,
+                CommandFloorAb::None,
+            );
+            prepare_bitop_fixture(&mut server, workload);
+            server
+                .clients
+                .as_ref()
+                .expect("live BITOP clients initialized")
+                .prepare(&packets);
+            server
+                .clients
+                .as_ref()
+                .expect("live BITOP clients initialized")
+                .run(&packets, 32, false);
+            assert_bitop_sources(&mut server);
+            assert_bitop_destination(&mut server, workload);
+            println!(
+                "BITOP_LIVE_PARITY workload={} arm={} pid={} sha256={} \
+process_threads_observed={} command_execution_threads_actual=1 \
+connections_actual={} client_driver_threads_actual={} pipeline=16 groups=32 \
+source_bytes_each=3 source_value_hex=616263 destination_bytes=3 \
+exact_source_and_binary_destination_type_strlen_get_pttl=true",
+                workload.name(),
+                arm.name(),
+                server.pid(),
+                server.executing_elf_sha256(),
+                server.observed_thread_count(),
+                client_shape.connections,
+                client_shape.driver_threads
+            );
+        }
+    }
+}
+
+#[test]
 fn sscan_cursor_zero_packet_has_exact_complete_reply() {
     let single_reply = sscan_cursor_zero_reply();
     assert!(single_reply.starts_with(b"*2\r\n$1\r\n0\r\n*16\r\n$1\r\n0\r\n"));
@@ -7401,6 +7597,18 @@ fn zinterstore_two_key_dual_null_vs_redis() {
 
 #[test]
 #[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
+fn bitop_and_two_dual_null_vs_redis() {
+    run_exact_dual_null_vs_redis(Workload::BitopAndTwo);
+}
+
+#[test]
+#[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
+fn bitop_not_one_dual_null_vs_redis() {
+    run_exact_dual_null_vs_redis(Workload::BitopNotOne);
+}
+
+#[test]
+#[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
 fn sscan_cursor_zero_dual_null_vs_redis() {
     run_exact_dual_null_vs_redis(Workload::SscanCursorZero);
 }
@@ -7446,6 +7654,8 @@ fn run_exact_dual_null_vs_redis(workload: Workload) {
                 | Workload::ZinterTwoKey
                 | Workload::ZunionstoreTwoKey
                 | Workload::ZinterstoreTwoKey
+                | Workload::BitopAndTwo
+                | Workload::BitopNotOne
                 | Workload::SscanCursorZero
                 | Workload::HscanCursorZero
                 | Workload::ZscanCursorZero
@@ -7531,6 +7741,10 @@ cv_provenance_only=true never_cv_gate=true"
         "FR_ZUNIONSTORE2_AB"
     } else if matches!(workload, Workload::ZinterstoreTwoKey) {
         "FR_ZINTERSTORE2_AB"
+    } else if matches!(workload, Workload::BitopAndTwo) {
+        "FR_BITOP_AND2_AB"
+    } else if matches!(workload, Workload::BitopNotOne) {
+        "FR_BITOP_NOT1_AB"
     } else if matches!(workload, Workload::SscanCursorZero) {
         "FR_SSCAN0_AB"
     } else if matches!(workload, Workload::HscanCursorZero) {
@@ -7724,6 +7938,10 @@ incumbent_b=vendored_redis_7.2.4"
         "three_member_listpack_sources_default_sum_four_member_listpack_union_overwrite"
     } else if matches!(workload, Workload::ZinterstoreTwoKey) {
         "three_member_listpack_sources_default_sum_two_member_listpack_intersection_overwrite"
+    } else if matches!(workload, Workload::BitopAndTwo) {
+        "three_byte_string_sources_bitop_and_two_source_exact_cross_type_overwrite"
+    } else if matches!(workload, Workload::BitopNotOne) {
+        "three_byte_string_source_bitop_not_one_source_exact_binary_cross_type_overwrite"
     } else if matches!(workload, Workload::SscanCursorZero) {
         "literal_cursor_zero_no_options_16_member_intset_single_complete_reply"
     } else if matches!(
@@ -7876,8 +8094,26 @@ full_response_bytes_asserted=true",
             "POST_MEASUREMENT_STATE workload={} arms=4 source_members_each=3 \
 source_encoding=listpack source_scores_exact=true source_pttl=-1 \
 destination_members={destination_members} destination_encoding=listpack \
-destination_pttl=-1 default_weights=1,1 default_aggregate=SUM \
+            destination_pttl=-1 default_weights=1,1 default_aggregate=SUM \
 {result_shape} full_ordered_response_bytes_asserted=true",
+            workload.name()
+        );
+    } else if matches!(workload, Workload::BitopAndTwo | Workload::BitopNotOne) {
+        for server in &mut servers {
+            assert_bitop_sources(server);
+            assert_bitop_destination(server, workload);
+        }
+        let operation = if matches!(workload, Workload::BitopAndTwo) {
+            "AND"
+        } else {
+            "NOT"
+        };
+        println!(
+            "POST_MEASUREMENT_STATE workload={} arms=4 source_bytes=3 \
+source_type=string source_value=abc source_pttl=-1 operation={operation} \
+destination_bytes=3 destination_type=string destination_pttl=-1 \
+exact_binary_destination=true cross_type_overwrite=true \
+full_response_bytes_asserted=true",
             workload.name()
         );
     } else if let Some(keys) = &zmpop_keys {
