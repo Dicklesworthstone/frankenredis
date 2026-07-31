@@ -245,6 +245,8 @@ const ZINTERCARD_INTERSECTION_MEMBERS: usize = 2_048;
 const ZINTERCARD_PREFILL_BATCH: usize = 256;
 const ZINTERCARD_CACHED: &[u8] = b"*4\r\n$10\r\nZINTERCARD\r\n$1\r\n2\r\n$2\r\nza\r\n$2\r\nzb\r\n";
 const ZINTERCARD_CACHED_REPLY: &[u8] = b":2048\r\n";
+const ZDIFF_TWO_KEY: &[u8] = b"*4\r\n$5\r\nZDIFF\r\n$1\r\n2\r\n$2\r\nza\r\n$2\r\nzb\r\n";
+const ZINTER_TWO_KEY: &[u8] = b"*4\r\n$6\r\nZINTER\r\n$1\r\n2\r\n$2\r\nza\r\n$2\r\nzb\r\n";
 const ZINTERCARD_ZA_CARD: &[u8] = b"*2\r\n$5\r\nZCARD\r\n$2\r\nza\r\n";
 const ZINTERCARD_ZB_CARD: &[u8] = b"*2\r\n$5\r\nZCARD\r\n$2\r\nzb\r\n";
 const ZINTERCARD_SOURCE_CARD_REPLY: &[u8] = b":4096\r\n";
@@ -425,6 +427,8 @@ enum Workload {
     SdiffstoreMixed,
     SinterstoreMixed,
     ZintercardCached,
+    ZdiffTwoKey,
+    ZinterTwoKey,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -506,6 +510,8 @@ impl Workload {
             Self::SdiffstoreMixed => "sdiffstore-mixed",
             Self::SinterstoreMixed => "sinterstore-mixed",
             Self::ZintercardCached => "zintercard-cached",
+            Self::ZdiffTwoKey => "zdiff-two-key",
+            Self::ZinterTwoKey => "zinter-two-key",
         }
     }
 
@@ -1077,6 +1083,24 @@ impl Workload {
                 "<fr_store::Store>::zintercard_count_cached",
                 "<fr_store::Store>::zintercard_cache_hit",
             ],
+            Self::ZdiffTwoKey => &[
+                "frankenredis::process_buffered_frames",
+                "__memcmp_avx2_movbe",
+                "parse_borrowed_plain_key_arg2_packet",
+                "fr_runtime::Runtime::execute_plain_zdiff2_borrowed",
+                "fr_runtime::Runtime::execute_plain_zdiff2_core",
+                "fr_store::Store::zdiff_members_no_stats",
+                "fr_protocol::encode",
+            ],
+            Self::ZinterTwoKey => &[
+                "frankenredis::process_buffered_frames",
+                "__memcmp_avx2_movbe",
+                "parse_borrowed_plain_key_arg2_packet",
+                "fr_runtime::Runtime::execute_plain_zinter_borrowed",
+                "fr_runtime::Runtime::execute_plain_zinter_core",
+                "fr_store::Store::zinter_members_argv_order_no_stats",
+                "fr_protocol::encode",
+            ],
             Self::Set | Self::Get | Self::Mixed | Self::MixedFamilies => &[],
         }
     }
@@ -1145,6 +1169,8 @@ impl Workload {
                 "sdiffstore-mixed" => Self::SdiffstoreMixed,
                 "sinterstore-mixed" => Self::SinterstoreMixed,
                 "zintercard-cached" => Self::ZintercardCached,
+                "zdiff-two-key" => Self::ZdiffTwoKey,
+                "zinter-two-key" => Self::ZinterTwoKey,
                 other => panic!("unknown FR_URING_AB_WORKLOADS item: {other}"),
             })
             .collect()
@@ -1748,6 +1774,28 @@ impl WorkloadPackets {
             }
             Workload::ZintercardCached => {
                 let case = repeated_case(ZINTERCARD_CACHED, ZINTERCARD_CACHED_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::ZdiffTwoKey => {
+                let response = zdiff_two_key_reply();
+                let case = repeated_case(ZDIFF_TWO_KEY, &response, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::ZinterTwoKey => {
+                let response = zinter_two_key_reply();
+                let case = repeated_case(ZINTER_TWO_KEY, &response, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -2804,6 +2852,23 @@ fn zrevrange_rank_range_reply() -> Vec<u8> {
     response
 }
 
+fn zset_algebra_member_reply(start: usize, end: usize) -> Vec<u8> {
+    let mut response = format!("*{}\r\n", end - start).into_bytes();
+    for member in start..end {
+        let member = member.to_string();
+        push_resp_bulk(&mut response, member.as_bytes());
+    }
+    response
+}
+
+fn zdiff_two_key_reply() -> Vec<u8> {
+    zset_algebra_member_reply(0, ZINTERCARD_SOURCE_B_START)
+}
+
+fn zinter_two_key_reply() -> Vec<u8> {
+    zset_algebra_member_reply(ZINTERCARD_SOURCE_B_START, ZINTERCARD_SOURCE_MEMBERS)
+}
+
 fn lindex_middle_prefill() -> ExchangeCase {
     let mut request = b"*3\r\n$3\r\nSET\r\n$1\r\nl\r\n$4\r\nseed\r\n\
 *2\r\n$3\r\nDEL\r\n$1\r\nl\r\n"
@@ -3354,7 +3419,10 @@ steady_state_ordered_index=warmed_by_exact_assertion",
                 SELECTIVE_PREFIX_DECOYS + 2,
                 SELECTIVE_PREFIX_DECOYS
             );
-        } else if matches!(workload, Workload::ZintercardCached) {
+        } else if matches!(
+            workload,
+            Workload::ZintercardCached | Workload::ZdiffTwoKey | Workload::ZinterTwoKey
+        ) {
             prefill_zintercard_sources(server);
             exchange_one(server, ZINTERCARD_ZA_CARD, ZINTERCARD_SOURCE_CARD_REPLY);
             exchange_one(server, ZINTERCARD_ZB_CARD, ZINTERCARD_SOURCE_CARD_REPLY);
@@ -3380,14 +3448,33 @@ steady_state_ordered_index=warmed_by_exact_assertion",
             );
             exchange_one(server, ZINTERCARD_ZA_PTTL, PTTL_PERSISTENT_REPLY);
             exchange_one(server, ZINTERCARD_ZB_PTTL, PTTL_PERSISTENT_REPLY);
-            exchange_one(server, ZINTERCARD_CACHED, ZINTERCARD_CACHED_REPLY);
-            exchange_one(server, ZINTERCARD_CACHED, ZINTERCARD_CACHED_REPLY);
+            let (request, response, result_shape) = match workload {
+                Workload::ZintercardCached => (
+                    ZINTERCARD_CACHED,
+                    ZINTERCARD_CACHED_REPLY.to_vec(),
+                    "intersection_cardinality=2048",
+                ),
+                Workload::ZdiffTwoKey => (
+                    ZDIFF_TWO_KEY,
+                    zdiff_two_key_reply(),
+                    "difference_members=0..2047",
+                ),
+                Workload::ZinterTwoKey => (
+                    ZINTER_TWO_KEY,
+                    zinter_two_key_reply(),
+                    "intersection_members=2048..4095",
+                ),
+                _ => unreachable!("zset algebra fixture is restricted to three workloads"),
+            };
+            exchange_one(server, request, &response);
+            exchange_one(server, request, &response);
             println!(
                 "FIXTURE_REPRESENTATION workload={} arm={} \
 source_a_members={} source_a_range=0..4095 source_a_encoding=skiplist \
 source_b_members={} source_b_range=2048..6143 source_b_encoding=skiplist \
 intersection_members={} source_pttl=-1 boundary_scores=verified \
-steady_state_result_cache=warmed_by_two_exact_assertions",
+result_shape={result_shape} full_response_bytes_asserted=true \
+steady_state_result=warmed_by_two_exact_assertions",
                 workload.name(),
                 server.arm.name(),
                 ZINTERCARD_SOURCE_MEMBERS,
@@ -5960,6 +6047,50 @@ fn rpop_count_missing_packet_has_exact_null_array_reply() {
 }
 
 #[test]
+fn zdiff_two_key_packet_has_exact_2048_member_reply() {
+    let single_reply = zdiff_two_key_reply();
+    assert!(single_reply.starts_with(b"*2048\r\n$1\r\n0\r\n"));
+    assert!(single_reply.ends_with(b"$4\r\n2047\r\n"));
+    assert!(
+        !single_reply
+            .windows(b"$4\r\n2048\r\n".len())
+            .any(|window| window == b"$4\r\n2048\r\n")
+    );
+
+    let packets = WorkloadPackets::new(Workload::ZdiffTwoKey, 2);
+    let mut expected_request = ZDIFF_TWO_KEY.to_vec();
+    expected_request.extend_from_slice(ZDIFF_TWO_KEY);
+    let mut expected_response = single_reply.clone();
+    expected_response.extend_from_slice(&single_reply);
+    assert_eq!(packets.even.request, expected_request);
+    assert_eq!(packets.even.response, expected_response);
+    assert_eq!(packets.odd.request, packets.even.request);
+    assert_eq!(packets.odd.response, packets.even.response);
+}
+
+#[test]
+fn zinter_two_key_packet_has_exact_2048_member_reply() {
+    let single_reply = zinter_two_key_reply();
+    assert!(single_reply.starts_with(b"*2048\r\n$4\r\n2048\r\n"));
+    assert!(single_reply.ends_with(b"$4\r\n4095\r\n"));
+    assert!(
+        !single_reply
+            .windows(b"$4\r\n2047\r\n".len())
+            .any(|window| window == b"$4\r\n2047\r\n")
+    );
+
+    let packets = WorkloadPackets::new(Workload::ZinterTwoKey, 2);
+    let mut expected_request = ZINTER_TWO_KEY.to_vec();
+    expected_request.extend_from_slice(ZINTER_TWO_KEY);
+    let mut expected_response = single_reply.clone();
+    expected_response.extend_from_slice(&single_reply);
+    assert_eq!(packets.even.request, expected_request);
+    assert_eq!(packets.even.response, expected_response);
+    assert_eq!(packets.odd.request, packets.even.request);
+    assert_eq!(packets.odd.response, packets.even.response);
+}
+
+#[test]
 fn zrangebylex_range_packet_has_exact_inclusive_reply() {
     let single_reply = zrangebylex_range_reply();
     assert_eq!(single_reply.len(), 11_018);
@@ -6440,6 +6571,18 @@ fn rpop_count_missing_dual_null_vs_redis() {
     run_exact_dual_null_vs_redis(Workload::RpopCountMissing);
 }
 
+#[test]
+#[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
+fn zdiff_two_key_dual_null_vs_redis() {
+    run_exact_dual_null_vs_redis(Workload::ZdiffTwoKey);
+}
+
+#[test]
+#[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
+fn zinter_two_key_dual_null_vs_redis() {
+    run_exact_dual_null_vs_redis(Workload::ZinterTwoKey);
+}
+
 fn run_exact_dual_null_vs_redis(workload: Workload) {
     assert!(
         matches!(
@@ -6453,6 +6596,8 @@ fn run_exact_dual_null_vs_redis(workload: Workload) {
                 | Workload::ZrevrangebylexRange
                 | Workload::LpopCountMissing
                 | Workload::RpopCountMissing
+                | Workload::ZdiffTwoKey
+                | Workload::ZinterTwoKey
         ),
         "competitive gate requires an authenticated exact workload"
     );
@@ -6525,6 +6670,10 @@ cv_provenance_only=true never_cv_gate=true"
         "FR_LPOP_COUNT_AB"
     } else if matches!(workload, Workload::RpopCountMissing) {
         "FR_RPOP_COUNT_AB"
+    } else if matches!(workload, Workload::ZdiffTwoKey) {
+        "FR_ZDIFF_AB"
+    } else if matches!(workload, Workload::ZinterTwoKey) {
+        "FR_ZINTER_AB"
     } else {
         "FR_ZRANGEBYLEX_AB"
     };
@@ -6689,6 +6838,10 @@ incumbent_b=vendored_redis_7.2.4"
         "missing_list_key_count_2_exact_null_array_left_pop"
     } else if matches!(workload, Workload::RpopCountMissing) {
         "missing_list_key_count_2_exact_null_array_right_pop"
+    } else if matches!(workload, Workload::ZdiffTwoKey) {
+        "overlapping_4096_member_skiplist_sources_2048_member_difference"
+    } else if matches!(workload, Workload::ZinterTwoKey) {
+        "overlapping_4096_member_skiplist_sources_2048_member_intersection"
     } else if matches!(workload, Workload::ZrangebylexRange) {
         "equal_score_2000_member_inclusive_1001_member_ascending_range"
     } else {
@@ -6762,6 +6915,54 @@ encoding=skiplist pttl=-1 exact=true",
         println!(
             "POST_MEASUREMENT_STATE workload={} arms=4 key=missing-list \
 key_exists=false pttl=-2 exact_null_array_reply=true",
+            workload.name()
+        );
+    } else if matches!(workload, Workload::ZdiffTwoKey | Workload::ZinterTwoKey) {
+        let (request, response, result_shape) = if matches!(workload, Workload::ZdiffTwoKey) {
+            (
+                ZDIFF_TWO_KEY,
+                zdiff_two_key_reply(),
+                "difference_members=0..2047",
+            )
+        } else {
+            (
+                ZINTER_TWO_KEY,
+                zinter_two_key_reply(),
+                "intersection_members=2048..4095",
+            )
+        };
+        for server in &mut servers {
+            exchange_one(server, ZINTERCARD_ZA_CARD, ZINTERCARD_SOURCE_CARD_REPLY);
+            exchange_one(server, ZINTERCARD_ZB_CARD, ZINTERCARD_SOURCE_CARD_REPLY);
+            exchange_one(
+                server,
+                ZINTERCARD_ZA_ENCODING,
+                ZINTERCARD_SKIPLIST_ENCODING_REPLY,
+            );
+            exchange_one(
+                server,
+                ZINTERCARD_ZB_ENCODING,
+                ZINTERCARD_SKIPLIST_ENCODING_REPLY,
+            );
+            exchange_one(
+                server,
+                ZINTERCARD_ZA_BOUNDARIES,
+                ZINTERCARD_ZA_BOUNDARIES_REPLY,
+            );
+            exchange_one(
+                server,
+                ZINTERCARD_ZB_BOUNDARIES,
+                ZINTERCARD_ZB_BOUNDARIES_REPLY,
+            );
+            exchange_one(server, ZINTERCARD_ZA_PTTL, PTTL_PERSISTENT_REPLY);
+            exchange_one(server, ZINTERCARD_ZB_PTTL, PTTL_PERSISTENT_REPLY);
+            exchange_one(server, request, &response);
+        }
+        println!(
+            "POST_MEASUREMENT_STATE workload={} arms=4 source_a_members=4096 \
+source_b_members=4096 source_a_encoding=skiplist source_b_encoding=skiplist \
+source_pttl=-1 boundary_scores=verified result_shape={result_shape} \
+full_response_bytes_asserted=true",
             workload.name()
         );
     }
