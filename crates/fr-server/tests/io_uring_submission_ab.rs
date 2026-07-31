@@ -329,6 +329,7 @@ enum Workload {
     Set,
     Get,
     Mixed,
+    MixedFamilies,
     BitposRange,
     BitfieldRoTwoGet,
     ObjectEncoding,
@@ -400,6 +401,7 @@ impl Workload {
             Self::Set => "set",
             Self::Get => "get",
             Self::Mixed => "mixed",
+            Self::MixedFamilies => "mixed-families",
             Self::BitposRange => "bitpos-range",
             Self::BitfieldRoTwoGet => "bitfield-ro-two-get",
             Self::ObjectEncoding => "object-encoding",
@@ -935,7 +937,7 @@ impl Workload {
                 "<fr_store::Store>::zintercard_count_cached",
                 "<fr_store::Store>::zintercard_cache_hit",
             ],
-            Self::Set | Self::Get | Self::Mixed => &[],
+            Self::Set | Self::Get | Self::Mixed | Self::MixedFamilies => &[],
         }
     }
 
@@ -949,6 +951,7 @@ impl Workload {
                 "set" => Self::Set,
                 "get" => Self::Get,
                 "mixed" => Self::Mixed,
+                "mixed-families" => Self::MixedFamilies,
                 "bitpos-range" => Self::BitposRange,
                 "bitfield-ro-two-get" => Self::BitfieldRoTwoGet,
                 "object-encoding" => Self::ObjectEncoding,
@@ -1037,6 +1040,9 @@ impl WorkloadPackets {
                 even: mixed_case(pipeline, false),
                 odd: mixed_case(pipeline, true),
             },
+            Workload::MixedFamilies => {
+                panic!("mixed-families requires per-connection keyed packets")
+            }
             Workload::BitposRange => {
                 let case = repeated_case(BITPOS_RANGE, BITPOS_RANGE_REPLY, pipeline);
                 Self {
@@ -1578,6 +1584,26 @@ impl DriverPackets {
         }
     }
 
+    fn keyed_mixed_families(pipeline: usize, keys: &[Vec<u8>]) -> (Self, Vec<ExchangeCase>) {
+        assert_eq!(
+            pipeline, 16,
+            "the mixed-family whole-job contract is registered at P16"
+        );
+        let mut server_setup = Vec::with_capacity(keys.len());
+        let connections = keys
+            .iter()
+            .map(|key| {
+                let (measured, setup) = keyed_mixed_families_cases(key);
+                server_setup.push(setup);
+                ConnectionPackets {
+                    measured,
+                    setup: None,
+                }
+            })
+            .collect();
+        (Self { connections }, server_setup)
+    }
+
     fn for_connection(&self, connection_index: usize) -> &ConnectionPackets {
         if self.connections.len() == 1 {
             &self.connections[0]
@@ -1622,6 +1648,108 @@ fn keyed_mixed_case(set: &[u8], get: &[u8], pipeline: usize, start_with_get: boo
         }
     }
     ExchangeCase { request, response }
+}
+
+fn resp_command(parts: &[&[u8]]) -> Vec<u8> {
+    let mut command = format!("*{}\r\n", parts.len()).into_bytes();
+    for part in parts {
+        push_resp_bulk(&mut command, part);
+    }
+    command
+}
+
+fn family_key(base: &[u8], suffix: &[u8]) -> Vec<u8> {
+    let mut key = Vec::with_capacity(base.len() + suffix.len() + 1);
+    key.extend_from_slice(base);
+    key.push(b':');
+    key.extend_from_slice(suffix);
+    key
+}
+
+fn exchange_case(steps: &[(&[u8], &[u8])]) -> ExchangeCase {
+    let request_len = steps.iter().map(|(request, _)| request.len()).sum();
+    let response_len = steps.iter().map(|(_, response)| response.len()).sum();
+    let mut request = Vec::with_capacity(request_len);
+    let mut response = Vec::with_capacity(response_len);
+    for (command, reply) in steps {
+        request.extend_from_slice(command);
+        response.extend_from_slice(reply);
+    }
+    ExchangeCase { request, response }
+}
+
+fn keyed_mixed_families_cases(base: &[u8]) -> (WorkloadPackets, ExchangeCase) {
+    const INTEGER_ZERO_REPLY: &[u8] = b":0\r\n";
+    const INTEGER_ONE_REPLY: &[u8] = b":1\r\n";
+    const BULK_ZERO_REPLY: &[u8] = b"$1\r\n0\r\n";
+    const BULK_A_REPLY: &[u8] = b"$1\r\na\r\n";
+    const BULK_B_REPLY: &[u8] = b"$1\r\nb\r\n";
+
+    let string_key = family_key(base, b"string");
+    let list_key = family_key(base, b"list");
+    let hash_key = family_key(base, b"hash");
+    let base_slot = fr_store::crc16_slot(base);
+    assert!(
+        [&string_key, &list_key, &hash_key]
+            .into_iter()
+            .all(|key| fr_store::crc16_slot(key) == base_slot),
+        "mixed-family keys must preserve their base key's shard"
+    );
+
+    let set_zero = resp_command(&[b"SET", &string_key, b"0"]);
+    let get_string = resp_command(&[b"GET", &string_key]);
+    let incr_string = resp_command(&[b"INCR", &string_key]);
+    let lpush_a = resp_command(&[b"LPUSH", &list_key, b"a"]);
+    let lpush_b = resp_command(&[b"LPUSH", &list_key, b"b"]);
+    let lpop = resp_command(&[b"LPOP", &list_key]);
+    let hset_a = resp_command(&[b"HSET", &hash_key, b"f", b"a"]);
+    let hset_b = resp_command(&[b"HSET", &hash_key, b"f", b"b"]);
+    let hget = resp_command(&[b"HGET", &hash_key, b"f"]);
+
+    // Both orderings are closed state machines: they end with string=1,
+    // list absent, and hash[f]=a. That makes every reply byte-exact across
+    // warmup, samples, arm rotations, and repeated invocations.
+    let even = exchange_case(&[
+        (&set_zero, SET_REPLY),
+        (&get_string, BULK_ZERO_REPLY),
+        (&incr_string, INTEGER_ONE_REPLY),
+        (&lpush_a, INTEGER_ONE_REPLY),
+        (&hset_a, INTEGER_ZERO_REPLY),
+        (&hget, BULK_A_REPLY),
+        (&lpop, BULK_A_REPLY),
+        (&set_zero, SET_REPLY),
+        (&hset_b, INTEGER_ZERO_REPLY),
+        (&lpush_b, INTEGER_ONE_REPLY),
+        (&get_string, BULK_ZERO_REPLY),
+        (&hget, BULK_B_REPLY),
+        (&incr_string, INTEGER_ONE_REPLY),
+        (&lpop, BULK_B_REPLY),
+        (&hset_a, INTEGER_ZERO_REPLY),
+        (&hget, BULK_A_REPLY),
+    ]);
+    let odd = exchange_case(&[
+        (&set_zero, SET_REPLY),
+        (&hset_b, INTEGER_ZERO_REPLY),
+        (&lpush_b, INTEGER_ONE_REPLY),
+        (&get_string, BULK_ZERO_REPLY),
+        (&hget, BULK_B_REPLY),
+        (&incr_string, INTEGER_ONE_REPLY),
+        (&lpop, BULK_B_REPLY),
+        (&hset_a, INTEGER_ZERO_REPLY),
+        (&set_zero, SET_REPLY),
+        (&get_string, BULK_ZERO_REPLY),
+        (&incr_string, INTEGER_ONE_REPLY),
+        (&lpush_a, INTEGER_ONE_REPLY),
+        (&hset_a, INTEGER_ZERO_REPLY),
+        (&hget, BULK_A_REPLY),
+        (&lpop, BULK_A_REPLY),
+        (&hget, BULK_A_REPLY),
+    ]);
+    let setup = ExchangeCase {
+        request: hset_a,
+        response: INTEGER_ONE_REPLY.to_vec(),
+    };
+    (WorkloadPackets { even, odd }, setup)
 }
 
 fn repeated_case(request: &[u8], response: &[u8], pipeline: usize) -> ExchangeCase {
@@ -2264,6 +2392,14 @@ expected_len={} partial_response={:?}: {error}",
         "setup reply diverged for arm={}",
         server.arm.name()
     );
+}
+
+fn apply_server_setup(servers: &mut [Server; 4], setup: &[ExchangeCase]) {
+    for server in servers {
+        for case in setup {
+            exchange_one(server, &case.request, &case.response);
+        }
+    }
 }
 
 fn seeded_stream_prefill() -> ExchangeCase {
@@ -5090,6 +5226,35 @@ fn parse_sharded_server_thread_counts() -> Vec<usize> {
     counts
 }
 
+fn parse_sharded_workloads() -> Vec<Workload> {
+    let value = std::env::var("FR_SHARDED_WORKLOADS").unwrap_or_else(|_| "set,mixed".to_owned());
+    let workloads = value
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(|item| match item {
+            "set" => Workload::Set,
+            "get" => Workload::Get,
+            "mixed" => Workload::Mixed,
+            "mixed-families" => Workload::MixedFamilies,
+            other => panic!("unknown FR_SHARDED_WORKLOADS item: {other}"),
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !workloads.is_empty(),
+        "sharded workload selection cannot be empty"
+    );
+    let mut unique = workloads.clone();
+    unique.sort_unstable_by_key(|workload| workload.name());
+    unique.dedup();
+    assert_eq!(
+        unique.len(),
+        workloads.len(),
+        "sharded workload selection contains duplicates: {workloads:?}"
+    );
+    workloads
+}
+
 fn balanced_shard_keys(connections: usize, workers: usize) -> Vec<Vec<u8>> {
     let mut keys = Vec::with_capacity(connections);
     let mut nonce = 0usize;
@@ -5119,6 +5284,179 @@ fn balanced_shard_keys(connections: usize, workers: usize) -> Vec<Vec<u8>> {
 distribution={distribution:?}"
     );
     keys
+}
+
+fn tagged_shard_keys(connections: usize, workers: usize, single_shard: bool) -> Vec<Vec<u8>> {
+    let target_count = if single_shard { 1 } else { workers };
+    let mut nonce = 0usize;
+    let mut tags = Vec::with_capacity(target_count);
+    for target in 0..target_count {
+        loop {
+            let tag = format!("mf:{target}:{nonce}");
+            nonce += 1;
+            if usize::from(fr_store::crc16_slot(tag.as_bytes())) % workers == target {
+                tags.push(tag);
+                break;
+            }
+        }
+    }
+    let keys = (0..connections)
+        .map(|connection| {
+            let target = if single_shard {
+                0
+            } else {
+                connection % workers
+            };
+            format!("{{{}}}:connection:{connection}", tags[target]).into_bytes()
+        })
+        .collect::<Vec<_>>();
+    let mut distribution = vec![0usize; workers];
+    for key in &keys {
+        distribution[usize::from(fr_store::crc16_slot(key)) % workers] += 1;
+    }
+    if single_shard {
+        assert_eq!(
+            distribution.iter().filter(|count| **count > 0).count(),
+            1,
+            "single-hot-shard fixture must route every key to one shard: {distribution:?}"
+        );
+    } else if connections >= workers {
+        assert!(
+            distribution.iter().all(|count| *count > 0),
+            "independent mixed-family fixture must route work to every shard: {distribution:?}"
+        );
+    }
+    println!(
+        "MIXED_FAMILY_SHARD_KEY_DISTRIBUTION workers={workers} connections={connections} \
+shape={} distribution={distribution:?}",
+        if single_shard {
+            "single_hot_shard_distinct_keys"
+        } else {
+            "independent_keys"
+        }
+    );
+    keys
+}
+
+#[test]
+fn mixed_family_packets_cover_every_supported_command_with_exact_replies() {
+    const EVEN_REPLIES: &[u8] = b"+OK\r\n$1\r\n0\r\n:1\r\n:1\r\n:0\r\n\
+$1\r\na\r\n$1\r\na\r\n+OK\r\n:0\r\n:1\r\n$1\r\n0\r\n$1\r\nb\r\n\
+:1\r\n$1\r\nb\r\n:0\r\n$1\r\na\r\n";
+    const ODD_REPLIES: &[u8] = b"+OK\r\n:0\r\n:1\r\n$1\r\n0\r\n$1\r\nb\r\n\
+:1\r\n$1\r\nb\r\n:0\r\n+OK\r\n$1\r\n0\r\n:1\r\n:1\r\n:0\r\n\
+$1\r\na\r\n$1\r\na\r\n$1\r\na\r\n";
+
+    let keys = tagged_shard_keys(4, 2, false);
+    let (packets, setup) = DriverPackets::keyed_mixed_families(16, &keys);
+    assert_eq!(setup.len(), keys.len());
+    for case in &setup {
+        assert_eq!(case.response, b":1\r\n");
+    }
+    for connection_index in 0..keys.len() {
+        let connection = packets.for_connection(connection_index);
+        assert!(connection.setup.is_none());
+        assert_eq!(connection.measured.even.response, EVEN_REPLIES);
+        assert_eq!(connection.measured.odd.response, ODD_REPLIES);
+        for case in [&connection.measured.even, &connection.measured.odd] {
+            for (command, expected) in [
+                ("SET", 2),
+                ("GET", 2),
+                ("INCR", 2),
+                ("LPUSH", 2),
+                ("LPOP", 2),
+                ("HSET", 3),
+                ("HGET", 3),
+            ] {
+                let marker = format!("${}\r\n{command}\r\n", command.len());
+                let actual = case
+                    .request
+                    .windows(marker.len())
+                    .filter(|window| *window == marker.as_bytes())
+                    .count();
+                assert_eq!(
+                    actual, expected,
+                    "{command} count diverged in mixed-family P16 packet"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires live frankenredis and vendored Redis executables; run explicitly"]
+fn mixed_family_packets_match_sharded_server_and_live_redis() {
+    let binary = std::env::var_os("FR_URING_FR_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_frankenredis")));
+    let redis_binary = std::env::var_os("FR_URING_REDIS_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../legacy_redis_code/redis/src/redis-server")
+        });
+    assert!(binary.is_file(), "missing {}", binary.display());
+    assert!(redis_binary.is_file(), "missing {}", redis_binary.display());
+
+    let server_cpu = *allowed_cpus()
+        .first()
+        .expect("live mixed-family smoke requires one allowed CPU");
+    let root = unique_root();
+    let client_shape = ClientShape {
+        connections: 8,
+        driver_threads: 2,
+    };
+    let keys = tagged_shard_keys(client_shape.connections, 2, false);
+    let (packets, setup) = DriverPackets::keyed_mixed_families(16, &keys);
+    let packets = Arc::new(packets);
+
+    for (arm, workers, force_io_uring_output) in
+        [(Arm::IoUring, Some(2), true), (Arm::Redis, None, false)]
+    {
+        let mut server = Server::spawn_with_options(
+            &binary,
+            &redis_binary,
+            arm,
+            &root,
+            &[server_cpu],
+            client_shape,
+            CommandFloorAb::None,
+            workers,
+            force_io_uring_output,
+        );
+        for case in &setup {
+            exchange_one(&mut server, &case.request, &case.response);
+        }
+        let worker_cpu_before = workers.map(|_| server.sharded_worker_cpu_ns());
+        server
+            .clients
+            .as_ref()
+            .expect("live mixed-family clients initialized")
+            .run(&packets, 32, false);
+        if let (Some(expected), Some(before)) = (workers, worker_cpu_before) {
+            server.assert_sharded_set_get_workers_reached_process(expected);
+            server.assert_flag_reached_process();
+            let after = server.sharded_worker_cpu_ns();
+            assert_eq!(
+                active_sharded_worker_count(&before, &after),
+                expected,
+                "balanced mixed-family smoke must execute on every candidate worker"
+            );
+        }
+        println!(
+            "MIXED_FAMILY_LIVE_PARITY arm={} pid={} sha256={} \
+process_threads_observed={} command_execution_threads_actual={} \
+connections_actual={} client_driver_threads_actual={} \
+commands_per_pipeline=16 groups=32 full_response_bytes_asserted=true",
+            arm.name(),
+            server.pid(),
+            server.executing_elf_sha256(),
+            server.observed_thread_count(),
+            workers.unwrap_or(1),
+            client_shape.connections,
+            client_shape.driver_threads
+        );
+    }
 }
 
 fn active_sharded_worker_count(before: &HashMap<u32, u64>, after: &HashMap<u32, u64>) -> usize {
@@ -5328,7 +5666,7 @@ fn dominant_libc_leaf_offsets_reach_specific_inlined_callers() {
 }
 
 #[test]
-#[ignore = "trj-only full server command-execution thread sweep; run explicitly"]
+#[ignore = "host-wide full server command-execution thread sweep; run explicitly"]
 fn sharded_set_get_server_thread_sweep_same_invocation() {
     let binary = std::env::var_os("FR_URING_FR_BIN")
         .map(PathBuf::from)
@@ -5384,19 +5722,36 @@ cv_provenance_only=true never_cv_gate=true"
     let hostname = command_output("hostname", &[]);
     assert!(hostname.status.success(), "hostname failed");
     let hostname = String::from_utf8_lossy(&hostname.stdout).trim().to_owned();
-    assert_eq!(
-        hostname, "threadripperje",
-        "server thread scaling must execute on trj/threadripperje"
-    );
     let (physical_cores, logical_threads) = machine_topology();
     let ram_kib = machine_ram_kib();
     let numa_nodes = machine_numa_nodes();
-    assert_eq!(
-        (physical_cores, logical_threads),
-        (64, 128),
-        "trj topology changed; do not publish ambiguous scaling evidence"
+    let allow_remote_host = parse_bool_env("FR_SHARDED_ALLOW_REMOTE_HOST");
+    if allow_remote_host {
+        assert!(
+            physical_cores >= 4 && logical_threads >= 4,
+            "remote host must expose at least four physical/logical CPUs: \
+host={hostname} physical={physical_cores} logical={logical_threads}"
+        );
+    } else {
+        assert_eq!(
+            hostname, "threadripperje",
+            "set FR_SHARDED_ALLOW_REMOTE_HOST=1 only for a strict-remote clean-overlay \
+invocation that records the actual host and retains every host-wide guard"
+        );
+        assert_eq!(
+            (physical_cores, logical_threads),
+            (64, 128),
+            "trj topology changed; do not publish ambiguous scaling evidence"
+        );
+    }
+    println!(
+        "SCALING_HOST_CONTRACT host_identity={hostname} \
+trj_required={} strict_remote_host_mode={} \
+physical_cores={physical_cores} logical_threads={logical_threads}",
+        !allow_remote_host, allow_remote_host
     );
     let server_thread_counts = parse_sharded_server_thread_counts();
+    let workloads = parse_sharded_workloads();
     let samples = parse_usize_env("FR_SHARDED_SAMPLES", DEFAULT_SAMPLES);
     assert!(samples >= 24, "sharded sweep requires at least 24 samples");
     assert!(
@@ -5448,6 +5803,7 @@ process cpuset has {} of {logical_threads}",
 physical_cores={physical_cores} logical_threads={logical_threads} \
 ram_kib={ram_kib} numa_nodes={numa_nodes} \
 server_thread_counts_requested={server_thread_counts:?} \
+workloads_requested={workloads:?} \
 client_driver_threads_actual={client_threads} client_connections={clients} \
 runtime_detected_isa={} process_cpuset_cap={process_cpuset_cap:?} \
 client_affinity={client_affinity:?} redis_affinity_cpu={server_core} \
@@ -5600,15 +5956,25 @@ campaign_multicore_scaling_result=true",
             servers[DualNullArm::RedisB.index()].affinity_cpus()
         );
         println!(
-            "ARM_SEMANTICS candidate_a=key_sharded_exact_set_get_io_uring \
-candidate_b=key_sharded_exact_set_get_io_uring \
+            "ARM_SEMANTICS candidate_a=key_sharded_supported_single_key_commands_io_uring \
+candidate_b=key_sharded_supported_single_key_commands_io_uring \
 incumbent_a=vendored_redis_7.2.4 incumbent_b=vendored_redis_7.2.4"
         );
 
         let independent_keys = balanced_shard_keys(clients, server_workers);
-        for workload in [Workload::Set, Workload::Mixed] {
-            let packets = Arc::new(DriverPackets::keyed(workload, pipeline, &independent_keys));
-            if matches!(workload, Workload::Mixed) {
+        for workload in workloads.iter().copied() {
+            let (packets, server_setup) = if matches!(workload, Workload::MixedFamilies) {
+                let family_keys = tagged_shard_keys(clients, server_workers, false);
+                DriverPackets::keyed_mixed_families(pipeline, &family_keys)
+            } else {
+                (
+                    DriverPackets::keyed(workload, pipeline, &independent_keys),
+                    Vec::new(),
+                )
+            };
+            apply_server_setup(&mut servers, &server_setup);
+            let packets = Arc::new(packets);
+            if matches!(workload, Workload::Mixed | Workload::MixedFamilies) {
                 profile_sharded_set_get_path(
                     &mut servers[DualNullArm::CandidateA.index()],
                     &point_root,
@@ -5617,6 +5983,14 @@ incumbent_a=vendored_redis_7.2.4 incumbent_b=vendored_redis_7.2.4"
                     pipeline,
                     server_workers,
                     &packets,
+                );
+            }
+            if matches!(workload, Workload::MixedFamilies) {
+                println!(
+                    "MIXED_FAMILY_WORKLOAD_CONTRACT pipeline={pipeline} \
+commands_per_pipeline=16 set=2 get=2 incr=2 lpush=2 lpop=2 hset=3 hget=3 \
+distinct_type_keys_per_connection=3 same_shard_per_connection=true \
+full_response_bytes_asserted=true state_closed_between_groups=true"
                 );
             }
             let candidate_worker_cpu_ns_before = [
@@ -5684,67 +6058,147 @@ server_command_execution_threads={server_workers} verdict={verdict:?}",
             ));
         }
 
-        let hot_keys = vec![b"mc:hot-key".to_vec(); clients];
-        let hot_packets = Arc::new(DriverPackets::keyed(Workload::Mixed, pipeline, &hot_keys));
-        let candidate_worker_cpu_ns_before = [
-            servers[DualNullArm::CandidateA.index()].sharded_worker_cpu_ns(),
-            servers[DualNullArm::CandidateB.index()].sharded_worker_cpu_ns(),
-        ];
-        let hot_measured = measure_dual_null_configuration_with_packets(
-            &mut servers,
-            Workload::Mixed,
-            pipeline,
-            measurement,
-            hot_packets,
-            PacketMeasurement {
-                prepare_keyed: true,
-                workload_shape: "single_hot_key_control",
-                host_wide_allowed_cpus: Some(&process_cpuset_cap),
-            },
-        );
-        let candidate_worker_cpu_ns_after = [
-            servers[DualNullArm::CandidateA.index()].sharded_worker_cpu_ns(),
-            servers[DualNullArm::CandidateB.index()].sharded_worker_cpu_ns(),
-        ];
-        let active_workers = [
-            active_sharded_worker_count(
-                &candidate_worker_cpu_ns_before[0],
-                &candidate_worker_cpu_ns_after[0],
-            ),
-            active_sharded_worker_count(
-                &candidate_worker_cpu_ns_before[1],
-                &candidate_worker_cpu_ns_after[1],
-            ),
-        ];
-        assert!(
-            active_workers.iter().all(|active| *active == 1),
-            "single-hot-key control must execute on exactly one shard in both candidate A/A \
+        if workloads.contains(&Workload::Mixed) {
+            let hot_keys = vec![b"mc:hot-key".to_vec(); clients];
+            let hot_packets = Arc::new(DriverPackets::keyed(Workload::Mixed, pipeline, &hot_keys));
+            let candidate_worker_cpu_ns_before = [
+                servers[DualNullArm::CandidateA.index()].sharded_worker_cpu_ns(),
+                servers[DualNullArm::CandidateB.index()].sharded_worker_cpu_ns(),
+            ];
+            let hot_measured = measure_dual_null_configuration_with_packets(
+                &mut servers,
+                Workload::Mixed,
+                pipeline,
+                measurement,
+                hot_packets,
+                PacketMeasurement {
+                    prepare_keyed: true,
+                    workload_shape: "single_hot_key_control",
+                    host_wide_allowed_cpus: Some(&process_cpuset_cap),
+                },
+            );
+            let candidate_worker_cpu_ns_after = [
+                servers[DualNullArm::CandidateA.index()].sharded_worker_cpu_ns(),
+                servers[DualNullArm::CandidateB.index()].sharded_worker_cpu_ns(),
+            ];
+            let active_workers = [
+                active_sharded_worker_count(
+                    &candidate_worker_cpu_ns_before[0],
+                    &candidate_worker_cpu_ns_after[0],
+                ),
+                active_sharded_worker_count(
+                    &candidate_worker_cpu_ns_before[1],
+                    &candidate_worker_cpu_ns_after[1],
+                ),
+            ];
+            assert!(
+                active_workers.iter().all(|active| *active == 1),
+                "single-hot-key control must execute on exactly one shard in both candidate A/A \
 arms: active={active_workers:?}"
-        );
-        println!(
-            "COUNTED_MECHANISM workload=mixed workload_shape=single_hot_key_control \
+            );
+            println!(
+                "COUNTED_MECHANISM workload=mixed workload_shape=single_hot_key_control \
 server_command_execution_threads={server_workers} \
 candidate_a_active_command_workers={} candidate_b_active_command_workers={} \
 thread_count_actually_used_candidate_a={} thread_count_actually_used_candidate_b={} \
 semantic_commands_per_arm_sample={} queue_envelope_commands_per_same_shard_batch={pipeline}",
-            active_workers[0],
-            active_workers[1],
-            active_workers[0],
-            active_workers[1],
-            groups_per_arm_sample * clients * pipeline
-        );
-        let hot_verdict =
-            adjudicate_dual_null(Workload::Mixed, pipeline, client_threads, &hot_measured);
-        println!(
-            "SHARDED_SWEEP_VERDICT workload=mixed workload_shape=single_hot_key_control \
+                active_workers[0],
+                active_workers[1],
+                active_workers[0],
+                active_workers[1],
+                groups_per_arm_sample * clients * pipeline
+            );
+            let hot_verdict =
+                adjudicate_dual_null(Workload::Mixed, pipeline, client_threads, &hot_measured);
+            println!(
+                "SHARDED_SWEEP_VERDICT workload=mixed workload_shape=single_hot_key_control \
 server_command_execution_threads={server_workers} verdict={hot_verdict:?}"
-        );
-        verdicts.push((
-            server_workers,
-            Workload::Mixed.name(),
-            "single_hot_key_control",
-            hot_verdict,
-        ));
+            );
+            verdicts.push((
+                server_workers,
+                Workload::Mixed.name(),
+                "single_hot_key_control",
+                hot_verdict,
+            ));
+        }
+        if workloads.contains(&Workload::MixedFamilies) {
+            let hot_shard_keys = tagged_shard_keys(clients, server_workers, true);
+            let (hot_packets, server_setup) =
+                DriverPackets::keyed_mixed_families(pipeline, &hot_shard_keys);
+            apply_server_setup(&mut servers, &server_setup);
+            let hot_packets = Arc::new(hot_packets);
+            println!(
+                "MIXED_FAMILY_HOT_CONTROL_CONTRACT \
+workload_shape=single_hot_shard_distinct_keys_control \
+connections={clients} distinct_keys_per_connection=3 \
+all_keys_route_to_one_command_worker=true full_response_bytes_asserted=true"
+            );
+            let candidate_worker_cpu_ns_before = [
+                servers[DualNullArm::CandidateA.index()].sharded_worker_cpu_ns(),
+                servers[DualNullArm::CandidateB.index()].sharded_worker_cpu_ns(),
+            ];
+            let hot_measured = measure_dual_null_configuration_with_packets(
+                &mut servers,
+                Workload::MixedFamilies,
+                pipeline,
+                measurement,
+                hot_packets,
+                PacketMeasurement {
+                    prepare_keyed: true,
+                    workload_shape: "single_hot_shard_distinct_keys_control",
+                    host_wide_allowed_cpus: Some(&process_cpuset_cap),
+                },
+            );
+            let candidate_worker_cpu_ns_after = [
+                servers[DualNullArm::CandidateA.index()].sharded_worker_cpu_ns(),
+                servers[DualNullArm::CandidateB.index()].sharded_worker_cpu_ns(),
+            ];
+            let active_workers = [
+                active_sharded_worker_count(
+                    &candidate_worker_cpu_ns_before[0],
+                    &candidate_worker_cpu_ns_after[0],
+                ),
+                active_sharded_worker_count(
+                    &candidate_worker_cpu_ns_before[1],
+                    &candidate_worker_cpu_ns_after[1],
+                ),
+            ];
+            assert!(
+                active_workers.iter().all(|active| *active == 1),
+                "single-hot-shard mixed-family control must execute on exactly one shard in \
+both candidate A/A arms: active={active_workers:?}"
+            );
+            println!(
+                "COUNTED_MECHANISM workload=mixed-families \
+workload_shape=single_hot_shard_distinct_keys_control \
+server_command_execution_threads={server_workers} \
+candidate_a_active_command_workers={} candidate_b_active_command_workers={} \
+thread_count_actually_used_candidate_a={} thread_count_actually_used_candidate_b={} \
+semantic_commands_per_arm_sample={} queue_envelope_commands_per_same_shard_batch={pipeline}",
+                active_workers[0],
+                active_workers[1],
+                active_workers[0],
+                active_workers[1],
+                groups_per_arm_sample * clients * pipeline
+            );
+            let hot_verdict = adjudicate_dual_null(
+                Workload::MixedFamilies,
+                pipeline,
+                client_threads,
+                &hot_measured,
+            );
+            println!(
+                "SHARDED_SWEEP_VERDICT workload=mixed-families \
+workload_shape=single_hot_shard_distinct_keys_control \
+server_command_execution_threads={server_workers} verdict={hot_verdict:?}"
+            );
+            verdicts.push((
+                server_workers,
+                Workload::MixedFamilies.name(),
+                "single_hot_shard_distinct_keys_control",
+                hot_verdict,
+            ));
+        }
     }
     let final_cpu_frequency_policy = cpu_frequency_policy(&process_cpuset_cap);
     print_cpu_frequency_policy(

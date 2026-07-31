@@ -24,9 +24,11 @@
 # --enable-debug-command.
 #
 # This harness still runs only a SET-then-GET job. Every row it prints is scoped
-# to SET/GET and is not a realistic mixed-command claim. A future mixed driver
-# must interleave the supported string/list/hash commands against both live
-# server arms in one invocation before quoting a broader result.
+# to SET/GET and is not a realistic mixed-command claim. The admissible
+# string/list/hash driver is the ignored
+# `sharded_set_get_server_thread_sweep_same_invocation` Rust integration test
+# with `FR_SHARDED_WORKLOADS=mixed-families`; it uses candidate and incumbent
+# A/A arms, exact RESP replies, and complete 24-order cycles.
 #
 # FAIRNESS
 # --------
