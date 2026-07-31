@@ -170,6 +170,31 @@ const HVALS_FIELDS: &[u8] = b"*2\r\n$5\r\nHVALS\r\n$1\r\nh\r\n";
 const HGETALL_FIELDS: &[u8] = b"*2\r\n$7\r\nHGETALL\r\n$1\r\nh\r\n";
 const HSCAN_ALL_FIELDS: &[u8] =
     b"*5\r\n$5\r\nHSCAN\r\n$1\r\nh\r\n$1\r\n0\r\n$5\r\nCOUNT\r\n$4\r\n1000\r\n";
+const SCAN0_MEMBERS: usize = 16;
+const SSCAN_CURSOR_ZERO: &[u8] = b"*3\r\n$5\r\nSSCAN\r\n$2\r\ns0\r\n$1\r\n0\r\n";
+const HSCAN_CURSOR_ZERO: &[u8] = b"*3\r\n$5\r\nHSCAN\r\n$2\r\nh0\r\n$1\r\n0\r\n";
+const ZSCAN_CURSOR_ZERO: &[u8] = b"*3\r\n$5\r\nZSCAN\r\n$2\r\nz0\r\n$1\r\n0\r\n";
+const SCAN0_CARD_REPLY: &[u8] = b":16\r\n";
+const SSCAN0_CARD: &[u8] = b"*2\r\n$5\r\nSCARD\r\n$2\r\ns0\r\n";
+const HSCAN0_CARD: &[u8] = b"*2\r\n$4\r\nHLEN\r\n$2\r\nh0\r\n";
+const ZSCAN0_CARD: &[u8] = b"*2\r\n$5\r\nZCARD\r\n$2\r\nz0\r\n";
+const SSCAN0_ENCODING: &[u8] = b"*3\r\n$6\r\nOBJECT\r\n$8\r\nENCODING\r\n$2\r\ns0\r\n";
+const HSCAN0_ENCODING: &[u8] = b"*3\r\n$6\r\nOBJECT\r\n$8\r\nENCODING\r\n$2\r\nh0\r\n";
+const ZSCAN0_ENCODING: &[u8] = b"*3\r\n$6\r\nOBJECT\r\n$8\r\nENCODING\r\n$2\r\nz0\r\n";
+const SSCAN0_ENCODING_REPLY: &[u8] = b"$6\r\nintset\r\n";
+const SCAN0_LISTPACK_ENCODING_REPLY: &[u8] = b"$8\r\nlistpack\r\n";
+const SSCAN0_BOUNDARIES: &[u8] = b"*6\r\n$11\r\nSMISMEMBER\r\n$2\r\ns0\r\n\
+$2\r\n-1\r\n$1\r\n0\r\n$2\r\n15\r\n$2\r\n16\r\n";
+const SSCAN0_BOUNDARIES_REPLY: &[u8] = b"*4\r\n:0\r\n:1\r\n:1\r\n:0\r\n";
+const HSCAN0_BOUNDARIES: &[u8] =
+    b"*5\r\n$5\r\nHMGET\r\n$2\r\nh0\r\n$3\r\nf00\r\n$3\r\nf15\r\n$6\r\nabsent\r\n";
+const HSCAN0_BOUNDARIES_REPLY: &[u8] = b"*3\r\n$3\r\nv00\r\n$3\r\nv15\r\n$-1\r\n";
+const ZSCAN0_BOUNDARIES: &[u8] =
+    b"*5\r\n$7\r\nZMSCORE\r\n$2\r\nz0\r\n$3\r\nm00\r\n$3\r\nm15\r\n$6\r\nabsent\r\n";
+const ZSCAN0_BOUNDARIES_REPLY: &[u8] = b"*3\r\n$1\r\n0\r\n$2\r\n15\r\n$-1\r\n";
+const SSCAN0_PTTL: &[u8] = b"*2\r\n$4\r\nPTTL\r\n$2\r\ns0\r\n";
+const HSCAN0_PTTL: &[u8] = b"*2\r\n$4\r\nPTTL\r\n$2\r\nh0\r\n";
+const ZSCAN0_PTTL: &[u8] = b"*2\r\n$4\r\nPTTL\r\n$2\r\nz0\r\n";
 const HSET_SAME_VALUE: &[u8] = b"*4\r\n$4\r\nHSET\r\n$1\r\nh\r\n$4\r\nf250\r\n$1\r\n1\r\n";
 const HSET_SAME_VALUE_REPLY: &[u8] = b":0\r\n";
 const HSETNX_EXISTING_FIELD: &[u8] = b"*4\r\n$6\r\nHSETNX\r\n$1\r\nh\r\n$4\r\nf250\r\n$1\r\nv\r\n";
@@ -412,6 +437,9 @@ enum Workload {
     HvalsFields,
     HgetallFields,
     HscanAllFields,
+    SscanCursorZero,
+    HscanCursorZero,
+    ZscanCursorZero,
     HsetSameValue,
     HsetnxExistingField,
     HincrbyZeroDelta,
@@ -495,6 +523,9 @@ impl Workload {
             Self::HvalsFields => "hvals-fields",
             Self::HgetallFields => "hgetall-fields",
             Self::HscanAllFields => "hscan-all-fields",
+            Self::SscanCursorZero => "sscan-cursor-zero",
+            Self::HscanCursorZero => "hscan-cursor-zero",
+            Self::ZscanCursorZero => "zscan-cursor-zero",
             Self::HsetSameValue => "hset-same-value",
             Self::HsetnxExistingField => "hsetnx-existing-field",
             Self::HincrbyZeroDelta => "hincrby-zero-delta",
@@ -870,6 +901,30 @@ impl Workload {
                 "fr_store::packed_set::CompactFieldMap::get_index",
                 "<fr_protocol::RespFrame>::encode_into",
             ],
+            Self::SscanCursorZero => &[
+                "frankenredis::process_buffered_frames",
+                "__memcmp_avx2_movbe",
+                "parse_borrowed_plain_key_arg1_packet",
+                "execute_plain_sscan0_borrowed_into",
+                "fr_store::Store::sscan0_borrow_scan",
+                "fr_protocol::encode_bulk_string_slice",
+            ],
+            Self::HscanCursorZero => &[
+                "frankenredis::process_buffered_frames",
+                "__memcmp_avx2_movbe",
+                "parse_borrowed_plain_key_arg1_packet",
+                "execute_plain_hscan0_borrowed_into",
+                "fr_store::Store::hscan0_borrow_scan",
+                "fr_protocol::encode_bulk_string_slice",
+            ],
+            Self::ZscanCursorZero => &[
+                "frankenredis::process_buffered_frames",
+                "__memcmp_avx2_movbe",
+                "parse_borrowed_plain_key_arg1_packet",
+                "execute_plain_zscan0_borrowed_into",
+                "fr_store::Store::zscan0_borrow_scan",
+                "fr_protocol::encode_bulk_string_slice",
+            ],
             Self::HsetSameValue => &[
                 "frankenredis::process_buffered_frames",
                 "__memcmp_avx2_movbe",
@@ -1154,6 +1209,9 @@ impl Workload {
                 "hvals-fields" => Self::HvalsFields,
                 "hgetall-fields" => Self::HgetallFields,
                 "hscan-all-fields" => Self::HscanAllFields,
+                "sscan-cursor-zero" => Self::SscanCursorZero,
+                "hscan-cursor-zero" => Self::HscanCursorZero,
+                "zscan-cursor-zero" => Self::ZscanCursorZero,
                 "hset-same-value" => Self::HsetSameValue,
                 "hsetnx-existing-field" => Self::HsetnxExistingField,
                 "hincrby-zero-delta" => Self::HincrbyZeroDelta,
@@ -1609,6 +1667,17 @@ impl WorkloadPackets {
             Workload::HscanAllFields => {
                 let response = hscan_all_fields_reply();
                 let case = repeated_case(HSCAN_ALL_FIELDS, &response, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::SscanCursorZero | Workload::HscanCursorZero | Workload::ZscanCursorZero => {
+                let (request, response) = scan0_request_reply(workload);
+                let case = repeated_case(request, &response, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -2795,6 +2864,123 @@ fn hscan_all_fields_reply() -> Vec<u8> {
     response
 }
 
+fn scan0_prefill(workload: Workload) -> ExchangeCase {
+    let key: &[u8] = match workload {
+        Workload::SscanCursorZero => b"s0",
+        Workload::HscanCursorZero => b"h0",
+        Workload::ZscanCursorZero => b"z0",
+        _ => unreachable!("compact scan fixture requires a cursor-zero scan workload"),
+    };
+    let mut request = resp_command(&[b"SET", key, b"seed"]);
+    request.extend_from_slice(&resp_command(&[b"DEL", key]));
+
+    match workload {
+        Workload::SscanCursorZero => {
+            request.extend_from_slice(format!("*{}\r\n", SCAN0_MEMBERS + 2).as_bytes());
+            push_resp_bulk(&mut request, b"SADD");
+            push_resp_bulk(&mut request, key);
+            for index in 0..SCAN0_MEMBERS {
+                push_resp_bulk(&mut request, index.to_string().as_bytes());
+            }
+        }
+        Workload::HscanCursorZero => {
+            request.extend_from_slice(format!("*{}\r\n", SCAN0_MEMBERS * 2 + 2).as_bytes());
+            push_resp_bulk(&mut request, b"HSET");
+            push_resp_bulk(&mut request, key);
+            for index in 0..SCAN0_MEMBERS {
+                push_resp_bulk(&mut request, format!("f{index:02}").as_bytes());
+                push_resp_bulk(&mut request, format!("v{index:02}").as_bytes());
+            }
+        }
+        Workload::ZscanCursorZero => {
+            request.extend_from_slice(format!("*{}\r\n", SCAN0_MEMBERS * 2 + 2).as_bytes());
+            push_resp_bulk(&mut request, b"ZADD");
+            push_resp_bulk(&mut request, key);
+            for index in 0..SCAN0_MEMBERS {
+                push_resp_bulk(&mut request, index.to_string().as_bytes());
+                push_resp_bulk(&mut request, format!("m{index:02}").as_bytes());
+            }
+        }
+        _ => unreachable!("compact scan fixture requires a cursor-zero scan workload"),
+    }
+
+    ExchangeCase {
+        request,
+        response: format!("+OK\r\n:1\r\n:{SCAN0_MEMBERS}\r\n").into_bytes(),
+    }
+}
+
+fn sscan_cursor_zero_reply() -> Vec<u8> {
+    let mut response = format!("*2\r\n$1\r\n0\r\n*{SCAN0_MEMBERS}\r\n").into_bytes();
+    for index in 0..SCAN0_MEMBERS {
+        push_resp_bulk(&mut response, index.to_string().as_bytes());
+    }
+    response
+}
+
+fn hscan_cursor_zero_reply() -> Vec<u8> {
+    let mut response = format!("*2\r\n$1\r\n0\r\n*{}\r\n", SCAN0_MEMBERS * 2).into_bytes();
+    for index in 0..SCAN0_MEMBERS {
+        push_resp_bulk(&mut response, format!("f{index:02}").as_bytes());
+        push_resp_bulk(&mut response, format!("v{index:02}").as_bytes());
+    }
+    response
+}
+
+fn zscan_cursor_zero_reply() -> Vec<u8> {
+    let mut response = format!("*2\r\n$1\r\n0\r\n*{}\r\n", SCAN0_MEMBERS * 2).into_bytes();
+    for index in 0..SCAN0_MEMBERS {
+        push_resp_bulk(&mut response, format!("m{index:02}").as_bytes());
+        push_resp_bulk(&mut response, index.to_string().as_bytes());
+    }
+    response
+}
+
+fn scan0_request_reply(workload: Workload) -> (&'static [u8], Vec<u8>) {
+    match workload {
+        Workload::SscanCursorZero => (SSCAN_CURSOR_ZERO, sscan_cursor_zero_reply()),
+        Workload::HscanCursorZero => (HSCAN_CURSOR_ZERO, hscan_cursor_zero_reply()),
+        Workload::ZscanCursorZero => (ZSCAN_CURSOR_ZERO, zscan_cursor_zero_reply()),
+        _ => unreachable!("compact scan fixture requires a cursor-zero scan workload"),
+    }
+}
+
+fn assert_scan0_fixture(server: &mut Server, workload: Workload) {
+    let (card, encoding, encoding_reply, boundaries, boundaries_reply, pttl) = match workload {
+        Workload::SscanCursorZero => (
+            SSCAN0_CARD,
+            SSCAN0_ENCODING,
+            SSCAN0_ENCODING_REPLY,
+            SSCAN0_BOUNDARIES,
+            SSCAN0_BOUNDARIES_REPLY,
+            SSCAN0_PTTL,
+        ),
+        Workload::HscanCursorZero => (
+            HSCAN0_CARD,
+            HSCAN0_ENCODING,
+            SCAN0_LISTPACK_ENCODING_REPLY,
+            HSCAN0_BOUNDARIES,
+            HSCAN0_BOUNDARIES_REPLY,
+            HSCAN0_PTTL,
+        ),
+        Workload::ZscanCursorZero => (
+            ZSCAN0_CARD,
+            ZSCAN0_ENCODING,
+            SCAN0_LISTPACK_ENCODING_REPLY,
+            ZSCAN0_BOUNDARIES,
+            ZSCAN0_BOUNDARIES_REPLY,
+            ZSCAN0_PTTL,
+        ),
+        _ => unreachable!("compact scan fixture requires a cursor-zero scan workload"),
+    };
+    exchange_one(server, card, SCAN0_CARD_REPLY);
+    exchange_one(server, encoding, encoding_reply);
+    exchange_one(server, boundaries, boundaries_reply);
+    exchange_one(server, pttl, PTTL_PERSISTENT_REPLY);
+    let (request, response) = scan0_request_reply(workload);
+    exchange_one(server, request, &response);
+}
+
 fn zrangebylex_range_reply() -> Vec<u8> {
     let count = ZRANGEBYLEX_RANGE_END - ZRANGEBYLEX_RANGE_START + 1;
     let mut response = format!("*{count}\r\n").into_bytes();
@@ -3301,6 +3487,29 @@ derived_listpack_bytes=3007",
                     LINDEX_MIDDLE_ELEMENTS
                 );
             }
+        } else if matches!(
+            workload,
+            Workload::SscanCursorZero | Workload::HscanCursorZero | Workload::ZscanCursorZero
+        ) {
+            let case = scan0_prefill(workload);
+            exchange_one(server, &case.request, &case.response);
+            assert_scan0_fixture(server, workload);
+            let (request, response) = scan0_request_reply(workload);
+            exchange_one(server, request, &response);
+            let compact_encoding = if matches!(workload, Workload::SscanCursorZero) {
+                "intset"
+            } else {
+                "listpack"
+            };
+            println!(
+                "FIXTURE_REPRESENTATION workload={} arm={} members={} \
+literal_cursor=0 options=none default_count=10 returned_cursor=0 \
+encoding={compact_encoding} pttl=-1 boundary_membership=verified \
+full_response_bytes_asserted=true steady_state_scan=warmed_by_two_exact_assertions",
+                workload.name(),
+                server.arm.name(),
+                SCAN0_MEMBERS
+            );
         } else if matches!(
             workload,
             Workload::HdelMissingField
@@ -6091,6 +6300,57 @@ fn zinter_two_key_packet_has_exact_2048_member_reply() {
 }
 
 #[test]
+fn sscan_cursor_zero_packet_has_exact_complete_reply() {
+    let single_reply = sscan_cursor_zero_reply();
+    assert!(single_reply.starts_with(b"*2\r\n$1\r\n0\r\n*16\r\n$1\r\n0\r\n"));
+    assert!(single_reply.ends_with(b"$2\r\n15\r\n"));
+
+    let packets = WorkloadPackets::new(Workload::SscanCursorZero, 2);
+    let mut expected_request = SSCAN_CURSOR_ZERO.to_vec();
+    expected_request.extend_from_slice(SSCAN_CURSOR_ZERO);
+    let mut expected_response = single_reply.clone();
+    expected_response.extend_from_slice(&single_reply);
+    assert_eq!(packets.even.request, expected_request);
+    assert_eq!(packets.even.response, expected_response);
+    assert_eq!(packets.odd.request, packets.even.request);
+    assert_eq!(packets.odd.response, packets.even.response);
+}
+
+#[test]
+fn hscan_cursor_zero_packet_has_exact_complete_reply() {
+    let single_reply = hscan_cursor_zero_reply();
+    assert!(single_reply.starts_with(b"*2\r\n$1\r\n0\r\n*32\r\n$3\r\nf00\r\n$3\r\nv00\r\n"));
+    assert!(single_reply.ends_with(b"$3\r\nf15\r\n$3\r\nv15\r\n"));
+
+    let packets = WorkloadPackets::new(Workload::HscanCursorZero, 2);
+    let mut expected_request = HSCAN_CURSOR_ZERO.to_vec();
+    expected_request.extend_from_slice(HSCAN_CURSOR_ZERO);
+    let mut expected_response = single_reply.clone();
+    expected_response.extend_from_slice(&single_reply);
+    assert_eq!(packets.even.request, expected_request);
+    assert_eq!(packets.even.response, expected_response);
+    assert_eq!(packets.odd.request, packets.even.request);
+    assert_eq!(packets.odd.response, packets.even.response);
+}
+
+#[test]
+fn zscan_cursor_zero_packet_has_exact_complete_reply() {
+    let single_reply = zscan_cursor_zero_reply();
+    assert!(single_reply.starts_with(b"*2\r\n$1\r\n0\r\n*32\r\n$3\r\nm00\r\n$1\r\n0\r\n"));
+    assert!(single_reply.ends_with(b"$3\r\nm15\r\n$2\r\n15\r\n"));
+
+    let packets = WorkloadPackets::new(Workload::ZscanCursorZero, 2);
+    let mut expected_request = ZSCAN_CURSOR_ZERO.to_vec();
+    expected_request.extend_from_slice(ZSCAN_CURSOR_ZERO);
+    let mut expected_response = single_reply.clone();
+    expected_response.extend_from_slice(&single_reply);
+    assert_eq!(packets.even.request, expected_request);
+    assert_eq!(packets.even.response, expected_response);
+    assert_eq!(packets.odd.request, packets.even.request);
+    assert_eq!(packets.odd.response, packets.even.response);
+}
+
+#[test]
 fn zrangebylex_range_packet_has_exact_inclusive_reply() {
     let single_reply = zrangebylex_range_reply();
     assert_eq!(single_reply.len(), 11_018);
@@ -6583,6 +6843,24 @@ fn zinter_two_key_dual_null_vs_redis() {
     run_exact_dual_null_vs_redis(Workload::ZinterTwoKey);
 }
 
+#[test]
+#[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
+fn sscan_cursor_zero_dual_null_vs_redis() {
+    run_exact_dual_null_vs_redis(Workload::SscanCursorZero);
+}
+
+#[test]
+#[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
+fn hscan_cursor_zero_dual_null_vs_redis() {
+    run_exact_dual_null_vs_redis(Workload::HscanCursorZero);
+}
+
+#[test]
+#[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
+fn zscan_cursor_zero_dual_null_vs_redis() {
+    run_exact_dual_null_vs_redis(Workload::ZscanCursorZero);
+}
+
 fn run_exact_dual_null_vs_redis(workload: Workload) {
     assert!(
         matches!(
@@ -6598,6 +6876,9 @@ fn run_exact_dual_null_vs_redis(workload: Workload) {
                 | Workload::RpopCountMissing
                 | Workload::ZdiffTwoKey
                 | Workload::ZinterTwoKey
+                | Workload::SscanCursorZero
+                | Workload::HscanCursorZero
+                | Workload::ZscanCursorZero
         ),
         "competitive gate requires an authenticated exact workload"
     );
@@ -6674,6 +6955,12 @@ cv_provenance_only=true never_cv_gate=true"
         "FR_ZDIFF_AB"
     } else if matches!(workload, Workload::ZinterTwoKey) {
         "FR_ZINTER_AB"
+    } else if matches!(workload, Workload::SscanCursorZero) {
+        "FR_SSCAN0_AB"
+    } else if matches!(workload, Workload::HscanCursorZero) {
+        "FR_HSCAN0_AB"
+    } else if matches!(workload, Workload::ZscanCursorZero) {
+        "FR_ZSCAN0_AB"
     } else {
         "FR_ZRANGEBYLEX_AB"
     };
@@ -6842,6 +7129,13 @@ incumbent_b=vendored_redis_7.2.4"
         "overlapping_4096_member_skiplist_sources_2048_member_difference"
     } else if matches!(workload, Workload::ZinterTwoKey) {
         "overlapping_4096_member_skiplist_sources_2048_member_intersection"
+    } else if matches!(workload, Workload::SscanCursorZero) {
+        "literal_cursor_zero_no_options_16_member_intset_single_complete_reply"
+    } else if matches!(
+        workload,
+        Workload::HscanCursorZero | Workload::ZscanCursorZero
+    ) {
+        "literal_cursor_zero_no_options_16_pair_listpack_single_complete_reply"
     } else if matches!(workload, Workload::ZrangebylexRange) {
         "equal_score_2000_member_inclusive_1001_member_ascending_range"
     } else {
@@ -6964,6 +7258,26 @@ source_b_members=4096 source_a_encoding=skiplist source_b_encoding=skiplist \
 source_pttl=-1 boundary_scores=verified result_shape={result_shape} \
 full_response_bytes_asserted=true",
             workload.name()
+        );
+    } else if matches!(
+        workload,
+        Workload::SscanCursorZero | Workload::HscanCursorZero | Workload::ZscanCursorZero
+    ) {
+        for server in &mut servers {
+            assert_scan0_fixture(server, workload);
+        }
+        let compact_encoding = if matches!(workload, Workload::SscanCursorZero) {
+            "intset"
+        } else {
+            "listpack"
+        };
+        println!(
+            "POST_MEASUREMENT_STATE workload={} arms=4 members={} \
+literal_cursor=0 options=none default_count=10 returned_cursor=0 \
+encoding={compact_encoding} pttl=-1 boundary_membership=verified \
+full_response_bytes_asserted=true",
+            workload.name(),
+            SCAN0_MEMBERS
         );
     }
     let verdict = adjudicate_dual_null(workload, pipeline, client_threads, &samples);
