@@ -79,6 +79,41 @@ i.e. **null** — which is the correct shape. There is no parallelism to exploit
 one connection, and a large win there would mean the job was measuring something
 other than concurrency.
 
+## Connection placement, isolated (the hot-key fixture)
+
+Placement was landed as key affinity in b9f2decc7 and then measured against
+round-robin. Both arms are the SAME binary lineage differing only in how an
+accepted socket is placed on a reactor: same partitioned keyspace, same spin
+lock, same 16 reactors, same cpuset, one at a time, **arm order alternating per
+round**. Fixture `-t lpush,lpop,hset -n 300000 -c 64 -P 1` — redis-benchmark
+points all three families at ONE key, the worst case a partitioned design can be
+handed. Harness `scripts/hotkey_routing_ab.sh`.
+
+| round | keyed rps | reactors >5% | round-robin rps | reactors >5% |
+|---|---|---|---|---|
+| 1 | 85,649 | 1/16 | 333,233 | 16/16 |
+| 2 | 83,763 | 1/16 | 299,700 | 16/16 |
+| 3 | 81,853 | 1/16 | 400,000 | 16/16 |
+
+Medians against live redis-server at 239,808 on the same fixture:
+
+| placement | rps | vs live Redis |
+|---|---|---|
+| by first key | 83,763 | **0.3493x** |
+| round-robin | 333,233 | **1.3896x** |
+
+**3.978x from one placement decision.** Key placement makes the entire
+thread-per-core design LOSE to single-threaded redis-server by nearly 3x, because
+every client's first command in a hot-key workload carries the same key and so
+every connection lands on the same reactor. The `reactors` column is the
+mechanism and it is a count, not a stopwatch: one core pegged at ~95% with
+fifteen idle, versus sixteen at ~400% aggregate. The partition lock is not
+implicated — a futex census on this fixture reports 0.0000 waits per operation,
+because only one thread is ever running.
+
+Ask of any connection-placement scheme: *what happens when every client's first
+command is identical?*
+
 ## Two ways to misread this harness, both hit during this run
 
 **1. The client cpuset can be the thing you are measuring.** A first pass used a

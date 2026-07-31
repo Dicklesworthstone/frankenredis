@@ -72,7 +72,6 @@ const SHARDED_SET_GET_MAX_STAGED: usize = SHARDED_SET_GET_TOTAL_QUEUE_BOUND;
 const SHARED_NOTHING_WAKE_TOKEN: Token = Token(0);
 const SHARED_NOTHING_URING_TOKEN: Token = Token(1);
 const SHARED_NOTHING_FIRST_CLIENT_TOKEN: usize = 2;
-const SHARED_NOTHING_ROUTE_BUFFER_LIMIT: usize = 1024 * 1024;
 
 const REPLICA_ACK_INTERVAL_MS: u64 = 1_000;
 const REPLICA_RECONNECT_BACKOFF_MS: u64 = 250;
@@ -1538,41 +1537,49 @@ fn run_shared_nothing_server(
     }
 }
 
+/// Hand each accepted socket to the next reactor, round-robin.
+///
+/// WHY NOT ROUTE BY THE FIRST KEY. Placing a connection on the reactor that
+/// hashes its first key was necessary only while a reactor OWNED that key's
+/// partition. Now that partitions are separate `Mutex<Runtime>` reachable from
+/// any reactor, key placement buys nothing and costs everything: in a hot-key
+/// workload every client's first command carries the SAME key, so every
+/// connection lands on the SAME reactor.
+///
+/// Measured 2026-07-31 on this host, both arms identical except this decision,
+/// 16 reactors, `-t lpush,lpop,hset -c 64` (redis-benchmark points all three at
+/// one key), arm order alternated, per-thread CPU census taken while the job ran:
+///
+/// | placement | rps | reactors >5% CPU | vs live redis (170,269) |
+/// |---|---|---|---|
+/// | by first key | 80,174 | **1 of 16** @ ~95% | 0.4709x |
+/// | round-robin | 332,934 | **16 of 16** @ ~500% | **1.9553x** |
+///
+/// 4.152x from one placement decision, and key placement makes the whole
+/// thread-per-core design LOSE to single-threaded redis-server by more than 2x.
+/// The partition lock is not implicated: a futex census on this fixture reports
+/// 0.0000 waits per operation, because only one thread is ever running.
+///
+/// Round-robin also lets the acceptor stop reading and parsing a command before
+/// it can place a socket: accept, hand off, done. The `pending` map, its poll
+/// registrations and the first-command parse all leave the one thread every
+/// connection must pass through.
 fn accept_shared_nothing_connections(
     listener: &mut TcpListener,
-    poll: &mut Poll,
-    pending: &mut HashMap<Token, SharedNothingPendingConnection, foldhash::fast::RandomState>,
-    next_token: &mut usize,
+    workers: &mut SharedNothingWorkerPool,
 ) {
     loop {
         match listener.accept() {
-            Ok((mut stream, peer_addr)) => {
+            Ok((stream, peer_addr)) => {
                 if let Err(err) = stream.set_nodelay(true) {
-                    eprintln!("warn: failed to set TCP_NODELAY on unrouted connection: {err}");
+                    eprintln!("warn: failed to set TCP_NODELAY on accepted connection: {err}");
                 }
-                if *next_token == SHARED_NOTHING_WAKE_TOKEN.0 {
-                    *next_token = SHARED_NOTHING_FIRST_CLIENT_TOKEN;
-                }
-                let token = Token(*next_token);
-                *next_token = next_token.wrapping_add(1);
-                if *next_token == SHARED_NOTHING_WAKE_TOKEN.0 {
-                    *next_token = SHARED_NOTHING_FIRST_CLIENT_TOKEN;
-                }
-                if let Err(err) = poll
-                    .registry()
-                    .register(&mut stream, token, Interest::READABLE)
+                let worker = workers.next_worker();
+                if let Err(err) =
+                    workers.route(worker, SharedNothingRoutedConnection { stream, peer_addr })
                 {
-                    eprintln!("warn: failed to register unrouted connection: {err}");
-                    continue;
+                    eprintln!("warn: failed to route connection to reactor {worker}: {err}");
                 }
-                pending.insert(
-                    token,
-                    SharedNothingPendingConnection {
-                        stream,
-                        peer_addr,
-                        initial_bytes: Vec::with_capacity(4096),
-                    },
-                );
             }
             Err(err) if err.kind() == ErrorKind::WouldBlock => break,
             Err(err) if err.kind() == ErrorKind::Interrupted => continue,
@@ -1581,82 +1588,6 @@ fn accept_shared_nothing_connections(
                 break;
             }
         }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn route_shared_nothing_connection(
-    token: Token,
-    pending: &mut HashMap<Token, SharedNothingPendingConnection, foldhash::fast::RandomState>,
-    poll: &mut Poll,
-    workers: &mut SharedNothingWorkerPool,
-    parser_config: &ParserConfig,
-    read_scratch: &mut [u8],
-) {
-    let mut peer_closed = false;
-    let mut route_limit_exceeded = false;
-    let worker = {
-        let Some(connection) = pending.get_mut(&token) else {
-            return;
-        };
-        loop {
-            match connection.stream.read(&mut *read_scratch) {
-                Ok(0) => {
-                    peer_closed = true;
-                    break;
-                }
-                Ok(n) => {
-                    if connection.initial_bytes.len().saturating_add(n)
-                        > SHARED_NOTHING_ROUTE_BUFFER_LIMIT
-                    {
-                        route_limit_exceeded = true;
-                        break;
-                    }
-                    connection
-                        .initial_bytes
-                        .extend_from_slice(&read_scratch[..n]);
-                    if n < read_scratch.len() {
-                        break;
-                    }
-                }
-                Err(err) if err.kind() == ErrorKind::WouldBlock => break,
-                Err(err) if err.kind() == ErrorKind::Interrupted => continue,
-                Err(_) => {
-                    peer_closed = true;
-                    break;
-                }
-            }
-        }
-        match shared_nothing_route_decision(&connection.initial_bytes, parser_config) {
-            SharedNothingRouteDecision::Incomplete => None,
-            SharedNothingRouteDecision::Keyed(key) => Some(workers.worker_for_key(key)),
-            SharedNothingRouteDecision::Unkeyed => Some(workers.choose_unkeyed_worker()),
-        }
-    };
-
-    if route_limit_exceeded || (peer_closed && worker.is_none()) {
-        if let Some(mut connection) = pending.remove(&token) {
-            let _ = poll.registry().deregister(&mut connection.stream);
-        }
-        return;
-    }
-    let Some(worker) = worker else {
-        return;
-    };
-    let Some(mut connection) = pending.remove(&token) else {
-        return;
-    };
-    if let Err(err) = poll.registry().deregister(&mut connection.stream) {
-        eprintln!("warn: failed to detach connection from acceptor: {err}");
-        return;
-    }
-    let routed = SharedNothingRoutedConnection {
-        stream: connection.stream,
-        peer_addr: connection.peer_addr,
-        initial_bytes: connection.initial_bytes,
-    };
-    if let Err(err) = workers.route(worker, routed) {
-        eprintln!("warn: failed to route connection to reactor {worker}: {err}");
     }
 }
 
@@ -1738,10 +1669,7 @@ fn run_shared_nothing_worker(
             &connections,
             &mut clients,
             &mut runtime,
-            &partitions,
             &mut poll,
-            &mut write_tokens,
-            &mut closing_tokens,
             &mut next_token,
             &mut uring,
         ) {
@@ -1824,16 +1752,12 @@ fn run_shared_nothing_worker(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn install_shared_nothing_connections(
     worker_idx: usize,
     connections: &mpsc::Receiver<SharedNothingRoutedConnection>,
     clients: &mut ClientMap,
     runtime: &mut Runtime,
-    partitions: &KeyspacePartitions,
     poll: &mut Poll,
-    write_tokens: &mut TokenSet,
-    closing_tokens: &mut TokenSet,
     next_token: &mut usize,
     uring: &mut SharedNothingUring,
 ) -> bool {
@@ -1857,7 +1781,6 @@ fn install_shared_nothing_connections(
         let SharedNothingRoutedConnection {
             mut stream,
             peer_addr,
-            initial_bytes,
         } = routed;
         #[cfg(feature = "io-uring-writes")]
         let uring_read_active = uring.receiver.is_some();
@@ -1891,33 +1814,9 @@ fn install_shared_nothing_connections(
         let mut connection = ClientConnection::new_with_writer(stream, None, session, now_ms());
         connection.main_registered = !uring_read_active;
         connection.uring_read_active = uring_read_active;
-        connection.read_buf = initial_bytes;
-        if !connection.read_buf.is_empty() {
-            runtime.note_read_event();
-            runtime.track_net_input_bytes(connection.read_buf.len() as u64);
-        }
-        let output_before = connection.write_buf.len();
-        dispatch_shared_nothing_frames(&mut connection, runtime, partitions, now_ms());
-        runtime.track_net_output_bytes(
-            connection
-                .write_buf
-                .len()
-                .saturating_sub(output_before) as u64,
-        );
-        if connection.has_pending_output() {
-            drive_client_output(
-                token,
-                &mut connection,
-                OutputDriveContext {
-                    runtime,
-                    poll,
-                    write_tokens,
-                    closing_tokens,
-                    writer_pool: None,
-                },
-                true,
-            );
-        }
+        // Nothing has been read from this socket yet -- the acceptor hands over
+        // the bare stream -- so the first readable event does all the work and
+        // no dispatch is needed here.
         clients.insert(token, connection);
     }
 }
