@@ -2,3 +2,4 @@
 legacy_redis_code/
 artifacts/
 .bench-history/
+.worktrees/

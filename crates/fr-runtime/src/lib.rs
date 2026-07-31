@@ -8354,6 +8354,107 @@ impl Runtime {
         self.execute_dispatch(None, Ok(argv), now_ms, Some(unix_time_us))
     }
 
+    /// Minimal command executors for the connection-affine shared-nothing
+    /// server mode.
+    ///
+    /// That mode creates one fresh default `Runtime` per worker and deliberately
+    /// exposes only a small RESP2 command surface: no authentication changes,
+    /// transactions, scripts, persistence, replication, tracking, monitoring,
+    /// notifications, reply suppression, alternate databases, or TTL-creating
+    /// commands can enter the worker. Consequently the general runtime's
+    /// per-command policy scan, packet-id allocation, active-expiry cycle,
+    /// slowlog/latency clocks, and propagation pass are guaranteed no-ops there.
+    /// These entry points preserve the store operation and wire reply while
+    /// deleting that orchestration from the isolated worker hot path.
+    #[inline]
+    pub fn execute_shared_nothing_get_into(&mut self, key: &[u8], now_ms: u64, out: &mut Vec<u8>) {
+        self.server.store.stat_total_commands_processed += 1;
+        match self.server.store.get_string_bytes(key, now_ms) {
+            Ok(value) => encode_bulk_string_slice(value.as_deref(), false, out),
+            Err(err) => CommandError::Store(err).to_resp().encode_into(out),
+        }
+    }
+
+    #[inline]
+    pub fn execute_shared_nothing_set(&mut self, key: &[u8], value: &[u8], now_ms: u64) {
+        self.server.store.stat_total_commands_processed += 1;
+        self.server.store.set_plain_borrowed(key, value, now_ms);
+    }
+
+    #[inline]
+    pub fn execute_shared_nothing_incr_into(&mut self, key: &[u8], now_ms: u64, out: &mut Vec<u8>) {
+        self.server.store.stat_total_commands_processed += 1;
+        let reply = match self.server.store.incr(key, now_ms) {
+            Ok(value) => RespFrame::Integer(value),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        reply.encode_into(out);
+    }
+
+    #[inline]
+    pub fn execute_shared_nothing_lpush_one_into(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) {
+        self.server.store.stat_total_commands_processed += 1;
+        let reply = match self.server.store.lpush(key, &[value], now_ms) {
+            Ok(len) => RespFrame::Integer(i64::try_from(len).unwrap_or(i64::MAX)),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        reply.encode_into(out);
+    }
+
+    #[inline]
+    pub fn execute_shared_nothing_lpop_into(&mut self, key: &[u8], now_ms: u64, out: &mut Vec<u8>) {
+        self.server.store.stat_total_commands_processed += 1;
+        let reply = match self.server.store.lpop(key, now_ms) {
+            Ok(value) => RespFrame::BulkString(value),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        reply.encode_into(out);
+    }
+
+    #[inline]
+    pub fn execute_shared_nothing_hset_one_into(
+        &mut self,
+        key: &[u8],
+        field: &[u8],
+        value: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) {
+        self.server.store.stat_total_commands_processed += 1;
+        let reply = match self
+            .server
+            .store
+            .hset_borrowed(key, field, value.to_vec(), now_ms)
+        {
+            Ok(added) => RespFrame::Integer(i64::from(added)),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        reply.encode_into(out);
+    }
+
+    #[inline]
+    pub fn execute_shared_nothing_hget_into(
+        &mut self,
+        key: &[u8],
+        field: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) {
+        self.server.store.stat_total_commands_processed += 1;
+        let result = self.server.store.hget_with(key, field, now_ms, |value| {
+            encode_bulk_string_slice(value, false, out);
+        });
+        if let Err(err) = result {
+            CommandError::Store(err).to_resp().encode_into(out);
+        }
+    }
+
     pub fn execute_plain_set_borrowed(
         &mut self,
         key: &[u8],
