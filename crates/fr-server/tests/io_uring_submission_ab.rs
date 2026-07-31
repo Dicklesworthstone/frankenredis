@@ -109,11 +109,21 @@ const ZRANGEBYLEX_RANGE: &[u8] =
     b"*4\r\n$11\r\nZRANGEBYLEX\r\n$4\r\nlexz\r\n$6\r\n[00500\r\n$6\r\n[01500\r\n";
 const ZREVRANGEBYLEX_RANGE: &[u8] =
     b"*4\r\n$14\r\nZREVRANGEBYLEX\r\n$4\r\nlexz\r\n$6\r\n[01500\r\n$6\r\n[00500\r\n";
+const ZRANGEBYSCORE_MEMBERS: usize = 2_000;
+const ZRANGEBYSCORE_RANGE_START: usize = 500;
+const ZRANGEBYSCORE_RANGE_END: usize = 1_500;
+const ZRANGEBYSCORE_PREFILL_BATCH: usize = 256;
+const ZRANGEBYSCORE_RANGE: &[u8] =
+    b"*4\r\n$13\r\nZRANGEBYSCORE\r\n$6\r\nscorez\r\n$3\r\n500\r\n$4\r\n1500\r\n";
+const ZRANGEBYSCORE_ZCARD: &[u8] = b"*2\r\n$5\r\nZCARD\r\n$6\r\nscorez\r\n";
+const ZRANGEBYSCORE_ZCARD_REPLY: &[u8] = b":2000\r\n";
+const ZRANGEBYSCORE_PTTL: &[u8] = b"*2\r\n$4\r\nPTTL\r\n$6\r\nscorez\r\n";
+const ZRANGEBYSCORE_ENCODING: &[u8] = b"*3\r\n$6\r\nOBJECT\r\n$8\r\nENCODING\r\n$6\r\nscorez\r\n";
 const ZRANGEBYLEX_ZCARD: &[u8] = b"*2\r\n$5\r\nZCARD\r\n$4\r\nlexz\r\n";
 const ZRANGEBYLEX_ZCARD_REPLY: &[u8] = b":2000\r\n";
 const ZRANGEBYLEX_PTTL: &[u8] = b"*2\r\n$4\r\nPTTL\r\n$4\r\nlexz\r\n";
 const ZRANGEBYLEX_ENCODING: &[u8] = b"*3\r\n$6\r\nOBJECT\r\n$8\r\nENCODING\r\n$4\r\nlexz\r\n";
-const ZRANGEBYLEX_SKIPLIST_ENCODING_REPLY: &[u8] = b"$8\r\nskiplist\r\n";
+const ZSET_SKIPLIST_ENCODING_REPLY: &[u8] = b"$8\r\nskiplist\r\n";
 const LRANGE_INVERTED_PREFILL: &[u8] = b"*3\r\n$3\r\nSET\r\n$1\r\nl\r\n$4\r\nseed\r\n\
 *2\r\n$3\r\nDEL\r\n$1\r\nl\r\n\
 *3\r\n$5\r\nLPUSH\r\n$1\r\nl\r\n$1\r\nm\r\n";
@@ -369,6 +379,7 @@ enum Workload {
     ZremrangebyscoreInverted,
     ZremrangebyrankNoop,
     ZremrangebylexNoop,
+    ZrangebyscoreRange,
     ZrangebylexRange,
     ZrevrangebylexRange,
     LrangeInverted,
@@ -445,6 +456,7 @@ impl Workload {
             Self::ZremrangebyscoreInverted => "zremrangebyscore-inverted",
             Self::ZremrangebyrankNoop => "zremrangebyrank-noop",
             Self::ZremrangebylexNoop => "zremrangebylex-noop",
+            Self::ZrangebyscoreRange => "zrangebyscore-range",
             Self::ZrangebylexRange => "zrangebylex-range",
             Self::ZrevrangebylexRange => "zrevrangebylex-range",
             Self::LrangeInverted => "lrange-inverted",
@@ -638,6 +650,16 @@ impl Workload {
                 "parse_borrowed_plain_key_arg2_packet",
                 "fr_store::Store::zremrangebylex",
                 "fr_store::SortedSet::lex_range_asc",
+            ],
+            Self::ZrangebyscoreRange => &[
+                "frankenredis::process_buffered_frames",
+                "__memcmp_avx2_movbe",
+                "parse_borrowed_plain_key_arg2_packet",
+                "execute_plain_zrangebyscore_borrowed_into",
+                "execute_plain_zrangebyscore_core_into",
+                "fr_store::Store::zrangebyscore_members_borrow_scan",
+                "fr_store::SortedSet::score_bound_range_asc_refs",
+                "fr_protocol::encode_bulk_string_slice",
             ],
             Self::ZrangebylexRange => &[
                 "frankenredis::process_buffered_frames",
@@ -1033,6 +1055,7 @@ impl Workload {
                 "zremrangebyscore-inverted" => Self::ZremrangebyscoreInverted,
                 "zremrangebyrank-noop" => Self::ZremrangebyrankNoop,
                 "zremrangebylex-noop" => Self::ZremrangebylexNoop,
+                "zrangebyscore-range" => Self::ZrangebyscoreRange,
                 "zrangebylex-range" => Self::ZrangebylexRange,
                 "zrevrangebylex-range" => Self::ZrevrangebylexRange,
                 "lrange-inverted" => Self::LrangeInverted,
@@ -1305,6 +1328,17 @@ impl WorkloadPackets {
             }
             Workload::ZremrangebylexNoop => {
                 let case = repeated_case(ZREMRANGEBYLEX_NOOP, ZREMRANGEBYLEX_NOOP_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::ZrangebyscoreRange => {
+                let response = zrangebyscore_range_reply();
+                let case = repeated_case(ZRANGEBYSCORE_RANGE, &response, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -2632,6 +2666,17 @@ fn zrevrangebylex_range_reply() -> Vec<u8> {
     response
 }
 
+fn zrangebyscore_range_reply() -> Vec<u8> {
+    let count = ZRANGEBYSCORE_RANGE_END - ZRANGEBYSCORE_RANGE_START + 1;
+    let mut response = format!("*{count}\r\n").into_bytes();
+    for member in ZRANGEBYSCORE_RANGE_START..=ZRANGEBYSCORE_RANGE_END {
+        let member = format!("{member:05}");
+        let value = format!("$5\r\n{member}\r\n");
+        response.extend_from_slice(value.as_bytes());
+    }
+    response
+}
+
 fn lindex_middle_prefill() -> ExchangeCase {
     let mut request = b"*3\r\n$3\r\nSET\r\n$1\r\nl\r\n$4\r\nseed\r\n\
 *2\r\n$3\r\nDEL\r\n$1\r\nl\r\n"
@@ -2730,11 +2775,38 @@ fn prefill_zrangebylex_source(server: &mut Server) {
 fn assert_lexz_skiplist_fixture(server: &mut Server) {
     exchange_one(server, ZRANGEBYLEX_ZCARD, ZRANGEBYLEX_ZCARD_REPLY);
     exchange_one(server, ZRANGEBYLEX_PTTL, PTTL_PERSISTENT_REPLY);
+    exchange_one(server, ZRANGEBYLEX_ENCODING, ZSET_SKIPLIST_ENCODING_REPLY);
+}
+
+fn prefill_zrangebyscore_source(server: &mut Server) {
     exchange_one(
         server,
-        ZRANGEBYLEX_ENCODING,
-        ZRANGEBYLEX_SKIPLIST_ENCODING_REPLY,
+        b"*3\r\n$3\r\nSET\r\n$6\r\nscorez\r\n$4\r\nseed\r\n\
+*2\r\n$3\r\nDEL\r\n$6\r\nscorez\r\n",
+        b"+OK\r\n:1\r\n",
     );
+    for batch_start in (0..ZRANGEBYSCORE_MEMBERS).step_by(ZRANGEBYSCORE_PREFILL_BATCH) {
+        let batch_end = (batch_start + ZRANGEBYSCORE_PREFILL_BATCH).min(ZRANGEBYSCORE_MEMBERS);
+        let mut request = format!(
+            "*{}\r\n$4\r\nZADD\r\n$6\r\nscorez\r\n",
+            (batch_end - batch_start) * 2 + 2
+        )
+        .into_bytes();
+        for index in batch_start..batch_end {
+            let score = index.to_string();
+            let member = format!("{index:05}");
+            push_resp_bulk(&mut request, score.as_bytes());
+            push_resp_bulk(&mut request, member.as_bytes());
+        }
+        let response = format!(":{}\r\n", batch_end - batch_start);
+        exchange_one(server, &request, response.as_bytes());
+    }
+}
+
+fn assert_scorez_skiplist_fixture(server: &mut Server) {
+    exchange_one(server, ZRANGEBYSCORE_ZCARD, ZRANGEBYSCORE_ZCARD_REPLY);
+    exchange_one(server, ZRANGEBYSCORE_PTTL, PTTL_PERSISTENT_REPLY);
+    exchange_one(server, ZRANGEBYSCORE_ENCODING, ZSET_SKIPLIST_ENCODING_REPLY);
 }
 
 fn prefill_mixed_setstore_sources(server: &mut Server, large_key: &str, large_start: usize) {
@@ -2905,6 +2977,22 @@ steady_state_range=warmed_by_exact_assertion",
                 workload.name(),
                 server.arm.name(),
                 ZRANGEBYLEX_MEMBERS
+            );
+        } else if matches!(workload, Workload::ZrangebyscoreRange) {
+            prefill_zrangebyscore_source(server);
+            assert_scorez_skiplist_fixture(server);
+            exchange_one(server, ZRANGEBYSCORE_RANGE, &zrangebyscore_range_reply());
+            println!(
+                "FIXTURE_REPRESENTATION workload={} arm={} members={} \
+distinct_integer_scores=0..1999 member_width_bytes=5 range_start={} range_end={} \
+range_members={} encoding=skiplist pttl=-1 full_response_bytes_asserted=true \
+range_order=ascending steady_state_range=warmed_by_exact_assertion",
+                workload.name(),
+                server.arm.name(),
+                ZRANGEBYSCORE_MEMBERS,
+                ZRANGEBYSCORE_RANGE_START,
+                ZRANGEBYSCORE_RANGE_END,
+                ZRANGEBYSCORE_RANGE_END - ZRANGEBYSCORE_RANGE_START + 1
             );
         } else if matches!(
             workload,
@@ -3288,6 +3376,7 @@ fn prefill_and_warm(
             | Workload::SdiffstoreMixed
             | Workload::SinterstoreMixed
             | Workload::ZintercardCached
+            | Workload::ZrangebyscoreRange
             | Workload::ZrangebylexRange
             | Workload::ZrevrangebylexRange
     ) {
@@ -3812,7 +3901,7 @@ fn measure_dual_null_configuration_with_packets(
     }
     let warm_ops: usize = if matches!(
         workload,
-        Workload::ZrangebylexRange | Workload::ZrevrangebylexRange
+        Workload::ZrangebyscoreRange | Workload::ZrangebylexRange | Workload::ZrevrangebylexRange
     ) {
         3_200
     } else {
@@ -5574,6 +5663,34 @@ shape={} distribution={distribution:?}",
 }
 
 #[test]
+fn zrangebyscore_range_packet_has_exact_inclusive_reply() {
+    let single_reply = zrangebyscore_range_reply();
+    assert_eq!(single_reply.len(), 11_018);
+    assert!(single_reply.starts_with(b"*1001\r\n$5\r\n00500\r\n"));
+    assert!(single_reply.ends_with(b"$5\r\n01500\r\n"));
+    assert!(
+        !single_reply
+            .windows(b"00499".len())
+            .any(|window| window == b"00499")
+    );
+    assert!(
+        !single_reply
+            .windows(b"01501".len())
+            .any(|window| window == b"01501")
+    );
+
+    let packets = WorkloadPackets::new(Workload::ZrangebyscoreRange, 2);
+    let mut expected_request = ZRANGEBYSCORE_RANGE.to_vec();
+    expected_request.extend_from_slice(ZRANGEBYSCORE_RANGE);
+    let mut expected_response = single_reply.clone();
+    expected_response.extend_from_slice(&single_reply);
+    assert_eq!(packets.even.request, expected_request);
+    assert_eq!(packets.even.response, expected_response);
+    assert_eq!(packets.odd.request, packets.even.request);
+    assert_eq!(packets.odd.response, packets.even.response);
+}
+
+#[test]
 fn zrangebylex_range_packet_has_exact_inclusive_reply() {
     let single_reply = zrangebylex_range_reply();
     assert_eq!(single_reply.len(), 11_018);
@@ -6002,6 +6119,12 @@ fn dominant_libc_leaf_offsets_reach_specific_inlined_callers() {
 
 #[test]
 #[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
+fn zrangebyscore_dual_null_vs_redis() {
+    run_zset_range_dual_null_vs_redis(Workload::ZrangebyscoreRange);
+}
+
+#[test]
+#[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
 fn zrangebylex_dual_null_vs_redis() {
     run_zset_range_dual_null_vs_redis(Workload::ZrangebylexRange);
 }
@@ -6030,6 +6153,7 @@ fn run_zset_range_dual_null_vs_redis(workload: Workload) {
             workload,
             Workload::ZremrangebyrankNoop
                 | Workload::ZremrangebylexNoop
+                | Workload::ZrangebyscoreRange
                 | Workload::ZrangebylexRange
                 | Workload::ZrevrangebylexRange
         ),
@@ -6094,6 +6218,8 @@ cv_provenance_only=true never_cv_gate=true"
         "FR_ZREMRANGEBYRANK_AB"
     } else if matches!(workload, Workload::ZremrangebylexNoop) {
         "FR_ZREMRANGEBYLEX_AB"
+    } else if matches!(workload, Workload::ZrangebyscoreRange) {
+        "FR_ZRANGEBYSCORE_AB"
     } else {
         "FR_ZRANGEBYLEX_AB"
     };
@@ -6248,6 +6374,8 @@ incumbent_b=vendored_redis_7.2.4"
         "equal_score_2000_member_skiplist_out_of_range_rank_delete_noop"
     } else if matches!(workload, Workload::ZremrangebylexNoop) {
         "equal_score_2000_member_skiplist_out_of_range_lex_delete_noop"
+    } else if matches!(workload, Workload::ZrangebyscoreRange) {
+        "distinct_score_2000_member_skiplist_inclusive_1001_member_ascending_range"
     } else if matches!(workload, Workload::ZrangebylexRange) {
         "equal_score_2000_member_inclusive_1001_member_ascending_range"
     } else {
@@ -6276,6 +6404,15 @@ incumbent_b=vendored_redis_7.2.4"
     ) {
         for server in &mut servers {
             assert_lexz_skiplist_fixture(server);
+        }
+        println!(
+            "POST_MEASUREMENT_STATE workload={} arms=4 cardinality=2000 \
+encoding=skiplist pttl=-1 exact=true",
+            workload.name()
+        );
+    } else if matches!(workload, Workload::ZrangebyscoreRange) {
+        for server in &mut servers {
+            assert_scorez_skiplist_fixture(server);
         }
         println!(
             "POST_MEASUREMENT_STATE workload={} arms=4 cardinality=2000 \
