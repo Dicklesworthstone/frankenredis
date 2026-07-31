@@ -294,6 +294,22 @@ const ZINTERCARD_ZB_BOUNDARIES_REPLY: &[u8] = b"*7\r\n$-1\r\n$-1\r\n$4\r\n2048\r
 $4\r\n4095\r\n$4\r\n4096\r\n$4\r\n6143\r\n$-1\r\n";
 const ZINTERCARD_ZA_PTTL: &[u8] = b"*2\r\n$4\r\nPTTL\r\n$2\r\nza\r\n";
 const ZINTERCARD_ZB_PTTL: &[u8] = b"*2\r\n$4\r\nPTTL\r\n$2\r\nzb\r\n";
+const ZUNIONSTORE_TWO_KEY: &[u8] =
+    b"*5\r\n$11\r\nZUNIONSTORE\r\n$2\r\nzd\r\n$1\r\n2\r\n$2\r\nza\r\n$2\r\nzb\r\n";
+const ZINTERSTORE_TWO_KEY: &[u8] =
+    b"*5\r\n$11\r\nZINTERSTORE\r\n$2\r\nzd\r\n$1\r\n2\r\n$2\r\nza\r\n$2\r\nzb\r\n";
+const ZUNIONSTORE_TWO_KEY_REPLY: &[u8] = b":4\r\n";
+const ZINTERSTORE_TWO_KEY_REPLY: &[u8] = b":2\r\n";
+const ZSTORE2_LISTPACK_ENCODING_REPLY: &[u8] = b"$8\r\nlistpack\r\n";
+const ZSTORE2_SOURCE_CARD_REPLY: &[u8] = b":3\r\n";
+const ZSTORE2_ZA_SCORES_REPLY: &[u8] = b"*4\r\n$1\r\n1\r\n$1\r\n2\r\n$1\r\n3\r\n$-1\r\n";
+const ZSTORE2_ZB_SCORES_REPLY: &[u8] = b"*4\r\n$-1\r\n$1\r\n4\r\n$1\r\n5\r\n$1\r\n6\r\n";
+const ZSTORE2_UNION_SCORES_REPLY: &[u8] =
+    b"*5\r\n$1\r\n1\r\n$1\r\n6\r\n$1\r\n8\r\n$1\r\n6\r\n$-1\r\n";
+const ZSTORE2_INTER_SCORES_REPLY: &[u8] = b"*5\r\n$-1\r\n$1\r\n6\r\n$1\r\n8\r\n$-1\r\n$-1\r\n";
+const ZSTORE2_UNION_RANGE_REPLY: &[u8] = b"*8\r\n$1\r\na\r\n$1\r\n1\r\n$1\r\nb\r\n$1\r\n6\r\n\
+$1\r\nd\r\n$1\r\n6\r\n$1\r\nc\r\n$1\r\n8\r\n";
+const ZSTORE2_INTER_RANGE_REPLY: &[u8] = b"*4\r\n$1\r\nb\r\n$1\r\n6\r\n$1\r\nc\r\n$1\r\n8\r\n";
 const PFMERGE_H1_ENCODING: &[u8] = b"*3\r\n$7\r\nPFDEBUG\r\n$8\r\nENCODING\r\n$2\r\nh1\r\n";
 const PFMERGE_H2_ENCODING: &[u8] = b"*3\r\n$7\r\nPFDEBUG\r\n$8\r\nENCODING\r\n$2\r\nh2\r\n";
 const PFMERGE_DST_ENCODING: &[u8] = b"*3\r\n$7\r\nPFDEBUG\r\n$8\r\nENCODING\r\n$3\r\ndst\r\n";
@@ -465,6 +481,8 @@ enum Workload {
     ZintercardCached,
     ZdiffTwoKey,
     ZinterTwoKey,
+    ZunionstoreTwoKey,
+    ZinterstoreTwoKey,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -553,6 +571,8 @@ impl Workload {
             Self::ZintercardCached => "zintercard-cached",
             Self::ZdiffTwoKey => "zdiff-two-key",
             Self::ZinterTwoKey => "zinter-two-key",
+            Self::ZunionstoreTwoKey => "zunionstore-two-key",
+            Self::ZinterstoreTwoKey => "zinterstore-two-key",
         }
     }
 
@@ -1178,6 +1198,16 @@ impl Workload {
                 "fr_store::Store::zinter_members_argv_order_no_stats",
                 "fr_protocol::encode",
             ],
+            Self::ZunionstoreTwoKey => &[
+                "execute_plain_zunionstore_borrowed",
+                "execute_plain_zstore_borrowed",
+                "Store::zunionstore",
+            ],
+            Self::ZinterstoreTwoKey => &[
+                "execute_plain_zinterstore_borrowed",
+                "execute_plain_zstore_borrowed",
+                "Store::zinterstore",
+            ],
             Self::Set | Self::Get | Self::Mixed | Self::MixedFamilies => &[],
         }
     }
@@ -1253,6 +1283,8 @@ impl Workload {
                 "zintercard-cached" => Self::ZintercardCached,
                 "zdiff-two-key" => Self::ZdiffTwoKey,
                 "zinter-two-key" => Self::ZinterTwoKey,
+                "zunionstore-two-key" => Self::ZunionstoreTwoKey,
+                "zinterstore-two-key" => Self::ZinterstoreTwoKey,
                 other => panic!("unknown FR_URING_AB_WORKLOADS item: {other}"),
             })
             .collect()
@@ -1892,6 +1924,26 @@ impl WorkloadPackets {
             Workload::ZinterTwoKey => {
                 let response = zinter_two_key_reply();
                 let case = repeated_case(ZINTER_TWO_KEY, &response, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::ZunionstoreTwoKey => {
+                let case = repeated_case(ZUNIONSTORE_TWO_KEY, ZUNIONSTORE_TWO_KEY_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::ZinterstoreTwoKey => {
+                let case = repeated_case(ZINTERSTORE_TWO_KEY, ZINTERSTORE_TWO_KEY_REPLY, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -3406,6 +3458,98 @@ fn prefill_zintercard_sources(server: &mut Server) {
     }
 }
 
+fn assert_zstore2_sources(server: &mut Server) {
+    for (key, expected_scores) in [
+        (b"za".as_slice(), ZSTORE2_ZA_SCORES_REPLY),
+        (b"zb".as_slice(), ZSTORE2_ZB_SCORES_REPLY),
+    ] {
+        let card = resp_command(&[b"ZCARD", key]);
+        exchange_one(server, &card, ZSTORE2_SOURCE_CARD_REPLY);
+
+        let encoding = resp_command(&[b"OBJECT", b"ENCODING", key]);
+        exchange_one(server, &encoding, ZSTORE2_LISTPACK_ENCODING_REPLY);
+
+        let scores = resp_command(&[b"ZMSCORE", key, b"a", b"b", b"c", b"d"]);
+        exchange_one(server, &scores, expected_scores);
+
+        let pttl = resp_command(&[b"PTTL", key]);
+        exchange_one(server, &pttl, PTTL_PERSISTENT_REPLY);
+    }
+}
+
+fn assert_zstore2_destination(server: &mut Server, workload: Workload) {
+    let (card_reply, scores_reply, range_reply) = match workload {
+        Workload::ZunionstoreTwoKey => (
+            ZUNIONSTORE_TWO_KEY_REPLY,
+            ZSTORE2_UNION_SCORES_REPLY,
+            ZSTORE2_UNION_RANGE_REPLY,
+        ),
+        Workload::ZinterstoreTwoKey => (
+            ZINTERSTORE_TWO_KEY_REPLY,
+            ZSTORE2_INTER_SCORES_REPLY,
+            ZSTORE2_INTER_RANGE_REPLY,
+        ),
+        _ => unreachable!("two-key ZSTORE destination assertion requires a store workload"),
+    };
+
+    let card = resp_command(&[b"ZCARD", b"zd"]);
+    exchange_one(server, &card, card_reply);
+    let encoding = resp_command(&[b"OBJECT", b"ENCODING", b"zd"]);
+    exchange_one(server, &encoding, ZSTORE2_LISTPACK_ENCODING_REPLY);
+    let scores = resp_command(&[b"ZMSCORE", b"zd", b"a", b"b", b"c", b"d", b"absent"]);
+    exchange_one(server, &scores, scores_reply);
+    let range = resp_command(&[b"ZRANGE", b"zd", b"0", b"-1", b"WITHSCORES"]);
+    exchange_one(server, &range, range_reply);
+    let pttl = resp_command(&[b"PTTL", b"zd"]);
+    exchange_one(server, &pttl, PTTL_PERSISTENT_REPLY);
+}
+
+fn prepare_zstore2_fixture(server: &mut Server, workload: Workload) {
+    for key in [b"za".as_slice(), b"zb".as_slice()] {
+        let mut reset = resp_command(&[b"SET", key, b"seed"]);
+        reset.extend_from_slice(&resp_command(&[b"DEL", key]));
+        exchange_one(server, &reset, b"+OK\r\n:1\r\n");
+    }
+    let destination_string = resp_command(&[b"SET", b"zd", b"seed"]);
+    exchange_one(server, &destination_string, SET_REPLY);
+
+    let za = resp_command(&[b"ZADD", b"za", b"1", b"a", b"2", b"b", b"3", b"c"]);
+    exchange_one(server, &za, ZSTORE2_SOURCE_CARD_REPLY);
+    let zb = resp_command(&[b"ZADD", b"zb", b"4", b"b", b"5", b"c", b"6", b"d"]);
+    exchange_one(server, &zb, ZSTORE2_SOURCE_CARD_REPLY);
+    assert_zstore2_sources(server);
+
+    let (request, response, result_shape) = match workload {
+        Workload::ZunionstoreTwoKey => (
+            ZUNIONSTORE_TWO_KEY,
+            ZUNIONSTORE_TWO_KEY_REPLY,
+            "union_members=4 union_scores=a:1,b:6,c:8,d:6",
+        ),
+        Workload::ZinterstoreTwoKey => (
+            ZINTERSTORE_TWO_KEY,
+            ZINTERSTORE_TWO_KEY_REPLY,
+            "intersection_members=2 intersection_scores=b:6,c:8",
+        ),
+        _ => unreachable!("two-key ZSTORE fixture requires a store workload"),
+    };
+    exchange_one(server, request, response);
+    assert_zstore2_sources(server);
+    assert_zstore2_destination(server, workload);
+    exchange_one(server, request, response);
+    assert_zstore2_destination(server, workload);
+    println!(
+        "FIXTURE_REPRESENTATION workload={} arm={} \
+source_a_members=3 source_a_scores=a:1,b:2,c:3 source_a_encoding=listpack \
+source_b_members=3 source_b_scores=b:4,c:5,d:6 source_b_encoding=listpack \
+default_weights=1,1 default_aggregate=SUM destination_initial_type=string \
+destination_cross_type_overwrite=true destination_encoding=listpack \
+source_and_destination_pttl=-1 {result_shape} exact_scores_and_order=true \
+steady_state_destination=warmed_by_two_exact_assertions",
+        workload.name(),
+        server.arm.name()
+    );
+}
+
 fn prefill_selective_prefix_keyspace(server: &mut Server, workload: Workload) {
     exchange_one(
         server,
@@ -3778,6 +3922,11 @@ steady_state_ordered_index=warmed_by_exact_assertion",
                 SELECTIVE_PREFIX_DECOYS + 2,
                 SELECTIVE_PREFIX_DECOYS
             );
+        } else if matches!(
+            workload,
+            Workload::ZunionstoreTwoKey | Workload::ZinterstoreTwoKey
+        ) {
+            prepare_zstore2_fixture(server, workload);
         } else if matches!(
             workload,
             Workload::ZintercardCached | Workload::ZdiffTwoKey | Workload::ZinterTwoKey
@@ -6483,6 +6632,99 @@ fn zinter_two_key_packet_has_exact_2048_member_reply() {
 }
 
 #[test]
+fn zstore_two_key_packets_have_exact_default_sum_replies() {
+    for (workload, request, response) in [
+        (
+            Workload::ZunionstoreTwoKey,
+            ZUNIONSTORE_TWO_KEY,
+            ZUNIONSTORE_TWO_KEY_REPLY,
+        ),
+        (
+            Workload::ZinterstoreTwoKey,
+            ZINTERSTORE_TWO_KEY,
+            ZINTERSTORE_TWO_KEY_REPLY,
+        ),
+    ] {
+        let packets = WorkloadPackets::new(workload, 2);
+        let mut expected_request = request.to_vec();
+        expected_request.extend_from_slice(request);
+        let mut expected_response = response.to_vec();
+        expected_response.extend_from_slice(response);
+        assert_eq!(packets.even.request, expected_request);
+        assert_eq!(packets.even.response, expected_response);
+        assert_eq!(packets.odd.request, packets.even.request);
+        assert_eq!(packets.odd.response, packets.even.response);
+    }
+}
+
+#[test]
+#[ignore = "requires live frankenredis and vendored Redis executables; run explicitly"]
+fn zstore_two_key_commands_match_server_and_live_redis() {
+    let binary = std::env::var_os("FR_URING_FR_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_frankenredis")));
+    let redis_binary = std::env::var_os("FR_URING_REDIS_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../legacy_redis_code/redis/src/redis-server")
+        });
+    assert!(binary.is_file(), "missing {}", binary.display());
+    assert!(redis_binary.is_file(), "missing {}", redis_binary.display());
+
+    let server_cpu = *allowed_cpus()
+        .first()
+        .expect("live two-key ZSTORE smoke requires one allowed CPU");
+    let root = unique_root();
+    let client_shape = ClientShape {
+        connections: 4,
+        driver_threads: 2,
+    };
+    for workload in [Workload::ZunionstoreTwoKey, Workload::ZinterstoreTwoKey] {
+        let packets = Arc::new(DriverPackets::shared(workload, 16));
+        for arm in [Arm::IoUring, Arm::Redis] {
+            let mut server = Server::spawn(
+                &binary,
+                &redis_binary,
+                arm,
+                &root.join(format!("{}_{}", workload.name(), arm.name())),
+                server_cpu,
+                client_shape,
+                CommandFloorAb::None,
+            );
+            prepare_zstore2_fixture(&mut server, workload);
+            server
+                .clients
+                .as_ref()
+                .expect("live two-key ZSTORE clients initialized")
+                .prepare(&packets);
+            server
+                .clients
+                .as_ref()
+                .expect("live two-key ZSTORE clients initialized")
+                .run(&packets, 32, false);
+            assert_zstore2_sources(&mut server);
+            assert_zstore2_destination(&mut server, workload);
+            println!(
+                "ZSTORE2_LIVE_PARITY workload={} arm={} pid={} sha256={} \
+process_threads_observed={} command_execution_threads_actual=1 \
+connections_actual={} client_driver_threads_actual={} pipeline=16 groups=32 \
+source_members_each=3 source_encoding=listpack default_weights=1,1 \
+default_aggregate=SUM destination_encoding=listpack \
+exact_source_scores_destination_scores_order_and_pttl=true",
+                workload.name(),
+                arm.name(),
+                server.pid(),
+                server.executing_elf_sha256(),
+                server.observed_thread_count(),
+                client_shape.connections,
+                client_shape.driver_threads
+            );
+        }
+    }
+}
+
+#[test]
 fn sscan_cursor_zero_packet_has_exact_complete_reply() {
     let single_reply = sscan_cursor_zero_reply();
     assert!(single_reply.starts_with(b"*2\r\n$1\r\n0\r\n*16\r\n$1\r\n0\r\n"));
@@ -7147,6 +7389,18 @@ fn zinter_two_key_dual_null_vs_redis() {
 
 #[test]
 #[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
+fn zunionstore_two_key_dual_null_vs_redis() {
+    run_exact_dual_null_vs_redis(Workload::ZunionstoreTwoKey);
+}
+
+#[test]
+#[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
+fn zinterstore_two_key_dual_null_vs_redis() {
+    run_exact_dual_null_vs_redis(Workload::ZinterstoreTwoKey);
+}
+
+#[test]
+#[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
 fn sscan_cursor_zero_dual_null_vs_redis() {
     run_exact_dual_null_vs_redis(Workload::SscanCursorZero);
 }
@@ -7190,6 +7444,8 @@ fn run_exact_dual_null_vs_redis(workload: Workload) {
                 | Workload::RpopCountMissing
                 | Workload::ZdiffTwoKey
                 | Workload::ZinterTwoKey
+                | Workload::ZunionstoreTwoKey
+                | Workload::ZinterstoreTwoKey
                 | Workload::SscanCursorZero
                 | Workload::HscanCursorZero
                 | Workload::ZscanCursorZero
@@ -7271,6 +7527,10 @@ cv_provenance_only=true never_cv_gate=true"
         "FR_ZDIFF_AB"
     } else if matches!(workload, Workload::ZinterTwoKey) {
         "FR_ZINTER_AB"
+    } else if matches!(workload, Workload::ZunionstoreTwoKey) {
+        "FR_ZUNIONSTORE2_AB"
+    } else if matches!(workload, Workload::ZinterstoreTwoKey) {
+        "FR_ZINTERSTORE2_AB"
     } else if matches!(workload, Workload::SscanCursorZero) {
         "FR_SSCAN0_AB"
     } else if matches!(workload, Workload::HscanCursorZero) {
@@ -7460,6 +7720,10 @@ incumbent_b=vendored_redis_7.2.4"
         "overlapping_4096_member_skiplist_sources_2048_member_difference"
     } else if matches!(workload, Workload::ZinterTwoKey) {
         "overlapping_4096_member_skiplist_sources_2048_member_intersection"
+    } else if matches!(workload, Workload::ZunionstoreTwoKey) {
+        "three_member_listpack_sources_default_sum_four_member_listpack_union_overwrite"
+    } else if matches!(workload, Workload::ZinterstoreTwoKey) {
+        "three_member_listpack_sources_default_sum_two_member_listpack_intersection_overwrite"
     } else if matches!(workload, Workload::SscanCursorZero) {
         "literal_cursor_zero_no_options_16_member_intset_single_complete_reply"
     } else if matches!(
@@ -7592,6 +7856,28 @@ key_exists=false pttl=-2 exact_null_array_reply=true",
 source_b_members=4096 source_a_encoding=skiplist source_b_encoding=skiplist \
 source_pttl=-1 boundary_scores=verified result_shape={result_shape} \
 full_response_bytes_asserted=true",
+            workload.name()
+        );
+    } else if matches!(
+        workload,
+        Workload::ZunionstoreTwoKey | Workload::ZinterstoreTwoKey
+    ) {
+        for server in &mut servers {
+            assert_zstore2_sources(server);
+            assert_zstore2_destination(server, workload);
+        }
+        let (destination_members, result_shape) = if matches!(workload, Workload::ZunionstoreTwoKey)
+        {
+            (4, "union_scores=a:1,b:6,c:8,d:6")
+        } else {
+            (2, "intersection_scores=b:6,c:8")
+        };
+        println!(
+            "POST_MEASUREMENT_STATE workload={} arms=4 source_members_each=3 \
+source_encoding=listpack source_scores_exact=true source_pttl=-1 \
+destination_members={destination_members} destination_encoding=listpack \
+destination_pttl=-1 default_weights=1,1 default_aggregate=SUM \
+{result_shape} full_ordered_response_bytes_asserted=true",
             workload.name()
         );
     } else if let Some(keys) = &zmpop_keys {
