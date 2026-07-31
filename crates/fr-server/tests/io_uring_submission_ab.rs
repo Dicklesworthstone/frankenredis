@@ -95,6 +95,17 @@ const ZREMRANGEBYSCORE_INVERTED_PREFILL_REPLY: &[u8] = b"+OK\r\n:1\r\n:1\r\n";
 const ZREMRANGEBYSCORE_INVERTED: &[u8] =
     b"*4\r\n$16\r\nZREMRANGEBYSCORE\r\n$1\r\nz\r\n$4\r\n+inf\r\n$4\r\n-inf\r\n";
 const ZREMRANGEBYSCORE_INVERTED_REPLY: &[u8] = b":0\r\n";
+const ZRANGEBYLEX_MEMBERS: usize = 2_000;
+const ZRANGEBYLEX_RANGE_START: usize = 500;
+const ZRANGEBYLEX_RANGE_END: usize = 1_500;
+const ZRANGEBYLEX_PREFILL_BATCH: usize = 256;
+const ZRANGEBYLEX_RANGE: &[u8] =
+    b"*4\r\n$11\r\nZRANGEBYLEX\r\n$4\r\nlexz\r\n$6\r\n[00500\r\n$6\r\n[01500\r\n";
+const ZRANGEBYLEX_ZCARD: &[u8] = b"*2\r\n$5\r\nZCARD\r\n$4\r\nlexz\r\n";
+const ZRANGEBYLEX_ZCARD_REPLY: &[u8] = b":2000\r\n";
+const ZRANGEBYLEX_PTTL: &[u8] = b"*2\r\n$4\r\nPTTL\r\n$4\r\nlexz\r\n";
+const ZRANGEBYLEX_ENCODING: &[u8] = b"*3\r\n$6\r\nOBJECT\r\n$8\r\nENCODING\r\n$4\r\nlexz\r\n";
+const ZRANGEBYLEX_SKIPLIST_ENCODING_REPLY: &[u8] = b"$8\r\nskiplist\r\n";
 const LRANGE_INVERTED_PREFILL: &[u8] = b"*3\r\n$3\r\nSET\r\n$1\r\nl\r\n$4\r\nseed\r\n\
 *2\r\n$3\r\nDEL\r\n$1\r\nl\r\n\
 *3\r\n$5\r\nLPUSH\r\n$1\r\nl\r\n$1\r\nm\r\n";
@@ -348,6 +359,7 @@ enum Workload {
     XreadAfterTail,
     PttlPersistent,
     ZremrangebyscoreInverted,
+    ZrangebylexRange,
     LrangeInverted,
     LindexMiddle,
     LsetMiddleSameValue,
@@ -420,6 +432,7 @@ impl Workload {
             Self::XreadAfterTail => "xread-after-tail",
             Self::PttlPersistent => "pttl-persistent",
             Self::ZremrangebyscoreInverted => "zremrangebyscore-inverted",
+            Self::ZrangebylexRange => "zrangebylex-range",
             Self::LrangeInverted => "lrange-inverted",
             Self::LindexMiddle => "lindex-middle",
             Self::LsetMiddleSameValue => "lset-middle-same-value",
@@ -595,6 +608,15 @@ impl Workload {
                 "fr_command::parse_score_bound",
                 "fr_store::Store::zremrangebyscore",
                 "fr_store::SortedSet::score_bound_range",
+            ],
+            Self::ZrangebylexRange => &[
+                "frankenredis::process_buffered_frames",
+                "__memcmp_avx2_movbe",
+                "parse_borrowed_plain_zrangebylex_packet",
+                "execute_plain_zrangebylex_borrowed_into",
+                "fr_store::Store::zrangebylex_members_borrow_scan",
+                "fr_store::SortedSet::range_by_lex",
+                "fr_protocol::encode_bulk_string_slice",
             ],
             Self::LrangeInverted => &[
                 "frankenredis::process_buffered_frames",
@@ -970,6 +992,7 @@ impl Workload {
                 "xread-after-tail" => Self::XreadAfterTail,
                 "pttl-persistent" => Self::PttlPersistent,
                 "zremrangebyscore-inverted" => Self::ZremrangebyscoreInverted,
+                "zrangebylex-range" => Self::ZrangebylexRange,
                 "lrange-inverted" => Self::LrangeInverted,
                 "lindex-middle" => Self::LindexMiddle,
                 "lset-middle-same-value" => Self::LsetMiddleSameValue,
@@ -1219,6 +1242,17 @@ impl WorkloadPackets {
                     ZREMRANGEBYSCORE_INVERTED_REPLY,
                     pipeline,
                 );
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::ZrangebylexRange => {
+                let response = zrangebylex_range_reply();
+                let case = repeated_case(ZRANGEBYLEX_RANGE, &response, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -2502,6 +2536,17 @@ fn hscan_all_fields_reply() -> Vec<u8> {
     response
 }
 
+fn zrangebylex_range_reply() -> Vec<u8> {
+    let count = ZRANGEBYLEX_RANGE_END - ZRANGEBYLEX_RANGE_START + 1;
+    let mut response = format!("*{count}\r\n").into_bytes();
+    for member in ZRANGEBYLEX_RANGE_START..=ZRANGEBYLEX_RANGE_END {
+        let member = format!("{member:05}");
+        let value = format!("$5\r\n{member}\r\n");
+        response.extend_from_slice(value.as_bytes());
+    }
+    response
+}
+
 fn lindex_middle_prefill() -> ExchangeCase {
     let mut request = b"*3\r\n$3\r\nSET\r\n$1\r\nl\r\n$4\r\nseed\r\n\
 *2\r\n$3\r\nDEL\r\n$1\r\nl\r\n"
@@ -2570,6 +2615,31 @@ fn bitcount_one_mib_get_reply() -> Vec<u8> {
     response.resize(response.len() + BITCOUNT_ONE_MIB_BYTES, 0xaa);
     response.extend_from_slice(b"\r\n");
     response
+}
+
+fn prefill_zrangebylex_source(server: &mut Server) {
+    exchange_one(
+        server,
+        b"*3\r\n$3\r\nSET\r\n$4\r\nlexz\r\n$4\r\nseed\r\n\
+*2\r\n$3\r\nDEL\r\n$4\r\nlexz\r\n",
+        b"+OK\r\n:1\r\n",
+    );
+    for batch_start in (0..ZRANGEBYLEX_MEMBERS).step_by(ZRANGEBYLEX_PREFILL_BATCH) {
+        let batch_end = (batch_start + ZRANGEBYLEX_PREFILL_BATCH).min(ZRANGEBYLEX_MEMBERS);
+        let mut request = format!(
+            "*{}\r\n$4\r\nZADD\r\n$4\r\nlexz\r\n",
+            (batch_end - batch_start) * 2 + 2
+        )
+        .into_bytes();
+        for member in batch_start..batch_end {
+            let member = format!("{member:05}");
+            request.extend_from_slice(b"$1\r\n0\r\n$5\r\n");
+            request.extend_from_slice(member.as_bytes());
+            request.extend_from_slice(b"\r\n");
+        }
+        let response = format!(":{}\r\n", batch_end - batch_start);
+        exchange_one(server, &request, response.as_bytes());
+    }
 }
 
 fn prefill_mixed_setstore_sources(server: &mut Server, large_key: &str, large_start: usize) {
@@ -2709,6 +2779,29 @@ fn prefill(servers: &mut [Server; 4], workload: Workload) {
                 server,
                 ZREMRANGEBYSCORE_INVERTED_PREFILL,
                 ZREMRANGEBYSCORE_INVERTED_PREFILL_REPLY,
+            );
+        } else if matches!(workload, Workload::ZrangebylexRange) {
+            prefill_zrangebylex_source(server);
+            exchange_one(server, ZRANGEBYLEX_ZCARD, ZRANGEBYLEX_ZCARD_REPLY);
+            exchange_one(server, ZRANGEBYLEX_PTTL, PTTL_PERSISTENT_REPLY);
+            exchange_one(
+                server,
+                ZRANGEBYLEX_ENCODING,
+                ZRANGEBYLEX_SKIPLIST_ENCODING_REPLY,
+            );
+            let response = zrangebylex_range_reply();
+            exchange_one(server, ZRANGEBYLEX_RANGE, &response);
+            println!(
+                "FIXTURE_REPRESENTATION workload={} arm={} members={} \
+uniform_score=0 member_width_bytes=5 range_start={} range_end={} \
+range_members={} encoding=skiplist pttl=-1 full_response_bytes_asserted=true \
+steady_state_range=warmed_by_exact_assertion",
+                workload.name(),
+                server.arm.name(),
+                ZRANGEBYLEX_MEMBERS,
+                ZRANGEBYLEX_RANGE_START,
+                ZRANGEBYLEX_RANGE_END,
+                ZRANGEBYLEX_RANGE_END - ZRANGEBYLEX_RANGE_START + 1
             );
         } else if matches!(workload, Workload::LrangeInverted) {
             exchange_one(
@@ -3063,6 +3156,7 @@ fn prefill_and_warm(
             | Workload::SdiffstoreMixed
             | Workload::SinterstoreMixed
             | Workload::ZintercardCached
+            | Workload::ZrangebylexRange
     ) {
         3_200
     } else {
@@ -3408,8 +3502,8 @@ fn measure_dual_null_configuration_with_packets(
         host_wide_allowed_cpus,
     } = packet_measurement;
     assert!(
-        prepare_keyed,
-        "the sharded dual-null fixture requires per-connection keyed setup"
+        prepare_keyed || packets.connections.len() == 1,
+        "a dual-null fixture without keyed preparation must use one shared packet oracle"
     );
     let ClientShape {
         connections: clients,
@@ -3583,7 +3677,12 @@ fn measure_dual_null_configuration_with_packets(
             .expect("benchmark clients initialized")
             .prepare(&packets);
     }
-    let warm_groups = 20_000usize.div_ceil(clients * pipeline).max(8);
+    let warm_ops: usize = if matches!(workload, Workload::ZrangebylexRange) {
+        3_200
+    } else {
+        20_000
+    };
+    let warm_groups = warm_ops.div_ceil(clients * pipeline).max(8);
     for server in servers.iter_mut() {
         time_block(
             server,
@@ -5339,6 +5438,34 @@ shape={} distribution={distribution:?}",
 }
 
 #[test]
+fn zrangebylex_range_packet_has_exact_inclusive_reply() {
+    let single_reply = zrangebylex_range_reply();
+    assert_eq!(single_reply.len(), 11_018);
+    assert!(single_reply.starts_with(b"*1001\r\n$5\r\n00500\r\n"));
+    assert!(single_reply.ends_with(b"$5\r\n01500\r\n"));
+    assert!(
+        !single_reply
+            .windows(b"00499".len())
+            .any(|window| window == b"00499")
+    );
+    assert!(
+        !single_reply
+            .windows(b"01501".len())
+            .any(|window| window == b"01501")
+    );
+
+    let packets = WorkloadPackets::new(Workload::ZrangebylexRange, 2);
+    let mut expected_request = ZRANGEBYLEX_RANGE.to_vec();
+    expected_request.extend_from_slice(ZRANGEBYLEX_RANGE);
+    let mut expected_response = single_reply.clone();
+    expected_response.extend_from_slice(&single_reply);
+    assert_eq!(packets.even.request, expected_request);
+    assert_eq!(packets.even.response, expected_response);
+    assert_eq!(packets.odd.request, packets.even.request);
+    assert_eq!(packets.odd.response, packets.even.response);
+}
+
+#[test]
 fn mixed_family_packets_cover_every_supported_command_with_exact_replies() {
     const EVEN_REPLIES: &[u8] = b"+OK\r\n$1\r\n0\r\n:1\r\n:1\r\n:0\r\n\
 $1\r\na\r\n$1\r\na\r\n+OK\r\n:0\r\n:1\r\n$1\r\n0\r\n$1\r\nb\r\n\
@@ -5663,6 +5790,244 @@ fn dominant_libc_leaf_offsets_reach_specific_inlined_callers() {
     assert_eq!(callers.total_samples, 3);
     assert_eq!(callers.leaf_offsets, [0x1983a4, 0x1986a1]);
     assert_eq!(callers.caller_counts, [(0x6e7351, 2), (0x6df34b, 1)]);
+}
+
+#[test]
+#[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
+fn zrangebylex_dual_null_vs_redis() {
+    let workload = Workload::ZrangebylexRange;
+    let binary = std::env::var_os("FR_URING_FR_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_frankenredis")));
+    let redis_binary = std::env::var_os("FR_URING_REDIS_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../legacy_redis_code/redis/src/redis-server")
+        });
+    assert!(binary.is_file(), "missing {}", binary.display());
+    assert!(redis_binary.is_file(), "missing {}", redis_binary.display());
+
+    let harness = std::env::current_exe().expect("locate running harness ELF");
+    println!(
+        "HARNESS_ELF_SELF_REPORT sha256={} \
+arms=candidate_a,candidate_b,vendored_redis_7.2.4_a,vendored_redis_7.2.4_b",
+        hash_path(&harness)
+    );
+    println!(
+        "DECISION_CONTRACT same_invocation=true independent_aa_per_arm=true \
+candidate_aa=true incumbent_aa=true live_redis_arm=true \
+bootstrap_median_ci_gate=true widest_null_margin=true \
+null_median_bias_guard_pct=2 null_ci_straddle_telemetry_only=true \
+cv_provenance_only=true never_cv_gate=true"
+    );
+
+    let redis_version = command_output(
+        redis_binary
+            .to_str()
+            .expect("vendored Redis executable path must be UTF-8"),
+        &["--version"],
+    );
+    assert!(
+        redis_version.status.success(),
+        "vendored Redis --version must succeed"
+    );
+    let redis_version = String::from_utf8(redis_version.stdout).expect("Redis version is UTF-8");
+    assert!(
+        redis_version.contains("v=7.2.4"),
+        "expected vendored Redis 7.2.4, got {redis_version:?}"
+    );
+    println!("INCUMBENT_VERSION {}", redis_version.trim());
+
+    let perf_version = command_output("perf", &["--version"]);
+    assert!(
+        perf_version.status.success(),
+        "worker must provide perf for profile attribution"
+    );
+    let hostname = command_output("hostname", &[]);
+    assert!(hostname.status.success(), "hostname failed");
+    let hostname = String::from_utf8_lossy(&hostname.stdout).trim().to_owned();
+    let kernel = command_output("uname", &["-r"]);
+    assert!(kernel.status.success(), "uname failed");
+    let kernel = String::from_utf8_lossy(&kernel.stdout).trim().to_owned();
+
+    let samples = parse_usize_env("FR_ZRANGEBYLEX_AB_SAMPLES", DEFAULT_SAMPLES);
+    let clients = parse_usize_env("FR_ZRANGEBYLEX_AB_CLIENTS", DEFAULT_CLIENTS);
+    let client_threads =
+        parse_usize_env("FR_ZRANGEBYLEX_AB_CLIENT_THREADS", DEFAULT_CLIENT_THREADS);
+    let pipeline = parse_usize_env("FR_ZRANGEBYLEX_AB_PIPELINE", 16);
+    let ops_per_sample = parse_usize_env("FR_ZRANGEBYLEX_AB_OPS_PER_SAMPLE", 1_600);
+    let interleave_groups = parse_usize_env("FR_ZRANGEBYLEX_AB_INTERLEAVE_GROUPS", 1);
+    let profile_seconds =
+        parse_u64_env("FR_ZRANGEBYLEX_AB_PROFILE_SECONDS", DEFAULT_PROFILE_SECONDS);
+    assert!(samples >= 8, "median CI requires at least eight samples");
+    assert!(
+        samples.is_multiple_of(24),
+        "sample count must contain complete 24-order cycles"
+    );
+    assert!(
+        (1..=clients).contains(&client_threads),
+        "actual client driver threads must be in 1..={clients}"
+    );
+    assert!(pipeline > 0, "pipeline depth must be positive");
+
+    let (physical_cores, logical_threads) = machine_topology();
+    let ram_kib = machine_ram_kib();
+    let numa_nodes = machine_numa_nodes();
+    let (client_cpu_order, server_core, process_cpuset_cap) =
+        choose_client_cpu_order(client_threads);
+    assert_eq!(
+        process_cpuset_cap.len(),
+        logical_threads,
+        "benchmark process must retain the worker's complete logical CPU set"
+    );
+    let initial_cpu_frequency_policy = cpu_frequency_policy(&process_cpuset_cap);
+    print_cpu_frequency_policy(
+        "zrangebylex_initial_pre_measurement",
+        &process_cpuset_cap,
+        &initial_cpu_frequency_policy,
+    );
+    assert_host_wide_quiescence(&process_cpuset_cap, "zrangebylex_initial_pre_pin");
+    let client_affinity = pin_client_process(&client_cpu_order, client_threads);
+    println!(
+        "WORKER_ID host={hostname} kernel={kernel} \
+physical_cores={physical_cores} logical_threads={logical_threads} \
+ram_kib={ram_kib} numa_nodes={numa_nodes} \
+runtime_detected_isa={} process_cpuset_cap={process_cpuset_cap:?} \
+server_affinity_cpu={server_core} client_affinity={client_affinity:?}",
+        runtime_isa_features()
+    );
+
+    let root = unique_root();
+    println!("ARTIFACT_ROOT {}", root.display());
+    let client_shape = ClientShape {
+        connections: clients,
+        driver_threads: client_threads,
+    };
+    let mut servers = [
+        Server::spawn(
+            &binary,
+            &redis_binary,
+            Arm::MioA,
+            &root.join("candidate_a"),
+            server_core,
+            client_shape,
+            CommandFloorAb::None,
+        ),
+        Server::spawn(
+            &binary,
+            &redis_binary,
+            Arm::MioB,
+            &root.join("candidate_b"),
+            server_core,
+            client_shape,
+            CommandFloorAb::None,
+        ),
+        Server::spawn(
+            &binary,
+            &redis_binary,
+            Arm::Redis,
+            &root.join("redis_a"),
+            server_core,
+            client_shape,
+            CommandFloorAb::None,
+        ),
+        Server::spawn(
+            &binary,
+            &redis_binary,
+            Arm::Redis,
+            &root.join("redis_b"),
+            server_core,
+            client_shape,
+            CommandFloorAb::None,
+        ),
+    ];
+    let server_hashes: [String; 4] =
+        std::array::from_fn(|index| servers[index].executing_elf_sha256());
+    assert_eq!(
+        server_hashes[0], server_hashes[1],
+        "candidate A/A arms must execute the same FrankenRedis ELF"
+    );
+    assert_eq!(
+        server_hashes[2], server_hashes[3],
+        "incumbent A/A arms must execute the same Redis ELF"
+    );
+    for (role, index) in [
+        ("candidate_a", 0),
+        ("candidate_b", 1),
+        ("redis_a", 2),
+        ("redis_b", 3),
+    ] {
+        assert_eq!(
+            servers[index].client_thread_count(),
+            client_threads,
+            "{role} client driver thread count diverged"
+        );
+        println!(
+            "SERVER_ELF_SELF_REPORT arm={role} pid={} sha256={} \
+process_threads_observed={} command_execution_threads_actual=1 \
+client_driver_threads_actual={} client_connections_actual={} affinity_cpus={:?}",
+            servers[index].pid(),
+            server_hashes[index],
+            servers[index].observed_thread_count(),
+            servers[index].client_thread_count(),
+            clients,
+            servers[index].affinity_cpus()
+        );
+    }
+    println!(
+        "ARM_SEMANTICS candidate_a=frankenredis_default_mio \
+candidate_b=frankenredis_default_mio incumbent_a=vendored_redis_7.2.4 \
+incumbent_b=vendored_redis_7.2.4"
+    );
+
+    prefill(&mut servers, workload);
+    profile_io_uring_path(
+        &mut servers[0],
+        &root,
+        profile_seconds,
+        workload,
+        pipeline,
+        client_threads,
+    );
+    let packets = Arc::new(DriverPackets::shared(workload, pipeline));
+    let samples = measure_dual_null_configuration_with_packets(
+        &mut servers,
+        workload,
+        pipeline,
+        MeasurementConfig {
+            client_shape,
+            samples,
+            ops_per_sample,
+            interleave_groups,
+        },
+        packets,
+        PacketMeasurement {
+            prepare_keyed: false,
+            workload_shape: "equal_score_2000_member_inclusive_1001_member_range",
+            host_wide_allowed_cpus: Some(&process_cpuset_cap),
+        },
+    );
+    let verdict = adjudicate_dual_null(workload, pipeline, client_threads, &samples);
+    println!(
+        "COMPETITIVE_VERDICT workload={} ratio_direction=FrankenRedis/Redis \
+wall_verdict={:?} cpu_fixed_work_verdict={:?} \
+claim_class=COMPETITIVE same_invocation=true",
+        workload.name(),
+        verdict.0,
+        verdict.1
+    );
+
+    let final_cpu_frequency_policy = cpu_frequency_policy(&process_cpuset_cap);
+    print_cpu_frequency_policy(
+        "zrangebylex_final_post_measurement",
+        &process_cpuset_cap,
+        &final_cpu_frequency_policy,
+    );
+    assert_eq!(
+        initial_cpu_frequency_policy, final_cpu_frequency_policy,
+        "CPU frequency policy changed during the ZRANGEBYLEX invocation"
+    );
 }
 
 #[test]
