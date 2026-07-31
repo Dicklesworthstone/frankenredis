@@ -136,6 +136,13 @@ const LRANGE_INVERTED_PREFILL: &[u8] = b"*3\r\n$3\r\nSET\r\n$1\r\nl\r\n$4\r\nsee
 const LRANGE_INVERTED_PREFILL_REPLY: &[u8] = b"+OK\r\n:1\r\n:1\r\n";
 const LRANGE_INVERTED: &[u8] = b"*4\r\n$6\r\nLRANGE\r\n$1\r\nl\r\n$1\r\n1\r\n$1\r\n0\r\n";
 const LRANGE_INVERTED_REPLY: &[u8] = b"*0\r\n";
+const LPOP_COUNT_MISSING: &[u8] = b"*3\r\n$4\r\nLPOP\r\n$12\r\nmissing-list\r\n$1\r\n2\r\n";
+const RPOP_COUNT_MISSING: &[u8] = b"*3\r\n$4\r\nRPOP\r\n$12\r\nmissing-list\r\n$1\r\n2\r\n";
+const LIST_COUNT_MISSING_REPLY: &[u8] = b"*-1\r\n";
+const LIST_COUNT_MISSING_EXISTS: &[u8] = b"*2\r\n$6\r\nEXISTS\r\n$12\r\nmissing-list\r\n";
+const LIST_COUNT_MISSING_EXISTS_REPLY: &[u8] = b":0\r\n";
+const LIST_COUNT_MISSING_PTTL: &[u8] = b"*2\r\n$4\r\nPTTL\r\n$12\r\nmissing-list\r\n";
+const LIST_COUNT_MISSING_PTTL_REPLY: &[u8] = b":-2\r\n";
 const LINDEX_MIDDLE_ELEMENTS: usize = 500;
 const LINDEX_MIDDLE: &[u8] = b"*3\r\n$6\r\nLINDEX\r\n$1\r\nl\r\n$3\r\n250\r\n";
 const LINDEX_MIDDLE_REPLY: &[u8] = b"$4\r\nv250\r\n";
@@ -391,6 +398,8 @@ enum Workload {
     ZrangebylexRange,
     ZrevrangebylexRange,
     LrangeInverted,
+    LpopCountMissing,
+    RpopCountMissing,
     LindexMiddle,
     LsetMiddleSameValue,
     LposMiddleElement,
@@ -470,6 +479,8 @@ impl Workload {
             Self::ZrangebylexRange => "zrangebylex-range",
             Self::ZrevrangebylexRange => "zrevrangebylex-range",
             Self::LrangeInverted => "lrange-inverted",
+            Self::LpopCountMissing => "lpop-count-missing",
+            Self::RpopCountMissing => "rpop-count-missing",
             Self::LindexMiddle => "lindex-middle",
             Self::LsetMiddleSameValue => "lset-middle-same-value",
             Self::LposMiddleElement => "lpos-middle-element",
@@ -717,6 +728,22 @@ impl Workload {
                 "execute_plain_lrange_borrowed_into",
                 "fr_store::Store::lrange_borrow_scan",
                 "fr_store::normalize_index",
+            ],
+            Self::LpopCountMissing => &[
+                "frankenredis::process_buffered_frames",
+                "__memcmp_avx2_movbe",
+                "parse_borrowed_plain_key_arg1_packet",
+                "execute_plain_list_pop_count_borrowed",
+                "fr_store::Store::lpop_count",
+                "fr_store::Store::lpop_count_impl",
+            ],
+            Self::RpopCountMissing => &[
+                "frankenredis::process_buffered_frames",
+                "__memcmp_avx2_movbe",
+                "parse_borrowed_plain_key_arg1_packet",
+                "execute_plain_list_pop_count_borrowed",
+                "fr_store::Store::rpop_count",
+                "fr_store::Store::rpop_count_impl",
             ],
             Self::LindexMiddle => &[
                 "frankenredis::process_buffered_frames",
@@ -1091,6 +1118,8 @@ impl Workload {
                 "zrangebylex-range" => Self::ZrangebylexRange,
                 "zrevrangebylex-range" => Self::ZrevrangebylexRange,
                 "lrange-inverted" => Self::LrangeInverted,
+                "lpop-count-missing" => Self::LpopCountMissing,
+                "rpop-count-missing" => Self::RpopCountMissing,
                 "lindex-middle" => Self::LindexMiddle,
                 "lset-middle-same-value" => Self::LsetMiddleSameValue,
                 "lpos-middle-element" => Self::LposMiddleElement,
@@ -1425,6 +1454,26 @@ impl WorkloadPackets {
             }
             Workload::LrangeInverted => {
                 let case = repeated_case(LRANGE_INVERTED, LRANGE_INVERTED_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::LpopCountMissing => {
+                let case = repeated_case(LPOP_COUNT_MISSING, LIST_COUNT_MISSING_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::RpopCountMissing => {
+                let case = repeated_case(RPOP_COUNT_MISSING, LIST_COUNT_MISSING_REPLY, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -3133,6 +3182,33 @@ range_order={range_order} steady_state_range=warmed_by_exact_assertion",
                 server,
                 LRANGE_INVERTED_PREFILL,
                 LRANGE_INVERTED_PREFILL_REPLY,
+            );
+        } else if matches!(
+            workload,
+            Workload::LpopCountMissing | Workload::RpopCountMissing
+        ) {
+            let request = if matches!(workload, Workload::LpopCountMissing) {
+                LPOP_COUNT_MISSING
+            } else {
+                RPOP_COUNT_MISSING
+            };
+            exchange_one(server, request, LIST_COUNT_MISSING_REPLY);
+            exchange_one(
+                server,
+                LIST_COUNT_MISSING_EXISTS,
+                LIST_COUNT_MISSING_EXISTS_REPLY,
+            );
+            exchange_one(
+                server,
+                LIST_COUNT_MISSING_PTTL,
+                LIST_COUNT_MISSING_PTTL_REPLY,
+            );
+            println!(
+                "FIXTURE_REPRESENTATION workload={} arm={} key=missing-list \
+count=2 key_exists=false pttl=-2 exact_null_array_reply=true \
+steady_state=missing_key_warmed_by_exact_assertion",
+                workload.name(),
+                server.arm.name()
             );
         } else if matches!(
             workload,
@@ -5858,6 +5934,32 @@ fn zrevrange_rank_range_packet_has_exact_descending_reply() {
 }
 
 #[test]
+fn lpop_count_missing_packet_has_exact_null_array_reply() {
+    let packets = WorkloadPackets::new(Workload::LpopCountMissing, 2);
+    let mut expected_request = LPOP_COUNT_MISSING.to_vec();
+    expected_request.extend_from_slice(LPOP_COUNT_MISSING);
+    let mut expected_response = LIST_COUNT_MISSING_REPLY.to_vec();
+    expected_response.extend_from_slice(LIST_COUNT_MISSING_REPLY);
+    assert_eq!(packets.even.request, expected_request);
+    assert_eq!(packets.even.response, expected_response);
+    assert_eq!(packets.odd.request, packets.even.request);
+    assert_eq!(packets.odd.response, packets.even.response);
+}
+
+#[test]
+fn rpop_count_missing_packet_has_exact_null_array_reply() {
+    let packets = WorkloadPackets::new(Workload::RpopCountMissing, 2);
+    let mut expected_request = RPOP_COUNT_MISSING.to_vec();
+    expected_request.extend_from_slice(RPOP_COUNT_MISSING);
+    let mut expected_response = LIST_COUNT_MISSING_REPLY.to_vec();
+    expected_response.extend_from_slice(LIST_COUNT_MISSING_REPLY);
+    assert_eq!(packets.even.request, expected_request);
+    assert_eq!(packets.even.response, expected_response);
+    assert_eq!(packets.odd.request, packets.even.request);
+    assert_eq!(packets.odd.response, packets.even.response);
+}
+
+#[test]
 fn zrangebylex_range_packet_has_exact_inclusive_reply() {
     let single_reply = zrangebylex_range_reply();
     assert_eq!(single_reply.len(), 11_018);
@@ -6287,46 +6389,58 @@ fn dominant_libc_leaf_offsets_reach_specific_inlined_callers() {
 #[test]
 #[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
 fn zrangebyscore_dual_null_vs_redis() {
-    run_zset_range_dual_null_vs_redis(Workload::ZrangebyscoreRange);
+    run_exact_dual_null_vs_redis(Workload::ZrangebyscoreRange);
 }
 
 #[test]
 #[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
 fn zrevrangebyscore_dual_null_vs_redis() {
-    run_zset_range_dual_null_vs_redis(Workload::ZrevrangebyscoreRange);
+    run_exact_dual_null_vs_redis(Workload::ZrevrangebyscoreRange);
 }
 
 #[test]
 #[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
 fn zrevrange_rank_dual_null_vs_redis() {
-    run_zset_range_dual_null_vs_redis(Workload::ZrevrangeRankRange);
+    run_exact_dual_null_vs_redis(Workload::ZrevrangeRankRange);
 }
 
 #[test]
 #[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
 fn zrangebylex_dual_null_vs_redis() {
-    run_zset_range_dual_null_vs_redis(Workload::ZrangebylexRange);
+    run_exact_dual_null_vs_redis(Workload::ZrangebylexRange);
 }
 
 #[test]
 #[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
 fn zrevrangebylex_dual_null_vs_redis() {
-    run_zset_range_dual_null_vs_redis(Workload::ZrevrangebylexRange);
+    run_exact_dual_null_vs_redis(Workload::ZrevrangebylexRange);
 }
 
 #[test]
 #[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
 fn zremrangebyrank_dual_null_vs_redis() {
-    run_zset_range_dual_null_vs_redis(Workload::ZremrangebyrankNoop);
+    run_exact_dual_null_vs_redis(Workload::ZremrangebyrankNoop);
 }
 
 #[test]
 #[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
 fn zremrangebylex_dual_null_vs_redis() {
-    run_zset_range_dual_null_vs_redis(Workload::ZremrangebylexNoop);
+    run_exact_dual_null_vs_redis(Workload::ZremrangebylexNoop);
 }
 
-fn run_zset_range_dual_null_vs_redis(workload: Workload) {
+#[test]
+#[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
+fn lpop_count_missing_dual_null_vs_redis() {
+    run_exact_dual_null_vs_redis(Workload::LpopCountMissing);
+}
+
+#[test]
+#[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
+fn rpop_count_missing_dual_null_vs_redis() {
+    run_exact_dual_null_vs_redis(Workload::RpopCountMissing);
+}
+
+fn run_exact_dual_null_vs_redis(workload: Workload) {
     assert!(
         matches!(
             workload,
@@ -6337,8 +6451,10 @@ fn run_zset_range_dual_null_vs_redis(workload: Workload) {
                 | Workload::ZrevrangeRankRange
                 | Workload::ZrangebylexRange
                 | Workload::ZrevrangebylexRange
+                | Workload::LpopCountMissing
+                | Workload::RpopCountMissing
         ),
-        "zset-range competitive gate requires an authenticated range workload"
+        "competitive gate requires an authenticated exact workload"
     );
     let binary = std::env::var_os("FR_URING_FR_BIN")
         .map(PathBuf::from)
@@ -6405,6 +6521,10 @@ cv_provenance_only=true never_cv_gate=true"
         "FR_ZREVRANGEBYSCORE_AB"
     } else if matches!(workload, Workload::ZrevrangeRankRange) {
         "FR_ZREVRANGE_AB"
+    } else if matches!(workload, Workload::LpopCountMissing) {
+        "FR_LPOP_COUNT_AB"
+    } else if matches!(workload, Workload::RpopCountMissing) {
+        "FR_RPOP_COUNT_AB"
     } else {
         "FR_ZRANGEBYLEX_AB"
     };
@@ -6565,6 +6685,10 @@ incumbent_b=vendored_redis_7.2.4"
         "distinct_score_2000_member_skiplist_inclusive_1001_member_descending_range"
     } else if matches!(workload, Workload::ZrevrangeRankRange) {
         "distinct_score_2000_member_skiplist_reverse_rank_499_1499_1001_member_descending_range"
+    } else if matches!(workload, Workload::LpopCountMissing) {
+        "missing_list_key_count_2_exact_null_array_left_pop"
+    } else if matches!(workload, Workload::RpopCountMissing) {
+        "missing_list_key_count_2_exact_null_array_right_pop"
     } else if matches!(workload, Workload::ZrangebylexRange) {
         "equal_score_2000_member_inclusive_1001_member_ascending_range"
     } else {
@@ -6611,6 +6735,33 @@ encoding=skiplist pttl=-1 exact=true",
         println!(
             "POST_MEASUREMENT_STATE workload={} arms=4 cardinality=2000 \
 encoding=skiplist pttl=-1 exact=true",
+            workload.name()
+        );
+    } else if matches!(
+        workload,
+        Workload::LpopCountMissing | Workload::RpopCountMissing
+    ) {
+        let request = if matches!(workload, Workload::LpopCountMissing) {
+            LPOP_COUNT_MISSING
+        } else {
+            RPOP_COUNT_MISSING
+        };
+        for server in &mut servers {
+            exchange_one(server, request, LIST_COUNT_MISSING_REPLY);
+            exchange_one(
+                server,
+                LIST_COUNT_MISSING_EXISTS,
+                LIST_COUNT_MISSING_EXISTS_REPLY,
+            );
+            exchange_one(
+                server,
+                LIST_COUNT_MISSING_PTTL,
+                LIST_COUNT_MISSING_PTTL_REPLY,
+            );
+        }
+        println!(
+            "POST_MEASUREMENT_STATE workload={} arms=4 key=missing-list \
+key_exists=false pttl=-2 exact_null_array_reply=true",
             workload.name()
         );
     }
