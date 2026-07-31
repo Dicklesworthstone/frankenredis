@@ -6,8 +6,8 @@
 //! per-module. The `io_uring` submission-queue push is inherently unsafe (the
 //! kernel reads the caller's buffers asynchronously), so per `AGENTS.md` — *"if
 //! narrow unsafe usage is unavoidable, isolate it behind audited interfaces and
-//! tests"* — the entire unsafe surface lives here, in one function, with the
-//! soundness argument written out and covered by tests.
+//! tests"* — the entire unsafe surface lives here, with the soundness arguments
+//! written out and covered by tests.
 //!
 //! # Measured premise and result
 //!
@@ -21,25 +21,27 @@
 //! | `recvfrom`/`read` | 229,700 calls, 673 ms | 238,966 calls, 776 ms |
 //! | `epoll_wait` | 4,725 calls (~48 fds ready per wakeup) | 6,598 calls |
 //!
-//! The read side is already batched — one `epoll_wait` reports ~48 ready
-//! connections — but each of those connections then pays its own `sendto`. This
-//! crate groups those submissions behind one SQ publication. Its owned-send API
-//! keeps buffers in a fixed registry across event-loop iterations so submission
-//! does not wait for completions. The feature and runtime flag remain default-off
-//! while this implementation is evaluated.
+//! The write side groups ready connections behind one SQ publication. The read
+//! side goes further: each connection gets one multishot receive backed by a
+//! worker-local provided-buffer ring, eliminating both the per-event `read` and
+//! the per-message receive submission. The feature and runtime flag remain
+//! default-off while this implementation is evaluated.
 //!
 //! At `pipeline=16` there is nothing here to win — that census measures 0.13-0.16
 //! syscalls per operation for both engines, because a whole pipelined batch
 //! already coalesces into one write. See the 2026-07-25 entry in
 //! `docs/NEGATIVE_EVIDENCE.md`. This crate targets the unpipelined regime only.
 
+use std::collections::HashSet;
 use std::io;
-use std::os::fd::RawFd;
+use std::mem::MaybeUninit;
+use std::os::fd::{AsRawFd, RawFd};
+use std::sync::atomic::{AtomicU16, Ordering};
 
-use io_uring::{IoUring, opcode, squeue, types};
+use io_uring::{IoUring, cqueue, opcode, squeue, types};
 
-/// The crate's single unsafe operation. Both callers establish that every SQE
-/// buffer remains valid through its CQE before reaching this helper.
+/// The send path's single unsafe operation. Both callers establish that every
+/// SQE buffer remains valid through its CQE before reaching this helper.
 fn push_entries(
     sq: &mut squeue::SubmissionQueue<'_>,
     entries: &[squeue::Entry],
@@ -54,6 +56,21 @@ fn push_entries(
 /// ~48 ready connections a single `epoll_wait` reports under `-c50`, so the
 /// common batch never has to be chunked.
 pub const DEFAULT_RING_ENTRIES: u32 = 256;
+
+/// Number of kernel-selectable receive buffers owned by each worker ring.
+///
+/// This is deliberately larger than the realistic per-worker connection count
+/// (128 clients / 16 workers = 8) so a burst can post many CQEs before userspace
+/// drains and recycles the buffers without terminating a multishot request with
+/// `ENOBUFS`. The value must remain a power of two for the buffer-ring mask.
+pub const MULTISHOT_BUFFER_COUNT: usize = 256;
+
+/// Size of each provided receive buffer. Matches the server's prior stack read
+/// buffer, preserving its batching and query-limit behavior.
+pub const MULTISHOT_BUFFER_LEN: usize = 8192;
+
+const MULTISHOT_BUFFER_GROUP: u16 = 1;
+const CANCEL_USER_DATA_BIT: u64 = 1 << 63;
 
 /// The outcome of one submitted send, in the same order as the request slice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -462,6 +479,316 @@ impl Drop for BatchWriter {
     }
 }
 
+/// One completion from a multishot receive request.
+pub struct MultishotRecvEvent<'a> {
+    /// Caller-defined connection identity supplied to [`MultishotReceiver::arm`].
+    pub tag: u64,
+    /// Data or terminal status carried by this CQE.
+    pub outcome: MultishotRecvOutcome<'a>,
+    /// True when the kernel retired the multishot request. An open connection
+    /// should arm a replacement after the current completion batch is drained.
+    pub request_ended: bool,
+}
+
+/// Result carried by one multishot receive CQE.
+pub enum MultishotRecvOutcome<'a> {
+    /// Newly received bytes. The slice is valid only for the duration of the
+    /// drain callback; its provided buffer is recycled immediately afterward.
+    Data(&'a [u8]),
+    /// Orderly peer shutdown.
+    Closed,
+    /// A transient condition (`EAGAIN`, `EINTR`, or buffer-pool exhaustion).
+    Retry,
+    /// Cancellation requested by the owner during connection teardown.
+    Cancelled,
+    /// A non-retryable error; the value is a positive errno.
+    Failed(i32),
+}
+
+/// Page-aligned storage for an `io_uring` provided-buffer ring.
+///
+/// The kernel ABI requires page alignment. Keeping this allocation boxed also
+/// prevents its address from changing while registered.
+#[repr(C, align(4096))]
+struct AlignedBufferRing {
+    entries: [MaybeUninit<types::BufRingEntry>; MULTISHOT_BUFFER_COUNT],
+}
+
+struct ProvidedBufferRing {
+    ring: Box<AlignedBufferRing>,
+    buffers: Vec<Box<[u8]>>,
+    tail: u16,
+}
+
+impl ProvidedBufferRing {
+    fn new() -> Self {
+        let ring = Box::new(AlignedBufferRing {
+            // `io_uring_buf` consists only of integer fields, so its all-zero
+            // representation is valid. Entries are fully initialized before
+            // their publication through the shared tail.
+            entries: [const { MaybeUninit::zeroed() }; MULTISHOT_BUFFER_COUNT],
+        });
+        let buffers = (0..MULTISHOT_BUFFER_COUNT)
+            .map(|_| vec![0u8; MULTISHOT_BUFFER_LEN].into_boxed_slice())
+            .collect();
+        let mut provided = Self {
+            ring,
+            buffers,
+            tail: 0,
+        };
+        for bid in 0..MULTISHOT_BUFFER_COUNT {
+            provided.recycle(bid as u16);
+        }
+        provided
+    }
+
+    fn base(&self) -> *const types::BufRingEntry {
+        self.ring.entries.as_ptr().cast()
+    }
+
+    fn base_mut(&mut self) -> *mut types::BufRingEntry {
+        self.ring.entries.as_mut_ptr().cast()
+    }
+
+    fn recycle(&mut self, bid: u16) {
+        let bid_index = usize::from(bid);
+        if bid_index >= self.buffers.len() {
+            eprintln!("fatal: io_uring returned an out-of-range provided-buffer id");
+            std::process::abort();
+        }
+        let slot = usize::from(self.tail) & (MULTISHOT_BUFFER_COUNT - 1);
+        let buffer_ptr = self.buffers[bid_index].as_mut_ptr();
+        // SAFETY: `slot` is masked into the page-aligned allocation. The entry
+        // was zero-initialized, is no longer kernel-owned after its CQE, and is
+        // not made visible again until the release-store to `tail` below.
+        let entry = unsafe { &mut *self.base_mut().add(slot) };
+        entry.set_addr(buffer_ptr as u64);
+        entry.set_len(MULTISHOT_BUFFER_LEN as u32);
+        entry.set_bid(bid);
+        self.tail = self.tail.wrapping_add(1);
+
+        // SAFETY: `base` points to the first valid, page-aligned buffer-ring
+        // entry. `BufRingEntry::tail` returns its ABI-defined u16 tail field,
+        // which is naturally aligned. The release-store publishes the entry
+        // writes before the kernel can consume the new tail.
+        let tail = unsafe { types::BufRingEntry::tail(self.base()) };
+        let atomic_tail = tail.cast::<AtomicU16>();
+        // SAFETY: the kernel and this worker are the only participants. The
+        // worker is the sole writer; the kernel performs the paired acquire.
+        unsafe { &*atomic_tail }.store(self.tail, Ordering::Release);
+    }
+}
+
+/// A worker-local receiver with one persistent multishot request per socket.
+///
+/// Each request consumes initialized storage from a registered provided-buffer
+/// ring and can produce arbitrarily many CQEs without another submission. The
+/// ring fd is pollable, allowing the server to remove client sockets from its
+/// epoll read set entirely.
+pub struct MultishotReceiver {
+    // Declared before `provided` deliberately: after `Drop`, the ring fd closes
+    // before the registered memory and receive buffers are released.
+    ring: IoUring,
+    provided: ProvidedBufferRing,
+    active: HashSet<u64>,
+}
+
+impl MultishotReceiver {
+    /// Create a receiver ring and register its page-aligned provided buffers.
+    pub fn new(entries: u32) -> io::Result<Self> {
+        let ring = IoUring::new(entries)?;
+        let provided = ProvidedBufferRing::new();
+        // SAFETY: `provided.ring` is boxed and therefore address-stable. It is
+        // stored in `Self` until `Drop` unregisters the group, and the entry
+        // count exactly matches the allocation.
+        unsafe {
+            ring.submitter().register_buf_ring_with_flags(
+                provided.base() as u64,
+                MULTISHOT_BUFFER_COUNT as u16,
+                MULTISHOT_BUFFER_GROUP,
+                0,
+            )?;
+        }
+        Ok(Self {
+            ring,
+            provided,
+            active: HashSet::new(),
+        })
+    }
+
+    /// File descriptor that becomes readable when receive CQEs are available.
+    #[must_use]
+    pub fn as_raw_fd(&self) -> RawFd {
+        self.ring.as_raw_fd()
+    }
+
+    /// Whether `tag` currently has a live multishot request.
+    #[must_use]
+    pub fn is_active(&self, tag: u64) -> bool {
+        self.active.contains(&tag)
+    }
+
+    /// Arm one persistent receive for `fd`.
+    pub fn arm(&mut self, tag: u64, fd: RawFd) -> io::Result<()> {
+        if tag & CANCEL_USER_DATA_BIT != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "multishot receive tag reserves its high bit",
+            ));
+        }
+        if self.active.contains(&tag) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "multishot receive tag is already armed",
+            ));
+        }
+        let entry = opcode::RecvMulti::new(types::Fd(fd), MULTISHOT_BUFFER_GROUP)
+            .build()
+            .user_data(tag);
+        self.submit_one(entry, "multishot receive")?;
+        self.active.insert(tag);
+        Ok(())
+    }
+
+    /// Asynchronously cancel a live request during connection teardown.
+    pub fn cancel(&mut self, tag: u64) -> io::Result<()> {
+        if !self.active.contains(&tag) {
+            return Ok(());
+        }
+        let entry = opcode::AsyncCancel::new(tag)
+            .build()
+            .user_data(tag | CANCEL_USER_DATA_BIT);
+        self.submit_one(entry, "multishot receive cancellation")
+    }
+
+    /// Drain every currently available CQE. Provided buffers are lent to the
+    /// callback and recycled immediately after it returns.
+    pub fn drain(&mut self, mut apply: impl FnMut(MultishotRecvEvent<'_>)) {
+        let (ring, provided, active) = (&mut self.ring, &mut self.provided, &mut self.active);
+        let mut cq = ring.completion();
+        for cqe in &mut cq {
+            let tag = cqe.user_data();
+            if tag & CANCEL_USER_DATA_BIT != 0 {
+                // The original receive CQE owns request retirement and any
+                // selected buffer. The cancellation CQE is only an ack.
+                continue;
+            }
+
+            let flags = cqe.flags();
+            let request_ended = !cqueue::more(flags);
+            if request_ended {
+                active.remove(&tag);
+            }
+            let selected = cqueue::buffer_select(flags);
+            let result = cqe.result();
+            if result > 0 {
+                let Some(bid) = selected else {
+                    eprintln!("fatal: multishot receive data CQE omitted its selected buffer");
+                    std::process::abort();
+                };
+                let count = result as usize;
+                let Some(buffer) = provided.buffers.get(usize::from(bid)) else {
+                    eprintln!("fatal: multishot receive selected an unknown buffer");
+                    std::process::abort();
+                };
+                if count > buffer.len() {
+                    eprintln!("fatal: multishot receive exceeded its selected buffer");
+                    std::process::abort();
+                }
+                apply(MultishotRecvEvent {
+                    tag,
+                    outcome: MultishotRecvOutcome::Data(&buffer[..count]),
+                    request_ended,
+                });
+            } else {
+                let outcome = if result == 0 {
+                    MultishotRecvOutcome::Closed
+                } else {
+                    let errno = -result;
+                    if errno == libc::EAGAIN
+                        || errno == libc::EWOULDBLOCK
+                        || errno == libc::EINTR
+                        || errno == libc::ENOBUFS
+                    {
+                        MultishotRecvOutcome::Retry
+                    } else if errno == libc::ECANCELED {
+                        MultishotRecvOutcome::Cancelled
+                    } else {
+                        MultishotRecvOutcome::Failed(errno)
+                    }
+                };
+                apply(MultishotRecvEvent {
+                    tag,
+                    outcome,
+                    request_ended,
+                });
+            }
+            if let Some(bid) = selected {
+                provided.recycle(bid);
+            }
+        }
+    }
+
+    fn submit_one(&mut self, entry: squeue::Entry, operation: &str) -> io::Result<()> {
+        {
+            let mut sq = self.ring.submission();
+            if push_entries(&mut sq, std::slice::from_ref(&entry)).is_err() {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    format!("io_uring submission queue full while arming {operation}"),
+                ));
+            }
+            sq.sync();
+        }
+        loop {
+            match self.ring.submit() {
+                Ok(0) => {
+                    eprintln!("fatal: io_uring consumed zero entries while arming {operation}");
+                    std::process::abort();
+                }
+                Ok(_) => return Ok(()),
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+                Err(err) => {
+                    eprintln!("fatal: io_uring_enter failed after publishing {operation}: {err}");
+                    std::process::abort();
+                }
+            }
+        }
+    }
+}
+
+impl Drop for MultishotReceiver {
+    fn drop(&mut self) {
+        let active: Vec<u64> = self.active.iter().copied().collect();
+        for tag in active {
+            if let Err(err) = self.cancel(tag) {
+                eprintln!("fatal: failed to submit multishot receive cancellation: {err}");
+                std::process::abort();
+            }
+        }
+        while !self.active.is_empty() {
+            loop {
+                match self.ring.submit_and_wait(1) {
+                    Ok(_) => break,
+                    Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+                    Err(err) => {
+                        eprintln!("fatal: failed to drain multishot receives: {err}");
+                        std::process::abort();
+                    }
+                }
+            }
+            self.drain(|_| {});
+        }
+        if let Err(err) = self
+            .ring
+            .submitter()
+            .unregister_buf_ring(MULTISHOT_BUFFER_GROUP)
+        {
+            eprintln!("warn: failed to unregister io_uring provided-buffer ring: {err}");
+        }
+    }
+}
+
 /// Probe whether a usable ring can be created on this kernel.
 ///
 /// Tests use this to distinguish real ring coverage from a green no-op on a
@@ -513,6 +840,59 @@ mod tests {
              (0 = enabled) and the kernel version; do NOT read the green results \
              above as coverage."
         );
+    }
+
+    #[test]
+    fn multishot_receive_reuses_one_request_for_multiple_messages() {
+        if !is_available() {
+            return;
+        }
+        let Ok(mut receiver) = MultishotReceiver::new(8) else {
+            // A pre-6.0 kernel can support basic io_uring but not multishot
+            // receive or registered buffer rings.
+            return;
+        };
+        let (mut tx, rx) = UnixStream::pair().expect("socketpair");
+        receiver.arm(7, rx.as_raw_fd()).expect("arm multishot");
+
+        tx.write_all(b"first").expect("write first");
+        receiver.ring.submit_and_wait(1).expect("wait first CQE");
+        let mut first = Vec::new();
+        receiver.drain(|event| {
+            assert_eq!(event.tag, 7);
+            if let MultishotRecvOutcome::Data(bytes) = event.outcome {
+                first.extend_from_slice(bytes);
+            }
+        });
+        assert_eq!(first, b"first");
+        assert!(receiver.is_active(7), "first CQE must retain the request");
+
+        tx.write_all(b"second").expect("write second");
+        receiver.ring.submit_and_wait(1).expect("wait second CQE");
+        let mut second = Vec::new();
+        receiver.drain(|event| {
+            assert_eq!(event.tag, 7);
+            if let MultishotRecvOutcome::Data(bytes) = event.outcome {
+                second.extend_from_slice(bytes);
+            }
+        });
+        assert_eq!(second, b"second");
+        assert!(
+            receiver.is_active(7),
+            "second CQE must still use the original request"
+        );
+
+        drop(tx);
+        receiver.ring.submit_and_wait(1).expect("wait close CQE");
+        let mut closed = false;
+        receiver.drain(|event| {
+            if matches!(event.outcome, MultishotRecvOutcome::Closed) {
+                closed = true;
+                assert!(event.request_ended);
+            }
+        });
+        assert!(closed, "peer shutdown must surface as a close CQE");
+        assert!(!receiver.is_active(7));
     }
 
     #[test]

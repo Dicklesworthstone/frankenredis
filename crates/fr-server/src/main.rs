@@ -44,6 +44,8 @@ use fr_runtime::{
     Runtime,
 };
 use mio::net::{TcpListener, TcpStream};
+#[cfg(all(feature = "io-uring-writes", unix))]
+use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token, Waker};
 
 /// Default port matching Redis convention.
@@ -72,7 +74,8 @@ const SHARDED_SET_GET_MAX_STAGED: usize = SHARDED_SET_GET_TOTAL_QUEUE_BOUND;
 /// arbitrary memory before it has an owner.
 const SHARED_NOTHING_ROUTE_BUFFER_LIMIT: usize = 1024 * 1024;
 const SHARED_NOTHING_WAKE_TOKEN: Token = Token(0);
-const SHARED_NOTHING_FIRST_CLIENT_TOKEN: usize = 1;
+const SHARED_NOTHING_URING_TOKEN: Token = Token(1);
+const SHARED_NOTHING_FIRST_CLIENT_TOKEN: usize = 2;
 
 const REPLICA_ACK_INTERVAL_MS: u64 = 1_000;
 const REPLICA_RECONNECT_BACKOFF_MS: u64 = 250;
@@ -370,7 +373,13 @@ struct ClientConnection {
     /// writer-pool offload carries the whole buffer plus this offset, so the
     /// remainder is moved, not copied.
     write_pos: usize,
+    /// Whether the client socket is currently registered in the main mio poll.
+    /// Multishot-receive clients normally leave it false and register only for
+    /// the rare writable-backpressure fallback.
+    main_registered: bool,
     main_writable_armed: bool,
+    /// True when reads are owned by a persistent io_uring multishot request.
+    uring_read_active: bool,
     /// True if the client sent QUIT or must be disconnected.
     closing: bool,
     /// If set, the client is blocked waiting for data.
@@ -522,7 +531,9 @@ impl ClientConnection {
             owned_plain_sets: VecDeque::new(),
             write_buf: Vec::new(),
             write_pos: 0,
+            main_registered: true,
             main_writable_armed: false,
+            uring_read_active: false,
             closing: false,
             blocked: None,
             replication_sent_offset: None,
@@ -1225,29 +1236,40 @@ struct SharedNothingWorkerPool {
 }
 
 #[cfg(feature = "io-uring-writes")]
-type SharedNothingUringWriter = Option<fr_uring::BatchWriter>;
+struct SharedNothingUring {
+    writer: Option<fr_uring::BatchWriter>,
+    receiver: Option<fr_uring::MultishotReceiver>,
+}
 
 #[cfg(not(feature = "io-uring-writes"))]
-struct SharedNothingUringWriter;
+struct SharedNothingUring;
 
 #[cfg(feature = "io-uring-writes")]
-fn new_shared_nothing_uring_writer(enabled: bool) -> io::Result<SharedNothingUringWriter> {
+fn new_shared_nothing_uring(enabled: bool) -> io::Result<SharedNothingUring> {
     if enabled {
-        fr_uring::BatchWriter::new(fr_uring::DEFAULT_RING_ENTRIES).map(Some)
+        Ok(SharedNothingUring {
+            writer: Some(fr_uring::BatchWriter::new(fr_uring::DEFAULT_RING_ENTRIES)?),
+            receiver: Some(fr_uring::MultishotReceiver::new(
+                fr_uring::DEFAULT_RING_ENTRIES,
+            )?),
+        })
     } else {
-        Ok(None)
+        Ok(SharedNothingUring {
+            writer: None,
+            receiver: None,
+        })
     }
 }
 
 #[cfg(not(feature = "io-uring-writes"))]
-fn new_shared_nothing_uring_writer(enabled: bool) -> io::Result<SharedNothingUringWriter> {
+fn new_shared_nothing_uring(enabled: bool) -> io::Result<SharedNothingUring> {
     if enabled {
         return Err(io::Error::new(
             ErrorKind::Unsupported,
-            "io_uring output requested without the io-uring-writes feature",
+            "io_uring network path requested without the io-uring-writes feature",
         ));
     }
-    Ok(SharedNothingUringWriter)
+    Ok(SharedNothingUring)
 }
 
 impl SharedNothingWorkerPool {
@@ -1259,7 +1281,7 @@ impl SharedNothingWorkerPool {
             let poll = Poll::new()?;
             let waker = Arc::new(Waker::new(poll.registry(), SHARED_NOTHING_WAKE_TOKEN)?);
             let (connection_tx, connection_rx) = mpsc::channel();
-            let uring_writer = new_shared_nothing_uring_writer(io_uring_output).map_err(|err| {
+            let uring = new_shared_nothing_uring(io_uring_output).map_err(|err| {
                 io::Error::new(
                     err.kind(),
                     format!("failed to create shard {worker_idx} io_uring: {err}"),
@@ -1274,7 +1296,7 @@ impl SharedNothingWorkerPool {
                         port,
                         poll,
                         connection_rx,
-                        uring_writer,
+                        uring,
                     );
                 })?;
             routes.push(SharedNothingWorkerRoute {
@@ -1365,7 +1387,7 @@ fn run_shared_nothing_server(
         env!("CARGO_PKG_VERSION")
     );
     if io_uring_output {
-        eprintln!("io_uring batched output enabled per shared-nothing worker");
+        eprintln!("io_uring multishot input and batched output enabled per shared-nothing worker");
     }
 
     let mut events = Events::with_capacity(1024);
@@ -1550,10 +1572,24 @@ fn run_shared_nothing_worker(
     port: u16,
     mut poll: Poll,
     connections: mpsc::Receiver<SharedNothingRoutedConnection>,
-    mut uring_writer: SharedNothingUringWriter,
+    mut uring: SharedNothingUring,
 ) {
     #[cfg(not(feature = "io-uring-writes"))]
-    let _ = &mut uring_writer;
+    let _ = &mut uring;
+
+    #[cfg(feature = "io-uring-writes")]
+    if let Some(receiver) = uring.receiver.as_ref() {
+        let ring_fd = receiver.as_raw_fd();
+        let mut ring_source = SourceFd(&ring_fd);
+        if let Err(err) = poll.registry().register(
+            &mut ring_source,
+            SHARED_NOTHING_URING_TOKEN,
+            Interest::READABLE,
+        ) {
+            eprintln!("error: shared-nothing shard {worker_idx} failed to poll io_uring: {err}");
+            return;
+        }
+    }
 
     let mut runtime = Runtime::new(RuntimePolicy::default());
     runtime.set_server_port(port);
@@ -1567,10 +1603,12 @@ fn run_shared_nothing_worker(
     let mut uring_jobs = Vec::new();
     #[cfg(feature = "io-uring-writes")]
     let mut uring_completions = Vec::new();
+    #[cfg(feature = "io-uring-writes")]
+    let mut ended_receives = Vec::new();
 
     loop {
         #[cfg(feature = "io-uring-writes")]
-        if let Some(writer) = uring_writer.as_mut() {
+        if let Some(writer) = uring.writer.as_mut() {
             drain_uring_completions(
                 writer,
                 &mut clients,
@@ -1579,6 +1617,20 @@ fn run_shared_nothing_worker(
                 &mut write_tokens,
                 &mut closing_tokens,
                 &mut uring_completions,
+            );
+        }
+        #[cfg(feature = "io-uring-writes")]
+        if let Some(receiver) = uring.receiver.as_mut() {
+            drain_shared_nothing_uring_receives(
+                worker_idx,
+                worker_count,
+                receiver,
+                &mut clients,
+                &mut runtime,
+                &mut poll,
+                &mut write_tokens,
+                &mut closing_tokens,
+                &mut ended_receives,
             );
         }
 
@@ -1592,12 +1644,13 @@ fn run_shared_nothing_worker(
             &mut write_tokens,
             &mut closing_tokens,
             &mut next_token,
+            &mut uring,
         ) {
             return;
         }
 
         #[cfg(feature = "io-uring-writes")]
-        if let Some(writer) = uring_writer.as_mut() {
+        if let Some(writer) = uring.writer.as_mut() {
             submit_uring_batch(
                 writer,
                 &mut clients,
@@ -1613,10 +1666,12 @@ fn run_shared_nothing_worker(
             &mut poll,
             &mut write_tokens,
             &mut closing_tokens,
+            &mut uring,
         );
 
         #[cfg(feature = "io-uring-writes")]
-        let poll_timeout = uring_writer
+        let poll_timeout = uring
+            .writer
             .as_ref()
             .is_some_and(fr_uring::BatchWriter::has_owned_in_flight)
             .then_some(Duration::ZERO);
@@ -1634,7 +1689,7 @@ fn run_shared_nothing_worker(
 
         for event in &events {
             let token = event.token();
-            if token == SHARED_NOTHING_WAKE_TOKEN {
+            if token == SHARED_NOTHING_WAKE_TOKEN || token == SHARED_NOTHING_URING_TOKEN {
                 continue;
             }
             if event.is_readable() || event.is_read_closed() {
@@ -1682,7 +1737,10 @@ fn install_shared_nothing_connections(
     write_tokens: &mut TokenSet,
     closing_tokens: &mut TokenSet,
     next_token: &mut usize,
+    uring: &mut SharedNothingUring,
 ) -> bool {
+    #[cfg(not(feature = "io-uring-writes"))]
+    let _ = uring;
     loop {
         let routed = match connections.try_recv() {
             Ok(routed) => routed,
@@ -1703,7 +1761,23 @@ fn install_shared_nothing_connections(
             peer_addr,
             initial_bytes,
         } = routed;
-        if let Err(err) = poll
+        #[cfg(feature = "io-uring-writes")]
+        let uring_read_active = uring.receiver.is_some();
+        #[cfg(not(feature = "io-uring-writes"))]
+        let uring_read_active = false;
+
+        if uring_read_active {
+            #[cfg(feature = "io-uring-writes")]
+            if let Some(receiver) = uring.receiver.as_mut()
+                && let Err(err) = receiver.arm(
+                    u64::try_from(token.0).expect("mio token must fit in u64"),
+                    stream.as_raw_fd(),
+                )
+            {
+                eprintln!("warn: shard {worker_idx} failed to arm multishot receive: {err}");
+                continue;
+            }
+        } else if let Err(err) = poll
             .registry()
             .register(&mut stream, token, Interest::READABLE)
         {
@@ -1717,6 +1791,8 @@ fn install_shared_nothing_connections(
             session.socket_fd = Some(stream.as_raw_fd());
         }
         let mut connection = ClientConnection::new_with_writer(stream, None, session, now_ms());
+        connection.main_registered = !uring_read_active;
+        connection.uring_read_active = uring_read_active;
         connection.read_buf = initial_bytes;
         if !connection.read_buf.is_empty() {
             runtime.note_read_event();
@@ -1751,6 +1827,124 @@ fn install_shared_nothing_connections(
             );
         }
         clients.insert(token, connection);
+    }
+}
+
+/// Consume every receive CQE already published by the worker's multishot ring.
+/// One armed SQE survives across messages; only a terminal CQE enters the rearm
+/// list, so the hot path performs no receive submissions or socket read syscalls.
+#[cfg(feature = "io-uring-writes")]
+#[allow(clippy::too_many_arguments)]
+fn drain_shared_nothing_uring_receives(
+    worker_idx: usize,
+    worker_count: usize,
+    receiver: &mut fr_uring::MultishotReceiver,
+    clients: &mut ClientMap,
+    runtime: &mut Runtime,
+    poll: &mut Poll,
+    write_tokens: &mut TokenSet,
+    closing_tokens: &mut TokenSet,
+    ended_receives: &mut Vec<Token>,
+) {
+    ended_receives.clear();
+    receiver.drain(|event| {
+        let Ok(raw_token) = usize::try_from(event.tag) else {
+            eprintln!("fatal: multishot receive tag does not fit in a mio token");
+            std::process::abort();
+        };
+        let token = Token(raw_token);
+        if event.request_ended {
+            ended_receives.push(token);
+        }
+        let Some(connection) = clients.get_mut(&token) else {
+            return;
+        };
+        if connection.closing {
+            return;
+        }
+
+        match event.outcome {
+            fr_uring::MultishotRecvOutcome::Data(bytes) => {
+                match validate_read_path(
+                    connection.read_buf.len(),
+                    bytes.len(),
+                    runtime.server.query_buffer_limit,
+                    false,
+                ) {
+                    Ok(_) => {
+                        connection.read_buf.extend_from_slice(bytes);
+                        runtime.track_net_input_bytes(bytes.len() as u64);
+                        runtime.note_read_event();
+                        let output_before = connection.write_buf.len();
+                        dispatch_shared_nothing_frames(
+                            worker_idx,
+                            worker_count,
+                            connection,
+                            runtime,
+                            now_ms(),
+                        );
+                        runtime.track_net_output_bytes(
+                            connection.write_buf.len().saturating_sub(output_before) as u64,
+                        );
+                        if connection.has_pending_output() {
+                            drive_client_output(
+                                token,
+                                connection,
+                                OutputDriveContext {
+                                    runtime,
+                                    poll,
+                                    write_tokens,
+                                    closing_tokens,
+                                    writer_pool: None,
+                                },
+                                true,
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!(
+                            "warn: shard {worker_idx} disconnected oversized query buffer: {}",
+                            err.reason_code()
+                        );
+                        connection.closing = true;
+                        closing_tokens.insert(token);
+                    }
+                }
+            }
+            fr_uring::MultishotRecvOutcome::Closed => {
+                connection.closing = true;
+                closing_tokens.insert(token);
+            }
+            fr_uring::MultishotRecvOutcome::Retry | fr_uring::MultishotRecvOutcome::Cancelled => {}
+            fr_uring::MultishotRecvOutcome::Failed(errno) => {
+                eprintln!(
+                    "warn: shard {worker_idx} io_uring client read error: {}",
+                    io::Error::from_raw_os_error(errno)
+                );
+                connection.closing = true;
+                closing_tokens.insert(token);
+            }
+        }
+    });
+
+    for token in ended_receives.drain(..) {
+        let Some(connection) = clients.get(&token) else {
+            continue;
+        };
+        if connection.closing {
+            continue;
+        }
+        let fd = connection.stream.as_raw_fd();
+        if let Err(err) = receiver.arm(
+            u64::try_from(token.0).expect("mio token must fit in u64"),
+            fd,
+        ) {
+            eprintln!("warn: shard {worker_idx} failed to rearm multishot receive: {err}");
+            if let Some(connection) = clients.get_mut(&token) {
+                connection.closing = true;
+                closing_tokens.insert(token);
+            }
+        }
     }
 }
 
@@ -2081,7 +2275,10 @@ fn reap_shared_nothing_connections(
     poll: &mut Poll,
     write_tokens: &mut TokenSet,
     closing_tokens: &mut TokenSet,
+    uring: &mut SharedNothingUring,
 ) {
+    #[cfg(not(feature = "io-uring-writes"))]
+    let _ = uring;
     let removable: Vec<Token> = closing_tokens
         .iter()
         .filter(|token| {
@@ -2097,7 +2294,17 @@ fn reap_shared_nothing_connections(
         write_tokens.remove(&token);
         if let Some(mut connection) = clients.remove(&token) {
             runtime.remove_client_session(connection.session.client_id);
-            let _ = poll.registry().deregister(&mut connection.stream);
+            #[cfg(feature = "io-uring-writes")]
+            if connection.uring_read_active
+                && let Some(receiver) = uring.receiver.as_mut()
+                && let Err(err) =
+                    receiver.cancel(u64::try_from(token.0).expect("mio token must fit in u64"))
+            {
+                eprintln!("warn: failed to cancel multishot receive for closing client: {err}");
+            }
+            if connection.main_registered {
+                let _ = poll.registry().deregister(&mut connection.stream);
+            }
         }
     }
 }
@@ -2203,7 +2410,7 @@ OPTIONS:\n\
   --masteruser <USERNAME>    Authenticate to the configured primary as this ACL user\n\
   --masterauth <PASSWORD>    Authenticate to the configured primary with this password\n\
   --enable-debug-command <VALUE>  Allow DEBUG commands: no | local | yes (default: no, matches upstream Redis 7.2)\n\
-  --io-uring-output          Opt in to batched io_uring writes (requires io-uring-writes feature)\n\
+  --io-uring-output          Opt in to multishot receive + batched io_uring writes (requires io-uring-writes feature)\n\
   --experimental-sharded-set-get-workers <N>\n\
                              Run default-DB single-key SET/GET/INCR/LPUSH/LPOP/HSET/HGET\n\
                              on N connection-affine, shared-nothing key shards\n\
@@ -28374,9 +28581,17 @@ fn drive_client_output(
 
 fn ensure_main_writable_disarmed(token: Token, conn: &mut ClientConnection, poll: &mut Poll) {
     if conn.main_writable_armed {
-        let _ = poll
-            .registry()
-            .reregister(&mut conn.stream, token, Interest::READABLE);
+        if conn.uring_read_active {
+            if conn.main_registered {
+                let _ = poll.registry().deregister(&mut conn.stream);
+                conn.main_registered = false;
+            }
+        } else {
+            let _ = poll
+                .registry()
+                .reregister(&mut conn.stream, token, Interest::READABLE);
+            conn.main_registered = true;
+        }
         conn.main_writable_armed = false;
     }
 }
@@ -28395,12 +28610,31 @@ fn arm_main_writable(
     if conn.has_pending_output() {
         write_tokens.insert(token);
         if !conn.main_writable_armed {
-            let _ = poll.registry().reregister(
-                &mut conn.stream,
-                token,
-                Interest::READABLE | Interest::WRITABLE,
-            );
-            conn.main_writable_armed = true;
+            let result = if conn.uring_read_active {
+                if conn.main_registered {
+                    poll.registry()
+                        .reregister(&mut conn.stream, token, Interest::WRITABLE)
+                } else {
+                    poll.registry()
+                        .register(&mut conn.stream, token, Interest::WRITABLE)
+                }
+            } else if conn.main_registered {
+                poll.registry().reregister(
+                    &mut conn.stream,
+                    token,
+                    Interest::READABLE | Interest::WRITABLE,
+                )
+            } else {
+                poll.registry().register(
+                    &mut conn.stream,
+                    token,
+                    Interest::READABLE | Interest::WRITABLE,
+                )
+            };
+            if result.is_ok() {
+                conn.main_registered = true;
+                conn.main_writable_armed = true;
+            }
         }
     } else {
         write_tokens.remove(&token);

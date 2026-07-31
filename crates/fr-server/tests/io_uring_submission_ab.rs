@@ -6843,6 +6843,41 @@ fn pin_client_process(client_cpu_order: &[usize], client_threads: usize) -> Vec<
     client_affinity
 }
 
+fn disjoint_physical_cpu_order(allowed_cpus: &[usize], excluded_cpus: &[usize]) -> Vec<usize> {
+    let allowed = allowed_cpus.iter().copied().collect::<HashSet<_>>();
+    let excluded_physical = excluded_cpus
+        .iter()
+        .flat_map(|cpu| sibling_group(*cpu))
+        .collect::<HashSet<_>>();
+    let mut grouped = HashSet::new();
+    let mut physical_groups = Vec::new();
+    for cpu in allowed_cpus {
+        if grouped.contains(cpu) || excluded_physical.contains(cpu) {
+            continue;
+        }
+        let mut siblings = sibling_group(*cpu)
+            .into_iter()
+            .filter(|sibling| allowed.contains(sibling) && !excluded_physical.contains(sibling))
+            .collect::<Vec<_>>();
+        siblings.sort_unstable();
+        if !siblings.is_empty() {
+            grouped.extend(siblings.iter().copied());
+            physical_groups.push(siblings);
+        }
+    }
+    physical_groups.sort_by_key(|group| group[0]);
+    let max_siblings = physical_groups.iter().map(Vec::len).max().unwrap_or(0);
+    let mut cpu_order = Vec::new();
+    for sibling_index in 0..max_siblings {
+        for group in &physical_groups {
+            if let Some(cpu) = group.get(sibling_index) {
+                cpu_order.push(*cpu);
+            }
+        }
+    }
+    cpu_order
+}
+
 fn unique_root() -> PathBuf {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -7007,9 +7042,10 @@ fn tagged_shard_keys(connections: usize, workers: usize, single_shard: bool) -> 
     let target_count = if single_shard { 1 } else { workers };
     let mut nonce = 0usize;
     let mut tags = Vec::with_capacity(target_count);
+    let shape = if single_shard { "hot" } else { "spread" };
     for target in 0..target_count {
         loop {
-            let tag = format!("mf:{target}:{nonce}");
+            let tag = format!("mf:{shape}:{target}:{nonce}");
             nonce += 1;
             if usize::from(fr_store::crc16_slot(tag.as_bytes())) % workers == target {
                 tags.push(tag);
@@ -9208,6 +9244,15 @@ process cpuset has {} of {logical_threads}",
     );
     assert_host_wide_quiescence(&process_cpuset_cap, "initial_pre_pin");
     let client_affinity = pin_client_process(&client_cpu_order, client_threads);
+    let candidate_cpu_order = disjoint_physical_cpu_order(&process_cpuset_cap, &client_affinity);
+    let maximum_server_workers = server_thread_counts.iter().copied().max().unwrap_or(0);
+    assert!(
+        candidate_cpu_order.len() >= maximum_server_workers,
+        "sharded candidates need one client-disjoint CPU per worker: requested={} available={} \
+client_affinity={client_affinity:?} candidate_cpu_order={candidate_cpu_order:?}",
+        maximum_server_workers,
+        candidate_cpu_order.len()
+    );
     println!(
         "SCALING_HARDWARE_PROVENANCE host_identity={hostname} \
 physical_cores={physical_cores} logical_threads={logical_threads} \
@@ -9217,7 +9262,7 @@ workloads_requested={workloads:?} \
 client_driver_threads_actual={client_threads} client_connections={clients} \
 runtime_detected_isa={} process_cpuset_cap={process_cpuset_cap:?} \
 client_affinity={client_affinity:?} redis_affinity_cpu={server_core} \
-candidate_a_affinity={process_cpuset_cap:?} candidate_b_affinity={process_cpuset_cap:?}",
+candidate_cpu_order={candidate_cpu_order:?}",
         runtime_isa_features()
     );
     println!(
@@ -9239,6 +9284,7 @@ profile_seconds={profile_seconds}"
     let mut verdicts = Vec::new();
 
     for server_workers in server_thread_counts {
+        let candidate_affinity = &candidate_cpu_order[..server_workers];
         let point_root = root.join(format!("server_workers_{server_workers}"));
         fs::create_dir_all(&point_root).expect("create server-thread point root");
         let candidate_a_root = point_root.join("candidate_a");
@@ -9251,7 +9297,7 @@ profile_seconds={profile_seconds}"
                 &redis_binary,
                 Arm::IoUring,
                 &candidate_a_root,
-                &process_cpuset_cap,
+                candidate_affinity,
                 client_shape,
                 CommandFloorAb::None,
                 Some(server_workers),
@@ -9262,7 +9308,7 @@ profile_seconds={profile_seconds}"
                 &redis_binary,
                 Arm::IoUring,
                 &candidate_b_root,
-                &process_cpuset_cap,
+                candidate_affinity,
                 client_shape,
                 CommandFloorAb::None,
                 Some(server_workers),
@@ -9387,6 +9433,9 @@ incumbent_a=vendored_redis_7.2.4 incumbent_b=vendored_redis_7.2.4"
                 )
             };
             apply_server_setup(&mut servers, &server_setup);
+            for server in &mut servers {
+                server.replace_clients(client_shape);
+            }
             let packets = Arc::new(packets);
             if !skip_profile && matches!(workload, Workload::Mixed | Workload::MixedFamilies) {
                 profile_sharded_set_get_path(
@@ -9475,6 +9524,9 @@ server_command_execution_threads={server_workers} verdict={verdict:?}",
         if workloads.contains(&Workload::Mixed) {
             let hot_keys = vec![b"mc:hot-key".to_vec(); clients];
             let hot_packets = Arc::new(DriverPackets::keyed(Workload::Mixed, pipeline, &hot_keys));
+            for server in &mut servers {
+                server.replace_clients(client_shape);
+            }
             let candidate_worker_cpu_ns_before = [
                 servers[DualNullArm::CandidateA.index()].sharded_worker_cpu_ns(),
                 servers[DualNullArm::CandidateB.index()].sharded_worker_cpu_ns(),
@@ -9540,6 +9592,9 @@ server_command_execution_threads={server_workers} verdict={hot_verdict:?}"
             let (hot_packets, server_setup) =
                 DriverPackets::keyed_mixed_families(pipeline, &hot_shard_keys);
             apply_server_setup(&mut servers, &server_setup);
+            for server in &mut servers {
+                server.replace_clients(client_shape);
+            }
             let hot_packets = Arc::new(hot_packets);
             println!(
                 "MIXED_FAMILY_HOT_CONTROL_CONTRACT \
