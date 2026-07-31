@@ -366,7 +366,7 @@ struct ClientConnection {
     blocked: Option<BlockedState>,
     /// If set, this client is a replica and this is the last offset sent to it.
     replication_sent_offset: Option<ReplOffset>,
-    /// Reply sequencing for the opt-in key-sharded SET/GET execution bus.
+    /// Reply sequencing for the opt-in key-sharded command execution bus.
     ///
     /// Shards execute independently, so completions may arrive out of order.
     /// This state holds those completions until every earlier command on the
@@ -669,16 +669,36 @@ impl WriterPool {
 }
 
 enum ShardedSetGetCommand {
-    Get { key: Vec<u8> },
-    Set { key: Vec<u8>, value: Vec<u8> },
+    Get {
+        key: Vec<u8>,
+    },
+    Set {
+        key: Vec<u8>,
+        value: Vec<u8>,
+    },
+    SingleKey {
+        key: Vec<u8>,
+        encoded_frame: Vec<u8>,
+    },
 }
 
 impl ShardedSetGetCommand {
     fn key(&self) -> &[u8] {
         match self {
             Self::Get { key } | Self::Set { key, .. } => key,
+            Self::SingleKey { key, .. } => key,
         }
     }
+}
+
+fn sharded_single_key_command(command: &[u8]) -> bool {
+    command.eq_ignore_ascii_case(b"GET")
+        || command.eq_ignore_ascii_case(b"SET")
+        || command.eq_ignore_ascii_case(b"INCR")
+        || command.eq_ignore_ascii_case(b"LPUSH")
+        || command.eq_ignore_ascii_case(b"LPOP")
+        || command.eq_ignore_ascii_case(b"HSET")
+        || command.eq_ignore_ascii_case(b"HGET")
 }
 
 struct ShardedSetGetJob {
@@ -734,6 +754,7 @@ fn parse_sharded_set_get_batch(
     let mut consumed_total = 0usize;
     let mut batch_shard = None;
     let mut first_command_consumed = 0usize;
+    let mut borrowed_args = Vec::new();
 
     while jobs.len() < parse.command_limit && consumed_total < input.len() {
         let unparsed = &input[consumed_total..];
@@ -754,7 +775,30 @@ fn parse_sharded_set_get_batch(
                     packet.consumed,
                 )
             } else {
-                break;
+                borrowed_args.clear();
+                let parsed = match fr_protocol::parse_command_args_borrowed_into(
+                    unparsed,
+                    parser_config,
+                    &mut borrowed_args,
+                ) {
+                    Ok(parsed)
+                        if borrowed_args
+                            .first()
+                            .is_some_and(|name| sharded_single_key_command(name)) =>
+                    {
+                        parsed
+                    }
+                    _ => break,
+                };
+                (
+                    ShardedSetGetCommand::SingleKey {
+                        key: borrowed_args
+                            .get(1)
+                            .map_or_else(Vec::new, |key| key.to_vec()),
+                        encoded_frame: unparsed[..parsed.consumed].to_vec(),
+                    },
+                    parsed.consumed,
+                )
             };
         let shard = sharded_set_get_shard(command.key(), parse.worker_count);
         if batch_shard.is_some_and(|expected| expected != shard) {
@@ -782,7 +826,7 @@ fn parse_sharded_set_get_batch(
     })
 }
 
-/// Opt-in command-execution bus for the default-DB, exact SET/GET subset.
+/// Opt-in command-execution bus for a default-DB, single-key command subset.
 ///
 /// Every key maps to exactly one worker-owned Runtime, so commands for one key
 /// remain FIFO and atomic without locks. Different keys can execute in parallel.
@@ -791,8 +835,8 @@ fn parse_sharded_set_get_batch(
 /// and completion envelope, amortizing channel synchronization and wakeups
 /// without moving any command across a shard boundary. This deliberately is not
 /// a transparent full-server mode: startup rejects persistence/replication/
-/// config/auth surfaces and command dispatch rejects every stateful shape
-/// outside exact SET/GET.
+/// config/auth surfaces, while dispatch accepts only single-key SET, GET, INCR,
+/// LPUSH, LPOP, HSET, and HGET plus local PING/QUIT.
 struct ShardedSetGetPool {
     jobs: Vec<mpsc::SyncSender<Vec<ShardedSetGetJob>>>,
     completions: Option<mpsc::Receiver<ShardedSetGetCompletionBatch>>,
@@ -924,6 +968,9 @@ fn run_sharded_set_get_worker(
                         b"-ERR sharded SET/GET worker rejected a default SET\r\n".to_vec()
                     }
                 }
+                ShardedSetGetCommand::SingleKey { encoded_frame, .. } => {
+                    runtime.execute_bytes(&encoded_frame, job.now_ms)
+                }
             };
             batch_completions.push(ShardedSetGetCompletion {
                 token: job.token,
@@ -1053,8 +1100,9 @@ OPTIONS:\n\
   --enable-debug-command <VALUE>  Allow DEBUG commands: no | local | yes (default: no, matches upstream Redis 7.2)\n\
   --io-uring-output          Opt in to batched io_uring writes (requires io-uring-writes feature)\n\
   --experimental-sharded-set-get-workers <N>\n\
-                             Run exact default-DB SET/GET on N key shards (1-{SHARDED_SET_GET_MAX_WORKERS});\n\
-                             permits local PING/QUIT and refuses every other command\n\
+                             Run default-DB single-key SET/GET/INCR/LPUSH/LPOP/HSET/HGET\n\
+                             on N key shards (1-{SHARDED_SET_GET_MAX_WORKERS}); permits local\n\
+                             PING/QUIT and refuses cross-key and aggregate commands\n\
   --help                     Show this help\n"
     )
 }
@@ -1442,7 +1490,7 @@ fn main() -> ExitCode {
                     Ok(workers @ 1..=SHARDED_SET_GET_MAX_WORKERS) => workers,
                     _ => {
                         eprintln!(
-                            "error: sharded SET/GET worker count must be in 1..={SHARDED_SET_GET_MAX_WORKERS}"
+                            "error: sharded command worker count must be in 1..={SHARDED_SET_GET_MAX_WORKERS}"
                         );
                         return ExitCode::from(1);
                     }
@@ -1674,12 +1722,12 @@ fn main() -> ExitCode {
         match ShardedSetGetPool::new(worker_count, Arc::clone(&background_waker)) {
             Ok(pool) => {
                 eprintln!(
-                    "experimental key-sharded SET/GET execution enabled: workers={worker_count}"
+                    "experimental key-sharded command execution enabled: workers={worker_count}"
                 );
                 Some(pool)
             }
             Err(e) => {
-                eprintln!("error: failed to start sharded SET/GET workers: {e}");
+                eprintln!("error: failed to start sharded command workers: {e}");
                 return ExitCode::from(1);
             }
         }
@@ -2794,7 +2842,7 @@ fn handle_sharded_set_get_readable(
                 }
                 Err(e) => {
                     eprintln!(
-                        "warn: sharded SET/GET client disconnected: {}",
+                        "warn: sharded command client disconnected: {}",
                         e.reason_code()
                     );
                     conn.closing = true;
@@ -2805,7 +2853,7 @@ fn handle_sharded_set_get_readable(
             Err(ref e) if e.kind() == ErrorKind::WouldBlock => break,
             Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
             Err(e) => {
-                eprintln!("warn: sharded SET/GET client read error: {e}");
+                eprintln!("warn: sharded command client read error: {e}");
                 conn.closing = true;
                 closing_tokens.insert(token);
                 return;
@@ -2858,9 +2906,9 @@ fn dispatch_sharded_set_get_frames(
     deferred_tokens: &mut TokenSet,
     ts: u64,
 ) {
-    const UNSUPPORTED: &[u8] = b"-ERR experimental sharded SET/GET mode only accepts exact default-DB SET, GET, PING, and QUIT\r\n";
-    const WORKER_GONE: &[u8] = b"-ERR experimental sharded SET/GET worker disconnected\r\n";
-    const PROTOCOL_ERROR: &[u8] = b"-ERR Protocol error in experimental sharded SET/GET mode\r\n";
+    const UNSUPPORTED: &[u8] = b"-ERR experimental sharded command mode accepts only default-DB single-key SET, GET, INCR, LPUSH, LPOP, HSET, HGET, plus PING and QUIT; cross-key and aggregate commands are not supported\r\n";
+    const WORKER_GONE: &[u8] = b"-ERR experimental sharded command worker disconnected\r\n";
+    const PROTOCOL_ERROR: &[u8] = b"-ERR Protocol error in experimental sharded command mode\r\n";
 
     deferred_tokens.remove(&token);
     let mut consumed_total = 0usize;
@@ -27424,7 +27472,46 @@ mod tests {
     }
 
     #[test]
-    fn sharded_set_get_pool_keeps_same_key_fifo() {
+    fn sharded_parser_batches_standard_single_key_mix() {
+        const SET: &[u8] = b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$2\r\n41\r\n";
+        const INCR: &[u8] = b"*2\r\n$4\r\nINCR\r\n$1\r\nk\r\n";
+        const GET: &[u8] = b"*2\r\n$3\r\nGET\r\n$1\r\nk\r\n";
+        let pipeline = [SET, INCR, GET].concat();
+
+        let parsed = crate::parse_sharded_set_get_batch(
+            &pipeline,
+            &ParserConfig::default(),
+            crate::ShardedSetGetBatchParse {
+                token: Token(71),
+                first_sequence: 19,
+                now_ms: 1,
+                worker_count: 8,
+                command_limit: crate::SHARDED_SET_GET_MAX_COMMANDS_PER_BATCH,
+            },
+        )
+        .expect("parse mixed single-key batch");
+
+        assert_eq!(parsed.jobs.len(), 3);
+        assert_eq!(parsed.consumed, pipeline.len());
+        assert_eq!(parsed.jobs[0].sequence, 19);
+        assert_eq!(parsed.jobs[2].sequence, 21);
+        assert!(matches!(
+            &parsed.jobs[0].command,
+            ShardedSetGetCommand::Set { .. }
+        ));
+        assert!(matches!(
+            &parsed.jobs[1].command,
+            ShardedSetGetCommand::SingleKey { .. }
+        ));
+        assert!(matches!(
+            &parsed.jobs[2].command,
+            ShardedSetGetCommand::Get { .. }
+        ));
+        assert!(parsed.jobs.iter().all(|job| job.command.key() == b"k"));
+    }
+
+    #[test]
+    fn sharded_pool_keeps_same_key_fifo_across_mixed_commands() {
         let poll = mio::Poll::new().expect("create test poll");
         let waker = std::sync::Arc::new(
             mio::Waker::new(poll.registry(), crate::BACKGROUND_WAKE_TOKEN)
@@ -27438,12 +27525,21 @@ mod tests {
                 now_ms: 1,
                 command: ShardedSetGetCommand::Set {
                     key: b"k".to_vec(),
-                    value: b"v".to_vec(),
+                    value: b"41".to_vec(),
                 },
             },
             ShardedSetGetJob {
                 token: Token(71),
                 sequence: 1,
+                now_ms: 1,
+                command: ShardedSetGetCommand::SingleKey {
+                    key: b"k".to_vec(),
+                    encoded_frame: b"*2\r\n$4\r\nINCR\r\n$1\r\nk\r\n".to_vec(),
+                },
+            },
+            ShardedSetGetJob {
+                token: Token(71),
+                sequence: 2,
                 now_ms: 1,
                 command: ShardedSetGetCommand::Get { key: b"k".to_vec() },
             },
@@ -27469,14 +27565,16 @@ mod tests {
             }
         };
         let completions = completion_batch.completions;
-        assert_eq!(completions.len(), 2);
+        assert_eq!(completions.len(), 3);
         assert_eq!(completions[0].sequence, 0);
         assert_eq!(completions[0].response, b"+OK\r\n");
         assert_eq!(completions[1].sequence, 1);
-        assert_eq!(completions[1].response, b"$1\r\nv\r\n");
+        assert_eq!(completions[1].response, b":42\r\n");
+        assert_eq!(completions[2].sequence, 2);
+        assert_eq!(completions[2].response, b"$2\r\n42\r\n");
         assert!(
             matches!(pool.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)),
-            "two same-shard commands must produce one completion envelope"
+            "three same-shard commands must produce one completion envelope"
         );
     }
 

@@ -1063,6 +1063,100 @@ fn sharded_set_get_p16_batches_match_legacy_redis() {
 }
 
 #[test]
+fn sharded_standard_single_key_mix_matches_legacy_redis() {
+    let fr_port = reserve_port();
+    let redis_port = reserve_port();
+    let _fr_server = spawn_frankenredis_sharded_set_get(fr_port, 8);
+    let _redis_server = spawn_legacy_redis(redis_port);
+    let mut fr = BufferedTcpClient::connect(fr_port);
+    let mut redis = BufferedTcpClient::connect(redis_port);
+    assert_ne!(
+        usize::from(fr_store::crc16_slot(b"a")) % 8,
+        usize::from(fr_store::crc16_slot(b"b")) % 8,
+        "counter and list fixtures must cross a worker boundary"
+    );
+
+    let commands: &[&[&[u8]]] = &[
+        &[b"SET".as_slice(), b"a".as_slice(), b"40".as_slice()],
+        &[b"INCR".as_slice(), b"a".as_slice()],
+        &[b"GET".as_slice(), b"a".as_slice()],
+        &[
+            b"LPUSH".as_slice(),
+            b"b".as_slice(),
+            b"one".as_slice(),
+            b"two".as_slice(),
+            b"three".as_slice(),
+        ],
+        &[b"LPOP".as_slice(), b"b".as_slice()],
+        &[b"LPOP".as_slice(), b"b".as_slice(), b"2".as_slice()],
+        &[
+            b"HSET".as_slice(),
+            b"hash".as_slice(),
+            b"f1".as_slice(),
+            b"v1".as_slice(),
+            b"f2".as_slice(),
+            b"v2".as_slice(),
+        ],
+        &[b"HGET".as_slice(), b"hash".as_slice(), b"f1".as_slice()],
+        &[
+            b"HSET".as_slice(),
+            b"hash".as_slice(),
+            b"f1".as_slice(),
+            b"v3".as_slice(),
+        ],
+        &[b"HGET".as_slice(), b"hash".as_slice(), b"f1".as_slice()],
+        &[
+            b"SET".as_slice(),
+            b"option-key".as_slice(),
+            b"first".as_slice(),
+            b"NX".as_slice(),
+        ],
+        &[
+            b"SET".as_slice(),
+            b"option-key".as_slice(),
+            b"second".as_slice(),
+            b"NX".as_slice(),
+        ],
+        &[b"GET".as_slice(), b"option-key".as_slice()],
+        &[
+            b"SET".as_slice(),
+            b"wrong-type".as_slice(),
+            b"value".as_slice(),
+        ],
+        &[
+            b"LPUSH".as_slice(),
+            b"wrong-type".as_slice(),
+            b"item".as_slice(),
+        ],
+        &[b"PING".as_slice(), b"mixed-ok".as_slice()],
+    ];
+    let mut pipeline = Vec::new();
+    for command in commands {
+        pipeline.extend_from_slice(&encode_command(command));
+    }
+
+    fr.write_all(&pipeline);
+    redis.write_all(&pipeline);
+    let fr_responses = fr.read_responses(commands.len());
+    let redis_responses = redis.read_responses(commands.len());
+    assert_eq!(
+        fr_responses, redis_responses,
+        "standard single-key string/list/hash commands must preserve Redis replies and pipeline order across shards"
+    );
+
+    let mut aggregate_pipeline = Vec::new();
+    aggregate_pipeline.extend_from_slice(&encode_command(&[b"DBSIZE"]));
+    aggregate_pipeline.extend_from_slice(&encode_command(&[b"INFO", b"server"]));
+    fr.write_all(&aggregate_pipeline);
+    for response in fr.read_responses(2) {
+        assert!(
+            matches!(response, RespFrame::Error(ref error) if error.contains("cross-key and aggregate commands are not supported")),
+            "aggregate command must fail closed instead of reporting one shard: {response:?}"
+        );
+    }
+}
+
+#[test]
 fn tcp_error_response() {
     let (port, server) = start_single_client_server();
 

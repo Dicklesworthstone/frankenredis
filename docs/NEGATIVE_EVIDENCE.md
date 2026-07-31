@@ -25408,3 +25408,55 @@ this repository's gates. No timing claim is made in this entry.
   same invocation. Until that predicate is met, the valid W1-W4 rows route away
   from the premise that merely adding sharded workers improves independent-key
   throughput.
+
+## 2026-07-30 BlackValley (cod/AUDIT+SURFACE): standard single-key sharded commands enabled; no mixed-concurrency performance claim (`frankenredis-sharded-command-surface-too-thin-z37kj`)
+
+- **Sol-max audit.** The eventfd storm and handoff counts survive as observations,
+  but cross-thread contention does not survive as the causal diagnosis. The
+  AM-coordinated per-thread census and run-length intervention recorded immediately
+  below isolate batch collapse in `parse_sharded_set_get_batch`: an envelope ends
+  at the first different-shard command in one connection's buffer, so scattered
+  W=8 work approaches one command per envelope. Holding eight workers and eight
+  completion producers fixed while restoring a 16-command same-shard run changes
+  the result by 1.92x; holding that run length fixed while reducing active workers
+  from eight to one changes it by at most 1%. Futex/handoff traffic is therefore a
+  symptom of the collapsed amortization unit, not the named root mechanism. The
+  raw long-job ratios remain `0.3840` and `0.2346`; their decline alone does not
+  refute a fixed startup cost because Redis throughput doubled. Absolute
+  FrankenRedis medians
+  (`1.630636397 s` for 400,000 operations and `13.667970819 s` for 4,000,000)
+  fit a two-point startup estimate of `0.293154794 s`, only `2.14483%` of the
+  longer job, so startup cannot explain most of the sustained deficit. Before
+  this change SET and GET were the only sharded data commands; PING and QUIT were
+  handled locally, while INCR, LPUSH, HSET, DBSIZE, and INFO were explicitly
+  refused.
+
+- **Surface change, not a timing result.** Sharded mode now routes default-DB
+  single-key SET, GET, INCR, LPUSH, LPOP, HSET, and HGET to the runtime owned by
+  the key's shard. Exact GET and plain SET retain their specialized parser paths;
+  the added standard families preserve the original RESP frame and execute it
+  through the full per-shard `Runtime`. Same-key FIFO, cross-shard reply ordering,
+  SET options, wrong-type errors, and command arity therefore use existing command
+  semantics rather than a second implementation.
+
+- **Correctness evidence.** Strict-remote focused unit tests passed all four
+  sharded parser/pool/order cases. A strict-remote TCP differential test then
+  pipelined SET/INCR/GET, LPUSH/LPOP, HSET/HGET, SET NX, a wrong-type list write,
+  and PING across an eight-worker FrankenRedis process and live vendored Redis
+  7.2.4; every RESP reply and its pipeline position matched. DBSIZE and INFO still
+  return an explicit cross-key/aggregate refusal instead of an incorrect
+  single-shard answer. Strict-remote workspace check and clippy
+  (`--all-targets`, `-D warnings`) passed, as did the full `fr-server` suite,
+  the explicit `fr-conformance -- --nocapture` suite, and the full workspace
+  test aggregate. Direct nightly rustfmt, shell syntax, and `git diff --check`
+  were clean; `cargo fmt --check` could not run because fail-closed rch correctly
+  refuses non-compilation commands (`RCH-E301`).
+
+- **Remaining claim blockers.** `scripts/thread_scaling_headtohead.sh` still
+  executes SET then GET only and explicitly makes no mixed-command claim.
+  `frankenredis-yd1ua` requires an interleaved string/list/hash driver with live
+  Redis, dual A/A controls, executable identity, exact semantic accounting, and
+  the repository's median-CI gates in one invocation. `frankenredis-91rts`
+  requires coordinator-owned, Redis-compatible DBSIZE/INFO aggregation across
+  every worker runtime. No realistic mixed-concurrency performance result is
+  claimed by this surface change.

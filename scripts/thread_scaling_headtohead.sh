@@ -17,16 +17,16 @@
 # SCOPE LIMIT -- READ THIS BEFORE QUOTING ANY NUMBER
 # --------------------------------------------------
 # FrankenRedis's only multi-threaded execution path is
-# `--experimental-sharded-set-get-workers N`, whose own help text reads: "Run
-# exact default-DB SET/GET on N key shards (1-256); permits local PING/QUIT and
-# refuses every other command". It is additionally incompatible with hardened
-# mode, --config, --aof, --rdb, --replicaof and --enable-debug-command.
+# `--experimental-sharded-set-get-workers N`. It serves the standard single-key
+# SET/GET/INCR/LPUSH/LPOP/HSET/HGET families on N key shards and permits local
+# PING/QUIT, but it still refuses cross-key and aggregate commands. It is also
+# incompatible with hardened mode, --config, --aof, --rdb, --replicaof and
+# --enable-debug-command.
 #
-# So a MIXED command workload is not measurable on this path -- every command
-# outside SET/GET/PING/QUIT is refused. This harness therefore runs a SET/GET job,
-# and every row it prints is scoped to SET/GET. The capability limit is part of
-# the result, not a footnote: the scaling headroom is real but currently reachable
-# only in a mode that serves two commands.
+# This harness still runs only a SET-then-GET job. Every row it prints is scoped
+# to SET/GET and is not a realistic mixed-command claim. A future mixed driver
+# must interleave the supported string/list/hash commands against both live
+# server arms in one invocation before quoting a broader result.
 #
 # FAIRNESS
 # --------
@@ -101,7 +101,7 @@ echo "  redis ELF     $RD_SHA"
 echo "  server cpuset $SERVER_CPUS   client cpuset $CLIENT_CPUS"
 echo "  job           SET then GET, n=$TOTAL each, c=$CLIENTS, P=$PIPE, r=$KEYSPACE"
 echo "  redis config  --io-threads $REDIS_IO_THREADS --io-threads-do-reads yes --save '' --appendonly no"
-echo "  SCOPE         SET/GET only (sharded path refuses every other command)"
+echo "  SCOPE         harness measures SET/GET only; no mixed-command claim"
 
 # fr must actually support the flag; an older binary silently predates it. A
 # sweep of only W=0 needs no flag, which is how a release-perf binary predating
@@ -262,4 +262,4 @@ if [ "$CLIENT_BOUND_ROWS" -gt 0 ]; then
 fi
 echo
 echo "host=$HOST kernel=$KERNEL cpu=$NPROC-thread fr_elf=${FR_SHA:0:16} redis_elf=${RD_SHA:0:16}"
-echo "SCOPE: SET/GET only. The sharded execution path refuses every other command."
+echo "SCOPE: this harness measures SET/GET only; it does not establish a mixed-command result."
