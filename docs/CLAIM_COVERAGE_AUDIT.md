@@ -8,6 +8,72 @@ it. Reproduce with `python3 scripts/claim_coverage_audit.py`.
 
 **Nothing was deleted or weakened by this audit. It is an inventory.**
 
+---
+
+## Re-run 2026-07-31 (BlackThrush) at HEAD `3202339fb` — the three numbers, and zero movement
+
+Re-run of the same tool against the same two ledgers after twelve conversion
+gates were built. **The counts did not move.** They are reproduced here rather
+than quietly re-stated, because the flat result is the finding.
+
+| | count | share |
+|---|---:|---:|
+| **KEEP claims held, total** | **568** | 100% |
+| **carry a vs-incumbent ratio measured with the incumbent LIVE in the same invocation** | **41** | 7.2% |
+| **do not** | **527** | 92.8% |
+
+The comparison the fleet asked for: FrankenFS found 67 of 186 (36.0%) with no
+ratio. **Ours is 92.8% by the strict gate, 84.2% counting only entries with no
+vs-Redis number of any kind.** That is worse than FrankenFS by a factor of two
+to three, and it is the honest number.
+
+### Cannot be converted vs not yet measured — these are different problems
+
+Of the 527 unsupported:
+
+| bucket | count | what it actually needs |
+|---|---:|---|
+| ratio **and** live arm present, written in a form the gate does not parse | 49 | reformat only; **no measurement** |
+| no vs-Redis number anywhere, but an incumbent arm is constructible | 468 | **re-measure** |
+| **structurally unconvertible — no incumbent arm exists for the surface** | **10** | **relabel `SELF-SPEEDUP`; never queue** |
+
+The 10 unconvertible quantify only internal counters Redis publishes no analogue
+of — instructions/op, syscalls/op, probe counts (`LFU HMGET 3 probes → 1`,
+`dispatch-floor front gate N x fewer instructions`). No harness produces a
+vs-incumbent ratio for them at any effort. Three currently sit at scorecard
+tier, where a bare `1.4330x` reads as a throughput ratio against Redis when it
+is a probe count against our own previous code. That mislabelling — not the
+missing measurement — is their defect.
+
+So the queue is **517 not-yet-measured (49 reformat + 468 re-measure)** and
+**10 not-measurable**, not 527 of one kind.
+
+### Why twelve gates produced zero conversions — root cause found today
+
+Between `f690bcd37` and `3202339fb` I built live-incumbent dual-null gates for
+the twelve highest-ranked Tier-1 claims (ZRANGEBYLEX, ZREVRANGEBYLEX,
+ZREMRANGEBYRANK/BYLEX, ZRANGEBYSCORE, ZREVRANGEBYSCORE, ZREVRANGE, LPOP/RPOP
+COUNT, ZDIFF/ZINTER, SSCAN/HSCAN/ZSCAN cursor-0, ZMPOP MIN/MAX,
+ZUNIONSTORE/ZINTERSTORE). All twelve beads are still `in_progress` and **not one
+ratio landed.** Every attempt died in the harness's host-wide quiescence
+preflight (every CPU in the process cpuset ≤ 20% busy over a 500 ms window,
+20 attempts) before a single server process spawned.
+
+The cause was not load. It was a fleet topology defect. `rch` declares
+`canonical_root = /data/projects`, `alias_root = /dp`; four workers had `/dp`
+pointing at `/data` (vmi1149989, vmi1227854, vmi1152480) or `/data/tmp`
+(vmi1293453). `rch` hard-denies those with `alias_wrong_target:/data`, so every
+strict-remote run was funnelled onto the alias-correct workers — and by
+measured per-CPU sampling those four rejected workers were **the quietest
+machines in the fleet** (12–13 of 20 preflight samples clear) while the
+alias-correct ones the scheduler kept choosing were the busiest
+(vmi1156319 load 8.73/8 cores, 0 clear samples; hz2 0/20; vmi1153651 load 17.5).
+
+Repaired 2026-07-31 with `ln -sfn /data/projects /dp` on all four; `rch
+diagnose` now selects them. The unmeasurability was infrastructure, not
+physics, and it had been reported as a per-bead retry blocker eleven separate
+times without anyone naming the shared cause.
+
 ## The one line
 
 > **568 KEEP claims total. 41 carry a vs-incumbent ratio in the gate's declared
