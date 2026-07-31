@@ -127,23 +127,68 @@ def load_public_text():
     return out
 
 
+# A claim's SUBJECT: the Redis command or subsystem it is about. Uppercase
+# runs of >=3 chars in a title are overwhelmingly command names (ZRANGEBYLEX,
+# HGETALL, BITOP). Verdict/process words are not subjects and are excluded, or
+# every KEEP would "surface" on every page that says KEEP.
+SUBJECT_TOKEN_RE = re.compile(r"\b[A-Z][A-Z0-9]{2,}(?:\.[A-Z]+)?\b")
+SUBJECT_STOPWORDS = frozenset(
+    {
+        "KEEP", "SHIPPED", "LANDED", "WIN", "PROMOTED", "REJECT", "REJECTED",
+        "NEGATIVE", "INVALID", "REVERT", "REVERTED", "HOLD", "MEASURE",
+        "MEASURED", "STRUCTURAL", "AUDIT", "SURFACE", "DIAGNOSTIC", "COMPETITIVE",
+        "SELF", "SPEEDUP", "CAVEAT", "FIX", "BUG", "TODO", "WIP", "NOTE",
+        "ORIG", "CAND", "CTL", "AND", "NOT", "THE", "FOR", "WITH", "VS",
+        "CPU", "RAM", "RSS", "CI", "CV", "ELF", "SHA", "ISA", "P16", "P1",
+        "RDB", "AOF", "RESP", "LTO", "SIMD", "AVX2", "MIN", "MAX",
+    }
+)
+
+
+def subject_tokens(title):
+    """Command/subsystem names a public page would have to mention by name."""
+    return {
+        token
+        for token in SUBJECT_TOKEN_RE.findall(title)
+        if token not in SUBJECT_STOPWORDS
+    }
+
+
 def load_bearing_score(title, body, public):
-    """How reachable is this claim from something a reader would act on?"""
+    """How reachable is this claim from something a reader would act on?
+
+    CORRECTED 2026-07-31 (BlackThrush), twice, and both corrections are recorded
+    because the first one was wrong in the opposite direction.
+
+    v1 accepted a bare ratio token ("1.18x") found anywhere in a public doc as
+    proof the claim surfaced there. That is a collision, not a citation: ratios
+    are three or four characters from a tiny alphabet and scorecards are full of
+    them. It scored the ZRANGEBYLEX entry 120 ("in BOTH scorecards") when
+    ZRANGEBYLEX appears in NEITHER -- the `1.18x` it matched belonged to an
+    unrelated zset/hash RDB-decode row and an unrelated set/get/incr table.
+
+    v2 replaced that with a subject-name match, which over-corrected: a claim
+    about `SET key value EX` matched every page, because every page says SET.
+    That inflated 79 entries to score 270 (README + both scorecards + parity +
+    changelog).
+
+    v3, used here: a bead id in the page is sufficient on its own. Otherwise the
+    page must BOTH name the subject AND quote one of the entry's own ratio
+    tokens -- naming the thing and citing its number. Neither half establishes
+    reachability alone.
+    """
     score = 0
     hits = []
     beads = set(BEAD_RE.findall(title)) | set(BEAD_RE.findall(body))
-    ratios = set(RATIO_TOKEN_RE.findall(title))
+    subjects = subject_tokens(title)
+    ratios = {r.replace(" ", "") for r in RATIO_TOKEN_RE.findall(title)}
     for path, weight, text in public:
-        matched = False
-        for bead in beads:
-            if bead in text:
-                matched = True
-                break
+        matched = any(bead in text for bead in beads)
         if not matched:
-            for ratio in ratios:
-                if ratio.replace(" ", "") in text.replace(" ", ""):
-                    matched = True
-                    break
+            squashed = text.replace(" ", "")
+            matched = any(subject in text for subject in subjects) and any(
+                ratio in squashed for ratio in ratios
+            )
         if matched:
             score += weight
             hits.append(path.name)

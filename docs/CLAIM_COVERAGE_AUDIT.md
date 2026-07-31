@@ -16,11 +16,15 @@ Re-run of the same tool against the same two ledgers after twelve conversion
 gates were built. **The counts did not move.** They are reproduced here rather
 than quietly re-stated, because the flat result is the finding.
 
-| | count | share |
+| | count at re-run | after today's conversion |
 |---|---:|---:|
-| **KEEP claims held, total** | **568** | 100% |
-| **carry a vs-incumbent ratio measured with the incumbent LIVE in the same invocation** | **41** | 7.2% |
-| **do not** | **527** | 92.8% |
+| **KEEP claims held, total** | **568** | **569** |
+| **carry a vs-incumbent ratio measured with the incumbent LIVE in the same invocation** | **41** (7.2%) | **42** (7.4%) |
+| **do not** | **527** (92.8%) | **527** (92.6%) |
+
+The middle column is the state this re-run found. The right-hand column is the
+state after the ZRANGEBYLEX conversion recorded below — one claim added, one
+claim supported. One.
 
 The comparison the fleet asked for: FrankenFS found 67 of 186 (36.0%) with no
 ratio. **Ours is 92.8% by the strict gate, 84.2% counting only entries with no
@@ -73,6 +77,59 @@ Repaired 2026-07-31 with `ln -sfn /data/projects /dp` on all four; `rch
 diagnose` now selects them. The unmeasurability was infrastructure, not
 physics, and it had been reported as a per-bead retry blocker eleven separate
 times without anyone naming the shared cause.
+
+### First conversion landed: ZRANGEBYLEX, 2.1198x live Redis
+
+With the fleet repaired, conversion-queue entry #1 was measured against a live
+incumbent and **KEEPs**: `ZRANGEBYLEX` over a 2000-member equal-score skiplist
+is **FrankenRedis/Redis 2.119766690x** wall (bootstrap 95% median CI
+[2.071790051, 2.160818627]) and 2.099226619x CPU-per-fixed-work, four arms in
+one invocation, both A/A nulls inside the 2% median guard, 97.4–97.8%
+saturation, all three host-wide quiescence phases clear, ELF SHA-256s
+self-reported from inside every process. Full entry in
+`docs/NEGATIVE_EVIDENCE.md`. Three earlier invocations were discarded by the
+harness (pre-pin quiescence; post-measurement quiescence; candidate CPU A/A
+median 1.0226 > 1.02) and no number from them is quoted. Total: **569 claims,
+42 supported.**
+
+## Correction 2026-07-31 (BlackThrush): this audit's own ranking was wrong
+
+Converting entry #1 exposed a bug in the tool that produced the queue above.
+It is corrected in `scripts/claim_coverage_audit.py` and the numbers here are
+restated. **The correction makes this repository's exposure look better, and it
+is published for the same reason the harsh numbers were.**
+
+`load_bearing_score()` decided whether a claim "surfaces in" a reader-facing
+page. v1 accepted a bare **ratio token** — `1.18x` — found anywhere on that
+page. Ratios are three or four characters from a tiny alphabet and scorecards
+are full of them, so this matched collisions, not citations. ZRANGEBYLEX scored
+120, *"in BOTH scorecards"*; **`ZRANGEBYLEX` appears in neither scorecard.** The
+`1.18x` it matched belonged to an unrelated zset/hash RDB-decode row and an
+unrelated `set`/`get`/`incr` table.
+
+v2 replaced ratio-matching with subject-name matching and over-corrected the
+other way: a claim about `SET key value EX` matched every page, because every
+page says SET. That inflated 79 entries to the maximum score of 270.
+
+v3, in force now: a bead id on the page is sufficient; otherwise the page must
+**both** name the claim's subject **and** quote one of that entry's own ratio
+tokens.
+
+| | v1 (published earlier today) | v3 (corrected) |
+|---|---:|---:|
+| claims echoed in **both** scorecards | 47 | **18** |
+| claims echoed in **one** scorecard | 32 | **24** |
+| claims with any reader-facing exposure | 79 | **42** |
+| claims at README tier | 0 | **0** |
+| ledger-only, no reader-facing surface | 389 | **426** |
+
+So the reader-facing exposure was **overstated by 88%** (79 → 42). The Tier-1
+list in the ranked queue above — including the ZRANGEBYLEX/ZREVRANGEBYLEX/
+ZREMRANGEBY* entries named as "highest-scoring examples, all in both
+scorecards" — was largely an artefact of ratio collisions. Those claims are
+still unsupported; they are just not on a page a user reads. The headline
+counts (569 / 42 / 527) are unaffected: they come from the repo's own
+`incumbent_measured()` gate, which this bug never touched.
 
 ## The one line
 
