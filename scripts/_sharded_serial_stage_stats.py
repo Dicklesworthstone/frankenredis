@@ -294,6 +294,53 @@ def main():
         print("   measured is what the path actually delivered. measured < ceiling is the")
         print("   handoff's latency and cross-core stall cost, on top of the instruction count.")
 
+    # WINDOW VALIDITY. The W=0 arm runs the UNSHARDED path, which is identical
+    # code in every binary this harness compares, so it is a built-in A/A null:
+    # if it does not reproduce, the window is bad and no row from it is a server
+    # measurement. Measured 2026-07-31 under loadavg 34.7, W=0 read 730,727 ops/s
+    # in one arm and 442,576 in another on the same code.
+    #
+    # It also flags the subtler failure. instructions/op is contention-proof only
+    # for PER-COMMAND work; a starved event loop burns empty poll ticks that are
+    # paced by time, not by operations, so the sharded rows' counts inflate too
+    # (candidate W=1 read 3476.5 instr/op in that window against 1551.9 quiet).
+    # A row whose serial thread is far from a saturated core is therefore
+    # reported as suspect rather than quoted.
+    print()
+    print("== window validity ==")
+    verdict_lines = []
+    if "0" in summary:
+        base_rate = summary["0"]["rate"]
+        base_instr = summary["0"]["evloop_instr"]
+        print(
+            f"  W=0 reference (unsharded path, identical code in every arm): "
+            f"{base_instr:.1f} instr/op at {base_rate:.0f} ops/s"
+        )
+        print(
+            "  Compare this line ACROSS binaries. A disagreement beyond a few percent"
+        )
+        print("  means the host moved, and no row from either run is admissible.")
+    starved = [
+        w for w in labels() if summary[w]["evloop_cpu"] < 90.0
+    ]
+    if starved:
+        verdict_lines.append(
+            "  SUSPECT: the serial thread was below 90% of a core on "
+            + ", ".join(f"W={w} ({summary[w]['evloop_cpu']:.1f}%)" for w in starved)
+        )
+        verdict_lines.append(
+            "    Either the client could not saturate the server (raise -j) or the host"
+        )
+        verdict_lines.append(
+            "    is contended. Both make ops/s describe something other than this server."
+        )
+    else:
+        verdict_lines.append(
+            "  OK: the serial thread was at or above 90% of a core on every arm."
+        )
+    for line in verdict_lines:
+        print(line)
+
     uncounted = []
     for w in labels():
         for _, g, _ in rounds[w]:

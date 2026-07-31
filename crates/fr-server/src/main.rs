@@ -62,6 +62,10 @@ const SHARDED_SET_GET_TOTAL_QUEUE_BOUND: usize = 65_536;
 const SHARDED_SET_GET_MAX_WORKERS: usize = 256;
 const SHARDED_SET_GET_MAX_IN_FLIGHT_PER_CLIENT: usize = 4_096;
 const SHARDED_SET_GET_MAX_COMMANDS_PER_BATCH: usize = 16;
+/// Ceiling on jobs held in per-tick shard staging before the event loop stops
+/// consuming new input. Matched to the total channel bound so staging cannot
+/// become a second, unbounded queue sitting behind the bounded one.
+const SHARDED_SET_GET_MAX_STAGED: usize = SHARDED_SET_GET_TOTAL_QUEUE_BOUND;
 
 const REPLICA_ACK_INTERVAL_MS: u64 = 1_000;
 const REPLICA_RECONNECT_BACKOFF_MS: u64 = 250;
@@ -718,8 +722,10 @@ struct ShardedSetGetBatchParse {
 }
 
 struct ParsedShardedSetGetBatch {
-    shard: usize,
-    jobs: Vec<ShardedSetGetJob>,
+    /// Per-shard job counts for this parse, indexed by shard. Commands are no
+    /// longer required to share a shard, so a parse can feed several at once.
+    staged_per_shard: Vec<usize>,
+    staged: usize,
     consumed: usize,
     first_command_consumed: usize,
 }
@@ -735,92 +741,276 @@ struct ShardedSetGetCompletionBatch {
 }
 
 enum ShardedSetGetEnqueueError {
-    Full,
-    Disconnected,
+    /// The shard's job channel is full. The envelope is handed BACK so the
+    /// caller can retain it in staging and retry on the next tick: the commands
+    /// have already been parsed out of the read buffer and had reply sequence
+    /// numbers assigned, so dropping them would strand those replies forever.
+    Full(Vec<ShardedSetGetJob>),
+    /// The shard's worker thread is gone. The envelope comes back so every
+    /// connection waiting on a sequence inside it can be failed explicitly
+    /// rather than left waiting on a reply that can never be produced.
+    Disconnected(Vec<ShardedSetGetJob>),
 }
+
+/// Reply sent when a shard worker has died with commands already sequenced
+/// against it. Module-level because both the dispatch path and the staging
+/// flush have to be able to emit it.
+const SHARDED_WORKER_GONE: &[u8] =
+    b"-ERR experimental sharded command worker disconnected\r\n";
 
 fn sharded_set_get_shard(key: &[u8], worker_count: usize) -> usize {
     usize::from(fr_store::crc16_slot(key)) % worker_count
 }
 
+/// Per-tick shard staging: the envelope the sharded bus actually ships.
+///
+/// One buffer per shard, filled by EVERY connection the event loop services in a
+/// tick and drained either when a buffer reaches the envelope cap or at the end
+/// of the tick. This replaces "a run of consecutive same-shard commands on one
+/// connection" as the amortization unit, which was the measured defect: at
+/// c=128/P=16 a tick offers ~2048 commands, so at W=8 each shard sees ~256 even
+/// when keys are perfectly scattered, against an expected run length of 1.14
+/// under the old unit.
+///
+/// INVARIANT THAT MAKES THIS SAFE: staging must be empty when the event loop
+/// returns to `poll`, or a staged command's reply never arrives and the client
+/// hangs. `flush` is therefore called at the tail of every path that can stage,
+/// and the one case that legitimately retains -- a full shard channel -- is
+/// woken again by that shard's own worker draining it.
+struct ShardedTickStaging {
+    per_shard: Vec<Vec<ShardedSetGetJob>>,
+    /// Total jobs held across all shards, so the saturation check is O(1) and
+    /// the end-of-tick flush can skip the whole scan when nothing is staged.
+    staged: usize,
+}
+
+impl ShardedTickStaging {
+    fn new(worker_count: usize) -> Self {
+        debug_assert!(worker_count > 0);
+        Self {
+            per_shard: (0..worker_count)
+                .map(|_| Vec::with_capacity(SHARDED_SET_GET_MAX_COMMANDS_PER_BATCH))
+                .collect(),
+            staged: 0,
+        }
+    }
+
+    /// Staging must not become a second, unbounded queue behind the bounded
+    /// channel it feeds. At the cap the parser stops consuming new input, which
+    /// leaves the bytes in the connection's read buffer exactly as a full
+    /// channel used to.
+    fn is_saturated(&self) -> bool {
+        self.staged >= SHARDED_SET_GET_MAX_STAGED
+    }
+
+    fn push(&mut self, shard: usize, job: ShardedSetGetJob) {
+        self.per_shard[shard].push(job);
+        self.staged += 1;
+    }
+
+    fn is_empty(&self) -> bool {
+        self.staged == 0
+    }
+
+    /// Ship one shard's staged jobs, in envelopes of at most
+    /// `SHARDED_SET_GET_MAX_COMMANDS_PER_BATCH`.
+    ///
+    /// The cap is deliberately unchanged from the pre-fix design: it is what the
+    /// hashtag-pinned proxy measured (0.0414 futex/op, ~1/24), and holding it
+    /// fixed keeps the worker's batch semantics and reply latency identical, so
+    /// the only variable this change introduces is WHERE the 16 commands come
+    /// from -- the whole tick rather than one connection's consecutive run.
+    ///
+    /// On a full channel the remaining envelopes are retained verbatim and every
+    /// connection with a job among them is deferred, so the retry happens next
+    /// tick without re-parsing or re-sequencing anything. Ordering within a shard
+    /// is preserved because the retained jobs stay at the FRONT of the buffer.
+    fn flush_shard(
+        &mut self,
+        shard: usize,
+        pool: &ShardedSetGetPool,
+        clients: &mut ClientMap,
+        closing_tokens: &mut TokenSet,
+        deferred_tokens: &mut TokenSet,
+    ) {
+        while !self.per_shard[shard].is_empty() {
+            let take = self.per_shard[shard]
+                .len()
+                .min(SHARDED_SET_GET_MAX_COMMANDS_PER_BATCH);
+            let envelope: Vec<ShardedSetGetJob> =
+                self.per_shard[shard].drain(..take).collect();
+            self.staged -= take;
+            match pool.try_enqueue_batch(shard, envelope) {
+                Ok(()) => {}
+                Err(ShardedSetGetEnqueueError::Full(envelope)) => {
+                    for job in &envelope {
+                        deferred_tokens.insert(job.token);
+                    }
+                    for job in self.per_shard[shard].iter() {
+                        deferred_tokens.insert(job.token);
+                    }
+                    self.staged += envelope.len();
+                    // Front-insert so this shard's FIFO order survives the retry.
+                    self.per_shard[shard].splice(0..0, envelope);
+                    return;
+                }
+                Err(ShardedSetGetEnqueueError::Disconnected(envelope)) => {
+                    // The worker thread is gone, so these replies can never be
+                    // produced. Fail each affected connection rather than leave
+                    // it waiting on a sequence that will never arrive.
+                    for job in envelope {
+                        let Some(conn) = clients.get_mut(&job.token) else {
+                            continue;
+                        };
+                        if !conn.closing {
+                            let _ = conn.sharded_replies.complete_remote(
+                                job.sequence,
+                                SHARDED_WORKER_GONE.to_vec(),
+                                &mut conn.write_buf,
+                            );
+                            conn.closing = true;
+                            closing_tokens.insert(job.token);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// End-of-tick drain. Cheap to call speculatively: with nothing staged it
+    /// does not touch the per-shard vectors at all.
+    fn flush(
+        &mut self,
+        pool: &ShardedSetGetPool,
+        clients: &mut ClientMap,
+        closing_tokens: &mut TokenSet,
+        deferred_tokens: &mut TokenSet,
+    ) {
+        if self.is_empty() {
+            return;
+        }
+        for shard in 0..self.per_shard.len() {
+            self.flush_shard(shard, pool, clients, closing_tokens, deferred_tokens);
+        }
+    }
+}
+
+/// Parse exactly one dispatchable sharded command, or None if the head of
+/// `unparsed` is not one (incomplete frame, or a shape this mode refuses).
+///
+/// Split out of the old run-length batch parser so the caller can route each
+/// command to its OWN shard instead of stopping at the first shard change.
+fn parse_sharded_command(
+    unparsed: &[u8],
+    parser_config: &ParserConfig,
+) -> Option<(ShardedSetGetCommand, usize)> {
+    if let Some(packet) = parse_borrowed_plain_get_packet(unparsed, parser_config) {
+        return Some((
+            ShardedSetGetCommand::Get {
+                key: packet.key.to_vec(),
+            },
+            packet.consumed,
+        ));
+    }
+    if let Some(packet) = parse_borrowed_plain_set_packet(unparsed, parser_config) {
+        return Some((
+            ShardedSetGetCommand::Set {
+                key: packet.key.to_vec(),
+                value: packet.value.to_vec(),
+            },
+            packet.consumed,
+        ));
+    }
+    // The generic single-key path allocates its argument vector per command, as
+    // it did before this change: under a scattered keyspace the old batch was
+    // one command long anyway, so this is the same cost, and the plain GET/SET
+    // fast paths above never touch it.
+    let mut borrowed_args = Vec::new();
+    let parsed = match fr_protocol::parse_command_args_borrowed_into(
+        unparsed,
+        parser_config,
+        &mut borrowed_args,
+    ) {
+        Ok(parsed)
+            if borrowed_args
+                .first()
+                .is_some_and(|name| sharded_single_key_command(name)) =>
+        {
+            parsed
+        }
+        _ => return None,
+    };
+    Some((
+        ShardedSetGetCommand::SingleKey {
+            key: borrowed_args
+                .get(1)
+                .map_or_else(Vec::new, |key| key.to_vec()),
+            encoded_frame: unparsed[..parsed.consumed].to_vec(),
+        },
+        parsed.consumed,
+    ))
+}
+
+/// Parse a run of dispatchable commands out of one connection's read buffer and
+/// STAGE each one on the shard its key selects.
+///
+/// This is the fix for the batch-collapse defect diagnosed on 2026-07-31. The
+/// previous parser amortized the channel handoff over a run of CONSECUTIVE
+/// same-shard commands within a single connection, and broke at the first shard
+/// change. With W shards and scattered keys the expected run length is W/(W-1) --
+/// 1.14 at W=8 -- so the amortization evaporated exactly where the parallelism
+/// was supposed to pay, and every operation bought its own channel send, receive
+/// and futex on the un-parallelizable event-loop thread.
+///
+/// Envelopes are now filled from the whole tick instead, across every connection
+/// the event loop services, so a scattered keyspace fills them just as densely as
+/// a pinned one. Reply order is unaffected: sequence numbers are still assigned
+/// per connection at parse time, and `ShardedReplyOrder` restores emission order
+/// from them no matter which shard finishes first.
 fn parse_sharded_set_get_batch(
     input: &[u8],
     parser_config: &ParserConfig,
     parse: ShardedSetGetBatchParse,
+    staging: &mut ShardedTickStaging,
 ) -> Option<ParsedShardedSetGetBatch> {
     debug_assert!(parse.worker_count > 0);
     debug_assert!(parse.command_limit > 0);
-    let mut jobs = Vec::with_capacity(parse.command_limit);
+    let mut staged_per_shard = vec![0usize; parse.worker_count];
+    let mut staged = 0usize;
     let mut consumed_total = 0usize;
-    let mut batch_shard = None;
     let mut first_command_consumed = 0usize;
-    let mut borrowed_args = Vec::new();
 
-    while jobs.len() < parse.command_limit && consumed_total < input.len() {
-        let unparsed = &input[consumed_total..];
-        let (command, consumed) =
-            if let Some(packet) = parse_borrowed_plain_get_packet(unparsed, parser_config) {
-                (
-                    ShardedSetGetCommand::Get {
-                        key: packet.key.to_vec(),
-                    },
-                    packet.consumed,
-                )
-            } else if let Some(packet) = parse_borrowed_plain_set_packet(unparsed, parser_config) {
-                (
-                    ShardedSetGetCommand::Set {
-                        key: packet.key.to_vec(),
-                        value: packet.value.to_vec(),
-                    },
-                    packet.consumed,
-                )
-            } else {
-                borrowed_args.clear();
-                let parsed = match fr_protocol::parse_command_args_borrowed_into(
-                    unparsed,
-                    parser_config,
-                    &mut borrowed_args,
-                ) {
-                    Ok(parsed)
-                        if borrowed_args
-                            .first()
-                            .is_some_and(|name| sharded_single_key_command(name)) =>
-                    {
-                        parsed
-                    }
-                    _ => break,
-                };
-                (
-                    ShardedSetGetCommand::SingleKey {
-                        key: borrowed_args
-                            .get(1)
-                            .map_or_else(Vec::new, |key| key.to_vec()),
-                        encoded_frame: unparsed[..parsed.consumed].to_vec(),
-                    },
-                    parsed.consumed,
-                )
-            };
-        let shard = sharded_set_get_shard(command.key(), parse.worker_count);
-        if batch_shard.is_some_and(|expected| expected != shard) {
+    while staged < parse.command_limit && consumed_total < input.len() {
+        if staging.is_saturated() {
             break;
         }
-        batch_shard = Some(shard);
-        if jobs.is_empty() {
+        let Some((command, consumed)) =
+            parse_sharded_command(&input[consumed_total..], parser_config)
+        else {
+            break;
+        };
+        let shard = sharded_set_get_shard(command.key(), parse.worker_count);
+        if staged == 0 {
             first_command_consumed = consumed;
         }
-        let sequence = parse.first_sequence.wrapping_add(jobs.len() as u64);
-        jobs.push(ShardedSetGetJob {
-            token: parse.token,
-            sequence,
-            now_ms: parse.now_ms,
-            command,
-        });
+        let sequence = parse.first_sequence.wrapping_add(staged as u64);
+        staging.push(
+            shard,
+            ShardedSetGetJob {
+                token: parse.token,
+                sequence,
+                now_ms: parse.now_ms,
+                command,
+            },
+        );
+        staged_per_shard[shard] += 1;
+        staged += 1;
         consumed_total += consumed;
     }
 
-    batch_shard.map(|shard| ParsedShardedSetGetBatch {
-        shard,
-        jobs,
+    (staged > 0).then_some(ParsedShardedSetGetBatch {
+        staged_per_shard,
+        staged,
         consumed: consumed_total,
         first_command_consumed,
     })
@@ -910,9 +1100,9 @@ impl ShardedSetGetPool {
         );
         match self.jobs[shard].try_send(jobs) {
             Ok(()) => Ok(()),
-            Err(mpsc::TrySendError::Full(_)) => Err(ShardedSetGetEnqueueError::Full),
-            Err(mpsc::TrySendError::Disconnected(_)) => {
-                Err(ShardedSetGetEnqueueError::Disconnected)
+            Err(mpsc::TrySendError::Full(jobs)) => Err(ShardedSetGetEnqueueError::Full(jobs)),
+            Err(mpsc::TrySendError::Disconnected(jobs)) => {
+                Err(ShardedSetGetEnqueueError::Disconnected(jobs))
             }
         }
     }
@@ -1804,6 +1994,14 @@ fn main() -> ExitCode {
     let mut paused_tokens: TokenSet = TokenSet::default();
     let mut deferred_tokens: TokenSet = TokenSet::default();
     let mut sharded_deferred_tokens: TokenSet = TokenSet::default();
+    // Per-tick shard staging. Sized from the pool so `push` can index by shard
+    // without a bounds decision; a single dummy buffer when sharding is off, in
+    // which case nothing ever stages into it.
+    let mut sharded_staging = ShardedTickStaging::new(
+        sharded_set_get_pool
+            .as_ref()
+            .map_or(1, ShardedSetGetPool::worker_count),
+    );
     let mut replica_sync = ReplicaSyncState::new();
     // (frankenredis-jd75g) Client handles start above the reserved listener
     // token range (0..MAX_LISTENERS).
@@ -1891,6 +2089,7 @@ fn main() -> ExitCode {
             &mut sharded_deferred_tokens,
             ts,
             writer_pool.as_ref(),
+            &mut sharded_staging,
         );
 
         for event in events.iter() {
@@ -1927,6 +2126,7 @@ fn main() -> ExitCode {
                         &mut sharded_deferred_tokens,
                         ts,
                         writer_pool.as_ref(),
+                        &mut sharded_staging,
                     );
                 }
                 conn_handle => {
@@ -1944,6 +2144,7 @@ fn main() -> ExitCode {
                                 pool,
                                 writer_pool.as_ref(),
                                 &mut read_scratch,
+                                &mut sharded_staging,
                             );
                         } else {
                             handle_readable(
@@ -1996,6 +2197,7 @@ fn main() -> ExitCode {
             &mut sharded_deferred_tokens,
             ts,
             writer_pool.as_ref(),
+            &mut sharded_staging,
         );
 
         // Run active expiry cycle once per tick (fast cycle).
@@ -2810,6 +3012,7 @@ fn handle_sharded_set_get_readable(
     pool: &ShardedSetGetPool,
     writer_pool: Option<&WriterPool>,
     read_scratch: &mut [u8],
+    staging: &mut ShardedTickStaging,
 ) {
     let Some(conn) = clients.get_mut(&token) else {
         return;
@@ -2873,6 +3076,7 @@ fn handle_sharded_set_get_readable(
         closing_tokens,
         deferred_tokens,
         ts,
+        staging,
     );
     runtime.track_net_output_bytes(
         conn.write_buf
@@ -2905,9 +3109,9 @@ fn dispatch_sharded_set_get_frames(
     closing_tokens: &mut TokenSet,
     deferred_tokens: &mut TokenSet,
     ts: u64,
+    staging: &mut ShardedTickStaging,
 ) {
     const UNSUPPORTED: &[u8] = b"-ERR experimental sharded command mode accepts only default-DB single-key SET, GET, INCR, LPUSH, LPOP, HSET, HGET, plus PING and QUIT; cross-key and aggregate commands are not supported\r\n";
-    const WORKER_GONE: &[u8] = b"-ERR experimental sharded command worker disconnected\r\n";
     const PROTOCOL_ERROR: &[u8] = b"-ERR Protocol error in experimental sharded command mode\r\n";
 
     deferred_tokens.remove(&token);
@@ -2918,13 +3122,16 @@ fn dispatch_sharded_set_get_frames(
     while consumed_total < conn.read_buf.len() && !conn.closing {
         if processed_frames >= MAX_FRAMES_PER_CLIENT_TICK
             || conn.sharded_replies.outstanding() >= SHARDED_SET_GET_MAX_IN_FLIGHT_PER_CLIENT
+            || staging.is_saturated()
         {
             deferred_tokens.insert(token);
             break;
         }
 
-        let batch_limit = SHARDED_SET_GET_MAX_COMMANDS_PER_BATCH
-            .min(MAX_FRAMES_PER_CLIENT_TICK - processed_frames)
+        // No longer capped at one envelope: this parse stages straight into the
+        // per-shard buffers, so a scattered pipeline is consumed in one pass
+        // instead of one command per call.
+        let parse_limit = (MAX_FRAMES_PER_CLIENT_TICK - processed_frames)
             .min(SHARDED_SET_GET_MAX_IN_FLIGHT_PER_CLIENT - conn.sharded_replies.outstanding());
         let parsed_batch = parse_sharded_set_get_batch(
             &conn.read_buf[consumed_total..],
@@ -2934,33 +3141,20 @@ fn dispatch_sharded_set_get_frames(
                 first_sequence: conn.sharded_replies.proposed_sequence(),
                 now_ms: ts,
                 worker_count: pool.worker_count(),
-                command_limit: batch_limit,
+                command_limit: parse_limit,
             },
+            staging,
         );
 
         if let Some(parsed_batch) = parsed_batch {
-            let batch_commands = parsed_batch.jobs.len();
-            match pool.try_enqueue_batch(parsed_batch.shard, parsed_batch.jobs) {
-                Ok(()) => {
-                    conn.sharded_replies.note_enqueued(batch_commands);
-                    consumed_total += parsed_batch.consumed;
-                    processed_frames += batch_commands;
-                    continue;
-                }
-                Err(ShardedSetGetEnqueueError::Full) => {
-                    deferred_tokens.insert(token);
-                    break;
-                }
-                Err(ShardedSetGetEnqueueError::Disconnected) => {
-                    let _ = conn
-                        .sharded_replies
-                        .complete_local(WORKER_GONE.to_vec(), &mut conn.write_buf);
-                    consumed_total += parsed_batch.first_command_consumed;
-                    conn.closing = true;
-                    closing_tokens.insert(token);
-                    break;
-                }
-            }
+            // The jobs are staged, so they are already committed to a reply
+            // sequence: account them as in flight now, exactly as the immediate
+            // enqueue used to. Backpressure is the staging cap plus the
+            // per-client outstanding cap, both checked at the top of this loop.
+            conn.sharded_replies.note_enqueued(parsed_batch.staged);
+            consumed_total += parsed_batch.consumed;
+            processed_frames += parsed_batch.staged;
+            continue;
         }
 
         let unparsed = &conn.read_buf[consumed_total..];
@@ -3043,6 +3237,7 @@ fn drain_sharded_set_get_completions(
     deferred_tokens: &mut TokenSet,
     ts: u64,
     writer_pool: Option<&WriterPool>,
+    staging: &mut ShardedTickStaging,
 ) {
     let Some(pool) = pool else {
         return;
@@ -3109,7 +3304,14 @@ fn drain_sharded_set_get_completions(
         deferred_tokens,
         ts,
         writer_pool,
+        staging,
     );
+
+    // THE TICK BOUNDARY. Every path that can stage a job funnels through this
+    // function, and this is its tail, so nothing staged survives into `poll`.
+    // That invariant is what keeps per-tick batching from being a hang: a job
+    // left in staging is a reply that never arrives.
+    staging.flush(pool, clients, closing_tokens, deferred_tokens);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3123,6 +3325,7 @@ fn process_deferred_sharded_set_get_clients(
     deferred_tokens: &mut TokenSet,
     ts: u64,
     writer_pool: Option<&WriterPool>,
+    staging: &mut ShardedTickStaging,
 ) {
     let tokens: Vec<Token> = deferred_tokens.iter().copied().collect();
     for token in tokens {
@@ -3143,6 +3346,7 @@ fn process_deferred_sharded_set_get_clients(
             closing_tokens,
             deferred_tokens,
             ts,
+            staging,
         );
         runtime.track_net_output_bytes(
             conn.write_buf
@@ -27437,19 +27641,28 @@ mod tests {
         assert_eq!(out, b"firstsecondthird");
     }
 
+    /// The direct inverse of the assertion this test used to make.
+    ///
+    /// It previously asserted that the parser STOPS at a shard change, consuming
+    /// 16 of 17 commands. That break was the batch-collapse defect: with W shards
+    /// and scattered keys the expected run length is W/(W-1), so the envelope the
+    /// design depends on never filled. The parser now consumes the whole pipeline
+    /// and routes each command to its own shard's staging buffer.
     #[test]
-    fn sharded_set_get_parser_batches_p16_without_crossing_shards() {
+    fn sharded_parser_stages_across_a_shard_change_instead_of_stopping() {
         const GET_A: &[u8] = b"*2\r\n$3\r\nGET\r\n$1\r\na\r\n";
         const GET_B: &[u8] = b"*2\r\n$3\r\nGET\r\n$1\r\nb\r\n";
         let mut pipeline = GET_A.repeat(16);
         pipeline.extend_from_slice(GET_B);
         let worker_count = 8;
+        let shard_a = crate::sharded_set_get_shard(b"a", worker_count);
+        let shard_b = crate::sharded_set_get_shard(b"b", worker_count);
         assert_ne!(
-            crate::sharded_set_get_shard(b"a", worker_count),
-            crate::sharded_set_get_shard(b"b", worker_count),
+            shard_a, shard_b,
             "fixture keys must route to different workers"
         );
 
+        let mut staging = crate::ShardedTickStaging::new(worker_count);
         let parsed = crate::parse_sharded_set_get_batch(
             &pipeline,
             &ParserConfig::default(),
@@ -27458,17 +27671,33 @@ mod tests {
                 first_sequence: 41,
                 now_ms: 1,
                 worker_count,
-                command_limit: crate::SHARDED_SET_GET_MAX_COMMANDS_PER_BATCH,
+                command_limit: crate::MAX_FRAMES_PER_CLIENT_TICK,
             },
+            &mut staging,
         )
-        .expect("parse same-shard P16 batch");
+        .expect("parse a pipeline that crosses a shard boundary");
 
-        assert_eq!(parsed.jobs.len(), 16);
-        assert_eq!(parsed.consumed, GET_A.len() * 16);
+        assert_eq!(parsed.staged, 17, "every command is consumed, not just 16");
+        assert_eq!(parsed.consumed, pipeline.len());
         assert_eq!(parsed.first_command_consumed, GET_A.len());
-        assert_eq!(parsed.jobs[0].sequence, 41);
-        assert_eq!(parsed.jobs[15].sequence, 56);
-        assert!(parsed.jobs.iter().all(|job| job.command.key() == b"a"));
+        assert_eq!(parsed.staged_per_shard[shard_a], 16);
+        assert_eq!(parsed.staged_per_shard[shard_b], 1);
+
+        // Sequence numbers stay dense and monotonic in ARRIVAL order across the
+        // shard change; that is what lets ShardedReplyOrder restore pipeline
+        // reply order regardless of which shard completes first.
+        let a_seqs: Vec<u64> = staging.per_shard[shard_a]
+            .iter()
+            .map(|job| job.sequence)
+            .collect();
+        assert_eq!(a_seqs, (41..57).collect::<Vec<u64>>());
+        assert_eq!(staging.per_shard[shard_b][0].sequence, 57);
+        assert!(
+            staging.per_shard[shard_a]
+                .iter()
+                .all(|job| job.command.key() == b"a")
+        );
+        assert_eq!(staging.per_shard[shard_b][0].command.key(), b"b");
     }
 
     #[test]
@@ -27477,7 +27706,10 @@ mod tests {
         const INCR: &[u8] = b"*2\r\n$4\r\nINCR\r\n$1\r\nk\r\n";
         const GET: &[u8] = b"*2\r\n$3\r\nGET\r\n$1\r\nk\r\n";
         let pipeline = [SET, INCR, GET].concat();
+        let worker_count = 8;
+        let shard = crate::sharded_set_get_shard(b"k", worker_count);
 
+        let mut staging = crate::ShardedTickStaging::new(worker_count);
         let parsed = crate::parse_sharded_set_get_batch(
             &pipeline,
             &ParserConfig::default(),
@@ -27485,29 +27717,77 @@ mod tests {
                 token: Token(71),
                 first_sequence: 19,
                 now_ms: 1,
-                worker_count: 8,
-                command_limit: crate::SHARDED_SET_GET_MAX_COMMANDS_PER_BATCH,
+                worker_count,
+                command_limit: crate::MAX_FRAMES_PER_CLIENT_TICK,
             },
+            &mut staging,
         )
         .expect("parse mixed single-key batch");
 
-        assert_eq!(parsed.jobs.len(), 3);
+        assert_eq!(parsed.staged, 3);
         assert_eq!(parsed.consumed, pipeline.len());
-        assert_eq!(parsed.jobs[0].sequence, 19);
-        assert_eq!(parsed.jobs[2].sequence, 21);
+        assert_eq!(parsed.staged_per_shard[shard], 3);
+        let jobs = &staging.per_shard[shard];
+        assert_eq!(jobs[0].sequence, 19);
+        assert_eq!(jobs[2].sequence, 21);
+        assert!(matches!(&jobs[0].command, ShardedSetGetCommand::Set { .. }));
         assert!(matches!(
-            &parsed.jobs[0].command,
-            ShardedSetGetCommand::Set { .. }
-        ));
-        assert!(matches!(
-            &parsed.jobs[1].command,
+            &jobs[1].command,
             ShardedSetGetCommand::SingleKey { .. }
         ));
-        assert!(matches!(
-            &parsed.jobs[2].command,
-            ShardedSetGetCommand::Get { .. }
-        ));
-        assert!(parsed.jobs.iter().all(|job| job.command.key() == b"k"));
+        assert!(matches!(&jobs[2].command, ShardedSetGetCommand::Get { .. }));
+        assert!(jobs.iter().all(|job| job.command.key() == b"k"));
+    }
+
+    /// Same-key commands must stay FIFO inside a shard even when the pipeline
+    /// interleaves other shards between them — the property that makes
+    /// per-key atomicity survive per-tick regrouping.
+    #[test]
+    fn sharded_staging_preserves_per_shard_fifo_under_interleaving() {
+        let worker_count = 8;
+        let mut pipeline = Vec::new();
+        let mut expected: std::collections::BTreeMap<usize, Vec<u64>> =
+            std::collections::BTreeMap::new();
+        for i in 0..64u64 {
+            let key = format!("k{i}");
+            let frame = format!(
+                "*2\r\n$3\r\nGET\r\n${}\r\n{}\r\n",
+                key.len(),
+                key
+            );
+            pipeline.extend_from_slice(frame.as_bytes());
+            let shard = crate::sharded_set_get_shard(key.as_bytes(), worker_count);
+            expected.entry(shard).or_default().push(i);
+        }
+        assert!(
+            expected.len() > 1,
+            "fixture must actually spread across shards"
+        );
+
+        let mut staging = crate::ShardedTickStaging::new(worker_count);
+        let parsed = crate::parse_sharded_set_get_batch(
+            &pipeline,
+            &ParserConfig::default(),
+            crate::ShardedSetGetBatchParse {
+                token: Token(9),
+                first_sequence: 0,
+                now_ms: 1,
+                worker_count,
+                command_limit: crate::MAX_FRAMES_PER_CLIENT_TICK,
+            },
+            &mut staging,
+        )
+        .expect("parse scattered pipeline");
+
+        assert_eq!(parsed.staged, 64);
+        assert_eq!(parsed.consumed, pipeline.len());
+        for (shard, sequences) in expected {
+            let got: Vec<u64> = staging.per_shard[shard]
+                .iter()
+                .map(|job| job.sequence)
+                .collect();
+            assert_eq!(got, sequences, "shard {shard} lost arrival order");
+        }
     }
 
     #[test]

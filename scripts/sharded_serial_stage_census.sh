@@ -46,6 +46,14 @@ CLIENTS=128
 PIPE=16
 KEYSPACE=100000
 CLIENT_THREADS=6
+# Client PROCESSES. One redis-benchmark saturates around 895k ops/s on this host
+# even with --threads 6, which is BELOW what the server can serve once the
+# sharded path is working -- so a single-process client silently converts a
+# server measurement into a client measurement and makes the scaling curve look
+# flat. Measured 2026-07-31: the same candidate arm read 891,266 ops/s at 81.2%
+# event-loop CPU with one client process and 968,523 at 96.6% with eight. Any
+# row whose event loop is not near a saturated core is flagged below.
+CLIENT_PROCS="${CLIENT_PROCS:-8}"
 FR_BIN="${FR_BIN:-/tmp/fr_census_956a5ab34}"
 SERVER_CPUS="${SERVER_CPUS:-0-7,32-39}"
 CLIENT_CPUS="${CLIENT_CPUS:-8-15,40-47}"
@@ -60,6 +68,7 @@ while [ $# -gt 0 ]; do
     -c) CLIENTS="$2"; shift 2;;
     -P) PIPE="$2"; shift 2;;
     -r) KEYSPACE="$2"; shift 2;;
+    -j) CLIENT_PROCS="$2"; shift 2;;
     --bin) FR_BIN="$2"; shift 2;;
     --port) FR_PORT="$2"; shift 2;;
     --out) OUTDIR="$2"; shift 2;;
@@ -103,7 +112,41 @@ echo "  fr path       $FR_BIN"
 echo "  server cpuset $SERVER_CPUS   client cpuset $CLIENT_CPUS"
 echo "  job           SET then GET, n=$TOTAL each => ops=$((2*TOTAL)) EXACT, c=$CLIENTS, P=$PIPE, r=$KEYSPACE"
 echo "  events        $EVENTS  (tracepoints=$TRACEPOINTS)"
+echo "  client        $CLIENT_PROCS process(es) x $((CLIENTS / CLIENT_PROCS)) conns x --threads $CLIENT_THREADS (total c=$CLIENTS)"
 echo "  rounds        $ROUNDS per worker count"
+
+# The client job as ONE command, so perf's window closes when the last client
+# exits. Each process draws from the SAME keyspace, so raising the process count
+# adds client capacity without changing the workload the server sees.
+CLIENT_SCRIPT="$OUTDIR/client_job.sh"
+PER_PROC=$((TOTAL / CLIENT_PROCS))
+# CONNECTIONS AND REQUESTS BOTH SPLIT ACROSS PROCESSES. Adding client processes
+# must add client CPU, not change the workload the server sees. Keeping -c at the
+# full value per process instead multiplies the connection count by
+# CLIENT_PROCS -- 1024 connections at P=16 is 16,384 outstanding commands, which
+# starves the server and reads as host contention. Measured 2026-07-31: that bug
+# put the event loop at 73.8-84.2% of a core and made W=1 instructions/op swing
+# 36% between rounds; splitting -c restores 96-97% and a 0.2% swing.
+PER_PROC_CLIENTS=$((CLIENTS / CLIENT_PROCS))
+[ "$PER_PROC_CLIENTS" -ge 1 ] || { echo "FAIL: -c $CLIENTS cannot split across $CLIENT_PROCS processes" >&2; exit 6; }
+emit_client_script() {
+  local out="$1" i
+  {
+    echo '#!/usr/bin/env bash'
+    echo 'set -u'
+    for i in $(seq 1 "$CLIENT_PROCS"); do
+      echo "taskset -c $CLIENT_CPUS $BENCH -p $FR_PORT -t set,get -n $PER_PROC \\"
+      echo "  -c $PER_PROC_CLIENTS -P $PIPE -r $KEYSPACE --threads $CLIENT_THREADS >/dev/null 2>&1 &"
+    done
+    echo 'wait'
+  } > "$out"
+  chmod +x "$out"
+}
+emit_client_script "$CLIENT_SCRIPT"
+# PER_PROC * CLIENT_PROCS can differ from TOTAL by integer truncation; the
+# denominator has to describe what was actually ISSUED, not what was requested.
+OPS=$((2 * PER_PROC * CLIENT_PROCS))
+echo "  denominator   ops=$OPS EXACT ($PER_PROC per process per phase, 2 phases)"
 echo
 
 PIDS=()
@@ -129,18 +172,17 @@ for W in ${WORKERS//,/ }; do
   for r in $(seq 1 "$ROUNDS"); do
     PERF_OUT="$OUTDIR/perf_W${W}_r${r}.csv"
     t0=$(date +%s.%N)
-    # perf follows the SERVER pid for exactly the duration of the client job, so
-    # the measured window and the exact 2N denominator describe the same interval.
+    # perf follows the SERVER pid for exactly the duration of the whole client
+    # job, so the measured window and the exact denominator describe the same
+    # interval no matter how many client processes drive it.
     perf stat --per-thread -e "$EVENTS" -x, -o "$PERF_OUT" -p "$FR_PID" -- \
-      taskset -c "$CLIENT_CPUS" "$BENCH" -p "$FR_PORT" -t set,get -n "$TOTAL" \
-        -c "$CLIENTS" -P "$PIPE" -r "$KEYSPACE" --threads "$CLIENT_THREADS" \
-        >"$OUTDIR/bench_W${W}_r${r}.log" 2>&1
+      "$CLIENT_SCRIPT" >"$OUTDIR/bench_W${W}_r${r}.log" 2>&1
     t1=$(date +%s.%N)
     elapsed=$(awk -v a="$t0" -v b="$t1" 'BEGIN{printf "%.3f", b-a}')
     # FR_PID is recorded so the stats pass can identify the event-loop thread
     # EXACTLY (tid == pid), instead of guessing it from a truncated comm string.
     printf '%s\t%s\t%s\t%s\t%s\n' "$W" "$r" "$elapsed" "$PERF_OUT" "$FR_PID" >> "$RES"
-    echo "  W=$W round $r  elapsed ${elapsed}s  ops/s $(awk -v n="$((2*TOTAL))" -v d="$elapsed" 'BEGIN{printf "%.0f", (d>0)?n/d:0}')"
+    echo "  W=$W round $r  elapsed ${elapsed}s  ops/s $(awk -v n="$OPS" -v d="$elapsed" 'BEGIN{printf "%.0f", (d>0)?n/d:0}')"
   done
 
   kill -9 "$FR_PID" 2>/dev/null || true
@@ -148,7 +190,7 @@ for W in ${WORKERS//,/ }; do
 done
 
 echo
-python3 "$ROOT/scripts/_sharded_serial_stage_stats.py" "$RES" "$((2*TOTAL))"
+python3 "$ROOT/scripts/_sharded_serial_stage_stats.py" "$RES" "$OPS"
 echo
 echo "host=$HOST fr_elf=${FR_SHA:0:16}"
 echo "SCOPE: SET/GET only. The sharded execution path refuses every other command."
