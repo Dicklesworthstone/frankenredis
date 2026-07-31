@@ -95,6 +95,9 @@ const ZREMRANGEBYSCORE_INVERTED_PREFILL_REPLY: &[u8] = b"+OK\r\n:1\r\n:1\r\n";
 const ZREMRANGEBYSCORE_INVERTED: &[u8] =
     b"*4\r\n$16\r\nZREMRANGEBYSCORE\r\n$1\r\nz\r\n$4\r\n+inf\r\n$4\r\n-inf\r\n";
 const ZREMRANGEBYSCORE_INVERTED_REPLY: &[u8] = b":0\r\n";
+const ZREMRANGEBYRANK_NOOP: &[u8] =
+    b"*4\r\n$15\r\nZREMRANGEBYRANK\r\n$4\r\nlexz\r\n$4\r\n2500\r\n$4\r\n3500\r\n";
+const ZREMRANGEBYRANK_NOOP_REPLY: &[u8] = b":0\r\n";
 const ZRANGEBYLEX_MEMBERS: usize = 2_000;
 const ZRANGEBYLEX_RANGE_START: usize = 500;
 const ZRANGEBYLEX_RANGE_END: usize = 1_500;
@@ -361,6 +364,7 @@ enum Workload {
     XreadAfterTail,
     PttlPersistent,
     ZremrangebyscoreInverted,
+    ZremrangebyrankNoop,
     ZrangebylexRange,
     ZrevrangebylexRange,
     LrangeInverted,
@@ -435,6 +439,7 @@ impl Workload {
             Self::XreadAfterTail => "xread-after-tail",
             Self::PttlPersistent => "pttl-persistent",
             Self::ZremrangebyscoreInverted => "zremrangebyscore-inverted",
+            Self::ZremrangebyrankNoop => "zremrangebyrank-noop",
             Self::ZrangebylexRange => "zrangebylex-range",
             Self::ZrevrangebylexRange => "zrevrangebylex-range",
             Self::LrangeInverted => "lrange-inverted",
@@ -612,6 +617,14 @@ impl Workload {
                 "fr_command::parse_score_bound",
                 "fr_store::Store::zremrangebyscore",
                 "fr_store::SortedSet::score_bound_range",
+            ],
+            Self::ZremrangebyrankNoop => &[
+                "frankenredis::process_buffered_frames",
+                "__memcmp_avx2_movbe",
+                "execute_plain_zremrangebyrank_borrowed",
+                "parse_borrowed_plain_key_arg2_packet",
+                "fr_store::Store::zremrangebyrank",
+                "fr_store::normalize_index",
             ],
             Self::ZrangebylexRange => &[
                 "frankenredis::process_buffered_frames",
@@ -1005,6 +1018,7 @@ impl Workload {
                 "xread-after-tail" => Self::XreadAfterTail,
                 "pttl-persistent" => Self::PttlPersistent,
                 "zremrangebyscore-inverted" => Self::ZremrangebyscoreInverted,
+                "zremrangebyrank-noop" => Self::ZremrangebyrankNoop,
                 "zrangebylex-range" => Self::ZrangebylexRange,
                 "zrevrangebylex-range" => Self::ZrevrangebylexRange,
                 "lrange-inverted" => Self::LrangeInverted,
@@ -1256,6 +1270,17 @@ impl WorkloadPackets {
                     ZREMRANGEBYSCORE_INVERTED_REPLY,
                     pipeline,
                 );
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::ZremrangebyrankNoop => {
+                let case =
+                    repeated_case(ZREMRANGEBYRANK_NOOP, ZREMRANGEBYRANK_NOOP_REPLY, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -2678,6 +2703,16 @@ fn prefill_zrangebylex_source(server: &mut Server) {
     }
 }
 
+fn assert_lexz_skiplist_fixture(server: &mut Server) {
+    exchange_one(server, ZRANGEBYLEX_ZCARD, ZRANGEBYLEX_ZCARD_REPLY);
+    exchange_one(server, ZRANGEBYLEX_PTTL, PTTL_PERSISTENT_REPLY);
+    exchange_one(
+        server,
+        ZRANGEBYLEX_ENCODING,
+        ZRANGEBYLEX_SKIPLIST_ENCODING_REPLY,
+    );
+}
+
 fn prefill_mixed_setstore_sources(server: &mut Server, large_key: &str, large_start: usize) {
     for key in ["small", large_key, "dst"] {
         let reset = format!(
@@ -2816,18 +2851,26 @@ fn prefill(servers: &mut [Server; 4], workload: Workload) {
                 ZREMRANGEBYSCORE_INVERTED_PREFILL,
                 ZREMRANGEBYSCORE_INVERTED_PREFILL_REPLY,
             );
+        } else if matches!(workload, Workload::ZremrangebyrankNoop) {
+            prefill_zrangebylex_source(server);
+            assert_lexz_skiplist_fixture(server);
+            exchange_one(server, ZREMRANGEBYRANK_NOOP, ZREMRANGEBYRANK_NOOP_REPLY);
+            assert_lexz_skiplist_fixture(server);
+            println!(
+                "FIXTURE_REPRESENTATION workload={} arm={} members={} \
+uniform_score=0 member_width_bytes=5 rank_start=2500 rank_stop=3500 \
+removed=0 encoding=skiplist pttl=-1 cardinality_before_after=2000 \
+steady_state_range=warmed_by_exact_assertion",
+                workload.name(),
+                server.arm.name(),
+                ZRANGEBYLEX_MEMBERS
+            );
         } else if matches!(
             workload,
             Workload::ZrangebylexRange | Workload::ZrevrangebylexRange
         ) {
             prefill_zrangebylex_source(server);
-            exchange_one(server, ZRANGEBYLEX_ZCARD, ZRANGEBYLEX_ZCARD_REPLY);
-            exchange_one(server, ZRANGEBYLEX_PTTL, PTTL_PERSISTENT_REPLY);
-            exchange_one(
-                server,
-                ZRANGEBYLEX_ENCODING,
-                ZRANGEBYLEX_SKIPLIST_ENCODING_REPLY,
-            );
+            assert_lexz_skiplist_fixture(server);
             let (request, response, range_order) = if matches!(workload, Workload::ZrangebylexRange)
             {
                 (ZRANGEBYLEX_RANGE, zrangebylex_range_reply(), "ascending")
@@ -5546,6 +5589,28 @@ fn zrevrangebylex_range_packet_has_exact_descending_reply() {
 }
 
 #[test]
+fn zremrangebyrank_noop_packet_has_exact_integer_reply() {
+    let packets = WorkloadPackets::new(Workload::ZremrangebyrankNoop, 2);
+    let mut expected_request = ZREMRANGEBYRANK_NOOP.to_vec();
+    expected_request.extend_from_slice(ZREMRANGEBYRANK_NOOP);
+    let mut expected_response = ZREMRANGEBYRANK_NOOP_REPLY.to_vec();
+    expected_response.extend_from_slice(ZREMRANGEBYRANK_NOOP_REPLY);
+    assert_eq!(packets.even.request, expected_request);
+    assert_eq!(packets.even.response, expected_response);
+    assert_eq!(packets.odd.request, packets.even.request);
+    assert_eq!(packets.odd.response, packets.even.response);
+    assert_eq!(
+        packets
+            .even
+            .request
+            .windows(b"ZREMRANGEBYRANK".len())
+            .filter(|window| *window == b"ZREMRANGEBYRANK")
+            .count(),
+        2
+    );
+}
+
+#[test]
 fn mixed_family_packets_cover_every_supported_command_with_exact_replies() {
     const EVEN_REPLIES: &[u8] = b"+OK\r\n$1\r\n0\r\n:1\r\n:1\r\n:0\r\n\
 $1\r\na\r\n$1\r\na\r\n+OK\r\n:0\r\n:1\r\n$1\r\n0\r\n$1\r\nb\r\n\
@@ -5875,22 +5940,30 @@ fn dominant_libc_leaf_offsets_reach_specific_inlined_callers() {
 #[test]
 #[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
 fn zrangebylex_dual_null_vs_redis() {
-    run_lex_range_dual_null_vs_redis(Workload::ZrangebylexRange);
+    run_zset_range_dual_null_vs_redis(Workload::ZrangebylexRange);
 }
 
 #[test]
 #[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
 fn zrevrangebylex_dual_null_vs_redis() {
-    run_lex_range_dual_null_vs_redis(Workload::ZrevrangebylexRange);
+    run_zset_range_dual_null_vs_redis(Workload::ZrevrangebylexRange);
 }
 
-fn run_lex_range_dual_null_vs_redis(workload: Workload) {
+#[test]
+#[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
+fn zremrangebyrank_dual_null_vs_redis() {
+    run_zset_range_dual_null_vs_redis(Workload::ZremrangebyrankNoop);
+}
+
+fn run_zset_range_dual_null_vs_redis(workload: Workload) {
     assert!(
         matches!(
             workload,
-            Workload::ZrangebylexRange | Workload::ZrevrangebylexRange
+            Workload::ZremrangebyrankNoop
+                | Workload::ZrangebylexRange
+                | Workload::ZrevrangebylexRange
         ),
-        "lex-range competitive gate requires a forward or reverse lex workload"
+        "zset-range competitive gate requires an authenticated range workload"
     );
     let binary = std::env::var_os("FR_URING_FR_BIN")
         .map(PathBuf::from)
@@ -5947,15 +6020,25 @@ cv_provenance_only=true never_cv_gate=true"
     assert!(kernel.status.success(), "uname failed");
     let kernel = String::from_utf8_lossy(&kernel.stdout).trim().to_owned();
 
-    let samples = parse_usize_env("FR_ZRANGEBYLEX_AB_SAMPLES", DEFAULT_SAMPLES);
-    let clients = parse_usize_env("FR_ZRANGEBYLEX_AB_CLIENTS", DEFAULT_CLIENTS);
-    let client_threads =
-        parse_usize_env("FR_ZRANGEBYLEX_AB_CLIENT_THREADS", DEFAULT_CLIENT_THREADS);
-    let pipeline = parse_usize_env("FR_ZRANGEBYLEX_AB_PIPELINE", 16);
-    let ops_per_sample = parse_usize_env("FR_ZRANGEBYLEX_AB_OPS_PER_SAMPLE", 1_600);
-    let interleave_groups = parse_usize_env("FR_ZRANGEBYLEX_AB_INTERLEAVE_GROUPS", 1);
-    let profile_seconds =
-        parse_u64_env("FR_ZRANGEBYLEX_AB_PROFILE_SECONDS", DEFAULT_PROFILE_SECONDS);
+    let env_prefix = if matches!(workload, Workload::ZremrangebyrankNoop) {
+        "FR_ZREMRANGEBYRANK_AB"
+    } else {
+        "FR_ZRANGEBYLEX_AB"
+    };
+    let samples_env = format!("{env_prefix}_SAMPLES");
+    let clients_env = format!("{env_prefix}_CLIENTS");
+    let client_threads_env = format!("{env_prefix}_CLIENT_THREADS");
+    let pipeline_env = format!("{env_prefix}_PIPELINE");
+    let ops_per_sample_env = format!("{env_prefix}_OPS_PER_SAMPLE");
+    let interleave_groups_env = format!("{env_prefix}_INTERLEAVE_GROUPS");
+    let profile_seconds_env = format!("{env_prefix}_PROFILE_SECONDS");
+    let samples = parse_usize_env(&samples_env, DEFAULT_SAMPLES);
+    let clients = parse_usize_env(&clients_env, DEFAULT_CLIENTS);
+    let client_threads = parse_usize_env(&client_threads_env, DEFAULT_CLIENT_THREADS);
+    let pipeline = parse_usize_env(&pipeline_env, 16);
+    let ops_per_sample = parse_usize_env(&ops_per_sample_env, 1_600);
+    let interleave_groups = parse_usize_env(&interleave_groups_env, 1);
+    let profile_seconds = parse_u64_env(&profile_seconds_env, DEFAULT_PROFILE_SECONDS);
     assert!(samples >= 8, "median CI requires at least eight samples");
     assert!(
         samples.is_multiple_of(24),
@@ -6089,7 +6172,9 @@ incumbent_b=vendored_redis_7.2.4"
         client_threads,
     );
     let packets = Arc::new(DriverPackets::shared(workload, pipeline));
-    let workload_shape = if matches!(workload, Workload::ZrangebylexRange) {
+    let workload_shape = if matches!(workload, Workload::ZremrangebyrankNoop) {
+        "equal_score_2000_member_skiplist_out_of_range_rank_delete_noop"
+    } else if matches!(workload, Workload::ZrangebylexRange) {
         "equal_score_2000_member_inclusive_1001_member_ascending_range"
     } else {
         "equal_score_2000_member_inclusive_1001_member_descending_range"
@@ -6111,6 +6196,16 @@ incumbent_b=vendored_redis_7.2.4"
             host_wide_allowed_cpus: Some(&process_cpuset_cap),
         },
     );
+    if matches!(workload, Workload::ZremrangebyrankNoop) {
+        for server in &mut servers {
+            assert_lexz_skiplist_fixture(server);
+        }
+        println!(
+            "POST_MEASUREMENT_STATE workload={} arms=4 cardinality=2000 \
+encoding=skiplist pttl=-1 exact=true",
+            workload.name()
+        );
+    }
     let verdict = adjudicate_dual_null(workload, pipeline, client_threads, &samples);
     println!(
         "COMPETITIVE_VERDICT workload={} ratio_direction=FrankenRedis/Redis \
