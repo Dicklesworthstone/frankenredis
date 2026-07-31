@@ -25460,3 +25460,192 @@ this repository's gates. No timing claim is made in this entry.
   requires coordinator-owned, Redis-compatible DBSIZE/INFO aggregation across
   every worker runtime. No realistic mixed-concurrency performance result is
   claimed by this surface change.
+
+## 2026-07-31 CrimsonHawk (cc/MEASURE): DIAGNOSIS (SELF-SPEEDUP, maintenance — not campaign output) — the sharded loss is BATCH COLLAPSE, not contention; the serial stage grows 34-42% and caps the path below 1.0x, and the fix is a change of amortization unit (`frankenredis-thr05`)
+
+- **Claim class: SELF-SPEEDUP. Campaign output: no.** Every figure here is
+  FrankenRedis measured against FrankenRedis. No live Redis arm ran in these
+  invocations, so nothing here revises, rescues or softens the 2.3-3.0x
+  vs-incumbent LOSS recorded in `frankenredis-thr01`/`thr04`. That loss stands as
+  measured. This entry explains its mechanism and decides whether it is fixable.
+
+- **The question this answers.** `frankenredis-thr03` closed on "the channel half
+  is open" and set the next gate as futex/op below ~0.1 at W=32. That framing
+  named the wrong defendant. The channel is not the cost; what the channel is
+  *asked to carry* is.
+
+- **Binaries and provenance.** One binary throughout, built from a CLEAN git
+  baseline at HEAD 956a5ab34 (`rch exec --base HEAD --clean-overlay
+  --overlay-path legacy_redis_code/redis/src/commands`, `--release` with
+  `strip=false debug=1` because rch does not retrieve `release-perf` linked
+  images). Every harness here self-reports the RUNNING IMAGE by hashing
+  `/proc/<pid>/exe` while that arm was serving, so the digest belongs to the
+  process that produced the numbers rather than to a path: server ELF SHA-256
+  `3475e43338d1e8c8b23103851a23605f740025973d42efd29b8c319fea98c288`, 12,341
+  symbols, identical on every arm of every run below. A peer's uncommitted
+  `main.rs` edits were in the shared tree during this session and did NOT enter
+  the binary, which is the reason for the clean-baseline build. thinkstation1,
+  Threadripper PRO 5975WX, server cpuset 8 physical cores, client cpuset 8
+  disjoint physical cores, loadavg 1-3.
+
+- **The instrument, and why it is not a wall clock.** New:
+  `scripts/sharded_serial_stage_census.sh` + `scripts/_sharded_serial_stage_stats.py`.
+  `perf stat --per-thread` follows the SERVER pid for exactly the duration of the
+  client job, and the denominator is exact — `redis-benchmark -t set,get -n N`
+  issues 2N operations. Instructions per operation on a named thread is therefore
+  a ratio of counts: it does not move with host load, client speed or core
+  identity, the three effects behind this lane's three known false positives. The
+  event-loop thread is identified by tid == pid, never by comm (the kernel
+  truncates comm to 15 characters). Null control: three rounds per arm, the same
+  arm against itself, spread **≤0.06% on the counted metric** and 0.6-2.4% on
+  ops/s. Every effect below clears that by one to two orders of magnitude. CV is
+  provenance only and gated nothing here.
+
+- **RESULT 1 — the serial stage GROWS, so the path cannot win at any W.** The
+  sharded mode never removed FrankenRedis's single-threaded stage: the mio event
+  loop still reads every socket, parses every frame, routes it, restores
+  per-connection reply order and writes every reply. Workers execute only the
+  store hit. Amdahl's bound is therefore `evloop instr/op at W=0 / evloop instr/op
+  at W`, and it reads:
+
+  | W | evloop instr/op | ceiling | evloop futex/op | shard ctxsw/op | total instr/op | ops/s |
+  |---|---|---|---|---|---|---|
+  | 0 (normal) | 1784.0 | — | 0.0000 | 0.0000 | 1784.0 | 805,153 |
+  | 1 | 1265.5 | 1.410x | 0.0011 | 0.0010 | 2683.1 | 894,855 |
+  | 8 | 2392.4 | **0.746x** | 0.5034 | 0.4849 | 4225.8 | 471,032 |
+  | 32 | 2534.1 | **0.704x** | 0.8660 | 0.8627 | 4480.6 | 380,228 |
+
+  At W=1 sharding genuinely offloads: the serial stage gets 29% CHEAPER and the
+  measured 1.111x self-speedup sits under a 1.410x allowance. At W>=8 the same
+  serial thread executes 34-42% MORE instructions per operation than it does with
+  no sharding at all, and pays 0.50-0.87 futex syscalls per operation that normal
+  mode pays zero of. A ceiling below 1.0 is not a tuning observation: no worker
+  count, not even an infinitely fast free worker, can win from there.
+
+- **RESULT 2 — the cause is BATCH COLLAPSE, isolated by intervention.** New:
+  `scripts/sharded_batch_length_discriminator.sh`. `crc16_slot` honours the
+  `{hashtag}` rule, so `{t3}:key:__rand_int__` routes by "t3" alone while the key
+  still ranges over the whole 100,000-key space — a workload with a real scattered
+  keyspace and a CHOSEN shard, which `-r` cannot express. The tag generator
+  self-tests against Redis's published CLUSTER KEYSLOT values (foo=12182,
+  bar=5061, hello=866) and refuses to emit if the CRC disagrees. W=8 fixed, all
+  eight worker threads present, 8 processes x 16 connections x P16 throughout,
+  each sharded arm paired against a normal-mode arm running the IDENTICAL key
+  pattern so key length cannot be credited to sharding:
+
+  | arm | active shards | run length | evloop instr/op normal -> sharded | ceiling | measured |
+  |---|---|---|---|---|---|
+  | scatter | 8 | ~1 | 1783.9 -> 2392.3 | 0.746x | **0.631x** |
+  | pinned | 8 | 16 | 1832.3 -> 1106.4 | 1.656x | **1.384x** |
+  | single | 1 | 16 | 1824.9 -> 1097.5 | 1.663x | **1.370x** |
+
+  **pinned vs scatter isolates run length** with worker count, active-shard count
+  and producer count on the shared completion channel all held at 8: a 1.92x
+  throughput swing, evloop instructions/op down 53.7%, evloop futex/op down 12.3x
+  (0.5022 -> 0.0414).
+
+  **pinned vs single isolates cross-core contention** with run length held at 16:
+  1.384x versus 1.370x. Eight concurrent producers on one shared completion
+  channel cost **nothing measurable** — pinned is marginally the better of the
+  two. Cache-line contention on shared state is REFUTED as the cause by
+  intervention, not by argument.
+
+  **Every arm is server-bound, which is what makes the ops/s columns admissible
+  at all**: the event-loop thread ran at 96.6-98.2% of a core in all six arms, so
+  no row describes redis-benchmark. That guard is the one whose absence produced
+  the wide nulls corrected in `thr04`.
+
+  **Two blemishes, recorded because they cut toward the conclusion rather than
+  away from it.** (1) The pinned arm's working set is 8x the others: each process
+  draws `-r 100000` from its OWN tag prefix, so pinned spans 800,000 distinct keys
+  where scatter and single span 100,000. That is a harder workload for cache, and
+  pinned still wins, so the 1.384x is if anything understated and the "contention
+  costs <=1%" reading is conservative. It does not touch the paired ratios, which
+  compare each arm only against a normal-mode arm on its own identical key
+  pattern. (2) W0-pinned is the one arm with visible round-to-round spread on the
+  counted metric, 1825.5-1936.3 instr/op (6.05%); the table uses its median. Taken
+  at the extremes its ceiling reads 1.650x-1.750x rather than 1.656x, so the
+  direction does not depend on which round is believed. Every other arm sits at
+  <=0.81%.
+
+  Batch length is not read directly — the binary is not instrumented for it — but
+  it is pinned down by the futex count: 0.0414 futex/op is ~1/24, consistent with
+  envelopes at or above the 16-command cap, against 0.5022 at scatter.
+
+- **RESULT 3 — the same collapse at symbol level.** `scripts/sharded_thread_symbol_split.sh`,
+  same binary, same W=8, worker-thread self-time:
+
+  | worker threads | run length ~1 | run length 16 |
+  |---|---|---|
+  | kernel (syscall + scheduler) | **66.10%** | 7.70% |
+  | store execution | 7.66% | **34.54%** |
+  | handoff (channel/waker/park) | 7.32% | 2.30% |
+  | allocator | 11.33% | 26.06% |
+
+  With the run collapsed, the threads that exist to execute the store spend
+  two-thirds of their time parked and woken, and 7.7% executing the store.
+
+- **MECHANISM, in the source.** `parse_sharded_set_get_batch`
+  (`crates/fr-server/src/main.rs:804` at b8894aff5; :760 at the measured
+  956a5ab34) builds a job envelope from a run of
+  consecutive same-shard commands **inside one connection's read buffer**, and
+  breaks at the first shard change. With W shards and scattered keys the expected
+  run length is W/(W-1) — 1.14 at W=8, 1.03 at W=32. So the design's amortization
+  unit is destroyed by the very knob that is supposed to buy parallelism: shard
+  count and run length are one knob turned in opposite directions. At run length 1
+  every single operation buys its own key and value copy, its own envelope
+  allocation, its own send, its own recv, its own BTreeMap reorder pair and its
+  own park/unpark. redis-server pays none of this, which is the cost asked for by
+  name.
+
+- **VERDICT: FIXABLE, not a dead end — and the fix is a different amortization
+  unit, not a faster channel.** With the run intact, sharded W=8 beats our own
+  normal mode by 1.384x measured on a scattered 100,000-key workload, under a
+  1.656x serial-stage allowance. The available fix is to group by shard across the
+  WHOLE event-loop tick instead of within one connection's consecutive run: at
+  c=128, P=16 a tick has up to 2048 commands available, which is ~256 per shard
+  per envelope at W=8 even with perfectly random keys. Per-connection reply
+  ordering already carries explicit sequence numbers (`ShardedReplyOrder`), so
+  regrouping across connections does not disturb it.
+
+- **WHAT THE 1.384x IS NOT.** The pinned arm is a PROXY, not a shippable
+  configuration — real clients do not hashtag their keys per shard. 1.384x is an
+  UPPER BOUND on the proposed fix, measured by achieving the target run length
+  through a mechanism the fix would achieve differently, and the regrouping pass
+  has its own event-loop cost which is NOT measured here. The 1.384x measured
+  against a 1.656x ceiling also leaves a 16% residual that instruction counts do
+  not explain and that belongs to handoff latency and cross-core stalls.
+
+- **Retry predicate — the kill condition for the proposed fix**
+  (`frankenredis-odusj`, filed). Implement
+  cross-tick shard grouping, then measure with
+  `scripts/sharded_serial_stage_census.sh -W 0,8,32` on the scattered workload —
+  counts BEFORE any timing, as `thr03` required. REJECT the fix unless BOTH hold
+  at W=8: event-loop instructions/op **<= 1400** (against 2392.4 now and 1106.4 at
+  the proxy) AND event-loop futex/op **<= 0.10** (against 0.5034 now). Those two
+  counts are what the ceiling is made of; if the regrouping pass costs more than
+  ~300 instructions/op on the event loop it closes the ceiling by itself and the
+  path becomes a genuine dead end, at which point record it as one. Only after
+  both counts pass is a timing run worth taking, and only then does
+  `scripts/thread_scaling_headtohead.sh` against the live incumbent become
+  meaningful. Independently still blocked for any mixed-workload claim by
+  `frankenredis-sharded-command-surface-too-thin-z37kj`: the path serves only
+  SET/GET.
+
+- **BASELINE, and what landed under it mid-session.** Every number above was
+  measured at 956a5ab34. While this was in flight BlackValley landed b8894aff5,
+  which widens the sharded command surface and edits
+  `parse_sharded_set_get_batch` — but leaves the run-length break itself
+  (`batch_shard.is_some_and(|expected| expected != shard) { break }`) unchanged,
+  so the mechanism diagnosed here is intact at that commit. A wider accepted
+  command surface can only lengthen the scattered tail, never shorten it, so the
+  direction is safe; the magnitudes are not re-certified against it. Re-running
+  `scripts/sharded_serial_stage_census.sh -W 0,1,8,32` against a b8894aff5 binary
+  costs ~4 minutes and should be the first thing anyone picking up
+  `frankenredis-odusj` does.
+
+- **Do not re-run.** The wakeup-storm curve (`thr02`/`thr04`) is settled. The
+  channel-handoff-is-dominant framing from `thr03` is superseded: futex/op is a
+  SYMPTOM of run length, and falls 12.3x with no change to the channel at all.
+  Do not chase cross-shard routing cost (crc16 executes identically in both arms)
+  or completion-channel cache-line contention (refuted above at <=1%).
