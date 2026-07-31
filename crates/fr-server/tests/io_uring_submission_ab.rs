@@ -201,6 +201,12 @@ const SCAN0_MEMBERS: usize = 16;
 const SSCAN_CURSOR_ZERO: &[u8] = b"*3\r\n$5\r\nSSCAN\r\n$2\r\ns0\r\n$1\r\n0\r\n";
 const HSCAN_CURSOR_ZERO: &[u8] = b"*3\r\n$5\r\nHSCAN\r\n$2\r\nh0\r\n$1\r\n0\r\n";
 const ZSCAN_CURSOR_ZERO: &[u8] = b"*3\r\n$5\r\nZSCAN\r\n$2\r\nz0\r\n$1\r\n0\r\n";
+const HMGET_NINE: &[u8] = b"*11\r\n$5\r\nHMGET\r\n$2\r\nh0\r\n\
+$3\r\nf00\r\n$3\r\nf01\r\n$3\r\nf02\r\n$3\r\nf03\r\n\
+$3\r\nf04\r\n$3\r\nf05\r\n$3\r\nf06\r\n$3\r\nf07\r\n$6\r\nabsent\r\n";
+const ZMSCORE_NINE: &[u8] = b"*11\r\n$7\r\nZMSCORE\r\n$2\r\nz0\r\n\
+$3\r\nm00\r\n$3\r\nm01\r\n$3\r\nm02\r\n$3\r\nm03\r\n\
+$3\r\nm04\r\n$3\r\nm05\r\n$3\r\nm06\r\n$3\r\nm07\r\n$6\r\nabsent\r\n";
 const SCAN0_CARD_REPLY: &[u8] = b":16\r\n";
 const SSCAN0_CARD: &[u8] = b"*2\r\n$5\r\nSCARD\r\n$2\r\ns0\r\n";
 const HSCAN0_CARD: &[u8] = b"*2\r\n$4\r\nHLEN\r\n$2\r\nh0\r\n";
@@ -489,6 +495,8 @@ enum Workload {
     SscanCursorZero,
     HscanCursorZero,
     ZscanCursorZero,
+    HmgetNine,
+    ZmscoreNine,
     ZmpopOneMin,
     ZmpopOneMax,
     HsetSameValue,
@@ -586,6 +594,8 @@ impl Workload {
             Self::SscanCursorZero => "sscan-cursor-zero",
             Self::HscanCursorZero => "hscan-cursor-zero",
             Self::ZscanCursorZero => "zscan-cursor-zero",
+            Self::HmgetNine => "hmget-nine",
+            Self::ZmscoreNine => "zmscore-nine",
             Self::ZmpopOneMin => "zmpop-one-min",
             Self::ZmpopOneMax => "zmpop-one-max",
             Self::HsetSameValue => "hset-same-value",
@@ -996,6 +1006,27 @@ impl Workload {
                 "fr_store::Store::zscan0_borrow_scan",
                 "fr_protocol::encode_bulk_string_slice",
             ],
+            Self::HmgetNine => &[
+                "frankenredis::process_buffered_frames",
+                "__memcmp_avx2_movbe",
+                "parse_borrowed_plain_hmget_multi_packet",
+                "execute_plain_hmget_borrowed_into",
+                "fr_store::Store::hmget_for_each",
+                "fr_store::packed_set::HashFieldMap::get",
+                "fr_store::packed_set::CompactFieldMap::get",
+                "fr_store::packed_set::CompactFieldMap::lookup_slot",
+                "fr_protocol::encode_bulk_string_slice",
+            ],
+            Self::ZmscoreNine => &[
+                "frankenredis::process_buffered_frames",
+                "__memcmp_avx2_movbe",
+                "parse_borrowed_plain_zmscore_multi_packet",
+                "execute_plain_zmscore_borrowed_into",
+                "fr_store::Store::zmscore",
+                "fr_store::SortedSet::get_score",
+                "fr_protocol::encode_redis_double",
+                "fr_protocol::encode_bulk_string_slice",
+            ],
             Self::ZmpopOneMin => &[
                 "execute_plain_zmpop1_borrowed",
                 "Store::zpopmin",
@@ -1361,6 +1392,8 @@ impl Workload {
                 "sscan-cursor-zero" => Self::SscanCursorZero,
                 "hscan-cursor-zero" => Self::HscanCursorZero,
                 "zscan-cursor-zero" => Self::ZscanCursorZero,
+                "hmget-nine" => Self::HmgetNine,
+                "zmscore-nine" => Self::ZmscoreNine,
                 "zmpop-one-min" => Self::ZmpopOneMin,
                 "zmpop-one-max" => Self::ZmpopOneMax,
                 "hset-same-value" => Self::HsetSameValue,
@@ -1835,7 +1868,11 @@ impl WorkloadPackets {
                     even: case,
                 }
             }
-            Workload::SscanCursorZero | Workload::HscanCursorZero | Workload::ZscanCursorZero => {
+            Workload::SscanCursorZero
+            | Workload::HscanCursorZero
+            | Workload::ZscanCursorZero
+            | Workload::HmgetNine
+            | Workload::ZmscoreNine => {
                 let (request, response) = scan0_request_reply(workload);
                 let case = repeated_case(request, &response, pipeline);
                 Self {
@@ -3148,9 +3185,9 @@ fn hscan_all_fields_reply() -> Vec<u8> {
 fn scan0_prefill(workload: Workload) -> ExchangeCase {
     let key: &[u8] = match workload {
         Workload::SscanCursorZero => b"s0",
-        Workload::HscanCursorZero => b"h0",
-        Workload::ZscanCursorZero => b"z0",
-        _ => unreachable!("compact scan fixture requires a cursor-zero scan workload"),
+        Workload::HscanCursorZero | Workload::HmgetNine => b"h0",
+        Workload::ZscanCursorZero | Workload::ZmscoreNine => b"z0",
+        _ => unreachable!("compact read fixture requires a scan or multi-lookup workload"),
     };
     let mut request = resp_command(&[b"SET", key, b"seed"]);
     request.extend_from_slice(&resp_command(&[b"DEL", key]));
@@ -3164,7 +3201,7 @@ fn scan0_prefill(workload: Workload) -> ExchangeCase {
                 push_resp_bulk(&mut request, index.to_string().as_bytes());
             }
         }
-        Workload::HscanCursorZero => {
+        Workload::HscanCursorZero | Workload::HmgetNine => {
             request.extend_from_slice(format!("*{}\r\n", SCAN0_MEMBERS * 2 + 2).as_bytes());
             push_resp_bulk(&mut request, b"HSET");
             push_resp_bulk(&mut request, key);
@@ -3173,7 +3210,7 @@ fn scan0_prefill(workload: Workload) -> ExchangeCase {
                 push_resp_bulk(&mut request, format!("v{index:02}").as_bytes());
             }
         }
-        Workload::ZscanCursorZero => {
+        Workload::ZscanCursorZero | Workload::ZmscoreNine => {
             request.extend_from_slice(format!("*{}\r\n", SCAN0_MEMBERS * 2 + 2).as_bytes());
             push_resp_bulk(&mut request, b"ZADD");
             push_resp_bulk(&mut request, key);
@@ -3182,7 +3219,7 @@ fn scan0_prefill(workload: Workload) -> ExchangeCase {
                 push_resp_bulk(&mut request, format!("m{index:02}").as_bytes());
             }
         }
-        _ => unreachable!("compact scan fixture requires a cursor-zero scan workload"),
+        _ => unreachable!("compact read fixture requires a scan or multi-lookup workload"),
     }
 
     ExchangeCase {
@@ -3217,12 +3254,32 @@ fn zscan_cursor_zero_reply() -> Vec<u8> {
     response
 }
 
+fn hmget_nine_reply() -> Vec<u8> {
+    let mut response = b"*9\r\n".to_vec();
+    for index in 0..8 {
+        push_resp_bulk(&mut response, format!("v{index:02}").as_bytes());
+    }
+    response.extend_from_slice(NIL_BULK_REPLY);
+    response
+}
+
+fn zmscore_nine_reply() -> Vec<u8> {
+    let mut response = b"*9\r\n".to_vec();
+    for index in 0..8 {
+        push_resp_bulk(&mut response, index.to_string().as_bytes());
+    }
+    response.extend_from_slice(NIL_BULK_REPLY);
+    response
+}
+
 fn scan0_request_reply(workload: Workload) -> (&'static [u8], Vec<u8>) {
     match workload {
         Workload::SscanCursorZero => (SSCAN_CURSOR_ZERO, sscan_cursor_zero_reply()),
         Workload::HscanCursorZero => (HSCAN_CURSOR_ZERO, hscan_cursor_zero_reply()),
         Workload::ZscanCursorZero => (ZSCAN_CURSOR_ZERO, zscan_cursor_zero_reply()),
-        _ => unreachable!("compact scan fixture requires a cursor-zero scan workload"),
+        Workload::HmgetNine => (HMGET_NINE, hmget_nine_reply()),
+        Workload::ZmscoreNine => (ZMSCORE_NINE, zmscore_nine_reply()),
+        _ => unreachable!("compact read fixture requires a scan or multi-lookup workload"),
     }
 }
 
@@ -3236,7 +3293,7 @@ fn assert_scan0_fixture(server: &mut Server, workload: Workload) {
             SSCAN0_BOUNDARIES_REPLY,
             SSCAN0_PTTL,
         ),
-        Workload::HscanCursorZero => (
+        Workload::HscanCursorZero | Workload::HmgetNine => (
             HSCAN0_CARD,
             HSCAN0_ENCODING,
             SCAN0_LISTPACK_ENCODING_REPLY,
@@ -3244,7 +3301,7 @@ fn assert_scan0_fixture(server: &mut Server, workload: Workload) {
             HSCAN0_BOUNDARIES_REPLY,
             HSCAN0_PTTL,
         ),
-        Workload::ZscanCursorZero => (
+        Workload::ZscanCursorZero | Workload::ZmscoreNine => (
             ZSCAN0_CARD,
             ZSCAN0_ENCODING,
             SCAN0_LISTPACK_ENCODING_REPLY,
@@ -3252,7 +3309,7 @@ fn assert_scan0_fixture(server: &mut Server, workload: Workload) {
             ZSCAN0_BOUNDARIES_REPLY,
             ZSCAN0_PTTL,
         ),
-        _ => unreachable!("compact scan fixture requires a cursor-zero scan workload"),
+        _ => unreachable!("compact read fixture requires a scan or multi-lookup workload"),
     };
     exchange_one(server, card, SCAN0_CARD_REPLY);
     exchange_one(server, encoding, encoding_reply);
@@ -4209,6 +4266,26 @@ derived_listpack_bytes=3007",
                     LINDEX_MIDDLE_ELEMENTS
                 );
             }
+        } else if matches!(workload, Workload::HmgetNine | Workload::ZmscoreNine) {
+            let case = scan0_prefill(workload);
+            exchange_one(server, &case.request, &case.response);
+            assert_scan0_fixture(server, workload);
+            let (request, response) = scan0_request_reply(workload);
+            exchange_one(server, request, &response);
+            let lookup_kind = if matches!(workload, Workload::HmgetNine) {
+                "hash_fields"
+            } else {
+                "sorted_set_members"
+            };
+            println!(
+                "FIXTURE_REPRESENTATION workload={} arm={} entries={} \
+lookup_items=9 lookup_kind={lookup_kind} present_items=8 missing_items=1 \
+encoding=listpack pttl=-1 boundary_membership=verified \
+full_response_bytes_asserted=true steady_state_lookup=warmed_by_two_exact_assertions",
+                workload.name(),
+                server.arm.name(),
+                SCAN0_MEMBERS
+            );
         } else if matches!(
             workload,
             Workload::SscanCursorZero | Workload::HscanCursorZero | Workload::ZscanCursorZero
@@ -7439,6 +7516,116 @@ duplicate_exists_count_semantics=true exact_full_state_and_reply=true",
 }
 
 #[test]
+fn multi_lookup_nine_packets_have_exact_ordered_replies() {
+    for (workload, request, single_reply) in [
+        (Workload::HmgetNine, HMGET_NINE, hmget_nine_reply()),
+        (Workload::ZmscoreNine, ZMSCORE_NINE, zmscore_nine_reply()),
+    ] {
+        assert!(request.starts_with(b"*11\r\n"));
+        assert_eq!(
+            request
+                .windows(b"absent".len())
+                .filter(|window| *window == b"absent")
+                .count(),
+            1
+        );
+        assert!(single_reply.starts_with(b"*9\r\n"));
+        assert!(single_reply.ends_with(NIL_BULK_REPLY));
+
+        let packets = WorkloadPackets::new(workload, 2);
+        let mut expected_request = request.to_vec();
+        expected_request.extend_from_slice(request);
+        let mut expected_response = single_reply.clone();
+        expected_response.extend_from_slice(&single_reply);
+        assert_eq!(packets.even.request, expected_request);
+        assert_eq!(packets.even.response, expected_response);
+        assert_eq!(packets.odd.request, packets.even.request);
+        assert_eq!(packets.odd.response, packets.even.response);
+    }
+}
+
+#[test]
+#[ignore = "requires live frankenredis and vendored Redis executables; run explicitly"]
+fn multi_lookup_nine_commands_match_server_and_live_redis() {
+    let binary = std::env::var_os("FR_URING_FR_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_frankenredis")));
+    let redis_binary = std::env::var_os("FR_URING_REDIS_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../legacy_redis_code/redis/src/redis-server")
+        });
+    assert!(binary.is_file(), "missing {}", binary.display());
+    assert!(redis_binary.is_file(), "missing {}", redis_binary.display());
+
+    let hostname = command_output("hostname", &[]);
+    assert!(hostname.status.success(), "hostname failed");
+    let hostname = String::from_utf8_lossy(&hostname.stdout).trim().to_owned();
+    let kernel = command_output("uname", &["-r"]);
+    assert!(kernel.status.success(), "uname failed");
+    let kernel = String::from_utf8_lossy(&kernel.stdout).trim().to_owned();
+    let harness = std::env::current_exe().expect("locate running harness ELF");
+    println!(
+        "MULTI_LOOKUP9_HOST host={hostname} kernel={kernel} runtime_detected_isa={} \
+harness_sha256={}",
+        runtime_isa_features(),
+        hash_path(&harness)
+    );
+
+    let server_cpu = *allowed_cpus()
+        .first()
+        .expect("live nine-item multi-lookup smoke requires one allowed CPU");
+    let root = unique_root();
+    let client_shape = ClientShape {
+        connections: 4,
+        driver_threads: 2,
+    };
+    for workload in [Workload::HmgetNine, Workload::ZmscoreNine] {
+        let packets = Arc::new(DriverPackets::shared(workload, 16));
+        for arm in [Arm::IoUring, Arm::Redis] {
+            let mut server = Server::spawn(
+                &binary,
+                &redis_binary,
+                arm,
+                &root.join(format!("{}_{}", workload.name(), arm.name())),
+                server_cpu,
+                client_shape,
+                CommandFloorAb::None,
+            );
+            let fixture = scan0_prefill(workload);
+            exchange_one(&mut server, &fixture.request, &fixture.response);
+            assert_scan0_fixture(&mut server, workload);
+            server
+                .clients
+                .as_ref()
+                .expect("live nine-item multi-lookup clients initialized")
+                .prepare(&packets);
+            server
+                .clients
+                .as_ref()
+                .expect("live nine-item multi-lookup clients initialized")
+                .run(&packets, 32, false);
+            assert_scan0_fixture(&mut server, workload);
+            println!(
+                "MULTI_LOOKUP9_LIVE_PARITY workload={} arm={} pid={} sha256={} \
+process_threads_observed={} command_execution_threads_actual=1 \
+connections_actual={} client_driver_threads_actual={} pipeline=16 groups=32 \
+fixture_entries=16 requested_items=9 present_items=8 missing_items=1 \
+encoding=listpack pttl=-1 exact_ordered_reply_and_post_state=true",
+                workload.name(),
+                arm.name(),
+                server.pid(),
+                server.executing_elf_sha256(),
+                server.observed_thread_count(),
+                client_shape.connections,
+                client_shape.driver_threads
+            );
+        }
+    }
+}
+
+#[test]
 fn sscan_cursor_zero_packet_has_exact_complete_reply() {
     let single_reply = sscan_cursor_zero_reply();
     assert!(single_reply.starts_with(b"*2\r\n$1\r\n0\r\n*16\r\n$1\r\n0\r\n"));
@@ -8175,6 +8362,18 @@ fn zscan_cursor_zero_dual_null_vs_redis() {
 
 #[test]
 #[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
+fn hmget_nine_dual_null_vs_redis() {
+    run_exact_dual_null_vs_redis(Workload::HmgetNine);
+}
+
+#[test]
+#[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
+fn zmscore_nine_dual_null_vs_redis() {
+    run_exact_dual_null_vs_redis(Workload::ZmscoreNine);
+}
+
+#[test]
+#[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
 fn zmpop_one_min_dual_null_vs_redis() {
     run_exact_dual_null_vs_redis(Workload::ZmpopOneMin);
 }
@@ -8212,6 +8411,8 @@ fn run_exact_dual_null_vs_redis(workload: Workload) {
                 | Workload::SscanCursorZero
                 | Workload::HscanCursorZero
                 | Workload::ZscanCursorZero
+                | Workload::HmgetNine
+                | Workload::ZmscoreNine
                 | Workload::ZmpopOneMin
                 | Workload::ZmpopOneMax
         ),
@@ -8314,6 +8515,10 @@ cv_provenance_only=true never_cv_gate=true"
         "FR_HSCAN0_AB"
     } else if matches!(workload, Workload::ZscanCursorZero) {
         "FR_ZSCAN0_AB"
+    } else if matches!(workload, Workload::HmgetNine) {
+        "FR_HMGET9_AB"
+    } else if matches!(workload, Workload::ZmscoreNine) {
+        "FR_ZMSCORE9_AB"
     } else if matches!(workload, Workload::ZmpopOneMin) {
         "FR_ZMPOP1_MIN_AB"
     } else if matches!(workload, Workload::ZmpopOneMax) {
@@ -8522,6 +8727,10 @@ incumbent_b=vendored_redis_7.2.4"
         Workload::HscanCursorZero | Workload::ZscanCursorZero
     ) {
         "literal_cursor_zero_no_options_16_pair_listpack_single_complete_reply"
+    } else if matches!(workload, Workload::HmgetNine) {
+        "sixteen_field_listpack_hash_hmget_nine_eight_present_one_absent_ordered_reply"
+    } else if matches!(workload, Workload::ZmscoreNine) {
+        "sixteen_member_listpack_zset_zmscore_nine_eight_present_one_absent_ordered_reply"
     } else if matches!(workload, Workload::ZmpopOneMin) {
         "independent_129_member_skiplist_priority_queues_zmpop_one_min_then_exact_reinsert"
     } else if matches!(workload, Workload::ZmpopOneMax) {
@@ -8739,6 +8948,23 @@ cardinality_and_encoding_preserved=true",
             workload.name(),
             keys.len(),
             ZMPOP1_MEMBERS
+        );
+    } else if matches!(workload, Workload::HmgetNine | Workload::ZmscoreNine) {
+        for server in &mut servers {
+            assert_scan0_fixture(server, workload);
+        }
+        let lookup_kind = if matches!(workload, Workload::HmgetNine) {
+            "hash_fields"
+        } else {
+            "sorted_set_members"
+        };
+        println!(
+            "POST_MEASUREMENT_STATE workload={} arms=4 entries={} \
+lookup_items=9 lookup_kind={lookup_kind} present_items=8 missing_items=1 \
+encoding=listpack pttl=-1 boundary_membership=verified \
+full_ordered_response_bytes_asserted=true",
+            workload.name(),
+            SCAN0_MEMBERS
         );
     } else if matches!(
         workload,
