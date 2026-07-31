@@ -115,6 +115,8 @@ const ZRANGEBYSCORE_RANGE_END: usize = 1_500;
 const ZRANGEBYSCORE_PREFILL_BATCH: usize = 256;
 const ZRANGEBYSCORE_RANGE: &[u8] =
     b"*4\r\n$13\r\nZRANGEBYSCORE\r\n$6\r\nscorez\r\n$3\r\n500\r\n$4\r\n1500\r\n";
+const ZREVRANGEBYSCORE_RANGE: &[u8] =
+    b"*4\r\n$16\r\nZREVRANGEBYSCORE\r\n$6\r\nscorez\r\n$4\r\n1500\r\n$3\r\n500\r\n";
 const ZRANGEBYSCORE_ZCARD: &[u8] = b"*2\r\n$5\r\nZCARD\r\n$6\r\nscorez\r\n";
 const ZRANGEBYSCORE_ZCARD_REPLY: &[u8] = b":2000\r\n";
 const ZRANGEBYSCORE_PTTL: &[u8] = b"*2\r\n$4\r\nPTTL\r\n$6\r\nscorez\r\n";
@@ -380,6 +382,7 @@ enum Workload {
     ZremrangebyrankNoop,
     ZremrangebylexNoop,
     ZrangebyscoreRange,
+    ZrevrangebyscoreRange,
     ZrangebylexRange,
     ZrevrangebylexRange,
     LrangeInverted,
@@ -457,6 +460,7 @@ impl Workload {
             Self::ZremrangebyrankNoop => "zremrangebyrank-noop",
             Self::ZremrangebylexNoop => "zremrangebylex-noop",
             Self::ZrangebyscoreRange => "zrangebyscore-range",
+            Self::ZrevrangebyscoreRange => "zrevrangebyscore-range",
             Self::ZrangebylexRange => "zrangebylex-range",
             Self::ZrevrangebylexRange => "zrevrangebylex-range",
             Self::LrangeInverted => "lrange-inverted",
@@ -659,6 +663,16 @@ impl Workload {
                 "execute_plain_zrangebyscore_core_into",
                 "fr_store::Store::zrangebyscore_members_borrow_scan",
                 "fr_store::SortedSet::score_bound_range_asc_refs",
+                "fr_protocol::encode_bulk_string_slice",
+            ],
+            Self::ZrevrangebyscoreRange => &[
+                "frankenredis::process_buffered_frames",
+                "__memcmp_avx2_movbe",
+                "parse_borrowed_plain_key_arg2_packet",
+                "execute_plain_zrevrangebyscore_borrowed_into",
+                "execute_plain_zrangebyscore_core_into",
+                "fr_store::Store::zrangebyscore_members_borrow_scan",
+                "fr_store::SortedSet::score_bound_range_desc_refs",
                 "fr_protocol::encode_bulk_string_slice",
             ],
             Self::ZrangebylexRange => &[
@@ -1056,6 +1070,7 @@ impl Workload {
                 "zremrangebyrank-noop" => Self::ZremrangebyrankNoop,
                 "zremrangebylex-noop" => Self::ZremrangebylexNoop,
                 "zrangebyscore-range" => Self::ZrangebyscoreRange,
+                "zrevrangebyscore-range" => Self::ZrevrangebyscoreRange,
                 "zrangebylex-range" => Self::ZrangebylexRange,
                 "zrevrangebylex-range" => Self::ZrevrangebylexRange,
                 "lrange-inverted" => Self::LrangeInverted,
@@ -1339,6 +1354,17 @@ impl WorkloadPackets {
             Workload::ZrangebyscoreRange => {
                 let response = zrangebyscore_range_reply();
                 let case = repeated_case(ZRANGEBYSCORE_RANGE, &response, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::ZrevrangebyscoreRange => {
+                let response = zrevrangebyscore_range_reply();
+                let case = repeated_case(ZREVRANGEBYSCORE_RANGE, &response, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -2677,6 +2703,17 @@ fn zrangebyscore_range_reply() -> Vec<u8> {
     response
 }
 
+fn zrevrangebyscore_range_reply() -> Vec<u8> {
+    let count = ZRANGEBYSCORE_RANGE_END - ZRANGEBYSCORE_RANGE_START + 1;
+    let mut response = format!("*{count}\r\n").into_bytes();
+    for member in (ZRANGEBYSCORE_RANGE_START..=ZRANGEBYSCORE_RANGE_END).rev() {
+        let member = format!("{member:05}");
+        let value = format!("$5\r\n{member}\r\n");
+        response.extend_from_slice(value.as_bytes());
+    }
+    response
+}
+
 fn lindex_middle_prefill() -> ExchangeCase {
     let mut request = b"*3\r\n$3\r\nSET\r\n$1\r\nl\r\n$4\r\nseed\r\n\
 *2\r\n$3\r\nDEL\r\n$1\r\nl\r\n"
@@ -2978,15 +3015,32 @@ steady_state_range=warmed_by_exact_assertion",
                 server.arm.name(),
                 ZRANGEBYLEX_MEMBERS
             );
-        } else if matches!(workload, Workload::ZrangebyscoreRange) {
+        } else if matches!(
+            workload,
+            Workload::ZrangebyscoreRange | Workload::ZrevrangebyscoreRange
+        ) {
             prefill_zrangebyscore_source(server);
             assert_scorez_skiplist_fixture(server);
-            exchange_one(server, ZRANGEBYSCORE_RANGE, &zrangebyscore_range_reply());
+            let (request, response, range_order) =
+                if matches!(workload, Workload::ZrangebyscoreRange) {
+                    (
+                        ZRANGEBYSCORE_RANGE,
+                        zrangebyscore_range_reply(),
+                        "ascending",
+                    )
+                } else {
+                    (
+                        ZREVRANGEBYSCORE_RANGE,
+                        zrevrangebyscore_range_reply(),
+                        "descending",
+                    )
+                };
+            exchange_one(server, request, &response);
             println!(
                 "FIXTURE_REPRESENTATION workload={} arm={} members={} \
 distinct_integer_scores=0..1999 member_width_bytes=5 range_start={} range_end={} \
 range_members={} encoding=skiplist pttl=-1 full_response_bytes_asserted=true \
-range_order=ascending steady_state_range=warmed_by_exact_assertion",
+range_order={range_order} steady_state_range=warmed_by_exact_assertion",
                 workload.name(),
                 server.arm.name(),
                 ZRANGEBYSCORE_MEMBERS,
@@ -3377,6 +3431,7 @@ fn prefill_and_warm(
             | Workload::SinterstoreMixed
             | Workload::ZintercardCached
             | Workload::ZrangebyscoreRange
+            | Workload::ZrevrangebyscoreRange
             | Workload::ZrangebylexRange
             | Workload::ZrevrangebylexRange
     ) {
@@ -3901,7 +3956,10 @@ fn measure_dual_null_configuration_with_packets(
     }
     let warm_ops: usize = if matches!(
         workload,
-        Workload::ZrangebyscoreRange | Workload::ZrangebylexRange | Workload::ZrevrangebylexRange
+        Workload::ZrangebyscoreRange
+            | Workload::ZrevrangebyscoreRange
+            | Workload::ZrangebylexRange
+            | Workload::ZrevrangebylexRange
     ) {
         3_200
     } else {
@@ -5691,6 +5749,34 @@ fn zrangebyscore_range_packet_has_exact_inclusive_reply() {
 }
 
 #[test]
+fn zrevrangebyscore_range_packet_has_exact_descending_reply() {
+    let single_reply = zrevrangebyscore_range_reply();
+    assert_eq!(single_reply.len(), 11_018);
+    assert!(single_reply.starts_with(b"*1001\r\n$5\r\n01500\r\n"));
+    assert!(single_reply.ends_with(b"$5\r\n00500\r\n"));
+    assert!(
+        !single_reply
+            .windows(b"00499".len())
+            .any(|window| window == b"00499")
+    );
+    assert!(
+        !single_reply
+            .windows(b"01501".len())
+            .any(|window| window == b"01501")
+    );
+
+    let packets = WorkloadPackets::new(Workload::ZrevrangebyscoreRange, 2);
+    let mut expected_request = ZREVRANGEBYSCORE_RANGE.to_vec();
+    expected_request.extend_from_slice(ZREVRANGEBYSCORE_RANGE);
+    let mut expected_response = single_reply.clone();
+    expected_response.extend_from_slice(&single_reply);
+    assert_eq!(packets.even.request, expected_request);
+    assert_eq!(packets.even.response, expected_response);
+    assert_eq!(packets.odd.request, packets.even.request);
+    assert_eq!(packets.odd.response, packets.even.response);
+}
+
+#[test]
 fn zrangebylex_range_packet_has_exact_inclusive_reply() {
     let single_reply = zrangebylex_range_reply();
     assert_eq!(single_reply.len(), 11_018);
@@ -6125,6 +6211,12 @@ fn zrangebyscore_dual_null_vs_redis() {
 
 #[test]
 #[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
+fn zrevrangebyscore_dual_null_vs_redis() {
+    run_zset_range_dual_null_vs_redis(Workload::ZrevrangebyscoreRange);
+}
+
+#[test]
+#[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
 fn zrangebylex_dual_null_vs_redis() {
     run_zset_range_dual_null_vs_redis(Workload::ZrangebylexRange);
 }
@@ -6154,6 +6246,7 @@ fn run_zset_range_dual_null_vs_redis(workload: Workload) {
             Workload::ZremrangebyrankNoop
                 | Workload::ZremrangebylexNoop
                 | Workload::ZrangebyscoreRange
+                | Workload::ZrevrangebyscoreRange
                 | Workload::ZrangebylexRange
                 | Workload::ZrevrangebylexRange
         ),
@@ -6220,6 +6313,8 @@ cv_provenance_only=true never_cv_gate=true"
         "FR_ZREMRANGEBYLEX_AB"
     } else if matches!(workload, Workload::ZrangebyscoreRange) {
         "FR_ZRANGEBYSCORE_AB"
+    } else if matches!(workload, Workload::ZrevrangebyscoreRange) {
+        "FR_ZREVRANGEBYSCORE_AB"
     } else {
         "FR_ZRANGEBYLEX_AB"
     };
@@ -6376,6 +6471,8 @@ incumbent_b=vendored_redis_7.2.4"
         "equal_score_2000_member_skiplist_out_of_range_lex_delete_noop"
     } else if matches!(workload, Workload::ZrangebyscoreRange) {
         "distinct_score_2000_member_skiplist_inclusive_1001_member_ascending_range"
+    } else if matches!(workload, Workload::ZrevrangebyscoreRange) {
+        "distinct_score_2000_member_skiplist_inclusive_1001_member_descending_range"
     } else if matches!(workload, Workload::ZrangebylexRange) {
         "equal_score_2000_member_inclusive_1001_member_ascending_range"
     } else {
@@ -6410,7 +6507,10 @@ incumbent_b=vendored_redis_7.2.4"
 encoding=skiplist pttl=-1 exact=true",
             workload.name()
         );
-    } else if matches!(workload, Workload::ZrangebyscoreRange) {
+    } else if matches!(
+        workload,
+        Workload::ZrangebyscoreRange | Workload::ZrevrangebyscoreRange
+    ) {
         for server in &mut servers {
             assert_scorez_skiplist_fixture(server);
         }
