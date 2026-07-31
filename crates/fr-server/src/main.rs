@@ -66,6 +66,13 @@ const SHARDED_SET_GET_MAX_COMMANDS_PER_BATCH: usize = 16;
 /// consuming new input. Matched to the total channel bound so staging cannot
 /// become a second, unbounded queue sitting behind the bounded one.
 const SHARDED_SET_GET_MAX_STAGED: usize = SHARDED_SET_GET_TOTAL_QUEUE_BOUND;
+/// A new connection is held by the acceptor only until its first complete
+/// command reveals the keyspace partition that owns it. Realistic clients send
+/// small commands here; bound the one-time routing buffer so a peer cannot pin
+/// arbitrary memory before it has an owner.
+const SHARED_NOTHING_ROUTE_BUFFER_LIMIT: usize = 1024 * 1024;
+const SHARED_NOTHING_WAKE_TOKEN: Token = Token(0);
+const SHARED_NOTHING_FIRST_CLIENT_TOKEN: usize = 1;
 
 const REPLICA_ACK_INTERVAL_MS: u64 = 1_000;
 const REPLICA_RECONNECT_BACKOFF_MS: u64 = 250;
@@ -724,9 +731,11 @@ struct ShardedSetGetBatchParse {
 struct ParsedShardedSetGetBatch {
     /// Per-shard job counts for this parse, indexed by shard. Commands are no
     /// longer required to share a shard, so a parse can feed several at once.
+    #[cfg_attr(not(test), allow(dead_code))]
     staged_per_shard: Vec<usize>,
     staged: usize,
     consumed: usize,
+    #[cfg_attr(not(test), allow(dead_code))]
     first_command_consumed: usize,
 }
 
@@ -755,8 +764,7 @@ enum ShardedSetGetEnqueueError {
 /// Reply sent when a shard worker has died with commands already sequenced
 /// against it. Module-level because both the dispatch path and the staging
 /// flush have to be able to emit it.
-const SHARDED_WORKER_GONE: &[u8] =
-    b"-ERR experimental sharded command worker disconnected\r\n";
+const SHARDED_WORKER_GONE: &[u8] = b"-ERR experimental sharded command worker disconnected\r\n";
 
 fn sharded_set_get_shard(key: &[u8], worker_count: usize) -> usize {
     usize::from(fr_store::crc16_slot(key)) % worker_count
@@ -837,8 +845,7 @@ impl ShardedTickStaging {
             let take = self.per_shard[shard]
                 .len()
                 .min(SHARDED_SET_GET_MAX_COMMANDS_PER_BATCH);
-            let envelope: Vec<ShardedSetGetJob> =
-                self.per_shard[shard].drain(..take).collect();
+            let envelope: Vec<ShardedSetGetJob> = self.per_shard[shard].drain(..take).collect();
             self.staged -= take;
             match pool.try_enqueue_batch(shard, envelope) {
                 Ok(()) => {}
@@ -1187,6 +1194,796 @@ fn run_sharded_set_get_worker(
     }
 }
 
+const SHARED_NOTHING_UNSUPPORTED: &[u8] = b"-ERR experimental shared-nothing mode accepts only default-DB single-key SET, GET, INCR, LPUSH, LPOP, HSET, HGET, plus PING and QUIT; cross-key and aggregate commands are not supported\r\n";
+const SHARED_NOTHING_PROTOCOL_ERROR: &[u8] =
+    b"-ERR Protocol error in experimental shared-nothing mode\r\n";
+const SHARED_NOTHING_CROSS_SHARD: &[u8] = b"-CROSSSHARD this connection is pinned to a different keyspace partition; use one connection per Redis hash slot\r\n";
+
+/// A socket crosses a thread boundary exactly once, after its first complete
+/// command identifies the owning keyspace partition. All later reads, parsing,
+/// execution, reply buffering, and writes stay on that worker.
+struct SharedNothingRoutedConnection {
+    stream: TcpStream,
+    peer_addr: SocketAddr,
+    initial_bytes: Vec<u8>,
+}
+
+struct SharedNothingPendingConnection {
+    stream: TcpStream,
+    peer_addr: SocketAddr,
+    initial_bytes: Vec<u8>,
+}
+
+struct SharedNothingWorkerRoute {
+    connections: mpsc::Sender<SharedNothingRoutedConnection>,
+    waker: Arc<Waker>,
+}
+
+struct SharedNothingWorkerPool {
+    routes: Vec<SharedNothingWorkerRoute>,
+    next_unkeyed_worker: usize,
+}
+
+#[cfg(feature = "io-uring-writes")]
+type SharedNothingUringWriter = Option<fr_uring::BatchWriter>;
+
+#[cfg(not(feature = "io-uring-writes"))]
+struct SharedNothingUringWriter;
+
+#[cfg(feature = "io-uring-writes")]
+fn new_shared_nothing_uring_writer(enabled: bool) -> io::Result<SharedNothingUringWriter> {
+    if enabled {
+        fr_uring::BatchWriter::new(fr_uring::DEFAULT_RING_ENTRIES).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+#[cfg(not(feature = "io-uring-writes"))]
+fn new_shared_nothing_uring_writer(enabled: bool) -> io::Result<SharedNothingUringWriter> {
+    if enabled {
+        return Err(io::Error::new(
+            ErrorKind::Unsupported,
+            "io_uring output requested without the io-uring-writes feature",
+        ));
+    }
+    Ok(SharedNothingUringWriter)
+}
+
+impl SharedNothingWorkerPool {
+    fn new(worker_count: usize, port: u16, io_uring_output: bool) -> io::Result<Self> {
+        debug_assert!(worker_count > 0);
+        let mut routes = Vec::with_capacity(worker_count);
+
+        for worker_idx in 0..worker_count {
+            let poll = Poll::new()?;
+            let waker = Arc::new(Waker::new(poll.registry(), SHARED_NOTHING_WAKE_TOKEN)?);
+            let (connection_tx, connection_rx) = mpsc::channel();
+            let uring_writer = new_shared_nothing_uring_writer(io_uring_output).map_err(|err| {
+                io::Error::new(
+                    err.kind(),
+                    format!("failed to create shard {worker_idx} io_uring: {err}"),
+                )
+            })?;
+            thread::Builder::new()
+                .name(format!("fr-set-get-shard-{worker_idx}"))
+                .spawn(move || {
+                    run_shared_nothing_worker(
+                        worker_idx,
+                        worker_count,
+                        port,
+                        poll,
+                        connection_rx,
+                        uring_writer,
+                    );
+                })?;
+            routes.push(SharedNothingWorkerRoute {
+                connections: connection_tx,
+                waker,
+            });
+        }
+
+        #[cfg(feature = "io-uring-writes")]
+        URING_WRITES_ACTIVE.store(io_uring_output, std::sync::atomic::Ordering::Relaxed);
+
+        Ok(Self {
+            routes,
+            next_unkeyed_worker: 0,
+        })
+    }
+
+    fn worker_count(&self) -> usize {
+        self.routes.len()
+    }
+
+    fn choose_unkeyed_worker(&mut self) -> usize {
+        let worker = self.next_unkeyed_worker;
+        self.next_unkeyed_worker = (worker + 1) % self.routes.len();
+        worker
+    }
+
+    fn route(&self, worker: usize, connection: SharedNothingRoutedConnection) -> io::Result<()> {
+        let route = &self.routes[worker];
+        route.connections.send(connection).map_err(|_| {
+            io::Error::new(
+                ErrorKind::BrokenPipe,
+                format!("shared-nothing worker {worker} disconnected"),
+            )
+        })?;
+        route.waker.wake()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SharedNothingRouteDecision {
+    Incomplete,
+    Shard(usize),
+    Unkeyed,
+}
+
+fn shared_nothing_route_decision(
+    input: &[u8],
+    parser_config: &ParserConfig,
+    worker_count: usize,
+) -> SharedNothingRouteDecision {
+    let mut borrowed_args = Vec::new();
+    match fr_protocol::parse_command_args_borrowed_into(input, parser_config, &mut borrowed_args) {
+        Err(RespParseError::Incomplete) => SharedNothingRouteDecision::Incomplete,
+        Ok(parsed)
+            if !matches!(parsed.kind, BorrowedCommandArgsKind::NullArray)
+                && borrowed_args
+                    .first()
+                    .is_some_and(|command| sharded_single_key_command(command))
+                && borrowed_args.get(1).is_some() =>
+        {
+            SharedNothingRouteDecision::Shard(sharded_set_get_shard(borrowed_args[1], worker_count))
+        }
+        Ok(_) | Err(_) => SharedNothingRouteDecision::Unkeyed,
+    }
+}
+
+fn run_shared_nothing_server(
+    bind_addr: &str,
+    port: u16,
+    worker_count: usize,
+    io_uring_output: bool,
+) -> Result<(), String> {
+    let socket_addr: SocketAddr = format!("{bind_addr}:{port}")
+        .parse()
+        .map_err(|err| format!("invalid bind address '{bind_addr}:{port}': {err}"))?;
+    let mut listener = TcpListener::bind(socket_addr)
+        .map_err(|err| format!("failed to bind to {socket_addr}: {err}"))?;
+    let mut poll = Poll::new().map_err(|err| format!("failed to create accept poll: {err}"))?;
+    poll.registry()
+        .register(&mut listener, SHARED_NOTHING_WAKE_TOKEN, Interest::READABLE)
+        .map_err(|err| format!("failed to register shared-nothing listener: {err}"))?;
+    let mut workers = SharedNothingWorkerPool::new(worker_count, port, io_uring_output)
+        .map_err(|err| format!("failed to start shared-nothing workers: {err}"))?;
+
+    eprintln!(
+        "FrankenRedis v{} ready (mode=strict, port={port}, command_execution_threads={worker_count}, topology=connection-affine-shared-nothing)",
+        env!("CARGO_PKG_VERSION")
+    );
+    if io_uring_output {
+        eprintln!("io_uring batched output enabled per shared-nothing worker");
+    }
+
+    let mut events = Events::with_capacity(1024);
+    let mut pending: HashMap<Token, SharedNothingPendingConnection, foldhash::fast::RandomState> =
+        HashMap::default();
+    let mut next_token = SHARED_NOTHING_FIRST_CLIENT_TOKEN;
+    let parser_config = ParserConfig::default();
+    let mut read_scratch = [0u8; 8192];
+    let mut ready_pending = Vec::new();
+
+    loop {
+        match poll.poll(&mut events, None) {
+            Ok(()) => {}
+            Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+            Err(err) => return Err(format!("shared-nothing accept poll failed: {err}")),
+        }
+
+        let mut listener_ready = false;
+        ready_pending.clear();
+        for event in &events {
+            if event.token() == SHARED_NOTHING_WAKE_TOKEN {
+                listener_ready |= event.is_readable();
+            } else if event.is_readable() || event.is_read_closed() || event.is_error() {
+                ready_pending.push(event.token());
+            }
+        }
+
+        if listener_ready {
+            accept_shared_nothing_connections(
+                &mut listener,
+                &mut poll,
+                &mut pending,
+                &mut next_token,
+            );
+        }
+        for token in ready_pending.iter().copied() {
+            route_shared_nothing_connection(
+                token,
+                &mut pending,
+                &mut poll,
+                &mut workers,
+                &parser_config,
+                &mut read_scratch,
+            );
+        }
+    }
+}
+
+fn accept_shared_nothing_connections(
+    listener: &mut TcpListener,
+    poll: &mut Poll,
+    pending: &mut HashMap<Token, SharedNothingPendingConnection, foldhash::fast::RandomState>,
+    next_token: &mut usize,
+) {
+    loop {
+        match listener.accept() {
+            Ok((mut stream, peer_addr)) => {
+                if let Err(err) = stream.set_nodelay(true) {
+                    eprintln!("warn: failed to set TCP_NODELAY on unrouted connection: {err}");
+                }
+                if *next_token == SHARED_NOTHING_WAKE_TOKEN.0 {
+                    *next_token = SHARED_NOTHING_FIRST_CLIENT_TOKEN;
+                }
+                let token = Token(*next_token);
+                *next_token = next_token.wrapping_add(1);
+                if *next_token == SHARED_NOTHING_WAKE_TOKEN.0 {
+                    *next_token = SHARED_NOTHING_FIRST_CLIENT_TOKEN;
+                }
+                if let Err(err) = poll
+                    .registry()
+                    .register(&mut stream, token, Interest::READABLE)
+                {
+                    eprintln!("warn: failed to register unrouted connection: {err}");
+                    continue;
+                }
+                pending.insert(
+                    token,
+                    SharedNothingPendingConnection {
+                        stream,
+                        peer_addr,
+                        initial_bytes: Vec::with_capacity(4096),
+                    },
+                );
+            }
+            Err(err) if err.kind() == ErrorKind::WouldBlock => break,
+            Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+            Err(err) => {
+                eprintln!("warn: shared-nothing accept failed: {err}");
+                break;
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn route_shared_nothing_connection(
+    token: Token,
+    pending: &mut HashMap<Token, SharedNothingPendingConnection, foldhash::fast::RandomState>,
+    poll: &mut Poll,
+    workers: &mut SharedNothingWorkerPool,
+    parser_config: &ParserConfig,
+    read_scratch: &mut [u8],
+) {
+    let mut peer_closed = false;
+    let mut route_limit_exceeded = false;
+    let decision = {
+        let Some(connection) = pending.get_mut(&token) else {
+            return;
+        };
+        loop {
+            match connection.stream.read(&mut *read_scratch) {
+                Ok(0) => {
+                    peer_closed = true;
+                    break;
+                }
+                Ok(n) => {
+                    if connection.initial_bytes.len().saturating_add(n)
+                        > SHARED_NOTHING_ROUTE_BUFFER_LIMIT
+                    {
+                        route_limit_exceeded = true;
+                        break;
+                    }
+                    connection
+                        .initial_bytes
+                        .extend_from_slice(&read_scratch[..n]);
+                    if n < read_scratch.len() {
+                        break;
+                    }
+                }
+                Err(err) if err.kind() == ErrorKind::WouldBlock => break,
+                Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+                Err(_) => {
+                    peer_closed = true;
+                    break;
+                }
+            }
+        }
+        shared_nothing_route_decision(
+            &connection.initial_bytes,
+            parser_config,
+            workers.worker_count(),
+        )
+    };
+
+    if route_limit_exceeded
+        || (peer_closed && matches!(decision, SharedNothingRouteDecision::Incomplete))
+    {
+        if let Some(mut connection) = pending.remove(&token) {
+            let _ = poll.registry().deregister(&mut connection.stream);
+        }
+        return;
+    }
+    if matches!(decision, SharedNothingRouteDecision::Incomplete) {
+        return;
+    }
+
+    let worker = match decision {
+        SharedNothingRouteDecision::Shard(worker) => worker,
+        SharedNothingRouteDecision::Unkeyed => workers.choose_unkeyed_worker(),
+        SharedNothingRouteDecision::Incomplete => return,
+    };
+    let Some(mut connection) = pending.remove(&token) else {
+        return;
+    };
+    if let Err(err) = poll.registry().deregister(&mut connection.stream) {
+        eprintln!("warn: failed to detach connection from acceptor: {err}");
+        return;
+    }
+    let routed = SharedNothingRoutedConnection {
+        stream: connection.stream,
+        peer_addr: connection.peer_addr,
+        initial_bytes: connection.initial_bytes,
+    };
+    if let Err(err) = workers.route(worker, routed) {
+        eprintln!("warn: failed to route connection to shard {worker}: {err}");
+    }
+}
+
+fn run_shared_nothing_worker(
+    worker_idx: usize,
+    worker_count: usize,
+    port: u16,
+    mut poll: Poll,
+    connections: mpsc::Receiver<SharedNothingRoutedConnection>,
+    mut uring_writer: SharedNothingUringWriter,
+) {
+    #[cfg(not(feature = "io-uring-writes"))]
+    let _ = &mut uring_writer;
+
+    let mut runtime = Runtime::new(RuntimePolicy::default());
+    runtime.set_server_port(port);
+    let mut events = Events::with_capacity(1024);
+    let mut clients = ClientMap::default();
+    let mut write_tokens = TokenSet::default();
+    let mut closing_tokens = TokenSet::default();
+    let mut next_token = SHARED_NOTHING_FIRST_CLIENT_TOKEN;
+    let mut read_scratch = [0u8; 8192];
+    #[cfg(feature = "io-uring-writes")]
+    let mut uring_jobs = Vec::new();
+    #[cfg(feature = "io-uring-writes")]
+    let mut uring_completions = Vec::new();
+
+    loop {
+        #[cfg(feature = "io-uring-writes")]
+        if let Some(writer) = uring_writer.as_mut() {
+            drain_uring_completions(
+                writer,
+                &mut clients,
+                &mut runtime,
+                &mut poll,
+                &mut write_tokens,
+                &mut closing_tokens,
+                &mut uring_completions,
+            );
+        }
+
+        if !install_shared_nothing_connections(
+            worker_idx,
+            worker_count,
+            &connections,
+            &mut clients,
+            &mut runtime,
+            &mut poll,
+            &mut write_tokens,
+            &mut closing_tokens,
+            &mut next_token,
+        ) {
+            return;
+        }
+
+        #[cfg(feature = "io-uring-writes")]
+        if let Some(writer) = uring_writer.as_mut() {
+            submit_uring_batch(
+                writer,
+                &mut clients,
+                &mut poll,
+                &mut write_tokens,
+                &mut uring_jobs,
+            );
+        }
+
+        reap_shared_nothing_connections(
+            &mut clients,
+            &mut runtime,
+            &mut poll,
+            &mut write_tokens,
+            &mut closing_tokens,
+        );
+
+        #[cfg(feature = "io-uring-writes")]
+        let poll_timeout = uring_writer
+            .as_ref()
+            .is_some_and(fr_uring::BatchWriter::has_owned_in_flight)
+            .then_some(Duration::ZERO);
+        #[cfg(not(feature = "io-uring-writes"))]
+        let poll_timeout = None;
+
+        match poll.poll(&mut events, poll_timeout) {
+            Ok(()) => {}
+            Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+            Err(err) => {
+                eprintln!("error: shared-nothing shard {worker_idx} poll failed: {err}");
+                return;
+            }
+        }
+
+        for event in &events {
+            let token = event.token();
+            if token == SHARED_NOTHING_WAKE_TOKEN {
+                continue;
+            }
+            if event.is_readable() || event.is_read_closed() {
+                handle_shared_nothing_readable(
+                    worker_idx,
+                    worker_count,
+                    token,
+                    &mut clients,
+                    &mut runtime,
+                    &mut poll,
+                    &mut write_tokens,
+                    &mut closing_tokens,
+                    &mut read_scratch,
+                );
+            }
+            if event.is_writable() {
+                handle_writable(
+                    token,
+                    &mut clients,
+                    &mut runtime,
+                    &mut write_tokens,
+                    &mut closing_tokens,
+                    &mut poll,
+                    None,
+                );
+            }
+            if (event.is_error() || event.is_write_closed())
+                && let Some(connection) = clients.get_mut(&token)
+            {
+                connection.closing = true;
+                closing_tokens.insert(token);
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn install_shared_nothing_connections(
+    worker_idx: usize,
+    worker_count: usize,
+    connections: &mpsc::Receiver<SharedNothingRoutedConnection>,
+    clients: &mut ClientMap,
+    runtime: &mut Runtime,
+    poll: &mut Poll,
+    write_tokens: &mut TokenSet,
+    closing_tokens: &mut TokenSet,
+    next_token: &mut usize,
+) -> bool {
+    loop {
+        let routed = match connections.try_recv() {
+            Ok(routed) => routed,
+            Err(mpsc::TryRecvError::Empty) => return true,
+            Err(mpsc::TryRecvError::Disconnected) => return false,
+        };
+        if *next_token == SHARED_NOTHING_WAKE_TOKEN.0 {
+            *next_token = SHARED_NOTHING_FIRST_CLIENT_TOKEN;
+        }
+        let token = Token(*next_token);
+        *next_token = next_token.wrapping_add(1);
+        if *next_token == SHARED_NOTHING_WAKE_TOKEN.0 {
+            *next_token = SHARED_NOTHING_FIRST_CLIENT_TOKEN;
+        }
+
+        let SharedNothingRoutedConnection {
+            mut stream,
+            peer_addr,
+            initial_bytes,
+        } = routed;
+        if let Err(err) = poll
+            .registry()
+            .register(&mut stream, token, Interest::READABLE)
+        {
+            eprintln!("warn: shard {worker_idx} failed to register connection: {err}");
+            continue;
+        }
+        let mut session = runtime.new_session();
+        session.peer_addr = Some(peer_addr);
+        #[cfg(unix)]
+        {
+            session.socket_fd = Some(stream.as_raw_fd());
+        }
+        let mut connection = ClientConnection::new_with_writer(stream, None, session, now_ms());
+        connection.read_buf = initial_bytes;
+        if !connection.read_buf.is_empty() {
+            runtime.note_read_event();
+            runtime.track_net_input_bytes(connection.read_buf.len() as u64);
+        }
+        let output_before = connection.write_buf.len();
+        dispatch_shared_nothing_frames(
+            worker_idx,
+            worker_count,
+            &mut connection,
+            runtime,
+            now_ms(),
+        );
+        runtime.track_net_output_bytes(
+            connection
+                .write_buf
+                .len()
+                .saturating_sub(output_before) as u64,
+        );
+        if connection.has_pending_output() {
+            drive_client_output(
+                token,
+                &mut connection,
+                OutputDriveContext {
+                    runtime,
+                    poll,
+                    write_tokens,
+                    closing_tokens,
+                    writer_pool: None,
+                },
+                true,
+            );
+        }
+        clients.insert(token, connection);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_shared_nothing_readable(
+    worker_idx: usize,
+    worker_count: usize,
+    token: Token,
+    clients: &mut ClientMap,
+    runtime: &mut Runtime,
+    poll: &mut Poll,
+    write_tokens: &mut TokenSet,
+    closing_tokens: &mut TokenSet,
+    read_scratch: &mut [u8],
+) {
+    let Some(connection) = clients.get_mut(&token) else {
+        return;
+    };
+    if connection.closing {
+        return;
+    }
+
+    let mut read_any = false;
+    let mut peer_closed = false;
+    loop {
+        match connection.stream.read(&mut *read_scratch) {
+            Ok(0) => {
+                peer_closed = true;
+                break;
+            }
+            Ok(n) => match validate_read_path(
+                connection.read_buf.len(),
+                n,
+                runtime.server.query_buffer_limit,
+                false,
+            ) {
+                Ok(_) => {
+                    connection.read_buf.extend_from_slice(&read_scratch[..n]);
+                    runtime.track_net_input_bytes(n as u64);
+                    read_any = true;
+                    if n < read_scratch.len() {
+                        break;
+                    }
+                }
+                Err(err) => {
+                    eprintln!(
+                        "warn: shard {worker_idx} disconnected oversized query buffer: {}",
+                        err.reason_code()
+                    );
+                    connection.closing = true;
+                    closing_tokens.insert(token);
+                    return;
+                }
+            },
+            Err(err) if err.kind() == ErrorKind::WouldBlock => break,
+            Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+            Err(err) => {
+                eprintln!("warn: shard {worker_idx} client read error: {err}");
+                connection.closing = true;
+                closing_tokens.insert(token);
+                return;
+            }
+        }
+    }
+
+    if read_any {
+        runtime.note_read_event();
+        let output_before = connection.write_buf.len();
+        dispatch_shared_nothing_frames(worker_idx, worker_count, connection, runtime, now_ms());
+        runtime.track_net_output_bytes(
+            connection
+                .write_buf
+                .len()
+                .saturating_sub(output_before) as u64,
+        );
+    }
+    if peer_closed {
+        connection.closing = true;
+        closing_tokens.insert(token);
+    }
+    if connection.has_pending_output() {
+        drive_client_output(
+            token,
+            connection,
+            OutputDriveContext {
+                runtime,
+                poll,
+                write_tokens,
+                closing_tokens,
+                writer_pool: None,
+            },
+            true,
+        );
+    }
+}
+
+fn dispatch_shared_nothing_frames(
+    worker_idx: usize,
+    worker_count: usize,
+    connection: &mut ClientConnection,
+    runtime: &mut Runtime,
+    ts: u64,
+) {
+    let parser_config = runtime.parser_config();
+    let mut consumed_total = 0usize;
+    let mut borrowed_args = Vec::new();
+
+    while consumed_total < connection.read_buf.len() && !connection.closing {
+        let unparsed = &connection.read_buf[consumed_total..];
+        if let Some((command, consumed)) = parse_sharded_command(unparsed, &parser_config) {
+            if sharded_set_get_shard(command.key(), worker_count) != worker_idx {
+                connection
+                    .write_buf
+                    .extend_from_slice(SHARED_NOTHING_CROSS_SHARD);
+                connection.closing = true;
+                break;
+            }
+            execute_sharded_command_into(runtime, command, ts, &mut connection.write_buf);
+            consumed_total += consumed;
+            continue;
+        }
+
+        if let Some(packet) = parse_borrowed_plain_ping_packet(unparsed, &parser_config) {
+            if let Some(message) = packet.message {
+                fr_protocol::encode_bulk_string_slice(
+                    Some(message),
+                    false,
+                    &mut connection.write_buf,
+                );
+            } else {
+                connection.write_buf.extend_from_slice(b"+PONG\r\n");
+            }
+            consumed_total += packet.consumed;
+            continue;
+        }
+
+        match fr_protocol::parse_command_args_borrowed_into(
+            unparsed,
+            &parser_config,
+            &mut borrowed_args,
+        ) {
+            Ok(parsed) => {
+                consumed_total += parsed.consumed;
+                if matches!(parsed.kind, BorrowedCommandArgsKind::NullArray)
+                    || borrowed_args.is_empty()
+                {
+                    continue;
+                }
+                if borrowed_args.len() == 1 && borrowed_args[0].eq_ignore_ascii_case(b"QUIT") {
+                    connection.write_buf.extend_from_slice(b"+OK\r\n");
+                    connection.closing = true;
+                    break;
+                }
+                connection
+                    .write_buf
+                    .extend_from_slice(SHARED_NOTHING_UNSUPPORTED);
+            }
+            Err(RespParseError::Incomplete) => break,
+            Err(_) => {
+                connection
+                    .write_buf
+                    .extend_from_slice(SHARED_NOTHING_PROTOCOL_ERROR);
+                connection.closing = true;
+                break;
+            }
+        }
+    }
+
+    if consumed_total == connection.read_buf.len() {
+        connection.read_buf.clear();
+    } else if consumed_total > 0 {
+        connection.read_buf.drain(..consumed_total);
+    }
+}
+
+fn execute_sharded_command_into(
+    runtime: &mut Runtime,
+    command: ShardedSetGetCommand,
+    ts: u64,
+    output: &mut Vec<u8>,
+) {
+    match command {
+        ShardedSetGetCommand::Get { key } => {
+            if runtime
+                .execute_plain_get_borrowed_into(&key, ts, false, output)
+                .is_none()
+            {
+                output.extend_from_slice(b"-ERR sharded SET/GET worker rejected a default GET\r\n");
+            }
+        }
+        ShardedSetGetCommand::Set { key, value } => {
+            if runtime
+                .execute_plain_set_borrowed_ok(&key, &value, ts)
+                .is_some()
+            {
+                output.extend_from_slice(b"+OK\r\n");
+            } else {
+                output.extend_from_slice(b"-ERR sharded SET/GET worker rejected a default SET\r\n");
+            }
+        }
+        ShardedSetGetCommand::SingleKey { encoded_frame, .. } => {
+            output.extend_from_slice(&runtime.execute_bytes(&encoded_frame, ts));
+        }
+    }
+}
+
+fn reap_shared_nothing_connections(
+    clients: &mut ClientMap,
+    runtime: &mut Runtime,
+    poll: &mut Poll,
+    write_tokens: &mut TokenSet,
+    closing_tokens: &mut TokenSet,
+) {
+    let removable: Vec<Token> = closing_tokens
+        .iter()
+        .filter(|token| {
+            clients
+                .get(token)
+                .map(ClientConnection::output_drained_or_failed)
+                .unwrap_or(true)
+        })
+        .copied()
+        .collect();
+    for token in removable {
+        closing_tokens.remove(&token);
+        write_tokens.remove(&token);
+        if let Some(mut connection) = clients.remove(&token) {
+            runtime.remove_client_session(connection.session.client_id);
+            let _ = poll.registry().deregister(&mut connection.stream);
+        }
+    }
+}
+
 fn flush_writer_job(job: WriterJob) -> WriterCompletion {
     let WriterJob {
         token,
@@ -1291,8 +2088,9 @@ OPTIONS:\n\
   --io-uring-output          Opt in to batched io_uring writes (requires io-uring-writes feature)\n\
   --experimental-sharded-set-get-workers <N>\n\
                              Run default-DB single-key SET/GET/INCR/LPUSH/LPOP/HSET/HGET\n\
-                             on N key shards (1-{SHARDED_SET_GET_MAX_WORKERS}); permits local\n\
-                             PING/QUIT and refuses cross-key and aggregate commands\n\
+                             on N connection-affine, shared-nothing key shards\n\
+                             (1-{SHARDED_SET_GET_MAX_WORKERS}); each connection stays on the\n\
+                             shard selected by its first keyed command\n\
   --help                     Show this help\n"
     )
 }
@@ -1539,6 +2337,8 @@ fn main() -> ExitCode {
     let mut sharded_set_get_workers: Option<usize> = None;
     #[cfg(feature = "io-uring-writes")]
     let mut io_uring_output = false;
+    #[cfg(not(feature = "io-uring-writes"))]
+    let io_uring_output = false;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -1728,6 +2528,16 @@ fn main() -> ExitCode {
             );
             return ExitCode::from(1);
         }
+    }
+
+    if let Some(worker_count) = sharded_set_get_workers {
+        return match run_shared_nothing_server(&bind_addr, port, worker_count, io_uring_output) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                eprintln!("error: shared-nothing server failed: {err}");
+                ExitCode::from(1)
+            }
+        };
     }
 
     let mut requirepass = None;
@@ -3101,6 +3911,7 @@ fn handle_sharded_set_get_readable(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dispatch_sharded_set_get_frames(
     token: Token,
     conn: &mut ClientConnection,
@@ -27750,11 +28561,7 @@ mod tests {
             std::collections::BTreeMap::new();
         for i in 0..64u64 {
             let key = format!("k{i}");
-            let frame = format!(
-                "*2\r\n$3\r\nGET\r\n${}\r\n{}\r\n",
-                key.len(),
-                key
-            );
+            let frame = format!("*2\r\n$3\r\nGET\r\n${}\r\n{}\r\n", key.len(), key);
             pipeline.extend_from_slice(frame.as_bytes());
             let shard = crate::sharded_set_get_shard(key.as_bytes(), worker_count);
             expected.entry(shard).or_default().push(i);

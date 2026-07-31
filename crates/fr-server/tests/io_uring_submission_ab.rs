@@ -57,7 +57,23 @@ const DEFAULT_INTERLEAVE_GROUPS: usize = 125;
 // inside each full sample instead of degenerating to one sequential arm block.
 const SHARDED_DEFAULT_INTERLEAVE_GROUPS: usize = 16;
 const QUIET_CORE_MAX_PCT: f64 = 5.0;
-const QUIET_CORE_PREFLIGHT_ATTEMPTS: usize = 20;
+// How long the preflight WAITS for the declared quiet condition — not how quiet
+// the host has to be. The thresholds (QUIET_CORE_MAX_PCT, HOST_WIDE_MAX_BUSY_PCT)
+// are unchanged; only the patience is.
+//
+// 20 attempts x 500 ms is a 10-second budget, and under strict-remote RCH the
+// preflight starts the instant a ~10-minute `cargo build` finishes on the SAME
+// host. Measured 2026-07-31: the build's own tail keeps several CPUs at 20-55%
+// for minutes afterwards, so the budget expired inside our own cooldown. Two
+// consecutive 18-gate invocations scored 0 verdicts this way while independent
+// per-CPU sampling of the same worker, taken minutes before and minutes after,
+// showed 16-19 of 20 windows clear. The gate was rejecting the machine for
+// being busy with the job that is about to measure it.
+//
+// A longer wait is strictly more faithful than a looser threshold: every
+// accepted window still requires every CPU in the cpuset at or below the same
+// limit, and the attempt count is printed with each verdict.
+const QUIET_CORE_PREFLIGHT_ATTEMPTS: usize = 240;
 // Host-wide scaling is admissible only when the entire original process
 // cpuset is quiet. This mirrors FrankenFS's fail-closed trj contract: picking
 // a few quiet cores does not prove that another benchmark is not consuming
@@ -6697,7 +6713,10 @@ fn restore_full_process_cpuset() {
         "restoring the full process cpuset failed: {}",
         String::from_utf8_lossy(&restore.stderr)
     );
-    println!("PROCESS_CPUSET_RESTORED online={online:?} observed_after={:?}", allowed_cpus());
+    println!(
+        "PROCESS_CPUSET_RESTORED online={online:?} observed_after={:?}",
+        allowed_cpus()
+    );
 }
 
 fn choose_client_cpu_order(max_client_threads: usize) -> (Vec<usize>, usize, Vec<usize>) {
@@ -9171,6 +9190,7 @@ physical_cores={physical_cores} logical_threads={logical_threads}",
 interleave_groups={interleave_groups} groups_per_arm_sample={groups_per_arm_sample}"
     );
     let profile_seconds = parse_u64_env("FR_SHARDED_PROFILE_SECONDS", DEFAULT_PROFILE_SECONDS);
+    let skip_profile = parse_bool_env("FR_SHARDED_SKIP_PROFILE");
     let (client_cpu_order, server_core, process_cpuset_cap) =
         choose_client_cpu_order(client_threads);
     assert_eq!(
@@ -9199,6 +9219,10 @@ runtime_detected_isa={} process_cpuset_cap={process_cpuset_cap:?} \
 client_affinity={client_affinity:?} redis_affinity_cpu={server_core} \
 candidate_a_affinity={process_cpuset_cap:?} candidate_b_affinity={process_cpuset_cap:?}",
         runtime_isa_features()
+    );
+    println!(
+        "SCALING_PROFILE_PROVENANCE profile_skipped={skip_profile} \
+profile_seconds={profile_seconds}"
     );
     let root = unique_root();
     println!("ARTIFACT_ROOT {}", root.display());
@@ -9364,7 +9388,7 @@ incumbent_a=vendored_redis_7.2.4 incumbent_b=vendored_redis_7.2.4"
             };
             apply_server_setup(&mut servers, &server_setup);
             let packets = Arc::new(packets);
-            if matches!(workload, Workload::Mixed | Workload::MixedFamilies) {
+            if !skip_profile && matches!(workload, Workload::Mixed | Workload::MixedFamilies) {
                 profile_sharded_set_get_path(
                     &mut servers[DualNullArm::CandidateA.index()],
                     &point_root,
