@@ -25649,3 +25649,163 @@ this repository's gates. No timing claim is made in this entry.
   SYMPTOM of run length, and falls 12.3x with no change to the channel at all.
   Do not chase cross-shard routing cost (crc16 executes identically in both arms)
   or completion-channel cache-line contention (refuted above at <=1%).
+
+## 2026-07-31 CrimsonHawk (cc/MEASURE): REJECT — per-tick shard regrouping removes the batch-collapse defect by count (evloop 2433.4→1491.5 instr/op, futex 1.0343→0.0159/op at W=8) yet the Amdahl ceiling is FLAT IN W, so sharding as a SCALING strategy is a conclusive dead end (`frankenredis-odusj`)
+
+- **Claim class: SELF-SPEEDUP. Campaign output: no.** FrankenRedis measured against
+  FrankenRedis throughout. No live Redis arm ran in these invocations, so the
+  2.3-3.0x vs-incumbent LOSS from `thr01`/`thr04` is neither revised nor rescued
+  here. CV is provenance only and gated nothing.
+
+- **WHAT IS BANKED, AND WHAT IS NOT — read before quoting any number below.** The
+  banked claim is the COUNTED one: event-loop instructions per operation and
+  event-loop futex syscalls per operation, each a ratio of counts over an EXACT
+  denominator (`redis-benchmark -t set,get -n N` issues exactly 2N operations),
+  measured per-thread with `perf stat --per-thread` following the server pid for
+  precisely the client job. That is the same admissibility argument `thr02` used
+  for write/op and it does not require a wall-clock null.
+
+  **The throughput figures are NOT banked.** The two arms ran in SEPARATE
+  invocations with a W=0 cross-arm reference, not a same-invocation A/A with a
+  bootstrap 95% median CI, so they do not satisfy the Meta-Lever 2 timing
+  contract and this entry does not ask them to. They are reported as
+  corroboration of the counted result and as the raw material for the shape
+  discussion, and anyone wanting to quote "1.92x" must first re-take it in one
+  invocation carrying A/A and A/B with a bootstrap median-CI gate. The
+  DEAD-END verdict below deliberately does not rest on them.
+
+- **The hypothesis this tested, stated before implementing.** The sharded loss is
+  caused by the job envelope's amortization unit — a run of consecutive same-shard
+  commands within one connection's read buffer — collapsing to length ~1 once W>1
+  scatters consecutive keys across shards, so every operation pays its own
+  key/value copy, envelope allocation, channel send, channel receive, reply-order
+  insert and futex park/unpark on the event-loop thread, inflating that
+  un-parallelizable stage and capping the path below 1.0x regardless of W. The fix
+  therefore had exactly one job: restore envelope length under scatter.
+
+- **THE CHANGE.** `parse_sharded_set_get_batch` no longer breaks at a shard change.
+  Commands are staged into per-shard buffers (`ShardedTickStaging`) filled by every
+  connection the event loop services in a tick, and flushed in envelopes of at most
+  16 — the cap is unchanged, so the only variable introduced is WHERE the 16
+  commands come from. The flush sits at the tail of
+  `drain_sharded_set_get_completions`, which every staging path funnels through, so
+  nothing staged survives into `poll`. That invariant is the whole safety argument:
+  a job left in staging is a reply that never arrives.
+
+- **Binaries.** Both built from a CLEAN baseline at f278d7a49 via
+  `rch exec --base HEAD --clean-overlay`, differing only by the main.rs overlay.
+  Each harness self-reports the RUNNING IMAGE by hashing `/proc/<pid>/exe` while
+  that arm served, so the digest belongs to the process that produced the numbers
+  rather than to a path. Baseline server ELF SHA-256
+  `8d6f8a416af3130f3aa64773f3ba228fa9ad54f4ccf6c257f6eb52ea5a315216`; candidate
+  server ELF SHA-256
+  `958010b4a084bcb26391a0e1e30125534a6a12b3b5fc962fbf5ad34a6a5338e4`.
+
+- **CORRECTNESS PROVED BEFORE TIMING.** `scripts/sharded_order_and_liveness_gate.py`,
+  new: a raw-socket RESP driver that writes the WHOLE pipeline before reading a
+  byte, then verifies reply COUNT and exact ORDER under a hard timeout. Both
+  binaries at W=1,2,8,32,128: **4000/4000 replies exact and in order**, fixture
+  verified to span every shard at each W. This is a liveness gate, not a
+  correctness spot-check, because the failure mode regrouping introduces is
+  SILENCE. `redis-cli --pipe` cannot perform this check — it ends its stream with
+  an ECHO sentinel that sharded mode refuses, so it fails on every binary and
+  proves nothing; that mistake produced a vacuous PASS-equivalent in `thr02`.
+  Unit tests: the old `..._batches_p16_without_crossing_shards` asserted the
+  parser STOPS at a shard change and is replaced by its inverse, plus a new
+  per-shard-FIFO-under-interleaving test. 5/5 sharded tests pass.
+
+- **RESULT 1 — the kill predicate, SPLIT, and I am recording it as I set it.**
+  `frankenredis-odusj` demanded BOTH at W=8: event-loop instructions/op <= 1400
+  AND event-loop futex/op <= 0.10.
+
+  | metric at W=8 | baseline | candidate | predicate | verdict |
+  |---|---|---|---|---|
+  | evloop instr/op | 2433.4 | **1491.5** | <= 1400 | **MISSED by 6.5%** |
+  | evloop futex/op | 1.0343 | **0.0159** | <= 0.10 | **PASSED by 6.3x** |
+
+  The instruction half missed. The residual over the 1106.4 instr/op the
+  hashtag-pinned proxy achieved is the regrouping pass's own cost plus the
+  per-shard buffer scatter the proxy did not pay: under regrouping consecutive
+  commands touch W different buffer tails instead of one. I am not relaxing the
+  number I wrote down before measuring.
+
+- **RESULT 2 — the defect is gone, and it is large.** Whole sweep, 8 client
+  processes x 16 connections x P16 (total c=128), 3 rounds, W=0 arm used as a
+  cross-arm A/A null because it is the UNSHARDED path and therefore identical code
+  in both binaries — it agreed to **0.45% on instructions/op and 1.1% on ops/s**,
+  which is what makes the two arms comparable at all.
+
+  | W | base evloop instr/op | cand evloop instr/op | base futex/op | cand futex/op | base ops/s | cand ops/s |
+  |---|---|---|---|---|---|---|
+  | 0 | 1784.7 | 1776.6 | 0.0000 | 0.0000 | 840,336 | 849,257 |
+  | 1 | 1276.5 | 1559.7 | 0.0018 | 0.0022 | 979,792 | 982,198 |
+  | 8 | 2433.4 | **1491.5** | 1.0343 | **0.0159** | 508,421 | **976,205** |
+  | 32 | 2583.1 | **1482.5** | 1.7351 | **0.0535** | 384,708 | 744,879 |
+  | 128 | 2623.9 | **1556.6** | 1.9325 | **0.1587** | 344,160 | 748,013 |
+
+  At W=8 the counted result is 942 fewer instructions and 1.018 fewer futex syscalls per operation on the serial thread, and the Amdahl ceiling moves from
+  **0.734x (cannot win at any W) to 1.191x**. The accompanying 508,421 -> 976,205
+  ops/s (1.92x) is corroboration only, per the banking note above. Round-to-round spread on the counted
+  metric is 0.02-0.26% on every sharded row.
+
+- **RESULT 3 — THE SHAPE, which is the finding, and it is NEGATIVE.** The candidate
+  peaks at W=1 (982,198), is flat through W=8 (976,205), and declines at W=32/128
+  (744,879 / 748,013). It never rises with worker count. The previous two fixes in
+  this lane each improved a metric without restoring scaling; so does this one.
+
+  **The plateau is established by COUNT, not by the wall clock, because the wall
+  clock cannot settle it here.** ~980k is this client's own ceiling on this host,
+  and the W=0/W=1 rows sit at 78-87% of a core, so a flat ops/s between W=1 and
+  W=8 could be the client rather than the server — that is precisely the error
+  corrected in `thr04` and I am not repeating it. What IS decidable: the
+  candidate's event-loop instructions/op is **FLAT IN W** — 1559.7, 1491.5, 1482.5,
+  1556.6 across W=1..128, spread 0.02-0.26%. The event loop remains the serial
+  stage; its per-operation cost no longer RISES with W, but neither does it FALL.
+  So the Amdahl ceiling is ~1.19x and **constant in W**, and no client, however
+  fast, can produce a curve that climbs past it by adding workers.
+
+- **VERDICT: the SCALING PREMISE is REJECTED; the code change lands as unbanked
+  maintenance.** Those are two separate verdicts and conflating them would misreport both.
+  The regrouping is worth keeping — it converts a monotonic collapse into a
+  plateau, removes 942 instructions and 1.02 futex syscalls per operation from the
+  serial thread at W=8, and turns a path that could not win at any W into one that
+  can win by up to 1.19x. But the thing the campaign wanted from sharding — a ratio
+  that WIDENS with thread count against a single-threaded incumbent — is not
+  available from this architecture, and the reason is now counted rather than
+  suspected: **the work sharding removes from the serial stage is bounded and
+  already removed; what remains there is per-operation read, parse, route, reply-
+  order and write, which is flat in W by construction.**
+
+- **Retry predicate.** Do not re-run the worker-count curve looking for scaling: it
+  has now been measured on a corrected instrument with the batching defect
+  removed, and the ceiling is flat in W by count. Sharding scales only if the
+  SERIAL STAGE is itself replicated — multiple event loops over `SO_REUSEPORT`,
+  each owning a disjoint connection set and its own shard set, so the ~1480
+  instructions/op is paid per core instead of once globally. Reopen only on that
+  design, and gate it the same way: event-loop instructions/op must FALL with
+  event-loop count in `scripts/sharded_serial_stage_census.sh` before any timing
+  run is worth taking. A second, cheaper reopening condition is the 1400 instr/op
+  target this candidate missed at 1491.5: closing that 6.5% raises the ceiling
+  toward the 1106.4 the pinned proxy demonstrated, which is worth ~1.6x rather than
+  ~1.19x — but it still would not make the curve climb with W.
+
+- **Instrument defects found and fixed in this window, both mine.** (1) The census
+  harness had no client-bound guard: one redis-benchmark process caps near 895k on
+  this host, below what the fixed path serves, so a single-process client silently
+  turned a server measurement into a client one and made the curve look flat
+  (891,266 at 81.2% evloop with one process; 968,523 at 96.6% with eight). (2) My
+  first multi-process implementation kept `-c 128` PER PROCESS, opening 1024
+  connections instead of 128; that starved the server and read exactly like host
+  contention — event loop at 73.8-84.2% and a 36% swing in W=1 instructions/op.
+  Both are now encoded as gates: the reducer prints a window-validity verdict and
+  flags any arm whose serial thread is below 90% of a core, and the W=0 cross-arm
+  reference is reported for comparison across binaries. **A related correction to
+  a belief I have been operating on: instructions/op is contention-proof only for
+  PER-COMMAND work. A starved event loop burns empty poll ticks that are paced by
+  time, not by operations, so the counts inflate too — a contended window gave
+  3476.5 evloop instr/op at W=1 against 1559.7 quiet.**
+
+- **Scope, unchanged.** The path still refuses every command outside default-DB
+  single-key SET/GET/INCR/LPUSH/LPOP/HSET/HGET plus PING/QUIT
+  (`frankenredis-sharded-command-surface-too-thin-z37kj`, closed by BlackValley in
+  b8894aff5), so no realistic mixed-workload claim follows from any number here.
