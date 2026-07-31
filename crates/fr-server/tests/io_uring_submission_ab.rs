@@ -96,6 +96,19 @@ const BITOP_SOURCE_VALUE_REPLY: &[u8] = b"$3\r\nabc\r\n";
 const BITOP_NOT_VALUE_REPLY: &[u8] = b"$3\r\n\x9e\x9d\x9c\r\n";
 const STRING_TYPE_REPLY: &[u8] = b"+string\r\n";
 const THREE_BYTE_STRLEN_REPLY: &[u8] = b":3\r\n";
+const SINTERSTORE_THREE_SOURCE: &[u8] =
+    b"*5\r\n$11\r\nSINTERSTORE\r\n$3\r\ndst\r\n$2\r\nsa\r\n$2\r\nsb\r\n$2\r\nsc\r\n";
+const SUNIONSTORE_THREE_SOURCE: &[u8] =
+    b"*5\r\n$11\r\nSUNIONSTORE\r\n$3\r\ndst\r\n$2\r\nsa\r\n$2\r\nsb\r\n$2\r\nsc\r\n";
+const SDIFFSTORE_THREE_SOURCE: &[u8] =
+    b"*5\r\n$10\r\nSDIFFSTORE\r\n$3\r\ndst\r\n$2\r\nsa\r\n$2\r\nsb\r\n$2\r\nsc\r\n";
+const SINTERSTORE_THREE_SOURCE_REPLY: &[u8] = b":6\r\n";
+const SUNIONSTORE_THREE_SOURCE_REPLY: &[u8] = b":14\r\n";
+const SDIFFSTORE_THREE_SOURCE_REPLY: &[u8] = b":2\r\n";
+const SET_LISTPACK_ENCODING_REPLY: &[u8] = b"$8\r\nlistpack\r\n";
+const SET_TYPE_REPLY: &[u8] = b"+set\r\n";
+const SETSTORE3_SOURCE_MEMBERS: usize = 10;
+const SETSTORE3_MEMBERSHIP_UNIVERSE: usize = 15;
 const ZREMRANGEBYSCORE_INVERTED_PREFILL: &[u8] = b"*3\r\n$3\r\nSET\r\n$1\r\nz\r\n$4\r\nseed\r\n\
 *2\r\n$3\r\nDEL\r\n$1\r\nz\r\n\
 *4\r\n$4\r\nZADD\r\n$1\r\nz\r\n$1\r\n1\r\n$1\r\nm\r\n";
@@ -493,6 +506,9 @@ enum Workload {
     ZinterstoreTwoKey,
     BitopAndTwo,
     BitopNotOne,
+    SinterstoreThreeSource,
+    SunionstoreThreeSource,
+    SdiffstoreThreeSource,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -585,6 +601,9 @@ impl Workload {
             Self::ZinterstoreTwoKey => "zinterstore-two-key",
             Self::BitopAndTwo => "bitop-and-two",
             Self::BitopNotOne => "bitop-not-one",
+            Self::SinterstoreThreeSource => "sinterstore-three-source",
+            Self::SunionstoreThreeSource => "sunionstore-three-source",
+            Self::SdiffstoreThreeSource => "sdiffstore-three-source",
         }
     }
 
@@ -1230,6 +1249,34 @@ impl Workload {
                 "Store::bitop",
                 "fr_simd::bitnot_collect",
             ],
+            Self::SinterstoreThreeSource => &[
+                "parse_borrowed_plain_key_arg3_packet",
+                "execute_plain_sinterstore_borrowed",
+                "execute_plain_setstore_borrowed",
+                "Store::sinterstore",
+                "Store::sinter_prepare",
+                "Store::sinter_value",
+                "SetValue::retain_intersect",
+                "Store::store_set_algebra_value",
+            ],
+            Self::SunionstoreThreeSource => &[
+                "parse_borrowed_plain_key_arg3_packet",
+                "execute_plain_sunionstore_borrowed",
+                "execute_plain_setstore_borrowed",
+                "Store::sunionstore",
+                "Store::sunion_value",
+                "SetValue::union_with",
+                "Store::store_set_algebra_value",
+            ],
+            Self::SdiffstoreThreeSource => &[
+                "parse_borrowed_plain_key_arg3_packet",
+                "execute_plain_sdiffstore_borrowed",
+                "execute_plain_setstore_borrowed",
+                "Store::sdiffstore",
+                "Store::sdiff_value",
+                "SetValue::retain_diff",
+                "Store::store_set_algebra_value",
+            ],
             Self::Set | Self::Get | Self::Mixed | Self::MixedFamilies => &[],
         }
     }
@@ -1309,6 +1356,9 @@ impl Workload {
                 "zinterstore-two-key" => Self::ZinterstoreTwoKey,
                 "bitop-and-two" => Self::BitopAndTwo,
                 "bitop-not-one" => Self::BitopNotOne,
+                "sinterstore-three-source" => Self::SinterstoreThreeSource,
+                "sunionstore-three-source" => Self::SunionstoreThreeSource,
+                "sdiffstore-three-source" => Self::SdiffstoreThreeSource,
                 other => panic!("unknown FR_URING_AB_WORKLOADS item: {other}"),
             })
             .collect()
@@ -1988,6 +2038,48 @@ impl WorkloadPackets {
             }
             Workload::BitopNotOne => {
                 let case = repeated_case(BITOP_NOT_ONE, BITOP_THREE_BYTE_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::SinterstoreThreeSource => {
+                let case = repeated_case(
+                    SINTERSTORE_THREE_SOURCE,
+                    SINTERSTORE_THREE_SOURCE_REPLY,
+                    pipeline,
+                );
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::SunionstoreThreeSource => {
+                let case = repeated_case(
+                    SUNIONSTORE_THREE_SOURCE,
+                    SUNIONSTORE_THREE_SOURCE_REPLY,
+                    pipeline,
+                );
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::SdiffstoreThreeSource => {
+                let case = repeated_case(
+                    SDIFFSTORE_THREE_SOURCE,
+                    SDIFFSTORE_THREE_SOURCE_REPLY,
+                    pipeline,
+                );
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -3660,6 +3752,132 @@ binary_destination_get_asserted=true steady_state_destination=warmed_by_two_exac
     );
 }
 
+fn setstore3_membership_case(key: &[u8], member_start: usize, member_end: usize) -> ExchangeCase {
+    let members: Vec<Vec<u8>> = (0..SETSTORE3_MEMBERSHIP_UNIVERSE)
+        .map(|index| format!("m{index}").into_bytes())
+        .collect();
+    let mut args: Vec<&[u8]> = Vec::with_capacity(members.len() + 2);
+    args.push(b"SMISMEMBER");
+    args.push(key);
+    args.extend(members.iter().map(Vec::as_slice));
+
+    let mut response = format!("*{}\r\n", members.len()).into_bytes();
+    for index in 0..members.len() {
+        response.extend_from_slice(if (member_start..member_end).contains(&index) {
+            b":1\r\n"
+        } else {
+            b":0\r\n"
+        });
+    }
+    ExchangeCase {
+        request: resp_command(&args),
+        response,
+    }
+}
+
+fn assert_setstore3_set(server: &mut Server, key: &[u8], member_start: usize, member_end: usize) {
+    let expected_cardinality = member_end - member_start;
+    let key_type = resp_command(&[b"TYPE", key]);
+    exchange_one(server, &key_type, SET_TYPE_REPLY);
+    let cardinality = resp_command(&[b"SCARD", key]);
+    let cardinality_reply = format!(":{expected_cardinality}\r\n");
+    exchange_one(server, &cardinality, cardinality_reply.as_bytes());
+    let encoding = resp_command(&[b"OBJECT", b"ENCODING", key]);
+    exchange_one(server, &encoding, SET_LISTPACK_ENCODING_REPLY);
+    let membership = setstore3_membership_case(key, member_start, member_end);
+    exchange_one(server, &membership.request, &membership.response);
+    let pttl = resp_command(&[b"PTTL", key]);
+    exchange_one(server, &pttl, PTTL_PERSISTENT_REPLY);
+}
+
+fn assert_setstore3_sources(server: &mut Server) {
+    for (key, member_start, member_end) in [
+        (b"sa".as_slice(), 0, 10),
+        (b"sb".as_slice(), 2, 12),
+        (b"sc".as_slice(), 4, 14),
+    ] {
+        assert_setstore3_set(server, key, member_start, member_end);
+    }
+}
+
+fn setstore3_workload_contract(workload: Workload) -> (&'static [u8], &'static [u8], usize, usize) {
+    match workload {
+        Workload::SinterstoreThreeSource => (
+            SINTERSTORE_THREE_SOURCE,
+            SINTERSTORE_THREE_SOURCE_REPLY,
+            4,
+            10,
+        ),
+        Workload::SunionstoreThreeSource => (
+            SUNIONSTORE_THREE_SOURCE,
+            SUNIONSTORE_THREE_SOURCE_REPLY,
+            0,
+            14,
+        ),
+        Workload::SdiffstoreThreeSource => {
+            (SDIFFSTORE_THREE_SOURCE, SDIFFSTORE_THREE_SOURCE_REPLY, 0, 2)
+        }
+        _ => unreachable!("three-source set-store contract requires a set-store workload"),
+    }
+}
+
+fn assert_setstore3_destination(server: &mut Server, workload: Workload) {
+    let (_, _, member_start, member_end) = setstore3_workload_contract(workload);
+    assert_setstore3_set(server, b"dst", member_start, member_end);
+}
+
+fn prepare_setstore3_fixture(server: &mut Server, workload: Workload) {
+    for (key, member_start) in [
+        (b"sa".as_slice(), 0),
+        (b"sb".as_slice(), 2),
+        (b"sc".as_slice(), 4),
+    ] {
+        let mut request = resp_command(&[b"SET", key, b"seed"]);
+        request.extend_from_slice(&resp_command(&[b"DEL", key]));
+
+        let members: Vec<Vec<u8>> = (member_start..member_start + SETSTORE3_SOURCE_MEMBERS)
+            .map(|index| format!("m{index}").into_bytes())
+            .collect();
+        let mut sadd_args: Vec<&[u8]> = Vec::with_capacity(members.len() + 2);
+        sadd_args.push(b"SADD");
+        sadd_args.push(key);
+        sadd_args.extend(members.iter().map(Vec::as_slice));
+        request.extend_from_slice(&resp_command(&sadd_args));
+        exchange_one(server, &request, b"+OK\r\n:1\r\n:10\r\n");
+    }
+    assert_setstore3_sources(server);
+
+    let destination_setup = resp_command(&[b"SET", b"dst", b"seed"]);
+    exchange_one(server, &destination_setup, SET_REPLY);
+    let destination_type = resp_command(&[b"TYPE", b"dst"]);
+    exchange_one(server, &destination_type, STRING_TYPE_REPLY);
+    let destination_value = resp_command(&[b"GET", b"dst"]);
+    exchange_one(server, &destination_value, b"$4\r\nseed\r\n");
+    let destination_pttl = resp_command(&[b"PTTL", b"dst"]);
+    exchange_one(server, &destination_pttl, PTTL_PERSISTENT_REPLY);
+
+    let (request, response, member_start, member_end) = setstore3_workload_contract(workload);
+    exchange_one(server, request, response);
+    assert_setstore3_sources(server);
+    assert_setstore3_destination(server, workload);
+    exchange_one(server, request, response);
+    assert_setstore3_destination(server, workload);
+    println!(
+        "FIXTURE_REPRESENTATION workload={} arm={} source_a_members=m0..m9 \
+source_b_members=m2..m11 source_c_members=m4..m13 source_members_each=10 \
+source_encoding=listpack source_pttl=-1 destination_initial_type=string \
+destination_cross_type_overwrite=true destination_members={}..{} \
+destination_cardinality={} destination_encoding=listpack destination_pttl=-1 \
+exact_full_membership_universe=m0..m14 \
+steady_state_destination=warmed_by_two_exact_assertions",
+        workload.name(),
+        server.arm.name(),
+        member_start,
+        member_end - 1,
+        member_end - member_start
+    );
+}
+
 fn prefill_selective_prefix_keyspace(server: &mut Server, workload: Workload) {
     exchange_one(
         server,
@@ -4032,6 +4250,13 @@ steady_state_ordered_index=warmed_by_exact_assertion",
                 SELECTIVE_PREFIX_DECOYS + 2,
                 SELECTIVE_PREFIX_DECOYS
             );
+        } else if matches!(
+            workload,
+            Workload::SinterstoreThreeSource
+                | Workload::SunionstoreThreeSource
+                | Workload::SdiffstoreThreeSource
+        ) {
+            prepare_setstore3_fixture(server, workload);
         } else if matches!(workload, Workload::BitopAndTwo | Workload::BitopNotOne) {
             prepare_bitop_fixture(server, workload);
         } else if matches!(
@@ -6921,6 +7146,113 @@ exact_source_and_binary_destination_type_strlen_get_pttl=true",
 }
 
 #[test]
+fn setstore3_packets_have_exact_cardinality_replies() {
+    for (workload, request, response) in [
+        (
+            Workload::SinterstoreThreeSource,
+            SINTERSTORE_THREE_SOURCE,
+            SINTERSTORE_THREE_SOURCE_REPLY,
+        ),
+        (
+            Workload::SunionstoreThreeSource,
+            SUNIONSTORE_THREE_SOURCE,
+            SUNIONSTORE_THREE_SOURCE_REPLY,
+        ),
+        (
+            Workload::SdiffstoreThreeSource,
+            SDIFFSTORE_THREE_SOURCE,
+            SDIFFSTORE_THREE_SOURCE_REPLY,
+        ),
+    ] {
+        let packets = WorkloadPackets::new(workload, 2);
+        let mut expected_request = request.to_vec();
+        expected_request.extend_from_slice(request);
+        let mut expected_response = response.to_vec();
+        expected_response.extend_from_slice(response);
+        assert_eq!(packets.even.request, expected_request);
+        assert_eq!(packets.even.response, expected_response);
+        assert_eq!(packets.odd.request, packets.even.request);
+        assert_eq!(packets.odd.response, packets.even.response);
+    }
+}
+
+#[test]
+#[ignore = "requires live frankenredis and vendored Redis executables; run explicitly"]
+fn setstore3_commands_match_server_and_live_redis() {
+    let binary = std::env::var_os("FR_URING_FR_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_frankenredis")));
+    let redis_binary = std::env::var_os("FR_URING_REDIS_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../legacy_redis_code/redis/src/redis-server")
+        });
+    assert!(binary.is_file(), "missing {}", binary.display());
+    assert!(redis_binary.is_file(), "missing {}", redis_binary.display());
+
+    let server_cpu = *allowed_cpus()
+        .first()
+        .expect("live three-source set-store smoke requires one allowed CPU");
+    let root = unique_root();
+    let client_shape = ClientShape {
+        connections: 4,
+        driver_threads: 2,
+    };
+    for workload in [
+        Workload::SinterstoreThreeSource,
+        Workload::SunionstoreThreeSource,
+        Workload::SdiffstoreThreeSource,
+    ] {
+        let packets = Arc::new(DriverPackets::shared(workload, 16));
+        for arm in [Arm::IoUring, Arm::Redis] {
+            let mut server = Server::spawn(
+                &binary,
+                &redis_binary,
+                arm,
+                &root.join(format!("{}_{}", workload.name(), arm.name())),
+                server_cpu,
+                client_shape,
+                CommandFloorAb::None,
+            );
+            prepare_setstore3_fixture(&mut server, workload);
+            server
+                .clients
+                .as_ref()
+                .expect("live three-source set-store clients initialized")
+                .prepare(&packets);
+            server
+                .clients
+                .as_ref()
+                .expect("live three-source set-store clients initialized")
+                .run(&packets, 32, false);
+            assert_setstore3_sources(&mut server);
+            assert_setstore3_destination(&mut server, workload);
+            let (_, _, member_start, member_end) = setstore3_workload_contract(workload);
+            println!(
+                "SETSTORE3_LIVE_PARITY workload={} arm={} pid={} sha256={} \
+process_threads_observed={} command_execution_threads_actual=1 \
+connections_actual={} client_driver_threads_actual={} pipeline=16 groups=32 \
+source_members_each=10 source_encoding=listpack source_pttl=-1 \
+destination_members={}..{} destination_cardinality={} \
+destination_encoding=listpack destination_pttl=-1 \
+exact_source_and_destination_full_membership=true",
+                workload.name(),
+                arm.name(),
+                server.pid(),
+                server.executing_elf_sha256(),
+                server.observed_thread_count(),
+                client_shape.connections,
+                client_shape.driver_threads,
+                member_start,
+                member_end - 1,
+                member_end - member_start
+            );
+        }
+    }
+}
+
+#[test]
 fn sscan_cursor_zero_packet_has_exact_complete_reply() {
     let single_reply = sscan_cursor_zero_reply();
     assert!(single_reply.starts_with(b"*2\r\n$1\r\n0\r\n*16\r\n$1\r\n0\r\n"));
@@ -7609,6 +7941,24 @@ fn bitop_not_one_dual_null_vs_redis() {
 
 #[test]
 #[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
+fn sinterstore_three_source_dual_null_vs_redis() {
+    run_exact_dual_null_vs_redis(Workload::SinterstoreThreeSource);
+}
+
+#[test]
+#[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
+fn sunionstore_three_source_dual_null_vs_redis() {
+    run_exact_dual_null_vs_redis(Workload::SunionstoreThreeSource);
+}
+
+#[test]
+#[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
+fn sdiffstore_three_source_dual_null_vs_redis() {
+    run_exact_dual_null_vs_redis(Workload::SdiffstoreThreeSource);
+}
+
+#[test]
+#[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
 fn sscan_cursor_zero_dual_null_vs_redis() {
     run_exact_dual_null_vs_redis(Workload::SscanCursorZero);
 }
@@ -7656,6 +8006,9 @@ fn run_exact_dual_null_vs_redis(workload: Workload) {
                 | Workload::ZinterstoreTwoKey
                 | Workload::BitopAndTwo
                 | Workload::BitopNotOne
+                | Workload::SinterstoreThreeSource
+                | Workload::SunionstoreThreeSource
+                | Workload::SdiffstoreThreeSource
                 | Workload::SscanCursorZero
                 | Workload::HscanCursorZero
                 | Workload::ZscanCursorZero
@@ -7745,6 +8098,12 @@ cv_provenance_only=true never_cv_gate=true"
         "FR_BITOP_AND2_AB"
     } else if matches!(workload, Workload::BitopNotOne) {
         "FR_BITOP_NOT1_AB"
+    } else if matches!(workload, Workload::SinterstoreThreeSource) {
+        "FR_SINTERSTORE3_AB"
+    } else if matches!(workload, Workload::SunionstoreThreeSource) {
+        "FR_SUNIONSTORE3_AB"
+    } else if matches!(workload, Workload::SdiffstoreThreeSource) {
+        "FR_SDIFFSTORE3_AB"
     } else if matches!(workload, Workload::SscanCursorZero) {
         "FR_SSCAN0_AB"
     } else if matches!(workload, Workload::HscanCursorZero) {
@@ -7942,6 +8301,12 @@ incumbent_b=vendored_redis_7.2.4"
         "three_byte_string_sources_bitop_and_two_source_exact_cross_type_overwrite"
     } else if matches!(workload, Workload::BitopNotOne) {
         "three_byte_string_source_bitop_not_one_source_exact_binary_cross_type_overwrite"
+    } else if matches!(workload, Workload::SinterstoreThreeSource) {
+        "ten_member_listpack_sources_three_source_sinterstore_six_member_exact_cross_type_overwrite"
+    } else if matches!(workload, Workload::SunionstoreThreeSource) {
+        "ten_member_listpack_sources_three_source_sunionstore_fourteen_member_exact_cross_type_overwrite"
+    } else if matches!(workload, Workload::SdiffstoreThreeSource) {
+        "ten_member_listpack_sources_three_source_sdiffstore_two_member_exact_cross_type_overwrite"
     } else if matches!(workload, Workload::SscanCursorZero) {
         "literal_cursor_zero_no_options_16_member_intset_single_complete_reply"
     } else if matches!(
@@ -8097,6 +8462,29 @@ destination_members={destination_members} destination_encoding=listpack \
             destination_pttl=-1 default_weights=1,1 default_aggregate=SUM \
 {result_shape} full_ordered_response_bytes_asserted=true",
             workload.name()
+        );
+    } else if matches!(
+        workload,
+        Workload::SinterstoreThreeSource
+            | Workload::SunionstoreThreeSource
+            | Workload::SdiffstoreThreeSource
+    ) {
+        for server in &mut servers {
+            assert_setstore3_sources(server);
+            assert_setstore3_destination(server, workload);
+        }
+        let (_, _, member_start, member_end) = setstore3_workload_contract(workload);
+        println!(
+            "POST_MEASUREMENT_STATE workload={} arms=4 source_a=m0..m9 \
+source_b=m2..m11 source_c=m4..m13 source_members_each=10 \
+source_encoding=listpack source_pttl=-1 destination_members={}..{} \
+destination_cardinality={} destination_encoding=listpack destination_pttl=-1 \
+exact_source_and_destination_full_membership_universe=m0..m14 \
+cross_type_overwrite=true full_response_bytes_asserted=true",
+            workload.name(),
+            member_start,
+            member_end - 1,
+            member_end - member_start
         );
     } else if matches!(workload, Workload::BitopAndTwo | Workload::BitopNotOne) {
         for server in &mut servers {
