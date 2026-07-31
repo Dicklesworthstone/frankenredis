@@ -6658,7 +6658,50 @@ fn current_process_cpu() -> usize {
         .expect("parse current processor")
 }
 
+/// Undo any client pinning this test binary applied earlier in the same run.
+///
+/// `pin_client_process` narrows the affinity of the WHOLE benchmark process and
+/// never restored it. With `--test-threads=1` every gate shares one process, so
+/// the first gate that reached the pinning step left the mask narrowed and every
+/// later gate died on `benchmark process must retain the worker's complete
+/// logical CPU set` before spawning a server. Measured 2026-07-31: of 18
+/// dual-null gates filtered into one invocation, 1 failed quiescence, 1 failed
+/// its own CLIENT-BOUND guard, and the remaining **16 failed only on the
+/// inherited mask** — so at most one gate per invocation could ever produce a
+/// ratio, which is why this family has been converted one full remote build at
+/// a time.
+///
+/// Restoring to the machine's online CPU list is not a relaxation: the harness
+/// already asserts the process holds the complete logical CPU set, so any
+/// environment that genuinely restricts it still fails that assertion.
+fn restore_full_process_cpuset() {
+    let online = fs::read_to_string("/sys/devices/system/cpu/online")
+        .map(|text| parse_cpu_list(&text))
+        .unwrap_or_else(|_| {
+            (0..thread::available_parallelism().expect("detect CPUs").get()).collect()
+        });
+    if allowed_cpus() == online {
+        return;
+    }
+    let mask = online
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let restore = Command::new("taskset")
+        .args(["-apc", &mask, &std::process::id().to_string()])
+        .output()
+        .expect("restore benchmark process cpuset");
+    assert!(
+        restore.status.success(),
+        "restoring the full process cpuset failed: {}",
+        String::from_utf8_lossy(&restore.stderr)
+    );
+    println!("PROCESS_CPUSET_RESTORED online={online:?} observed_after={:?}", allowed_cpus());
+}
+
 fn choose_client_cpu_order(max_client_threads: usize) -> (Vec<usize>, usize, Vec<usize>) {
+    restore_full_process_cpuset();
     let allowed = allowed_cpus();
     let allowed_set = allowed.iter().copied().collect::<HashSet<_>>();
     for attempt in 1..=QUIET_CORE_PREFLIGHT_ATTEMPTS {
