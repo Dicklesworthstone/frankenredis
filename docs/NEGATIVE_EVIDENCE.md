@@ -25910,3 +25910,58 @@ this repository's gates. No timing claim is made in this entry.
   full-response byte checking, and pre- AND post-measurement host-wide
   quiescence. This ratio is host-specific: it was taken on an 8-core
   `vaes=false` worker and must not be quoted as fleet-invariant.
+
+## 2026-07-31 BlackThrush (cc/MEASURE): COMPETITIVE KEEP — deleting the redundant per-element lex predicate takes `ZRANGEBYLEX` from 2.1198x to **3.5768x** live Redis (`frankenredis-bodco`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes. Decision: KEEP.** Production
+  source changed (`fr_store::SortedSet::lex_range_refs`). Measured against the
+  actual vendored Redis 7.2.4 running live beside both A/A controls in the same
+  invocation, on the same worker, fixture and knobs as the 2.119766690x baseline
+  taken earlier today (`3836c35ef`), so the two are directly comparable:
+  **1.687x on the command, 3.5768x versus the incumbent.**
+- **The deleted work.** On the equal-score fast path the ordered range
+  `range(lower..=upper)` already enforces BOTH endpoints, and the code then ran
+  `lex_in_range` on every returned element — re-parsing the `-`/`+`/`(`/`[`
+  prefix and redoing two slice comparisons per member. The profile named it:
+  `fr_store::lex_in_range` **15.41% self-time**, second-largest frame in the run,
+  plus `SortedSet::lex_range_refs` 4.18%. The filter's only real job was endpoint
+  exclusivity, because the old code built an inclusive range for `(` and `[`
+  alike. Encoding exclusivity in the range bound itself
+  (`Included`/`Excluded`) makes the scan predicate-free. Bounds that are neither
+  `-`/`+` nor `(`/`[`-prefixed fall through to the generic filtered scan rather
+  than being reinterpreted.
+- **Profile confirms the deletion.** `lex_in_range` and `lex_range_refs` are
+  **absent from the top frames** afterwards. Zero lost samples; named surface
+  self-time 33.20%, elimination ceiling 1.497006x. New top frames are
+  `fr_protocol::encode_bulk_string_slice` 25.68% and
+  `Vec<(&[u8], f64)> as SpecFromIterNested` 12.05% — the next lever, since the
+  score is identical for every element on this path.
+- **Identity and threads.** `vmi1293453`, runtime ISA
+  `avx2=true,fma=true,bmi2=true,vaes=false,avx512f=false`. Self-reported from
+  inside the running process, candidate server ELF sha256 f8c72f87581142f266de12e6f5f6686cc36bda96f34c18a8b42619cb8769f02e
+  and incumbent Redis server ELF sha256 e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7. Actual
+  observed threads unchanged (3 FrankenRedis / 5 Redis, one command executor
+  each). Median saturation 97.497% / 97.599% candidate, 97.835% / 97.746% Redis.
+- **Corrected dual-null gate, median clause included.** Wall: same-invocation
+  candidate A/A null median **0.993473845** with bootstrap 95% median CI
+  [0.966958701, 1.025698743]; Redis A/A null median **0.994780044** with
+  bootstrap 95% median CI [0.980575757, 1.015458274]; both inside the 2%
+  gross-bias median guard; twice-widest-null band
+  [0.933917403, 1.066082597]. **FrankenRedis/Redis = 3.576798954x**, bootstrap
+  95% median CI **[3.510121601, 3.624960508]**: **KEEP**. CPU per fixed work:
+  candidate null 0.994541196 CI [0.970040588, 1.024260988], Redis null
+  0.996097638 CI [0.979741772, 1.014836870], band [0.940081176, 1.059918824],
+  ratio **3.574518782x** CI [3.528953611, 3.644093218]: **KEEP**. The bootstrap
+  median-CI gate determined every verdict, never CV; CV is provenance only.
+- **Correctness.** Full `fr-store` suite: 880 passed, 0 correctness failures.
+  The single failing test is `zset_index_slice_treap_matches_linear_and_reports_ab_ratio`,
+  a pure timing-ratio assertion on an unrelated ZRANGE treap-select path
+  (`expected >2x, got 1.94x`) that this change does not touch, on a loaded host.
+- **Retry predicate.** Reopen after changes to ZRANGEBYLEX semantics, lex bound
+  parsing/validation, `FullZSetOrder::range` bound handling, the equal-score
+  fast-path precondition, `ScoreMember` ordering, or if a fresh valid
+  live-incumbent CI overlaps 1.0. Any retry keeps the live Redis arm,
+  inside-process ELF self-reports, same-invocation dual A/A with the median
+  clause, complete order cycles, zero-lost non-zero-self named profile, >=90%
+  saturation, full-response byte checking, and pre- and post-measurement
+  host-wide quiescence. Host-specific: 8-core `vaes=false` worker.
