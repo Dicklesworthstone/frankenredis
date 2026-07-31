@@ -1368,19 +1368,11 @@ fn cached_shared_nothing_partition_index(
     cached_partition.expect("shared-nothing partition cache populated")
 }
 
-/// A socket crosses a thread boundary exactly once, after its first complete
-/// command identifies the reactor that owns its keyspace partition. All later
-/// reads, parsing, execution, reply buffering, and writes stay on that reactor.
+/// A socket crosses a thread boundary exactly once, at accept. All reads,
+/// parsing, execution, reply buffering, and writes then stay on that reactor.
 struct SharedNothingRoutedConnection {
     stream: TcpStream,
     peer_addr: SocketAddr,
-    initial_bytes: Vec<u8>,
-}
-
-struct SharedNothingPendingConnection {
-    stream: TcpStream,
-    peer_addr: SocketAddr,
-    initial_bytes: Vec<u8>,
 }
 
 struct SharedNothingWorkerRoute {
@@ -1480,11 +1472,10 @@ impl SharedNothingWorkerPool {
         self.partitions.len()
     }
 
-    fn worker_for_key(&self, key: &[u8]) -> usize {
-        self.partitions.worker_for_key(key)
-    }
-
-    fn choose_unkeyed_worker(&mut self) -> usize {
+    /// Next reactor in round-robin order. Connections are the unit of balance
+    /// here, and they are long-lived, so a counter is enough -- there is no
+    /// per-command decision to get wrong and nothing shared to contend on.
+    fn next_worker(&mut self) -> usize {
         let worker = self.next_unkeyed_worker;
         self.next_unkeyed_worker = (worker + 1) % self.routes.len();
         worker
@@ -1499,33 +1490,6 @@ impl SharedNothingWorkerPool {
             )
         })?;
         route.waker.wake()
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SharedNothingRouteDecision<'a> {
-    Incomplete,
-    Keyed(&'a [u8]),
-    Unkeyed,
-}
-
-fn shared_nothing_route_decision<'a>(
-    input: &'a [u8],
-    parser_config: &ParserConfig,
-) -> SharedNothingRouteDecision<'a> {
-    let mut borrowed_args = Vec::new();
-    match fr_protocol::parse_command_args_borrowed_into(input, parser_config, &mut borrowed_args) {
-        Err(RespParseError::Incomplete) => SharedNothingRouteDecision::Incomplete,
-        Ok(parsed)
-            if !matches!(parsed.kind, BorrowedCommandArgsKind::NullArray)
-                && borrowed_args
-                    .first()
-                    .is_some_and(|command| sharded_single_key_command(command))
-                && borrowed_args.get(1).is_some() =>
-        {
-            SharedNothingRouteDecision::Keyed(borrowed_args[1])
-        }
-        Ok(_) | Err(_) => SharedNothingRouteDecision::Unkeyed,
     }
 }
 
@@ -1557,12 +1521,6 @@ fn run_shared_nothing_server(
     }
 
     let mut events = Events::with_capacity(1024);
-    let mut pending: HashMap<Token, SharedNothingPendingConnection, foldhash::fast::RandomState> =
-        HashMap::default();
-    let mut next_token = SHARED_NOTHING_FIRST_CLIENT_TOKEN;
-    let parser_config = ParserConfig::default();
-    let mut read_scratch = [0u8; 8192];
-    let mut ready_pending = Vec::new();
 
     loop {
         match poll.poll(&mut events, None) {
@@ -1571,32 +1529,11 @@ fn run_shared_nothing_server(
             Err(err) => return Err(format!("shared-nothing accept poll failed: {err}")),
         }
 
-        let mut listener_ready = false;
-        ready_pending.clear();
-        for event in &events {
-            if event.token() == SHARED_NOTHING_WAKE_TOKEN {
-                listener_ready |= event.is_readable();
-            } else if event.is_readable() || event.is_read_closed() || event.is_error() {
-                ready_pending.push(event.token());
-            }
-        }
+        let listener_ready = events
+            .iter()
+            .any(|event| event.token() == SHARED_NOTHING_WAKE_TOKEN && event.is_readable());
         if listener_ready {
-            accept_shared_nothing_connections(
-                &mut listener,
-                &mut poll,
-                &mut pending,
-                &mut next_token,
-            );
-        }
-        for token in ready_pending.iter().copied() {
-            route_shared_nothing_connection(
-                token,
-                &mut pending,
-                &mut poll,
-                &mut workers,
-                &parser_config,
-                &mut read_scratch,
-            );
+            accept_shared_nothing_connections(&mut listener, &mut workers);
         }
     }
 }
