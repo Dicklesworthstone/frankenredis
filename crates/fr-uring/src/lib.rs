@@ -21,17 +21,18 @@
 //! | `recvfrom`/`read` | 229,700 calls, 673 ms | 238,966 calls, 776 ms |
 //! | `epoll_wait` | 4,725 calls (~48 fds ready per wakeup) | 6,598 calls |
 //!
-//! The read side is already batched — one `epoll_wait` reports ~48 ready
-//! connections — but each of those connections then pays its own `sendto`. This
-//! crate groups those submissions behind one SQ publication. Its owned-send API
-//! keeps buffers in a fixed registry across event-loop iterations so submission
-//! does not wait for completions. The feature and runtime flag remain default-off
-//! while this implementation is evaluated.
+//! Readiness discovery is already batched — one `epoll_wait` reports ~48 ready
+//! connections — but the server historically paid one `read` and one `sendto`
+//! syscall for every ready connection. This crate groups both directions behind
+//! SQ publication. Its owned-buffer APIs keep allocations in fixed registries
+//! across event-loop iterations so submission does not wait for completions. The
+//! feature and runtime flag remain default-off while this implementation is
+//! evaluated.
 //!
-//! At `pipeline=16` there is nothing here to win — that census measures 0.13-0.16
-//! syscalls per operation for both engines, because a whole pipelined batch
-//! already coalesces into one write. See the 2026-07-25 entry in
-//! `docs/NEGATIVE_EVIDENCE.md`. This crate targets the unpipelined regime only.
+//! At `pipeline=16`, send batching alone has little to win — a whole pipelined
+//! batch already coalesces into one write. Receive batching still removes the
+//! per-ready-connection syscall when many connections wake together, while the
+//! unpipelined regime can benefit in both directions.
 
 use std::io;
 use std::os::fd::RawFd;
@@ -44,9 +45,10 @@ fn push_entries(
     sq: &mut squeue::SubmissionQueue<'_>,
     entries: &[squeue::Entry],
 ) -> Result<(), squeue::PushError> {
-    // SAFETY: this private helper is called only from `submit_owned`, whose fixed
-    // registry owns every buffer through completion, and `submit_chunk`, whose
-    // synchronous drain keeps every borrow alive through completion.
+    // SAFETY: this private helper is called only from the owned send/receive
+    // submitters, whose fixed registries own every buffer through completion,
+    // and `submit_chunk`, whose synchronous drain keeps every borrow alive
+    // through completion.
     unsafe { sq.push_multiple(entries) }
 }
 
@@ -108,6 +110,59 @@ pub struct OwnedSendCompletion {
     pub bytes: Vec<u8>,
     pub start: usize,
     pub outcome: SendOutcome,
+}
+
+/// The outcome of one submitted receive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecvOutcome {
+    /// The kernel placed `n` bytes at the front of the returned buffer.
+    Read(usize),
+    /// The peer performed an orderly shutdown.
+    Closed,
+    /// Readiness was consumed before the SQE ran (`EAGAIN`/`EWOULDBLOCK`).
+    WouldBlock,
+    /// The operation was interrupted before it read any bytes.
+    Interrupted,
+    /// A real error; the value is a positive errno.
+    Failed(i32),
+}
+
+impl RecvOutcome {
+    fn from_cqe_result(res: i32) -> Self {
+        if res > 0 {
+            return Self::Read(res as usize);
+        }
+        if res == 0 {
+            return Self::Closed;
+        }
+        let errno = -res;
+        if errno == libc::EAGAIN || errno == libc::EWOULDBLOCK {
+            Self::WouldBlock
+        } else if errno == libc::EINTR {
+            Self::Interrupted
+        } else {
+            Self::Failed(errno)
+        }
+    }
+}
+
+/// One socket receive whose initialized buffer ownership moves into
+/// [`BatchReader`] until the kernel posts its completion.
+#[derive(Debug)]
+pub struct OwnedRecvJob {
+    /// Caller-defined identity returned unchanged with the completion.
+    pub tag: u64,
+    pub fd: RawFd,
+    /// Initialized writable storage. Its length is the maximum receive size.
+    pub buffer: Vec<u8>,
+}
+
+/// One completed owned receive.
+#[derive(Debug)]
+pub struct OwnedRecvCompletion {
+    pub tag: u64,
+    pub buffer: Vec<u8>,
+    pub outcome: RecvOutcome,
 }
 
 /// A reusable `io_uring` instance for batched socket sends.
@@ -462,6 +517,205 @@ impl Drop for BatchWriter {
     }
 }
 
+/// A reusable `io_uring` instance for readiness-gated batched socket receives.
+///
+/// Each buffer is initialized once and then reused by its connection. The
+/// reader owns all in-flight buffers, so neither connection teardown nor an
+/// event-loop iteration can invalidate a pointer retained by the kernel.
+pub struct BatchReader {
+    ring: IoUring,
+    entries: usize,
+    // Fixed after construction. The Vec allocation stored in a populated slot
+    // remains at one address until the corresponding CQE is observed.
+    owned_slots: Vec<Option<OwnedRecvJob>>,
+    free_owned_slots: Vec<usize>,
+}
+
+impl BatchReader {
+    /// Create a receive ring with `entries` submission slots.
+    pub fn new(entries: u32) -> io::Result<Self> {
+        let ring = IoUring::new(entries)?;
+        let entries = entries as usize;
+        Ok(Self {
+            ring,
+            entries,
+            owned_slots: (0..entries).map(|_| None).collect(),
+            free_owned_slots: (0..entries).rev().collect(),
+        })
+    }
+
+    /// Number of receives that can be published without waiting for a CQE.
+    #[must_use]
+    pub fn available_owned_slots(&self) -> usize {
+        self.free_owned_slots.len()
+    }
+
+    /// Whether at least one receive is waiting for a CQE.
+    #[must_use]
+    pub fn has_owned_in_flight(&self) -> bool {
+        self.free_owned_slots.len() != self.entries
+    }
+
+    /// Publish owned receives without waiting for their completions.
+    ///
+    /// On success `jobs` is empty. On a recoverable validation or SQ-capacity
+    /// failure, no SQE was published and `jobs` is restored unchanged.
+    ///
+    /// # Soundness
+    ///
+    /// Every receive buffer is a fully initialized `Vec<u8>` moved into a fixed
+    /// registry slot before its pointer is published. No Rust reference to its
+    /// contents exists while the operation is in flight. The slot is taken only
+    /// after its unique CQE, and `Drop` drains all remaining operations before
+    /// releasing their allocations.
+    #[inline(never)]
+    pub fn submit_owned(&mut self, jobs: &mut Vec<OwnedRecvJob>) -> io::Result<()> {
+        if jobs.is_empty() {
+            return Ok(());
+        }
+        if jobs.len() > self.available_owned_slots() {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "io_uring owned-receive registry is full",
+            ));
+        }
+        if jobs.iter().any(|job| job.buffer.is_empty()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "owned receive must provide non-empty initialized storage",
+            ));
+        }
+
+        let owned = std::mem::take(jobs);
+        let mut slot_ids = Vec::with_capacity(owned.len());
+        for job in owned {
+            let slot = self
+                .free_owned_slots
+                .pop()
+                .expect("capacity checked before moving owned receives");
+            debug_assert!(self.owned_slots[slot].is_none());
+            self.owned_slots[slot] = Some(job);
+            slot_ids.push(slot);
+        }
+
+        let mut entries = Vec::with_capacity(slot_ids.len());
+        for &slot in &slot_ids {
+            let job = self.owned_slots[slot]
+                .as_mut()
+                .expect("slot populated before receive SQE construction");
+            entries.push(
+                opcode::Recv::new(
+                    types::Fd(job.fd),
+                    job.buffer.as_mut_ptr(),
+                    job.buffer.len().min(u32::MAX as usize) as u32,
+                )
+                .flags(libc::MSG_DONTWAIT)
+                .build()
+                .user_data(slot as u64),
+            );
+        }
+
+        {
+            let mut sq = self.ring.submission();
+            // Every mutable pointer addresses initialized storage owned by its
+            // fixed registry slot. `push_entries` is all-or-nothing, so the
+            // error path can restore every job before returning.
+            if push_entries(&mut sq, &entries).is_err() {
+                for slot in slot_ids {
+                    jobs.push(
+                        self.owned_slots[slot]
+                            .take()
+                            .expect("restore populated receive slot after failed push"),
+                    );
+                    self.free_owned_slots.push(slot);
+                }
+                return Err(io::Error::other("io_uring submission queue full"));
+            }
+            sq.sync();
+        }
+
+        // Once SQEs are published, their buffers must remain owned until the
+        // kernel consumes every entry. Retry EINTR; fail closed on an enter
+        // error that cannot safely return ownership to the caller.
+        let mut submitted = 0usize;
+        while submitted < entries.len() {
+            match self.ring.submit() {
+                Ok(0) => {
+                    eprintln!(
+                        "fatal: io_uring_enter consumed zero entries from a non-empty receive SQ"
+                    );
+                    std::process::abort();
+                }
+                Ok(count) => {
+                    submitted = submitted
+                        .checked_add(count)
+                        .expect("io_uring receive submitted-count overflow");
+                    if submitted > entries.len() {
+                        eprintln!(
+                            "fatal: io_uring reported more receive submissions than were published"
+                        );
+                        std::process::abort();
+                    }
+                }
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+                Err(err) => {
+                    eprintln!(
+                        "fatal: io_uring_enter failed after publishing owned receive buffers: {err}"
+                    );
+                    std::process::abort();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Drain every currently available receive CQE without waiting.
+    #[inline(never)]
+    pub fn drain_owned(&mut self, out: &mut Vec<OwnedRecvCompletion>) {
+        out.clear();
+        let (ring, slots, free_slots) = (
+            &mut self.ring,
+            &mut self.owned_slots,
+            &mut self.free_owned_slots,
+        );
+        let mut cq = ring.completion();
+        for cqe in &mut cq {
+            let slot = cqe.user_data() as usize;
+            let Some(job) = slots.get_mut(slot).and_then(Option::take) else {
+                eprintln!("fatal: io_uring returned an unknown or duplicate receive slot");
+                std::process::abort();
+            };
+            free_slots.push(slot);
+            out.push(OwnedRecvCompletion {
+                tag: job.tag,
+                buffer: job.buffer,
+                outcome: RecvOutcome::from_cqe_result(cqe.result()),
+            });
+        }
+    }
+}
+
+impl Drop for BatchReader {
+    fn drop(&mut self) {
+        let mut completed = Vec::new();
+        while self.has_owned_in_flight() {
+            loop {
+                match self.ring.submit_and_wait(1) {
+                    Ok(_) => break,
+                    Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+                    Err(err) => {
+                        eprintln!(
+                            "fatal: failed to drain owned io_uring receives during shutdown: {err}"
+                        );
+                        std::process::abort();
+                    }
+                }
+            }
+            self.drain_owned(&mut completed);
+        }
+    }
+}
+
 /// Probe whether a usable ring can be created on this kernel.
 ///
 /// Tests use this to distinguish real ring coverage from a green no-op on a
@@ -493,6 +747,23 @@ mod tests {
                 }
             }
             writer.drain_owned(&mut available);
+            all.append(&mut available);
+        }
+        all
+    }
+
+    fn wait_for_owned_recvs(reader: &mut BatchReader, want: usize) -> Vec<OwnedRecvCompletion> {
+        let mut all = Vec::with_capacity(want);
+        let mut available = Vec::new();
+        while all.len() < want {
+            loop {
+                match reader.ring.submit_and_wait(1) {
+                    Ok(_) => break,
+                    Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+                    Err(err) => panic!("wait for owned receive completion: {err}"),
+                }
+            }
+            reader.drain_owned(&mut available);
             all.append(&mut available);
         }
         all
@@ -558,6 +829,112 @@ mod tests {
             rx.read_exact(&mut buf).expect("read back");
             assert_eq!(buf, payloads[index], "payload {index} must arrive intact");
         }
+    }
+
+    #[test]
+    fn batched_receives_return_every_buffer_and_tag() {
+        if !is_available() {
+            return;
+        }
+        let mut reader = BatchReader::new(8).expect("ring");
+        let payloads: [&[u8]; 4] = [b"PING", b"set key value", b"get key", b"quit"];
+        let mut pairs: Vec<(UnixStream, UnixStream)> = (0..payloads.len())
+            .map(|_| UnixStream::pair().expect("socketpair"))
+            .collect();
+        for ((tx, _rx), payload) in pairs.iter_mut().zip(payloads) {
+            tx.write_all(payload).expect("prime receive socket");
+        }
+        let mut jobs: Vec<OwnedRecvJob> = pairs
+            .iter()
+            .enumerate()
+            .map(|(tag, (_tx, rx))| OwnedRecvJob {
+                tag: u64::try_from(tag).expect("test tag fits"),
+                fd: rx.as_raw_fd(),
+                buffer: vec![0; 64],
+            })
+            .collect();
+
+        reader.submit_owned(&mut jobs).expect("submit receives");
+        assert!(jobs.is_empty(), "ownership must transfer on success");
+        let mut completed = wait_for_owned_recvs(&mut reader, payloads.len());
+        completed.sort_unstable_by_key(|completion| completion.tag);
+        for (index, completion) in completed.iter().enumerate() {
+            let RecvOutcome::Read(count) = completion.outcome else {
+                panic!("receive {index} failed: {:?}", completion.outcome);
+            };
+            assert_eq!(&completion.buffer[..count], payloads[index]);
+        }
+        assert!(!reader.has_owned_in_flight());
+        assert_eq!(reader.available_owned_slots(), 8);
+    }
+
+    #[test]
+    fn owned_receive_reports_would_block_and_orderly_close() {
+        if !is_available() {
+            return;
+        }
+        let mut reader = BatchReader::new(8).expect("ring");
+        let (_open_tx, open_rx) = UnixStream::pair().expect("open socketpair");
+        let (closed_tx, closed_rx) = UnixStream::pair().expect("closed socketpair");
+        drop(closed_tx);
+        let mut jobs = vec![
+            OwnedRecvJob {
+                tag: 1,
+                fd: open_rx.as_raw_fd(),
+                buffer: vec![0; 32],
+            },
+            OwnedRecvJob {
+                tag: 2,
+                fd: closed_rx.as_raw_fd(),
+                buffer: vec![0; 32],
+            },
+        ];
+
+        reader.submit_owned(&mut jobs).expect("submit receives");
+        let mut completed = wait_for_owned_recvs(&mut reader, 2);
+        completed.sort_unstable_by_key(|completion| completion.tag);
+        assert_eq!(completed[0].outcome, RecvOutcome::WouldBlock);
+        assert_eq!(completed[1].outcome, RecvOutcome::Closed);
+        assert!(
+            completed
+                .iter()
+                .all(|completion| completion.buffer.len() == 32)
+        );
+    }
+
+    #[test]
+    fn owned_receive_validation_and_capacity_errors_preserve_jobs() {
+        if !is_available() {
+            return;
+        }
+        let mut reader = BatchReader::new(1).expect("ring");
+        let pairs: Vec<(UnixStream, UnixStream)> = (0..2)
+            .map(|_| UnixStream::pair().expect("socketpair"))
+            .collect();
+        let mut jobs: Vec<OwnedRecvJob> = pairs
+            .iter()
+            .enumerate()
+            .map(|(tag, (_tx, rx))| OwnedRecvJob {
+                tag: u64::try_from(tag).expect("test tag fits"),
+                fd: rx.as_raw_fd(),
+                buffer: vec![0; 8],
+            })
+            .collect();
+        let err = reader
+            .submit_owned(&mut jobs)
+            .expect_err("capacity refusal");
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(jobs.len(), 2);
+
+        jobs.truncate(1);
+        jobs[0].buffer.clear();
+        let err = reader
+            .submit_owned(&mut jobs)
+            .expect_err("empty buffer refusal");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(jobs.len(), 1);
+        assert!(jobs[0].buffer.is_empty());
+        assert_eq!(reader.available_owned_slots(), 1);
     }
 
     #[test]
