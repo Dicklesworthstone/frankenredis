@@ -109,6 +109,12 @@ const SET_LISTPACK_ENCODING_REPLY: &[u8] = b"$8\r\nlistpack\r\n";
 const SET_TYPE_REPLY: &[u8] = b"+set\r\n";
 const SETSTORE3_SOURCE_MEMBERS: usize = 10;
 const SETSTORE3_MEMBERSHIP_UNIVERSE: usize = 15;
+const EXISTS_TWO_KEY: &[u8] = b"*3\r\n$6\r\nEXISTS\r\n$2\r\ne1\r\n$2\r\ne2\r\n";
+const EXISTS_THREE_KEY: &[u8] = b"*4\r\n$6\r\nEXISTS\r\n$2\r\ne1\r\n$2\r\ne2\r\n$7\r\nmissing\r\n";
+const EXISTS_MULTI_REPLY: &[u8] = b":2\r\n";
+const STRING_EMBSTR_ENCODING_REPLY: &[u8] = b"$6\r\nembstr\r\n";
+const NONE_TYPE_REPLY: &[u8] = b"+none\r\n";
+const NIL_BULK_REPLY: &[u8] = b"$-1\r\n";
 const ZREMRANGEBYSCORE_INVERTED_PREFILL: &[u8] = b"*3\r\n$3\r\nSET\r\n$1\r\nz\r\n$4\r\nseed\r\n\
 *2\r\n$3\r\nDEL\r\n$1\r\nz\r\n\
 *4\r\n$4\r\nZADD\r\n$1\r\nz\r\n$1\r\n1\r\n$1\r\nm\r\n";
@@ -509,6 +515,8 @@ enum Workload {
     SinterstoreThreeSource,
     SunionstoreThreeSource,
     SdiffstoreThreeSource,
+    ExistsTwoKey,
+    ExistsThreeKey,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -604,6 +612,8 @@ impl Workload {
             Self::SinterstoreThreeSource => "sinterstore-three-source",
             Self::SunionstoreThreeSource => "sunionstore-three-source",
             Self::SdiffstoreThreeSource => "sdiffstore-three-source",
+            Self::ExistsTwoKey => "exists-two-key",
+            Self::ExistsThreeKey => "exists-three-key",
         }
     }
 
@@ -1277,6 +1287,24 @@ impl Workload {
                 "SetValue::retain_diff",
                 "Store::store_set_algebra_value",
             ],
+            Self::ExistsTwoKey => &[
+                "frankenredis::process_buffered_frames",
+                "parse_borrowed_plain_exists_two_packet",
+                "parse_borrowed_plain_key_arg1_packet",
+                "execute_plain_exists_borrowed_into",
+                "execute_plain_exists_multi_borrowed",
+                "Store::exists_no_touch",
+                "encode_nonnegative_integer_reply",
+            ],
+            Self::ExistsThreeKey => &[
+                "frankenredis::process_buffered_frames",
+                "parse_borrowed_plain_exists_three_packet",
+                "parse_borrowed_plain_key_arg2_packet",
+                "execute_plain_exists_borrowed_into",
+                "execute_plain_exists_multi_borrowed",
+                "Store::exists_no_touch",
+                "encode_nonnegative_integer_reply",
+            ],
             Self::Set | Self::Get | Self::Mixed | Self::MixedFamilies => &[],
         }
     }
@@ -1359,6 +1387,8 @@ impl Workload {
                 "sinterstore-three-source" => Self::SinterstoreThreeSource,
                 "sunionstore-three-source" => Self::SunionstoreThreeSource,
                 "sdiffstore-three-source" => Self::SdiffstoreThreeSource,
+                "exists-two-key" => Self::ExistsTwoKey,
+                "exists-three-key" => Self::ExistsThreeKey,
                 other => panic!("unknown FR_URING_AB_WORKLOADS item: {other}"),
             })
             .collect()
@@ -2080,6 +2110,26 @@ impl WorkloadPackets {
                     SDIFFSTORE_THREE_SOURCE_REPLY,
                     pipeline,
                 );
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::ExistsTwoKey => {
+                let case = repeated_case(EXISTS_TWO_KEY, EXISTS_MULTI_REPLY, pipeline);
+                Self {
+                    odd: ExchangeCase {
+                        request: case.request.clone(),
+                        response: case.response.clone(),
+                    },
+                    even: case,
+                }
+            }
+            Workload::ExistsThreeKey => {
+                let case = repeated_case(EXISTS_THREE_KEY, EXISTS_MULTI_REPLY, pipeline);
                 Self {
                     odd: ExchangeCase {
                         request: case.request.clone(),
@@ -3878,6 +3928,56 @@ steady_state_destination=warmed_by_two_exact_assertions",
     );
 }
 
+fn assert_exists_multi_string(server: &mut Server, key: &[u8], value: &[u8]) {
+    let key_type = resp_command(&[b"TYPE", key]);
+    exchange_one(server, &key_type, STRING_TYPE_REPLY);
+    let get = resp_command(&[b"GET", key]);
+    let mut value_reply = Vec::new();
+    push_resp_bulk(&mut value_reply, value);
+    exchange_one(server, &get, &value_reply);
+    let encoding = resp_command(&[b"OBJECT", b"ENCODING", key]);
+    exchange_one(server, &encoding, STRING_EMBSTR_ENCODING_REPLY);
+    let pttl = resp_command(&[b"PTTL", key]);
+    exchange_one(server, &pttl, PTTL_PERSISTENT_REPLY);
+}
+
+fn assert_exists_multi_fixture(server: &mut Server) {
+    assert_exists_multi_string(server, b"e1", b"alpha");
+    assert_exists_multi_string(server, b"e2", b"beta");
+
+    let missing_type = resp_command(&[b"TYPE", b"missing"]);
+    exchange_one(server, &missing_type, NONE_TYPE_REPLY);
+    let missing_get = resp_command(&[b"GET", b"missing"]);
+    exchange_one(server, &missing_get, NIL_BULK_REPLY);
+    let missing_encoding = resp_command(&[b"OBJECT", b"ENCODING", b"missing"]);
+    exchange_one(server, &missing_encoding, NIL_BULK_REPLY);
+    let missing_pttl = resp_command(&[b"PTTL", b"missing"]);
+    exchange_one(server, &missing_pttl, LIST_COUNT_MISSING_PTTL_REPLY);
+
+    exchange_one(server, EXISTS_TWO_KEY, EXISTS_MULTI_REPLY);
+    exchange_one(server, EXISTS_THREE_KEY, EXISTS_MULTI_REPLY);
+    let duplicate = resp_command(&[b"EXISTS", b"e1", b"e1", b"missing"]);
+    exchange_one(server, &duplicate, EXISTS_MULTI_REPLY);
+}
+
+fn prepare_exists_multi_fixture(server: &mut Server, workload: Workload) {
+    let mut setup = resp_command(&[b"SET", b"e1", b"alpha"]);
+    setup.extend_from_slice(&resp_command(&[b"SET", b"e2", b"beta"]));
+    setup.extend_from_slice(&resp_command(&[b"SET", b"missing", b"seed"]));
+    setup.extend_from_slice(&resp_command(&[b"DEL", b"missing"]));
+    exchange_one(server, &setup, b"+OK\r\n+OK\r\n+OK\r\n:1\r\n");
+    assert_exists_multi_fixture(server);
+    println!(
+        "FIXTURE_REPRESENTATION workload={} arm={} \
+present_keys=e1,e2 present_values=alpha,beta present_type=string \
+present_encoding=embstr present_pttl=-1 missing_key=missing \
+missing_type=none missing_get=nil missing_encoding=nil missing_pttl=-2 \
+duplicate_exists_count_semantics=true steady_state=read_only_exact_assertions",
+        workload.name(),
+        server.arm.name()
+    );
+}
+
 fn prefill_selective_prefix_keyspace(server: &mut Server, workload: Workload) {
     exchange_one(
         server,
@@ -4257,6 +4357,8 @@ steady_state_ordered_index=warmed_by_exact_assertion",
                 | Workload::SdiffstoreThreeSource
         ) {
             prepare_setstore3_fixture(server, workload);
+        } else if matches!(workload, Workload::ExistsTwoKey | Workload::ExistsThreeKey) {
+            prepare_exists_multi_fixture(server, workload);
         } else if matches!(workload, Workload::BitopAndTwo | Workload::BitopNotOne) {
             prepare_bitop_fixture(server, workload);
         } else if matches!(
@@ -7253,6 +7355,90 @@ exact_source_and_destination_full_membership=true",
 }
 
 #[test]
+fn exists_multi_packets_have_exact_count_replies() {
+    for (workload, request) in [
+        (Workload::ExistsTwoKey, EXISTS_TWO_KEY),
+        (Workload::ExistsThreeKey, EXISTS_THREE_KEY),
+    ] {
+        let packets = WorkloadPackets::new(workload, 2);
+        let mut expected_request = request.to_vec();
+        expected_request.extend_from_slice(request);
+        let mut expected_response = EXISTS_MULTI_REPLY.to_vec();
+        expected_response.extend_from_slice(EXISTS_MULTI_REPLY);
+        assert_eq!(packets.even.request, expected_request);
+        assert_eq!(packets.even.response, expected_response);
+        assert_eq!(packets.odd.request, packets.even.request);
+        assert_eq!(packets.odd.response, packets.even.response);
+    }
+}
+
+#[test]
+#[ignore = "requires live frankenredis and vendored Redis executables; run explicitly"]
+fn exists_multi_commands_match_server_and_live_redis() {
+    let binary = std::env::var_os("FR_URING_FR_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_frankenredis")));
+    let redis_binary = std::env::var_os("FR_URING_REDIS_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../legacy_redis_code/redis/src/redis-server")
+        });
+    assert!(binary.is_file(), "missing {}", binary.display());
+    assert!(redis_binary.is_file(), "missing {}", redis_binary.display());
+
+    let server_cpu = *allowed_cpus()
+        .first()
+        .expect("live multi-key EXISTS smoke requires one allowed CPU");
+    let root = unique_root();
+    let client_shape = ClientShape {
+        connections: 4,
+        driver_threads: 2,
+    };
+    for workload in [Workload::ExistsTwoKey, Workload::ExistsThreeKey] {
+        let packets = Arc::new(DriverPackets::shared(workload, 16));
+        for arm in [Arm::IoUring, Arm::Redis] {
+            let mut server = Server::spawn(
+                &binary,
+                &redis_binary,
+                arm,
+                &root.join(format!("{}_{}", workload.name(), arm.name())),
+                server_cpu,
+                client_shape,
+                CommandFloorAb::None,
+            );
+            prepare_exists_multi_fixture(&mut server, workload);
+            server
+                .clients
+                .as_ref()
+                .expect("live multi-key EXISTS clients initialized")
+                .prepare(&packets);
+            server
+                .clients
+                .as_ref()
+                .expect("live multi-key EXISTS clients initialized")
+                .run(&packets, 32, false);
+            assert_exists_multi_fixture(&mut server);
+            println!(
+                "EXISTS_MULTI_LIVE_PARITY workload={} arm={} pid={} sha256={} \
+process_threads_observed={} command_execution_threads_actual=1 \
+connections_actual={} client_driver_threads_actual={} pipeline=16 groups=32 \
+present_keys=e1,e2 present_type=string present_encoding=embstr present_pttl=-1 \
+missing_key=missing missing_type=none missing_pttl=-2 \
+duplicate_exists_count_semantics=true exact_full_state_and_reply=true",
+                workload.name(),
+                arm.name(),
+                server.pid(),
+                server.executing_elf_sha256(),
+                server.observed_thread_count(),
+                client_shape.connections,
+                client_shape.driver_threads
+            );
+        }
+    }
+}
+
+#[test]
 fn sscan_cursor_zero_packet_has_exact_complete_reply() {
     let single_reply = sscan_cursor_zero_reply();
     assert!(single_reply.starts_with(b"*2\r\n$1\r\n0\r\n*16\r\n$1\r\n0\r\n"));
@@ -7959,6 +8145,18 @@ fn sdiffstore_three_source_dual_null_vs_redis() {
 
 #[test]
 #[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
+fn exists_two_key_dual_null_vs_redis() {
+    run_exact_dual_null_vs_redis(Workload::ExistsTwoKey);
+}
+
+#[test]
+#[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
+fn exists_three_key_dual_null_vs_redis() {
+    run_exact_dual_null_vs_redis(Workload::ExistsThreeKey);
+}
+
+#[test]
+#[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
 fn sscan_cursor_zero_dual_null_vs_redis() {
     run_exact_dual_null_vs_redis(Workload::SscanCursorZero);
 }
@@ -8009,6 +8207,8 @@ fn run_exact_dual_null_vs_redis(workload: Workload) {
                 | Workload::SinterstoreThreeSource
                 | Workload::SunionstoreThreeSource
                 | Workload::SdiffstoreThreeSource
+                | Workload::ExistsTwoKey
+                | Workload::ExistsThreeKey
                 | Workload::SscanCursorZero
                 | Workload::HscanCursorZero
                 | Workload::ZscanCursorZero
@@ -8104,6 +8304,10 @@ cv_provenance_only=true never_cv_gate=true"
         "FR_SUNIONSTORE3_AB"
     } else if matches!(workload, Workload::SdiffstoreThreeSource) {
         "FR_SDIFFSTORE3_AB"
+    } else if matches!(workload, Workload::ExistsTwoKey) {
+        "FR_EXISTS2_AB"
+    } else if matches!(workload, Workload::ExistsThreeKey) {
+        "FR_EXISTS3_AB"
     } else if matches!(workload, Workload::SscanCursorZero) {
         "FR_SSCAN0_AB"
     } else if matches!(workload, Workload::HscanCursorZero) {
@@ -8307,6 +8511,10 @@ incumbent_b=vendored_redis_7.2.4"
         "ten_member_listpack_sources_three_source_sunionstore_fourteen_member_exact_cross_type_overwrite"
     } else if matches!(workload, Workload::SdiffstoreThreeSource) {
         "ten_member_listpack_sources_three_source_sdiffstore_two_member_exact_cross_type_overwrite"
+    } else if matches!(workload, Workload::ExistsTwoKey) {
+        "two_persistent_embstr_keys_exists_two_all_present_exact_count"
+    } else if matches!(workload, Workload::ExistsThreeKey) {
+        "two_persistent_embstr_keys_one_absent_exists_three_exact_count"
     } else if matches!(workload, Workload::SscanCursorZero) {
         "literal_cursor_zero_no_options_16_member_intset_single_complete_reply"
     } else if matches!(
@@ -8485,6 +8693,18 @@ cross_type_overwrite=true full_response_bytes_asserted=true",
             member_start,
             member_end - 1,
             member_end - member_start
+        );
+    } else if matches!(workload, Workload::ExistsTwoKey | Workload::ExistsThreeKey) {
+        for server in &mut servers {
+            assert_exists_multi_fixture(server);
+        }
+        println!(
+            "POST_MEASUREMENT_STATE workload={} arms=4 \
+present_keys=e1,e2 present_values=alpha,beta present_type=string \
+present_encoding=embstr present_pttl=-1 missing_key=missing \
+missing_type=none missing_get=nil missing_encoding=nil missing_pttl=-2 \
+duplicate_exists_count_semantics=true full_response_bytes_asserted=true",
+            workload.name()
         );
     } else if matches!(workload, Workload::BitopAndTwo | Workload::BitopNotOne) {
         for server in &mut servers {
