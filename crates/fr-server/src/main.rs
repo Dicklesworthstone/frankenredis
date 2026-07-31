@@ -22,6 +22,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque};
+use std::hash::BuildHasher;
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpStream as StdTcpStream};
 #[cfg(unix)]
@@ -68,14 +69,10 @@ const SHARDED_SET_GET_MAX_COMMANDS_PER_BATCH: usize = 16;
 /// consuming new input. Matched to the total channel bound so staging cannot
 /// become a second, unbounded queue sitting behind the bounded one.
 const SHARDED_SET_GET_MAX_STAGED: usize = SHARDED_SET_GET_TOTAL_QUEUE_BOUND;
-/// A new connection is held by the acceptor only until its first complete
-/// command reveals the keyspace partition that owns it. Realistic clients send
-/// small commands here; bound the one-time routing buffer so a peer cannot pin
-/// arbitrary memory before it has an owner.
-const SHARED_NOTHING_ROUTE_BUFFER_LIMIT: usize = 1024 * 1024;
 const SHARED_NOTHING_WAKE_TOKEN: Token = Token(0);
 const SHARED_NOTHING_URING_TOKEN: Token = Token(1);
 const SHARED_NOTHING_FIRST_CLIENT_TOKEN: usize = 2;
+const SHARED_NOTHING_ROUTE_BUFFER_LIMIT: usize = 1024 * 1024;
 
 const REPLICA_ACK_INTERVAL_MS: u64 = 1_000;
 const REPLICA_RECONNECT_BACKOFF_MS: u64 = 250;
@@ -392,6 +389,13 @@ struct ClientConnection {
     /// This state holds those completions until every earlier command on the
     /// same connection has completed, preserving Redis pipeline reply order.
     sharded_replies: ShardedReplyOrder,
+    /// Exact Redis hash tag used by the last shared-nothing command. Realistic
+    /// connections repeatedly operate on one key (or several `{tag}`-related
+    /// keys), so caching this routing decision removes both CRC16 and partition
+    /// selection from every command after the first without relying on a hash
+    /// collision being impossible.
+    shared_nothing_route_tag: Vec<u8>,
+    shared_nothing_partition: Option<usize>,
 }
 
 #[derive(Default)]
@@ -538,6 +542,8 @@ impl ClientConnection {
             blocked: None,
             replication_sent_offset: None,
             sharded_replies: ShardedReplyOrder::default(),
+            shared_nothing_route_tag: Vec::new(),
+            shared_nothing_partition: None,
         }
     }
 
@@ -1208,11 +1214,163 @@ fn run_sharded_set_get_worker(
 const SHARED_NOTHING_UNSUPPORTED: &[u8] = b"-ERR experimental shared-nothing mode accepts only default-DB single-key SET, GET, INCR, LPUSH, LPOP, HSET, HGET, plus PING and QUIT; cross-key and aggregate commands are not supported\r\n";
 const SHARED_NOTHING_PROTOCOL_ERROR: &[u8] =
     b"-ERR Protocol error in experimental shared-nothing mode\r\n";
-const SHARED_NOTHING_CROSS_SHARD: &[u8] = b"-CROSSSHARD this connection is pinned to a different keyspace partition; use one connection per Redis hash slot\r\n";
+/// Keyspace partitions shared by every per-core reactor.
+///
+/// Connections are routed from their first key to the reactor that owns that
+/// key's partition. The realistic one-key or one-hash-tag connection therefore
+/// keeps all parsing, execution, encoding, and I/O on one core and never bounces
+/// a partition lock line between cores. Unlike the former strict ownership
+/// design, later commands for a different partition remain correct: the same
+/// reactor takes that partition briefly instead of rejecting the client with
+/// `-CROSSSHARD` or shipping a command through a cross-core queue.
+struct KeyspacePartitions {
+    partitions: Vec<Mutex<Runtime>>,
+    worker_count: usize,
+    partitions_per_worker: usize,
+    /// Randomized, non-cryptographic secondary hash. CRC16 selects the owning
+    /// reactor only on a connection's first tag; this hash spreads that owner's
+    /// keys across its private group of partitions.
+    route_hasher: foldhash::fast::RandomState,
+    /// Bounded spin before parking, resolved once at startup.
+    /// `FR_PARTITION_LOCK_SPINS=0` reproduces the park-immediately behaviour, so
+    /// the spin can be A/B'd against its own absence on ONE identical ELF rather
+    /// than across two binaries.
+    spins: usize,
+}
+
+/// Partitions per worker when `FR_SHARED_NOTHING_PARTITIONS` is unset. Keeps
+/// per-partition utilization low enough that reactors rarely collide without
+/// paying for a `Runtime` per hash slot.
+const SHARED_NOTHING_PARTITIONS_PER_WORKER: usize = 4;
+
+/// Bounded spin before parking on a contended partition. Sized to comfortably
+/// cover a store hit at full backoff without letting a pathologically long
+/// critical section burn a core.
+const PARTITION_LOCK_SPINS: usize = 48;
+const PARTITION_LOCK_MAX_BACKOFF: u32 = 64;
+
+impl KeyspacePartitions {
+    fn new(worker_count: usize, port: u16) -> Self {
+        let requested = std::env::var("FR_SHARED_NOTHING_PARTITIONS")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|count| *count > 0)
+            .unwrap_or(worker_count.saturating_mul(SHARED_NOTHING_PARTITIONS_PER_WORKER));
+        // Keep an equal private partition group behind every worker. The exact
+        // total may round upward by at most worker_count - 1, but never beyond
+        // Redis Cluster's slot cardinality.
+        let max_per_worker = (16_384 / worker_count).max(1);
+        let partitions_per_worker = requested.div_ceil(worker_count).clamp(1, max_per_worker);
+        let count = worker_count * partitions_per_worker;
+        let partitions = (0..count)
+            .map(|_| {
+                let mut runtime = Runtime::new(RuntimePolicy::default());
+                runtime.set_server_port(port);
+                Mutex::new(runtime)
+            })
+            .collect();
+        let spins = std::env::var("FR_PARTITION_LOCK_SPINS")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(PARTITION_LOCK_SPINS);
+        Self {
+            partitions,
+            worker_count,
+            partitions_per_worker,
+            route_hasher: foldhash::fast::RandomState::default(),
+            spins,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.partitions.len()
+    }
+
+    #[inline]
+    fn worker_for_key(&self, key: &[u8]) -> usize {
+        sharded_set_get_shard(key, self.worker_count)
+    }
+
+    #[inline]
+    fn partition_index(&self, key: &[u8]) -> usize {
+        let worker = self.worker_for_key(key);
+        let lane = (self.route_hasher.hash_one(redis_routing_tag(key)) as usize)
+            % self.partitions_per_worker;
+        worker * self.partitions_per_worker + lane
+    }
+
+    /// Lock a previously selected partition, spinning briefly before parking.
+    ///
+    /// WHY THE SPIN. A partition is held only for the store hit -- tens to a few
+    /// hundred nanoseconds -- while parking on a contended `Mutex` costs a futex
+    /// round trip in the microseconds. Going straight to the futex is therefore
+    /// the wrong trade whenever the holder is about to finish, and under a hot
+    /// key it is catastrophic.
+    ///
+    /// Backing off between attempts matters as much as the spin. Hammering
+    /// `try_lock` is a CAS per iteration, so every waiter keeps the lock line
+    /// exclusive on its own core and the HOLDER stalls trying to release it. The
+    /// doubling pause keeps the line quiet enough for the holder to make
+    /// progress, and a bounded spin means a genuinely long critical section
+    /// still parks instead of burning a core.
+    ///
+    /// A poisoned partition means some reactor panicked mid-command; recovering
+    /// the guard keeps the remaining reactors serving instead of cascading one
+    /// panic across every core.
+    #[inline]
+    fn lock_partition(&self, index: usize) -> std::sync::MutexGuard<'_, Runtime> {
+        let partition = &self.partitions[index];
+        let mut backoff = 1u32;
+        for _ in 0..self.spins {
+            if let Ok(guard) = partition.try_lock() {
+                return guard;
+            }
+            for _ in 0..backoff {
+                std::hint::spin_loop();
+            }
+            backoff = (backoff << 1).min(PARTITION_LOCK_MAX_BACKOFF);
+        }
+        match partition.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+}
+
+/// Return the bytes Redis Cluster hashes when a key has a non-empty `{tag}`;
+/// otherwise return the full key. Keeping this exact slice in each connection
+/// makes the steady-state routing check a byte comparison, not another CRC pass.
+#[inline]
+fn redis_routing_tag(key: &[u8]) -> &[u8] {
+    let Some(open) = key.iter().position(|byte| *byte == b'{') else {
+        return key;
+    };
+    let tagged = &key[open + 1..];
+    let Some(close) = tagged.iter().position(|byte| *byte == b'}') else {
+        return key;
+    };
+    if close == 0 { key } else { &tagged[..close] }
+}
+
+#[inline]
+fn cached_shared_nothing_partition_index(
+    cached_tag: &mut Vec<u8>,
+    cached_partition: &mut Option<usize>,
+    partitions: &KeyspacePartitions,
+    key: &[u8],
+) -> usize {
+    let route_tag = redis_routing_tag(key);
+    if cached_partition.is_none() || cached_tag.as_slice() != route_tag {
+        cached_tag.clear();
+        cached_tag.extend_from_slice(route_tag);
+        *cached_partition = Some(partitions.partition_index(key));
+    }
+    cached_partition.expect("shared-nothing partition cache populated")
+}
 
 /// A socket crosses a thread boundary exactly once, after its first complete
-/// command identifies the owning keyspace partition. All later reads, parsing,
-/// execution, reply buffering, and writes stay on that worker.
+/// command identifies the reactor that owns its keyspace partition. All later
+/// reads, parsing, execution, reply buffering, and writes stay on that reactor.
 struct SharedNothingRoutedConnection {
     stream: TcpStream,
     peer_addr: SocketAddr,
@@ -1233,6 +1391,7 @@ struct SharedNothingWorkerRoute {
 struct SharedNothingWorkerPool {
     routes: Vec<SharedNothingWorkerRoute>,
     next_unkeyed_worker: usize,
+    partitions: Arc<KeyspacePartitions>,
 }
 
 #[cfg(feature = "io-uring-writes")]
@@ -1276,6 +1435,7 @@ impl SharedNothingWorkerPool {
     fn new(worker_count: usize, port: u16, io_uring_output: bool) -> io::Result<Self> {
         debug_assert!(worker_count > 0);
         let mut routes = Vec::with_capacity(worker_count);
+        let partitions = Arc::new(KeyspacePartitions::new(worker_count, port));
 
         for worker_idx in 0..worker_count {
             let poll = Poll::new()?;
@@ -1287,16 +1447,17 @@ impl SharedNothingWorkerPool {
                     format!("failed to create shard {worker_idx} io_uring: {err}"),
                 )
             })?;
+            let worker_partitions = Arc::clone(&partitions);
             thread::Builder::new()
                 .name(format!("fr-set-get-shard-{worker_idx}"))
                 .spawn(move || {
                     run_shared_nothing_worker(
                         worker_idx,
-                        worker_count,
                         port,
                         poll,
                         connection_rx,
                         uring,
+                        worker_partitions,
                     );
                 })?;
             routes.push(SharedNothingWorkerRoute {
@@ -1311,11 +1472,16 @@ impl SharedNothingWorkerPool {
         Ok(Self {
             routes,
             next_unkeyed_worker: 0,
+            partitions,
         })
     }
 
-    fn worker_count(&self) -> usize {
-        self.routes.len()
+    fn partition_count(&self) -> usize {
+        self.partitions.len()
+    }
+
+    fn worker_for_key(&self, key: &[u8]) -> usize {
+        self.partitions.worker_for_key(key)
     }
 
     fn choose_unkeyed_worker(&mut self) -> usize {
@@ -1337,17 +1503,16 @@ impl SharedNothingWorkerPool {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SharedNothingRouteDecision {
+enum SharedNothingRouteDecision<'a> {
     Incomplete,
-    Shard(usize),
+    Keyed(&'a [u8]),
     Unkeyed,
 }
 
-fn shared_nothing_route_decision(
-    input: &[u8],
+fn shared_nothing_route_decision<'a>(
+    input: &'a [u8],
     parser_config: &ParserConfig,
-    worker_count: usize,
-) -> SharedNothingRouteDecision {
+) -> SharedNothingRouteDecision<'a> {
     let mut borrowed_args = Vec::new();
     match fr_protocol::parse_command_args_borrowed_into(input, parser_config, &mut borrowed_args) {
         Err(RespParseError::Incomplete) => SharedNothingRouteDecision::Incomplete,
@@ -1358,7 +1523,7 @@ fn shared_nothing_route_decision(
                     .is_some_and(|command| sharded_single_key_command(command))
                 && borrowed_args.get(1).is_some() =>
         {
-            SharedNothingRouteDecision::Shard(sharded_set_get_shard(borrowed_args[1], worker_count))
+            SharedNothingRouteDecision::Keyed(borrowed_args[1])
         }
         Ok(_) | Err(_) => SharedNothingRouteDecision::Unkeyed,
     }
@@ -1383,8 +1548,9 @@ fn run_shared_nothing_server(
         .map_err(|err| format!("failed to start shared-nothing workers: {err}"))?;
 
     eprintln!(
-        "FrankenRedis v{} ready (mode=strict, port={port}, command_execution_threads={worker_count}, topology=connection-affine-shared-nothing)",
-        env!("CARGO_PKG_VERSION")
+        "FrankenRedis v{} ready (mode=strict, port={port}, command_execution_threads={worker_count}, keyspace_partitions={}, topology=per-core-reactor-partitioned-keyspace)",
+        env!("CARGO_PKG_VERSION"),
+        workers.partition_count()
     );
     if io_uring_output {
         eprintln!("io_uring multishot input and batched output enabled per shared-nothing worker");
@@ -1414,7 +1580,6 @@ fn run_shared_nothing_server(
                 ready_pending.push(event.token());
             }
         }
-
         if listener_ready {
             accept_shared_nothing_connections(
                 &mut listener,
@@ -1493,7 +1658,7 @@ fn route_shared_nothing_connection(
 ) {
     let mut peer_closed = false;
     let mut route_limit_exceeded = false;
-    let decision = {
+    let worker = {
         let Some(connection) = pending.get_mut(&token) else {
             return;
         };
@@ -1525,29 +1690,21 @@ fn route_shared_nothing_connection(
                 }
             }
         }
-        shared_nothing_route_decision(
-            &connection.initial_bytes,
-            parser_config,
-            workers.worker_count(),
-        )
+        match shared_nothing_route_decision(&connection.initial_bytes, parser_config) {
+            SharedNothingRouteDecision::Incomplete => None,
+            SharedNothingRouteDecision::Keyed(key) => Some(workers.worker_for_key(key)),
+            SharedNothingRouteDecision::Unkeyed => Some(workers.choose_unkeyed_worker()),
+        }
     };
 
-    if route_limit_exceeded
-        || (peer_closed && matches!(decision, SharedNothingRouteDecision::Incomplete))
-    {
+    if route_limit_exceeded || (peer_closed && worker.is_none()) {
         if let Some(mut connection) = pending.remove(&token) {
             let _ = poll.registry().deregister(&mut connection.stream);
         }
         return;
     }
-    if matches!(decision, SharedNothingRouteDecision::Incomplete) {
+    let Some(worker) = worker else {
         return;
-    }
-
-    let worker = match decision {
-        SharedNothingRouteDecision::Shard(worker) => worker,
-        SharedNothingRouteDecision::Unkeyed => workers.choose_unkeyed_worker(),
-        SharedNothingRouteDecision::Incomplete => return,
     };
     let Some(mut connection) = pending.remove(&token) else {
         return;
@@ -1562,17 +1719,17 @@ fn route_shared_nothing_connection(
         initial_bytes: connection.initial_bytes,
     };
     if let Err(err) = workers.route(worker, routed) {
-        eprintln!("warn: failed to route connection to shard {worker}: {err}");
+        eprintln!("warn: failed to route connection to reactor {worker}: {err}");
     }
 }
 
 fn run_shared_nothing_worker(
     worker_idx: usize,
-    worker_count: usize,
     port: u16,
     mut poll: Poll,
     connections: mpsc::Receiver<SharedNothingRoutedConnection>,
     mut uring: SharedNothingUring,
+    partitions: Arc<KeyspacePartitions>,
 ) {
     #[cfg(not(feature = "io-uring-writes"))]
     let _ = &mut uring;
@@ -1591,6 +1748,11 @@ fn run_shared_nothing_worker(
         }
     }
 
+    // Reactor-local runtime. It holds NO keys -- every keyed command executes
+    // against `partitions` -- and exists only for this reactor's own connection
+    // bookkeeping: session allocation, network byte counters, output draining.
+    // Keeping it thread-local is what stops connection accounting from becoming
+    // a second shared-state bottleneck behind the one we just removed.
     let mut runtime = Runtime::new(RuntimePolicy::default());
     runtime.set_server_port(port);
     let mut events = Events::with_capacity(1024);
@@ -1623,10 +1785,10 @@ fn run_shared_nothing_worker(
         if let Some(receiver) = uring.receiver.as_mut() {
             drain_shared_nothing_uring_receives(
                 worker_idx,
-                worker_count,
                 receiver,
                 &mut clients,
                 &mut runtime,
+                &partitions,
                 &mut poll,
                 &mut write_tokens,
                 &mut closing_tokens,
@@ -1636,10 +1798,10 @@ fn run_shared_nothing_worker(
 
         if !install_shared_nothing_connections(
             worker_idx,
-            worker_count,
             &connections,
             &mut clients,
             &mut runtime,
+            &partitions,
             &mut poll,
             &mut write_tokens,
             &mut closing_tokens,
@@ -1694,11 +1856,10 @@ fn run_shared_nothing_worker(
             }
             if event.is_readable() || event.is_read_closed() {
                 handle_shared_nothing_readable(
-                    worker_idx,
-                    worker_count,
                     token,
                     &mut clients,
                     &mut runtime,
+                    &partitions,
                     &mut poll,
                     &mut write_tokens,
                     &mut closing_tokens,
@@ -1729,10 +1890,10 @@ fn run_shared_nothing_worker(
 #[allow(clippy::too_many_arguments)]
 fn install_shared_nothing_connections(
     worker_idx: usize,
-    worker_count: usize,
     connections: &mpsc::Receiver<SharedNothingRoutedConnection>,
     clients: &mut ClientMap,
     runtime: &mut Runtime,
+    partitions: &KeyspacePartitions,
     poll: &mut Poll,
     write_tokens: &mut TokenSet,
     closing_tokens: &mut TokenSet,
@@ -1799,13 +1960,7 @@ fn install_shared_nothing_connections(
             runtime.track_net_input_bytes(connection.read_buf.len() as u64);
         }
         let output_before = connection.write_buf.len();
-        dispatch_shared_nothing_frames(
-            worker_idx,
-            worker_count,
-            &mut connection,
-            runtime,
-            now_ms(),
-        );
+        dispatch_shared_nothing_frames(&mut connection, runtime, partitions, now_ms());
         runtime.track_net_output_bytes(
             connection
                 .write_buf
@@ -1837,10 +1992,10 @@ fn install_shared_nothing_connections(
 #[allow(clippy::too_many_arguments)]
 fn drain_shared_nothing_uring_receives(
     worker_idx: usize,
-    worker_count: usize,
     receiver: &mut fr_uring::MultishotReceiver,
     clients: &mut ClientMap,
     runtime: &mut Runtime,
+    partitions: &KeyspacePartitions,
     poll: &mut Poll,
     write_tokens: &mut TokenSet,
     closing_tokens: &mut TokenSet,
@@ -1876,13 +2031,7 @@ fn drain_shared_nothing_uring_receives(
                         runtime.track_net_input_bytes(bytes.len() as u64);
                         runtime.note_read_event();
                         let output_before = connection.write_buf.len();
-                        dispatch_shared_nothing_frames(
-                            worker_idx,
-                            worker_count,
-                            connection,
-                            runtime,
-                            now_ms(),
-                        );
+                        dispatch_shared_nothing_frames(connection, runtime, partitions, now_ms());
                         runtime.track_net_output_bytes(
                             connection.write_buf.len().saturating_sub(output_before) as u64,
                         );
@@ -1950,11 +2099,10 @@ fn drain_shared_nothing_uring_receives(
 
 #[allow(clippy::too_many_arguments)]
 fn handle_shared_nothing_readable(
-    worker_idx: usize,
-    worker_count: usize,
     token: Token,
     clients: &mut ClientMap,
     runtime: &mut Runtime,
+    partitions: &KeyspacePartitions,
     poll: &mut Poll,
     write_tokens: &mut TokenSet,
     closing_tokens: &mut TokenSet,
@@ -1991,7 +2139,7 @@ fn handle_shared_nothing_readable(
                 }
                 Err(err) => {
                     eprintln!(
-                        "warn: shard {worker_idx} disconnected oversized query buffer: {}",
+                        "warn: shared-nothing reactor disconnected oversized query buffer: {}",
                         err.reason_code()
                     );
                     connection.closing = true;
@@ -2002,7 +2150,7 @@ fn handle_shared_nothing_readable(
             Err(err) if err.kind() == ErrorKind::WouldBlock => break,
             Err(err) if err.kind() == ErrorKind::Interrupted => continue,
             Err(err) => {
-                eprintln!("warn: shard {worker_idx} client read error: {err}");
+                eprintln!("warn: shared-nothing reactor client read error: {err}");
                 connection.closing = true;
                 closing_tokens.insert(token);
                 return;
@@ -2013,7 +2161,7 @@ fn handle_shared_nothing_readable(
     if read_any {
         runtime.note_read_event();
         let output_before = connection.write_buf.len();
-        dispatch_shared_nothing_frames(worker_idx, worker_count, connection, runtime, now_ms());
+        dispatch_shared_nothing_frames(connection, runtime, partitions, now_ms());
         runtime.track_net_output_bytes(
             connection
                 .write_buf
@@ -2041,11 +2189,144 @@ fn handle_shared_nothing_readable(
     }
 }
 
+enum SharedNothingFastCommand<'a> {
+    Get(BorrowedPlainGetPacket<'a>),
+    Set(BorrowedPlainSetPacket<'a>),
+    Incr(BorrowedPlainIncrPacket<'a>),
+    Lpush(BorrowedPlainKeyMemberPacket<'a>),
+    Lpop(BorrowedPlainGetPacket<'a>),
+    Hset(BorrowedPlainHsetPacket<'a>),
+    Hget(BorrowedPlainKeyMemberPacket<'a>),
+}
+
+impl SharedNothingFastCommand<'_> {
+    #[inline]
+    fn key(&self) -> &[u8] {
+        match self {
+            Self::Get(packet) | Self::Lpop(packet) => packet.key,
+            Self::Set(packet) => packet.key,
+            Self::Incr(packet) => packet.key,
+            Self::Lpush(packet) | Self::Hget(packet) => packet.key,
+            Self::Hset(packet) => packet.key,
+        }
+    }
+}
+
+/// Decode the complete shared-nothing command family in one pass over the RESP
+/// command header. The former dispatcher called seven independent packet
+/// parsers in sequence; a late-family HGET consequently re-tested six rejected
+/// array/command prefixes before parsing its arguments. Connection-affine
+/// workers execute only this closed family, so classify arity and command once,
+/// then parse only the arguments required by the selected command.
+#[inline]
+fn parse_shared_nothing_fast_command<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<SharedNothingFastCommand<'a>> {
+    let (arity, tail) = if let Some(tail) = input.strip_prefix(b"*2\r\n") {
+        (2usize, tail)
+    } else if let Some(tail) = input.strip_prefix(b"*3\r\n") {
+        (3, tail)
+    } else if let Some(tail) = input.strip_prefix(b"*4\r\n") {
+        (4, tail)
+    } else {
+        return None;
+    };
+    if config.max_array_len < arity || tail.first() != Some(&b'$') || tail.get(2..4)? != b"\r\n" {
+        return None;
+    }
+    let command_len = match tail[1] {
+        b'3'..=b'5' => usize::from(tail[1] - b'0'),
+        _ => return None,
+    };
+    if config.max_bulk_len < command_len {
+        return None;
+    }
+    let command = tail.get(4..4 + command_len)?;
+    if tail.get(4 + command_len..6 + command_len)? != b"\r\n" {
+        return None;
+    }
+    let cursor = input.len() - tail.len() + 6 + command_len;
+
+    match (arity, command_len) {
+        (2, 3) if command.eq_ignore_ascii_case(b"GET") => {
+            let (key, consumed) =
+                parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+            Some(SharedNothingFastCommand::Get(BorrowedPlainGetPacket {
+                consumed,
+                key,
+            }))
+        }
+        (3, 3) if command.eq_ignore_ascii_case(b"SET") => {
+            let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+            let (value, consumed) =
+                parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+            Some(SharedNothingFastCommand::Set(BorrowedPlainSetPacket {
+                consumed,
+                key,
+                value,
+            }))
+        }
+        (2, 4) if command.eq_ignore_ascii_case(b"INCR") => {
+            let (key, consumed) =
+                parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+            Some(SharedNothingFastCommand::Incr(BorrowedPlainIncrPacket {
+                consumed,
+                key,
+            }))
+        }
+        (2, 4) if command.eq_ignore_ascii_case(b"LPOP") => {
+            let (key, consumed) =
+                parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+            Some(SharedNothingFastCommand::Lpop(BorrowedPlainGetPacket {
+                consumed,
+                key,
+            }))
+        }
+        (3, 5) if command.eq_ignore_ascii_case(b"LPUSH") => {
+            let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+            let (member, consumed) =
+                parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+            Some(SharedNothingFastCommand::Lpush(
+                BorrowedPlainKeyMemberPacket {
+                    consumed,
+                    key,
+                    member,
+                },
+            ))
+        }
+        (3, 4) if command.eq_ignore_ascii_case(b"HGET") => {
+            let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+            let (member, consumed) =
+                parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+            Some(SharedNothingFastCommand::Hget(
+                BorrowedPlainKeyMemberPacket {
+                    consumed,
+                    key,
+                    member,
+                },
+            ))
+        }
+        (4, 4) if command.eq_ignore_ascii_case(b"HSET") => {
+            let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+            let (field, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+            let (value, consumed) =
+                parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+            Some(SharedNothingFastCommand::Hset(BorrowedPlainHsetPacket {
+                consumed,
+                key,
+                field,
+                value,
+            }))
+        }
+        _ => None,
+    }
+}
+
 fn dispatch_shared_nothing_frames(
-    worker_idx: usize,
-    worker_count: usize,
     connection: &mut ClientConnection,
     runtime: &mut Runtime,
+    partitions: &KeyspacePartitions,
     ts: u64,
 ) {
     let parser_config = runtime.parser_config();
@@ -2055,129 +2336,81 @@ fn dispatch_shared_nothing_frames(
     while consumed_total < connection.read_buf.len() && !connection.closing {
         let unparsed = &connection.read_buf[consumed_total..];
 
-        if let Some(packet) = parse_borrowed_plain_get_packet(unparsed, &parser_config) {
-            if !shared_nothing_key_is_local(
-                worker_idx,
-                worker_count,
-                packet.key,
-                &mut connection.write_buf,
-                &mut connection.closing,
-            ) {
-                break;
-            }
-            runtime.execute_shared_nothing_get_into(packet.key, ts, &mut connection.write_buf);
-            consumed_total += packet.consumed;
-            continue;
-        }
-
-        if let Some(packet) = parse_borrowed_plain_set_packet(unparsed, &parser_config) {
-            if !shared_nothing_key_is_local(
-                worker_idx,
-                worker_count,
-                packet.key,
-                &mut connection.write_buf,
-                &mut connection.closing,
-            ) {
-                break;
-            }
-            runtime.execute_shared_nothing_set(packet.key, packet.value, ts);
-            connection.write_buf.extend_from_slice(b"+OK\r\n");
-            consumed_total += packet.consumed;
-            continue;
-        }
-
-        if let Some(packet) = parse_borrowed_plain_incr_packet(unparsed, &parser_config) {
-            if !shared_nothing_key_is_local(
-                worker_idx,
-                worker_count,
-                packet.key,
-                &mut connection.write_buf,
-                &mut connection.closing,
-            ) {
-                break;
-            }
-            runtime.execute_shared_nothing_incr_into(packet.key, ts, &mut connection.write_buf);
-            consumed_total += packet.consumed;
-            continue;
-        }
-
-        if let Some((PlainKeyedValuesCmd::Lpush, packet)) =
-            parse_borrowed_plain_keyed_values1_packet(unparsed, &parser_config)
-        {
-            if !shared_nothing_key_is_local(
-                worker_idx,
-                worker_count,
-                packet.key,
-                &mut connection.write_buf,
-                &mut connection.closing,
-            ) {
-                break;
-            }
-            runtime.execute_shared_nothing_lpush_one_into(
-                packet.key,
-                packet.member,
-                ts,
-                &mut connection.write_buf,
+        if let Some(command) = parse_shared_nothing_fast_command(unparsed, &parser_config) {
+            // No shard check and no rejection: this reactor executes the command
+            // itself against whichever partition the key selects. The guard spans
+            // the store hit and nothing else -- parsing already happened, and
+            // reply encoding writes through the guard straight into this
+            // connection's own buffer, so no reply is ever copied or handed back
+            // across a thread.
+            let partition_index = cached_shared_nothing_partition_index(
+                &mut connection.shared_nothing_route_tag,
+                &mut connection.shared_nothing_partition,
+                partitions,
+                command.key(),
             );
-            consumed_total += packet.consumed;
-            continue;
-        }
-
-        if let Some((PlainKeyedPopCmd::Lpop, packet)) =
-            parse_borrowed_plain_keyed_pop_packet(unparsed, &parser_config)
-        {
-            if !shared_nothing_key_is_local(
-                worker_idx,
-                worker_count,
-                packet.key,
-                &mut connection.write_buf,
-                &mut connection.closing,
-            ) {
-                break;
-            }
-            runtime.execute_shared_nothing_lpop_into(packet.key, ts, &mut connection.write_buf);
-            consumed_total += packet.consumed;
-            continue;
-        }
-
-        if let Some(packet) = parse_borrowed_plain_hset_packet(unparsed, &parser_config) {
-            if !shared_nothing_key_is_local(
-                worker_idx,
-                worker_count,
-                packet.key,
-                &mut connection.write_buf,
-                &mut connection.closing,
-            ) {
-                break;
-            }
-            runtime.execute_shared_nothing_hset_one_into(
-                packet.key,
-                packet.field,
-                packet.value,
-                ts,
-                &mut connection.write_buf,
-            );
-            consumed_total += packet.consumed;
-            continue;
-        }
-
-        if let Some(packet) = parse_borrowed_plain_hget_packet(unparsed, &parser_config) {
-            if !shared_nothing_key_is_local(
-                worker_idx,
-                worker_count,
-                packet.key,
-                &mut connection.write_buf,
-                &mut connection.closing,
-            ) {
-                break;
-            }
-            runtime.execute_shared_nothing_hget_into(
-                packet.key,
-                packet.member,
-                ts,
-                &mut connection.write_buf,
-            );
-            consumed_total += packet.consumed;
+            let mut partition = partitions.lock_partition(partition_index);
+            let consumed = match command {
+                SharedNothingFastCommand::Get(packet) => {
+                    partition.execute_shared_nothing_get_into(
+                        packet.key,
+                        ts,
+                        &mut connection.write_buf,
+                    );
+                    packet.consumed
+                }
+                SharedNothingFastCommand::Set(packet) => {
+                    partition.execute_shared_nothing_set(packet.key, packet.value, ts);
+                    connection.write_buf.extend_from_slice(b"+OK\r\n");
+                    packet.consumed
+                }
+                SharedNothingFastCommand::Incr(packet) => {
+                    partition.execute_shared_nothing_incr_into(
+                        packet.key,
+                        ts,
+                        &mut connection.write_buf,
+                    );
+                    packet.consumed
+                }
+                SharedNothingFastCommand::Lpush(packet) => {
+                    partition.execute_shared_nothing_lpush_one_into(
+                        packet.key,
+                        packet.member,
+                        ts,
+                        &mut connection.write_buf,
+                    );
+                    packet.consumed
+                }
+                SharedNothingFastCommand::Lpop(packet) => {
+                    partition.execute_shared_nothing_lpop_into(
+                        packet.key,
+                        ts,
+                        &mut connection.write_buf,
+                    );
+                    packet.consumed
+                }
+                SharedNothingFastCommand::Hset(packet) => {
+                    partition.execute_shared_nothing_hset_one_into(
+                        packet.key,
+                        packet.field,
+                        packet.value,
+                        ts,
+                        &mut connection.write_buf,
+                    );
+                    packet.consumed
+                }
+                SharedNothingFastCommand::Hget(packet) => {
+                    partition.execute_shared_nothing_hget_into(
+                        packet.key,
+                        packet.member,
+                        ts,
+                        &mut connection.write_buf,
+                    );
+                    packet.consumed
+                }
+            };
+            drop(partition);
+            consumed_total += consumed;
             continue;
         }
 
@@ -2212,18 +2445,16 @@ fn dispatch_shared_nothing_frames(
                     .is_some_and(|name| sharded_single_key_command(name))
                 {
                     let key = borrowed_args.get(1).copied().unwrap_or_default();
-                    if !shared_nothing_key_is_local(
-                        worker_idx,
-                        worker_count,
+                    let partition_index = cached_shared_nothing_partition_index(
+                        &mut connection.shared_nothing_route_tag,
+                        &mut connection.shared_nothing_partition,
+                        partitions,
                         key,
-                        &mut connection.write_buf,
-                        &mut connection.closing,
-                    ) {
-                        break;
-                    }
-                    connection.write_buf.extend_from_slice(
-                        &runtime.execute_bytes(&unparsed[..parsed.consumed], ts),
                     );
+                    let reply = partitions
+                        .lock_partition(partition_index)
+                        .execute_bytes(&unparsed[..parsed.consumed], ts);
+                    connection.write_buf.extend_from_slice(&reply);
                     continue;
                 }
                 if borrowed_args.len() == 1 && borrowed_args[0].eq_ignore_ascii_case(b"QUIT") {
@@ -2251,22 +2482,6 @@ fn dispatch_shared_nothing_frames(
     } else if consumed_total > 0 {
         connection.read_buf.drain(..consumed_total);
     }
-}
-
-#[inline]
-fn shared_nothing_key_is_local(
-    worker_idx: usize,
-    worker_count: usize,
-    key: &[u8],
-    output: &mut Vec<u8>,
-    closing: &mut bool,
-) -> bool {
-    if sharded_set_get_shard(key, worker_count) == worker_idx {
-        return true;
-    }
-    output.extend_from_slice(SHARED_NOTHING_CROSS_SHARD);
-    *closing = true;
-    false
 }
 
 fn reap_shared_nothing_connections(
@@ -28775,6 +28990,23 @@ mod tests {
 
     fn test_argv(frame: RespFrame) -> Vec<Vec<u8>> {
         fr_command::frame_to_argv(&frame).expect("test command frame should produce argv")
+    }
+
+    #[test]
+    fn shared_nothing_routing_tag_matches_redis_cluster_rules() {
+        assert_eq!(crate::redis_routing_tag(b"{tenant}:string"), b"tenant");
+        assert_eq!(crate::redis_routing_tag(b"prefix{tenant}:hash"), b"tenant");
+        assert_eq!(crate::redis_routing_tag(b"{}:empty"), b"{}:empty");
+        assert_eq!(crate::redis_routing_tag(b"{unterminated"), b"{unterminated");
+        assert_eq!(crate::redis_routing_tag(b"plain"), b"plain");
+
+        let worker_count = 32;
+        let keys: [&[u8]; 3] = [b"{tenant}:string", b"{tenant}:list", b"{tenant}:hash"];
+        assert!(
+            keys.iter()
+                .all(|key| crate::sharded_set_get_shard(key, worker_count)
+                    == crate::sharded_set_get_shard(keys[0], worker_count))
+        );
     }
 
     #[test]

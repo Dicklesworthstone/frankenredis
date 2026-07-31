@@ -1064,27 +1064,62 @@ fn shared_nothing_p16_connection_affinity_matches_legacy_redis() {
     );
 }
 
+/// One connection scattering keys across every partition must behave exactly
+/// like live Redis.
+///
+/// This is the contract that replaced `-CROSSSHARD`. The old design gave each
+/// reactor sole ownership of a partition, so a connection could touch only that
+/// reactor's keys and anything else was refused and the socket closed -- which
+/// no ordinary Redis client can satisfy, because `redis-benchmark`, `redis-cli`
+/// and every non-cluster driver scatter keys across a single socket. Pinning the
+/// scattered case against a live 7.2.4 is what keeps that contract from silently
+/// coming back.
 #[test]
-fn shared_nothing_connection_rejects_cross_shard_command() {
+fn shared_nothing_connection_serves_scattered_keys_like_legacy_redis() {
     let fr_port = reserve_port();
+    let redis_port = reserve_port();
     let _fr_server = spawn_frankenredis_sharded_set_get(fr_port, 8);
+    let _redis_server = spawn_legacy_redis(redis_port);
     let mut fr = BufferedTcpClient::connect(fr_port);
-    assert_ne!(
-        usize::from(fr_store::crc16_slot(b"a")) % 8,
-        usize::from(fr_store::crc16_slot(b"b")) % 8,
-        "fixture keys must cross a worker boundary"
+    let mut redis = BufferedTcpClient::connect(redis_port);
+
+    // The fixture is only meaningful if the keys really do span partitions.
+    let keys: Vec<Vec<u8>> = (0..64u32)
+        .map(|i| format!("scatter:{i}").into_bytes())
+        .collect();
+    let distinct: std::collections::HashSet<usize> = keys
+        .iter()
+        .map(|key| usize::from(fr_store::crc16_slot(key)) % 8)
+        .collect();
+    assert!(
+        distinct.len() > 1,
+        "fixture keys must cross partition boundaries, saw {distinct:?}"
     );
 
+    // Every command family the per-core reactor path serves, all on ONE socket.
     let mut pipeline = Vec::new();
-    pipeline.extend_from_slice(&encode_command(&[b"SET", b"a", b"one"]));
-    pipeline.extend_from_slice(&encode_command(&[b"SET", b"b", b"two"]));
+    let mut command_count = 0usize;
+    for (i, key) in keys.iter().enumerate() {
+        let value = format!("v{i}").into_bytes();
+        let list_key = format!("l:{i}").into_bytes();
+        let hash_key = format!("h:{i}").into_bytes();
+        pipeline.extend_from_slice(&encode_command(&[b"SET", key, &value]));
+        pipeline.extend_from_slice(&encode_command(&[b"GET", key]));
+        pipeline.extend_from_slice(&encode_command(&[b"INCR", format!("n:{i}").as_bytes()]));
+        pipeline.extend_from_slice(&encode_command(&[b"LPUSH", &list_key, &value]));
+        pipeline.extend_from_slice(&encode_command(&[b"LPOP", &list_key]));
+        pipeline.extend_from_slice(&encode_command(&[b"HSET", &hash_key, b"f", &value]));
+        pipeline.extend_from_slice(&encode_command(&[b"HGET", &hash_key, b"f"]));
+        command_count += 7;
+    }
+
     fr.write_all(&pipeline);
-    let responses = fr.read_responses(2);
-    assert_eq!(responses[0], RespFrame::SimpleString("OK".to_string()));
-    assert!(
-        matches!(responses[1], RespFrame::Error(ref error) if error.contains("CROSSSHARD")),
-        "a connection must not cross worker-owned keyspaces: {:?}",
-        responses[1]
+    redis.write_all(&pipeline);
+    let fr_responses = fr.read_responses(command_count);
+    let redis_responses = redis.read_responses(command_count);
+    assert_eq!(
+        fr_responses, redis_responses,
+        "one connection scattering keys across partitions must match Redis exactly"
     );
 }
 
