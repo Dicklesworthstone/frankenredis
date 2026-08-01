@@ -14,12 +14,17 @@
 # The headline is each engine's DEGRADATION AGAINST ITS OWN BASELINE, which makes
 # the comparison independent of the two engines' different absolute speeds.
 set -euo pipefail
-ROOT=/data/projects/frankenredis
-SP=/data/tmp/claude-1000/-data-projects-frankenredis/258fb22f-5d58-4d03-a462-8546093e21cb/scratchpad
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BENCH="$ROOT/legacy_redis_code/redis/src/redis-benchmark"
 REDIS="$ROOT/legacy_redis_code/redis/src/redis-server"
 CLI="$ROOT/legacy_redis_code/redis/src/redis-cli"
-FR="$ROOT/target/release/frankenredis"
+FR="${FR_BIN:-$ROOT/target/release/frankenredis}"
+# The heavy loader ships next to this script. It used to be sourced from the
+# authoring session's scratchpad, which made the headline result unreproducible
+# for anyone else the moment that directory was reaped.
+LOADER="$(dirname "$0")/heavy_loader.py"
+[ -r "$LOADER" ] || { echo "FAIL: missing $LOADER" >&2; exit 3; }
+[ -x "$FR" ] || { echo "FAIL: fr binary not executable: $FR (set FR_BIN)" >&2; exit 3; }
 SERVER_CPUS="0-15,32-47"; CLIENT_CPUS="16-31,48-63"
 WORKERS=16
 N="${N:-150000}"; CONNS="${CONNS:-32}"; ROUNDS="${ROUNDS:-3}"
@@ -43,7 +48,7 @@ measure() { # $1=port -> "rps p99ms"
 
 start_heavy() { # $1=port ; sets HEAVY_PID. No command substitution: that would
                 # block forever waiting on the child's stdout to close.
-  python3 "$SP/heavy_loader.py" "$1" "$HEAVY_CONNS" hol:big >/dev/null 2>&1 &
+  python3 "$LOADER" "$1" "$HEAVY_CONNS" hol:big >/dev/null 2>&1 &
   HEAVY_PID=$!
 }
 stop_heavy() { [ -n "$HEAVY_PID" ] && kill -9 "$HEAVY_PID" 2>/dev/null || true; HEAVY_PID=""; sleep 1; }
