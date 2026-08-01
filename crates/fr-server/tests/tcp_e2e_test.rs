@@ -1075,6 +1075,65 @@ fn shared_nothing_p16_connection_affinity_matches_legacy_redis() {
 /// scattered case against a live 7.2.4 is what keeps that contract from silently
 /// coming back.
 #[test]
+fn shared_nothing_heavy_single_key_reads_match_legacy_redis() {
+    let fr_port = reserve_port();
+    let redis_port = reserve_port();
+    let _fr_server = spawn_frankenredis_sharded_set_get(fr_port, 8);
+    let _redis_server = spawn_legacy_redis(redis_port);
+    let mut fr = BufferedTcpClient::connect(fr_port);
+    let mut redis = BufferedTcpClient::connect(redis_port);
+
+    // The O(N) single-key reads are what let a partitioned keyspace absorb a
+    // heavy command without stalling unrelated clients, which is the one thing a
+    // single-threaded incumbent structurally cannot do. They are only admitted to
+    // the reactor path because each takes its key at argv[1] and touches no other
+    // key, so this pins them byte-for-byte against a live 7.2.4.
+    let mut pipeline = Vec::new();
+    let mut count = 0usize;
+    for i in 0..24u32 {
+        let s = format!("heavy:str:{i}");
+        let l = format!("heavy:list:{i}");
+        let h = format!("heavy:hash:{i}");
+        let off = format!("{}", i * 3);
+        pipeline.extend_from_slice(&encode_command(&[b"SETRANGE", s.as_bytes(), off.as_bytes(), b"abcdef"]));
+        pipeline.extend_from_slice(&encode_command(&[b"APPEND", s.as_bytes(), b"ZZ"]));
+        pipeline.extend_from_slice(&encode_command(&[b"STRLEN", s.as_bytes()]));
+        pipeline.extend_from_slice(&encode_command(&[b"GETRANGE", s.as_bytes(), b"0", b"-1"]));
+        pipeline.extend_from_slice(&encode_command(&[b"BITCOUNT", s.as_bytes()]));
+        pipeline.extend_from_slice(&encode_command(&[b"LPUSH", l.as_bytes(), b"a"]));
+        pipeline.extend_from_slice(&encode_command(&[b"LPUSH", l.as_bytes(), b"b"]));
+        pipeline.extend_from_slice(&encode_command(&[b"LRANGE", l.as_bytes(), b"0", b"-1"]));
+        pipeline.extend_from_slice(&encode_command(&[b"LLEN", l.as_bytes()]));
+        pipeline.extend_from_slice(&encode_command(&[b"HSET", h.as_bytes(), b"f", b"v"]));
+        pipeline.extend_from_slice(&encode_command(&[b"HGETALL", h.as_bytes()]));
+        pipeline.extend_from_slice(&encode_command(&[b"HLEN", h.as_bytes()]));
+        count += 12;
+    }
+    // Absent keys and negative ranges are where the borrowed fast paths and the
+    // generic path most often disagree.
+    for c in [
+        vec![b"BITCOUNT".as_slice(), b"heavy:absent".as_slice()],
+        vec![b"STRLEN".as_slice(), b"heavy:absent".as_slice()],
+        vec![b"GETRANGE".as_slice(), b"heavy:absent".as_slice(), b"0".as_slice(), b"-1".as_slice()],
+        vec![b"LRANGE".as_slice(), b"heavy:absent".as_slice(), b"0".as_slice(), b"-1".as_slice()],
+        vec![b"HGETALL".as_slice(), b"heavy:absent".as_slice()],
+        vec![b"GETRANGE".as_slice(), b"heavy:str:1".as_slice(), b"-3".as_slice(), b"-1".as_slice()],
+        vec![b"LRANGE".as_slice(), b"heavy:list:2".as_slice(), b"-2".as_slice(), b"-1".as_slice()],
+    ] {
+        pipeline.extend_from_slice(&encode_command(&c));
+        count += 1;
+    }
+
+    fr.write_all(&pipeline);
+    redis.write_all(&pipeline);
+    assert_eq!(
+        fr.read_responses(count),
+        redis.read_responses(count),
+        "heavy single-key reads across partitions must match Redis exactly"
+    );
+}
+
+#[test]
 fn shared_nothing_connection_serves_scattered_keys_like_legacy_redis() {
     let fr_port = reserve_port();
     let redis_port = reserve_port();

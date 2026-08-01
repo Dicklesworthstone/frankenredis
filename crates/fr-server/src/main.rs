@@ -743,6 +743,9 @@ fn reactor_single_key_command(command: &[u8]) -> bool {
         || command.eq_ignore_ascii_case(b"HLEN")
         || command.eq_ignore_ascii_case(b"BITCOUNT")
         || command.eq_ignore_ascii_case(b"STRLEN")
+        || command.eq_ignore_ascii_case(b"GETRANGE")
+        || command.eq_ignore_ascii_case(b"SETRANGE")
+        || command.eq_ignore_ascii_case(b"APPEND")
 }
 
 fn sharded_single_key_command(command: &[u8]) -> bool {
