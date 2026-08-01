@@ -723,13 +723,13 @@ impl ShardedSetGetCommand {
 /// This is deliberately WIDER than [`sharded_single_key_command`], which also
 /// gates the older handoff pool and is left alone.
 ///
-/// The additions are the O(N) single-key READS, and they are the point rather
-/// than an afterthought. redis-server executes every command on one thread, so a
-/// single `LRANGE` over a long list stalls EVERY other client for its whole
-/// duration -- head-of-line blocking that no amount of `io-threads` can remove,
-/// because io-threads only parallelize socket I/O and not execution. A
-/// partitioned keyspace confines that stall to the one partition owning the key;
-/// clients whose keys live elsewhere never see it.
+/// The additions are O(N) single-key reads and deterministic set operations,
+/// and they are the point rather than an afterthought. redis-server executes
+/// every command on one thread, so a large `LRANGE` or variadic `SADD` stalls
+/// EVERY other client for its whole duration -- head-of-line blocking that no
+/// amount of `io-threads` can remove, because io-threads only parallelize socket
+/// I/O and not execution. A partitioned keyspace confines that work to the one
+/// partition owning the key; clients whose keys live elsewhere never see it.
 ///
 /// Every command here must take its key at argv[1] and touch NO other key, or it
 /// would reach outside the partition it locked. That is why SORT is absent (its
@@ -746,6 +746,12 @@ fn reactor_single_key_command(command: &[u8]) -> bool {
         || command.eq_ignore_ascii_case(b"GETRANGE")
         || command.eq_ignore_ascii_case(b"SETRANGE")
         || command.eq_ignore_ascii_case(b"APPEND")
+        || command.eq_ignore_ascii_case(b"SADD")
+        || command.eq_ignore_ascii_case(b"SCARD")
+        || command.eq_ignore_ascii_case(b"SISMEMBER")
+        || command.eq_ignore_ascii_case(b"SMISMEMBER")
+        || command.eq_ignore_ascii_case(b"SMEMBERS")
+        || command.eq_ignore_ascii_case(b"SREM")
 }
 
 fn sharded_single_key_command(command: &[u8]) -> bool {
@@ -1240,7 +1246,7 @@ fn run_sharded_set_get_worker(
     }
 }
 
-const SHARED_NOTHING_UNSUPPORTED: &[u8] = b"-ERR experimental shared-nothing mode accepts only default-DB single-key SET, GET, INCR, LPUSH, LPOP, HSET, HGET, plus PING and QUIT; cross-key and aggregate commands are not supported\r\n";
+const SHARED_NOTHING_UNSUPPORTED: &[u8] = b"-ERR experimental shared-nothing mode accepts only supported default-DB partition-local single-key commands, plus PING and QUIT; cross-key and aggregate commands are not supported\r\n";
 const SHARED_NOTHING_PROTOCOL_ERROR: &[u8] =
     b"-ERR Protocol error in experimental shared-nothing mode\r\n";
 /// Keyspace partitions shared by every per-core reactor.
@@ -2493,10 +2499,9 @@ OPTIONS:\n\
   --enable-debug-command <VALUE>  Allow DEBUG commands: no | local | yes (default: no, matches upstream Redis 7.2)\n\
   --io-uring-output          Opt in to multishot receive + batched io_uring writes (requires io-uring-writes feature)\n\
   --experimental-sharded-set-get-workers <N>\n\
-                             Run default-DB single-key SET/GET/INCR/LPUSH/LPOP/HSET/HGET\n\
-                             on N connection-affine, shared-nothing key shards\n\
-                             (1-{SHARDED_SET_GET_MAX_WORKERS}); each connection stays on the\n\
-                             shard selected by its first keyed command\n\
+                             Run supported default-DB partition-local commands\n\
+                             on N connection-affine reactors over a partitioned\n\
+                             keyspace (1-{SHARDED_SET_GET_MAX_WORKERS})\n\
   --help                     Show this help\n"
     )
 }
@@ -28886,6 +28891,12 @@ mod tests {
             b"HLEN",
             b"BITCOUNT",
             b"strlen",
+            b"SADD",
+            b"SCARD",
+            b"SISMEMBER",
+            b"SMISMEMBER",
+            b"SMEMBERS",
+            b"SREM",
         ] {
             assert!(
                 crate::reactor_single_key_command(command),
@@ -28893,10 +28904,10 @@ mod tests {
             );
         }
 
-        for command in [b"SMEMBERS".as_slice(), b"MGET", b"SINTER", b"SORT", b"EVAL"] {
+        for command in [b"SMOVE".as_slice(), b"MGET", b"SINTER", b"SORT", b"EVAL"] {
             assert!(
                 !crate::reactor_single_key_command(command),
-                "{command:?} is not safe or reachable as a partition-local read"
+                "{command:?} is not safe or reachable as partition-local work"
             );
         }
         assert!(
