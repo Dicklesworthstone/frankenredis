@@ -718,6 +718,33 @@ impl ShardedSetGetCommand {
     }
 }
 
+/// Commands the per-core reactor path will execute against a single partition.
+///
+/// This is deliberately WIDER than [`sharded_single_key_command`], which also
+/// gates the older handoff pool and is left alone.
+///
+/// The additions are the O(N) single-key READS, and they are the point rather
+/// than an afterthought. redis-server executes every command on one thread, so a
+/// single `LRANGE` over a long list stalls EVERY other client for its whole
+/// duration -- head-of-line blocking that no amount of `io-threads` can remove,
+/// because io-threads only parallelize socket I/O and not execution. A
+/// partitioned keyspace confines that stall to the one partition owning the key;
+/// clients whose keys live elsewhere never see it.
+///
+/// Every command here must take its key at argv[1] and touch NO other key, or it
+/// would reach outside the partition it locked. That is why SORT is absent (its
+/// BY/GET patterns dereference other keys) and why the multi-key set operations
+/// (SINTER/SUNION/SDIFF) are absent.
+fn reactor_single_key_command(command: &[u8]) -> bool {
+    sharded_single_key_command(command)
+        || command.eq_ignore_ascii_case(b"LRANGE")
+        || command.eq_ignore_ascii_case(b"HGETALL")
+        || command.eq_ignore_ascii_case(b"LLEN")
+        || command.eq_ignore_ascii_case(b"HLEN")
+        || command.eq_ignore_ascii_case(b"BITCOUNT")
+        || command.eq_ignore_ascii_case(b"STRLEN")
+}
+
 fn sharded_single_key_command(command: &[u8]) -> bool {
     command.eq_ignore_ascii_case(b"GET")
         || command.eq_ignore_ascii_case(b"SET")
@@ -2278,7 +2305,7 @@ fn dispatch_shared_nothing_frames(
                 }
                 if borrowed_args
                     .first()
-                    .is_some_and(|name| sharded_single_key_command(name))
+                    .is_some_and(|name| reactor_single_key_command(name))
                 {
                     let key = borrowed_args.get(1).copied().unwrap_or_default();
                     let partition_index = cached_shared_nothing_partition_index(
@@ -28842,6 +28869,36 @@ mod tests {
             keys.iter()
                 .all(|key| crate::sharded_set_get_shard(key, worker_count)
                     == crate::sharded_set_get_shard(keys[0], worker_count))
+        );
+    }
+
+    #[test]
+    fn reactor_single_key_commands_admit_only_partition_local_work() {
+        for command in [
+            b"GET".as_slice(),
+            b"SET",
+            b"LRANGE",
+            b"HGETALL",
+            b"LLEN",
+            b"HLEN",
+            b"BITCOUNT",
+            b"strlen",
+        ] {
+            assert!(
+                crate::reactor_single_key_command(command),
+                "{command:?} stays on one keyspace partition"
+            );
+        }
+
+        for command in [b"SMEMBERS".as_slice(), b"MGET", b"SINTER", b"SORT", b"EVAL"] {
+            assert!(
+                !crate::reactor_single_key_command(command),
+                "{command:?} is not safe or reachable as a partition-local read"
+            );
+        }
+        assert!(
+            !crate::sharded_single_key_command(b"BITCOUNT"),
+            "the older handoff pool must keep its closed command family"
         );
     }
 
