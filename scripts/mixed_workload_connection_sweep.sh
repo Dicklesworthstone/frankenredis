@@ -186,11 +186,20 @@ for C in ${CONNS//,/ }; do
     fi
     thr=$(observed_threads $FR_PID)
     ratio=$(awk -v x="$a" -v y="$b" 'BEGIN{printf "%.4f", (y>0)?x/y:0}')
-    # CLIENT-BOUND guard: if the client cpuset is near its physical ceiling while
-    # neither server is, ops/s describes redis-benchmark, not a server.
-    flag=$(awk -v cc="$a_ccpu" -v cb="$b_ccpu" -v cph="$CLIENT_PHYS" \
+    # CLIENT-BOUND guard: if the client is near ITS ceiling while neither server
+    # is, ops/s describes redis-benchmark, not a server.
+    #
+    # The ceiling is min(physical cores, CLIENT THREADS), not the cpuset alone.
+    # redis-benchmark is threaded, so 8 --threads can never exceed 800% however
+    # many cores the cpuset owns. Comparing 728% against a 16-core 1600% ceiling
+    # read as 45% utilised and stayed silent, when against the real 800% ceiling
+    # it was 91% and saturated -- which silently understated fr at c=64 and
+    # c=128, where its throughput had gone flat (262k -> 290k) because the
+    # CLIENT had stopped scaling, not the server.
+    flag=$(awk -v cc="$a_ccpu" -v cb="$b_ccpu" -v cph="$CLIENT_PHYS" -v cth="$THREADS" \
                -v sa="$a_scpu" -v sb="$b_scpu" 'BEGIN{
-      ceil=cph*100; maxc=(cc>cb)?cc:cb; maxs=(sa>sb)?sa:sb;
+      lim=(cph<cth)?cph:cth; ceil=lim*100;
+      maxc=(cc>cb)?cc:cb; maxs=(sa>sb)?sa:sb;
       if (ceil>0 && maxc >= 0.85*ceil && maxs < 0.85*ceil) printf "CLIENT-BOUND"; else printf "ok";
     }')
     printf '%-6s %-6s %12d %12d %12d %9s %8s  srv=%s%%/%s%% clt=%s%% %s\n' \
