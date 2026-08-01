@@ -93,20 +93,35 @@ echo
 
 # perf-stat the SERVER pid across one fixed job, then divide by the known op
 # count. Attributing to the server pid keeps the client's own work out.
-census() { # $1=pid $2=port $3=tests -> "instr_per_op futex_per_op"
-  local pid="$1" port="$2" tests="$3" ops out futex instr
+census() { # $1=pid $2=port $3=tests -> "instr/op futex/op syscall/op read/op write/op"
+  local pid="$1" port="$2" tests="$3" ops out futex instr sysall rd wr
   ops=$((TOTAL * $(echo "$3" | tr ',' '\n' | grep -c .)))
   out=$(mktemp)
-  perf stat -e instructions:u,syscalls:sys_enter_futex -p "$pid" -x, -o "$out" -- \
+  # raw_syscalls:sys_enter counts EVERY syscall, which is the number that matters
+  # once user-space instructions stop explaining the wall clock: a 2.5x
+  # instruction advantage that converts to ~1.1x serially is being spent in the
+  # kernel, and read/write/epoll_wait per op is where an event-loop server spends
+  # it. Both engines are counted the same way, so the only question this answers
+  # is whether the incumbent pays the same syscall per op that we do.
+  perf stat -e instructions:u,syscalls:sys_enter_futex,raw_syscalls:sys_enter,\
+syscalls:sys_enter_read,syscalls:sys_enter_write \
+    -p "$pid" -x, -o "$out" -- \
     taskset -c "$CLIENT_CPUS" "$BENCH" -p "$port" -t "$tests" -n "$TOTAL" \
       -c "$CONNS" -P "$PIPE" -r "$KEYSPACE" --threads "$CLIENT_THREADS" >/dev/null 2>&1
   instr=$(awk -F, '/instructions/{print $1}' "$out")
   futex=$(awk -F, '/sys_enter_futex/{print $1}' "$out")
+  sysall=$(awk -F, '/raw_syscalls:sys_enter/{print $1}' "$out")
+  rd=$(awk -F, '/sys_enter_read/{print $1}' "$out")
+  wr=$(awk -F, '/sys_enter_write/{print $1}' "$out")
   rm -f "$out"
-  awk -v i="${instr:-0}" -v f="${futex:-0}" -v n="$ops" 'BEGIN{printf "%.1f %.4f", i/n, f/n}'
+  awk -v i="${instr:-0}" -v f="${futex:-0}" -v s="${sysall:-0}" -v r="${rd:-0}" \
+      -v w="${wr:-0}" -v n="$ops" 'BEGIN{
+    printf "%.1f %.4f %.3f %.3f %.3f", i/n, f/n, s/n, r/n, w/n
+  }'
 }
 
-printf '%-10s %-8s %14s %14s %10s %12s\n' fixture engine 'instr/op' 'futex/op' 'ratio' 'verdict'
+printf '%-10s %-12s %11s %9s %9s %8s %8s %9s\n' \
+  fixture engine 'instr/op' 'futex/op' 'sys/op' 'read/op' 'write/op' 'instr rat'
 for FX in $FIXTURES; do
   name="${FX%%:*}"; tests="${FX##*:}"
   # Warm both so first-touch allocation is not billed to the census.
@@ -115,22 +130,25 @@ for FX in $FIXTURES; do
   # Alternate order across the two measured passes: a COUNT should not care, and
   # if it does the host did something to one arm it did not do to the other.
   "$BENCH" -p $RD1_PORT -t "$tests" -n 20000 -c "$CONNS" -P "$PIPE" -r "$KEYSPACE" >/dev/null 2>&1
-  read -r fr_i fr_f <<<"$(census "$FR_PID" "$FR_PORT" "$tests")"
-  read -r rd_i rd_f <<<"$(census "$RD_PID" "$RD_PORT" "$tests")"
-  read -r r1_i r1_f <<<"$(census "$RD1_PID" "$RD1_PORT" "$tests")"
-  read -r r1_i2 r1_f2 <<<"$(census "$RD1_PID" "$RD1_PORT" "$tests")"
-  read -r rd_i2 rd_f2 <<<"$(census "$RD_PID" "$RD_PORT" "$tests")"
-  read -r fr_i2 fr_f2 <<<"$(census "$FR_PID" "$FR_PORT" "$tests")"
-  awk -v n="$name" -v a="$fr_i" -v a2="$fr_i2" -v b="$rd_i" -v b2="$rd_i2" \
-      -v c="$r1_i" -v c2="$r1_i2" -v af="$fr_f" -v bf="$rd_f" -v cf="$r1_f" 'BEGIN{
-    fi=(a<a2)?a:a2; ri=(b<b2)?b:b2; ci=(c<c2)?c:c2;  # best-of-2: noise only adds
-    printf "%-10s %-12s %14.1f %14.4f %10s %14s\n", n, "fr", fi, af, "", "";
-    printf "%-10s %-12s %14.1f %14.4f %9.3fx %14s\n", "", "redis io=1", ci, cf,
-      (ci>0)?fi/ci:0, (fi<ci)?"fr cheaper":"FR PAYS MORE";
-    printf "%-10s %-12s %14.1f %14.4f %9.3fx %14s\n", "", "redis io=8", ri, bf,
-      (ri>0)?fi/ri:0, "(spin-inflated)";
-    printf "%-10s %-12s %14s %14s %10s %14s\n", "", "(spread)",
-      sprintf("%.0f/%.0f", a, a2), sprintf("%.0f/%.0f", c, c2), "", "";
+  read -r fr_i fr_f fr_s fr_r fr_w <<<"$(census "$FR_PID" "$FR_PORT" "$tests")"
+  read -r rd_i rd_f rd_s rd_r rd_w <<<"$(census "$RD_PID" "$RD_PORT" "$tests")"
+  read -r r1_i r1_f r1_s r1_r r1_w <<<"$(census "$RD1_PID" "$RD1_PORT" "$tests")"
+  read -r fr_i2 _ _ _ _ <<<"$(census "$FR_PID" "$FR_PORT" "$tests")"
+  read -r r1_i2 _ _ _ _ <<<"$(census "$RD1_PID" "$RD1_PORT" "$tests")"
+  awk -v n="$name" -v a="$fr_i" -v a2="$fr_i2" -v c="$r1_i" -v c2="$r1_i2" -v b="$rd_i" \
+      -v af="$fr_f" -v cf="$r1_f" -v bf="$rd_f" \
+      -v as="$fr_s" -v cs="$r1_s" -v bs="$rd_s" \
+      -v ar="$fr_r" -v cr="$r1_r" -v br="$rd_r" \
+      -v aw="$fr_w" -v cw="$r1_w" -v bw="$rd_w" 'BEGIN{
+    fi=(a<a2)?a:a2; ci=(c<c2)?c:c2;   # best-of-2 per arm: noise only ever adds
+    printf "%-10s %-12s %11.1f %9.4f %9.3f %8.3f %8.3f %9s\n", n, "fr", fi, af, as, ar, aw, "";
+    printf "%-10s %-12s %11.1f %9.4f %9.3f %8.3f %8.3f %8.3fx\n", "", "redis io=1", ci, cf, cs, cr, cw,
+      (ci>0)?fi/ci:0;
+    printf "%-10s %-12s %11.1f %9.4f %9.3f %8.3f %8.3f %9s\n", "", "redis io=8", b, bf, bs, br, bw,
+      "(spin)";
+    printf "%-10s %-12s %11s %9s %9s %8s %8s %9s\n", "", "SYS RATIO", "", "",
+      sprintf("%.2fx", (cs>0)?as/cs:0), sprintf("%.2fx", (cr>0)?ar/cr:0),
+      sprintf("%.2fx", (cw>0)?aw/cw:0), "";
   }'
 done
 echo
