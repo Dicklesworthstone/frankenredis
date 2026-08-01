@@ -39,6 +39,7 @@ set -euo pipefail
 KEYS="${KEYS:-128}"            # distinct heavy keys, spread over partitions
 VALBYTES="${VALBYTES:-1048576}"  # per-key string size for the BITCOUNT fixture
 LISTLEN="${LISTLEN:-2000}"     # per-key list length for the LRANGE fixture
+HASHFIELDS="${HASHFIELDS:-200}"  # per-key field count for the HGETALL fixture
 N="${N:-40000}"
 CONNS="${CONNS:-64}"
 ROUNDS="${ROUNDS:-3}"
@@ -108,15 +109,20 @@ echo
 # command lands on a MISSING key and measures nothing.
 seed() { # $1=port $2=fixture
   local port="$1" fx="$2" i name
+  # LPUSH/HSET are used rather than RPUSH/HMSET because the reactor path admits
+  # them; the multi-member forms route through the generic partition-local path
+  # so one command seeds a whole key. Seeding must use commands the engine under
+  # test actually accepts, or the fixture silently ends up empty.
+  local members hfields
+  members=$(seq 1 "$LISTLEN" | tr '\n' ' ')
+  hfields=$(awk -v n="$HASHFIELDS" 'BEGIN{for(i=0;i<n;i++) printf "f%d v%d ", i, i}')
   for i in $(seq 0 $((KEYS - 1))); do
     name=$(printf '%s:%012d' "$fx" "$i")
-    if [ "$fx" = bitcount ]; then
-      "$CLI" -p "$port" SETRANGE "$name" $((VALBYTES - 1)) x >/dev/null
-    else
-      "$CLI" -p "$port" DEL "$name" >/dev/null 2>&1 || true
-      "$CLI" -p "$port" RPUSH "$name" $(seq 1 "$LISTLEN") >/dev/null 2>&1 \
-        || for _ in $(seq 1 "$LISTLEN"); do "$CLI" -p "$port" LPUSH "$name" v >/dev/null; done
-    fi
+    case "$fx" in
+      bitcount) "$CLI" -p "$port" SETRANGE "$name" $((VALBYTES - 1)) x >/dev/null ;;
+      lrange)   "$CLI" -p "$port" LPUSH "$name" $members >/dev/null ;;
+      hgetall)  "$CLI" -p "$port" HSET  "$name" $hfields >/dev/null ;;
+    esac
   done
 }
 
@@ -125,13 +131,14 @@ seed() { # $1=port $2=fixture
 verify_seed() { # $1=port $2=label $3=fixture -> prints measurement, exits on mismatch
   local port="$1" label="$2" fx="$3" probe want got
   probe=$(printf '%s:%012d' "$fx" 0)
-  if [ "$fx" = bitcount ]; then
-    got=$("$CLI" -p "$port" STRLEN "$probe"); want="$VALBYTES"
-    echo "    $label  STRLEN $probe = $got (want $want)"
-  else
-    got=$("$CLI" -p "$port" LLEN "$probe"); want="$LISTLEN"
-    echo "    $label  LLEN $probe = $got (want $want)"
-  fi
+  case "$fx" in
+    bitcount) got=$("$CLI" -p "$port" STRLEN "$probe"); want="$VALBYTES"
+              echo "    $label  STRLEN $probe = $got (want $want)" ;;
+    lrange)   got=$("$CLI" -p "$port" LLEN "$probe");   want="$LISTLEN"
+              echo "    $label  LLEN   $probe = $got (want $want)" ;;
+    hgetall)  got=$("$CLI" -p "$port" HLEN "$probe");   want="$HASHFIELDS"
+              echo "    $label  HLEN   $probe = $got (want $want)" ;;
+  esac
   [ "$got" = "$want" ] || { echo "FAIL: $label seed wrong for $fx: got $got want $want" >&2; exit 8; }
 }
 
@@ -143,7 +150,9 @@ probe_reply() { # $1=port $2=label $3=fixture
 import socket, sys
 port, label, fx, key = int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
 s = socket.create_connection(("127.0.0.1", port)); s.settimeout(10)
-args = ["BITCOUNT", key] if fx == "bitcount" else ["LRANGE", key, "0", "99"]
+args = {"bitcount": ["BITCOUNT", key],
+        "lrange":   ["LRANGE", key, "0", "99"],
+        "hgetall":  ["HGETALL", key]}[fx]
 out = f"*{len(args)}\r\n".encode()
 for a in args:
     out += b"$%d\r\n%s\r\n" % (len(a), a.encode())
@@ -178,11 +187,11 @@ measure() { # $1=port $2=fxcmd -> "rps p99ms"
 
 RES=$(mktemp)
 for FX in $FIXTURES; do
-  if [ "$FX" = bitcount ]; then
-    FXCMD="BITCOUNT bitcount:__rand_int__"
-  else
-    FXCMD="LRANGE lrange:__rand_int__ 0 99"
-  fi
+  case "$FX" in
+    bitcount) FXCMD="BITCOUNT bitcount:__rand_int__" ;;
+    lrange)   FXCMD="LRANGE lrange:__rand_int__ 0 99" ;;
+    hgetall)  FXCMD="HGETALL hgetall:__rand_int__" ;;
+  esac
   echo "== fixture: $FX  ($FXCMD) =="
   echo "  seeding $KEYS keys on each engine..."
   for pp in "$FR_PORT fr" "$RD_PORT redis" "$FR2_PORT fr2"; do
