@@ -2208,7 +2208,9 @@ enum SharedNothingFastCommand<'a> {
     Set(BorrowedPlainSetPacket<'a>),
     Incr(BorrowedPlainIncrPacket<'a>),
     Lpush(BorrowedPlainKeyMemberPacket<'a>),
+    Rpush(BorrowedPlainKeyMemberPacket<'a>),
     Lpop(BorrowedPlainGetPacket<'a>),
+    Rpop(BorrowedPlainGetPacket<'a>),
     Lrange(BorrowedPlainKeyRangePacket<'a>),
     Hset(BorrowedPlainHsetPacket<'a>),
     Hget(BorrowedPlainKeyMemberPacket<'a>),
@@ -2220,11 +2222,11 @@ impl SharedNothingFastCommand<'_> {
     #[inline]
     fn key(&self) -> &[u8] {
         match self {
-            Self::Get(packet) | Self::Lpop(packet) => packet.key,
+            Self::Get(packet) | Self::Lpop(packet) | Self::Rpop(packet) => packet.key,
             Self::Set(packet) => packet.key,
             Self::Incr(packet) => packet.key,
             Self::Lrange(packet) => packet.key,
-            Self::Lpush(packet) | Self::Hget(packet) => packet.key,
+            Self::Lpush(packet) | Self::Rpush(packet) | Self::Hget(packet) => packet.key,
             Self::Hset(packet) => packet.key,
             Self::Zadd(packet) => packet.key,
             Self::Zpopmin(packet) => packet.key,
@@ -2328,25 +2330,34 @@ fn parse_shared_nothing_fast_command<'a>(
                 key,
             }))
         }
-        (2, 4) if command.eq_ignore_ascii_case(b"LPOP") => {
+        (2, 4)
+            if command.eq_ignore_ascii_case(b"LPOP") || command.eq_ignore_ascii_case(b"RPOP") =>
+        {
             let (key, consumed) =
                 parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
-            Some(SharedNothingFastCommand::Lpop(BorrowedPlainGetPacket {
-                consumed,
-                key,
-            }))
+            let packet = BorrowedPlainGetPacket { consumed, key };
+            if command.eq_ignore_ascii_case(b"LPOP") {
+                Some(SharedNothingFastCommand::Lpop(packet))
+            } else {
+                Some(SharedNothingFastCommand::Rpop(packet))
+            }
         }
-        (3, 5) if command.eq_ignore_ascii_case(b"LPUSH") => {
+        (3, 5)
+            if command.eq_ignore_ascii_case(b"LPUSH") || command.eq_ignore_ascii_case(b"RPUSH") =>
+        {
             let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
             let (member, consumed) =
                 parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
-            Some(SharedNothingFastCommand::Lpush(
-                BorrowedPlainKeyMemberPacket {
-                    consumed,
-                    key,
-                    member,
-                },
-            ))
+            let packet = BorrowedPlainKeyMemberPacket {
+                consumed,
+                key,
+                member,
+            };
+            if command.eq_ignore_ascii_case(b"LPUSH") {
+                Some(SharedNothingFastCommand::Lpush(packet))
+            } else {
+                Some(SharedNothingFastCommand::Rpush(packet))
+            }
         }
         (3, 4) if command.eq_ignore_ascii_case(b"HGET") => {
             let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
@@ -2439,8 +2450,16 @@ fn execute_shared_nothing_fast_command(
             partition.execute_shared_nothing_lpush_one_into(packet.key, packet.member, ts, out);
             packet.consumed
         }
+        SharedNothingFastCommand::Rpush(packet) => {
+            partition.execute_shared_nothing_rpush_many_into(packet.key, &[packet.member], ts, out);
+            packet.consumed
+        }
         SharedNothingFastCommand::Lpop(packet) => {
             partition.execute_shared_nothing_lpop_into(packet.key, ts, out);
+            packet.consumed
+        }
+        SharedNothingFastCommand::Rpop(packet) => {
+            partition.execute_shared_nothing_rpop_many_into(packet.key, 1, ts, out);
             packet.consumed
         }
         SharedNothingFastCommand::Lrange(packet) => {
@@ -2522,6 +2541,75 @@ fn dispatch_shared_nothing_frames_impl<const COMBINE_PARTITION_RUNS: bool>(
         let unparsed = &connection.read_buf[consumed_total..];
 
         if let Some(mut command) = parse_shared_nothing_fast_command(unparsed, &parser_config) {
+            if COMBINE_PARTITION_RUNS && let SharedNothingFastCommand::Rpush(first) = &command {
+                let key = first.key;
+                let mut run_consumed = first.consumed;
+                let mut values = Vec::with_capacity(16);
+                values.push(first.member);
+                while let Some(SharedNothingFastCommand::Rpush(next)) =
+                    parse_shared_nothing_fast_command(&unparsed[run_consumed..], &parser_config)
+                {
+                    if next.key != key {
+                        break;
+                    }
+                    run_consumed += next.consumed;
+                    values.push(next.member);
+                    if run_consumed == unparsed.len() {
+                        break;
+                    }
+                }
+                let partition_index = cached_shared_nothing_partition_index(
+                    &mut connection.shared_nothing_route_tag,
+                    &mut connection.shared_nothing_partition,
+                    partitions,
+                    key,
+                );
+                partitions
+                    .lock_partition(partition_index)
+                    .execute_shared_nothing_rpush_many_into(
+                        key,
+                        &values,
+                        ts,
+                        &mut connection.write_buf,
+                    );
+                consumed_total += run_consumed;
+                continue;
+            }
+
+            if COMBINE_PARTITION_RUNS && let SharedNothingFastCommand::Rpop(first) = &command {
+                let key = first.key;
+                let mut run_consumed = first.consumed;
+                let mut count = 1usize;
+                while let Some(SharedNothingFastCommand::Rpop(next)) =
+                    parse_shared_nothing_fast_command(&unparsed[run_consumed..], &parser_config)
+                {
+                    if next.key != key {
+                        break;
+                    }
+                    run_consumed += next.consumed;
+                    count += 1;
+                    if run_consumed == unparsed.len() {
+                        break;
+                    }
+                }
+                let partition_index = cached_shared_nothing_partition_index(
+                    &mut connection.shared_nothing_route_tag,
+                    &mut connection.shared_nothing_partition,
+                    partitions,
+                    key,
+                );
+                partitions
+                    .lock_partition(partition_index)
+                    .execute_shared_nothing_rpop_many_into(
+                        key,
+                        count,
+                        ts,
+                        &mut connection.write_buf,
+                    );
+                consumed_total += run_consumed;
+                continue;
+            }
+
             // No shard check and no rejection: this reactor executes the command
             // itself against whichever partition the key selects. The guard spans
             // the store hit and nothing else -- parsing already happened, and

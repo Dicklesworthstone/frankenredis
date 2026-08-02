@@ -8417,6 +8417,68 @@ impl Runtime {
         reply.encode_into(out);
     }
 
+    /// Execute a resident run of one-value RPUSH commands with one key lookup.
+    ///
+    /// Every element is still one logical command and therefore receives its
+    /// own intermediate list length. The connection-affine mode has fixed
+    /// default policy (no LFU, propagation, notifications, or alternate DB), so
+    /// applying the values as one store batch has the same observable state as
+    /// N adjacent RPUSH commands while deleting N-1 hash-table probes.
+    #[inline]
+    pub fn execute_shared_nothing_rpush_many_into<M: AsRef<[u8]>>(
+        &mut self,
+        key: &[u8],
+        values: &[M],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) {
+        self.server.store.stat_total_commands_processed += values.len() as u64;
+        match self.server.store.rpush(key, values, now_ms) {
+            Ok(final_len) => {
+                let first_len = final_len.saturating_sub(values.len()).saturating_add(1);
+                for len in first_len..=final_len {
+                    RespFrame::Integer(i64::try_from(len).unwrap_or(i64::MAX)).encode_into(out);
+                }
+            }
+            Err(err) => {
+                let reply = CommandError::Store(err).to_resp();
+                for _ in values {
+                    reply.encode_into(out);
+                }
+            }
+        }
+    }
+
+    /// Execute adjacent single-element RPOP commands as one store-side count
+    /// pop, then preserve their individual bulk/null reply sequence.
+    #[inline]
+    pub fn execute_shared_nothing_rpop_many_into(
+        &mut self,
+        key: &[u8],
+        count: usize,
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) {
+        self.server.store.stat_total_commands_processed += count as u64;
+        match self.server.store.rpop_count(key, count, now_ms) {
+            Ok(values) => {
+                let values = values.unwrap_or_default();
+                for value in &values {
+                    encode_bulk_string_slice(Some(value), false, out);
+                }
+                for _ in values.len()..count {
+                    encode_bulk_string_slice(None, false, out);
+                }
+            }
+            Err(err) => {
+                let reply = CommandError::Store(err).to_resp();
+                for _ in 0..count {
+                    reply.encode_into(out);
+                }
+            }
+        }
+    }
+
     #[inline]
     pub fn execute_shared_nothing_hset_one_into(
         &mut self,
