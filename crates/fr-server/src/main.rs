@@ -757,6 +757,7 @@ const REACTOR_COMMAND_NAME_MAX: usize = 16;
 ///     -- the same exclusion the deterministic set commands were admitted under.
 ///   * DUMP/RESTORE, whose serialized payloads are not compared against the
 ///     incumbent anywhere, so they would be admitted untested.
+///
 /// The variadic key-list commands (DEL/UNLINK/EXISTS/TOUCH) are admitted only at
 /// one key, which [`reactor_partition_local_command`] enforces on argc.
 fn reactor_single_key_command(command: &[u8]) -> bool {
@@ -892,8 +893,7 @@ fn reactor_partition_local_command(args: &[&[u8]]) -> bool {
     let Some(name) = args.first() else {
         return false;
     };
-    reactor_single_key_command(name)
-        || (args.len() <= 2 && reactor_variadic_key_list_command(name))
+    reactor_single_key_command(name) || (args.len() <= 2 && reactor_variadic_key_list_command(name))
 }
 
 fn sharded_single_key_command(command: &[u8]) -> bool {
@@ -2226,6 +2226,24 @@ impl SharedNothingFastCommand<'_> {
     }
 }
 
+/// Select the frozen lock-per-command control only in measurement binaries.
+/// Production code has a constant-true selector, so neither the environment
+/// lookup nor a branch exists on the hot path.
+#[cfg(feature = "perf-ab-partition-run-combine")]
+#[inline]
+fn shared_nothing_partition_run_combine_enabled() -> bool {
+    static ORIGINAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    !*ORIGINAL.get_or_init(|| {
+        std::env::var("FR_PERF_AB_PARTITION_RUN_COMBINE_ORIG").is_ok_and(|value| value == "1")
+    })
+}
+
+#[cfg(not(feature = "perf-ab-partition-run-combine"))]
+#[inline(always)]
+const fn shared_nothing_partition_run_combine_enabled() -> bool {
+    true
+}
+
 /// Decode the complete shared-nothing command family in one pass over the RESP
 /// command header. The former dispatcher called seven independent packet
 /// parsers in sequence; a late-family HGET consequently re-tested six rejected
@@ -2337,7 +2355,66 @@ fn parse_shared_nothing_fast_command<'a>(
     }
 }
 
+#[inline]
+fn execute_shared_nothing_fast_command(
+    command: SharedNothingFastCommand<'_>,
+    partition: &mut Runtime,
+    ts: u64,
+    out: &mut Vec<u8>,
+) -> usize {
+    match command {
+        SharedNothingFastCommand::Get(packet) => {
+            partition.execute_shared_nothing_get_into(packet.key, ts, out);
+            packet.consumed
+        }
+        SharedNothingFastCommand::Set(packet) => {
+            partition.execute_shared_nothing_set(packet.key, packet.value, ts);
+            out.extend_from_slice(b"+OK\r\n");
+            packet.consumed
+        }
+        SharedNothingFastCommand::Incr(packet) => {
+            partition.execute_shared_nothing_incr_into(packet.key, ts, out);
+            packet.consumed
+        }
+        SharedNothingFastCommand::Lpush(packet) => {
+            partition.execute_shared_nothing_lpush_one_into(packet.key, packet.member, ts, out);
+            packet.consumed
+        }
+        SharedNothingFastCommand::Lpop(packet) => {
+            partition.execute_shared_nothing_lpop_into(packet.key, ts, out);
+            packet.consumed
+        }
+        SharedNothingFastCommand::Hset(packet) => {
+            partition.execute_shared_nothing_hset_one_into(
+                packet.key,
+                packet.field,
+                packet.value,
+                ts,
+                out,
+            );
+            packet.consumed
+        }
+        SharedNothingFastCommand::Hget(packet) => {
+            partition.execute_shared_nothing_hget_into(packet.key, packet.member, ts, out);
+            packet.consumed
+        }
+    }
+}
+
 fn dispatch_shared_nothing_frames(
+    connection: &mut ClientConnection,
+    runtime: &mut Runtime,
+    partitions: &KeyspacePartitions,
+    ts: u64,
+) {
+    if shared_nothing_partition_run_combine_enabled() {
+        dispatch_shared_nothing_frames_impl::<true>(connection, runtime, partitions, ts);
+    } else {
+        dispatch_shared_nothing_frames_impl::<false>(connection, runtime, partitions, ts);
+    }
+}
+
+fn dispatch_shared_nothing_frames_impl<const COMBINE_PARTITION_RUNS: bool>(
     connection: &mut ClientConnection,
     runtime: &mut Runtime,
     partitions: &KeyspacePartitions,
@@ -2350,7 +2427,7 @@ fn dispatch_shared_nothing_frames(
     while consumed_total < connection.read_buf.len() && !connection.closing {
         let unparsed = &connection.read_buf[consumed_total..];
 
-        if let Some(command) = parse_shared_nothing_fast_command(unparsed, &parser_config) {
+        if let Some(mut command) = parse_shared_nothing_fast_command(unparsed, &parser_config) {
             // No shard check and no rejection: this reactor executes the command
             // itself against whichever partition the key selects. The guard spans
             // the store hit and nothing else -- parsing already happened, and
@@ -2364,67 +2441,41 @@ fn dispatch_shared_nothing_frames(
                 command.key(),
             );
             let mut partition = partitions.lock_partition(partition_index);
-            let consumed = match command {
-                SharedNothingFastCommand::Get(packet) => {
-                    partition.execute_shared_nothing_get_into(
-                        packet.key,
-                        ts,
-                        &mut connection.write_buf,
-                    );
-                    packet.consumed
+            loop {
+                let consumed = execute_shared_nothing_fast_command(
+                    command,
+                    &mut partition,
+                    ts,
+                    &mut connection.write_buf,
+                );
+                consumed_total += consumed;
+
+                // Flat-combine the run already resident in this socket buffer:
+                // one reactor becomes the partition's combiner and applies every
+                // consecutive command for the same partition before releasing
+                // the cache line. Redis pipeline order is unchanged, while a P16
+                // hot-key burst pays one mutex acquisition instead of sixteen.
+                if !COMBINE_PARTITION_RUNS || consumed_total == connection.read_buf.len() {
+                    break;
                 }
-                SharedNothingFastCommand::Set(packet) => {
-                    partition.execute_shared_nothing_set(packet.key, packet.value, ts);
-                    connection.write_buf.extend_from_slice(b"+OK\r\n");
-                    packet.consumed
+                let next_unparsed = &connection.read_buf[consumed_total..];
+                let Some(next_command) =
+                    parse_shared_nothing_fast_command(next_unparsed, &parser_config)
+                else {
+                    break;
+                };
+                let next_partition_index = cached_shared_nothing_partition_index(
+                    &mut connection.shared_nothing_route_tag,
+                    &mut connection.shared_nothing_partition,
+                    partitions,
+                    next_command.key(),
+                );
+                if next_partition_index != partition_index {
+                    break;
                 }
-                SharedNothingFastCommand::Incr(packet) => {
-                    partition.execute_shared_nothing_incr_into(
-                        packet.key,
-                        ts,
-                        &mut connection.write_buf,
-                    );
-                    packet.consumed
-                }
-                SharedNothingFastCommand::Lpush(packet) => {
-                    partition.execute_shared_nothing_lpush_one_into(
-                        packet.key,
-                        packet.member,
-                        ts,
-                        &mut connection.write_buf,
-                    );
-                    packet.consumed
-                }
-                SharedNothingFastCommand::Lpop(packet) => {
-                    partition.execute_shared_nothing_lpop_into(
-                        packet.key,
-                        ts,
-                        &mut connection.write_buf,
-                    );
-                    packet.consumed
-                }
-                SharedNothingFastCommand::Hset(packet) => {
-                    partition.execute_shared_nothing_hset_one_into(
-                        packet.key,
-                        packet.field,
-                        packet.value,
-                        ts,
-                        &mut connection.write_buf,
-                    );
-                    packet.consumed
-                }
-                SharedNothingFastCommand::Hget(packet) => {
-                    partition.execute_shared_nothing_hget_into(
-                        packet.key,
-                        packet.member,
-                        ts,
-                        &mut connection.write_buf,
-                    );
-                    packet.consumed
-                }
-            };
+                command = next_command;
+            }
             drop(partition);
-            consumed_total += consumed;
             continue;
         }
 

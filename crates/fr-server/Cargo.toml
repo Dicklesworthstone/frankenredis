@@ -136,6 +136,11 @@ perf-ab-xrevrange-zero-floor = []
 # Controls preserve the current early-cascade route; production builds compile
 # only the front classifier using the same parser and runtime executor.
 perf-ab-lrange-floor = []
+# Measurement-only frozen arm for shared-partition run combining. Control
+# processes set FR_PERF_AB_PARTITION_RUN_COMBINE_ORIG=1; production builds
+# compile only the candidate that holds one partition guard across a pipelined
+# run targeting the same partition.
+perf-ab-partition-run-combine = []
 # Measurement-only frozen arm for replica-prefix extraction A/Bs.
 bench-reference = []
 
