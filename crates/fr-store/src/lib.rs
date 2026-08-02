@@ -19529,6 +19529,120 @@ impl Store {
         self.sadd_impl::<M, true>(key, members, now_ms)
     }
 
+    /// Apply a resident run of single-member SADD commands through one keyspace
+    /// lookup and return one added/not-added result per logical command.
+    ///
+    /// The shared-nothing server calls this only in its fixed default policy,
+    /// where LFU is disabled and every command in the run has the same timestamp.
+    /// If LFU is enabled, fall back to the ordinary per-command path so its random
+    /// sampling sequence remains exact.
+    pub fn sadd_individual_results<M: AsRef<[u8]>>(
+        &mut self,
+        key: &[u8],
+        members: &[M],
+        now_ms: u64,
+    ) -> Result<Vec<u8>, StoreError> {
+        if members.is_empty() {
+            return Ok(Vec::new());
+        }
+        if self.lfu_tracking_enabled() {
+            let mut results = Vec::with_capacity(members.len());
+            for member in members {
+                let added = self.sadd(key, std::slice::from_ref(member), now_ms)?;
+                results.push(u8::from(added != 0));
+            }
+            return Ok(results);
+        }
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
+
+        let max_intset_entries = self.set_max_intset_entries;
+        let max_listpack_entries = self.set_max_listpack_entries;
+        let max_listpack_value = self.set_max_listpack_value;
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                entry.touch(now_ms);
+                let had_set_listpack_encoding = entry.has_flag(ENTRY_FORCE_SET_LISTPACK_ENCODING);
+                let had_set_hashtable_encoding = entry.has_flag(ENTRY_FORCE_SET_HASHTABLE_ENCODING);
+                let (results, added, intset_int_overflow) = match &mut entry.value {
+                    Value::Set(set) => {
+                        let was_intset_encoded = !had_set_listpack_encoding
+                            && !had_set_hashtable_encoding
+                            && Self::set_fits_intset(set, max_intset_entries);
+                        let mut results = Vec::with_capacity(members.len());
+                        let mut added = 0_u64;
+                        for member in members {
+                            let inserted = set.insert_borrowed(member.as_ref(), max_intset_entries);
+                            results.push(u8::from(inserted));
+                            added += u64::from(inserted);
+                        }
+                        let intset_int_overflow = was_intset_encoded
+                            && set.len() > max_intset_entries
+                            && set.all_integers();
+                        (results, added, intset_int_overflow)
+                    }
+                    _ => return Err(StoreError::WrongType),
+                };
+
+                if added != 0 {
+                    Self::mark_digest_stale_fields(
+                        &mut self.digest_stale,
+                        &mut self.digest_mutations,
+                    );
+                    if intset_int_overflow {
+                        entry.set_flag(ENTRY_FORCE_SET_HASHTABLE_ENCODING, true);
+                        entry.set_flag(ENTRY_FORCE_SET_LISTPACK_ENCODING, false);
+                    }
+                    let added_member_max_len = members
+                        .iter()
+                        .map(|member| member.as_ref().len())
+                        .max()
+                        .unwrap_or(0);
+                    Self::refresh_set_encoding_flags_after_insert::<true>(
+                        entry,
+                        added_member_max_len,
+                        max_intset_entries,
+                        max_listpack_entries,
+                        max_listpack_value,
+                    );
+                    for _ in 0..added {
+                        entry.bump_mod_count();
+                    }
+                    self.dirty = self.dirty.saturating_add(added);
+                }
+                Ok(results)
+            }
+            None => {
+                let mut set = SetValue::new();
+                let mut results = Vec::with_capacity(members.len());
+                let mut added = 0_u64;
+                for member in members {
+                    let inserted = set.insert_borrowed(member.as_ref(), max_intset_entries);
+                    results.push(u8::from(inserted));
+                    added += u64::from(inserted);
+                }
+                let intset_int_overflow = set.len() > max_intset_entries && set.all_integers();
+                let mut entry = Entry::new(Value::Set(Box::new(set)), now_ms);
+                if intset_int_overflow {
+                    entry.set_flag(ENTRY_FORCE_SET_HASHTABLE_ENCODING, true);
+                }
+                Self::refresh_set_encoding_flags(
+                    &mut entry,
+                    max_intset_entries,
+                    max_listpack_entries,
+                    max_listpack_value,
+                );
+                for _ in 1..added {
+                    entry.bump_mod_count();
+                }
+                self.internal_entries_insert(key.to_vec(), entry);
+                self.dirty = self.dirty.saturating_add(added);
+                Ok(results)
+            }
+        }
+    }
+
     /// Bench-only baseline: SADD with the prior TWO-probe LFU path (`COLLAPSE = false`) — the LFU
     /// rand is gated behind a separate `self.entries.contains_key(key)` probe BEFORE `get_mut`, as
     /// opposed to production's single `get_mut` that draws the rand on the disjoint `rng_seed` field
