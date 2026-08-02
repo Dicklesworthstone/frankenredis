@@ -2207,7 +2207,6 @@ enum SharedNothingFastCommand<'a> {
     Get(BorrowedPlainGetPacket<'a>),
     Set(BorrowedPlainSetPacket<'a>),
     Incr(BorrowedPlainIncrPacket<'a>),
-    Sadd(BorrowedPlainKeyMemberPacket<'a>),
     Lpush(BorrowedPlainKeyMemberPacket<'a>),
     Rpush(BorrowedPlainKeyMemberPacket<'a>),
     Lpop(BorrowedPlainGetPacket<'a>),
@@ -2227,9 +2226,7 @@ impl SharedNothingFastCommand<'_> {
             Self::Set(packet) => packet.key,
             Self::Incr(packet) => packet.key,
             Self::Lrange(packet) => packet.key,
-            Self::Sadd(packet) | Self::Lpush(packet) | Self::Rpush(packet) | Self::Hget(packet) => {
-                packet.key
-            }
+            Self::Lpush(packet) | Self::Rpush(packet) | Self::Hget(packet) => packet.key,
             Self::Hset(packet) => packet.key,
             Self::Zadd(packet) => packet.key,
             Self::Zpopmin(packet) => packet.key,
@@ -2374,18 +2371,6 @@ fn parse_shared_nothing_fast_command<'a>(
                 },
             ))
         }
-        (3, 4) if command.eq_ignore_ascii_case(b"SADD") => {
-            let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
-            let (member, consumed) =
-                parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
-            Some(SharedNothingFastCommand::Sadd(
-                BorrowedPlainKeyMemberPacket {
-                    consumed,
-                    key,
-                    member,
-                },
-            ))
-        }
         (4, 4) if command.eq_ignore_ascii_case(b"HSET") => {
             let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
             let (field, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
@@ -2459,10 +2444,6 @@ fn execute_shared_nothing_fast_command(
         }
         SharedNothingFastCommand::Incr(packet) => {
             partition.execute_shared_nothing_incr_into(packet.key, ts, out);
-            packet.consumed
-        }
-        SharedNothingFastCommand::Sadd(packet) => {
-            partition.execute_shared_nothing_sadd_many_into(packet.key, &[packet.member], ts, out);
             packet.consumed
         }
         SharedNothingFastCommand::Lpush(packet) => {
@@ -2560,41 +2541,6 @@ fn dispatch_shared_nothing_frames_impl<const COMBINE_PARTITION_RUNS: bool>(
         let unparsed = &connection.read_buf[consumed_total..];
 
         if let Some(mut command) = parse_shared_nothing_fast_command(unparsed, &parser_config) {
-            if COMBINE_PARTITION_RUNS && let SharedNothingFastCommand::Sadd(first) = &command {
-                let key = first.key;
-                let mut run_consumed = first.consumed;
-                let mut members = Vec::with_capacity(16);
-                members.push(first.member);
-                while let Some(SharedNothingFastCommand::Sadd(next)) =
-                    parse_shared_nothing_fast_command(&unparsed[run_consumed..], &parser_config)
-                {
-                    if next.key != key {
-                        break;
-                    }
-                    run_consumed += next.consumed;
-                    members.push(next.member);
-                    if run_consumed == unparsed.len() {
-                        break;
-                    }
-                }
-                let partition_index = cached_shared_nothing_partition_index(
-                    &mut connection.shared_nothing_route_tag,
-                    &mut connection.shared_nothing_partition,
-                    partitions,
-                    key,
-                );
-                partitions
-                    .lock_partition(partition_index)
-                    .execute_shared_nothing_sadd_many_into(
-                        key,
-                        &members,
-                        ts,
-                        &mut connection.write_buf,
-                    );
-                consumed_total += run_consumed;
-                continue;
-            }
-
             if COMBINE_PARTITION_RUNS && let SharedNothingFastCommand::Rpush(first) = &command {
                 let key = first.key;
                 let mut run_consumed = first.consumed;

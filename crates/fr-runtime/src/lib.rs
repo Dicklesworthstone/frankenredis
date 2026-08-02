@@ -8391,36 +8391,6 @@ impl Runtime {
         reply.encode_into(out);
     }
 
-    /// Execute adjacent single-member SADD commands with one store lookup while
-    /// preserving the integer reply for every logical command.
-    #[inline]
-    pub fn execute_shared_nothing_sadd_many_into<M: AsRef<[u8]>>(
-        &mut self,
-        key: &[u8],
-        members: &[M],
-        now_ms: u64,
-        out: &mut Vec<u8>,
-    ) {
-        self.server.store.stat_total_commands_processed += members.len() as u64;
-        match self
-            .server
-            .store
-            .sadd_individual_results(key, members, now_ms)
-        {
-            Ok(results) => {
-                for added in results {
-                    out.extend_from_slice(if added == 0 { b":0\r\n" } else { b":1\r\n" });
-                }
-            }
-            Err(err) => {
-                let reply = CommandError::Store(err).to_resp();
-                for _ in members {
-                    reply.encode_into(out);
-                }
-            }
-        }
-    }
-
     #[inline]
     pub fn execute_shared_nothing_lpush_one_into(
         &mut self,
