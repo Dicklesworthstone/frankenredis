@@ -2212,6 +2212,8 @@ enum SharedNothingFastCommand<'a> {
     Lrange(BorrowedPlainKeyRangePacket<'a>),
     Hset(BorrowedPlainHsetPacket<'a>),
     Hget(BorrowedPlainKeyMemberPacket<'a>),
+    Zadd(BorrowedPlainKeyRangePacket<'a>),
+    Zpopmin(BorrowedPlainGetPacket<'a>),
 }
 
 impl SharedNothingFastCommand<'_> {
@@ -2224,6 +2226,8 @@ impl SharedNothingFastCommand<'_> {
             Self::Lrange(packet) => packet.key,
             Self::Lpush(packet) | Self::Hget(packet) => packet.key,
             Self::Hset(packet) => packet.key,
+            Self::Zadd(packet) => packet.key,
+            Self::Zpopmin(packet) => packet.key,
         }
     }
 }
@@ -2243,6 +2247,21 @@ fn shared_nothing_partition_run_combine_enabled() -> bool {
 #[cfg(not(feature = "perf-ab-partition-run-combine"))]
 #[inline(always)]
 const fn shared_nothing_partition_run_combine_enabled() -> bool {
+    true
+}
+
+#[cfg(feature = "perf-ab-shared-zset-direct")]
+#[inline]
+fn shared_nothing_zset_direct_enabled() -> bool {
+    static ORIGINAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    !*ORIGINAL.get_or_init(|| {
+        std::env::var("FR_PERF_AB_SHARED_ZSET_DIRECT_ORIG").is_ok_and(|value| value == "1")
+    })
+}
+
+#[cfg(not(feature = "perf-ab-shared-zset-direct"))]
+#[inline(always)]
+const fn shared_nothing_zset_direct_enabled() -> bool {
     true
 }
 
@@ -2270,7 +2289,7 @@ fn parse_shared_nothing_fast_command<'a>(
         return None;
     }
     let command_len = match tail[1] {
-        b'3'..=b'6' => usize::from(tail[1] - b'0'),
+        b'3'..=b'7' => usize::from(tail[1] - b'0'),
         _ => return None,
     };
     if config.max_bulk_len < command_len {
@@ -2366,6 +2385,30 @@ fn parse_shared_nothing_fast_command<'a>(
                 },
             ))
         }
+        (4, 4) if command.eq_ignore_ascii_case(b"ZADD") && shared_nothing_zset_direct_enabled() => {
+            let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+            let (score, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+            let (member, consumed) =
+                parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+            Some(SharedNothingFastCommand::Zadd(
+                BorrowedPlainKeyRangePacket {
+                    consumed,
+                    key,
+                    start: score,
+                    end: member,
+                },
+            ))
+        }
+        (2, 7)
+            if command.eq_ignore_ascii_case(b"ZPOPMIN") && shared_nothing_zset_direct_enabled() =>
+        {
+            let (key, consumed) =
+                parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+            Some(SharedNothingFastCommand::Zpopmin(BorrowedPlainGetPacket {
+                consumed,
+                key,
+            }))
+        }
         _ => None,
     }
 }
@@ -2426,6 +2469,27 @@ fn execute_shared_nothing_fast_command(
         }
         SharedNothingFastCommand::Hget(packet) => {
             partition.execute_shared_nothing_hget_into(packet.key, packet.member, ts, out);
+            packet.consumed
+        }
+        SharedNothingFastCommand::Zadd(packet) => {
+            if !partition.execute_shared_nothing_zadd_one_into(
+                packet.key,
+                packet.start,
+                packet.end,
+                ts,
+                out,
+            ) {
+                if let Some(command_wire) = wire.get(..packet.consumed) {
+                    let reply = partition.execute_bytes(command_wire, ts);
+                    out.extend_from_slice(&reply);
+                } else {
+                    out.extend_from_slice(SHARED_NOTHING_PROTOCOL_ERROR);
+                }
+            }
+            packet.consumed
+        }
+        SharedNothingFastCommand::Zpopmin(packet) => {
+            partition.execute_shared_nothing_zpopmin_into(packet.key, ts, out);
             packet.consumed
         }
     }

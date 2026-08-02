@@ -8455,6 +8455,50 @@ impl Runtime {
         }
     }
 
+    #[inline]
+    pub fn execute_shared_nothing_zadd_one_into(
+        &mut self,
+        key: &[u8],
+        score_arg: &[u8],
+        member: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) -> bool {
+        let Ok(score) = fr_command::parse_score_f64_arg(score_arg) else {
+            return false;
+        };
+        self.server.store.stat_total_commands_processed += 1;
+        match self
+            .server
+            .store
+            .zadd_plain_owned(key, vec![(score, member.to_vec())], now_ms)
+        {
+            Ok(added) => encode_nonnegative_integer_reply(added as u64, out),
+            Err(err) => CommandError::Store(err).to_resp().encode_into(out),
+        }
+        true
+    }
+
+    #[inline]
+    pub fn execute_shared_nothing_zpopmin_into(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) {
+        self.server.store.stat_total_commands_processed += 1;
+        match self.server.store.zpopmin(key, now_ms) {
+            Ok(Some((member, score))) => {
+                out.extend_from_slice(b"*2\r\n");
+                encode_bulk_string_slice(Some(&member), false, out);
+                let score = fr_store::redis_score_to_string(score);
+                encode_bulk_string_slice(Some(score.as_bytes()), false, out);
+            }
+            Ok(None) => out.extend_from_slice(b"*0\r\n"),
+            Err(err) => CommandError::Store(err).to_resp().encode_into(out),
+        }
+    }
+
     pub fn execute_plain_set_borrowed(
         &mut self,
         key: &[u8],

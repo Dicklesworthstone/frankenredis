@@ -141,6 +141,10 @@ perf-ab-lrange-floor = []
 # compile only the candidate that holds one partition guard across a pipelined
 # run targeting the same partition.
 perf-ab-partition-run-combine = []
+# Measurement-only frozen arm for the direct shared-nothing sorted-set path.
+# Controls set FR_PERF_AB_SHARED_ZSET_DIRECT_ORIG=1 and retain generic runtime
+# dispatch for ZADD/ZPOPMIN in the same ELF.
+perf-ab-shared-zset-direct = []
 # Measurement-only frozen arm for replica-prefix extraction A/Bs.
 bench-reference = []
 
