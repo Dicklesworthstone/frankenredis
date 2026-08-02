@@ -718,40 +718,182 @@ impl ShardedSetGetCommand {
     }
 }
 
+/// Longest command name in the partition-local table (`ZREMRANGEBYSCORE`,
+/// `ZREVRANGEBYSCORE`). Anything longer cannot be in it, so the case-fold buffer
+/// doubles as the first rejection test.
+const REACTOR_COMMAND_NAME_MAX: usize = 16;
+
 /// Commands the per-core reactor path will execute against a single partition.
 ///
 /// This is deliberately WIDER than [`sharded_single_key_command`], which also
 /// gates the older handoff pool and is left alone.
 ///
-/// The additions are O(N) single-key reads and deterministic set operations,
-/// and they are the point rather than an afterthought. redis-server executes
-/// every command on one thread, so a large `LRANGE` or variadic `SADD` stalls
-/// EVERY other client for its whole duration -- head-of-line blocking that no
-/// amount of `io-threads` can remove, because io-threads only parallelize socket
-/// I/O and not execution. A partitioned keyspace confines that work to the one
-/// partition owning the key; clients whose keys live elsewhere never see it.
+/// WHY THE TABLE IS THIS BIG
+/// -------------------------
+/// redis-server executes every command on ONE thread. `io-threads` parallelizes
+/// socket I/O and never execution, so one `ZRANGEBYSCORE` over a large sorted
+/// set or one `BITPOS` over a large string stalls EVERY other client for its
+/// whole duration. A partitioned keyspace confines that work to the single
+/// partition owning the key. That inability is structural, not a constant
+/// factor -- but it only pays off for commands actually admitted here, and
+/// everything NOT in this table is answered with `SHARED_NOTHING_UNSUPPORTED`.
+/// So the width of this table is the width of the workload the topology can
+/// serve at all, and the entire sorted-set and bitmap families were previously
+/// outside it.
 ///
-/// Every command here must take its key at argv[1] and touch NO other key, or it
-/// would reach outside the partition it locked. That is why SORT is absent (its
-/// BY/GET patterns dereference other keys) and why the multi-key set operations
-/// (SINTER/SUNION/SDIFF) are absent.
+/// ADMISSION RULE
+/// --------------
+/// Every command here must take its key at argv[1] and touch NO other key, or
+/// it would reach outside the partition it locked. Excluded for that reason:
+///   * SORT (BY/GET patterns dereference other keys), SINTER/SUNION/SDIFF and
+///     SINTERCARD, ZRANGESTORE and the Z*STORE family, SMOVE, RPOPLPUSH, LMOVE,
+///     COPY, RENAME, MSET/MGET, and BITOP.
+///   * MOVE and anything else that reaches across databases.
+///   * OBJECT and MEMORY USAGE, whose key is at argv[2], not argv[1]; routing
+///     them on argv[1] would lock the wrong partition.
+///   * BLPOP/BZPOPMIN and the rest of the blocking family, which would park a
+///     whole reactor.
+///   * SPOP, SRANDMEMBER, ZRANDMEMBER and HRANDFIELD, which are nondeterministic
+///     -- the same exclusion the deterministic set commands were admitted under.
+///   * DUMP/RESTORE, whose serialized payloads are not compared against the
+///     incumbent anywhere, so they would be admitted untested.
+/// The variadic key-list commands (DEL/UNLINK/EXISTS/TOUCH) are admitted only at
+/// one key, which [`reactor_partition_local_command`] enforces on argc.
 fn reactor_single_key_command(command: &[u8]) -> bool {
-    sharded_single_key_command(command)
-        || command.eq_ignore_ascii_case(b"LRANGE")
-        || command.eq_ignore_ascii_case(b"HGETALL")
-        || command.eq_ignore_ascii_case(b"LLEN")
-        || command.eq_ignore_ascii_case(b"HLEN")
-        || command.eq_ignore_ascii_case(b"BITCOUNT")
-        || command.eq_ignore_ascii_case(b"STRLEN")
-        || command.eq_ignore_ascii_case(b"GETRANGE")
-        || command.eq_ignore_ascii_case(b"SETRANGE")
-        || command.eq_ignore_ascii_case(b"APPEND")
-        || command.eq_ignore_ascii_case(b"SADD")
-        || command.eq_ignore_ascii_case(b"SCARD")
-        || command.eq_ignore_ascii_case(b"SISMEMBER")
-        || command.eq_ignore_ascii_case(b"SMISMEMBER")
-        || command.eq_ignore_ascii_case(b"SMEMBERS")
-        || command.eq_ignore_ascii_case(b"SREM")
+    // The seven hottest names short-circuit before the case fold, so the common
+    // GET/SET path pays exactly what it did before this table existed.
+    if sharded_single_key_command(command) {
+        return true;
+    }
+    // Case-fold into a fixed stack buffer so the table below is one `match`,
+    // which lowers to a switch on length plus a memcmp tree instead of the
+    // linear chain of `eq_ignore_ascii_case` calls a list this long would need.
+    let mut upper = [0u8; REACTOR_COMMAND_NAME_MAX];
+    let Some(folded) = upper.get_mut(..command.len()) else {
+        return false;
+    };
+    for (dst, src) in folded.iter_mut().zip(command) {
+        *dst = src.to_ascii_uppercase();
+    }
+    matches!(
+        &upper[..command.len()],
+        // string + bitmap. BITCOUNT/BITPOS are the shape the whole partitioned
+        // design pays off best on: O(N) in COMPUTE, one integer of reply.
+        b"APPEND"
+            | b"BITCOUNT"
+            | b"BITFIELD"
+            | b"BITFIELD_RO"
+            | b"BITPOS"
+            | b"DECR"
+            | b"DECRBY"
+            | b"GETBIT"
+            | b"GETDEL"
+            | b"GETEX"
+            | b"GETRANGE"
+            | b"GETSET"
+            | b"INCRBY"
+            | b"INCRBYFLOAT"
+            | b"PSETEX"
+            | b"SETBIT"
+            | b"SETEX"
+            | b"SETNX"
+            | b"SETRANGE"
+            | b"STRLEN"
+            | b"SUBSTR"
+            // hash
+            | b"HDEL"
+            | b"HEXISTS"
+            | b"HGETALL"
+            | b"HINCRBY"
+            | b"HINCRBYFLOAT"
+            | b"HKEYS"
+            | b"HLEN"
+            | b"HMGET"
+            | b"HMSET"
+            | b"HSCAN"
+            | b"HSETNX"
+            | b"HSTRLEN"
+            | b"HVALS"
+            // list
+            | b"LINDEX"
+            | b"LINSERT"
+            | b"LLEN"
+            | b"LPOS"
+            | b"LPUSHX"
+            | b"LRANGE"
+            | b"LREM"
+            | b"LSET"
+            | b"LTRIM"
+            | b"RPOP"
+            | b"RPUSH"
+            | b"RPUSHX"
+            // set
+            | b"SADD"
+            | b"SCARD"
+            | b"SISMEMBER"
+            | b"SMEMBERS"
+            | b"SMISMEMBER"
+            | b"SREM"
+            | b"SSCAN"
+            // sorted set
+            | b"ZADD"
+            | b"ZCARD"
+            | b"ZCOUNT"
+            | b"ZINCRBY"
+            | b"ZLEXCOUNT"
+            | b"ZMSCORE"
+            | b"ZPOPMAX"
+            | b"ZPOPMIN"
+            | b"ZRANGE"
+            | b"ZRANGEBYLEX"
+            | b"ZRANGEBYSCORE"
+            | b"ZRANK"
+            | b"ZREM"
+            | b"ZREMRANGEBYLEX"
+            | b"ZREMRANGEBYRANK"
+            | b"ZREMRANGEBYSCORE"
+            | b"ZREVRANGE"
+            | b"ZREVRANGEBYLEX"
+            | b"ZREVRANGEBYSCORE"
+            | b"ZREVRANK"
+            | b"ZSCAN"
+            | b"ZSCORE"
+            // key lifetime, all single-key and default-DB
+            | b"EXPIRE"
+            | b"EXPIREAT"
+            | b"EXPIRETIME"
+            | b"PERSIST"
+            | b"PEXPIRE"
+            | b"PEXPIREAT"
+            | b"PEXPIRETIME"
+            | b"PTTL"
+            | b"TTL"
+            | b"TYPE"
+    )
+}
+
+/// Commands whose keys are the whole of `argv[1..]`, and which therefore stay
+/// inside one partition only when exactly one key is given.
+fn reactor_variadic_key_list_command(command: &[u8]) -> bool {
+    command.eq_ignore_ascii_case(b"DEL")
+        || command.eq_ignore_ascii_case(b"UNLINK")
+        || command.eq_ignore_ascii_case(b"EXISTS")
+        || command.eq_ignore_ascii_case(b"TOUCH")
+}
+
+/// Whether a parsed command may run against the single partition owning
+/// `argv[1]`.
+///
+/// The `<= 2` bound rather than `== 2` is deliberate: a bare `DEL` with no key
+/// stays admitted so the partition's generic dispatcher produces Redis's own
+/// arity error, instead of this path masking it with the shared-nothing
+/// unsupported-command reply.
+fn reactor_partition_local_command(args: &[&[u8]]) -> bool {
+    let Some(name) = args.first() else {
+        return false;
+    };
+    reactor_single_key_command(name)
+        || (args.len() <= 2 && reactor_variadic_key_list_command(name))
 }
 
 fn sharded_single_key_command(command: &[u8]) -> bool {
@@ -2312,10 +2454,7 @@ fn dispatch_shared_nothing_frames(
                 {
                     continue;
                 }
-                if borrowed_args
-                    .first()
-                    .is_some_and(|name| reactor_single_key_command(name))
-                {
+                if reactor_partition_local_command(&borrowed_args) {
                     let key = borrowed_args.get(1).copied().unwrap_or_default();
                     let partition_index = cached_shared_nothing_partition_index(
                         &mut connection.shared_nothing_route_tag,
@@ -28897,6 +29036,24 @@ mod tests {
             b"SMISMEMBER",
             b"SMEMBERS",
             b"SREM",
+            // The families the reactor path could not serve at all before.
+            b"BITPOS",
+            b"bitfield_ro",
+            b"SETBIT",
+            b"ZADD",
+            b"ZRANGEBYSCORE",
+            b"zremrangebyscore",
+            b"ZCOUNT",
+            b"ZSCORE",
+            b"ZSCAN",
+            b"HMGET",
+            b"HSCAN",
+            b"LPOS",
+            b"RPUSH",
+            b"LTRIM",
+            b"SSCAN",
+            b"TTL",
+            b"EXPIRE",
         ] {
             assert!(
                 crate::reactor_single_key_command(command),
@@ -28904,7 +29061,41 @@ mod tests {
             );
         }
 
-        for command in [b"SMOVE".as_slice(), b"MGET", b"SINTER", b"SORT", b"EVAL"] {
+        for command in [
+            b"SMOVE".as_slice(),
+            b"MGET",
+            b"SINTER",
+            b"SORT",
+            b"EVAL",
+            // Multi-key writes that would reach outside the locked partition.
+            b"ZRANGESTORE",
+            b"ZUNIONSTORE",
+            b"BITOP",
+            b"SINTERCARD",
+            b"RPOPLPUSH",
+            b"COPY",
+            // Key at argv[2], so routing on argv[1] would lock the wrong one.
+            b"OBJECT",
+            b"MEMORY",
+            // Nondeterministic member selection.
+            b"SPOP",
+            b"SRANDMEMBER",
+            b"ZRANDMEMBER",
+            b"HRANDFIELD",
+            // Would park a whole reactor.
+            b"BLPOP",
+            b"BZPOPMIN",
+            // Cross-partition by construction.
+            b"KEYS",
+            b"SCAN",
+            b"DBSIZE",
+            b"FLUSHDB",
+            b"RANDOMKEY",
+            b"MOVE",
+            // Admitted nowhere until their payloads are pinned against 7.2.4.
+            b"DUMP",
+            b"RESTORE",
+        ] {
             assert!(
                 !crate::reactor_single_key_command(command),
                 "{command:?} is not safe or reachable as partition-local work"
@@ -28913,6 +29104,37 @@ mod tests {
         assert!(
             !crate::sharded_single_key_command(b"BITCOUNT"),
             "the older handoff pool must keep its closed command family"
+        );
+
+        // The variadic key-list commands are partition-local at exactly one key
+        // and cross-partition at two, so admission has to read argc, not just
+        // the name. A two-key DEL admitted here would delete only whichever key
+        // happened to live in the partition argv[1] routed to.
+        for name in [b"DEL".as_slice(), b"UNLINK", b"EXISTS", b"TOUCH"] {
+            assert!(
+                !crate::reactor_single_key_command(name),
+                "{name:?} must not be admitted on its name alone"
+            );
+            assert!(
+                crate::reactor_partition_local_command(&[name, b"k"]),
+                "{name:?} over one key stays on one partition"
+            );
+            assert!(
+                !crate::reactor_partition_local_command(&[name, b"k1", b"k2"]),
+                "{name:?} over two keys reaches outside the locked partition"
+            );
+            assert!(
+                crate::reactor_partition_local_command(&[name]),
+                "{name:?} with no key must reach the partition's own arity error"
+            );
+        }
+        assert!(
+            !crate::reactor_partition_local_command(&[]),
+            "an empty command is not partition-local work"
+        );
+        assert!(
+            crate::reactor_partition_local_command(&[b"ZADD", b"k", b"1", b"m"]),
+            "argc must not narrow the fixed-key commands"
         );
     }
 

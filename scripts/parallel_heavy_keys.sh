@@ -40,6 +40,8 @@ KEYS="${KEYS:-128}"            # distinct heavy keys, spread over partitions
 VALBYTES="${VALBYTES:-1048576}"  # per-key string size for the BITCOUNT fixture
 LISTLEN="${LISTLEN:-2000}"     # per-key list length for the LRANGE fixture
 HASHFIELDS="${HASHFIELDS:-200}"  # per-key field count for the HGETALL fixture
+ZSETLEN="${ZSETLEN:-2000}"     # per-key member count for the sorted-set fixtures
+ZSCANCOUNT="${ZSCANCOUNT:-2000}" # elements ZSCAN walks per call before filtering
 N="${N:-40000}"
 CONNS="${CONNS:-64}"
 ROUNDS="${ROUNDS:-3}"
@@ -50,6 +52,7 @@ FR_BIN="${FR_BIN:-/data/tmp/cargo-target/release/frankenredis}"
 SERVER_CPUS="${SERVER_CPUS:-0-15,32-47}"
 CLIENT_CPUS="${CLIENT_CPUS:-16-31,48-63}"
 FIXTURES="${FIXTURES:-bitcount lrange}"
+export ZSCANCOUNT   # read back by the raw-socket reply probe
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BENCH="$ROOT/legacy_redis_code/redis/src/redis-benchmark"
@@ -113,15 +116,17 @@ seed() { # $1=port $2=fixture
   # them; the multi-member forms route through the generic partition-local path
   # so one command seeds a whole key. Seeding must use commands the engine under
   # test actually accepts, or the fixture silently ends up empty.
-  local members hfields
+  local members hfields zmembers
   members=$(seq 1 "$LISTLEN" | tr '\n' ' ')
   hfields=$(awk -v n="$HASHFIELDS" 'BEGIN{for(i=0;i<n;i++) printf "f%d v%d ", i, i}')
+  zmembers=$(awk -v n="$ZSETLEN" 'BEGIN{for(i=0;i<n;i++) printf "%d m%06d ", i, i}')
   for i in $(seq 0 $((KEYS - 1))); do
     name=$(printf '%s:%012d' "$fx" "$i")
     case "$fx" in
-      bitcount) "$CLI" -p "$port" SETRANGE "$name" $((VALBYTES - 1)) x >/dev/null ;;
+      bitcount|bitpos) "$CLI" -p "$port" SETRANGE "$name" $((VALBYTES - 1)) x >/dev/null ;;
       lrange)   "$CLI" -p "$port" LPUSH "$name" $members >/dev/null ;;
       hgetall)  "$CLI" -p "$port" HSET  "$name" $hfields >/dev/null ;;
+      zrangebyscore|zscan) "$CLI" -p "$port" ZADD "$name" $zmembers >/dev/null ;;
     esac
   done
 }
@@ -132,12 +137,15 @@ verify_seed() { # $1=port $2=label $3=fixture -> prints measurement, exits on mi
   local port="$1" label="$2" fx="$3" probe want got
   probe=$(printf '%s:%012d' "$fx" 0)
   case "$fx" in
-    bitcount) got=$("$CLI" -p "$port" STRLEN "$probe"); want="$VALBYTES"
+    bitcount|bitpos) got=$("$CLI" -p "$port" STRLEN "$probe"); want="$VALBYTES"
               echo "    $label  STRLEN $probe = $got (want $want)" ;;
     lrange)   got=$("$CLI" -p "$port" LLEN "$probe");   want="$LISTLEN"
               echo "    $label  LLEN   $probe = $got (want $want)" ;;
     hgetall)  got=$("$CLI" -p "$port" HLEN "$probe");   want="$HASHFIELDS"
               echo "    $label  HLEN   $probe = $got (want $want)" ;;
+    zrangebyscore|zscan)
+              got=$("$CLI" -p "$port" ZCARD "$probe");  want="$ZSETLEN"
+              echo "    $label  ZCARD  $probe = $got (want $want)" ;;
   esac
   [ "$got" = "$want" ] || { echo "FAIL: $label seed wrong for $fx: got $got want $want" >&2; exit 8; }
 }
@@ -150,16 +158,21 @@ probe_reply() { # $1=port $2=label $3=fixture
 import socket, sys
 port, label, fx, key = int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
 s = socket.create_connection(("127.0.0.1", port)); s.settimeout(10)
+import os
 args = {"bitcount": ["BITCOUNT", key],
+        "bitpos":   ["BITPOS", key, "1"],
         "lrange":   ["LRANGE", key, "0", "99"],
-        "hgetall":  ["HGETALL", key]}[fx]
+        "hgetall":  ["HGETALL", key],
+        "zrangebyscore": ["ZRANGEBYSCORE", key, "-inf", "+inf"],
+        "zscan":    ["ZSCAN", key, "0", "MATCH", "zz*",
+                     "COUNT", os.environ.get("ZSCANCOUNT", "2000")]}[fx]
 out = f"*{len(args)}\r\n".encode()
 for a in args:
     out += b"$%d\r\n%s\r\n" % (len(a), a.encode())
 s.sendall(out)
 r = s.recv(256)
 head = r[:1].decode(errors="replace")
-want = ":" if fx == "bitcount" else "*"
+want = ":" if fx in ("bitcount", "bitpos") else "*"
 print(f"    {label}  {' '.join(args[:2])} -> {r[:48]!r}")
 if head != want:
     print(f"FAIL: {label} returned {head!r} for {fx}, expected {want!r} "
@@ -189,8 +202,18 @@ RES=$(mktemp)
 for FX in $FIXTURES; do
   case "$FX" in
     bitcount) FXCMD="BITCOUNT bitcount:__rand_int__" ;;
+    # BITPOS is BITCOUNT's structural sibling: O(N) in COMPUTE over the same
+    # 1 MB string, one integer of reply. Seeded all-zero with a single set byte
+    # at the very end, so `BITPOS key 1` has to scan the whole value.
+    bitpos)   FXCMD="BITPOS bitpos:__rand_int__ 1" ;;
     lrange)   FXCMD="LRANGE lrange:__rand_int__ 0 99" ;;
     hgetall)  FXCMD="HGETALL hgetall:__rand_int__" ;;
+    # Large reply, like LRANGE: separates "we execute in parallel" from "we also
+    # ship bytes" for the sorted-set family.
+    zrangebyscore) FXCMD="ZRANGEBYSCORE zrangebyscore:__rand_int__ -inf +inf" ;;
+    # The compute-per-reply-byte extreme: walks ZSCANCOUNT members and the MATCH
+    # filters every one of them out, so the reply is an empty array.
+    zscan)    FXCMD="ZSCAN zscan:__rand_int__ 0 MATCH zz* COUNT $ZSCANCOUNT" ;;
   esac
   echo "== fixture: $FX  ($FXCMD) =="
   echo "  seeding $KEYS keys on each engine..."

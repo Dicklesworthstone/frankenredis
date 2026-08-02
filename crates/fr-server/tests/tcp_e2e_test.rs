@@ -1133,6 +1133,182 @@ fn shared_nothing_heavy_single_key_reads_match_legacy_redis() {
     );
 }
 
+/// The sorted-set and bitmap families, which the reactor path could not serve
+/// at all until they were admitted as partition-local work.
+///
+/// These are the highest-value additions for a partitioned keyspace and the
+/// riskiest, for opposite reasons. Highest-value because `BITPOS`, `ZCOUNT` and
+/// `ZLEXCOUNT` are O(N) in COMPUTE and return ONE integer, which is exactly the
+/// shape a single-threaded incumbent cannot spread over cores. Riskiest because
+/// admission is a routing decision: every command below is trusted to take its
+/// key at argv[1] and touch nothing else, and a mistake there executes against
+/// the wrong partition rather than failing loudly. So each family is driven
+/// across keys that provably span partitions and compared byte-for-byte with a
+/// live 7.2.4 -- including score formatting, which is where fr and Redis have
+/// historically disagreed on doubles.
+#[test]
+fn shared_nothing_wide_partition_local_families_match_legacy_redis() {
+    let fr_port = reserve_port();
+    let redis_port = reserve_port();
+    let _fr_server = spawn_frankenredis_sharded_set_get(fr_port, 8);
+    let _redis_server = spawn_legacy_redis(redis_port);
+    let mut fr = BufferedTcpClient::connect(fr_port);
+    let mut redis = BufferedTcpClient::connect(redis_port);
+
+    let mut pipeline = Vec::new();
+    let mut count = 0usize;
+    let push = |cmd: &[&[u8]], pipeline: &mut Vec<u8>, count: &mut usize| {
+        pipeline.extend_from_slice(&encode_command(cmd));
+        *count += 1;
+    };
+
+    let mut partitions = std::collections::HashSet::new();
+    for i in 0..16u32 {
+        let z = format!("wide:z:{i}");
+        let s = format!("wide:s:{i}");
+        let h = format!("wide:h:{i}");
+        let l = format!("wide:l:{i}");
+        for key in [&z, &s, &h, &l] {
+            partitions.insert(usize::from(fr_store::crc16_slot(key.as_bytes())) % 8);
+        }
+        let (z, s, h, l) = (z.as_bytes(), s.as_bytes(), h.as_bytes(), l.as_bytes());
+
+        // sorted set: build, then every range/count/rank shape, then trim.
+        push(
+            &[b"ZADD", z, b"1", b"a", b"2.5", b"b", b"3", b"c", b"10", b"d"],
+            &mut pipeline,
+            &mut count,
+        );
+        push(&[b"ZADD", z, b"GT", b"CH", b"9", b"a"], &mut pipeline, &mut count);
+        push(&[b"ZINCRBY", z, b"1.5", b"b"], &mut pipeline, &mut count);
+        push(&[b"ZCARD", z], &mut pipeline, &mut count);
+        push(&[b"ZSCORE", z, b"b"], &mut pipeline, &mut count);
+        push(&[b"ZMSCORE", z, b"a", b"absent", b"d"], &mut pipeline, &mut count);
+        push(&[b"ZCOUNT", z, b"2", b"(10"], &mut pipeline, &mut count);
+        push(&[b"ZCOUNT", z, b"-inf", b"+inf"], &mut pipeline, &mut count);
+        push(&[b"ZLEXCOUNT", z, b"-", b"+"], &mut pipeline, &mut count);
+        push(&[b"ZRANGE", z, b"0", b"-1", b"WITHSCORES"], &mut pipeline, &mut count);
+        push(&[b"ZRANGE", z, b"(1", b"+inf", b"BYSCORE", b"LIMIT", b"1", b"2"], &mut pipeline, &mut count);
+        push(&[b"ZRANGEBYSCORE", z, b"2", b"+inf", b"WITHSCORES"], &mut pipeline, &mut count);
+        push(&[b"ZREVRANGEBYSCORE", z, b"+inf", b"2"], &mut pipeline, &mut count);
+        push(&[b"ZRANGEBYLEX", z, b"[a", b"(d"], &mut pipeline, &mut count);
+        push(&[b"ZREVRANGEBYLEX", z, b"+", b"-"], &mut pipeline, &mut count);
+        push(&[b"ZREVRANGE", z, b"0", b"1", b"WITHSCORES"], &mut pipeline, &mut count);
+        push(&[b"ZRANK", z, b"c"], &mut pipeline, &mut count);
+        push(&[b"ZREVRANK", z, b"c"], &mut pipeline, &mut count);
+        push(&[b"ZSCAN", z, b"0"], &mut pipeline, &mut count);
+        push(&[b"ZPOPMIN", z], &mut pipeline, &mut count);
+        push(&[b"ZPOPMAX", z, b"2"], &mut pipeline, &mut count);
+        push(&[b"ZREM", z, b"c"], &mut pipeline, &mut count);
+        push(&[b"ZREMRANGEBYSCORE", z, b"-inf", b"+inf"], &mut pipeline, &mut count);
+        push(&[b"ZCARD", z], &mut pipeline, &mut count);
+
+        // bitmap: BITPOS is BITCOUNT's sibling -- O(N) compute, one integer out.
+        push(&[b"SETBIT", s, b"100", b"1"], &mut pipeline, &mut count);
+        push(&[b"SETBIT", s, b"7", b"1"], &mut pipeline, &mut count);
+        push(&[b"GETBIT", s, b"7"], &mut pipeline, &mut count);
+        push(&[b"GETBIT", s, b"9999"], &mut pipeline, &mut count);
+        push(&[b"BITPOS", s, b"1"], &mut pipeline, &mut count);
+        push(&[b"BITPOS", s, b"0", b"0", b"-1"], &mut pipeline, &mut count);
+        push(&[b"BITCOUNT", s, b"0", b"-1", b"BIT"], &mut pipeline, &mut count);
+        push(
+            &[b"BITFIELD", s, b"INCRBY", b"u8", b"0", b"5", b"GET", b"u8", b"0"],
+            &mut pipeline,
+            &mut count,
+        );
+        push(&[b"BITFIELD_RO", s, b"GET", b"u8", b"0"], &mut pipeline, &mut count);
+
+        // string arithmetic and expiry, both single-key.
+        push(&[b"SETNX", s, b"nope"], &mut pipeline, &mut count);
+        push(&[b"INCRBY", format!("wide:n:{i}").as_bytes(), b"7"], &mut pipeline, &mut count);
+        push(&[b"INCRBYFLOAT", format!("wide:n:{i}").as_bytes(), b"0.25"], &mut pipeline, &mut count);
+        push(&[b"DECRBY", format!("wide:n:{i}").as_bytes(), b"2"], &mut pipeline, &mut count);
+        push(&[b"EXPIRE", s, b"1000"], &mut pipeline, &mut count);
+        push(&[b"TTL", s], &mut pipeline, &mut count);
+        push(&[b"PERSIST", s], &mut pipeline, &mut count);
+        push(&[b"TTL", s], &mut pipeline, &mut count);
+        push(&[b"TYPE", s], &mut pipeline, &mut count);
+        push(&[b"GETDEL", format!("wide:n:{i}").as_bytes()], &mut pipeline, &mut count);
+
+        // hash beyond HSET/HGET/HGETALL.
+        push(&[b"HSET", h, b"f1", b"1", b"f2", b"two"], &mut pipeline, &mut count);
+        push(&[b"HMGET", h, b"f1", b"absent", b"f2"], &mut pipeline, &mut count);
+        push(&[b"HINCRBY", h, b"f1", b"4"], &mut pipeline, &mut count);
+        push(&[b"HINCRBYFLOAT", h, b"f1", b"0.5"], &mut pipeline, &mut count);
+        push(&[b"HSTRLEN", h, b"f2"], &mut pipeline, &mut count);
+        push(&[b"HEXISTS", h, b"f2"], &mut pipeline, &mut count);
+        push(&[b"HSETNX", h, b"f2", b"ignored"], &mut pipeline, &mut count);
+        push(&[b"HKEYS", h], &mut pipeline, &mut count);
+        push(&[b"HVALS", h], &mut pipeline, &mut count);
+        push(&[b"HSCAN", h, b"0", b"COUNT", b"100"], &mut pipeline, &mut count);
+        push(&[b"HDEL", h, b"f1"], &mut pipeline, &mut count);
+
+        // list beyond LPUSH/LPOP/LRANGE/LLEN.
+        push(&[b"RPUSH", l, b"a", b"b", b"c", b"b"], &mut pipeline, &mut count);
+        push(&[b"LPOS", l, b"b"], &mut pipeline, &mut count);
+        push(&[b"LPOS", l, b"b", b"RANK", b"-1"], &mut pipeline, &mut count);
+        push(&[b"LPOS", l, b"b", b"COUNT", b"0"], &mut pipeline, &mut count);
+        push(&[b"LINDEX", l, b"-1"], &mut pipeline, &mut count);
+        push(&[b"LINSERT", l, b"BEFORE", b"c", b"x"], &mut pipeline, &mut count);
+        push(&[b"LSET", l, b"0", b"z"], &mut pipeline, &mut count);
+        push(&[b"LREM", l, b"1", b"b"], &mut pipeline, &mut count);
+        push(&[b"LTRIM", l, b"0", b"2"], &mut pipeline, &mut count);
+        push(&[b"RPOP", l, b"2"], &mut pipeline, &mut count);
+        push(&[b"LPUSHX", l, b"p"], &mut pipeline, &mut count);
+        push(&[b"RPUSHX", format!("wide:absent:{i}").as_bytes(), b"p"], &mut pipeline, &mut count);
+        push(&[b"LRANGE", l, b"0", b"-1"], &mut pipeline, &mut count);
+
+        // set: SSCAN is O(COUNT) compute against a reply the MATCH can empty.
+        push(&[b"SADD", format!("wide:t:{i}").as_bytes(), b"m1", b"m2"], &mut pipeline, &mut count);
+        push(&[b"SSCAN", format!("wide:t:{i}").as_bytes(), b"0", b"MATCH", b"m*"], &mut pipeline, &mut count);
+        push(&[b"SSCAN", format!("wide:t:{i}").as_bytes(), b"0", b"MATCH", b"zz*"], &mut pipeline, &mut count);
+
+        // the variadic key-list commands, at the one key where they are local.
+        push(&[b"EXISTS", l], &mut pipeline, &mut count);
+        push(&[b"TOUCH", l], &mut pipeline, &mut count);
+        push(&[b"UNLINK", format!("wide:t:{i}").as_bytes()], &mut pipeline, &mut count);
+        push(&[b"DEL", l], &mut pipeline, &mut count);
+    }
+
+    // Wrong-type and absent-key replies, where a fast path and the generic path
+    // most often diverge.
+    for cmd in [
+        vec![b"ZSCORE".as_slice(), b"wide:absent".as_slice(), b"m".as_slice()],
+        vec![b"ZRANGE".as_slice(), b"wide:absent".as_slice(), b"0".as_slice(), b"-1".as_slice()],
+        vec![b"ZCOUNT".as_slice(), b"wide:absent".as_slice(), b"-inf".as_slice(), b"+inf".as_slice()],
+        vec![b"BITPOS".as_slice(), b"wide:absent".as_slice(), b"1".as_slice()],
+        vec![b"BITPOS".as_slice(), b"wide:absent".as_slice(), b"0".as_slice()],
+        vec![b"LPOS".as_slice(), b"wide:absent".as_slice(), b"x".as_slice()],
+        vec![b"HMGET".as_slice(), b"wide:absent".as_slice(), b"f".as_slice()],
+        vec![b"TTL".as_slice(), b"wide:absent".as_slice()],
+        vec![b"TYPE".as_slice(), b"wide:absent".as_slice()],
+        // wrong type against a key that exists as a string
+        vec![b"ZADD".as_slice(), b"wide:s:0".as_slice(), b"1".as_slice(), b"m".as_slice()],
+        vec![b"LPOS".as_slice(), b"wide:s:0".as_slice(), b"x".as_slice()],
+        vec![b"HMGET".as_slice(), b"wide:s:0".as_slice(), b"f".as_slice()],
+        // arity errors must come from the partition, not from the
+        // shared-nothing unsupported-command reply
+        vec![b"ZADD".as_slice(), b"wide:z:0".as_slice()],
+        vec![b"DEL".as_slice()],
+    ] {
+        push(&cmd, &mut pipeline, &mut count);
+    }
+
+    assert!(
+        partitions.len() > 1,
+        "fixture keys must cross partition boundaries, saw {partitions:?}"
+    );
+
+    fr.write_all(&pipeline);
+    redis.write_all(&pipeline);
+    let fr_responses = fr.read_responses(count);
+    let redis_responses = redis.read_responses(count);
+    for (i, (got, want)) in fr_responses.iter().zip(&redis_responses).enumerate() {
+        assert_eq!(got, want, "reply {i} of the wide partition-local pipeline");
+    }
+    assert_eq!(fr_responses.len(), redis_responses.len());
+}
+
 #[test]
 fn shared_nothing_connection_serves_scattered_keys_like_legacy_redis() {
     let fr_port = reserve_port();

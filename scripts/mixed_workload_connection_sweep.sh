@@ -52,7 +52,12 @@ KEYSPACE="${KEYSPACE:-100000}"
 WORKERS="${WORKERS:-24}"        # fr reactor count
 REDIS_IO_THREADS="${REDIS_IO_THREADS:-8}"
 CLIENT_THREADS="${CLIENT_THREADS:-8}"
-TESTS="${TESTS:-set,get,incr,lpush,lpop,hset}"
+# Every family the per-core reactor path admits AND redis-benchmark can drive.
+# `spop` and `mset` are deliberately absent: SPOP is nondeterministic and MSET is
+# multi-key, so neither is admitted as partition-local work and both would be
+# answered with an error -- which redis-benchmark would count as a completed
+# request. probe_families() below enforces that, per family, on a raw socket.
+TESTS="${TESTS:-set,get,incr,lpush,rpush,lpop,rpop,sadd,hset,zadd,zpopmin,lrange_300}"
 FR_BIN="${FR_BIN:-/data/tmp/cargo-target/release/frankenredis}"
 SERVER_CPUS="${SERVER_CPUS:-0-23,32-55}"
 CLIENT_CPUS="${CLIENT_CPUS:-24-31,56-63}"
@@ -140,6 +145,62 @@ done
 echo "  redis RUNNING-IMAGE sha256: $(running_image_sha $RD_PID)  (threads at rest: $(observed_threads $RD_PID))"
 echo "  fr    RUNNING-IMAGE sha256: $(running_image_sha $FR_PID)  (null arm: $(running_image_sha $FR2_PID))"
 echo "  fr    startup line:         $(grep -m1 'ready' /tmp/fr_mixed_fr.log || true)"
+echo
+
+# INTEGRITY GATE. redis-benchmark counts an ERROR reply as a completed request,
+# so an engine that REFUSES a command looks infinitely fast at it -- this repo
+# has already published a "3.46-5.15x" that was a server answering -CROSSSHARD.
+# The whole-job number here averages every selected family, so one refused family
+# would inflate the total silently. Send each family's actual command shape on a
+# raw socket and require a non-error reply from BOTH engines before measuring.
+probe_families() {
+  python3 - "$FR_PORT" "$RD_PORT" "$TESTS" <<'PY'
+import socket, sys
+fr_port, rd_port, tests = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3].split(',')
+# The command shape redis-benchmark actually issues for each named test, taken
+# from redis-benchmark.c. Fixed key names (mylist/myset/myhash/myzset) are the
+# benchmark's own, and are why those families land on ONE partition.
+SHAPES = {
+    "set": ["SET", "key:probe", "v"], "get": ["GET", "key:probe"],
+    "incr": ["INCR", "counter:probe"],
+    "lpush": ["LPUSH", "mylist", "v"], "rpush": ["RPUSH", "mylist", "v"],
+    "lpop": ["LPOP", "mylist"], "rpop": ["RPOP", "mylist"],
+    "sadd": ["SADD", "myset", "element:probe"],
+    "spop": ["SPOP", "myset"],
+    "hset": ["HSET", "myhash", "element:probe", "v"],
+    "zadd": ["ZADD", "myzset", "1", "element:probe"],
+    "zpopmin": ["ZPOPMIN", "myzset"],
+    "mset": ["MSET", "key:a", "v", "key:b", "v"],
+}
+for t in tests:
+    SHAPES.setdefault(t.split('_')[0] if t.startswith('lrange') else t, None)
+for t in tests:
+    base = "lrange" if t.startswith("lrange") else t
+    shape = SHAPES.get(base) or (["LRANGE", "mylist", "0", "99"] if base == "lrange" else None)
+    if shape is None:
+        print(f"FAIL: no probe shape known for family {t!r}", file=sys.stderr); sys.exit(9)
+    out = f"*{len(shape)}\r\n".encode()
+    for a in shape:
+        out += b"$%d\r\n%s\r\n" % (len(a), a.encode())
+    row = []
+    for label, port in (("fr", fr_port), ("redis", rd_port)):
+        s = socket.create_connection(("127.0.0.1", port)); s.settimeout(10)
+        s.sendall(out)
+        r = s.recv(256); s.close()
+        row.append(f"{label}={r[:40]!r}")
+        if r[:1] == b"-":
+            print(f"    {t:<12} {' '.join(row)}")
+            print(f"FAIL: {label} answered {t!r} with an ERROR; redis-benchmark would "
+                  f"count it as a completed request and inflate the whole-job rate",
+                  file=sys.stderr)
+            sys.exit(9)
+        if not r:
+            print(f"FAIL: {label} closed the connection on {t!r}", file=sys.stderr); sys.exit(9)
+    print(f"    {t:<12} {'  '.join(row)}")
+PY
+}
+echo "  raw-socket reply probe (an error reply counts as a completed request):"
+probe_families
 echo
 
 # Whole-job wall time over the WHOLE mix, plus per-family ops/s parsed from the
