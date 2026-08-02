@@ -57509,6 +57509,98 @@ mod tests {
     }
 
     #[test]
+    fn hset_same_field_many_matches_sequential_commands() {
+        let seed = |case: &str| {
+            let mut store = Store::new();
+            match case {
+                "new" | "sticky_encoding" => {}
+                "existing_field" => {
+                    store
+                        .hset_borrowed(b"h", b"f", b"seed".to_vec(), 1)
+                        .unwrap();
+                }
+                "existing_hash" => {
+                    store
+                        .hset_borrowed(b"h", b"other", b"seed".to_vec(), 1)
+                        .unwrap();
+                }
+                "wrongtype" => store.set(b"h".to_vec(), b"scalar".to_vec(), None, 1),
+                "lfu" => {
+                    store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+                    store.lfu_decay_time = 0;
+                    store
+                        .hset_borrowed(b"h", b"f", b"seed".to_vec(), 1)
+                        .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            store
+        };
+
+        for case in [
+            "new",
+            "existing_field",
+            "existing_hash",
+            "wrongtype",
+            "sticky_encoding",
+            "lfu",
+        ] {
+            let values = if case == "sticky_encoding" {
+                vec![b"short".to_vec(), vec![b'x'; 80], b"final".to_vec()]
+            } else {
+                vec![
+                    b"value-0".to_vec(),
+                    b"value-1".to_vec(),
+                    b"value-2".to_vec(),
+                    b"final".to_vec(),
+                ]
+            };
+            let refs: Vec<&[u8]> = values.iter().map(Vec::as_slice).collect();
+            let mut reference = seed(case);
+            let expected: Vec<Result<bool, StoreError>> = values
+                .iter()
+                .map(|value| reference.hset_borrowed(b"h", b"f", value.clone(), 2))
+                .collect();
+            let mut candidate = seed(case);
+            let actual = candidate.hset_same_field_many_borrowed(b"h", b"f", &refs, 2);
+
+            assert_eq!(actual, expected[0], "first reply mismatch @ {case}");
+            match &expected[0] {
+                Ok(_) => assert!(
+                    expected[1..].iter().all(|result| result == &Ok(false)),
+                    "subsequent HSET replies must be zero @ {case}"
+                ),
+                Err(err) => assert!(
+                    expected[1..]
+                        .iter()
+                        .all(|result| result == &Err(err.clone())),
+                    "subsequent HSET errors must repeat @ {case}"
+                ),
+            }
+            assert_eq!(candidate.dirty, reference.dirty, "dirty mismatch @ {case}");
+            assert_eq!(
+                candidate.digest_mutations, reference.digest_mutations,
+                "digest mutation mismatch @ {case}"
+            );
+            assert_eq!(
+                candidate.key_modification_count(b"h", 2),
+                reference.key_modification_count(b"h", 2),
+                "modification count mismatch @ {case}"
+            );
+            assert_eq!(
+                candidate.object_encoding(b"h", 2),
+                reference.object_encoding(b"h", 2),
+                "encoding mismatch @ {case}"
+            );
+            assert_eq!(
+                candidate.state_digest(),
+                reference.state_digest(),
+                "state mismatch @ {case}"
+            );
+        }
+    }
+
+    #[test]
     fn hset_borrowed_incremental_refresh_matches_rescan() {
         // Gate the O(1) incremental post-insert encoding refresh (`INCR=true`, count + new
         // field/value) against the O(n) `refresh_hash_encoding_flag` re-scan (`INCR=false`). Every
