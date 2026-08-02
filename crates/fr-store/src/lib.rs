@@ -21927,6 +21927,103 @@ impl Store {
         self.zadd_plain_owned_with_encoding_refresh::<false>(key, members, now_ms)
     }
 
+    /// Collapse adjacent flagless ZADD commands for one key and one member to
+    /// their final score. The shared-nothing reactor owns the partition for the
+    /// complete run, so no intermediate score can be observed. The first
+    /// command's added/existing result and every write-visible side effect are
+    /// retained exactly.
+    pub fn zadd_same_member_many_owned(
+        &mut self,
+        key: &[u8],
+        member: &[u8],
+        scores: &[f64],
+        now_ms: u64,
+    ) -> Result<bool, StoreError> {
+        let Some((&first_score, remaining_scores)) = scores.split_first() else {
+            return Ok(false);
+        };
+        if self.lfu_tracking_enabled() {
+            let mut first_added = false;
+            let mut first_error = None;
+            for (index, score) in scores.iter().copied().enumerate() {
+                match self.zadd_plain_owned(key, vec![(score, member.to_vec())], now_ms) {
+                    Ok(added) if index == 0 => first_added = added != 0,
+                    Ok(_) => {}
+                    Err(err) if first_error.is_none() => first_error = Some(err),
+                    Err(_) => {}
+                }
+            }
+            return first_error.map_or(Ok(first_added), Err);
+        }
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
+
+        let max_entries = self.zset_max_listpack_entries;
+        let max_value = self.zset_max_listpack_value;
+        let first_score = canonicalize_zero_score(first_score);
+        let final_score = canonicalize_zero_score(*scores.last().expect("scores is non-empty"));
+
+        let (first_added, mutations) = if let Some(entry) = self.entries.get_mut(key) {
+            let Value::SortedSet(zset) = &mut entry.value else {
+                return Err(StoreError::WrongType);
+            };
+            let initial_score = zset.get_score(member);
+            let mut previous_score = initial_score;
+            let mut mutations = 0_u64;
+            for score in std::iter::once(first_score).chain(
+                remaining_scores
+                    .iter()
+                    .copied()
+                    .map(canonicalize_zero_score),
+            ) {
+                if previous_score.is_none_or(|previous| !previous.total_cmp(&score).is_eq()) {
+                    mutations += 1;
+                }
+                previous_score = Some(score);
+            }
+            zset.insert_with_limits_result(member.to_vec(), final_score, max_entries, max_value);
+            if mutations != 0 {
+                entry.touch_lru(now_ms);
+                entry.modification_count = entry.modification_count.wrapping_add(mutations);
+                Self::refresh_zset_encoding_flag_after_insert(entry, max_entries, max_value);
+            }
+            (initial_score.is_none(), mutations)
+        } else {
+            let mut previous_score = first_score;
+            let mut mutations = 1_u64;
+            for score in remaining_scores
+                .iter()
+                .copied()
+                .map(canonicalize_zero_score)
+            {
+                if !previous_score.total_cmp(&score).is_eq() {
+                    mutations += 1;
+                }
+                previous_score = score;
+            }
+            let zset = SortedSet::from_single_with_limits(
+                member.to_vec(),
+                final_score,
+                max_entries,
+                max_value,
+            );
+            let mut entry = Entry::new(Value::SortedSet(Box::new(zset)), now_ms);
+            entry.touch_lru(now_ms);
+            entry.modification_count = mutations;
+            Self::refresh_zset_encoding_flag(&mut entry, max_entries, max_value);
+            self.internal_entries_insert(key.to_vec(), entry);
+            (true, mutations)
+        };
+
+        if mutations != 0 {
+            self.digest_stale = true;
+            self.digest_mutations = self.digest_mutations.wrapping_add(mutations);
+            self.dirty = self.dirty.saturating_add(mutations);
+        }
+        Ok(first_added)
+    }
+
     /// Same-binary benchmark reference for the pre-change full member scan.
     #[doc(hidden)]
     #[cfg(any(test, feature = "bench-reference"))]
@@ -56744,6 +56841,123 @@ mod tests {
         );
         assert_eq!(fast.zscore(b"z", b"a", 1).unwrap(), Some(3.0));
         assert_eq!(fast.zscore(b"z", b"zero", 1).unwrap(), Some(0.0));
+    }
+
+    #[test]
+    fn zadd_same_member_many_matches_sequential_commands() {
+        let seed = |case: &str, member: &[u8]| {
+            let mut store = Store::new();
+            match case {
+                "new" | "oversized_member" => {}
+                "existing_member" | "round_trip" => {
+                    store
+                        .zadd_plain_owned(b"z", vec![(1.0, member.to_vec())], 1)
+                        .unwrap();
+                }
+                "existing_zset" => {
+                    store
+                        .zadd_plain_owned(b"z", vec![(7.0, b"other".to_vec())], 1)
+                        .unwrap();
+                }
+                "wrongtype" => store.set(b"z".to_vec(), b"scalar".to_vec(), None, 1),
+                "expired" => {
+                    store
+                        .zadd_plain_owned(b"z", vec![(9.0, member.to_vec())], 1)
+                        .unwrap();
+                    assert!(store.expire_at_milliseconds(b"z", 5, 1));
+                }
+                "lfu" => {
+                    store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+                    store.lfu_decay_time = 0;
+                    store
+                        .zadd_plain_owned(b"z", vec![(1.0, member.to_vec())], 1)
+                        .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            store
+        };
+
+        for case in [
+            "new",
+            "existing_member",
+            "existing_zset",
+            "round_trip",
+            "wrongtype",
+            "oversized_member",
+            "expired",
+            "lfu",
+        ] {
+            let member = if case == "oversized_member" {
+                vec![b'm'; 80]
+            } else {
+                b"member".to_vec()
+            };
+            let scores = match case {
+                "round_trip" => vec![1.0, 2.0, 2.0, -0.0, 1.0],
+                _ => vec![-0.0, 0.0, 2.0, 2.0, 3.0],
+            };
+            let now_ms = 10;
+            let mut reference = seed(case, &member);
+            let expected: Vec<Result<usize, StoreError>> = scores
+                .iter()
+                .map(|score| {
+                    reference.zadd_plain_owned(b"z", vec![(*score, member.clone())], now_ms)
+                })
+                .collect();
+            let mut candidate = seed(case, &member);
+            let actual = candidate.zadd_same_member_many_owned(b"z", &member, &scores, now_ms);
+
+            assert_eq!(
+                actual,
+                expected[0].clone().map(|added| added != 0),
+                "first reply mismatch @ {case}"
+            );
+            match &expected[0] {
+                Ok(_) => assert!(
+                    expected[1..].iter().all(|result| result == &Ok(0)),
+                    "subsequent ZADD replies must be zero @ {case}"
+                ),
+                Err(err) => assert!(
+                    expected[1..]
+                        .iter()
+                        .all(|result| result == &Err(err.clone())),
+                    "subsequent ZADD errors must repeat @ {case}"
+                ),
+            }
+            assert_eq!(
+                candidate.entries, reference.entries,
+                "entries mismatch @ {case}"
+            );
+            assert_eq!(candidate.dirty, reference.dirty, "dirty mismatch @ {case}");
+            assert_eq!(
+                candidate.digest_mutations, reference.digest_mutations,
+                "digest mutation mismatch @ {case}"
+            );
+            assert_eq!(
+                candidate.key_modification_count(b"z", now_ms),
+                reference.key_modification_count(b"z", now_ms),
+                "modification count mismatch @ {case}"
+            );
+            assert_eq!(
+                candidate.object_encoding(b"z", now_ms),
+                reference.object_encoding(b"z", now_ms),
+                "encoding mismatch @ {case}"
+            );
+            assert_eq!(
+                candidate.state_digest(),
+                reference.state_digest(),
+                "state mismatch @ {case}"
+            );
+        }
+
+        let mut empty = Store::new();
+        assert!(
+            !empty
+                .zadd_same_member_many_owned(b"z", b"member", &[], 0)
+                .unwrap()
+        );
+        assert!(!empty.exists(b"z", 0));
     }
 
     #[test]

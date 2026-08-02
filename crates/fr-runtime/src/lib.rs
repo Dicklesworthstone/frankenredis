@@ -8577,6 +8577,42 @@ impl Runtime {
         true
     }
 
+    /// Execute an adjacent same-key, same-member ZADD run as one final store
+    /// update, then emit the exact per-command integer reply sequence.
+    #[inline]
+    pub fn execute_shared_nothing_zadd_same_member_many_into(
+        &mut self,
+        key: &[u8],
+        member: &[u8],
+        scores: &[f64],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) {
+        self.server.store.stat_total_commands_processed += scores.len() as u64;
+        match self
+            .server
+            .store
+            .zadd_same_member_many_owned(key, member, scores, now_ms)
+        {
+            Ok(first_added) => {
+                out.extend_from_slice(if first_added { b":1\r\n" } else { b":0\r\n" });
+                const ZERO_REPLIES_16: &[u8] = b":0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n";
+                let mut remaining = scores.len().saturating_sub(1);
+                while remaining >= 16 {
+                    out.extend_from_slice(ZERO_REPLIES_16);
+                    remaining -= 16;
+                }
+                out.extend_from_slice(&ZERO_REPLIES_16[..remaining * 4]);
+            }
+            Err(err) => {
+                let reply = CommandError::Store(err).to_resp();
+                for _ in scores {
+                    reply.encode_into(out);
+                }
+            }
+        }
+    }
+
     #[inline]
     pub fn execute_shared_nothing_zpopmin_into(
         &mut self,

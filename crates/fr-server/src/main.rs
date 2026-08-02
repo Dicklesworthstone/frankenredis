@@ -2541,6 +2541,49 @@ fn dispatch_shared_nothing_frames_impl<const COMBINE_PARTITION_RUNS: bool>(
         let unparsed = &connection.read_buf[consumed_total..];
 
         if let Some(mut command) = parse_shared_nothing_fast_command(unparsed, &parser_config) {
+            if COMBINE_PARTITION_RUNS
+                && let SharedNothingFastCommand::Zadd(first) = &command
+                && let Ok(first_score) = fr_command::parse_score_f64_arg(first.start)
+            {
+                let key = first.key;
+                let member = first.end;
+                let mut run_consumed = first.consumed;
+                let mut scores = Vec::with_capacity(16);
+                scores.push(first_score);
+                while let Some(SharedNothingFastCommand::Zadd(next)) =
+                    parse_shared_nothing_fast_command(&unparsed[run_consumed..], &parser_config)
+                {
+                    if next.key != key || next.end != member {
+                        break;
+                    }
+                    let Ok(score) = fr_command::parse_score_f64_arg(next.start) else {
+                        break;
+                    };
+                    run_consumed += next.consumed;
+                    scores.push(score);
+                    if run_consumed == unparsed.len() {
+                        break;
+                    }
+                }
+                let partition_index = cached_shared_nothing_partition_index(
+                    &mut connection.shared_nothing_route_tag,
+                    &mut connection.shared_nothing_partition,
+                    partitions,
+                    key,
+                );
+                partitions
+                    .lock_partition(partition_index)
+                    .execute_shared_nothing_zadd_same_member_many_into(
+                        key,
+                        member,
+                        &scores,
+                        ts,
+                        &mut connection.write_buf,
+                    );
+                consumed_total += run_consumed;
+                continue;
+            }
+
             if COMBINE_PARTITION_RUNS && let SharedNothingFastCommand::Hset(first) = &command {
                 let key = first.key;
                 let field = first.field;
