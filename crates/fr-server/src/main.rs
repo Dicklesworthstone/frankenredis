@@ -2209,6 +2209,7 @@ enum SharedNothingFastCommand<'a> {
     Incr(BorrowedPlainIncrPacket<'a>),
     Lpush(BorrowedPlainKeyMemberPacket<'a>),
     Lpop(BorrowedPlainGetPacket<'a>),
+    Lrange(BorrowedPlainKeyRangePacket<'a>),
     Hset(BorrowedPlainHsetPacket<'a>),
     Hget(BorrowedPlainKeyMemberPacket<'a>),
 }
@@ -2220,6 +2221,7 @@ impl SharedNothingFastCommand<'_> {
             Self::Get(packet) | Self::Lpop(packet) => packet.key,
             Self::Set(packet) => packet.key,
             Self::Incr(packet) => packet.key,
+            Self::Lrange(packet) => packet.key,
             Self::Lpush(packet) | Self::Hget(packet) => packet.key,
             Self::Hset(packet) => packet.key,
         }
@@ -2268,7 +2270,7 @@ fn parse_shared_nothing_fast_command<'a>(
         return None;
     }
     let command_len = match tail[1] {
-        b'3'..=b'5' => usize::from(tail[1] - b'0'),
+        b'3'..=b'6' => usize::from(tail[1] - b'0'),
         _ => return None,
     };
     if config.max_bulk_len < command_len {
@@ -2351,6 +2353,19 @@ fn parse_shared_nothing_fast_command<'a>(
                 value,
             }))
         }
+        (4, 6) if command.eq_ignore_ascii_case(b"LRANGE") && lrange_floor_enabled() => {
+            let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+            let (start, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+            let (end, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+            Some(SharedNothingFastCommand::Lrange(
+                BorrowedPlainKeyRangePacket {
+                    consumed,
+                    key,
+                    start,
+                    end,
+                },
+            ))
+        }
         _ => None,
     }
 }
@@ -2361,6 +2376,7 @@ fn execute_shared_nothing_fast_command(
     partition: &mut Runtime,
     ts: u64,
     out: &mut Vec<u8>,
+    wire: &[u8],
 ) -> usize {
     match command {
         SharedNothingFastCommand::Get(packet) => {
@@ -2382,6 +2398,20 @@ fn execute_shared_nothing_fast_command(
         }
         SharedNothingFastCommand::Lpop(packet) => {
             partition.execute_shared_nothing_lpop_into(packet.key, ts, out);
+            packet.consumed
+        }
+        SharedNothingFastCommand::Lrange(packet) => {
+            if partition
+                .execute_plain_lrange_borrowed_into(packet.key, packet.start, packet.end, ts, out)
+                .is_none()
+            {
+                if let Some(command_wire) = wire.get(..packet.consumed) {
+                    let reply = partition.execute_bytes(command_wire, ts);
+                    out.extend_from_slice(&reply);
+                } else {
+                    out.extend_from_slice(SHARED_NOTHING_PROTOCOL_ERROR);
+                }
+            }
             packet.consumed
         }
         SharedNothingFastCommand::Hset(packet) => {
@@ -2447,6 +2477,7 @@ fn dispatch_shared_nothing_frames_impl<const COMBINE_PARTITION_RUNS: bool>(
                     &mut partition,
                     ts,
                     &mut connection.write_buf,
+                    &connection.read_buf[consumed_total..],
                 );
                 consumed_total += consumed;
 
