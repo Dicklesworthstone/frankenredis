@@ -2541,6 +2541,41 @@ fn dispatch_shared_nothing_frames_impl<const COMBINE_PARTITION_RUNS: bool>(
         let unparsed = &connection.read_buf[consumed_total..];
 
         if let Some(mut command) = parse_shared_nothing_fast_command(unparsed, &parser_config) {
+            if COMBINE_PARTITION_RUNS && let SharedNothingFastCommand::Set(first) = &command {
+                let key = first.key;
+                let mut run_consumed = first.consumed;
+                let mut values = Vec::with_capacity(16);
+                values.push(first.value);
+                while let Some(SharedNothingFastCommand::Set(next)) =
+                    parse_shared_nothing_fast_command(&unparsed[run_consumed..], &parser_config)
+                {
+                    if next.key != key {
+                        break;
+                    }
+                    run_consumed += next.consumed;
+                    values.push(next.value);
+                    if run_consumed == unparsed.len() {
+                        break;
+                    }
+                }
+                let partition_index = cached_shared_nothing_partition_index(
+                    &mut connection.shared_nothing_route_tag,
+                    &mut connection.shared_nothing_partition,
+                    partitions,
+                    key,
+                );
+                partitions
+                    .lock_partition(partition_index)
+                    .execute_shared_nothing_set_same_key_many(
+                        key,
+                        &values,
+                        ts,
+                        &mut connection.write_buf,
+                    );
+                consumed_total += run_consumed;
+                continue;
+            }
+
             if COMBINE_PARTITION_RUNS
                 && let SharedNothingFastCommand::Zadd(first) = &command
                 && let Ok(first_score) = fr_command::parse_score_f64_arg(first.start)

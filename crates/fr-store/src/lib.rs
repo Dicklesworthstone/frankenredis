@@ -8270,6 +8270,40 @@ impl Store {
         self.set_plain_borrowed_expiry_guard_impl::<true>(key, value, now_ms);
     }
 
+    /// Collapse adjacent plain SET commands for one key to their final value.
+    /// The shared-nothing reactor holds the key's partition for the complete
+    /// run, so intermediate values cannot be observed. One real overwrite plus
+    /// reconstructed counters preserves the sequential command contract.
+    pub fn set_plain_same_key_many_borrowed<M: AsRef<[u8]>>(
+        &mut self,
+        key: &[u8],
+        values: &[M],
+        now_ms: u64,
+    ) {
+        let Some(final_value) = values.last() else {
+            return;
+        };
+        self.set_plain_borrowed(key, final_value.as_ref(), now_ms);
+
+        let remaining = values.len().saturating_sub(1);
+        if remaining == 0 {
+            return;
+        }
+        let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        if let Some(entry) = self.entries.get_mut(key) {
+            entry.modification_count = entry.modification_count.wrapping_add(remaining as u64);
+            if lfu_tracking_enabled {
+                entry.lfu_freq = entry
+                    .lfu_freq
+                    .saturating_add(u8::try_from(remaining).unwrap_or(u8::MAX));
+            }
+        }
+        let remaining = remaining as u64;
+        self.digest_stale = true;
+        self.digest_mutations = self.digest_mutations.wrapping_add(remaining);
+        self.dirty = self.dirty.saturating_add(remaining);
+    }
+
     /// Bench-only reference for the pre-guard SET path: always execute
     /// `drop_if_expired` before the overwrite, even when the store has no TTL-bearing keys.
     #[cfg(feature = "bench-reference")]
@@ -42454,6 +42488,98 @@ mod tests {
         assert_eq!(actual.db_expires_counts, expected.db_expires_counts);
         assert_eq!(actual.dirty, expected.dirty);
         assert_eq!(actual.state_digest(), expected.state_digest());
+    }
+
+    #[test]
+    fn set_plain_same_key_many_matches_sequential_commands() {
+        let seed = |case: &str| {
+            let mut store = Store::new();
+            match case {
+                "new" | "final_integer" => {}
+                "existing_string" => store.set_plain_borrowed(b"k", b"seed", 1),
+                "volatile" => store.set(b"k".to_vec(), b"seed".to_vec(), Some(100), 1),
+                "expired" => store.set(b"k".to_vec(), b"seed".to_vec(), Some(1), 1),
+                "collection" => {
+                    store.rpush(b"k", &[b"element".to_vec()], 1).unwrap();
+                }
+                "lfu" => {
+                    store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+                    store.lfu_decay_time = 0;
+                    store.set_plain_borrowed(b"k", b"seed", 1);
+                }
+                _ => unreachable!(),
+            }
+            store
+        };
+
+        for case in [
+            "new",
+            "final_integer",
+            "existing_string",
+            "volatile",
+            "expired",
+            "collection",
+            "lfu",
+        ] {
+            let values = if case == "final_integer" {
+                vec![b"first".to_vec(), vec![b'x'; 80], b"42".to_vec()]
+            } else {
+                vec![
+                    b"value-0".to_vec(),
+                    vec![b'x'; 80],
+                    b"-0".to_vec(),
+                    b"final".to_vec(),
+                ]
+            };
+            let refs: Vec<&[u8]> = values.iter().map(Vec::as_slice).collect();
+            let now_ms = 10;
+            let mut reference = seed(case);
+            for value in &values {
+                reference.set_plain_borrowed(b"k", value, now_ms);
+            }
+            let mut candidate = seed(case);
+            candidate.set_plain_same_key_many_borrowed(b"k", &refs, now_ms);
+
+            assert_eq!(
+                candidate.entries, reference.entries,
+                "entries mismatch @ {case}"
+            );
+            assert_eq!(
+                candidate.expiry_deadlines, reference.expiry_deadlines,
+                "expiry map mismatch @ {case}"
+            );
+            assert_eq!(
+                candidate.expires_count, reference.expires_count,
+                "expiry count mismatch @ {case}"
+            );
+            assert_eq!(
+                candidate.db_key_counts, reference.db_key_counts,
+                "database key count mismatch @ {case}"
+            );
+            assert_eq!(
+                candidate.db_expires_counts, reference.db_expires_counts,
+                "database expiry count mismatch @ {case}"
+            );
+            assert_eq!(candidate.dirty, reference.dirty, "dirty mismatch @ {case}");
+            assert_eq!(
+                candidate.digest_mutations, reference.digest_mutations,
+                "digest mutation mismatch @ {case}"
+            );
+            assert_eq!(
+                candidate.object_encoding(b"k", now_ms),
+                reference.object_encoding(b"k", now_ms),
+                "encoding mismatch @ {case}"
+            );
+            assert_eq!(
+                candidate.state_digest(),
+                reference.state_digest(),
+                "state mismatch @ {case}"
+            );
+        }
+
+        let mut empty = Store::new();
+        empty.set_plain_same_key_many_borrowed::<&[u8]>(b"k", &[], 0);
+        assert!(!empty.exists(b"k", 0));
     }
 
     #[test]

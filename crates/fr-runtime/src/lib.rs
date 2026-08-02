@@ -8381,6 +8381,29 @@ impl Runtime {
         self.server.store.set_plain_borrowed(key, value, now_ms);
     }
 
+    /// Execute an adjacent same-key SET run as one final store overwrite and
+    /// emit the exact one-OK-per-command response batch.
+    #[inline]
+    pub fn execute_shared_nothing_set_same_key_many<M: AsRef<[u8]>>(
+        &mut self,
+        key: &[u8],
+        values: &[M],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) {
+        self.server.store.stat_total_commands_processed += values.len() as u64;
+        self.server
+            .store
+            .set_plain_same_key_many_borrowed(key, values, now_ms);
+        const OK_REPLIES_16: &[u8] = b"+OK\r\n+OK\r\n+OK\r\n+OK\r\n+OK\r\n+OK\r\n+OK\r\n+OK\r\n+OK\r\n+OK\r\n+OK\r\n+OK\r\n+OK\r\n+OK\r\n+OK\r\n+OK\r\n";
+        let mut remaining = values.len();
+        while remaining >= 16 {
+            out.extend_from_slice(OK_REPLIES_16);
+            remaining -= 16;
+        }
+        out.extend_from_slice(&OK_REPLIES_16[..remaining * 5]);
+    }
+
     #[inline]
     pub fn execute_shared_nothing_incr_into(&mut self, key: &[u8], now_ms: u64, out: &mut Vec<u8>) {
         self.server.store.stat_total_commands_processed += 1;
