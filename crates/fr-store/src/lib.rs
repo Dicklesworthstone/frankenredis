@@ -9147,6 +9147,44 @@ impl Store {
         self.incrby_existing_or_insert(key, 1, now_ms)
     }
 
+    /// Apply an adjacent same-key INCR run with one initial parse and one final
+    /// entry write. Returns the first reply value and the number of successful
+    /// increments; any remaining commands overflow exactly as they would after
+    /// the counter reaches [`i64::MAX`].
+    pub fn incr_same_key_many(
+        &mut self,
+        key: &[u8],
+        count: usize,
+        now_ms: u64,
+    ) -> Result<(i64, usize), StoreError> {
+        let Some(remaining) = count.checked_sub(1) else {
+            return Ok((0, 0));
+        };
+        let first = self.incr(key, now_ms)?;
+        let max_additional =
+            usize::try_from(i128::from(i64::MAX) - i128::from(first)).unwrap_or(usize::MAX);
+        let additional = remaining.min(max_additional);
+        if additional == 0 {
+            return Ok((first, 1));
+        }
+
+        let final_value =
+            i64::try_from(i128::from(first) + i128::try_from(additional).unwrap_or(i128::MAX))
+                .unwrap_or(i64::MAX);
+        if let Some(entry) = self.entries.get_mut(key) {
+            entry.value = Value::Integer(final_value);
+            entry.refresh_db_add_metadata(now_ms);
+            entry.modification_count = entry.modification_count.wrapping_add(additional as u64);
+            entry.clear_entry_flags();
+        }
+        let successes = 1 + additional;
+        let additional = additional as u64;
+        self.digest_stale = true;
+        self.digest_mutations = self.digest_mutations.wrapping_add(additional);
+        self.dirty = self.dirty.saturating_add(additional);
+        Ok((first, successes))
+    }
+
     fn incrby_existing_or_insert(
         &mut self,
         key: &[u8],
@@ -40696,6 +40734,113 @@ mod tests {
         assert_eq!(store.incr(b"n", 0).expect("incr"), 1);
         assert_eq!(store.incr(b"n", 0).expect("incr"), 2);
         assert_eq!(store.get(b"n", 0).unwrap(), Some(b"2".to_vec()));
+    }
+
+    #[test]
+    fn incr_same_key_many_matches_sequential_commands() {
+        let seed = |case: &str| {
+            let mut store = Store::new();
+            match case {
+                "missing" => {}
+                "existing" => store.set_plain_borrowed(b"n", b"-10", 1),
+                "volatile" => store.set(b"n".to_vec(), b"10".to_vec(), Some(100), 1),
+                "expired" => store.set(b"n".to_vec(), b"not-int".to_vec(), Some(1), 1),
+                "collection" => {
+                    store.rpush(b"n", &[b"element".to_vec()], 1).unwrap();
+                }
+                "invalid" => store.set_plain_borrowed(b"n", b"-0", 1),
+                "overflow" => {
+                    store.set_plain_borrowed(b"n", (i64::MAX - 2).to_string().as_bytes(), 1);
+                }
+                "max" => store.set_plain_borrowed(b"n", i64::MAX.to_string().as_bytes(), 1),
+                "lfu" => {
+                    store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+                    store.lfu_decay_time = 0;
+                    store.set_plain_borrowed(b"n", b"5", 1);
+                }
+                _ => unreachable!(),
+            }
+            let _ = store.state_digest();
+            store
+        };
+
+        for case in [
+            "missing",
+            "existing",
+            "volatile",
+            "expired",
+            "collection",
+            "invalid",
+            "overflow",
+            "max",
+            "lfu",
+        ] {
+            let count = 8;
+            let now_ms = 10;
+            let mut reference = seed(case);
+            let expected_replies: Vec<_> =
+                (0..count).map(|_| reference.incr(b"n", now_ms)).collect();
+
+            let mut candidate = seed(case);
+            let result = candidate.incr_same_key_many(b"n", count, now_ms);
+            let mut actual_replies = Vec::with_capacity(count);
+            match result {
+                Ok((first, successes)) => {
+                    for offset in 0..successes {
+                        actual_replies.push(Ok(i64::try_from(
+                            i128::from(first) + i128::try_from(offset).unwrap(),
+                        )
+                        .unwrap()));
+                    }
+                    actual_replies.resize(count, Err(StoreError::IntegerOverflow));
+                }
+                Err(err) => actual_replies.resize(count, Err(err)),
+            }
+
+            assert_eq!(actual_replies, expected_replies, "reply mismatch @ {case}");
+            assert_eq!(
+                candidate.entries, reference.entries,
+                "entry mismatch @ {case}"
+            );
+            assert_eq!(
+                candidate.expiry_deadlines, reference.expiry_deadlines,
+                "expiry map mismatch @ {case}"
+            );
+            assert_eq!(
+                candidate.expires_count, reference.expires_count,
+                "expiry count mismatch @ {case}"
+            );
+            assert_eq!(
+                candidate.db_key_counts, reference.db_key_counts,
+                "database key count mismatch @ {case}"
+            );
+            assert_eq!(
+                candidate.db_expires_counts, reference.db_expires_counts,
+                "database expiry count mismatch @ {case}"
+            );
+            assert_eq!(candidate.dirty, reference.dirty, "dirty mismatch @ {case}");
+            assert_eq!(
+                candidate.digest_mutations, reference.digest_mutations,
+                "digest mutation mismatch @ {case}"
+            );
+            assert_eq!(
+                candidate.stat_expired_keys, reference.stat_expired_keys,
+                "expired stat mismatch @ {case}"
+            );
+            assert_eq!(
+                candidate.lazy_expired_propagation, reference.lazy_expired_propagation,
+                "lazy expiry propagation mismatch @ {case}"
+            );
+            assert_eq!(
+                candidate.state_digest(),
+                reference.state_digest(),
+                "state mismatch @ {case}"
+            );
+        }
+
+        let mut empty = Store::new();
+        assert_eq!(empty.incr_same_key_many(b"n", 0, 0), Ok((0, 0)));
+        assert!(!empty.exists(b"n", 0));
     }
 
     #[test]

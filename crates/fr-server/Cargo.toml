@@ -141,6 +141,10 @@ perf-ab-lrange-floor = []
 # compile only the candidate that holds one partition guard across a pipelined
 # run targeting the same partition.
 perf-ab-partition-run-combine = []
+# Measurement-only frozen arm for adjacent same-key INCR fusion. Controls set
+# FR_PERF_AB_INCR_RUN_FUSE_ORIG=1 and retain the already-landed one-lock
+# partition combiner while executing every store increment in the same ELF.
+perf-ab-incr-run-fuse = []
 # Measurement-only frozen arm for the direct shared-nothing sorted-set path.
 # Controls set FR_PERF_AB_SHARED_ZSET_DIRECT_ORIG=1 and retain generic runtime
 # dispatch for ZADD/ZPOPMIN in the same ELF.

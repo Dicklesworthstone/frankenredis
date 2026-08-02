@@ -44,8 +44,8 @@ use fr_store::{
     AclKeyPattern, ClientReplyState, ClientTrackingState, CommandHistogram, CommandRecordKind,
     DispatchAclLogContext, DispatchAclPermissionReason, DispatchAclPermissions,
     EvictionLoopFailure, EvictionLoopResult, EvictionLoopStatus, EvictionSafetyGateState,
-    MaxmemoryPolicy, PendingAclLogEvent, SLOWLOG_ENTRY_MAX_STRING, Store, decode_db_key,
-    encode_db_key, glob_match,
+    MaxmemoryPolicy, PendingAclLogEvent, SLOWLOG_ENTRY_MAX_STRING, Store, StoreError,
+    decode_db_key, encode_db_key, glob_match,
 };
 use sha2::{Digest, Sha256};
 
@@ -8412,6 +8412,42 @@ impl Runtime {
             Err(err) => CommandError::Store(err).to_resp(),
         };
         reply.encode_into(out);
+    }
+
+    /// Execute an adjacent same-key INCR run with one store mutation while
+    /// preserving every ordered integer or error reply.
+    #[inline]
+    pub fn execute_shared_nothing_incr_same_key_many_into(
+        &mut self,
+        key: &[u8],
+        count: usize,
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) {
+        self.server.store.stat_total_commands_processed += count as u64;
+        match self.server.store.incr_same_key_many(key, count, now_ms) {
+            Ok((first, successes)) => {
+                let mut value = first;
+                for index in 0..successes {
+                    RespFrame::Integer(value).encode_into(out);
+                    if index + 1 < successes {
+                        value += 1;
+                    }
+                }
+                if successes < count {
+                    let reply = CommandError::Store(StoreError::IntegerOverflow).to_resp();
+                    for _ in successes..count {
+                        reply.encode_into(out);
+                    }
+                }
+            }
+            Err(err) => {
+                let reply = CommandError::Store(err).to_resp();
+                for _ in 0..count {
+                    reply.encode_into(out);
+                }
+            }
+        }
     }
 
     #[inline]

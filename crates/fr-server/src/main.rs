@@ -2252,6 +2252,21 @@ const fn shared_nothing_partition_run_combine_enabled() -> bool {
     true
 }
 
+#[cfg(feature = "perf-ab-incr-run-fuse")]
+#[inline]
+fn shared_nothing_incr_run_fuse_enabled() -> bool {
+    static ORIGINAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    !*ORIGINAL.get_or_init(|| {
+        std::env::var("FR_PERF_AB_INCR_RUN_FUSE_ORIG").is_ok_and(|value| value == "1")
+    })
+}
+
+#[cfg(not(feature = "perf-ab-incr-run-fuse"))]
+#[inline(always)]
+const fn shared_nothing_incr_run_fuse_enabled() -> bool {
+    true
+}
+
 #[cfg(feature = "perf-ab-shared-zset-direct")]
 #[inline]
 fn shared_nothing_zset_direct_enabled() -> bool {
@@ -2569,6 +2584,43 @@ fn dispatch_shared_nothing_frames_impl<const COMBINE_PARTITION_RUNS: bool>(
                     .execute_shared_nothing_set_same_key_many(
                         key,
                         &values,
+                        ts,
+                        &mut connection.write_buf,
+                    );
+                consumed_total += run_consumed;
+                continue;
+            }
+
+            if COMBINE_PARTITION_RUNS
+                && shared_nothing_incr_run_fuse_enabled()
+                && let SharedNothingFastCommand::Incr(first) = &command
+            {
+                let key = first.key;
+                let mut run_consumed = first.consumed;
+                let mut count = 1usize;
+                while let Some(SharedNothingFastCommand::Incr(next)) =
+                    parse_shared_nothing_fast_command(&unparsed[run_consumed..], &parser_config)
+                {
+                    if next.key != key {
+                        break;
+                    }
+                    run_consumed += next.consumed;
+                    count += 1;
+                    if run_consumed == unparsed.len() {
+                        break;
+                    }
+                }
+                let partition_index = cached_shared_nothing_partition_index(
+                    &mut connection.shared_nothing_route_tag,
+                    &mut connection.shared_nothing_partition,
+                    partitions,
+                    key,
+                );
+                partitions
+                    .lock_partition(partition_index)
+                    .execute_shared_nothing_incr_same_key_many_into(
+                        key,
+                        count,
                         ts,
                         &mut connection.write_buf,
                     );
