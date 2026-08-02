@@ -1391,6 +1391,113 @@ fn run_sharded_set_get_worker(
 const SHARED_NOTHING_UNSUPPORTED: &[u8] = b"-ERR experimental shared-nothing mode accepts only supported default-DB partition-local single-key commands, plus PING and QUIT; cross-key and aggregate commands are not supported\r\n";
 const SHARED_NOTHING_PROTOCOL_ERROR: &[u8] =
     b"-ERR Protocol error in experimental shared-nothing mode\r\n";
+
+const SHARED_GET_CACHE_MAX_ENTRIES: usize = 1_024;
+const SHARED_GET_CACHE_MAX_REPLY_BYTES: usize = 512;
+
+type SharedGetReplyMap =
+    HashMap<Vec<u8>, Arc<[u8]>, foldhash::fast::RandomState>;
+
+struct SharedGetReplyCache {
+    replies: std::sync::RwLock<SharedGetReplyMap>,
+    disabled: std::sync::atomic::AtomicBool,
+}
+
+impl SharedGetReplyCache {
+    fn new() -> Self {
+        Self {
+            replies: std::sync::RwLock::new(HashMap::with_hasher(
+                foldhash::fast::RandomState::default(),
+            )),
+            disabled: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    #[inline]
+    fn get(&self, key: &[u8]) -> Option<Arc<[u8]>> {
+        if self
+            .disabled
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return None;
+        }
+        match self.replies.read() {
+            Ok(replies) => replies.get(key).cloned(),
+            Err(poisoned) => poisoned.into_inner().get(key).cloned(),
+        }
+    }
+
+    #[inline]
+    fn insert(&self, key: &[u8], reply: Arc<[u8]>) {
+        if reply.len() > SHARED_GET_CACHE_MAX_REPLY_BYTES
+            || self
+                .disabled
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return;
+        }
+        let mut replies = match self.replies.write() {
+            Ok(replies) => replies,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if self
+            .disabled
+            .load(std::sync::atomic::Ordering::Acquire)
+            || (replies.len() >= SHARED_GET_CACHE_MAX_ENTRIES && !replies.contains_key(key))
+        {
+            return;
+        }
+        replies.insert(key.to_vec(), reply);
+    }
+
+    #[inline]
+    fn invalidate(&self, key: &[u8]) {
+        if self
+            .disabled
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return;
+        }
+        let contains = match self.replies.read() {
+            Ok(replies) => replies.contains_key(key),
+            Err(poisoned) => poisoned.into_inner().contains_key(key),
+        };
+        if !contains {
+            return;
+        }
+        match self.replies.write() {
+            Ok(mut replies) => {
+                replies.remove(key);
+            }
+            Err(poisoned) => {
+                poisoned.into_inner().remove(key);
+            }
+        }
+    }
+
+    fn disable(&self) {
+        self.disabled
+            .store(true, std::sync::atomic::Ordering::Release);
+        match self.replies.write() {
+            Ok(mut replies) => replies.clear(),
+            Err(poisoned) => poisoned.into_inner().clear(),
+        }
+    }
+}
+
+#[cfg(feature = "perf-ab-shared-get-cache")]
+fn shared_get_cache_enabled() -> bool {
+    static ORIGINAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    !*ORIGINAL.get_or_init(|| {
+        std::env::var("FR_PERF_AB_SHARED_GET_CACHE_ORIG").is_ok_and(|value| value == "1")
+    })
+}
+
+#[cfg(not(feature = "perf-ab-shared-get-cache"))]
+const fn shared_get_cache_enabled() -> bool {
+    true
+}
+
 /// Keyspace partitions shared by every per-core reactor.
 ///
 /// Connections are routed from their first key to the reactor that owns that
@@ -1402,6 +1509,8 @@ const SHARED_NOTHING_PROTOCOL_ERROR: &[u8] =
 /// `-CROSSSHARD` or shipping a command through a cross-core queue.
 struct KeyspacePartitions {
     partitions: Vec<Mutex<Runtime>>,
+    get_caches: Vec<SharedGetReplyCache>,
+    get_cache_enabled: bool,
     worker_count: usize,
     partitions_per_worker: usize,
     /// Randomized, non-cryptographic secondary hash. CRC16 selects the owning
@@ -1446,12 +1555,15 @@ impl KeyspacePartitions {
                 Mutex::new(runtime)
             })
             .collect();
+        let get_caches = (0..count).map(|_| SharedGetReplyCache::new()).collect();
         let spins = std::env::var("FR_PARTITION_LOCK_SPINS")
             .ok()
             .and_then(|value| value.trim().parse::<usize>().ok())
             .unwrap_or(PARTITION_LOCK_SPINS);
         Self {
             partitions,
+            get_caches,
+            get_cache_enabled: shared_get_cache_enabled(),
             worker_count,
             partitions_per_worker,
             route_hasher: foldhash::fast::RandomState::default(),
@@ -1510,6 +1622,45 @@ impl KeyspacePartitions {
         match partition.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    #[inline]
+    fn cached_get_reply(&self, index: usize, key: &[u8]) -> Option<Arc<[u8]>> {
+        if self.get_cache_enabled {
+            self.get_caches[index].get(key)
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    fn cache_get_reply(&self, index: usize, key: &[u8], reply: &[u8]) {
+        if self.get_cache_enabled {
+            self.get_caches[index].insert(key, Arc::from(reply));
+        }
+    }
+
+    #[inline]
+    fn cache_plain_get_reply(&self, index: usize, key: &[u8], value: &[u8]) {
+        if self.get_cache_enabled {
+            let mut reply = Vec::with_capacity(value.len().saturating_add(32));
+            fr_protocol::encode_bulk_string_slice(Some(value), false, &mut reply);
+            self.get_caches[index].insert(key, Arc::from(reply));
+        }
+    }
+
+    #[inline]
+    fn invalidate_get_reply(&self, index: usize, key: &[u8]) {
+        if self.get_cache_enabled {
+            self.get_caches[index].invalidate(key);
+        }
+    }
+
+    #[inline]
+    fn disable_get_cache(&self, index: usize) {
+        if self.get_cache_enabled {
+            self.get_caches[index].disable();
         }
     }
 }
@@ -2216,6 +2367,13 @@ enum SharedNothingFastCommand<'a> {
     Zpopmin(BorrowedPlainGetPacket<'a>),
 }
 
+enum SharedGetCacheEffect<'a> {
+    Preserve,
+    CacheReply(&'a [u8]),
+    Invalidate(&'a [u8]),
+    StorePlain(&'a [u8], &'a [u8]),
+}
+
 impl SharedNothingFastCommand<'_> {
     #[inline]
     fn key(&self) -> &[u8] {
@@ -2414,34 +2572,49 @@ fn parse_shared_nothing_fast_command<'a>(
 }
 
 #[inline]
-fn execute_shared_nothing_fast_command(
-    command: SharedNothingFastCommand<'_>,
+fn execute_shared_nothing_fast_command<'a>(
+    command: SharedNothingFastCommand<'a>,
     partition: &mut Runtime,
     ts: u64,
     out: &mut Vec<u8>,
     wire: &[u8],
-) -> usize {
+) -> (usize, SharedGetCacheEffect<'a>) {
     match command {
         SharedNothingFastCommand::Get(packet) => {
             partition.execute_shared_nothing_get_into(packet.key, ts, out);
-            packet.consumed
+            (
+                packet.consumed,
+                SharedGetCacheEffect::CacheReply(packet.key),
+            )
         }
         SharedNothingFastCommand::Set(packet) => {
             partition.execute_shared_nothing_set(packet.key, packet.value, ts);
             out.extend_from_slice(b"+OK\r\n");
-            packet.consumed
+            (
+                packet.consumed,
+                SharedGetCacheEffect::StorePlain(packet.key, packet.value),
+            )
         }
         SharedNothingFastCommand::Incr(packet) => {
             partition.execute_shared_nothing_incr_into(packet.key, ts, out);
-            packet.consumed
+            (
+                packet.consumed,
+                SharedGetCacheEffect::Invalidate(packet.key),
+            )
         }
         SharedNothingFastCommand::Lpush(packet) => {
             partition.execute_shared_nothing_lpush_one_into(packet.key, packet.member, ts, out);
-            packet.consumed
+            (
+                packet.consumed,
+                SharedGetCacheEffect::Invalidate(packet.key),
+            )
         }
         SharedNothingFastCommand::Lpop(packet) => {
             partition.execute_shared_nothing_lpop_into(packet.key, ts, out);
-            packet.consumed
+            (
+                packet.consumed,
+                SharedGetCacheEffect::Invalidate(packet.key),
+            )
         }
         SharedNothingFastCommand::Lrange(packet) => {
             if partition
@@ -2455,7 +2628,7 @@ fn execute_shared_nothing_fast_command(
                     out.extend_from_slice(SHARED_NOTHING_PROTOCOL_ERROR);
                 }
             }
-            packet.consumed
+            (packet.consumed, SharedGetCacheEffect::Preserve)
         }
         SharedNothingFastCommand::Hset(packet) => {
             partition.execute_shared_nothing_hset_one_into(
@@ -2465,11 +2638,14 @@ fn execute_shared_nothing_fast_command(
                 ts,
                 out,
             );
-            packet.consumed
+            (
+                packet.consumed,
+                SharedGetCacheEffect::Invalidate(packet.key),
+            )
         }
         SharedNothingFastCommand::Hget(packet) => {
             partition.execute_shared_nothing_hget_into(packet.key, packet.member, ts, out);
-            packet.consumed
+            (packet.consumed, SharedGetCacheEffect::Preserve)
         }
         SharedNothingFastCommand::Zadd(packet) => {
             if !partition.execute_shared_nothing_zadd_one_into(
@@ -2486,11 +2662,17 @@ fn execute_shared_nothing_fast_command(
                     out.extend_from_slice(SHARED_NOTHING_PROTOCOL_ERROR);
                 }
             }
-            packet.consumed
+            (
+                packet.consumed,
+                SharedGetCacheEffect::Invalidate(packet.key),
+            )
         }
         SharedNothingFastCommand::Zpopmin(packet) => {
             partition.execute_shared_nothing_zpopmin_into(packet.key, ts, out);
-            packet.consumed
+            (
+                packet.consumed,
+                SharedGetCacheEffect::Invalidate(packet.key),
+            )
         }
     }
 }
@@ -2534,15 +2716,41 @@ fn dispatch_shared_nothing_frames_impl<const COMBINE_PARTITION_RUNS: bool>(
                 partitions,
                 command.key(),
             );
+            if let SharedNothingFastCommand::Get(packet) = &command
+                && let Some(reply) = partitions.cached_get_reply(partition_index, packet.key)
+            {
+                connection.write_buf.extend_from_slice(&reply);
+                consumed_total += packet.consumed;
+                continue;
+            }
             let mut partition = partitions.lock_partition(partition_index);
             loop {
-                let consumed = execute_shared_nothing_fast_command(
+                let output_start = connection.write_buf.len();
+                let (consumed, cache_effect) = execute_shared_nothing_fast_command(
                     command,
                     &mut partition,
                     ts,
                     &mut connection.write_buf,
                     &connection.read_buf[consumed_total..],
                 );
+                if partition.shared_nothing_get_reply_is_cacheable() {
+                    match cache_effect {
+                        SharedGetCacheEffect::Preserve => {}
+                        SharedGetCacheEffect::CacheReply(key) => partitions.cache_get_reply(
+                            partition_index,
+                            key,
+                            &connection.write_buf[output_start..],
+                        ),
+                        SharedGetCacheEffect::Invalidate(key) => {
+                            partitions.invalidate_get_reply(partition_index, key);
+                        }
+                        SharedGetCacheEffect::StorePlain(key, value) => {
+                            partitions.cache_plain_get_reply(partition_index, key, value);
+                        }
+                    }
+                } else {
+                    partitions.disable_get_cache(partition_index);
+                }
                 consumed_total += consumed;
 
                 // Flat-combine the run already resident in this socket buffer:
@@ -2608,9 +2816,14 @@ fn dispatch_shared_nothing_frames_impl<const COMBINE_PARTITION_RUNS: bool>(
                         partitions,
                         key,
                     );
-                    let reply = partitions
-                        .lock_partition(partition_index)
-                        .execute_bytes(&unparsed[..parsed.consumed], ts);
+                    let mut partition = partitions.lock_partition(partition_index);
+                    let reply = partition.execute_bytes(&unparsed[..parsed.consumed], ts);
+                    if partition.shared_nothing_get_reply_is_cacheable() {
+                        partitions.invalidate_get_reply(partition_index, key);
+                    } else {
+                        partitions.disable_get_cache(partition_index);
+                    }
+                    drop(partition);
                     connection.write_buf.extend_from_slice(&reply);
                     continue;
                 }
@@ -29163,6 +29376,25 @@ mod tests {
                 .all(|key| crate::sharded_set_get_shard(key, worker_count)
                     == crate::sharded_set_get_shard(keys[0], worker_count))
         );
+    }
+
+    #[test]
+    fn shared_get_reply_cache_invalidates_and_disables() {
+        let cache = crate::SharedGetReplyCache::new();
+        cache.insert(b"key", std::sync::Arc::from(b"$5\r\nvalue\r\n".as_slice()));
+        assert_eq!(
+            cache.get(b"key").as_deref(),
+            Some(b"$5\r\nvalue\r\n".as_slice())
+        );
+
+        cache.invalidate(b"key");
+        assert!(cache.get(b"key").is_none());
+
+        cache.insert(b"key", std::sync::Arc::from(b"$-1\r\n".as_slice()));
+        cache.disable();
+        assert!(cache.get(b"key").is_none());
+        cache.insert(b"key", std::sync::Arc::from(b"$1\r\nx\r\n".as_slice()));
+        assert!(cache.get(b"key").is_none());
     }
 
     #[test]

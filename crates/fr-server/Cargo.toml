@@ -145,6 +145,10 @@ perf-ab-partition-run-combine = []
 # Controls set FR_PERF_AB_SHARED_ZSET_DIRECT_ORIG=1 and retain generic runtime
 # dispatch for ZADD/ZPOPMIN in the same ELF.
 perf-ab-shared-zset-direct = []
+# Measurement-only frozen arm for the shared-nothing encoded GET side cache.
+# Controls set FR_PERF_AB_SHARED_GET_CACHE_ORIG=1 and retain the previous
+# mutex-per-GET path in the same ELF.
+perf-ab-shared-get-cache = []
 # Measurement-only frozen arm for replica-prefix extraction A/Bs.
 bench-reference = []
 
