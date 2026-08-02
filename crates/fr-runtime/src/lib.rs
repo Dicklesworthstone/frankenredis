@@ -8500,6 +8500,42 @@ impl Runtime {
         reply.encode_into(out);
     }
 
+    /// Execute an adjacent same-key, same-field HSET run as one final store
+    /// update, then emit the exact per-command integer reply sequence.
+    #[inline]
+    pub fn execute_shared_nothing_hset_same_field_many_into<M: AsRef<[u8]>>(
+        &mut self,
+        key: &[u8],
+        field: &[u8],
+        values: &[M],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+    ) {
+        self.server.store.stat_total_commands_processed += values.len() as u64;
+        match self
+            .server
+            .store
+            .hset_same_field_many_borrowed(key, field, values, now_ms)
+        {
+            Ok(first_added) => {
+                out.extend_from_slice(if first_added { b":1\r\n" } else { b":0\r\n" });
+                const ZERO_REPLIES_16: &[u8] = b":0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n";
+                let mut remaining = values.len().saturating_sub(1);
+                while remaining >= 16 {
+                    out.extend_from_slice(ZERO_REPLIES_16);
+                    remaining -= 16;
+                }
+                out.extend_from_slice(&ZERO_REPLIES_16[..remaining * 4]);
+            }
+            Err(err) => {
+                let reply = CommandError::Store(err).to_resp();
+                for _ in values {
+                    reply.encode_into(out);
+                }
+            }
+        }
+    }
+
     #[inline]
     pub fn execute_shared_nothing_hget_into(
         &mut self,

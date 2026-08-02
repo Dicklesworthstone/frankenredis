@@ -14768,6 +14768,94 @@ impl Store {
         self.hset_borrowed_impl::<true, true>(key, field, value, now_ms)
     }
 
+    /// Collapse adjacent HSET commands for one key and one field to their final
+    /// value while preserving the first command's added/existing result and all
+    /// command-count side effects. No intermediate value is externally visible
+    /// while the shared-nothing reactor owns the partition.
+    pub fn hset_same_field_many_borrowed<M: AsRef<[u8]>>(
+        &mut self,
+        key: &[u8],
+        field: &[u8],
+        values: &[M],
+        now_ms: u64,
+    ) -> Result<bool, StoreError> {
+        if values.is_empty() {
+            return Ok(false);
+        }
+        if self.lfu_tracking_enabled() {
+            let mut first_added = false;
+            let mut first_error = None;
+            for (index, value) in values.iter().enumerate() {
+                match self.hset_borrowed(key, field, value.as_ref().to_vec(), now_ms) {
+                    Ok(added) if index == 0 => first_added = added,
+                    Ok(_) => {}
+                    Err(err) if first_error.is_none() => first_error = Some(err),
+                    Err(_) => {}
+                }
+            }
+            return first_error.map_or(Ok(first_added), Err);
+        }
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
+
+        let count = values.len() as u64;
+        let max_entries = self.hash_max_listpack_entries;
+        let max_value = self.hash_max_listpack_value;
+        let max_value_len = values
+            .iter()
+            .map(|value| value.as_ref().len())
+            .max()
+            .unwrap_or(0);
+        let final_value = values
+            .last()
+            .expect("values is non-empty")
+            .as_ref()
+            .to_vec();
+        let result = match self.entries.get_mut(key) {
+            Some(entry) => match &mut entry.value {
+                Value::Hash(hash) => {
+                    let is_new = hash.insert_borrowed(field, final_value);
+                    entry.touch_lru(now_ms);
+                    entry.modification_count = entry.modification_count.wrapping_add(count);
+                    Self::refresh_hash_encoding_after_insert::<true>(
+                        entry,
+                        field.len(),
+                        max_value_len,
+                        max_entries,
+                        max_value,
+                    );
+                    Ok(is_new)
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => {
+                let mut entry = Entry::new(Value::Hash(Box::default()), now_ms);
+                let is_new = match &mut entry.value {
+                    Value::Hash(hash) => hash.insert_borrowed(field, final_value),
+                    _ => unreachable!("freshly created Hash value"),
+                };
+                entry.touch_lru(now_ms);
+                entry.modification_count = entry.modification_count.wrapping_add(count);
+                Self::refresh_hash_encoding_after_insert::<true>(
+                    &mut entry,
+                    field.len(),
+                    max_value_len,
+                    max_entries,
+                    max_value,
+                );
+                self.internal_entries_insert(key.to_vec(), entry);
+                Ok(is_new)
+            }
+        };
+        if result.is_ok() {
+            self.digest_stale = true;
+            self.digest_mutations = self.digest_mutations.wrapping_add(count);
+        }
+        self.dirty = self.dirty.saturating_add(count);
+        result
+    }
+
     /// Bench/test-only reference: the pre-`get_mut`-first `hset_borrowed`, whose non-LFU path
     /// resolves the entry via `internal_entry` (contains_key + get_mut = two probes). Byte-
     /// identical to [`Self::hset_borrowed`]; exists only for the differential gate
