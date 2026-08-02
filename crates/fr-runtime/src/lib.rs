@@ -8375,14 +8375,6 @@ impl Runtime {
         }
     }
 
-    /// Whether an encoded shared-nothing GET reply may outlive this command.
-    /// Any expiry in the partition makes a cached reply time-dependent; callers
-    /// disable the side cache at that point and retain the mutable GET path.
-    #[inline]
-    pub fn shared_nothing_get_reply_is_cacheable(&self) -> bool {
-        self.server.store.count_expiring_keys() == 0
-    }
-
     #[inline]
     pub fn execute_shared_nothing_set(&mut self, key: &[u8], value: &[u8], now_ms: u64) {
         self.server.store.stat_total_commands_processed += 1;
