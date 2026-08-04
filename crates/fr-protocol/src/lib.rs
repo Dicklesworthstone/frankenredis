@@ -101,6 +101,49 @@ fn push_usize(out: &mut Vec<u8>, n: usize) {
     out.extend_from_slice(&buf[pos..]);
 }
 
+/// Write a decimal `u64` into the tail of a fixed scratch buffer and return the
+/// first byte written.  Reply encoders in the persistence and runtime crates
+/// use this to frame values without allocating an intermediate string.
+#[inline]
+pub fn write_u64_digits(buf: &mut [u8; 20], end: usize, mut value: u64) -> usize {
+    debug_assert!(end <= buf.len());
+    let mut pos = end;
+    loop {
+        pos -= 1;
+        buf[pos] = b'0' + (value % 10) as u8;
+        value /= 10;
+        if value == 0 {
+            return pos;
+        }
+    }
+}
+
+/// Append one RESP bulk string from borrowed bytes.  This is the wire-equivalent
+/// of encoding a [`RespFrame::BulkString`] without materializing the frame.
+pub fn encode_bulk_string_slice(value: Option<&[u8]>, resp3: bool, out: &mut Vec<u8>) {
+    match value {
+        Some(bytes) => {
+            out.reserve(1 + decimal_usize_len(bytes.len()) + 2 + bytes.len() + 2);
+            out.push(b'$');
+            push_usize(out, bytes.len());
+            out.extend_from_slice(b"\r\n");
+            out.extend_from_slice(bytes);
+            out.extend_from_slice(b"\r\n");
+        }
+        None if resp3 => out.extend_from_slice(b"_\r\n"),
+        None => out.extend_from_slice(b"$-1\r\n"),
+    }
+}
+
+/// Append the RESP array header (`*N`) or RESP3 set header (`~N`) used by
+/// borrow-encoded collection replies.
+pub fn encode_aggregate_header(len: usize, resp3_set: bool, out: &mut Vec<u8>) {
+    out.reserve(1 + decimal_usize_len(len) + 2);
+    out.push(if resp3_set { b'~' } else { b'*' });
+    push_usize(out, len);
+    out.extend_from_slice(b"\r\n");
+}
+
 fn decimal_u64_len(mut n: u64) -> usize {
     let mut len = 1;
     while n >= 10 {
@@ -439,6 +482,51 @@ pub fn format_redis_double(value: f64) -> String {
     fpconv_dtoa(value)
 }
 
+/// The listpack representation selected by Redis after rendering a sorted-set
+/// score with `d2string`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZsetScoreListpackEntry {
+    Int(i64),
+    Str,
+    /// Large integral doubles need the rendered decimal to be checked before
+    /// choosing a listpack representation.
+    Reparse,
+}
+
+/// Classify a sorted-set score exactly enough to preserve Redis's listpack
+/// integer-vs-string decision.  Values outside `double2ll`'s range must be
+/// rendered and reparsed by the caller because their shortest decimal can
+/// still be a canonical integer.
+#[must_use]
+pub fn zset_score_listpack_entry(score: f64) -> ZsetScoreListpackEntry {
+    if !score.is_finite() {
+        return ZsetScoreListpackEntry::Str;
+    }
+    if score == 0.0 {
+        return if score.is_sign_negative() {
+            ZsetScoreListpackEntry::Str
+        } else {
+            ZsetScoreListpackEntry::Int(0)
+        };
+    }
+    if score.fract() != 0.0 {
+        return ZsetScoreListpackEntry::Str;
+    }
+
+    let lower = (-i64::MAX / 2) as f64;
+    let upper = (i64::MAX / 2) as f64;
+    if score >= lower && score <= upper {
+        return ZsetScoreListpackEntry::Int(score as i64);
+    }
+    ZsetScoreListpackEntry::Reparse
+}
+
+/// Append Redis's canonical `d2string` spelling without exposing an
+/// intermediate `String` to callers.
+pub fn push_redis_double_ascii(out: &mut Vec<u8>, value: f64) {
+    out.extend_from_slice(format_redis_double(value).as_bytes());
+}
+
 // ───────────────────────── fpconv_dtoa (grisu2) ────────────────────────────
 //
 // Faithful safe-Rust port of redis deps/fpconv/fpconv_dtoa.c (Florian Loitsch's
@@ -486,49 +574,92 @@ const FPCONV_EXPMIN: i32 = -60;
 
 /// `(frac, exp)` cached powers of ten (87 entries), verbatim from fpconv_powers.h.
 const FPCONV_POWERS: [(u64, i32); 87] = [
-    (18054884314459144840, -1220), (13451937075301367670, -1193),
-    (10022474136428063862, -1166), (14934650266808366570, -1140),
-    (11127181549972568877, -1113), (16580792590934885855, -1087),
-    (12353653155963782858, -1060), (18408377700990114895, -1034),
-    (13715310171984221708, -1007), (10218702384817765436, -980),
-    (15227053142812498563, -954), (11345038669416679861, -927),
-    (16905424996341287883, -901), (12595523146049147757, -874),
-    (9384396036005875287, -847), (13983839803942852151, -821),
-    (10418772551374772303, -794), (15525180923007089351, -768),
-    (11567161174868858868, -741), (17236413322193710309, -715),
-    (12842128665889583758, -688), (9568131466127621947, -661),
-    (14257626930069360058, -635), (10622759856335341974, -608),
-    (15829145694278690180, -582), (11793632577567316726, -555),
-    (17573882009934360870, -529), (13093562431584567480, -502),
-    (9755464219737475723, -475), (14536774485912137811, -449),
-    (10830740992659433045, -422), (16139061738043178685, -396),
-    (12024538023802026127, -369), (17917957937422433684, -343),
-    (13349918974505688015, -316), (9946464728195732843, -289),
-    (14821387422376473014, -263), (11042794154864902060, -236),
-    (16455045573212060422, -210), (12259964326927110867, -183),
-    (18268770466636286478, -157), (13611294676837538539, -130),
-    (10141204801825835212, -103), (15111572745182864684, -77),
-    (11258999068426240000, -50), (16777216000000000000, -24),
-    (12500000000000000000, 3), (9313225746154785156, 30),
-    (13877787807814456755, 56), (10339757656912845936, 83),
-    (15407439555097886824, 109), (11479437019748901445, 136),
-    (17105694144590052135, 162), (12744735289059618216, 189),
-    (9495567745759798747, 216), (14149498560666738074, 242),
-    (10542197943230523224, 269), (15709099088952724970, 295),
-    (11704190886730495818, 322), (17440603504673385349, 348),
-    (12994262207056124023, 375), (9681479787123295682, 402),
-    (14426529090290212157, 428), (10748601772107342003, 455),
-    (16016664761464807395, 481), (11933345169920330789, 508),
-    (17782069995880619868, 534), (13248674568444952270, 561),
-    (9871031767461413346, 588), (14708983551653345445, 614),
-    (10959046745042015199, 641), (16330252207878254650, 667),
-    (12166986024289022870, 694), (18130221999122236476, 720),
-    (13508068024458167312, 747), (10064294952495520794, 774),
-    (14996968138956309548, 800), (11173611982879273257, 827),
-    (16649979327439178909, 853), (12405201291620119593, 880),
-    (9242595204427927429, 907), (13772540099066387757, 933),
-    (10261342003245940623, 960), (15290591125556738113, 986),
-    (11392378155556871081, 1013), (16975966327722178521, 1039),
+    (18054884314459144840, -1220),
+    (13451937075301367670, -1193),
+    (10022474136428063862, -1166),
+    (14934650266808366570, -1140),
+    (11127181549972568877, -1113),
+    (16580792590934885855, -1087),
+    (12353653155963782858, -1060),
+    (18408377700990114895, -1034),
+    (13715310171984221708, -1007),
+    (10218702384817765436, -980),
+    (15227053142812498563, -954),
+    (11345038669416679861, -927),
+    (16905424996341287883, -901),
+    (12595523146049147757, -874),
+    (9384396036005875287, -847),
+    (13983839803942852151, -821),
+    (10418772551374772303, -794),
+    (15525180923007089351, -768),
+    (11567161174868858868, -741),
+    (17236413322193710309, -715),
+    (12842128665889583758, -688),
+    (9568131466127621947, -661),
+    (14257626930069360058, -635),
+    (10622759856335341974, -608),
+    (15829145694278690180, -582),
+    (11793632577567316726, -555),
+    (17573882009934360870, -529),
+    (13093562431584567480, -502),
+    (9755464219737475723, -475),
+    (14536774485912137811, -449),
+    (10830740992659433045, -422),
+    (16139061738043178685, -396),
+    (12024538023802026127, -369),
+    (17917957937422433684, -343),
+    (13349918974505688015, -316),
+    (9946464728195732843, -289),
+    (14821387422376473014, -263),
+    (11042794154864902060, -236),
+    (16455045573212060422, -210),
+    (12259964326927110867, -183),
+    (18268770466636286478, -157),
+    (13611294676837538539, -130),
+    (10141204801825835212, -103),
+    (15111572745182864684, -77),
+    (11258999068426240000, -50),
+    (16777216000000000000, -24),
+    (12500000000000000000, 3),
+    (9313225746154785156, 30),
+    (13877787807814456755, 56),
+    (10339757656912845936, 83),
+    (15407439555097886824, 109),
+    (11479437019748901445, 136),
+    (17105694144590052135, 162),
+    (12744735289059618216, 189),
+    (9495567745759798747, 216),
+    (14149498560666738074, 242),
+    (10542197943230523224, 269),
+    (15709099088952724970, 295),
+    (11704190886730495818, 322),
+    (17440603504673385349, 348),
+    (12994262207056124023, 375),
+    (9681479787123295682, 402),
+    (14426529090290212157, 428),
+    (10748601772107342003, 455),
+    (16016664761464807395, 481),
+    (11933345169920330789, 508),
+    (17782069995880619868, 534),
+    (13248674568444952270, 561),
+    (9871031767461413346, 588),
+    (14708983551653345445, 614),
+    (10959046745042015199, 641),
+    (16330252207878254650, 667),
+    (12166986024289022870, 694),
+    (18130221999122236476, 720),
+    (13508068024458167312, 747),
+    (10064294952495520794, 774),
+    (14996968138956309548, 800),
+    (11173611982879273257, 827),
+    (16649979327439178909, 853),
+    (12405201291620119593, 880),
+    (9242595204427927429, 907),
+    (13772540099066387757, 933),
+    (10261342003245940623, 960),
+    (15290591125556738113, 986),
+    (11392378155556871081, 1013),
+    (16975966327722178521, 1039),
     (12648080533535911531, 1066),
 ];
 
@@ -623,7 +754,13 @@ fn fpconv_round_digit(
     }
 }
 
-fn fpconv_generate_digits(fp: &Fp, upper: &Fp, lower: &Fp, digits: &mut [u8], k: &mut i32) -> usize {
+fn fpconv_generate_digits(
+    fp: &Fp,
+    upper: &Fp,
+    lower: &Fp,
+    digits: &mut [u8],
+    k: &mut i32,
+) -> usize {
     let wfrac = upper.frac.wrapping_sub(fp.frac);
     let mut delta = upper.frac.wrapping_sub(lower.frac);
 
@@ -763,7 +900,11 @@ fn fpconv_emit_digits(digits: &[u8], mut ndigits: usize, k: i32, neg: bool) -> S
         out.extend_from_slice(&digits[1..ndigits]);
     }
     out.push(b'e');
-    out.push(if k + ndigits as i32 - 1 < 0 { b'-' } else { b'+' });
+    out.push(if k + ndigits as i32 - 1 < 0 {
+        b'-'
+    } else {
+        b'+'
+    });
 
     let mut e = exp;
     let mut cent = 0i32;
@@ -1398,9 +1539,59 @@ fn parse_array(
 const MAX_LINE_LENGTH: usize = 64 * 1024; // 64 KiB
 
 fn parse_i64_strict(input: &[u8]) -> Result<i64, RespParseError> {
+    parse_i64_strict_impl::<true, true, true, true>(input)
+}
+
+/// Bench hook for the parser's fixed-width fast paths. The const parameters
+/// keep the incumbent parser in the same executable for A/B measurements.
+#[cfg(feature = "bench-reference")]
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_parse_i64_strict<
+    const FAST: bool,
+    const ONE_DIGIT: bool,
+    const TWO_DIGIT: bool,
+    const THREE_DIGIT: bool,
+>(
+    input: &[u8],
+) -> Result<i64, RespParseError> {
+    parse_i64_strict_impl::<FAST, ONE_DIGIT, TWO_DIGIT, THREE_DIGIT>(input)
+}
+
+fn parse_i64_strict_impl<
+    const FAST: bool,
+    const ONE_DIGIT: bool,
+    const TWO_DIGIT: bool,
+    const THREE_DIGIT: bool,
+>(
+    input: &[u8],
+) -> Result<i64, RespParseError> {
     let slen = input.len();
     if slen == 0 || slen > 20 {
         return Err(RespParseError::InvalidInteger);
+    }
+    if ONE_DIGIT && slen == 1 {
+        let digit = input[0].wrapping_sub(b'0');
+        return if digit <= 9 {
+            Ok(i64::from(digit))
+        } else {
+            Err(RespParseError::InvalidInteger)
+        };
+    }
+    if TWO_DIGIT && slen == 2 {
+        let tens = input[0].wrapping_sub(b'0');
+        let ones = input[1].wrapping_sub(b'0');
+        if (1..=9).contains(&tens) && ones <= 9 {
+            return Ok(i64::from(tens * 10 + ones));
+        }
+    }
+    if THREE_DIGIT && slen == 3 {
+        let hundreds = input[0].wrapping_sub(b'0');
+        let tens = input[1].wrapping_sub(b'0');
+        let ones = input[2].wrapping_sub(b'0');
+        if (1..=9).contains(&hundreds) && tens <= 9 && ones <= 9 {
+            return Ok(i64::from(hundreds) * 100 + i64::from(tens) * 10 + i64::from(ones));
+        }
     }
     if slen == 1 && input[0] == b'0' {
         return Ok(0);
@@ -1418,21 +1609,35 @@ fn parse_i64_strict(input: &[u8]) -> Result<i64, RespParseError> {
     if input[p] >= b'1' && input[p] <= b'9' {
         let mut v: u64 = (input[p] - b'0') as u64;
         p += 1;
-        while p < slen {
-            let b = input[p];
-            if b.is_ascii_digit() {
-                if v > (u64::MAX / 10) {
-                    return Err(RespParseError::InvalidInteger);
+        if p < slen {
+            let digit_count = slen - usize::from(negative);
+            if FAST && digit_count <= 19 {
+                while p < slen {
+                    let b = input[p];
+                    if !b.is_ascii_digit() {
+                        return Err(RespParseError::InvalidInteger);
+                    }
+                    v = v * 10 + (b - b'0') as u64;
+                    p += 1;
                 }
-                v *= 10;
-                let digit = (b - b'0') as u64;
-                if v > (u64::MAX - digit) {
-                    return Err(RespParseError::InvalidInteger);
-                }
-                v += digit;
-                p += 1;
             } else {
-                return Err(RespParseError::InvalidInteger);
+                while p < slen {
+                    let b = input[p];
+                    if b.is_ascii_digit() {
+                        if v > (u64::MAX / 10) {
+                            return Err(RespParseError::InvalidInteger);
+                        }
+                        v *= 10;
+                        let digit = (b - b'0') as u64;
+                        if v > (u64::MAX - digit) {
+                            return Err(RespParseError::InvalidInteger);
+                        }
+                        v += digit;
+                        p += 1;
+                    } else {
+                        return Err(RespParseError::InvalidInteger);
+                    }
+                }
             }
         }
 
@@ -1475,9 +1680,41 @@ fn read_line(input: &[u8], start: usize) -> Result<(&[u8], usize), RespParseErro
 mod tests {
     use super::{
         BorrowedCommandArgsKind, BorrowedCommandFrame, MAX_LINE_LENGTH, ParserConfig, RespFrame,
-        RespParseError, format_redis_double, parse_command_args_borrowed_into, parse_command_frame,
+        RespParseError, ZsetScoreListpackEntry, encode_aggregate_header, encode_bulk_string_slice,
+        format_redis_double, parse_command_args_borrowed_into, parse_command_frame,
         parse_command_frame_borrowed, parse_frame, parse_frame_with_config,
+        push_redis_double_ascii, write_u64_digits, zset_score_listpack_entry,
     };
+
+    #[test]
+    fn restored_borrowed_encoders_and_score_helpers_match_resp_and_d2string() {
+        let mut digits = [0u8; 20];
+        for (value, expected) in [(0, "0"), (42, "42"), (u64::MAX, "18446744073709551615")] {
+            let start = write_u64_digits(&mut digits, 20, value);
+            assert_eq!(&digits[start..], expected.as_bytes());
+        }
+
+        let mut encoded = Vec::new();
+        encode_aggregate_header(2, false, &mut encoded);
+        encode_bulk_string_slice(Some(b"key"), false, &mut encoded);
+        encode_bulk_string_slice(None, true, &mut encoded);
+        assert_eq!(encoded, b"*2\r\n$3\r\nkey\r\n_\r\n");
+
+        assert_eq!(
+            zset_score_listpack_entry(42.0),
+            ZsetScoreListpackEntry::Int(42)
+        );
+        assert_eq!(zset_score_listpack_entry(-0.0), ZsetScoreListpackEntry::Str);
+        assert_eq!(zset_score_listpack_entry(0.5), ZsetScoreListpackEntry::Str);
+        assert_eq!(
+            zset_score_listpack_entry(6_917_529_027_641_081_856.0),
+            ZsetScoreListpackEntry::Reparse
+        );
+
+        let mut rendered = Vec::new();
+        push_redis_double_ascii(&mut rendered, 1e-7);
+        assert_eq!(rendered, format_redis_double(1e-7).as_bytes());
+    }
 
     #[test]
     fn parse_command_frame_requires_bulk_elements() {
