@@ -6654,7 +6654,11 @@ impl Runtime {
         if !self.has_connected_replicas() {
             return;
         }
-        self.capture_aof_record(&[b"REPLCONF".to_vec(), b"GETACK".to_vec(), b"*".to_vec()]);
+        self.server.capture_replication_only_record(&[
+            b"REPLCONF".to_vec(),
+            b"GETACK".to_vec(),
+            b"*".to_vec(),
+        ]);
     }
 
     /// The client-output-buffer-limit HARD limit (in bytes) that applies to the
@@ -60362,6 +60366,32 @@ mod tests {
             crate::eq_ascii_token(&recs.last().unwrap().argv[0], b"PUBLISH"),
             "the captured replication record should be the PUBLISH itself"
         );
+    }
+
+    #[test]
+    fn wait_getack_propagates_on_the_replication_only_path() {
+        let mut rt = Runtime::default_strict();
+
+        // There is no replication backlog before a replica connects, so GETACK
+        // must not create one merely because WAIT was called.
+        let before = rt.replication_primary_offset().0;
+        rt.solicit_replica_ack();
+        assert_eq!(rt.replication_primary_offset().0, before);
+        assert!(rt.aof_records().is_empty());
+
+        rt.server.replication_runtime_state.ensure_replica(7);
+        rt.solicit_replica_ack();
+        let records = rt.aof_records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].argv,
+            vec![b"REPLCONF".to_vec(), b"GETACK".to_vec(), b"*".to_vec()]
+        );
+        assert!(
+            rt.replication_primary_offset().0 > before,
+            "GETACK must advance the replication offset delivered to the replica"
+        );
+        assert!(crate::command_is_replication_only(&records[0].argv));
     }
 
     // (frankenredis-8luan) Single-key PFCOUNT is a may-replicate read: when it
