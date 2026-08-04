@@ -32190,6 +32190,268 @@ mod tests {
     }
 
     #[test]
+    fn borrowed_plain_smismember_zmscore_packet_parsers_accept_canonical_packets() {
+        let cfg = ParserConfig::default();
+
+        let sm2 = crate::parse_borrowed_plain_smismember2_packet(
+            b"*4\r\n$10\r\nsMiSmEmBeR\r\n$3\r\nkey\r\n$2\r\nm1\r\n$2\r\nm2\r\n*1\r\n$4\r\nPING\r\n",
+            &cfg,
+        )
+        .expect("canonical 2-member SMISMEMBER packet should parse");
+        assert_eq!(sm2.key, b"key");
+        assert_eq!(sm2.start, b"m1");
+        assert_eq!(sm2.end, b"m2");
+        assert_eq!(
+            sm2.consumed,
+            b"*4\r\n$10\r\nsMiSmEmBeR\r\n$3\r\nkey\r\n$2\r\nm1\r\n$2\r\nm2\r\n".len()
+        );
+
+        let sm3 = crate::parse_borrowed_plain_smismember3_packet(
+            b"*5\r\n$10\r\nSMISMEMBER\r\n$1\r\nk\r\n$1\r\na\r\n$2\r\nbb\r\n$3\r\nccc\r\n",
+            &cfg,
+        )
+        .expect("canonical 3-member SMISMEMBER packet should parse");
+        assert_eq!(
+            (sm3.key, sm3.f1, sm3.f2, sm3.f3),
+            (&b"k"[..], &b"a"[..], &b"bb"[..], &b"ccc"[..])
+        );
+
+        let zm2 = crate::parse_borrowed_plain_zmscore2_packet(
+            b"*4\r\n$7\r\nzMsCoRe\r\n$1\r\nk\r\n$1\r\na\r\n$4\r\nbbbb\r\n",
+            &cfg,
+        )
+        .expect("canonical 2-member ZMSCORE packet should parse");
+        assert_eq!(zm2.key, b"k");
+        assert_eq!(zm2.start, b"a");
+        assert_eq!(zm2.end, b"bbbb");
+
+        let zm3 = crate::parse_borrowed_plain_zmscore3_packet(
+            b"*5\r\n$7\r\nZMSCORE\r\n$1\r\nk\r\n$1\r\na\r\n$2\r\nbb\r\n$3\r\nccc\r\n",
+            &cfg,
+        )
+        .expect("canonical 3-member ZMSCORE packet should parse");
+        assert_eq!(
+            (zm3.key, zm3.f1, zm3.f2, zm3.f3),
+            (&b"k"[..], &b"a"[..], &b"bb"[..], &b"ccc"[..])
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_smismember_packet_parsers_declare_the_real_command_length() {
+        // Regression lock. SMISMEMBER is TEN bytes, so these parsers must key
+        // off `$10`. An earlier revision used `$9`, which no real packet ever
+        // matches — the fast path was simply dead and every SMISMEMBER fell
+        // through to the generic argv path.
+        //
+        // That failure mode is silent: nothing errors, no reply changes, and
+        // the only symptom is the fast path never firing. A canonical-accept
+        // test alone catches it, but only if it is written against the real
+        // wire bytes, so this pins both directions explicitly.
+        let cfg = ParserConfig::default();
+
+        assert!(
+            crate::parse_borrowed_plain_smismember2_packet(
+                b"*4\r\n$10\r\nSMISMEMBER\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n",
+                &cfg
+            )
+            .is_some(),
+            "the live 2-member parser must accept the real ten-byte SMISMEMBER token"
+        );
+        assert!(
+            crate::parse_borrowed_plain_smismember3_packet(
+                b"*5\r\n$10\r\nSMISMEMBER\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n",
+                &cfg
+            )
+            .is_some(),
+            "the live 3-member parser must accept the real ten-byte SMISMEMBER token"
+        );
+        // A packet that misdeclares the length is not a SMISMEMBER packet and
+        // must not be served by the fast path.
+        assert!(
+            crate::parse_borrowed_plain_smismember2_packet(
+                b"*4\r\n$9\r\nSMISMEMBE\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n",
+                &cfg
+            )
+            .is_none(),
+            "a nine-byte token is not SMISMEMBER and must stay on the generic parser"
+        );
+        // ZMSCORE is genuinely seven bytes; assert the same discipline there.
+        assert!(
+            crate::parse_borrowed_plain_zmscore2_packet(
+                b"*4\r\n$7\r\nZMSCORE\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n",
+                &cfg
+            )
+            .is_some(),
+            "the live 2-member parser must accept the real seven-byte ZMSCORE token"
+        );
+        assert!(
+            crate::parse_borrowed_plain_zmscore2_packet(
+                b"*4\r\n$6\r\nZMSCOR\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n",
+                &cfg
+            )
+            .is_none(),
+            "a six-byte token is not ZMSCORE and must stay on the generic parser"
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_smismember_zmscore_packet_parsers_reject_same_prefix_siblings() {
+        let cfg = ParserConfig::default();
+
+        // Cross-arity: the element count is the only thing separating the
+        // 2-member and 3-member forms.
+        assert!(
+            crate::parse_borrowed_plain_smismember2_packet(
+                b"*5\r\n$10\r\nSMISMEMBER\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n",
+                &cfg
+            )
+            .is_none(),
+            "2-member SMISMEMBER parser must reject a 3-member packet"
+        );
+        assert!(
+            crate::parse_borrowed_plain_zmscore3_packet(
+                b"*4\r\n$7\r\nZMSCORE\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n",
+                &cfg
+            )
+            .is_none(),
+            "3-member ZMSCORE parser must reject a 2-member packet"
+        );
+        // SINTERCARD is the other ten-byte four-element command, so it is
+        // byte-identical to a 2-member SMISMEMBER through `*4\r\n$10\r\n` —
+        // and its first argument is a numkeys count, not a key.
+        assert!(
+            crate::parse_borrowed_plain_smismember2_packet(
+                b"*4\r\n$10\r\nSINTERCARD\r\n$1\r\n2\r\n$1\r\na\r\n$1\r\nb\r\n",
+                &cfg
+            )
+            .is_none(),
+            "SMISMEMBER parser must reject the same-shape SINTERCARD command"
+        );
+        // ZINCRBY is the seven-byte four-element WRITE sharing ZMSCORE's
+        // prefix: answering member scores to an increment request would serve a
+        // read in place of a mutation.
+        assert!(
+            crate::parse_borrowed_plain_zmscore2_packet(
+                b"*4\r\n$7\r\nZINCRBY\r\n$1\r\nk\r\n$1\r\n1\r\n$1\r\nm\r\n",
+                &cfg
+            )
+            .is_none(),
+            "ZMSCORE parser must reject the same-shape ZINCRBY command"
+        );
+        // The two commands must not answer for each other either.
+        assert!(
+            crate::parse_borrowed_plain_zmscore2_packet(
+                b"*4\r\n$10\r\nSMISMEMBER\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n",
+                &cfg
+            )
+            .is_none(),
+            "ZMSCORE parser must reject a SMISMEMBER packet"
+        );
+        assert!(
+            crate::parse_borrowed_plain_smismember2_packet(
+                b"*4\r\n$7\r\nZMSCORE\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n",
+                &cfg
+            )
+            .is_none(),
+            "SMISMEMBER parser must reject a ZMSCORE packet"
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_smismember_zmscore_packet_parsers_defer_invalid_shapes_and_limits() {
+        let cfg = ParserConfig::default();
+
+        assert!(
+            crate::parse_borrowed_plain_smismember2_packet(
+                b"*04\r\n$10\r\nSMISMEMBER\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_zmscore2_packet(
+                b"*4\r\n$07\r\nZMSCORE\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical command bulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_smismember2_packet(
+                b"*4\r\n$10\r\nSMISMEMBER\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n",
+                &ParserConfig {
+                    max_array_len: 3,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_zmscore3_packet(
+                b"*5\r\n$7\r\nZMSCORE\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n",
+                &ParserConfig {
+                    max_array_len: 4,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "the 3-member parser must respect its own higher array-length floor"
+        );
+        assert!(
+            crate::parse_borrowed_plain_smismember2_packet(
+                b"*4\r\n$10\r\nSMISMEMBER\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n",
+                &ParserConfig {
+                    max_bulk_len: 9,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "command bulk-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_zmscore2_packet(
+                b"*4\r\n$7\r\nZMSCORE\r\n$1\r\nk\r\n$1\r\na\r\n$9\r\nbbbbbbbbb\r\n",
+                &ParserConfig {
+                    max_bulk_len: 8,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "a trailing member over the bulk limit stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_zmscore2_packet(
+                b"*4\r\n$7\r\nZMSCORE\r\n$1\r\nk\r\n$1\r\na\r\n$2\r\nb\r\n",
+                &cfg
+            )
+            .is_none(),
+            "malformed trailing bulk bodies stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_smismember3_packet(
+                b"*5\r\n$10\r\nSMISMEMBER\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n",
+                &cfg
+            )
+            .is_none(),
+            "packets missing a declared member stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_zmscore2_packet(
+                b"*4\r\n$7\r\nZMSCORE\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r",
+                &cfg
+            )
+            .is_none(),
+            "truncated packets stay on the generic parser until more bytes arrive"
+        );
+        assert!(
+            crate::parse_borrowed_plain_smismember2_packet(b"*4\r\n$10\r\nSMISM", &cfg).is_none(),
+            "packets truncated inside the command token stay on the generic parser"
+        );
+    }
+
+    #[test]
     fn borrowed_plain_bitcount_packet_parser_accepts_canonical_key_only_bitcount() {
         let input = b"*2\r\n$8\r\nbItCoUnT\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n";
         let parsed = crate::parse_borrowed_plain_bitcount_packet(input, &ParserConfig::default())
