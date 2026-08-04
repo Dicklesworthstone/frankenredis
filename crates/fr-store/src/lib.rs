@@ -5900,6 +5900,20 @@ struct ZScanResume {
     last_score: f64,
 }
 
+/// Resume point for an insertion-ordered HSCAN or SSCAN stream. The exposed
+/// cursor is positional, but HDEL/SREM can reorder the backing IndexMap/IndexSet
+/// between calls. Remembering the first unexamined field/member lets the next
+/// call relocate the cursor by value and avoids skipping a member that remains
+/// present for the entire scan.
+#[derive(Debug, Clone)]
+struct CollectionScanResume {
+    key: Vec<u8>,
+    next_cursor: u64,
+    next_member: Vec<u8>,
+    modification_count: u64,
+    examined_members: Vec<Vec<u8>>,
+}
+
 #[derive(Debug, Clone)]
 struct HllRegisterCache {
     modification_count: u64,
@@ -5971,6 +5985,8 @@ pub struct Store {
     scan_cache: Vec<ScanResume>,
     db_scan_cache: Vec<DbScanResume>,
     zscan_cache: Vec<ZScanResume>,
+    hscan_cache: Vec<CollectionScanResume>,
+    sscan_cache: Vec<CollectionScanResume>,
     /// Physical keys by DB for RANDOMKEY sampling. `ordered_keys` remains the
     /// deterministic SCAN/KEYS surface; RANDOMKEY has no ordering contract, so
     /// its per-db vector is rebuilt lazily only when a caller actually asks for
@@ -6525,6 +6541,8 @@ impl Default for Store {
             scan_cache: Vec::new(),
             db_scan_cache: Vec::new(),
             zscan_cache: Vec::new(),
+            hscan_cache: Vec::new(),
+            sscan_cache: Vec::new(),
             random_key_slots: vec![RandomKeySlotIndex::default(); DEFAULT_NUM_DATABASES],
             expiry_deadlines: HashMap::default(),
             volatile_keys: BTreeSet::new(),
@@ -13961,6 +13979,8 @@ impl Store {
         self.scan_cache.clear();
         self.db_scan_cache.clear();
         self.zscan_cache.clear();
+        self.hscan_cache.clear();
+        self.sscan_cache.clear();
         self.volatile_keys.clear();
         self.volatile_keys_dirty = false;
         self.expiry_deadline_counts.clear();
@@ -14005,6 +14025,10 @@ impl Store {
         self.db_scan_cache.shrink_to_fit();
         self.zscan_cache.clear();
         self.zscan_cache.shrink_to_fit();
+        self.hscan_cache.clear();
+        self.hscan_cache.shrink_to_fit();
+        self.sscan_cache.clear();
+        self.sscan_cache.shrink_to_fit();
         self.hll_register_cache.shrink_to_fit();
         self.clear_dump_payload_cache();
         self.dump_payload_cache.shrink_to_fit();
@@ -31084,7 +31108,16 @@ impl Store {
         };
         let max_listpack_entries = self.hash_max_listpack_entries;
         let max_listpack_value = self.hash_max_listpack_value;
-        match self.entries.get_mut(key) {
+        let hscan_resume_hint = if cursor != 0 {
+            self.hscan_cache
+                .iter()
+                .position(|resume| resume.key == key && resume.next_cursor == cursor)
+                .map(|index| self.hscan_cache.remove(index))
+        } else {
+            None
+        };
+        let mut hscan_pushback = None;
+        let outcome = match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
@@ -31112,12 +31145,37 @@ impl Store {
                                 .collect();
                             return Ok((0, result));
                         }
-                        let start = cursor as usize;
+                        let start = hscan_resume_hint
+                            .as_ref()
+                            .filter(|resume| resume.modification_count != entry.modification_count)
+                            .and_then(|resume| {
+                                h.iter().position(|(field, _)| field == resume.next_member)
+                            })
+                            .unwrap_or(cursor as usize);
                         let batch_size = count.max(1);
-                        let mut result = Vec::new();
+                        let total_fields = h.len();
+                        let mut examined_members = Vec::new();
+                        let mut result: Vec<(Vec<u8>, Vec<u8>)> = hscan_resume_hint
+                            .as_ref()
+                            .filter(|resume| resume.modification_count != entry.modification_count)
+                            .map(|resume| {
+                                let segment_start =
+                                    (cursor as usize).saturating_sub(resume.examined_members.len());
+                                (segment_start..(cursor as usize).min(total_fields))
+                                    .filter_map(|index| h.get_index(index))
+                                    .filter(|(field, _)| {
+                                        !resume
+                                            .examined_members
+                                            .iter()
+                                            .any(|examined| examined == *field)
+                                    })
+                                    .filter(|(field, _)| scan_pattern_matches(pattern, field))
+                                    .map(|(field, value)| (field.to_vec(), value.to_vec()))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
                         let mut pos = start;
 
-                        let total_fields = h.len();
                         if start >= total_fields {
                             return Ok((0, Vec::new()));
                         }
@@ -31136,6 +31194,7 @@ impl Store {
                             };
                             pos += 1;
                             processed += 1;
+                            examined_members.push(field.to_vec());
                             if !scan_pattern_matches(pattern, field) {
                                 if processed >= batch_size {
                                     break;
@@ -31149,6 +31208,17 @@ impl Store {
                         }
 
                         let next = if pos >= total_fields { 0 } else { pos as u64 };
+                        if next != 0
+                            && let Some((next_member, _)) = h.get_index(pos)
+                        {
+                            hscan_pushback = Some(CollectionScanResume {
+                                key: key.to_vec(),
+                                next_cursor: next,
+                                next_member: next_member.to_vec(),
+                                modification_count: entry.modification_count,
+                                examined_members,
+                            });
+                        }
                         // SCAN-family commands are read-only: do NOT touch LRU
                         Ok((next, result))
                     }
@@ -31156,7 +31226,17 @@ impl Store {
                 }
             }
             None => Ok((0, Vec::new())),
+        };
+        if let Some(resume) = hscan_pushback {
+            self.hscan_cache.retain(|cached| {
+                !(cached.key == resume.key && cached.next_cursor == resume.next_cursor)
+            });
+            self.hscan_cache.push(resume);
+            if self.hscan_cache.len() > SCAN_CACHE_LRU_CAP {
+                self.hscan_cache.remove(0);
+            }
         }
+        outcome
     }
 
     /// (CrimsonHawk) Borrow-scan twin of [`Store::hscan`] — streams `(next_cursor, [f,v,f,v,...])`
@@ -31191,7 +31271,16 @@ impl Store {
         };
         let max_listpack_entries = self.hash_max_listpack_entries;
         let max_listpack_value = self.hash_max_listpack_value;
-        match self.entries.get_mut(key) {
+        let hscan_resume_hint = if cursor != 0 {
+            self.hscan_cache
+                .iter()
+                .position(|resume| resume.key == key && resume.next_cursor == cursor)
+                .map(|index| self.hscan_cache.remove(index))
+        } else {
+            None
+        };
+        let mut hscan_pushback = None;
+        let outcome = match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
@@ -31216,7 +31305,13 @@ impl Store {
                             }
                             return Ok(());
                         }
-                        let start = cursor as usize;
+                        let start = hscan_resume_hint
+                            .as_ref()
+                            .filter(|resume| resume.modification_count != entry.modification_count)
+                            .and_then(|resume| {
+                                h.iter().position(|(field, _)| field == resume.next_member)
+                            })
+                            .unwrap_or(cursor as usize);
                         let batch_size = count.max(1);
                         let total_fields = h.len();
                         if start >= total_fields {
@@ -31224,7 +31319,25 @@ impl Store {
                             sink(SscanReplyEvent::Len(0));
                             return Ok(());
                         }
-                        let mut refs: Vec<(&[u8], &[u8])> = Vec::new();
+                        let mut examined_members = Vec::new();
+                        let mut refs: Vec<(&[u8], &[u8])> = hscan_resume_hint
+                            .as_ref()
+                            .filter(|resume| resume.modification_count != entry.modification_count)
+                            .map(|resume| {
+                                let segment_start =
+                                    (cursor as usize).saturating_sub(resume.examined_members.len());
+                                (segment_start..(cursor as usize).min(total_fields))
+                                    .filter_map(|index| h.get_index(index))
+                                    .filter(|(field, _)| {
+                                        !resume
+                                            .examined_members
+                                            .iter()
+                                            .any(|examined| examined == *field)
+                                    })
+                                    .filter(|(field, _)| scan_pattern_matches(pattern, field))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
                         let mut pos = start;
                         let mut processed = 0;
                         while pos < total_fields {
@@ -31233,6 +31346,7 @@ impl Store {
                             };
                             pos += 1;
                             processed += 1;
+                            examined_members.push(field.to_vec());
                             if !scan_pattern_matches(pattern, field) {
                                 if processed >= batch_size {
                                     break;
@@ -31245,6 +31359,17 @@ impl Store {
                             }
                         }
                         let next = if pos >= total_fields { 0 } else { pos as u64 };
+                        if next != 0
+                            && let Some((next_member, _)) = h.get_index(pos)
+                        {
+                            hscan_pushback = Some(CollectionScanResume {
+                                key: key.to_vec(),
+                                next_cursor: next,
+                                next_member: next_member.to_vec(),
+                                modification_count: entry.modification_count,
+                                examined_members,
+                            });
+                        }
                         sink(SscanReplyEvent::Cursor(next));
                         sink(SscanReplyEvent::Len(refs.len() * 2));
                         for (f, v) in &refs {
@@ -31261,7 +31386,17 @@ impl Store {
                 sink(SscanReplyEvent::Len(0));
                 Ok(())
             }
+        };
+        if let Some(resume) = hscan_pushback {
+            self.hscan_cache.retain(|cached| {
+                !(cached.key == resume.key && cached.next_cursor == resume.next_cursor)
+            });
+            self.hscan_cache.push(resume);
+            if self.hscan_cache.len() > SCAN_CACHE_LRU_CAP {
+                self.hscan_cache.remove(0);
+            }
         }
+        outcome
     }
 
     /// SSCAN: cursor-based iteration over set members.
@@ -31293,7 +31428,16 @@ impl Store {
         // `scan_pattern_matches(pattern, m)` (the hashtable path re-classified per
         // member: `glob_match` was ~10.8% self on a hashtable SSCAN MATCH).
         let scan_filter = ScanFilter::prepare(pattern);
-        match self.entries.get_mut(key) {
+        let sscan_resume_hint = if cursor != 0 {
+            self.sscan_cache
+                .iter()
+                .position(|resume| resume.key == key && resume.next_cursor == cursor)
+                .map(|index| self.sscan_cache.remove(index))
+        } else {
+            None
+        };
+        let mut sscan_pushback = None;
+        let outcome = match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
@@ -31322,14 +31466,40 @@ impl Store {
                                 .collect();
                             return Ok((0, result));
                         }
-                        let start = cursor as usize;
+                        let start = sscan_resume_hint
+                            .as_ref()
+                            .filter(|resume| resume.modification_count != entry.modification_count)
+                            .and_then(|resume| {
+                                s.iter()
+                                    .position(|candidate| candidate == resume.next_member)
+                            })
+                            .unwrap_or(cursor as usize);
                         if start >= s.len() {
                             return Ok((0, Vec::new()));
                         }
 
                         let batch_size = count.max(1);
                         let total_members = s.len();
-                        let mut result = Vec::new();
+                        let mut examined_members = Vec::new();
+                        let mut result: Vec<Vec<u8>> = sscan_resume_hint
+                            .as_ref()
+                            .filter(|resume| resume.modification_count != entry.modification_count)
+                            .map(|resume| {
+                                let segment_start =
+                                    (cursor as usize).saturating_sub(resume.examined_members.len());
+                                (segment_start..(cursor as usize).min(total_members))
+                                    .filter_map(|index| s.get_index(index))
+                                    .filter(|member| {
+                                        !resume
+                                            .examined_members
+                                            .iter()
+                                            .any(|examined| examined == member.as_ref())
+                                    })
+                                    .filter(|member| scan_filter.matches(member.as_ref()))
+                                    .map(Cow::into_owned)
+                                    .collect()
+                            })
+                            .unwrap_or_default();
                         let mut pos = start;
                         // (frankenredis-ir0ut) Resume at `pos` via O(1) get_index on
                         // the hashtable (IndexSet) encoding instead of
@@ -31343,6 +31513,7 @@ impl Store {
                             };
                             pos += 1;
                             processed += 1;
+                            examined_members.push(member.to_vec());
                             if !scan_filter.matches(member.as_ref()) {
                                 if processed >= batch_size {
                                     break;
@@ -31356,6 +31527,17 @@ impl Store {
                         }
 
                         let next = if pos >= total_members { 0 } else { pos as u64 };
+                        if next != 0
+                            && let Some(next_member) = s.get_index(pos)
+                        {
+                            sscan_pushback = Some(CollectionScanResume {
+                                key: key.to_vec(),
+                                next_cursor: next,
+                                next_member: next_member.into_owned(),
+                                modification_count: entry.modification_count,
+                                examined_members,
+                            });
+                        }
                         // SCAN-family commands are read-only: do NOT touch LRU
                         Ok((next, result))
                     }
@@ -31363,7 +31545,17 @@ impl Store {
                 }
             }
             None => Ok((0, Vec::new())),
+        };
+        if let Some(resume) = sscan_pushback {
+            self.sscan_cache.retain(|cached| {
+                !(cached.key == resume.key && cached.next_cursor == resume.next_cursor)
+            });
+            self.sscan_cache.push(resume);
+            if self.sscan_cache.len() > SCAN_CACHE_LRU_CAP {
+                self.sscan_cache.remove(0);
+            }
         }
+        outcome
     }
 
     /// (CrimsonHawk) Borrow-scan twin of [`Store::sscan`] — streams `(next_cursor, members)` via
@@ -31402,7 +31594,16 @@ impl Store {
         // `scan_pattern_matches(pattern, m)` (the hashtable path re-classified per
         // member: `glob_match` was ~10.8% self on a hashtable SSCAN MATCH).
         let scan_filter = ScanFilter::prepare(pattern);
-        match self.entries.get_mut(key) {
+        let sscan_resume_hint = if cursor != 0 {
+            self.sscan_cache
+                .iter()
+                .position(|resume| resume.key == key && resume.next_cursor == cursor)
+                .map(|index| self.sscan_cache.remove(index))
+        } else {
+            None
+        };
+        let mut sscan_pushback = None;
+        let outcome = match self.entries.get_mut(key) {
             Some(entry) => {
                 if lfu_tracking_enabled {
                     entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
@@ -31429,7 +31630,14 @@ impl Store {
                             }
                             return Ok(());
                         }
-                        let start = cursor as usize;
+                        let start = sscan_resume_hint
+                            .as_ref()
+                            .filter(|resume| resume.modification_count != entry.modification_count)
+                            .and_then(|resume| {
+                                s.iter()
+                                    .position(|candidate| candidate == resume.next_member)
+                            })
+                            .unwrap_or(cursor as usize);
                         if start >= s.len() {
                             sink(SscanReplyEvent::Cursor(0));
                             sink(SscanReplyEvent::Len(0));
@@ -31437,7 +31645,25 @@ impl Store {
                         }
                         let batch_size = count.max(1);
                         let total_members = s.len();
-                        let mut refs: Vec<Cow<'_, [u8]>> = Vec::new();
+                        let mut examined_members = Vec::new();
+                        let mut refs: Vec<Cow<'_, [u8]>> = sscan_resume_hint
+                            .as_ref()
+                            .filter(|resume| resume.modification_count != entry.modification_count)
+                            .map(|resume| {
+                                let segment_start =
+                                    (cursor as usize).saturating_sub(resume.examined_members.len());
+                                (segment_start..(cursor as usize).min(total_members))
+                                    .filter_map(|index| s.get_index(index))
+                                    .filter(|member| {
+                                        !resume
+                                            .examined_members
+                                            .iter()
+                                            .any(|examined| examined == member.as_ref())
+                                    })
+                                    .filter(|member| scan_filter.matches(member.as_ref()))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
                         let mut pos = start;
                         let mut processed = 0;
                         while pos < total_members {
@@ -31446,6 +31672,7 @@ impl Store {
                             };
                             pos += 1;
                             processed += 1;
+                            examined_members.push(member.to_vec());
                             if !scan_filter.matches(member.as_ref()) {
                                 if processed >= batch_size {
                                     break;
@@ -31458,6 +31685,17 @@ impl Store {
                             }
                         }
                         let next = if pos >= total_members { 0 } else { pos as u64 };
+                        if next != 0
+                            && let Some(next_member) = s.get_index(pos)
+                        {
+                            sscan_pushback = Some(CollectionScanResume {
+                                key: key.to_vec(),
+                                next_cursor: next,
+                                next_member: next_member.into_owned(),
+                                modification_count: entry.modification_count,
+                                examined_members,
+                            });
+                        }
                         sink(SscanReplyEvent::Cursor(next));
                         sink(SscanReplyEvent::Len(refs.len()));
                         for m in &refs {
@@ -31473,7 +31711,17 @@ impl Store {
                 sink(SscanReplyEvent::Len(0));
                 Ok(())
             }
+        };
+        if let Some(resume) = sscan_pushback {
+            self.sscan_cache.retain(|cached| {
+                !(cached.key == resume.key && cached.next_cursor == resume.next_cursor)
+            });
+            self.sscan_cache.push(resume);
+            if self.sscan_cache.len() > SCAN_CACHE_LRU_CAP {
+                self.sscan_cache.remove(0);
+            }
         }
+        outcome
     }
 
     /// Borrow-scan twin for the live `ZSCAN key 0` fast path. Cursor `0` emits
@@ -60351,6 +60599,89 @@ mod tests {
 
     // (frankenredis-zkkn4) Frozen fingerprint of the full-ZSCAN sequence.
     const ZSCANRT_GOLDEN: u64 = 0xbc1a_8d4b_00ab_b681;
+
+    #[test]
+    fn hscan_and_sscan_return_present_throughout_members_after_mid_scan_deletion() {
+        use super::Store;
+
+        const MEMBERS: usize = 600;
+
+        let mut hash_store = Store::new();
+        for index in 0..MEMBERS {
+            hash_store
+                .hset(
+                    b"hash",
+                    format!("f{index:04}").into_bytes(),
+                    b"value".to_vec(),
+                    0,
+                )
+                .unwrap();
+        }
+        let (mut hash_cursor, first_hash_batch) =
+            hash_store.hscan(b"hash", 0, None, 10, 0).unwrap();
+        assert_ne!(hash_cursor, 0, "large hash must use the paginated encoding");
+        let removed_hash_fields: Vec<Vec<u8>> = first_hash_batch
+            .iter()
+            .take(2)
+            .map(|(field, _)| field.clone())
+            .collect();
+        let removed_hash_refs: Vec<&[u8]> = removed_hash_fields.iter().map(Vec::as_slice).collect();
+        assert_eq!(
+            hash_store.hdel(b"hash", &removed_hash_refs, 1).unwrap(),
+            removed_hash_fields.len() as u64
+        );
+        let mut seen_hash_fields: std::collections::HashSet<Vec<u8>> = first_hash_batch
+            .into_iter()
+            .map(|(field, _)| field)
+            .collect();
+        while hash_cursor != 0 {
+            let (next_cursor, batch) = hash_store.hscan(b"hash", hash_cursor, None, 10, 2).unwrap();
+            seen_hash_fields.extend(batch.into_iter().map(|(field, _)| field));
+            hash_cursor = next_cursor;
+        }
+        for index in 0..MEMBERS {
+            let field = format!("f{index:04}").into_bytes();
+            if !removed_hash_fields.contains(&field) {
+                assert!(
+                    seen_hash_fields.contains(&field),
+                    "HSCAN skipped a field that remained present: {:?}",
+                    String::from_utf8_lossy(&field)
+                );
+            }
+        }
+
+        let mut set_store = Store::new();
+        for index in 0..MEMBERS {
+            set_store
+                .sadd(b"set", &[format!("m{index:04}").into_bytes()], 0)
+                .unwrap();
+        }
+        let (mut set_cursor, first_set_batch) = set_store.sscan(b"set", 0, None, 10, 0).unwrap();
+        assert_ne!(set_cursor, 0, "large set must use the paginated encoding");
+        let removed_set_members: Vec<Vec<u8>> = first_set_batch.iter().take(2).cloned().collect();
+        let removed_set_refs: Vec<&[u8]> = removed_set_members.iter().map(Vec::as_slice).collect();
+        assert_eq!(
+            set_store.srem(b"set", &removed_set_refs, 1).unwrap(),
+            removed_set_members.len() as u64
+        );
+        let mut seen_set_members: std::collections::HashSet<Vec<u8>> =
+            first_set_batch.into_iter().collect();
+        while set_cursor != 0 {
+            let (next_cursor, batch) = set_store.sscan(b"set", set_cursor, None, 10, 2).unwrap();
+            seen_set_members.extend(batch);
+            set_cursor = next_cursor;
+        }
+        for index in 0..MEMBERS {
+            let member = format!("m{index:04}").into_bytes();
+            if !removed_set_members.contains(&member) {
+                assert!(
+                    seen_set_members.contains(&member),
+                    "SSCAN skipped a member that remained present: {:?}",
+                    String::from_utf8_lossy(&member)
+                );
+            }
+        }
+    }
 
     // (frankenredis e3y73) ZSCAN must honour Redis's SCAN guarantee: a member
     // present for the WHOLE iteration is returned at least once, even if OTHER
