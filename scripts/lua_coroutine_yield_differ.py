@@ -16,10 +16,16 @@ Usage: lua_coroutine_yield_differ.py <oracle_port> <fr_port>
 import socket
 import sys
 import time
+from contextlib import contextmanager
 
 
+@contextmanager
 def conn(p):
-    return socket.create_connection(("127.0.0.1", p), timeout=5)
+    socket_handle = socket.create_connection(("127.0.0.1", p), timeout=5)
+    try:
+        yield socket_handle
+    finally:
+        socket_handle.close()
 
 
 def ev(s, script):
@@ -57,28 +63,33 @@ CASES = [
     ("wrap_yield_in_loop",
      "local co=coroutine.wrap(function() for i=1,3 do coroutine.yield(i) end end) "
      "return co()..co()..co()"),
+    ("yield_in_for_local_assign",
+     "local co=coroutine.create(function() local total=0 for i=1,2 do "
+     "local value=coroutine.yield(i) total=total+value end return total end) "
+     "local _,a=coroutine.resume(co) local _,b=coroutine.resume(co,10) "
+     "local _,total=coroutine.resume(co,20) return a..':'..b..':'..total"),
 ]
 
 
 def main():
     op = int(sys.argv[1]) if len(sys.argv) > 1 else 16399
     fp = int(sys.argv[2]) if len(sys.argv) > 2 else 16400
-    od, fr = conn(op), conn(fp)
-    fails = []
-    for label, script in CASES:
-        ro, rf = ev(od, script), ev(fr, script)
-        if ro != rf:
-            fails.append(f"{label}: redis={ro!r} fr={rf!r}")
-    print("=" * 60)
-    if fails:
-        print(f"FAIL — {len(fails)} coroutine divergence(s) vs redis 7.2.4:")
-        for x in fails:
-            print(f"  {x}")
-        sys.exit(1)
-    print(
-        "PASS — coroutine yield continuation features byte-exact vs redis 7.2.4 "
-        f"({len(CASES)} hard checks)"
-    )
+    with conn(op) as od, conn(fp) as fr:
+        fails = []
+        for label, script in CASES:
+            ro, rf = ev(od, script), ev(fr, script)
+            if ro != rf:
+                fails.append(f"{label}: redis={ro!r} fr={rf!r}")
+        print("=" * 60)
+        if fails:
+            print(f"FAIL — {len(fails)} coroutine divergence(s) vs redis 7.2.4:")
+            for x in fails:
+                print(f"  {x}")
+            sys.exit(1)
+        print(
+            "PASS — coroutine yield continuation features byte-exact vs redis 7.2.4 "
+            f"({len(CASES)} hard checks)"
+        )
 
 
 if __name__ == "__main__":

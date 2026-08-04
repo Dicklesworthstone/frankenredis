@@ -420,6 +420,18 @@ enum LuaCoroutineContinuation {
         current: f64,
         body_pc: usize,
     },
+    NumericForLocalAssign {
+        names: Vec<String>,
+        prefix: Vec<LuaValue>,
+        remaining: Vec<Expr>,
+        yield_was_last: bool,
+        name: String,
+        stop: f64,
+        step: f64,
+        body: Block,
+        current: f64,
+        body_pc: usize,
+    },
     /// (CrimsonHawk 7lmle) A top-level `if <coroutine.yield(...)> then ...` whose
     /// branch condition was a bare yield. On resume the yielded value becomes that
     /// condition's result: truthy → run `then_body`; falsy → fall through to the
@@ -4227,6 +4239,30 @@ impl<'a> LuaState<'a> {
                 );
                 break;
             }
+            if let Stmt::LocalAssign(names, exprs) = stmt
+                && let Some((prefix, yield_args, remaining, yield_was_last)) =
+                    self.split_direct_yield_exprs(exprs, env, varargs)?
+            {
+                outcome = self.start_coroutine_yield(
+                    &yield_args,
+                    LuaCoroutineContinuation::NumericForLocalAssign {
+                        names: names.clone(),
+                        prefix,
+                        remaining,
+                        yield_was_last,
+                        name: name.to_string(),
+                        stop,
+                        step,
+                        body: body.to_vec(),
+                        current,
+                        body_pc: offset + 1,
+                    },
+                    true,
+                    env,
+                    varargs,
+                );
+                break;
+            }
             match self.exec_stmt(stmt, env, varargs) {
                 Ok(ControlFlow::None) => {}
                 Ok(other) => {
@@ -5988,6 +6024,43 @@ impl<'a> LuaState<'a> {
                 env,
                 varargs,
             ),
+            LuaCoroutineContinuation::NumericForLocalAssign {
+                names,
+                prefix,
+                remaining,
+                yield_was_last,
+                name,
+                stop,
+                step,
+                body,
+                current,
+                body_pc,
+            } => {
+                let vals = self.complete_exprs_after_yield(
+                    prefix,
+                    &remaining,
+                    yield_was_last,
+                    resume_args,
+                    env,
+                    varargs,
+                )?;
+                for (i, local_name) in names.iter().enumerate() {
+                    let value = vals.get(i).cloned().unwrap_or(LuaValue::Nil);
+                    env.set_local(local_name, value);
+                }
+                self.resume_numeric_for_continuation(
+                    name,
+                    stop,
+                    step,
+                    body,
+                    current,
+                    body_pc,
+                    outer_stmts,
+                    outer_pc,
+                    env,
+                    varargs,
+                )
+            }
             LuaCoroutineContinuation::If {
                 then_body,
                 remaining,
@@ -19407,6 +19480,29 @@ end
         ";
         let result = eval_script(script, &[], &[], &mut store, 0);
         assert_eq!(result, Ok(RespFrame::BulkString(Some(b"123".to_vec()))));
+    }
+
+    #[test]
+    fn coroutine_yield_in_for_local_assign_receives_resume_values() {
+        let mut store = Store::new();
+        let script = b"
+            local co = coroutine.create(function()
+                local total = 0
+                for i = 1, 2 do
+                    local value = coroutine.yield(i)
+                    total = total + value
+                end
+                return total
+            end)
+            local _, first = coroutine.resume(co)
+            local _, second = coroutine.resume(co, 10)
+            local _, total = coroutine.resume(co, 20)
+            return first .. ':' .. second .. ':' .. total
+        ";
+        assert_eq!(
+            eval_script(script, &[], &[], &mut store, 0),
+            Ok(RespFrame::BulkString(Some(b"1:2:30".to_vec())))
+        );
     }
 
     #[test]
