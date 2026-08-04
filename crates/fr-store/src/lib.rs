@@ -66325,8 +66325,16 @@ mod tests {
         }
     }
 
+    // Keep the exact test doubles without spelling over-precise decimal literals:
+    // these bit patterns are the values Redis formats and listpack-encodes.
+    const SCORE_TWO_TO_62: f64 = f64::from_bits(0x43d0_0000_0000_0000);
+    const SCORE_ONE_ULP_BELOW_TWO_TO_62: f64 = f64::from_bits(0x43cf_ffff_ffff_ffff);
+    const SCORE_REPARSE_COUNTEREXAMPLE: f64 = f64::from_bits(0x43d8_0000_0000_0000);
+    const SCORE_TWO_TO_63: f64 = f64::from_bits(0x43e0_0000_0000_0000);
+    const SCORE_LARGE_FRACTION: f64 = f64::from_bits(0x419d_6f34_547e_6b75);
+    const SCORE_THREE_POINT_ONE_FOUR: f64 = f64::from_bits(0x4009_1eb8_51eb_851f);
+
     #[test]
-    #[allow(clippy::approx_constant, clippy::excessive_precision)]
     fn zset_score_int_listpack_fastpath_is_byte_identical_to_string_form() {
         // The DUMP zset-listpack score fast path
         // (zset_score_listpack_entry + encode_listpack_integer_entry) MUST emit
@@ -66371,7 +66379,7 @@ mod tests {
             1e20,
             1.5e300,
             -1.5e300,
-            123456789.123456789,
+            SCORE_LARGE_FRACTION,
             f64::INFINITY,
             f64::NEG_INFINITY,
             f64::NAN,
@@ -66381,19 +66389,19 @@ mod tests {
             // `double2ll`'s real window is ±(LLONG_MAX/2), which rounds to ±2^62 as a
             // double — NOT ±2^52, and not the ±1e18 the old gate used. Both sides of
             // the inclusive bound must still int-encode.
-            4.611686018427387904e18,  // 2^62 exactly
-            -4.611686018427387904e18, // -2^62 exactly
-            4.611686018427387392e18,  // 2^62 - 512 (one double ulp below)
+            SCORE_TWO_TO_62,
+            -SCORE_TWO_TO_62,
+            SCORE_ONE_ULP_BELOW_TWO_TO_62,
             // ABOVE the window, but grisu2's shortest form is still a plain canonical
             // decimal inside i64 range, so upstream int-encodes these. These are the
             // cases that make the `Reparse` arm load-bearing: string-encoding them
             // (i.e. skipping the re-parse on any non-`Int` classification) diverges.
-            6.917529027641081856e18, // -> "6917529027641082000", int-encoded upstream
+            SCORE_REPARSE_COUNTEREXAMPLE, // -> "6917529027641082000", int-encoded upstream
             7.2e18,
             // Above the window AND the plain form overflows i64 -> string-encoded.
-            9.223372036854775808e18, // 2^63 -> "9223372036854776000"
-            5e18,                    // -> "5e+18"
-            7e18,                    // -> "7e+18"
+            SCORE_TWO_TO_63, // 2^63 -> "9223372036854776000"
+            5e18,            // -> "5e+18"
+            7e18,            // -> "7e+18"
             -5e18,
             1e19,
             f64::MAX,
@@ -66444,9 +66452,8 @@ mod tests {
     /// `Reparse` into `Str` (i.e. string-encoding whenever the int fast path misses) would
     /// emit a string entry here and diverge from redis 7.2.4.
     #[test]
-    #[allow(clippy::excessive_precision)] // deliberate boundary constants beyond f64 precision
     fn zset_score_reparse_arm_is_load_bearing() {
-        let score = 6.917529027641081856e18;
+        let score = SCORE_REPARSE_COUNTEREXAMPLE;
         assert!(matches!(
             super::zset_score_listpack_entry(score),
             super::ZsetScoreListpackEntry::Reparse
@@ -66467,7 +66474,6 @@ mod tests {
     /// classifier never routes a score there whose `d2string` render would in fact
     /// re-parse as a canonical i64 — that would silently flip the entry encoding.
     #[test]
-    #[allow(clippy::approx_constant, clippy::excessive_precision)] // test scores, not math constants
     fn zset_score_str_arm_never_hides_a_canonical_integer_render() {
         let mut scores: Vec<f64> = vec![
             0.0,
@@ -66475,11 +66481,11 @@ mod tests {
             f64::INFINITY,
             f64::NEG_INFINITY,
             f64::NAN,
-            3.14,
+            SCORE_THREE_POINT_ONE_FOUR,
             -2.5,
             1e20,
             5e18,
-            9.223372036854775808e18,
+            SCORE_TWO_TO_63,
             f64::MAX,
             f64::MIN_POSITIVE,
         ];
@@ -66500,7 +66506,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::approx_constant, clippy::excessive_precision)]
     fn redis_score_to_string_matches_vendored_d2string() {
         // Golden values captured from vendored redis 7.2.4 ZSCORE (d2string ->
         // fpconv_dtoa). Verified byte-exact against the oracle across 437
@@ -66517,7 +66522,7 @@ mod tests {
             (17179869184.0, "17179869184"),
             (-42.0, "-42"),
             // fixed decimal > 1
-            (3.14, "3.14"),
+            (SCORE_THREE_POINT_ONE_FOUR, "3.14"),
             (123.456, "123.456"),
             (2.5, "2.5"),
             (-2.5, "-2.5"),
@@ -66527,7 +66532,7 @@ mod tests {
             (-0.0007, "-0.0007"),
             // scientific: many significant digits (K <= -7), regression for the
             // old log10_floor heuristic that wrongly emitted fixed here
-            (123456789.123456789, "1.2345678912345679e+8"),
+            (SCORE_LARGE_FRACTION, "1.2345678912345679e+8"),
             // scientific: large magnitude
             (1.5e300, "1.5e+300"),
             (1e20, "1e+20"),
