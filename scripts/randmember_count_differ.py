@@ -19,12 +19,18 @@ Usage: randmember_count_differ.py <oracle_port> <fr_port>
 import socket
 import sys
 import time
+from contextlib import contextmanager
 
 SIZE = 5
 
 
+@contextmanager
 def conn(p):
-    return socket.create_connection(("127.0.0.1", p), timeout=5)
+    socket_handle = socket.create_connection(("127.0.0.1", p), timeout=5)
+    try:
+        yield socket_handle
+    finally:
+        socket_handle.close()
 
 
 def cmd(s, *a):
@@ -61,7 +67,11 @@ def parr(b):
 def main():
     op = int(sys.argv[1]) if len(sys.argv) > 1 else 16399
     fp = int(sys.argv[2]) if len(sys.argv) > 2 else 16400
-    od, fr = conn(op), conn(fp)
+    with conn(op) as od, conn(fp) as fr:
+        run(od, fr)
+
+
+def run(od, fr):
     for s in (od, fr):
         cmd(s, "FLUSHALL")
         cmd(s, "SADD", "s", *[f"m{i}" for i in range(SIZE)])
@@ -108,12 +118,23 @@ def main():
             return r
         return tuple(sorted((r[i], r[i + 1]) for i in range(0, len(r), 2)))
 
+    def pair_count(srv, *c):
+        r = parr(cmd(srv, *c))
+        return len(r) // 2 if isinstance(r, list) and len(r) % 2 == 0 else r
+
     eq("hrand_withvalues_full", pairs_sorted(od, "HRANDFIELD", "h", "5", "WITHVALUES"),
        pairs_sorted(fr, "HRANDFIELD", "h", "5", "WITHVALUES"))
     eq("zrand_withscores_full", pairs_sorted(od, "ZRANDMEMBER", "z", "5", "WITHSCORES"),
        pairs_sorted(fr, "ZRANDMEMBER", "z", "5", "WITHSCORES"))
-    eq("hrand_neg_wv_card", card(od, "HRANDFIELD", "h", "-4", "WITHVALUES"),
-       card(fr, "HRANDFIELD", "h", "-4", "WITHVALUES"))
+    for label, name, key, modifier in [
+        ("hrand_neg_wv", "HRANDFIELD", "h", "WITHVALUES"),
+        ("zrand_neg_ws", "ZRANDMEMBER", "z", "WITHSCORES"),
+    ]:
+        for server, side in [(od, "redis"), (fr, "fr")]:
+            result = pair_count(server, name, key, "-4", modifier)
+            if result != 4:
+                fails.append(f"{label}_{side}_card: expected 4 pairs, got {result!r}")
+        eq(f"{label}_zero", cmd(od, name, key, "0", modifier), cmd(fr, name, key, "0", modifier))
     # SRANDMEMBER has no WITHVALUES -> error (same shape)
     eq("srand_withvalues_err", cmd(od, "SRANDMEMBER", "s", "3", "WITHVALUES"),
        cmd(fr, "SRANDMEMBER", "s", "3", "WITHVALUES"))
