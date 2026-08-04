@@ -30836,6 +30836,202 @@ mod tests {
     }
 
     #[test]
+    fn borrowed_plain_getbit_lindex_packet_parsers_accept_canonical_packets() {
+        let cfg = ParserConfig::default();
+
+        let getbit = crate::parse_borrowed_plain_getbit_packet(
+            b"*3\r\n$6\r\ngEtBiT\r\n$3\r\nkey\r\n$2\r\n17\r\n*1\r\n$4\r\nPING\r\n",
+            &cfg,
+        )
+        .expect("canonical GETBIT packet should parse");
+        assert_eq!(getbit.key, b"key");
+        assert_eq!(getbit.member, b"17");
+        assert_eq!(
+            getbit.consumed,
+            b"*3\r\n$6\r\ngEtBiT\r\n$3\r\nkey\r\n$2\r\n17\r\n".len()
+        );
+
+        let lindex = crate::parse_borrowed_plain_lindex_packet(
+            b"*3\r\n$6\r\nlInDeX\r\n$3\r\nkey\r\n$2\r\n-1\r\n*1\r\n$4\r\nPING\r\n",
+            &cfg,
+        )
+        .expect("canonical LINDEX packet should parse");
+        assert_eq!(lindex.key, b"key");
+        assert_eq!(lindex.member, b"-1");
+        assert_eq!(
+            lindex.consumed,
+            b"*3\r\n$6\r\nlInDeX\r\n$3\r\nkey\r\n$2\r\n-1\r\n".len()
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_getbit_lindex_packet_parsers_pass_the_arg_through_unvalidated() {
+        // Both parsers hand the second bulk through as raw bytes; the offset /
+        // index is parsed and range-checked by execute_plain_{getbit,lindex}_
+        // borrowed, not here. Pinning that split matters: if the parser ever
+        // starts rejecting these, the fast path stops agreeing with the generic
+        // path about which inputs produce a command error rather than a parse
+        // deferral.
+        let cfg = ParserConfig::default();
+
+        for arg in [&b"notanumber"[..], &b"-9999999999999999999"[..], &b""[..]] {
+            let mut packet = Vec::new();
+            packet.extend_from_slice(b"*3\r\n$6\r\nGETBIT\r\n$1\r\nk\r\n$");
+            packet.extend_from_slice(arg.len().to_string().as_bytes());
+            packet.extend_from_slice(b"\r\n");
+            packet.extend_from_slice(arg);
+            packet.extend_from_slice(b"\r\n");
+
+            let parsed = crate::parse_borrowed_plain_getbit_packet(&packet, &cfg)
+                .expect("GETBIT parser must accept any well-framed offset bulk");
+            assert_eq!(parsed.key, b"k");
+            assert_eq!(
+                parsed.member, arg,
+                "offset bytes must reach the executor verbatim"
+            );
+            assert_eq!(parsed.consumed, packet.len());
+        }
+
+        let lindex = crate::parse_borrowed_plain_lindex_packet(
+            b"*3\r\n$6\r\nLINDEX\r\n$1\r\nk\r\n$3\r\nfoo\r\n",
+            &cfg,
+        )
+        .expect("LINDEX parser must accept any well-framed index bulk");
+        assert_eq!(lindex.member, b"foo");
+    }
+
+    #[test]
+    fn borrowed_plain_getbit_lindex_packet_parsers_reject_same_prefix_siblings() {
+        let cfg = ParserConfig::default();
+
+        // GETBIT and LINDEX are byte-identical through `*3\r\n$6\r\n` — same
+        // arity, same key+arg shape, different data type entirely. They also
+        // collide with the six-letter writes (APPEND/GETSET/SETBIT), so a
+        // prefix-only match could answer a read from a write packet.
+        assert!(
+            crate::parse_borrowed_plain_getbit_packet(
+                b"*3\r\n$6\r\nLINDEX\r\n$1\r\nk\r\n$1\r\n0\r\n",
+                &cfg
+            )
+            .is_none(),
+            "GETBIT parser must reject the same-shape LINDEX command"
+        );
+        assert!(
+            crate::parse_borrowed_plain_lindex_packet(
+                b"*3\r\n$6\r\nGETBIT\r\n$1\r\nk\r\n$1\r\n0\r\n",
+                &cfg
+            )
+            .is_none(),
+            "LINDEX parser must reject the same-shape GETBIT command"
+        );
+        for other in [
+            &b"*3\r\n$6\r\nAPPEND\r\n$1\r\nk\r\n$1\r\nv\r\n"[..],
+            &b"*3\r\n$6\r\nGETSET\r\n$1\r\nk\r\n$1\r\nv\r\n"[..],
+            &b"*3\r\n$6\r\nSETBIT\r\n$1\r\nk\r\n$1\r\nv\r\n"[..],
+        ] {
+            assert!(
+                crate::parse_borrowed_plain_getbit_packet(other, &cfg).is_none(),
+                "GETBIT parser must reject same-shape sibling command"
+            );
+            assert!(
+                crate::parse_borrowed_plain_lindex_packet(other, &cfg).is_none(),
+                "LINDEX parser must reject same-shape sibling command"
+            );
+        }
+    }
+
+    #[test]
+    fn borrowed_plain_getbit_lindex_packet_parsers_defer_invalid_shapes_and_limits() {
+        let cfg = ParserConfig::default();
+
+        assert!(
+            crate::parse_borrowed_plain_getbit_packet(
+                b"*03\r\n$6\r\nGETBIT\r\n$1\r\nk\r\n$1\r\n0\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_lindex_packet(
+                b"*3\r\n$06\r\nLINDEX\r\n$1\r\nk\r\n$1\r\n0\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical command bulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_getbit_packet(
+                b"*3\r\n$6\r\nGETBIT\r\n$1\r\nk\r\n$1\r\n0\r\n",
+                &ParserConfig {
+                    max_array_len: 2,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_lindex_packet(
+                b"*3\r\n$6\r\nLINDEX\r\n$1\r\nk\r\n$1\r\n0\r\n",
+                &ParserConfig {
+                    max_bulk_len: 5,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "command bulk-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_getbit_packet(
+                b"*3\r\n$6\r\nGETBIT\r\n$7\r\nkeykeyk\r\n$1\r\n0\r\n",
+                &ParserConfig {
+                    max_bulk_len: 6,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "key bulk-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_lindex_packet(
+                b"*3\r\n$6\r\nLINDEX\r\n$1\r\nk\r\n$7\r\n1234567\r\n",
+                &ParserConfig {
+                    max_bulk_len: 6,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "arg bulk-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_getbit_packet(
+                b"*3\r\n$6\r\nGETBIT\r\n$1\r\nk\r\n$2\r\n0\r\n",
+                &cfg
+            )
+            .is_none(),
+            "malformed trailing bulk bodies stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_lindex_packet(b"*2\r\n$6\r\nLINDEX\r\n$1\r\nk\r\n", &cfg)
+                .is_none(),
+            "wrong-arity packets stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_getbit_packet(
+                b"*3\r\n$6\r\nGETBIT\r\n$1\r\nk\r\n$1\r\n0\r",
+                &cfg
+            )
+            .is_none(),
+            "truncated packets stay on the generic parser until more bytes arrive"
+        );
+        assert!(
+            crate::parse_borrowed_plain_lindex_packet(b"*3\r\n$6\r\nLIND", &cfg).is_none(),
+            "packets truncated inside the command token stay on the generic parser"
+        );
+    }
+
+    #[test]
     fn borrowed_plain_bitcount_packet_parser_accepts_canonical_key_only_bitcount() {
         let input = b"*2\r\n$8\r\nbItCoUnT\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n";
         let parsed = crate::parse_borrowed_plain_bitcount_packet(input, &ParserConfig::default())
