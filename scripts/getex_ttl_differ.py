@@ -66,6 +66,11 @@ def main():
     chk("persist_nottl_stays", "TTL", "not")
     # EXAT / PXAT: set a new absolute TTL
     setup()
+    chk("ex_value", "GETEX", "k", "EX", "100")
+    chk("ex_ttl_present", "TTL", "k")
+    setup()
+    chk("px_value", "GETEX", "k", "PX", "100000")
+    setup()
     chk("exat_value", "GETEX", "k", "EXAT", EXAT2)
     chk("exat_set", "EXPIRETIME", "k")
     setup()
