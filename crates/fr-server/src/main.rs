@@ -32005,6 +32005,191 @@ mod tests {
     }
 
     #[test]
+    fn borrowed_plain_lrange_packet_parser_accepts_canonical_packets() {
+        let cfg = ParserConfig::default();
+
+        let lrange = crate::parse_borrowed_plain_lrange_packet(
+            b"*4\r\n$6\r\nlRaNgE\r\n$3\r\nkey\r\n$1\r\n0\r\n$2\r\n-1\r\n*1\r\n$4\r\nPING\r\n",
+            &cfg,
+        )
+        .expect("canonical LRANGE packet should parse");
+        assert_eq!(lrange.key, b"key");
+        assert_eq!(lrange.start, b"0");
+        assert_eq!(lrange.end, b"-1");
+        assert_eq!(
+            lrange.consumed,
+            b"*4\r\n$6\r\nlRaNgE\r\n$3\r\nkey\r\n$1\r\n0\r\n$2\r\n-1\r\n".len()
+        );
+
+        // Distinct bulk lengths make the key/start/stop ordering observable —
+        // all three are same-shaped bulks, so a transposition would still parse.
+        let ordered = crate::parse_borrowed_plain_lrange_packet(
+            b"*4\r\n$6\r\nLRANGE\r\n$1\r\nk\r\n$2\r\n10\r\n$3\r\n200\r\n",
+            &cfg,
+        )
+        .expect("LRANGE with distinct bulks should parse");
+        assert_eq!(ordered.key, b"k");
+        assert_eq!(ordered.start, b"10", "start follows the key");
+        assert_eq!(ordered.end, b"200", "stop follows start");
+    }
+
+    #[test]
+    fn borrowed_plain_lrange_packet_parser_passes_the_range_through_unvalidated() {
+        // start/stop reach execute_plain_lrange_borrowed_into as raw bytes and
+        // are parsed and clamped there. Negative indices are the normal case
+        // for LRANGE, so the sign must survive the parse rather than being
+        // normalised here, and out-of-range or non-numeric values must remain a
+        // command-level decision rather than becoming a parse deferral.
+        let cfg = ParserConfig::default();
+
+        for (start, stop) in [
+            (&b"-1"[..], &b"-1"[..]),
+            (&b"0"[..], &b"-100"[..]),
+            (&b"9223372036854775807"[..], &b"-9223372036854775808"[..]),
+            (&b"notanumber"[..], &b"alsonot"[..]),
+            (&b""[..], &b""[..]),
+        ] {
+            let mut packet = Vec::new();
+            packet.extend_from_slice(b"*4\r\n$6\r\nLRANGE\r\n$1\r\nk\r\n$");
+            packet.extend_from_slice(start.len().to_string().as_bytes());
+            packet.extend_from_slice(b"\r\n");
+            packet.extend_from_slice(start);
+            packet.extend_from_slice(b"\r\n$");
+            packet.extend_from_slice(stop.len().to_string().as_bytes());
+            packet.extend_from_slice(b"\r\n");
+            packet.extend_from_slice(stop);
+            packet.extend_from_slice(b"\r\n");
+
+            let parsed = crate::parse_borrowed_plain_lrange_packet(&packet, &cfg)
+                .expect("LRANGE parser must accept any well-framed range bulks");
+            assert_eq!(parsed.key, b"k");
+            assert_eq!(
+                parsed.start, start,
+                "start bytes must reach the executor verbatim"
+            );
+            assert_eq!(
+                parsed.end, stop,
+                "stop bytes must reach the executor verbatim"
+            );
+            assert_eq!(parsed.consumed, packet.len());
+        }
+    }
+
+    #[test]
+    fn borrowed_plain_lrange_packet_parser_rejects_same_prefix_siblings() {
+        let cfg = ParserConfig::default();
+
+        // ZRANGE is the dangerous one: same `*4\r\n$6\r\n` prefix, same
+        // key+start+stop layout, and the same range semantics on a different
+        // data type. A prefix-only match would answer a list range from a
+        // sorted-set request without any shape mismatch to give it away.
+        assert!(
+            crate::parse_borrowed_plain_lrange_packet(
+                b"*4\r\n$6\r\nZRANGE\r\n$1\r\nk\r\n$1\r\n0\r\n$2\r\n-1\r\n",
+                &cfg
+            )
+            .is_none(),
+            "LRANGE parser must reject the same-shape ZRANGE command"
+        );
+        // SETBIT and HSETNX are writes with the identical key+arg+arg layout,
+        // so this would also serve a read where a mutation was requested.
+        for other in [
+            &b"*4\r\n$6\r\nSETBIT\r\n$1\r\nk\r\n$1\r\n0\r\n$1\r\n1\r\n"[..],
+            &b"*4\r\n$6\r\nHSETNX\r\n$1\r\nk\r\n$1\r\nf\r\n$1\r\nv\r\n"[..],
+            &b"*4\r\n$6\r\nZCOUNT\r\n$1\r\nk\r\n$1\r\n0\r\n$1\r\n9\r\n"[..],
+            &b"*4\r\n$6\r\nBITPOS\r\n$1\r\nk\r\n$1\r\n1\r\n$1\r\n0\r\n"[..],
+        ] {
+            assert!(
+                crate::parse_borrowed_plain_lrange_packet(other, &cfg).is_none(),
+                "LRANGE parser must reject same-shape sibling command"
+            );
+        }
+    }
+
+    #[test]
+    fn borrowed_plain_lrange_packet_parser_defers_invalid_shapes_and_limits() {
+        let cfg = ParserConfig::default();
+
+        assert!(
+            crate::parse_borrowed_plain_lrange_packet(
+                b"*04\r\n$6\r\nLRANGE\r\n$1\r\nk\r\n$1\r\n0\r\n$1\r\n1\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_lrange_packet(
+                b"*4\r\n$06\r\nLRANGE\r\n$1\r\nk\r\n$1\r\n0\r\n$1\r\n1\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical command bulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_lrange_packet(
+                b"*4\r\n$6\r\nLRANGE\r\n$1\r\nk\r\n$1\r\n0\r\n$1\r\n1\r\n",
+                &ParserConfig {
+                    max_array_len: 3,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_lrange_packet(
+                b"*4\r\n$6\r\nLRANGE\r\n$1\r\nk\r\n$1\r\n0\r\n$1\r\n1\r\n",
+                &ParserConfig {
+                    max_bulk_len: 5,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "command bulk-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_lrange_packet(
+                b"*4\r\n$6\r\nLRANGE\r\n$1\r\nk\r\n$1\r\n0\r\n$7\r\n1234567\r\n",
+                &ParserConfig {
+                    max_bulk_len: 6,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "stop bulk-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_lrange_packet(
+                b"*4\r\n$6\r\nLRANGE\r\n$1\r\nk\r\n$1\r\n0\r\n$2\r\n1\r\n",
+                &cfg
+            )
+            .is_none(),
+            "malformed trailing bulk bodies stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_lrange_packet(
+                b"*3\r\n$6\r\nLRANGE\r\n$1\r\nk\r\n$1\r\n0\r\n",
+                &cfg
+            )
+            .is_none(),
+            "wrong-arity packets stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_lrange_packet(
+                b"*4\r\n$6\r\nLRANGE\r\n$1\r\nk\r\n$1\r\n0\r\n$1\r\n1\r",
+                &cfg
+            )
+            .is_none(),
+            "truncated packets stay on the generic parser until more bytes arrive"
+        );
+        assert!(
+            crate::parse_borrowed_plain_lrange_packet(b"*4\r\n$6\r\nLRAN", &cfg).is_none(),
+            "packets truncated inside the command token stay on the generic parser"
+        );
+    }
+
+    #[test]
     fn borrowed_plain_bitcount_packet_parser_accepts_canonical_key_only_bitcount() {
         let input = b"*2\r\n$8\r\nbItCoUnT\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n";
         let parsed = crate::parse_borrowed_plain_bitcount_packet(input, &ParserConfig::default())
