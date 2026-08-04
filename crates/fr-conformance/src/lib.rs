@@ -12148,6 +12148,20 @@ mod tests {
     core_fixture_test!(conformance_core_transaction, "core_transaction.json");
     core_fixture_test!(conformance_core_connection, "core_connection.json");
     core_fixture_test!(conformance_core_server, "core_server.json");
+
+    #[test]
+    fn conformance_core_server_latency_history_is_fixture_isolated() {
+        let cfg = HarnessConfig::default_paths();
+        for run in 0..2 {
+            let report = run_fixture(&cfg, "core_server.json").expect("core server fixture");
+            assert_eq!(
+                report.total, report.passed,
+                "core_server fixture leaked state on run {run}: {:?}",
+                report.failed
+            );
+        }
+    }
+
     core_fixture_test!(conformance_core_config, "core_config.json");
     core_fixture_test!(conformance_core_client, "core_client.json");
     core_fixture_test!(conformance_core_copy, "core_copy.json");
