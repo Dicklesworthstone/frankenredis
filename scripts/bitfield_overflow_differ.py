@@ -15,10 +15,16 @@ Usage: bitfield_overflow_differ.py <oracle_port> <fr_port>
 import socket
 import sys
 import time
+from contextlib import contextmanager
 
 
+@contextmanager
 def conn(p):
-    return socket.create_connection(("127.0.0.1", p), timeout=5)
+    socket_handle = socket.create_connection(("127.0.0.1", p), timeout=5)
+    try:
+        yield socket_handle
+    finally:
+        socket_handle.close()
 
 
 def cmd(s, *a):
@@ -31,10 +37,7 @@ def cmd(s, *a):
     return s.recv(1 << 20)
 
 
-def main():
-    op = int(sys.argv[1]) if len(sys.argv) > 1 else 16399
-    fp = int(sys.argv[2]) if len(sys.argv) > 2 else 16400
-    od, fr = conn(op), conn(fp)
+def run(od, fr):
     fails = []
 
     def reset():
@@ -56,6 +59,7 @@ def main():
     reset(); chk("i8_fail", "BITFIELD", "bf", "SET", "i8", "0", "127", "OVERFLOW", "FAIL", "INCRBY", "i8", "0", "1")
     reset(); chk("i8_under_wrap", "BITFIELD", "bf", "SET", "i8", "0", "-128", "OVERFLOW", "WRAP", "INCRBY", "i8", "0", "-1")
     reset(); chk("i8_under_sat", "BITFIELD", "bf", "SET", "i8", "0", "-128", "OVERFLOW", "SAT", "DECRBY", "i8", "0", "1")
+    reset(); chk("i8_under_fail", "BITFIELD", "bf", "SET", "i8", "0", "-128", "OVERFLOW", "FAIL", "DECRBY", "i8", "0", "1")
     # #N offset
     reset(); chk("hash_offset", "BITFIELD", "bf", "SET", "u8", "#0", "65", "SET", "u8", "#1", "66", "GET", "u8", "#0", "GET", "u8", "#1")
     # GET beyond end -> 0
@@ -93,6 +97,13 @@ def main():
         "PASS — BITFIELD overflow-mode matrix byte-exact vs redis 7.2.4 "
         "(WRAP/SAT/FAIL signed+unsigned, #N offset, GET-beyond, widths, multi-op scope, errors, RO)"
     )
+
+
+def main():
+    op = int(sys.argv[1]) if len(sys.argv) > 1 else 16399
+    fp = int(sys.argv[2]) if len(sys.argv) > 2 else 16400
+    with conn(op) as od, conn(fp) as fr:
+        run(od, fr)
 
 
 if __name__ == "__main__":
