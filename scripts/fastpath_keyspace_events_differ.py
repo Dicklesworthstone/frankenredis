@@ -33,8 +33,11 @@ WRITES = [
     ("ZADD", "z", "1", "zm"),
     ("ZINCRBY", "z", "2", "zm"),
     ("ZPOPMIN", "z"),
+    ("ZADD", "z", "3", "zx"),
+    ("ZPOPMAX", "z"),
     ("EXPIRE", "s", "1000"),
-    ("GETDEL", "st"),
+    ("SET", "gd", "value"),
+    ("GETDEL", "gd"),
 ]
 
 
