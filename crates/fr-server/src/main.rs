@@ -31157,15 +31157,21 @@ mod tests {
             .is_none(),
             "single-pair MSET stays on the generic wrong-arity path"
         );
-        let parsed = crate::parse_borrowed_plain_mset_packet(
-            b"*19\r\n$4\r\nMSET\r\n$1\r\na\r\n$1\r\n1\r\n$1\r\nb\r\n$1\r\n2\r\n$1\r\nc\r\n$1\r\n3\r\n$1\r\nd\r\n$1\r\n4\r\n$1\r\ne\r\n$1\r\n5\r\n$1\r\nf\r\n$1\r\n6\r\n$1\r\ng\r\n$1\r\n7\r\n$1\r\nh\r\n$1\r\n8\r\n$1\r\ni\r\n$1\r\n9\r\n",
-            &cfg,
-        );
+        let input = b"*19\r\n$4\r\nmSeT\r\n$1\r\na\r\n$1\r\n1\r\n$1\r\nb\r\n$1\r\n2\r\n$1\r\nc\r\n$1\r\n3\r\n$1\r\nd\r\n$1\r\n4\r\n$1\r\ne\r\n$1\r\n5\r\n$1\r\nf\r\n$1\r\n6\r\n$1\r\ng\r\n$1\r\n7\r\n$1\r\nh\r\n$1\r\n8\r\n$1\r\ni\r\n$1\r\n9\r\n*1\r\n$4\r\nPING\r\n";
+        let parsed = crate::parse_borrowed_plain_mset_packet(input, &cfg);
         assert!(
             matches!(&parsed, Some(crate::BorrowedPlainMsetPacket::Multi(_))),
             "nine-pair MSET uses the shipped multi-pair parser"
         );
-        assert_eq!(parsed.expect("multi-pair packet").pairs().len(), 9);
+        let parsed = parsed.expect("multi-pair packet");
+        assert_eq!(parsed.pairs().len(), 9);
+        assert_eq!(parsed.pairs()[0], (b"a".as_slice(), b"1".as_slice()));
+        assert_eq!(parsed.pairs()[8], (b"i".as_slice(), b"9".as_slice()));
+        assert_eq!(
+            parsed.consumed(),
+            input.len() - b"*1\r\n$4\r\nPING\r\n".len(),
+            "the multi parser must leave the next pipeline frame unread"
+        );
         assert!(
             crate::parse_borrowed_plain_mset_packet(
                 b"*017\r\n$4\r\nMSET\r\n$1\r\na\r\n$1\r\n1\r\n$1\r\nb\r\n$1\r\n2\r\n$1\r\nc\r\n$1\r\n3\r\n$1\r\nd\r\n$1\r\n4\r\n$1\r\ne\r\n$1\r\n5\r\n$1\r\nf\r\n$1\r\n6\r\n$1\r\ng\r\n$1\r\n7\r\n$1\r\nh\r\n$1\r\n8\r\n",
@@ -31184,6 +31190,17 @@ mod tests {
             )
             .is_none(),
             "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_mset_packet(
+                b"*19\r\n$4\r\nMSET\r\n$1\r\na\r\n$1\r\n1\r\n$1\r\nb\r\n$1\r\n2\r\n$1\r\nc\r\n$1\r\n3\r\n$1\r\nd\r\n$1\r\n4\r\n$1\r\ne\r\n$1\r\n5\r\n$1\r\nf\r\n$1\r\n6\r\n$1\r\ng\r\n$1\r\n7\r\n$1\r\nh\r\n$1\r\n8\r\n$1\r\ni\r\n$1\r\n9\r\n",
+                &ParserConfig {
+                    max_array_len: 18,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "nine-pair array-limit errors stay on the generic parser"
         );
         assert!(
             crate::parse_borrowed_plain_mset_packet(
