@@ -3090,7 +3090,7 @@ expected_len={} partial_response={:?}: {error}",
     );
 }
 
-fn apply_server_setup(servers: &mut [Server; 4], setup: &[ExchangeCase]) {
+fn apply_server_setup(servers: &mut [Server], setup: &[ExchangeCase]) {
     for server in servers {
         for case in setup {
             exchange_one(server, &case.request, &case.response);
@@ -4754,7 +4754,7 @@ struct DualNullSample {
     cpu_competitive_speedup: f64,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DualNullArm {
     CandidateA,
     CandidateB,
@@ -4771,6 +4771,185 @@ impl DualNullArm {
             Self::RedisB => 3,
         }
     }
+
+    const fn is_candidate(self) -> bool {
+        matches!(self, Self::CandidateA | Self::CandidateB)
+    }
+}
+
+/// Every permutation of the four dual-null arms.
+///
+/// Rotating through all 24 gives each arm every position equally often, so a
+/// position-dependent effect (cache state left by the previous arm, frequency
+/// residue) cannot accumulate on one side of a null. This lives at module scope
+/// because the candidate-only preflight derives its own schedule from it; two
+/// hand-maintained tables would be free to drift, and a preflight measured on a
+/// different order distribution is not evidence about the curve it gates.
+const DUAL_NULL_ORDERS: [[DualNullArm; 4]; 24] = [
+    [
+        DualNullArm::CandidateA,
+        DualNullArm::CandidateB,
+        DualNullArm::RedisA,
+        DualNullArm::RedisB,
+    ],
+    [
+        DualNullArm::CandidateA,
+        DualNullArm::CandidateB,
+        DualNullArm::RedisB,
+        DualNullArm::RedisA,
+    ],
+    [
+        DualNullArm::CandidateA,
+        DualNullArm::RedisA,
+        DualNullArm::CandidateB,
+        DualNullArm::RedisB,
+    ],
+    [
+        DualNullArm::CandidateA,
+        DualNullArm::RedisA,
+        DualNullArm::RedisB,
+        DualNullArm::CandidateB,
+    ],
+    [
+        DualNullArm::CandidateA,
+        DualNullArm::RedisB,
+        DualNullArm::CandidateB,
+        DualNullArm::RedisA,
+    ],
+    [
+        DualNullArm::CandidateA,
+        DualNullArm::RedisB,
+        DualNullArm::RedisA,
+        DualNullArm::CandidateB,
+    ],
+    [
+        DualNullArm::CandidateB,
+        DualNullArm::CandidateA,
+        DualNullArm::RedisA,
+        DualNullArm::RedisB,
+    ],
+    [
+        DualNullArm::CandidateB,
+        DualNullArm::CandidateA,
+        DualNullArm::RedisB,
+        DualNullArm::RedisA,
+    ],
+    [
+        DualNullArm::CandidateB,
+        DualNullArm::RedisA,
+        DualNullArm::CandidateA,
+        DualNullArm::RedisB,
+    ],
+    [
+        DualNullArm::CandidateB,
+        DualNullArm::RedisA,
+        DualNullArm::RedisB,
+        DualNullArm::CandidateA,
+    ],
+    [
+        DualNullArm::CandidateB,
+        DualNullArm::RedisB,
+        DualNullArm::CandidateA,
+        DualNullArm::RedisA,
+    ],
+    [
+        DualNullArm::CandidateB,
+        DualNullArm::RedisB,
+        DualNullArm::RedisA,
+        DualNullArm::CandidateA,
+    ],
+    [
+        DualNullArm::RedisA,
+        DualNullArm::CandidateA,
+        DualNullArm::CandidateB,
+        DualNullArm::RedisB,
+    ],
+    [
+        DualNullArm::RedisA,
+        DualNullArm::CandidateA,
+        DualNullArm::RedisB,
+        DualNullArm::CandidateB,
+    ],
+    [
+        DualNullArm::RedisA,
+        DualNullArm::CandidateB,
+        DualNullArm::CandidateA,
+        DualNullArm::RedisB,
+    ],
+    [
+        DualNullArm::RedisA,
+        DualNullArm::CandidateB,
+        DualNullArm::RedisB,
+        DualNullArm::CandidateA,
+    ],
+    [
+        DualNullArm::RedisA,
+        DualNullArm::RedisB,
+        DualNullArm::CandidateA,
+        DualNullArm::CandidateB,
+    ],
+    [
+        DualNullArm::RedisA,
+        DualNullArm::RedisB,
+        DualNullArm::CandidateB,
+        DualNullArm::CandidateA,
+    ],
+    [
+        DualNullArm::RedisB,
+        DualNullArm::CandidateA,
+        DualNullArm::CandidateB,
+        DualNullArm::RedisA,
+    ],
+    [
+        DualNullArm::RedisB,
+        DualNullArm::CandidateA,
+        DualNullArm::RedisA,
+        DualNullArm::CandidateB,
+    ],
+    [
+        DualNullArm::RedisB,
+        DualNullArm::CandidateB,
+        DualNullArm::CandidateA,
+        DualNullArm::RedisA,
+    ],
+    [
+        DualNullArm::RedisB,
+        DualNullArm::CandidateB,
+        DualNullArm::RedisA,
+        DualNullArm::CandidateA,
+    ],
+    [
+        DualNullArm::RedisB,
+        DualNullArm::RedisA,
+        DualNullArm::CandidateA,
+        DualNullArm::CandidateB,
+    ],
+    [
+        DualNullArm::RedisB,
+        DualNullArm::RedisA,
+        DualNullArm::CandidateB,
+        DualNullArm::CandidateA,
+    ],
+];
+
+/// The candidate-only A/A schedule, derived by filtering every four-arm order
+/// down to its two candidate arms.
+///
+/// Derivation rather than a second literal table is the point: the preflight
+/// then imposes exactly the candidate relative-order distribution the four-arm
+/// curve imposes (12 orders lead with A, 12 with B), so a preflight pass is
+/// evidence about the curve it gates and not about a schedule of its own.
+fn candidate_null_orders() -> [[DualNullArm; 2]; 24] {
+    DUAL_NULL_ORDERS.map(|order| {
+        let mut candidates = order.into_iter().filter(|arm| arm.is_candidate());
+        let first = candidates
+            .next()
+            .expect("every four-arm order carries both candidate arms");
+        let second = candidates
+            .next()
+            .expect("every four-arm order carries both candidate arms");
+        [first, second]
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -5047,152 +5226,7 @@ fn measure_dual_null_configuration_with_packets(
         interleave_groups,
         ..
     } = config;
-    const ORDERS: [[DualNullArm; 4]; 24] = [
-        [
-            DualNullArm::CandidateA,
-            DualNullArm::CandidateB,
-            DualNullArm::RedisA,
-            DualNullArm::RedisB,
-        ],
-        [
-            DualNullArm::CandidateA,
-            DualNullArm::CandidateB,
-            DualNullArm::RedisB,
-            DualNullArm::RedisA,
-        ],
-        [
-            DualNullArm::CandidateA,
-            DualNullArm::RedisA,
-            DualNullArm::CandidateB,
-            DualNullArm::RedisB,
-        ],
-        [
-            DualNullArm::CandidateA,
-            DualNullArm::RedisA,
-            DualNullArm::RedisB,
-            DualNullArm::CandidateB,
-        ],
-        [
-            DualNullArm::CandidateA,
-            DualNullArm::RedisB,
-            DualNullArm::CandidateB,
-            DualNullArm::RedisA,
-        ],
-        [
-            DualNullArm::CandidateA,
-            DualNullArm::RedisB,
-            DualNullArm::RedisA,
-            DualNullArm::CandidateB,
-        ],
-        [
-            DualNullArm::CandidateB,
-            DualNullArm::CandidateA,
-            DualNullArm::RedisA,
-            DualNullArm::RedisB,
-        ],
-        [
-            DualNullArm::CandidateB,
-            DualNullArm::CandidateA,
-            DualNullArm::RedisB,
-            DualNullArm::RedisA,
-        ],
-        [
-            DualNullArm::CandidateB,
-            DualNullArm::RedisA,
-            DualNullArm::CandidateA,
-            DualNullArm::RedisB,
-        ],
-        [
-            DualNullArm::CandidateB,
-            DualNullArm::RedisA,
-            DualNullArm::RedisB,
-            DualNullArm::CandidateA,
-        ],
-        [
-            DualNullArm::CandidateB,
-            DualNullArm::RedisB,
-            DualNullArm::CandidateA,
-            DualNullArm::RedisA,
-        ],
-        [
-            DualNullArm::CandidateB,
-            DualNullArm::RedisB,
-            DualNullArm::RedisA,
-            DualNullArm::CandidateA,
-        ],
-        [
-            DualNullArm::RedisA,
-            DualNullArm::CandidateA,
-            DualNullArm::CandidateB,
-            DualNullArm::RedisB,
-        ],
-        [
-            DualNullArm::RedisA,
-            DualNullArm::CandidateA,
-            DualNullArm::RedisB,
-            DualNullArm::CandidateB,
-        ],
-        [
-            DualNullArm::RedisA,
-            DualNullArm::CandidateB,
-            DualNullArm::CandidateA,
-            DualNullArm::RedisB,
-        ],
-        [
-            DualNullArm::RedisA,
-            DualNullArm::CandidateB,
-            DualNullArm::RedisB,
-            DualNullArm::CandidateA,
-        ],
-        [
-            DualNullArm::RedisA,
-            DualNullArm::RedisB,
-            DualNullArm::CandidateA,
-            DualNullArm::CandidateB,
-        ],
-        [
-            DualNullArm::RedisA,
-            DualNullArm::RedisB,
-            DualNullArm::CandidateB,
-            DualNullArm::CandidateA,
-        ],
-        [
-            DualNullArm::RedisB,
-            DualNullArm::CandidateA,
-            DualNullArm::CandidateB,
-            DualNullArm::RedisA,
-        ],
-        [
-            DualNullArm::RedisB,
-            DualNullArm::CandidateA,
-            DualNullArm::RedisA,
-            DualNullArm::CandidateB,
-        ],
-        [
-            DualNullArm::RedisB,
-            DualNullArm::CandidateB,
-            DualNullArm::CandidateA,
-            DualNullArm::RedisA,
-        ],
-        [
-            DualNullArm::RedisB,
-            DualNullArm::CandidateB,
-            DualNullArm::RedisA,
-            DualNullArm::CandidateA,
-        ],
-        [
-            DualNullArm::RedisB,
-            DualNullArm::RedisA,
-            DualNullArm::CandidateA,
-            DualNullArm::CandidateB,
-        ],
-        [
-            DualNullArm::RedisB,
-            DualNullArm::RedisA,
-            DualNullArm::CandidateB,
-            DualNullArm::CandidateA,
-        ],
-    ];
+    const ORDERS: [[DualNullArm; 4]; 24] = DUAL_NULL_ORDERS;
     assert!(
         samples.is_multiple_of(ORDERS.len()),
         "sample count must contain complete 24-order cycles; got {samples}"
@@ -5381,6 +5415,280 @@ cpu_candidate_over_redis={:.9}",
         );
     }
     output
+}
+
+#[derive(Debug)]
+struct CandidateNullSample {
+    candidate_a_ns: f64,
+    candidate_b_ns: f64,
+    candidate_a_cpu_ns: u64,
+    candidate_b_cpu_ns: u64,
+    candidate_a_cpu_util_pct: f64,
+    candidate_b_cpu_util_pct: f64,
+    wall_null_ratio: f64,
+    cpu_null_ratio: f64,
+    identity_swapped: bool,
+}
+
+/// Measure the candidate A/A null alone, with no incumbent arm present.
+///
+/// This is deliberately not a ratio harness. It produces no vs-incumbent number
+/// and therefore cannot produce a campaign claim; its only job is to answer, far
+/// more cheaply than a four-arm curve, whether the candidate's two identical
+/// processes measure the same at a given worker count. Two full-curve
+/// invocations were spent discovering that they did not (W8 CPU null median
+/// 1.033100302, W2 0.977090968, sign flipped between runs, both wall nulls
+/// clean), which is exactly the finding a preflight should have surfaced first.
+fn measure_candidate_null_preflight(
+    servers: &mut [Server; 2],
+    workload: Workload,
+    pipeline: usize,
+    config: MeasurementConfig,
+    packets: Arc<DriverPackets>,
+    packet_measurement: PacketMeasurement<'_>,
+) -> Vec<CandidateNullSample> {
+    let PacketMeasurement {
+        prepare_keyed,
+        workload_shape,
+        host_wide_allowed_cpus,
+    } = packet_measurement;
+    assert!(
+        prepare_keyed || packets.connections.len() == 1,
+        "a candidate-null fixture without keyed preparation must use one shared packet oracle"
+    );
+    let ClientShape {
+        connections: clients,
+        driver_threads: client_threads,
+    } = config.client_shape;
+    let MeasurementConfig {
+        samples,
+        ops_per_sample,
+        interleave_groups,
+        ..
+    } = config;
+    let orders = candidate_null_orders();
+    assert!(
+        samples.is_multiple_of(orders.len()),
+        "sample count must contain complete 24-order cycles; got {samples}"
+    );
+    assert!(
+        interleave_groups > 0,
+        "interleave group count must be positive"
+    );
+
+    for server in servers.iter() {
+        server
+            .clients
+            .as_ref()
+            .expect("benchmark clients initialized")
+            .prepare(&packets);
+    }
+    let warm_groups = 20_000_usize.div_ceil(clients * pipeline).max(8);
+    for server in servers.iter_mut() {
+        time_block(
+            server,
+            &packets,
+            warm_groups,
+            matches!(workload, Workload::Mixed),
+        );
+    }
+    if let Some(allowed_cpus) = host_wide_allowed_cpus {
+        assert_host_wide_quiescence(
+            allowed_cpus,
+            &format!(
+                "before_candidate_null_preflight_{}_{}",
+                workload.name(),
+                workload_shape
+            ),
+        );
+    }
+    let groups = ops_per_sample.div_ceil(clients * pipeline).max(1);
+    let actual_ops = groups * clients * pipeline;
+    let mut output = Vec::with_capacity(samples);
+
+    println!(
+        "CONFIG_CANDIDATE_NULL_PREFLIGHT workload={} workload_shape={workload_shape} \
+pipeline={pipeline} clients={clients} client_threads={client_threads} samples={samples} \
+groups_per_arm_sample={groups} interleave_groups={interleave_groups} \
+operations_per_arm_sample={actual_ops} orders={} \
+candidate_only=true incumbent_arms_present=false ratio_claim_possible=false \
+full_response_bytes_asserted=true",
+        workload.name(),
+        orders.len()
+    );
+    for sample_index in 0..samples {
+        // Swap the two physical processes behind the logical A/A pair every
+        // sample, exactly as the four-arm curve does, so a persistent
+        // process-instance bias cannot shift the null median.
+        let identity_swapped = sample_index % 2 == 1;
+        let candidate_a_slot = usize::from(identity_swapped);
+        let candidate_b_slot = usize::from(!identity_swapped);
+        let mut elapsed = [Duration::ZERO; 2];
+        let mut cpu_elapsed = [0_u64; 2];
+        let mut groups_done = 0usize;
+        let mut interleave_index = 0usize;
+        while groups_done < groups {
+            let block_groups = (groups - groups_done).min(interleave_groups);
+            let order = orders[(sample_index + interleave_index) % orders.len()];
+            for arm in order {
+                let server_slot = match arm {
+                    DualNullArm::CandidateA => candidate_a_slot,
+                    DualNullArm::CandidateB => candidate_b_slot,
+                    other => panic!("candidate-null preflight cannot schedule {other:?}"),
+                };
+                let cpu_before = servers[server_slot].cpu_ns();
+                let block_elapsed = time_block(
+                    &mut servers[server_slot],
+                    &packets,
+                    block_groups,
+                    (groups_done % 2 == 1) ^ (sample_index % 2 == 1),
+                );
+                let cpu_after = servers[server_slot].cpu_ns();
+                elapsed[arm.index()] += block_elapsed;
+                cpu_elapsed[arm.index()] += cpu_after - cpu_before;
+            }
+            groups_done += block_groups;
+            interleave_index += 1;
+        }
+
+        let candidate_a_cpu_ns = cpu_elapsed[DualNullArm::CandidateA.index()];
+        let candidate_b_cpu_ns = cpu_elapsed[DualNullArm::CandidateB.index()];
+        assert!(
+            candidate_a_cpu_ns > 0 && candidate_b_cpu_ns > 0,
+            "both candidate A/A arms must accrue CPU time"
+        );
+        let candidate_a_ns = elapsed[DualNullArm::CandidateA.index()].as_nanos() as f64;
+        let candidate_b_ns = elapsed[DualNullArm::CandidateB.index()].as_nanos() as f64;
+        let result = CandidateNullSample {
+            candidate_a_ns,
+            candidate_b_ns,
+            candidate_a_cpu_ns,
+            candidate_b_cpu_ns,
+            candidate_a_cpu_util_pct: candidate_a_cpu_ns as f64 / candidate_a_ns * 100.0,
+            candidate_b_cpu_util_pct: candidate_b_cpu_ns as f64 / candidate_b_ns * 100.0,
+            wall_null_ratio: candidate_a_ns / candidate_b_ns,
+            cpu_null_ratio: candidate_a_cpu_ns as f64 / candidate_b_cpu_ns as f64,
+            identity_swapped,
+        };
+        println!(
+            "SAMPLE_CANDIDATE_NULL_PREFLIGHT workload={} workload_shape={workload_shape} \
+pipeline={pipeline} client_driver_threads={client_threads} sample={} \
+first_order={:?} physical_pair_slots={} \
+candidate_a_ns_per_op={:.3} candidate_b_ns_per_op={:.3} \
+candidate_a_cpu_ns={} candidate_b_cpu_ns={} \
+candidate_a_cpu_util_pct={:.3} candidate_b_cpu_util_pct={:.3} \
+wall_null_a_over_b={:.9} cpu_null_a_over_b={:.9}",
+            workload.name(),
+            sample_index + 1,
+            orders[sample_index % orders.len()],
+            if identity_swapped {
+                "candidate_BA"
+            } else {
+                "candidate_AB"
+            },
+            result.candidate_a_ns / actual_ops as f64,
+            result.candidate_b_ns / actual_ops as f64,
+            result.candidate_a_cpu_ns,
+            result.candidate_b_cpu_ns,
+            result.candidate_a_cpu_util_pct,
+            result.candidate_b_cpu_util_pct,
+            result.wall_null_ratio,
+            result.cpu_null_ratio,
+        );
+        output.push(result);
+    }
+    if let Some(allowed_cpus) = host_wide_allowed_cpus {
+        assert_host_wide_quiescence(
+            allowed_cpus,
+            &format!(
+                "after_candidate_null_preflight_{}_{}",
+                workload.name(),
+                workload_shape
+            ),
+        );
+    }
+    output
+}
+
+/// The preflight admits a candidate null only within 1% of 1.0.
+///
+/// This is tighter than the 2% gross-bias guard the four-arm curve applies, and
+/// deliberately so: the preflight is a go/no-go on burning a host, not an
+/// adjudication of a claim. Both observed failures — 1.033100302 at W8 and
+/// 0.977090968 at W2 — sit outside 2% as well, so the tightening is not what
+/// rejects them; it buys margin so a null drifting toward the curve's own limit
+/// is caught before the curve, not during it.
+const CANDIDATE_NULL_PREFLIGHT_MAX_BIAS: f64 = 0.01;
+
+fn adjudicate_candidate_null_preflight(
+    metric: &str,
+    server_workers: usize,
+    workload: Workload,
+    workload_shape: &str,
+    pipeline: usize,
+    client_threads: usize,
+    null: &[f64],
+) -> f64 {
+    let null_median = median(null);
+    let (null_ci_low, null_ci_high) = bootstrap_median_ci(null);
+    let null_ci_brackets_one = null_ci_low <= 1.0 && null_ci_high >= 1.0;
+    let bias = (null_median - 1.0).abs();
+    let admissible = bias <= CANDIDATE_NULL_PREFLIGHT_MAX_BIAS;
+    println!(
+        "CANDIDATE_NULL_PREFLIGHT_GATE metric={metric} \
+server_command_execution_threads={server_workers} workload={} \
+workload_shape={workload_shape} pipeline={pipeline} \
+client_driver_threads={client_threads} samples={} \
+verdict={} null_median={null_median:.9} \
+null_ci95=[{null_ci_low:.9},{null_ci_high:.9}] \
+null_ci_brackets_one={null_ci_brackets_one} null_cv_pct={:.6} \
+observed_bias_pct={:.6} maximum_bias_pct={:.6}",
+        workload.name(),
+        null.len(),
+        if admissible { "Admissible" } else { "Invalid" },
+        mean_cv_pct(null),
+        bias * 100.0,
+        CANDIDATE_NULL_PREFLIGHT_MAX_BIAS * 100.0
+    );
+    assert!(
+        admissible,
+        "CANDIDATE NULL UNSTABLE: metric={metric} \
+server_command_execution_threads={server_workers} workload={} \
+workload_shape={workload_shape} pipeline={pipeline} \
+client_driver_threads={client_threads}; candidate null median {null_median:.9} \
+CI [{null_ci_low:.9},{null_ci_high:.9}] must remain within {:.1}% of 1.0 before \
+a four-arm curve may be started; CI straddle is telemetry only",
+        workload.name(),
+        CANDIDATE_NULL_PREFLIGHT_MAX_BIAS * 100.0
+    );
+    null_median
+}
+
+/// Witness that each physical process spent equally many samples as logical A
+/// and as logical B.
+///
+/// The swap is what makes the null insensitive to process-instance bias, so an
+/// unbalanced swap silently reintroduces exactly the bias the preflight exists
+/// to detect. Asserting the balance keeps a truncated or odd sample count from
+/// passing the gate on a schedule that never actually cancelled.
+fn assert_sign_balanced_identity_swaps(server_workers: usize, samples: &[CandidateNullSample]) {
+    let swapped = samples
+        .iter()
+        .filter(|sample| sample.identity_swapped)
+        .count();
+    let unswapped = samples.len() - swapped;
+    println!(
+        "CANDIDATE_NULL_IDENTITY_SWAP_BALANCE server_command_execution_threads={server_workers} \
+samples={} physical_pair_ab={unswapped} physical_pair_ba={swapped} balanced={}",
+        samples.len(),
+        swapped == unswapped
+    );
+    assert_eq!(
+        swapped,
+        unswapped,
+        "identity swaps must be sign balanced: {} samples split {unswapped}/{swapped}",
+        samples.len()
+    );
 }
 
 fn quantile(samples: &[f64], q: f64) -> f64 {
@@ -6952,28 +7260,28 @@ fn parse_client_thread_counts() -> Vec<usize> {
 }
 
 fn parse_sharded_server_thread_counts() -> Vec<usize> {
-    let value = std::env::var("FR_SHARDED_SERVER_THREAD_SWEEP")
-        .unwrap_or_else(|_| "1,2,4,8,16,32,64,128".to_owned());
+    parse_sharded_thread_counts("FR_SHARDED_SERVER_THREAD_SWEEP", "1,2,4,8,16,32,64,128")
+}
+
+fn parse_sharded_thread_counts(name: &str, default: &str) -> Vec<usize> {
+    let value = std::env::var(name).unwrap_or_else(|_| default.to_owned());
     let counts = value
         .split(',')
         .map(str::trim)
         .filter(|item| !item.is_empty())
         .map(|item| {
             item.parse::<usize>()
-                .unwrap_or_else(|_| panic!("invalid FR_SHARDED_SERVER_THREAD_SWEEP item: {item}"))
+                .unwrap_or_else(|_| panic!("invalid {name} item: {item}"))
         })
         .collect::<Vec<_>>();
-    assert!(
-        !counts.is_empty(),
-        "sharded server thread sweep cannot be empty"
-    );
+    assert!(!counts.is_empty(), "{name} cannot be empty");
     assert!(
         counts.iter().all(|count| (1..=128).contains(count)),
-        "sharded server thread counts must be in 1..=128: {counts:?}"
+        "{name} counts must be in 1..=128: {counts:?}"
     );
     assert!(
         counts.windows(2).all(|pair| pair[0] < pair[1]),
-        "sharded server thread sweep must be strictly increasing: {counts:?}"
+        "{name} must be strictly increasing: {counts:?}"
     );
     counts
 }
@@ -8255,6 +8563,149 @@ fn dual_null_gate_rejects_grossly_biased_incumbent_null() {
     );
 }
 
+fn candidate_null_sample_fixture(identity_swapped: bool) -> CandidateNullSample {
+    CandidateNullSample {
+        candidate_a_ns: 1.0,
+        candidate_b_ns: 1.0,
+        candidate_a_cpu_ns: 1,
+        candidate_b_cpu_ns: 1,
+        candidate_a_cpu_util_pct: 100.0,
+        candidate_b_cpu_util_pct: 100.0,
+        wall_null_ratio: 1.0,
+        cpu_null_ratio: 1.0,
+        identity_swapped,
+    }
+}
+
+#[test]
+fn candidate_null_orders_preserve_the_four_arm_relative_order() {
+    let derived = candidate_null_orders();
+    assert_eq!(derived.len(), DUAL_NULL_ORDERS.len());
+    for (parent, pair) in DUAL_NULL_ORDERS.iter().zip(derived.iter()) {
+        let candidates = parent
+            .iter()
+            .copied()
+            .filter(|arm| arm.is_candidate())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            candidates.as_slice(),
+            pair.as_slice(),
+            "derived pair must keep the parent order's candidate sequence: parent={parent:?}"
+        );
+        assert_ne!(pair[0], pair[1], "a derived pair must hold both arms");
+    }
+    let a_first = derived
+        .iter()
+        .filter(|pair| pair[0] == DualNullArm::CandidateA)
+        .count();
+    assert_eq!(
+        a_first,
+        derived.len() / 2,
+        "the derived schedule must lead with A exactly as often as with B"
+    );
+}
+
+#[test]
+fn candidate_null_preflight_gate_accepts_a_null_within_one_percent() {
+    let null = [1.008_f64; 48];
+    let median = adjudicate_candidate_null_preflight(
+        "cpu_ns_per_fixed_work",
+        8,
+        Workload::MixedFamilies,
+        "independent_key_per_connection",
+        16,
+        128,
+        &null,
+    );
+    assert!((median - 1.008).abs() < 1.0e-12);
+}
+
+/// The discriminating case: a 1.5% bias clears the four-arm curve's own 2%
+/// gross-bias guard, so a preflight that merely reused that guard would wave it
+/// through and buy nothing. The preflight exists to stop a curve before it
+/// starts, which requires a strictly tighter band.
+#[test]
+#[should_panic(expected = "must remain within 1.0% of 1.0")]
+fn candidate_null_preflight_gate_rejects_bias_the_four_arm_guard_admits() {
+    let null = [1.015_f64; 48];
+    assert_eq!(
+        adjudicate_dual_null_ratios(
+            "cpu_ns_per_fixed_work",
+            "cpu_candidate_over_redis",
+            Workload::MixedFamilies,
+            16,
+            128,
+            DualNullRatioSamples {
+                candidate_null: &null,
+                redis_null: &[1.0_f64; 48],
+                ratio: &[1.20_f64; 48],
+            },
+        ),
+        Verdict::Keep,
+        "precondition: the four-arm guard admits a 1.5% candidate null"
+    );
+    let _ = adjudicate_candidate_null_preflight(
+        "cpu_ns_per_fixed_work",
+        8,
+        Workload::MixedFamilies,
+        "independent_key_per_connection",
+        16,
+        128,
+        &null,
+    );
+}
+
+/// r3's observed W8 candidate CPU null.
+#[test]
+#[should_panic(expected = "must remain within 1.0% of 1.0")]
+fn candidate_null_preflight_gate_rejects_the_observed_w8_cpu_bias() {
+    let null = [1.033_100_302_f64; 48];
+    let _ = adjudicate_candidate_null_preflight(
+        "cpu_ns_per_fixed_work",
+        8,
+        Workload::MixedFamilies,
+        "independent_key_per_connection",
+        16,
+        128,
+        &null,
+    );
+}
+
+/// r4's observed W2 candidate CPU null — the same instability with the opposite
+/// sign, which a one-sided guard would miss.
+#[test]
+#[should_panic(expected = "must remain within 1.0% of 1.0")]
+fn candidate_null_preflight_gate_rejects_the_observed_w2_cpu_bias() {
+    let null = [0.977_090_968_f64; 48];
+    let _ = adjudicate_candidate_null_preflight(
+        "cpu_ns_per_fixed_work",
+        2,
+        Workload::MixedFamilies,
+        "independent_key_per_connection",
+        16,
+        128,
+        &null,
+    );
+}
+
+#[test]
+fn candidate_null_identity_swaps_balance_over_complete_cycles() {
+    let samples = (0..48)
+        .map(|index| candidate_null_sample_fixture(index % 2 == 1))
+        .collect::<Vec<_>>();
+    assert_sign_balanced_identity_swaps(8, &samples);
+}
+
+#[test]
+#[should_panic(expected = "identity swaps must be sign balanced")]
+fn candidate_null_identity_swap_imbalance_is_rejected() {
+    let mut samples = (0..48)
+        .map(|index| candidate_null_sample_fixture(index % 2 == 1))
+        .collect::<Vec<_>>();
+    samples.push(candidate_null_sample_fixture(false));
+    assert_sign_balanced_identity_swaps(8, &samples);
+}
+
 #[test]
 fn dual_null_gate_uses_the_wider_null_margin() {
     let candidate_null = [
@@ -9107,6 +9558,341 @@ claim_class=COMPETITIVE same_invocation=true",
         final_cpu_frequency_policy,
         "CPU frequency policy changed during the {} invocation",
         workload.name()
+    );
+}
+
+/// Candidate-only A/A preflight, gating the four-arm sharded curve.
+///
+/// Two unchanged full-curve invocations were spent to learn that the candidate
+/// CPU A/A was not stable at every worker count: r3 failed at W8 with a null
+/// median of 1.033100302 and r4 failed at W2 with 0.977090968 — opposite signs,
+/// with both wall nulls clean, so the instability is specific to CPU accounting
+/// and specific to worker count. A four-arm curve costs four server arms across
+/// the whole 1/2/4/8/16/32/64/128 sweep to discover that; this costs two arms at
+/// the two implicated points.
+///
+/// It produces no vs-incumbent ratio and never can: no incumbent is spawned.
+/// Passing it is a licence to start a curve, not evidence for any claim.
+#[test]
+#[ignore = "host-wide sharded candidate-only A/A preflight; run explicitly before any four-arm curve"]
+fn sharded_candidate_null_preflight_same_invocation() {
+    let binary = std::env::var_os("FR_URING_FR_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_frankenredis")));
+    let redis_binary = std::env::var_os("FR_URING_REDIS_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../legacy_redis_code/redis/src/redis-server")
+        });
+    assert!(
+        binary.is_file(),
+        "FrankenRedis executable is missing: {}",
+        binary.display()
+    );
+    let harness = std::env::current_exe().expect("locate running harness ELF");
+    println!(
+        "HARNESS_ELF_SELF_REPORT sha256={} arms=sharded_candidate_a,sharded_candidate_b",
+        hash_path(&harness)
+    );
+    println!(
+        "DECISION_CONTRACT same_invocation=true candidate_aa=true incumbent_aa=false \
+live_redis_arm=false ratio_claim_possible=false preflight_only=true \
+null_median_bias_guard_pct=1 null_ci_straddle_telemetry_only=true \
+cv_provenance_only=true never_cv_gate=true \
+sign_balanced_identity_swaps=true derived_from_four_arm_orders=true"
+    );
+
+    let hostname = command_output("hostname", &[]);
+    assert!(hostname.status.success(), "hostname failed");
+    let hostname = String::from_utf8_lossy(&hostname.stdout).trim().to_owned();
+    let (physical_cores, logical_threads) = machine_topology();
+    let ram_kib = machine_ram_kib();
+    let numa_nodes = machine_numa_nodes();
+    let allow_remote_host = parse_bool_env("FR_SHARDED_ALLOW_REMOTE_HOST");
+    if allow_remote_host {
+        assert!(
+            physical_cores >= 4 && logical_threads >= 4,
+            "remote host must expose at least four physical/logical CPUs: \
+host={hostname} physical={physical_cores} logical={logical_threads}"
+        );
+    } else {
+        assert_eq!(
+            hostname, "threadripperje",
+            "set FR_SHARDED_ALLOW_REMOTE_HOST=1 only for a strict-remote clean-overlay \
+invocation that records the actual host and retains every host-wide guard"
+        );
+        assert_eq!(
+            (physical_cores, logical_threads),
+            (64, 128),
+            "trj topology changed; a preflight on different hardware does not gate a trj curve"
+        );
+    }
+    println!(
+        "SCALING_HOST_CONTRACT host_identity={hostname} \
+trj_required={} strict_remote_host_mode={} \
+physical_cores={physical_cores} logical_threads={logical_threads}",
+        !allow_remote_host, allow_remote_host
+    );
+
+    let server_thread_counts = parse_sharded_thread_counts("FR_SHARDED_PREFLIGHT_THREADS", "2,8");
+    let workloads = parse_sharded_workloads();
+    let samples = parse_usize_env("FR_SHARDED_SAMPLES", DEFAULT_SAMPLES);
+    assert!(
+        samples >= 48,
+        "candidate-null preflight requires at least 48 samples; got {samples}"
+    );
+    assert!(
+        samples.is_multiple_of(24),
+        "candidate-null preflight requires complete 24-order cycles; got {samples}"
+    );
+    let clients = parse_usize_env("FR_SHARDED_CLIENTS", 128);
+    let client_threads = parse_usize_env("FR_SHARDED_CLIENT_THREADS", 128);
+    assert!(
+        (1..=clients).contains(&client_threads),
+        "client driver threads must be in 1..={clients}"
+    );
+    let pipeline = parse_usize_env("FR_SHARDED_PIPELINE", 16);
+    assert_eq!(
+        pipeline, 16,
+        "the preflight must gate at the curve's pre-registered pipeline depth 16"
+    );
+    let ops_per_sample = parse_usize_env("FR_SHARDED_OPS_PER_SAMPLE", DEFAULT_OPS_PER_SAMPLE);
+    let interleave_groups = parse_usize_env(
+        "FR_SHARDED_INTERLEAVE_GROUPS",
+        SHARDED_DEFAULT_INTERLEAVE_GROUPS,
+    );
+    let groups_per_arm_sample = ops_per_sample.div_ceil(clients * pipeline).max(1);
+    assert!(
+        interleave_groups < groups_per_arm_sample,
+        "preflight must rotate arms within each sample: \
+interleave_groups={interleave_groups} groups_per_arm_sample={groups_per_arm_sample}"
+    );
+    let (client_cpu_order, _redis_core, process_cpuset_cap) =
+        choose_client_cpu_order(client_threads);
+    assert_eq!(
+        process_cpuset_cap.len(),
+        logical_threads,
+        "host-wide preflight requires access to every logical CPU; \
+process cpuset has {} of {logical_threads}",
+        process_cpuset_cap.len()
+    );
+    let initial_cpu_frequency_policy = cpu_frequency_policy(&process_cpuset_cap);
+    print_cpu_frequency_policy(
+        "initial_pre_measurement",
+        &process_cpuset_cap,
+        &initial_cpu_frequency_policy,
+    );
+    assert_host_wide_quiescence(&process_cpuset_cap, "initial_pre_pin");
+    let client_affinity = pin_client_process(&client_cpu_order, client_threads);
+    let candidate_cpu_order = disjoint_physical_cpu_order(&process_cpuset_cap, &client_affinity);
+    let maximum_server_workers = server_thread_counts.iter().copied().max().unwrap_or(0);
+    assert!(
+        candidate_cpu_order.len() >= maximum_server_workers,
+        "sharded candidates need one client-disjoint CPU per worker: requested={} available={} \
+client_affinity={client_affinity:?} candidate_cpu_order={candidate_cpu_order:?}",
+        maximum_server_workers,
+        candidate_cpu_order.len()
+    );
+    println!(
+        "PREFLIGHT_HARDWARE_PROVENANCE host_identity={hostname} \
+physical_cores={physical_cores} logical_threads={logical_threads} \
+ram_kib={ram_kib} numa_nodes={numa_nodes} \
+server_thread_counts_requested={server_thread_counts:?} \
+workloads_requested={workloads:?} samples={samples} \
+client_driver_threads_actual={client_threads} client_connections={clients} \
+runtime_detected_isa={} process_cpuset_cap={process_cpuset_cap:?} \
+client_affinity={client_affinity:?} candidate_cpu_order={candidate_cpu_order:?}",
+        runtime_isa_features()
+    );
+    let root = unique_root();
+    println!("ARTIFACT_ROOT {}", root.display());
+    let client_shape = ClientShape {
+        connections: clients,
+        driver_threads: client_threads,
+    };
+    let measurement = MeasurementConfig {
+        client_shape,
+        samples,
+        ops_per_sample,
+        interleave_groups,
+    };
+    let mut medians = Vec::new();
+
+    for server_workers in server_thread_counts {
+        let candidate_affinity = &candidate_cpu_order[..server_workers];
+        let point_root = root.join(format!("preflight_server_workers_{server_workers}"));
+        fs::create_dir_all(&point_root).expect("create preflight point root");
+        let mut servers = [
+            Server::spawn_with_options(
+                &binary,
+                &redis_binary,
+                Arm::IoUring,
+                &point_root.join("candidate_a"),
+                candidate_affinity,
+                client_shape,
+                CommandFloorAb::None,
+                Some(server_workers),
+                true,
+            ),
+            Server::spawn_with_options(
+                &binary,
+                &redis_binary,
+                Arm::IoUring,
+                &point_root.join("candidate_b"),
+                candidate_affinity,
+                client_shape,
+                CommandFloorAb::None,
+                Some(server_workers),
+                true,
+            ),
+        ];
+        let server_hashes: [String; 2] =
+            std::array::from_fn(|index| servers[index].executing_elf_sha256());
+        assert_eq!(
+            server_hashes[0], server_hashes[1],
+            "candidate A/A arms must execute the same FrankenRedis ELF"
+        );
+        for server in &mut servers {
+            server.assert_sharded_set_get_workers_reached_process(server_workers);
+            server.assert_flag_reached_process();
+        }
+        let candidate_worker_threads_observed = [
+            servers[0].sharded_worker_cpu_ns().len(),
+            servers[1].sharded_worker_cpu_ns().len(),
+        ];
+        assert!(
+            candidate_worker_threads_observed
+                .iter()
+                .all(|observed| *observed == server_workers),
+            "both candidate A/A processes must expose every requested command worker: \
+requested={server_workers} observed={candidate_worker_threads_observed:?}"
+        );
+        for (role, index) in [("sharded_candidate_a", 0), ("sharded_candidate_b", 1)] {
+            println!(
+                "SERVER_ELF_SELF_REPORT preflight_threads={server_workers} \
+arm={role} pid={} sha256={} process_threads_observed={} \
+command_execution_threads_requested={server_workers} \
+command_execution_threads_actual={} affinity_cpus={:?}",
+                servers[index].pid(),
+                server_hashes[index],
+                servers[index].observed_thread_count(),
+                candidate_worker_threads_observed[index],
+                servers[index].affinity_cpus()
+            );
+        }
+
+        let independent_keys = balanced_shard_keys(clients, server_workers);
+        for workload in workloads.iter().copied() {
+            let (packets, server_setup) = if matches!(workload, Workload::MixedFamilies) {
+                let family_keys = tagged_shard_keys(clients, server_workers, false);
+                DriverPackets::keyed_mixed_families(pipeline, &family_keys)
+            } else {
+                (
+                    DriverPackets::keyed(workload, pipeline, &independent_keys),
+                    Vec::new(),
+                )
+            };
+            apply_server_setup(&mut servers, &server_setup);
+            for server in &mut servers {
+                server.replace_clients(client_shape);
+            }
+            let packets = Arc::new(packets);
+            let worker_cpu_ns_before = [
+                servers[0].sharded_worker_cpu_ns(),
+                servers[1].sharded_worker_cpu_ns(),
+            ];
+            let measured = measure_candidate_null_preflight(
+                &mut servers,
+                workload,
+                pipeline,
+                measurement,
+                packets,
+                PacketMeasurement {
+                    prepare_keyed: true,
+                    workload_shape: "independent_key_per_connection",
+                    host_wide_allowed_cpus: Some(&process_cpuset_cap),
+                },
+            );
+            let worker_cpu_ns_after = [
+                servers[0].sharded_worker_cpu_ns(),
+                servers[1].sharded_worker_cpu_ns(),
+            ];
+            let active_workers = [
+                active_sharded_worker_count(&worker_cpu_ns_before[0], &worker_cpu_ns_after[0]),
+                active_sharded_worker_count(&worker_cpu_ns_before[1], &worker_cpu_ns_after[1]),
+            ];
+            assert!(
+                active_workers
+                    .iter()
+                    .all(|active| *active == server_workers),
+                "independent-key fixture must execute on every requested shard in both \
+candidate A/A arms: requested={server_workers} active={active_workers:?}"
+            );
+            println!(
+                "COUNTED_MECHANISM_PREFLIGHT workload={} \
+workload_shape=independent_key_per_connection \
+server_command_execution_threads={server_workers} \
+candidate_a_active_command_workers={} candidate_b_active_command_workers={} \
+semantic_commands_per_arm_sample={}",
+                workload.name(),
+                active_workers[0],
+                active_workers[1],
+                groups_per_arm_sample * clients * pipeline
+            );
+            assert_sign_balanced_identity_swaps(server_workers, &measured);
+            let wall_null = measured
+                .iter()
+                .map(|sample| sample.wall_null_ratio)
+                .collect::<Vec<_>>();
+            let cpu_null = measured
+                .iter()
+                .map(|sample| sample.cpu_null_ratio)
+                .collect::<Vec<_>>();
+            let wall_median = adjudicate_candidate_null_preflight(
+                "wall_ns_per_op",
+                server_workers,
+                workload,
+                "independent_key_per_connection",
+                pipeline,
+                client_threads,
+                &wall_null,
+            );
+            let cpu_median = adjudicate_candidate_null_preflight(
+                "cpu_ns_per_fixed_work",
+                server_workers,
+                workload,
+                "independent_key_per_connection",
+                pipeline,
+                client_threads,
+                &cpu_null,
+            );
+            medians.push((server_workers, workload.name(), wall_median, cpu_median));
+        }
+    }
+
+    println!("CANDIDATE_NULL_PREFLIGHT_SUMMARY samples={samples}");
+    for (server_workers, workload, wall_median, cpu_median) in &medians {
+        println!(
+            "CANDIDATE_NULL_PREFLIGHT_POINT server_command_execution_threads={server_workers} \
+workload={workload} wall_null_median={wall_median:.9} cpu_null_median={cpu_median:.9}"
+        );
+    }
+    let final_cpu_frequency_policy = cpu_frequency_policy(&process_cpuset_cap);
+    print_cpu_frequency_policy(
+        "final_post_measurement",
+        &process_cpuset_cap,
+        &final_cpu_frequency_policy,
+    );
+    assert_eq!(
+        initial_cpu_frequency_policy, final_cpu_frequency_policy,
+        "CPU frequency policy changed during the candidate-null preflight"
+    );
+    println!(
+        "CANDIDATE_NULL_PREFLIGHT_VERDICT points={} \
+maximum_bias_pct={:.6} unblocks=one_fresh_four_arm_curve",
+        medians.len(),
+        CANDIDATE_NULL_PREFLIGHT_MAX_BIAS * 100.0
     );
 }
 
