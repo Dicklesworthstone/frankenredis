@@ -30649,6 +30649,193 @@ mod tests {
     }
 
     #[test]
+    fn borrowed_plain_hexists_append_packet_parsers_accept_canonical_packets() {
+        let cfg = ParserConfig::default();
+
+        let hexists = crate::parse_borrowed_plain_hexists_packet(
+            b"*3\r\n$7\r\nhExIsTs\r\n$3\r\nkey\r\n$5\r\nfield\r\n*1\r\n$4\r\nPING\r\n",
+            &cfg,
+        )
+        .expect("canonical HEXISTS packet should parse");
+        assert_eq!(hexists.key, b"key");
+        assert_eq!(hexists.member, b"field");
+        assert_eq!(
+            hexists.consumed,
+            b"*3\r\n$7\r\nhExIsTs\r\n$3\r\nkey\r\n$5\r\nfield\r\n".len()
+        );
+
+        let append = crate::parse_borrowed_plain_append_packet(
+            b"*3\r\n$6\r\naPpEnD\r\n$3\r\nkey\r\n$5\r\nvalue\r\n*1\r\n$4\r\nPING\r\n",
+            &cfg,
+        )
+        .expect("canonical APPEND packet should parse");
+        assert_eq!(append.key, b"key");
+        assert_eq!(append.member, b"value");
+        assert_eq!(
+            append.consumed,
+            b"*3\r\n$6\r\naPpEnD\r\n$3\r\nkey\r\n$5\r\nvalue\r\n".len()
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_hexists_append_packet_parsers_bind_key_and_payload_in_order() {
+        // Both parsers return the same BorrowedPlainKeyMemberPacket shape, so a
+        // transposed pair would still typecheck and still parse. Distinct
+        // lengths and contents pin which bulk becomes the key and which becomes
+        // the field/value.
+        let cfg = ParserConfig::default();
+
+        let hexists = crate::parse_borrowed_plain_hexists_packet(
+            b"*3\r\n$7\r\nHEXISTS\r\n$2\r\nkk\r\n$8\r\nffffffff\r\n",
+            &cfg,
+        )
+        .expect("HEXISTS packet with distinct bulks should parse");
+        assert_eq!(
+            hexists.key, b"kk",
+            "first bulk after the command is the key"
+        );
+        assert_eq!(
+            hexists.member, b"ffffffff",
+            "second bulk after the command is the field"
+        );
+
+        let append = crate::parse_borrowed_plain_append_packet(
+            b"*3\r\n$6\r\nAPPEND\r\n$2\r\nkk\r\n$8\r\nvvvvvvvv\r\n",
+            &cfg,
+        )
+        .expect("APPEND packet with distinct bulks should parse");
+        assert_eq!(append.key, b"kk", "first bulk after the command is the key");
+        assert_eq!(
+            append.member, b"vvvvvvvv",
+            "second bulk after the command is the appended value"
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_hexists_append_packet_parsers_reject_same_prefix_siblings() {
+        let cfg = ParserConfig::default();
+
+        // HEXISTS shares `*3\r\n$7\r\n` with every seven-letter three-element
+        // command; only the command compare separates them.
+        for other in [
+            &b"*3\r\n$7\r\nZINCRBY\r\n$1\r\nk\r\n$1\r\nm\r\n"[..],
+            &b"*3\r\n$7\r\nLINSERT\r\n$1\r\nk\r\n$1\r\nm\r\n"[..],
+        ] {
+            assert!(
+                crate::parse_borrowed_plain_hexists_packet(other, &cfg).is_none(),
+                "HEXISTS parser must reject same-shape sibling command"
+            );
+        }
+        // APPEND shares `*3\r\n$6\r\n` with every six-letter three-element
+        // command. GETSET and SETBIT are the dangerous ones: same arity, same
+        // shape, and a key+value payload that would be silently appended
+        // instead of set.
+        for other in [
+            &b"*3\r\n$6\r\nGETSET\r\n$1\r\nk\r\n$1\r\nv\r\n"[..],
+            &b"*3\r\n$6\r\nSETBIT\r\n$1\r\nk\r\n$1\r\nv\r\n"[..],
+            &b"*3\r\n$6\r\nEXPIRE\r\n$1\r\nk\r\n$1\r\nv\r\n"[..],
+            &b"*3\r\n$6\r\nLPUSHX\r\n$1\r\nk\r\n$1\r\nv\r\n"[..],
+        ] {
+            assert!(
+                crate::parse_borrowed_plain_append_packet(other, &cfg).is_none(),
+                "APPEND parser must reject same-shape sibling command"
+            );
+        }
+    }
+
+    #[test]
+    fn borrowed_plain_hexists_append_packet_parsers_defer_invalid_shapes_and_limits() {
+        let cfg = ParserConfig::default();
+
+        assert!(
+            crate::parse_borrowed_plain_hexists_packet(
+                b"*03\r\n$7\r\nHEXISTS\r\n$1\r\nk\r\n$1\r\nf\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_append_packet(
+                b"*3\r\n$06\r\nAPPEND\r\n$1\r\nk\r\n$1\r\nv\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical command bulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hexists_packet(
+                b"*3\r\n$7\r\nHEXISTS\r\n$1\r\nk\r\n$1\r\nf\r\n",
+                &ParserConfig {
+                    max_array_len: 2,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_append_packet(
+                b"*3\r\n$6\r\nAPPEND\r\n$1\r\nk\r\n$1\r\nv\r\n",
+                &ParserConfig {
+                    max_bulk_len: 5,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "command bulk-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hexists_packet(
+                b"*3\r\n$7\r\nHEXISTS\r\n$8\r\nkeykeyke\r\n$1\r\nf\r\n",
+                &ParserConfig {
+                    max_bulk_len: 7,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "key bulk-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_append_packet(
+                b"*3\r\n$6\r\nAPPEND\r\n$1\r\nk\r\n$7\r\nvvvvvvv\r\n",
+                &ParserConfig {
+                    max_bulk_len: 6,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "value bulk-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hexists_packet(
+                b"*3\r\n$7\r\nHEXISTS\r\n$1\r\nk\r\n$2\r\nf\r\n",
+                &cfg
+            )
+            .is_none(),
+            "malformed trailing bulk bodies stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_append_packet(b"*2\r\n$6\r\nAPPEND\r\n$1\r\nk\r\n", &cfg)
+                .is_none(),
+            "wrong-arity packets stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hexists_packet(
+                b"*3\r\n$7\r\nHEXISTS\r\n$1\r\nk\r\n$1\r\nf\r",
+                &cfg
+            )
+            .is_none(),
+            "truncated packets stay on the generic parser until more bytes arrive"
+        );
+        assert!(
+            crate::parse_borrowed_plain_append_packet(b"*3\r\n$6\r\nAPPEND\r\n$1\r\nk\r\n", &cfg)
+                .is_none(),
+            "packets missing the trailing bulk stay on the generic parser"
+        );
+    }
+
+    #[test]
     fn borrowed_plain_bitcount_packet_parser_accepts_canonical_key_only_bitcount() {
         let input = b"*2\r\n$8\r\nbItCoUnT\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n";
         let parsed = crate::parse_borrowed_plain_bitcount_packet(input, &ParserConfig::default())
