@@ -31032,6 +31032,156 @@ mod tests {
     }
 
     #[test]
+    fn borrowed_plain_hgetall_smembers_packet_parsers_accept_canonical_packets() {
+        let cfg = ParserConfig::default();
+
+        let hgetall = crate::parse_borrowed_plain_hgetall_packet(
+            b"*2\r\n$7\r\nhGeTaLl\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n",
+            &cfg,
+        )
+        .expect("canonical HGETALL packet should parse");
+        assert_eq!(hgetall.key, b"key");
+        assert_eq!(
+            hgetall.consumed,
+            b"*2\r\n$7\r\nhGeTaLl\r\n$3\r\nkey\r\n".len()
+        );
+
+        let smembers = crate::parse_borrowed_plain_smembers_packet(
+            b"*2\r\n$8\r\nsMeMbErS\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n",
+            &cfg,
+        )
+        .expect("canonical SMEMBERS packet should parse");
+        assert_eq!(smembers.key, b"key");
+        assert_eq!(
+            smembers.consumed,
+            b"*2\r\n$8\r\nsMeMbErS\r\n$3\r\nkey\r\n".len()
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_hgetall_smembers_packet_parsers_reject_same_prefix_siblings() {
+        let cfg = ParserConfig::default();
+
+        // HGETALL shares `*2\r\n$7\r\n` with the other seven-letter single-key
+        // commands, and both of these siblings have their own live fast path.
+        for other in [
+            &b"*2\r\n$7\r\nPERSIST\r\n$1\r\nk\r\n"[..],
+            &b"*2\r\n$7\r\nPFCOUNT\r\n$1\r\nk\r\n"[..],
+        ] {
+            assert!(
+                crate::parse_borrowed_plain_hgetall_packet(other, &cfg).is_none(),
+                "HGETALL parser must reject same-shape sibling command"
+            );
+        }
+        // SMEMBERS shares `*2\r\n$8\r\n` with BITCOUNT, whose key-only form is
+        // exactly this shape and is itself a borrowed fast path.
+        for other in [
+            &b"*2\r\n$8\r\nBITCOUNT\r\n$1\r\nk\r\n"[..],
+            &b"*2\r\n$8\r\nGETRANGE\r\n$1\r\nk\r\n"[..],
+        ] {
+            assert!(
+                crate::parse_borrowed_plain_smembers_packet(other, &cfg).is_none(),
+                "SMEMBERS parser must reject same-shape sibling command"
+            );
+        }
+        // Different declared lengths, so these two cannot collide with each
+        // other — assert it rather than assume it.
+        assert!(
+            crate::parse_borrowed_plain_hgetall_packet(
+                b"*2\r\n$8\r\nSMEMBERS\r\n$1\r\nk\r\n",
+                &cfg
+            )
+            .is_none(),
+            "HGETALL parser must reject the longer SMEMBERS command"
+        );
+        assert!(
+            crate::parse_borrowed_plain_smembers_packet(
+                b"*2\r\n$7\r\nHGETALL\r\n$1\r\nk\r\n",
+                &cfg
+            )
+            .is_none(),
+            "SMEMBERS parser must reject the shorter HGETALL command"
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_hgetall_smembers_packet_parsers_defer_invalid_shapes_and_limits() {
+        let cfg = ParserConfig::default();
+
+        assert!(
+            crate::parse_borrowed_plain_hgetall_packet(
+                b"*02\r\n$7\r\nHGETALL\r\n$1\r\nk\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_smembers_packet(
+                b"*2\r\n$08\r\nSMEMBERS\r\n$1\r\nk\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical command bulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hgetall_packet(
+                b"*2\r\n$7\r\nHGETALL\r\n$1\r\nk\r\n",
+                &ParserConfig {
+                    max_array_len: 1,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_smembers_packet(
+                b"*2\r\n$8\r\nSMEMBERS\r\n$1\r\nk\r\n",
+                &ParserConfig {
+                    max_bulk_len: 7,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "command bulk-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hgetall_packet(
+                b"*2\r\n$7\r\nHGETALL\r\n$8\r\nkeykeyke\r\n",
+                &ParserConfig {
+                    max_bulk_len: 7,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "key bulk-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_smembers_packet(
+                b"*2\r\n$8\r\nSMEMBERS\r\n$2\r\nk\r\n",
+                &cfg
+            )
+            .is_none(),
+            "malformed key bulk bodies stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hgetall_packet(b"*3\r\n$7\r\nHGETALL\r\n$1\r\nk\r\n", &cfg)
+                .is_none(),
+            "wrong-arity packets stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_smembers_packet(b"*2\r\n$8\r\nSMEMBERS\r\n$1\r\nk\r", &cfg)
+                .is_none(),
+            "truncated packets stay on the generic parser until more bytes arrive"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hgetall_packet(b"*2\r\n$7\r\nHGET", &cfg).is_none(),
+            "packets truncated inside the command token stay on the generic parser"
+        );
+    }
+
+    #[test]
     fn borrowed_plain_bitcount_packet_parser_accepts_canonical_key_only_bitcount() {
         let input = b"*2\r\n$8\r\nbItCoUnT\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n";
         let parsed = crate::parse_borrowed_plain_bitcount_packet(input, &ParserConfig::default())
