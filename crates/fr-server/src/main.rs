@@ -30027,6 +30027,284 @@ mod tests {
     }
 
     #[test]
+    fn borrowed_plain_scard_hlen_zcard_packet_parsers_accept_canonical_packets() {
+        let cfg = ParserConfig::default();
+
+        let scard = crate::parse_borrowed_plain_scard_packet(
+            b"*2\r\n$5\r\nsCaRd\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n",
+            &cfg,
+        )
+        .expect("canonical SCARD packet should parse");
+        assert_eq!(scard.key, b"key");
+        assert_eq!(scard.consumed, b"*2\r\n$5\r\nsCaRd\r\n$3\r\nkey\r\n".len());
+
+        let hlen = crate::parse_borrowed_plain_hlen_packet(
+            b"*2\r\n$4\r\nhLeN\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n",
+            &cfg,
+        )
+        .expect("canonical HLEN packet should parse");
+        assert_eq!(hlen.key, b"key");
+        assert_eq!(hlen.consumed, b"*2\r\n$4\r\nhLeN\r\n$3\r\nkey\r\n".len());
+
+        let zcard = crate::parse_borrowed_plain_zcard_packet(
+            b"*2\r\n$5\r\nzCaRd\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n",
+            &cfg,
+        )
+        .expect("canonical ZCARD packet should parse");
+        assert_eq!(zcard.key, b"key");
+        assert_eq!(zcard.consumed, b"*2\r\n$5\r\nzCaRd\r\n$3\r\nkey\r\n".len());
+    }
+
+    #[test]
+    fn borrowed_plain_scard_hlen_zcard_packet_parsers_reject_same_prefix_siblings() {
+        let cfg = ParserConfig::default();
+
+        // SCARD and ZCARD are byte-identical through `*2\r\n$5\r\n`; only the
+        // command compare separates them, so each must refuse the other.
+        assert!(
+            crate::parse_borrowed_plain_scard_packet(b"*2\r\n$5\r\nZCARD\r\n$1\r\nk\r\n", &cfg)
+                .is_none(),
+            "SCARD parser must reject the same-shape ZCARD command"
+        );
+        assert!(
+            crate::parse_borrowed_plain_zcard_packet(b"*2\r\n$5\r\nSCARD\r\n$1\r\nk\r\n", &cfg)
+                .is_none(),
+            "ZCARD parser must reject the same-shape SCARD command"
+        );
+        for other in [
+            &b"*2\r\n$5\r\nHKEYS\r\n$1\r\nk\r\n"[..],
+            &b"*2\r\n$5\r\nHVALS\r\n$1\r\nk\r\n"[..],
+        ] {
+            assert!(
+                crate::parse_borrowed_plain_scard_packet(other, &cfg).is_none(),
+                "SCARD parser must reject same-shape sibling command"
+            );
+            assert!(
+                crate::parse_borrowed_plain_zcard_packet(other, &cfg).is_none(),
+                "ZCARD parser must reject same-shape sibling command"
+            );
+        }
+        for other in [
+            &b"*2\r\n$4\r\nLLEN\r\n$1\r\nk\r\n"[..],
+            &b"*2\r\n$4\r\nTYPE\r\n$1\r\nk\r\n"[..],
+        ] {
+            assert!(
+                crate::parse_borrowed_plain_hlen_packet(other, &cfg).is_none(),
+                "HLEN parser must reject same-shape sibling command"
+            );
+        }
+    }
+
+    #[test]
+    fn borrowed_plain_scard_hlen_zcard_packet_parsers_defer_invalid_shapes_and_limits() {
+        let cfg = ParserConfig::default();
+
+        assert!(
+            crate::parse_borrowed_plain_scard_packet(b"*02\r\n$5\r\nSCARD\r\n$1\r\nk\r\n", &cfg)
+                .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_zcard_packet(b"*2\r\n$05\r\nZCARD\r\n$1\r\nk\r\n", &cfg)
+                .is_none(),
+            "noncanonical command bulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hlen_packet(
+                b"*2\r\n$4\r\nHLEN\r\n$1\r\nk\r\n",
+                &ParserConfig {
+                    max_array_len: 1,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_scard_packet(
+                b"*2\r\n$5\r\nSCARD\r\n$1\r\nk\r\n",
+                &ParserConfig {
+                    max_bulk_len: 4,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "command bulk-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_zcard_packet(
+                b"*2\r\n$5\r\nZCARD\r\n$6\r\nkeykey\r\n",
+                &ParserConfig {
+                    max_bulk_len: 5,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "key bulk-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hlen_packet(b"*2\r\n$4\r\nHLEN\r\n$2\r\nk\r\n", &cfg)
+                .is_none(),
+            "malformed key bulk bodies stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_scard_packet(b"*3\r\n$5\r\nSCARD\r\n$1\r\nk\r\n", &cfg)
+                .is_none(),
+            "wrong-arity packets stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_zcard_packet(b"*2\r\n$5\r\nZCARD\r\n$1\r\nk\r", &cfg)
+                .is_none(),
+            "truncated packets stay on the generic parser until more bytes arrive"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hlen_packet(b"*2\r\n$4\r\nHLEN", &cfg).is_none(),
+            "packets truncated inside the command token stay on the generic parser"
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_ttl_pttl_type_packet_parsers_accept_canonical_packets() {
+        let cfg = ParserConfig::default();
+
+        let ttl = crate::parse_borrowed_plain_ttl_packet(
+            b"*2\r\n$3\r\ntTl\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n",
+            &cfg,
+        )
+        .expect("canonical TTL packet should parse");
+        assert_eq!(ttl.key, b"key");
+        assert_eq!(ttl.consumed, b"*2\r\n$3\r\ntTl\r\n$3\r\nkey\r\n".len());
+
+        let pttl = crate::parse_borrowed_plain_pttl_packet(
+            b"*2\r\n$4\r\npTtL\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n",
+            &cfg,
+        )
+        .expect("canonical PTTL packet should parse");
+        assert_eq!(pttl.key, b"key");
+        assert_eq!(pttl.consumed, b"*2\r\n$4\r\npTtL\r\n$3\r\nkey\r\n".len());
+
+        let type_packet = crate::parse_borrowed_plain_type_packet(
+            b"*2\r\n$4\r\ntYpE\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n",
+            &cfg,
+        )
+        .expect("canonical TYPE packet should parse");
+        assert_eq!(type_packet.key, b"key");
+        assert_eq!(
+            type_packet.consumed,
+            b"*2\r\n$4\r\ntYpE\r\n$3\r\nkey\r\n".len()
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_ttl_pttl_type_packet_parsers_reject_same_prefix_siblings() {
+        let cfg = ParserConfig::default();
+
+        // PTTL and TYPE are byte-identical through `*2\r\n$4\r\n`; only the
+        // command compare separates them, so each must refuse the other.
+        assert!(
+            crate::parse_borrowed_plain_pttl_packet(b"*2\r\n$4\r\nTYPE\r\n$1\r\nk\r\n", &cfg)
+                .is_none(),
+            "PTTL parser must reject the same-shape TYPE command"
+        );
+        assert!(
+            crate::parse_borrowed_plain_type_packet(b"*2\r\n$4\r\nPTTL\r\n$1\r\nk\r\n", &cfg)
+                .is_none(),
+            "TYPE parser must reject the same-shape PTTL command"
+        );
+        for other in [
+            &b"*2\r\n$4\r\nLLEN\r\n$1\r\nk\r\n"[..],
+            &b"*2\r\n$4\r\nHLEN\r\n$1\r\nk\r\n"[..],
+        ] {
+            assert!(
+                crate::parse_borrowed_plain_pttl_packet(other, &cfg).is_none(),
+                "PTTL parser must reject same-shape sibling command"
+            );
+            assert!(
+                crate::parse_borrowed_plain_type_packet(other, &cfg).is_none(),
+                "TYPE parser must reject same-shape sibling command"
+            );
+        }
+        // TTL shares `*2\r\n$3\r\n` with every three-letter single-key command.
+        for other in [
+            &b"*2\r\n$3\r\nGET\r\n$1\r\nk\r\n"[..],
+            &b"*2\r\n$3\r\nDEL\r\n$1\r\nk\r\n"[..],
+        ] {
+            assert!(
+                crate::parse_borrowed_plain_ttl_packet(other, &cfg).is_none(),
+                "TTL parser must reject same-shape sibling command"
+            );
+        }
+    }
+
+    #[test]
+    fn borrowed_plain_ttl_pttl_type_packet_parsers_defer_invalid_shapes_and_limits() {
+        let cfg = ParserConfig::default();
+
+        assert!(
+            crate::parse_borrowed_plain_ttl_packet(b"*02\r\n$3\r\nTTL\r\n$1\r\nk\r\n", &cfg)
+                .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_pttl_packet(b"*2\r\n$04\r\nPTTL\r\n$1\r\nk\r\n", &cfg)
+                .is_none(),
+            "noncanonical command bulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_type_packet(
+                b"*2\r\n$4\r\nTYPE\r\n$1\r\nk\r\n",
+                &ParserConfig {
+                    max_array_len: 1,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_ttl_packet(
+                b"*2\r\n$3\r\nTTL\r\n$1\r\nk\r\n",
+                &ParserConfig {
+                    max_bulk_len: 2,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "command bulk-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_type_packet(
+                b"*2\r\n$4\r\nTYPE\r\n$5\r\nkeyyy\r\n",
+                &ParserConfig {
+                    max_bulk_len: 4,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "key bulk-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_pttl_packet(b"*2\r\n$4\r\nPTTL\r\n$2\r\nk\r\n", &cfg)
+                .is_none(),
+            "malformed key bulk bodies stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_ttl_packet(b"*3\r\n$3\r\nTTL\r\n$1\r\nk\r\n", &cfg)
+                .is_none(),
+            "wrong-arity packets stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_type_packet(b"*2\r\n$4\r\nTYPE\r\n$1\r\nk\r", &cfg)
+                .is_none(),
+            "truncated packets stay on the generic parser until more bytes arrive"
+        );
+        assert!(
+            crate::parse_borrowed_plain_pttl_packet(b"*2\r\n$4\r\nPTT", &cfg).is_none(),
+            "packets truncated inside the command token stay on the generic parser"
+        );
+    }
+
+    #[test]
     fn borrowed_plain_bitcount_packet_parser_accepts_canonical_key_only_bitcount() {
         let input = b"*2\r\n$8\r\nbItCoUnT\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n";
         let parsed = crate::parse_borrowed_plain_bitcount_packet(input, &ParserConfig::default())
