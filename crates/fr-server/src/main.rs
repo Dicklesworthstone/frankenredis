@@ -19860,9 +19860,7 @@ fn parse_borrowed_plain_xlen_packet<'a>(
         return None;
     }
     let mut cursor = input.strip_prefix(b"*2\r\n$4\r\n").and_then(|rest| {
-        rest.get(..4)
-            .filter(|command| command.eq_ignore_ascii_case(b"XLEN"))
-            .map(|_| input.len() - rest.len() + 4)
+        rest.get(..4).map(|_| input.len() - rest.len() + 4)
     })?;
     if input.get(cursor..cursor + 2)? != b"\r\n" {
         return None;
@@ -30300,6 +30298,167 @@ mod tests {
         );
         assert!(
             crate::parse_borrowed_plain_pttl_packet(b"*2\r\n$4\r\nPTT", &cfg).is_none(),
+            "packets truncated inside the command token stay on the generic parser"
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_expiretime_pexpiretime_xlen_packet_parsers_accept_canonical_packets() {
+        let cfg = ParserConfig::default();
+
+        let expiretime = crate::parse_borrowed_plain_expiretime_packet(
+            b"*2\r\n$10\r\neXpIrEtImE\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n",
+            &cfg,
+        )
+        .expect("canonical EXPIRETIME packet should parse");
+        assert_eq!(expiretime.key, b"key");
+        assert_eq!(
+            expiretime.consumed,
+            b"*2\r\n$10\r\neXpIrEtImE\r\n$3\r\nkey\r\n".len()
+        );
+
+        let pexpiretime = crate::parse_borrowed_plain_pexpiretime_packet(
+            b"*2\r\n$11\r\npExPiReTiMe\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n",
+            &cfg,
+        )
+        .expect("canonical PEXPIRETIME packet should parse");
+        assert_eq!(pexpiretime.key, b"key");
+        assert_eq!(
+            pexpiretime.consumed,
+            b"*2\r\n$11\r\npExPiReTiMe\r\n$3\r\nkey\r\n".len()
+        );
+
+        let xlen = crate::parse_borrowed_plain_xlen_packet(
+            b"*2\r\n$4\r\nxLeN\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n",
+            &cfg,
+        )
+        .expect("canonical XLEN packet should parse");
+        assert_eq!(xlen.key, b"key");
+        assert_eq!(xlen.consumed, b"*2\r\n$4\r\nxLeN\r\n$3\r\nkey\r\n".len());
+    }
+
+    #[test]
+    fn borrowed_plain_expiretime_pexpiretime_xlen_packet_parsers_reject_same_prefix_siblings() {
+        let cfg = ParserConfig::default();
+
+        // EXPIRETIME and PEXPIRETIME differ in declared length, so the byte
+        // prefix alone already separates them; the risk is the other command
+        // of the *same* length, which only the command compare can reject.
+        assert!(
+            crate::parse_borrowed_plain_expiretime_packet(
+                b"*2\r\n$10\r\nSINTERCARD\r\n$1\r\nk\r\n",
+                &cfg
+            )
+            .is_none(),
+            "EXPIRETIME parser must reject the same-shape SINTERCARD command"
+        );
+        assert!(
+            crate::parse_borrowed_plain_expiretime_packet(
+                b"*2\r\n$11\r\nPEXPIRETIME\r\n$1\r\nk\r\n",
+                &cfg
+            )
+            .is_none(),
+            "EXPIRETIME parser must reject the longer PEXPIRETIME command"
+        );
+        for other in [
+            &b"*2\r\n$11\r\nSRANDMEMBER\r\n$1\r\nk\r\n"[..],
+            &b"*2\r\n$11\r\nINCRBYFLOAT\r\n$1\r\nk\r\n"[..],
+        ] {
+            assert!(
+                crate::parse_borrowed_plain_pexpiretime_packet(other, &cfg).is_none(),
+                "PEXPIRETIME parser must reject same-shape sibling command"
+            );
+        }
+        // XLEN shares `*2\r\n$4\r\n` with every four-letter single-key command.
+        for other in [
+            &b"*2\r\n$4\r\nLLEN\r\n$1\r\nk\r\n"[..],
+            &b"*2\r\n$4\r\nHLEN\r\n$1\r\nk\r\n"[..],
+            &b"*2\r\n$4\r\nTYPE\r\n$1\r\nk\r\n"[..],
+            &b"*2\r\n$4\r\nPTTL\r\n$1\r\nk\r\n"[..],
+        ] {
+            assert!(
+                crate::parse_borrowed_plain_xlen_packet(other, &cfg).is_none(),
+                "XLEN parser must reject same-shape sibling command"
+            );
+        }
+    }
+
+    #[test]
+    fn borrowed_plain_expiretime_pexpiretime_xlen_packet_parsers_defer_invalid_shapes_and_limits() {
+        let cfg = ParserConfig::default();
+
+        assert!(
+            crate::parse_borrowed_plain_expiretime_packet(
+                b"*02\r\n$10\r\nEXPIRETIME\r\n$1\r\nk\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_pexpiretime_packet(
+                b"*2\r\n$011\r\nPEXPIRETIME\r\n$1\r\nk\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical command bulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_xlen_packet(
+                b"*2\r\n$4\r\nXLEN\r\n$1\r\nk\r\n",
+                &ParserConfig {
+                    max_array_len: 1,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_expiretime_packet(
+                b"*2\r\n$10\r\nEXPIRETIME\r\n$1\r\nk\r\n",
+                &ParserConfig {
+                    max_bulk_len: 9,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "command bulk-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_xlen_packet(
+                b"*2\r\n$4\r\nXLEN\r\n$5\r\nkeyyy\r\n",
+                &ParserConfig {
+                    max_bulk_len: 4,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "key bulk-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_pexpiretime_packet(
+                b"*2\r\n$11\r\nPEXPIRETIME\r\n$2\r\nk\r\n",
+                &cfg
+            )
+            .is_none(),
+            "malformed key bulk bodies stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_xlen_packet(b"*3\r\n$4\r\nXLEN\r\n$1\r\nk\r\n", &cfg)
+                .is_none(),
+            "wrong-arity packets stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_expiretime_packet(
+                b"*2\r\n$10\r\nEXPIRETIME\r\n$1\r\nk\r",
+                &cfg
+            )
+            .is_none(),
+            "truncated packets stay on the generic parser until more bytes arrive"
+        );
+        assert!(
+            crate::parse_borrowed_plain_pexpiretime_packet(b"*2\r\n$11\r\nPEXPIRE", &cfg).is_none(),
             "packets truncated inside the command token stay on the generic parser"
         );
     }
