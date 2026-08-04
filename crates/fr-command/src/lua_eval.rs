@@ -11297,6 +11297,11 @@ fn resp_to_lua(frame: &RespFrame, resp3: bool) -> LuaValue {
             );
             LuaValue::Table(t)
         }
+        RespFrame::ErrorBytes(bytes) => {
+            let t = LuaTable::new();
+            t.set(LuaValue::Str(b"err".to_vec()), LuaValue::Str(bytes.clone()));
+            LuaValue::Table(t)
+        }
         RespFrame::Integer(n) => LuaValue::Number(*n as f64),
         RespFrame::BulkString(None) => null(),
         RespFrame::BulkString(Some(data)) => LuaValue::Str(data.clone()),

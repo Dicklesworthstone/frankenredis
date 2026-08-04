@@ -42,6 +42,9 @@ pub enum CommandError {
         command: &'static str,
         subcommand: String,
     },
+    /// A Redis error body that embeds arbitrary client-provided bytes.
+    /// Inline RESP errors are byte strings on the wire, not UTF-8 strings.
+    RawError(Vec<u8>),
     InvalidInteger,
     InvalidSlot,
     SyntaxError,
@@ -2289,6 +2292,7 @@ impl CommandError {
                 subcommand,
                 command.to_ascii_uppercase()
             )),
+            CommandError::RawError(body) => RespFrame::ErrorBytes(body.clone()),
             CommandError::InvalidInteger => {
                 RespFrame::Error("ERR value is not an integer or out of range".to_string())
             }
@@ -2779,14 +2783,25 @@ pub fn dispatch_argv(
     // Upstream server.c formats the unknown-command name with `%s` on the raw
     // argv[0] bytes: it does NOT require valid UTF-8 (a non-UTF-8 name is still
     // just "unknown command", not a UTF-8 error) and it truncates at the first
-    // NUL (C-string semantics). Match both: cut at the first NUL, then render
-    // the bytes (lossy for non-UTF-8 — RespFrame::Error is a Rust String so a
-    // raw 0xFF can't be reproduced byte-for-byte, but the error TYPE and the
-    // \r\n->space + 128-byte cap match upstream). (frankenredis-unkcmdname)
+    // NUL (C-string semantics). Preserve raw bytes when the command or preview
+    // is not UTF-8: Redis embeds those bytes verbatim in its inline error.
     let name_bytes = match raw_cmd.iter().position(|&b| b == 0) {
         Some(nul) => &raw_cmd[..nul],
         None => raw_cmd,
     };
+    if std::str::from_utf8(name_bytes).is_err()
+        || argv[1..]
+            .iter()
+            .any(|arg| std::str::from_utf8(arg).is_err())
+    {
+        let mut body = b"ERR unknown command '".to_vec();
+        body.extend_from_slice(&sanitize_and_cap_bytes(name_bytes, 128));
+        body.extend_from_slice(b"', with args beginning with: ");
+        if let Some(preview) = build_unknown_args_preview_bytes(argv) {
+            body.extend_from_slice(&preview);
+        }
+        return Err(CommandError::RawError(body));
+    }
     let cmd = String::from_utf8_lossy(name_bytes);
     let args_preview = build_unknown_args_preview(argv);
     Err(CommandError::UnknownCommand {
@@ -15740,19 +15755,23 @@ fn parse_limit_offset_arg(arg: &[u8]) -> Result<usize, CommandError> {
 fn parse_expire_options(extra_args: &[Vec<u8>]) -> Result<ExpireOptions, CommandError> {
     let mut options = ExpireOptions::default();
     for arg in extra_args {
-        let option = std::str::from_utf8(arg).map_err(|_| CommandError::InvalidUtf8Argument)?;
-        if option.eq_ignore_ascii_case("NX") {
+        if arg.eq_ignore_ascii_case(b"NX") {
             options.nx = true;
-        } else if option.eq_ignore_ascii_case("XX") {
+        } else if arg.eq_ignore_ascii_case(b"XX") {
             options.xx = true;
-        } else if option.eq_ignore_ascii_case("GT") {
+        } else if arg.eq_ignore_ascii_case(b"GT") {
             options.gt = true;
-        } else if option.eq_ignore_ascii_case("LT") {
+        } else if arg.eq_ignore_ascii_case(b"LT") {
             options.lt = true;
         } else {
-            return Err(CommandError::Custom(format!(
-                "ERR Unsupported option {option}"
-            )));
+            if let Ok(option) = std::str::from_utf8(arg) {
+                return Err(CommandError::Custom(format!(
+                    "ERR Unsupported option {option}"
+                )));
+            }
+            let mut body = b"ERR Unsupported option ".to_vec();
+            body.extend_from_slice(arg);
+            return Err(CommandError::RawError(body));
         }
     }
 
@@ -15868,6 +15887,42 @@ pub fn build_unknown_args_preview(argv: &[Vec<u8>]) -> Option<String> {
     }
 
     if out.is_empty() { None } else { Some(out) }
+}
+
+/// Match Redis' C-string rendering for bytes embedded in an inline error.
+/// It truncates at NUL, caps by bytes, and neutralizes line terminators before
+/// the frame encoder gets a chance to write the terminating CRLF.
+fn sanitize_and_cap_bytes(input: &[u8], cap: usize) -> Vec<u8> {
+    let end = input
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(input.len());
+    input[..end]
+        .iter()
+        .take(cap)
+        .map(|&byte| {
+            if byte == b'\r' || byte == b'\n' {
+                b' '
+            } else {
+                byte
+            }
+        })
+        .collect()
+}
+
+fn build_unknown_args_preview_bytes(argv: &[Vec<u8>]) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    for arg in &argv[1..] {
+        if out.len() >= 128 || 128 - out.len() < 3 {
+            break;
+        }
+        let remaining = 128 - out.len();
+        let capped = sanitize_and_cap_bytes(arg, remaining - 3);
+        out.push(b'\'');
+        out.extend_from_slice(&capped);
+        out.extend_from_slice(b"' ");
+    }
+    (!out.is_empty()).then_some(out)
 }
 
 pub fn trim_and_cap_string(input: &str, cap: usize) -> String {
@@ -23634,7 +23689,15 @@ fn object_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("OBJECT"));
     }
-    let sub = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+    let sub = match std::str::from_utf8(&argv[1]) {
+        Ok(sub) => sub,
+        Err(_) => {
+            let mut body = b"ERR unknown subcommand '".to_vec();
+            body.extend_from_slice(&sanitize_and_cap_bytes(&argv[1], 128));
+            body.extend_from_slice(b"'. Try OBJECT HELP.");
+            return Err(CommandError::RawError(body));
+        }
+    };
     if sub.eq_ignore_ascii_case("ENCODING") {
         // Upstream object.c::objectCommand requires exactly 3 args
         // (the subcommand + the single key argument). Trailing
@@ -31175,6 +31238,36 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"), // ubs:ignore — AI triage
         }
+    }
+
+    #[test]
+    fn non_utf8_error_echoes_are_preserved_on_the_wire() {
+        let mut store = Store::new();
+
+        let unknown = dispatch_argv(&[vec![0xff], vec![0xfe]], &mut store, 0)
+            .expect_err("unknown raw command must fail")
+            .to_resp();
+        assert_eq!(
+            unknown.to_bytes(),
+            b"-ERR unknown command '\xff', with args beginning with: '\xfe' \r\n"
+        );
+
+        let expire = dispatch_argv(
+            &[b"EXPIRE".to_vec(), b"k".to_vec(), b"1".to_vec(), vec![0xff]],
+            &mut store,
+            0,
+        )
+        .expect_err("raw EXPIRE option must fail")
+        .to_resp();
+        assert_eq!(expire.to_bytes(), b"-ERR Unsupported option \xff\r\n");
+
+        let object = dispatch_argv(&[b"OBJECT".to_vec(), vec![0xff]], &mut store, 0)
+            .expect_err("raw OBJECT subcommand must fail")
+            .to_resp();
+        assert_eq!(
+            object.to_bytes(),
+            b"-ERR unknown subcommand '\xff'. Try OBJECT HELP.\r\n"
+        );
     }
 
     #[test]

@@ -7,6 +7,11 @@ use std::fmt::{self, Display};
 pub enum RespFrame {
     SimpleString(String),
     Error(String),
+    /// RESP error whose body contains arbitrary bytes.  Redis formats a few
+    /// errors by embedding the offending client token verbatim, which may not
+    /// be valid UTF-8.  Keep the existing [`Self::Error`] for ordinary textual
+    /// errors while preserving those byte-exact error replies on the wire.
+    ErrorBytes(Vec<u8>),
     Integer(i64),
     BulkString(Option<Vec<u8>>),
     Array(Option<Vec<RespFrame>>),
@@ -816,6 +821,7 @@ impl RespFrame {
             Self::SimpleString(s) | Self::Error(s) | Self::Double(s) | Self::BigNumber(s) => {
                 1usize.checked_add(s.len())?.checked_add(2)
             }
+            Self::ErrorBytes(bytes) => 1usize.checked_add(bytes.len())?.checked_add(2),
             Self::Integer(n) => 1usize.checked_add(decimal_i64_len(*n))?.checked_add(2),
             // `#t\r\n` / `#f\r\n` and the RESP2 `:1\r\n` / `:0\r\n` downgrade
             // are all 4 bytes.
@@ -887,6 +893,11 @@ impl RespFrame {
             Self::Error(s) => {
                 out.extend_from_slice(b"-");
                 push_inline_sanitized(out, s.as_bytes());
+                out.extend_from_slice(b"\r\n");
+            }
+            Self::ErrorBytes(bytes) => {
+                out.extend_from_slice(b"-");
+                push_inline_sanitized(out, bytes);
                 out.extend_from_slice(b"\r\n");
             }
             Self::Integer(n) => encode_integer_reply::<true>(*n, out),
@@ -1049,6 +1060,11 @@ impl RespFrame {
             Self::Error(s) if DIRECT_SCALARS => {
                 out.extend_from_slice(b"-");
                 push_inline_sanitized(out, s.as_bytes());
+                out.extend_from_slice(b"\r\n");
+            }
+            Self::ErrorBytes(bytes) if DIRECT_SCALARS => {
+                out.extend_from_slice(b"-");
+                push_inline_sanitized(out, bytes);
                 out.extend_from_slice(b"\r\n");
             }
             Self::Integer(n) if DIRECT_SCALARS => encode_integer_reply::<true>(*n, out),
@@ -4208,6 +4224,16 @@ mod tests {
         // legacy inline-protocol terminator.
         let lone = RespFrame::Error("ERR a\rb\nc".to_string()).to_bytes();
         assert_eq!(lone, b"-ERR a b c\r\n");
+    }
+
+    #[test]
+    fn raw_error_bytes_preserve_non_utf8_and_sanitize_line_endings() {
+        let frame = RespFrame::ErrorBytes(vec![b'E', b'R', b'R', b' ', 0xff, b'\r', b'\n', b'x']);
+        assert_eq!(frame.to_bytes(), b"-ERR \xff  x\r\n");
+
+        let mut resp3 = Vec::new();
+        frame.encode_into_resp3(&mut resp3);
+        assert_eq!(resp3, b"-ERR \xff  x\r\n");
     }
 
     #[test]
