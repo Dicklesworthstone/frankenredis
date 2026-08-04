@@ -252,7 +252,6 @@ PORT_BASED = [
     ("copy_rename_encoding_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("resp3_type_tag_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("object_refcount_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
-    ("int_encoded_byteops_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("pop_count_edge_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("stream_id_trim_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("set_intset_canonical_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
@@ -303,6 +302,24 @@ ARGPARSE_BASED = [
     "sort_differ.py", "scan_differ.py", "hexfloat_incr_differ.py",
     "stream_xinfo_differ.py", "encoding_differ.py", "zset_store_bulk_differ.py",
 ]
+
+
+def _assert_no_duplicate_registrations():
+    """A gate registered twice runs twice and is counted twice in 'N/N gates passed'.
+
+    int_encoded_byteops_differ.py shipped registered in PORT_BASED twice
+    (frankenredis-n7dd4), which inflated the suite's own denominator. Fail loudly
+    at import rather than silently double-running.
+    """
+    names = [n for n, _ in SELF_ORCH] + [n for n, _ in PORT_BASED] + list(ARGPARSE_BASED)
+    dupes = sorted({n for n in names if names.count(n) > 1})
+    if dupes:
+        raise SystemExit(
+            f"parity_suite registry error: gate(s) registered more than once: {', '.join(dupes)}"
+        )
+
+
+_assert_no_duplicate_registrations()
 
 
 def main():
