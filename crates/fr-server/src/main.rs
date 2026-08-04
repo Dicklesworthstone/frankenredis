@@ -33511,6 +33511,230 @@ mod tests {
     }
 
     #[test]
+    fn borrowed_plain_exists_five_packet_parser_accepts_canonical_five_key_exists() {
+        let input =
+            b"*6\r\n$6\r\neXiStS\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\na\r\n*1\r\n$4\r\nPING\r\n";
+        let parsed =
+            crate::parse_borrowed_plain_exists_five_packet(input, &ParserConfig::default())
+                .expect("canonical five-key EXISTS packet should parse");
+
+        assert_eq!(
+            parsed.keys,
+            [
+                b"a".as_slice(),
+                b"b".as_slice(),
+                b"c".as_slice(),
+                b"d".as_slice(),
+                b"a".as_slice(),
+            ]
+        );
+        assert_eq!(
+            parsed.consumed,
+            b"*6\r\n$6\r\neXiStS\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\na\r\n".len()
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_exists_five_packet_parser_defers_other_shapes_or_limited_inputs() {
+        let cfg = ParserConfig::default();
+        assert!(
+            crate::parse_borrowed_plain_exists_five_packet(
+                b"*06\r\n$6\r\nEXISTS\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        // The five/six/seven parsers differ from each other only in their
+        // `*N\r\n` prefix constant and key count, so a copy-paste of the wrong
+        // constant is the realistic defect. Pinning both adjacent arities is
+        // what makes that visible.
+        assert!(
+            crate::parse_borrowed_plain_exists_five_packet(
+                b"*5\r\n$6\r\nEXISTS\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n",
+                &cfg
+            )
+            .is_none(),
+            "four-key EXISTS stays on the exact four-key parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_exists_five_packet(
+                b"*7\r\n$6\r\nEXISTS\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n$1\r\nf\r\n",
+                &cfg
+            )
+            .is_none(),
+            "six-key EXISTS stays on the exact six-key parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_exists_five_packet(
+                b"*6\r\n$6\r\nEXISTS\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n",
+                &ParserConfig {
+                    max_array_len: 5,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_exists_five_packet(
+                b"*6\r\n$6\r\nEXISTS\r\n$2\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n",
+                &cfg
+            )
+            .is_none(),
+            "malformed bulk bodies stay on the generic parser"
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_exists_six_packet_parser_accepts_canonical_six_key_exists() {
+        let input =
+            b"*7\r\n$6\r\neXiStS\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n$1\r\na\r\n*1\r\n$4\r\nPING\r\n";
+        let parsed = crate::parse_borrowed_plain_exists_six_packet(input, &ParserConfig::default())
+            .expect("canonical six-key EXISTS packet should parse");
+
+        assert_eq!(
+            parsed.keys,
+            [
+                b"a".as_slice(),
+                b"b".as_slice(),
+                b"c".as_slice(),
+                b"d".as_slice(),
+                b"e".as_slice(),
+                b"a".as_slice(),
+            ]
+        );
+        assert_eq!(
+            parsed.consumed,
+            b"*7\r\n$6\r\neXiStS\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n$1\r\na\r\n"
+                .len()
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_exists_six_packet_parser_defers_other_shapes_or_limited_inputs() {
+        let cfg = ParserConfig::default();
+        assert!(
+            crate::parse_borrowed_plain_exists_six_packet(
+                b"*07\r\n$6\r\nEXISTS\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n$1\r\nf\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_exists_six_packet(
+                b"*6\r\n$6\r\nEXISTS\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n",
+                &cfg
+            )
+            .is_none(),
+            "five-key EXISTS stays on the exact five-key parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_exists_six_packet(
+                b"*8\r\n$6\r\nEXISTS\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n$1\r\nf\r\n$1\r\ng\r\n",
+                &cfg
+            )
+            .is_none(),
+            "seven-key EXISTS stays on the exact seven-key parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_exists_six_packet(
+                b"*7\r\n$6\r\nEXISTS\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n$1\r\nf\r\n",
+                &ParserConfig {
+                    max_array_len: 6,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_exists_six_packet(
+                b"*7\r\n$6\r\nEXISTS\r\n$2\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n$1\r\nf\r\n",
+                &cfg
+            )
+            .is_none(),
+            "malformed bulk bodies stay on the generic parser"
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_exists_seven_packet_parser_accepts_canonical_seven_key_exists() {
+        let input =
+            b"*8\r\n$6\r\neXiStS\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n$1\r\nf\r\n$1\r\na\r\n*1\r\n$4\r\nPING\r\n";
+        let parsed =
+            crate::parse_borrowed_plain_exists_seven_packet(input, &ParserConfig::default())
+                .expect("canonical seven-key EXISTS packet should parse");
+
+        assert_eq!(
+            parsed.keys,
+            [
+                b"a".as_slice(),
+                b"b".as_slice(),
+                b"c".as_slice(),
+                b"d".as_slice(),
+                b"e".as_slice(),
+                b"f".as_slice(),
+                b"a".as_slice(),
+            ]
+        );
+        assert_eq!(
+            parsed.consumed,
+            b"*8\r\n$6\r\neXiStS\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n$1\r\nf\r\n$1\r\na\r\n"
+                .len()
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_exists_seven_packet_parser_defers_other_shapes_or_limited_inputs() {
+        let cfg = ParserConfig::default();
+        assert!(
+            crate::parse_borrowed_plain_exists_seven_packet(
+                b"*08\r\n$6\r\nEXISTS\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n$1\r\nf\r\n$1\r\ng\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_exists_seven_packet(
+                b"*7\r\n$6\r\nEXISTS\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n$1\r\nf\r\n",
+                &cfg
+            )
+            .is_none(),
+            "six-key EXISTS stays on the exact six-key parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_exists_seven_packet(
+                b"*9\r\n$6\r\nEXISTS\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n$1\r\nf\r\n$1\r\ng\r\n$1\r\nh\r\n",
+                &cfg
+            )
+            .is_none(),
+            "eight-key EXISTS stays on the exact eight-key parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_exists_seven_packet(
+                b"*8\r\n$6\r\nEXISTS\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n$1\r\nf\r\n$1\r\ng\r\n",
+                &ParserConfig {
+                    max_array_len: 7,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_exists_seven_packet(
+                b"*8\r\n$6\r\nEXISTS\r\n$2\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n$1\r\nf\r\n$1\r\ng\r\n",
+                &cfg
+            )
+            .is_none(),
+            "malformed bulk bodies stay on the generic parser"
+        );
+    }
+
+    #[test]
     fn borrowed_plain_ping_upper_noarg_packet_parser_accepts_only_hot_shape() {
         let input = b"*1\r\n$4\r\nPING\r\n*1\r\n$4\r\nPING\r\n";
         assert_eq!(
