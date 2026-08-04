@@ -29816,6 +29816,110 @@ mod tests {
     }
 
     #[test]
+    fn borrowed_plain_incr_packet_parser_accepts_canonical_incr() {
+        let input = b"*2\r\n$4\r\niNcR\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n";
+        let parsed = crate::parse_borrowed_plain_incr_packet(input, &ParserConfig::default())
+            .expect("canonical INCR packet should parse");
+
+        assert_eq!(parsed.key, b"key");
+        assert_eq!(parsed.consumed, b"*2\r\n$4\r\niNcR\r\n$3\r\nkey\r\n".len());
+    }
+
+    #[test]
+    fn borrowed_plain_decr_packet_parser_accepts_canonical_decr() {
+        let input = b"*2\r\n$4\r\ndEcR\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n";
+        let parsed = crate::parse_borrowed_plain_decr_packet(input, &ParserConfig::default())
+            .expect("canonical DECR packet should parse");
+
+        assert_eq!(parsed.key, b"key");
+        assert_eq!(parsed.consumed, b"*2\r\n$4\r\ndEcR\r\n$3\r\nkey\r\n".len());
+    }
+
+    // INCR and DECR share the byte prefix `*2\r\n$4\r\n` with every other 4-letter
+    // single-key command, so each parser must reject its siblings outright. A
+    // prefix-only match that forgot the command compare would mutate the wrong
+    // key (INCR on a DECR packet) — the worst failure this fast path can produce.
+    #[test]
+    fn borrowed_plain_incr_decr_packet_parsers_reject_other_four_letter_commands() {
+        let cfg = ParserConfig::default();
+
+        assert!(
+            crate::parse_borrowed_plain_incr_packet(b"*2\r\n$4\r\nDECR\r\n$1\r\nk\r\n", &cfg)
+                .is_none(),
+            "INCR parser must not claim a DECR packet"
+        );
+        assert!(
+            crate::parse_borrowed_plain_decr_packet(b"*2\r\n$4\r\nINCR\r\n$1\r\nk\r\n", &cfg)
+                .is_none(),
+            "DECR parser must not claim an INCR packet"
+        );
+        for other in [
+            &b"*2\r\n$4\r\nTYPE\r\n$1\r\nk\r\n"[..],
+            &b"*2\r\n$4\r\nLLEN\r\n$1\r\nk\r\n"[..],
+            &b"*2\r\n$4\r\nPTTL\r\n$1\r\nk\r\n"[..],
+            &b"*2\r\n$4\r\nHLEN\r\n$1\r\nk\r\n"[..],
+            &b"*2\r\n$4\r\nDUMP\r\n$1\r\nk\r\n"[..],
+        ] {
+            assert!(
+                crate::parse_borrowed_plain_incr_packet(other, &cfg).is_none(),
+                "INCR parser must not claim a same-prefix sibling command"
+            );
+            assert!(
+                crate::parse_borrowed_plain_decr_packet(other, &cfg).is_none(),
+                "DECR parser must not claim a same-prefix sibling command"
+            );
+        }
+    }
+
+    #[test]
+    fn borrowed_plain_incr_decr_packet_parsers_defer_noncanonical_or_limited_inputs() {
+        let cfg = ParserConfig::default();
+
+        assert!(
+            crate::parse_borrowed_plain_incr_packet(b"*02\r\n$4\r\nINCR\r\n$1\r\nk\r\n", &cfg)
+                .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_incr_packet(
+                b"*2\r\n$4\r\nINCR\r\n$1\r\nk\r\n",
+                &ParserConfig {
+                    max_array_len: 1,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_decr_packet(
+                b"*2\r\n$4\r\nDECR\r\n$1\r\nk\r\n",
+                &ParserConfig {
+                    max_bulk_len: 3,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "bulk-limit shorter than the command name stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_incr_packet(b"*2\r\n$4\r\nINCR\r\n$2\r\nk\r\n", &cfg)
+                .is_none(),
+            "malformed bulk bodies stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_decr_packet(b"*2\r\n$4\r\nDECR\r\n$1\r\nk\r", &cfg)
+                .is_none(),
+            "truncated packets stay on the generic parser until more bytes arrive"
+        );
+        assert!(
+            crate::parse_borrowed_plain_incr_packet(b"*3\r\n$4\r\nINCR\r\n$1\r\nk\r\n", &cfg)
+                .is_none(),
+            "INCRBY-arity packets stay on the generic parser"
+        );
+    }
+
+    #[test]
     fn borrowed_plain_bitcount_packet_parser_accepts_canonical_key_only_bitcount() {
         let input = b"*2\r\n$8\r\nbItCoUnT\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n";
         let parsed = crate::parse_borrowed_plain_bitcount_packet(input, &ParserConfig::default())
