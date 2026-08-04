@@ -19860,7 +19860,9 @@ fn parse_borrowed_plain_xlen_packet<'a>(
         return None;
     }
     let mut cursor = input.strip_prefix(b"*2\r\n$4\r\n").and_then(|rest| {
-        rest.get(..4).map(|_| input.len() - rest.len() + 4)
+        rest.get(..4)
+            .filter(|command| command.eq_ignore_ascii_case(b"XLEN"))
+            .map(|_| input.len() - rest.len() + 4)
     })?;
     if input.get(cursor..cursor + 2)? != b"\r\n" {
         return None;
