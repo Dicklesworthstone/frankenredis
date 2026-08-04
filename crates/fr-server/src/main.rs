@@ -29920,6 +29920,113 @@ mod tests {
     }
 
     #[test]
+    fn borrowed_plain_strlen_llen_getdel_packet_parsers_accept_canonical_packets() {
+        let cfg = ParserConfig::default();
+        let strlen = crate::parse_borrowed_plain_strlen_packet(
+            b"*2\r\n$6\r\nsTrLeN\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n",
+            &cfg,
+        )
+        .expect("canonical STRLEN packet should parse");
+        assert_eq!(strlen.key, b"key");
+        assert_eq!(
+            strlen.consumed,
+            b"*2\r\n$6\r\nsTrLeN\r\n$3\r\nkey\r\n".len()
+        );
+
+        let llen = crate::parse_borrowed_plain_llen_packet(
+            b"*2\r\n$4\r\nlLeN\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n",
+            &cfg,
+        )
+        .expect("canonical LLEN packet should parse");
+        assert_eq!(llen.key, b"key");
+        assert_eq!(llen.consumed, b"*2\r\n$4\r\nlLeN\r\n$3\r\nkey\r\n".len());
+
+        let getdel = crate::parse_borrowed_plain_getdel_packet(
+            b"*2\r\n$6\r\ngEtDeL\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n",
+            &cfg,
+        )
+        .expect("canonical GETDEL packet should parse");
+        assert_eq!(getdel.key, b"key");
+        assert_eq!(
+            getdel.consumed,
+            b"*2\r\n$6\r\ngEtDeL\r\n$3\r\nkey\r\n".len()
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_strlen_llen_getdel_packet_parsers_reject_same_prefix_siblings() {
+        let cfg = ParserConfig::default();
+
+        assert!(
+            crate::parse_borrowed_plain_strlen_packet(b"*2\r\n$6\r\nGETDEL\r\n$1\r\nk\r\n", &cfg)
+                .is_none(),
+            "STRLEN parser must reject the same-shape GETDEL command"
+        );
+        assert!(
+            crate::parse_borrowed_plain_getdel_packet(b"*2\r\n$6\r\nSTRLEN\r\n$1\r\nk\r\n", &cfg)
+                .is_none(),
+            "GETDEL parser must reject the same-shape STRLEN command"
+        );
+        for other in [
+            &b"*2\r\n$4\r\nTYPE\r\n$1\r\nk\r\n"[..],
+            &b"*2\r\n$4\r\nHLEN\r\n$1\r\nk\r\n"[..],
+        ] {
+            assert!(
+                crate::parse_borrowed_plain_llen_packet(other, &cfg).is_none(),
+                "LLEN parser must reject same-shape sibling command"
+            );
+        }
+    }
+
+    #[test]
+    fn borrowed_plain_strlen_llen_getdel_packet_parsers_defer_invalid_shapes_and_limits() {
+        let cfg = ParserConfig::default();
+
+        assert!(
+            crate::parse_borrowed_plain_strlen_packet(b"*02\r\n$6\r\nSTRLEN\r\n$1\r\nk\r\n", &cfg)
+                .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_llen_packet(
+                b"*2\r\n$4\r\nLLEN\r\n$1\r\nk\r\n",
+                &ParserConfig {
+                    max_array_len: 1,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_getdel_packet(
+                b"*2\r\n$6\r\nGETDEL\r\n$1\r\nk\r\n",
+                &ParserConfig {
+                    max_bulk_len: 5,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "command bulk-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_strlen_packet(b"*2\r\n$6\r\nSTRLEN\r\n$2\r\nk\r\n", &cfg)
+                .is_none(),
+            "malformed key bulk bodies stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_llen_packet(b"*3\r\n$4\r\nLLEN\r\n$1\r\nk\r\n", &cfg)
+                .is_none(),
+            "wrong-arity packets stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_getdel_packet(b"*2\r\n$6\r\nGETDEL\r\n$1\r\nk\r", &cfg)
+                .is_none(),
+            "truncated packets stay on the generic parser until more bytes arrive"
+        );
+    }
+
+    #[test]
     fn borrowed_plain_bitcount_packet_parser_accepts_canonical_key_only_bitcount() {
         let input = b"*2\r\n$8\r\nbItCoUnT\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n";
         let parsed = crate::parse_borrowed_plain_bitcount_packet(input, &ParserConfig::default())
