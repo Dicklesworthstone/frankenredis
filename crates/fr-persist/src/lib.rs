@@ -2260,9 +2260,15 @@ fn encode_compact_list_quicklist2(
     // saving is real when the parse is non-trivial (integer / short-string items,
     // where the length is a comparable cost to LZF per node); long-string items reject
     // in `parse_listpack_integer` on `len >= 21` so it is a wash for them, never worse.
-    let lens: Vec<usize> = items.iter().map(|it| listpack_entry_encoded_len(it)).collect();
+    let lens: Vec<usize> = items
+        .iter()
+        .map(|it| listpack_entry_encoded_len(it))
+        .collect();
     let mut buf = Vec::new();
-    rdb_encode_length(&mut buf, quicklist2_node_count_with_lens(items, &lens, budget));
+    rdb_encode_length(
+        &mut buf,
+        quicklist2_node_count_with_lens(items, &lens, budget),
+    );
     // Keep a borrowed slice roster for each PACKED node and let the shared
     // listpack encoder build the node payload. A direct streaming encoder was
     // measured slower on the focused quicklist RDB gate, so the buffered path
@@ -4431,14 +4437,20 @@ mod tests {
         const MEMBER: &[u8] = b"m";
         // 0x81 'm' 0x02  = member entry, then the score entry redis actually wrote.
         let cases: &[(f64, &[u8])] = &[
-            (5e18, &[0x81, b'm', 0x02, 0x85, b'5', b'e', b'+', b'1', b'8', 0x06]),
+            (
+                5e18,
+                &[0x81, b'm', 0x02, 0x85, b'5', b'e', b'+', b'1', b'8', 0x06],
+            ),
             (
                 1.5e300,
                 &[
                     0x81, b'm', 0x02, 0x88, b'1', b'.', b'5', b'e', b'+', b'3', b'0', b'0', 0x09,
                 ],
             ),
-            (1e-7, &[0x81, b'm', 0x02, 0x84, b'1', b'e', b'-', b'7', 0x05]),
+            (
+                1e-7,
+                &[0x81, b'm', 0x02, 0x84, b'1', b'e', b'-', b'7', 0x05],
+            ),
         ];
         for (score, want) in cases {
             let mut got = Vec::new();
@@ -4510,11 +4522,18 @@ mod tests {
     /// The encoder must equal the reference form for EVERY score: render with `d2string`,
     /// then let `encode_listpack_entry` re-decide int-vs-string (upstream's own round trip).
     #[test]
-    // The score probes are deliberate exact boundary values (2^62 = double2ll window, 2^63,
-    // the grisu2 plain-render edge 2^62+2^61, and 3.14) written at full precision to document
-    // the boundary they pin; they store the same f64 either way.
-    #[allow(clippy::approx_constant, clippy::excessive_precision)]
     fn zset_score_listpack_entry_equals_d2string_reference_form() {
+        // These probes are exact IEEE-754 values: 2^62 is Redis's `double2ll`
+        // boundary, 2^62 + 2^61 exercises the post-boundary plain-decimal
+        // case, and 2^63 must remain outside the signed listpack range.
+        let double2ll_limit = f64::from_bits(0x43d0_0000_0000_0000);
+        let post_limit_plain_decimal = f64::from_bits(0x43d8_0000_0000_0000);
+        let i64_overflow = f64::from_bits(0x43e0_0000_0000_0000);
+        let fractional_score = f64::from_bits(0x419d_6f34_547e_6b75);
+        let pi_like_score = f64::from_bits(0x4009_1eb8_51eb_851f);
+        assert_eq!(double2ll_limit, 2f64.powi(62));
+        assert_eq!(post_limit_plain_decimal, 2f64.powi(62) + 2f64.powi(61));
+        assert_eq!(i64_overflow, 2f64.powi(63));
         let mut scores: Vec<f64> = vec![
             0.0,
             -0.0,
@@ -4534,13 +4553,13 @@ mod tests {
             2e18,
             4e18,
             // double2ll's real window is +-2^62, NOT +-1e18 and NOT +-2^52.
-            4.611686018427387904e18,
-            -4.611686018427387904e18,
+            double2ll_limit,
+            -double2ll_limit,
             // Above the window, yet grisu2 still plain-renders these -> int entry upstream.
-            6.917529027641081856e18,
+            post_limit_plain_decimal,
             7.2e18,
             // Above the window and the plain form overflows i64 -> string entry.
-            9.223372036854775808e18,
+            i64_overflow,
             5e18,
             7e18,
             -5e18,
@@ -4550,10 +4569,10 @@ mod tests {
             1e-7,
             1e-10,
             0.000001,
-            3.14,
+            pi_like_score,
             -2.5,
             0.1,
-            123456789.123456789,
+            fractional_score,
             f64::INFINITY,
             f64::NEG_INFINITY,
             f64::NAN,
@@ -4641,9 +4660,31 @@ mod tests {
         // Hand cases cover the canonical boundaries; the sweep fuzzes short byte strings
         // over the ASCII range that exercises digits, sign, and non-digit bytes.
         let hand: &[&[u8]] = &[
-            b"", b"-", b"0", b"-0", b"00", b"007", b"-00", b"-07", b"+7", b"7", b"-7", b"10",
-            b"-10", b"9223372036854775807", b"-9223372036854775808", b"9223372036854775808",
-            b"99999999999999999999", b" 7", b"7 ", b"1.0", b"0x10", b"1e3", b"\xff", b"-x", b"x",
+            b"",
+            b"-",
+            b"0",
+            b"-0",
+            b"00",
+            b"007",
+            b"-00",
+            b"-07",
+            b"+7",
+            b"7",
+            b"-7",
+            b"10",
+            b"-10",
+            b"9223372036854775807",
+            b"-9223372036854775808",
+            b"9223372036854775808",
+            b"99999999999999999999",
+            b" 7",
+            b"7 ",
+            b"1.0",
+            b"0x10",
+            b"1e3",
+            b"\xff",
+            b"-x",
+            b"x",
         ];
         for entry in hand {
             assert_eq!(
@@ -5842,11 +5883,21 @@ mod tests {
             encode_compact_list_quicklist2_orig,
         };
         let th = CompactRdbThresholds::default();
-        let ints: Vec<Vec<u8>> = (0..5000).map(|i| (i * 37 - 9000).to_string().into_bytes()).collect();
+        let ints: Vec<Vec<u8>> = (0..5000)
+            .map(|i| (i * 37 - 9000).to_string().into_bytes())
+            .collect();
         let shorts: Vec<Vec<u8>> = (0..5000).map(|i| format!("e{i}").into_bytes()).collect();
-        let longs: Vec<Vec<u8>> = (0..400).map(|i| vec![b'a' + (i % 26) as u8; 50 + (i % 40)]).collect();
+        let longs: Vec<Vec<u8>> = (0..400)
+            .map(|i| vec![b'a' + (i % 26) as u8; 50 + (i % 40)])
+            .collect();
         let mixed: Vec<Vec<u8>> = (0..3000)
-            .map(|i| if i % 2 == 0 { i.to_string().into_bytes() } else { format!("member:{i:04}").into_bytes() })
+            .map(|i| {
+                if i % 2 == 0 {
+                    i.to_string().into_bytes()
+                } else {
+                    format!("member:{i:04}").into_bytes()
+                }
+            })
             .collect();
         let over_budget = vec![
             b"small".to_vec(),
@@ -6375,7 +6426,9 @@ mod tests {
         let mut buf = vec![0u8; 1500];
         let mut s = 0x9e37_79b9_7f4a_7c15u64;
         for b in buf.iter_mut() {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             *b = (s >> 33) as u8;
         }
         for len in 0..=1500usize {
