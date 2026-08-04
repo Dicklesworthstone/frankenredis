@@ -31513,6 +31513,142 @@ mod tests {
     }
 
     #[test]
+    fn borrowed_plain_dbsize_echo_packet_parsers_accept_canonical_packets() {
+        let cfg = ParserConfig::default();
+
+        // DBSIZE is the family's first zero-argument parser: it returns only
+        // the consumed length, so that length is the entire contract. It must
+        // stop at the end of its own packet and not swallow what follows it in
+        // the pipeline.
+        let dbsize = crate::parse_borrowed_plain_dbsize_packet(
+            b"*1\r\n$6\r\ndBsIzE\r\n*1\r\n$4\r\nPING\r\n",
+            &cfg,
+        )
+        .expect("canonical DBSIZE packet should parse");
+        assert_eq!(dbsize, b"*1\r\n$6\r\ndBsIzE\r\n".len());
+
+        let echo = crate::parse_borrowed_plain_echo_packet(
+            b"*2\r\n$4\r\neChO\r\n$5\r\nhello\r\n*1\r\n$4\r\nPING\r\n",
+            &cfg,
+        )
+        .expect("canonical ECHO packet should parse");
+        // The field is named `key` because the packet struct is shared, but for
+        // ECHO it carries the message that gets echoed back.
+        assert_eq!(echo.key, b"hello");
+        assert_eq!(echo.consumed, b"*2\r\n$4\r\neChO\r\n$5\r\nhello\r\n".len());
+
+        // An empty message is valid and must round-trip as an empty slice
+        // rather than being treated as a missing argument.
+        let empty =
+            crate::parse_borrowed_plain_echo_packet(b"*2\r\n$4\r\nECHO\r\n$0\r\n\r\n", &cfg)
+                .expect("ECHO with an empty message should parse");
+        assert_eq!(empty.key, b"");
+        assert_eq!(empty.consumed, b"*2\r\n$4\r\nECHO\r\n$0\r\n\r\n".len());
+    }
+
+    #[test]
+    fn borrowed_plain_dbsize_echo_packet_parsers_reject_same_prefix_siblings() {
+        let cfg = ParserConfig::default();
+
+        // BGSAVE is the other six-letter zero-argument command, so it is
+        // byte-identical to DBSIZE through `*1\r\n$6\r\n`.
+        assert!(
+            crate::parse_borrowed_plain_dbsize_packet(b"*1\r\n$6\r\nBGSAVE\r\n", &cfg).is_none(),
+            "DBSIZE parser must reject the same-shape BGSAVE command"
+        );
+        // ECHO shares `*2\r\n$4\r\n` with the four-letter single-key commands
+        // already covered by frankenredis-5x6ze and frankenredis-hxlzr. Getting
+        // this wrong would echo a key name back instead of running the command.
+        for other in [
+            &b"*2\r\n$4\r\nTYPE\r\n$1\r\nk\r\n"[..],
+            &b"*2\r\n$4\r\nLLEN\r\n$1\r\nk\r\n"[..],
+            &b"*2\r\n$4\r\nXLEN\r\n$1\r\nk\r\n"[..],
+            &b"*2\r\n$4\r\nPTTL\r\n$1\r\nk\r\n"[..],
+            &b"*2\r\n$4\r\nINCR\r\n$1\r\nk\r\n"[..],
+        ] {
+            assert!(
+                crate::parse_borrowed_plain_echo_packet(other, &cfg).is_none(),
+                "ECHO parser must reject same-shape sibling command"
+            );
+        }
+    }
+
+    #[test]
+    fn borrowed_plain_dbsize_echo_packet_parsers_defer_invalid_shapes_and_limits() {
+        let cfg = ParserConfig::default();
+
+        assert!(
+            crate::parse_borrowed_plain_dbsize_packet(b"*01\r\n$6\r\nDBSIZE\r\n", &cfg).is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_echo_packet(b"*2\r\n$04\r\nECHO\r\n$1\r\nm\r\n", &cfg)
+                .is_none(),
+            "noncanonical command bulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_dbsize_packet(
+                b"*1\r\n$6\r\nDBSIZE\r\n",
+                &ParserConfig {
+                    max_array_len: 0,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_dbsize_packet(
+                b"*1\r\n$6\r\nDBSIZE\r\n",
+                &ParserConfig {
+                    max_bulk_len: 5,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "command bulk-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_echo_packet(
+                b"*2\r\n$4\r\nECHO\r\n$5\r\nhello\r\n",
+                &ParserConfig {
+                    max_bulk_len: 4,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "message bulk-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_echo_packet(b"*2\r\n$4\r\nECHO\r\n$2\r\nm\r\n", &cfg)
+                .is_none(),
+            "malformed message bulk bodies stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_dbsize_packet(b"*2\r\n$6\r\nDBSIZE\r\n$1\r\nk\r\n", &cfg)
+                .is_none(),
+            "wrong-arity DBSIZE packets stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_echo_packet(b"*1\r\n$4\r\nECHO\r\n", &cfg).is_none(),
+            "wrong-arity ECHO packets stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_dbsize_packet(b"*1\r\n$6\r\nDBSIZE\r", &cfg).is_none(),
+            "truncated packets stay on the generic parser until more bytes arrive"
+        );
+        assert!(
+            crate::parse_borrowed_plain_echo_packet(b"*2\r\n$4\r\nECHO\r\n$5\r\nhel\r\n", &cfg)
+                .is_none(),
+            "short message bodies stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_dbsize_packet(b"*1\r\n$6\r\nDBS", &cfg).is_none(),
+            "packets truncated inside the command token stay on the generic parser"
+        );
+    }
+
+    #[test]
     fn borrowed_plain_bitcount_packet_parser_accepts_canonical_key_only_bitcount() {
         let input = b"*2\r\n$8\r\nbItCoUnT\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n";
         let parsed = crate::parse_borrowed_plain_bitcount_packet(input, &ParserConfig::default())
