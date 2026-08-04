@@ -51093,6 +51093,10 @@ mod tests {
         )
         .expect("msetnx");
         assert_eq!(out, RespFrame::Integer(0));
+        assert!(
+            store.get(b"b", 0).expect("lookup b").is_none(),
+            "MSETNX must not partially write"
+        );
     }
 
     #[test]
