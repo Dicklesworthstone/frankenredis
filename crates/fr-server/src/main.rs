@@ -31801,6 +31801,210 @@ mod tests {
     }
 
     #[test]
+    fn borrowed_plain_hmget2_hmget3_packet_parsers_accept_canonical_packets() {
+        let cfg = ParserConfig::default();
+
+        let two = crate::parse_borrowed_plain_hmget2_packet(
+            b"*4\r\n$5\r\nhMgEt\r\n$3\r\nkey\r\n$2\r\nf1\r\n$2\r\nf2\r\n*1\r\n$4\r\nPING\r\n",
+            &cfg,
+        )
+        .expect("canonical 2-field HMGET packet should parse");
+        assert_eq!(two.key, b"key");
+        // The 2-field parser borrows BorrowedPlainKeyRangePacket, so the fields
+        // arrive in members named `start` and `end`. Assert the mapping rather
+        // than trusting the names.
+        assert_eq!(two.start, b"f1");
+        assert_eq!(two.end, b"f2");
+        assert_eq!(
+            two.consumed,
+            b"*4\r\n$5\r\nhMgEt\r\n$3\r\nkey\r\n$2\r\nf1\r\n$2\r\nf2\r\n".len()
+        );
+
+        let three = crate::parse_borrowed_plain_hmget3_packet(
+            b"*5\r\n$5\r\nhMgEt\r\n$3\r\nkey\r\n$2\r\nf1\r\n$2\r\nf2\r\n$2\r\nf3\r\n",
+            &cfg,
+        )
+        .expect("canonical 3-field HMGET packet should parse");
+        assert_eq!(three.key, b"key");
+        assert_eq!(three.f1, b"f1");
+        assert_eq!(three.f2, b"f2");
+        assert_eq!(three.f3, b"f3");
+        assert_eq!(
+            three.consumed,
+            b"*5\r\n$5\r\nhMgEt\r\n$3\r\nkey\r\n$2\r\nf1\r\n$2\r\nf2\r\n$2\r\nf3\r\n".len()
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_hmget2_hmget3_packet_parsers_bind_fields_in_wire_order() {
+        // Every bulk after the key is a field of the same shape, so a parser
+        // that read them out of order would still parse and still typecheck.
+        // Distinct lengths make the ordering observable.
+        let cfg = ParserConfig::default();
+
+        let two = crate::parse_borrowed_plain_hmget2_packet(
+            b"*4\r\n$5\r\nHMGET\r\n$1\r\nk\r\n$1\r\na\r\n$4\r\nbbbb\r\n",
+            &cfg,
+        )
+        .expect("2-field HMGET with distinct bulks should parse");
+        assert_eq!(two.key, b"k");
+        assert_eq!(two.start, b"a", "first field follows the key");
+        assert_eq!(two.end, b"bbbb", "second field follows the first");
+
+        let three = crate::parse_borrowed_plain_hmget3_packet(
+            b"*5\r\n$5\r\nHMGET\r\n$1\r\nk\r\n$1\r\na\r\n$2\r\nbb\r\n$3\r\nccc\r\n",
+            &cfg,
+        )
+        .expect("3-field HMGET with distinct bulks should parse");
+        assert_eq!(three.key, b"k");
+        assert_eq!(three.f1, b"a");
+        assert_eq!(three.f2, b"bb");
+        assert_eq!(three.f3, b"ccc");
+    }
+
+    #[test]
+    fn borrowed_plain_hmget2_hmget3_packet_parsers_reject_same_prefix_siblings() {
+        let cfg = ParserConfig::default();
+
+        // The arity lives in the multibulk count, so each parser must refuse
+        // the other's element count outright.
+        assert!(
+            crate::parse_borrowed_plain_hmget2_packet(
+                b"*5\r\n$5\r\nHMGET\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n",
+                &cfg
+            )
+            .is_none(),
+            "2-field HMGET parser must reject a 3-field packet"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hmget3_packet(
+                b"*4\r\n$5\r\nHMGET\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n",
+                &cfg
+            )
+            .is_none(),
+            "3-field HMGET parser must reject a 2-field packet"
+        );
+        // `*4\r\n$5\r\n` is shared with the five-letter four-element WRITES.
+        // Reading a hash where the client asked to push, add or set would be a
+        // read answered in place of a mutation, so the command compare is the
+        // only thing keeping these apart.
+        for other in [
+            &b"*4\r\n$5\r\nLPUSH\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n"[..],
+            &b"*4\r\n$5\r\nRPUSH\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n"[..],
+            &b"*4\r\n$5\r\nSETEX\r\n$1\r\nk\r\n$1\r\n1\r\n$1\r\nv\r\n"[..],
+            &b"*4\r\n$5\r\nLTRIM\r\n$1\r\nk\r\n$1\r\n0\r\n$2\r\n-1\r\n"[..],
+        ] {
+            assert!(
+                crate::parse_borrowed_plain_hmget2_packet(other, &cfg).is_none(),
+                "2-field HMGET parser must reject same-shape sibling command"
+            );
+        }
+        for other in [
+            &b"*5\r\n$5\r\nLPUSH\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n"[..],
+            &b"*5\r\n$5\r\nRPUSH\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n"[..],
+        ] {
+            assert!(
+                crate::parse_borrowed_plain_hmget3_packet(other, &cfg).is_none(),
+                "3-field HMGET parser must reject same-shape sibling command"
+            );
+        }
+    }
+
+    #[test]
+    fn borrowed_plain_hmget2_hmget3_packet_parsers_defer_invalid_shapes_and_limits() {
+        let cfg = ParserConfig::default();
+
+        assert!(
+            crate::parse_borrowed_plain_hmget2_packet(
+                b"*04\r\n$5\r\nHMGET\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hmget3_packet(
+                b"*5\r\n$05\r\nHMGET\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical command bulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hmget2_packet(
+                b"*4\r\n$5\r\nHMGET\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n",
+                &ParserConfig {
+                    max_array_len: 3,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hmget3_packet(
+                b"*5\r\n$5\r\nHMGET\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n",
+                &ParserConfig {
+                    max_array_len: 4,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "the 3-field parser must respect its own higher array-length floor"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hmget2_packet(
+                b"*4\r\n$5\r\nHMGET\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n",
+                &ParserConfig {
+                    max_bulk_len: 4,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "command bulk-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hmget3_packet(
+                b"*5\r\n$5\r\nHMGET\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n$6\r\nffffff\r\n",
+                &ParserConfig {
+                    max_bulk_len: 5,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "a trailing field over the bulk limit stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hmget2_packet(
+                b"*4\r\n$5\r\nHMGET\r\n$1\r\nk\r\n$1\r\na\r\n$2\r\nb\r\n",
+                &cfg
+            )
+            .is_none(),
+            "malformed trailing bulk bodies stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hmget3_packet(
+                b"*5\r\n$5\r\nHMGET\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n",
+                &cfg
+            )
+            .is_none(),
+            "packets missing a declared field stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hmget2_packet(
+                b"*4\r\n$5\r\nHMGET\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r",
+                &cfg
+            )
+            .is_none(),
+            "truncated packets stay on the generic parser until more bytes arrive"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hmget3_packet(b"*5\r\n$5\r\nHMG", &cfg).is_none(),
+            "packets truncated inside the command token stay on the generic parser"
+        );
+    }
+
+    #[test]
     fn borrowed_plain_bitcount_packet_parser_accepts_canonical_key_only_bitcount() {
         let input = b"*2\r\n$8\r\nbItCoUnT\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n";
         let parsed = crate::parse_borrowed_plain_bitcount_packet(input, &ParserConfig::default())
