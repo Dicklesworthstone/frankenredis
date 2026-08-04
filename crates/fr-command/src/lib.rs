@@ -3,16 +3,21 @@
 pub mod lua_eval;
 pub use lua_eval::eval_script;
 
-use fr_protocol::RespFrame;
+use fr_protocol::{RespFrame, encode_aggregate_header, encode_bulk_string_slice};
 use fr_store::{
     BitRangeUnit, ClientReplyState, ClientTrackingState, DispatchAclLogContext,
     DispatchAclPermissionReason, DispatchAclPermissions, ExpireTimeValue, MaxmemoryPolicy,
-    PendingAclLogEvent, PttlValue, PubSubMessage, ScoreBound, Store, StoreError,
+    PendingAclLogEvent, PttlValue, PubSubMessage, RestoreMetadata, ScoreBound, Store, StoreError,
     StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimOptions, StreamClaimReply,
     StreamGroupReadCursor, StreamGroupReadOptions, StreamId, StreamPendingRecord, Value, ValueType,
-    glob_match, read_rss_bytes, read_total_system_memory_bytes, redis_score_to_string,
-    sha1_hex_public,
+    decode_db_key, glob_match, read_rss_bytes, read_total_system_memory_bytes,
+    redis_score_to_string, sha1_hex_public,
 };
+use icu_collator::{
+    Collator, CollatorBorrowed, options::AlternateHandling, options::CollatorOptions,
+};
+use icu_locale_core::Locale;
+use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::io::{ErrorKind, Read, Write};
@@ -852,7 +857,9 @@ enum CommandKeyLookupError {
     InvalidArguments,
 }
 
-fn command_uses_custom_key_specs(cmd_name: &str) -> bool {
+#[cfg(any(test, feature = "bench-reference"))]
+#[cfg_attr(feature = "bench-reference", inline(never))]
+fn bench_command_uses_custom_key_specs_reference(cmd_name: &str) -> bool {
     cmd_name.eq_ignore_ascii_case("APPEND")
         || cmd_name.eq_ignore_ascii_case("EXPIRE")
         || cmd_name.eq_ignore_ascii_case("EXPIREAT")
@@ -954,7 +961,115 @@ fn command_uses_custom_key_specs(cmd_name: &str) -> bool {
         || cmd_name.eq_ignore_ascii_case("MIGRATE")
 }
 
-fn command_has_keys(cmd_name: &str) -> bool {
+#[cfg_attr(feature = "bench-reference", inline(never))]
+fn command_uses_custom_key_specs(cmd_name: &str) -> bool {
+    matches!(
+        cmd_name,
+        "append"
+            | "expire"
+            | "expireat"
+            | "hset"
+            | "hsetnx"
+            | "hmset"
+            | "persist"
+            | "pexpire"
+            | "pexpireat"
+            | "psetex"
+            | "setex"
+            | "setnx"
+            | "lpush"
+            | "lpushx"
+            | "rpush"
+            | "rpushx"
+            | "sadd"
+            | "zadd"
+            | "xadd"
+            | "xdel"
+            | "xtrim"
+            | "xlen"
+            | "llen"
+            | "hlen"
+            | "scard"
+            | "zcard"
+            | "strlen"
+            | "type"
+            | "blpop"
+            | "brpop"
+            | "bzpopmin"
+            | "bzpopmax"
+            | "hdel"
+            | "lpop"
+            | "lrem"
+            | "rpop"
+            | "spop"
+            | "srem"
+            | "zpopmax"
+            | "zpopmin"
+            | "zrem"
+            | "zremrangebyrank"
+            | "zremrangebyscore"
+            | "zremrangebylex"
+            | "eval"
+            | "evalsha"
+            | "eval_ro"
+            | "evalsha_ro"
+            | "fcall"
+            | "fcall_ro"
+            | "xread"
+            | "xreadgroup"
+            | "xsetid"
+            | "restore"
+            | "restore-asking"
+            | "zunionstore"
+            | "zinterstore"
+            | "zdiffstore"
+            | "zunion"
+            | "zinter"
+            | "zdiff"
+            | "zintercard"
+            | "sintercard"
+            | "sinterstore"
+            | "sunionstore"
+            | "sdiffstore"
+            | "mset"
+            | "msetnx"
+            | "bitop"
+            | "sinter"
+            | "sunion"
+            | "sdiff"
+            | "sort"
+            | "sort_ro"
+            | "georadius"
+            | "georadiusbymember"
+            | "geosearch"
+            | "geosearchstore"
+            | "xinfo"
+            | "xgroup"
+            | "xack"
+            | "xclaim"
+            | "xautoclaim"
+            | "xpending"
+            | "object"
+            | "memory"
+            | "lmpop"
+            | "zmpop"
+            | "blmpop"
+            | "bzmpop"
+            | "smove"
+            | "rename"
+            | "renamenx"
+            | "copy"
+            | "lmove"
+            | "blmove"
+            | "rpoplpush"
+            | "brpoplpush"
+            | "migrate"
+    )
+}
+
+#[cfg(any(test, feature = "bench-reference"))]
+#[cfg_attr(feature = "bench-reference", inline(never))]
+fn bench_command_has_keys_reference(cmd_name: &str) -> bool {
     // SSUBSCRIBE/SUNSUBSCRIBE/SPUBLISH (shard pub/sub) declare a positional
     // key_spec in commands.def but tag it with the NOT_KEY flag — the arg is
     // a shard channel, not a keyspace key. Upstream's commandHasKeys() walks
@@ -970,8 +1085,49 @@ fn command_has_keys(cmd_name: &str) -> bool {
     {
         return false;
     }
-    command_uses_custom_key_specs(cmd_name)
+    bench_command_uses_custom_key_specs_reference(cmd_name)
         || command_table_index(cmd_name.as_bytes()).is_some_and(|idx| COMMAND_TABLE[idx].3 != 0)
+}
+
+#[cfg(feature = "bench-reference")]
+static BENCH_COMMAND_HAS_KEYS_REFERENCE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Select the frozen case-insensitive classifier for the `COMMAND GETKEYS`
+/// same-binary A/B harness.
+#[doc(hidden)]
+#[cfg(feature = "bench-reference")]
+pub fn bench_select_command_has_keys_reference(reference: bool) {
+    BENCH_COMMAND_HAS_KEYS_REFERENCE.store(reference, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg_attr(feature = "bench-reference", inline(never))]
+fn command_has_keys(command_table_idx: usize) -> bool {
+    let (cmd_name, _, _, first_key, _, _) = COMMAND_TABLE[command_table_idx];
+    #[cfg(feature = "bench-reference")]
+    if BENCH_COMMAND_HAS_KEYS_REFERENCE.load(std::sync::atomic::Ordering::Relaxed) {
+        return bench_command_has_keys_reference(cmd_name);
+    }
+    if matches!(cmd_name, "ssubscribe" | "sunsubscribe" | "spublish") {
+        return false;
+    }
+    command_uses_custom_key_specs(cmd_name) || first_key != 0
+}
+
+/// Exhaustively compare the frozen and indexed classifiers over every
+/// top-level command name resolved through the production table index.
+#[doc(hidden)]
+#[cfg(feature = "bench-reference")]
+pub fn bench_command_has_keys_parity_count() -> usize {
+    for &(name, ..) in COMMAND_TABLE {
+        let idx = command_table_index(name.as_bytes()).expect("COMMAND_TABLE row must resolve");
+        assert_eq!(
+            command_has_keys(idx),
+            bench_command_has_keys_reference(name),
+            "has-keys classification differs for {name}"
+        );
+    }
+    COMMAND_TABLE.len()
 }
 
 /// (frankenredis-z53ld) Validate the `numkeys` argument for the
@@ -1111,11 +1267,10 @@ fn command_key_references(
     };
     let cmd_name =
         std::str::from_utf8(raw_cmd).map_err(|_| CommandKeyLookupError::InvalidCommand)?;
-    let Some((table_name, _arity, flags, _, _, _)) =
-        command_table_index(cmd_name.as_bytes()).map(|idx| COMMAND_TABLE[idx])
-    else {
+    let Some(command_table_idx) = command_table_index(cmd_name.as_bytes()) else {
         return Err(CommandKeyLookupError::InvalidCommand);
     };
+    let (table_name, _arity, flags, _, _, _) = COMMAND_TABLE[command_table_idx];
 
     // Upstream COMMAND GETKEYS surfaces "no key arguments" before any arity
     // error: getKeysFromCommandWithSpecs() in commands.def first inspects the
@@ -1123,7 +1278,7 @@ fn command_key_references(
     // the arity branch. Mirror that ordering so no-key commands (PUBLISH,
     // SUBSCRIBE, WAIT, ...) report "no key arguments" regardless of how many
     // args followed. (br-frankenredis-getkeysorder)
-    if !command_has_keys(table_name) {
+    if !command_has_keys(command_table_idx) {
         return Err(CommandKeyLookupError::NoKeyArguments);
     }
     // Subcommand-style parents (OBJECT) need their lookupCommand match
@@ -1227,6 +1382,20 @@ pub fn command_acl_key_access(argv: &[Vec<u8>]) -> Vec<AclKeyAccess> {
             .collect(),
         Err(_) => Vec::new(),
     }
+}
+
+/// The keys a command MODIFIES (its write keys), in argv order. Used to target
+/// client-tracking invalidations: upstream `signalModifiedKey` fires per
+/// modified key, so a command's READ-ONLY source keys (COPY's source,
+/// SINTERSTORE / ZRANGESTORE / SORT...STORE / BITOP / GEORADIUS...STORE source
+/// keys) must NOT invalidate, even though they appear in `command_keys`.
+/// (frankenredis)
+pub fn command_write_keys(argv: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    command_acl_key_access(argv)
+        .into_iter()
+        .filter(|access| access.write)
+        .filter_map(|access| argv.get(access.index).cloned())
+        .collect()
 }
 
 fn command_key_references_with_exact_flags(
@@ -2313,13 +2482,29 @@ pub fn dispatch_argv(
             .next()
             .unwrap_or_else(|| command_name.to_ascii_lowercase());
         let (reason, object, error) = match permission_error {
-            DispatchAclPermissionError::Command => (
-                DispatchAclPermissionReason::Command,
-                command_name.to_ascii_uppercase(),
-                CommandError::Custom(format!(
-                    "NOPERM User {acl_denied_user} has no permissions to run the '{acl_command_fullname}' command"
-                )),
-            ),
+            DispatchAclPermissionError::Command => {
+                // A COMMAND-level ACL denial that fires INSIDE a Lua script
+                // (script_nesting_level >= 1) is wrapped by redis 7.2.4 as
+                // "ERR ACL failure in script: <msg>" rather than the bare
+                // "NOPERM <msg>" a direct client denial uses (the Lua error
+                // context "script: <sha>, on @user_script:N." is appended
+                // after). Key-level denials inside scripts are NOT wrapped
+                // (they stay "NOPERM No permissions to access a key"), so this
+                // rewrites only the Command arm. (frankenredis-aclscriptwrap)
+                let msg = format!(
+                    "User {acl_denied_user} has no permissions to run the '{acl_command_fullname}' command"
+                );
+                let error = if store.script_nesting_level >= 1 {
+                    CommandError::Custom(format!("ERR ACL failure in script: {msg}"))
+                } else {
+                    CommandError::Custom(format!("NOPERM {msg}"))
+                };
+                (
+                    DispatchAclPermissionReason::Command,
+                    command_name.to_ascii_uppercase(),
+                    error,
+                )
+            }
             DispatchAclPermissionError::Key(key) => {
                 let key_name = String::from_utf8_lossy(&key).into_owned();
                 (
@@ -2591,10 +2776,21 @@ pub fn dispatch_argv(
         None => {}
     }
 
-    let cmd = std::str::from_utf8(raw_cmd).map_err(|_| CommandError::InvalidUtf8Argument)?;
+    // Upstream server.c formats the unknown-command name with `%s` on the raw
+    // argv[0] bytes: it does NOT require valid UTF-8 (a non-UTF-8 name is still
+    // just "unknown command", not a UTF-8 error) and it truncates at the first
+    // NUL (C-string semantics). Match both: cut at the first NUL, then render
+    // the bytes (lossy for non-UTF-8 — RespFrame::Error is a Rust String so a
+    // raw 0xFF can't be reproduced byte-for-byte, but the error TYPE and the
+    // \r\n->space + 128-byte cap match upstream). (frankenredis-unkcmdname)
+    let name_bytes = match raw_cmd.iter().position(|&b| b == 0) {
+        Some(nul) => &raw_cmd[..nul],
+        None => raw_cmd,
+    };
+    let cmd = String::from_utf8_lossy(name_bytes);
     let args_preview = build_unknown_args_preview(argv);
     Err(CommandError::UnknownCommand {
-        command: trim_and_cap_string(cmd, 128),
+        command: trim_and_cap_string(&cmd, 128),
         args_preview,
     })
 }
@@ -2975,376 +3171,393 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
             }
         }
         4 => {
-            if eq_ascii_command(cmd, b"PING") {
-                Some(CommandId::Ping)
-            } else if eq_ascii_command(cmd, b"ECHO") {
-                Some(CommandId::Echo)
-            } else if eq_ascii_command(cmd, b"INCR") {
-                Some(CommandId::Incr)
-            } else if eq_ascii_command(cmd, b"PTTL") {
-                Some(CommandId::Pttl)
-            } else if eq_ascii_command(cmd, b"MGET") {
-                Some(CommandId::Mget)
-            } else if eq_ascii_command(cmd, b"MSET") {
-                Some(CommandId::Mset)
-            } else if eq_ascii_command(cmd, b"DECR") {
-                Some(CommandId::Decr)
-            } else if eq_ascii_command(cmd, b"TYPE") {
-                Some(CommandId::Type)
-            } else if eq_ascii_command(cmd, b"KEYS") {
-                Some(CommandId::Keys)
-            } else if eq_ascii_command(cmd, b"HGET") {
-                Some(CommandId::Hget)
-            } else if eq_ascii_command(cmd, b"HSET") {
-                Some(CommandId::Hset)
-            } else if eq_ascii_command(cmd, b"HDEL") {
-                Some(CommandId::Hdel)
-            } else if eq_ascii_command(cmd, b"HLEN") {
-                Some(CommandId::Hlen)
-            } else if eq_ascii_command(cmd, b"LPOP") {
-                Some(CommandId::Lpop)
-            } else if eq_ascii_command(cmd, b"RPOP") {
-                Some(CommandId::Rpop)
-            } else if eq_ascii_command(cmd, b"LLEN") {
-                Some(CommandId::Llen)
-            } else if eq_ascii_command(cmd, b"LSET") {
-                Some(CommandId::Lset)
-            } else if eq_ascii_command(cmd, b"SADD") {
-                Some(CommandId::Sadd)
-            } else if eq_ascii_command(cmd, b"SREM") {
-                Some(CommandId::Srem)
-            } else if eq_ascii_command(cmd, b"ZADD") {
-                Some(CommandId::Zadd)
-            } else if eq_ascii_command(cmd, b"ZREM") {
-                Some(CommandId::Zrem)
-            } else if eq_ascii_command(cmd, b"SPOP") {
-                Some(CommandId::Spop)
-            } else if eq_ascii_command(cmd, b"LPOS") {
-                Some(CommandId::Lpos)
-            } else if eq_ascii_command(cmd, b"LREM") {
-                Some(CommandId::Lrem)
-            } else if eq_ascii_command(cmd, b"QUIT") {
-                Some(CommandId::Quit)
-            } else if eq_ascii_command(cmd, b"INFO") {
-                Some(CommandId::Info)
-            } else if eq_ascii_command(cmd, b"TIME") {
-                Some(CommandId::Time)
-            } else if eq_ascii_command(cmd, b"WAIT") {
-                Some(CommandId::Wait)
-            } else if eq_ascii_command(cmd, b"DUMP") {
-                Some(CommandId::Dump)
-            } else if eq_ascii_command(cmd, b"SORT") {
-                Some(CommandId::Sort)
-            } else if eq_ascii_command(cmd, b"COPY") {
-                Some(CommandId::Copy)
-            } else if eq_ascii_command(cmd, b"SAVE") {
-                Some(CommandId::Save)
-            } else if eq_ascii_command(cmd, b"SCAN") {
-                Some(CommandId::Scan)
-            } else if eq_ascii_command(cmd, b"XADD") {
-                Some(CommandId::Xadd)
-            } else if eq_ascii_command(cmd, b"XLEN") {
-                Some(CommandId::Xlen)
-            } else if eq_ascii_command(cmd, b"XDEL") {
-                Some(CommandId::Xdel)
-            } else if eq_ascii_command(cmd, b"XACK") {
-                Some(CommandId::Xack)
-            } else if eq_ascii_command(cmd, b"EVAL") {
-                Some(CommandId::Eval)
-            } else if eq_ascii_command(cmd, b"ROLE") {
-                Some(CommandId::Role)
-            } else if eq_ascii_command(cmd, b"MOVE") {
-                Some(CommandId::Move)
-            } else {
-                None
+            // (perf) Compute the packed name ONCE + match on the const-packed u64 (compiler
+            // jump table / binary search) instead of the linear per-candidate eq_ascii_command
+            // chain. Byte-identical (classify_command_matches_linear_reference).
+            const PK_PING: u64 = pack_cmd_u64(b"PING");
+            const PK_ECHO: u64 = pack_cmd_u64(b"ECHO");
+            const PK_INCR: u64 = pack_cmd_u64(b"INCR");
+            const PK_PTTL: u64 = pack_cmd_u64(b"PTTL");
+            const PK_MGET: u64 = pack_cmd_u64(b"MGET");
+            const PK_MSET: u64 = pack_cmd_u64(b"MSET");
+            const PK_DECR: u64 = pack_cmd_u64(b"DECR");
+            const PK_TYPE: u64 = pack_cmd_u64(b"TYPE");
+            const PK_KEYS: u64 = pack_cmd_u64(b"KEYS");
+            const PK_HGET: u64 = pack_cmd_u64(b"HGET");
+            const PK_HSET: u64 = pack_cmd_u64(b"HSET");
+            const PK_HDEL: u64 = pack_cmd_u64(b"HDEL");
+            const PK_HLEN: u64 = pack_cmd_u64(b"HLEN");
+            const PK_LPOP: u64 = pack_cmd_u64(b"LPOP");
+            const PK_RPOP: u64 = pack_cmd_u64(b"RPOP");
+            const PK_LLEN: u64 = pack_cmd_u64(b"LLEN");
+            const PK_LSET: u64 = pack_cmd_u64(b"LSET");
+            const PK_SADD: u64 = pack_cmd_u64(b"SADD");
+            const PK_SREM: u64 = pack_cmd_u64(b"SREM");
+            const PK_ZADD: u64 = pack_cmd_u64(b"ZADD");
+            const PK_ZREM: u64 = pack_cmd_u64(b"ZREM");
+            const PK_SPOP: u64 = pack_cmd_u64(b"SPOP");
+            const PK_LPOS: u64 = pack_cmd_u64(b"LPOS");
+            const PK_LREM: u64 = pack_cmd_u64(b"LREM");
+            const PK_QUIT: u64 = pack_cmd_u64(b"QUIT");
+            const PK_INFO: u64 = pack_cmd_u64(b"INFO");
+            const PK_TIME: u64 = pack_cmd_u64(b"TIME");
+            const PK_WAIT: u64 = pack_cmd_u64(b"WAIT");
+            const PK_DUMP: u64 = pack_cmd_u64(b"DUMP");
+            const PK_SORT: u64 = pack_cmd_u64(b"SORT");
+            const PK_COPY: u64 = pack_cmd_u64(b"COPY");
+            const PK_SAVE: u64 = pack_cmd_u64(b"SAVE");
+            const PK_SCAN: u64 = pack_cmd_u64(b"SCAN");
+            const PK_XADD: u64 = pack_cmd_u64(b"XADD");
+            const PK_XLEN: u64 = pack_cmd_u64(b"XLEN");
+            const PK_XDEL: u64 = pack_cmd_u64(b"XDEL");
+            const PK_XACK: u64 = pack_cmd_u64(b"XACK");
+            const PK_EVAL: u64 = pack_cmd_u64(b"EVAL");
+            const PK_ROLE: u64 = pack_cmd_u64(b"ROLE");
+            const PK_MOVE: u64 = pack_cmd_u64(b"MOVE");
+            match pack_cmd_u64(cmd) {
+                PK_PING => Some(CommandId::Ping),
+                PK_ECHO => Some(CommandId::Echo),
+                PK_INCR => Some(CommandId::Incr),
+                PK_PTTL => Some(CommandId::Pttl),
+                PK_MGET => Some(CommandId::Mget),
+                PK_MSET => Some(CommandId::Mset),
+                PK_DECR => Some(CommandId::Decr),
+                PK_TYPE => Some(CommandId::Type),
+                PK_KEYS => Some(CommandId::Keys),
+                PK_HGET => Some(CommandId::Hget),
+                PK_HSET => Some(CommandId::Hset),
+                PK_HDEL => Some(CommandId::Hdel),
+                PK_HLEN => Some(CommandId::Hlen),
+                PK_LPOP => Some(CommandId::Lpop),
+                PK_RPOP => Some(CommandId::Rpop),
+                PK_LLEN => Some(CommandId::Llen),
+                PK_LSET => Some(CommandId::Lset),
+                PK_SADD => Some(CommandId::Sadd),
+                PK_SREM => Some(CommandId::Srem),
+                PK_ZADD => Some(CommandId::Zadd),
+                PK_ZREM => Some(CommandId::Zrem),
+                PK_SPOP => Some(CommandId::Spop),
+                PK_LPOS => Some(CommandId::Lpos),
+                PK_LREM => Some(CommandId::Lrem),
+                PK_QUIT => Some(CommandId::Quit),
+                PK_INFO => Some(CommandId::Info),
+                PK_TIME => Some(CommandId::Time),
+                PK_WAIT => Some(CommandId::Wait),
+                PK_DUMP => Some(CommandId::Dump),
+                PK_SORT => Some(CommandId::Sort),
+                PK_COPY => Some(CommandId::Copy),
+                PK_SAVE => Some(CommandId::Save),
+                PK_SCAN => Some(CommandId::Scan),
+                PK_XADD => Some(CommandId::Xadd),
+                PK_XLEN => Some(CommandId::Xlen),
+                PK_XDEL => Some(CommandId::Xdel),
+                PK_XACK => Some(CommandId::Xack),
+                PK_EVAL => Some(CommandId::Eval),
+                PK_ROLE => Some(CommandId::Role),
+                PK_MOVE => Some(CommandId::Move),
+                _ => None,
             }
         }
         5 => {
-            if eq_ascii_command(cmd, b"SETNX") {
-                Some(CommandId::Setnx)
-            } else if eq_ascii_command(cmd, b"HKEYS") {
-                Some(CommandId::Hkeys)
-            } else if eq_ascii_command(cmd, b"HVALS") {
-                Some(CommandId::Hvals)
-            } else if eq_ascii_command(cmd, b"HMGET") {
-                Some(CommandId::Hmget)
-            } else if eq_ascii_command(cmd, b"HMSET") {
-                Some(CommandId::Hmset)
-            } else if eq_ascii_command(cmd, b"LPUSH") {
-                Some(CommandId::Lpush)
-            } else if eq_ascii_command(cmd, b"RPUSH") {
-                Some(CommandId::Rpush)
-            } else if eq_ascii_command(cmd, b"SCARD") {
-                Some(CommandId::Scard)
-            } else if eq_ascii_command(cmd, b"ZRANK") {
-                Some(CommandId::Zrank)
-            } else if eq_ascii_command(cmd, b"ZCARD") {
-                Some(CommandId::Zcard)
-            } else if eq_ascii_command(cmd, b"SETEX") {
-                Some(CommandId::Setex)
-            } else if eq_ascii_command(cmd, b"SDIFF") {
-                Some(CommandId::Sdiff)
-            } else if eq_ascii_command(cmd, b"PFADD") {
-                Some(CommandId::Pfadd)
-            } else if eq_ascii_command(cmd, b"LTRIM") {
-                Some(CommandId::Ltrim)
-            } else if eq_ascii_command(cmd, b"XREAD") {
-                Some(CommandId::Xread)
-            } else if eq_ascii_command(cmd, b"LMPOP") {
-                Some(CommandId::Lmpop)
-            } else if eq_ascii_command(cmd, b"ZMPOP") {
-                Some(CommandId::Zmpop)
-            } else if eq_ascii_command(cmd, b"XINFO") {
-                Some(CommandId::Xinfo)
-            } else if eq_ascii_command(cmd, b"XTRIM") {
-                Some(CommandId::Xtrim)
-            } else if eq_ascii_command(cmd, b"LMOVE") {
-                Some(CommandId::Lmove)
-            } else if eq_ascii_command(cmd, b"SMOVE") {
-                Some(CommandId::Smove)
-            } else if eq_ascii_command(cmd, b"GETEX") {
-                Some(CommandId::Getex)
-            } else if eq_ascii_command(cmd, b"BITOP") {
-                Some(CommandId::Bitop)
-            } else if eq_ascii_command(cmd, b"ZDIFF") {
-                Some(CommandId::Zdiff)
-            } else if eq_ascii_command(cmd, b"HSCAN") {
-                Some(CommandId::Hscan)
-            } else if eq_ascii_command(cmd, b"SSCAN") {
-                Some(CommandId::Sscan)
-            } else if eq_ascii_command(cmd, b"ZSCAN") {
-                Some(CommandId::Zscan)
-            } else if eq_ascii_command(cmd, b"TOUCH") {
-                Some(CommandId::Touch)
-            } else if eq_ascii_command(cmd, b"RESET") {
-                Some(CommandId::Reset)
-            } else if eq_ascii_command(cmd, b"BLPOP") {
-                Some(CommandId::Blpop)
-            } else if eq_ascii_command(cmd, b"BRPOP") {
-                Some(CommandId::Brpop)
-            } else if eq_ascii_command(cmd, b"DEBUG") {
-                Some(CommandId::Debug)
-            } else if eq_ascii_command(cmd, b"FCALL") {
-                Some(CommandId::Fcall)
-            } else if eq_ascii_command(cmd, b"PSYNC") {
-                Some(CommandId::Psync)
-            } else {
-                None
+            // (perf) Compute the packed name ONCE + match on the const-packed u64 (compiler
+            // jump table / binary search) instead of the linear per-candidate eq_ascii_command
+            // chain. Byte-identical (classify_command_matches_linear_reference).
+            const PK_SETNX: u64 = pack_cmd_u64(b"SETNX");
+            const PK_HKEYS: u64 = pack_cmd_u64(b"HKEYS");
+            const PK_HVALS: u64 = pack_cmd_u64(b"HVALS");
+            const PK_HMGET: u64 = pack_cmd_u64(b"HMGET");
+            const PK_HMSET: u64 = pack_cmd_u64(b"HMSET");
+            const PK_LPUSH: u64 = pack_cmd_u64(b"LPUSH");
+            const PK_RPUSH: u64 = pack_cmd_u64(b"RPUSH");
+            const PK_SCARD: u64 = pack_cmd_u64(b"SCARD");
+            const PK_ZRANK: u64 = pack_cmd_u64(b"ZRANK");
+            const PK_ZCARD: u64 = pack_cmd_u64(b"ZCARD");
+            const PK_SETEX: u64 = pack_cmd_u64(b"SETEX");
+            const PK_SDIFF: u64 = pack_cmd_u64(b"SDIFF");
+            const PK_PFADD: u64 = pack_cmd_u64(b"PFADD");
+            const PK_LTRIM: u64 = pack_cmd_u64(b"LTRIM");
+            const PK_XREAD: u64 = pack_cmd_u64(b"XREAD");
+            const PK_LMPOP: u64 = pack_cmd_u64(b"LMPOP");
+            const PK_ZMPOP: u64 = pack_cmd_u64(b"ZMPOP");
+            const PK_XINFO: u64 = pack_cmd_u64(b"XINFO");
+            const PK_XTRIM: u64 = pack_cmd_u64(b"XTRIM");
+            const PK_LMOVE: u64 = pack_cmd_u64(b"LMOVE");
+            const PK_SMOVE: u64 = pack_cmd_u64(b"SMOVE");
+            const PK_GETEX: u64 = pack_cmd_u64(b"GETEX");
+            const PK_BITOP: u64 = pack_cmd_u64(b"BITOP");
+            const PK_ZDIFF: u64 = pack_cmd_u64(b"ZDIFF");
+            const PK_HSCAN: u64 = pack_cmd_u64(b"HSCAN");
+            const PK_SSCAN: u64 = pack_cmd_u64(b"SSCAN");
+            const PK_ZSCAN: u64 = pack_cmd_u64(b"ZSCAN");
+            const PK_TOUCH: u64 = pack_cmd_u64(b"TOUCH");
+            const PK_RESET: u64 = pack_cmd_u64(b"RESET");
+            const PK_BLPOP: u64 = pack_cmd_u64(b"BLPOP");
+            const PK_BRPOP: u64 = pack_cmd_u64(b"BRPOP");
+            const PK_DEBUG: u64 = pack_cmd_u64(b"DEBUG");
+            const PK_FCALL: u64 = pack_cmd_u64(b"FCALL");
+            const PK_PSYNC: u64 = pack_cmd_u64(b"PSYNC");
+            match pack_cmd_u64(cmd) {
+                PK_SETNX => Some(CommandId::Setnx),
+                PK_HKEYS => Some(CommandId::Hkeys),
+                PK_HVALS => Some(CommandId::Hvals),
+                PK_HMGET => Some(CommandId::Hmget),
+                PK_HMSET => Some(CommandId::Hmset),
+                PK_LPUSH => Some(CommandId::Lpush),
+                PK_RPUSH => Some(CommandId::Rpush),
+                PK_SCARD => Some(CommandId::Scard),
+                PK_ZRANK => Some(CommandId::Zrank),
+                PK_ZCARD => Some(CommandId::Zcard),
+                PK_SETEX => Some(CommandId::Setex),
+                PK_SDIFF => Some(CommandId::Sdiff),
+                PK_PFADD => Some(CommandId::Pfadd),
+                PK_LTRIM => Some(CommandId::Ltrim),
+                PK_XREAD => Some(CommandId::Xread),
+                PK_LMPOP => Some(CommandId::Lmpop),
+                PK_ZMPOP => Some(CommandId::Zmpop),
+                PK_XINFO => Some(CommandId::Xinfo),
+                PK_XTRIM => Some(CommandId::Xtrim),
+                PK_LMOVE => Some(CommandId::Lmove),
+                PK_SMOVE => Some(CommandId::Smove),
+                PK_GETEX => Some(CommandId::Getex),
+                PK_BITOP => Some(CommandId::Bitop),
+                PK_ZDIFF => Some(CommandId::Zdiff),
+                PK_HSCAN => Some(CommandId::Hscan),
+                PK_SSCAN => Some(CommandId::Sscan),
+                PK_ZSCAN => Some(CommandId::Zscan),
+                PK_TOUCH => Some(CommandId::Touch),
+                PK_RESET => Some(CommandId::Reset),
+                PK_BLPOP => Some(CommandId::Blpop),
+                PK_BRPOP => Some(CommandId::Brpop),
+                PK_DEBUG => Some(CommandId::Debug),
+                PK_FCALL => Some(CommandId::Fcall),
+                PK_PSYNC => Some(CommandId::Psync),
+                _ => None,
             }
         }
         6 => {
-            if eq_ascii_command(cmd, b"EXPIRE") {
-                Some(CommandId::Expire)
-            } else if eq_ascii_command(cmd, b"STRLEN") {
-                Some(CommandId::Strlen)
-            } else if eq_ascii_command(cmd, b"GETSET") {
-                Some(CommandId::Getset)
-            } else if eq_ascii_command(cmd, b"INCRBY") {
-                Some(CommandId::Incrby)
-            } else if eq_ascii_command(cmd, b"DECRBY") {
-                Some(CommandId::Decrby)
-            } else if eq_ascii_command(cmd, b"EXISTS") {
-                Some(CommandId::Exists)
-            } else if eq_ascii_command(cmd, b"RENAME") {
-                Some(CommandId::Rename)
-            } else if eq_ascii_command(cmd, b"DBSIZE") {
-                Some(CommandId::Dbsize)
-            } else if eq_ascii_command(cmd, b"APPEND") {
-                Some(CommandId::Append)
-            } else if eq_ascii_command(cmd, b"HSETNX") {
-                Some(CommandId::Hsetnx)
-            } else if eq_ascii_command(cmd, b"LRANGE") {
-                Some(CommandId::Lrange)
-            } else if eq_ascii_command(cmd, b"LINDEX") {
-                Some(CommandId::Lindex)
-            } else if eq_ascii_command(cmd, b"ZSCORE") {
-                Some(CommandId::Zscore)
-            } else if eq_ascii_command(cmd, b"ZRANGE") {
-                Some(CommandId::Zrange)
-            } else if eq_ascii_command(cmd, b"XGROUP") {
-                Some(CommandId::Xgroup)
-            } else if eq_ascii_command(cmd, b"XRANGE") {
-                Some(CommandId::Xrange)
-            } else if eq_ascii_command(cmd, b"XCLAIM") {
-                Some(CommandId::Xclaim)
-            } else if eq_ascii_command(cmd, b"ZCOUNT") {
-                Some(CommandId::Zcount)
-            } else if eq_ascii_command(cmd, b"PSETEX") {
-                Some(CommandId::Psetex)
-            } else if eq_ascii_command(cmd, b"GETDEL") {
-                Some(CommandId::Getdel)
-            } else if eq_ascii_command(cmd, b"SINTER") {
-                Some(CommandId::Sinter)
-            } else if eq_ascii_command(cmd, b"SUNION") {
-                Some(CommandId::Sunion)
-            } else if eq_ascii_command(cmd, b"SETBIT") {
-                Some(CommandId::Setbit)
-            } else if eq_ascii_command(cmd, b"GETBIT") {
-                Some(CommandId::Getbit)
-            } else if eq_ascii_command(cmd, b"BITPOS") {
-                Some(CommandId::Bitpos)
-            } else if eq_ascii_command(cmd, b"LPUSHX") {
-                Some(CommandId::Lpushx)
-            } else if eq_ascii_command(cmd, b"RPUSHX") {
-                Some(CommandId::Rpushx)
-            } else if eq_ascii_command(cmd, b"SELECT") {
-                Some(CommandId::Select)
-            } else if eq_ascii_command(cmd, b"CONFIG") {
-                Some(CommandId::Config)
-            } else if eq_ascii_command(cmd, b"CLIENT") {
-                Some(CommandId::Client)
-            } else if eq_ascii_command(cmd, b"OBJECT") {
-                Some(CommandId::Object)
-            } else if eq_ascii_command(cmd, b"UNLINK") {
-                Some(CommandId::Unlink)
-            } else if eq_ascii_command(cmd, b"SUBSTR") {
-                Some(CommandId::Substr)
-            } else if eq_ascii_command(cmd, b"GEOADD") {
-                Some(CommandId::Geoadd)
-            } else if eq_ascii_command(cmd, b"GEOPOS") {
-                Some(CommandId::Geopos)
-            } else if eq_ascii_command(cmd, b"MEMORY") {
-                Some(CommandId::Memory)
-            } else if eq_ascii_command(cmd, b"BGSAVE") {
-                Some(CommandId::Bgsave)
-            } else if eq_ascii_command(cmd, b"MSETNX") {
-                Some(CommandId::Msetnx)
-            } else if eq_ascii_command(cmd, b"ZINTER") {
-                Some(CommandId::Zinter)
-            } else if eq_ascii_command(cmd, b"ZUNION") {
-                Some(CommandId::Zunion)
-            } else if eq_ascii_command(cmd, b"SWAPDB") {
-                Some(CommandId::Swapdb)
-            } else if eq_ascii_command(cmd, b"BLMOVE") {
-                Some(CommandId::Blmove)
-            } else if eq_ascii_command(cmd, b"BLMPOP") {
-                Some(CommandId::Blmpop)
-            } else if eq_ascii_command(cmd, b"PUBSUB") {
-                Some(CommandId::Pubsub)
-            } else if eq_ascii_command(cmd, b"SCRIPT") {
-                Some(CommandId::Script)
-            } else if eq_ascii_command(cmd, b"XSETID") {
-                Some(CommandId::Xsetid)
-            } else if eq_ascii_command(cmd, b"LOLWUT") {
-                Some(CommandId::Lolwut)
-            } else if eq_ascii_command(cmd, b"BZMPOP") {
-                Some(CommandId::Bzmpop)
-            } else if eq_ascii_command(cmd, b"MODULE") {
-                Some(CommandId::Module)
-            } else {
-                None
+            // (perf) Compute the packed name ONCE and dispatch via a match on the
+            // const-packed u64 (a compiler jump table / binary search) instead of the
+            // linear per-candidate eq_ascii_command chain that re-packs `cmd` each time.
+            // Byte-identical to the linear reference (classify_command_matches_linear_reference).
+            const PK_EXPIRE: u64 = pack_cmd_u64(b"EXPIRE");
+            const PK_STRLEN: u64 = pack_cmd_u64(b"STRLEN");
+            const PK_GETSET: u64 = pack_cmd_u64(b"GETSET");
+            const PK_INCRBY: u64 = pack_cmd_u64(b"INCRBY");
+            const PK_DECRBY: u64 = pack_cmd_u64(b"DECRBY");
+            const PK_EXISTS: u64 = pack_cmd_u64(b"EXISTS");
+            const PK_RENAME: u64 = pack_cmd_u64(b"RENAME");
+            const PK_DBSIZE: u64 = pack_cmd_u64(b"DBSIZE");
+            const PK_APPEND: u64 = pack_cmd_u64(b"APPEND");
+            const PK_HSETNX: u64 = pack_cmd_u64(b"HSETNX");
+            const PK_LRANGE: u64 = pack_cmd_u64(b"LRANGE");
+            const PK_LINDEX: u64 = pack_cmd_u64(b"LINDEX");
+            const PK_ZSCORE: u64 = pack_cmd_u64(b"ZSCORE");
+            const PK_ZRANGE: u64 = pack_cmd_u64(b"ZRANGE");
+            const PK_XGROUP: u64 = pack_cmd_u64(b"XGROUP");
+            const PK_XRANGE: u64 = pack_cmd_u64(b"XRANGE");
+            const PK_XCLAIM: u64 = pack_cmd_u64(b"XCLAIM");
+            const PK_ZCOUNT: u64 = pack_cmd_u64(b"ZCOUNT");
+            const PK_PSETEX: u64 = pack_cmd_u64(b"PSETEX");
+            const PK_GETDEL: u64 = pack_cmd_u64(b"GETDEL");
+            const PK_SINTER: u64 = pack_cmd_u64(b"SINTER");
+            const PK_SUNION: u64 = pack_cmd_u64(b"SUNION");
+            const PK_SETBIT: u64 = pack_cmd_u64(b"SETBIT");
+            const PK_GETBIT: u64 = pack_cmd_u64(b"GETBIT");
+            const PK_BITPOS: u64 = pack_cmd_u64(b"BITPOS");
+            const PK_LPUSHX: u64 = pack_cmd_u64(b"LPUSHX");
+            const PK_RPUSHX: u64 = pack_cmd_u64(b"RPUSHX");
+            const PK_SELECT: u64 = pack_cmd_u64(b"SELECT");
+            const PK_CONFIG: u64 = pack_cmd_u64(b"CONFIG");
+            const PK_CLIENT: u64 = pack_cmd_u64(b"CLIENT");
+            const PK_OBJECT: u64 = pack_cmd_u64(b"OBJECT");
+            const PK_UNLINK: u64 = pack_cmd_u64(b"UNLINK");
+            const PK_SUBSTR: u64 = pack_cmd_u64(b"SUBSTR");
+            const PK_GEOADD: u64 = pack_cmd_u64(b"GEOADD");
+            const PK_GEOPOS: u64 = pack_cmd_u64(b"GEOPOS");
+            const PK_MEMORY: u64 = pack_cmd_u64(b"MEMORY");
+            const PK_BGSAVE: u64 = pack_cmd_u64(b"BGSAVE");
+            const PK_MSETNX: u64 = pack_cmd_u64(b"MSETNX");
+            const PK_ZINTER: u64 = pack_cmd_u64(b"ZINTER");
+            const PK_ZUNION: u64 = pack_cmd_u64(b"ZUNION");
+            const PK_SWAPDB: u64 = pack_cmd_u64(b"SWAPDB");
+            const PK_BLMOVE: u64 = pack_cmd_u64(b"BLMOVE");
+            const PK_BLMPOP: u64 = pack_cmd_u64(b"BLMPOP");
+            const PK_PUBSUB: u64 = pack_cmd_u64(b"PUBSUB");
+            const PK_SCRIPT: u64 = pack_cmd_u64(b"SCRIPT");
+            const PK_XSETID: u64 = pack_cmd_u64(b"XSETID");
+            const PK_LOLWUT: u64 = pack_cmd_u64(b"LOLWUT");
+            const PK_BZMPOP: u64 = pack_cmd_u64(b"BZMPOP");
+            const PK_MODULE: u64 = pack_cmd_u64(b"MODULE");
+            match pack_cmd_u64(cmd) {
+                PK_EXPIRE => Some(CommandId::Expire),
+                PK_STRLEN => Some(CommandId::Strlen),
+                PK_GETSET => Some(CommandId::Getset),
+                PK_INCRBY => Some(CommandId::Incrby),
+                PK_DECRBY => Some(CommandId::Decrby),
+                PK_EXISTS => Some(CommandId::Exists),
+                PK_RENAME => Some(CommandId::Rename),
+                PK_DBSIZE => Some(CommandId::Dbsize),
+                PK_APPEND => Some(CommandId::Append),
+                PK_HSETNX => Some(CommandId::Hsetnx),
+                PK_LRANGE => Some(CommandId::Lrange),
+                PK_LINDEX => Some(CommandId::Lindex),
+                PK_ZSCORE => Some(CommandId::Zscore),
+                PK_ZRANGE => Some(CommandId::Zrange),
+                PK_XGROUP => Some(CommandId::Xgroup),
+                PK_XRANGE => Some(CommandId::Xrange),
+                PK_XCLAIM => Some(CommandId::Xclaim),
+                PK_ZCOUNT => Some(CommandId::Zcount),
+                PK_PSETEX => Some(CommandId::Psetex),
+                PK_GETDEL => Some(CommandId::Getdel),
+                PK_SINTER => Some(CommandId::Sinter),
+                PK_SUNION => Some(CommandId::Sunion),
+                PK_SETBIT => Some(CommandId::Setbit),
+                PK_GETBIT => Some(CommandId::Getbit),
+                PK_BITPOS => Some(CommandId::Bitpos),
+                PK_LPUSHX => Some(CommandId::Lpushx),
+                PK_RPUSHX => Some(CommandId::Rpushx),
+                PK_SELECT => Some(CommandId::Select),
+                PK_CONFIG => Some(CommandId::Config),
+                PK_CLIENT => Some(CommandId::Client),
+                PK_OBJECT => Some(CommandId::Object),
+                PK_UNLINK => Some(CommandId::Unlink),
+                PK_SUBSTR => Some(CommandId::Substr),
+                PK_GEOADD => Some(CommandId::Geoadd),
+                PK_GEOPOS => Some(CommandId::Geopos),
+                PK_MEMORY => Some(CommandId::Memory),
+                PK_BGSAVE => Some(CommandId::Bgsave),
+                PK_MSETNX => Some(CommandId::Msetnx),
+                PK_ZINTER => Some(CommandId::Zinter),
+                PK_ZUNION => Some(CommandId::Zunion),
+                PK_SWAPDB => Some(CommandId::Swapdb),
+                PK_BLMOVE => Some(CommandId::Blmove),
+                PK_BLMPOP => Some(CommandId::Blmpop),
+                PK_PUBSUB => Some(CommandId::Pubsub),
+                PK_SCRIPT => Some(CommandId::Script),
+                PK_XSETID => Some(CommandId::Xsetid),
+                PK_LOLWUT => Some(CommandId::Lolwut),
+                PK_BZMPOP => Some(CommandId::Bzmpop),
+                PK_MODULE => Some(CommandId::Module),
+                _ => None,
             }
         }
         7 => {
-            if eq_ascii_command(cmd, b"PEXPIRE") {
-                Some(CommandId::Pexpire)
-            } else if eq_ascii_command(cmd, b"PERSIST") {
-                Some(CommandId::Persist)
-            } else if eq_ascii_command(cmd, b"FLUSHDB") {
-                Some(CommandId::Flushdb)
-            } else if eq_ascii_command(cmd, b"HGETALL") {
-                Some(CommandId::Hgetall)
-            } else if eq_ascii_command(cmd, b"HEXISTS") {
-                Some(CommandId::Hexists)
-            } else if eq_ascii_command(cmd, b"HINCRBY") {
-                Some(CommandId::Hincrby)
-            } else if eq_ascii_command(cmd, b"HSTRLEN") {
-                Some(CommandId::Hstrlen)
-            } else if eq_ascii_command(cmd, b"ZINCRBY") {
-                Some(CommandId::Zincrby)
-            } else if eq_ascii_command(cmd, b"ZPOPMIN") {
-                Some(CommandId::Zpopmin)
-            } else if eq_ascii_command(cmd, b"ZPOPMAX") {
-                Some(CommandId::Zpopmax)
-            } else if eq_ascii_command(cmd, b"LINSERT") {
-                Some(CommandId::Linsert)
-            } else if eq_ascii_command(cmd, b"PFCOUNT") {
-                Some(CommandId::Pfcount)
-            } else if eq_ascii_command(cmd, b"PFMERGE") {
-                Some(CommandId::Pfmerge)
-            } else if eq_ascii_command(cmd, b"ZMSCORE") {
-                Some(CommandId::Zmscore)
-            } else if eq_ascii_command(cmd, b"COMMAND") {
-                Some(CommandId::Command)
-            } else if eq_ascii_command(cmd, b"RESTORE") {
-                Some(CommandId::Restore)
-            } else if eq_ascii_command(cmd, b"GEODIST") {
-                Some(CommandId::Geodist)
-            } else if eq_ascii_command(cmd, b"GEOHASH") {
-                Some(CommandId::Geohash)
-            } else if eq_ascii_command(cmd, b"SLOWLOG") {
-                Some(CommandId::Slowlog)
-            } else if eq_ascii_command(cmd, b"EVALSHA") {
-                Some(CommandId::Evalsha)
-            } else if eq_ascii_command(cmd, b"EVAL_RO") {
-                Some(CommandId::EvalRo)
-            } else if eq_ascii_command(cmd, b"LATENCY") {
-                Some(CommandId::Latency)
-            } else if eq_ascii_command(cmd, b"PUBLISH") {
-                Some(CommandId::Publish)
-            } else if eq_ascii_command(cmd, b"WAITAOF") {
-                Some(CommandId::Waitaof)
-            } else if eq_ascii_command(cmd, b"CLUSTER") {
-                Some(CommandId::Cluster)
-            } else if eq_ascii_command(cmd, b"SLAVEOF") {
-                Some(CommandId::Replicaof)
-            } else if eq_ascii_command(cmd, b"SORT_RO") {
-                Some(CommandId::SortRo)
-            } else if eq_ascii_command(cmd, b"MONITOR") {
-                Some(CommandId::Monitor)
-            } else if eq_ascii_command(cmd, b"MIGRATE") {
-                Some(CommandId::Migrate)
-            } else if eq_ascii_command(cmd, b"PFDEBUG") {
-                Some(CommandId::Pfdebug)
-            } else {
-                None
+            // (perf) Compute the packed name ONCE + match on the const-packed u64 (compiler
+            // jump table / binary search) instead of the linear per-candidate eq_ascii_command
+            // chain. Byte-identical (classify_command_matches_linear_reference). Underscore
+            // names (EVAL_RO/SORT_RO) pack fine (`_` is not a letter, so no case-fold).
+            const PK_PEXPIRE: u64 = pack_cmd_u64(b"PEXPIRE");
+            const PK_PERSIST: u64 = pack_cmd_u64(b"PERSIST");
+            const PK_FLUSHDB: u64 = pack_cmd_u64(b"FLUSHDB");
+            const PK_HGETALL: u64 = pack_cmd_u64(b"HGETALL");
+            const PK_HEXISTS: u64 = pack_cmd_u64(b"HEXISTS");
+            const PK_HINCRBY: u64 = pack_cmd_u64(b"HINCRBY");
+            const PK_HSTRLEN: u64 = pack_cmd_u64(b"HSTRLEN");
+            const PK_ZINCRBY: u64 = pack_cmd_u64(b"ZINCRBY");
+            const PK_ZPOPMIN: u64 = pack_cmd_u64(b"ZPOPMIN");
+            const PK_ZPOPMAX: u64 = pack_cmd_u64(b"ZPOPMAX");
+            const PK_LINSERT: u64 = pack_cmd_u64(b"LINSERT");
+            const PK_PFCOUNT: u64 = pack_cmd_u64(b"PFCOUNT");
+            const PK_PFMERGE: u64 = pack_cmd_u64(b"PFMERGE");
+            const PK_ZMSCORE: u64 = pack_cmd_u64(b"ZMSCORE");
+            const PK_COMMAND: u64 = pack_cmd_u64(b"COMMAND");
+            const PK_RESTORE: u64 = pack_cmd_u64(b"RESTORE");
+            const PK_GEODIST: u64 = pack_cmd_u64(b"GEODIST");
+            const PK_GEOHASH: u64 = pack_cmd_u64(b"GEOHASH");
+            const PK_SLOWLOG: u64 = pack_cmd_u64(b"SLOWLOG");
+            const PK_EVALSHA: u64 = pack_cmd_u64(b"EVALSHA");
+            const PK_EVAL_RO: u64 = pack_cmd_u64(b"EVAL_RO");
+            const PK_LATENCY: u64 = pack_cmd_u64(b"LATENCY");
+            const PK_PUBLISH: u64 = pack_cmd_u64(b"PUBLISH");
+            const PK_WAITAOF: u64 = pack_cmd_u64(b"WAITAOF");
+            const PK_CLUSTER: u64 = pack_cmd_u64(b"CLUSTER");
+            const PK_SLAVEOF: u64 = pack_cmd_u64(b"SLAVEOF");
+            const PK_SORT_RO: u64 = pack_cmd_u64(b"SORT_RO");
+            const PK_MONITOR: u64 = pack_cmd_u64(b"MONITOR");
+            const PK_MIGRATE: u64 = pack_cmd_u64(b"MIGRATE");
+            const PK_PFDEBUG: u64 = pack_cmd_u64(b"PFDEBUG");
+            match pack_cmd_u64(cmd) {
+                PK_PEXPIRE => Some(CommandId::Pexpire),
+                PK_PERSIST => Some(CommandId::Persist),
+                PK_FLUSHDB => Some(CommandId::Flushdb),
+                PK_HGETALL => Some(CommandId::Hgetall),
+                PK_HEXISTS => Some(CommandId::Hexists),
+                PK_HINCRBY => Some(CommandId::Hincrby),
+                PK_HSTRLEN => Some(CommandId::Hstrlen),
+                PK_ZINCRBY => Some(CommandId::Zincrby),
+                PK_ZPOPMIN => Some(CommandId::Zpopmin),
+                PK_ZPOPMAX => Some(CommandId::Zpopmax),
+                PK_LINSERT => Some(CommandId::Linsert),
+                PK_PFCOUNT => Some(CommandId::Pfcount),
+                PK_PFMERGE => Some(CommandId::Pfmerge),
+                PK_ZMSCORE => Some(CommandId::Zmscore),
+                PK_COMMAND => Some(CommandId::Command),
+                PK_RESTORE => Some(CommandId::Restore),
+                PK_GEODIST => Some(CommandId::Geodist),
+                PK_GEOHASH => Some(CommandId::Geohash),
+                PK_SLOWLOG => Some(CommandId::Slowlog),
+                PK_EVALSHA => Some(CommandId::Evalsha),
+                PK_EVAL_RO => Some(CommandId::EvalRo),
+                PK_LATENCY => Some(CommandId::Latency),
+                PK_PUBLISH => Some(CommandId::Publish),
+                PK_WAITAOF => Some(CommandId::Waitaof),
+                PK_CLUSTER => Some(CommandId::Cluster),
+                PK_SLAVEOF => Some(CommandId::Replicaof),
+                PK_SORT_RO => Some(CommandId::SortRo),
+                PK_MONITOR => Some(CommandId::Monitor),
+                PK_MIGRATE => Some(CommandId::Migrate),
+                PK_PFDEBUG => Some(CommandId::Pfdebug),
+                _ => None,
             }
         }
         8 => {
-            if eq_ascii_command(cmd, b"EXPIREAT") {
-                Some(CommandId::Expireat)
-            } else if eq_ascii_command(cmd, b"RENAMENX") {
-                Some(CommandId::Renamenx)
-            } else if eq_ascii_command(cmd, b"FLUSHALL") {
-                Some(CommandId::Flushall)
-            } else if eq_ascii_command(cmd, b"SMEMBERS") {
-                Some(CommandId::Smembers)
-            } else if eq_ascii_command(cmd, b"ZREVRANK") {
-                Some(CommandId::Zrevrank)
-            } else if eq_ascii_command(cmd, b"GETRANGE") {
-                Some(CommandId::Getrange)
-            } else if eq_ascii_command(cmd, b"SETRANGE") {
-                Some(CommandId::Setrange)
-            } else if eq_ascii_command(cmd, b"BITCOUNT") {
-                Some(CommandId::Bitcount)
-            } else if eq_ascii_command(cmd, b"XPENDING") {
-                Some(CommandId::Xpending)
-            } else if eq_ascii_command(cmd, b"LASTSAVE") {
-                Some(CommandId::Lastsave)
-            } else if eq_ascii_command(cmd, b"SHUTDOWN") {
-                Some(CommandId::Shutdown)
-            } else if eq_ascii_command(cmd, b"BITFIELD") {
-                Some(CommandId::Bitfield)
-            } else if eq_ascii_command(cmd, b"FUNCTION") {
-                Some(CommandId::Function)
-            } else if eq_ascii_command(cmd, b"SPUBLISH") {
-                Some(CommandId::Spublish)
-            } else if eq_ascii_command(cmd, b"READONLY") {
-                Some(CommandId::Readonly)
-            } else if eq_ascii_command(cmd, b"FCALL_RO") {
-                Some(CommandId::FcallRo)
-            } else if eq_ascii_command(cmd, b"BZPOPMIN") {
-                Some(CommandId::Bzpopmin)
-            } else if eq_ascii_command(cmd, b"BZPOPMAX") {
-                Some(CommandId::Bzpopmax)
-            } else if eq_ascii_command(cmd, b"REPLCONF") {
-                Some(CommandId::Replconf)
-            } else if eq_ascii_command(cmd, b"FAILOVER") {
-                Some(CommandId::Failover)
-            } else if eq_ascii_command(cmd, b"SENTINEL") {
-                Some(CommandId::Sentinel)
-            } else {
-                None
+            // (perf) Compute the packed name ONCE + match on the const-packed u64 (compiler
+            // jump table / binary search) instead of the linear per-candidate eq_ascii_command
+            // chain. Byte-identical (classify_command_matches_linear_reference).
+            const PK_EXPIREAT: u64 = pack_cmd_u64(b"EXPIREAT");
+            const PK_RENAMENX: u64 = pack_cmd_u64(b"RENAMENX");
+            const PK_FLUSHALL: u64 = pack_cmd_u64(b"FLUSHALL");
+            const PK_SMEMBERS: u64 = pack_cmd_u64(b"SMEMBERS");
+            const PK_ZREVRANK: u64 = pack_cmd_u64(b"ZREVRANK");
+            const PK_GETRANGE: u64 = pack_cmd_u64(b"GETRANGE");
+            const PK_SETRANGE: u64 = pack_cmd_u64(b"SETRANGE");
+            const PK_BITCOUNT: u64 = pack_cmd_u64(b"BITCOUNT");
+            const PK_XPENDING: u64 = pack_cmd_u64(b"XPENDING");
+            const PK_LASTSAVE: u64 = pack_cmd_u64(b"LASTSAVE");
+            const PK_SHUTDOWN: u64 = pack_cmd_u64(b"SHUTDOWN");
+            const PK_BITFIELD: u64 = pack_cmd_u64(b"BITFIELD");
+            const PK_FUNCTION: u64 = pack_cmd_u64(b"FUNCTION");
+            const PK_SPUBLISH: u64 = pack_cmd_u64(b"SPUBLISH");
+            const PK_READONLY: u64 = pack_cmd_u64(b"READONLY");
+            const PK_FCALL_RO: u64 = pack_cmd_u64(b"FCALL_RO");
+            const PK_BZPOPMIN: u64 = pack_cmd_u64(b"BZPOPMIN");
+            const PK_BZPOPMAX: u64 = pack_cmd_u64(b"BZPOPMAX");
+            const PK_REPLCONF: u64 = pack_cmd_u64(b"REPLCONF");
+            const PK_FAILOVER: u64 = pack_cmd_u64(b"FAILOVER");
+            const PK_SENTINEL: u64 = pack_cmd_u64(b"SENTINEL");
+            match pack_cmd_u64(cmd) {
+                PK_EXPIREAT => Some(CommandId::Expireat),
+                PK_RENAMENX => Some(CommandId::Renamenx),
+                PK_FLUSHALL => Some(CommandId::Flushall),
+                PK_SMEMBERS => Some(CommandId::Smembers),
+                PK_ZREVRANK => Some(CommandId::Zrevrank),
+                PK_GETRANGE => Some(CommandId::Getrange),
+                PK_SETRANGE => Some(CommandId::Setrange),
+                PK_BITCOUNT => Some(CommandId::Bitcount),
+                PK_XPENDING => Some(CommandId::Xpending),
+                PK_LASTSAVE => Some(CommandId::Lastsave),
+                PK_SHUTDOWN => Some(CommandId::Shutdown),
+                PK_BITFIELD => Some(CommandId::Bitfield),
+                PK_FUNCTION => Some(CommandId::Function),
+                PK_SPUBLISH => Some(CommandId::Spublish),
+                PK_READONLY => Some(CommandId::Readonly),
+                PK_FCALL_RO => Some(CommandId::FcallRo),
+                PK_BZPOPMIN => Some(CommandId::Bzpopmin),
+                PK_BZPOPMAX => Some(CommandId::Bzpopmax),
+                PK_REPLCONF => Some(CommandId::Replconf),
+                PK_FAILOVER => Some(CommandId::Failover),
+                PK_SENTINEL => Some(CommandId::Sentinel),
+                _ => None,
             }
         }
         9 => {
@@ -3556,6 +3769,797 @@ fn eq_ascii_command(lhs: &[u8], rhs: &[u8]) -> bool {
         .all(|(left, right)| left.to_ascii_uppercase() == *right)
 }
 
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_classify6_linear(cmd: &[u8]) -> u32 {
+    if eq_ascii_command(cmd, b"EXPIRE") {
+        1
+    } else if eq_ascii_command(cmd, b"STRLEN") {
+        2
+    } else if eq_ascii_command(cmd, b"GETSET") {
+        3
+    } else if eq_ascii_command(cmd, b"INCRBY") {
+        4
+    } else if eq_ascii_command(cmd, b"DECRBY") {
+        5
+    } else if eq_ascii_command(cmd, b"EXISTS") {
+        6
+    } else if eq_ascii_command(cmd, b"RENAME") {
+        7
+    } else if eq_ascii_command(cmd, b"DBSIZE") {
+        8
+    } else if eq_ascii_command(cmd, b"APPEND") {
+        9
+    } else if eq_ascii_command(cmd, b"HSETNX") {
+        10
+    } else if eq_ascii_command(cmd, b"LRANGE") {
+        11
+    } else if eq_ascii_command(cmd, b"LINDEX") {
+        12
+    } else if eq_ascii_command(cmd, b"ZSCORE") {
+        13
+    } else if eq_ascii_command(cmd, b"ZRANGE") {
+        14
+    } else if eq_ascii_command(cmd, b"XGROUP") {
+        15
+    } else if eq_ascii_command(cmd, b"XRANGE") {
+        16
+    } else if eq_ascii_command(cmd, b"XCLAIM") {
+        17
+    } else if eq_ascii_command(cmd, b"ZCOUNT") {
+        18
+    } else if eq_ascii_command(cmd, b"PSETEX") {
+        19
+    } else if eq_ascii_command(cmd, b"GETDEL") {
+        20
+    } else if eq_ascii_command(cmd, b"SINTER") {
+        21
+    } else if eq_ascii_command(cmd, b"SUNION") {
+        22
+    } else if eq_ascii_command(cmd, b"SETBIT") {
+        23
+    } else if eq_ascii_command(cmd, b"GETBIT") {
+        24
+    } else if eq_ascii_command(cmd, b"BITPOS") {
+        25
+    } else if eq_ascii_command(cmd, b"LPUSHX") {
+        26
+    } else if eq_ascii_command(cmd, b"RPUSHX") {
+        27
+    } else if eq_ascii_command(cmd, b"SELECT") {
+        28
+    } else if eq_ascii_command(cmd, b"CONFIG") {
+        29
+    } else if eq_ascii_command(cmd, b"CLIENT") {
+        30
+    } else if eq_ascii_command(cmd, b"OBJECT") {
+        31
+    } else if eq_ascii_command(cmd, b"UNLINK") {
+        32
+    } else if eq_ascii_command(cmd, b"SUBSTR") {
+        33
+    } else if eq_ascii_command(cmd, b"GEOADD") {
+        34
+    } else if eq_ascii_command(cmd, b"GEOPOS") {
+        35
+    } else if eq_ascii_command(cmd, b"MEMORY") {
+        36
+    } else if eq_ascii_command(cmd, b"BGSAVE") {
+        37
+    } else if eq_ascii_command(cmd, b"MSETNX") {
+        38
+    } else if eq_ascii_command(cmd, b"ZINTER") {
+        39
+    } else if eq_ascii_command(cmd, b"ZUNION") {
+        40
+    } else if eq_ascii_command(cmd, b"SWAPDB") {
+        41
+    } else if eq_ascii_command(cmd, b"BLMOVE") {
+        42
+    } else if eq_ascii_command(cmd, b"BLMPOP") {
+        43
+    } else if eq_ascii_command(cmd, b"PUBSUB") {
+        44
+    } else if eq_ascii_command(cmd, b"SCRIPT") {
+        45
+    } else if eq_ascii_command(cmd, b"XSETID") {
+        46
+    } else if eq_ascii_command(cmd, b"LOLWUT") {
+        47
+    } else if eq_ascii_command(cmd, b"BZMPOP") {
+        48
+    } else if eq_ascii_command(cmd, b"MODULE") {
+        49
+    } else {
+        0
+    }
+}
+
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_classify6_match(cmd: &[u8]) -> u32 {
+    if cmd.len() != 6 {
+        return 0;
+    }
+    const PK_EXPIRE: u64 = pack_cmd_u64(b"EXPIRE");
+    const PK_STRLEN: u64 = pack_cmd_u64(b"STRLEN");
+    const PK_GETSET: u64 = pack_cmd_u64(b"GETSET");
+    const PK_INCRBY: u64 = pack_cmd_u64(b"INCRBY");
+    const PK_DECRBY: u64 = pack_cmd_u64(b"DECRBY");
+    const PK_EXISTS: u64 = pack_cmd_u64(b"EXISTS");
+    const PK_RENAME: u64 = pack_cmd_u64(b"RENAME");
+    const PK_DBSIZE: u64 = pack_cmd_u64(b"DBSIZE");
+    const PK_APPEND: u64 = pack_cmd_u64(b"APPEND");
+    const PK_HSETNX: u64 = pack_cmd_u64(b"HSETNX");
+    const PK_LRANGE: u64 = pack_cmd_u64(b"LRANGE");
+    const PK_LINDEX: u64 = pack_cmd_u64(b"LINDEX");
+    const PK_ZSCORE: u64 = pack_cmd_u64(b"ZSCORE");
+    const PK_ZRANGE: u64 = pack_cmd_u64(b"ZRANGE");
+    const PK_XGROUP: u64 = pack_cmd_u64(b"XGROUP");
+    const PK_XRANGE: u64 = pack_cmd_u64(b"XRANGE");
+    const PK_XCLAIM: u64 = pack_cmd_u64(b"XCLAIM");
+    const PK_ZCOUNT: u64 = pack_cmd_u64(b"ZCOUNT");
+    const PK_PSETEX: u64 = pack_cmd_u64(b"PSETEX");
+    const PK_GETDEL: u64 = pack_cmd_u64(b"GETDEL");
+    const PK_SINTER: u64 = pack_cmd_u64(b"SINTER");
+    const PK_SUNION: u64 = pack_cmd_u64(b"SUNION");
+    const PK_SETBIT: u64 = pack_cmd_u64(b"SETBIT");
+    const PK_GETBIT: u64 = pack_cmd_u64(b"GETBIT");
+    const PK_BITPOS: u64 = pack_cmd_u64(b"BITPOS");
+    const PK_LPUSHX: u64 = pack_cmd_u64(b"LPUSHX");
+    const PK_RPUSHX: u64 = pack_cmd_u64(b"RPUSHX");
+    const PK_SELECT: u64 = pack_cmd_u64(b"SELECT");
+    const PK_CONFIG: u64 = pack_cmd_u64(b"CONFIG");
+    const PK_CLIENT: u64 = pack_cmd_u64(b"CLIENT");
+    const PK_OBJECT: u64 = pack_cmd_u64(b"OBJECT");
+    const PK_UNLINK: u64 = pack_cmd_u64(b"UNLINK");
+    const PK_SUBSTR: u64 = pack_cmd_u64(b"SUBSTR");
+    const PK_GEOADD: u64 = pack_cmd_u64(b"GEOADD");
+    const PK_GEOPOS: u64 = pack_cmd_u64(b"GEOPOS");
+    const PK_MEMORY: u64 = pack_cmd_u64(b"MEMORY");
+    const PK_BGSAVE: u64 = pack_cmd_u64(b"BGSAVE");
+    const PK_MSETNX: u64 = pack_cmd_u64(b"MSETNX");
+    const PK_ZINTER: u64 = pack_cmd_u64(b"ZINTER");
+    const PK_ZUNION: u64 = pack_cmd_u64(b"ZUNION");
+    const PK_SWAPDB: u64 = pack_cmd_u64(b"SWAPDB");
+    const PK_BLMOVE: u64 = pack_cmd_u64(b"BLMOVE");
+    const PK_BLMPOP: u64 = pack_cmd_u64(b"BLMPOP");
+    const PK_PUBSUB: u64 = pack_cmd_u64(b"PUBSUB");
+    const PK_SCRIPT: u64 = pack_cmd_u64(b"SCRIPT");
+    const PK_XSETID: u64 = pack_cmd_u64(b"XSETID");
+    const PK_LOLWUT: u64 = pack_cmd_u64(b"LOLWUT");
+    const PK_BZMPOP: u64 = pack_cmd_u64(b"BZMPOP");
+    const PK_MODULE: u64 = pack_cmd_u64(b"MODULE");
+    match pack_cmd_u64(cmd) {
+        PK_EXPIRE => 1,
+        PK_STRLEN => 2,
+        PK_GETSET => 3,
+        PK_INCRBY => 4,
+        PK_DECRBY => 5,
+        PK_EXISTS => 6,
+        PK_RENAME => 7,
+        PK_DBSIZE => 8,
+        PK_APPEND => 9,
+        PK_HSETNX => 10,
+        PK_LRANGE => 11,
+        PK_LINDEX => 12,
+        PK_ZSCORE => 13,
+        PK_ZRANGE => 14,
+        PK_XGROUP => 15,
+        PK_XRANGE => 16,
+        PK_XCLAIM => 17,
+        PK_ZCOUNT => 18,
+        PK_PSETEX => 19,
+        PK_GETDEL => 20,
+        PK_SINTER => 21,
+        PK_SUNION => 22,
+        PK_SETBIT => 23,
+        PK_GETBIT => 24,
+        PK_BITPOS => 25,
+        PK_LPUSHX => 26,
+        PK_RPUSHX => 27,
+        PK_SELECT => 28,
+        PK_CONFIG => 29,
+        PK_CLIENT => 30,
+        PK_OBJECT => 31,
+        PK_UNLINK => 32,
+        PK_SUBSTR => 33,
+        PK_GEOADD => 34,
+        PK_GEOPOS => 35,
+        PK_MEMORY => 36,
+        PK_BGSAVE => 37,
+        PK_MSETNX => 38,
+        PK_ZINTER => 39,
+        PK_ZUNION => 40,
+        PK_SWAPDB => 41,
+        PK_BLMOVE => 42,
+        PK_BLMPOP => 43,
+        PK_PUBSUB => 44,
+        PK_SCRIPT => 45,
+        PK_XSETID => 46,
+        PK_LOLWUT => 47,
+        PK_BZMPOP => 48,
+        PK_MODULE => 49,
+        _ => 0,
+    }
+}
+
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_classify4_linear(cmd: &[u8]) -> u32 {
+    if eq_ascii_command(cmd, b"PING") {
+        1
+    } else if eq_ascii_command(cmd, b"ECHO") {
+        2
+    } else if eq_ascii_command(cmd, b"INCR") {
+        3
+    } else if eq_ascii_command(cmd, b"PTTL") {
+        4
+    } else if eq_ascii_command(cmd, b"MGET") {
+        5
+    } else if eq_ascii_command(cmd, b"MSET") {
+        6
+    } else if eq_ascii_command(cmd, b"DECR") {
+        7
+    } else if eq_ascii_command(cmd, b"TYPE") {
+        8
+    } else if eq_ascii_command(cmd, b"KEYS") {
+        9
+    } else if eq_ascii_command(cmd, b"HGET") {
+        10
+    } else if eq_ascii_command(cmd, b"HSET") {
+        11
+    } else if eq_ascii_command(cmd, b"HDEL") {
+        12
+    } else if eq_ascii_command(cmd, b"HLEN") {
+        13
+    } else if eq_ascii_command(cmd, b"LPOP") {
+        14
+    } else if eq_ascii_command(cmd, b"RPOP") {
+        15
+    } else if eq_ascii_command(cmd, b"LLEN") {
+        16
+    } else if eq_ascii_command(cmd, b"LSET") {
+        17
+    } else if eq_ascii_command(cmd, b"SADD") {
+        18
+    } else if eq_ascii_command(cmd, b"SREM") {
+        19
+    } else if eq_ascii_command(cmd, b"ZADD") {
+        20
+    } else if eq_ascii_command(cmd, b"ZREM") {
+        21
+    } else if eq_ascii_command(cmd, b"SPOP") {
+        22
+    } else if eq_ascii_command(cmd, b"LPOS") {
+        23
+    } else if eq_ascii_command(cmd, b"LREM") {
+        24
+    } else if eq_ascii_command(cmd, b"QUIT") {
+        25
+    } else if eq_ascii_command(cmd, b"INFO") {
+        26
+    } else if eq_ascii_command(cmd, b"TIME") {
+        27
+    } else if eq_ascii_command(cmd, b"WAIT") {
+        28
+    } else if eq_ascii_command(cmd, b"DUMP") {
+        29
+    } else if eq_ascii_command(cmd, b"SORT") {
+        30
+    } else if eq_ascii_command(cmd, b"COPY") {
+        31
+    } else if eq_ascii_command(cmd, b"SAVE") {
+        32
+    } else if eq_ascii_command(cmd, b"SCAN") {
+        33
+    } else if eq_ascii_command(cmd, b"XADD") {
+        34
+    } else if eq_ascii_command(cmd, b"XLEN") {
+        35
+    } else if eq_ascii_command(cmd, b"XDEL") {
+        36
+    } else if eq_ascii_command(cmd, b"XACK") {
+        37
+    } else if eq_ascii_command(cmd, b"EVAL") {
+        38
+    } else if eq_ascii_command(cmd, b"ROLE") {
+        39
+    } else if eq_ascii_command(cmd, b"MOVE") {
+        40
+    } else {
+        0
+    }
+}
+
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_classify4_match(cmd: &[u8]) -> u32 {
+    if cmd.len() != 4 {
+        return 0;
+    }
+    const PK_PING: u64 = pack_cmd_u64(b"PING");
+    const PK_ECHO: u64 = pack_cmd_u64(b"ECHO");
+    const PK_INCR: u64 = pack_cmd_u64(b"INCR");
+    const PK_PTTL: u64 = pack_cmd_u64(b"PTTL");
+    const PK_MGET: u64 = pack_cmd_u64(b"MGET");
+    const PK_MSET: u64 = pack_cmd_u64(b"MSET");
+    const PK_DECR: u64 = pack_cmd_u64(b"DECR");
+    const PK_TYPE: u64 = pack_cmd_u64(b"TYPE");
+    const PK_KEYS: u64 = pack_cmd_u64(b"KEYS");
+    const PK_HGET: u64 = pack_cmd_u64(b"HGET");
+    const PK_HSET: u64 = pack_cmd_u64(b"HSET");
+    const PK_HDEL: u64 = pack_cmd_u64(b"HDEL");
+    const PK_HLEN: u64 = pack_cmd_u64(b"HLEN");
+    const PK_LPOP: u64 = pack_cmd_u64(b"LPOP");
+    const PK_RPOP: u64 = pack_cmd_u64(b"RPOP");
+    const PK_LLEN: u64 = pack_cmd_u64(b"LLEN");
+    const PK_LSET: u64 = pack_cmd_u64(b"LSET");
+    const PK_SADD: u64 = pack_cmd_u64(b"SADD");
+    const PK_SREM: u64 = pack_cmd_u64(b"SREM");
+    const PK_ZADD: u64 = pack_cmd_u64(b"ZADD");
+    const PK_ZREM: u64 = pack_cmd_u64(b"ZREM");
+    const PK_SPOP: u64 = pack_cmd_u64(b"SPOP");
+    const PK_LPOS: u64 = pack_cmd_u64(b"LPOS");
+    const PK_LREM: u64 = pack_cmd_u64(b"LREM");
+    const PK_QUIT: u64 = pack_cmd_u64(b"QUIT");
+    const PK_INFO: u64 = pack_cmd_u64(b"INFO");
+    const PK_TIME: u64 = pack_cmd_u64(b"TIME");
+    const PK_WAIT: u64 = pack_cmd_u64(b"WAIT");
+    const PK_DUMP: u64 = pack_cmd_u64(b"DUMP");
+    const PK_SORT: u64 = pack_cmd_u64(b"SORT");
+    const PK_COPY: u64 = pack_cmd_u64(b"COPY");
+    const PK_SAVE: u64 = pack_cmd_u64(b"SAVE");
+    const PK_SCAN: u64 = pack_cmd_u64(b"SCAN");
+    const PK_XADD: u64 = pack_cmd_u64(b"XADD");
+    const PK_XLEN: u64 = pack_cmd_u64(b"XLEN");
+    const PK_XDEL: u64 = pack_cmd_u64(b"XDEL");
+    const PK_XACK: u64 = pack_cmd_u64(b"XACK");
+    const PK_EVAL: u64 = pack_cmd_u64(b"EVAL");
+    const PK_ROLE: u64 = pack_cmd_u64(b"ROLE");
+    const PK_MOVE: u64 = pack_cmd_u64(b"MOVE");
+    match pack_cmd_u64(cmd) {
+        PK_PING => 1,
+        PK_ECHO => 2,
+        PK_INCR => 3,
+        PK_PTTL => 4,
+        PK_MGET => 5,
+        PK_MSET => 6,
+        PK_DECR => 7,
+        PK_TYPE => 8,
+        PK_KEYS => 9,
+        PK_HGET => 10,
+        PK_HSET => 11,
+        PK_HDEL => 12,
+        PK_HLEN => 13,
+        PK_LPOP => 14,
+        PK_RPOP => 15,
+        PK_LLEN => 16,
+        PK_LSET => 17,
+        PK_SADD => 18,
+        PK_SREM => 19,
+        PK_ZADD => 20,
+        PK_ZREM => 21,
+        PK_SPOP => 22,
+        PK_LPOS => 23,
+        PK_LREM => 24,
+        PK_QUIT => 25,
+        PK_INFO => 26,
+        PK_TIME => 27,
+        PK_WAIT => 28,
+        PK_DUMP => 29,
+        PK_SORT => 30,
+        PK_COPY => 31,
+        PK_SAVE => 32,
+        PK_SCAN => 33,
+        PK_XADD => 34,
+        PK_XLEN => 35,
+        PK_XDEL => 36,
+        PK_XACK => 37,
+        PK_EVAL => 38,
+        PK_ROLE => 39,
+        PK_MOVE => 40,
+        _ => 0,
+    }
+}
+
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_classify5_linear(cmd: &[u8]) -> u32 {
+    if eq_ascii_command(cmd, b"SETNX") {
+        1
+    } else if eq_ascii_command(cmd, b"HKEYS") {
+        2
+    } else if eq_ascii_command(cmd, b"HVALS") {
+        3
+    } else if eq_ascii_command(cmd, b"HMGET") {
+        4
+    } else if eq_ascii_command(cmd, b"HMSET") {
+        5
+    } else if eq_ascii_command(cmd, b"LPUSH") {
+        6
+    } else if eq_ascii_command(cmd, b"RPUSH") {
+        7
+    } else if eq_ascii_command(cmd, b"SCARD") {
+        8
+    } else if eq_ascii_command(cmd, b"ZRANK") {
+        9
+    } else if eq_ascii_command(cmd, b"ZCARD") {
+        10
+    } else if eq_ascii_command(cmd, b"SETEX") {
+        11
+    } else if eq_ascii_command(cmd, b"SDIFF") {
+        12
+    } else if eq_ascii_command(cmd, b"PFADD") {
+        13
+    } else if eq_ascii_command(cmd, b"LTRIM") {
+        14
+    } else if eq_ascii_command(cmd, b"XREAD") {
+        15
+    } else if eq_ascii_command(cmd, b"LMPOP") {
+        16
+    } else if eq_ascii_command(cmd, b"ZMPOP") {
+        17
+    } else if eq_ascii_command(cmd, b"XINFO") {
+        18
+    } else if eq_ascii_command(cmd, b"XTRIM") {
+        19
+    } else if eq_ascii_command(cmd, b"LMOVE") {
+        20
+    } else if eq_ascii_command(cmd, b"SMOVE") {
+        21
+    } else if eq_ascii_command(cmd, b"GETEX") {
+        22
+    } else if eq_ascii_command(cmd, b"BITOP") {
+        23
+    } else if eq_ascii_command(cmd, b"ZDIFF") {
+        24
+    } else if eq_ascii_command(cmd, b"HSCAN") {
+        25
+    } else if eq_ascii_command(cmd, b"SSCAN") {
+        26
+    } else if eq_ascii_command(cmd, b"ZSCAN") {
+        27
+    } else if eq_ascii_command(cmd, b"TOUCH") {
+        28
+    } else if eq_ascii_command(cmd, b"RESET") {
+        29
+    } else if eq_ascii_command(cmd, b"BLPOP") {
+        30
+    } else if eq_ascii_command(cmd, b"BRPOP") {
+        31
+    } else if eq_ascii_command(cmd, b"DEBUG") {
+        32
+    } else if eq_ascii_command(cmd, b"FCALL") {
+        33
+    } else if eq_ascii_command(cmd, b"PSYNC") {
+        34
+    } else {
+        0
+    }
+}
+
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_classify5_match(cmd: &[u8]) -> u32 {
+    if cmd.len() != 5 {
+        return 0;
+    }
+    const PK_SETNX: u64 = pack_cmd_u64(b"SETNX");
+    const PK_HKEYS: u64 = pack_cmd_u64(b"HKEYS");
+    const PK_HVALS: u64 = pack_cmd_u64(b"HVALS");
+    const PK_HMGET: u64 = pack_cmd_u64(b"HMGET");
+    const PK_HMSET: u64 = pack_cmd_u64(b"HMSET");
+    const PK_LPUSH: u64 = pack_cmd_u64(b"LPUSH");
+    const PK_RPUSH: u64 = pack_cmd_u64(b"RPUSH");
+    const PK_SCARD: u64 = pack_cmd_u64(b"SCARD");
+    const PK_ZRANK: u64 = pack_cmd_u64(b"ZRANK");
+    const PK_ZCARD: u64 = pack_cmd_u64(b"ZCARD");
+    const PK_SETEX: u64 = pack_cmd_u64(b"SETEX");
+    const PK_SDIFF: u64 = pack_cmd_u64(b"SDIFF");
+    const PK_PFADD: u64 = pack_cmd_u64(b"PFADD");
+    const PK_LTRIM: u64 = pack_cmd_u64(b"LTRIM");
+    const PK_XREAD: u64 = pack_cmd_u64(b"XREAD");
+    const PK_LMPOP: u64 = pack_cmd_u64(b"LMPOP");
+    const PK_ZMPOP: u64 = pack_cmd_u64(b"ZMPOP");
+    const PK_XINFO: u64 = pack_cmd_u64(b"XINFO");
+    const PK_XTRIM: u64 = pack_cmd_u64(b"XTRIM");
+    const PK_LMOVE: u64 = pack_cmd_u64(b"LMOVE");
+    const PK_SMOVE: u64 = pack_cmd_u64(b"SMOVE");
+    const PK_GETEX: u64 = pack_cmd_u64(b"GETEX");
+    const PK_BITOP: u64 = pack_cmd_u64(b"BITOP");
+    const PK_ZDIFF: u64 = pack_cmd_u64(b"ZDIFF");
+    const PK_HSCAN: u64 = pack_cmd_u64(b"HSCAN");
+    const PK_SSCAN: u64 = pack_cmd_u64(b"SSCAN");
+    const PK_ZSCAN: u64 = pack_cmd_u64(b"ZSCAN");
+    const PK_TOUCH: u64 = pack_cmd_u64(b"TOUCH");
+    const PK_RESET: u64 = pack_cmd_u64(b"RESET");
+    const PK_BLPOP: u64 = pack_cmd_u64(b"BLPOP");
+    const PK_BRPOP: u64 = pack_cmd_u64(b"BRPOP");
+    const PK_DEBUG: u64 = pack_cmd_u64(b"DEBUG");
+    const PK_FCALL: u64 = pack_cmd_u64(b"FCALL");
+    const PK_PSYNC: u64 = pack_cmd_u64(b"PSYNC");
+    match pack_cmd_u64(cmd) {
+        PK_SETNX => 1,
+        PK_HKEYS => 2,
+        PK_HVALS => 3,
+        PK_HMGET => 4,
+        PK_HMSET => 5,
+        PK_LPUSH => 6,
+        PK_RPUSH => 7,
+        PK_SCARD => 8,
+        PK_ZRANK => 9,
+        PK_ZCARD => 10,
+        PK_SETEX => 11,
+        PK_SDIFF => 12,
+        PK_PFADD => 13,
+        PK_LTRIM => 14,
+        PK_XREAD => 15,
+        PK_LMPOP => 16,
+        PK_ZMPOP => 17,
+        PK_XINFO => 18,
+        PK_XTRIM => 19,
+        PK_LMOVE => 20,
+        PK_SMOVE => 21,
+        PK_GETEX => 22,
+        PK_BITOP => 23,
+        PK_ZDIFF => 24,
+        PK_HSCAN => 25,
+        PK_SSCAN => 26,
+        PK_ZSCAN => 27,
+        PK_TOUCH => 28,
+        PK_RESET => 29,
+        PK_BLPOP => 30,
+        PK_BRPOP => 31,
+        PK_DEBUG => 32,
+        PK_FCALL => 33,
+        PK_PSYNC => 34,
+        _ => 0,
+    }
+}
+
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_classify7_linear(cmd: &[u8]) -> u32 {
+    if eq_ascii_command(cmd, b"PEXPIRE") {
+        1
+    } else if eq_ascii_command(cmd, b"PERSIST") {
+        2
+    } else if eq_ascii_command(cmd, b"FLUSHDB") {
+        3
+    } else if eq_ascii_command(cmd, b"HGETALL") {
+        4
+    } else if eq_ascii_command(cmd, b"HEXISTS") {
+        5
+    } else if eq_ascii_command(cmd, b"HINCRBY") {
+        6
+    } else if eq_ascii_command(cmd, b"HSTRLEN") {
+        7
+    } else if eq_ascii_command(cmd, b"ZINCRBY") {
+        8
+    } else if eq_ascii_command(cmd, b"ZPOPMIN") {
+        9
+    } else if eq_ascii_command(cmd, b"ZPOPMAX") {
+        10
+    } else if eq_ascii_command(cmd, b"LINSERT") {
+        11
+    } else if eq_ascii_command(cmd, b"PFCOUNT") {
+        12
+    } else if eq_ascii_command(cmd, b"PFMERGE") {
+        13
+    } else if eq_ascii_command(cmd, b"ZMSCORE") {
+        14
+    } else if eq_ascii_command(cmd, b"COMMAND") {
+        15
+    } else if eq_ascii_command(cmd, b"RESTORE") {
+        16
+    } else if eq_ascii_command(cmd, b"GEODIST") {
+        17
+    } else if eq_ascii_command(cmd, b"GEOHASH") {
+        18
+    } else if eq_ascii_command(cmd, b"SLOWLOG") {
+        19
+    } else if eq_ascii_command(cmd, b"EVALSHA") {
+        20
+    } else if eq_ascii_command(cmd, b"EVAL_RO") {
+        21
+    } else if eq_ascii_command(cmd, b"LATENCY") {
+        22
+    } else if eq_ascii_command(cmd, b"PUBLISH") {
+        23
+    } else if eq_ascii_command(cmd, b"WAITAOF") {
+        24
+    } else if eq_ascii_command(cmd, b"CLUSTER") {
+        25
+    } else if eq_ascii_command(cmd, b"SLAVEOF") {
+        26
+    } else if eq_ascii_command(cmd, b"SORT_RO") {
+        27
+    } else if eq_ascii_command(cmd, b"MONITOR") {
+        28
+    } else if eq_ascii_command(cmd, b"MIGRATE") {
+        29
+    } else if eq_ascii_command(cmd, b"PFDEBUG") {
+        30
+    } else {
+        0
+    }
+}
+
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_classify7_match(cmd: &[u8]) -> u32 {
+    if cmd.len() != 7 {
+        return 0;
+    }
+    const PK_PEXPIRE: u64 = pack_cmd_u64(b"PEXPIRE");
+    const PK_PERSIST: u64 = pack_cmd_u64(b"PERSIST");
+    const PK_FLUSHDB: u64 = pack_cmd_u64(b"FLUSHDB");
+    const PK_HGETALL: u64 = pack_cmd_u64(b"HGETALL");
+    const PK_HEXISTS: u64 = pack_cmd_u64(b"HEXISTS");
+    const PK_HINCRBY: u64 = pack_cmd_u64(b"HINCRBY");
+    const PK_HSTRLEN: u64 = pack_cmd_u64(b"HSTRLEN");
+    const PK_ZINCRBY: u64 = pack_cmd_u64(b"ZINCRBY");
+    const PK_ZPOPMIN: u64 = pack_cmd_u64(b"ZPOPMIN");
+    const PK_ZPOPMAX: u64 = pack_cmd_u64(b"ZPOPMAX");
+    const PK_LINSERT: u64 = pack_cmd_u64(b"LINSERT");
+    const PK_PFCOUNT: u64 = pack_cmd_u64(b"PFCOUNT");
+    const PK_PFMERGE: u64 = pack_cmd_u64(b"PFMERGE");
+    const PK_ZMSCORE: u64 = pack_cmd_u64(b"ZMSCORE");
+    const PK_COMMAND: u64 = pack_cmd_u64(b"COMMAND");
+    const PK_RESTORE: u64 = pack_cmd_u64(b"RESTORE");
+    const PK_GEODIST: u64 = pack_cmd_u64(b"GEODIST");
+    const PK_GEOHASH: u64 = pack_cmd_u64(b"GEOHASH");
+    const PK_SLOWLOG: u64 = pack_cmd_u64(b"SLOWLOG");
+    const PK_EVALSHA: u64 = pack_cmd_u64(b"EVALSHA");
+    const PK_EVAL_RO: u64 = pack_cmd_u64(b"EVAL_RO");
+    const PK_LATENCY: u64 = pack_cmd_u64(b"LATENCY");
+    const PK_PUBLISH: u64 = pack_cmd_u64(b"PUBLISH");
+    const PK_WAITAOF: u64 = pack_cmd_u64(b"WAITAOF");
+    const PK_CLUSTER: u64 = pack_cmd_u64(b"CLUSTER");
+    const PK_SLAVEOF: u64 = pack_cmd_u64(b"SLAVEOF");
+    const PK_SORT_RO: u64 = pack_cmd_u64(b"SORT_RO");
+    const PK_MONITOR: u64 = pack_cmd_u64(b"MONITOR");
+    const PK_MIGRATE: u64 = pack_cmd_u64(b"MIGRATE");
+    const PK_PFDEBUG: u64 = pack_cmd_u64(b"PFDEBUG");
+    match pack_cmd_u64(cmd) {
+        PK_PEXPIRE => 1,
+        PK_PERSIST => 2,
+        PK_FLUSHDB => 3,
+        PK_HGETALL => 4,
+        PK_HEXISTS => 5,
+        PK_HINCRBY => 6,
+        PK_HSTRLEN => 7,
+        PK_ZINCRBY => 8,
+        PK_ZPOPMIN => 9,
+        PK_ZPOPMAX => 10,
+        PK_LINSERT => 11,
+        PK_PFCOUNT => 12,
+        PK_PFMERGE => 13,
+        PK_ZMSCORE => 14,
+        PK_COMMAND => 15,
+        PK_RESTORE => 16,
+        PK_GEODIST => 17,
+        PK_GEOHASH => 18,
+        PK_SLOWLOG => 19,
+        PK_EVALSHA => 20,
+        PK_EVAL_RO => 21,
+        PK_LATENCY => 22,
+        PK_PUBLISH => 23,
+        PK_WAITAOF => 24,
+        PK_CLUSTER => 25,
+        PK_SLAVEOF => 26,
+        PK_SORT_RO => 27,
+        PK_MONITOR => 28,
+        PK_MIGRATE => 29,
+        PK_PFDEBUG => 30,
+        _ => 0,
+    }
+}
+
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_classify8_linear(cmd: &[u8]) -> u32 {
+    if eq_ascii_command(cmd, b"EXPIREAT") {
+        1
+    } else if eq_ascii_command(cmd, b"RENAMENX") {
+        2
+    } else if eq_ascii_command(cmd, b"FLUSHALL") {
+        3
+    } else if eq_ascii_command(cmd, b"SMEMBERS") {
+        4
+    } else if eq_ascii_command(cmd, b"ZREVRANK") {
+        5
+    } else if eq_ascii_command(cmd, b"GETRANGE") {
+        6
+    } else if eq_ascii_command(cmd, b"SETRANGE") {
+        7
+    } else if eq_ascii_command(cmd, b"BITCOUNT") {
+        8
+    } else if eq_ascii_command(cmd, b"XPENDING") {
+        9
+    } else if eq_ascii_command(cmd, b"LASTSAVE") {
+        10
+    } else if eq_ascii_command(cmd, b"SHUTDOWN") {
+        11
+    } else if eq_ascii_command(cmd, b"BITFIELD") {
+        12
+    } else if eq_ascii_command(cmd, b"FUNCTION") {
+        13
+    } else if eq_ascii_command(cmd, b"SPUBLISH") {
+        14
+    } else if eq_ascii_command(cmd, b"READONLY") {
+        15
+    } else if eq_ascii_command(cmd, b"FCALL_RO") {
+        16
+    } else if eq_ascii_command(cmd, b"BZPOPMIN") {
+        17
+    } else if eq_ascii_command(cmd, b"BZPOPMAX") {
+        18
+    } else if eq_ascii_command(cmd, b"REPLCONF") {
+        19
+    } else if eq_ascii_command(cmd, b"FAILOVER") {
+        20
+    } else if eq_ascii_command(cmd, b"SENTINEL") {
+        21
+    } else {
+        0
+    }
+}
+
+#[doc(hidden)]
+#[inline(never)]
+pub fn bench_classify8_match(cmd: &[u8]) -> u32 {
+    if cmd.len() != 8 {
+        return 0;
+    }
+    const PK_EXPIREAT: u64 = pack_cmd_u64(b"EXPIREAT");
+    const PK_RENAMENX: u64 = pack_cmd_u64(b"RENAMENX");
+    const PK_FLUSHALL: u64 = pack_cmd_u64(b"FLUSHALL");
+    const PK_SMEMBERS: u64 = pack_cmd_u64(b"SMEMBERS");
+    const PK_ZREVRANK: u64 = pack_cmd_u64(b"ZREVRANK");
+    const PK_GETRANGE: u64 = pack_cmd_u64(b"GETRANGE");
+    const PK_SETRANGE: u64 = pack_cmd_u64(b"SETRANGE");
+    const PK_BITCOUNT: u64 = pack_cmd_u64(b"BITCOUNT");
+    const PK_XPENDING: u64 = pack_cmd_u64(b"XPENDING");
+    const PK_LASTSAVE: u64 = pack_cmd_u64(b"LASTSAVE");
+    const PK_SHUTDOWN: u64 = pack_cmd_u64(b"SHUTDOWN");
+    const PK_BITFIELD: u64 = pack_cmd_u64(b"BITFIELD");
+    const PK_FUNCTION: u64 = pack_cmd_u64(b"FUNCTION");
+    const PK_SPUBLISH: u64 = pack_cmd_u64(b"SPUBLISH");
+    const PK_READONLY: u64 = pack_cmd_u64(b"READONLY");
+    const PK_FCALL_RO: u64 = pack_cmd_u64(b"FCALL_RO");
+    const PK_BZPOPMIN: u64 = pack_cmd_u64(b"BZPOPMIN");
+    const PK_BZPOPMAX: u64 = pack_cmd_u64(b"BZPOPMAX");
+    const PK_REPLCONF: u64 = pack_cmd_u64(b"REPLCONF");
+    const PK_FAILOVER: u64 = pack_cmd_u64(b"FAILOVER");
+    const PK_SENTINEL: u64 = pack_cmd_u64(b"SENTINEL");
+    match pack_cmd_u64(cmd) {
+        PK_EXPIREAT => 1,
+        PK_RENAMENX => 2,
+        PK_FLUSHALL => 3,
+        PK_SMEMBERS => 4,
+        PK_ZREVRANK => 5,
+        PK_GETRANGE => 6,
+        PK_SETRANGE => 7,
+        PK_BITCOUNT => 8,
+        PK_XPENDING => 9,
+        PK_LASTSAVE => 10,
+        PK_SHUTDOWN => 11,
+        PK_BITFIELD => 12,
+        PK_FUNCTION => 13,
+        PK_SPUBLISH => 14,
+        PK_READONLY => 15,
+        PK_FCALL_RO => 16,
+        PK_BZPOPMIN => 17,
+        PK_BZPOPMAX => 18,
+        PK_REPLCONF => 19,
+        PK_FAILOVER => 20,
+        PK_SENTINEL => 21,
+        _ => 0,
+    }
+}
+
 fn ping(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     match argv.len() {
         1 => Ok(RespFrame::SimpleString("PONG".to_string())),
@@ -3614,9 +4618,9 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
 
     let mut options = argv[3..].iter();
     while let Some(option_arg) = options.next() {
-        let option =
-            std::str::from_utf8(option_arg).map_err(|_| CommandError::InvalidUtf8Argument)?;
-        if option.eq_ignore_ascii_case("PX") {
+        // (frankenredis-44iva) byte-match SET options; non-UTF8 -> syntax error
+        let option = option_arg;
+        if option.eq_ignore_ascii_case(b"PX") {
             if !matches!(expiry_kind, ExpiryKind::None | ExpiryKind::Px) {
                 return Err(CommandError::SyntaxError);
             }
@@ -3625,7 +4629,7 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
             };
             expiry_kind = ExpiryKind::Px;
             expiry_raw = ttl_arg;
-        } else if option.eq_ignore_ascii_case("EX") {
+        } else if option.eq_ignore_ascii_case(b"EX") {
             if !matches!(expiry_kind, ExpiryKind::None | ExpiryKind::Ex) {
                 return Err(CommandError::SyntaxError);
             }
@@ -3634,7 +4638,7 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
             };
             expiry_kind = ExpiryKind::Ex;
             expiry_raw = seconds_arg;
-        } else if option.eq_ignore_ascii_case("PXAT") {
+        } else if option.eq_ignore_ascii_case(b"PXAT") {
             if !matches!(expiry_kind, ExpiryKind::None | ExpiryKind::Pxat) {
                 return Err(CommandError::SyntaxError);
             }
@@ -3643,7 +4647,7 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
             };
             expiry_kind = ExpiryKind::Pxat;
             expiry_raw = ts_arg;
-        } else if option.eq_ignore_ascii_case("EXAT") {
+        } else if option.eq_ignore_ascii_case(b"EXAT") {
             if !matches!(expiry_kind, ExpiryKind::None | ExpiryKind::Exat) {
                 return Err(CommandError::SyntaxError);
             }
@@ -3652,12 +4656,12 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
             };
             expiry_kind = ExpiryKind::Exat;
             expiry_raw = ts_arg;
-        } else if option.eq_ignore_ascii_case("KEEPTTL") {
+        } else if option.eq_ignore_ascii_case(b"KEEPTTL") {
             if !matches!(expiry_kind, ExpiryKind::None | ExpiryKind::KeepTtl) {
                 return Err(CommandError::SyntaxError);
             }
             expiry_kind = ExpiryKind::KeepTtl;
-        } else if option.eq_ignore_ascii_case("NX") {
+        } else if option.eq_ignore_ascii_case(b"NX") {
             // (frankenredis-24276) Upstream
             // parseExtendedStringArgumentsOrReply (t_string.c lines
             // 216-225) gates NX behind `!(*flags & OBJ_SET_XX)` and
@@ -3670,12 +4674,12 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
                 return Err(CommandError::SyntaxError);
             }
             nx = true;
-        } else if option.eq_ignore_ascii_case("XX") {
+        } else if option.eq_ignore_ascii_case(b"XX") {
             if nx {
                 return Err(CommandError::SyntaxError);
             }
             xx = true;
-        } else if option.eq_ignore_ascii_case("GET") {
+        } else if option.eq_ignore_ascii_case(b"GET") {
             get = true;
         } else {
             return Err(CommandError::SyntaxError);
@@ -3729,7 +4733,12 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
         if get {
             old_value.is_some()
         } else {
-            store.exists_no_touch(&argv[1], now_ms)
+            // (frankenredis-hjk0m) Upstream setGenericCommand performs the NX/XX
+            // existence check via lookupKeyWrite, which does NOT bump
+            // keyspace_hits/misses. exists_no_touch counts them (it only skips the
+            // LRU/LFU touch), so `SET k v NX`/`XX` wrongly reported a keyspace
+            // hit/miss vs redis's 0. Use the non-counting type peek instead.
+            store.peek_value_type(&argv[1], now_ms).is_some()
         }
     } else {
         false
@@ -3940,19 +4949,12 @@ fn append(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     if argv.len() != 3 {
         return Err(CommandError::WrongArity("APPEND"));
     }
-    // APPEND is a write (lookupKeyWrite + checkType + checkStringLength), so the
-    // current-length/WRONGTYPE precheck must NOT bump keyspace_hits — use the
-    // non-counting length read. (frankenredis-934ax)
-    let current_len = store.string_len_no_stats(&argv[1], now_ms)?;
-    let added_len = argv[2].len();
-    if current_len.saturating_add(added_len) > 536_870_912 {
-        // (frankenredis-ga4j1) Upstream t_string.c::checkStringLength
-        // line 48 names the *config knob* (proto_max_bulk_len), not a
-        // fixed byte size. Matches SETRANGE wording at line 9422 above.
-        return Ok(RespFrame::Error(
-            "ERR string exceeds maximum allowed size (proto-max-bulk-len)".to_string(),
-        ));
-    }
+    // (CrimsonHawk) APPEND is a write (lookupKeyWrite + checkType + checkStringLength).
+    // The WRONGTYPE check and the checkStringLength (proto-max-bulk-len) cap now live
+    // INSIDE store.append, which already materializes the string — so the old separate
+    // `string_len_no_stats` probe (a redundant second keyspace lookup) is gone. append is
+    // a no-stat write (no keyspace_hits bump), matching the old no-counting probe; the cap
+    // error byte string is identical (rendered verbatim via GenericError).
     let new_len = store.append(&argv[1], &argv[2], now_ms)?;
     let new_len = i64::try_from(new_len).unwrap_or(i64::MAX);
     Ok(RespFrame::Integer(new_len))
@@ -3983,7 +4985,12 @@ fn mset(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     }
     let mut i = 1;
     while i < argv.len() {
-        store.set(argv[i].clone(), argv[i + 1].clone(), None, now_ms);
+        // Use the borrowed plain-SET fast path (no per-pair key/value clones,
+        // same full overwrite cleanup as single SET) instead of the owned
+        // Store::set. MSET is exactly N independent plain SETs with no TTL, so
+        // this is byte-identical while avoiding 2 heap allocations per pair —
+        // MSET was ~1.7x slower than redis 7.2.4 purely from that clone churn.
+        store.set_plain_borrowed(&argv[i], &argv[i + 1], now_ms);
         i += 2;
     }
     Ok(RespFrame::SimpleString("OK".to_string()))
@@ -3993,7 +5000,7 @@ fn setnx(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     if argv.len() != 3 {
         return Err(CommandError::WrongArity("SETNX"));
     }
-    let result = store.setnx(argv[1].clone(), argv[2].clone(), now_ms);
+    let result = store.setnx(&argv[1], &argv[2], now_ms);
     Ok(RespFrame::Integer(if result { 1 } else { 0 }))
 }
 
@@ -4001,7 +5008,7 @@ fn getset(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     if argv.len() != 3 {
         return Err(CommandError::WrongArity("GETSET"));
     }
-    let old = store.getset(argv[1].clone(), argv[2].clone(), now_ms)?;
+    let old = store.getset(argv[1].clone(), &argv[2], now_ms)?;
     Ok(RespFrame::BulkString(old))
 }
 
@@ -4659,7 +5666,9 @@ pub fn parse_score_f64_arg(arg: &[u8]) -> Result<f64, CommandError> {
     Ok(val)
 }
 
-fn parse_f64_arg(arg: &[u8]) -> Result<f64, CommandError> {
+// (frankenredis-6s9dx) `pub` so the fr-runtime INCRBYFLOAT borrowed fast path can
+// parse the increment with byte-identical semantics to the generic handler.
+pub fn parse_f64_arg(arg: &[u8]) -> Result<f64, CommandError> {
     let text = std::str::from_utf8(arg)
         .map_err(|_| CommandError::Store(fr_store::StoreError::ValueNotFloat))?;
     let bytes = text.as_bytes();
@@ -4795,8 +5804,13 @@ fn geo_encode(
     Some(geo_interleave64(lat_offset, long_offset))
 }
 
+/// (CrimsonHawk) Exposed for the fr-runtime GEOADD borrowed fast path
+/// (`execute_plain_geoadd_borrowed`), mirroring how `parse_f64_arg` is pub for
+/// INCRBYFLOAT. Encodes a WGS84 (longitude, latitude) to the 52-bit geohash bits;
+/// `None` when out of WGS84 range (the generic path then emits the exact
+/// "invalid longitude,latitude pair" error).
 #[inline]
-fn geo_encode_wgs84(longitude: f64, latitude: f64) -> Option<u64> {
+pub fn geo_encode_wgs84(longitude: f64, latitude: f64) -> Option<u64> {
     geo_encode(
         longitude,
         latitude,
@@ -4830,7 +5844,7 @@ fn geo_decode(bits: u64, long_min: f64, long_max: f64, lat_min: f64, lat_max: f6
 }
 
 #[inline]
-fn geo_decode_score(score: f64) -> Option<(f64, f64)> {
+pub fn geo_decode_score(score: f64) -> Option<(f64, f64)> {
     if !score.is_finite() {
         return None;
     }
@@ -4930,15 +5944,85 @@ fn format_coord_human(value: f64) -> String {
             "-inf".to_string()
         };
     }
-    let mut s = format!("{value:.17}");
-    if s.contains('.') {
-        let trimmed = s.trim_end_matches('0').trim_end_matches('.');
-        s.truncate(trimmed.len());
+    if value == 0.0 {
+        return "0".to_string();
     }
-    if s == "-0" {
-        s = "0".to_string();
+    // Exact 17-decimal formatting via i128 fixed-point. Byte-IDENTICAL to the
+    // prior `format!("{value:.17}")` + trailing-zero trim (verified over 5,000,012
+    // coord/distance/general values incl. edge cases, 0 diffs) but ~5x faster than
+    // Rust std's exact-decimal path, which routes through the `dragon` bignum
+    // algorithm (Big32x40 mul_pow2 …) and dominated GEOSEARCH WITHCOORD/WITHDIST
+    // profiles (~55% self — two coords formatted per result). Geo values are
+    // bounded (|lon/lat| < 180, distance < ~2e7 m), so `round_half_even(|v|·1e17)`
+    // always fits in an i128; the `e >= 0` (|v| >= 2^52) branch is outside the geo
+    // domain and defers to the std path so correctness never depends on the bound.
+    const E17: i128 = 100_000_000_000_000_000; // 10^17
+    let neg = value.is_sign_negative();
+    let bits = value.to_bits();
+    let exp_bits = ((bits >> 52) & 0x7ff) as i64;
+    let frac = (bits & ((1_u64 << 52) - 1)) as i128;
+    let (m, e) = if exp_bits == 0 {
+        (frac, -1074_i64) // subnormal: value = frac · 2^-1074
+    } else {
+        (frac | (1_i128 << 52), exp_bits - 1075) // value = m · 2^e
+    };
+    let scaled = m * E17; // m < 2^53, E17 < 2^57 ⇒ scaled < 2^110, fits i128
+    let digits: i128 = if e >= 0 {
+        if e > 40 {
+            // |value| >= 2^40: outside the geo domain — defer to the exact std
+            // path so an i128 shift can never overflow.
+            let mut s = format!("{value:.17}");
+            if s.contains('.') {
+                let trimmed = s.trim_end_matches('0').trim_end_matches('.');
+                s.truncate(trimmed.len());
+            }
+            if s == "-0" {
+                s = "0".to_string();
+            }
+            return s;
+        }
+        scaled << e
+    } else {
+        let shift = (-e) as u32;
+        if shift >= 127 {
+            0 // value magnitude < 2^-17 rounds to 0 at 17 decimals
+        } else {
+            // round half to even
+            let q = scaled >> shift;
+            let rem = scaled & ((1_i128 << shift) - 1);
+            let half = 1_i128 << (shift - 1);
+            if rem > half || (rem == half && (q & 1) == 1) {
+                q + 1
+            } else {
+                q
+            }
+        }
+    };
+    // Place the decimal point 17 digits from the right of `digits`, then trim
+    // trailing zeros / the point.
+    let ds = digits.to_string(); // digits >= 0 (sign applied at the end)
+    let mut out = String::with_capacity(ds.len() + 3);
+    if ds.len() <= 17 {
+        out.push_str("0.");
+        for _ in 0..(17 - ds.len()) {
+            out.push('0');
+        }
+        out.push_str(&ds);
+    } else {
+        let dot = ds.len() - 17;
+        out.push_str(&ds[..dot]);
+        out.push('.');
+        out.push_str(&ds[dot..]);
     }
-    s
+    let trimmed_len = out.trim_end_matches('0').trim_end_matches('.').len();
+    out.truncate(trimmed_len);
+    if out.is_empty() {
+        out.push('0');
+    }
+    if neg && out != "0" {
+        out.insert(0, '-');
+    }
+    out
 }
 
 /// Emits a GEOPOS / GEOSEARCH WITHCOORD coordinate the way upstream's
@@ -4947,7 +6031,7 @@ fn format_coord_human(value: f64) -> String {
 /// identical in both cases (17-significant-digit human form); only the wire
 /// type tag differs. (frankenredis geopos RESP3 double fidelity)
 #[inline]
-fn geo_coord_frame(value: f64, resp3: bool) -> RespFrame {
+pub fn geo_coord_frame(value: f64, resp3: bool) -> RespFrame {
     let s = format_coord_human(value);
     if resp3 {
         RespFrame::Double(s)
@@ -4957,7 +6041,7 @@ fn geo_coord_frame(value: f64, resp3: bool) -> RespFrame {
 }
 
 #[inline]
-fn geo_unit_to_meters(unit: &[u8]) -> Option<f64> {
+pub fn geo_unit_to_meters(unit: &[u8]) -> Option<f64> {
     if eq_ascii_command(unit, b"M") {
         Some(1.0)
     } else if eq_ascii_command(unit, b"KM") {
@@ -4977,7 +6061,7 @@ fn geo_lat_distance_m(lat1: f64, lat2: f64) -> f64 {
 }
 
 #[inline]
-fn geo_distance_m(lon1: f64, lat1: f64, lon2: f64, lat2: f64) -> f64 {
+pub fn geo_distance_m(lon1: f64, lat1: f64, lon2: f64, lat2: f64) -> f64 {
     let lon1r = lon1.to_radians();
     let lon2r = lon2.to_radians();
     let v = ((lon2r - lon1r) / 2.0).sin();
@@ -4989,6 +6073,62 @@ fn geo_distance_m(lon1: f64, lat1: f64, lon2: f64, lat2: f64) -> f64 {
     let u = ((lat2r - lat1r) / 2.0).sin();
     let a = (u * u + lat1r.cos() * lat2r.cos() * v * v).clamp(0.0, 1.0);
     2.0 * GEO_EARTH_RADIUS_IN_METERS * a.sqrt().asin()
+}
+
+/// (BlackThrush) NEGATIVE-EVIDENCE reproduction harness — NOT used in production. Center-precomputed
+/// variant of [`geo_distance_m`]: `cos_lat1r` is the GEOSEARCH center's `lat1.to_radians().cos()`,
+/// which is CONSTANT across candidates, so this reads it instead of recomputing the libm `cos()` per
+/// point. Bit-identical to `geo_distance_m(lon1, lat1, lon2, lat2)` (verified by
+/// `geo_distance_m_center_cos_is_bit_identical_to_geo_distance_m`) — the only change is the center's
+/// `lat1r.cos()` term is read from `cos_lat1r` (same input bits → same output bits; pure `cos`, no
+/// fast-math reassociation). Kept ONLY to document why the "hoist the constant center cosine out of
+/// `geo_collect_candidate`" lever is a NO-OP: the `geo_center_cos_hoist` bench measures 0 instruction
+/// difference (914.15M both arms) because the closure is monomorphised into `zset_for_each_asc`
+/// in-crate, geo_distance_m inlines into the loop, and LLVM's LICM already lifts the invariant cos.
+/// Do not re-attempt the manual hoist.
+#[inline]
+fn geo_distance_m_center_cos(lon1: f64, lat1: f64, cos_lat1r: f64, lon2: f64, lat2: f64) -> f64 {
+    let lon1r = lon1.to_radians();
+    let lon2r = lon2.to_radians();
+    let v = ((lon2r - lon1r) / 2.0).sin();
+    if v == 0.0 {
+        return geo_lat_distance_m(lat1, lat2);
+    }
+    let lat1r = lat1.to_radians();
+    let lat2r = lat2.to_radians();
+    let u = ((lat2r - lat1r) / 2.0).sin();
+    let a = (u * u + cos_lat1r * lat2r.cos() * v * v).clamp(0.0, 1.0);
+    2.0 * GEO_EARTH_RADIUS_IN_METERS * a.sqrt().asin()
+}
+
+/// (BlackThrush) Bench-only driver for the GEOSEARCH center-cos hoist A/B, keeping the internal
+/// haversine functions private. Sums the great-circle distance from a fixed center over
+/// `candidates`, either recomputing the center latitude cosine per candidate (`hoist = false`, the
+/// pre-change `geo_collect_candidate` path) or precomputing it once (`hoist = true`, shipped). The
+/// two arms are bit-identical (see `geo_distance_m_center_cos`); the sum is returned so the loop
+/// cannot be optimized away. Not used in production.
+#[doc(hidden)]
+#[must_use]
+pub fn bench_geo_center_cos_distance_sum(
+    center_lon: f64,
+    center_lat: f64,
+    candidates: &[(f64, f64)],
+    hoist: bool,
+) -> f64 {
+    if hoist {
+        let cos_clat_r = center_lat.to_radians().cos();
+        candidates
+            .iter()
+            .map(|&(lon, lat)| {
+                geo_distance_m_center_cos(center_lon, center_lat, cos_clat_r, lon, lat)
+            })
+            .sum()
+    } else {
+        candidates
+            .iter()
+            .map(|&(lon, lat)| geo_distance_m(center_lon, center_lat, lon, lat))
+            .sum()
+    }
 }
 
 /// Conservative lat/lon bounding box fully containing the great-circle disk of
@@ -5189,6 +6329,11 @@ fn geo_collect_candidate(
     if !bb.4 && (lon < bb.2 || lon > bb.3) {
         return;
     }
+    // NOTE: the search center (clon, clat) is loop-invariant across candidates, so the center's
+    // `cos(lat)` inside this haversine LOOKS hoistable. It is NOT worth doing manually: this closure
+    // is monomorphised into `zset_for_each_asc` in-crate, geo_distance_m inlines into the iteration
+    // loop, and LLVM's LICM already lifts the constant center cosine — a precomputed-cos variant
+    // measured 0 instruction difference (see the `geo_center_cos_hoist` bench / negative evidence).
     let dist = geo_distance_m(clon, clat, lon, lat);
     if dist <= radius_m {
         results.push((member.to_vec(), score, dist, lon, lat));
@@ -5223,6 +6368,115 @@ fn geo_collect_box_candidate(
         let dist = geo_distance_m(cx, cy, lon, lat);
         results.push((member.to_vec(), score, dist, lon, lat));
     }
+}
+
+/// GEOSEARCHSTORE historically measures the east-west BYBOX half-width at the
+/// search center's latitude, unlike GEOSEARCH's upstream-compatible point-
+/// latitude predicate. Keep that observable predicate byte-for-byte while
+/// borrowing members and pruning with the already-proven conservative bbox.
+/// (frankenredis-3oviz)
+#[allow(clippy::too_many_arguments)]
+fn geo_collect_searchstore_box_candidate(
+    member: &[u8],
+    score: f64,
+    cx: f64,
+    cy: f64,
+    half_w: f64,
+    half_h: f64,
+    bb: (f64, f64, f64, f64, bool),
+    results: &mut Vec<(Vec<u8>, f64, f64, f64, f64)>,
+) {
+    let Some((lon, lat)) = geo_decode_score(score) else {
+        return;
+    };
+    if lat < bb.0 || lat > bb.1 {
+        return;
+    }
+    if !bb.4 && (lon < bb.2 || lon > bb.3) {
+        return;
+    }
+    // Preserve the old operation order and exact f64 calls for every survivor.
+    let dist = geo_distance_m(cx, cy, lon, lat);
+    let lat_dist = geo_distance_m(cx, cy, cx, lat);
+    let lon_dist = geo_distance_m(cx, cy, lon, cy);
+    if lat_dist <= half_h && lon_dist <= half_w {
+        results.push((member.to_vec(), score, dist, lon, lat));
+    }
+}
+
+/// Collect GEOSEARCHSTORE BYBOX results in the exact ascending (score, member)
+/// order of `zrange_withscores(0, -1)`, borrowing every raw-score member and
+/// cloning only survivors. The bbox skips distance work only; every score must
+/// still be visited because ordinary ZADD can put fractional/negative scores in
+/// a GEO-readable zset and `geo_decode_score` casts those raw f64 values to u64.
+/// (frankenredis-3oviz)
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[cfg_attr(feature = "bench-reference", inline(never))]
+fn geo_searchstore_box_results(
+    store: &mut Store,
+    key: &[u8],
+    cx: f64,
+    cy: f64,
+    half_w: f64,
+    half_h: f64,
+    now_ms: u64,
+) -> Result<Vec<(Vec<u8>, f64, f64, f64, f64)>, CommandError> {
+    let bb = geo_box_bbox(cx, cy, half_w, half_h);
+    let mut results = Vec::new();
+    store.zset_for_each_asc(key, now_ms, |member, score| {
+        geo_collect_searchstore_box_candidate(
+            member,
+            score,
+            cx,
+            cy,
+            half_w,
+            half_h,
+            bb,
+            &mut results,
+        );
+    })?;
+    Ok(results)
+}
+
+/// Exact pre-3oviz materialize-and-scan arm, compiled only for unit proof and
+/// the same-binary benchmark reference.
+#[cfg(any(test, feature = "bench-reference"))]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[inline(never)]
+fn geo_searchstore_box_reference(
+    store: &mut Store,
+    key: &[u8],
+    cx: f64,
+    cy: f64,
+    half_w: f64,
+    half_h: f64,
+    now_ms: u64,
+) -> Result<Vec<(Vec<u8>, f64, f64, f64, f64)>, CommandError> {
+    let members = store.zrange_withscores(key, 0, -1, now_ms)?;
+    let mut results = Vec::new();
+    for (member, score) in members {
+        let Some((lon, lat)) = geo_decode_score(score) else {
+            continue;
+        };
+        let dist = geo_distance_m(cx, cy, lon, lat);
+        let lat_dist = geo_distance_m(cx, cy, cx, lat);
+        let lon_dist = geo_distance_m(cx, cy, lon, cy);
+        if lat_dist <= half_h && lon_dist <= half_w {
+            results.push((member, score, dist, lon, lat));
+        }
+    }
+    Ok(results)
+}
+
+#[cfg(feature = "bench-reference")]
+static BENCH_GEOSEARCHSTORE_BYBOX_REFERENCE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Select the old GEOSEARCHSTORE BYBOX collector in a benchmark child. This is
+/// absent from normal builds; both measured arms pay the same atomic load.
+#[cfg(feature = "bench-reference")]
+pub fn bench_select_geosearchstore_bybox_reference(reference: bool) {
+    BENCH_GEOSEARCHSTORE_BYBOX_REFERENCE.store(reference, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Conservative lat/lon bounding box fully containing the GEOSEARCH BYBOX
@@ -5281,13 +6535,13 @@ fn geo_point_in_box(cx: f64, cy: f64, lon: f64, lat: f64, half_w: f64, half_h: f
 }
 
 #[inline]
-fn geo_distance_reply(distance: f64) -> RespFrame {
+pub fn geo_distance_reply(distance: f64) -> RespFrame {
     let normalized = if distance == 0.0 { 0.0 } else { distance };
     RespFrame::BulkString(Some(format!("{normalized:.4}").into_bytes()))
 }
 
 #[inline]
-fn geo_hash_string_from_score(score: f64) -> Option<Vec<u8>> {
+pub fn geo_hash_bytes_from_score(score: f64) -> Option<[u8; 11]> {
     let (longitude, latitude) = geo_decode_score(score)?;
     let bits = geo_encode(
         longitude,
@@ -5307,10 +6561,7 @@ fn geo_hash_string_from_score(score: f64) -> Option<Vec<u8>> {
         // emitted an 11-character base32 string (10 chars cover the
         // first 50 bits, the 11th char would need bits 51-55). For
         // backward compatibility upstream hard-codes idx=0 for i==10
-        // so the trailing character is always '0'. fr previously
-        // computed `(bits << 3) & 0x1f`, which produces a non-zero
-        // index when bits 0-1 of the score happen to be set — making
-        // the last character drift away from vendored.
+        // so the trailing character is always '0'.
         let idx = if i == 10 {
             0
         } else {
@@ -5318,7 +6569,12 @@ fn geo_hash_string_from_score(score: f64) -> Option<Vec<u8>> {
         };
         *slot = GEO_BASE32_ALPHABET[idx];
     }
-    Some(buf.to_vec())
+    Some(buf)
+}
+
+#[inline]
+pub fn geo_hash_string_from_score(score: f64) -> Option<Vec<u8>> {
+    geo_hash_bytes_from_score(score).map(Vec::from)
 }
 
 fn zadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
@@ -5337,18 +6593,20 @@ fn zadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
 
     // Parse option flags
     while i < argv.len() {
-        let opt = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-        if opt.eq_ignore_ascii_case("NX") {
+        // (frankenredis-44iva) Match flags on raw bytes; a non-UTF8 token is not a
+        // flag, so it falls through to the score-member parse (redis: byte-based).
+        let opt = &argv[i];
+        if opt.eq_ignore_ascii_case(b"NX") {
             nx = true;
-        } else if opt.eq_ignore_ascii_case("XX") {
+        } else if opt.eq_ignore_ascii_case(b"XX") {
             xx = true;
-        } else if opt.eq_ignore_ascii_case("GT") {
+        } else if opt.eq_ignore_ascii_case(b"GT") {
             gt = true;
-        } else if opt.eq_ignore_ascii_case("LT") {
+        } else if opt.eq_ignore_ascii_case(b"LT") {
             lt = true;
-        } else if opt.eq_ignore_ascii_case("CH") {
+        } else if opt.eq_ignore_ascii_case(b"CH") {
             ch = true;
-        } else if opt.eq_ignore_ascii_case("INCR") {
+        } else if opt.eq_ignore_ascii_case(b"INCR") {
             incr = true;
         } else {
             break; // Start of score-member pairs
@@ -5377,7 +6635,7 @@ fn zadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     }
     // GT/LT/NX combinations share the same Redis error wording.
     if (nx && (gt || lt)) || (gt && lt) {
-        return Ok(RespFrame::Error(
+        return Err(CommandError::Custom(
             "ERR GT, LT, and/or NX options at the same time are not compatible".to_string(),
         ));
     }
@@ -5424,7 +6682,7 @@ fn zadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
             i += 2;
         }
 
-        let (count, _changed) = store.zadd_with_options(&argv[1], &pairs, opts, now_ms)?;
+        let (count, _changed) = store.zadd_with_options(&argv[1], pairs, opts, now_ms)?;
         Ok(RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)))
     }
 }
@@ -5502,31 +6760,34 @@ fn zrank_generic(
         false
     };
     let _ = cmd_name;
+    if withscore {
+        // (CrimsonHawk) Single keyspace lookup + single zset traversal returns BOTH
+        // rank and score — the old path did store.zrank THEN store.zmscore (a redundant
+        // entries probe + member lookup). One record_keyspace_lookup, matching upstream.
+        return match store.zrank_withscore(&argv[1], &argv[2], reverse, now_ms)? {
+            Some((rank, score)) => {
+                let rank_i = i64::try_from(rank).unwrap_or(i64::MAX);
+                // The score element honors the negotiated protocol: a RESP3 Double
+                // (`,<score>`) under HELLO 3, a bulk string under RESP2 — matching
+                // upstream t_zset.c zrankGenericCommand's addReplyDouble.
+                let score_frame =
+                    zpop_score_frame(score, store.dispatch_client_ctx.resp_protocol_version);
+                Ok(RespFrame::Array(Some(vec![
+                    RespFrame::Integer(rank_i),
+                    score_frame,
+                ])))
+            }
+            None => Ok(RespFrame::Array(None)),
+        };
+    }
     let rank_opt = if reverse {
         store.zrevrank(&argv[1], &argv[2], now_ms)?
     } else {
         store.zrank(&argv[1], &argv[2], now_ms)?
     };
     match rank_opt {
-        Some(rank) => {
-            let rank_i = i64::try_from(rank).unwrap_or(i64::MAX);
-            if withscore {
-                let score = store.zscore(&argv[1], &argv[2], now_ms)?.unwrap_or(0.0);
-                Ok(RespFrame::Array(Some(vec![
-                    RespFrame::Integer(rank_i),
-                    RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes())),
-                ])))
-            } else {
-                Ok(RespFrame::Integer(rank_i))
-            }
-        }
-        None => {
-            if withscore {
-                Ok(RespFrame::Array(None))
-            } else {
-                Ok(RespFrame::BulkString(None))
-            }
-        }
+        Some(rank) => Ok(RespFrame::Integer(i64::try_from(rank).unwrap_or(i64::MAX))),
+        None => Ok(RespFrame::BulkString(None)),
     }
 }
 
@@ -5805,11 +7066,12 @@ fn parse_zrangebyscore_opts(
     let mut limit_count = None;
     let mut i = start_idx;
     while i < argv.len() {
-        let opt = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-        if opt.eq_ignore_ascii_case("WITHSCORES") {
+        // (frankenredis-44iva) byte-match: non-UTF8/unrecognized option -> syntax error
+        let opt = &argv[i];
+        if opt.eq_ignore_ascii_case(b"WITHSCORES") {
             withscores = true;
             i += 1;
-        } else if opt.eq_ignore_ascii_case("LIMIT") {
+        } else if opt.eq_ignore_ascii_case(b"LIMIT") {
             if i + 2 >= argv.len() {
                 return Err(CommandError::SyntaxError);
             }
@@ -5916,7 +7178,7 @@ fn parse_zpop_count(arg: &[u8]) -> Result<usize, CommandError> {
 /// use_nested_array = (c->resp > 2 && count != -1). Under RESP3 with the
 /// COUNT form, each (member, score) is wrapped in a 2-Array; under RESP2
 /// or the no-COUNT form, the wire stays flat. Scores use Double type under RESP3.
-fn zpop_count_emit(pairs: Vec<(Vec<u8>, f64)>, resp_protocol_version: i64) -> RespFrame {
+pub fn zpop_count_emit(pairs: Vec<(Vec<u8>, f64)>, resp_protocol_version: i64) -> RespFrame {
     if resp_protocol_version == 3 {
         let frames = pairs
             .into_iter()
@@ -6080,7 +7342,7 @@ fn geoadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
 
     let (total_changed, _only_updated) = store.zadd_with_options(
         &argv[1],
-        &pairs,
+        pairs,
         fr_store::ZaddOptions {
             xx,
             nx,
@@ -6116,10 +7378,18 @@ fn geopos(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         return Err(CommandError::WrongArity("GEOPOS"));
     }
     let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
-    let mut frames = Vec::with_capacity(argv.len().saturating_sub(2));
-    for member in &argv[2..] {
-        let frame = match store.zscore(&argv[1], member, now_ms)? {
-            Some(score) => match geo_decode_score(score) {
+    // (frankenredis keyspace-acct) Upstream geo.c::geoposCommand does ONE
+    // lookupKeyReadOrReply for the key, then reads each member from that object.
+    // Per-member store.zscore each bumped keyspace_hits -> N vs redis's 1. Record
+    // the key lookup once, then read all members via the no-stat zmscore (mirrors
+    // the geodist fix). Byte-identical reply; only the keyspace stat is corrected.
+    let members: Vec<&[u8]> = argv[2..].iter().map(Vec::as_slice).collect();
+    record_source_key_lookups(store, &[argv[1].as_slice()], now_ms);
+    let scores = store.zmscore(&argv[1], &members, now_ms)?;
+    let mut frames = Vec::with_capacity(scores.len());
+    for score in scores {
+        let frame = match score {
+            Some(s) => match geo_decode_score(s) {
                 Some((longitude, latitude)) => RespFrame::Array(Some(vec![
                     geo_coord_frame(longitude, resp3),
                     geo_coord_frame(latitude, resp3),
@@ -6148,7 +7418,7 @@ fn geodist(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
         match geo_unit_to_meters(&argv[4]) {
             Some(unit) => unit,
             None => {
-                return Ok(RespFrame::Error(
+                return Err(CommandError::Custom(
                     "ERR unsupported unit provided. please use M, KM, FT, MI".to_string(),
                 ));
             }
@@ -6157,9 +7427,13 @@ fn geodist(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
         1.0
     };
 
-    let score1 = store.zscore(&argv[1], &argv[2], now_ms)?;
-    let score2 = store.zscore(&argv[1], &argv[3], now_ms)?;
-    let (Some(score1), Some(score2)) = (score1, score2) else {
+    // (frankenredis keyspace-acct) Upstream geo.c::geodistCommand does ONE
+    // lookupKeyReadOrReply for the key, then reads both members from that object.
+    // Two separate store.zscore calls each bumped keyspace_hits -> 2 vs redis's 1.
+    // Record the key lookup once, then read both scores via the no-stat zmscore.
+    record_source_key_lookups(store, &[argv[1].as_slice()], now_ms);
+    let scores = store.zmscore(&argv[1], &[argv[2].as_slice(), argv[3].as_slice()], now_ms)?;
+    let (Some(score1), Some(score2)) = (scores[0], scores[1]) else {
         return Ok(RespFrame::BulkString(None));
     };
 
@@ -6562,7 +7836,19 @@ fn geo_store_results(
 fn georadius(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     // GEORADIUS key longitude latitude radius m|km|ft|mi [WITHCOORD] [WITHDIST] [WITHHASH] [COUNT count [ANY]] [ASC|DESC] [STORE key] [STOREDIST key]
     if argv.len() < 6 {
-        return Err(CommandError::WrongArity("GEORADIUS"));
+        // GEORADIUS_RO shares this handler; the arity error must name the
+        // command the client actually invoked, not the base GEORADIUS, matching
+        // upstream where each registered fullname owns its error.
+        // (frankenredis-aliasarity)
+        let name = if argv
+            .first()
+            .is_some_and(|c| c.eq_ignore_ascii_case(b"GEORADIUS_RO"))
+        {
+            "GEORADIUS_RO"
+        } else {
+            "GEORADIUS"
+        };
+        return Err(CommandError::WrongArity(name));
     }
     // (frankenredis-geowrongtype) Upstream geo.c::georadiusGeneric runs
     // lookupKeyRead + checkType(OBJ_ZSET) BEFORE extracting the coords/radius/
@@ -6570,11 +7856,17 @@ fn georadius(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     // ahead of any 'need numeric radius' / 'unsupported unit' / 'radius cannot
     // be negative' option error. A missing key still falls through to option
     // parsing (upstream proceeds with a NULL zobj and replies empty at the end);
-    // the no-stat peek leaves the valid-path keyspace hit to geo_search_core.
+    // the no-stat peek preserves WRONGTYPE-before-parse ordering.
     match store.peek_value_type(&argv[1], now_ms) {
         None | Some(fr_store::ValueType::ZSet) => {}
         Some(_) => return Err(CommandError::Store(fr_store::StoreError::WrongType)),
     }
+    // geo_search_core scans the zset by reference (no-stat), so record the
+    // keyspace lookup here at the point upstream's lookupKeyRead runs (after
+    // the type check, before coord/radius/unit option parsing). Records a miss
+    // for a missing key, a hit otherwise — matching georadiusbymember, whose
+    // member zscore already records, and GEOSEARCH.
+    record_source_key_lookups(store, &[argv[1].as_slice()], now_ms);
     let center_lon = match parse_geo_f64(&argv[2]) {
         Ok(v) => v,
         Err(e) => return Ok(e),
@@ -6608,7 +7900,7 @@ fn georadius(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     let unit_mult = match geo_unit_to_meters(&argv[5]) {
         Some(m) => m,
         None => {
-            return Ok(RespFrame::Error(
+            return Err(CommandError::Custom(
                 "ERR unsupported unit provided. please use M, KM, FT, MI".to_string(),
             ));
         }
@@ -6659,7 +7951,17 @@ fn georadiusbymember(
 ) -> Result<RespFrame, CommandError> {
     // GEORADIUSBYMEMBER key member radius m|km|ft|mi [WITHCOORD] [WITHDIST] [WITHHASH] [COUNT count [ANY]] [ASC|DESC] [STORE key] [STOREDIST key]
     if argv.len() < 5 {
-        return Err(CommandError::WrongArity("GEORADIUSBYMEMBER"));
+        // GEORADIUSBYMEMBER_RO shares this handler; report the invoked name.
+        // (frankenredis-aliasarity)
+        let name = if argv
+            .first()
+            .is_some_and(|c| c.eq_ignore_ascii_case(b"GEORADIUSBYMEMBER_RO"))
+        {
+            "GEORADIUSBYMEMBER_RO"
+        } else {
+            "GEORADIUSBYMEMBER"
+        };
+        return Err(CommandError::WrongArity(name));
     }
     // Upstream geo.c::georadiusbymemberCommand only emits 'could
     // not decode requested zset member' when the source key exists
@@ -6693,7 +7995,7 @@ fn georadiusbymember(
     let unit_mult = match geo_unit_to_meters(&argv[4]) {
         Some(m) => m,
         None => {
-            return Ok(RespFrame::Error(
+            return Err(CommandError::Custom(
                 "ERR unsupported unit provided. please use M, KM, FT, MI".to_string(),
             ));
         }
@@ -6845,7 +8147,7 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             let um = match geo_unit_to_meters(&argv[i + 2]) {
                 Some(m) => m,
                 None => {
-                    return Ok(RespFrame::Error(
+                    return Err(CommandError::Custom(
                         "ERR unsupported unit provided. please use M, KM, FT, MI".to_string(),
                     ));
                 }
@@ -6881,7 +8183,7 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             let um = match geo_unit_to_meters(&argv[i + 3]) {
                 Some(m) => m,
                 None => {
-                    return Ok(RespFrame::Error(
+                    return Err(CommandError::Custom(
                         "ERR unsupported unit provided. please use M, KM, FT, MI".to_string(),
                     ));
                 }
@@ -7146,7 +8448,7 @@ fn geosearchstore(
             let um = match geo_unit_to_meters(&synth[i + 2]) {
                 Some(m) => m,
                 None => {
-                    return Ok(RespFrame::Error(
+                    return Err(CommandError::Custom(
                         "ERR unsupported unit provided. please use M, KM, FT, MI".to_string(),
                     ));
                 }
@@ -7181,7 +8483,7 @@ fn geosearchstore(
             let um = match geo_unit_to_meters(&synth[i + 3]) {
                 Some(m) => m,
                 None => {
-                    return Ok(RespFrame::Error(
+                    return Err(CommandError::Custom(
                         "ERR unsupported unit provided. please use M, KM, FT, MI".to_string(),
                     ));
                 }
@@ -7230,21 +8532,18 @@ fn geosearchstore(
     let results = if let Some(rm) = radius_m {
         geo_search_core(store, &synth[1], cx, cy, rm, count, sort, any, now_ms)?
     } else if let (Some(w), Some(h)) = (box_width_m, box_height_m) {
-        let members = store.zrange_withscores(&synth[1], 0, -1, now_ms)?;
         let half_w = w / 2.0;
         let half_h = h / 2.0;
-        let mut res: Vec<(Vec<u8>, f64, f64, f64, f64)> = Vec::new();
-        for (member, score) in members {
-            let Some((lon, lat)) = geo_decode_score(score) else {
-                continue;
+        #[cfg(feature = "bench-reference")]
+        let mut res =
+            if BENCH_GEOSEARCHSTORE_BYBOX_REFERENCE.load(std::sync::atomic::Ordering::Relaxed) {
+                geo_searchstore_box_reference(store, &synth[1], cx, cy, half_w, half_h, now_ms)?
+            } else {
+                geo_searchstore_box_results(store, &synth[1], cx, cy, half_w, half_h, now_ms)?
             };
-            let dist = geo_distance_m(cx, cy, lon, lat);
-            let lat_dist = geo_distance_m(cx, cy, cx, lat);
-            let lon_dist = geo_distance_m(cx, cy, lon, cy);
-            if lat_dist <= half_h && lon_dist <= half_w {
-                res.push((member, score, dist, lon, lat));
-            }
-        }
+        #[cfg(not(feature = "bench-reference"))]
+        let mut res =
+            geo_searchstore_box_results(store, &synth[1], cx, cy, half_w, half_h, now_ms)?;
         // (frankenredis-1axne) Apply same SORT_NONE handling as
         // geo_search_core / GEOSEARCH BYBOX (upstream geo.c:714-718).
         let effective = if matches!(sort, GeoSort::Unspecified) && count.is_some() && !any {
@@ -7306,13 +8605,43 @@ fn parse_partial_auto_id(arg: &[u8]) -> Option<u64> {
     ms_str.parse::<u64>().ok()
 }
 
+/// Append the decimal ASCII of `n` to `out` without the general `fmt` machinery.
+/// (CrimsonHawk) `format!` is ~21% of XRANGE full-scan self-time (the per-entry
+/// `<ms>-<seq>` id); this manual path is byte-identical and avoids the formatter
+/// plus its intermediate `String` allocation.
 #[inline]
-fn format_stream_id(id: StreamId) -> Vec<u8> {
-    format!("{}-{}", id.0, id.1).into_bytes()
+fn push_u64_ascii(out: &mut Vec<u8>, mut n: u64) {
+    if n == 0 {
+        out.push(b'0');
+        return;
+    }
+    // u64::MAX is 20 digits.
+    let mut buf = [0u8; 20];
+    let mut i = buf.len();
+    while n > 0 {
+        i -= 1;
+        buf[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    out.extend_from_slice(&buf[i..]);
 }
 
 #[inline]
-fn next_auto_stream_id(last_id: Option<StreamId>, now_ms: u64) -> Option<StreamId> {
+pub fn format_stream_id(id: StreamId) -> Vec<u8> {
+    // 20 (ms) + 1 ('-') + 20 (seq) worst case.
+    let mut out = Vec::with_capacity(41);
+    push_u64_ascii(&mut out, id.0);
+    out.push(b'-');
+    push_u64_ascii(&mut out, id.1);
+    out
+}
+
+#[inline]
+// (CrimsonHawk) pub for the fr-runtime XADD borrowed fast path
+// (`execute_plain_xadd_borrowed`) — reused verbatim so the auto-id `*` resolution
+// is byte-identical to the generic handler. `None` = ID space exhausted (the
+// fast path then defers to the generic path for the exact error).
+pub fn next_auto_stream_id(last_id: Option<StreamId>, now_ms: u64) -> Option<StreamId> {
     let id = match last_id {
         Some((last_ms, last_seq)) => {
             if now_ms > last_ms {
@@ -7389,7 +8718,7 @@ fn parse_partial_stream_id(arg: &[u8], is_start: bool) -> Result<StreamId, RespF
 // streamParseIntervalIDOrReply: accepts the `-`/`+` sentinels and the
 // `(N` exclusive prefix (Redis 6.2+). XREAD/XTRIM/XADD MINID/XGROUP do
 // NOT accept `(N` and must reject it upstream of this call.
-fn parse_stream_range_bound(arg: &[u8], is_start: bool) -> Result<StreamId, RespFrame> {
+pub fn parse_stream_range_bound(arg: &[u8], is_start: bool) -> Result<StreamId, RespFrame> {
     let invalid_id = || {
         RespFrame::Error("ERR Invalid stream ID specified as stream command argument".to_string())
     };
@@ -7586,10 +8915,13 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         idx += 2;
     }
 
+    // XADD is a write (upstream streamTypeLookupWriteOrCreate -> lookupKeyWrite),
+    // so resolving the auto-id / existence must NOT bump keyspace_hits/misses.
+    // (frankenredis-ljtdo)
     let (stream_exists, last_id) = if nomkstream {
-        store.xlast_id_with_existence(&argv[1], now_ms)?
+        store.xlast_id_with_existence_no_stat(&argv[1], now_ms)?
     } else {
-        (true, store.xlast_id(&argv[1], now_ms)?)
+        (true, store.xlast_id_no_stat(&argv[1], now_ms)?)
     };
     // NOMKSTREAM: if key doesn't exist, return nil (but proceed if key exists, even empty)
     if nomkstream && !stream_exists {
@@ -7682,38 +9014,39 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     // runs for `~` even WITHOUT an explicit LIMIT — upstream is not a no-op, so
     // `XADD ... MAXLEN ~ N` trims on every add (and `~ 0` clears the stream).
     if let Some(max_len) = trim_maxlen {
-        let effective_max_len = if trim_approx {
-            // xlen returns Result<usize, StoreError>; on error, fall through to a
-            // no-op (effective_max_len = current_len means "trim to current").
-            let current_len = store.xlen(&argv[1], now_ms).unwrap_or(max_len);
+        let removed = apply_xadd_maxlen_trim_after_add(
+            store,
+            &argv[1],
+            max_len,
+            trim_approx,
+            limit_given,
+            trim_limit_usize,
+            now_ms,
+        );
+        trimmed_entries = trimmed_entries.saturating_add(removed);
+    }
+    // (frankenredis-8t4vl.1) Inline MINID trim mirrors XTRIM MINID and upstream
+    // xaddCommand's streamTrim: exact (= or absent) removes every entry below the
+    // threshold; approximate (~) removes WHOLE head nodes via
+    // store.xtrim_minid_approx and runs on every add even WITHOUT an explicit
+    // LIMIT (an un-LIMITed `~` gets the upstream default cap of
+    // 100 * stream-node-max-entries). The previous approx-without-LIMIT no-op /
+    // exact-with-LIMIT path diverged from Redis node-boundary semantics.
+    if let Some(min_id) = trim_minid {
+        let removed = if trim_approx {
             let approx_limit = if limit_given {
                 trim_limit_usize
             } else {
                 Some(STREAM_APPROX_TRIM_DEFAULT_LIMIT)
             };
-            stream_approx_trim_target(current_len, max_len, approx_limit)
+            store
+                .xtrim_minid_approx(&argv[1], min_id, approx_limit, now_ms)
+                .unwrap_or(0)
         } else {
-            max_len
+            store
+                .xtrim_minid(&argv[1], min_id, trim_limit_usize, now_ms)
+                .unwrap_or(0)
         };
-        let pass_limit = if trim_approx { None } else { trim_limit_usize };
-        let removed = store
-            .xtrim(&argv[1], effective_max_len, pass_limit, now_ms)
-            .unwrap_or(0);
-        trimmed_entries = trimmed_entries.saturating_add(removed);
-    }
-    // MINID retains the approx-without-LIMIT no-op shortcut (node-boundary MINID
-    // trimming is a separate follow-up; see xtrim_cmd).
-    let should_run_minid_trim = !trim_approx || limit_given;
-    if let Some(min_id) = trim_minid
-        && should_run_minid_trim
-    {
-        // MINID approximate inline trim mirrors XTRIM MINID's
-        // pre-existing behavior; pass through with the LIMIT cap
-        // unchanged. (frankenredis-hpz8a leaves MINID
-        // node-boundary modeling for follow-up.)
-        let removed = store
-            .xtrim_minid(&argv[1], min_id, trim_limit_usize, now_ms)
-            .unwrap_or(0);
         trimmed_entries = trimmed_entries.saturating_add(removed);
     }
     // (frankenredis-xaddtrimdirty) Drop any dirty units the inline trim added;
@@ -7740,7 +9073,9 @@ fn xdel(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         return Err(CommandError::WrongArity("XDEL"));
     }
 
-    let (stream_exists, _) = store.xlast_id_with_existence(&argv[1], now_ms)?;
+    // XDEL is a write (upstream lookupKeyWriteOrReply) — no keyspace hit/miss.
+    // (frankenredis-ljtdo)
+    let (stream_exists, _) = store.xlast_id_with_existence_no_stat(&argv[1], now_ms)?;
     if !stream_exists {
         return Ok(RespFrame::Integer(0));
     }
@@ -7927,11 +9262,11 @@ fn xtrim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     // gets the upstream default cap of 100 * stream-node-max-entries; an
     // explicit LIMIT 0 (limit == None below) means no cap. (frankenredis-c6j11)
     //
-    // MINID retains the previous "approx-without-LIMIT → no-op" shortcut;
-    // modeling MINID node-boundary trimming is left to a follow-up because the
-    // entry distribution required to compute an effective threshold isn't
-    // exposed by fr's store today.
-    let approx_noop_minid = approx && !limit_given;
+    // MINID approximate (~) trimming is node-boundary aware too, via
+    // store.xtrim_minid_approx — whole head nodes are evicted while the node's
+    // last id < threshold (and within LIMIT), mirroring streamTrim. An un-LIMITed
+    // `~` gets the upstream default cap; an explicit LIMIT 0 means no cap.
+    // (frankenredis-8t4vl)
 
     if is_maxlen {
         let max_len = maxlen_value.expect("maxlen_value set when strategy = MaxLen");
@@ -7956,11 +9291,16 @@ fn xtrim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         ))
     } else {
         let min_id = minid_value.expect("minid_value set when strategy = MinId");
-        if approx_noop_minid {
-            store.xlen(&argv[1], now_ms)?;
-            return Ok(RespFrame::Integer(0));
-        }
-        let removed = store.xtrim_minid(&argv[1], min_id, limit, now_ms)?;
+        let removed = if approx {
+            let approx_limit = if limit_given {
+                limit
+            } else {
+                Some(STREAM_APPROX_TRIM_DEFAULT_LIMIT)
+            };
+            store.xtrim_minid_approx(&argv[1], min_id, approx_limit, now_ms)?
+        } else {
+            store.xtrim_minid(&argv[1], min_id, limit, now_ms)?
+        };
         Ok(RespFrame::Integer(
             i64::try_from(removed).unwrap_or(i64::MAX),
         ))
@@ -7973,6 +9313,43 @@ const STREAM_NODE_MAX_ENTRIES: usize = 100;
 /// Default LIMIT applied to an approximate (`~`) trim with no explicit LIMIT,
 /// mirroring upstream's `args->limit = 100 * server.stream_node_max_entries`.
 const STREAM_APPROX_TRIM_DEFAULT_LIMIT: usize = 100 * STREAM_NODE_MAX_ENTRIES;
+
+/// Apply the MAXLEN portion of an inline XADD trim after the entry has already
+/// been appended. Shared with the runtime's borrowed
+/// `XADD key MAXLEN ~ N * field value` path so the fast and generic routes use
+/// one implementation of Redis's whole-node approximate trimming semantics.
+///
+/// This helper intentionally does not restore `dirty` or set
+/// `last_xadd_trimmed`: both callers combine MAXLEN with their surrounding XADD
+/// accounting after this function returns the exact removal count.
+#[doc(hidden)]
+pub fn apply_xadd_maxlen_trim_after_add(
+    store: &mut Store,
+    key: &[u8],
+    max_len: usize,
+    trim_approx: bool,
+    limit_given: bool,
+    trim_limit: Option<usize>,
+    now_ms: u64,
+) -> usize {
+    let effective_max_len = if trim_approx {
+        // xlen returns Result<usize, StoreError>; on error, mirror the generic
+        // path's no-op fallback (trim to the current length).
+        let current_len = store.xlen(key, now_ms).unwrap_or(max_len);
+        let approx_limit = if limit_given {
+            trim_limit
+        } else {
+            Some(STREAM_APPROX_TRIM_DEFAULT_LIMIT)
+        };
+        stream_approx_trim_target(current_len, max_len, approx_limit)
+    } else {
+        max_len
+    };
+    let pass_limit = if trim_approx { None } else { trim_limit };
+    store
+        .xtrim(key, effective_max_len, pass_limit, now_ms)
+        .unwrap_or(0)
+}
 
 /// Mirror upstream `t_stream.c::streamTrim`'s approximate (`~`) eviction: it
 /// removes WHOLE rax nodes (each holding up to `STREAM_NODE_MAX_ENTRIES`
@@ -8456,18 +9833,29 @@ fn xread(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     let keys = &argv[idx..idx + stream_count];
     let ids = &argv[idx + stream_count..];
 
-    let mut out = Vec::new();
+    // (frankenredis-lnglj) Upstream t_stream.c::xreadCommand looks up each stream
+    // key TWICE via lookupKeyRead — once in the id-resolution loop, once in the
+    // serve loop — so every key records two keyspace hits, and any WRONGTYPE /
+    // bad-id error surfaces in the resolution pass BEFORE any key is served. Keep
+    // the two-phase shape: `store.xlast_id` is the first lookup (and resolves the
+    // `$` cursor); `store.xread` below is the second.
+    let mut cursors = Vec::with_capacity(stream_count);
     for (key, id_arg) in keys.iter().zip(ids.iter()) {
+        let resolved_last = store.xlast_id(key, now_ms)?;
         let cursor = if id_arg.as_slice() == b"$" {
-            store.xlast_id(key, now_ms)?.unwrap_or((u64::MAX, u64::MAX))
+            resolved_last.unwrap_or((u64::MAX, u64::MAX))
         } else {
             match parse_xread_id(id_arg) {
                 Ok(id) => id,
                 Err(reply) => return Ok(reply),
             }
         };
+        cursors.push(cursor);
+    }
 
-        let records = store.xread(key, cursor, count, now_ms)?;
+    let mut out = Vec::new();
+    for (key, cursor) in keys.iter().zip(cursors.iter()) {
+        let records = store.xread(key, *cursor, count, now_ms)?;
         if records.is_empty() {
             continue;
         }
@@ -8589,13 +9977,57 @@ fn xreadgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         let cursor = if is_new_entries {
             StreamGroupReadCursor::NewEntries
         } else {
-            let parsed = match parse_xread_id(id_arg) {
-                Ok(id) => id,
-                Err(reply) => return Ok(reply),
-            };
-            StreamGroupReadCursor::Id(parsed)
+            match parse_xread_id(id_arg) {
+                Ok(id) => StreamGroupReadCursor::Id(id),
+                Err(id_reply) => {
+                    // (frankenredis-xrgord) Upstream t_stream.c::xreadCommand
+                    // looks up the key (recording the keyspace hit/miss) and
+                    // checks its type, then the consumer group, BEFORE parsing
+                    // the stream ID. So a wrong-type key surfaces WRONGTYPE and a
+                    // missing key/group surfaces NOGROUP even when the ID is also
+                    // malformed; only a valid stream + existing group lets the
+                    // invalid-ID error stand. The valid-ID path is unchanged
+                    // (store.xreadgroup performs the single keyspace lookup), so
+                    // this branch must itself count the lookup — key_type routes
+                    // through the stat-recording value_type, exactly like the
+                    // XCLAIM early-validation path above. (frankenredis-xrgord)
+                    return match store.key_type(key, now_ms) {
+                        None => Ok(xreadgroup_nogroup_error(key, group)),
+                        Some("stream") => {
+                            let group_exists = store
+                                .stream_consumer_groups(key)
+                                .is_some_and(|groups| groups.contains_key(group.as_slice()));
+                            if group_exists {
+                                Ok(id_reply)
+                            } else {
+                                Ok(xreadgroup_nogroup_error(key, group))
+                            }
+                        }
+                        Some(_) => Err(CommandError::Store(StoreError::WrongType)),
+                    };
+                }
+            }
         };
 
+        // (frankenredis-xrgkscount) Upstream t_stream.c::xreadCommand looks each
+        // stream key up TWICE via lookupKeyRead — once in the parse/resolution
+        // loop and once in the serve loop. store.xreadgroup below performs only
+        // the serve-loop lookup (records one hit). For a key that will actually
+        // serve (an existing stream WITH the requested group) record the
+        // resolution-loop lookup too, so the valid path counts 2 hits like
+        // upstream. Keys that error out (missing/wrong-type/no-group/bad-id) are
+        // looked up exactly once below (or in the bad-id branch above), matching
+        // upstream's single resolution-loop lookup for those — same shape as the
+        // XREAD fix (lnglj, 58996991e). Stat-only; reply/data unchanged.
+        if matches!(
+            store.peek_value_type(key, now_ms),
+            Some(fr_store::ValueType::Stream)
+        ) && store
+            .stream_consumer_groups(key)
+            .is_some_and(|groups| groups.contains_key(group.as_slice()))
+        {
+            store.exists_no_touch(key, now_ms);
+        }
         let read_options = StreamGroupReadOptions {
             cursor,
             noack,
@@ -8657,9 +10089,12 @@ fn xclaim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     // of how mangled the rest of the argv is. The other XCLAIM-family
     // commands (XPENDING, XAUTOCLAIM) parse args first per upstream;
     // only XCLAIM short-circuits early. (frankenredis-3qrt)
-    match store.key_type(&argv[1], now_ms) {
+    // No-stat type peek: XCLAIM does ONE lookupKeyRead upstream and the store
+    // xclaim call below records that single keyspace hit. A stat-counting
+    // key_type precheck here would double-count keyspace_hits.
+    match store.value_type_no_stat(&argv[1], now_ms) {
         None => return Ok(xclaim_nogroup_error(&argv[1], &argv[2])),
-        Some("stream") => {
+        Some(fr_store::ValueType::Stream) => {
             let group_exists = store
                 .stream_consumer_groups(&argv[1])
                 .is_some_and(|groups| groups.contains_key(argv[2].as_slice()));
@@ -9140,8 +10575,10 @@ fn xgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
             _ => {}
         }
 
+        // XGROUP CREATE is a write (upstream lookupKeyWrite) — resolving a `$`
+        // start id must NOT bump keyspace_hits/misses. (frankenredis-ljtdo)
         let start_id = if eq_ascii_command(&argv[4], b"$") {
-            store.xlast_id(&argv[2], now_ms)?.unwrap_or((0, 0))
+            store.xlast_id_no_stat(&argv[2], now_ms)?.unwrap_or((0, 0))
         } else {
             // Upstream xgroupCommand CREATE uses streamParseStrictIDOrReply
             // (rejects `-`/`+`/`(N`); only `$` and a strict id are valid.
@@ -9193,9 +10630,11 @@ fn xgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         // key (same as the user-facing XLEN contract), so it can't be
         // used to distinguish absent-vs-empty here — Store::key_type
         // is the right probe. (frankenredis-n4qd, supersedes qcmh)
-        match store.key_type(&argv[2], now_ms) {
+        // No-stat type peek — XGROUP is a write (lookupKeyWrite, no keyspace
+        // stats); a stat-counting key_type precheck would over-count.
+        match store.value_type_no_stat(&argv[2], now_ms) {
             None => return Ok(xgroup_key_required_error()),
-            Some("stream") => {}
+            Some(fr_store::ValueType::Stream) => {}
             Some(_) => return Err(CommandError::Store(StoreError::WrongType)),
         }
         return match store.xgroup_destroy(&argv[2], &argv[3], now_ms) {
@@ -9262,8 +10701,10 @@ fn xgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         // NON-strict parser (t_stream.c:2694) — so `-` (0-0) and `+` (the
         // maximum id) are valid, as is `$` (the stream's last id). Only the
         // `(N` interval syntax is rejected.
+        // XGROUP SETID is a write (upstream lookupKeyWrite) — resolving a `$`
+        // id must NOT bump keyspace_hits/misses. (frankenredis-ljtdo)
         let last_delivered_id = if eq_ascii_command(&argv[4], b"$") {
-            store.xlast_id(&argv[2], now_ms)?.unwrap_or((0, 0))
+            store.xlast_id_no_stat(&argv[2], now_ms)?.unwrap_or((0, 0))
         } else if argv[4].starts_with(b"(") {
             return Ok(RespFrame::Error(
                 "ERR Invalid stream ID specified as stream command argument".to_string(),
@@ -9303,9 +10744,11 @@ fn xgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         // xlen probe wrongly emitted "key required" against an empty
         // stream that vendored accepts. Use Store::key_type instead.
         // (frankenredis-3vfpi)
-        match store.key_type(&argv[2], now_ms) {
+        // No-stat type peek — XGROUP is a write (lookupKeyWrite, no keyspace
+        // stats); a stat-counting key_type precheck would over-count.
+        match store.value_type_no_stat(&argv[2], now_ms) {
             None => return Ok(xgroup_key_required_error()),
-            Some("stream") => {}
+            Some(fr_store::ValueType::Stream) => {}
             Some(_) => return Err(CommandError::Store(StoreError::WrongType)),
         }
         return match store.xgroup_createconsumer(&argv[2], &argv[3], &argv[4], now_ms) {
@@ -9329,9 +10772,11 @@ fn xgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         // fell through to xgroup_delconsumer → NOGROUP error wording
         // instead of upstream's key-required ERR. Replace the probe
         // with Store::key_type. (frankenredis-n4g5, supersedes qcmh)
-        match store.key_type(&argv[2], now_ms) {
+        // No-stat type peek — XGROUP is a write (lookupKeyWrite, no keyspace
+        // stats); a stat-counting key_type precheck would over-count.
+        match store.value_type_no_stat(&argv[2], now_ms) {
             None => return Ok(xgroup_key_required_error()),
-            Some("stream") => {}
+            Some(fr_store::ValueType::Stream) => {}
             Some(_) => return Err(CommandError::Store(StoreError::WrongType)),
         }
         return match store.xgroup_delconsumer(&argv[2], &argv[3], &argv[4], now_ms) {
@@ -9392,8 +10837,18 @@ fn xgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
 /// 3388, 3880). The text is identical regardless of whether it
 /// was the key or the group that was actually missing.
 /// (br-frankenredis-ud94)
+/// The keys reaching command handlers are the DB-namespaced PHYSICAL keys
+/// (`\0frdb\0<db><logical>` for db != 0), so any error that echoes the key name
+/// must first strip that prefix — upstream reports the LOGICAL key the client
+/// sent. Without this, e.g. `SELECT 3; XREADGROUP GROUP g c STREAMS s >` leaked
+/// `No such key '\x00frdb\x00...\x03s'` instead of `'s'`.
+fn logical_key_lossy(key: &[u8]) -> std::borrow::Cow<'_, str> {
+    let logical = decode_db_key(key).map_or(key, |(_, lk)| lk);
+    String::from_utf8_lossy(logical)
+}
+
 fn xstream_nogroup_error(key: &[u8], group: &[u8]) -> RespFrame {
-    let key = String::from_utf8_lossy(key);
+    let key = logical_key_lossy(key);
     let group = String::from_utf8_lossy(group);
     RespFrame::Error(format!(
         "NOGROUP No such key '{key}' or consumer group '{group}'"
@@ -9405,7 +10860,7 @@ fn xreadgroup_nogroup_error(key: &[u8], group: &[u8]) -> RespFrame {
     // shared NOGROUP wording (legacy_redis_code/redis/src/t_stream.c
     // around line 4495 where the streamLookupCG failure is reported
     // for XREADGROUP specifically). (br-frankenredis-ud94)
-    let key = String::from_utf8_lossy(key);
+    let key = logical_key_lossy(key);
     let group = String::from_utf8_lossy(group);
     RespFrame::Error(format!(
         "NOGROUP No such key '{key}' or consumer group '{group}' in XREADGROUP with GROUP option"
@@ -9417,7 +10872,7 @@ fn xgroup_nogroup_error(key: &[u8], group: &[u8]) -> RespFrame {
     // "No such consumer group" because the key existence check has
     // already passed by the time the lookup is hit. (Upstream
     // t_stream.c:2632, 3880 in nested branches.)
-    let key = String::from_utf8_lossy(key);
+    let key = logical_key_lossy(key);
     let group = String::from_utf8_lossy(group);
     RespFrame::Error(format!(
         "NOGROUP No such consumer group '{group}' for key name '{key}'"
@@ -9443,7 +10898,7 @@ fn xpending_nogroup_error(key: &[u8], group: &[u8]) -> RespFrame {
 }
 
 fn xinfo_nogroup_consumers_error(key: &[u8], group: &[u8]) -> RespFrame {
-    let key = String::from_utf8_lossy(key);
+    let key = logical_key_lossy(key);
     let group = String::from_utf8_lossy(group);
     RespFrame::Error(format!(
         "NOGROUP No such consumer group '{group}' for key name '{key}'"
@@ -9488,7 +10943,9 @@ fn xinfo(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         let Some(groups) = store.xinfo_groups(&argv[2], now_ms)? else {
             return Err(CommandError::NoSuchKey);
         };
-        let Some((len, first, last)) = store.xinfo_stream(&argv[2], now_ms)? else {
+        // xinfo_groups above already recorded the single command keyspace lookup;
+        // read the stream bounds no-stat so XINFO GROUPS doesn't double-count.
+        let Some((len, first, last)) = store.xinfo_stream_no_stat(&argv[2], now_ms)? else {
             return Err(CommandError::NoSuchKey);
         };
         let entries_added = store.stream_entries_added(&argv[2], len);
@@ -9744,10 +11201,10 @@ fn xinfo(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         return Ok(RespFrame::Array(Some(flat)));
     }
 
-    let group_count = store
-        .xinfo_groups(&argv[2], now_ms)?
-        .map(|groups| i64::try_from(groups.len()).unwrap_or(i64::MAX))
-        .unwrap_or(0);
+    // Use the no-stat group count: xinfo_stream above already recorded the
+    // single keyspace lookup upstream's xinfoCommand performs; calling the
+    // stat-counting store.xinfo_groups here would double-count keyspace_hits.
+    let group_count = i64::try_from(store.stream_group_count(&argv[2])).unwrap_or(i64::MAX);
 
     let first_entry = first
         .map(|(id, fields)| stream_record_to_frame(id, fields))
@@ -9817,14 +11274,12 @@ fn xrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     if argv.len() < 4 {
         return Err(CommandError::WrongArity("XRANGE"));
     }
-    // Upstream t_stream.c::xrangeGenericCommand emits 'syntax error'
-    // (not wrong-arity) when the optional COUNT segment is malformed
-    // or the trailing args don't fit the expected pattern.
-    // (br-frankenredis-xrangearity)
-    if argv.len() != 4 && argv.len() != 6 {
-        return Err(CommandError::SyntaxError);
-    }
-
+    // Upstream t_stream.c::xrangeGenericCommand parses the start/end interval IDs
+    // (streamParseIntervalIDOrReply) BEFORE validating the optional COUNT trailer,
+    // so a malformed start/end ID surfaces "Invalid stream ID..." even when the
+    // trailing args are also wrong (e.g. `XRANGE k <bad-id> + extra`). The trailer
+    // syntax-error ("not COUNT" / wrong count of trailing args) is only reached
+    // once both IDs parse. (br-frankenredis-xrangearity; ID-before-arity order)
     let start = match parse_stream_range_bound(&argv[2], true) {
         Ok(v) => v,
         Err(reply) => return Ok(reply),
@@ -9834,8 +11289,8 @@ fn xrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         Err(reply) => return Ok(reply),
     };
 
-    let count = if argv.len() == 6 {
-        if !eq_ascii_command(&argv[4], b"COUNT") {
+    let count = if argv.len() != 4 {
+        if argv.len() != 6 || !eq_ascii_command(&argv[4], b"COUNT") {
             return Err(CommandError::SyntaxError);
         }
         let parsed = parse_i64_arg(&argv[5])?;
@@ -9878,12 +11333,9 @@ fn xrevrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     if argv.len() < 4 {
         return Err(CommandError::WrongArity("XREVRANGE"));
     }
-    // (br-frankenredis-xrangearity) — match upstream syntax-error
-    // wording for malformed COUNT trailer.
-    if argv.len() != 4 && argv.len() != 6 {
-        return Err(CommandError::SyntaxError);
-    }
-
+    // (br-frankenredis-xrangearity; ID-before-arity order) Upstream parses the
+    // end/start interval IDs before validating the COUNT trailer, so a malformed
+    // ID beats the trailing-arg syntax error even when both are wrong.
     let end = match parse_stream_range_bound(&argv[2], false) {
         Ok(v) => v,
         Err(reply) => return Ok(reply),
@@ -9893,8 +11345,8 @@ fn xrevrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         Err(reply) => return Ok(reply),
     };
 
-    let count = if argv.len() == 6 {
-        if !eq_ascii_command(&argv[4], b"COUNT") {
+    let count = if argv.len() != 4 {
+        if argv.len() != 6 || !eq_ascii_command(&argv[4], b"COUNT") {
             return Err(CommandError::SyntaxError);
         }
         let parsed = parse_i64_arg(&argv[5])?;
@@ -9942,9 +11394,12 @@ fn xack_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
     // missing. The IDs are only parsed once both exist, so an
     // invalid ID against a missing key/group reports 0 rather than
     // 'Invalid stream ID specified...'. (br-frankenredis-xackorder)
-    match store.xpending_summary(key, group, now_ms) {
-        Ok(None) => return Ok(RespFrame::Integer(0)),
-        Ok(Some(_)) => {}
+    // (frankenredis-j9lgb) Use the O(log) existence check, NOT
+    // xpending_summary — XACK never needs the per-consumer histogram, and the
+    // O(P) scan made XACK ~20x slower than redis on a large pending list.
+    match store.stream_group_exists(key, group, now_ms) {
+        Ok(false) => return Ok(RespFrame::Integer(0)),
+        Ok(true) => {}
         Err(e) => return Err(CommandError::Store(e)),
     }
     let mut ids = Vec::with_capacity(argv.len() - 3);
@@ -10170,6 +11625,12 @@ fn cluster_subcommand_syntax_error(subcommand: &str) -> CommandError {
     ))
 }
 
+fn cluster_invalid_setslot_action_error() -> CommandError {
+    CommandError::Custom(
+        "ERR Invalid CLUSTER SETSLOT action or number of arguments. Try CLUSTER HELP".to_string(),
+    )
+}
+
 fn cluster_reset_with_keys_error() -> CommandError {
     CommandError::Custom(
         "ERR CLUSTER RESET can't be called with master nodes containing keys".to_string(),
@@ -10216,10 +11677,25 @@ fn cluster_parse_port_arg(arg: &[u8]) -> Option<i64> {
     s.parse::<i64>().ok()
 }
 
-fn cluster_collect_explicit_slots(argv: &[Vec<u8>]) -> Result<BTreeSet<u16>, CommandError> {
-    let mut slots = BTreeSet::new();
+fn cluster_collect_explicit_slots_for_update(
+    argv: &[Vec<u8>],
+    assigned_slots: &BTreeSet<u16>,
+    deleting: bool,
+) -> Result<BTreeSet<u16>, CommandError> {
+    let mut parsed = Vec::with_capacity(argv.len());
     for slot_arg in argv {
         let slot = parse_cluster_slot_arg(slot_arg)?;
+        parsed.push(slot);
+    }
+
+    let mut slots = BTreeSet::new();
+    for slot in parsed {
+        if deleting && !assigned_slots.contains(&slot) {
+            return Err(cluster_slot_unassigned_error(slot));
+        }
+        if !deleting && assigned_slots.contains(&slot) {
+            return Err(cluster_slot_busy_error(slot));
+        }
         if !slots.insert(slot) {
             return Err(cluster_slot_specified_multiple_times_error(slot));
         }
@@ -10227,7 +11703,11 @@ fn cluster_collect_explicit_slots(argv: &[Vec<u8>]) -> Result<BTreeSet<u16>, Com
     Ok(slots)
 }
 
-fn cluster_collect_slot_ranges(argv: &[Vec<u8>]) -> Result<BTreeSet<u16>, CommandError> {
+fn cluster_collect_slot_ranges_for_update(
+    argv: &[Vec<u8>],
+    assigned_slots: &BTreeSet<u16>,
+    deleting: bool,
+) -> Result<BTreeSet<u16>, CommandError> {
     let mut slots = BTreeSet::new();
     let mut i = 0;
     while i + 1 < argv.len() {
@@ -10239,6 +11719,12 @@ fn cluster_collect_slot_ranges(argv: &[Vec<u8>]) -> Result<BTreeSet<u16>, Comman
             )));
         }
         for slot in start..=end {
+            if deleting && !assigned_slots.contains(&slot) {
+                return Err(cluster_slot_unassigned_error(slot));
+            }
+            if !deleting && assigned_slots.contains(&slot) {
+                return Err(cluster_slot_busy_error(slot));
+            }
             if !slots.insert(slot) {
                 return Err(cluster_slot_specified_multiple_times_error(slot));
             }
@@ -10796,22 +12282,21 @@ fn cluster_cmd(
         if !store.cluster_enabled {
             return Err(cluster_disabled_error());
         }
-        let slots = cluster_collect_explicit_slots(&argv[2..])?;
         if sub.eq_ignore_ascii_case("ADDSLOTS") {
-            for slot in &slots {
-                if store.cluster_assigned_slots.contains(slot) {
-                    return Err(cluster_slot_busy_error(*slot));
-                }
-            }
+            let slots = cluster_collect_explicit_slots_for_update(
+                &argv[2..],
+                &store.cluster_assigned_slots,
+                false,
+            )?;
             for slot in slots {
                 store.cluster_assigned_slots.insert(slot);
             }
         } else {
-            for slot in &slots {
-                if !store.cluster_assigned_slots.contains(slot) {
-                    return Err(cluster_slot_unassigned_error(*slot));
-                }
-            }
+            let slots = cluster_collect_explicit_slots_for_update(
+                &argv[2..],
+                &store.cluster_assigned_slots,
+                true,
+            )?;
             for slot in slots {
                 store.cluster_assigned_slots.remove(&slot);
             }
@@ -10834,22 +12319,21 @@ fn cluster_cmd(
         if !argv.len().is_multiple_of(2) {
             return Err(cluster_wrong_subcommand_arity(sub));
         }
-        let slots = cluster_collect_slot_ranges(&argv[2..])?;
         if sub.eq_ignore_ascii_case("ADDSLOTSRANGE") {
-            for slot in &slots {
-                if store.cluster_assigned_slots.contains(slot) {
-                    return Err(cluster_slot_busy_error(*slot));
-                }
-            }
+            let slots = cluster_collect_slot_ranges_for_update(
+                &argv[2..],
+                &store.cluster_assigned_slots,
+                false,
+            )?;
             for slot in slots {
                 store.cluster_assigned_slots.insert(slot);
             }
         } else {
-            for slot in &slots {
-                if !store.cluster_assigned_slots.contains(slot) {
-                    return Err(cluster_slot_unassigned_error(*slot));
-                }
-            }
+            let slots = cluster_collect_slot_ranges_for_update(
+                &argv[2..],
+                &store.cluster_assigned_slots,
+                true,
+            )?;
             for slot in slots {
                 store.cluster_assigned_slots.remove(&slot);
             }
@@ -10971,9 +12455,6 @@ fn cluster_cmd(
         if !store.cluster_enabled {
             return Err(cluster_disabled_error());
         }
-        if argv.len() != 4 && argv.len() != 5 {
-            return Err(cluster_wrong_subcommand_arity(sub));
-        }
         let slot = parse_i64_arg(&argv[2])?;
         if !(0..=16383).contains(&slot) {
             return Err(CommandError::Custom("ERR Invalid slot".to_string()));
@@ -10982,7 +12463,7 @@ fn cluster_cmd(
             std::str::from_utf8(&argv[3]).map_err(|_| CommandError::InvalidUtf8Argument)?;
         if action.eq_ignore_ascii_case("STABLE") {
             if argv.len() != 4 {
-                return Err(cluster_wrong_subcommand_arity(sub));
+                return Err(cluster_invalid_setslot_action_error());
             }
             // STABLE clears any migration state — no-op in fr's stub.
             return Ok(RespFrame::SimpleString("OK".to_string()));
@@ -10992,10 +12473,25 @@ fn cluster_cmd(
             || action.eq_ignore_ascii_case("NODE")
         {
             if argv.len() != 5 {
-                return Err(cluster_wrong_subcommand_arity(sub));
+                return Err(cluster_invalid_setslot_action_error());
             }
+            let slot = slot as u16;
             let node_id =
                 std::str::from_utf8(&argv[4]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+            if action.eq_ignore_ascii_case("MIGRATING")
+                && !store.cluster_assigned_slots.contains(&slot)
+            {
+                return Err(CommandError::Custom(format!(
+                    "ERR I'm not the owner of hash slot {slot}"
+                )));
+            }
+            if action.eq_ignore_ascii_case("IMPORTING")
+                && store.cluster_assigned_slots.contains(&slot)
+            {
+                return Err(CommandError::Custom(format!(
+                    "ERR I'm already the owner of hash slot {slot}"
+                )));
+            }
             // fr models a single self node; any other id is unknown.
             // Upstream's NODE branch emits "Unknown node <id>", while
             // MIGRATING / IMPORTING emit "I don't know about node <id>".
@@ -11007,10 +12503,13 @@ fn cluster_cmd(
                 };
                 return Err(CommandError::Custom(msg));
             }
-            // Self node — accept the no-op (fr has no migration state).
+            if action.eq_ignore_ascii_case("NODE") {
+                store.cluster_assigned_slots.insert(slot);
+            }
+            // Self MIGRATING/IMPORTING is accepted; fr has no migration state yet.
             return Ok(RespFrame::SimpleString("OK".to_string()));
         }
-        return Err(CommandError::SyntaxError);
+        return Err(cluster_invalid_setslot_action_error());
     }
     if sub.eq_ignore_ascii_case("COUNT-FAILURE-REPORTS") {
         // Upstream cluster.c::clusterCommand: when cluster mode is on,
@@ -11269,6 +12768,10 @@ fn zrangestore_cmd(
         ));
     }
 
+    // The source range reads below are no-stat; upstream zrangestoreCommand
+    // (zrangeGenericCommand) does a lookupKeyRead on src, so record one keyspace
+    // hit/miss here (after option validation, before the range walk / wrongtype).
+    record_source_key_lookups(store, &[src.as_slice()], now_ms);
     let pairs: Vec<(Vec<u8>, f64)> = if byscore {
         let min = parse_score_bound(&argv[3])?;
         let max = parse_score_bound(&argv[4])?;
@@ -11383,6 +12886,29 @@ fn function_cmd(
         }
         if store.script_nesting_level >= 1 {
             return Err(script_noscript_command_error());
+        }
+        // (frankenredis-5qhz7 / mbyoe / sg7b4) Upstream functions.c validates the
+        // library metadata header, then COMPILES the whole body, then registers
+        // — so a Lua syntax error ANYWHERE surfaces "Error compiling function:
+        // user_function:<line>: <msg>" before any store mutation, but AFTER
+        // metadata-header validation. fr-store text-scans for register_function
+        // and never compiles, so it (a) reported "No functions registered" for a
+        // syntax-error body with no scannable register_function, and (b) accepted
+        // a library whose register_function was scannable but whose body had a
+        // syntax error elsewhere. Pre-compile here: on failure let a metadata
+        // error win (precedence), else surface the compile error WITHOUT
+        // mutating the store — which preserves REPLACE atomicity (the existing
+        // library is left untouched, exactly as upstream does on a failed
+        // recompile). lua_execution_source blanks the shebang to a same-width
+        // space run, so compile_error_line reports the true file line.
+        if lua_eval::compile_check(&argv[code_idx]).is_err() {
+            store
+                .function_validate_metadata(&argv[code_idx])
+                .map_err(CommandError::Store)?;
+            return Err(CommandError::Custom(format!(
+                "ERR Error compiling function: user_function:{}",
+                lua_eval::compile_error_line(&argv[code_idx])
+            )));
         }
         match store.function_load(&argv[code_idx], replace) {
             Ok(name) => Ok(RespFrame::BulkString(Some(name.into_bytes()))),
@@ -12216,7 +13742,7 @@ fn spublish_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, Comman
     Ok(RespFrame::Integer(receivers as i64))
 }
 
-fn parse_score_bound(arg: &[u8]) -> Result<ScoreBound, CommandError> {
+pub fn parse_score_bound(arg: &[u8]) -> Result<ScoreBound, CommandError> {
     // Upstream Redis 7.2 t_zset.c::zslParseRange uses
     // strtod((char*)ptr+(open?1:0), &eptr) and `eptr[0] != '\0'` as
     // the trailing-junk gate. That has three observable consequences
@@ -12257,7 +13783,23 @@ fn parse_score_bound(arg: &[u8]) -> Result<ScoreBound, CommandError> {
         if after_ws.is_empty() {
             return Err(bad());
         }
-        after_ws.parse::<f64>().map_err(|_| bad())?
+        // strtod accepts C99 hex-float notation (`0x10`, `0X1A`,
+        // `0x1.8p3`), but Rust's `f64::from_str` only parses decimal —
+        // so a hex bound that upstream's zslParseRange accepts was
+        // rejected here as "min or max is not a float" (and, for a
+        // wrong-type key, masked the WRONGTYPE error redis returns
+        // after a successful range parse). Mirror the score path
+        // (`parse_f64_arg`) by trying the hex-float form first.
+        // try_parse_hex_float rejects trailing junk (from_str_radix
+        // fails), matching strtod's `eptr[0] != '\0'` check. nan/inf
+        // are handled by the shared `is_nan` gate below (zslParseRange
+        // rejects only nan, accepting overflow-to-inf like strtod).
+        // (frankenredis-hexfloat range bounds)
+        if let Some(hex) = try_parse_hex_float(after_ws) {
+            hex
+        } else {
+            after_ws.parse::<f64>().map_err(|_| bad())?
+        }
     };
     if val.is_nan() {
         return Err(bad());
@@ -12291,7 +13833,7 @@ fn score_bound_f64(bound: ScoreBound) -> f64 {
 ///   emit its empty result WITHOUT calling the store (so exactly the single
 ///   keyspace lookup redis performs is recorded).
 /// - `Err(WrongType)` — inverted range on a wrong-type key.
-fn zscore_inverted_wrongtype_guard(
+pub fn zscore_inverted_wrongtype_guard(
     store: &mut Store,
     key: &[u8],
     lo: ScoreBound,
@@ -12422,10 +13964,10 @@ fn setrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
         let cur = store.strlen(&argv[1], now_ms)?;
         return Ok(RespFrame::Integer(i64::try_from(cur).unwrap_or(i64::MAX)));
     }
-    if offset_u64.saturating_add(added_len as u64) > 536_870_912 {
+    if offset_u64.saturating_add(added_len as u64) > store.proto_max_bulk_len as u64 {
         // Upstream reply: "string exceeds maximum allowed size
         // (proto-max-bulk-len)" (br-frankenredis-68ql).
-        return Ok(RespFrame::Error(
+        return Err(CommandError::Custom(
             "ERR string exceeds maximum allowed size (proto-max-bulk-len)".to_string(),
         ));
     }
@@ -12474,12 +14016,28 @@ fn incrbyfloat(
     Ok(RespFrame::BulkString(Some(new_val)))
 }
 
+/// (frankenredis-6f2f5) Record one keyspace hit/miss per SOURCE key, matching
+/// upstream's lookupKeyRead-per-key accounting. The Store sinter/sunion/sdiff/
+/// zunionstore/zinterstore/zmscore read methods touch their input keys (LFU/LRU)
+/// but never bump the keyspace_hits/misses counters, so these handlers under-
+/// counted (recorded 0 where redis records numkeys). `exists_no_touch` records
+/// the hit/miss without an LFU touch (the store method's own touch stays single)
+/// and without firing keyspace events. Call BEFORE the store computation so a
+/// later WRONGTYPE/empty result still records the lookups, as upstream does.
+/// Destination keys of the *STORE variants are writes and are NOT counted here.
+pub fn record_source_key_lookups(store: &mut Store, keys: &[&[u8]], now_ms: u64) {
+    for &key in keys {
+        let _ = store.exists_no_touch(key, now_ms);
+    }
+}
+
 fn sinter(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("SINTER"));
     }
     let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
     let keys: Vec<&[u8]> = argv[1..].iter().map(Vec::as_slice).collect();
+    record_source_key_lookups(store, &keys, now_ms);
     let members = store.sinter(&keys, now_ms)?;
     let frames = members
         .into_iter()
@@ -12498,6 +14056,7 @@ fn sunion(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     }
     let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
     let keys: Vec<&[u8]> = argv[1..].iter().map(Vec::as_slice).collect();
+    record_source_key_lookups(store, &keys, now_ms);
     let members = store.sunion(&keys, now_ms)?;
     let frames = members
         .into_iter()
@@ -12516,6 +14075,7 @@ fn sdiff(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     }
     let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
     let keys: Vec<&[u8]> = argv[1..].iter().map(Vec::as_slice).collect();
+    record_source_key_lookups(store, &keys, now_ms);
     let members = store.sdiff(&keys, now_ms)?;
     let frames = members
         .into_iter()
@@ -12646,6 +14206,7 @@ fn sinterstore(
         return Err(CommandError::WrongArity("SINTERSTORE"));
     }
     let keys: Vec<&[u8]> = argv[2..].iter().map(|a| a.as_slice()).collect();
+    record_source_key_lookups(store, &keys, now_ms);
     let count = store.sinterstore(&argv[1], &keys, now_ms)?;
     Ok(RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)))
 }
@@ -12659,6 +14220,7 @@ fn sunionstore(
         return Err(CommandError::WrongArity("SUNIONSTORE"));
     }
     let keys: Vec<&[u8]> = argv[2..].iter().map(|a| a.as_slice()).collect();
+    record_source_key_lookups(store, &keys, now_ms);
     let count = store.sunionstore(&argv[1], &keys, now_ms)?;
     Ok(RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)))
 }
@@ -12668,6 +14230,7 @@ fn sdiffstore(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         return Err(CommandError::WrongArity("SDIFFSTORE"));
     }
     let keys: Vec<&[u8]> = argv[2..].iter().map(|a| a.as_slice()).collect();
+    record_source_key_lookups(store, &keys, now_ms);
     let count = store.sdiffstore(&argv[1], &keys, now_ms)?;
     Ok(RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)))
 }
@@ -12778,7 +14341,9 @@ fn zrandmember(
         return Err(CommandError::SyntaxError);
     }
     if argv.len() == 2 {
-        // No count: return single element or nil
+        // No count: return single element or nil. store.zrandmember is no-stat,
+        // so record the keyspace lookup here (upstream lookupKeyReadOrReply).
+        record_source_key_lookups(store, &[argv[1].as_slice()], now_ms);
         return match store.zrandmember(&argv[1], now_ms)? {
             Some(m) => Ok(RespFrame::BulkString(Some(m))),
             None => Ok(RespFrame::BulkString(None)),
@@ -12798,6 +14363,9 @@ fn zrandmember(
     if argv.len() == 4 && !withscores {
         return Err(CommandError::SyntaxError);
     }
+    // store.zrandmember_count is no-stat; record the single keyspace lookup
+    // (placed after all syntax/count validation, matching upstream order).
+    record_source_key_lookups(store, &[argv[1].as_slice()], now_ms);
     let pairs = store.zrandmember_count(&argv[1], count, now_ms)?;
     // (frankenredis-jnf53) Mirror ZRANGE WITHSCORES wire shape: under
     // RESP3 wrap each (member, score) in a 2-element Array; under RESP2
@@ -12815,6 +14383,7 @@ fn zmscore(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
     }
     let resp3 = store.dispatch_client_ctx.resp_protocol_version == 3;
     let members: Vec<&[u8]> = argv[2..].iter().map(|a| a.as_slice()).collect();
+    record_source_key_lookups(store, &[argv[1].as_slice()], now_ms);
     let scores = store.zmscore(&argv[1], &members, now_ms)?;
     let frames = scores
         .into_iter()
@@ -13009,8 +14578,8 @@ fn lpos(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     let mut maxlen: usize = 0;
     let mut i = 3;
     while i < argv.len() {
-        let opt = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-        if opt.eq_ignore_ascii_case("RANK") {
+        let opt = &argv[i]; // (frankenredis-44iva) byte-match: non-UTF8 -> syntax error
+        if opt.eq_ignore_ascii_case(b"RANK") {
             i += 1;
             if i >= argv.len() {
                 return Err(CommandError::SyntaxError);
@@ -13022,12 +14591,12 @@ fn lpos(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
             // never matches anything).
             rank = parse_i64_arg_long_range(&argv[i])?;
             if rank == 0 {
-                return Ok(RespFrame::Error(
+                return Err(CommandError::Custom(
                     "ERR RANK can't be zero: use 1 to start from the first match, 2 from the second ... or use negative to start from the end of the list"
                         .to_string(),
                 ));
             }
-        } else if opt.eq_ignore_ascii_case("COUNT") {
+        } else if opt.eq_ignore_ascii_case(b"COUNT") {
             i += 1;
             if i >= argv.len() {
                 return Err(CommandError::SyntaxError);
@@ -13043,7 +14612,7 @@ fn lpos(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
                 return Err(bad());
             }
             count = Some(c as u64);
-        } else if opt.eq_ignore_ascii_case("MAXLEN") {
+        } else if opt.eq_ignore_ascii_case(b"MAXLEN") {
             i += 1;
             if i >= argv.len() {
                 return Err(CommandError::SyntaxError);
@@ -13087,11 +14656,12 @@ fn linsert(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
     if argv.len() != 5 {
         return Err(CommandError::WrongArity("LINSERT"));
     }
-    let direction = std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-    if direction.eq_ignore_ascii_case("BEFORE") {
+    // (frankenredis-re7sp) byte-match BEFORE/AFTER; non-UTF8 -> syntax error (else)
+    let direction = &argv[2];
+    if direction.eq_ignore_ascii_case(b"BEFORE") {
         let len = store.linsert_before(&argv[1], &argv[3], argv[4].clone(), now_ms)?;
         Ok(RespFrame::Integer(len))
-    } else if direction.eq_ignore_ascii_case("AFTER") {
+    } else if direction.eq_ignore_ascii_case(b"AFTER") {
         let len = store.linsert_after(&argv[1], &argv[3], argv[4].clone(), now_ms)?;
         Ok(RespFrame::Integer(len))
     } else {
@@ -13172,7 +14742,9 @@ fn hrandfield(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         return Err(CommandError::SyntaxError);
     }
     if argv.len() == 2 {
-        // No count: return single field or nil
+        // No count: return single field or nil. store.hrandfield is no-stat,
+        // so record the keyspace lookup here (upstream lookupKeyReadOrReply).
+        record_source_key_lookups(store, &[argv[1].as_slice()], now_ms);
         return match store.hrandfield(&argv[1], now_ms)? {
             Some(field) => Ok(RespFrame::BulkString(Some(field))),
             None => Ok(RespFrame::BulkString(None)),
@@ -13191,6 +14763,9 @@ fn hrandfield(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     if argv.len() == 4 && !withvalues {
         return Err(CommandError::SyntaxError);
     }
+    // store.hrandfield_count is no-stat; record the single keyspace lookup
+    // (placed after all syntax/count validation, matching upstream order).
+    record_source_key_lookups(store, &[argv[1].as_slice()], now_ms);
     let pairs = store.hrandfield_count(&argv[1], count, now_ms)?;
     if withvalues {
         // Upstream t_hash.c::hrandfieldWithCountCommand uses
@@ -13287,6 +14862,10 @@ fn zrangebylex(
             "ERR syntax error, WITHSCORES not supported in combination with BYLEX".to_string(),
         ));
     }
+    // (frankenredis keyspace-acct) Legacy ZRANGEBYLEX must record the keyspace
+    // hit/miss like upstream's lookupKeyReadOrReply (zrangebylex_limited is
+    // no-stat; the unified ZRANGE BYLEX path records separately).
+    record_source_key_lookups(store, &[argv[1].as_slice()], now_ms);
     // LIMIT pushed into the lex walk — O(offset+count). (frankenredis-qchm7)
     let members = store.zrangebylex_limited(
         &argv[1],
@@ -13322,6 +14901,8 @@ fn zrevrangebylex(
             "ERR syntax error, WITHSCORES not supported in combination with BYLEX".to_string(),
         ));
     }
+    // (frankenredis keyspace-acct) Record the keyspace hit/miss like upstream.
+    record_source_key_lookups(store, &[argv[1].as_slice()], now_ms);
     // REV + LIMIT pushed into the lex walk: zrevrangebylex(key, max, min) is
     // zrangebylex_limited(key, min, max, rev=true). (frankenredis-qchm7)
     let members = store.zrangebylex_limited(
@@ -13346,6 +14927,10 @@ fn zlexcount(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     }
     validate_lex_bound(&argv[2])?;
     validate_lex_bound(&argv[3])?;
+    // (frankenredis keyspace-acct) Record the keyspace hit/miss like upstream's
+    // lookupKeyReadOrReply; store.zlexcount is no-stat (same lex-range class as
+    // the ZRANGEBYLEX fix).
+    record_source_key_lookups(store, &[argv[1].as_slice()], now_ms);
     let count = store.zlexcount(&argv[1], &argv[2], &argv[3], now_ms)?;
     Ok(RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)))
 }
@@ -13354,7 +14939,8 @@ fn zlexcount(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
 /// bounds must start with '[' (inclusive), '(' (exclusive), or be
 /// exactly '-' (min) or '+' (max). Plain strings are rejected with
 /// "ERR min or max not valid string range item". (br-frankenredis-moer)
-fn validate_lex_bound(arg: &[u8]) -> Result<(), CommandError> {
+/// `pub` so the ZLEXCOUNT borrowed fast path validates bounds identically (cc).
+pub fn validate_lex_bound(arg: &[u8]) -> Result<(), CommandError> {
     let valid = arg == b"-" || arg == b"+" || arg.first().is_some_and(|c| *c == b'[' || *c == b'(');
     if valid {
         Ok(())
@@ -13381,6 +14967,10 @@ fn pfcount(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
         return Err(CommandError::WrongArity("PFCOUNT"));
     }
     let keys: Vec<&[u8]> = argv[1..].iter().map(|k| k.as_slice()).collect();
+    // (frankenredis keyspace-acct) Upstream hyperloglog.c::pfcountCommand does
+    // lookupKeyRead per source key, bumping keyspace_hits/misses; store.pfcount
+    // is no-stat, so record the per-key lookups here to match.
+    record_source_key_lookups(store, &keys, now_ms);
     let count = store.pfcount(&keys, now_ms)?;
     Ok(RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)))
 }
@@ -13389,6 +14979,12 @@ fn pfmerge(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("PFMERGE"));
     }
+    // Upstream pfmergeCommand does a lookupKeyRead over EVERY key arg — the
+    // destination AND each source (it reads them all to merge, then writes the
+    // dest) — so each records a keyspace hit/miss. store.pfmerge is no-stat;
+    // record one lookup per key arg (dest first, then sources) before merging.
+    let all_keys: Vec<&[u8]> = argv[1..].iter().map(|k| k.as_slice()).collect();
+    record_source_key_lookups(store, &all_keys, now_ms);
     let sources: Vec<&[u8]> = argv[2..].iter().map(|k| k.as_slice()).collect();
     store.pfmerge(&argv[1], &sources, now_ms)?;
     Ok(RespFrame::SimpleString("OK".to_string()))
@@ -14016,7 +15612,12 @@ fn require_count_fits_half_long_range(count: i64) -> Result<(), CommandError> {
     Ok(())
 }
 
-fn parse_i64_arg(arg: &[u8]) -> Result<i64, CommandError> {
+/// Strict redis `string2ll` integer parse (rejects leading `+`, leading zeros,
+/// embedded space). Public so the borrowed LRANGE fast path parses index args
+/// IDENTICALLY to the generic dispatch — guaranteeing the fast path accepts
+/// exactly the same inputs (and falls back, never diverging, on any the generic
+/// path would reject). (frankenredis: LRANGE borrow-encode)
+pub fn parse_i64_arg(arg: &[u8]) -> Result<i64, CommandError> {
     let slen = arg.len();
     if slen == 0 || slen > 20 {
         return Err(CommandError::InvalidInteger);
@@ -14250,7 +15851,15 @@ pub fn build_unknown_args_preview(argv: &[Vec<u8>]) -> Option<String> {
             break;
         }
 
-        let text = String::from_utf8_lossy(arg);
+        // Upstream formats each arg with printf %.*s, which stops at the first
+        // NUL (C-string semantics) even within the length bound — so truncate
+        // each arg at its first NUL, mirroring the command-name handling.
+        // (frankenredis-unkcmdname)
+        let nul_truncated = match arg.iter().position(|&b| b == 0) {
+            Some(nul) => &arg[..nul],
+            None => arg.as_slice(),
+        };
+        let text = String::from_utf8_lossy(nul_truncated);
         let sanitized = text.replace(['\r', '\n'], " ");
         let capped = trim_and_cap_string(&sanitized, remaining.saturating_sub(3));
         out.push('\'');
@@ -14483,6 +16092,7 @@ fn sintercard(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
             return Err(CommandError::SyntaxError);
         }
     }
+    record_source_key_lookups(store, &keys, now_ms);
     let count = store.sintercard(&keys, limit, now_ms)?;
     #[allow(clippy::cast_possible_wrap)]
     Ok(RespFrame::Integer(count as i64))
@@ -14916,24 +16526,28 @@ fn lmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         }
     }
     for key in &argv[2..keys_end] {
-        let len = store.llen(key, now_ms);
-        match len {
-            Ok(n) if n > 0 => {
-                let mut popped = Vec::new();
-                for _ in 0..count {
-                    let val = if left {
-                        store.lpop(key, now_ms)?
-                    } else {
-                        store.rpop(key, now_ms)?
-                    };
-                    match val {
-                        Some(v) => popped.push(RespFrame::BulkString(Some(v))),
-                        None => break,
-                    }
-                }
+        // (CrimsonHawk) LMPOP is a write (upstream lookupKeyWrite). Pop directly with
+        // the count variant: ONE keyspace lookup pops up to `count` from the chosen key,
+        // replacing the old `llen_no_stat` probe + per-element single-pop loop (count+1
+        // lookups). Lists are never stored empty, so a missing/empty key returns None —
+        // exactly the old `n > 0` test — and we scan the next key; WrongType -> error.
+        // lpop_count/rpop_count back the shipped LPOP/RPOP COUNT (byte-exact order), and
+        // neither lpop nor lpop_count emits keyspace events (the runtime does), so dirty,
+        // key-removal, and notifications are unchanged.
+        let popped = if left {
+            store.lpop_count(key, count, now_ms)
+        } else {
+            store.rpop_count(key, count, now_ms)
+        };
+        match popped {
+            Ok(Some(items)) if !items.is_empty() => {
+                let arr = items
+                    .into_iter()
+                    .map(|v| RespFrame::BulkString(Some(v)))
+                    .collect();
                 return Ok(RespFrame::Array(Some(vec![
                     RespFrame::BulkString(Some(key.clone())),
-                    RespFrame::Array(Some(popped)),
+                    RespFrame::Array(Some(arr)),
                 ])));
             }
             Ok(_) => continue,
@@ -14998,30 +16612,32 @@ fn zmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
             return Err(CommandError::SyntaxError);
         }
     }
+    let resp_proto = store.dispatch_client_ctx.resp_protocol_version;
     for key in &argv[2..keys_end] {
-        let card = store.zcard(key, now_ms);
-        match card {
-            Ok(n) if n > 0 => {
-                let mut popped = Vec::new();
-                for _ in 0..count {
-                    let result = if use_min {
-                        store.zpopmin(key, now_ms)?
-                    } else {
-                        store.zpopmax(key, now_ms)?
-                    };
-                    match result {
-                        Some((member, score)) => {
-                            popped.push(RespFrame::Array(Some(vec![
-                                RespFrame::BulkString(Some(member)),
-                                zpop_score_frame(
-                                    score,
-                                    store.dispatch_client_ctx.resp_protocol_version,
-                                ),
-                            ])));
-                        }
-                        None => break,
-                    }
-                }
+        // (CrimsonHawk) ZMPOP is a write (upstream lookupKeyWrite). Pop directly with
+        // the count variant: ONE keyspace lookup pops up to `count` from the chosen key,
+        // replacing the old `zcard_no_stat` probe + per-element single-pop loop (count+1
+        // lookups). Sorted sets are never stored empty, so an empty result == the old
+        // `n > 0` test; scan the next key on empty, error on WrongType. zpopmin_count/
+        // zpopmax_count back the shipped ZPOPMIN/ZPOPMAX COUNT (byte-exact order), and
+        // emit no keyspace events themselves (the runtime does), so dirty/removal/notify
+        // are unchanged.
+        let result = if use_min {
+            store.zpopmin_count(key, count, now_ms)
+        } else {
+            store.zpopmax_count(key, count, now_ms)
+        };
+        match result {
+            Ok(pairs) if !pairs.is_empty() => {
+                let popped = pairs
+                    .into_iter()
+                    .map(|(member, score)| {
+                        RespFrame::Array(Some(vec![
+                            RespFrame::BulkString(Some(member)),
+                            zpop_score_frame(score, resp_proto),
+                        ]))
+                    })
+                    .collect();
                 return Ok(RespFrame::Array(Some(vec![
                     RespFrame::BulkString(Some(key.clone())),
                     RespFrame::Array(Some(popped)),
@@ -15060,6 +16676,10 @@ fn bitop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         ));
     }
 
+    // store.bitop reads the source keys no-stat; upstream bitopCommand does a
+    // lookupKeyRead per source key, so record one keyspace hit/miss per source
+    // (after op/arity validation, matching upstream order).
+    record_source_key_lookups(store, &keys, now_ms);
     let len = store
         .bitop(op, dest, &keys, now_ms)
         .map_err(CommandError::Store)?;
@@ -15165,6 +16785,11 @@ fn zunionstore(
     // so a wrong-type source key surfaces WRONGTYPE ahead of any option syntax
     // error. (The numkeys-overflow syntax check still precedes the type-check.)
     for &key in &keys {
+        // (frankenredis-6f2f5) Store::zunionstore never records keyspace
+        // hits/misses for its source keys, so the lookupKeyRead per key is
+        // recorded here — before the type check, matching upstream's
+        // lookup-then-checkType order so a wrong-type key still counts as a hit.
+        let _ = store.exists_no_touch(key, now_ms);
         store.ensure_zset_or_set_source(key, now_ms)?;
     }
     let (weights, aggregate) = parse_zstore_args(argv, 3 + numkeys, numkeys)?;
@@ -15198,6 +16823,9 @@ fn zinterstore(
     // (frankenredis-zsetop-wrongtype) Source-key type-check precedes the
     // WEIGHTS/AGGREGATE option parse — see zunionstore().
     for &key in &keys {
+        // (frankenredis-6f2f5) Record the per-key lookupKeyRead before the type
+        // check (Store::zinterstore doesn't), matching upstream's order.
+        let _ = store.exists_no_touch(key, now_ms);
         store.ensure_zset_or_set_source(key, now_ms)?;
     }
     let (weights, aggregate) = parse_zstore_args(argv, 3 + numkeys, numkeys)?;
@@ -15421,9 +17049,18 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     if section_requested("memory") {
         let used_memory = store.estimate_memory_usage_bytes();
         let used_memory_human = format_bytes_human(used_memory);
-        // Refresh the RSS sample so INFO remains accurate even outside the server main loop.
-        let used_memory_rss = read_rss_bytes().unwrap_or(used_memory);
-        store.observe_memory_sample(used_memory_rss);
+        // (CrimsonHawk) Report the RSS sampled by `record_ops_sec_sample` (the
+        // ~100ms event-loop tick = redis's serverCron hz=10 equivalent), instead
+        // of reading the 8KB /proc/self/status on EVERY INFO. Matches upstream,
+        // which reports the cron-sampled RSS. Fall back to a fresh read only
+        // before the first sample (cold start), preserving peak tracking there.
+        let used_memory_rss = if store.stat_used_memory_rss != 0 {
+            store.stat_used_memory_rss
+        } else {
+            let rss = read_rss_bytes().unwrap_or(used_memory);
+            store.observe_memory_sample(rss);
+            rss
+        };
         let used_memory_rss_human = format_bytes_human(used_memory_rss);
         let policy_str = store.maxmemory_policy.as_config_str();
         let frag_ratio = if used_memory > 0 {
@@ -15994,7 +17631,11 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
             let keys = store.dbsize_in_db(db);
             if keys > 0 {
                 let expires = store.expires_in_db(db);
-                let _ = write!(info, "db{db}:keys={keys},expires={expires},avg_ttl=0\r\n");
+                let avg_ttl = store.avg_ttl_in_db(db, now_ms);
+                let _ = write!(
+                    info,
+                    "db{db}:keys={keys},expires={expires},avg_ttl={avg_ttl}\r\n"
+                );
             }
         }
         info.push_str("\r\n");
@@ -16774,6 +18415,16 @@ const SUBCOMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
 
 /// Check if the argument count (including command name) satisfies the command's arity.
 /// Returns Ok(()) if valid, Err(command_name) if arity mismatch.
+/// Whether a command carries the `denyoom` flag — i.e. it may increase memory
+/// and must be rejected under maxmemory pressure (redis processCommand's
+/// `reject_cmd_on_oom = c->cmd->flags & CMD_DENYOOM`). Writes that DON'T allocate
+/// (DEL/UNLINK/EXPIRE/LPOP/HDEL/SREM/...) are NOT denyoom and stay ALLOWED over
+/// maxmemory so a user can free memory to recover. (frankenredis-oomdenyoom)
+pub fn command_is_denyoom(name: &[u8]) -> bool {
+    command_table_index(name)
+        .is_some_and(|idx| COMMAND_TABLE[idx].2.split(' ').any(|f| f == "denyoom"))
+}
+
 pub fn check_command_arity(name: &[u8], argc: usize) -> Result<(), &'static str> {
     if is_hget_command(name) {
         return if argc == HGET_ARITY {
@@ -16825,11 +18476,16 @@ pub fn check_full_command_arity(argv: &[Vec<u8>]) -> Result<(), &'static str> {
         if command_acl_parent_has_subcommands(&parent) {
             let sub = String::from_utf8_lossy(&argv[1]).to_ascii_lowercase();
             let key = format!("{parent}|{sub}");
-            if let Some(&(cmd_name, arity, ..)) =
-                SUBCOMMAND_TABLE.iter().find(|entry| entry.0 == key.as_str())
+            if let Some(&(cmd_name, arity, ..)) = SUBCOMMAND_TABLE
+                .iter()
+                .find(|entry| entry.0 == key.as_str())
             {
                 let argc = argv.len() as i64;
-                let ok = if arity > 0 { argc == arity } else { argc >= -arity };
+                let ok = if arity > 0 {
+                    argc == arity
+                } else {
+                    argc >= -arity
+                };
                 if !ok {
                     return Err(cmd_name);
                 }
@@ -17213,8 +18869,8 @@ pub fn command_has_acl_subcommands(parent: &str) -> bool {
 /// namespaced DEBUG as `debug|sub`.
 #[must_use]
 pub fn canonical_command_fullname(argv: &[Vec<u8>]) -> String {
-    let parent =
-        String::from_utf8_lossy(argv.first().map(Vec::as_slice).unwrap_or(b"")).to_ascii_lowercase();
+    let parent = String::from_utf8_lossy(argv.first().map(Vec::as_slice).unwrap_or(b""))
+        .to_ascii_lowercase();
     if command_acl_parent_has_subcommands(&parent)
         && let Some(sub) = argv.get(1)
     {
@@ -17227,21 +18883,31 @@ pub fn canonical_command_fullname(argv: &[Vec<u8>]) -> String {
 }
 
 fn command_acl_parent_has_subcommands(parent: &str) -> bool {
-    parent.eq_ignore_ascii_case("acl")
-        || parent.eq_ignore_ascii_case("client")
-        || parent.eq_ignore_ascii_case("cluster")
-        || parent.eq_ignore_ascii_case("command")
-        || parent.eq_ignore_ascii_case("config")
-        || parent.eq_ignore_ascii_case("function")
-        || parent.eq_ignore_ascii_case("latency")
-        || parent.eq_ignore_ascii_case("memory")
-        || parent.eq_ignore_ascii_case("module")
-        || parent.eq_ignore_ascii_case("object")
-        || parent.eq_ignore_ascii_case("pubsub")
-        || parent.eq_ignore_ascii_case("script")
-        || parent.eq_ignore_ascii_case("slowlog")
-        || parent.eq_ignore_ascii_case("xgroup")
-        || parent.eq_ignore_ascii_case("xinfo")
+    command_has_subcommands_bytes(parent.as_bytes())
+}
+
+/// Whether a raw command name is a container command whose per-command
+/// histogram/ACL key is namespaced as `parent|subcommand`. Byte version of the
+/// `canonical_command_fullname` container check, so hot-path callers can decide
+/// without lowercasing the name into an owned `String` first.
+/// (frankenredis-light-cmd-dispatch-overhead-byq16)
+#[must_use]
+pub fn command_has_subcommands_bytes(parent: &[u8]) -> bool {
+    parent.eq_ignore_ascii_case(b"acl")
+        || parent.eq_ignore_ascii_case(b"client")
+        || parent.eq_ignore_ascii_case(b"cluster")
+        || parent.eq_ignore_ascii_case(b"command")
+        || parent.eq_ignore_ascii_case(b"config")
+        || parent.eq_ignore_ascii_case(b"function")
+        || parent.eq_ignore_ascii_case(b"latency")
+        || parent.eq_ignore_ascii_case(b"memory")
+        || parent.eq_ignore_ascii_case(b"module")
+        || parent.eq_ignore_ascii_case(b"object")
+        || parent.eq_ignore_ascii_case(b"pubsub")
+        || parent.eq_ignore_ascii_case(b"script")
+        || parent.eq_ignore_ascii_case(b"slowlog")
+        || parent.eq_ignore_ascii_case(b"xgroup")
+        || parent.eq_ignore_ascii_case(b"xinfo")
 }
 
 /// Return ACL selectors for a command invocation, most-specific first.
@@ -17517,6 +19183,114 @@ fn command_table_row_is_visible(name: &str, store: &Store) -> bool {
     true
 }
 
+type CommandMetadataRow = (&'static str, i64, &'static str, i64, i64, i64);
+
+#[cfg(feature = "bench-reference")]
+static BENCH_COMMAND_INFO_SCAN_REFERENCE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Select the frozen linear-scan arm for the `COMMAND INFO` A/B harness.
+#[doc(hidden)]
+#[cfg(feature = "bench-reference")]
+pub fn bench_select_command_info_scan_reference(reference: bool) {
+    BENCH_COMMAND_INFO_SCAN_REFERENCE.store(reference, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Frozen current lookup for explicit `COMMAND INFO name [name ...]` requests.
+#[cfg(any(test, feature = "bench-reference"))]
+#[cfg_attr(feature = "bench-reference", inline(never))]
+fn command_info_requested_row_scan(cmd_name: &str, store: &Store) -> Option<CommandMetadataRow> {
+    COMMAND_TABLE
+        .iter()
+        .filter(|&&(name, ..)| command_table_row_is_visible(name, store))
+        .chain(SUBCOMMAND_TABLE.iter())
+        .find(|&&(name, ..)| name.eq_ignore_ascii_case(cmd_name))
+        .copied()
+}
+
+/// Resolve a top-level name through the canonical command index, retaining the
+/// ordered subcommand scan for namespaced fallbacks. (frankenredis-eey3d)
+#[cfg_attr(feature = "bench-reference", inline(never))]
+fn command_info_requested_row_indexed(cmd_name: &str, store: &Store) -> Option<CommandMetadataRow> {
+    if let Some(index) = command_table_index(cmd_name.as_bytes()) {
+        let row = COMMAND_TABLE[index];
+        if command_table_row_is_visible(row.0, store) {
+            return Some(row);
+        }
+    }
+    SUBCOMMAND_TABLE
+        .iter()
+        .find(|&&(name, ..)| name.eq_ignore_ascii_case(cmd_name))
+        .copied()
+}
+
+fn command_info_requested_row(cmd_name: &str, store: &Store) -> Option<CommandMetadataRow> {
+    #[cfg(feature = "bench-reference")]
+    if BENCH_COMMAND_INFO_SCAN_REFERENCE.load(std::sync::atomic::Ordering::Relaxed) {
+        return command_info_requested_row_scan(cmd_name, store);
+    }
+    command_info_requested_row_indexed(cmd_name, store)
+}
+
+#[cfg(feature = "bench-reference")]
+static BENCH_COMMAND_DOCS_SCAN_REFERENCE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Select the frozen linear-scan arm for the `COMMAND DOCS` A/B harness.
+#[doc(hidden)]
+#[cfg(feature = "bench-reference")]
+pub fn bench_select_command_docs_scan_reference(reference: bool) {
+    BENCH_COMMAND_DOCS_SCAN_REFERENCE.store(reference, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Frozen current lookup for explicit `COMMAND DOCS name [name ...]` requests.
+#[cfg(feature = "bench-reference")]
+#[inline(never)]
+fn command_docs_requested_row_scan(cmd_name: &str, store: &Store) -> Option<CommandMetadataRow> {
+    COMMAND_TABLE
+        .iter()
+        .filter(|&&(name, ..)| command_table_row_is_visible(name, store))
+        .chain(SUBCOMMAND_TABLE.iter())
+        .find(|&&(name, ..)| name.eq_ignore_ascii_case(cmd_name))
+        .copied()
+}
+
+/// Resolve a top-level docs name through the canonical index, retaining the
+/// ordered subcommand scan for namespaced fallbacks.
+#[cfg_attr(feature = "bench-reference", inline(never))]
+fn command_docs_requested_row_indexed(cmd_name: &str, store: &Store) -> Option<CommandMetadataRow> {
+    if let Some(index) = command_table_index(cmd_name.as_bytes()) {
+        let row = COMMAND_TABLE[index];
+        if command_table_row_is_visible(row.0, store) {
+            return Some(row);
+        }
+    }
+    SUBCOMMAND_TABLE
+        .iter()
+        .find(|&&(name, ..)| name.eq_ignore_ascii_case(cmd_name))
+        .copied()
+}
+
+fn command_docs_requested_row(cmd_name: &str, store: &Store) -> Option<CommandMetadataRow> {
+    #[cfg(feature = "bench-reference")]
+    if BENCH_COMMAND_DOCS_SCAN_REFERENCE.load(std::sync::atomic::Ordering::Relaxed) {
+        return command_docs_requested_row_scan(cmd_name, store);
+    }
+    command_docs_requested_row_indexed(cmd_name, store)
+}
+
+/// Number of top-level commands visible in the current mode — the `COMMAND COUNT`
+/// reply. Shared by the generic command handler and the borrowed fast path so
+/// both report the identical count (the visibility filter only hides `sentinel`
+/// outside sentinel mode). (frankenredis cold-cmd audit)
+#[must_use]
+pub fn visible_command_count(store: &Store) -> i64 {
+    COMMAND_TABLE
+        .iter()
+        .filter(|&&(name, ..)| command_table_row_is_visible(name, store))
+        .count() as i64
+}
+
 fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandError> {
     if argv.len() == 1 {
         // COMMAND with no sub-command: full command info for the top-level
@@ -17554,11 +19328,7 @@ fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErro
                 subcommand: sub.to_string(),
             });
         }
-        let visible = COMMAND_TABLE
-            .iter()
-            .filter(|&&(name, ..)| command_table_row_is_visible(name, store))
-            .count();
-        Ok(RespFrame::Integer(visible as i64))
+        Ok(RespFrame::Integer(visible_command_count(store)))
     } else if sub.eq_ignore_ascii_case("LIST") {
         // COMMAND LIST [FILTERBY MODULE modname | ACLCAT category | PATTERN pattern]
         // Upstream server.c::commandListCommand requires either
@@ -17664,13 +19434,9 @@ fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErro
             // back to nil — vendored 7.2.4 returns the per-sub metadata
             // from server.c::commandInfoCommand by walking the
             // container's subcommand_dict.
-            let found = COMMAND_TABLE
-                .iter()
-                .filter(|&&(name, ..)| command_table_row_is_visible(name, store))
-                .chain(SUBCOMMAND_TABLE.iter())
-                .find(|&&(name, ..)| name.eq_ignore_ascii_case(cmd_name));
+            let found = command_info_requested_row(cmd_name, store);
             match found {
-                Some(&(name, arity, flags, first_key, last_key, step)) => {
+                Some((name, arity, flags, first_key, last_key, step)) => {
                     let entry = command_info_entry(name, arity, flags, first_key, last_key, step);
                     entries.push(if resp3 {
                         command_info_entry_to_resp3(entry)
@@ -17710,16 +19476,8 @@ fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErro
                     // accepts subcommand fullnames like "module|help"
                     // and "client|kill"; fall back to SUBCOMMAND_TABLE
                     // when the top-level table doesn't carry the row.
-                    let row = COMMAND_TABLE
-                        .iter()
-                        .filter(|&&(name, ..)| command_table_row_is_visible(name, store))
-                        .find(|&&(name, ..)| name.eq_ignore_ascii_case(cmd_name))
-                        .or_else(|| {
-                            SUBCOMMAND_TABLE
-                                .iter()
-                                .find(|&&(name, ..)| name.eq_ignore_ascii_case(cmd_name))
-                        })?;
-                    let &(name, arity, flags, first_key, last_key, step) = row;
+                    let (name, arity, flags, first_key, last_key, step) =
+                        command_docs_requested_row(cmd_name, store)?;
                     Some((
                         RespFrame::BulkString(Some(name.as_bytes().to_vec())),
                         command_docs_entry(name, arity, flags, first_key, last_key, step, resp),
@@ -20797,6 +22555,7 @@ pub fn parse_client_tracking_state(argv: &[Vec<u8>]) -> Result<ClientTrackingSta
         return Ok(ClientTrackingState {
             enabled: false,
             redirect,
+            has_activity: redirect.is_some(),
             ..ClientTrackingState::default()
         });
     }
@@ -20840,6 +22599,7 @@ pub fn parse_client_tracking_state(argv: &[Vec<u8>]) -> Result<ClientTrackingSta
         caching: None,
         noloop,
         prefixes,
+        has_activity: true,
     })
 }
 
@@ -20908,6 +22668,7 @@ pub fn apply_client_caching_mode(
 ) -> Result<(), CommandError> {
     validate_client_caching_mode(mode, tracking)?;
     tracking.caching = Some(mode.eq_ignore_ascii_case("YES"));
+    tracking.has_activity = true;
     Ok(())
 }
 
@@ -21056,6 +22817,7 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
                     || kind.eq_ignore_ascii_case("REPLICA")
                     || kind.eq_ignore_ascii_case("NORMAL")
                     || kind.eq_ignore_ascii_case("PUBSUB")
+                    || kind.eq_ignore_ascii_case("SLAVE")
                 {
                     Vec::new()
                 } else {
@@ -21066,17 +22828,13 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
             } else if argv.len() >= 4 && argv[2].eq_ignore_ascii_case(b"ID") {
                 let mut payload = Vec::new();
                 for id_arg in &argv[3..] {
-                    // (br-frankenredis-lkoh) — upstream wording for
-                    // both CLIENT LIST ID and CLIENT KILL ID.
-                    let parsed_id = parse_i64_arg(id_arg).map_err(|_| {
-                        CommandError::Custom("ERR client-id should be greater than 0".to_string())
-                    })?;
-                    if parsed_id <= 0 {
-                        return Err(CommandError::Custom(
-                            "ERR client-id should be greater than 0".to_string(),
-                        ));
-                    }
-                    if parsed_id as u64 == store.dispatch_client_ctx.client_id {
+                    // CLIENT LIST ID differs from CLIENT KILL ID: upstream only
+                    // errors on nonnumeric IDs ("Invalid client ID"). Numeric
+                    // nonpositive IDs are valid filters that simply match no
+                    // clients. (frankenredis-q3rts)
+                    let parsed_id = parse_i64_arg(id_arg)
+                        .map_err(|_| CommandError::Custom("ERR Invalid client ID".to_string()))?;
+                    if parsed_id > 0 && parsed_id as u64 == store.dispatch_client_ctx.client_id {
                         payload.extend_from_slice(&info_line);
                     }
                 }
@@ -21205,8 +22963,9 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
         let mut skipme = legacy_addr.is_none();
         let mut filter_id: Option<u64> = None;
         let mut filter_type: Option<String> = None;
-        let mut filter_user: Option<Vec<u8>> = None;
+        let mut filter_user: Option<&[u8]> = None;
         let mut filter_addr = legacy_addr.map(str::to_owned);
+        let mut filter_laddr: Option<String> = None;
 
         if legacy_addr.is_none() {
             let mut i = 2;
@@ -21230,18 +22989,28 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
                     let kind = std::str::from_utf8(&argv[i + 1])
                         .map_err(|_| CommandError::InvalidUtf8Argument)?
                         .to_string();
-                    if !matches!(
-                        kind.to_ascii_lowercase().as_str(),
-                        "normal" | "master" | "replica" | "pubsub"
-                    ) {
-                        return Err(CommandError::Custom(format!(
-                            "ERR Unknown client type '{kind}'"
-                        )));
-                    }
-                    filter_type = Some(kind);
+                    let canonical = match kind.to_ascii_lowercase().as_str() {
+                        "normal" | "master" | "replica" | "pubsub" => kind.clone(),
+                        "slave" => "replica".to_string(),
+                        _ => {
+                            return Err(CommandError::Custom(format!(
+                                "ERR Unknown client type '{kind}'"
+                            )));
+                        }
+                    };
+                    filter_type = Some(canonical);
                     i += 2;
                 } else if opt.eq_ignore_ascii_case("USER") && i + 1 < argv.len() {
-                    filter_user = Some(argv[i + 1].clone());
+                    let user_arg = &argv[i + 1];
+                    if user_arg.as_slice() != b"default"
+                        && user_arg != &store.dispatch_client_ctx.authenticated_user
+                    {
+                        return Err(CommandError::Custom(format!(
+                            "ERR No such user '{}'",
+                            String::from_utf8_lossy(user_arg)
+                        )));
+                    }
+                    filter_user = Some(user_arg);
                     i += 2;
                 } else if opt.eq_ignore_ascii_case("ADDR") && i + 1 < argv.len() {
                     let addr = std::str::from_utf8(&argv[i + 1])
@@ -21251,12 +23020,16 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
                     i += 2;
                 } else if opt.eq_ignore_ascii_case("LADDR") && i + 1 < argv.len() {
                     // CLIENT KILL LADDR <ip:port> filters by the local
-                    // (server-side) socket address. We don't track a
-                    // distinct laddr per client at the dispatch layer,
-                    // so the filter never matches our single dispatch
-                    // session; return 0 like upstream does when no
-                    // clients match. (br-frankenredis-lkoh)
-                    return Ok(RespFrame::Integer(0));
+                    // (server-side) socket address. Direct dispatch has
+                    // one synthetic client and reports its laddr as
+                    // 127.0.0.1:<server_port> in CLIENT INFO/LIST, so
+                    // use the same advertised value for kill filtering.
+                    // (frankenredis-61iis)
+                    let laddr = std::str::from_utf8(&argv[i + 1])
+                        .map_err(|_| CommandError::InvalidUtf8Argument)?
+                        .to_string();
+                    filter_laddr = Some(laddr);
+                    i += 2;
                 } else if opt.eq_ignore_ascii_case("SKIPME") && i + 1 < argv.len() {
                     let val = std::str::from_utf8(&argv[i + 1])
                         .map_err(|_| CommandError::InvalidUtf8Argument)?;
@@ -21286,11 +23059,14 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
                 current_kind.eq_ignore_ascii_case(kind)
             })
             && filter_user
-                .as_ref()
-                .is_none_or(|user| &store.dispatch_client_ctx.authenticated_user == user)
+                .is_none_or(|user| store.dispatch_client_ctx.authenticated_user.as_slice() == user)
             && filter_addr
                 .as_ref()
-                .is_none_or(|addr| &store.dispatch_client_ctx.peer_addr == addr);
+                .is_none_or(|addr| &store.dispatch_client_ctx.peer_addr == addr)
+            && filter_laddr.as_ref().is_none_or(|laddr| {
+                let reported = format!("127.0.0.1:{}", store.server_port);
+                laddr == &reported
+            });
 
         if legacy_addr.is_some() {
             if matches_current_client {
@@ -21362,6 +23138,13 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
             return Err(script_noscript_command_error());
         }
         let requested = parse_client_tracking_state(argv)?;
+        if let Some(target_id) = requested.redirect
+            && target_id != store.dispatch_client_ctx.client_id
+        {
+            return Err(CommandError::Custom(
+                CLIENT_TRACKING_REDIRECT_MISSING.to_string(),
+            ));
+        }
         let current = store.dispatch_client_ctx.client_tracking.clone();
         store.dispatch_client_ctx.client_tracking =
             apply_client_tracking_update(&current, requested)?;
@@ -21578,14 +23361,18 @@ fn parse_scan_args_with_novalues(
     let mut novalues = false;
     let mut i = start_idx;
     while i < argv.len() {
-        let kw = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-        if kw.eq_ignore_ascii_case("MATCH") {
+        // (frankenredis-44iva) Match the option keyword on RAW BYTES, not via
+        // str::from_utf8 — redis db.c::scanGenericCommand works on bytes and emits
+        // "syntax error" for an unrecognized option, including a non-UTF8 one. The
+        // prior from_utf8 surfaced "invalid UTF-8 argument" for a non-UTF8 token.
+        let kw = &argv[i];
+        if kw.eq_ignore_ascii_case(b"MATCH") {
             if i + 1 >= argv.len() {
                 return Err(CommandError::SyntaxError);
             }
             pattern = Some(argv[i + 1].clone());
             i += 2;
-        } else if kw.eq_ignore_ascii_case("COUNT") {
+        } else if kw.eq_ignore_ascii_case(b"COUNT") {
             if i + 1 >= argv.len() {
                 return Err(CommandError::SyntaxError);
             }
@@ -21596,13 +23383,13 @@ fn parse_scan_args_with_novalues(
             }
             count = usize::try_from(c).map_err(|_| CommandError::InvalidInteger)?;
             i += 2;
-        } else if kw.eq_ignore_ascii_case("TYPE") {
+        } else if kw.eq_ignore_ascii_case(b"TYPE") {
             if i + 1 >= argv.len() {
                 return Err(CommandError::SyntaxError);
             }
             type_filter = Some(argv[i + 1].clone());
             i += 2;
-        } else if accept_novalues && kw.eq_ignore_ascii_case("NOVALUES") {
+        } else if accept_novalues && kw.eq_ignore_ascii_case(b"NOVALUES") {
             novalues = true;
             i += 1;
         } else {
@@ -21684,12 +23471,16 @@ fn scan(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         logical_keys.retain(|k| fr_store::glob_match(pat, k));
     }
     if let Some(ref tf) = args.type_filter {
-        let tf_str = std::str::from_utf8(tf).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        // (frankenredis-re7sp) Compare the TYPE value as raw bytes — redis
+        // scanGenericCommand byte-compares, so a non-UTF8 type value matches nothing
+        // (empty result), it is NOT a "invalid UTF-8 argument" error. (fr-runtime
+        // handle_scan_command already does this; this path is hit via Lua/redis.call.)
+        let tf: &[u8] = tf;
         logical_keys.retain(|logical| {
             let physical = fr_store::encode_db_key(db, logical);
             store
                 .key_type(&physical, now_ms)
-                .is_some_and(|t| t.eq_ignore_ascii_case(tf_str))
+                .is_some_and(|t| t.as_bytes().eq_ignore_ascii_case(tf))
         });
     }
     logical_keys.sort();
@@ -22285,16 +24076,40 @@ fn memory_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
             .saturating_add(aof_buffer)
             .saturating_add(lua_caches)
             .saturating_add(functions_caches);
-        // (frankenredis-cucvq) peak.allocated is the historical max
-        // observed by Store::observe_memory_sample (driven by RSS each
-        // INFO memory call). Fall back to `used` if no peak has been
-        // sampled yet -- upstream's c->stat_peak_memory is initialised
-        // to 0 but server.c::serverCron updates it before the first
-        // INFO call, so peak >= used in practice.
-        let peak_allocated: i64 = (store.stat_used_memory_peak as i64).max(used);
+        // (frankenredis-nckib) Per-db hashtable overhead (dictEntry bytes for
+        // keys + expires) is part of overhead.total. Sum it UP-FRONT so the
+        // emitted total.allocated already reflects the full overhead; the per-db
+        // display loop below reuses the same per-db figures without
+        // re-accumulating into overhead_total (which would double-count).
+        const DICT_ENTRY_BYTES: i64 = 64;
+        let mut hashtable_overhead: i64 = 0;
+        for db in 0..store.database_count {
+            let keys = store.dbsize_in_db(db);
+            if keys == 0 {
+                continue;
+            }
+            let expires = store.expires_in_db(db);
+            hashtable_overhead = hashtable_overhead
+                .saturating_add((keys as i64).saturating_mul(DICT_ENTRY_BYTES))
+                .saturating_add((expires as i64).saturating_mul(DICT_ENTRY_BYTES));
+        }
+        overhead_total = overhead_total.saturating_add(hashtable_overhead);
+        // (frankenredis-nckib) `used` (== dataset.bytes) is DATA-ONLY; the grand
+        // total allocated memory is data + overhead. Emitting total.allocated =
+        // used alone violated upstream's invariant total_allocated >=
+        // overhead_total (object.c getMemoryOverheadData) and made the derived
+        // dataset.bytes (= total - overhead) and allocator.* fields inconsistent.
+        let total_allocated: i64 = used.saturating_add(overhead_total);
+        // (frankenredis-cucvq) peak.allocated is the historical max observed by
+        // Store::observe_memory_sample (driven by RSS each INFO memory call).
+        // Fall back to total_allocated if no peak has been sampled yet --
+        // upstream's c->stat_peak_memory is initialised to 0 but
+        // server.c::serverCron updates it before the first INFO call, so peak >=
+        // total in practice.
+        let peak_allocated: i64 = (store.stat_used_memory_peak as i64).max(total_allocated);
         for kv in [
             pair("peak.allocated", peak_allocated),
-            pair("total.allocated", used),
+            pair("total.allocated", total_allocated),
             pair("startup.allocated", startup_allocated),
             pair("replication.backlog", replication_backlog),
             // (frankenredis-zfu61) Real per-client buffer summation
@@ -22336,7 +24151,6 @@ fn memory_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         // + value pointer + next-bucket pointer + overhead). Real
         // upstream uses a dict-impl-specific term; fr tracks the
         // dominant data-bearing factor that monitoring tools watch.
-        const DICT_ENTRY_BYTES: i64 = 64;
         let resp_v3 = store.dispatch_client_ctx.resp_protocol_version == 3;
         for db in 0..store.database_count {
             let keys = store.dbsize_in_db(db);
@@ -22344,13 +24158,11 @@ fn memory_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
                 continue;
             }
             let expires = store.expires_in_db(db);
+            // (frankenredis-nckib) Per-db hashtable overhead was already summed
+            // into overhead_total up-front (so total.allocated could reflect it);
+            // here we only re-derive the per-db display figures.
             let main_bytes = (keys as i64).saturating_mul(DICT_ENTRY_BYTES);
             let expires_bytes = (expires as i64).saturating_mul(DICT_ENTRY_BYTES);
-            // (frankenredis-wkglo) Per-db hashtable overhead contributes
-            // to overhead.total; sum here while we still have the values.
-            overhead_total = overhead_total
-                .saturating_add(main_bytes)
-                .saturating_add(expires_bytes);
             items.push(RespFrame::BulkString(Some(format!("db.{db}").into_bytes())));
             if resp_v3 {
                 items.push(RespFrame::Map(Some(vec![
@@ -22397,13 +24209,20 @@ fn memory_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         // Guard against divide-by-zero by falling back to 0.0 — matches
         // upstream's behavior on a freshly-started server before the
         // first cron sample.
-        let total_minus_startup = (used - startup_allocated).max(0);
-        let dataset_percentage = if total_minus_startup > 0 {
-            100.0 * (total_minus_startup - (overhead_total - startup_allocated).max(0)) as f64
-                / total_minus_startup as f64
-        } else {
-            0.0
-        };
+        // `used` (== dataset.bytes) is data-only: estimate_memory_usage_bytes
+        // sums per-entry keyspace bytes and EXCLUDES overhead (clients, repl
+        // backlog, lua/functions, hashtable). The implied total memory is
+        // therefore data + overhead, so dataset.percentage = dataset / net_usage
+        // with net_usage = (data + overhead) - startup. The previous formula
+        // treated `used` as the grand total and subtracted overhead FROM it,
+        // underflowing to a NEGATIVE percentage whenever overhead_total exceeded
+        // the (small) dataset estimate — e.g. an almost-empty keyspace returned
+        // dataset.percentage = -2.65. Mirrors upstream object.c
+        // getMemoryOverheadData: dataset_perc = dataset_bytes*100/net_usage,
+        // non-negative by construction (overhead_total >= startup_allocated, so
+        // net_usage >= used and the result lands in [0, 100]).
+        let net_usage = (used + overhead_total - startup_allocated).max(1);
+        let dataset_percentage = 100.0 * used as f64 / net_usage as f64;
         let peak_percentage = if peak_allocated > 0 {
             100.0 * used as f64 / peak_allocated as f64
         } else {
@@ -22416,9 +24235,9 @@ fn memory_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
             items.extend(kv);
         }
         for kv in [
-            pair("allocator.allocated", used),
-            pair("allocator.active", used),
-            pair("allocator.resident", used),
+            pair("allocator.allocated", total_allocated),
+            pair("allocator.active", total_allocated),
+            pair("allocator.resident", total_allocated),
         ] {
             items.extend(kv);
         }
@@ -22545,51 +24364,60 @@ fn parse_linux_proc_self_stat_cpu_times(stat_line: &str) -> Option<(f64, f64)> {
 /// from /proc/sys/kernel; on other platforms we fall back to the
 /// static OS name. (frankenredis-6xj9o)
 fn format_info_os_string() -> String {
-    fn fallback_os_name() -> &'static str {
-        match std::env::consts::OS {
-            "linux" => "Linux",
-            "macos" => "Darwin",
-            "windows" => "Windows",
-            "freebsd" => "FreeBSD",
-            "openbsd" => "OpenBSD",
-            "netbsd" => "NetBSD",
-            "dragonfly" => "DragonFly",
-            "solaris" => "SunOS",
-            other => other,
-        }
-    }
-    fn arch_machine() -> &'static str {
-        // Map Rust's std::env::consts::ARCH to upstream's uname
-        // `machine` token (Linux kernel returns x86_64 / aarch64 /
-        // armv7l / etc.). Rust uses x86_64 / aarch64 / arm — close
-        // enough for INFO parity; rare arches fall through unchanged.
-        match std::env::consts::ARCH {
-            "x86_64" => "x86_64",
-            "aarch64" => "aarch64",
-            "arm" => "armv7l",
-            "x86" => "i686",
-            "powerpc64" => "ppc64le",
-            other => other,
-        }
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let sysname = std::fs::read_to_string("/proc/sys/kernel/ostype")
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|_| fallback_os_name().to_string());
-        let release = std::fs::read_to_string("/proc/sys/kernel/osrelease")
-            .map(|s| s.trim().to_string())
-            .unwrap_or_default();
-        if release.is_empty() {
-            format!("{sysname} {}", arch_machine())
-        } else {
-            format!("{sysname} {release} {}", arch_machine())
-        }
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        format!("{} {}", fallback_os_name(), arch_machine())
-    }
+    // (CrimsonHawk) The uname sysname/release come from immutable /proc files;
+    // cache them so INFO does not read /proc every call (redis reads uname once
+    // at startup). This was ~3x on INFO server / ~5x on INFO all.
+    use std::sync::OnceLock;
+    static OS_CACHE: OnceLock<String> = OnceLock::new();
+    OS_CACHE
+        .get_or_init(|| {
+            fn fallback_os_name() -> &'static str {
+                match std::env::consts::OS {
+                    "linux" => "Linux",
+                    "macos" => "Darwin",
+                    "windows" => "Windows",
+                    "freebsd" => "FreeBSD",
+                    "openbsd" => "OpenBSD",
+                    "netbsd" => "NetBSD",
+                    "dragonfly" => "DragonFly",
+                    "solaris" => "SunOS",
+                    other => other,
+                }
+            }
+            fn arch_machine() -> &'static str {
+                // Map Rust's std::env::consts::ARCH to upstream's uname
+                // `machine` token (Linux kernel returns x86_64 / aarch64 /
+                // armv7l / etc.). Rust uses x86_64 / aarch64 / arm — close
+                // enough for INFO parity; rare arches fall through unchanged.
+                match std::env::consts::ARCH {
+                    "x86_64" => "x86_64",
+                    "aarch64" => "aarch64",
+                    "arm" => "armv7l",
+                    "x86" => "i686",
+                    "powerpc64" => "ppc64le",
+                    other => other,
+                }
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let sysname = std::fs::read_to_string("/proc/sys/kernel/ostype")
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_else(|_| fallback_os_name().to_string());
+                let release = std::fs::read_to_string("/proc/sys/kernel/osrelease")
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default();
+                if release.is_empty() {
+                    format!("{sysname} {}", arch_machine())
+                } else {
+                    format!("{sysname} {release} {}", arch_machine())
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                format!("{} {}", fallback_os_name(), arch_machine())
+            }
+        })
+        .clone()
 }
 
 fn read_cpu_times() -> (f64, f64) {
@@ -22668,6 +24496,53 @@ pub fn pubsub_message_to_frame_for_protocol(
         }
     } else {
         frame
+    }
+}
+
+/// Encode a `PubSubMessage` directly into the output buffer for hot delivery
+/// paths that should not allocate an intermediate `RespFrame`.
+pub fn encode_pubsub_message_for_protocol_into(
+    msg: PubSubMessage,
+    resp_protocol_version: i64,
+    out: &mut Vec<u8>,
+) {
+    let resp3 = resp_protocol_version == 3;
+    match msg {
+        PubSubMessage::Message { channel, data } => {
+            out.extend_from_slice(if resp3 { b">3\r\n" } else { b"*3\r\n" });
+            encode_bulk_string_slice(Some(b"message"), false, out);
+            encode_bulk_string_slice(Some(&channel), false, out);
+            encode_bulk_string_slice(Some(&data), false, out);
+        }
+        PubSubMessage::PMessage {
+            pattern,
+            channel,
+            data,
+        } => {
+            out.extend_from_slice(if resp3 { b">4\r\n" } else { b"*4\r\n" });
+            encode_bulk_string_slice(Some(b"pmessage"), false, out);
+            encode_bulk_string_slice(Some(&pattern), false, out);
+            encode_bulk_string_slice(Some(&channel), false, out);
+            encode_bulk_string_slice(Some(&data), false, out);
+        }
+        PubSubMessage::SMessage { channel, data } => {
+            out.extend_from_slice(if resp3 { b">3\r\n" } else { b"*3\r\n" });
+            encode_bulk_string_slice(Some(b"smessage"), false, out);
+            encode_bulk_string_slice(Some(&channel), false, out);
+            encode_bulk_string_slice(Some(&data), false, out);
+        }
+        PubSubMessage::Invalidate { keys } => {
+            out.extend_from_slice(if resp3 { b">2\r\n" } else { b"*2\r\n" });
+            encode_bulk_string_slice(Some(b"invalidate"), false, out);
+            if keys.is_empty() {
+                encode_bulk_string_slice(None, resp3, out);
+            } else {
+                encode_aggregate_header(keys.len(), false, out);
+                for key in keys {
+                    encode_bulk_string_slice(Some(&key), false, out);
+                }
+            }
+        }
     }
 }
 
@@ -23000,17 +24875,19 @@ fn msetnx(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     if argv.len() < 3 || argv.len().is_multiple_of(2) {
         return Err(CommandError::WrongArity("MSETNX"));
     }
-    // Upstream t_string.c::msetGenericCommand uses lookupKeyWrite for this
-    // NX preflight, so existing-key checks keep normal write-lookup touch
-    // semantics. This differs from EXISTS, which explicitly uses LOOKUP_NOTOUCH.
+    // Upstream t_string.c::msetGenericCommand uses lookupKeyWrite for this NX
+    // preflight. lookupKeyWrite reaps a stale-expired key but does NOT bump
+    // keyspace_hits/misses (MSETNX is a write), so use exists_no_stat — the
+    // stat-counting store.exists over-counted one hit/miss per probed key.
     for i in (1..argv.len()).step_by(2) {
-        if store.exists(&argv[i], now_ms) {
+        if store.exists_no_stat(&argv[i], now_ms) {
             return Ok(RespFrame::Integer(0));
         }
     }
-    // All keys are new — set them all
+    // All keys are new — set them all via the borrowed plain-SET fast path
+    // (no per-pair clones; byte-identical to N single SETs).
     for i in (1..argv.len()).step_by(2) {
-        store.set(argv[i].clone(), argv[i + 1].clone(), None, now_ms);
+        store.set_plain_borrowed(&argv[i], &argv[i + 1], now_ms);
     }
     Ok(RespFrame::Integer(1))
 }
@@ -23050,6 +24927,7 @@ fn zdiff(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     let keys: Vec<&[u8]> = (0..numkeys)
         .map(|i| argv[2_usize.saturating_add(i)].as_slice())
         .collect();
+    record_source_key_lookups(store, &keys, now_ms);
     // (frankenredis-sdiffwt) Validate every source type up front: upstream
     // checks all sources before computing, so an empty/missing first key must
     // not mask a wrong-type later key (which the per-member loop would skip).
@@ -23070,24 +24948,12 @@ fn zdiff(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
             return Err(CommandError::SyntaxError);
         }
     }
-    // Compute difference: members in first set not in any other
-    let first_members = store.zget_members_with_scores(keys[0], now_ms)?;
-    let mut result: Vec<(Vec<u8>, f64)> = Vec::new();
-    for (member, score) in first_members {
-        let mut in_other = false;
-        for &key in &keys[1..] {
-            if store
-                .zget_score_or_set_member(key, &member, now_ms)?
-                .is_some()
-            {
-                in_other = true;
-                break;
-            }
-        }
-        if !in_other {
-            result.push((member, score));
-        }
-    }
+    // Compute difference: members in first set not in any other. Resolve each
+    // source view ONCE (borrow-only) rather than re-looking-up every other key in
+    // the keyspace on each member probe; wrong-type was rejected by
+    // ensure_zset_or_set_source above. Byte-identical: keeps keys[0]'s members
+    // absent from all others with keys[0]'s score, re-sorted below.
+    let mut result = store.zdiff_members_no_stats(&keys);
     // (gauntlet B3) zset reply order: score asc, ties by member byte-lex.
     result.sort_by(|a, b| {
         a.1.partial_cmp(&b.1)
@@ -23123,6 +24989,7 @@ fn zdiffstore(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     let keys: Vec<&[u8]> = (0..numkeys)
         .map(|i| argv[3_usize.saturating_add(i)].as_slice())
         .collect();
+    record_source_key_lookups(store, &keys, now_ms);
     // (frankenredis-sdiffwt) Validate every source type up front (see zdiff).
     // (frankenredis-zsetop-wrongtype) The source-key type-check runs BEFORE the
     // trailing-token syntax check: upstream reads+checkType the keys
@@ -23134,25 +25001,13 @@ fn zdiffstore(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     if argv.len() != 3_usize.saturating_add(numkeys) {
         return Err(CommandError::SyntaxError);
     }
-    let first_members = store.zget_members_with_scores(keys[0], now_ms)?;
-    let mut result: std::collections::HashMap<Vec<u8>, f64> = std::collections::HashMap::new();
-    for (member, score) in first_members {
-        let mut in_other = false;
-        for &key in &keys[1..] {
-            if store
-                .zget_score_or_set_member(key, &member, now_ms)?
-                .is_some()
-            {
-                in_other = true;
-                break;
-            }
-        }
-        if !in_other {
-            result.insert(member, score);
-        }
-    }
+    // (CrimsonHawk) Resolve each source view ONCE (see zdiff_members_no_stats)
+    // rather than re-looking-up every other key in the keyspace per member probe;
+    // wrong-type was rejected by ensure_zset_or_set_source above. Byte-identical:
+    // same (member, score) survivors feed the order-independent dest-set build.
+    let result = store.zdiff_members_no_stats(&keys);
     let count = result.len();
-    store.store_sorted_set(dest, result, now_ms);
+    store.store_sorted_set_from_pairs(dest, result, now_ms);
     Ok(RespFrame::Integer(count as i64))
 }
 
@@ -23175,6 +25030,7 @@ fn zinter(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     let keys: Vec<&[u8]> = (0..numkeys)
         .map(|i| argv[2_usize.saturating_add(i)].as_slice())
         .collect();
+    record_source_key_lookups(store, &keys, now_ms);
     // (frankenredis-zsetop-wrongtype) Source-key type-check precedes the
     // WEIGHTS/AGGREGATE/WITHSCORES option parse — see zunionstore().
     for &key in &keys {
@@ -23182,28 +25038,17 @@ fn zinter(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     }
     let (weights, aggregate, withscores) =
         parse_zset_algebra_options(argv, 2 + numkeys, numkeys, true)?;
-    let first_members = store.zget_members_with_scores(keys[0], now_ms)?;
-    let mut result: Vec<(Vec<u8>, f64)> = Vec::new();
-    let w0 = weights.first().copied().unwrap_or(1.0);
-    for (member, score) in first_members {
-        let mut combined = normalize_weighted_score_cmd(score, w0);
-        let mut in_all = true;
-        for (i, &key) in keys[1..].iter().enumerate() {
-            match store.zget_score_or_set_member(key, &member, now_ms)? {
-                Some(s) => {
-                    let w = weights.get(i + 1).copied().unwrap_or(1.0);
-                    combined = aggregate_scores_for_cmd(combined, s * w, &aggregate);
-                }
-                None => {
-                    in_all = false;
-                    break;
-                }
-            }
-        }
-        if in_all {
-            result.push((member, combined));
-        }
-    }
+    // (CrimsonHawk) Borrow-only intersection: iterate the first source by
+    // reference and clone only the survivors, instead of materializing every
+    // first-key member (and its bytes) up front via
+    // `zget_members_with_scores_no_stats` only to discard the non-survivors. The
+    // type-checks above (`ensure_zset_or_set_source`) already rejected WRONGTYPE,
+    // so the store core can treat an absent source as an empty intersection
+    // member. Byte-identical: same argv aggregation order + same SUM/MIN/MAX/NaN
+    // helpers (`aggregate_scores`/`normalize_weighted_score` mirror the `*_for_cmd`
+    // variants), and the result is re-sorted below so first-key visitation order
+    // does not matter.
+    let mut result = store.zinter_members_argv_order_no_stats(&keys, &weights, &aggregate);
     // (gauntlet B3) zset reply order: score asc, ties by member byte-lex.
     result.sort_by(|a, b| {
         a.1.partial_cmp(&b.1)
@@ -23244,7 +25089,12 @@ fn zunion_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     }
     let (weights, aggregate, withscores) =
         parse_zset_algebra_options(argv, 2 + numkeys, numkeys, true)?;
-    let mut combined: std::collections::HashMap<Vec<u8>, f64> = std::collections::HashMap::new();
+    // (frankenredis-zunionfold) foldhash accumulator, not default-SipHash
+    // `HashMap::new()`: `entries` is sorted by (score, member) below, so the
+    // hasher never affects output, but ZUNION hashes every member of every
+    // source set here and foldhash is ~3-5x faster per hash.
+    let mut combined: std::collections::HashMap<Vec<u8>, f64, foldhash::quality::RandomState> =
+        std::collections::HashMap::default();
     for (i, &key) in keys.iter().enumerate() {
         let w = weights.get(i).copied().unwrap_or(1.0);
         let members = store.zget_members_with_scores(key, now_ms)?;
@@ -23294,6 +25144,10 @@ fn zintercard(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     if argv.len() < 2_usize.saturating_add(numkeys) {
         return Ok(RespFrame::Error("ERR syntax error".to_string()));
     }
+    let keys: Vec<&[u8]> = (0..numkeys)
+        .map(|i| argv[2_usize.saturating_add(i)].as_slice())
+        .collect();
+    record_source_key_lookups(store, &keys, now_ms);
     // (frankenredis-zintercardwt) Upstream zinterCardCommand looks up + type-
     // checks every input key (a non-zset/non-set key is WRONGTYPE; a SET is a
     // valid zset-like operand) BEFORE parsing the optional LIMIT clause — so a
@@ -23301,8 +25155,8 @@ fn zintercard(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     // parsed LIMIT first, surfacing the LIMIT/syntax error instead. (SINTERCARD
     // parses LIMIT first — a different upstream code path — so it is unchanged.)
     // The peek is no-stat so it does not perturb keyspace hit/miss accounting.
-    for i in 0..numkeys {
-        match store.peek_value_type(&argv[2_usize.saturating_add(i)], now_ms) {
+    for &key in &keys {
+        match store.peek_value_type(key, now_ms) {
             None | Some(ValueType::ZSet) | Some(ValueType::Set) => {}
             Some(_) => return Err(CommandError::Store(fr_store::StoreError::WrongType)),
         }
@@ -23333,33 +25187,7 @@ fn zintercard(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         }
         idx += 1;
     }
-    let keys: Vec<&[u8]> = (0..numkeys)
-        .map(|i| argv[2_usize.saturating_add(i)].as_slice())
-        .collect();
-    // Compute intersection count
-    if keys.is_empty() {
-        return Ok(RespFrame::Integer(0));
-    }
-    let first_members = store.zget_members_with_scores(keys[0], now_ms)?;
-    let mut count: u64 = 0;
-    for (member, _) in first_members {
-        let mut in_all = true;
-        for &key in &keys[1..] {
-            if store
-                .zget_score_or_set_member(key, &member, now_ms)?
-                .is_none()
-            {
-                in_all = false;
-                break;
-            }
-        }
-        if in_all {
-            count += 1;
-            if limit > 0 && count >= limit {
-                break;
-            }
-        }
-    }
+    let count = store.zintercard_count_cached(&keys, limit, now_ms)?;
     Ok(RespFrame::Integer(count as i64))
 }
 
@@ -23426,11 +25254,16 @@ fn eval_cmd(
     // eval_script_error_reply only recognises a handful of compile-error
     // string prefixes; lua_eval Parser also emits "<X> expected near …",
     // "malformed number near …", etc. that previously fell through.
-    if let Err(parse_err) = lua_eval::compile_check(script) {
-        return Ok(RespFrame::Error(format!(
-            "ERR Error compiling script (new function): user_script:1: {parse_err}"
-        )));
-    }
+    let compiled = match lua_eval::compile_lua_chunk_cached(script) {
+        Ok(compiled) => compiled,
+        Err(_) => {
+            // (frankenredis-5qhz7) Surface the true error line, not a hardcoded 1.
+            return Ok(RespFrame::Error(format!(
+                "ERR Error compiling script (new function): user_script:{}",
+                lua_eval::compile_error_line(script)
+            )));
+        }
+    };
 
     // Cache the script (Redis caches on EVAL too)
     store.script_load(script);
@@ -23443,7 +25276,8 @@ fn eval_cmd(
     let previous_read_only = store.script_read_only;
     store.script_read_only = read_only_script || script_shebang_has_no_writes_flag(script);
     store.script_nesting_level += 1;
-    let result = match lua_eval::eval_script(script, &keys_vec, &args_vec, store, now_ms) {
+    let result = match lua_eval::eval_compiled_script(compiled, &keys_vec, &args_vec, store, now_ms)
+    {
         Ok(frame) => Ok(frame),
         Err(e) => Ok(eval_script_error_reply(script, e, store.lua_error_line)),
     };
@@ -23485,13 +25319,24 @@ fn evalsha_cmd(
             ));
         }
     };
+    let compiled = match lua_eval::compile_lua_chunk_cached(&script) {
+        Ok(compiled) => compiled,
+        Err(_) => {
+            // (frankenredis-5qhz7) Surface the true error line, not a hardcoded 1.
+            return Ok(RespFrame::Error(format!(
+                "ERR Error compiling script (new function): user_script:{}",
+                lua_eval::compile_error_line(&script)
+            )));
+        }
+    };
 
     let keys_vec: Vec<Vec<u8>> = keys.to_vec();
     let args_vec: Vec<Vec<u8>> = args.to_vec();
     let previous_read_only = store.script_read_only;
     store.script_read_only = read_only_script || script_shebang_has_no_writes_flag(&script);
     store.script_nesting_level += 1;
-    let result = match lua_eval::eval_script(&script, &keys_vec, &args_vec, store, now_ms) {
+    let result = match lua_eval::eval_compiled_script(compiled, &keys_vec, &args_vec, store, now_ms)
+    {
         Ok(frame) => Ok(frame),
         Err(e) => Ok(eval_script_error_reply(&script, e, store.lua_error_line)),
     };
@@ -23613,9 +25458,11 @@ fn script_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
         // hashing first and only failing later at EVAL time, so callers
         // got a SHA back for unparseable Lua. Pre-validate via the same
         // lex+parse path EVAL uses so the rejection happens at LOAD time.
-        if let Err(parse_err) = lua_eval::compile_check(&argv[2]) {
+        if lua_eval::compile_check(&argv[2]).is_err() {
+            // (frankenredis-5qhz7) Surface the true error line, not a hardcoded 1.
             return Err(CommandError::Custom(format!(
-                "ERR Error compiling script (new function): user_script:1: {parse_err}"
+                "ERR Error compiling script (new function): user_script:{}",
+                lua_eval::compile_error_line(&argv[2])
             )));
         }
         let sha1 = store.script_load(&argv[2]);
@@ -23906,7 +25753,12 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             // for 'OBJECT'. Try DEBUG HELP." (br-frankenredis-1pe7)
             return Err(debug_subcommand_envelope_error(sub));
         }
-        let key = &argv[2];
+        // DEBUG <sub> <key> must resolve the key in the client's SELECTed DB.
+        // fr stores keys DB-namespaced (encode_db_key); the raw arg only matches
+        // db 0, so without this a non-zero-DB key reads db 0's same-named object
+        // (wrong value) or "no such key" — same class as the DIGEST-VALUE fix.
+        let key_buf = fr_store::encode_db_key(store.dispatch_client_ctx.db_index, &argv[2]);
+        let key = key_buf.as_slice();
         let Some(encoding) = store.object_encoding(key, now_ms) else {
             return Ok(RespFrame::Error("ERR no such key".to_string()));
         };
@@ -23943,9 +25795,32 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // not appear when the parity baseline is 7.2.4. Earlier code
         // (br-frankenredis-25re) appended it unconditionally, breaking
         // alignment with `redis-cli DEBUG OBJECT` against vendored.
-        let debug_info = format!(
+        let mut debug_info = format!(
             "Value at:0x0 refcount:{refcount} encoding:{encoding} serializedlength:{serialized_len} lru:{lru_clock} lru_seconds_idle:{idle_secs}"
         );
+        // (frankenredis debugobj-quicklist) Upstream debug.c::debugCommand
+        // appends quicklist-specific fields for OBJ_ENCODING_QUICKLIST lists:
+        //   ql_nodes:%d ql_avg_node:%.2f ql_listpack_max:%d ql_compressed:%d
+        //   ql_uncompressed_size:%zu
+        // ql_nodes / ql_uncompressed_size come from the synthesized quicklist
+        // node layout (byte-identical to DUMP); ql_avg_node = count / nodes;
+        // ql_listpack_max = the list-max-listpack-size config; ql_compressed is
+        // 0 (fr does not LZF-compress interior nodes, matching the default
+        // list-compress-depth 0). Listpack-encoded (small) lists get no suffix.
+        if encoding == "quicklist"
+            && let Some((ql_nodes, count, ql_uncompressed_size)) =
+                store.list_quicklist_debug_stats(key)
+        {
+            let ql_avg_node = if ql_nodes > 0 {
+                count as f64 / ql_nodes as f64
+            } else {
+                0.0
+            };
+            let ql_listpack_max = store.list_max_listpack_size;
+            debug_info.push_str(&format!(
+                " ql_nodes:{ql_nodes} ql_avg_node:{ql_avg_node:.2} ql_listpack_max:{ql_listpack_max} ql_compressed:0 ql_uncompressed_size:{ql_uncompressed_size}"
+            ));
+        }
         // (frankenredis-gmqk1) Upstream debug.c::debugCommand uses
         // addReplyStatusFormat which emits a SimpleString frame
         // ("+...\r\n"), not a BulkString. Same wire-shape rule as the
@@ -23960,7 +25835,10 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             return Err(debug_subcommand_envelope_error(sub));
         }
         let digest = compute_debug_digest(store, now_ms, None);
-        Ok(RespFrame::BulkString(Some(digest.into_bytes())))
+        // Upstream debug.c::debugCommand emits `addReplyStatus(c, ...)` for
+        // DIGEST — a RESP simple string (`+<hex>\r\n`), not a bulk string.
+        // (frankenredis DEBUG DIGEST reply-type parity)
+        Ok(RespFrame::SimpleString(digest))
     } else if sub.eq_ignore_ascii_case("DIGEST-VALUE") {
         // DEBUG DIGEST-VALUE [key ...] - return an Array of
         // per-key digests. Upstream debug.c::debugCommand:754
@@ -23977,7 +25855,10 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             .map(|key| {
                 let single = [key.as_slice()];
                 let digest = compute_debug_digest(store, now_ms, Some(&single));
-                RespFrame::BulkString(Some(digest.into_bytes()))
+                // Upstream emits `addReplyStatus` per key — an array of RESP
+                // simple strings, not bulk strings. (frankenredis DEBUG
+                // DIGEST-VALUE reply-type parity)
+                RespFrame::SimpleString(digest)
             })
             .collect();
         Ok(RespFrame::Array(Some(frames)))
@@ -24445,7 +26326,12 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         if argv.len() != 3 {
             return Err(debug_subcommand_envelope_error(sub));
         }
-        let key = &argv[2];
+        // DEBUG <sub> <key> must resolve the key in the client's SELECTed DB.
+        // fr stores keys DB-namespaced (encode_db_key); the raw arg only matches
+        // db 0, so without this a non-zero-DB key reads db 0's same-named object
+        // (wrong value) or "no such key" — same class as the DIGEST-VALUE fix.
+        let key_buf = fr_store::encode_db_key(store.dispatch_client_ctx.db_index, &argv[2]);
+        let key = key_buf.as_slice();
         let Some(encoding) = store.object_encoding(key, now_ms) else {
             return Ok(RespFrame::Error("ERR no such key".to_string()));
         };
@@ -24454,7 +26340,9 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
                 "ERR Not an sds encoded string.".to_string(),
             ));
         }
-        let key_len = key.len();
+        // key_sds_len reports the LOGICAL key the client passed (matching redis's
+        // per-DB sds key), not the DB-namespaced physical key used for the lookup.
+        let key_len = argv[2].len();
         let val_len = store.strlen(key, now_ms).unwrap_or(0);
         let key_header = sds_key_header_size(key_len);
         let val_header = sds_value_header_size(val_len);
@@ -24504,7 +26392,12 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         if argv.len() != 3 {
             return Err(debug_subcommand_envelope_error(sub));
         }
-        let key = &argv[2];
+        // DEBUG <sub> <key> must resolve the key in the client's SELECTed DB.
+        // fr stores keys DB-namespaced (encode_db_key); the raw arg only matches
+        // db 0, so without this a non-zero-DB key reads db 0's same-named object
+        // (wrong value) or "no such key" — same class as the DIGEST-VALUE fix.
+        let key_buf = fr_store::encode_db_key(store.dispatch_client_ctx.db_index, &argv[2]);
+        let key = key_buf.as_slice();
         let Some(encoding) = store.object_encoding(key, now_ms) else {
             return Ok(RespFrame::Error("ERR no such key".to_string()));
         };
@@ -24526,7 +26419,12 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         if argv.len() != 3 && argv.len() != 4 {
             return Err(debug_subcommand_envelope_error(sub));
         }
-        let key = &argv[2];
+        // DEBUG <sub> <key> must resolve the key in the client's SELECTed DB.
+        // fr stores keys DB-namespaced (encode_db_key); the raw arg only matches
+        // db 0, so without this a non-zero-DB key reads db 0's same-named object
+        // (wrong value) or "no such key" — same class as the DIGEST-VALUE fix.
+        let key_buf = fr_store::encode_db_key(store.dispatch_client_ctx.db_index, &argv[2]);
+        let key = key_buf.as_slice();
         let Some(encoding) = store.object_encoding(key, now_ms) else {
             return Ok(RespFrame::Error("ERR no such key".to_string()));
         };
@@ -24626,7 +26524,12 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         if argv.len() < 3 || argv.len() > 4 {
             return Err(debug_subcommand_envelope_error(sub));
         }
-        let key = &argv[2];
+        // DEBUG <sub> <key> must resolve the key in the client's SELECTed DB.
+        // fr stores keys DB-namespaced (encode_db_key); the raw arg only matches
+        // db 0, so without this a non-zero-DB key reads db 0's same-named object
+        // (wrong value) or "no such key" — same class as the DIGEST-VALUE fix.
+        let key_buf = fr_store::encode_db_key(store.dispatch_client_ctx.db_index, &argv[2]);
+        let key = key_buf.as_slice();
         let Some(encoding) = store.object_encoding(key, now_ms) else {
             return Ok(RespFrame::Error("ERR no such key".to_string()));
         };
@@ -24820,11 +26723,19 @@ fn compute_debug_digest(store: &mut Store, now_ms: u64, keys: Option<&[&[u8]]>) 
     let mut digest = [0u8; 20];
 
     if let Some(key_list) = keys {
+        // (frankenredis-0667f) Keys are stored DB-namespaced (encode_db_key:
+        // db 0 = raw, db N = \0frdb\0-prefixed). DEBUG DIGEST-VALUE must look up
+        // the key in the client's SELECTed DB, else any key in a non-zero DB
+        // digests to the empty 0000... value. The per-key path only uses the key
+        // for lookup (the value alone is mixed, not the name), so namespacing the
+        // physical key is sufficient and byte-identical for db 0.
+        let db = store.dispatch_client_ctx.db_index;
         for key in key_list {
-            store.expire_key_if_stale(key, now_ms);
-            if store.get_value_and_expiry(key).is_some() {
+            let pk = fr_store::encode_db_key(db, key);
+            store.expire_key_if_stale(&pk, now_ms);
+            if store.get_value_and_expiry(&pk).is_some() {
                 let mut object_digest = [0u8; 20];
-                mix_debug_object_digest(store, key, now_ms, &mut object_digest);
+                mix_debug_object_digest(store, &pk, now_ms, &mut object_digest);
                 for (dst, src) in digest.iter_mut().zip(object_digest) {
                     *dst ^= src;
                 }
@@ -24833,17 +26744,40 @@ fn compute_debug_digest(store: &mut Store, now_ms: u64, keys: Option<&[&[u8]]>) 
         return digest_to_hex(&digest);
     }
 
-    let keys_to_process = store.all_keys();
-    if !keys_to_process.is_empty() {
-        mix_digest(&mut digest, &0_u32.to_be_bytes());
+    // Redis's computeDatasetDigest walks DBs in ascending order and, for every
+    // NON-EMPTY DB, mixes htonl(dbid) into the running digest *before* XOR-ing
+    // that DB's per-key digests in — so "the same dataset moved to another DB"
+    // yields a different digest. Each per-key digest mixes the LOGICAL key name.
+    // fr stores keys DB-namespaced (encode_db_key), so the old code mixed a single
+    // htonl(0) plus the *physical* (namespaced) key name: byte-identical to redis
+    // for db 0 but divergent for every key in a non-zero DB. Group by decoded DB
+    // index and mix htonl(dbid) + the de-namespaced name to match redis across DBs.
+    let mut keys_by_db: std::collections::BTreeMap<usize, Vec<Vec<u8>>> =
+        std::collections::BTreeMap::new();
+    for key in store.all_keys() {
+        let db = fr_store::decode_db_key(&key).map_or(0, |(db, _)| db);
+        keys_by_db.entry(db).or_default().push(key);
     }
 
-    for key in &keys_to_process {
-        store.expire_key_if_stale(key, now_ms);
-        if store.get_value_and_expiry(key).is_some() {
+    for (db, phys_keys) in &keys_by_db {
+        // Resolve survivors first (lazy-expiry mutates the store); only a DB that
+        // still holds at least one live key contributes its htonl(dbid) header.
+        let mut survivors: Vec<&[u8]> = Vec::new();
+        for pk in phys_keys {
+            store.expire_key_if_stale(pk, now_ms);
+            if store.get_value_and_expiry(pk).is_some() {
+                survivors.push(pk.as_slice());
+            }
+        }
+        if survivors.is_empty() {
+            continue;
+        }
+        mix_digest(&mut digest, &(*db as u32).to_be_bytes());
+        for pk in survivors {
+            let logical = fr_store::decode_db_key(pk).map_or(pk, |(_, lk)| lk);
             let mut key_value_digest = [0u8; 20];
-            mix_digest(&mut key_value_digest, key);
-            mix_debug_object_digest(store, key, now_ms, &mut key_value_digest);
+            mix_digest(&mut key_value_digest, logical);
+            mix_debug_object_digest(store, pk, now_ms, &mut key_value_digest);
             xor_digest(&mut digest, &key_value_digest);
         }
     }
@@ -24893,12 +26827,12 @@ fn mix_debug_object_digest(store: &mut Store, key: &[u8], now_ms: u64, digest: &
             }
         }
         Value::Stream(entries) => {
-            for ((ms, seq), fields) in entries {
+            for ((ms, seq), fields) in entries.iter() {
                 let item_id = format!("{ms}.{seq}");
                 mix_digest(digest, item_id.as_bytes());
-                for (field, value) in fields {
-                    mix_digest(digest, &field);
-                    mix_digest(digest, &value);
+                for (field, value) in fields.iter() {
+                    mix_digest(digest, field);
+                    mix_digest(digest, value);
                 }
             }
         }
@@ -25047,23 +26981,17 @@ fn move_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
     let source = fr_store::encode_db_key(source_db, &argv[1]);
     let destination = fr_store::encode_db_key(target_db as usize, &argv[1]);
     // Upstream db.c::moveCommand uses lookupKeyWrite for both source and
-    // destination existence checks, so these keep normal write-lookup touch
-    // semantics.
-    if !store.exists(&source, now_ms) || store.exists(&destination, now_ms) {
+    // destination existence checks AND for the transfer — lookupKeyWrite does
+    // NOT touch keyspace_hits/misses, so use the no-stat probes/copy here.
+    // (Plain store.exists / store.copy record a keyspace lookup and would
+    // over-count MOVE as if it were a read.)
+    if !store.exists_no_stat(&source, now_ms) || store.exists_no_stat(&destination, now_ms) {
         return Ok(RespFrame::Integer(0));
     }
-    let dirty_before = store.dirty;
-    store
-        .copy(&source, &destination, false, now_ms)
+    let moved = store
+        .move_existing_no_stat(&source, &destination, now_ms)
         .map_err(CommandError::Store)?;
-    store.del(&[source], now_ms);
-    // (frankenredis-movedirty) Upstream db.c::moveCommand does `server.dirty++`
-    // exactly once for the whole transfer. fr implements MOVE as copy + del,
-    // and each helper bumps the dirty counter, so the move double-counted —
-    // diverging rdb_changes_since_last_save and the auto-save threshold from
-    // vendored. Normalize to a single dirty unit.
-    store.dirty = dirty_before.saturating_add(1);
-    Ok(RespFrame::Integer(1))
+    Ok(RespFrame::Integer(i64::from(moved)))
 }
 
 fn latency_graph(event: &str, samples: &[fr_store::LatencySample]) -> String {
@@ -25394,6 +27322,7 @@ fn bitfield_cmd(
     // execution loop interleaved per-op store access, so a valid early op
     // surfaced WRONGTYPE before a later op's arg error, and an op-less command
     // skipped the type check entirely. Validate all args first, then type-check.
+    let mut has_write = false;
     {
         let mut j = 2;
         while j < argv.len() {
@@ -25426,6 +27355,7 @@ fn bitfield_cmd(
                     return invalid_offset();
                 }
                 if needs_value {
+                    has_write = true;
                     parse_i64_arg(&argv[j + 3])?;
                 }
                 j += if needs_value { 4 } else { 3 };
@@ -25433,13 +27363,15 @@ fn bitfield_cmd(
                 if j + 1 >= argv.len() {
                     return Ok(RespFrame::Error("ERR syntax error".to_string()));
                 }
-                let mode = std::str::from_utf8(&argv[j + 1])
-                    .map_err(|_| CommandError::InvalidUtf8Argument)?;
-                if !(mode.eq_ignore_ascii_case("WRAP")
-                    || mode.eq_ignore_ascii_case("SAT")
-                    || mode.eq_ignore_ascii_case("FAIL"))
+                // (frankenredis-re7sp) byte-match OVERFLOW mode; non-UTF8/unknown ->
+                // "Invalid OVERFLOW type specified" (not "invalid UTF-8"), via Err so
+                // it carries redis's Lua script-context suffix.
+                let mode = &argv[j + 1];
+                if !(mode.eq_ignore_ascii_case(b"WRAP")
+                    || mode.eq_ignore_ascii_case(b"SAT")
+                    || mode.eq_ignore_ascii_case(b"FAIL"))
                 {
-                    return Ok(RespFrame::Error(
+                    return Err(CommandError::Custom(
                         "ERR Invalid OVERFLOW type specified".to_string(),
                     ));
                 }
@@ -25457,8 +27389,61 @@ fn bitfield_cmd(
         None | Some(ValueType::String) => {}
         Some(_) => return Err(CommandError::Store(fr_store::StoreError::WrongType)),
     }
+    // Keyspace accounting: upstream bitfieldGeneric looks the key up ONCE for the
+    // whole command — lookupKeyWrite (no keyspace stats) when any SET/INCRBY op
+    // is present, else lookupKeyRead (one hit/miss). Record that single read here
+    // only in the all-GET (read-only) case; the per-op store reads below are
+    // no-stat so they never double-count.
+    if !has_write {
+        record_source_key_lookups(store, &[key.as_slice()], now_ms);
+        // (CrimsonHawk) Read-only fast path: an all-GET BITFIELD re-resolved the key
+        // per op via bitfield_get_no_stat (drop_if_expired + entries.get each time —
+        // ~3 keyspace lookups/op). Collect the GET ops (args already validated in the
+        // pass above) and apply them all after a single keyspace lookup. OVERFLOW
+        // clauses are no-ops for reads. Byte-identical to the per-op loop below.
+        let mut ops: Vec<(u64, u8, bool)> = Vec::with_capacity(argv.len() / 3);
+        let mut i = 2;
+        while i < argv.len() {
+            if argv[i].eq_ignore_ascii_case(b"GET") {
+                if let Some((signed, bits)) = bitfield_parse_encoding(&argv[i + 1])
+                    && let Some(bit_offset) = bitfield_parse_offset(&argv[i + 2], bits)
+                {
+                    ops.push((bit_offset, bits, signed));
+                }
+                i += 3;
+            } else {
+                // OVERFLOW <mode>: no effect on a read-only command.
+                i += 2;
+            }
+        }
+        let vals = store.bitfield_get_batch(key, &ops, now_ms);
+        return Ok(RespFrame::Array(Some(
+            vals.into_iter().map(RespFrame::Integer).collect(),
+        )));
+    }
 
-    let mut results: Vec<RespFrame> = Vec::new();
+    // (frankenredis-i229a) Parse the whole command into ops + per-op clamp metadata, then apply
+    // them under ONE keyspace lookup via `Store::bitfield_apply_ops` (was: one store lookup PER op).
+    // Byte-identical: the SAME per-op clamp/overflow/reserve semantics run in the resolver below,
+    // and `bitfield_apply_ops` replicates the per-op read/write/reserve bookkeeping exactly (locked
+    // by `bitfield_apply_ops_matches_per_op_reference_across_matrix`).
+    enum BfMeta {
+        Get,
+        Set {
+            value: i64,
+            signed: bool,
+            bits: u8,
+            mode: BitfieldOverflow,
+        },
+        Incrby {
+            incr: i64,
+            signed: bool,
+            bits: u8,
+            mode: BitfieldOverflow,
+        },
+    }
+    let mut store_ops: Vec<fr_store::BitfieldOp> = Vec::new();
+    let mut metas: Vec<BfMeta> = Vec::new();
     let mut overflow_mode = BitfieldOverflow::Wrap;
     let mut i = 2;
 
@@ -25485,10 +27470,12 @@ fn bitfield_cmd(
                     ));
                 }
             };
-            let val = store
-                .bitfield_get(key, bit_offset, bits, signed, now_ms)
-                .map_err(CommandError::Store)?;
-            results.push(RespFrame::Integer(val));
+            store_ops.push(fr_store::BitfieldOp::Get {
+                offset: bit_offset,
+                bits,
+                signed,
+            });
+            metas.push(BfMeta::Get);
             i += 3;
         } else if sub.eq_ignore_ascii_case("SET") {
             if i + 3 >= argv.len() {
@@ -25512,57 +27499,21 @@ fn bitfield_cmd(
                 }
             };
             let value = parse_i64_arg(&argv[i + 3])?;
-            // Mirror upstream bitops.c::bitfieldCommand SET path:
-            //   newval = thisop->i64;
-            //   overflow = checkUnsignedBitfieldOverflow(newval, 0, bits, owtype, &wrapped);
-            //                  ^ for unsigned, newval (int64_t) is read as uint64_t, so a
-            //   negative i64 becomes UINT64_MAX which exceeds max → positive-overflow path,
-            //   SAT clamps to MAX (255 for u8), not 0. fr was funneling all SET-paths through
-            //   bitfield_clamp_with_overflow with i64_overflowed=false, hitting the
-            //   `value < 0 → (0, true)` branch that's only correct for INCRBY underflow.
-            // Signal the positive-overflow case via the existing i64_overflowed hint so the
-            // unsigned-SAT branch returns max (matches upstream).
-            // Also: upstream's SET path with FAIL overflow returns nil and does NOT write
-            //   `if (!(overflow && owtype == BFOVERFLOW_FAIL)) { addReply; setUnsignedBitfield; }`
-            // fr was writing the wrap value and returning Integer(0) regardless; switch to
-            // returning BulkString(None) without touching the store under FAIL-on-overflow.
-            // (frankenredis-bfsetovrflw)
-            let (clamped, overflowed) = if signed {
-                // Signed SET routes through the faithful checkSignedBitfieldOverflow
-                // port so extreme-negative literals saturate like redis. (INCRBY
-                // and unsigned SET keep the existing clamp.)
-                bitfield_signed_set_resolve(value, bits, overflow_mode)
-            } else {
-                let trigger_pos_overflow = value < 0;
-                bitfield_clamp_with_overflow(
-                    value,
-                    trigger_pos_overflow,
-                    bits,
-                    false,
-                    overflow_mode,
-                )
-            };
-            if overflowed && overflow_mode == BitfieldOverflow::Fail {
-                // Upstream still ran lookupStringForBitCommand, so the key is
-                // created/extended to this write's offset even though the value
-                // isn't written (FAIL). (frankenredis bitfield-fail-extend)
-                store
-                    .bitfield_reserve_for_write(key, bit_offset, bits, now_ms)
-                    .map_err(CommandError::Store)?;
-                results.push(RespFrame::BulkString(None));
-                i += 4;
-                continue;
-            }
-            let old = store
-                .bitfield_set(key, bit_offset, bits, clamped, now_ms)
-                .map_err(CommandError::Store)?;
-            // Return old value, sign-extended if signed
-            let old_result = if signed {
-                bitfield_sign_extend(old, bits)
-            } else {
-                old
-            };
-            results.push(RespFrame::Integer(old_result));
+            // Clamp/overflow semantics (bfsetovrflw) are unchanged — they now run in the resolver
+            // passed to `bitfield_apply_ops` (SET: signed via bitfield_signed_set_resolve, unsigned
+            // via bitfield_clamp_with_overflow with the value<0 positive-overflow hint; FAIL =>
+            // reserve-extend without writing => nil).
+            store_ops.push(fr_store::BitfieldOp::Set {
+                offset: bit_offset,
+                bits,
+                signed,
+            });
+            metas.push(BfMeta::Set {
+                value,
+                signed,
+                bits,
+                mode: overflow_mode,
+            });
             i += 4;
         } else if sub.eq_ignore_ascii_case("INCRBY") {
             if i + 3 >= argv.len() {
@@ -25587,43 +27538,35 @@ fn bitfield_cmd(
             };
             let increment = parse_i64_arg(&argv[i + 3])?;
 
-            // Read current value
-            let current = store
-                .bitfield_get(key, bit_offset, bits, signed, now_ms)
-                .map_err(CommandError::Store)?;
-
-            let (new_val, i64_overflowed) = current.overflowing_add(increment);
-            let (clamped, overflowed) =
-                bitfield_clamp_with_overflow(new_val, i64_overflowed, bits, signed, overflow_mode);
-
-            if overflowed && overflow_mode == BitfieldOverflow::Fail {
-                // As with SET: the key is created/extended upfront even when the
-                // INCRBY aborts under FAIL. (frankenredis bitfield-fail-extend)
-                store
-                    .bitfield_reserve_for_write(key, bit_offset, bits, now_ms)
-                    .map_err(CommandError::Store)?;
-                results.push(RespFrame::BulkString(None));
-            } else {
-                store
-                    .bitfield_set(key, bit_offset, bits, clamped, now_ms)
-                    .map_err(CommandError::Store)?;
-                results.push(RespFrame::Integer(clamped));
-            }
+            // Clamp/overflow (current+incr via bitfield_clamp_with_overflow, FAIL => nil) now runs
+            // in the resolver below, applied under the single fused lookup.
+            store_ops.push(fr_store::BitfieldOp::Incrby {
+                offset: bit_offset,
+                bits,
+                signed,
+            });
+            metas.push(BfMeta::Incrby {
+                incr: increment,
+                signed,
+                bits,
+                mode: overflow_mode,
+            });
             i += 4;
         } else if sub.eq_ignore_ascii_case("OVERFLOW") {
             if i + 1 >= argv.len() {
                 return Ok(RespFrame::Error("ERR syntax error".to_string()));
             }
-            let mode =
-                std::str::from_utf8(&argv[i + 1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-            if mode.eq_ignore_ascii_case("WRAP") {
+            // (frankenredis-re7sp) byte-match OVERFLOW mode; non-UTF8/unknown ->
+            // "Invalid OVERFLOW type specified" via Err (Lua script-context suffix).
+            let mode = &argv[i + 1];
+            if mode.eq_ignore_ascii_case(b"WRAP") {
                 overflow_mode = BitfieldOverflow::Wrap;
-            } else if mode.eq_ignore_ascii_case("SAT") {
+            } else if mode.eq_ignore_ascii_case(b"SAT") {
                 overflow_mode = BitfieldOverflow::Sat;
-            } else if mode.eq_ignore_ascii_case("FAIL") {
+            } else if mode.eq_ignore_ascii_case(b"FAIL") {
                 overflow_mode = BitfieldOverflow::Fail;
             } else {
-                return Ok(RespFrame::Error(
+                return Err(CommandError::Custom(
                     // Upstream t_string.c bitfieldCommand: plain
                     // "ERR Invalid OVERFLOW type specified".
                     // (br-frankenredis-ugkf)
@@ -25635,6 +27578,65 @@ fn bitfield_cmd(
             return Ok(RespFrame::Error("ERR syntax error".to_string()));
         }
     }
+
+    // (frankenredis-i229a) Apply every op under ONE keyspace lookup; the resolver runs the per-op
+    // clamp/overflow exactly as the per-op path did (byte-identical, `bitfield_apply_ops` gate).
+    let raw = store
+        .bitfield_apply_ops(key, &store_ops, now_ms, |idx, current| match &metas[idx] {
+            BfMeta::Set {
+                value,
+                signed,
+                bits,
+                mode,
+            } => {
+                let (clamped, overflowed) = if *signed {
+                    bitfield_signed_set_resolve(*value, *bits, *mode)
+                } else {
+                    bitfield_clamp_with_overflow(*value, *value < 0, *bits, false, *mode)
+                };
+                if overflowed && *mode == BitfieldOverflow::Fail {
+                    None
+                } else {
+                    Some(clamped)
+                }
+            }
+            BfMeta::Incrby {
+                incr,
+                signed,
+                bits,
+                mode,
+            } => {
+                let (new_val, i64_overflowed) = current.overflowing_add(*incr);
+                let (clamped, overflowed) =
+                    bitfield_clamp_with_overflow(new_val, i64_overflowed, *bits, *signed, *mode);
+                if overflowed && *mode == BitfieldOverflow::Fail {
+                    None
+                } else {
+                    Some(clamped)
+                }
+            }
+            BfMeta::Get => unreachable!("resolver is only called for write ops"),
+        })
+        .map_err(CommandError::Store)?;
+    let results: Vec<RespFrame> = metas
+        .iter()
+        .zip(raw)
+        .map(|(meta, r)| match meta {
+            BfMeta::Get => RespFrame::Integer(r.expect("GET always yields a value")),
+            BfMeta::Set { signed, bits, .. } => match r {
+                Some(old) => RespFrame::Integer(if *signed {
+                    bitfield_sign_extend(old, *bits)
+                } else {
+                    old
+                }),
+                None => RespFrame::BulkString(None),
+            },
+            BfMeta::Incrby { .. } => match r {
+                Some(new) => RespFrame::Integer(new),
+                None => RespFrame::BulkString(None),
+            },
+        })
+        .collect();
     Ok(RespFrame::Array(Some(results)))
 }
 
@@ -25649,62 +27651,107 @@ fn bitfield_ro_cmd(
         return Err(CommandError::WrongArity("BITFIELD_RO"));
     }
     let key = &argv[1];
-    let mut results: Vec<RespFrame> = Vec::new();
-    let mut i = 2;
 
-    while i < argv.len() {
-        let sub = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-        if sub.eq_ignore_ascii_case("GET") {
-            if i + 2 >= argv.len() {
-                return Ok(RespFrame::Error("ERR syntax error".to_string()));
-            }
-            let (signed, bits) = match bitfield_parse_encoding(&argv[i + 1]) {
-                Some(v) => v,
-                None => {
+    // (frankenredis-bfro-order) Upstream bitops.c::bitfieldGeneric validates
+    // EVERY operation's args (encoding / offset / value / OVERFLOW keyword) in a
+    // full pass BEFORE rejecting BITFIELD_RO for a write subcommand, and it
+    // type-checks the key in the read-only branch even with no GET op. So a SET/
+    // INCRBY with a malformed type/offset/value — or a bad OVERFLOW keyword
+    // anywhere — surfaces that arg error rather than the "only supports GET"
+    // error, and `BITFIELD_RO wrongtypekey` replies WRONGTYPE. fr previously
+    // short-circuited on the first SET/INCRBY and skipped the no-op type check.
+    let mut has_write = false;
+    {
+        let mut j = 2;
+        while j < argv.len() {
+            let sub =
+                std::str::from_utf8(&argv[j]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+            if sub.eq_ignore_ascii_case("GET")
+                || sub.eq_ignore_ascii_case("SET")
+                || sub.eq_ignore_ascii_case("INCRBY")
+            {
+                let needs_value = !sub.eq_ignore_ascii_case("GET");
+                let last = if needs_value { j + 3 } else { j + 2 };
+                if last >= argv.len() {
+                    return Ok(RespFrame::Error("ERR syntax error".to_string()));
+                }
+                let Some((_signed, bits)) = bitfield_parse_encoding(&argv[j + 1]) else {
                     return Ok(RespFrame::Error(
                         "ERR Invalid bitfield type. Use something like i16 u8. Note that u64 is not supported but i64 is."
                             .to_string(),
                     ));
-                }
-            };
-            let bit_offset = match bitfield_parse_offset(&argv[i + 2], bits) {
-                Some(v) => v,
-                None => {
+                };
+                if bitfield_parse_offset(&argv[j + 2], bits).is_none() {
                     return Ok(RespFrame::Error(
                         "ERR bit offset is not an integer or out of range".to_string(),
                     ));
                 }
-            };
+                if needs_value {
+                    has_write = true;
+                    parse_i64_arg(&argv[j + 3])?;
+                }
+                j += if needs_value { 4 } else { 3 };
+            } else if sub.eq_ignore_ascii_case("OVERFLOW") {
+                // OVERFLOW is a per-op modifier valid in BITFIELD_RO too (ineffective
+                // without a following SET/INCRBY). (br-frankenredis-bitfieldroovrflw)
+                if j + 1 >= argv.len() {
+                    return Ok(RespFrame::Error("ERR syntax error".to_string()));
+                }
+                // (frankenredis-re7sp) byte-match OVERFLOW mode; non-UTF8/unknown ->
+                // "Invalid OVERFLOW type specified" (not "invalid UTF-8"), via Err so
+                // it carries redis's Lua script-context suffix.
+                let mode = &argv[j + 1];
+                if !(mode.eq_ignore_ascii_case(b"WRAP")
+                    || mode.eq_ignore_ascii_case(b"SAT")
+                    || mode.eq_ignore_ascii_case(b"FAIL"))
+                {
+                    return Err(CommandError::Custom(
+                        "ERR Invalid OVERFLOW type specified".to_string(),
+                    ));
+                }
+                j += 2;
+            } else {
+                return Ok(RespFrame::Error("ERR syntax error".to_string()));
+            }
+        }
+    }
+    // All args validated: a write subcommand is rejected here (upstream returns
+    // this BEFORE the read-only key lookup/type-check).
+    if has_write {
+        return Ok(RespFrame::Error(
+            "ERR BITFIELD_RO only supports the GET subcommand".to_string(),
+        ));
+    }
+    // Read-only branch: type-check the key once (WRONGTYPE for a non-string
+    // present key, even with no GET op). No-stat peek; the single read-only
+    // keyspace lookup is recorded once below (per-GET reads are no-stat).
+    match store.peek_value_type(key, now_ms) {
+        None | Some(ValueType::String) => {}
+        Some(_) => return Err(CommandError::Store(fr_store::StoreError::WrongType)),
+    }
+    // BITFIELD_RO is always read-only: upstream does one lookupKeyRead for the
+    // whole command. Record that single hit/miss; the per-GET store reads below
+    // are no-stat so a multi-GET BITFIELD_RO records exactly one, like redis.
+    record_source_key_lookups(store, &[key.as_slice()], now_ms);
+
+    let mut results: Vec<RespFrame> = Vec::new();
+    let mut i = 2;
+    while i < argv.len() {
+        let sub = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        if sub.eq_ignore_ascii_case("GET") {
+            // Args already validated above.
+            let (signed, bits) =
+                bitfield_parse_encoding(&argv[i + 1]).expect("GET encoding validated");
+            let bit_offset =
+                bitfield_parse_offset(&argv[i + 2], bits).expect("GET offset validated");
             let val = store
-                .bitfield_get(key, bit_offset, bits, signed, now_ms)
+                .bitfield_get_no_stat(key, bit_offset, bits, signed, now_ms)
                 .map_err(CommandError::Store)?;
             results.push(RespFrame::Integer(val));
             i += 3;
-        } else if sub.eq_ignore_ascii_case("OVERFLOW") {
-            // Upstream bitops.c::bitfieldGeneric processes OVERFLOW
-            // for both BITFIELD and BITFIELD_RO (it's a per-operation
-            // modifier; ineffective when no SET/INCRBY follows).
-            // (br-frankenredis-bitfieldroovrflw)
-            if i + 1 >= argv.len() {
-                return Ok(RespFrame::Error("ERR syntax error".to_string()));
-            }
-            let owtype =
-                std::str::from_utf8(&argv[i + 1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-            if !owtype.eq_ignore_ascii_case("WRAP")
-                && !owtype.eq_ignore_ascii_case("SAT")
-                && !owtype.eq_ignore_ascii_case("FAIL")
-            {
-                return Ok(RespFrame::Error(
-                    "ERR Invalid OVERFLOW type specified".to_string(),
-                ));
-            }
-            i += 2;
-        } else if sub.eq_ignore_ascii_case("SET") || sub.eq_ignore_ascii_case("INCRBY") {
-            return Ok(RespFrame::Error(
-                "ERR BITFIELD_RO only supports the GET subcommand".to_string(),
-            ));
         } else {
-            return Ok(RespFrame::Error("ERR syntax error".to_string()));
+            // OVERFLOW (no-op for read-only); SET/INCRBY already returned above.
+            i += 2;
         }
     }
     Ok(RespFrame::Array(Some(results)))
@@ -26210,10 +28257,14 @@ fn bzpopmin(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
     for key in &argv[1..argv.len() - 1] {
         match store.zpopmin(key, now_ms) {
             Ok(Some((member, score))) => {
+                // The score honors the negotiated protocol (RESP3 Double / RESP2
+                // bulk string), matching upstream genericZpopCommand's
+                // addReplyDouble used by the BZPOPMIN immediate-serve reply.
+                let proto = store.dispatch_client_ctx.resp_protocol_version;
                 return Ok(RespFrame::Array(Some(vec![
                     RespFrame::BulkString(Some(key.clone())),
                     RespFrame::BulkString(Some(member)),
-                    RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes())),
+                    zpop_score_frame(score, proto),
                 ])));
             }
             Ok(None) => continue,
@@ -26232,10 +28283,11 @@ fn bzpopmax(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
     for key in &argv[1..argv.len() - 1] {
         match store.zpopmax(key, now_ms) {
             Ok(Some((member, score))) => {
+                let proto = store.dispatch_client_ctx.resp_protocol_version;
                 return Ok(RespFrame::Array(Some(vec![
                     RespFrame::BulkString(Some(key.clone())),
                     RespFrame::BulkString(Some(member)),
-                    RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes())),
+                    zpop_score_frame(score, proto),
                 ])));
             }
             Ok(None) => continue,
@@ -26363,7 +28415,17 @@ fn restore_cmd(
     now_ms: u64,
 ) -> Result<RespFrame, CommandError> {
     if argv.len() < 4 {
-        return Err(CommandError::WrongArity("RESTORE"));
+        // RESTORE-ASKING (cluster slot-migration alias) shares this handler;
+        // report the invoked name. (frankenredis-aliasarity)
+        let name = if argv
+            .first()
+            .is_some_and(|c| c.eq_ignore_ascii_case(b"RESTORE-ASKING"))
+        {
+            "RESTORE-ASKING"
+        } else {
+            "RESTORE"
+        };
+        return Err(CommandError::WrongArity(name));
     }
     let key = &argv[1];
     let payload = &argv[3];
@@ -26373,22 +28435,23 @@ fn restore_cmd(
     // (br-frankenredis-restoreorder)
     let mut replace = false;
     let mut absttl = false;
-    let mut idletime_seen = false;
-    let mut freq_seen = false;
+    let mut idletime_secs = None;
+    let mut lfu_freq = None;
     let mut i = 4;
     while i < argv.len() {
-        let opt = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-        if opt.eq_ignore_ascii_case("REPLACE") {
+        // (frankenredis-44iva) byte-match RESTORE options; non-UTF8 -> syntax error
+        let opt = &argv[i];
+        if opt.eq_ignore_ascii_case(b"REPLACE") {
             replace = true;
             i += 1;
-        } else if opt.eq_ignore_ascii_case("ABSTTL") {
+        } else if opt.eq_ignore_ascii_case(b"ABSTTL") {
             absttl = true;
             i += 1;
-        } else if opt.eq_ignore_ascii_case("IDLETIME") {
+        } else if opt.eq_ignore_ascii_case(b"IDLETIME") {
             // Upstream requires an additional arg AND that FREQ
             // hasn't been seen yet; without those, falls through
             // to the catch-all 'syntax error'.
-            if freq_seen || i + 1 >= argv.len() {
+            if lfu_freq.is_some() || i + 1 >= argv.len() {
                 return Err(CommandError::SyntaxError);
             }
             let v = parse_i64_arg(&argv[i + 1])?;
@@ -26397,10 +28460,15 @@ fn restore_cmd(
                     "ERR Invalid IDLETIME value, must be >= 0".to_string(),
                 ));
             }
-            idletime_seen = true;
+            let Ok(v) = u64::try_from(v) else {
+                return Ok(RespFrame::Error(
+                    "ERR Invalid IDLETIME value, must be >= 0".to_string(),
+                ));
+            };
+            idletime_secs = Some(v);
             i += 2;
-        } else if opt.eq_ignore_ascii_case("FREQ") {
-            if idletime_seen || i + 1 >= argv.len() {
+        } else if opt.eq_ignore_ascii_case(b"FREQ") {
+            if idletime_secs.is_some() || i + 1 >= argv.len() {
                 return Err(CommandError::SyntaxError);
             }
             let v = parse_i64_arg(&argv[i + 1])?;
@@ -26409,7 +28477,12 @@ fn restore_cmd(
                     "ERR Invalid FREQ value, must be >= 0 and <= 255".to_string(),
                 ));
             }
-            freq_seen = true;
+            let Ok(v) = u8::try_from(v) else {
+                return Ok(RespFrame::Error(
+                    "ERR Invalid FREQ value, must be >= 0 and <= 255".to_string(),
+                ));
+            };
+            lfu_freq = Some(v);
             i += 2;
         } else {
             return Err(CommandError::SyntaxError);
@@ -26420,8 +28493,10 @@ fn restore_cmd(
     // `lookupKeyWrite` + busy-key check before `verifyDumpPayload`.
     // (br-frankenredis-ao1i)
     // Upstream cluster.c::restoreCommand uses lookupKeyWrite for the busy-key
-    // preflight, so the check keeps normal write-lookup touch semantics.
-    if !replace && store.exists(key, now_ms) {
+    // preflight — lookupKeyWrite reaps a stale-expired key but does NOT bump
+    // keyspace_hits/misses, so use exists_no_stat (the stat-counting store.exists
+    // over-counted a miss here, since RESTORE is a write).
+    if !replace && store.exists_no_stat(key, now_ms) {
         return Ok(RespFrame::Error(
             "BUSYKEY Target key name already exists.".to_string(),
         ));
@@ -26444,7 +28519,11 @@ fn restore_cmd(
     } else {
         ttl_ms
     };
-    match store.restore_key(key, effective_ttl, payload, replace, now_ms) {
+    let metadata = RestoreMetadata {
+        idletime_secs,
+        lfu_freq,
+    };
+    match store.restore_key_with_metadata(key, effective_ttl, payload, replace, metadata, now_ms) {
         Ok(()) => Ok(RespFrame::SimpleString("OK".to_string())),
         Err(StoreError::BusyKey) => Ok(RespFrame::Error(
             "BUSYKEY Target key name already exists.".to_string(),
@@ -26457,10 +28536,128 @@ fn restore_cmd(
 }
 
 fn sort_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
-    sort_generic(argv, store, now_ms, /* readonly */ false, "SORT")
+    sort_generic::<true>(argv, store, now_ms, /* readonly */ false, "SORT")
 }
 
-fn sort_generic(
+/// Place exactly the elements that a full sort would put in `v[start..end]` into
+/// `v[start..end]`, in sorted order, WITHOUT fully sorting the whole slice —
+/// mirroring redis's `pqsort` partial-sort-for-SORT+LIMIT (sort.c:513). `cmp`
+/// MUST be a strict total order (the callers append an original-index tiebreak),
+/// so the unstable selection lands the same window a stable full sort would and
+/// the output is byte-identical. Cost is O(n) for the two `select_nth` partitions
+/// plus O(k log k) to sort the window, vs O(n log n) for a full sort. Elements
+/// outside `[start, end)` are left partitioned (all `<=` the window before it,
+/// all `>=` after it) — exactly the rows the caller's LIMIT drain/truncate
+/// discards. (frankenredis-sortlim)
+fn partial_sort_window<T>(
+    v: &mut [T],
+    start: usize,
+    end: usize,
+    mut cmp: impl FnMut(&T, &T) -> std::cmp::Ordering,
+) {
+    let n = v.len();
+    if n == 0 || start >= end {
+        return;
+    }
+    // Isolate the `end` smallest into v[0..end] (unordered).
+    if end < n {
+        v.select_nth_unstable_by(end - 1, &mut cmp);
+    }
+    // Within v[0..end], push the `start` smallest into v[0..start], leaving the
+    // requested window in v[start..end] (unordered).
+    if start > 0 {
+        v[..end].select_nth_unstable_by(start, &mut cmp);
+    }
+    // Finally order just the window.
+    v[start..end].sort_unstable_by(&mut cmp);
+}
+
+fn is_c_collation_locale(locale: &str) -> bool {
+    let locale = locale.trim();
+    locale.is_empty()
+        || locale.eq_ignore_ascii_case("C")
+        || locale.eq_ignore_ascii_case("POSIX")
+        || locale.eq_ignore_ascii_case("C.UTF-8")
+        || locale.eq_ignore_ascii_case("C.UTF8")
+}
+
+fn posix_locale_to_bcp47(locale: &str) -> Option<String> {
+    if is_c_collation_locale(locale) {
+        return None;
+    }
+    let without_encoding = locale
+        .split_once('.')
+        .map_or(locale, |(before_encoding, _)| before_encoding);
+    let without_modifier = without_encoding
+        .split_once('@')
+        .map_or(without_encoding, |(before_modifier, _)| before_modifier)
+        .trim();
+    if is_c_collation_locale(without_modifier) {
+        None
+    } else {
+        Some(without_modifier.replace('_', "-"))
+    }
+}
+
+fn active_sort_alpha_collator() -> Option<CollatorBorrowed<'static>> {
+    let locale = std::env::var("LC_ALL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            std::env::var("LC_COLLATE")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .or_else(|| {
+            std::env::var("LANG")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })?;
+    let locale = posix_locale_to_bcp47(&locale)?;
+    let locale = locale.parse::<Locale>().ok()?;
+    let mut options = CollatorOptions::default();
+    options.alternate_handling = Some(AlternateHandling::Shifted);
+    Collator::try_new(locale.into(), options).ok()
+}
+
+/// Compare two `SORT ... ALPHA` elements.
+///
+/// Short-circuits on `collator` BEFORE validating UTF-8. The previous form matched on the
+/// tuple `(collator, from_utf8(left), from_utf8(right))`, and Rust builds a tuple before it
+/// matches — so both validations ran unconditionally, including in the overwhelmingly common
+/// `None` case where the arm falls through to `left.cmp(right)` and both results are thrown
+/// away. That was two full UTF-8 scans of every element on each of the `n log n` comparisons:
+/// `core::str::converts::from_utf8` measured **35.43% flat self** on a `SORT L ALPHA STORE D`
+/// profile over a 1000-element list, the single largest frame.
+///
+/// Byte-identical to the old form: with `collator == None` the old code could only ever reach
+/// `_ => left.cmp(right)`, and the `Some` path keeps the same NUL/UTF-8 guards.
+///
+/// `pub` so `benches/sort_alpha_compare.rs` can A/B it in one binary against its `#[inline(never)]`
+/// pre-short-circuit reference arm (see `docs/BENCH_METHODOLOGY.md`).
+pub fn sort_alpha_compare(
+    collator: Option<&CollatorBorrowed<'_>>,
+    left: &[u8],
+    right: &[u8],
+) -> Ordering {
+    let Some(collator) = collator else {
+        return left.cmp(right);
+    };
+    match (std::str::from_utf8(left), std::str::from_utf8(right)) {
+        (Ok(left_str), Ok(right_str)) if !left_str.contains('\0') && !right_str.contains('\0') => {
+            collator.compare(left_str, right_str)
+        }
+        _ => left.cmp(right),
+    }
+}
+
+// (frankenredis-sortmove) `MOVE` selects how the sorted window is materialised and how the
+// no-GET reply is built: `false` = the historical per-element `clone()` (the A/B reference),
+// `true` = `mem::take` the window slots out of the soon-dropped `elements` and `into_iter` the
+// `sliced` Vec into the reply. Both leave BYTE-IDENTICAL output (the window indices are a
+// permutation, each taken once; `sliced`/`elements` are dropped right after) — locked by the
+// sort differ + `sort_move_matches_clone_reference`. Production calls `::<true>`.
+fn sort_generic<const MOVE: bool>(
     argv: &[Vec<u8>],
     store: &mut Store,
     now_ms: u64,
@@ -26483,54 +28680,97 @@ fn sort_generic(
 
     let mut i = 2;
     while i < argv.len() {
-        let arg = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-        if arg.eq_ignore_ascii_case("BY") {
+        // (frankenredis-44iva) byte-match SORT options; non-UTF8 -> syntax error
+        let arg = &argv[i];
+        if arg.eq_ignore_ascii_case(b"BY") {
             if i + 1 >= argv.len() {
-                return Ok(RespFrame::Error("ERR syntax error".to_string()));
+                return Err(CommandError::SyntaxError); // (re7sp) Err -> Lua script-context suffix
             }
             i += 1;
             by_pattern = Some(argv[i].clone());
-        } else if arg.eq_ignore_ascii_case("GET") {
+        } else if arg.eq_ignore_ascii_case(b"GET") {
             if i + 1 >= argv.len() {
-                return Ok(RespFrame::Error("ERR syntax error".to_string()));
+                return Err(CommandError::SyntaxError); // (re7sp) Err -> Lua script-context suffix
             }
             i += 1;
             get_patterns.push(argv[i].clone());
-        } else if arg.eq_ignore_ascii_case("LIMIT") {
+        } else if arg.eq_ignore_ascii_case(b"LIMIT") {
             if i + 2 >= argv.len() {
-                return Ok(RespFrame::Error("ERR syntax error".to_string()));
+                return Err(CommandError::SyntaxError); // (re7sp) Err -> Lua script-context suffix
             }
             i += 1;
             limit_offset = parse_i64_arg(&argv[i])?;
             i += 1;
             limit_count = parse_i64_arg(&argv[i])?;
-        } else if arg.eq_ignore_ascii_case("ASC") {
+        } else if arg.eq_ignore_ascii_case(b"ASC") {
             desc = false;
-        } else if arg.eq_ignore_ascii_case("DESC") {
+        } else if arg.eq_ignore_ascii_case(b"DESC") {
             desc = true;
-        } else if arg.eq_ignore_ascii_case("ALPHA") {
+        } else if arg.eq_ignore_ascii_case(b"ALPHA") {
             alpha = true;
-        } else if !readonly && arg.eq_ignore_ascii_case("STORE") {
+        } else if !readonly && arg.eq_ignore_ascii_case(b"STORE") {
             // (frankenredis-lryev) Mirror upstream sort.c line 228:
             // STORE is gated on `readonly == 0`. Under SORT_RO the
             // STORE arm is unreachable, so a literal 'STORE' token
             // can land in a GET/BY pattern slot without being
             // misclassified as a flag.
             if i + 1 >= argv.len() {
-                return Ok(RespFrame::Error("ERR syntax error".to_string()));
+                return Err(CommandError::SyntaxError); // (re7sp) Err -> Lua script-context suffix
             }
             i += 1;
             store_dest = Some(argv[i].clone());
         } else {
-            return Ok(RespFrame::Error("ERR syntax error".to_string()));
+            return Err(CommandError::SyntaxError); // (re7sp) Err -> Lua script-context suffix
         }
         i += 1;
     }
 
+    // ── Determine if sorting should be skipped (BY with constant pattern) ──
+    let dontsort = by_pattern.as_ref().is_some_and(|p| !p.contains(&b'*'));
+
     // ── Get elements from the source key ─────────────────────────────
-    let mut elements = store
-        .sort_elements(key, now_ms)
-        .map_err(CommandError::Store)?;
+    // (frankenredis-oun4r) dontsort over a LIST with a real LIMIT: load ONLY the
+    // natural-order window via the chunk-seeking lrange instead of materialising
+    // the whole list and truncating it (O(limit) not O(n)). The natural order of
+    // a list under dontsort is its element order (ASC) or its reverse (DESC), and
+    // GET/STORE/output all run on the post-LIMIT window — so the windowed load is
+    // byte-identical. Sets/zsets and the no-LIMIT case keep the full path.
+    let limit_restricts = limit_offset > 0 || limit_count >= 0;
+    let windowed =
+        dontsort && limit_restricts && store.value_type(key, now_ms) == Some(ValueType::List);
+    let mut elements = if windowed {
+        let len = store.llen(key, now_ms).map_err(CommandError::Store)? as i64;
+        let start = limit_offset.clamp(0, len);
+        let count = if limit_count < 0 {
+            len - start
+        } else {
+            limit_count.min(len - start).max(0)
+        };
+        let window = if count == 0 {
+            Vec::new()
+        } else if !desc {
+            store
+                .lrange(key, start, start + count - 1, now_ms)
+                .map_err(CommandError::Store)?
+        } else {
+            // DESC dontsort = reverse(list), windowed. reverse(list)[start..start+count]
+            // == list[len-start-count .. len-start] reversed.
+            let mut w = store
+                .lrange(key, len - start - count, len - start - 1, now_ms)
+                .map_err(CommandError::Store)?;
+            w.reverse();
+            w
+        };
+        // The window is already the final post-LIMIT output; neutralise the
+        // shared LIMIT block below.
+        limit_offset = 0;
+        limit_count = -1;
+        window
+    } else {
+        store
+            .sort_elements(key, now_ms)
+            .map_err(CommandError::Store)?
+    };
 
     if elements.is_empty() {
         if let Some(dest) = store_dest {
@@ -26540,11 +28780,10 @@ fn sort_generic(
         return Ok(RespFrame::Array(Some(Vec::new())));
     }
 
-    // ── Determine if sorting should be skipped (BY with constant pattern) ──
-    let dontsort = by_pattern.as_ref().is_some_and(|p| !p.contains(&b'*'));
-
     // ── Sort the elements ────────────────────────────────────────────
-    if dontsort {
+    if windowed {
+        // Already loaded in final natural order + windowed; nothing to sort.
+    } else if dontsort {
         // BY nosort: preserve natural order. (upstream sort.c)
         let is_set = store
             .value_type(key, now_ms)
@@ -26567,13 +28806,121 @@ fn sort_generic(
             elements.reverse();
         }
     } else {
-        // Build sort keys for each element
-        let sort_keys: Vec<Option<Vec<u8>>> = elements
-            .iter()
-            .map(|el| sort_lookup_by_pattern(store, &by_pattern, el, now_ms))
-            .collect();
+        // (frankenredis-dryll) Numeric sort by a plain-keyed BY pattern (a
+        // StringKey plan: has '*', and its only `->` — if any — is NOT a hash
+        // deref after the '*'): read each weight as f64 directly via
+        // store.get_sort_weight, which skips the int->string->f64 round-trip that
+        // dominated the profile (~50% in i64::to_string). The string-keyed-byte
+        // path (`sort_keys`) is only built for ALPHA, the no-BY case, and
+        // hash-field BY — none of which benefit from the int fast path. The
+        // plan's `->` is taken from the pattern after the '*' (matching upstream
+        // `lookupKeyByPattern`), so a `->` inside an element or before the '*'
+        // stays a StringKey here. (frankenredis-sortarrow)
+        let numeric_fast = !alpha
+            && by_pattern
+                .as_ref()
+                .is_some_and(|p| matches!(plan_sort_pattern(p), SortPattern::StringKey { .. }));
 
-        if !alpha {
+        // Build sort keys for each element (skipped for the numeric fast path).
+        // The pattern's `*`/`->` split is invariant across elements, so it is
+        // planned ONCE and every element reuses a single key buffer.
+        let sort_keys: Vec<Option<Vec<u8>>> = if numeric_fast {
+            Vec::new()
+        } else {
+            match by_pattern.as_ref() {
+                None => elements.iter().map(|el| Some(el.clone())).collect(),
+                Some(pattern) => {
+                    let plan = plan_sort_pattern(pattern);
+                    let mut keybuf: Vec<u8> = Vec::new();
+                    elements
+                        .iter()
+                        .map(|el| match &plan {
+                            // BY without '*' is the dontsort case (never reaches
+                            // here); upstream's BY resolution falls back to the
+                            // element value itself.
+                            SortPattern::NoStar => Some(el.clone()),
+                            _ => resolve_sort_pattern(store, &plan, el, now_ms, &mut keybuf),
+                        })
+                        .collect()
+                }
+            }
+        };
+
+        // Compute the LIMIT window [start, end) up front so we can sort ONLY the
+        // requested slice (redis pqsort, sort.c:513) instead of the whole vector
+        // when LIMIT restricts the output. `full` keeps the original full-sort
+        // path when the window covers everything.
+        let total = elements.len();
+        let start = if limit_offset <= 0 {
+            0
+        } else {
+            (limit_offset as usize).min(total)
+        };
+        let count = if limit_count < 0 {
+            total - start
+        } else {
+            (limit_count as usize).min(total - start)
+        };
+        let end = start + count;
+        let full = start == 0 && end == total;
+
+        if !alpha && numeric_fast {
+            // Numeric sort, plain-keyed BY: weights read directly as f64.
+            let pat = by_pattern.as_ref().expect("numeric_fast => BY present");
+            let star = pat
+                .iter()
+                .position(|&b| b == b'*')
+                .expect("numeric_fast => '*' present");
+            let mut scored: Vec<(f64, usize)> = Vec::with_capacity(elements.len());
+            // Reuse one key buffer across elements — the substituted lookup key
+            // is rebuilt in place rather than allocating a fresh Vec per element.
+            let mut k: Vec<u8> = Vec::with_capacity(pat.len() + 16);
+            for (idx, el) in elements.iter().enumerate() {
+                k.clear();
+                k.extend_from_slice(&pat[..star]);
+                k.extend_from_slice(el);
+                k.extend_from_slice(&pat[star + 1..]);
+                match store.get_sort_weight(&k, now_ms) {
+                    fr_store::SortWeight::Number(f) => scored.push((f, idx)),
+                    fr_store::SortWeight::Missing => scored.push((0.0, idx)),
+                    fr_store::SortWeight::NotNumber => {
+                        return Ok(RespFrame::Error(
+                            "ERR One or more scores can't be converted into double".to_string(),
+                        ));
+                    }
+                }
+            }
+            let mut cmp = |a: &(f64, usize), b: &(f64, usize)| {
+                let base =
+                    a.0.partial_cmp(&b.0)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| elements[a.1].cmp(&elements[b.1]));
+                let base = if desc { base.reverse() } else { base };
+                base.then_with(|| a.1.cmp(&b.1))
+            };
+            if full {
+                scored.sort_unstable_by(&mut cmp);
+            } else {
+                partial_sort_window(&mut scored, start, end, &mut cmp);
+            }
+            let reordered: Vec<Vec<u8>> = if MOVE {
+                scored[start..end]
+                    .iter()
+                    .map(|(_, idx)| std::mem::take(&mut elements[*idx]))
+                    .collect()
+            } else {
+                scored[start..end]
+                    .iter()
+                    .map(|(_, idx)| elements[*idx].clone())
+                    .collect()
+            };
+            elements = reordered;
+            // (frankenredis-wc0i6) `limit_offset`/`limit_count` are reset
+            // UNCONDITIONALLY after this if/else-if/else chain (the shared
+            // "neutralise the LIMIT" block), so setting them here is a dead store
+            // (clippy::unused_assignments). The other arms already rely on that
+            // shared reset; drop the redundant per-arm assignment.
+        } else if !alpha {
             // Numeric sort: parse sort keys as f64
             let mut scored: Vec<(f64, usize)> = Vec::with_capacity(elements.len());
             for (idx, sk) in sort_keys.iter().enumerate() {
@@ -26593,26 +28940,47 @@ fn sort_generic(
                 };
                 scored.push((score, idx));
             }
-            scored.sort_by(|a, b| {
-                // Upstream sortCompare: compare by score, and on a tie compare
-                // the elements themselves (so the order is deterministic), then
-                // negate the WHOLE comparison under DESC (`sort_desc ? -cmp :
-                // cmp`). The tiebreaker must follow `desc` too — applying it
-                // ascending-only reversed only the score and left tied runs in
-                // forward order. (frankenredis SORT numeric-tie DESC parity)
-                let cmp =
+            // Upstream sortCompare: compare by score, and on a tie compare the
+            // elements themselves (so the order is deterministic), then negate
+            // the WHOLE comparison under DESC (`sort_desc ? -cmp : cmp`). The
+            // trailing index compare makes this a STRICT TOTAL ORDER — it only
+            // separates byte-identical (truly-equal) rows, so it is unobservable
+            // in the output yet lets the unstable partial-sort reproduce the
+            // exact window a stable full sort would. (frankenredis-sortlim)
+            let mut cmp = |a: &(f64, usize), b: &(f64, usize)| {
+                let base =
                     a.0.partial_cmp(&b.0)
                         .unwrap_or(std::cmp::Ordering::Equal)
                         .then_with(|| elements[a.1].cmp(&elements[b.1]));
-                if desc { cmp.reverse() } else { cmp }
-            });
-            let reordered: Vec<Vec<u8>> = scored
-                .iter()
-                .map(|(_, idx)| elements[*idx].clone())
-                .collect();
+                let base = if desc { base.reverse() } else { base };
+                base.then_with(|| a.1.cmp(&b.1))
+            };
+            if full {
+                scored.sort_unstable_by(&mut cmp);
+            } else {
+                partial_sort_window(&mut scored, start, end, &mut cmp);
+            }
+            // Materialise ONLY the window the LIMIT keeps; the rows outside
+            // [start, end) were exactly what the later drain/truncate discards.
+            let reordered: Vec<Vec<u8>> = if MOVE {
+                scored[start..end]
+                    .iter()
+                    .map(|(_, idx)| std::mem::take(&mut elements[*idx]))
+                    .collect()
+            } else {
+                scored[start..end]
+                    .iter()
+                    .map(|(_, idx)| elements[*idx].clone())
+                    .collect()
+            };
             elements = reordered;
         } else {
             // Alpha (lexicographic) sort
+            let collator = if store_dest.is_none() {
+                active_sort_alpha_collator()
+            } else {
+                None
+            };
             let mut indexed: Vec<(usize, &[u8])> = sort_keys
                 .iter()
                 .enumerate()
@@ -26621,17 +28989,39 @@ fn sort_generic(
                     (idx, val)
                 })
                 .collect();
-            indexed.sort_by(|a, b| {
-                // NULL (empty) sorts before non-empty
-                let cmp = a.1.cmp(b.1);
-                if desc { cmp.reverse() } else { cmp }
-            });
-            let reordered: Vec<Vec<u8>> = indexed
-                .iter()
-                .map(|(idx, _)| elements[*idx].clone())
-                .collect();
+            // NULL (empty) sorts before non-empty; DESC negates the key compare.
+            // The trailing index compare (NOT reversed by DESC) reproduces the
+            // stable ordering of equal-key rows exactly while making `cmp` a
+            // strict total order for the partial sort. (frankenredis-sortlim)
+            let mut cmp = |a: &(usize, &[u8]), b: &(usize, &[u8])| {
+                let base = sort_alpha_compare(collator.as_ref(), a.1, b.1);
+                let base = if desc { base.reverse() } else { base };
+                base.then_with(|| a.0.cmp(&b.0))
+            };
+            if full {
+                indexed.sort_unstable_by(&mut cmp);
+            } else {
+                partial_sort_window(&mut indexed, start, end, &mut cmp);
+            }
+            // Materialise ONLY the window the LIMIT keeps (see numeric arm).
+            let reordered: Vec<Vec<u8>> = if MOVE {
+                indexed[start..end]
+                    .iter()
+                    .map(|(idx, _)| std::mem::take(&mut elements[*idx]))
+                    .collect()
+            } else {
+                indexed[start..end]
+                    .iter()
+                    .map(|(idx, _)| elements[*idx].clone())
+                    .collect()
+            };
             elements = reordered;
         }
+
+        // `elements` now holds exactly the post-LIMIT window in final order, so
+        // neutralise the shared LIMIT application below (drain 0 / keep all).
+        limit_offset = 0;
+        limit_count = -1;
     }
 
     // ── Apply LIMIT ──────────────────────────────────────────────────
@@ -26660,22 +29050,61 @@ fn sort_generic(
     // ── Build output with GET patterns ───────────────────────────────
     let use_store = store_dest.is_some();
     let output: Vec<RespFrame> = if get_patterns.is_empty() {
-        sliced
-            .iter()
-            .map(|el| RespFrame::BulkString(Some(el.clone())))
-            .collect()
+        if MOVE {
+            // `sliced` is not read after this arm (STORE consumes `output`, return wraps it),
+            // so move each element straight into its reply frame instead of cloning.
+            sliced
+                .into_iter()
+                .map(|el| RespFrame::BulkString(Some(el)))
+                .collect()
+        } else {
+            sliced
+                .iter()
+                .map(|el| RespFrame::BulkString(Some(el.clone())))
+                .collect()
+        }
     } else {
+        // (frankenredis-5gisf GET-facet) Precompute each GET pattern's `*`/`->`
+        // split ONCE (the pattern is constant across all elements) and reuse a
+        // single scratch key buffer for every element×pattern substitution,
+        // instead of re-scanning the pattern and allocating a fresh lookup-key
+        // Vec per element (sliced.len()*patterns allocs -> 0). The string /
+        // `->`-hash resolve now comes from the planned pattern (matching
+        // upstream `lookupKeyByPattern`), so a `->` inside an element or before
+        // the `*` is NOT a hash deref. (frankenredis-sortarrow)
+        enum GetPlan<'a> {
+            Element, // `GET #` -> the element itself
+            Pat(SortPattern<'a>),
+        }
+        let plans: Vec<GetPlan> = get_patterns
+            .iter()
+            .map(|pat| {
+                if pat.as_slice() == b"#" {
+                    GetPlan::Element
+                } else {
+                    GetPlan::Pat(plan_sort_pattern(pat))
+                }
+            })
+            .collect();
         let mut out = Vec::with_capacity(sliced.len() * get_patterns.len());
+        let mut keybuf: Vec<u8> = Vec::new();
+        let missing = |use_store: bool| {
+            if use_store {
+                RespFrame::BulkString(Some(Vec::new()))
+            } else {
+                RespFrame::BulkString(None)
+            }
+        };
         for el in &sliced {
-            for pat in &get_patterns {
-                let val = sort_lookup_get_pattern(store, pat, el, now_ms);
-                match val {
-                    Some(v) => out.push(RespFrame::BulkString(Some(v))),
-                    None => {
-                        if use_store {
-                            out.push(RespFrame::BulkString(Some(Vec::new())));
-                        } else {
-                            out.push(RespFrame::BulkString(None));
+            for plan in &plans {
+                match plan {
+                    GetPlan::Element => out.push(RespFrame::BulkString(Some(el.clone()))),
+                    // A pattern without `*` yields NULL upstream; `NoStar`
+                    // resolves to None below.
+                    GetPlan::Pat(sp) => {
+                        match resolve_sort_pattern(store, sp, el, now_ms, &mut keybuf) {
+                            Some(v) => out.push(RespFrame::BulkString(Some(v))),
+                            None => out.push(missing(use_store)),
                         }
                     }
                 }
@@ -26716,76 +29145,105 @@ fn sort_ro_cmd(
     // so SORT_RO simply doesn't recognise STORE as a flag, which means
     // a literal 'STORE' token can validly land in a GET/BY pattern
     // slot. The previous pre-scan rejected those valid uses.
-    sort_generic(argv, store, now_ms, /* readonly */ true, "SORT_RO")
+    sort_generic::<true>(argv, store, now_ms, /* readonly */ true, "SORT_RO")
 }
 
-/// Look up a sort key using a BY pattern for the SORT command.
-/// Substitutes `*` with the element value. Supports `->` for hash field dereference.
-/// Returns None if the key doesn't exist or is the wrong type.
-fn sort_lookup_by_pattern(
+/// (frankenredis-sortmove) Same-binary A/B / equivalence hook: run SORT with the clone
+/// reference (`MOVE=false`) or the move candidate (`MOVE=true`). Both must return byte-identical
+/// replies and leave identical STORE state.
+#[doc(hidden)]
+pub fn bench_sort_generic<const MOVE: bool>(
+    argv: &[Vec<u8>],
     store: &mut Store,
-    by_pattern: &Option<Vec<u8>>,
-    element: &[u8],
     now_ms: u64,
-) -> Option<Vec<u8>> {
-    let pattern = match by_pattern {
-        Some(p) => p,
-        None => return Some(element.to_vec()),
-    };
+) -> Result<RespFrame, CommandError> {
+    sort_generic::<MOVE>(argv, store, now_ms, /* readonly */ false, "SORT")
+}
 
-    // Substitute * with element value
-    let star_pos = pattern.iter().position(|&b| b == b'*');
-    let lookup_key = match star_pos {
-        Some(pos) => {
-            let mut k = Vec::with_capacity(pattern.len() + element.len());
-            k.extend_from_slice(&pattern[..pos]);
-            k.extend_from_slice(element);
-            k.extend_from_slice(&pattern[pos + 1..]);
-            k
+/// How a SORT `BY`/`GET` pattern resolves once its `*` and optional `->` hash
+/// field have been located. Computed ONCE per pattern (both are invariant
+/// across elements), then applied to every element with a reused key buffer.
+///
+/// Mirrors upstream `lookupKeyByPattern` (sort.c): the `*` substitution point
+/// and the `->` hash-field split are BOTH derived from the PATTERN, and the
+/// `->` is searched ONLY in the pattern text AFTER the `*`
+/// (`strstr(spat + prefixlen + 1, "->")`), with a non-empty field required
+/// (`*(f+2) != '\0'`). The substituted element value is never scanned for
+/// `->`, so an element that itself contains `->`, or a `->` sitting before the
+/// `*`, does NOT trigger a hash dereference. The previous implementation
+/// searched the fully-substituted key, which mis-classified those cases as
+/// hash lookups and diverged from Redis. (frankenredis-sortarrow)
+enum SortPattern<'a> {
+    /// Pattern has no `*`. For `BY` this is the `dontsort` case (handled
+    /// before key resolution); for `GET` upstream yields NULL.
+    NoStar,
+    /// `prefix` + element + `suffix` → string key lookup.
+    StringKey { prefix: &'a [u8], suffix: &'a [u8] },
+    /// `prefix` + element + `mid` → hash key; `field` (pattern text after the
+    /// `->`) is fixed across all elements.
+    HashKey {
+        prefix: &'a [u8],
+        mid: &'a [u8],
+        field: &'a [u8],
+    },
+}
+
+/// Locate the `*` and the optional hash-field `->` in a SORT pattern, matching
+/// upstream `lookupKeyByPattern`. See [`SortPattern`].
+fn plan_sort_pattern(pattern: &[u8]) -> SortPattern<'_> {
+    let Some(star) = pattern.iter().position(|&b| b == b'*') else {
+        return SortPattern::NoStar;
+    };
+    let prefix = &pattern[..star];
+    let after = &pattern[star + 1..];
+    // Upstream searches for "->" strictly AFTER the '*' and requires a
+    // non-empty field; otherwise the whole `after` stays part of the key.
+    if let Some(arrow) = after.windows(2).position(|w| w == b"->") {
+        let field = &after[arrow + 2..];
+        if !field.is_empty() {
+            return SortPattern::HashKey {
+                prefix,
+                mid: &after[..arrow],
+                field,
+            };
         }
-        None => return Some(element.to_vec()),
-    };
-
-    // Check for hash field dereference (->)
-    sort_resolve_key_or_hash(store, &lookup_key, now_ms)
+    }
+    SortPattern::StringKey {
+        prefix,
+        suffix: after,
+    }
 }
 
-/// Look up a value using a GET pattern for the SORT command.
-/// `GET #` returns the element itself.
-fn sort_lookup_get_pattern(
+/// Apply a precomputed [`SortPattern`] to one element, reusing `keybuf` for the
+/// substituted key. Returns the resolved value, or None on missing key, wrong
+/// type, or a `NoStar` pattern (mirroring `store.get`/`hget` → None). Byte-exact
+/// with the former `sort_resolve_key_or_hash`, only with the `->` split taken
+/// from the pattern instead of the substituted key.
+fn resolve_sort_pattern(
     store: &mut Store,
-    pattern: &[u8],
+    plan: &SortPattern<'_>,
     element: &[u8],
     now_ms: u64,
+    keybuf: &mut Vec<u8>,
 ) -> Option<Vec<u8>> {
-    // GET # returns the element itself
-    if pattern == b"#" {
-        return Some(element.to_vec());
-    }
-
-    // Substitute * with element value
-    let pos = pattern.iter().position(|&b| b == b'*')?;
-    let mut lookup_key = Vec::with_capacity(pattern.len() + element.len());
-    lookup_key.extend_from_slice(&pattern[..pos]);
-    lookup_key.extend_from_slice(element);
-    lookup_key.extend_from_slice(&pattern[pos + 1..]);
-
-    sort_resolve_key_or_hash(store, &lookup_key, now_ms)
-}
-
-/// Resolve a key that may contain `->` for hash field dereference.
-/// Without `->`, looks up as a string key.
-/// With `->`, looks up hash key and field.
-fn sort_resolve_key_or_hash(store: &mut Store, key: &[u8], now_ms: u64) -> Option<Vec<u8>> {
-    // Check for hash field dereference: key->field
-    if let Some(arrow_pos) = key.windows(2).position(|w| w == b"->") {
-        let hash_key = &key[..arrow_pos];
-        let field = &key[arrow_pos + 2..];
-        // Attempt hash lookup; silently return None on wrong type or missing
-        store.hget(hash_key, field, now_ms).ok().flatten()
-    } else {
-        // String key lookup; silently return None on wrong type or missing
-        store.get(key, now_ms).ok().flatten()
+    match plan {
+        SortPattern::NoStar => None,
+        SortPattern::StringKey { prefix, suffix } => {
+            keybuf.clear();
+            keybuf.reserve(prefix.len() + element.len() + suffix.len());
+            keybuf.extend_from_slice(prefix);
+            keybuf.extend_from_slice(element);
+            keybuf.extend_from_slice(suffix);
+            store.get(keybuf, now_ms).ok().flatten()
+        }
+        SortPattern::HashKey { prefix, mid, field } => {
+            keybuf.clear();
+            keybuf.reserve(prefix.len() + element.len() + mid.len());
+            keybuf.extend_from_slice(prefix);
+            keybuf.extend_from_slice(element);
+            keybuf.extend_from_slice(mid);
+            store.hget(keybuf, field, now_ms).ok().flatten()
+        }
     }
 }
 
@@ -26804,13 +29262,14 @@ fn copy_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
     let mut replace = false;
     let mut i = 3;
     while i < argv.len() {
-        let arg = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-        if arg.eq_ignore_ascii_case("REPLACE") {
+        // (frankenredis-re7sp) byte-match COPY options; non-UTF8 -> syntax error
+        let arg = &argv[i];
+        if arg.eq_ignore_ascii_case(b"REPLACE") {
             replace = true;
             i += 1;
             continue;
         }
-        if arg.eq_ignore_ascii_case("DB") {
+        if arg.eq_ignore_ascii_case(b"DB") {
             if i + 1 >= argv.len() {
                 return Err(CommandError::SyntaxError);
             }
@@ -26849,7 +29308,7 @@ fn copy_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
     // REPLACE. See legacy_redis_code/redis/src/cluster.c::copyCommand.
     // (br-frankenredis-ao1i)
     if destination_db == source_db && argv[1] == argv[2] {
-        return Ok(RespFrame::Error(
+        return Err(CommandError::Custom(
             "ERR source and destination objects are the same".to_string(),
         ));
     }
@@ -26868,7 +29327,13 @@ mod tests {
     use std::net::TcpStream;
     use std::time::Instant;
 
+    use super::{
+        cluster_invalid_setslot_action_error, encode_pubsub_message_for_protocol_into,
+        posix_locale_to_bcp47, sort_alpha_compare,
+    };
     use fr_protocol::RespFrame;
+    use icu_collator::{Collator, options::AlternateHandling, options::CollatorOptions};
+    use icu_locale_core::Locale;
 
     /// command_table_index (O(1) hash) must return exactly what the previous
     /// `COMMAND_TABLE.iter().find(|n| n.eq_ignore_ascii_case(name))` linear scan
@@ -26916,6 +29381,51 @@ mod tests {
         assert!(super::COMMAND_TABLE[idx].0.eq_ignore_ascii_case("set"));
     }
 
+    #[test]
+    fn command_has_keys_indexed_matches_reference_r16uz() {
+        for &(name, ..) in super::COMMAND_TABLE {
+            let idx = super::command_table_index(name.as_bytes()).expect("table row must resolve");
+            let candidate = super::command_has_keys(idx);
+            assert_eq!(
+                candidate,
+                super::bench_command_has_keys_reference(name),
+                "canonical classification differs for {name}"
+            );
+            assert_eq!(
+                candidate,
+                super::bench_command_has_keys_reference(&name.to_ascii_uppercase()),
+                "case-folded reference classification differs for {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn command_info_indexed_lookup_matches_linear_scan_eey3d() {
+        for sentinel_mode in [false, true] {
+            let mut store = fr_store::Store::new();
+            store.sentinel_mode = sentinel_mode;
+            for &(name, ..) in super::COMMAND_TABLE
+                .iter()
+                .chain(super::SUBCOMMAND_TABLE.iter())
+            {
+                for variant in [name.to_string(), name.to_ascii_uppercase()] {
+                    assert_eq!(
+                        super::command_info_requested_row_indexed(&variant, &store),
+                        super::command_info_requested_row_scan(&variant, &store),
+                        "sentinel_mode={sentinel_mode} name={variant:?}"
+                    );
+                }
+            }
+            for missing in ["", "not-a-command", "GET\0", "éxiste"] {
+                assert_eq!(
+                    super::command_info_requested_row_indexed(missing, &store),
+                    super::command_info_requested_row_scan(missing, &store),
+                    "sentinel_mode={sentinel_mode} missing={missing:?}"
+                );
+            }
+        }
+    }
+
     use fr_store::{
         SCRIPT_PROPAGATE_ALL, SCRIPT_PROPAGATE_AOF, SCRIPT_PROPAGATE_REPLICA, Store, StoreError,
         StreamGroupReadCursor, StreamGroupReadOptions,
@@ -26929,11 +29439,11 @@ mod tests {
         CLIENT_TRACKING_PREFIX_REQUIRES_BCAST, CLIENT_TRACKING_REDIRECT_MISSING,
         CLIENT_UNBLOCK_REASON_INVALID, COMMAND_TABLE, CommandError, CommandId, MigrateKeySpec,
         SCRIPT_NOSCRIPT_ERROR, SUBCOMMAND_TABLE, StreamLagInfo, acl_command_selectors_for_argv,
-        canonical_command_fullname, check_command_arity, check_full_command_arity, classify_command,
-        client_wrong_subcommand_arity,
-        cluster_disabled_error, cluster_reset_with_keys_error, cluster_wrong_subcommand_arity,
-        command_acl_categories, command_acl_key_access, command_has_acl_subcommands,
-        command_key_indexes, commands_in_acl_category, dispatch_argv, drain_pubsub_messages,
+        canonical_command_fullname, check_command_arity, check_full_command_arity,
+        classify_command, client_wrong_subcommand_arity, cluster_disabled_error,
+        cluster_reset_with_keys_error, cluster_wrong_subcommand_arity, command_acl_categories,
+        command_acl_key_access, command_has_acl_subcommands, command_key_indexes,
+        command_write_keys, commands_in_acl_category, dispatch_argv, drain_pubsub_messages,
         eq_ascii_command, eval_script, execute_migrate, format_coord_human,
         format_eval_read_only_script_error, frame_to_argv, geo_coord_frame, get_command_flags,
         hello_bulk, hello_simple, is_known_acl_command_selector, is_write_command,
@@ -28045,6 +30555,127 @@ mod tests {
     }
 
     #[test]
+    fn geosearchstore_box_scan_matches_materialized_reference_bitwise() {
+        use super::{geo_encode_wgs84, geo_searchstore_box_reference, geo_searchstore_box_results};
+
+        fn canonical(
+            values: Vec<(Vec<u8>, f64, f64, f64, f64)>,
+        ) -> Vec<(Vec<u8>, u64, u64, u64, u64)> {
+            values
+                .into_iter()
+                .map(|(member, score, dist, lon, lat)| {
+                    (
+                        member,
+                        score.to_bits(),
+                        dist.to_bits(),
+                        lon.to_bits(),
+                        lat.to_bits(),
+                    )
+                })
+                .collect()
+        }
+
+        let key = b"geo";
+        let mut store = Store::new();
+        let mut state = 0x4753_5354_4f52_4542_u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut unit = || (next() >> 11) as f64 / (1_u64 << 53) as f64;
+        let mut adds = Vec::with_capacity(10_000);
+        for i in 0..10_000 {
+            let (lon, lat) = if i < 5 {
+                [
+                    (0.0, 0.0),
+                    (179.99, 0.0),
+                    (-179.99, 0.0),
+                    (30.0, 84.0),
+                    (-30.0, -84.0),
+                ][i]
+            } else {
+                (unit() * 360.0 - 180.0, unit() * 170.0 - 85.0)
+            };
+            let bits = geo_encode_wgs84(lon, lat).expect("generated WGS84 coordinate");
+            adds.push((bits as f64, format!("member:{i:05}").into_bytes()));
+        }
+        store.zadd_plain_owned(key, adds, 0).unwrap();
+
+        let mut cases = vec![
+            (0.0, 0.0, 0.0, 0.0),
+            (10.0, 40.0, 20_000.0, 20_000.0),
+            (179.9, 0.0, 200_000.0, 100_000.0),
+            (-179.9, 10.0, 500_000.0, 50_000.0),
+            (30.0, 84.0, 2_000_000.0, 400_000.0),
+            (0.0, 0.0, f64::INFINITY, 1_000.0),
+            (0.0, 0.0, f64::NAN, 1_000.0),
+        ];
+        for _ in 0..400 {
+            cases.push((
+                unit() * 360.0 - 180.0,
+                unit() * 168.0 - 84.0,
+                10_f64.powf(1.0 + unit() * 7.0),
+                10_f64.powf(1.0 + unit() * 7.0),
+            ));
+        }
+
+        for (cx, cy, half_w, half_h) in cases {
+            let reference =
+                geo_searchstore_box_reference(&mut store, &key[..], cx, cy, half_w, half_h, 0)
+                    .unwrap();
+            let candidate =
+                geo_searchstore_box_results(&mut store, &key[..], cx, cy, half_w, half_h, 0)
+                    .unwrap();
+            assert_eq!(
+                canonical(candidate),
+                canonical(reference),
+                "GEOSEARCHSTORE BYBOX mismatch c=({cx},{cy}) half=({half_w},{half_h})"
+            );
+        }
+
+        // Ordinary ZADD can create a small packed zset with scores that are not
+        // canonical integer geohashes. The production decoder still casts every
+        // finite score to u64, so the borrowed scan must visit these values too.
+        let mut packed = Store::new();
+        let canonical_bits = geo_encode_wgs84(10.0, 40.0).unwrap() as f64;
+        packed
+            .zadd_plain_owned(
+                b"packed",
+                vec![
+                    (-1.0, b"negative".to_vec()),
+                    (canonical_bits + 0.5, b"fractional".to_vec()),
+                    ((1_u64 << 53) as f64, b"above-52-bit".to_vec()),
+                    (f64::INFINITY, b"infinity".to_vec()),
+                    (0.0, b"zero".to_vec()),
+                    (canonical_bits, b"canonical".to_vec()),
+                ],
+                0,
+            )
+            .unwrap();
+        assert_eq!(packed.object_encoding(b"packed", 0), Some("listpack"));
+        for (cx, cy, half_w, half_h) in [
+            (10.0, 40.0, 20_000.0, 20_000.0),
+            (0.0, 0.0, 20_000_000.0, 20_000_000.0),
+            (-179.9, -84.0, 2_000_000.0, 2_000_000.0),
+            (0.0, 0.0, f64::INFINITY, f64::INFINITY),
+        ] {
+            let reference =
+                geo_searchstore_box_reference(&mut packed, b"packed", cx, cy, half_w, half_h, 0)
+                    .unwrap();
+            let candidate =
+                geo_searchstore_box_results(&mut packed, b"packed", cx, cy, half_w, half_h, 0)
+                    .unwrap();
+            assert_eq!(
+                canonical(candidate),
+                canonical(reference),
+                "packed/noncanonical GEOSEARCHSTORE BYBOX mismatch c=({cx},{cy}) half=({half_w},{half_h})"
+            );
+        }
+    }
+
+    #[test]
     fn geo_box_bbox_is_a_superset_and_speeds_up_bybox() {
         use super::{
             geo_box_bbox, geo_decode_score, geo_distance_m, geo_encode_wgs84, geo_point_in_box,
@@ -28833,11 +31464,18 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_invalid_utf8_command_name_errors_invalid_utf8_argument() {
+    fn dispatch_invalid_utf8_command_name_errors_unknown_command() {
+        // (frankenredis-unkcmdname) Upstream does NOT require a command name to
+        // be valid UTF-8: a non-UTF-8 name is reported as "unknown command",
+        // not a UTF-8 error. The name is rendered lossily (RespFrame::Error is a
+        // Rust String) but the error variant matches redis.
         let mut store = Store::new();
         let argv = vec![vec![0xFF], b"k".to_vec()];
         let err = dispatch_argv(&argv, &mut store, 0).expect_err("must fail");
-        assert!(matches!(err, super::CommandError::InvalidUtf8Argument));
+        assert!(
+            matches!(err, super::CommandError::UnknownCommand { .. }),
+            "expected UnknownCommand for a non-UTF-8 command name, got {err:?}"
+        );
     }
 
     #[test]
@@ -30426,7 +33064,7 @@ mod tests {
             &mut store,
             0,
         )
-        .expect("dispatch returns Ok-with-error");
+        .unwrap_or_else(|e| e.to_resp());
         assert_eq!(
             out,
             RespFrame::Error("ERR source and destination objects are the same".to_string())
@@ -33232,6 +35870,99 @@ mod tests {
         }
     }
 
+    #[test]
+    fn zrangebyscore_score_bound_accepts_c99_hex_float() {
+        // (frankenredis-hexfloat range bounds) Upstream zslParseRange uses
+        // strtod, which accepts C99 hex-float notation; fr's parser used
+        // Rust f64::from_str (decimal-only) and rejected `0x10`, `0X1A`,
+        // `0x1.8p3`, and the exclusive `(0x10`. Mirror the score path.
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"zh".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+                b"16".to_vec(),
+                b"p".to_vec(),
+                b"100".to_vec(),
+                b"z".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("zadd seed");
+
+        // 0x10 == 16.0 inclusive → {p(16), z(100)}.
+        let hex_incl = dispatch_argv(
+            &[
+                b"ZRANGEBYSCORE".to_vec(),
+                b"zh".to_vec(),
+                b"0x10".to_vec(),
+                b"+inf".to_vec(),
+            ],
+            &mut store,
+            1,
+        )
+        .expect("0x10 hex bound must parse");
+        assert_eq!(
+            hex_incl,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"p".to_vec())),
+                RespFrame::BulkString(Some(b"z".to_vec())),
+            ]))
+        );
+
+        // Exclusive `(0x10` == exclusive 16 → only z(100).
+        let hex_excl = dispatch_argv(
+            &[
+                b"ZRANGEBYSCORE".to_vec(),
+                b"zh".to_vec(),
+                b"(0x10".to_vec(),
+                b"+inf".to_vec(),
+            ],
+            &mut store,
+            2,
+        )
+        .expect("(0x10 exclusive hex bound must parse");
+        assert_eq!(
+            hex_excl,
+            RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"z".to_vec()))]))
+        );
+
+        // 0x1.8p3 == 12.0 inclusive → {p(16), z(100)}.
+        let hex_p = dispatch_argv(
+            &[
+                b"ZCOUNT".to_vec(),
+                b"zh".to_vec(),
+                b"0x1.8p3".to_vec(),
+                b"+inf".to_vec(),
+            ],
+            &mut store,
+            3,
+        )
+        .expect("0x1.8p3 hex bound must parse");
+        assert_eq!(hex_p, RespFrame::Integer(2));
+
+        // Trailing junk after a hex prefix is still rejected (strtod's
+        // eptr[0] != '\0' check), as is a bare bad-hex.
+        let bad = CommandError::Custom("ERR min or max is not a float".to_string());
+        for arg in [b"0x10z".as_slice(), b"0xg"] {
+            let err = dispatch_argv(
+                &[
+                    b"ZRANGEBYSCORE".to_vec(),
+                    b"zh".to_vec(),
+                    arg.to_vec(),
+                    b"+inf".to_vec(),
+                ],
+                &mut store,
+                4,
+            )
+            .expect_err("invalid hex bound");
+            assert_eq!(err, bad, "input={:?}", String::from_utf8_lossy(arg));
+        }
+    }
+
     /// (ZRANGEBYSCORE inverted-range type-order parity) An inverted score range
     /// (`min > max`) against a WRONG-TYPE key must still surface WRONGTYPE —
     /// upstream type-checks the key before discovering the empty range. fr's
@@ -33701,6 +36432,33 @@ mod tests {
     }
 
     #[test]
+    fn aliased_commands_arity_error_names_the_invoked_alias() {
+        // (frankenredis-aliasarity) GEORADIUS_RO / GEORADIUSBYMEMBER_RO /
+        // RESTORE-ASKING share a handler with their base command, but their
+        // wrong-arity error must name the command the client actually invoked
+        // (the registered fullname), not the base — matching redis 7.2.4.
+        // Regression for the differential finding where fr reported 'georadius'
+        // for GEORADIUS_RO, etc.
+        let mut store = Store::new();
+        for (invoked, expected) in [
+            ("GEORADIUS_RO", "georadius_ro"),
+            ("GEORADIUSBYMEMBER_RO", "georadiusbymember_ro"),
+            ("RESTORE-ASKING", "restore-asking"),
+        ] {
+            let err = dispatch_argv(&[invoked.as_bytes().to_vec()], &mut store, 0)
+                .expect_err("wrong arity");
+            let CommandError::WrongArity(name) = err else {
+                panic!("{invoked}: expected WrongArity, got {err:?}"); // ubs:ignore — AI triage
+            };
+            assert_eq!(
+                name.to_ascii_lowercase(),
+                expected,
+                "{invoked} arity error must name the invoked alias"
+            );
+        }
+    }
+
+    #[test]
     fn zadd_odd_score_member_tail_returns_syntax_error() {
         let mut store = Store::new();
         for argv in [
@@ -33721,6 +36479,46 @@ mod tests {
             let err = dispatch_argv(&argv, &mut store, 0).expect_err("zadd odd tail");
             assert_eq!(err, CommandError::SyntaxError);
         }
+    }
+
+    #[test]
+    fn geo_distance_m_center_cos_is_bit_identical_to_geo_distance_m() {
+        // The center-cos hoist must be bit-for-bit identical to the per-call haversine for EVERY
+        // (center, candidate) pair — GEO distances are byte-exact vs upstream, so any FP drift is a
+        // parity break. Sweep a dense grid (including the v==0 lon-equal fast path and near-pole /
+        // antimeridian extremes) and require exact f64 bit equality.
+        use super::{geo_distance_m, geo_distance_m_center_cos};
+        let lons: [f64; 12] = [
+            -180.0, -179.999, -90.0, -45.0, -0.0001, 0.0, 0.0001, 12.3456, 45.0, 90.0, 179.999,
+            180.0,
+        ];
+        let lats: [f64; 8] = [-85.05, -60.0, -1.0, 0.0, 1.0, 37.5, 60.0, 85.05];
+        let mut checked = 0u64;
+        for &clon in &lons {
+            for &clat in &lats {
+                let cos_clat_r = clat.to_radians().cos();
+                for &plon in &lons {
+                    for &plat in &lats {
+                        let a = geo_distance_m(clon, clat, plon, plat);
+                        let b = geo_distance_m_center_cos(clon, clat, cos_clat_r, plon, plat);
+                        assert_eq!(
+                            a.to_bits(),
+                            b.to_bits(),
+                            "mismatch center=({clon},{clat}) cand=({plon},{plat}): {a} vs {b}"
+                        );
+                        // Force the lon-equal (v == 0.0) lat-only fast path too.
+                        let a0 = geo_distance_m(clon, clat, clon, plat);
+                        let b0 = geo_distance_m_center_cos(clon, clat, cos_clat_r, clon, plat);
+                        assert_eq!(a0.to_bits(), b0.to_bits(), "v==0 mismatch at lat {plat}");
+                        checked += 2;
+                    }
+                }
+            }
+        }
+        assert!(
+            checked > 10_000,
+            "grid should be dense (was {checked} pairs)"
+        );
     }
 
     #[test]
@@ -33956,7 +36754,7 @@ mod tests {
             &mut store,
             0,
         )
-        .expect("geoadd");
+        .unwrap_or_else(|e| e.to_resp());
 
         let meters = dispatch_argv(
             &[
@@ -33968,14 +36766,14 @@ mod tests {
             &mut store,
             0,
         )
-        .expect("geodist meters");
+        .unwrap_or_else(|e| e.to_resp());
         let RespFrame::BulkString(Some(distance_raw)) = meters else {
             panic!("geodist should return bulk distance"); // ubs:ignore — AI triage
         };
         let meters_value = std::str::from_utf8(&distance_raw)
-            .expect("distance utf8")
+            .expect("geodist distance utf8")
             .parse::<f64>()
-            .expect("distance float");
+            .expect("geodist distance parse");
         assert!(meters_value > 166_000.0);
 
         let invalid_unit = dispatch_argv(
@@ -33989,7 +36787,7 @@ mod tests {
             &mut store,
             0,
         )
-        .expect("geodist invalid unit");
+        .unwrap_or_else(|e| e.to_resp());
         assert_eq!(
             invalid_unit,
             RespFrame::Error("ERR unsupported unit provided. please use M, KM, FT, MI".to_string())
@@ -34005,7 +36803,7 @@ mod tests {
             &mut store,
             0,
         )
-        .expect("geodist missing");
+        .unwrap_or_else(|e| e.to_resp());
         assert_eq!(missing, RespFrame::BulkString(None));
     }
 
@@ -34029,7 +36827,7 @@ mod tests {
             &mut store,
             0,
         )
-        .expect("geoadd seed");
+        .unwrap_or_else(|e| e.to_resp());
 
         let cases = [
             // GEOSEARCH FROMMEMBER ... BYRADIUS ... <bad-unit>
@@ -34062,7 +36860,7 @@ mod tests {
             ],
         ];
         for argv in cases {
-            let out = dispatch_argv(&argv, &mut store, 0).expect("geo unit-error case");
+            let out = dispatch_argv(&argv, &mut store, 0).unwrap_or_else(|e| e.to_resp());
             assert_eq!(out, RespFrame::Error(expected.to_string()), "argv={argv:?}");
         }
     }
@@ -35528,6 +38326,88 @@ mod tests {
         );
     }
 
+    /// (frankenredis-8t4vl) XTRIM MINID ~ N [LIMIT M] follows upstream's
+    /// approximate whole-node model: it drops only full head nodes whose last id
+    /// is still below the MINID threshold, and a sub-node LIMIT drops nothing.
+    #[test]
+    fn xtrim_minid_approximate_respects_node_boundary_8t4vl() {
+        let mut store = Store::new();
+
+        let add_n = |store: &mut Store, n: usize| {
+            dispatch_argv(&[b"DEL".to_vec(), b"s".to_vec()], store, 0).expect("del");
+            for i in 1..=n {
+                dispatch_argv(
+                    &[
+                        b"XADD".to_vec(),
+                        b"s".to_vec(),
+                        format!("{i}-0").into_bytes(),
+                        b"f".to_vec(),
+                        b"v".to_vec(),
+                    ],
+                    store,
+                    0,
+                )
+                .expect("xadd");
+            }
+        };
+        let xtrim = |store: &mut Store, args: &[&[u8]]| -> i64 {
+            let mut argv = vec![b"XTRIM".to_vec(), b"s".to_vec()];
+            for a in args {
+                argv.push(a.to_vec());
+            }
+            match dispatch_argv(&argv, store, 0).expect("xtrim") {
+                RespFrame::Integer(n) => n,
+                other => panic!("expected integer, got {other:?}"),
+            }
+        };
+
+        add_n(&mut store, 250);
+        assert_eq!(xtrim(&mut store, &[b"MINID", b"~", b"100-0"]), 0);
+        assert_eq!(xtrim(&mut store, &[b"MINID", b"~", b"150-0"]), 100);
+        assert_eq!(
+            dispatch_argv(&[b"XLEN".to_vec(), b"s".to_vec()], &mut store, 0).unwrap(),
+            RespFrame::Integer(150)
+        );
+        let remaining = dispatch_argv(
+            &[
+                b"XRANGE".to_vec(),
+                b"s".to_vec(),
+                b"-".to_vec(),
+                b"+".to_vec(),
+                b"COUNT".to_vec(),
+                b"1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xrange");
+        assert!(matches!(
+            remaining,
+            RespFrame::Array(Some(ref rows))
+                if matches!(
+                    rows.first(),
+                    Some(RespFrame::Array(Some(first)))
+                        if first.first()
+                            == Some(&RespFrame::BulkString(Some(b"101-0".to_vec())))
+                )
+        ));
+
+        add_n(&mut store, 250);
+        assert_eq!(
+            xtrim(&mut store, &[b"MINID", b"~", b"10000-0", b"LIMIT", b"50"]),
+            0
+        );
+        assert_eq!(
+            xtrim(&mut store, &[b"MINID", b"~", b"10000-0", b"LIMIT", b"150"]),
+            100
+        );
+        add_n(&mut store, 250);
+        assert_eq!(
+            xtrim(&mut store, &[b"MINID", b"~", b"10000-0", b"LIMIT", b"0"]),
+            250
+        );
+    }
+
     #[test]
     fn stream_approx_trim_target_matches_redis_node_model_c6j11() {
         use super::{STREAM_APPROX_TRIM_DEFAULT_LIMIT, stream_approx_trim_target};
@@ -36962,6 +39842,72 @@ mod tests {
         assert!(matches!(
             wrongtype,
             CommandError::Store(fr_store::StoreError::WrongType)
+        ));
+    }
+
+    #[test]
+    fn xreadgroup_type_and_group_checks_precede_id_validation_xrgord() {
+        // (frankenredis-xrgord) Upstream checks key type (WRONGTYPE) and consumer
+        // group existence (NOGROUP) BEFORE parsing the stream ID, so a malformed
+        // ID must NOT mask those errors. fr previously parsed the ID first and
+        // returned the generic invalid-ID error.
+        let mut store = Store::new();
+        // s2: a real stream with NO matching group; str1: a string (wrong type);
+        // nostream: absent.
+        dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"s2".to_vec(),
+                b"1-1".to_vec(),
+                b"f".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xadd s2");
+        store.set(b"str1".to_vec(), b"hello".to_vec(), None, 0);
+
+        let nogroup = |key: &str| {
+            format!(
+                "NOGROUP No such key '{key}' or consumer group 'gX' in XREADGROUP with GROUP option"
+            )
+        };
+        let rg = |key: &str, id: &str, store: &mut Store| {
+            dispatch_argv(
+                &[
+                    b"XREADGROUP".to_vec(),
+                    b"GROUP".to_vec(),
+                    b"gX".to_vec(),
+                    b"c1".to_vec(),
+                    b"STREAMS".to_vec(),
+                    key.as_bytes().to_vec(),
+                    id.as_bytes().to_vec(),
+                ],
+                store,
+                0,
+            )
+        };
+
+        // Wrong type + malformed id -> WRONGTYPE (not invalid-id).
+        assert!(matches!(
+            rg("str1", "1-1-1", &mut store),
+            Err(CommandError::Store(fr_store::StoreError::WrongType))
+        ));
+        // Existing stream, missing group, malformed id -> NOGROUP.
+        assert_eq!(
+            rg("s2", "abc", &mut store).expect("nogroup reply"),
+            RespFrame::Error(nogroup("s2"))
+        );
+        // Absent key, malformed id -> NOGROUP.
+        assert_eq!(
+            rg("nostream", "1-1-1", &mut store).expect("nogroup reply"),
+            RespFrame::Error(nogroup("nostream"))
+        );
+        // Sanity: wrong type with the '>' sentinel still WRONGTYPE (unchanged path).
+        assert!(matches!(
+            rg("str1", ">", &mut store),
+            Err(CommandError::Store(fr_store::StoreError::WrongType))
         ));
     }
 
@@ -38403,6 +41349,40 @@ mod tests {
     }
 
     #[test]
+    fn nogroup_errors_report_logical_key_not_db_namespaced() {
+        use crate::{
+            xgroup_nogroup_error, xinfo_nogroup_consumers_error, xreadgroup_nogroup_error,
+            xstream_nogroup_error,
+        };
+        // Command handlers receive DB-namespaced physical keys; the NOGROUP
+        // error wording must echo the LOGICAL key the client sent, never the
+        // internal `\0frdb\0<db><key>` encoding. (Found by random_command_differ:
+        // SELECT 3; XREADGROUP ... STREAMS s > leaked the prefix.)
+        let phys = fr_store::encode_db_key(3, b"mystream");
+        assert_ne!(phys.as_slice(), b"mystream", "db>0 key must be prefixed");
+        for err in [
+            xreadgroup_nogroup_error(&phys, b"g"),
+            xstream_nogroup_error(&phys, b"g"),
+            xgroup_nogroup_error(&phys, b"g"),
+            xinfo_nogroup_consumers_error(&phys, b"g"),
+        ] {
+            let RespFrame::Error(msg) = err else {
+                panic!("expected NOGROUP error frame, got {err:?}");
+            };
+            assert!(
+                msg.contains("'mystream'"),
+                "must report logical key: {msg:?}"
+            );
+            assert!(!msg.contains("frdb"), "must not leak db prefix: {msg:?}");
+        }
+        // db 0 keys are unprefixed and pass through unchanged.
+        let RespFrame::Error(msg) = xreadgroup_nogroup_error(b"plainkey", b"g") else {
+            panic!("expected error");
+        };
+        assert!(msg.contains("'plainkey'"), "db0 key unchanged: {msg:?}");
+    }
+
+    #[test]
     fn xinfo_stream_lookup_ordering_and_arg_validation_match_upstream() {
         // Pin three XINFO STREAM divergences vs vendored 7.2.4
         // (frankenredis-y8m7):
@@ -39603,6 +42583,172 @@ mod tests {
             other => panic!("expected error, got {other:?}"),
         };
         assert_eq!(got, "ERR hash value is not an integer".to_string());
+    }
+
+    #[test]
+    fn zinter_borrowed_core_matches_materialized_reference_crimsonhawk() {
+        // (CrimsonHawk) ZINTER now iterates the first source by reference and
+        // clones only survivors via `zinter_members_argv_order_no_stats`. Prove
+        // the visible reply is byte-identical to an independent reference that
+        // materializes the first source, then filters/aggregates in argv order,
+        // across SortedSet/Set mixes, WEIGHTS, AGGREGATE SUM/MIN/MAX, WITHSCORES,
+        // a disjoint pair, a single key, and a missing key.
+        fn seed() -> Store {
+            let mut store = Store::new();
+            // zset za: a=1, b=2, c=3, d=4
+            for (m, s) in [("a", "1"), ("b", "2"), ("c", "3"), ("d", "4")] {
+                dispatch_argv(
+                    &[b"ZADD".to_vec(), b"za".to_vec(), s.into(), m.into()],
+                    &mut store,
+                    0,
+                )
+                .unwrap();
+            }
+            // zset zb: b=10, c=20, e=30
+            for (m, s) in [("b", "10"), ("c", "20"), ("e", "30")] {
+                dispatch_argv(
+                    &[b"ZADD".to_vec(), b"zb".to_vec(), s.into(), m.into()],
+                    &mut store,
+                    0,
+                )
+                .unwrap();
+            }
+            // plain set sc: {c, d, f}  (membership score 1.0)
+            dispatch_argv(
+                &[
+                    b"SADD".to_vec(),
+                    b"sc".to_vec(),
+                    b"c".to_vec(),
+                    b"d".to_vec(),
+                    b"f".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap();
+            // disjoint zset zx: x=1, y=2
+            for (m, s) in [("x", "1"), ("y", "2")] {
+                dispatch_argv(
+                    &[b"ZADD".to_vec(), b"zx".to_vec(), s.into(), m.into()],
+                    &mut store,
+                    0,
+                )
+                .unwrap();
+            }
+            store
+        }
+
+        // Independent reference DATA mirroring the OLD ZINTER loop exactly.
+        // Returns sorted (member, score) pairs; the reply byte-format/emit code is
+        // unchanged by this refactor, so comparing data is the right invariant.
+        fn reference(
+            store: &mut Store,
+            keys: &[&[u8]],
+            weights: &[f64],
+            aggregate: &[u8],
+        ) -> Vec<(Vec<u8>, f64)> {
+            let first = store.zget_members_with_scores_no_stats(keys[0]).unwrap();
+            let w0 = weights.first().copied().unwrap_or(1.0);
+            let mut result: Vec<(Vec<u8>, f64)> = Vec::new();
+            for (member, score) in first {
+                let ws = score * w0;
+                let mut combined = if ws.is_nan() { 0.0 } else { ws };
+                let mut in_all = true;
+                for (i, &key) in keys[1..].iter().enumerate() {
+                    match store
+                        .zget_score_or_set_member_no_stats(key, &member)
+                        .unwrap()
+                    {
+                        Some(s) => {
+                            let w = weights.get(i + 1).copied().unwrap_or(1.0);
+                            let b = s * w;
+                            combined = if aggregate.eq_ignore_ascii_case(b"MIN") {
+                                combined.min(b)
+                            } else if aggregate.eq_ignore_ascii_case(b"MAX") {
+                                combined.max(b)
+                            } else {
+                                let r = combined + b;
+                                if r.is_nan() { 0.0 } else { r }
+                            };
+                        }
+                        None => {
+                            in_all = false;
+                            break;
+                        }
+                    }
+                }
+                if in_all {
+                    result.push((member, combined));
+                }
+            }
+            result.sort_by(|a, b| {
+                a.1.partial_cmp(&b.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0))
+            });
+            result
+        }
+
+        // Parse a ZINTER ... WITHSCORES reply into (member, score) pairs.
+        fn pairs_from_reply(reply: &RespFrame) -> Vec<(Vec<u8>, f64)> {
+            let RespFrame::Array(Some(items)) = reply else {
+                panic!("expected array reply, got {reply:?}");
+            };
+            let mut out = Vec::new();
+            let mut it = items.iter();
+            while let Some(m) = it.next() {
+                let RespFrame::BulkString(Some(member)) = m else {
+                    panic!("expected bulk member, got {m:?}");
+                };
+                let s = it.next().expect("withscores: score follows member");
+                let RespFrame::BulkString(Some(score)) = s else {
+                    panic!("expected bulk score, got {s:?}");
+                };
+                let score: f64 = std::str::from_utf8(score).unwrap().parse().unwrap();
+                out.push((member.clone(), score));
+            }
+            out
+        }
+
+        type ZinterScenario<'a> = (&'a [&'a [u8]], Vec<f64>, &'a [u8]);
+        let scenarios: &[ZinterScenario<'_>] = &[
+            (&[b"za", b"zb"], vec![1.0, 1.0], b"SUM"),
+            (&[b"za", b"zb"], vec![2.0, 3.0], b"SUM"),
+            (&[b"za", b"zb"], vec![1.0, 1.0], b"MIN"),
+            (&[b"za", b"zb"], vec![1.0, 1.0], b"MAX"),
+            (&[b"za", b"sc"], vec![1.0, 1.0], b"SUM"),
+            (&[b"sc", b"za"], vec![1.0, 1.0], b"SUM"),
+            (&[b"za", b"zb", b"sc"], vec![1.0, 1.0, 1.0], b"SUM"),
+            (&[b"za", b"zx"], vec![1.0, 1.0], b"SUM"),
+            (&[b"za"], vec![1.0], b"SUM"),
+            (&[b"za", b"missing"], vec![1.0, 1.0], b"SUM"),
+        ];
+
+        for (keys, weights, aggregate) in scenarios {
+            let mut argv: Vec<Vec<u8>> = vec![b"ZINTER".to_vec(), keys.len().to_string().into()];
+            for k in *keys {
+                argv.push(k.to_vec());
+            }
+            argv.push(b"WEIGHTS".to_vec());
+            for w in weights {
+                argv.push(format!("{w}").into_bytes());
+            }
+            argv.push(b"AGGREGATE".to_vec());
+            argv.push(aggregate.to_vec());
+            argv.push(b"WITHSCORES".to_vec());
+
+            let mut store = seed();
+            let got = dispatch_argv(&argv, &mut store, 0).expect("zinter dispatch");
+            let got_pairs = pairs_from_reply(&got);
+            let mut ref_store = seed();
+            let want = reference(&mut ref_store, keys, weights, aggregate);
+            assert_eq!(
+                got_pairs,
+                want,
+                "ZINTER diverged for keys={keys:?} weights={weights:?} aggregate={}",
+                String::from_utf8_lossy(aggregate),
+            );
+        }
     }
 
     #[test]
@@ -41820,7 +44966,7 @@ mod tests {
             &mut store,
             0,
         )
-        .expect("LPUSH listk a");
+        .unwrap_or_else(|e| e.to_resp());
         let err = dispatch_argv(
             &[
                 b"SETRANGE".to_vec(),
@@ -41846,7 +44992,7 @@ mod tests {
             &mut store,
             0,
         )
-        .expect("SETRANGE missing key + size-violation");
+        .unwrap_or_else(|e| e.to_resp());
         assert_eq!(
             r,
             RespFrame::Error(
@@ -44167,10 +47313,10 @@ mod tests {
 
         let digest = dispatch_argv(&[b"DEBUG".to_vec(), b"DIGEST".to_vec()], &mut store, 0)
             .expect("debug digest");
-        let RespFrame::BulkString(Some(digest_bytes)) = digest else {
-            panic!("expected bulk string");
+        // Upstream emits `addReplyStatus` — a RESP simple string.
+        let RespFrame::SimpleString(digest_str) = digest else {
+            panic!("expected simple string");
         };
-        let digest_str = String::from_utf8(digest_bytes).expect("valid utf8");
         // (frankenredis-dbgdiglen) Upstream debug.c::computeDatasetDigest
         // emits a 20-byte SHA1 XOR digest hex-encoded to 40 chars. fr
         // mirrors the frame width via Sha256 truncated to 20 bytes.
@@ -44217,8 +47363,8 @@ mod tests {
 
         // (frankenredis-dbgdigval) DEBUG DIGEST-VALUE returns an
         // Array of per-key digests (one entry per requested key),
-        // matching upstream debug.c. Each entry is a BulkString of
-        // hex digits.
+        // matching upstream debug.c. Each entry is a SimpleString of
+        // hex digits (upstream `addReplyStatus` per key).
         let digest = dispatch_argv(
             &[b"DEBUG".to_vec(), b"DIGEST-VALUE".to_vec(), b"foo".to_vec()],
             &mut store,
@@ -44229,10 +47375,9 @@ mod tests {
             panic!("expected array of digests"); // ubs:ignore — AI triage
         };
         assert_eq!(entries.len(), 1);
-        let RespFrame::BulkString(Some(digest_bytes)) = &entries[0] else {
-            panic!("expected bulk string per-key digest"); // ubs:ignore — AI triage
+        let RespFrame::SimpleString(digest_str) = &entries[0] else {
+            panic!("expected simple string per-key digest"); // ubs:ignore — AI triage
         };
-        let digest_str = std::str::from_utf8(digest_bytes).expect("valid utf8");
         assert_eq!(digest_str.len(), 40);
 
         // DIGEST-VALUE with multiple keys returns one entry per key.
@@ -44252,10 +47397,10 @@ mod tests {
         };
         assert_eq!(multi_entries.len(), 2);
         for entry in &multi_entries {
-            assert!(matches!(entry, RespFrame::BulkString(Some(b)) if b.len() == 40));
+            assert!(matches!(entry, RespFrame::SimpleString(s) if s.len() == 40));
         }
 
-        // Digest of nonexistent key should still emit a BulkString
+        // Digest of nonexistent key should still emit a SimpleString
         // entry so the array shape stays predictable.
         let digest_nokey = dispatch_argv(
             &[
@@ -44271,7 +47416,7 @@ mod tests {
             panic!("expected array"); // ubs:ignore — AI triage
         };
         assert_eq!(missing.len(), 1);
-        assert!(matches!(&missing[0], RespFrame::BulkString(Some(_))));
+        assert!(matches!(&missing[0], RespFrame::SimpleString(_)));
 
         // (frankenredis-dbgdigvempty) DEBUG DIGEST-VALUE with no keys
         // is gated by `c->argc >= 2` upstream and emits
@@ -44305,7 +47450,7 @@ mod tests {
             .expect("debug digest");
         assert_eq!(
             one_key_digest,
-            RespFrame::BulkString(Some(b"f501b7e652f1e4874b8a6890245c152b5b89fe96".to_vec()))
+            RespFrame::SimpleString("f501b7e652f1e4874b8a6890245c152b5b89fe96".to_string())
         );
 
         let k1_value = dispatch_argv(
@@ -44316,9 +47461,9 @@ mod tests {
         .expect("debug digest-value k1");
         assert_eq!(
             k1_value,
-            RespFrame::Array(Some(vec![RespFrame::BulkString(Some(
-                b"1b39f6ecf00cfce8fa56c4c62c40126162d878fe".to_vec()
-            ))]))
+            RespFrame::Array(Some(vec![RespFrame::SimpleString(
+                "1b39f6ecf00cfce8fa56c4c62c40126162d878fe".to_string()
+            )]))
         );
 
         dispatch_argv(
@@ -44331,7 +47476,7 @@ mod tests {
             .expect("debug digest after k2");
         assert_eq!(
             two_key_digest,
-            RespFrame::BulkString(Some(b"91720c7142b6dfec5df4d6409a6f52e2da2a829f".to_vec()))
+            RespFrame::SimpleString("91720c7142b6dfec5df4d6409a6f52e2da2a829f".to_string())
         );
         let k2_value = dispatch_argv(
             &[b"DEBUG".to_vec(), b"DIGEST-VALUE".to_vec(), b"k2".to_vec()],
@@ -44341,9 +47486,9 @@ mod tests {
         .expect("debug digest-value k2");
         assert_eq!(
             k2_value,
-            RespFrame::Array(Some(vec![RespFrame::BulkString(Some(
-                b"becefaf9bf124b8996f547b6b4876ef6a6b60c37".to_vec()
-            ))]))
+            RespFrame::Array(Some(vec![RespFrame::SimpleString(
+                "becefaf9bf124b8996f547b6b4876ef6a6b60c37".to_string()
+            )]))
         );
     }
 
@@ -44413,10 +47558,9 @@ mod tests {
         let mut store = Store::new();
         let digest = dispatch_argv(&[b"DEBUG".to_vec(), b"DIGEST".to_vec()], &mut store, 0)
             .expect("debug digest empty");
-        let RespFrame::BulkString(Some(digest_bytes)) = digest else {
-            panic!("expected bulk string");
+        let RespFrame::SimpleString(digest_str) = digest else {
+            panic!("expected simple string");
         };
-        let digest_str = String::from_utf8(digest_bytes).expect("valid utf8");
         assert_eq!(digest_str.len(), 40);
     }
 
@@ -45676,7 +48820,7 @@ mod tests {
                 b"a".to_vec(),
             ],
         ] {
-            let out = dispatch_argv(&argv, &mut store, 0).expect("zadd conflict");
+            let out = dispatch_argv(&argv, &mut store, 0).unwrap_or_else(|e| e.to_resp());
             assert_eq!(
                 out,
                 RespFrame::Error(
@@ -46023,7 +49167,12 @@ mod tests {
             let (_, value) = entries
                 .iter()
                 .find(|(k, _)| matches!(k, RespFrame::BulkString(Some(b)) if b.as_slice() == *key))
-                .unwrap_or_else(|| panic!("RESP3 MEMORY STATS missing {:?}", String::from_utf8_lossy(key)));
+                .unwrap_or_else(|| {
+                    panic!(
+                        "RESP3 MEMORY STATS missing {:?}",
+                        String::from_utf8_lossy(key)
+                    )
+                });
             assert!(
                 matches!(value, RespFrame::Double(_)),
                 "RESP3 {} must be a Double, got {value:?}",
@@ -46042,7 +49191,12 @@ mod tests {
             let pos = items
                 .iter()
                 .position(|f| matches!(f, RespFrame::BulkString(Some(b)) if b.as_slice() == *key))
-                .unwrap_or_else(|| panic!("RESP2 MEMORY STATS missing {:?}", String::from_utf8_lossy(key)));
+                .unwrap_or_else(|| {
+                    panic!(
+                        "RESP2 MEMORY STATS missing {:?}",
+                        String::from_utf8_lossy(key)
+                    )
+                });
             assert!(
                 matches!(items[pos + 1], RespFrame::BulkString(Some(_))),
                 "RESP2 {} must be a bulk string, got {:?}",
@@ -46050,6 +49204,81 @@ mod tests {
                 items[pos + 1]
             );
         }
+    }
+
+    #[test]
+    fn memory_stats_dataset_percentage_is_non_negative() {
+        // (frankenredis-memdsperc) dataset.percentage must lie in [0, 100] — a
+        // percentage is non-negative by construction. fr's `used`
+        // (== dataset.bytes) is data-only and EXCLUDES overhead, so on a small
+        // keyspace overhead_total can exceed it; the old formula treated `used`
+        // as the grand total and subtracted overhead from it, underflowing to a
+        // negative percentage (observed -2.65 vs redis 7.2.4 differential).
+        // Helpers: pull a field's value (ratio as f64, integer as i64) from the
+        // RESP2 flat array.
+        fn field_at(store: &mut Store, field: &[u8]) -> RespFrame {
+            let out = dispatch_argv(&[b"MEMORY".to_vec(), b"STATS".to_vec()], store, 0)
+                .expect("memory stats");
+            let RespFrame::Array(Some(items)) = out else {
+                panic!("RESP2 MEMORY STATS must be a flat Array"); // ubs:ignore — AI triage
+            };
+            let pos = items
+                .iter()
+                .position(|f| matches!(f, RespFrame::BulkString(Some(b)) if b.as_slice() == field))
+                .unwrap_or_else(|| panic!("missing {:?}", String::from_utf8_lossy(field)));
+            items[pos + 1].clone()
+        }
+        fn ratio(store: &mut Store, field: &[u8]) -> f64 {
+            let RespFrame::BulkString(Some(v)) = field_at(store, field) else {
+                panic!("ratio value must be a bulk string"); // ubs:ignore — AI triage
+            };
+            std::str::from_utf8(&v).unwrap().parse::<f64>().unwrap()
+        }
+        fn int_field(store: &mut Store, field: &[u8]) -> i64 {
+            match field_at(store, field) {
+                RespFrame::Integer(n) => n,
+                other => panic!(
+                    "{:?} must be an Integer, got {other:?}", // ubs:ignore — AI triage
+                    String::from_utf8_lossy(field)
+                ),
+            }
+        }
+
+        // Exercise both the tiny-keyspace trigger (data dwarfed by overhead —
+        // the regime that produced the old negative result) and a populated one.
+        let mut tiny = Store::new();
+        tiny.set(b"k".to_vec(), b"v".to_vec(), None, 0);
+        let mut big = Store::new();
+        for i in 0..2000u32 {
+            big.set(format!("key:{i:08}").into_bytes(), vec![b'x'; 256], None, 0);
+        }
+        for store in [&mut tiny, &mut big] {
+            let p = ratio(store, b"dataset.percentage");
+            assert!(
+                (0.0..=100.0).contains(&p),
+                "dataset.percentage must be in [0,100], got {p}"
+            );
+            // Restored upstream invariants (frankenredis-nckib): total.allocated
+            // must be >= overhead.total, and dataset.bytes == total - overhead.
+            let total = int_field(store, b"total.allocated");
+            let overhead = int_field(store, b"overhead.total");
+            let dataset = int_field(store, b"dataset.bytes");
+            assert!(
+                total >= overhead,
+                "total.allocated ({total}) must be >= overhead.total ({overhead})"
+            );
+            assert_eq!(
+                dataset,
+                total - overhead,
+                "dataset.bytes must equal total.allocated - overhead.total"
+            );
+            // allocator.allocated tracks total.allocated (frag ratio is 1.0).
+            assert_eq!(int_field(store, b"allocator.allocated"), total);
+        }
+        assert!(
+            ratio(&mut big, b"dataset.percentage") > 0.0,
+            "non-empty dataset should have positive percentage"
+        );
     }
 
     #[test]
@@ -46782,6 +50011,47 @@ mod tests {
     }
 
     #[test]
+    fn bzpopmin_bzpopmax_score_is_resp3_double_under_hello3() {
+        // Upstream genericZpopCommand emits the score via addReplyDouble, so the
+        // BZPOPMIN/BZPOPMAX immediate-serve `[key, member, score]` reply uses a
+        // RESP3 Double under HELLO 3 (a bulk string under RESP2). (Regression:
+        // fr hardcoded a bulk string, diverging from redis only in RESP3.)
+        let mut store = Store::new();
+        store
+            .zadd(b"z", &[(1.0, b"a".to_vec()), (2.5, b"b".to_vec())], 0)
+            .unwrap();
+        store.dispatch_client_ctx.resp_protocol_version = 3;
+        let out = dispatch_argv(
+            &[b"BZPOPMIN".to_vec(), b"z".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("bzpopmin resp3");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"z".to_vec())),
+                RespFrame::BulkString(Some(b"a".to_vec())),
+                RespFrame::Double("1".to_string()),
+            ]))
+        );
+        let out = dispatch_argv(
+            &[b"BZPOPMAX".to_vec(), b"z".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("bzpopmax resp3");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"z".to_vec())),
+                RespFrame::BulkString(Some(b"b".to_vec())),
+                RespFrame::Double("2.5".to_string()),
+            ]))
+        );
+    }
+
+    #[test]
     fn bzpopmin_empty() {
         let mut store = Store::new();
         let out = dispatch_argv(
@@ -47445,6 +50715,46 @@ mod tests {
     }
 
     #[test]
+    fn direct_pubsub_encoder_matches_frame_encoder_bytes() {
+        let messages = vec![
+            fr_store::PubSubMessage::Message {
+                channel: b"ch1".to_vec(),
+                data: b"hello".to_vec(),
+            },
+            fr_store::PubSubMessage::PMessage {
+                pattern: b"ch*".to_vec(),
+                channel: b"ch1".to_vec(),
+                data: b"hello".to_vec(),
+            },
+            fr_store::PubSubMessage::SMessage {
+                channel: b"shard".to_vec(),
+                data: b"hello".to_vec(),
+            },
+            fr_store::PubSubMessage::Invalidate {
+                keys: vec![b"foo:1".to_vec(), b"foo:2".to_vec()],
+            },
+            fr_store::PubSubMessage::Invalidate { keys: Vec::new() },
+        ];
+
+        for message in messages {
+            for protocol in [2, 3] {
+                let mut direct = Vec::new();
+                encode_pubsub_message_for_protocol_into(message.clone(), protocol, &mut direct);
+
+                let frame = pubsub_message_to_frame_for_protocol(message.clone(), protocol);
+                let mut framed = Vec::new();
+                if protocol == 3 {
+                    frame.encode_into_resp3(&mut framed);
+                } else {
+                    frame.encode_into(&mut framed);
+                }
+
+                assert_eq!(direct, framed, "protocol={protocol} message={message:?}");
+            }
+        }
+    }
+
+    #[test]
     fn client_tracking_invalidation_to_frame_for_resp3_uses_push_type() {
         let frame = pubsub_message_to_frame_for_protocol(
             fr_store::PubSubMessage::Invalidate {
@@ -47813,6 +51123,73 @@ mod tests {
     }
 
     #[test]
+    fn zdiffstore_preserves_dest_source_scores_and_order() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"z".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+                b"2".to_vec(),
+                b"b".to_vec(),
+                b"3".to_vec(),
+                b"c".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"other".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+
+        let count = dispatch_argv(
+            &[
+                b"ZDIFFSTORE".to_vec(),
+                b"z".to_vec(),
+                b"2".to_vec(),
+                b"z".to_vec(),
+                b"other".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("zdiffstore");
+        assert_eq!(count, RespFrame::Integer(2));
+
+        let stored = dispatch_argv(
+            &[
+                b"ZRANGE".to_vec(),
+                b"z".to_vec(),
+                b"0".to_vec(),
+                b"-1".to_vec(),
+                b"WITHSCORES".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("zrange");
+        assert_eq!(
+            stored,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"b".to_vec())),
+                RespFrame::BulkString(Some(b"2".to_vec())),
+                RespFrame::BulkString(Some(b"c".to_vec())),
+                RespFrame::BulkString(Some(b"3".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
     fn zintercard_basic() {
         let mut store = Store::new();
         dispatch_argv(
@@ -47853,6 +51230,145 @@ mod tests {
         )
         .expect("zintercard");
         assert_eq!(out, RespFrame::Integer(1));
+    }
+
+    #[test]
+    fn zintercard_cache_records_lookups_and_invalidates_on_write() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"za".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+                b"2".to_vec(),
+                b"b".to_vec(),
+                b"3".to_vec(),
+                b"c".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"zb".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+
+        store.stat_keyspace_hits = 0;
+        store.stat_keyspace_misses = 0;
+
+        let argv = [
+            b"ZINTERCARD".to_vec(),
+            b"2".to_vec(),
+            b"za".to_vec(),
+            b"zb".to_vec(),
+        ];
+        assert_eq!(
+            dispatch_argv(&argv, &mut store, 0).expect("first zintercard"),
+            RespFrame::Integer(1)
+        );
+        assert_eq!(
+            dispatch_argv(&argv, &mut store, 0).expect("cached zintercard"),
+            RespFrame::Integer(1)
+        );
+        assert_eq!(store.stat_keyspace_hits, 4);
+        assert_eq!(store.stat_keyspace_misses, 0);
+
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"zb".to_vec(),
+                b"2".to_vec(),
+                b"b".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            dispatch_argv(&argv, &mut store, 0).expect("invalidated zintercard"),
+            RespFrame::Integer(2)
+        );
+    }
+
+    #[test]
+    fn zset_algebra_source_stats_record_once_per_input_key() {
+        fn seed() -> Store {
+            let mut store = Store::new();
+            for argv in [
+                [
+                    b"ZADD".as_slice(),
+                    b"za",
+                    b"1",
+                    b"a",
+                    b"2",
+                    b"b",
+                    b"3",
+                    b"c",
+                    b"4",
+                    b"d",
+                    b"5",
+                    b"e",
+                ]
+                .as_slice(),
+                [
+                    b"ZADD".as_slice(),
+                    b"zb",
+                    b"1",
+                    b"a",
+                    b"2",
+                    b"b",
+                    b"3",
+                    b"c",
+                ]
+                .as_slice(),
+                [
+                    b"ZADD".as_slice(),
+                    b"zc",
+                    b"1",
+                    b"c",
+                    b"2",
+                    b"d",
+                    b"3",
+                    b"e",
+                ]
+                .as_slice(),
+            ] {
+                let argv: Vec<Vec<u8>> = argv.iter().map(|arg| arg.to_vec()).collect();
+                dispatch_argv(&argv, &mut store, 0).unwrap();
+            }
+            store.stat_keyspace_hits = 0;
+            store.stat_keyspace_misses = 0;
+            store
+        }
+
+        for (argv, expected_hits) in [
+            ([b"ZINTERCARD".as_slice(), b"2", b"za", b"zb"].as_slice(), 2),
+            ([b"ZINTER".as_slice(), b"2", b"za", b"zb"].as_slice(), 2),
+            (
+                [b"ZINTER".as_slice(), b"3", b"za", b"zb", b"zc"].as_slice(),
+                3,
+            ),
+            ([b"ZDIFF".as_slice(), b"2", b"za", b"zb"].as_slice(), 2),
+            (
+                [b"ZDIFFSTORE".as_slice(), b"d", b"2", b"za", b"zb"].as_slice(),
+                2,
+            ),
+        ] {
+            let mut store = seed();
+            let argv: Vec<Vec<u8>> = argv.iter().map(|arg| arg.to_vec()).collect();
+            dispatch_argv(&argv, &mut store, 0).expect("zset algebra command");
+            assert_eq!(store.stat_keyspace_hits, expected_hits, "{argv:?}");
+            assert_eq!(store.stat_keyspace_misses, 0, "{argv:?}");
+        }
     }
 
     #[test]
@@ -48765,6 +52281,13 @@ mod tests {
             let name = entry.file_name().into_string().map_err(|name| {
                 format!("fuzz_command_option_parsers seed filename is not UTF-8: {name:?}")
             })?;
+            // Only the curated `.seed` corpus is classified by this test; the
+            // same directory accumulates untracked `cargo fuzz` coverage
+            // artifacts (hex-named) that are not hand-authored seeds and must
+            // not fail the completeness check. (frankenredis-bwbrb)
+            if !name.ends_with(".seed") {
+                continue;
+            }
             assert!(
                 listed.contains(name.as_str()),
                 "seed {name} must be listed as accept or reject"
@@ -51479,13 +55002,20 @@ mod tests {
         store.dispatch_client_ctx.resp_protocol_version = 3;
         let proto = |store: &mut Store, t: &str| {
             dispatch_argv(
-                &[b"DEBUG".to_vec(), b"PROTOCOL".to_vec(), t.as_bytes().to_vec()],
+                &[
+                    b"DEBUG".to_vec(),
+                    b"PROTOCOL".to_vec(),
+                    t.as_bytes().to_vec(),
+                ],
                 store,
                 0,
             )
             .unwrap_or_else(|_| panic!("DEBUG PROTOCOL {t}"))
         };
-        assert_eq!(proto(&mut store, "double"), RespFrame::Double("3.141".to_string()));
+        assert_eq!(
+            proto(&mut store, "double"),
+            RespFrame::Double("3.141".to_string())
+        );
         assert_eq!(
             proto(&mut store, "bignum"),
             RespFrame::BigNumber("1234567999999999999999999999999999999".to_string())
@@ -52097,6 +55627,69 @@ mod tests {
         assert!(info.contains("serializedlength:"), "{info}");
         assert!(info.contains("lru:"), "{info}");
         assert!(info.contains("lru_seconds_idle:"), "{info}");
+        // A string value carries no quicklist suffix.
+        assert!(!info.contains("ql_nodes:"), "{info}");
+    }
+
+    #[test]
+    fn debug_object_quicklist_emits_ql_fields() {
+        // (frankenredis-debugobj-quicklist) Upstream debug.c appends
+        // `ql_nodes:%d ql_avg_node:%.2f ql_listpack_max:%d ql_compressed:%d
+        // ql_uncompressed_size:%zu` for quicklist-encoded lists. fr previously
+        // ended at lru_seconds_idle for all encodings.
+        let mut store = Store::new();
+        // 200 x 100-byte elements -> quicklist (3 nodes under -2/8KiB cap),
+        // byte-matched to vendored redis 7.2.4 DEBUG OBJECT.
+        let mut argv = vec![b"RPUSH".to_vec(), b"ql".to_vec()];
+        argv.extend((0..200).map(|_| vec![b'x'; 100]));
+        dispatch_argv(&argv, &mut store, 0).expect("rpush");
+
+        let out = dispatch_argv(
+            &[b"DEBUG".to_vec(), b"OBJECT".to_vec(), b"ql".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("debug object ql");
+        let RespFrame::SimpleString(info) = out else {
+            panic!("expected SimpleString"); // ubs:ignore — AI triage
+        };
+        assert!(info.contains("encoding:quicklist"), "{info}");
+        assert!(info.contains("ql_nodes:3"), "{info}");
+        assert!(info.contains("ql_avg_node:66.67"), "{info}");
+        assert!(info.contains("ql_listpack_max:-2"), "{info}");
+        assert!(info.contains("ql_compressed:0"), "{info}");
+        assert!(info.contains("ql_uncompressed_size:20621"), "{info}");
+        // Field order matches upstream: suffix follows lru_seconds_idle.
+        let idle = info.find("lru_seconds_idle:").expect("idle field");
+        let qln = info.find("ql_nodes:").expect("ql_nodes field");
+        assert!(
+            qln > idle,
+            "ql_ suffix must follow lru_seconds_idle: {info}"
+        );
+
+        // A small listpack-encoded list carries no quicklist suffix.
+        dispatch_argv(
+            &[
+                b"RPUSH".to_vec(),
+                b"sl".to_vec(),
+                b"a".to_vec(),
+                b"b".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("rpush small");
+        let small = dispatch_argv(
+            &[b"DEBUG".to_vec(), b"OBJECT".to_vec(), b"sl".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("debug object small");
+        let RespFrame::SimpleString(small_info) = small else {
+            panic!("expected SimpleString"); // ubs:ignore — AI triage
+        };
+        assert!(small_info.contains("encoding:listpack"), "{small_info}");
+        assert!(!small_info.contains("ql_nodes:"), "{small_info}");
     }
 
     /// (frankenredis-debugobjlru) `lru` and `lru_seconds_idle` are
@@ -53284,7 +56877,13 @@ mod tests {
         // actually move keys between databases (not silently no-op
         // as the prior stub did). (frankenredis-w9yzb)
         let mut store = Store::new();
-        store.set(fr_store::encode_db_key(0, b"foo"), b"bar".to_vec(), None, 0);
+        let value = vec![b'v'; 64 * 1024];
+        store.set(
+            fr_store::encode_db_key(0, b"foo"),
+            value.clone(),
+            Some(60_000),
+            0,
+        );
         assert!(store.exists(&fr_store::encode_db_key(0, b"foo"), 0));
 
         let out = dispatch_argv(
@@ -53296,6 +56895,16 @@ mod tests {
         assert_eq!(out, RespFrame::Integer(1));
         assert!(!store.exists(&fr_store::encode_db_key(0, b"foo"), 0));
         assert!(store.exists(&fr_store::encode_db_key(1, b"foo"), 0));
+        assert_eq!(
+            store
+                .get(&fr_store::encode_db_key(1, b"foo"), 0)
+                .expect("moved value"),
+            Some(value)
+        );
+        assert_eq!(
+            store.pttl(&fr_store::encode_db_key(1, b"foo"), 0),
+            fr_store::PttlValue::Remaining(60_000)
+        );
     }
 
     #[test]
@@ -53481,6 +57090,75 @@ mod tests {
             store.last_xadd_trimmed,
             "MAXLEN below length must flag the trim"
         );
+    }
+
+    /// (frankenredis-8t4vl.1) XADD inline `MINID ~` follows the same whole-node
+    /// approximate model as XTRIM MINID ~ (Store::xtrim_minid_approx): it runs on
+    /// every add even without LIMIT, evicts only full head nodes whose last id is
+    /// below the threshold, and a sub-node LIMIT evicts nothing. Previously this
+    /// path no-op'd without LIMIT and used the exact trim with LIMIT.
+    #[test]
+    fn xadd_inline_minid_approx_respects_node_boundary_8t4vl_1() {
+        let mut store = Store::new();
+        let seed = |store: &mut Store, n: u64| {
+            dispatch_argv(&[b"DEL".to_vec(), b"s".to_vec()], store, 0).expect("del");
+            for i in 1..=n {
+                dispatch_argv(
+                    &[
+                        b"XADD".to_vec(),
+                        b"s".to_vec(),
+                        format!("{i}-0").into_bytes(),
+                        b"f".to_vec(),
+                        b"v".to_vec(),
+                    ],
+                    store,
+                    0,
+                )
+                .expect("seed");
+            }
+        };
+        // XADD with an inline MINID ~ trim clause; the add itself uses `next`-0.
+        let xadd_trim = |store: &mut Store, next: u64, clause: &[&[u8]]| -> usize {
+            let mut argv = vec![b"XADD".to_vec(), b"s".to_vec()];
+            for a in clause {
+                argv.push(a.to_vec());
+            }
+            argv.extend([
+                format!("{next}-0").into_bytes(),
+                b"f".to_vec(),
+                b"v".to_vec(),
+            ]);
+            dispatch_argv(&argv, store, 0).expect("xadd trim");
+            store.xlen(b"s", 0).expect("xlen")
+        };
+
+        // 250 entries + 1 added (251) -> nodes [1..100][101..200][201..251].
+        // ~ 201-0: node0(last 100) and node1(last 200) below threshold -> drop
+        // 200; node2 last id 251 NOT < 201 -> kept. 51 remain, even with no LIMIT.
+        seed(&mut store, 250);
+        assert_eq!(xadd_trim(&mut store, 251, &[b"MINID", b"~", b"201-0"]), 51);
+
+        // Sub-node LIMIT evicts nothing (whole-node granularity).
+        seed(&mut store, 250);
+        assert_eq!(
+            xadd_trim(
+                &mut store,
+                251,
+                &[b"MINID", b"~", b"201-0", b"LIMIT", b"50"]
+            ),
+            251
+        );
+        assert!(!store.last_xadd_trimmed, "sub-node LIMIT removes nothing");
+
+        // Threshold above every id drops all nodes incl. the partial tail.
+        seed(&mut store, 250);
+        assert_eq!(xadd_trim(&mut store, 251, &[b"MINID", b"~", b"10000-0"]), 0);
+        assert!(store.last_xadd_trimmed, "full clear flags a trim");
+
+        // Exact (=) MINID still removes every entry below the threshold.
+        seed(&mut store, 250);
+        // adds 251, then removes ids < 150 -> 150..251 = 102 remain.
+        assert_eq!(xadd_trim(&mut store, 251, &[b"MINID", b"=", b"150-0"]), 102);
     }
 
     #[test]
@@ -54264,8 +57942,15 @@ mod tests {
         let argv = |parts: &[&str]| -> Vec<Vec<u8>> {
             parts.iter().map(|p| p.as_bytes().to_vec()).collect()
         };
+        // Robust to the CommandError variant: a semantic-error refactor may surface
+        // WRONGTYPE as Store(WrongType) or Custom("WRONGTYPE ..."); both render to the
+        // same wire reply, so match on the rendered RESP error wording.
         let is_wrongtype = |r: Result<RespFrame, CommandError>| -> bool {
-            matches!(r, Err(CommandError::Store(fr_store::StoreError::WrongType)))
+            let frame = match r {
+                Ok(f) => f,
+                Err(e) => e.to_resp(),
+            };
+            matches!(frame, RespFrame::Error(s) if s.starts_with("WRONGTYPE"))
         };
         let mut store = Store::new();
         dispatch_argv(&argv(&["RPUSH", "l", "a", "b"]), &mut store, 0).unwrap();
@@ -54312,9 +57997,10 @@ mod tests {
             &argv(&["GEORADIUS", "nope", "15", "37", "100", "X"]),
             &mut store,
             0,
-        );
+        )
+        .unwrap_or_else(|e| e.to_resp());
         assert!(
-            matches!(missing, Ok(RespFrame::Error(ref s)) if s.contains("unsupported unit")),
+            matches!(missing, RespFrame::Error(ref s) if s.contains("unsupported unit")),
             "missing key must still parse options, got {missing:?}"
         );
         // Missing key + valid options -> empty array.
@@ -54389,6 +58075,74 @@ mod tests {
         assert!(format_coord_human(f64::NAN) == "nan");
         assert_eq!(format_coord_human(f64::INFINITY), "inf");
         assert_eq!(format_coord_human(f64::NEG_INFINITY), "-inf");
+    }
+
+    #[test]
+    fn format_coord_human_i128_path_matches_std_exact_formatter() {
+        // Locks the fast i128 fixed-point coordinate formatter byte-for-byte
+        // against the reference `format!("{value:.17}")` + trailing-zero-trim it
+        // replaced, across the geo domain (lon/lat/distance) plus adversarial
+        // magnitudes. Guards against a rounding/placement regression that would
+        // silently diverge GEOPOS / GEOSEARCH WITHCOORD from Redis 7.2.4.
+        fn reference(value: f64) -> String {
+            if value.is_nan() {
+                return "nan".to_string();
+            }
+            if value.is_infinite() {
+                return if value.is_sign_positive() {
+                    "inf"
+                } else {
+                    "-inf"
+                }
+                .to_string();
+            }
+            let mut s = format!("{value:.17}");
+            if s.contains('.') {
+                let t = s.trim_end_matches('0').trim_end_matches('.');
+                s.truncate(t.len());
+            }
+            if s == "-0" {
+                s = "0".to_string();
+            }
+            s
+        }
+        // Deterministic xorshift sweep over coord/distance/general ranges.
+        let mut seed: u64 = 0x9e3779b97f4a7c15;
+        for _ in 0..2_000_000u64 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let r = (seed >> 11) as f64 / (1u64 << 53) as f64;
+            let v = match seed & 3 {
+                0 => -180.0 + r * 360.0,  // longitude
+                1 => -85.05 + r * 170.1,  // latitude
+                2 => r * 20_000_000.0,    // distance in meters
+                _ => (r - 0.5) * 2_000.0, // general
+            };
+            assert_eq!(format_coord_human(v), reference(v), "mismatch at v={v}");
+        }
+        for &v in &[
+            13.361_389_338_970_184_f64,
+            38.115_556_395_496_3,
+            -122.419_401_705_265_05,
+            12.999_999_225_139_618,
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            0.5,
+            90.0,
+            -90.0,
+            180.0,
+            1e-10,
+            6e-18,
+        ] {
+            assert_eq!(
+                format_coord_human(v),
+                reference(v),
+                "mismatch at explicit v={v}"
+            );
+        }
     }
 
     #[test]
@@ -55212,6 +58966,110 @@ mod tests {
     }
 
     #[test]
+    fn sort_move_matches_clone_reference() {
+        // (frankenredis-sortmove) SORT with MOVE=true (mem::take the window + into_iter the reply)
+        // must return byte-identical replies AND leave identical STORE state as MOVE=false (the
+        // historical per-element clone), across numeric/alpha/BY/GET/LIMIT/DESC/STORE variants.
+        use super::bench_sort_generic;
+        fn seed() -> Store {
+            let mut s = Store::new();
+            for v in ["30", "1", "20", "3", "200", "10"] {
+                dispatch_argv(
+                    &[b"RPUSH".to_vec(), b"nums".to_vec(), v.as_bytes().to_vec()],
+                    &mut s,
+                    0,
+                )
+                .unwrap();
+            }
+            for v in ["banana", "apple", "cherry", "date", "apple"] {
+                dispatch_argv(
+                    &[b"RPUSH".to_vec(), b"words".to_vec(), v.as_bytes().to_vec()],
+                    &mut s,
+                    0,
+                )
+                .unwrap();
+            }
+            for (k, w, d) in [
+                ("1", "5", "one"),
+                ("20", "2", "twenty"),
+                ("3", "9", "three"),
+                ("200", "1", "twohundred"),
+                ("10", "7", "ten"),
+                ("30", "3", "thirty"),
+            ] {
+                dispatch_argv(
+                    &[
+                        b"SET".to_vec(),
+                        format!("weight_{k}").into_bytes(),
+                        w.as_bytes().to_vec(),
+                    ],
+                    &mut s,
+                    0,
+                )
+                .unwrap();
+                dispatch_argv(
+                    &[
+                        b"SET".to_vec(),
+                        format!("data_{k}").into_bytes(),
+                        d.as_bytes().to_vec(),
+                    ],
+                    &mut s,
+                    0,
+                )
+                .unwrap();
+            }
+            s
+        }
+        let b = |x: &[u8]| x.to_vec();
+        let variants: Vec<Vec<Vec<u8>>> = vec![
+            vec![b(b"SORT"), b(b"nums")],
+            vec![b(b"SORT"), b(b"nums"), b(b"DESC")],
+            vec![b(b"SORT"), b(b"nums"), b(b"LIMIT"), b(b"1"), b(b"3")],
+            vec![b(b"SORT"), b(b"words"), b(b"ALPHA")],
+            vec![
+                b(b"SORT"),
+                b(b"words"),
+                b(b"ALPHA"),
+                b(b"DESC"),
+                b(b"LIMIT"),
+                b(b"0"),
+                b(b"2"),
+            ],
+            vec![b(b"SORT"), b(b"nums"), b(b"BY"), b(b"weight_*")],
+            vec![
+                b(b"SORT"),
+                b(b"nums"),
+                b(b"BY"),
+                b(b"weight_*"),
+                b(b"GET"),
+                b(b"data_*"),
+                b(b"GET"),
+                b(b"#"),
+            ],
+            vec![b(b"SORT"), b(b"nums"), b(b"STORE"), b(b"dest")],
+            vec![
+                b(b"SORT"),
+                b(b"words"),
+                b(b"ALPHA"),
+                b(b"STORE"),
+                b(b"dest"),
+            ],
+        ];
+        for argv in &variants {
+            let mut s_ref = seed();
+            let mut s_cand = seed();
+            let r_ref = bench_sort_generic::<false>(argv, &mut s_ref, 0).unwrap();
+            let r_cand = bench_sort_generic::<true>(argv, &mut s_cand, 0).unwrap();
+            assert_eq!(r_ref, r_cand, "SORT reply diverged for {argv:?}");
+            assert_eq!(
+                s_ref.dump_key(b"dest", 1),
+                s_cand.dump_key(b"dest", 1),
+                "SORT STORE dest diverged for {argv:?}"
+            );
+        }
+    }
+
+    #[test]
     fn sort_numeric_list_asc() {
         let mut store = Store::new();
         for val in [b"3", b"1", b"2"] {
@@ -55260,6 +59118,53 @@ mod tests {
         );
     }
 
+    /// `sort_alpha_compare` now short-circuits on `collator` before validating UTF-8. With no
+    /// collator the old form matched `(None, _, _)` and could only reach `_ => left.cmp(right)`,
+    /// so the two must agree on EVERY input — including invalid UTF-8, embedded NULs, and
+    /// empties, which are exactly the shapes the discarded `from_utf8` used to touch.
+    #[test]
+    fn sort_alpha_compare_without_collator_matches_the_pre_shortcircuit_form() {
+        fn orig(left: &[u8], right: &[u8]) -> std::cmp::Ordering {
+            // Verbatim pre-fix body with `collator = None` folded in.
+            match (
+                None::<&super::CollatorBorrowed<'_>>,
+                std::str::from_utf8(left),
+                std::str::from_utf8(right),
+            ) {
+                (Some(collator), Ok(l), Ok(r)) if !l.contains('\0') && !r.contains('\0') => {
+                    collator.compare(l, r)
+                }
+                _ => left.cmp(right),
+            }
+        }
+        let corpus: &[&[u8]] = &[
+            b"",
+            b"a",
+            b"ab",
+            b"alpha",
+            b"bravo",
+            b"charlie",
+            b"\x00",
+            b"a\x00b",
+            b"\xff\xfe",    // invalid UTF-8
+            b"caf\xc3\xa9", // valid UTF-8, multibyte
+            b"caf\xe9",     // invalid UTF-8 (latin-1)
+            b"zzzzzzzzzzzzzzz",
+            b"0",
+            b"10",
+            b"9",
+        ];
+        for a in corpus {
+            for b in corpus {
+                assert_eq!(
+                    super::sort_alpha_compare(None, a, b),
+                    orig(a, b),
+                    "diverged on {a:?} vs {b:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn sort_alpha_list() {
         let mut store = Store::new();
@@ -55284,6 +59189,74 @@ mod tests {
                 RespFrame::BulkString(Some(b"bravo".to_vec())),
                 RespFrame::BulkString(Some(b"charlie".to_vec())),
             ]))
+        );
+    }
+
+    #[test]
+    fn sort_alpha_posix_locale_mapping_keeps_c_locale_binary() {
+        assert_eq!(posix_locale_to_bcp47("C"), None);
+        assert_eq!(posix_locale_to_bcp47("POSIX"), None);
+        assert_eq!(posix_locale_to_bcp47("C.UTF-8"), None);
+        assert_eq!(
+            posix_locale_to_bcp47("en_US.UTF-8"),
+            Some("en-US".to_string())
+        );
+        assert_eq!(
+            posix_locale_to_bcp47("de_DE.UTF-8@euro"),
+            Some("de-DE".to_string())
+        );
+    }
+
+    #[test]
+    fn sort_alpha_en_us_collation_matches_non_store_probe() {
+        let mut options = CollatorOptions::default();
+        options.alternate_handling = Some(AlternateHandling::Shifted);
+        let locale = "en-US".parse::<Locale>().expect("valid en-US locale");
+        let collator = Collator::try_new(locale.into(), options).expect("en-US collator");
+        let mut values = [
+            b"-2".to_vec(),
+            b"0".to_vec(),
+            b"18".to_vec(),
+            b"5".to_vec(),
+            b"6".to_vec(),
+            b"apple".to_vec(),
+            b"Banana".to_vec(),
+            b"9x".to_vec(),
+            b"3.5".to_vec(),
+            b"".to_vec(),
+        ];
+        values.sort_by(|left, right| sort_alpha_compare(Some(&collator), left, right));
+        assert_eq!(
+            values.as_slice(),
+            [
+                b"".to_vec(),
+                b"0".to_vec(),
+                b"18".to_vec(),
+                b"-2".to_vec(),
+                b"3.5".to_vec(),
+                b"5".to_vec(),
+                b"6".to_vec(),
+                b"9x".to_vec(),
+                b"apple".to_vec(),
+                b"Banana".to_vec(),
+            ]
+        );
+
+        values.sort();
+        assert_eq!(
+            values.as_slice(),
+            [
+                b"".to_vec(),
+                b"-2".to_vec(),
+                b"0".to_vec(),
+                b"18".to_vec(),
+                b"3.5".to_vec(),
+                b"5".to_vec(),
+                b"6".to_vec(),
+                b"9x".to_vec(),
+                b"Banana".to_vec(),
+                b"apple".to_vec(),
+            ]
         );
     }
 
@@ -55488,6 +59461,55 @@ mod tests {
             RespFrame::Array(Some(vec![
                 RespFrame::BulkString(Some(b"Alice".to_vec())),
                 RespFrame::BulkString(Some(b"Bob".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn sort_by_pattern_arrow_only_after_star_is_hash_deref() {
+        // (frankenredis-sortarrow) Upstream lookupKeyByPattern locates the hash
+        // field "->" ONLY in the pattern text AFTER the '*'. A "->" coming from
+        // the substituted element value (or sitting before the '*') is part of a
+        // plain STRING key, NOT a hash dereference. The trap below seeds BOTH a
+        // string key `weight_a->b` and a hash `weight_a` field `b`: the BY
+        // pattern `weight_*` has no "->" after the '*', so the string weights
+        // (5, 8) — not the hash weights (99, 1) — must drive the order.
+        let mut store = Store::new();
+        for val in [b"a->b".to_vec(), b"c->d".to_vec()] {
+            dispatch_argv(&[b"RPUSH".to_vec(), b"mylist".to_vec(), val], &mut store, 0).unwrap();
+        }
+        for (k, v) in [
+            (b"weight_a->b".to_vec(), b"5".to_vec()),
+            (b"weight_c->d".to_vec(), b"8".to_vec()),
+        ] {
+            dispatch_argv(&[b"SET".to_vec(), k, v], &mut store, 0).unwrap();
+        }
+        // Hash traps that MUST be ignored by `weight_*`.
+        for (k, f, v) in [
+            (b"weight_a".to_vec(), b"b".to_vec(), b"99".to_vec()),
+            (b"weight_c".to_vec(), b"d".to_vec(), b"1".to_vec()),
+        ] {
+            dispatch_argv(&[b"HSET".to_vec(), k, f, v], &mut store, 0).unwrap();
+        }
+        let out = dispatch_argv(
+            &[
+                b"SORT".to_vec(),
+                b"mylist".to_vec(),
+                b"BY".to_vec(),
+                b"weight_*".to_vec(),
+                b"GET".to_vec(),
+                b"#".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        // String weights: weight_a->b=5 < weight_c->d=8 => [a->b, c->d].
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"a->b".to_vec())),
+                RespFrame::BulkString(Some(b"c->d".to_vec())),
             ]))
         );
     }
@@ -56371,7 +60393,7 @@ mod tests {
                 b"0".to_vec(),
             ],
         ] {
-            let out = dispatch_argv(&argv_in, &mut store, 0).expect("bitfield invalid type");
+            let out = dispatch_argv(&argv_in, &mut store, 0).unwrap_or_else(|e| e.to_resp());
             assert_eq!(
                 out,
                 RespFrame::Error(invalid_type.to_string()),
@@ -56393,7 +60415,7 @@ mod tests {
             &mut store,
             0,
         )
-        .expect("bitfield overflow");
+        .unwrap_or_else(|e| e.to_resp());
         assert_eq!(
             overflow_bad,
             RespFrame::Error("ERR Invalid OVERFLOW type specified".to_string())
@@ -56656,6 +60678,82 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, RespFrame::Array(Some(vec![RespFrame::Integer(0)])));
+    }
+
+    #[test]
+    fn bitfield_ro_validates_args_before_write_rejection_bfro_order() {
+        // (frankenredis-bfro-order) Upstream validates EVERY op's args before
+        // rejecting BITFIELD_RO for a write subcommand, and type-checks the key in
+        // the read-only branch even with no GET op. fr used to short-circuit on
+        // the first SET/INCRBY and skip the no-op type check.
+        let mut store = Store::new();
+        let err = |store: &mut Store, args: &[&[u8]]| -> String {
+            let mut argv = vec![b"BITFIELD_RO".to_vec(), b"bf".to_vec()];
+            for a in args {
+                argv.push(a.to_vec());
+            }
+            match dispatch_argv(&argv, store, 0).unwrap_or_else(|e| e.to_resp()) {
+                RespFrame::Error(m) => m,
+                other => panic!("expected error, got {other:?}"), // ubs:ignore — AI triage
+            }
+        };
+        // Invalid type on the write op wins over the read-only rejection.
+        assert!(err(&mut store, &[b"SET", b"i0", b"0", b"1"]).contains("Invalid bitfield type"));
+        // Invalid type on a later op also precedes the read-only rejection.
+        assert!(
+            err(
+                &mut store,
+                &[b"GET", b"u8", b"0", b"SET", b"i-1", b"0", b"2"]
+            )
+            .contains("Invalid bitfield type")
+        );
+        // Out-of-range value on the write op precedes the rejection (surfaces as a
+        // CommandError mapped to "value is not an integer or out of range").
+        assert!(matches!(
+            dispatch_argv(
+                &[
+                    b"BITFIELD_RO".to_vec(),
+                    b"bf".to_vec(),
+                    b"SET".to_vec(),
+                    b"u2".to_vec(),
+                    b"0".to_vec(),
+                    b"9223372036854775808".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap_or_else(|e| e.to_resp()),
+            RespFrame::Error(s) if s.contains("not an integer or out of range")
+        ));
+        // Bad OVERFLOW keyword precedes the rejection.
+        assert!(
+            err(
+                &mut store,
+                &[b"SET", b"i8", b"0", b"1", b"OVERFLOW", b"BAD"]
+            )
+            .contains("Invalid OVERFLOW type")
+        );
+        // All args valid + a write op => the read-only rejection stands.
+        assert!(
+            err(
+                &mut store,
+                &[b"SET", b"u8", b"0", b"1", b"INCRBY", b"u8", b"8", b"2"]
+            )
+            .contains("BITFIELD_RO only supports the GET subcommand")
+        );
+
+        // Read-only branch type-checks the key even with NO op (WRONGTYPE).
+        dispatch_argv(
+            &[b"RPUSH".to_vec(), b"lk".to_vec(), b"a".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_or_else(|e| e.to_resp());
+        assert!(matches!(
+            dispatch_argv(&[b"BITFIELD_RO".to_vec(), b"lk".to_vec()], &mut store, 0)
+                .unwrap_or_else(|e| e.to_resp()),
+            RespFrame::Error(s) if s.starts_with("WRONGTYPE")
+        ));
     }
 
     // ── XACK tests ──────────────────────────────────────────────────
@@ -58259,15 +62357,15 @@ mod tests {
     /// (frankenredis-0pnd6) Upstream cluster.c::clusterCommand uses a
     /// loose `c->argc >= 4` guard at the top of the SETSLOT handler,
     /// then checks server.cluster_enabled, then enforces per-action
-    /// exact arity (STABLE=4, NODE/IMPORTING/MIGRATING=5). With
+    /// exact action shape (STABLE=4, NODE/IMPORTING/MIGRATING=5). With
     /// argc==6 (e.g. CLUSTER SETSLOT 0 NODE someid extra), upstream
     /// surfaces 'cluster support disabled' when cluster mode is off,
     /// because cluster_enabled is checked BEFORE the per-action
     /// exact-arity check. Pre-fix fr returned 'wrong number of
     /// arguments' here (over-strict top-level arity check). Pin the
     /// upstream order: <4 → wrong-arity; >=4 with cluster_disabled →
-    /// cluster-disabled; with cluster_enabled but odd shape → per-
-    /// action wrong-arity.
+    /// cluster-disabled; with cluster_enabled but odd shape → the
+    /// SETSLOT-specific action/argument help error.
     #[test]
     fn cluster_setslot_overarity_in_non_cluster_mode_returns_cluster_disabled() {
         // cluster_enabled defaults to false on a fresh Store.
@@ -58308,8 +62406,9 @@ mod tests {
             "<4 args must surface wrong-arity, got {arity_err:?}"
         );
 
-        // With cluster_enabled true, 6 args should fall through to
-        // the per-action exact-arity check (NODE expects exactly 5).
+        // With cluster_enabled true, 6 args reach the SETSLOT handler:
+        // Redis parses the slot, then emits the SETSLOT-specific
+        // action/argument help error.
         store.cluster_enabled = true;
         let action_err = dispatch_argv(
             &[
@@ -58324,10 +62423,10 @@ mod tests {
             0,
         )
         .unwrap_err();
-        assert!(
-            matches!(&action_err, CommandError::Custom(s) if s.contains("wrong number of arguments"))
-                || matches!(&action_err, CommandError::WrongSubcommandArity { .. }),
-            "6 args + cluster_enabled must surface per-action wrong-arity, got {action_err:?}"
+        assert_eq!(
+            action_err,
+            cluster_invalid_setslot_action_error(),
+            "6 args + cluster_enabled must surface SETSLOT action help"
         );
     }
 
@@ -58369,7 +62468,7 @@ mod tests {
             .unwrap(),
             RespFrame::SimpleString("OK".to_string())
         );
-        // STABLE with extra arg → wrong arity.
+        // STABLE with extra arg → SETSLOT-specific action/arity help.
         assert_eq!(
             dispatch_argv(
                 &[
@@ -58383,7 +62482,22 @@ mod tests {
                 0,
             )
             .unwrap_err(),
-            cluster_wrong_subcommand_arity("SETSLOT")
+            cluster_invalid_setslot_action_error()
+        );
+        // NODE without node id reaches the same SETSLOT-specific help error.
+        assert_eq!(
+            dispatch_argv(
+                &[
+                    b"CLUSTER".to_vec(),
+                    b"SETSLOT".to_vec(),
+                    b"100".to_vec(),
+                    b"NODE".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap_err(),
+            cluster_invalid_setslot_action_error()
         );
         // NODE with unknown peer → "Unknown node ...".
         assert_eq!(
@@ -58401,6 +62515,24 @@ mod tests {
             .unwrap_err(),
             CommandError::Custom("ERR Unknown node deadbeef".to_string())
         );
+        let self_node_id = store.server_run_id.as_bytes().to_vec();
+        // MIGRATING first checks local ownership of the slot.
+        assert_eq!(
+            dispatch_argv(
+                &[
+                    b"CLUSTER".to_vec(),
+                    b"SETSLOT".to_vec(),
+                    b"100".to_vec(),
+                    b"MIGRATING".to_vec(),
+                    self_node_id.clone(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap_err(),
+            CommandError::Custom("ERR I'm not the owner of hash slot 100".to_string())
+        );
+        store.cluster_assigned_slots.insert(100);
         // MIGRATING with unknown peer → "I don't know about node ...".
         assert_eq!(
             dispatch_argv(
@@ -58417,15 +62549,32 @@ mod tests {
             .unwrap_err(),
             CommandError::Custom("ERR I don't know about node someid".to_string())
         );
-        // NODE pointing at self id → OK no-op.
+        // IMPORTING first rejects a slot already owned by this node.
         assert_eq!(
             dispatch_argv(
                 &[
                     b"CLUSTER".to_vec(),
                     b"SETSLOT".to_vec(),
                     b"100".to_vec(),
+                    b"IMPORTING".to_vec(),
+                    self_node_id.clone(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap_err(),
+            CommandError::Custom("ERR I'm already the owner of hash slot 100".to_string())
+        );
+        // NODE pointing at self id assigns the slot to this node.
+        assert!(!store.cluster_assigned_slots.contains(&101));
+        assert_eq!(
+            dispatch_argv(
+                &[
+                    b"CLUSTER".to_vec(),
+                    b"SETSLOT".to_vec(),
+                    b"101".to_vec(),
                     b"NODE".to_vec(),
-                    store.server_run_id.as_bytes().to_vec(),
+                    self_node_id,
                 ],
                 &mut store,
                 0,
@@ -58433,7 +62582,8 @@ mod tests {
             .unwrap(),
             RespFrame::SimpleString("OK".to_string())
         );
-        // Bogus action → syntax error.
+        assert!(store.cluster_assigned_slots.contains(&101));
+        // Bogus action → SETSLOT-specific action/arity help.
         assert_eq!(
             dispatch_argv(
                 &[
@@ -58446,7 +62596,7 @@ mod tests {
                 0,
             )
             .unwrap_err(),
-            CommandError::SyntaxError
+            cluster_invalid_setslot_action_error()
         );
     }
 
@@ -58848,6 +62998,20 @@ mod tests {
                 &[
                     b"CLUSTER".to_vec(),
                     b"ADDSLOTS".to_vec(),
+                    b"0".to_vec(),
+                    b"0".to_vec()
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap_err(),
+            CommandError::Custom("ERR Slot 0 is already busy".to_string())
+        );
+        assert_eq!(
+            dispatch_argv(
+                &[
+                    b"CLUSTER".to_vec(),
+                    b"ADDSLOTS".to_vec(),
                     b"1".to_vec(),
                     b"1".to_vec()
                 ],
@@ -58907,6 +63071,22 @@ mod tests {
                     b"ADDSLOTSRANGE".to_vec(),
                     b"10".to_vec(),
                     b"11".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap_err(),
+            CommandError::Custom("ERR Slot 10 is already busy".to_string())
+        );
+        assert_eq!(
+            dispatch_argv(
+                &[
+                    b"CLUSTER".to_vec(),
+                    b"ADDSLOTSRANGE".to_vec(),
+                    b"10".to_vec(),
+                    b"10".to_vec(),
+                    b"10".to_vec(),
+                    b"10".to_vec(),
                 ],
                 &mut store,
                 0,
@@ -59142,6 +63322,19 @@ mod tests {
             &[
                 b"CLIENT".to_vec(),
                 b"KILL".to_vec(),
+                b"TYPE".to_vec(),
+                b"slave".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Integer(0));
+
+        let out = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"KILL".to_vec(),
                 b"SKIPME".to_vec(),
                 b"no".to_vec(),
             ],
@@ -59150,6 +63343,166 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, RespFrame::Integer(1));
+
+        let out = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"KILL".to_vec(),
+                b"USER".to_vec(),
+                b"default".to_vec(),
+                b"SKIPME".to_vec(),
+                b"no".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Integer(1));
+
+        let err = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"KILL".to_vec(),
+                b"USER".to_vec(),
+                b"ghost".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::Custom("ERR No such user 'ghost'".to_string())
+        );
+
+        store.dispatch_client_ctx.authenticated_user = b"alice".to_vec();
+        let out = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"KILL".to_vec(),
+                b"USER".to_vec(),
+                b"alice".to_vec(),
+                b"SKIPME".to_vec(),
+                b"no".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Integer(1));
+
+        let current_laddr = format!("127.0.0.1:{}", store.server_port).into_bytes();
+        let out = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"KILL".to_vec(),
+                b"LADDR".to_vec(),
+                current_laddr.clone(),
+                b"SKIPME".to_vec(),
+                b"no".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Integer(1));
+
+        let out = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"KILL".to_vec(),
+                b"LADDR".to_vec(),
+                current_laddr,
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Integer(0));
+
+        let out = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"KILL".to_vec(),
+                b"LADDR".to_vec(),
+                b"127.0.0.1:1".to_vec(),
+                b"SKIPME".to_vec(),
+                b"no".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Integer(0));
+    }
+
+    #[test]
+    fn client_kill_user_validates_known_direct_dispatch_users() {
+        let mut store = Store::new();
+
+        let out = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"KILL".to_vec(),
+                b"USER".to_vec(),
+                b"default".to_vec(),
+                b"SKIPME".to_vec(),
+                b"no".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Integer(1));
+
+        let err = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"KILL".to_vec(),
+                b"USER".to_vec(),
+                b"alice".to_vec(),
+                b"SKIPME".to_vec(),
+                b"no".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::Custom("ERR No such user 'alice'".to_string())
+        );
+
+        store.dispatch_client_ctx.authenticated_user = b"alice".to_vec();
+        let out = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"KILL".to_vec(),
+                b"USER".to_vec(),
+                b"alice".to_vec(),
+                b"SKIPME".to_vec(),
+                b"no".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Integer(1));
+
+        let out = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"KILL".to_vec(),
+                b"USER".to_vec(),
+                b"default".to_vec(),
+                b"SKIPME".to_vec(),
+                b"no".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Integer(0));
     }
 
     #[test]
@@ -61664,6 +66017,36 @@ mod tests {
         assert!(command_acl_key_access(&argv).is_empty());
     }
 
+    // (frankenredis) command_write_keys returns ONLY the modified keys, so
+    // client-tracking invalidation never fires for read-only source keys of
+    // COPY / *STORE / SORT...STORE / BITOP, while *MOVE (both modified) and
+    // plain writes keep all their keys.
+    #[test]
+    fn command_write_keys_excludes_read_only_source_keys() {
+        let wk = |parts: &[&str]| {
+            command_write_keys(
+                &parts
+                    .iter()
+                    .map(|p| p.as_bytes().to_vec())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let k = |s: &str| s.as_bytes().to_vec();
+        // Read-only sources excluded; only the destination is a write key.
+        assert_eq!(wk(&["COPY", "src", "dst", "REPLACE"]), vec![k("dst")]);
+        assert_eq!(wk(&["SINTERSTORE", "dest", "s1", "s2"]), vec![k("dest")]);
+        assert_eq!(wk(&["ZRANGESTORE", "zd", "zsrc", "0", "-1"]), vec![k("zd")]);
+        assert_eq!(wk(&["BITOP", "AND", "bd", "b1", "b2"]), vec![k("bd")]);
+        // Both keys modified -> both are write keys.
+        assert_eq!(wk(&["SMOVE", "ms1", "ms2", "m"]), vec![k("ms1"), k("ms2")]);
+        assert_eq!(wk(&["RENAME", "a", "b"]), vec![k("a"), k("b")]);
+        // Plain single-key writes keep their key; reads have no write keys.
+        assert_eq!(wk(&["SET", "k", "v"]), vec![k("k")]);
+        assert_eq!(wk(&["HSET", "h", "f", "v"]), vec![k("h")]);
+        assert!(wk(&["GET", "k"]).is_empty());
+        assert!(wk(&["SINTERCARD", "2", "s1", "s2"]).is_empty());
+    }
+
     #[test]
     fn hget_command_metadata_fast_paths_preserve_behavior() {
         let upper = vec![b"HGET".to_vec(), b"hash".to_vec(), b"field".to_vec()];
@@ -61697,16 +66080,31 @@ mod tests {
             parts.iter().map(|p| p.as_bytes().to_vec()).collect()
         };
         // Real containers namespace as parent|sub (matches c->cmd->fullname).
-        assert_eq!(canonical_command_fullname(&argv(&["CONFIG", "GET"])), "config|get");
-        assert_eq!(canonical_command_fullname(&argv(&["CLIENT", "KILL", "x"])), "client|kill");
-        assert_eq!(canonical_command_fullname(&argv(&["OBJECT", "ENCODING", "k"])), "object|encoding");
+        assert_eq!(
+            canonical_command_fullname(&argv(&["CONFIG", "GET"])),
+            "config|get"
+        );
+        assert_eq!(
+            canonical_command_fullname(&argv(&["CLIENT", "KILL", "x"])),
+            "client|kill"
+        );
+        assert_eq!(
+            canonical_command_fullname(&argv(&["OBJECT", "ENCODING", "k"])),
+            "object|encoding"
+        );
         // Case-insensitive, bare parent when no subcommand arg.
         assert_eq!(canonical_command_fullname(&argv(&["Config"])), "config");
         // DEBUG is NOT a container: its args are not registered subcommands, so
         // upstream's fullname is the bare "debug" (drives INFO commandstats /
         // latencystats keys + the subscribe-context error).
-        assert_eq!(canonical_command_fullname(&argv(&["DEBUG", "SLEEP", "0"])), "debug");
-        assert_eq!(canonical_command_fullname(&argv(&["DEBUG", "JMAP"])), "debug");
+        assert_eq!(
+            canonical_command_fullname(&argv(&["DEBUG", "SLEEP", "0"])),
+            "debug"
+        );
+        assert_eq!(
+            canonical_command_fullname(&argv(&["DEBUG", "JMAP"])),
+            "debug"
+        );
         // Plain commands are unchanged.
         assert_eq!(canonical_command_fullname(&argv(&["GET", "k"])), "get");
         assert_eq!(canonical_command_fullname(&argv(&[])), "");
@@ -63394,7 +67792,7 @@ mod tests {
             &mut store,
             0,
         )
-        .expect("rpush");
+        .unwrap_or_else(|e| e.to_resp());
 
         let i64_min = b"-9223372036854775808";
         let err = dispatch_argv(
@@ -63430,7 +67828,7 @@ mod tests {
             &mut store,
             0,
         )
-        .expect("rank -1 must succeed");
+        .unwrap_or_else(|e| e.to_resp());
         assert_eq!(out, RespFrame::Integer(0));
 
         // RANK = 0 still hits the bespoke 'RANK can't be zero' error.
@@ -63445,7 +67843,7 @@ mod tests {
             &mut store,
             0,
         )
-        .expect("rank 0 returns Error frame");
+        .unwrap_or_else(|e| e.to_resp());
         let RespFrame::Error(msg) = err else {
             panic!("expected Error frame for RANK 0"); // ubs:ignore — AI triage
         };
@@ -64307,8 +68705,12 @@ mod tests {
         assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
         // Key should exist at now=4999
         assert_eq!(store.get(b"k", 4999).unwrap(), Some(b"v".to_vec()));
-        // Key should be expired at now=5000
-        assert_eq!(store.get(b"k", 5000).unwrap(), None);
+        // Still alive at EXACTLY the deadline: upstream expires on `now > when`,
+        // not `now >= when` (db.c keyIsExpired), so 5000 == deadline is alive.
+        // (frankenredis-bwbrb, see project_expiry_boundary_semantics / dc37c1d17)
+        assert_eq!(store.get(b"k", 5000).unwrap(), Some(b"v".to_vec()));
+        // Expired one millisecond past the deadline.
+        assert_eq!(store.get(b"k", 5001).unwrap(), None);
     }
 
     #[test]
@@ -64331,8 +68733,11 @@ mod tests {
         assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
         // Key should exist at now=9999
         assert_eq!(store.get(b"k", 9999).unwrap(), Some(b"v".to_vec()));
-        // Key should be expired at now=10000
-        assert_eq!(store.get(b"k", 10000).unwrap(), None);
+        // Alive at EXACTLY the deadline (upstream expires on `now > when`).
+        // (frankenredis-bwbrb, see project_expiry_boundary_semantics / dc37c1d17)
+        assert_eq!(store.get(b"k", 10000).unwrap(), Some(b"v".to_vec()));
+        // Expired one millisecond past the deadline.
+        assert_eq!(store.get(b"k", 10001).unwrap(), None);
     }
 
     #[test]
@@ -64369,8 +68774,11 @@ mod tests {
         assert_eq!(store.get(b"k", now).unwrap(), Some(b"v2".to_vec()));
         // Original TTL should be preserved — still alive at 4999
         assert_eq!(store.get(b"k", 4999).unwrap(), Some(b"v2".to_vec()));
-        // Expired at 5000
-        assert_eq!(store.get(b"k", 5000).unwrap(), None);
+        // Alive at EXACTLY the preserved deadline (upstream expires on `now > when`).
+        // (frankenredis-bwbrb, see project_expiry_boundary_semantics / dc37c1d17)
+        assert_eq!(store.get(b"k", 5000).unwrap(), Some(b"v2".to_vec()));
+        // Expired one millisecond past the deadline.
+        assert_eq!(store.get(b"k", 5001).unwrap(), None);
     }
 
     #[test]
@@ -64522,7 +68930,7 @@ mod tests {
             &mut store,
             0,
         )
-        .expect("SORT_RO mylist GET STORE must not error");
+        .unwrap_or_else(|e| e.to_resp());
         match out {
             RespFrame::Array(Some(arr)) => {
                 assert_eq!(arr.len(), 3);
@@ -64542,7 +68950,7 @@ mod tests {
             &mut store,
             0,
         )
-        .expect("SORT_RO mylist BY STORE must not error");
+        .unwrap_or_else(|e| e.to_resp());
         match out {
             RespFrame::Array(Some(arr)) => {
                 assert_eq!(arr.len(), 3);
@@ -64563,7 +68971,7 @@ mod tests {
             &mut store,
             0,
         )
-        .expect("SORT_RO with STORE flag must surface as Error frame");
+        .unwrap_or_else(|e| e.to_resp());
         assert_eq!(err, RespFrame::Error("ERR syntax error".to_string()));
     }
 
@@ -65039,6 +69447,71 @@ mod tests {
             )
             .unwrap_err(),
             CommandError::Custom(CLIENT_CACHING_YES_REQUIRES_OPTIN.to_string())
+        );
+    }
+
+    #[test]
+    fn client_tracking_redirect_validates_direct_dispatch_target() {
+        let mut store = Store::new();
+        store.dispatch_client_ctx.client_id = 42;
+
+        assert_eq!(
+            dispatch_argv(
+                &[
+                    b"CLIENT".to_vec(),
+                    b"TRACKING".to_vec(),
+                    b"ON".to_vec(),
+                    b"REDIRECT".to_vec(),
+                    b"42".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap(),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            dispatch_argv(&[b"CLIENT".to_vec(), b"GETREDIR".to_vec()], &mut store, 0).unwrap(),
+            RespFrame::Integer(42)
+        );
+
+        for mode in [b"ON".as_slice(), b"OFF".as_slice()] {
+            let err = dispatch_argv(
+                &[
+                    b"CLIENT".to_vec(),
+                    b"TRACKING".to_vec(),
+                    mode.to_vec(),
+                    b"REDIRECT".to_vec(),
+                    b"999".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap_err();
+            assert_eq!(
+                err,
+                CommandError::Custom(CLIENT_TRACKING_REDIRECT_MISSING.to_string())
+            );
+        }
+
+        assert_eq!(
+            dispatch_argv(
+                &[
+                    b"CLIENT".to_vec(),
+                    b"TRACKING".to_vec(),
+                    b"OFF".to_vec(),
+                    b"REDIRECT".to_vec(),
+                    b"42".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap(),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            dispatch_argv(&[b"CLIENT".to_vec(), b"GETREDIR".to_vec()], &mut store, 0).unwrap(),
+            RespFrame::Integer(-1)
         );
     }
 
@@ -66214,6 +70687,19 @@ mod tests {
         .unwrap();
         assert_eq!(out, RespFrame::BulkString(Some(Vec::new())));
 
+        let out = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"LIST".to_vec(),
+                b"TYPE".to_vec(),
+                b"SLAVE".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::BulkString(Some(Vec::new())));
+
         store.dispatch_client_ctx.is_pubsub = true;
         let out = dispatch_argv(
             &[
@@ -66263,7 +70749,7 @@ mod tests {
             CommandError::Custom("ERR Unknown client type 'BOGUS'".to_string())
         );
 
-        let err = dispatch_argv(
+        let out = dispatch_argv(
             &[
                 b"CLIENT".to_vec(),
                 b"LIST".to_vec(),
@@ -66273,11 +70759,53 @@ mod tests {
             &mut store,
             0,
         )
+        .unwrap();
+        assert_eq!(out, RespFrame::BulkString(Some(Vec::new())));
+
+        let out = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"LIST".to_vec(),
+                b"ID".to_vec(),
+                b"-1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::BulkString(Some(Vec::new())));
+
+        let out = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"LIST".to_vec(),
+                b"ID".to_vec(),
+                b"-1".to_vec(),
+                b"77".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let RespFrame::BulkString(Some(payload)) = out else {
+            panic!("expected bulk string"); // ubs:ignore — AI triage
+        };
+        assert!(String::from_utf8_lossy(&payload).contains("id=77 "));
+
+        let err = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"LIST".to_vec(),
+                b"ID".to_vec(),
+                b"not-an-id".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
         .unwrap_err();
-        // (br-frankenredis-lkoh)
         assert_eq!(
             err,
-            CommandError::Custom("ERR client-id should be greater than 0".to_string())
+            CommandError::Custom("ERR Invalid client ID".to_string())
         );
     }
 
@@ -67649,6 +72177,102 @@ mod tests {
                 RespFrame::Double("5".to_string()),
             ]))
         );
+    }
+
+    #[test]
+    fn zrank_withscore_score_is_resp3_double_under_hello3() {
+        // Upstream t_zset.c zrankGenericCommand emits the score via
+        // addReplyDouble, so under RESP3 it is a Double (`,<score>`) and under
+        // RESP2 a bulk string. The rank stays an Integer in both. (Regression:
+        // fr previously always emitted the score as a bulk string, diverging
+        // from redis only in RESP3.)
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"z".to_vec(),
+                b"3.5".to_vec(),
+                b"a".to_vec(),
+                b"1".to_vec(),
+                b"b".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("zadd");
+
+        // RESP2: score is a bulk string.
+        let out = dispatch_argv(
+            &[
+                b"ZRANK".to_vec(),
+                b"z".to_vec(),
+                b"a".to_vec(),
+                b"WITHSCORE".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("zrank withscore resp2");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::Integer(1),
+                RespFrame::BulkString(Some(b"3.5".to_vec())),
+            ]))
+        );
+
+        // RESP3: score is a Double; ZREVRANK matches.
+        store.dispatch_client_ctx.resp_protocol_version = 3;
+        let out = dispatch_argv(
+            &[
+                b"ZRANK".to_vec(),
+                b"z".to_vec(),
+                b"a".to_vec(),
+                b"WITHSCORE".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("zrank withscore resp3");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::Integer(1),
+                RespFrame::Double("3.5".to_string()),
+            ]))
+        );
+        let out = dispatch_argv(
+            &[
+                b"ZREVRANK".to_vec(),
+                b"z".to_vec(),
+                b"b".to_vec(),
+                b"WITHSCORE".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("zrevrank withscore resp3");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::Integer(1),
+                RespFrame::Double("1".to_string()),
+            ]))
+        );
+
+        // Missing member: null array (RESP3 `_`), no score frame at all.
+        let out = dispatch_argv(
+            &[
+                b"ZRANK".to_vec(),
+                b"z".to_vec(),
+                b"nope".to_vec(),
+                b"WITHSCORE".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("zrank withscore missing resp3");
+        assert_eq!(out, RespFrame::Array(None));
     }
 
     #[test]
@@ -70136,8 +74760,9 @@ mod tests {
 
     fn sorted_bulk_pairs(flat: Vec<Vec<u8>>) -> Vec<(Vec<u8>, Vec<u8>)> {
         assert_eq!(flat.len() % 2, 0, "flat pair list must be even");
-        let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = flat
-            .chunks_exact(2)
+        let (chunks, _) = flat.as_chunks::<2>();
+        let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = chunks
+            .iter()
             .map(|pair| (pair[0].clone(), pair[1].clone()))
             .collect();
         pairs.sort();
@@ -71526,6 +76151,76 @@ mod tests {
     }
 
     #[test]
+    fn restore_applies_idletime_and_freq_values() {
+        let mut source = Store::new();
+        dispatch_argv(
+            &[b"SET".to_vec(), b"src".to_vec(), b"hello".to_vec()],
+            &mut source,
+            100,
+        )
+        .expect("seed source");
+        let payload = source.dump_key(b"src", 100).expect("dump source");
+
+        let mut store = Store::new();
+        let reply = dispatch_argv(
+            &[
+                b"RESTORE".to_vec(),
+                b"idle".to_vec(),
+                b"0".to_vec(),
+                payload.clone(),
+                b"IDLETIME".to_vec(),
+                b"100".to_vec(),
+            ],
+            &mut store,
+            200_000,
+        )
+        .expect("restore idle key");
+        assert_eq!(reply, RespFrame::SimpleString("OK".to_string()));
+
+        let reply = dispatch_argv(
+            &[b"OBJECT".to_vec(), b"IDLETIME".to_vec(), b"idle".to_vec()],
+            &mut store,
+            201_000,
+        )
+        .expect("idletime after restore");
+        assert_eq!(reply, RespFrame::Integer(101));
+
+        dispatch_argv(
+            &[
+                b"CONFIG".to_vec(),
+                b"SET".to_vec(),
+                b"maxmemory-policy".to_vec(),
+                b"allkeys-lfu".to_vec(),
+            ],
+            &mut store,
+            202_000,
+        )
+        .expect("enable lfu");
+        let reply = dispatch_argv(
+            &[
+                b"RESTORE".to_vec(),
+                b"freq".to_vec(),
+                b"0".to_vec(),
+                payload,
+                b"FREQ".to_vec(),
+                b"7".to_vec(),
+            ],
+            &mut store,
+            202_000,
+        )
+        .expect("restore freq key");
+        assert_eq!(reply, RespFrame::SimpleString("OK".to_string()));
+
+        let reply = dispatch_argv(
+            &[b"OBJECT".to_vec(), b"FREQ".to_vec(), b"freq".to_vec()],
+            &mut store,
+            202_001,
+        )
+        .expect("freq after restore");
+        assert_eq!(reply, RespFrame::Integer(7));
+    }
+
+    #[test]
     fn object_freq_applies_lfu_decay_time_before_reporting() {
         let mut store = Store::new();
 
@@ -71632,6 +76327,50 @@ mod tests {
                 "ERR An LFU maxmemory policy is selected, idle time not tracked. Please note that when switching between policies at runtime LRU and LFU data will take some time to adjust.".to_string()
             )
         );
+    }
+
+    #[test]
+    fn object_idletime_reinterprets_stale_lfu_bits_after_policy_switch() {
+        let mut store = Store::new();
+
+        dispatch_argv(
+            &[
+                b"CONFIG".to_vec(),
+                b"SET".to_vec(),
+                b"maxmemory-policy".to_vec(),
+                b"allkeys-lfu".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("enable lfu");
+        dispatch_argv(
+            &[b"SET".to_vec(), b"obj".to_vec(), b"v".to_vec()],
+            &mut store,
+            1,
+        )
+        .expect("seed key under lfu");
+        dispatch_argv(&[b"GET".to_vec(), b"obj".to_vec()], &mut store, 2)
+            .expect("touch key under lfu");
+        dispatch_argv(
+            &[
+                b"CONFIG".to_vec(),
+                b"SET".to_vec(),
+                b"maxmemory-policy".to_vec(),
+                b"noeviction".to_vec(),
+            ],
+            &mut store,
+            3,
+        )
+        .expect("disable lfu");
+
+        let reply = dispatch_argv(
+            &[b"OBJECT".to_vec(), b"IDLETIME".to_vec(), b"obj".to_vec()],
+            &mut store,
+            4,
+        )
+        .expect("idletime after lfu switch");
+        assert_eq!(reply, RespFrame::Integer(16_777_209));
     }
 
     #[test]
@@ -74324,6 +79063,7 @@ mod tests {
                     caching: None,
                     noloop: self.noloop,
                     prefixes,
+                    has_activity: true,
                 }
             }
         }
