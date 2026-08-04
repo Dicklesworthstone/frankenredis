@@ -31307,6 +31307,212 @@ mod tests {
     }
 
     #[test]
+    fn borrowed_plain_incrby_decrby_packet_parsers_accept_canonical_packets() {
+        let cfg = ParserConfig::default();
+
+        let incrby = crate::parse_borrowed_plain_incrby_packet(
+            b"*3\r\n$6\r\niNcRbY\r\n$3\r\nkey\r\n$2\r\n42\r\n*1\r\n$4\r\nPING\r\n",
+            &cfg,
+        )
+        .expect("canonical INCRBY packet should parse");
+        assert_eq!(incrby.key, b"key");
+        assert_eq!(incrby.member, b"42");
+        assert_eq!(
+            incrby.consumed,
+            b"*3\r\n$6\r\niNcRbY\r\n$3\r\nkey\r\n$2\r\n42\r\n".len()
+        );
+
+        let decrby = crate::parse_borrowed_plain_decrby_packet(
+            b"*3\r\n$6\r\ndEcRbY\r\n$3\r\nkey\r\n$2\r\n42\r\n*1\r\n$4\r\nPING\r\n",
+            &cfg,
+        )
+        .expect("canonical DECRBY packet should parse");
+        assert_eq!(decrby.key, b"key");
+        assert_eq!(decrby.member, b"42");
+        assert_eq!(
+            decrby.consumed,
+            b"*3\r\n$6\r\ndEcRbY\r\n$3\r\nkey\r\n$2\r\n42\r\n".len()
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_incrby_decrby_packet_parsers_pass_the_delta_through_unvalidated() {
+        // The delta reaches execute_plain_{incrby,decrby}_borrowed as raw bytes
+        // and is parsed and overflow-checked there. A negative delta is the
+        // interesting case: `DECRBY key -5` is an increment, so the sign must
+        // survive the parse untouched rather than being normalised here.
+        let cfg = ParserConfig::default();
+
+        for delta in [
+            &b"-5"[..],
+            &b"0"[..],
+            &b"+7"[..],
+            &b"9223372036854775807"[..],
+            &b"-9223372036854775808"[..],
+            &b"notanumber"[..],
+            &b""[..],
+        ] {
+            for command in [&b"INCRBY"[..], &b"DECRBY"[..]] {
+                let mut packet = Vec::new();
+                packet.extend_from_slice(b"*3\r\n$6\r\n");
+                packet.extend_from_slice(command);
+                packet.extend_from_slice(b"\r\n$1\r\nk\r\n$");
+                packet.extend_from_slice(delta.len().to_string().as_bytes());
+                packet.extend_from_slice(b"\r\n");
+                packet.extend_from_slice(delta);
+                packet.extend_from_slice(b"\r\n");
+
+                let parsed = if command == b"INCRBY" {
+                    crate::parse_borrowed_plain_incrby_packet(&packet, &cfg)
+                } else {
+                    crate::parse_borrowed_plain_decrby_packet(&packet, &cfg)
+                }
+                .expect("parser must accept any well-framed delta bulk");
+                assert_eq!(parsed.key, b"k");
+                assert_eq!(
+                    parsed.member, delta,
+                    "delta bytes must reach the executor verbatim"
+                );
+                assert_eq!(parsed.consumed, packet.len());
+            }
+        }
+    }
+
+    #[test]
+    fn borrowed_plain_incrby_decrby_packet_parsers_reject_same_prefix_siblings() {
+        let cfg = ParserConfig::default();
+
+        // INCRBY and DECRBY are byte-identical through `*3\r\n$6\r\n` and take
+        // the same key+delta payload. Confusing them does not raise an error —
+        // it inverts the sign of a write and silently corrupts the counter.
+        assert!(
+            crate::parse_borrowed_plain_incrby_packet(
+                b"*3\r\n$6\r\nDECRBY\r\n$1\r\nk\r\n$1\r\n5\r\n",
+                &cfg
+            )
+            .is_none(),
+            "INCRBY parser must reject the same-shape DECRBY command"
+        );
+        assert!(
+            crate::parse_borrowed_plain_decrby_packet(
+                b"*3\r\n$6\r\nINCRBY\r\n$1\r\nk\r\n$1\r\n5\r\n",
+                &cfg
+            )
+            .is_none(),
+            "DECRBY parser must reject the same-shape INCRBY command"
+        );
+        // The rest of the six-letter *3 cohort, already covered by
+        // frankenredis-7vlrv and frankenredis-pg6jj.
+        for other in [
+            &b"*3\r\n$6\r\nAPPEND\r\n$1\r\nk\r\n$1\r\nv\r\n"[..],
+            &b"*3\r\n$6\r\nGETSET\r\n$1\r\nk\r\n$1\r\nv\r\n"[..],
+            &b"*3\r\n$6\r\nSETBIT\r\n$1\r\nk\r\n$1\r\nv\r\n"[..],
+            &b"*3\r\n$6\r\nGETBIT\r\n$1\r\nk\r\n$1\r\n0\r\n"[..],
+            &b"*3\r\n$6\r\nLINDEX\r\n$1\r\nk\r\n$1\r\n0\r\n"[..],
+        ] {
+            assert!(
+                crate::parse_borrowed_plain_incrby_packet(other, &cfg).is_none(),
+                "INCRBY parser must reject same-shape sibling command"
+            );
+            assert!(
+                crate::parse_borrowed_plain_decrby_packet(other, &cfg).is_none(),
+                "DECRBY parser must reject same-shape sibling command"
+            );
+        }
+    }
+
+    #[test]
+    fn borrowed_plain_incrby_decrby_packet_parsers_defer_invalid_shapes_and_limits() {
+        let cfg = ParserConfig::default();
+
+        assert!(
+            crate::parse_borrowed_plain_incrby_packet(
+                b"*03\r\n$6\r\nINCRBY\r\n$1\r\nk\r\n$1\r\n1\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_decrby_packet(
+                b"*3\r\n$06\r\nDECRBY\r\n$1\r\nk\r\n$1\r\n1\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical command bulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_incrby_packet(
+                b"*3\r\n$6\r\nINCRBY\r\n$1\r\nk\r\n$1\r\n1\r\n",
+                &ParserConfig {
+                    max_array_len: 2,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_decrby_packet(
+                b"*3\r\n$6\r\nDECRBY\r\n$1\r\nk\r\n$1\r\n1\r\n",
+                &ParserConfig {
+                    max_bulk_len: 5,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "command bulk-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_incrby_packet(
+                b"*3\r\n$6\r\nINCRBY\r\n$7\r\nkeykeyk\r\n$1\r\n1\r\n",
+                &ParserConfig {
+                    max_bulk_len: 6,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "key bulk-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_decrby_packet(
+                b"*3\r\n$6\r\nDECRBY\r\n$1\r\nk\r\n$7\r\n1234567\r\n",
+                &ParserConfig {
+                    max_bulk_len: 6,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "delta bulk-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_incrby_packet(
+                b"*3\r\n$6\r\nINCRBY\r\n$1\r\nk\r\n$2\r\n1\r\n",
+                &cfg
+            )
+            .is_none(),
+            "malformed trailing bulk bodies stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_decrby_packet(b"*2\r\n$6\r\nDECRBY\r\n$1\r\nk\r\n", &cfg)
+                .is_none(),
+            "wrong-arity packets stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_incrby_packet(
+                b"*3\r\n$6\r\nINCRBY\r\n$1\r\nk\r\n$1\r\n1\r",
+                &cfg
+            )
+            .is_none(),
+            "truncated packets stay on the generic parser until more bytes arrive"
+        );
+        assert!(
+            crate::parse_borrowed_plain_decrby_packet(b"*3\r\n$6\r\nDECR", &cfg).is_none(),
+            "packets truncated inside the command token stay on the generic parser"
+        );
+    }
+
+    #[test]
     fn borrowed_plain_bitcount_packet_parser_accepts_canonical_key_only_bitcount() {
         let input = b"*2\r\n$8\r\nbItCoUnT\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n";
         let parsed = crate::parse_borrowed_plain_bitcount_packet(input, &ParserConfig::default())
