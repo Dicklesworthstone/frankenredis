@@ -30466,6 +30466,189 @@ mod tests {
     }
 
     #[test]
+    fn borrowed_plain_object_encoding_refcount_packet_parsers_accept_canonical_packets() {
+        let cfg = ParserConfig::default();
+
+        let encoding = crate::parse_borrowed_plain_object_encoding_packet(
+            b"*3\r\n$6\r\noBjEcT\r\n$8\r\neNcOdInG\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n",
+            &cfg,
+        )
+        .expect("canonical OBJECT ENCODING packet should parse");
+        assert_eq!(encoding.key, b"key");
+        assert_eq!(
+            encoding.consumed,
+            b"*3\r\n$6\r\noBjEcT\r\n$8\r\neNcOdInG\r\n$3\r\nkey\r\n".len()
+        );
+
+        let refcount = crate::parse_borrowed_plain_object_refcount_packet(
+            b"*3\r\n$6\r\noBjEcT\r\n$8\r\nrEfCoUnT\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n",
+            &cfg,
+        )
+        .expect("canonical OBJECT REFCOUNT packet should parse");
+        assert_eq!(refcount.key, b"key");
+        assert_eq!(
+            refcount.consumed,
+            b"*3\r\n$6\r\noBjEcT\r\n$8\r\nrEfCoUnT\r\n$3\r\nkey\r\n".len()
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_object_encoding_refcount_packet_parsers_reject_same_prefix_siblings() {
+        let cfg = ParserConfig::default();
+
+        // ENCODING, REFCOUNT and IDLETIME are all eight bytes, so these packets
+        // are byte-identical through `*3\r\n$6\r\nOBJECT\r\n$8\r\n`. Only the
+        // subcommand compare separates them; without it each parser would run
+        // its own subcommand against a packet asking for a different one.
+        assert!(
+            crate::parse_borrowed_plain_object_encoding_packet(
+                b"*3\r\n$6\r\nOBJECT\r\n$8\r\nREFCOUNT\r\n$1\r\nk\r\n",
+                &cfg
+            )
+            .is_none(),
+            "OBJECT ENCODING parser must reject the same-shape REFCOUNT subcommand"
+        );
+        assert!(
+            crate::parse_borrowed_plain_object_refcount_packet(
+                b"*3\r\n$6\r\nOBJECT\r\n$8\r\nENCODING\r\n$1\r\nk\r\n",
+                &cfg
+            )
+            .is_none(),
+            "OBJECT REFCOUNT parser must reject the same-shape ENCODING subcommand"
+        );
+        assert!(
+            crate::parse_borrowed_plain_object_encoding_packet(
+                b"*3\r\n$6\r\nOBJECT\r\n$8\r\nIDLETIME\r\n$1\r\nk\r\n",
+                &cfg
+            )
+            .is_none(),
+            "OBJECT ENCODING parser must reject the same-shape IDLETIME subcommand"
+        );
+        assert!(
+            crate::parse_borrowed_plain_object_refcount_packet(
+                b"*3\r\n$6\r\nOBJECT\r\n$8\r\nIDLETIME\r\n$1\r\nk\r\n",
+                &cfg
+            )
+            .is_none(),
+            "OBJECT REFCOUNT parser must reject the same-shape IDLETIME subcommand"
+        );
+
+        // The container command compare is separately load-bearing: MEMORY is
+        // also six bytes, so `MEMORY ENCODING key` matches the byte prefix.
+        assert!(
+            crate::parse_borrowed_plain_object_encoding_packet(
+                b"*3\r\n$6\r\nMEMORY\r\n$8\r\nENCODING\r\n$1\r\nk\r\n",
+                &cfg
+            )
+            .is_none(),
+            "OBJECT ENCODING parser must reject a same-shape non-OBJECT container command"
+        );
+        assert!(
+            crate::parse_borrowed_plain_object_refcount_packet(
+                b"*3\r\n$6\r\nMEMORY\r\n$8\r\nREFCOUNT\r\n$1\r\nk\r\n",
+                &cfg
+            )
+            .is_none(),
+            "OBJECT REFCOUNT parser must reject a same-shape non-OBJECT container command"
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_object_encoding_refcount_packet_parsers_defer_invalid_shapes_and_limits() {
+        let cfg = ParserConfig::default();
+
+        assert!(
+            crate::parse_borrowed_plain_object_encoding_packet(
+                b"*03\r\n$6\r\nOBJECT\r\n$8\r\nENCODING\r\n$1\r\nk\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_object_refcount_packet(
+                b"*3\r\n$06\r\nOBJECT\r\n$8\r\nREFCOUNT\r\n$1\r\nk\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical container bulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_object_encoding_packet(
+                b"*3\r\n$6\r\nOBJECT\r\n$08\r\nENCODING\r\n$1\r\nk\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical subcommand bulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_object_encoding_packet(
+                b"*3\r\n$6\r\nOBJECT\r\n$8\r\nENCODING\r\n$1\r\nk\r\n",
+                &ParserConfig {
+                    max_array_len: 2,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_object_refcount_packet(
+                b"*3\r\n$6\r\nOBJECT\r\n$8\r\nREFCOUNT\r\n$1\r\nk\r\n",
+                &ParserConfig {
+                    max_bulk_len: 7,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "subcommand bulk-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_object_encoding_packet(
+                b"*3\r\n$6\r\nOBJECT\r\n$8\r\nENCODING\r\n$9\r\nkeykeykey\r\n",
+                &ParserConfig {
+                    max_bulk_len: 8,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "key bulk-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_object_refcount_packet(
+                b"*3\r\n$6\r\nOBJECT\r\n$8\r\nREFCOUNT\r\n$2\r\nk\r\n",
+                &cfg
+            )
+            .is_none(),
+            "malformed key bulk bodies stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_object_encoding_packet(
+                b"*2\r\n$6\r\nOBJECT\r\n$8\r\nENCODING\r\n",
+                &cfg
+            )
+            .is_none(),
+            "wrong-arity packets stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_object_refcount_packet(
+                b"*3\r\n$6\r\nOBJECT\r\n$8\r\nREFCOUNT\r\n$1\r\nk\r",
+                &cfg
+            )
+            .is_none(),
+            "truncated packets stay on the generic parser until more bytes arrive"
+        );
+        assert!(
+            crate::parse_borrowed_plain_object_encoding_packet(
+                b"*3\r\n$6\r\nOBJECT\r\n$8\r\nENC",
+                &cfg
+            )
+            .is_none(),
+            "packets truncated inside the subcommand token stay on the generic parser"
+        );
+    }
+
+    #[test]
     fn borrowed_plain_bitcount_packet_parser_accepts_canonical_key_only_bitcount() {
         let input = b"*2\r\n$8\r\nbItCoUnT\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n";
         let parsed = crate::parse_borrowed_plain_bitcount_packet(input, &ParserConfig::default())
