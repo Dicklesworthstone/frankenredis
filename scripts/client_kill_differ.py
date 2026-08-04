@@ -149,9 +149,12 @@ class Gate:
         return R
 
     def laddr_invariant(self):
-        """(list_count_on_laddr, kill_laddr_count, victims_dead) — the LADDR
-        consistency check. Upstream: all three agree (every client shares the
-        laddr in this single-listener setup)."""
+        """Return the LADDR `SKIPME no` and `SKIPME yes` invariants.
+
+        In this single-listener topology every client has the same LADDR.  The
+        former must kill every listed client, while the latter must preserve the
+        requesting controller and kill exactly the other listed clients.
+        """
         ctrl = Conn(self.port)
         laddr = ctrl.info_field("laddr")
         vs = [Conn(self.port) for _ in range(3)]
@@ -167,7 +170,22 @@ class Gate:
             ctrl.close()
         except Exception:
             pass
-        return (listed, killed, dead)
+
+        ctrl = Conn(self.port)
+        laddr = ctrl.info_field("laddr")
+        vs = [Conn(self.port) for _ in range(3)]
+        time.sleep(0.15)
+        listed_skipme = sum(1 for ln in ctrl.cmd("CLIENT", "LIST").split("\n")
+                            if f"laddr={laddr}" in ln)
+        killed_skipme = ctrl.cmd("CLIENT", "KILL", "LADDR", laddr, "SKIPME", "yes")
+        time.sleep(0.2)
+        controller_survives = ctrl.alive()
+        dead_skipme = sum(0 if v.alive() else 1 for v in vs)
+        for v in vs:
+            v.close()
+        ctrl.close()
+        return ((listed, killed, dead),
+                (listed_skipme, killed_skipme, controller_survives, dead_skipme))
 
 
 def main():
@@ -183,11 +201,14 @@ def main():
         if rd.get(k) != fd.get(k):
             failures.append(f"{k}: redis={rd.get(k)!r} fr={fd.get(k)!r}")
 
-    # LADDR consistency invariant
+    # LADDR consistency invariants: SKIPME no kills every matching client;
+    # SKIPME yes preserves exactly the requesting controller.
     rl, fl = rg.laddr_invariant(), fg.laddr_invariant()
-    # redis must be self-consistent: list count == kill count == victims dead.
-    if not (rl[0] == rl[1] and rl[1] - 0 >= rl[2] >= 0):
-        failures.append(f"oracle LADDR self-inconsistent: {rl}")
+    rl_no, rl_yes = rl
+    if not (rl_no[0] == rl_no[1] and rl_no[1] >= rl_no[2] >= 0):
+        failures.append(f"oracle LADDR SKIPME no self-inconsistent: {rl_no}")
+    if not (rl_yes[0] - 1 == rl_yes[1] == rl_yes[3] and rl_yes[2]):
+        failures.append(f"oracle LADDR SKIPME yes self-inconsistent: {rl_yes}")
     if fl != rl:
         failures.append(f"LADDR: redis(list,kill,dead)={rl} fr={fl}")
 
