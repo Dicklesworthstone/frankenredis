@@ -63,6 +63,7 @@ def main():
     chk("incrby_imin_ok_val", "GET", "f")
     setk("g", "0"); chk("decrby_imin_overflow", "DECRBY", "g", IMIN)   # negating i64-min overflows
     chk("incrby_arg_overflow", "INCRBY", "h", "99999999999999999999")
+    chk("decrby_arg_overflow", "DECRBY", "h", "99999999999999999999")
     setk("i", "3.5"); chk("incr_nonint", "INCR", "i")
     setk("j", "  5"); chk("incr_leading_space", "INCR", "j")
     setk("k", "5 "); chk("incr_trailing_space", "INCR", "k")
@@ -71,11 +72,13 @@ def main():
         cmd(s, "DEL", "hh")
         cmd(s, "HSET", "hh", "ff", IMAX)
     chk("hincrby_overflow", "HINCRBY", "hh", "ff", "1")
+    chk("hincrby_arg_overflow", "HINCRBY", "hh", "ff", "99999999999999999999")
     chk("hincrby_nonint_field", "HSET", "hh", "nf", "x")
     chk("hincrby_nonint", "HINCRBY", "hh", "nf", "1")
     # SETBIT value / offset bounds
     setk("sb", "x")
     chk("setbit_badval", "SETBIT", "sb", "0", "2")
+    chk("setbit_nonint_offset", "SETBIT", "sb", "one", "1")
     chk("setbit_neg_offset", "SETBIT", "sb", "-1", "1")
     chk("setbit_huge_offset", "SETBIT", "sb", "4294967296", "1")
     chk("setbit_ok", "SETBIT", "sbm", "100", "1")
