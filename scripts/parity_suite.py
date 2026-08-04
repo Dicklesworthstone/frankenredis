@@ -236,6 +236,7 @@ PORT_BASED = [
     ("keyspace_notification_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("hll_corrupt_probe.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("sharded_pubsub_order_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("sharded_pubsub_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("track_crosskey_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("hll_estimation_range_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("bitfield_overflow_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),

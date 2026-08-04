@@ -12,6 +12,7 @@ the invariant that regular `PUBSUB CHANNELS` must NOT report shard channels.
 Usage: sharded_pubsub_differ.py <oracle_port> <fr_port>
        Exit 0 = byte-exact, 1 = divergence, 2 = setup error.
 """
+import re
 import socket
 import sys
 import time
@@ -45,6 +46,11 @@ def drain(s, settle=0.15):
         pass
     s.setblocking(True)
     return buf
+
+
+def unordered_bulk_array(reply):
+    """Canonicalize PUBSUB CHANNELS replies whose member order is unspecified."""
+    return tuple(sorted(re.findall(rb"\$\d+\r\n(.*?)\r\n", reply)))
 
 
 def run(port):
@@ -83,9 +89,11 @@ def main():
         sys.exit(2)
     diffs = 0
     for k in oracle:
-        if oracle[k] != fr[k]:
+        expected = unordered_bulk_array(oracle[k]) if k in {"shardchannels", "shardchannels_after"} else oracle[k]
+        actual = unordered_bulk_array(fr[k]) if k in {"shardchannels", "shardchannels_after"} else fr[k]
+        if expected != actual:
             diffs += 1
-            print(f"DIFF {k}\n  redis={oracle[k]!r}\n  fr   ={fr[k]!r}")
+            print(f"DIFF {k}\n  redis={expected!r}\n  fr   ={actual!r}")
     if diffs:
         print(f"\nFAIL — {diffs} sharded pub/sub divergence(s) vs redis 7.2.4")
         sys.exit(1)
