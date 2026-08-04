@@ -13,8 +13,20 @@ random); LPOP/RPOP/ZPOP{MIN,MAX} are fully ordered so compared exactly.
 Usage: pop_count_edge_differ.py <oracle_port> <fr_port>
        Exit 0 = byte-exact, 1 = divergence.
 """
-import re, socket, sys, time
-def conn(p): return socket.create_connection(("127.0.0.1",p),timeout=5)
+import re
+import socket
+import sys
+import time
+from contextlib import contextmanager
+
+
+@contextmanager
+def conn(p):
+    socket_handle = socket.create_connection(("127.0.0.1", p), timeout=5)
+    try:
+        yield socket_handle
+    finally:
+        socket_handle.close()
 def cmd(s,*a):
     o=b"*%d\r\n"%len(a)
     for x in a: x=x if isinstance(x,bytes) else str(x).encode(); o+=b"$%d\r\n%s\r\n"%(len(x),x)
@@ -23,7 +35,12 @@ def sortbulks(b): return (b[:4], tuple(sorted(re.findall(rb"\$\d+\r\n([^\r]*)\r\
 def main():
     op=int(sys.argv[1]) if len(sys.argv)>1 else 16399
     fp=int(sys.argv[2]) if len(sys.argv)>2 else 16400
-    od,fr=conn(op),conn(fp); fails=[]
+    with conn(op) as od, conn(fp) as fr:
+        return run(od,fr)
+
+
+def run(od,fr):
+    fails=[]
     IMAX="9223372036854775807"; IMIN="-9223372036854775808"
     def setup():
         for s in (od,fr):
@@ -39,19 +56,23 @@ def main():
     chk("lpop_missing_count","LPOP","nope","2"); chk("lpop_missing_count0","LPOP","nope","0")
     chk("lpop_float","LPOP","l","1.5")
     setup(); chk("rpop_0","RPOP","l","0"); chk("rpop_imax","RPOP","l",IMAX)
+    chk("rpop_missing_count","RPOP","nope","2"); chk("rpop_missing_count0","RPOP","nope","0")
     setup()
     chk("spop_0","SPOP","st","0"); chk("spop_gt","SPOP","st","100",sortset=True)
     setup(); chk("spop_neg","SPOP","st","-1"); chk("spop_float","SPOP","st","abc")
     chk("spop_missing_count","SPOP","nope","2"); chk("spop_missing_nocount","SPOP","nope")
     setup()
     chk("zpopmin_0","ZPOPMIN","z","0"); chk("zpopmin_gt","ZPOPMIN","z","100")
-    setup(); chk("zpopmax_gt","ZPOPMAX","z","100")
+    setup(); chk("zpopmax_0","ZPOPMAX","z","0"); chk("zpopmax_gt","ZPOPMAX","z","100")
+    setup(); chk("zpopmax_neg","ZPOPMAX","z","-1"); chk("zpopmax_float","ZPOPMAX","z","2.0")
+    chk("zpopmax_missing","ZPOPMAX","nope"); chk("zpopmax_missing_count","ZPOPMAX","nope","3")
     setup(); chk("zpopmin_neg","ZPOPMIN","z","-1"); chk("zpopmin_float","ZPOPMIN","z","2.0")
     chk("zpopmin_missing","ZPOPMIN","nope"); chk("zpopmin_missing_count","ZPOPMIN","nope","3")
     print("="*60)
     if fails:
         print(f"FAIL — {len(fails)} pop count-edge divergence(s) vs redis 7.2.4:")
         for x in fails[:14]: print(f"  {x}")
-        sys.exit(1)
+        return 1
     print("PASS — pop-command count edges byte-exact vs redis 7.2.4 (count=0/>size/neg/float/missing; LPOP-nil vs SPOP/ZPOP-empty distinction)")
-if __name__=="__main__": main()
+    return 0
+if __name__=="__main__": sys.exit(main())
