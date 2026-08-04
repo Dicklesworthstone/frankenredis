@@ -30959,6 +30959,7 @@ mod tests {
         // Redis 7.2.4 distinguishes a command ACL denial raised by an inner
         // redis.call from a direct denial: the former carries the Lua failure
         // prefix before luaCallFunction appends the script location.
+        use crate::sha1_hex_public;
         use fr_store::{DispatchAclPermissions, DispatchClientContext};
 
         let mut denied_commands = std::collections::HashSet::new();
