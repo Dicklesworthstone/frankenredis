@@ -30955,6 +30955,45 @@ mod tests {
     }
 
     #[test]
+    fn eval_wraps_inner_command_acl_denial_in_script_error() {
+        // Redis 7.2.4 distinguishes a command ACL denial raised by an inner
+        // redis.call from a direct denial: the former carries the Lua failure
+        // prefix before luaCallFunction appends the script location.
+        use fr_store::{DispatchAclPermissions, DispatchClientContext};
+
+        let mut denied_commands = std::collections::HashSet::new();
+        denied_commands.insert("incr".to_string());
+        let mut store = Store::new();
+        store.dispatch_client_ctx = DispatchClientContext {
+            authenticated_user: b"antirez".to_vec(),
+            acl_permissions: Some(DispatchAclPermissions {
+                all_commands: true,
+                denied_commands,
+                all_keys: true,
+                all_channels: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let script = b"return redis.call('incr','foo')";
+        let reply = dispatch_argv(
+            &[b"EVAL".to_vec(), script.to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("EVAL dispatch");
+
+        assert_eq!(
+            reply,
+            RespFrame::Error(format!(
+                "ERR ACL failure in script: User antirez has no permissions to run the 'incr' command script: {}, on @user_script:1.",
+                sha1_hex_public(script)
+            ))
+        );
+    }
+
+    #[test]
     fn acl_dispatch_enforces_read_write_key_selector_split() {
         // (frankenredis-y40p3) The dispatch-side ACL gate — the path that
         // covers Lua-invoked `redis.call` — must honour `%R~` / `%W~` key

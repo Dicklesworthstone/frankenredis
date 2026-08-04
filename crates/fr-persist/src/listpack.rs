@@ -653,9 +653,7 @@ pub fn decode_zset_listpack_pairs(data: &[u8]) -> Result<Vec<(Vec<u8>, f64)>, Li
 /// drops each string score's `Vec`. Kept in-crate (like `entry_len_with_backlen_orig`)
 /// so the same-binary A/B measures exactly what shipped. Result is identical to the
 /// production path.
-pub fn decode_zset_listpack_pairs_orig(
-    data: &[u8],
-) -> Result<Vec<(Vec<u8>, f64)>, ListpackError> {
+pub fn decode_zset_listpack_pairs_orig(data: &[u8]) -> Result<Vec<(Vec<u8>, f64)>, ListpackError> {
     let decoded = decode_listpack(data)?;
     if !decoded.len().is_multiple_of(2) {
         return Err(ListpackError::ElementCountMismatch);
@@ -1426,7 +1424,10 @@ mod tests {
 
     /// Compare pairs bit-exactly on the score (so -0.0 / inf / rounding all count).
     fn zpair_bits(pairs: &[(Vec<u8>, f64)]) -> Vec<(Vec<u8>, u64)> {
-        pairs.iter().map(|(m, s)| (m.clone(), s.to_bits())).collect()
+        pairs
+            .iter()
+            .map(|(m, s)| (m.clone(), s.to_bits()))
+            .collect()
     }
 
     #[test]
@@ -1446,8 +1447,8 @@ mod tests {
             &entry_6bit_str(b"m004"),
             &entry_32bit_int(1_000_000), // score 1e6 (int)
             &entry_6bit_str(b"m005"),
-            &entry_6bit_str(b"-2.5"), // score -2.5 (str)
-            &entry_7bit_uint(7),      // integer MEMBER
+            &entry_6bit_str(b"-2.5"),  // score -2.5 (str)
+            &entry_7bit_uint(7),       // integer MEMBER
             &entry_6bit_str(b"1.375"), // exact binary fraction (11/8)
         ]);
         let new = decode_zset_listpack_pairs(&lp).expect("new decode");
