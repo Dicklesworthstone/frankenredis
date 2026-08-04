@@ -5,8 +5,12 @@ Redis's DUMP of a collection is byte-deterministic across DEBUG RELOAD — RESTO
 replication digests, and migration all depend on it. This builds a key of a given
 type/encoding/size, snapshots DUMP, DEBUG RELOADs, snapshots DUMP again, and asserts
 fr's stability matches redis 7.2.4's (i.e. if redis's DUMP is stable across reload,
-fr's must be too). Found frankenredis-2j9wz: listpack HASH/SET re-serialize to a
-different (logically-equivalent) layout after reload while redis stays stable.
+fr's must be too).
+
+frankenredis-2j9wz (listpack HASH/SET re-serialized to a different, logically
+equivalent layout after reload while redis stayed stable) is fixed, so there is
+no allowlisted case: every kind/size where redis is stable and fr is not fails
+the gate directly.
 
 Usage: reload_dump_determinism_gate.py <oracle_port> <fr_port>
 Exit 0 = fr matches redis's reload-DUMP stability for every case; 1 = a regression.
@@ -58,6 +62,6 @@ def main():
         if os_ and not fs:
             bad+=1; print(f"DIVERGE {kind}/{n}: redis DUMP stable across reload but fr's is NOT")
     print("-"*60)
-    if bad: print(f"FAIL — {bad} NEW reload-DUMP-determinism regression(s) vs redis 7.2.4"); return 1
+    if bad: print(f"FAIL — {bad} reload-DUMP-determinism divergence(s) vs redis 7.2.4"); return 1
     print("PASS — fr DUMP reload-stability matches redis"); return 0
 if __name__=="__main__": sys.exit(main())
