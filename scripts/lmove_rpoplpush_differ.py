@@ -77,6 +77,7 @@ def main():
     chk("wrongtype_src", "LMOVE", "str", "dst", "LEFT", "RIGHT")
     chk("wrongtype_dst", "LMOVE", "src", "str", "LEFT", "RIGHT")
     chk("rpoplpush_wrongtype", "RPOPLPUSH", "str", "dst")
+    chk("rpoplpush_wrongtype_dst", "RPOPLPUSH", "src", "str")
     chk("bad_dir", "LMOVE", "src", "dst", "UP", "DOWN")
     chk("arity", "LMOVE", "src", "dst", "LEFT")
 
