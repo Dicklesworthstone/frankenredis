@@ -31649,6 +31649,158 @@ mod tests {
     }
 
     #[test]
+    fn borrowed_plain_command_count_packet_parser_accepts_canonical_packets() {
+        let cfg = ParserConfig::default();
+
+        let consumed = crate::parse_borrowed_plain_command_count_packet(
+            b"*2\r\n$7\r\ncOmMaNd\r\n$5\r\ncOuNt\r\n*1\r\n$4\r\nPING\r\n",
+            &cfg,
+        )
+        .expect("canonical COMMAND COUNT packet should parse");
+        assert_eq!(consumed, b"*2\r\n$7\r\ncOmMaNd\r\n$5\r\ncOuNt\r\n".len());
+
+        // Keyless parser, so the consumed length is the whole contract: it must
+        // end at its own packet and leave the pipelined PING for the next round.
+        let exact = crate::parse_borrowed_plain_command_count_packet(
+            b"*2\r\n$7\r\nCOMMAND\r\n$5\r\nCOUNT\r\n",
+            &cfg,
+        )
+        .expect("exact-length COMMAND COUNT packet should parse");
+        assert_eq!(exact, b"*2\r\n$7\r\nCOMMAND\r\n$5\r\nCOUNT\r\n".len());
+    }
+
+    #[test]
+    fn borrowed_plain_command_count_packet_parser_rejects_same_prefix_siblings() {
+        let cfg = ParserConfig::default();
+
+        // The container compare is the dangerous one here. CLUSTER and LATENCY
+        // are also seven bytes and both take a five-byte RESET subcommand, so
+        // `CLUSTER RESET` and `LATENCY RESET` are byte-shaped exactly like
+        // `COMMAND COUNT`. A parser that matched `*2\r\n$7\r\n...$5\r\n` on
+        // shape alone would answer a command count to a destructive admin
+        // command and consume it, so the real one would never run.
+        for other in [
+            &b"*2\r\n$7\r\nCLUSTER\r\n$5\r\nRESET\r\n"[..],
+            &b"*2\r\n$7\r\nLATENCY\r\n$5\r\nRESET\r\n"[..],
+        ] {
+            assert!(
+                crate::parse_borrowed_plain_command_count_packet(other, &cfg).is_none(),
+                "COMMAND COUNT parser must reject a same-shape seven-byte container command"
+            );
+        }
+        // A seven-byte container carrying a genuine COUNT subcommand isolates
+        // the container compare from the subcommand compare.
+        assert!(
+            crate::parse_borrowed_plain_command_count_packet(
+                b"*2\r\n$7\r\nCLUSTER\r\n$5\r\nCOUNT\r\n",
+                &cfg
+            )
+            .is_none(),
+            "COMMAND COUNT parser must reject a non-COMMAND container even with a COUNT subcommand"
+        );
+        // And COMMAND carrying a different five-byte subcommand isolates the
+        // subcommand compare from the container compare.
+        assert!(
+            crate::parse_borrowed_plain_command_count_packet(
+                b"*2\r\n$7\r\nCOMMAND\r\n$5\r\nRESET\r\n",
+                &cfg
+            )
+            .is_none(),
+            "COMMAND COUNT parser must reject a non-COUNT five-byte subcommand"
+        );
+        // The other COMMAND subcommands declare different lengths, so the byte
+        // prefix already separates them — assert it rather than assume it.
+        for other in [
+            &b"*2\r\n$7\r\nCOMMAND\r\n$4\r\nDOCS\r\n"[..],
+            &b"*2\r\n$7\r\nCOMMAND\r\n$4\r\nLIST\r\n"[..],
+            &b"*2\r\n$7\r\nCOMMAND\r\n$4\r\nINFO\r\n"[..],
+            &b"*2\r\n$7\r\nCOMMAND\r\n$7\r\nGETKEYS\r\n"[..],
+        ] {
+            assert!(
+                crate::parse_borrowed_plain_command_count_packet(other, &cfg).is_none(),
+                "COMMAND COUNT parser must reject other COMMAND subcommands"
+            );
+        }
+    }
+
+    #[test]
+    fn borrowed_plain_command_count_packet_parser_defers_invalid_shapes_and_limits() {
+        let cfg = ParserConfig::default();
+
+        assert!(
+            crate::parse_borrowed_plain_command_count_packet(
+                b"*02\r\n$7\r\nCOMMAND\r\n$5\r\nCOUNT\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_command_count_packet(
+                b"*2\r\n$07\r\nCOMMAND\r\n$5\r\nCOUNT\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical container bulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_command_count_packet(
+                b"*2\r\n$7\r\nCOMMAND\r\n$05\r\nCOUNT\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical subcommand bulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_command_count_packet(
+                b"*2\r\n$7\r\nCOMMAND\r\n$5\r\nCOUNT\r\n",
+                &ParserConfig {
+                    max_array_len: 1,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_command_count_packet(
+                b"*2\r\n$7\r\nCOMMAND\r\n$5\r\nCOUNT\r\n",
+                &ParserConfig {
+                    max_bulk_len: 6,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "container bulk-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_command_count_packet(b"*1\r\n$7\r\nCOMMAND\r\n", &cfg)
+                .is_none(),
+            "wrong-arity packets stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_command_count_packet(
+                b"*2\r\n$7\r\nCOMMAND\r\n$5\r\nCOUNT\r",
+                &cfg
+            )
+            .is_none(),
+            "truncated packets stay on the generic parser until more bytes arrive"
+        );
+        assert!(
+            crate::parse_borrowed_plain_command_count_packet(b"*2\r\n$7\r\nCOMM", &cfg).is_none(),
+            "packets truncated inside the container token stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_command_count_packet(
+                b"*2\r\n$7\r\nCOMMAND\r\n$5\r\nCOU",
+                &cfg
+            )
+            .is_none(),
+            "packets truncated inside the subcommand token stay on the generic parser"
+        );
+    }
+
+    #[test]
     fn borrowed_plain_bitcount_packet_parser_accepts_canonical_key_only_bitcount() {
         let input = b"*2\r\n$8\r\nbItCoUnT\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n";
         let parsed = crate::parse_borrowed_plain_bitcount_packet(input, &ParserConfig::default())
