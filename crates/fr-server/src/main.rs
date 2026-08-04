@@ -31182,6 +31182,131 @@ mod tests {
     }
 
     #[test]
+    fn borrowed_plain_hkeys_hvals_packet_parsers_accept_canonical_packets() {
+        let cfg = ParserConfig::default();
+
+        let hkeys = crate::parse_borrowed_plain_hkeys_packet(
+            b"*2\r\n$5\r\nhKeYs\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n",
+            &cfg,
+        )
+        .expect("canonical HKEYS packet should parse");
+        assert_eq!(hkeys.key, b"key");
+        assert_eq!(hkeys.consumed, b"*2\r\n$5\r\nhKeYs\r\n$3\r\nkey\r\n".len());
+
+        let hvals = crate::parse_borrowed_plain_hvals_packet(
+            b"*2\r\n$5\r\nhVaLs\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n",
+            &cfg,
+        )
+        .expect("canonical HVALS packet should parse");
+        assert_eq!(hvals.key, b"key");
+        assert_eq!(hvals.consumed, b"*2\r\n$5\r\nhVaLs\r\n$3\r\nkey\r\n".len());
+    }
+
+    #[test]
+    fn borrowed_plain_hkeys_hvals_packet_parsers_reject_same_prefix_siblings() {
+        let cfg = ParserConfig::default();
+
+        // HKEYS and HVALS are byte-identical through `*2\r\n$5\r\n` and both
+        // dispatch into execute_plain_hcoll_borrowed_into, separated only by a
+        // boolean. Confusing them is therefore not a wrong-command error that
+        // surfaces to the client — it silently returns the hash's values where
+        // its keys were asked for. The command compare is the only guard.
+        assert!(
+            crate::parse_borrowed_plain_hkeys_packet(b"*2\r\n$5\r\nHVALS\r\n$1\r\nk\r\n", &cfg)
+                .is_none(),
+            "HKEYS parser must reject the same-shape HVALS command"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hvals_packet(b"*2\r\n$5\r\nHKEYS\r\n$1\r\nk\r\n", &cfg)
+                .is_none(),
+            "HVALS parser must reject the same-shape HKEYS command"
+        );
+        // They also share the prefix with the five-letter cardinality reads
+        // covered by frankenredis-ldpk9.
+        for other in [
+            &b"*2\r\n$5\r\nSCARD\r\n$1\r\nk\r\n"[..],
+            &b"*2\r\n$5\r\nZCARD\r\n$1\r\nk\r\n"[..],
+        ] {
+            assert!(
+                crate::parse_borrowed_plain_hkeys_packet(other, &cfg).is_none(),
+                "HKEYS parser must reject same-shape sibling command"
+            );
+            assert!(
+                crate::parse_borrowed_plain_hvals_packet(other, &cfg).is_none(),
+                "HVALS parser must reject same-shape sibling command"
+            );
+        }
+    }
+
+    #[test]
+    fn borrowed_plain_hkeys_hvals_packet_parsers_defer_invalid_shapes_and_limits() {
+        let cfg = ParserConfig::default();
+
+        assert!(
+            crate::parse_borrowed_plain_hkeys_packet(b"*02\r\n$5\r\nHKEYS\r\n$1\r\nk\r\n", &cfg)
+                .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hvals_packet(b"*2\r\n$05\r\nHVALS\r\n$1\r\nk\r\n", &cfg)
+                .is_none(),
+            "noncanonical command bulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hkeys_packet(
+                b"*2\r\n$5\r\nHKEYS\r\n$1\r\nk\r\n",
+                &ParserConfig {
+                    max_array_len: 1,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hvals_packet(
+                b"*2\r\n$5\r\nHVALS\r\n$1\r\nk\r\n",
+                &ParserConfig {
+                    max_bulk_len: 4,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "command bulk-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hkeys_packet(
+                b"*2\r\n$5\r\nHKEYS\r\n$6\r\nkeykey\r\n",
+                &ParserConfig {
+                    max_bulk_len: 5,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "key bulk-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hvals_packet(b"*2\r\n$5\r\nHVALS\r\n$2\r\nk\r\n", &cfg)
+                .is_none(),
+            "malformed key bulk bodies stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hkeys_packet(b"*3\r\n$5\r\nHKEYS\r\n$1\r\nk\r\n", &cfg)
+                .is_none(),
+            "wrong-arity packets stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hvals_packet(b"*2\r\n$5\r\nHVALS\r\n$1\r\nk\r", &cfg)
+                .is_none(),
+            "truncated packets stay on the generic parser until more bytes arrive"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hkeys_packet(b"*2\r\n$5\r\nHKE", &cfg).is_none(),
+            "packets truncated inside the command token stay on the generic parser"
+        );
+    }
+
+    #[test]
     fn borrowed_plain_bitcount_packet_parser_accepts_canonical_key_only_bitcount() {
         let input = b"*2\r\n$8\r\nbItCoUnT\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n";
         let parsed = crate::parse_borrowed_plain_bitcount_packet(input, &ParserConfig::default())
