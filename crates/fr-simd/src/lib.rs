@@ -97,7 +97,7 @@ unsafe fn popcount_popcnt(bytes: &[u8]) -> usize {
 unsafe fn popcount_avx2(bytes: &[u8]) -> usize {
     use std::arch::x86_64::{
         __m256i, _mm256_add_epi8, _mm256_add_epi64, _mm256_and_si256, _mm256_loadu_si256,
-        _mm256_sad_epu8, _mm256_setr_epi8, _mm256_setzero_si256, _mm256_set1_epi8,
+        _mm256_sad_epu8, _mm256_set1_epi8, _mm256_setr_epi8, _mm256_setzero_si256,
         _mm256_shuffle_epi8, _mm256_srli_epi16, _mm256_storeu_si256,
     };
 
@@ -124,10 +124,8 @@ unsafe fn popcount_avx2(bytes: &[u8]) -> usize {
             let v = _mm256_loadu_si256(bytes.as_ptr().add(offset) as *const __m256i);
             let lo = _mm256_and_si256(v, low_nibble);
             let hi = _mm256_and_si256(_mm256_srli_epi16(v, 4), low_nibble);
-            let counts = _mm256_add_epi8(
-                _mm256_shuffle_epi8(lut, lo),
-                _mm256_shuffle_epi8(lut, hi),
-            );
+            let counts =
+                _mm256_add_epi8(_mm256_shuffle_epi8(lut, lo), _mm256_shuffle_epi8(lut, hi));
             // `sad_epu8` horizontally sums each 8-byte group into a u64 lane; the per-byte counts
             // are <= 8, so 8 of them cannot overflow a byte, and the u64 accumulator cannot
             // overflow for any slice that fits in memory.
@@ -333,9 +331,7 @@ pub fn common_prefix_len_scalar(a: &[u8], b: &[u8], n: usize) -> usize {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn common_prefix_len_avx2(a: &[u8], b: &[u8], n: usize) -> usize {
-    use std::arch::x86_64::{
-        __m256i, _mm256_cmpeq_epi8, _mm256_loadu_si256, _mm256_movemask_epi8,
-    };
+    use std::arch::x86_64::{__m256i, _mm256_cmpeq_epi8, _mm256_loadu_si256, _mm256_movemask_epi8};
     let full = n / 32 * 32;
     // SAFETY: AVX2 guaranteed; every load spans `[off, off+32) ⊆ [0, full) ⊆ [0, n) ⊆` both slices.
     unsafe {
@@ -414,9 +410,7 @@ pub fn bitand_inplace_scalar(dst: &mut [u8], src: &[u8]) {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn bitand_inplace_avx2(dst: &mut [u8], src: &[u8]) {
-    use std::arch::x86_64::{
-        __m256i, _mm256_and_si256, _mm256_loadu_si256, _mm256_storeu_si256,
-    };
+    use std::arch::x86_64::{__m256i, _mm256_and_si256, _mm256_loadu_si256, _mm256_storeu_si256};
 
     let n = dst.len().min(src.len());
     let full = n / 32 * 32;
@@ -640,9 +634,7 @@ pub fn max_bytes_inplace_scalar(dst: &mut [u8], src: &[u8]) {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn max_bytes_inplace_avx2(dst: &mut [u8], src: &[u8]) {
-    use std::arch::x86_64::{
-        __m256i, _mm256_loadu_si256, _mm256_max_epu8, _mm256_storeu_si256,
-    };
+    use std::arch::x86_64::{__m256i, _mm256_loadu_si256, _mm256_max_epu8, _mm256_storeu_si256};
     let n = dst.len().min(src.len());
     let full = n / 32 * 32;
     // SAFETY: AVX2 guaranteed by the caller. Every load/store spans `[offset, offset+32)` with
@@ -792,8 +784,8 @@ unsafe fn bitnot_collect_avx2(src: &[u8], dst: *mut u8) {
             _mm256_storeu_si256(dst.add(off) as *mut __m256i, _mm256_xor_si256(s, ones));
             off += 32;
         }
-        for (i, &s) in src.iter().enumerate().take(n).skip(full) {
-            *dst.add(i) = !s;
+        for (tail_offset, &byte) in src[full..].iter().enumerate() {
+            *dst.add(full + tail_offset) = !byte;
         }
     }
 }
@@ -1026,9 +1018,7 @@ unsafe fn crc64_pclmul_fold1(data: &[u8]) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        first_mismatch_byte, first_mismatch_byte_scalar, popcount_bytes, popcount_scalar,
-    };
+    use super::{first_mismatch_byte, first_mismatch_byte_scalar, popcount_bytes, popcount_scalar};
 
     /// The oracle: the definition of popcount, straight from the standard library.
     fn oracle(bytes: &[u8]) -> usize {
@@ -1038,7 +1028,9 @@ mod tests {
     /// Deterministic pseudo-random fill; no dependency on `rand`.
     fn fill(buf: &mut [u8], mut seed: u64) {
         for byte in buf.iter_mut() {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             *byte = (seed >> 33) as u8;
         }
     }
@@ -1053,8 +1045,16 @@ mod tests {
             for len in 0..=1024usize {
                 let slice = &buf[..len];
                 let want = oracle(slice);
-                assert_eq!(popcount_bytes(slice), want, "dispatched, len={len}, seed={seed}");
-                assert_eq!(popcount_scalar(slice), want, "scalar, len={len}, seed={seed}");
+                assert_eq!(
+                    popcount_bytes(slice),
+                    want,
+                    "dispatched, len={len}, seed={seed}"
+                );
+                assert_eq!(
+                    popcount_scalar(slice),
+                    want,
+                    "scalar, len={len}, seed={seed}"
+                );
             }
         }
     }
@@ -1122,7 +1122,10 @@ mod tests {
                         Some(pos),
                         "skip={skip:#04x} len={len} pos={pos}"
                     );
-                    assert_eq!(super::first_mismatch_byte(&buf, skip), first_mismatch_byte_scalar(&buf, skip));
+                    assert_eq!(
+                        super::first_mismatch_byte(&buf, skip),
+                        first_mismatch_byte_scalar(&buf, skip)
+                    );
                 }
             }
         }
@@ -1141,7 +1144,10 @@ mod tests {
             let other = !skip;
             for len in 0..=200usize {
                 // SAFETY: sse2 confirmed present above.
-                assert_eq!(unsafe { super::first_mismatch_byte_sse2(&vec![skip; len], skip) }, None);
+                assert_eq!(
+                    unsafe { super::first_mismatch_byte_sse2(&vec![skip; len], skip) },
+                    None
+                );
                 for pos in 0..len {
                     let mut buf = vec![skip; len];
                     buf[pos] = other;
@@ -1191,7 +1197,11 @@ mod tests {
     #[test]
     fn crc64_pclmul_matches_scalar_and_check_value() {
         use super::{crc64, crc64_fold1_reference, crc64_scalar};
-        assert_eq!(crc64(b"123456789"), 0xe9c6_d914_c4b8_d9ca, "CRC-64/Jones check value");
+        assert_eq!(
+            crc64(b"123456789"),
+            0xe9c6_d914_c4b8_d9ca,
+            "CRC-64/Jones check value"
+        );
         let mut buf = vec![0u8; 2048];
         for seed in [1u64, 0xdead_beef, 0x0f0f_0f0f_f0f0_f0f0] {
             fill(&mut buf, seed);
@@ -1201,7 +1211,11 @@ mod tests {
                 // equal the scalar oracle — a wrong 4-block constant, a broken combine, or a stale
                 // reference all fail here (the 8-block boundary, every 0..3 remainder, and the
                 // 4..7-block fold-by-1 fallback are all exercised across this length sweep).
-                assert_eq!(crc64(&buf[..len]), scalar, "fold4 != scalar at len={len} seed={seed}");
+                assert_eq!(
+                    crc64(&buf[..len]),
+                    scalar,
+                    "fold4 != scalar at len={len} seed={seed}"
+                );
                 assert_eq!(
                     crc64_fold1_reference(&buf[..len]),
                     scalar,
@@ -1217,7 +1231,11 @@ mod tests {
                 }
                 let s = &buf[start..start + len];
                 assert_eq!(crc64(s), crc64_scalar(0, s), "start={start} len={len}");
-                assert_eq!(crc64(s), crc64_fold1_reference(s), "fold4 != fold1 start={start} len={len}");
+                assert_eq!(
+                    crc64(s),
+                    crc64_fold1_reference(s),
+                    "fold4 != fold1 start={start} len={len}"
+                );
             }
         }
     }
@@ -1244,7 +1262,10 @@ mod tests {
                 let mut b = a.clone();
                 b[pos] ^= 0xff;
                 assert_eq!(common_prefix_len(&a, &b), pos, "len={len} pos={pos}");
-                assert_eq!(common_prefix_len(&a, &b), common_prefix_len_scalar(&a, &b, len));
+                assert_eq!(
+                    common_prefix_len(&a, &b),
+                    common_prefix_len_scalar(&a, &b, len)
+                );
             }
         }
         // Unequal lengths: the shorter is a full prefix of the longer.
@@ -1261,7 +1282,11 @@ mod tests {
                     }
                     let x = &base[astart..astart + len];
                     let y = &base[bstart..bstart + len];
-                    assert_eq!(common_prefix_len(x, y), oracle(x, y), "a={astart} b={bstart} len={len}");
+                    assert_eq!(
+                        common_prefix_len(x, y),
+                        oracle(x, y),
+                        "a={astart} b={bstart} len={len}"
+                    );
                 }
             }
         }
@@ -1319,14 +1344,20 @@ mod tests {
                     let onaive: Vec<u8> = base.iter().zip(s).map(|(a, b)| a | b).collect();
                     bitor_inplace(&mut o1, s);
                     bitor_inplace_scalar(&mut o2, s);
-                    assert_eq!(o1, o2, "OR dispatch!=scalar d={dstart} s={sstart} len={len}");
+                    assert_eq!(
+                        o1, o2,
+                        "OR dispatch!=scalar d={dstart} s={sstart} len={len}"
+                    );
                     assert_eq!(o1, onaive, "OR wrong d={dstart} s={sstart} len={len}");
                     // XOR: dispatch == scalar == independent naive.
                     let (mut x1, mut x2) = (base.clone(), base.clone());
                     let xnaive: Vec<u8> = base.iter().zip(s).map(|(a, b)| a ^ b).collect();
                     bitxor_inplace(&mut x1, s);
                     bitxor_inplace_scalar(&mut x2, s);
-                    assert_eq!(x1, x2, "XOR dispatch!=scalar d={dstart} s={sstart} len={len}");
+                    assert_eq!(
+                        x1, x2,
+                        "XOR dispatch!=scalar d={dstart} s={sstart} len={len}"
+                    );
                     assert_eq!(x1, xnaive, "XOR wrong d={dstart} s={sstart} len={len}");
                 }
             }
@@ -1360,7 +1391,10 @@ mod tests {
                     let naive: Vec<u8> = s.iter().map(|b| !b).collect();
                     bitnot_into(&mut d1, s);
                     bitnot_into_scalar(&mut d2, s);
-                    assert_eq!(d1, d2, "NOT dispatch!=scalar d={dstart} s={sstart} len={len}");
+                    assert_eq!(
+                        d1, d2,
+                        "NOT dispatch!=scalar d={dstart} s={sstart} len={len}"
+                    );
                     assert_eq!(d1, naive, "NOT wrong d={dstart} s={sstart} len={len}");
                 }
             }
@@ -1369,7 +1403,11 @@ mod tests {
         let mut d = vec![0x11u8; 40];
         bitnot_into(&mut d, &[0xf0u8; 10]);
         assert_eq!(&d[..10], &[0x0fu8; 10]);
-        assert_eq!(&d[10..], &[0x11u8; 30], "NOT bytes past src.len() untouched");
+        assert_eq!(
+            &d[10..],
+            &[0x11u8; 30],
+            "NOT bytes past src.len() untouched"
+        );
     }
 
     #[test]
@@ -1391,7 +1429,10 @@ mod tests {
                     let naive: Vec<u8> = base.iter().zip(s).map(|(a, b)| (*a).max(*b)).collect();
                     max_bytes_inplace(&mut d1, s);
                     max_bytes_inplace_scalar(&mut d2, s);
-                    assert_eq!(d1, d2, "MAX dispatch!=scalar d={dstart} s={sstart} len={len}");
+                    assert_eq!(
+                        d1, d2,
+                        "MAX dispatch!=scalar d={dstart} s={sstart} len={len}"
+                    );
                     assert_eq!(d1, naive, "MAX wrong d={dstart} s={sstart} len={len}");
                 }
             }
@@ -1422,9 +1463,21 @@ mod tests {
                     let and_n: Vec<u8> = a.iter().zip(b).map(|(x, y)| x & y).collect();
                     let or_n: Vec<u8> = a.iter().zip(b).map(|(x, y)| x | y).collect();
                     let xor_n: Vec<u8> = a.iter().zip(b).map(|(x, y)| x ^ y).collect();
-                    assert_eq!(bitand_collect(a, b), and_n, "AND a={astart} b={bstart} len={len}");
-                    assert_eq!(bitor_collect(a, b), or_n, "OR a={astart} b={bstart} len={len}");
-                    assert_eq!(bitxor_collect(a, b), xor_n, "XOR a={astart} b={bstart} len={len}");
+                    assert_eq!(
+                        bitand_collect(a, b),
+                        and_n,
+                        "AND a={astart} b={bstart} len={len}"
+                    );
+                    assert_eq!(
+                        bitor_collect(a, b),
+                        or_n,
+                        "OR a={astart} b={bstart} len={len}"
+                    );
+                    assert_eq!(
+                        bitxor_collect(a, b),
+                        xor_n,
+                        "XOR a={astart} b={bstart} len={len}"
+                    );
                 }
             }
         }
