@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential gate: HSCAN/SSCAN/ZSCAN across encodings (frankenredis-...).
+"""Differential gate: HSCAN/SSCAN/ZSCAN across encodings (frankenredis-phpcq).
 
 SCAN-family cursor behavior depends on the collection encoding: a SMALL (listpack /
 intset) hash/set/zset returns ALL elements in a single cursor=0 reply (byte-exact incl.
@@ -34,6 +34,44 @@ def full_iter(s, cmdname, key, *opts):
         items.extend(bulks[1:])  # drop the cursor bulk
         if cur==b"0": break
     return tuple(sorted(items))
+
+def scan_page(s, cmdname, key, cursor, *opts):
+    """Return a SCAN-family cursor and the bulk payload from one small page."""
+    reply = cmd(s, cmdname, key, cursor, *opts)
+    match = re.match(rb"\*2\r\n\$\d+\r\n([^\r]*)\r\n", reply)
+    if not match:
+        return None, ("PARSE_ERR", reply[:60])
+    payload = re.findall(rb"\$\d+\r\n([^\r]*)\r\n", reply)[1:]
+    return match.group(1), payload
+
+def scan_survivors_after_deleting_first_page(s, kind):
+    """Return present-throughout members missing from a mid-scan-delete walk."""
+    command, key, prefix, delete_command, paired = {
+        "hash": ("HSCAN", "surviveh", b"f", "HDEL", True),
+        "set": ("SSCAN", "survives", b"m", "SREM", False),
+        "zset": ("ZSCAN", "survivez", b"z", "ZREM", True),
+    }[kind]
+    cursor, payload = scan_page(s, command, key, "0", "COUNT", "10")
+    if cursor is None or not payload:
+        return ("FIRST_PAGE", payload)
+    first_members = payload[::2] if paired else payload
+    removed = first_members[:2]
+    if len(removed) != 2:
+        return ("SHORT_FIRST_PAGE", payload)
+    cmd(s, delete_command, key, *removed)
+    seen = set(first_members)
+    guard = 0
+    while cursor != b"0":
+        guard += 1
+        if guard > 10000:
+            return ("LOOP",)
+        cursor, payload = scan_page(s, command, key, cursor, "COUNT", "10")
+        if cursor is None:
+            return payload
+        members = payload[::2] if paired else payload
+        seen.update(members)
+    expected = {prefix + f"{index:04}".encode() for index in range(300)}
+    return tuple(sorted((expected - set(removed)) - seen))
 def main():
     op=int(sys.argv[1]) if len(sys.argv)>1 else 16399
     fp=int(sys.argv[2]) if len(sys.argv)>2 else 16400
@@ -48,6 +86,9 @@ def main():
         for i in range(300): cmd(s,"HSET","bigh",f"f{i}",f"v{i}")
         for i in range(300): cmd(s,"SADD","bigs",f"m{i}")
         for i in range(300): cmd(s,"ZADD","bigz",str(i),f"z{i}")
+        for i in range(300): cmd(s,"HSET","surviveh",f"f{i:04}","v")
+        for i in range(300): cmd(s,"SADD","survives",f"m{i:04}")
+        for i in range(300): cmd(s,"ZADD","survivez",str(i),f"z{i:04}")
     def raw(label,*c):
         ro,rf=cmd(od,*c),cmd(fr,*c)
         if ro!=rf: fails.append(f"{label}: redis={ro[:70]!r} fr={rf[:70]!r}")
@@ -62,6 +103,15 @@ def main():
     iter_set("hscan_big","HSCAN","bigh"); iter_set("hscan_big_count","HSCAN","bigh","COUNT","10")
     iter_set("sscan_big","SSCAN","bigs"); iter_set("zscan_big","ZSCAN","bigz","COUNT","7")
     iter_set("hscan_big_match","HSCAN","bigh","MATCH","f1*")
+    # Redis's SCAN guarantee: a member that remains present throughout an
+    # iteration must appear at least once, even when already-returned members
+    # are deleted between cursor pages. This exercises the continuation point
+    # after HDEL's ordered removal and SREM's swap removal.
+    for kind in ("hash", "set", "zset"):
+        for server, label in ((od, "redis"), (fr, "fr")):
+            missing = scan_survivors_after_deleting_first_page(server, kind)
+            if missing:
+                fails.append(f"{kind}_delete_survivors_{label}: missing={missing[:6]!r}")
     # error / edge cases
     raw("hscan_novalues","HSCAN","smallh","0","NOVALUES")
     raw("hscan_missing","HSCAN","nope","0"); raw("hscan_badcursor","HSCAN","smallh","abc")
@@ -70,6 +120,8 @@ def main():
     if fails:
         print(f"FAIL — {len(fails)} scan-encoding divergence(s) vs redis 7.2.4:")
         for x in fails[:12]: print(f"  {x}")
+        od.close(); fr.close()
         sys.exit(1)
-    print("PASS — HSCAN/SSCAN/ZSCAN across encodings byte-exact vs redis 7.2.4 (small single-shot + big full-iter set + MATCH/NOVALUES/TYPE/missing/bad-cursor)")
+    od.close(); fr.close()
+    print("PASS — HSCAN/SSCAN/ZSCAN across encodings byte-exact vs redis 7.2.4 (small single-shot + big full-iter set + deletion survivors + MATCH/NOVALUES/TYPE/missing/bad-cursor)")
 if __name__=="__main__": main()
