@@ -18134,7 +18134,9 @@ fn sha1_hex(data: &[u8]) -> String {
     }
     msg.extend_from_slice(&bit_len.to_be_bytes());
 
-    for chunk in msg.chunks_exact(64) {
+    let (chunks, remainder) = msg.as_chunks::<64>();
+    debug_assert!(remainder.is_empty());
+    for chunk in chunks {
         let mut w = [0u32; 80];
         for i in 0..16 {
             w[i] = u32::from_be_bytes([
@@ -20083,9 +20085,11 @@ fn hll_encode(registers: &[u8], encoding: HllEncoding) -> Vec<u8> {
 // bit/8, bit%8, and masked-OR byte loads/stores. (frankenredis-kgsni)
 fn hll_encode_dense_registers(registers: &[u8]) -> Vec<u8> {
     let mut payload = vec![0u8; HLL_REDIS_DENSE_REGISTER_BYTES];
-    for (regs, bytes) in registers
-        .chunks_exact(4)
-        .zip(payload.chunks_exact_mut(3))
+    let (register_groups, _) = registers.as_chunks::<4>();
+    let (payload_groups, _) = payload.as_chunks_mut::<3>();
+    for (regs, bytes) in register_groups
+        .iter()
+        .zip(payload_groups.iter_mut())
         .take(HLL_REGISTERS / 4)
     {
         let w = (u32::from(regs[0] & 0x3f))
@@ -20104,7 +20108,11 @@ fn hll_decode_dense_registers(payload: &[u8]) -> Result<Vec<u8>, StoreError> {
         return Err(StoreError::InvalidHllValue);
     }
     let mut registers = vec![0u8; HLL_REGISTERS];
-    for (regs, bytes) in registers.chunks_exact_mut(4).zip(payload.chunks_exact(3)) {
+    let (register_groups, register_remainder) = registers.as_chunks_mut::<4>();
+    let (payload_groups, payload_remainder) = payload.as_chunks::<3>();
+    debug_assert!(register_remainder.is_empty());
+    debug_assert!(payload_remainder.is_empty());
+    for (regs, bytes) in register_groups.iter_mut().zip(payload_groups) {
         let w = u32::from(bytes[0]) | (u32::from(bytes[1]) << 8) | (u32::from(bytes[2]) << 16);
         regs[0] = (w & 0x3f) as u8;
         regs[1] = ((w >> 6) & 0x3f) as u8;
@@ -36781,7 +36789,7 @@ mod tests {
                         "PEXPIREAT replay must target an existing key"
                     );
                 } else if eq_ascii_ci(command, b"HSET") || eq_ascii_ci(command, b"HMSET") {
-                    for pair in argv[2..].chunks_exact(2) {
+                    for pair in argv[2..].as_chunks::<2>().0 {
                         store
                             .hset(&key, pair[0].clone(), pair[1].clone(), METAMORPHIC_NOW_MS)
                             .expect("hash replay must stay valid");
@@ -36796,7 +36804,9 @@ mod tests {
                         .expect("SADD replay must stay valid");
                 } else if eq_ascii_ci(command, b"ZADD") {
                     let entries: Vec<(f64, Vec<u8>)> = argv[2..]
-                        .chunks_exact(2)
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
                         .map(|pair| (parse_f64_arg(&pair[0]), pair[1].clone()))
                         .collect();
                     store
@@ -36815,7 +36825,9 @@ mod tests {
                         };
                     let id = parse_stream_id_arg(id_arg);
                     let fields: Vec<(Vec<u8>, Vec<u8>)> = field_args
-                        .chunks_exact(2)
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
                         .map(|pair| (pair[0].clone(), pair[1].clone()))
                         .collect();
                     store
