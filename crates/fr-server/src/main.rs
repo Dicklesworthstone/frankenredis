@@ -32663,6 +32663,173 @@ mod tests {
     }
 
     #[test]
+    fn borrowed_plain_keyed_pop_packet_parser_maps_every_command_to_its_own_discriminant() {
+        // This parser multiplexes five commands onto one shape, returning a
+        // PlainKeyedPopCmd discriminant. The existing coverage only ever
+        // asserted SPOP, so a mis-mapping of any other arm would have gone
+        // unnoticed — and these are the most destructive confusions in the
+        // whole packet-parser family:
+        //
+        //   LPOP vs RPOP        pop opposite ends of a list
+        //   ZPOPMIN vs ZPOPMAX  pop opposite ends of a sorted set
+        //
+        // Both pairs are byte-identical apart from the command token, both are
+        // WRITES, and both would silently destroy the wrong element rather than
+        // raise any error a client could observe.
+        let cfg = ParserConfig::default();
+
+        for (packet, expected, key) in [
+            (
+                &b"*2\r\n$4\r\nlPoP\r\n$4\r\nlist\r\n"[..],
+                fr_runtime::PlainKeyedPopCmd::Lpop,
+                &b"list"[..],
+            ),
+            (
+                &b"*2\r\n$4\r\nrPoP\r\n$4\r\nlist\r\n"[..],
+                fr_runtime::PlainKeyedPopCmd::Rpop,
+                &b"list"[..],
+            ),
+            (
+                &b"*2\r\n$4\r\nsPoP\r\n$3\r\nset\r\n"[..],
+                fr_runtime::PlainKeyedPopCmd::Spop,
+                &b"set"[..],
+            ),
+            (
+                &b"*2\r\n$7\r\nzPoPmIn\r\n$4\r\nzset\r\n"[..],
+                fr_runtime::PlainKeyedPopCmd::Zpopmin,
+                &b"zset"[..],
+            ),
+            (
+                &b"*2\r\n$7\r\nzPoPmAx\r\n$4\r\nzset\r\n"[..],
+                fr_runtime::PlainKeyedPopCmd::Zpopmax,
+                &b"zset"[..],
+            ),
+        ] {
+            let (cmd, parsed) = crate::parse_borrowed_plain_keyed_pop_packet(packet, &cfg)
+                .expect("canonical no-count pop packet should parse");
+            assert_eq!(
+                cmd, expected,
+                "the parsed discriminant must match the command on the wire"
+            );
+            assert_eq!(parsed.key, key);
+            assert_eq!(parsed.consumed, packet.len());
+        }
+    }
+
+    #[test]
+    fn borrowed_plain_keyed_pop_packet_parser_defers_count_forms_for_every_command() {
+        // Each of these commands takes an optional count that changes the reply
+        // shape (a bulk becomes an array, and for LPOP/RPOP a nil becomes an
+        // empty array). The fast path serves only the no-count form, so the
+        // arity guard is what keeps a counted request off it — the first two
+        // elements are indistinguishable from the no-count form.
+        let cfg = ParserConfig::default();
+
+        for packet in [
+            &b"*3\r\n$4\r\nLPOP\r\n$1\r\nk\r\n$1\r\n2\r\n"[..],
+            &b"*3\r\n$4\r\nRPOP\r\n$1\r\nk\r\n$1\r\n2\r\n"[..],
+            &b"*3\r\n$7\r\nZPOPMIN\r\n$1\r\nk\r\n$1\r\n2\r\n"[..],
+            &b"*3\r\n$7\r\nZPOPMAX\r\n$1\r\nk\r\n$1\r\n2\r\n"[..],
+        ] {
+            assert!(
+                crate::parse_borrowed_plain_keyed_pop_packet(packet, &cfg).is_none(),
+                "count forms stay on the generic borrowed parser"
+            );
+        }
+    }
+
+    #[test]
+    fn borrowed_plain_keyed_pop_packet_parser_rejects_same_prefix_siblings() {
+        let cfg = ParserConfig::default();
+
+        // Four-byte siblings that share `*2\r\n$4\r\n` with LPOP/RPOP/SPOP.
+        // TYPE and LLEN are reads, so serving a pop for them would DESTROY an
+        // element in response to a read-only request.
+        for other in [
+            &b"*2\r\n$4\r\nTYPE\r\n$1\r\nk\r\n"[..],
+            &b"*2\r\n$4\r\nLLEN\r\n$1\r\nk\r\n"[..],
+            &b"*2\r\n$4\r\nXLEN\r\n$1\r\nk\r\n"[..],
+            &b"*2\r\n$4\r\nPTTL\r\n$1\r\nk\r\n"[..],
+            &b"*2\r\n$4\r\nECHO\r\n$1\r\nk\r\n"[..],
+        ] {
+            assert!(
+                crate::parse_borrowed_plain_keyed_pop_packet(other, &cfg).is_none(),
+                "keyed-pop parser must reject a same-shape four-byte sibling"
+            );
+        }
+        // Seven-byte siblings sharing the ZPOPMIN/ZPOPMAX prefix. PERSIST and
+        // HGETALL are likewise non-pops.
+        for other in [
+            &b"*2\r\n$7\r\nPERSIST\r\n$1\r\nk\r\n"[..],
+            &b"*2\r\n$7\r\nHGETALL\r\n$1\r\nk\r\n"[..],
+            &b"*2\r\n$7\r\nPFCOUNT\r\n$1\r\nk\r\n"[..],
+        ] {
+            assert!(
+                crate::parse_borrowed_plain_keyed_pop_packet(other, &cfg).is_none(),
+                "keyed-pop parser must reject a same-shape seven-byte sibling"
+            );
+        }
+    }
+
+    #[test]
+    fn borrowed_plain_keyed_pop_packet_parser_defers_invalid_shapes_and_limits() {
+        let cfg = ParserConfig::default();
+
+        assert!(
+            crate::parse_borrowed_plain_keyed_pop_packet(b"*02\r\n$4\r\nLPOP\r\n$1\r\nk\r\n", &cfg)
+                .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_keyed_pop_packet(
+                b"*2\r\n$07\r\nZPOPMIN\r\n$1\r\nk\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical command bulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_keyed_pop_packet(
+                b"*2\r\n$7\r\nZPOPMAX\r\n$1\r\nk\r\n",
+                &ParserConfig {
+                    max_bulk_len: 6,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "the seven-byte arms must respect the command bulk limit"
+        );
+        assert!(
+            crate::parse_borrowed_plain_keyed_pop_packet(
+                b"*2\r\n$4\r\nRPOP\r\n$6\r\nkeykey\r\n",
+                &ParserConfig {
+                    max_bulk_len: 5,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "key bulk-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_keyed_pop_packet(
+                b"*2\r\n$7\r\nZPOPMIN\r\n$2\r\nk\r\n",
+                &cfg
+            )
+            .is_none(),
+            "malformed key bulk bodies stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_keyed_pop_packet(b"*2\r\n$4\r\nLPOP\r\n$1\r\nk\r", &cfg)
+                .is_none(),
+            "truncated packets stay on the generic parser until more bytes arrive"
+        );
+        assert!(
+            crate::parse_borrowed_plain_keyed_pop_packet(b"*2\r\n$7\r\nZPOP", &cfg).is_none(),
+            "packets truncated inside the command token stay on the generic parser"
+        );
+    }
+
+    #[test]
     fn borrowed_plain_bitcount_packet_parser_accepts_canonical_key_only_bitcount() {
         let input = b"*2\r\n$8\r\nbItCoUnT\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n";
         let parsed = crate::parse_borrowed_plain_bitcount_packet(input, &ParserConfig::default())
