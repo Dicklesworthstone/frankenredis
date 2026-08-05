@@ -16,7 +16,6 @@ Usage: list_mutation_differ.py <oracle_port> <fr_port>
 """
 import socket
 import sys
-import time
 
 BASE = ["a", "b", "a", "c", "a", "b", "a"]  # a x4, b x2, c x1
 
@@ -25,14 +24,56 @@ def conn(p):
     return socket.create_connection(("127.0.0.1", p), timeout=5)
 
 
+def _frame_len(buf, i=0):
+    """Byte length of the complete RESP frame at buf[i:], or None if partial."""
+    nl = buf.find(b"\r\n", i)
+    if nl < 0:
+        return None
+    kind, head = buf[i:i + 1], buf[i + 1:nl]
+    if kind in (b"+", b"-", b":", b",", b"#", b"("):
+        return nl + 2 - i
+    if kind == b"$":
+        n = int(head)
+        if n < 0:
+            return nl + 2 - i
+        end = nl + 2 + n + 2
+        return end - i if len(buf) >= end else None
+    if kind in (b"*", b"~", b">", b"%"):
+        n = int(head)
+        if n < 0:
+            return nl + 2 - i
+        if kind == b"%":
+            n *= 2
+        pos = nl + 2
+        for _ in range(n):
+            sub = _frame_len(buf, pos)
+            if sub is None:
+                return None
+            pos += sub
+        return pos - i
+    raise ValueError(f"unrecognised RESP type byte {kind!r}")
+
+
 def cmd(s, *a):
     o = b"*%d\r\n" % len(a)
     for x in a:
-        x = x if isinstance(x, bytes) else str(x).encode()
+        # latin-1 so a str escape maps to the single byte it names, and read
+        # until a complete RESP frame is buffered rather than sleeping and
+        # taking whatever arrived. (frankenredis-r9ei8)
+        x = x if isinstance(x, bytes) else str(x).encode("latin-1")
         o += b"$%d\r\n%s\r\n" % (len(x), x)
     s.sendall(o)
-    time.sleep(0.02)
-    return s.recv(1 << 20)
+    buf = b""
+    while True:
+        try:
+            if buf and _frame_len(buf) is not None:
+                return buf
+        except ValueError:
+            return buf
+        chunk = s.recv(1 << 20)
+        if not chunk:
+            raise OSError("server closed the connection mid-reply")
+        buf += chunk
 
 
 # (label, list-key, reset_items_or_None, command-argv)
@@ -79,13 +120,34 @@ def main():
             for s in (od, fr):
                 cmd(s, "DEL", key)
                 if reset_items:
-                    cmd(s, "RPUSH", key, *reset_items)
+                    seeded = cmd(s, "RPUSH", key, *reset_items)
+                    # A silently failed seed would leave every case operating on
+                    # a missing key, and most of these commands answer 0 / -1 /
+                    # empty for a missing key on BOTH engines — so the gate would
+                    # pass while testing nothing.
+                    if seeded != b":%d\r\n" % len(reset_items):
+                        print(
+                            f"SEED FAILED for {label}: RPUSH {key} returned "
+                            f"{seeded!r}, expected :{len(reset_items)}\\r\\n"
+                        )
+                        sys.exit(1)
         ro, rf = cmd(od, *argv), cmd(fr, *argv)
         lo, lf = cmd(od, "LRANGE", key, "0", "-1"), cmd(fr, "LRANGE", key, "0", "-1")
+        # LRANGE alone CANNOT distinguish "key deleted" from "key present but
+        # empty" — both answer *0. This gate's own headline clause is that a
+        # range which empties the list DELETES the key, so EXISTS and TYPE are
+        # compared too; without them ltrim_empties_key asserted nothing about
+        # deletion. (frankenredis-i7ngc)
+        eo, ef = cmd(od, "EXISTS", key), cmd(fr, "EXISTS", key)
+        to, tf = cmd(od, "TYPE", key), cmd(fr, "TYPE", key)
         if ro != rf:
             fails.append(f"{label} reply: redis={ro!r} fr={rf!r}")
         if lo != lf:
             fails.append(f"{label} list: redis={lo!r} fr={lf!r}")
+        if eo != ef:
+            fails.append(f"{label} EXISTS: redis={eo!r} fr={ef!r}")
+        if to != tf:
+            fails.append(f"{label} TYPE: redis={to!r} fr={tf!r}")
     print("=" * 60)
     if fails:
         print(f"FAIL — {len(fails)} list-mutation divergence(s) vs redis 7.2.4:")
@@ -94,7 +156,8 @@ def main():
         sys.exit(1)
     print(
         f"PASS — list mutations byte-exact vs redis 7.2.4 "
-        f"({len(CASES)} cases x reply+resulting-list: LREM/LINSERT/LSET/LTRIM)"
+        f"({len(CASES)} cases x reply+LRANGE+EXISTS+TYPE: LREM/LINSERT/LSET/LTRIM, "
+        "incl. empties-key deletion)"
     )
 
 
