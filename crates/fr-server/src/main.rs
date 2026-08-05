@@ -33817,6 +33817,243 @@ mod tests {
     }
 
     #[test]
+    fn borrowed_plain_expire_setrange_zincrby_packet_parsers_accept_canonical_packets() {
+        let cfg = ParserConfig::default();
+
+        let expire = crate::parse_borrowed_plain_expire_packet(
+            b"*3\r\n$6\r\neXpIrE\r\n$3\r\nkey\r\n$2\r\n60\r\n*1\r\n$4\r\nPING\r\n",
+            &cfg,
+        )
+        .expect("canonical EXPIRE packet should parse");
+        assert_eq!(expire.key, b"key");
+        assert_eq!(expire.member, b"60", "the second bulk is the TTL");
+        assert_eq!(
+            expire.consumed,
+            b"*3\r\n$6\r\neXpIrE\r\n$3\r\nkey\r\n$2\r\n60\r\n".len()
+        );
+
+        let setrange = crate::parse_borrowed_plain_setrange_packet(
+            b"*4\r\n$8\r\nsEtRaNgE\r\n$3\r\nkey\r\n$2\r\n10\r\n$5\r\nvalue\r\n",
+            &cfg,
+        )
+        .expect("canonical SETRANGE packet should parse");
+        assert_eq!(setrange.key, b"key");
+        assert_eq!(setrange.start, b"10", "the second bulk is the offset");
+        assert_eq!(setrange.end, b"value", "the third bulk is the value");
+
+        let zincrby = crate::parse_borrowed_plain_zincrby_packet(
+            b"*4\r\n$7\r\nzInCrBy\r\n$3\r\nkey\r\n$3\r\n1.5\r\n$6\r\nmember\r\n",
+            &cfg,
+        )
+        .expect("canonical ZINCRBY packet should parse");
+        assert_eq!(zincrby.key, b"key");
+        assert_eq!(zincrby.start, b"1.5", "the second bulk is the increment");
+        assert_eq!(zincrby.end, b"member", "the third bulk is the member");
+    }
+
+    #[test]
+    fn borrowed_plain_expire_packet_parser_defers_the_option_form() {
+        // Redis 7 gave EXPIRE the NX/XX/GT/LT options, which make the command
+        // conditional — it may now return 0 where the plain form returns 1. The
+        // option form is four elements, so the fast path's `*3` prefix defers
+        // it; that arity guard is the only thing preventing a conditional
+        // expiry from being applied unconditionally.
+        let cfg = ParserConfig::default();
+
+        for option in [&b"NX"[..], &b"XX"[..], &b"GT"[..], &b"LT"[..], &b"nx"[..]] {
+            let mut packet = Vec::new();
+            packet.extend_from_slice(b"*4\r\n$6\r\nEXPIRE\r\n$1\r\nk\r\n$2\r\n60\r\n$");
+            packet.extend_from_slice(option.len().to_string().as_bytes());
+            packet.extend_from_slice(b"\r\n");
+            packet.extend_from_slice(option);
+            packet.extend_from_slice(b"\r\n");
+
+            assert!(
+                crate::parse_borrowed_plain_expire_packet(&packet, &cfg).is_none(),
+                "the conditional EXPIRE form must stay on the generic parser"
+            );
+        }
+    }
+
+    #[test]
+    fn borrowed_plain_expire_setrange_zincrby_packet_parsers_pass_numeric_args_through() {
+        // TTLs, offsets and increments all reach their executors as raw bytes
+        // and are parsed and range-checked there. Out-of-range and non-numeric
+        // values must stay command-level errors rather than becoming parse
+        // deferrals, or the fast path and the generic path would disagree about
+        // which inputs are errors at all.
+        let cfg = ParserConfig::default();
+
+        for arg in [
+            &b"-1"[..],
+            &b"0"[..],
+            &b"9223372036854775807"[..],
+            &b"-9223372036854775808"[..],
+            &b"notanumber"[..],
+            &b""[..],
+        ] {
+            let mut expire = Vec::new();
+            expire.extend_from_slice(b"*3\r\n$6\r\nEXPIRE\r\n$1\r\nk\r\n$");
+            expire.extend_from_slice(arg.len().to_string().as_bytes());
+            expire.extend_from_slice(b"\r\n");
+            expire.extend_from_slice(arg);
+            expire.extend_from_slice(b"\r\n");
+            let parsed = crate::parse_borrowed_plain_expire_packet(&expire, &cfg)
+                .expect("EXPIRE parser must accept any well-framed TTL bulk");
+            assert_eq!(
+                parsed.member, arg,
+                "TTL bytes must reach the executor verbatim"
+            );
+
+            let mut zincrby = Vec::new();
+            zincrby.extend_from_slice(b"*4\r\n$7\r\nZINCRBY\r\n$1\r\nk\r\n$");
+            zincrby.extend_from_slice(arg.len().to_string().as_bytes());
+            zincrby.extend_from_slice(b"\r\n");
+            zincrby.extend_from_slice(arg);
+            zincrby.extend_from_slice(b"\r\n$1\r\nm\r\n");
+            let parsed = crate::parse_borrowed_plain_zincrby_packet(&zincrby, &cfg)
+                .expect("ZINCRBY parser must accept any well-framed increment bulk");
+            assert_eq!(
+                parsed.start, arg,
+                "increment bytes must reach the executor verbatim"
+            );
+        }
+    }
+
+    #[test]
+    fn borrowed_plain_expire_setrange_zincrby_packet_parsers_reject_same_prefix_siblings() {
+        let cfg = ParserConfig::default();
+
+        // EXPIRE joins the six-letter *3 cohort already covered by
+        // frankenredis-7vlrv, frankenredis-pg6jj and frankenredis-5w5kb.
+        for other in [
+            &b"*3\r\n$6\r\nAPPEND\r\n$1\r\nk\r\n$1\r\nv\r\n"[..],
+            &b"*3\r\n$6\r\nGETSET\r\n$1\r\nk\r\n$1\r\nv\r\n"[..],
+            &b"*3\r\n$6\r\nGETBIT\r\n$1\r\nk\r\n$1\r\n0\r\n"[..],
+            &b"*3\r\n$6\r\nINCRBY\r\n$1\r\nk\r\n$1\r\n1\r\n"[..],
+            &b"*3\r\n$6\r\nDECRBY\r\n$1\r\nk\r\n$1\r\n1\r\n"[..],
+        ] {
+            assert!(
+                crate::parse_borrowed_plain_expire_packet(other, &cfg).is_none(),
+                "EXPIRE parser must reject a same-shape sibling command"
+            );
+        }
+        // GETRANGE is the sharp one for SETRANGE: same `*4\r\n$8\r\n` prefix,
+        // same key+arg+arg layout, and a READ where SETRANGE is a WRITE. A
+        // prefix-only match would mutate a string in response to a fetch.
+        assert!(
+            crate::parse_borrowed_plain_setrange_packet(
+                b"*4\r\n$8\r\nGETRANGE\r\n$1\r\nk\r\n$1\r\n0\r\n$2\r\n-1\r\n",
+                &cfg
+            )
+            .is_none(),
+            "SETRANGE parser must reject the same-shape GETRANGE read"
+        );
+        assert!(
+            crate::parse_borrowed_plain_setrange_packet(
+                b"*4\r\n$8\r\nBITCOUNT\r\n$1\r\nk\r\n$1\r\n0\r\n$2\r\n-1\r\n",
+                &cfg
+            )
+            .is_none(),
+            "SETRANGE parser must reject the same-shape ranged BITCOUNT read"
+        );
+        // RESTORE shares ZINCRBY's `*4\r\n$7\r\n` prefix and is a
+        // deserialising WRITE, so a mismatch there would score a member using a
+        // serialised payload as the member name.
+        assert!(
+            crate::parse_borrowed_plain_zincrby_packet(
+                b"*4\r\n$7\r\nRESTORE\r\n$1\r\nk\r\n$1\r\n0\r\n$3\r\npay\r\n",
+                &cfg
+            )
+            .is_none(),
+            "ZINCRBY parser must reject the same-shape RESTORE command"
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_expire_setrange_zincrby_packet_parsers_defer_invalid_shapes_and_limits() {
+        let cfg = ParserConfig::default();
+
+        assert!(
+            crate::parse_borrowed_plain_expire_packet(
+                b"*03\r\n$6\r\nEXPIRE\r\n$1\r\nk\r\n$1\r\n1\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_setrange_packet(
+                b"*4\r\n$08\r\nSETRANGE\r\n$1\r\nk\r\n$1\r\n0\r\n$1\r\nv\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical command bulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_zincrby_packet(
+                b"*4\r\n$7\r\nZINCRBY\r\n$1\r\nk\r\n$1\r\n1\r\n$1\r\nm\r\n",
+                &ParserConfig {
+                    max_array_len: 3,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_setrange_packet(
+                b"*4\r\n$8\r\nSETRANGE\r\n$1\r\nk\r\n$1\r\n0\r\n$1\r\nv\r\n",
+                &ParserConfig {
+                    max_bulk_len: 7,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "command bulk-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_setrange_packet(
+                b"*4\r\n$8\r\nSETRANGE\r\n$1\r\nk\r\n$1\r\n0\r\n$9\r\nvvvvvvvvv\r\n",
+                &ParserConfig {
+                    max_bulk_len: 8,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "value bulk-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_expire_packet(
+                b"*3\r\n$6\r\nEXPIRE\r\n$1\r\nk\r\n$2\r\n1\r\n",
+                &cfg
+            )
+            .is_none(),
+            "malformed trailing bulk bodies stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_zincrby_packet(
+                b"*3\r\n$7\r\nZINCRBY\r\n$1\r\nk\r\n$1\r\n1\r\n",
+                &cfg
+            )
+            .is_none(),
+            "wrong-arity packets stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_setrange_packet(
+                b"*4\r\n$8\r\nSETRANGE\r\n$1\r\nk\r\n$1\r\n0\r\n$1\r\nv\r",
+                &cfg
+            )
+            .is_none(),
+            "truncated packets stay on the generic parser until more bytes arrive"
+        );
+        assert!(
+            crate::parse_borrowed_plain_expire_packet(b"*3\r\n$6\r\nEXP", &cfg).is_none(),
+            "packets truncated inside the command token stay on the generic parser"
+        );
+    }
+
+    #[test]
     fn borrowed_plain_bitcount_packet_parser_accepts_canonical_key_only_bitcount() {
         let input = b"*2\r\n$8\r\nbItCoUnT\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n";
         let parsed = crate::parse_borrowed_plain_bitcount_packet(input, &ParserConfig::default())
