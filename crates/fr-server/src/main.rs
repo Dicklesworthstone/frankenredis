@@ -38890,11 +38890,26 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
 
         let listener = StdTcpListener::bind(("127.0.0.1", 0)).expect("bind primary socket");
         let addr = listener.local_addr().expect("local addr");
+        // The drain below only accumulates into write_buf once it has READ the
+        // GETACK frame, and the output-buffer-limit guard only trips once
+        // write_buf is non-empty. Signal from the writer thread and block on it
+        // here, so the frame is provably in flight before the drain starts.
+        //
+        // This used to rely on a 50ms read timeout being long enough for the
+        // spawned thread to accept and write. That holds when the test runs
+        // alone and fails intermittently under the full suite's default
+        // multi-threaded harness, where drain returns a timeout instead of the
+        // expected InvalidData. (frankenredis-63yad)
+        let (getack_written_tx, getack_written_rx) = std::sync::mpsc::channel::<()>();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept replica");
             stream
                 .write_all(&replica_handshake_frame(&[b"REPLCONF", b"GETACK", b"*"]).to_bytes())
                 .expect("write getack");
+            stream.flush().expect("flush getack");
+            getack_written_tx
+                .send(())
+                .expect("signal that the getack frame was written");
         });
 
         let mut runtime = Runtime::default_strict();
@@ -38902,8 +38917,14 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         // trip (0 would mean unlimited under redis semantics). (frankenredis-8sb0l)
         runtime.server.client_output_buffer_limits.slave.hard = 1;
         let stream = StdTcpStream::connect(addr).expect("connect primary");
+        getack_written_rx
+            .recv()
+            .expect("primary thread must report the getack frame written");
+        // Still bounded so a genuine regression fails fast rather than hanging,
+        // but no longer load-bearing for correctness now that the frame is
+        // known to have been written.
         stream
-            .set_read_timeout(Some(std::time::Duration::from_millis(50)))
+            .set_read_timeout(Some(std::time::Duration::from_secs(30)))
             .expect("set replica stream read timeout");
         let mut connection = ReplicaPrimaryConnection {
             stream,
