@@ -32830,6 +32830,217 @@ mod tests {
     }
 
     #[test]
+    fn borrowed_plain_keyed_values1_packet_parser_maps_every_command_to_its_own_discriminant() {
+        // Nine commands multiplexed onto one shape, distinguished only by the
+        // command token, all of them WRITES. Existing coverage asserted HDEL
+        // and PFADD only, so seven arms could have been mis-mapped silently.
+        //
+        // The confusions this guards are semantic opposites, not type errors:
+        //
+        //   SADD vs SREM     ADD versus REMOVE on the same set, same $4 prefix
+        //   LPUSH vs RPUSH   opposite ends of a list
+        //   HDEL/SREM/ZREM   removals from three different types, all $4
+        //   LPUSH vs LPUSHX  LPUSHX must not create a missing key
+        //
+        // None of these would raise an error a client could observe; they would
+        // just mutate the wrong thing.
+        let cfg = ParserConfig::default();
+
+        for (packet, expected) in [
+            (
+                &b"*3\r\n$5\r\nlPuSh\r\n$1\r\nk\r\n$1\r\nv\r\n"[..],
+                fr_runtime::PlainKeyedValuesCmd::Lpush,
+            ),
+            (
+                &b"*3\r\n$5\r\nrPuSh\r\n$1\r\nk\r\n$1\r\nv\r\n"[..],
+                fr_runtime::PlainKeyedValuesCmd::Rpush,
+            ),
+            (
+                &b"*3\r\n$5\r\npFaDd\r\n$1\r\nk\r\n$1\r\nv\r\n"[..],
+                fr_runtime::PlainKeyedValuesCmd::Pfadd,
+            ),
+            (
+                &b"*3\r\n$4\r\nsAdD\r\n$1\r\nk\r\n$1\r\nv\r\n"[..],
+                fr_runtime::PlainKeyedValuesCmd::Sadd,
+            ),
+            (
+                &b"*3\r\n$4\r\nsReM\r\n$1\r\nk\r\n$1\r\nv\r\n"[..],
+                fr_runtime::PlainKeyedValuesCmd::Srem,
+            ),
+            (
+                &b"*3\r\n$4\r\nhDeL\r\n$1\r\nk\r\n$1\r\nv\r\n"[..],
+                fr_runtime::PlainKeyedValuesCmd::Hdel,
+            ),
+            (
+                &b"*3\r\n$4\r\nzReM\r\n$1\r\nk\r\n$1\r\nv\r\n"[..],
+                fr_runtime::PlainKeyedValuesCmd::Zrem,
+            ),
+            (
+                &b"*3\r\n$6\r\nlPuShX\r\n$1\r\nk\r\n$1\r\nv\r\n"[..],
+                fr_runtime::PlainKeyedValuesCmd::Lpushx,
+            ),
+            (
+                &b"*3\r\n$6\r\nrPuShX\r\n$1\r\nk\r\n$1\r\nv\r\n"[..],
+                fr_runtime::PlainKeyedValuesCmd::Rpushx,
+            ),
+        ] {
+            let (cmd, parsed) = crate::parse_borrowed_plain_keyed_values1_packet(packet, &cfg)
+                .expect("canonical single-value keyed write should parse");
+            assert_eq!(
+                cmd, expected,
+                "the parsed discriminant must match the command on the wire"
+            );
+            assert_eq!(parsed.key, b"k");
+            assert_eq!(parsed.member, b"v");
+            assert_eq!(parsed.consumed, packet.len());
+        }
+    }
+
+    #[test]
+    fn borrowed_plain_keyed_values1_packet_parser_binds_key_before_value() {
+        // Key and value are two same-shaped bulks, so a transposition would
+        // still parse. For a write that means pushing the key name into the
+        // list and using the payload as the key.
+        let cfg = ParserConfig::default();
+
+        let (cmd, parsed) = crate::parse_borrowed_plain_keyed_values1_packet(
+            b"*3\r\n$5\r\nLPUSH\r\n$3\r\nkey\r\n$7\r\npayload\r\n",
+            &cfg,
+        )
+        .expect("LPUSH with distinct bulks should parse");
+        assert_eq!(cmd, fr_runtime::PlainKeyedValuesCmd::Lpush);
+        assert_eq!(
+            parsed.key, b"key",
+            "the first bulk after the command is the key"
+        );
+        assert_eq!(
+            parsed.member, b"payload",
+            "the second bulk after the command is the pushed value"
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_keyed_values1_packet_parser_defers_multi_value_forms() {
+        // Every one of these commands is variadic. The fast path serves exactly
+        // one value, so the arity guard is what keeps a multi-value write off
+        // it — a two-value packet's first three elements are identical to the
+        // single-value form, so serving it would silently drop every value
+        // after the first.
+        let cfg = ParserConfig::default();
+
+        for packet in [
+            &b"*4\r\n$5\r\nLPUSH\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n"[..],
+            &b"*4\r\n$5\r\nRPUSH\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n"[..],
+            &b"*4\r\n$4\r\nSADD\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n"[..],
+            &b"*4\r\n$4\r\nSREM\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n"[..],
+            &b"*4\r\n$4\r\nZREM\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n"[..],
+            &b"*4\r\n$6\r\nLPUSHX\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n"[..],
+        ] {
+            assert!(
+                crate::parse_borrowed_plain_keyed_values1_packet(packet, &cfg).is_none(),
+                "multi-value forms stay on the generic borrowed parser"
+            );
+        }
+    }
+
+    #[test]
+    fn borrowed_plain_keyed_values1_packet_parser_rejects_same_prefix_siblings() {
+        let cfg = ParserConfig::default();
+
+        // Same-shape non-members of this multiplexer. Serving any of them would
+        // turn a read or an unrelated write into a mutation of the named key.
+        for other in [
+            &b"*3\r\n$5\r\nZRANK\r\n$1\r\nk\r\n$1\r\nm\r\n"[..],
+            &b"*3\r\n$5\r\nSETNX\r\n$1\r\nk\r\n$1\r\nv\r\n"[..],
+            &b"*3\r\n$4\r\nHGET\r\n$1\r\nk\r\n$1\r\nf\r\n"[..],
+            &b"*3\r\n$4\r\nLREM\r\n$1\r\nk\r\n$1\r\nv\r\n"[..],
+            &b"*3\r\n$6\r\nGETBIT\r\n$1\r\nk\r\n$1\r\n0\r\n"[..],
+            &b"*3\r\n$6\r\nAPPEND\r\n$1\r\nk\r\n$1\r\nv\r\n"[..],
+            &b"*3\r\n$6\r\nINCRBY\r\n$1\r\nk\r\n$1\r\n1\r\n"[..],
+        ] {
+            assert!(
+                crate::parse_borrowed_plain_keyed_values1_packet(other, &cfg).is_none(),
+                "keyed-values parser must reject a same-shape sibling command"
+            );
+        }
+    }
+
+    #[test]
+    fn borrowed_plain_keyed_values1_packet_parser_defers_invalid_shapes_and_limits() {
+        let cfg = ParserConfig::default();
+
+        assert!(
+            crate::parse_borrowed_plain_keyed_values1_packet(
+                b"*03\r\n$5\r\nLPUSH\r\n$1\r\nk\r\n$1\r\nv\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_keyed_values1_packet(
+                b"*3\r\n$04\r\nSADD\r\n$1\r\nk\r\n$1\r\nv\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical command bulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_keyed_values1_packet(
+                b"*3\r\n$5\r\nLPUSH\r\n$1\r\nk\r\n$1\r\nv\r\n",
+                &ParserConfig {
+                    max_array_len: 2,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_keyed_values1_packet(
+                b"*3\r\n$6\r\nLPUSHX\r\n$1\r\nk\r\n$1\r\nv\r\n",
+                &ParserConfig {
+                    max_bulk_len: 5,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "the six-byte arms must respect the command bulk limit"
+        );
+        assert!(
+            crate::parse_borrowed_plain_keyed_values1_packet(
+                b"*3\r\n$4\r\nSADD\r\n$1\r\nk\r\n$6\r\nvvvvvv\r\n",
+                &ParserConfig {
+                    max_bulk_len: 5,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "value bulk-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_keyed_values1_packet(
+                b"*3\r\n$4\r\nZREM\r\n$1\r\nk\r\n$2\r\nv\r\n",
+                &cfg
+            )
+            .is_none(),
+            "malformed trailing bulk bodies stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_keyed_values1_packet(
+                b"*3\r\n$5\r\nRPUSH\r\n$1\r\nk\r\n$1\r\nv\r",
+                &cfg
+            )
+            .is_none(),
+            "truncated packets stay on the generic parser until more bytes arrive"
+        );
+        assert!(
+            crate::parse_borrowed_plain_keyed_values1_packet(b"*3\r\n$6\r\nRPUS", &cfg).is_none(),
+            "packets truncated inside the command token stay on the generic parser"
+        );
+    }
+
+    #[test]
     fn borrowed_plain_bitcount_packet_parser_accepts_canonical_key_only_bitcount() {
         let input = b"*2\r\n$8\r\nbItCoUnT\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n";
         let parsed = crate::parse_borrowed_plain_bitcount_packet(input, &ParserConfig::default())
