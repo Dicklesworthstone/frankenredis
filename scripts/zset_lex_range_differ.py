@@ -16,7 +16,12 @@ import sys
 
 # all members share score 0 so ordering is purely lexicographic; includes the
 # empty-string member and a shared-prefix pair (b / ba).
-MEMBERS = ["a", "b", "c", "d", "e", "f", "ba", ""]
+# Members share score 0 so ordering is purely lexicographic. Includes the empty
+# member, a shared-prefix pair (b / ba), and two NON-ASCII members so the binary
+# cases below compare against something that actually exists — a lex bound of
+# "[\xff" over an all-ASCII set matches nothing on either engine, which passes
+# while testing nothing. (frankenredis-r9ei8)
+MEMBERS = ["a", "b", "c", "d", "e", "f", "ba", "", "\x00bin", "\xfe", "\xff"]
 
 CASES = [
     ["ZRANGEBYLEX", "z", "-", "+"],
@@ -138,7 +143,10 @@ def _frame_len(buf, i=0):
 def cmd(s, *a):
     o = b"*%d\r\n" % len(a)
     for x in a:
-        x = x if isinstance(x, bytes) else str(x).encode()
+        # latin-1, NOT utf-8: the binary-member cases below name specific bytes
+        # with \xNN escapes, and utf-8 would send 0xff as 0xc3 0xbf — valid
+        # UTF-8 — so the binary cases would test nothing. (frankenredis-r9ei8)
+        x = x if isinstance(x, bytes) else str(x).encode("latin-1")
         o += b"$%d\r\n%s\r\n" % (len(x), x)
     s.sendall(o)
     buf = b""

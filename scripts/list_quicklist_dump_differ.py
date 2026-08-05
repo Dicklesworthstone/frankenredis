@@ -40,14 +40,59 @@ def conn(p):
     return socket.create_connection(("127.0.0.1", p), timeout=8)
 
 
+def _frame_len(buf, i=0):
+    """Byte length of the complete RESP frame at buf[i:], or None if partial."""
+    nl = buf.find(b"\r\n", i)
+    if nl < 0:
+        return None
+    kind, head = buf[i:i + 1], buf[i + 1:nl]
+    if kind in (b"+", b"-", b":", b",", b"#", b"("):
+        return nl + 2 - i
+    if kind == b"$":
+        n = int(head)
+        if n < 0:
+            return nl + 2 - i
+        end = nl + 2 + n + 2
+        return end - i if len(buf) >= end else None
+    if kind in (b"*", b"~", b">", b"%"):
+        n = int(head)
+        if n < 0:
+            return nl + 2 - i
+        if kind == b"%":
+            n *= 2
+        pos = nl + 2
+        for _ in range(n):
+            sub = _frame_len(buf, pos)
+            if sub is None:
+                return None
+            pos += sub
+        return pos - i
+    raise ValueError(f"unrecognised RESP type byte {kind!r}")
+
+
 def cmd(s, *a):
     o = b"*%d\r\n" % len(a)
     for x in a:
-        x = x if isinstance(x, bytes) else str(x).encode()
+        x = x if isinstance(x, bytes) else str(x).encode("latin-1")
         o += b"$%d\r\n%s\r\n" % (len(x), x)
     s.sendall(o)
-    time.sleep(0.05)
-    return s.recv(1 << 20)
+    # This gate DUMPs lists holding 12KiB and 20KiB elements and LRANGEs them
+    # back, so its replies run well past one segment. The previous
+    # sleep-then-single-recv reader truncated them, and dump() slices to the
+    # DECLARED length — so a truncated payload came back SHORT rather than
+    # raising, and the size comparison at the call site then compared two
+    # equally-truncated payloads and passed. (frankenredis-r9ei8)
+    buf = b""
+    while True:
+        try:
+            if buf and _frame_len(buf) is not None:
+                return buf
+        except ValueError:
+            return buf
+        chunk = s.recv(1 << 20)
+        if not chunk:
+            raise OSError("server closed the connection mid-reply")
+        buf += chunk
 
 
 def dump(s, k):
