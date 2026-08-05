@@ -1095,7 +1095,12 @@ fn shared_nothing_heavy_single_key_reads_match_legacy_redis() {
         let l = format!("heavy:list:{i}");
         let h = format!("heavy:hash:{i}");
         let off = format!("{}", i * 3);
-        pipeline.extend_from_slice(&encode_command(&[b"SETRANGE", s.as_bytes(), off.as_bytes(), b"abcdef"]));
+        pipeline.extend_from_slice(&encode_command(&[
+            b"SETRANGE",
+            s.as_bytes(),
+            off.as_bytes(),
+            b"abcdef",
+        ]));
         pipeline.extend_from_slice(&encode_command(&[b"APPEND", s.as_bytes(), b"ZZ"]));
         pipeline.extend_from_slice(&encode_command(&[b"STRLEN", s.as_bytes()]));
         pipeline.extend_from_slice(&encode_command(&[b"GETRANGE", s.as_bytes(), b"0", b"-1"]));
@@ -1114,11 +1119,31 @@ fn shared_nothing_heavy_single_key_reads_match_legacy_redis() {
     for c in [
         vec![b"BITCOUNT".as_slice(), b"heavy:absent".as_slice()],
         vec![b"STRLEN".as_slice(), b"heavy:absent".as_slice()],
-        vec![b"GETRANGE".as_slice(), b"heavy:absent".as_slice(), b"0".as_slice(), b"-1".as_slice()],
-        vec![b"LRANGE".as_slice(), b"heavy:absent".as_slice(), b"0".as_slice(), b"-1".as_slice()],
+        vec![
+            b"GETRANGE".as_slice(),
+            b"heavy:absent".as_slice(),
+            b"0".as_slice(),
+            b"-1".as_slice(),
+        ],
+        vec![
+            b"LRANGE".as_slice(),
+            b"heavy:absent".as_slice(),
+            b"0".as_slice(),
+            b"-1".as_slice(),
+        ],
         vec![b"HGETALL".as_slice(), b"heavy:absent".as_slice()],
-        vec![b"GETRANGE".as_slice(), b"heavy:str:1".as_slice(), b"-3".as_slice(), b"-1".as_slice()],
-        vec![b"LRANGE".as_slice(), b"heavy:list:2".as_slice(), b"-2".as_slice(), b"-1".as_slice()],
+        vec![
+            b"GETRANGE".as_slice(),
+            b"heavy:str:1".as_slice(),
+            b"-3".as_slice(),
+            b"-1".as_slice(),
+        ],
+        vec![
+            b"LRANGE".as_slice(),
+            b"heavy:list:2".as_slice(),
+            b"-2".as_slice(),
+            b"-1".as_slice(),
+        ],
     ] {
         pipeline.extend_from_slice(&encode_command(&c));
         count += 1;
@@ -1175,32 +1200,76 @@ fn shared_nothing_wide_partition_local_families_match_legacy_redis() {
 
         // sorted set: build, then every range/count/rank shape, then trim.
         push(
-            &[b"ZADD", z, b"1", b"a", b"2.5", b"b", b"3", b"c", b"10", b"d"],
+            &[
+                b"ZADD", z, b"1", b"a", b"2.5", b"b", b"3", b"c", b"10", b"d",
+            ],
             &mut pipeline,
             &mut count,
         );
-        push(&[b"ZADD", z, b"GT", b"CH", b"9", b"a"], &mut pipeline, &mut count);
+        push(
+            &[b"ZADD", z, b"GT", b"CH", b"9", b"a"],
+            &mut pipeline,
+            &mut count,
+        );
         push(&[b"ZINCRBY", z, b"1.5", b"b"], &mut pipeline, &mut count);
         push(&[b"ZCARD", z], &mut pipeline, &mut count);
         push(&[b"ZSCORE", z, b"b"], &mut pipeline, &mut count);
-        push(&[b"ZMSCORE", z, b"a", b"absent", b"d"], &mut pipeline, &mut count);
+        push(
+            &[b"ZMSCORE", z, b"a", b"absent", b"d"],
+            &mut pipeline,
+            &mut count,
+        );
         push(&[b"ZCOUNT", z, b"2", b"(10"], &mut pipeline, &mut count);
         push(&[b"ZCOUNT", z, b"-inf", b"+inf"], &mut pipeline, &mut count);
         push(&[b"ZLEXCOUNT", z, b"-", b"+"], &mut pipeline, &mut count);
-        push(&[b"ZRANGE", z, b"0", b"-1", b"WITHSCORES"], &mut pipeline, &mut count);
-        push(&[b"ZRANGE", z, b"(1", b"+inf", b"BYSCORE", b"LIMIT", b"1", b"2"], &mut pipeline, &mut count);
-        push(&[b"ZRANGEBYSCORE", z, b"2", b"+inf", b"WITHSCORES"], &mut pipeline, &mut count);
-        push(&[b"ZREVRANGEBYSCORE", z, b"+inf", b"2"], &mut pipeline, &mut count);
-        push(&[b"ZRANGEBYLEX", z, b"[a", b"(d"], &mut pipeline, &mut count);
-        push(&[b"ZREVRANGEBYLEX", z, b"+", b"-"], &mut pipeline, &mut count);
-        push(&[b"ZREVRANGE", z, b"0", b"1", b"WITHSCORES"], &mut pipeline, &mut count);
+        push(
+            &[b"ZRANGE", z, b"0", b"-1", b"WITHSCORES"],
+            &mut pipeline,
+            &mut count,
+        );
+        push(
+            &[
+                b"ZRANGE", z, b"(1", b"+inf", b"BYSCORE", b"LIMIT", b"1", b"2",
+            ],
+            &mut pipeline,
+            &mut count,
+        );
+        push(
+            &[b"ZRANGEBYSCORE", z, b"2", b"+inf", b"WITHSCORES"],
+            &mut pipeline,
+            &mut count,
+        );
+        push(
+            &[b"ZREVRANGEBYSCORE", z, b"+inf", b"2"],
+            &mut pipeline,
+            &mut count,
+        );
+        push(
+            &[b"ZRANGEBYLEX", z, b"[a", b"(d"],
+            &mut pipeline,
+            &mut count,
+        );
+        push(
+            &[b"ZREVRANGEBYLEX", z, b"+", b"-"],
+            &mut pipeline,
+            &mut count,
+        );
+        push(
+            &[b"ZREVRANGE", z, b"0", b"1", b"WITHSCORES"],
+            &mut pipeline,
+            &mut count,
+        );
         push(&[b"ZRANK", z, b"c"], &mut pipeline, &mut count);
         push(&[b"ZREVRANK", z, b"c"], &mut pipeline, &mut count);
         push(&[b"ZSCAN", z, b"0"], &mut pipeline, &mut count);
         push(&[b"ZPOPMIN", z], &mut pipeline, &mut count);
         push(&[b"ZPOPMAX", z, b"2"], &mut pipeline, &mut count);
         push(&[b"ZREM", z, b"c"], &mut pipeline, &mut count);
-        push(&[b"ZREMRANGEBYSCORE", z, b"-inf", b"+inf"], &mut pipeline, &mut count);
+        push(
+            &[b"ZREMRANGEBYSCORE", z, b"-inf", b"+inf"],
+            &mut pipeline,
+            &mut count,
+        );
         push(&[b"ZCARD", z], &mut pipeline, &mut count);
 
         // bitmap: BITPOS is BITCOUNT's sibling -- O(N) compute, one integer out.
@@ -1209,81 +1278,222 @@ fn shared_nothing_wide_partition_local_families_match_legacy_redis() {
         push(&[b"GETBIT", s, b"7"], &mut pipeline, &mut count);
         push(&[b"GETBIT", s, b"9999"], &mut pipeline, &mut count);
         push(&[b"BITPOS", s, b"1"], &mut pipeline, &mut count);
-        push(&[b"BITPOS", s, b"0", b"0", b"-1"], &mut pipeline, &mut count);
-        push(&[b"BITCOUNT", s, b"0", b"-1", b"BIT"], &mut pipeline, &mut count);
         push(
-            &[b"BITFIELD", s, b"INCRBY", b"u8", b"0", b"5", b"GET", b"u8", b"0"],
+            &[b"BITPOS", s, b"0", b"0", b"-1"],
             &mut pipeline,
             &mut count,
         );
-        push(&[b"BITFIELD_RO", s, b"GET", b"u8", b"0"], &mut pipeline, &mut count);
+        push(
+            &[b"BITCOUNT", s, b"0", b"-1", b"BIT"],
+            &mut pipeline,
+            &mut count,
+        );
+        push(
+            &[
+                b"BITFIELD",
+                s,
+                b"INCRBY",
+                b"u8",
+                b"0",
+                b"5",
+                b"GET",
+                b"u8",
+                b"0",
+            ],
+            &mut pipeline,
+            &mut count,
+        );
+        push(
+            &[b"BITFIELD_RO", s, b"GET", b"u8", b"0"],
+            &mut pipeline,
+            &mut count,
+        );
 
         // string arithmetic and expiry, both single-key.
         push(&[b"SETNX", s, b"nope"], &mut pipeline, &mut count);
-        push(&[b"INCRBY", format!("wide:n:{i}").as_bytes(), b"7"], &mut pipeline, &mut count);
-        push(&[b"INCRBYFLOAT", format!("wide:n:{i}").as_bytes(), b"0.25"], &mut pipeline, &mut count);
-        push(&[b"DECRBY", format!("wide:n:{i}").as_bytes(), b"2"], &mut pipeline, &mut count);
+        push(
+            &[b"INCRBY", format!("wide:n:{i}").as_bytes(), b"7"],
+            &mut pipeline,
+            &mut count,
+        );
+        push(
+            &[b"INCRBYFLOAT", format!("wide:n:{i}").as_bytes(), b"0.25"],
+            &mut pipeline,
+            &mut count,
+        );
+        push(
+            &[b"DECRBY", format!("wide:n:{i}").as_bytes(), b"2"],
+            &mut pipeline,
+            &mut count,
+        );
         push(&[b"EXPIRE", s, b"1000"], &mut pipeline, &mut count);
         push(&[b"TTL", s], &mut pipeline, &mut count);
         push(&[b"PERSIST", s], &mut pipeline, &mut count);
         push(&[b"TTL", s], &mut pipeline, &mut count);
         push(&[b"TYPE", s], &mut pipeline, &mut count);
-        push(&[b"GETDEL", format!("wide:n:{i}").as_bytes()], &mut pipeline, &mut count);
+        push(
+            &[b"GETDEL", format!("wide:n:{i}").as_bytes()],
+            &mut pipeline,
+            &mut count,
+        );
 
         // hash beyond HSET/HGET/HGETALL.
-        push(&[b"HSET", h, b"f1", b"1", b"f2", b"two"], &mut pipeline, &mut count);
-        push(&[b"HMGET", h, b"f1", b"absent", b"f2"], &mut pipeline, &mut count);
+        push(
+            &[b"HSET", h, b"f1", b"1", b"f2", b"two"],
+            &mut pipeline,
+            &mut count,
+        );
+        push(
+            &[b"HMGET", h, b"f1", b"absent", b"f2"],
+            &mut pipeline,
+            &mut count,
+        );
         push(&[b"HINCRBY", h, b"f1", b"4"], &mut pipeline, &mut count);
-        push(&[b"HINCRBYFLOAT", h, b"f1", b"0.5"], &mut pipeline, &mut count);
+        push(
+            &[b"HINCRBYFLOAT", h, b"f1", b"0.5"],
+            &mut pipeline,
+            &mut count,
+        );
         push(&[b"HSTRLEN", h, b"f2"], &mut pipeline, &mut count);
         push(&[b"HEXISTS", h, b"f2"], &mut pipeline, &mut count);
-        push(&[b"HSETNX", h, b"f2", b"ignored"], &mut pipeline, &mut count);
+        push(
+            &[b"HSETNX", h, b"f2", b"ignored"],
+            &mut pipeline,
+            &mut count,
+        );
         push(&[b"HKEYS", h], &mut pipeline, &mut count);
         push(&[b"HVALS", h], &mut pipeline, &mut count);
-        push(&[b"HSCAN", h, b"0", b"COUNT", b"100"], &mut pipeline, &mut count);
+        push(
+            &[b"HSCAN", h, b"0", b"COUNT", b"100"],
+            &mut pipeline,
+            &mut count,
+        );
         push(&[b"HDEL", h, b"f1"], &mut pipeline, &mut count);
 
         // list beyond LPUSH/LPOP/LRANGE/LLEN.
-        push(&[b"RPUSH", l, b"a", b"b", b"c", b"b"], &mut pipeline, &mut count);
+        push(
+            &[b"RPUSH", l, b"a", b"b", b"c", b"b"],
+            &mut pipeline,
+            &mut count,
+        );
         push(&[b"LPOS", l, b"b"], &mut pipeline, &mut count);
-        push(&[b"LPOS", l, b"b", b"RANK", b"-1"], &mut pipeline, &mut count);
-        push(&[b"LPOS", l, b"b", b"COUNT", b"0"], &mut pipeline, &mut count);
+        push(
+            &[b"LPOS", l, b"b", b"RANK", b"-1"],
+            &mut pipeline,
+            &mut count,
+        );
+        push(
+            &[b"LPOS", l, b"b", b"COUNT", b"0"],
+            &mut pipeline,
+            &mut count,
+        );
         push(&[b"LINDEX", l, b"-1"], &mut pipeline, &mut count);
-        push(&[b"LINSERT", l, b"BEFORE", b"c", b"x"], &mut pipeline, &mut count);
+        push(
+            &[b"LINSERT", l, b"BEFORE", b"c", b"x"],
+            &mut pipeline,
+            &mut count,
+        );
         push(&[b"LSET", l, b"0", b"z"], &mut pipeline, &mut count);
         push(&[b"LREM", l, b"1", b"b"], &mut pipeline, &mut count);
         push(&[b"LTRIM", l, b"0", b"2"], &mut pipeline, &mut count);
         push(&[b"RPOP", l, b"2"], &mut pipeline, &mut count);
         push(&[b"LPUSHX", l, b"p"], &mut pipeline, &mut count);
-        push(&[b"RPUSHX", format!("wide:absent:{i}").as_bytes(), b"p"], &mut pipeline, &mut count);
+        push(
+            &[b"RPUSHX", format!("wide:absent:{i}").as_bytes(), b"p"],
+            &mut pipeline,
+            &mut count,
+        );
         push(&[b"LRANGE", l, b"0", b"-1"], &mut pipeline, &mut count);
 
         // set: SSCAN is O(COUNT) compute against a reply the MATCH can empty.
-        push(&[b"SADD", format!("wide:t:{i}").as_bytes(), b"m1", b"m2"], &mut pipeline, &mut count);
-        push(&[b"SSCAN", format!("wide:t:{i}").as_bytes(), b"0", b"MATCH", b"m*"], &mut pipeline, &mut count);
-        push(&[b"SSCAN", format!("wide:t:{i}").as_bytes(), b"0", b"MATCH", b"zz*"], &mut pipeline, &mut count);
+        push(
+            &[b"SADD", format!("wide:t:{i}").as_bytes(), b"m1", b"m2"],
+            &mut pipeline,
+            &mut count,
+        );
+        push(
+            &[
+                b"SSCAN",
+                format!("wide:t:{i}").as_bytes(),
+                b"0",
+                b"MATCH",
+                b"m*",
+            ],
+            &mut pipeline,
+            &mut count,
+        );
+        push(
+            &[
+                b"SSCAN",
+                format!("wide:t:{i}").as_bytes(),
+                b"0",
+                b"MATCH",
+                b"zz*",
+            ],
+            &mut pipeline,
+            &mut count,
+        );
 
         // the variadic key-list commands, at the one key where they are local.
         push(&[b"EXISTS", l], &mut pipeline, &mut count);
         push(&[b"TOUCH", l], &mut pipeline, &mut count);
-        push(&[b"UNLINK", format!("wide:t:{i}").as_bytes()], &mut pipeline, &mut count);
+        push(
+            &[b"UNLINK", format!("wide:t:{i}").as_bytes()],
+            &mut pipeline,
+            &mut count,
+        );
         push(&[b"DEL", l], &mut pipeline, &mut count);
     }
 
     // Wrong-type and absent-key replies, where a fast path and the generic path
     // most often diverge.
     for cmd in [
-        vec![b"ZSCORE".as_slice(), b"wide:absent".as_slice(), b"m".as_slice()],
-        vec![b"ZRANGE".as_slice(), b"wide:absent".as_slice(), b"0".as_slice(), b"-1".as_slice()],
-        vec![b"ZCOUNT".as_slice(), b"wide:absent".as_slice(), b"-inf".as_slice(), b"+inf".as_slice()],
-        vec![b"BITPOS".as_slice(), b"wide:absent".as_slice(), b"1".as_slice()],
-        vec![b"BITPOS".as_slice(), b"wide:absent".as_slice(), b"0".as_slice()],
-        vec![b"LPOS".as_slice(), b"wide:absent".as_slice(), b"x".as_slice()],
-        vec![b"HMGET".as_slice(), b"wide:absent".as_slice(), b"f".as_slice()],
+        vec![
+            b"ZSCORE".as_slice(),
+            b"wide:absent".as_slice(),
+            b"m".as_slice(),
+        ],
+        vec![
+            b"ZRANGE".as_slice(),
+            b"wide:absent".as_slice(),
+            b"0".as_slice(),
+            b"-1".as_slice(),
+        ],
+        vec![
+            b"ZCOUNT".as_slice(),
+            b"wide:absent".as_slice(),
+            b"-inf".as_slice(),
+            b"+inf".as_slice(),
+        ],
+        vec![
+            b"BITPOS".as_slice(),
+            b"wide:absent".as_slice(),
+            b"1".as_slice(),
+        ],
+        vec![
+            b"BITPOS".as_slice(),
+            b"wide:absent".as_slice(),
+            b"0".as_slice(),
+        ],
+        vec![
+            b"LPOS".as_slice(),
+            b"wide:absent".as_slice(),
+            b"x".as_slice(),
+        ],
+        vec![
+            b"HMGET".as_slice(),
+            b"wide:absent".as_slice(),
+            b"f".as_slice(),
+        ],
         vec![b"TTL".as_slice(), b"wide:absent".as_slice()],
         vec![b"TYPE".as_slice(), b"wide:absent".as_slice()],
         // wrong type against a key that exists as a string
-        vec![b"ZADD".as_slice(), b"wide:s:0".as_slice(), b"1".as_slice(), b"m".as_slice()],
+        vec![
+            b"ZADD".as_slice(),
+            b"wide:s:0".as_slice(),
+            b"1".as_slice(),
+            b"m".as_slice(),
+        ],
         vec![b"LPOS".as_slice(), b"wide:s:0".as_slice(), b"x".as_slice()],
         vec![b"HMGET".as_slice(), b"wide:s:0".as_slice(), b"f".as_slice()],
         // arity errors must come from the partition, not from the
