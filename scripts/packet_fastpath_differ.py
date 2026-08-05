@@ -36,7 +36,11 @@ def conn(p):
 def enc(args):
     o = b"*%d\r\n" % len(args)
     for a in args:
-        a = a if isinstance(a, bytes) else str(a).encode()
+        # latin-1, NOT utf-8: this gate stores a non-UTF8 value (SET bk "\xff")
+        # to exercise the byte-prefix fast paths over raw bytes. A bare utf-8
+        # encode turns 0xff into 0xc3 0xbf — VALID UTF-8 — which defeats the
+        # purpose of that fixture. (frankenredis-r9ei8)
+        a = a if isinstance(a, bytes) else str(a).encode("latin-1")
         o += b"$%d\r\n%s\r\n" % (len(a), a)
     return o
 

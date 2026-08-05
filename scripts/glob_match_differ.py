@@ -54,7 +54,12 @@ def conn(p):
 def cmd(s, *a):
     o = b"*%d\r\n" % len(a)
     for x in a:
-        x = x if isinstance(x, bytes) else str(x).encode()
+        # latin-1, NOT utf-8: the keyspace deliberately includes a non-UTF8 key
+        # ("\xff\xfe") to exercise glob matching over raw bytes. A bare utf-8
+        # encode turns 0xff into 0xc3 0xbf — VALID UTF-8 — so the one property
+        # this fixture exists to test would no longer be tested at all.
+        # (frankenredis-r9ei8)
+        x = x if isinstance(x, bytes) else str(x).encode("latin-1")
         o += b"$%d\r\n%s\r\n" % (len(x), x)
     s.sendall(o)
     time.sleep(0.03)
