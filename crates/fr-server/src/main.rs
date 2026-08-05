@@ -33624,6 +33624,199 @@ mod tests {
     }
 
     #[test]
+    fn borrowed_plain_zadd2_packet_parser_binds_both_pairs_in_wire_order() {
+        // Five same-shaped payload bulks (key, s1, m1, s2, m2). A parser that
+        // read them out of order would still parse and still typecheck, and for
+        // a sorted-set write that means scoring the wrong member. Distinct
+        // lengths make the binding observable.
+        let cfg = ParserConfig::default();
+
+        let zadd2 = crate::parse_borrowed_plain_zadd2_packet(
+            b"*6\r\n$4\r\nzAdD\r\n$3\r\nkey\r\n$1\r\n1\r\n$2\r\nm1\r\n$2\r\n22\r\n$3\r\nm22\r\n*1\r\n$4\r\nPING\r\n",
+            &cfg,
+        )
+        .expect("canonical 2-pair ZADD packet should parse");
+        assert_eq!(zadd2.key, b"key");
+        assert_eq!(zadd2.s1, b"1", "second bulk is the first score");
+        assert_eq!(zadd2.m1, b"m1", "third bulk is the first member");
+        assert_eq!(zadd2.s2, b"22", "fourth bulk is the second score");
+        assert_eq!(zadd2.m2, b"m22", "fifth bulk is the second member");
+        assert_eq!(
+            zadd2.consumed,
+            b"*6\r\n$4\r\nzAdD\r\n$3\r\nkey\r\n$1\r\n1\r\n$2\r\nm1\r\n$2\r\n22\r\n$3\r\nm22\r\n"
+                .len()
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_zadd2_packet_parser_defers_option_keywords_in_the_first_score_slot() {
+        // Same reasoning as the single-pair form: `ZADD key NX s m ...` puts an
+        // OPTION where this parser expects the first score, and the option form
+        // belongs to the generic path. Case-insensitive, so the lowercase
+        // spellings are asserted too.
+        let cfg = ParserConfig::default();
+
+        for keyword in [
+            &b"NX"[..],
+            &b"nx"[..],
+            &b"XX"[..],
+            &b"xx"[..],
+            &b"GT"[..],
+            &b"gt"[..],
+            &b"LT"[..],
+            &b"lt"[..],
+            &b"CH"[..],
+            &b"ch"[..],
+            &b"INCR"[..],
+            &b"InCr"[..],
+        ] {
+            let mut packet = Vec::new();
+            packet.extend_from_slice(b"*6\r\n$4\r\nZADD\r\n$1\r\nk\r\n$");
+            packet.extend_from_slice(keyword.len().to_string().as_bytes());
+            packet.extend_from_slice(b"\r\n");
+            packet.extend_from_slice(keyword);
+            packet.extend_from_slice(b"\r\n$2\r\nm1\r\n$1\r\n2\r\n$2\r\nm2\r\n");
+
+            assert!(
+                crate::parse_borrowed_plain_zadd2_packet(&packet, &cfg).is_none(),
+                "an option keyword in the first score slot must stay on the generic parser"
+            );
+        }
+    }
+
+    #[test]
+    fn borrowed_plain_zadd2_packet_parser_guards_only_the_first_score_slot() {
+        // The guard is deliberately asymmetric and that asymmetry is CORRECT,
+        // not an oversight worth "fixing". Redis only recognises ZADD options
+        // before the first score, so once a score/member pair has been
+        // consumed, a later NX is an ordinary score token — invalid as a float,
+        // which the executor reports, exactly as redis does. Serving it here is
+        // therefore right, and narrowing the guard to s1 is what makes the fast
+        // path agree with the generic path about which inputs are errors.
+        //
+        // Members named after keywords are likewise just members.
+        let cfg = ParserConfig::default();
+
+        let later_score_keyword = crate::parse_borrowed_plain_zadd2_packet(
+            b"*6\r\n$4\r\nZADD\r\n$1\r\nk\r\n$1\r\n1\r\n$2\r\nm1\r\n$2\r\nNX\r\n$2\r\nm2\r\n",
+            &cfg,
+        )
+        .expect("a keyword in the SECOND score slot is an ordinary score token");
+        assert_eq!(later_score_keyword.s2, b"NX");
+
+        let keyword_members = crate::parse_borrowed_plain_zadd2_packet(
+            b"*6\r\n$4\r\nZADD\r\n$1\r\nk\r\n$1\r\n1\r\n$2\r\nNX\r\n$1\r\n2\r\n$4\r\nINCR\r\n",
+            &cfg,
+        )
+        .expect("members named like option keywords are still members");
+        assert_eq!(keyword_members.m1, b"NX");
+        assert_eq!(keyword_members.m2, b"INCR");
+    }
+
+    #[test]
+    fn borrowed_plain_zadd2_packet_parser_defers_siblings_shapes_and_limits() {
+        let cfg = ParserConfig::default();
+
+        // HSET with two field/value pairs is byte-identical through
+        // `*6\r\n$4\r\n` — same arity, same five payload bulks, different data
+        // type entirely. A four-member SADD is the same shape again. The
+        // command compare is all that separates a hash or set write from a
+        // sorted-set write.
+        for other in [
+            &b"*6\r\n$4\r\nHSET\r\n$1\r\nk\r\n$2\r\nf1\r\n$2\r\nv1\r\n$2\r\nf2\r\n$2\r\nv2\r\n"[..],
+            &b"*6\r\n$4\r\nSADD\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n"[..],
+            &b"*6\r\n$4\r\nZREM\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n"[..],
+        ] {
+            assert!(
+                crate::parse_borrowed_plain_zadd2_packet(other, &cfg).is_none(),
+                "the 2-pair ZADD parser must reject a same-shape sibling command"
+            );
+        }
+        // Other pair counts belong elsewhere: one pair is the simple form, and
+        // three pairs must reach the generic path rather than being served with
+        // the third pair silently dropped.
+        for packet in [
+            &b"*4\r\n$4\r\nZADD\r\n$1\r\nk\r\n$1\r\n1\r\n$1\r\nm\r\n"[..],
+            &b"*8\r\n$4\r\nZADD\r\n$1\r\nk\r\n$1\r\n1\r\n$2\r\nm1\r\n$1\r\n2\r\n$2\r\nm2\r\n$1\r\n3\r\n$2\r\nm3\r\n"[..],
+        ] {
+            assert!(
+                crate::parse_borrowed_plain_zadd2_packet(packet, &cfg).is_none(),
+                "pair counts other than two stay on their own paths"
+            );
+        }
+
+        assert!(
+            crate::parse_borrowed_plain_zadd2_packet(
+                b"*06\r\n$4\r\nZADD\r\n$1\r\nk\r\n$1\r\n1\r\n$2\r\nm1\r\n$1\r\n2\r\n$2\r\nm2\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_zadd2_packet(
+                b"*6\r\n$04\r\nZADD\r\n$1\r\nk\r\n$1\r\n1\r\n$2\r\nm1\r\n$1\r\n2\r\n$2\r\nm2\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical command bulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_zadd2_packet(
+                b"*6\r\n$4\r\nZADD\r\n$1\r\nk\r\n$1\r\n1\r\n$2\r\nm1\r\n$1\r\n2\r\n$2\r\nm2\r\n",
+                &ParserConfig {
+                    max_array_len: 5,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_zadd2_packet(
+                b"*6\r\n$4\r\nZADD\r\n$1\r\nk\r\n$1\r\n1\r\n$2\r\nm1\r\n$1\r\n2\r\n$2\r\nm2\r\n",
+                &ParserConfig {
+                    max_bulk_len: 3,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "command bulk-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_zadd2_packet(
+                b"*6\r\n$4\r\nZADD\r\n$1\r\nk\r\n$1\r\n1\r\n$2\r\nm1\r\n$1\r\n2\r\n$6\r\nmmmmmm\r\n",
+                &ParserConfig {
+                    max_bulk_len: 5,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "a trailing member over the bulk limit stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_zadd2_packet(
+                b"*6\r\n$4\r\nZADD\r\n$1\r\nk\r\n$1\r\n1\r\n$2\r\nm1\r\n$1\r\n2\r\n$3\r\nm2\r\n",
+                &cfg
+            )
+            .is_none(),
+            "malformed trailing bulk bodies stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_zadd2_packet(
+                b"*6\r\n$4\r\nZADD\r\n$1\r\nk\r\n$1\r\n1\r\n$2\r\nm1\r\n$1\r\n2\r\n",
+                &cfg
+            )
+            .is_none(),
+            "packets missing a declared pair element stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_zadd2_packet(b"*6\r\n$4\r\nZA", &cfg).is_none(),
+            "packets truncated inside the command token stay on the generic parser"
+        );
+    }
+
+    #[test]
     fn borrowed_plain_bitcount_packet_parser_accepts_canonical_key_only_bitcount() {
         let input = b"*2\r\n$8\r\nbItCoUnT\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n";
         let parsed = crate::parse_borrowed_plain_bitcount_packet(input, &ParserConfig::default())
