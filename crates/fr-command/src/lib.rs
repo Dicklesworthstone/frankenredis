@@ -31602,16 +31602,50 @@ mod tests {
 
     #[test]
     fn dispatch_invalid_utf8_command_name_errors_unknown_command() {
-        // (frankenredis-unkcmdname) Upstream does NOT require a command name to
-        // be valid UTF-8: a non-UTF-8 name is reported as "unknown command",
-        // not a UTF-8 error. The name is rendered lossily (RespFrame::Error is a
-        // Rust String) but the error variant matches redis.
+        // (frankenredis-unkcmdname / frankenredis-84u61) Upstream does NOT
+        // require a command name to be valid UTF-8: a non-UTF-8 name is
+        // reported as "unknown command", not a UTF-8 error, and the offending
+        // name is echoed back VERBATIM.
+        //
+        // This used to assert only that the variant was UnknownCommand, with a
+        // note that the name was "rendered lossily (RespFrame::Error is a Rust
+        // String)". That premise is gone: frankenredis-ynlg1 added
+        // RespFrame::ErrorBytes / CommandError::RawError, so the dispatch path
+        // now carries the raw byte to the wire and the old assertion contradicts
+        // the shipped behaviour.
+        //
+        // Asserting the exact bytes is strictly stronger than asserting the
+        // variant — it pins what a client actually receives. The expected string
+        // is taken from a live redis 7.2.4, which replies (trailing space
+        // included, before the CRLF):
+        //   -ERR unknown command '\xff', with args beginning with: 'k'
         let mut store = Store::new();
         let argv = vec![vec![0xFF], b"k".to_vec()];
         let err = dispatch_argv(&argv, &mut store, 0).expect_err("must fail");
+
+        let mut expected = b"ERR unknown command '".to_vec();
+        expected.push(0xFF);
+        expected.extend_from_slice(b"', with args beginning with: 'k' ");
+
+        match &err {
+            super::CommandError::RawError(body) => assert_eq!(
+                body.as_slice(),
+                expected.as_slice(),
+                "unknown-command body must be byte-exact with redis;\n  got      = {:?}\n  expected = {:?}",
+                String::from_utf8_lossy(body),
+                String::from_utf8_lossy(&expected)
+            ),
+            other => panic!("expected RawError carrying the raw name byte, got {other:?}"),
+        }
+
+        // The raw byte must survive, and its UTF-8-widened form must not appear.
+        let super::CommandError::RawError(body) = &err else {
+            unreachable!("checked above")
+        };
+        assert!(body.contains(&0xFF), "raw 0xFF byte was not preserved");
         assert!(
-            matches!(err, super::CommandError::UnknownCommand { .. }),
-            "expected UnknownCommand for a non-UTF-8 command name, got {err:?}"
+            !body.windows(2).any(|w| w == [0xC3, 0xBF]),
+            "name was re-encoded as UTF-8 instead of kept raw"
         );
     }
 
