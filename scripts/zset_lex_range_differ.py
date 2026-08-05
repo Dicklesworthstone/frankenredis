@@ -11,11 +11,10 @@ Compares every form byte-for-byte vs vendored redis 7.2.4.
 Usage: zset_lex_range_differ.py <oracle_port> <fr_port>
        Exit 0 = byte-exact, 1 = divergence.
 """
-import socket
 import sys
 
-# all members share score 0 so ordering is purely lexicographic; includes the
-# empty-string member and a shared-prefix pair (b / ba).
+from _respread import cmd, conn
+
 # Members share score 0 so ordering is purely lexicographic. Includes the empty
 # member, a shared-prefix pair (b / ba), and two NON-ASCII members so the binary
 # cases below compare against something that actually exists — a lex bound of
@@ -96,70 +95,6 @@ WIDE_CASES = [
     ["ZRANGEBYLEX", "wide", "[w0000000000001000", "[w0000000000003000"],
     ["ZRANGE", "wide", "-", "+", "BYLEX", "LIMIT", "1500", "1200"],
 ]
-
-
-def conn(p):
-    return socket.create_connection(("127.0.0.1", p), timeout=5)
-
-
-def _frame_len(buf, i=0):
-    """Byte length of the complete RESP frame at buf[i:], or None if partial.
-
-    Needed because the reply to a wide lex range is far larger than one TCP
-    segment. The original reader slept 20ms and took a single recv(), which
-    silently truncates: a 4000-member ZRANGEBYLEX returns 65536 bytes of a much
-    longer reply. With the old 8-member fixture that never showed, but it made
-    the gate unsafe to widen — and two replies both truncated at the same offset
-    compare EQUAL while differing past it, i.e. a false PASS. (frankenredis-zavq6)
-    """
-    nl = buf.find(b"\r\n", i)
-    if nl < 0:
-        return None
-    kind, head = buf[i:i + 1], buf[i + 1:nl]
-    if kind in (b"+", b"-", b":", b",", b"#", b"("):
-        return nl + 2 - i
-    if kind == b"$":
-        n = int(head)
-        if n < 0:
-            return nl + 2 - i
-        end = nl + 2 + n + 2
-        return end - i if len(buf) >= end else None
-    if kind in (b"*", b"~", b">", b"%"):
-        n = int(head)
-        if n < 0:
-            return nl + 2 - i
-        if kind == b"%":
-            n *= 2
-        pos = nl + 2
-        for _ in range(n):
-            sub = _frame_len(buf, pos)
-            if sub is None:
-                return None
-            pos += sub
-        return pos - i
-    raise ValueError(f"unrecognised RESP type byte {kind!r}")
-
-
-def cmd(s, *a):
-    o = b"*%d\r\n" % len(a)
-    for x in a:
-        # latin-1, NOT utf-8: the binary-member cases below name specific bytes
-        # with \xNN escapes, and utf-8 would send 0xff as 0xc3 0xbf — valid
-        # UTF-8 — so the binary cases would test nothing. (frankenredis-r9ei8)
-        x = x if isinstance(x, bytes) else str(x).encode("latin-1")
-        o += b"$%d\r\n%s\r\n" % (len(x), x)
-    s.sendall(o)
-    buf = b""
-    while True:
-        try:
-            if buf and _frame_len(buf) is not None:
-                return buf
-        except ValueError:
-            return buf
-        chunk = s.recv(1 << 20)
-        if not chunk:
-            raise OSError("server closed the connection mid-reply")
-        buf += chunk
 
 
 def main():

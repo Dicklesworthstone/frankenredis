@@ -14,69 +14,13 @@ byte-exact vs vendored redis 7.2.4.
 Usage: list_mutation_differ.py <oracle_port> <fr_port>
        Exit 0 = byte-exact, 1 = divergence.
 """
-import socket
 import sys
+
+from _respread import cmd, conn
 
 BASE = ["a", "b", "a", "c", "a", "b", "a"]  # a x4, b x2, c x1
 
 
-def conn(p):
-    return socket.create_connection(("127.0.0.1", p), timeout=5)
-
-
-def _frame_len(buf, i=0):
-    """Byte length of the complete RESP frame at buf[i:], or None if partial."""
-    nl = buf.find(b"\r\n", i)
-    if nl < 0:
-        return None
-    kind, head = buf[i:i + 1], buf[i + 1:nl]
-    if kind in (b"+", b"-", b":", b",", b"#", b"("):
-        return nl + 2 - i
-    if kind == b"$":
-        n = int(head)
-        if n < 0:
-            return nl + 2 - i
-        end = nl + 2 + n + 2
-        return end - i if len(buf) >= end else None
-    if kind in (b"*", b"~", b">", b"%"):
-        n = int(head)
-        if n < 0:
-            return nl + 2 - i
-        if kind == b"%":
-            n *= 2
-        pos = nl + 2
-        for _ in range(n):
-            sub = _frame_len(buf, pos)
-            if sub is None:
-                return None
-            pos += sub
-        return pos - i
-    raise ValueError(f"unrecognised RESP type byte {kind!r}")
-
-
-def cmd(s, *a):
-    o = b"*%d\r\n" % len(a)
-    for x in a:
-        # latin-1 so a str escape maps to the single byte it names, and read
-        # until a complete RESP frame is buffered rather than sleeping and
-        # taking whatever arrived. (frankenredis-r9ei8)
-        x = x if isinstance(x, bytes) else str(x).encode("latin-1")
-        o += b"$%d\r\n%s\r\n" % (len(x), x)
-    s.sendall(o)
-    buf = b""
-    while True:
-        try:
-            if buf and _frame_len(buf) is not None:
-                return buf
-        except ValueError:
-            return buf
-        chunk = s.recv(1 << 20)
-        if not chunk:
-            raise OSError("server closed the connection mid-reply")
-        buf += chunk
-
-
-# (label, list-key, reset_items_or_None, command-argv)
 CASES = [
     ("lrem_pos2_a", "l", BASE, ["LREM", "l", "2", "a"]),
     ("lrem_pos_overflow", "l", BASE, ["LREM", "l", "100", "a"]),

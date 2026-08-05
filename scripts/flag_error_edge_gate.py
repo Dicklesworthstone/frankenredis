@@ -26,7 +26,8 @@ Exit 0 if every case matches, 1 on a real divergence.
 """
 import socket
 import sys
-import time
+
+from _respread import cmd
 
 # True redis 7.2.4 COMPILED-IN defaults (config.c create*Config), i.e. what a
 # config-less server reports. Used as the pollution preflight.
@@ -44,64 +45,6 @@ TRUE_DEFAULTS = {
 
 def cli(p):
     return socket.create_connection(("127.0.0.1", p), timeout=3)
-
-
-def _frame_len(buf, i=0):
-    """Byte length of the complete RESP frame at buf[i:], or None if partial."""
-    nl = buf.find(b"\r\n", i)
-    if nl < 0:
-        return None
-    kind, head = buf[i:i + 1], buf[i + 1:nl]
-    if kind in (b"+", b"-", b":", b",", b"#", b"("):
-        return nl + 2 - i
-    if kind == b"$":
-        n = int(head)
-        if n < 0:
-            return nl + 2 - i
-        end = nl + 2 + n + 2
-        return end - i if len(buf) >= end else None
-    if kind in (b"*", b"~", b">", b"%"):
-        n = int(head)
-        if n < 0:
-            return nl + 2 - i
-        if kind == b"%":
-            n *= 2
-        pos = nl + 2
-        for _ in range(n):
-            sub = _frame_len(buf, pos)
-            if sub is None:
-                return None
-            pos += sub
-        return pos - i
-    raise ValueError(f"unrecognised RESP type byte {kind!r}")
-
-
-def cmd(s, *a):
-    o = b"*%d\r\n" % len(a)
-    for x in a:
-        if isinstance(x, str):
-            # latin-1, NOT utf-8: this gate stores a raw-byte fixture
-            # ("\xff\xf0\x00"), and utf-8 would send 0xff as 0xc3 0xbf.
-            # (frankenredis-r9ei8)
-            x = x.encode("latin-1")
-        elif isinstance(x, int):
-            x = str(x).encode()
-        o += b"$%d\r\n%s\r\n" % (len(x), x)
-    s.sendall(o)
-    # Read until a complete RESP frame is buffered: this gate builds 513-field
-    # hashes and 512-member sets, so a readback can exceed one segment and the
-    # old fixed-size recv would silently truncate it. (frankenredis-r9ei8)
-    buf = b""
-    while True:
-        try:
-            if buf and _frame_len(buf) is not None:
-                return buf
-        except ValueError:
-            return buf
-        chunk = s.recv(1 << 20)
-        if not chunk:
-            raise OSError("server closed the connection mid-reply")
-        buf += chunk
 
 
 def config_value(s, name):
