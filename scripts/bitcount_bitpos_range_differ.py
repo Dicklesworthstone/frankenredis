@@ -14,7 +14,6 @@ Usage: bitcount_bitpos_range_differ.py <oracle_port> <fr_port>
 """
 import socket
 import sys
-import time
 
 # (key, raw-byte value) set up before the cases run.
 VALUES = {
@@ -70,14 +69,58 @@ def conn(p):
     return socket.create_connection(("127.0.0.1", p), timeout=5)
 
 
+def _frame_len(buf, i=0):
+    """Byte length of the complete RESP frame at buf[i:], or None if partial."""
+    nl = buf.find(b"\r\n", i)
+    if nl < 0:
+        return None
+    kind, head = buf[i:i + 1], buf[i + 1:nl]
+    if kind in (b"+", b"-", b":", b",", b"#", b"("):
+        return nl + 2 - i
+    if kind == b"$":
+        n = int(head)
+        if n < 0:
+            return nl + 2 - i
+        end = nl + 2 + n + 2
+        return end - i if len(buf) >= end else None
+    if kind in (b"*", b"~", b">", b"%"):
+        n = int(head)
+        if n < 0:
+            return nl + 2 - i
+        if kind == b"%":
+            n *= 2
+        pos = nl + 2
+        for _ in range(n):
+            sub = _frame_len(buf, pos)
+            if sub is None:
+                return None
+            pos += sub
+        return pos - i
+    raise ValueError(f"unrecognised RESP type byte {kind!r}")
+
+
 def cmd(s, *a):
     o = b"*%d\r\n" % len(a)
     for x in a:
-        x = x if isinstance(x, bytes) else str(x).encode()
+        # latin-1, NOT utf-8: these fixtures carry raw bytes written as str
+        # escapes ("\xff"), and utf-8 would re-encode 0xff as 0xc3 0xbf,
+        # silently changing the data under test. (frankenredis-1ftub)
+        x = x if isinstance(x, bytes) else str(x).encode("latin-1")
         o += b"$%d\r\n%s\r\n" % (len(x), x)
     s.sendall(o)
-    time.sleep(0.02)
-    return s.recv(1 << 20)
+    # Read until a complete RESP frame is buffered rather than sleeping and
+    # taking whatever arrived. (frankenredis-r9ei8)
+    buf = b""
+    while True:
+        try:
+            if buf and _frame_len(buf) is not None:
+                return buf
+        except ValueError:
+            return buf
+        chunk = s.recv(1 << 20)
+        if not chunk:
+            raise OSError("server closed the connection mid-reply")
+        buf += chunk
 
 
 def main():
@@ -88,6 +131,35 @@ def main():
         cmd(s, "FLUSHALL")
         for k, v in VALUES.items():
             cmd(s, "SET", k, v)
+            # The fixtures are raw-byte strings written as escapes. Until this
+            # gate was fixed they were encoded as utf-8, which turned "\xff"
+            # into 0xc3 0xbf — so "allff" was c3 bf c3 bf, NOT all-ones, and the
+            # all-0xff BITPOS-0 rule this gate exists to pin was never actually
+            # exercised. Both engines received the same wrong bytes, so it
+            # passed while proving nothing. Assert the stored length matches the
+            # intended byte count so that can never silently return.
+            want = len(v.encode("latin-1"))
+            got = cmd(s, "STRLEN", k)
+            if got != b":%d\r\n" % want:
+                print(
+                    f"SEED CORRUPTED: STRLEN {k} = {got!r}, expected :{want}\\r\\n "
+                    "(raw-byte fixture was re-encoded)"
+                )
+                sys.exit(1)
+
+    # The all-ones fixture must really be all ones, or the special case below is
+    # vacuous. 0xff bytes have no zero bit, so BITPOS(0) with no range must
+    # report the first bit PAST the end, i.e. len*8.
+    allff_bits = len(VALUES["allff"].encode("latin-1")) * 8
+    for s in (od, fr):
+        got = cmd(s, "BITPOS", "allff", "0")
+        if got != b":%d\r\n" % allff_bits:
+            print(
+                f"FIXTURE NOT ALL-ONES: BITPOS allff 0 = {got!r}, expected "
+                f":{allff_bits}\\r\\n"
+            )
+            sys.exit(1)
+
     fails = []
     for argv in CASES:
         ro, rf = cmd(od, *argv), cmd(fr, *argv)
