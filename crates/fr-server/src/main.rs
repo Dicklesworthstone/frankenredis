@@ -32452,6 +32452,217 @@ mod tests {
     }
 
     #[test]
+    fn borrowed_plain_hstrlen_zrank_zrevrank_packet_parsers_accept_canonical_packets() {
+        let cfg = ParserConfig::default();
+
+        let hstrlen = crate::parse_borrowed_plain_hstrlen_packet(
+            b"*3\r\n$7\r\nhStRlEn\r\n$3\r\nkey\r\n$5\r\nfield\r\n*1\r\n$4\r\nPING\r\n",
+            &cfg,
+        )
+        .expect("canonical HSTRLEN packet should parse");
+        assert_eq!(hstrlen.key, b"key");
+        assert_eq!(hstrlen.member, b"field");
+        assert_eq!(
+            hstrlen.consumed,
+            b"*3\r\n$7\r\nhStRlEn\r\n$3\r\nkey\r\n$5\r\nfield\r\n".len()
+        );
+
+        let zrank = crate::parse_borrowed_plain_zrank_packet(
+            b"*3\r\n$5\r\nzRaNk\r\n$1\r\nk\r\n$6\r\nmember\r\n",
+            &cfg,
+        )
+        .expect("canonical ZRANK packet should parse");
+        assert_eq!(zrank.key, b"k");
+        assert_eq!(zrank.member, b"member");
+        assert_eq!(
+            zrank.consumed,
+            b"*3\r\n$5\r\nzRaNk\r\n$1\r\nk\r\n$6\r\nmember\r\n".len()
+        );
+
+        let zrevrank = crate::parse_borrowed_plain_zrevrank_packet(
+            b"*3\r\n$8\r\nzReVrAnK\r\n$1\r\nk\r\n$6\r\nmember\r\n",
+            &cfg,
+        )
+        .expect("canonical ZREVRANK packet should parse");
+        assert_eq!(zrevrank.key, b"k");
+        assert_eq!(zrevrank.member, b"member");
+        assert_eq!(
+            zrevrank.consumed,
+            b"*3\r\n$8\r\nzReVrAnK\r\n$1\r\nk\r\n$6\r\nmember\r\n".len()
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_rank_packet_parsers_defer_the_withscore_form() {
+        // ZRANK/ZREVRANK accept an optional WITHSCORE, which changes the reply
+        // from an integer to a two-element array. These fast paths deliberately
+        // serve only the three-element form; the four-element WITHSCORE form
+        // must reach the generic path that knows about the option.
+        //
+        // Serving it here would not be a parse error — the packet is
+        // well-formed and the first three elements look exactly like a plain
+        // rank request — so the arity guard is the only thing preventing a
+        // WITHSCORE request from being answered with a bare integer.
+        let cfg = ParserConfig::default();
+
+        assert!(
+            crate::parse_borrowed_plain_zrank_packet(
+                b"*4\r\n$5\r\nZRANK\r\n$1\r\nk\r\n$1\r\nm\r\n$9\r\nWITHSCORE\r\n",
+                &cfg
+            )
+            .is_none(),
+            "ZRANK fast path must defer the WITHSCORE form to the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_zrevrank_packet(
+                b"*4\r\n$8\r\nZREVRANK\r\n$1\r\nk\r\n$1\r\nm\r\n$9\r\nWITHSCORE\r\n",
+                &cfg
+            )
+            .is_none(),
+            "ZREVRANK fast path must defer the WITHSCORE form to the generic parser"
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_hstrlen_zrank_zrevrank_packet_parsers_reject_same_prefix_siblings() {
+        let cfg = ParserConfig::default();
+
+        // PUBLISH is the other seven-byte three-element command, so it is
+        // byte-identical to HSTRLEN through `*3\r\n$7\r\n` — and it is not even
+        // a keyspace command, so serving it here would answer a hash field
+        // length to a pub/sub publish.
+        assert!(
+            crate::parse_borrowed_plain_hstrlen_packet(
+                b"*3\r\n$7\r\nPUBLISH\r\n$2\r\nch\r\n$3\r\nmsg\r\n",
+                &cfg
+            )
+            .is_none(),
+            "HSTRLEN parser must reject the same-shape PUBLISH command"
+        );
+        // ZRANK shares `*3\r\n$5\r\n` with the five-letter three-element
+        // WRITES, so a prefix-only match would answer a rank where the client
+        // asked to push or conditionally set.
+        for other in [
+            &b"*3\r\n$5\r\nSETNX\r\n$1\r\nk\r\n$1\r\nv\r\n"[..],
+            &b"*3\r\n$5\r\nLPUSH\r\n$1\r\nk\r\n$1\r\nv\r\n"[..],
+            &b"*3\r\n$5\r\nRPUSH\r\n$1\r\nk\r\n$1\r\nv\r\n"[..],
+        ] {
+            assert!(
+                crate::parse_borrowed_plain_zrank_packet(other, &cfg).is_none(),
+                "ZRANK parser must reject same-shape sibling command"
+            );
+        }
+        // EXPIREAT is the eight-byte three-element WRITE sharing ZREVRANK's
+        // prefix; answering a rank to it would drop a TTL mutation entirely.
+        assert!(
+            crate::parse_borrowed_plain_zrevrank_packet(
+                b"*3\r\n$8\r\nEXPIREAT\r\n$1\r\nk\r\n$10\r\n1700000000\r\n",
+                &cfg
+            )
+            .is_none(),
+            "ZREVRANK parser must reject the same-shape EXPIREAT command"
+        );
+        // The two rank parsers declare different lengths, so the byte prefix
+        // already separates them — assert it rather than assume it.
+        assert!(
+            crate::parse_borrowed_plain_zrank_packet(
+                b"*3\r\n$8\r\nZREVRANK\r\n$1\r\nk\r\n$1\r\nm\r\n",
+                &cfg
+            )
+            .is_none(),
+            "ZRANK parser must reject the longer ZREVRANK command"
+        );
+        assert!(
+            crate::parse_borrowed_plain_zrevrank_packet(
+                b"*3\r\n$5\r\nZRANK\r\n$1\r\nk\r\n$1\r\nm\r\n",
+                &cfg
+            )
+            .is_none(),
+            "ZREVRANK parser must reject the shorter ZRANK command"
+        );
+    }
+
+    #[test]
+    fn borrowed_plain_hstrlen_zrank_zrevrank_packet_parsers_defer_invalid_shapes_and_limits() {
+        let cfg = ParserConfig::default();
+
+        assert!(
+            crate::parse_borrowed_plain_hstrlen_packet(
+                b"*03\r\n$7\r\nHSTRLEN\r\n$1\r\nk\r\n$1\r\nf\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical multibulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_zrank_packet(
+                b"*3\r\n$05\r\nZRANK\r\n$1\r\nk\r\n$1\r\nm\r\n",
+                &cfg
+            )
+            .is_none(),
+            "noncanonical command bulk length stays on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_zrevrank_packet(
+                b"*3\r\n$8\r\nZREVRANK\r\n$1\r\nk\r\n$1\r\nm\r\n",
+                &ParserConfig {
+                    max_array_len: 2,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "array-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hstrlen_packet(
+                b"*3\r\n$7\r\nHSTRLEN\r\n$1\r\nk\r\n$1\r\nf\r\n",
+                &ParserConfig {
+                    max_bulk_len: 6,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "command bulk-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_zrank_packet(
+                b"*3\r\n$5\r\nZRANK\r\n$1\r\nk\r\n$6\r\nmember\r\n",
+                &ParserConfig {
+                    max_bulk_len: 5,
+                    ..ParserConfig::default()
+                },
+            )
+            .is_none(),
+            "member bulk-limit errors stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_zrevrank_packet(
+                b"*3\r\n$8\r\nZREVRANK\r\n$1\r\nk\r\n$2\r\nm\r\n",
+                &cfg
+            )
+            .is_none(),
+            "malformed trailing bulk bodies stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_hstrlen_packet(b"*2\r\n$7\r\nHSTRLEN\r\n$1\r\nk\r\n", &cfg)
+                .is_none(),
+            "wrong-arity packets stay on the generic parser"
+        );
+        assert!(
+            crate::parse_borrowed_plain_zrank_packet(
+                b"*3\r\n$5\r\nZRANK\r\n$1\r\nk\r\n$1\r\nm\r",
+                &cfg
+            )
+            .is_none(),
+            "truncated packets stay on the generic parser until more bytes arrive"
+        );
+        assert!(
+            crate::parse_borrowed_plain_zrevrank_packet(b"*3\r\n$8\r\nZREV", &cfg).is_none(),
+            "packets truncated inside the command token stay on the generic parser"
+        );
+    }
+
+    #[test]
     fn borrowed_plain_bitcount_packet_parser_accepts_canonical_key_only_bitcount() {
         let input = b"*2\r\n$8\r\nbItCoUnT\r\n$3\r\nkey\r\n*1\r\n$4\r\nPING\r\n";
         let parsed = crate::parse_borrowed_plain_bitcount_packet(input, &ParserConfig::default())
