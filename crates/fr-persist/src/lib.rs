@@ -2536,7 +2536,7 @@ fn lzf_compress_with_scratch(
     // htab stores ip+1 (0 = unset). Epoch tags make stale slots read as unset,
     // preserving the zero-initialised C table semantics without clearing 256 KiB
     // on every compression attempt. (frankenredis-gu5nf.27)
-    let generation = scratch.begin_call(HSIZE);
+    let generation = scratch.begin_call(HSIZE, in_len);
 
     let mut ip: usize = 0;
     let mut lit: usize = 0;

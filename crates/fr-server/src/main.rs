@@ -2456,6 +2456,14 @@ fn process_buffered_frames(
     let mut argv_scratch: Vec<Vec<u8>> = Vec::new();
     let mut plain_get_read_gate_cache: Option<bool> = None;
 
+    // (frankenredis-7grsy) Begin a fresh command-timing chain for this batch.
+    // The chained fast-path timer reuses one command's end-instant as the next
+    // command's start-instant only when their global command counters are
+    // adjacent; resetting here guarantees the first command in this batch reads
+    // the clock anew, so an idle gap since the previous batch is never counted
+    // as command-execution time.
+    runtime.reset_command_timing_chain();
+
     loop {
         if conn.closing {
             break;

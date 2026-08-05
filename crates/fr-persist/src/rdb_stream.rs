@@ -318,10 +318,7 @@ fn pack_stream_nodes<F: AsRef<[u8]>, V: AsRef<[u8]>>(
                 count_scratch.clear();
                 encode_listpack_int(&mut count_scratch, i64::try_from(builder.count).ok()?);
                 let master_entry = count_scratch.len() + builder.master_rest_bytes;
-                let lp_bytes = LISTPACK_HEADER_SIZE
-                    + master_entry
-                    + builder.members.len()
-                    + 1; // EOF
+                let lp_bytes = LISTPACK_HEADER_SIZE + master_entry + builder.members.len() + 1; // EOF
                 lp_bytes.saturating_add(totelelen)
                     >= STREAM_NODE_MAX_BYTES.min(STREAM_LISTPACK_MAX_SIZE)
                     || builder.count >= STREAM_NODE_MAX_ENTRIES
