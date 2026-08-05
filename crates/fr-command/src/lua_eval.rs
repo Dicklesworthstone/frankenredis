@@ -13764,6 +13764,39 @@ pub(crate) fn compile_error_line(source: &[u8]) -> String {
     }
 }
 
+/// [`compile_error_line`] with the offending source byte preserved verbatim.
+///
+/// The lexer widens an unexpected byte to a `char` when it builds the
+/// "unexpected symbol near '<X>'" message, because its error type is `String`
+/// and a Rust `String` cannot hold a lone `0xFF`. That widening is
+/// `b as char`, which maps a byte in `0x80..=0xFF` to exactly the scalar
+/// `U+0080..=U+00FF` — so it is losslessly invertible, and this walks the
+/// message applying that inverse: every scalar in that range becomes the single
+/// byte it came from, and everything else is copied unchanged.
+///
+/// Redis embeds the raw offending byte in the reply, so `FUNCTION LOAD` on a
+/// non-UTF8 body must too. Without this the byte is re-encoded as UTF-8
+/// (`0xFF` -> `0xC3 0xBF`) and the reply diverges byte-for-byte from upstream.
+///
+/// Nothing else in these messages can produce a scalar in that range: the
+/// lexer's own wording is ASCII, and any non-ASCII text reaching it arrives as
+/// source bytes through the same `b as char` widening, where the inverse is
+/// equally correct. (frankenredis-7qmmr)
+pub(crate) fn compile_error_line_bytes(source: &[u8]) -> Vec<u8> {
+    let rendered = compile_error_line(source);
+    let mut out = Vec::with_capacity(rendered.len());
+    for ch in rendered.chars() {
+        let code = ch as u32;
+        if (0x80..=0xFF).contains(&code) {
+            out.push(code as u8);
+        } else {
+            let mut buf = [0_u8; 4];
+            out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+        }
+    }
+    out
+}
+
 pub(crate) fn compile_lua_chunk_cached(script: &[u8]) -> Result<Rc<Block>, String> {
     let source = lua_execution_source(script);
     if let Some(cached) =

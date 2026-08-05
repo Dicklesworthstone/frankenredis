@@ -12920,10 +12920,14 @@ fn function_cmd(
             store
                 .function_validate_metadata(&argv[code_idx])
                 .map_err(CommandError::Store)?;
-            return Err(CommandError::Custom(format!(
-                "ERR Error compiling function: user_function:{}",
-                lua_eval::compile_error_line(&argv[code_idx])
-            )));
+            // RawError, not Custom: upstream embeds the offending source byte
+            // verbatim, and a non-UTF8 body makes that byte unrepresentable in
+            // a Rust String. compile_error_line_bytes undoes the lexer's
+            // `b as char` widening so `\xff` stays `\xff` on the wire instead
+            // of being re-encoded as `\xc3\xbf`. (frankenredis-7qmmr)
+            let mut body = b"ERR Error compiling function: user_function:".to_vec();
+            body.extend_from_slice(&lua_eval::compile_error_line_bytes(&argv[code_idx]));
+            return Err(CommandError::RawError(body));
         }
         match store.function_load(&argv[code_idx], replace) {
             Ok(name) => Ok(RespFrame::BulkString(Some(name.into_bytes()))),
