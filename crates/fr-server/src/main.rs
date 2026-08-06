@@ -2752,102 +2752,93 @@ fn execute_shared_nothing_fast_command(
 /// nothing marks it as partial. So they stay fail-closed. (frankenredis-91rts)
 #[derive(Debug, PartialEq, Eq)]
 enum ReactorInfoRequest {
-    /// Every requested section is Keyspace (possibly repeated).
-    KeyspaceOnly,
-    /// Every requested section is Clients (possibly repeated). Served from the
-    /// per-reactor published slots. (frankenredis-zydmi)
-    ClientsOnly,
-    /// Every requested section is Stats (possibly repeated). Served from BOTH
-    /// populations: keyspace counters summed over partitions, connection
-    /// counters from the published reactor slots. (frankenredis-zydmi)
-    StatsOnly,
-    /// Every requested section is Memory (possibly repeated). used_memory sums
-    /// over partitions; RSS is process-wide and taken once, never summed.
-    /// (frankenredis-zydmi)
-    MemoryOnly,
-    /// Every requested section is Persistence (possibly repeated). One additive
-    /// field, `rdb_changes_since_last_save`; the rest are constants here.
-    /// (frankenredis-zydmi)
-    PersistenceOnly,
-    /// Server, CPU or Replication -- sections whose every field is either a
-    /// process-wide fact or identical in every partition, so partition 0's
-    /// rendering IS the server's answer and nothing needs rewriting.
-    /// (frankenredis-zydmi)
+    /// The servable sections this request asks for, already in upstream emission
+    /// order. Bare `INFO` resolves to the full servable set, which is upstream's
+    /// `default` -- that set excludes commandstats and latencystats, so unlike
+    /// `all` it is entirely answerable. (frankenredis-zydmi)
+    Sections(Vec<&'static str>),
+    /// The request names a section this path does not aggregate, or the `all` /
+    /// `everything` forms that imply one. Refused WHOLE: a client asking for a
+    /// section it cannot be given must be told, not quietly handed less.
     ///
-    /// This is a positive finding, not a shortcut. CPU is the case worth naming:
-    /// `used_cpu_sys` / `used_cpu_user` come from `read_cpu_times`, which reads
-    /// `/proc/self/stat` -- the whole PROCESS, which every reactor shares. Summing
-    /// them across partitions would multiply the server's CPU time by the
-    /// partition count, the same class of error that made a summed RSS report
-    /// 162x. Passthrough is the CORRECT rule, and the gate pins it as such.
-    ProcessWideOnly,
-    /// At least one section needs reactor-local state this path does not yet
-    /// publish, or the request is the bare/`all`/`default` form implying such
-    /// sections.
+    /// The unaggregated set is `commandstats` and `latencystats`; see
+    /// `REACTOR_UNAGGREGATED_INFO_SECTIONS` for why each resists merging.
     NotAggregatable,
 }
 
+/// Sections this path can answer for the whole server, in UPSTREAM EMISSION ORDER.
+///
+/// (frankenredis-zydmi) The order is load-bearing: a multi-section reply must
+/// match upstream's fixed sequence, and this list also defines bare `INFO`.
+const REACTOR_SERVABLE_INFO_SECTIONS: &[&str] = &[
+    "server",
+    "clients",
+    "memory",
+    "persistence",
+    "stats",
+    "replication",
+    "cpu",
+    "modules",
+    "errorstats",
+    "cluster",
+    "keyspace",
+];
+
+/// Sections deliberately NOT aggregated, named so the gap stays visible rather
+/// than a partial implementation reading as complete. (frankenredis-zydmi)
+///
+/// `commandstats` is a per-command map whose values are multi-field
+/// (calls/usec/rejected/failed), and `latencystats` is a set of per-command
+/// quantile sketches whose percentiles cannot be recovered by summing. Merging
+/// either needs more than a union-and-add, and neither is attempted.
+///
+/// A request naming one of these is refused WHOLE. `all` and `everything` imply
+/// both, so they are refused too rather than silently downgraded to the servable
+/// subset -- a client asking for everything must not quietly receive less.
+const REACTOR_UNAGGREGATED_INFO_SECTIONS: &[&str] = &["commandstats", "latencystats"];
+
 fn classify_reactor_info_request(args: &[&[u8]]) -> ReactorInfoRequest {
-    // Bare INFO means `default`, which includes Server/Memory/Stats.
+    // Bare INFO is upstream's `default` set, which excludes commandstats and
+    // latencystats -- so unlike `all` it consists entirely of servable sections
+    // and CAN be answered.
     if args.len() < 2 {
+        return ReactorInfoRequest::Sections(REACTOR_SERVABLE_INFO_SECTIONS.to_vec());
+    }
+
+    let mut wanted: Vec<&'static str> = Vec::new();
+    for section in &args[1..] {
+        // Checked explicitly, ahead of the servable lookup, so the list of what
+        // this path does NOT merge does real work rather than sitting in a
+        // comment where it can quietly stop being true.
+        if REACTOR_UNAGGREGATED_INFO_SECTIONS
+            .iter()
+            .any(|unmerged| section.eq_ignore_ascii_case(unmerged.as_bytes()))
+        {
+            return ReactorInfoRequest::NotAggregatable;
+        }
+        let Some(name) = REACTOR_SERVABLE_INFO_SECTIONS
+            .iter()
+            .find(|candidate| section.eq_ignore_ascii_case(candidate.as_bytes()))
+        else {
+            // `all`/`everything`/`default` (which imply the unmerged families)
+            // and any unknown name.
+            return ReactorInfoRequest::NotAggregatable;
+        };
+        if !wanted.contains(name) {
+            wanted.push(name);
+        }
+    }
+    if wanted.is_empty() {
         return ReactorInfoRequest::NotAggregatable;
     }
-    let all_of = |name: &[u8]| args[1..].iter().all(|s| s.eq_ignore_ascii_case(name));
-    // Single-section requests only. A mixed request is refused WHOLE rather than
-    // partially served, so a client never silently loses a section it asked for.
-    if all_of(b"keyspace") {
-        ReactorInfoRequest::KeyspaceOnly
-    } else if all_of(b"clients") {
-        ReactorInfoRequest::ClientsOnly
-    } else if all_of(b"stats") {
-        ReactorInfoRequest::StatsOnly
-    } else if all_of(b"memory") {
-        ReactorInfoRequest::MemoryOnly
-    } else if all_of(b"persistence") {
-        ReactorInfoRequest::PersistenceOnly
-    } else if all_of(b"server") || all_of(b"cpu") || all_of(b"replication") {
-        ReactorInfoRequest::ProcessWideOnly
-    } else {
-        ReactorInfoRequest::NotAggregatable
-    }
-}
-
-/// Render the INFO Clients section from a whole-server view.
-///
-/// (frankenredis-zydmi) `connected_clients` is the SUM over reactors, which is
-/// the entire point: each reactor owns a disjoint set of connections, so the
-/// value any single reactor could report is its own share and never the server's.
-///
-/// `maxclients` is a configuration constant identical in every reactor, so it is
-/// passed through from the answering reactor rather than summed -- summing a
-/// limit would be nonsense. The remaining fields are pinned at the values a
-/// reactor can currently justify: this topology has no cluster bus, no blocking
-/// command support (the blocking family is outside the admission table), and no
-/// per-client buffer watermark tracking, so reporting anything other than 0
-/// would be inventing a number.
-fn render_aggregate_clients_section(connected_clients: u64, maxclients: u64) -> Vec<u8> {
-    use std::fmt::Write as _;
-
-    let mut info = String::from("# Clients\r\n");
-    // Upstream never reports 0 here: the client asking is itself connected. The
-    // reactor publishes its slot once per loop tick, so a connection installed
-    // after the last publish is not yet counted; clamping to at least 1 matches
-    // upstream and keeps that window from ever producing a 0 no live server has.
-    let _ = write!(info, "connected_clients:{}\r\n", connected_clients.max(1));
-    info.push_str("cluster_connections:0\r\n");
-    let _ = write!(info, "maxclients:{maxclients}\r\n");
-    // Field set and ORDER mirror fr-command's own Clients emitter, which is the
-    // form already pinned against 7.2.4. Deliberately NOT emitted here:
-    // pubsub_clients, watching_clients and total_watched_keys are 7.4 additions,
-    // and fr must not implement post-7.2.4 surface.
-    info.push_str("client_recent_max_input_buffer:0\r\n");
-    info.push_str("client_recent_max_output_buffer:0\r\n");
-    info.push_str("blocked_clients:0\r\n");
-    info.push_str("tracking_clients:0\r\n");
-    info.push_str("clients_in_timeout_table:0\r\n");
-    info.push_str("total_blocking_keys:0\r\n");
-    info.push_str("total_blocking_keys_on_nokey:0\r\n");
-    info.into_bytes()
+    // Emit in upstream order regardless of the order the client named them.
+    wanted.sort_by_key(|name| {
+        REACTOR_SERVABLE_INFO_SECTIONS
+            .iter()
+            .position(|candidate| candidate == name)
+            .unwrap_or(usize::MAX)
+    });
+    ReactorInfoRequest::Sections(wanted)
 }
 
 /// The database a shared-nothing connection operates on.
@@ -2920,6 +2911,62 @@ fn resp_bulk_body(reply: &[u8]) -> Option<&[u8]> {
     rest.get(body_start..body_start + len)
 }
 
+/// Replace the body of one `# Header` section in a rendered INFO reply.
+///
+/// (frankenredis-zydmi) Some sections cannot be fixed by rewriting named fields,
+/// because the set of LINES itself differs per partition: INFO Keyspace omits a
+/// database with no keys, and INFO Errorstats omits an error code that never
+/// occurred. Building either from one partition therefore drops whole rows rather
+/// than merely undercounting them, so the section body is regenerated from the
+/// union across partitions and swapped in wholesale.
+///
+/// Leaves the template untouched if the header is absent, so a request that did
+/// not ask for the section is unaffected.
+fn replace_info_section(template: &[u8], header: &str, new_body: &[u8]) -> Vec<u8> {
+    let header_line = format!("{header}\r\n");
+    let Some(start) = template
+        .windows(header_line.len())
+        .position(|w| w == header_line.as_bytes())
+    else {
+        return template.to_vec();
+    };
+    // A section runs to the separator immediately preceding the NEXT header, or
+    // to the end of the reply for the final section.
+    //
+    // Anchoring on the next `\r\n#` rather than on a `\r\n\r\n` blank line is
+    // load-bearing: an EMPTY section's body IS the separator, so a blank-line
+    // search starting after the header immediately runs past the following
+    // header and swallows that whole section. Errorstats is empty whenever no
+    // error has occurred -- the default state -- so the naive version silently
+    // deleted `# Cluster` from every bare INFO reply.
+    let after_header = start + header_line.len();
+    let end = template[after_header..]
+        .windows(3)
+        .position(|w| w == b"\r\n#")
+        .map_or(template.len(), |offset| after_header + offset);
+    let mut out = Vec::with_capacity(template.len());
+    out.extend_from_slice(&template[..start]);
+    out.extend_from_slice(new_body);
+    out.extend_from_slice(&template[end..]);
+    out
+}
+
+/// Render the INFO Errorstats section from the union across partitions.
+///
+/// Sorted by code, matching upstream's ordering, and emitting only codes with a
+/// non-zero count -- both properties of the emitter this replaces.
+fn render_aggregate_errorstats_section(merged: &BTreeMap<String, u64>) -> Vec<u8> {
+    use std::fmt::Write as _;
+
+    let mut info = String::from("# Errorstats\r\n");
+    for (code, count) in merged {
+        if *count > 0 {
+            let _ = write!(info, "errorstat_{code}:count={count}\r\n");
+        }
+    }
+    info.into_bytes()
+}
+
 /// Rewrite named `field:value` lines of an INFO section rendered by one partition.
 ///
 /// (frankenredis-zydmi) The field SET and ORDER come from `template`, which the
@@ -2973,6 +3020,188 @@ fn rewrite_info_fields(template: &[u8], replacements: &[(&str, String)]) -> Vec<
     out
 }
 
+/// Render INFO for the whole server, one or many sections. (frankenredis-zydmi)
+///
+/// THE ORDERING PROBLEM SOLVES ITSELF. The client's own frame is handed to
+/// partition 0's normal dispatcher, so the reply already contains exactly the
+/// requested sections in upstream's fixed sequence, produced by the emitter that
+/// defines that sequence. This path then corrects the VALUES. Re-implementing
+/// section ordering here would be a second copy of upstream's contract, free to
+/// drift from the emitter the single-node server uses.
+///
+/// Corrections come in two shapes:
+///   * named `field:value` rewrites, for scalars that are additive across
+///     partitions or that live in the reactor slots;
+///   * whole-section replacement, for Keyspace and Errorstats, where the set of
+///     LINES differs per partition -- an empty database and an error code that
+///     never occurred are both simply absent -- so building from one partition
+///     drops rows rather than undercounting them.
+///
+/// Everything not named is passthrough, which is correct for process-wide facts
+/// (pid, uptime, RSS, CPU) and for values identical in every partition.
+#[allow(clippy::too_many_arguments)]
+fn render_reactor_info(
+    sections: &[&str],
+    frame: &[u8],
+    partitions: &KeyspacePartitions,
+    reactor_stats: &ReactorStats,
+    maxclients: u64,
+    ts: u64,
+    out: &mut Vec<u8>,
+) {
+    let wants = |name: &str| sections.contains(&name);
+    let reactor = reactor_stats.aggregate();
+
+    let mut guards = partitions.lock_all_partitions_in_index_order();
+
+    // All sums are taken BEFORE the template renders, because rendering executes
+    // a command on partition 0 and would otherwise double-count its own INFO.
+    let mut partition_sums: Vec<(&str, u64)> = guards
+        .first()
+        .map(|p| {
+            p.partition_additive_stats()
+                .iter()
+                .map(|(name, _)| (*name, 0u64))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut used_memory = 0usize;
+    let mut used_memory_peak = 0usize;
+    let mut rdb_changes = 0u64;
+    let mut errorstats: BTreeMap<String, u64> = BTreeMap::new();
+    let database_count = guards.first().map_or(0, |p| p.database_count());
+    let mut per_db = vec![(0usize, 0usize, 0u128); database_count];
+
+    for partition in &guards {
+        if wants("stats") {
+            for (slot, (_, value)) in partition_sums
+                .iter_mut()
+                .zip(partition.partition_additive_stats())
+            {
+                slot.1 += value;
+            }
+        }
+        if wants("memory") {
+            used_memory += partition.partition_used_memory();
+            used_memory_peak += partition.partition_used_memory_peak();
+        }
+        if wants("persistence") {
+            rdb_changes += partition.partition_rdb_changes_since_last_save();
+        }
+        if wants("errorstats") {
+            for (code, count) in partition.partition_errorstats() {
+                *errorstats.entry(code).or_insert(0) += count;
+            }
+        }
+        if wants("keyspace") {
+            for (db, slot) in per_db.iter_mut().enumerate() {
+                let expires = partition.partition_expires_in_db(db);
+                slot.0 += partition.partition_dbsize_in_db(db);
+                slot.1 += expires;
+                slot.2 += u128::from(partition.partition_avg_ttl_in_db(db, ts))
+                    * u128::try_from(expires).unwrap_or(0);
+            }
+        }
+    }
+
+    let template = guards
+        .first_mut()
+        .map(|partition| partition.execute_bytes(frame, ts))
+        .unwrap_or_default();
+    drop(guards);
+
+    let Some(body) = resp_bulk_body(&template) else {
+        // An error reply (e.g. bad arity) has no body; forward it verbatim rather
+        // than inventing sections.
+        out.extend_from_slice(&template);
+        return;
+    };
+
+    let mut replacements: Vec<(&str, String)> = Vec::new();
+    if wants("stats") {
+        replacements.extend(
+            partition_sums
+                .iter()
+                .map(|(name, value)| (*name, value.to_string())),
+        );
+        replacements.extend([
+            (
+                "total_connections_received",
+                reactor.total_connections_received.to_string(),
+            ),
+            ("total_net_input_bytes", reactor.net_input_bytes.to_string()),
+            (
+                "total_net_output_bytes",
+                reactor.net_output_bytes.to_string(),
+            ),
+        ]);
+    }
+    if wants("clients") {
+        // connected_clients sums the reactor slots; maxclients is a LIMIT and is
+        // passed through, since summing it across reactors would report N times
+        // the configured cap.
+        replacements.push((
+            "connected_clients",
+            reactor.connected_clients.max(1).to_string(),
+        ));
+        replacements.push(("maxclients", maxclients.to_string()));
+    }
+    if wants("memory") {
+        // RSS is read ONCE from the template: it is the resident size of the one
+        // process every reactor shares, so summing it would multiply the memory
+        // the machine is actually using by the partition count.
+        let rss = info_field_u64(body, "used_memory_rss").unwrap_or(0);
+        let frag_ratio = if used_memory > 0 {
+            rss as f64 / used_memory as f64
+        } else {
+            1.0
+        };
+        let peak_perc = if used_memory_peak > 0 {
+            (used_memory as f64 / used_memory_peak as f64) * 100.0
+        } else {
+            0.0
+        };
+        replacements.extend([
+            ("used_memory", used_memory.to_string()),
+            (
+                "used_memory_human",
+                fr_command::format_bytes_human(used_memory),
+            ),
+            ("used_memory_peak", used_memory_peak.to_string()),
+            (
+                "used_memory_peak_human",
+                fr_command::format_bytes_human(used_memory_peak),
+            ),
+            ("used_memory_peak_perc", format!("{peak_perc:.2}%")),
+            ("mem_fragmentation_ratio", format!("{frag_ratio:.2}")),
+            (
+                "mem_fragmentation_bytes",
+                (rss as i64 - used_memory as i64).to_string(),
+            ),
+        ]);
+    }
+    if wants("persistence") {
+        replacements.push(("rdb_changes_since_last_save", rdb_changes.to_string()));
+    }
+
+    let mut rendered = rewrite_info_fields(body, &replacements);
+    if wants("errorstats") {
+        rendered = replace_info_section(
+            &rendered,
+            "# Errorstats",
+            &render_aggregate_errorstats_section(&errorstats),
+        );
+    }
+    if wants("keyspace") {
+        rendered = replace_info_section(
+            &rendered,
+            "# Keyspace",
+            &render_aggregate_keyspace_section(&per_db),
+        );
+    }
+    RespFrame::BulkString(Some(rendered)).encode_into(out);
+}
+
 /// Answer a whole-keyspace command from a simultaneous snapshot of every
 /// partition, appending the RESP reply to `out`.
 ///
@@ -3012,197 +3241,18 @@ fn execute_reactor_cross_partition_aggregate(
     }
 
     if name.eq_ignore_ascii_case(b"INFO") {
-        match classify_reactor_info_request(args) {
-            ReactorInfoRequest::ClientsOnly => {
-                // Wait-free: reads the published slots, takes no partition lock
-                // and asks no reactor for anything, so a busy or wedged reactor
-                // cannot delay or block this reply.
-                let stats = reactor_stats.aggregate();
-                RespFrame::BulkString(Some(render_aggregate_clients_section(
-                    stats.connected_clients,
-                    maxclients,
-                )))
-                .encode_into(out);
-                return true;
-            }
-            ReactorInfoRequest::StatsOnly => {
-                let reactor = reactor_stats.aggregate();
-                let mut guards = partitions.lock_all_partitions_in_index_order();
-                // Sum the keyspace-side counters by NAME, so the rule table and
-                // the accessor that supplies it stay in one place.
-                let mut partition_sums: Vec<(&str, u64)> = guards
-                    .first()
-                    .map(|p| {
-                        p.partition_additive_stats()
-                            .iter()
-                            .map(|(name, _)| (*name, 0u64))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                for partition in &guards {
-                    for (slot, (_, value)) in partition_sums
-                        .iter_mut()
-                        .zip(partition.partition_additive_stats())
-                    {
-                        slot.1 += value;
-                    }
-                }
-                // Render the field template from partition 0. This costs the one
-                // command increment upstream also charges for its own INFO, and
-                // it is taken AFTER the sums above so the template's own
-                // total_commands_processed cannot double-count.
-                let template = guards
-                    .first_mut()
-                    .map(|partition| partition.execute_bytes(frame, ts))
-                    .unwrap_or_default();
-                drop(guards);
-                let Some(body) = resp_bulk_body(&template) else {
-                    // The partition answered with an error (e.g. arity); forward
-                    // it verbatim rather than inventing a section.
-                    out.extend_from_slice(&template);
-                    return true;
-                };
-                let mut replacements: Vec<(&str, String)> = partition_sums
-                    .iter()
-                    .map(|(name, value)| (*name, value.to_string()))
-                    .collect();
-                replacements.extend([
-                    (
-                        "total_connections_received",
-                        reactor.total_connections_received.to_string(),
-                    ),
-                    ("total_net_input_bytes", reactor.net_input_bytes.to_string()),
-                    (
-                        "total_net_output_bytes",
-                        reactor.net_output_bytes.to_string(),
-                    ),
-                ]);
-                RespFrame::BulkString(Some(rewrite_info_fields(body, &replacements)))
-                    .encode_into(out);
-                return true;
-            }
-            ReactorInfoRequest::MemoryOnly => {
-                let mut guards = partitions.lock_all_partitions_in_index_order();
-                // SUM: memory attributable to the KEYSPACE, which the topology
-                // splits across partitions. Each partition estimates only its own
-                // share, so any single one is a fraction of the server's usage.
-                let used_memory: usize = guards.iter().map(|p| p.partition_used_memory()).sum();
-                // used_memory_peak is summed as an UPPER BOUND and labelled as
-                // such here rather than silently: each partition's high-water mark
-                // is real, but they need not have occurred at the same instant, so
-                // their sum is >= the true server-wide peak. Tracking an exact
-                // aggregate peak would need a process-wide sampler this path does
-                // not own. The bound is at least self-consistent -- it can never
-                // fall below the summed current usage.
-                let used_memory_peak: usize =
-                    guards.iter().map(|p| p.partition_used_memory_peak()).sum();
-                let template = guards
-                    .first_mut()
-                    .map(|partition| partition.execute_bytes(frame, ts))
-                    .unwrap_or_default();
-                drop(guards);
-                let Some(body) = resp_bulk_body(&template) else {
-                    out.extend_from_slice(&template);
-                    return true;
-                };
-                // RSS is taken ONCE, never summed: it is the resident size of the
-                // single process every reactor shares. Summing it across 32
-                // partitions would report ~32x the memory the machine is actually
-                // using -- a plausible-looking number that is catastrophically
-                // wrong. It therefore stays a passthrough from the template.
-                let rss = info_field_u64(body, "used_memory_rss").unwrap_or(0);
-                // RECOMPUTED, not passed through. These are derived from
-                // used_memory, so leaving the template's copies would leave the
-                // reply self-contradictory: a summed used_memory beside partition
-                // 0's human rendering and partition 0's fragmentation ratio.
-                let frag_ratio = if used_memory > 0 {
-                    rss as f64 / used_memory as f64
-                } else {
-                    1.0
-                };
-                let peak_perc = if used_memory_peak > 0 {
-                    (used_memory as f64 / used_memory_peak as f64) * 100.0
-                } else {
-                    0.0
-                };
-                let replacements: Vec<(&str, String)> = vec![
-                    ("used_memory", used_memory.to_string()),
-                    (
-                        "used_memory_human",
-                        fr_command::format_bytes_human(used_memory),
-                    ),
-                    ("used_memory_peak", used_memory_peak.to_string()),
-                    (
-                        "used_memory_peak_human",
-                        fr_command::format_bytes_human(used_memory_peak),
-                    ),
-                    ("used_memory_peak_perc", format!("{peak_perc:.2}%")),
-                    ("mem_fragmentation_ratio", format!("{frag_ratio:.2}")),
-                    (
-                        "mem_fragmentation_bytes",
-                        (rss as i64 - used_memory as i64).to_string(),
-                    ),
-                ];
-                RespFrame::BulkString(Some(rewrite_info_fields(body, &replacements)))
-                    .encode_into(out);
-                return true;
-            }
-            ReactorInfoRequest::PersistenceOnly => {
-                let mut guards = partitions.lock_all_partitions_in_index_order();
-                let rdb_changes: u64 = guards
-                    .iter()
-                    .map(|p| p.partition_rdb_changes_since_last_save())
-                    .sum();
-                // Sums taken BEFORE the template renders, since rendering runs a
-                // command on partition 0.
-                let template = guards
-                    .first_mut()
-                    .map(|partition| partition.execute_bytes(frame, ts))
-                    .unwrap_or_default();
-                drop(guards);
-                let Some(body) = resp_bulk_body(&template) else {
-                    out.extend_from_slice(&template);
-                    return true;
-                };
-                let replacements = [("rdb_changes_since_last_save", rdb_changes.to_string())];
-                RespFrame::BulkString(Some(rewrite_info_fields(body, &replacements)))
-                    .encode_into(out);
-                return true;
-            }
-            ReactorInfoRequest::ProcessWideOnly => {
-                // NOTHING is rewritten, and that is the rule rather than an
-                // omission -- see ReactorInfoRequest::ProcessWideOnly. Every field
-                // in Server, CPU and Replication is either a process-wide fact
-                // (pid, uptime, CPU time from /proc/self/stat, listener) or is
-                // identical in every partition by construction (version, mode,
-                // tcp_port set on each partition at startup, role master with no
-                // replicas). Summing any of them would multiply a server-wide
-                // truth by the partition count.
-                let reply = partitions.lock_partition(0).execute_bytes(frame, ts);
-                out.extend_from_slice(&reply);
-                return true;
-            }
-            ReactorInfoRequest::NotAggregatable => return false,
-            ReactorInfoRequest::KeyspaceOnly => {}
-        }
-        let guards = partitions.lock_all_partitions_in_index_order();
-        // Database count is fixed at construction and identical in every
-        // partition, so partition 0 is authoritative for the loop bound.
-        let database_count = guards
-            .first()
-            .map_or(0, |partition| partition.database_count());
-        let mut per_db = vec![(0usize, 0usize, 0u128); database_count];
-        for partition in &guards {
-            for (db, slot) in per_db.iter_mut().enumerate() {
-                let expires = partition.partition_expires_in_db(db);
-                slot.0 += partition.partition_dbsize_in_db(db);
-                slot.1 += expires;
-                slot.2 += u128::from(partition.partition_avg_ttl_in_db(db, ts))
-                    * u128::try_from(expires).unwrap_or(0);
-            }
-        }
-        drop(guards);
-        RespFrame::BulkString(Some(render_aggregate_keyspace_section(&per_db))).encode_into(out);
+        let ReactorInfoRequest::Sections(sections) = classify_reactor_info_request(args) else {
+            return false;
+        };
+        render_reactor_info(
+            &sections,
+            frame,
+            partitions,
+            reactor_stats,
+            maxclients,
+            ts,
+            out,
+        );
         return true;
     }
 
@@ -30327,82 +30377,82 @@ mod tests {
     /// other reactor can read. A classifier that accepted the bare form would
     /// emit a full-looking INFO describing one reactor.
     #[test]
-    fn info_aggregate_accepts_only_the_keyspace_section() {
+    fn info_aggregate_serves_every_section_except_the_unmerged_families() {
         use crate::ReactorInfoRequest;
 
-        assert_eq!(
-            crate::classify_reactor_info_request(&[b"INFO", b"keyspace"]),
-            ReactorInfoRequest::KeyspaceOnly
-        );
-        assert_eq!(
-            crate::classify_reactor_info_request(&[b"INFO", b"KeySpace"]),
-            ReactorInfoRequest::KeyspaceOnly,
-            "section names are case-insensitive"
-        );
-        assert_eq!(
-            crate::classify_reactor_info_request(&[b"INFO", b"keyspace", b"keyspace"]),
-            ReactorInfoRequest::KeyspaceOnly,
-            "a repeated section is still only that section"
-        );
+        let classify = |args: &[&[u8]]| crate::classify_reactor_info_request(args);
+        let sections = |request: &[&[u8]]| match classify(request) {
+            ReactorInfoRequest::Sections(s) => s,
+            other => panic!("{request:?} should be servable, got {other:?}"),
+        };
 
-        // (frankenredis-zydmi) Clients is now served from the per-reactor
-        // published slots, and Stats from both populations merged.
+        // Single sections, case-insensitive and repetition-tolerant.
+        assert_eq!(sections(&[b"INFO", b"keyspace"]), vec!["keyspace"]);
         assert_eq!(
-            crate::classify_reactor_info_request(&[b"INFO", b"clients"]),
-            ReactorInfoRequest::ClientsOnly
+            sections(&[b"INFO", b"CLIENTS", b"clients"]),
+            vec!["clients"]
         );
-        assert_eq!(
-            crate::classify_reactor_info_request(&[b"INFO", b"stats"]),
-            ReactorInfoRequest::StatsOnly
-        );
-        assert_eq!(
-            crate::classify_reactor_info_request(&[b"INFO", b"Stats", b"STATS"]),
-            ReactorInfoRequest::StatsOnly,
-            "case-insensitive and repetition-tolerant"
-        );
-        assert_eq!(
-            crate::classify_reactor_info_request(&[b"INFO", b"memory"]),
-            ReactorInfoRequest::MemoryOnly
-        );
-        assert_eq!(
-            crate::classify_reactor_info_request(&[b"INFO", b"persistence"]),
-            ReactorInfoRequest::PersistenceOnly
-        );
-        // Server, CPU and Replication share one classification because every
-        // field in them is process-wide or identical per partition. CPU is the
-        // one that matters: /proc/self/stat describes the whole process, so
-        // summing it would multiply the server's CPU time by the partition count.
-        for section in [b"server".as_slice(), b"cpu", b"replication"] {
-            assert_eq!(
-                crate::classify_reactor_info_request(&[b"INFO", section]),
-                ReactorInfoRequest::ProcessWideOnly,
-                "{section:?} is answered from one partition, never summed"
-            );
+        assert_eq!(sections(&[b"INFO", b"Stats"]), vec!["stats"]);
+        assert_eq!(sections(&[b"INFO", b"memory"]), vec!["memory"]);
+        assert_eq!(sections(&[b"INFO", b"persistence"]), vec!["persistence"]);
+        for name in [
+            b"server".as_slice(),
+            b"cpu",
+            b"replication",
+            b"modules",
+            b"cluster",
+        ] {
+            assert_eq!(sections(&[b"INFO", name]).len(), 1, "{name:?}");
         }
+
+        // Multi-section requests are served, and emitted in UPSTREAM order no
+        // matter how the client ordered them -- a client parsing positionally
+        // would otherwise read the wrong section.
         assert_eq!(
-            crate::classify_reactor_info_request(&[b"INFO", b"CLIENTS", b"clients"]),
-            ReactorInfoRequest::ClientsOnly,
-            "case-insensitive and repetition-tolerant, like the keyspace form"
+            sections(&[b"INFO", b"keyspace", b"server"]),
+            vec!["server", "keyspace"],
+            "sections must come back in upstream emission order"
+        );
+        assert_eq!(
+            sections(&[b"INFO", b"stats", b"clients", b"memory"]),
+            vec!["clients", "memory", "stats"]
         );
 
+        // Bare INFO is upstream's `default`, which excludes the unmerged
+        // families, so it IS servable -- the whole point of this change.
+        assert_eq!(
+            sections(&[b"INFO"]),
+            crate::REACTOR_SERVABLE_INFO_SECTIONS.to_vec(),
+            "bare INFO must serve the full default set"
+        );
+
+        // The gap stays visible. commandstats and latencystats are not merged, and
+        // `all`/`everything` imply both, so all three are refused WHOLE rather
+        // than silently downgraded to the servable subset.
         for request in [
-            [b"INFO".as_slice()].as_slice(),
-            &[b"INFO", b"all"],
+            [b"INFO".as_slice(), b"all"].as_slice(),
             &[b"INFO", b"everything"],
-            &[b"INFO", b"default"],
-            // Mixed requests must be refused whole: emitting only the half we
-            // can aggregate would silently drop sections the client asked for.
-            // That holds for two AGGREGATABLE sections too -- keyspace+clients
-            // is still a two-section reply this path does not assemble.
-            &[b"INFO", b"keyspace", b"stats"],
-            &[b"INFO", b"stats", b"keyspace"],
-            &[b"INFO", b"keyspace", b"clients"],
-            &[b"INFO", b"clients", b"keyspace"],
+            &[b"INFO", b"commandstats"],
+            &[b"INFO", b"latencystats"],
+            // A mixed request containing one unmerged section is refused whole,
+            // even though every other section in it is servable.
+            &[b"INFO", b"server", b"commandstats"],
+            &[b"INFO", b"keyspace", b"latencystats"],
+            &[b"INFO", b"nosuchsection"],
         ] {
             assert_eq!(
-                crate::classify_reactor_info_request(request),
+                classify(request),
                 ReactorInfoRequest::NotAggregatable,
-                "{request:?} needs reactor-local state and must stay fail-closed"
+                "{request:?} names a section this path does not aggregate"
+            );
+        }
+
+        // The two lists must not overlap, or a section would be both claimed and
+        // disclaimed.
+        for unmerged in crate::REACTOR_UNAGGREGATED_INFO_SECTIONS {
+            assert!(
+                !crate::REACTOR_SERVABLE_INFO_SECTIONS.contains(unmerged),
+                "{unmerged} is listed as both servable and unaggregated"
             );
         }
     }
@@ -30520,56 +30570,6 @@ mod tests {
             },
         );
         assert_eq!(silent.aggregate().connected_clients, 4);
-    }
-
-    /// The Clients section must carry the 7.2.4 field set in upstream order, and
-    /// must NOT carry the 7.4 additions.
-    #[test]
-    fn aggregate_clients_section_matches_upstream_shape() {
-        let rendered = crate::render_aggregate_clients_section(9, 10_000);
-        let text = String::from_utf8(rendered).expect("utf8");
-
-        assert!(text.starts_with("# Clients\r\n"));
-        assert!(
-            text.contains("connected_clients:9\r\n"),
-            "the SUM over reactors is reported, not one reactor's share: {text}"
-        );
-        assert!(text.contains("maxclients:10000\r\n"), "{text}");
-
-        let fields: Vec<&str> = text
-            .lines()
-            .filter(|line| line.contains(':'))
-            .map(|line| line.split(':').next().unwrap_or_default())
-            .collect();
-        assert_eq!(
-            fields,
-            vec![
-                "connected_clients",
-                "cluster_connections",
-                "maxclients",
-                "client_recent_max_input_buffer",
-                "client_recent_max_output_buffer",
-                "blocked_clients",
-                "tracking_clients",
-                "clients_in_timeout_table",
-                "total_blocking_keys",
-                "total_blocking_keys_on_nokey",
-            ],
-            "field set and order must match the 7.2.4 form fr-command already emits"
-        );
-        for post_724 in ["pubsub_clients", "watching_clients", "total_watched_keys"] {
-            assert!(
-                !text.contains(post_724),
-                "{post_724} is a 7.4 field; fr must not implement post-7.2.4 surface"
-            );
-        }
-
-        // Upstream never reports zero: the client asking is itself connected. A
-        // connection installed after the owning reactor's last publish would
-        // otherwise surface as a 0 no live server ever returns.
-        let empty =
-            String::from_utf8(crate::render_aggregate_clients_section(0, 10_000)).expect("utf8");
-        assert!(empty.contains("connected_clients:1\r\n"), "{empty}");
     }
 
     /// The weighted mean is what makes the aggregate exact rather than

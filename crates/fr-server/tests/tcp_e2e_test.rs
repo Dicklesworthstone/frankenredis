@@ -1892,10 +1892,12 @@ fn sharded_dbsize_and_info_keyspace_aggregate_every_partition() {
     // per-reactor connection counters, so it is served rather than refused, and
     // its own gate is sharded_info_clients_aggregates_every_reactor.
     let mut refused = Vec::new();
-    refused.extend_from_slice(&encode_command(&[b"INFO"]));
     refused.extend_from_slice(&encode_command(&[b"INFO", b"all"]));
+    refused.extend_from_slice(&encode_command(&[b"INFO", b"everything"]));
     refused.extend_from_slice(&encode_command(&[b"INFO", b"commandstats"]));
-    refused.extend_from_slice(&encode_command(&[b"INFO", b"keyspace", b"stats"]));
+    // A mixed request is refused WHOLE when ANY member is unmerged, even though
+    // keyspace on its own is served.
+    refused.extend_from_slice(&encode_command(&[b"INFO", b"keyspace", b"latencystats"]));
     fr.write_all(&refused);
     for response in fr.read_responses(4) {
         assert!(
@@ -2522,11 +2524,11 @@ fn sharded_info_server_cpu_persistence_replication_are_not_multiplied() {
     }
 
     // The bare/all forms still refuse: this path serves single sections only, and
-    // assembling a multi-section reply is a separate contract.
+    // and a request is refused WHOLE if ANY section in it is unmerged.
     let mut refused = Vec::new();
-    refused.extend_from_slice(&encode_command(&[b"INFO"]));
     refused.extend_from_slice(&encode_command(&[b"INFO", b"all"]));
-    refused.extend_from_slice(&encode_command(&[b"INFO", b"server", b"cpu"]));
+    refused.extend_from_slice(&encode_command(&[b"INFO", b"everything"]));
+    refused.extend_from_slice(&encode_command(&[b"INFO", b"server", b"commandstats"]));
     fr.write_all(&refused);
     for response in fr.read_responses(3) {
         assert!(
@@ -2534,6 +2536,125 @@ fn sharded_info_server_cpu_persistence_replication_are_not_multiplied() {
             "multi-section INFO must still fail closed: {response:?}"
         );
     }
+}
+
+/// Bare `INFO` and multi-section requests must assemble correctly-aggregated
+/// sections in upstream's fixed order. (frankenredis-zydmi)
+///
+/// The two things that can go wrong are ORDER and CONTENT, and they need separate
+/// checks: a reply can carry every section in the wrong sequence (breaking any
+/// client that parses positionally), or the right sequence with a section built
+/// from one partition. Both are pinned here, plus the boundary -- `all` and
+/// `everything` stay refused because commandstats and latencystats are not merged.
+#[test]
+fn sharded_info_assembles_multiple_sections_in_upstream_order() {
+    const WORKERS: usize = 8;
+    const KEYS: usize = 40;
+
+    let fr_port = reserve_port();
+    let redis_port = reserve_port();
+    let _fr_server = spawn_frankenredis_sharded_set_get(fr_port, WORKERS);
+    let _redis_server = spawn_legacy_redis(redis_port);
+    let mut fr = BufferedTcpClient::connect(fr_port);
+    let mut redis = BufferedTcpClient::connect(redis_port);
+
+    // Scatter keys so Keyspace has something only an aggregate can get right.
+    let keys: Vec<Vec<u8>> = (0..KEYS)
+        .map(|i| format!("multi:key:{i}").into_bytes())
+        .collect();
+    let workers_reached: std::collections::HashSet<usize> = keys
+        .iter()
+        .map(|key| usize::from(fr_store::crc16_slot(key)) % WORKERS)
+        .collect();
+    assert_eq!(
+        workers_reached.len(),
+        WORKERS,
+        "fixtures must span reactors"
+    );
+    let mut work = Vec::new();
+    for key in &keys {
+        work.extend_from_slice(&encode_command(&[b"SET".as_slice(), key, b"v".as_slice()]));
+    }
+    fr.write_all(&work);
+    let _ = fr.read_responses(KEYS);
+    redis.write_all(&work);
+    let _ = redis.read_responses(KEYS);
+
+    // Bare INFO: upstream's default set. Section HEADERS and their order must
+    // match Redis exactly.
+    let bare = encode_command(&[b"INFO"]);
+    fr.write_all(&bare);
+    redis.write_all(&bare);
+    let fr_reply = fr.read_response();
+    let fr_headers = info_section_headers(&fr_reply);
+    let redis_headers = info_section_headers(&redis.read_response());
+    assert_eq!(
+        fr_headers, redis_headers,
+        "bare INFO must emit the same sections, in the same order, as Redis 7.2.4"
+    );
+    assert!(
+        fr_headers.len() > 5,
+        "bare INFO should carry the whole default set, got {fr_headers:?}"
+    );
+
+    // CONTENT: the Keyspace section inside that multi-section reply must be the
+    // AGGREGATE, not partition 0's share. This is the assertion that separates
+    // "assembled the sections" from "assembled them correctly".
+    let keyspace = parse_db0_keyspace_line(&fr_reply).expect("db0 present in bare INFO");
+    assert_eq!(
+        keyspace.0, KEYS as u64,
+        "the Keyspace section inside a multi-section INFO must sum every partition"
+    );
+    // Same for a Stats counter, which comes from a different aggregation path.
+    let commands = parse_info_u64(&fr_reply, "total_commands_processed");
+    assert!(
+        commands >= KEYS as u64,
+        "the Stats section inside a multi-section INFO must sum every partition, got {commands}"
+    );
+
+    // Explicit multi-section request, deliberately given OUT of upstream order:
+    // the reply must still come back in upstream order.
+    let scrambled = encode_command(&[b"INFO", b"keyspace", b"clients", b"server"]);
+    fr.write_all(&scrambled);
+    let scrambled_headers = info_section_headers(&fr.read_response());
+    assert_eq!(
+        scrambled_headers,
+        vec![
+            "# Server".to_string(),
+            "# Clients".to_string(),
+            "# Keyspace".to_string()
+        ],
+        "sections must be emitted in upstream order regardless of request order"
+    );
+
+    // The boundary stays visible: the unmerged families are refused, and so is a
+    // mixed request that names one, even though its other sections are servable.
+    let mut refused = Vec::new();
+    refused.extend_from_slice(&encode_command(&[b"INFO", b"all"]));
+    refused.extend_from_slice(&encode_command(&[b"INFO", b"everything"]));
+    refused.extend_from_slice(&encode_command(&[b"INFO", b"commandstats"]));
+    refused.extend_from_slice(&encode_command(&[b"INFO", b"latencystats"]));
+    refused.extend_from_slice(&encode_command(&[b"INFO", b"server", b"commandstats"]));
+    fr.write_all(&refused);
+    for response in fr.read_responses(5) {
+        assert!(
+            matches!(response, RespFrame::Error(ref e) if e.contains("not supported")),
+            "unmerged sections must stay refused rather than silently omitted: {response:?}"
+        );
+    }
+}
+
+/// Section headers (`# Server`, ...) of an INFO reply, in emission order.
+fn info_section_headers(frame: &RespFrame) -> Vec<String> {
+    let body = match frame {
+        RespFrame::BulkString(Some(bytes)) => String::from_utf8_lossy(bytes).into_owned(),
+        RespFrame::Verbatim(text) => text.clone(),
+        other => panic!("INFO must reply with a bulk string, got {other:?}"),
+    };
+    body.lines()
+        .filter(|line| line.starts_with('#'))
+        .map(|line| line.trim_end().to_string())
+        .collect()
 }
 
 /// Pull a single `field:<float>` out of an INFO section reply.
@@ -2699,10 +2820,10 @@ fn sharded_info_clients_aggregates_every_reactor() {
     // stats` is deliberately absent from this list now that it is served; its own
     // gate is sharded_info_stats_merges_partition_and_reactor_counters.
     let mut refused = Vec::new();
-    refused.extend_from_slice(&encode_command(&[b"INFO"]));
+    refused.extend_from_slice(&encode_command(&[b"INFO", b"all"]));
     refused.extend_from_slice(&encode_command(&[b"INFO", b"commandstats"]));
-    refused.extend_from_slice(&encode_command(&[b"INFO", b"errorstats"]));
-    refused.extend_from_slice(&encode_command(&[b"INFO", b"clients", b"keyspace"]));
+    refused.extend_from_slice(&encode_command(&[b"INFO", b"latencystats"]));
+    refused.extend_from_slice(&encode_command(&[b"INFO", b"clients", b"commandstats"]));
     fr.write_all(&refused);
     for response in fr.read_responses(4) {
         assert!(

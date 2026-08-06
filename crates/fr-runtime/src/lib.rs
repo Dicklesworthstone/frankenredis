@@ -7187,6 +7187,24 @@ impl Runtime {
         ]
     }
 
+    /// Per-error-code counts for THIS partition, non-zero entries only.
+    ///
+    /// (frankenredis-zydmi) Aggregating these is a UNION merge, not a field
+    /// rewrite: a code that occurred only on partition 7 is absent from partition
+    /// 0's rendering entirely, so building the section from any single partition
+    /// would drop error classes rather than merely undercount them. Same shape as
+    /// the INFO Keyspace db-line case.
+    #[must_use]
+    pub fn partition_errorstats(&self) -> Vec<(String, u64)> {
+        self.server
+            .store
+            .errorstats_per_type
+            .iter()
+            .filter(|(_, count)| **count > 0)
+            .map(|(code, count)| (code.clone(), *count))
+            .collect()
+    }
+
     /// Keyspace mutations in THIS partition since its last save.
     ///
     /// (frankenredis-zydmi) Additive: it counts writes to this partition's own
