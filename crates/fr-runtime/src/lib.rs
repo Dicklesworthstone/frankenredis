@@ -5916,6 +5916,19 @@ impl Runtime {
         self.server.store.server_port = port;
     }
 
+    /// Turn cluster mode on at boot.
+    ///
+    /// (frankenredis-inuwt) BOOT-ONLY by design, mirroring upstream: `CONFIG SET
+    /// cluster-enabled` is already refused as a boot-only parameter, so the
+    /// startup config file is the only thing that may call this. Before it
+    /// existed, `store.cluster_enabled` was assigned only inside `#[test]`
+    /// blocks, which meant every cluster-mode command branch was unreachable
+    /// over the wire and a server configured with `cluster-enabled yes` came up
+    /// silently in non-cluster mode.
+    pub fn set_cluster_enabled(&mut self, enabled: bool) {
+        self.server.store.cluster_enabled = enabled;
+    }
+
     /// Number of logical databases this runtime tracks. Fixed at construction,
     /// so it is identical across every partition of a sharded keyspace and a
     /// cross-partition aggregate may read it from any one of them.

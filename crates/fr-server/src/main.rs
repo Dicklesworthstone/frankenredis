@@ -3506,6 +3506,15 @@ struct StartupConfig {
     appendfilename: Option<String>,
     aclfile: Option<String>,
     enable_debug_command: Option<String>,
+    /// (frankenredis-inuwt) `cluster-enabled` was parsed into the config map and
+    /// then dropped on the floor: nothing ever reached `store.cluster_enabled`,
+    /// so a server started with `cluster-enabled yes` silently came up in
+    /// non-cluster mode and answered every CLUSTER command with "This instance
+    /// has cluster support disabled". Redis would have started in cluster mode,
+    /// so the divergence was a SILENT one -- the worst kind, because the
+    /// operator gets a different server than the one they configured with no
+    /// error to notice.
+    cluster_enabled: Option<bool>,
 }
 
 impl StartupConfig {
@@ -3606,6 +3615,10 @@ fn startup_config_from_directives(
             b"appendonly" => {
                 expect_config_arg_count(directive, 1)?;
                 config.appendonly = Some(config_arg_bool(directive, 0)?);
+            }
+            b"cluster-enabled" => {
+                expect_config_arg_count(directive, 1)?;
+                config.cluster_enabled = Some(config_arg_bool(directive, 0)?);
             }
             b"appenddirname" => {
                 expect_config_arg_count(directive, 1)?;
@@ -3939,6 +3952,7 @@ fn main() -> ExitCode {
     let mut requirepass = None;
     let mut aclfile_path = None;
     let mut config_enable_debug_command: Option<String> = None;
+    let mut config_cluster_enabled = false;
     if let Some(path) = &config_path {
         let startup_config = match load_startup_config_file(path) {
             Ok(config) => config,
@@ -3948,6 +3962,7 @@ fn main() -> ExitCode {
             }
         };
         config_enable_debug_command = startup_config.enable_debug_command.clone();
+        config_cluster_enabled = startup_config.cluster_enabled.unwrap_or(false);
         let config_rdb_path = startup_config.configured_rdb_path();
         let config_aof_path = startup_config.configured_aof_path();
         if !cli_bind_addr && let Some(config_bind_addr) = startup_config.bind_addr {
@@ -4000,6 +4015,13 @@ fn main() -> ExitCode {
         .or(config_enable_debug_command.as_deref())
     {
         runtime.set_enable_debug_command(value);
+    }
+    // (frankenredis-inuwt) Boot-only, exactly as upstream treats it: CONFIG SET
+    // already refuses `cluster-enabled`, so this is the ONLY path that can turn
+    // cluster mode on, and without it every cluster-mode branch was unreachable
+    // over the wire no matter how the server was configured.
+    if config_cluster_enabled {
+        runtime.set_cluster_enabled(true);
     }
     if let Some(config_requirepass) = requirepass {
         runtime.set_requirepass(config_requirepass);
@@ -39442,6 +39464,9 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
                 appendfilename: Some("startup.aof".to_string()),
                 aclfile: Some("/tmp/frankenredis-startup/users.acl".to_string()),
                 enable_debug_command: None,
+                // Absent from this fixture, so it stays None and the server keeps
+                // upstream's non-cluster default. (frankenredis-inuwt)
+                cluster_enabled: None,
             }
         );
         assert_eq!(

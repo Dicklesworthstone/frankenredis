@@ -492,6 +492,36 @@ fn spawn_legacy_redis_with_aof(port: u16) -> ManagedChild {
     child
 }
 
+/// Vendored Redis started in CLUSTER MODE. (frankenredis-inuwt)
+///
+/// Each node needs its own `dir`, because a cluster node writes a
+/// `cluster-config-file` (nodes.conf) into it and two nodes sharing a directory
+/// would fight over the same file.
+fn spawn_legacy_redis_cluster_enabled(port: u16) -> ManagedChild {
+    let dir = unique_temp_dir("frankenredis-legacy-cluster");
+    let mut command = Command::new(legacy_redis_server_path());
+    command
+        .arg("--bind")
+        .arg("127.0.0.1")
+        .arg("--port")
+        .arg(port.to_string())
+        .arg("--save")
+        .arg("")
+        .arg("--appendonly")
+        .arg("no")
+        .arg("--protected-mode")
+        .arg("no")
+        .arg("--cluster-enabled")
+        .arg("yes")
+        .arg("--dir")
+        .arg(dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let child = ManagedChild::spawn(command, None);
+    wait_for_port(port);
+    child
+}
+
 fn spawn_legacy_redis_with_requirepass(port: u16, requirepass: Option<&str>) -> ManagedChild {
     let dir = unique_temp_dir("frankenredis-legacy");
     let mut command = Command::new(legacy_redis_server_path());
@@ -1905,6 +1935,176 @@ fn sharded_dbsize_and_info_keyspace_aggregate_every_partition() {
         fr.read_response(),
         redis.read_response(),
         "DBSIZE must return 0 once every partition is empty"
+    );
+}
+
+/// Parse a `field:value` block (INFO / CLUSTER INFO) into a map.
+fn parse_field_block(frame: &RespFrame) -> HashMap<String, String> {
+    let body = match frame {
+        RespFrame::BulkString(Some(bytes)) => String::from_utf8_lossy(bytes).into_owned(),
+        RespFrame::Verbatim(text) => text.clone(),
+        other => panic!("expected a bulk string reply, got {other:?}"),
+    };
+    body.lines()
+        .filter_map(|line| {
+            let line = line.trim_end();
+            if line.is_empty() || line.starts_with('#') {
+                return None;
+            }
+            line.split_once(':')
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+        })
+        .collect()
+}
+
+/// `cluster-enabled yes` must actually start a cluster-mode server.
+/// (frankenredis-inuwt)
+///
+/// Before this, `cluster-enabled` was parsed into the config map and then
+/// dropped: `store.cluster_enabled` was assigned only inside `#[test]` blocks, so
+/// a server configured for cluster mode came up silently in non-cluster mode and
+/// answered every CLUSTER command with "cluster support disabled". That silent
+/// divergence is what this gate pins.
+///
+/// This is also the FIRST test in the repo that can compare cluster-mode replies
+/// against a real cluster-enabled Redis. While fr's flag was unreachable, any
+/// such differ compared two *disabled* servers and proved nothing — a green
+/// result meaning the opposite of what it appeared to mean. Both servers here are
+/// started with cluster mode ON, so the comparison is real.
+#[test]
+fn cluster_enabled_config_starts_a_cluster_mode_server_matching_legacy_redis() {
+    let fr_port = reserve_port();
+    let redis_port = reserve_port();
+
+    let fr_dir = unique_temp_dir("frankenredis-cluster-enabled");
+    let config_path = fr_dir.join("frankenredis.conf");
+    std::fs::write(
+        &config_path,
+        format!(
+            "bind 127.0.0.1\nport {fr_port}\ncluster-enabled yes\ndir {}\n",
+            fr_dir.display()
+        ),
+    )
+    .expect("write cluster config");
+
+    let _fr_server =
+        spawn_frankenredis_with_config(fr_port, config_path.to_str().expect("utf8 config path"));
+    let _redis_server = spawn_legacy_redis_cluster_enabled(redis_port);
+
+    let mut fr = BufferedTcpClient::connect(fr_port);
+    let mut redis = BufferedTcpClient::connect(redis_port);
+
+    // A fresh cluster node with no slots assigned.
+    //
+    // `cluster_size` is a BOOT TRANSIENT in real Redis and must be waited out
+    // rather than raced. cluster.c::clusterInit seeds `server.cluster->size = 1`,
+    // and clusterUpdateState — the only thing that recomputes it as "masters
+    // serving at least one slot" — returns early for the first
+    // CLUSTER_WRITABLE_DELAY (2000ms) while a master sits in CLUSTER_FAIL
+    // (cluster.c:5001, 5015-5020). So upstream reports cluster_size:1 for ~2s
+    // after boot and 0 thereafter, on a node whose slot count never changed.
+    // fr reports the settled value throughout. Comparing before Redis settles
+    // would fail for a reason that has nothing to do with fr, so poll until
+    // Redis has passed its own delay and only then compare.
+    let cluster_info = encode_command(&[b"CLUSTER", b"INFO"]);
+    let settle_deadline = Instant::now() + Duration::from_secs(20);
+    let redis_info = loop {
+        redis.write_all(&cluster_info);
+        let info = parse_field_block(&redis.read_response());
+        if info.get("cluster_size").map(String::as_str) == Some("0") {
+            break info;
+        }
+        assert!(
+            Instant::now() < settle_deadline,
+            "Redis cluster_size never settled to 0: {info:?}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    fr.write_all(&cluster_info);
+    let fr_info = parse_field_block(&fr.read_response());
+
+    assert_eq!(
+        redis_info.get("cluster_enabled").map(String::as_str),
+        None,
+        "fixture check: CLUSTER INFO has no cluster_enabled field; it is an INFO field"
+    );
+    for field in [
+        "cluster_state",
+        "cluster_slots_assigned",
+        "cluster_slots_ok",
+        "cluster_slots_pfail",
+        "cluster_slots_fail",
+        "cluster_known_nodes",
+        // Compared only after the settle-wait above; see the CLUSTER_WRITABLE_DELAY note.
+        "cluster_size",
+        "cluster_current_epoch",
+        "cluster_my_epoch",
+    ] {
+        assert_eq!(
+            fr_info.get(field),
+            redis_info.get(field),
+            "CLUSTER INFO {field} must match a real cluster-enabled Redis (fr={fr_info:?})"
+        );
+    }
+    // The discriminating value: an unwired flag yields the disabled error rather
+    // than a parseable block, and a wired-but-slotless node must report fail.
+    assert_eq!(
+        fr_info.get("cluster_state").map(String::as_str),
+        Some("fail"),
+        "a cluster node with no slots assigned reports fail"
+    );
+    assert_eq!(
+        fr_info.get("cluster_known_nodes").map(String::as_str),
+        Some("1")
+    );
+
+    // INFO's own cluster section must flip too — this is the field a client
+    // library reads to decide whether to speak the cluster protocol.
+    let info_cluster = encode_command(&[b"INFO", b"cluster"]);
+    fr.write_all(&info_cluster);
+    redis.write_all(&info_cluster);
+    assert_eq!(
+        parse_field_block(&fr.read_response()).get("cluster_enabled"),
+        parse_field_block(&redis.read_response()).get("cluster_enabled"),
+        "INFO cluster_enabled must agree with a real cluster-enabled Redis"
+    );
+
+    // CLUSTER MYID is a 40-char hex node id on both. The VALUE is per-node and
+    // must not be compared, only its shape.
+    let myid = encode_command(&[b"CLUSTER", b"MYID"]);
+    fr.write_all(&myid);
+    redis.write_all(&myid);
+    for (label, response) in [("fr", fr.read_response()), ("redis", redis.read_response())] {
+        let RespFrame::BulkString(Some(id)) = response else {
+            panic!("{label}: CLUSTER MYID must reply with a bulk string, got {response:?}");
+        };
+        assert_eq!(id.len(), 40, "{label}: node id must be 40 chars");
+        assert!(
+            id.iter().all(|b| b.is_ascii_hexdigit()),
+            "{label}: node id must be hex"
+        );
+    }
+
+    // With no slots assigned, both report an empty slot map.
+    let slots = encode_command(&[b"CLUSTER", b"SLOTS"]);
+    fr.write_all(&slots);
+    redis.write_all(&slots);
+    assert_eq!(
+        fr.read_response(),
+        redis.read_response(),
+        "an unassigned cluster reports an empty CLUSTER SLOTS on both"
+    );
+
+    // A default (non-cluster) server must still refuse, so this change cannot
+    // have turned cluster mode on globally.
+    let plain_port = reserve_port();
+    let _plain = spawn_frankenredis(plain_port, None);
+    let mut plain = BufferedTcpClient::connect(plain_port);
+    plain.write_all(&cluster_info);
+    let plain_response = plain.read_response();
+    assert!(
+        matches!(plain_response, RespFrame::Error(ref e) if e.contains("cluster support disabled")),
+        "a server without cluster-enabled must still refuse: {plain_response:?}"
     );
 }
 
