@@ -7123,6 +7123,39 @@ impl Runtime {
         self.server.store.stat_connected_clients += 1;
     }
 
+    /// The configured `maxclients` limit.
+    ///
+    /// (frankenredis-zydmi) A configuration constant, identical in every reactor,
+    /// so a cross-reactor INFO passes it through from whichever reactor answers
+    /// rather than summing it -- summing a limit would be meaningless.
+    #[must_use]
+    pub fn configured_maxclients(&self) -> u64 {
+        self.server.store.server_maxclients
+    }
+
+    /// Connections ever accepted by THIS runtime.
+    ///
+    /// (frankenredis-zydmi) The shared-nothing server gives every reactor its own
+    /// `Runtime` for connection bookkeeping, so this counts one reactor's share.
+    /// A server-wide INFO must sum it across reactors.
+    #[must_use]
+    pub fn reactor_total_connections_received(&self) -> u64 {
+        self.server.store.stat_total_connections_received
+    }
+
+    /// Socket bytes read by THIS runtime. Additive across reactors, exactly like
+    /// [`Self::reactor_total_connections_received`]. (frankenredis-zydmi)
+    #[must_use]
+    pub fn reactor_net_input_bytes(&self) -> u64 {
+        self.server.store.stat_total_net_input_bytes
+    }
+
+    /// Socket bytes written by THIS runtime. (frankenredis-zydmi)
+    #[must_use]
+    pub fn reactor_net_output_bytes(&self) -> u64 {
+        self.server.store.stat_total_net_output_bytes
+    }
+
     /// Track network input bytes for INFO stats.
     pub fn track_net_input_bytes(&mut self, bytes: u64) {
         self.server.store.stat_total_net_input_bytes += bytes;

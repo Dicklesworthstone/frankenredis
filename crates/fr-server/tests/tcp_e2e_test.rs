@@ -1856,12 +1856,15 @@ fn sharded_dbsize_and_info_keyspace_aggregate_every_partition() {
         "wrong-arity DBSIZE must match Redis's error rather than being masked"
     );
 
-    // Sections needing reactor-local state stay fail-closed, and so does the
-    // bare `INFO` form because it implies them.
+    // Sections whose reactor-local state is not published stay fail-closed, and
+    // so does the bare `INFO` form because it implies them. `INFO clients` is
+    // deliberately NOT in this list any more: frankenredis-zydmi publishes the
+    // per-reactor connection counters, so it is served rather than refused, and
+    // its own gate is sharded_info_clients_aggregates_every_reactor.
     let mut refused = Vec::new();
     refused.extend_from_slice(&encode_command(&[b"INFO"]));
     refused.extend_from_slice(&encode_command(&[b"INFO", b"all"]));
-    refused.extend_from_slice(&encode_command(&[b"INFO", b"clients"]));
+    refused.extend_from_slice(&encode_command(&[b"INFO", b"memory"]));
     refused.extend_from_slice(&encode_command(&[b"INFO", b"keyspace", b"stats"]));
     fr.write_all(&refused);
     for response in fr.read_responses(4) {
@@ -1903,6 +1906,147 @@ fn sharded_dbsize_and_info_keyspace_aggregate_every_partition() {
         redis.read_response(),
         "DBSIZE must return 0 once every partition is empty"
     );
+}
+
+/// Pull a single `field:<integer>` out of an INFO section reply.
+fn parse_info_u64(frame: &RespFrame, field: &str) -> u64 {
+    let body = match frame {
+        RespFrame::BulkString(Some(bytes)) => String::from_utf8_lossy(bytes).into_owned(),
+        RespFrame::Verbatim(text) => text.clone(),
+        other => panic!("INFO must reply with a bulk string, got {other:?}"),
+    };
+    let prefix = format!("{field}:");
+    body.lines()
+        .find_map(|line| line.trim_end().strip_prefix(&prefix))
+        .unwrap_or_else(|| panic!("INFO reply missing {field}: {body}"))
+        .parse()
+        .unwrap_or_else(|_| panic!("INFO {field} is not an integer: {body}"))
+}
+
+/// INFO Clients must describe the WHOLE server, not the reactor that happens to
+/// own the asking connection. (frankenredis-zydmi)
+///
+/// Connections are round-robined across reactors and each reactor keeps its
+/// connection accounting in a THREAD-LOCAL Runtime, so a per-reactor answer would
+/// report roughly connections/reactors. The fixtures open enough connections to
+/// populate several reactors, then require fr to agree with Redis exactly --
+/// Redis being a single process that trivially knows its own client count.
+#[test]
+fn sharded_info_clients_aggregates_every_reactor() {
+    const WORKERS: usize = 8;
+    const EXTRA_CONNECTIONS: usize = 15;
+
+    let fr_port = reserve_port();
+    let redis_port = reserve_port();
+    let _fr_server = spawn_frankenredis_sharded_set_get(fr_port, WORKERS);
+    let _redis_server = spawn_legacy_redis(redis_port);
+
+    let mut fr = BufferedTcpClient::connect(fr_port);
+    let mut redis = BufferedTcpClient::connect(redis_port);
+
+    // Hold the extra connections open, and PING each so it is fully installed on
+    // its reactor before anything is asserted.
+    let ping = encode_command(&[b"PING"]);
+    let mut fr_extra = Vec::new();
+    let mut redis_extra = Vec::new();
+    for _ in 0..EXTRA_CONNECTIONS {
+        let mut c = BufferedTcpClient::connect(fr_port);
+        c.write_all(&ping);
+        assert_eq!(
+            c.read_response(),
+            RespFrame::SimpleString("PONG".to_string())
+        );
+        fr_extra.push(c);
+        let mut r = BufferedTcpClient::connect(redis_port);
+        r.write_all(&ping);
+        assert_eq!(
+            r.read_response(),
+            RespFrame::SimpleString("PONG".to_string())
+        );
+        redis_extra.push(r);
+    }
+
+    let expected = (EXTRA_CONNECTIONS + 1) as u64;
+    let info_clients = encode_command(&[b"INFO", b"clients"]);
+
+    // Each reactor publishes its slot once per event-loop tick, so the aggregate
+    // is eventually consistent within a tick rather than instantaneous. Poll
+    // briefly for convergence -- the assertion below is still on the EXACT value,
+    // so a genuinely wrong aggregate (one reactor's share) fails rather than
+    // being waited out.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut fr_connected;
+    loop {
+        fr.write_all(&info_clients);
+        fr_connected = parse_info_u64(&fr.read_response(), "connected_clients");
+        if fr_connected == expected || Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    redis.write_all(&info_clients);
+    let redis_connected = parse_info_u64(&redis.read_response(), "connected_clients");
+
+    assert_eq!(
+        redis_connected, expected,
+        "fixture check: Redis must see its own {expected} connections"
+    );
+    assert_eq!(
+        fr_connected, redis_connected,
+        "INFO clients must sum every reactor, not report the answering reactor's share"
+    );
+    // Discriminating bound: with 8 reactors round-robining 16 connections a
+    // single-reactor answer lands near 2, so anything that low is the bug.
+    assert!(
+        fr_connected > (EXTRA_CONNECTIONS as u64) / 2,
+        "connected_clients {fr_connected} looks like one reactor's share, not the server's"
+    );
+
+    // Closures must be reflected too, across whichever reactors owned them.
+    fr_extra.truncate(5);
+    redis_extra.truncate(5);
+    let remaining = 6u64;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut fr_after;
+    loop {
+        fr.write_all(&info_clients);
+        fr_after = parse_info_u64(&fr.read_response(), "connected_clients");
+        if fr_after == remaining || Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert_eq!(
+        fr_after, remaining,
+        "closing connections on other reactors must lower the aggregate"
+    );
+
+    // maxclients is a constant passed through, not summed -- summing it across 8
+    // reactors would report 80000.
+    fr.write_all(&info_clients);
+    let fr_max = parse_info_u64(&fr.read_response(), "maxclients");
+    redis.write_all(&info_clients);
+    let redis_max = parse_info_u64(&redis.read_response(), "maxclients");
+    assert_eq!(
+        fr_max, redis_max,
+        "maxclients is a limit, not an additive counter"
+    );
+
+    // Sections still backed by unpublished reactor-local state stay fail-closed,
+    // and a mixed request is refused whole rather than partially served.
+    let mut refused = Vec::new();
+    refused.extend_from_slice(&encode_command(&[b"INFO"]));
+    refused.extend_from_slice(&encode_command(&[b"INFO", b"stats"]));
+    refused.extend_from_slice(&encode_command(&[b"INFO", b"memory"]));
+    refused.extend_from_slice(&encode_command(&[b"INFO", b"clients", b"keyspace"]));
+    fr.write_all(&refused);
+    for response in fr.read_responses(4) {
+        assert!(
+            matches!(response, RespFrame::Error(ref error) if error.contains("not supported")),
+            "INFO forms this path cannot aggregate must fail closed: {response:?}"
+        );
+    }
 }
 
 /// DBSIZE takes EVERY partition lock at once, so it is the only operation in the

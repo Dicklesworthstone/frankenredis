@@ -1627,6 +1627,98 @@ struct SharedNothingWorkerPool {
     partitions: Arc<KeyspacePartitions>,
 }
 
+/// One reactor's connection accounting, published where every reactor can read it.
+///
+/// (frankenredis-zydmi) INFO's client and network counters live in each reactor's
+/// THREAD-LOCAL `Runtime`, which no other reactor can read, so the section could
+/// not be answered at all. The obvious remedy -- a cross-reactor request/response
+/// fan-out -- carries the failure modes that make a half-implementation worse
+/// than the refusal it replaces: an aggregate that never completes strands every
+/// later reply on that connection, a partial enqueue has to be unwound, and a
+/// reactor dying mid-aggregate has to be detected.
+///
+/// None of that is necessary, because this state does not need to be REQUESTED
+/// from another thread -- it needs to be PUBLISHED by each thread somewhere all
+/// of them can read. Each reactor owns exactly one slot and is its only writer;
+/// any reactor answering INFO reads all N with plain relaxed loads. There is no
+/// channel, nothing is ever left pending, and a dead reactor simply stops
+/// updating its slot instead of hanging a client.
+///
+/// The slot is padded to 128 bytes so two reactors never share a cache line.
+/// That is the whole reason the reactor `Runtime` was made thread-local in the
+/// first place -- to keep connection accounting from becoming a second shared
+/// bottleneck -- and an unpadded array of counters would reintroduce exactly
+/// that false sharing.
+#[repr(align(128))]
+#[derive(Default)]
+struct ReactorStatsSlot {
+    /// Currently-installed connections on this reactor.
+    connected_clients: std::sync::atomic::AtomicU64,
+    /// Connections ever accepted onto this reactor.
+    total_connections_received: std::sync::atomic::AtomicU64,
+    /// Bytes read from / written to sockets owned by this reactor.
+    net_input_bytes: std::sync::atomic::AtomicU64,
+    net_output_bytes: std::sync::atomic::AtomicU64,
+}
+
+struct ReactorStats {
+    slots: Vec<ReactorStatsSlot>,
+}
+
+/// Aggregate of every reactor's published counters.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ReactorStatsSnapshot {
+    connected_clients: u64,
+    total_connections_received: u64,
+    net_input_bytes: u64,
+    net_output_bytes: u64,
+}
+
+impl ReactorStats {
+    fn new(worker_count: usize) -> Self {
+        Self {
+            slots: (0..worker_count)
+                .map(|_| ReactorStatsSlot::default())
+                .collect(),
+        }
+    }
+
+    /// Publish this reactor's totals into its own slot.
+    ///
+    /// Relaxed is the right ordering and not a shortcut: each field is an
+    /// independent counter read for a human-facing statistic, so no reader
+    /// depends on seeing two of them from the same instant, and INFO has never
+    /// promised a torn-free cross-field snapshot -- upstream Redis reads its own
+    /// counters without synchronisation either. Paying for acquire/release here
+    /// would tax the reactor loop for a guarantee nothing consumes.
+    fn publish(&self, worker: usize, snapshot: &ReactorStatsSnapshot) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let slot = &self.slots[worker];
+        slot.connected_clients
+            .store(snapshot.connected_clients, Relaxed);
+        slot.total_connections_received
+            .store(snapshot.total_connections_received, Relaxed);
+        slot.net_input_bytes
+            .store(snapshot.net_input_bytes, Relaxed);
+        slot.net_output_bytes
+            .store(snapshot.net_output_bytes, Relaxed);
+    }
+
+    /// Sum every reactor's slot. Wait-free: no lock, no channel, no reactor
+    /// participation, so this cannot be blocked by a busy or wedged reactor.
+    fn aggregate(&self) -> ReactorStatsSnapshot {
+        use std::sync::atomic::Ordering::Relaxed;
+        let mut total = ReactorStatsSnapshot::default();
+        for slot in &self.slots {
+            total.connected_clients += slot.connected_clients.load(Relaxed);
+            total.total_connections_received += slot.total_connections_received.load(Relaxed);
+            total.net_input_bytes += slot.net_input_bytes.load(Relaxed);
+            total.net_output_bytes += slot.net_output_bytes.load(Relaxed);
+        }
+        total
+    }
+}
+
 #[cfg(feature = "io-uring-writes")]
 struct SharedNothingUring {
     writer: Option<fr_uring::BatchWriter>,
@@ -1669,6 +1761,7 @@ impl SharedNothingWorkerPool {
         debug_assert!(worker_count > 0);
         let mut routes = Vec::with_capacity(worker_count);
         let partitions = Arc::new(KeyspacePartitions::new(worker_count, port));
+        let reactor_stats = Arc::new(ReactorStats::new(worker_count));
 
         for worker_idx in 0..worker_count {
             let poll = Poll::new()?;
@@ -1681,6 +1774,7 @@ impl SharedNothingWorkerPool {
                 )
             })?;
             let worker_partitions = Arc::clone(&partitions);
+            let worker_stats = Arc::clone(&reactor_stats);
             thread::Builder::new()
                 .name(format!("fr-set-get-shard-{worker_idx}"))
                 .spawn(move || {
@@ -1691,6 +1785,7 @@ impl SharedNothingWorkerPool {
                         connection_rx,
                         uring,
                         worker_partitions,
+                        worker_stats,
                     );
                 })?;
             routes.push(SharedNothingWorkerRoute {
@@ -1702,6 +1797,8 @@ impl SharedNothingWorkerPool {
         #[cfg(feature = "io-uring-writes")]
         URING_WRITES_ACTIVE.store(io_uring_output, std::sync::atomic::Ordering::Relaxed);
 
+        // Not retained on the pool: the acceptor never reads these counters, and
+        // each reactor holds the only handle it needs.
         Ok(Self {
             routes,
             next_unkeyed_worker: 0,
@@ -1840,6 +1937,7 @@ fn run_shared_nothing_worker(
     connections: mpsc::Receiver<SharedNothingRoutedConnection>,
     mut uring: SharedNothingUring,
     partitions: Arc<KeyspacePartitions>,
+    reactor_stats: Arc<ReactorStats>,
 ) {
     #[cfg(not(feature = "io-uring-writes"))]
     let _ = &mut uring;
@@ -1899,6 +1997,7 @@ fn run_shared_nothing_worker(
                 &mut clients,
                 &mut runtime,
                 &partitions,
+                &reactor_stats,
                 &mut poll,
                 &mut write_tokens,
                 &mut closing_tokens,
@@ -1938,6 +2037,24 @@ fn run_shared_nothing_worker(
             &mut uring,
         );
 
+        // (frankenredis-zydmi) Publish this reactor's counters where the reactor
+        // answering INFO can read them. Once per loop iteration, NOT per I/O
+        // operation: the hot path keeps accumulating into the thread-local
+        // `Runtime` exactly as before, so no atomic is added to a per-command
+        // path, and INFO becomes eventually consistent within one tick -- which
+        // is all a monotonic statistics counter needs. `connected_clients` is
+        // read from the live client map rather than tracked separately, so it
+        // cannot drift from reality on a missed decrement.
+        reactor_stats.publish(
+            worker_idx,
+            &ReactorStatsSnapshot {
+                connected_clients: clients.len() as u64,
+                total_connections_received: runtime.reactor_total_connections_received(),
+                net_input_bytes: runtime.reactor_net_input_bytes(),
+                net_output_bytes: runtime.reactor_net_output_bytes(),
+            },
+        );
+
         #[cfg(feature = "io-uring-writes")]
         let poll_timeout = uring
             .writer
@@ -1967,6 +2084,7 @@ fn run_shared_nothing_worker(
                     &mut clients,
                     &mut runtime,
                     &partitions,
+                    &reactor_stats,
                     &mut poll,
                     &mut write_tokens,
                     &mut closing_tokens,
@@ -2047,6 +2165,14 @@ fn install_shared_nothing_connections(
             eprintln!("warn: shard {worker_idx} failed to register connection: {err}");
             continue;
         }
+        // (frankenredis-zydmi) The reactor path never counted its connections.
+        // `new_session` takes `&self` and so cannot, and `track_connection_opened`
+        // was called only from the non-sharded event loop -- so in shared-nothing
+        // mode `total_connections_received` sat at 0 and INFO Clients would have
+        // under-reported from a single reactor even before any cross-reactor
+        // aggregation. That was latent rather than visible only because INFO was
+        // refused outright in this mode.
+        runtime.track_connection_opened();
         let mut session = runtime.new_session();
         session.peer_addr = Some(peer_addr);
         #[cfg(unix)]
@@ -2074,6 +2200,7 @@ fn drain_shared_nothing_uring_receives(
     clients: &mut ClientMap,
     runtime: &mut Runtime,
     partitions: &KeyspacePartitions,
+    reactor_stats: &ReactorStats,
     poll: &mut Poll,
     write_tokens: &mut TokenSet,
     closing_tokens: &mut TokenSet,
@@ -2109,7 +2236,13 @@ fn drain_shared_nothing_uring_receives(
                         runtime.track_net_input_bytes(bytes.len() as u64);
                         runtime.note_read_event();
                         let output_before = connection.write_buf.len();
-                        dispatch_shared_nothing_frames(connection, runtime, partitions, now_ms());
+                        dispatch_shared_nothing_frames(
+                            connection,
+                            runtime,
+                            partitions,
+                            reactor_stats,
+                            now_ms(),
+                        );
                         runtime.track_net_output_bytes(
                             connection.write_buf.len().saturating_sub(output_before) as u64,
                         );
@@ -2181,6 +2314,7 @@ fn handle_shared_nothing_readable(
     clients: &mut ClientMap,
     runtime: &mut Runtime,
     partitions: &KeyspacePartitions,
+    reactor_stats: &ReactorStats,
     poll: &mut Poll,
     write_tokens: &mut TokenSet,
     closing_tokens: &mut TokenSet,
@@ -2239,7 +2373,7 @@ fn handle_shared_nothing_readable(
     if read_any {
         runtime.note_read_event();
         let output_before = connection.write_buf.len();
-        dispatch_shared_nothing_frames(connection, runtime, partitions, now_ms());
+        dispatch_shared_nothing_frames(connection, runtime, partitions, reactor_stats, now_ms());
         runtime.track_net_output_bytes(
             connection
                 .write_buf
@@ -2620,24 +2754,68 @@ fn execute_shared_nothing_fast_command(
 enum ReactorInfoRequest {
     /// Every requested section is Keyspace (possibly repeated).
     KeyspaceOnly,
-    /// At least one section needs reactor-local state, or the request is the
-    /// bare/`all`/`default` form that implies such sections.
+    /// Every requested section is Clients (possibly repeated). Served from the
+    /// per-reactor published slots. (frankenredis-zydmi)
+    ClientsOnly,
+    /// At least one section needs reactor-local state this path does not yet
+    /// publish, or the request is the bare/`all`/`default` form implying such
+    /// sections.
     NotAggregatable,
 }
 
 fn classify_reactor_info_request(args: &[&[u8]]) -> ReactorInfoRequest {
-    // Bare INFO means `default`, which includes Server/Clients/Memory/Stats.
+    // Bare INFO means `default`, which includes Server/Memory/Stats.
     if args.len() < 2 {
         return ReactorInfoRequest::NotAggregatable;
     }
-    if args[1..]
-        .iter()
-        .all(|section| section.eq_ignore_ascii_case(b"keyspace"))
-    {
+    let all_of = |name: &[u8]| args[1..].iter().all(|s| s.eq_ignore_ascii_case(name));
+    // Single-section requests only. A mixed request is refused WHOLE rather than
+    // partially served, so a client never silently loses a section it asked for.
+    if all_of(b"keyspace") {
         ReactorInfoRequest::KeyspaceOnly
+    } else if all_of(b"clients") {
+        ReactorInfoRequest::ClientsOnly
     } else {
         ReactorInfoRequest::NotAggregatable
     }
+}
+
+/// Render the INFO Clients section from a whole-server view.
+///
+/// (frankenredis-zydmi) `connected_clients` is the SUM over reactors, which is
+/// the entire point: each reactor owns a disjoint set of connections, so the
+/// value any single reactor could report is its own share and never the server's.
+///
+/// `maxclients` is a configuration constant identical in every reactor, so it is
+/// passed through from the answering reactor rather than summed -- summing a
+/// limit would be nonsense. The remaining fields are pinned at the values a
+/// reactor can currently justify: this topology has no cluster bus, no blocking
+/// command support (the blocking family is outside the admission table), and no
+/// per-client buffer watermark tracking, so reporting anything other than 0
+/// would be inventing a number.
+fn render_aggregate_clients_section(connected_clients: u64, maxclients: u64) -> Vec<u8> {
+    use std::fmt::Write as _;
+
+    let mut info = String::from("# Clients\r\n");
+    // Upstream never reports 0 here: the client asking is itself connected. The
+    // reactor publishes its slot once per loop tick, so a connection installed
+    // after the last publish is not yet counted; clamping to at least 1 matches
+    // upstream and keeps that window from ever producing a 0 no live server has.
+    let _ = write!(info, "connected_clients:{}\r\n", connected_clients.max(1));
+    info.push_str("cluster_connections:0\r\n");
+    let _ = write!(info, "maxclients:{maxclients}\r\n");
+    // Field set and ORDER mirror fr-command's own Clients emitter, which is the
+    // form already pinned against 7.2.4. Deliberately NOT emitted here:
+    // pubsub_clients, watching_clients and total_watched_keys are 7.4 additions,
+    // and fr must not implement post-7.2.4 surface.
+    info.push_str("client_recent_max_input_buffer:0\r\n");
+    info.push_str("client_recent_max_output_buffer:0\r\n");
+    info.push_str("blocked_clients:0\r\n");
+    info.push_str("tracking_clients:0\r\n");
+    info.push_str("clients_in_timeout_table:0\r\n");
+    info.push_str("total_blocking_keys:0\r\n");
+    info.push_str("total_blocking_keys_on_nokey:0\r\n");
+    info.into_bytes()
 }
 
 /// The database a shared-nothing connection operates on.
@@ -2695,6 +2873,8 @@ fn execute_reactor_cross_partition_aggregate(
     args: &[&[u8]],
     frame: &[u8],
     partitions: &KeyspacePartitions,
+    reactor_stats: &ReactorStats,
+    maxclients: u64,
     ts: u64,
     out: &mut Vec<u8>,
 ) -> bool {
@@ -2723,8 +2903,21 @@ fn execute_reactor_cross_partition_aggregate(
     }
 
     if name.eq_ignore_ascii_case(b"INFO") {
-        if classify_reactor_info_request(args) != ReactorInfoRequest::KeyspaceOnly {
-            return false;
+        match classify_reactor_info_request(args) {
+            ReactorInfoRequest::ClientsOnly => {
+                // Wait-free: reads the published slots, takes no partition lock
+                // and asks no reactor for anything, so a busy or wedged reactor
+                // cannot delay or block this reply.
+                let stats = reactor_stats.aggregate();
+                RespFrame::BulkString(Some(render_aggregate_clients_section(
+                    stats.connected_clients,
+                    maxclients,
+                )))
+                .encode_into(out);
+                return true;
+            }
+            ReactorInfoRequest::NotAggregatable => return false,
+            ReactorInfoRequest::KeyspaceOnly => {}
         }
         let guards = partitions.lock_all_partitions_in_index_order();
         // Database count is fixed at construction and identical in every
@@ -2754,12 +2947,25 @@ fn dispatch_shared_nothing_frames(
     connection: &mut ClientConnection,
     runtime: &mut Runtime,
     partitions: &KeyspacePartitions,
+    reactor_stats: &ReactorStats,
     ts: u64,
 ) {
     if shared_nothing_partition_run_combine_enabled() {
-        dispatch_shared_nothing_frames_impl::<true>(connection, runtime, partitions, ts);
+        dispatch_shared_nothing_frames_impl::<true>(
+            connection,
+            runtime,
+            partitions,
+            reactor_stats,
+            ts,
+        );
     } else {
-        dispatch_shared_nothing_frames_impl::<false>(connection, runtime, partitions, ts);
+        dispatch_shared_nothing_frames_impl::<false>(
+            connection,
+            runtime,
+            partitions,
+            reactor_stats,
+            ts,
+        );
     }
 }
 
@@ -2767,6 +2973,7 @@ fn dispatch_shared_nothing_frames_impl<const COMBINE_PARTITION_RUNS: bool>(
     connection: &mut ClientConnection,
     runtime: &mut Runtime,
     partitions: &KeyspacePartitions,
+    reactor_stats: &ReactorStats,
     ts: u64,
 ) {
     let parser_config = runtime.parser_config();
@@ -3104,6 +3311,8 @@ fn dispatch_shared_nothing_frames_impl<const COMBINE_PARTITION_RUNS: bool>(
                         &borrowed_args,
                         &unparsed[..parsed.consumed],
                         partitions,
+                        reactor_stats,
+                        runtime.configured_maxclients(),
                         ts,
                         &mut connection.write_buf,
                     )
@@ -29848,18 +30057,34 @@ mod tests {
             "a repeated section is still only that section"
         );
 
+        // (frankenredis-zydmi) Clients is now served from the per-reactor
+        // published slots.
+        assert_eq!(
+            crate::classify_reactor_info_request(&[b"INFO", b"clients"]),
+            ReactorInfoRequest::ClientsOnly
+        );
+        assert_eq!(
+            crate::classify_reactor_info_request(&[b"INFO", b"CLIENTS", b"clients"]),
+            ReactorInfoRequest::ClientsOnly,
+            "case-insensitive and repetition-tolerant, like the keyspace form"
+        );
+
         for request in [
             [b"INFO".as_slice()].as_slice(),
             &[b"INFO", b"all"],
             &[b"INFO", b"everything"],
             &[b"INFO", b"default"],
             &[b"INFO", b"server"],
-            &[b"INFO", b"clients"],
             &[b"INFO", b"stats"],
+            &[b"INFO", b"memory"],
             // Mixed requests must be refused whole: emitting only the half we
             // can aggregate would silently drop sections the client asked for.
+            // That holds for two AGGREGATABLE sections too -- keyspace+clients
+            // is still a two-section reply this path does not assemble.
             &[b"INFO", b"keyspace", b"stats"],
             &[b"INFO", b"stats", b"keyspace"],
+            &[b"INFO", b"keyspace", b"clients"],
+            &[b"INFO", b"clients", b"keyspace"],
         ] {
             assert_eq!(
                 crate::classify_reactor_info_request(request),
@@ -29899,6 +30124,139 @@ mod tests {
             crate::render_aggregate_keyspace_section(&[(4, 0, 0)]),
             b"# Keyspace\r\ndb0:keys=4,expires=0,avg_ttl=0\r\n".to_vec()
         );
+    }
+
+    /// (frankenredis-zydmi) The per-reactor slots are the whole mechanism: each
+    /// reactor publishes only its own, and the server-wide value is their sum.
+    /// The discriminating case is that ANY single slot is not the answer --
+    /// reading one reactor is exactly the bug this replaces.
+    #[test]
+    fn reactor_stats_sum_every_slot() {
+        let stats = crate::ReactorStats::new(4);
+        let per_reactor = [
+            crate::ReactorStatsSnapshot {
+                connected_clients: 3,
+                total_connections_received: 10,
+                net_input_bytes: 100,
+                net_output_bytes: 200,
+            },
+            crate::ReactorStatsSnapshot {
+                connected_clients: 5,
+                total_connections_received: 20,
+                net_input_bytes: 300,
+                net_output_bytes: 400,
+            },
+            crate::ReactorStatsSnapshot {
+                connected_clients: 0,
+                total_connections_received: 7,
+                net_input_bytes: 0,
+                net_output_bytes: 11,
+            },
+            crate::ReactorStatsSnapshot {
+                connected_clients: 1,
+                total_connections_received: 1,
+                net_input_bytes: 2,
+                net_output_bytes: 3,
+            },
+        ];
+        for (worker, snapshot) in per_reactor.iter().enumerate() {
+            stats.publish(worker, snapshot);
+        }
+
+        let total = stats.aggregate();
+        assert_eq!(total.connected_clients, 9);
+        assert_eq!(total.total_connections_received, 38);
+        assert_eq!(total.net_input_bytes, 402);
+        assert_eq!(total.net_output_bytes, 614);
+        for snapshot in &per_reactor {
+            assert_ne!(
+                snapshot.connected_clients, total.connected_clients,
+                "no single reactor holds the server-wide count; reading one is the bug"
+            );
+        }
+
+        // Republishing replaces a slot rather than accumulating into it -- the
+        // reactor publishes absolute totals every tick, so a summing store would
+        // inflate without bound over the life of the process.
+        stats.publish(
+            0,
+            &crate::ReactorStatsSnapshot {
+                connected_clients: 3,
+                total_connections_received: 10,
+                net_input_bytes: 100,
+                net_output_bytes: 200,
+            },
+        );
+        assert_eq!(
+            stats.aggregate().connected_clients,
+            9,
+            "a repeated publish of the same totals must not change the sum"
+        );
+
+        // A reactor that never publishes contributes zero rather than corrupting
+        // the total, which is what makes the read wait-free: a wedged reactor
+        // cannot block or poison the aggregate.
+        let silent = crate::ReactorStats::new(3);
+        silent.publish(
+            1,
+            &crate::ReactorStatsSnapshot {
+                connected_clients: 4,
+                total_connections_received: 4,
+                net_input_bytes: 0,
+                net_output_bytes: 0,
+            },
+        );
+        assert_eq!(silent.aggregate().connected_clients, 4);
+    }
+
+    /// The Clients section must carry the 7.2.4 field set in upstream order, and
+    /// must NOT carry the 7.4 additions.
+    #[test]
+    fn aggregate_clients_section_matches_upstream_shape() {
+        let rendered = crate::render_aggregate_clients_section(9, 10_000);
+        let text = String::from_utf8(rendered).expect("utf8");
+
+        assert!(text.starts_with("# Clients\r\n"));
+        assert!(
+            text.contains("connected_clients:9\r\n"),
+            "the SUM over reactors is reported, not one reactor's share: {text}"
+        );
+        assert!(text.contains("maxclients:10000\r\n"), "{text}");
+
+        let fields: Vec<&str> = text
+            .lines()
+            .filter(|line| line.contains(':'))
+            .map(|line| line.split(':').next().unwrap_or_default())
+            .collect();
+        assert_eq!(
+            fields,
+            vec![
+                "connected_clients",
+                "cluster_connections",
+                "maxclients",
+                "client_recent_max_input_buffer",
+                "client_recent_max_output_buffer",
+                "blocked_clients",
+                "tracking_clients",
+                "clients_in_timeout_table",
+                "total_blocking_keys",
+                "total_blocking_keys_on_nokey",
+            ],
+            "field set and order must match the 7.2.4 form fr-command already emits"
+        );
+        for post_724 in ["pubsub_clients", "watching_clients", "total_watched_keys"] {
+            assert!(
+                !text.contains(post_724),
+                "{post_724} is a 7.4 field; fr must not implement post-7.2.4 surface"
+            );
+        }
+
+        // Upstream never reports zero: the client asking is itself connected. A
+        // connection installed after the owning reactor's last publish would
+        // otherwise surface as a 0 no live server ever returns.
+        let empty =
+            String::from_utf8(crate::render_aggregate_clients_section(0, 10_000)).expect("utf8");
+        assert!(empty.contains("connected_clients:1\r\n"), "{empty}");
     }
 
     /// The weighted mean is what makes the aggregate exact rather than
