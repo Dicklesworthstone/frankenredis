@@ -14704,13 +14704,13 @@ column is 1.345x.** Neither 6x nor 2.4-3.4x may be cited again.
 
 ### MEASURED
 
-Ten `RCH_REQUIRE_REMOTE=1 rch exec -- cargo bench -p fr-persist --bench int_render_itoa2 --profile
-release-perf` invocations across five distinct rch workers. Every row is one same-invocation A/A
+Twelve `RCH_REQUIRE_REMOTE=1 rch exec -- cargo bench -p fr-persist --bench int_render_itoa2
+--profile release-perf` invocations across five distinct rch workers. Every row is one same-invocation A/A
 null beside its A/B on the identical interleave-and-swap schedule, median of 41 paired ratios.
 Runs 1-3 (60ms segments) and A-D (300ms) predate the median-CI instrument and are corroborating
-only; runs E-G are the attributable, contract-conformant rows.
+only; runs E-I are the attributable, contract-conformant rows.
 
-Runs E-G, bootstrap 95% median CI on the A/A null, `TARGET_SEGMENT_SECS = 0.300`:
+Runs E-I, bootstrap 95% median CI on the A/A null, `TARGET_SEGMENT_SECS = 0.300`:
 
 | run | worker | ELF SHA-256 (self-reported, first 16) | wl | null med | null median CI95 | itoa2/tostr | itoa2/divloop | verdict |
 |-----|--------|------|----|----------|------------------|-------------|---------------|---------|
@@ -14723,6 +14723,12 @@ Runs E-G, bootstrap 95% median CI on the A/A null, `TARGET_SEGMENT_SECS = 0.300`
 | G | ovh-a | `f0b94d255cd46153` | d1_256 | 1.0020 | [0.9957, 1.0248] | 1.038 | 1.157 | WIN |
 | G | ovh-a | `f0b94d255cd46153` | d6_256 | 0.9797 | [0.9712, 0.9910] | 1.071 | 1.190 | **NULL-INADMISSIBLE** |
 | G | ovh-a | `f0b94d255cd46153` | d18_256 | 0.9790 | [0.9628, 1.0036] | 1.055 | 1.300 | WIN |
+| H | vmi1227854 | `bbee19d7ed6952a8` | d1_256 | 0.9997 | [0.9857, 1.0450] | 1.214 | 1.125 | WIN |
+| H | vmi1227854 | `bbee19d7ed6952a8` | d6_256 | 1.0180 | [1.0001, 1.0375] | 1.170 | 1.165 | **NULL-INADMISSIBLE** |
+| H | vmi1227854 | `bbee19d7ed6952a8` | d18_256 | 0.9915 | [0.9730, 1.0141] | 1.115 | 1.265 | WIN |
+| I | ovh-a | `6186650acac7428d` | d1_256 | 0.9977 | [0.9939, 1.0017] | 1.031 | 1.159 | WIN |
+| I | ovh-a | `6186650acac7428d` | d6_256 | 0.9755 | [0.9705, 0.9882] | 1.052 | 1.193 | **NULL-INADMISSIBLE** |
+| I | ovh-a | `6186650acac7428d` | d18_256 | 0.9674 | [0.9577, 0.9794] | 1.042 | 1.250 | **NULL-INADMISSIBLE** |
 
 The verdict decision is a bootstrap median-CI gate, applied within one invocation to that
 invocation's own controls. Stated for one representative admissible row: in run E, `d6_256`, the
@@ -14739,6 +14745,8 @@ bench as the instrument was being fixed; the source is identical across F and G:
     run E  bench_elf_sha256=8640b9d005c0b7cdf467f1a14bcdb68560a23985ba4ff3041d31b710938c96bf
     run F  bench_elf_sha256=f3168755b1742fcab48d974a9a08605abddd21cecc14191690dc572620db5427
     run G  bench_elf_sha256=f0b94d255cd461539e23bad71c3fb6749a919b827898637358022887ffa407a6
+    run H  bench_elf_sha256=bbee19d7ed6952a8e777a029f2dbadadcaf99a9950cf300b82603028e1120766
+    run I  bench_elf_sha256=6186650acac7428d29dbf5dacc0c26f6958b583d9b938bbd48b135b6224862ff
 
 Corroborating earlier runs, raw null p5..p95 (superseded statistic, listed for provenance):
 runs 1-3 at 60ms on `ovh-a`/`vmi1227854` gave `itoa2/divloop` 1.147-1.305 with null p5..p95 as
@@ -14751,22 +14759,29 @@ verdict in this entry.
 
 ### THE FINDING: the A/A control detects 2-3% systematic position bias
 
-**Three of the nine contract-conformant rows have an A/A null whose median CI EXCLUDES 1.0** —
-[0.9794, 0.9880], [0.9563, 0.9712], [0.9712, 0.9910]. Those are 95% intervals asserting that a
-binary differs from ITSELF by 1.2-4.4%. They are false positives, and their cause is that a
-bootstrap assumes i.i.d. resampling while consecutive round-ratios on a shared build worker are
-serially correlated (warm-up, drift, a co-tenant compile starting mid-run). **The exclusions are
-one-directional in every case — null median 0.968-0.982, always BELOW 1.0** — which is the
-signature of an ordering effect the swap schedule only partly cancels, not of random noise.
+**Six of the fifteen contract-conformant rows have an A/A null whose median CI EXCLUDES 1.0** —
+[0.9794, 0.9880], [0.9563, 0.9712], [0.9712, 0.9910], [1.0001, 1.0375], [0.9705, 0.9882],
+[0.9577, 0.9794]. Those are 95% intervals asserting that a binary differs from ITSELF by 1.2-4.4%.
+They are false positives, and their cause is that a bootstrap assumes i.i.d. resampling while
+consecutive round-ratios on a shared build worker are serially correlated (warm-up, drift, a
+co-tenant compile starting mid-run).
+
+CORRECTION TO AN EARLIER READING IN THIS ENTRY. On the first three runs every exclusion fell
+BELOW 1.0 and this entry called the bias one-directional, reading it as an ordering effect the
+swap schedule only partly cancels. Runs H and I refute that: run H `d6_256` excludes 1.0 from
+ABOVE, at [1.0001, 1.0375] with null median 1.0180. The bias therefore has no fixed sign and is
+better described as per-run drift on a shared host than as a systematic position effect — which
+matters, because a fixed-sign bias could in principle be corrected for, and a drifting one cannot.
+`d6_256` is the workload that fails most often, inadmissible in four of five runs.
 
 This is why the admissibility guard is the load-bearing part of the fix rather than the median CI
-itself. Without it the same bootstrap would have certified those three rows.
+itself. Without it the same bootstrap would have certified all six of those rows.
 
 ### Integrity check on the gate change, per the repo's own standard
 
 The standard says a gate change that suddenly produces wins was a loosening, not a fix, so the
-split is published rather than summarised. Of the 9 rows measured under the new instrument: **6
-admissible, and all 6 read WIN(itoa2); 3 refused as NULL-INADMISSIBLE.** That "all admissible rows
+split is published rather than summarised. Of the 15 rows measured under the new instrument: **9
+admissible, and all 9 read WIN(itoa2); 6 refused as NULL-INADMISSIBLE.** That "all admissible rows
 win" pattern is exactly the loosening signature and is why this entry does NOT certify a
 magnitude. Three counterweights are recorded so a later reader can judge for themselves:
 
@@ -14774,20 +14789,22 @@ magnitude. Three counterweights are recorded so a later reader can judge for the
   rows. A pure loosening rejects nothing.
 * It did not rescue the retracted claim. Under the old rule the maximum was 1.345x; under the new
   one it is 1.300x. The gate change moved nothing toward 6x or 2.4-3.4x, which stay refuted.
-* The verdict is still worker-dependent. `d6_256` reads WIN on run E and NULL-INADMISSIBLE on both
-  F and G. Identical source, three self-reported ELF hashes, three verdicts driven by which host
-  `rch` picked.
+* The verdict is still worker-dependent. `d6_256` reads WIN on run E and NULL-INADMISSIBLE on F,
+  G, H and I — inadmissible in four runs of five, and on run H the null is biased in the OPPOSITE
+  direction from the others. Identical source, five self-reported ELF hashes, verdicts driven by
+  which host `rch` picked.
 
 ### VERDICT
 
 **Direction: consistent. Magnitude: UNCERTIFIED. The retracted figures: refuted.**
 
-All 42 A/B ratios across every run sit above 1.0, and no run in any configuration produced a
+All 54 A/B ratios across every run sit above 1.0, and no run in any configuration produced a
 REGRESSION, so a real compute advantage for the direct digit writer is very likely. But no figure
 may be quoted: `itoa2/tostr` ranges 1.013-1.345 and `itoa2/divloop` ranges 1.111-1.336 **on
-identical source**, a spread far larger than any effect being claimed, and one third of rows are
-refused by the instrument's own control. A number nobody can reproduce within 30 points is not a
-measurement.
+identical source**, a spread far larger than any effect being claimed, and 6 of 15 rows are
+refused by the instrument's own control. Restricting to the 9 ADMISSIBLE rows alone does not
+rescue it: `itoa2/divloop` still spans 1.125-1.300 and `itoa2/tostr` 1.023-1.214 there. A number
+nobody can reproduce within 17 points is not a measurement.
 
 NO PRODUCT CODE CHANGE, and none is warranted. `fr-persist` `decimal_i64_scratch` (lib.rs:17)
 calls `fr_protocol::write_u64_digits`; the bench's correctness gate proves byte-identical
