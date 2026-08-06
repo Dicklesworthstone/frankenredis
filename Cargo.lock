@@ -414,6 +414,7 @@ dependencies = [
  "fr-protocol",
  "fr-simd",
  "proptest",
+ "sha2",
 ]
 
 [[package]]

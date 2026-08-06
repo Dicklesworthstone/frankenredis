@@ -20,9 +20,48 @@ use std::time::Instant;
 use fr_protocol::write_u64_digits;
 
 const ROUNDS: usize = 41;
-const TARGET_SEGMENT_SECS: f64 = 0.060;
+/// (frankenredis-tgr69/ef928) 60ms segments left the orig-vs-orig null at cv
+/// 4.8-10.5% with p5..p95 as wide as [0.78, 1.16] across four runs on three
+/// different rch workers — too wide to read a ~1.2x effect, and wide enough that
+/// the verdict column flipped between runs for the SAME workload. vqjz1 had
+/// already raised this 4ms -> 60ms without resolving it and recorded "re-run on a
+/// quiescent host" as the retry predicate.
+///
+/// More ROUNDS cannot help: it sharpens the estimate of the null's percentiles
+/// but does not narrow the distribution those percentiles describe. Only a longer
+/// measured segment does, by averaging more scheduler noise into each sample. So
+/// 300ms is the honest lever to reach for before declaring the effect
+/// unmeasurable — it is an instrument improvement, not a relaxation of the gate,
+/// which stays exactly where vqjz1 set it.
+const TARGET_SEGMENT_SECS: f64 = 0.300;
 const NULL_LO: f64 = 0.05;
 const NULL_HI: f64 = 0.95;
+
+/// SHA-256 of the ELF actually running, reported by the process itself.
+///
+/// (frankenredis-tgr69/ef928) This bench has already published one figure that
+/// turned out to describe something other than what it claimed, so a ratio taken
+/// from it must be attributable to an identifiable build. Hashing
+/// `current_exe()` from INSIDE the run is the point: a hash computed by the
+/// harness outside the process could name a different binary than the one that
+/// produced the numbers.
+fn bench_elf_sha256() -> Result<(String, usize), String> {
+    use sha2::{Digest, Sha256};
+
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("could not resolve bench executable: {error}"))?;
+    let bytes = std::fs::read(&executable)
+        .map_err(|error| format!("could not read {}: {error}", executable.display()))?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let mut digest = String::with_capacity(64);
+    for byte in hasher.finalize() {
+        digest.push(char::from(HEX[usize::from(byte >> 4)]));
+        digest.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    Ok((digest, bytes.len()))
+}
 
 /// CAND: mirror of fr-persist `decimal_i64_scratch` + `decimal_i64_bytes` (the shipped itoa2 path).
 fn itoa2_bytes(value: i64) -> Vec<u8> {
@@ -82,6 +121,13 @@ fn pct(sorted: &[f64], p: f64) -> f64 {
 }
 
 fn main() {
+    match bench_elf_sha256() {
+        Ok((sha256, bytes)) => println!("bench_elf_sha256={sha256} ({bytes} bytes)"),
+        // Refuse to print a table that cannot be attributed to a build. This
+        // bench's history is precisely that of an unattributable number.
+        Err(error) => panic!("ELF SELF-REPORT INVALID: {error}"),
+    }
+
     // Correctness gate: byte-identical rendering across sign edges, zero, i64 extremes, widths.
     for v in [
         0i64, 1, -1, 9, -9, 10, -10, 99, -99, 100, -100, 12345, -12345, i64::MIN, i64::MAX,

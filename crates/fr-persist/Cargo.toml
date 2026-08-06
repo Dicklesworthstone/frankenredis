@@ -18,6 +18,10 @@ fr-simd = { version = "0.1.0", path = "../fr-simd" }
 [dev-dependencies]
 proptest.workspace = true
 criterion = "0.8"
+# (frankenredis-tgr69/ef928) Bench-only: lets int_render_itoa2 self-report the SHA-256 of the ELF
+# actually executing, so a recorded ratio cannot later be attributed to a build nobody can identify.
+# Same workspace dep the fr-protocol benches already use for this.
+sha2.workspace = true
 
 # (frankenredis VERIFY phase, cc) Server-free, degradation-immune criterion bench of the RDB
 # encode+decode path — exercises the presize/direct-emit encode levers + the decode-string-move
