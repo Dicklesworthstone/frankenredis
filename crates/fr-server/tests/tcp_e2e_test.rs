@@ -1905,6 +1905,140 @@ fn sharded_dbsize_and_info_keyspace_aggregate_every_partition() {
     );
 }
 
+/// DBSIZE takes EVERY partition lock at once, so it is the only operation in the
+/// reactor that holds more than one. That makes lock ordering a real risk rather
+/// than a theoretical one, and a mistake there shows up as a hang, not a wrong
+/// answer -- which no equality assertion would ever catch. (frankenredis-91rts)
+///
+/// This drives writers on separate connections, spread over every reactor, while
+/// aggregates run concurrently from another connection. The aggregates must keep
+/// completing throughout (the harness read deadline turns a deadlock into a test
+/// failure instead of a wedged suite), every reply must be a well-formed integer
+/// rather than a torn or partial frame, and once the writers quiesce the count
+/// must agree exactly with Redis over the same command stream.
+#[test]
+fn sharded_dbsize_aggregate_is_safe_under_concurrent_cross_partition_writes() {
+    const WORKERS: usize = 8;
+    const WRITERS: usize = 4;
+    const KEYS_PER_WRITER: usize = 40;
+
+    let fr_port = reserve_port();
+    let redis_port = reserve_port();
+    let _fr_server = spawn_frankenredis_sharded_set_get(fr_port, WORKERS);
+    let _redis_server = spawn_legacy_redis(redis_port);
+
+    // Every writer owns a disjoint key range, so the final count is exact and
+    // does not depend on interleaving.
+    let plans: Vec<Vec<Vec<u8>>> = (0..WRITERS)
+        .map(|writer| {
+            (0..KEYS_PER_WRITER)
+                .map(|index| format!("conc:{writer}:{index}").into_bytes())
+                .collect()
+        })
+        .collect();
+
+    let all_keys: Vec<&Vec<u8>> = plans.iter().flatten().collect();
+    let workers_reached: std::collections::HashSet<usize> = all_keys
+        .iter()
+        .map(|key| usize::from(fr_store::crc16_slot(key)) % WORKERS)
+        .collect();
+    assert_eq!(
+        workers_reached.len(),
+        WORKERS,
+        "concurrent writes must span every reactor or the multi-lock path is not contended"
+    );
+
+    // Start the aggregate loop only once every writer is connected and ready, so
+    // the aggregates genuinely overlap the writes rather than racing ahead.
+    let barrier = Arc::new(Barrier::new(WRITERS + 1));
+    let mut writer_threads = Vec::with_capacity(WRITERS);
+    for keys in plans.clone() {
+        let barrier = Arc::clone(&barrier);
+        writer_threads.push(thread::spawn(move || {
+            let mut client = BufferedTcpClient::connect(fr_port);
+            barrier.wait();
+            // Churn the keyspace: create, delete, and recreate, so partition
+            // counts move up and down underneath the aggregates.
+            for pass in 0..3 {
+                for key in &keys {
+                    client.write_all(&encode_command(&[b"SET".as_slice(), key, b"v".as_slice()]));
+                    client.read_response();
+                    if pass < 2 {
+                        client.write_all(&encode_command(&[b"DEL".as_slice(), key]));
+                        client.read_response();
+                    }
+                }
+            }
+        }));
+    }
+
+    let mut aggregator = BufferedTcpClient::connect(fr_port);
+    barrier.wait();
+    let dbsize = encode_command(&[b"DBSIZE"]);
+    let info_keyspace = encode_command(&[b"INFO", b"keyspace"]);
+    let total_keys = WRITERS * KEYS_PER_WRITER;
+    let mut aggregates_completed = 0usize;
+    for round in 0..200 {
+        aggregator.write_all(&dbsize);
+        match aggregator.read_response() {
+            RespFrame::Integer(count) => assert!(
+                (0..=total_keys as i64).contains(&count),
+                "round {round}: DBSIZE {count} is outside the range the keyspace can hold"
+            ),
+            other => panic!("round {round}: DBSIZE must reply with an integer, got {other:?}"),
+        }
+        // INFO Keyspace walks the same all-partition snapshot, so exercise it
+        // under contention too rather than only the integer path.
+        aggregator.write_all(&info_keyspace);
+        let keyspace = aggregator.read_response();
+        if let Some((keys, expires)) = parse_db0_keyspace_line(&keyspace) {
+            assert!(
+                keys <= total_keys as u64,
+                "round {round}: INFO keyspace reported {keys} keys, more than exist"
+            );
+            assert_eq!(
+                expires, 0,
+                "round {round}: no key in this test carries a TTL"
+            );
+        }
+        aggregates_completed += 1;
+    }
+    assert_eq!(
+        aggregates_completed, 200,
+        "every aggregate must complete; a lock-order bug would hang here instead"
+    );
+
+    for handle in writer_threads {
+        handle.join().expect("writer thread must not panic");
+    }
+
+    // Writers have quiesced: the snapshot must now agree exactly with Redis over
+    // the same command stream.
+    let mut redis = BufferedTcpClient::connect(redis_port);
+    let mut replay = Vec::new();
+    for keys in &plans {
+        for key in keys {
+            replay.extend_from_slice(&encode_command(&[b"SET".as_slice(), key, b"v".as_slice()]));
+        }
+    }
+    redis.write_all(&replay);
+    let _ = redis.read_responses(total_keys);
+
+    aggregator.write_all(&dbsize);
+    redis.write_all(&dbsize);
+    let fr_final = aggregator.read_response();
+    assert_eq!(
+        fr_final,
+        redis.read_response(),
+        "after concurrent churn the aggregate must equal Redis over the same surviving keyspace"
+    );
+    assert_eq!(
+        fr_final,
+        RespFrame::Integer(total_keys as i64),
+        "the final pass recreates every key, so all {total_keys} must be counted"
+    );
+}
+
 #[test]
 fn tcp_error_response() {
     let (port, server) = start_single_client_server();
