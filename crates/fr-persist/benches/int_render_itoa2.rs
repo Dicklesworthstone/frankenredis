@@ -20,7 +20,7 @@ use std::time::Instant;
 use fr_protocol::write_u64_digits;
 
 const ROUNDS: usize = 41;
-const TARGET_SEGMENT_SECS: f64 = 0.004;
+const TARGET_SEGMENT_SECS: f64 = 0.060;
 const NULL_LO: f64 = 0.05;
 const NULL_HI: f64 = 0.95;
 
@@ -37,6 +37,36 @@ fn itoa2_bytes(value: i64) -> Vec<u8> {
 /// ORIG: the pre-itoa2 fmt+alloc path.
 fn to_string_bytes(value: i64) -> Vec<u8> {
     value.to_string().into_bytes()
+}
+
+/// ORIG-2: the SINGLE-DIGIT div-by-10 loop that `decimal_i64_scratch` actually
+/// replaced. (frankenredis-vqjz1)
+///
+/// This is a different baseline from `to_string_bytes` above, and measuring the
+/// right one matters: vqjz1's claim is specifically "one division per digit ->
+/// two digits per division", NOT "avoid core::fmt". The to_string arm bundles
+/// the Display machinery into the delta and so cannot answer vqjz1 — against
+/// that baseline itoa2 would look good even if the digit loop itself were no
+/// faster. Both arms here write into a stack buffer and do exactly one heap
+/// alloc (the result Vec), so this isolates division count alone.
+fn divloop_bytes(value: i64) -> Vec<u8> {
+    let mut scratch = [0u8; 20];
+    let mut end = scratch.len();
+    let mut n = value.unsigned_abs();
+    if n == 0 {
+        end -= 1;
+        scratch[end] = b'0';
+    }
+    while n > 0 {
+        end -= 1;
+        scratch[end] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    if value < 0 {
+        end -= 1;
+        scratch[end] = b'-';
+    }
+    scratch[end..].to_vec()
 }
 
 fn median(r: &mut [f64]) -> f64 {
@@ -58,6 +88,11 @@ fn main() {
         i64::MIN + 1, i64::MAX - 1, 1_000_000_000_000, -1_000_000_000_000,
     ] {
         assert_eq!(itoa2_bytes(v), to_string_bytes(v), "render diverged on {v}");
+        assert_eq!(
+            itoa2_bytes(v),
+            divloop_bytes(v),
+            "itoa2 vs div-by-10 loop diverged on {v}"
+        );
     }
 
     // Batches of i64 spanning the digit-width distribution seen on int-heavy collections.
@@ -77,13 +112,31 @@ fn main() {
     ];
 
     println!(
-        "\n{:<12} {:>7} {:>9} {:>16} {:>8} {:>13} {:>14}",
-        "workload", "reps", "NULL med", "null p5..p95", "null cv%", "itoa2/tostr", "verdict"
+        "\n{:<12} {:>7} {:>9} {:>16} {:>8} {:>13} {:>14} {:>15} {:>16}",
+        "workload",
+        "reps",
+        "NULL med",
+        "null p5..p95",
+        "null cv%",
+        "itoa2/tostr",
+        "verdict",
+        "itoa2/divloop",
+        "verdict(vqjz1)"
     );
 
     for (label, vals) in cases {
-        let orig = |vs: &[i64]| vs.iter().map(|&v| to_string_bytes(v).len()).sum::<usize>();
-        let cand = |vs: &[i64]| vs.iter().map(|&v| itoa2_bytes(v).len()).sum::<usize>();
+        // Sink over the RENDERED BYTES, not just the length. Summing .len()
+        // lets the optimizer skip materializing the digits — the length of an
+        // i64's decimal form is derivable without writing them — which is how
+        // this bench reported a 5.35x "win" at d1_256, where both arms perform
+        // exactly one division and the true delta must be ~nil. Folding every
+        // byte forces the digit loop to actually run. (frankenredis-vqjz1)
+        fn fold(bytes: &[u8]) -> usize {
+            bytes.iter().fold(0usize, |a, &b| a.wrapping_mul(31).wrapping_add(b as usize))
+        }
+        let orig = |vs: &[i64]| vs.iter().map(|&v| fold(&to_string_bytes(v))).sum::<usize>();
+        let cand = |vs: &[i64]| vs.iter().map(|&v| fold(&itoa2_bytes(v))).sum::<usize>();
+        let divloop = |vs: &[i64]| vs.iter().map(|&v| fold(&divloop_bytes(v))).sum::<usize>();
         let time = |f: &dyn Fn(&[i64]) -> usize, reps: usize| -> f64 {
             let start = Instant::now();
             let mut acc = 0usize;
@@ -105,6 +158,7 @@ fn main() {
 
         let mut nulls = Vec::with_capacity(ROUNDS);
         let mut speeds = Vec::with_capacity(ROUNDS);
+        let mut divloop_speeds = Vec::with_capacity(ROUNDS);
         for round in 0..=ROUNDS {
             let swap = round % 2 == 1;
             let pair = |bf: &dyn Fn(&[i64]) -> usize, cf: &dyn Fn(&[i64]) -> usize| {
@@ -118,33 +172,42 @@ fn main() {
             };
             let nn = pair(&orig, &orig);
             let sp = pair(&orig, &cand);
+            // Same interleave and swap schedule, so the div-by-10 comparison is
+            // gated by the SAME null as the to_string one.
+            let dv = pair(&divloop, &cand);
             if round == 0 {
                 continue;
             }
             nulls.push(nn);
             speeds.push(sp);
+            divloop_speeds.push(dv);
         }
 
         let null_med = median(&mut nulls);
         let speedup = median(&mut speeds);
         let lo = pct(&nulls, NULL_LO);
         let hi = pct(&nulls, NULL_HI);
-        let verdict = if speedup > 1.0 && speedup > hi {
-            "WIN(itoa2)"
-        } else if speedup < 1.0 && speedup < lo {
-            "REGRESSION"
-        } else {
-            "indistinguishable"
+        let divloop_speedup = median(&mut divloop_speeds);
+        let verdict = |s: f64| {
+            if s > 1.0 && s > hi {
+                "WIN(itoa2)"
+            } else if s < 1.0 && s < lo {
+                "REGRESSION"
+            } else {
+                "indistinguishable"
+            }
         };
         println!(
-            "{:<12} {:>7} {:>9.4} {:>16} {:>8.2} {:>12.3}x {:>14}",
+            "{:<12} {:>7} {:>9.4} {:>16} {:>8.2} {:>12.3}x {:>14} {:>14.3}x {:>16}",
             label,
             reps,
             null_med,
             format!("[{lo:.3}, {hi:.3}]"),
             cv(&nulls),
             speedup,
-            verdict
+            verdict(speedup),
+            divloop_speedup,
+            verdict(divloop_speedup)
         );
     }
 }
