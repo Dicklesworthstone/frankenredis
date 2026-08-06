@@ -69,11 +69,25 @@ fn exchange(stream: &mut TcpStream, parts: &[&[u8]]) -> Vec<u8> {
 }
 
 fn reserve_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind ephemeral port")
-        .local_addr()
-        .expect("local addr")
-        .port()
+    use std::sync::atomic::{AtomicU16, Ordering};
+    // (frankenredis-pve7s) This binary is where the race was actually OBSERVED:
+    // `wait_for_port` succeeded and the following `connect_client` was refused,
+    // which is the signature of another process having taken the port and then
+    // closed -- a merely slow server would have failed inside `wait_for_port`
+    // instead. Binding :0 and reading the port drops the listener before the
+    // server binds, leaving exactly that window. A per-binary monotonic counter
+    // removes the test-vs-test case; the bind is only a liveness probe.
+    static NEXT_PORT: AtomicU16 = AtomicU16::new(36_000);
+    for _ in 0..500 {
+        let port = NEXT_PORT.fetch_add(1, Ordering::Relaxed);
+        if port < 36_000 {
+            continue;
+        }
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
+    panic!("could not reserve a free TCP port");
 }
 
 fn wait_for_port(port: u16) {

@@ -58,11 +58,23 @@ fn send_command(stream: &mut TcpStream, parts: &[&[u8]]) -> RespFrame {
 }
 
 fn reserve_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind ephemeral port")
-        .local_addr()
-        .expect("local addr")
-        .port()
+    use std::sync::atomic::{AtomicU16, Ordering};
+    // (frankenredis-pve7s) See the note in client_kill_test.rs: binding :0 and
+    // reading the port drops the listener before the server binds, leaving a
+    // window in which any other process can take it. A per-binary monotonic
+    // counter removes the test-vs-test case; the bind is only a liveness probe.
+    // Base is unique per test binary.
+    static NEXT_PORT: AtomicU16 = AtomicU16::new(35_000);
+    for _ in 0..500 {
+        let port = NEXT_PORT.fetch_add(1, Ordering::Relaxed);
+        if port < 35_000 {
+            continue;
+        }
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
+    panic!("could not reserve a free TCP port");
 }
 
 fn wait_until(timeout: Duration, mut check: impl FnMut() -> bool, message: &str) {

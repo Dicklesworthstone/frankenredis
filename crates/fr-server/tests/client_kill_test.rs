@@ -56,11 +56,30 @@ fn send_command(stream: &mut TcpStream, parts: &[&[u8]]) -> RespFrame {
 }
 
 fn reserve_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind ephemeral port")
-        .local_addr()
-        .expect("local addr")
-        .port()
+    use std::sync::atomic::{AtomicU16, Ordering};
+    // (frankenredis-pve7s) `bind("127.0.0.1:0")` then reading `.port()` drops the
+    // listener at the end of that expression, leaving the port unbound until the
+    // spawned server claims it. Anything on the host can take it in between --
+    // including another test doing exactly the same thing, since two concurrent
+    // binds to :0 can hand out the same freshly-released ephemeral port.
+    //
+    // A monotonic counter gives every test in this binary a distinct candidate,
+    // which removes the test-vs-test collision outright; the bind below is only a
+    // liveness probe to skip a port an unrelated process already holds. This is
+    // the pattern frankenredis-vcv8o established in tcp_e2e_test.rs for the same
+    // failure. The base is unique per test BINARY, because the counter is static
+    // per binary and `cargo test` runs binaries concurrently.
+    static NEXT_PORT: AtomicU16 = AtomicU16::new(34_000);
+    for _ in 0..500 {
+        let port = NEXT_PORT.fetch_add(1, Ordering::Relaxed);
+        if port < 34_000 {
+            continue;
+        }
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
+    panic!("could not reserve a free TCP port");
 }
 
 fn wait_until(timeout: Duration, mut check: impl FnMut() -> bool, message: &str) {
