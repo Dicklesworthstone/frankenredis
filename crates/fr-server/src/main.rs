@@ -2757,6 +2757,10 @@ enum ReactorInfoRequest {
     /// Every requested section is Clients (possibly repeated). Served from the
     /// per-reactor published slots. (frankenredis-zydmi)
     ClientsOnly,
+    /// Every requested section is Stats (possibly repeated). Served from BOTH
+    /// populations: keyspace counters summed over partitions, connection
+    /// counters from the published reactor slots. (frankenredis-zydmi)
+    StatsOnly,
     /// At least one section needs reactor-local state this path does not yet
     /// publish, or the request is the bare/`all`/`default` form implying such
     /// sections.
@@ -2775,6 +2779,8 @@ fn classify_reactor_info_request(args: &[&[u8]]) -> ReactorInfoRequest {
         ReactorInfoRequest::KeyspaceOnly
     } else if all_of(b"clients") {
         ReactorInfoRequest::ClientsOnly
+    } else if all_of(b"stats") {
+        ReactorInfoRequest::StatsOnly
     } else {
         ReactorInfoRequest::NotAggregatable
     }
@@ -2864,6 +2870,79 @@ fn render_aggregate_keyspace_section(per_db: &[(usize, usize, u128)]) -> Vec<u8>
     info.into_bytes()
 }
 
+/// Borrow the payload of a RESP bulk-string reply, or None for any other frame.
+///
+/// Used to unwrap a partition's own INFO rendering before rewriting it; an error
+/// reply has no body and must be forwarded untouched. (frankenredis-zydmi)
+fn resp_bulk_body(reply: &[u8]) -> Option<&[u8]> {
+    let rest = reply.strip_prefix(b"$")?;
+    let header_end = rest.windows(2).position(|w| w == b"\r\n")?;
+    let len: usize = std::str::from_utf8(&rest[..header_end])
+        .ok()?
+        .parse()
+        .ok()?;
+    let body_start = header_end + 2;
+    rest.get(body_start..body_start + len)
+}
+
+/// Rewrite the additive lines of an INFO Stats section rendered by one partition.
+///
+/// (frankenredis-zydmi) The field SET and ORDER come from `template`, which the
+/// normal `fr-command` emitter produced, so this cannot drift out of parity when
+/// that emitter changes -- the alternative, re-listing INFO's ~53 Stats fields
+/// here, is a second copy that would silently rot. Only values named in the rule
+/// table are replaced; every other line passes through untouched.
+///
+/// THE RULE TABLE IS THE CORRECTNESS CLAIM. Three kinds of field, and getting one
+/// into the wrong class yields a plausible-looking wrong INFO, which is the exact
+/// failure this bead family exists to avoid:
+///
+///   * `partition_sums` -- incremented by KEYSPACE work, which the topology
+///     spreads across partitions, so the server-wide value is their sum.
+///   * `reactor_sums` -- incremented by CONNECTION work, which lives in each
+///     reactor's thread-local runtime; the template's copy is 0 because
+///     partitions never see a socket, so these are SUBSTITUTED, not summed with
+///     it.
+///   * everything else -- passthrough. Either a genuine constant for this
+///     topology (replication, defrag, fork and io-thread counters are all 0
+///     because none of those subsystems runs here) or a value identical in every
+///     partition.
+///
+/// KNOWN LIMIT, recorded rather than papered over: `instantaneous_ops_per_sec`
+/// and the `instantaneous_*_kbps` rates pass through as partition 0's value.
+/// They are sampled rates, not counters, so they are neither additive nor
+/// meaningful from one partition -- computing a true server-wide rate needs a
+/// sampling window this path does not own. They are reported as the partition's
+/// own figure and must not be read as a server total.
+fn rewrite_additive_stats_lines(
+    template: &[u8],
+    partition_sums: &[(&str, u64)],
+    reactor_sums: &[(&str, u64)],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(template.len());
+    for line in template.split_inclusive(|byte| *byte == b'\n') {
+        let trimmed = line
+            .strip_suffix(b"\n")
+            .map_or(line, |l| l.strip_suffix(b"\r").unwrap_or(l));
+        let replacement = trimmed
+            .iter()
+            .position(|byte| *byte == b':')
+            .and_then(|colon| {
+                let field = std::str::from_utf8(&trimmed[..colon]).ok()?;
+                partition_sums
+                    .iter()
+                    .chain(reactor_sums.iter())
+                    .find(|(name, _)| *name == field)
+                    .map(|(name, value)| format!("{name}:{value}\r\n"))
+            });
+        match replacement {
+            Some(rewritten) => out.extend_from_slice(rewritten.as_bytes()),
+            None => out.extend_from_slice(line),
+        }
+    }
+    out
+}
+
 /// Answer a whole-keyspace command from a simultaneous snapshot of every
 /// partition, appending the RESP reply to `out`.
 ///
@@ -2912,6 +2991,59 @@ fn execute_reactor_cross_partition_aggregate(
                 RespFrame::BulkString(Some(render_aggregate_clients_section(
                     stats.connected_clients,
                     maxclients,
+                )))
+                .encode_into(out);
+                return true;
+            }
+            ReactorInfoRequest::StatsOnly => {
+                let reactor = reactor_stats.aggregate();
+                let mut guards = partitions.lock_all_partitions_in_index_order();
+                // Sum the keyspace-side counters by NAME, so the rule table and
+                // the accessor that supplies it stay in one place.
+                let mut partition_sums: Vec<(&str, u64)> = guards
+                    .first()
+                    .map(|p| {
+                        p.partition_additive_stats()
+                            .iter()
+                            .map(|(name, _)| (*name, 0u64))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                for partition in &guards {
+                    for (slot, (_, value)) in partition_sums
+                        .iter_mut()
+                        .zip(partition.partition_additive_stats())
+                    {
+                        slot.1 += value;
+                    }
+                }
+                // Render the field template from partition 0. This costs the one
+                // command increment upstream also charges for its own INFO, and
+                // it is taken AFTER the sums above so the template's own
+                // total_commands_processed cannot double-count.
+                let template = guards
+                    .first_mut()
+                    .map(|partition| partition.execute_bytes(frame, ts))
+                    .unwrap_or_default();
+                drop(guards);
+                let Some(body) = resp_bulk_body(&template) else {
+                    // The partition answered with an error (e.g. arity); forward
+                    // it verbatim rather than inventing a section.
+                    out.extend_from_slice(&template);
+                    return true;
+                };
+                let reactor_sums = [
+                    (
+                        "total_connections_received",
+                        reactor.total_connections_received,
+                    ),
+                    ("total_net_input_bytes", reactor.net_input_bytes),
+                    ("total_net_output_bytes", reactor.net_output_bytes),
+                ];
+                RespFrame::BulkString(Some(rewrite_additive_stats_lines(
+                    body,
+                    &partition_sums,
+                    &reactor_sums,
                 )))
                 .encode_into(out);
                 return true;
@@ -30080,10 +30212,19 @@ mod tests {
         );
 
         // (frankenredis-zydmi) Clients is now served from the per-reactor
-        // published slots.
+        // published slots, and Stats from both populations merged.
         assert_eq!(
             crate::classify_reactor_info_request(&[b"INFO", b"clients"]),
             ReactorInfoRequest::ClientsOnly
+        );
+        assert_eq!(
+            crate::classify_reactor_info_request(&[b"INFO", b"stats"]),
+            ReactorInfoRequest::StatsOnly
+        );
+        assert_eq!(
+            crate::classify_reactor_info_request(&[b"INFO", b"Stats", b"STATS"]),
+            ReactorInfoRequest::StatsOnly,
+            "case-insensitive and repetition-tolerant"
         );
         assert_eq!(
             crate::classify_reactor_info_request(&[b"INFO", b"CLIENTS", b"clients"]),
@@ -30097,7 +30238,6 @@ mod tests {
             &[b"INFO", b"everything"],
             &[b"INFO", b"default"],
             &[b"INFO", b"server"],
-            &[b"INFO", b"stats"],
             &[b"INFO", b"memory"],
             // Mixed requests must be refused whole: emitting only the half we
             // can aggregate would silently drop sections the client asked for.

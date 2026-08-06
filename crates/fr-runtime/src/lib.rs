@@ -7146,6 +7146,47 @@ impl Runtime {
         self.server.store.server_maxclients
     }
 
+    /// The INFO Stats counters that are ADDITIVE across a partitioned keyspace,
+    /// for THIS runtime's partition. (frankenredis-zydmi)
+    ///
+    /// Returned as `(field_name, value)` pairs so a cross-partition aggregate can
+    /// sum them by name into a template rendered by the normal INFO emitter,
+    /// rather than re-listing INFO's field set in a second place where the two
+    /// could drift apart.
+    ///
+    /// Membership is a correctness claim, not a convenience: every counter here
+    /// is incremented by keyspace work, which the shared-nothing topology spreads
+    /// across partitions, so the server-wide value is their sum. Counters
+    /// incremented by CONNECTION work are deliberately absent -- they live in each
+    /// reactor's thread-local runtime and are published separately.
+    #[must_use]
+    pub fn partition_additive_stats(&self) -> [(&'static str, u64); 9] {
+        let store = &self.server.store;
+        [
+            (
+                "total_commands_processed",
+                store.stat_total_commands_processed,
+            ),
+            ("expired_keys", store.stat_expired_keys),
+            ("evicted_keys", store.stat_evicted_keys),
+            ("keyspace_hits", store.stat_keyspace_hits),
+            ("keyspace_misses", store.stat_keyspace_misses),
+            (
+                "expire_cycle_cpu_milliseconds",
+                store.stat_expire_cycle_cpu_milliseconds,
+            ),
+            ("tracking_total_keys", store.stat_tracking_total_keys as u64),
+            (
+                "tracking_total_items",
+                store.stat_tracking_total_items as u64,
+            ),
+            (
+                "tracking_total_prefixes",
+                store.stat_tracking_total_prefixes as u64,
+            ),
+        ]
+    }
+
     /// Connections ever accepted by THIS runtime.
     ///
     /// (frankenredis-zydmi) The shared-nothing server gives every reactor its own

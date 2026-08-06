@@ -2108,6 +2108,137 @@ fn cluster_enabled_config_starts_a_cluster_mode_server_matching_legacy_redis() {
     );
 }
 
+/// INFO Stats must merge BOTH populations: keyspace counters summed over
+/// partitions, connection counters from the reactor slots. (frankenredis-zydmi)
+///
+/// Stats cannot be compared to Redis value-for-value — the two servers process
+/// different command counts and different byte volumes during the test — so this
+/// pins the two things that ARE checkable, and they are the two that matter:
+/// the FIELD SET AND ORDER must equal a real 7.2.4 server's (a genuine parity
+/// claim, and the thing most likely to rot), and the additive counters must
+/// reflect the whole server rather than one partition's or one reactor's share.
+#[test]
+fn sharded_info_stats_merges_partition_and_reactor_counters() {
+    const WORKERS: usize = 8;
+    const KEYS: usize = 40;
+
+    let fr_port = reserve_port();
+    let redis_port = reserve_port();
+    let _fr_server = spawn_frankenredis_sharded_set_get(fr_port, WORKERS);
+    let _redis_server = spawn_legacy_redis(redis_port);
+    let mut fr = BufferedTcpClient::connect(fr_port);
+    let mut redis = BufferedTcpClient::connect(redis_port);
+
+    let info_stats = encode_command(&[b"INFO", b"stats"]);
+
+    // Field set and ORDER parity against a real 7.2.4 server.
+    fr.write_all(&info_stats);
+    redis.write_all(&info_stats);
+    let fr_fields = info_field_order(&fr.read_response());
+    let redis_fields = info_field_order(&redis.read_response());
+    assert_eq!(
+        fr_fields, redis_fields,
+        "INFO stats field set and order must match Redis 7.2.4 exactly"
+    );
+
+    // Drive keyspace work that deliberately scatters over every reactor, then
+    // check the keyspace-side counters describe the WHOLE keyspace.
+    let keys: Vec<Vec<u8>> = (0..KEYS)
+        .map(|i| format!("stats:key:{i}").into_bytes())
+        .collect();
+    let workers_reached: std::collections::HashSet<usize> = keys
+        .iter()
+        .map(|key| usize::from(fr_store::crc16_slot(key)) % WORKERS)
+        .collect();
+    assert_eq!(
+        workers_reached.len(),
+        WORKERS,
+        "fixtures must reach every reactor or the merge is not exercised"
+    );
+
+    let mut work = Vec::new();
+    for key in &keys {
+        work.extend_from_slice(&encode_command(&[b"SET".as_slice(), key, b"v".as_slice()]));
+        work.extend_from_slice(&encode_command(&[b"GET".as_slice(), key]));
+        work.extend_from_slice(&encode_command(&[
+            b"GET".as_slice(),
+            b"stats:absent".as_slice(),
+        ]));
+    }
+    fr.write_all(&work);
+    let _ = fr.read_responses(KEYS * 3);
+
+    fr.write_all(&info_stats);
+    let after = fr.read_response();
+    let commands = parse_info_u64(&after, "total_commands_processed");
+    let hits = parse_info_u64(&after, "keyspace_hits");
+    let misses = parse_info_u64(&after, "keyspace_misses");
+
+    // The discriminating bounds. 120 keyed commands were spread over 32
+    // partitions, so a single-partition answer lands near 4 and a single-reactor
+    // answer near 15 — both far below these floors.
+    assert!(
+        commands >= (KEYS * 3) as u64,
+        "total_commands_processed {commands} must cover all {} commands, not one partition's share",
+        KEYS * 3
+    );
+    assert!(
+        hits >= KEYS as u64,
+        "keyspace_hits {hits} must sum every partition (expected >= {KEYS})"
+    );
+    assert!(
+        misses >= KEYS as u64,
+        "keyspace_misses {misses} must sum every partition (expected >= {KEYS})"
+    );
+
+    // Connection-side counters come from the reactor slots, and the template's
+    // own copy is 0 because partitions never see a socket — so a passthrough bug
+    // shows up as exactly 0 here.
+    let connections = parse_info_u64(&after, "total_connections_received");
+    let input_bytes = parse_info_u64(&after, "total_net_input_bytes");
+    assert!(
+        connections >= 1,
+        "total_connections_received must come from the reactor slots, got {connections}"
+    );
+    assert!(
+        input_bytes > 0,
+        "total_net_input_bytes must come from the reactor slots, got {input_bytes}"
+    );
+
+    // Topology constants stay 0 — none of these subsystems runs in this mode, and
+    // summing a partition's copy must not have invented a value.
+    for zero_field in [
+        "sync_full",
+        "total_forks",
+        "active_defrag_hits",
+        "total_net_repl_input_bytes",
+    ] {
+        assert_eq!(
+            parse_info_u64(&after, zero_field),
+            0,
+            "{zero_field} must stay 0 in the shared-nothing topology"
+        );
+    }
+}
+
+/// Field names of an INFO section reply, in emission order.
+fn info_field_order(frame: &RespFrame) -> Vec<String> {
+    let body = match frame {
+        RespFrame::BulkString(Some(bytes)) => String::from_utf8_lossy(bytes).into_owned(),
+        RespFrame::Verbatim(text) => text.clone(),
+        other => panic!("INFO must reply with a bulk string, got {other:?}"),
+    };
+    body.lines()
+        .filter_map(|line| {
+            let line = line.trim_end();
+            if line.is_empty() || line.starts_with('#') {
+                return None;
+            }
+            line.split_once(':').map(|(k, _)| k.to_string())
+        })
+        .collect()
+}
+
 /// Pull a single `field:<integer>` out of an INFO section reply.
 fn parse_info_u64(frame: &RespFrame, field: &str) -> u64 {
     let body = match frame {
@@ -2234,10 +2365,12 @@ fn sharded_info_clients_aggregates_every_reactor() {
     );
 
     // Sections still backed by unpublished reactor-local state stay fail-closed,
-    // and a mixed request is refused whole rather than partially served.
+    // and a mixed request is refused whole rather than partially served. `INFO
+    // stats` is deliberately absent from this list now that it is served; its own
+    // gate is sharded_info_stats_merges_partition_and_reactor_counters.
     let mut refused = Vec::new();
     refused.extend_from_slice(&encode_command(&[b"INFO"]));
-    refused.extend_from_slice(&encode_command(&[b"INFO", b"stats"]));
+    refused.extend_from_slice(&encode_command(&[b"INFO", b"server"]));
     refused.extend_from_slice(&encode_command(&[b"INFO", b"memory"]));
     refused.extend_from_slice(&encode_command(&[b"INFO", b"clients", b"keyspace"]));
     fr.write_all(&refused);
