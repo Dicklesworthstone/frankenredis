@@ -41,12 +41,16 @@ use fr_repl::{
     evaluate_wait, evaluate_waitaof, parse_psync_reply,
 };
 use fr_store::{
-    AclKeyPattern, ClientReplyState, ClientTrackingState, CommandHistogram, CommandRecordKind,
-    DispatchAclLogContext, DispatchAclPermissionReason, DispatchAclPermissions,
-    EvictionLoopFailure, EvictionLoopResult, EvictionLoopStatus, EvictionSafetyGateState,
-    MaxmemoryPolicy, PendingAclLogEvent, SLOWLOG_ENTRY_MAX_STRING, Store, StoreError,
-    decode_db_key, encode_db_key, glob_match,
+    AclKeyPattern, ClientReplyState, ClientTrackingState, CommandRecordKind, DispatchAclLogContext,
+    DispatchAclPermissionReason, DispatchAclPermissions, EvictionLoopFailure, EvictionLoopResult,
+    EvictionLoopStatus, EvictionSafetyGateState, MaxmemoryPolicy, PendingAclLogEvent,
+    SLOWLOG_ENTRY_MAX_STRING, Store, StoreError, decode_db_key, encode_db_key, glob_match,
 };
+
+/// Re-exported so a cross-partition INFO aggregate can hold and merge per-command
+/// histograms without taking a direct fr-store dependency. (frankenredis-zu4b7)
+pub use fr_store::CommandHistogram;
+
 use sha2::{Digest, Sha256};
 
 fn encode_nonnegative_integer_reply(value: u64, out: &mut Vec<u8>) {
@@ -1581,6 +1585,74 @@ impl Runtime {
             .map(|v| v.eq_ignore_ascii_case("yes") || v.eq_ignore_ascii_case("local"))
             .unwrap_or(false)
     }
+}
+
+/// Render the INFO Commandstats section from a set of per-command histograms.
+///
+/// (frankenredis-zu4b7) Public and histogram-driven so the single-node path and
+/// the cross-partition aggregate share ONE renderer. The alternative -- a second
+/// copy in the aggregating layer -- is a duplicate of upstream's field contract
+/// that drifts silently, the same failure family as a stale doc.
+///
+/// Mirrors upstream server.c::genRedisInfoStringCommandStats (5329-5353).
+#[must_use]
+pub fn render_commandstats_section(histograms: &[(&str, &CommandHistogram)]) -> Vec<u8> {
+    let mut info = String::from("# Commandstats\r\n");
+    // Upstream omits a command entirely until one of its counters has moved.
+    for (cmd, hist) in histograms {
+        if hist.calls == 0 && hist.rejected_calls == 0 && hist.failed_calls == 0 {
+            continue;
+        }
+        // RE-DERIVED from the (possibly merged) totals, never averaged from
+        // per-partition values: averaging per-call means would be wrong whenever
+        // partitions handled unequal call counts.
+        let usec_per_call = if hist.calls > 0 {
+            hist.total_usec as f64 / hist.calls as f64
+        } else {
+            0.0
+        };
+        let _ = write!(
+            info,
+            "cmdstat_{}:calls={},usec={},usec_per_call={:.2},rejected_calls={},failed_calls={}\r\n",
+            cmd.to_ascii_lowercase(),
+            hist.calls,
+            hist.total_usec,
+            usec_per_call,
+            hist.rejected_calls,
+            hist.failed_calls,
+        );
+    }
+    info.push_str("\r\n");
+    info.into_bytes()
+}
+
+/// Render the INFO Latencystats section from a set of per-command histograms.
+///
+/// (frankenredis-zu4b7) Percentiles are computed FROM the histogram, which is why
+/// a cross-partition aggregate must merge bucket counts and call this, rather
+/// than trying to combine per-partition percentile values -- a quantile of a
+/// union cannot be recovered from the quantiles of its parts.
+#[must_use]
+pub fn render_latencystats_section(
+    histograms: &[(&str, &CommandHistogram)],
+    percentiles: &[f64],
+) -> Vec<u8> {
+    let mut info = String::from("# Latencystats\r\n");
+    for (cmd, hist) in histograms {
+        let _ = write!(info, "latency_percentiles_usec_{cmd}:");
+        for (i, &p) in percentiles.iter().enumerate() {
+            if i > 0 {
+                info.push(',');
+            }
+            let val = histogram_percentile_us(hist, p);
+            // (frankenredis-7flec) Upstream uses %.3f here (server.c:5287);
+            // mirror it to keep the section byte-equivalent.
+            let _ = write!(info, "p{p}={val:.3}");
+        }
+        info.push_str("\r\n");
+    }
+    info.push_str("\r\n");
+    info.into_bytes()
 }
 
 fn histogram_percentile_us(hist: &CommandHistogram, percentile: f64) -> f64 {
@@ -7185,6 +7257,33 @@ impl Runtime {
                 store.stat_tracking_total_prefixes as u64,
             ),
         ]
+    }
+
+    /// Per-command latency histograms for THIS partition.
+    ///
+    /// (frankenredis-zu4b7) Aggregating these is a UNION merge whose values are
+    /// themselves merged rather than replaced: a command executed only on
+    /// partition 7 is absent from partition 0 entirely, and one present in both
+    /// must have its bucket counts and call counters summed via
+    /// [`CommandHistogram::merge`]. Owned clones, because the caller holds the
+    /// partition locks only for the duration of the snapshot.
+    #[must_use]
+    pub fn partition_command_histograms(&self) -> Vec<(String, CommandHistogram)> {
+        self.server
+            .store
+            .all_command_histograms()
+            .into_iter()
+            .map(|(cmd, hist)| (cmd.to_string(), hist.clone()))
+            .collect()
+    }
+
+    /// The percentiles INFO Latencystats reports, as configured.
+    ///
+    /// Identical in every partition, so a cross-partition aggregate reads it from
+    /// whichever partition it already holds. (frankenredis-zu4b7)
+    #[must_use]
+    pub fn latency_percentiles(&self) -> Vec<f64> {
+        self.server.latency_percentiles.clone()
     }
 
     /// Per-error-code counts for THIS partition, non-zero entries only.
@@ -43732,61 +43831,16 @@ impl Runtime {
     }
 
     fn handle_info_latencystats_section(&mut self) -> RespFrame {
-        let mut info = String::from("# Latencystats\r\n");
         let histograms = self.server.store.all_command_histograms();
-        for (cmd, hist) in histograms {
-            let _ = write!(info, "latency_percentiles_usec_{cmd}:");
-            for (i, &p) in self.server.latency_percentiles.iter().enumerate() {
-                if i > 0 {
-                    info.push(',');
-                }
-                let val = histogram_percentile_us(hist, p);
-                // (frankenredis-7flec) Upstream server.c::
-                // fillPercentileDistributionLatencies uses %.3f for the
-                // percentile value (line 5287); mirror to keep INFO
-                // latencystats byte-equivalent.
-                let _ = write!(info, "p{p}={val:.3}");
-            }
-            info.push_str("\r\n");
-        }
-        info.push_str("\r\n");
-        RespFrame::BulkString(Some(info.into_bytes()))
+        RespFrame::BulkString(Some(render_latencystats_section(
+            &histograms,
+            &self.server.latency_percentiles,
+        )))
     }
 
     fn handle_info_commandstats_section(&mut self) -> RespFrame {
-        // Mirrors upstream server.c::genRedisInfoStringCommandStats
-        // (5329-5353). All four metric columns now come from real
-        // CommandHistogram counters tracked at command-dispatch time.
-        // (frankenredis-ot3y, frankenredis-infosections)
-        let mut info = String::from("# Commandstats\r\n");
-        // Skip commands whose only activity is `rejected_calls > 0` —
-        // upstream omits a row entirely until at least one call lands.
-        // We mirror that: emit a row when calls + rejected_calls +
-        // failed_calls > 0 (so a rejected-only command still surfaces,
-        // matching upstream's "any counter moved" semantics).
         let histograms = self.server.store.all_command_histograms();
-        for (cmd, hist) in histograms {
-            if hist.calls == 0 && hist.rejected_calls == 0 && hist.failed_calls == 0 {
-                continue;
-            }
-            let usec_per_call = if hist.calls > 0 {
-                hist.total_usec as f64 / hist.calls as f64
-            } else {
-                0.0
-            };
-            let _ = write!(
-                info,
-                "cmdstat_{}:calls={},usec={},usec_per_call={:.2},rejected_calls={},failed_calls={}\r\n",
-                cmd.to_ascii_lowercase(),
-                hist.calls,
-                hist.total_usec,
-                usec_per_call,
-                hist.rejected_calls,
-                hist.failed_calls,
-            );
-        }
-        info.push_str("\r\n");
-        RespFrame::BulkString(Some(info.into_bytes()))
+        RespFrame::BulkString(Some(render_commandstats_section(&histograms)))
     }
 
     fn handle_info_persistence_section(&mut self) -> RespFrame {

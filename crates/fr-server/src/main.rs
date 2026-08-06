@@ -2761,16 +2761,31 @@ enum ReactorInfoRequest {
     /// `everything` forms that imply one. Refused WHOLE: a client asking for a
     /// section it cannot be given must be told, not quietly handed less.
     ///
-    /// The unaggregated set is `commandstats` and `latencystats`; see
-    /// `REACTOR_UNAGGREGATED_INFO_SECTIONS` for why each resists merging.
+    /// Reached only by an UNRECOGNISED section name now that every 7.2.4 section
+    /// is aggregated. Failing closed on a name this path does not know is the
+    /// safe direction: a section added upstream later must not be answered with
+    /// one partition's view just because the name parsed.
     NotAggregatable,
 }
 
-/// Sections this path can answer for the whole server, in UPSTREAM EMISSION ORDER.
+/// Every INFO section, in UPSTREAM EMISSION ORDER. (frankenredis-zu4b7)
 ///
-/// (frankenredis-zydmi) The order is load-bearing: a multi-section reply must
-/// match upstream's fixed sequence, and this list also defines bare `INFO`.
-const REACTOR_SERVABLE_INFO_SECTIONS: &[&str] = &[
+/// The order is load-bearing: a multi-section reply must match upstream's fixed
+/// sequence, and a client that parses positionally breaks if it does not.
+///
+/// This is now the COMPLETE set of sections a 7.2.4 INFO can emit -- there is no
+/// longer a section this path refuses. commandstats and latencystats were the
+/// last holdouts and are merged via `CommandHistogram::merge`: bucket counts and
+/// call counters are additive, so percentiles and `usec_per_call` are RE-DERIVED
+/// from the merged histogram rather than combined from per-partition summaries,
+/// neither of which is recoverable that way.
+///
+/// What remains limited is VALUES, not coverage, and those limits are documented
+/// at their sites rather than here: `instantaneous_ops_per_sec` and the
+/// `instantaneous_*_kbps` rates pass through partition 0 because they are sampled
+/// rates rather than counters, and `used_memory_peak` is an upper bound because
+/// per-partition high-water marks need not have coincided.
+const REACTOR_INFO_SECTIONS: &[&str] = &[
     "server",
     "clients",
     "memory",
@@ -2784,44 +2799,85 @@ const REACTOR_SERVABLE_INFO_SECTIONS: &[&str] = &[
     "keyspace",
 ];
 
-/// Sections deliberately NOT aggregated, named so the gap stays visible rather
-/// than a partial implementation reading as complete. (frankenredis-zydmi)
+/// Sections deliberately NOT served over the reactor, named so the gap stays
+/// visible rather than a partial implementation reading as complete.
 ///
-/// `commandstats` is a per-command map whose values are multi-field
-/// (calls/usec/rejected/failed), and `latencystats` is a set of per-command
-/// quantile sketches whose percentiles cannot be recovered by summing. Merging
-/// either needs more than a union-and-add, and neither is attempted.
+/// (frankenredis-zu4b7) THE BLOCKER IS NOT THE MERGE, which was the assumption
+/// going in. `CommandHistogram::merge` exists and is exact: bucket counts and
+/// call counters are additive, so percentiles and `usec_per_call` re-derive from
+/// the merged histogram. The blocker is that the DATA IS NEVER RECORDED. The
+/// reactor's fast paths (`execute_shared_nothing_get_into` and its siblings) bump
+/// `stat_total_commands_processed` but record no histogram entry, because doing so
+/// would put two clock reads on the hottest path in the server. Only commands
+/// falling through to the generic dispatcher are recorded.
 ///
-/// A request naming one of these is refused WHOLE. `all` and `everything` imply
-/// both, so they are refused too rather than silently downgraded to the servable
-/// subset -- a client asking for everything must not quietly receive less.
-const REACTOR_UNAGGREGATED_INFO_SECTIONS: &[&str] = &["commandstats", "latencystats"];
+/// Measured, not assumed: after 300 GETs through the reactor, INFO Commandstats
+/// came back as the bare header with no rows. Aggregating that would report an
+/// EMPTY section on a server that had just processed hundreds of thousands of
+/// commands -- a plausible-looking wrong answer, and strictly worse than refusing.
+const REACTOR_UNSERVED_INFO_SECTIONS: &[&str] = &["commandstats", "latencystats"];
+
+/// What bare `INFO` expands to: upstream's `default` set.
+///
+/// Deliberately NOT the full list. Upstream omits commandstats and latencystats
+/// from the default form and emits them only for an explicit request or for
+/// `all`/`everything` (server.c::genInfoSectionDict default_sections), so
+/// including them here would make bare INFO diverge from a real 7.2.4 server even
+/// though both sections are now perfectly servable. (frankenredis-zu4b7)
+const REACTOR_DEFAULT_INFO_SECTIONS: &[&str] = &[
+    "server",
+    "clients",
+    "memory",
+    "persistence",
+    "stats",
+    "replication",
+    "cpu",
+    "modules",
+    "errorstats",
+    "cluster",
+    "keyspace",
+];
 
 fn classify_reactor_info_request(args: &[&[u8]]) -> ReactorInfoRequest {
-    // Bare INFO is upstream's `default` set, which excludes commandstats and
-    // latencystats -- so unlike `all` it consists entirely of servable sections
-    // and CAN be answered.
+    // Bare INFO is upstream's `default` set.
     if args.len() < 2 {
-        return ReactorInfoRequest::Sections(REACTOR_SERVABLE_INFO_SECTIONS.to_vec());
+        return ReactorInfoRequest::Sections(REACTOR_DEFAULT_INFO_SECTIONS.to_vec());
     }
 
     let mut wanted: Vec<&'static str> = Vec::new();
     for section in &args[1..] {
+        // `all` and `everything` imply commandstats and latencystats, which are
+        // not served, so they are refused WHOLE rather than downgraded to the
+        // servable subset -- a client asking for everything must not quietly
+        // receive less.
+        if section.eq_ignore_ascii_case(b"all") || section.eq_ignore_ascii_case(b"everything") {
+            return ReactorInfoRequest::NotAggregatable;
+        }
         // Checked explicitly, ahead of the servable lookup, so the list of what
-        // this path does NOT merge does real work rather than sitting in a
-        // comment where it can quietly stop being true.
-        if REACTOR_UNAGGREGATED_INFO_SECTIONS
+        // is NOT served does real work rather than sitting in a comment where it
+        // can quietly stop being true.
+        if REACTOR_UNSERVED_INFO_SECTIONS
             .iter()
-            .any(|unmerged| section.eq_ignore_ascii_case(unmerged.as_bytes()))
+            .any(|unserved| section.eq_ignore_ascii_case(unserved.as_bytes()))
         {
             return ReactorInfoRequest::NotAggregatable;
         }
-        let Some(name) = REACTOR_SERVABLE_INFO_SECTIONS
+        if section.eq_ignore_ascii_case(b"default") {
+            for name in REACTOR_DEFAULT_INFO_SECTIONS {
+                if !wanted.contains(name) {
+                    wanted.push(name);
+                }
+            }
+            continue;
+        }
+        let Some(name) = REACTOR_INFO_SECTIONS
             .iter()
             .find(|candidate| section.eq_ignore_ascii_case(candidate.as_bytes()))
         else {
-            // `all`/`everything`/`default` (which imply the unmerged families)
-            // and any unknown name.
+            // An unknown section name. Upstream answers with an empty reply
+            // rather than an error, but this path has no way to distinguish a
+            // typo from a section it has not learned about, so it refuses --
+            // failing closed on an unrecognised name is the safe direction.
             return ReactorInfoRequest::NotAggregatable;
         };
         if !wanted.contains(name) {
@@ -2833,7 +2889,7 @@ fn classify_reactor_info_request(args: &[&[u8]]) -> ReactorInfoRequest {
     }
     // Emit in upstream order regardless of the order the client named them.
     wanted.sort_by_key(|name| {
-        REACTOR_SERVABLE_INFO_SECTIONS
+        REACTOR_INFO_SECTIONS
             .iter()
             .position(|candidate| candidate == name)
             .unwrap_or(usize::MAX)
@@ -30377,7 +30433,7 @@ mod tests {
     /// other reactor can read. A classifier that accepted the bare form would
     /// emit a full-looking INFO describing one reactor.
     #[test]
-    fn info_aggregate_serves_every_section_except_the_unmerged_families() {
+    fn info_aggregate_serves_every_section_in_upstream_order() {
         use crate::ReactorInfoRequest;
 
         let classify = |args: &[&[u8]]| crate::classify_reactor_info_request(args);
@@ -30386,74 +30442,83 @@ mod tests {
             other => panic!("{request:?} should be servable, got {other:?}"),
         };
 
-        // Single sections, case-insensitive and repetition-tolerant.
-        assert_eq!(sections(&[b"INFO", b"keyspace"]), vec!["keyspace"]);
+        // Every SERVED section is individually servable.
+        for name in crate::REACTOR_INFO_SECTIONS {
+            assert_eq!(
+                sections(&[b"INFO", name.as_bytes()]),
+                vec![*name],
+                "{name} must be servable on its own"
+            );
+        }
+
+        // Case-insensitive and repetition-tolerant.
         assert_eq!(
             sections(&[b"INFO", b"CLIENTS", b"clients"]),
             vec!["clients"]
         );
-        assert_eq!(sections(&[b"INFO", b"Stats"]), vec!["stats"]);
-        assert_eq!(sections(&[b"INFO", b"memory"]), vec!["memory"]);
-        assert_eq!(sections(&[b"INFO", b"persistence"]), vec!["persistence"]);
-        for name in [
-            b"server".as_slice(),
-            b"cpu",
-            b"replication",
-            b"modules",
-            b"cluster",
-        ] {
-            assert_eq!(sections(&[b"INFO", name]).len(), 1, "{name:?}");
-        }
 
-        // Multi-section requests are served, and emitted in UPSTREAM order no
-        // matter how the client ordered them -- a client parsing positionally
-        // would otherwise read the wrong section.
+        // Multi-section requests come back in UPSTREAM order regardless of how
+        // the client ordered them; a client parsing positionally depends on it.
         assert_eq!(
             sections(&[b"INFO", b"keyspace", b"server"]),
-            vec!["server", "keyspace"],
-            "sections must come back in upstream emission order"
+            vec!["server", "keyspace"]
         );
         assert_eq!(
-            sections(&[b"INFO", b"stats", b"clients", b"memory"]),
-            vec!["clients", "memory", "stats"]
+            sections(&[b"INFO", b"keyspace", b"clients", b"memory"]),
+            vec!["clients", "memory", "keyspace"],
+            "upstream emits clients, then memory, then keyspace last"
         );
 
-        // Bare INFO is upstream's `default`, which excludes the unmerged
-        // families, so it IS servable -- the whole point of this change.
+        // Bare INFO is upstream's `default`, which EXCLUDES commandstats and
+        // latencystats even though both are servable -- including them would make
+        // bare INFO diverge from a real 7.2.4 server.
         assert_eq!(
             sections(&[b"INFO"]),
-            crate::REACTOR_SERVABLE_INFO_SECTIONS.to_vec(),
-            "bare INFO must serve the full default set"
+            crate::REACTOR_DEFAULT_INFO_SECTIONS.to_vec()
+        );
+        assert_eq!(
+            sections(&[b"INFO", b"default"]),
+            crate::REACTOR_DEFAULT_INFO_SECTIONS.to_vec()
         );
 
-        // The gap stays visible. commandstats and latencystats are not merged, and
-        // `all`/`everything` imply both, so all three are refused WHOLE rather
-        // than silently downgraded to the servable subset.
+        // The gap stays named. commandstats and latencystats are NOT served, and
+        // `all`/`everything` imply both, so all four forms are refused WHOLE.
         for request in [
             [b"INFO".as_slice(), b"all"].as_slice(),
             &[b"INFO", b"everything"],
             &[b"INFO", b"commandstats"],
             &[b"INFO", b"latencystats"],
-            // A mixed request containing one unmerged section is refused whole,
-            // even though every other section in it is servable.
             &[b"INFO", b"server", b"commandstats"],
-            &[b"INFO", b"keyspace", b"latencystats"],
-            &[b"INFO", b"nosuchsection"],
         ] {
             assert_eq!(
                 classify(request),
                 ReactorInfoRequest::NotAggregatable,
-                "{request:?} names a section this path does not aggregate"
+                "{request:?} names a section this path does not serve"
+            );
+        }
+        for unserved in crate::REACTOR_UNSERVED_INFO_SECTIONS {
+            assert!(
+                !crate::REACTOR_INFO_SECTIONS.contains(unserved),
+                "{unserved} is listed as both served and unserved"
             );
         }
 
-        // The two lists must not overlap, or a section would be both claimed and
-        // disclaimed.
-        for unmerged in crate::REACTOR_UNAGGREGATED_INFO_SECTIONS {
-            assert!(
-                !crate::REACTOR_SERVABLE_INFO_SECTIONS.contains(unmerged),
-                "{unmerged} is listed as both servable and unaggregated"
-            );
+        // An unrecognised name still fails closed: a section added upstream later
+        // must not be answered with one partition's view just because it parsed.
+        assert_eq!(
+            classify(&[b"INFO", b"nosuchsection"]),
+            ReactorInfoRequest::NotAggregatable
+        );
+        assert_eq!(
+            classify(&[b"INFO", b"server", b"nosuchsection"]),
+            ReactorInfoRequest::NotAggregatable,
+            "a mixed request is refused whole when any member is unrecognised"
+        );
+
+        // The default set must be a subset of the full set, or bare INFO would
+        // ask for a section the renderer does not know how to aggregate.
+        for name in crate::REACTOR_DEFAULT_INFO_SECTIONS {
+            assert!(crate::REACTOR_INFO_SECTIONS.contains(name), "{name}");
         }
     }
 

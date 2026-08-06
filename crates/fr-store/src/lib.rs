@@ -5171,6 +5171,28 @@ pub struct CommandHistogram {
     pub failed_calls: u64,
 }
 
+impl CommandHistogram {
+    /// Fold `other` into `self`, producing the histogram the two would have
+    /// formed had their calls been recorded on one instance.
+    ///
+    /// (frankenredis-zu4b7) This is what makes INFO commandstats and latencystats
+    /// aggregatable across a partitioned keyspace. Bucket COUNTS are additive, so
+    /// merging them and re-deriving the percentiles afterwards is exact -- whereas
+    /// combining the per-partition percentiles themselves is not possible at all,
+    /// since a quantile of a union cannot be recovered from the quantiles of its
+    /// parts. The same holds for `usec_per_call`, which callers must re-derive
+    /// from the merged `total_usec` and `calls` rather than averaging.
+    pub fn merge(&mut self, other: &Self) {
+        for (slot, count) in self.buckets.iter_mut().zip(other.buckets.iter()) {
+            *slot = slot.saturating_add(*count);
+        }
+        self.calls = self.calls.saturating_add(other.calls);
+        self.total_usec = self.total_usec.saturating_add(other.total_usec);
+        self.rejected_calls = self.rejected_calls.saturating_add(other.rejected_calls);
+        self.failed_calls = self.failed_calls.saturating_add(other.failed_calls);
+    }
+}
+
 /// Outcome classification for `CommandHistogram::record`. Drives the
 /// upstream `calls`/`rejected_calls`/`failed_calls` counters separately
 /// so `cmdstat_<cmd>` lines mirror server.c::genRedisInfoStringCommandStats.
@@ -40330,6 +40352,57 @@ mod quicklist_dump_fix_tests {
 
 #[cfg(test)]
 mod tests {
+    /// (frankenredis-zu4b7) `CommandHistogram::merge` is the primitive a
+    /// cross-partition INFO commandstats/latencystats aggregate needs. It is
+    /// proven here even though the reactor does not yet serve those sections --
+    /// the blocker there is that the fast paths never RECORD, not that merging is
+    /// wrong.
+    #[test]
+    fn command_histogram_merge_is_additive_and_preserves_percentile_shape() {
+        use super::{CommandHistogram, CommandRecordKind};
+
+        let mut a = CommandHistogram::default();
+        let mut b = CommandHistogram::default();
+        // Deliberately UNEQUAL call counts and latencies: this is what
+        // distinguishes a merged histogram from an averaged one.
+        for _ in 0..90 {
+            a.record_with_kind(10, CommandRecordKind::Success);
+        }
+        for _ in 0..10 {
+            b.record_with_kind(1000, CommandRecordKind::Success);
+        }
+        b.record_with_kind(0, CommandRecordKind::Rejected);
+        b.record_with_kind(5, CommandRecordKind::Failed);
+
+        let expected_calls = a.calls + b.calls;
+        let expected_usec = a.total_usec + b.total_usec;
+        let expected_rejected = a.rejected_calls + b.rejected_calls;
+        let expected_failed = a.failed_calls + b.failed_calls;
+
+        a.merge(&b);
+
+        assert_eq!(a.calls, expected_calls, "calls must sum");
+        assert_eq!(a.total_usec, expected_usec, "usec must sum");
+        assert_eq!(a.rejected_calls, expected_rejected);
+        assert_eq!(a.failed_calls, expected_failed);
+
+        // The merged per-call mean must be the ratio of the SUMMED totals, which
+        // for this lopsided split is far from the mean of the two per-arm means.
+        let merged_mean = a.total_usec as f64 / a.calls as f64;
+        let mean_of_means = (10.0 + 1000.0) / 2.0;
+        assert!(
+            (merged_mean - mean_of_means).abs() > 100.0,
+            "fixture must distinguish a re-derived mean ({merged_mean}) from an \
+             averaged one ({mean_of_means}); an even split would not"
+        );
+
+        // Merging an empty histogram is a no-op, so a partition that never ran a
+        // command cannot perturb the aggregate.
+        let before = a.clone();
+        a.merge(&CommandHistogram::default());
+        assert_eq!(a, before, "merging an empty histogram must change nothing");
+    }
+
     use super::HllEncoding;
     use super::{
         BitRangeUnit, ClientTrackingState, DUMP_CRC64_LEN, DUMP_TRAILER_LEN, DUMP_VERSION_LEN,
