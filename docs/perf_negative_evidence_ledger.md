@@ -14667,3 +14667,144 @@ probe per successful INCR; or (4) a literal-current profile names a different no
 at least **5% self-time**. Any candidate still requires one-ELF same-invocation A/A+A/B, zero-lost
 exact-function profiling, and the median-CI gate. Lane M now switches to the separately attributed
 submission/syscall vein.
+
+## 2026-08-06 MossyCoast: RETRACTION + MAGNITUDE-UNCERTIFIED (SELF-SPEEDUP) — the itoa2 render win is not 6x and not 2.4-3.4x; the substrate carries 2-3% position bias its own A/A control detects (`frankenredis-tgr69`, `frankenredis-ef928`)
+
+**Claim class: SELF-SPEEDUP. Campaign output: no.** Both arms are FrankenRedis code
+(`write_u64_digits` scratch render vs `i64::to_string()`, and vs the pre-change single-digit
+div-by-10 loop). No Redis arm is involved and none is claimed.
+
+WHAT IS RETRACTED, unconditionally. `frankenredis-tgr69` and `frankenredis-ef928` were both closed
+2026-07-11 citing "itoa2 render A/B WIN confirmed 2.4-3.4x", sourced from
+`crates/fr-persist/benches/int_render_itoa2.rs`, whose header quoted ~6x. `frankenredis-vqjz1`
+found the bench consumed both arms as `render(v).len()`; an i64's decimal LENGTH is derivable
+without writing digits, so the optimizer could elide the timed digit loop. The tell was `d1_256` —
+every value one digit, both arms performing exactly one division — reporting 5.35x, which no
+mechanism produces. Fixed in db5438b2f by folding every rendered byte. **Across ten invocations on
+five workers below, nothing anywhere approaches either figure: the maximum observed ratio in any
+column is 1.345x.** Neither 6x nor 2.4-3.4x may be cited again.
+
+### Instrument defects found while re-measuring, and fixed here
+
+1. NO BUILD IDENTITY. The bench emitted no ELF hash, which is how one figure went uncontested for
+   three weeks. It now hashes `current_exe()` from INSIDE the process and prints the digest before
+   any timing, and panics rather than print an unattributable table.
+2. THE VERDICT RULE WAS THE WRONG STATISTIC — and this is the substantive finding. The bench
+   decided by asking whether the candidate's point median fell outside the null's raw p5..p95 of
+   INDIVIDUAL round-ratios. That compares an average of 41 rounds against the spread of one round,
+   which is conservative by roughly sqrt(41) ~ 6.4x and answers a question nobody asked. vqjz1's
+   recorded re-run condition inherited the same error by gating on the sample spread and on `cv`.
+   The repo's own contract, enforced by `perf_candidate_preflight.py`, is a bootstrap median-CI
+   decision with CV as provenance only. The bench now uses one: fixed-seed deterministic bootstrap,
+   10,000 resamples.
+3. NO ADMISSIBILITY GUARD. Added, and it is what makes the rest of this entry possible: the A/A
+   null's own median CI must straddle 1.0, or the row is `NULL-INADMISSIBLE` and no ratio from it
+   may be read. An A/A control compares a binary against ITSELF, so a null CI excluding 1.0 is a
+   false positive by construction and condemns the run, not the candidate.
+
+### MEASURED
+
+Ten `RCH_REQUIRE_REMOTE=1 rch exec -- cargo bench -p fr-persist --bench int_render_itoa2 --profile
+release-perf` invocations across five distinct rch workers. Every row is one same-invocation A/A
+null beside its A/B on the identical interleave-and-swap schedule, median of 41 paired ratios.
+Runs 1-3 (60ms segments) and A-D (300ms) predate the median-CI instrument and are corroborating
+only; runs E-G are the attributable, contract-conformant rows.
+
+Runs E-G, bootstrap 95% median CI on the A/A null, `TARGET_SEGMENT_SECS = 0.300`:
+
+| run | worker | ELF SHA-256 (self-reported, first 16) | wl | null med | null median CI95 | itoa2/tostr | itoa2/divloop | verdict |
+|-----|--------|------|----|----------|------------------|-------------|---------------|---------|
+| E | vmi1149989 | `8640b9d005c0b7cd` | d1_256 | 1.0099 | [0.9650, 1.0232] | 1.196 | 1.140 | WIN |
+| E | vmi1149989 | `8640b9d005c0b7cd` | d6_256 | 1.0012 | [0.9748, 1.0220] | 1.170 | 1.148 | WIN |
+| E | vmi1149989 | `8640b9d005c0b7cd` | d18_256 | 0.9887 | [0.9674, 1.0147] | 1.118 | 1.261 | WIN |
+| F | ovh-a | `f3168755b1742fca` | d1_256 | 1.0006 | [0.9959, 1.0068] | 1.023 | 1.127 | WIN |
+| F | ovh-a | `f3168755b1742fca` | d6_256 | 0.9821 | [0.9794, 0.9880] | 1.049 | 1.167 | **NULL-INADMISSIBLE** |
+| F | ovh-a | `f3168755b1742fca` | d18_256 | 0.9680 | [0.9563, 0.9712] | 1.013 | 1.205 | **NULL-INADMISSIBLE** |
+| G | ovh-a | `f0b94d255cd46153` | d1_256 | 1.0020 | [0.9957, 1.0248] | 1.038 | 1.157 | WIN |
+| G | ovh-a | `f0b94d255cd46153` | d6_256 | 0.9797 | [0.9712, 0.9910] | 1.071 | 1.190 | **NULL-INADMISSIBLE** |
+| G | ovh-a | `f0b94d255cd46153` | d18_256 | 0.9790 | [0.9628, 1.0036] | 1.055 | 1.300 | WIN |
+
+The verdict decision is a bootstrap median-CI gate, applied within one invocation to that
+invocation's own controls. Stated for one representative admissible row: in run E, `d6_256`, the
+same-invocation A/A null has median **1.0012** with a bootstrap 95% median CI of
+**[0.9748, 1.0220]**, so that null is admissible (it straddles 1.0) and its A/B may be read; the
+paired `itoa2/divloop` A/B in the same invocation reads 1.148. Run F `d1_256` is the same shape,
+A/A null median **1.0006**, bootstrap 95% median CI **[0.9959, 1.0068]**. The three refused rows
+are refused precisely because their A/A null CI fails that containment.
+
+Executing-ELF identity, self-reported by each process before any timing (the bench panics rather
+than print a table it cannot attribute). The three digests differ because each run rebuilt the
+bench as the instrument was being fixed; the source is identical across F and G:
+
+    run E  bench_elf_sha256=8640b9d005c0b7cdf467f1a14bcdb68560a23985ba4ff3041d31b710938c96bf
+    run F  bench_elf_sha256=f3168755b1742fcab48d974a9a08605abddd21cecc14191690dc572620db5427
+    run G  bench_elf_sha256=f0b94d255cd461539e23bad71c3fb6749a919b827898637358022887ffa407a6
+
+Corroborating earlier runs, raw null p5..p95 (superseded statistic, listed for provenance):
+runs 1-3 at 60ms on `ovh-a`/`vmi1227854` gave `itoa2/divloop` 1.147-1.305 with null p5..p95 as
+wide as [0.780, 1.098]; runs A-D at 300ms on `ovh-a`/`vmi1264463`/`vmi1149989` gave 1.111-1.336,
+including one worker at p5..p95 [0.662, 1.363]. Run D self-reported ELF
+`bdd836e4cec4043152a0f462c2333d9c43db772dd78ff28b5416a32d8af83c86`.
+
+CV is tabulated in the raw output as provenance only; CV is not a gate and did not influence any
+verdict in this entry.
+
+### THE FINDING: the A/A control detects 2-3% systematic position bias
+
+**Three of the nine contract-conformant rows have an A/A null whose median CI EXCLUDES 1.0** —
+[0.9794, 0.9880], [0.9563, 0.9712], [0.9712, 0.9910]. Those are 95% intervals asserting that a
+binary differs from ITSELF by 1.2-4.4%. They are false positives, and their cause is that a
+bootstrap assumes i.i.d. resampling while consecutive round-ratios on a shared build worker are
+serially correlated (warm-up, drift, a co-tenant compile starting mid-run). **The exclusions are
+one-directional in every case — null median 0.968-0.982, always BELOW 1.0** — which is the
+signature of an ordering effect the swap schedule only partly cancels, not of random noise.
+
+This is why the admissibility guard is the load-bearing part of the fix rather than the median CI
+itself. Without it the same bootstrap would have certified those three rows.
+
+### Integrity check on the gate change, per the repo's own standard
+
+The standard says a gate change that suddenly produces wins was a loosening, not a fix, so the
+split is published rather than summarised. Of the 9 rows measured under the new instrument: **6
+admissible, and all 6 read WIN(itoa2); 3 refused as NULL-INADMISSIBLE.** That "all admissible rows
+win" pattern is exactly the loosening signature and is why this entry does NOT certify a
+magnitude. Three counterweights are recorded so a later reader can judge for themselves:
+
+* The new rule introduced a REFUSAL class the old rule did not have, and it refuses a third of all
+  rows. A pure loosening rejects nothing.
+* It did not rescue the retracted claim. Under the old rule the maximum was 1.345x; under the new
+  one it is 1.300x. The gate change moved nothing toward 6x or 2.4-3.4x, which stay refuted.
+* The verdict is still worker-dependent. `d6_256` reads WIN on run E and NULL-INADMISSIBLE on both
+  F and G. Identical source, three self-reported ELF hashes, three verdicts driven by which host
+  `rch` picked.
+
+### VERDICT
+
+**Direction: consistent. Magnitude: UNCERTIFIED. The retracted figures: refuted.**
+
+All 42 A/B ratios across every run sit above 1.0, and no run in any configuration produced a
+REGRESSION, so a real compute advantage for the direct digit writer is very likely. But no figure
+may be quoted: `itoa2/tostr` ranges 1.013-1.345 and `itoa2/divloop` ranges 1.111-1.336 **on
+identical source**, a spread far larger than any effect being claimed, and one third of rows are
+refused by the instrument's own control. A number nobody can reproduce within 30 points is not a
+measurement.
+
+NO PRODUCT CODE CHANGE, and none is warranted. `fr-persist` `decimal_i64_scratch` (lib.rs:17)
+calls `fr_protocol::write_u64_digits`; the bench's correctness gate proves byte-identical
+rendering across zero, both sign edges, i64::MIN/MAX and every digit width before any timing runs.
+The shipped path stays; it simply carries no defensible speedup figure. The only edits are to the
+bench and to `fr-persist` dev-dependencies.
+
+Retry predicate: attach a magnitude to this surface ONLY IF, on an EXCLUSIVELY BOOKED host
+(trj/threadripperje, or an rch worker taken out of the pool), three consecutive `cargo bench -p
+fr-persist --bench int_render_itoa2 --profile release-perf` invocations each show all nine rows
+admissible — that is, every A/A null median CI clears the containment test by covering 1.0 — and
+the `itoa2/divloop` medians agree within 5 points across those three runs. Until that holds, no
+figure may be quoted for this surface.
+The all-admissible condition is the real gate: it is exactly what fails today, on 3 of 9 rows, and
+it is the only evidence that the ordering bias has been removed rather than hidden. Only then
+attach a magnitude to `frankenredis-tgr69` / `frankenredis-ef928`, quoting the executing-ELF
+SHA-256 each run self-reports. If the bias persists on a quiet host, the residual is in the swap
+schedule rather than the substrate, and the next lever is a per-round randomised arm order rather
+than strict alternation. Do NOT re-cite 6x or 2.4-3.4x under any circumstances. Same host
+constraint that parks `frankenredis-vag28` and `frankenredis-hgqyu`.

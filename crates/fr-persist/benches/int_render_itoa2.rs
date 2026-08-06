@@ -11,8 +11,20 @@
 //! ORIG = to_string; CAND = write_u64_digits scratch. verdict WIN => itoa2 render is faster.
 //!
 //! Substrate = the cc bench roster: ONE binary, adjacent-pair interleave (swap on odd rounds),
-//! black_box, reps calibrated per input, median of 41 paired ratios, gated on the candidate
-//! median outside the null (orig-vs-orig) p5..p95. Both arms produce BYTE-IDENTICAL bytes.
+//! black_box, reps calibrated per input, median of 41 paired ratios. Both arms produce
+//! BYTE-IDENTICAL bytes, checked before any timing runs.
+//!
+//! DECISION = bootstrap 95% median CI, two conditions (frankenredis-tgr69/ef928). The A/A null's
+//! median CI must straddle 1.0, or the run is NULL-INADMISSIBLE and no ratio from it may be read
+//! — an off-centre null means position bias lives in the instrument, and narrowing it does not
+//! help. Only then must the candidate's own median CI clear 1.0 and sit outside the null's. The
+//! earlier rule — candidate point median outside the null's raw p5..p95 — said nothing about how
+//! well either median was determined, and its verdict flipped between rch workers for identical
+//! code. `cv` is printed as provenance and is never consulted for a verdict.
+//!
+//! HISTORY, kept deliberately: this bench once reported ~6x by consuming both arms as
+//! `render(v).len()`, letting the optimizer elide the digit loop, and three beads were closed on
+//! that figure. See the 2026-08-05 ledger entry. Do not cite 6x or 2.4-3.4x.
 
 use std::hint::black_box;
 use std::time::Instant;
@@ -120,6 +132,42 @@ fn pct(sorted: &[f64], p: f64) -> f64 {
     sorted[((sorted.len() - 1) as f64 * p).round() as usize]
 }
 
+/// Bootstrap 95% confidence interval for the MEDIAN of `samples`.
+///
+/// (frankenredis-tgr69/ef928) The repo's decision contract is a median-CI test,
+/// and this bench had no such instrument — it decided on whether the candidate
+/// median fell outside the null's raw p5..p95, which says nothing about how well
+/// either median is itself determined. With 41 rounds on a shared worker the
+/// median is loose enough that the resulting verdict flipped between workers for
+/// identical code, which is what sent an unreal figure into three bead closures.
+///
+/// Deterministic by construction: a fixed-seed xorshift, so re-running the same
+/// ELF on the same samples reproduces the interval exactly. A bootstrap that
+/// moved run to run would reintroduce the very irreproducibility it exists to
+/// measure.
+fn bootstrap_median_ci(samples: &[f64], seed: u64) -> (f64, f64) {
+    const RESAMPLES: usize = 10_000;
+    debug_assert!(!samples.is_empty());
+    let n = samples.len();
+    let mut state = seed | 1;
+    let mut draw = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let mut medians = Vec::with_capacity(RESAMPLES);
+    let mut resample = vec![0.0f64; n];
+    for _ in 0..RESAMPLES {
+        for slot in resample.iter_mut() {
+            *slot = samples[(draw() % n as u64) as usize];
+        }
+        medians.push(median(&mut resample));
+    }
+    medians.sort_by(|a, b| a.partial_cmp(b).expect("no NaN"));
+    (pct(&medians, 0.025), pct(&medians, 0.975))
+}
+
 fn main() {
     match bench_elf_sha256() {
         Ok((sha256, bytes)) => println!("bench_elf_sha256={sha256} ({bytes} bytes)"),
@@ -158,11 +206,11 @@ fn main() {
     ];
 
     println!(
-        "\n{:<12} {:>7} {:>9} {:>16} {:>8} {:>13} {:>14} {:>15} {:>16}",
+        "\n{:<12} {:>7} {:>9} {:>18} {:>8} {:>13} {:>18} {:>15} {:>18}",
         "workload",
         "reps",
         "NULL med",
-        "null p5..p95",
+        "null median CI95",
         "null cv%",
         "itoa2/tostr",
         "verdict",
@@ -234,26 +282,48 @@ fn main() {
         let lo = pct(&nulls, NULL_LO);
         let hi = pct(&nulls, NULL_HI);
         let divloop_speedup = median(&mut divloop_speeds);
-        let verdict = |s: f64| {
-            if s > 1.0 && s > hi {
+
+        // MEDIAN-CI DECISION. Two independent conditions, both required.
+        //
+        // ADMISSIBILITY is a property of the null alone: an A/A control compares
+        // a binary against ITSELF, so its median CI must straddle 1.0. A null CI
+        // that excludes 1.0 means position/ordering bias lives inside the
+        // instrument, and no candidate ratio measured through it can be read --
+        // narrowness does not rescue an off-centre null.
+        //
+        // SEPARATION then requires the candidate's own median CI to clear 1.0
+        // and to sit outside the null's, so a verdict states that the two
+        // medians are resolved apart, not merely that two point estimates
+        // differ. CV is printed as provenance and is not consulted here.
+        let (null_ci_lo, null_ci_hi) = bootstrap_median_ci(&nulls, 0x9E3779B97F4A7C15);
+        let null_admissible = null_ci_lo <= 1.0 && null_ci_hi >= 1.0;
+        // Decides on the sample's median CI, never on the printed point estimate
+        // — that point estimate is provenance, the interval is the instrument.
+        let verdict = |samples: &[f64]| {
+            if !null_admissible {
+                return "NULL-INADMISSIBLE";
+            }
+            let (ci_lo, ci_hi) = bootstrap_median_ci(samples, 0xD1B54A32D192ED03);
+            if ci_lo > 1.0 && ci_lo > null_ci_hi {
                 "WIN(itoa2)"
-            } else if s < 1.0 && s < lo {
+            } else if ci_hi < 1.0 && ci_hi < null_ci_lo {
                 "REGRESSION"
             } else {
                 "indistinguishable"
             }
         };
+        let _ = (lo, hi);
         println!(
-            "{:<12} {:>7} {:>9.4} {:>16} {:>8.2} {:>12.3}x {:>14} {:>14.3}x {:>16}",
+            "{:<12} {:>7} {:>9.4} {:>18} {:>8.2} {:>12.3}x {:>18} {:>14.3}x {:>18}",
             label,
             reps,
             null_med,
-            format!("[{lo:.3}, {hi:.3}]"),
+            format!("[{null_ci_lo:.4}, {null_ci_hi:.4}]"),
             cv(&nulls),
             speedup,
-            verdict(speedup),
+            verdict(&speeds),
             divloop_speedup,
-            verdict(divloop_speedup)
+            verdict(&divloop_speeds)
         );
     }
 }
