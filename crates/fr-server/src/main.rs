@@ -1471,6 +1471,22 @@ impl KeyspacePartitions {
             .map(|_| {
                 let mut runtime = Runtime::new(RuntimePolicy::default());
                 runtime.set_server_port(port);
+                // (frankenredis-ktcqz) MEASURED DECISION, not a default inherited
+                // by accident. Command-histogram recording on the reactor fast
+                // path costs 2.68-3.20x on the GET path -- three admissible rows
+                // over two invocations of
+                // `cargo bench -p fr-runtime --bench reactor_fastpath_histogram`,
+                // each arm a real setting of the `latency-tracking` knob in one
+                // binary. Nearly tripling the hottest path in the server to
+                // populate an INFO section is not a trade this topology makes, so
+                // the partitions run with tracking OFF.
+                //
+                // The consequence is deliberate and is what keeps INFO
+                // commandstats and latencystats REFUSED here rather than served
+                // empty: with no recording there are no histograms to aggregate.
+                // Serving them would report a bare section on a server processing
+                // hundreds of thousands of commands.
+                runtime.set_latency_tracking(false);
                 Mutex::new(runtime)
             })
             .collect();

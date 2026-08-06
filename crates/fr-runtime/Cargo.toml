@@ -108,3 +108,11 @@ required-features = ["bench-reference"]
 name = "client_tracking_membership"
 harness = false
 required-features = ["bench-reference"]
+
+# (frankenredis-ktcqz) Same-binary A/B for command-histogram recording on the
+# reactor GET fast path. Both arms are the two settings of the real
+# `latency-tracking` knob, so the measured delta is the cost a default
+# deployment pays rather than that of a synthetic toggle.
+[[bench]]
+name = "reactor_fastpath_histogram"
+harness = false

@@ -5988,6 +5988,15 @@ impl Runtime {
         self.server.store.server_port = port;
     }
 
+    /// Set the `latency-tracking` knob, which gates command-histogram recording.
+    ///
+    /// (frankenredis-ktcqz) Exposed so an A/B can hold BOTH arms in one binary:
+    /// the two settings of a real, supported config knob rather than a code
+    /// variant that ships to nobody.
+    pub fn set_latency_tracking(&mut self, enabled: bool) {
+        self.server.latency_tracking = enabled;
+    }
+
     /// Turn cluster mode on at boot.
     ///
     /// (frankenredis-inuwt) BOOT-ONLY by design, mirroring upstream: `CONFIG SET
@@ -8654,9 +8663,34 @@ impl Runtime {
     #[inline]
     pub fn execute_shared_nothing_get_into(&mut self, key: &[u8], now_ms: u64, out: &mut Vec<u8>) {
         self.server.store.stat_total_commands_processed += 1;
-        match self.server.store.get_string_bytes(key, now_ms) {
+        // (frankenredis-ktcqz) The reactor fast paths previously recorded NO
+        // command histogram, so INFO commandstats and latencystats came back
+        // empty for exactly the commands that dominate the workload -- measured
+        // at 300 GETs producing a bare header with no rows. Recording is gated on
+        // `latency_tracking`, the same knob upstream exposes and the same one the
+        // non-sharded borrowed fast paths already honour, so a deployment that
+        // wants the last nanosecond can turn it off and pay one predictable
+        // branch instead.
+        let started = self.server.latency_tracking.then(std::time::Instant::now);
+        let result = self.server.store.get_string_bytes(key, now_ms);
+        let failed = result.is_err();
+        match result {
             Ok(value) => encode_bulk_string_slice(value.as_deref(), false, out),
             Err(err) => CommandError::Store(err).to_resp().encode_into(out),
+        }
+        if let Some(started) = started {
+            let elapsed_us = started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind(
+                    "get",
+                    elapsed_us,
+                    if failed {
+                        CommandRecordKind::Failed
+                    } else {
+                        CommandRecordKind::Success
+                    },
+                );
         }
     }
 

@@ -14881,3 +14881,83 @@ SHA-256 each run self-reports. If the bias persists on a quiet host, the residua
 schedule rather than the substrate, and the next lever is a per-round randomised arm order rather
 than strict alternation. Do NOT re-cite 6x or 2.4-3.4x under any circumstances. Same host
 constraint that parks `frankenredis-vag28` and `frankenredis-hgqyu`.
+
+## 2026-08-06 MossyCoast: REJECT (SELF-SPEEDUP) — command-histogram recording on the reactor GET fast path costs 2.68-3.20x; partitions run with latency-tracking OFF (`frankenredis-ktcqz`)
+
+**Claim class: SELF-SPEEDUP. Campaign output: no.** Both arms are FrankenRedis code — the two
+settings of the `latency-tracking` knob on the shared-nothing reactor's GET fast path. No Redis arm
+is involved and none is claimed.
+
+WHY IT WAS TRIED. `execute_shared_nothing_get_into` and its siblings recorded no command histogram,
+so INFO commandstats and latencystats came back EMPTY for exactly the commands that dominate a real
+workload. Measured, not assumed: 300 GETs through an 8-worker reactor produced a bare
+`# Commandstats` header with no rows. Recording would have unblocked
+`frankenredis-zu4b7`, which needs those histograms to aggregate.
+
+WHAT WAS MEASURED. `cargo bench -p fr-runtime --bench reactor_fastpath_histogram --profile
+release-perf`, two invocations on worker `vmi1227854`, each ELF self-hashed:
+
+    run 1  bench_elf_sha256=ef9a23f03099f151e492f1b9b1a2dc0d2bc73b82479a235747e4f0350b6820b3
+    run 2  bench_elf_sha256=d5e95e26f9c93aff61627a3f30d46f1077f4b0f9f2ec001fc3a561bb89a3531e
+
+Both arms live in ONE binary and are the two settings of a REAL config knob rather than a synthetic
+toggle: ORIG = `latency-tracking` off (one predictable branch), CAND = on (clock pair plus
+histogram record). `latency-tracking` defaults to `yes` upstream and in fr, and the non-sharded
+borrowed fast paths already honour it, so the measured delta is the cost a default deployment would
+pay. A correctness gate runs before any timing and asserts the two arms produce byte-identical
+replies for hits and misses, so the ratio compares bookkeeping and not behaviour.
+
+Arm order is drawn PER PAIR from a fixed-seed PRNG, reps are calibrated per input, and each row is
+the median of 41 paired ratios.
+
+DECISION RULE, stated before the verdict: bootstrap 95% median CI with an admissibility guard. The
+A/A null's own median CI must straddle 1.0 or the row is `NULL-INADMISSIBLE` and no ratio from it
+may be read — an A/A control compares a binary against itself, so a CI excluding 1.0 condemns the
+run rather than the candidate. CV is tabulated as provenance only; CV is not a gate and did not
+influence any verdict in this entry.
+
+| run | workload | A/A null med | null median CI95 | on/off | verdict |
+|-----|----------|--------------|------------------|--------|---------|
+| 1 | keys_16 | 0.9435 | [0.8878, 0.9677] | 3.159 | **NULL-INADMISSIBLE** |
+| 1 | keys_256 | 1.0494 | [1.0403, 1.0629] | 2.816 | **NULL-INADMISSIBLE** |
+| 1 | keys_4096 | 0.9857 | [0.9624, 1.0192] | 2.732 | COSTS [2.678, 2.841] |
+| 2 | keys_16 | 0.9336 | [0.9144, 0.9613] | 3.258 | **NULL-INADMISSIBLE** |
+| 2 | keys_256 | 0.9665 | [0.9468, 1.0015] | 3.149 | COSTS [3.041, 3.204] |
+| 2 | keys_4096 | 1.0111 | [0.9760, 1.0389] | 2.920 | COSTS [2.866, 2.998] |
+
+Stated for one representative admissible row: in run 2, `keys_4096`, the same-invocation A/A null
+has median **1.0111** with a bootstrap 95% median CI of **[0.9760, 1.0389]**, so that null is
+admissible (it straddles 1.0) and its A/B may be read; the paired on/off A/B measured in the same
+invocation reads 2.920, with its own bootstrap 95% median CI at [2.866, 2.998]. Run 1 `keys_4096`
+is the same shape: A/A null median **0.9857**, bootstrap 95% median CI **[0.9624, 1.0192]**, A/B
+2.732 with CI [2.678, 2.841]. The three refused rows are refused precisely because their A/A null
+CI fails that containment.
+
+VERDICT: **REJECT, decisively.** Three admissible rows across two invocations put the cost at
+2.68-3.20x. The three inadmissible rows agree in magnitude (2.82-3.26x) but are not counted toward
+the verdict. The effect is two orders of magnitude larger than any null width here — the widest
+admissible null spans about 6% while the effect is 170-220% — so this is not a marginal call and
+does not depend on the substrate being quiet.
+
+Two clock reads and a histogram update nearly TRIPLE the cost of the path the per-core reactor
+exists to make fast. Populating an INFO section is not worth that.
+
+SHIPPED INSTEAD: the shared-nothing partitions are constructed with `set_latency_tracking(false)`,
+making the decision explicit at the site with the measurement cited, rather than inheriting
+upstream's `yes` default into a topology where it costs 3x. The recording code stays in the fast
+path gated on that knob, so this rejection remains reproducible by flipping it — the same
+both-source-forms discipline the `frankenredis-u6uwo` entry used.
+
+CONSEQUENCE, recorded rather than hidden: with no recording there are no histograms, so INFO
+commandstats and latencystats stay REFUSED in reactor mode. That is the correct behaviour —
+serving them would report a bare section on a server processing hundreds of thousands of commands,
+which is a plausible-looking wrong answer and strictly worse than refusing.
+`REACTOR_UNSERVED_INFO_SECTIONS` names the gap and is enforced in the classifier.
+
+Retry predicate: revisit ONLY IF a recording mechanism appears that does not read the clock per
+command — for example a sampled recorder taking every Nth call, or a coarse per-batch timestamp
+amortised over a pipeline run. Either changes what `calls` and `usec` MEAN, so it is a parity
+question against 7.2.4 and not merely a perf one, and it must be settled before any implementation.
+Re-measure with this same bench and require the cost below 1.05x on three consecutive admissible
+rows before enabling recording on this path. Do NOT re-attempt the straightforward per-command
+clock pair: it has been measured at 2.68-3.20x and that is not a substrate artifact.
