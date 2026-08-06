@@ -66556,13 +66556,29 @@ mod tests {
             rt.execute_frame(command(&[b"BGSAVE"]), 6),
             RespFrame::SimpleString("Background saving started".to_string())
         );
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        rt.check_child_processes(6);
-
-        assert!(
-            rdb_path.exists(),
-            "BGSAVE should write the configured RDB file"
-        );
+        // (frankenredis-hyaa4) BGSAVE forks and the child writes the RDB
+        // asynchronously, so a fixed sleep races it. A 50ms sleep followed by an
+        // immediate assert passed in isolation and failed intermittently under
+        // full-suite parallel load, where the child had not always finished.
+        //
+        // Wait on the CONDITION instead. `write_rdb_file` publishes via a temp
+        // file plus an atomic rename, so the path existing means the file is
+        // complete -- there is no partially-written window to observe.
+        // `check_child_processes` is what reaps the finished child, so it runs
+        // inside the loop rather than once before it; the deadline is generous
+        // because the point is to tolerate a loaded host, not to bound latency.
+        let bgsave_deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            rt.check_child_processes(6);
+            if rdb_path.exists() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < bgsave_deadline,
+                "BGSAVE should write the configured RDB file within 30s"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
 
         let (entries, aux) = fr_persist::read_rdb_file(&rdb_path).expect("read rdb");
         assert_eq!(aux.get("frankenredis"), Some(&"true".to_string()));
