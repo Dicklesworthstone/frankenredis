@@ -10,7 +10,9 @@
 //!
 //! ORIG = to_string; CAND = write_u64_digits scratch. verdict WIN => itoa2 render is faster.
 //!
-//! Substrate = the cc bench roster: ONE binary, adjacent-pair interleave (swap on odd rounds),
+//! Substrate = the cc bench roster: ONE binary, adjacent-pair interleave with the arm order drawn
+//! PER PAIR from a fixed-seed PRNG (not round parity — strict alternation aliases with periodic
+//! host drift and made the null and the candidate share one realisation of the position bias),
 //! black_box, reps calibrated per input, median of 41 paired ratios. Both arms produce
 //! BYTE-IDENTICAL bytes, checked before any timing runs.
 //!
@@ -178,8 +180,25 @@ fn main() {
 
     // Correctness gate: byte-identical rendering across sign edges, zero, i64 extremes, widths.
     for v in [
-        0i64, 1, -1, 9, -9, 10, -10, 99, -99, 100, -100, 12345, -12345, i64::MIN, i64::MAX,
-        i64::MIN + 1, i64::MAX - 1, 1_000_000_000_000, -1_000_000_000_000,
+        0i64,
+        1,
+        -1,
+        9,
+        -9,
+        10,
+        -10,
+        99,
+        -99,
+        100,
+        -100,
+        12345,
+        -12345,
+        i64::MIN,
+        i64::MAX,
+        i64::MIN + 1,
+        i64::MAX - 1,
+        1_000_000_000_000,
+        -1_000_000_000_000,
     ] {
         assert_eq!(itoa2_bytes(v), to_string_bytes(v), "render diverged on {v}");
         assert_eq!(
@@ -226,7 +245,9 @@ fn main() {
         // exactly one division and the true delta must be ~nil. Folding every
         // byte forces the digit loop to actually run. (frankenredis-vqjz1)
         fn fold(bytes: &[u8]) -> usize {
-            bytes.iter().fold(0usize, |a, &b| a.wrapping_mul(31).wrapping_add(b as usize))
+            bytes
+                .iter()
+                .fold(0usize, |a, &b| a.wrapping_mul(31).wrapping_add(b as usize))
         }
         let orig = |vs: &[i64]| vs.iter().map(|&v| fold(&to_string_bytes(v))).sum::<usize>();
         let cand = |vs: &[i64]| vs.iter().map(|&v| fold(&itoa2_bytes(v))).sum::<usize>();
@@ -244,7 +265,8 @@ fn main() {
         loop {
             let e = time(&orig, reps);
             if e >= TARGET_SEGMENT_SECS || reps > 1 << 18 {
-                reps = ((reps as f64) * (TARGET_SEGMENT_SECS / e.max(1e-9)).max(1.0)).ceil() as usize;
+                reps =
+                    ((reps as f64) * (TARGET_SEGMENT_SECS / e.max(1e-9)).max(1.0)).ceil() as usize;
                 break;
             }
             reps *= 4;
@@ -253,9 +275,30 @@ fn main() {
         let mut nulls = Vec::with_capacity(ROUNDS);
         let mut speeds = Vec::with_capacity(ROUNDS);
         let mut divloop_speeds = Vec::with_capacity(ROUNDS);
+        // (frankenredis-tgr69/ef928) Arm order is drawn PER PAIR from a fixed-seed
+        // PRNG rather than alternating on round parity.
+        //
+        // Strict alternation has two defects the A/A null exposed. It aliases
+        // with any periodic drift on the host -- a disturbance with even period
+        // lands on the same arm every time and never cancels -- and it gave all
+        // three pairs in a round the identical order, so the null and the
+        // candidate shared whatever bias that order carried instead of the null
+        // sampling it independently. Both show up as an A/A control whose median
+        // CI excludes 1.0, which is what refused 6 of 15 rows on the previous
+        // schedule.
+        //
+        // Seeded, so the same ELF reproduces the same schedule: a bench whose
+        // ordering moved run to run would reintroduce the irreproducibility this
+        // is meant to remove.
+        let mut order_state: u64 = 0x2545F4914F6CDD1D ^ (reps as u64);
+        let mut next_swap = move || {
+            order_state ^= order_state << 13;
+            order_state ^= order_state >> 7;
+            order_state ^= order_state << 17;
+            order_state & 1 == 1
+        };
         for round in 0..=ROUNDS {
-            let swap = round % 2 == 1;
-            let pair = |bf: &dyn Fn(&[i64]) -> usize, cf: &dyn Fn(&[i64]) -> usize| {
+            let pair = |bf: &dyn Fn(&[i64]) -> usize, cf: &dyn Fn(&[i64]) -> usize, swap: bool| {
                 if swap {
                     let c = time(cf, reps);
                     time(bf, reps) / c
@@ -264,11 +307,14 @@ fn main() {
                     b / time(cf, reps)
                 }
             };
-            let nn = pair(&orig, &orig);
-            let sp = pair(&orig, &cand);
-            // Same interleave and swap schedule, so the div-by-10 comparison is
-            // gated by the SAME null as the to_string one.
-            let dv = pair(&divloop, &cand);
+            // Independent draws: the null must SAMPLE the position-bias
+            // distribution the candidates are subject to, not inherit one
+            // particular realisation of it.
+            let nn = pair(&orig, &orig, next_swap());
+            let sp = pair(&orig, &cand, next_swap());
+            // Drawn from the same schedule, so the div-by-10 comparison is gated
+            // by the SAME null distribution as the to_string one.
+            let dv = pair(&divloop, &cand, next_swap());
             if round == 0 {
                 continue;
             }

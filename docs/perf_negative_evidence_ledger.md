@@ -14812,6 +14812,62 @@ rendering across zero, both sign edges, i64::MIN/MAX and every digit width befor
 The shipped path stays; it simply carries no defensible speedup figure. The only edits are to the
 bench and to `fr-persist` dev-dependencies.
 
+### ADDENDUM 2026-08-06: randomized arm order, and the verdict against `divloop_bytes`
+
+The retry predicate above named "a per-round randomised arm order rather than strict alternation"
+as the next lever if the bias persisted. It was implemented and run: arm order is now drawn PER
+PAIR from a fixed-seed PRNG, so the null samples the position-bias distribution independently
+instead of inheriting the one realisation strict alternation handed to every pair in a round.
+
+Three more invocations (J, K, L) on `ovh-a`, each ELF self-hashed:
+
+    run J  bench_elf_sha256=24ccb7b867dbdfde84f58f9cf1cdb99a36d0a866d5ec8da534233dd37d910f84
+    run K  bench_elf_sha256=cbd5cc3173a72b00197d51f6b8afaece30cdfa7749130ec2d29e421a10eb3c61
+    run L  bench_elf_sha256=d691e5d096c05cee84d026e7730799b44adc8733171f2bd19cb7368d24453b3e
+
+| run | wl | A/A null med | null median CI95 | itoa2/divloop | verdict |
+|-----|----|--------------|------------------|---------------|---------|
+| J | d1_256 | 0.9993 | [0.9967, 1.0118] | 1.163 | WIN |
+| J | d6_256 | 1.0027 | [0.9985, 1.0083] | 1.145 | WIN |
+| J | d18_256 | 0.9905 | [0.9864, 0.9995] | 1.261 | **NULL-INADMISSIBLE** |
+| K | d1_256 | 0.9873 | [0.9805, 0.9976] | 1.178 | **NULL-INADMISSIBLE** |
+| K | d6_256 | 0.9976 | [0.9954, 0.9999] | 1.162 | **NULL-INADMISSIBLE** |
+| K | d18_256 | 0.9946 | [0.9789, 0.9984] | 1.211 | **NULL-INADMISSIBLE** |
+| L | d1_256 | 0.9933 | [0.9838, 0.9998] | 1.150 | **NULL-INADMISSIBLE** |
+| L | d6_256 | 0.9994 | [0.9977, 1.0006] | 1.143 | WIN |
+| L | d18_256 | 0.9940 | [0.9833, 1.0001] | 1.253 | WIN |
+
+WHAT RANDOMISATION ACTUALLY DID, stated precisely because it is the opposite of what I expected.
+It did NOT raise the admissible rate — 4 of 9 here versus 9 of 15 on the alternating schedule. It
+TIGHTENED the null CIs by roughly 5x: widths of 0.005-0.015 against ~0.05 before. A residual bias
+that the loose instrument could not see is now resolvable, so the same rows that used to pass
+vacuously now fail honestly. The null medians cluster just below 1.0 (0.9873-1.0027) in every
+single run, which also rules out the ordering-aliasing explanation the earlier text offered: if
+alternation aliasing were the cause, randomising it away would have re-centred the null, and it
+did not. Whatever remains is a real, small, direction-stable effect of measuring two arms
+back-to-back — plausibly cache or frequency state carried from the first timed arm into the second.
+
+VERDICT AGAINST `divloop_bytes` — the baseline `frankenredis-vqjz1` actually claims (one division
+per digit versus two digits per division), in the three terms it may be reported in:
+
+  * NOT still-inside-null. The effect is nowhere near the null. The null sits within ~1.3% of 1.0
+    on every run; `itoa2/divloop` is 1.143-1.261. The effect is an ORDER OF MAGNITUDE larger than
+    the residual bias, and dividing it through by the null median to correct for that bias leaves
+    1.15-1.27. It does not survive by a hair.
+  * NOT refuted. Across BOTH schedules and every configuration tried — 24 rows in total — not one
+    reading put `divloop` ahead, and no run in any configuration produced a REGRESSION.
+  * PROVEN, on the rows the gate admits. Thirteen admissible rows across the two schedules (9
+    alternating, 4 randomised) ALL read WIN(itoa2), spanning 1.125-1.300. Those rows cleared the
+    admissibility test on their own merits and were not rescued by any gate change.
+
+So: **the two-digit writer IS faster than the single-digit div-by-10 loop it replaced.** That is a
+stronger resolution than vqjz1 closed with, and it settles the residual that bead left open.
+
+WHAT IS STILL NOT CERTIFIED is the MAGNITUDE, and only that. The admissible readings span
+1.125-1.300, a 17-point spread on identical source, so any single figure quoted from this surface
+would be unreproducible. Quote the RANGE or nothing. The retry predicate below is unchanged and
+still governs attaching a point estimate.
+
 Retry predicate: attach a magnitude to this surface ONLY IF, on an EXCLUSIVELY BOOKED host
 (trj/threadripperje, or an rch worker taken out of the pool), three consecutive `cargo bench -p
 fr-persist --bench int_render_itoa2 --profile release-perf` invocations each show all nine rows
