@@ -5,6 +5,9 @@ Not a gate — this module has no side effects and nothing to run. It exists so
 the three corrections below have ONE home instead of being hand-copied into
 every differ, where they drift back one file at a time.
 
+See docs/GATE_VALIDITY.md for the full catalogue of ways a differential gate
+passes without testing anything, and the checklist to run before adding one.
+
 Each correction fixes a way a gate can be GREEN FOR A REASON UNRELATED TO THE
 PROPERTY IT TESTS, all three of which were measured on real gates in this repo:
 
