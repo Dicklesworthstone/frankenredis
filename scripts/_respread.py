@@ -30,7 +30,8 @@ PROPERTY IT TESTS, all three of which were measured on real gates in this repo:
 
 3. UNVERIFIED SEED. If seeding silently fails, most commands answer 0 / -1 /
    empty for a missing key on BOTH engines, so the gate passes while testing
-   nothing. `assert_seed()` makes the seed a checked precondition.
+   nothing. `assert_seed()` makes a counting seed (RPUSH/SADD/...) a checked
+   precondition, and `assert_ok()` does the same for a `+OK` seed (SET/MSET/...).
 
 Usage:
 
@@ -47,7 +48,7 @@ sys.path[0] and a plain `import _respread` resolves.
 import socket
 import sys
 
-__all__ = ["conn", "cmd", "encode_arg", "encode_command", "frame_len", "assert_seed"]
+__all__ = ["conn", "cmd", "encode_arg", "encode_command", "frame_len", "assert_seed", "assert_ok"]
 
 
 def encode_arg(x):
@@ -135,6 +136,20 @@ def cmd(sock, *args):
         if not chunk:
             raise OSError("server closed the connection mid-reply")
         buf += chunk
+
+
+def assert_ok(reply, label, exit_code=1):
+    """Fail loudly unless `reply` is `+OK`.
+
+    The `assert_seed` companion for seeds that are SET/MSET/etc rather than a
+    counting write. Same reason it exists: a silently failed seed leaves the
+    cases operating on a missing key, where most commands answer identically on
+    both engines and the gate passes having exercised nothing.
+    """
+    if reply != b"+OK\r\n":
+        print(f"SEED FAILED [{label}]: got {reply!r}, expected b'+OK\\r\\n'")
+        sys.exit(exit_code)
+    return reply
 
 
 def assert_seed(reply, expected_int, label, exit_code=1):

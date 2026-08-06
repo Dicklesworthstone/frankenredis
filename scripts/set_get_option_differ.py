@@ -15,26 +15,23 @@ timing never flakes. Also covers the legacy GETSET.
 
 Usage: set_get_option_differ.py <oracle_port> <fr_port>
        Exit 0 = byte-exact, 1 = divergence.
+
+(frankenredis-0lqad) Reads through `_respread.cmd`, which buffers until a WHOLE
+RESP frame has arrived. The hand-rolled `sleep(0.02); recv(1 << 20)` this replaced
+returns whatever bytes happened to have landed, which is not a frame boundary --
+and because both sides of a differ used the same reader, two replies truncated at
+the same offset COMPARE EQUAL while differing past it. That is a false PASS, worse
+than a false FAIL because nothing looks wrong. See docs/GATE_VALIDITY.md.
+
+Seeding is a CHECKED precondition for the same reason: a silently failed seed
+leaves both engines answering nil/0 for a missing key, so the gate passes while
+testing nothing.
 """
-import socket
 import sys
-import time
+
+from _respread import assert_ok, assert_seed, cmd, conn
 
 EXAT = "4102444800"   # 2100-01-01, stable absolute seconds
-
-
-def conn(p):
-    return socket.create_connection(("127.0.0.1", p), timeout=5)
-
-
-def cmd(s, *a):
-    o = b"*%d\r\n" % len(a)
-    for x in a:
-        x = x if isinstance(x, bytes) else str(x).encode()
-        o += b"$%d\r\n%s\r\n" % (len(x), x)
-    s.sendall(o)
-    time.sleep(0.02)
-    return s.recv(1 << 20)
 
 
 def main():
@@ -49,15 +46,21 @@ def main():
             fails.append(f"{label}: redis={ro!r} fr={rf!r}")
 
     def setk(v=None, ttl_exat=None, as_list=False):
+        # Every seed is asserted. Without this a silently failed RPUSH leaves the
+        # wrongtype cases testing a MISSING key, where both engines answer
+        # identically and the gate passes having exercised nothing.
         for s in (od, fr):
             cmd(s, "DEL", "k")
             if as_list:
-                cmd(s, "RPUSH", "k", "listval")
+                assert_seed(cmd(s, "RPUSH", "k", "listval"), 1, "RPUSH k listval")
             elif v is not None:
                 if ttl_exat:
-                    cmd(s, "SET", "k", v, "EXAT", ttl_exat)
+                    assert_ok(
+                        cmd(s, "SET", "k", v, "EXAT", ttl_exat),
+                        f"SET k {v} EXAT",
+                    )
                 else:
-                    cmd(s, "SET", "k", v)
+                    assert_ok(cmd(s, "SET", "k", v), f"SET k {v}")
 
     setk(); chk("get_missing", "SET", "k", "v1", "GET"); chk("get_missing_after", "GET", "k")
     setk("old"); chk("get_existing", "SET", "k", "new", "GET"); chk("get_existing_after", "GET", "k")
