@@ -2765,6 +2765,22 @@ enum ReactorInfoRequest {
     /// over partitions; RSS is process-wide and taken once, never summed.
     /// (frankenredis-zydmi)
     MemoryOnly,
+    /// Every requested section is Persistence (possibly repeated). One additive
+    /// field, `rdb_changes_since_last_save`; the rest are constants here.
+    /// (frankenredis-zydmi)
+    PersistenceOnly,
+    /// Server, CPU or Replication -- sections whose every field is either a
+    /// process-wide fact or identical in every partition, so partition 0's
+    /// rendering IS the server's answer and nothing needs rewriting.
+    /// (frankenredis-zydmi)
+    ///
+    /// This is a positive finding, not a shortcut. CPU is the case worth naming:
+    /// `used_cpu_sys` / `used_cpu_user` come from `read_cpu_times`, which reads
+    /// `/proc/self/stat` -- the whole PROCESS, which every reactor shares. Summing
+    /// them across partitions would multiply the server's CPU time by the
+    /// partition count, the same class of error that made a summed RSS report
+    /// 162x. Passthrough is the CORRECT rule, and the gate pins it as such.
+    ProcessWideOnly,
     /// At least one section needs reactor-local state this path does not yet
     /// publish, or the request is the bare/`all`/`default` form implying such
     /// sections.
@@ -2787,6 +2803,10 @@ fn classify_reactor_info_request(args: &[&[u8]]) -> ReactorInfoRequest {
         ReactorInfoRequest::StatsOnly
     } else if all_of(b"memory") {
         ReactorInfoRequest::MemoryOnly
+    } else if all_of(b"persistence") {
+        ReactorInfoRequest::PersistenceOnly
+    } else if all_of(b"server") || all_of(b"cpu") || all_of(b"replication") {
+        ReactorInfoRequest::ProcessWideOnly
     } else {
         ReactorInfoRequest::NotAggregatable
     }
@@ -3125,6 +3145,41 @@ fn execute_reactor_cross_partition_aggregate(
                 ];
                 RespFrame::BulkString(Some(rewrite_info_fields(body, &replacements)))
                     .encode_into(out);
+                return true;
+            }
+            ReactorInfoRequest::PersistenceOnly => {
+                let mut guards = partitions.lock_all_partitions_in_index_order();
+                let rdb_changes: u64 = guards
+                    .iter()
+                    .map(|p| p.partition_rdb_changes_since_last_save())
+                    .sum();
+                // Sums taken BEFORE the template renders, since rendering runs a
+                // command on partition 0.
+                let template = guards
+                    .first_mut()
+                    .map(|partition| partition.execute_bytes(frame, ts))
+                    .unwrap_or_default();
+                drop(guards);
+                let Some(body) = resp_bulk_body(&template) else {
+                    out.extend_from_slice(&template);
+                    return true;
+                };
+                let replacements = [("rdb_changes_since_last_save", rdb_changes.to_string())];
+                RespFrame::BulkString(Some(rewrite_info_fields(body, &replacements)))
+                    .encode_into(out);
+                return true;
+            }
+            ReactorInfoRequest::ProcessWideOnly => {
+                // NOTHING is rewritten, and that is the rule rather than an
+                // omission -- see ReactorInfoRequest::ProcessWideOnly. Every field
+                // in Server, CPU and Replication is either a process-wide fact
+                // (pid, uptime, CPU time from /proc/self/stat, listener) or is
+                // identical in every partition by construction (version, mode,
+                // tcp_port set on each partition at startup, role master with no
+                // replicas). Summing any of them would multiply a server-wide
+                // truth by the partition count.
+                let reply = partitions.lock_partition(0).execute_bytes(frame, ts);
+                out.extend_from_slice(&reply);
                 return true;
             }
             ReactorInfoRequest::NotAggregatable => return false,
@@ -30310,6 +30365,21 @@ mod tests {
             ReactorInfoRequest::MemoryOnly
         );
         assert_eq!(
+            crate::classify_reactor_info_request(&[b"INFO", b"persistence"]),
+            ReactorInfoRequest::PersistenceOnly
+        );
+        // Server, CPU and Replication share one classification because every
+        // field in them is process-wide or identical per partition. CPU is the
+        // one that matters: /proc/self/stat describes the whole process, so
+        // summing it would multiply the server's CPU time by the partition count.
+        for section in [b"server".as_slice(), b"cpu", b"replication"] {
+            assert_eq!(
+                crate::classify_reactor_info_request(&[b"INFO", section]),
+                ReactorInfoRequest::ProcessWideOnly,
+                "{section:?} is answered from one partition, never summed"
+            );
+        }
+        assert_eq!(
             crate::classify_reactor_info_request(&[b"INFO", b"CLIENTS", b"clients"]),
             ReactorInfoRequest::ClientsOnly,
             "case-insensitive and repetition-tolerant, like the keyspace form"
@@ -30320,9 +30390,6 @@ mod tests {
             &[b"INFO", b"all"],
             &[b"INFO", b"everything"],
             &[b"INFO", b"default"],
-            &[b"INFO", b"server"],
-            &[b"INFO", b"cpu"],
-            &[b"INFO", b"replication"],
             // Mixed requests must be refused whole: emitting only the half we
             // can aggregate would silently drop sections the client asked for.
             // That holds for two AGGREGATABLE sections too -- keyspace+clients

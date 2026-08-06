@@ -7187,6 +7187,20 @@ impl Runtime {
         ]
     }
 
+    /// Keyspace mutations in THIS partition since its last save.
+    ///
+    /// (frankenredis-zydmi) Additive: it counts writes to this partition's own
+    /// keys, so the server-wide figure is the sum. This is the ONLY additive
+    /// field in INFO Persistence -- every other line there is a constant in this
+    /// topology, because neither AOF rewriting nor RDB saving runs on a reactor.
+    #[must_use]
+    pub fn partition_rdb_changes_since_last_save(&self) -> u64 {
+        self.server
+            .store
+            .dirty
+            .saturating_sub(self.server.store.dirty_at_last_save)
+    }
+
     /// Estimated memory held by THIS runtime's slice of the keyspace.
     ///
     /// (frankenredis-zydmi) Additive: the shared-nothing topology splits the

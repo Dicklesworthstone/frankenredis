@@ -1702,7 +1702,7 @@ fn sharded_standard_single_key_mix_matches_legacy_redis() {
     // which no other reactor can read.
     let mut aggregate_pipeline = Vec::new();
     aggregate_pipeline.extend_from_slice(&encode_command(&[b"DBSIZE"]));
-    aggregate_pipeline.extend_from_slice(&encode_command(&[b"INFO", b"server"]));
+    aggregate_pipeline.extend_from_slice(&encode_command(&[b"INFO", b"commandstats"]));
     fr.write_all(&aggregate_pipeline);
     redis.write_all(&encode_command(&[b"DBSIZE"]));
     let fr_aggregate = fr.read_responses(2);
@@ -1894,7 +1894,7 @@ fn sharded_dbsize_and_info_keyspace_aggregate_every_partition() {
     let mut refused = Vec::new();
     refused.extend_from_slice(&encode_command(&[b"INFO"]));
     refused.extend_from_slice(&encode_command(&[b"INFO", b"all"]));
-    refused.extend_from_slice(&encode_command(&[b"INFO", b"cpu"]));
+    refused.extend_from_slice(&encode_command(&[b"INFO", b"commandstats"]));
     refused.extend_from_slice(&encode_command(&[b"INFO", b"keyspace", b"stats"]));
     fr.write_all(&refused);
     for response in fr.read_responses(4) {
@@ -2353,6 +2353,204 @@ fn sharded_info_memory_sums_used_memory_but_takes_rss_once() {
     );
 }
 
+/// Server, CPU, Persistence and Replication complete the INFO surface.
+/// (frankenredis-zydmi)
+///
+/// The load-bearing assertion here is CPU. `used_cpu_sys` and `used_cpu_user` come
+/// from `/proc/self/stat` -- the whole PROCESS, which every reactor shares -- so
+/// passthrough is the correct rule and summing them would multiply the server's
+/// CPU time by the partition count. That is the same class of error a summed RSS
+/// made visible at 162x, and it is pinned here by comparing against a Redis
+/// process that has done comparable work.
+#[test]
+fn sharded_info_server_cpu_persistence_replication_are_not_multiplied() {
+    const WORKERS: usize = 8;
+    const KEYS: usize = 40;
+
+    let fr_port = reserve_port();
+    let redis_port = reserve_port();
+    let _fr_server = spawn_frankenredis_sharded_set_get(fr_port, WORKERS);
+    let _redis_server = spawn_legacy_redis(redis_port);
+    let mut fr = BufferedTcpClient::connect(fr_port);
+    let mut redis = BufferedTcpClient::connect(redis_port);
+
+    // Field set and ORDER parity for every newly-served section.
+    for section in [
+        b"server".as_slice(),
+        b"cpu".as_slice(),
+        b"persistence".as_slice(),
+        b"replication".as_slice(),
+    ] {
+        let request = encode_command(&[b"INFO".as_slice(), section]);
+        fr.write_all(&request);
+        redis.write_all(&request);
+        let fr_fields = info_field_order(&fr.read_response());
+        let redis_fields = info_field_order(&redis.read_response());
+        assert_eq!(
+            fr_fields,
+            redis_fields,
+            "INFO {} field set and order must match Redis 7.2.4",
+            String::from_utf8_lossy(section)
+        );
+    }
+
+    // Drive work across every reactor so the CPU counters are non-trivial and
+    // the persistence change-counter has something to sum.
+    let keys: Vec<Vec<u8>> = (0..KEYS)
+        .map(|i| format!("misc:key:{i}").into_bytes())
+        .collect();
+    let workers_reached: std::collections::HashSet<usize> = keys
+        .iter()
+        .map(|key| usize::from(fr_store::crc16_slot(key)) % WORKERS)
+        .collect();
+    assert_eq!(
+        workers_reached.len(),
+        WORKERS,
+        "fixtures must span reactors"
+    );
+    let mut work = Vec::new();
+    for key in &keys {
+        work.extend_from_slice(&encode_command(&[b"SET".as_slice(), key, b"v".as_slice()]));
+    }
+    fr.write_all(&work);
+    let _ = fr.read_responses(KEYS);
+    redis.write_all(&work);
+    let _ = redis.read_responses(KEYS);
+
+    // Burn enough CPU on BOTH servers that /proc/self/stat registers whole clock
+    // ticks. Without this the counters read 0.000 on a test-length run, and a
+    // summed value would be 32 * 0 = 0 -- the gate would pass for a reason
+    // unrelated to what it claims, which is precisely the failure this suite has
+    // been hunting. The burst is pipelined, so it costs well under a second.
+    const BURN: usize = 40_000;
+    let mut burn = Vec::with_capacity(BURN * 32);
+    for i in 0..BURN {
+        let key = format!("burn:{}", i % 512).into_bytes();
+        burn.extend_from_slice(&encode_command(&[b"SET".as_slice(), &key, b"v".as_slice()]));
+    }
+    fr.write_all(&burn);
+    let _ = fr.read_responses(BURN);
+    redis.write_all(&burn);
+    let _ = redis.read_responses(BURN);
+
+    // CPU: process-wide, taken once. A summed value would be ~WORKERS*4 times
+    // larger than a comparable single process's.
+    let info_cpu = encode_command(&[b"INFO", b"cpu"]);
+    fr.write_all(&info_cpu);
+    redis.write_all(&info_cpu);
+    let fr_frame = fr.read_response();
+    let redis_frame = redis.read_response();
+    let fr_cpu =
+        parse_info_f64(&fr_frame, "used_cpu_sys") + parse_info_f64(&fr_frame, "used_cpu_user");
+    let redis_cpu = parse_info_f64(&redis_frame, "used_cpu_sys")
+        + parse_info_f64(&redis_frame, "used_cpu_user");
+    // The counters must be NON-ZERO first, or this assertion proves nothing: a
+    // summed zero is still zero. An earlier version of this gate PASSED its own
+    // negative control for exactly that reason -- the test-length workload never
+    // accumulated a whole clock tick, so there was nothing to multiply and the
+    // check was green for a reason unrelated to what it claimed. The burn loop
+    // above exists solely to give this assertion power.
+    assert!(
+        fr_cpu > 0.0 && redis_cpu > 0.0,
+        "CPU counters must register real work before they can be gated \
+         (fr {fr_cpu}, redis {redis_cpu})"
+    );
+    // Threshold set from MEASUREMENT, not taste. With the correct passthrough the
+    // ratio measured ~4.6 -- fr runs 8 reactor threads against Redis's one, so
+    // several times Redis's CPU is expected and correct. With CPU wrongly treated
+    // as additive over the 32 partitions it measured ~74. A bound of 20 sits
+    // between them with >4x headroom below and ~3.7x above.
+    assert!(
+        fr_cpu < redis_cpu * 20.0,
+        "used_cpu_sys+user {fr_cpu} looks summed across partitions; a comparable \
+         Redis process reports {redis_cpu}. CPU time comes from /proc/self/stat \
+         and describes the whole process, so it must be taken once, never summed"
+    );
+
+    // Persistence: rdb_changes_since_last_save is the one additive field, and it
+    // must cover writes that landed on every reactor.
+    let info_persistence = encode_command(&[b"INFO", b"persistence"]);
+    fr.write_all(&info_persistence);
+    let changes = parse_info_u64(&fr.read_response(), "rdb_changes_since_last_save");
+    assert!(
+        changes >= KEYS as u64,
+        "rdb_changes_since_last_save {changes} must sum every partition (>= {KEYS})"
+    );
+
+    // Server: identical in every partition, so the answer must be stable across
+    // repeated calls rather than varying with which partition replied.
+    let info_server = encode_command(&[b"INFO", b"server"]);
+    fr.write_all(&info_server);
+    let first = fr.read_response();
+    fr.write_all(&info_server);
+    let second = fr.read_response();
+    let run_id_of = |frame: &RespFrame| {
+        let body = match frame {
+            RespFrame::BulkString(Some(b)) => String::from_utf8_lossy(b).into_owned(),
+            other => panic!("INFO server must be a bulk string, got {other:?}"),
+        };
+        body.lines()
+            .find_map(|l| l.trim_end().strip_prefix("run_id:"))
+            .expect("run_id present")
+            .to_string()
+    };
+    assert_eq!(
+        run_id_of(&first),
+        run_id_of(&second),
+        "run_id must be stable; a server that answered from a different partition \
+         each time would look like a different server to a client library"
+    );
+    let port = parse_info_u64(&first, "tcp_port");
+    assert_eq!(
+        port,
+        u64::from(fr_port),
+        "tcp_port must be the port actually listening"
+    );
+
+    // Replication: a master with no replicas, matching Redis exactly.
+    let info_repl = encode_command(&[b"INFO", b"replication"]);
+    fr.write_all(&info_repl);
+    redis.write_all(&info_repl);
+    let fr_repl = parse_field_block(&fr.read_response());
+    let redis_repl = parse_field_block(&redis.read_response());
+    for field in ["role", "connected_slaves", "master_failover_state"] {
+        assert_eq!(
+            fr_repl.get(field),
+            redis_repl.get(field),
+            "INFO replication {field} must match Redis"
+        );
+    }
+
+    // The bare/all forms still refuse: this path serves single sections only, and
+    // assembling a multi-section reply is a separate contract.
+    let mut refused = Vec::new();
+    refused.extend_from_slice(&encode_command(&[b"INFO"]));
+    refused.extend_from_slice(&encode_command(&[b"INFO", b"all"]));
+    refused.extend_from_slice(&encode_command(&[b"INFO", b"server", b"cpu"]));
+    fr.write_all(&refused);
+    for response in fr.read_responses(3) {
+        assert!(
+            matches!(response, RespFrame::Error(ref e) if e.contains("not supported")),
+            "multi-section INFO must still fail closed: {response:?}"
+        );
+    }
+}
+
+/// Pull a single `field:<float>` out of an INFO section reply.
+fn parse_info_f64(frame: &RespFrame, field: &str) -> f64 {
+    let body = match frame {
+        RespFrame::BulkString(Some(bytes)) => String::from_utf8_lossy(bytes).into_owned(),
+        RespFrame::Verbatim(text) => text.clone(),
+        other => panic!("INFO must reply with a bulk string, got {other:?}"),
+    };
+    let prefix = format!("{field}:");
+    body.lines()
+        .find_map(|line| line.trim_end().strip_prefix(&prefix))
+        .unwrap_or_else(|| panic!("INFO reply missing {field}: {body}"))
+        .parse()
+        .unwrap_or_else(|_| panic!("INFO {field} is not a float: {body}"))
+}
+
 /// Field names of an INFO section reply, in emission order.
 fn info_field_order(frame: &RespFrame) -> Vec<String> {
     let body = match frame {
@@ -2502,8 +2700,8 @@ fn sharded_info_clients_aggregates_every_reactor() {
     // gate is sharded_info_stats_merges_partition_and_reactor_counters.
     let mut refused = Vec::new();
     refused.extend_from_slice(&encode_command(&[b"INFO"]));
-    refused.extend_from_slice(&encode_command(&[b"INFO", b"server"]));
-    refused.extend_from_slice(&encode_command(&[b"INFO", b"cpu"]));
+    refused.extend_from_slice(&encode_command(&[b"INFO", b"commandstats"]));
+    refused.extend_from_slice(&encode_command(&[b"INFO", b"errorstats"]));
     refused.extend_from_slice(&encode_command(&[b"INFO", b"clients", b"keyspace"]));
     fr.write_all(&refused);
     for response in fr.read_responses(4) {
