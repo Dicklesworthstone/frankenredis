@@ -7187,6 +7187,29 @@ impl Runtime {
         ]
     }
 
+    /// Estimated memory held by THIS runtime's slice of the keyspace.
+    ///
+    /// (frankenredis-zydmi) Additive: the shared-nothing topology splits the
+    /// keyspace across partitions and each estimates only its own share, so a
+    /// server-wide `used_memory` is their sum. Contrast `used_memory_rss`, which
+    /// is the resident size of the ONE process every reactor shares and must be
+    /// read once rather than summed.
+    #[must_use]
+    pub fn partition_used_memory(&self) -> usize {
+        self.server.store.estimate_memory_usage_bytes()
+    }
+
+    /// This partition's high-water memory mark. (frankenredis-zydmi)
+    ///
+    /// Summing these across partitions yields an UPPER BOUND on the server-wide
+    /// peak, not the peak itself: each mark is real but they need not have
+    /// occurred at the same instant. An exact aggregate peak would need a
+    /// process-wide sampler no reactor owns.
+    #[must_use]
+    pub fn partition_used_memory_peak(&self) -> usize {
+        self.server.store.stat_used_memory_peak
+    }
+
     /// Connections ever accepted by THIS runtime.
     ///
     /// (frankenredis-zydmi) The shared-nothing server gives every reactor its own

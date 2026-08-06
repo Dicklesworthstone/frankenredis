@@ -16944,7 +16944,15 @@ fn select(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandError
     }
 }
 
-fn format_bytes_human(bytes: usize) -> String {
+/// Render a byte count the way INFO Memory's `*_human` fields do.
+///
+/// Public so a cross-partition INFO aggregate can RE-render the human forms from
+/// its summed byte totals using this exact function. (frankenredis-zydmi) That
+/// matters for correctness, not tidiness: summing `used_memory` while passing
+/// through partition 0's `used_memory_human` would leave the two fields
+/// contradicting each other in the same reply, and a second copy of this
+/// formatter would drift from this one.
+pub fn format_bytes_human(bytes: usize) -> String {
     const KB: f64 = 1024.0;
     const MB: f64 = 1024.0 * 1024.0;
     const GB: f64 = 1024.0 * 1024.0 * 1024.0;

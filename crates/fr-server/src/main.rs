@@ -2761,6 +2761,10 @@ enum ReactorInfoRequest {
     /// populations: keyspace counters summed over partitions, connection
     /// counters from the published reactor slots. (frankenredis-zydmi)
     StatsOnly,
+    /// Every requested section is Memory (possibly repeated). used_memory sums
+    /// over partitions; RSS is process-wide and taken once, never summed.
+    /// (frankenredis-zydmi)
+    MemoryOnly,
     /// At least one section needs reactor-local state this path does not yet
     /// publish, or the request is the bare/`all`/`default` form implying such
     /// sections.
@@ -2781,6 +2785,8 @@ fn classify_reactor_info_request(args: &[&[u8]]) -> ReactorInfoRequest {
         ReactorInfoRequest::ClientsOnly
     } else if all_of(b"stats") {
         ReactorInfoRequest::StatsOnly
+    } else if all_of(b"memory") {
+        ReactorInfoRequest::MemoryOnly
     } else {
         ReactorInfoRequest::NotAggregatable
     }
@@ -2870,6 +2876,15 @@ fn render_aggregate_keyspace_section(per_db: &[(usize, usize, u128)]) -> Vec<u8>
     info.into_bytes()
 }
 
+/// Read one integer `field:` value out of an INFO section body.
+fn info_field_u64(body: &[u8], field: &str) -> Option<u64> {
+    let text = std::str::from_utf8(body).ok()?;
+    let prefix = format!("{field}:");
+    text.lines()
+        .find_map(|line| line.trim_end().strip_prefix(&prefix))
+        .and_then(|value| value.parse().ok())
+}
+
 /// Borrow the payload of a RESP bulk-string reply, or None for any other frame.
 ///
 /// Used to unwrap a partition's own INFO rendering before rewriting it; an error
@@ -2885,7 +2900,7 @@ fn resp_bulk_body(reply: &[u8]) -> Option<&[u8]> {
     rest.get(body_start..body_start + len)
 }
 
-/// Rewrite the additive lines of an INFO Stats section rendered by one partition.
+/// Rewrite named `field:value` lines of an INFO section rendered by one partition.
 ///
 /// (frankenredis-zydmi) The field SET and ORDER come from `template`, which the
 /// normal `fr-command` emitter produced, so this cannot drift out of parity when
@@ -2914,11 +2929,7 @@ fn resp_bulk_body(reply: &[u8]) -> Option<&[u8]> {
 /// meaningful from one partition -- computing a true server-wide rate needs a
 /// sampling window this path does not own. They are reported as the partition's
 /// own figure and must not be read as a server total.
-fn rewrite_additive_stats_lines(
-    template: &[u8],
-    partition_sums: &[(&str, u64)],
-    reactor_sums: &[(&str, u64)],
-) -> Vec<u8> {
+fn rewrite_info_fields(template: &[u8], replacements: &[(&str, String)]) -> Vec<u8> {
     let mut out = Vec::with_capacity(template.len());
     for line in template.split_inclusive(|byte| *byte == b'\n') {
         let trimmed = line
@@ -2929,9 +2940,8 @@ fn rewrite_additive_stats_lines(
             .position(|byte| *byte == b':')
             .and_then(|colon| {
                 let field = std::str::from_utf8(&trimmed[..colon]).ok()?;
-                partition_sums
+                replacements
                     .iter()
-                    .chain(reactor_sums.iter())
                     .find(|(name, _)| *name == field)
                     .map(|(name, value)| format!("{name}:{value}\r\n"))
             });
@@ -3032,20 +3042,89 @@ fn execute_reactor_cross_partition_aggregate(
                     out.extend_from_slice(&template);
                     return true;
                 };
-                let reactor_sums = [
+                let mut replacements: Vec<(&str, String)> = partition_sums
+                    .iter()
+                    .map(|(name, value)| (*name, value.to_string()))
+                    .collect();
+                replacements.extend([
                     (
                         "total_connections_received",
-                        reactor.total_connections_received,
+                        reactor.total_connections_received.to_string(),
                     ),
-                    ("total_net_input_bytes", reactor.net_input_bytes),
-                    ("total_net_output_bytes", reactor.net_output_bytes),
+                    ("total_net_input_bytes", reactor.net_input_bytes.to_string()),
+                    (
+                        "total_net_output_bytes",
+                        reactor.net_output_bytes.to_string(),
+                    ),
+                ]);
+                RespFrame::BulkString(Some(rewrite_info_fields(body, &replacements)))
+                    .encode_into(out);
+                return true;
+            }
+            ReactorInfoRequest::MemoryOnly => {
+                let mut guards = partitions.lock_all_partitions_in_index_order();
+                // SUM: memory attributable to the KEYSPACE, which the topology
+                // splits across partitions. Each partition estimates only its own
+                // share, so any single one is a fraction of the server's usage.
+                let used_memory: usize = guards.iter().map(|p| p.partition_used_memory()).sum();
+                // used_memory_peak is summed as an UPPER BOUND and labelled as
+                // such here rather than silently: each partition's high-water mark
+                // is real, but they need not have occurred at the same instant, so
+                // their sum is >= the true server-wide peak. Tracking an exact
+                // aggregate peak would need a process-wide sampler this path does
+                // not own. The bound is at least self-consistent -- it can never
+                // fall below the summed current usage.
+                let used_memory_peak: usize =
+                    guards.iter().map(|p| p.partition_used_memory_peak()).sum();
+                let template = guards
+                    .first_mut()
+                    .map(|partition| partition.execute_bytes(frame, ts))
+                    .unwrap_or_default();
+                drop(guards);
+                let Some(body) = resp_bulk_body(&template) else {
+                    out.extend_from_slice(&template);
+                    return true;
+                };
+                // RSS is taken ONCE, never summed: it is the resident size of the
+                // single process every reactor shares. Summing it across 32
+                // partitions would report ~32x the memory the machine is actually
+                // using -- a plausible-looking number that is catastrophically
+                // wrong. It therefore stays a passthrough from the template.
+                let rss = info_field_u64(body, "used_memory_rss").unwrap_or(0);
+                // RECOMPUTED, not passed through. These are derived from
+                // used_memory, so leaving the template's copies would leave the
+                // reply self-contradictory: a summed used_memory beside partition
+                // 0's human rendering and partition 0's fragmentation ratio.
+                let frag_ratio = if used_memory > 0 {
+                    rss as f64 / used_memory as f64
+                } else {
+                    1.0
+                };
+                let peak_perc = if used_memory_peak > 0 {
+                    (used_memory as f64 / used_memory_peak as f64) * 100.0
+                } else {
+                    0.0
+                };
+                let replacements: Vec<(&str, String)> = vec![
+                    ("used_memory", used_memory.to_string()),
+                    (
+                        "used_memory_human",
+                        fr_command::format_bytes_human(used_memory),
+                    ),
+                    ("used_memory_peak", used_memory_peak.to_string()),
+                    (
+                        "used_memory_peak_human",
+                        fr_command::format_bytes_human(used_memory_peak),
+                    ),
+                    ("used_memory_peak_perc", format!("{peak_perc:.2}%")),
+                    ("mem_fragmentation_ratio", format!("{frag_ratio:.2}")),
+                    (
+                        "mem_fragmentation_bytes",
+                        (rss as i64 - used_memory as i64).to_string(),
+                    ),
                 ];
-                RespFrame::BulkString(Some(rewrite_additive_stats_lines(
-                    body,
-                    &partition_sums,
-                    &reactor_sums,
-                )))
-                .encode_into(out);
+                RespFrame::BulkString(Some(rewrite_info_fields(body, &replacements)))
+                    .encode_into(out);
                 return true;
             }
             ReactorInfoRequest::NotAggregatable => return false,
@@ -30227,6 +30306,10 @@ mod tests {
             "case-insensitive and repetition-tolerant"
         );
         assert_eq!(
+            crate::classify_reactor_info_request(&[b"INFO", b"memory"]),
+            ReactorInfoRequest::MemoryOnly
+        );
+        assert_eq!(
             crate::classify_reactor_info_request(&[b"INFO", b"CLIENTS", b"clients"]),
             ReactorInfoRequest::ClientsOnly,
             "case-insensitive and repetition-tolerant, like the keyspace form"
@@ -30238,7 +30321,8 @@ mod tests {
             &[b"INFO", b"everything"],
             &[b"INFO", b"default"],
             &[b"INFO", b"server"],
-            &[b"INFO", b"memory"],
+            &[b"INFO", b"cpu"],
+            &[b"INFO", b"replication"],
             // Mixed requests must be refused whole: emitting only the half we
             // can aggregate would silently drop sections the client asked for.
             // That holds for two AGGREGATABLE sections too -- keyspace+clients

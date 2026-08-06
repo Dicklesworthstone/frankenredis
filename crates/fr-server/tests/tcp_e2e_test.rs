@@ -1894,7 +1894,7 @@ fn sharded_dbsize_and_info_keyspace_aggregate_every_partition() {
     let mut refused = Vec::new();
     refused.extend_from_slice(&encode_command(&[b"INFO"]));
     refused.extend_from_slice(&encode_command(&[b"INFO", b"all"]));
-    refused.extend_from_slice(&encode_command(&[b"INFO", b"memory"]));
+    refused.extend_from_slice(&encode_command(&[b"INFO", b"cpu"]));
     refused.extend_from_slice(&encode_command(&[b"INFO", b"keyspace", b"stats"]));
     fr.write_all(&refused);
     for response in fr.read_responses(4) {
@@ -2221,6 +2221,138 @@ fn sharded_info_stats_merges_partition_and_reactor_counters() {
     }
 }
 
+/// INFO Memory must sum used_memory across partitions while taking RSS ONCE.
+/// (frankenredis-zydmi)
+///
+/// The two failure modes are opposite and both plausible-looking. Reporting one
+/// partition's used_memory under-reports the server by ~32x; summing RSS -- which
+/// is the resident size of the single process every reactor shares -- over-reports
+/// it by ~32x. The gate pins both directions, plus the self-consistency the
+/// derived fields must have: a summed used_memory beside partition 0's
+/// used_memory_human, or partition 0's mem_fragmentation_ratio, would leave the
+/// reply contradicting itself in a way no single-field assertion would catch.
+#[test]
+fn sharded_info_memory_sums_used_memory_but_takes_rss_once() {
+    const WORKERS: usize = 8;
+    const KEYS: usize = 60;
+    const VALUE_LEN: usize = 4096;
+
+    let fr_port = reserve_port();
+    let redis_port = reserve_port();
+    let _fr_server = spawn_frankenredis_sharded_set_get(fr_port, WORKERS);
+    let _redis_server = spawn_legacy_redis(redis_port);
+    let mut fr = BufferedTcpClient::connect(fr_port);
+    let mut redis = BufferedTcpClient::connect(redis_port);
+
+    let info_memory = encode_command(&[b"INFO", b"memory"]);
+
+    // Field set and ORDER parity against a real 7.2.4 server.
+    fr.write_all(&info_memory);
+    redis.write_all(&info_memory);
+    let fr_fields = info_field_order(&fr.read_response());
+    let redis_fields = info_field_order(&redis.read_response());
+    assert_eq!(
+        fr_fields, redis_fields,
+        "INFO memory field set and order must match Redis 7.2.4 exactly"
+    );
+
+    fr.write_all(&info_memory);
+    let before = parse_info_u64(&fr.read_response(), "used_memory");
+
+    // Store enough scattered data that the summed total must move visibly, and
+    // assert the keys really span every reactor first.
+    let keys: Vec<Vec<u8>> = (0..KEYS)
+        .map(|i| format!("mem:key:{i}").into_bytes())
+        .collect();
+    let workers_reached: std::collections::HashSet<usize> = keys
+        .iter()
+        .map(|key| usize::from(fr_store::crc16_slot(key)) % WORKERS)
+        .collect();
+    assert_eq!(
+        workers_reached.len(),
+        WORKERS,
+        "fixtures must reach every reactor or the sum is not exercised"
+    );
+
+    let value = vec![b'x'; VALUE_LEN];
+    let mut work = Vec::new();
+    for key in &keys {
+        work.extend_from_slice(&encode_command(&[b"SET".as_slice(), key, &value]));
+    }
+    fr.write_all(&work);
+    let _ = fr.read_responses(KEYS);
+
+    fr.write_all(&info_memory);
+    let after_frame = fr.read_response();
+    let after = parse_info_u64(&after_frame, "used_memory");
+    let rss = parse_info_u64(&after_frame, "used_memory_rss");
+    let peak = parse_info_u64(&after_frame, "used_memory_peak");
+
+    // The stored payload alone is KEYS * VALUE_LEN. A single-partition answer
+    // would see roughly 1/32 of it and fall far below this floor.
+    let stored = (KEYS * VALUE_LEN) as u64;
+    assert!(
+        after >= before + stored / 2,
+        "used_memory {after} (was {before}) must sum every partition; \
+         {stored} bytes of payload were written across {WORKERS} reactors"
+    );
+
+    // RSS must be the ONE process's resident size, not 32 partitions' worth. A
+    // summed RSS would exceed the machine's own view of the process by ~32x, so
+    // compare against the Redis process holding a comparable dataset.
+    redis.write_all(&work);
+    let _ = redis.read_responses(KEYS);
+    redis.write_all(&info_memory);
+    let redis_rss = parse_info_u64(&redis.read_response(), "used_memory_rss");
+    assert!(
+        rss < redis_rss * 8,
+        "used_memory_rss {rss} looks summed across partitions; Redis holding the \
+         same dataset reports {redis_rss}"
+    );
+
+    // Peak is a documented UPPER BOUND on the true server-wide peak, so the one
+    // property it must always have is self-consistency with current usage.
+    assert!(
+        peak >= after,
+        "used_memory_peak {peak} must not be below current used_memory {after}"
+    );
+
+    // Derived fields must be RECOMPUTED from the aggregate. If used_memory were
+    // summed while these passed through from partition 0, the reply would
+    // contradict itself and only a cross-field check would notice.
+    let body = match &after_frame {
+        RespFrame::BulkString(Some(bytes)) => String::from_utf8_lossy(bytes).into_owned(),
+        other => panic!("INFO memory must reply with a bulk string, got {other:?}"),
+    };
+    let human = body
+        .lines()
+        .find_map(|l| l.trim_end().strip_prefix("used_memory_human:"))
+        .expect("used_memory_human present")
+        .to_string();
+    // Unit-aware: the renderer picks B/K/M/G by magnitude, so decode whichever
+    // suffix it chose rather than assuming one. What is being pinned is that the
+    // human string describes the SUMMED byte count, not partition 0's share --
+    // which would be off by roughly the partition count.
+    let (human_value, divisor) = {
+        let numeric = human.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+        let value: f64 = numeric.parse().expect("human value parses");
+        let divisor = match human.trim_start_matches(numeric) {
+            "K" => 1024.0,
+            "M" => 1024.0 * 1024.0,
+            "G" => 1024.0 * 1024.0 * 1024.0,
+            "B" | "" => 1.0,
+            other => panic!("unexpected used_memory_human unit {other:?} in {human}"),
+        };
+        (value, divisor)
+    };
+    let expected = after as f64 / divisor;
+    assert!(
+        (human_value - expected).abs() <= 0.01 * expected.max(1.0),
+        "used_memory_human {human} must render the SUMMED used_memory {after} \
+         (~{expected:.2}), not partition 0's share"
+    );
+}
+
 /// Field names of an INFO section reply, in emission order.
 fn info_field_order(frame: &RespFrame) -> Vec<String> {
     let body = match frame {
@@ -2371,7 +2503,7 @@ fn sharded_info_clients_aggregates_every_reactor() {
     let mut refused = Vec::new();
     refused.extend_from_slice(&encode_command(&[b"INFO"]));
     refused.extend_from_slice(&encode_command(&[b"INFO", b"server"]));
-    refused.extend_from_slice(&encode_command(&[b"INFO", b"memory"]));
+    refused.extend_from_slice(&encode_command(&[b"INFO", b"cpu"]));
     refused.extend_from_slice(&encode_command(&[b"INFO", b"clients", b"keyspace"]));
     fr.write_all(&refused);
     for response in fr.read_responses(4) {
