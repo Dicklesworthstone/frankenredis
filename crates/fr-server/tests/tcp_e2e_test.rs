@@ -1666,16 +1666,243 @@ fn sharded_standard_single_key_mix_matches_legacy_redis() {
         "standard single-key string/list/hash commands must preserve Redis replies and pipeline order across shards"
     );
 
+    // (frankenredis-91rts) DBSIZE is now answered from a snapshot of every
+    // partition, so it must match Redis rather than fail closed. INFO server
+    // stays fail-closed: its fields live in each reactor's thread-local Runtime,
+    // which no other reactor can read.
     let mut aggregate_pipeline = Vec::new();
     aggregate_pipeline.extend_from_slice(&encode_command(&[b"DBSIZE"]));
     aggregate_pipeline.extend_from_slice(&encode_command(&[b"INFO", b"server"]));
     fr.write_all(&aggregate_pipeline);
-    for response in fr.read_responses(2) {
+    redis.write_all(&encode_command(&[b"DBSIZE"]));
+    let fr_aggregate = fr.read_responses(2);
+    assert_eq!(
+        fr_aggregate[0],
+        redis.read_response(),
+        "sharded DBSIZE must equal the Redis count over the same keyspace"
+    );
+    assert!(
+        matches!(fr_aggregate[1], RespFrame::Error(ref error) if error.contains("not supported")),
+        "INFO sections backed by reactor-local state must still fail closed instead of reporting one reactor: {:?}",
+        fr_aggregate[1]
+    );
+}
+
+/// Pull `db0:keys=N,expires=M` out of an INFO Keyspace reply.
+///
+/// Returns `None` when the section carries no `db0` line at all, which is how
+/// both servers represent an empty database -- distinct from `Some((0, 0))`,
+/// which neither ever emits.
+fn parse_db0_keyspace_line(frame: &RespFrame) -> Option<(u64, u64)> {
+    let body = match frame {
+        RespFrame::BulkString(Some(bytes)) => String::from_utf8_lossy(bytes).into_owned(),
+        RespFrame::Verbatim(text) => text.clone(),
+        other => panic!("INFO keyspace must reply with a bulk string, got {other:?}"),
+    };
+    let line = body
+        .lines()
+        .find(|line| line.starts_with("db0:"))?
+        .trim_end()
+        .to_string();
+    let field = |name: &str| -> u64 {
+        line.split(',')
+            .find_map(|part| part.trim_start_matches("db0:").strip_prefix(name))
+            .unwrap_or_else(|| panic!("INFO keyspace db0 line missing {name}: {line}"))
+            .parse()
+            .unwrap_or_else(|_| panic!("INFO keyspace db0 {name} is not an integer: {line}"))
+    };
+    Some((field("keys="), field("expires=")))
+}
+
+/// DBSIZE and INFO Keyspace must describe the WHOLE partitioned keyspace, not
+/// the one partition a connection last touched. (frankenredis-91rts)
+///
+/// The discriminating property is the key scatter: the fixtures are untagged and
+/// deliberately spread over many partitions, and the test asserts that spread
+/// before trusting any count. An implementation that answered from a single
+/// partition -- the failure this bead exists to prevent -- would report a small
+/// fraction of the total and fail every equality below. The scatter assertion is
+/// what stops that negative case from evaporating: if a future routing change
+/// collapsed these keys onto one partition, the counts would agree for the wrong
+/// reason, so the test refuses to proceed instead of passing vacuously.
+#[test]
+fn sharded_dbsize_and_info_keyspace_aggregate_every_partition() {
+    const WORKERS: usize = 8;
+    const KEY_COUNT: usize = 48;
+
+    let fr_port = reserve_port();
+    let redis_port = reserve_port();
+    let _fr_server = spawn_frankenredis_sharded_set_get(fr_port, WORKERS);
+    let _redis_server = spawn_legacy_redis(redis_port);
+    let mut fr = BufferedTcpClient::connect(fr_port);
+    let mut redis = BufferedTcpClient::connect(redis_port);
+
+    let keys: Vec<Vec<u8>> = (0..KEY_COUNT)
+        .map(|index| format!("agg:key:{index}").into_bytes())
+        .collect();
+
+    let workers_reached: std::collections::HashSet<usize> = keys
+        .iter()
+        .map(|key| usize::from(fr_store::crc16_slot(key)) % WORKERS)
+        .collect();
+    assert_eq!(
+        workers_reached.len(),
+        WORKERS,
+        "fixtures must reach every worker or the aggregate is not being exercised across partitions"
+    );
+
+    let mut seed = Vec::new();
+    for key in &keys {
+        seed.extend_from_slice(&encode_command(&[b"SET".as_slice(), key, b"v".as_slice()]));
+    }
+    fr.write_all(&seed);
+    redis.write_all(&seed);
+    let fr_seeded = fr.read_responses(KEY_COUNT);
+    let redis_seeded = redis.read_responses(KEY_COUNT);
+    assert_eq!(fr_seeded, redis_seeded, "seeding writes must agree");
+
+    let dbsize = encode_command(&[b"DBSIZE"]);
+    fr.write_all(&dbsize);
+    redis.write_all(&dbsize);
+    let fr_total = fr.read_response();
+    assert_eq!(
+        fr_total,
+        redis.read_response(),
+        "DBSIZE must sum every partition"
+    );
+    assert_eq!(
+        fr_total,
+        RespFrame::Integer(KEY_COUNT as i64),
+        "DBSIZE must count all {KEY_COUNT} scattered keys, not one partition's share"
+    );
+
+    // Deletions must be reflected too, including deletions that land on
+    // partitions other than the one this connection most recently wrote.
+    let mut deletes = Vec::new();
+    for key in keys.iter().take(9) {
+        deletes.extend_from_slice(&encode_command(&[b"DEL".as_slice(), key]));
+    }
+    fr.write_all(&deletes);
+    redis.write_all(&deletes);
+    assert_eq!(
+        fr.read_responses(9),
+        redis.read_responses(9),
+        "deletes must agree"
+    );
+
+    // Expiring keys are counted by DBSIZE and separately reported as `expires`.
+    let mut ttls = Vec::new();
+    for key in keys.iter().skip(9).take(7) {
+        ttls.extend_from_slice(&encode_command(&[
+            b"EXPIRE".as_slice(),
+            key,
+            b"10000".as_slice(),
+        ]));
+    }
+    fr.write_all(&ttls);
+    redis.write_all(&ttls);
+    assert_eq!(
+        fr.read_responses(7),
+        redis.read_responses(7),
+        "EXPIRE replies must agree"
+    );
+
+    fr.write_all(&dbsize);
+    redis.write_all(&dbsize);
+    let fr_after_delete = fr.read_response();
+    assert_eq!(
+        fr_after_delete,
+        redis.read_response(),
+        "DBSIZE must track cross-partition deletion"
+    );
+    assert_eq!(
+        fr_after_delete,
+        RespFrame::Integer((KEY_COUNT - 9) as i64),
+        "DBSIZE must drop by exactly the deleted count"
+    );
+
+    // INFO Keyspace: `keys` and `expires` are pure sums over partitions.
+    //
+    // avg_ttl is deliberately NOT compared against Redis. Upstream derives it
+    // from its active-expire sampling and reports 0 until that cycle has run,
+    // while fr computes a real mean; that difference is a standing single-node
+    // parity matter, not an artifact of aggregation, so pinning it here would
+    // assert something this bead did not change.
+    let info_keyspace = encode_command(&[b"INFO", b"keyspace"]);
+    fr.write_all(&info_keyspace);
+    redis.write_all(&info_keyspace);
+    let fr_keyspace =
+        parse_db0_keyspace_line(&fr.read_response()).expect("fr must report db0 in INFO keyspace");
+    let redis_keyspace = parse_db0_keyspace_line(&redis.read_response())
+        .expect("redis must report db0 in INFO keyspace");
+    assert_eq!(
+        fr_keyspace, redis_keyspace,
+        "INFO keyspace keys/expires must sum every partition"
+    );
+    assert_eq!(
+        fr_keyspace,
+        ((KEY_COUNT - 9) as u64, 7),
+        "INFO keyspace must report the whole-keyspace totals"
+    );
+
+    // A wrong-arity DBSIZE must produce Redis's own arity error, not the
+    // shared-nothing unsupported reply.
+    let bad_arity = encode_command(&[b"DBSIZE", b"extra"]);
+    fr.write_all(&bad_arity);
+    redis.write_all(&bad_arity);
+    assert_eq!(
+        fr.read_response(),
+        redis.read_response(),
+        "wrong-arity DBSIZE must match Redis's error rather than being masked"
+    );
+
+    // Sections needing reactor-local state stay fail-closed, and so does the
+    // bare `INFO` form because it implies them.
+    let mut refused = Vec::new();
+    refused.extend_from_slice(&encode_command(&[b"INFO"]));
+    refused.extend_from_slice(&encode_command(&[b"INFO", b"all"]));
+    refused.extend_from_slice(&encode_command(&[b"INFO", b"clients"]));
+    refused.extend_from_slice(&encode_command(&[b"INFO", b"keyspace", b"stats"]));
+    fr.write_all(&refused);
+    for response in fr.read_responses(4) {
         assert!(
-            matches!(response, RespFrame::Error(ref error) if error.contains("cross-key and aggregate commands are not supported")),
-            "aggregate command must fail closed instead of reporting one shard: {response:?}"
+            matches!(response, RespFrame::Error(ref error) if error.contains("not supported")),
+            "INFO forms needing reactor-local state must fail closed: {response:?}"
         );
     }
+
+    // An emptied keyspace must omit the db0 line entirely, exactly as Redis does
+    // -- the aggregate decides that on the SUM, so a partition that still holds
+    // keys keeps the line alive.
+    let mut drain = Vec::new();
+    for key in keys.iter().skip(9) {
+        drain.extend_from_slice(&encode_command(&[b"DEL".as_slice(), key]));
+    }
+    fr.write_all(&drain);
+    redis.write_all(&drain);
+    let drained = KEY_COUNT - 9;
+    assert_eq!(
+        fr.read_responses(drained),
+        redis.read_responses(drained),
+        "draining deletes must agree"
+    );
+    fr.write_all(&info_keyspace);
+    redis.write_all(&info_keyspace);
+    let fr_empty = parse_db0_keyspace_line(&fr.read_response());
+    assert_eq!(
+        fr_empty,
+        parse_db0_keyspace_line(&redis.read_response()),
+        "an empty keyspace must omit db0 the way Redis does"
+    );
+    assert_eq!(fr_empty, None, "db0 must disappear once every key is gone");
+
+    fr.write_all(&dbsize);
+    redis.write_all(&dbsize);
+    assert_eq!(
+        fr.read_response(),
+        redis.read_response(),
+        "DBSIZE must return 0 once every partition is empty"
+    );
 }
 
 #[test]

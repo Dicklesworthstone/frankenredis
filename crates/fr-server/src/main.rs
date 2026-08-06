@@ -896,6 +896,34 @@ fn reactor_partition_local_command(args: &[&[u8]]) -> bool {
     reactor_single_key_command(name) || (args.len() <= 2 && reactor_variadic_key_list_command(name))
 }
 
+/// Commands answered from a simultaneous snapshot of EVERY partition rather than
+/// from the one partition a key selects. (frankenredis-91rts)
+///
+/// These are not partition-local and never can be: their reply describes the
+/// whole keyspace, so answering from a single reactor's `Runtime` would report
+/// roughly `1/partitions` of the truth -- a plausible-looking wrong number, which
+/// is worse than the explicit refusal this path replaces.
+///
+/// Membership is deliberately narrow. A command belongs here only if its reply is
+/// a pure function of state every partition already holds, so the aggregate needs
+/// no cross-partition mutation and no ordering contract between shards. DBSIZE
+/// and INFO qualify. The other commands the reactor refuses as "cross-partition"
+/// do NOT, and stay refused for distinct reasons: KEYS/SCAN would have to merge
+/// and paginate a cursor across partitions with a deletion guarantee spanning
+/// all of them; FLUSHDB and MOVE mutate several partitions and would need
+/// all-or-nothing semantics under a partial failure; RANDOMKEY must weight its
+/// choice by per-partition cardinality to stay uniform.
+fn reactor_cross_partition_aggregate_command(args: &[&[u8]]) -> bool {
+    let Some(name) = args.first() else {
+        return false;
+    };
+    // Admitted at ANY arity, mirroring `reactor_partition_local_command`'s bare
+    // DEL: a wrong-arity DBSIZE is forwarded to a partition's generic dispatcher
+    // so the client sees Redis's own arity error, instead of this path masking it
+    // with the shared-nothing unsupported-command reply.
+    name.eq_ignore_ascii_case(b"DBSIZE") || name.eq_ignore_ascii_case(b"INFO")
+}
+
 fn sharded_single_key_command(command: &[u8]) -> bool {
     command.eq_ignore_ascii_case(b"GET")
         || command.eq_ignore_ascii_case(b"SET")
@@ -1388,7 +1416,7 @@ fn run_sharded_set_get_worker(
     }
 }
 
-const SHARED_NOTHING_UNSUPPORTED: &[u8] = b"-ERR experimental shared-nothing mode accepts only supported default-DB partition-local single-key commands, plus PING and QUIT; cross-key and aggregate commands are not supported\r\n";
+const SHARED_NOTHING_UNSUPPORTED: &[u8] = b"-ERR experimental shared-nothing mode accepts only supported default-DB partition-local single-key commands, plus PING, QUIT, DBSIZE and INFO KEYSPACE; other cross-key and aggregate commands are not supported\r\n";
 const SHARED_NOTHING_PROTOCOL_ERROR: &[u8] =
     b"-ERR Protocol error in experimental shared-nothing mode\r\n";
 /// Keyspace partitions shared by every per-core reactor.
@@ -1511,6 +1539,42 @@ impl KeyspacePartitions {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         }
+    }
+
+    /// Lock EVERY partition, in ascending index order, and return the guards.
+    ///
+    /// WHY A SIMULTANEOUS SNAPSHOT AND NOT A RUNNING SUM. Redis answers DBSIZE
+    /// from a single dict under a single thread, so every value it can return is
+    /// a count the database actually held. Summing partitions one at a time --
+    /// lock, read, release, next -- can observe partition A before a write and
+    /// partition B after it, yielding a total that existed at no instant. That
+    /// is not a tighter or looser number, it is a fabricated one, and it is
+    /// exactly what a differential test against 7.2.4 under concurrent writers
+    /// would catch. Holding every partition for the duration makes the reply a
+    /// real snapshot. (frankenredis-91rts)
+    ///
+    /// WHY THIS IS DEADLOCK-FREE. Ascending index order is the whole argument.
+    /// This is the only site that holds more than one partition lock at a time;
+    /// every other path in the shared-nothing reactor acquires exactly one and
+    /// releases it before taking another (the flat-combine loop in
+    /// `dispatch_shared_nothing_frames_impl` re-locks only after `drop`). A hold-
+    /// and-wait cycle needs at least two multi-lock holders disagreeing on order,
+    /// so with a single multi-lock holder no cycle can form even if several
+    /// reactors run this concurrently: they all queue in the same order.
+    ///
+    /// This blocks every reactor for the length of the aggregate, which is why
+    /// only administrative whole-keyspace commands are routed here. Locking
+    /// parks immediately rather than spinning like [`Self::lock_partition`]: a
+    /// waiter here holds locks other reactors need, so burning a core to shave a
+    /// futex would extend the stall it is trying to avoid.
+    fn lock_all_partitions_in_index_order(&self) -> Vec<std::sync::MutexGuard<'_, Runtime>> {
+        self.partitions
+            .iter()
+            .map(|partition| match partition.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            })
+            .collect()
     }
 }
 
@@ -2529,6 +2593,163 @@ fn execute_shared_nothing_fast_command(
     }
 }
 
+/// Which INFO sections a request asks for, as far as the aggregate can serve it.
+///
+/// Only `Keyspace` is aggregatable today, and the reason is architectural rather
+/// than a matter of effort. The reply-bearing state INFO reports lives in two
+/// populations:
+///
+///   * the keyspace itself -- keys, TTLs, and the per-command counters that the
+///     partition-local fast paths maintain -- lives in `KeyspacePartitions`,
+///     which every reactor holds an `Arc` to. It is therefore readable under the
+///     all-partition snapshot this module already takes for DBSIZE.
+///   * connection and network accounting -- `connected_clients`, the session
+///     table, byte counters, output-drain state -- lives in each reactor's
+///     THREAD-LOCAL `Runtime` (see `run_shared_nothing_worker`), deliberately so:
+///     that is what keeps connection bookkeeping from becoming a second shared
+///     bottleneck behind the one partitioning removed.
+///
+/// A reactor cannot read another reactor's local `Runtime` at all. Serving
+/// Server/Clients/Memory/Stats/CPU/Persistence/Replication would therefore need a
+/// cross-reactor request/response channel with its own failure handling, not a
+/// wider lock. Until that exists, answering those sections from whichever
+/// reactor happened to own the connection would report ONE reactor's fraction of
+/// the truth in a full-looking INFO block -- strictly worse than refusing, since
+/// nothing marks it as partial. So they stay fail-closed. (frankenredis-91rts)
+#[derive(Debug, PartialEq, Eq)]
+enum ReactorInfoRequest {
+    /// Every requested section is Keyspace (possibly repeated).
+    KeyspaceOnly,
+    /// At least one section needs reactor-local state, or the request is the
+    /// bare/`all`/`default` form that implies such sections.
+    NotAggregatable,
+}
+
+fn classify_reactor_info_request(args: &[&[u8]]) -> ReactorInfoRequest {
+    // Bare INFO means `default`, which includes Server/Clients/Memory/Stats.
+    if args.len() < 2 {
+        return ReactorInfoRequest::NotAggregatable;
+    }
+    if args[1..]
+        .iter()
+        .all(|section| section.eq_ignore_ascii_case(b"keyspace"))
+    {
+        ReactorInfoRequest::KeyspaceOnly
+    } else {
+        ReactorInfoRequest::NotAggregatable
+    }
+}
+
+/// The database a shared-nothing connection operates on.
+///
+/// SELECT is not in the reactor's admission table, so every connection stays on
+/// the default DB for its whole life and the aggregate never has to ask which one
+/// a given connection is using.
+const REACTOR_DEFAULT_DB: usize = 0;
+
+/// Render the INFO Keyspace section for a whole-keyspace snapshot.
+///
+/// `per_db` is indexed by database and carries `(keys, expires, ttl_weighted_sum)`
+/// already summed across partitions.
+///
+/// Weighted, not averaged: `avg_ttl` is `mean(deadline) - now` over a db's
+/// volatile keys, so the count-weighted mean of the partition values is the exact
+/// whole-keyspace value, whereas a plain mean of means would be wrong whenever
+/// partitions hold unequal numbers of volatile keys.
+fn render_aggregate_keyspace_section(per_db: &[(usize, usize, u128)]) -> Vec<u8> {
+    // Local import: `std::io::Write` is already in scope module-wide and the two
+    // traits collide on `write!` for a `String`.
+    use std::fmt::Write as _;
+
+    let mut info = String::from("# Keyspace\r\n");
+    for (db, (keys, expires, ttl_weighted_sum)) in per_db.iter().enumerate() {
+        // Upstream omits a database with no keys entirely. A db may be empty in
+        // partition 0 yet populated in partition 7, so this decision has to be
+        // made on the SUM -- rendering from any single partition would drop rows.
+        if *keys == 0 {
+            continue;
+        }
+        let avg_ttl = if *expires == 0 {
+            0
+        } else {
+            u64::try_from(ttl_weighted_sum / (*expires as u128)).unwrap_or(u64::MAX)
+        };
+        let _ = write!(
+            info,
+            "db{db}:keys={keys},expires={expires},avg_ttl={avg_ttl}\r\n"
+        );
+    }
+    // `handle_info_command` appends this inter-section separator and then trims a
+    // single trailing "\r\n" before replying, because upstream emits the
+    // separator BETWEEN sections only. A single-section reply is that trim's
+    // fixed point, so emit the section without it.
+    info.into_bytes()
+}
+
+/// Answer a whole-keyspace command from a simultaneous snapshot of every
+/// partition, appending the RESP reply to `out`.
+///
+/// Returns `false` when the command cannot be aggregated, leaving `out`
+/// untouched so the caller emits the unsupported reply. (frankenredis-91rts)
+fn execute_reactor_cross_partition_aggregate(
+    args: &[&[u8]],
+    frame: &[u8],
+    partitions: &KeyspacePartitions,
+    ts: u64,
+    out: &mut Vec<u8>,
+) -> bool {
+    let Some(name) = args.first() else {
+        return false;
+    };
+
+    if name.eq_ignore_ascii_case(b"DBSIZE") {
+        if args.len() != 1 {
+            // Wrong arity: let a partition's generic dispatcher produce Redis's
+            // own error text. It rejects on arity before touching the store, so
+            // reading it from one partition observes no keyspace state and needs
+            // no snapshot.
+            let reply = partitions.lock_partition(0).execute_bytes(frame, ts);
+            out.extend_from_slice(&reply);
+            return true;
+        }
+        let guards = partitions.lock_all_partitions_in_index_order();
+        let total: usize = guards
+            .iter()
+            .map(|partition| partition.partition_dbsize_in_db(REACTOR_DEFAULT_DB))
+            .sum();
+        drop(guards);
+        RespFrame::Integer(i64::try_from(total).unwrap_or(i64::MAX)).encode_into(out);
+        return true;
+    }
+
+    if name.eq_ignore_ascii_case(b"INFO") {
+        if classify_reactor_info_request(args) != ReactorInfoRequest::KeyspaceOnly {
+            return false;
+        }
+        let guards = partitions.lock_all_partitions_in_index_order();
+        // Database count is fixed at construction and identical in every
+        // partition, so partition 0 is authoritative for the loop bound.
+        let database_count = guards
+            .first()
+            .map_or(0, |partition| partition.database_count());
+        let mut per_db = vec![(0usize, 0usize, 0u128); database_count];
+        for partition in &guards {
+            for (db, slot) in per_db.iter_mut().enumerate() {
+                let expires = partition.partition_expires_in_db(db);
+                slot.0 += partition.partition_dbsize_in_db(db);
+                slot.1 += expires;
+                slot.2 += u128::from(partition.partition_avg_ttl_in_db(db, ts))
+                    * u128::try_from(expires).unwrap_or(0);
+            }
+        }
+        drop(guards);
+        RespFrame::BulkString(Some(render_aggregate_keyspace_section(&per_db))).encode_into(out);
+        return true;
+    }
+
+    false
+}
+
 fn dispatch_shared_nothing_frames(
     connection: &mut ClientConnection,
     runtime: &mut Runtime,
@@ -2873,6 +3094,21 @@ fn dispatch_shared_nothing_frames_impl<const COMBINE_PARTITION_RUNS: bool>(
                     connection.write_buf.extend_from_slice(b"+OK\r\n");
                     connection.closing = true;
                     break;
+                }
+                // Whole-keyspace commands, answered from a snapshot of every
+                // partition rather than from the one a key would select. Returns
+                // false for the aggregates still fail-closed, which then fall
+                // through to the unsupported reply. (frankenredis-91rts)
+                if reactor_cross_partition_aggregate_command(&borrowed_args)
+                    && execute_reactor_cross_partition_aggregate(
+                        &borrowed_args,
+                        &unparsed[..parsed.consumed],
+                        partitions,
+                        ts,
+                        &mut connection.write_buf,
+                    )
+                {
+                    continue;
                 }
                 connection
                     .write_buf
@@ -29536,6 +29772,151 @@ mod tests {
         assert!(
             crate::reactor_partition_local_command(&[b"ZADD", b"k", b"1", b"m"]),
             "argc must not narrow the fixed-key commands"
+        );
+    }
+
+    /// (frankenredis-91rts) The aggregate lane is separate from the
+    /// partition-local lane, and the separation is the point: a command answered
+    /// from one partition when it needs all of them returns a fraction of the
+    /// truth, which is worse than refusing.
+    #[test]
+    fn cross_partition_aggregate_admission_is_narrow() {
+        for name in [b"DBSIZE".as_slice(), b"INFO", b"dbsize", b"info"] {
+            assert!(
+                crate::reactor_cross_partition_aggregate_command(&[name]),
+                "{name:?} must reach the whole-keyspace aggregate"
+            );
+            assert!(
+                !crate::reactor_partition_local_command(&[name]),
+                "{name:?} must never be answered from a single partition"
+            );
+        }
+
+        // Wrong-arity DBSIZE is still admitted so a partition's own dispatcher
+        // produces Redis's arity error instead of the unsupported reply masking
+        // it -- the same convention the bare-DEL case above relies on.
+        assert!(
+            crate::reactor_cross_partition_aggregate_command(&[b"DBSIZE", b"extra"]),
+            "a wrong-arity DBSIZE must reach the real arity error"
+        );
+
+        // The other whole-keyspace commands stay refused. Each needs something
+        // the snapshot alone cannot give -- a merged cursor, all-or-nothing
+        // mutation, or cardinality-weighted choice -- so admitting them here
+        // would ship a wrong answer, not a missing one.
+        for name in [
+            b"KEYS".as_slice(),
+            b"SCAN",
+            b"FLUSHDB",
+            b"FLUSHALL",
+            b"RANDOMKEY",
+            b"MOVE",
+            b"SELECT",
+            b"SWAPDB",
+        ] {
+            assert!(
+                !crate::reactor_cross_partition_aggregate_command(&[name]),
+                "{name:?} is not answerable from a read-only partition snapshot"
+            );
+        }
+        assert!(
+            !crate::reactor_cross_partition_aggregate_command(&[]),
+            "an empty command is not an aggregate"
+        );
+    }
+
+    /// INFO is admitted by name but only the Keyspace section can actually be
+    /// aggregated; every other section is backed by reactor-local state that no
+    /// other reactor can read. A classifier that accepted the bare form would
+    /// emit a full-looking INFO describing one reactor.
+    #[test]
+    fn info_aggregate_accepts_only_the_keyspace_section() {
+        use crate::ReactorInfoRequest;
+
+        assert_eq!(
+            crate::classify_reactor_info_request(&[b"INFO", b"keyspace"]),
+            ReactorInfoRequest::KeyspaceOnly
+        );
+        assert_eq!(
+            crate::classify_reactor_info_request(&[b"INFO", b"KeySpace"]),
+            ReactorInfoRequest::KeyspaceOnly,
+            "section names are case-insensitive"
+        );
+        assert_eq!(
+            crate::classify_reactor_info_request(&[b"INFO", b"keyspace", b"keyspace"]),
+            ReactorInfoRequest::KeyspaceOnly,
+            "a repeated section is still only that section"
+        );
+
+        for request in [
+            [b"INFO".as_slice()].as_slice(),
+            &[b"INFO", b"all"],
+            &[b"INFO", b"everything"],
+            &[b"INFO", b"default"],
+            &[b"INFO", b"server"],
+            &[b"INFO", b"clients"],
+            &[b"INFO", b"stats"],
+            // Mixed requests must be refused whole: emitting only the half we
+            // can aggregate would silently drop sections the client asked for.
+            &[b"INFO", b"keyspace", b"stats"],
+            &[b"INFO", b"stats", b"keyspace"],
+        ] {
+            assert_eq!(
+                crate::classify_reactor_info_request(request),
+                ReactorInfoRequest::NotAggregatable,
+                "{request:?} needs reactor-local state and must stay fail-closed"
+            );
+        }
+    }
+
+    /// The rendered section has to be byte-identical to what a single-node INFO
+    /// Keyspace emits, including which databases appear at all.
+    #[test]
+    fn aggregate_keyspace_section_matches_upstream_shape() {
+        assert_eq!(
+            crate::render_aggregate_keyspace_section(&[(3, 2, 1_000)]),
+            b"# Keyspace\r\ndb0:keys=3,expires=2,avg_ttl=500\r\n".to_vec(),
+            "avg_ttl is the expires-weighted mean, not a sum"
+        );
+
+        // A database with no keys is omitted entirely, and that decision is made
+        // on the SUM: were it made per partition, db0 would vanish from a server
+        // whose partition 0 happened to be empty.
+        assert_eq!(
+            crate::render_aggregate_keyspace_section(&[(0, 0, 0)]),
+            b"# Keyspace\r\n".to_vec(),
+            "an empty database must not be reported"
+        );
+        assert_eq!(
+            crate::render_aggregate_keyspace_section(&[(0, 0, 0), (5, 0, 0)]),
+            b"# Keyspace\r\ndb1:keys=5,expires=0,avg_ttl=0\r\n".to_vec(),
+            "a populated database must be reported even when db0 is empty"
+        );
+
+        // No volatile keys means no TTL to average, and the weighted mean must
+        // not divide by zero.
+        assert_eq!(
+            crate::render_aggregate_keyspace_section(&[(4, 0, 0)]),
+            b"# Keyspace\r\ndb0:keys=4,expires=0,avg_ttl=0\r\n".to_vec()
+        );
+    }
+
+    /// The weighted mean is what makes the aggregate exact rather than
+    /// approximate, so pin the case a plain mean-of-means would get wrong.
+    #[test]
+    fn aggregate_avg_ttl_weights_by_expiring_key_count() {
+        // Partition A: 1 volatile key at 100ms. Partition B: 9 at 1000ms.
+        // Weighted: (1*100 + 9*1000) / 10 = 910. A plain mean of the two
+        // partition means would report 550.
+        let partitions: [(u128, u128); 2] = [(100, 1), (1000, 9)];
+        let weighted_sum: u128 = partitions
+            .iter()
+            .map(|(avg_ttl, expires)| avg_ttl * expires)
+            .sum();
+        assert_eq!(
+            crate::render_aggregate_keyspace_section(&[(10, 10, weighted_sum)]),
+            b"# Keyspace\r\ndb0:keys=10,expires=10,avg_ttl=910\r\n".to_vec(),
+            "a mean of partition means would report 550 here"
         );
     }
 

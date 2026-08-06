@@ -5916,6 +5916,46 @@ impl Runtime {
         self.server.store.server_port = port;
     }
 
+    /// Number of logical databases this runtime tracks. Fixed at construction,
+    /// so it is identical across every partition of a sharded keyspace and a
+    /// cross-partition aggregate may read it from any one of them.
+    /// (frankenredis-91rts)
+    #[must_use]
+    pub fn database_count(&self) -> usize {
+        self.server.store.database_count
+    }
+
+    /// Live key count for `db` in THIS runtime's slice of the keyspace.
+    ///
+    /// The shared-nothing server shards ONE logical keyspace across many
+    /// `Runtime`s, so this is a fraction of the server's true DBSIZE by
+    /// construction. A caller answering DBSIZE or INFO Keyspace for the whole
+    /// server must sum it over every partition. (frankenredis-91rts)
+    #[must_use]
+    pub fn partition_dbsize_in_db(&self, db: usize) -> usize {
+        self.server.store.dbsize_in_db(db)
+    }
+
+    /// Keys carrying a TTL in `db`, for THIS runtime's slice of the keyspace.
+    /// Additive across partitions, exactly like [`Self::partition_dbsize_in_db`].
+    /// (frankenredis-91rts)
+    #[must_use]
+    pub fn partition_expires_in_db(&self, db: usize) -> usize {
+        self.server.store.expires_in_db(db)
+    }
+
+    /// Mean remaining TTL in milliseconds over `db`'s volatile keys, for THIS
+    /// runtime's slice of the keyspace.
+    ///
+    /// NOT additive: a cross-partition aggregate must recombine these as a mean
+    /// weighted by each partition's [`Self::partition_expires_in_db`], because
+    /// summing means would report a value no database ever held.
+    /// (frankenredis-91rts)
+    #[must_use]
+    pub fn partition_avg_ttl_in_db(&self, db: usize, now_ms: u64) -> u64 {
+        self.server.store.avg_ttl_in_db(db, now_ms)
+    }
+
     /// Record the listen bind address so the CONFIG SET port handler can
     /// test-bind a new port the way upstream config.c::updatePort does. The
     /// standalone server calls this at startup; library/test contexts leave it
