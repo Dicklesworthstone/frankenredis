@@ -12,23 +12,9 @@ checking the reply, the resulting dest TYPE/EXISTS, and the stored contents
 Usage: store_dest_semantics_differ.py <oracle_port> <fr_port>
        Exit 0 = byte-exact, 1 = divergence.
 """
-import socket
 import sys
-import time
 
-
-def conn(p):
-    return socket.create_connection(("127.0.0.1", p), timeout=5)
-
-
-def cmd(s, *a):
-    o = b"*%d\r\n" % len(a)
-    for x in a:
-        x = x if isinstance(x, bytes) else str(x).encode()
-        o += b"$%d\r\n%s\r\n" % (len(x), x)
-    s.sendall(o)
-    time.sleep(0.02)
-    return s.recv(1 << 20)
+from _respread import assert_seed, cmd, conn
 
 
 # Each step: (label, argv). Steps run in order; "RESET" re-seeds both servers
@@ -79,18 +65,59 @@ STEPS = [
     "RESET",
     ("zrangestore_empty", ["ZRANGESTORE", "dest", "z1", "5", "10"]),  # OOB -> empty -> dest deleted
     ("zrangestore_empty_gone", ["EXISTS", "dest"]),
+    # Cross-type overwrite of a NON-string dest. The docstring claimed a
+    # list-typed dest was covered but reset() only ever created a string, so
+    # "cross-type overwrite" was really only string->set. These make the
+    # list-typed and zset-typed pre-existing dest real, in both the overwrite
+    # and the empty-result-deletes directions.
+    "RESET:list",
+    ("overwrite_listdest_set", ["SINTERSTORE", "dest", "s1", "s2"]),
+    ("overwrite_listdest_type", ["TYPE", "dest"]),
+    ("overwrite_listdest_members", ["SMEMBERS", "dest"]),
+    "RESET:list",
+    ("emptyresult_listdest", ["SINTERSTORE", "dest", "s1", "s3"]),
+    ("emptyresult_listdest_gone", ["EXISTS", "dest"]),
+    ("emptyresult_listdest_type", ["TYPE", "dest"]),
+    "RESET:zset",
+    ("overwrite_zsetdest_sort", ["SORT", "srt", "STORE", "dest"]),
+    ("overwrite_zsetdest_type", ["TYPE", "dest"]),
+    ("overwrite_zsetdest_range", ["LRANGE", "dest", "0", "-1"]),
+    "RESET:zset",
+    ("emptyresult_zsetdest", ["ZDIFFSTORE", "dest", "2", "z1", "z1"]),
+    ("emptyresult_zsetdest_gone", ["EXISTS", "dest"]),
+    ("emptyresult_zsetdest_type", ["TYPE", "dest"]),
 ]
 
 
-def reset(s):
+def reset(s, dest_kind="string"):
+    """Re-seed both servers.
+
+    EVERY seed is asserted. This gate is unusually exposed to a silent seed
+    failure: if the sources were missing, every *STORE would produce an EMPTY
+    result, dest would never be created, and every "empty deletes dest" check
+    would see EXISTS 0 on BOTH engines. The whole gate would pass while
+    exercising nothing at all. (frankenredis-r9ei8 mechanism 4)
+    """
     cmd(s, "FLUSHALL")
-    cmd(s, "SADD", "s1", "a", "b", "c")
-    cmd(s, "SADD", "s2", "c", "d", "e")
-    cmd(s, "SADD", "s3", "x", "y")
-    cmd(s, "ZADD", "z1", "1", "a", "2", "b")
-    cmd(s, "ZADD", "z2", "3", "b", "4", "c")
-    cmd(s, "RPUSH", "srt", "3", "1", "2")
-    cmd(s, "SET", "dest", "preexisting-string")   # dest exists as a string
+    assert_seed(cmd(s, "SADD", "s1", "a", "b", "c"), 3, "SADD s1")
+    assert_seed(cmd(s, "SADD", "s2", "c", "d", "e"), 3, "SADD s2")
+    assert_seed(cmd(s, "SADD", "s3", "x", "y"), 2, "SADD s3")
+    assert_seed(cmd(s, "ZADD", "z1", "1", "a", "2", "b"), 2, "ZADD z1")
+    assert_seed(cmd(s, "ZADD", "z2", "3", "b", "4", "c"), 2, "ZADD z2")
+    assert_seed(cmd(s, "RPUSH", "srt", "3", "1", "2"), 3, "RPUSH srt")
+    # A PRE-EXISTING dest of a different type, so the overwrite cases actually
+    # overwrite something. The docstring claimed a list-typed dest was covered;
+    # it was not — only a string was ever created. dest_kind makes both real.
+    if dest_kind == "string":
+        if cmd(s, "SET", "dest", "preexisting-string") != b"+OK\r\n":
+            print("SEED FAILED: SET dest")
+            sys.exit(1)
+    elif dest_kind == "list":
+        assert_seed(cmd(s, "RPUSH", "dest", "old1", "old2"), 2, "RPUSH dest")
+    elif dest_kind == "zset":
+        assert_seed(cmd(s, "ZADD", "dest", "9", "old"), 1, "ZADD dest")
+    else:
+        raise ValueError(dest_kind)
 
 
 def main():
@@ -100,9 +127,10 @@ def main():
     fails = []
     n = 0
     for step in STEPS:
-        if step == "RESET":
-            reset(od)
-            reset(fr)
+        if isinstance(step, str) and step.startswith("RESET"):
+            kind = step.split(":", 1)[1] if ":" in step else "string"
+            reset(od, kind)
+            reset(fr, kind)
             continue
         label, argv = step
         ro, rf = cmd(od, *argv), cmd(fr, *argv)
