@@ -15,7 +15,9 @@ def conn(p):
 def send(s, *args):
     b = b"*%d\r\n" % len(args)
     for a in args:
-        if isinstance(a, str): a = a.encode()
+        # latin-1: the binary key/value fixtures are \xNN escapes.
+        # (frankenredis-r9ei8)
+        if isinstance(a, str): a = a.encode("latin-1")
         b += b"$%d\r\n%s\r\n" % (len(a), a)
     s.sendall(b)
     return read_reply(s)

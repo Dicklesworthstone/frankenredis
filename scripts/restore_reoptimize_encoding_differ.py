@@ -20,12 +20,13 @@ DEBUG-RELOAD-based gate would exercise the already-fixed one.
 Usage: restore_reoptimize_encoding_differ.py <oracle_port> <fr_port>
        Exit 0 = hash/zset/list re-optimization byte-exact, 1 = divergence.
 """
-import socket, sys, time
-def conn(p): return socket.create_connection(("127.0.0.1",p),timeout=8)
-def cmd(s,*a):
-    o=b"*%d\r\n"%len(a)
-    for x in a: x=x if isinstance(x,bytes) else str(x).encode(); o+=b"$%d\r\n%s\r\n"%(len(x),x)
-    s.sendall(o); time.sleep(0.01); return s.recv(1<<20)
+import sys
+
+# Shared RESP client: reads COMPLETE frames and encodes args latin-1. This gate
+# RESTOREs 600-element lists and reads them back, so the previous
+# sleep-then-single-recv would truncate a wide readback and compare two equally
+# truncated payloads as equal. (frankenredis-r9ei8)
+from _respread import cmd, conn
 def enc(s,k):
     r=cmd(s,"OBJECT","ENCODING",k); return r[r.index(b"\r\n")+2:].split(b"\r\n")[0] if r.startswith(b"$") and b"$-1" not in r[:4] else b"?"
 def dump(s,key): r=cmd(s,"DUMP",key); nl=r.index(b"\r\n"); return r[nl+2:nl+2+int(r[1:nl])]

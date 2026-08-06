@@ -56,7 +56,9 @@ class Conn:
         out = b"*%d\r\n" % len(args)
         for a in args:
             if isinstance(a, str):
-                a = a.encode()
+                # latin-1 so a \xNN fixture escape means that single byte;
+                # utf-8 would send 0xff as 0xc3 0xbf. (frankenredis-r9ei8)
+                a = a.encode("latin-1")
             elif isinstance(a, int):
                 a = str(a).encode()
             out += b"$%d\r\n%s\r\n" % (len(a), a)

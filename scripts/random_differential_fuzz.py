@@ -12,7 +12,9 @@ def conn(p):
 def enc(args):
     out = b"*%d\r\n" % len(args)
     for a in args:
-        a = a.encode() if isinstance(a, str) else a
+        # latin-1: the fuzzer's raw-byte fixtures are \xNN escapes.
+        # (frankenredis-r9ei8)
+        a = a.encode("latin-1") if isinstance(a, str) else a
         out += b"$%d\r\n%s\r\n" % (len(a), a)
     return out
 

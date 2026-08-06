@@ -56,7 +56,8 @@ class Conn:
     def cmd(self, *a):
         out = b"*%d\r\n" % len(a)
         for x in a:
-            x = x if isinstance(x, bytes) else str(x).encode()
+            # latin-1: fixtures here carry raw-byte escapes. (frankenredis-r9ei8)
+            x = x if isinstance(x, bytes) else str(x).encode("latin-1")
             out += b"$%d\r\n%s\r\n" % (len(x), x)
         self.s.sendall(out)
         return self.parse()
