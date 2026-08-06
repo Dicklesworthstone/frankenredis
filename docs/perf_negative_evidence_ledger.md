@@ -14948,6 +14948,32 @@ upstream's `yes` default into a topology where it costs 3x. The recording code s
 path gated on that knob, so this rejection remains reproducible by flipping it — the same
 both-source-forms discipline the `frankenredis-u6uwo` entry used.
 
+### INFO COVERAGE IN SHARED-NOTHING MODE: 11 OF 13 SECTIONS. Do not read 11 as complete.
+
+Stated plainly here because the surrounding work reads like a completed feature and it is not. A
+7.2.4 INFO has THIRTEEN sections. The shared-nothing reactor now answers ELEVEN of them for the
+whole server -- Server, Clients, Memory, Persistence, Stats, Replication, CPU, Modules, Errorstats,
+Cluster, Keyspace -- singly, in any combination, and as bare `INFO`.
+
+TWO ARE NOT SERVED, and will not be without a change of mechanism:
+
+  * `commandstats` and `latencystats`. Both are REFUSED, not degraded. The reason is the rejection
+    above: the reactor fast paths do not record command histograms, because recording costs
+    2.68-3.20x on the GET path, so there is nothing to aggregate. Serving them would emit a bare
+    section on a server processing hundreds of thousands of commands.
+  * `INFO all` and `INFO everything` are consequently refused too, since both imply the two
+    unserved sections. A request naming either is refused WHOLE rather than downgraded to the
+    servable subset -- a client asking for everything must not quietly receive less.
+
+Enforced in code, not just here: `REACTOR_UNSERVED_INFO_SECTIONS` in `crates/fr-server/src/main.rs`
+is checked in the request classifier, and a unit test asserts it never overlaps the served list.
+
+TWO VALUE-LEVEL LIMITS remain inside the eleven, and are limits on accuracy rather than coverage:
+`instantaneous_ops_per_sec` and the `instantaneous_*_kbps` rates pass through partition 0's value
+because they are sampled rates rather than counters, and must not be read as server totals; and
+`used_memory_peak` is the SUM of per-partition high-water marks, which is an upper bound on the
+true server-wide peak because those marks need not have coincided.
+
 CONSEQUENCE, recorded rather than hidden: with no recording there are no histograms, so INFO
 commandstats and latencystats stay REFUSED in reactor mode. That is the correct behaviour —
 serving them would report a bare section on a server processing hundreds of thousands of commands,
