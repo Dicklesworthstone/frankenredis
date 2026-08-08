@@ -12,24 +12,9 @@ hash-tag extraction boundaries so any keyHashSlot regression is caught.
 Usage: cluster_keyslot_hashtag_differ.py <oracle_port> <fr_port>
        Exit 0 = every KEYSLOT byte-exact, 1 = divergence.
 """
-import socket
 import sys
-import time
 
-
-def conn(p):
-    return socket.create_connection(("127.0.0.1", p), timeout=5)
-
-
-def cmd(s, *a):
-    o = b"*%d\r\n" % len(a)
-    for x in a:
-        x = x if isinstance(x, bytes) else str(x).encode()
-        o += b"$%d\r\n%s\r\n" % (len(x), x)
-    s.sendall(o)
-    time.sleep(0.02)
-    return s.recv(1 << 20)
-
+from _respread import cmd, conn
 
 # (key, note) — each must hash to the SAME slot on fr and redis.
 KEYS = [

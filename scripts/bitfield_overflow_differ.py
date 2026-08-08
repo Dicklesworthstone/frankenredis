@@ -12,29 +12,21 @@ type, bad overflow mode), and BITFIELD_RO rejecting write ops. Byte-exact vs red
 Usage: bitfield_overflow_differ.py <oracle_port> <fr_port>
        Exit 0 = byte-exact, 1 = divergence.
 """
-import socket
 import sys
-import time
 from contextlib import contextmanager
+
+from _respread import assert_ok, cmd
+from _respread import conn as _conn
 
 
 @contextmanager
 def conn(p):
-    socket_handle = socket.create_connection(("127.0.0.1", p), timeout=5)
+    """The shared-reader socket, closed deterministically on scope exit."""
+    socket_handle = _conn(p)
     try:
         yield socket_handle
     finally:
         socket_handle.close()
-
-
-def cmd(s, *a):
-    o = b"*%d\r\n" % len(a)
-    for x in a:
-        x = x if isinstance(x, bytes) else str(x).encode()
-        o += b"$%d\r\n%s\r\n" % (len(x), x)
-    s.sendall(o)
-    time.sleep(0.02)
-    return s.recv(1 << 20)
 
 
 def run(od, fr):
@@ -83,7 +75,7 @@ def run(od, fr):
     # BITFIELD_RO
     reset()
     for s in (od, fr):
-        cmd(s, "SET", "bf", "AB")
+        assert_ok(cmd(s, "SET", "bf", "AB"), "SET bf AB")
     chk("ro_get", "BITFIELD_RO", "bf", "GET", "u8", "0")
     chk("ro_rejects_set", "BITFIELD_RO", "bf", "SET", "u8", "0", "1")
 
