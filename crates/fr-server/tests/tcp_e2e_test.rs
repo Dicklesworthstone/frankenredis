@@ -253,8 +253,48 @@ impl BufferedTcpClient {
     }
 }
 
+/// First port this binary may hand out, and the width of the band each
+/// PROCESS gets. (frankenredis-6ujef)
+const PORT_BASE: u16 = 29_500;
+const PORT_BAND: u16 = 256;
+
+/// Per-process port counter, seeded so two concurrently running test binaries
+/// occupy DISJOINT bands.
+///
+/// (frankenredis-6ujef) The monotonic counter below fixed test-vs-test
+/// collisions inside one binary (frankenredis-vcv8o), but it started at the
+/// same constant in EVERY process, so two test binaries running at once —
+/// which is exactly what `cargo test --workspace` does, and what happens when
+/// several agents build on this host — marched through the identical port
+/// sequence and fought over every port.
+///
+/// That did not merely flake: reproduced 6/6 with six concurrent runs of this
+/// binary, and the failures were CROSS-TALK, not timeouts. One test received
+/// "experimental shared-nothing mode accepts only ..." from another process's
+/// sharded server, and another read `DBSIZE 89` — another process's data.
+/// A client talking to the wrong server can just as easily produce a
+/// misleading PASS as a failure, which is why this is worth seeding properly
+/// rather than papering over with retries.
+///
+/// Seeding from the pid (mixed, so sibling pids do not alias into neighbouring
+/// bands) gives ~140 disjoint bands of 256 ports. This binary's ~70 tests take
+/// well under one band. The liveness probe below still covers the residual
+/// birthday case and any unrelated process holding a port.
+fn next_port_counter() -> &'static std::sync::atomic::AtomicU16 {
+    use std::sync::LazyLock;
+    use std::sync::atomic::AtomicU16;
+    static NEXT_PORT: LazyLock<AtomicU16> = LazyLock::new(|| {
+        let bands = u32::from((u16::MAX - PORT_BASE) / PORT_BAND);
+        // Knuth multiplicative mix so pid and pid+1 do not land adjacent.
+        let mixed = std::process::id().wrapping_mul(2_654_435_761);
+        let band = (mixed % bands) as u16;
+        AtomicU16::new(PORT_BASE + band * PORT_BAND)
+    });
+    &NEXT_PORT
+}
+
 fn reserve_port() -> u16 {
-    use std::sync::atomic::{AtomicU16, Ordering};
+    use std::sync::atomic::Ordering;
     // A monotonic counter hands every test (across all parallel test
     // threads in this binary) a distinct candidate port. The old
     // `bind("127.0.0.1:0")` approach could assign two concurrent tests the
@@ -262,10 +302,10 @@ fn reserve_port() -> u16 {
     // that fought over it, so one died and the peer's reads panicked in
     // `read_response`. A never-repeating counter removes the test-vs-test
     // collision entirely. (frankenredis-vcv8o)
-    static NEXT_PORT: AtomicU16 = AtomicU16::new(29_500);
+    let next_port = next_port_counter();
     for _ in 0..4000 {
-        let port = NEXT_PORT.fetch_add(1, Ordering::Relaxed);
-        if port < 29_500 {
+        let port = next_port.fetch_add(1, Ordering::Relaxed);
+        if port < PORT_BASE {
             // Counter wrapped past u16::MAX — skip the low/privileged range.
             continue;
         }
