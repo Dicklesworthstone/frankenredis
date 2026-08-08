@@ -11463,7 +11463,11 @@ fn xsetid_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     let mut max_deleted_id: Option<StreamId> = None;
     let mut i = 3;
     while i < argv.len() {
-        let kw = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        // (frankenredis-k0gwc) Unrecognized option = syntax error whatever bytes it
+        // holds; upstream never validates an option token's encoding. `kw` is only
+        // compared against ASCII keywords and never echoed, so undecodable bytes fall
+        // through to the syntax-error arm below instead of raising an fr-only error.
+        let kw = std::str::from_utf8(&argv[i]).unwrap_or("");
         let moreargs = argv.len().saturating_sub(i + 1);
         if kw.eq_ignore_ascii_case("ENTRIESADDED") && moreargs > 0 {
             let value = parse_i64_arg(&argv[i + 1])?;
@@ -12960,8 +12964,10 @@ fn function_cmd(
         let mut with_code = false;
         let mut i = 2;
         while i < argv.len() {
-            let arg =
-                std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+            // (frankenredis-k0gwc) Never fail the decode here — see the unknown-argument
+            // arm below, which has to ECHO the raw token, and the LIBRARYNAME arm, where
+            // an undecodable pattern is a glob that simply matches nothing.
+            let arg = std::str::from_utf8(&argv[i]).unwrap_or("");
             if arg.eq_ignore_ascii_case("LIBRARYNAME") {
                 i += 1;
                 if i >= argv.len() {
@@ -12973,16 +12979,32 @@ fn function_cmd(
                         "ERR library name argument was not given".to_string(),
                     ));
                 }
-                let pat =
-                    std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-                pattern = Some(pat.to_string());
+                // (frankenredis-k0gwc) A non-UTF8 LIBRARYNAME is NOT an error upstream:
+                // measured, redis answers `*0` because the glob simply matches no
+                // library. `pattern` is typed String, so decode lossily — a pattern
+                // carrying U+FFFD cannot match any real library name, which yields the
+                // same empty reply, and valid UTF-8 is unaffected.
+                pattern = Some(String::from_utf8_lossy(&argv[i]).into_owned());
             } else if arg.eq_ignore_ascii_case("WITHCODE") {
                 with_code = true;
             } else {
                 // Upstream functions.c::functionListCommand emits
                 // 'ERR Unknown argument <token>' for any token
                 // outside LIBRARYNAME / WITHCODE. (br-frankenredis-funclist)
-                return Err(CommandError::Custom(format!("ERR Unknown argument {arg}")));
+                //
+                // (frankenredis-k0gwc) The token is ECHOED, so a non-UTF8 one cannot go
+                // through the String path — measured, redis emits the raw bytes back:
+                //   FUNCTION LIST <0xff 0xfe> -> -ERR Unknown argument \xff\xfe
+                // Same shape expire's option parser already uses for its unsupported
+                // option, via CommandError::RawError.
+                if let Ok(token) = std::str::from_utf8(&argv[i]) {
+                    return Err(CommandError::Custom(format!(
+                        "ERR Unknown argument {token}"
+                    )));
+                }
+                let mut body = b"ERR Unknown argument ".to_vec();
+                body.extend_from_slice(&argv[i]);
+                return Err(CommandError::RawError(body));
             }
             i += 1;
         }
@@ -15114,8 +15136,9 @@ pub fn parse_migrate_request(argv: &[Vec<u8>]) -> Result<MigrateRequest, Command
     {
         let mut j = 6;
         while j < argv.len() {
-            let opt =
-                std::str::from_utf8(&argv[j]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+            // (frankenredis-k0gwc) See xsetid_cmd: matched as ASCII keywords, never
+            // echoed, so an undecodable token is a syntax error.
+            let opt = std::str::from_utf8(&argv[j]).unwrap_or("");
             if opt.eq_ignore_ascii_case("COPY") || opt.eq_ignore_ascii_case("REPLACE") {
                 j += 1;
             } else if opt.eq_ignore_ascii_case("AUTH") {
@@ -15153,7 +15176,9 @@ pub fn parse_migrate_request(argv: &[Vec<u8>]) -> Result<MigrateRequest, Command
 
     let mut i = 6;
     while i < argv.len() {
-        let arg = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        // (frankenredis-k0gwc) See xsetid_cmd: option tokens are matched as ASCII
+        // keywords and never echoed, so an undecodable one is a syntax error.
+        let arg = std::str::from_utf8(&argv[i]).unwrap_or("");
         if arg.eq_ignore_ascii_case("COPY") {
             copy = true;
             i += 1;
@@ -15461,7 +15486,9 @@ fn failover_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErr
 
     let mut i = 1;
     while i < argv.len() {
-        let arg = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        // (frankenredis-k0gwc) See xsetid_cmd: option tokens are matched as ASCII
+        // keywords and never echoed, so an undecodable one is a syntax error.
+        let arg = std::str::from_utf8(&argv[i]).unwrap_or("");
         if arg.eq_ignore_ascii_case("ABORT")
             && i + 1 == argv.len()
             && !abort
@@ -16778,7 +16805,9 @@ fn parse_zset_algebra_options(
     let mut withscores = false;
     let mut i = start;
     while i < argv.len() {
-        let kw = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        // (frankenredis-k0gwc) See xsetid_cmd: option tokens are matched as ASCII
+        // keywords and never echoed, so an undecodable one is a syntax error.
+        let kw = std::str::from_utf8(&argv[i]).unwrap_or("");
         if kw.eq_ignore_ascii_case("WEIGHTS") {
             i += 1;
             if i + numkeys > argv.len() {
@@ -22946,7 +22975,11 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
         if store.script_nesting_level >= 1 {
             return Err(script_noscript_command_error());
         }
-        let mode = std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        // (frankenredis-k0gwc) CLIENT NO-EVICT/NO-TOUCH's ON|OFF token: matched as an
+        // ASCII keyword and never echoed, and upstream answers the generic syntax error
+        // for anything else, so undecodable bytes must reach that arm rather than raise
+        // an fr-only encoding error.
+        let mode = std::str::from_utf8(&argv[2]).unwrap_or("");
         let on = if mode.eq_ignore_ascii_case("ON") {
             true
         } else if mode.eq_ignore_ascii_case("OFF") {
@@ -23051,7 +23084,9 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
             let mut i = 2;
             while i < argv.len() {
                 let opt =
-                    std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+                    // (frankenredis-k0gwc) See xsetid_cmd: ASCII-keyword match only,
+                    // never echoed, so an undecodable token is a syntax error.
+                    std::str::from_utf8(&argv[i]).unwrap_or("");
 
                 if opt.eq_ignore_ascii_case("ID") && i + 1 < argv.len() {
                     // (br-frankenredis-lkoh)
@@ -25252,7 +25287,11 @@ fn zintercard(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     let mut limit: u64 = 0;
     let mut idx = 2 + numkeys;
     while idx < argv.len() {
-        let opt = std::str::from_utf8(&argv[idx]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        // (frankenredis-k0gwc) ZINTERCARD has its OWN option loop — it does not go
+        // through parse_zset_algebra_options — so it needed the same correction: the
+        // token is matched as an ASCII keyword and never echoed, and redis answers a
+        // plain syntax error for an unrecognized one whatever bytes it holds.
+        let opt = std::str::from_utf8(&argv[idx]).unwrap_or("");
         if opt.eq_ignore_ascii_case("LIMIT") {
             idx += 1;
             if idx >= argv.len() {
@@ -27414,8 +27453,9 @@ fn bitfield_cmd(
     {
         let mut j = 2;
         while j < argv.len() {
-            let sub =
-                std::str::from_utf8(&argv[j]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+            // (frankenredis-k0gwc) See xsetid_cmd: ASCII-keyword match only, never
+            // echoed, so an undecodable subcommand token is a syntax error.
+            let sub = std::str::from_utf8(&argv[j]).unwrap_or("");
             let invalid_type = || {
                 Ok(RespFrame::Error(
                     "ERR Invalid bitfield type. Use something like i16 u8. Note that u64 is not supported but i64 is."
@@ -27536,7 +27576,8 @@ fn bitfield_cmd(
     let mut i = 2;
 
     while i < argv.len() {
-        let sub = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        // (frankenredis-k0gwc) See xsetid_cmd: ASCII-keyword match only, never echoed.
+        let sub = std::str::from_utf8(&argv[i]).unwrap_or("");
         if sub.eq_ignore_ascii_case("GET") {
             if i + 2 >= argv.len() {
                 return Ok(RespFrame::Error("ERR syntax error".to_string()));
@@ -27752,8 +27793,11 @@ fn bitfield_ro_cmd(
     {
         let mut j = 2;
         while j < argv.len() {
-            let sub =
-                std::str::from_utf8(&argv[j]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+            // (frankenredis-k0gwc) THIS is BITFIELD_RO's gate for a bad subcommand
+            // token: the later serve loop's `else` is a no-op `i += 2`, so relaxing
+            // that one would silently SKIP an undecodable token and answer success.
+            // Rejecting here keeps the syntax error, matching redis.
+            let sub = std::str::from_utf8(&argv[j]).unwrap_or("");
             if sub.eq_ignore_ascii_case("GET")
                 || sub.eq_ignore_ascii_case("SET")
                 || sub.eq_ignore_ascii_case("INCRBY")
@@ -32118,6 +32162,142 @@ mod tests {
         let ttl_argv = vec![b"TTL".to_vec(), b"k".to_vec()];
         let ttl_out = dispatch_argv(&ttl_argv, &mut store, 1000).expect("ttl");
         assert_eq!(ttl_out, RespFrame::Integer(10));
+    }
+
+    #[test]
+    fn non_utf8_option_token_matches_redis_across_commands_k0gwc() {
+        // (frankenredis-k0gwc) hp1us fixed ZRANGE/ZRANGESTORE; probing found the same
+        // from_utf8-before-recognize ordering in nine more commands. Each expectation
+        // below is what vendored redis 7.2.4 actually answered for the same argv with
+        // a non-UTF8 (0xff 0xfe) option token — measured, not assumed.
+        //
+        // NOTE ON VERIFICATION: the live differ cannot confirm these yet. The only fr
+        // binary on this host is a release build predating the fix, and rch does not
+        // return a linked binary (docs/BENCH_METHODOLOGY.md section 2), so these unit
+        // assertions are the verification and the live re-run is pending a binary.
+        let nb = || b"\xff\xfe".to_vec();
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"z".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("seed zset");
+        dispatch_argv(
+            &[b"SET".to_vec(), b"str".to_vec(), b"v".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("seed string");
+        dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"st".to_vec(),
+                b"1-1".to_vec(),
+                b"f".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("seed stream");
+
+        // redis answers a plain syntax error for all of these.
+        let syntax: Vec<(&str, Vec<Vec<u8>>)> = vec![
+            (
+                "XSETID",
+                vec![b"XSETID".to_vec(), b"st".to_vec(), b"5-5".to_vec(), nb()],
+            ),
+            ("FAILOVER", vec![b"FAILOVER".to_vec(), nb()]),
+            (
+                "ZUNIONSTORE",
+                vec![
+                    b"ZUNIONSTORE".to_vec(),
+                    b"d".to_vec(),
+                    b"1".to_vec(),
+                    b"z".to_vec(),
+                    nb(),
+                ],
+            ),
+            (
+                "ZINTERCARD",
+                vec![b"ZINTERCARD".to_vec(), b"1".to_vec(), b"z".to_vec(), nb()],
+            ),
+            (
+                "CLIENT",
+                vec![b"CLIENT".to_vec(), b"NO-EVICT".to_vec(), nb()],
+            ),
+            (
+                "BITFIELD",
+                vec![b"BITFIELD".to_vec(), b"str".to_vec(), nb()],
+            ),
+            (
+                "BITFIELD_RO",
+                vec![b"BITFIELD_RO".to_vec(), b"str".to_vec(), nb()],
+            ),
+            (
+                "MIGRATE",
+                vec![
+                    b"MIGRATE".to_vec(),
+                    b"127.0.0.1".to_vec(),
+                    b"1".to_vec(),
+                    b"k".to_vec(),
+                    b"0".to_vec(),
+                    b"100".to_vec(),
+                    nb(),
+                ],
+            ),
+        ];
+        for (name, argv) in syntax {
+            let got = dispatch_argv(&argv, &mut store, 0);
+            let is_syntax = match &got {
+                Err(CommandError::SyntaxError) => true,
+                // several of these report the syntax error as an Ok(Error) frame
+                Ok(RespFrame::Error(msg)) => msg == "ERR syntax error",
+                _ => false,
+            };
+            assert!(
+                is_syntax,
+                "{name} with a non-UTF8 option must be redis's syntax error, got {got:?}"
+            );
+        }
+
+        // FUNCTION is the exception: redis ECHOES the raw bytes rather than saying
+        // "syntax error", so this must not be folded into the loop above.
+        let err = dispatch_argv(
+            &[b"FUNCTION".to_vec(), b"LIST".to_vec(), nb()],
+            &mut store,
+            0,
+        )
+        .expect_err("unknown FUNCTION argument must error");
+        match err {
+            CommandError::RawError(body) => assert_eq!(
+                body,
+                b"ERR Unknown argument \xff\xfe".to_vec(),
+                "FUNCTION must echo the raw token like redis"
+            ),
+            other => panic!("expected RawError echoing the token, got {other:?}"),
+        }
+
+        // And a non-UTF8 LIBRARYNAME is NOT an error at all upstream — it is a glob
+        // that matches nothing, so redis answers an empty array.
+        let listed = dispatch_argv(
+            &[
+                b"FUNCTION".to_vec(),
+                b"LIST".to_vec(),
+                b"LIBRARYNAME".to_vec(),
+                nb(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("a non-UTF8 LIBRARYNAME is a non-matching pattern, not an error");
+        assert_eq!(listed, RespFrame::Array(Some(vec![])));
     }
 
     #[test]
