@@ -26108,3 +26108,73 @@ be re-filed as a loss. If a pure bulk-load path (RDB load / MIGRATE) is ever sho
 any future lever to THAT ingest path only, never to the shared hash accessors.
 
 Host state: `kernel.perf_event_paranoid` 4->1 for the run and RESTORED to 4 after; verified.
+
+## 2026-08-08 CrimsonHawk: REJECT (measured loss, SELF-SPEEDUP) — recycling Lua binding-NAME buffers is 2.92% SLOWER than letting mimalloc allocate them. The scope/argv/arg-buffer pools win; the String pool does not.
+
+Claim class: SELF-SPEEDUP
+Campaign output: no
+(fr-vs-fr on the same bench binary family; no live legacy Redis arm is involved and none is claimed —
+this is a rejected internal optimisation, not campaign output.)
+
+Today's Lua levers established that recycling a `Vec` across `redis.call` iterations pays (scope
+buffers 5e1d28527 2.783%, argv 2b19a3935 1.664%, call-args 7fd4be79a 1.011%). The obvious next step
+looked identical in shape: `Scope::set_local_cell` still calls `name.to_string()` for every binding
+push, so a loop body declaring the same local pays a `String` allocation per iteration, and
+`set_local_cell` sat at 2.41% self time in a `cycles:u` profile. It does NOT generalise.
+
+CANDIDATE: give `Scope` a `spare_names: Vec<String>` pool; `recycle_locals()` moves each binding's
+name buffer there instead of dropping it, and `set_local_cell` refills one (`clear()` + `push_str()`)
+instead of allocating.
+
+MEASURED on a quiescent trj, fr release-perf, pinned to core 40. ONE invocation interleaves three
+arms per rep — A (baseline), N (a byte-identical COPY of the baseline, giving the A/A null), and B
+(candidate) — over 12 reps of FIXED WORK (1M redis.calls each) under
+`perf stat -e instructions:u`. Counted mechanism; wall clock is not used for the verdict.
+
+  A/A NULL    median 0.999994   bootstrap 95% median CI [0.999952, 1.000016]   (straddles 1.0)
+  A/B EFFECT  median 1.029225   bootstrap 95% median CI [1.029203, 1.029270]
+
+  The effect CI EXCLUDES 1.0 and its lower bound (1.029203) clears the widest null bound (1.000048)
+  by ~600x, so the regression is real and not measurement drift.
+
+  per-op: baseline 3,546.9 vs candidate 3,650.6 million instructions per 1M redis.calls
+  => +103.7 instructions per redis.call, **2.92% SLOWER**. Reverted; nothing shipped.
+
+  CV is provenance only and did not influence this verdict: baseline 0.0023%, null-ratio
+  0.0037%, effect-ratio 0.0034%. The verdict rests on the bootstrap median CIs above.
+
+  bench_elf_sha256 = 8d77313b425c10bb7628387b7caeaa8ab7503dff3e349bfa16af671f61d0d7d5
+  (candidate; baseline arm bench_elf_sha256 =
+   d93053abcb0cdf8c7e7299274e7ff53c0a0a2cdb2b9ff08647a469ef1b11b826)
+
+  CAVEAT ON THAT SHA, stated rather than glossed: `lua_rediscall_loop` does not print its own ELF
+  hash the way `io_uring_submission_ab` does (HARNESS_ELF_SELF_REPORT). These are `sha256sum` values
+  taken over the exact two binaries that were executed, and each was additionally symbol-verified for
+  mimalloc linkage (`nm | grep -c mi_malloc` = 25 on both). Adding a genuine self-report to this bench
+  is worth doing before the next entry cites it.
+
+WHY IT LOSES, and why the sibling pools win. The pooled buffer is not free: `spare_names` is itself a
+`Vec` that allocates on first push, so the change trades one small `String` allocation for a second
+container allocation plus a drain loop, a bound check per binding, and a pop/clear/push_str on the way
+back in. mimalloc's small-object fast path already services a 1-byte `String` in very few
+instructions, so there was little to win and real bookkeeping to lose. The scope, argv and call-arg
+pools win precisely because they recycle a container that ALREADY exists and is reached through a
+single hot site — they add no new container and no per-element loop.
+
+REUSABLE RULE: pool the container, not its elements. A recycling lever pays when it removes an
+allocation from a hot path without introducing another allocation or a per-element pass; once the
+bookkeeping is per-element, mimalloc's fast path beats it. Do not re-file per-element buffer pooling
+in the Lua interpreter without first showing the element allocation is NOT already on an allocator
+fast path.
+
+RETRY PREDICATE: only revisit if binding names stop being per-scope heap `String`s altogether — i.e.
+if the AST is changed to carry `Rc<str>` names so a binding push becomes a refcount bump with NO pool
+and NO per-element copy. That is the same multi-turn refactor as
+frankenredis-lua-rediscall-loop-interpreter-bound-d3al0's lever (1), and it subsumes this one.
+
+INCIDENTAL, recorded so the next agent does not chase it: the workspace suite showed
+`tcp_aof_restart_preserves_all_data` and `tcp_empty_and_null_multibulk_are_skipped` failing during
+this work. They are FLAKY, not caused by the candidate — two runs on the reverted tree gave failures
+then zero. Filed separately.
+
+Host state: `kernel.perf_event_paranoid` 4->1 for the runs and RESTORED to 4; verified.
