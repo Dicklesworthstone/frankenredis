@@ -15,6 +15,18 @@ use fr_command::dispatch_argv;
 use fr_command::lua_eval::eval_script;
 use fr_store::Store;
 
+// (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0) Match the shipping
+// allocator. `fr-server` declares `#[global_allocator] mimalloc` and defaults
+// the feature on; a bench in `fr-command` inherits nothing from it and would
+// otherwise link glibc malloc. That matters here specifically: a 2026-08-08
+// profile of this bench put ~28% of cycles in memory churn (LuaValue::clone
+// 9.82%, malloc+cfree 7.68%, drop_glue 6.28%, memmove 4.07%), and this bead's
+// headline lever is `LuaValue::Str -> Rc<[u8]>` -- an allocation-reduction
+// lever. Ranking that under the wrong allocator is how a multi-day refactor
+// gets justified by a number the server will never see.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 const EVALS: usize = 20_000;
 const CALLS_PER_EVAL: usize = 50;
 

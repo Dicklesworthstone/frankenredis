@@ -23,6 +23,10 @@ perf-ab-xtrim-minid-noop = ["fr-store/perf-ab-xtrim-minid-noop"]
 [dev-dependencies]
 proptest.workspace = true
 criterion = "0.8"
+# The shipping server sets mimalloc as its global allocator (fr-server defaults
+# to it). Benches that profile allocation-heavy paths must link the SAME
+# allocator or they measure glibc malloc and mis-rank every alloc lever.
+mimalloc.workspace = true
 
 [[bench]]
 name = "lua_eval"
