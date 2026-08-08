@@ -11,6 +11,12 @@ FULL-iteration element set (compared order-insensitive) are guaranteed equal. Al
 pins MATCH filtering, NOVALUES rejected on 7.2.4 (syntax error), SCAN TYPE filter,
 missing-key (cursor 0 / empty), and bad-cursor error. vs redis 7.2.4.
 
+One deliberate exception to the byte-exact rule: the KEYSPACE `SCAN ... TYPE` case is
+compared as cursor + order-insensitive key SET, because keyspace SCAN returns keys in
+dict-iteration order, which redis does not specify (frankenredis-z7fa2). The
+small-collection cases above stay byte-exact including order — a listpack/intset IS
+ordered, so there the order is a real contract.
+
 Usage: scan_encoding_cursor_differ.py <oracle_port> <fr_port>
        Exit 0 = byte-exact (per the above contract), 1 = divergence.
 """
@@ -93,6 +99,29 @@ def main():
     def iter_set(label,cmdname,key,*opts):
         eo,ef=full_iter(od,cmdname,key,*opts),full_iter(fr,cmdname,key,*opts)
         if eo!=ef: fails.append(f"{label}: redis={str(eo)[:60]} fr={str(ef)[:60]}")
+    def keyspace_scan_set(label,*c):
+        """Compare a KEYSPACE SCAN reply as cursor + order-insensitive key SET.
+
+        Keyspace SCAN returns keys in dict-iteration order, which redis does not
+        specify — the same WONTFIX class already normalized for ACL CAT and
+        FUNCTION LIST in their differs. Comparing the whole reply byte-exact
+        therefore asserts a property neither engine promises, and it was failing
+        3/3 runs: measured 2026-08-08, redis alone produced THREE different
+        orderings of the same three keys across three runs on one host
+        (surviveh,smallh,bigh / smallh,bigh,surviveh / smallh,surviveh,bigh)
+        while both engines agreed on the member set every time.
+
+        This drops ONLY the order. The cursor is still compared exactly and the
+        key set is still compared exactly, so a missing key, an extra key, a
+        wrong TYPE filter or a wrong cursor all still fail. (frankenredis-z7fa2)
+        """
+        def split(reply):
+            m=re.match(rb"\*2\r\n\$\d+\r\n([^\r]*)\r\n",reply)
+            if not m: return (None, reply[:70])
+            bulks=re.findall(rb"\$\d+\r\n([^\r]*)\r\n",reply)
+            return (m.group(1), tuple(sorted(bulks[1:])))
+        eo,ef=split(cmd(od,*c)),split(cmd(fr,*c))
+        if eo!=ef: fails.append(f"{label}: redis={str(eo)[:70]} fr={str(ef)[:70]}")
     # small single-shot byte-exact
     raw("hscan_small","HSCAN","smallh","0"); raw("sscan_small","SSCAN","smalls","0")
     raw("sscan_intset","SSCAN","intset","0"); raw("zscan_small","ZSCAN","smallz","0")
@@ -113,7 +142,7 @@ def main():
     # error / edge cases
     raw("hscan_novalues","HSCAN","smallh","0","NOVALUES")
     raw("hscan_missing","HSCAN","nope","0"); raw("hscan_badcursor","HSCAN","smallh","abc")
-    raw("scan_type","SCAN","0","TYPE","hash","COUNT","10000")
+    keyspace_scan_set("scan_type","SCAN","0","TYPE","hash","COUNT","10000")
     print("="*60)
     if fails:
         print(f"FAIL — {len(fails)} scan-encoding divergence(s) vs redis 7.2.4:")
