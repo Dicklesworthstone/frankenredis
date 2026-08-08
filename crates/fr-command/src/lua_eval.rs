@@ -3511,10 +3511,36 @@ fn lua_base_globals_template() -> Rc<LuaMap<String, LuaValue>> {
     })
 }
 
+/// (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0) One bit in the
+/// overlay membership filter.
+///
+/// Deliberately NOT the map's hash: the filter only needs a spread over 64
+/// buckets, not collision resistance, and the whole point is to be cheaper than
+/// the foldhash probe it lets us skip. `foldhash` also seeds `overlay` and
+/// `base` independently, so their hashes cannot be shared even in principle.
+fn overlay_filter_bit(key: &str) -> u64 {
+    let bytes = key.as_bytes();
+    let first = u64::from(*bytes.first().unwrap_or(&0));
+    let last = u64::from(*bytes.last().unwrap_or(&0));
+    let len = bytes.len() as u64;
+    1u64 << ((first ^ (last << 2) ^ (len << 4)) & 63)
+}
+
 #[derive(Clone, Debug)]
 struct LuaGlobals {
     base: Rc<LuaMap<String, LuaValue>>,
     overlay: LuaMap<String, LuaValue>,
+    /// Monotonic 64-bit membership filter over `overlay`'s keys.
+    ///
+    /// `LuaGlobals` exposes no removal — the overlay is insert-only for a
+    /// script's lifetime — so a set bit can never go stale and the filter can
+    /// only produce false POSITIVES, which fall through to the real probe. A
+    /// CLEAR bit is therefore proof of absence, which lets a base-resident
+    /// global (`redis`, `math`, `string`, `cjson`, …) skip a full foldhash
+    /// probe of the overlay. On the `redis.call` hot path that is one of the
+    /// three hashes per call: `redis` resolves base-only (overlay miss + base
+    /// hit) while `KEYS` lives in the overlay.
+    overlay_filter: u64,
 }
 
 impl LuaGlobals {
@@ -3522,26 +3548,41 @@ impl LuaGlobals {
         Self {
             base,
             overlay: LuaMap::default(),
+            overlay_filter: 0,
         }
     }
 
     fn from_flat_map(map: LuaMap<String, LuaValue>) -> Self {
+        // This constructor puts EVERY global in the overlay, so the filter has
+        // to be seeded from the whole key set or the lookups it guards would
+        // report false absences.
+        let overlay_filter = map
+            .keys()
+            .fold(0u64, |bits, key| bits | overlay_filter_bit(key.as_str()));
         Self {
             base: Rc::new(LuaMap::default()),
             overlay: map,
+            overlay_filter,
         }
     }
 
     fn get(&self, key: &str) -> Option<&LuaValue> {
-        self.overlay.get(key).or_else(|| self.base.get(key))
+        if self.overlay_filter & overlay_filter_bit(key) != 0
+            && let Some(value) = self.overlay.get(key)
+        {
+            return Some(value);
+        }
+        self.base.get(key)
     }
 
     fn insert(&mut self, key: String, value: LuaValue) -> Option<LuaValue> {
+        self.overlay_filter |= overlay_filter_bit(key.as_str());
         self.overlay.insert(key, value)
     }
 
     fn contains_key(&self, key: &str) -> bool {
-        self.overlay.contains_key(key) || self.base.contains_key(key)
+        (self.overlay_filter & overlay_filter_bit(key) != 0 && self.overlay.contains_key(key))
+            || self.base.contains_key(key)
     }
 
     fn iter(&self) -> impl Iterator<Item = (&String, &LuaValue)> {
@@ -13970,9 +14011,71 @@ mod tests {
     use fr_store::Store;
 
     use super::{
-        Env, LuaState, LuaTable, LuaValue, SCRIPT_NOSCRIPT_ERROR, compile_check, eval_script,
-        json_to_lua_value, lua_raw_equal, lua_test_live_tables, lua_value_to_json,
+        Env, LuaGlobals, LuaMap, LuaState, LuaTable, LuaValue, SCRIPT_NOSCRIPT_ERROR,
+        compile_check, eval_script, json_to_lua_value, lua_base_globals_template, lua_raw_equal,
+        lua_test_live_tables, lua_value_to_json, overlay_filter_bit,
     };
+
+    /// (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0) The overlay
+    /// membership filter is only sound because it can never report a false
+    /// ABSENCE. Pin that: every inserted key must read back, including keys
+    /// that collide into the same filter bit, and shadowing must still win.
+    #[test]
+    fn overlay_filter_never_reports_a_false_absence() {
+        let mut globals = LuaGlobals::from_shared_base(lua_base_globals_template());
+
+        // Base-resident globals resolve while the overlay is still empty --
+        // this is the case the filter short-circuits.
+        assert!(globals.get("redis").is_some());
+        assert!(globals.get("math").is_some());
+        assert!(globals.contains_key("string"));
+        assert!(globals.get("definitely_not_a_global").is_none());
+        assert!(!globals.contains_key("definitely_not_a_global"));
+
+        // Find two distinct keys that share a filter bit, so a collision is
+        // actually exercised rather than assumed to be impossible.
+        let colliding = (0..4096)
+            .map(|n| format!("k{n}"))
+            .find(|k| k != "KEYS" && overlay_filter_bit(k) == overlay_filter_bit("KEYS"))
+            .expect("some key collides with KEYS in a 64-bucket filter");
+
+        globals.insert("KEYS".to_string(), LuaValue::Number(1.0));
+        // The collider was NOT inserted; a false positive must still resolve
+        // correctly (fall through to base, which does not have it either).
+        assert!(globals.get(&colliding).is_none());
+        assert!(globals.get("KEYS").is_some());
+
+        globals.insert(colliding.clone(), LuaValue::Number(2.0));
+        assert!(globals.get(&colliding).is_some());
+        assert!(globals.get("KEYS").is_some());
+
+        // Overlay must shadow base, and the filter must not hide the shadow.
+        globals.insert("redis".to_string(), LuaValue::Number(3.0));
+        assert!(matches!(globals.get("redis"), Some(LuaValue::Number(n)) if *n == 3.0));
+
+        // Empty-string and single-byte keys must not panic or go missing.
+        globals.insert(String::new(), LuaValue::Number(4.0));
+        assert!(globals.get("").is_some());
+        globals.insert("x".to_string(), LuaValue::Number(5.0));
+        assert!(globals.get("x").is_some());
+    }
+
+    /// `from_flat_map` puts every global in the overlay, so its filter has to
+    /// be seeded from the whole key set or those globals become invisible.
+    #[test]
+    fn flat_map_globals_seed_the_overlay_filter() {
+        let flat: LuaMap<String, LuaValue> = lua_base_globals_template().as_ref().clone();
+        let names: Vec<String> = flat.keys().cloned().collect();
+        assert!(names.len() > 5, "template should carry the stdlib");
+        let globals = LuaGlobals::from_flat_map(flat);
+        for name in names {
+            assert!(
+                globals.get(&name).is_some(),
+                "flat-map global {name} went missing behind the filter"
+            );
+            assert!(globals.contains_key(&name));
+        }
+    }
 
     /// (frankenredis-qqq17) Regression gate for the Lua Rc-cycle leak DoS.
     /// Cyclic scripts — a self-referential table and a recursive closure that
