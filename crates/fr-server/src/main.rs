@@ -4524,6 +4524,15 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    // (frankenredis-zwtqi) UNREACHABLE: `--experimental-sharded-set-get-workers`
+    // returns into `run_shared_nothing_server` above, so `sharded_set_get_workers`
+    // is always `None` by the time control reaches here and this pool is never
+    // built. It is left in place pending an owner decision on the bead; do NOT
+    // read it as the live sharding design. The live path routes CONNECTIONS
+    // round-robin at accept (`SharedNothingWorkerPool::next_worker`), whereas this
+    // pool routes KEYS (`sharded_set_get_shard` = crc16_slot % workers). Modelling
+    // the server on this dead path is what produced the stale hot-shard invariant
+    // fixed in frankenredis-uiqc5.
     let sharded_set_get_pool = if let Some(worker_count) = sharded_set_get_workers {
         match ShardedSetGetPool::new(worker_count, Arc::clone(&background_waker)) {
             Ok(pool) => {
