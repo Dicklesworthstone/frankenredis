@@ -105,6 +105,13 @@ SELF_ORCH = [
     ("replication_digest_fuzz.py", [REDIS_BIN, FR_BIN, str(SO_PORTS["replf"]), "3", "500"]),
     ("aof_roundtrip_digest_fuzz.py", [REDIS_BIN, FR_BIN, str(SO_PORTS["aoff"]), "2", "4"]),
     ("rdb_changes_save_gate.py", [REDIS_BIN, FR_BIN, str(SO_PORTS["rdbc"])]),
+    # (frankenredis-8jqlx, secondary clause "register orphaned index_range_boundary")
+    # This gate has existed since 2026-06-11 and was never registered, so its ~670
+    # index/range/count boundary cases have never run in the suite. It takes
+    # --redis-bin/--bin rather than ports because it spins up its own pair. Measured
+    # before registering: "OK: 670 index/range/count boundary cases byte-exact vs
+    # redis 7.2.4 (LRANGE/GETRANGE/LPOS/SINTERCARD/ZRANGE*/BITCOUNT/BITPOS/ZRANK)".
+    ("index_range_boundary_gate.py", ["--redis-bin", REDIS_BIN, "--bin", FR_BIN]),
 ]
 # Gates invoked positionally: <oracle_port> <fr_port>
 PORT_BASED = [
