@@ -14,9 +14,9 @@ Resets set-max-listpack config to true defaults first (config-pollution trap).
 Usage: set_listpack_dump_differ.py <oracle_port> <fr_port>   (default 16399 16400)
        Exit 0 = byte-exact, 1 = divergence.
 """
-import socket
 import sys
-import time
+
+from _respread import assert_ok, assert_seed, cmd, conn
 
 CASES = {
     "sl_str": ["apple", "banana", "cherry", "date", "-5x", "007abc"],
@@ -25,20 +25,6 @@ CASES = {
     "sl_large": [f"m{i}" for i in range(100)],               # 100 string members, still listpack
     "sl_longval": ["x" * 60, "y" * 60, "short"],             # values near the 64-byte cap
 }
-
-
-def conn(p):
-    return socket.create_connection(("127.0.0.1", p), timeout=6)
-
-
-def cmd(s, *a):
-    o = b"*%d\r\n" % len(a)
-    for x in a:
-        x = x if isinstance(x, bytes) else str(x).encode()
-        o += b"$%d\r\n%s\r\n" % (len(x), x)
-    s.sendall(o)
-    time.sleep(0.02)
-    return s.recv(1 << 20)
 
 
 def dump(s, k):

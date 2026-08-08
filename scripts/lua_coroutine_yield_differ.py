@@ -13,15 +13,17 @@ yield-across-boundary continuations.
 Usage: lua_coroutine_yield_differ.py <oracle_port> <fr_port>
        Exit 0 = parity, 1 = divergence.
 """
-import socket
 import sys
-import time
 from contextlib import contextmanager
+
+from _respread import cmd
+from _respread import conn as _conn
 
 
 @contextmanager
 def conn(p):
-    socket_handle = socket.create_connection(("127.0.0.1", p), timeout=5)
+    """The shared-reader socket, closed deterministically on scope exit."""
+    socket_handle = _conn(p)
     try:
         yield socket_handle
     finally:
@@ -29,14 +31,7 @@ def conn(p):
 
 
 def ev(s, script):
-    a = ("EVAL", script, "0")
-    o = b"*%d\r\n" % len(a)
-    for x in a:
-        x = x.encode()
-        o += b"$%d\r\n%s\r\n" % (len(x), x)
-    s.sendall(o)
-    time.sleep(0.03)
-    return s.recv(1 << 20)
+    return cmd(s, "EVAL", script, "0")
 
 
 # (label, script) — every case must match byte-exactly.

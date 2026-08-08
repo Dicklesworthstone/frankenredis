@@ -13,26 +13,49 @@ Usage: sharded_pubsub_differ.py <oracle_port> <fr_port>
        Exit 0 = byte-exact, 1 = divergence, 2 = setup error.
 """
 import re
-import socket
 import sys
-import time
+import time  # only for drain()'s settle wait, never for reading a command reply
+
+from _respread import cmd, conn, encode_command, frame_len
 
 
-def conn(p):
-    return socket.create_connection(("127.0.0.1", p), timeout=5)
+def cmd_n(s, n, *args):
+    """Send one command and read exactly N complete RESP frames.
 
-
-def cmd(s, *a):
-    o = b"*%d\r\n" % len(a)
-    for x in a:
-        x = str(x).encode() if not isinstance(x, bytes) else x
-        o += b"$%d\r\n%s\r\n" % (len(x), x)
-    s.sendall(o)
-    time.sleep(0.05)
-    return s.recv(1 << 20)
+    SSUBSCRIBE/SUNSUBSCRIBE emit one confirmation frame PER CHANNEL, so the
+    shared `cmd` — which returns as soon as the FIRST frame is complete — would
+    capture only the first and leave the rest for whatever reads next. Both
+    engines would lose the same frames and still compare equal: exactly the
+    false-PASS this gate was migrated to eliminate. (frankenredis-tesrb)
+    """
+    s.sendall(encode_command(args))
+    buf = b""
+    while True:
+        pos = got = 0
+        while got < n:
+            ln = frame_len(buf, pos)
+            if ln is None:
+                break
+            pos += ln
+            got += 1
+        if got >= n:
+            return buf
+        chunk = s.recv(1 << 20)
+        if not chunk:
+            raise OSError("server closed the connection mid-reply")
+        buf += chunk
 
 
 def drain(s, settle=0.15):
+    """Collect asynchronously-delivered push frames, or confirm none arrived.
+
+    DELIBERATE EXCEPTION to the shared reader (frankenredis-tesrb): every other
+    read in this gate is a reply to a command we just sent, so frame-completeness
+    tells the reader when to stop. Here there is no such bound — "the server sent
+    nothing more" is only observable by waiting, so this stays a timed
+    non-blocking read. It is a settle wait, not a truncating read: the loop below
+    consumes everything buffered rather than taking one recv and moving on.
+    """
     s.setblocking(False)
     time.sleep(settle)
     buf = b""
@@ -57,7 +80,7 @@ def run(port):
     sub, pub = conn(port), conn(port)
     out = {}
     # subscribe confirmation frames (one per channel, in order)
-    out["ssubscribe"] = cmd(sub, "SSUBSCRIBE", "sc1", "sc2")
+    out["ssubscribe"] = cmd_n(sub, 2, "SSUBSCRIBE", "sc1", "sc2")
     drain(sub)
     # introspection reflects the active shard subscriptions
     out["shardchannels"] = cmd(pub, "PUBSUB", "SHARDCHANNELS")

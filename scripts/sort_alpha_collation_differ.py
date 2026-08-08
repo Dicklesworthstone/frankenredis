@@ -21,9 +21,9 @@ no ignorable-char ties) are deterministic; this gate pins exactly those.
 Usage: sort_alpha_collation_differ.py <oracle_port> <fr_port>
        Exit 0 = working-set byte-exact, 1 = regression in the supported cases.
 """
-import socket
 import sys
-import time
+
+from _respread import assert_ok, assert_seed, cmd, conn
 
 # (label, members) — SORT ALPHA over each must be byte-identical to redis 7.2.4.
 CASES = [
@@ -47,20 +47,6 @@ OPTS = [
 ]
 
 
-def conn(p):
-    return socket.create_connection(("127.0.0.1", p), timeout=5)
-
-
-def cmd(s, *a):
-    o = b"*%d\r\n" % len(a)
-    for x in a:
-        x = x if isinstance(x, bytes) else str(x).encode()
-        o += b"$%d\r\n%s\r\n" % (len(x), x)
-    s.sendall(o)
-    time.sleep(0.03)
-    return s.recv(1 << 20)
-
-
 def main():
     op = int(sys.argv[1]) if len(sys.argv) > 1 else 16399
     fp = int(sys.argv[2]) if len(sys.argv) > 2 else 16400
@@ -68,11 +54,16 @@ def main():
     fails = []
     n = 0
     for label, members in CASES:
+        # utf-8, explicitly: the deliberate exception in _respread.encode_arg's
+        # docstring. Its latin-1 default exists so a "\xNN" escape means the one
+        # byte it names; these accented/CJK members are real TEXT, which is what
+        # a real client sends — and "中" has no latin-1 encoding at all.
+        members = [m.encode("utf-8") for m in members]
         for opts in OPTS:
             cmd(od, "DEL", "sk")
             cmd(fr, "DEL", "sk")
-            cmd(od, "RPUSH", "sk", *members)
-            cmd(fr, "RPUSH", "sk", *members)
+            assert_seed(cmd(od, "RPUSH", "sk", *members), len(members), f"redis RPUSH {label}")
+            assert_seed(cmd(fr, "RPUSH", "sk", *members), len(members), f"fr RPUSH {label}")
             ro, rf = cmd(od, "SORT", "sk", *opts), cmd(fr, "SORT", "sk", *opts)
             n += 1
             if ro != rf:

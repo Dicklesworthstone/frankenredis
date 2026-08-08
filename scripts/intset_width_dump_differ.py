@@ -14,9 +14,9 @@ set-max-intset-entries to the true default (512) first (config-pollution trap).
 Usage: intset_width_dump_differ.py <oracle_port> <fr_port>   (default 16399 16400)
        Exit 0 = byte-exact, 1 = divergence.
 """
-import socket
 import sys
-import time
+
+from _respread import assert_ok, assert_seed, cmd, conn
 
 CASES = {
     "i16": ["1", "2", "3", "-5", "100", "32767", "-32768"],
@@ -26,20 +26,6 @@ CASES = {
     "large": [str(i) for i in range(300)],          # >128, still intset (default cap 512)
     "neg_heavy": [str(-i) for i in range(150)],
 }
-
-
-def conn(p):
-    return socket.create_connection(("127.0.0.1", p), timeout=6)
-
-
-def cmd(s, *a):
-    o = b"*%d\r\n" % len(a)
-    for x in a:
-        x = x if isinstance(x, bytes) else str(x).encode()
-        o += b"$%d\r\n%s\r\n" % (len(x), x)
-    s.sendall(o)
-    time.sleep(0.02)
-    return s.recv(1 << 20)
 
 
 def dump(s, k):

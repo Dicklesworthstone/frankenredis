@@ -21,20 +21,6 @@ EXAT2 = "4102444900"
 PXAT = "4102444800000"
 
 
-def conn(p):
-    return socket.create_connection(("127.0.0.1", p), timeout=5)
-
-
-def cmd(s, *a):
-    o = b"*%d\r\n" % len(a)
-    for x in a:
-        x = x if isinstance(x, bytes) else str(x).encode()
-        o += b"$%d\r\n%s\r\n" % (len(x), x)
-    s.sendall(o)
-    time.sleep(0.02)
-    return s.recv(1 << 20)
-
-
 def main():
     op = int(sys.argv[1]) if len(sys.argv) > 1 else 16399
     fp = int(sys.argv[2]) if len(sys.argv) > 2 else 16400

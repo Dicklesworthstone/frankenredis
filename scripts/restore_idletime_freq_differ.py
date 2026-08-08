@@ -14,23 +14,9 @@ application via OBJECT IDLETIME / OBJECT FREQ.
 Usage: restore_idletime_freq_differ.py <oracle_port> <fr_port>
        Exit 0 = parity, 1 = divergence, 2 = setup error.
 """
-import socket
 import sys
-import time
 
-
-def conn(p):
-    return socket.create_connection(("127.0.0.1", p), timeout=5)
-
-
-def cmd(s, *a):
-    o = b"*%d\r\n" % len(a)
-    for x in a:
-        x = x if isinstance(x, bytes) else str(x).encode()
-        o += b"$%d\r\n%s\r\n" % (len(x), x)
-    s.sendall(o)
-    time.sleep(0.02)
-    return s.recv(1 << 20)
+from _respread import assert_ok, assert_seed, cmd, conn
 
 
 def payload(dump_reply):

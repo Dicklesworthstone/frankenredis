@@ -21,23 +21,9 @@ NOT byte-asserted (legitimately non-deterministic / BY DESIGN):
 Usage: stream_dump_byte_differ.py <oracle_port> <fr_port>   (default 16399 16400)
        Exit 0 = clean-stream DUMP byte-exact, 1 = a NEW (non-aapu4) divergence.
 """
-import socket
 import sys
-import time
 
-
-def conn(p):
-    return socket.create_connection(("127.0.0.1", p), timeout=8)
-
-
-def cmd(s, *a):
-    o = b"*%d\r\n" % len(a)
-    for x in a:
-        x = x if isinstance(x, bytes) else str(x).encode()
-        o += b"$%d\r\n%s\r\n" % (len(x), x)
-    s.sendall(o)
-    time.sleep(0.02)
-    return s.recv(1 << 20)
+from _respread import assert_ok, assert_seed, cmd, conn
 
 
 def dump(s, k):

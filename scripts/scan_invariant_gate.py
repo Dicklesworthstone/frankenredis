@@ -17,25 +17,11 @@ Usage: scan_invariant_gate.py [<oracle_port>] <fr_port>   (the LAST arg is the f
        Exit 0 = invariant holds, 1 = violated.
 """
 import re
-import socket
 import sys
-import time
+
+from _respread import assert_ok, assert_seed, cmd, conn
 
 N = 1000
-
-
-def conn(p):
-    return socket.create_connection(("127.0.0.1", p), timeout=8)
-
-
-def cmd(s, *a):
-    o = b"*%d\r\n" % len(a)
-    for x in a:
-        x = x if isinstance(x, bytes) else str(x).encode()
-        o += b"$%d\r\n%s\r\n" % (len(x), x)
-    s.sendall(o)
-    time.sleep(0.01)
-    return s.recv(1 << 20)
 
 
 def scan_all(s, count, match=None, typ=None):

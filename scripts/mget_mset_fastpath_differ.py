@@ -12,23 +12,10 @@ inputs and compares replies + observable side effects (GET/TTL/TYPE) vs redis.
 Usage: mget_mset_fastpath_differ.py <oracle_port> <fr_port>
        Exit 0 = byte-exact, 1 = divergence.
 """
-import socket
 import sys
-import time
+import time  # only for the PEXPIRE-elapse wait below, never for reading a reply
 
-
-def conn(p):
-    return socket.create_connection(("127.0.0.1", p), timeout=5)
-
-
-def cmd(s, *a):
-    o = b"*%d\r\n" % len(a)
-    for x in a:
-        x = x if isinstance(x, bytes) else str(x).encode()
-        o += b"$%d\r\n%s\r\n" % (len(x), x)
-    s.sendall(o)
-    time.sleep(0.02)
-    return s.recv(1 << 20)
+from _respread import cmd, conn
 
 
 def main():

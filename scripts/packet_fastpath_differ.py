@@ -19,36 +19,20 @@ only probed on no-expiry (-1) and missing (-2) keys.
 Usage: packet_fastpath_differ.py <oracle_port> <fr_port>
        Exit 0 = every fast-path reply byte-exact, 1 = divergence.
 """
-import socket
 import sys
-import time
+
+from _respread import assert_ok, assert_seed, conn
+from _respread import cmd as call
+
+# The shared encoder is latin-1, NOT utf-8, which this gate depends on: it stores
+# a non-UTF8 value (SET bk "\xff") to exercise the byte-prefix fast paths over raw
+# bytes. A bare utf-8 encode turns 0xff into 0xc3 0xbf — VALID UTF-8 — which
+# defeats the purpose of that fixture. (frankenredis-r9ei8)
 
 EXAT = "4102444800"  # 2100-01-01, stable absolute expire seconds
 BINKEY = b"bin\xff\r\n\x00k"
 BINVAL = b"\x00\xff\r\nval\xfe"
 BINFIELD = b"f\xff\x00"
-
-
-def conn(p):
-    return socket.create_connection(("127.0.0.1", p), timeout=5)
-
-
-def enc(args):
-    o = b"*%d\r\n" % len(args)
-    for a in args:
-        # latin-1, NOT utf-8: this gate stores a non-UTF8 value (SET bk "\xff")
-        # to exercise the byte-prefix fast paths over raw bytes. A bare utf-8
-        # encode turns 0xff into 0xc3 0xbf — VALID UTF-8 — which defeats the
-        # purpose of that fixture. (frankenredis-r9ei8)
-        a = a if isinstance(a, bytes) else str(a).encode("latin-1")
-        o += b"$%d\r\n%s\r\n" % (len(a), a)
-    return o
-
-
-def call(s, *args):
-    s.sendall(enc(args))
-    time.sleep(0.02)
-    return s.recv(1 << 20)
 
 
 def setup(s):

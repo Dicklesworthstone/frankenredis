@@ -18,28 +18,12 @@ and asserts, for every reply:
 Usage: multidb_namespace_leak_gate.py <oracle_port> <fr_port>
 Exit 0 if all match and no leak; 1 otherwise.
 """
-import socket
 import sys
-import time
+
+from _respread import assert_ok, cmd
+from _respread import conn as cli
 
 SENTINELS = (b"frdb", b"\x00frdb\x00")
-
-
-def cli(p):
-    return socket.create_connection(("127.0.0.1", p), timeout=3)
-
-
-def cmd(s, *a):
-    o = b"*%d\r\n" % len(a)
-    for x in a:
-        if isinstance(x, str):
-            x = x.encode()
-        elif isinstance(x, int):
-            x = str(x).encode()
-        o += b"$%d\r\n%s\r\n" % (len(x), x)
-    s.sendall(o)
-    time.sleep(0.015)
-    return s.recv(131072)
 
 
 CASES = []

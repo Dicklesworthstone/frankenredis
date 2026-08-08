@@ -15,9 +15,9 @@ listpack config to true defaults first (the documented oracle config-pollution t
 Usage: hash_mixed_member_dump_differ.py <oracle_port> <fr_port>   (default 16399 16400)
        Exit 0 = byte-exact, 1 = divergence.
 """
-import socket
 import sys
-import time
+
+from _respread import assert_ok, assert_seed, cmd, conn
 
 # (key, HSET field/value args) — each stays < 128 entries so it remains listpack.
 CASES = {
@@ -28,20 +28,6 @@ CASES = {
                        for i in range(24)), []),
     "mh_negzero": ["-0", "a", "0", "b", "-1", "neg", "1", "pos"],
 }
-
-
-def conn(p):
-    return socket.create_connection(("127.0.0.1", p), timeout=6)
-
-
-def cmd(s, *a):
-    o = b"*%d\r\n" % len(a)
-    for x in a:
-        x = x if isinstance(x, bytes) else str(x).encode()
-        o += b"$%d\r\n%s\r\n" % (len(x), x)
-    s.sendall(o)
-    time.sleep(0.02)
-    return s.recv(1 << 20)
 
 
 def dump(s, k):

@@ -18,9 +18,9 @@ empty pattern); this gate's `**`/`***` patterns over the empty key lock it.
 Usage: glob_match_differ.py <oracle_port> <fr_port>
        Exit 0 = matched-key sets identical, 1 = divergence.
 """
-import socket
 import sys
-import time
+
+from _respread import assert_ok, cmd, conn
 
 # Rich keyspace, including the empty-string key (exercises z9dc3, now fixed).
 KEYS = [
@@ -46,24 +46,11 @@ PATTERNS = [
     "[-]", "[--/]", "[\\]a]", "[a-z-]", "[z-a]", "[^abc", "[\\", "[0-9-]",
 ]
 
-
-def conn(p):
-    return socket.create_connection(("127.0.0.1", p), timeout=5)
-
-
-def cmd(s, *a):
-    o = b"*%d\r\n" % len(a)
-    for x in a:
-        # latin-1, NOT utf-8: the keyspace deliberately includes a non-UTF8 key
-        # ("\xff\xfe") to exercise glob matching over raw bytes. A bare utf-8
-        # encode turns 0xff into 0xc3 0xbf — VALID UTF-8 — so the one property
-        # this fixture exists to test would no longer be tested at all.
-        # (frankenredis-r9ei8)
-        x = x if isinstance(x, bytes) else str(x).encode("latin-1")
-        o += b"$%d\r\n%s\r\n" % (len(x), x)
-    s.sendall(o)
-    time.sleep(0.03)
-    return s.recv(1 << 20)
+# The shared encoder is latin-1, NOT utf-8, which this fixture depends on: the
+# keyspace deliberately includes a non-UTF8 key ("\xff\xfe") to exercise glob
+# matching over raw bytes. A bare utf-8 encode turns 0xff into 0xc3 0xbf — VALID
+# UTF-8 — so the one property this fixture exists to test would no longer be
+# tested at all. (frankenredis-r9ei8)
 
 
 def keys_set(srv, pat):

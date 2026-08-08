@@ -16,31 +16,23 @@ cardinality / structure / error-reply equality.
 Usage: randmember_count_differ.py <oracle_port> <fr_port>
        Exit 0 = invariants match, 1 = divergence.
 """
-import socket
 import sys
-import time
 from contextlib import contextmanager
+
+from _respread import assert_ok, assert_seed, cmd
+from _respread import conn as _conn
 
 SIZE = 5
 
 
 @contextmanager
 def conn(p):
-    socket_handle = socket.create_connection(("127.0.0.1", p), timeout=5)
+    """The shared-reader socket, closed deterministically on scope exit."""
+    socket_handle = _conn(p)
     try:
         yield socket_handle
     finally:
         socket_handle.close()
-
-
-def cmd(s, *a):
-    o = b"*%d\r\n" % len(a)
-    for x in a:
-        x = x if isinstance(x, bytes) else str(x).encode()
-        o += b"$%d\r\n%s\r\n" % (len(x), x)
-    s.sendall(o)
-    time.sleep(0.02)
-    return s.recv(1 << 20)
 
 
 def parr(b):

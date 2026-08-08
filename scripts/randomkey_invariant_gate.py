@@ -22,25 +22,11 @@ Usage: randomkey_invariant_gate.py [<oracle_port>] <fr_port>   (LAST arg = fr su
        Exit 0 = invariants hold, 1 = violated.
 """
 import re
-import socket
 import sys
-import time
+
+from _respread import assert_ok, assert_seed, cmd, conn
 
 N = 300
-
-
-def conn(p):
-    return socket.create_connection(("127.0.0.1", p), timeout=8)
-
-
-def cmd(s, *a):
-    o = b"*%d\r\n" % len(a)
-    for x in a:
-        x = x if isinstance(x, bytes) else str(x).encode()
-        o += b"$%d\r\n%s\r\n" % (len(x), x)
-    s.sendall(o)
-    time.sleep(0.005)
-    return s.recv(1 << 20)
 
 
 def bulk(r):

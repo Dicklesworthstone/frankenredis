@@ -13,9 +13,9 @@ conflicts — checking both the reply AND the resulting ZSCORE byte-exact vs red
 Usage: zadd_flag_matrix_differ.py <oracle_port> <fr_port>
        Exit 0 = byte-exact, 1 = divergence.
 """
-import socket
 import sys
-import time
+
+from _respread import assert_ok, assert_seed, cmd, conn
 
 FLAGSETS = [
     [], ["NX"], ["XX"], ["GT"], ["LT"], ["CH"],
@@ -24,20 +24,6 @@ FLAGSETS = [
     ["NX", "GT"], ["NX", "XX"], ["GT", "LT"],   # last three are conflict errors
 ]
 SCORES = ["5", "3", "7", "5"]  # equal, lower, higher, equal-again (member starts at 5)
-
-
-def conn(p):
-    return socket.create_connection(("127.0.0.1", p), timeout=5)
-
-
-def cmd(s, *a):
-    o = b"*%d\r\n" % len(a)
-    for x in a:
-        x = x if isinstance(x, bytes) else str(x).encode()
-        o += b"$%d\r\n%s\r\n" % (len(x), x)
-    s.sendall(o)
-    time.sleep(0.015)
-    return s.recv(1 << 20)
 
 
 def main():

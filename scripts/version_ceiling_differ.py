@@ -13,23 +13,9 @@ identically. If a future change adds a 7.4 command to fr, this gate flags the dr
 Usage: version_ceiling_differ.py <oracle_port> <fr_port>
        Exit 0 = byte-exact, 1 = divergence (fr drifted past 7.2.4).
 """
-import socket
 import sys
-import time
 
-
-def conn(p):
-    return socket.create_connection(("127.0.0.1", p), timeout=5)
-
-
-def cmd(s, *a):
-    o = b"*%d\r\n" % len(a)
-    for x in a:
-        x = x if isinstance(x, bytes) else str(x).encode()
-        o += b"$%d\r\n%s\r\n" % (len(x), x)
-    s.sendall(o)
-    time.sleep(0.02)
-    return s.recv(1 << 20)
+from _respread import assert_ok, assert_seed, cmd, conn
 
 
 # Must be UNKNOWN COMMAND on 7.2.4 (and therefore on fr).

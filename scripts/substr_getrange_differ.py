@@ -12,9 +12,9 @@ non-integer index, arity.
 Usage: substr_getrange_differ.py <oracle_port> <fr_port>
        Exit 0 = byte-exact, 1 = divergence.
 """
-import socket
 import sys
-import time
+
+from _respread import assert_ok, assert_seed, cmd, conn
 
 RANGES = [
     ("0", "4"), ("0", "-1"), ("-5", "-1"), ("6", "-1"), ("0", "0"), ("-1", "-1"),
@@ -25,20 +25,6 @@ RANGES = [
     ("9223372036854775808", "-1"),
     ("-9223372036854775809", "-1"),
 ]
-
-
-def conn(p):
-    return socket.create_connection(("127.0.0.1", p), timeout=5)
-
-
-def cmd(s, *a):
-    o = b"*%d\r\n" % len(a)
-    for x in a:
-        x = x if isinstance(x, bytes) else str(x).encode()
-        o += b"$%d\r\n%s\r\n" % (len(x), x)
-    s.sendall(o)
-    time.sleep(0.02)
-    return s.recv(1 << 20)
 
 
 def main():
