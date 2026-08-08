@@ -507,6 +507,20 @@ fn spawn_legacy_redis(port: u16) -> ManagedChild {
 
 fn spawn_legacy_redis_with_aof(port: u16) -> ManagedChild {
     let dir = unique_temp_dir("frankenredis-legacy-aof");
+    // (frankenredis-6ujef) Capture legacy-redis output instead of discarding it.
+    // Every failure left after the port-band and cwd fixes is "port N did not
+    // become ready", and they all land in tests that spawn LEGACY redis --
+    // whose output was going to /dev/null, so the reason a node failed to come
+    // up was structurally invisible. Note redis logs to STDOUT when `logfile`
+    // is empty, which is why both streams are captured -- pointing only at
+    // stderr produced empty logs on the first attempt. Raising the readiness
+    // budget 5s -> 45s changed nothing (4/9/8 panics vs 8/6/5), so this is
+    // diagnosis groundwork, not a fix.
+    let legacy_log = dir.join("redis-output.log");
+    let legacy_log_file = std::fs::File::create(&legacy_log).expect("create legacy redis log");
+    let legacy_log_stderr = legacy_log_file
+        .try_clone()
+        .expect("clone legacy redis log handle");
     let mut command = Command::new(legacy_redis_server_path());
     command
         .arg("--bind")
@@ -525,8 +539,10 @@ fn spawn_legacy_redis_with_aof(port: u16) -> ManagedChild {
         .arg("no")
         .arg("--dir")
         .arg(dir)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        // redis logs to STDOUT when `logfile` is empty, so capture that stream;
+        // stderr is kept too so a loader/bind failure cannot be lost.
+        .stdout(Stdio::from(legacy_log_file))
+        .stderr(Stdio::from(legacy_log_stderr));
     let child = ManagedChild::spawn(command, None);
     wait_for_port(port);
     child
@@ -539,6 +555,20 @@ fn spawn_legacy_redis_with_aof(port: u16) -> ManagedChild {
 /// would fight over the same file.
 fn spawn_legacy_redis_cluster_enabled(port: u16) -> ManagedChild {
     let dir = unique_temp_dir("frankenredis-legacy-cluster");
+    // (frankenredis-6ujef) Capture legacy-redis output instead of discarding it.
+    // Every failure left after the port-band and cwd fixes is "port N did not
+    // become ready", and they all land in tests that spawn LEGACY redis --
+    // whose output was going to /dev/null, so the reason a node failed to come
+    // up was structurally invisible. Note redis logs to STDOUT when `logfile`
+    // is empty, which is why both streams are captured -- pointing only at
+    // stderr produced empty logs on the first attempt. Raising the readiness
+    // budget 5s -> 45s changed nothing (4/9/8 panics vs 8/6/5), so this is
+    // diagnosis groundwork, not a fix.
+    let legacy_log = dir.join("redis-output.log");
+    let legacy_log_file = std::fs::File::create(&legacy_log).expect("create legacy redis log");
+    let legacy_log_stderr = legacy_log_file
+        .try_clone()
+        .expect("clone legacy redis log handle");
     let mut command = Command::new(legacy_redis_server_path());
     command
         .arg("--bind")
@@ -555,8 +585,10 @@ fn spawn_legacy_redis_cluster_enabled(port: u16) -> ManagedChild {
         .arg("yes")
         .arg("--dir")
         .arg(dir)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        // redis logs to STDOUT when `logfile` is empty, so capture that stream;
+        // stderr is kept too so a loader/bind failure cannot be lost.
+        .stdout(Stdio::from(legacy_log_file))
+        .stderr(Stdio::from(legacy_log_stderr));
     let child = ManagedChild::spawn(command, None);
     wait_for_port(port);
     child
@@ -564,6 +596,20 @@ fn spawn_legacy_redis_cluster_enabled(port: u16) -> ManagedChild {
 
 fn spawn_legacy_redis_with_requirepass(port: u16, requirepass: Option<&str>) -> ManagedChild {
     let dir = unique_temp_dir("frankenredis-legacy");
+    // (frankenredis-6ujef) Capture legacy-redis output instead of discarding it.
+    // Every failure left after the port-band and cwd fixes is "port N did not
+    // become ready", and they all land in tests that spawn LEGACY redis --
+    // whose output was going to /dev/null, so the reason a node failed to come
+    // up was structurally invisible. Note redis logs to STDOUT when `logfile`
+    // is empty, which is why both streams are captured -- pointing only at
+    // stderr produced empty logs on the first attempt. Raising the readiness
+    // budget 5s -> 45s changed nothing (4/9/8 panics vs 8/6/5), so this is
+    // diagnosis groundwork, not a fix.
+    let legacy_log = dir.join("redis-output.log");
+    let legacy_log_file = std::fs::File::create(&legacy_log).expect("create legacy redis log");
+    let legacy_log_stderr = legacy_log_file
+        .try_clone()
+        .expect("clone legacy redis log handle");
     let mut command = Command::new(legacy_redis_server_path());
     command
         .arg("--bind")
@@ -585,7 +631,11 @@ fn spawn_legacy_redis_with_requirepass(port: u16, requirepass: Option<&str>) -> 
     if let Some(requirepass) = requirepass {
         command.arg("--requirepass").arg(requirepass);
     }
-    command.stdout(Stdio::null()).stderr(Stdio::null());
+    command
+        // redis logs to STDOUT when `logfile` is empty, so capture that stream;
+        // stderr is kept too so a loader/bind failure cannot be lost.
+        .stdout(Stdio::from(legacy_log_file))
+        .stderr(Stdio::from(legacy_log_stderr));
     let child = ManagedChild::spawn(command, None);
     wait_for_port(port);
     child
@@ -593,6 +643,20 @@ fn spawn_legacy_redis_with_requirepass(port: u16, requirepass: Option<&str>) -> 
 
 fn spawn_legacy_redis_replica(port: u16, primary_port: u16) -> ManagedChild {
     let dir = unique_temp_dir("frankenredis-legacy-replica");
+    // (frankenredis-6ujef) Capture legacy-redis output instead of discarding it.
+    // Every failure left after the port-band and cwd fixes is "port N did not
+    // become ready", and they all land in tests that spawn LEGACY redis --
+    // whose output was going to /dev/null, so the reason a node failed to come
+    // up was structurally invisible. Note redis logs to STDOUT when `logfile`
+    // is empty, which is why both streams are captured -- pointing only at
+    // stderr produced empty logs on the first attempt. Raising the readiness
+    // budget 5s -> 45s changed nothing (4/9/8 panics vs 8/6/5), so this is
+    // diagnosis groundwork, not a fix.
+    let legacy_log = dir.join("redis-output.log");
+    let legacy_log_file = std::fs::File::create(&legacy_log).expect("create legacy redis log");
+    let legacy_log_stderr = legacy_log_file
+        .try_clone()
+        .expect("clone legacy redis log handle");
     let mut command = Command::new(legacy_redis_server_path());
     command
         .arg("--bind")
@@ -614,8 +678,10 @@ fn spawn_legacy_redis_replica(port: u16, primary_port: u16) -> ManagedChild {
         .arg(primary_port.to_string())
         .arg("--dir")
         .arg(dir)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        // redis logs to STDOUT when `logfile` is empty, so capture that stream;
+        // stderr is kept too so a loader/bind failure cannot be lost.
+        .stdout(Stdio::from(legacy_log_file))
+        .stderr(Stdio::from(legacy_log_stderr));
     let child = ManagedChild::spawn(command, None);
     wait_for_port(port);
     child
@@ -674,6 +740,9 @@ fn spawn_frankenredis_with_aof(port: u16) -> ManagedChild {
 
 fn spawn_frankenredis_with_config(port: u16, config_path: &str) -> ManagedChild {
     let work_dir = unique_temp_dir("frankenredis-server-work");
+    // (frankenredis-6ujef) Keep this server's stderr instead of discarding it.
+    let work_log = work_dir.join("stderr.log");
+    let work_log_file = std::fs::File::create(&work_log).expect("create server stderr log");
     let mut command = Command::new(env!("CARGO_BIN_EXE_frankenredis"));
     command
         .arg("--bind")
@@ -688,7 +757,7 @@ fn spawn_frankenredis_with_config(port: u16, config_path: &str) -> ManagedChild 
         // artifacts (dump.rdb, appendonly dir) cannot be shared between servers.
         .current_dir(&work_dir)
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::from(work_log_file));
     let child = ManagedChild::spawn(command, None);
     wait_for_port(port);
     child
@@ -696,6 +765,9 @@ fn spawn_frankenredis_with_config(port: u16, config_path: &str) -> ManagedChild 
 
 fn spawn_frankenredis_config_only(port: u16, config_path: &str) -> ManagedChild {
     let work_dir = unique_temp_dir("frankenredis-server-work");
+    // (frankenredis-6ujef) Keep this server's stderr instead of discarding it.
+    let work_log = work_dir.join("stderr.log");
+    let work_log_file = std::fs::File::create(&work_log).expect("create server stderr log");
     let mut command = Command::new(env!("CARGO_BIN_EXE_frankenredis"));
     command
         .arg("--mode")
@@ -706,7 +778,7 @@ fn spawn_frankenredis_config_only(port: u16, config_path: &str) -> ManagedChild 
         // artifacts (dump.rdb, appendonly dir) cannot be shared between servers.
         .current_dir(&work_dir)
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::from(work_log_file));
     let child = ManagedChild::spawn(command, None);
     wait_for_port(port);
     child
