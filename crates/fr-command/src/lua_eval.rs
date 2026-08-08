@@ -5973,6 +5973,22 @@ impl<'a> LuaState<'a> {
         // the Vec just drop it and the pool refills.
         let mut vals = self.take_arg_buffer();
         vals.reserve(args.len());
+        // (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0) Only a
+        // trailing VarArgs / Call / MethodCall can expand to multiple values.
+        // Deciding that ONCE lets the ordinary case run a tight loop instead of
+        // paying an index compare plus a match chain per argument -- and the
+        // ordinary case is every `redis.call(...)`, whose last argument is an
+        // Index or a literal. The slow path below is untouched.
+        if !matches!(
+            args.last(),
+            Some(Expr::VarArgs | Expr::Call(..) | Expr::MethodCall(..))
+        ) {
+            for arg in args {
+                let value = self.eval_expr(arg, env, varargs)?;
+                vals.push(value);
+            }
+            return Ok(vals);
+        }
         for (i, arg) in args.iter().enumerate() {
             if i == args.len() - 1 {
                 // Last arg: expand multi-value
@@ -14438,6 +14454,80 @@ mod tests {
         )
         .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"gamma".to_vec())));
+    }
+
+    /// (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0) Argument
+    /// evaluation takes a tight loop unless the LAST argument can expand to
+    /// multiple values. Pin both sides: trailing expansion still expands, and a
+    /// non-trailing multi-value expression is still truncated to one value.
+    #[test]
+    fn call_argument_expansion_survives_the_tight_loop() {
+        let mut store = Store::new();
+
+        // Trailing call expands to all its results.
+        let frame = eval_script(
+            b"local function two() return 'a','b' end \
+              local function join(...) return table.concat({...}, '|') end \
+              return join(two())",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"a|b".to_vec())));
+
+        // A NON-trailing call is truncated to one value.
+        let frame = eval_script(
+            b"local function two() return 'a','b' end \
+              local function join(...) return table.concat({...}, '|') end \
+              return join(two(), 'z')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"a|z".to_vec())));
+
+        // Trailing varargs expand.
+        let frame = eval_script(
+            b"local function join(...) return table.concat({...}, '|') end \
+              local function fwd(...) return join(...) end \
+              return fwd('p','q','r')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"p|q|r".to_vec())));
+
+        // Trailing method call expands.
+        let frame = eval_script(
+            b"local obj = {} \
+              obj.pair = function(self) return 'm','n' end \
+              local function join(...) return table.concat({...}, '|') end \
+              return join(obj:pair())",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"m|n".to_vec())));
+
+        // The ordinary tight-loop shape: plain args, no expansion.
+        let frame = eval_script(
+            b"local function join(...) return table.concat({...}, '|') end \
+              return join('x', 'y', 'z')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"x|y|z".to_vec())));
     }
 
     /// (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0) The array-hit
