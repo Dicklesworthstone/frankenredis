@@ -269,38 +269,44 @@ const PORT_BASE: u16 = 29_500;
 const PORT_MAX: u16 = 55_535;
 const PORT_BAND: u16 = 256;
 
-/// Per-process port counter, seeded so two concurrently running test binaries
-/// occupy DISJOINT bands.
+/// Per-process port counter, seeded into a band this process has EXCLUSIVELY
+/// claimed from the OS.
 ///
-/// (frankenredis-6ujef) The monotonic counter below fixed test-vs-test
-/// collisions inside one binary (frankenredis-vcv8o), but it started at the
-/// same constant in EVERY process, so two test binaries running at once —
-/// which is exactly what `cargo test --workspace` does, and what happens when
-/// several agents build on this host — marched through the identical port
-/// sequence and fought over every port.
+/// (frankenredis-6ujef) The first version of this seeded the band from a mixed
+/// pid, which fixed the "every process starts at 29_500" collision but left a
+/// birthday problem: 101 bands and six concurrent test binaries collide 14% of
+/// the time, and two processes sharing a band march through identical ports --
+/// exactly the original bug. Eight concurrent binaries collide 25% of the time.
 ///
-/// That did not merely flake: reproduced 6/6 with six concurrent runs of this
-/// binary, and the failures were CROSS-TALK, not timeouts. One test received
-/// "experimental shared-nothing mode accepts only ..." from another process's
-/// sharded server, and another read `DBSIZE 89` — another process's data.
-/// A client talking to the wrong server can just as easily produce a
-/// misleading PASS as a failure, which is why this is worth seeding properly
-/// rather than papering over with retries.
-///
-/// Seeding from the pid (mixed, so sibling pids do not alias into neighbouring
-/// bands) gives ~140 disjoint bands of 256 ports. This binary's ~70 tests take
-/// well under one band. The liveness probe below still covers the residual
-/// birthday case and any unrelated process holding a port.
+/// The band is now claimed by BINDING the band's first port and holding that
+/// listener for the life of the process. Binding is atomic, so two processes
+/// cannot claim the same band, and the kernel releases the claim on exit -- no
+/// lock file, no staleness handling, and nothing to clean up. The claim port
+/// itself is never handed to a test; the usable range starts one above it.
+fn claim_port_band() -> u16 {
+    let bands = (PORT_MAX - PORT_BASE) / PORT_BAND;
+    // Mixed so sibling pids do not start scanning at adjacent bands.
+    let mixed = std::process::id().wrapping_mul(2_654_435_761);
+    let start = (mixed % u32::from(bands)) as u16;
+    for step in 0..bands {
+        let band = (start + step) % bands;
+        let claim_port = PORT_BASE + band * PORT_BAND;
+        if let Ok(listener) = TcpListener::bind(("127.0.0.1", claim_port)) {
+            // Hold the claim for the process lifetime; the kernel frees it on
+            // exit. Leaking is the point -- dropping it would release the band.
+            std::mem::forget(listener);
+            return claim_port + 1;
+        }
+    }
+    // Every band claimed (more concurrent binaries than bands). Fall back to
+    // the pid-derived band and rely on the liveness probe below.
+    PORT_BASE + start * PORT_BAND + 1
+}
+
 fn next_port_counter() -> &'static std::sync::atomic::AtomicU16 {
     use std::sync::LazyLock;
     use std::sync::atomic::AtomicU16;
-    static NEXT_PORT: LazyLock<AtomicU16> = LazyLock::new(|| {
-        let bands = u32::from((PORT_MAX - PORT_BASE) / PORT_BAND);
-        // Knuth multiplicative mix so pid and pid+1 do not land adjacent.
-        let mixed = std::process::id().wrapping_mul(2_654_435_761);
-        let band = (mixed % bands) as u16;
-        AtomicU16::new(PORT_BASE + band * PORT_BAND)
-    });
+    static NEXT_PORT: LazyLock<AtomicU16> = LazyLock::new(|| AtomicU16::new(claim_port_band()));
     &NEXT_PORT
 }
 
@@ -458,13 +464,17 @@ fn leave_server_slot() {
     });
 }
 
+struct NotReady {
+    exited: bool,
+}
+
 struct ManagedChild {
     child: Child,
     log_path: Option<PathBuf>,
 }
 
 impl ManagedChild {
-    fn spawn(mut command: Command, log_path: Option<PathBuf>) -> Self {
+    fn spawn_once(command: &mut Command, log_path: Option<PathBuf>) -> Self {
         // Block before spawning so the cap bounds live processes, not just
         // post-spawn work.
         enter_server_slot();
@@ -484,6 +494,40 @@ impl ManagedChild {
         Self { child, log_path }
     }
 
+    /// Spawn, and if the child dies before the port opens, spawn it again.
+    ///
+    /// (frankenredis-6ujef) This host has `ip_local_port_range = 1024 65535`,
+    /// i.e. the ephemeral range is the WHOLE port space. Every client socket
+    /// any test opens can therefore sit on a port some later server needs, and
+    /// no amount of partitioning the pool can prevent it -- which is why the
+    /// per-process bands and the cluster-safe cap, both correct in themselves,
+    /// each plateaued. Redis's cluster bus makes it worse still: a node also
+    /// binds port + 10000, proven in the wild by
+    ///   "Could not create server TCP listening socket 127.0.0.1:48720:
+    ///    bind: Address already in use / Failed listening on port 48720
+    ///    (cluster), aborting."
+    ///
+    /// These collisions are TRANSIENT -- the ephemeral socket holding the port
+    /// closes -- so retrying the SAME port is enough and keeps every caller's
+    /// `let port = reserve_port()` valid. Only a child that EXITS is retried; a
+    /// child that is merely slow is left alone and still fails the readiness
+    /// assertion with its log, so a genuine startup defect cannot hide here.
+    fn spawn_ready(mut command: Command, log_path: Option<PathBuf>, port: u16) -> Self {
+        const ATTEMPTS: usize = 4;
+        for attempt in 1..=ATTEMPTS {
+            let mut child = Self::spawn_once(&mut command, log_path.clone());
+            match child.ready_or_exit(port) {
+                Ok(()) => return child,
+                Err(state) if attempt < ATTEMPTS && state.exited => {
+                    drop(child);
+                    thread::sleep(Duration::from_millis(150 * attempt as u64));
+                }
+                Err(state) => child.report_not_ready(port, &state),
+            }
+        }
+        unreachable!("spawn_ready returns or panics");
+    }
+
     /// Wait for the server to accept a connection, and on timeout say WHY.
     ///
     /// (frankenredis-6ujef) `wait_for_port` could only ever report "port N did
@@ -492,17 +536,28 @@ impl ManagedChild {
     /// that is still running but wedged, and it never showed the server's own
     /// log. Chasing this bead cost two refuted hypotheses for want of that
     /// distinction, so the harness now answers it directly.
-    fn wait_until_ready(&mut self, port: u16) {
+    fn ready_or_exit(&mut self, port: u16) -> Result<(), NotReady> {
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
             if TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
-                return;
+                return Ok(());
+            }
+            // A child that has already exited will never open the port; stop
+            // waiting out the full budget so a retry can start promptly.
+            if matches!(self.child.try_wait(), Ok(Some(_))) {
+                return Err(NotReady { exited: true });
             }
             thread::sleep(Duration::from_millis(50));
         }
         if TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
-            return;
+            return Ok(());
         }
+        Err(NotReady {
+            exited: matches!(self.child.try_wait(), Ok(Some(_))),
+        })
+    }
+
+    fn report_not_ready(&mut self, port: u16, _state: &NotReady) -> ! {
         let state = match self.child.try_wait() {
             Ok(Some(status)) => format!("child EXITED with {status}"),
             Ok(None) => "child is STILL RUNNING (wedged during startup, not dead)".to_owned(),
@@ -587,9 +642,7 @@ fn spawn_legacy_redis_with_aof(port: u16) -> ManagedChild {
         // stderr is kept too so a loader/bind failure cannot be lost.
         .stdout(Stdio::from(legacy_log_file))
         .stderr(Stdio::from(legacy_log_stderr));
-    let mut child = ManagedChild::spawn(command, Some(legacy_log));
-    child.wait_until_ready(port);
-    child
+    ManagedChild::spawn_ready(command, Some(legacy_log), port)
 }
 
 /// Vendored Redis started in CLUSTER MODE. (frankenredis-inuwt)
@@ -633,9 +686,7 @@ fn spawn_legacy_redis_cluster_enabled(port: u16) -> ManagedChild {
         // stderr is kept too so a loader/bind failure cannot be lost.
         .stdout(Stdio::from(legacy_log_file))
         .stderr(Stdio::from(legacy_log_stderr));
-    let mut child = ManagedChild::spawn(command, Some(legacy_log));
-    child.wait_until_ready(port);
-    child
+    ManagedChild::spawn_ready(command, Some(legacy_log), port)
 }
 
 fn spawn_legacy_redis_with_requirepass(port: u16, requirepass: Option<&str>) -> ManagedChild {
@@ -680,9 +731,7 @@ fn spawn_legacy_redis_with_requirepass(port: u16, requirepass: Option<&str>) -> 
         // stderr is kept too so a loader/bind failure cannot be lost.
         .stdout(Stdio::from(legacy_log_file))
         .stderr(Stdio::from(legacy_log_stderr));
-    let mut child = ManagedChild::spawn(command, Some(legacy_log));
-    child.wait_until_ready(port);
-    child
+    ManagedChild::spawn_ready(command, Some(legacy_log), port)
 }
 
 fn spawn_legacy_redis_replica(port: u16, primary_port: u16) -> ManagedChild {
@@ -726,9 +775,7 @@ fn spawn_legacy_redis_replica(port: u16, primary_port: u16) -> ManagedChild {
         // stderr is kept too so a loader/bind failure cannot be lost.
         .stdout(Stdio::from(legacy_log_file))
         .stderr(Stdio::from(legacy_log_stderr));
-    let mut child = ManagedChild::spawn(command, Some(legacy_log));
-    child.wait_until_ready(port);
-    child
+    ManagedChild::spawn_ready(command, Some(legacy_log), port)
 }
 
 fn spawn_frankenredis(port: u16, primary_port: Option<u16>) -> ManagedChild {
@@ -754,26 +801,11 @@ fn spawn_frankenredis_sharded_set_get(port: u16, workers: usize) -> ManagedChild
         .current_dir(&log_dir)
         .stdout(Stdio::null())
         .stderr(Stdio::from(log_file));
-    let mut child = ManagedChild::spawn(command, Some(log_path));
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
-            break;
-        }
-        if let Some(status) = child.child.try_wait().expect("poll sharded server") {
-            panic!(
-                "sharded server exited before binding port {port} with {status}: {}",
-                child.log_contents().unwrap_or_default()
-            );
-        }
-        assert!(
-            Instant::now() < deadline,
-            "sharded server did not bind port {port}: {}",
-            child.log_contents().unwrap_or_default()
-        );
-        thread::sleep(Duration::from_millis(50));
-    }
-    child
+    // (frankenredis-6ujef) Same retry-on-early-exit path as every other spawn.
+    // The bespoke loop this replaced could not retry a transient port
+    // collision, and this helper's servers were the ones turning up with empty
+    // logs under the concurrent gate.
+    ManagedChild::spawn_ready(command, Some(log_path), port)
 }
 
 fn spawn_frankenredis_with_aof(port: u16) -> ManagedChild {
@@ -802,9 +834,7 @@ fn spawn_frankenredis_with_config(port: u16, config_path: &str) -> ManagedChild 
         .current_dir(&work_dir)
         .stdout(Stdio::null())
         .stderr(Stdio::from(work_log_file));
-    let mut child = ManagedChild::spawn(command, Some(work_log));
-    child.wait_until_ready(port);
-    child
+    ManagedChild::spawn_ready(command, Some(work_log), port)
 }
 
 fn spawn_frankenredis_config_only(port: u16, config_path: &str) -> ManagedChild {
@@ -823,9 +853,7 @@ fn spawn_frankenredis_config_only(port: u16, config_path: &str) -> ManagedChild 
         .current_dir(&work_dir)
         .stdout(Stdio::null())
         .stderr(Stdio::from(work_log_file));
-    let mut child = ManagedChild::spawn(command, Some(work_log));
-    child.wait_until_ready(port);
-    child
+    ManagedChild::spawn_ready(command, Some(work_log), port)
 }
 
 fn spawn_frankenredis_opts(
@@ -895,9 +923,7 @@ fn spawn_frankenredis_opts_with_config(
             .expect("write stub redis.conf");
         command.arg("--config").arg(&config_path);
     }
-    let mut child = ManagedChild::spawn(command, Some(log_path));
-    child.wait_until_ready(port);
-    child
+    ManagedChild::spawn_ready(command, Some(log_path), port)
 }
 
 fn spawn_frankenredis_with_config_file(port: u16, primary_port: Option<u16>) -> ManagedChild {
