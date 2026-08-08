@@ -12,12 +12,10 @@ predicate underpins bbyfz (the RESTORE re-derive must use it, not a raw parse_i6
 Usage: set_intset_canonical_differ.py <oracle_port> <fr_port>
        Exit 0 = byte-exact, 1 = divergence.
 """
-import re, socket, sys, time
-def conn(p): return socket.create_connection(("127.0.0.1",p),timeout=5)
-def cmd(s,*a):
-    o=b"*%d\r\n"%len(a)
-    for x in a: x=x if isinstance(x,bytes) else str(x).encode(); o+=b"$%d\r\n%s\r\n"%(len(x),x)
-    s.sendall(o); time.sleep(0.02); return s.recv(1<<20)
+import re
+import sys
+
+from _respread import cmd, conn
 def enc(s,k):
     r=cmd(s,"OBJECT","ENCODING",k); return r[r.index(b"\r\n")+2:].split(b"\r\n")[0] if r.startswith(b"$") and b"$-1" not in r[:4] else b"?"
 def members(b): return tuple(sorted(re.findall(rb"\$\d+\r\n([^\r]*)\r\n", b)))

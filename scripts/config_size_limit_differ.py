@@ -12,12 +12,9 @@ restores the default 536870912 (suite-safe). Locks the uwhyl fix (90331d584).
 Usage: config_size_limit_differ.py <oracle_port> <fr_port>
        Exit 0 = byte-exact, 1 = divergence.
 """
-import socket, sys, time
-def conn(p): return socket.create_connection(("127.0.0.1",p),timeout=8)
-def cmd(s,*a):
-    o=b"*%d\r\n"%len(a)
-    for x in a: x=x if isinstance(x,bytes) else str(x).encode(); o+=b"$%d\r\n%s\r\n"%(len(x),x)
-    s.sendall(o); time.sleep(0.02); return s.recv(1<<20)
+import sys
+
+from _respread import cmd, conn
 def short(r): return r[:r.index(b"\r\n")] if b"\r\n" in r else r[:60]
 def main():
     op=int(sys.argv[1]) if len(sys.argv)>1 else 16399

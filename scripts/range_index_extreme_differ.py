@@ -10,12 +10,9 @@ ZRANGE / LTRIM / ZREMRANGEBYRANK / SETRANGE with i64 max, i64 min, i64-max+1,
 Usage: range_index_extreme_differ.py <oracle_port> <fr_port>
        Exit 0 = byte-exact, 1 = divergence.
 """
-import socket, sys, time
-def conn(p): return socket.create_connection(("127.0.0.1",p),timeout=5)
-def cmd(s,*a):
-    o=b"*%d\r\n"%len(a)
-    for x in a: x=x if isinstance(x,bytes) else str(x).encode(); o+=b"$%d\r\n%s\r\n"%(len(x),x)
-    s.sendall(o); time.sleep(0.015); return s.recv(1<<20)
+import sys
+
+from _respread import cmd, conn
 IMAX="9223372036854775807"; IMIN="-9223372036854775808"
 IMAXP1="9223372036854775808"; HUGE="99999999999999999999"
 def main():

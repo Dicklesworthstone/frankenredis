@@ -12,12 +12,10 @@ covers *STORE generally; this is the aliasing class incl. BITOP/COPY.)
 Usage: store_dest_aliasing_differ.py <oracle_port> <fr_port>
        Exit 0 = byte-exact, 1 = divergence.
 """
-import socket, sys, time, re
-def conn(p): return socket.create_connection(("127.0.0.1",p),timeout=5)
-def cmd(s,*a):
-    o=b"*%d\r\n"%len(a)
-    for x in a: x=x if isinstance(x,bytes) else str(x).encode(); o+=b"$%d\r\n%s\r\n"%(len(x),x)
-    s.sendall(o); time.sleep(0.02); return s.recv(1<<20)
+import re
+import sys
+
+from _respread import cmd, conn
 def sortmem(b): return tuple(sorted(re.findall(rb"\$\d+\r\n([^\r]*)\r\n", b)))
 def main():
     op=int(sys.argv[1]) if len(sys.argv)>1 else 16399

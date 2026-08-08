@@ -15,14 +15,14 @@ keywords, so a non-UTF8 option -> "syntax error" (asserted below).
 Usage: nonutf8_arg_parity_differ.py <oracle_port> <fr_port>
        Exit 0 = the asserted (correct) cases byte-exact, 1 = a NEW divergence.
 """
-import socket, sys, time
+import sys
+
+from _respread import cmd, conn
+
+# The shared encoder is latin-1, which this gate depends on: it exists to exercise
+# NON-UTF8 arguments, and a bare utf-8 encode turns 0xff into 0xc3 0xbf — VALID
+# UTF-8 — so the one property under test stops being tested. (frankenredis-r9ei8)
 NUTF=b"\xff\xfe"
-def conn(p): return socket.create_connection(("127.0.0.1",p),timeout=5)
-def cmd(s,*a):
-    o=b"*%d\r\n"%len(a)
-    for x in a:
-        x=x if isinstance(x,bytes) else str(x).encode(); o+=b"$%d\r\n%s\r\n"%(len(x),x)
-    s.sendall(o); time.sleep(0.02); return s.recv(1<<20)
 def dump(s,key): r=cmd(s,"DUMP",key); nl=r.index(b"\r\n"); return r[nl+2:nl+2+int(r[1:nl])]
 def main():
     op=int(sys.argv[1]) if len(sys.argv)>1 else 16399

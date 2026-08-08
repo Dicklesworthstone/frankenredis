@@ -11,15 +11,13 @@ MOVE cross-db, and COPY ... DB.
 Usage: copy_rename_encoding_differ.py <oracle_port> <fr_port>
        Exit 0 = byte-exact, 1 = divergence.
 """
-import socket, sys, time
+import sys
+
+from _respread import cmd, conn
+
 CFG = {"set-max-intset-entries":"512","set-max-listpack-entries":"128",
        "hash-max-listpack-entries":"128","zset-max-listpack-entries":"128",
        "list-max-listpack-size":"128"}
-def conn(p): return socket.create_connection(("127.0.0.1",p),timeout=5)
-def cmd(s,*a):
-    o=b"*%d\r\n"%len(a)
-    for x in a: x=x if isinstance(x,bytes) else str(x).encode(); o+=b"$%d\r\n%s\r\n"%(len(x),x)
-    s.sendall(o); time.sleep(0.02); return s.recv(1<<20)
 def enc(s,k):
     r=cmd(s,"OBJECT","ENCODING",k); return r[r.index(b"\r\n")+2:].split(b"\r\n")[0] if r.startswith(b"$") and b"$-1" not in r[:4] else b"?"
 def main():

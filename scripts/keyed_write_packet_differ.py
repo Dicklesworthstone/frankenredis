@@ -12,9 +12,31 @@ HSET-overwrite return-count. Byte-exact vs redis 7.2.4.
 Usage: keyed_write_packet_differ.py <oracle_port> <fr_port>
        Exit 0 = byte-exact, 1 = divergence.
 """
-import socket, sys, time
-def conn(p): return socket.create_connection(("127.0.0.1",p),timeout=5)
-def raw(s,b): s.sendall(b); time.sleep(0.04); return s.recv(1<<20)
+import sys
+
+from _respread import conn, frame_len
+
+
+def raw(s, b):
+    """Send a PRE-BUILT packet and read one COMPLETE RESP frame.
+
+    This gate hand-builds its wire bytes, so it cannot go through _respread.cmd
+    (which encodes from arguments) — but it needs the same framed read, hence
+    frame_len from the shared module rather than a bare recv.
+    (frankenredis-tesrb)
+    """
+    s.sendall(b)
+    buf = b""
+    while True:
+        try:
+            if buf and frame_len(buf) is not None:
+                return buf
+        except ValueError:
+            return buf  # not RESP we recognise — let the caller's compare surface it
+        chunk = s.recv(1 << 20)
+        if not chunk:
+            raise OSError("server closed the connection mid-reply")
+        buf += chunk
 def enc(*a):
     o=b"*%d\r\n"%len(a)
     for x in a: x=x if isinstance(x,bytes) else str(x).encode(); o+=b"$%d\r\n%s\r\n"%(len(x),x)

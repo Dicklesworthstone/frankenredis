@@ -14,12 +14,10 @@ missing-key (cursor 0 / empty), and bad-cursor error. vs redis 7.2.4.
 Usage: scan_encoding_cursor_differ.py <oracle_port> <fr_port>
        Exit 0 = byte-exact (per the above contract), 1 = divergence.
 """
-import socket, sys, time, re
-def conn(p): return socket.create_connection(("127.0.0.1",p),timeout=5)
-def cmd(s,*a):
-    o=b"*%d\r\n"%len(a)
-    for x in a: x=x if isinstance(x,bytes) else str(x).encode(); o+=b"$%d\r\n%s\r\n"%(len(x),x)
-    s.sendall(o); time.sleep(0.02); return s.recv(1<<20)
+import re
+import sys
+
+from _respread import cmd, conn
 def full_iter(s, cmdname, key, *opts):
     """Iterate cursor to 0, return sorted multiset of all returned elements."""
     cur=b"0"; items=[]; guard=0

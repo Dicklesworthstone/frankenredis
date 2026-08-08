@@ -14,23 +14,21 @@ Usage: pop_count_edge_differ.py <oracle_port> <fr_port>
        Exit 0 = byte-exact, 1 = divergence.
 """
 import re
-import socket
 import sys
-import time
 from contextlib import contextmanager
+
+from _respread import cmd
+from _respread import conn as _conn
 
 
 @contextmanager
 def conn(p):
-    socket_handle = socket.create_connection(("127.0.0.1", p), timeout=5)
+    """The shared-reader socket, closed deterministically on scope exit."""
+    socket_handle = _conn(p)
     try:
         yield socket_handle
     finally:
         socket_handle.close()
-def cmd(s,*a):
-    o=b"*%d\r\n"%len(a)
-    for x in a: x=x if isinstance(x,bytes) else str(x).encode(); o+=b"$%d\r\n%s\r\n"%(len(x),x)
-    s.sendall(o); time.sleep(0.02); return s.recv(1<<20)
 def sortbulks(b): return (b[:4], tuple(sorted(re.findall(rb"\$\d+\r\n([^\r]*)\r\n", b))))
 def main():
     op=int(sys.argv[1]) if len(sys.argv)>1 else 16399

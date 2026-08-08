@@ -15,14 +15,9 @@ script continue past a failed redis.call and dropped the script suffix.
 Usage: lua_rediscall_error_differ.py <oracle_port> <fr_port>   (default 16399 16400)
        Exit 0 = byte-exact, 1 = divergence.
 """
-import socket, sys, time
-def conn(p): return socket.create_connection(("127.0.0.1", p), timeout=6)
-def cmd(s, *a):
-    o = b"*%d\r\n" % len(a)
-    for x in a:
-        x = x if isinstance(x, bytes) else str(x).encode()
-        o += b"$%d\r\n%s\r\n" % (len(x), x)
-    s.sendall(o); time.sleep(0.02); return s.recv(1 << 20)
+import sys
+
+from _respread import cmd, conn
 
 def main():
     op = int(sys.argv[1]) if len(sys.argv) > 1 else 16399

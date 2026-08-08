@@ -20,16 +20,11 @@ Usage: stream_id_trim_differ.py <oracle_port> <fr_port>
        Exit 0 = byte-exact, 1 = divergence.
 """
 import re
-import socket
 import sys
-import time
+
+from _respread import cmd, conn
 
 STREAM_ID_BULK = re.compile(rb"\$\d+\r\n\d+-\d+\r\n")
-
-def cmd(s,*a):
-    o=b"*%d\r\n"%len(a)
-    for x in a: x=x if isinstance(x,bytes) else str(x).encode(); o+=b"$%d\r\n%s\r\n"%(len(x),x)
-    s.sendall(o); time.sleep(0.02); return s.recv(1<<20)
 def run_differ(od, fr):
     fails=[]
     def each(*c):
@@ -112,10 +107,7 @@ def run_differ(od, fr):
 def main():
     op=int(sys.argv[1]) if len(sys.argv)>1 else 16399
     fp=int(sys.argv[2]) if len(sys.argv)>2 else 16400
-    with (
-        socket.create_connection(("127.0.0.1", op), timeout=5) as od,
-        socket.create_connection(("127.0.0.1", fp), timeout=5) as fr,
-    ):
+    with conn(op) as od, conn(fp) as fr:
         run_differ(od, fr)
 
 

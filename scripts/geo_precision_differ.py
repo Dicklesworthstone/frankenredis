@@ -12,20 +12,14 @@ GEOSEARCH boundaries only; this covers the precision + flag surface.)
 Usage: geo_precision_differ.py <oracle_port> <fr_port>
        Exit 0 = byte-exact, 1 = divergence.
 """
-import socket
 import sys
-import time
 
-
-def cmd(s,*a):
-    o=b"*%d\r\n"%len(a)
-    for x in a: x=x if isinstance(x,bytes) else str(x).encode(); o+=b"$%d\r\n%s\r\n"%(len(x),x)
-    s.sendall(o); time.sleep(0.02); return s.recv(1<<20)
+from _respread import cmd, conn
 def main():
     op=int(sys.argv[1]) if len(sys.argv)>1 else 16399
     fp=int(sys.argv[2]) if len(sys.argv)>2 else 16400
-    od = socket.create_connection(("127.0.0.1", op), timeout=5)  # ubs:ignore — closed unconditionally by main's finally clause.
-    fr = socket.create_connection(("127.0.0.1", fp), timeout=5)  # ubs:ignore — closed unconditionally by main's finally clause.
+    od = conn(op)  # ubs:ignore — closed unconditionally by main's finally clause.
+    fr = conn(fp)  # ubs:ignore — closed unconditionally by main's finally clause.
     try:
         fails=[]
         for s in (od,fr):
