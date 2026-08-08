@@ -15193,3 +15193,87 @@ EVAL (-P 16) or a script with a much higher redis.call count per eval (the harne
 for exactly this), and require the A/A null CI to contain 1.0 and the A/B CI to exclude it before
 reclassifying. If a future measurement does clear that bar, this entry should be superseded by a
 COMPETITIVE one rather than edited.
+
+## 2026-08-08 CrimsonHawk: KEEP — revert the branchless probe inside `intersect_sorted_i64`'s skewed branch; SINTERSTORE +48.1%, FrankenRedis / vendored Redis 7.2.4 = 2.243x -> 3.305x (`frankenredis-6irj9`)
+
+Claim class: COMPETITIVE. Campaign output: yes.
+
+A live vendored Redis 7.2.4 server arm runs in the SAME invocation as both FrankenRedis arms and
+the A/A null, all driven by the same vendored redis-benchmark:
+**FrankenRedis / vendored Redis 7.2.4 = 3.305x** after the fix, up from
+FrankenRedis / vendored Redis 7.2.4 = 2.243x before it.
+
+THE DEFECT. `0f510b69e` swapped the per-element probe in `intersect_sorted_i64`'s skewed branch
+(large:small ratio >= 32) from std `binary_search` to the branchless
+`intset_binary_search_contains`, on the strength of a 1.16x disjoint measurement. At this
+function's actual shape the branchless probe LOSES, and loses in both regimes. Measured on
+20k INT 2M, three runs each, against the same `bin_search_retain` reference the unit test uses:
+    branchless   hit-heavy 0.78-0.80x    disjoint 0.75-0.83x
+    std          hit-heavy 0.98-1.00x    disjoint 0.99-1.01x
+It has no early exit and pays an `imul` plus two `.min()` clamps per step, which costs more than
+the mispredicts it avoids once the array is large enough that the search is cache-miss-bound rather
+than branch-bound. It had also been quietly violating this function's own documented contract --
+"never worse than the binary search it replaces".
+
+Reverting THAT CALL SITE ONLY. `intset_binary_search_contains` keeps its other callers and its own
+2.12x absent-heavy measurement (`b687c0b05`); those shapes were not re-measured and are not claimed
+either way. See the open question at the end.
+
+COMPETITIVE MEASUREMENT. `scripts/sinter_skew_headtohead.sh` (new), four arms in ONE invocation:
+fr before the fix, fr after, a byte-identical copy of "before" as the A/A null, and live Redis
+7.2.4. Servers and client each pinned to their own quiet core whose SMT sibling is also idle, core
+0 excluded, core assignment rotated every round, rounds forced to a multiple of the arm count.
+c=1 serial control, n=20000, 12 rounds. The benchmarked server ELF self-reported SHA-256
+eca61bf3a3c76c6aefe52e0d35bd9cf642b36932dc285ac6e3bdd522f4f05a43 for the fixed arm and
+42eabaacb8804718b32ad6b96b862c8cd9b1ba7ac09671560ac81fbd0092032c for the baseline arm.
+
+  A/A null    fr_A2/fr_A  median 0.9845  bootstrap 95% median CI [0.9687, 1.0029]  <- CONTAINS 1.0
+  A/B effect  fr_B /fr_A  median 1.4813  bootstrap 95% median CI [1.4417, 1.4940]  = +48.13%
+  COMPETITIVE fr_A /redis median 2.2433  bootstrap 95% median CI [2.2197, 2.2602]
+  COMPETITIVE fr_B /redis median 3.3047  bootstrap 95% median CI [3.2443, 3.3580]
+The effect's CI excludes 1.0 and clears the null's widest bound (3.13%) by more than an order of
+magnitude, and the two competitive CIs do not overlap. Absolute ops/s: 5,415 -> 8,034 against
+redis 2,422. The bootstrap median-CI gate determined the verdict, never CV; CV is not computed for
+this arm at all.
+
+THE FIRST VERSION OF THIS HARNESS MEASURED THE WRONG COMMAND, and the miss is the reusable part.
+It benchmarked SINTERCARD, the obvious choice for "intersection cost without a big reply".
+SINTERCARD never enters the changed function: it has its OWN membership loop calling
+`intset_binary_search_contains` directly. The only production caller of `intersect_sorted_i64` is
+`SetValue::retain_intersect`, reached by SINTER/SINTERSTORE. The SINTERCARD harness duly reported
++1.87%, inside its own null bound -- a "no result" that could not have been anything else, since
+the two binaries do not differ on that path. GREP THE CALLERS OF THE FUNCTION YOU CHANGED AND PICK
+A COMMAND THAT REACHES IT; a plausible-sounding command is not evidence that the diff is under the
+benchmark. Switching to SINTERSTORE (integer reply, so the intersection dominates) turned the same
+comparison from +1.87% into +48.13%.
+
+TWO MORE HARNESS TRAPS, recorded because each produced a confident wrong state before being caught:
+  * `set-max-intset-entries` defaults to 512, so a 500k integer set is NOT intset-encoded and the
+    skewed intset branch is never reached. The harness now raises it and ASSERTS
+    `object encoding == intset`, failing the run otherwise. It must be raised via CONFIG SET, not
+    argv: redis accepts `--set-max-intset-entries` as a flag and fr rejects it ("unknown
+    argument"), so the argv form starts redis happily and kills all three fr arms.
+  * seeding via one EVAL trips fr's per-script iteration cap, and because the cap fires after the
+    first loop the naive version left `big` populated and `small` EMPTY -- which benchmarks
+    beautifully and answers 0. Seeding is chunked, and every arm must return the expected
+    cardinality before any timing is believed.
+
+TEST COVERAGE ADDED. The unit test `intersect_sorted_i64_galloping_isomorphic_and_faster_galp1`
+only had a 100%-HIT skewed case, while the probe it exercises was justified on ABSENT-heavy
+corpora -- so a probe change could trade one regime for the other and the test would report the
+loss without ever showing the gain that paid for it. A disjoint skewed case is now measured
+alongside, with the corpus asserted actually disjoint. Post-fix the test passes 3/3 with
+hit-heavy 1.00-1.04x and disjoint 1.01-1.09x.
+
+GATES: fr-store lib suite 887 passed, 1 failed -- the failure is
+`zset_index_slice_treap_matches_linear_and_reports_ab_ratio`, a pre-existing marginal wall-clock
+ratio test (1.84x / 1.68x / 2.76x across three identical isolated runs against a `> 2.0` assert),
+tracked on the same bead and untouched by this change; rustfmt and clippy -D warnings clean.
+
+Retry predicate: do NOT restore the branchless probe at this call site without first measuring BOTH
+regimes at a large shape (>= 1M elements in the large array) and showing it beats std
+`binary_search` in each; the 1.16x that justified it originally did not hold here. The OPEN
+question this leaves, filed rather than assumed: SINTERCARD's own membership loop still calls
+`intset_binary_search_contains` on large intsets, which is the same probe on a plausibly similar
+shape, and it was NOT measured here. Measure it with this harness's SINTERCARD workload before
+concluding anything about it either way.

@@ -4091,9 +4091,28 @@ fn intersect_sorted_i64(a: &[i64], b: &[i64]) -> Vec<i64> {
         // top-of-tree nodes stay resident across all probes) — measured ~16x
         // slower. So keep the cache-warm full-array search the old code used.
         for &x in small {
-            // (CrimsonHawk) Branchless (cmov) full-array probe — same cache-warm search, no branch
-            // to mispredict on absent-heavy (disjoint) intersections. Byte-identical to `binary_search`.
-            if intset_binary_search_contains(large, x) {
+            // (frankenredis-6irj9) std `binary_search`, NOT the branchless
+            // `intset_binary_search_contains`. `0f510b69e` swapped this site to
+            // the branchless probe on the strength of a 1.16x disjoint
+            // measurement, and at this function's actual shape it loses in BOTH
+            // regimes -- measured on 20k ∩ 2M, three runs each, against the same
+            // `bin_search_retain` reference the test uses:
+            //     branchless   hit-heavy 0.78-0.80x   disjoint 0.75-0.83x
+            //     std          hit-heavy 0.98-1.00x   disjoint 0.99-1.01x
+            // The branchless probe has no early exit and pays an `imul` plus two
+            // `.min()` clamps per step, which costs more than the mispredicts it
+            // avoids once the array is large enough that the search is
+            // cache-miss-bound rather than branch-bound.
+            //
+            // This also restores the contract in this function's own doc comment
+            // -- "never worse than the binary search it replaces" -- which the
+            // branchless probe had been quietly violating.
+            //
+            // Scoped deliberately to THIS call site. `intset_binary_search_contains`
+            // keeps its other callers and its own 2.12x absent-heavy measurement
+            // (`b687c0b05`); those shapes were not re-measured here and are not
+            // claimed either way.
+            if large.binary_search(&x).is_ok() {
                 out.push(x);
             }
         }
@@ -60545,6 +60564,43 @@ mod tests {
         assert!(
             skew_score >= 0.85,
             "adaptive intersect regressed skewed case: {skew_score:.2}x"
+        );
+
+        // (frankenredis-6irj9) DISJOINT skewed case. The case above is 100%
+        // HITS, and the skewed branch's probe (`intset_binary_search_contains`,
+        // added by 0f510b69e) was justified and measured on ABSENT-heavy
+        // corpora -- 1.16x disjoint, 2.12x absent-heavy on the function itself.
+        // With only the hit-heavy case covered, a probe change could trade one
+        // regime for the other and the test would report the loss without ever
+        // showing the gain that paid for it. Both regimes are measured here so
+        // the trade is visible in one place.
+        //
+        // All of `small` lies strictly between `huge`'s entries (huge is even,
+        // small is odd) and spans the same range, so every probe misses and the
+        // misses are spread across the array rather than clustered at one end.
+        let dj_small: Vec<i64> = (0..20_000i64).map(|i| i * 200 + 1).collect();
+        let dj_huge: Vec<i64> = (0..2_000_000i64).map(|i| i * 2).collect();
+        let t4 = std::time::Instant::now();
+        let mut da = 0usize;
+        for _ in 0..skew_reps {
+            da = da.wrapping_add(bin_search_retain(&dj_small, &dj_huge).len());
+        }
+        let dj_old = t4.elapsed().as_nanos().max(1);
+        std::hint::black_box(da);
+        let t5 = std::time::Instant::now();
+        let mut db = 0usize;
+        for _ in 0..skew_reps {
+            db = db.wrapping_add(intersect_sorted_i64(&dj_small, &dj_huge).len());
+        }
+        let dj_new = t5.elapsed().as_nanos().max(1);
+        std::hint::black_box(db);
+        assert_eq!(da, db, "old/new disagree on disjoint skewed count");
+        assert_eq!(da, 0, "the disjoint corpus must actually be disjoint");
+        let dj_score = dj_old as f64 / dj_new as f64;
+        eprintln!("GALP1 disjoint 20k_int_2M: old={dj_old}ns new={dj_new}ns score={dj_score:.2}x");
+        assert!(
+            dj_score >= 0.85,
+            "adaptive intersect regressed disjoint skewed case: {dj_score:.2}x"
         );
     }
 
