@@ -28036,6 +28036,11 @@ impl Store {
             }
         }
         sink(XreadgroupHistEvent::RecordCount(records.len()));
+        // (frankenredis-dgz7i) Collect the SERVED, non-tombstone ids while the
+        // borrow of `entries`/`group_state` is still live; the PEL mutation below
+        // needs `&mut self`, so it cannot happen inside this loop. StreamId is
+        // Copy, so carrying the ids out costs nothing.
+        let mut delivered: Vec<StreamId> = Vec::new();
         for (id, fields) in &records {
             match fields {
                 Some(fields) => {
@@ -28044,8 +28049,43 @@ impl Store {
                         sink(XreadgroupHistEvent::Field(field));
                         sink(XreadgroupHistEvent::Field(value));
                     }
+                    delivered.push(*id);
                 }
                 None => sink(XreadgroupHistEvent::RecordStartNil(*id)),
+            }
+        }
+        drop(records);
+
+        // (frankenredis-dgz7i) This fast path claimed to mirror the generic
+        // `Store::xreadgroup` history path "side-for-side" but dropped its two
+        // MUTATIONS, keeping only the read side effects. Both are restored here.
+        //
+        // Measured vs redis 7.2.4 before the fix, walking one entry step by step:
+        //   deliver via '>'      redis count 1   fr 1
+        //   history re-read      redis count 2   fr 1   <-- diverges here
+        //   history re-read      redis count 3   fr 1
+        // XCLAIM / XAUTOCLAIM / explicit RETRYCOUNT all bumped correctly on fr, so
+        // the history read was the only leaking path -- and only because it is the
+        // one served by this borrow scan rather than by `xreadgroup`.
+        //
+        // 1. delivery_count / delivery_time, per SERVED entry whose underlying
+        //    stream entry still exists. Upstream streamReplyWithRangeFromConsumerPEL
+        //    does `nack->delivery_count++; nack->delivery_time = now`. Tombstoned
+        //    entries take upstream's `[id, NULL]` branch and are NOT touched, which
+        //    is why only `delivered` (the Some(fields) arm) is bumped here.
+        // 2. server.dirty, which upstream bumps once for a group history read
+        //    regardless of how many entries came back -- including zero -- so it is
+        //    unconditional here, matching the generic path's single Id-cursor bump.
+        self.dirty = self.dirty.saturating_add(1);
+        if !delivered.is_empty()
+            && let Some(groups) = self.stream_groups.get_mut(key)
+            && let Some(group_state) = groups.get_mut(group)
+        {
+            for id in &delivered {
+                if let Some(pending_entry) = group_state.pending.get_mut(id) {
+                    pending_entry.deliveries = pending_entry.deliveries.saturating_add(1);
+                    pending_entry.last_delivered_ms = now_ms;
+                }
             }
         }
     }
@@ -65887,6 +65927,78 @@ mod tests {
             .unwrap()
             .expect("group exists");
         assert_eq!(store.dirty, before + 1, "existing consumer + 1 claimed = 1");
+    }
+
+    #[test]
+    fn xreadgroup_history_borrow_scan_bumps_delivery_count_dgz7i() {
+        // (frankenredis-dgz7i) The BORROW-SCAN history path served the read but
+        // dropped both of the generic path's mutations: the per-entry PEL
+        // delivery_count/delivery_time bump and the single server.dirty bump. The
+        // existing borrow_scan test only compares OUTPUT against the clone path, so
+        // the missing side effects were invisible to it -- which is exactly how this
+        // survived. Measured vs redis 7.2.4 before the fix, one entry, step by step:
+        //   deliver via '>'   redis delivery_count 1   fr 1
+        //   history re-read   redis delivery_count 2   fr 1   <-- diverged
+        //   history re-read   redis delivery_count 3   fr 1
+        use crate::XreadgroupHistEvent;
+        let mut store = Store::new();
+        store
+            .xadd(b"s", (1, 1), &[(b"f".to_vec(), b"v".to_vec())], 0)
+            .unwrap();
+        assert!(store.xgroup_create(b"s", b"g", (0, 0), false, 0).unwrap());
+        store
+            .xreadgroup(
+                b"s",
+                b"g",
+                b"c1",
+                group_read_options(StreamGroupReadCursor::NewEntries, false, Some(9)),
+                0,
+            )
+            .unwrap()
+            .expect("group exists");
+
+        let count_of = |st: &Store| -> u64 {
+            st.stream_groups
+                .get(b"s".as_slice())
+                .and_then(|g| g.get(b"g".as_slice()))
+                .and_then(|gs| gs.pending.get(&(1, 1)))
+                .map(|p| p.deliveries)
+                .expect("entry must be pending after the '>' delivery")
+        };
+        assert_eq!(count_of(&store), 1, "'>' delivery seeds delivery_count = 1");
+        assert!(store.xreadgroup_history_eligible(b"s", b"g", b"c1"));
+
+        // Two history re-reads through the BORROW SCAN specifically.
+        for expected in [2u64, 3] {
+            let dirty_before = store.dirty;
+            let mut served = 0usize;
+            store.xreadgroup_history_borrow_scan(b"s", b"g", b"c1", (0, 0), Some(9), 5, |ev| {
+                if let XreadgroupHistEvent::RecordStart(..) = ev {
+                    served += 1;
+                }
+            });
+            assert_eq!(served, 1, "the entry must actually be served");
+            assert_eq!(
+                count_of(&store),
+                expected,
+                "each served history re-read must bump delivery_count like redis"
+            );
+            assert_eq!(
+                store.dirty,
+                dirty_before + 1,
+                "a synchronous group history serve bumps server.dirty once"
+            );
+        }
+
+        // A tombstoned entry is emitted as [id, nil] upstream and must NOT bump.
+        assert_eq!(store.xdel(b"s", &[(1, 1)], 5).unwrap(), 1);
+        let before = count_of(&store);
+        store.xreadgroup_history_borrow_scan(b"s", b"g", b"c1", (0, 0), Some(9), 6, |_| {});
+        assert_eq!(
+            count_of(&store),
+            before,
+            "a tombstoned entry takes redis's [id, NULL] branch and is not bumped"
+        );
     }
 
     #[test]
