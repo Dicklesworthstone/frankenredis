@@ -3104,6 +3104,11 @@ pub struct LuaState<'a> {
     /// every `eval_script` call since each script creates a fresh
     /// LuaState. (frankenredis-cxmsu)
     pending_error_value: Option<LuaValue>,
+    /// (frankenredis-a0wt5) Recycled `redis.call` argv buffer. Only ever holds
+    /// a CLEARED Vec between calls — the argument bytes are dropped as soon as
+    /// the call returns — so nothing observable survives; it exists purely to
+    /// keep one allocation per `redis.call` out of the hot loop.
+    argv_scratch: Vec<Vec<u8>>,
     /// True iff the pending_error_value came from an `error({err=STR})`
     /// unwrap (frankenredis-vkqn0). When the typed-error sentinel
     /// escapes uncaught at the top level, the rendering site prepends
@@ -3936,6 +3941,7 @@ impl<'a> LuaState<'a> {
             resp_version: 2,
             call_depth: 0,
             lua_frame_kinds: Vec::new(),
+            argv_scratch: Vec::new(),
             iterations: 0,
             current_line: 1,
             rng_seed,
@@ -10098,8 +10104,37 @@ impl<'a> LuaState<'a> {
         }
     }
 
+    /// (frankenredis-a0wt5) Thin wrapper owning the argv buffer's lifetime.
+    ///
+    /// The body below has four exits and `argv` outlives dispatch — it feeds
+    /// `record_script_monitor`, `command_may_propagate_from_script` and the
+    /// propagation path. Restoring the scratch at each exit would put a leak
+    /// (or worse, a wrong restore) on error paths that carry pinned
+    /// redis-parity semantics, so the take/restore lives here and happens
+    /// EXACTLY ONCE, whatever the body does.
+    ///
+    /// Re-entrancy is safe: a nested EVAL dispatches through `dispatch_argv`
+    /// and builds its own `LuaState`, so it never touches this scratch. The
+    /// buffer is moved out for the duration of the call, so a re-entrant path
+    /// that somehow reached the same state would find an empty scratch and
+    /// allocate, not alias.
     fn redis_call(
         &mut self,
+        args: &mut [LuaValue],
+        is_pcall: bool,
+    ) -> Result<Vec<LuaValue>, String> {
+        let mut argv = std::mem::take(&mut self.argv_scratch);
+        argv.clear();
+        let result = self.redis_call_with_argv(&mut argv, args, is_pcall);
+        // Drop the argument bytes now; keep only the outer buffer.
+        argv.clear();
+        self.argv_scratch = argv;
+        result
+    }
+
+    fn redis_call_with_argv(
+        &mut self,
+        argv: &mut Vec<Vec<u8>>,
         args: &mut [LuaValue],
         is_pcall: bool,
     ) -> Result<Vec<LuaValue>, String> {
@@ -10137,8 +10172,10 @@ impl<'a> LuaState<'a> {
             );
         }
 
-        // Build argv for dispatch
-        let mut argv: Vec<Vec<u8>> = Vec::with_capacity(args.len());
+        // Build argv for dispatch. The buffer arrives cleared from the wrapper
+        // and keeps its capacity across calls, so this reserve is a no-op once
+        // a script has settled on an argument count.
+        argv.reserve(args.len());
         for arg in args.iter_mut() {
             match arg.take_redis_arg() {
                 Ok(b) => argv.push(b),
@@ -10153,10 +10190,10 @@ impl<'a> LuaState<'a> {
         // afterward so the script's own reply to the client is unaffected.
         let saved_resp_version = self.store.dispatch_client_ctx.resp_protocol_version;
         self.store.dispatch_client_ctx.resp_protocol_version = self.resp_version;
-        let command_result = if let Some(intercepted) = script_command_intercept(&argv) {
+        let command_result = if let Some(intercepted) = script_command_intercept(argv) {
             intercepted
         } else {
-            match dispatch_argv(&argv, self.store, self.now_ms) {
+            match dispatch_argv(argv, self.store, self.now_ms) {
                 Ok(frame) => Ok(frame),
                 Err(e) => {
                     let err_msg = match e.to_resp() {
@@ -10186,15 +10223,15 @@ impl<'a> LuaState<'a> {
                 // post-exec point, matching redis) and drained by the runtime
                 // after the EVAL command's own monitor line; no-op when no
                 // MONITOR clients are attached.
-                self.store.record_script_monitor(&argv);
+                self.store.record_script_monitor(argv);
                 let dirty_after = self.store.dirty;
-                if dirty_after > dirty_before || command_may_propagate_from_script(&argv) {
+                if dirty_after > dirty_before || command_may_propagate_from_script(argv) {
                     // (frankenredis-x1225) Record the DETERMINISTIC effect form so
                     // a script's XADD `*` / SPOP / INCRBYFLOAT (etc.) propagates a
                     // concrete command, not the non-deterministic one — otherwise
                     // replicas/AOF replay regenerate ids/randomness and diverge.
                     let effect = crate::rewrite_effect_command_for_propagation(
-                        &argv,
+                        argv,
                         &frame,
                         self.store,
                         self.now_ms,
@@ -10229,7 +10266,7 @@ impl<'a> LuaState<'a> {
                     };
                 }
                 Ok(vec![resp_to_lua_command_result(
-                    &argv,
+                    argv,
                     frame,
                     self.resp_version == 3,
                 )])
