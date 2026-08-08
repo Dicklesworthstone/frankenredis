@@ -66554,7 +66554,12 @@ mod tests {
             -1e17,
             999_999_999_999.0,
             // non-integer / out-of-range → must take the string fallback
-            3.14,
+            // (frankenredis-a94ys) 3.15, not 3.14: clippy::approx_constant fires on
+            // 3.14 and made `cargo clippy -p fr-store --all-targets -- -D warnings`
+            // red, so the crate had no usable clippy signal. Only "is a non-integer
+            // float" matters to this fixture, so the exact value is immaterial and
+            // moving off the PI approximation costs the test nothing.
+            3.15,
             -2.5,
             0.1,
             0.000001,
