@@ -31,7 +31,7 @@ def main():
     fp = int(sys.argv[2]) if len(sys.argv) > 2 else 16400
     od, fr = conn(op), conn(fp)
     for s in (od, fr):
-        cmd(s, "FLUSHALL")
+        assert_ok(cmd(s, "FLUSHALL"), "FLUSHALL")
     fails = []
 
     def chk(label, *c):
@@ -47,11 +47,11 @@ def main():
     for sc in ["1.5", "1e3", "inf", "nan", "1.5x", "", "0x1p4", "+inf", "-inf"]:
         for s in (od, fr):
             cmd(s, "DEL", "z2")
-            cmd(s, "ZADD", "z2", "1", "m")
+            assert_seed(cmd(s, "ZADD", "z2", "1", "m"), 1, "ZADD z2 seed")
         chk(f"zincrby[{sc!r}]", "ZINCRBY", "z2", sc, "m")
         for s in (od, fr):
             cmd(s, "DEL", "fl")
-            cmd(s, "SET", "fl", "1")
+            assert_ok(cmd(s, "SET", "fl", "1"), "SET fl seed")
         chk(f"incrbyfloat[{sc!r}]", "INCRBYFLOAT", "fl", sc)
 
     print("=" * 60)

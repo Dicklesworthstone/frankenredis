@@ -46,10 +46,10 @@ def main():
     od, fr = conn(op), conn(fp)
     fails = []
     for label, v in values():
-        cmd(od, "FLUSHALL")
-        cmd(fr, "FLUSHALL")
-        cmd(od, "SET", "k", v)
-        cmd(fr, "SET", "k", v)
+        assert_ok(cmd(od, "FLUSHALL"), "redis FLUSHALL")
+        assert_ok(cmd(fr, "FLUSHALL"), "fr FLUSHALL")
+        assert_ok(cmd(od, "SET", "k", v), f"redis SET k ({len(v)}B)")
+        assert_ok(cmd(fr, "SET", "k", v), f"fr SET k ({len(v)}B)")
         do, df = cmd(od, "DUMP", "k"), cmd(fr, "DUMP", "k")
         if do != df:
             fails.append(f"{label} (len {len(v)}): DUMP bytes differ redis={do!r} fr={df!r}")

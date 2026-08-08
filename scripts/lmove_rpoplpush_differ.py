@@ -25,11 +25,11 @@ def main():
 
     def setup():
         for s in (od, fr):
-            cmd(s, "FLUSHALL")
-            cmd(s, "RPUSH", "src", "a", "b", "c")
-            cmd(s, "RPUSH", "dst", "x", "y")
-            cmd(s, "RPUSH", "one", "solo")
-            cmd(s, "SET", "str", "v")
+            assert_ok(cmd(s, "FLUSHALL"), "FLUSHALL")
+            assert_seed(cmd(s, "RPUSH", "src", "a", "b", "c"), 3, "RPUSH src")
+            assert_seed(cmd(s, "RPUSH", "dst", "x", "y"), 2, "RPUSH dst")
+            assert_seed(cmd(s, "RPUSH", "one", "solo"), 1, "RPUSH one")
+            assert_ok(cmd(s, "SET", "str", "v"), "SET str")
 
     def chk(label, *c):
         ro, rf = cmd(od, *c), cmd(fr, *c)

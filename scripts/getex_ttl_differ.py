@@ -14,7 +14,7 @@ Usage: getex_ttl_differ.py <oracle_port> <fr_port>
 """
 import sys
 
-from _respread import assert_ok, cmd, conn
+from _respread import assert_ok, assert_seed, cmd, conn
 
 EXAT = "4102444800"        # 2100-01-01 in seconds (stable absolute)
 EXAT2 = "4102444900"

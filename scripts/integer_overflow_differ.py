@@ -38,7 +38,7 @@ def main():
             cmd(s, "SET", k, v)
 
     for s in (od, fr):
-        cmd(s, "FLUSHALL")
+        assert_ok(cmd(s, "FLUSHALL"), "FLUSHALL")
 
     setk("a", IMAX); chk("incr_overflow", "INCR", "a")
     setk("b", IMIN); chk("decr_overflow", "DECR", "b")
@@ -77,7 +77,7 @@ def main():
     # APPEND forces raw encoding off an int-encoded key
     for s in (od, fr):
         cmd(s, "DEL", "ap")
-        cmd(s, "SET", "ap", "12345")
+        assert_ok(cmd(s, "SET", "ap", "12345"), "SET ap")
     chk("append_int", "APPEND", "ap", "6")
     chk("append_int_enc", "OBJECT", "ENCODING", "ap")
 

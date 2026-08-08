@@ -47,13 +47,13 @@ def main():
     fp = int(sys.argv[2]) if len(sys.argv) > 2 else 16400
     od, fr = conn(op), conn(fp)
     for s in (od, fr):
-        cmd(s, "FLUSHALL")
-        cmd(s, "SADD", "s1", "a", "b", "c", "d")
-        cmd(s, "SADD", "s2", "b", "c", "d", "e")
-        cmd(s, "SADD", "s3", "c", "d", "f")
-        cmd(s, "ZADD", "z1", "1", "a", "2", "b", "3", "c", "4", "d")
-        cmd(s, "ZADD", "z2", "1", "b", "2", "c", "3", "d", "4", "e")
-        cmd(s, "SET", "str", "x")
+        assert_ok(cmd(s, "FLUSHALL"), "FLUSHALL")
+        assert_seed(cmd(s, "SADD", "s1", "a", "b", "c", "d"), 4, "SADD s1")
+        assert_seed(cmd(s, "SADD", "s2", "b", "c", "d", "e"), 4, "SADD s2")
+        assert_seed(cmd(s, "SADD", "s3", "c", "d", "f"), 3, "SADD s3")
+        assert_seed(cmd(s, "ZADD", "z1", "1", "a", "2", "b", "3", "c", "4", "d"), 4, "ZADD z1")
+        assert_seed(cmd(s, "ZADD", "z2", "1", "b", "2", "c", "3", "d", "4", "e"), 4, "ZADD z2")
+        assert_ok(cmd(s, "SET", "str", "x"), "SET str")
     fails = []
     for argv in CASES:
         ro, rf = cmd(od, *argv), cmd(fr, *argv)
