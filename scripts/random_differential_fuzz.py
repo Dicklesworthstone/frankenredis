@@ -57,7 +57,17 @@ KEYS = ["k1", "k2", "k3", "h1", "l1", "s1", "z1", "nope"]
 INTS = ["0", "1", "-1", "2", "5", "-5", "10", "100", "-100", "9223372036854775807",
         "-9223372036854775808", "9999999999999999999", "3.14", "-0", "+1", " 1", "1 ", "0x10", "1e3"]
 VALS = ["", "a", "abc", "hello world", "foo\x00bar", "\xff\xfe", "123", "-1", "3.14",
-        "नमस्ते", "  ", "\r\n", "x" * 40]
+        # (frankenredis-dcgff) BYTES, not str. This list mixes two kinds of fixture and
+        # they need opposite encodings. "foo\x00bar" / "\xff\xfe" are \xNN BYTE escapes
+        # and must stay str so enc()'s latin-1 maps each to the single byte it names
+        # (the r9ei8 correction). This one is real Devanagari TEXT, which has NO latin-1
+        # encoding at all, so as a str it made enc() raise — and the handler treated the
+        # raise as a connection error and stopped the run at op 77 of 8000 while still
+        # exiting 0. Pre-encoding it utf-8 here is what a real client sends and lets the
+        # latin-1 branch pass it through untouched. Same deliberate exception that
+        # _respread.encode_arg documents.
+        "नमस्ते".encode("utf-8"),
+        "  ", "\r\n", "x" * 40]
 FIELDS = ["f1", "f2", "f3", "fx"]
 
 # (cmd, arg-generators) — generators draw from pools. Reads + light writes.
@@ -133,7 +143,15 @@ def main():
             fr.sendall(enc(args)); a = read_reply(fr)
             red.sendall(enc(args)); b = read_reply(red)
         except Exception as e:
-            print("conn error", e, args); break
+            # (frankenredis-dcgff) An aborted run must FAIL, never fall through to the
+            # summary and exit 0 — that is how this fuzzer spent every sweep reporting
+            # "diffs=0" after covering 77 of 8000 ops. The cause is also no longer
+            # pre-judged as a connection problem: the original "conn error" label hid a
+            # CLIENT-side encoding bug for as long as the fixture has existed.
+            print(f"ABORTED at op {nrun} of {N}: {type(e).__name__}: {e}")
+            print(f"  while sending: {args!r}")
+            print("  a run that stopped early is NOT a clean run; failing loudly")
+            sys.exit(2)
         nrun += 1
         if name in RANDOMISH or name in TIMING:
             if kind(a) != kind(b):
