@@ -26050,3 +26050,61 @@ this repository's gates. No timing claim is made in this entry.
   Profiling required `kernel.perf_event_paranoid` 4->1 and `kernel.kptr_restrict`
   1->0 (perf returns zero-sized data at paranoid=4); both were recorded and
   REVERTED to 4 and 1 after the run.
+
+## 2026-08-08 CrimsonHawk: REJECT (premise) — the small-HASH listpack-attach lever (b1o02) is a net LOSS above ~1.03 reads per RESTORE; fr's eager decode already buys a 2.81x per-read advantage. Closes b1o02.
+
+b1o02 proposed keeping the raw RDB listpack verbatim as the in-memory small-hash repr (zero decode on
+RESTORE, zero encode on DUMP) with accessors doing "O(n) listpack scan exactly like redis's
+lpFind/lpGet" — i.e. redis's shallow attach. Its premise was a RESTORE-ISOLATION number (HASH 0.57x,
+per-type DEBUG RELOAD), which puts it squarely under the closing instruction of the 2026-07-23
+FoggyOrchid REJECT at :5478: "Do not re-file the RESTORE-isolation gap as a loss; measure
+RESTORE+read." GoldenHeron's 2026-08-08 preflight adjudication blocked implementation pending exactly
+that measurement on SMALL listpack hashes, where fr's read advantage was unmeasured. This is it.
+
+Measured on trj (threadripperje, quiescent: loadavg 0.15, both engines pinned to disjoint cores 40/41),
+fr release-perf from main 205a59aa7 vs vendored redis 7.2.4 (malloc=jemalloc-5.3.0, matching the
+reference build). 64-field hash, 16B values; BOTH engines report OBJECT ENCODING listpack and their
+DUMP payloads are BYTE-IDENTICAL (357 bytes), and the HGETALL reply is byte-identical in size (2182),
+so the two arms do the same work. Fixed-WORK window of 40,000 RESTOREs, 3 reps, engine order
+alternated per rep, `perf stat -e instructions:u` attached per server pid and SIGINT'd once the last
+expected reply byte is drained. Harness: `scripts/hash_restore_read_premise_probe.py`.
+
+  reads/RESTORE | fr instr/op | redis instr/op | fr/redis instr | fr/redis wall
+  --------------|-------------|----------------|----------------|---------------
+       0        |    67,487   |     13,956     |    4.8355x     |    2.4299x
+       1        |    96,111   |     94,335     |    1.0188x     |    1.1949x
+       2        |   124,735   |    175,124     |    0.7123x     |    0.8657x
+       4        |   181,982   |    336,711     |    0.5405x     |    0.6490x
+
+instr/op reproduced across independent runs to ~0.001% (RESTORE-only fr 67,487.0 then 67,486.6).
+
+THE DECIDING QUANTITY IS THE MARGINAL COST OF A READ, and it is the opposite of the bead's premise:
+  fr    96,111 - 67,487 = 28,624 instructions per HGETALL
+  redis 94,335 - 13,956 = 80,379 instructions per HGETALL
+redis pays 2.81x MORE per read, because it walks the listpack while fr reads its decoded map. That is
+the same eager-decode-buys-O(1)-reads effect FoggyOrchid measured for lists, now confirmed for small
+listpack hashes.
+
+BREAK-EVEN: the lever can save at most 67,487 - 13,956 = 53,531 instructions per RESTORE, and costs
+80,379 - 28,624 = 51,755 per read. Net win only when reads/RESTORE < 53,531/51,755 = **1.034**. The
+measured crossover sits between the 1-read and 2-read rows, as predicted; the 2-read point was
+predicted at 124,735 before it was run and measured 124,734.5.
+
+WHY THIS IS A REJECT AND NOT A SCOPE REDUCTION: the lever's blast radius is EVERY small hash, because
+every read accessor (HGET/HEXISTS/HSTRLEN/HKEYS/HVALS/HGETALL/HSCAN) becomes an O(n) listpack scan and
+every write must promote first. It would surrender a measured 2.81x per-read advantage across all
+small hashes to speed up the restore-then-never-read path (MIGRATE / DEBUG RELOAD / bulk-load) alone,
+and it is a multi-day, all-or-nothing change carrying OBJECT ENCODING / used_memory / DEBUG DIGEST /
+HSCAN byte-exactness risk. The trade is only positive below ~1 read per RESTORE.
+
+CONSERVATIVE IN THE LEVER'S FAVOUR: HGETALL is the read that flatters redis most, since it must touch
+every field anyway. A point read (HGET) is O(1) for fr and an O(n) scan for redis, so the per-read gap
+— and therefore the reject — widens for the more common access pattern. Measured at 64 fields x 16B;
+the gap grows with field count.
+
+RETRY PREDICATE: re-open only with a measured workload profile showing fewer than ~1 read per RESTORE
+on small hashes in a real mixed job. The RESTORE-isolation number alone is not sufficient and must not
+be re-filed as a loss. If a pure bulk-load path (RDB load / MIGRATE) is ever shown to dominate, scope
+any future lever to THAT ingest path only, never to the shared hash accessors.
+
+Host state: `kernel.perf_event_paranoid` 4->1 for the run and RESTORED to 4 after; verified.
