@@ -26,10 +26,10 @@ class Conn:
         self.s.settimeout(2)
         self.buf = b""
 
-    def _fill(self, block=True):
+    def _fill(self, block=True, timeout=0.06):
         try:
             if not block:
-                self.s.settimeout(0.06)
+                self.s.settimeout(timeout)
             c = self.s.recv(65536)
             if not c:
                 raise EOFError("closed")
@@ -84,12 +84,30 @@ class Conn:
         self.s.sendall(out)
         return self._parse()
 
+    # Quiet-period budgets for the drain below. The loop can only conclude "no more
+    # frames are coming" by waiting, so this timeout is paid on EVERY drain — twice
+    # per iteration (oracle + fr). At the old flat 0.06 that was 120ms/iter, which
+    # with the 30ms settle made 0.152 s/iter and put the registered 3000 iterations
+    # at ~456s against parity_suite's 180s run_gate cap: the suite never saw this
+    # gate's verdict, it killed it. (frankenredis-1zpr7)
+    #
+    # The budget is ADAPTIVE rather than simply smaller, because "I saw nothing" is
+    # exactly the answer that must not be rushed: if a short wait made BOTH engines
+    # miss the same straggler, they would agree on the empty set and the gate would
+    # pass having observed nothing — the false-PASS class tesrb existed to remove.
+    # So the full budget is still paid whenever we have seen NO event yet; only the
+    # already-have-events case, where the question is merely "is there one more",
+    # takes the short poll.
+    QUIET_EMPTY = 0.06
+    QUIET_AFTER_EVENT = 0.006
+
     def drain_pmessages(self):
         """Collect all pending pmessage frames (best-effort, ~timeout-bounded)."""
         msgs = []
         # ensure at least one short wait so async pushes arrive
         while True:
-            if b"\r\n" not in self.buf and not self._fill(block=False):
+            quiet = self.QUIET_AFTER_EVENT if msgs else self.QUIET_EMPTY
+            if b"\r\n" not in self.buf and not self._fill(block=False, timeout=quiet):
                 break
             # parse one frame if a full one is buffered
             try:
@@ -97,7 +115,10 @@ class Conn:
                 frame = self._parse_nonblock()
             except _Incomplete:
                 self.buf = save
-                if not self._fill(block=False):
+                # Keeps the FULL budget deliberately: a frame is already mid-flight
+                # (split across TCP segments), so the remaining bytes are known to be
+                # coming and cutting this short would truncate a real event.
+                if not self._fill(block=False, timeout=self.QUIET_EMPTY):
                     break
                 continue
             if frame is None:

@@ -25965,3 +25965,88 @@ this repository's gates. No timing claim is made in this entry.
   clause, complete order cycles, zero-lost non-zero-self named profile, >=90%
   saturation, full-response byte checking, and pre- and post-measurement
   host-wide quiescence. Host-specific: 8-core `vaes=false` worker.
+## 2026-08-08 GoldenHeron (cc/MEASURE): PROFILE REJECT — the allocator premise on the pipeline=16 path is refuted; per-request heap allocation is 0.11-0.18% self, not 58% (`frankenredis-gu5nf`)
+
+- **Ledger admission and prior-row adjudication.** `check-candidate allocator
+  "per-request heap allocation" arena "slab reuse"` exits 2, so every matching row
+  was read by hand before proceeding. All of them are COMPETITIVE KEEP rows dated
+  2026-07-29 (oboc2 KEYS, x0wum ZINTERCARD, SINTERSTORE, SDIFFSTORE, HGETALL,
+  SUNIONSTORE, BITCOUNT, PFCOUNT, PFMERGE, HSCAN) whose only match is the word
+  "allocator" inside their boilerplate retry predicates — "rerun after changes to
+  ... allocator, kernel, harness, or release codegen". **None of them measures an
+  allocator lever**, so none adjudicates this candidate; the block is a substring
+  match, not covered ground. No prior row states an allocator self-time on the P16
+  path. Production remains untouched by this entry: no code changed.
+- **Counted mechanism, not a timing verdict.** This row is decided by a counted
+  profile, which is the alternative the entry gate accepts in place of a
+  same-invocation A/A bootstrap CI. Host `thinkstation1`, Linux
+  `6.17.0-41-generic`, 64 cores. Vendored `redis-benchmark 7.2.4` ELF SHA-256
+  **`8931ebb4de7ea5ae700bf4cf866ad246535743496318ad4e19b46af1c58d7a0b`** drove a
+  release FrankenRedis pinned to core 40 with the client pinned to disjoint cores
+  44-51, `-P 16 -c 50 --threads 4`. The server self-reported its executing image via
+  `/proc/<pid>/exe` before measurement: ELF SHA-256
+  **`9ae2b2fb365e31a6a0e6d863a085d17210f2a6f033c31a556bbea702b7a9befc`**
+  (`target/release/frankenredis`, confirmed current with HEAD — no `.rs` newer than
+  the binary; the release profile leaves it **not stripped**, so symbols resolve
+  without `release-perf`). A raw-socket error probe preceded each run — `SET` -> `+OK`,
+  `GET` -> `$-1` — because `redis-benchmark` counts an ERROR reply as a completed
+  request, so a refused command would read as throughput. `perf record -F 997`,
+  60s SET / 45s GET at steady state, **0 lost samples** (3K and 2K samples).
+- **The premise, measured.** Share of on-CPU samples, categorized by what each frame
+  actually is:
+
+  | category | SET | GET |
+  |---|---|---|
+  | kernel: network / syscall / sched | 79.58% | 83.44% |
+  | FrankenRedis user code | 15.20% | 11.79% |
+  | kernel slab/skb buffer mgmt (NOT fr's heap) | 3.19% | 3.08% |
+  | libc | 2.05% | 1.45% |
+  | **user heap allocator (mimalloc/rust/libc)** | **0.11%** | **0.18%** |
+
+  The complete set of user-heap-allocator frames present is
+  `mi_theap_malloc_aligned` 0.050%, `mi_malloc_aligned` 0.030%, `mi_free` 0.030%
+  (SET); `mi_theap_malloc_aligned` 0.090%, `mi_free` 0.050%,
+  `_mi_page_malloc_zero` 0.040% (GET). The bead's target — "drive per-request heap
+  allocation toward zero" — therefore has an **Amdahl elimination ceiling of
+  1.0011x (SET) / 1.0018x (GET)**, against a claimed premise of 58%.
+  **Beware the naive grep:** counting every frame whose text contains `alloc`
+  reports 3.36%, because it sweeps in kernel skb/slab frees and
+  `HashMap<alloc::boxed::Box<[u8]>, fr_store::Entry, ..>::get_mut`, which is a hash
+  LOOKUP whose generic parameter merely names `alloc::`. That miscount is how a
+  0.11% surface can be mistaken for a lever.
+- **Why the premise was true when filed.** The bead is dated 2026-06-02. Since then
+  mimalloc became the DEFAULT global allocator (`crates/fr-server/Cargo.toml:33`,
+  whose own comment records "mimalloc by default: 63.6% vs 36.5% geomean parity,
+  70x better p99 tails"). The allocator work this bead asks for has effectively
+  already shipped as an allocator swap, which is why the remaining surface is a
+  rounding error. Where the time actually is: 79.6-83.4% kernel, dominated by the
+  TCP/epoll path (`process_backlog`, `tcp_v4_rcv`, `tcp_clean_rtx_queue`,
+  `ep_poll_callback`, `_copy_to_iter`) plus 5.9% netfilter (`nf_conntrack` +
+  `nf_tables`), which is host firewall overhead on loopback and not FrankenRedis.
+  Any further P16 SET/GET lever is a **syscall** lever, not an allocation lever.
+- **NO COMPETITIVE RATIO IS CLAIMED — both attempts had an invalid null.** Reported
+  as harness failures rather than as numbers, per the null-control rule that a null
+  outside the 2% gross-bias guard is a harness bug and not noise. (1) fr fixed to
+  core 40 versus Redis on core 41, `--io-threads 1`, error-probed: null median
+  **0.9772 — FAILS** the guard; cause identified as core-40-vs-41 asymmetry carried
+  straight into the ratio. That attempt was independently invalid a second way:
+  `-n 1500000` made each run ~1.2s, and `redis-benchmark`'s 250ms tick quantized
+  arms to identical repeated rps (fr 1199041, redis 998668 recurring). (2) Four fr
+  and two Redis, two per core, every ratio the geometric mean over both core
+  assignments so core identity cancels exactly, `-n 12000000` (~10s/run), null built
+  from four DISTINCT fr processes so it stays non-degenerate: null median
+  **0.9467 — still FAILS**; the residual is measurement ORDER, not core identity
+  (first-measured arms in each round read slow). Competitive medians of ~1.14-1.20
+  were observed in both and are **withheld** as inadmissible. CV is provenance only
+  and never a gate (attempt 2: null 1.77%, competitive 2.26%).
+- **Retry predicate.** Reopen the allocator clause of `frankenredis-gu5nf` ONLY if
+  FrankenRedis stops defaulting to mimalloc, or a fresh zero-lost P16 profile that
+  records the executing ELF SHA-256 shows user-heap-allocator frames above **5%
+  self**. Reopen for any reason after changes to the global allocator selection,
+  `fr-server`'s allocator feature flags, the P16 read/parse/dispatch path, Redis
+  version, kernel, or release codegen. A competitive ratio on this path additionally
+  requires a harness whose A/A null median lands inside `[0.98, 1.02]` — which
+  requires balancing measurement ORDER across rounds, not only core assignment.
+  Profiling required `kernel.perf_event_paranoid` 4->1 and `kernel.kptr_restrict`
+  1->0 (perf returns zero-sized data at paranoid=4); both were recorded and
+  REVERTED to 4 and 1 after the run.

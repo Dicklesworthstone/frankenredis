@@ -16,10 +16,14 @@ Two gate classes are run:
       flag_error_edge_gate (flag-conflict / error-order / encoding boundaries)
 
 Usage: parity_suite.py <redis-server-bin> <fr-bin>
-Both servers are launched with --enable-debug-command; the redis oracle is
-started from a clean cwd so it never loads stale dump.rdb / appendonly files.
+Both servers are launched with --enable-debug-command, each in a directory created
+fresh by mkdtemp for that run, so neither can load a stale dump.rdb / appendonly
+file. This used to say "a clean cwd" while actually passing cwd="/tmp", which is
+shared and accumulates dumps -- and that was not hypothetical: a /tmp/dump.rdb
+carrying two Lua FUNCTION libraries made resp3_reply_type_gate report two
+divergences that belonged to the oracle, not to fr (frankenredis-1zpr7).
 """
-import sys, os, time, socket, subprocess
+import sys, os, time, socket, subprocess, tempfile
 
 REDIS_BIN = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "legacy_redis_code/redis/src/redis-server")
 FR_BIN = os.path.abspath(sys.argv[2] if len(sys.argv) > 2 else "/tmp/fr_rdb")
@@ -289,6 +293,19 @@ PORT_BASED = [
     ("fuzz_untrodden_differ.py", [str(ORACLE_PORT), str(FR_PORT), "--seed", "9001", "--iters", "1200"]),
 ]
 
+# Per-gate extra flags for ARGPARSE_BASED gates, for the ones whose DEFAULTS do not
+# fit run_gate()'s 180s cap. A gate that exceeds the cap is not failing and not
+# passing -- it is being KILLED, and "TIMEOUT" reads as flake rather than as
+# no-coverage, which is strictly worse than a red gate. State the measured budget
+# here so the next person can see what was chosen and why. (frankenredis-1zpr7)
+ARGPARSE_EXTRA = {
+    # Default --iters 3000 measured 352s against the 180s cap, so the suite had
+    # NEVER seen this gate's verdict. 1000 iters measures 115.7s (reproduced twice),
+    # leaving ~64s headroom. Raise it again if run_gate's cap rises or the drain
+    # gets a delivery barrier instead of a quiet-period timeout (frankenredis-2p8kx).
+    "keyspace_notif_differ.py": ["--iters", "1000"],
+}
+
 # Older differs use argparse flags: --oracle <port> --fr <port>
 ARGPARSE_BASED = [
     "client_kill_differ.py",
@@ -337,13 +354,26 @@ def main():
     os.environ["ORACLE_PORT"] = str(ORACLE_PORT)
     os.environ["FR_PORT"] = str(FR_PORT)
     try:
+        # A FRESHLY CREATED directory, not /tmp. This block used to pass cwd="/tmp"
+        # and the docstring claimed the oracle "is started from a clean cwd so it
+        # never loads stale dump.rdb" -- but /tmp is shared and accumulates dumps,
+        # so the claim was false and the contamination was real and observed:
+        # /tmp/dump.rdb held the `ratom` and `goodlib` Lua libraries left by
+        # function_load_compile_error_differ, redis restores FUNCTION libraries from
+        # RDB at startup, and resp3_reply_type_gate then reported 2 divergences --
+        # FUNCTION STATS libraries_count 2 vs 0 and FUNCTION LIST 2 entries vs empty.
+        # Those were the ORACLE carrying state, not an fr bug: with a clean cwd the
+        # gate passes. mkdtemp per run makes the docstring's promise actually true.
+        # (frankenredis-1zpr7)
+        oracle_cwd = tempfile.mkdtemp(prefix="parity-oracle-")
+        fr_cwd = tempfile.mkdtemp(prefix="parity-fr-")
         procs.append(subprocess.Popen(
             [REDIS_BIN, "--port", str(ORACLE_PORT), "--save", "", "--appendonly", "no",
              "--enable-debug-command", "yes"],
-            cwd="/tmp", stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+            cwd=oracle_cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
         procs.append(subprocess.Popen(
             [FR_BIN, "--port", str(FR_PORT), "--enable-debug-command", "yes"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+            cwd=fr_cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
         pair_ok = wait_up(ORACLE_PORT) and wait_up(FR_PORT)
         # Backstop health check: confirm the oracle we reached is a real redis
         # 7.2.4 (a wedged/stale/wrong server answers PING but reports a tiny
@@ -378,7 +408,8 @@ def main():
             if not pair_ok:
                 results.append((name, False, "fr/redis pair did not start"))
                 continue
-            ok, tail = run_gate(name, ["--oracle", str(ORACLE_PORT), "--fr", str(FR_PORT)])
+            ok, tail = run_gate(name, ["--oracle", str(ORACLE_PORT), "--fr", str(FR_PORT)]
+                                + ARGPARSE_EXTRA.get(name, []))
             results.append((name, ok, tail))
     finally:
         for p in procs:
