@@ -10283,7 +10283,57 @@ fn lua_format_error_reply_payload(input: &[u8]) -> Vec<u8> {
     out
 }
 
+/// (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0) EXHAUSTIVE list of
+/// the `argv[0]` values `script_command_intercept_chain` can claim.
+///
+/// This is a correctness-critical enumeration: a command missing here would
+/// stop being intercepted. `RESET` is deliberately absent — it is matched at
+/// `argv[2]` inside `ACL LOG RESET`, not as a command. `PUBLISH`/`SPUBLISH` are
+/// likewise absent: they belong to `command_may_propagate_from_script`, which is
+/// a separate check.
+const SCRIPT_INTERCEPT_COMMANDS: [&[u8]; 9] = [
+    b"MULTI", b"EXEC", b"DISCARD", b"WATCH", b"UNWATCH", b"ACL", b"AUTH", b"HELLO", b"SYNC",
+];
+
+/// One bit of the intercept pre-filter, keyed on the uppercased first byte and
+/// the length. `eq_ignore_ascii_case` already requires equal lengths, so any
+/// command the chain would claim necessarily lands on a set bit.
+const fn script_intercept_bit(first_upper: u8, len: usize) -> u64 {
+    1u64 << (((first_upper as u64) ^ ((len as u64) << 3)) & 63)
+}
+
+const SCRIPT_INTERCEPT_FILTER: u64 = {
+    let mut bits = 0u64;
+    let mut index = 0;
+    while index < SCRIPT_INTERCEPT_COMMANDS.len() {
+        let command = SCRIPT_INTERCEPT_COMMANDS[index];
+        bits |= script_intercept_bit(command[0], command.len());
+        index += 1;
+    }
+    bits
+};
+
+/// Cheap conservative reject. A CLEAR bit proves the chain cannot claim this
+/// command; a set bit falls through to the real chain, so collisions only cost
+/// a little work and can never change behaviour.
+fn maybe_script_intercepted(command: &[u8]) -> bool {
+    let Some(&first) = command.first() else {
+        return false;
+    };
+    SCRIPT_INTERCEPT_FILTER & script_intercept_bit(first.to_ascii_uppercase(), command.len()) != 0
+}
+
 fn script_command_intercept(argv: &[Vec<u8>]) -> Option<Result<RespFrame, String>> {
+    // Every `redis.call` walked all five predicates -- roughly ten
+    // `eq_ignore_ascii_case` probes -- to learn that GET is not MULTI. One
+    // masked test now rejects the whole chain for ordinary data commands.
+    if !maybe_script_intercepted(argv.first()?) {
+        return None;
+    }
+    script_command_intercept_chain(argv)
+}
+
+fn script_command_intercept_chain(argv: &[Vec<u8>]) -> Option<Result<RespFrame, String>> {
     transaction_control_script_result(argv)
         .or_else(|| acl_script_result(argv))
         .or_else(|| auth_script_result(argv))
@@ -14015,6 +14065,78 @@ mod tests {
         compile_check, eval_script, json_to_lua_value, lua_base_globals_template, lua_raw_equal,
         lua_test_live_tables, lua_value_to_json, overlay_filter_bit,
     };
+
+    /// (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0) The intercept
+    /// pre-filter is only sound if it never rejects a command the chain would
+    /// have claimed. Assert the FILTERED and UNFILTERED paths agree, rather
+    /// than asserting the filter looks right.
+    #[test]
+    fn intercept_filter_agrees_with_the_unfiltered_chain() {
+        // INDEPENDENTLY hardcoded -- deliberately NOT derived from
+        // SCRIPT_INTERCEPT_COMMANDS. Deriving the corpus from the list under
+        // test makes the test tautological: dropping an entry from the list
+        // would also drop it from the corpus and the test would still pass.
+        // Verified by mutation: removing "SYNC" from the const must fail this.
+        let intercepted = [
+            "MULTI", "EXEC", "DISCARD", "WATCH", "UNWATCH", "ACL", "AUTH", "HELLO", "SYNC",
+        ];
+        let mut corpus: Vec<Vec<u8>> = Vec::new();
+        for command in intercepted {
+            let upper = command.as_bytes().to_vec();
+            let lower = command.to_ascii_lowercase().into_bytes();
+            let mut mixed = upper.clone();
+            if let Some(first) = mixed.first_mut() {
+                *first = first.to_ascii_lowercase();
+            }
+            corpus.extend([upper, lower, mixed]);
+        }
+        // Ordinary data commands, near-misses, and edge shapes.
+        for extra in [
+            "GET", "SET", "INCR", "HSET", "HGET", "LPUSH", "LPOP", "DEL", "PUBLISH", "SPUBLISH",
+            "RESET", "SYNCX", "SYN", "HELL", "HELLOO", "AC", "ACLX", "WATC", "WATCHX", "MULT",
+            "MULTIX", "EXECX", "", "A", "x", "0",
+        ] {
+            corpus.push(extra.as_bytes().to_vec());
+        }
+
+        for command in corpus {
+            for arity in 0..4usize {
+                let mut argv = vec![command.clone()];
+                for n in 0..arity {
+                    argv.push(format!("arg{n}").into_bytes());
+                }
+                let filtered = super::script_command_intercept(&argv);
+                let unfiltered = super::script_command_intercept_chain(&argv);
+                assert_eq!(
+                    filtered.is_some(),
+                    unfiltered.is_some(),
+                    "filter disagreed for {:?} at arity {arity}",
+                    String::from_utf8_lossy(&command)
+                );
+                if let (Some(a), Some(b)) = (filtered, unfiltered) {
+                    assert_eq!(
+                        format!("{a:?}"),
+                        format!("{b:?}"),
+                        "filtered/unfiltered results differ for {:?}",
+                        String::from_utf8_lossy(&command)
+                    );
+                }
+            }
+        }
+
+        // Empty argv must behave exactly as before (no interception).
+        let empty: Vec<Vec<u8>> = Vec::new();
+        assert!(super::script_command_intercept(&empty).is_none());
+        assert!(super::script_command_intercept_chain(&empty).is_none());
+
+        // Secondary guard, checked AFTER the behavioural comparison so the
+        // disagreement above is what a regression reports first.
+        assert_eq!(
+            super::SCRIPT_INTERCEPT_COMMANDS.len(),
+            intercepted.len(),
+            "SCRIPT_INTERCEPT_COMMANDS changed; update this test's independent list"
+        );
+    }
 
     /// (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0) The overlay
     /// membership filter is only sound because it can never report a false
