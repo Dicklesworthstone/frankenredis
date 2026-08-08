@@ -16,7 +16,7 @@ Usage: restore_idletime_freq_differ.py <oracle_port> <fr_port>
 """
 import sys
 
-from _respread import assert_ok, assert_seed, cmd, conn
+from _respread import assert_ok, cmd, conn
 
 
 def payload(dump_reply):
@@ -45,10 +45,10 @@ def main():
     def both(*c):
         return cmd(od, *c), cmd(fr, *c)
 
-    cmd(od, "FLUSHALL")
-    cmd(fr, "FLUSHALL")
-    cmd(od, "SET", "src", "hello")
-    cmd(fr, "SET", "src", "hello")
+    assert_ok(cmd(od, "FLUSHALL"), "redis FLUSHALL")
+    assert_ok(cmd(fr, "FLUSHALL"), "fr FLUSHALL")
+    assert_ok(cmd(od, "SET", "src", "hello"), "redis SET src")
+    assert_ok(cmd(fr, "SET", "src", "hello"), "fr SET src")
     do, df = cmd(od, "DUMP", "src"), cmd(fr, "DUMP", "src")
     if payload(do) != payload(df):
         print(f"SETUP ERROR: DUMP payloads differ\n  redis={do!r}\n  fr={df!r}")
@@ -77,13 +77,17 @@ def main():
     hard("idletime_under_lfu_err", "RESTORE", "e4", "0", p, "IDLETIME", "5")
     hard("freq_out_of_range_err", "RESTORE", "e5", "0", p, "FREQ", "256")
     reset("noeviction")
-    cmd(od, "SET", "e6", "x")
-    cmd(fr, "SET", "e6", "x")
+    assert_ok(cmd(od, "SET", "e6", "x"), "redis SET e6")
+    assert_ok(cmd(fr, "SET", "e6", "x"), "fr SET e6")
     hard("replace_ok", "RESTORE", "e6", "0", p, "REPLACE")
 
     # HARD: IDLETIME value must be reflected by OBJECT IDLETIME
     reset("noeviction")
-    both("RESTORE", "k1", "0", p, "IDLETIME", "100")
+    # A failed RESTORE leaves k1 missing on BOTH engines, and OBJECT IDLETIME then
+    # errors identically instead of reporting the IDLETIME this case exists to
+    # check. (frankenredis-tesrb)
+    for r in both("RESTORE", "k1", "0", p, "IDLETIME", "100"):
+        assert_ok(r, "RESTORE k1 IDLETIME 100")
     o, f = both("OBJECT", "IDLETIME", "k1")
     try:
         oi, fi = as_int(o), as_int(f)
@@ -95,7 +99,8 @@ def main():
 
     # HARD: FREQ value must be reflected by OBJECT FREQ (LFU policy)
     reset("allkeys-lfu")
-    both("RESTORE", "k2", "0", p, "FREQ", "7")
+    for r in both("RESTORE", "k2", "0", p, "FREQ", "7"):
+        assert_ok(r, "RESTORE k2 FREQ 7")
     o, f = both("OBJECT", "FREQ", "k2")
     try:
         oi, fi = as_int(o), as_int(f)

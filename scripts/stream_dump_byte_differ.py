@@ -39,7 +39,7 @@ def main():
     fp = int(sys.argv[2]) if len(sys.argv) > 2 else 16400
     o, f = conn(op), conn(fp)
     for s in (o, f):
-        cmd(s, "FLUSHALL")
+        assert_ok(cmd(s, "FLUSHALL"), "FLUSHALL")
         # clean single-node stream (explicit deterministic IDs)
         for i in range(1, 11):
             cmd(s, "XADD", "s_small", f"{i}-0", "field", f"v{i}", "n", str(i))
@@ -49,11 +49,16 @@ def main():
         # explicit-last-id (XSETID beyond entries) — metadata, deterministic
         for i in range(1, 6):
             cmd(s, "XADD", "s_setid", f"{i}-0", "k", "v")
-        cmd(s, "XSETID", "s_setid", "999-0")
+        assert_ok(cmd(s, "XSETID", "s_setid", "999-0"), "XSETID s_setid")
         # the aapu4 case: deletions -> tombstones
         for i in range(1, 11):
             cmd(s, "XADD", "s_del", f"{i}-0", "k", "v")
-        cmd(s, "XDEL", "s_del", "3-0", "7-0")
+        assert_seed(cmd(s, "XDEL", "s_del", "3-0", "7-0"), 2, "XDEL s_del")
+        # XADD with an explicit ID replies with the ID, not a count, so the seed
+        # is pinned by length instead. A short build silently changes the macro-
+        # node shape these DUMPs exist to compare. (frankenredis-tesrb)
+        for key, want in (("s_small", 10), ("s_big", 300), ("s_setid", 5), ("s_del", 8)):
+            assert_seed(cmd(s, "XLEN", key), want, f"XLEN {key}")
 
     fails, known = [], []
 
@@ -63,8 +68,10 @@ def main():
             fails.append(f"{key}: DUMP redis={len(do)}b fr={len(df)}b")
             return
         # RESTORE round-trip on both, compare XRANGE
-        cmd(o, "RESTORE", key + "r", "0", do)
-        cmd(f, "RESTORE", key + "r", "0", df)
+        # A failed RESTORE leaves key+"r" missing on BOTH engines, so the XRANGE
+        # below compares two empty arrays and passes. (frankenredis-tesrb)
+        assert_ok(cmd(o, "RESTORE", key + "r", "0", do), f"redis RESTORE {key}r")
+        assert_ok(cmd(f, "RESTORE", key + "r", "0", df), f"fr RESTORE {key}r")
         if cmd(o, "XRANGE", key + "r", "-", "+") != cmd(f, "XRANGE", key + "r", "-", "+"):
             fails.append(f"{key}: XRANGE after RESTORE differs")
 

@@ -48,10 +48,14 @@ def main():
     fp = int(sys.argv[-1]) if len(sys.argv) > 1 else 16400
     s = conn(fp)
     fails = []
-    cmd(s, "FLUSHALL")
+    assert_ok(cmd(s, "FLUSHALL"), "FLUSHALL")
     expect = {f"k{i:05d}" for i in range(N)}
     for i in range(N):
         cmd(s, "SET", f"k{i:05d}", "v")
+    # A short populate makes the completeness/no-dup checks below trivially
+    # satisfiable — a single-cursor SCAN over 3 keys is "complete". Pin the size.
+    # (frankenredis-tesrb)
+    assert_seed(cmd(s, "DBSIZE"), N, f"populate {N} keys")
 
     def check(label, keys, want):
         if len(keys) != len(set(keys)):
@@ -77,8 +81,8 @@ def main():
     remaining = {k for k in expect if int(k[1:]) % 3 != 0}
     check("after_delete", scan_all(s, 9, match="k*"), remaining)
     # add a different type, re-scan full
-    cmd(s, "RPUSH", "alist", "x")
-    cmd(s, "HSET", "ahash", "f", "v")
+    assert_seed(cmd(s, "RPUSH", "alist", "x"), 1, "RPUSH alist")
+    assert_seed(cmd(s, "HSET", "ahash", "f", "v"), 1, "HSET ahash")
     full = remaining | {"alist", "ahash"}
     check("after_mixed_add", scan_all(s, 17), full)
     # (frankenredis-uhthd presized KeyDict build) DEBUG RELOAD rebuilds the keyspace dict

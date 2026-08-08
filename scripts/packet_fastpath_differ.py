@@ -36,23 +36,24 @@ BINFIELD = b"f\xff\x00"
 
 
 def setup(s):
-    call(s, "FLUSHALL")
-    call(s, "SET", "sk", "12345")           # int encoding (> 9999, not shared)
-    call(s, "SET", "shint", "100")          # shared-integer pool (0..9999)
-    call(s, "SET", "str", "hello world")
-    call(s, "RPUSH", "lst", "a", "b", "c")
-    call(s, "HSET", "h", "f1", "v1", "f2", "v2")
-    call(s, "SADD", "s", "a", "b", "c")
-    call(s, "SADD", "si", "1", "2", "3")
-    call(s, "ZADD", "z", "1.5", "x", "2.5", "y")
-    call(s, "SET", "ctr", "10")
-    call(s, "SET", "exk", "v", "EXAT", EXAT)
-    call(s, "SET", "gd", "bye")
-    call(s, "SET", "bk", "\xff")
+    assert_ok(call(s, "FLUSHALL"), "FLUSHALL")
+    # int encoding (> 9999, not shared)
+    assert_ok(call(s, "SET", "sk", "12345"), "SET sk")
+    assert_ok(call(s, "SET", "shint", "100"), "SET shint")  # shared-integer pool (0..9999)
+    assert_ok(call(s, "SET", "str", "hello world"), "SET str")
+    assert_seed(call(s, "RPUSH", "lst", "a", "b", "c"), 3, "RPUSH lst")
+    assert_seed(call(s, "HSET", "h", "f1", "v1", "f2", "v2"), 2, "HSET h")
+    assert_seed(call(s, "SADD", "s", "a", "b", "c"), 3, "SADD s")
+    assert_seed(call(s, "SADD", "si", "1", "2", "3"), 3, "SADD si")
+    assert_seed(call(s, "ZADD", "z", "1.5", "x", "2.5", "y"), 2, "ZADD z")
+    assert_ok(call(s, "SET", "ctr", "10"), "SET ctr")
+    assert_ok(call(s, "SET", "exk", "v", "EXAT", EXAT), "SET exk EXAT")
+    assert_ok(call(s, "SET", "gd", "bye"), "SET gd")
+    assert_ok(call(s, "SET", "bk", "\xff"), "SET bk (non-UTF8 value)")
     # binary key/field/value (embedded \xff, CRLF, NUL) — fast paths parse
     # length-prefixed bulks, so they must be binary-safe.
-    call(s, "SET", BINKEY, BINVAL)
-    call(s, "HSET", "bh", BINFIELD, BINVAL)
+    assert_ok(call(s, "SET", BINKEY, BINVAL), "SET BINKEY")
+    assert_seed(call(s, "HSET", "bh", BINFIELD, BINVAL), 1, "HSET bh BINFIELD")
 
 
 # Each entry is a command sent as canonical RESP (fires the byte-prefix packet).

@@ -30,7 +30,7 @@ Usage: zset_score_emit_differ.py <oracle_port> <fr_port>   (default 16399 16400)
 """
 import sys
 
-from _respread import assert_ok, assert_seed, cmd, conn
+from _respread import assert_seed, cmd, conn
 
 MEMBERS = [
     ("mi", "1"),
@@ -140,7 +140,10 @@ def main():
         key = f"zedge{i}"
         for s in (o, f):
             cmd(s, "DEL", key)
-            cmd(s, "ZADD", key, score, "m")
+            # A rejected score leaves `key` absent, and ZSCORE / DUMP / ENCODING
+            # then agree on nil across both engines while rendering no score at
+            # all — which is the entire point of this case. (frankenredis-tesrb)
+            assert_seed(cmd(s, "ZADD", key, score, "m"), 1, f"ZADD {key} {score}")
         chk(f"edge_zscore[{score}]", "ZSCORE", key, "m")
         chk(f"edge_dump[{score}]", "DUMP", key)
         chk(f"edge_encoding[{score}]", "OBJECT", "ENCODING", key)

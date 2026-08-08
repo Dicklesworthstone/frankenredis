@@ -23,7 +23,7 @@ Usage: sort_alpha_collation_differ.py <oracle_port> <fr_port>
 """
 import sys
 
-from _respread import assert_ok, assert_seed, cmd, conn
+from _respread import assert_seed, cmd, conn
 
 # (label, members) — SORT ALPHA over each must be byte-identical to redis 7.2.4.
 CASES = [

@@ -32,13 +32,13 @@ def main():
 
     def setup():
         for s in (od, fr):
-            cmd(s, "FLUSHALL")
-            cmd(s, "SADD", "src", "a", "b", "c")
-            cmd(s, "SADD", "dst", "x", "y")
-            cmd(s, "SADD", "both", "a", "z")
-            cmd(s, "SET", "str", "v")
-            cmd(s, "SADD", "intsrc", "1", "2", "3")
-            cmd(s, "SADD", "intdst", "4", "5")
+            assert_ok(cmd(s, "FLUSHALL"), "FLUSHALL")
+            assert_seed(cmd(s, "SADD", "src", "a", "b", "c"), 3, "SADD src")
+            assert_seed(cmd(s, "SADD", "dst", "x", "y"), 2, "SADD dst")
+            assert_seed(cmd(s, "SADD", "both", "a", "z"), 2, "SADD both")
+            assert_ok(cmd(s, "SET", "str", "v"), "SET str")
+            assert_seed(cmd(s, "SADD", "intsrc", "1", "2", "3"), 3, "SADD intsrc")
+            assert_seed(cmd(s, "SADD", "intdst", "4", "5"), 2, "SADD intdst")
 
     def chk(label, *c):
         ro, rf = cmd(od, *c), cmd(fr, *c)

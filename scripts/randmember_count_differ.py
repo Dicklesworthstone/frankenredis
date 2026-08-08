@@ -65,11 +65,13 @@ def main():
 
 def run(od, fr):
     for s in (od, fr):
-        cmd(s, "FLUSHALL")
-        cmd(s, "SADD", "s", *[f"m{i}" for i in range(SIZE)])
-        cmd(s, "HSET", "h", *sum([[f"f{i}", f"v{i}"] for i in range(SIZE)], []))
-        cmd(s, "ZADD", "z", *sum([[str(i), f"zm{i}"] for i in range(SIZE)], []))
-        cmd(s, "SET", "str", "x")
+        assert_ok(cmd(s, "FLUSHALL"), "FLUSHALL")
+        assert_seed(cmd(s, "SADD", "s", *[f"m{i}" for i in range(SIZE)]), SIZE, "SADD s")
+        assert_seed(cmd(s, "HSET", "h", *sum([[f"f{i}", f"v{i}"] for i in range(SIZE)], [])),
+                    SIZE, "HSET h")
+        assert_seed(cmd(s, "ZADD", "z", *sum([[str(i), f"zm{i}"] for i in range(SIZE)], [])),
+                    SIZE, "ZADD z")
+        assert_ok(cmd(s, "SET", "str", "x"), "SET str")
     fails = []
 
     def eq(label, a, b):

@@ -28,11 +28,12 @@ def main():
 
     def setup():
         for s in (od, fr):
-            cmd(s, "FLUSHALL")
-            cmd(s, "SET", "a", "va", "EXAT", EXAT)   # a: value + absolute TTL
-            cmd(s, "SET", "b", "vb")                  # b: no TTL
-            cmd(s, "RPUSH", "lst", "x", "y")
-            cmd(s, "SET", "plain", "old")
+            assert_ok(cmd(s, "FLUSHALL"), "FLUSHALL")
+            # a: value + absolute TTL
+            assert_ok(cmd(s, "SET", "a", "va", "EXAT", EXAT), "SET a EXAT")
+            assert_ok(cmd(s, "SET", "b", "vb"), "SET b")                # b: no TTL
+            assert_seed(cmd(s, "RPUSH", "lst", "x", "y"), 2, "RPUSH lst")
+            assert_ok(cmd(s, "SET", "plain", "old"), "SET plain")
 
     def chk(label, *c):
         ro, rf = cmd(od, *c), cmd(fr, *c)

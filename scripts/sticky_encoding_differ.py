@@ -14,7 +14,7 @@ Usage: sticky_encoding_differ.py <oracle_port> <fr_port>
 """
 import sys
 
-from _respread import assert_ok, assert_seed, cmd, conn
+from _respread import assert_ok, cmd, conn
 
 
 def main():
@@ -32,7 +32,12 @@ def main():
         for s in (od, fr):
             cmd(s, *c)
 
-    each("FLUSHALL")
+    def each_ok(*c):
+        """`each`, but requiring +OK — for the seeds the thresholds depend on."""
+        for s in (od, fr):
+            assert_ok(cmd(s, *c), " ".join(str(x) for x in c[:3]))
+
+    each_ok("FLUSHALL")
     for k, v in [
         ("hash-max-listpack-entries", "128"),
         ("hash-max-listpack-value", "64"),
@@ -41,7 +46,7 @@ def main():
         ("zset-max-listpack-entries", "128"),
         ("list-max-listpack-size", "128"),
     ]:
-        each("CONFIG", "SET", k, v)
+        each_ok("CONFIG", "SET", k, v)
 
     # HASH: grow past 128 -> hashtable, shrink to 5 -> stays hashtable
     for i in range(200):

@@ -29,12 +29,12 @@ def main():
     fp = int(sys.argv[2]) if len(sys.argv) > 2 else 16400
     od, fr = conn(op), conn(fp)
     for s in (od, fr):
-        cmd(s, "FLUSHALL")
-        cmd(s, "SET", "ss", "hello")
-        cmd(s, "RPUSH", "ls", "a", "b", "c")
-        cmd(s, "HSET", "hs", "f", "v", "g", "w")
-        cmd(s, "ZADD", "zs", "1", "a", "2", "b")
-        cmd(s, "SADD", "es", "x", "y", "z")
+        assert_ok(cmd(s, "FLUSHALL"), "FLUSHALL")
+        assert_ok(cmd(s, "SET", "ss", "hello"), "SET ss")
+        assert_seed(cmd(s, "RPUSH", "ls", "a", "b", "c"), 3, "RPUSH ls")
+        assert_seed(cmd(s, "HSET", "hs", "f", "v", "g", "w"), 2, "HSET hs")
+        assert_seed(cmd(s, "ZADD", "zs", "1", "a", "2", "b"), 2, "ZADD zs")
+        assert_seed(cmd(s, "SADD", "es", "x", "y", "z"), 3, "SADD es")
     # fr DUMP is byte-identical to redis (separately gated); use the oracle's payloads.
     pl = {k: dump_payload(od, k) for k in ("ss", "ls", "hs", "zs", "es")}
     fails = []

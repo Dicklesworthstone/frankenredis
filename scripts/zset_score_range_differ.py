@@ -28,9 +28,10 @@ def main():
     fp = int(sys.argv[2]) if len(sys.argv) > 2 else 16400
     od, fr = conn(op), conn(fp)
     for s in (od, fr):
-        cmd(s, "FLUSHALL")
-        cmd(s, "ZADD", "z", "1", "a", "2", "b", "3", "c", "4", "d", "5", "e")
-        cmd(s, "ZADD", "zneg", "-10", "x", "0", "y", "10", "z")
+        assert_ok(cmd(s, "FLUSHALL"), "FLUSHALL")
+        assert_seed(cmd(s, "ZADD", "z", "1", "a", "2", "b", "3", "c", "4", "d", "5", "e"),
+                    5, "ZADD z")
+        assert_seed(cmd(s, "ZADD", "zneg", "-10", "x", "0", "y", "10", "z"), 3, "ZADD zneg")
     fails = []
 
     def chk(label, *c):

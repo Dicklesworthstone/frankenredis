@@ -52,11 +52,11 @@ def main():
     fp = int(sys.argv[2]) if len(sys.argv) > 2 else 16400
     od, fr = conn(op), conn(fp)
     for s in (od, fr):
-        cmd(s, "FLUSHALL")
-        cmd(s, "HSET", "h", "f", "v")
-        cmd(s, "SET", "k", "v")
-        cmd(s, "RPUSH", "l", "a")
-        cmd(s, "SADD", "s", "m")
+        assert_ok(cmd(s, "FLUSHALL"), "FLUSHALL")
+        assert_seed(cmd(s, "HSET", "h", "f", "v"), 1, "HSET h")
+        assert_ok(cmd(s, "SET", "k", "v"), "SET k")
+        assert_seed(cmd(s, "RPUSH", "l", "a"), 1, "RPUSH l")
+        assert_seed(cmd(s, "SADD", "s", "m"), 1, "SADD s")
     fails = []
     for argv in POST_724 + IN_724:
         ro, rf = cmd(od, *argv), cmd(fr, *argv)

@@ -77,12 +77,14 @@ def run(port):
     s = cli(port)
     out = []
     for label, setup, probe in CASES:
-        cmd(s, "SELECT", "0")
-        cmd(s, "FLUSHALL")
+        assert_ok(cmd(s, "SELECT", "0"), f"{label} SELECT 0")
+        assert_ok(cmd(s, "FLUSHALL"), f"{label} FLUSHALL")
         for c in setup:
             cmd(s, *c)
         out.append((label, cmd(s, *probe)))
-        cmd(s, "SELECT", "0")
+        # A failed SELECT would leave the NEXT case running against the wrong DB,
+        # on both engines alike. (frankenredis-tesrb)
+        assert_ok(cmd(s, "SELECT", "0"), f"{label} SELECT 0 (restore)")
     s.close()
     return out
 

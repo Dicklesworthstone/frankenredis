@@ -17,7 +17,7 @@ Usage: lzf_dump_byte_equality_differ.py <oracle_port> <fr_port>
 """
 import sys
 
-from _respread import assert_ok, assert_seed, cmd, conn
+from _respread import assert_ok, cmd, conn
 
 
 def values():

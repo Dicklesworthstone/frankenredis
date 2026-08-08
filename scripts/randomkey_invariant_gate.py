@@ -52,22 +52,26 @@ def main():
     fails = []
 
     # 4. empty db -> nil
-    cmd(s, "FLUSHALL")
+    assert_ok(cmd(s, "FLUSHALL"), "FLUSHALL")
     if bulk(cmd(s, "RANDOMKEY")) is not None:
         fails.append("empty db: RANDOMKEY not nil")
 
     # 5. single key -> always that key
-    cmd(s, "SET", "solo", "v")
+    assert_ok(cmd(s, "SET", "solo", "v"), "SET solo")
     for _ in range(50):
         if bulk(cmd(s, "RANDOMKEY")) != b"solo":
             fails.append("single key: RANDOMKEY != solo")
             break
-    cmd(s, "FLUSHALL")
+    assert_ok(cmd(s, "FLUSHALL"), "FLUSHALL")
 
     # populate
     full = {f"k{i:04d}".encode() for i in range(N)}
     for i in range(N):
         cmd(s, "SET", f"k{i:04d}", "v")
+    # A short populate makes every coverage round below trivially satisfiable —
+    # RANDOMKEY over 3 keys "fully covers" in a handful of draws. Pin the size.
+    # (frankenredis-tesrb)
+    assert_seed(cmd(s, "DBSIZE"), N, f"populate {N} keys")
 
     def check_round(label, present):
         seen = randomkeys(s, len(present) * 15)

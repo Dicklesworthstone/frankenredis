@@ -32,10 +32,10 @@ def main():
     fp = int(sys.argv[2]) if len(sys.argv) > 2 else 16400
     od, fr = conn(op), conn(fp)
     for s in (od, fr):
-        cmd(s, "FLUSHALL")
-        cmd(s, "SET", "k", "Hello World")  # len 11
-        cmd(s, "SET", "e", "")
-        cmd(s, "RPUSH", "lst", "x")
+        assert_ok(cmd(s, "FLUSHALL"), "FLUSHALL")
+        assert_ok(cmd(s, "SET", "k", "Hello World"), "SET k")  # len 11
+        assert_ok(cmd(s, "SET", "e", ""), "SET e (empty)")
+        assert_seed(cmd(s, "RPUSH", "lst", "x"), 1, "RPUSH lst")
     fails = []
     for st, en in RANGES:
         og, fg = cmd(od, "GETRANGE", "k", st, en), cmd(fr, "GETRANGE", "k", st, en)

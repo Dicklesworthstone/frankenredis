@@ -32,9 +32,9 @@ def main():
             fails.append(f"{label}: redis={ro!r} fr={rf!r}")
 
     for s in (od, fr):
-        cmd(s, "CONFIG", "SET", "appendonly", "no")
-        cmd(s, "FLUSHALL")
-        cmd(s, "SET", "k", "v")
+        assert_ok(cmd(s, "CONFIG", "SET", "appendonly", "no"), "CONFIG SET appendonly no")
+        assert_ok(cmd(s, "FLUSHALL"), "FLUSHALL")
+        assert_ok(cmd(s, "SET", "k", "v"), "SET k v")
 
     # WAIT — standalone, 0 replicas
     chk("wait_0_0", "WAIT", "0", "0")

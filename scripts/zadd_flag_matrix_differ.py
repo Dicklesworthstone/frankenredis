@@ -15,7 +15,7 @@ Usage: zadd_flag_matrix_differ.py <oracle_port> <fr_port>
 """
 import sys
 
-from _respread import assert_ok, assert_seed, cmd, conn
+from _respread import assert_seed, cmd, conn
 
 FLAGSETS = [
     [], ["NX"], ["XX"], ["GT"], ["LT"], ["CH"],
@@ -43,8 +43,8 @@ def main():
     def reset():
         for s in (od, fr):
             cmd(s, "DEL", "z")
-            cmd(s, "ZADD", "z", "5", "m")
-            cmd(s, "ZADD", "z", "10", "other")
+            assert_seed(cmd(s, "ZADD", "z", "5", "m"), 1, "ZADD z 5 m")
+            assert_seed(cmd(s, "ZADD", "z", "10", "other"), 1, "ZADD z 10 other")
 
     # existing-member flag x score-direction matrix (reply + resulting score)
     for flags in FLAGSETS:
@@ -57,14 +57,14 @@ def main():
     for flags in (["NX"], ["XX"], ["GT"], ["LT"], ["CH"], ["GT", "CH"]):
         for s in (od, fr):
             cmd(s, "DEL", "z")
-            cmd(s, "ZADD", "z", "5", "m")
+            assert_seed(cmd(s, "ZADD", "z", "5", "m"), 1, "ZADD z 5 m")
         tag = "_".join(flags)
         chk(f"new_{tag}", "ZADD", "z", *flags, "8", "newm")
         chk(f"new_score_{tag}", "ZSCORE", "z", "newm")
     # multi-pair with GT+CH: a (3<5 no), b (9>5 yes), c (new) -> CH counts b + c = 2
     for s in (od, fr):
         cmd(s, "DEL", "z")
-        cmd(s, "ZADD", "z", "5", "a", "5", "b")
+        assert_seed(cmd(s, "ZADD", "z", "5", "a", "5", "b"), 2, "ZADD z a,b")
     chk("multi_gt_ch", "ZADD", "z", "GT", "CH", "3", "a", "9", "b", "1", "c")
     chk("multi_a", "ZSCORE", "z", "a")
     chk("multi_b", "ZSCORE", "z", "b")

@@ -66,7 +66,11 @@ def main():
             cmd(s, "DEL", "k")
             for c in seed:
                 cmd(s, *c)
-            cmd(s, "EXPIREAT", "k", EXAT)
+            # EXPIREAT answers 1 only if the seed actually created `k`, so this one
+            # assertion covers every per-case seed shape at once. Without it a
+            # failed seed leaves EXPIRETIME/TTL at -2 on BOTH engines and the
+            # invariant check passes having observed no TTL. (frankenredis-tesrb)
+            assert_seed(cmd(s, "EXPIREAT", "k", EXAT), 1, f"{label} seed + EXPIREAT")
         ro, rf = cmd(od, *mutation), cmd(fr, *mutation)
         if det_reply and ro != rf:
             fails.append(f"{label}_reply: redis={ro!r} fr={rf!r}")
@@ -75,7 +79,7 @@ def main():
     # PERSIST
     for s in (od, fr):
         cmd(s, "DEL", "k")
-        cmd(s, "SET", "k", "v")
+        assert_ok(cmd(s, "SET", "k", "v"), "SET k v")
         cmd(s, "EXPIREAT", "k", EXAT)
     chk("persist_had", "PERSIST", "k")
     chk("persist_ttl", "TTL", "k")
