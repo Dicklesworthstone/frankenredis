@@ -197,6 +197,20 @@ rotate_cores() {  # ROUND
   done
 }
 
+# ROUNDS MUST BE A MULTIPLE OF THE ARM COUNT, or the rotation does not cancel.
+# Each arm visits each core once per full cycle; a partial final cycle leaves
+# some arm with an extra turn on a faster core, which shows up as a BIASED A/A
+# null. Observed for real: 15 rounds with 3 arms (a multiple) gave a null of
+# 1.0000, and 15 rounds with 4 arms gave 1.0144 with a CI excluding 1.0, which
+# correctly voided that run's A/B verdict.
+ARM_COUNT=${#ARM_PIDS[@]}
+if [ $((ROUNDS % ARM_COUNT)) -ne 0 ]; then
+  ADJUSTED=$(( (ROUNDS / ARM_COUNT + 1) * ARM_COUNT ))
+  echo "NOTE: rounds $ROUNDS is not a multiple of the $ARM_COUNT arms; raising to $ADJUSTED"
+  echo "      so every arm spends equal time on every core (otherwise the null is biased)."
+  ROUNDS=$ADJUSTED
+fi
+
 for r in $(seq 1 "$ROUNDS"); do
   rotate_cores "$r"
   # Rotate start order every round so no arm permanently owns the warm cache.

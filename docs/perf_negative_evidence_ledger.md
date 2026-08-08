@@ -15093,3 +15093,103 @@ widest bound, before quoting any competitive movement. Do NOT quote the microben
 percentage as a competitive figure — the measured translation on this workload is about 1:3. Revisit
 the "structural gap" question specifically if `fr_B/redis` ever crosses 0.90x by safe levers alone,
 which would mean the bytecode-VM conclusion needs restating rather than qualifying.
+
+## 2026-08-08 CrimsonHawk: KEEP (SELF-SPEEDUP) — memoise `Expr::Field` by AST-name address + table address + epoch; 10.516% fewer redis.call instructions, and NO admissible e2e effect (`frankenredis-lua-rediscall-loop-interpreter-bound-d3al0`)
+
+Claim class: SELF-SPEEDUP. Campaign output: no.
+
+Stated up front because it is the point of this entry: this is MAINTENANCE, not campaign output.
+The instruction win is large and clean, and the end-to-end arm REFUSED to call it a result. Both
+halves are recorded, and the second half is the one that matters for planning.
+
+PREFLIGHT, reported exactly as it came out rather than reworded until it passed.
+`check-candidate get_str "field lookup" LuaTableInner "inline cache"` exits **2**, not 0 — I
+misreported this as 0 on the previous entry by reading `tail`'s exit status through a pipe instead
+of the checker's; corrected here. Eight of the blocking rows match the substring `get_str` inside
+`get_string_bytes` and are about **fr-store's GET keyspace path** with zero mentions of Lua
+(NEGATIVE_EVIDENCE.md:20701, :20717, :24603; perf_negative_evidence_ledger.md:5375, :7133, :9894,
+:9922, :13002 — all read). The two rows that genuinely touch this ground:
+  * NEGATIVE_EVIDENCE.md:13202 (2026-07-02, mine) is a KEEP that removed a `table.clone()` from
+    INSIDE `table_lookup_with_index_meta`. Complementary, not superseding: it made the lookup
+    cheaper, this elides it.
+  * perf_negative_evidence_ledger.md:7676 (2026-06-28 AmberRiver, "hashing isn't the EVAL
+    bottleneck") is **VOID-NONULL** — no A/A null, host load ~12 — as established with measurement
+    in the preceding entry. Per this checker's own instruction, re-running a void row is legitimate
+    when the entry says so; this entry says so.
+
+THE LEVER. `Expr::Field` is a field read on every `redis.call`, and each one hashed the field name
+and memcmp'd it against `string_hash`. A two-entry cache on `LuaState` keyed on the AST name's
+ADDRESS, the table's ADDRESS, and a `LUA_TABLE_FIELD_EPOCH` replaces that with pointer compares.
+Pointers are compared, never dereferenced; the crate forbids unsafe.
+
+SOUNDNESS IS THE WHOLE DESIGN, and it is why the epoch exists. `get_str` reads `string_hash` and
+nothing else, so exactly three sites can invalidate a cached field read — `hash_set`'s insert and
+remove branches, and the GC sweep's `clear()`. Grep confirms those are the only
+`string_hash.{insert,remove,clear,retain,entry,get_mut}` / `string_hash =` sites in the crate, and
+NO code outside `lua_eval.rs` writes `LuaTableInner`'s public fields at all. Two further bumps sit
+in the `LuaTableInner` constructors to close an ABA hazard that content-invalidation alone misses:
+a table can be dropped and a new one allocated at the SAME address without touching `string_hash`,
+which would let a stale entry's pointer compare succeed against a different table. Five bump sites
+total, each labelled in the source.
+
+I MEASURED THE CEILING BEFORE BUILDING THE SOUND VERSION, with a deliberately unsound
+no-invalidation build that was never committed, because the sound design's cost was unknown and
+worth bounding first: ceiling **10.621%**, sound version **10.516%** — the invalidation machinery
+costs 1% of the win, i.e. the sound version captures 99.0% of the ceiling.
+
+MICROBENCH (`lua_rediscall_loop`, instructions:u, 8 interleaved reps of A / byte-identical null / B
+in one invocation, quiescent trj, pinned to core 40, both binaries mimalloc-linked):
+  A/A null   median 1.000001  bootstrap 95% median CI [0.999999, 1.000002]
+  A/B effect median 0.894835  bootstrap 95% median CI [0.894835, 0.894942]  = 10.516% FEWER
+  3,136.75 -> 2,806.88 instructions per redis.call; arms NON-OVERLAPPING (A min > B max).
+
+END-TO-END, and this is the part that decides the class. `scripts/lua_eval_headtohead.sh`, four
+arms in ONE invocation (pre-lever fr, post-lever fr, byte-identical A/A null, live vendored Redis
+7.2.4), vendored redis-benchmark, per-core pinned and rotated, c=1, 32 rounds. The benchmarked
+server ELF self-reported SHA-256
+c2ff5693b6a2544901f3b7e2ad2c9a02c50373ce1911a5eacf9ab2810d4b7dfa for the candidate arm.
+  A/A null   median 1.0000  bootstrap 95% median CI [0.9859, 1.0112]   <- admissible
+  A/B effect median 1.0134  bootstrap 95% median CI [0.9926, 1.0251]   <- CI CONTAINS 1.0
+  fr/redis 0.7619 [0.7501, 0.7721] before, 0.7664 [0.7570, 0.7804] after -- CIs OVERLAP.
+**NOT A RESULT.** A 10.5% instruction reduction produced no e2e effect this harness can resolve.
+The 32-round run was PRE-REGISTERED as the tie-breaker after a 16-round run put the effect (+2.58%)
+inside the null's own bound (3.24%), and its verdict stands as taken; with the extra power the
+effect shrank to +1.34% and its CI swallowed 1.0. That ordering is recorded so this cannot be read
+as stopping at a flattering number.
+
+The bootstrap median-CI gate determined the verdict, never CV; CV is not computed for the e2e arm
+at all, and for the microbench it is provenance only. An earlier 15-round configuration was VOIDED
+by its own null (CI excluded 1.0) rather than reported: with FOUR arms, core rotation only cancels
+when the round count is a multiple of the arm count, and 15 is not. The harness now raises the
+round count to the next multiple and says so.
+
+NO REGRESSION ELSEWHERE, checked because the five epoch bumps tax every table write and every
+table construction: the compute-heavy `lua_eval` bench measures A/B 1.000031 with bootstrap 95%
+median CI [1.000009, 1.000098] against an A/A null of 1.000018 — 0.003% slower, which is real but
+negligible and does not approach the redis.call gain.
+
+WHY KEEP IT ANYWAY, argued rather than assumed. The preceding entry measured that TEN individually
+small interpreter levers, none of which would have cleared this e2e bar alone, together moved
+fr from 0.689x to 0.755x of the incumbent — +6.1% to +8.4%. The accumulation is what shows up, not
+the individual lever. This is the largest single instruction reduction on the bead and it costs
+0.003% elsewhere. Keeping it is a bet on the same accumulation, and it is labelled SELF-SPEEDUP so
+nobody counts it twice or quotes it as competitive output.
+
+GATES: fr-command lib suite 1193 passed / 0 failed; workspace (--no-fail-fast, excluding
+fr-conformance) 2747 passed across 14/15 binaries, the single failing binary being fr-store's
+wall-clock ratio tests filed as frankenredis-6irj9 and byte-identical to main; rustfmt and clippy
+-D warnings clean. Three mutation tests, each breaking exactly one guard, all confirmed failing:
+insert-bump removed -> an overwritten field serves the stale value; remove-bump removed -> a field
+cleared to nil keeps serving the removed value instead of falling through to `__index`;
+table-address component removed -> one AST node reading two tables serves the first's value for
+both. The third case did NOT discriminate in its first form (routing the reads through a helper
+function let the call machinery bump the epoch and mask the missing check) and was rewritten to
+alternate tables through one AST node in a loop with nothing that can bump.
+
+Retry predicate: do NOT re-attempt this as a competitive lever on unpipelined EVAL — it has been
+measured there and the effect is below what a 4-arm c=1 harness can resolve at 32 rounds. Revisit
+ONLY under a workload where interpreter time is a larger share of the round trip, i.e. pipelined
+EVAL (-P 16) or a script with a much higher redis.call count per eval (the harness takes `--calls`
+for exactly this), and require the A/A null CI to contain 1.0 and the A/B CI to exclude it before
+reclassifying. If a future measurement does clear that bar, this entry should be superseded by a
+COMPETITIVE one rather than edited.

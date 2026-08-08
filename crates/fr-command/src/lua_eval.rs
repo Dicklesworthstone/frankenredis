@@ -6,7 +6,7 @@
 // KEYS/ARGV, and standard library functions.
 
 use std::borrow::Cow;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::rc::{Rc, Weak};
@@ -112,6 +112,52 @@ fn lua_gc_register_table(inner: &Rc<RefCell<LuaTableInner>>) {
     });
 }
 
+thread_local! {
+    /// (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0) Monotonic
+    /// witness for "any table's `string_hash` may have changed, or a table
+    /// address may have been recycled".
+    ///
+    /// `LuaState`'s field cache memoises `Expr::Field` reads by
+    /// (AST-name address, table address). Both halves of that key are stable
+    /// only while the world is; this epoch is the third component that makes a
+    /// stale entry unservable. It is bumped from exactly FIVE sites, and the
+    /// completeness argument is what makes the cache sound rather than merely
+    /// plausible:
+    ///
+    ///   * the THREE places `string_hash` can change -- `hash_set`'s remove and
+    ///     insert branches, and the GC sweep's `clear()`. `get_str` reads
+    ///     `string_hash` and nothing else, so no other field can invalidate a
+    ///     cached field read. Verified by grep: those are the only
+    ///     `string_hash.{insert,remove,clear,retain,entry,get_mut}` or
+    ///     `string_hash =` sites in the crate, and no code outside this file
+    ///     writes `LuaTableInner`'s public fields at all.
+    ///   * the TWO `LuaTableInner` constructors. This closes an ABA hazard that
+    ///     content-invalidation alone does not: a table could be dropped and a
+    ///     NEW table allocated at the same heap address without ever touching
+    ///     `string_hash`, which would make a stale entry's pointer compare
+    ///     succeed against a different table. Bumping on construction means any
+    ///     recycled address carries a fresh epoch.
+    ///
+    /// Bumping unconditionally -- rather than reasoning about which tables are
+    /// reachable from a cached entry -- is deliberate: it makes the cache
+    /// impossible to poison by construction, at the cost of dropping the cache
+    /// more often than strictly required.
+    static LUA_TABLE_FIELD_EPOCH: Cell<u64> = const { Cell::new(0) };
+}
+
+/// One memoised `Expr::Field` resolution: the AST field-name's address and
+/// length, the table's address, the `LUA_TABLE_FIELD_EPOCH` the entry was filled
+/// at, and the value. All five must match for the entry to be served.
+type FieldCacheSlot = Option<(*const u8, usize, *const (), u64, LuaValue)>;
+
+fn lua_field_epoch() -> u64 {
+    LUA_TABLE_FIELD_EPOCH.with(Cell::get)
+}
+
+fn bump_lua_field_epoch() {
+    LUA_TABLE_FIELD_EPOCH.with(|c| c.set(c.get().wrapping_add(1)));
+}
+
 /// Register a freshly-created local/upvalue cell (the carrier of recursive
 /// closure self-references).
 fn lua_gc_register_cell(cell: &Rc<RefCell<LuaValue>>) {
@@ -151,6 +197,9 @@ impl Drop for LuaGcScope {
                             // should hold a live borrow, and a contended borrow
                             // must never panic during cleanup.
                             if let Ok(mut inner) = inner.try_borrow_mut() {
+                                // Bump site 1 of 5 (see LUA_TABLE_FIELD_EPOCH):
+                                // clearing string_hash invalidates cached reads.
+                                bump_lua_field_epoch();
                                 inner.array.clear();
                                 inner.string_hash.clear();
                                 inner.other_hash.clear();
@@ -509,6 +558,9 @@ impl LuaTable {
             shared_template: false,
             readonly: false,
         }));
+        // Bump site 4 of 5 (see LUA_TABLE_FIELD_EPOCH): a new table may reuse a
+        // freed address, so cached entries keyed on that address must not survive.
+        bump_lua_field_epoch();
         // (frankenredis-qqq17) Track for cycle-breaking at eval end.
         lua_gc_register_table(&inner);
         #[cfg(test)]
@@ -517,6 +569,9 @@ impl LuaTable {
     }
 
     fn new_shared_template() -> Self {
+        // Bump site 5 of 5 (see LUA_TABLE_FIELD_EPOCH): same address-reuse
+        // argument as `new()`.
+        bump_lua_field_epoch();
         Self {
             inner: Rc::new(RefCell::new(LuaTableInner {
                 array: Vec::new(),
@@ -688,6 +743,8 @@ impl LuaTableInner {
     fn hash_set(&mut self, key: LuaValue, value: LuaValue) {
         if matches!(value, LuaValue::Nil) {
             if let LuaValue::Str(s) = key {
+                // Bump site 2 of 5 (see LUA_TABLE_FIELD_EPOCH).
+                bump_lua_field_epoch();
                 self.string_hash.remove(&s);
             } else {
                 self.other_keys.remove(&LuaHashKey(key.clone()));
@@ -697,6 +754,8 @@ impl LuaTableInner {
             return;
         }
         if let LuaValue::Str(s) = key {
+            // Bump site 3 of 5 (see LUA_TABLE_FIELD_EPOCH).
+            bump_lua_field_epoch();
             self.string_hash.insert(s, value);
             return;
         }
@@ -3138,6 +3197,17 @@ pub struct LuaState<'a> {
     /// dereferenced -- this crate forbids unsafe.
     global_cache: [Option<(*const u8, usize, u64, LuaValue)>; 2],
     global_cache_next: usize,
+    /// (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0) Memoised
+    /// `Expr::Field` reads, keyed on (AST field-name address, table address,
+    /// LUA_TABLE_FIELD_EPOCH). `redis.call` is a field read on every call, and
+    /// the probe it replaces is a foldhash of the name plus a memcmp.
+    ///
+    /// Two entries, because the hot script shape reads a small fixed set of
+    /// fields; a miss simply takes the unchanged path. Pointers are compared,
+    /// never dereferenced -- this crate forbids unsafe. Soundness rests on the
+    /// epoch's five bump sites, argued in full on LUA_TABLE_FIELD_EPOCH.
+    field_cache: [FieldCacheSlot; 2],
+    field_cache_next: usize,
     /// (frankenredis-a0wt5) Recycled call-argument buffers. `eval_call_args`
     /// SOURCES its Vec from here and the hot `Expr::Call` path hands it back,
     /// which keeps one allocation per Lua call out of the loop.
@@ -4034,6 +4104,8 @@ impl<'a> LuaState<'a> {
             argv_scratch: Vec::new(),
             global_cache: [None, None],
             global_cache_next: 0,
+            field_cache: [None, None],
+            field_cache_next: 0,
             arg_scratch: Vec::new(),
             iterations: 0,
             current_line: 1,
@@ -5753,10 +5825,36 @@ impl<'a> LuaState<'a> {
                         // observed here. Verified by mutation -- deleting the
                         // check does not fail any test today. Kept so this stays
                         // correct if Nil ever becomes storable.
+                        // Memoised by (field-name address, table address, epoch).
+                        // A hit skips the name's hash and the key memcmp
+                        // entirely; anything that could change what `get_str`
+                        // would return bumps the epoch and makes every entry
+                        // unservable (see LUA_TABLE_FIELD_EPOCH).
+                        let field_ptr = field.as_ptr();
+                        let field_len = field.len();
+                        let table_ptr = Rc::as_ptr(&t.inner).cast::<()>();
+                        let epoch = lua_field_epoch();
+                        for slot in &self.field_cache {
+                            if let Some((cached_ptr, cached_len, cached_table, cached_epoch, value)) =
+                                slot
+                                && *cached_ptr == field_ptr
+                                && *cached_len == field_len
+                                && *cached_table == table_ptr
+                                && *cached_epoch == epoch
+                            {
+                                return Ok(value.clone());
+                            }
+                        }
                         let borrowed = t.inner.borrow().get_str(field.as_bytes());
                         if let Some(value) = borrowed
                             && !matches!(value, LuaValue::Nil)
                         {
+                            // Only HITS are cached. A miss must keep taking the
+                            // full lookup so __index chains still resolve.
+                            let slot = self.field_cache_next % self.field_cache.len();
+                            self.field_cache[slot] =
+                                Some((field_ptr, field_len, table_ptr, epoch, value.clone()));
+                            self.field_cache_next = self.field_cache_next.wrapping_add(1);
                             return Ok(value);
                         }
                         let key = LuaValue::Str(field.as_bytes().to_vec());
@@ -14433,6 +14531,107 @@ mod tests {
         )
         .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"1,2,3".to_vec())));
+    }
+
+    /// (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0) The field cache
+    /// memoises `Expr::Field` by (AST-name address, table address, epoch). Each
+    /// case below is written so that ONE specific guard's removal breaks it, and
+    /// each mutation was run:
+    ///
+    ///   * epoch bump on `string_hash.insert` -- without it, an overwritten
+    ///     field keeps serving the old value;
+    ///   * epoch bump on `string_hash.remove` -- without it, a field cleared to
+    ///     nil keeps serving the removed value instead of falling through to
+    ///     `__index`;
+    ///   * the table-address component -- without it, one AST node reading two
+    ///     different tables serves the first table's value for both.
+    ///
+    /// Every case reads through the SAME AST node more than once, in a loop.
+    /// That is essential and is easy to get wrong: two textual occurrences of
+    /// `t.f` are two different AST nodes with different addresses, so a test
+    /// written that way never populates a cache entry it then reads, and would
+    /// pass with the whole cache deleted.
+    ///
+    /// NOT directly tested, and stated rather than implied: the ABA case where a
+    /// table is freed and a new one is allocated at the same address. It cannot
+    /// be provoked deterministically from a script, since address reuse is an
+    /// allocator decision. It is why both `LuaTableInner` constructors bump the
+    /// epoch -- a recycled address always carries a fresh epoch.
+    #[test]
+    fn field_cache_never_serves_a_stale_or_foreign_value() {
+        let mut store = Store::new();
+
+        // OVERWRITE. One AST node (`t.f` inside the loop) read twice, with the
+        // field reassigned in between.
+        let frame = eval_script(
+            b"local t = {} \
+              t.f = 1 \
+              local out = {} \
+              for i = 1, 2 do \
+                out[i] = tostring(t.f) \
+                t.f = 2 \
+              end \
+              return table.concat(out, ',')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"1,2".to_vec())));
+
+        // REMOVAL. Clearing the field to nil must make the cached hit
+        // unservable and let `__index` answer instead.
+        let frame = eval_script(
+            b"local mt = {} \
+              mt.__index = function() return 'from_mt' end \
+              local t = setmetatable({}, mt) \
+              t.f = 'own' \
+              local out = {} \
+              for i = 1, 2 do \
+                out[i] = tostring(t.f) \
+                t.f = nil \
+              end \
+              return table.concat(out, ',')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"own,from_mt".to_vec())));
+
+        // FOREIGN TABLE. One AST node -- the `t.f` in the loop body -- read four
+        // times with `t` alternating between two distinct tables.
+        //
+        // The obvious spelling of this case does NOT discriminate, and I only
+        // found that by mutation: routing the two reads through a helper
+        // (`local function get(t) return t.f end`, called as `get(a)` then
+        // `get(b)`) leaves the test green with the table-address check deleted,
+        // because the call machinery bumps the epoch between the two reads and
+        // the epoch masks the missing check. Everything in this loop is chosen
+        // so nothing can bump: both tables are built beforehand, there is no
+        // call, and `out[#out + 1] = ...` takes the array path rather than
+        // `string_hash`.
+        let frame = eval_script(
+            b"local a = {} \
+              a.f = 'A' \
+              local b = {} \
+              b.f = 'B' \
+              local out = {} \
+              for i = 1, 4 do \
+                local t \
+                if i % 2 == 1 then t = a else t = b end \
+                out[#out + 1] = t.f \
+              end \
+              return table.concat(out, ',')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"A,B,A,B".to_vec())));
     }
 
     /// (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0) The numeric-for
