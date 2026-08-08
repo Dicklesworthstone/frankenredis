@@ -639,6 +639,9 @@ fn spawn_frankenredis_sharded_set_get(port: u16, workers: usize) -> ManagedChild
         .arg("strict")
         .arg("--experimental-sharded-set-get-workers")
         .arg(workers.to_string())
+        // (frankenredis-6ujef) Own working directory so cwd-relative default
+        // artifacts (dump.rdb, appendonly dir) cannot be shared between servers.
+        .current_dir(&log_dir)
         .stdout(Stdio::null())
         .stderr(Stdio::from(log_file));
     let mut child = ManagedChild::spawn(command, Some(log_path));
@@ -670,6 +673,7 @@ fn spawn_frankenredis_with_aof(port: u16) -> ManagedChild {
 }
 
 fn spawn_frankenredis_with_config(port: u16, config_path: &str) -> ManagedChild {
+    let work_dir = unique_temp_dir("frankenredis-server-work");
     let mut command = Command::new(env!("CARGO_BIN_EXE_frankenredis"));
     command
         .arg("--bind")
@@ -680,6 +684,9 @@ fn spawn_frankenredis_with_config(port: u16, config_path: &str) -> ManagedChild 
         .arg("strict")
         .arg("--config")
         .arg(config_path)
+        // (frankenredis-6ujef) Own working directory so cwd-relative default
+        // artifacts (dump.rdb, appendonly dir) cannot be shared between servers.
+        .current_dir(&work_dir)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     let child = ManagedChild::spawn(command, None);
@@ -688,12 +695,16 @@ fn spawn_frankenredis_with_config(port: u16, config_path: &str) -> ManagedChild 
 }
 
 fn spawn_frankenredis_config_only(port: u16, config_path: &str) -> ManagedChild {
+    let work_dir = unique_temp_dir("frankenredis-server-work");
     let mut command = Command::new(env!("CARGO_BIN_EXE_frankenredis"));
     command
         .arg("--mode")
         .arg("strict")
         .arg("--config")
         .arg(config_path)
+        // (frankenredis-6ujef) Own working directory so cwd-relative default
+        // artifacts (dump.rdb, appendonly dir) cannot be shared between servers.
+        .current_dir(&work_dir)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     let child = ManagedChild::spawn(command, None);
@@ -728,6 +739,21 @@ fn spawn_frankenredis_opts_with_config(
         .arg(port.to_string())
         .arg("--mode")
         .arg("strict")
+        // (frankenredis-6ujef) Each server gets its OWN working directory.
+        //
+        // Without this every spawned server inherited the test process's cwd —
+        // the repo root — and so shared one cwd-relative default `dump.rdb`
+        // and appendonly dir. Concurrent servers then loaded each other's
+        // state: `tcp_multi_client_concurrent_access_roundtrip` failed on
+        // `DBSIZE 1026 != 1002`, having inherited 24 foreign keys, and a
+        // `dump.rdb` was observably being written into the repo root by the
+        // test runs themselves.
+        //
+        // `log_dir` is already unique per process AND per spawn (pid + nanos),
+        // so pointing cwd at it isolates every default-path artifact for free.
+        // Every `--aof`/`--rdb`/`--config` path callers pass is absolute
+        // (built from `unique_temp_dir`), so nothing depends on the old cwd.
+        .current_dir(&log_dir)
         .stdout(Stdio::null())
         .stderr(Stdio::from(log_file));
     if let Some(primary_port) = primary_port {
@@ -5221,6 +5247,8 @@ fn tcp_config_file_rejects_invalid_aclfile_at_startup() {
         .arg("strict")
         .arg("--config")
         .arg(config_path_str)
+        // (frankenredis-6ujef) Own working directory; see spawn_frankenredis_opts.
+        .current_dir(&temp_dir)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
