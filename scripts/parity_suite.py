@@ -194,6 +194,7 @@ PORT_BASED = [
     ("integer_overflow_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("lcs_edge_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("intercard_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
+    ("function_debug_reload_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("empty_collection_autodelete_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("hll_core_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
     ("list_rdb_roundtrip_differ.py", [str(ORACLE_PORT), str(FR_PORT)]),
