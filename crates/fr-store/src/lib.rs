@@ -59807,25 +59807,54 @@ mod tests {
         let mut store_cold = Store::new();
         store_cold.zadd(key_cold, &adds, 0).unwrap();
         let (s, e) = (99_900i64, 99_999i64);
-        let reps = 2_000;
-        let t0 = std::time::Instant::now();
-        let mut c0 = 0usize;
-        for _ in 0..reps {
-            c0 = c0.wrapping_add(store_cold.zrange(key_cold, s, e, 0).unwrap().len());
+        // (frankenredis-6irj9) ONE deep ZRANGE per freshly-built store, best-of-N
+        // across stores -- NOT a 2,000-rep loop on one "cold" store.
+        //
+        // The old shape looped 2,000 deep ZRANGEs over a single `store_cold` and
+        // compared the total against the same loop on a warm store. That does not
+        // measure what its comment claimed. The rank treap ADAPTIVELY WARMS on
+        // repeated deep access (see
+        // `repeated_deep_zrange_adaptively_warms_rank_tree_mn0qm`, where the
+        // SECOND deep ZRANGE is already served warm), so the cold arm was cold
+        // for one or two of its 2,000 reps and warm for the rest. What it
+        // actually timed was a one-time treap BUILD amortised over ~2,000 warm
+        // queries, which is why three identical isolated runs gave 1.84x, 1.68x
+        // and 2.76x: the reading tracked how the build cost happened to land, not
+        // scheduling noise.
+        //
+        // Proof that this was the mechanism rather than a hypothesis: applying a
+        // plain best-of-5 to the OLD shape collapsed the ratio to 1.00x on 10 of
+        // 10 runs, because trials 2..5 had nothing left to build. A self-warming
+        // subject cannot be sampled repeatedly -- the second trial measures a
+        // different thing.
+        //
+        // So each cold trial gets its OWN freshly-built store and is timed for a
+        // SINGLE ZRANGE, which is genuinely served by the O(offset) linear skip.
+        // The warm arm is the same single ZRANGE on the already-warm store. The
+        // minimum over trials is the robust estimator on both sides -- timing
+        // noise only ever ADDS time -- and the 2.0x threshold is UNCHANGED.
+        let trials = 7;
+        let mut cold_ns = u128::MAX;
+        for _ in 0..trials {
+            let mut fresh = Store::new();
+            fresh.zadd(key_cold, &adds, 0).unwrap();
+            let t = std::time::Instant::now();
+            let got = fresh.zrange(key_cold, s, e, 0).unwrap().len();
+            cold_ns = cold_ns.min(t.elapsed().as_nanos().max(1));
+            std::hint::black_box(got);
         }
-        let cold_ns = t0.elapsed().as_nanos().max(1);
-        std::hint::black_box(c0);
         // `store` already has the tree warm from the ZRANK above.
-        let t1 = std::time::Instant::now();
-        let mut c1 = 0usize;
-        for _ in 0..reps {
-            c1 = c1.wrapping_add(store.zrange(key, s, e, 0).unwrap().len());
+        let mut warm_ns = u128::MAX;
+        for _ in 0..trials {
+            let t = std::time::Instant::now();
+            let got = store.zrange(key, s, e, 0).unwrap().len();
+            warm_ns = warm_ns.min(t.elapsed().as_nanos().max(1));
+            std::hint::black_box(got);
         }
-        let warm_ns = t1.elapsed().as_nanos().max(1);
-        std::hint::black_box(c1);
         let ratio = cold_ns as f64 / warm_ns as f64;
         println!(
-            "ZRANGE deep-index A/B (n={n}, start={s}, x{reps}): linear-skip={cold_ns}ns treap-select={warm_ns}ns ratio={ratio:.2}x"
+            "ZRANGE deep-index A/B (n={n}, start={s}, best of {trials} single accesses): \
+             linear-skip={cold_ns}ns treap-select={warm_ns}ns ratio={ratio:.2}x"
         );
         assert!(
             ratio > 2.0 || cfg!(debug_assertions),
@@ -67862,24 +67891,41 @@ mod tests {
             fold.insert(f.clone(), i as u64);
         }
 
+        // (frankenredis-6irj9) BEST-OF-N per arm. This gate passed in isolation
+        // but failed inside the full parallel workspace run, where 128 cores of
+        // other test binaries preempt a single timed loop. Timing noise only
+        // ADDS time, so the minimum over several trials estimates the true cost
+        // while a single sample estimates "whatever interrupted that run". Same
+        // statistic on both arms; the threshold below is untouched.
         let reps = 100u32;
-        let t0 = Instant::now();
+        let trials = 5;
+        let mut sip_ns = u128::MAX;
         let mut acc0 = 0u64;
-        for _ in 0..reps {
-            for f in &fields {
-                acc0 = acc0.wrapping_add(*sip.get(f.as_slice()).unwrap());
+        for _ in 0..trials {
+            let t0 = Instant::now();
+            let mut a = 0u64;
+            for _ in 0..reps {
+                for f in &fields {
+                    a = a.wrapping_add(*sip.get(f.as_slice()).unwrap());
+                }
             }
+            sip_ns = sip_ns.min(t0.elapsed().as_nanos().max(1));
+            acc0 = a;
         }
-        let sip_ns = t0.elapsed().as_nanos().max(1);
 
-        let t1 = Instant::now();
+        let mut fold_ns = u128::MAX;
         let mut acc1 = 0u64;
-        for _ in 0..reps {
-            for f in &fields {
-                acc1 = acc1.wrapping_add(*fold.get(f.as_slice()).unwrap());
+        for _ in 0..trials {
+            let t1 = Instant::now();
+            let mut a = 0u64;
+            for _ in 0..reps {
+                for f in &fields {
+                    a = a.wrapping_add(*fold.get(f.as_slice()).unwrap());
+                }
             }
+            fold_ns = fold_ns.min(t1.elapsed().as_nanos().max(1));
+            acc1 = a;
         }
-        let fold_ns = t1.elapsed().as_nanos().max(1);
 
         assert_eq!(acc0, acc1, "hash-field lookup results must match");
         // Insertion order must be hasher-independent (the parity guarantee).
