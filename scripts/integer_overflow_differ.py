@@ -35,7 +35,7 @@ def main():
 
     def setk(k, v):
         for s in (od, fr):
-            cmd(s, "SET", k, v)
+            assert_ok(cmd(s, "SET", k, v), f"SET {k}")
 
     for s in (od, fr):
         assert_ok(cmd(s, "FLUSHALL"), "FLUSHALL")
@@ -56,7 +56,7 @@ def main():
     # HINCRBY field overflow
     for s in (od, fr):
         cmd(s, "DEL", "hh")
-        cmd(s, "HSET", "hh", "ff", IMAX)
+        assert_seed(cmd(s, "HSET", "hh", "ff", IMAX), 1, "HSET hh ff")
     chk("hincrby_overflow", "HINCRBY", "hh", "ff", "1")
     chk("hincrby_arg_overflow", "HINCRBY", "hh", "ff", "99999999999999999999")
     chk("hincrby_nonint_field", "HSET", "hh", "nf", "x")

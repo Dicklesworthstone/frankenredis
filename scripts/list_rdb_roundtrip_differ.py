@@ -28,6 +28,10 @@ def build(s, key, n, width):
     els = [("e%d" % i).ljust(width, "x") for i in range(n)]
     for i in range(0, len(els), 50):
         cmd(s, "RPUSH", key, *els[i : i + 50])
+    # A partly- or wholly-failed build leaves a short/absent list, and DUMP +
+    # ENCODING + LRANGE then agree between the engines while testing a shape the
+    # case never meant to cover. (frankenredis-tesrb)
+    assert_seed(cmd(s, "LLEN", key), n, f"build {key} n={n} width={width}")
 
 
 def main():
@@ -35,8 +39,9 @@ def main():
     fp = int(sys.argv[2]) if len(sys.argv) > 2 else 16400
     od, fr = conn(op), conn(fp)
     for s in (od, fr):
-        cmd(s, "CONFIG", "SET", "list-max-listpack-size", "128")
-        cmd(s, "FLUSHALL")
+        assert_ok(cmd(s, "CONFIG", "SET", "list-max-listpack-size", "128"),
+                  "CONFIG SET list-max-listpack-size")
+        assert_ok(cmd(s, "FLUSHALL"), "FLUSHALL")
     fails = []
     n_checks = 0
     for n in SIZES:

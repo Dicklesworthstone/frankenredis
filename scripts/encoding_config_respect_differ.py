@@ -17,7 +17,7 @@ Usage: encoding_config_respect_differ.py <oracle_port> <fr_port>
 """
 import sys
 
-from _respread import assert_ok, assert_seed, cmd, conn
+from _respread import assert_ok, cmd, conn
 
 DEFAULTS = {
     "set-max-intset-entries": "512",
@@ -43,14 +43,23 @@ def main():
 
     def setcfg(k, v):
         for s in (od, fr):
-            cmd(s, "CONFIG", "SET", k, str(v))
+            assert_ok(cmd(s, "CONFIG", "SET", k, str(v)), f"CONFIG SET {k}")
 
     def each(*c):
         for s in (od, fr):
             cmd(s, *c)
 
     def enc(label, key):
-        eo, ef = short(cmd(od, "OBJECT", "ENCODING", key)), short(cmd(fr, "OBJECT", "ENCODING", key))
+        ro, rf = cmd(od, "OBJECT", "ENCODING", key), cmd(fr, "OBJECT", "ENCODING", key)
+        # The seeds that build `key` are table-driven with per-case counts, so the
+        # one precondition worth asserting is that they produced a key at all: a
+        # silently failed seed answers nil-encoding on BOTH engines, and this
+        # comparison passes having measured no encoding. (frankenredis-tesrb)
+        for tag, r in (("redis", ro), ("fr", rf)):
+            if r.startswith(b"$-1") or r.startswith(b"_"):
+                print(f"SEED FAILED [{label}]: {tag} has no key {key!r} to encode")
+                sys.exit(1)
+        eo, ef = short(ro), short(rf)
         if eo != ef:
             fails.append(f"{label}: redis={eo!r} fr={ef!r}")
 

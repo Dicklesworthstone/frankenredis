@@ -44,9 +44,9 @@ def main():
     o, f = conn(op), conn(fp)
     fails = []
     for s in (o, f):
-        cmd(s, "FLUSHALL")
+        assert_ok(cmd(s, "FLUSHALL"), "FLUSHALL")
         for cfg in (("hash-max-listpack-entries", "512"), ("hash-max-listpack-value", "64")):
-            cmd(s, "CONFIG", "SET", *cfg)
+            assert_ok(cmd(s, "CONFIG", "SET", *cfg), f"CONFIG SET {cfg[0]}")
 
     def chk(label, ro, rf):
         if ro != rf:
@@ -55,13 +55,15 @@ def main():
     for key, args in CASES.items():
         for s in (o, f):
             cmd(s, "DEL", key)
-            cmd(s, "HSET", key, *args)
+            assert_seed(cmd(s, "HSET", key, *args), len(args) // 2, f"HSET {key}")
         chk(f"dump_{key}", dump(o, key), dump(f, key))
         chk(f"enc_{key}", cmd(o, "OBJECT", "ENCODING", key), cmd(f, "OBJECT", "ENCODING", key))
         chk(f"hgetall_{key}", cmd(o, "HGETALL", key), cmd(f, "HGETALL", key))
         pl_o, pl_f = dump(o, key), dump(f, key)
-        cmd(o, "RESTORE", key + "r", "0", pl_o)
-        cmd(f, "RESTORE", key + "r", "0", pl_f)
+        # A failed RESTORE leaves key+"r" missing on BOTH engines, so the redump
+        # below compares two nils and passes. (frankenredis-tesrb)
+        assert_ok(cmd(o, "RESTORE", key + "r", "0", pl_o), f"redis RESTORE {key}r")
+        assert_ok(cmd(f, "RESTORE", key + "r", "0", pl_f), f"fr RESTORE {key}r")
         chk(f"redump_{key}", dump(o, key + "r"), dump(f, key + "r"))
 
     # (RDB-save encoder coverage) DUMP exercises the fr-store command encoder; the RDB-save
