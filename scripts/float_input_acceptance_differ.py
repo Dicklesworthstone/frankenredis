@@ -13,9 +13,9 @@ hexfloat_incr (hex only), and zset_score_range (the strtod range-bound parser).
 Usage: float_input_acceptance_differ.py <oracle_port> <fr_port>
        Exit 0 = byte-exact, 1 = divergence.
 """
-import socket
 import sys
-import time
+
+from _respread import assert_ok, assert_seed, cmd, conn
 
 SCORES = [
     "1.5", "1.5e3", "1.5E3", "1e10", "-2.5", "+3.5", ".5", "5.", "0.0", "-0.0",
@@ -24,20 +24,6 @@ SCORES = [
     "nan", "NaN", "-nan", "0x1p4", "0x1.8p1", "1_000", "3.14159265358979",
     "1e400", "-1e400",
 ]
-
-
-def conn(p):
-    return socket.create_connection(("127.0.0.1", p), timeout=5)
-
-
-def cmd(s, *a):
-    o = b"*%d\r\n" % len(a)
-    for x in a:
-        x = x if isinstance(x, bytes) else str(x).encode()
-        o += b"$%d\r\n%s\r\n" % (len(x), x)
-    s.sendall(o)
-    time.sleep(0.015)
-    return s.recv(1 << 20)
 
 
 def main():

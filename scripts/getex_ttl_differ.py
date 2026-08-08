@@ -12,9 +12,9 @@ PERSIST -> TTL -1, errors, and OBJECT ENCODING preservation.
 Usage: getex_ttl_differ.py <oracle_port> <fr_port>
        Exit 0 = byte-exact, 1 = divergence.
 """
-import socket
 import sys
-import time
+
+from _respread import assert_ok, cmd, conn
 
 EXAT = "4102444800"        # 2100-01-01 in seconds (stable absolute)
 EXAT2 = "4102444900"

@@ -14,9 +14,9 @@ compile error. This gate HARD-checks the full surface byte-exact.
 Usage: function_load_compile_error_differ.py <oracle_port> <fr_port>
        Exit 0 = byte-exact, 1 = divergence.
 """
-import socket
 import sys
-import time
+
+from _respread import cmd, conn
 
 GOOD = "#!lua name=goodlib\nredis.register_function('gf', function(k,a) return a[1] end)"
 
@@ -65,20 +65,6 @@ CASES = [
       "#!lua name=ratom\nredis.register_function('rf',function() return 1 end)\n)syntaxerr")),
     ("repl_atom_old_preserved", ("FCALL", "rf", "0")),
 ]
-
-
-def conn(p):
-    return socket.create_connection(("127.0.0.1", p), timeout=5)
-
-
-def cmd(s, *a):
-    o = b"*%d\r\n" % len(a)
-    for x in a:
-        x = x if isinstance(x, bytes) else str(x).encode()
-        o += b"$%d\r\n%s\r\n" % (len(x), x)
-    s.sendall(o)
-    time.sleep(0.03)
-    return s.recv(1 << 20)
 
 
 def main():

@@ -13,23 +13,9 @@ multi-key PFCOUNT union. Estimates are deterministic for a fixed element set.
 Usage: hll_estimation_range_differ.py <oracle_port> <fr_port>
        Exit 0 = byte-exact, 1 = divergence.
 """
-import socket
 import sys
-import time
 
-
-def conn(p):
-    return socket.create_connection(("127.0.0.1", p), timeout=10)
-
-
-def cmd(s, *a):
-    o = b"*%d\r\n" % len(a)
-    for x in a:
-        x = x if isinstance(x, bytes) else str(x).encode()
-        o += b"$%d\r\n%s\r\n" % (len(x), x)
-    s.sendall(o)
-    time.sleep(0.003)
-    return s.recv(1 << 20)
+from _respread import cmd, conn
 
 
 CHECKPOINTS = [1, 10, 100, 500, 1000, 2000, 5000, 12000, 16384, 20000, 40000, 50000]

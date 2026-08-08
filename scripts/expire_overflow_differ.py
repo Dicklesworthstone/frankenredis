@@ -10,27 +10,13 @@ byte-exact error wording. This gate pins them vs redis 7.2.4.
 Usage: expire_overflow_differ.py <oracle_port> <fr_port>
        Exit 0 = byte-exact, 1 = divergence.
 """
-import socket
 import sys
-import time
+
+from _respread import assert_ok, cmd, conn
 
 IMAX = "9223372036854775807"
 IMIN = "-9223372036854775808"
 HUGE = "9999999999999999"  # seconds; *1000 overflows i64
-
-
-def conn(p):
-    return socket.create_connection(("127.0.0.1", p), timeout=5)
-
-
-def cmd(s, *a):
-    o = b"*%d\r\n" % len(a)
-    for x in a:
-        x = x if isinstance(x, bytes) else str(x).encode()
-        o += b"$%d\r\n%s\r\n" % (len(x), x)
-    s.sendall(o)
-    time.sleep(0.02)
-    return s.recv(1 << 20)
 
 
 def main():

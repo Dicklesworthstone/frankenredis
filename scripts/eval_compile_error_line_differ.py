@@ -12,23 +12,9 @@ unexpected symbol / unterminated block comment), and a valid script.
 Usage: eval_compile_error_line_differ.py <oracle_port> <fr_port>
        Exit 0 = every case byte-exact, 1 = divergence.
 """
-import socket
 import sys
-import time
 
-
-def conn(p):
-    return socket.create_connection(("127.0.0.1", p), timeout=5)
-
-
-def cmd(s, *a):
-    o = b"*%d\r\n" % len(a)
-    for x in a:
-        x = x.encode() if isinstance(x, str) else x
-        o += b"$%d\r\n%s\r\n" % (len(x), x)
-    s.sendall(o)
-    time.sleep(0.03)
-    return s.recv(1 << 20)
+from _respread import cmd, conn
 
 
 # (label, argv) — each must be byte-exact vs redis 7.2.4.
