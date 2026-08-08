@@ -12,13 +12,20 @@ gives delta 1; BGSAVE collapses to 0 again. Absolute pre-save counts are NOT com
 
 Usage: rdb_changes_save_gate.py <redis-bin> <fr-bin> [base_port]
 """
-import importlib.util, os, socket, subprocess, sys, time
+import importlib.util, os, socket, subprocess, sys, tempfile, time
 
 REDIS_BIN = sys.argv[1] if len(sys.argv) > 1 else "legacy_redis_code/redis/src/redis-server"
 FR_BIN    = sys.argv[2] if len(sys.argv) > 2 else "/tmp/fr_rdb"
 BASE      = int(sys.argv[3]) if len(sys.argv) > 3 else 29761
-RDIR = "/data/tmp/rdbchg_redis_%d" % os.getpid()
-FRDB = "/data/tmp/rdbchg_fr_%d.rdb" % os.getpid()
+# Scratch under the platform temp dir (honours TMPDIR), NOT a hardcoded
+# /data/tmp. That path exists on the primary dev box and nowhere else, so on any
+# other host this gate died in os.makedirs BEFORE printing anything and
+# parity_suite scored it "[FAIL] (no output)" -- which reads like a gate that ran
+# and disagreed, rather than one that never started. mkdtemp also matches what
+# parity_suite already does for the servers' cwds.
+_SCRATCH = tempfile.mkdtemp(prefix="rdbchg_%d_" % os.getpid())
+RDIR = os.path.join(_SCRATCH, "redis")
+FRDB = os.path.join(_SCRATCH, "fr.rdb")
 
 _dsf = os.path.join(os.path.dirname(os.path.abspath(__file__)), "digest_state_fuzz.py")
 _spec = importlib.util.spec_from_file_location("digest_state_fuzz", _dsf)

@@ -15,7 +15,7 @@ restart or diverges from redis.
 
 Usage: aof_roundtrip_digest_fuzz.py <redis-bin> <fr-bin> [base_port] [seeds] [rounds]
 """
-import importlib.util, os, random, socket, subprocess, sys, time
+import importlib.util, os, random, socket, subprocess, sys, tempfile, time
 
 REDIS_BIN = sys.argv[1] if len(sys.argv) > 1 else "legacy_redis_code/redis/src/redis-server"
 FR_BIN    = sys.argv[2] if len(sys.argv) > 2 else "/tmp/fr_aof"
@@ -28,7 +28,12 @@ _dsf = os.path.join(os.path.dirname(os.path.abspath(__file__)), "digest_state_fu
 _spec = importlib.util.spec_from_file_location("digest_state_fuzz", _dsf)
 M = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(M)
 
-AOFDIR = "/data/tmp/fr_aofgate_%d" % os.getpid()
+# Scratch under the platform temp dir (honours TMPDIR), NOT a hardcoded
+# /data/tmp. That path exists on the primary dev box and nowhere else, so on any
+# other host this gate died in os.makedirs BEFORE printing anything and
+# parity_suite scored it "[FAIL] (no output)" -- indistinguishable in the
+# scorecard from a gate that ran and found a divergence.
+AOFDIR = tempfile.mkdtemp(prefix="fr_aofgate_%d_" % os.getpid())
 AOF = os.path.join(AOFDIR, "app.aof")
 
 def ping(port):
