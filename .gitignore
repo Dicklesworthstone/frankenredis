@@ -3,6 +3,11 @@
 /target-local
 target-*/
 **/*.rs.bk
+# Landing spot for a release-perf binary fetched off an rch worker (see
+# docs/BENCH_METHODOLOGY.md section 2). Deliberately NOT named target-*/ so it is
+# outside rch's retrieval exclude patterns; it holds a ~36 MB binary and must never
+# be committed.
+/frbuild
 
 # Local agent/task tooling state
 .bv/

@@ -36,9 +36,37 @@ switches into custom-target-dir mode, and bench/build artifact retrieval comes b
 ~0 bytes (`Custom CARGO_TARGET_DIR artifacts retrieved: 2 files, 769 bytes`). Unsetting it per
 invocation is required; do not merely hope the shell is clean.
 
-Corollary, learned the hard way: **`rch` does not return the linked binary.** Anything that needs a
-real `fr-server` (a live-server A/B, `perf record` on the server, a `fr-bench` row) cannot be done
-through `rch` today. Profiling an **already-existing** binary is fine and needs no Cargo at all.
+Corollary, learned the hard way: **`rch exec` does not COPY BACK the linked binary** — but the
+binary does get built, and you can fetch it. This paragraph used to end "cannot be done through
+`rch` today", and that overstated it: it turned a retrieval gap into a believed-permanent block,
+and work sat behind it.
+
+The cause is configuration, not capability. `rch config show` lists `exclude_patterns` containing
+`target/`, `target-*/` and `.rch-target-*/`, and `rch` builds into its own
+`.rch-target-<worker>-pool-<hash>/` on the worker — an excluded path — so retrieval comes back as a
+handful of metadata files (`5 files, 455 bytes`). Renaming your `--target-dir` does NOT help: the
+build still lands in rch's pool dir.
+
+What works (2026-08-08, `frankenredis-k0gwc`): build remotely as usual, read the worker and pool
+path out of rch's own `Retrieving artifacts from ... on <worker>` log line, then `scp` the binary:
+
+```sh
+RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- \
+    cargo build --profile release-perf -p fr-server            # note the worker + pool path it logs
+scp <worker>:/data/projects/frankenredis/.rch-target-<worker>-pool-<hash>/release-perf/frankenredis \
+    frbuild/release-perf/frankenredis
+chmod +x frbuild/release-perf/frankenredis
+```
+
+This is **not** a local-build fallback — compilation still happens on the worker, so the rule in
+section 1 is intact; only the artifact copy is manual. `frbuild/` is gitignored and is deliberately
+not named `target-*/`, which would put it back inside the exclude patterns.
+
+Always confirm you are testing what you think: have the server self-report its executing image via
+`/proc/<pid>/exe` and hash it. The pool hash is per-project, and the WORKER changes between runs
+(hz1 one build, hz2 the next), so re-read the log line each time rather than reusing a path.
+
+Profiling an **already-existing** binary is still fine and needs no Cargo at all.
 
 ## 3. A/B substrate
 

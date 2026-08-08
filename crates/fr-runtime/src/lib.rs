@@ -41861,10 +41861,14 @@ impl Runtime {
             if argv.len() != 3 {
                 return client_wrong_subcommand_arity(sub);
             }
-            let mode = match std::str::from_utf8(&argv[2]) {
-                Ok(m) => m,
-                Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
-            };
+            // (frankenredis-k0gwc) fr-runtime serves CLIENT on the LIVE path, so the
+            // matching fix in fr-command was unreachable here — caught only once a
+            // rebuilt binary made a live differential possible: unit tests passed
+            // while the running server still answered "invalid UTF-8 argument" where
+            // redis answers "syntax error". ON|OFF is an ASCII keyword compare and the
+            // token is never echoed, so undecodable bytes must reach the syntax-error
+            // arm below rather than raise an fr-only encoding error.
+            let mode = std::str::from_utf8(&argv[2]).unwrap_or("");
             if mode.eq_ignore_ascii_case("ON") {
                 self.session.client_no_evict = true;
             } else if mode.eq_ignore_ascii_case("OFF") {
@@ -41877,10 +41881,9 @@ impl Runtime {
             if argv.len() != 3 {
                 return client_wrong_subcommand_arity(sub);
             }
-            let mode = match std::str::from_utf8(&argv[2]) {
-                Ok(m) => m,
-                Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
-            };
+            // (frankenredis-k0gwc) Same as NO-EVICT above: ASCII keyword compare,
+            // token never echoed, so an undecodable one is redis's syntax error.
+            let mode = std::str::from_utf8(&argv[2]).unwrap_or("");
             if mode.eq_ignore_ascii_case("ON") {
                 self.session.client_no_touch = true;
             } else if mode.eq_ignore_ascii_case("OFF") {
@@ -44306,10 +44309,11 @@ replica_announced:1\r\n",
         // request still gets the canonical 'No failover in progress.'
         // wording rather than the replica-error text. (frankenredis-0bxcy)
         if argv.len() == 2 {
-            let arg = match std::str::from_utf8(&argv[1]) {
-                Ok(arg) => arg,
-                Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
-            };
+            // (frankenredis-k0gwc) FAILOVER is served here on the live path too. The
+            // token is compared as an ASCII keyword and never echoed; an unrecognized
+            // one falls through to the option parser below, which reports redis's
+            // syntax error regardless of the bytes.
+            let arg = std::str::from_utf8(&argv[1]).unwrap_or("");
             if arg.eq_ignore_ascii_case("ABORT") {
                 return RespFrame::Error("ERR No failover in progress.".to_string());
             }
@@ -44336,10 +44340,12 @@ replica_announced:1\r\n",
         let mut timeout_ms: Option<u64> = None;
         let mut i = 1;
         while i < argv.len() {
-            let arg = match std::str::from_utf8(&argv[i]) {
-                Ok(arg) => arg,
-                Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
-            };
+            // (frankenredis-k0gwc) FAILOVER's option parser — the SECOND gate on this
+            // command, after the ABORT check above. Fixing only that one left the live
+            // divergence in place, which the rebuilt-binary differential caught.
+            // TIMEOUT/TO/FORCE are ASCII keyword compares and the token is never
+            // echoed, so an unrecognized one is redis's syntax error.
+            let arg = std::str::from_utf8(&argv[i]).unwrap_or("");
             if arg.eq_ignore_ascii_case("TIMEOUT") && i + 1 < argv.len() && timeout_ms.is_none() {
                 let parsed_timeout = match parse_i64_arg(&argv[i + 1]) {
                     Ok(value) => value,
