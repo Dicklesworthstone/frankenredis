@@ -3109,6 +3109,16 @@ pub struct LuaState<'a> {
     /// the call returns — so nothing observable survives; it exists purely to
     /// keep one allocation per `redis.call` out of the hot loop.
     argv_scratch: Vec<Vec<u8>>,
+    /// (frankenredis-a0wt5) Recycled call-argument buffers. `eval_call_args`
+    /// SOURCES its Vec from here and the hot `Expr::Call` path hands it back,
+    /// which keeps one allocation per Lua call out of the loop.
+    ///
+    /// Only ever holds CLEARED Vecs. Callers that consume the returned Vec
+    /// (the `.extend(..)` sites) simply drop it and the pool refills on the
+    /// next call, so nothing has to be threaded through those paths; the same
+    /// is true of an error unwinding past the hand-back. It is a stack because
+    /// `Expr::Call` nests.
+    arg_scratch: Vec<Vec<LuaValue>>,
     /// True iff the pending_error_value came from an `error({err=STR})`
     /// unwrap (frankenredis-vkqn0). When the typed-error sentinel
     /// escapes uncaught at the top level, the rendering site prepends
@@ -3353,6 +3363,9 @@ struct Env {
 /// Cap on recycled scopes so a deeply nested script cannot retain buffers
 /// without bound.
 const SCOPE_POOL_LIMIT: usize = 32;
+
+/// (frankenredis-a0wt5) Same bound for recycled call-argument buffers.
+const ARG_SCRATCH_POOL_LIMIT: usize = 32;
 
 fn is_lua_yield_signal(err: &str) -> bool {
     err == LUA_YIELD_SENTINEL
@@ -3942,6 +3955,7 @@ impl<'a> LuaState<'a> {
             call_depth: 0,
             lua_frame_kinds: Vec::new(),
             argv_scratch: Vec::new(),
+            arg_scratch: Vec::new(),
             iterations: 0,
             current_line: 1,
             rng_seed,
@@ -5664,6 +5678,10 @@ impl<'a> LuaState<'a> {
                         _ => {}
                     }
                 }
+                // (frankenredis-a0wt5) Hand the buffer back on the normal exit.
+                // An error unwinding past here just drops it and the pool
+                // refills, so no error path has to be threaded.
+                self.give_arg_buffer(arg_vals);
                 Ok(results.into_iter().next().unwrap_or(LuaValue::Nil))
             }
             Expr::MethodCall(obj_expr, method, args) => {
@@ -5813,6 +5831,21 @@ impl<'a> LuaState<'a> {
         }
     }
 
+    /// (frankenredis-a0wt5) Borrow a cleared call-argument buffer.
+    fn take_arg_buffer(&mut self) -> Vec<LuaValue> {
+        self.arg_scratch.pop().unwrap_or_default()
+    }
+
+    /// Return a call-argument buffer for reuse. Clearing here drops every
+    /// remaining `LuaValue` immediately, so a pooled buffer never keeps a value
+    /// (or an `Rc` cell) alive past the call that produced it.
+    fn give_arg_buffer(&mut self, mut buffer: Vec<LuaValue>) {
+        buffer.clear();
+        if self.arg_scratch.len() < ARG_SCRATCH_POOL_LIMIT {
+            self.arg_scratch.push(buffer);
+        }
+    }
+
     fn eval_call_args(
         &mut self,
         args: &[Expr],
@@ -5826,7 +5859,11 @@ impl<'a> LuaState<'a> {
         // (CrimsonHawk) Pre-size to the arg count (the common no-trailing-expansion
         // case is exact) so building a redis.call / function arg list doesn't
         // re-grow the Vec from zero on every call.
-        let mut vals = Vec::with_capacity(args.len());
+        // (frankenredis-a0wt5) Source the buffer from the pool so the alloc
+        // itself leaves the loop too. It arrives cleared; callers that consume
+        // the Vec just drop it and the pool refills.
+        let mut vals = self.take_arg_buffer();
+        vals.reserve(args.len());
         for (i, arg) in args.iter().enumerate() {
             if i == args.len() - 1 {
                 // Last arg: expand multi-value
