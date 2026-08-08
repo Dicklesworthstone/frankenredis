@@ -2980,31 +2980,7 @@ impl Server {
     }
 
     fn sharded_worker_cpu_ns(&self) -> HashMap<u32, u64> {
-        let mut cpu_ns = HashMap::new();
-        let task_root = format!("/proc/{}/task", self.pid());
-        for entry in fs::read_dir(&task_root).expect("read server task directory") {
-            let entry = entry.expect("read server task entry");
-            let tid = entry
-                .file_name()
-                .to_string_lossy()
-                .parse::<u32>()
-                .expect("task directory is a TID");
-            let comm =
-                fs::read_to_string(entry.path().join("comm")).expect("read server task comm");
-            if !comm.trim().starts_with("fr-set-get-sha") {
-                continue;
-            }
-            let schedstat = fs::read_to_string(entry.path().join("schedstat"))
-                .expect("read sharded worker schedstat");
-            let task_cpu_ns = schedstat
-                .split_whitespace()
-                .next()
-                .expect("sharded worker schedstat contains execution time")
-                .parse::<u64>()
-                .expect("parse sharded worker CPU nanoseconds");
-            cpu_ns.insert(tid, task_cpu_ns);
-        }
-        cpu_ns
+        sharded_worker_cpu_ns_for_pid(self.pid())
     }
 
     fn affinity_cpus(&self) -> Vec<usize> {
@@ -7399,6 +7375,145 @@ shape={} distribution={distribution:?}",
     keys
 }
 
+/// Regression for frankenredis-uiqc5.
+///
+/// The hot controls used to assert that a key-concentrated fixture executed on
+/// exactly one reactor. Reactors are assigned round-robin at accept, before any
+/// key is parsed, so that assert was unsatisfiable for more than one connection
+/// per reactor and the sharded sweep aborted on it.
+#[test]
+fn hot_fixture_lights_up_every_reactor_regardless_of_key_placement() {
+    // One connection cannot occupy more than one reactor.
+    assert_eq!(expected_active_command_workers(1, 8), 1);
+    // Fewer connections than reactors leaves the surplus reactors idle.
+    assert_eq!(expected_active_command_workers(3, 8), 3);
+    // The case the stale assert got wrong: many connections, few reactors.
+    assert_eq!(expected_active_command_workers(128, 2), 2);
+    assert_eq!(expected_active_command_workers(128, 64), 64);
+    // A hot fixture is not special on this axis -- it matches the spread shape.
+    assert_eq!(
+        expected_active_command_workers(128, 16),
+        expected_active_command_workers(128, 16)
+    );
+}
+
+/// Regression for frankenredis-uiqc5: the fixtures the hot controls build must
+/// still concentrate every key into a single partition, which is the property
+/// those controls actually exercise.
+#[test]
+fn hot_control_fixtures_concentrate_one_partition() {
+    let mixed_hot = vec![b"mc:hot-key".to_vec(); 128];
+    assert_fixture_targets_single_partition(&mixed_hot, "single_hot_key_control");
+
+    for workers in [1usize, 2, 8, 64] {
+        let hot_shard_keys = tagged_shard_keys(128, workers, true);
+        assert_eq!(hot_shard_keys.len(), 128);
+        assert_fixture_targets_single_partition(
+            &hot_shard_keys,
+            "single_hot_shard_distinct_keys_control",
+        );
+        // Distinct keys per connection, single shared partition -- that pairing
+        // is the whole point of the distinct-keys control.
+        assert_eq!(
+            hot_shard_keys.iter().collect::<HashSet<_>>().len(),
+            128,
+            "hot-shard control must still use a distinct key per connection"
+        );
+    }
+}
+
+/// Regression for frankenredis-uiqc5, against a live server.
+///
+/// Drives every connection at keys that share one hash tag (so one partition)
+/// and asserts the reactors light up by connection count, not key count. This
+/// is the measurement that showed the old invariant was describing a placement
+/// policy the server does not implement.
+#[test]
+fn live_hot_partition_spreads_connections_across_reactors() {
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_frankenredis"));
+    assert!(binary.is_file(), "missing {}", binary.display());
+
+    for (connections, workers) in [(1usize, 2usize), (8, 2), (16, 4)] {
+        let port = free_port();
+        let mut child = Command::new(&binary)
+            .args([
+                "--bind",
+                "127.0.0.1",
+                "--port",
+                &port.to_string(),
+                "--experimental-sharded-set-get-workers",
+                &workers.to_string(),
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn sharded frankenredis");
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        // Every key shares the tag, so crc16_slot maps them all to one slot.
+        let keys = (0..connections)
+            .map(|index| format!("{{uiqc5:hot}}:connection:{index}").into_bytes())
+            .collect::<Vec<_>>();
+        assert_fixture_targets_single_partition(&keys, "live_hot_partition");
+
+        let mut streams = keys
+            .iter()
+            .map(|key| {
+                let stream = connect(port);
+                (stream, key.clone())
+            })
+            .collect::<Vec<_>>();
+
+        // Snapshot only after every measured connection is established, the way
+        // the sweep does after `replace_clients`. Connection setup -- including
+        // the readiness probe above -- lands on whichever reactor the
+        // round-robin counter was pointing at, and counting that would measure
+        // accept bookkeeping instead of command execution.
+        thread::sleep(Duration::from_millis(200));
+        let before = sharded_worker_cpu_ns_for_pid(child.id());
+        assert_eq!(
+            before.len(),
+            workers,
+            "expected {workers} command workers, found {}",
+            before.len()
+        );
+        for (stream, key) in &mut streams {
+            let request = resp_command(&[b"SET", key, b"v"]).repeat(2_000);
+            stream
+                .write_all(&request)
+                .expect("write hot partition load");
+            let mut seen = 0usize;
+            let mut buffer = [0u8; 8192];
+            while seen < SET_REPLY.len() * 2_000 {
+                let read = stream
+                    .read(&mut buffer)
+                    .expect("read hot partition replies");
+                assert!(read > 0, "server closed the connection early");
+                seen += read;
+            }
+        }
+        drop(streams);
+
+        let after = sharded_worker_cpu_ns_for_pid(child.id());
+        let active = active_sharded_worker_count(&before, &after);
+        let expected = expected_active_command_workers(connections, workers);
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(
+            active, expected,
+            "connections={connections} workers={workers}: one partition, but reactors are \
+assigned round-robin, so active reactors must equal min(connections, workers)"
+        );
+    }
+}
+
 #[test]
 fn zrangebyscore_range_packet_has_exact_inclusive_reply() {
     let single_reply = zrangebyscore_range_reply();
@@ -8422,11 +8537,79 @@ commands_per_pipeline=16 groups=32 full_response_bytes_asserted=true",
     }
 }
 
+/// Per-command-worker CPU nanoseconds, keyed by TID.
+///
+/// `comm` truncates at 15 characters, so the reactor threads named
+/// `fr-set-get-shard-{idx}` surface as the `fr-set-get-sha` prefix.
+fn sharded_worker_cpu_ns_for_pid(pid: u32) -> HashMap<u32, u64> {
+    let mut cpu_ns = HashMap::new();
+    let task_root = format!("/proc/{pid}/task");
+    for entry in fs::read_dir(&task_root).expect("read server task directory") {
+        let entry = entry.expect("read server task entry");
+        let tid = entry
+            .file_name()
+            .to_string_lossy()
+            .parse::<u32>()
+            .expect("task directory is a TID");
+        let comm = fs::read_to_string(entry.path().join("comm")).expect("read server task comm");
+        if !comm.trim().starts_with("fr-set-get-sha") {
+            continue;
+        }
+        let schedstat = fs::read_to_string(entry.path().join("schedstat"))
+            .expect("read sharded worker schedstat");
+        let task_cpu_ns = schedstat
+            .split_whitespace()
+            .next()
+            .expect("sharded worker schedstat contains execution time")
+            .parse::<u64>()
+            .expect("parse sharded worker CPU nanoseconds");
+        cpu_ns.insert(tid, task_cpu_ns);
+    }
+    cpu_ns
+}
+
 fn active_sharded_worker_count(before: &HashMap<u32, u64>, after: &HashMap<u32, u64>) -> usize {
     after
         .iter()
         .filter(|(tid, ticks)| **ticks > before.get(tid).copied().unwrap_or(0))
         .count()
+}
+
+/// Reactors that a fixture will light up, for ANY key distribution.
+///
+/// `accept_shared_nothing_connections` assigns each accepted socket to
+/// `SharedNothingWorkerPool::next_worker()`, a plain round-robin counter. The
+/// reactor is chosen before a single byte is parsed, so it cannot depend on a
+/// key. Placement *by first key* was measured on 2026-07-31 and deliberately
+/// rejected: it parked 1 of 16 reactors at ~95% CPU for 80,174 rps (0.4709x
+/// live redis) where round-robin used 16 of 16 for 332,934 rps (1.9553x) --
+/// 4.152x from that one decision. See the doc comment on
+/// `accept_shared_nothing_connections` in `crates/fr-server/src/main.rs`.
+///
+/// So a "hot key" or "hot shard" fixture concentrates the PARTITION, never the
+/// reactor, and every shape spreads identically across `min(clients, workers)`
+/// reactors. Asserting that a hot fixture lands on exactly one reactor demands
+/// the placement policy that was thrown out, and is unsatisfiable whenever
+/// there is more than one connection per reactor.
+fn expected_active_command_workers(clients: usize, server_workers: usize) -> usize {
+    clients.min(server_workers)
+}
+
+/// Assert the property a hot fixture actually owns: every key resolves to one
+/// partition, so the arms contend on a single partition lock while their
+/// connections stay spread across all reactors.
+fn assert_fixture_targets_single_partition(keys: &[Vec<u8>], workload_shape: &str) {
+    assert!(!keys.is_empty(), "{workload_shape} fixture cannot be empty");
+    let slots = keys
+        .iter()
+        .map(|key| fr_store::crc16_slot(key))
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        slots.len(),
+        1,
+        "{workload_shape} must place every key in one partition, got {} distinct slots",
+        slots.len()
+    );
 }
 
 fn parse_u64_env(name: &str, default: u64) -> u64 {
@@ -10343,10 +10526,15 @@ server_command_execution_threads={server_workers} verdict={verdict:?}",
                     &candidate_worker_cpu_ns_after[1],
                 ),
             ];
+            let expected_active = expected_active_command_workers(clients, server_workers);
             assert!(
-                active_workers.iter().all(|active| *active == 1),
-                "single-hot-key control must execute on exactly one shard in both candidate A/A \
-arms: active={active_workers:?}"
+                active_workers
+                    .iter()
+                    .all(|active| *active == expected_active),
+                "single-hot-key control concentrates the partition, not the reactor: connections \
+are placed round-robin at accept, so both candidate A/A arms must light up \
+min(clients={clients}, workers={server_workers})={expected_active} reactors: \
+active={active_workers:?}"
             );
             println!(
                 "COUNTED_MECHANISM workload=mixed workload_shape=single_hot_key_control \
@@ -10381,12 +10569,20 @@ server_command_execution_threads={server_workers} verdict={hot_verdict:?}"
             for server in &mut servers {
                 server.replace_clients(client_shape);
             }
+            assert_fixture_targets_single_partition(
+                &hot_shard_keys,
+                "single_hot_shard_distinct_keys_control",
+            );
             let hot_packets = Arc::new(hot_packets);
             println!(
                 "MIXED_FAMILY_HOT_CONTROL_CONTRACT \
 workload_shape=single_hot_shard_distinct_keys_control \
 connections={clients} distinct_keys_per_connection=3 \
-all_keys_route_to_one_command_worker=true full_response_bytes_asserted=true"
+all_keys_route_to_one_partition=true \
+reactor_placement=round_robin_at_accept \
+expected_active_command_workers={} \
+full_response_bytes_asserted=true",
+                expected_active_command_workers(clients, server_workers)
             );
             let candidate_worker_cpu_ns_before = [
                 servers[DualNullArm::CandidateA.index()].sharded_worker_cpu_ns(),
@@ -10418,10 +10614,15 @@ all_keys_route_to_one_command_worker=true full_response_bytes_asserted=true"
                     &candidate_worker_cpu_ns_after[1],
                 ),
             ];
+            let expected_active = expected_active_command_workers(clients, server_workers);
             assert!(
-                active_workers.iter().all(|active| *active == 1),
-                "single-hot-shard mixed-family control must execute on exactly one shard in \
-both candidate A/A arms: active={active_workers:?}"
+                active_workers
+                    .iter()
+                    .all(|active| *active == expected_active),
+                "single-hot-shard mixed-family control concentrates the partition, not the \
+reactor: connections are placed round-robin at accept, so both candidate A/A arms must light up \
+min(clients={clients}, workers={server_workers})={expected_active} reactors: \
+active={active_workers:?}"
             );
             println!(
                 "COUNTED_MECHANISM workload=mixed-families \
