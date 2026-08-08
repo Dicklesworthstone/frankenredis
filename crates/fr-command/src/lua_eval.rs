@@ -3338,7 +3338,16 @@ struct Env {
     /// at indices >= local_floor are locals declared in or below the
     /// current function body. (frankenredis-md71j)
     local_floor: usize,
+    /// (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0) Recycled scope
+    /// buffers. Only ever holds CLEARED scopes, so nothing observable survives
+    /// a pop; it exists purely to keep `Vec<LocalBinding>` allocations out of
+    /// hot loops.
+    scope_pool: Vec<Scope>,
 }
+
+/// Cap on recycled scopes so a deeply nested script cannot retain buffers
+/// without bound.
+const SCOPE_POOL_LIMIT: usize = 32;
 
 fn is_lua_yield_signal(err: &str) -> bool {
     err == LUA_YIELD_SENTINEL
@@ -3350,6 +3359,7 @@ impl Env {
             scopes: vec![Scope::new()],
             global_env: None,
             local_floor: 0,
+            scope_pool: Vec::new(),
         }
     }
 
@@ -3361,13 +3371,36 @@ impl Env {
         self.global_env = Some(table);
     }
 
+    /// (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0) Scopes are
+    /// pushed and popped once per loop iteration, and each one allocates a
+    /// fresh `Vec<LocalBinding>` the first time a local lands in it. Recycling
+    /// the popped `Vec`'s buffer keeps that allocation out of the loop.
+    ///
+    /// The recycled scope is CLEARED on the way in, so a reused scope is
+    /// observationally identical to `Scope::new()` -- only the heap buffer
+    /// survives, never a binding. That keeps every lookup, upvalue capture and
+    /// shadowing rule untouched.
     fn push_scope(&mut self) {
-        self.scopes.push(Scope::new());
+        match self.scope_pool.pop() {
+            Some(mut scope) => {
+                scope.locals.clear();
+                self.scopes.push(scope);
+            }
+            None => self.scopes.push(Scope::new()),
+        }
     }
 
     fn pop_scope(&mut self) {
-        if self.scopes.len() > 1 {
-            self.scopes.pop();
+        if self.scopes.len() > 1
+            && let Some(mut scope) = self.scopes.pop()
+        {
+            // Drop the bindings now (they own cells the GC tracks); retain only
+            // the buffer, and only while the pool is small enough that a deep
+            // script cannot turn this into unbounded retention.
+            scope.locals.clear();
+            if self.scope_pool.len() < SCOPE_POOL_LIMIT {
+                self.scope_pool.push(scope);
+            }
         }
     }
 
@@ -3480,6 +3513,7 @@ impl Env {
                 .collect(),
             global_env: None,
             local_floor,
+            scope_pool: Vec::new(),
         }
     }
 
@@ -14065,6 +14099,95 @@ mod tests {
         compile_check, eval_script, json_to_lua_value, lua_base_globals_template, lua_raw_equal,
         lua_test_live_tables, lua_value_to_json, overlay_filter_bit,
     };
+
+    /// (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0) Scope buffers
+    /// are recycled between pushes. The whole design rests on a recycled scope
+    /// being observationally identical to a fresh one, so pin that a binding
+    /// from an earlier scope can never reappear in a later one.
+    #[test]
+    fn recycled_scopes_never_leak_a_binding() {
+        let mut store = Store::new();
+
+        // THE DISCRIMINATING CASE. `leaked` is declared only inside iteration
+        // 1's inner block. A later iteration reads it WITHOUT declaring it, so
+        // the read must fall through to globals and hit the protected-globals
+        // guard. If a recycled scope carried the binding forward, this would
+        // instead resolve to the stale local and return "99".
+        //
+        // Re-declaring the name in each iteration does NOT test this:
+        // `set_local_cell` finds an existing binding by name and overwrites it,
+        // so a leak would be masked. Verified by mutation -- removing both
+        // `locals.clear()` calls must fail THIS assertion.
+        let leaked = eval_script(
+            b"local r = {} \
+              for i = 1, 3 do \
+                if i == 1 then local leaked = 99 end \
+                if i == 3 then r[1] = tostring(leaked) end \
+              end \
+              return r[1]",
+            &[],
+            &[],
+            &mut store,
+            0,
+        );
+        let message =
+            leaked.expect_err("reading an undeclared name must not resolve to a recycled binding");
+        assert!(
+            message.contains("nonexistent global variable 'leaked'"),
+            "expected the protected-globals error, got {message:?}"
+        );
+
+        // Same name re-declared per iteration must re-initialise, not persist.
+        let frame = eval_script(
+            b"local r = {} \
+              for i = 1, 3 do \
+                local acc = i * 10 \
+                r[i] = tostring(acc) \
+              end \
+              return table.concat(r, ',')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"10,20,30".to_vec())));
+
+        // Nested scopes recycled at different depths must still shadow
+        // correctly and restore the outer binding on exit.
+        let frame = eval_script(
+            b"local out = {} \
+              for i = 1, 3 do \
+                local v = 'outer' \
+                do local v = 'inner' ; out[#out + 1] = v end \
+                out[#out + 1] = v \
+              end \
+              return table.concat(out, ',')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(b"inner,outer,inner,outer,inner,outer".to_vec()))
+        );
+
+        // A closure capturing a loop local must keep its own cell after the
+        // scope that created it has been popped and recycled.
+        let frame = eval_script(
+            b"local fns = {} \
+              for i = 1, 3 do fns[i] = function() return i end end \
+              return fns[1]() .. ',' .. fns[2]() .. ',' .. fns[3]()",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"1,2,3".to_vec())));
+    }
 
     /// (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0) The intercept
     /// pre-filter is only sound if it never rejects a command the chain would
