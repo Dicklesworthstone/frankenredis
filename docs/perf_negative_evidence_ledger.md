@@ -14987,3 +14987,109 @@ question against 7.2.4 and not merely a perf one, and it must be settled before 
 Re-measure with this same bench and require the cost below 1.05x on three consecutive admissible
 rows before enabling recording on this path. Do NOT re-attempt the straightforward per-command
 clock pair: it has been measured at 2.68-3.20x and that is not a substrate artifact.
+
+## 2026-08-08 CrimsonHawk: KEEP — the day's ten Lua interpreter levers MOVE THE COMPETITIVE NUMBER, EVAL 0.689x -> 0.755x vs vendored 7.2.4 (`frankenredis-lua-rediscall-loop-interpreter-bound-d3al0`)
+
+Claim class: COMPETITIVE. Campaign output: yes.
+
+A live vendored Redis 7.2.4 server arm runs in the SAME invocation as both FrankenRedis arms,
+driven by the same vendored `redis-benchmark`, and the headline is a ratio against that arm:
+**FrankenRedis / vendored Redis 7.2.4 = 0.7553x** after the ten levers, up from
+FrankenRedis / vendored Redis 7.2.4 = 0.6893x before them. This entry deliberately does NOT rest on the instructions:u
+microbench that the ten levers were developed against; that instrument compares fr to fr and cannot
+support a competitive claim, which is exactly why this measurement was made.
+
+WHAT WAS MEASURED. `scripts/lua_eval_headtohead.sh` (new, added with this entry) runs four arms in
+one invocation: fr_A = the server built at `72d8bc325`, the commit immediately BEFORE the first of
+today's ten Lua levers; fr_B = the server built at `dc330ddb7`, i.e. after all ten; fr_A2 = a
+byte-identical copy of fr_A providing the A/A null; and live Redis 7.2.4. Workload is
+`EVAL "for i=1,50 do redis.call('GET', KEYS[1]) end return 1" 1 k` — the microbench's script
+verbatim, so the two instruments exercise the same interpreter path.
+
+BINARIES. Each arm's hash below is the RUNNING IMAGE: the harness hashes
+`/proc/<pid>/exe` of the already-started server, so the benchmarked server ELF self-reported
+SHA-256 rather than the harness vouching for a file it hashed on disk beforehand.
+  fr_A  benchmarked server ELF self-reported SHA-256
+        502ec90c93117e23e1fd9efb3b5dc3f78eb5ad350c26426fad68bd4241e20d03   (pre-levers, 72d8bc325)
+  fr_A2 benchmarked server ELF self-reported SHA-256
+        502ec90c93117e23e1fd9efb3b5dc3f78eb5ad350c26426fad68bd4241e20d03   <- equals fr_A, as a null
+        arm must; the harness refuses to run if the two are not byte-identical
+  fr_B  benchmarked server ELF self-reported SHA-256
+        de4c5e42aa58c776b1615de540c8590756bd596ddb9cd0ab65c60c6ec1815936   (post-levers, dc330ddb7)
+  redis benchmarked server ELF self-reported SHA-256
+        f17461ccbebf44ce238d338215fde339d0b93c61ee499cb2cc2c97aa777582e8
+        Redis server v=7.2.4 malloc=jemalloc-5.3.0 bits=64
+Host threadripperje, 128 cores, load < 1.0, servers and client each pinned to their own quiet core
+whose SMT sibling is also idle, c=1 serial control, n=20000 evals (1M redis.calls) per arm per
+round, 15 rounds, arm order alternated and core assignment rotated every round.
+
+RESULT. TWO independent invocations, both admissible. Medians of per-round ratios with
+bootstrap 95% median CIs; the SECOND is the better-controlled run (tighter null) and neither is
+discarded:
+
+  invocation 1                                invocation 2
+  A/A null    1.0145  CI [0.9914, 1.0224]     1.0000  CI [0.9880, 1.0159]   <- both CONTAIN 1.0
+  A/B effect  1.0843  CI [1.0433, 1.1168]     1.0613  CI [1.0407, 1.0690]   <- both EXCLUDE 1.0
+  fr_A/redis  0.6893  CI [0.6683, 0.7178]     0.7033  CI [0.6976, 0.7139]
+  fr_B/redis  0.7553  CI [0.7481, 0.7597]     0.7438  CI [0.7356, 0.7529]
+  null widest bound      2.24%                       1.59%
+
+Stated in the contract's own terms for the better-controlled run: A/A null median 1.0000 with
+bootstrap 95% median CI [0.9880, 1.0159], against an A/B effect median 1.0613 with bootstrap 95%
+median CI [1.0407, 1.0690]. Invocation 1 likewise: A/A null median 1.0145 with bootstrap 95%
+median CI [0.9914, 1.0224], A/B effect median 1.0843 with bootstrap 95% median CI [1.0433, 1.1168].
+
+The bootstrap median-CI gate determined the verdict, never CV. CV is not computed here at all and
+would be the wrong instrument: the per-round spread of an e2e throughput ratio is wide (individual
+rounds ranged 0.94-1.10 on the null) while the MEDIAN of fifteen rounds is well determined, so a
+dispersion statistic would have refused a result the interval resolves cleanly. The decision rule
+is mechanical and is enforced by the harness itself, which prints it: the A/A null CI must contain
+1.0, and the A/B CI must exclude 1.0 AND the effect must exceed the null's widest bound from 1.0.
+
+The honest headline is therefore a RANGE, not the friendlier of the two numbers: the ten levers are
+worth **+6.1% to +8.4% of end-to-end EVAL throughput**, moving FrankenRedis from 0.689-0.703x to
+0.744-0.755x of the incumbent. In both invocations the two competitive CIs DO NOT OVERLAP, so the
+improvement in competitive position is itself resolved and not merely the throughput delta.
+Absolute ops/s (invocation 2): fr_A 17,227 · fr_B 18,100 · redis 24,361.
+
+WHAT IT MEANS, stated without inflation. Ten levers that removed 23.60% of the interpreter's
+per-redis.call instructions (3,806 -> 2,908, microbench) bought **+8.43% of end-to-end EVAL
+throughput** and moved fr from 0.689x to 0.755x of the incumbent. The instruction win is real and
+so is the throughput win, but they are not the same size — most of an unpipelined EVAL round trip
+is not interpreter time — and anyone quoting 23.60% as a competitive figure would be wrong by
+roughly a factor of three. **fr still LOSES this workload at 0.755x.**
+
+PARTIALLY REFUTES an inherited verdict, and the distinction matters:
+  `docs/perf_negative_evidence_ledger.md:7676` (2026-06-28 AmberRiver) concluded "EVAL is
+  conclusively a STRUCTURAL-only gap (bytecode VM / mlua-LuaJIT)" after a SipHash->foldhash swap on
+  the Lua maps measured 1.00-1.02x. That row is correct that the gap is real and correct that
+  swapping the hash FUNCTION does nothing. It is wrong that no safe lever can move the number:
+  eliding work rather than making it cheaper moved it 6.6 ratio points. Note that row was taken at
+  host load ~12 with no A/A null, so it could not have resolved a sub-10% effect had one existed —
+  it is a VOID-NONULL-class row by this repo's own taxonomy, and re-running its ground was
+  legitimate on that basis.
+
+HARNESS PROVENANCE, recorded because two of these bit this measurement before it was trustworthy:
+  * The first configuration reported an A/A null of 1.046 with a 10.8% spread and did NOT shrink
+    when run length was tripled, because the bias was POSITIONAL — the arms held fixed cores, and
+    core 0 (which absorbs device interrupts) permanently penalised whichever arm drew it. Fixed by
+    excluding core 0 and by rotating the core assignment across arms every round via `taskset -cp`.
+    That took the null median from 1.046 to 1.0145.
+  * At c=8 the per-round spread stayed near 10% even unbiased; the c=1 SERIAL CONTROL is what makes
+    the null tight enough to resolve an 8% effect. Any future use of this harness at higher
+    concurrency must re-establish its own null before quoting an A/B.
+  * `redis-benchmark --csv` is UNPARSEABLE for this workload: it names the test after the command
+    it sent, and the script contains both commas and double quotes, so the rps lands in a
+    column that moves with the script text. The harness parses the `-q` line instead. A field-index
+    parse here silently reads a latency as a throughput.
+  * The harness refuses to run unless every arm returns the integer `1` for the exact script the
+    benchmark will send. redis-benchmark counts an ERROR REPLY as a completed request, so an engine
+    that refused the script would post an excellent number.
+
+Retry predicate: this is a KEEP of a measurement, not of a code change; the code it validates is
+already on main. Re-run `scripts/lua_eval_headtohead.sh` after any further interpreter lever and
+require (a) the A/A null CI to contain 1.0, (b) the A/B CI to exclude 1.0 and clear the null's
+widest bound, before quoting any competitive movement. Do NOT quote the microbench's instruction
+percentage as a competitive figure — the measured translation on this workload is about 1:3. Revisit
+the "structural gap" question specifically if `fr_B/redis` ever crosses 0.90x by safe levers alone,
+which would mean the bytecode-VM conclusion needs restating rather than qualifying.
