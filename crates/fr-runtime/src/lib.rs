@@ -33,7 +33,7 @@ use fr_eventloop::{
 };
 use fr_persist::{
     AofRecord, PersistError, RdbEntry, RdbStringEntryRef, RdbValue, decode_aof_stream,
-    encode_aof_stream, encode_aof_stream_tail_bytes, read_rdb_file,
+    encode_aof_stream, encode_aof_stream_tail_bytes, read_rdb_file_with_functions,
 };
 use fr_protocol::{RespFrame, RespParseError, encode_bulk_string_slice};
 use fr_repl::{
@@ -6245,7 +6245,7 @@ impl Runtime {
             Some(path) => path.clone(),
             None => return Ok(0),
         };
-        let (entries, _aux, functions) = fr_persist::read_rdb_file_with_functions(&path)?;
+        let (entries, _aux, functions) = read_rdb_file_with_functions(&path)?;
         let mut store = Store::new();
         // (frankenredis-63p1s) Apply the live encoding thresholds BEFORE the
         // rebuild so replayed collections pick their encoding under the current
@@ -6277,8 +6277,18 @@ impl Runtime {
         }
 
         if let Some(path) = self.server.rdb_path.clone() {
-            return match read_rdb_file(&path) {
-                Ok((entries, _aux)) => {
+            // (frankenredis-i0yd6) read_rdb_file_with_functions, NOT read_rdb_file:
+            // the plain reader drops the RDB_OPCODE_FUNCTION2 records on the floor,
+            // so every Lua FUNCTION library was lost across a DEBUG RELOAD whenever
+            // an RDB path was configured — which is the DEFAULT for fr-server, so
+            // this was the live behaviour, not a corner case. The in-memory branch
+            // below already restored them (c0u9q); this branch never did, and the
+            // asymmetry hid the bug from the unit tests, which run with no rdb_path
+            // and therefore only ever exercised the branch that was correct.
+            // Measured vs redis 7.2.4: FUNCTION LIST *1 -> fr *0, FCALL -> "Function
+            // not found", while a plain key set before the reload survived it.
+            return match read_rdb_file_with_functions(&path) {
+                Ok((entries, _aux, functions)) => {
                     let mut store = Store::new();
                     // (frankenredis-63p1s) live encoding thresholds before rebuild.
                     copy_encoding_thresholds(&mut store, &self.server.store);
@@ -6294,6 +6304,11 @@ impl Runtime {
                             );
                         }
                     };
+                    // Restore FUNCTION libraries through the round-trip, matching the
+                    // in-memory branch. (frankenredis-i0yd6)
+                    for code in &functions {
+                        let _ = store.function_load(code, true);
+                    }
                     store.stat_rdb_last_load_keys_expired =
                         u64::try_from(counts.expired).unwrap_or(u64::MAX);
                     store.stat_rdb_last_load_keys_loaded =
@@ -64289,6 +64304,107 @@ mod tests {
                 "{name} 42 should be accepted"
             );
         }
+    }
+
+    #[test]
+    fn debug_reload_preserves_function_libraries_i0yd6() {
+        // (frankenredis-i0yd6) Upstream serializes function libraries into the RDB
+        // (RDB_OPCODE_FUNCTION2) precisely so they survive an rdbSave/rdbLoad pair,
+        // and DEBUG RELOAD is that pair. Measured against vendored redis 7.2.4:
+        //   FUNCTION LOAD              redis $8 probelib   fr $8 probelib
+        //   FUNCTION STATS libraries   redis :1            fr :1
+        //   DEBUG RELOAD               redis +OK           fr +OK
+        //   FUNCTION STATS libraries   redis :1            fr :0     <-- divergence
+        //   FUNCTION LIST              redis *1            fr *0     <-- divergence
+        //   FCALL pf 0                 redis :1            fr -ERR Function not found
+        // The reload itself was working — a plain key set before the reload survived
+        // it — so this pins the FUNCTION leg specifically, not the round-trip.
+        let mut rt = Runtime::default_strict();
+        rt.set_enable_debug_command("yes");
+
+        let lib = b"#!lua name=probelib\nredis.register_function('pf', function() return 1 end)";
+        let loaded = rt.execute_frame(command(&[b"FUNCTION", b"LOAD", lib]), 0);
+        assert_eq!(
+            loaded,
+            RespFrame::BulkString(Some(b"probelib".to_vec())),
+            "precondition: the library must load before the reload is meaningful"
+        );
+        // A plain key too: if the reload silently no-opped, this test would pass
+        // for the wrong reason, so the key proves the round-trip actually ran.
+        rt.execute_frame(command(&[b"SET", b"k", b"v"]), 0);
+        assert_eq!(
+            rt.execute_frame(command(&[b"FCALL", b"pf", b"0"]), 0),
+            RespFrame::Integer(1),
+            "precondition: the function must be callable before the reload"
+        );
+
+        let reload = rt.execute_frame(command(&[b"DEBUG", b"RELOAD"]), 1);
+        assert_eq!(reload, RespFrame::SimpleString("OK".to_string()));
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"k"]), 2),
+            RespFrame::BulkString(Some(b"v".to_vec())),
+            "the reload must have actually round-tripped the dataset"
+        );
+        let listed = rt.execute_frame(command(&[b"FUNCTION", b"LIST"]), 2);
+        assert!(
+            !matches!(&listed, RespFrame::Array(Some(items)) if items.is_empty()),
+            "FUNCTION LIST must not be empty after DEBUG RELOAD; got {listed:?}"
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"FCALL", b"pf", b"0"]), 2),
+            RespFrame::Integer(1),
+            "the restored library's function must still be callable"
+        );
+    }
+
+    #[test]
+    fn debug_reload_preserves_function_libraries_with_rdb_path_i0yd6() {
+        // (frankenredis-i0yd6) The branch that was ACTUALLY broken. The sibling test
+        // above runs with no rdb_path and so takes the in-memory round-trip, which
+        // had restored functions since c0u9q; the RDB-FILE branch used the plain
+        // read_rdb_file, which drops RDB_OPCODE_FUNCTION2 records, and never
+        // restored them. fr-server configures an rdb path by default (a DEBUG RELOAD
+        // leaves a dump.rdb in its cwd), so the broken branch was the live one and
+        // the only covered branch was the correct one -- which is exactly why the
+        // unit tests were green while the server lost every library.
+        let dir = std::env::temp_dir().join("fr_runtime_debug_reload_functions_i0yd6");
+        let _ = std::fs::create_dir_all(&dir);
+        let rdb_path = dir.join("debug-reload-functions.rdb");
+        let _ = std::fs::remove_file(&rdb_path);
+
+        let mut rt = Runtime::default_strict();
+        rt.set_enable_debug_command("yes");
+        rt.set_rdb_path(rdb_path.clone());
+
+        let lib = b"#!lua name=probelib\nredis.register_function('pf', function() return 1 end)";
+        assert_eq!(
+            rt.execute_frame(command(&[b"FUNCTION", b"LOAD", lib]), 0),
+            RespFrame::BulkString(Some(b"probelib".to_vec()))
+        );
+        rt.execute_frame(command(&[b"SET", b"k", b"v"]), 0);
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"DEBUG", b"RELOAD"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        // Proves the reload really round-tripped rather than silently no-opping.
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"k"]), 2),
+            RespFrame::BulkString(Some(b"v".to_vec()))
+        );
+        let listed = rt.execute_frame(command(&[b"FUNCTION", b"LIST"]), 2);
+        assert!(
+            !matches!(&listed, RespFrame::Array(Some(items)) if items.is_empty()),
+            "FUNCTION LIST must survive a DEBUG RELOAD through a CONFIGURED rdb path; got {listed:?}"
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"FCALL", b"pf", b"0"]), 2),
+            RespFrame::Integer(1),
+            "the restored library's function must still be callable"
+        );
+
+        let _ = std::fs::remove_file(&rdb_path);
     }
 
     #[test]
