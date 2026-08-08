@@ -802,7 +802,7 @@ fn spawn_frankenredis_with_config(port: u16, config_path: &str) -> ManagedChild 
         .current_dir(&work_dir)
         .stdout(Stdio::null())
         .stderr(Stdio::from(work_log_file));
-    let mut child = ManagedChild::spawn(command, None);
+    let mut child = ManagedChild::spawn(command, Some(work_log));
     child.wait_until_ready(port);
     child
 }
@@ -823,7 +823,7 @@ fn spawn_frankenredis_config_only(port: u16, config_path: &str) -> ManagedChild 
         .current_dir(&work_dir)
         .stdout(Stdio::null())
         .stderr(Stdio::from(work_log_file));
-    let mut child = ManagedChild::spawn(command, None);
+    let mut child = ManagedChild::spawn(command, Some(work_log));
     child.wait_until_ready(port);
     child
 }
