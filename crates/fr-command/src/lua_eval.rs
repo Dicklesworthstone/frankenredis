@@ -5653,7 +5653,32 @@ impl<'a> LuaState<'a> {
                     // (frankenredis-vhbp3) Route through the full __index
                     // metamethod chain so function-valued __index is
                     // invoked rather than silently returning nil.
-                    LuaValue::Table(t) => self.table_lookup_with_index_meta(t, &key, env, varargs),
+                    LuaValue::Table(t) => {
+                        // (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0)
+                        // Array-hit fast path. `KEYS[1]` is an integer index into
+                        // the array part on every redis.call, and routing it
+                        // through the generic lookup cost a call plus the
+                        // metatable bookkeeping (table_lookup_with_index_meta was
+                        // 4.82% of a cycles:u profile).
+                        //
+                        // Only a NON-Nil array hit short-circuits, mirroring the
+                        // generic path's `!matches!(raw, Nil)` guard -- the array
+                        // CAN hold Nil (it is padded on insert), and a Nil there
+                        // must still fall through to the __index chain. Unlike
+                        // the string-key case this guard is genuinely reachable.
+                        if let LuaValue::Number(n) = &key {
+                            let index = *n as usize;
+                            let inner = t.inner.borrow();
+                            if index >= 1
+                                && index <= inner.array.len()
+                                && *n == index as f64
+                                && !matches!(inner.array[index - 1], LuaValue::Nil)
+                            {
+                                return Ok(inner.array[index - 1].clone());
+                            }
+                        }
+                        self.table_lookup_with_index_meta(t, &key, env, varargs)
+                    }
                     // (frankenredis-tbu4k) Lua 5.1 sets the string library
                     // as the metatable __index for strings, so indexing a
                     // string with a string key looks up that field in the
@@ -14413,6 +14438,77 @@ mod tests {
         )
         .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"gamma".to_vec())));
+    }
+
+    /// (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0) The array-hit
+    /// fast path for `t[i]` must not swallow the __index chain. Unlike the
+    /// string-key guard, a Nil sitting in the array part IS reachable, so this
+    /// pins it directly.
+    #[test]
+    fn array_fast_path_still_consults_index_metamethod() {
+        let mut store = Store::new();
+
+        // Plain array hit.
+        let frame = eval_script(
+            b"local t = {'a','b','c'} return t[2]",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"b".to_vec())));
+
+        // Index PAST the array must reach __index.
+        let frame = eval_script(
+            b"local base = {} base[5] = 'from_index' \
+              local t = setmetatable({'a'}, {__index = base}) \
+              return t[5]",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"from_index".to_vec())));
+
+        // A HOLE inside the array part must reach __index too -- this is the
+        // case the non-Nil guard exists for, and it is reachable.
+        let frame = eval_script(
+            b"local base = {} base[2] = 'filled_hole' \
+              local t = setmetatable({'a','b','c'}, {__index = base}) \
+              t[2] = nil \
+              return t[2]",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"filled_hole".to_vec())));
+
+        // Non-integer and out-of-range keys behave unchanged.
+        let frame = eval_script(
+            b"local t = {'a','b'} return tostring(t[1.5]) .. ',' .. tostring(t[0]) \
+              .. ',' .. tostring(t[99])",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"nil,nil,nil".to_vec())));
+
+        // KEYS[1] itself, the actual hot path.
+        let frame = eval_script(
+            b"return KEYS[1]",
+            &[b"the_key".to_vec()],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"the_key".to_vec())));
     }
 
     /// (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0) The borrowed-key
