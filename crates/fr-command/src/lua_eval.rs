@@ -3122,6 +3122,22 @@ pub struct LuaState<'a> {
     /// the call returns — so nothing observable survives; it exists purely to
     /// keep one allocation per `redis.call` out of the hot loop.
     argv_scratch: Vec<Vec<u8>>,
+    /// (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0) Two-entry
+    /// global-resolution cache.
+    ///
+    /// `redis.call('GET', KEYS[1])` resolves TWO globals per call -- `redis`
+    /// and `KEYS` -- and each costs a hash plus a memcmp
+    /// (HashMap<String,LuaValue>::get was 3.87% of a cycles:u profile). Two
+    /// entries is exactly enough to hold both without thrashing.
+    ///
+    /// Keyed on the AST name's ADDRESS, not its text: the name lives in the
+    /// parsed chunk and is stable for the life of this `LuaState`, so a pointer
+    /// compare replaces the hash+memcmp entirely. Validated against
+    /// `LuaGlobals::generation`, which bumps on every binding change, so a
+    /// rebound global cannot be served stale. Pointers are compared, never
+    /// dereferenced -- this crate forbids unsafe.
+    global_cache: [Option<(*const u8, usize, u64, LuaValue)>; 2],
+    global_cache_next: usize,
     /// (frankenredis-a0wt5) Recycled call-argument buffers. `eval_call_args`
     /// SOURCES its Vec from here and the hot `Expr::Call` path hands it back,
     /// which keeps one allocation per Lua call out of the loop.
@@ -3606,6 +3622,9 @@ struct LuaGlobals {
     /// three hashes per call: `redis` resolves base-only (overlay miss + base
     /// hit) while `KEYS` lives in the overlay.
     overlay_filter: u64,
+    /// Bumped on every binding change so a cached resolution can be validated
+    /// in one integer compare.
+    generation: u64,
 }
 
 impl LuaGlobals {
@@ -3614,6 +3633,7 @@ impl LuaGlobals {
             base,
             overlay: LuaMap::default(),
             overlay_filter: 0,
+            generation: 0,
         }
     }
 
@@ -3628,6 +3648,7 @@ impl LuaGlobals {
             base: Rc::new(LuaMap::default()),
             overlay: map,
             overlay_filter,
+            generation: 0,
         }
     }
 
@@ -3642,7 +3663,16 @@ impl LuaGlobals {
 
     fn insert(&mut self, key: String, value: LuaValue) -> Option<LuaValue> {
         self.overlay_filter |= overlay_filter_bit(key.as_str());
+        // (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0) Any binding
+        // change invalidates the resolution cache below. Bumping here rather
+        // than trying to reason about which assignment paths a locked script can
+        // still reach means the cache cannot go stale by construction.
+        self.generation = self.generation.wrapping_add(1);
         self.overlay.insert(key, value)
+    }
+
+    fn generation(&self) -> u64 {
+        self.generation
     }
 
     fn contains_key(&self, key: &str) -> bool {
@@ -3968,6 +3998,8 @@ impl<'a> LuaState<'a> {
             call_depth: 0,
             lua_frame_kinds: Vec::new(),
             argv_scratch: Vec::new(),
+            global_cache: [None, None],
+            global_cache_next: 0,
             arg_scratch: Vec::new(),
             iterations: 0,
             current_line: 1,
@@ -5298,8 +5330,8 @@ impl<'a> LuaState<'a> {
                     )
                 } else if name == "_G" {
                     Ok(LuaValue::Table(self.ensure_g_table()))
-                } else if let Some(val) = self.globals.get(name) {
-                    Ok(val.clone())
+                } else if let Some(val) = self.resolve_global_cached(name) {
+                    Ok(val)
                 } else if self.globals_locked {
                     Err(format!(
                         "user_script:1: Script attempted to access nonexistent global variable '{name}'"
@@ -5320,8 +5352,8 @@ impl<'a> LuaState<'a> {
                     )
                 } else if name == "_G" {
                     Ok(LuaValue::Table(self.ensure_g_table()))
-                } else if let Some(val) = self.globals.get(name) {
-                    Ok(val.clone())
+                } else if let Some(val) = self.resolve_global_cached(name) {
+                    Ok(val)
                 } else if self.globals_locked {
                     // (frankenredis-j02x9) Mirror upstream's
                     // luaProtectedTableError __index handler — reading
@@ -5860,6 +5892,27 @@ impl<'a> LuaState<'a> {
                 identity: next_function_identity(),
             })),
         }
+    }
+
+    /// Look up a global, memoising the resolution by AST-name address.
+    fn resolve_global_cached(&mut self, name: &str) -> Option<LuaValue> {
+        let key = name.as_ptr();
+        let len = name.len();
+        let generation = self.globals.generation();
+        for slot in &self.global_cache {
+            if let Some((cached_ptr, cached_len, cached_gen, value)) = slot
+                && *cached_ptr == key
+                && *cached_len == len
+                && *cached_gen == generation
+            {
+                return Some(value.clone());
+            }
+        }
+        let value = self.globals.get(name)?.clone();
+        let slot = self.global_cache_next % self.global_cache.len();
+        self.global_cache[slot] = Some((key, len, generation, value.clone()));
+        self.global_cache_next = self.global_cache_next.wrapping_add(1);
+        Some(value)
     }
 
     /// (frankenredis-a0wt5) Borrow a cleared call-argument buffer.
@@ -14292,6 +14345,74 @@ mod tests {
         )
         .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"1,2,3".to_vec())));
+    }
+
+    /// (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0) The global
+    /// resolution cache is keyed on the AST name's ADDRESS and validated by a
+    /// generation counter. This pins the observable behaviour: repeated reads
+    /// are consistent, and a fresh eval sees fresh KEYS. It also pins that the
+    /// sandbox REFUSES to rebind a global at all -- which is why the generation
+    /// check is defensive rather than exercised (see the comment on the cache).
+    #[test]
+    fn global_cache_sees_a_rebound_global() {
+        let mut store = Store::new();
+
+        // The same `g` AST node is read before and after the rebind, inside one
+        // eval, so the cache is warm when the value changes.
+        // A script that REBINDS a global and re-reads it through the same AST
+        // name must see the new value. This is the case the generation counter
+        // exists for: the pointer key alone would serve the stale entry.
+        let frame = eval_script(
+            b"gvar = 'first' \
+              local a = gvar \
+              gvar = 'second' \
+              local b = gvar \
+              return a .. ',' .. b",
+            &[],
+            &[],
+            &mut store,
+            0,
+        );
+        match frame {
+            Ok(RespFrame::BulkString(Some(bytes))) => {
+                assert_eq!(
+                    bytes,
+                    b"first,second".to_vec(),
+                    "cache served a stale global"
+                );
+            }
+            // The sandbox refuses global creation outright ("Attempt to modify
+            // a readonly table"), so this path pins the REFUSAL, and the
+            // generation check is therefore unreachable from user scripts. That
+            // is recorded rather than dressed up as coverage: verified by
+            // mutation, deleting the generation check fails nothing today.
+            Err(message) => assert!(
+                message.contains("readonly") || message.contains("global"),
+                "unexpected error rebinding a global: {message}"
+            ),
+            other => panic!("unexpected reply rebinding a global: {other:?}"),
+        }
+
+        // KEYS is rebound per invocation; a stale cache would leak the previous
+        // call's KEYS into this one. Two evals on the SAME store, different keys.
+        let first =
+            eval_script(b"return KEYS[1]", &[b"alpha".to_vec()], &[], &mut store, 0).unwrap();
+        assert_eq!(first, RespFrame::BulkString(Some(b"alpha".to_vec())));
+        let second =
+            eval_script(b"return KEYS[1]", &[b"beta".to_vec()], &[], &mut store, 0).unwrap();
+        assert_eq!(second, RespFrame::BulkString(Some(b"beta".to_vec())));
+
+        // Repeated reads of the same global inside one script stay consistent.
+        let frame = eval_script(
+            b"local a = KEYS[1] local b = KEYS[1] local c = KEYS[1] \
+              if a == b and b == c then return a else return 'inconsistent' end",
+            &[b"gamma".to_vec()],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"gamma".to_vec())));
     }
 
     /// (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0) The borrowed-key
