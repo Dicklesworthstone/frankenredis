@@ -14,18 +14,12 @@ WITHSCORE, BZPOPMIN.)
 Usage: resp3_nested_aggregate_differ.py <oracle_port> <fr_port>
        Exit 0 = byte-exact, 1 = divergence.
 """
-import socket, sys, time
-def conn(p):
-    s=socket.create_connection(("127.0.0.1",p),timeout=5); s.settimeout(1.2); return s
-def send(s,*a):
-    o=b"*%d\r\n"%len(a)
-    for x in a: x=x if isinstance(x,bytes) else str(x).encode(); o+=b"$%d\r\n%s\r\n"%(len(x),x)
-    s.sendall(o)
-def rd(s):
-    time.sleep(0.05)
-    try: return s.recv(1<<20)
-    except Exception: return b""
-def cmd(s,*a): send(s,*a); return rd(s)
+import sys
+
+# A nested aggregate is precisely the reply shape a single recv truncates, and
+# both engines truncating at the same offset compares EQUAL — so this gate had the
+# most to lose from the old reader. (frankenredis-tesrb)
+from _respread import cmd, conn
 def main():
     op=int(sys.argv[1]) if len(sys.argv)>1 else 16399
     fp=int(sys.argv[2]) if len(sys.argv)>2 else 16400

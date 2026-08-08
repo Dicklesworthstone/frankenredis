@@ -13,28 +13,43 @@ Usage: restore_corruption_fuzz.py <oracle_port> <fr_port> [iters] [seed]
        Exit 0 = identical + no fr exception, 1 = divergence / fr panic.
 """
 import random
-import socket
 import sys
-import time
+
+from _respread import conn as _conn
+from _respread import encode_command, frame_len
 
 
 def conn(p):
-    s = socket.create_connection(("127.0.0.1", p), timeout=5)
-    s.settimeout(3)
+    s = _conn(p)
+    s.settimeout(3)  # a corrupt payload must not be able to hang the fuzzer
     return s
 
 
 def cmd(s, *a):
-    o = b"*%d\r\n" % len(a)
-    for x in a:
-        x = x if isinstance(x, bytes) else str(x).encode()
-        o += b"$%d\r\n%s\r\n" % (len(x), x)
-    s.sendall(o)
-    time.sleep(0.004)
-    try:
-        return s.recv(1 << 20)
-    except Exception as e:
-        return ("EXC", str(e))
+    """Send one command and read a COMPLETE RESP frame.
+
+    Keeps this fuzzer's defensive posture — it feeds deliberately CORRUPTED
+    RESTORE payloads, so a server that answers nothing must surface as a
+    comparable value rather than hang — but it no longer stops at the first
+    recv, so a large valid reply (the DUMP baselines here run to tens of KB) is
+    compared in full instead of at whatever offset happened to arrive.
+    (frankenredis-tesrb)
+    """
+    s.sendall(encode_command(a))
+    buf = b""
+    while True:
+        try:
+            if buf and frame_len(buf) is not None:
+                return buf
+        except ValueError:
+            return buf  # not RESP we recognise — let the caller's compare surface it
+        try:
+            chunk = s.recv(1 << 20)
+        except Exception as e:
+            return ("EXC", str(e)) if not buf else buf
+        if not chunk:
+            return buf
+        buf += chunk
 
 
 def dump_payload(s, key):
