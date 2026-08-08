@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential gate: proto-max-bulk-len config respect (frankenredis-uwhyl).
+"""Differential gate: proto-max-bulk-len config respect (frankenredis-ask3q, locking frankenredis-uwhyl).
 
 fr's string/bit size checks must honor the CONFIGURED proto-max-bulk-len, not a
 hardcoded 512 MiB. With proto-max-bulk-len set below the default, APPEND/SETRANGE

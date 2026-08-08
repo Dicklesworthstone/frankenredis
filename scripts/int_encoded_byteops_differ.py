@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential gate: byte-level ops on integer-encoded strings (frankenredis-...).
+"""Differential gate: byte-level ops on integer-encoded strings (frankenredis-ycir5).
 
 A SET of a canonical integer is `int`-encoded (a shared/embedded long, not a byte
 buffer). Byte-level commands must transparently materialize it: READ ops

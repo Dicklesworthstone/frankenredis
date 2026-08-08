@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential gate: stream ID validation + trim semantics (frankenredis-...).
+"""Differential gate: stream ID validation + trim semantics (frankenredis-9u12k).
 
 Deterministic stream-ID and trimming surface byte-exact vs redis 7.2.4: XADD with an
 explicit ID enforces strictly-increasing order ("equal or smaller than the target

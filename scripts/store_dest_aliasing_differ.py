@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential gate: *STORE/BITOP/COPY destination-aliases-source (frankenredis-...).
+"""Differential gate: *STORE/BITOP/COPY destination-aliases-source (frankenredis-epo5t).
 
 When a writing command's DESTINATION is also one of its SOURCE keys, redis computes
 the full result BEFORE overwriting the destination (no mid-computation clobber). fr

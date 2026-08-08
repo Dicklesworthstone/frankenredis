@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential gate: expiration timestamp edges (frankenredis-...).
+"""Differential gate: expiration timestamp edges (frankenredis-23z5v).
 
 Pins the subtle create-then-expire + invalid-expire semantics byte-exact vs redis
 7.2.4: SET/GETEX with EXAT/PXAT in the PAST create the key then immediately expire it

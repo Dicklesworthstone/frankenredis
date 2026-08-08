@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential gate: OBJECT REFCOUNT shared-integer modeling (frankenredis-...).
+"""Differential gate: OBJECT REFCOUNT shared-integer modeling (frankenredis-j9nuy).
 
 redis caches the integers 0..9999 as shared objects with a sentinel refcount
 (2147483647 = OBJ_SHARED_REFCOUNT); all other values (large ints, strings, non-string

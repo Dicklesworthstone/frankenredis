@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential gate: in-command duplicate args (frankenredis-...).
+"""Differential gate: in-command duplicate args (frankenredis-p1xv2).
 
 When the SAME member/field/key appears more than once in a single command, redis has
 precise semantics that fr must mirror: ZADD/HSET keep the LAST value and the return

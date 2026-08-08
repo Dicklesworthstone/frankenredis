@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential gate: RESP3 type-tag fidelity, port-based (frankenredis-...).
+"""Differential gate: RESP3 type-tag fidelity, port-based (frankenredis-ygf9t).
 
 Under HELLO 3, commands must emit the correct RESP3 aggregate/scalar type, not a
 RESP2 array/bulk fallback: HGETALL / CONFIG GET -> Map (%), SMEMBERS / SINTER /

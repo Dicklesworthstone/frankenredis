@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential gate: COPY/RENAME/MOVE encoding preservation (frankenredis-...).
+"""Differential gate: COPY/RENAME/MOVE encoding preservation (frankenredis-za91n).
 
 COPY/RENAME/MOVE duplicate or relocate a key IN MEMORY — redis preserves the source
 object's encoding verbatim (no content-based re-derivation). So a set that grew to

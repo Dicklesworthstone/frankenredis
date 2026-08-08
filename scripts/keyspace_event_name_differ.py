@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential gate: per-command keyspace-notification event NAMES (frankenredis-...).
+"""Differential gate: per-command keyspace-notification event NAMES (frankenredis-jr75e).
 
 With notify-keyspace-events=KEA, every mutating command publishes a __keyevent@0__:<ev>
 notification whose <ev> name must match redis exactly — these are easy to get subtly

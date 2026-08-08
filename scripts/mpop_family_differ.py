@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential gate: LMPOP/ZMPOP/BLMPOP/BZMPOP family (frankenredis-...).
+"""Differential gate: LMPOP/ZMPOP/BLMPOP/BZMPOP family (frankenredis-llqia).
 
 The multi-key pop family has subtle, distinct-message validation + selection semantics
 that no other gate pins: pops from the FIRST NON-EMPTY key; COUNT (and COUNT>size);

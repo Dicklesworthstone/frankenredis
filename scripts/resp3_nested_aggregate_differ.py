@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential gate: RESP3 nested-aggregate reply structure (frankenredis-...).
+"""Differential gate: RESP3 nested-aggregate reply structure (frankenredis-oo6mu).
 
 Under HELLO 3, withscores/entry replies change NESTING (not just the leading type
 byte): ZRANGE/ZRANGEBYSCORE/ZPOPMIN/ZPOPMAX WITHSCORES return an array of 2-element
