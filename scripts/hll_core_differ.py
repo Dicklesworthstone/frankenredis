@@ -13,7 +13,7 @@ Usage: hll_core_differ.py <oracle_port> <fr_port>
 """
 import sys
 
-from _respread import assert_seed, cmd, conn
+from _respread import assert_ok, assert_seed, cmd, conn
 
 
 def main():
@@ -31,8 +31,21 @@ def main():
         for s in (od, fr):
             cmd(s, *c)
 
+    def seed_both(expect, *c):
+        """Run a seed on both engines, requiring `expect` from each.
+
+        An int is checked as an integer reply, None as `+OK`. A silently failed
+        seed leaves the cases operating on a missing key, where PFADD/PFCOUNT
+        answer identically on both engines and the gate passes having exercised
+        nothing. (frankenredis-tesrb)
+        """
+        label = " ".join(str(x) for x in c[:2])
+        for s in (od, fr):
+            r = cmd(s, *c)
+            assert_seed(r, expect, label) if expect is not None else assert_ok(r, label)
+
     for s in (od, fr):
-        cmd(s, "FLUSHALL")
+        assert_ok(cmd(s, "FLUSHALL"), "FLUSHALL")
 
     # PFADD change-detect + PFCOUNT exactness on small cardinalities
     chk("pfadd_new", "PFADD", "hll", "a", "b", "c")
@@ -49,8 +62,8 @@ def main():
     chk("hll_encoding", "OBJECT", "ENCODING", "hll")
     chk("hll_strlen_sparse", "STRLEN", "hll")
     # multi-key PFCOUNT union
-    both("PFADD", "ha", "x", "y", "z")
-    both("PFADD", "hb", "z", "w", "v")
+    seed_both(1, "PFADD", "ha", "x", "y", "z")
+    seed_both(1, "PFADD", "hb", "z", "w", "v")
     chk("pfcount_multi_union", "PFCOUNT", "ha", "hb")
     # PFMERGE -> dest + byte-equal dump
     both("DEL", "hm")
@@ -63,12 +76,12 @@ def main():
     chk("pfmerge_no_source", "PFMERGE", "he")
     chk("pfmerge_no_source_count", "PFCOUNT", "he")
     # corrupt / wrong-type errors
-    both("SET", "plain", "not-an-hll-value")
+    seed_both(None, "SET", "plain", "not-an-hll-value")
     chk("pfadd_corrupt", "PFADD", "plain", "x")
     chk("pfcount_corrupt", "PFCOUNT", "plain")
     chk("pfmerge_corrupt", "PFMERGE", "dst", "plain")
     both("DEL", "lst")
-    both("RPUSH", "lst", "a")
+    seed_both(1, "RPUSH", "lst", "a")
     chk("pfadd_wrongtype", "PFADD", "lst", "x")
     # sparse->dense transition: estimate + dense register encoding byte-equality
     both("DEL", "big")

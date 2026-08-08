@@ -34,11 +34,12 @@ def main():
 
     def setup():
         for s in (od, fr):
-            cmd(s, "FLUSHALL")
-            cmd(s, "SET", "k", "val", "EXAT", EXAT)   # value + a stable absolute TTL
-            cmd(s, "SET", "not", "v")                 # no TTL
-            cmd(s, "SET", "ik", "12345")              # int-encoded
-            cmd(s, "RPUSH", "lst", "a")
+            assert_ok(cmd(s, "FLUSHALL"), "FLUSHALL")
+            # value + a stable absolute TTL
+            assert_ok(cmd(s, "SET", "k", "val", "EXAT", EXAT), "SET k EXAT")
+            assert_ok(cmd(s, "SET", "not", "v"), "SET not")            # no TTL
+            assert_ok(cmd(s, "SET", "ik", "12345"), "SET ik")          # int-encoded
+            assert_seed(cmd(s, "RPUSH", "lst", "a"), 1, "RPUSH lst")
 
     # no-option GETEX: returns value, TTL untouched (absolute EXPIRETIME unchanged)
     setup()

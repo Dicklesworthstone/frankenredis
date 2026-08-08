@@ -34,11 +34,11 @@ def main():
 
     def pair(a, b):
         for s in (od, fr):
-            cmd(s, "MSET", "k1", a, "k2", b)
+            assert_ok(cmd(s, "MSET", "k1", a, "k2", b), "MSET k1 k2")
 
     for s in (od, fr):
-        cmd(s, "FLUSHALL")
-        cmd(s, "RPUSH", "lst", "x")  # wrong-type operand
+        assert_ok(cmd(s, "FLUSHALL"), "FLUSHALL")
+        assert_seed(cmd(s, "RPUSH", "lst", "x"), 1, "RPUSH lst")  # wrong-type operand
 
     # option errors
     pair("a", "b")
@@ -80,7 +80,7 @@ def main():
     chk("missing_both", "LCS", "m1", "m2")
     chk("missing_both_idx", "LCS", "m1", "m2", "IDX")
     for s in (od, fr):
-        cmd(s, "SET", "m1", "abc")
+        assert_ok(cmd(s, "SET", "m1", "abc"), "SET m1")
     chk("missing_one", "LCS", "m1", "m2")
     # past the 64-char bit-parallel word boundary
     pair("a" * 80 + "XYZ" + "b" * 40, "c" * 30 + "XYZ" + "d" * 50)

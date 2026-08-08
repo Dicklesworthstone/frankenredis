@@ -28,7 +28,7 @@ def main():
 
     def flush():
         for s in (od, fr):
-            cmd(s, "FLUSHALL")
+            assert_ok(cmd(s, "FLUSHALL"), "FLUSHALL")
 
     # all new -> 1, all written
     flush()
@@ -61,7 +61,7 @@ def main():
     chk("msetnx_noargs", "MSETNX", "a")
     # MSET always overwrites (contrast)
     for s in (od, fr):
-        cmd(s, "SET", "m", "old")
+        assert_ok(cmd(s, "SET", "m", "old"), "SET m old")
     chk("mset_overwrite_reply", "MSET", "m", "new", "n", "2")
     chk("mset_overwrite_m", "GET", "m")
     chk("mset_overwrite_n", "GET", "n")

@@ -40,7 +40,8 @@ def main():
         if ro != rf:
             fails.append(f"{label}: redis={ro!r} fr={rf!r}")
 
-    cmd(od, "FLUSHALL"); cmd(fr, "FLUSHALL")
+    assert_ok(cmd(od, "FLUSHALL"), "redis FLUSHALL")
+    assert_ok(cmd(fr, "FLUSHALL"), "fr FLUSHALL")
     for k, v in LISTPACK_DEFAULTS.items():
         each("CONFIG", "SET", k, v)
 

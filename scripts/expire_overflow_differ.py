@@ -32,8 +32,8 @@ def main():
 
     def reset():
         for s in (od, fr):
-            cmd(s, "FLUSHALL")
-            cmd(s, "SET", "k", "v")
+            assert_ok(cmd(s, "FLUSHALL"), "FLUSHALL")
+            assert_ok(cmd(s, "SET", "k", "v"), "SET k v")
 
     # seconds-based commands: *1000 + now overflows -> invalid expire time
     reset()
@@ -72,10 +72,10 @@ def main():
     chk("expire_imin_state", "EXISTS", "k")
     # float overflow -> "increment would produce NaN or Infinity"
     for s in (od, fr):
-        cmd(s, "SET", "fl", "1e308")
+        assert_ok(cmd(s, "SET", "fl", "1e308"), "SET fl")
     chk("incrbyfloat_overflow", "INCRBYFLOAT", "fl", "1e308")
     for s in (od, fr):
-        cmd(s, "SET", "fl2", "3.0e3")
+        assert_ok(cmd(s, "SET", "fl2", "3.0e3"), "SET fl2")
     chk("incrbyfloat_ok", "INCRBYFLOAT", "fl2", "200")
     chk("incrbyfloat_nan", "INCRBYFLOAT", "fl2", "nan")
     chk("incrbyfloat_inf_arg", "INCRBYFLOAT", "fl2", "inf")

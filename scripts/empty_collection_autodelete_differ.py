@@ -14,7 +14,7 @@ Usage: empty_collection_autodelete_differ.py <oracle_port> <fr_port>
 """
 import sys
 
-from _respread import assert_ok, assert_seed, cmd, conn
+from _respread import assert_seed, cmd, conn
 
 
 def reply_canon(b):
@@ -78,6 +78,12 @@ def main():
             cmd(s, "DEL", key, "sb")  # sb is the SMOVE dest target if used
             for sc in seed:
                 cmd(s, *sc)
+            # The seed replies differ per scenario, but every scenario must leave
+            # `key` present — that is the precondition the removal below tests. If
+            # a seed silently fails, the removal / EXISTS / TYPE all answer
+            # identically on both engines for a missing key and the gate passes
+            # having exercised nothing. (frankenredis-tesrb)
+            assert_seed(cmd(s, "EXISTS", key), 1, f"{label} seed created {key}")
         ro, rf = cmd(od, *removal), cmd(fr, *removal)
         eo, ef = cmd(od, "EXISTS", key), cmd(fr, "EXISTS", key)
         to, tf = cmd(od, "TYPE", key), cmd(fr, "TYPE", key)
@@ -91,7 +97,7 @@ def main():
     # SMOVE: moving the last member deletes the source key
     for s in (od, fr):
         cmd(s, "DEL", "sa", "sb")
-        cmd(s, "SADD", "sa", "x")
+        assert_seed(cmd(s, "SADD", "sa", "x"), 1, "SADD sa x")
     ro, rf = cmd(od, "SMOVE", "sa", "sb", "x"), cmd(fr, "SMOVE", "sa", "sb", "x")
     eo, ef = cmd(od, "EXISTS", "sa"), cmd(fr, "EXISTS", "sa")
     if ro != rf:

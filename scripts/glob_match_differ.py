@@ -73,9 +73,9 @@ def main():
     fp = int(sys.argv[2]) if len(sys.argv) > 2 else 16400
     od, fr = conn(op), conn(fp)
     for s in (od, fr):
-        cmd(s, "FLUSHALL")
+        assert_ok(cmd(s, "FLUSHALL"), "FLUSHALL")
         for k in KEYS:
-            cmd(s, "SET", k, "v")
+            assert_ok(cmd(s, "SET", k, "v"), f"SET {k!r}")
     fails = []
     for pat in PATTERNS:
         ro, rf = keys_set(od, pat), keys_set(fr, pat)
