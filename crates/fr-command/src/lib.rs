@@ -6834,7 +6834,17 @@ fn zrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
 
     let mut i = 4;
     while i < argv.len() {
-        let opt = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        // (frankenredis-hp1us) An UNRECOGNIZED option is a plain syntax error whatever
+        // bytes it holds — upstream t_zset.c never validates the encoding of an option
+        // token. Failing the conversion here instead produced
+        //   ZRANGE z 0 -1 <0xff 0xfe>   redis -ERR syntax error
+        //                               fr    -ERR invalid UTF-8 argument
+        // fr's own EXPIRE option parser already gets this right (it echoes the raw
+        // bytes back like redis), so this was an inconsistency inside fr, not a missing
+        // capability. `opt` is compared ONLY against ASCII keywords below and is never
+        // echoed in an error, so mapping undecodable bytes to a value that cannot match
+        // any keyword sends them down the same syntax-error arm upstream uses.
+        let opt = std::str::from_utf8(&argv[i]).unwrap_or("");
         if opt.eq_ignore_ascii_case("BYSCORE") {
             // Upstream t_zset.c::zrangeGenericCommand only matches
             // BYSCORE when rangetype is still AUTO; a second BYSCORE
@@ -12720,7 +12730,10 @@ fn zrangestore_cmd(
 
     let mut i = 5;
     while i < argv.len() {
-        let opt = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        // (frankenredis-hp1us) Same as zrange_cmd: an unrecognized option token is a
+        // syntax error regardless of encoding, and `opt` is only ever compared against
+        // ASCII keywords here.
+        let opt = std::str::from_utf8(&argv[i]).unwrap_or("");
         if opt.eq_ignore_ascii_case("BYSCORE") {
             // (frankenredis-r2f7m) ZRANGE rejects duplicate BYSCORE /
             // BYLEX / REV because upstream t_zset.c::zrangeGenericCommand
@@ -32105,6 +32118,59 @@ mod tests {
         let ttl_argv = vec![b"TTL".to_vec(), b"k".to_vec()];
         let ttl_out = dispatch_argv(&ttl_argv, &mut store, 1000).expect("ttl");
         assert_eq!(ttl_out, RespFrame::Integer(10));
+    }
+
+    #[test]
+    fn zrange_non_utf8_option_is_a_syntax_error_hp1us() {
+        // (frankenredis-hp1us) Upstream t_zset.c never validates the ENCODING of an
+        // option token: an unrecognized option is a plain syntax error whatever bytes
+        // it holds. fr converted the token to UTF-8 first and failed the conversion,
+        // so measured against redis 7.2.4:
+        //   ZRANGE z 0 -1 <0xff 0xfe>   redis -ERR syntax error
+        //                               fr    -ERR invalid UTF-8 argument
+        // fr's own EXPIRE option parser already got this right (it echoes the raw
+        // bytes back like redis), so this was an inconsistency inside fr.
+        let mut store = Store::new();
+        for (cmd, argv) in [
+            (
+                "ZRANGE",
+                vec![
+                    b"ZRANGE".to_vec(),
+                    b"z".to_vec(),
+                    b"0".to_vec(),
+                    b"-1".to_vec(),
+                    b"\xff\xfe".to_vec(),
+                ],
+            ),
+            (
+                "ZRANGESTORE",
+                vec![
+                    b"ZRANGESTORE".to_vec(),
+                    b"dst".to_vec(),
+                    b"z".to_vec(),
+                    b"0".to_vec(),
+                    b"-1".to_vec(),
+                    b"\xff\xfe".to_vec(),
+                ],
+            ),
+        ] {
+            let err = dispatch_argv(&argv, &mut store, 0)
+                .expect_err("a non-UTF8 option must be rejected");
+            assert!(
+                matches!(err, CommandError::SyntaxError),
+                "{cmd} with a non-UTF8 option must be SyntaxError like redis, got {err:?}"
+            );
+        }
+        // A VALID option must still work, so the fix cannot have turned the option
+        // parser into a no-op that syntax-errors on everything.
+        let ok = vec![
+            b"ZRANGE".to_vec(),
+            b"z".to_vec(),
+            b"0".to_vec(),
+            b"-1".to_vec(),
+            b"WITHSCORES".to_vec(),
+        ];
+        dispatch_argv(&ok, &mut store, 0).expect("WITHSCORES must still be accepted");
     }
 
     #[test]
