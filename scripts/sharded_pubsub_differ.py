@@ -16,34 +16,7 @@ import re
 import sys
 import time  # only for drain()'s settle wait, never for reading a command reply
 
-from _respread import cmd, conn, encode_command, frame_len
-
-
-def cmd_n(s, n, *args):
-    """Send one command and read exactly N complete RESP frames.
-
-    SSUBSCRIBE/SUNSUBSCRIBE emit one confirmation frame PER CHANNEL, so the
-    shared `cmd` — which returns as soon as the FIRST frame is complete — would
-    capture only the first and leave the rest for whatever reads next. Both
-    engines would lose the same frames and still compare equal: exactly the
-    false-PASS this gate was migrated to eliminate. (frankenredis-tesrb)
-    """
-    s.sendall(encode_command(args))
-    buf = b""
-    while True:
-        pos = got = 0
-        while got < n:
-            ln = frame_len(buf, pos)
-            if ln is None:
-                break
-            pos += ln
-            got += 1
-        if got >= n:
-            return buf
-        chunk = s.recv(1 << 20)
-        if not chunk:
-            raise OSError("server closed the connection mid-reply")
-        buf += chunk
+from _respread import cmd, cmd_n, conn
 
 
 def drain(s, settle=0.15):

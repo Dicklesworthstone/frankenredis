@@ -12,7 +12,11 @@ async capture can't race across commands.
 Usage: keyspace_notification_differ.py <oracle_port> <fr_port>
        Exit 0 = event streams byte-exact, 1 = divergence, 2 = setup error.
 """
-import socket, sys, time
+import socket
+import sys
+import time  # only for drain_events() settle, never for reading a command reply
+
+from _respread import encode_command, read_frame
 
 
 def conn(p):
@@ -20,20 +24,18 @@ def conn(p):
 
 
 def send(s, *a):
-    o = b"*%d\r\n" % len(a)
-    for x in a:
-        x = x.encode() if isinstance(x, str) else x
-        o += b"$%d\r\n%s\r\n" % (len(x), x)
-    s.sendall(o)
+    s.sendall(encode_command(a))
 
 
 def recv_reply(s):
-    s.settimeout(2)
-    time.sleep(0.02)
-    try:
-        return s.recv(1 << 20)
-    except socket.timeout:
-        return b""
+    """Read one COMPLETE command reply (frankenredis-gpry6).
+
+    Was a settle-then-single-recv, which is the truncating read: it returns
+    whatever ARRIVED, and both engines cut at the same offset compare EQUAL.
+    Unlike drain_events() below, a command reply IS bounded by frame
+    completeness, so it goes through the shared reader.
+    """
+    return read_frame(s)
 
 
 def drain_events(sub, settle=0.18):

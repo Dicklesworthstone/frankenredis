@@ -53,6 +53,24 @@ def conn(p):
 
 
 def raw(s, b):
+    """Send a raw INLINE packet and collect whatever the server answers.
+
+    DELIBERATE EXCEPTION to the shared reader (frankenredis-tesrb/gpry6), for two
+    independent reasons — this is not an oversight:
+
+      1. One packet here carries SEVERAL inline commands
+         (b'APPEND mq "x"\\r\\nAPPEND mq abc\\r\\nGET mq\\r\\n' -> three replies),
+         so there is no single frame to complete on, and cmd_n's fixed count does
+         not apply either because...
+      2. ...the fixtures are deliberately MALFORMED (unbalanced quotes, bad inline
+         syntax). The whole point is to observe how many replies come back and
+         whether the server errors or closes — so the reply count is precisely the
+         unknown under test. Demanding N complete frames would hang on exactly the
+         cases this gate exists to probe.
+
+    A timeout is therefore a RESULT here, not a failure, and is returned as the
+    comparable value b"(timeout)".
+    """
     s.sendall(b)
     time.sleep(0.05)
     try:

@@ -48,7 +48,8 @@ sys.path[0] and a plain `import _respread` resolves.
 import socket
 import sys
 
-__all__ = ["conn", "cmd", "encode_arg", "encode_command", "frame_len", "assert_seed", "assert_ok"]
+__all__ = ["conn", "cmd", "cmd_n", "read_frame", "encode_arg", "encode_command",
+           "frame_len", "assert_seed", "assert_ok"]
 
 
 def encode_arg(x):
@@ -115,14 +116,14 @@ def conn(port, host="127.0.0.1", timeout=10):
     return socket.create_connection((host, port), timeout=timeout)
 
 
-def cmd(sock, *args):
-    """Send one command; return the COMPLETE raw reply bytes.
+def read_frame(sock):
+    """Read until ONE complete RESP frame is buffered; return its raw bytes.
 
-    Raw bytes rather than a decoded value is deliberate: a decoded comparison
-    hides encoding differences (integer vs bulk, RESP2 nil spelling, element
-    order) that a client would actually observe.
+    The read half of `cmd`, exposed separately for the gates that build their own
+    wire bytes (hand-built packets, deliberately malformed frames) or that keep
+    send and receive as separate steps. Those had each hand-rolled this loop,
+    which is exactly the drift `_respread` exists to prevent.
     """
-    sock.sendall(encode_command(args))
     buf = b""
     while True:
         try:
@@ -131,6 +132,52 @@ def cmd(sock, *args):
         except ValueError:
             # Not RESP we recognise — hand it back rather than spinning; the
             # caller's comparison will surface it.
+            return buf
+        chunk = sock.recv(1 << 20)
+        if not chunk:
+            raise OSError("server closed the connection mid-reply")
+        buf += chunk
+
+
+def cmd(sock, *args):
+    """Send one command; return the COMPLETE raw reply bytes.
+
+    Raw bytes rather than a decoded value is deliberate: a decoded comparison
+    hides encoding differences (integer vs bulk, RESP2 nil spelling, element
+    order) that a client would actually observe.
+    """
+    sock.sendall(encode_command(args))
+    return read_frame(sock)
+
+
+def cmd_n(sock, n, *args):
+    """Send one command; return the COMPLETE raw bytes of its FIRST `n` frames.
+
+    A fourth way a gate reads less than it thinks (frankenredis-tesrb/gpry6): some
+    commands answer with one frame PER ARGUMENT rather than one frame total.
+    `SSUBSCRIBE a b c` emits three confirmations, `SUNSUBSCRIBE` one per channel.
+    `cmd()` returns as soon as the FIRST frame is complete, so it would capture one
+    of three and leave the rest in the buffer for whatever reads next — both engines
+    lose the same frames and still compare equal.
+
+    Use this wherever the reply count is known and > 1. For frames nobody solicited
+    (a delivered pub/sub message), no count is knowable in advance and a timed drain
+    is the only correct shape — see the drain() docstrings in the pub/sub gates.
+    """
+    sock.sendall(encode_command(args))
+    buf = b""
+    while True:
+        pos = got = 0
+        try:
+            while got < n:
+                ln = frame_len(buf, pos)
+                if ln is None:
+                    break
+                pos += ln
+                got += 1
+        except ValueError:
+            return buf  # not RESP we recognise — hand it back, don't spin
+        if got >= n:
             return buf
         chunk = sock.recv(1 << 20)
         if not chunk:

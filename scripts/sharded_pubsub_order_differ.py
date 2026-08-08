@@ -15,26 +15,30 @@ Usage: sharded_pubsub_order_differ.py <oracle_port> <fr_port>
        Exit 0 = equivalent, 1 = real divergence.
 """
 import re
-import socket
 import sys
-import time
+import time  # only for drain()'s settle wait, never for reading a command reply
+
+from _respread import assert_ok, cmd, cmd_n
+from _respread import conn as _conn
 
 
 def conn(p):
-    s = socket.create_connection(("127.0.0.1", p), timeout=5)
-    s.settimeout(1.5)
+    s = _conn(p)
+    s.settimeout(1.5)  # bounds drain()'s non-blocking read, not the framed ones
     return s
 
 
-def send(s, *a):
-    o = b"*%d\r\n" % len(a)
-    for x in a:
-        x = x if isinstance(x, bytes) else str(x).encode()
-        o += b"$%d\r\n%s\r\n" % (len(x), x)
-    s.sendall(o)
+def drain(s, settle=0.15):
+    """Collect an asynchronously-DELIVERED smessage, or confirm none arrived.
 
-
-def rd(s, settle=0.15):
+    DELIBERATE EXCEPTION to the shared reader (frankenredis-gpry6): every other
+    read in this gate is the reply to a command we just sent, so frame
+    completeness tells the reader when to stop. A delivered pub/sub message is
+    not solicited by the reading connection, so "the server sent nothing more"
+    is only observable by waiting. Used ONLY for delivered messages here — the
+    command replies and the per-channel SSUBSCRIBE/SUNSUBSCRIBE confirmations go
+    through cmd / cmd_n.
+    """
     time.sleep(settle)
     try:
         return s.recv(1 << 20)
@@ -48,19 +52,20 @@ def sorted_bulks(b):
 
 def run(p):
     sub, pub = conn(p), conn(p)
-    send(sub, "FLUSHALL"); rd(sub)
+    assert_ok(cmd(sub, "FLUSHALL"), "FLUSHALL")
     r = {}
-    send(sub, "SSUBSCRIBE", "sc1", "sc2", "sc3"); r["ssub"] = rd(sub)
-    send(pub, "SPUBLISH", "sc1", "hello"); r["spub1"] = rd(pub); r["msg1"] = rd(sub)
-    send(pub, "SPUBLISH", "sc2", "world"); r["spub2"] = rd(pub); r["msg2"] = rd(sub)
-    send(pub, "SPUBLISH", "nope", "x"); r["spub_none"] = rd(pub)
-    send(pub, "PUBSUB", "SHARDCHANNELS"); r["shardchannels"] = rd(pub)
-    send(pub, "PUBSUB", "SHARDNUMSUB", "sc1", "sc2", "nope"); r["shardnumsub"] = rd(pub)
-    send(pub, "PUBSUB", "SHARDCHANNELS", "sc*"); r["shardchannels_pat"] = rd(pub)
-    send(pub, "PUBSUB", "SHARDCHANNELS", "zzz*"); r["shardchannels_nomatch"] = rd(pub)
-    send(sub, "SUNSUBSCRIBE", "sc1"); r["sunsub"] = rd(sub)
-    send(pub, "PUBSUB", "SHARDCHANNELS"); r["shardchannels2"] = rd(pub)
-    send(pub, "PUBSUB", "NUMPAT"); r["numpat"] = rd(pub)  # shard subs don't count as patterns
+    # one confirmation frame PER CHANNEL — 3 here, 1 for the SUNSUBSCRIBE below
+    r["ssub"] = cmd_n(sub, 3, "SSUBSCRIBE", "sc1", "sc2", "sc3")
+    r["spub1"] = cmd(pub, "SPUBLISH", "sc1", "hello"); r["msg1"] = drain(sub)
+    r["spub2"] = cmd(pub, "SPUBLISH", "sc2", "world"); r["msg2"] = drain(sub)
+    r["spub_none"] = cmd(pub, "SPUBLISH", "nope", "x")
+    r["shardchannels"] = cmd(pub, "PUBSUB", "SHARDCHANNELS")
+    r["shardnumsub"] = cmd(pub, "PUBSUB", "SHARDNUMSUB", "sc1", "sc2", "nope")
+    r["shardchannels_pat"] = cmd(pub, "PUBSUB", "SHARDCHANNELS", "sc*")
+    r["shardchannels_nomatch"] = cmd(pub, "PUBSUB", "SHARDCHANNELS", "zzz*")
+    r["sunsub"] = cmd_n(sub, 1, "SUNSUBSCRIBE", "sc1")
+    r["shardchannels2"] = cmd(pub, "PUBSUB", "SHARDCHANNELS")
+    r["numpat"] = cmd(pub, "PUBSUB", "NUMPAT")  # shard subs don't count as patterns
     sub.close(); pub.close()
     return r
 
