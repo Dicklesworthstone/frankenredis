@@ -3476,6 +3476,40 @@ impl Env {
         self.scopes.last()?.get_local_cell(name).cloned()
     }
 
+    /// (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0) Re-arm the
+    /// numeric-for loop scope for the next iteration IN PLACE, instead of
+    /// popping it and building a fresh binding.
+    ///
+    /// The caller keeps one scope open across the whole loop, so at entry the
+    /// scope holds `[loop_var, ...whatever the body declared]`. Truncating to
+    /// slot 0 drops exactly the body's bindings, which is what `pop_scope` +
+    /// `push_scope` + re-binding the loop variable produced before, and leaves
+    /// the same `[loop_var]` state — same binding, same declaration order, so
+    /// lookup, shadowing and slot resolution are untouched. What it avoids is
+    /// re-allocating the binding's `name` String every iteration.
+    ///
+    /// The cell is reused only when the scope is its sole owner. The GC
+    /// registry holds a `Weak`, so `strong_count == 1` means nothing captured
+    /// it and overwriting in place is unobservable; a closure that DID capture
+    /// it pushes the count above 1 and gets a fresh cell, preserving the value
+    /// it captured.
+    fn rearm_loop_scope(&mut self, value: LuaValue) {
+        let Some(scope) = self.scopes.last_mut() else {
+            return;
+        };
+        scope.locals.truncate(1);
+        let Some(binding) = scope.locals.first_mut() else {
+            return;
+        };
+        if Rc::strong_count(&binding.cell) == 1 {
+            *binding.cell.borrow_mut() = value;
+        } else {
+            let cell = Rc::new(RefCell::new(value));
+            lua_gc_register_cell(&cell);
+            binding.cell = cell;
+        }
+    }
+
     fn get_local(&self, name: &str) -> Option<LuaValue> {
         for scope in self.scopes.iter().rev() {
             if let Some(value) = scope.get_local_cell(name) {
@@ -4896,39 +4930,52 @@ impl<'a> LuaState<'a> {
                     return result;
                 }
                 let mut i = s;
-                // (CrimsonHawk) Reuse one loop-var cell across iterations unless a
-                // closure captured it (Rc strong_count > 1; GC registry holds only a
-                // Weak). Byte-identical to fresh-every-iteration.
-                let mut loop_cell: Option<LuaCell> = None;
+                // (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0) ONE
+                // scope for the whole loop, re-armed per iteration, rather than a
+                // push/pop pair per iteration. The old shape cleared the scope and
+                // re-pushed the loop binding every pass, which re-allocated the
+                // binding's `name` String each time; `rearm_loop_scope` truncates
+                // to the loop variable and overwrites its cell instead, reaching
+                // the identical `[loop_var]` state. Cell reuse keeps the same
+                // strong_count == 1 guard as before -- now read off the scope's own
+                // binding, which is the sole owner precisely when nothing captured
+                // it.
+                let mut scope_open = false;
                 loop {
                     self.iterations += 1;
                     if self.iterations > MAX_ITERATIONS {
+                        if scope_open {
+                            env.pop_scope();
+                        }
                         return Err("script exceeded maximum iteration count".to_string());
                     }
                     if (st > 0.0 && i > e) || (st < 0.0 && i < e) {
                         break;
                     }
-                    env.push_scope();
-                    match loop_cell.take() {
-                        Some(cell) if Rc::strong_count(&cell) == 1 => {
-                            *cell.borrow_mut() = LuaValue::Number(i);
-                            env.set_local_cell_top(name, cell.clone());
-                            loop_cell = Some(cell);
-                        }
-                        _ => {
-                            env.set_local(name, LuaValue::Number(i));
-                            loop_cell = env.top_local_cell(name);
-                        }
+                    if scope_open {
+                        env.rearm_loop_scope(LuaValue::Number(i));
+                    } else {
+                        env.push_scope();
+                        env.set_local(name, LuaValue::Number(i));
+                        scope_open = true;
                     }
+                    // NOTE the `?` deliberately leaves the scope unpopped on the
+                    // error path, exactly as the per-iteration shape did: an error
+                    // here unwinds the whole script.
                     let cf =
                         self.exec_numeric_for_body_from(name, e, st, body, i, 0, env, varargs)?;
-                    env.pop_scope();
                     match cf {
                         ControlFlow::Break => break,
-                        ControlFlow::Return(v) => return Ok(ControlFlow::Return(v)),
+                        ControlFlow::Return(v) => {
+                            env.pop_scope();
+                            return Ok(ControlFlow::Return(v));
+                        }
                         ControlFlow::None => {}
                     }
                     i += st;
+                }
+                if scope_open {
+                    env.pop_scope();
                 }
                 Ok(ControlFlow::None)
             }
@@ -14386,6 +14433,144 @@ mod tests {
         )
         .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"1,2,3".to_vec())));
+    }
+
+    /// (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0) The numeric-for
+    /// loop keeps ONE scope open for the whole loop and re-arms it in place, so
+    /// the push/pop no longer sits inside the iteration. That moves three
+    /// balance properties from "free" to "load-bearing", and each case below is
+    /// the one that a specific mutation breaks:
+    ///
+    ///   * loop variable must not outlive the loop  -- breaks if the final
+    ///     `pop_scope` is dropped;
+    ///   * a loop that never runs must not pop a scope it never pushed -- breaks
+    ///     if the `scope_open` guard is removed and the pop runs unconditionally,
+    ///     which eats the ENCLOSING scope;
+    ///   * `break` and `return` must each pop exactly once.
+    ///
+    /// A captured loop cell not being overwritten (the `strong_count == 1`
+    /// guard) is pinned by `recycled_scopes_never_leak_a_binding` above --
+    /// deleting that guard turns its closure case into "3,3,3". That test does
+    /// NOT cover `locals.truncate(1)`, though it looks like it should: its
+    /// `local leaked` sits inside an `if` block, which gets a scope of its own,
+    /// so the loop scope never holds the binding and deleting the truncate
+    /// leaves the test green. Verified by mutation. The truncate is covered
+    /// here instead, by a local declared DIRECTLY in the loop body.
+    #[test]
+    fn hoisted_loop_scope_stays_balanced() {
+        let mut store = Store::new();
+
+        // THE `truncate(1)` CASE. `direct` is declared straight into the loop
+        // scope, and read by a LATER iteration at a point BEFORE its own
+        // declaration runs. Re-arming must drop it, so the read falls through
+        // to the protected-globals guard; if the body's bindings survived the
+        // re-arm it would instead resolve to the stale 99.
+        let leaked = eval_script(
+            b"local r = {} \
+              for i = 1, 3 do \
+                if i == 3 then r[1] = tostring(direct) end \
+                local direct = 99 \
+              end \
+              return r[1]",
+            &[],
+            &[],
+            &mut store,
+            0,
+        );
+        let message = leaked.expect_err("a body local must not survive into the next iteration");
+        assert!(
+            message.contains("nonexistent global variable 'direct'"),
+            "expected the protected-globals error, got {message:?}"
+        );
+
+        // The loop variable is scoped to the loop. Reading it afterwards must
+        // fall through to the protected-globals guard, not find a scope that
+        // was never popped.
+        let escaped = eval_script(
+            b"local r = {} \
+              for i = 1, 3 do r[i] = i end \
+              return tostring(i)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        );
+        let message = escaped.expect_err("the loop variable must not outlive the loop");
+        assert!(
+            message.contains("nonexistent global variable 'i'"),
+            "expected the protected-globals error, got {message:?}"
+        );
+
+        // A loop whose body never runs pushes no scope, so it must pop none.
+        // The `do` block puts a real scope underneath: an unconditional pop
+        // would discard `keep` rather than the loop's own scope.
+        let frame = eval_script(
+            b"local out = '' \
+              do \
+                local keep = 'kept' \
+                for i = 1, 0 do local x = i end \
+                out = keep \
+              end \
+              return out",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"kept".to_vec())));
+
+        // `break` leaves the enclosing scope intact.
+        let frame = eval_script(
+            b"local out = {} \
+              do \
+                local keep = 'kept' \
+                for i = 1, 5 do \
+                  out[#out + 1] = tostring(i) \
+                  if i == 2 then break end \
+                end \
+                out[#out + 1] = keep \
+              end \
+              return table.concat(out, ',')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"1,2,kept".to_vec())));
+
+        // Returning out of the loop still returns the right value.
+        let frame = eval_script(
+            b"for i = 1, 5 do if i == 3 then return 'got' .. i end end \
+              return 'no'",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"got3".to_vec())));
+
+        // Nested loops each keep their own scope; the inner loop re-arming
+        // must not disturb the outer loop's variable.
+        let frame = eval_script(
+            b"local out = {} \
+              for i = 1, 2 do \
+                for j = 1, 2 do out[#out + 1] = i .. j end \
+                out[#out + 1] = 'i=' .. i \
+              end \
+              return table.concat(out, ',')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(b"11,12,i=1,21,22,i=2".to_vec()))
+        );
     }
 
     /// (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0) The global
