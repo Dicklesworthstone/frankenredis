@@ -625,6 +625,19 @@ impl LuaTableInner {
         }
     }
 
+    /// (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0) Borrowed-key
+    /// lookup for the string-keyed fast path.
+    ///
+    /// `HashMap<Vec<u8>, _>` probes fine through `Borrow<[u8]>`, so a field read
+    /// does not need to allocate a `Vec<u8>` just to build a `LuaValue::Str`
+    /// key. `Expr::Field` did exactly that on EVERY access, which on the
+    /// `redis.call` path is one allocation per call. Returns None on a miss so
+    /// the caller can fall back to the full lookup (metatables, non-string-hash
+    /// entries) with the key materialised once, on the rare path only.
+    fn get_str(&self, key: &[u8]) -> Option<LuaValue> {
+        self.string_hash.get(key).cloned()
+    }
+
     fn hash_get(&self, key: &LuaValue) -> LuaValue {
         if let LuaValue::Str(s) = key
             && let Some(v) = self.string_hash.get(s)
@@ -5624,6 +5637,24 @@ impl<'a> LuaState<'a> {
                 let table = self.eval_expr(table_expr, env, varargs)?;
                 match &table {
                     LuaValue::Table(t) => {
+                        // Hit-only fast path: no key allocation. A miss takes
+                        // the unchanged path below, so __index chains still
+                        // resolve (pinned by
+                        // field_fast_path_still_consults_index_metamethod).
+                        //
+                        // The non-Nil check mirrors the full lookup's
+                        // `!matches!(raw, Nil)` guard. It is DEFENSIVE and
+                        // currently unreachable: assigning nil to a string key
+                        // does `string_hash.remove`, so a stored Nil cannot be
+                        // observed here. Verified by mutation -- deleting the
+                        // check does not fail any test today. Kept so this stays
+                        // correct if Nil ever becomes storable.
+                        let borrowed = t.inner.borrow().get_str(field.as_bytes());
+                        if let Some(value) = borrowed
+                            && !matches!(value, LuaValue::Nil)
+                        {
+                            return Ok(value);
+                        }
                         let key = LuaValue::Str(field.as_bytes().to_vec());
                         self.table_lookup_with_index_meta(t, &key, env, varargs)
                     }
@@ -14261,6 +14292,81 @@ mod tests {
         )
         .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"1,2,3".to_vec())));
+    }
+
+    /// (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0) The borrowed-key
+    /// field fast path may only short-circuit on a NON-Nil hit. A field that is
+    /// absent (or nil) must still reach the `__index` chain, and rawget must
+    /// still see through it.
+    #[test]
+    fn field_fast_path_still_consults_index_metamethod() {
+        let mut store = Store::new();
+
+        // Absent field on a table WITH __index must come from the metatable.
+        let frame = eval_script(
+            b"local base = {greet = 'from_index'} \
+              local t = setmetatable({}, {__index = base}) \
+              return t.greet",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"from_index".to_vec())));
+
+        // An own field shadows the metatable.
+        let frame = eval_script(
+            b"local base = {greet = 'from_index'} \
+              local t = setmetatable({greet = 'own'}, {__index = base}) \
+              return t.greet",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"own".to_vec())));
+
+        // Assigning nil must NOT keep shadowing -- the __index value returns.
+        let frame = eval_script(
+            b"local base = {greet = 'from_index'} \
+              local t = setmetatable({greet = 'own'}, {__index = base}) \
+              t.greet = nil \
+              return t.greet",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"from_index".to_vec())));
+
+        // A chained __index still resolves through the fast path's fallback.
+        let frame = eval_script(
+            b"local root = {deep = 'root_value'} \
+              local mid = setmetatable({}, {__index = root}) \
+              local t = setmetatable({}, {__index = mid}) \
+              return t.deep",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"root_value".to_vec())));
+
+        // And a genuinely missing field is still nil, not an error.
+        let frame = eval_script(
+            b"local t = setmetatable({}, {__index = {}}) \
+              return tostring(t.nothing)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"nil".to_vec())));
     }
 
     /// (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0) The intercept
