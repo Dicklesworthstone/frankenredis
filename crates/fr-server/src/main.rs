@@ -395,6 +395,119 @@ struct ClientConnection {
     /// collision being impossible.
     shared_nothing_route_tag: Vec<u8>,
     shared_nothing_partition: Option<usize>,
+    /// Command shapes this connection has already proved have NO borrowed fast
+    /// route, so the ~339-arm cascade is not re-walked for them.
+    ///
+    /// Measured with callgrind (exact instruction counts, no hardware counters
+    /// needed): `LTRIM key 0 -1` retires 21,760 instructions per op with the
+    /// cascade walked and 6,024 with it skipped — 72.3% of the operation was the
+    /// walk, spread across three inlined copies of the chain plus the generic
+    /// `key_arg1`/`key_arg4`/`key_arg5` parsers failing in turn.
+    ///
+    /// Direct-mapped, keyed by [`borrowed_fast_route_key`], and correct by
+    /// construction rather than by exhaustiveness: an entry can only cause the
+    /// packet to take the GENERIC path, which is the reference path every fast
+    /// route is already required to agree with (gated by
+    /// `borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis`). So a
+    /// key collision, an evicted slot, or a shape whose route depends on bytes
+    /// past the name can only cost a fast path — never a wrong reply.
+    borrowed_route_miss_memo: [u64; BORROWED_ROUTE_MEMO_SLOTS],
+    /// Whether ANY packet on this connection has ever reached the generic path.
+    ///
+    /// Until one has, the memo is provably empty, so testing it is pure loss —
+    /// and that loss is not hypothetical: with the memo arm unguarded, HDEL and
+    /// SETRANGE (both of which take a route further down the chain) measured
+    /// +2.4% and +2.2% instructions, and GET and SET +1.1% and +1.4%. A
+    /// connection that only ever issues routed commands now pays one predictable
+    /// boolean test instead of a header read and a probe on every packet.
+    saw_generic_dispatch: bool,
+}
+
+/// Slots in [`ClientConnection::borrowed_route_miss_memo`]. A connection cycles
+/// through very few distinct command shapes — the same observation that makes
+/// `shared_nothing_route_tag` a single entry — so this is sized to hold a
+/// realistic working set at 128 bytes per connection rather than to be a general
+/// cache. Must stay a power of two for the mask in [`borrowed_route_memo_slot`].
+const BORROWED_ROUTE_MEMO_SLOTS: usize = 16;
+
+/// Identity for "which borrowed fast routes could possibly match this packet":
+/// the multibulk arity, the command-name length, and the first six bytes of the
+/// name folded to upper case. Every arm of the cascade begins by testing a
+/// literal RESP prefix built from exactly the first two of those, so a shape that
+/// has failed every arm once will fail them all again.
+///
+/// Returns `None` for anything it does not fully understand — an arity or name
+/// length past two digits, a truncated header, a name longer than 63 bytes — and
+/// a `None` simply means no pruning, so the parser stays the authority on what
+/// the packet is.
+/// This sits in front of GET, so it is written as two unaligned loads and a
+/// mask rather than a decimal parse. The first attempt parsed the header with a
+/// digit loop and cost 134 instructions per packet — 8.8% of a GET, which is far
+/// too much to pay for pruning a walk GET never does. Reading a fixed 16-byte
+/// window and masking the name out of it is a handful of instructions.
+///
+/// The name is NOT case-folded. Folding is not needed for correctness — `get`
+/// and `GET` merely occupy two entries — and it is not worth the instructions.
+fn borrowed_fast_route_key(input: &[u8]) -> Option<u64> {
+    // ONE bounds check for the whole function: everything below indexes this
+    // fixed-size array, so there is no second slice-and-convert to fold away.
+    let head = input.first_chunk::<16>()?;
+    if head[0] != b'*' || head[2] != b'\r' || head[4] != b'$' {
+        return None;
+    }
+    let arity = head[1];
+    if !arity.is_ascii_digit() {
+        return None;
+    }
+    let name_window = u64::from_le_bytes([
+        head[8], head[9], head[10], head[11], head[12], head[13], head[14], head[15],
+    ]);
+    // Shape A, `*<d>\r\n$<d>\r\n<NAME>`: names of 1..=9 bytes, which is most of
+    // the command table, and the name starts at byte 8. Shape B,
+    // `*<d>\r\n$<dd>\r\n<NAME>`: 10..=63 bytes, name starts at byte 9, so the
+    // same 16-byte window carries its first SEVEN bytes — enough to key on.
+    let (name_len, window) = if head[6] == b'\r' {
+        (u64::from(head[5]) & 0x0f, name_window)
+    } else if head[7] == b'\r' && head[5].is_ascii_digit() && head[6].is_ascii_digit() {
+        (
+            (u64::from(head[5]) & 0x0f) * 10 + (u64::from(head[6]) & 0x0f),
+            name_window >> 8,
+        )
+    } else {
+        return None;
+    };
+    if name_len == 0 || name_len > 63 {
+        return None;
+    }
+    // Mask so bytes past the name — which belong to the first argument's bulk
+    // header, and so vary with the argument — cannot enter the key.
+    let keep = name_len.min(7);
+    let key = (window & ((1u64 << (8 * keep)) - 1)) ^ (u64::from(arity) << 56) ^ (name_len << 48);
+    // 0 is the empty-slot marker, so a key that lands on it must not be stored.
+    (key != 0).then_some(key)
+}
+
+/// Fold the key so shapes that differ only in arity, or only in the sixth name
+/// byte, do not pile into one slot.
+fn borrowed_route_memo_slot(key: u64) -> usize {
+    ((key ^ (key >> 29) ^ (key >> 47)) as usize) & (BORROWED_ROUTE_MEMO_SLOTS - 1)
+}
+
+/// Whether this connection has already walked the whole cascade for this packet
+/// shape and found nothing.
+///
+/// Takes the memo FIELD rather than the connection: the packet being classified
+/// is a borrow of `read_buf`, so a `&mut self` method here would collide with it
+/// while two disjoint field borrows do not.
+fn borrowed_route_is_known_miss(memo: &[u64; BORROWED_ROUTE_MEMO_SLOTS], key: u64) -> bool {
+    memo[borrowed_route_memo_slot(key)] == key
+}
+
+/// Record a shape that reached the generic parser. Recording a shape that DID
+/// match an arm but whose `execute_plain_*` declined is deliberate: that arm has
+/// already proved it will hand this shape back.
+fn record_borrowed_route_miss(memo: &mut [u64; BORROWED_ROUTE_MEMO_SLOTS], key: u64) {
+    memo[borrowed_route_memo_slot(key)] = key;
 }
 
 #[derive(Default)]
@@ -543,6 +656,8 @@ impl ClientConnection {
             sharded_replies: ShardedReplyOrder::default(),
             shared_nothing_route_tag: Vec::new(),
             shared_nothing_partition: None,
+            borrowed_route_miss_memo: [0; BORROWED_ROUTE_MEMO_SLOTS],
+            saw_generic_dispatch: false,
         }
     }
 
@@ -7188,6 +7303,30 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
+                } else if conn.saw_generic_dispatch
+                    && let Some(key) = borrowed_fast_route_key(unparsed)
+                    && borrowed_route_is_known_miss(&conn.borrowed_route_miss_memo, key)
+                {
+                    // (frankenredis-4m3i4) This connection has already sent this
+                    // packet shape through the rest of the chain and watched it
+                    // come out on the generic path. Measured with callgrind:
+                    // `LTRIM key 0 -1` retires 21,760 instructions per op with
+                    // the walk and 6,024 without it, so the walk was 72.3% of
+                    // that operation.
+                    //
+                    // The position is measured, not chosen for tidiness. The key
+                    // is a 16-byte header read — cheap, not free — and the arms
+                    // above this point are PING, GET and SET, which must not pay
+                    // it to prune a walk they never do: with the memo sitting one
+                    // arm earlier, above SET, SET measured +4.2% instructions.
+                    parse_borrowed_multibulk_action(
+                        unparsed,
+                        parser_config,
+                        runtime,
+                        ts,
+                        &mut conn.write_buf,
+                        &mut argv_scratch,
+                    )
                 } else if let Some(packet) =
                     parse_borrowed_plain_hset_packet(unparsed, &parser_config)
                 {
@@ -15221,6 +15360,27 @@ fn process_buffered_frames(
                     )
                 }
             };
+            // (frankenredis-4m3i4) Learn the shape whenever the packet ended up
+            // on the GENERIC path, whichever way it got there.
+            //
+            // Recording at the bottom of the `else` chain was not enough and the
+            // measurement said so: `LTRIM` improved 70.7% but `LREM` and three
+            // pair `ZADD` did not move, because those packets DO match an arm —
+            // the arm's `execute_plain_*` then declines and calls the generic
+            // parser from inside the arm, so they never reach the chain's final
+            // `else`. `Parsed` is returned only by that generic parser, so this
+            // one test covers all ~339 of those inner fallthroughs. A route that
+            // matches and declines is worth memoising for exactly the same
+            // reason as one that never matched: it has proved it hands this
+            // shape back.
+            if matches!(
+                borrowed_parse_result,
+                Ok(BorrowedMultibulkAction::Parsed { .. })
+            ) && let Some(key) = borrowed_fast_route_key(&conn.read_buf[consumed_total..])
+            {
+                record_borrowed_route_miss(&mut conn.borrowed_route_miss_memo, key);
+                conn.saw_generic_dispatch = true;
+            }
             match borrowed_parse_result {
                 Ok(BorrowedMultibulkAction::FastEncodedReply { consumed }) => {
                     processed_frames = processed_frames.saturating_add(1);
@@ -30667,6 +30827,90 @@ mod tests {
             crate::reactor_partition_local_command(&[b"ZADD", b"k", b"1", b"m"]),
             "argc must not narrow the fixed-key commands"
         );
+    }
+
+    /// (frankenredis-4m3i4) The memo only pays if the key is a function of the
+    /// packet SHAPE and nothing else. A key that moved with the arguments would
+    /// allocate a fresh slot per distinct key name and never hit, which is a
+    /// silent loss of the whole lever — no reply changes, so only this test
+    /// would catch it.
+    #[test]
+    fn borrowed_fast_route_key_depends_on_the_shape_and_not_the_arguments() {
+        let short = crate::borrowed_fast_route_key(b"*4\r\n$5\r\nLTRIM\r\n$1\r\nl\r\n$1\r\n0\r\n")
+            .expect("shape A key");
+        let long = crate::borrowed_fast_route_key(
+            b"*4\r\n$5\r\nLTRIM\r\n$24\r\nsome:much:longer:key:aaa\r\n",
+        )
+        .expect("shape A key");
+        assert_eq!(
+            short, long,
+            "the key must not move with the argument that follows the name"
+        );
+
+        // Same arity and name length, different name.
+        let lrem = crate::borrowed_fast_route_key(b"*4\r\n$4\r\nLREM\r\n$1\r\nl\r\n$1\r\n1\r\n")
+            .expect("LREM key");
+        let hdel = crate::borrowed_fast_route_key(b"*4\r\n$4\r\nHDEL\r\n$1\r\nh\r\n$1\r\nf\r\n")
+            .expect("HDEL key");
+        assert_ne!(lrem, hdel, "same arity and length, different command");
+
+        // Same name, different arity.
+        let rpush3 = crate::borrowed_fast_route_key(b"*3\r\n$5\r\nRPUSH\r\n$1\r\nl\r\n$1\r\na\r\n")
+            .expect("RPUSH/3 key");
+        let rpush4 = crate::borrowed_fast_route_key(b"*4\r\n$5\r\nRPUSH\r\n$1\r\nl\r\n$1\r\na\r\n")
+            .expect("RPUSH/4 key");
+        assert_ne!(rpush3, rpush4, "arity is part of the shape");
+
+        // Shape B: a two-digit name length puts the name one byte later.
+        let by_score =
+            crate::borrowed_fast_route_key(b"*4\r\n$13\r\nZRANGEBYSCORE\r\n$1\r\nz\r\n$1\r\n0\r\n")
+                .expect("shape B key");
+        let by_lex =
+            crate::borrowed_fast_route_key(b"*4\r\n$11\r\nZRANGEBYLEX\r\n$1\r\nz\r\n$1\r\n-\r\n")
+                .expect("shape B key");
+        assert_ne!(by_score, by_lex, "two-digit-length names must separate");
+        assert_ne!(
+            by_score, short,
+            "a shape-B key must not collide with a shape-A one"
+        );
+
+        // Anything not fully understood declines, which costs pruning and never
+        // correctness.
+        assert!(crate::borrowed_fast_route_key(b"*2\r\n$3\r\nGET\r\n").is_none());
+        assert!(crate::borrowed_fast_route_key(b"+OK\r\n").is_none());
+        assert!(crate::borrowed_fast_route_key(b"*x\r\n$5\r\nLTRIM\r\n$1\r\nl\r\n").is_none());
+    }
+
+    /// The memo must answer "known miss" ONLY for the key currently in the slot.
+    /// A stale true would route a packet to the generic path forever after an
+    /// eviction — still correct, but it is the difference between a cache and a
+    /// blanket bypass, so it is pinned.
+    #[test]
+    fn borrowed_route_memo_reports_only_the_key_it_holds() {
+        let mut memo = [0u64; crate::BORROWED_ROUTE_MEMO_SLOTS];
+        let ltrim = crate::borrowed_fast_route_key(b"*4\r\n$5\r\nLTRIM\r\n$1\r\nl\r\n$1\r\n0\r\n")
+            .expect("LTRIM key");
+        let lrem = crate::borrowed_fast_route_key(b"*4\r\n$4\r\nLREM\r\n$1\r\nl\r\n$1\r\n1\r\n")
+            .expect("LREM key");
+
+        assert!(!crate::borrowed_route_is_known_miss(&memo, ltrim));
+        crate::record_borrowed_route_miss(&mut memo, ltrim);
+        assert!(crate::borrowed_route_is_known_miss(&memo, ltrim));
+        assert!(!crate::borrowed_route_is_known_miss(&memo, lrem));
+
+        // Evicting the slot must retract the old answer rather than keep it.
+        let slot = crate::borrowed_route_memo_slot(ltrim);
+        memo[slot] = lrem;
+        assert!(!crate::borrowed_route_is_known_miss(&memo, ltrim));
+
+        // A zero key is the empty marker, so a real key must never be zero —
+        // otherwise a fresh memo would claim to hold it.
+        assert!(!crate::borrowed_route_is_known_miss(
+            &[0u64; crate::BORROWED_ROUTE_MEMO_SLOTS],
+            ltrim
+        ));
+        assert_ne!(ltrim, 0, "0 is the empty-slot marker");
+        assert_ne!(lrem, 0, "0 is the empty-slot marker");
     }
 
     /// (frankenredis-4m3i4) The cascade bypass is a MEASUREMENT arm. Shipping a
