@@ -16496,6 +16496,10 @@ enum BorrowedDispatchFloorClass {
     Lrem,
     /// (frankenredis-ozrro) `EXPIRE key seconds`, no option token.
     Expire,
+    /// (frankenredis-ozrro) `APPEND key value`.
+    Append,
+    /// (frankenredis-ozrro) `ZREMRANGEBYSCORE key min max`.
+    Zremrangebyscore,
     /// (frankenredis-ozrro) `LINSERT key BEFORE|AFTER pivot element`.
     Linsert,
     /// (frankenredis-ozrro) `SETRANGE key offset value`.
@@ -16555,6 +16559,7 @@ struct BorrowedDispatchFloorToken<'a> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BorrowedDispatchFloorCommand {
+    Append,
     Bitcount,
     Bitfield,
     BitfieldRo,
@@ -16605,6 +16610,7 @@ enum BorrowedDispatchFloorCommand {
     Zrange,
     Zrem,
     Zremrangebyrank,
+    Zremrangebyscore,
     Zscore,
 }
 
@@ -16668,6 +16674,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'X', b'R', b'A', b'N', b'G', b'E'] => Some(BorrowedDispatchFloorCommand::Xrange),
             [b'B', b'I', b'T', b'P', b'O', b'S'] => Some(BorrowedDispatchFloorCommand::Bitpos),
             [b'E', b'X', b'P', b'I', b'R', b'E'] => Some(BorrowedDispatchFloorCommand::Expire),
+            [b'A', b'P', b'P', b'E', b'N', b'D'] => Some(BorrowedDispatchFloorCommand::Append),
             _ => None,
         },
         7 => match uppercase_ascii_token::<7>(token)? {
@@ -16759,6 +16766,27 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
                 b'N',
                 b'K',
             ] => Some(BorrowedDispatchFloorCommand::Zremrangebyrank),
+            _ => None,
+        },
+        16 => match uppercase_ascii_token::<16>(token)? {
+            [
+                b'Z',
+                b'R',
+                b'E',
+                b'M',
+                b'R',
+                b'A',
+                b'N',
+                b'G',
+                b'E',
+                b'B',
+                b'Y',
+                b'S',
+                b'C',
+                b'O',
+                b'R',
+                b'E',
+            ] => Some(BorrowedDispatchFloorCommand::Zremrangebyscore),
             _ => None,
         },
         _ => None,
@@ -17021,6 +17049,20 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // ZINCRBY's shape — keep the cascade, because a classification the
         // parser then declines lands on the generic path instead of the arm that
         // would have served it.
+        // (frankenredis-ozrro) Second batch, ranked the same way. Gap per op:
+        // ZREMRANGEBYSCORE 8,455 (2.19x) and APPEND 2,081 (1.93x).
+        //
+        // Four candidates were measured and NOT taken, and the two negative ones
+        // are the more interesting result: `SETEX k 100 v` reads 0.93x and
+        // `GETSET k v` 0.65x — bypassing the cascade makes them SLOWER, so their
+        // routes both sit near the front AND beat the generic path by more than
+        // any walk costs. LSET (1.08x) and HSETNX (1.10x) are likewise already
+        // shallow. A negative gap is a positive finding: it says the arm order is
+        // already right for that command.
+        (3, BorrowedDispatchFloorCommand::Append) => Some(BorrowedDispatchFloorClass::Append),
+        (4, BorrowedDispatchFloorCommand::Zremrangebyscore) => {
+            Some(BorrowedDispatchFloorClass::Zremrangebyscore)
+        }
         (3, BorrowedDispatchFloorCommand::Expire) => Some(BorrowedDispatchFloorClass::Expire),
         (4, BorrowedDispatchFloorCommand::Setrange) => Some(BorrowedDispatchFloorClass::Setrange),
         (4, BorrowedDispatchFloorCommand::Zincrby) => Some(BorrowedDispatchFloorClass::Zincrby),
@@ -18097,6 +18139,50 @@ fn try_dispatch_floor_classified_action(
                     packet.element,
                     ts,
                 )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Append => {
+            if let Some(packet) = parse_borrowed_plain_append_packet(unparsed, &parser_config)
+                && let Some(response) =
+                    runtime.execute_plain_append_borrowed(packet.key, packet.member, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Zremrangebyscore => {
+            if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
+                unparsed,
+                &parser_config,
+                b"*4\r\n$16\r\n",
+                b"ZREMRANGEBYSCORE",
+            ) && let Some(response) =
+                runtime.execute_plain_zremrangebyscore_borrowed(packet.key, packet.a, packet.b, ts)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,

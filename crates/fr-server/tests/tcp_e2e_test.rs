@@ -2182,6 +2182,11 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"SET", b"s:1", b"hello"]));
     cmds.push(c(&[b"GET", b"s:1"]));
     cmds.push(c(&[b"APPEND", b"s:1", b"!!"]));
+    // (frankenredis-ozrro) APPEND onto an ABSENT key creates it, which is the
+    // branch its front-classified route is most likely to differ on.
+    cmds.push(c(&[b"APPEND", b"s:new", b"start"]));
+    cmds.push(c(&[b"APPEND", b"s:new", b""]));
+    cmds.push(c(&[b"GET", b"s:new"]));
     cmds.push(c(&[b"STRLEN", b"s:1"]));
     cmds.push(c(&[b"GETRANGE", b"s:1", b"0", b"-1"]));
     cmds.push(c(&[b"GETRANGE", b"s:1", b"-3", b"-1"]));
@@ -2348,6 +2353,19 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"ZPOPMIN", b"z:1"]));
     cmds.push(c(&[b"ZPOPMAX", b"z:1", b"2"]));
     cmds.push(c(&[b"ZREM", b"z:1", b"c"]));
+    // (frankenredis-ozrro) On a FRESH key, because by this point z:1 has been
+    // emptied by ZPOPMIN/ZPOPMAX/ZREM and every ZREMRANGEBYSCORE against it
+    // removes nothing — so all of them answered 0 and the case proved nothing.
+    // A min/max swap in the route passed the gate until these lines existed.
+    // The strict-subset removal below is what makes the bound order observable.
+    cmds.push(c(&[
+        b"ZADD", b"z:4", b"1", b"a", b"2", b"b", b"3", b"c", b"4", b"d",
+    ]));
+    cmds.push(c(&[b"ZREMRANGEBYSCORE", b"z:4", b"2", b"3"]));
+    cmds.push(c(&[b"ZRANGE", b"z:4", b"0", b"-1", b"WITHSCORES"]));
+    cmds.push(c(&[b"ZREMRANGEBYSCORE", b"z:4", b"(1", b"(4"]));
+    cmds.push(c(&[b"ZREMRANGEBYSCORE", b"z:4", b"500", b"600"]));
+    cmds.push(c(&[b"ZRANGE", b"z:4", b"0", b"-1", b"WITHSCORES"]));
     cmds.push(c(&[b"ZREMRANGEBYSCORE", b"z:1", b"-inf", b"+inf"]));
     cmds.push(c(&[b"ZCARD", b"z:1"]));
 
