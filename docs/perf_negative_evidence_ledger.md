@@ -15463,3 +15463,64 @@ CI, which is pseudo-replicated and will look ~3x tighter than the truth. To reso
 of ~10% instructions, raise the invocation count until the null bound is under ~1%, or find a shape
 where the interpreter's share is larger -- but note the -P 16 attempt was retracted for bias and has
 NOT been re-characterised under the corrected estimator.
+
+## 2026-08-09 CrimsonHawk: REJECT — the field-cache lever's 10.516% instruction reduction is worth +0.02% end-to-end; instruction count does NOT project to command-level effect in this interpreter (`frankenredis-lua-rediscall-loop-interpreter-bound-d3al0`)
+
+Claim class: SELF-SPEEDUP. Campaign output: no.
+
+The lever stays shipped (39c5ef6f5) and its instruction measurement stands. What is REJECTED is the
+inference -- mine -- that an instruction reduction of that size buys anything measurable against the
+incumbent, and with it the method of projecting e2e value from instruction counts at all.
+
+MEASURED with the first instrument sharp enough to settle it. Twenty independent invocations of
+`scripts/lua_eval_multirun.sh`, each contributing ONE median (the across-run estimator; the inner
+per-round CI is pseudo-replicated and must not be read). Four arms in every invocation: fr before
+the field cache, fr after, a byte-identical A/A null, and live vendored Redis 7.2.4, all driven by
+the same vendored redis-benchmark, per-core pinned with order and cores rotated on independent
+cycles. Host threadripperje at load 0.13. Workload
+`EVAL "for i=1,50 do redis.call('GET', KEYS[1]) end return 1" 1 k`, n=4000, c=1, -P 1, 16 rounds
+per invocation.
+
+  A/A null    median 0.9989  bootstrap 95% median CI [0.9910, 1.0054]  sd 1.09%  <- CONTAINS 1.0
+  A/B effect  median 1.0002  bootstrap 95% median CI [0.9968, 1.0078]  sd 1.26%  = +0.02%
+  fr_A/redis  median 0.7660  bootstrap 95% median CI [0.7622, 0.7713]  sd 0.72%
+  fr_B/redis  median 0.7667  bootstrap 95% median CI [0.7599, 0.7728]  sd 1.09%
+
+THE NULL BOUND IS 0.90%, the tightest this harness has produced, so this is NOT "the effect is under
+the noise floor". The floor is 0.90% and the effect is 0.02% -- centred on zero, with a CI that
+comfortably contains 1.0. A 10.516% instruction reduction bought nothing at the command level. The
+two competitive CIs overlap almost entirely (0.7660 vs 0.7667).
+
+The isolation is clean: the only EVAL-path change between the two binaries is 39c5ef6f5. The other
+two commits in the range touch SINTER (`cce293db6`) and a test (`1131ab350`), neither of which this
+workload executes.
+
+WHAT THIS OVERTURNS, and it is my own reasoning from earlier today. The preceding COMPETITIVE entry
+measured the day's TEN levers at 23.60% of instructions -> +5.74% e2e and I read a ~1:4 translation
+out of it, then used that ratio to project this lever at ~2.5% and to argue that lever (1)
+`Str -> Rc<[u8]>` (223 hand-edited sites) would land near 4-5% and was therefore worth attempting.
+That projection is now falsified by direct measurement: the largest single lever in the set
+translates at ~1:500, not ~1:4. A ratio derived from a bundle does not distribute over its members.
+
+The likely reason, offered as a hypothesis and not a finding: instructions removed from a path that
+is already stalled on memory or syscall latency are free to remove and free to keep. The field cache
+elides a hash and a memcmp whose cost may sit inside an existing stall, whereas whatever produced
+the bundle's +5.74% evidently removed work that was on the critical path. Distinguishing them needs
+IPC per arm, which this harness does not collect.
+
+CONSEQUENCE FOR THE REMAINING WORK: do NOT start lever (1) on an instruction-count projection. The
+only honest basis for attempting 223 hand edits would be a measurement showing that the specific
+work it removes -- the three per-call allocations -- is on the critical path, and the cheapest way to
+get that is an IPC or cycles-per-op comparison per arm, not another instructions:u delta.
+
+The bootstrap median-CI gate determined the verdict, never CV; CV is not computed here, and the sd
+figures above are reported as provenance only.
+
+Retry predicate: re-open ONLY IF a per-arm measurement SHOWS the removed work on the critical path
+-- specifically, IF cycles-per-op between the two arms differs by > 1.0% while the A/A null bound
+stays < 1.0%, or IF IPC differs between the arms at all (this entry's arms differ by 10.516% in
+instructions and must therefore differ in IPC if the cycles are equal). Also re-open IF a workload
+whose redis.call-per-eval count EXCEEDS ~200 makes field resolution dominate, WHEN measured with the
+same across-run estimator. Do NOT re-run this comparison at -P 1 UNTIL at least 20 invocations are
+budgeted: at 7 invocations the null bound is 1.80%, which EXCEEDS this effect and would have made a
+null result indistinguishable from a small positive one.
