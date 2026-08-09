@@ -15339,3 +15339,59 @@ the null must contain 1.0 and the effect must both exclude 1.0 and exceed the nu
 Do NOT quote an instructions:u percentage as competitive output -- the translation is between 1:1.9
 and 1:3.4 depending on pipelining alone. Re-run this entry's comparison if the workload's
 redis.call-per-eval count changes, since that also moves the interpreter's share.
+
+## 2026-08-09 CrimsonHawk: RETRACTION of the -P 16 "+12.43%" entry above — its A/A null was ONE lucky draw; the harness is biased up to 7% at that shape (`frankenredis-lua-rediscall-loop-interpreter-bound-d3al0`)
+
+Claim class: SELF-SPEEDUP. Campaign output: no.
+
+Retracting my own COMPETITIVE entry from earlier today. The measurement it reports is real but it is
+NOT ADEQUATELY SUPPORTED, and the defect is in my method rather than in the numbers.
+
+WHAT I DID WRONG. I published an A/B of +12.43% on the strength of a single invocation whose A/A
+null happened to read 1.0000 with a bootstrap 95% median CI of [0.9898, 1.0258]. That is one draw.
+I never asked what the null's DISTRIBUTION looks like at -P 16 before quoting an effect against it.
+
+WHAT THE NULL ACTUALLY DOES AT -P 16. Five invocations, byte-identical binaries on both arms, same
+host at load 0.15-0.30, same rotation and round-count discipline:
+    null 0.9512  CI [0.9403, 0.9696]   EXCLUDES 1.0   (bound 5.97%)
+    null 0.9770  CI [0.9667, 0.9778]   EXCLUDES 1.0   (bound 3.33%)
+    null 1.0240  CI [1.0000, 1.0424]   contains 1.0   (bound 4.24%)
+    null 1.0529  CI [1.0460, 1.0711]   EXCLUDES 1.0   (bound 7.11%)
+    null 1.0347  CI [1.0285, 1.0595]   EXCLUDES 1.0   (bound 5.95%)
+Four of five are INADMISSIBLE by the harness's own rule, the bias reaches 7%, and its SIGN VARIES
+between runs -- so it is not a fixed offset that could be corrected for. The competitive ratio moves
+with it: fr/redis read 0.769, 0.785, 0.826 across those same runs, a 7% spread on the number the
+earlier entry quoted to three decimal places as 0.7877.
+
+CONSEQUENCE: the "+12.43%" and the "0.700x -> 0.788x" in the preceding entry must not be cited. An
+effect of 12% measured against a null that wanders +/-7% is not resolved, and the one run that
+looked clean is indistinguishable from a favourable draw. The `-P 16` support added to
+`scripts/lua_eval_headtohead.sh` in that commit is kept -- the CODE is fine and the reasoning that
+pipelining raises the interpreter's share is still sound -- but the SHAPE is not currently a usable
+measurement substrate and no verdict may be taken from it until the bias is understood.
+
+WHAT IS AND IS NOT AFFECTED. The -P 1 results are not retracted: their nulls ran 1.0000, 1.0145,
+0.9845, 0.9987 across separate invocations and workloads, i.e. admissible and stable, and the
+effects reported there were correctly called NON-RESULTS. Nothing that was reported as "not a
+result" becomes one now. Only the pipelined claim is withdrawn.
+
+LIKELIEST MECHANISM, stated as a hypothesis and not as a finding: -P 16 pushes this workload to
+~45,000 EVAL/s (2.25M redis.calls/s) from a SINGLE pinned client core, which is roughly 2.5x the
+unpipelined rate. At that rate the client itself plausibly becomes a participant in the measurement,
+and small differences in client-side batching or socket state between arms would show up as exactly
+this: a null that is biased, run-dependent, and signed either way. Deliberately NOT concluded --
+`ps`-based CPU sampling of the client during a run was attempted and captured the wrong PIDs, so
+there is no evidence for it yet.
+
+Retry predicate: before ANY verdict is taken at -P 16, characterise the null FIRST -- at least five
+null-only invocations -- and require every one of them to contain 1.0 with a bound under ~2%. If the
+bias survives, test the client hypothesis directly (multiple `--threads`, a second client core, or
+`-c` above 1 so the client is not a single serialised pipeline) and re-characterise. Do not attempt
+lever (1) `Str -> Rc<[u8]>` against this shape until that is done; the argument that -P 16 makes it
+measurable rested on the null being tight, which it is not.
+
+GENERAL RULE, which is the part worth carrying: a single admissible A/A null is not evidence that a
+harness is unbiased -- it is one sample from the null's own distribution. Characterise the null
+across runs BEFORE the first A/B is published, not after someone doubts it. I already hold this
+standard for repository gates ("a gate that fails then passes at identical config is MARGINAL") and
+failed to apply it to my own instrument.
