@@ -718,10 +718,12 @@ impl ShardedSetGetCommand {
     }
 }
 
-/// Longest command name in the partition-local table (`ZREMRANGEBYSCORE`,
-/// `ZREVRANGEBYSCORE`). Anything longer cannot be in it, so the case-fold buffer
-/// doubles as the first rejection test.
-const REACTOR_COMMAND_NAME_MAX: usize = 16;
+/// Longest command name in the partition-local table
+/// (`GEORADIUSBYMEMBER_RO`). Anything longer cannot be in it, so the case-fold
+/// buffer doubles as the first rejection test. This bound is load-bearing, not
+/// cosmetic: a name longer than the buffer is REJECTED rather than folded, so
+/// admitting a longer command without raising it would silently do nothing.
+const REACTOR_COMMAND_NAME_MAX: usize = 20;
 
 /// Commands the per-core reactor path will execute against a single partition.
 ///
@@ -747,7 +749,11 @@ const REACTOR_COMMAND_NAME_MAX: usize = 16;
 /// it would reach outside the partition it locked. Excluded for that reason:
 ///   * SORT (BY/GET patterns dereference other keys), SINTER/SUNION/SDIFF and
 ///     SINTERCARD, ZRANGESTORE and the Z*STORE family, SMOVE, RPOPLPUSH, LMOVE,
-///     COPY, RENAME, MSET/MGET, and BITOP.
+///     COPY, RENAME, MSET/MGET, BITOP, PFMERGE and GEOSEARCHSTORE.
+///   * GEORADIUS and GEORADIUSBYMEMBER, whose STORE/STOREDIST options write a
+///     SECOND key chosen at runtime. Admission reads the name only, so the
+///     option cannot be seen here; the `_RO` spellings, which upstream defines
+///     as the store-less variants, are admitted in their place.
 ///   * MOVE and anything else that reaches across databases.
 ///   * OBJECT and MEMORY USAGE, whose key is at argv[2], not argv[1]; routing
 ///     them on argv[1] would lock the wrong partition.
@@ -758,8 +764,8 @@ const REACTOR_COMMAND_NAME_MAX: usize = 16;
 ///   * DUMP/RESTORE, whose serialized payloads are not compared against the
 ///     incumbent anywhere, so they would be admitted untested.
 ///
-/// The variadic key-list commands (DEL/UNLINK/EXISTS/TOUCH) are admitted only at
-/// one key, which [`reactor_partition_local_command`] enforces on argc.
+/// The variadic key-list commands (DEL/UNLINK/EXISTS/TOUCH/PFCOUNT) are admitted
+/// only at one key, which [`reactor_partition_local_command`] enforces on argc.
 fn reactor_single_key_command(command: &[u8]) -> bool {
     // The seven hottest names short-circuit before the case fold, so the common
     // GET/SET path pays exactly what it did before this table existed.
@@ -859,6 +865,21 @@ fn reactor_single_key_command(command: &[u8]) -> bool {
             | b"ZREVRANK"
             | b"ZSCAN"
             | b"ZSCORE"
+            // HyperLogLog. PFCOUNT is the same shape as BITCOUNT -- a scan of
+            // 16384 dense registers answered with ONE integer -- so it is
+            // admitted through the variadic-key-list lane below, at one key.
+            // PFMERGE writes a destination key and stays out.
+            | b"PFADD"
+            // geo. Every one of these takes the geo set at argv[1]; the two
+            // `_RO` spellings are upstream's store-less variants, so unlike
+            // GEORADIUS/GEORADIUSBYMEMBER they cannot write a second key.
+            | b"GEOADD"
+            | b"GEODIST"
+            | b"GEOHASH"
+            | b"GEOPOS"
+            | b"GEORADIUSBYMEMBER_RO"
+            | b"GEORADIUS_RO"
+            | b"GEOSEARCH"
             // key lifetime, all single-key and default-DB
             | b"EXPIRE"
             | b"EXPIREAT"
@@ -880,6 +901,10 @@ fn reactor_variadic_key_list_command(command: &[u8]) -> bool {
         || command.eq_ignore_ascii_case(b"UNLINK")
         || command.eq_ignore_ascii_case(b"EXISTS")
         || command.eq_ignore_ascii_case(b"TOUCH")
+        // PFCOUNT is variadic in KEYS, not in members: `PFCOUNT a b` unions two
+        // registers sets and would read whichever of them happened to land in
+        // the partition argv[1] selected, so it is only partition-local at one.
+        || command.eq_ignore_ascii_case(b"PFCOUNT")
 }
 
 /// Whether a parsed command may run against the single partition owning
@@ -30494,6 +30519,19 @@ mod tests {
             b"SSCAN",
             b"TTL",
             b"EXPIRE",
+            // HLL and geo, the families the table had no entry for at all.
+            b"PFADD",
+            b"pfadd",
+            b"GEOADD",
+            b"GEODIST",
+            b"GEOHASH",
+            b"GEOPOS",
+            b"GEOSEARCH",
+            b"GEORADIUS_RO",
+            // 20 bytes: the longest name in the table, and the one that the
+            // case-fold buffer silently rejected before it was widened.
+            b"GEORADIUSBYMEMBER_RO",
+            b"georadiusbymember_ro",
         ] {
             assert!(
                 crate::reactor_single_key_command(command),
@@ -30535,6 +30573,11 @@ mod tests {
             // Admitted nowhere until their payloads are pinned against 7.2.4.
             b"DUMP",
             b"RESTORE",
+            // Write a SECOND key that admission cannot see from the name.
+            b"PFMERGE",
+            b"GEOSEARCHSTORE",
+            b"GEORADIUS",
+            b"GEORADIUSBYMEMBER",
         ] {
             assert!(
                 !crate::reactor_single_key_command(command),
@@ -30550,7 +30593,13 @@ mod tests {
         // and cross-partition at two, so admission has to read argc, not just
         // the name. A two-key DEL admitted here would delete only whichever key
         // happened to live in the partition argv[1] routed to.
-        for name in [b"DEL".as_slice(), b"UNLINK", b"EXISTS", b"TOUCH"] {
+        for name in [
+            b"DEL".as_slice(),
+            b"UNLINK",
+            b"EXISTS",
+            b"TOUCH",
+            b"PFCOUNT",
+        ] {
             assert!(
                 !crate::reactor_single_key_command(name),
                 "{name:?} must not be admitted on its name alone"

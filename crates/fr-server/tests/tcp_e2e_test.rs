@@ -1757,6 +1757,365 @@ fn shared_nothing_wide_partition_local_families_match_legacy_redis() {
     assert_eq!(fr_responses.len(), redis_responses.len());
 }
 
+/// The HyperLogLog and geo families, which the reactor path refused outright
+/// until they were admitted as partition-local work. (frankenredis-aasnl)
+///
+/// `PFCOUNT` is the same shape as `BITCOUNT`, which is the shape a partitioned
+/// keyspace pays off best on: a scan of 16384 dense registers answered with ONE
+/// integer, so the compute spreads over cores while the reply stays tiny. It is
+/// also the family with the most room to disagree with 7.2.4, because the
+/// cardinality it reports depends on the register encoding AND on where the
+/// sparse-to-dense promotion happens -- so the fixture drives one key past that
+/// threshold rather than staying in the sparse regime where any implementation
+/// counts exactly. The geo replies pin coordinate and distance FORMATTING, which
+/// is where fr and Redis have historically diverged on doubles.
+///
+/// The final block is the other half of admission, and the half a gate is most
+/// likely to omit: the spellings that reach a SECOND key -- `PFCOUNT` over two
+/// keys, `PFMERGE`, `GEOSEARCHSTORE`, and `GEORADIUS`/`GEORADIUSBYMEMBER` with
+/// their `STORE` options -- must still be REFUSED. Without it this test would
+/// pass just as well against a table that admitted every command there is.
+#[test]
+fn shared_nothing_hll_and_geo_families_match_legacy_redis() {
+    let fr_port = reserve_port();
+    let redis_port = reserve_port();
+    let _fr_server = spawn_frankenredis_sharded_set_get(fr_port, 8);
+    let _redis_server = spawn_legacy_redis(redis_port);
+    let mut fr = BufferedTcpClient::connect(fr_port);
+    let mut redis = BufferedTcpClient::connect(redis_port);
+
+    let mut pipeline = Vec::new();
+    let mut count = 0usize;
+    let push = |cmd: &[&[u8]], pipeline: &mut Vec<u8>, count: &mut usize| {
+        pipeline.extend_from_slice(&encode_command(cmd));
+        *count += 1;
+    };
+
+    let mut partitions = std::collections::HashSet::new();
+    for i in 0..12u32 {
+        let hll = format!("geohll:h:{i}");
+        let geo = format!("geohll:g:{i}");
+        let str_key = format!("geohll:s:{i}");
+        for key in [&hll, &geo, &str_key] {
+            partitions.insert(usize::from(fr_store::crc16_slot(key.as_bytes())) % 8);
+        }
+        let (hll, geo, str_key) = (hll.as_bytes(), geo.as_bytes(), str_key.as_bytes());
+
+        // HyperLogLog, sparse regime: PFADD reports whether the estimate moved.
+        push(
+            &[b"PFADD", hll, b"a", b"b", b"c"],
+            &mut pipeline,
+            &mut count,
+        );
+        push(&[b"PFADD", hll, b"a", b"b"], &mut pipeline, &mut count);
+        push(&[b"PFADD", hll, b"d"], &mut pipeline, &mut count);
+        push(&[b"PFCOUNT", hll], &mut pipeline, &mut count);
+        // A key-less PFADD creates an empty HLL, so both its return and the
+        // TYPE of what it created are observable.
+        push(
+            &[b"PFADD", format!("geohll:e:{i}").as_bytes()],
+            &mut pipeline,
+            &mut count,
+        );
+        push(
+            &[b"PFCOUNT", format!("geohll:e:{i}").as_bytes()],
+            &mut pipeline,
+            &mut count,
+        );
+        push(&[b"TYPE", hll], &mut pipeline, &mut count);
+        push(&[b"STRLEN", hll], &mut pipeline, &mut count);
+
+        // Geo. The four Sicilian fixtures upstream's own tests use, so the
+        // distances and geohashes below have published expected values.
+        push(
+            &[
+                b"GEOADD",
+                geo,
+                b"13.361389",
+                b"38.115556",
+                b"Palermo",
+                b"15.087269",
+                b"37.502669",
+                b"Catania",
+            ],
+            &mut pipeline,
+            &mut count,
+        );
+        push(
+            &[
+                b"GEOADD",
+                geo,
+                b"13.583333",
+                b"37.316667",
+                b"Agrigento",
+                b"15.280000",
+                b"37.070000",
+                b"Siracusa",
+            ],
+            &mut pipeline,
+            &mut count,
+        );
+        // NX/XX/CH change what the integer reply counts, and XX on an absent
+        // member must not create it.
+        push(
+            &[
+                b"GEOADD",
+                geo,
+                b"NX",
+                b"CH",
+                b"13.361389",
+                b"38.2",
+                b"Palermo",
+            ],
+            &mut pipeline,
+            &mut count,
+        );
+        push(
+            &[b"GEOADD", geo, b"XX", b"CH", b"1.0", b"2.0", b"Nowhere"],
+            &mut pipeline,
+            &mut count,
+        );
+        push(&[b"ZCARD", geo], &mut pipeline, &mut count);
+        push(
+            &[b"GEOPOS", geo, b"Palermo", b"Catania", b"Nowhere"],
+            &mut pipeline,
+            &mut count,
+        );
+        push(
+            &[b"GEODIST", geo, b"Palermo", b"Catania"],
+            &mut pipeline,
+            &mut count,
+        );
+        push(
+            &[b"GEODIST", geo, b"Palermo", b"Catania", b"km"],
+            &mut pipeline,
+            &mut count,
+        );
+        push(
+            &[b"GEODIST", geo, b"Palermo", b"Nowhere"],
+            &mut pipeline,
+            &mut count,
+        );
+        push(
+            &[b"GEOHASH", geo, b"Palermo", b"Catania", b"Nowhere"],
+            &mut pipeline,
+            &mut count,
+        );
+        // The O(N)-compute reads. ASC pins the order so the comparison is not
+        // hostage to an unspecified traversal order.
+        push(
+            &[
+                b"GEOSEARCH",
+                geo,
+                b"FROMLONLAT",
+                b"15.0",
+                b"37.0",
+                b"BYRADIUS",
+                b"200",
+                b"km",
+                b"ASC",
+                b"WITHCOORD",
+                b"WITHDIST",
+                b"WITHHASH",
+            ],
+            &mut pipeline,
+            &mut count,
+        );
+        push(
+            &[
+                b"GEOSEARCH",
+                geo,
+                b"FROMMEMBER",
+                b"Palermo",
+                b"BYBOX",
+                b"400",
+                b"400",
+                b"km",
+                b"ASC",
+                b"COUNT",
+                b"3",
+            ],
+            &mut pipeline,
+            &mut count,
+        );
+        push(
+            &[
+                b"GEORADIUS_RO",
+                geo,
+                b"15.0",
+                b"37.0",
+                b"200",
+                b"km",
+                b"ASC",
+                b"WITHDIST",
+            ],
+            &mut pipeline,
+            &mut count,
+        );
+        push(
+            &[
+                b"GEORADIUSBYMEMBER_RO",
+                geo,
+                b"Palermo",
+                b"200",
+                b"km",
+                b"ASC",
+            ],
+            &mut pipeline,
+            &mut count,
+        );
+
+        // Wrong type in both directions: a plain string is not a valid HLL, and
+        // an HLL (which IS a string) is not a sorted set.
+        push(&[b"SET", str_key, b"plain"], &mut pipeline, &mut count);
+        push(&[b"PFADD", str_key, b"x"], &mut pipeline, &mut count);
+        push(&[b"PFCOUNT", str_key], &mut pipeline, &mut count);
+        push(
+            &[b"GEOADD", hll, b"1.0", b"2.0", b"m"],
+            &mut pipeline,
+            &mut count,
+        );
+    }
+
+    // One key driven past the sparse-to-dense promotion, where the estimate
+    // stops being exact and starts depending on the estimator itself.
+    let dense_elements: Vec<Vec<u8>> = (0..400u32)
+        .map(|i| format!("elem-{i}").into_bytes())
+        .collect();
+    let mut dense_cmd: Vec<&[u8]> = vec![b"PFADD".as_slice(), b"geohll:dense".as_slice()];
+    dense_cmd.extend(dense_elements.iter().map(Vec::as_slice));
+    push(&dense_cmd, &mut pipeline, &mut count);
+    push(&[b"PFCOUNT", b"geohll:dense"], &mut pipeline, &mut count);
+    push(&[b"STRLEN", b"geohll:dense"], &mut pipeline, &mut count);
+    // Re-adding known members must not move a dense estimate.
+    push(
+        &[b"PFADD", b"geohll:dense", b"elem-0", b"elem-399"],
+        &mut pipeline,
+        &mut count,
+    );
+    push(&[b"PFCOUNT", b"geohll:dense"], &mut pipeline, &mut count);
+
+    // Absent keys and arity errors must come from the partition's own dispatcher,
+    // not from the shared-nothing unsupported reply.
+    for cmd in [
+        vec![b"PFCOUNT".as_slice(), b"geohll:absent".as_slice()],
+        vec![
+            b"GEOPOS".as_slice(),
+            b"geohll:absent".as_slice(),
+            b"m".as_slice(),
+        ],
+        vec![
+            b"GEODIST".as_slice(),
+            b"geohll:absent".as_slice(),
+            b"a".as_slice(),
+            b"b".as_slice(),
+        ],
+        vec![
+            b"GEOHASH".as_slice(),
+            b"geohll:absent".as_slice(),
+            b"m".as_slice(),
+        ],
+        vec![
+            b"GEOSEARCH".as_slice(),
+            b"geohll:absent".as_slice(),
+            b"FROMLONLAT".as_slice(),
+            b"15".as_slice(),
+            b"37".as_slice(),
+            b"BYRADIUS".as_slice(),
+            b"100".as_slice(),
+            b"km".as_slice(),
+            b"ASC".as_slice(),
+        ],
+        vec![b"PFADD".as_slice()],
+        vec![b"GEOADD".as_slice(), b"geohll:g:0".as_slice()],
+        vec![
+            b"GEOSEARCH".as_slice(),
+            b"geohll:g:0".as_slice(),
+            b"FROMLONLAT".as_slice(),
+            b"15".as_slice(),
+        ],
+    ] {
+        push(&cmd, &mut pipeline, &mut count);
+    }
+
+    assert!(
+        partitions.len() > 1,
+        "fixture keys must cross partition boundaries, saw {partitions:?}"
+    );
+
+    fr.write_all(&pipeline);
+    redis.write_all(&pipeline);
+    let fr_responses = fr.read_responses(count);
+    let redis_responses = redis.read_responses(count);
+    for (i, (got, want)) in fr_responses.iter().zip(&redis_responses).enumerate() {
+        assert_eq!(
+            got, want,
+            "reply {i} of the HLL/geo partition-local pipeline"
+        );
+    }
+    assert_eq!(fr_responses.len(), redis_responses.len());
+
+    // Admission is narrow on purpose: everything below would read or write a
+    // key the routed partition does not own, so the reactor must refuse rather
+    // than answer from one partition. Sent to fr ONLY -- Redis answers all of
+    // them, which is exactly why they cannot be part of the comparison above.
+    let mut refused = Vec::new();
+    let mut refused_count = 0usize;
+    for cmd in [
+        vec![
+            b"PFCOUNT".as_slice(),
+            b"geohll:h:0".as_slice(),
+            b"geohll:h:1".as_slice(),
+        ],
+        vec![
+            b"PFMERGE".as_slice(),
+            b"geohll:merged".as_slice(),
+            b"geohll:h:0".as_slice(),
+        ],
+        vec![
+            b"GEOSEARCHSTORE".as_slice(),
+            b"geohll:dest".as_slice(),
+            b"geohll:g:0".as_slice(),
+            b"FROMLONLAT".as_slice(),
+            b"15".as_slice(),
+            b"37".as_slice(),
+            b"BYRADIUS".as_slice(),
+            b"200".as_slice(),
+            b"km".as_slice(),
+            b"ASC".as_slice(),
+        ],
+        vec![
+            b"GEORADIUS".as_slice(),
+            b"geohll:g:0".as_slice(),
+            b"15".as_slice(),
+            b"37".as_slice(),
+            b"200".as_slice(),
+            b"km".as_slice(),
+            b"STORE".as_slice(),
+            b"geohll:dest".as_slice(),
+        ],
+        vec![
+            b"GEORADIUSBYMEMBER".as_slice(),
+            b"geohll:g:0".as_slice(),
+            b"Palermo".as_slice(),
+            b"200".as_slice(),
+            b"km".as_slice(),
+            b"STORE".as_slice(),
+            b"geohll:dest".as_slice(),
+        ],
+    ] {
+        refused.extend_from_slice(&encode_command(&cmd));
+        refused_count += 1;
+    }
+    fr.write_all(&refused);
+    for response in fr.read_responses(refused_count) {
+        assert!(
+            matches!(response, RespFrame::Error(ref error) if error.contains("not supported")),
+            "a second-key spelling must stay refused, not answered from one partition: {response:?}"
+        );
+    }
+}
+
 #[test]
 fn shared_nothing_connection_serves_scattered_keys_like_legacy_redis() {
     let fr_port = reserve_port();
