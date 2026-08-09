@@ -3972,7 +3972,20 @@ fn startup_config_from_directives(
                         "bind requires at least one address",
                     ));
                 }
-                config.bind_addr = Some(config_arg_string(directive, 0)?);
+                // (frankenredis-5rru3) ALL addresses, not just arg 0. redis binds
+                // every address on the line, and the stock redis.conf ships
+                // `bind 127.0.0.1 -::1`, so reading only the first left IPv6
+                // loopback unreachable on fr while redis answered on it -- with
+                // `CONFIG GET bind` echoing the truncated value back, so the
+                // operator's own introspection agreed with the wrong answer.
+                // The runtime already models this as one space-separated string
+                // (its CONFIG SET bind handles up to MAX_LISTENERS addresses);
+                // only this parser was lossy.
+                let mut parts = Vec::with_capacity(directive.args.len());
+                for i in 0..directive.args.len() {
+                    parts.push(config_arg_string(directive, i)?);
+                }
+                config.bind_addr = Some(parts.join(" "));
             }
             b"port" => {
                 expect_config_arg_count(directive, 1)?;
@@ -4691,16 +4704,32 @@ fn main() -> ExitCode {
     // binds the single configured bind address; CONFIG SET bind can later grow
     // this to a set of up to MAX_LISTENERS. cur_binds / cur_listen_port track
     // the live set so a CONFIG SET port or bind change can recompute it.
-    let mut cur_binds: Vec<String> = vec![bind_addr.clone()];
+    // (frankenredis-5rru3) `bind_addr` is a SPEC, possibly several addresses and
+    // possibly `-`-prefixed, not a single address. Bind them all; if that fails
+    // and some were optional, drop the optional ones and try the required set
+    // rather than refusing to start.
+    let (all_binds, required_binds) = split_bind_spec(&bind_addr);
+    let mut cur_binds: Vec<String> = all_binds;
     let mut cur_listen_port: u16 = port;
-    let mut listeners: Vec<TcpListener> =
-        match bind_and_register(&poll, &cur_binds, cur_listen_port) {
-            Ok(l) => l,
-            Err(e) => {
-                eprintln!("error: {e}");
-                return ExitCode::from(1);
+    let mut listeners: Vec<TcpListener> = match bind_and_register(&poll, &cur_binds, cur_listen_port)
+    {
+        Ok(l) => l,
+        Err(first_err) if cur_binds.len() != required_binds.len() => {
+            eprintln!("warning: {first_err}; retrying without the optional (-prefixed) addresses");
+            cur_binds = required_binds;
+            match bind_and_register(&poll, &cur_binds, cur_listen_port) {
+                Ok(l) => l,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::from(1);
+                }
             }
-        };
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(1);
+        }
+    };
 
     eprintln!(
         "FrankenRedis v{} ready (mode={mode_str}, port={port}, command_execution_threads={})",
@@ -5225,6 +5254,32 @@ fn main() -> ExitCode {
 /// so a mid-way failure cleans up fully and never disturbs the caller's
 /// existing listeners. An empty `addrs` yields zero listeners (server listens
 /// on nothing — matching redis `bind ""`).
+/// (frankenredis-5rru3) Split a redis `bind` spec into (every address, the
+/// required subset). A leading `-` marks an address redis binds if it can and
+/// SKIPS if it cannot, which is why the stock config can ship `-::1` and still
+/// start on a host with no IPv6. Treating that as a hard requirement would stop
+/// fr booting on such a host -- the same shape as the `tcp-backlog` regression
+/// in e38641d46, where refusing what a stock file legitimately carries was worse
+/// than the bug being fixed.
+fn split_bind_spec(spec: &str) -> (Vec<String>, Vec<String>) {
+    let mut all = Vec::new();
+    let mut required = Vec::new();
+    for token in spec.split_whitespace() {
+        let (addr, optional) = match token.strip_prefix('-') {
+            Some(rest) => (rest, true),
+            None => (token, false),
+        };
+        if addr.is_empty() {
+            continue;
+        }
+        all.push(addr.to_string());
+        if !optional {
+            required.push(addr.to_string());
+        }
+    }
+    (all, required)
+}
+
 fn bind_and_register(poll: &Poll, addrs: &[String], port: u16) -> Result<Vec<TcpListener>, String> {
     if addrs.len() > MAX_LISTENERS {
         return Err(format!(
@@ -5234,9 +5289,22 @@ fn bind_and_register(poll: &Poll, addrs: &[String], port: u16) -> Result<Vec<Tcp
     }
     let mut listeners: Vec<TcpListener> = Vec::with_capacity(addrs.len());
     for a in addrs {
-        let sa: SocketAddr = format!("{a}:{port}")
+        // (frankenredis-5rru3) An IPv6 literal must be BRACKETED before the port
+        // is appended: `format!("{a}:{port}")` turns `::1` into `::1:6379`, which
+        // is not a parseable SocketAddr, so every IPv6 bind failed with "invalid
+        // bind address". This was invisible until the `bind` directive stopped
+        // being truncated to its first address -- the old parser only ever
+        // reached here with `127.0.0.1`, so the formatting bug had nothing to
+        // act on. Fixing the truncation alone would have turned a silent IPv4-only
+        // server into one that refuses to start on the stock config.
+        let host_port = if a.contains(':') && !a.starts_with('[') {
+            format!("[{a}]:{port}")
+        } else {
+            format!("{a}:{port}")
+        };
+        let sa: SocketAddr = host_port
             .parse()
-            .map_err(|e| format!("invalid bind address '{a}:{port}': {e}"))?;
+            .map_err(|e| format!("invalid bind address '{host_port}': {e}"))?;
         let listener = TcpListener::bind(sa).map_err(|e| format!("failed to bind to {sa}: {e}"))?;
         listeners.push(listener);
     }
@@ -39937,7 +40005,12 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         assert_eq!(
             config,
             StartupConfig {
-                bind_addr: Some("127.0.0.1".to_string()),
+                // (frankenredis-5rru3) The fixture line is `bind 127.0.0.1 ::1`
+                // and this used to assert just "127.0.0.1" -- the test PINNED the
+                // truncation as correct, which is why the bug survived. Both
+                // addresses now, space-joined the way the runtime models a bind
+                // set.
+                bind_addr: Some("127.0.0.1 ::1".to_string()),
                 port: Some(6381),
                 requirepass: Some(Some(b"top secret".to_vec())),
                 masteruser: Some(Some("repl".to_string())),
