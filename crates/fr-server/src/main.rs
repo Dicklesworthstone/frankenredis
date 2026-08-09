@@ -16528,6 +16528,10 @@ enum BorrowedDispatchFloorClass {
     /// (frankenredis-ozrro) `HMGET key field...`, any count — two, three and the
     /// variadic parser are tried in the cascade's own order.
     Hmget,
+    /// (frankenredis-ozrro) `GETDEL key`.
+    Getdel,
+    /// (frankenredis-ozrro) `DECRBY key decrement`.
+    Decrby,
     /// (frankenredis-ozrro) `HEXISTS key field`.
     Hexists,
     /// (frankenredis-ozrro) `HSTRLEN key field`.
@@ -16620,9 +16624,11 @@ enum BorrowedDispatchFloorCommand {
     BitfieldRo,
     Bitpos,
     Dbsize,
+    Decrby,
     Echo,
     Exists,
     Expire,
+    Getdel,
     Getex,
     Getrange,
     Hdel,
@@ -16757,6 +16763,8 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'B', b'I', b'T', b'P', b'O', b'S'] => Some(BorrowedDispatchFloorCommand::Bitpos),
             [b'E', b'X', b'P', b'I', b'R', b'E'] => Some(BorrowedDispatchFloorCommand::Expire),
             [b'A', b'P', b'P', b'E', b'N', b'D'] => Some(BorrowedDispatchFloorCommand::Append),
+            [b'D', b'E', b'C', b'R', b'B', b'Y'] => Some(BorrowedDispatchFloorCommand::Decrby),
+            [b'G', b'E', b'T', b'D', b'E', b'L'] => Some(BorrowedDispatchFloorCommand::Getdel),
             _ => None,
         },
         7 => match uppercase_ascii_token::<7>(token)? {
@@ -17272,6 +17280,13 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // instructions per op in the sweep. That is the ZLEXCOUNT lesson twice
         // over: instructions per op flags a candidate, the GAP decides, and a
         // batch where most candidates are rejected is the method working.
+        // (frankenredis-ozrro) Ninth batch, six more swept and four gap-measured:
+        // GETDEL 5,295/op (3.80x) and DECRBY 1,434/op (1.65x) taken; PERSIST
+        // -132/op (0.98x) and LPUSHX -1,957/op (0.67x) rejected. RPOP and ZPOPMIN
+        // were swept at 1,803 and 1,941 instructions per op, already down at the
+        // level a classified command reaches, and were not gap-measured.
+        (2, BorrowedDispatchFloorCommand::Getdel) => Some(BorrowedDispatchFloorClass::Getdel),
+        (3, BorrowedDispatchFloorCommand::Decrby) => Some(BorrowedDispatchFloorClass::Decrby),
         (arity, BorrowedDispatchFloorCommand::Hmget) if arity >= 3 => {
             Some(BorrowedDispatchFloorClass::Hmget)
         }
@@ -18397,6 +18412,45 @@ fn try_dispatch_floor_classified_action(
                     packet.element,
                     ts,
                 )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Getdel => {
+            if let Some(packet) = parse_borrowed_plain_getdel_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_getdel_borrowed(packet.key, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Decrby => {
+            if let Some(packet) = parse_borrowed_plain_decrby_packet(unparsed, &parser_config)
+                && let Some(response) =
+                    runtime.execute_plain_decrby_borrowed(packet.key, packet.member, ts)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,

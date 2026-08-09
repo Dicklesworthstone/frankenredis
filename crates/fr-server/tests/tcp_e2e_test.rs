@@ -2194,6 +2194,11 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"SETRANGE", b"s:1", b"2", b"XY"]));
     cmds.push(c(&[b"GETSET", b"s:1", b"fresh"]));
     cmds.push(c(&[b"GETDEL", b"s:absent"]));
+    // (frankenredis-ozrro) GETDEL is now front-classified, so the branch that
+    // actually removes a key has to run, not only the absent-key one.
+    cmds.push(c(&[b"SET", b"s:del", b"doomed"]));
+    cmds.push(c(&[b"GETDEL", b"s:del"]));
+    cmds.push(c(&[b"EXISTS", b"s:del"]));
     cmds.push(c(&[b"SETNX", b"s:3", b"v"]));
     cmds.push(c(&[b"SETNX", b"s:3", b"w"]));
     cmds.push(c(&[b"SET", b"s:4", b"v", b"EX", b"100"]));
