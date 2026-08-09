@@ -16511,6 +16511,11 @@ enum BorrowedDispatchFloorClass {
     Zrangebyscore,
     /// (frankenredis-ozrro) `ZREVRANGEBYSCORE key max min`, arity-4 form only.
     Zrevrangebyscore,
+    /// (frankenredis-ozrro) `ZREVRANGE key start stop`, arity-4 form only —
+    /// WITHSCORES has its own arm and keeps the cascade.
+    Zrevrange,
+    /// (frankenredis-ozrro) `LPOS key element RANK n`.
+    LposRank,
     /// (frankenredis-ozrro) `ZRANGEBYLEX key min max`.
     Zrangebylex,
     /// (frankenredis-ozrro) `ZREVRANK key member`.
@@ -16636,6 +16641,7 @@ enum BorrowedDispatchFloorCommand {
     Zrangebylex,
     Zrangebyscore,
     Zrank,
+    Zrevrange,
     Zrevrangebyscore,
     Zrevrank,
     Zrem,
@@ -16730,6 +16736,9 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             }
             [b'X', b'R', b'E', b'V', b'R', b'A', b'N', b'G', b'E'] => {
                 Some(BorrowedDispatchFloorCommand::Xrevrange)
+            }
+            [b'Z', b'R', b'E', b'V', b'R', b'A', b'N', b'G', b'E'] => {
+                Some(BorrowedDispatchFloorCommand::Zrevrange)
             }
             _ => None,
         },
@@ -17176,6 +17185,15 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // generic path. Admitting them on ARITY alone would be wrong for the
         // counts no parser covers — those simply fall through to generic, which
         // is the same answer by a slower road.
+        // (frankenredis-ozrro) Fifth batch. The MIDDLE of the chain turned out to
+        // be nearly all negative — DEL -459/op (0.91x), ZRANGE -1,190 (0.69x),
+        // ZSCORE -127 (0.95x), XLEN -104 (0.95x), TOUCH -637 (0.89x), and the
+        // variadic writes SADD-9 -31 (0.99x) and HDEL-5 -3,989 (0.37x) — because
+        // those commands are already classified or already near the front. Two
+        // outliers were left in it: LPOS with a RANK option 12,919/op (5.31x) and
+        // arity-4 ZREVRANGE 7,647/op (2.02x).
+        (5, BorrowedDispatchFloorCommand::Lpos) => Some(BorrowedDispatchFloorClass::LposRank),
+        (4, BorrowedDispatchFloorCommand::Zrevrange) => Some(BorrowedDispatchFloorClass::Zrevrange),
         (4..=5, BorrowedDispatchFloorCommand::Smismember) => {
             Some(BorrowedDispatchFloorClass::SmismemberFew)
         }
@@ -18279,6 +18297,54 @@ fn try_dispatch_floor_classified_action(
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
                     response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::LposRank => {
+            if let Some(packet) = parse_borrowed_plain_lpos_rank_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_lpos_rank_borrowed(
+                    packet.key,
+                    packet.element,
+                    packet.rank,
+                    ts,
+                )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Zrevrange => {
+            if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
+                unparsed,
+                &parser_config,
+                b"*4\r\n$9\r\n",
+                b"ZREVRANGE",
+            ) && runtime
+                .execute_plain_zrevrange_borrowed_into(packet.key, packet.a, packet.b, ts, out)
+                .is_some()
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
+                    consumed: packet.consumed,
                 })
             } else {
                 parse_borrowed_multibulk_action(
@@ -42793,9 +42859,26 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             ),
             Some(super::BorrowedDispatchFloorClass::Lpos)
         );
+        // (frankenredis-ozrro) This shape used to be pinned as NOT classified.
+        // It is now claimed on purpose: walking the cascade to reach the RANK arm
+        // measured 12,919 instructions per op, 5.31x, the second largest gap this
+        // bead has found. The `COUNT` spelling shares arity 5 and is therefore
+        // claimed too — that costs nothing, because LPOS has only the plain and
+        // RANK parsers, so COUNT already reached the generic path and now reaches
+        // it sooner.
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(
                 b"*5\r\n$4\r\nLPOS\r\n$1\r\nl\r\n$1\r\na\r\n$4\r\nRANK\r\n$1\r\n2\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::LposRank)
+        );
+        // An LPOS arity the table does not name still stays on the cascade, which
+        // is what keeps this assertion about EXACT tokens rather than about the
+        // command name alone.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*7\r\n$4\r\nLPOS\r\n$1\r\nl\r\n$1\r\na\r\n$4\r\nRANK\r\n$1\r\n1\r\n$5\r\nCOUNT\r\n$1\r\n0\r\n",
                 &cfg,
             ),
             None

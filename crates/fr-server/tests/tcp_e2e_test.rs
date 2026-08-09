@@ -2282,6 +2282,9 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"LINDEX", b"l:1", b"-1"]));
     cmds.push(c(&[b"LPOS", b"l:1", b"b"]));
     cmds.push(c(&[b"LPOS", b"l:1", b"b", b"RANK", b"-1"]));
+    cmds.push(c(&[b"LPOS", b"l:1", b"b", b"RANK", b"1"]));
+    cmds.push(c(&[b"LPOS", b"l:1", b"b", b"RANK", b"9"]));
+    cmds.push(c(&[b"LPOS", b"l:1", b"nosuch", b"RANK", b"-1"]));
     cmds.push(c(&[b"LPOS", b"l:1", b"b", b"COUNT", b"0"]));
     cmds.push(c(&[b"LINSERT", b"l:1", b"BEFORE", b"c", b"X"]));
     cmds.push(c(&[b"LINSERT", b"l:1", b"AFTER", b"c", b"Y"]));
@@ -2378,6 +2381,11 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"ZREVRANGEBYSCORE", b"z:1", b"+inf", b"2"]));
     cmds.push(c(&[b"ZRANGEBYLEX", b"z:1", b"[a", b"(d"]));
     cmds.push(c(&[b"ZREVRANGEBYLEX", b"z:1", b"+", b"-"]));
+    // (frankenredis-ozrro) The classifier claims ZREVRANGE at arity 4 only, so
+    // the plain form and the WITHSCORES form that keeps the cascade both run.
+    cmds.push(c(&[b"ZREVRANGE", b"z:1", b"0", b"-1"]));
+    cmds.push(c(&[b"ZREVRANGE", b"z:1", b"1", b"2"]));
+    cmds.push(c(&[b"ZREVRANGE", b"z:1", b"5", b"9"]));
     cmds.push(c(&[b"ZREVRANGE", b"z:1", b"0", b"1", b"WITHSCORES"]));
     cmds.push(c(&[b"ZRANK", b"z:1", b"c"]));
     cmds.push(c(&[b"ZREVRANK", b"z:1", b"c"]));
