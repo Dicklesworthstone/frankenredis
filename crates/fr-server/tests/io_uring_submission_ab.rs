@@ -232,7 +232,7 @@ const HSCAN0_ENCODING: &[u8] = b"*3\r\n$6\r\nOBJECT\r\n$8\r\nENCODING\r\n$2\r\nh
 const ZSCAN0_ENCODING: &[u8] = b"*3\r\n$6\r\nOBJECT\r\n$8\r\nENCODING\r\n$2\r\nz0\r\n";
 const SSCAN0_ENCODING_REPLY: &[u8] = b"$6\r\nintset\r\n";
 const SCAN0_LISTPACK_ENCODING_REPLY: &[u8] = b"$8\r\nlistpack\r\n";
-const SSCAN0_BOUNDARIES: &[u8] = b"*6\r\n$11\r\nSMISMEMBER\r\n$2\r\ns0\r\n\
+const SSCAN0_BOUNDARIES: &[u8] = b"*6\r\n$10\r\nSMISMEMBER\r\n$2\r\ns0\r\n\
 $2\r\n-1\r\n$1\r\n0\r\n$2\r\n15\r\n$2\r\n16\r\n";
 const SSCAN0_BOUNDARIES_REPLY: &[u8] = b"*4\r\n:0\r\n:1\r\n:1\r\n:0\r\n";
 const HSCAN0_BOUNDARIES: &[u8] =
@@ -242,6 +242,26 @@ const ZSCAN0_BOUNDARIES: &[u8] =
     b"*5\r\n$7\r\nZMSCORE\r\n$2\r\nz0\r\n$3\r\nm00\r\n$3\r\nm15\r\n$6\r\nabsent\r\n";
 const ZSCAN0_BOUNDARIES_REPLY: &[u8] = b"*3\r\n$1\r\n0\r\n$2\r\n15\r\n$-1\r\n";
 const SSCAN0_PTTL: &[u8] = b"*2\r\n$4\r\nPTTL\r\n$2\r\ns0\r\n";
+
+// (frankenredis-pg0t9) SMISMEMBER 9-item fixture. Deliberately a SEPARATE key
+// from s0: s0 holds integer members and is intset-encoded, while this gate must
+// carry nine requested members through the listpack set representation.
+// Members are m00..m15 (16, non-numeric so the encoding stays listpack); the
+// request asks for the eight present m00..m07 plus one absent member.
+const SMISMEMBER_NINE: &[u8] = b"*11\r\n$10\r\nSMISMEMBER\r\n$2\r\ns9\r\n\
+$3\r\nm00\r\n$3\r\nm01\r\n$3\r\nm02\r\n$3\r\nm03\r\n$3\r\nm04\r\n\
+$3\r\nm05\r\n$3\r\nm06\r\n$3\r\nm07\r\n$6\r\nabsent\r\n";
+const SMIS9_CARD: &[u8] = b"*2\r\n$5\r\nSCARD\r\n$2\r\ns9\r\n";
+const SMIS9_ENCODING: &[u8] = b"*3\r\n$6\r\nOBJECT\r\n$8\r\nENCODING\r\n$2\r\ns9\r\n";
+const SMIS9_ENCODING_REPLY: &[u8] = b"$8\r\nlistpack\r\n";
+// Boundary proof: first present member, last present member, a member that
+// EXISTS in the set but is NOT requested by the measured packet, and an absent
+// one. The third pins that the fixture really holds all 16, not just the eight
+// the hot packet reads.
+const SMIS9_BOUNDARIES: &[u8] = b"*6\r\n$10\r\nSMISMEMBER\r\n$2\r\ns9\r\n\
+$3\r\nm00\r\n$3\r\nm07\r\n$3\r\nm15\r\n$6\r\nabsent\r\n";
+const SMIS9_BOUNDARIES_REPLY: &[u8] = b"*4\r\n:1\r\n:1\r\n:1\r\n:0\r\n";
+const SMIS9_PTTL: &[u8] = b"*2\r\n$4\r\nPTTL\r\n$2\r\ns9\r\n";
 const HSCAN0_PTTL: &[u8] = b"*2\r\n$4\r\nPTTL\r\n$2\r\nh0\r\n";
 const ZSCAN0_PTTL: &[u8] = b"*2\r\n$4\r\nPTTL\r\n$2\r\nz0\r\n";
 const ZMPOP1_MEMBERS: usize = 129;
@@ -513,6 +533,7 @@ enum Workload {
     ZscanCursorZero,
     HmgetNine,
     ZmscoreNine,
+    SmismemberNine,
     ZmpopOneMin,
     ZmpopOneMax,
     HsetSameValue,
@@ -612,6 +633,7 @@ impl Workload {
             Self::ZscanCursorZero => "zscan-cursor-zero",
             Self::HmgetNine => "hmget-nine",
             Self::ZmscoreNine => "zmscore-nine",
+            Self::SmismemberNine => "smismember-nine",
             Self::ZmpopOneMin => "zmpop-one-min",
             Self::ZmpopOneMax => "zmpop-one-max",
             Self::HsetSameValue => "hset-same-value",
@@ -1022,6 +1044,17 @@ impl Workload {
                 "fr_store::Store::zscan0_borrow_scan",
                 "fr_protocol::encode_bulk_string_slice",
             ],
+            // (frankenredis-pg0t9) Nine requested members route through the
+            // variadic borrowed packet parser and the stack-array execute path,
+            // verified against crates/fr-server/src/main.rs -- the 2- and 3-item
+            // specialisations are NOT on this path at nine.
+            Self::SmismemberNine => &[
+                "frankenredis::process_buffered_frames",
+                "parse_borrowed_plain_smismember_multi_packet",
+                "execute_plain_smismember_borrowed_into",
+                "fr_store::Store::smismember",
+                "fr_store::packed_set::PackedSet::contains",
+            ],
             Self::HmgetNine => &[
                 "frankenredis::process_buffered_frames",
                 "__memcmp_avx2_movbe",
@@ -1410,6 +1443,7 @@ impl Workload {
                 "zscan-cursor-zero" => Self::ZscanCursorZero,
                 "hmget-nine" => Self::HmgetNine,
                 "zmscore-nine" => Self::ZmscoreNine,
+                "smismember-nine" => Self::SmismemberNine,
                 "zmpop-one-min" => Self::ZmpopOneMin,
                 "zmpop-one-max" => Self::ZmpopOneMax,
                 "hset-same-value" => Self::HsetSameValue,
@@ -1888,7 +1922,8 @@ impl WorkloadPackets {
             | Workload::HscanCursorZero
             | Workload::ZscanCursorZero
             | Workload::HmgetNine
-            | Workload::ZmscoreNine => {
+            | Workload::ZmscoreNine
+            | Workload::SmismemberNine => {
                 let (request, response) = scan0_request_reply(workload);
                 let case = repeated_case(request, &response, pipeline);
                 Self {
@@ -3179,6 +3214,9 @@ fn scan0_prefill(workload: Workload) -> ExchangeCase {
         Workload::SscanCursorZero => b"s0",
         Workload::HscanCursorZero | Workload::HmgetNine => b"h0",
         Workload::ZscanCursorZero | Workload::ZmscoreNine => b"z0",
+        // (frankenredis-pg0t9) Its OWN key: the s0 set is intset-encoded, and
+        // this gate must exercise the LISTPACK set representation.
+        Workload::SmismemberNine => b"s9",
         _ => unreachable!("compact read fixture requires a scan or multi-lookup workload"),
     };
     let mut request = resp_command(&[b"SET", key, b"seed"]);
@@ -3191,6 +3229,16 @@ fn scan0_prefill(workload: Workload) -> ExchangeCase {
             push_resp_bulk(&mut request, key);
             for index in 0..SCAN0_MEMBERS {
                 push_resp_bulk(&mut request, index.to_string().as_bytes());
+            }
+        }
+        Workload::SmismemberNine => {
+            // Non-numeric members keep the set in the LISTPACK encoding; the
+            // numeric members s0 uses would make it an intset instead.
+            request.extend_from_slice(format!("*{}\r\n", SCAN0_MEMBERS + 2).as_bytes());
+            push_resp_bulk(&mut request, b"SADD");
+            push_resp_bulk(&mut request, key);
+            for index in 0..SCAN0_MEMBERS {
+                push_resp_bulk(&mut request, format!("m{index:02}").as_bytes());
             }
         }
         Workload::HscanCursorZero | Workload::HmgetNine => {
@@ -3255,6 +3303,18 @@ fn hmget_nine_reply() -> Vec<u8> {
     response
 }
 
+/// (frankenredis-pg0t9) Eight present members then one absent, in the exact
+/// order requested -- SMISMEMBER's contract is positional, so an implementation
+/// that returned the right multiset in the wrong order would still be wrong.
+fn smismember_nine_reply() -> Vec<u8> {
+    let mut response = b"*9\r\n".to_vec();
+    for _ in 0..8 {
+        response.extend_from_slice(b":1\r\n");
+    }
+    response.extend_from_slice(b":0\r\n");
+    response
+}
+
 fn zmscore_nine_reply() -> Vec<u8> {
     let mut response = b"*9\r\n".to_vec();
     for index in 0..8 {
@@ -3271,6 +3331,7 @@ fn scan0_request_reply(workload: Workload) -> (&'static [u8], Vec<u8>) {
         Workload::ZscanCursorZero => (ZSCAN_CURSOR_ZERO, zscan_cursor_zero_reply()),
         Workload::HmgetNine => (HMGET_NINE, hmget_nine_reply()),
         Workload::ZmscoreNine => (ZMSCORE_NINE, zmscore_nine_reply()),
+        Workload::SmismemberNine => (SMISMEMBER_NINE, smismember_nine_reply()),
         _ => unreachable!("compact read fixture requires a scan or multi-lookup workload"),
     }
 }
@@ -3292,6 +3353,16 @@ fn assert_scan0_fixture(server: &mut Server, workload: Workload) {
             HSCAN0_BOUNDARIES,
             HSCAN0_BOUNDARIES_REPLY,
             HSCAN0_PTTL,
+        ),
+        // (frankenredis-pg0t9) Its own card/encoding/boundary/PTTL proof: a
+        // 16-member LISTPACK set, distinct from s0's intset.
+        Workload::SmismemberNine => (
+            SMIS9_CARD,
+            SMIS9_ENCODING,
+            SMIS9_ENCODING_REPLY,
+            SMIS9_BOUNDARIES,
+            SMIS9_BOUNDARIES_REPLY,
+            SMIS9_PTTL,
         ),
         Workload::ZscanCursorZero | Workload::ZmscoreNine => (
             ZSCAN0_CARD,
@@ -4258,16 +4329,21 @@ derived_listpack_bytes=3007",
                     LINDEX_MIDDLE_ELEMENTS
                 );
             }
-        } else if matches!(workload, Workload::HmgetNine | Workload::ZmscoreNine) {
+        } else if matches!(
+            workload,
+            Workload::HmgetNine | Workload::ZmscoreNine | Workload::SmismemberNine
+        ) {
             let case = scan0_prefill(workload);
             exchange_one(server, &case.request, &case.response);
             assert_scan0_fixture(server, workload);
             let (request, response) = scan0_request_reply(workload);
             exchange_one(server, request, &response);
-            let lookup_kind = if matches!(workload, Workload::HmgetNine) {
-                "hash_fields"
-            } else {
-                "sorted_set_members"
+            let lookup_kind = match workload {
+                Workload::HmgetNine => "hash_fields",
+                // (frankenredis-pg0t9) Nine set members through the listpack
+                // set representation.
+                Workload::SmismemberNine => "set_members",
+                _ => "sorted_set_members",
             };
             println!(
                 "FIXTURE_REPRESENTATION workload={} arm={} entries={} \
@@ -7598,6 +7674,36 @@ fn zrevrange_rank_range_packet_has_exact_descending_reply() {
     assert_eq!(packets.odd.response, packets.even.response);
 }
 
+/// (frankenredis-pg0t9) Pin the SMISMEMBER 9-item packet and its reply byte for
+/// byte, without needing a live server. SMISMEMBER's contract is POSITIONAL, so
+/// the reply must be eight `:1` in the requested order followed by `:0` for the
+/// absent member -- a right-multiset-wrong-order implementation must fail here.
+#[test]
+fn smismember_nine_packet_has_exact_positional_reply() {
+    let packets = WorkloadPackets::new(Workload::SmismemberNine, 2);
+
+    let mut expected_request = SMISMEMBER_NINE.to_vec();
+    expected_request.extend_from_slice(SMISMEMBER_NINE);
+    assert_eq!(packets.even.request, expected_request);
+    assert_eq!(packets.odd.request, packets.even.request);
+
+    // Nine requested members: the command word, the key, then nine members.
+    assert_eq!(SMISMEMBER_NINE.starts_with(b"*11\r\n"), true);
+    assert!(SMISMEMBER_NINE.windows(b"absent".len()).any(|w| w == b"absent"));
+
+    let single = smismember_nine_reply();
+    assert_eq!(single, b"*9\r\n:1\r\n:1\r\n:1\r\n:1\r\n:1\r\n:1\r\n:1\r\n:1\r\n:0\r\n");
+    let mut expected_response = single.clone();
+    expected_response.extend_from_slice(&single);
+    assert_eq!(packets.even.response, expected_response);
+    assert_eq!(packets.odd.response, packets.even.response);
+
+    // The fixture is a 16-member LISTPACK set on its OWN key, not s0's intset.
+    assert_eq!(SMIS9_ENCODING_REPLY, b"$8\r\nlistpack\r\n");
+    assert!(SMIS9_CARD.windows(2).any(|w| w == b"s9"));
+    assert_eq!(SMIS9_BOUNDARIES_REPLY, b"*4\r\n:1\r\n:1\r\n:1\r\n:0\r\n");
+}
+
 #[test]
 fn lpop_count_missing_packet_has_exact_null_array_reply() {
     let packets = WorkloadPackets::new(Workload::LpopCountMissing, 2);
@@ -8954,6 +9060,15 @@ fn dominant_libc_leaf_offsets_reach_specific_inlined_callers() {
     assert_eq!(callers.caller_counts, [(0x6e7351, 2), (0x6df34b, 1)]);
 }
 
+/// (frankenredis-pg0t9) Authenticate the SMISMEMBER 9-item fast path against a
+/// live vendored Redis 7.2.4 in the SAME invocation, with independent A/A
+/// bootstrap median-CI nulls on both arms.
+#[test]
+#[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
+fn smismember_nine_dual_null_vs_redis() {
+    run_exact_dual_null_vs_redis(Workload::SmismemberNine);
+}
+
 #[test]
 #[ignore = "strict-remote dual-null live-incumbent performance gate; run explicitly"]
 fn zrangebyscore_dual_null_vs_redis() {
@@ -9147,6 +9262,13 @@ fn run_exact_dual_null_vs_redis(workload: Workload) {
                 | Workload::ZmscoreNine
                 | Workload::ZmpopOneMin
                 | Workload::ZmpopOneMax
+                // (frankenredis-pg0t9) Registered only after the same
+                // authentication the entries above carry: an exact positional
+                // reply pinned byte-for-byte, a fixture proof (SCARD 16,
+                // OBJECT ENCODING listpack, boundary SMISMEMBER, PTTL), and a
+                // named profile target set taken from the actual borrowed
+                // multi-member path in fr-server/src/main.rs.
+                | Workload::SmismemberNine
         ),
         "competitive gate requires an authenticated exact workload"
     );
