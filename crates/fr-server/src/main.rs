@@ -16509,6 +16509,18 @@ enum BorrowedDispatchFloorClass {
     /// (frankenredis-ozrro) `ZRANGEBYSCORE key min max`, the plain arity-4 form
     /// only — WITHSCORES and LIMIT keep the cascade.
     Zrangebyscore,
+    /// (frankenredis-ozrro) `ZREVRANGEBYSCORE key max min`, arity-4 form only.
+    Zrevrangebyscore,
+    /// (frankenredis-ozrro) `ZRANGEBYLEX key min max`.
+    Zrangebylex,
+    /// (frankenredis-ozrro) `ZREVRANK key member`.
+    Zrevrank,
+    /// (frankenredis-ozrro) `SMISMEMBER key member...` at two or three members,
+    /// the counts the cascade has exact parsers for.
+    SmismemberFew,
+    /// (frankenredis-ozrro) `ZMSCORE key member...`, any count — two, three and
+    /// the variadic parser are tried in the cascade's own order.
+    Zmscore,
     /// (frankenredis-ozrro) `LINSERT key BEFORE|AFTER pivot element`.
     Linsert,
     /// (frankenredis-ozrro) `SETRANGE key offset value`.
@@ -16601,6 +16613,7 @@ enum BorrowedDispatchFloorCommand {
     Setrange,
     Sismember,
     Smembers,
+    Smismember,
     Srandmember,
     Srem,
     Strlen,
@@ -16619,8 +16632,12 @@ enum BorrowedDispatchFloorCommand {
     Zcount,
     Zincrby,
     Zrange,
+    Zmscore,
+    Zrangebylex,
     Zrangebyscore,
     Zrank,
+    Zrevrangebyscore,
+    Zrevrank,
     Zrem,
     Zremrangebyrank,
     Zremrangebyscore,
@@ -16702,6 +16719,9 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'Z', b'I', b'N', b'C', b'R', b'B', b'Y'] => {
                 Some(BorrowedDispatchFloorCommand::Zincrby)
             }
+            [b'Z', b'M', b'S', b'C', b'O', b'R', b'E'] => {
+                Some(BorrowedDispatchFloorCommand::Zmscore)
+            }
             _ => None,
         },
         9 => match uppercase_ascii_token::<9>(token)? {
@@ -16716,6 +16736,9 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
         10 => match uppercase_ascii_token::<10>(token)? {
             [b'H', b'R', b'A', b'N', b'D', b'F', b'I', b'E', b'L', b'D'] => {
                 Some(BorrowedDispatchFloorCommand::Hrandfield)
+            }
+            [b'S', b'M', b'I', b'S', b'M', b'E', b'M', b'B', b'E', b'R'] => {
+                Some(BorrowedDispatchFloorCommand::Smismember)
             }
             _ => None,
         },
@@ -16734,6 +16757,9 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             }
             [b'S', b'M', b'E', b'M', b'B', b'E', b'R', b'S'] => {
                 Some(BorrowedDispatchFloorCommand::Smembers)
+            }
+            [b'Z', b'R', b'E', b'V', b'R', b'A', b'N', b'K'] => {
+                Some(BorrowedDispatchFloorCommand::Zrevrank)
             }
             _ => None,
         },
@@ -16782,6 +16808,19 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
                 b'E',
                 b'R',
             ] => Some(BorrowedDispatchFloorCommand::Srandmember),
+            [
+                b'Z',
+                b'R',
+                b'A',
+                b'N',
+                b'G',
+                b'E',
+                b'B',
+                b'Y',
+                b'L',
+                b'E',
+                b'X',
+            ] => Some(BorrowedDispatchFloorCommand::Zrangebylex),
             _ => None,
         },
         15 => match uppercase_ascii_token::<15>(token)? {
@@ -16823,6 +16862,24 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
                 b'R',
                 b'E',
             ] => Some(BorrowedDispatchFloorCommand::Zremrangebyscore),
+            [
+                b'Z',
+                b'R',
+                b'E',
+                b'V',
+                b'R',
+                b'A',
+                b'N',
+                b'G',
+                b'E',
+                b'B',
+                b'Y',
+                b'S',
+                b'C',
+                b'O',
+                b'R',
+                b'E',
+            ] => Some(BorrowedDispatchFloorCommand::Zrevrangebyscore),
             _ => None,
         },
         _ => None,
@@ -17106,6 +17163,32 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // spellings have their own arms further down and must keep the cascade,
         // because a classification those arms' parsers decline would land on the
         // generic path instead of the arm that serves them.
+        // (frankenredis-ozrro) Fourth batch off the same generator — the parsers
+        // called lowest in the function. Per op: ZRANGEBYLEX 8,214 (2.01x),
+        // ZREVRANGEBYSCORE 7,488 (1.86x), ZMSCORE 3,133 (2.00x, queued from the
+        // previous batch), ZREVRANK 2,892 (2.24x), SMISMEMBER 2,159 (1.81x).
+        // PEXPIREAT measured -794 (0.86x) and is left alone, joining SETEX,
+        // GETSET and PEXPIRE in the group whose routes already sit ahead of the
+        // walk.
+        //
+        // SMISMEMBER and ZMSCORE have several exact parsers keyed on member
+        // count, so their arms try them in the cascade's own order before the
+        // generic path. Admitting them on ARITY alone would be wrong for the
+        // counts no parser covers — those simply fall through to generic, which
+        // is the same answer by a slower road.
+        (4..=5, BorrowedDispatchFloorCommand::Smismember) => {
+            Some(BorrowedDispatchFloorClass::SmismemberFew)
+        }
+        (arity, BorrowedDispatchFloorCommand::Zmscore) if arity >= 3 => {
+            Some(BorrowedDispatchFloorClass::Zmscore)
+        }
+        (3, BorrowedDispatchFloorCommand::Zrevrank) => Some(BorrowedDispatchFloorClass::Zrevrank),
+        (4, BorrowedDispatchFloorCommand::Zrangebylex) => {
+            Some(BorrowedDispatchFloorClass::Zrangebylex)
+        }
+        (4, BorrowedDispatchFloorCommand::Zrevrangebyscore) => {
+            Some(BorrowedDispatchFloorClass::Zrevrangebyscore)
+        }
         (2, BorrowedDispatchFloorCommand::Smembers) => Some(BorrowedDispatchFloorClass::Smembers),
         (3, BorrowedDispatchFloorCommand::Lindex) => Some(BorrowedDispatchFloorClass::Lindex),
         (3, BorrowedDispatchFloorCommand::Zrank) => Some(BorrowedDispatchFloorClass::Zrank),
@@ -18196,6 +18279,174 @@ fn try_dispatch_floor_classified_action(
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
                     response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Zrevrank => {
+            if let Some(packet) = parse_borrowed_plain_zrevrank_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_rank_borrowed(
+                    PlainRankCmd::Zrevrank,
+                    packet.key,
+                    packet.member,
+                    ts,
+                )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Zrangebylex => {
+            if let Some(packet) = parse_borrowed_plain_zrangebylex_packet(unparsed, &parser_config)
+                && runtime
+                    .execute_plain_zrangebylex_borrowed_into(
+                        packet.key, packet.min, packet.max, ts, out,
+                    )
+                    .is_some()
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
+                    consumed: packet.consumed,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Zrevrangebyscore => {
+            if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
+                unparsed,
+                &parser_config,
+                b"*4\r\n$16\r\n",
+                b"ZREVRANGEBYSCORE",
+            ) && runtime
+                .execute_plain_zrevrangebyscore_borrowed_into(
+                    packet.key, packet.a, packet.b, ts, out,
+                )
+                .is_some()
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
+                    consumed: packet.consumed,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::SmismemberFew => {
+            if let Some(packet) = parse_borrowed_plain_smismember2_packet(unparsed, &parser_config)
+                && runtime
+                    .execute_plain_smismember_borrowed_into(
+                        packet.key,
+                        &[packet.start, packet.end],
+                        ts,
+                        out,
+                    )
+                    .is_some()
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
+                    consumed: packet.consumed,
+                })
+            } else if let Some(packet) =
+                parse_borrowed_plain_smismember3_packet(unparsed, &parser_config)
+                && runtime
+                    .execute_plain_smismember_borrowed_into(
+                        packet.key,
+                        &[packet.f1, packet.f2, packet.f3],
+                        ts,
+                        out,
+                    )
+                    .is_some()
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
+                    consumed: packet.consumed,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Zmscore => {
+            let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+            if let Some(packet) = parse_borrowed_plain_zmscore2_packet(unparsed, &parser_config)
+                && runtime
+                    .execute_plain_zmscore_borrowed_into(
+                        packet.key,
+                        &[packet.start, packet.end],
+                        ts,
+                        client_resp3,
+                        out,
+                    )
+                    .is_some()
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
+                    consumed: packet.consumed,
+                })
+            } else if let Some(packet) =
+                parse_borrowed_plain_zmscore3_packet(unparsed, &parser_config)
+                && runtime
+                    .execute_plain_zmscore_borrowed_into(
+                        packet.key,
+                        &[packet.f1, packet.f2, packet.f3],
+                        ts,
+                        client_resp3,
+                        out,
+                    )
+                    .is_some()
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
+                    consumed: packet.consumed,
+                })
+            } else if let Some(packet) =
+                parse_borrowed_plain_zmscore_multi_packet(unparsed, &parser_config)
+                && runtime
+                    .execute_plain_zmscore_borrowed_into(
+                        packet.key,
+                        &packet.fields[..packet.len],
+                        ts,
+                        client_resp3,
+                        out,
+                    )
+                    .is_some()
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
+                    consumed: packet.consumed,
                 })
             } else {
                 parse_borrowed_multibulk_action(

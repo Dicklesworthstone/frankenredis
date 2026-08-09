@@ -2302,6 +2302,8 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"SISMEMBER", b"t:1", b"m1"]));
     cmds.push(c(&[b"SISMEMBER", b"t:1", b"zz"]));
     cmds.push(c(&[b"SMISMEMBER", b"t:1", b"m1", b"zz"]));
+    cmds.push(c(&[b"SMISMEMBER", b"t:1", b"m1", b"zz", b"m3"]));
+    cmds.push(c(&[b"SMISMEMBER", b"t:absent", b"m1", b"m2"]));
     cmds.push(c(&[b"SSCAN", b"t:1", b"0", b"MATCH", b"m*"]));
     // (frankenredis-ozrro) SMEMBERS is now front-classified, so its reply ORDER
     // has to be pinned rather than sidestepped with SSCAN. Both encodings are
@@ -2343,7 +2345,13 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"ZSCORE", b"z:3", b"fresh"]));
     cmds.push(c(&[b"ZCARD", b"z:1"]));
     cmds.push(c(&[b"ZSCORE", b"z:1", b"b"]));
+    // (frankenredis-ozrro) ZMSCORE's classified arm tries three parsers keyed on
+    // member count, so all three counts have to be driven or two of them are
+    // reachable only through the generic path and nothing pins them.
+    cmds.push(c(&[b"ZMSCORE", b"z:1", b"a", b"d"]));
     cmds.push(c(&[b"ZMSCORE", b"z:1", b"a", b"zz", b"d"]));
+    cmds.push(c(&[b"ZMSCORE", b"z:1", b"a", b"b", b"c", b"d", b"zz"]));
+    cmds.push(c(&[b"ZMSCORE", b"z:absent", b"a", b"b"]));
     cmds.push(c(&[b"ZCOUNT", b"z:1", b"2", b"(10"]));
     cmds.push(c(&[b"ZCOUNT", b"z:1", b"-inf", b"+inf"]));
     cmds.push(c(&[b"ZLEXCOUNT", b"z:1", b"-", b"+"]));
