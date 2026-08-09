@@ -53,7 +53,11 @@ ORACLE_PORT, FR_PORT = _free_port(29951), _free_port(29952)
 # we've verified is free for the same stale-server reason.
 SO_PORTS = {name: _free_port(base) for name, base in (
     ("rdb", 29961), ("aof", 29971), ("repl", 29981),
-    ("replf", 29991), ("aoff", 29671), ("rdbc", 29761))}
+    ("replf", 29991), ("aoff", 29671), ("rdbc", 29761),
+    # (frankenredis-4ib91) needs FOUR consecutive ports: redis+fr for the argv
+    # form and again for the config-file form, plus one it starts and expects to
+    # die for the negative half.
+    ("cfgd", 29811))}
 
 
 def enc(a):
@@ -105,6 +109,7 @@ SELF_ORCH = [
     ("replication_digest_fuzz.py", [REDIS_BIN, FR_BIN, str(SO_PORTS["replf"]), "3", "500"]),
     ("aof_roundtrip_digest_fuzz.py", [REDIS_BIN, FR_BIN, str(SO_PORTS["aoff"]), "2", "4"]),
     ("rdb_changes_save_gate.py", [REDIS_BIN, FR_BIN, str(SO_PORTS["rdbc"])]),
+    ("config_directive_parity_gate.py", [REDIS_BIN, FR_BIN, str(SO_PORTS["cfgd"])]),
     # (frankenredis-8jqlx, secondary clause "register orphaned index_range_boundary")
     # This gate has existed since 2026-06-11 and was never registered, so its ~670
     # index/range/count boundary cases have never run in the suite. It takes
