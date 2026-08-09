@@ -220,14 +220,32 @@ fi
 
 for r in $(seq 1 "$ROUNDS"); do
   rotate_cores "$r"
-  # Rotate start order every round so no arm permanently owns the warm cache.
-  if [ $((r % 2)) -eq 1 ]; then
-    run_arm $FR_A_PORT fr_A "$r"; run_arm $FR_A2_PORT fr_A2 "$r"; run_arm $RD_PORT redis "$r"
-    [ -n "$FR_BIN_B" ] && run_arm $FR_B_PORT fr_B "$r"
-  else
-    [ -n "$FR_BIN_B" ] && run_arm $FR_B_PORT fr_B "$r"
-    run_arm $RD_PORT redis "$r"; run_arm $FR_A2_PORT fr_A2 "$r"; run_arm $FR_A_PORT fr_A "$r"
+  # CYCLIC rotation of arm ORDER -- not the reversal this used to do.
+  #
+  # Reversing (A,A2,R -> R,A2,A) swaps only first and last: with three arms fr_A2
+  # sits in position 2 in EVERY round, while fr_A alternates between first and
+  # last. Position is not neutral -- whichever arm runs first in a round pays for
+  # a colder cache and a just-idled core -- so a fixed-position arm accumulates a
+  # systematic offset. That is measurable and was: with byte-identical binaries
+  # on both arms, four -P 1 runs gave nulls of 1.0440, 1.0280, 1.0246, 1.0022,
+  # always in the SAME direction (fr_A2 faster), two of them inadmissible, bias
+  # to 7.22%. It is the defect behind the retracted -P 16 result too, which I had
+  # wrongly blamed on pipelining.
+  #
+  # Rotating by the round index gives every arm every position an equal number of
+  # times over each full cycle, so position cancels in the median instead of
+  # accumulating. ROUNDS is already forced to a multiple of the arm count above,
+  # which is exactly the condition that makes the cycle complete.
+  ORDER_PORTS=("$FR_A_PORT" "$FR_A2_PORT" "$RD_PORT")
+  ORDER_TAGS=(fr_A fr_A2 redis)
+  if [ -n "$FR_BIN_B" ]; then
+    ORDER_PORTS+=("$FR_B_PORT"); ORDER_TAGS+=(fr_B)
   fi
+  n_arms=${#ORDER_PORTS[@]}
+  for k in $(seq 0 $((n_arms - 1))); do
+    idx=$(( (k + r) % n_arms ))
+    run_arm "${ORDER_PORTS[$idx]}" "${ORDER_TAGS[$idx]}" "$r"
+  done
   echo "  round $r done"
 done
 
