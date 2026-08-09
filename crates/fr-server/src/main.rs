@@ -16525,6 +16525,14 @@ enum BorrowedDispatchFloorClass {
     },
     /// (frankenredis-ozrro) `ZRANGE key start stop WITHSCORES`.
     ZrangeWithscores,
+    /// (frankenredis-ozrro) `HEXISTS key field`.
+    Hexists,
+    /// (frankenredis-ozrro) `HSTRLEN key field`.
+    Hstrlen,
+    /// (frankenredis-ozrro) Bare `HSCAN|SSCAN|ZSCAN key cursor`. All three take
+    /// the same shape and each has its own cursor-0 `_into` route, so one class
+    /// carries which family it is.
+    Scan0(PlainScan0Cmd),
     /// (frankenredis-ozrro) `ZRANGEBYLEX key min max`.
     Zrangebylex,
     /// (frankenredis-ozrro) `ZREVRANK key member`.
@@ -16592,6 +16600,15 @@ struct BorrowedDispatchFloorToken<'a> {
     remaining: &'a [u8],
 }
 
+/// Which cursor-0 SCAN family a [`BorrowedDispatchFloorClass::Scan0`] refers to.
+/// (frankenredis-ozrro)
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PlainScan0Cmd {
+    Hscan,
+    Sscan,
+    Zscan,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BorrowedDispatchFloorCommand {
     Append,
@@ -16606,9 +16623,12 @@ enum BorrowedDispatchFloorCommand {
     Getex,
     Getrange,
     Hdel,
+    Hexists,
     Hget,
     Hgetall,
     Hkeys,
+    Hscan,
+    Hstrlen,
     Hlen,
     Hrandfield,
     Hvals,
@@ -16631,6 +16651,7 @@ enum BorrowedDispatchFloorCommand {
     Sismember,
     Smembers,
     Smismember,
+    Sscan,
     Srandmember,
     Srem,
     Strlen,
@@ -16656,6 +16677,7 @@ enum BorrowedDispatchFloorCommand {
     Zrevrange,
     Zrevrangebyscore,
     Zrevrank,
+    Zscan,
     Zrem,
     Zremrangebyrank,
     Zremrangebyscore,
@@ -16709,6 +16731,9 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'Z', b'R', b'A', b'N', b'K'] => Some(BorrowedDispatchFloorCommand::Zrank),
             [b'H', b'K', b'E', b'Y', b'S'] => Some(BorrowedDispatchFloorCommand::Hkeys),
             [b'H', b'V', b'A', b'L', b'S'] => Some(BorrowedDispatchFloorCommand::Hvals),
+            [b'H', b'S', b'C', b'A', b'N'] => Some(BorrowedDispatchFloorCommand::Hscan),
+            [b'S', b'S', b'C', b'A', b'N'] => Some(BorrowedDispatchFloorCommand::Sscan),
+            [b'Z', b'S', b'C', b'A', b'N'] => Some(BorrowedDispatchFloorCommand::Zscan),
             _ => None,
         },
         6 => match uppercase_ascii_token::<6>(token)? {
@@ -16744,6 +16769,12 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             }
             [b'H', b'G', b'E', b'T', b'A', b'L', b'L'] => {
                 Some(BorrowedDispatchFloorCommand::Hgetall)
+            }
+            [b'H', b'E', b'X', b'I', b'S', b'T', b'S'] => {
+                Some(BorrowedDispatchFloorCommand::Hexists)
+            }
+            [b'H', b'S', b'T', b'R', b'L', b'E', b'N'] => {
+                Some(BorrowedDispatchFloorCommand::Hstrlen)
             }
             _ => None,
         },
@@ -17216,6 +17247,30 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // Measuring the gap confirmed it. Per op: HGETALL 13,345 (5.81x),
         // HVALS 13,312 (6.21x), HKEYS 13,253 (6.18x), ZRANGE WITHSCORES 9,405
         // (3.90x). The whole hash-read family sat ~1,300 lines deep.
+        // (frankenredis-ozrro) Seventh batch. Swept instructions/op first and only
+        // measured the gap for the outliers, which is cheaper than measuring
+        // everything: HSCAN read 14,802 instr/op and ZLEXCOUNT 6,909 against
+        // GETRANGE's 2,287, and the gap confirmed HSCAN 6,152/op (1.71x),
+        // SSCAN 5,659 (1.67x), HSTRLEN 2,070 (1.88x), HEXISTS 1,995 (1.84x).
+        // ZLEXCOUNT came back 555/op (1.09x) and is NOT taken — a high
+        // instructions/op flags a candidate, it does not prove a walk.
+        //
+        // ZSCAN is classified alongside HSCAN and SSCAN without its own gap
+        // measurement: it is the same parser, the same arity and the same
+        // cursor-0 `_into` route as its two siblings, both of which measured
+        // ~1.7x. That inference is recorded here so it is not mistaken for a
+        // measurement.
+        (3, BorrowedDispatchFloorCommand::Hscan) => {
+            Some(BorrowedDispatchFloorClass::Scan0(PlainScan0Cmd::Hscan))
+        }
+        (3, BorrowedDispatchFloorCommand::Sscan) => {
+            Some(BorrowedDispatchFloorClass::Scan0(PlainScan0Cmd::Sscan))
+        }
+        (3, BorrowedDispatchFloorCommand::Zscan) => {
+            Some(BorrowedDispatchFloorClass::Scan0(PlainScan0Cmd::Zscan))
+        }
+        (3, BorrowedDispatchFloorCommand::Hexists) => Some(BorrowedDispatchFloorClass::Hexists),
+        (3, BorrowedDispatchFloorCommand::Hstrlen) => Some(BorrowedDispatchFloorClass::Hstrlen),
         (2, BorrowedDispatchFloorCommand::Hgetall) => Some(BorrowedDispatchFloorClass::Hgetall),
         (2, BorrowedDispatchFloorCommand::Hkeys) => {
             Some(BorrowedDispatchFloorClass::Hcoll { values: false })
@@ -18332,6 +18387,98 @@ fn try_dispatch_floor_classified_action(
                     consumed: packet.consumed,
                     response,
                 })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Hexists => {
+            if let Some(packet) = parse_borrowed_plain_hexists_packet(unparsed, &parser_config)
+                && let Some(response) =
+                    runtime.execute_plain_hexists_borrowed(packet.key, packet.member, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Hstrlen => {
+            if let Some(packet) = parse_borrowed_plain_hstrlen_packet(unparsed, &parser_config)
+                && let Some(response) =
+                    runtime.execute_plain_hstrlen_borrowed(packet.key, packet.member, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Scan0(which) => {
+            let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+            let name: &[u8] = match which {
+                PlainScan0Cmd::Hscan => b"HSCAN",
+                PlainScan0Cmd::Sscan => b"SSCAN",
+                PlainScan0Cmd::Zscan => b"ZSCAN",
+            };
+            let served = parse_borrowed_plain_key_arg1_packet(
+                unparsed,
+                &parser_config,
+                b"*3\r\n$5\r\n",
+                name,
+            )
+            .and_then(|packet| {
+                let ok = match which {
+                    PlainScan0Cmd::Hscan => runtime.execute_plain_hscan0_borrowed_into(
+                        packet.key,
+                        packet.arg,
+                        ts,
+                        client_resp3,
+                        out,
+                    ),
+                    PlainScan0Cmd::Sscan => runtime.execute_plain_sscan0_borrowed_into(
+                        packet.key,
+                        packet.arg,
+                        ts,
+                        client_resp3,
+                        out,
+                    ),
+                    PlainScan0Cmd::Zscan => runtime.execute_plain_zscan0_borrowed_into(
+                        packet.key,
+                        packet.arg,
+                        ts,
+                        client_resp3,
+                        out,
+                    ),
+                };
+                ok.map(|()| packet.consumed)
+            });
+            if let Some(consumed) = served {
+                Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,

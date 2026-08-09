@@ -2277,6 +2277,11 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"HINCRBY", b"h:2", b"ctr", b"5"]));
     cmds.push(c(&[b"HINCRBYFLOAT", b"h:2", b"ctr", b"0.5"]));
     cmds.push(c(&[b"HDEL", b"h:1", b"f3"]));
+    // (frankenredis-ozrro) The classifier claims the BARE arity-3 SCAN form; the
+    // COUNT/MATCH spellings keep the cascade. Both run, and so does the
+    // absent-key branch, which is where the cursor-0 route declines.
+    cmds.push(c(&[b"HSCAN", b"h:1", b"0"]));
+    cmds.push(c(&[b"HSCAN", b"h:absent", b"0"]));
     cmds.push(c(&[b"HSCAN", b"h:1", b"0", b"COUNT", b"100"]));
 
     // ── list ────────────────────────────────────────────────────────────────
@@ -2397,6 +2402,9 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"ZRANK", b"z:1", b"c"]));
     cmds.push(c(&[b"ZREVRANK", b"z:1", b"c"]));
     cmds.push(c(&[b"ZSCAN", b"z:1", b"0"]));
+    cmds.push(c(&[b"ZSCAN", b"z:absent", b"0"]));
+    cmds.push(c(&[b"SSCAN", b"t:1", b"0"]));
+    cmds.push(c(&[b"SSCAN", b"t:absent", b"0"]));
     cmds.push(c(&[b"ZPOPMIN", b"z:1"]));
     cmds.push(c(&[b"ZPOPMAX", b"z:1", b"2"]));
     cmds.push(c(&[b"ZREM", b"z:1", b"c"]));
