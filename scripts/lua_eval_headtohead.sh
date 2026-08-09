@@ -196,7 +196,21 @@ fi
 # the same number of rounds on every core, so the bias cancels in the median
 # instead of accumulating -- which is what turns the A/A null from a systematic
 # 1.046 into an actual control.
-rotate_cores() {  # ROUND
+rotate_cores() {  # CYCLE_INDEX (NOT the round number -- see below)
+  # DO NOT pass the round number here. Core rotation and ORDER rotation were both
+  # keyed on `r`, which COUPLES them: with arm j at round r the core index is
+  # (j+r) mod n and the order position is (j-r) mod n, so
+  #     core_index + position == 2j (mod n)
+  # is CONSTANT for each arm. Every arm then samples only its own diagonal of the
+  # position x core grid -- n of the n^2 combinations -- and since both position
+  # and core carry real cost differences, each arm averages over a different
+  # subset. That is a systematic bias that LOOKS like it has been rotated away.
+  # It is the residual that survived the order-rotation fix: nulls stayed around
+  # +1% and always positive.
+  #
+  # Advancing cores once per COMPLETE order cycle (r / ARM_COUNT) decouples them,
+  # so over ARM_COUNT^2 rounds every arm sees every (position, core) pair exactly
+  # once. The ROUNDS guard enforces that multiple.
   local n=${#ARM_PIDS[@]} i shifted
   for i in $(seq 0 $((n - 1))); do
     shifted=$(( (i + $1) % n ))
@@ -211,15 +225,22 @@ rotate_cores() {  # ROUND
 # 1.0000, and 15 rounds with 4 arms gave 1.0144 with a CI excluding 1.0, which
 # correctly voided that run's A/B verdict.
 ARM_COUNT=${#ARM_PIDS[@]}
-if [ $((ROUNDS % ARM_COUNT)) -ne 0 ]; then
-  ADJUSTED=$(( (ROUNDS / ARM_COUNT + 1) * ARM_COUNT ))
-  echo "NOTE: rounds $ROUNDS is not a multiple of the $ARM_COUNT arms; raising to $ADJUSTED"
-  echo "      so every arm spends equal time on every core (otherwise the null is biased)."
+# ROUNDS must be a multiple of ARM_COUNT SQUARED. One factor of ARM_COUNT gives
+# every arm every ORDER POSITION; the second gives every arm every CORE at each
+# of those positions. A multiple of ARM_COUNT alone was not enough -- see
+# rotate_cores.
+CYCLE=$(( ARM_COUNT * ARM_COUNT ))
+if [ $((ROUNDS % CYCLE)) -ne 0 ]; then
+  ADJUSTED=$(( (ROUNDS / CYCLE + 1) * CYCLE ))
+  echo "NOTE: rounds $ROUNDS is not a multiple of ${ARM_COUNT}^2=$CYCLE; raising to $ADJUSTED"
+  echo "      so every arm sees every (position, core) pair equally often."
   ROUNDS=$ADJUSTED
 fi
 
 for r in $(seq 1 "$ROUNDS"); do
-  rotate_cores "$r"
+  # Cores advance once per COMPLETE order cycle, not once per round -- see
+  # rotate_cores for why sharing the index with the order rotation is a trap.
+  rotate_cores $(( r / ARM_COUNT ))
   # CYCLIC rotation of arm ORDER -- not the reversal this used to do.
   #
   # Reversing (A,A2,R -> R,A2,A) swaps only first and last: with three arms fr_A2
