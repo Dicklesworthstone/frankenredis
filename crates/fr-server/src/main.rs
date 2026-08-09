@@ -3903,6 +3903,19 @@ struct StartupConfig {
     /// operator gets a different server than the one they configured with no
     /// error to notice.
     cluster_enabled: Option<bool>,
+    /// (frankenredis-4ib91) Every directive this parser does not name
+    /// explicitly, carried through to `CONFIG SET` instead of being dropped.
+    ///
+    /// The arm below used to be a bare `_ => {}`, so a plain redis.conf carrying
+    /// `maxmemory-policy allkeys-lru` started a server running `noeviction` and
+    /// said nothing: measured against 7.2.4, redis reported the configured value
+    /// and fr reported its own default, with zero warnings anywhere in its
+    /// startup output. `cluster-enabled` (frankenredis-inuwt) was the SAME bug
+    /// and was fixed by naming one more directive; this carries the rest
+    /// generically so the next one does not have to be discovered in production.
+    /// Each entry is (directive name, arguments joined by a space) because
+    /// `CONFIG SET` takes a single value string -- `save "900 1"` included.
+    passthrough: Vec<(String, String)>,
 }
 
 impl StartupConfig {
@@ -4026,7 +4039,22 @@ fn startup_config_from_directives(
                 expect_config_arg_count(directive, 1)?;
                 config.enable_debug_command = Some(config_arg_string(directive, 0)?);
             }
-            _ => {}
+            // (frankenredis-4ib91) Anything this parser does not name is handed
+            // to CONFIG SET at boot rather than silently discarded. Directives
+            // CONFIG SET also refuses are reported there, so an unknown or
+            // misspelled directive still fails loudly -- it just fails with the
+            // reason instead of vanishing.
+            other => {
+                config.passthrough.push((
+                    String::from_utf8_lossy(other).into_owned(),
+                    directive
+                        .args
+                        .iter()
+                        .map(|a| String::from_utf8_lossy(a).into_owned())
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                ));
+            }
         }
     }
 
@@ -4131,6 +4159,12 @@ fn main() -> ExitCode {
     let mut cli_rdb = false;
     let mut cli_enable_debug_command: Option<String> = None;
     let mut sentinel_mode = false;
+    // (frankenredis-4ib91) `--<directive> <value>` pairs this loop does not name,
+    // applied via CONFIG SET once the runtime exists. CLI is collected separately
+    // from the config file's so it can be applied LAST and win, matching how the
+    // named flags above already override their config-file counterparts.
+    let mut cli_passthrough: Vec<(String, String)> = Vec::new();
+    let mut file_passthrough: Vec<(String, String)> = Vec::new();
     let mut sharded_set_get_workers: Option<usize> = None;
     #[cfg(feature = "io-uring-writes")]
     let mut io_uring_output = false;
@@ -4288,6 +4322,25 @@ fn main() -> ExitCode {
                 print!("{}", server_help_text());
                 return ExitCode::SUCCESS;
             }
+            // (frankenredis-4ib91) redis accepts ANY config directive as
+            // `--<name> <value>` -- the form nearly every container image and
+            // init script uses -- so a `--maxmemory-policy allkeys-lru` that fr
+            // rejected outright meant fr would not boot at all under a config
+            // that redis takes. Collect it and let CONFIG SET adjudicate below.
+            //
+            // This does NOT make unknown flags silent: a name CONFIG SET does not
+            // recognise still aborts startup, with CONFIG SET's reason attached.
+            // A `--flag` with no following value is still an immediate error,
+            // since every config directive takes one.
+            other if other.starts_with("--") && other.len() > 2 => {
+                let Some(value) = args.get(i + 1) else {
+                    eprintln!("error: {other} requires a value");
+                    eprintln!("Try 'frankenredis --help' for usage.");
+                    return ExitCode::from(1);
+                };
+                cli_passthrough.push((other[2..].to_string(), value.clone()));
+                i += 1;
+            }
             other => {
                 eprintln!("error: unknown argument: {other}");
                 eprintln!("Try 'frankenredis --help' for usage.");
@@ -4351,6 +4404,9 @@ fn main() -> ExitCode {
         };
         config_enable_debug_command = startup_config.enable_debug_command.clone();
         config_cluster_enabled = startup_config.cluster_enabled.unwrap_or(false);
+        // (frankenredis-4ib91) Hoisted out of this block so it survives to the
+        // CONFIG SET application below; `startup_config` itself is scoped here.
+        file_passthrough = startup_config.passthrough.clone();
         let config_rdb_path = startup_config.configured_rdb_path();
         let config_aof_path = startup_config.configured_aof_path();
         if !cli_bind_addr && let Some(config_bind_addr) = startup_config.bind_addr {
@@ -4383,6 +4439,41 @@ fn main() -> ExitCode {
         _ => RuntimePolicy::hardened(),
     };
     let mut runtime = Runtime::new(policy);
+
+    // (frankenredis-4ib91) Apply the directives the argv loop and the config-file
+    // parser did not name, through the very same CONFIG SET the runtime already
+    // implements. Placed here, immediately after construction and BEFORE the RDB
+    // / AOF load below, because the encoding thresholds among these decide how
+    // loaded collections are encoded -- applying them after the load would leave
+    // restored data encoded under the defaults.
+    //
+    // File first, CLI second, so an explicit `--name value` beats the same
+    // directive in the config file, matching every named flag above.
+    //
+    // A rejected directive ABORTS STARTUP with CONFIG SET's own message. That is
+    // the deliberate half of this change: the old config-file behaviour was to
+    // drop the directive silently, which is how `maxmemory-policy allkeys-lru`
+    // became a server running `noeviction` with nothing in the log.
+    for (source, name, value) in file_passthrough
+        .iter()
+        .map(|(n, v)| ("config file", n, v))
+        .chain(cli_passthrough.iter().map(|(n, v)| ("command line", n, v)))
+    {
+        let reply = runtime.execute_frame(
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"CONFIG".to_vec())),
+                RespFrame::BulkString(Some(b"SET".to_vec())),
+                RespFrame::BulkString(Some(name.as_bytes().to_vec())),
+                RespFrame::BulkString(Some(value.as_bytes().to_vec())),
+            ])),
+            now_ms(),
+        );
+        if let RespFrame::Error(err) = reply {
+            eprintln!("error: {source}: '{name} {value}': {err}");
+            return ExitCode::from(1);
+        }
+    }
+
     runtime.set_server_port(port);
     // (frankenredis-zyx9q) Let the runtime's CONFIG SET port handler test-bind
     // the new port and signal a live listener rebind.
@@ -39848,6 +39939,14 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
                 // Absent from this fixture, so it stays None and the server keeps
                 // upstream's non-cluster default. (frankenredis-inuwt)
                 cluster_enabled: None,
+                // (frankenredis-4ib91) `timeout 30` is in this fixture and has no
+                // dedicated field, so it is exactly the case the catch-all exists
+                // for: before this change it hit `_ => {}` and vanished. Pinning
+                // the CONTENTS rather than just the length also pins the negative
+                // half -- every OTHER directive above still populates its own
+                // field and must NOT appear here, which is what would break if
+                // the catch-all were ever placed before a named arm.
+                passthrough: vec![("timeout".to_string(), "30".to_string())],
             }
         );
         assert_eq!(
