@@ -4711,25 +4711,27 @@ fn main() -> ExitCode {
     let (all_binds, required_binds) = split_bind_spec(&bind_addr);
     let mut cur_binds: Vec<String> = all_binds;
     let mut cur_listen_port: u16 = port;
-    let mut listeners: Vec<TcpListener> = match bind_and_register(&poll, &cur_binds, cur_listen_port)
-    {
-        Ok(l) => l,
-        Err(first_err) if cur_binds.len() != required_binds.len() => {
-            eprintln!("warning: {first_err}; retrying without the optional (-prefixed) addresses");
-            cur_binds = required_binds;
-            match bind_and_register(&poll, &cur_binds, cur_listen_port) {
-                Ok(l) => l,
-                Err(e) => {
-                    eprintln!("error: {e}");
-                    return ExitCode::from(1);
+    let mut listeners: Vec<TcpListener> =
+        match bind_and_register(&poll, &cur_binds, cur_listen_port) {
+            Ok(l) => l,
+            Err(first_err) if cur_binds.len() != required_binds.len() => {
+                eprintln!(
+                    "warning: {first_err}; retrying without the optional (-prefixed) addresses"
+                );
+                cur_binds = required_binds;
+                match bind_and_register(&poll, &cur_binds, cur_listen_port) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        return ExitCode::from(1);
+                    }
                 }
             }
-        }
-        Err(e) => {
-            eprintln!("error: {e}");
-            return ExitCode::from(1);
-        }
-    };
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::from(1);
+            }
+        };
 
     eprintln!(
         "FrankenRedis v{} ready (mode={mode_str}, port={port}, command_execution_threads={})",
