@@ -7688,7 +7688,7 @@ fn smismember_nine_packet_has_exact_positional_reply() {
     assert_eq!(packets.odd.request, packets.even.request);
 
     // Nine requested members: the command word, the key, then nine members.
-    assert_eq!(SMISMEMBER_NINE.starts_with(b"*11\r\n"), true);
+    assert!(SMISMEMBER_NINE.starts_with(b"*11\r\n"));
     assert!(SMISMEMBER_NINE.windows(b"absent".len()).any(|w| w == b"absent"));
 
     let single = smismember_nine_reply();
