@@ -34,6 +34,14 @@ BASE = int(sys.argv[3]) if len(sys.argv) > 3 else 29811
 
 # Ordinary tuning directives, none of which had a dedicated fr flag.
 DIRECTIVES = [
+    # (frankenredis-5rru3) `bind` earns its place here for two reasons the other
+    # entries do not have. It is MULTI-VALUED, so it catches a parser that reads
+    # only the first argument -- fr did, which left IPv6 loopback unreachable
+    # while `CONFIG GET bind` still echoed the truncated value, so the operator's
+    # own introspection confirmed the wrong answer. And the `-` prefix means
+    # "bind if possible, skip if not", so a server must honour it rather than
+    # refuse to start on a host without IPv6.
+    ("bind", "127.0.0.1 -::1"),
     ("hash-max-listpack-entries", "256"),
     ("set-max-intset-entries", "4096"),
     ("zset-max-listpack-entries", "256"),

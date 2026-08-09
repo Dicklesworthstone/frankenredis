@@ -6059,11 +6059,28 @@ impl Runtime {
         self.server.bind_addr = addr.clone();
         // (frankenredis-jd75g) The standalone server binds a single address at
         // startup; seed the bind list so CONFIG SET port/bind can test-bind it.
-        self.server.bind_addrs = if addr.is_empty() {
-            Vec::new()
+        // (frankenredis-5rru3) A startup `bind` spec can name SEVERAL addresses,
+        // space-separated and optionally `-`-prefixed, exactly like CONFIG SET
+        // bind accepts. Storing the whole spec as one element left `bind_addrs`
+        // holding a single bogus entry such as "127.0.0.1 -::1".
+        self.server.bind_addrs = addr
+            .split_whitespace()
+            .map(|a| a.strip_prefix('-').unwrap_or(a).to_string())
+            .collect();
+        // CONFIG GET bind reads `config_overrides`, which only CONFIG SET bind
+        // used to populate -- so a server configured at STARTUP reported the
+        // compiled default ("127.0.0.1") no matter what it was actually bound to.
+        // Against redis 7.2.4 with the stock `bind 127.0.0.1 -::1`, redis echoed
+        // the configured spec and fr echoed the default, so an operator checking
+        // their own configuration got confirmation of something untrue. Record
+        // the spec verbatim (prefixes included) the way getConfigBindOption does.
+        if addr.is_empty() {
+            self.server.config_overrides.remove("bind");
         } else {
-            vec![addr]
-        };
+            self.server
+                .config_overrides
+                .insert("bind".to_string(), addr);
+        }
     }
 
     /// Take a pending CONFIG SET port change for the standalone event loop to
