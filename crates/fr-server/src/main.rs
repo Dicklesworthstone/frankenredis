@@ -16516,6 +16516,15 @@ enum BorrowedDispatchFloorClass {
     Zrevrange,
     /// (frankenredis-ozrro) `LPOS key element RANK n`.
     LposRank,
+    /// (frankenredis-ozrro) `HGETALL key`.
+    Hgetall,
+    /// (frankenredis-ozrro) `HKEYS key` / `HVALS key` — one class, since both go
+    /// to the same `execute_plain_hcoll_borrowed_into` with a values flag.
+    Hcoll {
+        values: bool,
+    },
+    /// (frankenredis-ozrro) `ZRANGE key start stop WITHSCORES`.
+    ZrangeWithscores,
     /// (frankenredis-ozrro) `ZRANGEBYLEX key min max`.
     Zrangebylex,
     /// (frankenredis-ozrro) `ZREVRANK key member`.
@@ -16598,8 +16607,11 @@ enum BorrowedDispatchFloorCommand {
     Getrange,
     Hdel,
     Hget,
+    Hgetall,
+    Hkeys,
     Hlen,
     Hrandfield,
+    Hvals,
     Incr,
     Lindex,
     Linsert,
@@ -16695,6 +16707,8 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'R', b'P', b'U', b'S', b'H'] => Some(BorrowedDispatchFloorCommand::Rpush),
             [b'X', b'T', b'R', b'I', b'M'] => Some(BorrowedDispatchFloorCommand::Xtrim),
             [b'Z', b'R', b'A', b'N', b'K'] => Some(BorrowedDispatchFloorCommand::Zrank),
+            [b'H', b'K', b'E', b'Y', b'S'] => Some(BorrowedDispatchFloorCommand::Hkeys),
+            [b'H', b'V', b'A', b'L', b'S'] => Some(BorrowedDispatchFloorCommand::Hvals),
             _ => None,
         },
         6 => match uppercase_ascii_token::<6>(token)? {
@@ -16727,6 +16741,9 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             }
             [b'Z', b'M', b'S', b'C', b'O', b'R', b'E'] => {
                 Some(BorrowedDispatchFloorCommand::Zmscore)
+            }
+            [b'H', b'G', b'E', b'T', b'A', b'L', b'L'] => {
+                Some(BorrowedDispatchFloorCommand::Hgetall)
             }
             _ => None,
         },
@@ -17192,6 +17209,23 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // those commands are already classified or already near the front. Two
         // outliers were left in it: LPOS with a RANK option 12,919/op (5.31x) and
         // arity-4 ZREVRANGE 7,647/op (2.02x).
+        // (frankenredis-ozrro) Sixth batch, and it came out of the ALLOCATION
+        // census on gu5nf rather than from reading the source: counting allocator
+        // calls per request showed a fixed 178 for every shape, but printed
+        // instructions per op alongside them, and HGETALL stood out at 16,103.
+        // Measuring the gap confirmed it. Per op: HGETALL 13,345 (5.81x),
+        // HVALS 13,312 (6.21x), HKEYS 13,253 (6.18x), ZRANGE WITHSCORES 9,405
+        // (3.90x). The whole hash-read family sat ~1,300 lines deep.
+        (2, BorrowedDispatchFloorCommand::Hgetall) => Some(BorrowedDispatchFloorClass::Hgetall),
+        (2, BorrowedDispatchFloorCommand::Hkeys) => {
+            Some(BorrowedDispatchFloorClass::Hcoll { values: false })
+        }
+        (2, BorrowedDispatchFloorCommand::Hvals) => {
+            Some(BorrowedDispatchFloorClass::Hcoll { values: true })
+        }
+        (5, BorrowedDispatchFloorCommand::Zrange) => {
+            Some(BorrowedDispatchFloorClass::ZrangeWithscores)
+        }
         (5, BorrowedDispatchFloorCommand::Lpos) => Some(BorrowedDispatchFloorClass::LposRank),
         (4, BorrowedDispatchFloorCommand::Zrevrange) => Some(BorrowedDispatchFloorClass::Zrevrange),
         (4..=5, BorrowedDispatchFloorCommand::Smismember) => {
@@ -18297,6 +18331,81 @@ fn try_dispatch_floor_classified_action(
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
                     response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Hgetall => {
+            let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+            if let Some(packet) = parse_borrowed_plain_hgetall_packet(unparsed, &parser_config)
+                && runtime
+                    .execute_plain_hgetall_borrowed_into(packet.key, ts, client_resp3, out)
+                    .is_some()
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
+                    consumed: packet.consumed,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Hcoll { values } => {
+            let parsed = if values {
+                parse_borrowed_plain_hvals_packet(unparsed, &parser_config)
+            } else {
+                parse_borrowed_plain_hkeys_packet(unparsed, &parser_config)
+            };
+            if let Some(packet) = parsed
+                && runtime
+                    .execute_plain_hcoll_borrowed_into(packet.key, ts, values, out)
+                    .is_some()
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
+                    consumed: packet.consumed,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::ZrangeWithscores => {
+            let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+            if let Some(packet) =
+                parse_borrowed_plain_zrange_withscores_packet(unparsed, &parser_config)
+                && runtime
+                    .execute_plain_zrange_withscores_borrowed_into(
+                        packet.key,
+                        packet.start,
+                        packet.end,
+                        ts,
+                        client_resp3,
+                        out,
+                    )
+                    .is_some()
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
+                    consumed: packet.consumed,
                 })
             } else {
                 parse_borrowed_multibulk_action(

@@ -2262,6 +2262,13 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"HGETALL", b"h:1"]));
     cmds.push(c(&[b"HKEYS", b"h:1"]));
     cmds.push(c(&[b"HVALS", b"h:1"]));
+    // (frankenredis-ozrro) HKEYS and HVALS share one classified arm distinguished
+    // only by a values flag, so both have to run against the SAME hash — a
+    // swapped flag is invisible unless the two replies can be compared. The
+    // absent-key case is the other branch of that arm.
+    cmds.push(c(&[b"HGETALL", b"h:absent"]));
+    cmds.push(c(&[b"HKEYS", b"h:absent"]));
+    cmds.push(c(&[b"HVALS", b"h:absent"]));
     cmds.push(c(&[b"HLEN", b"h:1"]));
     cmds.push(c(&[b"HSTRLEN", b"h:1", b"f2"]));
     cmds.push(c(&[b"HEXISTS", b"h:1", b"f9"]));
