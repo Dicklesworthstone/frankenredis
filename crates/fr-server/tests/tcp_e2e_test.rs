@@ -2297,6 +2297,15 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"ZADD", b"z:1", b"NX", b"100", b"a"]));
     cmds.push(c(&[b"ZADD", b"z:1", b"XX", b"CH", b"4", b"b"]));
     cmds.push(c(&[b"ZADD", b"z:1", b"INCR", b"1.5", b"c"]));
+    // (frankenredis-ozrro) EVEN arity >= 8 is what the front classifier claims,
+    // and a flagged ZADD lands there whenever it carries two flags. The
+    // multi-pair parser declines those, so this is the shape that proves the
+    // classifier's second parser is wired and not stranding them on the generic
+    // path with different semantics.
+    cmds.push(c(&[b"ZADD", b"z:2", b"GT", b"CH", b"1", b"a", b"2", b"b"]));
+    cmds.push(c(&[b"ZADD", b"z:2", b"NX", b"CH", b"5", b"e", b"6", b"f"]));
+    cmds.push(c(&[b"ZADD", b"z:2", b"XX", b"CH", b"9", b"a", b"9", b"zz"]));
+    cmds.push(c(&[b"ZRANGE", b"z:2", b"0", b"-1", b"WITHSCORES"]));
     cmds.push(c(&[b"ZINCRBY", b"z:1", b"2", b"d"]));
     cmds.push(c(&[b"ZCARD", b"z:1"]));
     cmds.push(c(&[b"ZSCORE", b"z:1", b"b"]));

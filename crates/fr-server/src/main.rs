@@ -16492,6 +16492,11 @@ enum BorrowedDispatchFloorClass {
     GetexExpire,
     GetexPersist,
     Hlen,
+    /// (frankenredis-ozrro) `LREM key count element`.
+    Lrem,
+    /// (frankenredis-ozrro) `ZADD key score member ...` with 3..8 pairs, plus the
+    /// even-arity flag form the same classification necessarily catches.
+    ZaddMulti,
     /// Variadic keyed-values write (LPUSH/RPUSH/SADD/HDEL/SREM/ZREM) carrying the
     /// value count (5..=8) — the forms stranded ~1350 lines deep in the cascade.
     KeyedValuesWrite(usize),
@@ -16560,6 +16565,7 @@ enum BorrowedDispatchFloorCommand {
     Lrange,
     Lpos,
     Lpush,
+    Lrem,
     Memory,
     Object,
     Pfcount,
@@ -16581,6 +16587,7 @@ enum BorrowedDispatchFloorCommand {
     Xrevrange,
     Xtrim,
     Xlen,
+    Zadd,
     Zcard,
     Zcount,
     Zrange,
@@ -16622,6 +16629,8 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'X', b'A', b'D', b'D'] => Some(BorrowedDispatchFloorCommand::Xadd),
             [b'X', b'A', b'C', b'K'] => Some(BorrowedDispatchFloorCommand::Xack),
             [b'X', b'D', b'E', b'L'] => Some(BorrowedDispatchFloorCommand::Xdel),
+            [b'L', b'R', b'E', b'M'] => Some(BorrowedDispatchFloorCommand::Lrem),
+            [b'Z', b'A', b'D', b'D'] => Some(BorrowedDispatchFloorCommand::Zadd),
             _ => None,
         },
         5 => match uppercase_ascii_token::<5>(token)? {
@@ -16967,6 +16976,23 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         }
         (4, BorrowedDispatchFloorCommand::Xack) if xack_missing_floor_enabled() => {
             Some(BorrowedDispatchFloorClass::XackMissing)
+        }
+        // (frankenredis-ozrro) Two routes that WORK but sit ~1200 and ~2700 arms'
+        // worth of prefix tests deep, so the walk to reach them costs more than
+        // they save. Measured with callgrind over 2000 ops, same ELF, cascade
+        // walked vs bypassed: `LREM l 1 zz` 30,827,109 vs 11,613,947 (the walk is
+        // 9,607 instr/op, 62.3% of the op) and `ZADD z 1 a 2 b 3 c` 18,843,258 vs
+        // 10,473,506 (4,185 instr/op, 44.4%). frankenredis-4m3i4's negative memo
+        // cannot reach either: it only records shapes that come out on the
+        // GENERIC path, and these two match their arm and succeed.
+        (4, BorrowedDispatchFloorCommand::Lrem) => Some(BorrowedDispatchFloorClass::Lrem),
+        // The multi-pair parser covers *8..*18 (3..8 pairs); odd arities are flag
+        // forms and are left to the cascade. An even arity whose leading token IS
+        // a flag (`ZADD k CH 1 a 2 b`) is declined by that parser, so the arm
+        // below tries the flag-multi parser before giving up — otherwise
+        // classifying here would strand the flag form on the generic path.
+        (arity, BorrowedDispatchFloorCommand::Zadd) if arity >= 8 && arity.is_multiple_of(2) => {
+            Some(BorrowedDispatchFloorClass::ZaddMulti)
         }
         (4, BorrowedDispatchFloorCommand::Xrange) if xrange_zero_floor_enabled() => {
             Some(BorrowedDispatchFloorClass::XrangeZero)
@@ -18024,6 +18050,63 @@ fn try_dispatch_floor_classified_action(
 ) -> Option<Result<BorrowedMultibulkAction, RespParseError>> {
     let class = classify_borrowed_dispatch_floor_packet(unparsed, &parser_config)?;
     Some(match class {
+        BorrowedDispatchFloorClass::Lrem => {
+            if let Some(packet) = parse_borrowed_plain_lrem_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_lrem_borrowed(
+                    packet.key,
+                    packet.count,
+                    packet.element,
+                    ts,
+                )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::ZaddMulti => {
+            if let Some(packet) = parse_borrowed_plain_zadd_multi_packet(unparsed, &parser_config)
+                && let Some(response) =
+                    runtime.execute_plain_zadd_borrowed(packet.key, &packet.pairs[..packet.len], ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else if let Some(packet) =
+                parse_borrowed_plain_zadd_flag_multi_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_zadd_flag_multi_borrowed(
+                    packet.key,
+                    &packet.flags[..packet.nflags],
+                    &packet.pairs[..packet.npairs_bulks],
+                    ts,
+                )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
         BorrowedDispatchFloorClass::XaddNomkstream => {
             if let Some(packet) = parse_borrowed_plain_key_arg4_packet(
                 unparsed,
