@@ -16494,6 +16494,14 @@ enum BorrowedDispatchFloorClass {
     Hlen,
     /// (frankenredis-ozrro) `LREM key count element`.
     Lrem,
+    /// (frankenredis-ozrro) `EXPIRE key seconds`, no option token.
+    Expire,
+    /// (frankenredis-ozrro) `LINSERT key BEFORE|AFTER pivot element`.
+    Linsert,
+    /// (frankenredis-ozrro) `SETRANGE key offset value`.
+    Setrange,
+    /// (frankenredis-ozrro) `ZINCRBY key increment member`.
+    Zincrby,
     /// (frankenredis-ozrro) `ZADD key score member ...` with 3..8 pairs, plus the
     /// even-arity flag form the same classification necessarily catches.
     ZaddMulti,
@@ -16554,6 +16562,7 @@ enum BorrowedDispatchFloorCommand {
     Dbsize,
     Echo,
     Exists,
+    Expire,
     Getex,
     Getrange,
     Hdel,
@@ -16561,6 +16570,7 @@ enum BorrowedDispatchFloorCommand {
     Hlen,
     Hrandfield,
     Incr,
+    Linsert,
     Llen,
     Lrange,
     Lpos,
@@ -16573,6 +16583,7 @@ enum BorrowedDispatchFloorCommand {
     Sadd,
     Scard,
     Setbit,
+    Setrange,
     Sismember,
     Srandmember,
     Srem,
@@ -16590,6 +16601,7 @@ enum BorrowedDispatchFloorCommand {
     Zadd,
     Zcard,
     Zcount,
+    Zincrby,
     Zrange,
     Zrem,
     Zremrangebyrank,
@@ -16655,11 +16667,18 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'Z', b'R', b'A', b'N', b'G', b'E'] => Some(BorrowedDispatchFloorCommand::Zrange),
             [b'X', b'R', b'A', b'N', b'G', b'E'] => Some(BorrowedDispatchFloorCommand::Xrange),
             [b'B', b'I', b'T', b'P', b'O', b'S'] => Some(BorrowedDispatchFloorCommand::Bitpos),
+            [b'E', b'X', b'P', b'I', b'R', b'E'] => Some(BorrowedDispatchFloorCommand::Expire),
             _ => None,
         },
         7 => match uppercase_ascii_token::<7>(token)? {
             [b'P', b'F', b'C', b'O', b'U', b'N', b'T'] => {
                 Some(BorrowedDispatchFloorCommand::Pfcount)
+            }
+            [b'L', b'I', b'N', b'S', b'E', b'R', b'T'] => {
+                Some(BorrowedDispatchFloorCommand::Linsert)
+            }
+            [b'Z', b'I', b'N', b'C', b'R', b'B', b'Y'] => {
+                Some(BorrowedDispatchFloorCommand::Zincrby)
             }
             _ => None,
         },
@@ -16687,6 +16706,9 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             }
             [b'B', b'I', b'T', b'C', b'O', b'U', b'N', b'T'] => {
                 Some(BorrowedDispatchFloorCommand::Bitcount)
+            }
+            [b'S', b'E', b'T', b'R', b'A', b'N', b'G', b'E'] => {
+                Some(BorrowedDispatchFloorCommand::Setrange)
             }
             _ => None,
         },
@@ -16986,6 +17008,23 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // cannot reach either: it only records shapes that come out on the
         // GENERIC path, and these two match their arm and succeed.
         (4, BorrowedDispatchFloorCommand::Lrem) => Some(BorrowedDispatchFloorClass::Lrem),
+        // (frankenredis-ozrro) Four more routes picked the way the bead says to
+        // pick them — by the walked-vs-bypassed callgrind gap, which IS the
+        // prize. Per op, over 2000 ops: LINSERT 4,653 instructions (1.70x),
+        // SETRANGE 2,934 (2.24x), ZINCRBY 2,809 (1.76x), EXPIRE 1,700 (1.53x).
+        // HINCRBY was measured alongside them at 184 instr/op (1.03x) and is
+        // deliberately NOT here: its route is already near the front, so
+        // classifying it would buy nothing and still enlarge this match.
+        //
+        // Each is admitted at the ONE arity its parser accepts. The option forms
+        // — `EXPIRE key ttl NX`, and anything that changes LINSERT/SETRANGE/
+        // ZINCRBY's shape — keep the cascade, because a classification the
+        // parser then declines lands on the generic path instead of the arm that
+        // would have served it.
+        (3, BorrowedDispatchFloorCommand::Expire) => Some(BorrowedDispatchFloorClass::Expire),
+        (4, BorrowedDispatchFloorCommand::Setrange) => Some(BorrowedDispatchFloorClass::Setrange),
+        (4, BorrowedDispatchFloorCommand::Zincrby) => Some(BorrowedDispatchFloorClass::Zincrby),
+        (5, BorrowedDispatchFloorCommand::Linsert) => Some(BorrowedDispatchFloorClass::Linsert),
         // The multi-pair parser covers *8..*18 (3..8 pairs); odd arities are flag
         // forms and are left to the cascade. An even arity whose leading token IS
         // a flag (`ZADD k CH 1 a 2 b`) is declined by that parser, so the arm
@@ -18055,6 +18094,95 @@ fn try_dispatch_floor_classified_action(
                 && let Some(response) = runtime.execute_plain_lrem_borrowed(
                     packet.key,
                     packet.count,
+                    packet.element,
+                    ts,
+                )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Expire => {
+            if let Some(packet) = parse_borrowed_plain_expire_packet(unparsed, &parser_config)
+                && let Some(response) =
+                    runtime.execute_plain_expire_borrowed(packet.key, packet.member, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Setrange => {
+            if let Some(packet) = parse_borrowed_plain_setrange_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_setrange_borrowed(
+                    packet.key,
+                    packet.start,
+                    packet.end,
+                    ts,
+                )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Zincrby => {
+            if let Some(packet) = parse_borrowed_plain_zincrby_packet(unparsed, &parser_config)
+                && let Some(response) =
+                    runtime.execute_plain_zincrby_borrowed(packet.key, packet.start, packet.end, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Linsert => {
+            if let Some(packet) = parse_borrowed_plain_linsert_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_linsert_borrowed(
+                    packet.key,
+                    packet.before,
+                    packet.pivot,
                     packet.element,
                     ts,
                 )

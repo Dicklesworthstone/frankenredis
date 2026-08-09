@@ -2200,6 +2200,16 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"PERSIST", b"s:6"]));
     cmds.push(c(&[b"TTL", b"s:6"]));
     cmds.push(c(&[b"EXPIRE", b"s:absent", b"100"]));
+    // (frankenredis-ozrro) The classifier claims EXPIRE at arity 3 only, so the
+    // option form has to stay on the cascade and answer identically. Same idea
+    // for the SETRANGE offset that extends with zero padding, which is the shape
+    // its fast route is most likely to get wrong.
+    cmds.push(c(&[b"EXPIRE", b"s:3", b"100", b"NX"]));
+    cmds.push(c(&[b"EXPIRE", b"s:3", b"200", b"XX"]));
+    cmds.push(c(&[b"PERSIST", b"s:3"]));
+    cmds.push(c(&[b"SETRANGE", b"s:pad", b"3", b"ZZ"]));
+    cmds.push(c(&[b"GET", b"s:pad"]));
+    cmds.push(c(&[b"STRLEN", b"s:pad"]));
     cmds.push(c(&[b"GETEX", b"s:3"]));
     cmds.push(c(&[b"GETEX", b"s:3", b"PERSIST"]));
     cmds.push(c(&[b"INCR", b"n:1"]));
@@ -2269,6 +2279,8 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"LPOS", b"l:1", b"b", b"RANK", b"-1"]));
     cmds.push(c(&[b"LPOS", b"l:1", b"b", b"COUNT", b"0"]));
     cmds.push(c(&[b"LINSERT", b"l:1", b"BEFORE", b"c", b"X"]));
+    cmds.push(c(&[b"LINSERT", b"l:1", b"AFTER", b"c", b"Y"]));
+    cmds.push(c(&[b"LINSERT", b"l:1", b"BEFORE", b"nosuch", b"Z"]));
     cmds.push(c(&[b"LSET", b"l:1", b"0", b"Y"]));
     cmds.push(c(&[b"LREM", b"l:1", b"1", b"b"]));
     cmds.push(c(&[b"LTRIM", b"l:1", b"0", b"3"]));
@@ -2307,6 +2319,14 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"ZADD", b"z:2", b"XX", b"CH", b"9", b"a", b"9", b"zz"]));
     cmds.push(c(&[b"ZRANGE", b"z:2", b"0", b"-1", b"WITHSCORES"]));
     cmds.push(c(&[b"ZINCRBY", b"z:1", b"2", b"d"]));
+    // (frankenredis-ozrro) These exercise the ZINCRBY route on their OWN key.
+    // Putting them on z:1 made the later ZRANGEBYLEX queries disagree with
+    // 7.2.4 — correctly, because ZRANGEBYLEX is only defined when every member
+    // shares a score, and re-scoring z:1 broke that. Pinning an unspecified
+    // ordering would have made this gate brittle rather than sharper.
+    cmds.push(c(&[b"ZINCRBY", b"z:3", b"1.25", b"fresh"]));
+    cmds.push(c(&[b"ZINCRBY", b"z:3", b"-0.5", b"fresh"]));
+    cmds.push(c(&[b"ZSCORE", b"z:3", b"fresh"]));
     cmds.push(c(&[b"ZCARD", b"z:1"]));
     cmds.push(c(&[b"ZSCORE", b"z:1", b"b"]));
     cmds.push(c(&[b"ZMSCORE", b"z:1", b"a", b"zz", b"d"]));
