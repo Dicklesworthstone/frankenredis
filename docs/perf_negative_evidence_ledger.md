@@ -15524,3 +15524,55 @@ whose redis.call-per-eval count EXCEEDS ~200 makes field resolution dominate, WH
 same across-run estimator. Do NOT re-run this comparison at -P 1 UNTIL at least 20 invocations are
 budgeted: at 7 invocations the null bound is 1.80%, which EXCEEDS this effect and would have made a
 null result indistinguishable from a small positive one.
+
+## 2026-08-09 CrimsonHawk: REJECT — the whole instruction-reduction strategy for EVAL. fr already retires 6% FEWER instructions than redis and loses on STALLS: IPC 1.57 vs 2.71, 6x the branch-miss rate, 2.5x the cache-miss rate (`frankenredis-lua-rediscall-loop-interpreter-bound-d3al0`)
+
+Claim class: SELF-SPEEDUP. Campaign output: no.
+
+COUNTED MECHANISM, measured on the SERVER process with `perf stat` attached while the vendored
+redis-benchmark drove it, so these are per-operation hardware counters and not a timing ratio.
+Workload `EVAL "for i=1,50 do redis.call('GET', KEYS[1]) end return 1" 1 k`, n=6000, c=1, each
+server pinned to its own core, host threadripperje at load 0.23:
+
+              IPC     cycles/op     instr/op    branch-miss%   cache-miss%   br-misses/op
+  fr_pre     1.620     111,383       180,405       1.20%          69.87%         396.8
+  fr_post    1.520     115,490       175,545       1.40%          71.56%         452.8
+  redis      2.705      69,090       186,855       0.20%          28.49%          74.5
+
+Instructions/op are reproducible to ~0.001% across four separate runs (fr_pre 180,315-180,325;
+fr_post 175,322-175,332; redis 186,584-186,649). Cycles/op carry 1-2% run-to-run noise, so the small
+fr_pre/fr_post cycle difference is NOT resolved and no claim is made about it. The branch and cache
+figures are a single run; the fr-vs-redis contrast is large enough (6x, 2.5x) to be qualitative, but
+the fr_pre/fr_post difference in those columns is within noise and is not claimed either.
+
+THE FINDING, which re-scopes this bead. fr RETIRES 6.0% FEWER INSTRUCTIONS PER OPERATION THAN REDIS
+(175,545 vs 186,855) AND STILL BURNS 63% MORE CYCLES (115,490 vs 69,090). The engine is not doing
+more work. It is stalling: 1.73x worse IPC, 6x the branch-miss RATE and 6x the absolute mispredicts
+per operation, 2.5x the cache-miss rate. That is the textbook signature of a tree-walking
+interpreter -- every AST node is a pointer dereference (cache misses) reached through an enum match
+(indirect-branch mispredicts).
+
+WHY THIS EXPLAINS THE WHOLE CAMPAIGN, and it is a rejection of my own strategy rather than of any
+individual lever:
+  * eleven levers cut 23.60% of interpreter instructions and bought +5.74% e2e;
+  * the largest single one cut 10.516% and bought +0.02% (preceding entry);
+  * fr already executes FEWER instructions than the incumbent it is losing to.
+Shaving instructions cannot close a gap whose cause is stalls. Every remaining instruction-count
+lever on this bead -- including lever (1) `LuaValue::Str -> Rc<[u8]>`, 223 hand-edited sites -- is
+being scored on the wrong axis. This corroborates `project_zrangebyscore_ipc_stall_not_work_volume`,
+which found the same shape on a different command (fr retiring 24% fewer instructions and burning
+16% more cycles) and drew the same conclusion: score candidates by IPC, not instruction count.
+
+NOTED, because it is a second reason not to trust the microbench: the field cache measures 10.516%
+on `lua_rediscall_loop` but only 2.77% of a whole EVAL operation in the server binary
+(180,405 -> 175,545 instr/op). Part of that is the operation including protocol and dispatch beyond
+the 50 redis.calls, but the per-call saving still does not reproduce at the microbench's magnitude
+in a `release` server build. The microbench is a `release-perf` build of one crate and inlines
+differently.
+
+Retry predicate: re-open instruction-reduction work ONLY IF a candidate is shown to reduce CYCLES
+per op by > 1.0% with the A/A null bound < 1.0%, or IF it reduces branch-misses/op or cache-misses
+per op measurably -- not merely instructions. Conversely, the surface that IS worth opening is
+anything that attacks the stalls directly: a flatter instruction representation (bytecode or a
+linear op array) that replaces per-node pointer chasing and enum dispatch, evaluated first by
+whether it moves branch-misses/op below ~400 and IPC above ~2.0, and only then by throughput.
