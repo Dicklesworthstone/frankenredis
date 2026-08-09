@@ -2253,6 +2253,27 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"OBJECT", b"ENCODING", b"s:1"]));
     cmds.push(c(&[b"TYPE", b"s:1"]));
     cmds.push(c(&[b"TYPE", b"s:absent"]));
+    // (frankenredis-ozrro) Geo joins this gate because GEOPOS and GEODIST are now
+    // front-classified. GEODIST is driven with AND without a unit token, since
+    // its parser accepts both arities and the classifier admits both; the unit
+    // path is where a conversion constant could silently drift.
+    cmds.push(c(&[
+        b"GEOADD",
+        b"geo:1",
+        b"13.361389",
+        b"38.115556",
+        b"Palermo",
+        b"15.087269",
+        b"37.502669",
+        b"Catania",
+    ]));
+    cmds.push(c(&[b"GEOPOS", b"geo:1", b"Palermo"]));
+    cmds.push(c(&[b"GEOPOS", b"geo:1", b"Nowhere"]));
+    cmds.push(c(&[b"GEOPOS", b"geo:absent", b"Palermo"]));
+    cmds.push(c(&[b"GEODIST", b"geo:1", b"Palermo", b"Catania"]));
+    cmds.push(c(&[b"GEODIST", b"geo:1", b"Palermo", b"Catania", b"km"]));
+    cmds.push(c(&[b"GEODIST", b"geo:1", b"Palermo", b"Nowhere"]));
+    cmds.push(c(&[b"GEODIST", b"geo:absent", b"a", b"b"]));
     cmds.push(c(&[b"ECHO", b"hey"]));
     cmds.push(c(&[b"PING"]));
     cmds.push(c(&[b"PING", b"hello"]));

@@ -16532,6 +16532,12 @@ enum BorrowedDispatchFloorClass {
     Getdel,
     /// (frankenredis-ozrro) `DECRBY key decrement`.
     Decrby,
+    /// (frankenredis-ozrro) `INCRBY key increment`.
+    Incrby,
+    /// (frankenredis-ozrro) `GEOPOS key member` at one member.
+    Geopos,
+    /// (frankenredis-ozrro) `GEODIST key m1 m2`, with or without a unit token.
+    Geodist,
     /// (frankenredis-ozrro) `HEXISTS key field`.
     Hexists,
     /// (frankenredis-ozrro) `HSTRLEN key field`.
@@ -16628,6 +16634,8 @@ enum BorrowedDispatchFloorCommand {
     Echo,
     Exists,
     Expire,
+    Geodist,
+    Geopos,
     Getdel,
     Getex,
     Getrange,
@@ -16643,6 +16651,7 @@ enum BorrowedDispatchFloorCommand {
     Hrandfield,
     Hvals,
     Incr,
+    Incrby,
     Lindex,
     Linsert,
     Llen,
@@ -16765,6 +16774,8 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'A', b'P', b'P', b'E', b'N', b'D'] => Some(BorrowedDispatchFloorCommand::Append),
             [b'D', b'E', b'C', b'R', b'B', b'Y'] => Some(BorrowedDispatchFloorCommand::Decrby),
             [b'G', b'E', b'T', b'D', b'E', b'L'] => Some(BorrowedDispatchFloorCommand::Getdel),
+            [b'I', b'N', b'C', b'R', b'B', b'Y'] => Some(BorrowedDispatchFloorCommand::Incrby),
+            [b'G', b'E', b'O', b'P', b'O', b'S'] => Some(BorrowedDispatchFloorCommand::Geopos),
             _ => None,
         },
         7 => match uppercase_ascii_token::<7>(token)? {
@@ -16779,6 +16790,9 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             }
             [b'Z', b'M', b'S', b'C', b'O', b'R', b'E'] => {
                 Some(BorrowedDispatchFloorCommand::Zmscore)
+            }
+            [b'G', b'E', b'O', b'D', b'I', b'S', b'T'] => {
+                Some(BorrowedDispatchFloorCommand::Geodist)
             }
             [b'H', b'G', b'E', b'T', b'A', b'L', b'L'] => {
                 Some(BorrowedDispatchFloorCommand::Hgetall)
@@ -17285,6 +17299,21 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // -132/op (0.98x) and LPUSHX -1,957/op (0.67x) rejected. RPOP and ZPOPMIN
         // were swept at 1,803 and 1,941 instructions per op, already down at the
         // level a classified command reaches, and were not gap-measured.
+        // (frankenredis-ozrro) Tenth batch, and the first with a stated
+        // threshold instead of a felt one: take at an absolute gap of ~1,400
+        // instructions per op or more, whatever the command's own cost. Per op:
+        // GEOPOS 3,158 (1.38x), GEODIST 2,583 (1.24x), INCRBY 1,459 (1.67x) all
+        // clear it; PFADD 777 (1.11x) does not. Absolute gap rather than ratio,
+        // because the ratio punishes an expensive command for being expensive —
+        // GEODIST costs ~11,000 instructions of its own work, and removing 2,583
+        // is worth the same as removing 2,583 from a cheap one.
+        //
+        // GEOPOS is admitted at ONE member (arity 3); its parser handles more,
+        // but only that shape was measured. GEODIST's parser takes arity 4 and 5
+        // (with and without a unit token) and both are admitted.
+        (3, BorrowedDispatchFloorCommand::Geopos) => Some(BorrowedDispatchFloorClass::Geopos),
+        (4..=5, BorrowedDispatchFloorCommand::Geodist) => Some(BorrowedDispatchFloorClass::Geodist),
+        (3, BorrowedDispatchFloorCommand::Incrby) => Some(BorrowedDispatchFloorClass::Incrby),
         (2, BorrowedDispatchFloorCommand::Getdel) => Some(BorrowedDispatchFloorClass::Getdel),
         (3, BorrowedDispatchFloorCommand::Decrby) => Some(BorrowedDispatchFloorClass::Decrby),
         (arity, BorrowedDispatchFloorCommand::Hmget) if arity >= 3 => {
@@ -18410,6 +18439,72 @@ fn try_dispatch_floor_classified_action(
                     packet.key,
                     packet.count,
                     packet.element,
+                    ts,
+                )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Incrby => {
+            if let Some(packet) = parse_borrowed_plain_incrby_packet(unparsed, &parser_config)
+                && let Some(response) =
+                    runtime.execute_plain_incrby_borrowed(packet.key, packet.member, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Geopos => {
+            if let Some(packet) = parse_borrowed_plain_geopos_packet(unparsed, &parser_config)
+                && let Some(response) =
+                    runtime.execute_plain_geopos_borrowed(packet.key, &packet.members, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Geodist => {
+            if let Some(packet) = parse_borrowed_plain_geodist_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_geodist_borrowed(
+                    packet.key,
+                    packet.m1,
+                    packet.m2,
+                    packet.to_meter,
+                    packet.unit,
                     ts,
                 )
             {
