@@ -2303,6 +2303,15 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"SISMEMBER", b"t:1", b"zz"]));
     cmds.push(c(&[b"SMISMEMBER", b"t:1", b"m1", b"zz"]));
     cmds.push(c(&[b"SSCAN", b"t:1", b"0", b"MATCH", b"m*"]));
+    // (frankenredis-ozrro) SMEMBERS is now front-classified, so its reply ORDER
+    // has to be pinned rather than sidestepped with SSCAN. Both encodings are
+    // driven: an all-integer set (intset, numerically ordered) and a small
+    // string set (listpack, insertion ordered).
+    cmds.push(c(&[b"SADD", b"t:int", b"30", b"10", b"20"]));
+    cmds.push(c(&[b"SMEMBERS", b"t:int"]));
+    cmds.push(c(&[b"OBJECT", b"ENCODING", b"t:int"]));
+    cmds.push(c(&[b"SMEMBERS", b"t:1"]));
+    cmds.push(c(&[b"SMEMBERS", b"t:absent"]));
     cmds.push(c(&[b"SREM", b"t:1", b"m2"]));
     cmds.push(c(&[b"SCARD", b"t:1"]));
 
@@ -2342,7 +2351,22 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[
         b"ZRANGE", b"z:1", b"(1", b"+inf", b"BYSCORE", b"LIMIT", b"1", b"2",
     ]));
+    // (frankenredis-ozrro) The classifier claims ZRANGEBYSCORE at arity 4 ONLY,
+    // so both the plain form and the WITHSCORES/LIMIT forms that must keep the
+    // cascade are driven here.
+    cmds.push(c(&[b"ZRANGEBYSCORE", b"z:1", b"2", b"3"]));
+    cmds.push(c(&[b"ZRANGEBYSCORE", b"z:1", b"(2", b"+inf"]));
+    cmds.push(c(&[b"ZRANGEBYSCORE", b"z:1", b"500", b"600"]));
     cmds.push(c(&[b"ZRANGEBYSCORE", b"z:1", b"2", b"+inf", b"WITHSCORES"]));
+    cmds.push(c(&[
+        b"ZRANGEBYSCORE",
+        b"z:1",
+        b"-inf",
+        b"+inf",
+        b"LIMIT",
+        b"1",
+        b"2",
+    ]));
     cmds.push(c(&[b"ZREVRANGEBYSCORE", b"z:1", b"+inf", b"2"]));
     cmds.push(c(&[b"ZRANGEBYLEX", b"z:1", b"[a", b"(d"]));
     cmds.push(c(&[b"ZREVRANGEBYLEX", b"z:1", b"+", b"-"]));
