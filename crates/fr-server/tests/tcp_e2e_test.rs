@@ -782,6 +782,29 @@ fn spawn_frankenredis(port: u16, primary_port: Option<u16>) -> ManagedChild {
     spawn_frankenredis_opts(port, primary_port, None, None)
 }
 
+/// The same ELF with the borrowed fast-path cascade bypassed, so every `*`
+/// packet is answered by the generic parser the fast routes are required to
+/// agree with. (frankenredis-dyz65, instrument from frankenredis-4m3i4)
+#[cfg(feature = "perf-ab-cascade-bypass")]
+fn spawn_frankenredis_generic_dispatch(port: u16) -> ManagedChild {
+    let log_dir = unique_temp_dir("frankenredis-generic-dispatch-log");
+    let log_path = log_dir.join("stderr.log");
+    let log_file = std::fs::File::create(&log_path).expect("create generic-dispatch server log");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_frankenredis"));
+    command
+        .arg("--bind")
+        .arg("127.0.0.1")
+        .arg("--port")
+        .arg(port.to_string())
+        .arg("--mode")
+        .arg("strict")
+        .env("FR_PERF_AB_CASCADE_BYPASS", "1")
+        .current_dir(&log_dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(log_file));
+    ManagedChild::spawn_ready(command, Some(log_path), port)
+}
+
 fn spawn_frankenredis_sharded_set_get(port: u16, workers: usize) -> ManagedChild {
     let log_dir = unique_temp_dir("frankenredis-sharded-set-get-log");
     let log_path = log_dir.join("stderr.log");
@@ -2112,6 +2135,281 @@ fn shared_nothing_hll_and_geo_families_match_legacy_redis() {
         assert!(
             matches!(response, RespFrame::Error(ref error) if error.contains("not supported")),
             "a second-key spelling must stay refused, not answered from one partition: {response:?}"
+        );
+    }
+}
+
+/// Every borrowed fast route must answer exactly what the generic path answers.
+/// (frankenredis-dyz65)
+///
+/// `process_buffered_frames` carries ~339 borrowed fast routes. Each one is an
+/// independent reimplementation of a command's parse and reply, and
+/// `project_borrowed_fastpath_skips_generic_check_vein` is the standing record
+/// that the way they break is by SKIPPING a check the generic path performs — a
+/// divergence no single-engine test can see, because both arms live in the same
+/// binary and only one of them runs. Until `FR_PERF_AB_CASCADE_BYPASS`
+/// (frankenredis-4m3i4) there was no way to run the same server on the generic
+/// route, so each route was pinned ad hoc when someone thought to and the
+/// surface as a whole was never compared.
+///
+/// This drives one corpus through THREE engines: fr on its fast routes, the same
+/// ELF with the cascade bypassed, and live vendored 7.2.4. The fr-vs-fr
+/// comparison is the new one and it is exact — same binary, same build, so any
+/// difference is a fast route disagreeing with its own fallback. The Redis arm
+/// keeps the pair honest: two fr routes could agree with each other and both be
+/// wrong.
+///
+/// The corpus deliberately includes wrong-type, absent-key and arity errors.
+/// Those are where a fast route DECLINES and falls through mid-way, which is the
+/// path least likely to have been pinned by the route's own test.
+///
+/// Requires `--features perf-ab-cascade-bypass`; without it the second arm does
+/// not exist and the test is not compiled.
+#[cfg(feature = "perf-ab-cascade-bypass")]
+#[test]
+// The corpus is a sectioned list that grows a command at a time as routes are
+// added; keeping it as statements means a new case is one line in the right
+// section rather than an edit inside a 160-entry `vec![]` literal.
+#[allow(clippy::vec_init_then_push)]
+fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
+    fn c(parts: &[&[u8]]) -> Vec<Vec<u8>> {
+        parts.iter().map(|part| part.to_vec()).collect()
+    }
+
+    let mut cmds: Vec<Vec<Vec<u8>>> = Vec::new();
+
+    // ── strings, counters, bitmaps ──────────────────────────────────────────
+    cmds.push(c(&[b"SET", b"s:1", b"hello"]));
+    cmds.push(c(&[b"GET", b"s:1"]));
+    cmds.push(c(&[b"APPEND", b"s:1", b"!!"]));
+    cmds.push(c(&[b"STRLEN", b"s:1"]));
+    cmds.push(c(&[b"GETRANGE", b"s:1", b"0", b"-1"]));
+    cmds.push(c(&[b"GETRANGE", b"s:1", b"-3", b"-1"]));
+    cmds.push(c(&[b"SUBSTR", b"s:1", b"0", b"2"]));
+    cmds.push(c(&[b"SETRANGE", b"s:1", b"2", b"XY"]));
+    cmds.push(c(&[b"GETSET", b"s:1", b"fresh"]));
+    cmds.push(c(&[b"GETDEL", b"s:absent"]));
+    cmds.push(c(&[b"SETNX", b"s:3", b"v"]));
+    cmds.push(c(&[b"SETNX", b"s:3", b"w"]));
+    cmds.push(c(&[b"SET", b"s:4", b"v", b"EX", b"100"]));
+    cmds.push(c(&[b"PERSIST", b"s:4"]));
+    cmds.push(c(&[b"TTL", b"s:4"]));
+    cmds.push(c(&[b"SETEX", b"s:5", b"100", b"v"]));
+    cmds.push(c(&[b"PERSIST", b"s:5"]));
+    cmds.push(c(&[b"PSETEX", b"s:6", b"100000", b"v"]));
+    cmds.push(c(&[b"PERSIST", b"s:6"]));
+    cmds.push(c(&[b"TTL", b"s:6"]));
+    cmds.push(c(&[b"EXPIRE", b"s:absent", b"100"]));
+    cmds.push(c(&[b"GETEX", b"s:3"]));
+    cmds.push(c(&[b"GETEX", b"s:3", b"PERSIST"]));
+    cmds.push(c(&[b"INCR", b"n:1"]));
+    cmds.push(c(&[b"INCRBY", b"n:1", b"5"]));
+    cmds.push(c(&[b"DECR", b"n:1"]));
+    cmds.push(c(&[b"DECRBY", b"n:1", b"2"]));
+    cmds.push(c(&[b"INCRBYFLOAT", b"n:2", b"1.5"]));
+    cmds.push(c(&[b"INCRBYFLOAT", b"n:2", b"-0.25"]));
+    cmds.push(c(&[b"SETBIT", b"b:1", b"7", b"1"]));
+    cmds.push(c(&[b"SETBIT", b"b:1", b"100", b"1"]));
+    cmds.push(c(&[b"GETBIT", b"b:1", b"7"]));
+    cmds.push(c(&[b"GETBIT", b"b:1", b"9999"]));
+    cmds.push(c(&[b"BITCOUNT", b"b:1"]));
+    cmds.push(c(&[b"BITCOUNT", b"b:1", b"0", b"-1"]));
+    cmds.push(c(&[b"BITCOUNT", b"b:1", b"0", b"-1", b"BIT"]));
+    cmds.push(c(&[b"BITPOS", b"b:1", b"1"]));
+    cmds.push(c(&[b"BITPOS", b"b:1", b"0", b"0"]));
+    cmds.push(c(&[b"BITPOS", b"b:1", b"0", b"0", b"-1"]));
+    cmds.push(c(&[
+        b"BITFIELD",
+        b"b:2",
+        b"INCRBY",
+        b"u8",
+        b"0",
+        b"5",
+        b"GET",
+        b"u8",
+        b"0",
+    ]));
+    cmds.push(c(&[b"BITFIELD_RO", b"b:2", b"GET", b"u8", b"0"]));
+    cmds.push(c(&[b"OBJECT", b"ENCODING", b"s:1"]));
+    cmds.push(c(&[b"TYPE", b"s:1"]));
+    cmds.push(c(&[b"TYPE", b"s:absent"]));
+    cmds.push(c(&[b"ECHO", b"hey"]));
+    cmds.push(c(&[b"PING"]));
+    cmds.push(c(&[b"PING", b"hello"]));
+    cmds.push(c(&[b"WAIT", b"0", b"0"]));
+
+    // ── hash ────────────────────────────────────────────────────────────────
+    cmds.push(c(&[b"HSET", b"h:1", b"f1", b"v1", b"f2", b"v2"]));
+    cmds.push(c(&[b"HSET", b"h:1", b"f3", b"v3"]));
+    cmds.push(c(&[b"HGET", b"h:1", b"f1"]));
+    cmds.push(c(&[b"HGET", b"h:1", b"nope"]));
+    cmds.push(c(&[b"HMGET", b"h:1", b"f1", b"nope", b"f2"]));
+    cmds.push(c(&[b"HGETALL", b"h:1"]));
+    cmds.push(c(&[b"HKEYS", b"h:1"]));
+    cmds.push(c(&[b"HVALS", b"h:1"]));
+    cmds.push(c(&[b"HLEN", b"h:1"]));
+    cmds.push(c(&[b"HSTRLEN", b"h:1", b"f2"]));
+    cmds.push(c(&[b"HEXISTS", b"h:1", b"f9"]));
+    cmds.push(c(&[b"HSETNX", b"h:1", b"f1", b"zzz"]));
+    cmds.push(c(&[b"HSETNX", b"h:1", b"f9", b"new"]));
+    cmds.push(c(&[b"HINCRBY", b"h:2", b"ctr", b"5"]));
+    cmds.push(c(&[b"HINCRBYFLOAT", b"h:2", b"ctr", b"0.5"]));
+    cmds.push(c(&[b"HDEL", b"h:1", b"f3"]));
+    cmds.push(c(&[b"HSCAN", b"h:1", b"0", b"COUNT", b"100"]));
+
+    // ── list ────────────────────────────────────────────────────────────────
+    cmds.push(c(&[b"RPUSH", b"l:1", b"a", b"b", b"c", b"b"]));
+    cmds.push(c(&[b"LPUSH", b"l:1", b"z"]));
+    cmds.push(c(&[b"LLEN", b"l:1"]));
+    cmds.push(c(&[b"LRANGE", b"l:1", b"0", b"-1"]));
+    cmds.push(c(&[b"LRANGE", b"l:1", b"-2", b"-1"]));
+    cmds.push(c(&[b"LINDEX", b"l:1", b"0"]));
+    cmds.push(c(&[b"LINDEX", b"l:1", b"-1"]));
+    cmds.push(c(&[b"LPOS", b"l:1", b"b"]));
+    cmds.push(c(&[b"LPOS", b"l:1", b"b", b"RANK", b"-1"]));
+    cmds.push(c(&[b"LPOS", b"l:1", b"b", b"COUNT", b"0"]));
+    cmds.push(c(&[b"LINSERT", b"l:1", b"BEFORE", b"c", b"X"]));
+    cmds.push(c(&[b"LSET", b"l:1", b"0", b"Y"]));
+    cmds.push(c(&[b"LREM", b"l:1", b"1", b"b"]));
+    cmds.push(c(&[b"LTRIM", b"l:1", b"0", b"3"]));
+    cmds.push(c(&[b"LTRIM", b"l:1", b"0", b"-1"]));
+    cmds.push(c(&[b"RPOP", b"l:1"]));
+    cmds.push(c(&[b"RPOP", b"l:1", b"2"]));
+    cmds.push(c(&[b"LPOP", b"l:1"]));
+    cmds.push(c(&[b"LPUSHX", b"l:1", b"p"]));
+    cmds.push(c(&[b"RPUSHX", b"l:absent", b"p"]));
+
+    // ── set ─────────────────────────────────────────────────────────────────
+    cmds.push(c(&[b"SADD", b"t:1", b"m1", b"m2", b"m3"]));
+    cmds.push(c(&[b"SCARD", b"t:1"]));
+    cmds.push(c(&[b"SISMEMBER", b"t:1", b"m1"]));
+    cmds.push(c(&[b"SISMEMBER", b"t:1", b"zz"]));
+    cmds.push(c(&[b"SMISMEMBER", b"t:1", b"m1", b"zz"]));
+    cmds.push(c(&[b"SSCAN", b"t:1", b"0", b"MATCH", b"m*"]));
+    cmds.push(c(&[b"SREM", b"t:1", b"m2"]));
+    cmds.push(c(&[b"SCARD", b"t:1"]));
+
+    // ── sorted set ──────────────────────────────────────────────────────────
+    cmds.push(c(&[
+        b"ZADD", b"z:1", b"1", b"a", b"2.5", b"b", b"3", b"c", b"10", b"d",
+    ]));
+    cmds.push(c(&[b"ZADD", b"z:1", b"GT", b"CH", b"9", b"a"]));
+    cmds.push(c(&[b"ZADD", b"z:1", b"NX", b"100", b"a"]));
+    cmds.push(c(&[b"ZADD", b"z:1", b"XX", b"CH", b"4", b"b"]));
+    cmds.push(c(&[b"ZADD", b"z:1", b"INCR", b"1.5", b"c"]));
+    cmds.push(c(&[b"ZINCRBY", b"z:1", b"2", b"d"]));
+    cmds.push(c(&[b"ZCARD", b"z:1"]));
+    cmds.push(c(&[b"ZSCORE", b"z:1", b"b"]));
+    cmds.push(c(&[b"ZMSCORE", b"z:1", b"a", b"zz", b"d"]));
+    cmds.push(c(&[b"ZCOUNT", b"z:1", b"2", b"(10"]));
+    cmds.push(c(&[b"ZCOUNT", b"z:1", b"-inf", b"+inf"]));
+    cmds.push(c(&[b"ZLEXCOUNT", b"z:1", b"-", b"+"]));
+    cmds.push(c(&[b"ZRANGE", b"z:1", b"0", b"-1", b"WITHSCORES"]));
+    cmds.push(c(&[
+        b"ZRANGE", b"z:1", b"(1", b"+inf", b"BYSCORE", b"LIMIT", b"1", b"2",
+    ]));
+    cmds.push(c(&[b"ZRANGEBYSCORE", b"z:1", b"2", b"+inf", b"WITHSCORES"]));
+    cmds.push(c(&[b"ZREVRANGEBYSCORE", b"z:1", b"+inf", b"2"]));
+    cmds.push(c(&[b"ZRANGEBYLEX", b"z:1", b"[a", b"(d"]));
+    cmds.push(c(&[b"ZREVRANGEBYLEX", b"z:1", b"+", b"-"]));
+    cmds.push(c(&[b"ZREVRANGE", b"z:1", b"0", b"1", b"WITHSCORES"]));
+    cmds.push(c(&[b"ZRANK", b"z:1", b"c"]));
+    cmds.push(c(&[b"ZREVRANK", b"z:1", b"c"]));
+    cmds.push(c(&[b"ZSCAN", b"z:1", b"0"]));
+    cmds.push(c(&[b"ZPOPMIN", b"z:1"]));
+    cmds.push(c(&[b"ZPOPMAX", b"z:1", b"2"]));
+    cmds.push(c(&[b"ZREM", b"z:1", b"c"]));
+    cmds.push(c(&[b"ZREMRANGEBYSCORE", b"z:1", b"-inf", b"+inf"]));
+    cmds.push(c(&[b"ZCARD", b"z:1"]));
+
+    // ── streams, explicit ids only so the replies are deterministic ─────────
+    cmds.push(c(&[b"XADD", b"st:1", b"1-1", b"f", b"v"]));
+    cmds.push(c(&[b"XADD", b"st:1", b"2-1", b"f", b"v2", b"g", b"w2"]));
+    cmds.push(c(&[b"XADD", b"st:1", b"NOMKSTREAM", b"3-1", b"f", b"v3"]));
+    cmds.push(c(&[b"XLEN", b"st:1"]));
+    cmds.push(c(&[b"XRANGE", b"st:1", b"-", b"+"]));
+    cmds.push(c(&[b"XRANGE", b"st:1", b"1-1", b"1-1"]));
+    cmds.push(c(&[b"XREVRANGE", b"st:1", b"+", b"-"]));
+    cmds.push(c(&[b"XDEL", b"st:1", b"1-1"]));
+    cmds.push(c(&[b"XDEL", b"st:1", b"0-0"]));
+    cmds.push(c(&[b"XLEN", b"st:1"]));
+    cmds.push(c(&[b"XADD", b"st:1", b"MAXLEN", b"2", b"4-1", b"f", b"v4"]));
+    cmds.push(c(&[b"XTRIM", b"st:1", b"MAXLEN", b"1"]));
+    cmds.push(c(&[b"XSETID", b"st:1", b"9-9"]));
+    cmds.push(c(&[b"XGROUP", b"CREATE", b"st:1", b"grp", b"0"]));
+    cmds.push(c(&[b"XACK", b"st:1", b"grp", b"1-1"]));
+
+    // ── the decline-and-fall-through cases ──────────────────────────────────
+    cmds.push(c(&[b"GET"]));
+    cmds.push(c(&[b"SET", b"k"]));
+    cmds.push(c(&[b"INCR", b"s:1"]));
+    cmds.push(c(&[b"LPUSH", b"s:1", b"x"]));
+    cmds.push(c(&[b"ZADD", b"s:1", b"1", b"m"]));
+    cmds.push(c(&[b"HGET", b"l:1", b"f"]));
+    cmds.push(c(&[b"GETRANGE", b"s:absent", b"0", b"-1"]));
+    cmds.push(c(&[b"BITCOUNT", b"s:absent"]));
+    cmds.push(c(&[b"ZSCORE", b"z:absent", b"m"]));
+    cmds.push(c(&[b"XRANGE", b"st:absent", b"-", b"+"]));
+    cmds.push(c(&[b"SETRANGE", b"s:1", b"-1", b"x"]));
+    cmds.push(c(&[b"SETBIT", b"b:1", b"7", b"2"]));
+    cmds.push(c(&[b"LPOS", b"l:1", b"b", b"RANK", b"0"]));
+    cmds.push(c(&[b"XADD", b"st:1", b"1-1", b"f", b"v"]));
+
+    // ── keyspace read-back: a divergence that produced the same REPLY but a
+    //    different STATE would otherwise pass ────────────────────────────────
+    cmds.push(c(&[b"GET", b"s:1"]));
+    cmds.push(c(&[b"GET", b"s:3"]));
+    cmds.push(c(&[b"GET", b"n:1"]));
+    cmds.push(c(&[b"GET", b"n:2"]));
+    cmds.push(c(&[b"STRLEN", b"b:1"]));
+    cmds.push(c(&[b"HGETALL", b"h:1"]));
+    cmds.push(c(&[b"HGETALL", b"h:2"]));
+    cmds.push(c(&[b"LRANGE", b"l:1", b"0", b"-1"]));
+    cmds.push(c(&[b"SSCAN", b"t:1", b"0"]));
+    cmds.push(c(&[b"ZRANGE", b"z:1", b"0", b"-1", b"WITHSCORES"]));
+    cmds.push(c(&[b"XRANGE", b"st:1", b"-", b"+"]));
+    cmds.push(c(&[b"DBSIZE"]));
+
+    let mut pipeline = Vec::new();
+    for cmd in &cmds {
+        let borrowed: Vec<&[u8]> = cmd.iter().map(Vec::as_slice).collect();
+        pipeline.extend_from_slice(&encode_command(&borrowed));
+    }
+
+    let fast_port = reserve_port();
+    let generic_port = reserve_port();
+    let redis_port = reserve_port();
+    let _fast_server = spawn_frankenredis(fast_port, None);
+    let _generic_server = spawn_frankenredis_generic_dispatch(generic_port);
+    let _redis_server = spawn_legacy_redis(redis_port);
+    let mut fast = BufferedTcpClient::connect(fast_port);
+    let mut generic = BufferedTcpClient::connect(generic_port);
+    let mut redis = BufferedTcpClient::connect(redis_port);
+
+    fast.write_all(&pipeline);
+    generic.write_all(&pipeline);
+    redis.write_all(&pipeline);
+    let fast_responses = fast.read_responses(cmds.len());
+    let generic_responses = generic.read_responses(cmds.len());
+    let redis_responses = redis.read_responses(cmds.len());
+
+    assert_eq!(fast_responses.len(), cmds.len());
+    assert_eq!(generic_responses.len(), cmds.len());
+    assert_eq!(redis_responses.len(), cmds.len());
+
+    for (i, cmd) in cmds.iter().enumerate() {
+        let label = cmd
+            .iter()
+            .map(|part| String::from_utf8_lossy(part).into_owned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(
+            fast_responses[i], generic_responses[i],
+            "reply {i} `{label}`: the borrowed fast route disagrees with the generic path in the SAME binary"
+        );
+        assert_eq!(
+            fast_responses[i], redis_responses[i],
+            "reply {i} `{label}`: both fr routes agree with each other but not with 7.2.4"
         );
     }
 }
