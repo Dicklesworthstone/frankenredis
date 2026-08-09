@@ -38,7 +38,7 @@
 # Exit 0 = measured · 4 = port busy · 5 = engine disagreement (see below) · 6 = no quiet cores
 set -euo pipefail
 
-REQUESTS=20000; CLIENTS=8; ROUNDS=5; CALLS=50
+REQUESTS=20000; CLIENTS=8; ROUNDS=5; CALLS=50; PIPELINE=1
 FR_BIN_A="${FR_BIN_A:-/tmp/fr_eval_a}"
 FR_BIN_B="${FR_BIN_B:-}"
 while [ $# -gt 0 ]; do
@@ -46,6 +46,13 @@ while [ $# -gt 0 ]; do
     -n) REQUESTS="$2"; shift 2;;
     -c) CLIENTS="$2"; shift 2;;
     -R) ROUNDS="$2"; shift 2;;
+    # (d3al0) Pipelining depth. Added because at -P 1 an interpreter lever cannot
+    # clear this harness's own A/A null: a 10.516% instruction reduction measured
+    # +1.34% e2e with a CI containing 1.0, since most of an unpipelined round trip
+    # is syscall and scheduling, not interpretation. Amortising the round trip
+    # over a batch raises the interpreter's SHARE of the measured work, which is
+    # the only way a lever of that size becomes resolvable at the command level.
+    -P) PIPELINE="$2"; shift 2;;
     --calls) CALLS="$2"; shift 2;;
     *) echo "unknown arg $1" >&2; exit 2;;
   esac
@@ -106,7 +113,7 @@ echo "redis  $(sha256sum "$REDIS")"
 "$REDIS" --version | head -1
 echo "host $(hostname) load $(cut -d' ' -f1-3 /proc/loadavg)  nproc $nproc_n"
 echo "cores: fr_A=$FR_A_CORE fr_A2=$FR_A2_CORE redis=$RD_CORE fr_B=${FR_B_CORE:-none} client=$CLIENT_CORE"
-echo "workload: EVAL with $CALLS redis.call('GET') per eval, n=$REQUESTS c=$CLIENTS rounds=$ROUNDS"
+echo "workload: EVAL with $CALLS redis.call('GET') per eval, n=$REQUESTS c=$CLIENTS P=$PIPELINE rounds=$ROUNDS"
 
 PORTS="$FR_A_PORT $FR_A2_PORT $RD_PORT"; [ -n "$FR_BIN_B" ] && PORTS="$PORTS $FR_B_PORT"
 for p in $PORTS; do
@@ -164,7 +171,7 @@ run_arm() {  # PORT TAG ROUND
   # on how many commas the script has). The -q line ends in an unambiguous
   # "<rps> requests per second" regardless of the script text.
   local rps
-  rps=$(taskset -c "$CLIENT_CORE" "$BENCH" -p "$1" -n "$REQUESTS" -c "$CLIENTS" \
+  rps=$(taskset -c "$CLIENT_CORE" "$BENCH" -p "$1" -n "$REQUESTS" -c "$CLIENTS" -P "$PIPELINE" \
           -q eval "$SCRIPT" 1 k 2>/dev/null \
         | tr '\r' '\n' | grep -oE '[0-9]+\.[0-9]+ requests per second' \
         | tail -1 | awk '{print $1}')
