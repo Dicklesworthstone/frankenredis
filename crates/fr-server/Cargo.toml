@@ -149,6 +149,12 @@ perf-ab-incr-run-fuse = []
 # Controls set FR_PERF_AB_SHARED_ZSET_DIRECT_ORIG=1 and retain generic runtime
 # dispatch for ZADD/ZPOPMIN in the same ELF.
 perf-ab-shared-zset-direct = []
+# Measurement-only bypass of the ENTIRE borrowed fast-path cascade, so the cost
+# of walking it can be priced instead of guessed. Controls set
+# FR_PERF_AB_CASCADE_BYPASS=1 and route every `*` packet straight to the generic
+# parser that already terminates the chain; production builds compile the bypass
+# out to a `const false`. (frankenredis-4m3i4)
+perf-ab-cascade-bypass = []
 # Measurement-only frozen arm for replica-prefix extraction A/Bs.
 bench-reference = []
 

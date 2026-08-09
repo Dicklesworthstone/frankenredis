@@ -6748,7 +6748,18 @@ fn process_buffered_frames(
             let borrowed_parse_result = {
                 let unparsed = &conn.read_buf[consumed_total..];
                 let parser_config = runtime.parser_config();
-                if let Some(action) = try_dispatch_floor_classified_action(
+                // (frankenredis-4m3i4) Measurement control only; compiles to a
+                // `const false` and vanishes in production builds.
+                if borrowed_cascade_bypass_enabled() {
+                    parse_borrowed_multibulk_action(
+                        unparsed,
+                        parser_config,
+                        runtime,
+                        ts,
+                        &mut conn.write_buf,
+                        &mut argv_scratch,
+                    )
+                } else if let Some(action) = try_dispatch_floor_classified_action(
                     unparsed,
                     parser_config,
                     runtime,
@@ -17053,6 +17064,37 @@ fn dbsize_floor_enabled() -> bool {
 #[inline(always)]
 const fn dbsize_floor_enabled() -> bool {
     true
+}
+
+/// Price the borrowed fast-path cascade instead of guessing at it.
+/// (frankenredis-4m3i4)
+///
+/// `process_buffered_frames` runs a `*` packet through the floor classifier and
+/// then a LINEAR chain of ~339 `else if let Some(..) = parse_borrowed_plain_*`
+/// arms, each re-testing a literal RESP prefix, before reaching the generic
+/// parser that terminates the chain. A command with no borrowed route pays every
+/// one of those tests. When this control is selected the chain is skipped
+/// outright and the packet goes to that same terminating parser, so the
+/// difference between the arms IS the cost of the walk — for a routed command it
+/// prices what the route buys, and for an unrouted one it prices pure waste.
+///
+/// Skipping is always semantically safe: the generic parser is the reference
+/// path every fast route is required to agree with, which is why this can be a
+/// blanket bypass rather than a per-command one.
+#[cfg(feature = "perf-ab-cascade-bypass")]
+#[inline]
+fn borrowed_cascade_bypass_enabled() -> bool {
+    static BYPASS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *BYPASS.get_or_init(|| match std::env::var("FR_PERF_AB_CASCADE_BYPASS") {
+        Ok(value) => value == "1",
+        Err(_) => false,
+    })
+}
+
+#[cfg(not(feature = "perf-ab-cascade-bypass"))]
+#[inline(always)]
+const fn borrowed_cascade_bypass_enabled() -> bool {
+    false
 }
 
 /// Preserve the exact pre-lever ECHO cascade route in the measurement ELF.
@@ -30625,6 +30667,28 @@ mod tests {
             crate::reactor_partition_local_command(&[b"ZADD", b"k", b"1", b"m"]),
             "argc must not narrow the fixed-key commands"
         );
+    }
+
+    /// (frankenredis-4m3i4) The cascade bypass is a MEASUREMENT arm. Shipping a
+    /// build where it is live would route every `*` packet past every borrowed
+    /// fast path, which is a silent whole-server slowdown that no reply differs
+    /// on — so nothing else in the suite could catch it. Without the
+    /// `perf-ab-cascade-bypass` feature the accessor is a `const fn` returning
+    /// false, so this also pins that the measurement code is compiled OUT rather
+    /// than merely defaulting to off at runtime.
+    #[test]
+    #[cfg(not(feature = "perf-ab-cascade-bypass"))]
+    fn borrowed_cascade_bypass_is_compiled_out_of_production_builds() {
+        assert!(
+            !crate::borrowed_cascade_bypass_enabled(),
+            "the measurement bypass must never be live in a build without its feature"
+        );
+        const {
+            assert!(
+                !crate::borrowed_cascade_bypass_enabled(),
+                "the accessor must fold at compile time, not read an env var per packet"
+            );
+        }
     }
 
     /// (frankenredis-91rts) The aggregate lane is separate from the
