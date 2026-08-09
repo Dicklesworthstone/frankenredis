@@ -15395,3 +15395,71 @@ harness is unbiased -- it is one sample from the null's own distribution. Charac
 across runs BEFORE the first A/B is published, not after someone doubts it. I already hold this
 standard for repository gates ("a gate that fails then passes at identical config is MARGINAL") and
 failed to apply it to my own instrument.
+
+## 2026-08-09 CrimsonHawk: KEEP — day's ten Lua levers re-derived with a CORRECTED estimator: +5.74% e2e, FrankenRedis / vendored Redis 7.2.4 = 0.725x -> 0.760x (`frankenredis-lua-rediscall-loop-interpreter-bound-d3al0`)
+
+Claim class: COMPETITIVE. Campaign output: yes.
+
+A live vendored Redis 7.2.4 server arm runs in the SAME invocation as both FrankenRedis arms and the
+byte-identical A/A null, all driven by the same vendored redis-benchmark:
+**FrankenRedis / vendored Redis 7.2.4 = 0.7598x** after the ten levers, up from
+FrankenRedis / vendored Redis 7.2.4 = 0.7254x before them.
+
+THIS SUPERSEDES the -P 1 figures in the 2026-08-08 COMPETITIVE entry (+6.1-8.4%, 0.689x -> 0.755x).
+Those were computed with an estimator that bootstrapped over ROUNDS. That is pseudo-replication:
+rounds inside one invocation share a per-run offset, so they are correlated and the interval came
+out far narrower than the data supports. The evidence was that raising rounds 18 -> 36 made MORE
+runs inadmissible, not fewer -- 3 of 4 excluded 1.0 at bounds of 1.3-2.9% while the run medians
+themselves spread ~1.4% sd. The unit of replication is the RUN.
+
+`scripts/lua_eval_multirun.sh` (new) therefore takes each invocation's median as ONE sample and
+bootstraps across those. Two harness defects were fixed first, both measured:
+  * arm ORDER was "alternated" by REVERSING it, which pins the middle arm in place forever;
+  * core rotation and order rotation were both keyed on the round index, so
+    core_index + position == 2j (mod n) is constant per arm and each arm sampled only its own
+    diagonal of the position x core grid. Cores now advance once per complete order cycle and
+    ROUNDS must be a multiple of ARM_COUNT^2.
+Only after both did the null become admissible under the correct estimator.
+
+BINARIES. Each arm's hash is of the RUNNING IMAGE: the harness hashes /proc/<pid>/exe of the
+already-started process, so the benchmarked server ELF self-reported SHA-256
+b16ee5093ee2b4e41dee62278e2a6d3b97b45236d90292793bd1ccb191c2d9ba for the post-lever arm and the
+benchmarked server ELF self-reported SHA-256
+502ec90c93117e23e1fd9efb3b5dc3f78eb5ad350c26426fad68bd4241e20d03 for the pre-lever arm, rather than
+the harness vouching for a file it hashed on disk beforehand.
+  fr_A  502ec90c93117e23e1fd9efb3b5dc3f78eb5ad350c26426fad68bd4241e20d03   (72d8bc325, pre-levers)
+  fr_A2 same bytes as fr_A; the harness refuses to run if the null arm differs
+  fr_B  b16ee5093ee2b4e41dee62278e2a6d3b97b45236d90292793bd1ccb191c2d9ba   (current main)
+  redis f17461ccbebf44ce238d338215fde339d0b93c61ee499cb2cc2c97aa777582e8   v=7.2.4 jemalloc-5.3.0
+Host threadripperje, each server and the client pinned to its own quiet core whose SMT sibling is
+also idle, core 0 excluded. Workload `EVAL "for i=1,50 do redis.call('GET', KEYS[1]) end return 1" 1 k`,
+n=4000, c=1, -P 1, 16 rounds per invocation, SEVEN independent invocations.
+
+RESULT, medians of the seven per-run medians, bootstrap 95% CI ACROSS RUNS:
+  A/A null    1.0000  across-run 95% CI [0.9960, 1.0180]  sd 1.15%   <- CONTAINS 1.0, bound 1.80%
+  A/B effect  1.0574  across-run 95% CI [1.0381, 1.0693]  sd 1.46%   = +5.74%
+  fr_A/redis  0.7254  across-run 95% CI [0.7145, 0.7418]  sd 1.18%
+  fr_B/redis  0.7598  across-run 95% CI [0.7558, 0.7835]  sd 1.78%
+Stated in the contract's own terms: A/A null median 1.0000 with bootstrap 95% median CI
+[0.9960, 1.0180], against an A/B effect median 1.0574 with bootstrap 95% median CI [1.0381, 1.0693].
+Each of the seven invocations contained the A/A pair and the A/B pair together, so every arm is
+compared only against arms measured beside it.
+
+The effect's CI excludes 1.0 and its magnitude (5.74%) exceeds the null's widest bound (1.80%) by
+more than 3x, and the two competitive CIs do not overlap. This is the FIRST time this harness has
+produced an admissible A/A null under the correct estimator: the >=5-runs, contains-1.0, bound-under-
+2% bar had never previously been met. The bootstrap median-CI gate determined the verdict, never CV;
+CV is not computed for this arm at all.
+
+WHAT IT MEANS. 23.60% of interpreter instructions is worth +5.74% of unpipelined EVAL throughput --
+a translation of roughly 1:4, not the 1:3 the superseded entry implied. fr still LOSES this workload
+at 0.760x. The individual levers remain unmeasurable here: the largest single one (field cache,
+10.516% of instructions) projects to ~2.5% e2e, which is inside the 1.80% null bound only by a
+whisker and would need more invocations to resolve.
+
+Retry predicate: measure with `lua_eval_multirun.sh --runs >= 7` and require the ACROSS-RUN null to
+contain 1.0 with a bound under 2% before reading any A/B; do NOT read the inner harness's per-round
+CI, which is pseudo-replicated and will look ~3x tighter than the truth. To resolve a single lever
+of ~10% instructions, raise the invocation count until the null bound is under ~1%, or find a shape
+where the interpreter's share is larger -- but note the -P 16 attempt was retracted for bias and has
+NOT been re-characterised under the corrected estimator.
