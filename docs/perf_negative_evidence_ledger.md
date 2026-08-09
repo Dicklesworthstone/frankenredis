@@ -15277,3 +15277,65 @@ question this leaves, filed rather than assumed: SINTERCARD's own membership loo
 `intset_binary_search_contains` on large intsets, which is the same probe on a plausibly similar
 shape, and it was NOT measured here. Measure it with this harness's SINTERCARD workload before
 concluding anything about it either way.
+
+## 2026-08-09 CrimsonHawk: KEEP — pipelined EVAL resolves what unpipelined could not; the day's ten Lua levers are +12.43% at -P 16, FrankenRedis / vendored Redis 7.2.4 = 0.700x -> 0.788x (`frankenredis-lua-rediscall-loop-interpreter-bound-d3al0`)
+
+Claim class: COMPETITIVE. Campaign output: yes.
+
+A live vendored Redis 7.2.4 server arm runs in the SAME invocation as both FrankenRedis arms and the
+byte-identical A/A null, all driven by the same vendored redis-benchmark:
+**FrankenRedis / vendored Redis 7.2.4 = 0.7877x** after the levers, up from
+FrankenRedis / vendored Redis 7.2.4 = 0.7000x before them.
+
+WHY THIS ENTRY EXISTS. The 2026-08-08 COMPETITIVE entry measured the same ten levers at -P 1 and got
++6.1-8.4%, and the follow-up field-cache lever (10.516% of instructions) measured +1.34% e2e with a
+CI CONTAINING 1.0 -- not a result. The conclusion drawn then was that interpreter levers sit under
+the harness's resolution. That conclusion was about the WORKLOAD, not the levers: most of an
+unpipelined EVAL round trip is syscall and scheduling, so the interpreter's share of the measured
+work is small and a 10% interpretation win disappears into it. Pipelining amortises the round trip
+and raises that share. `scripts/lua_eval_headtohead.sh` now takes `-P`.
+
+BINARIES, running images (the harness hashes /proc/<pid>/exe, not the file it intended to launch):
+  fr_A  benchmarked server ELF self-reported SHA-256
+        502ec90c93117e23e1fd9efb3b5dc3f78eb5ad350c26426fad68bd4241e20d03  (72d8bc325, pre-levers)
+  fr_A2 same bytes as fr_A -- the harness refuses to run if the null arm differs
+  fr_B  benchmarked server ELF self-reported SHA-256
+        b16ee5093ee2b4e41dee62278e2a6d3b97b45236d90292793bd1ccb191c2d9ba  (current main)
+  redis benchmarked server ELF self-reported SHA-256
+        f17461ccbebf44ce238d338215fde339d0b93c61ee499cb2cc2c97aa777582e8   v=7.2.4 jemalloc-5.3.0
+Host threadripperje at load 0.19, each server and the client pinned to its own quiet core whose SMT
+sibling is also idle, core 0 excluded, core assignment rotated every round, rounds a multiple of the
+arm count. Workload `EVAL "for i=1,50 do redis.call('GET', KEYS[1]) end return 1" 1 k`, n=4000,
+c=1, -P 16, 16 rounds.
+
+RESULT, medians of per-round ratios with bootstrap 95% median CIs:
+  A/A null    fr_A2/fr_A  median 1.0000  bootstrap 95% median CI [0.9898, 1.0258]  <- CONTAINS 1.0
+  A/B effect  fr_B /fr_A  median 1.1243  bootstrap 95% median CI [1.1011, 1.1348]  = +12.43%
+  COMPETITIVE fr_A /redis median 0.7000  bootstrap 95% median CI [0.6954, 0.7113]
+  COMPETITIVE fr_B /redis median 0.7877  bootstrap 95% median CI [0.7809, 0.7955]
+The effect's CI excludes 1.0 and clears the null's widest bound (2.58%) by ~5x, and the two
+competitive CIs do not overlap. The bootstrap median-CI gate determined the verdict, never CV; CV is
+not computed for this arm.
+
+WHAT IT CHANGES. The microbench-to-e2e translation is NOT a constant, and quoting one is how a lever
+gets mis-ranked. Same ten levers, same 23.60% of instructions:
+    -P 1   ->  +6.1-8.4%   (about 1:3.4)
+    -P 16  ->  +12.43%     (about 1:1.9)
+An interpreter lever is therefore worth roughly twice as much on pipelined traffic, and -- more
+usefully -- it is MEASURABLE there. The field cache's 10.516% produced no admissible result at -P 1;
+at this shape a lever that size would be expected around 5-6%, comfortably clear of a 2.58% null.
+
+CONSEQUENCE FOR THE REMAINING WORK, which is the point of running this: lever (1)
+`LuaValue::Str -> Rc<[u8]>` is 223 hand-edited impl sites, and the case against attempting it was
+that a perfect execution lands near the resolution floor. That case was computed against -P 1. At
+-P 16 the same estimate -- roughly 9% of instructions, the remaining alloc/clone cluster -- lands
+near 4-5% e2e, which this harness resolves. The refactor is still multi-turn and still wants its own
+bead and review, but it is no longer unmeasurable, and it should be measured HERE rather than at
+-P 1 where its result would be indistinguishable from noise.
+
+Retry predicate: any future interpreter lever must be measured at -P 16 (or a higher `--calls`
+shape) AND must re-establish this harness's A/A null in the same invocation before its A/B is read;
+the null must contain 1.0 and the effect must both exclude 1.0 and exceed the null's widest bound.
+Do NOT quote an instructions:u percentage as competitive output -- the translation is between 1:1.9
+and 1:3.4 depending on pipelining alone. Re-run this entry's comparison if the workload's
+redis.call-per-eval count changes, since that also moves the interpreter's share.
