@@ -16525,6 +16525,9 @@ enum BorrowedDispatchFloorClass {
     },
     /// (frankenredis-ozrro) `ZRANGE key start stop WITHSCORES`.
     ZrangeWithscores,
+    /// (frankenredis-ozrro) `HMGET key field...`, any count — two, three and the
+    /// variadic parser are tried in the cascade's own order.
+    Hmget,
     /// (frankenredis-ozrro) `HEXISTS key field`.
     Hexists,
     /// (frankenredis-ozrro) `HSTRLEN key field`.
@@ -16627,6 +16630,7 @@ enum BorrowedDispatchFloorCommand {
     Hget,
     Hgetall,
     Hkeys,
+    Hmget,
     Hscan,
     Hstrlen,
     Hlen,
@@ -16731,6 +16735,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'Z', b'R', b'A', b'N', b'K'] => Some(BorrowedDispatchFloorCommand::Zrank),
             [b'H', b'K', b'E', b'Y', b'S'] => Some(BorrowedDispatchFloorCommand::Hkeys),
             [b'H', b'V', b'A', b'L', b'S'] => Some(BorrowedDispatchFloorCommand::Hvals),
+            [b'H', b'M', b'G', b'E', b'T'] => Some(BorrowedDispatchFloorCommand::Hmget),
             [b'H', b'S', b'C', b'A', b'N'] => Some(BorrowedDispatchFloorCommand::Hscan),
             [b'S', b'S', b'C', b'A', b'N'] => Some(BorrowedDispatchFloorCommand::Sscan),
             [b'Z', b'S', b'C', b'A', b'N'] => Some(BorrowedDispatchFloorCommand::Zscan),
@@ -17260,6 +17265,16 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // cursor-0 `_into` route as its two siblings, both of which measured
         // ~1.7x. That inference is recorded here so it is not mistaken for a
         // measurement.
+        // (frankenredis-ozrro) Eighth batch, and a THIN one: six commands swept,
+        // five gap-measured, ONE taken. HMGET 7,467/op (3.04x). The other four
+        // came back at or below 1.0 — INCRBYFLOAT 0.95x, EXPIREAT 0.75x,
+        // SUBSTR 0.90x, SETNX 1.11x — despite all of them reading 5,000-11,000
+        // instructions per op in the sweep. That is the ZLEXCOUNT lesson twice
+        // over: instructions per op flags a candidate, the GAP decides, and a
+        // batch where most candidates are rejected is the method working.
+        (arity, BorrowedDispatchFloorCommand::Hmget) if arity >= 3 => {
+            Some(BorrowedDispatchFloorClass::Hmget)
+        }
         (3, BorrowedDispatchFloorCommand::Hscan) => {
             Some(BorrowedDispatchFloorClass::Scan0(PlainScan0Cmd::Hscan))
         }
@@ -18386,6 +18401,63 @@ fn try_dispatch_floor_classified_action(
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
                     response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Hmget => {
+            let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+            if let Some(packet) = parse_borrowed_plain_hmget2_packet(unparsed, &parser_config)
+                && runtime
+                    .execute_plain_hmget_borrowed_into(
+                        packet.key,
+                        &[packet.start, packet.end],
+                        ts,
+                        client_resp3,
+                        out,
+                    )
+                    .is_some()
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
+                    consumed: packet.consumed,
+                })
+            } else if let Some(packet) =
+                parse_borrowed_plain_hmget3_packet(unparsed, &parser_config)
+                && runtime
+                    .execute_plain_hmget_borrowed_into(
+                        packet.key,
+                        &[packet.f1, packet.f2, packet.f3],
+                        ts,
+                        client_resp3,
+                        out,
+                    )
+                    .is_some()
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
+                    consumed: packet.consumed,
+                })
+            } else if let Some(packet) =
+                parse_borrowed_plain_hmget_multi_packet(unparsed, &parser_config)
+                && runtime
+                    .execute_plain_hmget_borrowed_into(
+                        packet.key,
+                        &packet.fields[..packet.len],
+                        ts,
+                        client_resp3,
+                        out,
+                    )
+                    .is_some()
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
+                    consumed: packet.consumed,
                 })
             } else {
                 parse_borrowed_multibulk_action(

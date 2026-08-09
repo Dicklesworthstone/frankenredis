@@ -2258,7 +2258,13 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"HSET", b"h:1", b"f3", b"v3"]));
     cmds.push(c(&[b"HGET", b"h:1", b"f1"]));
     cmds.push(c(&[b"HGET", b"h:1", b"nope"]));
+    // (frankenredis-ozrro) HMGET's classified arm tries three parsers keyed on
+    // field count, so two, three and the variadic count all have to run or two of
+    // them are reachable only through the generic path.
+    cmds.push(c(&[b"HMGET", b"h:1", b"f1", b"f2"]));
     cmds.push(c(&[b"HMGET", b"h:1", b"f1", b"nope", b"f2"]));
+    cmds.push(c(&[b"HMGET", b"h:1", b"f1", b"f2", b"nope", b"f1", b"f2"]));
+    cmds.push(c(&[b"HMGET", b"h:absent", b"f1", b"f2"]));
     cmds.push(c(&[b"HGETALL", b"h:1"]));
     cmds.push(c(&[b"HKEYS", b"h:1"]));
     cmds.push(c(&[b"HVALS", b"h:1"]));
