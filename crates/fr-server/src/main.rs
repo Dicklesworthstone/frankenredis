@@ -4450,10 +4450,21 @@ fn main() -> ExitCode {
     // File first, CLI second, so an explicit `--name value` beats the same
     // directive in the config file, matching every named flag above.
     //
-    // A rejected directive ABORTS STARTUP with CONFIG SET's own message. That is
-    // the deliberate half of this change: the old config-file behaviour was to
-    // drop the directive silently, which is how `maxmemory-policy allkeys-lru`
-    // became a server running `noeviction` with nothing in the log.
+    // REJECTION IS HANDLED DIFFERENTLY BY SOURCE, and the asymmetry is the point.
+    //
+    // command line: ABORT. These flags previously produced "unknown argument"
+    //   and refused to start, so failing loudly on one CONFIG SET also refuses
+    //   is not a regression, and a typo in an explicitly-typed flag is worth
+    //   stopping for.
+    //
+    // config file: WARN and CONTINUE. Aborting here looked right and was wrong:
+    //   a stock redis.conf carries directives that are startup-only, which
+    //   CONFIG SET refuses at runtime with "can't set immutable config". The
+    //   first version of this change aborted on `tcp-backlog 511` -- the fourth
+    //   line of the vendored redis.conf -- so fr would not boot on a file redis
+    //   accepts. That trades a silent drop for a dead server, which is worse.
+    //   A warning still fixes the original defect: the operator learns the
+    //   directive did not take effect, where before there was nothing at all.
     for (source, name, value) in file_passthrough
         .iter()
         .map(|(n, v)| ("config file", n, v))
@@ -4469,8 +4480,11 @@ fn main() -> ExitCode {
             now_ms(),
         );
         if let RespFrame::Error(err) = reply {
-            eprintln!("error: {source}: '{name} {value}': {err}");
-            return ExitCode::from(1);
+            if source == "command line" {
+                eprintln!("error: {source}: '{name} {value}': {err}");
+                return ExitCode::from(1);
+            }
+            eprintln!("warning: {source}: '{name} {value}' not applied: {err}");
         }
     }
 
