@@ -11,6 +11,8 @@ target-*/
 
 # Local agent/task tooling state
 .bv/
+# Linked git worktrees created by agents (never part of the source tree).
+.worktrees/
 
 # Local oracle clone (not part of clean-room implementation)
 # NOTE: no trailing slash — must also ignore a *symlink* named legacy_redis_code
