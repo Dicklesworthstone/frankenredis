@@ -41,6 +41,11 @@ set -euo pipefail
 REQUESTS=20000; CLIENTS=8; ROUNDS=5; CALLS=50; PIPELINE=1
 FR_BIN_A="${FR_BIN_A:-/tmp/fr_eval_a}"
 FR_BIN_B="${FR_BIN_B:-}"
+# A few idle CPUs do not make a loaded host usable: migrating background work
+# corrupts the A/A control even when the selected CPUs looked idle at selection.
+# Historical admissible rows were taken below load 1.0, so fail closed above that
+# default. An override is for harness diagnosis only, never a campaign verdict.
+MAX_LOAD_1="${MAX_LOAD_1:-1.0}"
 while [ $# -gt 0 ]; do
   case "$1" in
     -n) REQUESTS="$2"; shift 2;;
@@ -63,6 +68,12 @@ BENCH="$ROOT/legacy_redis_code/redis/src/redis-benchmark"
 REDIS="$ROOT/legacy_redis_code/redis/src/redis-server"
 CLI="$ROOT/legacy_redis_code/redis/src/redis-cli"
 FR_A_PORT=27571; FR_A2_PORT=27572; RD_PORT=27573; FR_B_PORT=27574
+
+LOAD_1=$(awk '{print $1}' /proc/loadavg)
+if ! awk -v one_min_load="$LOAD_1" -v max="$MAX_LOAD_1" 'BEGIN { exit !(one_min_load <= max) }'; then
+  echo "PREFLIGHT FAIL: one-minute host load $LOAD_1 exceeds MAX_LOAD_1=$MAX_LOAD_1; wait for a quiet host" >&2
+  exit 6
+fi
 
 # The script under test is the microbench's script verbatim, so the harness and
 # the instructions:u bench exercise the SAME interpreter path.
@@ -111,7 +122,7 @@ if [ -n "$FR_BIN_B" ] && cmp -s "$FR_BIN_A" "$FR_BIN_B"; then
 fi
 echo "redis  $(sha256sum "$REDIS")"
 "$REDIS" --version | head -1
-echo "host $(hostname) load $(cut -d' ' -f1-3 /proc/loadavg)  nproc $nproc_n"
+echo "host $(hostname) load $(cut -d' ' -f1-3 /proc/loadavg)  nproc $nproc_n (MAX_LOAD_1=$MAX_LOAD_1)"
 echo "cores: fr_A=$FR_A_CORE fr_A2=$FR_A2_CORE redis=$RD_CORE fr_B=${FR_B_CORE:-none} client=$CLIENT_CORE"
 echo "workload: EVAL with $CALLS redis.call('GET') per eval, n=$REQUESTS c=$CLIENTS P=$PIPELINE rounds=$ROUNDS"
 
