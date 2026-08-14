@@ -19779,6 +19779,35 @@ impl Store {
         self.sadd_impl::<M, true>(key, members, now_ms)
     }
 
+    /// Load a canonical RDB intset without rendering every member to decimal
+    /// bytes only for `SADD` to parse it back again. Non-canonical or oversized
+    /// inputs intentionally take the ordinary `SADD` path, preserving its
+    /// sorting, deduplication, and live-configuration behavior.
+    pub fn restore_intset(
+        &mut self,
+        key: &[u8],
+        members: Vec<i64>,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        if self.expires_count != 0 {
+            self.drop_if_expired(key, now_ms);
+        }
+        let is_canonical = members.windows(2).all(|pair| pair[0] < pair[1]);
+        if self.entries.contains_key(key)
+            || members.len() > self.set_max_intset_entries
+            || !is_canonical
+        {
+            let members: Vec<Vec<u8>> = members.into_iter().map(set_int_to_bytes).collect();
+            self.sadd(key, &members, now_ms).map(|_| ())
+        } else {
+            let added = u64::try_from(members.len()).unwrap_or(u64::MAX);
+            let entry = Entry::new(Value::Set(Box::new(SetValue::Int(members))), now_ms);
+            self.internal_entries_insert(key.to_vec(), entry);
+            self.dirty = self.dirty.saturating_add(added);
+            Ok(())
+        }
+    }
+
     /// Bench-only baseline: SADD with the prior TWO-probe LFU path (`COLLAPSE = false`) — the LFU
     /// rand is gated behind a separate `self.entries.contains_key(key)` probe BEFORE `get_mut`, as
     /// opposed to production's single `get_mut` that draws the rand on the disjoint `rng_seed` field
@@ -42350,6 +42379,25 @@ mod tests {
             )
             .expect("sadd mixed");
         assert_eq!(store2.object_encoding(b"t", 0), Some("listpack"));
+    }
+
+    #[test]
+    fn restore_intset_installs_canonical_values_and_preserves_sadd_fallback() {
+        let mut direct = Store::new();
+        direct
+            .restore_intset(b"s", vec![-1, 0, 42], 10)
+            .expect("canonical intset loads directly");
+        assert_eq!(direct.object_encoding(b"s", 10), Some("intset"));
+        assert_eq!(direct.scard(b"s", 10), Ok(3));
+        assert_eq!(direct.dirty, 3);
+
+        let mut fallback = Store::new();
+        fallback.set_max_intset_entries = 2;
+        fallback
+            .restore_intset(b"s", vec![1, 2, 3], 10)
+            .expect("oversized intset follows sadd fallback");
+        assert_eq!(fallback.object_encoding(b"s", 10), Some("listpack"));
+        assert_eq!(fallback.scard(b"s", 10), Ok(3));
     }
 
     #[test]

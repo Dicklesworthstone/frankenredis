@@ -4289,7 +4289,7 @@ pub struct ServerState {
 
 impl Default for ServerState {
     fn default() -> Self {
-        let mut store = Store::new();
+        let mut store = fr_store::Store::new();
         store.maxmemory_bytes_live = 0;
         Self {
             // (frankenredis-d1505) Mirror upstream replication.c which
@@ -45958,6 +45958,18 @@ fn apply_rdb_entries_to_store(
                     );
                 }
             }
+            RdbValue::IntSet(members) => {
+                store
+                    .restore_intset(&key, members, now_ms)
+                    .map_err(|_| PersistError::InvalidFrame)?;
+                if let Some(expires_at_ms) = entry.expire_ms {
+                    store.expire_at_milliseconds(
+                        &key,
+                        i64::try_from(expires_at_ms).unwrap_or(i64::MAX),
+                        now_ms,
+                    );
+                }
+            }
             RdbValue::SetHashtable(ref members) => {
                 // (frankenredis-nom8d) Replicate redis rdbLoadObject's RDB_TYPE_SET
                 // decision exactly: a plain set with MORE than set-max-intset-
@@ -67864,6 +67876,28 @@ mod tests {
         assert_eq!(
             rt.execute_frame(command(&[b"SCARD", b"s"]), 100),
             RespFrame::Integer(8),
+        );
+    }
+
+    #[test]
+    fn rdb_load_installs_typed_intset_without_decimal_recovery() {
+        let entries = vec![RdbEntry {
+            db: 0,
+            key: b"intset".to_vec(),
+            value: RdbValue::IntSet(vec![-1, 0, 42]),
+            expire_ms: Some(500),
+        }];
+        let mut store = Store::new();
+
+        let counts = super::apply_rdb_entries_to_store(&mut store, entries, 100)
+            .expect("typed intset applies");
+
+        assert_eq!(counts.loaded, 1);
+        assert_eq!(store.object_encoding(b"intset", 100), Some("intset"));
+        assert_eq!(store.scard(b"intset", 100), Ok(3));
+        assert_eq!(
+            store.pttl(b"intset", 100),
+            fr_store::PttlValue::Remaining(400)
         );
     }
 

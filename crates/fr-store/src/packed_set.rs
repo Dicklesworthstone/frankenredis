@@ -449,7 +449,10 @@ impl GenericSet {
                     p.iter().filter(|m| keep(m)).map(|m| m.to_vec()).collect();
                 let mut np = PackedStrSet::with_capacity(p.byte_len());
                 for m in &survivors {
-                    np.insert(m);
+                    // These came from one existing packed set, whose insertion
+                    // invariant already guarantees uniqueness. Re-scanning the
+                    // partially rebuilt buffer via `insert` made retain O(n²).
+                    np.append(m);
                 }
                 *p = np;
             }
@@ -6329,6 +6332,28 @@ mod tests {
                 assert!(bulk_set.contains(m));
             }
         }
+    }
+
+    #[test]
+    fn generic_packed_set_retain_keeps_unique_survivors_in_order() {
+        use super::GenericSet;
+
+        let mut set = GenericSet::default();
+        for member in [b"alpha".as_slice(), b"beta", b"gamma", b"delta"] {
+            assert!(set.insert_borrowed(member));
+        }
+
+        set.retain(|member| member == b"beta" || member == b"delta");
+
+        assert_eq!(set.len(), 2);
+        assert_eq!(
+            set.iter().collect::<Vec<_>>(),
+            vec![b"beta".as_slice(), b"delta"]
+        );
+        assert!(set.contains(b"beta"));
+        assert!(set.contains(b"delta"));
+        assert!(!set.contains(b"alpha"));
+        assert!(!set.contains(b"gamma"));
     }
 
     #[test]

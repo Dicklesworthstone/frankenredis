@@ -1303,6 +1303,12 @@ pub enum RdbValue {
     /// `List`, so load/apply paths keep a single canonical semantic shape.
     ListQuicklist2Packed(Vec<Vec<u8>>),
     Set(Vec<Vec<u8>>),
+    /// A canonical, sorted intset decoded from `RDB_TYPE_SET_INTSET`.
+    ///
+    /// Carrying the values as integers lets the RDB load path install the
+    /// store's native intset without first formatting every value to decimal
+    /// bytes and having `SADD` parse those bytes back to integers.
+    IntSet(Vec<i64>),
     /// A set that is HASHTABLE-encoded (upstream `RDB_TYPE_SET`, the plain
     /// count-prefixed member list). Distinct from `Set` (which re-derives
     /// intset/listpack/hashtable from content+thresholds) so a sticky hashtable
@@ -1908,6 +1914,28 @@ fn encode_rdb_internal(
                         }
                     }
                 }
+                RdbValue::IntSet(members) => {
+                    // `IntSet` is produced only from a canonical RDB intset;
+                    // retain that wire representation without decimal-string
+                    // materialization when the decoded entry is re-emitted.
+                    let width = intset_width(members);
+                    if let Some(blob) = encode_sorted_intset_blob(members, width) {
+                        buf.push(RDB_TYPE_SET_INTSET);
+                        rdb_encode_string(&mut buf, &entry.key);
+                        rdb_encode_string(&mut buf, &blob);
+                    } else {
+                        // An RDB value cannot practically exceed `u32::MAX`
+                        // entries, but preserve set semantics rather than
+                        // emitting a malformed intset if one is constructed
+                        // programmatically beyond that wire limit.
+                        buf.push(RDB_TYPE_SET);
+                        rdb_encode_string(&mut buf, &entry.key);
+                        rdb_encode_length(&mut buf, members.len());
+                        for member in members {
+                            rdb_encode_string(&mut buf, &decimal_i64_bytes(*member));
+                        }
+                    }
+                }
                 RdbValue::SetHashtable(members) => {
                     // (frankenredis-39is8) A hashtable-encoded set always emits
                     // the plain RDB_TYPE_SET, regardless of whether its content
@@ -2022,18 +2050,11 @@ fn encode_compact_set_intset(
     // which upstream's intset path also refuses). Use the shared allocation-free
     // canonical parser instead of formatting a String per candidate member.
     let mut values = Vec::with_capacity(members.len());
-    let mut width = 2u32;
     for raw in members {
         let value = parse_listpack_integer(raw)?;
-        if width < 8 && i16::try_from(value).is_err() {
-            if i32::try_from(value).is_ok() {
-                width = 4;
-            } else {
-                width = 8;
-            }
-        }
         values.push(value);
     }
+    let width = intset_width(&values);
     let blob = encode_intset_blob(values, width)?;
     let mut out = Vec::with_capacity(blob.len() + 4);
     rdb_encode_length(&mut out, blob.len());
@@ -2617,9 +2638,9 @@ fn encode_private_stream_rdb_value(
 /// `[encoding:u32 LE][len:u32 LE][element:encoding-bytes × len]` with
 /// `encoding ∈ {2, 4, 8}` selecting the per-element width in bytes
 /// (mirrors `intset.h`). Returns the elements as their canonical decimal
-/// string form so they round-trip through `RdbValue::Set(Vec<Vec<u8>>)`.
-/// (br-frankenredis-aqgx)
-fn decode_intset_members(data: &[u8]) -> Option<Vec<Vec<u8>>> {
+/// integer form so the RDB loader can install the native `SetValue::Int`
+/// directly. (frankenredis-y6zqo)
+fn decode_intset_values(data: &[u8]) -> Option<Vec<i64>> {
     if data.len() < 8 {
         return None;
     }
@@ -2635,7 +2656,7 @@ fn decode_intset_members(data: &[u8]) -> Option<Vec<Vec<u8>>> {
     if data.len() != expected_len {
         return None;
     }
-    let mut members = Vec::with_capacity(len);
+    let mut values = Vec::with_capacity(len);
     let mut cursor = 8;
     for _ in 0..len {
         let value = match width {
@@ -2656,9 +2677,9 @@ fn decode_intset_members(data: &[u8]) -> Option<Vec<Vec<u8>>> {
             }
             _ => unreachable!("width is one of 2, 4, 8"),
         };
-        members.push(decimal_i64_bytes(value));
+        values.push(value);
     }
-    Some(members)
+    Some(values)
 }
 
 // ── Compact-encoding emitters (br-frankenredis-91kt) ────────────────
@@ -2669,12 +2690,22 @@ fn decode_intset_members(data: &[u8]) -> Option<Vec<Vec<u8>>> {
 // would have chosen for shapes within the listpack/intset thresholds.
 // fr-store can't be a dep of fr-persist (the dep arrow goes the other
 // way), so the helpers are duplicated here. Both sides round-trip
-// through the shared `decode_listpack` / `decode_intset_members`
+// through the shared `decode_listpack` / `decode_intset_values`
 // readers.
 
 /// Encode a sorted-ascending intset blob (8-byte header + per-element
 /// little-endian fixed-width values). Returns `None` when any value
 /// exceeds the i64 range or `len > u32::MAX`.
+fn intset_width(values: &[i64]) -> u32 {
+    if values.iter().all(|value| i16::try_from(*value).is_ok()) {
+        2
+    } else if values.iter().all(|value| i32::try_from(*value).is_ok()) {
+        4
+    } else {
+        8
+    }
+}
+
 fn encode_intset_blob(mut values: Vec<i64>, width: u32) -> Option<Vec<u8>> {
     // Take the parsed values by value and sort in place — the sole caller
     // (encode_compact_set_intset) builds this Vec fresh and discards it, so owning it lets us
@@ -2682,13 +2713,17 @@ fn encode_intset_blob(mut values: Vec<i64>, width: u32) -> Option<Vec<u8>> {
     // vs a copy yields the identical canonical order => byte-identical output.
     // (frankenredis perf: intset encode sorts in place, code-first batch-test pending)
     debug_assert!(matches!(width, 2 | 4 | 8));
-    let len = u32::try_from(values.len()).ok()?;
     values.sort_unstable();
-    let sorted = values;
-    let mut out = Vec::with_capacity(8usize.saturating_add(sorted.len() * width as usize));
+    encode_sorted_intset_blob(&values, width)
+}
+
+fn encode_sorted_intset_blob(values: &[i64], width: u32) -> Option<Vec<u8>> {
+    debug_assert!(matches!(width, 2 | 4 | 8));
+    let len = u32::try_from(values.len()).ok()?;
+    let mut out = Vec::with_capacity(8usize.saturating_add(values.len() * width as usize));
     out.extend_from_slice(&width.to_le_bytes());
     out.extend_from_slice(&len.to_le_bytes());
-    for value in &sorted {
+    for value in values {
         match width {
             2 => out.extend_from_slice(&i16::try_from(*value).ok()?.to_le_bytes()),
             4 => out.extend_from_slice(&i32::try_from(*value).ok()?.to_le_bytes()),
@@ -4106,9 +4141,17 @@ fn decode_rdb_prefix_impl<const MOVE_LEGACY_HASH_ZIPLIST_FIELDS: bool>(
                         let (intset, consumed) =
                             rdb_decode_string(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
                         cursor += consumed;
-                        let members =
-                            decode_intset_members(&intset).ok_or(PersistError::InvalidFrame)?;
-                        RdbValue::Set(members)
+                        let values =
+                            decode_intset_values(&intset).ok_or(PersistError::InvalidFrame)?;
+                        if values.windows(2).all(|pair| pair[0] < pair[1]) {
+                            RdbValue::IntSet(values)
+                        } else {
+                            // Preserve the legacy recovery behavior for a
+                            // malformed-but-decodable intset: its decimal
+                            // members still flow through `SADD`, which sorts
+                            // and deduplicates them.
+                            RdbValue::Set(values.into_iter().map(decimal_i64_bytes).collect())
+                        }
                     }
                     RDB_TYPE_SET_LISTPACK => {
                         let (listpack, consumed) =
@@ -5541,7 +5584,7 @@ mod tests {
         RDB_TYPE_LIST_QUICKLIST_2, RDB_TYPE_SET, RDB_TYPE_SET_INTSET, RDB_TYPE_SET_LISTPACK,
         RDB_TYPE_STRING, RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK, RdbEncodeOptions, RdbEntry,
         RdbStreamConsumer, RdbStreamConsumerGroup, RdbStreamMetadata, RdbStreamPendingEntry,
-        RdbValue, UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3, crc64_redis, decode_intset_members,
+        RdbValue, UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3, crc64_redis, decode_intset_values,
         decode_rdb, decode_rdb_prefix, encode_compact_set_intset, encode_hash_listpack_blob,
         encode_listpack_strings_blob, encode_rdb, encode_rdb_with_functions,
         encode_rdb_with_options, encode_set_listpack_blob, lzf_compress, lzf_decompress,
@@ -7811,14 +7854,14 @@ mod tests {
         let (entries, _) = decode_rdb(&bytes).expect("decode set_intset");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].key, b"si");
-        match &entries[0].value {
-            RdbValue::Set(members) => {
-                let mut got: Vec<&[u8]> = members.iter().map(Vec::as_slice).collect();
-                got.sort();
-                assert_eq!(got, vec![b"1" as &[u8], b"2", b"3", b"5"]);
-            }
-            other => panic!("expected RdbValue::Set, got {other:?}"),
-        }
+        assert_eq!(entries[0].value, RdbValue::IntSet(vec![1, 2, 3, 5]));
+
+        let encoded = encode_rdb(&entries, &[]);
+        assert_eq!(
+            type_byte_for_key(&encoded, b"si"),
+            Some(RDB_TYPE_SET_INTSET),
+            "typed intset re-emits as RDB_TYPE_SET_INTSET"
+        );
     }
 
     #[test]
@@ -7992,54 +8035,36 @@ mod tests {
     fn intset_helper_decoder_handles_each_width() {
         // 16-bit
         let blob_16 = build_intset_for_test(&[-1, 0, 1, 32_000]);
-        let got = decode_intset_members(&blob_16).expect("16-bit intset");
+        let got = decode_intset_values(&blob_16).expect("16-bit intset");
         assert_eq!(
             got.capacity(),
             4,
-            "decoder preallocates the RDB member count"
+            "typed decoder preallocates the RDB member count"
         );
-        assert_eq!(
-            got,
-            vec![
-                b"-1".to_vec(),
-                b"0".to_vec(),
-                b"1".to_vec(),
-                b"32000".to_vec()
-            ]
-        );
+        assert_eq!(got, vec![-1, 0, 1, 32_000]);
 
         // 32-bit (force >= 16-bit range)
         let blob_32 = build_intset_for_test(&[-100_000, 0, 100_000]);
-        let got = decode_intset_members(&blob_32).expect("32-bit intset");
+        let got = decode_intset_values(&blob_32).expect("32-bit intset");
         assert_eq!(
             got.capacity(),
             3,
-            "decoder preallocates the RDB member count"
+            "typed decoder preallocates the RDB member count"
         );
-        assert_eq!(
-            got,
-            vec![b"-100000".to_vec(), b"0".to_vec(), b"100000".to_vec()]
-        );
+        assert_eq!(got, vec![-100_000, 0, 100_000]);
 
         // 64-bit (force >= 32-bit range)
         let blob_64 = build_intset_for_test(&[i64::MIN, 0, i64::MAX]);
-        let got = decode_intset_members(&blob_64).expect("64-bit intset");
+        let got = decode_intset_values(&blob_64).expect("64-bit intset");
         assert_eq!(
             got.capacity(),
             3,
-            "decoder preallocates the RDB member count"
+            "typed decoder preallocates the RDB member count"
         );
-        assert_eq!(
-            got,
-            vec![
-                i64::MIN.to_string().into_bytes(),
-                b"0".to_vec(),
-                i64::MAX.to_string().into_bytes(),
-            ]
-        );
+        assert_eq!(got, vec![i64::MIN, 0, i64::MAX]);
 
         // Truncated buffer must reject.
-        assert!(decode_intset_members(&[0; 4]).is_none());
+        assert!(decode_intset_values(&[0; 4]).is_none());
     }
 
     /// Acceptance gate for the fuzz_rdb_decoder corpus seeds added in
