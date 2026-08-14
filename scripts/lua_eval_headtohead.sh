@@ -211,10 +211,20 @@ rotate_cores() {  # CYCLE_INDEX (NOT the round number -- see below)
   # Advancing cores once per COMPLETE order cycle (r / ARM_COUNT) decouples them,
   # so over ARM_COUNT^2 rounds every arm sees every (position, core) pair exactly
   # once. The ROUNDS guard enforces that multiple.
-  local n=${#ARM_PIDS[@]} i shifted
+  local n=${#ARM_PIDS[@]} i shifted pid core observed
   for i in $(seq 0 $((n - 1))); do
     shifted=$(( (i + $1) % n ))
-    taskset -cp "${ARM_CORES[$shifted]}" "${ARM_PIDS[$i]}" >/dev/null 2>&1 || true
+    pid="${ARM_PIDS[$i]}"
+    core="${ARM_CORES[$shifted]}"
+    taskset -cp "$core" "$pid" >/dev/null 2>&1 || {
+      echo "PREFLIGHT FAIL: unable to pin arm pid $pid to core $core" >&2
+      exit 6
+    }
+    observed=$(taskset -pc "$pid" 2>/dev/null | sed -n 's/.*affinity list: //p')
+    if [[ "$observed" != "$core" ]]; then
+      echo "PREFLIGHT FAIL: arm pid $pid affinity ${observed:-unknown}, expected $core" >&2
+      exit 6
+    fi
   done
 }
 
