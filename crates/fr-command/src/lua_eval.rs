@@ -2058,7 +2058,12 @@ pub enum Expr {
     Nil,
     Bool(bool),
     Number(f64),
-    Str(Vec<u8>),
+    // Parsed chunks are cached and function bodies clone their AST when a
+    // closure is instantiated. Lua string literals are immutable, so retain
+    // their byte payload behind an Rc instead of copying it with every AST
+    // clone. Runtime LuaValue strings remain owned for now; this is the
+    // compilation-side foundation for the wider shared-string refactor.
+    Str(Rc<[u8]>),
     Name(String),
     LocalName(String, LocalSlotRef),
     VarArgs,
@@ -2776,7 +2781,7 @@ impl Parser {
             }
             Token::Str(s) => {
                 self.advance();
-                Ok(vec![Expr::Str(s)])
+                Ok(vec![Expr::Str(Rc::from(s))])
             }
             // (frankenredis-yunl8) Mirror upstream llex.c wording:
             // "function arguments expected near '<token>'". The
@@ -2807,7 +2812,7 @@ impl Parser {
             }
             Token::Str(s) => {
                 self.advance();
-                Ok(Expr::Str(s))
+                Ok(Expr::Str(Rc::from(s)))
             }
             Token::True => {
                 self.advance();
@@ -5453,7 +5458,7 @@ impl<'a> LuaState<'a> {
             Expr::Nil => Ok(LuaValue::Nil),
             Expr::Bool(b) => Ok(LuaValue::Bool(*b)),
             Expr::Number(n) => Ok(LuaValue::Number(*n)),
-            Expr::Str(s) => Ok(LuaValue::Str(s.clone())),
+            Expr::Str(s) => Ok(LuaValue::Str(s.to_vec())),
             Expr::VarArgs => {
                 // Return first vararg; multi-value context handled in eval_expr_list
                 Ok(varargs.first().cloned().unwrap_or(LuaValue::Nil))
@@ -17970,6 +17975,40 @@ end
         let two = eval_script(script, &[], &[b"two".to_vec()], &mut store, 0).unwrap();
         assert_eq!(one, RespFrame::BulkString(Some(b"one".to_vec())));
         assert_eq!(two, RespFrame::BulkString(Some(b"two".to_vec())));
+    }
+
+    #[test]
+    fn cloned_function_ast_shares_immutable_literal_bytes_d3al0() {
+        // A cached chunk may instantiate the same function literal many times.
+        // The payload is immutable Lua source data, so cloning its AST must
+        // retain the exact Rc allocation rather than copying the bytes.
+        let parsed = super::parse_lua_chunk(b"return function() return 'shared literal' end")
+            .expect("script should parse");
+        let cloned = parsed.clone();
+
+        let literal = |block: &super::Block| {
+            let super::Stmt::Return(values) = &block[0].1 else {
+                panic!("expected top-level return");
+            };
+            let super::Expr::FunctionDef(_, _, body) = &values[0] else {
+                panic!("expected function literal");
+            };
+            let super::Stmt::Return(values) = &body[0].1 else {
+                panic!("expected function return");
+            };
+            let super::Expr::Str(bytes) = &values[0] else {
+                panic!("expected string literal");
+            };
+            bytes.clone()
+        };
+
+        let original_bytes = literal(&parsed);
+        let cloned_bytes = literal(&cloned);
+        assert!(
+            std::rc::Rc::ptr_eq(&original_bytes, &cloned_bytes),
+            "cloned AST must share its immutable literal allocation"
+        );
+        assert_eq!(original_bytes.as_ref(), b"shared literal");
     }
 
     #[test]
