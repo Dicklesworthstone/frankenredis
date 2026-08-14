@@ -16601,7 +16601,6 @@ enum BorrowedDispatchFloorClass {
     /// value count (5..=8) — the forms stranded ~1350 lines deep in the cascade.
     KeyedValuesWrite(usize),
     Llen,
-    Lpop,
     Lrange,
     Lpos,
     MemoryUsage,
@@ -16748,6 +16747,7 @@ enum BorrowedDispatchFloorCommand {
     Lindex,
     Linsert,
     Llen,
+    Lpop,
     Lrange,
     Lpos,
     Lpush,
