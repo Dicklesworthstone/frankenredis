@@ -2138,7 +2138,10 @@ pub enum Stmt {
     LocalAssign(Vec<String>, Vec<Expr>),
     Expression(Expr),
     If(Vec<(Expr, Block)>, Option<Block>),
-    NumericFor(String, Expr, Expr, Option<Expr>, Block),
+    // Numeric-loop variables are immutable parser data. Cached EVAL chunks
+    // clone their AST before each execution, so share the spelling just like
+    // resolved local names; the runtime environment still owns its binding.
+    NumericFor(Rc<str>, Expr, Expr, Option<Expr>, Block),
     GenericFor(Vec<String>, Vec<Expr>, Block),
     While(Expr, Block),
     Repeat(Block, Expr),
@@ -2389,7 +2392,7 @@ impl Parser {
             self.loop_depth -= 1;
             let body = body_result?;
             self.check_match(&Token::End, "for", opener_line)?;
-            Ok(Stmt::NumericFor(name, start, stop, step, body))
+            Ok(Stmt::NumericFor(Rc::from(name), start, stop, step, body))
         } else {
             // Generic for: for name [, name ...] in explist do ... end
             let mut names = vec![name];
@@ -3012,7 +3015,7 @@ impl LocalResolver {
                     self.resolve_expr(step);
                 }
                 self.enter_scope();
-                self.declare_local(name);
+                self.declare_local(name.as_ref());
                 self.resolve_stmts(body);
                 self.exit_scope();
             }
@@ -5044,9 +5047,14 @@ impl<'a> LuaState<'a> {
                 // either breaks/returns or the loop is infinite (caller's
                 // responsibility, same as `while true do end`). Vendored
                 // does not reject step=0 at the runtime layer.
-                if let Some(result) =
-                    self.execute_numeric_for_add_assign_fast_path(name, e, st, body, s, env)
-                {
+                if let Some(result) = self.execute_numeric_for_add_assign_fast_path(
+                    name.as_ref(),
+                    e,
+                    st,
+                    body,
+                    s,
+                    env,
+                ) {
                     return result;
                 }
                 let mut i = s;
@@ -5076,14 +5084,22 @@ impl<'a> LuaState<'a> {
                         env.rearm_loop_scope(LuaValue::Number(i));
                     } else {
                         env.push_scope();
-                        env.set_local(name, LuaValue::Number(i));
+                        env.set_local(name.as_ref(), LuaValue::Number(i));
                         scope_open = true;
                     }
                     // NOTE the `?` deliberately leaves the scope unpopped on the
                     // error path, exactly as the per-iteration shape did: an error
                     // here unwinds the whole script.
-                    let cf =
-                        self.exec_numeric_for_body_from(name, e, st, body, i, 0, env, varargs)?;
+                    let cf = self.exec_numeric_for_body_from(
+                        name.as_ref(),
+                        e,
+                        st,
+                        body,
+                        i,
+                        0,
+                        env,
+                        varargs,
+                    )?;
                     match cf {
                         ControlFlow::Break => break,
                         ControlFlow::Return(v) => {
@@ -18278,6 +18294,41 @@ end
             0,
         );
         assert_eq!(reply, Ok(RespFrame::BulkString(Some(b"value".to_vec()))));
+    }
+
+    #[test]
+    fn cloned_ast_shares_numeric_for_name_d3al0() {
+        let parsed = super::parse_lua_chunk(b"for iteration = 1, 3 do end");
+        assert!(parsed.is_ok(), "script should parse");
+
+        let loop_name = |block: &super::Block| {
+            let [(_, super::Stmt::NumericFor(name, _, _, _, _))] = block.as_slice() else {
+                return None;
+            };
+            Some(name.clone())
+        };
+
+        if let Ok(parsed) = parsed {
+            let cloned = parsed.clone();
+            let original_name = loop_name(&parsed);
+            let cloned_name = loop_name(&cloned);
+            assert!(original_name.is_some(), "expected numeric loop name");
+            assert!(cloned_name.is_some(), "expected numeric loop name");
+            if let (Some(original_name), Some(cloned_name)) = (original_name, cloned_name) {
+                assert!(std::rc::Rc::ptr_eq(&original_name, &cloned_name));
+                assert_eq!(original_name.as_ref(), "iteration");
+            }
+        }
+
+        let mut store = Store::new();
+        let reply = eval_script(
+            b"local total = 0; for iteration = 1, 3 do total = total + iteration end; return total",
+            &[],
+            &[],
+            &mut store,
+            0,
+        );
+        assert_eq!(reply, Ok(RespFrame::Integer(6)));
     }
 
     #[test]
