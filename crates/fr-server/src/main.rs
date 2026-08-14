@@ -16541,8 +16541,9 @@ enum BorrowedDispatchFloorClass {
     /// (frankenredis-ozrro) `HMGET key field...`, any count — two, three and the
     /// variadic parser are tried in the cascade's own order.
     Hmget,
-    /// (frankenredis-ozrro) `MGET` with exactly four keys.
-    MgetFour,
+    /// (frankenredis-ozrro) `MGET key...`; the generic borrowed key parser
+    /// preserves all arities while avoiding the linear cascade.
+    Mget,
     /// (frankenredis-ozrro) `GETDEL key`.
     Getdel,
     /// (frankenredis-ozrro) `DECRBY key decrement`.
@@ -17572,7 +17573,9 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (arity, BorrowedDispatchFloorCommand::Hmget) if arity >= 3 => {
             Some(BorrowedDispatchFloorClass::Hmget)
         }
-        (5, BorrowedDispatchFloorCommand::Mget) => Some(BorrowedDispatchFloorClass::MgetFour),
+        (arity, BorrowedDispatchFloorCommand::Mget) if arity >= 3 => {
+            Some(BorrowedDispatchFloorClass::Mget)
+        }
         (3, BorrowedDispatchFloorCommand::Hscan) => {
             Some(BorrowedDispatchFloorClass::Scan0(PlainScan0Cmd::Hscan))
         }
@@ -19001,11 +19004,17 @@ fn try_dispatch_floor_classified_action(
                 )
             }
         }
-        BorrowedDispatchFloorClass::MgetFour => {
+        BorrowedDispatchFloorClass::Mget => {
             let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
-            if let Some(packet) = parse_borrowed_plain_mget_four_packet(unparsed, &parser_config)
+            if let Some(packet) =
+                parse_borrowed_plain_keys_multi_packet(unparsed, &parser_config, b"MGET")
                 && runtime
-                    .execute_plain_mget_borrowed_into(&packet.keys, ts, client_resp3, out)
+                    .execute_plain_mget_borrowed_into(
+                        &packet.keys[..packet.len],
+                        ts,
+                        client_resp3,
+                        out,
+                    )
                     .is_some()
             {
                 Ok(BorrowedMultibulkAction::FastEncodedReply {
