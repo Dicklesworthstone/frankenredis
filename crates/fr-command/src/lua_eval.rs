@@ -369,6 +369,25 @@ impl Eq for LuaHashKey {}
 /// messages report the real line (not a hardcoded 1). (frankenredis-m7oy8)
 pub type Block = Vec<(u32, Stmt)>;
 
+/// A parsed Lua chunk retained by the per-thread compilation cache.
+///
+/// Keeping the chunk as an explicit unit, rather than caching a bare block,
+/// gives the executor one immutable compilation product to evolve into the
+/// linear instruction stream used by the interpreter.  Nested function bodies
+/// remain `Block`s for now because they are created dynamically and can carry
+/// captured environments; the top-level chunk is the stable, reusable entry
+/// point shared by EVAL/EVALSHA/FUNCTION invocations.
+#[derive(Debug)]
+pub(crate) struct CompiledChunk {
+    ast: Block,
+}
+
+impl CompiledChunk {
+    fn new(ast: Block) -> Self {
+        Self { ast }
+    }
+}
+
 /// Stamp the real source line into a leading `user_script:1:` prefix. The
 /// interpreter's ~90 error sites hardcode line 1; the evaluator tracks the
 /// executing statement's line in `current_line` and applies it here, at the
@@ -4178,7 +4197,7 @@ impl<'a> LuaState<'a> {
         self.execute_compiled(stmts.as_ref())
     }
 
-    fn execute_compiled(&mut self, stmts: &Block) -> Result<LuaValue, String> {
+    fn execute_compiled(&mut self, compiled: &CompiledChunk) -> Result<LuaValue, String> {
         // (frankenredis-j02x9) Lock the globals table — from this point
         // forward any user-script write to globals raises a readonly-
         // table error and any read of an undefined global raises the
@@ -4224,7 +4243,7 @@ impl<'a> LuaState<'a> {
         // frame for the purposes of luaL_where; push before exec_block so
         // error(msg, N) at the bottom of the call stack can find it.
         self.lua_frame_kinds.push(true);
-        let outcome = self.exec_block(stmts, &mut env, &mut varargs);
+        let outcome = self.exec_block(&compiled.ast, &mut env, &mut varargs);
         self.lua_frame_kinds.pop();
         match outcome {
             Ok(ControlFlow::Return(vals)) => Ok(vals.into_iter().next().unwrap_or(LuaValue::Nil)),
@@ -14175,7 +14194,7 @@ impl<'a> JsonParser<'a> {
 const LUA_COMPILED_CHUNK_CACHE_MAX: usize = 256;
 
 thread_local! {
-    static LUA_COMPILED_CHUNK_CACHE: RefCell<HashMap<Vec<u8>, Rc<Block>>> =
+    static LUA_COMPILED_CHUNK_CACHE: RefCell<HashMap<Vec<u8>, Rc<CompiledChunk>>> =
         RefCell::new(HashMap::new());
 }
 
@@ -14266,7 +14285,7 @@ pub(crate) fn compile_error_line_bytes(source: &[u8]) -> Vec<u8> {
     out
 }
 
-pub(crate) fn compile_lua_chunk_cached(script: &[u8]) -> Result<Rc<Block>, String> {
+pub(crate) fn compile_lua_chunk_cached(script: &[u8]) -> Result<Rc<CompiledChunk>, String> {
     let source = lua_execution_source(script);
     if let Some(cached) =
         LUA_COMPILED_CHUNK_CACHE.with(|cache| cache.borrow().get(source.as_ref()).cloned())
@@ -14274,7 +14293,7 @@ pub(crate) fn compile_lua_chunk_cached(script: &[u8]) -> Result<Rc<Block>, Strin
         return Ok(cached);
     }
 
-    let compiled = Rc::new(parse_lua_chunk(source.as_ref())?);
+    let compiled = Rc::new(CompiledChunk::new(parse_lua_chunk(source.as_ref())?));
     let cached = LUA_COMPILED_CHUNK_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
         if let Some(cached) = cache.get(source.as_ref()) {
@@ -14315,7 +14334,7 @@ pub fn eval_script_cloned_globals_for_bench(
 }
 
 pub(crate) fn eval_compiled_script(
-    compiled: Rc<Block>,
+    compiled: Rc<CompiledChunk>,
     keys: &[Vec<u8>],
     argv: &[Vec<u8>],
     store: &mut Store,
@@ -14325,7 +14344,7 @@ pub(crate) fn eval_compiled_script(
 }
 
 fn eval_compiled_script_inner(
-    compiled: Rc<Block>,
+    compiled: Rc<CompiledChunk>,
     keys: &[Vec<u8>],
     argv: &[Vec<u8>],
     store: &mut Store,
@@ -17925,13 +17944,13 @@ end
     }
 
     #[test]
-    fn compiled_chunk_cache_reuses_ast_but_rebinds_call_state_45ywg() {
+    fn compiled_chunk_cache_reuses_program_but_rebinds_call_state_45ywg() {
         let script = b"local arg = ARGV[1]; return arg";
         let first = super::compile_lua_chunk_cached(script).expect("compile first");
         let second = super::compile_lua_chunk_cached(script).expect("compile second");
         assert!(
             std::rc::Rc::ptr_eq(&first, &second),
-            "expected repeated compile to reuse cached AST"
+            "expected repeated compile to reuse the cached program"
         );
 
         let mut store = Store::new();
