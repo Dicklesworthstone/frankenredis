@@ -4348,7 +4348,7 @@ impl<'a> LuaState<'a> {
             return None;
         };
         if method == "yield"
-            && matches!(table_expr.as_ref(), Expr::Name(name) if name == "coroutine")
+            && matches!(table_expr.as_ref(), Expr::Name(name) if name.as_ref() == "coroutine")
         {
             Some(args)
         } else {
@@ -5500,7 +5500,7 @@ impl<'a> LuaState<'a> {
                         env,
                         varargs,
                     )
-                } else if name == "_G" {
+                } else if name.as_ref() == "_G" {
                     Ok(LuaValue::Table(self.ensure_g_table()))
                 } else if let Some(val) = self.resolve_global_cached(name) {
                     Ok(val)
