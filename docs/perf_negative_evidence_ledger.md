@@ -15731,3 +15731,53 @@ number. A clean current-HEAD rebuild was queued and is the right binary for the 
 Retry predicate: re-run on a clean current-HEAD binary from a SNAPSHOTTED copy of the harness, so a
 peer's edit cannot land inside the batch again. Do not attribute the 0.7598x -> 0.8977x movement to
 anything until an A/B with both binaries in ONE invocation says what moved it.
+
+## 2026-08-14 PearlPuma: COMPETITIVE — nine front-classified shapes measured LIVE vs vendored 7.2.4 on a BUSY host; fr wins every admissible row, but so does the untouched control, so the margin is NOT attributed to the lever (`frankenredis-ozrro`)
+
+Claim class: COMPETITIVE. Campaign output: yes.
+
+FIRST rows this repo has produced with the balanced-square substrate
+(`scripts/balanced_square_ab.py`, c93ded6cc), which replaced an unsatisfiable
+quiet-host precondition with a design that tolerates load. Both arms interleave
+as `ABBAABBA` inside each round, each arm carries its own first-half/second-half
+A/A null, and a row whose null leaves [0.98, 1.02] is REFUSED.
+
+Two independent invocations, host loadavg 11.07 and 8.36, `-c1 -P16`,
+30,000 ops per timed slot, 9 and 17 rounds. fr ELF self-reported from
+`/proc/<pid>/exe` as `efd1afcb673090ae9bf5892646b71c6f038cdc8a0b26d09e4a26778860e7ee2f`
+(clean HEAD build), vendored redis `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`,
+governor `performance`, AVX2, 64 cores, fr observed running 3 threads.
+
+| shape | run A (9 rounds) | run B (17 rounds) | replicated |
+|---|---|---|---|
+| expiretime | **1.0618** [1.0077, 1.1031] | **1.0558** [1.0153, 1.0759] | **yes** |
+| geohash | **1.0694** [1.0514, 1.1188] | **1.0838** [1.0522, 1.1176] | **yes** |
+| getbit | **1.0469** [1.0161, 1.0732] | **1.0375** [1.0150, 1.0589] | **yes** |
+| srandmember | 1.1423 [1.0873, 1.2045] | NULL-FAILED | no |
+| publish | 1.1406 [1.0930, 1.1551] | NULL-FAILED | no |
+| copy | 1.0659 [1.0068, 1.1212] | NULL-FAILED | no |
+| sintercard | NULL-FAILED | 1.1241 [1.1134, 1.1575] | no |
+| zrandmember | NULL-FAILED | 1.0789 [1.0445, 1.1161] | no |
+| pttl | 1.0413 [1.0024, 1.0957] | STRADDLES-1 (1.0004) | no |
+| **get_control (GET)** | NULL-FAILED | **1.0995** [1.0872, 1.1126] | — |
+
+THE ATTRIBUTION LIMIT, which is the most important line here: **GET is untouched
+by the classification work and it wins by 1.0995**, comfortably inside the range
+of the shapes that were classified. These rows therefore establish that fr beats
+vendored 7.2.4 on these shapes at `-P16`; they do NOT establish that the
+front-classification is what produced the margin. Attributing it needs a pre/post
+fr A/B with both binaries in ONE invocation, which this substrate can carry as a
+second fr arm and which has not been run. No such attribution is claimed.
+
+THIS SUPERSEDES NOTHING AND RETRACTS NOTHING. The earlier same-day row that had
+these shapes at 0.66x-0.93x was logged INADMISSIBLE on its own null (0.85-1.07)
+and was never a result; it is not a "before" for these numbers.
+
+THREE ROWS PER RUN WERE REFUSED ON THEIR NULLS and the refusals do not agree
+between runs, which is what an honest per-row null looks like on a shared host:
+whichever rows happened to straddle a peer's build get rejected, and only
+expiretime, geohash and getbit survived both. Those three are the ones to quote.
+
+Retry predicate: run the same substrate with a second fr arm (pre-lever vs
+post-lever) to attribute the margin, and raise rounds until every row including
+the control clears its null in the same invocation.
