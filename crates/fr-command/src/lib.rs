@@ -6,12 +6,13 @@ pub use lua_eval::eval_script;
 use fr_protocol::{RespFrame, encode_aggregate_header, encode_bulk_string_slice};
 use fr_store::{
     BitRangeUnit, ClientReplyState, ClientTrackingState, DispatchAclLogContext,
-    DispatchAclPermissionReason, DispatchAclPermissions, ExpireTimeValue, MaxmemoryPolicy,
-    PendingAclLogEvent, PttlValue, PubSubMessage, RestoreMetadata, ScoreBound, Store, StoreError,
-    StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimOptions, StreamClaimReply,
-    StreamGroupReadCursor, StreamGroupReadOptions, StreamId, StreamPendingRecord, Value, ValueType,
-    decode_db_key, glob_match, read_rss_bytes, read_total_system_memory_bytes,
-    redis_score_to_string, sha1_hex_public,
+    DispatchAclPermissionReason, DispatchAclPermissions, ExpireTimeValue, HashFieldPersistResult,
+    HashFieldTtl, HashFieldTtlCondition, HashFieldTtlSet, HashFieldTtlUnit, MaxmemoryPolicy,
+    NOTIFY_GENERIC, NOTIFY_HASH, PendingAclLogEvent, PttlValue, PubSubMessage, RestoreMetadata,
+    ScoreBound, Store, StoreError, StreamAutoClaimOptions, StreamAutoClaimReply,
+    StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions, StreamId,
+    StreamPendingRecord, Value, ValueType, decode_db_key, glob_match, read_rss_bytes,
+    read_total_system_memory_bytes, redis_score_to_string, sha1_hex_public,
 };
 use icu_collator::{
     Collator, CollatorBorrowed, options::AlternateHandling, options::CollatorOptions,
@@ -2573,6 +2574,7 @@ pub fn dispatch_argv(
         Some(CommandId::Flushdb) => return flushdb(argv, store),
         Some(CommandId::Flushall) => return flushall(argv, store),
         Some(CommandId::Hset) => return hset(argv, store, now_ms),
+        Some(CommandId::Hexpire) => return hexpire(argv, store, now_ms),
         Some(CommandId::Hget) => return hget(argv, store, now_ms),
         Some(CommandId::Hdel) => return hdel(argv, store, now_ms),
         Some(CommandId::Hexists) => return hexists(argv, store, now_ms),
@@ -2585,6 +2587,8 @@ pub fn dispatch_argv(
         Some(CommandId::Hincrby) => return hincrby(argv, store, now_ms),
         Some(CommandId::Hsetnx) => return hsetnx_cmd(argv, store, now_ms),
         Some(CommandId::Hstrlen) => return hstrlen(argv, store, now_ms),
+        Some(CommandId::Httl) => return httl(argv, store, now_ms),
+        Some(CommandId::Hpersist) => return hpersist(argv, store, now_ms),
         Some(CommandId::Lpush) => return lpush(argv, store, now_ms),
         Some(CommandId::Rpush) => return rpush(argv, store, now_ms),
         Some(CommandId::Lpop) => return lpop(argv, store, now_ms),
@@ -2837,10 +2841,12 @@ pub fn is_write_command(cmd: &[u8]) -> bool {
             | CommandId::Flushdb
             | CommandId::Flushall
             | CommandId::Hset
+            | CommandId::Hexpire
             | CommandId::Hdel
             | CommandId::Hmset
             | CommandId::Hincrby
             | CommandId::Hsetnx
+            | CommandId::Hpersist
             | CommandId::Lpush
             | CommandId::Rpush
             | CommandId::Lpop
@@ -2965,6 +2971,7 @@ pub enum CommandId {
     Flushdb,
     Flushall,
     Hset,
+    Hexpire,
     Hget,
     Hdel,
     Hexists,
@@ -2977,6 +2984,8 @@ pub enum CommandId {
     Hincrby,
     Hsetnx,
     Hstrlen,
+    Httl,
+    Hpersist,
     Lpush,
     Rpush,
     Lpop,
@@ -3202,6 +3211,7 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
             const PK_HSET: u64 = pack_cmd_u64(b"HSET");
             const PK_HDEL: u64 = pack_cmd_u64(b"HDEL");
             const PK_HLEN: u64 = pack_cmd_u64(b"HLEN");
+            const PK_HTTL: u64 = pack_cmd_u64(b"HTTL");
             const PK_LPOP: u64 = pack_cmd_u64(b"LPOP");
             const PK_RPOP: u64 = pack_cmd_u64(b"RPOP");
             const PK_LLEN: u64 = pack_cmd_u64(b"LLEN");
@@ -3243,6 +3253,7 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 PK_HSET => Some(CommandId::Hset),
                 PK_HDEL => Some(CommandId::Hdel),
                 PK_HLEN => Some(CommandId::Hlen),
+                PK_HTTL => Some(CommandId::Httl),
                 PK_LPOP => Some(CommandId::Lpop),
                 PK_RPOP => Some(CommandId::Rpop),
                 PK_LLEN => Some(CommandId::Llen),
@@ -3462,6 +3473,7 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
             // chain. Byte-identical (classify_command_matches_linear_reference). Underscore
             // names (EVAL_RO/SORT_RO) pack fine (`_` is not a letter, so no case-fold).
             const PK_PEXPIRE: u64 = pack_cmd_u64(b"PEXPIRE");
+            const PK_HEXPIRE: u64 = pack_cmd_u64(b"HEXPIRE");
             const PK_PERSIST: u64 = pack_cmd_u64(b"PERSIST");
             const PK_FLUSHDB: u64 = pack_cmd_u64(b"FLUSHDB");
             const PK_HGETALL: u64 = pack_cmd_u64(b"HGETALL");
@@ -3493,6 +3505,7 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
             const PK_PFDEBUG: u64 = pack_cmd_u64(b"PFDEBUG");
             match pack_cmd_u64(cmd) {
                 PK_PEXPIRE => Some(CommandId::Pexpire),
+                PK_HEXPIRE => Some(CommandId::Hexpire),
                 PK_PERSIST => Some(CommandId::Persist),
                 PK_FLUSHDB => Some(CommandId::Flushdb),
                 PK_HGETALL => Some(CommandId::Hgetall),
@@ -3530,6 +3543,7 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
             // jump table / binary search) instead of the linear per-candidate eq_ascii_command
             // chain. Byte-identical (classify_command_matches_linear_reference).
             const PK_EXPIREAT: u64 = pack_cmd_u64(b"EXPIREAT");
+            const PK_HPERSIST: u64 = pack_cmd_u64(b"HPERSIST");
             const PK_RENAMENX: u64 = pack_cmd_u64(b"RENAMENX");
             const PK_FLUSHALL: u64 = pack_cmd_u64(b"FLUSHALL");
             const PK_SMEMBERS: u64 = pack_cmd_u64(b"SMEMBERS");
@@ -3552,6 +3566,7 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
             const PK_SENTINEL: u64 = pack_cmd_u64(b"SENTINEL");
             match pack_cmd_u64(cmd) {
                 PK_EXPIREAT => Some(CommandId::Expireat),
+                PK_HPERSIST => Some(CommandId::Hpersist),
                 PK_RENAMENX => Some(CommandId::Renamenx),
                 PK_FLUSHALL => Some(CommandId::Flushall),
                 PK_SMEMBERS => Some(CommandId::Smembers),
@@ -5253,6 +5268,157 @@ fn hset(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         i += 2;
     }
     Ok(RespFrame::Integer(i64::try_from(added).unwrap_or(i64::MAX)))
+}
+
+/// Parse the `FIELDS numfields field [field ...]` suffix shared by Redis 7.4
+/// hash-field TTL commands. These commands deliberately report their own
+/// syntax errors instead of accepting a trailing field list: `numfields` is
+/// part of the wire contract and catches truncated or overlong client input.
+fn parse_hash_field_ttl_fields<'a>(
+    argv: &'a [Vec<u8>],
+    fields_at: usize,
+    positive_count_error: &'static str,
+) -> Result<&'a [Vec<u8>], CommandError> {
+    if !eq_ascii_command(&argv[fields_at - 1], b"FIELDS") {
+        return Err(CommandError::Custom(
+            "ERR Mandatory argument FIELDS is missing or not at the right position".to_string(),
+        ));
+    }
+    let num_fields = parse_i64_arg(&argv[fields_at])?;
+    if num_fields <= 0 {
+        return Err(CommandError::Custom(positive_count_error.to_string()));
+    }
+    let num_fields = usize::try_from(num_fields).map_err(|_| CommandError::InvalidInteger)?;
+    let fields = &argv[fields_at + 1..];
+    if fields.len() != num_fields {
+        return Err(CommandError::Custom(
+            "ERR The `numfields` parameter must match the number of arguments".to_string(),
+        ));
+    }
+    Ok(fields)
+}
+
+fn hexpire(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    if argv.len() < 6 {
+        return Err(CommandError::WrongArity("HEXPIRE"));
+    }
+    let seconds = parse_i64_arg(&argv[2])?;
+    if seconds < 0 {
+        return Err(CommandError::Custom(
+            "ERR invalid expire time, must be >= 0".to_string(),
+        ));
+    }
+    let seconds = seconds as u64;
+    let ttl_ms = seconds.checked_mul(1000).ok_or_else(|| {
+        CommandError::Custom("ERR invalid expire time in 'hexpire' command".to_string())
+    })?;
+    if ttl_ms > (i64::MAX as u64).saturating_sub(now_ms) {
+        return Err(CommandError::Custom(
+            "ERR invalid expire time in 'hexpire' command".to_string(),
+        ));
+    }
+    let expires_at_ms = now_ms + ttl_ms;
+
+    let (condition, fields_at) = if eq_ascii_command(&argv[3], b"NX") {
+        (HashFieldTtlCondition::Nx, 5)
+    } else if eq_ascii_command(&argv[3], b"XX") {
+        (HashFieldTtlCondition::Xx, 5)
+    } else if eq_ascii_command(&argv[3], b"GT") {
+        (HashFieldTtlCondition::Gt, 5)
+    } else if eq_ascii_command(&argv[3], b"LT") {
+        (HashFieldTtlCondition::Lt, 5)
+    } else {
+        (HashFieldTtlCondition::None, 4)
+    };
+    let fields = parse_hash_field_ttl_fields(
+        argv,
+        fields_at,
+        "ERR Parameter `numFields` should be greater than 0",
+    )?;
+
+    let mut replies = Vec::with_capacity(fields.len());
+    let mut field_deleted = false;
+    let mut field_updated = false;
+    for field in fields {
+        let reply = match store.hash_field_set_abs_expiry(
+            &argv[1],
+            field,
+            expires_at_ms,
+            condition,
+            now_ms,
+        ) {
+            HashFieldTtlSet::Applied => {
+                field_updated = true;
+                1
+            }
+            HashFieldTtlSet::AppliedAlreadyExpired => {
+                field_deleted = true;
+                store.reap_expired_hash_field_without_expiry_event(&argv[1], field, now_ms);
+                2
+            }
+            HashFieldTtlSet::ConditionNotMet => 0,
+            HashFieldTtlSet::FieldMissing | HashFieldTtlSet::KeyMissing => -2,
+            HashFieldTtlSet::WrongType => return Err(CommandError::Store(StoreError::WrongType)),
+        };
+        replies.push(RespFrame::Integer(reply));
+    }
+    if field_deleted || field_updated {
+        let (db, logical_key) = match decode_db_key(&argv[1]) {
+            Some((db, key)) => (db, key),
+            None => (0, argv[1].as_slice()),
+        };
+        if field_deleted && !store.exists(&argv[1], now_ms) {
+            store.notify_keyspace_event(NOTIFY_HASH, "hdel", logical_key, db);
+            store.notify_keyspace_event(NOTIFY_GENERIC, "del", logical_key, db);
+        } else {
+            let event = if field_deleted { "hdel" } else { "hexpire" };
+            store.notify_keyspace_event(NOTIFY_HASH, event, logical_key, db);
+        }
+    }
+    Ok(RespFrame::Array(Some(replies)))
+}
+
+fn httl(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    if argv.len() < 5 {
+        return Err(CommandError::WrongArity("HTTL"));
+    }
+    let fields =
+        parse_hash_field_ttl_fields(argv, 3, "ERR Number of fields must be a positive integer")?;
+    let mut replies = Vec::with_capacity(fields.len());
+    for field in fields {
+        store.reap_expired_hash_field(&argv[1], field, now_ms);
+        let reply =
+            match store.hash_field_ttl(&argv[1], field, now_ms, HashFieldTtlUnit::Seconds, false) {
+                HashFieldTtl::Remaining(ttl) => i64::try_from(ttl).unwrap_or(i64::MAX),
+                HashFieldTtl::NoTtl => -1,
+                HashFieldTtl::FieldMissing | HashFieldTtl::KeyMissing | HashFieldTtl::Expired => -2,
+                HashFieldTtl::WrongType => return Err(CommandError::Store(StoreError::WrongType)),
+            };
+        replies.push(RespFrame::Integer(reply));
+    }
+    Ok(RespFrame::Array(Some(replies)))
+}
+
+fn hpersist(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    if argv.len() < 5 {
+        return Err(CommandError::WrongArity("HPERSIST"));
+    }
+    let fields =
+        parse_hash_field_ttl_fields(argv, 3, "ERR Number of fields must be a positive integer")?;
+    let mut replies = Vec::with_capacity(fields.len());
+    for field in fields {
+        store.reap_expired_hash_field(&argv[1], field, now_ms);
+        let reply = match store.hash_field_persist_with_event(&argv[1], field) {
+            HashFieldPersistResult::Persisted => 1,
+            HashFieldPersistResult::NoTtl => -1,
+            HashFieldPersistResult::FieldMissing | HashFieldPersistResult::KeyMissing => -2,
+            HashFieldPersistResult::WrongType => {
+                return Err(CommandError::Store(StoreError::WrongType));
+            }
+        };
+        replies.push(RespFrame::Integer(reply));
+    }
+    Ok(RespFrame::Array(Some(replies)))
 }
 
 fn hget(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
@@ -17822,6 +17988,7 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("unlink", -2, "write fast", 1, -1, 1),
     ("touch", -2, "readonly fast", 1, -1, 1),
     ("hset", -4, "write denyoom fast", 1, 1, 1),
+    ("hexpire", -6, "write denyoom fast", 1, 1, 1),
     ("hget", 3, "readonly fast", 1, 1, 1),
     ("hdel", -3, "write fast", 1, 1, 1),
     ("hexists", 3, "readonly fast", 1, 1, 1),
@@ -17835,6 +18002,8 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("hincrbyfloat", 4, "write denyoom fast", 1, 1, 1),
     ("hsetnx", 4, "write denyoom fast", 1, 1, 1),
     ("hstrlen", 3, "readonly fast", 1, 1, 1),
+    ("httl", -5, "readonly fast", 1, 1, 1),
+    ("hpersist", -5, "write fast", 1, 1, 1),
     ("hrandfield", -2, "readonly", 1, 1, 1),
     ("hscan", -3, "readonly", 1, 1, 1),
     ("lpush", -3, "write denyoom fast", 1, 1, 1),
@@ -18678,6 +18847,17 @@ const ACL_CATEGORIES: &[&str] = &[
     "scripting",
 ];
 
+/// Redis 7.4 hash-field TTL commands are newer than the vendored 7.2 command
+/// metadata used to generate `UPSTREAM_ACL_CATEGORY_ENTRIES`. Keep their ACL
+/// classification explicit until that source snapshot is upgraded, so `+@hash`
+/// and `-@write` guard these dispatched commands just like the rest of the
+/// hash family.
+const FORWARD_HASH_FIELD_TTL_ACL_ENTRIES: &[(&str, &[&str])] = &[
+    ("hexpire", &["write", "hash", "fast"]),
+    ("httl", &["read", "hash", "fast"]),
+    ("hpersist", &["write", "hash", "fast"]),
+];
+
 struct AclCategoryMaps {
     by_category: HashMap<&'static str, Vec<&'static str>>,
     by_command: HashMap<&'static str, Vec<&'static str>>,
@@ -18858,6 +19038,14 @@ fn acl_category_maps() -> &'static AclCategoryMaps {
 
         let mut by_command: HashMap<&'static str, Vec<&'static str>> = HashMap::new();
         for &(name, categories) in UPSTREAM_ACL_CATEGORY_ENTRIES {
+            for &cat in categories {
+                if let Some(list) = by_category.get_mut(cat) {
+                    list.push(name);
+                }
+            }
+            by_command.insert(name, categories.to_vec());
+        }
+        for &(name, categories) in FORWARD_HASH_FIELD_TTL_ACL_ENTRIES {
             for &cat in categories {
                 if let Some(list) = by_category.get_mut(cat) {
                     list.push(name);
@@ -29683,6 +29871,9 @@ mod tests {
         if eq_ascii_command(cmd, b"HSET") {
             return Some(CommandId::Hset);
         }
+        if eq_ascii_command(cmd, b"HEXPIRE") {
+            return Some(CommandId::Hexpire);
+        }
         if eq_ascii_command(cmd, b"HGET") {
             return Some(CommandId::Hget);
         }
@@ -29718,6 +29909,12 @@ mod tests {
         }
         if eq_ascii_command(cmd, b"HSTRLEN") {
             return Some(CommandId::Hstrlen);
+        }
+        if eq_ascii_command(cmd, b"HTTL") {
+            return Some(CommandId::Httl);
+        }
+        if eq_ascii_command(cmd, b"HPERSIST") {
+            return Some(CommandId::Hpersist);
         }
         if eq_ascii_command(cmd, b"LPUSH") {
             return Some(CommandId::Lpush);
@@ -31832,6 +32029,7 @@ mod tests {
             b"POST",
             b"host:",
             b"HSET",
+            b"HEXPIRE",
             b"HGET",
             b"HDEL",
             b"HLEN",
@@ -31844,6 +32042,8 @@ mod tests {
             b"HINCRBY",
             b"HSETNX",
             b"HSTRLEN",
+            b"HTTL",
+            b"HPERSIST",
             b"hset",
             b"hGetAll",
             b"LPUSH",
@@ -34501,6 +34701,307 @@ mod tests {
         let get = vec![b"HGET".to_vec(), b"myhash".to_vec(), b"f1".to_vec()];
         let out = dispatch_argv(&get, &mut store, 0).expect("hget");
         assert_eq!(out, RespFrame::BulkString(Some(b"v1".to_vec())));
+    }
+
+    #[test]
+    fn hash_field_ttl_dispatch_reports_per_field_results_and_reaps_zero_ttl() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"HSET".to_vec(),
+                b"h".to_vec(),
+                b"persistent".to_vec(),
+                b"one".to_vec(),
+                b"volatile".to_vec(),
+                b"two".to_vec(),
+            ],
+            &mut store,
+            1_000,
+        )
+        .expect("seed hash");
+
+        let expire = dispatch_argv(
+            &[
+                b"HEXPIRE".to_vec(),
+                b"h".to_vec(),
+                b"10".to_vec(),
+                b"FIELDS".to_vec(),
+                b"3".to_vec(),
+                b"volatile".to_vec(),
+                b"missing".to_vec(),
+                b"persistent".to_vec(),
+            ],
+            &mut store,
+            1_000,
+        )
+        .expect("hexpire");
+        assert_eq!(
+            expire,
+            RespFrame::Array(Some(vec![
+                RespFrame::Integer(1),
+                RespFrame::Integer(-2),
+                RespFrame::Integer(1),
+            ]))
+        );
+
+        let ttl = dispatch_argv(
+            &[
+                b"HTTL".to_vec(),
+                b"h".to_vec(),
+                b"FIELDS".to_vec(),
+                b"3".to_vec(),
+                b"volatile".to_vec(),
+                b"missing".to_vec(),
+                b"persistent".to_vec(),
+            ],
+            &mut store,
+            1_000,
+        )
+        .expect("httl");
+        assert_eq!(
+            ttl,
+            RespFrame::Array(Some(vec![
+                RespFrame::Integer(10),
+                RespFrame::Integer(-2),
+                RespFrame::Integer(10),
+            ]))
+        );
+
+        let persist = dispatch_argv(
+            &[
+                b"HPERSIST".to_vec(),
+                b"h".to_vec(),
+                b"FIELDS".to_vec(),
+                b"2".to_vec(),
+                b"volatile".to_vec(),
+                b"missing".to_vec(),
+            ],
+            &mut store,
+            1_000,
+        )
+        .expect("hpersist");
+        assert_eq!(
+            persist,
+            RespFrame::Array(Some(vec![RespFrame::Integer(1), RespFrame::Integer(-2)]))
+        );
+        assert_eq!(
+            dispatch_argv(
+                &[
+                    b"HTTL".to_vec(),
+                    b"h".to_vec(),
+                    b"FIELDS".to_vec(),
+                    b"2".to_vec(),
+                    b"volatile".to_vec(),
+                    b"persistent".to_vec(),
+                ],
+                &mut store,
+                1_000,
+            )
+            .expect("httl after hpersist"),
+            RespFrame::Array(Some(vec![RespFrame::Integer(-1), RespFrame::Integer(10)]))
+        );
+
+        let zero_ttl = dispatch_argv(
+            &[
+                b"HEXPIRE".to_vec(),
+                b"h".to_vec(),
+                b"0".to_vec(),
+                b"FIELDS".to_vec(),
+                b"1".to_vec(),
+                b"persistent".to_vec(),
+            ],
+            &mut store,
+            1_000,
+        )
+        .expect("zero hexpire");
+        assert_eq!(
+            zero_ttl,
+            RespFrame::Array(Some(vec![RespFrame::Integer(2)]))
+        );
+        assert_eq!(
+            dispatch_argv(
+                &[
+                    b"HTTL".to_vec(),
+                    b"h".to_vec(),
+                    b"FIELDS".to_vec(),
+                    b"2".to_vec(),
+                    b"persistent".to_vec(),
+                    b"volatile".to_vec(),
+                ],
+                &mut store,
+                1_000,
+            )
+            .expect("zero ttl reaped only selected field"),
+            RespFrame::Array(Some(vec![RespFrame::Integer(-2), RespFrame::Integer(-1)]))
+        );
+    }
+
+    #[test]
+    fn hash_field_ttl_dispatch_rejects_bad_fields_block() {
+        let mut store = Store::new();
+        let missing_fields = dispatch_argv(
+            &[
+                b"HEXPIRE".to_vec(),
+                b"h".to_vec(),
+                b"1".to_vec(),
+                b"field".to_vec(),
+                b"1".to_vec(),
+                b"f".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("FIELDS token required");
+        assert_eq!(
+            missing_fields,
+            CommandError::Custom(
+                "ERR Mandatory argument FIELDS is missing or not at the right position".to_string()
+            )
+        );
+
+        let mismatched_count = dispatch_argv(
+            &[
+                b"HTTL".to_vec(),
+                b"h".to_vec(),
+                b"FIELDS".to_vec(),
+                b"2".to_vec(),
+                b"f".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("numfields must match");
+        assert_eq!(
+            mismatched_count,
+            CommandError::Custom(
+                "ERR The `numfields` parameter must match the number of arguments".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn hash_field_ttl_dispatch_honors_conditions_and_wrongtype() {
+        let mut store = Store::new();
+        assert_eq!(
+            dispatch_argv(
+                &[
+                    b"HEXPIRE".to_vec(),
+                    b"missing".to_vec(),
+                    b"1".to_vec(),
+                    b"FIELDS".to_vec(),
+                    b"1".to_vec(),
+                    b"f".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .expect("missing hash returns field result"),
+            RespFrame::Array(Some(vec![RespFrame::Integer(-2)]))
+        );
+
+        dispatch_argv(
+            &[
+                b"HSET".to_vec(),
+                b"h".to_vec(),
+                b"f".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("seed hash");
+        for (seconds, condition, expected) in [
+            (10_u8, b"NX".as_slice(), 1),
+            (20, b"NX".as_slice(), 0),
+            (20, b"XX".as_slice(), 1),
+            (19, b"GT".as_slice(), 0),
+            (19, b"LT".as_slice(), 1),
+        ] {
+            assert_eq!(
+                dispatch_argv(
+                    &[
+                        b"HEXPIRE".to_vec(),
+                        b"h".to_vec(),
+                        seconds.to_string().into_bytes(),
+                        condition.to_vec(),
+                        b"FIELDS".to_vec(),
+                        b"1".to_vec(),
+                        b"f".to_vec(),
+                    ],
+                    &mut store,
+                    0,
+                )
+                .expect("conditional hexpire"),
+                RespFrame::Array(Some(vec![RespFrame::Integer(expected)])),
+                "condition={:?}",
+                String::from_utf8_lossy(condition)
+            );
+        }
+
+        dispatch_argv(
+            &[b"SET".to_vec(), b"string".to_vec(), b"v".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("seed string");
+        assert_eq!(
+            dispatch_argv(
+                &[
+                    b"HTTL".to_vec(),
+                    b"string".to_vec(),
+                    b"FIELDS".to_vec(),
+                    b"1".to_vec(),
+                    b"f".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .expect_err("wrong-type httl"),
+            CommandError::Store(StoreError::WrongType)
+        );
+    }
+
+    #[test]
+    fn hash_field_ttl_dispatch_uses_aggregate_immediate_expiry_events() {
+        let mut store = Store::new();
+        store.notify_keyspace_events =
+            fr_store::NOTIFY_KEYEVENT | fr_store::NOTIFY_HASH | fr_store::NOTIFY_GENERIC;
+        dispatch_argv(
+            &[
+                b"HSET".to_vec(),
+                b"h".to_vec(),
+                b"f".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("seed hash");
+        let _ = store.drain_keyspace_notifications();
+
+        assert_eq!(
+            dispatch_argv(
+                &[
+                    b"HEXPIRE".to_vec(),
+                    b"h".to_vec(),
+                    b"0".to_vec(),
+                    b"FIELDS".to_vec(),
+                    b"1".to_vec(),
+                    b"f".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .expect("immediate expiry"),
+            RespFrame::Array(Some(vec![RespFrame::Integer(2)]))
+        );
+        assert_eq!(
+            store.drain_keyspace_notifications(),
+            vec![
+                (b"__keyevent@0__:hdel".to_vec(), b"h".to_vec()),
+                (b"__keyevent@0__:del".to_vec(), b"h".to_vec()),
+            ]
+        );
     }
 
     #[test]
@@ -67009,7 +67510,7 @@ mod tests {
         assert_eq!(commands_in_acl_category("admin").len(), 65);
         assert_eq!(commands_in_acl_category("connection").len(), 38);
         assert_eq!(commands_in_acl_category("dangerous").len(), 75);
-        assert_eq!(commands_in_acl_category("read").len(), 87);
+        assert_eq!(commands_in_acl_category("read").len(), 88);
 
         let connection = commands_in_acl_category("connection");
         assert!(connection.contains(&"command|docs"));
@@ -67026,6 +67527,11 @@ mod tests {
 
         let dangerous = commands_in_acl_category("dangerous");
         assert!(dangerous.contains(&"config|set"));
+
+        let hash = commands_in_acl_category("hash");
+        assert!(hash.contains(&"hexpire"));
+        assert!(hash.contains(&"httl"));
+        assert!(hash.contains(&"hpersist"));
         assert!(dangerous.contains(&"acl|setuser"));
 
         let read = commands_in_acl_category("read");

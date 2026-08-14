@@ -13680,6 +13680,29 @@ impl Store {
     /// has passed. Returns true if the field was reaped.
     /// (br-frankenredis-b8ut)
     fn drop_hash_field_if_expired(&mut self, key: &[u8], field: &[u8], now_ms: u64) -> bool {
+        self.drop_hash_field_if_expired_inner(key, field, now_ms, true)
+    }
+
+    /// Delete an elapsed field TTL while leaving the command that caused the
+    /// deletion responsible for the keyspace event. This is used by the
+    /// immediate-expiry form of HEXPIRE, which emits `hdel`, whereas ordinary
+    /// lazy expiration emits `hexpired`.
+    fn drop_hash_field_if_expired_without_expiry_event(
+        &mut self,
+        key: &[u8],
+        field: &[u8],
+        now_ms: u64,
+    ) -> bool {
+        self.drop_hash_field_if_expired_inner(key, field, now_ms, false)
+    }
+
+    fn drop_hash_field_if_expired_inner(
+        &mut self,
+        key: &[u8],
+        field: &[u8],
+        now_ms: u64,
+        emit_expiry_event: bool,
+    ) -> bool {
         if !self.hash_field_is_expired(key, field, now_ms) {
             return false;
         }
@@ -13709,7 +13732,9 @@ impl Store {
                 .entry(key.to_vec())
                 .or_insert(0);
             *entry = entry.saturating_add(1);
-            self.notify_hash_field_expired(key);
+            if emit_expiry_event {
+                self.notify_hash_field_expired(key);
+            }
         }
         if became_empty {
             self.internal_entries_remove(key);
@@ -29862,21 +29887,21 @@ impl Store {
             return HashFieldTtlSet::ConditionNotMet;
         }
 
-        self.hash_field_expires.insert(composite, expires_at_ms);
-        self.dirty = self.dirty.saturating_add(1);
-
         if expires_at_ms <= now_ms {
+            self.hash_field_expires.insert(composite, expires_at_ms);
             HashFieldTtlSet::AppliedAlreadyExpired
         } else {
+            self.hash_field_expires.insert(composite, expires_at_ms);
+            self.dirty = self.dirty.saturating_add(1);
             HashFieldTtlSet::Applied
         }
     }
 
     /// Wrapper around [`hash_field_set_abs_expiry`] that emits the
     /// upstream-matching NOTIFY_HASH keyspace event ("hexpire" /
-    /// "hpexpire" / "hexpireat" / "hpexpireat") on success. The Applied
-    /// and AppliedAlreadyExpired outcomes both fire the event; blocked
-    /// (NX/XX/GT/LT) and missing/wrong-type do not.
+    /// "hpexpire" / "hexpireat" / "hpexpireat") when the deadline is set.
+    /// An already-expired deadline deletes the field instead; that command
+    /// path emits its aggregate `hdel` event after all fields are processed.
     /// (br-frankenredis-7jhg)
     pub fn hash_field_set_abs_expiry_with_event(
         &mut self,
@@ -29888,11 +29913,7 @@ impl Store {
         event: &str,
     ) -> HashFieldTtlSet {
         let outcome = self.hash_field_set_abs_expiry(key, field, expires_at_ms, cond, now_ms);
-        if matches!(
-            outcome,
-            HashFieldTtlSet::Applied | HashFieldTtlSet::AppliedAlreadyExpired
-        ) && self.notify_keyspace_events != 0
-        {
+        if matches!(outcome, HashFieldTtlSet::Applied) && self.notify_keyspace_events != 0 {
             let (db, logical_key) = match decode_db_key(key) {
                 Some((db, lk)) => (db, lk),
                 None => (0, key),
@@ -29995,6 +30016,31 @@ impl Store {
             self.notify_keyspace_event(NOTIFY_HASH, "hpersist", logical_key, db);
         }
         outcome
+    }
+
+    /// Reap one elapsed hash-field TTL before a command reports its result.
+    ///
+    /// The field-expiry map is deliberately lazy for normal hash reads. The
+    /// `HEXPIRE` command also has an immediate-expiry form (a zero timeout),
+    /// though, and `HTTL` / `HPERSIST` must treat an elapsed field as missing
+    /// rather than exposing its stale metadata. Command dispatch uses this
+    /// narrow hook to apply the same deletion path those reads use.
+    pub fn reap_expired_hash_field(&mut self, key: &[u8], field: &[u8], now_ms: u64) -> bool {
+        self.drop_hash_field_if_expired(key, field, now_ms)
+    }
+
+    /// Reap one elapsed hash-field TTL without sending the lazy-expiry event.
+    ///
+    /// `HEXPIRE ... 0` deletes a field immediately and reports one aggregate
+    /// `hdel` event for the command, so its caller uses this companion to keep
+    /// the lazy `hexpired` event from leaking into that observable path.
+    pub fn reap_expired_hash_field_without_expiry_event(
+        &mut self,
+        key: &[u8],
+        field: &[u8],
+        now_ms: u64,
+    ) -> bool {
+        self.drop_hash_field_if_expired_without_expiry_event(key, field, now_ms)
     }
 
     /// True if `field` on `key` is expired (past deadline) per the

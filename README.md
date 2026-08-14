@@ -36,7 +36,7 @@ FrankenRedis ships a Rust workspace whose crates each own one job (`fr-protocol`
 | You want… | FrankenRedis gives you |
 |---|---|
 | **A memory-safe Redis** | `#![forbid(unsafe_code)]` across 12 of 13 crates (parser, data engine, command dispatch, persistence, replication, sentinel, etc.); `fr-runtime` uses `#![deny(unsafe_code)]` with three audited `unsafe` blocks for `libc::waitpid` in BGSAVE/BGREWRITEAOF child-process supervision |
-| **Drop-in protocol parity with Redis 7.2.4** | 241 commands implemented (zero stubs), 4,975 differential conformance cases run against the vendored Redis binary on every CI gate |
+| **Drop-in protocol parity with Redis 7.2.4** | 241 Redis 7.2.4 commands plus three Redis 7.4 hash-field TTL commands implemented (zero stubs), 4,975 differential conformance cases run against the vendored Redis binary on every CI gate |
 | **A compatibility/security policy split** | `Mode::Strict` (byte-exact replies, no defensive repairs) vs `Mode::Hardened` (preserves contract, adds fail-closed guards for malformed/adversarial input) |
 | **A Sentinel state machine** | The `fr-sentinel` crate implements `__sentinel__:hello` discovery, quorum-based S_DOWN/O_DOWN, epoch leader election, and a 7-state failover machine, matching the conceptual model of Redis Sentinel. Currently exposed as a library and via `SENTINEL` command dispatch. |
 | **Live differential parity testing** | The `fr-conformance` harness spawns vendored `redis-server`, executes the same fixture against both, and diffs replies byte-for-byte across 43 fixture families covering every command domain |
@@ -89,7 +89,7 @@ The replica issues `PSYNC` / `FULLRESYNC` against the primary, streams the RDB s
 
 | Area | State | Detail |
 |---|---|---|
-| **Commands** | **241 base commands, zero stubs.** | All command families: strings, hashes, lists, sets, sorted sets, streams, geo, hyperloglog, bitmap, pub/sub, scripting (EVAL/FCALL), server, cluster (single-node), connection, ACL, transactions, debug, function, memory, slowlog, latency, monitor. |
+| **Commands** | **241 Redis 7.2 base commands plus three Redis 7.4 hash-field TTL commands, zero stubs.** | All command families: strings, hashes, lists, sets, sorted sets, streams, geo, hyperloglog, bitmap, pub/sub, scripting (EVAL/FCALL), server, cluster (single-node), connection, ACL, transactions, debug, function, memory, slowlog, latency, monitor. |
 | **Wire protocol** | RESP2 native; RESP3 inbound parsing with downconversion. | `fr-protocol` enforces upstream `max_bulk_len = 512 MiB`, `max_array_len = 1M`, `max_recursion_depth = 128`, CRLF-injection sanitization on error/string bodies. RESP3 `Map`/`Set` emitted on the reply side when the client negotiates `protocol_version=3` (`HELLO 3`) for `CONFIG GET`, `HGETALL`, `XINFO STREAM/GROUPS/CONSUMERS`. |
 | **Persistence** | AOF + RDB v11, both round-trip-tested. | Manifest-based multi-part AOF with `everysec`/`always`/`no` fsync; AOF replay with bounded tail-repair policies. RDB v11 with LZF compression on strings >20 B, CRC64 footer, standalone listpack decoder for upstream macro-node entries, and decoder coverage for upstream compact type tags `RDB_TYPE_SET_INTSET` (11), `RDB_TYPE_HASH_LISTPACK` (16), `RDB_TYPE_ZSET_LISTPACK` (17), `RDB_TYPE_LIST_QUICKLIST_2` (18), `RDB_TYPE_STREAM_LISTPACKS_2` (19), `RDB_TYPE_SET_LISTPACK` (20), and `RDB_TYPE_STREAM_LISTPACKS_3` (21). `FUNCTION DUMP`/`RESTORE` wrapped in an upstream version + CRC64 envelope so functions round-trip through vendored servers. |
 | **Replication** | TCP end-to-end, both directions. | `--replicaof` and `REPLICAOF`/`SLAVEOF` from clients; `AUTH`/`REPLCONF`/`PSYNC` handshake; `FULLRESYNC` snapshot stream; `CONTINUE` backlog replay; `REPLCONF ACK` offset accounting; replica-of-replica chaining; `min-replicas-to-write` / `min-replicas-max-lag` write admission; reconnect with backoff. Integration tests prove legacy → FrankenRedis, password-protected legacy → FrankenRedis, and FrankenRedis → replica → downstream replica. |
@@ -408,7 +408,7 @@ pub struct SortedSet {
 
 **SCAN cursors are positional, not bit-reversed.** Real Redis uses a clever reverse-binary cursor that survives hash-table rehashing without missing or duplicating keys. FrankenRedis's `HashMap` doesn't have Redis's two-table rehash, so it can get away with a simpler positional cursor: `next_cursor = pos`, returning `0` on completion. Redis explicitly documents SCAN cursors as opaque to clients, so this is allowed; `HSCAN`/`SSCAN`/`ZSCAN` short-circuit small-encoding values (return everything with cursor = 0) just like upstream does.
 
-**Hash field TTL** has its storage layer wired (`hash_field_expires: BTreeMap<(key, field), expires_at_ms>` plus per-key reap counters) and RDB round-trips through `RDB_TYPE_HASH_WITH_TTLS` (tag 100) already preserve per-field expirations across both runtimes. What is *not* yet wired is the wire-level command dispatch: the Redis 7.4 `HEXPIRE`/`HTTL`/`HPERSIST` family does not have command-arm entries in `fr-command::dispatch_argv` yet, and the lazy-expiry enforcement at every hash read path is still to come.
+**Hash field TTL** uses `hash_field_expires: BTreeMap<(key, field), expires_at_ms>` plus per-key reap counters, with RDB round-trips through `RDB_TYPE_HASH_WITH_TTLS` (tag 100). The Redis 7.4 `HEXPIRE`, `HTTL`, and `HPERSIST` command family is dispatched through `fr-command`; elapsed fields are reaped before TTL or persist results are reported.
 
 **LFU is the logarithmic counter from upstream** with `LFU_INIT_VAL = 5` (newly-created objects start at 5 so they aren't immediate eviction candidates) and `lfu-log-factor = 10` controlling counter growth speed; decay is applied via `lfu_last_touch_min` so the counter doesn't grow without bound during long-running cache sessions.
 
@@ -680,7 +680,7 @@ PFCOUNT then estimates cardinality from the 16384 registers using the
 HLL harmonic-mean formula plus the small/large cardinality bias corrections.
 ```
 
-FrankenRedis ships the **dense** representation (`16389 bytes = 16384 6-bit registers packed into 12 KiB plus a 5-byte HLL_DENSE header`). Vendored Redis uses a sparse representation for low cardinalities and switches to dense when it gets bigger; that's the open `frankenredis-j2tuo` parity bead. Switching to sparse for small sets saves a lot of memory when you have many keys each holding a small HLL.
+FrankenRedis uses Redis-compatible **sparse** encoding for low-cardinality sketches and promotes to the dense representation (`16389 bytes = 16384 6-bit registers packed into 12 KiB plus a 5-byte HLL_DENSE header`) once the sparse form is no longer efficient. This preserves the memory advantage for workloads with many small HLL keys.
 
 `PFMERGE` produces a union by taking the register-wise max across the inputs. `PFDEBUG GETREG/DECODE/ENCODING/TODENSE` inspect or convert the encoding. `PFSELFTEST` is the upstream-defined self-check covering register bit-packing and hash-distribution invariants.
 
@@ -743,14 +743,14 @@ fn run_active_expire_cycle(now_ms, start_cursor, sample_limit):
 
 This is a **deterministic cursor-based scan** rather than the random-sampling-with-25%-recurrence heuristic upstream uses. Every expiring key is eventually visited as the cursor walks the keyspace; the budget bound (`sample_limit`) prevents any one tick from monopolizing the loop. The trade-off versus upstream is more predictable progress and simpler reasoning, at slightly higher cost on workloads where most expirations cluster temporally. The cursor is persisted across ticks so the scan is fair across the keyspace, not biased toward whatever is at the front of the index.
 
-### LRU / LFU eviction (note: exact, not approximate)
+### LRU / LFU eviction
 
 `maxmemory-policy {allkeys-lru, volatile-lru, allkeys-lfu, volatile-lfu, allkeys-random, volatile-random, volatile-ttl, noeviction}` triggers when adding a key would exceed `maxmemory`. Two pieces of FrankenRedis behavior are worth calling out explicitly because they differ from vendored Redis:
 
-1. **Eviction selection is currently an exact scan.** `select_eviction_candidate` walks every `Entry` in `Store::entries` to find the one with the smallest `last_access_ms` (for LRU policies) or the soonest `expires_at_ms` (for `volatile-ttl`). Upstream Redis approximates this with `maxmemory-samples` random samples plus an `EVPOOL_SIZE = 16` candidate pool. FrankenRedis recognizes `maxmemory-samples` in `CONFIG SET` for compatibility but does not currently use it for selection; selection is exact and `O(N)` per eviction.
-2. **LFU is currently approximated as LRU at selection time.** The 8-bit LFU counter is tracked per-`Entry` and exposed via `OBJECT FREQ` (using the standard upstream logarithmic-increment + minute-resolution-decay arithmetic), but `select_eviction_candidate` for `allkeys-lfu` / `volatile-lfu` falls back to picking the key with the smallest `last_access_ms` rather than the smallest `lfu_freq`. The counter is correct; the selection isn't yet wired to it.
+1. **Eviction selection samples candidates.** `select_eviction_candidate` samples up to `maxmemory-samples` keys, then chooses the lowest access time (LRU), lowest decayed frequency (LFU), or nearest expiry (`volatile-ttl`) within that sample. Upstream additionally retains a sorted `EVPOOL_SIZE = 16` candidate pool across eviction rounds; FrankenRedis samples fresh each round.
+2. **LFU selection uses the decayed 8-bit frequency.** The counter is tracked per-`Entry` and exposed via `OBJECT FREQ`, using the standard logarithmic increment and minute-resolution decay arithmetic. Ties are resolved by access time and key bytes for deterministic selection.
 
-Both are worth tracking. The exact scan is straightforward to switch to sampling, and the LFU-selection wiring is a small change. Neither affects the observable contract of `OBJECT IDLETIME` / `OBJECT FREQ` or the `evicted_keys` counter, but they do affect throughput at very large keyspaces and the *which key gets evicted* decision under LFU.
+The remaining difference from upstream's eviction pool affects throughput and which key is selected under pressure, but not the observable `OBJECT IDLETIME` / `OBJECT FREQ` contracts or the `evicted_keys` counter.
 
 The LFU counter itself follows upstream `evict.c`: logarithmic increment so a hot key doesn't saturate the 8-bit counter to 255 immediately (it grows roughly like `log_2(access_count)` modulated by `lfu-log-factor`), plus a separate decay (`lfu-decay-time` minutes) so a once-hot-then-cold key doesn't stick forever.
 
@@ -1056,12 +1056,12 @@ frankenredis [options]
 
 ## Command surface
 
-All 241 base Redis commands are implemented and exposed. Counts below are approximate command-name groupings.
+All 241 Redis 7.2 base commands are implemented and exposed, together with Redis 7.4 `HEXPIRE`, `HTTL`, and `HPERSIST`. Counts below are approximate command-name groupings.
 
 | Family | Count | Highlights |
 |---|---|---|
 | Strings | 22 | GET, SET (`EX`/`PX`/`EXAT`/`PXAT`/`KEEPTTL`/`NX`/`XX`/`GET`), SETEX, PSETEX, SETNX, APPEND, GETRANGE, SETRANGE, INCR, DECR, INCRBY, DECRBY, INCRBYFLOAT, GETEX, GETDEL, GETSET, MSET, MSETNX, MGET, LCS, SUBSTR, STRLEN |
-| Hashes | 16 | HSET, HGET, HMGET, HDEL, HINCRBY, HINCRBYFLOAT, HSCAN, HRANDFIELD (`COUNT`/`WITHVALUES`), HSETNX, HVALS, HKEYS, HLEN, HEXISTS |
+| Hashes | 19 | HSET, HGET, HMGET, HDEL, HINCRBY, HINCRBYFLOAT, HSCAN, HRANDFIELD (`COUNT`/`WITHVALUES`), HSETNX, HVALS, HKEYS, HLEN, HEXISTS, HEXPIRE, HTTL, HPERSIST |
 | Lists | 22 | LPUSH, RPUSH, LPOP/RPOP (`COUNT`), LRANGE, LTRIM, LINSERT, LPOS (`RANK`/`COUNT`/`MAXLEN`), LMOVE, RPOPLPUSH, LMPOP, BLPOP, BRPOP, BLMOVE, BLMPOP, BRPOPLPUSH |
 | Sets | 17 | SADD, SREM, SISMEMBER, SMISMEMBER, SCARD, SMEMBERS, SINTER, SUNION, SDIFF, SINTERSTORE, SUNIONSTORE, SDIFFSTORE, SINTERCARD, SRANDMEMBER (`COUNT`), SPOP (`COUNT`), SSCAN, SMOVE |
 | Sorted sets | 35 | ZADD (`NX`/`XX`/`GT`/`LT`/`CH`/`INCR`), ZRANGE (`BYSCORE`/`BYLEX`/`REV`/`LIMIT`/`WITHSCORES`), ZREVRANGE, ZRANGESTORE, ZRANGEBYSCORE/ZREVRANGEBYSCORE, ZRANGEBYLEX/ZREVRANGEBYLEX, ZPOPMIN/ZPOPMAX (`COUNT`), BZPOPMIN, BZPOPMAX, ZMPOP, BZMPOP, ZDIFF/ZUNION/ZINTER + STORE forms, ZINTERCARD, ZRANDMEMBER, ZINCRBY, ZRANK/ZREVRANK (`WITHSCORE`), ZSCORE, ZMSCORE, ZCOUNT, ZLEXCOUNT, ZCARD, ZREM, ZREMRANGEBYRANK/SCORE/LEX, ZSCAN |
@@ -1582,8 +1582,8 @@ In strict mode, the default decision for every threat class is `FailClosed` with
 Honest list of what FrankenRedis does *not* do today. The roadmap below tracks closure.
 
 - **No multi-node cluster sharding.** The `CLUSTER` command surface is implemented for single-node mode (slot map, NODES, INFO, KEYSLOT, etc.), but FrankenRedis does not yet do CRC16 slot rebalancing or live shard migration across multiple FrankenRedis processes.
-- **Wire-level TLS delegated to operational layer.** TLS configuration parsing and validation are wired through `fr-config` / `fr-runtime`, but the listener accepts plaintext only. **This is a deliberate scope decision:** TLS termination is a transport concern, not Redis protocol parity. All 241 commands behave identically over TLS or plaintext. Use `stunnel`, `spiped`, or your load balancer/reverse-proxy for TLS termination — this is the standard production pattern anyway.
-- **Hash field TTL commands are intentionally not exposed.** The `HEXPIRE`/`HTTL`/`HPERSIST` family is a Redis 7.4 feature; FrankenRedis targets 7.2.4 parity. The storage-layer representation exists (`hash_field_expires` on `Store`, `RDB_TYPE_HASH_WITH_TTLS` round-trip) for forward compatibility.
+- **Wire-level TLS delegated to operational layer.** TLS configuration parsing and validation are wired through `fr-config` / `fr-runtime`, but the listener accepts plaintext only. **This is a deliberate scope decision:** TLS termination is a transport concern, not Redis protocol parity. All implemented commands behave identically over TLS or plaintext. Use `stunnel`, `spiped`, or your load balancer/reverse-proxy for TLS termination — this is the standard production pattern anyway.
+- **Hash-field TTL coverage is partial.** `HEXPIRE`, `HTTL`, and `HPERSIST` are exposed as Redis 7.4 forward-compatibility commands; the millisecond and absolute-time variants remain outside the current command surface.
 - **Maxmemory eviction samples randomly, not into a sorted pool.** `sampled_eviction_candidate_keys` randomly samples up to `sample_limit` keys (default 5, matching upstream's `maxmemory-samples`), then picks the best LRU/LFU/TTL candidate from that sample. Upstream merges samples into a sorted `EVPOOL_SIZE = 16` pool across eviction rounds; FrankenRedis samples fresh each round.
 - **RaptorQ-everywhere durability sidecar is not started.** The doctrine is named in `AGENTS.md`; no crate dependency or implementation exists yet.
 - **No tagged releases.** Workspace version is `0.1.0` everywhere; the project is pre-1.0 and `main` is the only branch with guarantees.
