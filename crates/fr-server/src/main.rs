@@ -16486,6 +16486,9 @@ enum BorrowedDispatchFloorClass {
     BitfieldRoTwoGet,
     BitfieldSet,
     Dbsize,
+    /// (frankenredis-ozrro) `DEL` with two through five keys. These exact
+    /// parsers lived near the tail of the borrowed cascade.
+    Del(usize),
     Echo,
     Exists(usize),
     Getex,
@@ -16593,8 +16596,6 @@ enum BorrowedDispatchFloorClass {
     /// (frankenredis-ozrro) `ZMSCORE key member...`, any count — two, three and
     /// the variadic parser are tried in the cascade's own order.
     Zmscore,
-    Zpopmax,
-    Zpopmin,
     /// (frankenredis-ozrro) `LINSERT key BEFORE|AFTER pivot element`.
     Linsert,
     /// (frankenredis-ozrro) `SETRANGE key offset value`.
@@ -16726,6 +16727,7 @@ enum BorrowedDispatchFloorCommand {
     Bitpos,
     Copy,
     Dbsize,
+    Del,
     Decrby,
     Echo,
     Exists,
@@ -16794,6 +16796,8 @@ enum BorrowedDispatchFloorCommand {
     Zdiffstore,
     Zincrby,
     Zinterstore,
+    Zpopmax,
+    Zpopmin,
     Zrandmember,
     Zrange,
     Zmscore,
@@ -16824,9 +16828,11 @@ fn uppercase_ascii_token<const N: usize>(token: &[u8]) -> Option<[u8; N]> {
 
 fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloorCommand> {
     match token.len() {
-        3 => token
-            .eq_ignore_ascii_case(b"TTL")
-            .then_some(BorrowedDispatchFloorCommand::Ttl),
+        3 => match uppercase_ascii_token::<3>(token)? {
+            [b'T', b'T', b'L'] => Some(BorrowedDispatchFloorCommand::Ttl),
+            [b'D', b'E', b'L'] => Some(BorrowedDispatchFloorCommand::Del),
+            _ => None,
+        },
         4 => match uppercase_ascii_token::<4>(token)? {
             [b'E', b'C', b'H', b'O'] => Some(BorrowedDispatchFloorCommand::Echo),
             [b'T', b'Y', b'P', b'E'] => Some(BorrowedDispatchFloorCommand::Type),
@@ -17376,6 +17382,9 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         }
         (4, BorrowedDispatchFloorCommand::Xack) if xack_missing_floor_enabled() => {
             Some(BorrowedDispatchFloorClass::XackMissing)
+        }
+        (array_len, BorrowedDispatchFloorCommand::Del) if (3..=6).contains(&array_len) => {
+            Some(BorrowedDispatchFloorClass::Del(array_len - 1))
         }
         // (frankenredis-ozrro) Two routes that WORK but sit ~1200 and ~2700 arms'
         // worth of prefix tests deep, so the walk to reach them costs more than
@@ -18419,6 +18428,68 @@ fn dispatch_floor_fast_lpos(
     Some((packet.consumed, response))
 }
 
+/// Reuse the exact per-arity parsers that the late cascade arms used for DEL.
+/// A malformed frame or a runtime decline returns `None`, preserving the generic
+/// fallback and its error semantics.
+fn dispatch_floor_fast_del(
+    nkeys: usize,
+    unparsed: &[u8],
+    parser_config: &ParserConfig,
+    runtime: &mut Runtime,
+    ts: u64,
+) -> Option<(usize, RespFrame)> {
+    match nkeys {
+        2 => {
+            let packet = parse_borrowed_plain_key_arg1_packet(
+                unparsed,
+                parser_config,
+                b"*3\r\n$3\r\n",
+                b"DEL",
+            )?;
+            runtime
+                .execute_plain_del_borrowed(&[packet.key, packet.arg], ts)
+                .map(|response| (packet.consumed, response))
+        }
+        3 => {
+            let packet = parse_borrowed_plain_key_arg2_packet(
+                unparsed,
+                parser_config,
+                b"*4\r\n$3\r\n",
+                b"DEL",
+            )?;
+            runtime
+                .execute_plain_del_borrowed(&[packet.key, packet.a, packet.b], ts)
+                .map(|response| (packet.consumed, response))
+        }
+        4 => {
+            let packet = parse_borrowed_plain_key_arg3_packet(
+                unparsed,
+                parser_config,
+                b"*5\r\n$3\r\n",
+                b"DEL",
+            )?;
+            runtime
+                .execute_plain_del_borrowed(&[packet.key, packet.a, packet.b, packet.c], ts)
+                .map(|response| (packet.consumed, response))
+        }
+        5 => {
+            let packet = parse_borrowed_plain_key_arg4_packet(
+                unparsed,
+                parser_config,
+                b"*6\r\n$3\r\n",
+                b"DEL",
+            )?;
+            runtime
+                .execute_plain_del_borrowed(
+                    &[packet.key, packet.a, packet.b, packet.c, packet.d],
+                    ts,
+                )
+                .map(|response| (packet.consumed, response))
+        }
+        _ => None,
+    }
+}
+
 fn dispatch_floor_fast_exists_into(
     nkeys: usize,
     unparsed: &[u8],
@@ -18686,6 +18757,22 @@ fn try_dispatch_floor_classified_action(
                     consumed: packet.consumed,
                     response,
                 })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Del(nkeys) => {
+            if let Some((consumed, response)) =
+                dispatch_floor_fast_del(nkeys, unparsed, &parser_config, runtime, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply { consumed, response })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,
@@ -43713,6 +43800,25 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
                 &cfg,
             ),
             Some(super::BorrowedDispatchFloorClass::Xlen)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$3\r\ndEl\r\n$1\r\na\r\n$1\r\nb\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Del(2))
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*6\r\n$3\r\nDEL\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Del(5))
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(b"*2\r\n$3\r\nDEL\r\n$1\r\na\r\n", &cfg,),
+            None,
+            "single-key DEL keeps its existing dedicated route"
         );
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(
