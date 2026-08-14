@@ -1407,7 +1407,8 @@ fn lua_lvalue_first_token(expr: &Expr) -> String {
             }
         }
         Expr::Str(s) => format!("'{}'", String::from_utf8_lossy(s)),
-        Expr::Name(n) | Expr::LocalName(n, _) => n.clone(),
+        Expr::Name(n) => n.to_string(),
+        Expr::LocalName(n, _) => n.clone(),
         Expr::VarArgs => "...".to_string(),
         Expr::Call(_, _) | Expr::MethodCall(_, _, _) => "()".to_string(),
         Expr::TableConstructor(_) => "{".to_string(),
@@ -2064,7 +2065,9 @@ pub enum Expr {
     // clone. Runtime LuaValue strings remain owned for now; this is the
     // compilation-side foundation for the wider shared-string refactor.
     Str(Rc<[u8]>),
-    Name(String),
+    // Global names are immutable source tokens. Cached chunks clone function
+    // bodies for each closure instance, so keep the parsed spelling shared.
+    Name(Rc<str>),
     LocalName(String, LocalSlotRef),
     VarArgs,
     BinOp(Box<Expr>, BinOp, Box<Expr>),
@@ -2751,7 +2754,7 @@ impl Parser {
         match self.peek().clone() {
             Token::Name(n) => {
                 self.advance();
-                Ok((Expr::Name(n), true))
+                Ok((Expr::Name(Rc::from(n)), true))
             }
             Token::LParen => {
                 self.advance();
@@ -2798,7 +2801,7 @@ impl Parser {
         match self.peek().clone() {
             Token::Name(n) => {
                 self.advance();
-                Ok(Expr::Name(n))
+                Ok(Expr::Name(Rc::from(n)))
             }
             Token::LParen => {
                 self.advance();
@@ -3036,7 +3039,7 @@ impl LocalResolver {
         match expr {
             Expr::Name(name) => {
                 if let Some(local) = self.resolve_local(name) {
-                    *expr = Expr::LocalName(name.clone(), local);
+                    *expr = Expr::LocalName(name.to_string(), local);
                 }
             }
             Expr::LocalName(_, _) | Expr::Nil | Expr::Bool(_) | Expr::Number(_) | Expr::Str(_) => {}
@@ -5120,7 +5123,7 @@ impl<'a> LuaState<'a> {
                     // (frankenredis-j02x9) `function f() end` is
                     // equivalent to `f = function() end`; both write
                     // to the globals table. Block once locked.
-                    self.assign_to(&Expr::Name(names[0].clone()), func, env, varargs)?;
+                    self.assign_to(&Expr::Name(Rc::from(names[0].clone())), func, env, varargs)?;
                 } else {
                     // Nested field assignment: a.b.c = func
                     self.set_nested_field(names, func)?;
@@ -5270,7 +5273,7 @@ impl<'a> LuaState<'a> {
                     if self.globals_locked {
                         return Err("user_script:1: Attempt to modify a readonly table".to_string());
                     }
-                    self.globals.insert(name.clone(), value);
+                    self.globals.insert(name.to_string(), value);
                 }
             }
             Expr::Index(table_expr, key_expr) => {
@@ -5430,7 +5433,7 @@ impl<'a> LuaState<'a> {
                         )?;
                         return Ok(());
                     }
-                    self.globals.insert(name.clone(), table);
+                    self.globals.insert(name.to_string(), table);
                 }
                 Ok(())
             }
@@ -5932,7 +5935,8 @@ impl<'a> LuaState<'a> {
                             match env.set_existing_local(var_name, arg_vals[0].clone()) {
                                 true => {}
                                 false => {
-                                    self.globals.insert(var_name.clone(), arg_vals[0].clone());
+                                    self.globals
+                                        .insert(var_name.to_string(), arg_vals[0].clone());
                                 }
                             }
                         }
@@ -7041,7 +7045,8 @@ impl<'a> LuaState<'a> {
             return Some(m.to_string());
         }
         match callee_expr {
-            Expr::Name(n) | Expr::LocalName(n, _) => Some(n.clone()),
+            Expr::Name(n) => Some(n.to_string()),
+            Expr::LocalName(n, _) => Some(n.clone()),
             Expr::Field(_, f) => Some(f.clone()),
             Expr::Index(_, key) => match key.as_ref() {
                 Expr::Str(s) if !s.is_empty() => std::str::from_utf8(s).ok().map(str::to_string),
@@ -18009,6 +18014,43 @@ end
             "cloned AST must share its immutable literal allocation"
         );
         assert_eq!(original_bytes.as_ref(), b"shared literal");
+    }
+
+    #[test]
+    fn cloned_function_ast_shares_global_name_nodes_d3al0() {
+        // Global names are immutable parser data just like literals. Closure
+        // creation clones the function body, so the AST copies must retain the
+        // same allocation instead of copying every global spelling.
+        let parsed = super::parse_lua_chunk(b"return function() return KEYS[1] end")
+            .expect("script should parse");
+        let cloned = parsed.clone();
+
+        let global_name = |block: &super::Block| {
+            let super::Stmt::Return(values) = &block[0].1 else {
+                panic!("expected top-level return");
+            };
+            let super::Expr::FunctionDef(_, _, body) = &values[0] else {
+                panic!("expected function literal");
+            };
+            let super::Stmt::Return(values) = &body[0].1 else {
+                panic!("expected function return");
+            };
+            let super::Expr::Index(base, _) = &values[0] else {
+                panic!("expected global index");
+            };
+            let super::Expr::Name(name) = base.as_ref() else {
+                panic!("expected global name");
+            };
+            name.clone()
+        };
+
+        let original_name = global_name(&parsed);
+        let cloned_name = global_name(&cloned);
+        assert!(
+            std::rc::Rc::ptr_eq(&original_name, &cloned_name),
+            "cloned AST must share its immutable global-name allocation"
+        );
+        assert_eq!(original_name.as_ref(), "KEYS");
     }
 
     #[test]
