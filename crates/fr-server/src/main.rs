@@ -16541,6 +16541,8 @@ enum BorrowedDispatchFloorClass {
     /// (frankenredis-ozrro) `HMGET key field...`, any count — two, three and the
     /// variadic parser are tried in the cascade's own order.
     Hmget,
+    /// (frankenredis-ozrro) `MGET` with exactly four keys.
+    MgetFour,
     /// (frankenredis-ozrro) `GETDEL key`.
     Getdel,
     /// (frankenredis-ozrro) `DECRBY key decrement`.
@@ -16762,6 +16764,7 @@ enum BorrowedDispatchFloorCommand {
     Lpush,
     Lrem,
     Memory,
+    Mget,
     Object,
     Pfcount,
     Pttl,
@@ -16856,6 +16859,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'Z', b'A', b'D', b'D'] => Some(BorrowedDispatchFloorCommand::Zadd),
             [b'C', b'O', b'P', b'Y'] => Some(BorrowedDispatchFloorCommand::Copy),
             [b'P', b'T', b'T', b'L'] => Some(BorrowedDispatchFloorCommand::Pttl),
+            [b'M', b'G', b'E', b'T'] => Some(BorrowedDispatchFloorCommand::Mget),
             _ => None,
         },
         5 => match uppercase_ascii_token::<5>(token)? {
@@ -17568,6 +17572,7 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (arity, BorrowedDispatchFloorCommand::Hmget) if arity >= 3 => {
             Some(BorrowedDispatchFloorClass::Hmget)
         }
+        (5, BorrowedDispatchFloorCommand::Mget) => Some(BorrowedDispatchFloorClass::MgetFour),
         (3, BorrowedDispatchFloorCommand::Hscan) => {
             Some(BorrowedDispatchFloorClass::Scan0(PlainScan0Cmd::Hscan))
         }
@@ -18980,6 +18985,27 @@ fn try_dispatch_floor_classified_action(
                         client_resp3,
                         out,
                     )
+                    .is_some()
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
+                    consumed: packet.consumed,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::MgetFour => {
+            let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+            if let Some(packet) = parse_borrowed_plain_mget_four_packet(unparsed, &parser_config)
+                && runtime
+                    .execute_plain_mget_borrowed_into(&packet.keys, ts, client_resp3, out)
                     .is_some()
             {
                 Ok(BorrowedMultibulkAction::FastEncodedReply {
@@ -47698,6 +47724,10 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         assert_eq!(
             borrowed_dispatch_floor_command(b"HGET"),
             Some(BorrowedDispatchFloorCommand::Hget)
+        );
+        assert_eq!(
+            borrowed_dispatch_floor_command(b"mGeT"),
+            Some(BorrowedDispatchFloorCommand::Mget)
         );
         assert_eq!(
             borrowed_dispatch_floor_command(b"SISMEMBER"),
