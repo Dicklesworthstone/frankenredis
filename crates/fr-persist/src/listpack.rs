@@ -593,6 +593,13 @@ pub fn decode_listpack(data: &[u8]) -> Result<Vec<ListpackEntry>, ListpackError>
 /// `decoded.len().is_multiple_of(2)` guard did. (frankenredis zsetlpscore)
 pub fn decode_zset_listpack_pairs(data: &[u8]) -> Result<Vec<(Vec<u8>, f64)>, ListpackError> {
     let (total_bytes, num_elements) = parse_header(data)?;
+    // A zset listpack is strictly alternating member/score entries. When the
+    // header carries an exact count, reject an impossible odd shape before
+    // walking entries or materializing any member buffers. The unknown-count
+    // sentinel still needs the structural walk below.
+    if num_elements != LISTPACK_HDR_NUMELE_UNKNOWN && !num_elements.is_multiple_of(2) {
+        return Err(ListpackError::ElementCountMismatch);
+    }
     let end = (total_bytes as usize) - 1; // terminator is at total_bytes - 1
     let mut cursor = LISTPACK_HEADER_SIZE;
     let mut pairs = if num_elements == LISTPACK_HDR_NUMELE_UNKNOWN {
@@ -1475,7 +1482,11 @@ mod tests {
             &entry_7bit_uint(1),
             &entry_6bit_str(b"m1"),
         ]);
-        assert!(decode_zset_listpack_pairs(&odd).is_err());
+        assert_eq!(
+            decode_zset_listpack_pairs(&odd),
+            Err(ListpackError::ElementCountMismatch),
+            "a known odd header must fail before member materialization"
+        );
         assert!(decode_zset_listpack_pairs_orig(&odd).is_err());
 
         // Unparseable string score.
