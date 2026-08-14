@@ -2084,7 +2084,10 @@ pub enum Expr {
     // bodies, so share them across AST clones with the other name nodes.
     MethodCall(Box<Expr>, Rc<str>, Vec<Expr>),
     TableConstructor(Vec<TableField>),
-    FunctionDef(Vec<String>, bool, Block),
+    // Function-literal parameters are immutable parser data. Keep them shared
+    // in cached ASTs; instantiating the runtime Lua function still materializes
+    // its independent local-name vector.
+    FunctionDef(Vec<Rc<str>>, bool, Block),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2844,7 +2847,11 @@ impl Parser {
                 let fn_line = self.cur_line();
                 self.advance();
                 let (params, is_variadic, body) = self.parse_func_body(fn_line)?;
-                Ok(Expr::FunctionDef(params, is_variadic, body))
+                Ok(Expr::FunctionDef(
+                    params.into_iter().map(Rc::from).collect(),
+                    is_variadic,
+                    body,
+                ))
             }
             Token::Dots => {
                 self.advance();
@@ -2955,10 +2962,10 @@ impl LocalResolver {
         self.exit_scope();
     }
 
-    fn resolve_function_body(&mut self, params: &[String], body: &mut Block) {
+    fn resolve_function_body<T: AsRef<str>>(&mut self, params: &[T], body: &mut Block) {
         self.enter_scope();
         for param in params {
-            self.declare_local(param);
+            self.declare_local(param.as_ref());
         }
         self.resolve_stmts(body);
         self.exit_scope();
@@ -6095,7 +6102,7 @@ impl<'a> LuaState<'a> {
                 Ok(LuaValue::Table(table))
             }
             Expr::FunctionDef(params, is_variadic, body) => Ok(LuaValue::function(LuaFunc {
-                params: params.clone(),
+                params: params.iter().map(ToString::to_string).collect(),
                 body: body.clone(),
                 is_variadic: *is_variadic,
                 captured_env: Some(env.snapshot()),
@@ -18220,6 +18227,51 @@ end
         let mut store = Store::new();
         let reply = eval_script(
             b"local f = function(value) local snapshot = value; return snapshot end; return f('value')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        );
+        assert_eq!(reply, Ok(RespFrame::BulkString(Some(b"value".to_vec()))));
+    }
+
+    #[test]
+    fn cloned_function_ast_shares_parameter_names_d3al0() {
+        let parsed = super::parse_lua_chunk(b"return function(first, second) return first end");
+        assert!(parsed.is_ok(), "script should parse");
+
+        let parameters = |block: &super::Block| {
+            let [(_, super::Stmt::Return(values))] = block.as_slice() else {
+                return None;
+            };
+            let [super::Expr::FunctionDef(params, _, _)] = values.as_slice() else {
+                return None;
+            };
+            let [first, second] = params.as_slice() else {
+                return None;
+            };
+            Some((first.clone(), second.clone()))
+        };
+
+        if let Ok(parsed) = parsed {
+            let cloned = parsed.clone();
+            let original_params = parameters(&parsed);
+            let cloned_params = parameters(&cloned);
+            assert!(original_params.is_some(), "expected function parameters");
+            assert!(cloned_params.is_some(), "expected function parameters");
+            if let (Some((original_first, original_second)), Some((cloned_first, cloned_second))) =
+                (original_params, cloned_params)
+            {
+                assert!(std::rc::Rc::ptr_eq(&original_first, &cloned_first));
+                assert!(std::rc::Rc::ptr_eq(&original_second, &cloned_second));
+                assert_eq!(original_first.as_ref(), "first");
+                assert_eq!(original_second.as_ref(), "second");
+            }
+        }
+
+        let mut store = Store::new();
+        let reply = eval_script(
+            b"local f = function(first, second) return first end; return f('value', 'ignored')",
             &[],
             &[],
             &mut store,
