@@ -16540,6 +16540,11 @@ enum BorrowedDispatchFloorClass {
     Sintercard,
     /// (frankenredis-ozrro) `ZRANDMEMBER key count`, the members-only form.
     ZrandmemberCount,
+    /// (frankenredis-ozrro) `ZUNIONSTORE`/`ZINTERSTORE`/`ZDIFFSTORE` with two
+    /// or three source keys. The deep cascade has one arm per command/arity;
+    /// carrying the operation here lets the name-keyed classifier select the
+    /// shared parser and executor before that walk begins.
+    ZsetStore(PlainZsetStoreCmd),
     /// (frankenredis-ozrro) `SRANDMEMBER key count`, the array-reply form. The
     /// no-count form is [`BorrowedDispatchFloorClass::Srandmember`].
     SrandmemberCount,
@@ -16644,6 +16649,62 @@ enum PlainScan0Cmd {
     Zscan,
 }
 
+/// The no-option two- and three-source sorted-set store operations share the
+/// same borrowed packet shape. Keeping the command as data is what prevents a
+/// packet from walking three adjacent literal-prefix arms before it reaches its
+/// executor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PlainZsetStoreCmd {
+    Union,
+    Inter,
+    Diff,
+}
+
+impl PlainZsetStoreCmd {
+    const fn command(self) -> &'static [u8] {
+        match self {
+            Self::Union => b"ZUNIONSTORE",
+            Self::Inter => b"ZINTERSTORE",
+            Self::Diff => b"ZDIFFSTORE",
+        }
+    }
+
+    const fn two_source_prefix(self) -> &'static [u8] {
+        match self {
+            Self::Union | Self::Inter => b"*5\r\n$11\r\n",
+            Self::Diff => b"*5\r\n$10\r\n",
+        }
+    }
+
+    const fn three_source_prefix(self) -> &'static [u8] {
+        match self {
+            Self::Union | Self::Inter => b"*6\r\n$11\r\n",
+            Self::Diff => b"*6\r\n$10\r\n",
+        }
+    }
+
+    fn execute(
+        self,
+        runtime: &mut Runtime,
+        destination: &[u8],
+        numkeys: &[u8],
+        sources: &[&[u8]],
+        ts: u64,
+    ) -> Option<RespFrame> {
+        match self {
+            Self::Union => {
+                runtime.execute_plain_zunionstore_borrowed(destination, numkeys, sources, ts)
+            }
+            Self::Inter => {
+                runtime.execute_plain_zinterstore_borrowed(destination, numkeys, sources, ts)
+            }
+            Self::Diff => {
+                runtime.execute_plain_zdiffstore_borrowed(destination, numkeys, sources, ts)
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BorrowedDispatchFloorCommand {
     Append,
@@ -16716,7 +16777,9 @@ enum BorrowedDispatchFloorCommand {
     Zadd,
     Zcard,
     Zcount,
+    Zdiffstore,
     Zincrby,
+    Zinterstore,
     Zrandmember,
     Zrange,
     Zmscore,
@@ -16731,6 +16794,7 @@ enum BorrowedDispatchFloorCommand {
     Zremrangebyrank,
     Zremrangebyscore,
     Zscore,
+    Zunionstore,
 }
 
 fn uppercase_ascii_token<const N: usize>(token: &[u8]) -> Option<[u8; N]> {
@@ -16869,6 +16933,9 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'E', b'X', b'P', b'I', b'R', b'E', b'T', b'I', b'M', b'E'] => {
                 Some(BorrowedDispatchFloorCommand::Expiretime)
             }
+            [b'Z', b'D', b'I', b'F', b'F', b'S', b'T', b'O', b'R', b'E'] => {
+                Some(BorrowedDispatchFloorCommand::Zdiffstore)
+            }
             _ => None,
         },
         8 => match uppercase_ascii_token::<8>(token)? {
@@ -16963,6 +17030,32 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
                 b'E',
                 b'R',
             ] => Some(BorrowedDispatchFloorCommand::Zrandmember),
+            [
+                b'Z',
+                b'U',
+                b'N',
+                b'I',
+                b'O',
+                b'N',
+                b'S',
+                b'T',
+                b'O',
+                b'R',
+                b'E',
+            ] => Some(BorrowedDispatchFloorCommand::Zunionstore),
+            [
+                b'Z',
+                b'I',
+                b'N',
+                b'T',
+                b'E',
+                b'R',
+                b'S',
+                b'T',
+                b'O',
+                b'R',
+                b'E',
+            ] => Some(BorrowedDispatchFloorCommand::Zinterstore),
             _ => None,
         },
         15 => match uppercase_ascii_token::<15>(token)? {
@@ -17399,6 +17492,15 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (3, BorrowedDispatchFloorCommand::Zrandmember) => {
             Some(BorrowedDispatchFloorClass::ZrandmemberCount)
         }
+        (5..=6, BorrowedDispatchFloorCommand::Zunionstore) => Some(
+            BorrowedDispatchFloorClass::ZsetStore(PlainZsetStoreCmd::Union),
+        ),
+        (5..=6, BorrowedDispatchFloorCommand::Zinterstore) => Some(
+            BorrowedDispatchFloorClass::ZsetStore(PlainZsetStoreCmd::Inter),
+        ),
+        (5..=6, BorrowedDispatchFloorCommand::Zdiffstore) => Some(
+            BorrowedDispatchFloorClass::ZsetStore(PlainZsetStoreCmd::Diff),
+        ),
         (3, BorrowedDispatchFloorCommand::Srandmember) => {
             Some(BorrowedDispatchFloorClass::SrandmemberCount)
         }
@@ -20533,6 +20635,50 @@ fn try_dispatch_floor_classified_action(
                 });
             if let Some(consumed) = hit {
                 Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::ZsetStore(command) => {
+            let hit = parse_borrowed_plain_key_arg4_packet(
+                unparsed,
+                &parser_config,
+                command.three_source_prefix(),
+                command.command(),
+            )
+            .and_then(|packet| {
+                command
+                    .execute(
+                        runtime,
+                        packet.key,
+                        packet.a,
+                        &[packet.b, packet.c, packet.d],
+                        ts,
+                    )
+                    .map(|response| (packet.consumed, response))
+            })
+            .or_else(|| {
+                parse_borrowed_plain_key_arg3_packet(
+                    unparsed,
+                    &parser_config,
+                    command.two_source_prefix(),
+                    command.command(),
+                )
+                .and_then(|packet| {
+                    command
+                        .execute(runtime, packet.key, packet.a, &[packet.b, packet.c], ts)
+                        .map(|response| (packet.consumed, response))
+                })
+            });
+            if let Some((consumed, response)) = hit {
+                Ok(BorrowedMultibulkAction::FastReply { consumed, response })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,
@@ -44153,6 +44299,43 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
                 &cfg,
             ),
             Some(super::BorrowedDispatchFloorClass::ZrandmemberCount)
+        );
+        // (frankenredis-ozrro) The sorted-set store family has six deep cascade
+        // arms (three commands times two source counts). Its name-keyed class
+        // must preserve case-insensitivity and admit exactly those two arities.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*5\r\n$11\r\nzUnIoNsToRe\r\n$2\r\nzd\r\n$1\r\n2\r\n$2\r\nza\r\n$2\r\nzb\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::ZsetStore(
+                super::PlainZsetStoreCmd::Union,
+            ))
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*6\r\n$11\r\nZINTERSTORE\r\n$2\r\nzd\r\n$1\r\n3\r\n$2\r\nza\r\n$2\r\nzb\r\n$2\r\nzc\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::ZsetStore(
+                super::PlainZsetStoreCmd::Inter,
+            ))
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*5\r\n$10\r\nzDiFfStOrE\r\n$2\r\nzd\r\n$1\r\n2\r\n$2\r\nza\r\n$2\r\nzb\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::ZsetStore(
+                super::PlainZsetStoreCmd::Diff,
+            ))
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*7\r\n$11\r\nZUNIONSTORE\r\n$2\r\nzd\r\n$1\r\n4\r\n$2\r\nza\r\n$2\r\nzb\r\n$2\r\nzc\r\n$2\r\nzd\r\n",
+                &cfg,
+            ),
+            None
         );
         // WITHSCORES is arity 4; the no-count form is arity 2. Both keep the
         // cascade, because the count parser would decline them and a declined

@@ -2522,6 +2522,38 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[
         b"ZADD", b"z:1", b"1", b"a", b"2.5", b"b", b"3", b"c", b"10", b"d",
     ]));
+    // (frankenredis-ozrro) The name-keyed ZSET-store family replaces six deep
+    // literal-prefix arms (three operations at two source counts). Drive every
+    // operation plus both source counts, then read each destination back so a
+    // route with the right cardinality but wrong operation/order cannot hide.
+    cmds.push(c(&[b"ZADD", b"zs:a", b"1", b"a", b"2", b"b", b"3", b"c"]));
+    cmds.push(c(&[b"ZADD", b"zs:b", b"2", b"b", b"3", b"c", b"4", b"d"]));
+    cmds.push(c(&[b"ZADD", b"zs:c", b"3", b"c", b"4", b"d", b"5", b"e"]));
+    cmds.push(c(&[b"ZUNIONSTORE", b"zs:union2", b"2", b"zs:a", b"zs:b"]));
+    cmds.push(c(&[b"ZRANGE", b"zs:union2", b"0", b"-1", b"WITHSCORES"]));
+    cmds.push(c(&[
+        b"ZINTERSTORE",
+        b"zs:inter3",
+        b"3",
+        b"zs:a",
+        b"zs:b",
+        b"zs:c",
+    ]));
+    cmds.push(c(&[b"ZRANGE", b"zs:inter3", b"0", b"-1", b"WITHSCORES"]));
+    cmds.push(c(&[b"ZDIFFSTORE", b"zs:diff2", b"2", b"zs:a", b"zs:b"]));
+    cmds.push(c(&[b"ZRANGE", b"zs:diff2", b"0", b"-1", b"WITHSCORES"]));
+    cmds.push(c(&[
+        b"ZDIFFSTORE",
+        b"zs:diff3",
+        b"3",
+        b"zs:a",
+        b"zs:b",
+        b"zs:c",
+    ]));
+    cmds.push(c(&[b"ZRANGE", b"zs:diff3", b"0", b"-1", b"WITHSCORES"]));
+    // The classifier recognizes arity, not the textual numkeys value; this
+    // mismatch must still decline to Redis's unchanged syntax error path.
+    cmds.push(c(&[b"ZUNIONSTORE", b"zs:bad", b"3", b"zs:a", b"zs:b"]));
     cmds.push(c(&[b"ZADD", b"z:1", b"GT", b"CH", b"9", b"a"]));
     cmds.push(c(&[b"ZADD", b"z:1", b"NX", b"100", b"a"]));
     cmds.push(c(&[b"ZADD", b"z:1", b"XX", b"CH", b"4", b"b"]));
