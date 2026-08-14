@@ -43831,6 +43831,21 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         let cfg = ParserConfig::default();
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(
+                b"*5\r\n$4\r\nmGeT\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Mget)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*2\r\n$4\r\nMGET\r\n$1\r\na\r\n",
+                &cfg,
+            ),
+            None,
+            "MGET requires at least two keys"
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
                 b"*2\r\n$4\r\nxLeN\r\n$1\r\ns\r\n",
                 &cfg,
             ),
