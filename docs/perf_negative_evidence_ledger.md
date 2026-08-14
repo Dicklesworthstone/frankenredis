@@ -15654,3 +15654,20 @@ Retry predicate: re-run when this host's loadavg is under ~10, or with >= 9 reps
 per-rep ratios tightens, or on the server CPU ns/op axis (utime+stime from `/proc/<pid>/stat` over
 the measured window) rather than client-side ops/s, which is what the README's own table uses for
 exactly this reason. Do NOT report the throughput row until an A/A null lands inside 0.98-1.02.
+
+## 2026-08-14 CloudyHorse: WITHHELD — live EVAL 50x `redis.call('GET')` remeasurement reached 1.0113x, but the same-invocation A/A null was 1.0505x (`frankenredis-lua-rediscall-loop-interpreter-bound-d3al0`)
+
+`bash scripts/lua_eval_headtohead.sh -n 20000 -c 8 -R 9 -P 1 --calls 50`, with the freshly remote-built
+FrankenRedis `release-perf` executable and vendored Redis 7.2.4 live in the same invocation, reported:
+
+| arm | ops/s | running ELF SHA-256 |
+|---|---:|---|
+| FrankenRedis A | 26,702 | `882714b0ceadb0c8a6ef4a7ef62d1815bf26e661c0e3fc13fbe108aacf79dda6` |
+| FrankenRedis A2 | 26,991 | `882714b0ceadb0c8a6ef4a7ef62d1815bf26e661c0e3fc13fbe108aacf79dda6` |
+| vendored Redis | 29,369 | `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7` |
+
+The harness self-reported each SHA from `/proc/<pid>/exe`. Its median A/A `A2/A` was **1.0505x**
+(bootstrap 95% CI `[0.8655, 1.1488]`), outside the campaign's required 0.98--1.02 control band;
+the apparent FrankenRedis/Redis median **1.0113x** (CI `[0.7578, 1.0448]`) is therefore **WITHHELD**,
+not a competitive row. A 27-round repeat immediately hit the specific harness blocker
+`PREFLIGHT FAIL: fewer than 4 quiet cores; wait for a window`; do not infer a win from this run.
