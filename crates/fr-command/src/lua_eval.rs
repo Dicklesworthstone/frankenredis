@@ -2073,7 +2073,9 @@ pub enum Expr {
     BinOp(Box<Expr>, BinOp, Box<Expr>),
     UnaryOp(UnaryOp, Box<Expr>),
     Index(Box<Expr>, Box<Expr>),
-    Field(Box<Expr>, String),
+    // Field spellings are immutable parser data. Retain them when cached
+    // function bodies are cloned instead of duplicating short field names.
+    Field(Box<Expr>, Rc<str>),
     Call(Box<Expr>, Vec<Expr>),
     MethodCall(Box<Expr>, String, Vec<Expr>),
     TableConstructor(Vec<TableField>),
@@ -2715,7 +2717,7 @@ impl Parser {
                 Token::Dot => {
                     self.advance();
                     match self.advance() {
-                        Token::Name(n) => expr = Expr::Field(Box::new(expr), n),
+                        Token::Name(n) => expr = Expr::Field(Box::new(expr), Rc::from(n)),
                         t => return Err(parser_name_expected_near(&t)),
                     }
                 }
@@ -4347,7 +4349,7 @@ impl<'a> LuaState<'a> {
         let Expr::Field(table_expr, method) = func_expr.as_ref() else {
             return None;
         };
-        if method == "yield"
+        if method.as_ref() == "yield"
             && matches!(table_expr.as_ref(), Expr::Name(name) if name.as_ref() == "coroutine")
         {
             Some(args)
@@ -7047,7 +7049,7 @@ impl<'a> LuaState<'a> {
         match callee_expr {
             Expr::Name(n) => Some(n.to_string()),
             Expr::LocalName(n, _) => Some(n.clone()),
-            Expr::Field(_, f) => Some(f.clone()),
+            Expr::Field(_, f) => Some(f.to_string()),
             Expr::Index(_, key) => match key.as_ref() {
                 Expr::Str(s) if !s.is_empty() => std::str::from_utf8(s).ok().map(str::to_string),
                 _ => None,
@@ -18051,6 +18053,38 @@ end
             "cloned AST must share its immutable global-name allocation"
         );
         assert_eq!(original_name.as_ref(), "KEYS");
+    }
+
+    #[test]
+    fn cloned_function_ast_shares_field_name_nodes_d3al0() {
+        let parsed = super::parse_lua_chunk(b"return function() return redis.call end")
+            .expect("script should parse");
+        let cloned = parsed.clone();
+
+        let field_name = |block: &super::Block| {
+            let super::Stmt::Return(values) = &block[0].1 else {
+                panic!("expected top-level return");
+            };
+            let super::Expr::FunctionDef(_, _, body) = &values[0] else {
+                panic!("expected function literal");
+            };
+            let super::Stmt::Return(values) = &body[0].1 else {
+                panic!("expected function return");
+            };
+            let super::Expr::Field(base, field) = &values[0] else {
+                panic!("expected field lookup");
+            };
+            assert!(matches!(base.as_ref(), super::Expr::Name(name) if name.as_ref() == "redis"));
+            field.clone()
+        };
+
+        let original_field = field_name(&parsed);
+        let cloned_field = field_name(&cloned);
+        assert!(
+            std::rc::Rc::ptr_eq(&original_field, &cloned_field),
+            "cloned AST must share its immutable field-name allocation"
+        );
+        assert_eq!(original_field.as_ref(), "call");
     }
 
     #[test]
