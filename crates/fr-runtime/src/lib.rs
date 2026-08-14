@@ -4289,7 +4289,7 @@ pub struct ServerState {
 
 impl Default for ServerState {
     fn default() -> Self {
-        let mut store = fr_store::Store::new();
+        let mut store = Store::new();
         store.maxmemory_bytes_live = 0;
         Self {
             // (frankenredis-d1505) Mirror upstream replication.c which
@@ -67887,7 +67887,7 @@ mod tests {
             value: RdbValue::IntSet(vec![-1, 0, 42]),
             expire_ms: Some(500),
         }];
-        let mut store = Store::new();
+        let mut store = fr_store::Store::new();
 
         let counts = super::apply_rdb_entries_to_store(&mut store, entries, 100)
             .expect("typed intset applies");
