@@ -15781,3 +15781,23 @@ expiretime, geohash and getbit survived both. Those three are the ones to quote.
 Retry predicate: run the same substrate with a second fr arm (pre-lever vs
 post-lever) to attribute the margin, and raise rounds until every row including
 the control clears its null in the same invocation.
+
+## 2026-08-14: MEASURED LOSS — balanced-square EVAL 50x `redis.call('GET')`, FrankenRedis / vendored Redis 7.2.4 = 0.8524x (`frankenredis-lua-rediscall-loop-interpreter-bound-d3al0`)
+
+One live invocation of `scripts/balanced_square_ab.py --fr-bin
+frbuild/release-perf/frankenredis-c93ded6 --expect-elf 5e0c69d761eb3e07
+--shapes eval --rounds 9 --ops 50000 --pipeline 16` ran the current
+FrankenRedis ELF and vendored Redis together on thinkstation1 (loadavg
+10.46/9.85/9.00, governor `performance`, AVX2). The harness self-reported the
+running images from `/proc/<pid>/exe`: fr
+`5e0c69d761eb3e07dd7078fbddcff284a005844c0bb11088e396d1029a2c0164`, Redis
+`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`.
+
+| row | fr/Redis | bootstrap 95% CI | Redis half-null | fr half-null | verdict |
+|---|---:|---|---:|---:|---|
+| EVAL 50x GET | **0.8524x** | [0.8297, 0.8669] | 1.0073 | 1.0110 | **ADMISSIBLE LOSS** |
+| GET control | 1.1022x | [1.0699, 1.1797] | 1.0286 | 1.0110 | NULL-FAILED |
+
+The EVAL row's independent per-arm A/A controls both remain inside 0.98--1.02;
+the control is explicitly refused. This is a fresh live loss, not an attribution
+of the preceding interpreter changes.
