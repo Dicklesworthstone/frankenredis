@@ -2,12 +2,13 @@
 //! connect via TCP, send RESP commands, and verify responses.
 //! Tests the actual networking stack including RESP framing.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -269,6 +270,14 @@ const PORT_BASE: u16 = 29_500;
 const PORT_MAX: u16 = 55_535;
 const PORT_BAND: u16 = 256;
 
+/// Globally reserved loopback ports used only as test-process semaphore
+/// tokens.  Unlike `ServerSlots`, whose mutex is necessarily private to one
+/// test binary, a bound TCP port is owned by the kernel and is therefore
+/// visible to every concurrently running workspace test binary.  Keep this
+/// range disjoint from the actual server-port pool below.
+const CROSS_BINARY_SERVER_SLOT_BASE: u16 = 28_900;
+const CROSS_BINARY_SERVER_SLOT_COUNT: u16 = 4;
+
 /// Per-process port counter, seeded into a band this process has EXCLUSIVELY
 /// claimed from the OS.
 ///
@@ -371,6 +380,36 @@ fn unique_temp_dir(prefix: &str) -> PathBuf {
     path
 }
 
+/// Acquire one of the process-wide server-test tokens.  The listener remains
+/// bound for the calling test thread's whole server lifetime and is dropped by
+/// `leave_cross_binary_server_slot`; no filesystem lock or cleanup path is
+/// involved, and the kernel releases a token if a test binary aborts.
+fn enter_cross_binary_server_slot() {
+    CROSS_BINARY_SERVER_SLOT.with(|slot| {
+        if slot.borrow().is_some() {
+            return;
+        }
+
+        loop {
+            for offset in 0..CROSS_BINARY_SERVER_SLOT_COUNT {
+                let port = CROSS_BINARY_SERVER_SLOT_BASE + offset;
+                if let Ok(listener) = TcpListener::bind(("127.0.0.1", port)) {
+                    *slot.borrow_mut() = Some(listener);
+                    return;
+                }
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+    });
+}
+
+/// Release this test thread's process-wide server-test token.
+fn leave_cross_binary_server_slot() {
+    CROSS_BINARY_SERVER_SLOT.with(|slot| {
+        let _ = slot.borrow_mut().take();
+    });
+}
+
 /// Counting semaphore bounding how many tests may hold spawned server
 /// processes at the same time.
 ///
@@ -436,6 +475,10 @@ thread_local! {
     static LIVE_SERVERS: Cell<usize> = const { Cell::new(0) };
     /// Whether this test thread currently holds a `ServerSlots` permit.
     static HOLDS_SLOT: Cell<bool> = const { Cell::new(false) };
+    /// Kernel-visible token shared with every concurrently running test
+    /// binary.  Holding the listener, rather than a path on disk, gives us a
+    /// crash-safe cross-process semaphore without cleanup races.
+    static CROSS_BINARY_SERVER_SLOT: RefCell<Option<TcpListener>> = const { RefCell::new(None) };
 }
 
 /// Take a server slot for the current test unless it already holds one.
@@ -449,6 +492,7 @@ fn enter_server_slot() {
     HOLDS_SLOT.with(|holds| {
         if !holds.get() {
             server_slots().acquire();
+            enter_cross_binary_server_slot();
             holds.set(true);
         }
     });
@@ -458,10 +502,54 @@ fn enter_server_slot() {
 fn leave_server_slot() {
     HOLDS_SLOT.with(|holds| {
         if holds.get() {
+            leave_cross_binary_server_slot();
             server_slots().release();
             holds.set(false);
         }
     });
+}
+
+#[test]
+fn cross_binary_server_slots_bound_parallel_holders_8agls() {
+    const CONTENDERS: usize = 8;
+    let start = Arc::new(Barrier::new(CONTENDERS));
+    let current = Arc::new(AtomicUsize::new(0));
+    let high_water = Arc::new(AtomicUsize::new(0));
+    let mut workers = Vec::with_capacity(CONTENDERS);
+
+    for _ in 0..CONTENDERS {
+        let start = Arc::clone(&start);
+        let current = Arc::clone(&current);
+        let high_water = Arc::clone(&high_water);
+        workers.push(thread::spawn(move || {
+            start.wait();
+            enter_cross_binary_server_slot();
+            let now = current.fetch_add(1, Ordering::SeqCst) + 1;
+            let mut observed = high_water.load(Ordering::SeqCst);
+            while now > observed {
+                match high_water.compare_exchange_weak(
+                    observed,
+                    now,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    Ok(_) => break,
+                    Err(actual) => observed = actual,
+                }
+            }
+            thread::sleep(Duration::from_millis(40));
+            current.fetch_sub(1, Ordering::SeqCst);
+            leave_cross_binary_server_slot();
+        }));
+    }
+
+    for worker in workers {
+        worker.join().expect("cross-binary slot worker panicked");
+    }
+    assert!(
+        high_water.load(Ordering::SeqCst) <= usize::from(CROSS_BINARY_SERVER_SLOT_COUNT),
+        "cross-binary server slot cap was exceeded"
+    );
 }
 
 struct NotReady {
