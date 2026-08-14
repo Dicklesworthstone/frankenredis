@@ -16499,6 +16499,11 @@ enum BorrowedDispatchFloorClass {
     ListPopCount {
         left: bool,
     },
+    /// (frankenredis-ozrro) `ZPOPMIN|ZPOPMAX key count`, the sorted-set sibling
+    /// of [`Self::ListPopCount`].
+    ZsetPopCount {
+        min: bool,
+    },
     /// (frankenredis-ozrro) `EXPIRE key seconds`, no option token.
     Expire,
     /// (frankenredis-ozrro) `APPEND key value`.
@@ -16588,6 +16593,8 @@ enum BorrowedDispatchFloorClass {
     /// (frankenredis-ozrro) `ZMSCORE key member...`, any count — two, three and
     /// the variadic parser are tried in the cascade's own order.
     Zmscore,
+    Zpopmax,
+    Zpopmin,
     /// (frankenredis-ozrro) `LINSERT key BEFORE|AFTER pivot element`.
     Linsert,
     /// (frankenredis-ozrro) `SETRANGE key offset value`.
@@ -16893,6 +16900,12 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             }
             [b'Z', b'I', b'N', b'C', b'R', b'B', b'Y'] => {
                 Some(BorrowedDispatchFloorCommand::Zincrby)
+            }
+            [b'Z', b'P', b'O', b'P', b'M', b'I', b'N'] => {
+                Some(BorrowedDispatchFloorCommand::Zpopmin)
+            }
+            [b'Z', b'P', b'O', b'P', b'M', b'A', b'X'] => {
+                Some(BorrowedDispatchFloorCommand::Zpopmax)
             }
             [b'Z', b'M', b'S', b'C', b'O', b'R', b'E'] => {
                 Some(BorrowedDispatchFloorCommand::Zmscore)
@@ -17381,6 +17394,12 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         }
         (3, BorrowedDispatchFloorCommand::Rpop) => {
             Some(BorrowedDispatchFloorClass::ListPopCount { left: false })
+        }
+        (3, BorrowedDispatchFloorCommand::Zpopmin) => {
+            Some(BorrowedDispatchFloorClass::ZsetPopCount { min: true })
+        }
+        (3, BorrowedDispatchFloorCommand::Zpopmax) => {
+            Some(BorrowedDispatchFloorClass::ZsetPopCount { min: false })
         }
         // (frankenredis-ozrro) Four more routes picked the way the bead says to
         // pick them — by the walked-vs-bypassed callgrind gap, which IS the
@@ -18688,6 +18707,31 @@ fn try_dispatch_floor_classified_action(
             .and_then(|packet| {
                 runtime
                     .execute_plain_list_pop_count_borrowed(left, packet.key, packet.arg, ts)
+                    .map(|response| (packet.consumed, response))
+            });
+            if let Some((consumed, response)) = hit {
+                Ok(BorrowedMultibulkAction::FastReply { consumed, response })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::ZsetPopCount { min } => {
+            let hit = parse_borrowed_plain_key_arg1_packet(
+                unparsed,
+                &parser_config,
+                b"*3\r\n$7\r\n",
+                if min { b"ZPOPMIN" } else { b"ZPOPMAX" },
+            )
+            .and_then(|packet| {
+                runtime
+                    .execute_plain_zpop_count_borrowed(min, packet.key, packet.arg, ts)
                     .map(|response| (packet.consumed, response))
             });
             if let Some((consumed, response)) = hit {
@@ -43691,6 +43735,28 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             ),
             None,
             "no-count pop keeps its existing dedicated route"
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$7\r\nzPoPmIn\r\n$1\r\nz\r\n$1\r\n2\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::ZsetPopCount { min: true })
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$7\r\nZpOpMaX\r\n$1\r\nz\r\n$1\r\n2\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::ZsetPopCount { min: false })
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*2\r\n$7\r\nZPOPMIN\r\n$1\r\nz\r\n",
+                &cfg,
+            ),
+            None,
+            "no-count zset pop keeps its existing dedicated route"
         );
         let xadd_maxlen =
             b"*8\r\n$4\r\nxAdD\r\n$1\r\ns\r\n$6\r\nMaXlEn\r\n$1\r\n~\r\n$4\r\n1000\r\n$1\r\n*\r\n$1\r\nf\r\n$1\r\nv\r\n";
