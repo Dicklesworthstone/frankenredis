@@ -373,18 +373,22 @@ pub type Block = Vec<(u32, Stmt)>;
 ///
 /// Keeping the chunk as an explicit unit, rather than caching a bare block,
 /// gives the executor one immutable compilation product to evolve into the
-/// linear instruction stream used by the interpreter.  Nested function bodies
+/// linear instruction stream used by the interpreter. The top-level statement
+/// stream is compacted after parsing: a cached chunk must not retain the
+/// parser's spare `Vec` capacity for every script SHA. Nested function bodies
 /// remain `Block`s for now because they are created dynamically and can carry
 /// captured environments; the top-level chunk is the stable, reusable entry
 /// point shared by EVAL/EVALSHA/FUNCTION invocations.
 #[derive(Debug)]
 pub(crate) struct CompiledChunk {
-    ast: Block,
+    top_level: Box<[(u32, Stmt)]>,
 }
 
 impl CompiledChunk {
     fn new(ast: Block) -> Self {
-        Self { ast }
+        Self {
+            top_level: ast.into_boxed_slice(),
+        }
     }
 }
 
@@ -4243,7 +4247,7 @@ impl<'a> LuaState<'a> {
         // frame for the purposes of luaL_where; push before exec_block so
         // error(msg, N) at the bottom of the call stack can find it.
         self.lua_frame_kinds.push(true);
-        let outcome = self.exec_block(&compiled.ast, &mut env, &mut varargs);
+        let outcome = self.exec_block(&compiled.top_level, &mut env, &mut varargs);
         self.lua_frame_kinds.pop();
         match outcome {
             Ok(ControlFlow::Return(vals)) => Ok(vals.into_iter().next().unwrap_or(LuaValue::Nil)),
@@ -17945,12 +17949,20 @@ end
 
     #[test]
     fn compiled_chunk_cache_reuses_program_but_rebinds_call_state_45ywg() {
-        let script = b"local arg = ARGV[1]; return arg";
+        // Keep multiple top-level statements here: the cached chunk owns its
+        // compact boxed stream, while each execution still receives fresh
+        // KEYS/ARGV bindings and interpreter state.
+        let script = b"local arg = ARGV[1]; local copy = arg; return copy";
         let first = super::compile_lua_chunk_cached(script).expect("compile first");
         let second = super::compile_lua_chunk_cached(script).expect("compile second");
         assert!(
             std::rc::Rc::ptr_eq(&first, &second),
             "expected repeated compile to reuse the cached program"
+        );
+        assert_eq!(
+            first.top_level.len(),
+            3,
+            "the compiled chunk must retain every top-level instruction"
         );
 
         let mut store = Store::new();
