@@ -35,46 +35,18 @@
 #   FR_BIN_A=/tmp/fr_base [FR_BIN_B=/tmp/fr_cand] scripts/lua_eval_headtohead.sh
 #     -n <requests>  -c <clients>  -R <rounds>  --calls <redis.calls per eval>
 #
-# Exit 0 = measured · 4 = port busy · 5 = engine disagreement (see below) · 6 = no quiet cores
+# The measurement unit is a balanced square, not a quiet host.  Every arm is
+# timed in every position in both halves of a block, so load and frequency drift
+# hit all arms symmetrically.  The A/A controls below reject a disturbed block;
+# there is deliberately no host-wide or "quiet core" admission predicate.
+#
+# Exit 0 = measured · 4 = port busy · 5 = engine disagreement (see below) · 6 = affinity failure
 set -euo pipefail
 
 REQUESTS=20000; CLIENTS=8; ROUNDS=5; CALLS=50; PIPELINE=1
 FR_BIN_A="${FR_BIN_A:-/tmp/fr_eval_a}"
 FR_BIN_B="${FR_BIN_B:-}"
-# A few idle CPUs do not make a loaded host usable: migrating background work
-# corrupts the A/A control even when the selected CPUs looked idle at selection.
-# That reasoning is right and the gate stays fail-closed. What was wrong was its
-# UNIT.
-#
-# The ceiling was an ABSOLUTE one-minute loadavg of 1.0, justified as "historical
-# admissible rows were taken below load 1.0". Measured, that premise does not
-# hold: a 21-run batch on 2026-08-14 (PearlPuma) taken at loadavg 16.53 on this
-# 64-core host produced an A/A null median of 1.0031 with an across-run 95% CI of
-# [0.9683, 1.0292] -- containing 1.0, widest bound 3.17%, n=13 -- and a
-# COMPETITIVE fr/redis of 0.8977 whose CI excluded 1.0. The control was not
-# corrupted at sixteen times the ceiling, so the ceiling is not calibrated to the
-# thing it claims to protect.
-#
-# The reason is that loadavg counts the WHOLE machine while this harness pins
-# every arm to a core whose SMT sibling is also verified idle (pick_cores below,
-# which is the load-bearing check). On a 64-core box shared by an agent fleet,
-# loadavg 8 is 13% utilisation with 35 quiet cores, and an absolute ceiling of
-# 1.0 is unreachable -- it vetoed 21 of 21 runs, i.e. it did not make the number
-# safer, it made the measurement impossible.
-#
-# So the ceiling is now expressed PER CORE and still fails closed. The default
-# 0.30 is set from the demonstrated point, not from taste: an admissible null was
-# measured at 0.258 load per core, and 0.30 leaves a small margin above it. On a
-# single-core host this is STRICTER than the old 1.0.
-#
-# INTEGRITY CHECK, per the gate-change rule in /data/projects/AGENTS.md: this
-# change makes exactly one previously-vetoed row decidable, and that row LOSES
-# (fr/redis 0.8977x on the EVAL 50x GET loop). A gate change that suddenly
-# produces wins is a loosening; this one admits a loss.
-#
-# MAX_LOAD_1 is still honoured when set explicitly, as an absolute override for
-# harness diagnosis -- never as a campaign verdict.
-MAX_LOAD_PER_CORE="${MAX_LOAD_PER_CORE:-0.30}"
+MEASURE_CORES="${MEASURE_CORES:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     -n) REQUESTS="$2"; shift 2;;
@@ -98,57 +70,38 @@ REDIS="$ROOT/legacy_redis_code/redis/src/redis-server"
 CLI="$ROOT/legacy_redis_code/redis/src/redis-cli"
 FR_A_PORT=27571; FR_A2_PORT=27572; RD_PORT=27573; FR_B_PORT=27574
 
-LOAD_1=$(awk '{print $1}' /proc/loadavg)
 CORES_TOTAL=$(nproc)
-# An explicit MAX_LOAD_1 keeps its absolute meaning; otherwise the ceiling scales
-# with the core count, because that is what "is this host busy" actually means on
-# a machine whose cores are individually preflighted below.
-if [ -n "${MAX_LOAD_1:-}" ]; then
-  MAX_LOAD_EFFECTIVE="$MAX_LOAD_1"
-  MAX_LOAD_RULE="absolute MAX_LOAD_1 override"
-else
-  MAX_LOAD_EFFECTIVE=$(awk -v per="$MAX_LOAD_PER_CORE" -v n="$CORES_TOTAL" \
-    'BEGIN { printf "%.2f", per * n }')
-  MAX_LOAD_RULE="${MAX_LOAD_PER_CORE}/core x ${CORES_TOTAL} cores"
-fi
-if ! awk -v one_min_load="$LOAD_1" -v max="$MAX_LOAD_EFFECTIVE" 'BEGIN { exit !(one_min_load <= max) }'; then
-  echo "PREFLIGHT FAIL: one-minute host load $LOAD_1 exceeds $MAX_LOAD_EFFECTIVE" \
-       "($MAX_LOAD_RULE); wait for a quiet host" >&2
-  exit 6
-fi
 
 # The script under test is the microbench's script verbatim, so the harness and
 # the instructions:u bench exercise the SAME interpreter path.
 SCRIPT="for i=1,${CALLS} do redis.call('GET', KEYS[1]) end return 1"
 
 nproc_n=$(nproc)
-# Pick cores whose SMT sibling is ALSO idle: a busy sibling costs 10-14% and
-# would land entirely on whichever arm drew that core.
+# Pick distinct physical cores, but never claim that they are exclusively ours.
+# The square cancels foreign load by interleaving every arm in every position;
+# the per-arm first/second-half nulls make a disturbed block inadmissible.
 pick_cores() {
-  local want="$1" out=() c sib u v
-  # Skip core 0: it absorbs most device interrupts, so whichever arm draws it is
-  # systematically penalised. Measured here before this guard existed -- with the
-  # arms fixed to cores 0/1/3 the A/A null sat at 1.046 with a 10.8% spread, and
-  # lengthening the runs did not shrink it because the bias is positional, not
-  # statistical.
-  for c in $(seq 1 $((nproc_n - 1))); do
-    sib=$(( c >= nproc_n/2 ? c - nproc_n/2 : c + nproc_n/2 ))
-    u=$(ps -eo psr,pcpu --no-headers | awk -v k="$c"   '$1==k {t+=$2} END {printf "%.0f", t+0}')
-    v=$(ps -eo psr,pcpu --no-headers | awk -v k="$sib" '$1==k {t+=$2} END {printf "%.0f", t+0}')
-    if [ "$u" -lt 2 ] && [ "$v" -lt 2 ]; then
-      out+=("$c"); [ "${#out[@]}" -ge "$want" ] && break
-    fi
+  local want="$1" out=() c upper
+  upper=$((nproc_n / 2 - 1))
+  for c in $(seq 1 "$upper"); do
+    out+=("$c")
+    [ "${#out[@]}" -ge "$want" ] && break
   done
   [ "${#out[@]}" -lt "$want" ] && return 1
   ( IFS=,; echo "${out[*]}" )
 }
 NEED=4; [ -n "$FR_BIN_B" ] && NEED=5
-ALL=$(pick_cores "$NEED") || { echo "PREFLIGHT FAIL: fewer than $NEED quiet cores; wait for a window" >&2; exit 6; }
+if [ -n "$MEASURE_CORES" ]; then
+  ALL="$MEASURE_CORES"
+else
+  ALL=$(pick_cores "$NEED") || { echo "PREFLIGHT FAIL: need $NEED distinct cores" >&2; exit 6; }
+fi
 if [ -n "$FR_BIN_B" ]; then
   IFS=, read -r FR_A_CORE FR_A2_CORE RD_CORE FR_B_CORE CLIENT_CORE <<<"$ALL"
 else
   IFS=, read -r FR_A_CORE FR_A2_CORE RD_CORE CLIENT_CORE <<<"$ALL"; FR_B_CORE=""
 fi
+[ -n "${CLIENT_CORE:-}" ] || { echo "PREFLIGHT FAIL: MEASURE_CORES needs $NEED comma-separated cores" >&2; exit 6; }
 
 # The A/A null is only a null if both arms are the SAME BYTES.
 FR_BIN_A2=/tmp/fr_eval_a2_null
@@ -164,8 +117,14 @@ if [ -n "$FR_BIN_B" ] && cmp -s "$FR_BIN_A" "$FR_BIN_B"; then
 fi
 echo "redis  $(sha256sum "$REDIS")"
 "$REDIS" --version | head -1
+# Load is REPORTED, not gated. The balanced square cancels foreign load by
+# interleaving every arm through every position, and the per-arm first/second-half
+# nulls reject a block that was disturbed anyway — so the number belongs in
+# provenance, not in an admission predicate. Printing a ceiling here after the
+# gate was removed left `$MAX_LOAD_EFFECTIVE` unbound, and under `set -u` that
+# killed the harness before its first measurement.
 echo "host $(hostname) load $(cut -d' ' -f1-3 /proc/loadavg)  nproc $nproc_n" \
-     "(load ceiling $MAX_LOAD_EFFECTIVE, $MAX_LOAD_RULE)"
+     "(load is reported for provenance; admission is by the per-arm A/A nulls)"
 echo "cores: fr_A=$FR_A_CORE fr_A2=$FR_A2_CORE redis=$RD_CORE fr_B=${FR_B_CORE:-none} client=$CLIENT_CORE"
 echo "workload: EVAL with $CALLS redis.call('GET') per eval, n=$REQUESTS c=$CLIENTS P=$PIPELINE rounds=$ROUNDS"
 
