@@ -2093,7 +2093,10 @@ pub struct LocalSlotRef {
 #[derive(Clone, Debug)]
 pub enum TableField {
     Index(Expr, Expr),
-    Named(String, Expr),
+    // Named table keys are immutable parser data. Function literals keep the
+    // constructor AST in cached chunks, so share the spelling when that AST is
+    // cloned for a closure instance.
+    Named(Rc<str>, Expr),
     Positional(Expr),
 }
 
@@ -2867,7 +2870,7 @@ impl Parser {
                 if self.check(&Token::Eq) {
                     self.advance();
                     let val = self.parse_expr()?;
-                    fields.push(TableField::Named(n, val));
+                    fields.push(TableField::Named(Rc::from(n), val));
                 } else {
                     // Rewind and parse as expression
                     self.pos = saved_pos;
@@ -18120,6 +18123,56 @@ end
             "cloned AST must share its immutable method-name allocation"
         );
         assert_eq!(original_method.as_ref(), "method");
+    }
+
+    #[test]
+    fn cloned_function_ast_shares_named_table_key_d3al0() {
+        let parsed = super::parse_lua_chunk(b"return function() return { cached = 'value' } end");
+        assert!(parsed.is_ok(), "script should parse");
+
+        let named_key = |block: &super::Block| {
+            let [(_, super::Stmt::Return(values))] = block.as_slice() else {
+                return None;
+            };
+            let [super::Expr::FunctionDef(_, _, body)] = values.as_slice() else {
+                return None;
+            };
+            let [(_, super::Stmt::Return(values))] = body.as_slice() else {
+                return None;
+            };
+            let [super::Expr::TableConstructor(fields)] = values.as_slice() else {
+                return None;
+            };
+            let [super::TableField::Named(key, _)] = fields.as_slice() else {
+                return None;
+            };
+            Some(key.clone())
+        };
+
+        if let Ok(parsed) = parsed {
+            let cloned = parsed.clone();
+            let original_key = named_key(&parsed);
+            let cloned_key = named_key(&cloned);
+            assert!(original_key.is_some(), "expected named table field");
+            assert!(cloned_key.is_some(), "expected named table field");
+            if let (Some(original_key), Some(cloned_key)) = (original_key, cloned_key) {
+                assert!(
+                    std::rc::Rc::ptr_eq(&original_key, &cloned_key),
+                    "cloned AST must share its immutable named-table-key allocation"
+                );
+                assert_eq!(original_key.as_ref(), "cached");
+            }
+        }
+
+        let mut store = Store::new();
+        let reply = eval_script(
+            b"local f = function() return { cached = 'value' } end; return f().cached",
+            &[],
+            &[],
+            &mut store,
+            0,
+        );
+        assert_eq!(reply, Ok(RespFrame::BulkString(Some(b"value".to_vec()))));
     }
 
     #[test]
