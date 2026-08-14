@@ -8012,6 +8012,11 @@ mod tests {
         let blob_32 = build_intset_for_test(&[-100_000, 0, 100_000]);
         let got = decode_intset_members(&blob_32).expect("32-bit intset");
         assert_eq!(
+            got.capacity(),
+            3,
+            "decoder preallocates the RDB member count"
+        );
+        assert_eq!(
             got,
             vec![b"-100000".to_vec(), b"0".to_vec(), b"100000".to_vec()]
         );
@@ -8019,6 +8024,11 @@ mod tests {
         // 64-bit (force >= 32-bit range)
         let blob_64 = build_intset_for_test(&[i64::MIN, 0, i64::MAX]);
         let got = decode_intset_members(&blob_64).expect("64-bit intset");
+        assert_eq!(
+            got.capacity(),
+            3,
+            "decoder preallocates the RDB member count"
+        );
         assert_eq!(
             got,
             vec![
