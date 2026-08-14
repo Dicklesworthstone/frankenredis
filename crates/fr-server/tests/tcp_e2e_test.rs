@@ -2310,6 +2310,37 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"STRLEN", b"s:pad"]));
     cmds.push(c(&[b"GETEX", b"s:3"]));
     cmds.push(c(&[b"GETEX", b"s:3", b"PERSIST"]));
+    // (frankenredis-ozrro) PTTL and EXPIRETIME are now front-classified. Only
+    // their -1/-2 branches are byte-comparable here, because a live PTTL is a
+    // millisecond countdown that differs between two replies taken microseconds
+    // apart; the live branch is checked as a band after the loop.
+    cmds.push(c(&[b"PTTL", b"s:3"]));
+    cmds.push(c(&[b"PTTL", b"s:absent"]));
+    cmds.push(c(&[b"PTTL"]));
+    // EXPIRETIME is an ABSOLUTE unix second, so a key given a fixed EXPIREAT
+    // reads back the same integer on both engines — that is the case that tells
+    // EXPIRETIME apart from PEXPIRETIME, which would answer in milliseconds.
+    cmds.push(c(&[b"SET", b"s:et", b"v"]));
+    cmds.push(c(&[b"EXPIREAT", b"s:et", b"4102444800"]));
+    cmds.push(c(&[b"EXPIRETIME", b"s:et"]));
+    cmds.push(c(&[b"PEXPIRETIME", b"s:et"]));
+    cmds.push(c(&[b"EXPIRETIME", b"s:1"]));
+    cmds.push(c(&[b"EXPIRETIME", b"s:absent"]));
+    // (frankenredis-ozrro) COPY is claimed at arity 3 only; the REPLACE spelling
+    // keeps the cascade. Both the create and the already-exists branches run,
+    // and the destination is read back so a copy that returned 1 without
+    // actually writing the value would be caught.
+    cmds.push(c(&[b"COPY", b"s:1", b"s:copy"]));
+    cmds.push(c(&[b"GET", b"s:copy"]));
+    cmds.push(c(&[b"COPY", b"s:1", b"s:copy"]));
+    cmds.push(c(&[b"COPY", b"s:absent", b"s:copy2"]));
+    cmds.push(c(&[b"EXISTS", b"s:copy2"]));
+    cmds.push(c(&[b"COPY", b"s:pad", b"s:copy", b"REPLACE"]));
+    cmds.push(c(&[b"GET", b"s:copy"]));
+    // (frankenredis-ozrro) PUBLISH with no subscribers is a deterministic 0, and
+    // the arity-4 form is an error both engines must word identically.
+    cmds.push(c(&[b"PUBLISH", b"ch:1", b"hello"]));
+    cmds.push(c(&[b"PUBLISH", b"ch:1", b"hello", b"extra"]));
     cmds.push(c(&[b"INCR", b"n:1"]));
     cmds.push(c(&[b"INCRBY", b"n:1", b"5"]));
     cmds.push(c(&[b"DECR", b"n:1"]));
@@ -2362,6 +2393,15 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"GEODIST", b"geo:1", b"Palermo", b"Catania", b"km"]));
     cmds.push(c(&[b"GEODIST", b"geo:1", b"Palermo", b"Nowhere"]));
     cmds.push(c(&[b"GEODIST", b"geo:absent", b"a", b"b"]));
+    // (frankenredis-ozrro) GEOHASH is claimed at ONE member only. The
+    // multi-member form has its own parser at a higher arity and stays on the
+    // cascade; both are driven so a classification that swallowed the multi form
+    // would show up as a reply-shape difference rather than silently costing it
+    // its route.
+    cmds.push(c(&[b"GEOHASH", b"geo:1", b"Palermo"]));
+    cmds.push(c(&[b"GEOHASH", b"geo:1", b"Nowhere"]));
+    cmds.push(c(&[b"GEOHASH", b"geo:absent", b"Palermo"]));
+    cmds.push(c(&[b"GEOHASH", b"geo:1", b"Palermo", b"Catania"]));
     cmds.push(c(&[b"ECHO", b"hey"]));
     cmds.push(c(&[b"PING"]));
     cmds.push(c(&[b"PING", b"hello"]));
@@ -2449,6 +2489,32 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"OBJECT", b"ENCODING", b"t:int"]));
     cmds.push(c(&[b"SMEMBERS", b"t:1"]));
     cmds.push(c(&[b"SMEMBERS", b"t:absent"]));
+    // (frankenredis-ozrro) SINTERCARD is claimed at arity 4 and 5, one per exact
+    // key-count parser, so BOTH counts run. A numkeys that disagrees with the
+    // arity is declined by both parsers and must still produce 7.2.4's error,
+    // and the LIMIT spelling is arity 6 and keeps the cascade.
+    cmds.push(c(&[b"SADD", b"sc:a", b"m1", b"m2", b"m3"]));
+    cmds.push(c(&[b"SADD", b"sc:b", b"m2", b"m3", b"m4"]));
+    cmds.push(c(&[b"SADD", b"sc:c", b"m3", b"m9"]));
+    cmds.push(c(&[b"SINTERCARD", b"2", b"sc:a", b"sc:b"]));
+    cmds.push(c(&[b"SINTERCARD", b"3", b"sc:a", b"sc:b", b"sc:c"]));
+    cmds.push(c(&[b"SINTERCARD", b"2", b"sc:a", b"t:absent"]));
+    cmds.push(c(&[b"SINTERCARD", b"3", b"sc:a", b"sc:b"]));
+    cmds.push(c(&[b"SINTERCARD", b"2", b"sc:a", b"sc:b", b"LIMIT", b"1"]));
+    cmds.push(c(&[b"SINTERCARD", b"2", b"sc:a", b"s:1"]));
+    // (frankenredis-ozrro) SRANDMEMBER with a count samples, so only shapes whose
+    // reply is determined can be compared byte-for-byte across engines. A
+    // ONE-member set makes both the positive and the NEGATIVE count deterministic
+    // — `-3` must repeat that member three times — which is what makes the count
+    // observable at all; count 0 and the absent key cover the two empty branches.
+    cmds.push(c(&[b"SADD", b"sc:one", b"only"]));
+    cmds.push(c(&[b"SRANDMEMBER", b"sc:one", b"3"]));
+    cmds.push(c(&[b"SRANDMEMBER", b"sc:one", b"-3"]));
+    cmds.push(c(&[b"SRANDMEMBER", b"sc:one", b"1"]));
+    cmds.push(c(&[b"SRANDMEMBER", b"sc:one", b"0"]));
+    cmds.push(c(&[b"SRANDMEMBER", b"t:absent", b"3"]));
+    cmds.push(c(&[b"SRANDMEMBER", b"s:1", b"2"]));
+    cmds.push(c(&[b"SRANDMEMBER", b"sc:one"]));
     cmds.push(c(&[b"SREM", b"t:1", b"m2"]));
     cmds.push(c(&[b"SCARD", b"t:1"]));
 
@@ -2521,6 +2587,19 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"ZREVRANGE", b"z:1", b"0", b"1", b"WITHSCORES"]));
     cmds.push(c(&[b"ZRANK", b"z:1", b"c"]));
     cmds.push(c(&[b"ZREVRANK", b"z:1", b"c"]));
+    // (frankenredis-ozrro) ZRANDMEMBER's count form is claimed at arity 3 only.
+    // Same determinism argument as SRANDMEMBER: a one-member sorted set pins the
+    // positive count, the repeating negative count, and the two empty branches,
+    // while WITHSCORES (arity 4) and the no-count form (arity 2) stay on the
+    // cascade and are driven to prove they still answer.
+    cmds.push(c(&[b"ZADD", b"zr:one", b"1.5", b"only"]));
+    cmds.push(c(&[b"ZRANDMEMBER", b"zr:one", b"3"]));
+    cmds.push(c(&[b"ZRANDMEMBER", b"zr:one", b"-3"]));
+    cmds.push(c(&[b"ZRANDMEMBER", b"zr:one", b"0"]));
+    cmds.push(c(&[b"ZRANDMEMBER", b"z:absent", b"3"]));
+    cmds.push(c(&[b"ZRANDMEMBER", b"zr:one", b"2", b"WITHSCORES"]));
+    cmds.push(c(&[b"ZRANDMEMBER", b"zr:one"]));
+    cmds.push(c(&[b"ZRANDMEMBER", b"s:1", b"2"]));
     cmds.push(c(&[b"ZSCAN", b"z:1", b"0"]));
     cmds.push(c(&[b"ZSCAN", b"z:absent", b"0"]));
     cmds.push(c(&[b"SSCAN", b"t:1", b"0"]));
@@ -2632,6 +2711,76 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
         assert_eq!(
             fast_responses[i], redis_responses[i],
             "reply {i} `{label}`: both fr routes agree with each other but not with 7.2.4"
+        );
+    }
+
+    // (frankenredis-ozrro) The one PTTL branch the equality loop above cannot
+    // carry. A live PTTL is a millisecond countdown, so three engines answering
+    // microseconds apart legitimately disagree in the last digits and an
+    // equality assertion would be a flake generator. It is still the ONLY case
+    // that tells the front-classified PTTL route apart from its TTL sibling: a
+    // route wired to the seconds executor answers 100 here, three orders of
+    // magnitude outside the band. Checked as a band on all three engines.
+    // (frankenredis-ozrro) PUBLISH's front-classified route cannot be pinned by
+    // the loop above at all: with nobody listening every spelling answers 0, so
+    // swapping the channel and the message is invisible. One extra connection
+    // per engine subscribing to a known channel makes the argument ORDER
+    // observable — the right order reaches one subscriber, the swapped order
+    // publishes to a channel nobody is on and reaches none.
+    for (engine, port) in [
+        ("fast", fast_port),
+        ("generic", generic_port),
+        ("redis", redis_port),
+    ] {
+        let mut listener = BufferedTcpClient::connect(port);
+        listener.write_all(&encode_command(&[b"SUBSCRIBE", b"ch:live"]));
+        let subscribed = listener.read_response();
+        assert!(
+            matches!(subscribed, RespFrame::Array(Some(ref parts)) if parts.len() == 3),
+            "{engine}: SUBSCRIBE must confirm before the publish is counted, got {subscribed:?}"
+        );
+        let mut publisher = BufferedTcpClient::connect(port);
+        publisher.write_all(&encode_command(&[b"PUBLISH", b"ch:live", b"payload"]));
+        assert_eq!(
+            publisher.read_response(),
+            RespFrame::Integer(1),
+            "{engine}: PUBLISH must report the one subscriber on ch:live"
+        );
+        publisher.write_all(&encode_command(&[b"PUBLISH", b"payload", b"ch:live"]));
+        assert_eq!(
+            publisher.read_response(),
+            RespFrame::Integer(0),
+            "{engine}: a channel nobody subscribed to must report zero receivers"
+        );
+    }
+
+    let mut band = Vec::new();
+    band.extend_from_slice(&encode_command(&[b"SET", b"s:band", b"v"]));
+    band.extend_from_slice(&encode_command(&[b"PEXPIRE", b"s:band", b"100000"]));
+    band.extend_from_slice(&encode_command(&[b"PTTL", b"s:band"]));
+    for (engine, client) in [
+        ("fast", &mut fast),
+        ("generic", &mut generic),
+        ("redis", &mut redis),
+    ] {
+        client.write_all(&band);
+        let replies = client.read_responses(3);
+        assert_eq!(
+            replies[1],
+            RespFrame::Integer(1),
+            "{engine}: PEXPIRE must arm the key"
+        );
+        let RespFrame::Integer(remaining) = replies[2] else {
+            panic!(
+                "{engine}: PTTL must answer an integer, got {:?}",
+                replies[2]
+            );
+        };
+        assert!(
+            (95_000..=100_000).contains(&remaining),
+            "{engine}: PTTL answered {remaining}, outside the 95s-100s band a \
+             100-second PEXPIRE must produce — a seconds-resolution reply lands \
+             at 100 and a route wired to the wrong key meta command lands at -1"
         );
     }
 }

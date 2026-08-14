@@ -16534,6 +16534,28 @@ enum BorrowedDispatchFloorClass {
     Decrby,
     /// (frankenredis-ozrro) `INCRBY key increment`.
     Incrby,
+    /// (frankenredis-ozrro) `SINTERCARD numkeys key...` at two and three keys —
+    /// the two counts the cascade has exact parsers for. `LIMIT` spellings are a
+    /// higher arity and keep the cascade.
+    Sintercard,
+    /// (frankenredis-ozrro) `ZRANDMEMBER key count`, the members-only form.
+    ZrandmemberCount,
+    /// (frankenredis-ozrro) `SRANDMEMBER key count`, the array-reply form. The
+    /// no-count form is [`BorrowedDispatchFloorClass::Srandmember`].
+    SrandmemberCount,
+    /// (frankenredis-ozrro) `COPY source destination`, no `DB`/`REPLACE` token.
+    Copy,
+    /// (frankenredis-ozrro) `PTTL key`.
+    Pttl,
+    /// (frankenredis-ozrro) `EXPIRETIME key`.
+    Expiretime,
+    /// (frankenredis-ozrro) `PUBLISH channel message`.
+    Publish,
+    /// (frankenredis-ozrro) `GETBIT key offset`.
+    Getbit,
+    /// (frankenredis-ozrro) `GEOHASH key member` at one member; the multi-member
+    /// parser is a different arity and keeps the cascade.
+    GeohashSingle,
     /// (frankenredis-ozrro) `GEOPOS key member` at one member.
     Geopos,
     /// (frankenredis-ozrro) `GEODIST key m1 m2`, with or without a unit token.
@@ -16629,13 +16651,17 @@ enum BorrowedDispatchFloorCommand {
     Bitfield,
     BitfieldRo,
     Bitpos,
+    Copy,
     Dbsize,
     Decrby,
     Echo,
     Exists,
     Expire,
+    Expiretime,
     Geodist,
+    Geohash,
     Geopos,
+    Getbit,
     Getdel,
     Getex,
     Getrange,
@@ -16662,11 +16688,14 @@ enum BorrowedDispatchFloorCommand {
     Memory,
     Object,
     Pfcount,
+    Pttl,
+    Publish,
     Rpush,
     Sadd,
     Scard,
     Setbit,
     Setrange,
+    Sintercard,
     Sismember,
     Smembers,
     Smismember,
@@ -16688,6 +16717,7 @@ enum BorrowedDispatchFloorCommand {
     Zcard,
     Zcount,
     Zincrby,
+    Zrandmember,
     Zrange,
     Zmscore,
     Zrangebylex,
@@ -16738,6 +16768,8 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'X', b'D', b'E', b'L'] => Some(BorrowedDispatchFloorCommand::Xdel),
             [b'L', b'R', b'E', b'M'] => Some(BorrowedDispatchFloorCommand::Lrem),
             [b'Z', b'A', b'D', b'D'] => Some(BorrowedDispatchFloorCommand::Zadd),
+            [b'C', b'O', b'P', b'Y'] => Some(BorrowedDispatchFloorCommand::Copy),
+            [b'P', b'T', b'T', b'L'] => Some(BorrowedDispatchFloorCommand::Pttl),
             _ => None,
         },
         5 => match uppercase_ascii_token::<5>(token)? {
@@ -16776,6 +16808,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'G', b'E', b'T', b'D', b'E', b'L'] => Some(BorrowedDispatchFloorCommand::Getdel),
             [b'I', b'N', b'C', b'R', b'B', b'Y'] => Some(BorrowedDispatchFloorCommand::Incrby),
             [b'G', b'E', b'O', b'P', b'O', b'S'] => Some(BorrowedDispatchFloorCommand::Geopos),
+            [b'G', b'E', b'T', b'B', b'I', b'T'] => Some(BorrowedDispatchFloorCommand::Getbit),
             _ => None,
         },
         7 => match uppercase_ascii_token::<7>(token)? {
@@ -16803,6 +16836,12 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'H', b'S', b'T', b'R', b'L', b'E', b'N'] => {
                 Some(BorrowedDispatchFloorCommand::Hstrlen)
             }
+            [b'P', b'U', b'B', b'L', b'I', b'S', b'H'] => {
+                Some(BorrowedDispatchFloorCommand::Publish)
+            }
+            [b'G', b'E', b'O', b'H', b'A', b'S', b'H'] => {
+                Some(BorrowedDispatchFloorCommand::Geohash)
+            }
             _ => None,
         },
         9 => match uppercase_ascii_token::<9>(token)? {
@@ -16823,6 +16862,12 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             }
             [b'S', b'M', b'I', b'S', b'M', b'E', b'M', b'B', b'E', b'R'] => {
                 Some(BorrowedDispatchFloorCommand::Smismember)
+            }
+            [b'S', b'I', b'N', b'T', b'E', b'R', b'C', b'A', b'R', b'D'] => {
+                Some(BorrowedDispatchFloorCommand::Sintercard)
+            }
+            [b'E', b'X', b'P', b'I', b'R', b'E', b'T', b'I', b'M', b'E'] => {
+                Some(BorrowedDispatchFloorCommand::Expiretime)
             }
             _ => None,
         },
@@ -16905,6 +16950,19 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
                 b'E',
                 b'X',
             ] => Some(BorrowedDispatchFloorCommand::Zrangebylex),
+            [
+                b'Z',
+                b'R',
+                b'A',
+                b'N',
+                b'D',
+                b'M',
+                b'E',
+                b'M',
+                b'B',
+                b'E',
+                b'R',
+            ] => Some(BorrowedDispatchFloorCommand::Zrandmember),
             _ => None,
         },
         15 => match uppercase_ascii_token::<15>(token)? {
@@ -17311,6 +17369,49 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // GEOPOS is admitted at ONE member (arity 3); its parser handles more,
         // but only that shape was measured. GEODIST's parser takes arity 4 and 5
         // (with and without a unit token) and both are admitted.
+        // (frankenredis-ozrro) Eleventh batch, ranked by the same absolute gap
+        // threshold slice ten introduced: take at ~1,400 instructions per op or
+        // more. Twelve candidates were gap-measured with callgrind on one ELF,
+        // 2000 ops, -c1 -P16, cascade walked vs bypassed; nine cleared it.
+        //   SINTERCARD 2 s1 s2   ctl 23,924,602  byp 11,972,618  5,975/op  2.00x
+        //   ZRANDMEMBER z 2      ctl 21,012,154  byp  9,985,272  5,513/op  2.10x
+        //   SRANDMEMBER s 2      ctl 18,142,965  byp  9,098,839  4,522/op  1.99x
+        //   COPY k1 kdst         ctl 20,666,854  byp 12,547,289  4,059/op  1.65x
+        //   PTTL k1              ctl 12,067,962  byp  5,231,946  3,418/op  2.31x
+        //   EXPIRETIME k1        ctl 11,645,703  byp  4,871,983  3,386/op  2.39x
+        //   PUBLISH ch hello     ctl 20,206,029  byp 13,531,808  3,337/op  1.49x
+        //   GETBIT s 5           ctl 10,738,814  byp  5,029,604  2,854/op  2.14x
+        //   GEOHASH g m1         ctl 18,498,462  byp 13,787,966  2,355/op  1.34x
+        // Rejected on their own numbers, and the negative one is the more useful
+        // result: HINCRBYFLOAT measured -603/op (0.95x) — bypassing makes it
+        // SLOWER, so its route already sits ahead of the walk and joins SETEX,
+        // GETSET, PEXPIRE and PEXPIREAT in the leave-alone group. SINTER 752/op
+        // (1.07x), UNLINK 742/op (1.12x) and MGET-3 602/op (1.21x) are simply
+        // already shallow.
+        //
+        // Each is admitted at the arity its parser accepts and no other. GEOHASH
+        // and SRANDMEMBER each have a second parser at a different arity, so the
+        // multi-member and no-count forms keep the cascade rather than being
+        // stranded on the generic path by a classification their parser declines.
+        (4..=5, BorrowedDispatchFloorCommand::Sintercard) => {
+            Some(BorrowedDispatchFloorClass::Sintercard)
+        }
+        (3, BorrowedDispatchFloorCommand::Zrandmember) => {
+            Some(BorrowedDispatchFloorClass::ZrandmemberCount)
+        }
+        (3, BorrowedDispatchFloorCommand::Srandmember) => {
+            Some(BorrowedDispatchFloorClass::SrandmemberCount)
+        }
+        (3, BorrowedDispatchFloorCommand::Copy) => Some(BorrowedDispatchFloorClass::Copy),
+        (2, BorrowedDispatchFloorCommand::Pttl) => Some(BorrowedDispatchFloorClass::Pttl),
+        (2, BorrowedDispatchFloorCommand::Expiretime) => {
+            Some(BorrowedDispatchFloorClass::Expiretime)
+        }
+        (3, BorrowedDispatchFloorCommand::Publish) => Some(BorrowedDispatchFloorClass::Publish),
+        (3, BorrowedDispatchFloorCommand::Getbit) => Some(BorrowedDispatchFloorClass::Getbit),
+        (3, BorrowedDispatchFloorCommand::Geohash) => {
+            Some(BorrowedDispatchFloorClass::GeohashSingle)
+        }
         (3, BorrowedDispatchFloorCommand::Geopos) => Some(BorrowedDispatchFloorClass::Geopos),
         (4..=5, BorrowedDispatchFloorCommand::Geodist) => Some(BorrowedDispatchFloorClass::Geodist),
         (3, BorrowedDispatchFloorCommand::Incrby) => Some(BorrowedDispatchFloorClass::Incrby),
@@ -20366,6 +20467,237 @@ fn try_dispatch_floor_classified_action(
                         .map(|()| packet.consumed)
                 },
             );
+            if let Some(consumed) = hit {
+                Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        // (frankenredis-ozrro) Eleventh batch. Every arm below routes to the SAME
+        // parser and executor its cascade arm used, so the reply is identical by
+        // construction and a decline still lands on the generic path.
+        BorrowedDispatchFloorClass::Sintercard => {
+            // Two exact parsers, one per key count. They are tried in the
+            // cascade's own order; `SINTERCARD 3 a b` (a numkeys that disagrees
+            // with the arity) is declined by both, exactly as before.
+            let hit = parse_borrowed_plain_sintercard2_packet(unparsed, &parser_config)
+                .and_then(|packet| {
+                    let tail = [packet.numkeys, packet.k1, packet.k2];
+                    runtime
+                        .execute_plain_sintercard_borrowed(&tail, ts)
+                        .map(|response| (packet.consumed, response))
+                })
+                .or_else(|| {
+                    parse_borrowed_plain_sintercard3_packet(unparsed, &parser_config).and_then(
+                        |packet| {
+                            let tail = [packet.numkeys, packet.k1, packet.k2, packet.k3];
+                            runtime
+                                .execute_plain_sintercard_borrowed(&tail, ts)
+                                .map(|response| (packet.consumed, response))
+                        },
+                    )
+                });
+            if let Some((consumed, response)) = hit {
+                Ok(BorrowedMultibulkAction::FastReply { consumed, response })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::ZrandmemberCount => {
+            let hit = parse_borrowed_plain_zrandmember_count_packet(unparsed, &parser_config)
+                .and_then(|packet| {
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    runtime
+                        .execute_plain_zrandmember_count_borrowed_into(
+                            packet.key,
+                            packet.count,
+                            ts,
+                            client_resp3,
+                            out,
+                        )
+                        .map(|()| packet.consumed)
+                });
+            if let Some(consumed) = hit {
+                Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::SrandmemberCount => {
+            let hit = parse_borrowed_plain_srandmember_count_packet(unparsed, &parser_config)
+                .and_then(|packet| {
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    runtime
+                        .execute_plain_srandmember_count_borrowed_into(
+                            packet.key,
+                            packet.count,
+                            ts,
+                            client_resp3,
+                            out,
+                        )
+                        .map(|()| packet.consumed)
+                });
+            if let Some(consumed) = hit {
+                Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Copy => {
+            if let Some(packet) = parse_borrowed_plain_copy_packet(unparsed, &parser_config)
+                && let Some(response) =
+                    runtime.execute_plain_copy_borrowed(packet.key, packet.member, false, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Pttl => {
+            if let Some(packet) = parse_borrowed_plain_pttl_packet(unparsed, &parser_config)
+                && let Some(response) =
+                    runtime.execute_plain_keymeta_borrowed(PlainKeyMetaCmd::Pttl, packet.key, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Expiretime => {
+            if let Some(packet) = parse_borrowed_plain_expiretime_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_keymeta_borrowed(
+                    PlainKeyMetaCmd::Expiretime,
+                    packet.key,
+                    ts,
+                )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Publish => {
+            // PUBLISH channel message: key=channel, arg=message.
+            if let Some(packet) = parse_borrowed_plain_key_arg1_packet(
+                unparsed,
+                &parser_config,
+                b"*3\r\n$7\r\n",
+                b"PUBLISH",
+            ) && let Some(response) =
+                runtime.execute_plain_publish_borrowed(packet.key, packet.arg, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Getbit => {
+            if let Some(packet) = parse_borrowed_plain_getbit_packet(unparsed, &parser_config)
+                && let Some(response) =
+                    runtime.execute_plain_getbit_borrowed(packet.key, packet.member, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::GeohashSingle => {
+            let hit = parse_borrowed_plain_key_arg1_packet(
+                unparsed,
+                &parser_config,
+                b"*3\r\n$7\r\n",
+                b"GEOHASH",
+            )
+            .and_then(|packet| {
+                let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                runtime
+                    .execute_plain_geohash_single_borrowed_into(
+                        packet.key,
+                        packet.arg,
+                        ts,
+                        client_resp3,
+                        out,
+                    )
+                    .map(|()| packet.consumed)
+            });
             if let Some(consumed) = hit {
                 Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
             } else {
@@ -43786,6 +44118,158 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         );
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(b"*3\r\n$5\r\nGETEX", &cfg,),
+            None
+        );
+
+        // (frankenredis-ozrro) Eleventh batch. Each new claim is pinned at the
+        // arity its parser accepts, with the neighbouring arity pinned as NOT
+        // claimed, so this stays an assertion about exact tokens rather than
+        // about command names.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*4\r\n$10\r\nsInTeRcArD\r\n$1\r\n2\r\n$2\r\ns1\r\n$2\r\ns2\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Sintercard)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*5\r\n$10\r\nSINTERCARD\r\n$1\r\n3\r\n$2\r\ns1\r\n$2\r\ns2\r\n$2\r\ns3\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Sintercard)
+        );
+        // The LIMIT spelling is arity 6 and keeps the cascade.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*6\r\n$10\r\nSINTERCARD\r\n$1\r\n2\r\n$2\r\ns1\r\n$2\r\ns2\r\n$5\r\nLIMIT\r\n$1\r\n1\r\n",
+                &cfg,
+            ),
+            None
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$11\r\nzRaNdMeMbEr\r\n$1\r\nz\r\n$1\r\n2\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::ZrandmemberCount)
+        );
+        // WITHSCORES is arity 4; the no-count form is arity 2. Both keep the
+        // cascade, because the count parser would decline them and a declined
+        // classification lands on the generic path instead of their own arms.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*4\r\n$11\r\nZRANDMEMBER\r\n$1\r\nz\r\n$1\r\n2\r\n$10\r\nWITHSCORES\r\n",
+                &cfg,
+            ),
+            None
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*2\r\n$11\r\nZRANDMEMBER\r\n$1\r\nz\r\n",
+                &cfg,
+            ),
+            None
+        );
+        // SRANDMEMBER now splits by arity: 2 is the single-member `_into` route
+        // that already floored, 3 is the array-reply count form added here.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*2\r\n$11\r\nSRANDMEMBER\r\n$1\r\nt\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Srandmember)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$11\r\nsRaNdMeMbEr\r\n$1\r\nt\r\n$1\r\n2\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::SrandmemberCount)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$4\r\ncOpY\r\n$1\r\na\r\n$1\r\nb\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Copy)
+        );
+        // `COPY src dst REPLACE` and the `DB n` spelling stay on the cascade.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*4\r\n$4\r\nCOPY\r\n$1\r\na\r\n$1\r\nb\r\n$7\r\nREPLACE\r\n",
+                &cfg,
+            ),
+            None
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*2\r\n$4\r\npTtL\r\n$1\r\nk\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Pttl)
+        );
+        // PTTL and TTL are distinct classes; nothing here may collapse them.
+        assert_ne!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*2\r\n$4\r\nPTTL\r\n$1\r\nk\r\n",
+                &cfg,
+            ),
+            super::classify_borrowed_dispatch_floor_packet(b"*2\r\n$3\r\nTTL\r\n$1\r\nk\r\n", &cfg,)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*2\r\n$10\r\neXpIrEtImE\r\n$1\r\nk\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Expiretime)
+        );
+        // PEXPIRETIME is an eleven-byte token and is deliberately NOT claimed.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*2\r\n$11\r\nPEXPIRETIME\r\n$1\r\nk\r\n",
+                &cfg,
+            ),
+            None
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$7\r\npUbLiSh\r\n$2\r\nch\r\n$2\r\nhi\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Publish)
+        );
+        // SPUBLISH is a different command with a different length; it keeps the
+        // cascade.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$8\r\nSPUBLISH\r\n$2\r\nch\r\n$2\r\nhi\r\n",
+                &cfg,
+            ),
+            None
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$6\r\ngEtBiT\r\n$1\r\nb\r\n$1\r\n7\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Getbit)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$7\r\ngEoHaSh\r\n$1\r\ng\r\n$1\r\nm\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::GeohashSingle)
+        );
+        // Multi-member GEOHASH has its own parser at a higher arity and must
+        // keep the cascade, or the single-member route would decline it onto the
+        // generic path instead of the arm that serves it.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*4\r\n$7\r\nGEOHASH\r\n$1\r\ng\r\n$2\r\nm1\r\n$2\r\nm2\r\n",
+                &cfg,
+            ),
             None
         );
     }
