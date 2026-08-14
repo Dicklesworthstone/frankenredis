@@ -1408,7 +1408,7 @@ fn lua_lvalue_first_token(expr: &Expr) -> String {
         }
         Expr::Str(s) => format!("'{}'", String::from_utf8_lossy(s)),
         Expr::Name(n) => n.to_string(),
-        Expr::LocalName(n, _) => n.clone(),
+        Expr::LocalName(n, _) => n.to_string(),
         Expr::VarArgs => "...".to_string(),
         Expr::Call(_, _) | Expr::MethodCall(_, _, _) => "()".to_string(),
         Expr::TableConstructor(_) => "{".to_string(),
@@ -2068,7 +2068,10 @@ pub enum Expr {
     // Global names are immutable source tokens. Cached chunks clone function
     // bodies for each closure instance, so keep the parsed spelling shared.
     Name(Rc<str>),
-    LocalName(String, LocalSlotRef),
+    // The resolver substitutes this for immutable parser names. Function
+    // bodies are cloned when cached chunks instantiate closures, so retain
+    // the source spelling instead of copying every resolved local name.
+    LocalName(Rc<str>, LocalSlotRef),
     VarArgs,
     BinOp(Box<Expr>, BinOp, Box<Expr>),
     UnaryOp(UnaryOp, Box<Expr>),
@@ -3046,7 +3049,7 @@ impl LocalResolver {
         match expr {
             Expr::Name(name) => {
                 if let Some(local) = self.resolve_local(name) {
-                    *expr = Expr::LocalName(name.to_string(), local);
+                    *expr = Expr::LocalName(name.clone(), local);
                 }
             }
             Expr::LocalName(_, _) | Expr::Nil | Expr::Bool(_) | Expr::Number(_) | Expr::Str(_) => {}
@@ -4578,7 +4581,7 @@ impl<'a> LuaState<'a> {
         };
 
         fn is_loop_var(expr: &Expr, loop_name: &str) -> bool {
-            matches!(expr, Expr::LocalName(name, _) if name == loop_name)
+            matches!(expr, Expr::LocalName(name, _) if name.as_ref() == loop_name)
         }
 
         fn addend_kind(expr: &Expr, loop_name: &str) -> Option<NumericForAddend> {
@@ -5258,7 +5261,7 @@ impl<'a> LuaState<'a> {
                     if self.globals_locked {
                         return Err("user_script:1: Attempt to modify a readonly table".to_string());
                     }
-                    self.globals.insert(name.clone(), value);
+                    self.globals.insert(name.to_string(), value);
                 }
             }
             Expr::Name(name) => {
@@ -5424,7 +5427,7 @@ impl<'a> LuaState<'a> {
                         )?;
                         return Ok(());
                     }
-                    self.globals.insert(name.clone(), table);
+                    self.globals.insert(name.to_string(), table);
                 }
                 Ok(())
             }
@@ -5485,7 +5488,7 @@ impl<'a> LuaState<'a> {
                         env,
                         varargs,
                     )
-                } else if name == "_G" {
+                } else if name.as_ref() == "_G" {
                     Ok(LuaValue::Table(self.ensure_g_table()))
                 } else if let Some(val) = self.resolve_global_cached(name) {
                     Ok(val)
@@ -5935,7 +5938,8 @@ impl<'a> LuaState<'a> {
                             if !env.set_existing_local_slot(*local, arg_vals[0].clone())
                                 && !env.set_existing_local(var_name, arg_vals[0].clone())
                             {
-                                self.globals.insert(var_name.clone(), arg_vals[0].clone());
+                                self.globals
+                                    .insert(var_name.to_string(), arg_vals[0].clone());
                             }
                         }
                         Some(Expr::Name(var_name)) => {
@@ -7053,7 +7057,7 @@ impl<'a> LuaState<'a> {
         }
         match callee_expr {
             Expr::Name(n) => Some(n.to_string()),
-            Expr::LocalName(n, _) => Some(n.clone()),
+            Expr::LocalName(n, _) => Some(n.to_string()),
             Expr::Field(_, f) => Some(f.to_string()),
             Expr::Index(_, key) => match key.as_ref() {
                 Expr::Str(s) if !s.is_empty() => std::str::from_utf8(s).ok().map(str::to_string),
@@ -18167,6 +18171,55 @@ end
         let mut store = Store::new();
         let reply = eval_script(
             b"local f = function() return { cached = 'value' } end; return f().cached",
+            &[],
+            &[],
+            &mut store,
+            0,
+        );
+        assert_eq!(reply, Ok(RespFrame::BulkString(Some(b"value".to_vec()))));
+    }
+
+    #[test]
+    fn cloned_function_ast_shares_resolved_local_name_d3al0() {
+        let parsed = super::parse_lua_chunk(
+            b"return function(value) local snapshot = value; return snapshot end",
+        );
+        assert!(parsed.is_ok(), "script should parse");
+
+        let resolved_local = |block: &super::Block| {
+            let [(_, super::Stmt::Return(values))] = block.as_slice() else {
+                return None;
+            };
+            let [super::Expr::FunctionDef(_, _, body)] = values.as_slice() else {
+                return None;
+            };
+            let [_, (_, super::Stmt::Return(values))] = body.as_slice() else {
+                return None;
+            };
+            let [super::Expr::LocalName(name, _)] = values.as_slice() else {
+                return None;
+            };
+            Some(name.clone())
+        };
+
+        if let Ok(parsed) = parsed {
+            let cloned = parsed.clone();
+            let original_name = resolved_local(&parsed);
+            let cloned_name = resolved_local(&cloned);
+            assert!(original_name.is_some(), "expected resolved local name");
+            assert!(cloned_name.is_some(), "expected resolved local name");
+            if let (Some(original_name), Some(cloned_name)) = (original_name, cloned_name) {
+                assert!(
+                    std::rc::Rc::ptr_eq(&original_name, &cloned_name),
+                    "cloned AST must share its immutable resolved-local-name allocation"
+                );
+                assert_eq!(original_name.as_ref(), "snapshot");
+            }
+        }
+
+        let mut store = Store::new();
+        let reply = eval_script(
+            b"local f = function(value) local snapshot = value; return snapshot end; return f('value')",
             &[],
             &[],
             &mut store,
