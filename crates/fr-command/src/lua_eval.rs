@@ -2077,7 +2077,9 @@ pub enum Expr {
     // function bodies are cloned instead of duplicating short field names.
     Field(Box<Expr>, Rc<str>),
     Call(Box<Expr>, Vec<Expr>),
-    MethodCall(Box<Expr>, String, Vec<Expr>),
+    // Method spellings are immutable parser data and appear in cached closure
+    // bodies, so share them across AST clones with the other name nodes.
+    MethodCall(Box<Expr>, Rc<str>, Vec<Expr>),
     TableConstructor(Vec<TableField>),
     FunctionDef(Vec<String>, bool, Block),
 }
@@ -2734,7 +2736,7 @@ impl Parser {
                         t => return Err(parser_name_expected_near(&t)),
                     };
                     let args = self.parse_call_args()?;
-                    expr = Expr::MethodCall(Box::new(expr), method, args);
+                    expr = Expr::MethodCall(Box::new(expr), Rc::from(method), args);
                 }
                 Token::LParen | Token::LBrace | Token::Str(_) => {
                     let args = self.parse_call_args()?;
@@ -18085,6 +18087,39 @@ end
             "cloned AST must share its immutable field-name allocation"
         );
         assert_eq!(original_field.as_ref(), "call");
+    }
+
+    #[test]
+    fn cloned_function_ast_shares_method_name_nodes_d3al0() {
+        let parsed = super::parse_lua_chunk(b"return function() return obj:method() end")
+            .expect("script should parse");
+        let cloned = parsed.clone();
+
+        let method_name = |block: &super::Block| {
+            let super::Stmt::Return(values) = &block[0].1 else {
+                panic!("expected top-level return");
+            };
+            let super::Expr::FunctionDef(_, _, body) = &values[0] else {
+                panic!("expected function literal");
+            };
+            let super::Stmt::Return(values) = &body[0].1 else {
+                panic!("expected function return");
+            };
+            let super::Expr::MethodCall(receiver, method, args) = &values[0] else {
+                panic!("expected method call");
+            };
+            assert!(args.is_empty());
+            assert!(matches!(receiver.as_ref(), super::Expr::Name(name) if name.as_ref() == "obj"));
+            method.clone()
+        };
+
+        let original_method = method_name(&parsed);
+        let cloned_method = method_name(&cloned);
+        assert!(
+            std::rc::Rc::ptr_eq(&original_method, &cloned_method),
+            "cloned AST must share its immutable method-name allocation"
+        );
+        assert_eq!(original_method.as_ref(), "method");
     }
 
     #[test]
