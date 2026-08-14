@@ -7994,6 +7994,11 @@ mod tests {
         let blob_16 = build_intset_for_test(&[-1, 0, 1, 32_000]);
         let got = decode_intset_members(&blob_16).expect("16-bit intset");
         assert_eq!(
+            got.capacity(),
+            4,
+            "decoder preallocates the RDB member count"
+        );
+        assert_eq!(
             got,
             vec![
                 b"-1".to_vec(),
