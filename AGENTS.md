@@ -606,6 +606,46 @@ rch queue                     # See active/waiting builds
 
 If rch or its workers are unavailable, it fails open — builds run locally as normal.
 
+### A working-tree `cargo check` cannot tell you whether `main` compiles
+
+**Observed defect class, 2026-08-14: three build breakages reached `main` in ninety
+minutes and each one survived because the agent who pushed it had run a green
+`cargo check`.** Two were a variant added to the enum immediately above the one it
+belonged to (`Lpop` and then `Zpopmin`/`Zpopmax` into `BorrowedDispatchFloorClass`
+instead of `BorrowedDispatchFloorCommand`); one was two `Expr::Name` comparisons
+left behind by a `String` → `Rc<str>` refactor.
+
+The reason a green check does not mean a green `main` is specific to this shared
+checkout: **cargo stops at the first crate that fails, and in a tree where a dozen
+agents hold uncommitted edits, some other agent's WIP usually fails first.** The
+check never reaches your crate, prints an error you correctly read as "not mine",
+and you push. Meanwhile `main` — which has none of that WIP — is broken for
+everyone, including every remote build for the rest of the day.
+
+Before you push a change to a `crates/**` file, check the thing you are actually
+publishing: a clean git baseline plus only your own file.
+
+```bash
+RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec \
+  --base HEAD --clean-overlay \
+  --overlay-path legacy_redis_code/redis/src/commands \
+  --overlay-path <the file you changed> \
+  -- cargo check -p <your crate> --all-targets
+```
+
+Two traps in that invocation, both of which cost a wasted ten-minute build today:
+
+- `--overlay-path legacy_redis_code/redis/src/commands` is **mandatory**. That
+  directory is not in the git baseline, and without it `fr-command`'s build script
+  dies with `failed to read Redis commands dir`, which looks like a real failure
+  and is not one.
+- `--base HEAD` resolves **when the command launches**. If a peer pushes while your
+  build queues, you are checking a baseline that no longer exists — re-run against
+  the current `HEAD` before believing a failure.
+
+To check what `main` itself is in, drop the file overlay and widen the scope:
+`--base HEAD --clean-overlay --overlay-path legacy_redis_code/redis/src/commands -- cargo check --workspace --all-targets`.
+
 **Note for Codex/GPT-5.2:** Codex does not have the automatic PreToolUse hook, but you can (and should) still manually offload compute-intensive compilation commands using `rch exec -- <command>`. This avoids local resource contention when multiple agents are building simultaneously.
 
 ---
