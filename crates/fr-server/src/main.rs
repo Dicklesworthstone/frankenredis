@@ -16494,6 +16494,11 @@ enum BorrowedDispatchFloorClass {
     Hlen,
     /// (frankenredis-ozrro) `LREM key count element`.
     Lrem,
+    /// (frankenredis-ozrro) `LPOP|RPOP key count`. The count forms have an
+    /// exact borrowed parser/executor but were stranded late in the cascade.
+    ListPopCount {
+        left: bool,
+    },
     /// (frankenredis-ozrro) `EXPIRE key seconds`, no option token.
     Expire,
     /// (frankenredis-ozrro) `APPEND key value`.
@@ -16596,6 +16601,7 @@ enum BorrowedDispatchFloorClass {
     /// value count (5..=8) — the forms stranded ~1350 lines deep in the cascade.
     KeyedValuesWrite(usize),
     Llen,
+    Lpop,
     Lrange,
     Lpos,
     MemoryUsage,
@@ -16752,6 +16758,7 @@ enum BorrowedDispatchFloorCommand {
     Pttl,
     Publish,
     Rpush,
+    Rpop,
     Sadd,
     Scard,
     Setbit,
@@ -16831,6 +16838,8 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'X', b'A', b'C', b'K'] => Some(BorrowedDispatchFloorCommand::Xack),
             [b'X', b'D', b'E', b'L'] => Some(BorrowedDispatchFloorCommand::Xdel),
             [b'L', b'R', b'E', b'M'] => Some(BorrowedDispatchFloorCommand::Lrem),
+            [b'L', b'P', b'O', b'P'] => Some(BorrowedDispatchFloorCommand::Lpop),
+            [b'R', b'P', b'O', b'P'] => Some(BorrowedDispatchFloorCommand::Rpop),
             [b'Z', b'A', b'D', b'D'] => Some(BorrowedDispatchFloorCommand::Zadd),
             [b'C', b'O', b'P', b'Y'] => Some(BorrowedDispatchFloorCommand::Copy),
             [b'P', b'T', b'T', b'L'] => Some(BorrowedDispatchFloorCommand::Pttl),
@@ -17364,6 +17373,15 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // cannot reach either: it only records shapes that come out on the
         // GENERIC path, and these two match their arm and succeed.
         (4, BorrowedDispatchFloorCommand::Lrem) => Some(BorrowedDispatchFloorClass::Lrem),
+        // The count forms use the same fixed arity and parser shape. Carrying
+        // direction as data lets one front classifier skip both late literal
+        // prefix arms without widening to no-count or blocking-pop variants.
+        (3, BorrowedDispatchFloorCommand::Lpop) => {
+            Some(BorrowedDispatchFloorClass::ListPopCount { left: true })
+        }
+        (3, BorrowedDispatchFloorCommand::Rpop) => {
+            Some(BorrowedDispatchFloorClass::ListPopCount { left: false })
+        }
         // (frankenredis-ozrro) Four more routes picked the way the bead says to
         // pick them — by the walked-vs-bypassed callgrind gap, which IS the
         // prize. Per op, over 2000 ops: LINSERT 4,653 instructions (1.70x),
@@ -18649,6 +18667,31 @@ fn try_dispatch_floor_classified_action(
                     consumed: packet.consumed,
                     response,
                 })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::ListPopCount { left } => {
+            let hit = parse_borrowed_plain_key_arg1_packet(
+                unparsed,
+                &parser_config,
+                b"*3\r\n$4\r\n",
+                if left { b"LPOP" } else { b"RPOP" },
+            )
+            .and_then(|packet| {
+                runtime
+                    .execute_plain_list_pop_count_borrowed(left, packet.key, packet.arg, ts)
+                    .map(|response| (packet.consumed, response))
+            });
+            if let Some((consumed, response)) = hit {
+                Ok(BorrowedMultibulkAction::FastReply { consumed, response })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,
@@ -43626,6 +43669,28 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
                 &cfg,
             ),
             Some(super::BorrowedDispatchFloorClass::Xlen)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$4\r\nlPoP\r\n$1\r\nl\r\n$1\r\n2\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::ListPopCount { left: true })
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$4\r\nRpOp\r\n$1\r\nl\r\n$1\r\n2\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::ListPopCount { left: false })
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*2\r\n$4\r\nLPOP\r\n$1\r\nl\r\n",
+                &cfg,
+            ),
+            None,
+            "no-count pop keeps its existing dedicated route"
         );
         let xadd_maxlen =
             b"*8\r\n$4\r\nxAdD\r\n$1\r\ns\r\n$6\r\nMaXlEn\r\n$1\r\n~\r\n$4\r\n1000\r\n$1\r\n*\r\n$1\r\nf\r\n$1\r\nv\r\n";
