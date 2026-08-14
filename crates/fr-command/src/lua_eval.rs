@@ -5994,7 +5994,7 @@ impl<'a> LuaState<'a> {
                     &mut arg_vals,
                     env,
                     varargs,
-                    Some(method.as_str()),
+                    Some(method),
                 )?;
                 Ok(results.into_iter().next().unwrap_or(LuaValue::Nil))
             }
@@ -6054,7 +6054,7 @@ impl<'a> LuaState<'a> {
                                             &mut arg_vals,
                                             env,
                                             varargs,
-                                            Some(method.as_str()),
+                                            Some(method),
                                         )?
                                     }
                                     _ => vec![self.eval_expr(expr, env, varargs)?],
@@ -6225,7 +6225,7 @@ impl<'a> LuaState<'a> {
                             &mut arg_vals,
                             env,
                             varargs,
-                            Some(method.as_str()),
+                            Some(method),
                         )?;
                         vals.extend(results);
                     }
