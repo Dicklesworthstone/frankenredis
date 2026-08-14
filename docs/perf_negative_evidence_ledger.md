@@ -15576,3 +15576,81 @@ per op measurably -- not merely instructions. Conversely, the surface that IS wo
 anything that attacks the stalls directly: a flatter instruction representation (bytecode or a
 linear op array) that replaces per-node pointer chasing and enum dispatch, evaluated first by
 whether it moves branch-misses/op below ~400 and IPC above ~2.0, and only then by throughput.
+
+## 2026-08-14 PearlPuma: REJECT — four of thirteen borrowed-cascade classification candidates, measured and not taken; HINCRBYFLOAT's gap is NEGATIVE (`frankenredis-ozrro`)
+
+Claim class: SELF (instruction counts, one ELF, both arms). Campaign output: yes.
+
+Lever: front-classify a command into `classify_borrowed_dispatch_floor_packet` so its packet skips
+the ~395-arm linear borrowed cascade. Hypothesis: any command whose route sits deep in the chain
+pays the walk, so classifying it removes the walk.
+
+Instrument: `--features perf-ab-cascade-bypass` + `FR_PERF_AB_CASCADE_BYPASS`, one release ELF,
+SHA-256 7c8e7f213b3eb1860bd635bce18d71551b6e439e85432bd692546c5e20cfda7d, under callgrind so the
+count is exact and immune to this host's load. 2000 ops per shape, vendored redis-benchmark
+`-c 1 -P 16`, server seeded and counters zeroed before the measured window.
+
+| shape | cascade walked | bypassed | gap/op | ratio | verdict |
+|---|---:|---:|---:|---|---|
+| `HINCRBYFLOAT h f1 1` | 23,866,136 | 25,072,265 | **-603** | 0.951x | REJECT |
+| `MGET k1 k2 k3` | 6,939,274 | 5,735,261 | 602 | 1.209x | REJECT |
+| `UNLINK nokey` | 13,413,289 | 11,927,879 | 742 | 1.124x | REJECT |
+| `SINTER s1 s2` | 22,993,294 | 21,487,354 | 752 | 1.070x | REJECT |
+
+The threshold this bead has used since its tenth slice is an ABSOLUTE gap of ~1,400 instructions per
+op, and these four are the batch's misses. HINCRBYFLOAT is the one worth reading twice: its gap is
+NEGATIVE, so bypassing the cascade makes it SLOWER. Its borrowed route is both near the front of the
+chain AND better than the generic path by more than the walk costs, and classifying it would trade a
+good route for a worse one. It joins SETEX (0.93x), GETSET (0.65x), PEXPIRE (0.73x) and PEXPIREAT
+(0.86x) in the leave-alone group this bead has been accumulating. MGET, UNLINK and SINTER are simply
+already shallow.
+
+Retry predicate: do not re-measure these four. Re-open only if the chain is reordered such that
+their arms move materially deeper, which would show up as their gap crossing ~1,400 instructions per
+op in a fresh walked-vs-bypassed run on the same instrument.
+
+## 2026-08-14 PearlPuma: INADMISSIBLE — the e2e throughput arm for the cascade-classification batch; A/A null 0.85-1.07 and a same-binary post/pre of 0.96-1.05 on a loadavg-58 host (`frankenredis-ozrro`)
+
+Claim class: COMPETITIVE, ATTEMPTED AND WITHHELD. Campaign output: yes.
+
+The instruction-level result for this batch is exact (callgrind, one ELF, both arms). The e2e arm
+that would turn it into a COMPETITIVE row was run in the same session and its null failed, so the
+row is not reported.
+
+Harness: four servers started in ONE invocation — fr `post`, fr `pre`, vendored `redis-server`, and
+a SECOND instance of the post ELF as the A/A null — each pinned to its own core preflighted at
+<5% busy, client on a fifth. Arm order rotates per rep. 3 reps, 300,000 ops per arm per shape,
+`-c 1 -P 16`, 20,000-op warm-up, statistic the median of per-rep ratios. Every shape is error-probed
+on every engine first; none fired.
+
+CALIBRATION RUN, with `post` and `pre` pointed at the BYTE-IDENTICAL binary
+(SHA-256 7c8e7f213b3eb1860bd635bce18d71551b6e439e85432bd692546c5e20cfda7d), so both columns below
+have a known true value of exactly 1.0:
+
+| shape | A/A null (true 1.0) | same-binary post/pre (true 1.0) |
+|---|---:|---:|
+| SINTERCARD 2 | 0.9909 | 1.0180 |
+| ZRANDMEMBER z 2 | 1.0092 | 1.0213 |
+| SRANDMEMBER s 2 | 1.0632 | 0.9987 |
+| COPY k kdst | 1.0728 | 0.9982 |
+| PTTL k | 1.0271 | 1.0512 |
+| EXPIRETIME k | 1.0370 | 0.9606 |
+| PUBLISH ch hi | 1.0750 | 1.0127 |
+| GETBIT b 5 | 0.8504 | 1.0403 |
+| GEOHASH g m | 1.0275 | 0.9676 |
+| GET (control) | 1.0221 | 1.0032 |
+
+Two columns that must both read 1.0000 read 0.85-1.07 and 0.96-1.05. The noise floor is +-5-7%,
+wider than the effect being measured. Host at the time: thinkstation1, governor `performance`,
+AVX2, loadavg 57.95/56.76/48.85, 27 concurrent remote-build clients from the agent fleet.
+
+WHAT THE SAME RUN DOES ESTABLISH, because a failed null invalidates a RATIO CLAIM but not a coarse
+map: fr/redis for the nine shapes before the lever is SINTERCARD 0.76x, ZRANDMEMBER 0.79x,
+SRANDMEMBER 0.80x, COPY 0.71x, PTTL 0.81x, EXPIRETIME 0.84x, PUBLISH 0.66x, GETBIT 0.93x,
+GEOHASH 0.75x, with the untouched GET control at 1.11x. All nine are LOSSES, which is the map this
+batch was picked against.
+
+Retry predicate: re-run when this host's loadavg is under ~10, or with >= 9 reps so the median of
+per-rep ratios tightens, or on the server CPU ns/op axis (utime+stime from `/proc/<pid>/stat` over
+the measured window) rather than client-side ops/s, which is what the README's own table uses for
+exactly this reason. Do NOT report the throughput row until an A/A null lands inside 0.98-1.02.
