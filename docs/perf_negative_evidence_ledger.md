@@ -15671,3 +15671,63 @@ The harness self-reported each SHA from `/proc/<pid>/exe`. Its median A/A `A2/A`
 the apparent FrankenRedis/Redis median **1.0113x** (CI `[0.7578, 1.0448]`) is therefore **WITHHELD**,
 not a competitive row. A 27-round repeat immediately hit the specific harness blocker
 `PREFLIGHT FAIL: fewer than 4 quiet cores; wait for a window`; do not infer a win from this run.
+
+## 2026-08-14 PearlPuma: MEASURED LOSS — EVAL 50x `redis.call('GET')` loop, FrankenRedis / vendored Redis 7.2.4 = 0.8977x, A/A null 1.0031 (`frankenredis-lua-rediscall-loop-interpreter-bound-d3al0`)
+
+Claim class: COMPETITIVE. Campaign output: yes. This is a LOSS and it is reported as one.
+
+The standing row for this target was 0.7598x (2026-08-09 CrimsonHawk, same harness, same estimator).
+This is a fresh measurement of the same target and it reads BETTER, at 0.8977x. It is recorded as a
+new measurement, NOT as an attributed improvement: the binary is five days of commits newer and no
+A/B was run between the two, so nothing here identifies what moved it.
+
+HARNESS: `scripts/lua_eval_multirun.sh --runs 15 -R 9`, which drives
+`scripts/lua_eval_headtohead.sh`. Three arms start in ONE invocation — `fr_A`, a SECOND instance of
+the SAME fr ELF as the A/A null, and a live vendored `redis-server` — each pinned to its own
+preflighted-quiet core, arm order and core assignment rotated so every arm sees every
+(position, core) pair equally often. Each invocation contributes ONE median per ratio and the
+bootstrap runs ACROSS invocations, because the unit of replication is the RUN: rounds inside one
+invocation share a per-run offset and their CIs come out ~3x too tight.
+
+| ratio | median | across-run 95% CI | sd | n_runs |
+|---|---:|---|---:|---:|
+| **A/A null** fr_A2/fr_A | **1.0031** | [0.9683, 1.0292] | 6.63% | 13 |
+| **COMPETITIVE** fr_A/redis | **0.8977** | [0.8233, 0.9577] | 9.33% | 13 |
+
+The null CONTAINS 1.0 with a widest bound of 3.17%, so the row is admissible. The competitive CI
+EXCLUDES 1.0, so the loss is separated from the null rather than inside it.
+
+TWO OF FIFTEEN INVOCATIONS WERE VOID, and the cause is worth recording because it is a measurement
+hazard specific to a shared checkout rather than a bug in anything. Run 7 hit
+`PREFLIGHT FAIL: fewer than 4 quiet cores`. Run 3 died on
+`lua_eval_headtohead.sh: line 272: e.: command not found`, and line 272 of that file is a COMMENT —
+the harness was being rewritten underneath the running batch. `scripts/lua_eval_headtohead.sh` has
+an mtime of 13:58:56, inside this batch's window, from a peer's commit 87e441860
+`fix(harness): reject loaded EVAL hosts`. bash reads a script incrementally by byte offset, so
+editing a file while it executes makes it resume at a stale offset and run fragments of a line. Both
+VOIDs are excluded rather than imputed; the thirteen admitted runs each completed normally, since
+this failure mode produces a VOID and not a wrong number.
+
+**Reusable: in a shared checkout, a benchmark can be invalidated by a peer EDITING THE HARNESS
+mid-run, and bash will not tell you cleanly — it reports a syntax error on a comment line. Snapshot
+the harness (copy it out of the tree, or record its sha256 before and after) for any batch that runs
+longer than a few seconds.**
+
+PROVENANCE. Both fr arms self-report their SHA-256 from `/proc/<pid>/exe` of the already-started
+process, so the harness cannot compare a build against a different one by accident: fr
+`7c8e7f213b3eb1860bd635bce18d71551b6e439e85432bd692546c5e20cfda7d`, vendored redis
+`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`. Host thinkstation1, 64 cores,
+governor `performance`, AVX2, loadavg 16.53/29.48/39.66 at the start of the batch. Workload
+`EVAL "for i=1,50 do redis.call('GET', KEYS[1]) end return 1" 1 k`, 20,000 requests, 8 clients,
+pipeline 1, 9 rounds per invocation. Every arm is correctness-probed first (EVAL returns 1 and
+GET k = val on all three ports), because redis-benchmark counts an error reply as a completed
+request.
+
+CAVEAT ON THE BINARY, stated rather than buried: the fr ELF is a `--release` build of commit
+5d6d2368b carrying the `perf-ab-cascade-bypass` measurement feature. That feature defaults OFF and
+costs fr one `OnceLock` read per packet, so it can only HANDICAP fr — it cannot inflate this
+number. A clean current-HEAD rebuild was queued and is the right binary for the next run.
+
+Retry predicate: re-run on a clean current-HEAD binary from a SNAPSHOTTED copy of the harness, so a
+peer's edit cannot land inside the batch again. Do not attribute the 0.7598x -> 0.8977x movement to
+anything until an A/B with both binaries in ONE invocation says what moved it.
