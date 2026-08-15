@@ -15995,3 +15995,49 @@ after the 73-arm deletion lands, rebuild the bypass ELF from that commit and
 re-run `cascade_gap.py --ops 2000` over the eleven; classify a command only if
 its post-cut gap still clears 1,400 instructions per op, and record the ones that
 fall below it as rejections of the pre-cut numbers.
+
+## 2026-08-15: PROVENANCE ADDENDUM — worker identity for the slice-11 cascade rows, and why they are not exposed to the cross-worker hazard (`frankenredis-ozrro`)
+
+Filed against the fleet-wide finding that the SAME cell measured on two different
+rch workers returned 1.2693x and 0.0093x — a 13.6x swing with BOTH A/A nulls
+passing — so a passing null does not license comparing arms that ran on different
+workers, and every banked row must name its worker. This addendum supplies that
+naming for the two slice-11 entries above and states their exposure honestly
+rather than assuming instruction counts are automatically safe.
+
+**The measurements did not run on a worker at all.** Every callgrind run in those
+entries executed LOCALLY on thinkstation1 (Threadripper PRO 5975WX, governor
+`powersave`, AVX2, valgrind 3.25.1). rch was used only to COMPILE. Both arms of
+every row — cascade walked and `FR_PERF_AB_CASCADE_BYPASS=1` — ran in the same
+invocation, on the same host, sequentially, out of the same ELF. There is no
+cross-worker comparison anywhere in those tables.
+
+**Callgrind counts instructions in software**, so the quantity is independent of
+CPU model, cache size, memory bandwidth and contention — the four things that
+differ between workers. The evidence that this is true here rather than merely
+argued is the control: `GET foo` measured -368, -367 and -370 instructions per op
+in three independent invocations spanning hours, two different ELFs and different
+ports.
+
+**The one place a worker could have entered, checked rather than assumed.** The
+two ELFs were built on DIFFERENT workers — pre-cut
+`017727a9ada7913797321b91a75bd1354f4b7a74a1cfec0d255ba9db93cef6d5` on
+`vmi1153651`, post-cut
+`be69d55b4f6b7f730512f7c0276f6ec51c27289ae3324ebc4b621bfa450f22fa` on
+`vmi1264463`. Had the toolchain tuned codegen to the build host, the pre-vs-post
+column would mix codegen differences into the arm-deletion delta. It does not:
+this repo sets `rustflags = ["-Z", "threads=4"]` and nothing else, there is no
+`-C target-cpu=native` in `.cargo/config.toml`, `Cargo.toml`, `rust-toolchain.toml`
+or the environment, and the toolchain is pinned. Empirically the two
+zero-deletion shapes settle it — `DECR` moved by ONE instruction per op and `GET`
+by three ACROSS THE TWO ELFS, which a codegen difference would not have confined
+to the shapes with no deleted arms upstream.
+
+**Conclusion: no slice-11 row is worker-scoped and none needs flagging.** The
+general rule still binds every future row here, including the wall-clock
+throughput rows this bead will eventually need: both arms in one invocation on
+one worker, worker identity recorded, and the balanced-square interleave
+(`scripts/balanced_square_ab.py`) for anything timed rather than counted. Retry
+predicate: if any future cascade row is ever taken with its arms on separate
+workers, or on a host where `-C target-cpu=native` is in force, that row is
+inadmissible and must be re-taken in a single invocation before it is quoted.
