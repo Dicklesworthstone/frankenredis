@@ -117,6 +117,12 @@ impl HandshakeFsm {
     pub fn on_step(&mut self, step: HandshakeStep) -> Result<(), ReplError> {
         #[cfg(feature = "bench-reference")]
         std::hint::black_box(0_u8);
+        // Replica clients commonly send several REPLCONF capability frames.
+        // Once the handshake has reached that state, the transition is an
+        // identity operation; avoid constructing and matching the full tuple.
+        if self.state == HandshakeState::ReplconfSeen && step == HandshakeStep::Replconf {
+            return Ok(());
+        }
         let transition = match (self.state, step, self.auth_required) {
             (HandshakeState::Init, HandshakeStep::Ping, _) => Some(HandshakeState::PingSeen),
             (HandshakeState::PingSeen, HandshakeStep::Auth, true) => Some(HandshakeState::AuthSeen),
@@ -124,9 +130,6 @@ impl HandshakeFsm {
                 Some(HandshakeState::ReplconfSeen)
             }
             (HandshakeState::AuthSeen, HandshakeStep::Replconf, _) => {
-                Some(HandshakeState::ReplconfSeen)
-            }
-            (HandshakeState::ReplconfSeen, HandshakeStep::Replconf, _) => {
                 Some(HandshakeState::ReplconfSeen)
             }
             (HandshakeState::ReplconfSeen, HandshakeStep::Psync, _) => {
@@ -858,6 +861,21 @@ mod tests {
         fsm.on_step(HandshakeStep::Psync).expect("psync");
         fsm.on_psync_accepted().expect("accepted");
         assert_eq!(fsm.state(), HandshakeState::Online);
+    }
+
+    #[test]
+    fn repeated_replconf_keeps_handshake_ready_for_psync_bf1ow() {
+        let mut fsm = HandshakeFsm::new(false);
+        fsm.on_step(HandshakeStep::Ping).expect("ping");
+        fsm.on_step(HandshakeStep::Replconf)
+            .expect("initial replconf");
+        for _ in 0..3 {
+            fsm.on_step(HandshakeStep::Replconf)
+                .expect("repeated replconf remains accepted");
+            assert_eq!(fsm.state(), HandshakeState::ReplconfSeen);
+        }
+        fsm.on_step(HandshakeStep::Psync)
+            .expect("repeated replconf must not block psync");
     }
 
     #[test]
