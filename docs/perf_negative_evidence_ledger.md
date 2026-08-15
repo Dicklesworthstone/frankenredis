@@ -16539,3 +16539,82 @@ it slightly worse. **Three workloads, three different answers to the identical
 question.** The rule is to MEASURE the cross-process term per harness — a second
 instance of your own engine as an arm — rather than to adopt or reject pinning as a
 policy.
+
+## 2026-08-15: HARNESS DISAGREEMENT MEASURED AND BOUNDED — two sanctioned harnesses differ up to 5.5% on ABSOLUTE instructions per op, and agree on the GAP to 0.03-1.7% (`frankenredis-ozrro`)
+
+Filed against the fleet finding that frankenlibc measured the same primitive on
+the same worker with two separately-sanctioned harnesses and got 5.9459x and
+12.385414x — a ~2x spread with BOTH A/A nulls passing — and the resulting rule
+that every banked row must name its HARNESS as well as its worker, and that a
+disagreement between two of your own harnesses is a finding rather than a number
+to pick between.
+
+**HARNESS IDENTITY FOR EVERY ROW THIS BEAD HAS BANKED TODAY.** All cascade rows
+(the 16-shape batch, the 15-shape batch, and the 11 post-cut rows in commit
+`8d1270456`) were taken with **`cascade_gap.py`** — callgrind, window opened with
+`callgrind_control -z` after seeding and closed with `-d`, total read from the
+dump's `summary:` line. The EVAL allocation census in `ef76d1461` was taken with
+**`lua_stall_census.py`** — callgrind with `--cache-sim=yes --branch-sim=yes`,
+window taken by TWO-POINT SUBTRACTION (2N ops minus N ops) with no control
+channel. Both run entirely on **thinkstation1**; rch is used only to compile.
+Both harnesses live in this session's scratchpad and are named in the retry
+predicates of the entries they produced.
+
+**THE TWO HARNESSES WERE THEN RUN AGAINST EACH OTHER ON THE SAME PRIMITIVES**,
+same ELF (`be69d55b4f6b7f730512f7c0276f6ec51c27289ae3324ebc4b621bfa450f22fa`),
+same host, cascade-walked arm, 2000 ops:
+
+| shape | A: `cascade_gap.py` | B: `lua_stall_census.py` | A−B | (A−B)/A |
+|---|---:|---:|---:|---:|
+| `GET foo` | 1,543.9 Ir/op | 1,458.9 Ir/op | 85.0 | 5.50% |
+| `ZREMRANGEBYLEX zl (z (zz` | 14,477.4 | 14,350.8 | 126.5 | 0.87% |
+| `SINTERSTORE d1 s1 s2` | 16,841.9 | 16,704.0 | 137.9 | 0.82% |
+
+**THE DISAGREEMENT IS A FIXED PER-WINDOW TERM, NOT A PROPORTIONAL BIAS.** Across a
+tenfold range in the operation's own cost (1,544 → 16,842 Ir/op) the absolute
+difference moves only 85 → 138 Ir/op. The control-channel harness measures a
+window CONTAINING 2000 ops plus that window's edges; the two-point harness
+measures the marginal cost OF 2000 ops, and the edges cancel. Quoting this as
+"the harnesses disagree by 5.5%" would be misleading — the 5.5% is an artifact of
+GET being cheap, and the honest statement is **85-138 instructions per op of
+fixed window overhead**, with at most ~0.3% of proportional residue.
+
+**THE CONSEQUENCE FOR THIS BEAD'S ROWS, MEASURED RATHER THAN ARGUED.** A fixed
+term appears in BOTH arms of a walked-vs-bypassed pair and must cancel in their
+difference. Tested directly by taking the same gaps with both harnesses:
+
+| shape | A gap/op | B gap/op | B−A | as % of gap |
+|---|---:|---:|---:|---:|
+| `GET foo` (control) | -369.6 | -369.5 | **0.1** | 0.03% |
+| `ZREMRANGEBYLEX` | 7,368.7 | 7,319.0 | -49.7 | 0.67% |
+| `SINTERSTORE` | 5,149.9 | 5,061.1 | -88.8 | 1.72% |
+
+**Every banked gap row is robust to the harness choice**: the two harnesses agree
+on the gap to between 0.1 and 89 instructions per op, at most 1.7% of the gap and
+at most 6% of the 1,400 instr/op take-threshold — so no take/reject decision in
+either sweep changes under either harness. The GET control agreeing to 0.1
+instructions per op is the sharpest form of the result: the fixed window term
+cancels essentially exactly.
+
+**WHAT IS NOT ROBUST, and this is the actionable half.** A fixed additive term
+biases a RATIO, because it inflates numerator and denominator unequally. The
+`ctl/byp` column in both sweeps is therefore biased LOW by roughly 1% (correcting
+`ZREMRANGEBYLEX` for the 126.5 term moves 2.038 → 2.056). **Quote the GAP, treat
+the ratio as secondary** — which is what slice ten's absolute-gap threshold
+already did, for a different reason, and this row is the retrospective
+justification for that choice.
+
+**WORKER-SCOPING AUDIT, per the second directive.** No row this bead banked today
+needs flagging as worker-scoped: both arms of every row ran in the SAME
+invocation of the same harness on thinkstation1, out of one ELF, with no rch
+worker in the measurement path at all. The only worker dependence anywhere is
+that the pre-cut and post-cut ELFs were COMPILED on `vmi1153651` and
+`vmi1264463`; that seam is addressed in the provenance addendum above, checked
+for `-C target-cpu=native` and empirically bounded by the two zero-deletion
+shapes moving 1 and 65 instructions per op across the two binaries.
+
+Retry predicate: if either harness's windowing changes, or a third harness is
+introduced for cascade work, re-run this three-shape cross-check before quoting
+any gap from it — agreement on absolutes is NOT required, but agreement on the
+GAP to well inside 1,400 instr/op is, and a harness that fails that cannot be
+used to take or reject a candidate.
