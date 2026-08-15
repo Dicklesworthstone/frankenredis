@@ -450,8 +450,11 @@ const BORROWED_ROUTE_MEMO_SLOTS: usize = 16;
 /// too much to pay for pruning a walk GET never does. Reading a fixed 16-byte
 /// window and masking the name out of it is a handful of instructions.
 ///
-/// The name is NOT case-folded. Folding is not needed for correctness — `get`
-/// and `GET` merely occupy two entries — and it is not worth the instructions.
+/// The name is folded to ASCII upper case in the fingerprint. Redis command
+/// names are case-insensitive, so otherwise `ltrim` and `LTRIM` occupy separate
+/// miss-memo slots and both walk the entire cascade before reaching generic
+/// dispatch. This fingerprint is only a generic-path pruning hint: a collision
+/// can skip a fast route, never change a reply.
 fn borrowed_fast_route_key(input: &[u8]) -> Option<u64> {
     // ONE bounds check for the whole function: everything below indexes this
     // fixed-size array, so there is no second slice-and-convert to fold away.
@@ -486,7 +489,12 @@ fn borrowed_fast_route_key(input: &[u8]) -> Option<u64> {
     // Mask so bytes past the name — which belong to the first argument's bulk
     // header, and so vary with the argument — cannot enter the key.
     let keep = name_len.min(7);
-    let key = (window & ((1u64 << (8 * keep)) - 1)) ^ (u64::from(arity) << 56) ^ (name_len << 48);
+    // Clearing ASCII bit 5 folds command letters to upper case in all eight
+    // byte lanes at once. Non-letter command bytes may collide after this
+    // normalization, but this key can only select the generic reference path.
+    let folded_window = window & 0xdfdf_dfdf_dfdf_dfdf;
+    let key =
+        (folded_window & ((1u64 << (8 * keep)) - 1)) ^ (u64::from(arity) << 56) ^ (name_len << 48);
     // 0 is the empty-slot marker, so a key that lands on it must not be stored.
     (key != 0).then_some(key)
 }
@@ -32785,6 +32793,14 @@ mod tests {
         assert_eq!(
             short, long,
             "the key must not move with the argument that follows the name"
+        );
+
+        let mixed_case =
+            crate::borrowed_fast_route_key(b"*4\r\n$5\r\nlTrIm\r\n$1\r\nl\r\n$1\r\n0\r\n")
+                .expect("mixed-case LTRIM key");
+        assert_eq!(
+            short, mixed_case,
+            "case-insensitive command dispatch must share one miss-memo shape"
         );
 
         // Same arity and name length, different name.
