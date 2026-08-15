@@ -2334,6 +2334,19 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"GET", b"s:copy"]));
     cmds.push(c(&[b"COPY", b"s:1", b"s:copy"]));
     cmds.push(c(&[b"COPY", b"s:absent", b"s:copy2"]));
+    // (frankenredis-ozrro) RENAME is classified at arity 3 and replies a
+    // constant +OK, so its success branch takes a different reply path from its
+    // "no such key" error. Both run, plus the destination-overwrite case (whose
+    // value has to be the SOURCE's afterwards) and the source==destination case,
+    // which is a no-op that still answers +OK.
+    cmds.push(c(&[b"SET", b"s:ren", b"movedvalue"]));
+    cmds.push(c(&[b"SET", b"s:renvictim", b"clobbered"]));
+    cmds.push(c(&[b"RENAME", b"s:ren", b"s:renvictim"]));
+    cmds.push(c(&[b"GET", b"s:renvictim"]));
+    cmds.push(c(&[b"EXISTS", b"s:ren"]));
+    cmds.push(c(&[b"RENAME", b"s:renvictim", b"s:renvictim"]));
+    cmds.push(c(&[b"GET", b"s:renvictim"]));
+    cmds.push(c(&[b"RENAME", b"s:absent", b"s:renx"]));
     cmds.push(c(&[b"EXISTS", b"s:copy2"]));
     cmds.push(c(&[b"COPY", b"s:pad", b"s:copy", b"REPLACE"]));
     cmds.push(c(&[b"GET", b"s:copy"]));
@@ -2345,6 +2358,17 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"INCRBY", b"n:1", b"5"]));
     cmds.push(c(&[b"DECR", b"n:1"]));
     cmds.push(c(&[b"DECRBY", b"n:1", b"2"]));
+    // (frankenredis-ozrro) DECR is now front-classified, so all three of its
+    // branches have to run: an existing counter, an ABSENT key (which creates it
+    // at -1), and a non-integer value whose route declines and must still give
+    // 7.2.4's wording. A route that ignored the stored value would pass on the
+    // first alone.
+    cmds.push(c(&[b"DECR", b"n:decr:absent"]));
+    cmds.push(c(&[b"DECR", b"n:decr:absent"]));
+    cmds.push(c(&[b"GET", b"n:decr:absent"]));
+    cmds.push(c(&[b"SET", b"n:decr:str", b"notanumber"]));
+    cmds.push(c(&[b"DECR", b"n:decr:str"]));
+    cmds.push(c(&[b"DECR"]));
     cmds.push(c(&[b"INCRBYFLOAT", b"n:2", b"1.5"]));
     cmds.push(c(&[b"INCRBYFLOAT", b"n:2", b"-0.25"]));
     cmds.push(c(&[b"SETBIT", b"b:1", b"7", b"1"]));
@@ -2412,6 +2436,21 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"HSET", b"h:1", b"f3", b"v3"]));
     cmds.push(c(&[b"HGET", b"h:1", b"f1"]));
     cmds.push(c(&[b"HGET", b"h:1", b"nope"]));
+    // (frankenredis-ozrro) HMSET's classified arm is admitted across even
+    // arities 4..=18 because its exact parser is keyed on PAIR COUNT, so several
+    // counts have to run or the untaken ones are reachable only through the
+    // generic path. The odd-arity form has no parser and must still produce
+    // 7.2.4's error, and overwriting an existing field is the branch a route
+    // that only ever inserts would get wrong.
+    cmds.push(c(&[b"HMSET", b"h:ms", b"f1", b"v1"]));
+    cmds.push(c(&[b"HMSET", b"h:ms", b"f2", b"v2", b"f3", b"v3"]));
+    cmds.push(c(&[
+        b"HMSET", b"h:ms", b"f4", b"v4", b"f5", b"v5", b"f6", b"v6",
+    ]));
+    cmds.push(c(&[b"HMSET", b"h:ms", b"f1", b"overwritten"]));
+    cmds.push(c(&[b"HGETALL", b"h:ms"]));
+    cmds.push(c(&[b"HMSET", b"h:ms", b"f7"]));
+    cmds.push(c(&[b"HMSET", b"s:1", b"f1", b"v1"]));
     // (frankenredis-ozrro) HMGET's classified arm tries three parsers keyed on
     // field count, so two, three and the variadic count all have to run or two of
     // them are reachable only through the generic path.
@@ -2461,6 +2500,21 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"LINSERT", b"l:1", b"BEFORE", b"c", b"X"]));
     cmds.push(c(&[b"LINSERT", b"l:1", b"AFTER", b"c", b"Y"]));
     cmds.push(c(&[b"LINSERT", b"l:1", b"BEFORE", b"nosuch", b"Z"]));
+    // (frankenredis-ozrro) LMOVE is classified at arity 5. All four direction
+    // pairs run, because the route forwards wherefrom and whereto separately and
+    // a route that swapped or ignored one would still answer plausibly for
+    // LEFT/LEFT. The same-key rotation is the shape whose source and destination
+    // alias, and the wrong-type and bad-direction cases are its decline paths.
+    cmds.push(c(&[b"RPUSH", b"l:mv", b"a", b"b", b"c"]));
+    cmds.push(c(&[b"LMOVE", b"l:mv", b"l:mvdst", b"LEFT", b"RIGHT"]));
+    cmds.push(c(&[b"LMOVE", b"l:mv", b"l:mvdst", b"RIGHT", b"LEFT"]));
+    cmds.push(c(&[b"LMOVE", b"l:mv", b"l:mv", b"LEFT", b"RIGHT"]));
+    cmds.push(c(&[b"LRANGE", b"l:mv", b"0", b"-1"]));
+    cmds.push(c(&[b"LMOVE", b"l:mvdst", b"l:mvdst", b"RIGHT", b"LEFT"]));
+    cmds.push(c(&[b"LRANGE", b"l:mvdst", b"0", b"-1"]));
+    cmds.push(c(&[b"LMOVE", b"l:absent", b"l:mvdst", b"LEFT", b"LEFT"]));
+    cmds.push(c(&[b"LMOVE", b"l:mv", b"l:mvdst", b"SIDEWAYS", b"LEFT"]));
+    cmds.push(c(&[b"LMOVE", b"s:1", b"l:mvdst", b"LEFT", b"RIGHT"]));
     cmds.push(c(&[b"LSET", b"l:1", b"0", b"Y"]));
     cmds.push(c(&[b"LREM", b"l:1", b"1", b"b"]));
     cmds.push(c(&[b"LTRIM", b"l:1", b"0", b"3"]));
@@ -2502,6 +2556,29 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"SINTERCARD", b"3", b"sc:a", b"sc:b"]));
     cmds.push(c(&[b"SINTERCARD", b"2", b"sc:a", b"sc:b", b"LIMIT", b"1"]));
     cmds.push(c(&[b"SINTERCARD", b"2", b"sc:a", b"s:1"]));
+    // (frankenredis-ozrro) The three two-source set stores now share ONE
+    // classified arm distinguished only by which operation it carries, so all
+    // three must run against the SAME pair of sources — a swapped operation is
+    // invisible unless the three replies can be compared against each other.
+    // sc:a and sc:b overlap partially and differ in both directions, so
+    // intersection, union and difference are three DIFFERENT answers here; with
+    // disjoint or identical sources a swap would heal itself. The three-source
+    // spelling is a different arity and keeps the cascade.
+    cmds.push(c(&[b"SINTERSTORE", b"ss:inter", b"sc:a", b"sc:b"]));
+    cmds.push(c(&[b"SMEMBERS", b"ss:inter"]));
+    cmds.push(c(&[b"SUNIONSTORE", b"ss:union", b"sc:a", b"sc:b"]));
+    cmds.push(c(&[b"SMEMBERS", b"ss:union"]));
+    cmds.push(c(&[b"SDIFFSTORE", b"ss:diff", b"sc:a", b"sc:b"]));
+    cmds.push(c(&[b"SMEMBERS", b"ss:diff"]));
+    // Order matters for SDIFF and not for the other two: reversing the sources
+    // is the mutation a route that ignored argument order would survive.
+    cmds.push(c(&[b"SDIFFSTORE", b"ss:diffrev", b"sc:b", b"sc:a"]));
+    cmds.push(c(&[b"SMEMBERS", b"ss:diffrev"]));
+    cmds.push(c(&[b"SINTERSTORE", b"ss:empty", b"sc:a", b"t:absent"]));
+    cmds.push(c(&[b"EXISTS", b"ss:empty"]));
+    cmds.push(c(&[b"SINTERSTORE", b"ss:inter", b"sc:a", b"sc:b", b"sc:c"]));
+    cmds.push(c(&[b"SMEMBERS", b"ss:inter"]));
+    cmds.push(c(&[b"SDIFFSTORE", b"ss:wrong", b"sc:a", b"s:1"]));
     // (frankenredis-ozrro) SRANDMEMBER with a count samples, so only shapes whose
     // reply is determined can be compared byte-for-byte across engines. A
     // ONE-member set makes both the positive and the NEGATIVE count deterministic
@@ -2540,6 +2617,23 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
         b"zs:c",
     ]));
     cmds.push(c(&[b"ZRANGE", b"zs:inter3", b"0", b"-1", b"WITHSCORES"]));
+    // (frankenredis-ozrro) ZINTER and ZDIFF are classified at two sources; their
+    // sibling ZUNION measured a 780/op gap against their ~5,700 and is
+    // deliberately NOT classified, so it runs here as the arm that still walks
+    // the cascade and must agree anyway. Reversed ZDIFF sources are the mutation
+    // an order-blind route would survive, and WITHSCORES is a different arity
+    // that keeps the cascade.
+    cmds.push(c(&[b"ZINTER", b"2", b"zs:a", b"zs:b"]));
+    cmds.push(c(&[b"ZDIFF", b"2", b"zs:a", b"zs:b"]));
+    cmds.push(c(&[b"ZDIFF", b"2", b"zs:b", b"zs:a"]));
+    cmds.push(c(&[b"ZUNION", b"2", b"zs:a", b"zs:b"]));
+    cmds.push(c(&[b"ZINTER", b"2", b"zs:a", b"zs:absent"]));
+    cmds.push(c(&[b"ZDIFF", b"2", b"zs:a", b"zs:b", b"WITHSCORES"]));
+    cmds.push(c(&[b"ZINTER", b"3", b"zs:a", b"zs:b", b"zs:c"]));
+    // The classifier keys on arity, not on the textual numkeys, so a numkeys
+    // that disagrees with the arity must still decline to 7.2.4's syntax error.
+    cmds.push(c(&[b"ZINTER", b"3", b"zs:a", b"zs:b"]));
+    cmds.push(c(&[b"ZDIFF", b"2", b"zs:a", b"s:1"]));
     cmds.push(c(&[b"ZDIFFSTORE", b"zs:diff2", b"2", b"zs:a", b"zs:b"]));
     cmds.push(c(&[b"ZRANGE", b"zs:diff2", b"0", b"-1", b"WITHSCORES"]));
     cmds.push(c(&[
@@ -2611,6 +2705,40 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"ZREVRANGEBYSCORE", b"z:1", b"+inf", b"2"]));
     cmds.push(c(&[b"ZRANGEBYLEX", b"z:1", b"[a", b"(d"]));
     cmds.push(c(&[b"ZREVRANGEBYLEX", b"z:1", b"+", b"-"]));
+    // (frankenredis-ozrro) ZREVRANGEBYLEX is claimed at arity 4 only; the LIMIT
+    // spelling is arity 7 with its own arm and keeps the cascade. Both run, and
+    // the reversed-bound case is the one a route that forwarded max/min in the
+    // wrong order would get wrong — ZREVRANGEBYLEX takes MAX first, unlike its
+    // forward sibling.
+    cmds.push(c(&[b"ZREVRANGEBYLEX", b"z:1", b"(d", b"[a"]));
+    cmds.push(c(&[b"ZREVRANGEBYLEX", b"z:1", b"[a", b"(d"]));
+    cmds.push(c(&[
+        b"ZREVRANGEBYLEX",
+        b"z:1",
+        b"+",
+        b"-",
+        b"LIMIT",
+        b"1",
+        b"2",
+    ]));
+    cmds.push(c(&[b"ZREVRANGEBYLEX", b"z:absent", b"+", b"-"]));
+    // ZREMRANGEBYLEX gets its OWN key, freshly built with equal scores. Two
+    // reasons, both learned on this bead: a lex range is only defined when every
+    // member shares a score, and a corpus in which the command only ever removes
+    // NOTHING tests nothing about it — a swapped min/max would answer 0 either
+    // way and pass. Here it removes a strict subset, so the count and the
+    // survivors both discriminate.
+    cmds.push(c(&[
+        b"ZADD", b"z:lexrm", b"0", b"a", b"0", b"b", b"0", b"c", b"0", b"d",
+    ]));
+    cmds.push(c(&[b"ZREMRANGEBYLEX", b"z:lexrm", b"[b", b"(d"]));
+    cmds.push(c(&[b"ZRANGE", b"z:lexrm", b"0", b"-1"]));
+    cmds.push(c(&[b"ZREMRANGEBYLEX", b"z:lexrm", b"(z", b"(zz"]));
+    cmds.push(c(&[b"ZREMRANGEBYLEX", b"z:lexrm", b"-", b"+"]));
+    cmds.push(c(&[b"EXISTS", b"z:lexrm"]));
+    cmds.push(c(&[b"ZREMRANGEBYLEX", b"z:absent", b"-", b"+"]));
+    cmds.push(c(&[b"ZREMRANGEBYLEX", b"s:1", b"-", b"+"]));
+    cmds.push(c(&[b"ZREMRANGEBYLEX", b"z:1", b"bad", b"+"]));
     // (frankenredis-ozrro) The classifier claims ZREVRANGE at arity 4 only, so
     // the plain form and the WITHSCORES form that keeps the cascade both run.
     cmds.push(c(&[b"ZREVRANGE", b"z:1", b"0", b"-1"]));

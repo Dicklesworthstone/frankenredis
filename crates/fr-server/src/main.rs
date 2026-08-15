@@ -14972,6 +14972,38 @@ enum BorrowedDispatchFloorClass {
     BitposKeyBit,
     BitposRange,
     Incr,
+    /// (frankenredis-ozrro) `DECR key`.
+    Decr,
+    /// (frankenredis-ozrro) `HMSET key field value [field value ...]` at the one
+    /// through eight pairs its exact parser accepts.
+    Hmset,
+    /// (frankenredis-ozrro) `RENAME source destination`.
+    Rename,
+    /// (frankenredis-ozrro) `LMOVE source destination LEFT|RIGHT LEFT|RIGHT`.
+    Lmove,
+    /// (frankenredis-ozrro) `ZREMRANGEBYLEX key min max`.
+    Zremrangebylex,
+    /// (frankenredis-ozrro) `ZREVRANGEBYLEX key max min`, the plain arity-4 form
+    /// only — the `LIMIT` spelling has its own arm and keeps the cascade.
+    Zrevrangebylex,
+    /// (frankenredis-ozrro) `SINTERSTORE|SUNIONSTORE|SDIFFSTORE dest src src` at
+    /// TWO source keys. One class carrying the operation, for the same reason
+    /// [`BorrowedDispatchFloorClass::ZsetStore`] carries its own: three adjacent
+    /// literal-prefix arms otherwise get walked one after another.
+    SetStore(PlainSetStoreCmd),
+    /// (frankenredis-ozrro) `ZINTER numkeys key key`, two sources, no options.
+    Zinter2,
+    /// (frankenredis-ozrro) `ZDIFF numkeys key key`, two sources, no options.
+    Zdiff2,
+}
+
+/// The no-option two-source SET store operations, the plain-set sibling of
+/// [`PlainZsetStoreCmd`]. (frankenredis-ozrro)
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PlainSetStoreCmd {
+    Inter,
+    Union,
+    Diff,
 }
 
 struct BorrowedDispatchFloorToken<'a> {
@@ -15138,9 +15170,20 @@ enum BorrowedDispatchFloorCommand {
     Zscan,
     Zrem,
     Zremrangebyrank,
+    Zremrangebylex,
     Zremrangebyscore,
+    Zrevrangebylex,
     Zscore,
     Zunionstore,
+    Decr,
+    Hmset,
+    Rename,
+    Lmove,
+    Sinterstore,
+    Sunionstore,
+    Sdiffstore,
+    Zinter,
+    Zdiff,
 }
 
 fn uppercase_ascii_token<const N: usize>(token: &[u8]) -> Option<[u8; N]> {
@@ -15185,6 +15228,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'C', b'O', b'P', b'Y'] => Some(BorrowedDispatchFloorCommand::Copy),
             [b'P', b'T', b'T', b'L'] => Some(BorrowedDispatchFloorCommand::Pttl),
             [b'M', b'G', b'E', b'T'] => Some(BorrowedDispatchFloorCommand::Mget),
+            [b'D', b'E', b'C', b'R'] => Some(BorrowedDispatchFloorCommand::Decr),
             _ => None,
         },
         5 => match uppercase_ascii_token::<5>(token)? {
@@ -15201,6 +15245,9 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'H', b'S', b'C', b'A', b'N'] => Some(BorrowedDispatchFloorCommand::Hscan),
             [b'S', b'S', b'C', b'A', b'N'] => Some(BorrowedDispatchFloorCommand::Sscan),
             [b'Z', b'S', b'C', b'A', b'N'] => Some(BorrowedDispatchFloorCommand::Zscan),
+            [b'H', b'M', b'S', b'E', b'T'] => Some(BorrowedDispatchFloorCommand::Hmset),
+            [b'L', b'M', b'O', b'V', b'E'] => Some(BorrowedDispatchFloorCommand::Lmove),
+            [b'Z', b'D', b'I', b'F', b'F'] => Some(BorrowedDispatchFloorCommand::Zdiff),
             _ => None,
         },
         6 => match uppercase_ascii_token::<6>(token)? {
@@ -15224,6 +15271,8 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'I', b'N', b'C', b'R', b'B', b'Y'] => Some(BorrowedDispatchFloorCommand::Incrby),
             [b'G', b'E', b'O', b'P', b'O', b'S'] => Some(BorrowedDispatchFloorCommand::Geopos),
             [b'G', b'E', b'T', b'B', b'I', b'T'] => Some(BorrowedDispatchFloorCommand::Getbit),
+            [b'R', b'E', b'N', b'A', b'M', b'E'] => Some(BorrowedDispatchFloorCommand::Rename),
+            [b'Z', b'I', b'N', b'T', b'E', b'R'] => Some(BorrowedDispatchFloorCommand::Zinter),
             _ => None,
         },
         7 => match uppercase_ascii_token::<7>(token)? {
@@ -15278,6 +15327,9 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             _ => None,
         },
         10 => match uppercase_ascii_token::<10>(token)? {
+            [b'S', b'D', b'I', b'F', b'F', b'S', b'T', b'O', b'R', b'E'] => {
+                Some(BorrowedDispatchFloorCommand::Sdiffstore)
+            }
             [b'H', b'R', b'A', b'N', b'D', b'F', b'I', b'E', b'L', b'D'] => {
                 Some(BorrowedDispatchFloorCommand::Hrandfield)
             }
@@ -15335,6 +15387,32 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             _ => None,
         },
         11 => match uppercase_ascii_token::<11>(token)? {
+            [
+                b'S',
+                b'I',
+                b'N',
+                b'T',
+                b'E',
+                b'R',
+                b'S',
+                b'T',
+                b'O',
+                b'R',
+                b'E',
+            ] => Some(BorrowedDispatchFloorCommand::Sinterstore),
+            [
+                b'S',
+                b'U',
+                b'N',
+                b'I',
+                b'O',
+                b'N',
+                b'S',
+                b'T',
+                b'O',
+                b'R',
+                b'E',
+            ] => Some(BorrowedDispatchFloorCommand::Sunionstore),
             [
                 b'B',
                 b'I',
@@ -15413,6 +15491,44 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
                 b'R',
                 b'E',
             ] => Some(BorrowedDispatchFloorCommand::Zinterstore),
+            _ => None,
+        },
+        // (frankenredis-ozrro) There was no length-14 arm at all before this
+        // slice; both lex-range names are exactly fourteen characters, so
+        // neither could be classified without it.
+        14 => match uppercase_ascii_token::<14>(token)? {
+            [
+                b'Z',
+                b'R',
+                b'E',
+                b'M',
+                b'R',
+                b'A',
+                b'N',
+                b'G',
+                b'E',
+                b'B',
+                b'Y',
+                b'L',
+                b'E',
+                b'X',
+            ] => Some(BorrowedDispatchFloorCommand::Zremrangebylex),
+            [
+                b'Z',
+                b'R',
+                b'E',
+                b'V',
+                b'R',
+                b'A',
+                b'N',
+                b'G',
+                b'E',
+                b'B',
+                b'Y',
+                b'L',
+                b'E',
+                b'X',
+            ] => Some(BorrowedDispatchFloorCommand::Zrevrangebylex),
             _ => None,
         },
         15 => match uppercase_ascii_token::<15>(token)? {
@@ -15894,6 +16010,74 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (3, BorrowedDispatchFloorCommand::Incrby) => Some(BorrowedDispatchFloorClass::Incrby),
         (2, BorrowedDispatchFloorCommand::Getdel) => Some(BorrowedDispatchFloorClass::Getdel),
         (3, BorrowedDispatchFloorCommand::Decrby) => Some(BorrowedDispatchFloorClass::Decrby),
+        // (frankenredis-ozrro) TWELFTH batch, and the one that settled the
+        // bead's own open question. Slice ten pre-committed to re-scoping and
+        // CLOSING this bead if one more sweep came back mostly negative. It did
+        // not: 31 commands were gap-measured and 11 cleared the 1,400 instr/op
+        // threshold, the best absolute count of any slice. What changed is the
+        // GENERATOR — these were produced as command NAMES with no entry in
+        // BorrowedDispatchFloorClass, rather than by reading the chain in source
+        // order the way slices 4-6 did.
+        //
+        // Every row below was measured TWICE: once before frankenredis-ozrro's
+        // 73-arm duplicate deletion (1b5d36da0) and again on a bypass ELF built
+        // from it, because deleting arms shortens every walk and the pre-cut
+        // numbers are upper bounds. Post-cut gap per op, 2000 ops, -c1 -P16,
+        // cascade walked vs bypassed, with the pre-cut figure in parentheses:
+        //   ZREMRANGEBYLEX  7,381 (8,647)  2.04x     DECR    5,382 (5,381)  3.59x
+        //   ZREVRANGEBYLEX  6,258 (7,521)  1.68x     RENAME  3,005 (3,496)  1.52x
+        //   ZINTER          5,698 (7,004)  1.67x     HMSET   3,265 (3,330)  2.27x
+        //   ZDIFF           5,649 (6,988)  1.71x     LMOVE   2,575 (3,053)  1.34x
+        //   SDIFFSTORE      5,378 (6,639)  1.50x
+        //   SUNIONSTORE     5,210 (6,491)  1.43x     GET control -370 (-367)
+        //   SINTERSTORE     5,142 (6,390)  1.44x
+        //
+        // THE RE-MEASUREMENT VALIDATED THE DELETION MODEL RATHER THAN JUST THE
+        // ROWS. Each command's drop divided by the arms deleted upstream of it
+        // gives ~27-28 instructions per walked arm, agreeing across seven
+        // independent shapes (BYLEX pair 1,266/45 and 1,263/45; RENAME 491/18;
+        // LMOVE 478/18). The two commands with ZERO deletions upstream are the
+        // control on that model and they behaved: DECR moved by ONE instruction
+        // per op across the two ELFs, HMSET by 65. A source position can
+        // therefore be converted into an expected gap without a rebuild.
+        //
+        // Each is admitted at the arity its exact parser accepts and no other.
+        // ZREVRANGEBYLEX's LIMIT spelling, the three-source set stores and the
+        // three-source ZINTER all have their own arms at a different arity and
+        // keep the cascade, because a classification those parsers decline lands
+        // on the generic path instead of the arm that would have served it.
+        (2, BorrowedDispatchFloorCommand::Decr) => Some(BorrowedDispatchFloorClass::Decr),
+        (3, BorrowedDispatchFloorCommand::Rename) => Some(BorrowedDispatchFloorClass::Rename),
+        (5, BorrowedDispatchFloorCommand::Lmove) => Some(BorrowedDispatchFloorClass::Lmove),
+        // HMSET's exact parser takes one through eight pairs, so the admitted
+        // arity is even and 4..=18; an odd or larger count has no parser and is
+        // the generic path's business either way.
+        (array_len, BorrowedDispatchFloorCommand::Hmset)
+            if (4..=18).contains(&array_len) && array_len % 2 == 0 =>
+        {
+            Some(BorrowedDispatchFloorClass::Hmset)
+        }
+        (4, BorrowedDispatchFloorCommand::Zremrangebylex) => {
+            Some(BorrowedDispatchFloorClass::Zremrangebylex)
+        }
+        (4, BorrowedDispatchFloorCommand::Zrevrangebylex) => {
+            Some(BorrowedDispatchFloorClass::Zrevrangebylex)
+        }
+        (4, BorrowedDispatchFloorCommand::Sinterstore) => Some(
+            BorrowedDispatchFloorClass::SetStore(PlainSetStoreCmd::Inter),
+        ),
+        (4, BorrowedDispatchFloorCommand::Sunionstore) => Some(
+            BorrowedDispatchFloorClass::SetStore(PlainSetStoreCmd::Union),
+        ),
+        (4, BorrowedDispatchFloorCommand::Sdiffstore) => {
+            Some(BorrowedDispatchFloorClass::SetStore(PlainSetStoreCmd::Diff))
+        }
+        // ZINTER and ZDIFF clear the threshold by NINE TIMES what their sibling
+        // ZUNION measured (780/op, 1.08x) at the same arity in the same family.
+        // ZUNION is deliberately absent: family resemblance is not evidence, and
+        // classifying it would buy nothing while enlarging this match.
+        (4, BorrowedDispatchFloorCommand::Zinter) => Some(BorrowedDispatchFloorClass::Zinter2),
+        (4, BorrowedDispatchFloorCommand::Zdiff) => Some(BorrowedDispatchFloorClass::Zdiff2),
         (arity, BorrowedDispatchFloorCommand::Hmget) if arity >= 3 => {
             Some(BorrowedDispatchFloorClass::Hmget)
         }
@@ -17255,6 +17439,256 @@ fn try_dispatch_floor_classified_action(
             if let Some(packet) = parse_borrowed_plain_decrby_packet(unparsed, &parser_config)
                 && let Some(response) =
                     runtime.execute_plain_decrby_borrowed(packet.key, packet.member, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Decr => {
+            if let Some(packet) = parse_borrowed_plain_decr_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_decr_borrowed(packet.key, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Rename => {
+            // RENAME replies a constant +OK on success, so the success branch
+            // takes FastOkReply and never builds a reply frame; a "no such key"
+            // error still routes through FastReply.
+            if let Some(packet) = parse_borrowed_plain_rename_packet(unparsed, &parser_config) {
+                match runtime.execute_plain_rename_borrowed(packet.key, packet.member, ts) {
+                    Some(None) => Ok(BorrowedMultibulkAction::FastOkReply {
+                        consumed: packet.consumed,
+                    }),
+                    Some(Some(response)) => Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: packet.consumed,
+                        response,
+                    }),
+                    None => parse_borrowed_multibulk_action(
+                        unparsed,
+                        parser_config,
+                        runtime,
+                        ts,
+                        out,
+                        argv_scratch,
+                    ),
+                }
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Hmset => {
+            if let Some(packet) = parse_borrowed_plain_hmset_packet(unparsed, &parser_config) {
+                match runtime.execute_plain_hmset_borrowed_ok(
+                    packet.key,
+                    &packet.pairs[..packet.len],
+                    ts,
+                ) {
+                    Some(None) => Ok(BorrowedMultibulkAction::FastOkReply {
+                        consumed: packet.consumed,
+                    }),
+                    Some(Some(response)) => Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: packet.consumed,
+                        response,
+                    }),
+                    None => parse_borrowed_multibulk_action(
+                        unparsed,
+                        parser_config,
+                        runtime,
+                        ts,
+                        out,
+                        argv_scratch,
+                    ),
+                }
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Lmove => {
+            let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+            let hit =
+                parse_borrowed_plain_lmove_packet(unparsed, &parser_config).filter(|packet| {
+                    runtime
+                        .execute_plain_lmove_borrowed_into(
+                            packet.src,
+                            packet.dst,
+                            packet.wherefrom,
+                            packet.whereto,
+                            ts,
+                            client_resp3,
+                            out,
+                        )
+                        .is_some()
+                });
+            if let Some(packet) = hit {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
+                    consumed: packet.consumed,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Zremrangebylex => {
+            if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
+                unparsed,
+                &parser_config,
+                b"*4\r\n$14\r\n",
+                b"ZREMRANGEBYLEX",
+            ) && let Some(response) =
+                runtime.execute_plain_zremrangebylex_borrowed(packet.key, packet.a, packet.b, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Zrevrangebylex => {
+            let hit = parse_borrowed_plain_zrevrangebylex_packet(unparsed, &parser_config).filter(
+                |packet| {
+                    runtime
+                        .execute_plain_zrevrangebylex_borrowed_into(
+                            packet.key, packet.max, packet.min, ts, out,
+                        )
+                        .is_some()
+                },
+            );
+            if let Some(packet) = hit {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
+                    consumed: packet.consumed,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::SetStore(cmd) => {
+            let (prefix, name) = match cmd {
+                PlainSetStoreCmd::Inter => (&b"*4\r\n$11\r\n"[..], &b"SINTERSTORE"[..]),
+                PlainSetStoreCmd::Union => (&b"*4\r\n$11\r\n"[..], &b"SUNIONSTORE"[..]),
+                PlainSetStoreCmd::Diff => (&b"*4\r\n$10\r\n"[..], &b"SDIFFSTORE"[..]),
+            };
+            let response =
+                parse_borrowed_plain_key_arg2_packet(unparsed, &parser_config, prefix, name)
+                    .and_then(|packet| {
+                        let sources = [packet.a, packet.b];
+                        let reply =
+                            match cmd {
+                                PlainSetStoreCmd::Inter => runtime
+                                    .execute_plain_sinterstore_borrowed(packet.key, &sources, ts),
+                                PlainSetStoreCmd::Union => runtime
+                                    .execute_plain_sunionstore_borrowed(packet.key, &sources, ts),
+                                PlainSetStoreCmd::Diff => runtime
+                                    .execute_plain_sdiffstore_borrowed(packet.key, &sources, ts),
+                            };
+                        reply.map(|reply| (packet.consumed, reply))
+                    });
+            if let Some((consumed, response)) = response {
+                Ok(BorrowedMultibulkAction::FastReply { consumed, response })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Zinter2 => {
+            // packet.key holds the numkeys bulk; a/b are the two source keys.
+            if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
+                unparsed,
+                &parser_config,
+                b"*4\r\n$6\r\n",
+                b"ZINTER",
+            ) && let Some(response) =
+                runtime.execute_plain_zinter_borrowed(packet.key, &[packet.a, packet.b], ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Zdiff2 => {
+            // packet.key holds the numkeys bulk; a/b are the two source keys.
+            if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
+                unparsed,
+                &parser_config,
+                b"*4\r\n$5\r\n",
+                b"ZDIFF",
+            ) && let Some(response) =
+                runtime.execute_plain_zdiff2_borrowed(packet.key, packet.a, packet.b, ts)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
