@@ -44138,6 +44138,27 @@ replica_announced:1\r\n",
     }
 
     fn handle_wait_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        self.handle_wait_command_at_offset(argv, self.server.replication_ack_state.primary_offset)
+    }
+
+    /// Re-evaluate an already-blocked WAIT against the write offset captured
+    /// when that WAIT first ran. `REPLCONF GETACK *` advances the master's live
+    /// offset while asking replicas to acknowledge the *preceding* write, so a
+    /// blocked recheck must not move its threshold forward with that control
+    /// record.
+    pub fn execute_wait_at_offset(
+        &mut self,
+        argv: &[Vec<u8>],
+        required_offset: ReplOffset,
+    ) -> RespFrame {
+        self.handle_wait_command_at_offset(argv, required_offset)
+    }
+
+    fn handle_wait_command_at_offset(
+        &mut self,
+        argv: &[Vec<u8>],
+        required_offset: ReplOffset,
+    ) -> RespFrame {
         if argv.len() != 3 {
             return CommandError::WrongArity("WAIT").to_resp();
         }
@@ -44176,7 +44197,7 @@ replica_announced:1\r\n",
         let outcome = evaluate_wait(
             &self.server.replication_ack_state.replica_ack_offsets,
             WaitThreshold {
-                required_offset: self.server.replication_ack_state.primary_offset,
+                required_offset,
                 required_replicas,
             },
         );
@@ -60712,6 +60733,29 @@ mod tests {
             "GETACK must advance the replication offset delivered to the replica"
         );
         assert!(crate::command_is_replication_only(&records[0].argv));
+    }
+
+    #[test]
+    fn blocked_wait_keeps_its_pre_getack_write_offset() {
+        let mut rt = Runtime::default_strict();
+        let wait = command(&[b"WAIT", b"1", b"300"]);
+
+        // The replica has acknowledged the client write at 27.  Sending the
+        // GETACK control frame advances only the master's live offset to 64;
+        // Redis compares this WAIT against the pre-control write (27), not the
+        // newly advanced control-record offset.
+        rt.server
+            .set_replication_ack_state_for_tests(64, 64, &[27], &[27]);
+        assert_eq!(
+            rt.execute_wait_at_offset(&wait, ReplOffset(27)),
+            RespFrame::Integer(1),
+            "the replica ACK for the client write satisfies the blocked WAIT"
+        );
+        assert_eq!(
+            rt.execute_wait_at_offset(&wait, ReplOffset(64)),
+            RespFrame::Integer(0),
+            "using the GETACK-advanced live offset would reproduce the undercount"
+        );
     }
 
     // (frankenredis-8luan) Single-key PFCOUNT is a may-replicate read: when it

@@ -109,8 +109,12 @@ enum BlockingOp {
     BXreadgroup { argv: Vec<Vec<u8>> },
     /// WAITAOF: wait for local and/or replica fsync thresholds.
     Waitaof { argv: Vec<Vec<u8>> },
-    /// WAIT: wait for replica ACK count to reach required threshold.
-    Wait { argv: Vec<Vec<u8>> },
+    /// WAIT: wait for replica ACK count to reach the write offset observed
+    /// before the master injected its REPLCONF GETACK control record.
+    Wait {
+        argv: Vec<Vec<u8>>,
+        required_offset: ReplOffset,
+    },
 }
 
 impl BlockingOp {
@@ -29930,7 +29934,7 @@ fn process_argv_frame(
     ) || waitaof_should_block(argv, &response)
         || wait_should_block(argv, &response);
     if should_block
-        && let Some(blocked) =
+        && let Some(mut blocked) =
             try_build_blocked_state(argv, ts).and_then(|BlockedState { op, deadline_ms }| {
                 Some(BlockedState {
                     op: resolve_blocked_op(op, runtime, ts)?,
@@ -29952,6 +29956,12 @@ fn process_argv_frame(
                 blocked.op,
                 BlockingOp::Wait { .. } | BlockingOp::Waitaof { .. }
             );
+            if let BlockingOp::Wait {
+                required_offset, ..
+            } = &mut blocked.op
+            {
+                *required_offset = runtime.replication_primary_offset();
+            }
             conn.blocked = Some(blocked);
             blocked_tokens.insert(token);
             if let Some(blocked) = &conn.blocked {
@@ -31134,6 +31144,7 @@ fn try_build_blocked_state(argv: &[Vec<u8>], now_ms: u64) -> Option<BlockedState
         Some(BlockedState {
             op: BlockingOp::Wait {
                 argv: argv.to_vec(),
+                required_offset: ReplOffset(0),
             },
             deadline_ms,
         })
@@ -31229,7 +31240,7 @@ fn wait_should_block(argv: &[Vec<u8>], response: &RespFrame) -> bool {
 fn blocked_timeout_response(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64) -> RespFrame {
     match op {
         BlockingOp::BLmove { .. } => RespFrame::BulkString(None),
-        BlockingOp::Waitaof { argv } | BlockingOp::Wait { argv } => runtime.execute_frame(
+        BlockingOp::Waitaof { argv } => runtime.execute_frame(
             RespFrame::Array(Some(
                 argv.iter()
                     .map(|arg| RespFrame::BulkString(Some(arg.clone())))
@@ -31237,6 +31248,10 @@ fn blocked_timeout_response(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64)
             )),
             now_ms,
         ),
+        BlockingOp::Wait {
+            argv,
+            required_offset,
+        } => runtime.execute_wait_at_offset(argv, *required_offset),
         _ => RespFrame::Array(None),
     }
 }
@@ -31789,13 +31804,11 @@ fn try_fulfill_blocked(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64) -> O
                 None
             }
         }
-        BlockingOp::Wait { argv } => {
-            let frame = RespFrame::Array(Some(
-                argv.iter()
-                    .map(|arg| RespFrame::BulkString(Some(arg.clone())))
-                    .collect(),
-            ));
-            let response = runtime.execute_frame(frame, now_ms);
+        BlockingOp::Wait {
+            argv,
+            required_offset,
+        } => {
+            let response = runtime.execute_wait_at_offset(argv, *required_offset);
             if matches!(response, RespFrame::Error(_)) || wait_response_satisfies(argv, &response) {
                 Some(response)
             } else {
@@ -41840,6 +41853,7 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             },
             BlockingOp::Wait {
                 argv: vec![b"1".to_vec(), b"100".to_vec()],
+                required_offset: ReplOffset(0),
             },
             BlockingOp::Waitaof {
                 argv: vec![b"1".to_vec(), b"0".to_vec(), b"0".to_vec()],
@@ -42015,6 +42029,7 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         let wait = blocked_state(
             BlockingOp::Wait {
                 argv: vec![b"WAIT".to_vec(), b"1".to_vec(), b"100".to_vec()],
+                required_offset: ReplOffset(0),
             },
             100,
         );
