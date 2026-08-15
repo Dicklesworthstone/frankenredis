@@ -34,6 +34,58 @@ fn sort_zset_for_redis_order(members: &[(Vec<u8>, f64)]) -> Vec<(Vec<u8>, f64)> 
     sorted
 }
 
+/// Render a decoded set back to the `Set` spelling its encoded input used; every
+/// other value is returned unchanged. (frankenredis-wuxai)
+///
+/// A set survives `encode_rdb` -> `decode_rdb` with its MEMBERS intact but not
+/// necessarily its variant, and this test compares variants:
+///
+/// - a plain `RDB_TYPE_SET` decodes to `SetHashtable`, deliberately, so the load
+///   does not re-derive a smaller encoding from content (frankenredis-39is8) —
+///   and `encode_rdb` without compact options writes exactly that type, so EVERY
+///   generated `Set` came back as `SetHashtable`;
+/// - an all-integer set written as `RDB_TYPE_SET_INTSET` decodes to the typed
+///   `IntSet` (f4781193c).
+///
+/// Both left this test's `(Set, Set)` arm unreachable for sets, so it fell
+/// through to the catch-all "value type changed during roundtrip". The lib-side
+/// round-trip tests already carry the 39is8 accommodation; this file never got
+/// it, and the lib failure masked that because cargo stops at the first failing
+/// test target.
+///
+/// `decimal_i64_bytes` is crate-private, but `to_string` is byte-identical to it
+/// for every `i64` (canonical decimal, leading `-` for negatives) — the same
+/// rendering the decoder produced before the typed variant landed.
+fn canonicalise_decoded_set(value: &RdbValue) -> RdbValue {
+    match value {
+        RdbValue::SetHashtable(members) => RdbValue::Set(members.clone()),
+        RdbValue::IntSet(values) => RdbValue::Set(
+            values
+                .iter()
+                .map(|member| member.to_string().into_bytes())
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// The variant name of an `RdbValue`, for failure messages that have to
+/// distinguish a spelling change from a content change. (frankenredis-wuxai)
+fn rdb_value_kind(value: &RdbValue) -> &'static str {
+    match value {
+        RdbValue::String(_) => "String",
+        RdbValue::List(_) => "List",
+        RdbValue::ListQuicklist2Packed(_) => "ListQuicklist2Packed",
+        RdbValue::Set(_) => "Set",
+        RdbValue::IntSet(_) => "IntSet",
+        RdbValue::SetHashtable(_) => "SetHashtable",
+        RdbValue::Hash(_) => "Hash",
+        RdbValue::HashWithTtls(_) => "HashWithTtls",
+        RdbValue::SortedSet(_) => "SortedSet",
+        RdbValue::Stream(..) => "Stream",
+    }
+}
+
 fn arb_rdb_value() -> impl Strategy<Value = RdbValue> {
     prop_oneof![
         arb_value().prop_map(RdbValue::String),
@@ -86,7 +138,14 @@ proptest! {
             prop_assert_eq!(orig.db, dec.db, "db mismatch");
             prop_assert_eq!(&orig.key, &dec.key, "key mismatch");
             prop_assert_eq!(orig.expire_ms, dec.expire_ms, "expire_ms mismatch");
-            match (&orig.value, &dec.value) {
+            // (frankenredis-wuxai) An all-integer set is written as
+            // RDB_TYPE_SET_INTSET and decodes back as the typed
+            // `RdbValue::IntSet`, so put it back into the `Set` spelling the
+            // generator produced. Only the variant stops being load-bearing —
+            // the arms below still compare every member, and a non-set decoding
+            // as a set (or vice versa) still falls through to the catch-all.
+            let dec_value = canonicalise_decoded_set(&dec.value);
+            match (&orig.value, &dec_value) {
                 (RdbValue::String(a), RdbValue::String(b)) => {
                     prop_assert_eq!(a, b, "string value mismatch");
                 }
@@ -199,7 +258,10 @@ proptest! {
         prop_assert_eq!(&decoded[0].key, b"unique_test_key", "key should match");
         prop_assert_eq!(decoded[0].expire_ms, expire_ms, "expire_ms should match");
 
-        match (&value, &decoded[0].value) {
+        // Sets round-trip their MEMBERS, not their variant — see
+        // `canonicalise_decoded_set`. (frankenredis-wuxai)
+        let decoded_value = canonicalise_decoded_set(&decoded[0].value);
+        match (&value, &decoded_value) {
             (RdbValue::String(a), RdbValue::String(b)) => {
                 prop_assert_eq!(a, b, "string roundtrip failed");
             }
@@ -234,8 +296,19 @@ proptest! {
             (RdbValue::Stream(_, _, _, _, _, _), RdbValue::Stream(_, _, _, _, _, _)) => {
                 // Stream encoding has known incompatibilities
             }
-            _ => {
-                prop_assert!(false, "value type changed during roundtrip");
+            (encoded_value, round_tripped) => {
+                // Name BOTH variants: "value type changed" alone cannot tell a
+                // real encoder bug from a spelling the canonicaliser above does
+                // not yet cover, and that ambiguity is what let this test sit
+                // red. (frankenredis-wuxai)
+                prop_assert!(
+                    false,
+                    "value type changed during roundtrip: encoded {} -> decoded {} \
+                     (canonicalised from {})",
+                    rdb_value_kind(encoded_value),
+                    rdb_value_kind(round_tripped),
+                    rdb_value_kind(&decoded[0].value),
+                );
             }
         }
     }

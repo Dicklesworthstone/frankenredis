@@ -5742,11 +5742,11 @@ mod tests {
         RDB_TYPE_LIST_QUICKLIST_2, RDB_TYPE_SET, RDB_TYPE_SET_INTSET, RDB_TYPE_SET_LISTPACK,
         RDB_TYPE_STRING, RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK, RdbEncodeOptions, RdbEntry,
         RdbStreamConsumer, RdbStreamConsumerGroup, RdbStreamMetadata, RdbStreamPendingEntry,
-        RdbValue, UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3, crc64_redis, decode_intset_values,
-        decode_rdb, decode_rdb_prefix, encode_compact_set_intset, encode_hash_listpack_blob,
-        encode_listpack_strings_blob, encode_rdb, encode_rdb_with_functions,
-        encode_rdb_with_options, encode_set_listpack_blob, lzf_compress, lzf_decompress,
-        rdb_decode_string, rdb_encode_length, rdb_encode_string,
+        RdbValue, UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3, crc64_redis, decimal_i64_bytes,
+        decode_intset_values, decode_rdb, decode_rdb_prefix, encode_compact_set_intset,
+        encode_hash_listpack_blob, encode_listpack_strings_blob, encode_rdb,
+        encode_rdb_with_functions, encode_rdb_with_options, encode_set_listpack_blob, lzf_compress,
+        lzf_decompress, rdb_decode_string, rdb_encode_length, rdb_encode_string,
     };
 
     fn append_rdb_checksum(encoded: &mut Vec<u8>) {
@@ -7100,6 +7100,29 @@ mod tests {
 
     // ── Compact-type encoder selection (br-frankenredis-91kt) ─────
 
+    /// Helper: put a decoded value back into the spelling its ENCODED input
+    /// used, so a round-trip assertion compares content rather than variant.
+    ///
+    /// (frankenredis-wuxai) An all-integer set is encoded as
+    /// `RDB_TYPE_SET_INTSET` and, since f4781193c, decodes back as the typed
+    /// [`RdbValue::IntSet`] rather than [`RdbValue::Set`] — deliberately, so the
+    /// store can adopt the packed integers without a decimal round-trip. The
+    /// four round-trip tests that compare `(input, decoded)` pairs predate that
+    /// change and had no arm for the new variant, so they fell through to their
+    /// catch-all and panicked with "kind mismatch".
+    ///
+    /// This renders `IntSet` back to its canonical decimal members and leaves
+    /// every other value untouched, which keeps each caller's existing arms — and
+    /// therefore every genuine kind mismatch — exactly as strict as before.
+    fn canonicalise_decoded_set(value: &RdbValue) -> RdbValue {
+        match value {
+            RdbValue::IntSet(values) => {
+                RdbValue::Set(values.iter().copied().map(decimal_i64_bytes).collect())
+            }
+            other => other.clone(),
+        }
+    }
+
     /// Helper: scan `encoded` for the leading type byte of the entry
     /// for `key`. Skips REDIS magic, AUX records, SELECTDB / RESIZEDB,
     /// and any expiry opcodes. Used by the compact-encoder tests to
@@ -7617,7 +7640,8 @@ mod tests {
                 .iter()
                 .find(|d| d.key == original.key)
                 .unwrap_or_else(|| panic!("missing key {:?} in decoded", original.key));
-            match (&original.value, &restored.value) {
+            let restored_value = canonicalise_decoded_set(&restored.value);
+            match (&original.value, &restored_value) {
                 (RdbValue::Set(a), RdbValue::Set(b)) => {
                     let mut a = a.clone();
                     let mut b = b.clone();
@@ -8005,8 +8029,10 @@ mod tests {
                 );
 
                 // Invariant: shape-equivalent round-trip (under
-                // canonicalisation for unordered shapes).
-                match (value, &decoded[0].value) {
+                // canonicalisation for unordered shapes, and for the typed
+                // intset spelling the decoder now returns).
+                let decoded_value = canonicalise_decoded_set(&decoded[0].value);
+                match (value, &decoded_value) {
                     (RdbValue::String(a), RdbValue::String(b)) => {
                         assert_eq!(a, b, "[{label}] {name}: string drift")
                     }
@@ -8365,6 +8391,10 @@ mod tests {
                 // A plain RDB_TYPE_SET now decodes to SetHashtable; both are
                 // "Set" for this round-trip kind check. (frankenredis-39is8)
                 RdbValue::Set(members) | RdbValue::SetHashtable(members) => ("Set", members.len()),
+                // ...and RDB_TYPE_SET_INTSET decodes to the typed IntSet, which
+                // is still a set for this check — the compact_intset_* seeds are
+                // declared "Set" above. (frankenredis-wuxai)
+                RdbValue::IntSet(values) => ("Set", values.len()),
                 RdbValue::Hash(fields) => ("Hash", fields.len()),
                 RdbValue::SortedSet(members) => ("SortedSet", members.len()),
                 _ => ("Other", 0),
@@ -9655,6 +9685,16 @@ mod tests {
 
         fn normalize_entries_for_semantic_compare(mut entries: Vec<RdbEntry>) -> Vec<RdbEntry> {
             for entry in &mut entries {
+                // (frankenredis-wuxai) An all-integer set is written as
+                // RDB_TYPE_SET_INTSET and decodes back as the typed IntSet, so
+                // the two sides of this comparison legitimately differ in
+                // spelling. Canonicalise to sorted decimal members — the
+                // comparison still tests every member, only the variant stops
+                // being load-bearing.
+                if let RdbValue::IntSet(values) = &entry.value {
+                    entry.value =
+                        RdbValue::Set(values.iter().copied().map(decimal_i64_bytes).collect());
+                }
                 match &mut entry.value {
                     RdbValue::Set(members) => members.sort(),
                     RdbValue::Hash(fields) => fields.sort(),
