@@ -7858,6 +7858,39 @@ impl Store {
         }
     }
 
+    /// Measurement-only control selector for frankenredis-3uuan.
+    ///
+    /// Returning `true` makes `restore_key_with_metadata` throw away the max-element
+    /// bound the decode arm supplied, which puts the encoding refresh back on the
+    /// pre-lever full re-walk. Both arms therefore live in ONE executable, selected by
+    /// `FR_PERF_AB_RESTORE_ENCODING_RESCAN=1` at run time.
+    ///
+    /// This exists because a two-binary A/B is not sound on this fleet: rch has no
+    /// worker-pinning flag, so the control and candidate can be built by different
+    /// workers, and a difference in toolchain or code layout would be indistinguishable
+    /// from the lever. (Layout alone has moved an untouched command by ~1.5% in this
+    /// repo before.) One ELF removes that whole axis.
+    ///
+    /// Selecting the control is always semantically safe: it takes the same `None` path
+    /// that every non-listpack RESTORE payload already takes in production.
+    #[cfg(feature = "perf-ab-restore-encoding-rescan")]
+    #[inline]
+    fn restore_encoding_rescan_control_enabled() -> bool {
+        static RESCAN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *RESCAN.get_or_init(
+            || match std::env::var("FR_PERF_AB_RESTORE_ENCODING_RESCAN") {
+                Ok(value) => value == "1",
+                Err(_) => false,
+            },
+        )
+    }
+
+    #[cfg(not(feature = "perf-ab-restore-encoding-rescan"))]
+    #[inline(always)]
+    const fn restore_encoding_rescan_control_enabled() -> bool {
+        false
+    }
+
     /// (frankenredis-3uuan) O(1) twin of [`Self::refresh_hash_encoding_flag`] for the RESTORE
     /// path, where the decode arm already walked every field and value and can report the
     /// longest of them.
@@ -34878,6 +34911,17 @@ impl Store {
         // (frankenredis-3uuan) When the decode arm reported the longest element it saw,
         // the promotion test is O(1) and the object built two statements ago is not
         // re-walked. `None` (ziplist/zipmap/hashtable/intset payloads) keeps the scan.
+        //
+        // Discarding the bound here selects the PRE-LEVER control, which is what makes
+        // this a one-ELF A/B: both arms are the same executable and the same codegen,
+        // so a measured difference cannot be a build artifact. That matters because the
+        // two arms would otherwise be two binaries, and nothing guarantees two rch
+        // builds land on the same worker with the same toolchain and layout.
+        let restored_max_element_len = if Self::restore_encoding_rescan_control_enabled() {
+            None
+        } else {
+            restored_max_element_len
+        };
         match (&entry.value, restored_max_element_len) {
             (Value::Hash(_), Some(max_element_len)) => {
                 Self::refresh_hash_encoding_flag_from_max_len(
@@ -40697,27 +40741,27 @@ mod tests {
     use super::HllEncoding;
     use super::{
         BitRangeUnit, ClientTrackingState, DUMP_CRC64_LEN, DUMP_TRAILER_LEN, DUMP_VERSION_LEN,
-        Entry, EvictionLoopFailure, EvictionLoopStatus, EvictionSafetyGateState, ExpireTimeValue,
-        HLL_P, HLL_REDIS_DENSE_ENCODING, HLL_REDIS_DENSE_SIZE, HLL_REDIS_HEADER_SIZE,
-        HLL_REDIS_MAGIC, HLL_REDIS_SPARSE_ENCODING, HLL_REDIS_SPARSE_MAX_BYTES, HLL_REGISTERS,
-        HLL_SPARSE_XZERO_BIT, HashFieldMap, HashFieldTtl, HashFieldTtlCondition, HashFieldTtlSet,
-        HashFieldTtlUnit, LFU_INIT_VAL, LatencySample, MaxmemoryPolicy, MaxmemoryPressureLevel,
-        NOTIFY_EVICTED, NOTIFY_EXPIRED, NOTIFY_GENERIC, NOTIFY_KEYEVENT, PttlValue,
-        RDB_DUMP_VERSION, RDB_OPCODE_FUNCTION2, RDB_TYPE_HASH, RDB_TYPE_HASH_LISTPACK,
-        RDB_TYPE_HASH_ZIPLIST, RDB_TYPE_HASH_ZIPMAP, RDB_TYPE_LIST, RDB_TYPE_LIST_QUICKLIST,
-        RDB_TYPE_LIST_QUICKLIST_2, RDB_TYPE_LIST_ZIPLIST, RDB_TYPE_SET, RDB_TYPE_SET_INTSET,
-        RDB_TYPE_SET_LISTPACK, RDB_TYPE_STREAM_LISTPACKS_3, RDB_TYPE_STRING, RDB_TYPE_ZSET,
-        RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK, RDB_TYPE_ZSET_ZIPLIST,
-        REDIS_OBJECT_OVERHEAD_BYTES, REDIS_SCORE_BYTES, RestoreMetadata, ScoreBound, SetValue,
-        SmallStr, Store, StoreError, StreamAutoClaimOptions, StreamAutoClaimReply,
-        StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions,
-        StreamPendingEntry, Value, ValueType, decode_length, decode_listpack_strings,
-        decode_rdb_string, encode_db_key, encode_hash_listpack_dump, encode_intset, encode_length,
-        encode_listpack_strings, encode_set_listpack_dump, estimate_listpack_entry_bytes,
-        estimate_listpack_score_bytes, estimate_set_memory_usage_bytes, hll_encode,
-        hll_encode_sparse_create_from_pfadd, hll_hash, hll_rho, hll_sparse_decode,
-        integer_decimal_bytes, lfu_access_minutes, lfu_elapsed_minutes, redis_allocation_size,
-        redis_score_to_string, set_int_to_bytes, ziplist_integer_bytes,
+        ENTRY_FORCE_HASH_HASHTABLE_ENCODING, Entry, EvictionLoopFailure, EvictionLoopStatus,
+        EvictionSafetyGateState, ExpireTimeValue, HLL_P, HLL_REDIS_DENSE_ENCODING,
+        HLL_REDIS_DENSE_SIZE, HLL_REDIS_HEADER_SIZE, HLL_REDIS_MAGIC, HLL_REDIS_SPARSE_ENCODING,
+        HLL_REDIS_SPARSE_MAX_BYTES, HLL_REGISTERS, HLL_SPARSE_XZERO_BIT, HashFieldMap,
+        HashFieldTtl, HashFieldTtlCondition, HashFieldTtlSet, HashFieldTtlUnit, LFU_INIT_VAL,
+        LatencySample, MaxmemoryPolicy, MaxmemoryPressureLevel, NOTIFY_EVICTED, NOTIFY_EXPIRED,
+        NOTIFY_GENERIC, NOTIFY_KEYEVENT, PttlValue, RDB_DUMP_VERSION, RDB_OPCODE_FUNCTION2,
+        RDB_TYPE_HASH, RDB_TYPE_HASH_LISTPACK, RDB_TYPE_HASH_ZIPLIST, RDB_TYPE_HASH_ZIPMAP,
+        RDB_TYPE_LIST, RDB_TYPE_LIST_QUICKLIST, RDB_TYPE_LIST_QUICKLIST_2, RDB_TYPE_LIST_ZIPLIST,
+        RDB_TYPE_SET, RDB_TYPE_SET_INTSET, RDB_TYPE_SET_LISTPACK, RDB_TYPE_STREAM_LISTPACKS_3,
+        RDB_TYPE_STRING, RDB_TYPE_ZSET, RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK,
+        RDB_TYPE_ZSET_ZIPLIST, REDIS_OBJECT_OVERHEAD_BYTES, REDIS_SCORE_BYTES, RestoreMetadata,
+        ScoreBound, SetValue, SmallStr, Store, StoreError, StreamAutoClaimOptions,
+        StreamAutoClaimReply, StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor,
+        StreamGroupReadOptions, StreamPendingEntry, Value, ValueType, decode_length,
+        decode_listpack_strings, decode_rdb_string, encode_db_key, encode_hash_listpack_dump,
+        encode_intset, encode_length, encode_listpack_strings, encode_set_listpack_dump,
+        estimate_listpack_entry_bytes, estimate_listpack_score_bytes,
+        estimate_set_memory_usage_bytes, hll_encode, hll_encode_sparse_create_from_pfadd, hll_hash,
+        hll_rho, hll_sparse_decode, integer_decimal_bytes, lfu_access_minutes, lfu_elapsed_minutes,
+        redis_allocation_size, redis_score_to_string, set_int_to_bytes, ziplist_integer_bytes,
     };
 
     fn group_read_options(
@@ -72470,6 +72514,86 @@ mod tests {
             Some(b"value2".to_vec())
         );
         assert_eq!(store.zscore(b"zset", b"a", 100).unwrap(), Some(1.5));
+    }
+
+    /// (frankenredis-3uuan) The O(1) refresh must agree with the scanning refresh it
+    /// replaced, on every shape, for every threshold. The scan is the REFERENCE — it is
+    /// the pre-lever, Redis-matching behavior — so this compares the new implementation
+    /// against it directly rather than against a restatement of the new rule.
+    ///
+    /// The matrix deliberately straddles both thresholds in both directions, including
+    /// the exact boundary (`len == max_value` must NOT promote, since the predicate is
+    /// `>`), a long FIELD, a long VALUE, and the empty map.
+    #[test]
+    fn restore_hash_encoding_o1_refresh_agrees_with_the_scan_it_replaced() {
+        type FieldValuePairs = Vec<(Vec<u8>, Vec<u8>)>;
+        let shapes: &[(&str, FieldValuePairs)] = &[
+            ("empty", vec![]),
+            ("all short", vec![(b"f".to_vec(), b"v".to_vec())]),
+            ("long value", vec![(b"f".to_vec(), vec![b'v'; 40])]),
+            ("long field", vec![(vec![b'f'; 40], b"v".to_vec())]),
+            (
+                "many short",
+                (0..12)
+                    .map(|i| (format!("f{i}").into_bytes(), b"v".to_vec()))
+                    .collect(),
+            ),
+            (
+                "one long among short",
+                (0..6)
+                    .map(|i| {
+                        let value = if i == 3 {
+                            vec![b'v'; 33]
+                        } else {
+                            b"v".to_vec()
+                        };
+                        (format!("f{i}").into_bytes(), value)
+                    })
+                    .collect(),
+            ),
+        ];
+
+        for (label, pairs) in shapes {
+            let borrowed: Vec<(&[u8], &[u8])> = pairs
+                .iter()
+                .map(|(f, v)| (f.as_slice(), v.as_slice()))
+                .collect();
+            let max_element_len = borrowed
+                .iter()
+                .map(|(f, v)| f.len().max(v.len()))
+                .max()
+                .unwrap_or(0);
+
+            for max_entries in [0_usize, 1, 5, 8, 128] {
+                // 32/33 straddles the "one long among short" element exactly, and
+                // max_value == the element length pins the non-strict boundary.
+                for max_value in [0_usize, 1, 32, 33, 40, 64] {
+                    let build = || {
+                        let map = HashFieldMap::from_unique_pairs_borrowed(&borrowed);
+                        Entry::new(Value::Hash(Box::new(map)), 100)
+                    };
+
+                    let mut scanned = build();
+                    Store::refresh_hash_encoding_flag(&mut scanned, max_entries, max_value);
+
+                    let mut derived = build();
+                    Store::refresh_hash_encoding_flag_from_max_len(
+                        &mut derived,
+                        max_element_len,
+                        max_entries,
+                        max_value,
+                    );
+
+                    assert_eq!(
+                        scanned.has_flag(ENTRY_FORCE_HASH_HASHTABLE_ENCODING),
+                        derived.has_flag(ENTRY_FORCE_HASH_HASHTABLE_ENCODING),
+                        "{label}: O(1) refresh disagreed with the scan at \
+                         max_entries={max_entries} max_value={max_value} \
+                         (max_element_len={max_element_len})"
+                    );
+                }
+            }
+        }
     }
 
     // ── (frankenredis-3uuan) RESTORE encoding flags derived from the decode ──────

@@ -18,6 +18,10 @@ bench-reference = []
 # Measurement-only selector for the XTRIM/XADD MINID approximate no-op guard.
 # Production builds compile the guard as an unconditional constant path.
 perf-ab-xtrim-minid-noop = []
+# Measurement-only selector that restores the pre-frankenredis-3uuan RESTORE
+# encoding refresh (re-walk the object that was just built) so BOTH arms of that
+# lever live in ONE ELF. Production builds compile the control away entirely.
+perf-ab-restore-encoding-rescan = []
 
 [dev-dependencies]
 proptest.workspace = true
