@@ -4081,8 +4081,47 @@ fn build_lua_base_globals_template() -> LuaMap<String, LuaValue> {
         LuaValue::Table(lua_redis_table_template()),
     );
 
+    // (frankenredis-jwp0v) The coroutine library belongs in the SHARED template,
+    // read-only like every other standard library table. Redis 7.2.4 runs
+    // luaSetTableProtectionRecursively over the sandbox after env init and a
+    // script that writes `coroutine.zzz = 1` gets "Attempt to modify a readonly
+    // table"; fr built this table fresh per EVAL and left it writable, so the
+    // same script returned normally. Verified against vendored 7.2.4 with both
+    // engines live: fr answered `ok`, redis answered the readonly error, while
+    // `math.zzz = 1` errored identically on both.
+    //
+    // Building it once here also removes the per-EVAL cost of rebuilding it —
+    // 13 of the 15 allocations `set_keys_argv` used to make, which is 30% of the
+    // allocations of a ONE-call EVAL. Sharing is only sound BECAUSE the table is
+    // read-only: it holds nothing but RustFunction dispatch names, and no script
+    // can now mutate what the next script sees.
+    const COROUTINE_FNS: [(&str, &str); 6] = [
+        ("create", "coroutine.create"),
+        ("resume", "coroutine.resume"),
+        ("yield", "coroutine.yield"),
+        ("status", "coroutine.status"),
+        ("wrap", "coroutine.wrap"),
+        ("running", "coroutine.running"),
+    ];
+    let coroutine_table = LuaTable::new_shared_template();
+    for (key, full) in COROUTINE_FNS {
+        coroutine_table.set(
+            LuaValue::Str(key.as_bytes().to_vec()),
+            LuaValue::RustFunction(std::rc::Rc::from(full)),
+        );
+    }
+    globals.insert("coroutine".to_string(), LuaValue::Table(coroutine_table));
+
     for name in [
-        "math", "string", "table", "struct", "bit", "cjson", "cmsgpack", "redis",
+        "math",
+        "string",
+        "table",
+        "struct",
+        "bit",
+        "cjson",
+        "cmsgpack",
+        "redis",
+        "coroutine",
     ] {
         if let Some(LuaValue::Table(table)) = globals.get(name) {
             table.mark_readonly_recursive();
@@ -4249,28 +4288,10 @@ impl<'a> LuaState<'a> {
         // variable' error. The os.clock dispatch handler is left in
         // place but the table is not bound.
 
-        // Coroutine table registration. Redis 7.2 keeps the Lua
-        // coroutine library available inside the script sandbox.
-        // (BlackThrush) Static full names. The previous `format!("coroutine.{name}")` allocated a
-        // fresh String and ran the Display formatting machinery for all six CONSTANT names on EVERY
-        // eval (set_keys_argv runs once per EVAL). Byte-identical RustFunction dispatch names.
-        const COROUTINE_FNS: [(&str, &str); 6] = [
-            ("create", "coroutine.create"),
-            ("resume", "coroutine.resume"),
-            ("yield", "coroutine.yield"),
-            ("status", "coroutine.status"),
-            ("wrap", "coroutine.wrap"),
-            ("running", "coroutine.running"),
-        ];
-        let coroutine_table = LuaTable::new();
-        for (key, full) in COROUTINE_FNS {
-            coroutine_table.set(
-                LuaValue::Str(key.as_bytes().to_vec()),
-                LuaValue::RustFunction(std::rc::Rc::from(full)),
-            );
-        }
-        self.globals
-            .insert("coroutine".to_string(), LuaValue::Table(coroutine_table));
+        // (frankenredis-jwp0v) The coroutine library now lives in the shared
+        // base globals template, built once per thread and marked read-only
+        // there, which is both the parity behaviour (Redis 7.2.4 protects it)
+        // and one fewer table to rebuild on every EVAL.
     }
 
     pub fn execute(&mut self, source: &[u8]) -> Result<LuaValue, String> {
@@ -4308,7 +4329,15 @@ impl<'a> LuaState<'a> {
         );
         if !already_protected {
             for name in [
-                "math", "string", "table", "struct", "bit", "cjson", "cmsgpack", "redis",
+                "math",
+                "string",
+                "table",
+                "struct",
+                "bit",
+                "cjson",
+                "cmsgpack",
+                "redis",
+                "coroutine",
             ] {
                 if let Some(LuaValue::Table(t)) = self.globals.get(name) {
                     t.mark_readonly_recursive();
@@ -16107,6 +16136,45 @@ mod tests {
         assert!(
             err.contains("attempt to concatenate a nil value"),
             "wrong wording for nil: {err:?}"
+        );
+    }
+
+    /// Pins frankenredis-jwp0v against vendored Redis 7.2.4, checked live with
+    /// both engines running: `coroutine.zzz = 1` returns the readonly-table
+    /// error on 7.2.4 but SUCCEEDED on fr, because fr rebuilt the coroutine
+    /// table per EVAL and never protected it while protecting every other
+    /// standard library table. `math.zzz = 1` errored identically on both, which
+    /// is what isolated the divergence to this one table.
+    ///
+    /// Discriminating: the fix marks the table read-only in the shared base
+    /// globals template, and removing `"coroutine"` from either protection list
+    /// makes the first assertion below fail with `Ok` instead of an error.
+    #[test]
+    fn lua_coroutine_table_is_readonly_like_upstream() {
+        let mut store = Store::new();
+
+        let err = eval_script(b"coroutine.zzz = 1 return 'ok'", &[], &[], &mut store, 0)
+            .expect_err("writing a coroutine field must raise, as it does on 7.2.4");
+        assert!(
+            err.contains("Attempt to modify a readonly table"),
+            "coroutine must be protected like math/string/table: {err:?}"
+        );
+
+        // The library still has to WORK — protection must not have emptied it.
+        let frame = eval_script(b"return type(coroutine.create)", &[], &[], &mut store, 0)
+            .expect("coroutine.create must still resolve");
+        match frame {
+            RespFrame::BulkString(Some(body)) => assert_eq!(body, b"function"),
+            other => panic!("expected bulk string, got {other:?}"),
+        }
+
+        // A second eval must see a pristine table: the template is shared across
+        // evals, so a leak would show up as state surviving from the first.
+        let err = eval_script(b"coroutine.zzz = 1 return 'ok'", &[], &[], &mut store, 0)
+            .expect_err("the shared template must stay protected across evals");
+        assert!(
+            err.contains("Attempt to modify a readonly table"),
+            "{err:?}"
         );
     }
 
