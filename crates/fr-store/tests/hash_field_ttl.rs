@@ -349,8 +349,30 @@ fn hash_field_set_with_event_emits_hexpire_on_applied() {
     );
 }
 
+/// An already-expired deadline does NOT emit the per-command event.
+///
+/// (frankenredis-lyni9) This test previously asserted the opposite. Commit
+/// 2248c4de3 (frankenredis-g1nuo) deliberately narrowed the wrapper's notify
+/// guard from `Applied | AppliedAlreadyExpired` to `Applied` and rewrote its doc
+/// comment to say so, because an already-expired deadline DELETES the field
+/// rather than scheduling one — so the honest event is a deletion, not an
+/// "expiry was set". The command layer owns that: `hexpire` in fr-command reaps
+/// the field via `reap_expired_hash_field_without_expiry_event`, then emits ONE
+/// aggregate `hdel` for the whole command (plus `del` when the reap empties the
+/// key), which is why the per-field wrapper must stay silent — otherwise the
+/// same logical deletion would notify twice.
+///
+/// The assertion was left behind by that commit, so it had been failing at HEAD.
+/// It now pins the current contract, including the negative half: no `hpexpireat`,
+/// and specifically no per-field `hdel` from this layer.
+///
+/// The other half of the contract — that the deletion IS reported, once, by the
+/// command — is pinned by `hash_field_ttl_dispatch_uses_aggregate_immediate_expiry_events`
+/// in fr-command, which asserts the exact `hdel` then `del` sequence for
+/// `HEXPIRE h 0 FIELDS 1 f`. Neither test is meaningful without the other: this
+/// one alone would be satisfied by losing the notification entirely.
 #[test]
-fn hash_field_set_with_event_emits_on_already_expired() {
+fn hash_field_set_with_event_stays_silent_on_already_expired() {
     let mut store = Store::new();
     seed_hash(&mut store, b"h", &[(b"f", b"v")]);
     enable_all_keyspace_events(&mut store);
@@ -364,8 +386,16 @@ fn hash_field_set_with_event_emits_on_already_expired() {
         "hpexpireat",
     );
     assert_eq!(outcome, HashFieldTtlSet::AppliedAlreadyExpired);
+
     let events = collect_event_pairs(&mut store);
-    assert!(events.iter().any(|(_, k)| k == "hpexpireat"));
+    assert!(
+        !events.iter().any(|(_, k)| k == "hpexpireat"),
+        "an already-expired deadline sets no expiry, so it must not report one: {events:?}"
+    );
+    assert!(
+        !events.iter().any(|(_, k)| k == "hdel"),
+        "the deletion event is the command layer's aggregate, not this wrapper's: {events:?}"
+    );
 }
 
 #[test]
