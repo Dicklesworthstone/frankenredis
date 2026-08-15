@@ -1648,8 +1648,16 @@ impl SortedSet {
                 .iter()
                 .all(|(member, _)| member.len() <= max_listpack_value)
         {
+            let packed = if PackedZSet::borrowed_pairs_are_sorted(&pairs) {
+                // RDB_TYPE_ZSET_LISTPACK is normally written in this order by
+                // Redis. Retain the defensive fallback below for legal foreign
+                // payloads: RESTORE accepts them but must normalize their order.
+                PackedZSet::from_sorted_unique_pairs_borrowed(pairs)
+            } else {
+                PackedZSet::from_unique_pairs_borrowed(pairs)
+            };
             Self {
-                inner: SortedSetInner::Packed(PackedZSet::from_unique_pairs_borrowed(pairs)),
+                inner: SortedSetInner::Packed(packed),
             }
         } else {
             let owned_pairs = pairs
@@ -71581,6 +71589,41 @@ mod tests {
                 "duplicate zset listpack members should reject the dump, got {other:?}"
             )),
         }
+    }
+
+    #[test]
+    fn restore_unsorted_zset_listpack_normalizes_score_member_order_i41sx() -> Result<(), String> {
+        // Redis emits zset listpacks in score/member order, but RESTORE also
+        // accepts foreign payloads whose pair order is not canonical. The
+        // sorted fast path must therefore validate before bypassing the sort.
+        let listpack =
+            encode_listpack_strings(&[b"gamma".as_slice(), b"2", b"alpha", b"1", b"beta", b"2"])
+                .ok_or_else(|| "encode zset listpack".to_string())?;
+        let mut body = vec![RDB_TYPE_ZSET_LISTPACK];
+        append_raw_dump_bulk(&mut body, &listpack);
+        let payload = append_dump_footer(body);
+
+        let mut store = Store::new();
+        store
+            .restore_key(b"z", 0, &payload, false, 100)
+            .map_err(|err| format!("restore unordered listpack: {err:?}"))?;
+        assert_eq!(
+            store.zrange(b"z", 0, -1, 100),
+            Ok(vec![b"alpha".to_vec(), b"beta".to_vec(), b"gamma".to_vec()])
+        );
+
+        let normalized = store
+            .dump_key(b"z", 100)
+            .ok_or_else(|| "dump normalized zset".to_string())?;
+        let mut reloaded = Store::new();
+        reloaded
+            .restore_key(b"z2", 0, &normalized, false, 100)
+            .map_err(|err| format!("restore normalized dump: {err:?}"))?;
+        assert_eq!(
+            reloaded.zrange(b"z2", 0, -1, 100),
+            Ok(vec![b"alpha".to_vec(), b"beta".to_vec(), b"gamma".to_vec()])
+        );
+        Ok(())
     }
 
     #[test]

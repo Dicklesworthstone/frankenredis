@@ -4823,6 +4823,14 @@ impl PackedZSet {
     #[must_use]
     pub fn from_unique_pairs_borrowed(mut pairs: Vec<(&[u8], f64)>) -> Self {
         pairs.sort_by(|(am, ascore), (bm, bscore)| zset_cmp(*ascore, am, *bscore, bm));
+        Self::from_sorted_unique_pairs_borrowed(pairs)
+    }
+
+    /// Build directly from pairs already known to be in Redis `(score, member)`
+    /// order. RDB zset listpacks are emitted in this order; validating it before
+    /// calling this constructor avoids a second `O(n log n)` sort during RESTORE.
+    #[must_use]
+    pub(crate) fn from_sorted_unique_pairs_borrowed(pairs: Vec<(&[u8], f64)>) -> Self {
         let cap = pairs
             .iter()
             .map(|(member, _)| member.len().saturating_add(10))
@@ -4838,6 +4846,17 @@ impl PackedZSet {
             zset.len += 1;
         }
         zset
+    }
+
+    /// Whether pairs are already in the canonical zset order required by the
+    /// packed representation. Callers still own duplicate validation: equal
+    /// adjacent pairs are not a duplicate member unless their member bytes are
+    /// equal, and non-adjacent duplicate members remain possible.
+    #[must_use]
+    pub(crate) fn borrowed_pairs_are_sorted(pairs: &[(&[u8], f64)]) -> bool {
+        pairs
+            .windows(2)
+            .all(|pair| !zset_cmp(pair[1].1, pair[1].0, pair[0].1, pair[0].0).is_lt())
     }
 
     #[must_use]
@@ -6774,6 +6793,26 @@ mod tests {
         assert_eq!(
             z2.iter().collect::<Vec<_>>(),
             vec![(&b"x"[..], 0.0), (b"y", -0.0)]
+        );
+    }
+
+    #[test]
+    fn packed_zset_borrowed_sorted_builder_matches_sorting_builder_i41sx() {
+        let ordered = vec![(b"alpha".as_slice(), -1.0), (b"beta", 0.0), (b"gamma", 0.0)];
+        assert!(PackedZSet::borrowed_pairs_are_sorted(&ordered));
+        let direct = PackedZSet::from_sorted_unique_pairs_borrowed(ordered.clone());
+        let sorted = PackedZSet::from_unique_pairs_borrowed(ordered);
+        assert_eq!(
+            direct.iter().collect::<Vec<_>>(),
+            sorted.iter().collect::<Vec<_>>()
+        );
+
+        let unordered = vec![(b"gamma".as_slice(), 0.0), (b"alpha", -1.0), (b"beta", 0.0)];
+        assert!(!PackedZSet::borrowed_pairs_are_sorted(&unordered));
+        let normalized = PackedZSet::from_unique_pairs_borrowed(unordered);
+        assert_eq!(
+            normalized.iter().collect::<Vec<_>>(),
+            vec![(&b"alpha"[..], -1.0), (b"beta", 0.0), (b"gamma", 0.0)]
         );
     }
 
