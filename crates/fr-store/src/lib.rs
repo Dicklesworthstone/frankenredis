@@ -37160,7 +37160,22 @@ fn sha1_hex(data: &[u8]) -> String {
         h3 = h3.wrapping_add(d);
         h4 = h4.wrapping_add(e);
     }
-    format!("{h0:08x}{h1:08x}{h2:08x}{h3:08x}{h4:08x}")
+    // (frankenredis-w08xv) Table-driven hex instead of
+    // `format!("{h0:08x}…")`. Every EVAL hashes its script body to find it in
+    // the script cache, so this runs once per EVAL, and callgrind put the five
+    // `<u32 as LowerHex>::fmt` calls plus `core::fmt::write` at ~1,460
+    // instructions per op — about 7% of a ONE-call EVAL. The digest is 40 fixed
+    // hex characters, so the length is known and the formatting machinery buys
+    // nothing. Byte-identical output: `{:08x}` is lowercase, zero-padded,
+    // big-endian nibble order, which is exactly what this emits.
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(40);
+    for word in [h0, h1, h2, h3, h4] {
+        for shift in [28u32, 24, 20, 16, 12, 8, 4, 0] {
+            out.push(HEX[((word >> shift) & 0xF) as usize] as char);
+        }
+    }
+    out
 }
 
 const REDIS_OBJECT_OVERHEAD_BYTES: usize = 16;
@@ -40687,6 +40702,59 @@ mod quicklist_dump_fix_tests {
 
 #[cfg(test)]
 mod tests {
+    /// (frankenredis-w08xv) Pins `sha1_hex` against the PUBLISHED SHA-1 test
+    /// vectors, not against anything this file computes. The digests below come
+    /// from FIPS 180-1 / RFC 3174 and the classic pangram case; hardcoding them
+    /// is the point, because a test whose expected values were produced by the
+    /// implementation under test proves only that it is self-consistent.
+    ///
+    /// This guards the table-driven hex encoder that replaced
+    /// `format!("{:08x}…")`. Any error in nibble order, padding, case, or word
+    /// order changes these strings.
+    #[test]
+    fn sha1_hex_matches_published_vectors() {
+        for (input, expected) in [
+            ("", "da39a3ee5e6b4b0d3255bfef95601890afd80709"),
+            ("abc", "a9993e364706816aba3e25717850c26c9cd0d89d"),
+            (
+                "The quick brown fox jumps over the lazy dog",
+                "2fd4e1c67a2d28fced849ee1bb76e7391b93eb12",
+            ),
+            (
+                "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
+                "84983e441c3bd26ebaae4aa1f95129e5e54670f1",
+            ),
+        ] {
+            let got = super::sha1_hex_public(input.as_bytes());
+            assert_eq!(got, expected, "sha1_hex({input:?})");
+            assert_eq!(got.len(), 40, "digest must be 40 hex characters");
+            assert!(
+                got.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                "digest must be lowercase hex: {got}"
+            );
+        }
+
+        // Padding-edge and multi-block messages, whose expected digests come
+        // from an INDEPENDENT implementation (Python's hashlib), not from this
+        // one. 55 and 56 bytes straddle the point where the length field no
+        // longer fits in the first block, and 64/120 are exact block multiples.
+        for (len, expected) in [
+            (55usize, "c1c8bbdc22796e28c0e15163d20899b65621d65a"),
+            (56, "c2db330f6083854c99d4b5bfb6e8f29f201be699"),
+            (63, "03f09f5b158a7a8cdad920bddc29b81c18a551f5"),
+            (64, "0098ba824b5c16427bd7a1122a5a442a25ec644d"),
+            (119, "ee971065aaa017e0632a8ca6c77bb3bf8b1dfc56"),
+            (120, "f34c1488385346a55709ba056ddd08280dd4c6d6"),
+        ] {
+            assert_eq!(
+                super::sha1_hex_public(&vec![b'a'; len]),
+                expected,
+                "sha1_hex of {len} 'a' bytes"
+            );
+        }
+    }
+
     /// (frankenredis-zu4b7) `CommandHistogram::merge` is the primitive a
     /// cross-partition INFO commandstats/latencystats aggregate needs. It is
     /// proven here even though the reactor does not yet serve those sections --
