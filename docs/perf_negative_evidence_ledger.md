@@ -16410,3 +16410,59 @@ Authenticating a cross-process A/B on a within-process A/A would be gate
 self-weakening: it would null drift while leaving the placement term — the term that
 actually dominates here — entirely uncontrolled. Its value is diagnostic, and it is
 what identified the fix, because the gap between the two nulls IS the placement term.
+
+## 2026-08-15: REJECTED AS SCOPED — the `LuaValue::Str` → `Rc<[u8]>` lever is ~6.3% of an EVAL op's instructions, inside its own harness's noise floor (`frankenredis-w08xv`)
+
+Preflighted BEFORE the refactor rather than after, which is the whole point of
+the entry. The lever is real and its mechanism is counted: `lua_eval.rs:5541` is
+`Expr::Str(s) => Ok(LuaValue::Str(s.to_vec()))`, `Expr::Str` already holds
+`Rc<[u8]>` from parse time, and the evaluator discards that sharing and
+heap-copies on every evaluation. Changing `LuaValue::Str(Vec<u8>)` to
+`Rc<[u8]>` turns both the literal evaluation and the `LuaValue::clone` of a
+table read into refcount bumps. It is ~235 sites in one 26,474-line file.
+
+**The sizing, from the allocation census on the same bead.** Per EVAL op of
+`for i=1,50 do redis.call('GET', KEYS[1]) end`: 146,421 Ir, 291.4 allocations,
+291 D1 misses, allocator self-cost 26,809 Ir (18.3% of the op, 22.2% counting
+`drop_glue::<LuaValue>`). Allocations attributed by call site:
+
+| site | allocs/op |
+|---|---:|
+| `eval_expr'2` — string literal copy | 50.0 |
+| `LuaValue::clone` — KEYS[1] table read | 50.0 |
+| `redis_call_with_argv` — per-call container | 50.0 |
+| `fr_store::Store::get` — reply bytes out of the store | 50.0 |
+| `eval_intrinsic_call` — args vector | 50.0 |
+| `set_keys_argv` | 15.0 |
+| `finish_grow` + reallocs | 18.3 |
+
+The Rc lever removes the first two: **100 of 291 allocations, 34.3%, ~9,200 Ir/op
+= 6.28% of the operation.** This path's own calibration says to read instructions
+as roughly HALF their magnitude in wall terms, so expect **~3%** end to end.
+`scripts/lua_eval_multirun.sh` has a measured bound of **2.5-4.9%** on this
+workload. **The expected effect is inside the noise floor of the only harness
+that would measure it**, so 235 edits would buy a number that cannot be
+distinguished from zero — which is precisely how this path already produced a
+bundle of eleven levers worth 3,806→2,807 instructions per call whose largest
+single member measured **+0.02%**.
+
+**REJECTED AS A STANDALONE LEVER on that arithmetic, not on its merits.** No code
+was written; the file was reserved, backed up and left untouched.
+
+**What the same arithmetic says IS worth doing.** Removing all seven sites is
+283 of 291 allocations, ~26,064 Ir/op = **17.8% of the operation**, ~9% expected
+in wall terms, which clears the harness bound by roughly 2x. So this lever is a
+COMPONENT, not a row: it should be built and measured as a bundle, and — per this
+repo's own rule that a lever must never be projected from a bundled ratio — the
+bundle must be reported as a bundle, with no per-member attribution claimed for
+any of the seven.
+
+Retry predicate, two independent ways in, either of which makes the work
+admissible: (a) the bundle above is built and the combined effect exceeds 4.9%
+end to end in a live same-invocation row against vendored 7.2.4; or (b) the EVAL
+harness's null bound falls below ~1.5%, at which point a 3% single-lever effect
+clears it and the Rc change can be taken and attributed on its own. Note (b) is
+blocked on the same measurement work as the rest of EVAL: three of the seven
+sites are in `lua_eval.rs`, one is in `fr-store`'s reply path, and a
+cross-process throughput row on this host was measured today at ~1% placement
+noise for redis-benchmark-shaped work.
