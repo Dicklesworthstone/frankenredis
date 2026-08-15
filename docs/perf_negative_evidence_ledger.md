@@ -16618,3 +16618,82 @@ introduced for cascade work, re-run this three-shape cross-check before quoting
 any gap from it — agreement on absolutes is NOT required, but agreement on the
 GAP to well inside 1,400 instr/op is, and a harness that fails that cannot be
 used to take or reject a candidate.
+
+## 2026-08-15: KEEP (COMPETITIVE) — EVAL 50x `redis.call('GET')` moves from 0.8906x to 0.9528x of vendored Redis 7.2.4 after two allocation levers (`frankenredis-w08xv`)
+
+Claim class: COMPETITIVE. Campaign output: yes. Both rows are FrankenRedis
+against a live vendored Redis 7.2.4 arm running in the SAME invocation,
+interleaved by the balanced square, each row carrying its own A/A null.
+
+**Harness:** `scripts/balanced_square_ab.py`, square `ABBAABBA`, 21 rounds,
+50,000 ops per slot, `-P16`, null bound ±0.02, bootstrap 95% CI. Servers
+unpinned, which this harness's own `--cross-null` measured at ~1% for
+redis-benchmark-shaped work. **Host:** thinkstation1, kernel 6.17.0-41-generic,
+64 cores, governor `powersave`, AVX2, loadavg 4.8-6.4; the benchmark runs
+LOCALLY, rch is used only to compile. **Build workers:** `vmi1264463` for the
+pre-lever ELF, `vmi1293453` for the post-lever ELF. Observed thread counts
+self-reported from inside the processes: fr 3, redis 6.
+
+**Running images, self-reported by the benchmarked processes from inside
+themselves** (the harness reads each server's own image, so these are not
+hashes of a path computed later by prose):
+- pre-lever fr ELF, self-reported sha256 `be69d55b4f6b7f730512f7c0276f6ec51c27289ae3324ebc4b621bfa450f22fa`
+- post-lever fr ELF, self-reported sha256 `13cf1421f38fa30f28b0712e4750b11ccf9bb2646cc6f228ab4d2219bbbf3340`
+- vendored 7.2.4 ELF, self-reported sha256 `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+
+| row | fr/Redis | bootstrap 95% CI | null redis | null fr | verdict |
+|---|---:|---|---:|---:|---|
+| EVAL 50x GET, pre-lever | **0.8906x** | [0.8818, 0.8967] | 1.0078 | 0.9988 | ADMISSIBLE |
+| EVAL 50x GET, post-lever | **0.9528x** | [0.9414, 0.9613] | 0.9961 | 1.0058 | ADMISSIBLE |
+| GET control, pre-lever | 1.1107x | [1.0870, 1.1386] | 0.9860 | 0.9988 | ADMISSIBLE |
+| GET control, post-lever | 1.1364x | [1.1114, 1.1631] | 1.0205 | 1.0028 | **NULL-FAILED** |
+
+The two EVAL confidence intervals do not overlap. The two levers are `86410de15`
+(the intrinsic invocation name stops heap-copying a 'static str per call) and
+`47ea344d0` (redis.call returns one value instead of a one-element Vec), which
+together take allocations per EVAL op from 291.1 to 191.1 and instructions from
+146,527 to 128,711 (−12.2%), counted with `lua_stall_census.py`.
+
+**THE ATTRIBUTION IS ACROSS INVOCATIONS AND IS THEREFORE WEAKER THAN THE ROWS.**
+Each row is a valid same-invocation competitive measurement, but the pre and post
+ELFs were measured in two SEPARATE invocations of the harness, because it takes
+one `--fr-bin`. Redis is the common live reference in both and its own null was
+admissible in both, which is what makes the comparison worth anything at all. The
+honest bound on cross-invocation drift comes from the untouched control shape:
+GET moved 1.1107 → 1.1364, about 2.3%, and one of those two control rows
+NULL-FAILED, so that bound is loose rather than clean. **The EVAL improvement
+(1.0698x, ~7.0%) is about three times that loose drift bound, and it agrees with
+the ~6% predicted from the −12.2% instruction count under this path's
+half-magnitude rule** — but a reader should treat "0.8906 → 0.9528" as two
+separately-admissible rows plus a consistent prediction, NOT as one
+same-invocation A/B.
+
+**No per-member attribution.** Two levers landed between the two ELFs and this
+row cannot separate them; the preflight (`dc57a78af`) required exactly that and
+it still binds. It also predicted no single lever could clear the 2.5-4.9%
+harness bound, which is why the bundle was built before anything was timed.
+
+**SAME-INVOCATION A/A, measured rather than assumed.** Running the harness with
+`--cross-null` replaces the Redis arm with a SECOND instance of the same fr ELF,
+so the reported ratio IS a cross-process A/A taken in one invocation, with the
+same square, rounds and bootstrap as the rows above. On the post-lever ELF, same
+host, same hour: **A/A median 0.9801, bootstrap 95% CI [0.9612, 0.9995]**
+(21 rounds, 50,000 ops/slot, -P16). Two identical images therefore differ by
+about 2% on this workload, which is the cross-process placement term the per-row
+within-process nulls structurally cannot see. **The pre-to-post EVAL difference of
+7.0% is about three and a half times that measured term**, which is the argument
+for believing it; the accompanying `get_control` A/A row NULL-FAILED and is
+refused rather than quoted.
+
+**CV is diagnostic only and was never used as a gate here.** The bootstrap
+median-CI gate against the ±0.02 null bound determined every verdict above.
+
+Retry predicate: this row must be re-taken if `balanced_square_ab.py` changes its
+windowing or square, and it should be upgraded when the harness can take two fr
+binaries so that pre and post run as arms of ONE square with Redis as the third —
+at which point the cross-invocation drift currently bounded only by the control
+falls inside the null instead. Reopen and re-measure if the measured
+cross-process A/A moves outside [0.96, 1.04], or if the GET control clears its
+null in both invocations and still shows more than 2% drift, either of which
+would mean the 7.0% pre-to-post difference is no longer safely larger than the
+terms the nulls do not bound.
