@@ -1410,7 +1410,9 @@ fn lua_lvalue_first_token(expr: &Expr) -> String {
         Expr::Name(n) => n.to_string(),
         Expr::LocalName(n, _) => n.to_string(),
         Expr::VarArgs => "...".to_string(),
-        Expr::Call(_, _) | Expr::MethodCall(_, _, _) => "()".to_string(),
+        Expr::Call(_, _) | Expr::IntrinsicCall(_, _, _) | Expr::MethodCall(_, _, _) => {
+            "()".to_string()
+        }
         Expr::TableConstructor(_) => "{".to_string(),
         Expr::FunctionDef(_, _, _) => "function".to_string(),
         Expr::BinOp(left, _, _) | Expr::UnaryOp(_, left) => lua_lvalue_first_token(left),
@@ -2080,6 +2082,12 @@ pub enum Expr {
     // function bodies are cloned instead of duplicating short field names.
     Field(Box<Expr>, Rc<str>),
     Call(Box<Expr>, Vec<Expr>),
+    /// A call through the immutable `redis` global lowered after lexical-name
+    /// resolution.  Keeping the original callee lets execution fall back to
+    /// the ordinary dynamic call path if a custom function environment shadows
+    /// `redis`; the intrinsic is therefore an execution representation, not a
+    /// semantic shortcut.
+    IntrinsicCall(RedisIntrinsic, Box<Expr>, Vec<Expr>),
     // Method spellings are immutable parser data and appear in cached closure
     // bodies, so share them across AST clones with the other name nodes.
     MethodCall(Box<Expr>, Rc<str>, Vec<Expr>),
@@ -2088,6 +2096,16 @@ pub enum Expr {
     // in cached ASTs; instantiating the runtime Lua function still materializes
     // its independent local-name vector.
     FunctionDef(Vec<Rc<str>>, bool, Block),
+}
+
+/// Builtins whose global binding is installed by Redis before a script starts.
+/// This is deliberately a small closed set: new intrinsic calls need both a
+/// lowering rule and an invalidation proof, rather than an unchecked string
+/// comparison in the hot evaluator.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RedisIntrinsic {
+    Call,
+    PCall,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3076,6 +3094,27 @@ impl LocalResolver {
             Expr::Field(table, _) => self.resolve_expr(table),
             Expr::Call(func, args) => {
                 self.resolve_expr(func);
+                for arg in args.iter_mut() {
+                    self.resolve_expr(arg);
+                }
+                let intrinsic = match func.as_ref() {
+                    Expr::Field(table, method) if matches!(table.as_ref(), Expr::Name(name) if name.as_ref() == "redis") => {
+                        match method.as_ref() {
+                            "call" => Some(RedisIntrinsic::Call),
+                            "pcall" => Some(RedisIntrinsic::PCall),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some(intrinsic) = intrinsic {
+                    let fallback = std::mem::replace(func, Box::new(Expr::Nil));
+                    let args = std::mem::take(args);
+                    *expr = Expr::IntrinsicCall(intrinsic, fallback, args);
+                }
+            }
+            Expr::IntrinsicCall(_, fallback, args) => {
+                self.resolve_expr(fallback);
                 for arg in args {
                     self.resolve_expr(arg);
                 }
@@ -3259,6 +3298,10 @@ pub struct LuaState<'a> {
     /// epoch's five bump sites, argued in full on LUA_TABLE_FIELD_EPOCH.
     field_cache: [FieldCacheSlot; 2],
     field_cache_next: usize,
+    /// Validation cache for lowered `redis.call` / `redis.pcall` sites.  The
+    /// pair of epochs covers both ways a script can change the dynamic lookup:
+    /// rebinding the global and mutating the redis table itself.
+    intrinsic_redis_cache: Option<(u64, u64, bool, bool)>,
     /// (frankenredis-a0wt5) Recycled call-argument buffers. `eval_call_args`
     /// SOURCES its Vec from here and the hot `Expr::Call` path hands it back,
     /// which keeps one allocation per Lua call out of the loop.
@@ -4157,6 +4200,7 @@ impl<'a> LuaState<'a> {
             global_cache_next: 0,
             field_cache: [None, None],
             field_cache_next: 0,
+            intrinsic_redis_cache: None,
             arg_scratch: Vec::new(),
             iterations: 0,
             current_line: 1,
@@ -5983,6 +6027,31 @@ impl<'a> LuaState<'a> {
                 self.give_arg_buffer(arg_vals);
                 Ok(results.into_iter().next().unwrap_or(LuaValue::Nil))
             }
+            Expr::IntrinsicCall(intrinsic, fallback, args) => {
+                if self.intrinsic_redis_is_bound(*intrinsic, env) {
+                    let mut arg_vals = self.eval_call_args(args, env, varargs)?;
+                    let results = self.call_redis_intrinsic(*intrinsic, &mut arg_vals);
+                    self.give_arg_buffer(arg_vals);
+                    return results
+                        .map(|values| values.into_iter().next().unwrap_or(LuaValue::Nil));
+                }
+
+                // A custom function environment can shadow `redis`.  Keep the
+                // original field expression in the lowered node and route that
+                // rare case through precisely the old dynamic evaluator.
+                let func = self.eval_expr(fallback, env, varargs)?;
+                let mut arg_vals = self.eval_call_args(args, env, varargs)?;
+                let results = self.call_function_with_callee(
+                    fallback,
+                    &func,
+                    &mut arg_vals,
+                    env,
+                    varargs,
+                    None,
+                );
+                self.give_arg_buffer(arg_vals);
+                results.map(|values| values.into_iter().next().unwrap_or(LuaValue::Nil))
+            }
             Expr::MethodCall(obj_expr, method, args) => {
                 let obj = self.eval_expr(obj_expr, env, varargs)?;
                 let func = match &obj {
@@ -6151,6 +6220,73 @@ impl<'a> LuaState<'a> {
         Some(value)
     }
 
+    /// Check whether a lowered redis intrinsic still names the protected
+    /// builtin.  This is the guard that keeps the linear call representation
+    /// observationally identical to evaluating `redis.call` as an ordinary
+    /// field expression in a custom function environment.
+    fn intrinsic_redis_is_bound(&mut self, intrinsic: RedisIntrinsic, env: &Env) -> bool {
+        if env.global_env.is_some() {
+            return false;
+        }
+
+        let generation = self.globals.generation();
+        let epoch = lua_field_epoch();
+        let (call, pcall) = match self.intrinsic_redis_cache {
+            Some((cached_generation, cached_epoch, call, pcall))
+                if cached_generation == generation && cached_epoch == epoch =>
+            {
+                (call, pcall)
+            }
+            _ => {
+                let (call, pcall) = match self.globals.get("redis") {
+                    Some(LuaValue::Table(redis)) => {
+                        let table = redis.inner.borrow();
+                        (
+                            matches!(table.get_str(b"call"), Some(LuaValue::RustFunction(name)) if name.as_ref() == "redis.call"),
+                            matches!(table.get_str(b"pcall"), Some(LuaValue::RustFunction(name)) if name.as_ref() == "redis.pcall"),
+                        )
+                    }
+                    _ => (false, false),
+                };
+                self.intrinsic_redis_cache = Some((generation, epoch, call, pcall));
+                (call, pcall)
+            }
+        };
+        match intrinsic {
+            RedisIntrinsic::Call => call,
+            RedisIntrinsic::PCall => pcall,
+        }
+    }
+
+    /// Execute a guarded intrinsic with the same call-depth and C-frame state
+    /// as the generic `LuaValue::RustFunction` branch, but without re-walking
+    /// the `redis.call` AST field on every loop iteration.
+    fn call_redis_intrinsic(
+        &mut self,
+        intrinsic: RedisIntrinsic,
+        args: &mut [LuaValue],
+    ) -> Result<Vec<LuaValue>, String> {
+        self.call_depth += 1;
+        if self.call_depth > MAX_CALL_DEPTH {
+            self.call_depth -= 1;
+            return Err("script exceeded maximum call depth".to_string());
+        }
+        self.lua_frame_kinds.push(false);
+        let (name, is_pcall) = match intrinsic {
+            RedisIntrinsic::Call => ("redis.call", false),
+            RedisIntrinsic::PCall => ("redis.pcall", true),
+        };
+        let previous_name =
+            std::mem::replace(&mut self.current_invocation_name, Some(name.to_string()));
+        let previous_method = std::mem::replace(&mut self.current_invocation_is_method, false);
+        let result = self.redis_call(args, is_pcall);
+        self.current_invocation_name = previous_name;
+        self.current_invocation_is_method = previous_method;
+        self.call_depth -= 1;
+        self.lua_frame_kinds.pop();
+        result
+    }
+
     /// (frankenredis-a0wt5) Borrow a cleared call-argument buffer.
     fn take_arg_buffer(&mut self) -> Vec<LuaValue> {
         self.arg_scratch.pop().unwrap_or_default()
@@ -6258,6 +6394,33 @@ impl<'a> LuaState<'a> {
                             Some(method),
                         )?;
                         vals.extend(results);
+                    }
+                    Expr::IntrinsicCall(intrinsic, fallback, call_args) => {
+                        // A lowered `redis.call` still occupies a normal Lua
+                        // call-expression slot. In the rare shadowed-global
+                        // case its saved dynamic callee may return multiple
+                        // values, so preserve the trailing-call expansion rule
+                        // instead of routing through `eval_expr` (which keeps
+                        // only the first result).
+                        if self.intrinsic_redis_is_bound(*intrinsic, env) {
+                            let mut arg_vals = self.eval_call_args(call_args, env, varargs)?;
+                            let results = self.call_redis_intrinsic(*intrinsic, &mut arg_vals)?;
+                            self.give_arg_buffer(arg_vals);
+                            vals.extend(results);
+                        } else {
+                            let func = self.eval_expr(fallback, env, varargs)?;
+                            let mut arg_vals = self.eval_call_args(call_args, env, varargs)?;
+                            let results = self.call_function_with_callee(
+                                fallback,
+                                &func,
+                                &mut arg_vals,
+                                env,
+                                varargs,
+                                None,
+                            )?;
+                            self.give_arg_buffer(arg_vals);
+                            vals.extend(results);
+                        }
                     }
                     _ => {
                         vals.push(self.eval_expr(arg, env, varargs)?);
@@ -18014,6 +18177,88 @@ end
         let two = eval_script(script, &[], &[b"two".to_vec()], &mut store, 0).unwrap();
         assert_eq!(one, RespFrame::BulkString(Some(b"one".to_vec())));
         assert_eq!(two, RespFrame::BulkString(Some(b"two".to_vec())));
+    }
+
+    #[test]
+    fn resolved_redis_calls_lower_to_guarded_intrinsics_d3al0() {
+        let parsed = super::parse_lua_chunk(b"return redis.call('GET', KEYS[1])")
+            .expect("script should parse");
+        let super::Stmt::Return(values) = &parsed[0].1 else {
+            panic!("expected top-level return");
+        };
+        let super::Expr::IntrinsicCall(kind, fallback, args) = &values[0] else {
+            panic!("global redis.call should lower after local resolution");
+        };
+        assert_eq!(*kind, super::RedisIntrinsic::Call);
+        assert!(
+            matches!(fallback.as_ref(), super::Expr::Field(_, method) if method.as_ref() == "call")
+        );
+        assert_eq!(args.len(), 2);
+
+        let parsed = super::parse_lua_chunk(b"return redis.pcall('GET', KEYS[1])")
+            .expect("script should parse");
+        let super::Stmt::Return(values) = &parsed[0].1 else {
+            panic!("expected top-level return");
+        };
+        let super::Expr::IntrinsicCall(kind, _, _) = &values[0] else {
+            panic!("global redis.pcall should lower after local resolution");
+        };
+        assert_eq!(*kind, super::RedisIntrinsic::PCall);
+
+        let mut store = Store::new();
+        let result = eval_script(
+            b"redis.call('SET', 'intrinsic-key', '42'); return redis.call('GET', 'intrinsic-key')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("guarded intrinsic should preserve redis.call semantics");
+        assert_eq!(result, RespFrame::BulkString(Some(b"42".to_vec())));
+    }
+
+    #[test]
+    fn local_redis_shadowing_stays_on_dynamic_call_path_d3al0() {
+        let script =
+            b"local redis = { call = function() return 'shadowed' end }; return redis.call()";
+        let parsed = super::parse_lua_chunk(script).expect("script should parse");
+        let super::Stmt::Return(values) = &parsed[1].1 else {
+            panic!("expected return after local declaration");
+        };
+        assert!(matches!(&values[0], super::Expr::Call(_, _)));
+
+        let mut store = Store::new();
+        let result = eval_script(script, &[], &[], &mut store, 0)
+            .expect("local redis call must not use the global intrinsic");
+        assert_eq!(result, RespFrame::BulkString(Some(b"shadowed".to_vec())));
+
+        // `setfenv` leaves the parsed call site global, so it is the case that
+        // proves the runtime guard rather than the resolver's local-name rule.
+        let result = eval_script(
+            b"setfenv(1, {redis = {call = function() return 'environment' end}}); return redis.call()",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("custom function environment must take the saved fallback");
+        assert_eq!(result, RespFrame::BulkString(Some(b"environment".to_vec())));
+
+        let result = eval_script(
+            b"setfenv(1, {redis = {call = function() return 'left', 'right' end}}); local a, b = redis.call(); return {a, b}",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("shadowed trailing intrinsic must preserve multi-value expansion");
+        assert_eq!(
+            result,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"left".to_vec())),
+                RespFrame::BulkString(Some(b"right".to_vec())),
+            ]))
+        );
     }
 
     #[test]
