@@ -6032,9 +6032,9 @@ impl<'a> LuaState<'a> {
                 self.give_arg_buffer(arg_vals);
                 Ok(results.into_iter().next().unwrap_or(LuaValue::Nil))
             }
-            Expr::IntrinsicCall(intrinsic, fallback, args) => self
-                .eval_intrinsic_call(*intrinsic, fallback, args, env, varargs)
-                .map(|values| values.into_iter().next().unwrap_or(LuaValue::Nil)),
+            Expr::IntrinsicCall(intrinsic, fallback, args) => {
+                self.eval_intrinsic_call_value(*intrinsic, fallback, args, env, varargs)
+            }
             Expr::MethodCall(obj_expr, method, args) => {
                 let obj = self.eval_expr(obj_expr, env, varargs)?;
                 let func = match &obj {
@@ -6252,7 +6252,7 @@ impl<'a> LuaState<'a> {
         &mut self,
         intrinsic: RedisIntrinsic,
         args: &mut [LuaValue],
-    ) -> Result<Vec<LuaValue>, String> {
+    ) -> Result<LuaValue, String> {
         self.call_depth += 1;
         if self.call_depth > MAX_CALL_DEPTH {
             self.call_depth -= 1;
@@ -6286,9 +6286,9 @@ impl<'a> LuaState<'a> {
     ) -> Result<Vec<LuaValue>, String> {
         if self.intrinsic_redis_is_bound(intrinsic, env) {
             let mut arg_vals = self.eval_call_args(args, env, varargs)?;
-            let results = self.call_redis_intrinsic(intrinsic, &mut arg_vals);
+            let result = self.call_redis_intrinsic(intrinsic, &mut arg_vals);
             self.give_arg_buffer(arg_vals);
-            return results;
+            return result.map(|value| vec![value]);
         }
 
         // A custom function environment can shadow `redis`. Keep the original
@@ -6300,6 +6300,42 @@ impl<'a> LuaState<'a> {
             self.call_function_with_callee(fallback, &func, &mut arg_vals, env, varargs, None);
         self.give_arg_buffer(arg_vals);
         results
+    }
+
+    /// (frankenredis-w08xv) The single-value form of [`Self::eval_intrinsic_call`].
+    ///
+    /// An intrinsic call in expression or statement position wants exactly one
+    /// value, and `redis.call`/`redis.pcall` produce exactly one. Routing that
+    /// case through the `Vec` contract allocated a one-element vector per call
+    /// purely to have `into_iter().next()` take the element back out and drop
+    /// it — 50 allocations per EVAL op of a 50-call script, counted from
+    /// callgrind's `calls=` records. The multi-value callers (argument
+    /// expansion, `return f()`) keep the `Vec` form, where the allocation is
+    /// real work rather than a round trip.
+    fn eval_intrinsic_call_value(
+        &mut self,
+        intrinsic: RedisIntrinsic,
+        fallback: &Expr,
+        args: &[Expr],
+        env: &mut Env,
+        varargs: &mut Vec<LuaValue>,
+    ) -> Result<LuaValue, String> {
+        if self.intrinsic_redis_is_bound(intrinsic, env) {
+            let mut arg_vals = self.eval_call_args(args, env, varargs)?;
+            let result = self.call_redis_intrinsic(intrinsic, &mut arg_vals);
+            self.give_arg_buffer(arg_vals);
+            return result;
+        }
+
+        // A custom function environment can shadow `redis`; that rare path keeps
+        // the original dynamic evaluator, including its multi-value return, and
+        // is narrowed to one value exactly as the caller would have done.
+        let func = self.eval_expr(fallback, env, varargs)?;
+        let mut arg_vals = self.eval_call_args(args, env, varargs)?;
+        let results =
+            self.call_function_with_callee(fallback, &func, &mut arg_vals, env, varargs, None);
+        self.give_arg_buffer(arg_vals);
+        results.map(|values| values.into_iter().next().unwrap_or(LuaValue::Nil))
     }
 
     /// (frankenredis-a0wt5) Borrow a cleared call-argument buffer.
@@ -7509,8 +7545,8 @@ impl<'a> LuaState<'a> {
         env: &mut Env,
     ) -> Result<Vec<LuaValue>, String> {
         match name {
-            "redis.call" => self.redis_call(args, false),
-            "redis.pcall" => self.redis_call(args, true),
+            "redis.call" => self.redis_call(args, false).map(|value| vec![value]),
+            "redis.pcall" => self.redis_call(args, true).map(|value| vec![value]),
             // (note) `args` is already `&mut [LuaValue]`; redis_call moves string
             // arg bytes out of it, which is fine — args is discarded after.
             "redis.error_reply" => {
@@ -10656,11 +10692,7 @@ impl<'a> LuaState<'a> {
     /// buffer is moved out for the duration of the call, so a re-entrant path
     /// that somehow reached the same state would find an empty scratch and
     /// allocate, not alias.
-    fn redis_call(
-        &mut self,
-        args: &mut [LuaValue],
-        is_pcall: bool,
-    ) -> Result<Vec<LuaValue>, String> {
+    fn redis_call(&mut self, args: &mut [LuaValue], is_pcall: bool) -> Result<LuaValue, String> {
         let mut argv = std::mem::take(&mut self.argv_scratch);
         argv.clear();
         let result = self.redis_call_with_argv(&mut argv, args, is_pcall);
@@ -10675,7 +10707,7 @@ impl<'a> LuaState<'a> {
         argv: &mut Vec<Vec<u8>>,
         args: &mut [LuaValue],
         is_pcall: bool,
-    ) -> Result<Vec<LuaValue>, String> {
+    ) -> Result<LuaValue, String> {
         // (frankenredis-sj52g) Upstream's luaPushError prepends "ERR "
         // to the body of the error table that bubbles out of
         // luaRedisGenericCommand — both for the empty-args branch and
@@ -10685,7 +10717,7 @@ impl<'a> LuaState<'a> {
         // fr previously returned bare error strings AND only packaged
         // dispatch errors (the `?` short-circuit on to_redis_arg
         // bypassed the is_pcall table form entirely).
-        let arg_error = |msg: &str, is_pcall: bool| -> Result<Vec<LuaValue>, String> {
+        let arg_error = |msg: &str, is_pcall: bool| -> Result<LuaValue, String> {
             let body = format!("ERR {msg}");
             if is_pcall {
                 let t = LuaTable::new();
@@ -10693,7 +10725,7 @@ impl<'a> LuaState<'a> {
                     LuaValue::Str(b"err".to_vec()),
                     LuaValue::Str(body.into_bytes()),
                 );
-                Ok(vec![LuaValue::Table(t)])
+                Ok(LuaValue::Table(t))
             } else {
                 Err(body)
             }
@@ -10798,16 +10830,16 @@ impl<'a> LuaState<'a> {
                             LuaValue::Str(b"err".to_vec()),
                             LuaValue::Str(err_msg.into_bytes()),
                         );
-                        Ok(vec![LuaValue::Table(t)])
+                        Ok(LuaValue::Table(t))
                     } else {
                         Err(err_msg)
                     };
                 }
-                Ok(vec![resp_to_lua_command_result(
+                Ok(resp_to_lua_command_result(
                     argv,
                     frame,
                     self.resp_version == 3,
-                )])
+                ))
             }
             Err(err_msg) => {
                 // (frankenredis-0czgc) apply the script command-lookup rewrites
@@ -10820,7 +10852,7 @@ impl<'a> LuaState<'a> {
                         LuaValue::Str(b"err".to_vec()),
                         LuaValue::Str(err_msg.into_bytes()),
                     );
-                    Ok(vec![LuaValue::Table(t)])
+                    Ok(LuaValue::Table(t))
                 } else {
                     Err(err_msg)
                 }
