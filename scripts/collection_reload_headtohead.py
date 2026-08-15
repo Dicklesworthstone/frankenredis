@@ -24,6 +24,25 @@ FrankenRedis processes and the vendored Redis process live in this one Python
 invocation. It rotates all three arms within each sample, emits both running
 images from `/proc/<pid>/exe`, and rejects an A/B verdict unless the A/A median
 is within 0.98..1.02 with a bootstrap median CI.
+
+PIN THE THREE SERVERS TO CORES OR THIS MODE CANNOT AUTHENTICATE ON A BUSY HOST.
+Measured 2026-08-15 at loadavg 11-17: unpinned, the two-process A/A missed the
+0.98..1.02 band on SIX consecutive invocations, scattering 0.918-1.058 — i.e.
+the null moved more than the 0.44-0.50 effect it was gating, and raising the
+trial count from 9 to 72 did not help because the term is not sampling noise.
+Pinned to symmetric core sets it authenticated on the first try and reproduced:
+
+    taskset -c 0-3   frankenredis --port A ...
+    taskset -c 4-7   frankenredis --port B ...     # same CCD as A, symmetric
+    taskset -c 8-11  redis-server  --port R ...
+
+giving A/A 1.010558 CI [1.001541, 1.015901] and 1.008119 CI [0.984687,
+1.025978] on two runs. The A/A compares two PROCESSES, so it nulls the engine
+and the process's core placement together; on a 32-core 4-CCD part an unpinned
+pair lands wherever the scheduler puts it and that term swamps the engine. The
+`fr_b halves` line is the same-process drift null, DIAGNOSTIC ONLY — it is not
+the gate, because the A/B it would authenticate is itself a cross-process
+comparison and must be nulled by one.
 """
 import hashlib
 import itertools
@@ -224,20 +243,47 @@ def run_competitive_restore(fr_a, fr_b, redis):
     arms = {"fr_a": fr_a, "fr_b": fr_b, "redis": redis}
     elapsed = {name: [] for name in arms}
     aa_ratios, ab_ratios = [], []
-    for trial in range(TRIALS):
+    # Trials are grouped into ROUNDS of len(ARM_ORDERS), so every arm occupies
+    # every position exactly once per round. Without this the balance the
+    # self-test asserts only holds when TRIALS happens to be a multiple of 6 —
+    # and the default of 9 is not, so orders 0..2 ran twice and 3..5 once.
+    rounds = max(1, TRIALS // len(ARM_ORDERS))
+    round_min = {name: [] for name in arms}
+    for trial in range(rounds * len(ARM_ORDERS)):
         sample = {}
         for arm in ARM_ORDERS[trial % len(ARM_ORDERS)]:
             sample[arm] = time_restore(arms[arm], payloads)
             elapsed[arm].append(sample[arm])
         aa_ratios.append(sample["fr_a"] / sample["fr_b"])
         ab_ratios.append(sample["redis"] / sample["fr_b"])
+        if (trial + 1) % len(ARM_ORDERS) == 0:
+            window = slice(-len(ARM_ORDERS), None)
+            for arm in arms:
+                round_min[arm].append(min(elapsed[arm][window]))
 
     aa, aa_lo, aa_hi = bootstrap_median_ci(aa_ratios)
     ab, ab_lo, ab_hi = bootstrap_median_ci(ab_ratios)
+    # SAME-PROCESS A/A. The fr_a/fr_b null compares two separate fr PROCESSES, so
+    # it nulls the engine and the process placement together — and on a busy
+    # many-core host the placement term dominates. Measured on this host: the
+    # two-process A/A scattered 0.918-1.057 across five invocations while the A/B
+    # it is supposed to authenticate held 0.438-0.501, i.e. the null moved more
+    # than the effect it was gating. Splitting ONE arm's own trials into halves
+    # removes the placement term entirely, because both halves are the same
+    # process on the same core with the same warmed allocator.
+    half = len(elapsed["fr_b"]) // 2
+    same_proc_aa = None
+    if half >= 3:
+        first, second = elapsed["fr_b"][:half], elapsed["fr_b"][half:half * 2]
+        same_proc_aa = statistics.median(first) / statistics.median(second)
     print("\nCOMPETITIVE RESTORE decode (one invocation; three live arms):")
     for arm in ("fr_a", "fr_b", "redis"):
-        print(f"  {arm:>5} median={statistics.median(elapsed[arm]) * 1000:.3f}ms")
-    print(f"  A/A null (fr_a/fr_b) median={aa:.6f}x 95% CI=[{aa_lo:.6f}, {aa_hi:.6f}]")
+        print(f"  {arm:>5} median={statistics.median(elapsed[arm]) * 1000:.3f}ms"
+              f"  best={min(elapsed[arm]) * 1000:.3f}ms")
+    print(f"  A/A null (fr_a/fr_b, two processes) median={aa:.6f}x "
+          f"95% CI=[{aa_lo:.6f}, {aa_hi:.6f}]")
+    if same_proc_aa is not None:
+        print(f"  A/A null (fr_b halves, one process) median={same_proc_aa:.6f}x")
     print(f"  A/B redis/fr_b median={ab:.6f}x 95% CI=[{ab_lo:.6f}, {ab_hi:.6f}]")
     if not 0.98 <= aa <= 1.02:
         print("  VERDICT: HOLD — A/A median outside 0.98..1.02; A/B is not authenticated")
