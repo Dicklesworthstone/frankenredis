@@ -10241,63 +10241,9 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
-                    parse_borrowed_plain_strlen_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_strlen_borrowed(packet.key, ts) {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_llen_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_llen_borrowed(packet.key, ts) {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
                     parse_borrowed_plain_getdel_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_getdel_borrowed(packet.key, ts) {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_scard_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_scard_borrowed(packet.key, ts) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -10752,50 +10698,6 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
-                    parse_borrowed_plain_hlen_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_cardinality_borrowed(
-                        PlainCardinalityCmd::Hlen,
-                        packet.key,
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_zcard_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_cardinality_borrowed(
-                        PlainCardinalityCmd::Zcard,
-                        packet.key,
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
                     parse_borrowed_plain_pfcount_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_cardinality_borrowed(
@@ -10828,46 +10730,6 @@ fn process_buffered_frames(
                         packet.unit,
                         ts,
                     ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_zcount_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime
-                        .execute_plain_zcount_borrowed(packet.key, packet.min, packet.max, ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_zlexcount_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime
-                        .execute_plain_zlexcount_borrowed(packet.key, packet.min, packet.max, ts)
-                    {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -11007,71 +10869,6 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
-                    parse_borrowed_plain_ttl_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) =
-                        runtime.execute_plain_keymeta_borrowed(PlainKeyMetaCmd::Ttl, packet.key, ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_pttl_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_keymeta_borrowed(
-                        PlainKeyMetaCmd::Pttl,
-                        packet.key,
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_smove_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_smove_borrowed(
-                        packet.key,
-                        packet.start,
-                        packet.end,
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
                     parse_borrowed_plain_setbit_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_setbit_borrowed(
@@ -11080,162 +10877,6 @@ fn process_buffered_frames(
                         packet.end,
                         ts,
                     ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_hsetnx_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_hsetnx_borrowed(
-                        packet.key,
-                        packet.start,
-                        packet.end,
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_lset_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_lset_borrowed(
-                        packet.key,
-                        packet.start,
-                        packet.end,
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_hincrbyfloat_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_hincrbyfloat_borrowed(
-                        packet.key,
-                        packet.start,
-                        packet.end,
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_hincrby_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_hincrby_borrowed(
-                        packet.key,
-                        packet.start,
-                        packet.end,
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_psetex_packet(unparsed, &parser_config)
-                {
-                    // PSETEX replies a constant +OK; route the non-allocating `_ok` twin to
-                    // FastOkReply so no `SimpleString("OK")` reply frame is allocated per PSETEX.
-                    if runtime
-                        .execute_plain_psetex_borrowed_ok(packet.key, packet.start, packet.end, ts)
-                        .is_some()
-                    {
-                        Ok(BorrowedMultibulkAction::FastOkReply {
-                            consumed: packet.consumed,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_setex_packet(unparsed, &parser_config)
-                {
-                    // SETEX replies a constant +OK; route the non-allocating `_ok` twin to
-                    // FastOkReply so no `SimpleString("OK")` reply frame is allocated per SETEX.
-                    if runtime
-                        .execute_plain_setex_borrowed_ok(packet.key, packet.start, packet.end, ts)
-                        .is_some()
-                    {
-                        Ok(BorrowedMultibulkAction::FastOkReply {
-                            consumed: packet.consumed,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_incrbyfloat_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) =
-                        runtime.execute_plain_incrbyfloat_borrowed(packet.key, packet.member, ts)
-                    {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -11298,26 +10939,6 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
-                    parse_borrowed_plain_renamenx_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) =
-                        runtime.execute_plain_renamenx_borrowed(packet.key, packet.member, ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
                     parse_borrowed_plain_lmove_packet(unparsed, &parser_config)
                 {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
@@ -11327,33 +10948,6 @@ fn process_buffered_frames(
                             packet.dst,
                             packet.wherefrom,
                             packet.whereto,
-                            ts,
-                            client_resp3,
-                            &mut conn.write_buf,
-                        )
-                        .is_some()
-                    {
-                        Ok(BorrowedMultibulkAction::FastEncodedReply {
-                            consumed: packet.consumed,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_rpoplpush_packet(unparsed, &parser_config)
-                {
-                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
-                    if runtime
-                        .execute_plain_rpoplpush_borrowed_into(
-                            packet.key,
-                            packet.member,
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
@@ -11394,53 +10988,6 @@ fn process_buffered_frames(
                             &mut conn.write_buf,
                             &mut argv_scratch,
                         ),
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_getset_packet(unparsed, &parser_config)
-                {
-                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
-                    if runtime
-                        .execute_plain_getset_borrowed_into(
-                            packet.key,
-                            packet.member,
-                            ts,
-                            client_resp3,
-                            &mut conn.write_buf,
-                        )
-                        .is_some()
-                    {
-                        Ok(BorrowedMultibulkAction::FastEncodedReply {
-                            consumed: packet.consumed,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_setnx_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) =
-                        runtime.execute_plain_setnx_borrowed(packet.key, packet.member, ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
                     }
                 } else if let Some(packet) =
                     parse_borrowed_plain_getex_packet(unparsed, &parser_config)
@@ -11521,93 +11068,6 @@ fn process_buffered_frames(
                                 &mut argv_scratch,
                             )
                         }
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_persist_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_persist_borrowed(packet.key, ts) {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_type_packet(unparsed, &parser_config)
-                {
-                    if runtime
-                        .execute_plain_keymeta_borrowed_into(
-                            PlainKeyMetaCmd::Type,
-                            packet.key,
-                            ts,
-                            &mut conn.write_buf,
-                        )
-                        .is_some()
-                    {
-                        Ok(BorrowedMultibulkAction::FastEncodedReply {
-                            consumed: packet.consumed,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_expiretime_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_keymeta_borrowed(
-                        PlainKeyMetaCmd::Expiretime,
-                        packet.key,
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_pexpiretime_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_keymeta_borrowed(
-                        PlainKeyMetaCmd::Pexpiretime,
-                        packet.key,
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
                     }
                 } else if let Some(packet) = parse_borrowed_plain_key_arg1_packet(
                     unparsed,
@@ -11725,76 +11185,6 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
-                } else if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
-                    unparsed,
-                    &parser_config,
-                    b"*4\r\n$6\r\n",
-                    b"XRANGE",
-                ) {
-                    // XRANGE key start end (no COUNT): a=start, b=end.
-                    // (CrimsonHawk) Zero-copy `_into`: stream the XRANGE records' fields borrowed
-                    // straight into the write buffer (per-field clone elimination, 11.88x store A/B).
-                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
-                    if runtime
-                        .execute_plain_xrange_borrowed_into(
-                            packet.key,
-                            packet.a,
-                            packet.b,
-                            None,
-                            ts,
-                            client_resp3,
-                            &mut conn.write_buf,
-                        )
-                        .is_some()
-                    {
-                        Ok(BorrowedMultibulkAction::FastEncodedReply {
-                            consumed: packet.consumed,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
-                    unparsed,
-                    &parser_config,
-                    b"*4\r\n$9\r\n",
-                    b"XREVRANGE",
-                ) {
-                    // XREVRANGE key end start (no COUNT): a=end, b=start.
-                    // (CrimsonHawk) Zero-copy `_into`: stream the XREVRANGE records' fields borrowed
-                    // into the write buffer (per-field clone elimination, ~11.9x store A/B).
-                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
-                    if runtime
-                        .execute_plain_xrevrange_borrowed_into(
-                            packet.key,
-                            packet.a,
-                            packet.b,
-                            None,
-                            ts,
-                            client_resp3,
-                            &mut conn.write_buf,
-                        )
-                        .is_some()
-                    {
-                        Ok(BorrowedMultibulkAction::FastEncodedReply {
-                            consumed: packet.consumed,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
                 } else if let Some(packet) = parse_borrowed_plain_key_arg4_packet(
                     unparsed,
                     &parser_config,
@@ -11852,94 +11242,6 @@ fn process_buffered_frames(
                     {
                         Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_xlen_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_cardinality_borrowed(
-                        PlainCardinalityCmd::Xlen,
-                        packet.key,
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_object_encoding_packet(unparsed, &parser_config)
-                {
-                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
-                    if runtime
-                        .execute_plain_object_encoding_borrowed_into(
-                            packet.key,
-                            ts,
-                            client_resp3,
-                            &mut conn.write_buf,
-                        )
-                        .is_some()
-                    {
-                        Ok(BorrowedMultibulkAction::FastEncodedReply {
-                            consumed: packet.consumed,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_object_refcount_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) =
-                        runtime.execute_plain_object_refcount_borrowed(packet.key, ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_object_stat_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) =
-                        runtime.execute_plain_object_stat_borrowed(packet.cmd, packet.key, ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -12033,81 +11335,6 @@ fn process_buffered_frames(
                         .execute_plain_hmget_borrowed_into(
                             packet.key,
                             &packet.fields[..packet.len],
-                            ts,
-                            client_resp3,
-                            &mut conn.write_buf,
-                        )
-                        .is_some()
-                    {
-                        Ok(BorrowedMultibulkAction::FastEncodedReply {
-                            consumed: packet.consumed,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_hget_packet(unparsed, &parser_config)
-                {
-                    // (TealHeron) Zero-copy HGET — see the matching site above.
-                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
-                    if runtime
-                        .execute_plain_hget_borrowed_into(
-                            packet.key,
-                            packet.member,
-                            ts,
-                            client_resp3,
-                            &mut conn.write_buf,
-                        )
-                        .is_some()
-                    {
-                        Ok(BorrowedMultibulkAction::FastEncodedReply {
-                            consumed: packet.consumed,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_sismember_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) =
-                        runtime.execute_plain_sismember_borrowed(packet.key, packet.member, ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_zscore_packet(unparsed, &parser_config)
-                {
-                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
-                    if runtime
-                        .execute_plain_zscore_borrowed_into(
-                            packet.key,
-                            packet.member,
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
@@ -12322,66 +11549,6 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
-                    parse_borrowed_plain_hexists_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) =
-                        runtime.execute_plain_hexists_borrowed(packet.key, packet.member, ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_append_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) =
-                        runtime.execute_plain_append_borrowed(packet.key, packet.member, ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_getbit_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) =
-                        runtime.execute_plain_getbit_borrowed(packet.key, packet.member, ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
                     parse_borrowed_plain_linsert_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_linsert_borrowed(
@@ -12391,54 +11558,6 @@ fn process_buffered_frames(
                         packet.element,
                         ts,
                     ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
-                    unparsed,
-                    &parser_config,
-                    b"*4\r\n$5\r\n",
-                    b"ZMPOP",
-                ) {
-                    // packet.key holds the numkeys bulk; a=key, b=direction.
-                    if let Some(response) =
-                        runtime.execute_plain_zmpop1_borrowed(packet.key, packet.a, packet.b, ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
-                    unparsed,
-                    &parser_config,
-                    b"*4\r\n$5\r\n",
-                    b"LMPOP",
-                ) {
-                    // packet.key holds the numkeys bulk; a=key, b=direction.
-                    if let Some(response) =
-                        runtime.execute_plain_lmpop1_borrowed(packet.key, packet.a, packet.b, ts)
-                    {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -13940,57 +13059,6 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
-                    parse_borrowed_plain_lindex_packet(unparsed, &parser_config)
-                {
-                    // (TealHeron) Zero-copy LINDEX: encode the borrowed list-element
-                    // slice straight into conn.write_buf instead of the allocating
-                    // execute_plain_lindex_borrowed (to_vec -> BulkString(Vec) -> encode
-                    // = O(elem) malloc+memcpy + a 2nd copy). Mirrors GETRANGE/HGET _into.
-                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
-                    if runtime
-                        .execute_plain_lindex_borrowed_into(
-                            packet.key,
-                            packet.member,
-                            ts,
-                            client_resp3,
-                            &mut conn.write_buf,
-                        )
-                        .is_some()
-                    {
-                        Ok(BorrowedMultibulkAction::FastEncodedReply {
-                            consumed: packet.consumed,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_lpos_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) =
-                        runtime.execute_plain_lpos_borrowed(packet.key, packet.member, ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
                     parse_borrowed_plain_lpos_rank_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_lpos_rank_borrowed(
@@ -14058,46 +13126,6 @@ fn process_buffered_frames(
                     {
                         Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_incrby_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) =
-                        runtime.execute_plain_incrby_borrowed(packet.key, packet.member, ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_decrby_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) =
-                        runtime.execute_plain_decrby_borrowed(packet.key, packet.member, ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -14196,70 +13224,6 @@ fn process_buffered_frames(
                     if runtime
                         .execute_plain_smembers_borrowed_into(
                             packet.key,
-                            ts,
-                            client_resp3,
-                            &mut conn.write_buf,
-                        )
-                        .is_some()
-                    {
-                        Ok(BorrowedMultibulkAction::FastEncodedReply {
-                            consumed: packet.consumed,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_lrange_packet(unparsed, &parser_config)
-                {
-                    // (frankenredis-z7vzf) LRANGE encodes its multi-bulk reply
-                    // directly into the write buffer (like GET); None means it
-                    // wrote nothing and we re-dispatch via the generic path.
-                    if runtime
-                        .execute_plain_lrange_borrowed_into(
-                            packet.key,
-                            packet.start,
-                            packet.end,
-                            ts,
-                            &mut conn.write_buf,
-                        )
-                        .is_some()
-                    {
-                        Ok(BorrowedMultibulkAction::FastEncodedReply {
-                            consumed: packet.consumed,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_getrange_packet(unparsed, &parser_config)
-                {
-                    // (CrimsonHawk) Zero-copy GETRANGE: encode the substring slice straight
-                    // into conn.write_buf instead of the allocating execute_plain_getrange_
-                    // borrowed (which did substring.to_vec() -> RespFrame::BulkString(Vec) ->
-                    // encode = a full O(range) malloc+memcpy then a 2nd copy). Finishes the
-                    // _into migration parse_borrowed_multibulk_action already uses; large
-                    // ranges measured 0.39x->parity. _into returns None (no bytes written)
-                    // before any output on a deferred/invalid range, so the fallback is safe.
-                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
-                    if runtime
-                        .execute_plain_getrange_borrowed_into(
-                            packet.key,
-                            packet.start,
-                            packet.end,
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
@@ -14534,658 +13498,6 @@ fn process_buffered_frames(
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some((cmd, packet)) =
-                    parse_borrowed_plain_keyed_values8_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed(
-                        cmd,
-                        packet.key,
-                        &[
-                            packet.v1, packet.v2, packet.v3, packet.v4, packet.v5, packet.v6,
-                            packet.v7, packet.v8,
-                        ],
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some((cmd, packet)) =
-                    parse_borrowed_plain_keyed_values7_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed(
-                        cmd,
-                        packet.key,
-                        &[
-                            packet.v1, packet.v2, packet.v3, packet.v4, packet.v5, packet.v6,
-                            packet.v7,
-                        ],
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some((cmd, packet)) =
-                    parse_borrowed_plain_keyed_values6_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed(
-                        cmd,
-                        packet.key,
-                        &[
-                            packet.v1, packet.v2, packet.v3, packet.v4, packet.v5, packet.v6,
-                        ],
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some((cmd, packet)) =
-                    parse_borrowed_plain_keyed_values5_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed(
-                        cmd,
-                        packet.key,
-                        &[packet.v1, packet.v2, packet.v3, packet.v4, packet.v5],
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some((cmd, packet)) =
-                    parse_borrowed_plain_keyed_values4_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed(
-                        cmd,
-                        packet.key,
-                        &[packet.v1, packet.v2, packet.v3, packet.v4],
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some((cmd, packet)) =
-                    parse_borrowed_plain_keyed_values3_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed(
-                        cmd,
-                        packet.key,
-                        &[packet.f1, packet.f2, packet.f3],
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some((cmd, packet)) =
-                    parse_borrowed_plain_keyed_values2_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed(
-                        cmd,
-                        packet.key,
-                        &[packet.start, packet.end],
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some((cmd, packet)) =
-                    parse_borrowed_plain_keyed_values1_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_keyed_values_write_borrowed(
-                        cmd,
-                        packet.key,
-                        &[packet.member],
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
-                    unparsed,
-                    &parser_config,
-                    b"*4\r\n$6\r\n",
-                    b"EXPIRE",
-                ) {
-                    // EXPIRE key seconds NX|XX|GT|LT: a=seconds, b=option token.
-                    if let Some(response) = runtime
-                        .execute_plain_expire_cond_borrowed(packet.key, packet.a, packet.b, ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
-                    unparsed,
-                    &parser_config,
-                    b"*4\r\n$7\r\n",
-                    b"PEXPIRE",
-                ) {
-                    if let Some(response) = runtime
-                        .execute_plain_pexpire_cond_borrowed(packet.key, packet.a, packet.b, ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
-                    unparsed,
-                    &parser_config,
-                    b"*4\r\n$8\r\n",
-                    b"EXPIREAT",
-                ) {
-                    if let Some(response) = runtime
-                        .execute_plain_expireat_cond_borrowed(packet.key, packet.a, packet.b, ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
-                    unparsed,
-                    &parser_config,
-                    b"*4\r\n$9\r\n",
-                    b"PEXPIREAT",
-                ) {
-                    if let Some(response) = runtime
-                        .execute_plain_pexpireat_cond_borrowed(packet.key, packet.a, packet.b, ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_expire_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) =
-                        runtime.execute_plain_expire_borrowed(packet.key, packet.member, ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_pexpire_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) =
-                        runtime.execute_plain_pexpire_borrowed(packet.key, packet.member, ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_expireat_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) =
-                        runtime.execute_plain_expireat_borrowed(packet.key, packet.member, ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_pexpireat_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) =
-                        runtime.execute_plain_pexpireat_borrowed(packet.key, packet.member, ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_setrange_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_setrange_borrowed(
-                        packet.key,
-                        packet.start,
-                        packet.end,
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_zadd2_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_zadd_borrowed(
-                        packet.key,
-                        &[packet.s1, packet.m1, packet.s2, packet.m2],
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_zadd_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_zadd_borrowed(
-                        packet.key,
-                        &[packet.start, packet.end],
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_zincrby_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_zincrby_borrowed(
-                        packet.key,
-                        packet.start,
-                        packet.end,
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_hstrlen_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) =
-                        runtime.execute_plain_hstrlen_borrowed(packet.key, packet.member, ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_zrank_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_rank_borrowed(
-                        PlainRankCmd::Zrank,
-                        packet.key,
-                        packet.member,
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_zrevrank_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_rank_borrowed(
-                        PlainRankCmd::Zrevrank,
-                        packet.key,
-                        packet.member,
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_smismember2_packet(unparsed, &parser_config)
-                {
-                    if runtime
-                        .execute_plain_smismember_borrowed_into(
-                            packet.key,
-                            &[packet.start, packet.end],
-                            ts,
-                            &mut conn.write_buf,
-                        )
-                        .is_some()
-                    {
-                        Ok(BorrowedMultibulkAction::FastEncodedReply {
-                            consumed: packet.consumed,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_smismember3_packet(unparsed, &parser_config)
-                {
-                    if runtime
-                        .execute_plain_smismember_borrowed_into(
-                            packet.key,
-                            &[packet.f1, packet.f2, packet.f3],
-                            ts,
-                            &mut conn.write_buf,
-                        )
-                        .is_some()
-                    {
-                        Ok(BorrowedMultibulkAction::FastEncodedReply {
-                            consumed: packet.consumed,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_zmscore2_packet(unparsed, &parser_config)
-                {
-                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
-                    if runtime
-                        .execute_plain_zmscore_borrowed_into(
-                            packet.key,
-                            &[packet.start, packet.end],
-                            ts,
-                            client_resp3,
-                            &mut conn.write_buf,
-                        )
-                        .is_some()
-                    {
-                        Ok(BorrowedMultibulkAction::FastEncodedReply {
-                            consumed: packet.consumed,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_zmscore3_packet(unparsed, &parser_config)
-                {
-                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
-                    if runtime
-                        .execute_plain_zmscore_borrowed_into(
-                            packet.key,
-                            &[packet.f1, packet.f2, packet.f3],
-                            ts,
-                            client_resp3,
-                            &mut conn.write_buf,
-                        )
-                        .is_some()
-                    {
-                        Ok(BorrowedMultibulkAction::FastEncodedReply {
-                            consumed: packet.consumed,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_zmscore_multi_packet(unparsed, &parser_config)
-                {
-                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
-                    if runtime
-                        .execute_plain_zmscore_borrowed_into(
-                            packet.key,
-                            &packet.fields[..packet.len],
-                            ts,
-                            client_resp3,
-                            &mut conn.write_buf,
-                        )
-                        .is_some()
-                    {
-                        Ok(BorrowedMultibulkAction::FastEncodedReply {
-                            consumed: packet.consumed,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -32591,10 +30903,10 @@ fn handle_writable(
 mod tests {
     use crate::{
         BlockingOp, CheckBlockedClientsContext, InlineParseResult, PendingClientUnblocksContext,
-        REPLICA_ACK_INTERVAL_MS, REPLICA_RECONNECT_BACKOFF_MS, ReplicaPrimaryConnection,
-        ReplicaSyncState, ShardedReplyOrder, ShardedSetGetCommand, ShardedSetGetJob,
-        ShardedSetGetPool, StartupConfig, apply_pending_client_unblocks, check_blocked_clients,
-        check_subscription_mode_gate, command_frame_can_move_to_argv,
+        REPLICA_ACK_INTERVAL_MS, REPLICA_RECONNECT_BACKOFF_MS, ReplOffset,
+        ReplicaPrimaryConnection, ReplicaSyncState, ShardedReplyOrder, ShardedSetGetCommand,
+        ShardedSetGetJob, ShardedSetGetPool, StartupConfig, apply_pending_client_unblocks,
+        check_blocked_clients, check_subscription_mode_gate, command_frame_can_move_to_argv,
         consume_complete_replication_prefix, drain_replica_stream, drive_replica_sync,
         encode_eof_marked_replication_snapshot, encode_replication_snapshot, find_crlf,
         frame_matches_suppressed_replication_reply, is_quit_frame, parse_blocking_deadline,
@@ -43854,6 +42166,90 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         assert_eq!(
             super::inline_plain_ping_noarg_consumed(b"*1\r\n$4\r\nPING\r\n"),
             None
+        );
+    }
+
+    /// (frankenredis-ozrro) The borrowed fast-path cascade in
+    /// `process_buffered_frames` is ONE `else if` chain: no code runs between
+    /// two conditions, and every arm tests the same `unparsed` against the same
+    /// `parser_config`. So a second arm whose parser call is identical to an
+    /// earlier one can never be reached — it contributes nothing but one more
+    /// prefix test for every packet that walks past it. 73 such arms (22% of
+    /// the chain) had accumulated, every one of them from a hoist that added a
+    /// copy near the front of the chain and left the original in the tail.
+    /// Deletion condition: this test goes away with the chain, when the arms
+    /// become a name-keyed table and reachability stops depending on position.
+    #[test]
+    fn borrowed_cascade_has_no_unreachable_duplicate_arms() {
+        const SOURCE: &str = include_str!("main.rs");
+
+        let body = SOURCE
+            .split_once("fn process_buffered_frames(")
+            .expect("cascade host function")
+            .1;
+        // Stop at the next item so sibling dispatch chains elsewhere in the
+        // file cannot contribute a spurious pair.
+        let body = body.split_once("\nfn ").map_or(body, |(head, _)| head);
+
+        let lines: Vec<&str> = body.lines().collect();
+        let mut arms: Vec<(usize, String)> = Vec::new();
+        let mut i = 0;
+        while i < lines.len() {
+            if !lines[i].contains("else if let Some") {
+                i += 1;
+                continue;
+            }
+            // A condition spans several lines; it ends at the brace that opens
+            // the arm body, which is the first line-final `{` at paren depth 0.
+            let mut condition = String::new();
+            let mut j = i;
+            while j < lines.len() {
+                condition.push(' ');
+                condition.push_str(lines[j].trim());
+                if lines[j].trim_end().ends_with('{')
+                    && condition.matches('(').count() == condition.matches(')').count()
+                {
+                    break;
+                }
+                j += 1;
+            }
+            if let Some(start) = condition.find("parse_borrowed_plain_") {
+                let signature = condition[start..]
+                    .trim_end()
+                    .trim_end_matches('{')
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                arms.push((i + 1, signature));
+            }
+            i = j + 1;
+        }
+
+        // Without this the test passes vacuously the moment the chain stops
+        // matching the shape scanned above.
+        assert!(
+            arms.len() > 200,
+            "scanned only {} cascade arms — the source no longer has the shape this test reads, \
+             so a duplicate would go unnoticed",
+            arms.len()
+        );
+
+        let mut first_seen: std::collections::HashMap<&str, usize> =
+            std::collections::HashMap::new();
+        let mut unreachable: Vec<String> = Vec::new();
+        for (line, signature) in &arms {
+            if let Some(first) = first_seen.get(signature.as_str()) {
+                unreachable.push(format!(
+                    "arm {line} lines into process_buffered_frames repeats the arm at {first}: {signature}"
+                ));
+            } else {
+                first_seen.insert(signature.as_str(), *line);
+            }
+        }
+        assert!(
+            unreachable.is_empty(),
+            "unreachable duplicate cascade arms (each costs every walking packet a prefix test):\n{}",
+            unreachable.join("\n")
         );
     }
 
