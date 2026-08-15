@@ -16041,3 +16041,291 @@ one worker, worker identity recorded, and the balanced-square interleave
 predicate: if any future cascade row is ever taken with its arms on separate
 workers, or on a host where `-C target-cpu=native` is in force, that row is
 inadmissible and must be re-taken in a single invocation before it is quoted.
+
+---
+
+## 2026-08-15 BlackThrush: KEEP (SELF-SPEEDUP) — delete 73 unreachable duplicate cascade arms; 26-34 instructions per walked arm, graded against a per-shape prediction (`frankenredis-ozrro`)
+
+Claim class: SELF-SPEEDUP. Campaign output: no.
+
+TAKEN, not rejected. No incumbent ran in these invocations and none is claimed —
+this is fr-before against fr-after, which is MAINTENANCE by the campaign's own
+definition. It is recorded here because the ledger is where the method and the
+per-arm constant belong, and because the number below is what lets any future
+cascade candidate be priced from its SOURCE POSITION without a build.
+
+**The change (1b5d36da0).** The borrowed fast-path cascade in
+`process_buffered_frames` is ONE `else if let Some(..) = parse_borrowed_plain_*(..)`
+chain. No code runs between two of its conditions and every arm tests the same
+`unparsed` against the same `parser_config`, so a second arm whose parser call is
+identical to an earlier one is unreachable by construction. **73 of the 333 arms —
+22% of the chain — were exactly that**, each costing every packet that walked past
+it one more literal prefix test and buying nothing. All 73 verified byte-identical
+to an earlier arm (full condition text including the literal prefix/name arguments,
+plus the body with comment lines stripped), so removing them cannot change a reply,
+a decline, or a fall-through. Chain 333 → 260 arms; main.rs −1,688 lines.
+
+Every one came from a hoist that copied an arm nearer the front of the chain to
+shorten its walk and left the original in the tail — i.e. from eleven prior slices
+of this very bead. The defect was self-inflicted and was still accumulating.
+
+### Provenance
+
+- Host: AMD Ryzen Threadripper PRO 5975WX (32 cores / 64 threads observed via
+  `nproc`), governor `powersave`, runtime ISA AVX2, load average 11-17 during the
+  run — which is precisely why the instrument is callgrind and not `perf`.
+- `kernel.perf_event_paranoid = 4`, so hardware counters are unavailable to an
+  unprivileged user. Callgrind counts instructions in SOFTWARE: exact,
+  deterministic, load-immune. valgrind 3.25.1.
+- **Running-image identity, self-reported by the measured processes.** The harness
+  reads `/proc/<pid>/maps` for each server it launches, finds the executable mapping
+  of the guest ELF and hashes THAT — `/proc/<pid>/exe` is the repo's usual recipe but
+  points at the valgrind binary here, since the guest is mapped into valgrind's
+  address space. It is cross-checked against the `executable:` path the server itself
+  reports in `INFO server`, and asserted identical across EVERY window of the row, so
+  no single window can have executed different bytes:
+  - pre arm, running server ELF, self-reported sha256 `130dc2c553d015c70bef53dc7e5bc57a2d62dd168f0ccb3162b1503966c8c9ec`
+  - post arm, running server ELF, self-reported sha256 `aa85ba7b8ac8b4d91df7ece3a84748ab2f0e0498c900c0900087305f5fa4292b`
+- Both built `--release --config profile.release.strip=false --config
+  profile.release.debug=1` from isolated source trees under
+  `/data/projects/.scratch/fr_ab/{pre,post}`. The trees were diffed against git
+  refs before the run: post `main.rs` is byte-identical to commit 1b5d36da0, pre
+  `main.rs` byte-identical to its parent. Peers' working-tree edits (fr-persist,
+  fr-store, benches) were reverted to HEAD in BOTH arms, so **the only difference
+  between the two binaries is the 73 arms.**
+- **The two arms were COMPILED ON DIFFERENT rch WORKERS** — pre on `vmi1227854`,
+  post on `vmi1264463` — which is a live hazard for a cross-binary comparison and
+  is disclosed rather than buried. Three things close it, in descending strength:
+  (a) both ELFs embed the SAME rustc commit,
+  `/rustc/3d50c25bc66853bf0ad205529d0f305a1d841b5e`, so the compiler was identical
+  even though the machine was not — worth checking directly, because
+  `rust-toolchain.toml` pins `channel = "nightly"` with no date and two workers
+  could in principle carry different nightlies; (b) there is no
+  `-C target-cpu=native` anywhere — `.cargo/config.toml` carries `rustflags =
+  ["-Z", "threads=4"]` and nothing else — so codegen does not vary with the host
+  CPU; (c) empirically, the four zero-deletion shapes are the codegen control and
+  they came back flat. Any future cascade row built this way must name its workers
+  and carry a zero-deletion control, or it cannot be compared to this one.
+- The measurement itself ran ENTIRELY LOCALLY under callgrind on this host; rch was
+  used only to compile. Instruction counts are simulated in software, so CPU model,
+  cache and memory bandwidth do not enter the numbers.
+- Each binary was copied to a private path and sha256'd there before use. See the
+  rendezvous rule at the bottom of this entry.
+- Servers started `--save '' --appendonly no`. The measured window is delimited by
+  wall time and is long under callgrind, so periodic background work would otherwise
+  land inside it a variable number of times.
+- Method: **two-point subtraction**, `(S(2N) − S(N)) / N` with N=2000, pipelined 16
+  deep. A single window's total is not a per-op cost — it also contains process
+  startup, seeding, connection setup and teardown. Measured directly, that constant
+  is what made an A/A null read **1.0314 on GET at 400 ops**: the same binary
+  against itself, differing only in how much fixed work happened to fall inside the
+  window. Subtracting two window sizes on the same binary cancels it exactly.
+- A/A null (the pre binary measured a second time) is reported per row.
+
+### The prediction, fixed before the run
+
+`delta/op = c × (number of deleted arms upstream of that shape's LIVE arm)` for ONE
+constant `c`, with the zero-count shapes not moving. Counted mechanically: walk the
+pre-image chain in order, mark every arm whose signature repeats an earlier one,
+then for each command take its FIRST (live) arm and count marked arms before it.
+**A uniform shift across all shapes would be code layout, not the walk.**
+
+### Result
+
+Run 2 is the citable one (it carries the running-image identity above); run 1 is an
+independent earlier invocation of the same design, reported alongside because a row
+that reproduces is worth more than a row that is merely precise.
+
+| shape | deleted arms upstream | pre instr/op | post instr/op | delta/op | ratio | instr per arm | A/A null | run-1 delta |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| GET (outside the chain) | 0 | 1471.1 | 1457.0 | +14.0 | 1.0096 | — | −15.5 | −0.2 |
+| HMSET | 0 | 5776.4 | 5776.4 | −0.0 | 1.0000 | — | +1.0 | −1.9 |
+| SETEX | 0 | 8103.7 | 8103.6 | +0.1 | 1.0000 | — | −1.9 | +1.2 |
+| SMOVE | 0 | 7042.8 | 7011.1 | +31.6 | 1.0045 | — | −14.9 | +2.9 |
+| LMOVE | 18 | 10453.2 | 9964.6 | **488.6** | 1.0490 | 27.1 | +2.7 | 474.8 |
+| RENAME | 19 | 9252.6 | 8737.8 | **514.8** | 1.0589 | 27.1 | +13.9 | 511.2 |
+| SINTERSTORE | 39 | 17765.4 | 16505.5 | **1259.8** | 1.0763 | 32.3 | −1.1 | 1277.9 |
+| UNLINK | 39 | 13693.2 | 12366.5 | **1326.6** | 1.1073 | 34.0 | −13.8 | 1323.6 |
+| TOUCH (4-key) | 39 | 14739.2 | 13475.7 | **1263.5** | 1.0938 | 32.4 | +1.1 | 1268.5 |
+| COMMAND COUNT | 41 | 16610.1 | 15282.6 | **1327.4** | 1.0869 | 32.4 | +0.0 | 1329.9 |
+
+### The A/A null, and the decision rule
+
+Seven independent A/A pairs run inside one top-level invocation — the pre binary
+measured against itself on UNLINK, the largest claimed row, at the identical
+ops/depth used for the claim — gave ratios 0.999940, 0.999524, 1.000060, 1.001016,
+0.999828, 0.999949, 1.000000. **A/A null median 0.999949, with a bootstrap 95%
+median CI of [0.999828, 1.000060]** (20,000 percentile-bootstrap resamples, seed
+20260815 so the interval is reproducible). Observed spread (max−min)/median is
+0.1492%.
+
+GATE: that bootstrap median-CI is the decision rule for this row — a null whose
+median falls outside [0.98, 1.02], or whose CI is wide enough to cover the claimed
+effect, refuses the row outright rather than being reported alongside it. Here the
+claimed UNLINK effect is 1.1073 against a null CI half-width of ~0.0001, so the
+effect clears its own null by roughly three orders of magnitude.
+
+**CV is diagnostic only and was never used as a gate here.** The instrument is a counted one — callgrind
+simulates instructions in software rather than sampling them — so the residual
+0.15% spread is not measurement noise in the timing sense but per-window variation
+in how much server work falls inside the measured window. That is exactly what the
+two-point subtraction and this null are there to bound.
+
+The six moved rows reproduce across the two invocations to within 0.2%-2.9%. The
+zero rows are noisier in run 2 than run 1 (GET +14.0 against a −15.5 null, SMOVE
++31.6 against −14.9) because the host was busier; **that is what the null is for, and
+in both runs every zero-shape delta is within its own null.** Do not read the run-2
+GET row as a 1% regression — its null is larger than its delta and of the opposite
+sign.
+
+**READ THE ZERO ROWS FIRST — they are the control that licenses the rest.** All four
+zero-deletion shapes move by ≤2.9 instr/op, inside their own A/A nulls, across
+operations spanning 1,456 to 8,104 instr/op. That single fact rules out three
+alternative explanations at once: code layout (a smaller binary shifting everything),
+cross-worker codegen drift (the two arms were compiled on different machines), and
+harness drift. None of those would confine itself to exactly the shapes with
+deletions upstream of their arm.
+
+**The prediction holds.** Every shape with deletions upstream moves by 474-1330
+instr/op, monotone in the count, for **4.8%-11.1%** of the whole operation.
+
+**`c` IS NOT ONE CONSTANT, AND "DEEPER IS DEARER" DOES NOT EXPLAIN IT EITHER.** Here
+it reads 27.1 at 18-19 arms against 32.3-34.0 at 39-41. CrimsonHawk's independent
+table, derived by a completely different method (the CHANGE in each slice-12
+candidate's walked-vs-bypassed gap, measured on a third binary on a different
+worker), lands in the same band and shows the same structure — and refutes the
+depth explanation outright:
+
+| arm group | CrimsonHawk instr/arm | this run |
+|---|---|---|
+| 45 arms (BYLEX pair, ZINTER, ZDIFF) | 28.1, 28.1, 29.0, 29.8 | — |
+| 39-41 arms (set-store trio; UNLINK/TOUCH/SINTERSTORE/COMMAND COUNT here) | 32.0, 32.3, 32.8 | 32.3, 32.4, 32.4, 34.0 |
+| 18-19 arms (LMOVE, RENAME) | 26.6, 27.3 | 27.1, 27.1 |
+
+**39 arms costs MORE per arm than 45 does**, in both tables, so the driver is not
+depth. It is WHICH arms were deleted: the run of deletions between pre-image lines
+11300 and 14200 is mostly multi-argument `key_argN` arms with longer literal
+prefixes, and a failing test against those costs more than against the short
+single-key arms deleted at 10243-11300. **Never quote a single `c`.** A source
+position converts to an expected gap only together with the arm GROUP it walks, and
+then only as a prediction to report against.
+
+**The zero-deletion rows are the load-bearing half of both tables.** CrimsonHawk's
+DECR moved by ONE instruction per op across two different ELFs and HMSET by 65;
+ours move within their own nulls. Two methods, four binaries, three workers, and
+the only shapes that move are the ones with deletions upstream of their arm.
+
+**THIS IS A SELF-SPEEDUP, NOT A WIN.** No incumbent ran in these invocations, and
+none is claimed. Per this repo's own history the instruction delta is a leading
+indicator of roughly HALF its magnitude in throughput (the cascade-memo lever moved
+instructions 5.93x for 2.00x throughput), so 4.8-11.1% of instructions should be
+read as a few percent of wall, unmeasured here.
+
+### What this buys the next cascade slice
+
+A source position now converts to an expected gap without a build. Deletions ran
+from pre-image line 10243 to 15173 in 19 runs of sizes
+2,1,2,2,3,7,1,1,2,4,2,4,3,3,2,2,2,2,28. Cumulative deleted-upstream for a candidate
+is the sum of runs starting before its live arm; multiply by 26-34. Equivalently:
+**any walked-vs-bypassed gap measured on the PRE-cut tree is an upper bound on the
+post-cut tree, over-stating by exactly that product.** CrimsonHawk's slice-12 table
+lost ~1,270 instr/op on most candidates for this reason, and eleven still cleared
+the 1,400 instr/op bar on the shortened chain — both changes are worth having, and
+neither number should be quoted without the other or a reader will double-count.
+
+### Gate added, and why it is not ceremony
+
+`borrowed_cascade_has_no_unreachable_duplicate_arms` scans the chain out of the
+crate's own source via `include_str!("main.rs")` and fails on any repeated arm
+signature. Observed defect class: 73 instances, all from the same hoist pattern,
+accumulated over eleven slices by agents who were each doing the right thing
+locally. It asserts a floor of 200 scanned arms BEFORE checking for duplicates, so
+it cannot pass vacuously by failing to match the source shape. Deletion condition:
+it goes away with the chain — when the arms become a name-keyed table, reachability
+stops depending on position.
+
+### REUSABLE: check the classifier, not the position, before spending a run
+
+`classify_borrowed_dispatch_floor_packet` claims **94 command names**, and a claimed
+shape never enters the cascade at all — it reads ~0 however deep its arm sits, which
+is indistinguishable from a refutation. This killed two successive attempts at the
+table above: EXISTS, ZMSCORE, LPOS and HMGET went out on the first pass; SADD (at
+`array_len` 7..=20), SETBIT (4), MEMORY (3) and SINTERCARD on the second. It is also
+why `exists_two..exists_eight` and `keys_multi EXISTS` sit at the very end of the
+chain doing nothing at all. **Check a candidate against the classifier's match ARMS
+before pricing it by source position.** Confirmed empirically from the other side:
+CrimsonHawk measured EXISTS anyway and got −13 instr/op at 1.00x.
+
+### REUSABLE: a fixed-port harness fakes a PASS, not a FAIL
+
+From `scripts/wait_getack_gate.py` (frankenredis-97shd), same session. A gate that
+spawns servers on fixed ports on a shared box has a silent failure mode: if the port
+is already held, the spawn dies into `DEVNULL` and every subsequent command lands on
+whatever else is listening. **On a differential gate the squatter is often the very
+engine being compared against, so the wrong answer is a PASS** — the direction nobody
+checks for. Pin each spawned server by `INFO server process_id` before use; that
+turns a silent wrong answer into a loud SETUP-FAIL. Prove the pin discriminates by
+squatting the port: with a `redis-server` on 31002 the gate now dies with "master on
+port 31002 exited immediately (rc=1) — port already in use?" instead of measuring the
+impostor.
+
+### REUSABLE: `target/release/<bin>` is a RENDEZVOUS, not an output path
+
+A dozen agents build into that same path in this shared checkout. sha256'ing the file
+and then measuring it are two separate opens with another agent's build free to land
+in between, so **a cited sha does not prove which bytes executed**, however careful
+the sha-ing was. The only attributable form is: build → copy to a private path → sha
+the copy → measure the copy. This is a strengthening of the stale-twin rule, not a
+restatement of it: stale-twin says the file may be old, this says the file may be
+someone else's and the sha you quote may never have run.
+
+**The ledger's own pre-commit hook enforces this, and it caught this entry.** The
+first version cited `sha256sum` of the path handed to valgrind and was REJECTED:
+"this KEEP-class entry has no self-reported executing-binary SHA-256". That is the
+same rendezvous mistake described above, committed two hours after describing it.
+The fix is the identity block in the provenance section: hash the image the process
+actually mapped, cross-check the path against what the server reports about itself,
+and re-verify on every window rather than once — **a one-shot capture proves the
+image at capture time, not that all N windows ran it.** Stronger still, per
+CrimsonHawk: match the mapping by INODE and hash through an fd whose inode is
+re-verified, which proves the process mapped THIS inode rather than merely this
+path. Note `/proc/<pid>/map_files` is unusable under valgrind — the guest is mapped
+by valgrind's own loader and the entry is not exposed (ENOENT on the exact range
+from `maps`).
+
+### Retry predicate
+
+Two concrete conditions, either of which reopens this surface:
+
+1. **If `kernel.perf_event_paranoid` falls to <= 1 on this host**, re-take these six
+   moved rows with `perf stat -e instructions,cycles,branch-misses` so the
+   instruction delta can be converted into a wall-clock claim instead of the
+   half-magnitude rule of thumb used above. That is the single open question this
+   entry leaves: 4.9%-11.1% of instructions is worth an unknown, and currently
+   unmeasurable, share of throughput. Until then this row stays SELF-SPEEDUP and
+   must not be quoted as a competitive number.
+2. **If `borrowed_cascade_has_no_unreachable_duplicate_arms` ever fires again**, or
+   if the chain is replaced by a name-keyed table, the per-arm constant here no
+   longer applies and must be re-derived — it is a property of WHICH arms a shape
+   walks, so any change to the set of arms invalidates it. Do not carry 27-34
+   forward across a restructure of the chain.
+
+Do not retry unless one of those holds: re-running this exact pair on this exact
+tree can only reproduce it, and it already reproduced across two invocations.
+
+### Three rch traps this run paid for
+
+1. **rch refuses any project path that does not resolve under `/data/projects`**
+   ("input resolves outside canonical root"), and then rejects every worker. A
+   scratch tree under `/data/tmp` can never be admitted; A/B trees must live under
+   `/data/projects/.scratch/`.
+2. **A fresh remote project dir has no `legacy_redis_code`**, so `fr-command`'s build
+   script hard-fails. Fix by dropping `legacy_redis_code/` from THAT tree's
+   `.rchignore` so the 1.7MB `redis/src/commands` dir syncs — NOT by setting
+   `FR_ALLOW_STUB_COMMANDS`, which silently degrades ACL CAT and COMMAND DOCS to
+   empty tables. A build that "works" and quietly changes behaviour is worse than one
+   that fails.
+3. **`--profile release-perf` returns no linked binary** while printing
+   `Finished release-perf profile ... in 2m 46s`, which reads as success. Two builds
+   were spent before the directory was checked. Use `--release` with
+   `--config profile.release.strip=false --config profile.release.debug=1`.
