@@ -2747,11 +2747,14 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"ZREVRANGE", b"z:1", b"0", b"1", b"WITHSCORES"]));
     cmds.push(c(&[b"ZRANK", b"z:1", b"c"]));
     cmds.push(c(&[b"ZREVRANK", b"z:1", b"c"]));
-    // (frankenredis-ozrro) ZRANDMEMBER's count form is claimed at arity 3 only.
-    // Same determinism argument as SRANDMEMBER: a one-member sorted set pins the
-    // positive count, the repeating negative count, and the two empty branches,
-    // while WITHSCORES (arity 4) and the no-count form (arity 2) stay on the
-    // cascade and are driven to prove they still answer.
+    // (frankenredis-ozrro) ZRANDMEMBER is claimed at arity 3 (count) AND arity 2
+    // (the bare single-member form). Same determinism argument as SRANDMEMBER: a
+    // one-member sorted set pins the positive count, the repeating negative
+    // count, both empty branches, and the bare form's only possible reply, while
+    // WITHSCORES (arity 4) stays on the cascade and is driven to prove it still
+    // answers. The arity-2 rows below matter most for the wrong-type and
+    // absent-key branches, where the route DECLINES and has to fall through to
+    // the generic path rather than answer for itself.
     cmds.push(c(&[b"ZADD", b"zr:one", b"1.5", b"only"]));
     cmds.push(c(&[b"ZRANDMEMBER", b"zr:one", b"3"]));
     cmds.push(c(&[b"ZRANDMEMBER", b"zr:one", b"-3"]));
@@ -2759,6 +2762,8 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"ZRANDMEMBER", b"z:absent", b"3"]));
     cmds.push(c(&[b"ZRANDMEMBER", b"zr:one", b"2", b"WITHSCORES"]));
     cmds.push(c(&[b"ZRANDMEMBER", b"zr:one"]));
+    cmds.push(c(&[b"ZRANDMEMBER", b"z:absent"]));
+    cmds.push(c(&[b"ZRANDMEMBER", b"s:1"]));
     cmds.push(c(&[b"ZRANDMEMBER", b"s:1", b"2"]));
     cmds.push(c(&[b"ZSCAN", b"z:1", b"0"]));
     cmds.push(c(&[b"ZSCAN", b"z:absent", b"0"]));

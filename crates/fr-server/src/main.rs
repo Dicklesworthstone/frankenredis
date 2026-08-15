@@ -14879,6 +14879,10 @@ enum BorrowedDispatchFloorClass {
     /// higher arity and keep the cascade.
     Sintercard,
     /// (frankenredis-ozrro) `ZRANDMEMBER key count`, the members-only form.
+    /// (frankenredis-ozrro) Bare `ZRANDMEMBER key`, the single-member reply
+    /// form. Its sibling [`Self::ZrandmemberCount`] was classified in an earlier
+    /// slice, which left this one alone ~3,600 lines deep in the chain.
+    Zrandmember,
     ZrandmemberCount,
     /// (frankenredis-ozrro) `ZUNIONSTORE`/`ZINTERSTORE`/`ZDIFFSTORE` with two
     /// or three source keys. The deep cascade has one arm per command/arity;
@@ -15979,6 +15983,9 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // stranded on the generic path by a classification their parser declines.
         (4..=5, BorrowedDispatchFloorCommand::Sintercard) => {
             Some(BorrowedDispatchFloorClass::Sintercard)
+        }
+        (2, BorrowedDispatchFloorCommand::Zrandmember) => {
+            Some(BorrowedDispatchFloorClass::Zrandmember)
         }
         (3, BorrowedDispatchFloorCommand::Zrandmember) => {
             Some(BorrowedDispatchFloorClass::ZrandmemberCount)
@@ -19575,6 +19582,29 @@ fn try_dispatch_floor_classified_action(
                 });
             if let Some((consumed, response)) = hit {
                 Ok(BorrowedMultibulkAction::FastReply { consumed, response })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Zrandmember => {
+            if let Some(packet) = parse_borrowed_plain_zrandmember_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_rand_member_borrowed(
+                    PlainRandMemberCmd::Zrandmember,
+                    packet.key,
+                    ts,
+                )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,
@@ -43485,9 +43515,9 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
             ),
             None
         );
-        // WITHSCORES is arity 4; the no-count form is arity 2. Both keep the
-        // cascade, because the count parser would decline them and a declined
-        // classification lands on the generic path instead of their own arms.
+        // WITHSCORES is arity 4 and still keeps the cascade: the count parser
+        // would decline it, and a declined classification lands on the generic
+        // path instead of its own arm.
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(
                 b"*4\r\n$11\r\nZRANDMEMBER\r\n$1\r\nz\r\n$1\r\n2\r\n$10\r\nWITHSCORES\r\n",
@@ -43495,12 +43525,18 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
             ),
             None
         );
+        // (frankenredis-ozrro) The no-count form is arity 2 and now has its OWN
+        // class, so the "a declined classification is worse than the cascade"
+        // argument above no longer applies to it — `Zrandmember` dispatches to
+        // the bare form's own parser and `execute_plain_rand_member_borrowed`,
+        // not to the count parser. Measured: walking the chain to that arm cost
+        // 8,653 instructions per op, 69% of the operation.
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(
                 b"*2\r\n$11\r\nZRANDMEMBER\r\n$1\r\nz\r\n",
                 &cfg,
             ),
-            None
+            Some(super::BorrowedDispatchFloorClass::Zrandmember)
         );
         // SRANDMEMBER now splits by arity: 2 is the single-member `_into` route
         // that already floored, 3 is the array-reply count form added here.
