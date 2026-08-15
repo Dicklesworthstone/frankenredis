@@ -37110,16 +37110,24 @@ fn sha1_hex(data: &[u8]) -> String {
     let mut h3: u32 = 0x1032_5476;
     let mut h4: u32 = 0xC3D2_E1F0;
 
+    // (frankenredis-w08xv) Compress the whole 64-byte blocks straight out of
+    // `data` and pad only the tail in a stack buffer. The previous shape copied
+    // the entire message into a fresh `Vec` and then appended the padding one
+    // `push` at a time — a heap allocation, a full copy of the script body, and
+    // up to 63 bounds-checked pushes, on a function every EVAL runs to find its
+    // script in the cache. The padded tail is at most two blocks: one when the
+    // remainder leaves room for the 8-byte length, two when it does not.
     let bit_len = (data.len() as u64).wrapping_mul(8);
-    let mut msg = data.to_vec();
-    msg.push(0x80);
-    while msg.len() % 64 != 56 {
-        msg.push(0);
-    }
-    msg.extend_from_slice(&bit_len.to_be_bytes());
+    let (blocks, tail) = data.as_chunks::<64>();
 
-    let (chunks, _) = msg.as_chunks::<64>();
-    for chunk in chunks {
+    let mut last = [0u8; 128];
+    last[..tail.len()].copy_from_slice(tail);
+    last[tail.len()] = 0x80;
+    let padded = if tail.len() < 56 { 64 } else { 128 };
+    last[padded - 8..padded].copy_from_slice(&bit_len.to_be_bytes());
+    let (tail_blocks, _) = last[..padded].as_chunks::<64>();
+
+    for chunk in blocks.iter().chain(tail_blocks) {
         let mut w = [0u32; 80];
         for i in 0..16 {
             w[i] = u32::from_be_bytes([
