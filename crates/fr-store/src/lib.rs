@@ -36615,13 +36615,25 @@ fn zset_from_listpack_spans(listpack: &[u8]) -> Result<(SortedSet, usize), Store
     for pair in span_pairs {
         let member = pair[0].as_bytes(listpack);
         max_member_len = max_member_len.max(member.len());
-        let score = std::str::from_utf8(pair[1].as_bytes(listpack))
-            .ok()
-            .and_then(|raw| raw.parse::<f64>().ok())
-            .ok_or(StoreError::InvalidDumpPayload)?;
-        if score.is_nan() {
-            return Err(StoreError::InvalidDumpPayload);
-        }
+        // (frankenredis-w08xv) An integer-encoded score arrives as a number and
+        // the decoder renders it to decimal for the byte-oriented consumers.
+        // Taking that number directly skips a `str::parse::<f64>` of text this
+        // process just produced — the second half of a render-then-reparse round
+        // trip. String-encoded scores still parse, which is the only path that
+        // can produce a NaN, so the NaN rejection stays on exactly that branch.
+        let score = match pair[1].as_i64() {
+            Some(value) => value as f64,
+            None => {
+                let parsed = std::str::from_utf8(pair[1].as_bytes(listpack))
+                    .ok()
+                    .and_then(|raw| raw.parse::<f64>().ok())
+                    .ok_or(StoreError::InvalidDumpPayload)?;
+                if parsed.is_nan() {
+                    return Err(StoreError::InvalidDumpPayload);
+                }
+                parsed
+            }
+        };
         pairs.push((member, score));
     }
 

@@ -63,6 +63,10 @@ pub enum ListpackValueSpan {
 pub struct ListpackIntegerBytes {
     bytes: [u8; 20],
     len: u8,
+    /// (frankenredis-w08xv) The value the decimal bytes were rendered FROM.
+    /// A zset score consumer wants the number, and without this it had to
+    /// re-derive it by parsing the text this struct had just produced.
+    value: i64,
 }
 
 impl ListpackIntegerBytes {
@@ -79,12 +83,20 @@ impl ListpackIntegerBytes {
         Self {
             bytes,
             len: len as u8,
+            value,
         }
     }
 
     #[must_use]
     pub fn as_slice(&self) -> &[u8] {
         &self.bytes[..usize::from(self.len)]
+    }
+
+    /// The integer this entry decoded to, without going through its decimal
+    /// rendering. (frankenredis-w08xv)
+    #[must_use]
+    pub const fn value(&self) -> i64 {
+        self.value
     }
 }
 
@@ -98,6 +110,19 @@ impl ListpackValueSpan {
         match self {
             Self::String(range) => &listpack[range.clone()],
             Self::Integer(bytes) => bytes.as_slice(),
+        }
+    }
+
+    /// The entry's integer value when it was integer-encoded in the listpack.
+    /// (frankenredis-w08xv) A consumer that wants a NUMBER — a sorted-set score
+    /// is the one that matters — can take it directly instead of parsing the
+    /// decimal text this decoder just rendered from it. Returns `None` for
+    /// string-encoded entries, which still have to be parsed.
+    #[must_use]
+    pub const fn as_i64(&self) -> Option<i64> {
+        match self {
+            Self::String(_) => None,
+            Self::Integer(bytes) => Some(bytes.value()),
         }
     }
 }
@@ -1365,6 +1390,59 @@ mod tests {
             .expect("all entries are strings");
         let borrowed: Vec<&[u8]> = ranges.iter().map(|range| &lp[range.clone()]).collect();
         assert_eq!(borrowed, vec![b"alpha".as_slice(), b"beta".as_slice()]);
+    }
+
+    /// (frankenredis-w08xv) The sorted-set RESTORE path takes an
+    /// integer-encoded score straight off the span instead of parsing the
+    /// decimal text this decoder rendered from it. That substitution is only
+    /// sound if BOTH routes land on the same `f64`, including where an i64 no
+    /// longer fits one exactly — `i64 as f64` and a correctly-rounded
+    /// `str::parse::<f64>` both round to nearest, so they must agree even past
+    /// 2^53. This pins that, and pins the rendered bytes alongside so a change
+    /// to either half cannot silently drift from the other.
+    #[test]
+    fn integer_span_value_and_rendered_bytes_agree_as_f64() {
+        for value in [
+            0i64,
+            1,
+            -1,
+            42,
+            -42,
+            9_007_199_254_740_992, // 2^53, exactly representable
+            9_007_199_254_740_993, // 2^53 + 1, NOT exactly representable
+            -9_007_199_254_740_993,
+            i64::MAX,
+            i64::MIN,
+        ] {
+            let span = ListpackValueSpan::integer(value);
+            assert_eq!(span.as_i64(), Some(value), "as_i64 for {value}");
+
+            let rendered = span.as_bytes(&[]);
+            assert_eq!(
+                rendered,
+                value.to_string().as_bytes(),
+                "rendered decimal for {value}"
+            );
+
+            let via_parse: f64 = std::str::from_utf8(rendered)
+                .expect("decimal render is ascii")
+                .parse()
+                .expect("decimal render parses");
+            #[allow(clippy::cast_precision_loss)]
+            let via_value = value as f64;
+            assert_eq!(
+                via_value.to_bits(),
+                via_parse.to_bits(),
+                "the two score routes must produce the identical f64 for {value}"
+            );
+        }
+
+        // A string-encoded entry has no integer to take, so the consumer must
+        // fall back to parsing — that is the branch fractional scores use.
+        let lp = assemble(&[&entry_6bit_str(b"1.5")]);
+        let spans = decode_value_spans(&lp).expect("decodes");
+        assert_eq!(spans[0].as_i64(), None, "string spans have no integer");
+        assert_eq!(spans[0].as_bytes(&lp), b"1.5");
     }
 
     #[test]
