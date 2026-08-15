@@ -15801,3 +15801,66 @@ running images from `/proc/<pid>/exe`: fr
 The EVAL row's independent per-arm A/A controls both remain inside 0.98--1.02;
 the control is explicitly refused. This is a fresh live loss, not an attribution
 of the preceding interpreter changes.
+
+## 2026-08-15: SIXTEEN CANDIDATES GAP-MEASURED, TEN REJECTED — borrowed-cascade walked-vs-bypassed sweep, slice 11 (`frankenredis-ozrro`)
+
+Method is the one the bead prescribes: the walked-vs-bypassed callgrind gap IS
+the prize. One ELF, built `--features perf-ab-cascade-bypass`, self-reported
+sha256 `017727a9ada7913797321b91a75bd1354f4b7a74a1cfec0d255ba9db93cef6d5`; `ctl`
+runs the borrowed cascade, `byp` sets `FR_PERF_AB_CASCADE_BYPASS=1` and routes
+every `*` packet straight to the generic parser that terminates the chain. 2000
+ops per arm, pipelined 16 deep on one connection, counters zeroed after seeding
+with `callgrind_control -z` and dumped with `-d`, window total read from the
+dump's `summary:` line. thinkstation1, AMD Ryzen Threadripper PRO 5975WX,
+governor `powersave`, AVX2, valgrind 3.25.1, loadavg ~8. Instruction counts are
+counted in software, so they are exact and load-immune; this is a DIAGNOSTIC of
+our own dispatch, not a vs-incumbent ratio, and no claim against Redis is made
+from these rows.
+
+| shape | ctl (instr) | byp (instr) | gap/op | ctl/byp | verdict |
+|---|---:|---:|---:|---:|---|
+| `ZREMRANGEBYLEX zl (z (zz` | 31,511,385 | 14,217,970 | 8,647 | 2.22x | TAKE |
+| `ZREVRANGEBYLEX zl [c [a` | 33,403,598 | 18,360,993 | 7,521 | 1.82x | TAKE |
+| `DECR n` | 14,918,828 | 4,157,769 | 5,381 | 3.59x | TAKE |
+| `RENAME ra ra` | 18,700,458 | 11,709,194 | 3,496 | 1.60x | TAKE |
+| `HMSET h f v` | 11,826,626 | 5,167,588 | 3,330 | 2.29x | TAKE |
+| `LMOVE la la LEFT RIGHT` | 21,107,388 | 15,000,537 | 3,053 | 1.41x | TAKE |
+| `SMOVE s s m` | 14,239,061 | 12,264,917 | 987 | 1.16x | REJECT |
+| `RENAMENX ra rb` | 13,036,693 | 11,449,108 | 794 | 1.14x | REJECT |
+| `KEYS nomatch*` | 12,147,128 | 10,620,633 | 763 | 1.14x | REJECT |
+| `MSET m1 v1 m2 v2` | 6,771,272 | 6,264,044 | 254 | 1.08x | REJECT |
+| `HSET h f v` | 5,371,848 | 5,099,349 | 136 | 1.05x | REJECT |
+| `EXISTS e1..e8` | 6,774,838 | 6,800,057 | -13 | 1.00x | REJECT |
+| `ZADD zi INCR 0 m` | 14,063,280 | 15,069,006 | -503 | 0.93x | REJECT |
+| `DUMP d` | 10,516,909 | 12,212,060 | -848 | 0.86x | REJECT |
+| `RPOPLPUSH la la` | 12,452,802 | 14,293,444 | -920 | 0.87x | REJECT |
+| `EXPIRE eo 100 NX` | 9,543,152 | 13,012,188 | -1,735 | 0.73x | REJECT |
+| `GET foo` (control) | 3,086,454 | 3,821,685 | -368 | 0.81x | control, unmoved |
+
+Ten rejections at slice ten's stated threshold of ~1,400 instructions per op.
+Five of them are NEGATIVE — bypassing the cascade makes the command SLOWER —
+which says their fast routes already sit ahead of the walk and beat the generic
+path by more than the walk costs. `EXPIRE eo 100 NX` at 0.73x is the sharpest of
+them and the most useful: the arity-3 EXPIRE is front-classified and the option
+form deliberately keeps the cascade, and this row is the measurement that says
+that split is the right one rather than an accident. The GET control reads
+-368/op (0.81x), unmoved and negative as every earlier slice found it.
+
+**THE BEAD'S OWN PREDICTION IS REFUTED BY THIS SAMPLE.** Slice ten recorded a
+falling hit rate (5/6, then 2/6, 1/6, 2/4) and pre-committed to re-scoping and
+closing if one more sweep came back mostly negative. It did not: six of sixteen
+clear the threshold, the best absolute count of any slice, and the two best rows
+(8,647 and 7,521 instructions per op) are the largest gaps found since the deep
+third. The lesson is about the generator, not the chain — these sixteen were
+picked as command NAMES with no classifier entry, rather than by reading source
+order, and that generator is still productive. `frankenredis-ozrro` stays open on
+this evidence.
+
+**THE SIX ARE MEASURED BUT NOT LANDED, and that is deliberate.** A peer is
+mid-refactor in `crates/fr-server/src/main.rs` with ~2,900 deleted and ~1,500
+added uncommitted lines, rewriting `process_buffered_frames` and deleting the
+exact cascade arms these six would be classified out of. Staging that file would
+sweep an unfinished peer refactor into this commit, so the numbers are published
+here and handed to the peer instead. Retry predicate: after that refactor lands,
+re-run `cascade_gap.py` on a fresh bypass ELF and classify whichever of the six
+still measure a gap — the refactor may have collected them already.
