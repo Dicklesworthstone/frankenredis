@@ -16466,3 +16466,76 @@ blocked on the same measurement work as the rest of EVAL: three of the seven
 sites are in `lua_eval.rs`, one is in `fr-store`'s reply path, and a
 cross-process throughput row on this host was measured today at ~1% placement
 noise for redis-benchmark-shaped work.
+
+---
+
+## 2026-08-15 BlackThrush: REJECTED (attempt, not a lever) — the epoll amortization tax's THROUGHPUT consequence still cannot be measured on this host; a c=128 row is refused by its own null (`project_epoll_wakeup_amortization_tax`)
+
+Claim class: SELF-SPEEDUP. Campaign output: no.
+
+**Lever, hypothesis, result, why rejected, in one line:** measure whether the
+standing "TOP OPEN LEVER" actually costs anything — fr pays ~1.0 `epoll_wait` per op
+at c=128 where redis pays 0.009 (115 events per wake), recv and send being 1.000
+syscalls on both — by timing fr, a second fr and vendored 7.2.4 interleaved at c=128;
+**REFUSED, because the fr/fr A/A null came out 1.1242, 1.1430 and 0.9422 on three
+invocations**, so no throughput ratio from this host at that concurrency is
+admissible, whatever it says.
+
+### Why this is worth an entry rather than a silent retry
+
+The count on that note has never been in doubt; the note itself carries a correction
+saying **the throughput consequence is UNMEASURED and a syscall count proves only a
+syscall count**. This is the first attempt to measure the consequence, and the useful
+output is that the measurement is currently unattainable — so the next agent should
+not spend the day rediscovering that.
+
+The null does not fail randomly. **It follows the PROCESS, not the role.** Swapping
+which fr instance is the subject moved the null from 1.1430 to 0.9422 while the same
+server (port 18851, cores 0-7) stayed the faster one in both. And unlike the RESTORE
+decode workload measured earlier the same day, **pinning to equal-sized core sets did
+not fix it** — 1.1242 unpinned, 1.1430 pinned. Two identical fr images, same binary
+sha256 `aa85ba7b8ac8b4d91df7ece3a84748ab2f0e0498c900c0900087305f5fa4292b`, differ by
+6-14% in throughput at c=128 on this box.
+
+### The one observation that IS direction-stable, offered as a hypothesis, not a row
+
+Across all three invocations, and across BOTH fr arms within each, fr's p99 latency
+was consistently well under redis's while fr paid the extra syscall:
+
+| run | fr p99 | second fr p99 | redis p99 | fr/redis p99 |
+|---|---|---|---|---|
+| pinned | 1.575 ms | 1.643 ms | 2.467 ms | 0.638 |
+| pinned, arms swapped | 1.787 ms | 1.743 ms | 2.751 ms | 0.650 |
+
+The two fr arms agree on p99 to within 4-10% in runs where their THROUGHPUT differs
+by 6-14%, so the latency column is the better-behaved measurement of the two.
+
+**This suggests the tax may be mis-framed.** 115 events per wake means 115 requests
+were already queued when redis woke: amortization of that kind IS backlog, and backlog
+is latency. If that reading survives measurement, fr is not paying a tax for its
+partitioned reactors — it is buying lower p99 with an extra syscall, and closing the
+"gap" would mean deliberately queueing. **It is a hypothesis. The p99 rows above are
+from invocations whose null was REFUSED, so they authenticate nothing, and nobody
+should cite them as a result.**
+
+### Retry predicate
+
+Revisit only when one of these holds: the host gains an isolated cpuset or a
+quiescence window in which two identical fr servers reproduce each other within
+[0.98, 1.02] at c=128 (that is the precondition, and it failed three times here); or
+somebody builds a c=128 harness whose A/A is taken between the SAME pair of processes
+that produce the A/B, so the per-process asymmetry cancels rather than being assumed
+away. Until then, do not quote any c=128 throughput ratio from this box, in either
+direction. Do not retry unless one holds — more rounds will not fix a bias that
+follows the process.
+
+### REUSABLE: pinning is not a general fix, it is a workload-specific one
+
+Earlier the same day, pinning collapsed a 6% cross-process A/A into
+[1.001541, 1.015901] for the RESTORE decode workload. Here, on the same host and the
+same binaries, pinning left the null at 1.1430. And on
+`balanced_square_ab.py`'s redis-benchmark workload the term was ~1% and pinning made
+it slightly worse. **Three workloads, three different answers to the identical
+question.** The rule is to MEASURE the cross-process term per harness — a second
+instance of your own engine as an arm — rather than to adopt or reject pinning as a
+policy.
