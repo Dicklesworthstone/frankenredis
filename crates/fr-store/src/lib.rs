@@ -7763,6 +7763,38 @@ impl Store {
         entry.set_flag(ENTRY_FORCE_SET_LISTPACK_ENCODING, false);
     }
 
+    /// (frankenredis-3uuan) O(1)-per-length twin of [`Self::refresh_set_encoding_flags`] for the
+    /// RESTORE path. Only the listpack tier's `generic.iter().all(|m| m.len() <=
+    /// max_listpack_value)` is O(n); the intset tier is already O(1). Substituting
+    /// `max_member_len <= max_listpack_value` for that `all` is the same predicate, so the tier
+    /// chosen — and therefore `OBJECT ENCODING` — is unchanged.
+    fn refresh_set_encoding_flags_from_max_len(
+        entry: &mut Entry,
+        max_member_len: usize,
+        max_intset_entries: usize,
+        max_listpack_entries: usize,
+        max_listpack_value: usize,
+    ) {
+        let Value::Set(set) = &entry.value else {
+            return;
+        };
+        if entry.has_flag(ENTRY_FORCE_SET_HASHTABLE_ENCODING) {
+            return;
+        }
+        if Self::set_fits_intset(set, max_intset_entries) {
+            return;
+        }
+        let fits_listpack = set.as_generic().is_some_and(|generic| {
+            generic.len() <= max_listpack_entries && max_member_len <= max_listpack_value
+        });
+        if fits_listpack {
+            entry.set_flag(ENTRY_FORCE_SET_LISTPACK_ENCODING, true);
+            return;
+        }
+        entry.set_flag(ENTRY_FORCE_SET_HASHTABLE_ENCODING, true);
+        entry.set_flag(ENTRY_FORCE_SET_LISTPACK_ENCODING, false);
+    }
+
     /// (frankenredis-md7ti) Post-add encoding refresh that scales with the command, not the set —
     /// the last non-incremental encoding refresh (hash/zset/list already do O(1) after a write).
     /// `INCR = true` (production) does the O(1) incremental check; `INCR = false` (bench baseline)
@@ -7821,6 +7853,34 @@ impl Store {
         let needs_hashtable = m.len() > max_listpack_entries
             || m.iter()
                 .any(|(k, v)| k.len() > max_listpack_value || v.len() > max_listpack_value);
+        if needs_hashtable {
+            entry.set_flag(ENTRY_FORCE_HASH_HASHTABLE_ENCODING, true);
+        }
+    }
+
+    /// (frankenredis-3uuan) O(1) twin of [`Self::refresh_hash_encoding_flag`] for the RESTORE
+    /// path, where the decode arm already walked every field and value and can report the
+    /// longest of them.
+    ///
+    /// The scan it replaces asks `m.iter().any(|(k, v)| k.len() > max_value || v.len() >
+    /// max_value)`. That is precisely `max(k.len(), v.len()) > max_value`, so the promotion
+    /// decision is identical — only the second walk over the just-built map disappears.
+    /// `max_element_len` MUST be the max over BOTH fields and values; a fields-only max would
+    /// leave an over-long VALUE reported as `listpack`.
+    fn refresh_hash_encoding_flag_from_max_len(
+        entry: &mut Entry,
+        max_element_len: usize,
+        max_listpack_entries: usize,
+        max_listpack_value: usize,
+    ) {
+        if entry.has_flag(ENTRY_FORCE_HASH_HASHTABLE_ENCODING) {
+            return;
+        }
+        let Value::Hash(m) = &entry.value else {
+            return;
+        };
+        let needs_hashtable =
+            m.len() > max_listpack_entries || max_element_len > max_listpack_value;
         if needs_hashtable {
             entry.set_flag(ENTRY_FORCE_HASH_HASHTABLE_ENCODING, true);
         }
@@ -7912,6 +7972,28 @@ impl Store {
         };
         let needs_skiplist =
             zs.len() > max_listpack_entries || zs.keys().any(|k| k.len() > max_listpack_value);
+        if needs_skiplist {
+            entry.set_flag(ENTRY_FORCE_ZSET_SKIPLIST_ENCODING, true);
+        }
+    }
+
+    /// (frankenredis-3uuan) O(1) twin of [`Self::refresh_zset_encoding_flag`] for the RESTORE
+    /// path. The scan it replaces is `zs.keys().any(|k| k.len() > max_listpack_value)` — MEMBER
+    /// lengths only, scores never participate — so `max_member_len > max_listpack_value` decides
+    /// it identically without re-walking the sorted set that was just built.
+    fn refresh_zset_encoding_flag_from_max_len(
+        entry: &mut Entry,
+        max_member_len: usize,
+        max_listpack_entries: usize,
+        max_listpack_value: usize,
+    ) {
+        if entry.has_flag(ENTRY_FORCE_ZSET_SKIPLIST_ENCODING) {
+            return;
+        }
+        let Value::SortedSet(zs) = &entry.value else {
+            return;
+        };
+        let needs_skiplist = zs.len() > max_listpack_entries || max_member_len > max_listpack_value;
         if needs_skiplist {
             entry.set_flag(ENTRY_FORCE_ZSET_SKIPLIST_ENCODING, true);
         }
@@ -34374,6 +34456,14 @@ impl Store {
         // (frankenredis-bbyfz) No longer force-set on the RDB_TYPE_SET arm — the
         // set encoding is now re-derived by refresh_set_encoding_flags below.
         let force_set_hashtable_encoding = false;
+        // (frankenredis-3uuan) Longest element the decode arm actually saw, when that
+        // arm can supply it for free. The encoding refresh below only needs
+        // `any(element_len > max_listpack_value)`, which is exactly
+        // `max(element_len) > max_listpack_value` — so an arm that already touches
+        // every element hands the max up instead of making the refresh re-walk the
+        // object it just built. `None` keeps the general re-scan for arms that do not
+        // (ziplist/zipmap/hashtable payloads), so their behavior is untouched.
+        let mut restored_max_element_len: Option<usize> = None;
         let value = match type_byte {
             RDB_TYPE_STRING => {
                 let (v, consumed) = decode_rdb_string(payload, cursor, data_end)?;
@@ -34649,10 +34739,11 @@ impl Store {
                 // Zero-copy span build (see hash_from_listpack_spans): avoids the N
                 // transient owned Vec<u8> that decode_listpack_strings allocates only
                 // for the builder to copy into the hash's arena and drop.
-                let hash = hash_from_listpack_spans(&listpack)?;
+                let (hash, max_element_len) = hash_from_listpack_spans(&listpack)?;
                 if hash.is_empty() {
                     return Err(StoreError::InvalidDumpPayload);
                 }
+                restored_max_element_len = Some(max_element_len);
                 Value::Hash(Box::new(hash))
             }
             RDB_TYPE_HASH_ZIPLIST => {
@@ -34706,6 +34797,11 @@ impl Store {
                     return Err(StoreError::InvalidDumpPayload);
                 }
                 let members: Vec<&[u8]> = spans.iter().map(|s| s.as_bytes(&listpack)).collect();
+                // (frankenredis-3uuan) The set encoding refresh below tests every member
+                // length against set-max-listpack-value; report the max from the members
+                // we already hold instead of re-walking the built GenericSet.
+                restored_max_element_len =
+                    Some(members.iter().map(|member| member.len()).max().unwrap_or(0));
                 // Dedup-check then BULK-build. from_unique_str_members appends each
                 // member with no lookup (O(n)); insertion order — the only observable
                 // order for a listpack set — is unchanged. RESTORE still rejects a
@@ -34729,10 +34825,11 @@ impl Store {
             RDB_TYPE_ZSET_LISTPACK => {
                 let (listpack, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                 cursor += consumed;
-                let zs = zset_from_listpack_spans(&listpack)?;
+                let (zs, max_member_len) = zset_from_listpack_spans(&listpack)?;
                 if zs.is_empty() {
                     return Err(StoreError::InvalidDumpPayload);
                 }
+                restored_max_element_len = Some(max_member_len);
                 Value::SortedSet(Box::new(zs))
             }
             RDB_TYPE_ZSET_ZIPLIST => {
@@ -34778,18 +34875,46 @@ impl Store {
         // the old "sets keep the type-byte mapping" premise was wrong vs redis
         // rdbLoadObject, which re-derives a RESTORE'd RDB_TYPE_SET to intset/
         // listpack/hashtable from content under the current config.
-        match &entry.value {
-            Value::Hash(_) => Self::refresh_hash_encoding_flag(
+        // (frankenredis-3uuan) When the decode arm reported the longest element it saw,
+        // the promotion test is O(1) and the object built two statements ago is not
+        // re-walked. `None` (ziplist/zipmap/hashtable/intset payloads) keeps the scan.
+        match (&entry.value, restored_max_element_len) {
+            (Value::Hash(_), Some(max_element_len)) => {
+                Self::refresh_hash_encoding_flag_from_max_len(
+                    &mut entry,
+                    max_element_len,
+                    self.hash_max_listpack_entries,
+                    self.hash_max_listpack_value,
+                );
+            }
+            (Value::Hash(_), None) => Self::refresh_hash_encoding_flag(
                 &mut entry,
                 self.hash_max_listpack_entries,
                 self.hash_max_listpack_value,
             ),
-            Value::SortedSet(_) => Self::refresh_zset_encoding_flag(
+            (Value::SortedSet(_), Some(max_member_len)) => {
+                Self::refresh_zset_encoding_flag_from_max_len(
+                    &mut entry,
+                    max_member_len,
+                    self.zset_max_listpack_entries,
+                    self.zset_max_listpack_value,
+                );
+            }
+            (Value::SortedSet(_), None) => Self::refresh_zset_encoding_flag(
                 &mut entry,
                 self.zset_max_listpack_entries,
                 self.zset_max_listpack_value,
             ),
-            Value::Set(_) => Self::refresh_set_encoding_flags(
+            (Value::Set(_), Some(max_member_len)) => {
+                Self::refresh_set_encoding_flags_from_max_len(
+                    &mut entry,
+                    max_member_len,
+                    self.set_max_intset_entries,
+                    self.set_max_listpack_entries,
+                    self.set_max_listpack_value,
+                );
+            }
+            (Value::Set(_), None) => Self::refresh_set_encoding_flags(
                 &mut entry,
                 self.set_max_intset_entries,
                 self.set_max_listpack_entries,
@@ -36324,17 +36449,29 @@ fn hash_from_flat_entries(entries: Vec<Vec<u8>>) -> Result<HashFieldMap, StoreEr
 /// `from_unique_pairs_borrowed` instead of exploding to N owned `Vec<u8>` that
 /// the builder would only copy and drop. Byte-identical for a valid
 /// (duplicate-free) dump. (BlackThrush: RESTORE decode zero-copy span build)
-fn hash_from_listpack_spans(listpack: &[u8]) -> Result<HashFieldMap, StoreError> {
+/// Returns the built map plus the longest field-or-value byte length it contains.
+/// (frankenredis-3uuan) The RESTORE encoding refresh needs exactly
+/// `any(len > max_listpack_value)` over those same elements, so reporting the max
+/// from this loop lets the caller decide in O(1) instead of iterating the finished
+/// map a second time. Zero for an empty listpack, which the caller rejects anyway.
+fn hash_from_listpack_spans(listpack: &[u8]) -> Result<(HashFieldMap, usize), StoreError> {
     let spans = fr_persist::listpack::decode_value_spans(listpack)
         .map_err(|_| StoreError::InvalidDumpPayload)?;
     if !spans.len().is_multiple_of(2) {
         return Err(StoreError::InvalidDumpPayload);
     }
-    let refs: Vec<&[u8]> = spans.iter().map(|s| s.as_bytes(listpack)).collect();
-    let mut pairs: Vec<(&[u8], &[u8])> = Vec::with_capacity(refs.len() / 2);
-    let (ref_pairs, _) = refs.as_chunks::<2>();
-    for pair in ref_pairs {
-        pairs.push((pair[0], pair[1]));
+    // Build the (field, value) pairs straight from the span chunks. The previous form
+    // materialized an intermediate `Vec<&[u8]>` of every element only to re-chunk it
+    // into pairs; the spans are already in listpack order, so the extra Vec was pure
+    // allocation and copy traffic on the RESTORE hot path. Same pairs, same order.
+    let (span_pairs, _) = spans.as_chunks::<2>();
+    let mut pairs: Vec<(&[u8], &[u8])> = Vec::with_capacity(span_pairs.len());
+    let mut max_element_len = 0_usize;
+    for pair in span_pairs {
+        let field = pair[0].as_bytes(listpack);
+        let value = pair[1].as_bytes(listpack);
+        max_element_len = max_element_len.max(field.len()).max(value.len());
+        pairs.push((field, value));
     }
     let mut seen: std::collections::HashSet<&[u8], foldhash::quality::RandomState> =
         std::collections::HashSet::with_capacity_and_hasher(
@@ -36345,7 +36482,10 @@ fn hash_from_listpack_spans(listpack: &[u8]) -> Result<HashFieldMap, StoreError>
         return Err(StoreError::InvalidDumpPayload);
     }
     drop(seen);
-    Ok(HashFieldMap::from_unique_pairs_borrowed(&pairs))
+    Ok((
+        HashFieldMap::from_unique_pairs_borrowed(&pairs),
+        max_element_len,
+    ))
 }
 
 // ── (frankenredis-b1o02 ceiling A/B, bench-only) ──────────────────────────────
@@ -36358,7 +36498,7 @@ fn hash_from_listpack_spans(listpack: &[u8]) -> Result<HashFieldMap, StoreError>
 #[doc(hidden)]
 #[must_use]
 pub fn bench_hash_restore_current(listpack: &[u8]) -> usize {
-    hash_from_listpack_spans(listpack).map_or(0, |h| h.len())
+    hash_from_listpack_spans(listpack).map_or(0, |(h, _)| h.len())
 }
 
 #[doc(hidden)]
@@ -36414,7 +36554,11 @@ fn zset_from_flat_entries(entries: Vec<Vec<u8>>) -> Result<SortedSet, StoreError
     ))
 }
 
-fn zset_from_listpack_spans(listpack: &[u8]) -> Result<SortedSet, StoreError> {
+/// Returns the built sorted set plus the longest MEMBER byte length it contains.
+/// (frankenredis-3uuan) `refresh_zset_encoding_flag` tests `zs.keys().any(|k| k.len()
+/// > max_listpack_value)` — member lengths only, scores never participate — so this
+/// loop reports `max(member.len())` and the caller skips that re-walk.
+fn zset_from_listpack_spans(listpack: &[u8]) -> Result<(SortedSet, usize), StoreError> {
     let spans = fr_persist::listpack::decode_value_spans(listpack)
         .map_err(|_| StoreError::InvalidDumpPayload)?;
     if !spans.len().is_multiple_of(2) {
@@ -36422,9 +36566,11 @@ fn zset_from_listpack_spans(listpack: &[u8]) -> Result<SortedSet, StoreError> {
     }
 
     let mut pairs: Vec<(&[u8], f64)> = Vec::with_capacity(spans.len() / 2);
+    let mut max_member_len = 0_usize;
     let (span_pairs, _) = spans.as_chunks::<2>();
     for pair in span_pairs {
         let member = pair[0].as_bytes(listpack);
+        max_member_len = max_member_len.max(member.len());
         let score = std::str::from_utf8(pair[1].as_bytes(listpack))
             .ok()
             .and_then(|raw| raw.parse::<f64>().ok())
@@ -36447,10 +36593,13 @@ fn zset_from_listpack_spans(listpack: &[u8]) -> Result<SortedSet, StoreError> {
         }
     }
 
-    Ok(SortedSet::from_unique_borrowed_pairs_with_limits(
-        pairs,
-        SORTED_SET_PACKED_DEFAULT_MAX_ENTRIES,
-        SORTED_SET_PACKED_DEFAULT_MAX_VALUE,
+    Ok((
+        SortedSet::from_unique_borrowed_pairs_with_limits(
+            pairs,
+            SORTED_SET_PACKED_DEFAULT_MAX_ENTRIES,
+            SORTED_SET_PACKED_DEFAULT_MAX_VALUE,
+        ),
+        max_member_len,
     ))
 }
 
@@ -72321,6 +72470,156 @@ mod tests {
             Some(b"value2".to_vec())
         );
         assert_eq!(store.zscore(b"zset", b"a", 100).unwrap(), Some(1.5));
+    }
+
+    // ── (frankenredis-3uuan) RESTORE encoding flags derived from the decode ──────
+    //
+    // The listpack RESTORE arms hand `restore_key_with_metadata` the longest element
+    // they saw so the encoding refresh does not re-walk the object it just built.
+    // Every case below DUMPs from a store with a PERMISSIVE per-value limit (so the
+    // payload really is the listpack-encoded type byte, i.e. the arm under test) and
+    // RESTOREs into a store with a TIGHTER limit, which is the only situation where
+    // the derived bound can disagree with the scan it replaced.
+
+    /// The long element is a VALUE, and every FIELD is short. An implementation that
+    /// maxes over fields only — the natural way to get this wrong — leaves the bound
+    /// at 2 and reports `listpack`.
+    #[test]
+    fn restore_hash_listpack_promotes_on_a_long_value_not_just_a_long_field() {
+        let mut src = Store::new();
+        src.hash_max_listpack_value = 128;
+        src.hset(b"h", b"f1".to_vec(), b"short".to_vec(), 100)
+            .unwrap();
+        src.hset(b"h", b"f2".to_vec(), vec![b'v'; 40], 100).unwrap();
+        assert_eq!(src.object_encoding(b"h", 100), Some("listpack"));
+        let payload = src.dump_key(b"h", 100).expect("hash must dump");
+
+        let mut dst = Store::new();
+        dst.hash_max_listpack_value = 20;
+        dst.restore_key(b"h", 0, &payload, false, 100).unwrap();
+        assert_eq!(
+            dst.object_encoding(b"h", 100),
+            Some("hashtable"),
+            "a 40-byte VALUE exceeds hash-max-listpack-value=20 even though every field is 2 bytes"
+        );
+        assert_eq!(dst.hget(b"h", b"f2", 100).unwrap(), Some(vec![b'v'; 40]));
+    }
+
+    /// Control for the case above: with every field AND value inside the tighter
+    /// limit the restored hash must stay `listpack`. A bound that over-reports (say,
+    /// the payload length) would wrongly promote here.
+    #[test]
+    fn restore_hash_listpack_stays_listpack_when_every_element_fits() {
+        let mut src = Store::new();
+        src.hash_max_listpack_value = 128;
+        src.hset(b"h", b"f1".to_vec(), b"short".to_vec(), 100)
+            .unwrap();
+        src.hset(b"h", b"f2".to_vec(), b"alsoshort".to_vec(), 100)
+            .unwrap();
+        let payload = src.dump_key(b"h", 100).expect("hash must dump");
+
+        let mut dst = Store::new();
+        dst.hash_max_listpack_value = 20;
+        dst.restore_key(b"h", 0, &payload, false, 100).unwrap();
+        assert_eq!(dst.object_encoding(b"h", 100), Some("listpack"));
+    }
+
+    /// The entry-count threshold must still promote on its own, with every element
+    /// comfortably under the per-value limit.
+    #[test]
+    fn restore_hash_listpack_promotes_on_entry_count_alone() {
+        let mut src = Store::new();
+        for i in 0..8 {
+            src.hset(b"h", format!("f{i}").into_bytes(), b"v".to_vec(), 100)
+                .unwrap();
+        }
+        let payload = src.dump_key(b"h", 100).expect("hash must dump");
+
+        let mut dst = Store::new();
+        dst.hash_max_listpack_entries = 4;
+        dst.restore_key(b"h", 0, &payload, false, 100).unwrap();
+        assert_eq!(dst.object_encoding(b"h", 100), Some("hashtable"));
+    }
+
+    /// Zset promotion is driven by MEMBER length only — scores never participate in
+    /// `zset-max-listpack-value`. A long member must promote to `skiplist`.
+    #[test]
+    fn restore_zset_listpack_promotes_on_a_long_member() {
+        let mut src = Store::new();
+        src.zset_max_listpack_value = 128;
+        src.zadd_plain_owned(b"z", vec![(1.0, b"a".to_vec())], 100)
+            .unwrap();
+        src.zadd_plain_owned(b"z", vec![(2.0, vec![b'm'; 40])], 100)
+            .unwrap();
+        assert_eq!(src.object_encoding(b"z", 100), Some("listpack"));
+        let payload = src.dump_key(b"z", 100).expect("zset must dump");
+
+        let mut dst = Store::new();
+        dst.zset_max_listpack_value = 20;
+        dst.restore_key(b"z", 0, &payload, false, 100).unwrap();
+        assert_eq!(dst.object_encoding(b"z", 100), Some("skiplist"));
+        assert_eq!(dst.zscore(b"z", &[b'm'; 40], 100).unwrap(), Some(2.0));
+    }
+
+    /// A zset whose members all fit stays `listpack`. Guards against a bound that
+    /// folded the SCORE bytes into the max: the score of the second member renders
+    /// wider than either member here, and must not decide the encoding.
+    #[test]
+    fn restore_zset_listpack_ignores_score_width() {
+        let mut src = Store::new();
+        src.zadd_plain_owned(b"z", vec![(1.0, b"a".to_vec())], 100)
+            .unwrap();
+        src.zadd_plain_owned(b"z", vec![(1_234_567_890_123.0, b"b".to_vec())], 100)
+            .unwrap();
+        let payload = src.dump_key(b"z", 100).expect("zset must dump");
+
+        let mut dst = Store::new();
+        dst.zset_max_listpack_value = 4;
+        dst.restore_key(b"z", 0, &payload, false, 100).unwrap();
+        assert_eq!(
+            dst.object_encoding(b"z", 100),
+            Some("listpack"),
+            "a 13-digit score must not count against zset-max-listpack-value=4"
+        );
+    }
+
+    /// A restored listpack SET with one over-long member drops to `hashtable`; the
+    /// short-member control stays `listpack`.
+    #[test]
+    fn restore_set_listpack_promotes_on_a_long_member() {
+        let mut src = Store::new();
+        src.set_max_listpack_value = 128;
+        src.sadd(b"s", &[b"a".to_vec(), vec![b'm'; 40]], 100)
+            .unwrap();
+        assert_eq!(src.object_encoding(b"s", 100), Some("listpack"));
+        let payload = src.dump_key(b"s", 100).expect("set must dump");
+
+        let mut tight = Store::new();
+        tight.set_max_listpack_value = 20;
+        tight.restore_key(b"s", 0, &payload, false, 100).unwrap();
+        assert_eq!(tight.object_encoding(b"s", 100), Some("hashtable"));
+        assert!(tight.sismember(b"s", &[b'm'; 40], 100).unwrap());
+
+        let mut loose = Store::new();
+        loose.set_max_listpack_value = 64;
+        loose.restore_key(b"s", 0, &payload, false, 100).unwrap();
+        assert_eq!(loose.object_encoding(b"s", 100), Some("listpack"));
+    }
+
+    /// An all-integer set restores as `intset` regardless of the per-value limit —
+    /// the intset tier is tested BEFORE the listpack length predicate, so the derived
+    /// bound must not short-circuit it.
+    #[test]
+    fn restore_set_listpack_still_reaches_the_intset_tier() {
+        let mut src = Store::new();
+        src.sadd(b"s", &[b"1".to_vec(), b"22".to_vec()], 100)
+            .unwrap();
+        let payload = src.dump_key(b"s", 100).expect("set must dump");
+
+        let mut dst = Store::new();
+        dst.set_max_listpack_value = 1;
+        dst.restore_key(b"s", 0, &payload, false, 100).unwrap();
+        assert_eq!(dst.object_encoding(b"s", 100), Some("intset"));
     }
 
     #[test]
