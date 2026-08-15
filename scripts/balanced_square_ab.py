@@ -284,6 +284,35 @@ def main(argv_in: list[str]) -> int:
     parser.add_argument("--fr-port", type=int, default=27841)
     parser.add_argument("--redis-port", type=int, default=27842)
     parser.add_argument("--client-core", default=None)
+    # (frankenredis-xvq1a) Optional server pinning. The per-arm nulls are each
+    # arm's own first half over its second half — WITHIN-process drift — while the
+    # reported ratio is a CROSS-process comparison, so placement between the two
+    # server processes is a term the nulls structurally cannot see. Whether that
+    # matters is WORKLOAD-DEPENDENT and was measured both ways on this host:
+    #   * RESTORE decode (long ~40ms DEBUG-driven bursts, one connection): a
+    #     cross-process A/A between two identical fr servers scattered 0.918-1.058
+    #     over six invocations; pinning to symmetric core sets collapsed it to
+    #     1.0106 [1.0015, 1.0159] and 1.0081 [0.9847, 1.0260].
+    #   * THIS harness's redis-benchmark workload (-c1 -P16, many short ops):
+    #     unpinned cross-process A/A came out 0.9974 and 1.0106, and PINNING DID
+    #     NOT IMPROVE IT (1.0151 and 0.9896, one row null-failed). So the term is
+    #     ~1% here and these flags buy nothing for the registered shape sets.
+    # They are kept because the RESTORE result shows the term is real for other
+    # workloads, and because a future shape set may be burst-shaped. Off by
+    # default: do not pin without first showing --cross-null needs it.
+    parser.add_argument("--fr-core", default=None,
+                        help="taskset core list for the fr server (e.g. 0-3); "
+                             "measured to buy nothing on the current shape sets")
+    parser.add_argument("--redis-core", default=None,
+                        help="taskset core list for the redis server; use a set "
+                             "symmetric with --fr-core (same CCD, same size)")
+    # Lets the harness MEASURE its own cross-process null instead of assuming it:
+    # run the second arm as another fr, so the reported ratio should be 1.0. This
+    # is the flag that settled the question above, and it is the one worth using.
+    parser.add_argument("--cross-null", action="store_true",
+                        help="replace the redis arm with a SECOND fr server; the "
+                             "reported ratio is then a cross-process A/A and must "
+                             "come out 1.0. Not a competitive row.")
     parser.add_argument("--expect-elf", default=None)
     parser.add_argument("--list", action="store_true")
     args = parser.parse_args(argv_in)
@@ -302,10 +331,20 @@ def main(argv_in: list[str]) -> int:
     if shapes is None:
         raise SystemExit(f"unknown shape set {args.shapes}; try --list")
 
-    fr = subprocess.Popen([args.fr_bin, "--port", str(args.fr_port)],
-                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    redis = subprocess.Popen([REDIS, "--port", str(args.redis_port),
-                              "--save", "", "--appendonly", "no"],
+    def pinned(core: str | None, cmd: list[str]) -> list[str]:
+        return (["taskset", "-c", core] + cmd) if core else cmd
+
+    if (args.fr_core is None) != (args.redis_core is None):
+        parser.error("--fr-core and --redis-core must be given together; pinning "
+                     "one server and not the other is worse than pinning neither")
+
+    fr = subprocess.Popen(
+        pinned(args.fr_core, [args.fr_bin, "--port", str(args.fr_port)]),
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    second_arm = ([args.fr_bin, "--port", str(args.redis_port)] if args.cross_null
+                  else [REDIS, "--port", str(args.redis_port),
+                        "--save", "", "--appendonly", "no"])
+    redis = subprocess.Popen(pinned(args.redis_core, second_arm),
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         wait_ready(args.fr_port)
@@ -319,6 +358,16 @@ def main(argv_in: list[str]) -> int:
         print("== provenance (self-reported from inside the running processes) ==")
         for key, value in prov.items():
             print(f"  {key:24} {value}")
+        if args.cross_null:
+            print("\n== CROSS-PROCESS A/A MODE: the second arm is another fr, so "
+                  "every ratio below must be 1.0. NOT a competitive row. ==")
+        if args.fr_core:
+            print(f"  servers pinned: fr={args.fr_core} redis={args.redis_core}")
+        else:
+            print("  servers unpinned (the per-arm nulls are within-process drift "
+                  "and do not bound cross-process placement; run --cross-null to "
+                  "measure that term rather than assume it — on this workload it "
+                  "measured ~1%)")
         print(f"\nsquare={SQUARE}  rounds={args.rounds}  ops/slot={args.ops}"
               f"  -P{args.pipeline}  null bound +/-{NULL_BOUND}")
 
