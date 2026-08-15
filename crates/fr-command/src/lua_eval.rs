@@ -6258,8 +6258,7 @@ impl<'a> LuaState<'a> {
             RedisIntrinsic::Call => ("redis.call", false),
             RedisIntrinsic::PCall => ("redis.pcall", true),
         };
-        let previous_name =
-            std::mem::replace(&mut self.current_invocation_name, Some(name.to_string()));
+        let previous_name = self.current_invocation_name.replace(name.to_string());
         let previous_method = std::mem::replace(&mut self.current_invocation_is_method, false);
         let result = self.redis_call(args, is_pcall);
         self.current_invocation_name = previous_name;
@@ -6412,33 +6411,6 @@ impl<'a> LuaState<'a> {
                             Some(method),
                         )?;
                         vals.extend(results);
-                    }
-                    Expr::IntrinsicCall(intrinsic, fallback, call_args) => {
-                        // A lowered `redis.call` still occupies a normal Lua
-                        // call-expression slot. In the rare shadowed-global
-                        // case its saved dynamic callee may return multiple
-                        // values, so preserve the trailing-call expansion rule
-                        // instead of routing through `eval_expr` (which keeps
-                        // only the first result).
-                        if self.intrinsic_redis_is_bound(*intrinsic, env) {
-                            let mut arg_vals = self.eval_call_args(call_args, env, varargs)?;
-                            let results = self.call_redis_intrinsic(*intrinsic, &mut arg_vals)?;
-                            self.give_arg_buffer(arg_vals);
-                            vals.extend(results);
-                        } else {
-                            let func = self.eval_expr(fallback, env, varargs)?;
-                            let mut arg_vals = self.eval_call_args(call_args, env, varargs)?;
-                            let results = self.call_function_with_callee(
-                                fallback,
-                                &func,
-                                &mut arg_vals,
-                                env,
-                                varargs,
-                                None,
-                            )?;
-                            self.give_arg_buffer(arg_vals);
-                            vals.extend(results);
-                        }
                     }
                     _ => {
                         vals.push(self.eval_expr(arg, env, varargs)?);
