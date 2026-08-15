@@ -15929,3 +15929,69 @@ with D1 misses moving from 291 toward Redis's 167. **Quote the allocation count
 and the D1 delta, never Ir/op**: this path's own history is eleven shaving levers
 worth 3,806 to 2,807 instructions per call whose largest single member measured
 +0.02% end to end.
+
+## 2026-08-15: FIFTEEN MORE GAP-MEASURED, TEN REJECTED — borrowed-cascade sweep, slice 11 second batch (`frankenredis-ozrro`)
+
+Same instrument, same ELF, same window as the entry above: one binary with
+self-reported sha256
+`017727a9ada7913797321b91a75bd1354f4b7a74a1cfec0d255ba9db93cef6d5` built
+`--features perf-ab-cascade-bypass`, `ctl` walks the cascade and `byp` sets
+`FR_PERF_AB_CASCADE_BYPASS=1`, 2000 ops per arm pipelined 16 deep, counters
+zeroed after seeding and the window read from the dump's `summary:` line. Every
+shape is chosen to leave the keyspace unchanged across its 2000 repetitions so
+both arms see identical state. Generator: command NAMES with no entry in the
+floor classifier, second pass — set and sorted-set algebra, plus the remaining
+common names.
+
+| shape | ctl (instr) | byp (instr) | gap/op | ctl/byp | verdict |
+|---|---:|---:|---:|---:|---|
+| `ZINTER 2 z1 z2` | 31,048,421 | 17,039,737 | 7,004 | 1.82x | TAKE |
+| `ZDIFF 2 z1 z2` | 29,987,729 | 16,011,789 | 6,988 | 1.87x | TAKE |
+| `SDIFFSTORE d1 s1 s2` | 34,915,268 | 21,636,786 | 6,639 | 1.61x | TAKE |
+| `SUNIONSTORE d1 s1 s2` | 37,253,678 | 24,272,320 | 6,491 | 1.53x | TAKE |
+| `SINTERSTORE d1 s1 s2` | 36,210,968 | 23,431,387 | 6,390 | 1.55x | TAKE |
+| `PFMERGE hd hs` | 177,931,971 | 176,200,713 | 866 | 1.01x | REJECT |
+| `GEOADD geo 13.3 38.1 m1` | 17,612,866 | 15,998,233 | 807 | 1.10x | REJECT |
+| `ZRANGESTORE zd z1 0 -1` | 20,987,952 | 19,400,574 | 794 | 1.08x | REJECT |
+| `ZUNION 2 z1 z2` | 21,207,431 | 19,646,845 | 780 | 1.08x | REJECT |
+| `SDIFF s1 s2` | 19,246,377 | 17,691,011 | 778 | 1.09x | REJECT |
+| `SCAN 0` | 14,518,845 | 12,973,297 | 773 | 1.12x | REJECT |
+| `LTRIM lt 0 -1` | 13,936,305 | 12,407,529 | 764 | 1.12x | REJECT |
+| `SUNION s1 s2` | 22,244,574 | 20,721,521 | 762 | 1.07x | REJECT |
+| `RANDOMKEY` | 9,182,281 | 9,246,056 | -32 | 0.99x | REJECT |
+| `RPUSHX lx v` | 7,961,058 | 11,778,768 | -1,909 | 0.68x | REJECT |
+| `GET foo` (control) | 3,088,097 | 3,821,685 | -367 | 0.81x | control |
+
+**THE CONTROL IS THE RUN'S OWN NULL AND IT REPRODUCED.** `GET foo` measured
+-368/op in the first batch and -367/op here, in two independent invocations
+hours apart with servers launched on different ports — one instruction per op of
+drift on a 3,088,097-instruction window. Callgrind counts in software, so an
+identical ELF on an identical shape is expected to reproduce exactly; this is the
+determinism check that a wall-clock harness has to buy with bootstrap CIs.
+
+**THE INTERESTING PAIR IS ZINTER/ZDIFF vs ZUNION.** Same family, same arity, same
+argument shape, and ZINTER (7,004/op) and ZDIFF (6,988) clear the threshold by
+nine times what ZUNION (780) does. That is not noise — it is the cascade's source
+order showing through, and it is the reason this bead classifies by measured
+position rather than by command family. Classifying ZUNION alongside its two
+siblings on the grounds that they look alike would buy nothing and still enlarge
+the match.
+
+`PFMERGE` is the cleanest illustration of the rule that a big command is not a
+big gap: it costs 88,966 instructions per op, thirty times any other row here,
+and its walk is 866 — 1.0% of its own work. `RPUSHX` at 0.68x joins the negative
+group whose routes already sit ahead of the walk (SETEX, GETSET, PEXPIRE,
+PEXPIREAT, HINCRBYFLOAT, LPUSHX, DUMP, RPOPLPUSH, `EXPIRE k ttl NX`).
+
+**RUNNING TOTAL FOR SLICE 11: 31 commands gap-measured, 11 clear the 1,400
+instr/op threshold, 20 rejected.** Against the bead's pre-committed prediction
+that one more sweep would come back mostly negative and justify closing, an 11/31
+hit rate with two rows above 7,000 instr/op says the opposite. Still unlanded for
+the same reason as the first batch — a peer holds an uncommitted 73-arm deletion
+in the same function — and all eleven will be RE-MEASURED on a post-cut ELF
+before any is classified, because deleting 73 arms shortens every walk and these
+gaps are therefore UPPER BOUNDS on the tree they will land in. Retry predicate:
+after the 73-arm deletion lands, rebuild the bypass ELF from that commit and
+re-run `cascade_gap.py --ops 2000` over the eleven; classify a command only if
+its post-cut gap still clears 1,400 instructions per op, and record the ones that
+fall below it as rejections of the pre-cut numbers.
