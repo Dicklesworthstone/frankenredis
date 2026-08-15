@@ -6027,31 +6027,9 @@ impl<'a> LuaState<'a> {
                 self.give_arg_buffer(arg_vals);
                 Ok(results.into_iter().next().unwrap_or(LuaValue::Nil))
             }
-            Expr::IntrinsicCall(intrinsic, fallback, args) => {
-                if self.intrinsic_redis_is_bound(*intrinsic, env) {
-                    let mut arg_vals = self.eval_call_args(args, env, varargs)?;
-                    let results = self.call_redis_intrinsic(*intrinsic, &mut arg_vals);
-                    self.give_arg_buffer(arg_vals);
-                    return results
-                        .map(|values| values.into_iter().next().unwrap_or(LuaValue::Nil));
-                }
-
-                // A custom function environment can shadow `redis`.  Keep the
-                // original field expression in the lowered node and route that
-                // rare case through precisely the old dynamic evaluator.
-                let func = self.eval_expr(fallback, env, varargs)?;
-                let mut arg_vals = self.eval_call_args(args, env, varargs)?;
-                let results = self.call_function_with_callee(
-                    fallback,
-                    &func,
-                    &mut arg_vals,
-                    env,
-                    varargs,
-                    None,
-                );
-                self.give_arg_buffer(arg_vals);
-                results.map(|values| values.into_iter().next().unwrap_or(LuaValue::Nil))
-            }
+            Expr::IntrinsicCall(intrinsic, fallback, args) => self
+                .eval_intrinsic_call(*intrinsic, fallback, args, env, varargs)
+                .map(|values| values.into_iter().next().unwrap_or(LuaValue::Nil)),
             Expr::MethodCall(obj_expr, method, args) => {
                 let obj = self.eval_expr(obj_expr, env, varargs)?;
                 let func = match &obj {
@@ -6127,6 +6105,10 @@ impl<'a> LuaState<'a> {
                                             None,
                                         )?
                                     }
+                                    Expr::IntrinsicCall(intrinsic, fallback, call_args) => self
+                                        .eval_intrinsic_call(
+                                            *intrinsic, fallback, call_args, env, varargs,
+                                        )?,
                                     Expr::MethodCall(obj_expr, method, call_args) => {
                                         let obj = self.eval_expr(obj_expr, env, varargs)?;
                                         let func = match &obj {
@@ -6287,6 +6269,35 @@ impl<'a> LuaState<'a> {
         result
     }
 
+    /// Evaluate the lowered call in a context that preserves all Lua return
+    /// values.  `eval_expr` takes only the first value, while trailing calls in
+    /// assignments, returns, and table constructors expand the full vector.
+    fn eval_intrinsic_call(
+        &mut self,
+        intrinsic: RedisIntrinsic,
+        fallback: &Expr,
+        args: &[Expr],
+        env: &mut Env,
+        varargs: &mut Vec<LuaValue>,
+    ) -> Result<Vec<LuaValue>, String> {
+        if self.intrinsic_redis_is_bound(intrinsic, env) {
+            let mut arg_vals = self.eval_call_args(args, env, varargs)?;
+            let results = self.call_redis_intrinsic(intrinsic, &mut arg_vals);
+            self.give_arg_buffer(arg_vals);
+            return results;
+        }
+
+        // A custom function environment can shadow `redis`. Keep the original
+        // field expression in the lowered node and route that rare case through
+        // precisely the old dynamic evaluator, including multi-value returns.
+        let func = self.eval_expr(fallback, env, varargs)?;
+        let mut arg_vals = self.eval_call_args(args, env, varargs)?;
+        let results =
+            self.call_function_with_callee(fallback, &func, &mut arg_vals, env, varargs, None);
+        self.give_arg_buffer(arg_vals);
+        results
+    }
+
     /// (frankenredis-a0wt5) Borrow a cleared call-argument buffer.
     fn take_arg_buffer(&mut self) -> Vec<LuaValue> {
         self.arg_scratch.pop().unwrap_or_default()
@@ -6328,7 +6339,7 @@ impl<'a> LuaState<'a> {
         // Index or a literal. The slow path below is untouched.
         if !matches!(
             args.last(),
-            Some(Expr::VarArgs | Expr::Call(..) | Expr::MethodCall(..))
+            Some(Expr::VarArgs | Expr::Call(..) | Expr::IntrinsicCall(..) | Expr::MethodCall(..))
         ) {
             for arg in args {
                 let value = self.eval_expr(arg, env, varargs)?;
@@ -6357,6 +6368,13 @@ impl<'a> LuaState<'a> {
                             None,
                         )?;
                         vals.extend(results);
+                    }
+                    Expr::IntrinsicCall(intrinsic, fallback, call_args) => {
+                        vals.extend(
+                            self.eval_intrinsic_call(
+                                *intrinsic, fallback, call_args, env, varargs,
+                            )?,
+                        );
                     }
                     Expr::MethodCall(obj_expr, method, call_args) => {
                         let obj = self.eval_expr(obj_expr, env, varargs)?;
