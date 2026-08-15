@@ -16329,3 +16329,84 @@ tree can only reproduce it, and it already reproduced across two invocations.
    `Finished release-perf profile ... in 2m 46s`, which reads as success. Two builds
    were spent before the directory was checked. Use `--release` with
    `--config profile.release.strip=false --config profile.release.debug=1`.
+
+---
+
+## 2026-08-15 BlackThrush: REJECTED — per-round best-of-6 estimator does not rescue the RESTORE competitive A/A; the blocker is core placement, not noise (`frankenredis-xvq1a`)
+
+Claim class: COMPETITIVE. Campaign output: yes.
+
+**Lever, hypothesis, result, why rejected, in one line:** replace the median with a
+per-round minimum in `collection_reload_headtohead.py --competitive`, on the theory
+that timing noise is one-sided so the minimum is the robust estimator (the recipe
+that fixed the fr-store A/B family in `1131ab350`) — A/A moved 0.919 → 0.967 at 30
+trials then **back to 0.927 at 72**, i.e. it did not converge; rejected and reverted,
+because the minimum is right for noise ADDED to a shared fixed cost and cannot help
+when the two arms have DIFFERENT fixed costs.
+
+### What was actually wrong
+
+`--competitive` was refusing every verdict: **six consecutive invocations** with the
+two-process A/A null at 0.918, 0.933, 0.967, 1.026, 1.057, 0.978 against its
+0.98..1.02 band. The null was moving more than the 0.44-0.50 effect it exists to
+gate, and raising trials from 9 to 30 to 72 did not converge it — the tell that the
+term is not sampling noise.
+
+That A/A compares two separate fr PROCESSES, so it nulls the engine and the
+process's core placement together. Splitting ONE arm's own trials into halves —
+same process, same core, same warmed allocator — gives a drift null of **1.013 and
+0.995**, so the engine is steady and essentially all the scatter is placement. On a
+32-core 4-CCD part an unpinned pair lands wherever the scheduler puts it.
+
+**The fix is operational, not statistical.** Pin the three servers to symmetric core
+sets (`taskset -c 0-3` / `-c 4-7` / `-c 8-11`) and it authenticates on the first
+attempt and reproduces.
+
+### Authenticated competitive row
+
+Three live arms in one invocation, arm order rotated over all six permutations in
+whole rounds, host loadavg 11-17 throughout, governor `powersave`, AVX2, 64 threads
+observed. Running server ELF, self-reported sha256
+`aa85ba7b8ac8b4d91df7ece3a84748ab2f0e0498c900c0900087305f5fa4292b`; vendored Redis
+7.2.4 binary sha256
+`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`.
+
+| run | same-invocation A/A null (fr_a/fr_b) | A/B redis/fr |
+|---|---|---|
+| 1 | median 1.010558, bootstrap 95% median CI [1.001541, 1.015901] | 0.521151, CI [0.507288, 0.535630] |
+| 2 | median 1.008119, bootstrap 95% median CI [0.984687, 1.025978] | 0.479870, CI [0.473905, 0.491916] |
+
+GATE: the bootstrap median-CI on that same-invocation A/A is the decision rule —
+a null outside 0.98..1.02 refuses the row, which is exactly what happened on all six
+unpinned attempts. **CV is diagnostic only and was never used as a gate here.**
+
+**RESTORE decode on a collection-heavy DB (2000 hashes + 2000 sets + 2000 zsets, 40
+string members each) is 0.48-0.52x vs vendored Redis 7.2.4** — Redis is roughly
+1.9-2.1x faster. This is a DIFFERENT and less severe cell than the 0.31-0.41x on
+record; it is not a contradiction of it, it is a different shape, and neither number
+may be quoted for the other.
+
+### Second defect found and fixed: the balancing was not the balancing performed
+
+The self-test asserts each arm occupies each position exactly twice across the six
+arm orders, but that property only reaches the RUN when `TRIALS` is a multiple of
+six — and **the default of 9 is not**, so orders 0..2 ran twice and 3..5 once. Trials
+are now grouped into whole rounds.
+
+### Retry predicate
+
+Revisit only if one of these changes: the host gains a quiescence guarantee or an
+isolated cpuset, in which case re-take unpinned to see whether pinning is still
+required and whether the A/B moves; or the RESTORE decode path lands a structural
+change (typed `RdbValue::IntSet` carriage, listpack streaming), in which case this
+0.48-0.52x row is stale and must be re-taken pinned before any improvement is
+claimed against it. Do not retry unless one holds — six unpinned attempts already
+established that more trials alone will not authenticate this row.
+
+### REUSABLE: a null must null the same KIND of comparison as the A/B
+
+The same-process drift null is printed but deliberately NOT wired to the verdict.
+Authenticating a cross-process A/B on a within-process A/A would be gate
+self-weakening: it would null drift while leaving the placement term — the term that
+actually dominates here — entirely uncontrolled. Its value is diagnostic, and it is
+what identified the fix, because the gap between the two nulls IS the placement term.
