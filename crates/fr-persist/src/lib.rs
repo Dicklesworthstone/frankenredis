@@ -3441,13 +3441,20 @@ fn lzf_compress_core<const SIMD: bool, T: LzfHashTable>(
             let r = (stored - 1) as usize;
             // ref > in_data (r >= 1); off = ip-ref-1 < MAX_OFF;
             // ref[0..2] == ip[0..2] (u16 + 3rd byte in C).
-            if r >= 1
-                && r < ip
-                && ip - r - 1 < MAX_OFF
-                && input[r + 2] == input[ip + 2]
-                && input[r] == input[ip]
-                && input[r + 1] == input[ip + 1]
-            {
+            //
+            // The three-byte agreement is fetched as two SLICES rather than six
+            // individually indexed bytes: this is the hottest test in the
+            // compressor (every position with a table hit runs it), and the
+            // indexed form pays a separate bounds check per byte where the slice
+            // form pays one range check per side and lets the comparison happen a
+            // word at a time — which is what vendored lzf_c.c does with its
+            // `*(u16 *)ref == *(u16 *)ip && ref[2] == ip[2]`. Both slices are in
+            // range whenever the preceding guards hold: the loop keeps
+            // `ip < in_len - 2`, so `ip + 3 <= in_len`, and `r < ip` gives
+            // `r + 3 <= in_len`. Equality of the same three bytes is the same
+            // predicate — only the evaluation ORDER of the byte comparisons
+            // changes, which no caller can observe. (frankenredis-qj6jn)
+            if r >= 1 && r < ip && ip - r - 1 < MAX_OFF && input[r..r + 3] == input[ip..ip + 3] {
                 let off = ip - r - 1;
                 // len starts at 2; maxlen = in_end - ip - 2, capped MAX_REF.
                 let maxlen = std::cmp::min(MAX_REF, in_len - ip - 2);
