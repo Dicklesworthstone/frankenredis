@@ -3334,7 +3334,12 @@ pub struct LuaState<'a> {
     /// Pushed/restored by `call_function_with_callee` and explicitly
     /// cleared by `pcall`/`xpcall` around their protected callback.
     /// (frankenredis-557p3)
-    current_invocation_name: Option<String>,
+    // (frankenredis-w08xv) `Cow`, not `String`: the redis.call/redis.pcall path
+    // sets this on EVERY intrinsic invocation, and a `String` there heap-copied
+    // a 'static name once per call — 50 allocations per EVAL op of a 50-call
+    // script, measured by counting callgrind's `calls=` records into the
+    // allocator. The AST-derived names on the cold path are still owned.
+    current_invocation_name: Option<Cow<'static, str>>,
     /// True when the current invocation entered via method-style call
     /// `t:f(args)` — Lua desugars this to `t.f(t, args...)` and
     /// reports arg #1 type errors with the `'calling 'f' on bad self
@@ -6258,7 +6263,7 @@ impl<'a> LuaState<'a> {
             RedisIntrinsic::Call => ("redis.call", false),
             RedisIntrinsic::PCall => ("redis.pcall", true),
         };
-        let previous_name = self.current_invocation_name.replace(name.to_string());
+        let previous_name = self.current_invocation_name.replace(Cow::Borrowed(name));
         let previous_method = std::mem::replace(&mut self.current_invocation_is_method, false);
         let result = self.redis_call(args, is_pcall);
         self.current_invocation_name = previous_name;
@@ -7227,16 +7232,22 @@ impl<'a> LuaState<'a> {
     /// bad-argument errors. Mirrors Lua 5.1's `lua_getinfo` "n.name":
     /// the variable used to invoke the function, not the function's
     /// internal name. (frankenredis-557p3)
-    fn ast_call_name(&self, callee_expr: &Expr, method_override: Option<&str>) -> Option<String> {
+    fn ast_call_name(
+        &self,
+        callee_expr: &Expr,
+        method_override: Option<&str>,
+    ) -> Option<Cow<'static, str>> {
         if let Some(m) = method_override {
-            return Some(m.to_string());
+            return Some(Cow::Owned(m.to_string()));
         }
         match callee_expr {
-            Expr::Name(n) => Some(n.to_string()),
-            Expr::LocalName(n, _) => Some(n.to_string()),
-            Expr::Field(_, f) => Some(f.to_string()),
+            Expr::Name(n) => Some(Cow::Owned(n.to_string())),
+            Expr::LocalName(n, _) => Some(Cow::Owned(n.to_string())),
+            Expr::Field(_, f) => Some(Cow::Owned(f.to_string())),
             Expr::Index(_, key) => match key.as_ref() {
-                Expr::Str(s) if !s.is_empty() => std::str::from_utf8(s).ok().map(str::to_string),
+                Expr::Str(s) if !s.is_empty() => std::str::from_utf8(s)
+                    .ok()
+                    .map(|name| Cow::Owned(name.to_string())),
                 _ => None,
             },
             _ => None,
@@ -9034,7 +9045,7 @@ impl<'a> LuaState<'a> {
                 // lua_format_argerror; the luaL_error wrong-arity uses
                 // a conditional-prefix helper because it has no name
                 // in the message.
-                let inv_owned: Option<String> = self.current_invocation_name.clone();
+                let inv_owned: Option<Cow<'static, str>> = self.current_invocation_name.clone();
                 let inv = inv_owned.as_deref();
                 let number_expected = |arg_idx: usize, got: &LuaValue| -> String {
                     lua_format_argerror(
@@ -9729,7 +9740,7 @@ impl<'a> LuaState<'a> {
                 ])
             }
             "string.gsub" => {
-                let inv_owned: Option<String> = self.current_invocation_name.clone();
+                let inv_owned: Option<Cow<'static, str>> = self.current_invocation_name.clone();
                 let inv = inv_owned.as_deref();
                 let s = lua_check_string(inv, args, 0, "gsub")?;
                 let pattern = lua_check_string(inv, args, 1, "gsub")?;
