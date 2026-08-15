@@ -16807,3 +16807,60 @@ moves outside [0.98, 1.02] — at 1.0095 it currently consumes most of the appar
 margin, so any growth in that term would turn this parity row back into a loss,
 and any harness change that shrinks it below ~0.5% would be what finally settles
 whether the remaining ~2% is real.
+
+---
+
+## 2026-08-15 BlackCat: REJECT x9 — the unmeasured no-classifier commands are a spent depth band; only ZRANDMEMBER cleared the bar (`frankenredis-ozrro`)
+
+Swept every command with no `BorrowedDispatchFloorClass` entry that no previous
+slice had measured. Harness: CrimsonHawk's `cascade_gap.py` (callgrind, 2000 ops,
+-P16, ctl = cascade walked, byp = `FR_PERF_AB_CASCADE_BYPASS=1`, same ELF for
+both arms), bypass-feature ELF built clean-HEAD on rch worker vmi1293453,
+thinkstation1 / Threadripper PRO 5975WX / powersave / valgrind 3.25.1. Take
+threshold 1,400 instructions per op, as used by slice 11.
+
+| shape | ctl | byp | gap/op | ratio | verdict |
+|---|---|---|---|---|---|
+| ZRANDMEMBER | 17,306,557 | 5,673,588 | +5,816 | 3.05 | **TAKEN** (f7a7f7c14) |
+| HSETNX | 14,127,592 | 12,840,246 | +644 | 1.10 | REJECT |
+| SETNX | 12,673,751 | 11,413,513 | +630 | 1.11 | REJECT |
+| LSET | 14,755,800 | 13,700,482 | +528 | 1.08 | REJECT |
+| PERSIST | 11,062,608 | 11,185,682 | -62 | 0.99 | REJECT |
+| INCRBYFLOAT | 18,246,928 | 19,231,400 | -492 | 0.95 | REJECT |
+| HINCRBYFLOAT | 18,163,988 | 19,255,736 | -546 | 0.94 | REJECT |
+| SUBSTR | 11,461,709 | 12,608,354 | -573 | 0.91 | REJECT |
+| PSETEX | 16,586,032 | 18,015,310 | -715 | 0.92 | REJECT |
+| EXPIREAT | 12,127,875 | 16,067,378 | -1,970 | 0.75 | REJECT |
+
+HYPOTHESIS: the commands left unclassified after twelve slices still carry a walk
+worth front-classifying. MEASURED: one in ten does. WHY REJECTED: six of the nine
+have a NEGATIVE gap, meaning bypassing the cascade makes them SLOWER — their
+routes are already correctly placed near the front and beat the generic path by
+more than the walk costs, so classifying them would trade a good route for a
+worse one. The three positive rows (HSETNX +644, SETNX +630, LSET +528) are all
+under half the take threshold.
+
+The nine cluster in the same depth band that already produced SETEX 0.93x,
+GETSET 0.65x, PEXPIRE 0.73x and PEXPIREAT 0.86x in earlier slices. That is now
+four independent sweeps agreeing that the band around lines ~9,400-10,000 of the
+chain is spent, which bounds the remaining upside on this bead: it is not "339
+arms of prize left", it is a short tail of deep, mostly-uncommon shapes.
+
+Do not re-measure these nine. If a future slice wants more from this bead, the
+generator that still works is the STRUCTURAL one — take shapes from the LAST
+third of the chain by source order — and check `BorrowedDispatchFloorClass`
+first, because position in the file is not the same as being walked.
+
+RETRY PREDICATE (measurable, per shape): do not retry unless one of
+these two conditions holds; re-measure one of these nine only if
+its walked-vs-bypassed gap would have moved, which happens on exactly two
+conditions. (1) Its arm's POSITION changes — the chain is walked in source
+order, so any slice that inserts or deletes arms ahead of it moves its walk; the
+observable trigger is the arm's first-occurrence line in
+`process_buffered_frames` moving by more than 500 lines from the value recorded
+in this sweep (HSETNX 9,846; SETNX 9,702; LSET 9,869; PERSIST 9,419;
+INCRBYFLOAT 9,722; HINCRBYFLOAT 9,915; SUBSTR 9,116; PSETEX 9,824;
+EXPIREAT 8,787). (2) Its own borrowed ROUTE changes — a negative gap says the
+route beats generic by more than the walk costs, so a commit touching that
+command's `parse_borrowed_plain_*` parser or its `execute_plain_*` executor
+invalidates the row. Absent either, the number stands and a re-run is waste.
