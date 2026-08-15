@@ -16697,3 +16697,52 @@ cross-process A/A moves outside [0.96, 1.04], or if the GET control clears its
 null in both invocations and still shows more than 2% drift, either of which
 would mean the 7.0% pre-to-post difference is no longer safely larger than the
 terms the nulls do not bound.
+
+## 2026-08-15: REJECTED ON MECHANISM — `LuaValue::Str` → `Rc<[u8]>` would RELOCATE the allocation, not remove it, on any redis.call-shaped workload (`frankenredis-w08xv`)
+
+This supersedes the noise-floor rejection of the same lever recorded earlier
+today (`dc57a78af`), which rejected it as too small to measure. The stronger
+reason is that on this workload it removes nothing at all, and the earlier entry
+did not establish that.
+
+Claim class: SELF-SPEEDUP. Campaign output: no. This is a rejection of a proposed
+change, not a ratio against the incumbent.
+
+**Counted mechanism.** `lua_stall_census.py` attributes, per EVAL op of
+`for i=1,50 do redis.call('GET', KEYS[1]) end`, exactly 50.0 allocations to
+`eval_expr'2` (materializing the `'GET'` string literal) and exactly 50.0 to
+`<LuaValue as Clone>::clone` (reading `KEYS[1]` out of its table). Those 100 are
+the two sites the Rc conversion was supposed to delete.
+
+**Why it deletes neither.** `LuaValue::take_redis_arg` is
+`LuaValue::Str(s) => Ok(std::mem::take(s))` — it MOVES the byte buffer out of the
+Lua value and into `argv: Vec<Vec<u8>>`, which is what `dispatch_argv` requires.
+So today each argument costs exactly ONE allocation, made when the value is
+materialized and then handed onward. Under `Rc<[u8]>` the materialization becomes
+a refcount bump and costs nothing — but `take_redis_arg` can no longer move, and
+must call `to_vec()` to produce the owned bytes dispatch needs. The allocation
+moves from `eval_expr` to `take_redis_arg` and the count is unchanged. A 235-site
+type change across a 26,474-line file would buy zero allocations on the workload
+that motivated it.
+
+**Where it would pay, stated so the idea is not lost:** Lua strings that are read
+repeatedly WITHOUT being handed to `redis.call` — string manipulation, table keys,
+values compared or concatenated in a loop. This workload has none of those, and
+no measurement of such a workload exists, so no size is claimed for it.
+
+**What this implies about the remaining floor.** With `dispatch_argv` taking
+`&[Vec<u8>]`, an argument that reaches Redis costs one allocation no matter how
+the interpreter represents strings. At two arguments per call that is 100
+allocations per EVAL op of this shape, plus 50 more where `Store::get` copies the
+stored value into an owned reply frame. The measured 191.1 allocations per op
+after the two levers landed today is therefore within ~40 of the floor imposed by
+the dispatch signature itself. **The next real lever on this path is a borrowed or
+refcounted argv contract across `fr-command`/`fr-store`, not a change of interior
+string type** — and that is a cross-crate architectural change that should be
+sized before it is started.
+
+Retry predicate: reopen if `dispatch_argv` and the store's reply path gain a
+borrowed or `Rc`-backed argument contract, at which point the interior string type
+becomes load-bearing and this lever should be re-measured on a string-heavy script
+rather than a redis.call-heavy one; or if a profiled real-world script shows Lua
+string values being read many times without reaching dispatch.
