@@ -16746,3 +16746,64 @@ borrowed or `Rc`-backed argument contract, at which point the interior string ty
 becomes load-bearing and this lever should be re-measured on a string-heavy script
 rather than a redis.call-heavy one; or if a profiled real-world script shows Lua
 string values being read many times without reaching dispatch.
+
+## 2026-08-15: KEEP (COMPETITIVE) — EVAL 50x `redis.call('GET')` reaches PARITY with vendored Redis 7.2.4, 1.0283x raw and ~1.019x bias-corrected (`frankenredis-w08xv`)
+
+Claim class: COMPETITIVE. Campaign output: yes. The row is FrankenRedis against a
+live vendored Redis 7.2.4 arm in the SAME invocation, interleaved by the balanced
+square, with its own A/A null.
+
+**Harness:** `scripts/balanced_square_ab.py`, square `ABBAABBA`, 21 rounds,
+50,000 ops/slot, `-P16`, null bound ±0.02, bootstrap 95% CI, servers unpinned.
+**Host:** thinkstation1, 64 cores, governor `powersave`, AVX2; the benchmark runs
+LOCALLY and rch is used only to compile. **Build worker:** `vmi1153651`.
+**Running images, self-reported by the benchmarked processes from inside
+themselves:** fr ELF, self-reported sha256
+`8881296aaaa74f6c9b1e...` (full 64-hex recorded by the harness at run time as
+`8881296aaaa74f6c9b1e` prefix of the executing image); vendored 7.2.4 ELF,
+self-reported sha256
+`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`.
+
+| row | fr/Redis | bootstrap 95% CI | null redis | null fr | verdict |
+|---|---:|---|---:|---:|---|
+| EVAL 50x GET | **1.0283x** | [1.0028, 1.0450] | 1.0015 | 1.0115 | ADMISSIBLE |
+| GET control | 1.1117x | [1.0918, 1.1385] | 1.0000 | 0.9988 | ADMISSIBLE |
+
+**THE RAW ROW OVERSTATES THE RESULT AND THE A/A SAYS SO.** Re-running the same
+square with `--cross-null`, which replaces the Redis arm with a SECOND instance of
+the identical fr ELF so the ratio IS a cross-process A/A, gives **median 1.0095,
+bootstrap 95% CI [0.9923, 1.0152]** on the same workload, host and hour. Two
+identical images therefore differ by about 1% in fr's favour purely from arm
+position — a term the per-arm within-process nulls structurally cannot see.
+Dividing the A/B through by it gives **~1.019x with an interval of roughly
+[0.993, 1.035], which STRADDLES 1.0**.
+
+**So the honest verdict is PARITY, not a win.** "FrankenRedis is faster at EVAL"
+is NOT established by this row and must not be quoted from it. What IS established
+is the move: this workload measured 0.8524x on 2026-08-14, 0.8906x on the
+pre-lever ELF earlier today, 0.9528x after two levers, and 1.0283x raw here — a
+gap that was a clear, repeatedly-reproduced loss is now indistinguishable from
+even.
+
+**What produced it, as a bundle with no per-member attribution:** five levers
+landed today, all on the allocation and per-EVAL setup surface —
+`86410de15` (intrinsic invocation name stops heap-copying a 'static str),
+`47ea344d0` (redis.call returns one value rather than a one-element Vec),
+`ddfc031c8` (coroutine table built once in the shared template, which was also a
+readonly-parity fix), `3b32c3a7c` (table-driven hex), `faaf48d5c` (SHA-1 round
+loop unrolled into four fixed-function groups). Counted with
+`lua_stall_census.py`: allocations per 50-call EVAL op 291.1 → 175.1, and for a
+ONE-call EVAL 41.1 → 25.1 allocations and 24,523 → 17,433 instructions. On that
+one-call shape fr now retires 17,433 instructions against vendored 7.2.4's 17,413
+— 0.1% apart, which is an instruction count and not a throughput claim.
+
+**CV is diagnostic only and was never used as a gate here.** The bootstrap
+median-CI gate against the ±0.02 null bound determined every verdict above.
+
+Retry predicate: re-take this row if `balanced_square_ab.py` changes its square or
+windowing, and upgrade it when the harness can carry two fr binaries so pre and
+post run as arms of ONE square. Reopen and re-measure if the cross-process A/A
+moves outside [0.98, 1.02] — at 1.0095 it currently consumes most of the apparent
+margin, so any growth in that term would turn this parity row back into a loss,
+and any harness change that shrinks it below ~0.5% would be what finally settles
+whether the remaining ~2% is real.
