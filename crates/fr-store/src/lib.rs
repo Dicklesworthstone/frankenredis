@@ -37134,25 +37134,43 @@ fn sha1_hex(data: &[u8]) -> String {
         }
 
         let (mut a, mut b, mut c, mut d, mut e) = (h0, h1, h2, h3, h4);
+        // (frankenredis-w08xv) Four fixed-function groups rather than one
+        // 80-iteration loop that re-decides `(f, k)` with a four-arm `match i`
+        // every round. The round function is constant within each group of
+        // twenty by definition of SHA-1, so the branch was pure overhead — 80
+        // of them per 64-byte block. Vendored Redis unrolls the same way
+        // (sha1.c's R0/R1/R2/R3/R4 macros). Identical arithmetic, so the digest
+        // is unchanged and the published-vector test above proves it.
+        macro_rules! sha1_round {
+            ($i:expr, $f:expr, $k:expr) => {{
+                let temp = a
+                    .rotate_left(5)
+                    .wrapping_add($f)
+                    .wrapping_add(e)
+                    .wrapping_add($k)
+                    .wrapping_add(w[$i]);
+                e = d;
+                d = c;
+                c = b.rotate_left(30);
+                b = a;
+                a = temp;
+            }};
+        }
         #[allow(clippy::needless_range_loop)]
-        for i in 0..80 {
-            let (f, k) = match i {
-                0..=19 => ((b & c) | ((!b) & d), 0x5A82_7999u32),
-                20..=39 => (b ^ c ^ d, 0x6ED9_EBA1u32),
-                40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1B_BCDCu32),
-                _ => (b ^ c ^ d, 0xCA62_C1D6u32),
-            };
-            let temp = a
-                .rotate_left(5)
-                .wrapping_add(f)
-                .wrapping_add(e)
-                .wrapping_add(k)
-                .wrapping_add(w[i]);
-            e = d;
-            d = c;
-            c = b.rotate_left(30);
-            b = a;
-            a = temp;
+        for i in 0..20 {
+            sha1_round!(i, (b & c) | ((!b) & d), 0x5A82_7999u32);
+        }
+        #[allow(clippy::needless_range_loop)]
+        for i in 20..40 {
+            sha1_round!(i, b ^ c ^ d, 0x6ED9_EBA1u32);
+        }
+        #[allow(clippy::needless_range_loop)]
+        for i in 40..60 {
+            sha1_round!(i, (b & c) | (b & d) | (c & d), 0x8F1B_BCDCu32);
+        }
+        #[allow(clippy::needless_range_loop)]
+        for i in 60..80 {
+            sha1_round!(i, b ^ c ^ d, 0xCA62_C1D6u32);
         }
         h0 = h0.wrapping_add(a);
         h1 = h1.wrapping_add(b);
