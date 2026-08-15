@@ -3067,10 +3067,120 @@ pub fn bench_lzf_compress<const SIMD: bool>(input: &[u8], out_budget: usize) -> 
     })
 }
 
+/// Same-binary A/B hook for the match-table dispatch.
+///
+/// `HOIST == true` is production (representation chosen once per call, probes go
+/// to a fixed-size array); `HOIST == false` is the prior path (a `use_packed`
+/// test and a slice bounds check on every probe). Both arms MUST return
+/// byte-identical output — that equality is asserted by
+/// `lzf_table_hoist_matches_dynamic_probe_arm` and by the bench itself.
+#[doc(hidden)]
+pub fn bench_lzf_compress_table<const HOIST: bool>(
+    input: &[u8],
+    out_budget: usize,
+) -> Option<Vec<u8>> {
+    LZF_SCRATCH.with(|scratch| {
+        lzf_compress_dispatch::<true, HOIST>(input, out_budget, &mut scratch.borrow_mut())
+    })
+}
+
 #[derive(Clone, Copy, Default)]
 struct LzfHashSlot {
     generation: u32,
     pos_plus_one: u32,
+}
+
+/// liblzf VERY_FAST hash geometry, shared by the compressor and its table views.
+const LZF_HLOG: u32 = 16;
+const LZF_HSIZE: usize = 1 << LZF_HLOG; // 65536
+
+/// liblzf VERY_FAST: `IDX(h) = ((h >> (24 - HLOG)) - h*5) & (HSIZE-1)`.
+///
+/// The mask is what makes every table access provably in range of an
+/// `[_; LZF_HSIZE]`, which is why the table views below index a fixed-size array
+/// rather than a slice.
+#[inline]
+fn lzf_idx(h: u32) -> usize {
+    (((h >> (24 - LZF_HLOG)).wrapping_sub(h.wrapping_mul(5))) & (LZF_HSIZE as u32 - 1)) as usize
+}
+
+/// The compressor's match-position table, abstracted so the hot loop is
+/// monomorphised over ONE table representation instead of re-testing
+/// `LzfScratch::use_packed` on every probe.
+///
+/// LZF probes the table twice per input position (one `get`, one `set`) plus
+/// twice more per emitted match, so a representation test inside the accessors
+/// is paid ~2n times per compressed value. The mode is decided once per call
+/// (it depends only on `in_len`), which is exactly the shape a const-generic
+/// dispatch collapses. Every implementor stores and returns the same values in
+/// the same order, so the compressed bytes are identical whichever is chosen.
+trait LzfHashTable {
+    fn get(&self, index: usize, generation: u32) -> u32;
+    fn set(&mut self, index: usize, generation: u32, pos_plus_one: u32);
+}
+
+/// Packed table view (`in_len < 16 MiB`): `(gen8 << 24) | pos_plus_one`.
+/// Indexing a `&mut [u32; LZF_HSIZE]` with a value the caller masked to
+/// `LZF_HSIZE - 1` lets the bounds check fold away, unlike the `Vec` deref.
+struct LzfPackedTable<'a>(&'a mut [u32; LZF_HSIZE]);
+
+impl LzfHashTable for LzfPackedTable<'_> {
+    #[inline]
+    fn get(&self, index: usize, generation: u32) -> u32 {
+        let slot = self.0[index];
+        if (slot >> 24) == (generation & 0xFF) {
+            slot & 0x00FF_FFFF
+        } else {
+            0
+        }
+    }
+
+    #[inline]
+    fn set(&mut self, index: usize, generation: u32, pos_plus_one: u32) {
+        self.0[index] = ((generation & 0xFF) << 24) | (pos_plus_one & 0x00FF_FFFF);
+    }
+}
+
+/// Wide table view (`in_len >= 16 MiB`), where `pos_plus_one` no longer fits the
+/// packed 24-bit field.
+struct LzfWideTable<'a>(&'a mut [LzfHashSlot; LZF_HSIZE]);
+
+impl LzfHashTable for LzfWideTable<'_> {
+    #[inline]
+    fn get(&self, index: usize, generation: u32) -> u32 {
+        let slot = self.0[index];
+        if slot.generation == generation {
+            slot.pos_plus_one
+        } else {
+            0
+        }
+    }
+
+    #[inline]
+    fn set(&mut self, index: usize, generation: u32, pos_plus_one: u32) {
+        self.0[index] = LzfHashSlot {
+            generation,
+            pos_plus_one,
+        };
+    }
+}
+
+/// The pre-change accessor pair: one runtime `use_packed` test and one slice
+/// bounds check per probe. Retained in-crate (like `entry_len_with_backlen_orig`)
+/// so the same binary can measure both arms, and as the fallback if the scratch
+/// vectors are ever not exactly `LZF_HSIZE` long.
+struct LzfDynTable<'a>(&'a mut LzfScratch);
+
+impl LzfHashTable for LzfDynTable<'_> {
+    #[inline]
+    fn get(&self, index: usize, generation: u32) -> u32 {
+        self.0.get(index, generation)
+    }
+
+    #[inline]
+    fn set(&mut self, index: usize, generation: u32, pos_plus_one: u32) {
+        self.0.set(index, generation, pos_plus_one);
+    }
 }
 
 struct LzfScratch {
@@ -3224,6 +3334,62 @@ fn lzf_compress_with_scratch<const SIMD: bool>(
     out_budget: usize,
     scratch: &mut LzfScratch,
 ) -> Option<Vec<u8>> {
+    lzf_compress_dispatch::<SIMD, true>(input, out_budget, scratch)
+}
+
+/// Choose the match-table representation ONCE per call and hand the compressor a
+/// monomorphised view of it.
+///
+/// `HOIST == true` (production) resolves `use_packed` here, so the inner loop's
+/// probes carry neither the representation test nor a slice bounds check.
+/// `HOIST == false` is verbatim the previous behaviour — every probe goes through
+/// `LzfScratch::{get,set}` — and exists so one binary can measure both arms.
+/// Both arms read and write the same slots in the same order and therefore emit
+/// byte-identical compressed output.
+fn lzf_compress_dispatch<const SIMD: bool, const HOIST: bool>(
+    input: &[u8],
+    out_budget: usize,
+    scratch: &mut LzfScratch,
+) -> Option<Vec<u8>> {
+    // Nothing to compress: bail before touching the table, so an empty input
+    // still costs no allocation and burns no epoch (the core repeats this check,
+    // which is what makes the two arms' bail behaviour identical).
+    if input.is_empty() || out_budget == 0 {
+        return None;
+    }
+    // Sizes/resizes the active table and returns this call's epoch tag. Must run
+    // before the fixed-size view is taken: it is what guarantees the length.
+    let generation = scratch.begin_call(LZF_HSIZE, input.len());
+    if HOIST {
+        if scratch.use_packed {
+            if let Ok(table) = <&mut [u32; LZF_HSIZE]>::try_from(scratch.packed.as_mut_slice()) {
+                return lzf_compress_core::<SIMD, _>(
+                    input,
+                    out_budget,
+                    &mut LzfPackedTable(table),
+                    generation,
+                );
+            }
+        } else if let Ok(table) =
+            <&mut [LzfHashSlot; LZF_HSIZE]>::try_from(scratch.htab.as_mut_slice())
+        {
+            return lzf_compress_core::<SIMD, _>(
+                input,
+                out_budget,
+                &mut LzfWideTable(table),
+                generation,
+            );
+        }
+    }
+    lzf_compress_core::<SIMD, _>(input, out_budget, &mut LzfDynTable(scratch), generation)
+}
+
+fn lzf_compress_core<const SIMD: bool, T: LzfHashTable>(
+    input: &[u8],
+    out_budget: usize,
+    table: &mut T,
+    generation: u32,
+) -> Option<Vec<u8>> {
     // Faithful port of vendored deps/lzf/lzf_c.c with HLOG=16 and the
     // VERY_FAST configuration redis builds (lzfP.h: VERY_FAST=1,
     // ULTRA_FAST=0). Reproducing the rolling `hval`, the liblzf IDX hash,
@@ -3232,8 +3398,6 @@ fn lzf_compress_with_scratch<const SIMD: bool>(
     // valid-but-different compressed streams for mixed-byte inputs (the
     // all-'x' z4tsz test passed only because identical trigrams collide
     // regardless of hash). (frankenredis-wmh2p, supersedes z4tsz)
-    const HLOG: u32 = 16;
-    const HSIZE: usize = 1 << HLOG; // 65536
     const MAX_LIT: usize = 1 << 5; // 32
     const MAX_OFF: usize = 1 << 13; // 8192
     const MAX_REF: usize = (1 << 8) + (1 << 3); // 264
@@ -3243,17 +3407,11 @@ fn lzf_compress_with_scratch<const SIMD: bool>(
         return None;
     }
 
-    // liblzf VERY_FAST: IDX(h) = ((h >> (24 - HLOG)) - h*5) & (HSIZE-1).
-    let idx = |h: u32| -> usize {
-        (((h >> (24 - HLOG)).wrapping_sub(h.wrapping_mul(5))) & (HSIZE as u32 - 1)) as usize
-    };
-
     let mut out: Vec<u8> = Vec::with_capacity(out_budget);
-    // htab stores ip+1 (0 = unset). Epoch tags make stale slots read as unset,
-    // preserving the zero-initialised C table semantics without clearing 256 KiB
-    // on every compression attempt. (frankenredis-gu5nf.27)
-    let generation = scratch.begin_call(HSIZE, in_len);
-
+    // The table stores ip+1 (0 = unset). Epoch tags make stale slots read as
+    // unset, preserving the zero-initialised C table semantics without clearing
+    // 256 KiB on every compression attempt. (frankenredis-gu5nf.27) The epoch is
+    // taken by the caller, which also picks the table representation.
     let mut ip: usize = 0;
     let mut lit: usize = 0;
     let mut lit_hdr_pos: usize = out.len();
@@ -3274,9 +3432,9 @@ fn lzf_compress_with_scratch<const SIMD: bool>(
     while in_len >= 3 && ip < in_len - 2 {
         // hval = NEXT(hval, ip) = (hval << 8) | ip[2]
         hval = (hval << 8) | (input[ip + 2] as u32);
-        let h = idx(hval);
-        let stored = scratch.get(h, generation);
-        scratch.set(h, generation, (ip as u32) + 1);
+        let h = lzf_idx(hval);
+        let stored = table.get(h, generation);
+        table.set(h, generation, (ip as u32) + 1);
 
         let mut emitted_match = false;
         if stored != 0 {
@@ -3393,10 +3551,10 @@ fn lzf_compress_with_scratch<const SIMD: bool>(
                 ip -= 2;
                 hval = ((input[ip] as u32) << 8) | (input[ip + 1] as u32); // FRST(ip)
                 hval = (hval << 8) | (input[ip + 2] as u32); // NEXT
-                scratch.set(idx(hval), generation, (ip as u32) + 1);
+                table.set(lzf_idx(hval), generation, (ip as u32) + 1);
                 ip += 1;
                 hval = (hval << 8) | (input[ip + 2] as u32); // NEXT
-                scratch.set(idx(hval), generation, (ip as u32) + 1);
+                table.set(lzf_idx(hval), generation, (ip as u32) + 1);
                 ip += 1;
             }
         }
@@ -6658,6 +6816,90 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn lzf_table_hoist_matches_dynamic_probe_arm() {
+        // Production resolves the match-table representation ONCE per call and
+        // probes a fixed-size array (`bench_lzf_compress_table::<true>`); the
+        // prior path re-tested `use_packed` and bounds-checked a slice on every
+        // probe (`::<false>`). Both must emit the SAME compressed bytes AND make
+        // the same bail-to-raw (`None`) decision for every input, because they
+        // read and write identical slots in identical order.
+        let mut payloads: Vec<Vec<u8>> = Vec::new();
+        payloads.push(vec![b'x'; 8192]); // pure run: match path every position
+        payloads.push(vec![0u8; 4096]);
+        {
+            // Listpack-shaped: small string entries each followed by their
+            // backlen byte — the RDB/DUMP payload this actually runs on.
+            let mut p = Vec::new();
+            for i in 0..40u32 {
+                for element in [format!("f{i}"), format!("v{i}")] {
+                    p.push(0x80 | u8::try_from(element.len()).expect("short element"));
+                    p.extend_from_slice(element.as_bytes());
+                    p.push(u8::try_from(element.len() + 1).expect("short element"));
+                }
+            }
+            payloads.push(p);
+        }
+        {
+            let mut s: u32 = 0xC0FF_EE00; // pseudo-random: literal path every position
+            let mut p = Vec::with_capacity(3000);
+            for _ in 0..3000 {
+                s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                p.push((s >> 24) as u8);
+            }
+            payloads.push(p);
+        }
+        for n in [1usize, 2, 3, 4, 33, 64, 263, 264, 265] {
+            payloads.push(vec![b'q'; n]); // MAX_LIT / MAX_REF boundaries
+        }
+
+        for p in &payloads {
+            for budget in [p.len(), p.len().saturating_sub(4), p.len() * 2 + 64] {
+                assert_eq!(
+                    super::bench_lzf_compress_table::<false>(p, budget),
+                    super::bench_lzf_compress_table::<true>(p, budget),
+                    "table dispatch diverged (len={}, budget={budget})",
+                    p.len()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lzf_table_hoist_matches_dynamic_probe_arm_on_the_wide_table() {
+        // The ONLY cover for the wide (non-packed) arm: `use_packed` is false
+        // exactly when `in_len >= 1 << 24`, because `pos_plus_one` no longer fits
+        // the packed 24-bit field. A dispatch that sent this input to the packed
+        // table would truncate every position past 16 MiB and silently emit a
+        // DIFFERENT (still decompressible) stream, which is why this case is
+        // compared rather than merely round-tripped. Long runs keep it quick: the
+        // match path advances up to MAX_REF bytes per iteration.
+        const WIDE: usize = (1 << 24) + 4096;
+        let mut payload = vec![b'z'; WIDE];
+        // Break the run periodically so the encoder emits literals and matches
+        // both above and below the 16 MiB boundary.
+        for (i, byte) in payload.iter_mut().enumerate() {
+            if i % 1024 == 0 {
+                *byte = (i / 1024) as u8;
+            }
+        }
+        assert!(
+            payload.len() >= 1 << 24,
+            "input must exercise the wide table"
+        );
+        let budget = payload.len() - 4;
+        let dynamic = super::bench_lzf_compress_table::<false>(&payload, budget);
+        let hoisted = super::bench_lzf_compress_table::<true>(&payload, budget);
+        assert!(dynamic.is_some(), "16 MiB run payload must compress");
+        assert_eq!(dynamic, hoisted, "wide-table dispatch diverged");
+        let compressed = hoisted.expect("compressed");
+        assert_eq!(
+            lzf_decompress(&compressed, payload.len()).as_deref(),
+            Some(payload.as_slice()),
+            "wide-table stream must round-trip"
+        );
     }
 
     #[test]
