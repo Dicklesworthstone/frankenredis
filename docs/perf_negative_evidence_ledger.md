@@ -15864,3 +15864,68 @@ sweep an unfinished peer refactor into this commit, so the numbers are published
 here and handed to the peer instead. Retry predicate: after that refactor lands,
 re-run `cascade_gap.py` on a fresh bypass ELF and classify whichever of the six
 still measure a gap — the refactor may have collected them already.
+
+## 2026-08-15: REJECTED AS AN INSTRUMENT — callgrind `--branch-sim` cannot arbitrate the EVAL branch-miss axis; the same run counts a 5.3x allocator gap that can (`frankenredis-w08xv`)
+
+`kernel.perf_event_paranoid` is 4 on thinkstation1, so `perf stat` cannot read
+IPC or branch-misses, and the campaign's EVAL thesis
+(`project_zrangebyscore_ipc_stall_not_work_volume`) rests on a hardware reading
+of a 6x branch-miss rate at IPC 1.57 vs 2.71. The obvious substitute is
+callgrind's software simulation: `--cache-sim=yes --branch-sim=yes` models
+conditional and indirect branch prediction and D1/LL caches, deterministic and
+load-immune like its instruction counts.
+
+Measured with two-point subtraction — run 2N ops and N ops and subtract, so
+startup, seeding and teardown cancel exactly and no `callgrind_control` channel
+is needed. That is not a stylistic choice: zeroing the counters over vgdb made
+vendored redis drop its client mid-run, and a control channel that perturbs one
+engine and not the other is not a fair comparison. Workload
+`EVAL "for i=1,50 do redis.call('GET', KEYS[1]) end return 1" 1 k`, pipelined 16
+deep, N=30 vs N=60. fr ELF self-reported sha256
+`017727a9ada7913797321b91a75bd1354f4b7a74a1cfec0d255ba9db93cef6d5`; incumbent is
+vendored 7.2.4 at `legacy_redis_code/redis/src/redis-server`, run in the same
+sweep on the same host. Threadripper PRO 5975WX, governor `powersave`, AVX2,
+valgrind 3.25.1.
+
+| engine | Ir/op | cond br/op | cond mispred/op | ind br/op | ind mispred/op | D1 miss/op | LL miss/op |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| fr | 146,421 | 16,832 | 524 | 2,966 | 696 | 291 | 0 |
+| vendored 7.2.4 | 182,463 | 25,194 | 543 | 2,022 | 573 | 167 | 2 |
+
+**THE INSTRUMENT IS REJECTED FOR THAT AXIS.** Total simulated mispredicts come
+out at PARITY — fr 1,220/op against Redis 1,116/op — where the hardware reading
+that the EVAL thesis rests on is 6x. Either the hardware gap is a
+predictor-capacity or aliasing effect that callgrind's model does not have, or
+the original hardware measurement was confounded; this run cannot distinguish
+those, and that is exactly why it settles nothing. No branch-miss conclusion may
+be drawn from `--branch-sim`, in either direction, and the earlier hardware row
+is neither confirmed nor retracted by it. Retry predicate for the branch axis is
+unchanged and specific: `kernel.perf_event_paranoid <= 1`, then `perf stat -e
+branch-misses,cycles,instructions` against both engines in one invocation.
+
+**WHAT THE SAME RUN DOES ESTABLISH, because it is a COUNT and not a simulation.**
+Summing callgrind's `calls=` records over the identical window, per EVAL op:
+
+| engine | allocations/op | frees/op | interning lookups/op |
+|---|---:|---:|---:|
+| fr | 291.4 | 296.4 | — |
+| vendored 7.2.4 | — | 55.0 (`zfree`) | 107.0 (`luaS_newlstr`) |
+
+fr issues **~5.8 allocations per `redis.call` against Redis's ~1.1, 5.3x the
+allocator traffic** on the same script, and fr's D1 misses are 1.74x Redis's with
+`_mi_page_malloc_zero` alone carrying 99 of fr's 291 misses per op (34%).
+Allocator self-cost is 26,809 Ir/op, 18.3% of the operation, or 32,536 (22.2%)
+counting `drop_glue::<LuaValue>`. Redis's allocator appears nowhere in its top
+eighteen frames — it interns through `luaS_newlstr` and pays a GC instead.
+
+Named mechanism, one line: `crates/fr-command/src/lua_eval.rs:5541` is
+`Expr::Str(s) => Ok(LuaValue::Str(s.to_vec()))`. `Expr::Str` already holds
+`Rc<[u8]>` built once at parse time, so the AST is already shared; the evaluator
+discards that sharing and heap-copies on every evaluation — fifty fresh
+allocations of the three bytes `GET` in the loop above. The lever this scopes is
+`LuaValue::Str(Vec<u8>)` to `Rc<[u8]>`, filed as `frankenredis-w08xv`, and its
+pre-stated falsifiable target is allocations per EVAL op from 291 to under 150
+with D1 misses moving from 291 toward Redis's 167. **Quote the allocation count
+and the D1 delta, never Ir/op**: this path's own history is eleven shaving levers
+worth 3,806 to 2,807 instructions per call whose largest single member measured
++0.02% end to end.
