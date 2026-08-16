@@ -335,6 +335,24 @@ CASES = [
     ("ZSCORE", "z6", "m1"),
     ("ZADD", "z6", "XX", "CH", "1", "absent"),
     ("ZADD", "s:1", "XX", "CH", "1", "m1"),
+    # (frankenredis-4b2o4) LPOS MAXLEN. Array length 5 admits RANK, COUNT and
+    # MAXLEN; the floor class claims all three and the arm branches on RANK and
+    # COUNT only, so MAXLEN falls to generic. Unlike the ZADD arity-6 case there is
+    # NO parser and NO executor for it anywhere, so generic is where it would have
+    # gone regardless -- the cost is one wasted parse, not a lost fast path.
+    # These rows exist so that if MAXLEN is ever given a route, the behaviour it
+    # must reproduce is already pinned.
+    ("DEL", "lm"),
+    ("RPUSH", "lm", "a", "b", "c", "b", "a"),
+    ("LPOS", "lm", "b"),
+    ("LPOS", "lm", "b", "MAXLEN", "2"),
+    ("LPOS", "lm", "b", "MAXLEN", "0"),
+    ("LPOS", "lm", "nosuch", "MAXLEN", "3"),
+    # RANK and COUNT at the same length, which the arm DOES serve -- so a future
+    # MAXLEN route cannot be added by loosening the branch and stranding these.
+    ("LPOS", "lm", "b", "RANK", "2"),
+    ("LPOS", "lm", "b", "COUNT", "2"),
+    ("LPOS", "s:1", "b", "MAXLEN", "2"),
     # Errors must come from the generic path verbatim.
     ("ZMPOP", "1", "s:1", "MIN"),
     ("ZMPOP", "1", "z:mp", "SIDEWAYS"),
