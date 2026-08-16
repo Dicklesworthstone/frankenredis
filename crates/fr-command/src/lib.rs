@@ -2333,8 +2333,12 @@ impl CommandError {
                 fr_store::StoreError::IndexOutOfRange => {
                     RespFrame::Error("ERR index out of range".to_string())
                 }
+                // (frankenredis-oczh9) See the RESTORE handler: this variant is a
+                // BODY-parse failure, which upstream reports as "Bad data format".
+                // The envelope (version/CRC64) rejections carry their own text and
+                // never reach here.
                 fr_store::StoreError::InvalidDumpPayload => {
-                    RespFrame::Error("ERR DUMP payload version or checksum are wrong".to_string())
+                    RespFrame::Error("ERR Bad data format".to_string())
                 }
                 fr_store::StoreError::BusyKey => {
                     RespFrame::Error("BUSYKEY Target key name already exists.".to_string())
@@ -29072,9 +29076,19 @@ fn restore_cmd(
         Err(StoreError::BusyKey) => Ok(RespFrame::Error(
             "BUSYKEY Target key name already exists.".to_string(),
         )),
-        Err(StoreError::InvalidDumpPayload) => Ok(RespFrame::Error(
-            "ERR DUMP payload version or checksum are wrong".to_string(),
-        )),
+        // (frankenredis-oczh9) Upstream splits these two rejections and so must we.
+        // cluster.c::restoreCommand checks the envelope FIRST via verifyDumpPayload,
+        // which is the only thing that yields "DUMP payload version or checksum are
+        // wrong"; once the envelope is good, a body that fails to parse falls to
+        // cluster.c:6667 `addReplyError(c,"Bad data format")`. `InvalidDumpPayload` is
+        // fr's BODY-parse failure. The envelope's version/CRC rejections are built as
+        // `GenericError` carrying the checksum text in `restore_key_with_metadata`
+        // (see step 1 of frankenredis-oczh9) — before that split they shared this
+        // variant, so reporting the checksum wording here named the wrong half of the
+        // payload.
+        Err(StoreError::InvalidDumpPayload) => {
+            Ok(RespFrame::Error("ERR Bad data format".to_string()))
+        }
         Err(e) => Err(CommandError::Store(e)),
     }
 }

@@ -333,6 +333,80 @@ fn restore_corrupted_crc() {
     );
 }
 
+/// (frankenredis-oczh9) A payload whose ENVELOPE is perfect but whose BODY is
+/// corrupt must report "Bad data format", NOT the checksum error.
+///
+/// Upstream keeps these strictly separate. `cluster.c::restoreCommand` runs
+/// `verifyDumpPayload` first — that is the sole source of "DUMP payload version or
+/// checksum are wrong" — and only once the envelope is accepted does a body that
+/// fails to parse reach `cluster.c:6667 addReplyError(c,"Bad data format")`.
+/// Verified against a live 7.2.4, which answers `Bad data format` for a corrupt
+/// body under `--sanitize-dump-payload yes` and the checksum error for a flipped
+/// CRC bit under either setting.
+///
+/// The pre-existing coverage could not catch this: `restore_invalid_payload` uses
+/// a 14-byte literal that fails the VERSION check and `restore_corrupted_crc`
+/// flips a CRC bit, so both exercise the envelope and both legitimately expect the
+/// checksum text. This case resealed the footer so the envelope stays valid, which
+/// is the only way to reach the body parser at all.
+#[test]
+fn restore_reports_bad_data_format_when_only_the_body_is_corrupt() {
+    let mut rt = Runtime::default_strict();
+    rt.execute_frame(
+        command(&[b"HSET", b"bdf_src", b"f1", b"v1", b"f2", b"v2"]),
+        0,
+    );
+
+    let dump = rt.execute_frame(command(&[b"DUMP", b"bdf_src"]), 1);
+    let payload = extract_dump_payload(&dump);
+
+    // Corrupt one byte of the BODY (an entry encoding byte inside the listpack),
+    // leaving the 2-byte RDB version untouched, then recompute the CRC64 over
+    // everything it covers so the envelope check still passes.
+    const FOOTER_LEN: usize = 10;
+    let body_end = payload.len() - FOOTER_LEN;
+    let mut corrupt = payload.clone();
+    corrupt[body_end - 2] ^= 0xFF;
+    let crc = fr_persist::crc64_redis(&corrupt[..body_end + 2]);
+    corrupt[body_end + 2..].copy_from_slice(&crc.to_le_bytes());
+
+    let restore = rt.execute_frame(
+        RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"RESTORE".to_vec())),
+            RespFrame::BulkString(Some(b"bdf_dst".to_vec())),
+            RespFrame::BulkString(Some(b"0".to_vec())),
+            RespFrame::BulkString(Some(corrupt.clone())),
+        ])),
+        2,
+    );
+    assert_eq!(
+        restore,
+        RespFrame::Error("ERR Bad data format".to_string()),
+        "a valid envelope around a corrupt body must report the BODY error"
+    );
+
+    // Guard the other half of the split: flipping a CRC bit on the SAME payload
+    // must still report the envelope error. Without this, changing both arms to
+    // one shared string would keep the test above green.
+    let mut bad_crc = corrupt;
+    let last = bad_crc.len() - 1;
+    bad_crc[last] ^= 0x01;
+    let restore_crc = rt.execute_frame(
+        RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"RESTORE".to_vec())),
+            RespFrame::BulkString(Some(b"bdf_dst2".to_vec())),
+            RespFrame::BulkString(Some(b"0".to_vec())),
+            RespFrame::BulkString(Some(bad_crc)),
+        ])),
+        3,
+    );
+    assert_eq!(
+        restore_crc,
+        RespFrame::Error("ERR DUMP payload version or checksum are wrong".to_string()),
+        "a bad CRC must still report the ENVELOPE error"
+    );
+}
+
 #[test]
 fn dump_restore_to_different_key() {
     let mut rt = Runtime::default_strict();

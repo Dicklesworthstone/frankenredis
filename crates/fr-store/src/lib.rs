@@ -34631,17 +34631,33 @@ impl Store {
         // separate type byte: for a 10-byte payload the type byte (read from
         // the front by rdbLoadObjectType) overlaps the footer's version low
         // byte, exactly as it does here. (frankenredis-b19ln)
+        // (frankenredis-oczh9) The ENVELOPE's five rejections carry redis's
+        // checksum wording; `InvalidDumpPayload` is reserved for BODY-parse
+        // failure below. Upstream reports the two halves differently —
+        // cluster.c::verifyDumpPayload failing gives "DUMP payload version or
+        // checksum are wrong", while a well-sealed payload whose OBJECT will not
+        // parse gives "Bad data format" — and fr returned the same variant for
+        // both, so the command layer could not tell them apart however it
+        // mapped. The split has to live here, not in fr-command.
+        //
+        // This is the shape the FUNCTION-DUMP path in this file already uses, so
+        // it adds no enum variant and no exhaustive-match churn: fr-command maps
+        // `GenericError(msg)` straight to `RespFrame::Error(msg)`.
+        fn envelope_err() -> StoreError {
+            StoreError::GenericError("ERR DUMP payload version or checksum are wrong".to_string())
+        }
+
         if payload.len() < DUMP_TRAILER_LEN {
-            return Err(StoreError::InvalidDumpPayload);
+            return Err(envelope_err());
         }
         let version_offset = payload.len() - DUMP_TRAILER_LEN;
         let version = u16::from_le_bytes(
             payload[version_offset..version_offset + DUMP_VERSION_LEN]
                 .try_into()
-                .map_err(|_| StoreError::InvalidDumpPayload)?,
+                .map_err(|_| envelope_err())?,
         );
         if version > RDB_DUMP_VERSION {
-            return Err(StoreError::InvalidDumpPayload);
+            return Err(envelope_err());
         }
 
         // Validate CRC64: last 8 bytes are CRC over everything before them
@@ -34649,11 +34665,11 @@ impl Store {
         let stored_crc = u64::from_le_bytes(
             payload[crc_offset..crc_offset + DUMP_CRC64_LEN]
                 .try_into()
-                .map_err(|_| StoreError::InvalidDumpPayload)?,
+                .map_err(|_| envelope_err())?,
         );
         let computed_crc = fr_persist::crc64_redis(&payload[..crc_offset]);
         if stored_crc != computed_crc {
-            return Err(StoreError::InvalidDumpPayload);
+            return Err(envelope_err());
         }
         let type_byte = payload[0];
         let mut cursor = 1;
