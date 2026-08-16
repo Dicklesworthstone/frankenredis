@@ -22963,3 +22963,75 @@ RETRY PREDICATE: this table is the campaign's standing reference; do not re-cert
 without a code change to justify the turn. The single open item is set_base at 34.0 pct
 dispatch — the lever is specified, the span is verified unobstructed, and the refined
 model predicts ~0.426x. The next row in this ledger should be its result.
+
+## MEASURED (frankenredis-iqicb) — at loadavg 11 the incumbent arm tightens sevenfold, and my "a quiet window gains nothing" claim was WRONG
+
+Claim class: COMPETITIVE
+
+FrankenRedis/Redis 7.2.4 = 0.7827x worst bound, measured with the live vendored
+redis-server arm launched and run in the SAME invocation of shape_instr_per_op.py as the
+candidate, both under callgrind back to back.
+
+Campaign output: yes
+
+Same provenance limitation as the rows above (valgrind hosts the target, so no
+self-reported ELF SHA; ABBA repeats, not a bootstrap CI).
+
+    run  shape                   fr instr/op   redis 7.2.4   fr/redis   loadavg
+    A    incrbyfloat_nondyadic       7500.5        9609.6     0.7805x    11.48
+    B    incrbyfloat_same            4395.1        8950.6     0.4910x    11.48
+    B    incrbyfloat_same            4430.5        9031.8     0.4905x    11.20
+    A    incrbyfloat_nondyadic       7489.7        9569.1     0.7827x    10.95
+
+    uptime at start: 12.77 / 20.49 / 26.00      at end: 10.95 / 19.31 / 25.43
+
+**THIS IS THE FIRST GENUINELY QUIET WINDOW OF THE SESSION**, and it corrects a claim I
+banked two rows ago. That row concluded: "Re-running a row in a quiet window will NOT
+tighten it here... the denominator did not tighten at lower load either." I drew that from
+two bands, 19-21 and 29-39, NEITHER OF WHICH WAS QUIET. With a third band the picture
+changes:
+
+    load band   redis incrbyfloat_nondyadic pair spread
+    ~11         0.42 pct     <- this row
+    19-21       3.04 pct
+    29-39       1.99 pct
+
+**The incumbent arm is SEVEN TIMES tighter at loadavg 11 than at 20.** The relationship is
+not monotonic — 19-21 is noisier than 29-39 — but the quiet band is dramatically tighter
+than either, and my earlier conclusion generalised from a gap between two mid-load points
+to a claim about quiet windows I had never observed. **That is the same error class this
+ledger keeps recording: a conclusion drawn from a range that does not contain the case
+being concluded about.**
+
+SO THE FLEET'S GUIDANCE IS RIGHT FOR THIS GATE'S DENOMINATOR, and my earlier dismissal of
+it was not. Corrected position, with the asymmetry intact:
+
+  * the fr NUMERATOR is load-immune — 12 runs of this shape across loadavg 11 to 39 span
+    7479.1 to 7500.5 instr/op, **0.29 pct**;
+  * the redis DENOMINATOR is load-sensitive at the low end, tightening from ~3 pct to
+    0.42 pct;
+  * therefore a quiet window does not make an fr-side lever more trustworthy, but it DOES
+    sharpen a ratio near a decision boundary. Defer near-parity adjudications to a quiet
+    window; do not defer large fr-side movements.
+
+The ratio spreads this row are 0.28 pct (nondyadic) and 0.10 pct — against 3.60 pct and
+5.71 pct for the same pair at higher load. Worst bound 0.7827x is therefore the most
+trustworthy figure yet recorded for this shape, and it remains the worst measured ratio on
+the board.
+
+A/A NULL:
+
+    fr arm      nondyadic  7500.5 -> 7489.7   -0.14%
+                dyadic     4395.1 -> 4430.5   +0.81%
+    redis arm   nondyadic  9609.6 -> 9569.1   -0.42%
+                dyadic     8950.6 -> 9031.8   +0.91%
+    ratio       nondyadic  0.7805 -> 0.7827  0.28%  |  dyadic  0.4910 -> 0.4905  0.10%
+
+EXECUTABLE IDENTITIES, full 64-hex (computed post-run, see limitation above):
+  candidate  `773d819de62d62d7f496b2a1df8e82bd645228e9e366e64c6294190ffa6d8e2d`
+  incumbent  `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+  tree       47a307984; NO rebuild — no crate code had changed since that binary.
+
+RETRY PREDICATE: quiet windows are for RATIOS NEAR A BOUNDARY, not for fr-side levers.
+Check uptime before certifying, as this row did; below ~15 the denominator is worth
+trusting to a few tenths of a percent, and above ~19 it carries ~3 pct.
