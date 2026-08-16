@@ -238,6 +238,27 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
         ("getex_persist", ["SET gx abcdefghijklmnop"], ["GETEX", "gx", "PERSIST"]),
         ("get_control", ["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
     ],
+    # (frankenredis-mnzgy) Second unswept batch: the TTL-WRITE family plus the
+    # remaining O(1) metadata reads. PERSIST and SETEX came out worst of anything
+    # measured (frankenredis-59wjs, 1.7732x instructions to do nothing), so the
+    # commands that SET a TTL are the obvious next place to look. All cleared
+    # scripts/shape_admission_probe.py on both engines: 15 admitted, 0 rejected.
+    "unswept2": [
+        ("del_missing", [], ["DEL", "nosuchkey"]),
+        ("unlink_missing", [], ["UNLINK", "nosuchkey"]),
+        ("expire_same", ["SET s abcdefghijklmnop"], ["EXPIRE", "s", "10000"]),
+        ("pexpire_same", ["SET s abcdefghijklmnop"], ["PEXPIRE", "s", "10000000"]),
+        ("expireat_same", ["SET s abcdefghijklmnop"], ["EXPIREAT", "s", "4102444800"]),
+        ("lpos", ["RPUSH l a b c d e"], ["LPOS", "l", "c"]),
+        ("object_refcount", ["SET s abcdefghijklmnop"], ["OBJECT", "REFCOUNT", "s"]),
+        ("memory_usage", ["SET s abcdefghijklmnop"], ["MEMORY", "USAGE", "s"]),
+        ("hexists", ["HSET h f1 v1"], ["HEXISTS", "h", "f1"]),
+        ("sismember", ["SADD st m1 m2 m3"], ["SISMEMBER", "st", "m2"]),
+        ("zscore", ["ZADD z 1 a 2 b"], ["ZSCORE", "z", "b"]),
+        ("zrank", ["ZADD z 1 a 2 b"], ["ZRANK", "z", "b"]),
+        ("hstrlen", ["HSET h f1 v1"], ["HSTRLEN", "h", "f1"]),
+        ("get_control", ["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
+    ],
     "storeops": [
         ("exists_8key", ["MSET e1 1 e2 1 e3 1 e4 1 e5 1 e6 1 e7 1 e8 1"],
          ["EXISTS", "e1", "e2", "e3", "e4", "e5", "e6", "e7", "e8"]),

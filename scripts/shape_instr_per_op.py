@@ -92,6 +92,13 @@ SHAPES = {
     "persist_noop": (["SET s abcdefghijklmnop"], ["PERSIST", "s"]),
     "setex_same": ([], ["SETEX", "wx", "100", "vvvvvvvvvvvvvvvv"]),
     "set_same": ([], ["SET", "wk", "vvvvvvvvvvvvvvvv"]),
+    # (frankenredis-mnzgy) The NO-OP / MISS family. PERSIST on a non-volatile key,
+    # DEL and UNLINK on a key that does not exist: all three should early-return
+    # almost free, and all three are among the worst routes measured. Whatever fr
+    # pays before discovering there is nothing to do, it pays in full.
+    "del_missing": ([], ["DEL", "nosuchkey"]),
+    "unlink_missing": ([], ["UNLINK", "nosuchkey"]),
+    "pexpire_same": (["SET s abcdefghijklmnop"], ["PEXPIRE", "s", "10000000"]),
     # The control: a route none of the above levers touch.
     "get_control": (["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
 }
