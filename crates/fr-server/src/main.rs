@@ -16291,12 +16291,8 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // siblings at 3 are claimed elsewhere, and an over-claim would be worse than
         // none: a floor decline calls the generic dispatcher directly rather than
         // returning to the cascade.
-        (4, BorrowedDispatchFloorCommand::Expire) => {
-            Some(BorrowedDispatchFloorClass::ExpireCond)
-        }
-        (4, BorrowedDispatchFloorCommand::Pexpire) => {
-            Some(BorrowedDispatchFloorClass::PexpireCond)
-        }
+        (4, BorrowedDispatchFloorCommand::Expire) => Some(BorrowedDispatchFloorClass::ExpireCond),
+        (4, BorrowedDispatchFloorCommand::Pexpire) => Some(BorrowedDispatchFloorClass::PexpireCond),
         (4, BorrowedDispatchFloorCommand::Expireat) => {
             Some(BorrowedDispatchFloorClass::ExpireatCond)
         }
@@ -18902,13 +18898,7 @@ fn try_dispatch_floor_classified_action(
             ) && packet.c.eq_ignore_ascii_case(b"LIMIT")
                 && runtime
                     .execute_plain_zrangebyscore_limit_borrowed_into(
-                        packet.key,
-                        packet.a,
-                        packet.b,
-                        packet.d,
-                        packet.e,
-                        ts,
-                        out,
+                        packet.key, packet.a, packet.b, packet.d, packet.e, ts, out,
                     )
                     .is_some()
             {
@@ -19230,8 +19220,8 @@ fn try_dispatch_floor_classified_action(
                 &parser_config,
                 b"*4\r\n$6\r\n",
                 b"EXPIRE",
-            ) && let Some(response) = runtime
-                .execute_plain_expire_cond_borrowed(packet.key, packet.a, packet.b, ts)
+            ) && let Some(response) =
+                runtime.execute_plain_expire_cond_borrowed(packet.key, packet.a, packet.b, ts)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -19256,8 +19246,8 @@ fn try_dispatch_floor_classified_action(
                 &parser_config,
                 b"*4\r\n$7\r\n",
                 b"PEXPIRE",
-            ) && let Some(response) = runtime
-                .execute_plain_pexpire_cond_borrowed(packet.key, packet.a, packet.b, ts)
+            ) && let Some(response) =
+                runtime.execute_plain_pexpire_cond_borrowed(packet.key, packet.a, packet.b, ts)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -19282,8 +19272,8 @@ fn try_dispatch_floor_classified_action(
                 &parser_config,
                 b"*4\r\n$8\r\n",
                 b"EXPIREAT",
-            ) && let Some(response) = runtime
-                .execute_plain_expireat_cond_borrowed(packet.key, packet.a, packet.b, ts)
+            ) && let Some(response) =
+                runtime.execute_plain_expireat_cond_borrowed(packet.key, packet.a, packet.b, ts)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -19308,8 +19298,8 @@ fn try_dispatch_floor_classified_action(
                 &parser_config,
                 b"*4\r\n$9\r\n",
                 b"PEXPIREAT",
-            ) && let Some(response) = runtime
-                .execute_plain_pexpireat_cond_borrowed(packet.key, packet.a, packet.b, ts)
+            ) && let Some(response) =
+                runtime.execute_plain_pexpireat_cond_borrowed(packet.key, packet.a, packet.b, ts)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -19485,10 +19475,9 @@ fn try_dispatch_floor_classified_action(
                 &parser_config,
                 b"*5\r\n$6\r\n",
                 b"MSETNX",
-            ) && let Some(response) = runtime.execute_plain_msetnx_borrowed(
-                &[packet.key, packet.a, packet.b, packet.c],
-                ts,
-            ) {
+            ) && let Some(response) = runtime
+                .execute_plain_msetnx_borrowed(&[packet.key, packet.a, packet.b, packet.c], ts)
+            {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
                     response,
@@ -19562,8 +19551,8 @@ fn try_dispatch_floor_classified_action(
                 &parser_config,
                 b"*5\r\n$5\r\n",
                 b"TOUCH",
-            ) && let Some(response) =
-                runtime.execute_plain_touch_borrowed(&[packet.key, packet.a, packet.b, packet.c], ts)
+            ) && let Some(response) = runtime
+                .execute_plain_touch_borrowed(&[packet.key, packet.a, packet.b, packet.c], ts)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -19582,11 +19571,8 @@ fn try_dispatch_floor_classified_action(
         }
         BorrowedDispatchFloorClass::ZaddBase => {
             if let Some(packet) = parse_borrowed_plain_zadd_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_zadd_borrowed(
-                    packet.key,
-                    &[packet.start, packet.end],
-                    ts,
-                )
+                && let Some(response) =
+                    runtime.execute_plain_zadd_borrowed(packet.key, &[packet.start, packet.end], ts)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -20925,8 +20911,7 @@ fn try_dispatch_floor_classified_action(
                 .or_else(|| {
                     parse_borrowed_plain_sintercard4_packet(unparsed, &parser_config).and_then(
                         |packet| {
-                            let tail =
-                                [packet.numkeys, packet.k1, packet.k2, packet.k3, packet.k4];
+                            let tail = [packet.numkeys, packet.k1, packet.k2, packet.k3, packet.k4];
                             runtime
                                 .execute_plain_sintercard_borrowed(&tail, ts)
                                 .map(|response| (packet.consumed, response))
@@ -45048,12 +45033,8 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         // them. MAXLEN is the live case -- a genuine LPOS option with no executor.
         for kw in [&b"RANK"[..], &b"COUNT"[..], &b"MAXLEN"[..]] {
             let pkt = packet(kw);
-            let parsed = super::parse_borrowed_plain_key_arg3_packet(
-                &pkt,
-                &cfg,
-                b"*5\r\n$4\r\n",
-                b"LPOS",
-            );
+            let parsed =
+                super::parse_borrowed_plain_key_arg3_packet(&pkt, &cfg, b"*5\r\n$4\r\n", b"LPOS");
             let parsed = parsed.unwrap_or_else(|| {
                 panic!(
                     "key_arg3 declined LPOS ... {} ...; the arm parses once and relies \
@@ -45062,8 +45043,7 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
                 )
             });
             assert_eq!(
-                parsed.b,
-                kw,
+                parsed.b, kw,
                 "key_arg3 must hand the keyword through untouched as `b`, since that is \
                  what the arm branches on"
             );
@@ -45234,7 +45214,11 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
                 super::parse_borrowed_plain_key_arg2_packet(
                     &pkt(name, Some(b"BOGUS")),
                     &cfg,
-                    if name == b"ZRANK" { b"*4\r\n$5\r\n" } else { b"*4\r\n$8\r\n" },
+                    if name == b"ZRANK" {
+                        b"*4\r\n$5\r\n"
+                    } else {
+                        b"*4\r\n$8\r\n"
+                    },
                     name,
                 )
                 .is_some(),
@@ -45297,19 +45281,31 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             if got.is_some() {
                 let served = match keys {
                     1 => super::parse_borrowed_plain_key_only_packet(
-                        &pkt, &cfg, b"*2\r\n$5\r\n", b"TOUCH",
+                        &pkt,
+                        &cfg,
+                        b"*2\r\n$5\r\n",
+                        b"TOUCH",
                     )
                     .is_some(),
                     2 => super::parse_borrowed_plain_key_arg1_packet(
-                        &pkt, &cfg, b"*3\r\n$5\r\n", b"TOUCH",
+                        &pkt,
+                        &cfg,
+                        b"*3\r\n$5\r\n",
+                        b"TOUCH",
                     )
                     .is_some(),
                     3 => super::parse_borrowed_plain_key_arg2_packet(
-                        &pkt, &cfg, b"*4\r\n$5\r\n", b"TOUCH",
+                        &pkt,
+                        &cfg,
+                        b"*4\r\n$5\r\n",
+                        b"TOUCH",
                     )
                     .is_some(),
                     4 => super::parse_borrowed_plain_key_arg3_packet(
-                        &pkt, &cfg, b"*5\r\n$5\r\n", b"TOUCH",
+                        &pkt,
+                        &cfg,
+                        b"*5\r\n$5\r\n",
+                        b"TOUCH",
                     )
                     .is_some(),
                     _ => unreachable!("only arities 2-5 are claimed"),
@@ -45346,11 +45342,17 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             if got.is_some() {
                 let served = match pairs {
                     1 => super::parse_borrowed_plain_key_arg1_packet(
-                        &pkt, &cfg, b"*3\r\n$6\r\n", b"MSETNX",
+                        &pkt,
+                        &cfg,
+                        b"*3\r\n$6\r\n",
+                        b"MSETNX",
                     )
                     .is_some(),
                     2 => super::parse_borrowed_plain_key_arg3_packet(
-                        &pkt, &cfg, b"*5\r\n$6\r\n", b"MSETNX",
+                        &pkt,
+                        &cfg,
+                        b"*5\r\n$6\r\n",
+                        b"MSETNX",
                     )
                     .is_some(),
                     _ => unreachable!("only one and two pairs are claimed"),
@@ -45457,13 +45459,8 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
                 "single-triple GEOADD must classify"
             );
             assert!(
-                super::parse_borrowed_plain_key_arg3_packet(
-                    pkt,
-                    &cfg,
-                    b"*5\r\n$6\r\n",
-                    b"GEOADD",
-                )
-                .is_some(),
+                super::parse_borrowed_plain_key_arg3_packet(pkt, &cfg, b"*5\r\n$6\r\n", b"GEOADD",)
+                    .is_some(),
                 "the claim must be honoured by the arm's parser"
             );
         }
@@ -50428,7 +50425,9 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         assert_eq!(got.consumed, plain.len());
 
         // Lowercase is the same shape; Redis dispatches case-insensitively.
-        assert!(super::parse_borrowed_plain_set_packet(&packet(&["set", "k", "v"]), &cfg).is_some());
+        assert!(
+            super::parse_borrowed_plain_set_packet(&packet(&["set", "k", "v"]), &cfg).is_some()
+        );
 
         // Negative: every option form served by an arm BELOW this one.
         for form in [
