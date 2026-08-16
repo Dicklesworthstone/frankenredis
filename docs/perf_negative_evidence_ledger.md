@@ -18702,3 +18702,50 @@ PROVENANCE:
 
 RETRY PREDICATE: do not re-derive. DO instrument set_bulk directly if anyone needs
 the factor-of-2 assumption removed, and do that BEFORE quoting 48.0 as measured.
+
+## CANDIDATE (frankenredis-gein3) — SINTER sorts its reply; Redis 7.2.4 sorts nothing
+
+Filed under the build freeze (/data at its 42G floor), source-verified, no number claimed.
+
+RANKED BY RATIO, sinter_9 looks finished at 0.5343x. RANKED BY ABSOLUTE COST it is the
+largest target measured on ELF 51708552264214d1:
+
+    sinter_9          12,114 instr/op    0.5343x    dispatch 8.3%
+    incrbyfloat_same   6,076 instr/op    0.6786x    dispatch 7.3%
+    hincrbyfloat       4,221 instr/op    0.4673x    dispatch 12.1%
+    lpos_count         3,218 instr/op    0.4199x    dispatch 27.2%
+    del_1_missing      2,003 instr/op    0.7685x    dispatch 12.2%
+
+Twice incrbyfloat, six times del, and 8.3 pct dispatch means front-classification has
+nothing left to take. RATIO RANKS; ABSOLUTE COST SIZES — and the two orderings disagree
+completely here, which is the point of recording both.
+
+THE CANDIDATE: fr sorts the SINTER reply (`out.sort_unstable()` fr-store:20672, and
+`sinter_borrow_scan` sorts the refs on the fast reply path). Redis's
+`sinterGenericCommand` (t_set.c:1277) sorts NOTHING — it qsorts the SETS by cardinality
+to pick the smallest to iterate, which fr also does, then streams members straight out of
+that iterator via addReplyBulkCBuffer / addReplyBulkLongLong.
+
+THE ARGUMENT THAT MAKES IT WORTH FILING RATHER THAN GUESSING: if redis does not sort and
+fr does, fr and redis ALREADY produce different member orders in the general case, so the
+sort cannot be what keeps fr byte-identical to the incumbent. It is an internal
+determinism choice, not a parity obligation. And SINTERSTORE was already decoupled from it
+by someone else — `Store::sinterstore` uses `sinter_value` directly, its comment calling
+the old route "a wasted sort (the stored set needs no order)".
+
+FOUR THINGS NOT KNOWN, all of which must be settled before anyone edits:
+  1. SIZE — O(k log k) in RESULT cardinality, which is unmeasured for sinter_9. If the
+     result is small this is real waste that still cannot explain much of 12,114.
+  2. REMOVABILITY — a mutation question (delete it, run the suite), needs a build.
+  3. DETERMINISM — removing it makes the reply order fr's internal iteration order, which
+     may vary run to run. Upstream leaves SINTER order unspecified, but a currently-green
+     differ going flaky is worse than the lever is worth.
+  4. THE ARMS DIFFER — sinter_borrow_scan records that byte-sort of decimal reps is NOT
+     value order, and the intset arm materializes for that reason. Generic and intset do
+     not have the same relationship to ordering.
+
+Campaign output: candidate only — no lever attempted, no ratio claimed.
+
+RETRY PREDICATE: measure sinter_9's RESULT CARDINALITY before touching the sort. If it is
+a handful of members, drop this and attack the membership probe instead — 12,114 instr/op
+with 8.3 pct dispatch leaves a lot that is neither sort nor dispatch.
