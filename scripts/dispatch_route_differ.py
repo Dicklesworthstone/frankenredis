@@ -316,6 +316,25 @@ CASES = [
     ("SLOWLOG", "GET", "3"),
     ("CONFIG", "SET", "slowlog-log-slower-than", "10000"),
     ("SLOWLOG", "RESET"),
+    # (frankenredis-zadd6) Array length 6 admits two readings and the arm served
+    # only one. Both are exercised here so the fix cannot serve one and strand the
+    # other -- which is the regression itself.
+    ("DEL", "z6"),
+    ("ZADD", "z6", "1", "m1", "2", "m2"),
+    ("ZSCORE", "z6", "m1"),
+    ("ZSCORE", "z6", "m2"),
+    # two flags, one pair -- the reading that was dropped on generic
+    ("ZADD", "z6", "XX", "CH", "5", "m1"),
+    ("ZSCORE", "z6", "m1"),
+    ("ZADD", "z6", "NX", "CH", "9", "m1"),
+    ("ZSCORE", "z6", "m1"),
+    ("ZADD", "z6", "NX", "CH", "9", "brandnew"),
+    ("ZADD", "z6", "GT", "CH", "1", "m1"),
+    ("ZSCORE", "z6", "m1"),
+    ("ZADD", "z6", "GT", "CH", "99", "m1"),
+    ("ZSCORE", "z6", "m1"),
+    ("ZADD", "z6", "XX", "CH", "1", "absent"),
+    ("ZADD", "s:1", "XX", "CH", "1", "m1"),
     # Errors must come from the generic path verbatim.
     ("ZMPOP", "1", "s:1", "MIN"),
     ("ZMPOP", "1", "z:mp", "SIDEWAYS"),

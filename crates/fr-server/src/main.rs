@@ -19390,11 +19390,33 @@ fn try_dispatch_floor_classified_action(
                 )
             }
         }
+        // (frankenredis-zadd6) Array length 6 admits TWO readings: `ZADD k s1 m1 s2 m2`
+        // (two pairs) and `ZADD k <flag> <flag> score member` (two flags, one pair).
+        // The class claimed BOTH and the arm served only the first, so every
+        // two-flag form was claimed at the floor and dropped on the generic path --
+        // the mis-claim this pane has fixed four times over. zadd_flag2's parser
+        // and executor already existed; only the chaining was missing. The two
+        // parsers are mutually exclusive on the token shape, so order is immaterial.
         BorrowedDispatchFloorClass::ZaddTwoPair => {
             if let Some(packet) = parse_borrowed_plain_zadd2_packet(unparsed, &parser_config)
                 && let Some(response) = runtime.execute_plain_zadd_borrowed(
                     packet.key,
                     &[packet.s1, packet.m1, packet.s2, packet.m2],
+                    ts,
+                )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else if let Some(packet) =
+                parse_borrowed_plain_zadd_flag2_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_zadd_flag2_borrowed(
+                    packet.key,
+                    packet.flag1,
+                    packet.flag2,
+                    packet.score,
+                    packet.member,
                     ts,
                 )
             {
