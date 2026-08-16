@@ -21431,3 +21431,68 @@ PROVENANCE:
 RETRY PREDICATE: do NOT re-run zadd_base. DO re-measure expire_nx_opt and set_base on
 the CURRENT ELF before proposing anything for them — the base rate of "already fixed
 without my noticing" is now two in three.
+
+## MEASURED ATTRIBUTION (frankenredis-iqicb) — re-profiled after chunking: div_small fell 18.39 pct -> 2.84 pct, 8.06x against 8x predicted, and no single dominant frame remains
+
+Claim class: COMPETITIVE — fr and the vendored Redis 7.2.4 binary in the SAME invocation.
+Same provenance limitation as the rows above (valgrind hosts the target, so no
+self-reported ELF SHA; ABBA repeats, not a bootstrap CI).
+
+    run  shape                   fr instr/op   redis 7.2.4   fr/redis
+    A    incrbyfloat_nondyadic       7485.3        9712.0     0.7707x
+    B    incrbyfloat_same            4414.0        8878.3     0.4972x
+    B    incrbyfloat_same            4455.7        8946.9     0.4980x
+    A    incrbyfloat_nondyadic       7370.2        9406.8     0.7835x
+
+Worst bound 0.7835x, statistically unchanged from the 0.7792x banked after the chunking
+lever. Still the worst measured ratio on the board.
+
+THE POINT OF THIS RUN WAS THE RE-PROFILE that the chunking row's retry predicate demanded
+— "the profile has certainly reordered and the previous frame ranking is stale". It had:
+
+    frame                          before chunking   after      absolute Ir
+    <BigNat>::div_small                 18.39 pct    2.84 pct   7,056,000 -> 876,000
+    bignat_to_long_double               10.25 pct   12.76 pct   3,932,000 -> 3,932,000
+    parse_long_double                   10.10 pct   11.99 pct   3,876,000 -> 3,696,000
+    <BigNat>::from_decimal_digits        7.80 pct    9.71 pct   2,992,000 -> 2,992,000
+    exact_small_decimal_to_long_double   2.69 pct    absent     1,032,000 -> 0
+
+**div_small's absolute count fell 8.06x against the 8x predicted from going 16 passes to
+2.** The other frames' absolute counts are unchanged — they were never the target — and
+their PERCENTAGES rose only because the denominator shrank, which is the standard trap in
+reading a re-profile and is why the absolute column is printed beside it.
+
+`exact_small_decimal_to_long_double` is GONE from the listing entirely, confirming the
+trailing-digit pre-check from two rows ago: it used to burn 2.69 pct (~258 instr/op) on
+inputs it declines and now exits on one byte comparison.
+
+NO SINGLE DOMINANT FRAME REMAINS, which changes what the next lever must look like. The
+top three are now `bignat_to_long_double` 12.76, `parse_long_double` 11.99 and
+`from_decimal_digits` 9.71 — **34.5 pct spread across three frames that are all BigNat
+construction and conversion**, rather than one function doing something avoidable. The
+cheap structural levers on this route are spent: what is left is the bignum
+REPRESENTATION itself, and that is a redesign rather than a fix. Recorded so nobody
+attacks one of the three expecting a repeat of the 43 pct and 37 pct wins.
+
+A/A NULL, from the ABBA repeats in this one invocation:
+
+    fr arm      nondyadic  7485.3 -> 7370.2   -1.54%
+                dyadic     4414.0 -> 4455.7   +0.94%
+    redis arm   nondyadic  9712.0 -> 9406.8   -3.14%
+                dyadic     8878.3 -> 8946.9   +0.77%
+    ratio       nondyadic  0.7707 -> 0.7835  1.66%  |  dyadic  0.4972 -> 0.4980  0.16%
+
+Twelfth consecutive row where the incumbent arm is the noisier one.
+
+EXECUTABLE IDENTITIES, full 64-hex (computed post-run, see limitation above):
+  candidate  `77982cb5a457e48794c4842140d304437e2b98766b3311ad3354568bb24ac7f9`
+  incumbent  `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+  tree       0d0bcd5aa; NO rebuild — no crate code had changed since that binary.
+
+Campaign output: yes — confirms a lever's mechanism to 0.06x of prediction and records
+that this route no longer has a concentrated target.
+
+RETRY PREDICATE: do NOT take one of the three remaining bignum frames expecting a large
+win — they are 34.5 pct spread evenly and are the representation, not an avoidable step.
+Prefer the 23 unworked shapes from the dispatch sweep, where the wins have been 37-43 pct
+and the mechanism is understood.
