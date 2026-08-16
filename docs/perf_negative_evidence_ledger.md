@@ -21880,3 +21880,83 @@ on dispatch and a third adds nothing. The next work on SET is option (B), moving
 cascade arm beside GET's, which the previous row verified is unobstructed. Measure
 set_base AND set_same afterwards, plus set_xx_opt and set_ex_opt as the regression
 check, since an ordering change is exactly what could disturb the option forms.
+
+--------------------------------------------------------------------------------
+CONFIRMED FIXED — multi-key TOUCH is 0.557x at 21.1 pct dispatch, down from a reported
+3.2848x at 73.9 pct — BUT THE FIX IS UNCOMMITTED (frankenredis-z2ce3,
+frankenredis-p98mw)
+
+frankenredis-p98mw banked multi-key TOUCH at 3.2848x with 73.9 pct dispatch, calling it
+the campaign's worst shape and its author's own defect. Measured here on a binary built
+from the current working tree, it does not reproduce — because the fix is present but
+NOT COMMITTED.
+
+CONVENTION: fr instructions per op / redis 7.2.4's. BELOW 1.0 = fr AHEAD.
+
+    A/A control (get_control)  0.4180 / 0.4183 / 0.4178      spread 0.12 pct
+                               — the tightest null in this entire series
+
+    touch_2, four runs   fr 2087.6 / 2081.6 / 2084.2 / 2079.2   spread 0.40 pct
+                         redis 3642.5 / 3567.4 / 3885.8 / 3882.1  spread 8.9 pct
+                         ratio 0.5731 / 0.5835 / 0.5364 / 0.5356  spread 8.9 pct
+                         dispatch 21.0 / 21.1 / 21.1 / 21.1       ~438.8 instr/op
+
+    reported defect state    3.2848x, 73.9 pct dispatch
+    measured here            0.5572x, 21.1 pct dispatch
+
+Monotonic on both arms in all four runs. The null is 0.12 pct — by far the best of the
+series — so the instrument was in excellent condition; the 8.9 pct ratio spread is
+entirely redis's arm, as usual.
+
+THE FIX IS IN THE WORKING TREE AND IS NOT COMMITTED. `git status` shows
+`crates/fr-server/src/main.rs` modified, and the arity map in that modified file
+carries:
+
+    (2, Touch) => Touch      (3, Touch) => Touch2
+    (4, Touch) => Touch3     (5, Touch) => Touch4
+
+cargo builds the WORKING TREE, so the binary measured here includes those uncommitted
+claims. That is why the shape is healthy: the multi-key arities are now each claimed at
+an arity their own parser serves, which is exactly the `9hnxt` rule applied correctly.
+
+    SO THIS ROW CONFIRMS THE FIX WORKS — 73.9 pct -> 21.1 pct dispatch, 3.2848x ->
+    0.5572x, a 5.9x movement — AND SIMULTANEOUSLY WARNS THAT IT EXISTS ONLY AS
+    UNCOMMITTED WORK. If that file is reverted, swept, or the tree cleaned, the 3.28x
+    regression returns and this measurement becomes misleading rather than helpful.
+    It should be committed.
+
+A CORRECTION TO MYSELF, MADE IN THIS SAME TURN. Before measuring I grepped the TOUCH
+claims with `head -3`, saw only `(2, Touch)`, and stated that multi-key TOUCH was
+unclaimed and therefore stranded. That was wrong: the 3/4/5 entries were on the very
+next lines and my own truncation hid them. A `head -3` on a grep whose matches are
+consecutive is a view that cannot show the thing being looked for — the same error
+class as the literal-scan in the previous row and the single-line regex before it,
+committed twice in two turns.
+
+WHY THE ORIGINAL DEFECT WAS SO LARGE, worth recording because it is the largest ratio
+this campaign has seen: 73.9 pct dispatch on TOUCH means dispatch dominated an
+already-cheap command. TOUCH does almost no work — fr's total here is 2,083 instr/op —
+so a full generic dispatch is not a fraction of the cost, it IS the cost. That is the
+mirror of the sort_ro_alpha caveat: an expensive command makes dispatch look small, and
+a cheap one makes it look enormous. Both readings need the absolute instr/op beside the
+share.
+
+STANDINGS: with this fixed, sort_ro_alpha (1.52x) is again the only shape above parity,
+and it remains the only item on the board that is not a rewire.
+
+PROVENANCE:
+  ELF sha256           6e4adcdaad95f2c332677edf937eee89683096f1873a09ade221216911aaa0f6
+                       built LOCALLY from the WORKING TREE at HEAD 199e1a778 PLUS the
+                       uncommitted fr-server/src/main.rs described above, with
+                       RCH_CARGO_WRAPPER_BYPASS=1 and env -u CARGO_TARGET_DIR,
+                       executable path from --message-format=json, COPIED to a private
+                       path and sha'd there.
+  tree                 NOT reproducible from HEAD alone — and for once that caveat is
+                       the point of the row rather than a footnote.
+  harness              scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines in
+                       the SAME invocation.
+  host                 thinkstation1, 64 cores, /data 310G, one build this pane.
+
+RETRY PREDICATE: do NOT re-measure touch_2 until the fix is COMMITTED — a green number
+from an uncommitted tree is exactly the kind of evidence that evaporates. Once
+committed, one confirming run against fr's 2,083.2 instr/op baseline is enough.
