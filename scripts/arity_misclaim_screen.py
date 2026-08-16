@@ -144,7 +144,7 @@ MINLEN: dict = {}
 MAXLEN: dict = {}
 
 
-def advise(cmd):
+def form_map(cmd):
     """Before you claim an arity for a command, ask what ELSE has that length.
 
     The screens above only inspect classes that EXIST. This answers the question
@@ -160,8 +160,7 @@ def advise(cmd):
     """
     path = os.path.join(CMDS, cmd.lower() + ".json")
     if not os.path.exists(path):
-        print("no incumbent spec for %s" % cmd)
-        return 1
+        return None
     spec = json.load(open(path))
     spec = spec[list(spec)[0]]
 
@@ -188,9 +187,7 @@ def advise(cmd):
         w = fixed_width(arg)
         if arg.get("multiple"):
             if var_width is not None or w is None:
-                print("%s: more than one variadic argument, or an unmodelled one; "
-                      "this advisor does not guess" % cmd)
-                return 1
+                return None
             var_width = w
             continue
         if arg.get("type") == "oneof":
@@ -198,8 +195,7 @@ def advise(cmd):
             for alt in arg.get("arguments", []):
                 aw = fixed_width(alt)
                 if aw is None:
-                    print("%s: unmodelled oneof alternative" % cmd)
-                    return 1
+                    return None
                 alts.append((alt.get("token") or alt.get("name", "?").upper(), aw))
             if arg.get("optional"):
                 opts.append(alts)          # choose one, or none
@@ -207,8 +203,7 @@ def advise(cmd):
                 base += alts[0][1]
             continue
         if w is None:
-            print("%s: unmodelled argument %r" % (cmd, arg.get("name")))
-            return 1
+            return None
         if arg.get("optional"):
             opts.append([(arg.get("token") or arg.get("name", "?").upper(), w)])
         else:
@@ -224,7 +219,6 @@ def advise(cmd):
                 nxt.append((" ".join(x for x in [label, tok] if x), width + w))
         combos = nxt
 
-    print("%s: base=%d, variadic block width=%s" % (cmd, base, var_width))
     forms = {}
     for label, width in combos:
         if var_width:
@@ -233,6 +227,15 @@ def advise(cmd):
                     "%s x%d" % (label or "(plain)", n))
         else:
             forms.setdefault(base + width, []).append(label or "(plain)")
+    return base, var_width, forms
+
+
+def advise(cmd):
+    got = form_map(cmd)
+    if got is None or isinstance(got, int):
+        return 1
+    base, var_width, forms = got
+    print("%s: base=%d, variadic block width=%s" % (cmd, base, var_width))
     for length in sorted(forms):
         if length > base + 14:
             break
@@ -244,6 +247,36 @@ def advise(cmd):
     print("can still be resolved, by READING that count at classification time rather")
     print("than inferring it from the length. That costs a parse in the classifier, so")
     print("it is a trade, not a free out; but do not read these rows as `impossible`.")
+    return 0
+
+
+def sweep():
+    """Every fixed-arity class, checked against the variadic solver.
+
+    The keyword mode enumerates fixed argument widths and parks anything variadic,
+    which left 30 fixed-arity claims unexamined. form_map solves for the repeat
+    count instead, so those can be checked too -- 13 remain unmodelled here rather
+    than 30.
+    """
+    ambiguous, clean, unmodelled = [], 0, 0
+    for arity, cmd, cls in floor_claims():
+        got = form_map(cmd)
+        if got is None:
+            unmodelled += 1
+            continue
+        _base, _w, forms = got
+        hits = forms.get(arity, [])
+        if len(hits) >= 2:
+            ambiguous.append((cmd, arity, cls, tuple(hits)))
+        else:
+            clean += 1
+    print("AMBIGUOUS AT THEIR CLAIMED ARITY -- %d" % len(set(ambiguous)))
+    for cmd, arity, cls, hits in sorted(set(ambiguous)):
+        print("  %-12s arity %-2d -> %-22s %s"
+              % (cmd, arity, cls, " | ".join(hits)))
+    print("\nunambiguous: %d   still unmodelled: %d" % (clean, unmodelled))
+    print("Each hit needs the ARM read: an arm may chain parsers and serve every")
+    print("form (GETEX does), and a hit is ambiguity, never a confirmed defect.")
     return 0
 
 
@@ -495,6 +528,9 @@ def main():
             ambiguous.append((arity, cmd, cls, hits))
         else:
             clean.append((arity, cmd, cls, hits))
+
+    if "--sweep" in sys.argv:
+        return sweep()
 
     if "--advise" in sys.argv:
         i = sys.argv.index("--advise")
