@@ -306,6 +306,18 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
         ("hrandfield_c", ["HSET h f1 v1"], ["HRANDFIELD", "h", "1"]),
         ("get_control", ["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
     ],
+    # (frankenredis-32f3p) The routes ozrro's gap metric left alone that turned out
+    # to carry large parse counts. A big dispatch prize is NOT the same as being
+    # below parity end to end, so they get a wall-clock row before anyone acts.
+    # All cleared shape_admission_probe on both engines: 6 admitted, 0 rejected.
+    "gaprejects": [
+        ("hincrbyfloat", ["HSET h f 1"], ["HINCRBYFLOAT", "h", "f", "0"]),
+        ("hsetnx_existing", ["HSET h f1 v1"], ["HSETNX", "h", "f1", "other"]),
+        ("pfadd_existing", ["PFADD hll a b c"], ["PFADD", "hll", "a"]),
+        ("sinter_2", ["SADD s1 m1 m2 m3", "SADD s2 m2 m3 m4"], ["SINTER", "s1", "s2"]),
+        ("mget_3", ["MSET a 1 b 2 c 3"], ["MGET", "a", "b", "c"]),
+        ("get_control", ["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
+    ],
     "storeops": [
         ("exists_8key", ["MSET e1 1 e2 1 e3 1 e4 1 e5 1 e6 1 e7 1 e8 1"],
          ["EXISTS", "e1", "e2", "e3", "e4", "e5", "e6", "e7", "e8"]),
