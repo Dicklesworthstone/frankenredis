@@ -19642,3 +19642,72 @@ unstable term. DO probe redis's miss-path nondeterminism if a stable ratio is ev
 needed on this family; one probe would cover all three shapes. And measure any
 fr-side lever here against fr's own baseline: 1665.1 (touch_missing), 1557.2
 (exists_missing), 2002.2 (del_1_missing).
+
+## MEASURED ATTRIBUTION (frankenredis-iqicb) — the non-dyadic worst ratio is 0.9921x, div_small is 18.39 pct of it, and MY OWN fast path costs 2.69 pct on the shapes it declines
+
+Claim class: COMPETITIVE — fr and the vendored Redis 7.2.4 binary in the SAME invocation.
+Same provenance limitation as the rows above (valgrind hosts the target, so no
+self-reported ELF SHA; ABBA repeats, not a bootstrap CI).
+
+    run  shape                   fr instr/op   redis 7.2.4   fr/redis
+    A    incrbyfloat_nondyadic       9314.1        9675.7     0.9626x
+    B    incrbyfloat_same            4416.3        9082.7     0.4862x
+    B    incrbyfloat_same            4412.7        8954.7     0.4928x
+    A    incrbyfloat_nondyadic       9325.9        9400.4     0.9921x
+
+WORST BOUND 0.9921x — fr is 0.8 pct ahead, effectively AT PARITY, and this remains the
+worst measured ratio on the board.
+
+ATTRIBUTION OF THE 9334 instr/op, which is what the retry predicate above asked for:
+
+    18.39%  <BigNat>::div_small                   ~1764 instr/op   <- DOMINANT
+    10.25%  bignat_to_long_double                  ~983
+    10.10%  parse_long_double                      ~969
+     7.80%  <BigNat>::from_decimal_digits          ~748
+     2.69%  exact_small_decimal_to_long_double     ~258            <- MY fast path, WASTED
+     2.53%  internal_entries_insert_with_expiry
+     2.50%  add_float_text
+
+`div_small` ALONE IS THE TARGET. It is the negative-exponent division — the path that
+scales the coefficient by `shl_bits(4*m + 130)` and then divides by 10^m one limb at a
+time. Nothing else in the profile comes close, and it exists only on this input class:
+the dyadic shape never reaches it.
+
+AND THE HONEST COST OF MY OWN LEVER: `exact_small_decimal_to_long_double` is 2.69 pct
+(~258 instr/op) OF A SHAPE IT CANNOT SERVE. On non-dyadic input it parses every digit
+into a u64, computes 5^|exp|, discovers the remainder is non-zero, and declines — all
+wasted. The lever makes dyadic INCRBYFLOAT ~2x faster and makes non-dyadic ~2.7 pct
+SLOWER. That trade was not measured when the lever was banked and is recorded here rather
+than left for someone else to find.
+
+IT IS ALSO CHEAPLY FIXABLE, and the fix is three instructions. For `sig % 5^e == 0` with
+e >= 1, the significand MUST end in 0 or 5. Testing the LAST DIGIT BYTE before the parse
+loop rejects the overwhelming majority of non-dyadic inputs — 0.1, 3.14, 1.1, 0.333... all
+end in neither — at the cost of one comparison instead of ~258 instructions. Filed as the
+next micro-lever on this bead.
+
+A/A NULL, from the ABBA repeats in this one invocation:
+
+    fr arm      nondyadic  9314.1 -> 9325.9   +0.13%
+                dyadic     4416.3 -> 4412.7   -0.08%
+    redis arm   nondyadic  9675.7 -> 9400.4   -2.85%   <- the noisy arm, sixth row running
+                dyadic     9082.7 -> 8954.7   -1.41%
+    ratio       nondyadic  0.9626 -> 0.9921  3.07%  |  dyadic  0.4862 -> 0.4928  1.36%
+
+NOTE THE RATIO SPREAD MATTERS HERE IN A WAY IT HAS NOT ELSEWHERE. At 0.9626-0.9921 the
+3.07 pct spread straddles a meaningful boundary: the low end reads as a 3.7 pct win, the
+high end as 0.8 pct. Every other row this campaign has banked had a margin clearing its
+spread by an order or more. **This one does not, so the honest statement is "at parity,
+direction unresolved within the spread" rather than any single figure.**
+
+EXECUTABLE IDENTITIES, full 64-hex (computed post-run, see limitation above):
+  candidate  `c36c3fb0a66033deff0cf03dc6a313ef647d5970cd22596aac575120a5d2a297`
+  incumbent  `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+  tree       31b22f983; NO rebuild — no crate code had changed since that binary.
+
+Campaign output: yes — names the dominant frame on the worst route and records a cost my
+own lever imposed.
+
+RETRY PREDICATE: attack `BigNat::div_small`. Before that, take the trailing-digit
+pre-check, which is nearly free and removes my lever's own 2.69 pct penalty on the shapes
+it declines.
