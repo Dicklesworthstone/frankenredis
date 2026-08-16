@@ -1,0 +1,134 @@
+//! (frankenredis-z2ce3) Count the allocations a BORROWED DEL costs, and pin it.
+//!
+//! DESTINATION: crates/fr-runtime/tests/del_borrowed_allocation_census.rs
+//! NOT COMPILED — build freeze at the 42G floor. Expect one rustc error on first
+//! build; every parked change this session has had exactly one.
+//!
+//! WHY A COUNT AND NOT A CALL-STYLE ASSERTION. My first version of this test
+//! asserted that `Store::del` accepts both `&[Vec<u8>]` and `&[&[u8]]`. BlackCat
+//! found the hole and it is fatal: A GENERIC SIGNATURE DOES NOT PREVENT AN INTERNAL
+//! COPY. Someone can keep `del<K: AsRef<[u8]>>` and write
+//! `keys.iter().map(|k| k.as_ref().to_vec()).collect()` INSIDE `del` — both call
+//! styles still compile, the call-style assertion stays green, and every allocation
+//! is back. That test pinned the SIGNATURE, which is a proxy. This one pins the
+//! PROPERTY, and reddens wherever the copy is reintroduced.
+//!
+//! WHAT THIS TEST IS NOT. It links `CountingAlloc`, not the shipping mimalloc, so it
+//! counts allocation CALLS and says nothing about their cost. THE CENSUS PINS THE
+//! INVARIANT; A CALLGRIND ROW SIZES IT. That separation matters here specifically:
+//! two small mimalloc allocations may well be only a few percent of `del_1_missing`,
+//! and a small cost number must not be read as "the invariant does not matter".
+//!
+//! `#[global_allocator]` is binary-wide, so this must live under `tests/`, which is
+//! why the two existing censuses do — `fr-command/tests/lua_redis_call_allocation_
+//! census.rs` and `fr-runtime/tests/rdb_hash_load_allocation_census.rs`.
+
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static ALLOCS: AtomicUsize = AtomicUsize::new(0);
+
+struct CountingAlloc;
+
+unsafe impl GlobalAlloc for CountingAlloc {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        ALLOCS.fetch_add(1, Ordering::Relaxed);
+        unsafe { System.alloc(layout) }
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(ptr, layout) }
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        ALLOCS.fetch_add(1, Ordering::Relaxed);
+        unsafe { System.realloc(ptr, layout, new_size) }
+    }
+}
+
+#[global_allocator]
+static GLOBAL: CountingAlloc = CountingAlloc;
+
+/// Allocations charged to `n` borrowed DELs of a key that does not exist.
+fn del_missing_allocations(rt: &mut fr_runtime::Runtime, n: usize) -> usize {
+    let keys: [&[u8]; 1] = [b"nosuchkey"];
+    let before = ALLOCS.load(Ordering::Relaxed);
+    for _ in 0..n {
+        // A None here means the borrowed route DECLINED its gate and the census is
+        // counting nothing — the failure mode that would make this test silently
+        // vacuous while passing.
+        assert_eq!(
+            rt.execute_plain_del_borrowed(&keys, 1),
+            Some(fr_protocol::RespFrame::Integer(0)),
+            "borrowed DEL must serve a missing key and report 0 removed"
+        );
+    }
+    ALLOCS.load(Ordering::Relaxed) - before
+}
+
+#[test]
+fn borrowed_del_on_a_missing_key_allocates_nothing_per_key() {
+    let mut rt = fr_runtime::Runtime::default_strict();
+
+    // Two-point subtraction on CALL COUNT: the difference is the marginal cost of
+    // one DEL, so construction and any lazily-built table cancel instead of being
+    // amortised into the per-op figure.
+    let _ = del_missing_allocations(&mut rt, 64);
+    let few = del_missing_allocations(&mut rt, 128);
+    let many = del_missing_allocations(&mut rt, 384);
+    let per_op = many.saturating_sub(few) as f64 / 256.0;
+
+    eprintln!("borrowed DEL (missing key): {per_op:.3} allocations/op");
+
+    // BEFORE the lever this is >= 2 per op: one Vec for `keys_owned` plus one
+    // `to_vec()` per key. AFTER it should be 0 — the route holds only borrows,
+    // `last_del_removed` is gated on `notify_keyspace_events != 0` (off by
+    // default), and the metrics closure is lazy via `get_or_insert_with`.
+    //
+    // The bound sits BETWEEN the two states so neither can pass in the other's
+    // place, which is the discipline the perf-ab-rdb-hash-owned census uses.
+    assert!(
+        per_op < 1.0,
+        "borrowed DEL still materialises owned keys: {per_op:.3} allocations/op. \
+         A generic signature is not enough — check for a copy INSIDE Store::del."
+    );
+}
+
+#[test]
+fn borrowed_del_removing_a_key_allocates_only_the_callers_own_key() {
+    // The companion case, and it is what makes the missing-key figure meaningful
+    // rather than an artifact of nothing ever being removed: with notifications OFF
+    // the REMOVAL path must not push to `last_del_removed` either.
+    let mut rt = fr_runtime::Runtime::default_strict();
+    const N: usize = 256;
+
+    for i in 0..N {
+        rt.execute_frame(
+            fr_protocol::RespFrame::Array(Some(vec![
+                fr_protocol::RespFrame::BulkString(Some(b"SET".to_vec())),
+                fr_protocol::RespFrame::BulkString(Some(format!("k:{i}").into_bytes())),
+                fr_protocol::RespFrame::BulkString(Some(b"v".to_vec())),
+            ])),
+            1,
+        );
+    }
+
+    let before = ALLOCS.load(Ordering::Relaxed);
+    for i in 0..N {
+        let owned = format!("k:{i}").into_bytes();
+        let keys: [&[u8]; 1] = [owned.as_slice()];
+        assert_eq!(
+            rt.execute_plain_del_borrowed(&keys, 1),
+            Some(fr_protocol::RespFrame::Integer(1)),
+            "key k:{i} should have been removed"
+        );
+    }
+    let per_op = (ALLOCS.load(Ordering::Relaxed) - before) as f64 / N as f64;
+    eprintln!("borrowed DEL (present key, notifications off): {per_op:.3} allocations/op");
+
+    // `format!` allocates the key itself inside the loop, so the floor here is 1,
+    // not 0. What must NOT appear is a SECOND owned copy for `last_del_removed`.
+    assert!(
+        per_op < 2.0,
+        "removal path allocates beyond the caller's own key: {per_op:.3}/op — check \
+         that last_del_removed stays gated on notify_keyspace_events"
+    );
+}
