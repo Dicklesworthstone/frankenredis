@@ -23,6 +23,7 @@ Exit 0 if defaults match (modulo host-specific fields), else 1.
 """
 import argparse
 import os
+import tempfile
 import socket
 import subprocess
 import sys
@@ -127,8 +128,24 @@ def find_redis():
     return None
 
 
+# (frankenredis-7afsd) Every engine this gate launches runs in a private
+# directory. Launched bare they inherit the caller's cwd -- normally the repo
+# root, shared by a dozen agents -- and load whatever dump.rdb sits there. An
+# fr-written dump.rdb carrying a FUNCTION library redis 7.2.4 refuses ("Error
+# registering functions: ERR user_function:3: attempt to index local 't' (a nil
+# value)") makes redis abort during startup, which this gate reports as "server
+# did not start". Isolation is via cwd rather than --dir because fr rejects --dir
+# as a startup argument (frankenredis-fyi51).
+_WORKDIR = tempfile.mkdtemp(prefix="fr_config_defaults_")
+
+
 def launch(cmdline, port):
-    proc = subprocess.Popen(cmdline, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # The binary path is absolutised against OUR cwd before the child moves to
+    # _WORKDIR, so a relative --redis-bin (what run_parity_differs.sh passes by
+    # default) still resolves.
+    cmdline = [os.path.abspath(cmdline[0])] + list(cmdline[1:])
+    proc = subprocess.Popen(cmdline, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, cwd=_WORKDIR)
     for _ in range(60):
         try:
             c = Conn(port)

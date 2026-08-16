@@ -142,6 +142,18 @@ def verbs_between(cmds, beg_key, end_key):
     return out
 
 
+def free_port():
+    """(frankenredis-7afsd) Ephemeral port instead of the fixed 21717: on a box a
+    dozen agents share, anyone can hold a number, and a squatter that speaks RESP
+    is adopted without a word."""
+    s = socket.socket()
+    try:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+    finally:
+        s.close()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bin", default=None)
@@ -152,10 +164,12 @@ def main():
         sys.exit(2)
 
     tmp = tempfile.mkdtemp(prefix="fr-wrapgate-")
-    port = 21717
+    port = free_port()
+    # (frankenredis-7afsd) Run in the gate's own tempdir, not the shared repo root.
     proc = subprocess.Popen(
-        [binpath, "--port", str(port), "--aof", os.path.join(tmp, "appendonly.aof")],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        [os.path.abspath(binpath), "--port", str(port),
+         "--aof", os.path.join(tmp, "appendonly.aof")],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=tmp,
     )
     failures = []
     try:

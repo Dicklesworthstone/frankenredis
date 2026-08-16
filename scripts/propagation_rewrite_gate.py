@@ -107,9 +107,13 @@ def main():
     port = free_port()
     tmp = tempfile.mkdtemp(prefix="fr-prop-")
     aof = os.path.join(tmp, "appendonly.aof")
+    # (frankenredis-7afsd) Run the engine in the tempdir this gate already makes,
+    # not the caller's cwd: bare, it loads whatever dump.rdb sits in the shared
+    # repo root.
     proc = subprocess.Popen(
-        [fr_bin, "--port", str(port), "--enable-debug-command", "yes", "--aof", aof],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        [os.path.abspath(fr_bin), "--port", str(port),
+         "--enable-debug-command", "yes", "--aof", aof],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=tmp)
     try:
         time.sleep(1.5)
         c = Cli(port)

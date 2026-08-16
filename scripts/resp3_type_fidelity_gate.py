@@ -22,12 +22,26 @@ by TYPE/shape, not content. Exit 0 if byte-exact, else 1. Usage:
 import argparse
 import os
 import socket
+import tempfile
 import subprocess
 import sys
 import time
 
-FR_PORT = 21833
-REDIS_PORT = 21834
+def _free_port():
+    """(frankenredis-7afsd) Ephemeral ports: a fixed pair on a shared box can be
+    held by anyone, and a squatter speaking RESP is adopted without a word."""
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    p = s.getsockname()[1]
+    s.close()
+    return p
+
+
+# (frankenredis-7afsd) Both engines run here, never the caller's cwd, which is
+# normally the shared repo root and may hold a dump.rdb redis refuses to load.
+_WORKDIR = tempfile.mkdtemp(prefix="fr_resp3_fidelity_")
+FR_PORT = _free_port()
+REDIS_PORT = _free_port()
 
 
 def find_bin():
@@ -113,11 +127,14 @@ def main():
     failures = []
     rproc = fproc = None
     try:
-        rproc = subprocess.Popen([redispath, conf, "--port", str(REDIS_PORT)],
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        fproc = subprocess.Popen([binpath, "--port", str(FR_PORT),
+        rproc = subprocess.Popen([os.path.abspath(redispath), conf,
+                                  "--port", str(REDIS_PORT)],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 cwd=_WORKDIR)
+        fproc = subprocess.Popen([os.path.abspath(binpath), "--port", str(FR_PORT),
                                   "--enable-debug-command", "yes"],
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 cwd=_WORKDIR)
         wait_up(REDIS_PORT)
         wait_up(FR_PORT)
 
