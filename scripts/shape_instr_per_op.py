@@ -167,6 +167,14 @@ SHAPES = {
     "pfadd_existing": (["PFADD hll a b c"], ["PFADD", "hll", "a"]),
     "pexpireat_same": (["SET s abcdefghijklmnop"],
                        ["PEXPIREAT", "s", "4102444800000"]),
+    # (frankenredis-ee41v) ZRANGEBYSCORE with LIMIT reads 0.7979 and 0.7924 while
+    # the PLAIN form measured 1.2601 in the zsetreads sweep -- same command, one
+    # option, opposite sides of parity. Attribute before assuming which mechanism.
+    "zrangebyscore_l": (["ZADD z 1 a 2 b 3 c"],
+                        ["ZRANGEBYSCORE", "z", "1", "3", "LIMIT", "0", "2"]),
+    "zrangebyscore_plain": (["ZADD z 1 a 2 b 3 c"], ["ZRANGEBYSCORE", "z", "1", "3"]),
+    "sintercard_lim": (["SADD s1 m1 m2 m3", "SADD s2 m2 m3 m4"],
+                       ["SINTERCARD", "2", "s1", "s2", "LIMIT", "1"]),
     # The control: a route none of the above levers touch.
     "get_control": (["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
 }

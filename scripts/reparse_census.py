@@ -43,7 +43,22 @@ def parse_counts(dump_dir):
     for m in re.finditer(r"parse_borrowed_plain_([a-z0-9_]+)_packet \(([\d,]+)x\)", out):
         name, n = m.group(1), int(m.group(2).replace(",", ""))
         counts[name] = max(counts.get(name, 0), n)
-    return {k: v / (2 * OPS) for k, v in counts.items() if v >= 2 * OPS * 0.5}
+    per_op = {k: v / (2 * OPS) for k, v in counts.items() if v >= 2 * OPS * 0.5}
+    # (frankenredis-5b596) A per-op parser call count MUST be a whole number:
+    # the parser either runs n times per command or it does not. A fractional
+    # value means the N and 2N runs did not scale, i.e. the two-point subtraction
+    # was contaminated and the whole row is invalid. Observed live: three repeats
+    # of ZRANGEBYSCORE-with-LIMIT gave 81.0, 81.0 and 66.4, and the 66.4 run also
+    # reported 9179 instr/op against the other two at 22073 and 22106. The
+    # fraction is the cheaper signal -- it is visible without a second run.
+    for name, calls in sorted(per_op.items()):
+        if abs(calls - round(calls)) > 0.02:
+            raise SystemExit(
+                "INVALID: %s measured %.2f calls per op, which is not a whole "
+                "number. The two-point subtraction did not scale between the N "
+                "and 2N runs, so every figure in this row is contaminated. "
+                "Re-run." % (name, calls))
+    return per_op
 
 
 def main():

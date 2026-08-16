@@ -318,6 +318,28 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
         ("mget_3", ["MSET a 1 b 2 c 3"], ["MGET", "a", "b", "c"]),
         ("get_control", ["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
     ],
+    # (frankenredis-ee41v) Fifth batch: single-command shapes no sweep had
+    # touched. All 13 cleared shape_admission_probe on both engines. SCAN and KEYS
+    # were probed and REJECTED: both engines return the same key SET in a
+    # different ORDER, which is unspecified upstream and not a parity bug, but it
+    # disqualifies them from a byte-exact throughput shape.
+    "unswept5": [
+        ("getrange_full", ["SET s abcdefghijklmnop"], ["GETRANGE", "s", "0", "-1"]),
+        ("lrange_neg", ["RPUSH l a b c d e"], ["LRANGE", "l", "-3", "-1"]),
+        ("hmget_2", ["HSET h f1 v1 f2 v2"], ["HMGET", "h", "f1", "f2"]),
+        ("mset_2", [], ["MSET", "ma", "1", "mb", "2"]),
+        ("zadd_xx", ["ZADD z 1 a"], ["ZADD", "z", "XX", "1", "a"]),
+        ("expire_nx", ["SET s v", "EXPIRE s 10000"], ["EXPIRE", "s", "500", "NX"]),
+        ("lpos_rank", ["RPUSH l a b c d e"], ["LPOS", "l", "c", "RANK", "1"]),
+        ("sintercard_lim", ["SADD s1 m1 m2 m3", "SADD s2 m2 m3 m4"],
+         ["SINTERCARD", "2", "s1", "s2", "LIMIT", "1"]),
+        ("sadd_existing2", ["SADD st m1 m2"], ["SADD", "st", "m1", "m2"]),
+        ("zrangebyscore_l", ["ZADD z 1 a 2 b 3 c"],
+         ["ZRANGEBYSCORE", "z", "1", "3", "LIMIT", "0", "2"]),
+        ("hdel_existing", ["HSET h f1 v1"], ["HDEL", "h", "nofield2"]),
+        ("append_empty", ["SET s abcdefghijklmnop"], ["APPEND", "s", ""]),
+        ("get_control", ["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
+    ],
     "storeops": [
         ("exists_8key", ["MSET e1 1 e2 1 e3 1 e4 1 e5 1 e6 1 e7 1 e8 1"],
          ["EXISTS", "e1", "e2", "e3", "e4", "e5", "e6", "e7", "e8"]),
