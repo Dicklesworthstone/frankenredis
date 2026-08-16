@@ -18411,42 +18411,49 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::LposRank => {
-            if let Some(packet) = parse_borrowed_plain_lpos_rank_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_lpos_rank_borrowed(
-                    packet.key,
-                    packet.element,
-                    packet.rank,
-                    ts,
-                )
-            {
-                Ok(BorrowedMultibulkAction::FastReply {
-                    consumed: packet.consumed,
-                    response,
-                })
-            } else if let Some((consumed, response)) = parse_borrowed_plain_key_arg3_packet(
+            // (frankenredis-uu33c) PARSE ONCE, then branch on the keyword.
+            //
+            // The previous form tried `parse_borrowed_plain_lpos_rank_packet` first and
+            // re-parsed with `key_arg3` when it declined. Both parsers call `set_bulk`
+            // four times, and the RANK parser declines at the KEYWORD, which sits after
+            // the THIRD call — so a COUNT packet paid 3 + 4 = 7 `set_bulk` calls where
+            // RANK pays 4. Measured: `set_bulk` self-cost 336 vs 192 instr/op, exactly
+            // 7/4, ~48 instr per call. That is ~249 instr/op of pure waste (144 in the
+            // three wasted calls, 105 in the rest of the failed attempt).
+            //
+            // The keyword CANNOT be peeked before parsing: it follows two
+            // length-prefixed bulks whose sizes are data, so reaching it IS the parse.
+            // Hence parse once and branch — this is not skipping work, it is not
+            // repeating it, which is why nothing can be dropped (the two parsers'
+            // validation differs by exactly the keyword check).
+            //
+            // The `*5` below is now the ONLY arity guard for this route: `key_arg3`
+            // takes the prefix as a PARAMETER where `lpos_rank_packet` hardcoded it, so
+            // the guard moved from the parser into this call site. Passing `*6` here
+            // would compile, run, and mis-claim silently.
+            if let Some((consumed, response)) = parse_borrowed_plain_key_arg3_packet(
                 unparsed,
                 &parser_config,
                 b"*5\r\n$4\r\n",
                 b"LPOS",
             )
-            .filter(|packet| packet.b.eq_ignore_ascii_case(b"COUNT"))
             .and_then(|packet| {
-                // (frankenredis-uu33c) This class is minted on ARITY ALONE, so the
-                // sibling `*5` option forms land here too and the RANK parser above
-                // declines every one of them: `LPOS k e COUNT n` and `MAXLEN n`.
-                // COUNT is served here rather than by narrowing the class, because
-                // narrowing only pays when the CASCADE has an arm that serves the
-                // shape — and LPOS has none: only `lpos` (no-option) and `lpos_rank`
-                // exist, so an unclaimed COUNT would walk the whole cascade to reach
-                // the same generic path it reaches now. Chaining here is the ZRANGE
-                // (2e4tq) / GETEX / HMGET pattern.
-                //
-                // MAXLEN is deliberately NOT served: it has no executor, so it keeps
-                // falling through to generic below. Recorded as still-stranded rather
-                // than silently assumed handled.
-                runtime
-                    .execute_plain_lpos_count_borrowed(packet.key, packet.a, packet.c, ts)
-                    .map(|response| (packet.consumed, response))
+                // EXHAUSTIVE ON PURPOSE. Do NOT collapse this to
+                // `if COUNT { .. } else { rank .. }`. The old form had the PARSER reject
+                // a third keyword (`rank_kw != "RANK"` -> decline -> generic). Parsing
+                // once moves that decision here, so an `else` meaning RANK would execute
+                // `LPOS k e MAXLEN n` AS RANK — a WRONG ANSWER, not a wrong route, and
+                // invisible to every perf test. MAXLEN is live: it is a real LPOS option
+                // deliberately left stranded on generic, so it WILL reach this branch.
+                let served = if packet.b.eq_ignore_ascii_case(b"RANK") {
+                    runtime.execute_plain_lpos_rank_borrowed(packet.key, packet.a, packet.c, ts)
+                } else if packet.b.eq_ignore_ascii_case(b"COUNT") {
+                    runtime.execute_plain_lpos_count_borrowed(packet.key, packet.a, packet.c, ts)
+                } else {
+                    // MAXLEN and any other option: still generic, still stranded.
+                    None
+                };
+                served.map(|response| (packet.consumed, response))
             }) {
                 Ok(BorrowedMultibulkAction::FastReply { consumed, response })
             } else {
@@ -43909,6 +43916,66 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
     /// BITFIELD (where the parser takes opaque bulks and the biconditional holds
     /// trivially) it is meaningful here: the parser IS the discriminator, and the
     /// key-count floor is a real boundary it can regress back to.
+    /// (frankenredis-uu33c) The LposRank arm parses ONCE with `key_arg3` and branches
+    /// on the keyword. This pins the contract that makes that safe — and the hazard it
+    /// creates.
+    ///
+    /// `key_arg3` is a POSITIONAL parser: it does not know what LPOS means and accepts
+    /// ANY third bulk. Under the previous design the RANK parser rejected a foreign
+    /// keyword itself, so a `MAXLEN` packet never reached an executor. Now the parser
+    /// accepts it and **the branch is the only thing that decides**, which is why that
+    /// branch must be exhaustive with a generic fallthrough. An `else` meaning RANK
+    /// would execute `LPOS k e MAXLEN n` AS RANK: a wrong answer rather than a wrong
+    /// route, and invisible to every perf test.
+    ///
+    /// If this test ever fails because `key_arg3` started discriminating, the branch's
+    /// exhaustiveness is no longer load-bearing and the comment there should be
+    /// revisited — but do NOT "fix" it by narrowing the parser, which would restore the
+    /// double-parse this lever removed.
+    #[test]
+    fn lpos_arity5_parser_is_keyword_blind_so_the_arm_branch_is_load_bearing() {
+        let cfg = ParserConfig::default();
+        let packet = |kw: &[u8]| -> Vec<u8> {
+            let mut p = b"*5\r\n$4\r\nLPOS\r\n$1\r\nk\r\n$1\r\ne\r\n".to_vec();
+            p.extend_from_slice(format!("${}\r\n", kw.len()).as_bytes());
+            p.extend_from_slice(kw);
+            p.extend_from_slice(b"\r\n$1\r\n1\r\n");
+            p
+        };
+        // All three real option spellings parse identically; only the branch separates
+        // them. MAXLEN is the live case -- a genuine LPOS option with no executor.
+        for kw in [&b"RANK"[..], &b"COUNT"[..], &b"MAXLEN"[..]] {
+            let pkt = packet(kw);
+            let parsed = super::parse_borrowed_plain_key_arg3_packet(
+                &pkt,
+                &cfg,
+                b"*5\r\n$4\r\n",
+                b"LPOS",
+            );
+            let parsed = parsed.unwrap_or_else(|| {
+                panic!(
+                    "key_arg3 declined LPOS ... {} ...; the arm parses once and relies \
+                     on this parser accepting every arity-5 option form",
+                    String::from_utf8_lossy(kw)
+                )
+            });
+            assert_eq!(
+                parsed.b,
+                kw,
+                "key_arg3 must hand the keyword through untouched as `b`, since that is \
+                 what the arm branches on"
+            );
+        }
+        // And the class still claims every arity-5 LPOS, which is what routes all three
+        // spellings into that single arm in the first place.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(&packet(b"MAXLEN"), &cfg),
+            Some(super::BorrowedDispatchFloorClass::LposRank),
+            "arity-5 LPOS must still be claimed; if it stopped being claimed, MAXLEN \
+             would reach the cascade instead of this arm's generic fallthrough"
+        );
+    }
+
     #[test]
     fn set_algebra_floor_claims_are_honoured_at_every_claimed_arity() {
         let cfg = ParserConfig::default();
