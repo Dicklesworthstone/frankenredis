@@ -337,6 +337,24 @@ CASES = [
     ("ZSCORE", "z6", "m1"),
     ("ZADD", "z6", "XX", "CH", "1", "absent"),
     ("ZADD", "s:1", "XX", "CH", "1", "m1"),
+    # (frankenredis-f3nry) INCR at array length 6 is the case the fused arity-6
+    # parser can get wrong SILENTLY. INCR is not in the flag whitelist and IS in
+    # the two-pair reject list, so both readings decline it and it must reach the
+    # generic path -- where its reply is a BULK score (or a nil), never the
+    # integer count both fast paths emit. A fusion that admitted INCR as a flag,
+    # or that dropped the INCR guard from the two-pair branch, would answer these
+    # rows with the wrong RESP TYPE while every count-shaped row above stayed
+    # green. Both option slots are covered because the guard is per-slot.
+    ("ZADD", "z6", "INCR", "CH", "5", "m1"),
+    ("ZSCORE", "z6", "m1"),
+    ("ZADD", "z6", "GT", "INCR", "5", "m1"),
+    ("ZADD", "z6", "GT", "INCR", "-5", "m1"),
+    ("ZSCORE", "z6", "m1"),
+    ("ZADD", "z6", "INCR", "XX", "2", "absent"),
+    ("ZADD", "z6", "INCR", "NX", "2", "m1"),
+    # A flag followed by a score is a dangling-element error, not a two-pair
+    # write: the error text must come from the generic path verbatim.
+    ("ZADD", "z6", "NX", "1", "a", "2"),
     # (frankenredis-4b2o4) LPOS MAXLEN. Array length 5 admits RANK, COUNT and
     # MAXLEN; the floor class claims all three and the arm branches on RANK and
     # COUNT only, so MAXLEN falls to generic. Unlike the ZADD arity-6 case there is
