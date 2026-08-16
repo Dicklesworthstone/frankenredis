@@ -161,6 +161,44 @@ CASES = [
     ("ZRANGEBYSCORE", "s:1", "1", "4", "LIMIT", "0", "2"),
     # a non-LIMIT token at the same length must still reach generic verbatim
     ("ZRANGEBYSCORE", "z:lim", "1", "4", "SIDEWAYS", "0", "2"),
+    # (frankenredis-6oxxn) The remaining stranded routes, at the arities --stranded
+    # reports as SAFE to claim. Landing the gate BEFORE the classification means
+    # whoever mints these classes inherits a corpus instead of writing one, and the
+    # rows also pin today's cascade behaviour so a regression is visible either way.
+    #
+    # TOUCH, safe at 2..6. Read-only, so ordering with the rest is harmless.
+    ("TOUCH", "t:absent"),
+    ("TOUCH", "z:lim"),
+    ("TOUCH", "z:lim", "t:absent"),
+    ("TOUCH", "z:lim", "t:absent", "s:1"),
+    # MSETNX, safe at odd lengths. It is all-or-nothing: the second call must
+    # return 0 and leave the FIRST key untouched, which a route that wrote
+    # eagerly would fail.
+    ("MSETNX", "mn:a", "1"),
+    ("MSETNX", "mn:a", "2", "mn:b", "3"),
+    ("GET", "mn:a"),
+    ("EXISTS", "mn:b"),
+    ("MSETNX", "mn:c", "1", "mn:d", "2"),
+    ("MGET", "mn:c", "mn:d"),
+    # SPUBLISH, safe at 3. No subscribers on either engine, so the receiver count
+    # is deterministic.
+    ("SPUBLISH", "chan:1", "hello"),
+    # LMPOP, safe at 4/5/9/10 -- and length 6 is the AMBIGUOUS one the advisor
+    # flags, so both readings are exercised here deliberately.
+    ("RPUSH", "l:mp", "a", "b", "c"),
+    ("LMPOP", "1", "l:mp", "LEFT"),
+    ("LMPOP", "1", "l:mp", "RIGHT"),
+    ("LMPOP", "1", "l:absent", "LEFT"),
+    ("LMPOP", "1", "l:mp", "LEFT", "COUNT", "2"),
+    ("RPUSH", "l:mp2", "x", "y"),
+    ("LMPOP", "2", "l:absent", "l:mp2", "LEFT"),
+    ("LMPOP", "1", "s:1", "LEFT"),
+    # MOVE, safe at 3. Kept LAST of the stateful rows: it removes the key from
+    # db 0, so anything after it would see a different keyspace.
+    ("SET", "mv:k", "v"),
+    ("MOVE", "mv:k", "1"),
+    ("EXISTS", "mv:k"),
+    ("MOVE", "mv:absent", "1"),
     # Errors must come from the generic path verbatim.
     ("ZMPOP", "1", "s:1", "MIN"),
     ("ZMPOP", "1", "z:mp", "SIDEWAYS"),
