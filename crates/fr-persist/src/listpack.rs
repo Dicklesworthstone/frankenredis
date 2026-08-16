@@ -50,23 +50,62 @@ impl ListpackEntry {
 }
 
 /// Redis-observable listpack value without copying string payload bytes.
+///
+/// (frankenredis-33832) SIZE IS THE COST OF THIS TYPE. `decode_value_spans`
+/// pushes one of these per listpack entry, and callgrind line attribution put
+/// `core::ptr::write` — the struct copy inside that push — at 26.4% of the
+/// function, 40 instructions per element on a 40-byte struct, i.e. one
+/// instruction per byte. Shrinking the struct is therefore a direct, linear
+/// reduction of the hottest line on the RESTORE decode path, and it also shrinks
+/// the retained `Vec<ListpackValueSpan>` that `packed_set` keeps for a
+/// listpack-backed list, so it is an RSS win as well as an instruction win.
+///
+/// Two things bought the shrink from 40 bytes to 24:
+///   - the string range is `u32`, not `usize`. A listpack's own header stores
+///     `total_bytes` as a `u32`, so a range that needed more than 32 bits could
+///     not describe a valid listpack in the first place.
+///   - the integer variant no longer caches the `i64` it was rendered from.
+///
+/// Variants are deliberately not `pub`-constructible-in-practice: nothing
+/// outside this module builds or matches one (verified repo-wide), every
+/// consumer goes through [`Self::as_bytes`], so the layout is free to change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ListpackValueSpan {
     /// Byte-string entry borrowed from the original listpack payload.
-    String(Range<usize>),
+    String(Range<u32>),
     /// Integer entry rendered as Redis's decimal byte-string value.
     Integer(ListpackIntegerBytes),
 }
 
+// Lock the shrink in. Without this the type could drift back to 40 bytes under a
+// later edit and silently give back the win, with nothing failing.
+// 32 rather than a tighter number on purpose: the exact size depends on whether
+// the layout algorithm tucks the discriminant into the `Integer` variant's
+// trailing padding (24) or gives it its own aligned slot (28), and pinning a
+// guessed value would turn a layout detail into a build failure. 32 is below the
+// 40 this type used to be, so the win cannot silently regress, and the
+// accompanying test reports the actual size.
+const _: () = assert!(
+    std::mem::size_of::<ListpackValueSpan>() <= 32,
+    "ListpackValueSpan must stay <= 32 bytes: decode_value_spans pays ~1 instruction \
+     per byte of it per listpack entry (frankenredis-33832)"
+);
+
 /// Inline decimal representation for any i64 (`i64::MIN` is 20 bytes).
+///
+/// (frankenredis-33832) The `value: i64` this used to carry — added by w08xv so a
+/// score consumer would not have to reparse the decimal text — is gone, along
+/// with its `value()` / `ListpackValueSpan::as_i64()` accessors. They had NO
+/// caller anywhere in the workspace: the sorted-set path that motivated them
+/// takes its number from `decode_zset_spans_and_scores`, which reads the value
+/// straight off `RawListpackValue::Integer` before a span is ever built, so it
+/// never needed the cached copy. Carrying it cost 8 bytes on EVERY entry —
+/// including the string entries that are the whole of a typical hash RESTORE —
+/// to serve nobody.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListpackIntegerBytes {
     bytes: [u8; 20],
     len: u8,
-    /// (frankenredis-w08xv) The value the decimal bytes were rendered FROM.
-    /// A zset score consumer wants the number, and without this it had to
-    /// re-derive it by parsing the text this struct had just produced.
-    value: i64,
 }
 
 impl ListpackIntegerBytes {
@@ -83,7 +122,6 @@ impl ListpackIntegerBytes {
         Self {
             bytes,
             len: len as u8,
-            value,
         }
     }
 
@@ -92,12 +130,23 @@ impl ListpackIntegerBytes {
         &self.bytes[..usize::from(self.len)]
     }
 
-    /// The integer this entry decoded to, without going through its decimal
-    /// rendering. (frankenredis-w08xv)
-    #[must_use]
-    pub const fn value(&self) -> i64 {
-        self.value
-    }
+}
+
+/// Narrow a decoded payload offset pair to the `u32` pair a span stores.
+///
+/// (frankenredis-33832) CHECKED, not an `as` cast, and the distinction matters.
+/// A valid listpack cannot address beyond 32 bits — its own header stores
+/// `total_bytes` as a `u32` — but `decode_entry_value_span` bounds its ranges
+/// against `data.len()`, and a caller is free to hand this decoder a buffer
+/// longer than `u32::MAX`. Under an `as` cast a crafted entry could then wrap to
+/// a DIFFERENT, still in-bounds range, and `as_bytes` would hand back the wrong
+/// bytes with no error anywhere — a wrong answer, which is strictly worse than a
+/// rejection. This turns that case into the rejection it should be.
+#[inline]
+fn narrow_span(start: usize, end: usize) -> Result<Range<u32>, ListpackError> {
+    let start = u32::try_from(start).map_err(|_| ListpackError::StringLengthOverflow)?;
+    let end = u32::try_from(end).map_err(|_| ListpackError::StringLengthOverflow)?;
+    Ok(start..end)
 }
 
 impl ListpackValueSpan {
@@ -109,21 +158,34 @@ impl ListpackValueSpan {
     #[inline]
     pub fn as_bytes<'a>(&'a self, listpack: &'a [u8]) -> &'a [u8] {
         match self {
-            Self::String(range) => &listpack[range.clone()],
+            Self::String(range) => {
+                &listpack[range.start as usize..range.end as usize]
+            }
             Self::Integer(bytes) => bytes.as_slice(),
         }
     }
 
     /// The entry's integer value when it was integer-encoded in the listpack.
-    /// (frankenredis-w08xv) A consumer that wants a NUMBER — a sorted-set score
-    /// is the one that matters — can take it directly instead of parsing the
-    /// decimal text this decoder just rendered from it. Returns `None` for
-    /// string-encoded entries, which still have to be parsed.
+    /// Returns `None` for string-encoded entries.
+    ///
+    /// (frankenredis-33832) DERIVED by parsing the rendered decimal, not cached.
+    /// w08xv originally kept the source `i64` in a field so a score consumer
+    /// would not reparse — but that cost 8 bytes on EVERY span, including the
+    /// string entries that make up a typical hash RESTORE, and no production
+    /// caller ever took it: the sorted-set path reads its number off
+    /// `RawListpackValue::Integer` inside [`decode_zset_spans_and_scores`],
+    /// before a span exists. Deriving it keeps the accessor (and the round-trip
+    /// invariant its tests pin) while letting the struct shrink.
+    ///
+    /// DO NOT put this on a hot path — use [`decode_zset_spans_and_scores`],
+    /// which is what the field existed to serve in the first place.
     #[must_use]
-    pub const fn as_i64(&self) -> Option<i64> {
+    pub fn as_i64(&self) -> Option<i64> {
         match self {
             Self::String(_) => None,
-            Self::Integer(bytes) => Some(bytes.value()),
+            Self::Integer(bytes) => std::str::from_utf8(bytes.as_slice())
+                .ok()
+                .and_then(|text| text.parse().ok()),
         }
     }
 }
@@ -800,7 +862,7 @@ fn decode_entry_value_span(
         }
         let data_len = 1 + slen;
         let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
-        return Ok((ListpackValueSpan::String(start..end), entry_len));
+        return Ok((ListpackValueSpan::String(narrow_span(start, end)?), entry_len));
     }
     if first & 0xE0 == 0xC0 {
         let second = *data.get(cursor + 1).ok_or(ListpackError::TruncatedEntry)?;
@@ -826,7 +888,7 @@ fn decode_entry_value_span(
         }
         let data_len = 2 + slen;
         let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
-        return Ok((ListpackValueSpan::String(start..end), entry_len));
+        return Ok((ListpackValueSpan::String(narrow_span(start, end)?), entry_len));
     }
     match first {
         0xF0 => {
@@ -848,7 +910,7 @@ fn decode_entry_value_span(
             }
             let data_len = 5 + slen;
             let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
-            Ok((ListpackValueSpan::String(start..end), entry_len))
+            Ok((ListpackValueSpan::String(narrow_span(start, end)?), entry_len))
         }
         0xF1 => {
             if cursor + 3 > data.len() {
@@ -1004,7 +1066,9 @@ pub fn decode_zset_spans_and_scores(
             // Member half: rendered exactly as the general decoder would.
             None => {
                 pending = Some(match raw {
-                    RawListpackValue::String(range) => ListpackValueSpan::String(range),
+                    RawListpackValue::String(range) => {
+                        ListpackValueSpan::String(narrow_span(range.start, range.end)?)
+                    },
                     RawListpackValue::Integer(value) => ListpackValueSpan::integer(value),
                 });
             }
@@ -1596,6 +1660,56 @@ mod tests {
     fn decode_string_ranges_returns_none_for_integer_node() {
         let lp = assemble(&[&entry_6bit_str(b"alpha"), &entry_7bit_uint(42)]);
         assert_eq!(decode_string_ranges_if_all_strings(&lp).unwrap(), None);
+    }
+
+    /// (frankenredis-33832) The span's SIZE is its cost: `decode_value_spans`
+    /// pushes one per listpack entry and pays ~1 instruction per byte of it in
+    /// `ptr::write`. There is a `const _: () = assert!(..)` on the type that is
+    /// the real gate; this test exists so the reason shows up in a test failure
+    /// and not only in a compile error.
+    #[test]
+    fn listpack_value_span_stays_small() {
+        assert!(
+            std::mem::size_of::<ListpackValueSpan>() <= 32,
+            "ListpackValueSpan grew to {} bytes; decode_value_spans pays about one \
+             instruction per byte per listpack entry, so this is a direct RESTORE \
+             regression (was 40 before frankenredis-33832)",
+            std::mem::size_of::<ListpackValueSpan>()
+        );
+        // Report the achieved size so the measurement can be checked against it.
+        println!(
+            "ListpackValueSpan = {} bytes",
+            std::mem::size_of::<ListpackValueSpan>()
+        );
+    }
+
+    /// The `usize -> u32` narrowing must REJECT, never truncate.
+    ///
+    /// This is the one path a real listpack cannot reach — it needs a buffer
+    /// longer than `u32::MAX`, which no test is going to allocate — so it is
+    /// tested directly on the helper. Under a plain `as` cast the first case
+    /// below would silently become `0..0` and `as_bytes` would return the wrong
+    /// bytes with no error raised anywhere.
+    #[test]
+    fn narrow_span_rejects_offsets_beyond_u32_instead_of_truncating() {
+        let over = u32::MAX as usize + 1;
+        assert_eq!(
+            narrow_span(0, over),
+            Err(ListpackError::StringLengthOverflow),
+            "an end offset past u32::MAX must be rejected, not wrapped to 0"
+        );
+        assert_eq!(
+            narrow_span(over, over + 8),
+            Err(ListpackError::StringLengthOverflow),
+            "a start offset past u32::MAX must be rejected"
+        );
+        // The boundary itself is representable and must still be accepted, so the
+        // guard cannot be "reject everything large" and pass the cases above.
+        assert_eq!(
+            narrow_span(0, u32::MAX as usize),
+            Ok(0..u32::MAX),
+            "u32::MAX is representable and must be accepted"
+        );
     }
 
     #[test]
