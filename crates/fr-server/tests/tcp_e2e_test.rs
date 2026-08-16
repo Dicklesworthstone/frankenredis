@@ -2370,6 +2370,22 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"GET", b"s:sx3"]));
     cmds.push(c(&[b"SETEX", b"s:sx4", b"100"]));
     cmds.push(c(&[b"SETEX", b"s:sx4", b"100", b"vv", b"extra"]));
+    // (frankenredis-iqicb) PSETEX, the millisecond sibling. PTTL is read back rather
+    // than TTL: a route accidentally wired to the SECONDS executor would still reply
+    // +OK and still set an expiry, and only the millisecond magnitude tells them
+    // apart -- which is the exact confusion these two commands invite.
+    cmds.push(c(&[b"PSETEX", b"s:px", b"100000", b"vv"]));
+    cmds.push(c(&[b"GET", b"s:px"]));
+    cmds.push(c(&[b"PTTL", b"s:px"]));
+    cmds.push(c(&[b"psetex", b"s:px2", b"200000", b"ww"]));
+    cmds.push(c(&[b"GET", b"s:px2"]));
+    cmds.push(c(&[b"PSETEX", b"s:px3", b"0", b"vv"]));
+    cmds.push(c(&[b"PSETEX", b"s:px3", b"-1", b"vv"]));
+    cmds.push(c(&[b"PSETEX", b"s:px3", b"notanint", b"vv"]));
+    cmds.push(c(&[b"PSETEX", b"s:px3", b"99999999999999999", b"vv"]));
+    cmds.push(c(&[b"GET", b"s:px3"]));
+    cmds.push(c(&[b"PSETEX", b"s:px4", b"100000"]));
+    cmds.push(c(&[b"PSETEX", b"s:px4", b"100000", b"vv", b"extra"]));
     // (frankenredis-ozrro) COPY is claimed at arity 3 only; the REPLACE spelling
     // keeps the cascade. Both the create and the already-exists branches run,
     // and the destination is read back so a copy that returned 1 without

@@ -92,6 +92,9 @@ SHAPES = {
     # Instruction counts need no null at all.
     "persist_noop": (["SET s abcdefghijklmnop"], ["PERSIST", "s"]),
     "setex_same": ([], ["SETEX", "wx", "100", "vvvvvvvvvvvvvvvv"]),
+    # (frankenredis-iqicb) PSETEX is SETEX's millisecond sibling and sat beside it
+    # in the same probe chain. Same shape so the two are directly comparable.
+    "psetex_same": ([], ["PSETEX", "wy", "100000", "vvvvvvvvvvvvvvvv"]),
     "set_same": ([], ["SET", "wk", "vvvvvvvvvvvvvvvv"]),
     # (frankenredis-mnzgy) The NO-OP / MISS family. PERSIST on a non-volatile key,
     # DEL and UNLINK on a key that does not exist: all three should early-return

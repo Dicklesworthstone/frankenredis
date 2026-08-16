@@ -9770,28 +9770,6 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
-                    parse_borrowed_plain_psetex_packet(unparsed, &parser_config)
-                {
-                    // PSETEX replies a constant +OK; route the non-allocating `_ok` twin to
-                    // FastOkReply so no `SimpleString("OK")` reply frame is allocated per PSETEX.
-                    if runtime
-                        .execute_plain_psetex_borrowed_ok(packet.key, packet.start, packet.end, ts)
-                        .is_some()
-                    {
-                        Ok(BorrowedMultibulkAction::FastOkReply {
-                            consumed: packet.consumed,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
                     parse_borrowed_plain_hsetnx_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_hsetnx_borrowed(
@@ -14791,6 +14769,7 @@ enum BorrowedDispatchFloorClass {
     Pexpiretime,
     Persist,
     Setex,
+    Psetex,
     /// (frankenredis-ozrro) Bare `ZRANDMEMBER key`, the single-member reply
     /// form. Its sibling [`Self::ZrandmemberCount`] was classified in an earlier
     /// slice, which left this one alone ~3,600 lines deep in the chain.
@@ -15009,6 +14988,9 @@ enum BorrowedDispatchFloorCommand {
     Pexpiretime,
     /// `PERSIST`. Only the bare `PERSIST key` form has a borrowed route.
     Persist,
+    /// `PSETEX`. Millisecond sibling of `SETEX`; same borrowed route shape and the
+    /// same decline on an out-of-range TTL.
+    Psetex,
     /// `SETEX`. Only the bare `SETEX key seconds value` form has a borrowed route;
     /// the executor still declines on out-of-range seconds and takes the generic
     /// path, which is where the cascade would have delivered it anyway.
@@ -15195,6 +15177,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
         },
         6 => match uppercase_ascii_token::<6>(token)? {
             [b'D', b'B', b'S', b'I', b'Z', b'E'] => Some(BorrowedDispatchFloorCommand::Dbsize),
+            [b'P', b'S', b'E', b'T', b'E', b'X'] => Some(BorrowedDispatchFloorCommand::Psetex),
             [b'E', b'X', b'I', b'S', b'T', b'S'] => Some(BorrowedDispatchFloorCommand::Exists),
             [b'S', b'E', b'T', b'B', b'I', b'T'] => Some(BorrowedDispatchFloorCommand::Setbit),
             [b'Z', b'C', b'O', b'U', b'N', b'T'] => Some(BorrowedDispatchFloorCommand::Zcount),
@@ -15972,6 +15955,7 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         }
         (2, BorrowedDispatchFloorCommand::Persist) => Some(BorrowedDispatchFloorClass::Persist),
         (4, BorrowedDispatchFloorCommand::Setex) => Some(BorrowedDispatchFloorClass::Setex),
+        (4, BorrowedDispatchFloorCommand::Psetex) => Some(BorrowedDispatchFloorClass::Psetex),
         // `COMMAND COUNT` is the only COMMAND subcommand with a borrowed route,
         // so a declined classification here costs nothing: DOCS/INFO/LIST/GETKEYS
         // land on the generic path, which is exactly where walking the whole
@@ -19711,6 +19695,28 @@ fn try_dispatch_floor_classified_action(
                 });
             if let Some(consumed) = hit {
                 Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Psetex => {
+            // PSETEX replies a constant +OK; the non-allocating `_ok` twin routes to
+            // FastOkReply so no SimpleString("OK") frame is allocated per PSETEX.
+            if let Some(packet) = parse_borrowed_plain_psetex_packet(unparsed, &parser_config)
+                && runtime
+                    .execute_plain_psetex_borrowed_ok(packet.key, packet.start, packet.end, ts)
+                    .is_some()
+            {
+                Ok(BorrowedMultibulkAction::FastOkReply {
+                    consumed: packet.consumed,
+                })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,
