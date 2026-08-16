@@ -21347,3 +21347,87 @@ RETRY PREDICATE: 23 of the 27 swept shapes remain. Work the list. Before each, c
 whether a near-miss guard asserts the shape must NOT classify — one already did, on a
 false premise, and a second would be enough to call that a pattern rather than an
 accident.
+
+--------------------------------------------------------------------------------
+CONFIRMED — zadd_base CROSSED 0.8464x -> 0.5283x, predicted to 2.1 pct; and the
+"unmoved at 46.1 pct" row is STALE relative to current HEAD (frankenredis-z2ce3,
+frankenredis-do85w)
+
+Third consecutive lever whose outcome the dispatch-share method predicted before it
+existed — and a correction to a sibling row that would otherwise send someone to build
+a lever that has already landed.
+
+CONVENTION: fr instructions per op / redis 7.2.4's. BELOW 1.0 = fr AHEAD.
+
+    A/A control (get_control)  0.4157 / 0.4179 / 0.4172      spread 0.53 pct
+
+    zadd_base            ELF c36c3fb0…        ELF 11b0c675…       change
+      fr instr/op           4432.5               2718.2           -38.7 pct
+      redis instr/op        5240.0               5146.5           unchanged
+      fr/redis              0.8464x              0.5283x           1.60x better
+      dispatch share        46.1 pct             16.7 pct
+      dispatch instr/op    ~2045                 ~453
+
+    NEW ELF, four runs   fr 2718.3 / 2719.9 / 2718.0 / 2716.7   spread 0.12 pct
+                         redis 5184.7 / 5269.8 / 5090.7 / 5040.7  spread 4.5 pct
+                         ratio 0.5243 / 0.5161 / 0.5339 / 0.5389  spread 4.3 pct
+                         dispatch 16.7 pct, all four
+
+Monotonic on both arms in all four runs. The null (0.53 pct) is far smaller than the
+signal spread (4.3 pct), and fr's own cost reproduced to 0.12 pct — the tightest
+numerator in this series.
+
+THE PREDICTION, THIRD IN A ROW. The earlier zadd_base row wrote as an explicit upper
+bound: "at get_control's dispatch cost fr would drop from 4,432.5 to roughly 2,662
+against redis 5,240 — about 0.51x from 0.846x."
+
+    predicted fr instr/op   2,662       actual   2,718.2      2.1 pct low
+    predicted ratio         ~0.51       actual   0.5283       3.6 pct low
+
+    running record of the method on rewires:
+      zadd_xx_opt      predicted 3,232   actual 3,194.8   1.2 pct
+      bitcount_range   predicted 2,332   actual 2,311.5   0.9 pct
+      zadd_base        predicted 2,662   actual 2,718.2   2.1 pct
+
+All three land within ~2 pct, and ALL THREE ERR IN THE SAME DIRECTION ONCE THE
+REFERENCE-COST BIAS IS ACCOUNTED FOR: none of the three reached get_control's 275.4
+instr/op of dispatch. They landed at 522, 459 and 453. So the method's residual is now
+characterised rather than merely flagged — assume a front-classified route lands near
+450-520 instr/op of dispatch, not 275, and the estimate tightens further.
+
+THE SIBLING ROW IS STALE, NOT WRONG. frankenredis-do85w banked "zadd_base unmoved at
+46.1 pct share — the arity-5 lever missed it". On this ELF, built at HEAD 8ae6ea4b4
+which CONTAINS that commit, zadd_base reads 16.7 pct. The reasoning in that row was
+sound — an arity-5 floor entry genuinely cannot reach arity 4, which is what the
+earlier row here predicted too — so the most likely explanation is that arity 4 was
+claimed by a different commit, before or after theirs, and their measurement predates
+it. NOT INVESTIGATED: I have not identified which commit did it. What matters
+operationally is that ANYONE READING do85w WOULD BUILD AN ARITY-4 LEVER THAT ALREADY
+EXISTS.
+
+STANDINGS: three of the four stranded rewires this series identified have now crossed —
+zadd_xx_opt, bitcount_range, zadd_base — every one to within ~2 pct of a figure
+predicted from its dispatch share alone. Remaining:
+
+    expire_nx_opt   51.0 pct dispatch on the old ELF, arity 4, parser + executor exist
+    set_base        33.9 pct, ABSENT from the token table; floor class OR earlier arm
+    sort_ro_alpha   23.9 pct, NOT a rewire — no parser, no executor, no class, and the
+                    only shape still above parity
+
+Both remaining rewires should be re-measured on the current ELF BEFORE any work: two of
+three shapes checked this way turned out to have crossed already without my noticing.
+
+PROVENANCE:
+  ELF sha256 (new)     11b0c67517b6130fac51679ec296db62d31163a6525c151f3c10e21ba86d4182
+                       built LOCALLY at HEAD 8ae6ea4b4 with RCH_CARGO_WRAPPER_BYPASS=1
+                       and env -u CARGO_TARGET_DIR, executable path from
+                       --message-format=json, COPIED to a private path and sha'd there.
+  ELF sha256 (old)     c36c3fb0a66033deff0cf03dc6a313ef647d5970cd22596aac575120a5d2a297
+  tree                 HEAD 8ae6ea4b4 plus a peer's uncommitted fr-server/src/main.rs.
+  harness              scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines in
+                       the SAME invocation.
+  host                 thinkstation1, 64 cores, /data 314G, no build this turn.
+
+RETRY PREDICATE: do NOT re-run zadd_base. DO re-measure expire_nx_opt and set_base on
+the CURRENT ELF before proposing anything for them — the base rate of "already fixed
+without my noticing" is now two in three.
