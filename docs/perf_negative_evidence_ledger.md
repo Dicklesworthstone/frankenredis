@@ -22610,3 +22610,80 @@ harness cannot resolve a few percent here, which is exactly what the earlier
 INADMISSIBLE row in this ledger established. If the throughput crossing matters, it
 needs a quiet box, and the instruction result should be quoted meanwhile WITH ITS UNIT
 NAMED.
+
+## MEASURED (frankenredis-iqicb) — the fleet's host-contention finding checked against THIS gate: the fr arm is load-immune, the incumbent arm is not
+
+Claim class: COMPETITIVE — fr and the vendored Redis 7.2.4 binary in the SAME invocation.
+Same provenance limitation as the rows above (valgrind hosts the target, so no
+self-reported ELF SHA; ABBA repeats, not a bootstrap CI).
+
+**LOADAVG RECORDED PER RUN, as the fleet finding requires:**
+
+    run  shape                   fr instr/op   redis 7.2.4   fr/redis   loadavg
+    A    incrbyfloat_nondyadic       7490.5        9489.2     0.7894x    20.85
+    B    incrbyfloat_same            4460.7        8954.4     0.4982x    20.38
+    B    incrbyfloat_same            4410.7        8953.0     0.4926x    19.23
+    A    incrbyfloat_nondyadic       7490.5        9778.0     0.7661x    19.23
+
+    loadavg 1/5/15 before: 20.85 / 30.51 / 29.23      after: 19.23 / 29.85 / 29.02
+
+THE FLEET FINDING IS THAT WALL-CLOCK BOARDS ZERO-CERTIFY UNDER CONTENTION (torch's 21
+lanes for four ticks; mermaid's per-CPU exclusivity gate unachievable here), with the
+instruction to re-run before calling a loss. **Checked against this gate, it applies
+ASYMMETRICALLY, and the asymmetry is measurable in the rows above:**
+
+    fr arm     nondyadic  7490.5 -> 7490.5   0.000 pct   <- IDENTICAL TO THE DIGIT
+               dyadic     4460.7 -> 4410.7   1.12 pct
+    redis arm  nondyadic  9489.2 -> 9778.0   3.04 pct
+               dyadic     8954.4 -> 8953.0   0.02 pct
+
+The fr arm reproduced EXACTLY across a loadavg change of 20.85 -> 19.23. That is what
+callgrind promises: it counts retired instructions, which do not depend on how much CPU
+the process gets.
+
+**BUT THE INCUMBENT ARM IS NOT LOAD-IMMUNE, AND THE HARNESS ALREADY EXPLAINS WHY.** Its
+own docstring records that the two-point subtraction "cancels work proportional to OP
+COUNT, not work proportional to ELAPSED TIME, and redis's serverCron is the latter --
+under valgrind a run's duration varies, so its background work does not divide out."
+Host load changes run duration, so it changes how many serverCron ticks land inside the
+measured window. **The denominator therefore carries a load-coupled term that the
+numerator does not.**
+
+THIS RESOLVES SOMETHING I HAD MISATTRIBUTED. Twelve rows in this ledger note "the
+incumbent is the noisier arm" and one concludes its variance is SHAPE-dependent
+(SINTERCARD stable to 0.15 pct, EXPIRE moving 6 pct). Shape is likely a proxy: shapes
+differ in how long their runs take, and duration is what admits serverCron ticks. I do not
+have the per-run durations to prove that, so it is recorded as the better hypothesis
+rather than a conclusion — but "shape-dependent" should not be quoted as if the mechanism
+were understood.
+
+PRACTICAL CONSEQUENCES FOR THIS GATE, which differ from the fleet's:
+
+  1. A row is NOT invalidated by high load the way a wall-clock lane is. The fr arm is
+     exact; re-running it in a quiet window changes nothing.
+  2. When a ratio needs re-running, **re-run the REDIS ARM, not the row.** The fr arm has
+     no load exposure to remove.
+  3. Margins are trustworthy asymmetrically: a large fr-side movement (the 32-83 pct
+     dispatch levers) is solid at any load, while a ratio near parity — expire_nx_opt's
+     0.9982-1.0354x straddle, or this row's 0.7661-0.7894x — carries the denominator's
+     3 pct on top and should not be adjudicated from one pair.
+  4. Record loadavg per run regardless, which these rows now do.
+
+NOTE THE LOAD I ACTUALLY MEASURED AT WAS ~19-21, NOT 43. The instruction quoted 43; by the
+time this ran the 1-minute average had fallen to 20.85 and then 19.23, with 5- and
+15-minute averages near 30. A single loadavg figure ages fast on this host, which is
+itself an argument for stamping it per run rather than per turn.
+
+WORST RATIO unchanged at incrbyfloat_nondyadic, worst bound now 0.7894x.
+
+EXECUTABLE IDENTITIES, full 64-hex (computed post-run, see limitation above):
+  candidate  `d959cba13aedb271455f33b35b8154c5af466577fbc57f253a40e117112a66c1`
+  incumbent  `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+  tree       6ef528727; NO rebuild — no crate code had changed since that binary.
+
+Campaign output: yes — establishes that this gate's load exposure is confined to the
+denominator, and corrects a twelve-row misattribution.
+
+RETRY PREDICATE: do NOT re-run whole rows for load. Re-run the REDIS arm when a ratio sits
+within ~3 pct of a decision boundary. And stop quoting "incumbent variance is
+shape-dependent" as settled — duration is the better hypothesis and neither is proven.
