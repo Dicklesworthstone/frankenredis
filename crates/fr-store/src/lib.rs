@@ -20611,7 +20611,7 @@ impl Store {
             // other set, copy survivors directly into the output Vec (no result
             // set). Byte-identical to the prior path after the shared sort.
             Some(base) if keys.len() >= 2 => {
-                let other_sets: Vec<&SetValue> = keys
+                let mut other_sets: Vec<&SetValue> = keys
                     .iter()
                     .enumerate()
                     .filter(|(i, _)| *i != min_idx)
@@ -20620,6 +20620,25 @@ impl Store {
                         _ => None,
                     })
                     .collect();
+                // (frankenredis-804l1) Probe the other sets SMALLEST-FIRST, which is
+                // what upstream does and fr did not: t_set.c sinterGenericCommand
+                // runs `qsort(sets, setnum, sizeof(robj*), qsortCompareSetsByCardinality)`
+                // over ALL the sets, so after it picks sets[0] as the iteration base
+                // the REMAINING probes also run in ascending-cardinality order. fr
+                // picked the smallest set to iterate but then probed the rest in the
+                // order the user happened to name them.
+                //
+                // The inner loop rejects a member on the FIRST set that does not
+                // contain it, so probe order decides how many of the other sets are
+                // touched per member. Cardinality is upstream's selectivity proxy: a
+                // smaller set rejects a larger fraction, so testing it first
+                // short-circuits sooner. With two keys there is one other set and this
+                // is a no-op; the win is entirely in the >=3-source shapes.
+                //
+                // Output is unchanged: intersection is commutative, a survivor must be
+                // in ALL other sets, and emission order is still the base set's
+                // iteration order. Only the number of `contains` calls moves.
+                other_sets.sort_by_key(|s| s.len());
                 let mut v: Vec<Vec<u8>> = Vec::with_capacity(base.len());
                 'member: for member in base.iter() {
                     for other in &other_sets {
@@ -20682,7 +20701,7 @@ impl Store {
         };
         match smallest.as_generic() {
             Some(base) if keys.len() >= 2 => {
-                let other_sets: Vec<&SetValue> = keys
+                let mut other_sets: Vec<&SetValue> = keys
                     .iter()
                     .enumerate()
                     .filter(|(i, _)| *i != min_idx)
@@ -20691,6 +20710,25 @@ impl Store {
                         _ => None,
                     })
                     .collect();
+                // (frankenredis-804l1) Probe the other sets SMALLEST-FIRST, which is
+                // what upstream does and fr did not: t_set.c sinterGenericCommand
+                // runs `qsort(sets, setnum, sizeof(robj*), qsortCompareSetsByCardinality)`
+                // over ALL the sets, so after it picks sets[0] as the iteration base
+                // the REMAINING probes also run in ascending-cardinality order. fr
+                // picked the smallest set to iterate but then probed the rest in the
+                // order the user happened to name them.
+                //
+                // The inner loop rejects a member on the FIRST set that does not
+                // contain it, so probe order decides how many of the other sets are
+                // touched per member. Cardinality is upstream's selectivity proxy: a
+                // smaller set rejects a larger fraction, so testing it first
+                // short-circuits sooner. With two keys there is one other set and this
+                // is a no-op; the win is entirely in the >=3-source shapes.
+                //
+                // Output is unchanged: intersection is commutative, a survivor must be
+                // in ALL other sets, and emission order is still the base set's
+                // iteration order. Only the number of `contains` calls moves.
+                other_sets.sort_by_key(|s| s.len());
                 let mut survivors: Vec<&[u8]> = Vec::with_capacity(base.len());
                 'member: for member in base.iter() {
                     for other in &other_sets {
@@ -20887,7 +20925,7 @@ impl Store {
                 // each other set's &SetValue ONCE here; the loop then only does the
                 // necessary s.contains(member) membership tests. Byte-identical output
                 // (same smallest-set iteration order, same survivors).
-                let other_sets: Vec<&SetValue> = keys
+                let mut other_sets: Vec<&SetValue> = keys
                     .iter()
                     .enumerate()
                     .filter(|(i, _)| *i != min_idx)
@@ -20896,6 +20934,25 @@ impl Store {
                         _ => None,
                     })
                     .collect();
+                // (frankenredis-804l1) Probe the other sets SMALLEST-FIRST, which is
+                // what upstream does and fr did not: t_set.c sinterGenericCommand
+                // runs `qsort(sets, setnum, sizeof(robj*), qsortCompareSetsByCardinality)`
+                // over ALL the sets, so after it picks sets[0] as the iteration base
+                // the REMAINING probes also run in ascending-cardinality order. fr
+                // picked the smallest set to iterate but then probed the rest in the
+                // order the user happened to name them.
+                //
+                // The inner loop rejects a member on the FIRST set that does not
+                // contain it, so probe order decides how many of the other sets are
+                // touched per member. Cardinality is upstream's selectivity proxy: a
+                // smaller set rejects a larger fraction, so testing it first
+                // short-circuits sooner. With two keys there is one other set and this
+                // is a no-op; the win is entirely in the >=3-source shapes.
+                //
+                // Output is unchanged: intersection is commutative, a survivor must be
+                // in ALL other sets, and emission order is still the base set's
+                // iteration order. Only the number of `contains` calls moves.
+                other_sets.sort_by_key(|s| s.len());
                 let mut out = GenericSet::with_capacity_and_hasher(
                     base.len(),
                     foldhash::quality::RandomState::default(),
@@ -41097,6 +41154,13 @@ mod tests {
     ///
     /// `FR_PERF_RATIO_GATE=1` forces the assertions on for a deliberate pinned
     /// measurement on a quiesced host; `=0` forces them off.
+    /// Decided ONCE per test binary. Sampling the load per assertion let a
+    /// momentary dip re-arm a gate on an otherwise busy host: in one observed
+    /// run `galp1` printed "gate NOT enforced" for two of its three ratios and
+    /// still failed on the third, because that one call happened to catch the
+    /// load below the line. One decision for the whole run removes that race.
+    static RATIO_GATE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
     fn ratio_gate_enforced() -> bool {
         *RATIO_GATE.get_or_init(|| {
             match std::env::var("FR_PERF_RATIO_GATE").as_deref() {
@@ -41132,6 +41196,108 @@ mod tests {
             );
             quiescent
         })
+    }
+
+    /// (frankenredis-804l1) SINTER over >= 3 sources probes the other sets in
+    /// ASCENDING cardinality, matching upstream's
+    /// `qsortCompareSetsByCardinality`, and that must not change a single byte of
+    /// output.
+    ///
+    /// Two independent claims, checked separately because they can fail
+    /// separately:
+    ///
+    ///  1. ISOMORPHISM. Over randomised 3- and 4-source corpora with deliberately
+    ///     skewed cardinalities, in every key permutation, the intersection must
+    ///     equal the order-independent reference. Intersection is commutative, so
+    ///     any divergence here is a bug in the reordering rather than a tie-break
+    ///     question.
+    ///
+    ///  2. MECHANISM, as a COUNT rather than a wall-clock ratio — this host
+    ///     cannot resolve a timing ratio (see `ratio_gate_enforced`), and a count
+    ///     is deterministic and load-immune. The lever is purely a decision about
+    ///     probe ORDER, so the honest unit is how many `contains` calls the two
+    ///     orders make on the same corpus. Smallest-first must make strictly
+    ///     fewer on a corpus where one small set is highly selective.
+    #[test]
+    fn sinter_probes_other_sets_smallest_first_without_changing_output() {
+        // Deliberately skewed: `big` shares almost everything with the base, so it
+        // rejects almost nothing; `tiny` rejects nearly every member. Probing
+        // `tiny` first short-circuits before `big` is ever consulted.
+        let base: Vec<Vec<u8>> = (0..600u32)
+            .map(|i| format!("m{i:05}").into_bytes())
+            .collect();
+        let big: Vec<Vec<u8>> = (0..5_000u32)
+            .map(|i| format!("m{i:05}").into_bytes())
+            .collect();
+        let tiny: Vec<Vec<u8>> = (0..10u32)
+            .map(|i| format!("m{i:05}").into_bytes())
+            .collect();
+
+        let mut store = Store::new();
+        store.sadd(b"base", &base, 0).unwrap();
+        store.sadd(b"big", &big, 0).unwrap();
+        store.sadd(b"tiny", &tiny, 0).unwrap();
+
+        // ---- 1. isomorphism, over every ordering of the source keys ----
+        let orders: [[&[u8]; 3]; 6] = [
+            [b"base", b"big", b"tiny"],
+            [b"base", b"tiny", b"big"],
+            [b"big", b"base", b"tiny"],
+            [b"big", b"tiny", b"base"],
+            [b"tiny", b"base", b"big"],
+            [b"tiny", b"big", b"base"],
+        ];
+        let mut reference: Vec<Vec<u8>> = tiny.clone();
+        reference.sort();
+        for keys in orders {
+            let mut got = store.sinter(&keys, 0).unwrap();
+            got.sort();
+            assert_eq!(
+                got, reference,
+                "SINTER must be order-independent for {keys:?}"
+            );
+            // SINTERSTORE goes through sinter_value, a separate copy of the same
+            // block, so it is checked too rather than assumed.
+            let n = store.sinterstore(b"dst", &keys, 0).unwrap();
+            assert_eq!(n, reference.len(), "SINTERSTORE cardinality for {keys:?}");
+            let mut stored = store.smembers(b"dst", 0).unwrap();
+            stored.sort();
+            assert_eq!(stored, reference, "SINTERSTORE contents for {keys:?}");
+        }
+
+        // ---- 2. mechanism: probe COUNT, both orders, same corpus ----
+        // Replays the inner loop's short-circuit over the real `SetValue::contains`
+        // so the number counted is the number the shipped loop makes.
+        let probes = |sets: &[&SetValue], members: &[Vec<u8>]| -> usize {
+            let mut n = 0usize;
+            'member: for m in members {
+                for s in sets {
+                    n += 1;
+                    if !s.contains(m) {
+                        continue 'member;
+                    }
+                }
+            }
+            n
+        };
+        fn set_of<'a>(store: &'a Store, k: &[u8]) -> &'a SetValue {
+            match &store.entries.get(k).expect("seeded").value {
+                Value::Set(s) => s.as_ref(),
+                _ => panic!("not a set"),
+            }
+        }
+        let (s_big, s_tiny) = (set_of(&store, b"big"), set_of(&store, b"tiny"));
+        let smallest_first = probes(&[s_tiny, s_big], &base);
+        let largest_first = probes(&[s_big, s_tiny], &base);
+        println!(
+            "SINTER probe count over {} base members: smallest-first={smallest_first} \
+             largest-first={largest_first}",
+            base.len()
+        );
+        assert!(
+            smallest_first < largest_first,
+            "smallest-first must short-circuit sooner: {smallest_first} vs {largest_first}"
+        );
     }
 
     /// (frankenredis-brs56) `H/S/ZRANDMEMBER key <count>` with `count >= size`
@@ -41426,13 +41592,6 @@ mod tests {
             "#!lua name={name}\n\
              redis.register_function('{first_fn}', function(keys, args) return #keys + #args end)\n\
              redis.register_function{{function_name='{second_fn}', callback=function(keys, args) return 0 end}}\n"
-    /// Decided ONCE per test binary. Sampling the load per assertion let a
-    /// momentary dip re-arm a gate on an otherwise busy host: in one observed
-    /// run `galp1` printed "gate NOT enforced" for two of its three ratios and
-    /// still failed on the third, because that one call happened to catch the
-    /// load below the line. One decision for the whole run removes that race.
-    static RATIO_GATE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-
         )
         .into_bytes()
     }
