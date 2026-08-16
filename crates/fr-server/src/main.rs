@@ -14641,6 +14641,9 @@ enum BorrowedDispatchFloorClass {
     Hsetnx,
     Hincrbyfloat,
     Sinter,
+    Pexpire,
+    Expireat,
+    Pexpireat,
     /// (frankenredis-ozrro) Bare `ZRANDMEMBER key`, the single-member reply
     /// form. Its sibling [`Self::ZrandmemberCount`] was classified in an earlier
     /// slice, which left this one alone ~3,600 lines deep in the chain.
@@ -14867,6 +14870,13 @@ enum BorrowedDispatchFloorCommand {
     /// streaming executor were already present but sat ~880 lines deep in the
     /// inline chain, so every call paid the walk to reach them.
     Sinter,
+    /// `PEXPIRE`, `EXPIREAT`, `PEXPIREAT`, all at arity 3. (frankenredis-m6xu9)
+    /// The rest of EXPIRE's family: each already had a parser and executor in
+    /// the cascade at ~8751/8771/8791 while their classified sibling EXPIRE
+    /// sat at 17.5%% dispatch share against their ~51%%.
+    Pexpire,
+    Expireat,
+    Pexpireat,
     /// `SETNX`, `GETSET`, `LSET`, `INCRBYFLOAT`. (frankenredis-iqicb) Each already
     /// had a borrowed parser and executor and merely sat deep in the probe chain.
     Setnx,
@@ -15092,6 +15102,9 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             _ => None,
         },
         7 => match uppercase_ascii_token::<7>(token)? {
+            [b'P', b'E', b'X', b'P', b'I', b'R', b'E'] => {
+                Some(BorrowedDispatchFloorCommand::Pexpire)
+            }
             [b'C', b'O', b'M', b'M', b'A', b'N', b'D'] => {
                 Some(BorrowedDispatchFloorCommand::Command)
             }
@@ -15137,6 +15150,9 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             _ => None,
         },
         9 => match uppercase_ascii_token::<9>(token)? {
+            [b'P', b'E', b'X', b'P', b'I', b'R', b'E', b'A', b'T'] => {
+                Some(BorrowedDispatchFloorCommand::Pexpireat)
+            }
             [b'S', b'I', b'S', b'M', b'E', b'M', b'B', b'E', b'R'] => {
                 Some(BorrowedDispatchFloorCommand::Sismember)
             }
@@ -15170,6 +15186,9 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             _ => None,
         },
         8 => match uppercase_ascii_token::<8>(token)? {
+            [b'E', b'X', b'P', b'I', b'R', b'E', b'A', b'T'] => {
+                Some(BorrowedDispatchFloorCommand::Expireat)
+            }
             [b'B', b'I', b'T', b'F', b'I', b'E', b'L', b'D'] => {
                 Some(BorrowedDispatchFloorCommand::Bitfield)
             }
@@ -16075,6 +16094,14 @@ fn classify_borrowed_dispatch_floor_packet_impl<
             Some(BorrowedDispatchFloorClass::Zremrangebyscore)
         }
         (3, BorrowedDispatchFloorCommand::Expire) => Some(BorrowedDispatchFloorClass::Expire),
+        // (frankenredis-m6xu9) EXPIRE's three siblings, same arity, same shape.
+        // ozrro's gap metric recorded PEXPIRE and PEXPIREAT in a "leave-alone
+        // group", but that metric compares the cascade against the GENERIC path
+        // and cannot see front-classification, which is a third state; the same
+        // group's SETEX and GETSET have since been classified and won.
+        (3, BorrowedDispatchFloorCommand::Pexpire) => Some(BorrowedDispatchFloorClass::Pexpire),
+        (3, BorrowedDispatchFloorCommand::Expireat) => Some(BorrowedDispatchFloorClass::Expireat),
+        (3, BorrowedDispatchFloorCommand::Pexpireat) => Some(BorrowedDispatchFloorClass::Pexpireat),
         (4, BorrowedDispatchFloorCommand::Setrange) => Some(BorrowedDispatchFloorClass::Setrange),
         (4, BorrowedDispatchFloorCommand::Zincrby) => Some(BorrowedDispatchFloorClass::Zincrby),
         (5, BorrowedDispatchFloorCommand::Linsert) => Some(BorrowedDispatchFloorClass::Linsert),
@@ -18418,6 +18445,66 @@ fn try_dispatch_floor_classified_action(
                 b"ZREMRANGEBYSCORE",
             ) && let Some(response) =
                 runtime.execute_plain_zremrangebyscore_borrowed(packet.key, packet.a, packet.b, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Pexpire => {
+            if let Some(packet) = parse_borrowed_plain_pexpire_packet(unparsed, &parser_config)
+                && let Some(response) =
+                    runtime.execute_plain_pexpire_borrowed(packet.key, packet.member, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Expireat => {
+            if let Some(packet) = parse_borrowed_plain_expireat_packet(unparsed, &parser_config)
+                && let Some(response) =
+                    runtime.execute_plain_expireat_borrowed(packet.key, packet.member, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Pexpireat => {
+            if let Some(packet) = parse_borrowed_plain_pexpireat_packet(unparsed, &parser_config)
+                && let Some(response) =
+                    runtime.execute_plain_pexpireat_borrowed(packet.key, packet.member, ts)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -43100,6 +43187,63 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
     #[test]
     fn dispatch_floor_classifier_recognizes_only_exact_target_tokens() {
         let cfg = ParserConfig::default();
+        // (frankenredis-m6xu9) EXPIRE's three siblings, each at arity 3 only.
+        // The near-miss rows matter here more than usual: PEXPIRE/EXPIREAT/
+        // PEXPIREAT are prefixes and suffixes of one another across three
+        // different token-length groups, so a length mix-up would classify one as
+        // another and silently answer with the wrong time base.
+        for (name, want) in [
+            (&b"PEXPIRE"[..], super::BorrowedDispatchFloorClass::Pexpire),
+            (
+                &b"EXPIREAT"[..],
+                super::BorrowedDispatchFloorClass::Expireat,
+            ),
+            (
+                &b"PEXPIREAT"[..],
+                super::BorrowedDispatchFloorClass::Pexpireat,
+            ),
+        ] {
+            let ok = format!(
+                "*3\r\n${}\r\n{}\r\n$1\r\nk\r\n$2\r\n10\r\n",
+                name.len(),
+                String::from_utf8_lossy(name)
+            );
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(ok.as_bytes(), &cfg),
+                Some(want),
+                "{} at arity 3 must classify",
+                String::from_utf8_lossy(name)
+            );
+            // The option forms (NX/XX/GT/LT) are arity 4 and have no borrowed
+            // parser; classifying them would strand them on the generic path.
+            let opt = format!(
+                "*4\r\n${}\r\n{}\r\n$1\r\nk\r\n$2\r\n10\r\n$2\r\nNX\r\n",
+                name.len(),
+                String::from_utf8_lossy(name)
+            );
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(opt.as_bytes(), &cfg),
+                None,
+                "{} with an option token must not classify",
+                String::from_utf8_lossy(name)
+            );
+        }
+        // Mixed case, and EXPIRE itself must still reach its own class rather
+        // than being captured by the new 8-character EXPIREAT arm.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$9\r\npExPiReAt\r\n$1\r\nk\r\n$2\r\n10\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Pexpireat)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$6\r\nEXPIRE\r\n$1\r\nk\r\n$2\r\n10\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Expire)
+        );
         // DEL's single-key form, previously outside the 3..=6 guard. Arity 1
         // (`DEL` with no key) is the arity-error shape and must NOT classify.
         assert_eq!(
