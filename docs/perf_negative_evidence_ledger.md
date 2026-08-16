@@ -19873,3 +19873,60 @@ RETRY PREDICATE: sort_ro_alpha is now measured to 2.2 pct against a 0.77 pct nul
 eight runs — do NOT re-run it again. The next work on this shape is CODE, not
 measurement: a borrowed parser and executor, costed as a new implementation rather
 than a rewire. Re-measure only after that exists.
+
+## MEASURED (frankenredis-iqicb) — trailing-digit pre-check removes my own lever's decline penalty: 0.9921x -> 0.9528x on the worst route
+
+Claim class: COMPETITIVE — fr and the vendored Redis 7.2.4 binary in the SAME invocation.
+Same provenance limitation as the rows above (valgrind hosts the target, so no
+self-reported ELF SHA; ABBA repeats, not a bootstrap CI).
+
+THE ROW ABOVE FOUND THAT MY OWN FAST PATH COST 2.69 pct (~258 instr/op) ON SHAPES IT
+CANNOT SERVE. This fixes it in one comparison.
+
+    run  shape                   fr instr/op   redis 7.2.4   fr/redis
+    A    incrbyfloat_nondyadic       8970.7        9488.8     0.9454x
+    B    incrbyfloat_same            4418.0        9040.0     0.4887x   <- CONTROL
+    B    incrbyfloat_same            4454.8        9086.5     0.4903x   <- CONTROL
+    A    incrbyfloat_nondyadic       9077.8        9527.8     0.9528x
+
+    worst bound   nondyadic  0.9921x -> 0.9528x     fr instr/op ~9320 -> ~9024
+    control       dyadic     0.4928x -> 0.4903x     fr instr/op ~4415 -> ~4437 (flat)
+
+~296 instr/op removed from the non-dyadic path, and THE CONTROL DID NOT MOVE — the dyadic
+path never reaches the new branch, so a change there would have meant the pre-check was
+rejecting inputs it should serve. That arm is the reason this row can attribute the gain.
+
+THE MECHANISM IS ARITHMETIC, NOT TUNING. `sig % 5^e == 0` requires the significand to be
+a multiple of 5, and every multiple of 5 ends in 0 or 5. So one byte comparison on the
+last digit decides it, and the ~258 instr/op of parsing-then-discovering-a-remainder is
+skipped entirely for 0.1, 3.14, 1.1 and 0.333... — none of which end in 0 or 5.
+
+MEASURED SAVING (296) EXCEEDS THE FRAME IT TARGETED (258) because the 258 was the
+function's SELF cost; declining earlier also skips its callees (`pow5_u64`, the modulo,
+the checked multiply chain). Same lesson as the 21.3 pct ceiling that a call graph
+overshot: a self-cost figure is a FLOOR on what removing a call can save, not a ceiling.
+
+A/A NULL, from the ABBA repeats in this one invocation:
+
+    fr arm      nondyadic  8970.7 -> 9077.8   +1.19%
+                dyadic     4418.0 -> 4454.8   +0.83%
+    redis arm   nondyadic  9488.8 -> 9527.8   +0.41%
+                dyadic     9040.0 -> 9086.5   +0.51%
+    ratio       nondyadic  0.9454 -> 0.9528  0.78%  |  dyadic  0.4887 -> 0.4903  0.33%
+
+Spreads are much tighter than the previous run on this pair (3.07 pct / 1.36 pct), and
+the 4.0 pct movement in the worst bound clears the 0.78 pct spread by five times. The
+"direction unresolved within the spread" caveat on the prior row does NOT apply here.
+
+STILL THE WORST RATIO ON THE BOARD at 0.9528x. `BigNat::div_small` remains untouched at
+18.39 pct of the op and is the next target.
+
+EXECUTABLE IDENTITIES, full 64-hex (computed post-run, see limitation above):
+  candidate  `415f466bc777487d26392667efaba98ac90a6c81c75da53926d26b51c87b1b45`
+  incumbent  `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+  tests      fr-store 913 passed, 0 failed, plus the three fast-path tests.
+
+Campaign output: yes — repairs a regression this campaign's own lever introduced, measured
+with the control that proves it.
+
+RETRY PREDICATE: attack `BigNat::div_small` next. Do not re-run this pair to re-confirm.

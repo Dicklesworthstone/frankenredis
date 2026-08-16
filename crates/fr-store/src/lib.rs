@@ -38797,6 +38797,27 @@ fn exact_small_decimal_to_long_double(
     if digits.is_empty() || digits.len() > 19 {
         return None;
     }
+    // (frankenredis-iqicb) DECLINE IN ONE COMPARISON, before parsing anything.
+    //
+    // A negative decimal exponent is exact only when 5^|exp| divides the significand,
+    // and any multiple of 5 ends in 0 or 5. So a significand ending in anything else
+    // CANNOT be served, and the whole parse below is wasted work on it.
+    //
+    // Measured, and this is why the check exists: on `incrbyfloat_nondyadic` this
+    // function cost 2.69 pct of the op (~258 instr/op) doing exactly that -- parsing
+    // every digit into a u64, computing 5^|exp|, finding a non-zero remainder and
+    // giving up. The fast path made dyadic INCRBYFLOAT ~2x faster and non-dyadic ~2.7
+    // pct SLOWER; this removes that penalty for the common declines (0.1, 3.14, 1.1,
+    // 0.333... all end in neither 0 nor 5).
+    //
+    // Leading zeros are already stripped by the caller, and the digits are ASCII, so
+    // the last byte is the units digit of the significand.
+    if exp10 < 0 {
+        let last = digits[digits.len() - 1];
+        if last != b'0' && last != b'5' {
+            return None;
+        }
+    }
     let mut sig: u64 = 0;
     for &d in digits {
         let v = d.checked_sub(b'0')?;
