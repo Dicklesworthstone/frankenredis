@@ -17191,7 +17191,18 @@ impl Store {
 
         let indices: Vec<usize> = if count >= 0 {
             let n = (count as usize).min(len);
-            if n < len / 2 && n < 1024 {
+            // (frankenredis-brs56) CASE 2, cited from legacy_redis_code/redis/src/
+            // t_hash.c hrandfieldWithCountCommand (and the identical block in
+            // t_set.c / t_zset.c): when the requested count is >= the collection
+            // size, upstream does NOT sample at all -- it iterates and emits every
+            // element in ITERATION order, consuming no randomness. fr fell through
+            // to the partial Fisher-Yates below, which returns the whole collection
+            // SHUFFLED; `HRANDFIELD h 3` on a 3-field hash gave [f2,f3,f1] where
+            // 7.2.4 gives [f1,f2,f3]. Sampling still applies strictly BELOW the
+            // threshold, which is what the `else if` preserves.
+            if n == len {
+                (0..len).collect()
+            } else if n < len / 2 && n < 1024 {
                 let mut idxs = Vec::with_capacity(n);
                 // (SilverBirch) foldhash, not the default SipHash `RandomState`: this dedups
                 // drawn `usize` indices by value (hasher-independent, so the sampled index
@@ -17287,7 +17298,18 @@ impl Store {
 
         let indices: Vec<usize> = if count >= 0 {
             let n = (count as usize).min(len);
-            if n < len / 2 && n < 1024 {
+            // (frankenredis-brs56) CASE 2, cited from legacy_redis_code/redis/src/
+            // t_hash.c hrandfieldWithCountCommand (and the identical block in
+            // t_set.c / t_zset.c): when the requested count is >= the collection
+            // size, upstream does NOT sample at all -- it iterates and emits every
+            // element in ITERATION order, consuming no randomness. fr fell through
+            // to the partial Fisher-Yates below, which returns the whole collection
+            // SHUFFLED; `HRANDFIELD h 3` on a 3-field hash gave [f2,f3,f1] where
+            // 7.2.4 gives [f1,f2,f3]. Sampling still applies strictly BELOW the
+            // threshold, which is what the `else if` preserves.
+            if n == len {
+                (0..len).collect()
+            } else if n < len / 2 && n < 1024 {
                 let mut idxs = Vec::with_capacity(n);
                 // (SilverBirch) foldhash, not the default SipHash `RandomState`: this dedups
                 // drawn `usize` indices by value (hasher-independent, so the sampled index
@@ -17391,7 +17413,18 @@ impl Store {
 
         let indices: Vec<usize> = if count >= 0 {
             let n = (count as usize).min(len);
-            if n < len / 2 && n < 1024 {
+            // (frankenredis-brs56) CASE 2, cited from legacy_redis_code/redis/src/
+            // t_hash.c hrandfieldWithCountCommand (and the identical block in
+            // t_set.c / t_zset.c): when the requested count is >= the collection
+            // size, upstream does NOT sample at all -- it iterates and emits every
+            // element in ITERATION order, consuming no randomness. fr fell through
+            // to the partial Fisher-Yates below, which returns the whole collection
+            // SHUFFLED; `HRANDFIELD h 3` on a 3-field hash gave [f2,f3,f1] where
+            // 7.2.4 gives [f1,f2,f3]. Sampling still applies strictly BELOW the
+            // threshold, which is what the `else if` preserves.
+            if n == len {
+                (0..len).collect()
+            } else if n < len / 2 && n < 1024 {
                 let mut idxs = Vec::with_capacity(n);
                 // (SilverBirch) foldhash, not the default SipHash `RandomState`: this dedups
                 // drawn `usize` indices by value (hasher-independent, so the sampled index
@@ -21775,7 +21808,18 @@ impl Store {
     fn srandmember_sample_indices(rng_seed: &mut u64, count: i64, len: usize) -> Vec<usize> {
         if count >= 0 {
             let n = (count as usize).min(len);
-            if n < len / 2 && n < 1024 {
+            // (frankenredis-brs56) CASE 2, cited from legacy_redis_code/redis/src/
+            // t_hash.c hrandfieldWithCountCommand (and the identical block in
+            // t_set.c / t_zset.c): when the requested count is >= the collection
+            // size, upstream does NOT sample at all -- it iterates and emits every
+            // element in ITERATION order, consuming no randomness. fr fell through
+            // to the partial Fisher-Yates below, which returns the whole collection
+            // SHUFFLED; `HRANDFIELD h 3` on a 3-field hash gave [f2,f3,f1] where
+            // 7.2.4 gives [f1,f2,f3]. Sampling still applies strictly BELOW the
+            // threshold, which is what the `else if` preserves.
+            if n == len {
+                (0..len).collect()
+            } else if n < len / 2 && n < 1024 {
                 // Rejection sampling for a small distinct subset.
                 let mut idxs = Vec::with_capacity(n);
                 let mut picked =
@@ -21906,7 +21950,18 @@ impl Store {
 
         let indices: Vec<usize> = if count >= 0 {
             let n = (count as usize).min(len);
-            if n < len / 2 && n < 1024 {
+            // (frankenredis-brs56) CASE 2, cited from legacy_redis_code/redis/src/
+            // t_hash.c hrandfieldWithCountCommand (and the identical block in
+            // t_set.c / t_zset.c): when the requested count is >= the collection
+            // size, upstream does NOT sample at all -- it iterates and emits every
+            // element in ITERATION order, consuming no randomness. fr fell through
+            // to the partial Fisher-Yates below, which returns the whole collection
+            // SHUFFLED; `HRANDFIELD h 3` on a 3-field hash gave [f2,f3,f1] where
+            // 7.2.4 gives [f1,f2,f3]. Sampling still applies strictly BELOW the
+            // threshold, which is what the `else if` preserves.
+            if n == len {
+                (0..len).collect()
+            } else if n < len / 2 && n < 1024 {
                 let mut idxs = Vec::with_capacity(n);
                 // (SilverBirch) foldhash, not the default SipHash `RandomState`: this dedups
                 // drawn `usize` indices by value (hasher-independent, so the sampled index
@@ -26594,7 +26649,18 @@ impl Store {
         // old materialise-then-index path, so the output is byte-for-byte the same.
         let indices: Vec<usize> = if count >= 0 {
             let n = (count as usize).min(len);
-            if n < len / 2 && n < 1024 {
+            // (frankenredis-brs56) CASE 2, cited from legacy_redis_code/redis/src/
+            // t_hash.c hrandfieldWithCountCommand (and the identical block in
+            // t_set.c / t_zset.c): when the requested count is >= the collection
+            // size, upstream does NOT sample at all -- it iterates and emits every
+            // element in ITERATION order, consuming no randomness. fr fell through
+            // to the partial Fisher-Yates below, which returns the whole collection
+            // SHUFFLED; `HRANDFIELD h 3` on a 3-field hash gave [f2,f3,f1] where
+            // 7.2.4 gives [f1,f2,f3]. Sampling still applies strictly BELOW the
+            // threshold, which is what the `else if` preserves.
+            if n == len {
+                (0..len).collect()
+            } else if n < len / 2 && n < 1024 {
                 let mut idxs = Vec::with_capacity(n);
                 // (SilverBirch) foldhash, not the default SipHash `RandomState`: this dedups
                 // drawn `usize` indices by value (hasher-independent, so the sampled index
@@ -26684,7 +26750,18 @@ impl Store {
 
         let indices: Vec<usize> = if count >= 0 {
             let n = (count as usize).min(len);
-            if n < len / 2 && n < 1024 {
+            // (frankenredis-brs56) CASE 2, cited from legacy_redis_code/redis/src/
+            // t_hash.c hrandfieldWithCountCommand (and the identical block in
+            // t_set.c / t_zset.c): when the requested count is >= the collection
+            // size, upstream does NOT sample at all -- it iterates and emits every
+            // element in ITERATION order, consuming no randomness. fr fell through
+            // to the partial Fisher-Yates below, which returns the whole collection
+            // SHUFFLED; `HRANDFIELD h 3` on a 3-field hash gave [f2,f3,f1] where
+            // 7.2.4 gives [f1,f2,f3]. Sampling still applies strictly BELOW the
+            // threshold, which is what the `else if` preserves.
+            if n == len {
+                (0..len).collect()
+            } else if n < len / 2 && n < 1024 {
                 let mut idxs = Vec::with_capacity(n);
                 // (SilverBirch) foldhash, not the default SipHash `RandomState`: this dedups
                 // drawn `usize` indices by value (hasher-independent, so the sampled index
@@ -26783,7 +26860,18 @@ impl Store {
 
         let indices: Vec<usize> = if count >= 0 {
             let n = (count as usize).min(len);
-            if n < len / 2 && n < 1024 {
+            // (frankenredis-brs56) CASE 2, cited from legacy_redis_code/redis/src/
+            // t_hash.c hrandfieldWithCountCommand (and the identical block in
+            // t_set.c / t_zset.c): when the requested count is >= the collection
+            // size, upstream does NOT sample at all -- it iterates and emits every
+            // element in ITERATION order, consuming no randomness. fr fell through
+            // to the partial Fisher-Yates below, which returns the whole collection
+            // SHUFFLED; `HRANDFIELD h 3` on a 3-field hash gave [f2,f3,f1] where
+            // 7.2.4 gives [f1,f2,f3]. Sampling still applies strictly BELOW the
+            // threshold, which is what the `else if` preserves.
+            if n == len {
+                (0..len).collect()
+            } else if n < len / 2 && n < 1024 {
                 let mut idxs = Vec::with_capacity(n);
                 // (SilverBirch) foldhash, not the default SipHash `RandomState`: this dedups
                 // drawn `usize` indices by value (hasher-independent, so the sampled index
@@ -40791,32 +40879,142 @@ mod tests {
     /// `FR_PERF_RATIO_GATE=1` forces the assertions on for a deliberate pinned
     /// measurement on a quiesced host; `=0` forces them off.
     fn ratio_gate_enforced() -> bool {
-        match std::env::var("FR_PERF_RATIO_GATE").as_deref() {
-            Ok("1") => return true,
-            Ok("0") => return false,
-            _ => {}
-        }
-        // Unknown host state is treated as "not quiescent": report, do not gate.
-        let Ok(loadavg) = std::fs::read_to_string("/proc/loadavg") else {
-            return false;
-        };
-        let Some(one_min) = loadavg.split_whitespace().next() else {
-            return false;
-        };
-        let Ok(load) = one_min.parse::<f64>() else {
-            return false;
-        };
-        let cpus = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1) as f64;
-        let quiescent = load < cpus;
-        if !quiescent {
+        *RATIO_GATE.get_or_init(|| {
+            match std::env::var("FR_PERF_RATIO_GATE").as_deref() {
+                Ok("1") => return true,
+                Ok("0") => return false,
+                _ => {}
+            }
+            // Unknown host state is treated as "not quiescent": report, do not gate.
+            let Ok(loadavg) = std::fs::read_to_string("/proc/loadavg") else {
+                return false;
+            };
+            let Some(one_min) = loadavg.split_whitespace().next() else {
+                return false;
+            };
+            let Ok(load) = one_min.parse::<f64>() else {
+                return false;
+            };
+            let cpus = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1) as f64;
+            // 0.75 rather than 1.0: at exactly one runnable task per CPU the two
+            // arms are already competing with the rest of the suite, and the
+            // margin is what stops a host hovering at the line from flipping
+            // verdicts between runs.
+            let quiescent = load < cpus * 0.75;
             eprintln!(
-                "perf-ratio gate NOT enforced: loadavg {load:.2} >= {cpus:.0} logical CPUs \
-                 (ratios below are reported only)"
+                "perf-ratio gates {}: loadavg {load:.2} vs {cpus:.0} logical CPUs",
+                if quiescent {
+                    "ENFORCED"
+                } else {
+                    "NOT enforced (ratios are reported only)"
+                }
+            );
+            quiescent
+        })
+    }
+
+    /// (frankenredis-brs56) `H/S/ZRANDMEMBER key <count>` with `count >= size`
+    /// must return the WHOLE collection in ITERATION order, not a shuffle of it.
+    ///
+    /// Oracle is upstream, cited not inferred: `t_hash.c`
+    /// `hrandfieldWithCountCommand` CASE 2 (and the identical blocks in
+    /// `t_set.c` / `t_zset.c`) short-circuits when the requested count reaches
+    /// the collection size — it iterates and emits every element, consuming no
+    /// randomness at all. fr instead fell through to a partial Fisher-Yates over
+    /// the whole index space, so `HRANDFIELD h 3` on a three-field hash answered
+    /// `[f2, f3, f1]` where 7.2.4 answers `[f1, f2, f3]`.
+    ///
+    /// THE NEGATIVE CASE IS THE POINT OF THIS TEST. A "fix" that simply made
+    /// these commands always iterate would satisfy every count >= size row above
+    /// and silently destroy the sampling behaviour, so each family is also
+    /// checked STRICTLY BELOW the threshold: it must return the right number of
+    /// DISTINCT elements drawn from the collection, and — over repeated draws
+    /// with the store's own RNG advancing — must not be pinned to one fixed
+    /// answer the way the count >= size path deliberately is.
+    #[test]
+    fn randmember_count_at_or_above_size_returns_the_whole_collection_in_order() {
+        let mut store = Store::new();
+
+        // ---- HRANDFIELD ----
+        let fields: Vec<(Vec<u8>, Vec<u8>)> = (0..3)
+            .map(|i| (format!("f{i}").into_bytes(), format!("v{i}").into_bytes()))
+            .collect();
+        store.hset_many(b"h", fields.clone(), 0).unwrap();
+        let iteration_order = store.hgetall(b"h", 0).unwrap();
+        assert_eq!(iteration_order.len(), 3);
+        for count in [3i64, 4, 100] {
+            let got = store.hrandfield_count(b"h", count, 0).unwrap();
+            assert_eq!(
+                got, iteration_order,
+                "HRANDFIELD h {count} must be the whole hash in iteration order"
             );
         }
-        quiescent
+        // Below the threshold: still a sample.
+        let sampled = store.hrandfield_count(b"h", 2, 0).unwrap();
+        assert_eq!(sampled.len(), 2, "HRANDFIELD h 2 must return two fields");
+        let mut seen: Vec<&Vec<u8>> = sampled.iter().map(|(f, _)| f).collect();
+        seen.sort();
+        seen.dedup();
+        assert_eq!(seen.len(), 2, "a positive count must not repeat a field");
+        for (f, v) in &sampled {
+            assert!(
+                iteration_order.iter().any(|(kf, kv)| kf == f && kv == v),
+                "sampled field must come from the hash"
+            );
+        }
+
+        // ---- SRANDMEMBER ----
+        // Non-integer members so the set is generic-encoded, where insertion
+        // order is the iteration order (an intset is sorted instead).
+        let members: Vec<Vec<u8>> = (0..3).map(|i| format!("m{i}").into_bytes()).collect();
+        store.sadd(b"s", &members, 0).unwrap();
+        let set_order = store.smembers(b"s", 0).unwrap();
+        assert_eq!(set_order.len(), 3);
+        for count in [3i64, 4, 100] {
+            let got = store.srandmember_count(b"s", count, 0).unwrap();
+            assert_eq!(
+                got, set_order,
+                "SRANDMEMBER s {count} must be the whole set in iteration order"
+            );
+        }
+        let sampled = store.srandmember_count(b"s", 2, 0).unwrap();
+        assert_eq!(sampled.len(), 2, "SRANDMEMBER s 2 must return two members");
+        let mut seen = sampled.clone();
+        seen.sort();
+        seen.dedup();
+        assert_eq!(seen.len(), 2, "a positive count must not repeat a member");
+
+        // ---- ZRANDMEMBER ----
+        let zadds: Vec<(f64, Vec<u8>)> = (0..3)
+            .map(|i| (i as f64, format!("z{i}").into_bytes()))
+            .collect();
+        store.zadd(b"z", &zadds, 0).unwrap();
+        let zset_order = store.zrange_withscores(b"z", 0, -1, 0).unwrap();
+        assert_eq!(zset_order.len(), 3);
+        for count in [3i64, 4, 100] {
+            let got = store.zrandmember_count(b"z", count, 0).unwrap();
+            assert_eq!(
+                got, zset_order,
+                "ZRANDMEMBER z {count} must be the whole zset in iteration order"
+            );
+        }
+        let sampled = store.zrandmember_count(b"z", 2, 0).unwrap();
+        assert_eq!(sampled.len(), 2, "ZRANDMEMBER z 2 must return two members");
+        let mut seen: Vec<&Vec<u8>> = sampled.iter().map(|(m, _)| m).collect();
+        seen.sort();
+        seen.dedup();
+        assert_eq!(seen.len(), 2, "a positive count must not repeat a member");
+
+        // A NEGATIVE count is the with-repetition path and keeps sampling even
+        // when |count| exceeds the size — CASE 1 upstream, not CASE 2.
+        let repeated = store.hrandfield_count(b"h", -6, 0).unwrap();
+        assert_eq!(
+            repeated.len(),
+            6,
+            "a negative count must return |count| entries, with repeats allowed"
+        );
     }
 
     /// (frankenredis-w08xv) Pins `sha1_hex` against the PUBLISHED SHA-1 test
@@ -41009,6 +41207,13 @@ mod tests {
             "#!lua name={name}\n\
              redis.register_function('{first_fn}', function(keys, args) return #keys + #args end)\n\
              redis.register_function{{function_name='{second_fn}', callback=function(keys, args) return 0 end}}\n"
+    /// Decided ONCE per test binary. Sampling the load per assertion let a
+    /// momentary dip re-arm a gate on an otherwise busy host: in one observed
+    /// run `galp1` printed "gate NOT enforced" for two of its three ratios and
+    /// still failed on the third, because that one call happened to catch the
+    /// load below the line. One decision for the whole run removes that race.
+    static RATIO_GATE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
         )
         .into_bytes()
     }
