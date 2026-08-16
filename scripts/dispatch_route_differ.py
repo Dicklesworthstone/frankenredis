@@ -160,6 +160,44 @@ CASES = [
     ("SCARD", "ss:u4"),
     # Wrong type as a source, verbatim from the generic path.
     ("SINTERSTORE", "ss:bad", "ss:a", "bo:a", "ss:c"),
+    # (frankenredis-opmo4) PFADD, LPUSHX and RPUSHX newly reach the floor at ONE
+    # value. PFADD's no-op is the fragile case: upstream pfaddCommand fires
+    # signalModifiedKey / notifyKeyspaceEvent / server.dirty / HLL_INVALIDATE_CACHE
+    # only when `updated != 0`, and pvw3u established fr's notification is
+    # centrally dirty-gated — so a route that dirties on a no-op diverges here
+    # before it diverges anywhere else.
+    ("PFADD", "hll:a", "e1"),
+    ("PFCOUNT", "hll:a"),
+    # Same element again: must reply 0. PFCOUNT after it is the assertion that
+    # matters — a route adding to the wrong register set still replies 1, and a
+    # reply-only corpus would pass it.
+    ("PFADD", "hll:a", "e1"),
+    ("PFCOUNT", "hll:a"),
+    ("PFADD", "hll:a", "e2"),
+    ("PFCOUNT", "hll:a"),
+    # Multi-element PFADD is deliberately NOT claimed: only the values1 parser
+    # knows these names, so array_len 4 must reach the cascade and answer
+    # identically. If the classifier is ever widened to 3..=20 for these, this row
+    # is what catches the packet landing on the generic path instead.
+    ("PFADD", "hll:m", "e1", "e2", "e3"),
+    ("PFCOUNT", "hll:m"),
+    # Wrong type, verbatim from the generic path.
+    ("PFADD", "s:1", "e1"),
+    # LPUSHX/RPUSHX on a MISSING key must not create it — the branch that
+    # separates them from LPUSH/RPUSH and the one a mis-wired executor loses.
+    ("LPUSHX", "l:absent", "v1"),
+    ("EXISTS", "l:absent"),
+    ("RPUSHX", "l:absent", "v1"),
+    ("EXISTS", "l:absent"),
+    # ...and on a present key must push, at the correct end.
+    ("LPUSH", "l:x", "mid"),
+    ("LPUSHX", "l:x", "head"),
+    ("RPUSHX", "l:x", "tail"),
+    ("LRANGE", "l:x", "0", "-1"),
+    # Multi-element form, deliberately unclaimed, stated at the values1 parser.
+    ("LPUSHX", "l:x", "a", "b"),
+    ("LRANGE", "l:x", "0", "-1"),
+    ("RPUSHX", "s:1", "v"),
 ]
 
 def executing_image(conn):

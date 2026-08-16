@@ -14946,14 +14946,17 @@ enum BorrowedDispatchFloorCommand {
     Lrange,
     Lpos,
     Lpush,
+    Lpushx,
     Lrem,
     Memory,
     Mget,
     Object,
+    Pfadd,
     Pfcount,
     Pttl,
     Publish,
     Rpush,
+    Rpushx,
     Rpop,
     Sadd,
     Scard,
@@ -15067,6 +15070,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             _ => None,
         },
         5 => match uppercase_ascii_token::<5>(token)? {
+            [b'P', b'F', b'A', b'D', b'D'] => Some(BorrowedDispatchFloorCommand::Pfadd),
             [b'G', b'E', b'T', b'E', b'X'] => Some(BorrowedDispatchFloorCommand::Getex),
             [b'S', b'E', b'T', b'E', b'X'] => Some(BorrowedDispatchFloorCommand::Setex),
             [b'S', b'E', b'T', b'N', b'X'] => Some(BorrowedDispatchFloorCommand::Setnx),
@@ -15091,6 +15095,8 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             _ => None,
         },
         6 => match uppercase_ascii_token::<6>(token)? {
+            [b'L', b'P', b'U', b'S', b'H', b'X'] => Some(BorrowedDispatchFloorCommand::Lpushx),
+            [b'R', b'P', b'U', b'S', b'H', b'X'] => Some(BorrowedDispatchFloorCommand::Rpushx),
             [b'D', b'B', b'S', b'I', b'Z', b'E'] => Some(BorrowedDispatchFloorCommand::Dbsize),
             [b'P', b'S', b'E', b'T', b'E', b'X'] => Some(BorrowedDispatchFloorCommand::Psetex),
             [b'H', b'S', b'E', b'T', b'N', b'X'] => Some(BorrowedDispatchFloorCommand::Hsetnx),
@@ -16293,6 +16299,34 @@ fn classify_borrowed_dispatch_floor_packet_impl<
                 ) =>
         {
             Some(BorrowedDispatchFloorClass::KeyedValuesWrite(array_len - 2))
+        }
+        // (frankenredis-opmo4) PFADD, LPUSHX and RPUSHX are keyed-values writes by
+        // wire shape, and the machinery already serves them end to end — parser at
+        // 25701/25723/25725, executor variants in fr-runtime, and the same
+        // KeyedValuesWrite arm. They were missing only from the hand-written
+        // command list above, which is the second time an enumeration has lagged
+        // the general machinery it gates (l9wvl was the first).
+        //
+        // BUT THEY GET THEIR OWN ARM AT ARRAY_LEN 3, NOT THE 3..=20 RANGE, and the
+        // distinction is the whole point. Only `parse_borrowed_plain_keyed_values1_
+        // packet` recognises these three names; values2 through values18 serve the
+        // six commands above and nothing else, by design — "multi-element
+        // LPUSHX/RPUSHX fall through to the generic path" is stated at the values1
+        // parser. Adding them to the wider range would classify `PFADD key a b`
+        // into KeyedValuesWrite(2), whose parser refuses the name, and the decline
+        // falls through to the GENERIC path rather than back to the cascade. That
+        // is a REGRESSION, not a missed optimisation, and it is exactly the defect
+        // this bead was opened for on MGET. The classifier must promise no more
+        // than the arm can serve.
+        (3, cmd)
+            if matches!(
+                cmd,
+                BorrowedDispatchFloorCommand::Pfadd
+                    | BorrowedDispatchFloorCommand::Lpushx
+                    | BorrowedDispatchFloorCommand::Rpushx
+            ) =>
+        {
+            Some(BorrowedDispatchFloorClass::KeyedValuesWrite(1))
         }
         _ => None,
     }
@@ -18298,6 +18332,42 @@ fn try_dispatch_floor_classified_action(
                 Ok(BorrowedMultibulkAction::FastEncodedReply {
                     consumed: packet.consumed,
                 })
+            } else if let Some(consumed) = parse_borrowed_plain_key_arg3_packet(
+                unparsed,
+                &parser_config,
+                b"*5\r\n$6\r\n",
+                b"ZRANGE",
+            )
+            .and_then(|packet| {
+                // (frankenredis-2e4tq) This class is minted on ARITY ALONE, so the
+                // sibling `*5` forms land here too and the WITHSCORES parser above
+                // declines every one of them: `ZRANGE k s e REV|BYSCORE|BYLEX`.
+                // Dropping them to the generic dispatcher is worse than never
+                // classifying them, because the cascade arm they skip (~11141)
+                // already serves all three through zero-copy `_into` executors.
+                // Serve them here instead, exact-form first, the way HMGET's arm
+                // chains its parsers (frankenredis-opmo4).
+                let served = if packet.c.eq_ignore_ascii_case(b"REV") {
+                    runtime.execute_plain_zrange_rev_borrowed_into(
+                        packet.key, packet.a, packet.b, ts, out,
+                    )
+                } else if packet.c.eq_ignore_ascii_case(b"BYSCORE") {
+                    runtime.execute_plain_zrange_byscore_borrowed_into(
+                        packet.key, packet.a, packet.b, ts, out,
+                    )
+                } else if packet.c.eq_ignore_ascii_case(b"BYLEX") {
+                    runtime.execute_plain_zrange_bylex_borrowed_into(
+                        packet.key, packet.a, packet.b, ts, out,
+                    )
+                } else {
+                    // Includes the WITHSCORES packet itself when the executor
+                    // above declined: key_arg3 matches it structurally, so the
+                    // token check is what keeps it on the generic path.
+                    None
+                };
+                served.map(|_| packet.consumed)
+            }) {
+                Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,
@@ -43618,6 +43688,50 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             "SINTERCARD must not classify as SINTER"
         );
 
+        // (frankenredis-2e4tq) ZRANGE's class is minted on ARITY ALONE, so every
+        // `*5` form is claimed as WITHSCORES. Unlike MGET (opmo4) the fix here is
+        // in the ARM rather than the classifier, so what needs pinning is that
+        // the arm's fallback is REACHABLE and REQUIRED -- three facts, each of
+        // which would silently un-fix the route if it changed.
+        const ZRANGE_REV: &[u8] = b"*5\r\n$6\r\nZRANGE\r\n$1\r\nz\r\n$1\r\n0\r\n$2\r\n-1\r\n$3\r\nREV\r\n";
+
+        // 1. LOAD-BEARING, and it asks the parser rather than encoding a belief:
+        // the WITHSCORES parser must DECLINE a REV packet. That decline is the
+        // whole reason the arm needs a fallback. If someone widens this parser to
+        // cope with REV, this fails and sends the reader here, instead of leaving
+        // a fallback chained behind a parser that would now handle it.
+        assert!(
+            super::parse_borrowed_plain_zrange_withscores_packet(ZRANGE_REV, &cfg).is_none(),
+            "the WITHSCORES parser must decline `ZRANGE z 0 -1 REV`; the floor arm's \
+             REV/BYSCORE/BYLEX fallback exists precisely because it does"
+        );
+
+        // 2. The fallback parser must ACCEPT that same packet and surface the
+        // option token, since the arm discriminates on `c`. Without this the
+        // fallback compiles and never serves anything.
+        let rev = super::parse_borrowed_plain_key_arg3_packet(
+            ZRANGE_REV,
+            &cfg,
+            b"*5\r\n$6\r\n",
+            b"ZRANGE",
+        )
+        .expect("key_arg3 must accept `ZRANGE z 0 -1 REV` for the floor arm to serve it");
+        assert!(
+            rev.c.eq_ignore_ascii_case(b"REV"),
+            "the option token must land in `c`, got {:?}",
+            rev.c
+        );
+
+        // 3. The class really is arity-keyed: REV IS claimed here, which is what
+        // makes the arm -- not the cascade -- responsible for it. If a future
+        // change discriminates at classification instead, this fails and the
+        // fallback above becomes dead code worth deleting rather than trusting.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(ZRANGE_REV, &cfg),
+            Some(super::BorrowedDispatchFloorClass::ZrangeWithscores),
+            "arity 5 claims REV as WITHSCORES, so the floor arm must serve it"
+        );
+
         // (frankenredis-opmo4) MGET's class must split where its PARSERS split.
         //
         // The first assertion is the load-bearing one, and it deliberately does
@@ -43680,6 +43794,74 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             super::classify_borrowed_dispatch_floor_packet(b"*2\r\n$4\r\nMGET\r\n$1\r\na\r\n", &cfg),
             None,
             "1-key MGET has no exact-N parser and must not classify"
+        );
+
+        // (frankenredis-opmo4) PFADD, LPUSHX and RPUSHX at ONE value. The
+        // keyed-values machinery serves them end to end; only the classifier's
+        // hand-written command list had omitted them.
+        for packet in [
+            &b"*3\r\n$5\r\nPFADD\r\n$3\r\nhll\r\n$2\r\ne1\r\n"[..],
+            &b"*3\r\n$5\r\npFaDd\r\n$3\r\nhll\r\n$2\r\ne1\r\n"[..],
+            &b"*3\r\n$6\r\nLPUSHX\r\n$1\r\nl\r\n$1\r\nv\r\n"[..],
+            &b"*3\r\n$6\r\nRpUsHx\r\n$1\r\nl\r\n$1\r\nv\r\n"[..],
+        ] {
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(packet, &cfg),
+                Some(super::BorrowedDispatchFloorClass::KeyedValuesWrite(1)),
+                "single-value keyed write must classify"
+            );
+        }
+        // THE NEGATIVES ARE THE LOAD-BEARING HALF. These three names live ONLY in
+        // the values1 parser; values2..values18 serve the other six and refuse
+        // these. Classifying a multi-element form would hand it to an arm whose
+        // parser declines, and the decline lands on the GENERIC path rather than
+        // returning to the cascade — a regression, which is the defect this bead
+        // exists for. Asked of the parser, not asserted from belief:
+        assert!(
+            super::parse_borrowed_plain_keyed_values2_packet(
+                b"*4\r\n$5\r\nPFADD\r\n$3\r\nhll\r\n$2\r\ne1\r\n$2\r\ne2\r\n",
+                &cfg,
+            )
+            .is_none(),
+            "values2 does not serve PFADD; if it now does, widen the classifier arm too"
+        );
+        for packet in [
+            &b"*4\r\n$5\r\nPFADD\r\n$3\r\nhll\r\n$2\r\ne1\r\n$2\r\ne2\r\n"[..],
+            &b"*4\r\n$6\r\nLPUSHX\r\n$1\r\nl\r\n$1\r\na\r\n$1\r\nb\r\n"[..],
+            &b"*4\r\n$6\r\nRPUSHX\r\n$1\r\nl\r\n$1\r\na\r\n$1\r\nb\r\n"[..],
+        ] {
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(packet, &cfg),
+                None,
+                "multi-element PFADD/LPUSHX/RPUSHX must NOT classify: only values1 \
+                 parses these names, so a claim here lands on the generic path"
+            );
+        }
+        // Near-miss tokens in the same length groups these three opened.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$5\r\nPFADX\r\n$3\r\nhll\r\n$2\r\ne1\r\n",
+                &cfg,
+            ),
+            None,
+            "PFADX must not classify as PFADD"
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$6\r\nLPUSHY\r\n$1\r\nl\r\n$1\r\nv\r\n",
+                &cfg,
+            ),
+            None,
+            "LPUSHY must not classify as LPUSHX"
+        );
+        // PFADD must not be swallowed by, nor swallow, the 7-char PFCOUNT group.
+        assert_ne!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*2\r\n$7\r\nPFCOUNT\r\n$3\r\nhll\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::KeyedValuesWrite(1)),
+            "PFCOUNT must not classify as a keyed-values write"
         );
         // (frankenredis-iqicb) HSETNX and HINCRBYFLOAT, both arity 4. HINCRBYFLOAT
         // also opens a NEW 12-character token group, so the near-miss row matters
