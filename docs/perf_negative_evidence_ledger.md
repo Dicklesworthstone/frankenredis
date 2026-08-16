@@ -20018,3 +20018,98 @@ RETRY PREDICATE: do NOT re-run zadd_base for a tighter ratio — the denominator
 arities the seven zadd parsers actually serve, then add floor entries for exactly
 those. Re-measure fr's own instr/op against the 4,432.5 baseline afterwards, not the
 ratio.
+
+--------------------------------------------------------------------------------
+MEASURED — zadd_xx_opt is 1.242x with a 58 PCT DISPATCH SHARE, the highest measured
+anywhere in this campaign; the whole ZADD FAMILY is stranded (frankenredis-z2ce3)
+
+Screened the option-form family, which has been the richest vein for mis-claims. Three
+more shapes above parity turned up, and the worst of them has a dispatch share higher
+than any pre-fix route this campaign has closed.
+
+CONVENTION: fr instructions per op / redis 7.2.4's. BELOW 1.0 = fr AHEAD.
+
+    screen (one run each)    zadd_xx_opt      1.2460x   disp 57.9%   <- above parity
+                             expire_nx_opt    1.0240x   disp 51.0%   <- above parity
+                             bitcount_range   0.9062x   disp 46.4%
+                             set_xx_opt       0.7180x   disp 29.5%
+                             sintercard_lim   0.5964x   disp 22.2%
+                             lset_same        0.5735x   disp 17.1%
+                             getex_ex_opt     0.5543x   disp 15.2%
+                             psetex_same      0.5495x   disp 13.5%
+                             setbit_same      0.5324x   disp 20.6%
+                             lpos_count_opt   0.3798x   disp 21.7%
+
+    A/A control (get_control)  0.4186 / 0.4164 / 0.4180       spread 0.53 pct
+
+    zadd_xx_opt, four runs   fr instr/op  redis instr/op  fr/redis  dispatch
+      run 1                     7037.6       5656.8        1.2441    57.9%
+      run 2                     7016.6       5651.7        1.2415    58.1%
+      run 3                     7027.5       5632.3        1.2477    57.9%
+      run 4                     7045.5       5714.3        1.2329    57.9%
+      mean                      7031.8       5663.8        1.2416    58.0%
+      spread                     0.41%        1.45%         1.2%      0.3%
+
+Monotonic on both arms in all four runs. THE NULL (0.53 pct) IS SMALLER THAN THE
+SIGNAL'S SPREAD (1.2 pct), so this figure is quotable as measured: 1.242x.
+
+58 PCT DISPATCH IS THE HIGHEST SHARE RECORDED IN THIS CAMPAIGN. ~4,075 of fr's 7,032
+instr/op decide which command this is. For scale on the same binary: get_control 20.6
+pct, sort_ro_alpha 23.9, zadd_base 46.1. And against the pre-fix stranded routes this
+campaign already closed — DEL 57.2, SADD 51.2, HDEL 51.3, SREM 50.3 — zadd_xx_opt is
+WORSE than any of them.
+
+ATTRIBUTED, AND THE WHOLE FAMILY IS STRANDED, not just this shape:
+
+    floor claim          main.rs:16225   (arity, Zadd) if arity >= 8
+                                         && arity.is_multiple_of(2)
+    parsers that exist   zadd        b"*4\r\n$4\r\n"   arity 4   ZADD k score member
+                         zadd_flag   b"*5\r\n$4\r\n"   arity 5   ZADD k XX score member
+                         zadd2       b"*6\r\n$4\r\n"   arity 6
+                         zadd_flag2  b"*6\r\n$4\r\n"   arity 6
+    executors that exist fr-runtime  execute_plain_zadd_borrowed        12027
+                                     execute_plain_zadd_flag2_borrowed  13385
+                                     execute_plain_zadd_flag_borrowed   13569
+                                     execute_plain_zadd_flag_multi_...  13768
+
+The floor claims ZADD from arity EIGHT upward and only at EVEN arities. Arity 4, 5 and
+6 all have working parsers and working executors and are claimed by nothing, so they
+match the token table, find no class, and walk the entire cascade. Arity 5 is
+additionally excluded by the parity test even if the lower bound moved, which is worth
+noticing: the `is_multiple_of(2)` guard was written for the multi-pair form and
+silently excludes every ODD-arity ZADD shape, of which the XX form is one.
+
+THIS IS A REWIRE, and the largest one left. Parsers and executors exist for all three
+arities; what is missing is classifier entries. Same shape of change as GEOADD, MOVE,
+SPUBLISH and the keyed-values family — and the opposite of sort_ro_alpha two rows
+above, which has no parser and no executor and needs a route written from nothing.
+Both were surfaced by dispatch share; only the grep separates them.
+
+SIZE, as an upper bound: if zadd_xx_opt paid get_control's dispatch (~275 instr/op)
+instead of 4,075, fr would fall from 7,031.8 to roughly 3,232 against redis's 5,663.8
+— about 0.57x, from 1.242x. That is a 2.2x movement and the largest single available
+win identified in this campaign. NOT A PREDICTION: it assumes front-classified
+dispatch cost.
+
+THE `9hnxt` RULE BINDS HARD HERE. Claim EXACTLY the arities the parsers serve — 4, 5
+and 6 — and no others. A widened range that claims an arity no parser accepts sends
+that shape to the GENERIC path rather than back to the cascade, which is worse than
+leaving it stranded. Note also that arity 6 has TWO parsers (zadd2 and zadd_flag2), so
+that entry needs the in-arm chaining idiom rather than a single parser call.
+
+PROVENANCE:
+  ELF sha256 (first 16)  c36c3fb0a66033de — built LOCALLY with
+                         RCH_CARGO_WRAPPER_BYPASS=1, env -u CARGO_TARGET_DIR,
+                         executable path from --message-format=json, COPIED to a
+                         private path and sha'd there. Contains 62ce27eb5.
+  tree                   HEAD plus a peer's uncommitted fr-server/src/main.rs; NOT
+                         reproducible from HEAD alone.
+  harness                scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines
+                         in the SAME invocation.
+  host                   thinkstation1, 64 cores, /data 319G, no build this turn.
+
+RETRY PREDICATE: do NOT re-run zadd_xx_opt — null 0.53 pct against a 1.2 pct spread on
+four runs is settled. The next step is CODE: floor entries for ZADD arities 4, 5 and 6,
+with arity 6 chaining its two parsers, and each claim verified against the parser
+before landing. expire_nx_opt (1.024x, 51.0 pct dispatch) and bitcount_range (0.906x,
+46.4 pct) are the next two to attribute and were NOT investigated here.
