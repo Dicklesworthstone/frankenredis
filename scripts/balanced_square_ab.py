@@ -403,6 +403,13 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
     # came from the noisiest window. So the 16% spread was cross-invocation drift,
     # not an unstable route -- and the interleaved pairing is the one to trust.
     #
+    # SECOND back-to-back pairing, independent of the first:
+    #   fast     1.1414 [1.1176, 1.1570]  nulls 0.9860/0.9791 (same direction)
+    #   generic  0.8623 [0.8391, 0.8903]  nulls 0.9805/0.9939  ADMISSIBLE
+    #   -> 1.324x, identical to pairing 1's 1.324x, intervals DISJOINT.
+    # Fast runs 1.1377 and 1.1414 overlap and sit 0.3% apart; generic 0.8596 and
+    # 0.8623 are both admissible. Two pairings, same answer to four digits.
+    #
     # expire_nx is the runner-up and is NOT yet a candidate: 0.9068 and 0.9111 agree
     # in direction across the same two ELFs, but BOTH runs null-failed.
     #
