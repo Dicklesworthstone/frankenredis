@@ -14640,6 +14640,7 @@ enum BorrowedDispatchFloorClass {
     Incrbyfloat,
     Hsetnx,
     Hincrbyfloat,
+    Sinter,
     /// (frankenredis-ozrro) Bare `ZRANDMEMBER key`, the single-member reply
     /// form. Its sibling [`Self::ZrandmemberCount`] was classified in an earlier
     /// slice, which left this one alone ~3,600 lines deep in the chain.
@@ -14862,6 +14863,10 @@ enum BorrowedDispatchFloorCommand {
     /// `INCRBYFLOAT`, same situation: parser and executor already present, no class.
     Hsetnx,
     Hincrbyfloat,
+    /// `SINTER key [key ...]`. Variadic, like `Mget`. Its borrowed parser and
+    /// streaming executor were already present but sat ~880 lines deep in the
+    /// inline chain, so every call paid the walk to reach them.
+    Sinter,
     /// `SETNX`, `GETSET`, `LSET`, `INCRBYFLOAT`. (frankenredis-iqicb) Each already
     /// had a borrowed parser and executor and merely sat deep in the probe chain.
     Setnx,
@@ -15008,9 +15013,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
         },
         4 => match uppercase_ascii_token::<4>(token)? {
             [b'E', b'C', b'H', b'O'] => Some(BorrowedDispatchFloorCommand::Echo),
-            [b'L', b'S', b'E', b'T'] => {
-                Some(BorrowedDispatchFloorCommand::Lset)
-            }
+            [b'L', b'S', b'E', b'T'] => Some(BorrowedDispatchFloorCommand::Lset),
             [b'T', b'Y', b'P', b'E'] => Some(BorrowedDispatchFloorCommand::Type),
             [b'X', b'L', b'E', b'N'] => Some(BorrowedDispatchFloorCommand::Xlen),
             [b'H', b'L', b'E', b'N'] => Some(BorrowedDispatchFloorCommand::Hlen),
@@ -15039,9 +15042,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
         5 => match uppercase_ascii_token::<5>(token)? {
             [b'G', b'E', b'T', b'E', b'X'] => Some(BorrowedDispatchFloorCommand::Getex),
             [b'S', b'E', b'T', b'E', b'X'] => Some(BorrowedDispatchFloorCommand::Setex),
-            [b'S', b'E', b'T', b'N', b'X'] => {
-                Some(BorrowedDispatchFloorCommand::Setnx)
-            }
+            [b'S', b'E', b'T', b'N', b'X'] => Some(BorrowedDispatchFloorCommand::Setnx),
             [b'S', b'C', b'A', b'R', b'D'] => Some(BorrowedDispatchFloorCommand::Scard),
             [b'Z', b'C', b'A', b'R', b'D'] => Some(BorrowedDispatchFloorCommand::Zcard),
             [b'L', b'P', b'U', b'S', b'H'] => Some(BorrowedDispatchFloorCommand::Lpush),
@@ -15065,10 +15066,9 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'D', b'B', b'S', b'I', b'Z', b'E'] => Some(BorrowedDispatchFloorCommand::Dbsize),
             [b'P', b'S', b'E', b'T', b'E', b'X'] => Some(BorrowedDispatchFloorCommand::Psetex),
             [b'H', b'S', b'E', b'T', b'N', b'X'] => Some(BorrowedDispatchFloorCommand::Hsetnx),
-            [b'G', b'E', b'T', b'S', b'E', b'T'] => {
-                Some(BorrowedDispatchFloorCommand::Getset)
-            }
+            [b'G', b'E', b'T', b'S', b'E', b'T'] => Some(BorrowedDispatchFloorCommand::Getset),
             [b'E', b'X', b'I', b'S', b'T', b'S'] => Some(BorrowedDispatchFloorCommand::Exists),
+            [b'S', b'I', b'N', b'T', b'E', b'R'] => Some(BorrowedDispatchFloorCommand::Sinter),
             [b'S', b'E', b'T', b'B', b'I', b'T'] => Some(BorrowedDispatchFloorCommand::Setbit),
             [b'Z', b'C', b'O', b'U', b'N', b'T'] => Some(BorrowedDispatchFloorCommand::Zcount),
             [b'S', b'T', b'R', b'L', b'E', b'N'] => Some(BorrowedDispatchFloorCommand::Strlen),
@@ -15239,9 +15239,19 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
                 b'M',
                 b'E',
             ] => Some(BorrowedDispatchFloorCommand::Pexpiretime),
-            [b'I', b'N', b'C', b'R', b'B', b'Y', b'F', b'L', b'O', b'A', b'T'] => {
-                Some(BorrowedDispatchFloorCommand::Incrbyfloat)
-            }
+            [
+                b'I',
+                b'N',
+                b'C',
+                b'R',
+                b'B',
+                b'Y',
+                b'F',
+                b'L',
+                b'O',
+                b'A',
+                b'T',
+            ] => Some(BorrowedDispatchFloorCommand::Incrbyfloat),
             [
                 b'S',
                 b'I',
@@ -15460,6 +15470,7 @@ fn borrowed_dispatch_floor_command_pre_object_idletime(
     match uppercase_ascii_token::<6>(token)? {
         [b'D', b'B', b'S', b'I', b'Z', b'E'] => Some(BorrowedDispatchFloorCommand::Dbsize),
         [b'E', b'X', b'I', b'S', b'T', b'S'] => Some(BorrowedDispatchFloorCommand::Exists),
+        [b'S', b'I', b'N', b'T', b'E', b'R'] => Some(BorrowedDispatchFloorCommand::Sinter),
         [b'S', b'E', b'T', b'B', b'I', b'T'] => Some(BorrowedDispatchFloorCommand::Setbit),
         [b'Z', b'C', b'O', b'U', b'N', b'T'] => Some(BorrowedDispatchFloorCommand::Zcount),
         [b'S', b'T', b'R', b'L', b'E', b'N'] => Some(BorrowedDispatchFloorCommand::Strlen),
@@ -16005,6 +16016,10 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         }
         (arity, BorrowedDispatchFloorCommand::Mget) if arity >= 3 => {
             Some(BorrowedDispatchFloorClass::Mget)
+        }
+        // SINTER, variadic like MGET. `SINTER k` is arity 2.
+        (arity, BorrowedDispatchFloorCommand::Sinter) if arity >= 2 => {
+            Some(BorrowedDispatchFloorClass::Sinter)
         }
         (3, BorrowedDispatchFloorCommand::Hscan) => {
             Some(BorrowedDispatchFloorClass::Scan0(PlainScan0Cmd::Hscan))
@@ -17753,6 +17768,33 @@ fn try_dispatch_floor_classified_action(
                     .execute_plain_hmget_borrowed_into(
                         packet.key,
                         &packet.fields[..packet.len],
+                        ts,
+                        client_resp3,
+                        out,
+                    )
+                    .is_some()
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
+                    consumed: packet.consumed,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Sinter => {
+            let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+            if let Some(packet) =
+                parse_borrowed_plain_keys_multi_packet(unparsed, &parser_config, b"SINTER")
+                && runtime
+                    .execute_plain_sinter_borrowed_into(
+                        &packet.keys[..packet.len],
                         ts,
                         client_resp3,
                         out,
@@ -19628,19 +19670,22 @@ fn try_dispatch_floor_classified_action(
         }
         BorrowedDispatchFloorClass::Hsetnx => {
             if let Some(packet) = parse_borrowed_plain_hsetnx_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_hsetnx_borrowed(
-                    packet.key,
-                    packet.start,
-                    packet.end,
-                    ts,
-                )
+                && let Some(response) =
+                    runtime.execute_plain_hsetnx_borrowed(packet.key, packet.start, packet.end, ts)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
                     response,
                 })
             } else {
-                parse_borrowed_multibulk_action(unparsed, parser_config, runtime, ts, out, argv_scratch)
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
             }
         }
         BorrowedDispatchFloorClass::Hincrbyfloat => {
@@ -19657,7 +19702,14 @@ fn try_dispatch_floor_classified_action(
                     response,
                 })
             } else {
-                parse_borrowed_multibulk_action(unparsed, parser_config, runtime, ts, out, argv_scratch)
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
             }
         }
         BorrowedDispatchFloorClass::Setnx => {
@@ -19670,7 +19722,14 @@ fn try_dispatch_floor_classified_action(
                     response,
                 })
             } else {
-                parse_borrowed_multibulk_action(unparsed, parser_config, runtime, ts, out, argv_scratch)
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
             }
         }
         BorrowedDispatchFloorClass::Incrbyfloat => {
@@ -19683,24 +19742,34 @@ fn try_dispatch_floor_classified_action(
                     response,
                 })
             } else {
-                parse_borrowed_multibulk_action(unparsed, parser_config, runtime, ts, out, argv_scratch)
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
             }
         }
         BorrowedDispatchFloorClass::Lset => {
             if let Some(packet) = parse_borrowed_plain_lset_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_lset_borrowed(
-                    packet.key,
-                    packet.start,
-                    packet.end,
-                    ts,
-                )
+                && let Some(response) =
+                    runtime.execute_plain_lset_borrowed(packet.key, packet.start, packet.end, ts)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
                     response,
                 })
             } else {
-                parse_borrowed_multibulk_action(unparsed, parser_config, runtime, ts, out, argv_scratch)
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
             }
         }
         BorrowedDispatchFloorClass::Getset => {
@@ -19722,7 +19791,14 @@ fn try_dispatch_floor_classified_action(
                     consumed: packet.consumed,
                 })
             } else {
-                parse_borrowed_multibulk_action(unparsed, parser_config, runtime, ts, out, argv_scratch)
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
             }
         }
         BorrowedDispatchFloorClass::Psetex => {
@@ -42955,6 +43031,38 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
     #[test]
     fn dispatch_floor_classifier_recognizes_only_exact_target_tokens() {
         let cfg = ParserConfig::default();
+        // SINTER, variadic. Mixed case must classify; the arity-1 spelling (no
+        // keys) must NOT, or the fast route would claim a shape its parser
+        // declines; and SINTERCARD must not be swallowed by the 6-byte token —
+        // it is a different command that merely shares a prefix, and it opens a
+        // 10-character group the 6-byte match must not reach into.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$6\r\nSiNtEr\r\n$1\r\na\r\n$1\r\nb\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Sinter)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*2\r\n$6\r\nSINTER\r\n$1\r\na\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Sinter)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(b"*1\r\n$6\r\nSINTER\r\n", &cfg),
+            None,
+            "SINTER with no keys must not classify"
+        );
+        assert_ne!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$10\r\nSINTERCARD\r\n$1\r\n1\r\n$1\r\na\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Sinter),
+            "SINTERCARD must not classify as SINTER"
+        );
         // (frankenredis-iqicb) HSETNX and HINCRBYFLOAT, both arity 4. HINCRBYFLOAT
         // also opens a NEW 12-character token group, so the near-miss row matters
         // more than usual: nothing else guards that length.

@@ -2550,6 +2550,20 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"SADD", b"ss:a", b"m1", b"m2", b"m3", b"m4"]));
     cmds.push(c(&[b"SADD", b"ss:b", b"m2", b"m3", b"m4", b"m5"]));
     cmds.push(c(&[b"SADD", b"ss:c", b"m3", b"m4", b"m5", b"m6"]));
+    // SINTER, now front-classified. The plain reply form is variadic, so the
+    // shapes that matter are the arity boundaries and the outcomes its streaming
+    // executor can decline on: one key, several keys, an empty intersection, a
+    // missing key (empty result, not an error), and a WRONGTYPE source — which
+    // must still reach the generic path rather than being answered by the fast
+    // route. SINTERCARD is included because it shares SINTER's six-byte prefix
+    // and must not be claimed by it.
+    cmds.push(c(&[b"SINTER", b"ss:a"]));
+    cmds.push(c(&[b"SINTER", b"ss:a", b"ss:b"]));
+    cmds.push(c(&[b"SINTER", b"ss:a", b"ss:b", b"ss:c"]));
+    cmds.push(c(&[b"SINTER", b"ss:a", b"ss:nope"]));
+    cmds.push(c(&[b"SINTER", b"ss:nope", b"ss:a"]));
+    cmds.push(c(&[b"SINTER", b"ss:a", b"bo:a"]));
+    cmds.push(c(&[b"SINTERCARD", b"2", b"ss:a", b"ss:b"]));
     cmds.push(c(&[b"SINTERSTORE", b"ss:i", b"ss:a", b"ss:b", b"ss:c"]));
     cmds.push(c(&[b"SMEMBERS", b"ss:i"]));
     cmds.push(c(&[b"SUNIONSTORE", b"ss:u", b"ss:a", b"ss:b", b"ss:c"]));
