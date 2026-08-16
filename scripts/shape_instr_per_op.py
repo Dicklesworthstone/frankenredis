@@ -248,6 +248,15 @@ SHAPES = {
     # 0.6251 across two sweeps. Attribute before choosing a lever -- dispatch has
     # been the answer four times and was NOT the answer for the TTL writes.
     "sort_ro_alpha": (["RPUSH sl c a b"], ["SORT_RO", "sl", "ALPHA"]),
+    # (frankenredis-z2ce3) The THREE-element sibling above cannot see any lever whose cost
+    # is per-element and whose saving is per-COMPARISON: at n=3 a sort does ~3 comparisons,
+    # so "n log n comparisons" and "n elements" are the same number and a decorate-style
+    # change is pure overhead. This 64-element variant separates them (~350 comparisons
+    # against 64 elements). Mixed case so collation, not byte order, decides.
+    "sort_ro_alpha_64": (
+        ["RPUSH sl64 " + " ".join(f"w{i:02d}{'Ab'[i % 2]}" for i in range(64))],
+        ["SORT_RO", "sl64", "ALPHA"],
+    ),
     "geoadd_same": (["GEOADD g 13.361389 38.115556 P1"],
                     ["GEOADD", "g", "13.361389", "38.115556", "P1"]),
     "pfadd_same": (["PFADD hll a b c"], ["PFADD", "hll", "a"]),

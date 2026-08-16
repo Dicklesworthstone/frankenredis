@@ -24152,3 +24152,94 @@ RETRY PREDICATE: do NOT re-run set_base or set_same; the effect is 19 pct agains
 pct null and reproduced on two shapes. DO re-take the option-form tax on a clean-tree ELF
 if anyone wants it tighter than "40-50 instr/op" — set_xx_opt's total is inside its own
 spread and only its dispatch share carries the signal.
+
+--------------------------------------------------------------------------------
+REJECTED (frankenredis-z2ce3) — ICU sort keys for SORT ALPHA: +3.9% at n=3 and +52.5% at
+n=64. AND THE REJECTION NAMED THE REAL LEVER: fr's per-element collation is CHEAPER than
+redis's; the whole 1.50x is a ~6,800 instr/op FIXED per-command cost
+
+Claim class: REJECT
+
+THE HYPOTHESIS. `SORT ... ALPHA` runs n log n comparisons and each collates both operands.
+A callgrind census of `sort_ro_alpha` put the ICU bloc (`CollationElements::next` +
+`iter_next` + `init`, `CollatorBorrowed::compare`, `CodePointTrie::get32_by_small_index`)
+at 23.7% of the command against redis's 6.62% in `strcoll_l` — 4.9x the instructions on
+the same comparison, and ~93% of the whole fr/redis gap on that shape. Decorate-sort-
+undecorate should turn 2 n log n collation walks into n, and ICU4X 2.2 exposes exactly the
+primitive: `write_sort_key_utf8_to`, contracted so that a bytewise compare of two keys
+equals a collation comparison of the originals.
+
+Upstream warns that keys are expensive relative to `compare` BECAUSE `compare` skips
+identical prefixes. I argued that caveat did not apply here, because
+`AlternateHandling::Shifted` has to see the whole string to resolve variable weights and so
+there is no early exit to lose. THAT ARGUMENT WAS WRONG. Shifted changes variable
+weighting; it does not stop ICU returning as soon as the PRIMARY level differs. Key
+generation, by contrast, must emit every level plus the identical-level NFD tie-breaker for
+every element, whether or not anything ever needed to look that far.
+
+MEASURED, ABBA, BOTH ELFs IN ONE WINDOW. Two scales, because the existing shape sorts a
+THREE-element list and cannot distinguish a per-element cost from a per-comparison saving.
+
+    shape              OLD (fr-setmove)      NEW (sort keys)      delta      ratio
+    sort_ro_alpha      12965.4 / 13024.4     13481.7 / 13524.7    +3.9 pct   1.5037 -> 1.6010
+    sort_ro_alpha_64   138700.4 / 138715.7   211534.5 / 211577.0  +52.5 pct  0.6999 -> 1.0648
+
+Arm spreads 0.32-0.46 pct at n=3 and 0.01-0.02 pct at n=64, so both losses are far outside
+noise. The n=64 arm flips fr from AHEAD of redis to BEHIND. Rejected and reverted; the code
+is preserved in `git stash` rather than deleted.
+
+    HONEST LIMIT ON THE NULL: the get_control A/A for this pair ran at loadavg 47-53, above
+    the ~50 ceiling this ledger established two rows ago, and moved 6.1 pct — it is NOT a
+    usable null and I am not quoting it as one. The sort_ro_alpha arms themselves ran at
+    20-41, inside the band, and reproduced to 0.01-0.46 pct. The effects are 4x and 50x
+    their own arm spreads, which is what the rejection rests on.
+
+WHAT THE 64-ELEMENT SHAPE REVEALED, WHICH IS WORTH MORE THAN THE LEVER WAS. Two points on
+each engine give a slope and an intercept:
+
+                     n=3        n=64       per element    fixed per command
+    fr             12,995     138,708         2,061            ~6,812
+    redis           8,655     198,461         3,112              ~0
+
+**fr's per-element collation is 34% CHEAPER than redis's**, and at n=64 fr is 0.6999x —
+comfortably ahead. The 1.50x deficit at n=3 is not the collation kernel at all: it is a
+~6,800 instr/op FIXED cost fr pays per SORT command that redis does not, which at a
+three-element list is 52 pct of the command and is invisible by n=64.
+
+    THE STANDING "sort_ro_alpha IS THE ONLY SHAPE ABOVE PARITY" IS A SMALL-LIST STATEMENT.
+    It was read for four rows as a collation-kernel gap and used to justify a plan to write
+    a borrowed parser and executor from nothing. Both readings were wrong: dispatch is 24
+    pct and flat, the kernel is a WIN, and the target is a fixed per-command cost nobody
+    has attributed yet. That attribution is the next lever and it is NOT a rewire.
+
+REUSABLE, AND THIS IS THE GENERAL FORM: **a shape whose N is small enough that n and
+n log n are the same number cannot distinguish a per-element cost from a per-comparison
+saving, and cannot separate fixed cost from slope.** At n=3 a sort does ~3 comparisons over
+3 elements. Every conclusion drawn from such a shape about WHERE a command spends its time
+is a conclusion about its intercept, silently. Add the second N before attributing, not
+after a lever fails. `sort_ro_alpha_64` is landed for that purpose.
+
+PROVENANCE:
+  new ELF sha256       35e01d4e194c3d53d53b16c93ab2cccb98f22ca55bf9ba6fbd104df2ef7440de
+                       NOT reproducible from HEAD — contains the (now stashed) sort-key
+                       change plus a peer's uncommitted ZADD work.
+  old ELF sha256       1b1d66cd028dd406fdde74e0dceb968b57558ffb03e9faf77bc439d77c46d87e
+  harness              scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines in the
+                       SAME invocation, ABBA across the two ELFs. Shape sort_ro_alpha_64
+                       added by this change.
+  correctness          the rejected path carried a differential test asserting sort-key
+                       ordering equals collator ordering over a corpus covering the
+                       punctuation-vs-digit pairs Shifted decides, tertiary-only case
+                       pairs and accents, plus a decline gate for invalid UTF-8 and NUL.
+                       MUTATION-TESTED: truncating keys to 2 bytes reddened it on
+                       "apple" vs "APPLE". It was correct — it was just slower.
+  host                 thinkstation1, 64 cores, /data 286G, one build this pane.
+  loadavg              20.4 - 41.3 across the sort_ro_alpha ABBA, 20.4 - 33.1 across the
+                       n=64 ABBA. Certification window verified beforehand by three
+                       samples: 1-min 17.30/18.63/15.46 against a 5-min of 16.90/17.27/
+                       16.64 — close and both low.
+
+RETRY PREDICATE: do NOT retry sort keys for SORT ALPHA at any N — the loss GROWS with N,
+which is the opposite of the amortisation the idea depends on. DO attribute the ~6,800
+instr/op fixed per-command cost with a callgrind two-point subtraction between the n=3 and
+n=64 dumps; the frames that do NOT scale with N are the target.
