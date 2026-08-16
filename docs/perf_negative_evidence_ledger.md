@@ -23347,3 +23347,82 @@ RETRY PREDICATE: do not rank shapes across load regimes. When two candidates for
 are within ~5 pct, measure them in the SAME invocation — the harness takes multiple shapes
 per run and that is what makes them comparable. And treat fr-arm stability as a per-shape
 fact to be observed, never assumed: two shapes of one command differ by 25x.
+
+--------------------------------------------------------------------------------
+RE-CERTIFIED — full standings on the CURRENT ELF, and an accidental controlled
+experiment proving instruction counts are load-immune (frankenredis-z2ce3)
+
+LOADAVG OBSERVED BY ME, both ends:
+    before  24.72 / 14.80 / 20.36        after  52.62 / 29.04 / 24.92
+
+THE REPORTED WINDOW DID NOT EXIST — AGAIN. The trigger was "loadavg read 6.88, the
+quietest of the session". The box read 24.72 on the 1-minute at my own check, less than
+a third of the way to the claim, with a 15-minute average of 20.4 against the ~10 gate
+this ledger set for the throughput arm. THIRD CONSECUTIVE TURN in which a relayed
+loadavg was far below the measured one (16.8 -> 25.3, 13 -> 31.4, 6.88 -> 24.7). The
+throughput arm was therefore NOT attempted a fourth time, and this row is
+instruction-count only.
+
+THE ACCIDENT IS THE MOST VALUABLE PART. Load MORE THAN DOUBLED during the run — 24.72
+to 52.62 on the 1-minute — and the dispatch shares moved by AT MOST 0.1 pct on every
+one of eleven shapes. That is an unplanned controlled experiment on the instrument
+itself, and it is the strongest evidence in this ledger for the claim every row here
+depends on: RETIRED-INSTRUCTION COUNTS DO NOT MOVE WITH LOAD. The throughput harness,
+by contrast, went from 3-of-13 admissible to 1-of-13 across a comparable load change.
+
+CONVENTION: fr instructions per op / redis 7.2.4's. BELOW 1.0 = fr AHEAD.
+Two runs per shape, ELF 773d819d…, one session.
+
+    shape             run 1     run 2    dispatch      state
+    sort_ro_alpha    1.5676    1.4841    23.9 / 23.9   ONLY shape above parity
+    expire_nx_opt    0.5838    0.5737    20.2 / 20.2   crossed
+    touch_2          0.5714    0.5405    21.1 / 21.1   crossed
+    zrank_withscore  0.5657    0.5670    22.2 / 22.2   NEW lever, in band
+    bitcount_range   0.5614    0.5136    19.8 / 19.9   crossed
+    zadd_xx_opt      0.5490    0.5697    16.3 / 16.3   crossed
+    zrank_base       0.5402    0.5393    19.3 / 19.3   reference sibling
+    set_base         0.5278    0.5171    33.9 / 33.8   LAST UNTAKEN REWIRE
+    zadd_base        0.5219    0.5248    16.6 / 16.7   crossed
+    zadd_2pair       0.5020    0.5201    15.7 / 15.7   NEW lever, served form only
+    get_control      0.4119    0.4247    20.5 / 20.7   A/A reference
+
+    A/A null 3.1 pct. Ratios carry that; dispatch shares reproduced to 0.1 pct or
+    better on all eleven, ACROSS A DOUBLING OF SYSTEM LOAD.
+
+WHAT THE REFRESH CHANGES against the previous certification (ELF f3c2e2b9, which
+predates two levers):
+
+  * zrank_withscore enters at 22.2 pct, in band — the 47a307984 lever landed correctly.
+    Its sibling zrank_base sits at 19.3 pct, so the WITHSCORE form pays ~3 points more
+    dispatch than the plain one. Both are in band; the gap is small and unexplained,
+    and is NOT claimed as a defect here.
+  * zadd_2pair enters at 15.7 pct — the lowest dispatch of any shape measured. But see
+    the LIVE REGRESSION row immediately above: this is the SERVED form of an arity-6
+    claim whose arm chains only one of two parsers. The flagged arity-6 form has no
+    shape and is on the generic path. A healthy number here is exactly what a
+    half-chained arm produces, and this table must not be read as clearing the family.
+  * Everything else is unchanged within the null.
+
+THE TWO STANDING FACTS SURVIVE THE REFRESH:
+    sort_ro_alpha is the only shape above parity — now on two independently built,
+    clean-tree ELFs and twenty-plus runs.
+    set_base is the only shape outside the 15.7-23.9 pct dispatch band, at 33.9 pct,
+    and remains the last untaken rewire with its fix verified unobstructed.
+
+PROVENANCE:
+  ELF sha256           773d819de62d62d7f496b2a1df8e82bd645228e9e366e64c6294190ffa6d8e2d
+                       built LOCALLY at HEAD from a CLEAN tree with
+                       RCH_CARGO_WRAPPER_BYPASS=1 and env -u CARGO_TARGET_DIR,
+                       executable path from --message-format=json, COPIED to a private
+                       path and sha'd there. Contains 6ef528727 and 47a307984.
+                       REPRODUCIBLE FROM HEAD ALONE.
+  harness              scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines in
+                       the SAME invocation, two runs per shape.
+  host                 thinkstation1, 64 cores, /data 301G, no build this turn.
+  loadavg              24.72/14.80/20.36 before, 52.62/29.04/24.92 after.
+
+RETRY PREDICATE: this supersedes the earlier certification. Do not re-certify without a
+code change. The throughput arm has now been deferred four times on 15-minute averages
+of 20-30; if it is ever wanted, gate on a SUSTAINED 15-minute reading under 10 and
+re-check after, because three relayed "quiet window" figures in a row have not survived
+contact with /proc/loadavg.
