@@ -14591,6 +14591,14 @@ enum BorrowedDispatchFloorClass {
     Lindex,
     /// (frankenredis-ozrro) `ZRANK key member`.
     Zrank,
+    /// (frankenredis-p98mw) `ZRANK key member WITHSCORE` and its ZREVRANK twin, both
+    /// array length 4. The arity-3 forms were front-classified and these were not, so
+    /// the WITHSCORE forms reach their borrowed route only by walking the cascade.
+    /// Found by the 27-shape source sweep; not yet measured, so no ratio is claimed --
+    /// the three measured instances of this defect class span 0.79x to 3.28x and the
+    /// size cannot be inferred from the class alone.
+    ZrankWithscore,
+    ZrevrankWithscore,
     /// (frankenredis-ozrro) `ZRANGEBYSCORE key min max`, the plain arity-4 form
     /// only — WITHSCORES keeps the cascade. LIMIT no longer does; see below.
     Zrangebyscore,
@@ -16243,6 +16251,15 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (2, BorrowedDispatchFloorCommand::Smembers) => Some(BorrowedDispatchFloorClass::Smembers),
         (3, BorrowedDispatchFloorCommand::Lindex) => Some(BorrowedDispatchFloorClass::Lindex),
         (3, BorrowedDispatchFloorCommand::Zrank) => Some(BorrowedDispatchFloorClass::Zrank),
+        // (frankenredis-p98mw) The WITHSCORE forms. Arity 4 EXACTLY -- these commands
+        // have no wider borrowed parser, so a range claim would reach shapes the arm
+        // must decline, and a floor decline calls generic directly.
+        (4, BorrowedDispatchFloorCommand::Zrank) => {
+            Some(BorrowedDispatchFloorClass::ZrankWithscore)
+        }
+        (4, BorrowedDispatchFloorCommand::Zrevrank) => {
+            Some(BorrowedDispatchFloorClass::ZrevrankWithscore)
+        }
         (4, BorrowedDispatchFloorCommand::Zrangebyscore) => {
             Some(BorrowedDispatchFloorClass::Zrangebyscore)
         }
@@ -19295,6 +19312,84 @@ fn try_dispatch_floor_classified_action(
         // same executor, same generic fallthrough. key=k0, a=v0, b=k1, c=v1.
         // (frankenredis-p98mw) Mirrors the cascade arm at ~8089 exactly -- same parser,
         // same executor, same generic fallthrough.
+        // (frankenredis-p98mw) Mirrors the cascade arm exactly, including the
+        // WITHSCORE guard: any other 4th argument falls through to generic, which owns
+        // the syntax error. The executor writes into `out`, so this is a
+        // FastEncodedReply rather than a FastReply.
+        BorrowedDispatchFloorClass::ZrankWithscore => {
+            if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
+                unparsed,
+                &parser_config,
+                b"*4\r\n$5\r\n",
+                b"ZRANK",
+            ) && packet.b.eq_ignore_ascii_case(b"WITHSCORE")
+                && {
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    runtime
+                        .execute_plain_zrank_withscore_borrowed_into(
+                            packet.key,
+                            packet.a,
+                            false,
+                            ts,
+                            client_resp3,
+                            out,
+                        )
+                        .is_some()
+                }
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
+                    consumed: packet.consumed,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        // (frankenredis-p98mw) Mirrors the cascade arm exactly, including the
+        // WITHSCORE guard: any other 4th argument falls through to generic, which owns
+        // the syntax error. The executor writes into `out`, so this is a
+        // FastEncodedReply rather than a FastReply.
+        BorrowedDispatchFloorClass::ZrevrankWithscore => {
+            if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
+                unparsed,
+                &parser_config,
+                b"*4\r\n$8\r\n",
+                b"ZREVRANK",
+            ) && packet.b.eq_ignore_ascii_case(b"WITHSCORE")
+                && {
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    runtime
+                        .execute_plain_zrank_withscore_borrowed_into(
+                            packet.key,
+                            packet.a,
+                            true,
+                            ts,
+                            client_resp3,
+                            out,
+                        )
+                        .is_some()
+                }
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
+                    consumed: packet.consumed,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
         BorrowedDispatchFloorClass::ZaddTwoPair => {
             if let Some(packet) = parse_borrowed_plain_zadd2_packet(unparsed, &parser_config)
                 && let Some(response) = runtime.execute_plain_zadd_borrowed(
@@ -44547,6 +44642,87 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
     /// is the `arity >= 3` defect in its original form (opmo4, xqqwv), and a test that
     /// only checked the claimed arity would pass happily while the regression shipped.
     #[test]
+    /// (frankenredis-p98mw) ZRANK / ZREVRANK claim arity 3 AND 4, and nothing wider.
+    ///
+    /// Written to the discipline the TOUCH defect taught: the corpus runs ONE ARITY
+    /// PAST the claimed set, because a test that only covers the claimed arities cannot
+    /// detect an exclusion. TOUCH passed its own test at 3.2848x behind the incumbent
+    /// for exactly that reason.
+    ///
+    /// The arity-4 arm additionally guards on the WITHSCORE keyword -- key_arg2 is
+    /// positional and accepts ANY fourth argument, so the guard, not the parser, is what
+    /// keeps a bogus option on the generic path. That is asserted separately below,
+    /// because a parser check alone would pass with the guard deleted.
+    #[test]
+    fn zrank_family_claims_arity_three_and_four_only() {
+        let cfg = ParserConfig::default();
+        let pkt = |name: &[u8], extra: Option<&[u8]>| -> Vec<u8> {
+            let n = if extra.is_some() { 4 } else { 3 };
+            let mut p = format!("*{}\r\n${}\r\n", n, name.len()).into_bytes();
+            p.extend_from_slice(name);
+            p.extend_from_slice(b"\r\n$1\r\nz\r\n$1\r\nm\r\n");
+            if let Some(e) = extra {
+                p.extend_from_slice(format!("${}\r\n", e.len()).as_bytes());
+                p.extend_from_slice(e);
+                p.extend_from_slice(b"\r\n");
+            }
+            p
+        };
+
+        for (name, base, ws) in [
+            (
+                &b"ZRANK"[..],
+                super::BorrowedDispatchFloorClass::Zrank,
+                super::BorrowedDispatchFloorClass::ZrankWithscore,
+            ),
+            (
+                &b"ZREVRANK"[..],
+                super::BorrowedDispatchFloorClass::Zrevrank,
+                super::BorrowedDispatchFloorClass::ZrevrankWithscore,
+            ),
+        ] {
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(&pkt(name, None), &cfg),
+                Some(base),
+                "{} at arity 3 must classify",
+                String::from_utf8_lossy(name)
+            );
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(
+                    &pkt(name, Some(b"WITHSCORE")),
+                    &cfg
+                ),
+                Some(ws),
+                "{} WITHSCORE at arity 4 must classify",
+                String::from_utf8_lossy(name)
+            );
+            // ONE PAST THE CLAIM: no arity-5 parser exists, so it must keep walking.
+            let mut wide = pkt(name, Some(b"WITHSCORE"));
+            wide[1] = b'5';
+            wide.extend_from_slice(b"$1\r\nx\r\n");
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(&wide, &cfg),
+                None,
+                "{} at arity 5 has no parser and must stay unclaimed",
+                String::from_utf8_lossy(name)
+            );
+            // The parser is POSITIONAL and accepts any fourth argument -- so a bogus
+            // option still CLASSIFIES, and the arm's WITHSCORE guard is what sends it
+            // to generic. Pinned so that guard cannot be deleted silently.
+            assert!(
+                super::parse_borrowed_plain_key_arg2_packet(
+                    &pkt(name, Some(b"BOGUS")),
+                    &cfg,
+                    if name == b"ZRANK" { b"*4\r\n$5\r\n" } else { b"*4\r\n$8\r\n" },
+                    name,
+                )
+                .is_some(),
+                "{} key_arg2 accepts any 4th arg; the arm guard is the discriminator",
+                String::from_utf8_lossy(name)
+            );
+        }
+    }
+
     fn touch_and_msetnx_claim_exactly_the_arity_their_parser_serves() {
         let cfg = ParserConfig::default();
 
