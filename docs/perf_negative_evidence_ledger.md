@@ -18900,3 +18900,51 @@ RETRY PREDICATE: after removing the three sorts, `sinter_borrow_scan_reports_ab`
 ratio WILL move because both its numerators change. That movement is not evidence about
 this lever either. Measure with the new large-intersection harness shapes
 (sinter_large_generic / sinter_large_intset) against a pre-change ELF.
+
+## ATTRIBUTION (frankenredis-iqicb) — INCRBYFLOAT's bignum is HEAP-backed, so the exact fast path has an allocation signature and is census-pinnable
+
+Source-verified under the freeze, no build. Extends the 16.02 pct frame attribution above.
+
+`BigNat` is heap-backed and constructed per operation:
+
+    fr-store:38276   struct BigNat { limbs: Vec<u32> }
+    fr-store:38297   fn from_decimal_digits: starts at zero(), then per digit
+                     mul_small(10) + add_small(d) -- so limbs GROWS INCREMENTALLY and
+                     reallocates repeatedly as it does. NOT one allocation per parse.
+    fr-store:38425   fn add_abs: Vec::with_capacity(len + 1) -- a fresh allocation per add
+    fr-store:38508   BigNat::from_u64(self.mantissa) on the formatting side
+
+An `INCRBYFLOAT k 0` parses BOTH operands, adds them, and formats the result, so the op
+pays several bignum constructions plus the growth reallocs inside each parse. That is
+consistent with the allocator frames measured on this shape — `mi_free` 2.98 pct and
+`mi_theap_malloc_aligned` 2.45 pct, ~5.4 pct of the op in the allocator — sitting
+underneath the 16.02 pct `bignat_to_long_double` and 5.25 pct `parse_long_double`.
+
+WHY THIS MATTERS FOR THE LEVER: the exact fast path
+(scratchpad/incrbyfloat_exact_fastpath.md) does `sig * 5^exp` in u64 and never
+constructs a BigNat at all for inputs it accepts. So the lever has a SECOND, sharper
+signature besides instruction count: **allocation calls should drop to zero on the fast
+window.**
+
+AND IT NEEDS ONE, BECAUSE THE LEVER HAS NO BEHAVIOURAL SIGNATURE. The fast path is
+bit-identical to the bignum path by construction — that is its whole correctness
+argument — so no differential test can see whether it fired, and a version that silently
+declines every input passes every correctness test while being a no-op. Same structural
+problem MossySparrow hit on z2ce3: the property has no functional consequence, so pin it
+with an instrument that measures the property.
+
+THE INSTRUMENT ALREADY EXISTS: `CountingAlloc` + `#[global_allocator]` in
+crates/fr-command/tests/lua_redis_call_allocation_census.rs and
+crates/fr-runtime/tests/rdb_hash_load_allocation_census.rs. Two constraints carried from
+them: it must live under `tests/` because a global allocator is binary-wide, and it links
+CountingAlloc rather than mimalloc, so it counts allocation CALLS and says nothing about
+cost. **The census pins the invariant; a callgrind row sizes it.** Keeping those separate
+matters here for the same reason as on z2ce3 — a modest cost number must not be read as
+"the invariant does not matter."
+
+Campaign output: yes — gives an otherwise unobservable lever a testable property.
+
+RETRY PREDICATE: a census on this shape must use two-point subtraction (warm, then N vs
+3N, divide by the difference) so per-process construction cancels, and must assert the
+reply INSIDE the counting loop — a declined fast path would otherwise count nothing and
+pass vacuously, which is this campaign's most repeated failure mode.
