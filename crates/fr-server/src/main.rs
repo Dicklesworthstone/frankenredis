@@ -14879,6 +14879,10 @@ enum BorrowedDispatchFloorClass {
     /// higher arity and keep the cascade.
     Sintercard,
     /// (frankenredis-ozrro) `ZRANDMEMBER key count`, the members-only form.
+    /// (frankenredis-ozrro) Keyless `COMMAND COUNT`. The deepest arm measured on
+    /// this bead: walking to it cost 15,373 instructions per op, 4.27x the
+    /// bypassed floor. Clients that probe the command table on connect pay it.
+    CommandCount,
     /// (frankenredis-ozrro) Bare `ZRANDMEMBER key`, the single-member reply
     /// form. Its sibling [`Self::ZrandmemberCount`] was classified in an earlier
     /// slice, which left this one alone ~3,600 lines deep in the chain.
@@ -15088,6 +15092,10 @@ enum BorrowedDispatchFloorCommand {
     Bitfield,
     BitfieldRo,
     Bitpos,
+    /// `COMMAND`. Only the keyless `COMMAND COUNT` form has a borrowed route;
+    /// every other subcommand declines and takes the generic path, which is
+    /// where the cascade would have delivered it anyway.
+    Command,
     Copy,
     Dbsize,
     Del,
@@ -15280,6 +15288,9 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             _ => None,
         },
         7 => match uppercase_ascii_token::<7>(token)? {
+            [b'C', b'O', b'M', b'M', b'A', b'N', b'D'] => {
+                Some(BorrowedDispatchFloorCommand::Command)
+            }
             [b'P', b'F', b'C', b'O', b'U', b'N', b'T'] => {
                 Some(BorrowedDispatchFloorCommand::Pfcount)
             }
@@ -15983,6 +15994,13 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // stranded on the generic path by a classification their parser declines.
         (4..=5, BorrowedDispatchFloorCommand::Sintercard) => {
             Some(BorrowedDispatchFloorClass::Sintercard)
+        }
+        // `COMMAND COUNT` is the only COMMAND subcommand with a borrowed route,
+        // so a declined classification here costs nothing: DOCS/INFO/LIST/GETKEYS
+        // land on the generic path, which is exactly where walking the whole
+        // chain would have delivered them.
+        (2, BorrowedDispatchFloorCommand::Command) => {
+            Some(BorrowedDispatchFloorClass::CommandCount)
         }
         (2, BorrowedDispatchFloorCommand::Zrandmember) => {
             Some(BorrowedDispatchFloorClass::Zrandmember)
@@ -19581,6 +19599,23 @@ fn try_dispatch_floor_classified_action(
                     )
                 });
             if let Some((consumed, response)) = hit {
+                Ok(BorrowedMultibulkAction::FastReply { consumed, response })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::CommandCount => {
+            if let Some(consumed) =
+                parse_borrowed_plain_command_count_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_command_count_borrowed(ts)
+            {
                 Ok(BorrowedMultibulkAction::FastReply { consumed, response })
             } else {
                 parse_borrowed_multibulk_action(

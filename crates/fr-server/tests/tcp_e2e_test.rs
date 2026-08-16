@@ -2835,6 +2835,17 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"ZRANGE", b"z:1", b"0", b"-1", b"WITHSCORES"]));
     cmds.push(c(&[b"XRANGE", b"st:1", b"-", b"+"]));
     cmds.push(c(&[b"DBSIZE"]));
+    // (frankenredis-ozrro) COMMAND is claimed at arity 2, but only the COUNT
+    // subcommand has a borrowed route. This row is the DECLINE path, which is
+    // the one that can actually break: an unknown subcommand must still reach
+    // the generic path and answer identically, because a classification that
+    // declines lands there rather than back on the cascade.
+    //
+    // COUNT/INFO/LIST cannot be asserted against 7.2.4 here — they report how
+    // many commands the ENGINE implements (fr 244 vs vendored 241), so equality
+    // would be asserting that fr's command table never grows. They get their own
+    // fr-fast-vs-fr-generic check after the loop instead.
+    cmds.push(c(&[b"COMMAND", b"NOSUCHSUB"]));
 
     let mut pipeline = Vec::new();
     for cmd in &cmds {
@@ -2877,6 +2888,55 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
             fast_responses[i], redis_responses[i],
             "reply {i} `{label}`: both fr routes agree with each other but not with 7.2.4"
         );
+    }
+
+    // (frankenredis-ozrro) COMMAND COUNT's front-classified route, on the axis
+    // the equality loop cannot use. The reply counts the commands the ENGINE
+    // implements, so fr and 7.2.4 legitimately differ (244 vs 241) and pinning
+    // the value against vendored would assert that fr's command table never
+    // grows. What MUST hold is the fr-vs-fr axis — the fast route and the same
+    // binary's generic path must agree — plus the shape against vendored: all
+    // three answer an integer, and the two fr paths answer the SAME integer.
+    // The case-insensitive spelling is included because the subcommand is
+    // matched with eq_ignore_ascii_case and a route wired to a byte-exact
+    // compare would silently decline `command count` to the generic path.
+    for row in [
+        vec![b"COMMAND".to_vec(), b"COUNT".to_vec()],
+        vec![b"COMMAND".to_vec(), b"count".to_vec()],
+    ] {
+        let borrowed: Vec<&[u8]> = row.iter().map(Vec::as_slice).collect();
+        let encoded = encode_command(&borrowed);
+        let label = String::from_utf8_lossy(&row.concat()).into_owned();
+
+        let mut fast_one = BufferedTcpClient::connect(fast_port);
+        let mut generic_one = BufferedTcpClient::connect(generic_port);
+        let mut redis_one = BufferedTcpClient::connect(redis_port);
+        fast_one.write_all(&encoded);
+        generic_one.write_all(&encoded);
+        redis_one.write_all(&encoded);
+        let fast_reply = fast_one.read_responses(1).remove(0);
+        let generic_reply = generic_one.read_responses(1).remove(0);
+        let redis_reply = redis_one.read_responses(1).remove(0);
+
+        assert_eq!(
+            fast_reply, generic_reply,
+            "`{label}`: the borrowed fast route disagrees with the generic path in the SAME binary"
+        );
+        for (engine, reply) in [
+            ("fast", &fast_reply),
+            ("generic", &generic_reply),
+            ("redis", &redis_reply),
+        ] {
+            match reply {
+                RespFrame::Integer(count) => assert!(
+                    *count > 0,
+                    "`{label}`: {engine} answered {count}, expected a positive command count"
+                ),
+                other => {
+                    panic!("`{label}`: {engine} answered {other:?}, expected an integer reply")
+                }
+            }
+        }
     }
 
     // (frankenredis-ozrro) The one PTTL branch the equality loop above cannot
