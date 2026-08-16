@@ -19565,3 +19565,80 @@ pins both conventions to source lines.
 RETRY PREDICATE: before treating any row as a regression, check WHICH HARNESS produced it.
 If the figure came from balanced_square_ab.py, above 1.0 is a win; if from
 shape_instr_per_op.py, below 1.0 is a win.
+
+--------------------------------------------------------------------------------
+MEASURED — touch_missing 0.599x and exists_missing 0.576x; and REDIS'S MISSING-KEY
+PATHS ARE NONDETERMINISTIC WHERE ITS GET PATH IS NOT (frankenredis-z2ce3)
+
+Sized the two shapes the z2ce3 lever touches. Both engines in the SAME invocation,
+two runs each, plus a two-run A/A control. No build — existing binary re-run.
+
+CONVENTION: fr instructions per op / redis 7.2.4's. BELOW 1.0 = fr AHEAD.
+
+    shape             fr instr/op       redis instr/op      fr/redis        dispatch
+    touch_missing    1665.1 / 1663.7   2736.4 / 2815.1   0.6085 / 0.5910     20.5%
+    exists_missing   1557.2 / 1556.4   2654.9 / 2749.6   0.5865 / 0.5660     13.6%
+    get_control (A/A)1334.8 / 1339.0   3200.0 / 3201.7   0.4171 / 0.4182     20.6%
+
+    spread            fr        redis     ratio
+    touch_missing    0.08%      2.9%      2.9%
+    exists_missing   0.05%      3.6%      3.6%
+    get_control      0.31%      0.05%     0.26%
+
+Ir(2N) > Ir(N) on both arms of every run. A/A null 0.26 pct — the instrument is sound.
+
+THE FINDING, WHICH IS BIGGER THAN EITHER RATIO. Three shapes have now been measured
+on this ELF whose operand is a MISSING key — del_1_missing, touch_missing,
+exists_missing — and all three show the same signature: fr's arm reproduces to
+0.05-0.08 pct while REDIS's arm swings 2.9-6.3 pct. In the same sessions, on the same
+binary and host, get_control — whose key EXISTS — holds redis to 0.05 pct.
+
+    shape             redis spread    key present?
+    del_1_missing        6.3%             no
+    exists_missing       3.6%             no
+    touch_missing        2.9%             no
+    get_control          0.05%            YES
+
+So the instability is not the harness, not the host, and not load: it tracks the
+MISSING-KEY property. Something in Redis 7.2.4's miss path varies run to run in a way
+its hit path does not. Candidates, NONE attributed here: an active-expire cycle
+landing inside the measured window, dict rehashing state carried across runs, or
+serverCron work. Recorded as an observation with a controlled comparison, not an
+explanation.
+
+WHY IT MATTERS BEYOND CURIOSITY. Every vs-incumbent ratio on a missing-key shape
+inherits a 3-6 pct denominator wobble that no amount of re-running fixes, because the
+numerator is already exact. A lever worth a few percent of fr's cost is therefore
+INVISIBLE in the ratio and OBVIOUS in fr's own instr/op. The rule from the
+del_1_missing row generalises to the whole miss family: MEASURE THE NUMERATOR.
+
+WHAT THIS DOES AND DOES NOT SAY ABOUT THE z2ce3 LEVER. It gives touch_missing and
+exists_missing their first absolute figures — fr at 1665.1 and 1557.2 instr/op — which
+is the baseline any future lever on them is measured against. It does NOT size the
+allocation lever: that would need the pre-lever arm built and measured on this same
+binary, which was not done. The lever's evidence remains the allocation census
+(3.000/4.426 -> 0.000 per op against a 6.957/7.188 control, 62ce27eb5), which is a
+COUNT and not a cost. Do not read these ratios as the lever's effect.
+
+DISPATCH SHARES ARE STABLE AND DIFFER USEFULLY: touch_missing 20.5 pct against
+exists_missing 13.6 pct, identical across runs to a tenth of a point. Both are
+front-classified, so the gap is in the executors rather than the routing, and TOUCH's
+extra ~128 instr/op over EXISTS on a strictly simpler command is the more interesting
+of the two numbers here for anyone looking for the next lever on this family.
+
+PROVENANCE:
+  ELF sha256 (first 16)  c36c3fb0a66033de — built LOCALLY with
+                         RCH_CARGO_WRAPPER_BYPASS=1, env -u CARGO_TARGET_DIR,
+                         executable path from --message-format=json, COPIED to a
+                         private path and sha'd there. Contains 62ce27eb5.
+  tree                   HEAD plus a peer's uncommitted fr-server/src/main.rs; NOT
+                         reproducible from HEAD alone.
+  harness                scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines
+                         in the SAME invocation.
+  host                   thinkstation1, 64 cores, /data 321G, no build this turn.
+
+RETRY PREDICATE: do NOT re-run these for tighter ratios — the denominator is the
+unstable term. DO probe redis's miss-path nondeterminism if a stable ratio is ever
+needed on this family; one probe would cover all three shapes. And measure any
+fr-side lever here against fr's own baseline: 1665.1 (touch_missing), 1557.2
+(exists_missing), 2002.2 (del_1_missing).
