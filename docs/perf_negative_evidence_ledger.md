@@ -21803,3 +21803,80 @@ arms show what to mirror. THEN write an arity-N+1 shape for every other exact-ar
 this campaign has landed (MSETNX, ZADD base, BITCOUNT range, the four expire
 conditionals) before assuming any of them is harmless; TOUCH is proof that the exclusion
 can be worse than the claim was good.
+
+--------------------------------------------------------------------------------
+CONFIRMED ON A SECOND SHAPE — set_same pays the SAME ~724 instr/op of dispatch as
+set_base: the cost is the ROUTE, not the workload (frankenredis-z2ce3)
+
+Screened the last twelve untouched shapes. Nothing above parity, nothing anomalous —
+except set_same at 33.8 pct, which is set_base's figure to a tenth of a point. Measured
+properly it is an independent confirmation of the SET finding, on a different shape.
+
+CONVENTION: fr instructions per op / redis 7.2.4's. BELOW 1.0 = fr AHEAD.
+
+    screen (one run each)   set_same    0.5246x  disp 33.8%   <- the only anomaly
+                            bitop_not   0.7009x  disp 13.0%
+                            sismember   0.4695x  disp 20.2%
+                            hexists     0.4889x  disp 20.0%
+                            persist_noop 0.5792x disp 19.5%
+                            lindex      0.4441x  disp 18.3%
+                            zrange_ws   0.4165x  disp 17.8%
+                            scard       0.5857x  disp 17.2%
+                            expiretime  0.5699x  disp 16.5%
+                            getex_base2 0.5702x  disp 15.5%
+                            getex_ex    0.5823x  disp 15.1%
+                            expire_base 0.5510x  disp 13.9%
+
+    A/A control (get_control)  0.4022 / 0.4175 / 0.4183      spread 4.0 pct
+
+    set_same, four runs   fr 2133.3 / 2163.6 / 2132.5 / 2137.0   spread 1.5 pct
+                          redis 4208.7 / 3952.5 / 4082.2 / 3952.9  spread 6.5 pct
+                          ratio 0.5069 / 0.5474 / 0.5224 / 0.5406  spread 8.0 pct
+                          dispatch 33.9 / 33.8 / 33.9 / 33.9
+
+Monotonic on both arms in all four runs.
+
+THE TWO SET SHAPES ARE THE SAME ROUTE AND THE NUMBERS SAY SO:
+
+                        fr instr/op   dispatch share   dispatch instr/op   fr/redis
+    set_base (missing)     2131.7        33.9 pct          ~723.0          0.5198x
+    set_same  (existing)   2141.6        33.9 pct          ~724.9          0.5293x
+    difference              0.46 pct      0.03 pct          0.26 pct
+
+Two shapes with DIFFERENT workloads — one writes a key that does not exist, one
+overwrites a key that does — pay dispatch costs that agree to a quarter of a percent.
+That is what you get when the cost is a property of HOW THE COMMAND IS REACHED rather
+than of what it does, and it is the prediction that follows from SET being absent from
+the floor token table.
+
+WHY THIS MATTERS FOR THE LEVER, and it is not just corroboration: it establishes that
+the ~450 instr/op gap to GET applies to ALL SET TRAFFIC, not to a favourable subset.
+A lever measured on one SET shape can be quoted for the command. Every other stranded
+shape in this series was measured on a single shape and I was careful to say so; SET is
+now the one where that caveat can be dropped.
+
+It also rules out the alternative reading of set_base's 33.9 pct — that a missing-key
+SET does less real work, inflating dispatch as a FRACTION. set_same does more work
+(it overwrites an existing value) and lands within 0.5 pct on fr's total. The share is
+not an artefact of a cheap denominator.
+
+THE SCREEN IS NOW EXHAUSTED. Across roughly seventy shapes measured or screened on this
+ELF, NOTHING is above parity except sort_ro_alpha, and nothing carries an unexplained
+dispatch share except the two SET shapes and expire_nx_opt — all three already
+attributed, with levers specified and one of them verified viable.
+
+PROVENANCE:
+  ELF sha256           11b0c67517b6130fac51679ec296db62d31163a6525c151f3c10e21ba86d4182
+                       built LOCALLY at HEAD 8ae6ea4b4 with RCH_CARGO_WRAPPER_BYPASS=1
+                       and env -u CARGO_TARGET_DIR, executable path from
+                       --message-format=json, COPIED to a private path and sha'd there.
+  tree                 HEAD 8ae6ea4b4 plus a peer's uncommitted fr-server/src/main.rs.
+  harness              scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines in
+                       the SAME invocation.
+  host                 thinkstation1, 64 cores, /data 311G, no build this turn.
+
+RETRY PREDICATE: do NOT measure another SET shape — two agree to a quarter of a percent
+on dispatch and a third adds nothing. The next work on SET is option (B), moving its
+cascade arm beside GET's, which the previous row verified is unobstructed. Measure
+set_base AND set_same afterwards, plus set_xx_opt and set_ex_opt as the regression
+check, since an ordering change is exactly what could disturb the option forms.
