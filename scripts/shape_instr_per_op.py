@@ -147,6 +147,15 @@ DISPATCH_FRAMES = (
     "check_full_command_arity", "execute_dispatch", "parse_command_args_borrowed_into",
     "try_dispatch_floor_classified_action", "parse_borrowed_plain_",
     "effective_command_flags", "canonical_command_fullname",
+    # The first version of this list stopped above and UNDERCOUNTED the generic
+    # path, which is the path it exists to flag. Differencing UNLINK against DEL
+    # frame by frame surfaced four more that only appear once a command misses the
+    # borrowed floor: dispatch_argv (+104 instr/op), acl_permission_error_for_argv
+    # (+94), borrowed_fast_route_key (+92) and the Utf8Chunks iterator (+132) that
+    # push_ascii_lowercase_lossy drives. Together they were 422 instr/op of
+    # dispatch reported as if it were work.
+    "dispatch_argv", "acl_permission_error_for_argv", "borrowed_fast_route_key",
+    "Utf8Chunks", "resolve_command_spec", "lookup_command",
 )
 
 
