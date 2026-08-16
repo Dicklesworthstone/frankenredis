@@ -17483,3 +17483,48 @@ RETRY PREDICATE: do not retry this check unless `.cargo/config.toml` gains a
 row is benchmarked on an rch worker instead of locally. Under those conditions
 the zero-delta property has to be re-established before any cross-worker A/B is
 quoted.
+
+
+---
+
+## 2026-08-16 BlackCat: NULL — `#[inline]` is a HINT, and the optimizer declined it on a three-caller decoder: +0.012% (`frankenredis-33832`)
+
+LEVER: the same trick that measured **-2.80%** on hash RESTORE a few commits earlier
+(inlining `decode_entry_value_span` and `ListpackValueSpan::as_bytes`, both of which
+went to 0 self-cost and were absorbed into their caller). Applied to the RDB-load
+twin: `#[inline]` on `decode_entry_raw` (3,040 instr/key, called once per listpack
+element) and on `decode_entry` (already absorbed, so a no-op by inspection).
+
+MEASURED, callgrind slope method (identical seed+workload at 4 and 12 DEBUG RELOADs,
+differenced), harness scratchpad cg_slope.sh + restore_profile.py + cg_delta.py,
+200 keys x 40-field listpack hash. Baseline ELF = current main built on rch worker
+vmi1152480 (sha256 8578b36cabfcb5f8...), candidate = same tree + this file only,
+built on rch worker vmi1153651. thinkstation1 / Threadripper PRO 5975WX / powersave
+/ valgrind 3.25.1, host load 6.45/10.20/10.77 and falling.
+
+| | baseline | candidate | delta |
+|---|---|---|---|
+| DEBUG RELOAD | 17,700,537 instr/reload | 17,702,733 | **+0.012% (null)** |
+| per key | 88,503 | 88,514 | +11 |
+
+THE MECHANISM DID NOT FIRE, which is the whole finding. Per-function self cost is
+UNCHANGED on both targets: `decode_entry_raw` 3,040 -> 3,040 and `decode_listpack`
+4,785 -> 4,785. `#[inline]` is a hint, not a directive, and LLVM declined it here.
+
+WHY IT FIRED BEFORE AND NOT NOW, which is the reusable part: the function that paid
+had ONE hot caller (`decode_entry_value_span` from `decode_value_spans`), so
+inlining traded a call for a single copy of the body. `decode_entry_raw` has THREE
+call sites (`decode_entry`, `decode_zset_listpack_pairs`, and the value-span
+decoder), so inlining it triples the body and the inliner's cost model says no. The
+attribute is identical in both cases; the outcome is not.
+
+DO NOT read this as "inlining does not pay on this path" — read it as "the attribute
+was ignored". Always confirm the symbol actually DISAPPEARS from the per-function
+profile before crediting an inlining lever, exactly as the -2.80% row did
+(3,280 -> 0 and 1,280 -> 0).
+
+RETRY PREDICATE: do not retry unless the call-site count for `decode_entry_raw`
+drops to one (e.g. `decode_entry` is deleted or the zset path stops using it), OR
+the attempt uses `#[inline(always)]` AND reports the resulting code-size change
+alongside the instruction delta — forcing a three-site inline can cost more in
+i-cache than it saves in call overhead, and this row does not measure that.
