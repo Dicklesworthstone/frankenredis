@@ -280,6 +280,32 @@ SHAPES = {
          "SADD bg2 " + " ".join(f"m{i:04d}" for i in range(512))],
         ["SINTER", "bg1", "bg2"],
     ),
+    # (frankenredis-gein3) SINTER's siblings at large RESULT cardinality. Every other
+    # set-algebra shape in this file is seeded at two or three members, which is the near
+    # side of a crossover SINTER was shown to have: it read 0.52x at k=2 and 1.38x at
+    # k=512, so "SUNION/SDIFF/SINTERSTORE are comfortably ahead" is a statement about
+    # their SEED, not about the commands. These three make the far side visible.
+    #
+    # SUNION returns 1024 (disjoint halves) and SDIFF 512 (nothing shared), so each one
+    # emits a large reply; SINTERSTORE intersects 512 and writes them to a key instead of
+    # replying, which is the control that separates REPLY-DELIVERY cost from the set work
+    # -- the distinction that decided SINTER, where fr's deficit turned out to be
+    # reply-bound rather than probe-bound.
+    "sunion_big": (
+        ["SADD ub1 " + " ".join(f"m{i:04d}" for i in range(512)),
+         "SADD ub2 " + " ".join(f"n{i:04d}" for i in range(512))],
+        ["SUNION", "ub1", "ub2"],
+    ),
+    "sdiff_big": (
+        ["SADD db1 " + " ".join(f"m{i:04d}" for i in range(512)),
+         "SADD db2 " + " ".join(f"n{i:04d}" for i in range(512))],
+        ["SDIFF", "db1", "db2"],
+    ),
+    "sinterstore_big": (
+        ["SADD sb1 " + " ".join(f"m{i:04d}" for i in range(512)),
+         "SADD sb2 " + " ".join(f"m{i:04d}" for i in range(512))],
+        ["SINTERSTORE", "sbdst", "sb1", "sb2"],
+    ),
     # (frankenredis-gein3) THE STABLE MID POINT, and it exists because the SINTER
     # crossover has been argued three times from two shapes that cannot settle it.
     # sinter_2 returns 2 members and reproduces to ~1.4 pct; sinter_big returns 512 and

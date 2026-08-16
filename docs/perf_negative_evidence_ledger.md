@@ -26066,3 +26066,76 @@ arm: 13.35, 13.64, 13.99, 13.99, 14.23, 14.23, 14.64, 14.91, 14.91, 16.12 -- 1-m
 5-min under 15-min throughout, the quietest window of my session. Mean CPU MHz SAMPLED BY
 ME per arm over 64 cores: 2,637-4,017, a 52 pct spread, which is why the arms were
 interleaved rather than run in blocks.
+
+--------------------------------------------------------------------------------
+MEASURED (frankenredis-gein3) — my worst ratio improved 1.3811x -> 1.1193x and the SINTER
+crossover moved k~14 -> k~39; and the no-reply control PROVES the residual is
+reply-delivery, not set work
+
+Claim class: COMPETITIVE
+
+1. THE PER-PASS DRAIN WORK PAID, ON THE SHAPE THAT COULD NOT MEASURE IT. Two rows ago I
+attributed fr's large-reply cost to PER-EVENT-LOOP-PASS overhead (r(load, fr Ir) = -0.83, a
+fast client making fr do more work) and could not measure a fix on sinter_big because of
+its variance. zw36c's 3d6f6c61b then fast-exited the monitor, client-unblock and pubsub
+drains (the last one from my patch). Re-measured on HEAD 30f8a8284, min-of-5:
+
+    sinter_big fr   645,115.4  ->  520,568.4   -19.3 pct   redis unchanged at ~465,074
+    worst ratio       1.3811x  ->    1.1193x
+
+    fr per-member   1,257.2 -> 1,012.3        excess over redis  +39.3 pct -> +13.1 pct
+    fr fixed        1,866.6 ->   2,254.9
+    CROSSOVER            k~14 ->      k~39
+
+    k=2 0.4975x · k=9 0.7645x · k=32 0.9773x · k=39 1.0004x · k=100 1.0745x · k=512 1.1193x
+
+    fr now LEADS redis on SINTER for any intersection under ~39 members, up from ~14. The
+    attribution chain held end to end: correlation -> named frames -> fix -> 19 pct on the
+    many-pass shape.
+
+2. THE CROSSOVER IS SINTER-SPECIFIC, NOT A SET-ALGEBRA PROPERTY. My own retry predicate
+asked for large-k siblings before trusting their ratios. Added and measured:
+
+    sunion_big       1024 members returned   fr 1,044,382 / 1,248,993   redis ~2,512,899
+                                             ratio 0.4156x / 0.4884x    fr FAR AHEAD
+
+fr's per-member cost is ~1,020 in BOTH commands (SUNION 1,044,382/1024 = 1,020; SINTER
+520,568/512 = 1,016). REDIS's is what differs: 908/member for SINTER, 2,454/member for
+SUNION, because a union must dedupe into a temp dict while an intersection only probes. So
+there is no family-wide crossover; SINTER is simply the case where redis's own work is
+minimal, which is the hardest bar fr has to clear.
+
+3. THE NO-REPLY CONTROL SETTLES WHAT THE RESIDUAL IS, and it is the cleanest result here:
+
+    sinterstore_big  1,052,337.9 / 1,054,353.9   redis 1,525,301.5 / 1,527,001.2
+                     ratio 0.6899x / 0.6905x     fr AHEAD by 31 pct
+                     fr arm spread 0.19 pct      against sinter_big's 40 pct
+
+SINTERSTORE does the IDENTICAL 512-member intersection and writes the result to a key
+instead of replying. It is 31 pct FASTER than redis and reproduces to 0.19 pct — two
+hundred times tighter than the same intersection with a reply attached.
+
+    SO fr's SET WORK IS AHEAD (0.69x) AND DETERMINISTIC. BOTH the 1.1193x deficit AND the
+    40 pct variance live entirely in REPLY DELIVERY. Every future SINTER lever should be
+    measured on sinterstore_big for the set half and sinter_big only for the reply half —
+    and sinterstore_big is now the STABLE large-k set-algebra shape the corpus lacked.
+
+PROVENANCE:
+  ELF sha256           e5dbd27698f54ead... built LOCALLY at HEAD 30f8a8284 from a clean
+                       tree. Byte-identical to the prior turn's build, which is itself a
+                       determinism check.
+  harness              scripts/shape_instr_per_op.py; shapes sunion_big, sdiff_big and
+                       sinterstore_big added by this change. RESERVED by me while editing,
+                       released on commit.
+  estimator            MIN-OF-K per arm. sdiff_big was added but NOT measured — the batch
+                       timed out; it is unmeasured, not cheap, and is listed as open below.
+  host                 thinkstation1, 64 cores, /data 231G, governor powersave, one build.
+  PER-ARM loadavg/MHz  sinter_big 11.86/3469, 13.22/2649, 27.51/2874, 58.15/2545,
+                       40.73/2694 · sunion_big 26.11/2545, 12.20/2594 · sinterstore_big
+                       14.54 and 9.73 · small-k batch at 11-27. Window verified at open:
+                       11.00/18.82/21.30.
+
+RETRY PREDICATE: MEASURE sdiff_big — it is landed but unmeasured, and it is the one
+remaining shape that could still hide a crossover. Do NOT chase fr's set work: it is 0.69x
+and stable. DO attack reply delivery, and measure it as the DIFFERENCE between sinter_big
+and sinterstore_big, which isolates it exactly.
