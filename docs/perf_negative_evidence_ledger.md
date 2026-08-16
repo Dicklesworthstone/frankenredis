@@ -23035,3 +23035,76 @@ EXECUTABLE IDENTITIES, full 64-hex (computed post-run, see limitation above):
 RETRY PREDICATE: quiet windows are for RATIOS NEAR A BOUNDARY, not for fr-side levers.
 Check uptime before certifying, as this row did; below ~15 the denominator is worth
 trusting to a few tenths of a percent, and above ~19 it carries ~3 pct.
+
+--------------------------------------------------------------------------------
+CERTIFIED — zadd_2pair at 0.514x / 15.7 pct dispatch: the arity-6 ZADD lever landed
+correctly, including the two-parser case this series warned about
+(frankenredis-z2ce3, frankenredis-p98mw)
+
+LOADAVG OBSERVED BY ME, both ends, per the standing rule:
+    before  11.70 / 19.88 / 25.71        after  10.70 / 17.16 / 24.16
+Falling throughout and well under the ~30 defer line. Instruction counts are load-immune
+regardless; the throughput arm remains gated out by the 15-minute average of 24, against
+the ~10 gate this ledger set two rows ago.
+
+CONVENTION: fr instructions per op / redis 7.2.4's. BELOW 1.0 = fr AHEAD.
+
+    A/A control (get_control)  0.4269 / 0.4177 / 0.4275      spread 2.3 pct
+
+    zadd_2pair, four runs   fr 3657.9 / 3676.2 / 3669.3 / 3669.9   spread 0.50 pct
+                            redis 7161.0 / 7074.6 / 7128.6 / 7169.2  spread 1.3 pct
+                            ratio 0.5108 / 0.5196 / 0.5147 / 0.5119  spread 1.7 pct
+                            dispatch 15.7 pct, ~574.5 instr/op
+
+Monotonic on both arms in all four runs. The null (2.3 pct) is comparable to the signal
+spread (1.7 pct), so 0.514x is sound to about two percent.
+
+THE WARNING THIS TESTS. When this series identified the ZADD family as stranded, it
+flagged arity 6 specifically: "Arity 6 has TWO parsers (zadd2 and zadd_flag2), so that
+entry needs the in-arm chaining idiom rather than a single parser call." A single-parser
+arm would claim arity 6, serve one of the two forms, and send the other to the GENERIC
+path — worse than leaving it stranded, per the 9hnxt rule.
+
+The floor now reads:
+
+    (4, Zadd) => ZaddBase      (5, Zadd) => ZaddFlag      (6, Zadd) => ZaddTwoPair
+
+and zadd_2pair measures 15.7 pct dispatch — inside the cheap-to-reach band (16.4-21.0
+for every other crossed route on the certified table). So the two-pair form is served,
+not declined.
+
+WHAT I CANNOT CLAIM, AND IT IS THE HALF THAT MATTERS: zadd_2pair exercises ONE of the
+two arity-6 forms. The other, whatever `zadd_flag2` parses, is NOT covered by this
+measurement. If the arm calls a single parser rather than chaining, the form I measured
+would look exactly like this and the form I did not measure would be on the generic
+path. THE MEASUREMENT IS CONSISTENT WITH CORRECT CHAINING AND DOES NOT PROVE IT. What
+would prove it is a second shape for the other arity-6 form, or reading the arm — and I
+have done neither.
+
+That is the same trap this campaign has hit repeatedly in other guises: a green reading
+on the shape you thought to test says nothing about the shape you did not. It is worth
+stating plainly here because the whole point of the original warning was that ONE of two
+forms could be silently stranded.
+
+DISPATCH LANDED AT 574.5 instr/op, above the 450-520 zone characterised from the earlier
+levers, and above every crossed route on the certified table. Consistent with the
+existing residual note rather than contradicting it — the landing cost varies with the
+command — but it is the highest of the crossed set and worth a glance if anyone
+re-examines the family.
+
+PROVENANCE:
+  ELF sha256           773d819de62d62d7f496b2a1df8e82bd645228e9e366e64c6294190ffa6d8e2d
+                       built LOCALLY at HEAD from a CLEAN tree with
+                       RCH_CARGO_WRAPPER_BYPASS=1 and env -u CARGO_TARGET_DIR,
+                       executable path from --message-format=json, COPIED to a private
+                       path and sha'd there. Contains 6ef528727 (two-pair ZADD) and
+                       47a307984 (ZRANK/ZREVRANK WITHSCORE).
+  harness              scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines in
+                       the SAME invocation.
+  host                 thinkstation1, 64 cores, /data 301G, one build this pane.
+  loadavg              11.70/19.88/25.71 before, 10.70/17.16/24.16 after.
+
+RETRY PREDICATE: do NOT re-run zadd_2pair. DO add a harness shape for the OTHER arity-6
+ZADD form before treating the family as closed — this row establishes that one of the
+two is served and deliberately claims nothing about the other. set_base remains the last
+untaken rewire on the certified table at 34.0 pct dispatch.
