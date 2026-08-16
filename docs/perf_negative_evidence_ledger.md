@@ -19215,3 +19215,70 @@ EXECUTABLE IDENTITIES, full 64-hex (computed post-run, see the limitation above)
 
 RETRY PREDICATE: do not re-run to re-confirm. DO build a NON-DYADIC incrbyfloat shape
 before quoting 0.4927x as anything but the fast window's best case.
+
+## MEASURED ATTRIBUTION (frankenredis-iqicb) — the NON-DYADIC incrbyfloat is 0.9794x: the new worst ratio, and my own 0.4927x headline was the ceiling
+
+Claim class: COMPETITIVE — fr and the vendored Redis 7.2.4 binary in the SAME invocation.
+
+Same provenance limitation as the two rows above: under callgrind the process is
+VALGRIND, so no self-reported executing-binary SHA-256 is obtainable and the hash below
+was computed post-run; what ran is an ABBA repeat, not an A/A bootstrap median CI.
+
+    run  shape                   fr instr/op   redis 7.2.4   fr/redis
+    A    incrbyfloat_nondyadic       9323.9        9566.1     0.9747x
+    B    incrbyfloat_same            4402.6        9106.2     0.4835x
+    B    incrbyfloat_same            4426.3        8958.0     0.4941x
+    A    incrbyfloat_nondyadic       9334.0        9530.5     0.9794x
+
+THIS IS NOW THE WORST MEASURED RATIO ON THE BOARD at 0.9794x worst bound — fr barely 2
+pct ahead — displacing del_1_missing's 0.7653x. It exists because I went looking for it:
+the retry predicate on the row above said "build a NON-DYADIC shape before quoting
+0.4927x as anything but the fast window's best case." It was the best case, by a lot.
+
+THE STRUCTURAL FINDING, which is worth more than the ratio. Compare how the two engines
+respond to the SAME change of input class:
+
+    fr      4426 -> 9334 instr/op   +111 pct   (its cost DOUBLES)
+    redis   8958 -> 9530 instr/op   +  6 pct   (essentially flat)
+
+Redis pays almost the same for a non-representable decimal as for an exact one — its
+strtold handles both through one path. fr has TWO paths with a 2.1x cost ratio between
+them, so fr's standing on INCRBYFLOAT is now almost entirely a function of what the
+operand looks like. On dyadic values fr is 2x ahead; on ordinary money-shaped values
+(0.1, 0.01, 3.14, 1.1 — none dyadic) it is at parity.
+
+SO THE REAL TARGET IS THE BIGNUM PATH ITSELF, not more fast-path coverage. The fast path
+is already saturated: every input it can serve, it serves. What remains is that fr's
+bignum route costs ~9334 instr/op where redis's equivalent costs ~9530 for the same work
+— they are near parity there, and the 16.02 pct `bignat_to_long_double` frame that the
+fast path removed is still fully paid on this shape.
+
+WHICH SHAPE IS REPRESENTATIVE IS NOW AN OPEN QUESTION, and neither of these two answers
+it alone. Real INCRBYFLOAT traffic is presumably dominated by money-shaped values, which
+are non-dyadic — so 0.9794x is likely closer to the truth than 0.4835x. Do not quote
+either without saying which input class it measures.
+
+A/A NULL, from the ABBA repeats in this one invocation:
+
+    fr arm      nondyadic  9323.9 -> 9334.0   +0.11%
+                dyadic     4402.6 -> 4426.3   +0.54%
+    redis arm   nondyadic  9566.1 -> 9530.5   -0.37%
+                dyadic     9106.2 -> 8958.0   -1.63%   <- the noisy arm again
+    ratio       nondyadic  0.9747 -> 0.9794   0.48%
+                dyadic     0.4835 -> 0.4941   2.20%
+
+The 2x gap between the two shapes clears both spreads by more than an order.
+
+EXECUTABLE IDENTITIES, full 64-hex (computed post-run, see limitation above):
+  candidate  `c36c3fb0a66033deff0cf03dc6a313ef647d5970cd22596aac575120a5d2a297`
+  incumbent  `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+  tree       31b22f983; NO rebuild was needed or done — no crate code changed since that
+             binary, so re-measuring would have reproduced the same numbers. Only the
+             harness gained a shape, which is Python.
+
+Campaign output: yes — replaces a best-case headline with a measured worst case and names
+the next target.
+
+RETRY PREDICATE: attack the BIGNUM path, not fast-path coverage. And when quoting any
+INCRBYFLOAT figure, state the input class — the two differ by 2x on fr and by 6 pct on
+redis, so the shape choice, not the engine, dominates the number.

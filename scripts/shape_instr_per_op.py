@@ -154,6 +154,28 @@ SHAPES = {
     "getset_same": (["SET gsk vvvvvvvvvvvvvvvv"], ["GETSET", "gsk", "vvvvvvvvvvvvvvvv"]),
     "lset_head": (["RPUSH lsk a b c d e f g h"], ["LSET", "lsk", "0", "a"]),
     "incrbyfloat_same": (["SET ibf 1.5"], ["INCRBYFLOAT", "ibf", "0"]),
+    # (frankenredis-iqicb) The NON-DYADIC counterpart, and the reason it exists is that
+    # `incrbyfloat_same` measures the exact-decimal fast path's BEST case and cannot
+    # measure anything else.
+    #
+    # That path is exact only when 5^|exp| divides the significand -- i.e. only for
+    # DYADIC rationals (halves, quarters, eighths). 1.5 is 3/2 and qualifies. Ordinary
+    # money-shaped values do NOT: 0.1 = 1/10, 0.01 = 1/100 and 3.14 = 157/50 all keep a
+    # factor of 5 in the denominator, have no exact binary value, and take the unchanged
+    # bignum path.
+    #
+    # So the pair isolates the fast path itself with everything else held: same command,
+    # same arity, same executor, same reply shape -- only the operand's representability
+    # differs. Quoting incrbyfloat_same alone reports the ceiling as though it were the
+    # average.
+    #
+    # 0.3333333333333333 is 3333333333333333 * 10^-16 and 5^16 does not divide it, so the
+    # fast path must decline. Incrementing by 0 keeps the stored value fixed across ops
+    # so every iteration is identical, matching incrbyfloat_same's construction.
+    "incrbyfloat_nondyadic": (
+        ["SET ibfnd 0.3333333333333333"],
+        ["INCRBYFLOAT", "ibfnd", "0"],
+    ),
     "set_same": ([], ["SET", "wk", "vvvvvvvvvvvvvvvv"]),
     # (frankenredis-mnzgy) The NO-OP / MISS family. PERSIST on a non-volatile key,
     # DEL and UNLINK on a key that does not exist: all three should early-return
