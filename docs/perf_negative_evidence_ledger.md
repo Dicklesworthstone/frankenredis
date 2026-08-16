@@ -20465,3 +20465,71 @@ RETRY PREDICATE: do NOT re-run for a tighter ratio — the null exceeds the spre
 use the paired dispatch shares (15.9 vs 46.4 pct on the same command) as the evidence,
 and measure any lever against fr's 3,741.1 instr/op baseline. And when comparing two
 parsers' "depth", check first whether both are actually reached by the same path.
+
+## MEASURED ATTRIBUTION (frankenredis-f2zrr) — bitcount_range is 0.9288x, the new worst; and the STOP verdict on it is refuted by arithmetic, not opinion
+
+Claim class: COMPETITIVE — fr and the vendored Redis 7.2.4 binary in the SAME invocation.
+Same provenance limitation as the rows above (valgrind hosts the target, so no
+self-reported ELF SHA; ABBA repeats, not a bootstrap CI).
+
+    run  shape            fr instr/op   redis 7.2.4   fr/redis   dispatch share
+    A    bitcount_range       3736.5        4163.4     0.8975x       46.4%
+    B    bitcount             2019.8        3217.1     0.6278x       16.0%
+    B    bitcount             2034.7        3287.7     0.6189x       15.9%
+    A    bitcount_range       3673.8        3955.5     0.9288x       46.8%
+
+NEW WORST RATIO ON THE BOARD at 0.9288x worst bound, displacing zadd_base (0.8724x) and
+incrbyfloat_nondyadic (0.7792x).
+
+THE f2zrr STOP VERDICT IS REFUTED. That bead recorded BITCOUNT range as a STOP-HERE,
+reasoning that its excess over base is "two extra bulk parses plus genuine start/end
+handling — REAL WORK, not dispatch overhead", and told readers not to spend a slot on it.
+The arithmetic says otherwise:
+
+    bitcount        2019.8 instr/op   dispatch 16.0 pct  ->  ~323 instr/op of dispatch
+    bitcount_range  3736.5 instr/op   dispatch 46.4 pct  ->  ~1734 instr/op of dispatch
+
+    excess over base            1716.7 instr/op
+    of which DISPATCH           1411.0 instr/op   =  82 pct
+    of which everything else     305.7 instr/op   =  18 pct
+
+**82 pct of the excess is dispatch.** The verdict inverted the split: it attributed the
+gap to real work and dismissed dispatch, when dispatch is four fifths of it. A 46.4 pct
+share is squarely in the 40-70 pct stranded band that this campaign uses to SELECT
+front-classification targets — the same screen that found every route already landed.
+
+I RELIED ON THAT VERDICT WITHOUT VERIFYING IT. When I closed the GETEX line on f2zrr I
+quoted the BITCOUNT STOP as settled and moved on, because it came with a mechanism story
+that sounded right. A share figure would have refuted it in one run. **A verdict with a
+plausible mechanism and no measurement is exactly as strong as a guess, and it is more
+dangerous, because the mechanism makes it quotable.**
+
+THE SAME BASE/OPTION SPLIT AS ZADD, IN THE OPPOSITE DIRECTION. On ZADD the BASE form is
+stranded (46 pct) and the option form classified (16 pct). Here the BASE form is
+classified (16.0 pct) and the RANGE form stranded (46.4 pct). In both commands one form
+of the pair was classified and its sibling left behind — so the defect is not "options are
+harder", it is that classification was done per-shape without sweeping the family.
+
+A/A NULL, from the ABBA repeats in this one invocation:
+
+    fr arm      bitcount_range  3736.5 -> 3673.8   -1.68%
+                bitcount        2019.8 -> 2034.7   +0.74%
+    redis arm   bitcount_range  4163.4 -> 3955.5   -4.99%   <- the noisy arm, eighth row
+                bitcount        3217.1 -> 3287.7   +2.19%
+    ratio       range 0.8975 -> 0.9288  3.49%  |  base 0.6278 -> 0.6189  1.42%
+
+The 46-vs-16 pct share gap is not a ratio and does not carry that spread; it is the
+reliable half of this row.
+
+EXECUTABLE IDENTITIES, full 64-hex (computed post-run, see limitation above):
+  candidate  `b526caa0537587de82334d59b6e1bf4a33f97ce2f2e7c9da9685383c5edd1ba2`
+  incumbent  `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+  tree       344f8361d; NO rebuild — no committed crate code had changed. The peer's
+             in-flight ZADD work is uncommitted and NOT in this ELF.
+
+Campaign output: yes — retires a STOP verdict that was steering people away from a
+stranded route, and names the next target.
+
+RETRY PREDICATE: front-classify BITCOUNT's range form. And SWEEP THE FAMILY rather than
+the shape — ZADD and BITCOUNT both had one form classified and its sibling stranded, so
+check every command where a base and an optioned form both have parsers.
