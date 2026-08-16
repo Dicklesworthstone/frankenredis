@@ -52,6 +52,23 @@ def main():
     chk("pcall_continues", b"redis.pcall('XADD','st','0-0','f','v'); return 'AFTER'")
     chk("pcall_err_field", b"local r=redis.pcall('SORT','l','BOGUS'); return r.err")
     chk("pcall_badsub_err", b"local r=redis.pcall('OBJECT','BADSUB'); return r.err")
+    # (frankenredis-zsbhn) ARGUMENT-type failures, which are a different family
+    # from the command errors above: they are raised by redis.call itself before
+    # any command lookup happens, and upstream gives each its own fixed wording
+    # rather than routing it through luaL_argerror. That distinction is what this
+    # block pins — if upstream ever started naming the C function (a
+    # "bad argument #N to 'redis.call'" style message), these cases would diverge
+    # here, which is exactly the signal frankenredis-zsbhn needs.
+    chk("arg_none", b"return redis.call()")
+    chk("arg_none_pcall", b"local ok,e = pcall(redis.call) return tostring(e)")
+    chk("arg_table", b"return redis.call('GET', {})")
+    chk("arg_bool", b"return redis.call('GET', true)")
+    chk("arg_nil", b"return redis.call('GET', nil)")
+    chk("arg_table_nested_pcall",
+        b"local ok,e = pcall(function() return redis.call('GET', {}) end) return tostring(e)")
+    # A NUMBER argument is accepted and formatted, so the type rejection must not
+    # over-reach: this is the negative case for the block above.
+    chk("arg_number_ok", b"redis.call('SET','n',42); return redis.call('GET','n')")
     # valid commands unaffected
     chk("valid_setget", b"redis.call('SET','k','v1'); return redis.call('GET','k')")
     chk("valid_nested_pcall", b"local ok=pcall(function() return redis.call('INCR','str') end); return tostring(ok)")
@@ -60,7 +77,7 @@ def main():
         for x in fails[:15]:
             print(f"  {x}")
         sys.exit(1)
-    print("PASS — redis.call/pcall command-error semantics byte-exact vs redis 7.2.4 "
+    print("PASS — redis.call/pcall command-error AND argument-type semantics byte-exact vs redis 7.2.4 "
           "(raise+abort+script-suffix, unknown-cmd/subcmd & arity rewrites, pcall {err=} table)")
 
 if __name__ == "__main__":
