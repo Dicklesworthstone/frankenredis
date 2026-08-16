@@ -18503,3 +18503,60 @@ RETRY PREDICATE: do not re-run GEOADD. DO re-measure lpos_count against lpos_ran
 if anyone takes the 7-point residual, and attribute it before proposing a lever —
 the last three times a share was explained without attribution the mechanism was
 wrong.
+
+## MEASURED (frankenredis-uu33c) — LPOS COUNT's residual share ATTRIBUTED: chaining is the smaller half
+
+MossySparrow measured the lever at 2.15x (0.8927x -> 0.4201/0.4109x) and flagged a
+residual: the ratio halved but the dispatch share barely moved, 32.2 -> 27.2 pct, still
+well above its own siblings (lpos_rank 20.2 pct, lpos_base 16.4 pct). They hypothesised
+the CHAINING itself — COUNT is served by a second parser attempt after RANK declines —
+and explicitly did NOT attribute it. This attributes it, and the hypothesis is right but
+is the SMALLER half.
+
+CALLGRIND SELF-COST, fr arm, 2N=4000 ops, converted to instr/op (self cost, so the
+components do not double-count):
+
+    frame                          lpos_count   lpos_rank    delta
+    parse_borrowed_plain_set_bulk     336          192        +144   <- LARGEST
+    parse_borrowed_plain_lpos_rank    105            —        +105   <- the chaining
+    key_arg3 vs hand-rolled rank      178          155         +23
+    parse total                       619          347        +272
+
++272 instr/op on a 3218 instr/op op is 8.5 pct, which accounts for the 7.0-point share
+gap within the run-to-run wobble of the share figure itself.
+
+THE CHAINING IS REAL AND COSTS 105 instr/op — the RANK parser matches the header, walks
+key and element, finds COUNT where it wanted RANK, and declines. That is 39 pct of the
+residual, exactly the mechanism proposed.
+
+BUT THE LARGER COMPONENT IS THE GENERIC PARSER, 144 instr/op. `key_arg3` is a POSITIONAL
+parser that calls `parse_borrowed_plain_set_bulk` per argument, where
+`parse_borrowed_plain_lpos_rank_packet` is hand-rolled and parses its bulks inline. The
+count path therefore pays the generic per-bulk helper on every argument. Reusing an
+existing generic parser is what made the lever cheap to write and correct by
+construction; it is also why the residual did not close.
+
+CONSEQUENCE FOR THE NEXT LEVER — and it is NOT "add a dedicated COUNT parser" on its own.
+A dedicated parser removes the 144 but leaves the 105, because the arm would still try
+RANK first. The change that removes BOTH is to DISCRIMINATE THE KEYWORD BEFORE PARSING:
+read the option token at its fixed offset once, then call exactly one parser. That is the
+OBJECT idiom (guarded classifier arms, fr-server:16236-16251) applied inside an arm
+rather than at the classifier, and it is worth up to ~272 instr/op, ~8.5 pct of the op.
+
+NOT CLAIMED: that the full 272 is recoverable. Some of the 144 is real bulk parsing that
+any parser must do; only the DIFFERENCE between generic and hand-rolled is available, and
+that split is not measured here.
+
+PROVENANCE:
+  ELF sha256 (first 16)  51708552264214d1 — reused, NO BUILD (/data 43G).
+  dumps                  per-shape, `Profiled target:` header VERIFIED as this session's
+                         binary on each — see the hygiene note on the incrbyfloat row:
+                         /data/tmp/fr_instr_* is shared across panes.
+  ratios this run        lpos_count 0.4199x / 27.2 pct, lpos_rank 0.4476x / 20.2 pct,
+                         consistent with MossySparrow's independent 0.4201/0.4109.
+
+Campaign output: yes — converts a located residual into an attributed one and names the
+change that would close it.
+
+RETRY PREDICATE: do not re-profile to re-confirm. DO re-profile if the arm's parser order
+changes, since the 105 exists only while RANK is attempted first.
