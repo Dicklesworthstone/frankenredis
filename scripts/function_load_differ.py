@@ -114,7 +114,17 @@ def main():
     print("-" * 118)
     for i, (name, body, _desc) in enumerate(CASES):
         lib = f"o500d{i}"
-        src = (SHEBANG % lib) + body
+        # (frankenredis-niu8g) Each case needs its own FUNCTION name, not just
+        # its own library name. A function name is GLOBAL across libraries — a
+        # second library registering an existing name is refused with
+        # "Function <name> already exists" — so a row whose library LOADS
+        # reserves 'f' and poisons every later row ON THAT ENGINE ONLY. That
+        # made the CONTROL_valid row diverge for a reason having nothing to do
+        # with what it measures: on fr the nil_index library still loads (o500d
+        # row 4, unfixed) and takes 'f', while on redis it is rejected and 'f'
+        # stays free. The rows must be independent for any of them to mean
+        # anything.
+        src = (SHEBANG % lib) + body.replace("'f'", f"'f{i}'")
         r_reply = classify(redis.cmd("FUNCTION", "LOAD", "REPLACE", src))
         f_reply = classify(fr.cmd("FUNCTION", "LOAD", "REPLACE", src))
         agree = (r_reply.split(":")[0] == f_reply.split(":")[0]) and (
