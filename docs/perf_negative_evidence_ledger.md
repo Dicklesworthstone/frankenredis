@@ -24465,3 +24465,101 @@ of code-generation cost is the only part still worth anything, and only as a war
 this kernel, adding arithmetic to the hot loop cost more than removing a per-byte store
 saved. Remaining qj6jn slices are unchanged (rolling `hval` 1,152/key; budget guard
 808/key), and both are inner-loop changes, so size them against that 530 before starting.
+
+--------------------------------------------------------------------------------
+ATTRIBUTED (frankenredis-z2ce3) — SORT's ~6,700 instr/op fixed tax is 42% GENERIC DISPATCH,
+fr overtakes redis at n=7, and "the only shape above parity" was an artefact of a
+three-element list
+
+Claim class: COMPETITIVE (attribution; no code change)
+
+This executes the retry predicate left two rows ago: attribute the fixed per-command cost
+with a per-function subtraction between the n=3 and n=64 dumps, because the frames that do
+NOT scale with N are the target.
+
+METHOD. For every frame, per-op cost = (Ir(2N) - Ir(N)) / N at each list size, then a
+two-point fit: slope = (p64 - p3)/61, intercept = p3 - 3*slope. A frame that does real
+per-element work has a large slope; a fixed per-command cost has slope ~0 and its whole
+cost in the intercept.
+
+    frame                                       fixed   @n=3    @n=64   per elem
+    <Runtime>::execute_frame_internal             445     445      445      0.0
+    command_table_index                           350     350      350      0.0
+    process_buffered_frames                       348     348      348     -0.0
+    <Runtime>::dispatch_with_client_context       327     327      327      0.0
+    classify_command                              304     304      304      0.0
+    parse_command_args_borrowed_into              250     250      250     -0.0
+    push_ascii_lowercase_lossy                    192     192      192      0.0
+    classify_borrowed_dispatch_floor_packet_impl  157     157      157     -0.0
+    <Runtime>::execute_dispatch                   154     154      154      0.0
+    parse_borrowed_multibulk_action               150     150      150     -0.0
+    copy_borrowed_argv_into_scratch               119     119      119     -0.0
+    -------------------------------------------------------------------------
+    generic-dispatch subtotal                   2,796  ... every slope is ZERO
+    sort_generic::<true>                          321     357    1,089     12.0
+    __memcpy_avx_unaligned_erms                   221     495    6,061     91.2
+    __memcmp_avx2_movbe                           195     192      211      0.3
+    mi_theap_malloc_aligned / mi_free             295     555    5,852     86.9
+    total intercept, ALL frames                 6,694
+
+THE HEADLINE: 2,796 of the 6,694 — 42 pct — is generic dispatch, and every one of those
+frames has slope ZERO. `SORT`/`SORT_RO` appear NOWHERE in the floor token table, so the
+command walks the whole cascade and falls out on `parse_borrowed_multibulk_action`. It then
+pays the full generic preamble: copy every argv into scratch, lowercase the command name,
+hash it in `command_table_index`, classify it. 846 instr/op of that is spent on nothing but
+deciding WHICH command this is — a question the packet answered in its first eight bytes.
+
+    For scale: a FRONT-CLASSIFIED route costs ~275 instr/op of dispatch (get_control, same
+    ELF, same window). SORT_RO pays ~3,006. The generic route is 11x the classified one,
+    and that is the whole of fr's fixed disadvantage.
+
+THE TWO ENGINES' COST MODELS, which is what the second list size bought:
+
+                per element      fixed per command
+    fr             2,062              +6,702
+    redis          3,119                -724   (i.e. ~zero)
+
+**fr's per-element SORT work is 34 pct CHEAPER than redis's.** fr loses only on the
+intercept. Solving the two lines gives the crossover:
+
+    n=3   fr  12,888   redis   8,633   1.4929x
+    n=5   fr  17,012   redis  14,871   1.1440x
+    n=7   fr  21,136   redis  21,109   1.0013x   <- PARITY
+    n=10  fr  27,322   redis  30,466   0.8968x
+    n=64  fr 138,670   redis 198,892   0.6972x
+
+    fr OVERTAKES REDIS AT SEVEN ELEMENTS. `sort_ro_alpha` has been carried for five rows
+    as "the only shape above parity" and used to justify writing a borrowed SORT parser
+    and executor from nothing. It is above parity ONLY because the harness shape sorts
+    THREE elements. There is no SORT problem. There is a generic-dispatch problem that a
+    three-element list makes 42 pct of the command.
+
+WHAT THIS RETARGETS. The lever is not SORT-specific and never was: it is the generic-route
+tax that EVERY unclassified command pays, which is the open `ozrro` front-classification
+work. Front-classifying `SORT_RO key ALPHA` would recover roughly 2,600-2,800 instr/op
+(~20 pct of this shape at n=3, and ~2 pct at n=64 where it is already invisible). That is
+worth doing, but it should be scoped as one more entry in the admission table rather than
+as a SORT rescue, and it should be justified by the number of commands still walking the
+cascade, not by this shape's 1.49x.
+
+The diffuse remainder (6,694 - 2,796 = 3,898) has no single owner: `sort_generic` setup 321,
+memcpy 221, memcmp 195, allocator 295, and a long tail of small frames. Nothing there is a
+lever.
+
+PROVENANCE:
+  ELF sha256           1b1d66cd028dd406fdde74e0dceb968b57558ffb03e9faf77bc439d77c46d87e
+  harness              scripts/shape_instr_per_op.py, N=2000/2N=4000; per-function costs
+                       via callgrind_annotate --threshold=99.9 on all four fr dumps.
+  BOTH ARMS IN ONE WINDOW, run back to back:
+    sort_ro_alpha      loadavg 18.70 / 29.49 / 34.06   mean 3071 MHz   12,887.5 instr/op
+    sort_ro_alpha_64   same window, immediately after  mean 3071 MHz  138,668.5 instr/op
+    at close           loadavg 19.45 / 26.14 / 32.26   mean 3895 MHz
+  host                 thinkstation1, 64 cores, /data 280G, governor powersave, no build.
+  instrument           callgrind Ir; frequency-immune by construction and measured at
+                       0.64 pct across a 34 pct MHz swing (row 9e195955e), so the 2884-3895
+                       MHz drift across these arms cannot reach these numbers.
+
+RETRY PREDICATE: do NOT re-attribute this. DO stop quoting sort_ro_alpha's 1.49x as a
+standing parity gap without saying "at n=3"; the honest one-line summary is "fr is ahead of
+redis on SORT ALPHA for any list of 7 or more elements". If front-classification is taken
+up, the number to beat is 3,006 instr/op of dispatch against a classified route's ~275.
