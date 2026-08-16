@@ -43458,6 +43458,175 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         );
     }
 
+    /// (frankenredis-opmo4, frankenredis-uu33c) THE PAIR-LEVEL INVARIANT:
+    ///
+    ///     for every (COMMAND, ARITY) pair the classifier CLAIMS, the parser the
+    ///     arm would reach for that arity must ACCEPT that command.
+    ///
+    /// Pair-level, not name-level. In all four known instances of this defect the
+    /// NAME was known to the machinery and the PAIR was not, so a name-level check
+    /// — "every name the parser knows appears in the classifier's list" — passes
+    /// all four. That check is what found PFADD/LPUSHX/RPUSHX and it would have
+    /// missed MGET 2-8, LPOS COUNT and ZRANGE REV.
+    ///
+    /// Over-claiming is the REGRESSION: a floor decline falls through to the
+    /// GENERIC path, not back to the cascade, so a mis-claimed shape skips both
+    /// the arm that cannot serve it AND the cascade arm that can. Under-claiming
+    /// is the missed lever that left PFADD 7% behind Redis. Hence a BICONDITIONAL.
+    ///
+    /// This must be an INVARIANT test rather than a differential one: the reply is
+    /// byte-identical whether a shape is front-classified, walked to, or dropped
+    /// on generic, so `scripts/dispatch_route_differ.py` passes every instance.
+    /// The defect is visible only in a profile, which is why four accumulated.
+    ///
+    /// TWO ASSERTIONS PER SHAPE, and the distinction between them is the whole
+    /// design (BlackCat's review of the first draft, which had only the first):
+    ///   1. classifier vs ORACLE — catches classifier and parser drifting TOGETHER
+    ///   2. classifier vs PARSER — catches the classifier drifting ALONE, which is
+    ///      what happened all four times
+    /// A test with only (1) proves the classifier matches a table a human wrote.
+    #[test]
+    fn keyed_values_classifier_claims_exactly_what_its_parsers_accept() {
+        let cfg = ParserConfig::default();
+
+        // The ORACLE. Hardcoded on purpose: deriving it from the parser source
+        // would make the test agree with whatever the parsers do, including
+        // agreeing with a bug. `values1` knows nine names; `values2..18` know only
+        // the six variadic ones — "multi-element LPUSHX/RPUSHX fall through to the
+        // generic path" is stated at the values1 parser, and PFADD sits in exactly
+        // the same position.
+        const VARIADIC: [&[u8]; 6] = [b"LPUSH", b"RPUSH", b"SADD", b"HDEL", b"SREM", b"ZREM"];
+        const SINGLE_ONLY: [&[u8]; 3] = [b"PFADD", b"LPUSHX", b"RPUSHX"];
+
+        fn packet(name: &[u8], values: usize) -> Vec<u8> {
+            let mut p = format!("*{}\r\n${}\r\n", values + 2, name.len()).into_bytes();
+            p.extend_from_slice(name);
+            p.extend_from_slice(b"\r\n$1\r\nk\r\n");
+            for i in 0..values {
+                p.extend_from_slice(format!("$2\r\nv{}\r\n", i % 10).as_bytes());
+            }
+            p
+        }
+
+        // Independent restatement of the arm's values -> parser mapping. It is a
+        // duplicate of `dispatch_floor_keyed_values_write` BY DESIGN: if the arm's
+        // mapping is edited, this must be edited to agree, which is the point of
+        // asserting against the parser rather than against the arm.
+        fn parser_accepts(values: usize, pkt: &[u8], cfg: &ParserConfig) -> bool {
+            match values {
+                1 => super::parse_borrowed_plain_keyed_values1_packet(pkt, cfg).is_some(),
+                2 => super::parse_borrowed_plain_keyed_values2_packet(pkt, cfg).is_some(),
+                3 => super::parse_borrowed_plain_keyed_values3_packet(pkt, cfg).is_some(),
+                4 => super::parse_borrowed_plain_keyed_values4_packet(pkt, cfg).is_some(),
+                5 => super::parse_borrowed_plain_keyed_values5_packet(pkt, cfg).is_some(),
+                6 => super::parse_borrowed_plain_keyed_values6_packet(pkt, cfg).is_some(),
+                7 => super::parse_borrowed_plain_keyed_values7_packet(pkt, cfg).is_some(),
+                8 => super::parse_borrowed_plain_keyed_values8_packet(pkt, cfg).is_some(),
+                9 => super::parse_borrowed_plain_keyed_values9_packet(pkt, cfg).is_some(),
+                10 => super::parse_borrowed_plain_keyed_values10_packet(pkt, cfg).is_some(),
+                11 => super::parse_borrowed_plain_keyed_values11_packet(pkt, cfg).is_some(),
+                12 => super::parse_borrowed_plain_keyed_values12_packet(pkt, cfg).is_some(),
+                13 => super::parse_borrowed_plain_keyed_values13_packet(pkt, cfg).is_some(),
+                14 => super::parse_borrowed_plain_keyed_values14_packet(pkt, cfg).is_some(),
+                15 => super::parse_borrowed_plain_keyed_values15_packet(pkt, cfg).is_some(),
+                16 => super::parse_borrowed_plain_keyed_values16_packet(pkt, cfg).is_some(),
+                17 => super::parse_borrowed_plain_keyed_values17_packet(pkt, cfg).is_some(),
+                18 => super::parse_borrowed_plain_keyed_values18_packet(pkt, cfg).is_some(),
+                _ => unreachable!("values out of the arm's range"),
+            }
+        }
+
+        for values in 1..=18usize {
+            for name in VARIADIC.iter().chain(SINGLE_ONLY.iter()) {
+                let single_only = SINGLE_ONLY.contains(name);
+                let oracle = if single_only { values == 1 } else { true };
+                let pkt = packet(name, values);
+                let shown = String::from_utf8_lossy(name).to_string();
+
+                let claimed = matches!(
+                    super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
+                    Some(super::BorrowedDispatchFloorClass::KeyedValuesWrite(n)) if n == values
+                );
+
+                // (1) vs the oracle.
+                assert_eq!(
+                    claimed, oracle,
+                    "{shown} at {values} value(s): classifier claim ({claimed}) disagrees with \
+                     the oracle ({oracle})",
+                );
+
+                // (2) vs the PARSER — the assertion that actually prevents the
+                // regression. Widening the oracle and the classifier together but
+                // not the parser passes (1) and fails here, which is the exact
+                // shape of all four instances.
+                let accepts = parser_accepts(values, &pkt, &cfg);
+                assert_eq!(
+                    claimed, accepts,
+                    "{shown} at {values} value(s): classifier claims={claimed} but the values{values} \
+                     parser accepts={accepts}. Over-claiming is a REGRESSION — the arm declines and \
+                     the packet lands on the GENERIC path, skipping the cascade arm that would have \
+                     served it.",
+                );
+            }
+        }
+    }
+
+    /// (frankenredis-opmo4) The same invariant for MGET, whose class carries the
+    /// KEY count. Every claim is checked against the parser the arm would reach —
+    /// including the `MgetN(2..=8)` range, which is where the defect actually was.
+    /// The first draft guarded the parser check on the class being `Mget`, so the
+    /// buggy range was the one range it never checked.
+    #[test]
+    fn mget_classifier_claims_exactly_what_its_parsers_accept() {
+        let cfg = ParserConfig::default();
+        fn packet(keys: usize) -> Vec<u8> {
+            let mut p = format!("*{}\r\n$4\r\nMGET\r\n", keys + 1).into_bytes();
+            for i in 0..keys {
+                p.extend_from_slice(format!("$2\r\nk{}\r\n", i % 10).as_bytes());
+            }
+            p
+        }
+        fn exact_accepts(keys: usize, pkt: &[u8], cfg: &ParserConfig) -> bool {
+            match keys {
+                2 => super::parse_borrowed_plain_mget_two_packet(pkt, cfg).is_some(),
+                3 => super::parse_borrowed_plain_mget_three_packet(pkt, cfg).is_some(),
+                4 => super::parse_borrowed_plain_mget_four_packet(pkt, cfg).is_some(),
+                5 => super::parse_borrowed_plain_mget_five_packet(pkt, cfg).is_some(),
+                6 => super::parse_borrowed_plain_mget_six_packet(pkt, cfg).is_some(),
+                7 => super::parse_borrowed_plain_mget_seven_packet(pkt, cfg).is_some(),
+                8 => super::parse_borrowed_plain_mget_eight_packet(pkt, cfg).is_some(),
+                _ => unreachable!("no exact-N MGET parser for {keys} keys"),
+            }
+        }
+
+        for keys in 1..=12usize {
+            let pkt = packet(keys);
+            let got = super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg);
+            // `mget_two` is the smallest exact-N parser, so one key has nothing at
+            // the floor and must keep walking.
+            let want = match keys {
+                1 => None,
+                2..=8 => Some(super::BorrowedDispatchFloorClass::MgetN(keys as u8)),
+                _ => Some(super::BorrowedDispatchFloorClass::Mget),
+            };
+            assert_eq!(got, want, "MGET with {keys} key(s) classified wrongly");
+
+            // Every claim honoured by the parser the arm would reach — BOTH
+            // classes, not just the multi one.
+            match got {
+                Some(super::BorrowedDispatchFloorClass::Mget) => assert!(
+                    super::parse_borrowed_plain_keys_multi_packet(&pkt, &cfg, b"MGET").is_some(),
+                    "MGET {keys} keys claimed for the multi class but keys_multi declines it"
+                ),
+                Some(super::BorrowedDispatchFloorClass::MgetN(n)) => assert!(
+                    exact_accepts(n as usize, &pkt, &cfg),
+                    "MGET {keys} keys claimed as MgetN({n}) but that exact-N parser declines it"
+                ),
+                _ => {}
+            }
+        }
+    }
+
     #[test]
     fn dispatch_floor_classifier_recognizes_only_exact_target_tokens() {
         let cfg = ParserConfig::default();
