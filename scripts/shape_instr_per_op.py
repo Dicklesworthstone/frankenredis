@@ -121,6 +121,14 @@ SHAPES = {
     # popping a real list would drain it across the 2N run and put real work into
     # the slope, hiding the dispatch cost this is meant to isolate.
     "lpop_nocount_missing": ([], ["LPOP", "nosuchlist"]),
+    # (frankenredis-dzik2) LPUSHX / RPUSHX. The keyed-values PARSER at main.rs:25694
+    # serves nine commands; the floor classifier's matches! arm lists SIX. PFADD,
+    # LPUSHX and RPUSHX are the three it omits, so all three are stranded in the
+    # cascade despite the machinery already handling them. Measured on a MISSING key:
+    # both are no-ops there (reply 0, create nothing), so the 2N run does not grow the
+    # keyspace and the slope isolates dispatch rather than real work.
+    "lpushx_missing": ([], ["LPUSHX", "nosuchlist", "v"]),
+    "rpushx_missing": ([], ["RPUSHX", "nosuchlist", "v"]),
     "zpopmin_nocount_missing": ([], ["ZPOPMIN", "nosuchzset"]),
     "getset_same": (["SET gsk vvvvvvvvvvvvvvvv"], ["GETSET", "gsk", "vvvvvvvvvvvvvvvv"]),
     "lset_head": (["RPUSH lsk a b c d e f g h"], ["LSET", "lsk", "0", "a"]),
