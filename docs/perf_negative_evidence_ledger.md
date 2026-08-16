@@ -17063,3 +17063,54 @@ the square changes, and reopen this surface if the cross-process A/A on it ever
 falls outside [0.98, 1.02] or if the GET control clears its null at a ratio above
 ~1.15, either of which would mean the route-attributable margins computed here
 are no longer separable from the general advantage they are normalised against.
+
+
+---
+
+## 2026-08-16 BlackCat: REJECT — byte-wise short copies in `lzf_decompress` are +3.4% on the path that runs them, and a NO-OP on the path they were aimed at (`frankenredis-33832`)
+
+LEVER: LZF decompression issues one `memcpy` call per token, and on structured
+listpack payloads those tokens are tiny — a counted 190 memcpy calls per hash
+RESTORE for roughly 450 decompressed bytes, ~2.4 bytes per call. Vendored lzf_d.c
+copies these byte-wise for exactly that reason. So: gate copies at 16 bytes and
+run a byte loop below it (`extend_from_slice` -> `for &b in literal { push }`,
+`extend_from_within` -> an index loop that reproduces the overlapping-run
+propagation).
+
+MEASURED, callgrind slope method (identical seed+workload at two op counts,
+differenced), harness scratchpad cg_slope.sh + restore_profile.py + cg_delta.py,
+200 keys x 40-field listpack hash, thinkstation1 / Threadripper PRO 5975WX /
+powersave / valgrind 3.25.1. Baseline ELF clean-HEAD on rch worker vmi1152480,
+candidate (this file only, overlaid) on rch worker vmi1264463:
+
+| path | baseline | candidate | delta |
+|---|---|---|---|
+| hash RESTORE | 39,173 instr/op | 39,162 instr/op | **-0.03% (noise)** |
+| DEBUG RELOAD | 88,482 instr/key | 91,533 instr/key | **+3.4% WORSE** |
+
+TWO REASONS IT DIED, and the first is the more useful one.
+
+1. **It never reached the RESTORE path at all.** The 190 memcpy calls per op come
+   out of `fr_store::decode_rdb_string`, which is fr-store's OWN LZF decoder
+   (`decode_lzf_rdb_string` -> `lzf_decompress_string`, crates/fr-store/src/lib.rs).
+   `fr_persist::lzf_decompress` — the function edited here — is a DIFFERENT
+   decompressor used by the RDB-FILE load path, and it accounted for 6.3 calls per
+   op, not 190. Proof the mechanism never fired: memcpy calls per op 220.1 ->
+   220.0 and `decode_rdb_string` self 5,662 -> 5,662, both unchanged.
+   This is [[feedback_bench_must_reach_the_function_you_changed]] again: TWO
+   crates carry an LZF decompressor with near-identical names, and the RESTORE
+   command uses the fr-store one. Grep the callers before editing either.
+
+2. **Where it did run, it lost.** On DEBUG RELOAD, which does use the fr-persist
+   decompressor, byte-wise copying is 3.4% more expensive than the memcpy call it
+   replaced: `Vec::push` pays a capacity check and a length store per byte, so a
+   3-byte token costs ~3 checked pushes against one call that memcpy's fast path
+   completes in ~11 instructions. The call overhead was already cheaper than the
+   loop at these sizes.
+
+RETRY PREDICATE: do not retry unless the copy is written into ALREADY-INITIALISED
+capacity so the per-byte capacity check disappears (e.g. resize-then-index rather
+than push), AND it is measured on `fr_store::decode_rdb_string` — the decoder the
+RESTORE path actually executes — rather than on this one. The 190-calls-per-op
+figure stands as a live target for whoever owns crates/fr-store/src/lib.rs; it is
+~2,090 instructions per RESTORE at ~11 instructions per call.
