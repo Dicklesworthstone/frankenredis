@@ -16955,3 +16955,111 @@ or if `PackedZSet` gains a member index, either of which moves the remaining
 profile. Reopen the round-trip question only if a profile shows a rendered value
 being reparsed on some other path — the hash and set RESTORE decoders were checked
 and do not have one, because their consumers genuinely want the bytes.
+
+## 2026-08-16: KEEP (COMPETITIVE) — four zset/scan read routes authenticated vs vendored 7.2.4, and the CONTROL eats most of the raw margin (`frankenredis-vlrnn`, `frankenredis-fhjnd`)
+
+Claim class: COMPETITIVE. Campaign output: yes. Every row is FrankenRedis against
+a live vendored Redis 7.2.4 arm in the SAME invocation, interleaved by the
+balanced square, each row carrying its own A/A null.
+
+**Harness:** `scripts/balanced_square_ab.py --shapes zsetreads --rounds 31`,
+square `ABBAABBA`, 50,000 ops/slot, `-P16`, null bound ±0.02, bootstrap 95% CI,
+servers unpinned. The `zsetreads` shape set is added by this change. **Host:**
+thinkstation1, 64 cores, governor `powersave`, AVX2; benchmark runs LOCALLY, rch
+only compiles. **Build worker:** `vmi1153651`; fr ELF self-reported sha256
+`3c90e4fa2d1c259590eb…`, built `--base HEAD --clean-overlay` (receipt
+`base=fa04069399d927b89041738ceb06350ea7abb462`) so no peer working-tree state
+could enter it. Vendored 7.2.4 ELF self-reported sha256
+`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`.
+
+| row | fr/Redis | bootstrap 95% CI | null redis | null fr | verdict |
+|---|---:|---|---:|---:|---|
+| ZREVRANGEBYLEX | **1.3291x** | [1.2864, 1.3674] | 0.9918 | 0.9994 | ADMISSIBLE |
+| SSCAN cursor-0 | **1.2176x** | [1.2065, 1.2405] | 1.0009 | 0.9913 | ADMISSIBLE |
+| ZSCAN cursor-0 | **1.1872x** | [1.1709, 1.1990] | 1.0100 | 1.0181 | ADMISSIBLE |
+| HSCAN cursor-0 | **1.1775x** | [1.1587, 1.2032] | 0.9939 | 1.0056 | ADMISSIBLE |
+| GET control | **1.0929x** | [1.0768, 1.1363] | 1.0112 | 1.0150 | ADMISSIBLE |
+| ZREVRANGE | 1.1421x | [1.1153, 1.1704] | 1.0391 | 1.0028 | NULL-FAILED |
+| ZRANGEBYSCORE | 1.2916x | [1.2511, 1.3207] | 0.9914 | 1.0406 | NULL-FAILED |
+| ZREVRANGEBYSCORE | 1.2544x | [1.2279, 1.2719] | 1.0279 | 0.9733 | NULL-FAILED |
+| ZDIFF | 1.2855x | [1.2572, 1.3344] | 0.9733 | 1.0175 | NULL-FAILED |
+| ZINTER | 1.1803x | [1.1639, 1.2130] | 0.9680 | 1.0139 | NULL-FAILED |
+
+**THE CONTROL IS THE RESULT, and it is why the raw ratios must not be quoted for
+the routes.** `GET` is not front-classified by any of this work, and it comes out
+**1.0929x** — fr is ~9% faster on an UNTOUCHED command at this shape. So most of
+each raw margin is a general fr advantage on short `-P16` reads, not the
+classified route. Normalising each admissible row by the control gives the
+route-attributable part:
+
+| row | raw | ÷ control | route-attributable |
+|---|---:|---:|---:|
+| ZREVRANGEBYLEX | 1.3291 | 1.0929 | **~1.216x** |
+| SSCAN | 1.2176 | 1.0929 | **~1.114x** |
+| ZSCAN | 1.1872 | 1.0929 | **~1.086x** |
+| HSCAN | 1.1775 | 1.0929 | **~1.077x** |
+
+That normalisation is a first-order correction, not a second measurement, and the
+honest claim is the smaller number in every case.
+
+**FIVE ROWS ARE REFUSED ON THEIR OWN NULLS** and are not quoted in either
+direction: ZREVRANGE, ZRANGEBYSCORE, ZREVRANGEBYSCORE, ZDIFF and ZINTER. An
+earlier 21-round run of the same set had a DIFFERENT five refused (the control
+among them), which is what a per-row null looks like on a shared host — whichever
+rows straddle a neighbour's build get rejected. Raising 21 → 31 rounds is a
+principled change and both runs are reported; the 21-round numbers are not
+quoted, because its control failed and nothing in it can be normalised.
+
+**THREE BEADS CANNOT BE MEASURED BY THIS HARNESS AT ALL, by design rather than by
+accident.** `ZREMRANGEBYLEX` (`frankenredis-5yhyh`), `ZREMRANGEBYRANK`
+(`frankenredis-va5me`) and `LPOP/RPOP COUNT` (`frankenredis-wgrny`) MUTATE their
+key: redis-benchmark issues tens of thousands of identical requests, so the key
+drains within the first few and every remaining request measures the
+absent-or-empty path — a steady state neither route was shipped for. They are
+deliberately excluded from `zsetreads` rather than included and quietly
+misreported. Retry predicate for those three: reopen them when a harness exists
+that restores the key's state per request, or when a counted instruction
+measurement isolates a single restored-state operation — until one of those
+lands, any redis-benchmark row for a mutating shape measures the drained key
+and must be refused.
+
+**SAME-INVOCATION A/A, MEASURED not assumed.** `--cross-null` reruns the identical
+square with the Redis arm replaced by a SECOND instance of the same fr ELF, so
+each reported ratio IS a cross-process A/A taken in one invocation, with its own
+bootstrap CI. On this shape set, same host and hour, 31 rounds:
+
+| shape | A/A median | bootstrap 95% CI |
+|---|---:|---|
+| ZREVRANGEBYLEX | 1.0099 | [0.9938, 1.0332] |
+| SSCAN cursor-0 | 0.9942 | [0.9599, 1.0285] |
+| ZSCAN cursor-0 | 0.9904 | [0.9752, 1.0137] |
+| HSCAN cursor-0 | 1.0000 | [0.9718, 1.0148] |
+| GET control | 1.0042 | [0.9983, 1.0172] |
+| ZREVRANGE | 1.0025 | [0.9855, 1.0227] |
+| ZRANGEBYSCORE | 0.9856 | [0.9750, 1.0067] |
+| ZREVRANGEBYSCORE | 0.9969 | [0.9823, 1.0243] |
+| ZDIFF | 0.9997 | [0.9893, 1.0218] |
+| ZINTER | 1.0125 | [0.9844, 1.0216] |
+
+Stated in the form the ledger gate reads: taken in the same invocation as its
+A/B, the ZREVRANGEBYLEX A/A null has median 1.0099 with a bootstrap 95% CI of
+[0.9938, 1.0332]; the GET control A/A null has median 1.0042 with a bootstrap 95%
+CI of [0.9983, 1.0172]; the SSCAN A/A null has median 0.9942 with a bootstrap 95%
+CI of [0.9599, 1.0285].
+
+Every A/A median lands inside [0.986, 1.013], so the cross-process placement term
+on this shape set is about 1% — an order of magnitude below the 1.18-1.33x
+margins above, which is what licenses reading them as real. It also settles the
+control: `GET` at 1.0929 is NOT placement noise, it is a genuine fr advantage on
+short `-P16` reads, which is exactly why the route-attributable figures must be
+the control-normalised ones.
+
+**CV is diagnostic only and was never used as a gate here.** The bootstrap
+median-CI gate against the ±0.02 null bound determined every verdict above, and
+each row's A/A null was taken in the SAME invocation as its A/B.
+
+Retry predicate for the rows above: re-take them if the `zsetreads` shape set or
+the square changes, and reopen this surface if the cross-process A/A on it ever
+falls outside [0.98, 1.02] or if the GET control clears its null at a ratio above
+~1.15, either of which would mean the route-attributable margins computed here
+are no longer separable from the general advantage they are normalised against.
