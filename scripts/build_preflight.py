@@ -53,6 +53,34 @@ def free_gb(path="/data"):
     return shutil.disk_usage(path).free / (1024 ** 3)
 
 
+def df_h_avail(path):
+    """What `df -h` PRINTS for available space, in GB, or None if unreadable.
+
+    Not a model of df's rounding -- it rounds up, and guessing the rule is how the
+    first version of this warning failed to fire at 58.3G while df showed 59G. Ask
+    df what it says and compare.
+    """
+    try:
+        out = subprocess.run(["df", "-h", path], capture_output=True, text=True,
+                             check=False).stdout.splitlines()
+    except FileNotFoundError:
+        return None
+    if len(out) < 2:
+        return None
+    fields = out[-1].split()
+    if len(fields) < 4:
+        return None
+    avail = fields[3]
+    try:
+        if avail.endswith("G"):
+            return float(avail[:-1])
+        if avail.endswith("T"):
+            return float(avail[:-1]) * 1024
+    except ValueError:
+        return None
+    return None
+
+
 def our_crates():
     """Crate names owned by THIS repo, read from disk so it cannot drift."""
     crates_dir = os.path.join(REPO, "crates")
@@ -177,6 +205,16 @@ def main():
     if naive != len(ours):
         print("  NOTE: a bare 'frankenredis' grep would report %d, not %d "
               "-- fr-* crates carry no project name" % (naive, len(ours)))
+
+    # `df -h` ROUNDS. At 58.3G free it prints "59G", which reads as exactly at the
+    # threshold and invites a build the budget forbids. Every stale go-ahead this
+    # session has come in at "59G" while statvfs said 58.x. Say so explicitly
+    # rather than let the two numbers quietly disagree.
+    shown = df_h_avail(args.path)
+    if shown is not None and gb < args.floor_gb <= shown:
+        print("  NOTE: `df -h` PRINTS %.0fG here, which reads as AT the %.0fG floor. "
+              "statvfs says %.1fG, which is BELOW it. df -h rounds UP; every stale "
+              "go-ahead this session arrived as \"59G\"." % (shown, args.floor_gb, gb))
 
     blocked = []
     if gb < args.floor_gb:
