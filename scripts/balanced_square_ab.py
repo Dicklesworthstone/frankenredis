@@ -352,6 +352,26 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
     #                   1.1991) but NO admissible row -- two excusable on ELF1, and
     #                   ELF2's nulls are opposite. Worst bound 1.1591. Ahead beyond
     #                   doubt; not admissible-certified.
+    # (frankenredis-u5cmn) Does the per-command active-expire cycle explain
+    # expire_nx? frankenredis-bk7pi early-exits run_active_expire_cycle when
+    # count_expiring_keys() == 0. expire_nx SEEDS a TTL, so the guard never fires
+    # and every command runs a full cycle -- while upstream runs one per event
+    # loop (whjrj: 150 fr call sites against 2 in server.c).
+    #
+    # ORDER IS THE CONTROL. seed() does not FLUSHALL, so keyspace state
+    # accumulates across shapes. The no-TTL probe MUST run first, before any shape
+    # seeds an expiry; once expire_nx_ttl has seeded, count_expiring_keys() stays
+    # non-zero for the rest of the sweep.
+    #
+    # Both probes issue the SAME command shape against the SAME dispatch route and
+    # executor. The only difference is whether a TTL exists anywhere, which is
+    # exactly the condition the guard tests. If the gap tracks TTL presence, the
+    # cycle is the cost; if both read alike, it is not and the lead dies.
+    "ttlprobe": [
+        ("expire_nx_nottl", ["SET t v"], ["EXPIRE", "nosuch", "500", "NX"]),
+        ("expire_nx_ttl", ["SET s v", "EXPIRE s 10000"], ["EXPIRE", "s", "500", "NX"]),
+        ("get_control", ["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
+    ],
     "misclaim": [
         ("zrange_ws", ["ZADD z 1 a 2 b 3 c"], ["ZRANGE", "z", "0", "-1", "WITHSCORES"]),
         ("zrange_rev", ["ZADD z 1 a 2 b 3 c"], ["ZRANGE", "z", "0", "-1", "REV"]),
