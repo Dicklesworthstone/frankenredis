@@ -25190,3 +25190,116 @@ RETRY PREDICATE: do not re-run del_1_missing or unlink_missing; both arms reprod
 0.05 pct or better except unlink AFTER at 1.4 pct. The open question this row does NOT
 answer is whether the win scales linearly with key count — that needs a multi-key DEL shape,
 which does not exist in shape_instr_per_op.py today.
+
+--------------------------------------------------------------------------------
+CORRECTION + INSTRUMENT BOUND (frankenredis-gein3, frankenredis-z2ce3) — fr's NUMERATOR is
+NOT immune on LARGE-REPLY shapes: sinter_big spreads 48 pct on identical runs. Last row's
+crossover precision is RETRACTED; its direction survives and is understated
+
+Claim class: METHOD + CORRECTION
+
+WHAT I BANKED LAST ROW, from ONE sample of each shape: sinter_big at 645,573.8 instr/op,
+1.3764x, and a SINTER parity crossover at "k = 14.2". The direction was right. The
+PRECISION WAS NOT EARNED, and this row is the measurement that shows why.
+
+FIVE RUNS OF sinter_big, SAME ELF, NOTHING CHANGED BETWEEN THEM:
+
+    run  elapsed   Ir(N)          instr/op
+     1   83.61s    634,961,472     965,368.7
+     2   78.89s    849,283,446     820,746.1
+     3   79.86s    830,410,393     760,576.5
+     4   73.95s    879,016,474     652,420.0
+     5   77.83s    707,872,547     796,967.9
+
+    spread 48.0 pct on fr's own arm, against the 0.139 pct this same instrument gives on
+    get_control.
+
+THE MECHANISM IS THE HARNESS, NOT fr — CAUGHT BEFORE I BLAMED THE ENGINE. My first
+reading was that fr's event loop is inherently variable on large replies: a 512-member
+reply is written in many chunks, driving variable writer-completion and pubsub-outbox
+drains, which is where last row's 300.9M sat. That story fits the numbers and it is
+probably WRONG, because a peer is repairing the actual cause in the harness right now,
+under this same bead. Their uncommitted work adds DRAIN WHILE SENDING, and their own
+comment states the defect:
+
+    "This loop used to be `sendall(payload)` followed by a recv loop, which never read a
+    byte until the last command had been handed to the kernel. For a shape whose reply is
+    a few bytes that is harmless — the replies fit in the socket buffers and nothing
+    accumulates. For a shape with a LARGE reply it is fatal..."
+
+So the client stops draining while it sends, the server's replies fill the socket buffers,
+and the server's write path stalls and retries a VARIABLE number of times depending on
+kernel scheduling. That is a measurement artefact of the client, and it lands in fr's Ir.
+It also explains why the effect appears only now: every shape measured before sinter_big
+had a reply small enough to fit in the buffers.
+
+    CORRECTED BOUND, stated without blaming the engine: fr's numerator is immune to load,
+    clock and placement ON SMALL-REPLY SHAPES (get_control 0.139 pct, and every
+    dispatch-sized shape this session). On shapes whose reply exceeds the socket buffers
+    the CURRENT harness does not produce a stable number at all, for a reason that is being
+    fixed. Reply size is the axis, and until that fix lands, large-reply shapes are not
+    measurable here — which is a stronger statement than "fr is variable", and a different
+    one.
+
+WHAT SURVIVES, CHECKED RATHER THAN ASSUMED. The contaminant is additive and non-negative —
+extra event-loop passes can only ADD instructions — so MIN-OF-K is the right estimator on
+both arms, as it was for redis's cron:
+
+    every observed k=512 ratio   1.391, 1.622, 1.699, 1.750, 2.058
+    min-of-5 ratio               1.3910x        mean-based would be 1.7040x
+    min-based crossover          k = 13.7       single-sample claim was 14.2
+
+    EVERY OBSERVATION HAS fr BEHIND REDIS AT k=512, so "SINTER crosses and fr loses at
+    large result cardinality" STANDS, and the single sample I banked was near the MINIMUM,
+    i.e. the most generous reading of fr. The direction is if anything UNDERSTATED. What is
+    retracted is the precision: "1.3764x" and "k = 14.2" should read "at least 1.39x" and
+    "crossover near 14, bounded roughly 12-19".
+
+THE SORT MUTATION IS UNMEASURABLE ON THIS SHAPE, which settles gein3 differently than last
+row did. I removed `survivors.sort_unstable()` (fr-store sinter_borrow_scan), built a
+matched pair from the same clean tree, and ran ABBA:
+
+    sinter_big  WITH sort   641,174.1 / 597,861.3      NOSORT   692,739.4 / 676,955.8
+    get_control WITH sort     1,292.1 /   1,299.2      NOSORT     1,330.4 /   1,331.4
+
+The NOSORT arm measured HIGHER, which is not a result — it is the 48 pct noise plus a
+2.7 pct code-layout shift that the control reports on a shape a SINTER change cannot
+touch. No verdict is available from this shape at this precision.
+
+    AND I MUST CORRECT LAST ROW ON ITS OWN TERMS: I wrote "no sort function appears
+    anywhere in the profile" and concluded the sort was too small. That was an over-read of
+    a top-12 frame listing. `sort_unstable` on `Vec<&[u8]>` INLINES; its comparisons land
+    inside `sinter_borrow_scan` (84.9M) and `__memcmp_avx2_movbe` (85.6M). ABSENCE OF A
+    NAMED FRAME IS NOT ABSENCE OF THE WORK. The sort's size remains unknown, not zero.
+    Keeping it: it is unmeasured, it is the only thing making fr's SINTER reply order
+    deterministic, and removing it is a semantic change bought with no evidence.
+
+PROVENANCE:
+  ELFs                 e71790cb8bb51210 (with sort, = HEAD) and ad2f2a5827f95809 (sort
+                       removed), built minutes apart from the same clean tree so they
+                       differ ONLY by the mutation. The mutation is REVERTED; the tree is
+                       clean and nothing was deleted.
+  harness              scripts/shape_instr_per_op.py, N=2000/2N=4000. sinter_big runs take
+                       ~80s each under callgrind, against ~3s for get_control.
+  estimator            MIN-OF-K on fr for the corrected figures; the single-pair rows above
+                       are shown as raw pairs precisely because they cannot be averaged.
+  host                 thinkstation1, 64 cores, /data 256G, governor powersave, two builds.
+  PER-ARM loadavg/MHz  ABBA arms: 24.29 / 2694 MHz, 14.15 / 2475, 13.81 / 3455, 17.14 /
+                       2803 (sinter_big); 27.60 / 3072, 26.83 / 2575, 25.96 / 2415, 24.61 /
+                       2202 (sinter_9); 23.36 / 2560, 23.36 / 2008, 22.21 / 2260, 21.15 /
+                       2217 (get_control). Five-run stability test at loadavg 28.4 falling
+                       to 10.4, mean MHz 3943 at open and 2176 at close. Window verified
+                       converged at open (28.41/24.49/23.86) with cross-core spread
+                       collapsed to 3937-3968 MHz, the tightest of the session — and the
+                       shape STILL spread 48 pct, which is the point: this is not a host
+                       problem.
+
+RETRY PREDICATE: do NOT quote sinter_big to three decimal places, and do NOT adjudicate the
+sort on it. RE-MEASURE EVERY LARGE-REPLY SHAPE ONCE THE DRAIN-WHILE-SENDING HARNESS FIX
+LANDS — this row's 48 pct is a client artefact, so the corrected numbers may move the
+crossover in either direction, and the only claim that should survive unchanged is the
+DIRECTION (every one of five observations had fr behind at k=512). Until then use MIN-OF-K
+on both arms and report a range, never a point. To settle gein3's sort the ideal shape is
+one whose reply is SMALL but whose SURVIVOR COUNT is large; that combination cannot exist,
+so the honest instrument is a direct microbench of the sort inside fr-store rather than an
+end-to-end shape.
