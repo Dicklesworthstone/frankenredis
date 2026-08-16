@@ -356,6 +356,47 @@ def dispatch_share(dump_path):
     return disp / attributed, sorted(top, reverse=True)[:5]
 
 
+# (frankenredis-8280l) The FULL generic set. Presence of ALL of these together is
+# the reliable sign that a command reaches its executor through the generic path
+# rather than the classified route.
+#
+# This replaces a discriminator I used and was wrong about. I previously tested
+# for `execute_plain_<cmd>_borrowed` in the profile and called that structural
+# rather than fitted. It is neither: those handlers EXIST in source for every
+# route I called handler-less, and are absent from the profile only because they
+# are INLINED. No symbol pattern can fix that -- a profile cannot tell you an
+# inlined function exists. The generic frames, by contrast, are real call sites
+# that show up when they are taken.
+#
+# MEASURED (frankenredis-94lp3): the discriminating frame is dispatch_with_client_context
+# ALONE. Across eight routes it is present in exactly the two on the generic path and
+# absent everywhere else, including routes paying 2686-9755 of dispatch through the
+# WALK -- so it separates mechanism from magnitude. The other three frames here appear
+# in classified routes too (HGET shows three of them, PERSIST four) and carry no
+# information; they are kept only so the printout shows what was seen.
+GENERIC_PATH_FRAMES = (
+    "execute_frame_internal",
+    "dispatch_with_client_context",
+    "command_table_index",
+)
+GENERIC_PATH_MARKERS = ("classify_command", "push_ascii_lowercase_lossy")
+
+
+def dispatch_mechanism(dump_path):
+    """Which mechanism is this route paying: the parser walk, or the generic path?
+
+    Returns (label, frames_found). The caller still needs the parse count: a route
+    can pay the walk, the generic path, both, or neither.
+    """
+    out = subprocess.run(["callgrind_annotate", "--auto=no", "--threshold=99.5", dump_path],
+                         capture_output=True, text=True, timeout=900).stdout
+    present = {f for f in GENERIC_PATH_FRAMES if f in out}
+    markers = {m for m in GENERIC_PATH_MARKERS if m in out}
+    if len(present) == len(GENERIC_PATH_FRAMES) and markers:
+        return "GENERIC PATH", sorted(present | markers)
+    return "classified route", sorted(present | markers)
+
+
 def run_once(engine: str, seeds, cmd, ops: int, workdir: str, tag: str,
              locale: str | None = None) -> int:
     out = os.path.join(workdir, "cg.%s.out" % tag)
@@ -533,6 +574,9 @@ def main() -> int:
         frac = got[0] if got else float("nan")
         print("LADDER %-18s fr %8.1f instr/op   dispatch %8.1f (%.1f%%)"
               % (shape, fr_ipo, fr_ipo * frac, 100 * frac))
+        label, frames = dispatch_mechanism(os.path.join(workdir, "cg.fr.2n.out"))
+        print("  mechanism: %s  (generic frames seen: %s)"
+              % (label, ", ".join(frames) if frames else "none"))
         print("  callgrind dumps: %s" % workdir)
         return 0
     rd_ipo, rd_lo, rd_hi = instr_per_op(REDIS, seeds, cmd, ops, workdir, "redis", locale)
