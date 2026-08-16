@@ -33,6 +33,113 @@ Redis arm and numeric ratio; a SELF-SPEEDUP needs the heading label and cannot
 mark itself as campaign output. Missing or contradictory classification exits
 **8**.
 
+## 2026-08-16 GentleStream: SELF-SPEEDUP KEEP — RESTORE stops re-walking the object it just built; hash −6.29%, set −4.70%, zset −4.22% instructions, measured as a ONE-ELF A/B (`frankenredis-3uuan`)
+
+- **Claim class: SELF-SPEEDUP. Campaign output: no.** Our code against our own
+  previous code. This is NOT a vs-Redis ratio and no competitive claim is made.
+  Shipped in `819ce67f9`; the A/B substrate and its equivalence gate in `023a95937`.
+- **The lever.** The listpack RESTORE decode arms already touch every element while
+  building the object. `restore_key_with_metadata` then called
+  `refresh_{hash,zset,set}_encoding_flag`, each of which walked the finished object
+  AGAIN only to answer `any(element_len > max_listpack_value)`. The decode arms now
+  report the longest element they saw and the refresh decides in O(1). Payload types
+  that cannot supply the bound (ziplist / zipmap / hashtable / intset) keep the scan
+  unchanged.
+- **Why one ELF rather than two binaries.** `rch exec` has no worker-pinning flag,
+  and this session's builds landed on `vmi1227854`, `vmi1149989`, `vmi1264463` and
+  `vmi1152480`. Two ELFs from two workers can differ in toolchain and code layout,
+  and layout ALONE has moved an untouched command by ~1.5% in this repo. That is
+  indistinguishable from a lever. Feature `perf-ab-restore-encoding-rescan` plus
+  `FR_PERF_AB_RESTORE_ENCODING_RESCAN=1` therefore selects the pre-lever re-walk
+  inside the SAME executable, mirroring the existing `perf-ab-cascade-bypass` idiom.
+  Production builds compile the control away to `const fn ... { false }`.
+- **Provenance.** Self-reported executing-binary SHA-256
+  `b3fc8f4faa7b98b08c6cffcb2b8aab06e24f5e673ec01b66ee2d190e75ef6353`. Obtained the
+  way this ledger requires — the SERVER reported its own `process_id` over
+  `INFO server`, and `/proc/<pid>/exe` was resolved and hashed from that. Stated
+  caveat, because it is a real gap and not worth papering over: under callgrind
+  `/proc/self/exe` is `valgrind.bin`, so the self-report was taken by running the
+  SAME file outside valgrind and confirming its self-reported hash equals the hash
+  of the exact file callgrind loaded. Both read
+  `b3fc8f4faa7b98b08c6cffcb2b8aab06e24f5e673ec01b66ee2d190e75ef6353`. Also verified
+  with `strings | grep FR_PERF_AB_RESTORE_ENCODING_RESCAN` that the FEATURE is
+  compiled in rather than merely requested, and the binary was copied to a private
+  path and hashed there because `target/release/frankenredis` is a rendezvous — two
+  different peers overwrote it mid-session. **HARNESS**: `restore_phase.py` + valgrind callgrind
+  3.25.1, instrumentation gated to the RESTORE region only (`--instr-atstart=no`
+  plus `callgrind_control -i on/off`), 800 RESTOREs of a 40-element collection per
+  arm. **RCH_WORKER**: `vmi1152480` (build). **same_host**: `thinkstation1`, AMD
+  Ryzen Threadripper PRO 5975WX, 32 physical cores / 64 threads observed, governor
+  `powersave`, ISA `avx2+bmi2+vaes` (no avx512).
+
+  | kind | ctrl (re-walk) | cand (derived) | removed/op | reduction | ratio |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | hash | 34,395,321 | 32,231,752 | 2,704 | 6.29% | 1.0671x |
+  | zset | 36,090,069 | 34,568,292 | 1,902 | 4.22% | 1.0440x |
+  | set | 22,528,864 | 21,470,941 | 1,322 | 4.70% | 1.0493x |
+
+- **A/A null and the median-CI gate.** Three repetitions of EACH arm, same ELF, same
+  host, same 800-RESTORE hash workload, arms alternating within the run and differing
+  only in the env selector. Program totals — ctrl 34,405,710 / 34,384,517 / 34,381,067,
+  cand 32,408,449 / 32,402,306 / 32,265,671.
+  **Same-invocation A/A null (ctrl vs ctrl, all six ordered pairs): median
+  `1.000000x`, bootstrap 95% median CI `[0.999334, 1.000667]`.**
+  **A/B (ctrl/cand, paired by repetition): median `1.061628x`, bootstrap 95% median
+  CI `[1.061175, 1.065562]`** — a 5.805% instruction reduction. The A/B CI does not
+  overlap the A/A CI, so the decision is **KEEP** on the bootstrap median-CI gate.
+  Bootstrap is the percentile method over 4,096 resamples with a fixed seed, so the
+  interval is reproducible. n=3 per arm is THIN and stated as such: it bounds the
+  run-to-run term, it is not a precision claim.
+  **CV is provenance only and is NEVER a gate here** — no decision in this row is
+  made on a coefficient of variation; the median CI is the only decision rule.
+- **A second null, embedded in the same measurement.** The build function NOT touched
+  by this lever must not move between arms, and does not: `hash_from_listpack_spans`
+  15,928,086 vs 15,927,996 (**0.0006%**), `zset_from_listpack_spans` 21,839,400 vs
+  21,842,628 (**0.015%**).
+- **Correction to a claim made earlier on the bead.** I first described the counts as
+  reproducing "bit-identically". That is true of the PER-FUNCTION Ir — the three
+  refresh costs come out at exactly 2,135,200 / 1,537,600 / 1,072,800 across ELFs —
+  but NOT of the whole-process total, which moves by ~0.07% run to run. Both facts
+  stand; the second is why the A/A null above is a real interval rather than a point.
+- **Cross-worker reproduction, offered against the 2026-08-15 worker-identity
+  hazard.** The control arm reproduced the pre-change ELF's three refresh costs
+  BIT-IDENTICALLY — 2,135,200 / 1,537,600 / 1,072,800 Ir for hash / zset / set —
+  even though that earlier binary was built by a DIFFERENT worker (`vmi1227854`).
+  Where frankenscipy saw timing swing 13.6x across workers, instruction counts did
+  not move at all. Callgrind counts simulated instructions, so CPU model, cache,
+  bandwidth and contention cannot reach them. **Reusable:** when the timing axis is
+  untrustworthy, Ir counting sidesteps worker identity entirely — with the standing
+  caveat that Ir is not time, this repo reads instr/op as roughly half its e2e
+  magnitude, and where stalls dominate you still need IPC.
+- **Equivalence, gated not asserted.** `any(x > T)` and `max(x) > T` are the same
+  predicate. Pinned by a differential test comparing the O(1) refresh against the
+  SCAN it replaced — the scan being the pre-lever, Redis-matching reference — across
+  6 shapes x 5 entry thresholds x 6 value thresholds, including the non-strict
+  boundary where `len == max_value` must NOT promote. Both new guards are also
+  mutation-proven: a fields-only hash bound returns `listpack` where `hashtable` is
+  correct and ONLY the new test catches it (the other 95 restore tests pass against
+  that mutant); folding score width into the zset bound flips it to `skiplist` and
+  only its own test catches that.
+- **NOT measured, deliberately.** `819ce67f9` bundled a second change — removing an
+  intermediate `Vec<&[u8]>` in `hash_from_listpack_spans` — which is present in BOTH
+  arms of this ELF. Isolating it would need a cross-ELF subtraction, exactly the
+  comparison this design exists to avoid, so it stays unquoted rather than being
+  inferred.
+- **Retry predicate.** Re-run after changes to `refresh_{hash,zset,set}_encoding_flag`
+  or their `_from_max_len` twins, `hash_from_listpack_spans`,
+  `zset_from_listpack_spans`, the `RDB_TYPE_*_LISTPACK` restore arms, the packed/hash
+  storage thresholds, or the allocator/codegen. Invalidate rather than compare if the
+  embedded null exceeds ~0.1%, if `strings` no longer shows the feature in the ELF,
+  or if the two arms are not the same ELF on the same host.
+- **Sibling cost deliberately NOT chased, banked so the next agent does not.**
+  `decode_rdb_string` reads 21.15% (hash) / 17.16% (set) / 10.93% (zset) inclusive
+  and looks like the fattest target on the path, but 157 of its memcpys per op are
+  LZF decompression that Redis pays too. It is parity work, not gap. The real
+  remaining prize is the build itself — `zset_from_listpack_spans` 60.68%,
+  `hash_from_listpack_spans` 47.23% — which is the b1o02 structural question, and a
+  prior keep-listpack attempt was already REVERTED as ~0-gain, so it needs a
+  different idea rather than a retry.
+
 ## 2026-07-29 MossyBluff (cod/MEASURE): COMPETITIVE KEEP — selective literal-prefix KEYS is 428.994x live Redis at saturated P16 (`frankenredis-oboc2`)
 
 - **Claim class: COMPETITIVE. Campaign output: yes.** The qualifying result is
