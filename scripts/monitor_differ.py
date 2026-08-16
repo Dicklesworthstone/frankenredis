@@ -34,11 +34,46 @@ import argparse
 import os
 import socket
 import subprocess
+import tempfile
+import re
 import sys
 import time
 
-REDIS_PORT = 21850
-FR_PORT = 21851
+def free_port():
+    """(frankenredis-olwad) Fixed ports 21850/21851 are shared-box hazards: anyone can
+    hold them, and the dangerous case is not a failed bind but a SUCCESSFUL one --
+    launch() only PINGs, so a squatter speaking RESP silently becomes the engine
+    under test."""
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    p = s.getsockname()[1]
+    s.close()
+    return p
+
+
+def server_pid(port):
+    """process_id from INFO server, over a raw socket so this is independent of the
+    local Conn reply shape. Returns None when the field is absent (sentinel-mode
+    INFO is not assumed to carry it), in which case the caller skips the check
+    rather than inventing a failure."""
+    s = socket.create_connection(("127.0.0.1", port), 3)
+    s.settimeout(4.0)
+    try:
+        s.sendall(b"*2\r\n$4\r\nINFO\r\n$6\r\nserver\r\n")
+        buf = b""
+        while b"process_id:" not in buf:
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+        m = re.search(rb"process_id:(\d+)", buf)
+        return int(m.group(1)) if m else None
+    finally:
+        s.close()
+
+
+REDIS_PORT = free_port()
+FR_PORT = free_port()
 
 
 def find_bin(explicit):
@@ -217,14 +252,26 @@ def lua_addr_check(port, mon):
     return extract_addr(inner_line)
 
 
-def launch(cmdline, port):
+def launch(cmdline, port, cwd=None):
     proc = subprocess.Popen(cmdline, stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL, start_new_session=True)
+                            stderr=subprocess.DEVNULL, cwd=cwd,
+                            start_new_session=True)
     for _ in range(80):
         try:
             c = Conn(port)
             if c.cmd("PING") == "PONG":
                 c.close()
+                # (frankenredis-olwad) PONG only proves SOMETHING listens. Pin
+                # the answering process to the one we launched, or a squatter
+                # becomes the engine under test.
+                pid = server_pid(port)
+                if pid is not None and pid != proc.pid:
+                    proc.kill()
+                    raise SystemExit(
+                        f"port {port} is served by pid {pid}, not the server we "
+                        f"launched (pid {proc.pid}): another process holds the "
+                        f"port, so any verdict here would describe its server, "
+                        f"not {cmdline[0]}")
                 return proc
         except OSError:
             time.sleep(0.1)
@@ -315,6 +362,11 @@ def main():
     args = ap.parse_args()
     binpath = find_bin(args.bin)
     redispath = find_redis(args.redis_bin)
+    # (frankenredis-olwad) The engines run with cwd=WORKDIR below, so a RELATIVE
+    # binary path would resolve against that temp dir and vanish -- and
+    # run_parity_differs.sh passes exactly that by default.
+    binpath = os.path.abspath(binpath) if binpath else binpath
+    redispath = os.path.abspath(redispath) if redispath else redispath
     if not binpath or not os.path.exists(binpath):
         print("FAIL: frankenredis binary not found (pass --bin PATH)", file=sys.stderr)
         sys.exit(2)
@@ -324,10 +376,17 @@ def main():
 
     failures = []
     procs = []
+    # (frankenredis-olwad) Run every engine in a private cwd. Launched bare they
+    # inherit the caller's directory -- normally the repo root, shared by a dozen
+    # agents -- and load whatever dump.rdb sits there. An fr-written dump.rdb
+    # holding a FUNCTION library redis 7.2.4 refuses made redis abort at startup,
+    # which this differ reported as "server did not start".
+    workdir = tempfile.mkdtemp(prefix="fr_monitor_differ_")
     try:
         procs.append(launch([redispath, "--port", str(REDIS_PORT), "--save", "",
-                             "--appendonly", "no"], REDIS_PORT))
-        procs.append(launch([binpath, "--port", str(FR_PORT)], FR_PORT))
+                             "--appendonly", "no"], REDIS_PORT, cwd=workdir))
+        procs.append(launch([binpath, "--port", str(FR_PORT), "--save", "",
+                             "--appendonly", "no"], FR_PORT, cwd=workdir))
         rmon = MonitorConn(REDIS_PORT)
         fmon = MonitorConn(FR_PORT)
         time.sleep(0.2)
