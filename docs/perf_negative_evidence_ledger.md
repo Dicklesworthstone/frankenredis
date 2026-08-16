@@ -16864,3 +16864,47 @@ EXPIREAT 8,787). (2) Its own borrowed ROUTE changes — a negative gap says the
 route beats generic by more than the walk costs, so a commit touching that
 command's `parse_borrowed_plain_*` parser or its `execute_plain_*` executor
 invalidates the row. Absent either, the number stands and a re-run is waste.
+
+
+---
+
+## 2026-08-16 BlackCat: REJECT x4 — the DEEPEST unclassified arms are not all prizes; GEOHASH's route beats generic by 2.6x (`frankenredis-ozrro`)
+
+Second sweep of the same bead, candidates generated STRUCTURALLY (the arms
+called in the last third of `process_buffered_frames` by source order, which is
+the order the chain is walked). Harness: CrimsonHawk's `cascade_gap.py`
+(callgrind, 2000 ops, -P16, ctl = cascade walked, byp =
+`FR_PERF_AB_CASCADE_BYPASS=1`, same ELF both arms), bypass-feature ELF built
+clean-HEAD on rch worker vmi1293453. thinkstation1 / Threadripper PRO 5975WX /
+powersave / valgrind 3.25.1. Take threshold 1,400 instructions per op.
+
+| shape | ctl | byp | gap/op | ratio | verdict |
+|---|---|---|---|---|---|
+| COMMAND COUNT | 30,746,835 | 7,194,392 | +11,776 | 4.27 | **TAKEN** (9c3728328) |
+| PUBSUB CHANNELS | 21,952,341 | 20,405,827 | +773 | 1.08 | REJECT |
+| XREAD | 21,101,826 | 21,366,968 | -133 | 0.99 | REJECT |
+| PUBSUB NUMSUB | 19,816,242 | 21,883,400 | -1,034 | 0.91 | REJECT |
+| GEOHASH | 5,127,035 | 13,286,773 | -4,080 | 0.39 | REJECT |
+
+GEOHASH is the row worth keeping: its borrowed route is **2.6x cheaper than the
+generic path** (5,127,035 walked vs 13,286,773 bypassed), the largest
+route-beats-generic margin measured on this bead. Depth alone does not predict a
+prize — GEOHASH sits deeper in the chain than several shapes that were taken.
+
+METHOD CORRECTION, recorded because it is easy to over-read this screen: a
+negative gap does NOT prove that front-classifying the shape is worthless. The
+bypass experiment measures `(walk + route)` against `(generic)`, so when the
+route and the generic path differ substantially the walk term is not isolated.
+It remains a good SCREEN — every shape taken on this bead had a large positive
+gap and every one landed at or below its own bypass floor after classification —
+but what it screens is "route advantage plus walk", not the walk alone. A future
+slice wanting the walk term alone needs a third arm: classified, walked, and
+bypassed on the same ELF.
+
+RETRY PREDICATE (per shape): do not retry unless the arm's first-occurrence line
+in `process_buffered_frames` moves by more than 500 lines from this sweep
+(PUBSUB 11,121; PUBSUB NUMSUB 11,142; XREAD 10,415; GEOHASH 10,781), or a commit
+touches that command's own `parse_borrowed_plain_*` parser or `execute_plain_*`
+executor. For GEOHASH specifically, also retry if its route is ever simplified,
+since the reject rests on that route being unusually good rather than on the walk
+being cheap.
