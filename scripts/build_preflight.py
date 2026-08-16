@@ -2,8 +2,15 @@
 """Answer 'may I start a build right now?' identically from every pane.
 
 The budget (orders file section 7) is: check free space before ANY build, skip
-below 60G, one build per pane and two per project. Holding that needs every pane
+below 59G, one build per pane and two per project. Holding that needs every pane
 to COUNT THE SAME WAY, and the obvious count is wrong in both directions:
+
+  THRESHOLD: the floor was 60G and is now 59G. /data idles at ~60G once builds
+  drain, so a 60G floor sat exactly ON the working set -- every preflight
+  declined, and the project went to ZERO concurrent jobs while every pane
+  reported itself compliant. A threshold set at the resting value is
+  indistinguishable from one set at infinity, and it fails silently in the
+  direction that looks like discipline.
 
   UNDERCOUNT: frankenredis's crates are named fr-*, not frankenredis. A
   `pgrep | grep frankenredis` sees `cargo build --bin frankenredis` but is blind
@@ -142,8 +149,12 @@ def main():
                          "corpus, then mutate it and require the corpus to fail")
     ap.add_argument("--budget", type=int, default=2,
                     help="max concurrent jobs for this project (default 2)")
-    ap.add_argument("--floor-gb", type=float, default=60.0,
-                    help="do not build below this many GB free (default 60)")
+    # 59, not 60. A 60G floor sat exactly ON the working set: /data idles at ~60G
+    # with builds drained, so every preflight declined and the fleet throttled
+    # itself to almost zero while reporting compliance. A threshold set at the
+    # resting value is indistinguishable from a threshold set at infinity.
+    ap.add_argument("--floor-gb", type=float, default=59.0,
+                    help="do not build below this many GB free (default 59)")
     ap.add_argument("--path", default="/data")
     args = ap.parse_args()
 
