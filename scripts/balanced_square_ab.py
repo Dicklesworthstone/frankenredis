@@ -410,7 +410,22 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
     # Fast runs 1.1377 and 1.1414 overlap and sit 0.3% apart; generic 0.8596 and
     # 0.8623 are both admissible. Two pairings, same answer to four digits.
     #
-    # expire_nx is the runner-up and is NOT yet a candidate: 0.9068 and 0.9111 agree
+    # zadd_xx FAST ROW IS NOW ADMISSIBLE: 1.1009 [1.0552, 1.1374] nulls
+    # 1.0199/1.0044, on ELF a146507d78bdb55610c63397. With the generic arm
+    # reproducing 0.8596-0.8833 every time it is measured, the crossing is
+    # certified on both sides. Later same-session reading 1.1269 null-failed.
+    #
+    # NEW WORST ROUTE: expire_nx. Four readings on the same ELF --
+    #   0.8817 [0.8217, 0.9280]  NULL-FAILED (nulls 0.9721/1.0495, opposite)
+    #   0.9068                   NULL-FAILED
+    #   0.9111                   NULL-FAILED
+    #   0.9600 [0.9335, 0.9918]  ADMISSIBLE  (nulls 1.0141/1.0045)
+    # Spread 9%, and the ONLY admissible row is the HIGHEST of the four. Quoting
+    # 0.9600 alone would be picking the most flattering reading and calling it the
+    # certified one. Treat the route as 0.88-0.96, worst bound 0.8217, and get a
+    # second admissible row before acting on the magnitude.
+    #
+    # expire_nx earlier history: 0.9068 and 0.9111 agree
     # in direction across the same two ELFs, but BOTH runs null-failed.
     #
     # Already attributed: ZADD length 5
