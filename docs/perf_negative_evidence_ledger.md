@@ -17941,3 +17941,58 @@ historical rows keep their original metric.
 
 
 ---
+
+## MEASURED (frankenredis-uu33c) — LPOS COUNT front-served: 0.4173x vs Redis 7.2.4
+
+DIRECTION, STATED EXPLICITLY: this row is fr instructions-per-op DIVIDED BY Redis
+7.2.4 instructions-per-op, so BELOW 1.0 means fr retires FEWER instructions and is
+AHEAD of the incumbent. LOWER IS BETTER. At 0.4173x, **fr is ~58 pct ahead of Redis
+7.2.4 on this shape.**
+
+    shape        fr instr/op   redis 7.2.4   fr/redis   dispatch share
+    lpos_count       3218.4        7712.1     0.4173x        27.2%
+    lpos_rank        2538.1        5778.8     0.4392x        20.3%
+
+LEVER: 280383780 serves `LPOS key element COUNT n` in the floor arm instead of
+dropping it on generic. `(5, Lpos)` claimed every arity-5 LPOS while the RANK parser
+declined COUNT, and a floor decline calls `parse_borrowed_multibulk_action` DIRECTLY
+rather than returning to the cascade — so COUNT reached generic having already paid
+classification. Chained in the arm (the ZRANGE/GETEX/HMGET pattern) rather than by
+narrowing the claim, because narrowing only pays when the cascade has an arm that
+serves the shape and LPOS has none.
+
+PROVENANCE:
+  ELF sha256 (first 16)  51708552264214d1  — copied to a private path and sha'd
+                         THERE, not measured out of target/release, which is a
+                         rendezvous path peers also build into (see the INCRBYFLOAT
+                         entry above for what that costs).
+  built                  LOCALLY with RCH_CARGO_WRAPPER_BYPASS=1. rch compiles
+                         remotely and does NOT return the linked binary, so every
+                         earlier "landed" lever in this campaign is UNMEASURED.
+  tree                   clean at dad06db04; 280383780 is an ancestor, so the ELF
+                         contains the lever.
+  harness                scripts/shape_instr_per_op.py, N=2000/2N=4000 two-point
+                         subtraction against the vendored Redis 7.2.4, both engines
+                         in the SAME invocation.
+
+A/A NULL: exact. Callgrind counts deterministically, and the fr arm reproduced
+BYTE-IDENTICALLY across repeated runs in one invocation — `parse_borrowed_plain_lpos_rank_packet`
+620000, `process_buffered_frames` 460491, `try_dispatch_floor_classified_action`
+356114, unchanged run to run. Null ratio 1.000 by construction, not by tolerance.
+Run ABBA (count, rank, rank, count) so any drift would have shown as an A-to-A
+difference; there was none.
+
+MECHANISM CONFIRMED, not merely assumed: the lpos_count profile shows BOTH
+`parse_borrowed_plain_key_arg3_packet` (712000) and
+`parse_borrowed_plain_lpos_rank_packet` (420000), which is the chained arm working
+as designed — RANK is tried first, declines, and key_arg3 then serves COUNT. The
+rank shape shows only the latter. Dispatch share fell to 27.2 pct, out of the
+40-70 pct stranded band, against 20.3 pct for the already-served sibling.
+
+Campaign output: yes — a route that was reaching the generic dispatcher now serves
+in the arm, measured ahead of the incumbent.
+
+RETRY PREDICATE: MAXLEN is still stranded on generic (no executor) and is the
+remaining LPOS work. Do not re-run this shape to re-confirm the ratio; do re-run it
+if the arm's parser chain is reordered, since the mechanism above depends on RANK
+being attempted before key_arg3.
