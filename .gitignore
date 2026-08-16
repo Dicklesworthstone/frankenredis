@@ -214,9 +214,14 @@ ubs_*.jsonl
 # Golden-test `.actual` outputs (diff output of failing golden comparisons)
 **/tests/golden/*.actual
 
-# Empty test stubs (agent-generated, never completed)
-crates/fr-server/tests/replica_of_replica.rs
-crates/fr-server/tests/test_replica_of_replica.rs
+# (frankenredis-8a5j3) The two fr-server test stubs that used to be ignored here
+# are now TRACKED. Ignoring a path does not stop cargo from compiling it: both
+# were listed by `cargo metadata` as integration test targets, so `cargo test -p
+# fr-server` compiled two files that did not exist in the repository. Empty they
+# were harmless; anything written into one would have aborted the whole test run
+# on a file no reviewer could see and no bisect could reach. Do not re-add .rs
+# paths under crates/*/{src,tests,benches,examples} here --
+# scripts/untracked_compiled_sources_gate.py fails on them.
 
 # Remote compilation helper per-job target shards (target-set + job-id +
 # nanos + retry counter) — created by concurrent `rch` cargo invocations.

@@ -42,16 +42,20 @@ from pathlib import Path
 
 # Untracked .rs files that already existed when this guard was written.
 #
-# Both are 1-byte placeholders that .gitignore itself labels "Empty test stubs
-# (agent-generated, never completed)". They compile to zero tests, so they cannot
-# abort a run today. They are allowlisted rather than deleted because deleting
-# another agent's files is not this guard's call. The list must only ever shrink;
-# _check_allowlist_is_not_stale enforces that, so it cannot become the new hiding
-# place -- which is how frankenlibc reached 273.
-KNOWN_UNTRACKED = {
-    "crates/fr-server/tests/replica_of_replica.rs",
-    "crates/fr-server/tests/test_replica_of_replica.rs",
-}
+# (frankenredis-8a5j3) EMPTY, and that is the finished state, not an oversight.
+# It held crates/fr-server/tests/replica_of_replica.rs and
+# test_replica_of_replica.rs, the two 1-byte stubs .gitignore labelled "Empty test
+# stubs (agent-generated, never completed)". They are now TRACKED and their
+# .gitignore lines are gone, which resolves them without deleting anything -- the
+# concern that put them on this list in the first place. cargo metadata confirmed
+# both were real integration test targets, so cargo test -p fr-server had been
+# compiling two files absent from the repository.
+#
+# _check_allowlist_is_not_stale is what forced this: it fails the moment an
+# allowlisted path stops being untracked, so the list cannot quietly describe a
+# world that no longer exists. Keep it empty. Re-adding an entry means accepting a
+# compiled source no reviewer can see, which is how frankenlibc reached 273.
+KNOWN_UNTRACKED: set[str] = set()
 
 # Directories cargo turns into build targets. The workspace root manifest is
 # virtual ([workspace] with no [package]), so a root tests/ is NOT compiled and is
