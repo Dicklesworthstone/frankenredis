@@ -112,6 +112,30 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
         # Control: GET is not front-classified by that work.
         ("get_control", ["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
     ],
+    # (frankenredis-bcva8/t7qgs/in98j/vlrnn/bj3mq/fhjnd) The zset and scan READ
+    # routes that were front-classified onto the dispatch floor and shipped on
+    # instruction counts alone. Every shape here is READ-ONLY on purpose: a
+    # mutating shape like ZREMRANGEBYLEX or LPOP COUNT drains or empties its key
+    # within the first few of redis-benchmark's requests and then measures the
+    # absent/empty path for the remaining tens of thousands, which is a steady
+    # state neither route was shipped for. Those need a harness that restores
+    # state per request and are deliberately NOT faked in here.
+    "zsetreads": [
+        ("zrevrange", ["ZADD zr 1 a 2 b 3 c 4 d 5 e"], ["ZREVRANGE", "zr", "0", "-1"]),
+        ("zrangebyscore", ["ZADD zr 1 a 2 b 3 c 4 d 5 e"],
+         ["ZRANGEBYSCORE", "zr", "2", "4"]),
+        ("zrevrangebyscore", ["ZADD zr 1 a 2 b 3 c 4 d 5 e"],
+         ["ZREVRANGEBYSCORE", "zr", "4", "2"]),
+        ("zrevrangebylex", ["ZADD zl 0 a 0 b 0 c 0 d 0 e"],
+         ["ZREVRANGEBYLEX", "zl", "[e", "[b"]),
+        ("zdiff", ["ZADD zd1 1 a 2 b 3 c", "ZADD zd2 1 b"], ["ZDIFF", "2", "zd1", "zd2"]),
+        ("zinter", ["ZADD zd1 1 a 2 b 3 c", "ZADD zd2 1 b"], ["ZINTER", "2", "zd1", "zd2"]),
+        ("sscan0", ["SADD ss m1 m2 m3 m4 m5 m6 m7 m8"], ["SSCAN", "ss", "0"]),
+        ("hscan0", ["HSET hh f1 v1 f2 v2 f3 v3 f4 v4"], ["HSCAN", "hh", "0"]),
+        ("zscan0", ["ZADD zr 1 a 2 b 3 c 4 d 5 e"], ["ZSCAN", "zr", "0"]),
+        # Control: GET is not front-classified by that work.
+        ("get_control", ["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
+    ],
     # The standing Lua target: 50 redis.call('GET') per EVAL.
     "eval": [
         ("eval_50x_get", ["SET k val"],

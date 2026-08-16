@@ -254,7 +254,9 @@ fn bench_get(c: &mut Criterion) {
     // (cc_fr) LPOP count popping ALL of a 120-element PACKED list: the batch `pop_front_n` does one
     // `buf.drain` instead of 120 per-element shifts (the old `pop_front` loop was O(count*len)).
     // iter_batched rebuilds the list each iter (untimed setup), so only the LPOP is measured.
-    let lpop_members: Vec<Vec<u8>> = (0..120u32).map(|i| format!("elem:{i:05}").into_bytes()).collect();
+    let lpop_members: Vec<Vec<u8>> = (0..120u32)
+        .map(|i| format!("elem:{i:05}").into_bytes())
+        .collect();
     g.bench_function("lpop_count_all_120_packed", |b| {
         b.iter_batched(
             || {
@@ -299,8 +301,9 @@ fn bench_get(c: &mut Criterion) {
     // (cc_fr) ZREMRANGEBYRANK removing the middle rank window [30, 90] (61 members) of a 120-member
     // PACKED zset: the batch drains the contiguous byte span in one shift instead of collecting the
     // 61 members + 61x the O(len) `remove(member)` (the old O(count*len) packed path).
-    let zrem_members: Vec<(f64, Vec<u8>)> =
-        (0..120u32).map(|i| (f64::from(i), format!("m{i:05}").into_bytes())).collect();
+    let zrem_members: Vec<(f64, Vec<u8>)> = (0..120u32)
+        .map(|i| (f64::from(i), format!("m{i:05}").into_bytes()))
+        .collect();
     g.bench_function("zremrangebyrank_middle_120_packed", |b| {
         b.iter_batched(
             || {
@@ -308,7 +311,9 @@ fn bench_get(c: &mut Criterion) {
                 s.zadd(b"z", &zrem_members, 1_000).unwrap();
                 s
             },
-            |mut s| std::hint::black_box(s.zremrangebyrank(std::hint::black_box(b"z"), 30, 90, 2_000)),
+            |mut s| {
+                std::hint::black_box(s.zremrangebyrank(std::hint::black_box(b"z"), 30, 90, 2_000))
+            },
             criterion::BatchSize::SmallInput,
         )
     });

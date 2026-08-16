@@ -63,10 +63,10 @@ fn main() {
     );
 
     let cases: &[(&str, usize, usize)] = &[
-        ("n128_w12_lp", 128, 12),  // listpack (<=128 entries, short values)
-        ("n600_w12_sk", 600, 12),  // skiplist by count
+        ("n128_w12_lp", 128, 12), // listpack (<=128 entries, short values)
+        ("n600_w12_sk", 600, 12), // skiplist by count
         ("n2000_w12_sk", 2000, 12),
-        ("n300_w80_sk", 300, 80),  // skiplist by value width, longer member copies
+        ("n300_w80_sk", 300, 80), // skiplist by value width, longer member copies
     ];
 
     for &(label, n, w) in cases {
@@ -110,7 +110,8 @@ fn main() {
         loop {
             let e = time(&orig, &mut store, reps);
             if e >= TARGET_SEGMENT_SECS || reps > 1 << 18 {
-                reps = ((reps as f64) * (TARGET_SEGMENT_SECS / e.max(1e-9)).max(1.0)).ceil() as usize;
+                reps =
+                    ((reps as f64) * (TARGET_SEGMENT_SECS / e.max(1e-9)).max(1.0)).ceil() as usize;
                 break;
             }
             reps *= 4;
@@ -120,7 +121,9 @@ fn main() {
         let mut speeds = Vec::with_capacity(ROUNDS);
         for round in 0..=ROUNDS {
             let swap = round % 2 == 1;
-            let pair = |bf: &dyn Fn(&mut Store) -> usize, cf: &dyn Fn(&mut Store) -> usize, s: &mut Store| {
+            let pair = |bf: &dyn Fn(&mut Store) -> usize,
+                        cf: &dyn Fn(&mut Store) -> usize,
+                        s: &mut Store| {
                 if swap {
                     let c = time(cf, s, reps);
                     time(bf, s, reps) / c

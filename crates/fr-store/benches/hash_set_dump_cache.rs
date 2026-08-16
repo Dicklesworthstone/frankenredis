@@ -115,8 +115,13 @@ fn main() {
         // HASH (small listpack): n fields, short field/value.
         let mut hs = Store::new();
         for i in 0..n {
-            hs.hset(b"h", format!("f{i:04}").into_bytes(), format!("v{i:04}").into_bytes(), TS)
-                .unwrap();
+            hs.hset(
+                b"h",
+                format!("f{i:04}").into_bytes(),
+                format!("v{i:04}").into_bytes(),
+                TS,
+            )
+            .unwrap();
         }
         let seed = hs.dump_key(b"h", TS).expect("hash dump populates cache");
         let re = hs.bench_dump_hash_reencode(b"h").expect("hash reencode");

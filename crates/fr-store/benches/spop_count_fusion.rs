@@ -17,7 +17,9 @@ const NULL_HI: f64 = 0.95;
 
 fn build(n: usize) -> Store {
     let mut s = Store::new();
-    let members: Vec<Vec<u8>> = (0..n).map(|i| format!("member:{i:06}").into_bytes()).collect();
+    let members: Vec<Vec<u8>> = (0..n)
+        .map(|i| format!("member:{i:06}").into_bytes())
+        .collect();
     s.sadd(b"s", &members, 1).unwrap();
     s
 }

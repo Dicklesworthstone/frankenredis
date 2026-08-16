@@ -44,8 +44,22 @@ impl Arm {
 // Realistic multibulk count lines (`*<N>\r\n`), positioned at the count digits as
 // `parse_multibulk_count` receives them (just past the `*`): common command arities.
 const CORPUS: [&[u8]; 16] = [
-    b"EXPIREAT", b"SMEMBERS", b"GETRANGE", b"SETRANGE", b"BITCOUNT", b"XPENDING", b"BITFIELD", b"FUNCTION",
-    b"RENAMENX", b"ZREVRANK", b"FLUSHALL", b"FCALL_RO", b"BZPOPMIN", b"BZPOPMAX", b"SENTINEL", b"ZZZZZZZZ",
+    b"EXPIREAT",
+    b"SMEMBERS",
+    b"GETRANGE",
+    b"SETRANGE",
+    b"BITCOUNT",
+    b"XPENDING",
+    b"BITFIELD",
+    b"FUNCTION",
+    b"RENAMENX",
+    b"ZREVRANK",
+    b"FLUSHALL",
+    b"FCALL_RO",
+    b"BZPOPMIN",
+    b"BZPOPMAX",
+    b"SENTINEL",
+    b"ZZZZZZZZ",
 ];
 
 fn classify(cmd: &[u8], arm: Arm) -> u32 {
@@ -280,10 +294,25 @@ fn correctness_gate() {
         b"SENTINEL",
     ];
     for name in NAMES {
-        assert_eq!(bench_classify8_match(name), bench_classify8_linear(name), "hit differs {name:?}");
+        assert_eq!(
+            bench_classify8_match(name),
+            bench_classify8_linear(name),
+            "hit differs {name:?}"
+        );
     }
-    for miss in [b"ZZZZZZZZ".as_slice(), b"AAAAAAAA", b"get", b"", b"BITCOUNX", b"BITCOUN"] {
-        assert_eq!(bench_classify8_match(miss), bench_classify8_linear(miss), "miss differs {miss:?}");
+    for miss in [
+        b"ZZZZZZZZ".as_slice(),
+        b"AAAAAAAA",
+        b"get",
+        b"",
+        b"BITCOUNX",
+        b"BITCOUN",
+    ] {
+        assert_eq!(
+            bench_classify8_match(miss),
+            bench_classify8_linear(miss),
+            "miss differs {miss:?}"
+        );
     }
     println!("CORRECTNESS_GATE classify8_match_matches_linear=identical");
 }

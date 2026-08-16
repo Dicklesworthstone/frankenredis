@@ -117,8 +117,14 @@ fn main() {
         "\nLPUSH LFU 2->1 (instructions:u, {} timed appends, build subtracted, median of {RUNS})",
         KEYSPACE * PASSES
     );
-    println!("  baseline workload : {base_med:>14} instr  ({:.2}/op)", base_med as f64 / ops);
-    println!("  collapsed workload: {coll_med:>14} instr  ({:.2}/op)", coll_med as f64 / ops);
+    println!(
+        "  baseline workload : {base_med:>14} instr  ({:.2}/op)",
+        base_med as f64 / ops
+    );
+    println!(
+        "  collapsed workload: {coll_med:>14} instr  ({:.2}/op)",
+        coll_med as f64 / ops
+    );
     println!(
         "  saved             : {:>14} instr  ({:.2}/op)",
         base_med.saturating_sub(coll_med),
@@ -127,6 +133,10 @@ fn main() {
     let ratio = base_med as f64 / coll_med.max(1) as f64;
     println!(
         "  ratio base/coll   : {ratio:.4}x  ({})",
-        if coll_med < base_med { "WIN (fewer retired instructions)" } else { "no reduction" }
+        if coll_med < base_med {
+            "WIN (fewer retired instructions)"
+        } else {
+            "no reduction"
+        }
     );
 }

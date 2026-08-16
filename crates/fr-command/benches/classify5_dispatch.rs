@@ -44,8 +44,8 @@ impl Arm {
 // Realistic multibulk count lines (`*<N>\r\n`), positioned at the count digits as
 // `parse_multibulk_count` receives them (just past the `*`): common command arities.
 const CORPUS: [&[u8]; 16] = [
-    b"SETNX", b"HMGET", b"HMSET", b"LPUSH", b"RPUSH", b"SCARD", b"ZCARD", b"SETEX",
-    b"GETEX", b"HSCAN", b"SSCAN", b"ZSCAN", b"BLPOP", b"BRPOP", b"PSYNC", b"ZZZZZ",
+    b"SETNX", b"HMGET", b"HMSET", b"LPUSH", b"RPUSH", b"SCARD", b"ZCARD", b"SETEX", b"GETEX",
+    b"HSCAN", b"SSCAN", b"ZSCAN", b"BLPOP", b"BRPOP", b"PSYNC", b"ZZZZZ",
 ];
 
 fn classify(cmd: &[u8], arm: Arm) -> u32 {
@@ -257,46 +257,31 @@ fn perf_instructions(executable: &Path, arm: Arm) -> Result<u64, String> {
 
 fn correctness_gate() {
     const NAMES: [&[u8]; 34] = [
-        b"SETNX",
-        b"HKEYS",
-        b"HVALS",
-        b"HMGET",
-        b"HMSET",
-        b"LPUSH",
-        b"RPUSH",
-        b"SCARD",
-        b"ZRANK",
-        b"ZCARD",
-        b"SETEX",
-        b"SDIFF",
-        b"PFADD",
-        b"LTRIM",
-        b"XREAD",
-        b"LMPOP",
-        b"ZMPOP",
-        b"XINFO",
-        b"XTRIM",
-        b"LMOVE",
-        b"SMOVE",
-        b"GETEX",
-        b"BITOP",
-        b"ZDIFF",
-        b"HSCAN",
-        b"SSCAN",
-        b"ZSCAN",
-        b"TOUCH",
-        b"RESET",
-        b"BLPOP",
-        b"BRPOP",
-        b"DEBUG",
-        b"FCALL",
-        b"PSYNC",
+        b"SETNX", b"HKEYS", b"HVALS", b"HMGET", b"HMSET", b"LPUSH", b"RPUSH", b"SCARD", b"ZRANK",
+        b"ZCARD", b"SETEX", b"SDIFF", b"PFADD", b"LTRIM", b"XREAD", b"LMPOP", b"ZMPOP", b"XINFO",
+        b"XTRIM", b"LMOVE", b"SMOVE", b"GETEX", b"BITOP", b"ZDIFF", b"HSCAN", b"SSCAN", b"ZSCAN",
+        b"TOUCH", b"RESET", b"BLPOP", b"BRPOP", b"DEBUG", b"FCALL", b"PSYNC",
     ];
     for name in NAMES {
-        assert_eq!(bench_classify5_match(name), bench_classify5_linear(name), "hit differs {name:?}");
+        assert_eq!(
+            bench_classify5_match(name),
+            bench_classify5_linear(name),
+            "hit differs {name:?}"
+        );
     }
-    for miss in [b"ZZZZZ".as_slice(), b"AAAAA", b"get", b"", b"LPUSHX", b"LPUS"] {
-        assert_eq!(bench_classify5_match(miss), bench_classify5_linear(miss), "miss differs {miss:?}");
+    for miss in [
+        b"ZZZZZ".as_slice(),
+        b"AAAAA",
+        b"get",
+        b"",
+        b"LPUSHX",
+        b"LPUS",
+    ] {
+        assert_eq!(
+            bench_classify5_match(miss),
+            bench_classify5_linear(miss),
+            "miss differs {miss:?}"
+        );
     }
     println!("CORRECTNESS_GATE classify5_match_matches_linear=identical");
 }

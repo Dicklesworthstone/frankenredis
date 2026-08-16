@@ -26,7 +26,12 @@ fn build() -> Store {
     s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
     s.lfu_decay_time = 0;
     for i in 0..KEYSPACE {
-        s.set(format!("k{i:08}").into_bytes(), b"abcdefgh".to_vec(), None, 1);
+        s.set(
+            format!("k{i:08}").into_bytes(),
+            b"abcdefgh".to_vec(),
+            None,
+            1,
+        );
     }
     s
 }

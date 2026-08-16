@@ -9394,28 +9394,6 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
-                    parse_borrowed_plain_pexpiretime_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_keymeta_borrowed(
-                        PlainKeyMetaCmd::Pexpiretime,
-                        packet.key,
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
                     parse_borrowed_plain_persist_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_persist_borrowed(packet.key, ts) {
@@ -10348,37 +10326,6 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
-                    parse_borrowed_plain_hrandfield_count_packet(unparsed, &parser_config)
-                {
-                    // (CrimsonHawk) Zero-copy `_into` fast path — stream the sampled field names
-                    // borrowed into the write buffer (member-clone elimination). Same parse/gate
-                    // decline conditions as the RespFrame path ⇒ generic fallthrough preserves
-                    // behaviour. Parser accepts only the no-WITHVALUES form (fields only).
-                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
-                    if runtime
-                        .execute_plain_hrandfield_count_borrowed_into(
-                            packet.key,
-                            packet.count,
-                            ts,
-                            client_resp3,
-                            &mut conn.write_buf,
-                        )
-                        .is_some()
-                    {
-                        Ok(BorrowedMultibulkAction::FastEncodedReply {
-                            consumed: packet.consumed,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
                     parse_borrowed_plain_xreadgroup_history_packet(unparsed, &parser_config)
                 {
                     // (CrimsonHawk) Zero-copy `_into` for single-key XREADGROUP history (explicit id) —
@@ -10522,28 +10469,6 @@ fn process_buffered_frames(
                     {
                         Ok(BorrowedMultibulkAction::FastEncodedReply {
                             consumed: packet.consumed,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_zrandmember_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_rand_member_borrowed(
-                        PlainRandMemberCmd::Zrandmember,
-                        packet.key,
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
                         })
                     } else {
                         parse_borrowed_multibulk_action(
@@ -13071,21 +12996,6 @@ fn process_buffered_frames(
                             consumed: packet.consumed,
                             response,
                         })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(consumed) =
-                    parse_borrowed_plain_command_count_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_command_count_borrowed(ts) {
-                        Ok(BorrowedMultibulkAction::FastReply { consumed, response })
                     } else {
                         parse_borrowed_multibulk_action(
                             unparsed,

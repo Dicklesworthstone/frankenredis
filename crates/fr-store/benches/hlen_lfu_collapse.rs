@@ -34,7 +34,9 @@ fn build() -> Store {
 }
 
 fn get_keys(n: usize) -> Vec<Vec<u8>> {
-    (0..n).map(|i| format!("k{:08}", i * (KEYSPACE / n.max(1))).into_bytes()).collect()
+    (0..n)
+        .map(|i| format!("k{:08}", i * (KEYSPACE / n.max(1))).into_bytes())
+        .collect()
 }
 
 #[inline(never)]
@@ -98,7 +100,8 @@ fn bench(label: &str, s: &mut Store, n: usize) {
     let mut speeds = Vec::with_capacity(ROUNDS);
     for round in 0..=ROUNDS {
         let swap = round % 2 == 1;
-        let mut pair = |bf: fn(&mut Store, &[&[u8]]) -> usize, cf: fn(&mut Store, &[&[u8]]) -> usize| {
+        let mut pair = |bf: fn(&mut Store, &[&[u8]]) -> usize,
+                        cf: fn(&mut Store, &[&[u8]]) -> usize| {
             if swap {
                 let c = time(reps, s, cf, &keys);
                 time(reps, s, bf, &keys) / c

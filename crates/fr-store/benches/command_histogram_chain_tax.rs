@@ -82,7 +82,10 @@ fn main() {
             b.bench_hashmap_get(CMD).map(|h| h.calls),
             "both arms record the same fall-through command into the HashMap"
         );
-        assert!(a.get(CMD).is_some(), "expire resolves via the HashMap, not a direct field");
+        assert!(
+            a.get(CMD).is_some(),
+            "expire resolves via the HashMap, not a direct field"
+        );
     }
 
     // Reference arm = full chain (the slower, production fall-through path).

@@ -72,7 +72,8 @@ fn main() {
         loop {
             let e = time(&unsized_, reps);
             if e >= TARGET_SEGMENT_SECS || reps > 1 << 20 {
-                reps = ((reps as f64) * (TARGET_SEGMENT_SECS / e.max(1e-9)).max(1.0)).ceil() as usize;
+                reps =
+                    ((reps as f64) * (TARGET_SEGMENT_SECS / e.max(1e-9)).max(1.0)).ceil() as usize;
                 break;
             }
             reps *= 4;

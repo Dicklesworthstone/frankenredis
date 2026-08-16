@@ -49,10 +49,16 @@ fn mixed(n: usize) -> Vec<Vec<u8>> {
 }
 
 fn sum_orig(items: &[Vec<u8>]) -> i64 {
-    items.iter().filter_map(|e| parse_listpack_integer_orig(e)).fold(0i64, i64::wrapping_add)
+    items
+        .iter()
+        .filter_map(|e| parse_listpack_integer_orig(e))
+        .fold(0i64, i64::wrapping_add)
 }
 fn sum_new(items: &[Vec<u8>]) -> i64 {
-    items.iter().filter_map(|e| parse_listpack_integer_new(e)).fold(0i64, i64::wrapping_add)
+    items
+        .iter()
+        .filter_map(|e| parse_listpack_integer_new(e))
+        .fold(0i64, i64::wrapping_add)
 }
 
 fn median(r: &mut [f64]) -> f64 {
@@ -73,12 +79,18 @@ fn main() {
         "workload", "reps", "NULL med", "null p5..p95", "null cv%", "speedup", "verdict"
     );
 
-    let cases: &[(&str, Vec<Vec<u8>>)] =
-        &[("all_ints_2048", all_ints(2048)), ("mixed_2048", mixed(2048))];
+    let cases: &[(&str, Vec<Vec<u8>>)] = &[
+        ("all_ints_2048", all_ints(2048)),
+        ("mixed_2048", mixed(2048)),
+    ];
 
     for (label, items) in cases {
         // Correctness gate.
-        assert_eq!(sum_orig(items), sum_new(items), "{label}: orig/new diverged");
+        assert_eq!(
+            sum_orig(items),
+            sum_new(items),
+            "{label}: orig/new diverged"
+        );
 
         let orig = |it: &[Vec<u8>]| sum_orig(it);
         let cand = |it: &[Vec<u8>]| sum_new(it);
@@ -95,7 +107,8 @@ fn main() {
         loop {
             let e = time(&orig, reps);
             if e >= TARGET_SEGMENT_SECS || reps > 1 << 18 {
-                reps = ((reps as f64) * (TARGET_SEGMENT_SECS / e.max(1e-9)).max(1.0)).ceil() as usize;
+                reps =
+                    ((reps as f64) * (TARGET_SEGMENT_SECS / e.max(1e-9)).max(1.0)).ceil() as usize;
                 break;
             }
             reps *= 4;

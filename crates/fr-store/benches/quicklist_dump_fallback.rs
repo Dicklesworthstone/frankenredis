@@ -34,7 +34,9 @@ fn str_items(n: usize) -> Vec<Vec<u8>> {
 }
 /// `n` integer items (redis-benchmark list members render as canonical decimals).
 fn int_items(n: usize) -> Vec<Vec<u8>> {
-    (0..n).map(|i| ((i as i64) * 977 - 13).to_string().into_bytes()).collect()
+    (0..n)
+        .map(|i| ((i as i64) * 977 - 13).to_string().into_bytes())
+        .collect()
 }
 
 fn median(r: &mut [f64]) -> f64 {
@@ -86,7 +88,8 @@ fn main() {
         loop {
             let e = time(&orig, reps);
             if e >= TARGET_SEGMENT_SECS || reps > 1 << 18 {
-                reps = ((reps as f64) * (TARGET_SEGMENT_SECS / e.max(1e-9)).max(1.0)).ceil() as usize;
+                reps =
+                    ((reps as f64) * (TARGET_SEGMENT_SECS / e.max(1e-9)).max(1.0)).ceil() as usize;
                 break;
             }
             reps *= 4;

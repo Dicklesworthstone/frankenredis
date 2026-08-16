@@ -108,7 +108,11 @@ fn main() {
     // Correctness gate: both probes make the byte-identical decision on every entry.
     for (label, entries) in &cases {
         for e in entries {
-            assert_eq!(probe_to_string(e), probe_canonical(e), "{label}: probe diverged on {e:?}");
+            assert_eq!(
+                probe_to_string(e),
+                probe_canonical(e),
+                "{label}: probe diverged on {e:?}"
+            );
         }
     }
 
@@ -133,7 +137,8 @@ fn main() {
         loop {
             let e = time(&orig, reps);
             if e >= TARGET_SEGMENT_SECS || reps > 1 << 18 {
-                reps = ((reps as f64) * (TARGET_SEGMENT_SECS / e.max(1e-9)).max(1.0)).ceil() as usize;
+                reps =
+                    ((reps as f64) * (TARGET_SEGMENT_SECS / e.max(1e-9)).max(1.0)).ceil() as usize;
                 break;
             }
             reps *= 4;

@@ -45,9 +45,22 @@ impl Arm {
 // Realistic multibulk count lines (`*<N>\r\n`), positioned at the count digits as
 // `parse_multibulk_count` receives them (just past the `*`): common command arities.
 const CORPUS: [&[u8]; 16] = [
-    b"user:1000", b"session:42", b"counter:x", b"cache:abcd", b"key:000001", b"k:evenmore",
-    b"user:2000", b"session:99", b"counter:y", b"cache:efgh", b"key:000002", b"k:another1",
-    b"user:3000", b"session:11", b"counter:z", b"cache:ijkl",
+    b"user:1000",
+    b"session:42",
+    b"counter:x",
+    b"cache:abcd",
+    b"key:000001",
+    b"k:evenmore",
+    b"user:2000",
+    b"session:99",
+    b"counter:y",
+    b"cache:efgh",
+    b"key:000002",
+    b"k:another1",
+    b"user:3000",
+    b"session:11",
+    b"counter:z",
+    b"cache:ijkl",
 ];
 
 fn cleanup(store: &mut Store, key: &[u8], arm: Arm) {

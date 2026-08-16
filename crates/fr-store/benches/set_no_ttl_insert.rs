@@ -35,10 +35,20 @@ fn build_store() -> Store {
 }
 
 fn set_orig(s: &mut Store) {
-    s.set_orig(black_box(KEY).to_vec(), black_box(VAL).to_vec(), None, 2_000);
+    s.set_orig(
+        black_box(KEY).to_vec(),
+        black_box(VAL).to_vec(),
+        None,
+        2_000,
+    );
 }
 fn set_new(s: &mut Store) {
-    s.set(black_box(KEY).to_vec(), black_box(VAL).to_vec(), None, 2_000);
+    s.set(
+        black_box(KEY).to_vec(),
+        black_box(VAL).to_vec(),
+        None,
+        2_000,
+    );
 }
 
 fn timed(f: fn(&mut Store), s: &mut Store, reps: usize) -> f64 {

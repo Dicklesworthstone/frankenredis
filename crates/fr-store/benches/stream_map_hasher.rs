@@ -47,10 +47,22 @@ impl Arm {
 // Realistic multibulk count lines (`*<N>\r\n`), positioned at the count digits as
 // `parse_multibulk_count` receives them (just past the `*`): common command arities.
 const CORPUS: [&[u8]; 16] = [
-    b"stream:events:0001", b"mystream", b"orders:eu:west", b"chat:room:42",
-    b"metrics:cpu:host01", b"log:app:backend", b"queue:jobs:high", b"s:1",
-    b"stream:events:0002", b"notifications", b"orders:us:east", b"chat:room:99",
-    b"metrics:mem:host02", b"log:app:frontend", b"queue:jobs:low", b"telemetry:v2",
+    b"stream:events:0001",
+    b"mystream",
+    b"orders:eu:west",
+    b"chat:room:42",
+    b"metrics:cpu:host01",
+    b"log:app:backend",
+    b"queue:jobs:high",
+    b"s:1",
+    b"stream:events:0002",
+    b"notifications",
+    b"orders:us:east",
+    b"chat:room:99",
+    b"metrics:mem:host02",
+    b"log:app:frontend",
+    b"queue:jobs:low",
+    b"telemetry:v2",
 ];
 
 #[inline(never)]
@@ -292,10 +304,16 @@ fn correctness_gate() {
         sip.insert(k.to_vec(), i as u64);
     }
     for key in CORPUS {
-        assert_eq!(probe_candidate_foldhash(&fold, key), probe_reference_sip(&sip, key));
+        assert_eq!(
+            probe_candidate_foldhash(&fold, key),
+            probe_reference_sip(&sip, key)
+        );
     }
     for miss in [b"absent".as_slice(), b"", b"stream:events:9999"] {
-        assert_eq!(probe_candidate_foldhash(&fold, miss), probe_reference_sip(&sip, miss));
+        assert_eq!(
+            probe_candidate_foldhash(&fold, miss),
+            probe_reference_sip(&sip, miss)
+        );
     }
     println!("CORRECTNESS_GATE stream_map_hasher_lookups_identical=identical");
 }

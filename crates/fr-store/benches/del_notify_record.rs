@@ -43,9 +43,22 @@ impl Arm {
 
 // Representative DEL key arguments (the buffer records one entry per real removal).
 const CORPUS: [&[u8]; 16] = [
-    b"user:1000", b"session:42", b"counter:x", b"cache:abcd", b"key:000001", b"k:evenmore",
-    b"user:2000", b"session:99", b"counter:y", b"cache:efgh", b"key:000002", b"k:another1",
-    b"user:3000", b"session:11", b"counter:z", b"cache:ijkl",
+    b"user:1000",
+    b"session:42",
+    b"counter:x",
+    b"cache:abcd",
+    b"key:000001",
+    b"k:evenmore",
+    b"user:2000",
+    b"session:99",
+    b"counter:y",
+    b"cache:efgh",
+    b"key:000002",
+    b"k:another1",
+    b"user:3000",
+    b"session:11",
+    b"counter:z",
+    b"cache:ijkl",
 ];
 
 fn record(store: &mut Store, key: &[u8], arm: Arm) {

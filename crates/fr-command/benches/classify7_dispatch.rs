@@ -257,42 +257,32 @@ fn perf_instructions(executable: &Path, arm: Arm) -> Result<u64, String> {
 
 fn correctness_gate() {
     const NAMES: [&[u8]; 30] = [
-        b"PEXPIRE",
-        b"PERSIST",
-        b"FLUSHDB",
-        b"HGETALL",
-        b"HEXISTS",
-        b"HINCRBY",
-        b"HSTRLEN",
-        b"ZINCRBY",
-        b"ZPOPMIN",
-        b"ZPOPMAX",
-        b"LINSERT",
-        b"PFCOUNT",
-        b"PFMERGE",
-        b"ZMSCORE",
-        b"COMMAND",
-        b"RESTORE",
-        b"GEODIST",
-        b"GEOHASH",
-        b"SLOWLOG",
-        b"EVALSHA",
-        b"EVAL_RO",
-        b"LATENCY",
-        b"PUBLISH",
-        b"WAITAOF",
-        b"CLUSTER",
-        b"SLAVEOF",
-        b"SORT_RO",
-        b"MONITOR",
-        b"MIGRATE",
-        b"PFDEBUG",
+        b"PEXPIRE", b"PERSIST", b"FLUSHDB", b"HGETALL", b"HEXISTS", b"HINCRBY", b"HSTRLEN",
+        b"ZINCRBY", b"ZPOPMIN", b"ZPOPMAX", b"LINSERT", b"PFCOUNT", b"PFMERGE", b"ZMSCORE",
+        b"COMMAND", b"RESTORE", b"GEODIST", b"GEOHASH", b"SLOWLOG", b"EVALSHA", b"EVAL_RO",
+        b"LATENCY", b"PUBLISH", b"WAITAOF", b"CLUSTER", b"SLAVEOF", b"SORT_RO", b"MONITOR",
+        b"MIGRATE", b"PFDEBUG",
     ];
     for name in NAMES {
-        assert_eq!(bench_classify7_match(name), bench_classify7_linear(name), "hit differs {name:?}");
+        assert_eq!(
+            bench_classify7_match(name),
+            bench_classify7_linear(name),
+            "hit differs {name:?}"
+        );
     }
-    for miss in [b"ZZZZZZZ".as_slice(), b"AAAAAAA", b"get", b"", b"PERSISX", b"PERSIS"] {
-        assert_eq!(bench_classify7_match(miss), bench_classify7_linear(miss), "miss differs {miss:?}");
+    for miss in [
+        b"ZZZZZZZ".as_slice(),
+        b"AAAAAAA",
+        b"get",
+        b"",
+        b"PERSISX",
+        b"PERSIS",
+    ] {
+        assert_eq!(
+            bench_classify7_match(miss),
+            bench_classify7_linear(miss),
+            "miss differs {miss:?}"
+        );
     }
     println!("CORRECTNESS_GATE classify7_match_matches_linear=identical");
 }

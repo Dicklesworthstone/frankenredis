@@ -73,9 +73,17 @@ fn main() {
         let mut a = seeded_store();
         let before = a.bench_mem_estimate_cache_len();
         a.invalidate_write_side_caches_scalar_shim(KEY);
-        assert_eq!(a.bench_mem_estimate_cache_len(), before, "scalar skip must not touch a miss");
+        assert_eq!(
+            a.bench_mem_estimate_cache_len(),
+            before,
+            "scalar skip must not touch a miss"
+        );
         a.invalidate_write_side_caches_new(KEY);
-        assert_eq!(a.bench_mem_estimate_cache_len(), before, "full invalidation miss also no-op");
+        assert_eq!(
+            a.bench_mem_estimate_cache_len(),
+            before,
+            "full invalidation miss also no-op"
+        );
     }
 
     let mut store_o = seeded_store();

@@ -42,7 +42,9 @@ fn str_blob(n: usize, w: usize) -> Vec<u8> {
 
 /// A listpack blob of `n` integer entries (both arms render decimals — a wash / guard).
 fn int_blob(n: usize) -> Vec<u8> {
-    let owned: Vec<Vec<u8>> = (0..n).map(|i| ((i as i64) * 733 - 11).to_string().into_bytes()).collect();
+    let owned: Vec<Vec<u8>> = (0..n)
+        .map(|i| ((i as i64) * 733 - 11).to_string().into_bytes())
+        .collect();
     let refs: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
     encode_listpack_strings_blob(&refs).expect("encode int listpack")
 }
@@ -79,9 +81,16 @@ fn pct(sorted: &[f64], p: f64) -> f64 {
 fn main() {
     // Correctness gate: to_bytes and into_bytes materialize byte-identical entries.
     for (label, blob) in [("str", str_blob(64, 16)), ("int", int_blob(64))] {
-        let a: Vec<Vec<u8>> = decode_listpack(&blob).unwrap().iter().map(|e| e.to_bytes()).collect();
-        let b: Vec<Vec<u8>> =
-            decode_listpack(&blob).unwrap().into_iter().map(ListpackEntry::into_bytes).collect();
+        let a: Vec<Vec<u8>> = decode_listpack(&blob)
+            .unwrap()
+            .iter()
+            .map(|e| e.to_bytes())
+            .collect();
+        let b: Vec<Vec<u8>> = decode_listpack(&blob)
+            .unwrap()
+            .into_iter()
+            .map(ListpackEntry::into_bytes)
+            .collect();
         assert_eq!(a, b, "{label}: to_bytes/into_bytes diverged");
     }
 
@@ -113,7 +122,8 @@ fn main() {
         loop {
             let e = time(&orig, reps);
             if e >= TARGET_SEGMENT_SECS || reps > 1 << 18 {
-                reps = ((reps as f64) * (TARGET_SEGMENT_SECS / e.max(1e-9)).max(1.0)).ceil() as usize;
+                reps =
+                    ((reps as f64) * (TARGET_SEGMENT_SECS / e.max(1e-9)).max(1.0)).ceil() as usize;
                 break;
             }
             reps *= 4;

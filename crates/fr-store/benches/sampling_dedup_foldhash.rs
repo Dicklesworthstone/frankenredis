@@ -109,7 +109,8 @@ fn bench(label: &str, n: usize, len: usize) {
     let mut speeds = Vec::with_capacity(ROUNDS);
     for round in 0..=ROUNDS {
         let swap = round % 2 == 1;
-        let pair = |bf: fn(usize, usize, u64) -> Vec<usize>, cf: fn(usize, usize, u64) -> Vec<usize>| {
+        let pair = |bf: fn(usize, usize, u64) -> Vec<usize>,
+                    cf: fn(usize, usize, u64) -> Vec<usize>| {
             if swap {
                 let c = time(reps, cf, n, len);
                 time(reps, bf, n, len) / c

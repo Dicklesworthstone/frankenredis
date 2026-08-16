@@ -26,7 +26,12 @@ fn build() -> Store {
     s.lfu_decay_time = 0;
     for i in 0..KEYSPACE {
         let k = format!("k{i:08}").into_bytes();
-        s.rpush(&k, &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec(), b"d".to_vec()], 1).unwrap();
+        s.rpush(
+            &k,
+            &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec(), b"d".to_vec()],
+            1,
+        )
+        .unwrap();
     }
     s
 }
@@ -40,7 +45,7 @@ fn keys() -> Vec<Vec<u8>> {
 fn workload(collapsed: bool) {
     let mut s = build();
     let ks = keys();
-    
+
     let mut acc = 0usize;
     for _ in 0..PASSES {
         for k in &ks {
@@ -117,8 +122,14 @@ fn main() {
         "\nLINSERT LFU 2->1 (instructions:u, {} timed appends, build subtracted, median of {RUNS})",
         KEYSPACE * PASSES
     );
-    println!("  baseline workload : {base_med:>14} instr  ({:.2}/op)", base_med as f64 / ops);
-    println!("  collapsed workload: {coll_med:>14} instr  ({:.2}/op)", coll_med as f64 / ops);
+    println!(
+        "  baseline workload : {base_med:>14} instr  ({:.2}/op)",
+        base_med as f64 / ops
+    );
+    println!(
+        "  collapsed workload: {coll_med:>14} instr  ({:.2}/op)",
+        coll_med as f64 / ops
+    );
     println!(
         "  saved             : {:>14} instr  ({:.2}/op)",
         base_med.saturating_sub(coll_med),
@@ -127,6 +138,10 @@ fn main() {
     let ratio = base_med as f64 / coll_med.max(1) as f64;
     println!(
         "  ratio base/coll   : {ratio:.4}x  ({})",
-        if coll_med < base_med { "WIN (fewer retired instructions)" } else { "no reduction" }
+        if coll_med < base_med {
+            "WIN (fewer retired instructions)"
+        } else {
+            "no reduction"
+        }
     );
 }

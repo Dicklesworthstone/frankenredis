@@ -34,7 +34,9 @@ fn build_base() -> Store {
 }
 
 fn refill(s: &mut Store) {
-    let members: Vec<Vec<u8>> = (0..SET_N).map(|i| format!("m{i:07}").into_bytes()).collect();
+    let members: Vec<Vec<u8>> = (0..SET_N)
+        .map(|i| format!("m{i:07}").into_bytes())
+        .collect();
     s.sadd(b"target", &members, 1).expect("sadd");
 }
 

@@ -28,7 +28,9 @@ const NULL_HI: f64 = 0.95;
 
 /// A multi-node list of small integers (each item parses as an integer).
 fn int_list(n: usize) -> Vec<Vec<u8>> {
-    (0..n).map(|i| ((i as i64) * 2_654_435 - 7).to_string().into_bytes()).collect()
+    (0..n)
+        .map(|i| ((i as i64) * 2_654_435 - 7).to_string().into_bytes())
+        .collect()
 }
 /// A multi-node list of short non-integer strings (parse fails after a few bytes).
 fn short_str_list(n: usize) -> Vec<Vec<u8>> {
@@ -36,7 +38,9 @@ fn short_str_list(n: usize) -> Vec<Vec<u8>> {
 }
 /// A multi-node list of long (>=21 byte) strings (parse rejects on `len >= 21`).
 fn long_str_list(n: usize) -> Vec<Vec<u8>> {
-    (0..n).map(|i| format!("member:{i:08}:payload:{i:08}").into_bytes()).collect()
+    (0..n)
+        .map(|i| format!("member:{i:08}:payload:{i:08}").into_bytes())
+        .collect()
 }
 
 fn median(r: &mut [f64]) -> f64 {
@@ -72,8 +76,10 @@ fn main() {
             "{label}: orig/new RDB diverged"
         );
 
-        let orig = |it: &[Vec<u8>]| encode_compact_list_quicklist2_orig(it, &th).map_or(0, |v| v.len());
-        let cand = |it: &[Vec<u8>]| encode_compact_list_quicklist2_new(it, &th).map_or(0, |v| v.len());
+        let orig =
+            |it: &[Vec<u8>]| encode_compact_list_quicklist2_orig(it, &th).map_or(0, |v| v.len());
+        let cand =
+            |it: &[Vec<u8>]| encode_compact_list_quicklist2_new(it, &th).map_or(0, |v| v.len());
         let time = |f: &dyn Fn(&[Vec<u8>]) -> usize, reps: usize| -> f64 {
             let start = Instant::now();
             let mut acc = 0usize;
@@ -87,7 +93,8 @@ fn main() {
         loop {
             let e = time(&orig, reps);
             if e >= TARGET_SEGMENT_SECS || reps > 1 << 16 {
-                reps = ((reps as f64) * (TARGET_SEGMENT_SECS / e.max(1e-9)).max(1.0)).ceil() as usize;
+                reps =
+                    ((reps as f64) * (TARGET_SEGMENT_SECS / e.max(1e-9)).max(1.0)).ceil() as usize;
                 break;
             }
             reps *= 4;

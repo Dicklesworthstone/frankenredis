@@ -266,10 +266,25 @@ fn correctness_gate() {
         b"MODULE",
     ];
     for name in NAMES {
-        assert_eq!(bench_classify6_match(name), bench_classify6_linear(name), "hit differs {name:?}");
+        assert_eq!(
+            bench_classify6_match(name),
+            bench_classify6_linear(name),
+            "hit differs {name:?}"
+        );
     }
-    for miss in [b"ZZZZZZ".as_slice(), b"AAAAAA", b"get", b"", b"CONFIGX", b"CONFI"] {
-        assert_eq!(bench_classify6_match(miss), bench_classify6_linear(miss), "miss differs {miss:?}");
+    for miss in [
+        b"ZZZZZZ".as_slice(),
+        b"AAAAAA",
+        b"get",
+        b"",
+        b"CONFIGX",
+        b"CONFI",
+    ] {
+        assert_eq!(
+            bench_classify6_match(miss),
+            bench_classify6_linear(miss),
+            "miss differs {miss:?}"
+        );
     }
     println!("CORRECTNESS_GATE classify6_match_matches_linear=identical");
 }

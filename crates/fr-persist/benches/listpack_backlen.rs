@@ -29,7 +29,10 @@ const LISTPACK_EOF: u8 = 0xFF;
 /// Append a listpack string entry (6-bit or 12-bit encoding + 1-byte backlen; all payloads
 /// here keep `data_len <= 127`).
 fn push_str_entry(out: &mut Vec<u8>, s: &[u8]) {
-    assert!(s.len() <= 63, "test payloads stay in the 6-bit-str / 1-byte-backlen range");
+    assert!(
+        s.len() <= 63,
+        "test payloads stay in the 6-bit-str / 1-byte-backlen range"
+    );
     let data_len = 1 + s.len();
     out.push(0x80 | (s.len() as u8));
     out.extend_from_slice(s);
@@ -125,7 +128,8 @@ fn main() {
         loop {
             let e = time(&orig, reps);
             if e >= TARGET_SEGMENT_SECS || reps > 1 << 18 {
-                reps = ((reps as f64) * (TARGET_SEGMENT_SECS / e.max(1e-9)).max(1.0)).ceil() as usize;
+                reps =
+                    ((reps as f64) * (TARGET_SEGMENT_SECS / e.max(1e-9)).max(1.0)).ceil() as usize;
                 break;
             }
             reps *= 4;

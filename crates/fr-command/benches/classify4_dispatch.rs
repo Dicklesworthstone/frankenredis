@@ -44,8 +44,8 @@ impl Arm {
 // Realistic multibulk count lines (`*<N>\r\n`), positioned at the count digits as
 // `parse_multibulk_count` receives them (just past the `*`): common command arities.
 const CORPUS: [&[u8]; 16] = [
-    b"INCR", b"MGET", b"MSET", b"HGET", b"HSET", b"HDEL", b"LPOP", b"RPOP",
-    b"SADD", b"ZADD", b"SCAN", b"EVAL", b"TYPE", b"KEYS", b"MOVE", b"ZZZZ",
+    b"INCR", b"MGET", b"MSET", b"HGET", b"HSET", b"HDEL", b"LPOP", b"RPOP", b"SADD", b"ZADD",
+    b"SCAN", b"EVAL", b"TYPE", b"KEYS", b"MOVE", b"ZZZZ",
 ];
 
 fn classify(cmd: &[u8], arm: Arm) -> u32 {
@@ -257,52 +257,24 @@ fn perf_instructions(executable: &Path, arm: Arm) -> Result<u64, String> {
 
 fn correctness_gate() {
     const NAMES: [&[u8]; 40] = [
-        b"PING",
-        b"ECHO",
-        b"INCR",
-        b"PTTL",
-        b"MGET",
-        b"MSET",
-        b"DECR",
-        b"TYPE",
-        b"KEYS",
-        b"HGET",
-        b"HSET",
-        b"HDEL",
-        b"HLEN",
-        b"LPOP",
-        b"RPOP",
-        b"LLEN",
-        b"LSET",
-        b"SADD",
-        b"SREM",
-        b"ZADD",
-        b"ZREM",
-        b"SPOP",
-        b"LPOS",
-        b"LREM",
-        b"QUIT",
-        b"INFO",
-        b"TIME",
-        b"WAIT",
-        b"DUMP",
-        b"SORT",
-        b"COPY",
-        b"SAVE",
-        b"SCAN",
-        b"XADD",
-        b"XLEN",
-        b"XDEL",
-        b"XACK",
-        b"EVAL",
-        b"ROLE",
-        b"MOVE",
+        b"PING", b"ECHO", b"INCR", b"PTTL", b"MGET", b"MSET", b"DECR", b"TYPE", b"KEYS", b"HGET",
+        b"HSET", b"HDEL", b"HLEN", b"LPOP", b"RPOP", b"LLEN", b"LSET", b"SADD", b"SREM", b"ZADD",
+        b"ZREM", b"SPOP", b"LPOS", b"LREM", b"QUIT", b"INFO", b"TIME", b"WAIT", b"DUMP", b"SORT",
+        b"COPY", b"SAVE", b"SCAN", b"XADD", b"XLEN", b"XDEL", b"XACK", b"EVAL", b"ROLE", b"MOVE",
     ];
     for name in NAMES {
-        assert_eq!(bench_classify4_match(name), bench_classify4_linear(name), "hit differs {name:?}");
+        assert_eq!(
+            bench_classify4_match(name),
+            bench_classify4_linear(name),
+            "hit differs {name:?}"
+        );
     }
     for miss in [b"ZZZZ".as_slice(), b"AAAA", b"get", b"", b"INCRX", b"INC"] {
-        assert_eq!(bench_classify4_match(miss), bench_classify4_linear(miss), "miss differs {miss:?}");
+        assert_eq!(
+            bench_classify4_match(miss),
+            bench_classify4_linear(miss),
+            "miss differs {miss:?}"
+        );
     }
     println!("CORRECTNESS_GATE classify4_match_matches_linear=identical");
 }

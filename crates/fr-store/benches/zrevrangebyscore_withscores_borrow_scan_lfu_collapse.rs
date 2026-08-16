@@ -12,7 +12,7 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use fr_store::{MaxmemoryPolicy, ScoreBound, ZRangeWithScoresScanEvent, Store};
+use fr_store::{MaxmemoryPolicy, ScoreBound, Store, ZRangeWithScoresScanEvent};
 
 const ROUNDS: usize = 61;
 const TARGET_SEGMENT_SECS: f64 = 0.04;
@@ -29,7 +29,11 @@ fn build() -> Store {
         let k = format!("k{i:08}").into_bytes();
         s.zadd(
             &k,
-            &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec()), (3.0, b"c".to_vec())],
+            &[
+                (1.0, b"a".to_vec()),
+                (2.0, b"b".to_vec()),
+                (3.0, b"c".to_vec()),
+            ],
             1,
         )
         .unwrap();
@@ -56,11 +60,12 @@ fn run_threeprobe(s: &mut Store, keys: &[&[u8]]) -> usize {
     let mut acc = 0usize;
     for &k in keys {
         let mut local = 0usize;
-        let _ = s.zrevrangebyscore_withscores_borrow_scan_lfu_threeprobe_bench(k, min, max, 1, |ev| {
-            if let ZRangeWithScoresScanEvent::Pair(m, _sc) = ev {
-                local = local.wrapping_add(m.len());
-            }
-        });
+        let _ =
+            s.zrevrangebyscore_withscores_borrow_scan_lfu_threeprobe_bench(k, min, max, 1, |ev| {
+                if let ZRangeWithScoresScanEvent::Pair(m, _sc) = ev {
+                    local = local.wrapping_add(m.len());
+                }
+            });
         acc = acc.wrapping_add(local);
     }
     acc

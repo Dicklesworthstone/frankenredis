@@ -12,7 +12,7 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use fr_store::{MaxmemoryPolicy, ScoreBound, ZRangeWithScoresScanEvent, Store};
+use fr_store::{MaxmemoryPolicy, ScoreBound, Store, ZRangeWithScoresScanEvent};
 
 const ROUNDS: usize = 61;
 const TARGET_SEGMENT_SECS: f64 = 0.04;
@@ -29,7 +29,11 @@ fn build() -> Store {
         let k = format!("k{i:08}").into_bytes();
         s.zadd(
             &k,
-            &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec()), (3.0, b"c".to_vec())],
+            &[
+                (1.0, b"a".to_vec()),
+                (2.0, b"b".to_vec()),
+                (3.0, b"c".to_vec()),
+            ],
             1,
         )
         .unwrap();

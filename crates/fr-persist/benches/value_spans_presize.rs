@@ -21,16 +21,22 @@ const NULL_HI: f64 = 0.95;
 
 /// A listpack of `n` short string entries (hash/set/zset members are the common compact case).
 fn listpack(n: usize) -> Vec<u8> {
-    let owned: Vec<Vec<u8>> = (0..n).map(|i| format!("member:{i:06}").into_bytes()).collect();
+    let owned: Vec<Vec<u8>> = (0..n)
+        .map(|i| format!("member:{i:06}").into_bytes())
+        .collect();
     let refs: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
     encode_listpack_strings_blob(&refs).expect("encode listpack")
 }
 
 fn grow(blob: &[u8]) -> usize {
-    bench_decode_value_spans::<false>(blob).expect("grow decode").len()
+    bench_decode_value_spans::<false>(blob)
+        .expect("grow decode")
+        .len()
 }
 fn presize(blob: &[u8]) -> usize {
-    bench_decode_value_spans::<true>(blob).expect("presize decode").len()
+    bench_decode_value_spans::<true>(blob)
+        .expect("presize decode")
+        .len()
 }
 
 fn median(r: &mut [f64]) -> f64 {
@@ -79,7 +85,8 @@ fn main() {
         loop {
             let e = time(grow, reps);
             if e >= TARGET_SEGMENT_SECS || reps > 1 << 20 {
-                reps = ((reps as f64) * (TARGET_SEGMENT_SECS / e.max(1e-9)).max(1.0)).ceil() as usize;
+                reps =
+                    ((reps as f64) * (TARGET_SEGMENT_SECS / e.max(1e-9)).max(1.0)).ceil() as usize;
                 break;
             }
             reps *= 4;

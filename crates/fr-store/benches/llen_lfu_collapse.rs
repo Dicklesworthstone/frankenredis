@@ -26,13 +26,16 @@ fn build() -> Store {
     s.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
     s.lfu_decay_time = 0;
     for i in 0..KEYSPACE {
-        s.rpush(&format!("k{i:08}").into_bytes(), &[b"a".to_vec()], 1).unwrap(); // 1-elem list (borrowed on GET)
+        s.rpush(&format!("k{i:08}").into_bytes(), &[b"a".to_vec()], 1)
+            .unwrap(); // 1-elem list (borrowed on GET)
     }
     s
 }
 
 fn get_keys(n: usize) -> Vec<Vec<u8>> {
-    (0..n).map(|i| format!("k{:08}", i * (KEYSPACE / n.max(1))).into_bytes()).collect()
+    (0..n)
+        .map(|i| format!("k{:08}", i * (KEYSPACE / n.max(1))).into_bytes())
+        .collect()
 }
 
 #[inline(never)]
@@ -96,7 +99,8 @@ fn bench(label: &str, s: &mut Store, n: usize) {
     let mut speeds = Vec::with_capacity(ROUNDS);
     for round in 0..=ROUNDS {
         let swap = round % 2 == 1;
-        let mut pair = |bf: fn(&mut Store, &[&[u8]]) -> usize, cf: fn(&mut Store, &[&[u8]]) -> usize| {
+        let mut pair = |bf: fn(&mut Store, &[&[u8]]) -> usize,
+                        cf: fn(&mut Store, &[&[u8]]) -> usize| {
             if swap {
                 let c = time(reps, s, cf, &keys);
                 time(reps, s, bf, &keys) / c

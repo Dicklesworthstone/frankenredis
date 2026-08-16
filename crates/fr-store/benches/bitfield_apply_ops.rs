@@ -30,8 +30,16 @@ fn set_value(i: usize) -> i64 {
 fn make_ops(pairs: usize) -> Vec<BitfieldOp> {
     let mut v = Vec::with_capacity(pairs * 2);
     for i in 0..pairs {
-        v.push(BitfieldOp::Set { offset: (i * 8) as u64, bits: 8, signed: false });
-        v.push(BitfieldOp::Get { offset: (i * 8) as u64, bits: 8, signed: false });
+        v.push(BitfieldOp::Set {
+            offset: (i * 8) as u64,
+            bits: 8,
+            signed: false,
+        });
+        v.push(BitfieldOp::Get {
+            offset: (i * 8) as u64,
+            bits: 8,
+            signed: false,
+        });
     }
     v
 }
@@ -57,7 +65,10 @@ fn fused(store: &mut Store, ops: &[BitfieldOp]) -> u64 {
     let r = store
         .bitfield_apply_ops(b"bf", ops, TS, |idx, _cur| Some(set_value(idx / 2)))
         .unwrap();
-    r.into_iter().flatten().map(|x| x as u64).fold(0, u64::wrapping_add)
+    r.into_iter()
+        .flatten()
+        .map(|x| x as u64)
+        .fold(0, u64::wrapping_add)
 }
 
 fn median(r: &mut [f64]) -> f64 {
@@ -113,7 +124,8 @@ fn main() {
         loop {
             let e = time(&orig, &mut store, reps);
             if e >= TARGET_SEGMENT_SECS || reps > 1 << 18 {
-                reps = ((reps as f64) * (TARGET_SEGMENT_SECS / e.max(1e-9)).max(1.0)).ceil() as usize;
+                reps =
+                    ((reps as f64) * (TARGET_SEGMENT_SECS / e.max(1e-9)).max(1.0)).ceil() as usize;
                 break;
             }
             reps *= 4;
@@ -123,15 +135,16 @@ fn main() {
         let mut speeds = Vec::with_capacity(ROUNDS);
         for round in 0..=ROUNDS {
             let swap = round % 2 == 1;
-            let pair = |bf: &dyn Fn(&mut Store) -> u64, cf: &dyn Fn(&mut Store) -> u64, s: &mut Store| {
-                if swap {
-                    let c = time(cf, s, reps);
-                    time(bf, s, reps) / c
-                } else {
-                    let bt = time(bf, s, reps);
-                    bt / time(cf, s, reps)
-                }
-            };
+            let pair =
+                |bf: &dyn Fn(&mut Store) -> u64, cf: &dyn Fn(&mut Store) -> u64, s: &mut Store| {
+                    if swap {
+                        let c = time(cf, s, reps);
+                        time(bf, s, reps) / c
+                    } else {
+                        let bt = time(bf, s, reps);
+                        bt / time(cf, s, reps)
+                    }
+                };
             let nn = pair(&orig, &orig, &mut store);
             let sp = pair(&orig, &cand, &mut store);
             if round == 0 {

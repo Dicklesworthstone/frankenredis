@@ -307,10 +307,16 @@ fn correctness_gate() {
     }
     for key in CORPUS {
         let ks = std::str::from_utf8(key).unwrap();
-        assert_eq!(probe_candidate_foldhash(&fold, ks), probe_reference_sip(&sip, ks));
+        assert_eq!(
+            probe_candidate_foldhash(&fold, ks),
+            probe_reference_sip(&sip, ks)
+        );
     }
     for miss in ["absent", "", "0000000000000000000000000000000000000000"] {
-        assert_eq!(probe_candidate_foldhash(&fold, miss), probe_reference_sip(&sip, miss));
+        assert_eq!(
+            probe_candidate_foldhash(&fold, miss),
+            probe_reference_sip(&sip, miss)
+        );
     }
     println!("CORRECTNESS_GATE script_cache_hasher_lookups_identical=identical");
 }
