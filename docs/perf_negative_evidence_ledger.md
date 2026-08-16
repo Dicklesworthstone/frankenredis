@@ -17689,3 +17689,61 @@ built ELFs; require the memcmp call count to move.
 
 
 ---
+## REJECT — RESTORE hash: fuse the pair-materialisation walk with the tier/byte-budget walk (frankenredis-33832)
+
+Landed as 86b011c76, measured, and REVERTED in 0aa80140a the same turn.
+
+PREMISE, which was correct as far as it went: `hash_from_listpack_spans` walks every
+(field, value) pair to materialise the borrowed slices and track `max_element_len`.
+`HashFieldMap::from_unique_pairs_borrowed` then walked all of them AGAIN, reading the
+same `field.len()` / `value.len()` purely to recompute the tier decision (`to_hash`)
+and the capacity budget (`bytes`). Its self-cost was 14,049,200 over 6,000 ops on a
+100-field hash, so the second walk looked like free money.
+
+CHANGE: the first walk produces `to_hash` and `bytes`; a new
+`from_unique_pairs_borrowed_presized` accepts them. The tier rule was centralised in
+`pair_forces_hash_tier()` / `PACKED_HASH_MAX_ENTRIES` so the two sites could not drift.
+
+MEASURED, two ELFs differing only by this commit, BOTH built on rch worker vmi1227854
+(`--base <sha> --clean-overlay`, release + debug=1), benchmarked locally on
+thinkstation1 with the callgrind slope harness (2,000 vs 6,000 RESTOREs differenced),
+200 hash keys:
+
+    m=40    34,718 -> 34,722    +0.01%
+    m=100   70,271 -> 70,384    +0.16%
+
+A LOSS, and outside the ~0.03% run-to-run spread of this harness at m=100.
+
+MECHANISM COUNTED, which is what makes this a real result and not noise. The walk WAS
+removed and the cost simply moved, at a worse rate:
+
+    from_unique_pairs_borrowed   14,049,200 -> (gone)
+    ..._presized                              5,933,400     = -8,115,800
+    hash_from_listpack_spans     54,174,000 -> 62,682,000    = +8,508,000
+                                                       net  = +392,200
+
+Untouched-function controls byte-identical across the two ELFs: decode_rdb_string
+82,932,000; decode_value_spans 78,438,000; PackedStrMap::append 55,264,000;
+crc64_pclmul 11,700,708. So the +0.16% is code, not codegen drift.
+
+THE REUSABLE FINDING: FUSING TWO LOOPS IS NOT FREE. The eliminated pass was a tight,
+well-predicted, sequential walk over a `Vec<(&[u8], &[u8])>` already hot in cache —
+about the cheapest loop a machine can run. Adding its work to the materialisation loop
+made that loop's body larger and its scheduling worse, and the added cost per iteration
+exceeded the entire cost of the separate pass. "This data is walked twice, therefore one
+walk is waste" is a premise about INSTRUCTION COUNT that ignores what those instructions
+cost where they land. Count both sides before believing it. This is the loop-level twin
+of the existing "POOL THE CONTAINER, NOT ITS ELEMENTS" entry.
+
+Campaign output: no.
+
+RETRY PREDICATE: do not retry loop fusion on this path. Retry only IF a profile first
+shows `from_unique_pairs_borrowed`'s walk is NOT a sequential pass over cache-resident
+data (e.g. the pairs vector has been made large enough to miss L2), AND the fused loop
+is shown to keep the same per-iteration instruction count as the unfused one — measure
+`hash_from_listpack_spans` self-cost before and after, and require the SUM of the two
+functions to fall, not just the callee's. Never adjudicate this on the callee's
+self-cost alone; that is precisely what made it look like a 2,267 instr/op win.
+
+
+---
