@@ -24809,3 +24809,115 @@ For the arity lever specifically the surface is CLOSED unless condition 1 is met
 dispatch share (30.5% -> 27.5%, five of five runs at exactly 27.5%) is already invariant
 across both load regimes and both pinning conditions, so no further measurement can move
 the claim that the lever works -- only the size of its absolute delta is open.
+
+---
+
+## MEASURED (frankenredis-z2ce3) — borrowed multi-key write routes re-owned their argv EAGERLY for a closure that almost never runs: -4.0 to -25.0 pct across five shapes
+
+Six borrowed fast paths built the owned `Vec<Vec<u8>>` argv for their slowlog / latency
+closure BEFORE calling `record_plain_zremrange_borrowed_metrics`, which only invokes that
+closure on a slowlog, latency-tracker or time-budget BREACH. On every ordinary call the
+copies were allocated, never read, and dropped — inside routes whose entire premise is that
+the keys are borrowed. On the breach path they were copied TWICE, once into the locals and
+again through `.clone()` inside the closure.
+
+The fix is to materialise inside the closure. The SCAN-family arm in the same file had
+always done it that way; these six were the outliers.
+
+Campaign output: no
+
+Claim class: SELF-SPEEDUP. The headline deltas are fr-before against fr-after and that is
+maintenance, not a win, by section 1. The vs-incumbent ratios below are measured live
+against redis 7.2.4 in the SAME invocation and are reported as context for where the routes
+now sit, not as the claim.
+
+    execute_plain_zinter_borrowed        execute_plain_zstore_borrowed
+    execute_plain_setstore_borrowed      execute_plain_zdiffstore_borrowed
+    execute_plain_bitop_borrowed         execute_plain_msetnx_borrowed
+
+MEASURED, reverse-patch A/B. Both ELFs built LOCALLY from the SAME tree at the same moment,
+differing ONLY by `git apply -R` of this patch, then INTERLEAVED in one window so a load or
+frequency excursion is shared by both arms and shows up in the control. Convention: fr
+instructions per op / redis 7.2.4's, BELOW 1.0 = fr ahead, both engines in the same
+invocation, `scripts/shape_instr_per_op.py`, N=2000/2N=4000.
+
+    shape               BEFORE            AFTER             delta      pct
+    bitop_and           5200.7 / 5212.9   4549.1 / 4516.9   -673.8   -12.9
+    sinterstore_3src    9916.7 / 9924.4   9324.2 / 9322.3   -597.3    -6.0
+    sunionstore_3src   14958.7 / 14952.3 14355.2 / 14353.7  -601.1    -4.0
+    sdiffstore_3src     9448.5 / 9448.8   8846.0 / 8846.7   -602.3    -6.4
+    msetnx_2            2830.2 / 2831.9   2122.8 / 2123.2   -708.1   -25.0
+    get_control (NULL)  1337.6 / 1339.2   1333.3 / 1334.2     -4.6    -0.34
+
+    ratios: bitop_and 0.7460 / 0.7586 -> 0.6258 / 0.6375
+            sinterstore_3src 0.7376 / 0.7552 -> 0.6987 / 0.6924
+
+THE NULL IS -0.34 pct, inside the ~0.6 pct instr/op noise floor this ledger established in
+the instrument audit, and every claimed row is 4x to 40x that floor — so all five stand at
+this load without needing a quieter window.
+
+WHAT MAKES THIS AN ATTRIBUTION RATHER THAN FIVE COINCIDENCES: each route removes exactly
+FIVE allocate+copy+free triples, and the deltas agree with each other.
+
+    bitop_and         op + dest + outer Vec + 2 sources  = 5   ->  -673.8
+    setstore x3       dest + outer Vec + 3 sources       = 5   ->  -597.3 / -601.1 / -602.3
+    msetnx_2          outer Vec + 4 pair elements        = 5   ->  -708.1
+
+Five independent shapes, three different commands, one shared constant of roughly 120-140
+instructions per allocate+copy+free triple under mimalloc. The three setstore variants land
+within 5 instr/op of each other while their absolute costs differ by 5,500.
+
+REPRODUCIBILITY: sdiffstore_3src came out 9448.5 then 9448.8 (0.003 pct); the widest arm
+spread on the board was bitop_and's AFTER at 0.71 pct.
+
+STILL OPEN, and deliberately not taken: `execute_plain_del_borrowed` and
+`execute_plain_unlink_borrowed` have the SAME eager copy, but theirs is not closure-only —
+it feeds `Store::del`, whose signature is `&[Vec<u8>]`. Fixing those needs a borrowed twin
+in `crates/fr-store/src/lib.rs` (`del_inner<K: AsRef<[u8]>>` with `del` / `del_borrowed`
+wrappers; the body only ever needs `&[u8]`). That file was held exclusively by IndigoOriole,
+so the two sites are left in place rather than half-done. They are the last two eager
+`let *_owned` in fr-runtime.
+
+TEST, and it was MUTATION-PROVEN rather than merely written: nothing in the tree exercised
+these closures, because every other test of these routes asserts the REPLY and the reply is
+identical whether the argv is right, wrong or reordered. `borrowed_multikey_write_routes_
+record_their_full_argv_on_a_breach` sets `slowlog_log_slower_than_us = 0` so the closure
+runs on every command, then asserts the FULL argv for all six routes. Swapping `op` and
+`dest` in the BITOP closure makes it fail with the two vectors printed; reverting makes it
+pass. Full fr-runtime suite green (598 + 44 + 8 + 9 + 18 + 25 + 14 + 11 + ... across all
+targets, 0 failed).
+
+PROVENANCE:
+  ELF sha256   5e41377bb730da336de3468f074826236a72a6d250e8b1ef4152ba95f409e64b  BEFORE
+               10d0b48a163d935a58349a8f16465b80a9534f7d78d14fb928260bf3cab2b1cf  AFTER
+               COMPUTED BY sha256sum ON A PRIVATE COPY, not emitted by the process.
+               Same provenance limitation as every other shape_instr_per_op.py row in
+               this ledger: valgrind hosts the target, so there is no self-reported ELF
+               SHA. This row is therefore NOT KEEP-class and does not claim to be; it is
+               a self-speedup measurement with a computed identity.
+               Both built locally, RCH_CARGO_WRAPPER_BYPASS=1 exported and
+               env -u CARGO_TARGET_DIR, no [RCH] line in either build log, executable path
+               from --message-format=json, copied to private paths and sha'd there. The
+               tree was verified byte-identical to the saved patch after the reverse-patch
+               round trip, so the BEFORE arm differs from the AFTER arm by this change and
+               nothing else.
+  host         thinkstation1, 64 cores observed, governor powersave, /data 280G.
+  loadavg      SAMPLED BY ME per arm: 16.97/22.56/28.91 at the first arm falling to
+               14.74/21.33/28.23 at the last. 1-min below 5-min below 15-min throughout,
+               so the window was SHEDDING load, not stable — recorded rather than claimed
+               as quiet.
+  CPU MHz      SAMPLED BY ME per arm, mean over 64 cores, before->after each run:
+               2681->2640, 2802->2762, 2800->2872, 3182->2583, 2682->2630, 2759->3172,
+               3398->2588, 2764->2954, 2828->2767, 3107->2916, 2788->2598, 2969->2691.
+               A 31 pct spread (2583-3398) INSIDE the measurement window, which is exactly
+               why the arms were interleaved: the BEFORE and AFTER arms of every shape sit
+               on both sides of that spread and the null still came out flat.
+
+PROCESS NOTE, recorded because it has now happened three times today: the CODE for this row
+landed in c497fb100 under another pane's message, swept out of my working tree by a `git
+add` while I was building the two ELFs and running the interleaved measurement. That commit
+is accurate about the code and carries no number, because the after-ELF did not exist when
+it was written. This is the measurement half. The lesson I am taking is the one my own
+earlier row already stated and I failed to apply: COMMIT AS SOON AS IT COMPILES AND TESTS,
+THEN MEASURE — anything sitting in the working tree during a twenty-minute measurement
+belongs to whoever commits next.
