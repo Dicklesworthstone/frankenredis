@@ -177,12 +177,14 @@ def main():
                          "corpus, then mutate it and require the corpus to fail")
     ap.add_argument("--budget", type=int, default=2,
                     help="max concurrent jobs for this project (default 2)")
-    # 59, not 60. A 60G floor sat exactly ON the working set: /data idles at ~60G
-    # with builds drained, so every preflight declined and the fleet throttled
-    # itself to almost zero while reporting compliance. A threshold set at the
-    # resting value is indistinguishable from a threshold set at infinity.
-    ap.add_argument("--floor-gb", type=float, default=59.0,
-                    help="do not build below this many GB free (default 59)")
+    # 52, an EMERGENCY BRAKE rather than a regulator. 60 then 59 were both set at
+    # or above the drained working set -- a fleet with every build stopped still
+    # reads ~58G -- so both values declined unconditionally and froze the project
+    # for no reason. Concurrency is the regulator now (one build per pane, two per
+    # project); free space only stops a genuine emergency.
+    ap.add_argument("--floor-gb", type=float, default=52.0,
+                    help="emergency brake: do not build below this many GB free "
+                         "(default 52). Concurrency, not space, is the regulator.")
     ap.add_argument("--path", default="/data")
     args = ap.parse_args()
 
