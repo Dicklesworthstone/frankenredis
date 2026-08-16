@@ -212,6 +212,19 @@ SHAPES = {
     "hincrbyfloat": (["HSET h f 1"], ["HINCRBYFLOAT", "h", "f", "0"]),
     "hsetnx_existing": (["HSET h f1 v1"], ["HSETNX", "h", "f1", "other"]),
     "sinter_2": (["SADD s1 m1 m2 m3", "SADD s2 m2 m3 m4"], ["SINTER", "s1", "s2"]),
+    # (frankenredis-9hnxt) SINTER at NINE keys, the pair for sinter_2. keys_multi is
+    # the only parser either SINTER call site uses and it refuses arr_len < 10, i.e.
+    # fewer than nine keys -- and unlike MGET there are no exact-N SINTER parsers to
+    # fall back to. So sinter_2 has NO borrowed route at all while sinter_9 does.
+    # Same command, same executor, with and without a working parser: the pairing
+    # isolates "no fast route" from "simply expensive", which a flat profile alone
+    # cannot distinguish. Every set holds the same three members so the intersection
+    # result is identical and only the key COUNT differs.
+    "sinter_9": ([
+        "SADD n1 m1 m2 m3", "SADD n2 m1 m2 m3", "SADD n3 m1 m2 m3",
+        "SADD n4 m1 m2 m3", "SADD n5 m1 m2 m3", "SADD n6 m1 m2 m3",
+        "SADD n7 m1 m2 m3", "SADD n8 m1 m2 m3", "SADD n9 m1 m2 m3",
+    ], ["SINTER", "n1", "n2", "n3", "n4", "n5", "n6", "n7", "n8", "n9"]),
     "mget_3": (["MSET a 1 b 2 c 3"], ["MGET", "a", "b", "c"]),
     "pfadd_existing": (["PFADD hll a b c"], ["PFADD", "hll", "a"]),
     "pexpireat_same": (["SET s abcdefghijklmnop"],
