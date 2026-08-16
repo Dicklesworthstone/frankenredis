@@ -18111,9 +18111,37 @@ PROVENANCE:
 
 Campaign output: yes — retires a withdrawn figure with a measurement.
 
-RETRY PREDICATE: do not re-run to re-confirm either ratio. DO re-measure getset_same
-from a clean tree if anyone needs to attribute its 0.9799x -> 0.5266x movement, which
-this row deliberately does not attempt.
+RETRY PREDICATE: do not re-run to re-confirm either ratio.
+
+ATTRIBUTION OF THE getset_same MOVEMENT — ANSWERED, and the answer is "no movement".
+This row asked for it and declined to attempt it; it is closable without a build.
+
+  GIT: GETSET was front-classified in eae7b0d29 (iqicb), which is what took it from
+  1.7583x to somewhere near parity. Since that commit, across 152 commits to HEAD,
+  `git log -S execute_plain_getset_borrowed` and `git log -S 'fn getset'` over
+  fr-runtime, fr-server and fr-store return NOTHING. No code on GETSET's execution
+  path changed between the two figures.
+
+  BATCH: 0.9799x sits in cv3fm's "SHIPPED ->" column IMMEDIATELY ADJACENT to
+  incrbyfloat_same 1.2800x — the figure already WITHDRAWN as untrustworthy, traced
+  to a binary copied out of target/release (a rendezvous) whose provenance was never
+  checked. A third row from the same column, hincrbyfloat 0.7510x, also moved 28
+  points on re-measurement.
+
+  So: three rows from one batch, all moving substantially when re-measured, and no
+  code change behind any of them. That is a BATCH-LEVEL measurement fault, not three
+  independent improvements, and it is the same fault that produced the withdrawn
+  87 pct INCRBYFLOAT discrepancy. NO LEVER SHOULD BE CREDITED for getset_same's
+  "improvement" because there was none — the earlier number was wrong.
+
+  A peer reached the same conclusion from the other direction, refreshing all
+  seventeen shapes on one ELF and recording "the METHOD was wrong, not the
+  measurements". The git evidence above is the half that was missing: the inventory
+  refresh shows the NUMBERS changed, and the archaeology shows the CODE did not.
+
+CONSEQUENCE FOR SHAPE SELECTION: the current worst measured shape is del_1_missing
+at 0.7685x (12.2 pct dispatch share) on ELF 51708552264214d1, not getset_same. Any
+"worst route" pick taken off the pre-refresh column is picking off known-bad data.
 
 --------------------------------------------------------------------------------
 INADMISSIBLE — balanced-square THROUGHPUT A/A null fails at loadavg 51 on the same
