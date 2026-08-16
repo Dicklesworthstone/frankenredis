@@ -200,6 +200,20 @@ SHAPES = {
     # form I DID classify, so it reported healthy while three siblings walked the
     # cascade. A lever's own shape cannot detect the shapes the lever excluded.
     "touch_2": (["SET tk1 v", "SET tk2 v"], ["TOUCH", "tk1", "tk2"]),
+    # (frankenredis-p98mw) MSETNX at the arity I CLAIMED (3) and the arity I EXCLUDED
+    # (5), the same pairing that exposed multi-key TOUCH at 3.2848x.
+    #
+    # I front-classified MSETNX at `(3, Msetnx)` exactly, reasoning that only the
+    # one-pair form had a borrowed parser. No shape existed for either arity, so that
+    # claim has never been measured and neither has its exclusion. A source sweep
+    # separately flagged MSETNX arity 5 as having a parser reachable only from the
+    # cascade.
+    #
+    # Both seeded so mk1 already exists: MSETNX is all-or-nothing, so every op returns
+    # 0 and writes nothing, making each iteration identical. Without that the first op
+    # would succeed and the rest fail, measuring two different paths in one average.
+    "msetnx_1": (["SET mk1 v"], ["MSETNX", "mk1", "mv1"]),
+    "msetnx_2": (["SET mk1 v"], ["MSETNX", "mk1", "mv1", "mk2", "mv2"]),
     "exists_missing": ([], ["EXISTS", "nosuchkey"]),
     # (frankenredis-c0ts5) Ladder shapes: cheap O(1) reads across every type, so
     # the dispatch cost can be compared at constant (near-zero) real work. Mirrors

@@ -22028,3 +22028,69 @@ RETRY PREDICATE: every other exact-arity claim this campaign landed still lacks 
 arity-N+1 shape — MSETNX, ZADD base, BITCOUNT range, the four expire conditionals. TOUCH
 went from "carefully scoped" to 3.28x behind on exactly that gap. Write the N+1 shape
 before assuming any of them is harmless.
+
+## MEASURED (frankenredis-p98mw) — MSETNX's excluded arity is 2.6703x at 70.5 pct dispatch: the TOUCH defect repeats, exactly as predicted
+
+Claim class: COMPETITIVE — fr and the vendored Redis 7.2.4 binary in the SAME invocation.
+Same provenance limitation as the rows above (valgrind hosts the target, so no
+self-reported ELF SHA; ABBA repeats, not a bootstrap CI).
+
+    run  shape       fr instr/op   redis 7.2.4   fr/redis   dispatch share
+    A    msetnx_2       11056.9        4140.7     2.6703x       70.5%
+    B    msetnx_1        2375.5        3241.8     0.7328x       19.4%   <- CONTROL
+    B    msetnx_1        2359.8        3318.8     0.7111x       19.4%   <- CONTROL
+    A    msetnx_2       11055.9        4141.2     2.6697x       70.5%
+
+**fr retires 2.67x MORE instructions than Redis 7.2.4 on `MSETNX k1 v1 k2 v2`.** This is
+now the worst shape on the board, and it is the SECOND confirmed instance of the defect
+the previous row predicted.
+
+THE PREDICTION WAS EXACT. The TOUCH row's retry predicate read: "every other exact-arity
+claim this campaign landed still lacks an arity-N+1 shape — MSETNX, ZADD base, BITCOUNT
+range, the four expire conditionals. TOUCH went from 'carefully scoped' to 3.28x behind on
+exactly that gap. Write the N+1 shape before assuming any of them is harmless." MSETNX was
+first on that list and it reproduces the pattern feature for feature:
+
+    command   claimed arity  measured        excluded arity  measured
+    TOUCH     2              0.6401x / 20 pct    3           3.2848x / 73.9 pct
+    MSETNX    3              0.7328x / 19.4 pct  5           2.6703x / 70.5 pct
+
+In both cases the CLAIMED form measures healthy in the front-classified band while the
+EXCLUDED sibling sits at 70+ pct dispatch share — past the 40-70 pct stranded band, the
+signature of paying the cascade walk AND the generic fallthrough. One extra key-value pair
+costs 4.65x here (2,376 -> 11,057 instr/op) for work that is one additional store write.
+
+NEITHER MSETNX ARITY HAD EVER BEEN MEASURED. No shape existed for the command at all, so
+the `(3, Msetnx)` claim shipped unmeasured and its exclusion shipped unexamined. **A lever
+landed without a shape is a lever whose blast radius is unknown**, and this campaign has
+now shipped two of them from one batch.
+
+BOTH SHAPES ARE SEEDED SO mk1 ALREADY EXISTS. MSETNX is all-or-nothing, so every operation
+returns 0 and writes nothing, making each iteration identical. Unseeded, the first op would
+succeed and the rest fail — two different paths averaged into one figure, which would have
+made the row uninterpretable rather than merely wrong.
+
+A/A NULL — THE TIGHTEST RATIO NULL OF THE CAMPAIGN:
+
+    fr arm      msetnx_2  11056.9 -> 11055.9   -0.01%
+                msetnx_1   2375.5 ->  2359.8   -0.66%
+    redis arm   msetnx_2   4140.7 ->  4141.2   +0.01%
+                msetnx_1   3241.8 ->  3318.8   +2.38%
+    ratio       msetnx_2  2.6703 -> 2.6697  0.02%  |  msetnx_1  0.7328 -> 0.7111  2.96%
+
+The msetnx_2 pair agrees to 0.02 pct on the ratio and 0.01 pct on BOTH arms. A 167 pct
+deviation from parity needs no help from that, but it removes any question of the figure.
+
+EXECUTABLE IDENTITIES, full 64-hex (computed post-run, see limitation above):
+  candidate  `5b6592da685ce76a48b920a07f39f5e5783e9ca497626e90d510fa995875ec9f`
+  incumbent  `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+  tree       d75679cc1; NO rebuild — no crate code had changed, and the shapes added are
+             Python.
+
+Campaign output: yes — confirms a predicted defect class on its first test, and supplies
+the shape that makes it visible.
+
+RETRY PREDICATE: claim MSETNX at arity 5 (the parser exists; mirror its cascade arm), then
+work the rest of the list — ZADD base, BITCOUNT range, the four expire conditionals. Two
+for two so far. Write the N+1 shape FIRST in every case: both defects were invisible until
+a shape existed, and neither would have been found by re-measuring the claimed form.
