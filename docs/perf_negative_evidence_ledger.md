@@ -25383,3 +25383,162 @@ k=128; nine points say there is none. DO reopen if either of these becomes true:
   2. A lever targets hashtable-set membership. That is where the whole 1.77x lives, and
      the measurement to beat is k=256 and k=512 with `OBJECT ENCODING` asserted as
      `hashtable` on both arms before the numbers are read.
+
+--------------------------------------------------------------------------------
+CERTIFIED (frankenredis-gein3) — SINTER crosses at k=8..15 and fr is BEHIND at k=512 in
+5 of 5 draws; the residual 32 pct variance is fr's OWN, not the client's, and it is
+INVERSE in load: a FAST client makes fr do MORE work
+
+Claim class: COMPETITIVE
+
+Run on the FIXED harness (ae6236d11 landed the drain-while-sending repair), in the best
+window of the session, with min-of-K on BOTH arms — the estimator this ledger established
+for an additive, non-negative contaminant.
+
+    shape        fr min-of-5   redis min-of-5   fr spread   redis spread   min-based ratio
+    sinter_big     645,115.4        467,086.8     32.0 pct       2.2 pct        1.3811x
+    sinter_2         4,358.6          8,756.6      0.96 pct      3.2 pct        0.4978x
+    get_control      1,322.7          3,199.5      0.73 pct      4.7 pct        0.4134x
+
+    per-run sinter_big ratios   1.784  1.456  1.512  1.381  1.640
+
+WHAT IS NOW SETTLED. fr is BEHIND redis at k=512 in FIVE OF FIVE draws, worst-case 1.784x
+and best-case 1.3811x. The direction I retracted precision on last row is confirmed, and
+the crossover is bounded rather than pointed:
+
+    crossover, fr's BEST draw    k = 14.3      (agrees with 14.2 and 13.7 from two
+    crossover, fr's WORST draw   k =  7.8       independent earlier estimates)
+
+    SINTER CROSSES SOMEWHERE IN k = 8..15. Below it fr leads by ~2x; above it fr falls
+    behind and keeps falling. Every SINTER shape in the corpus except sinter_big sits at
+    k = 2..3, on the winning side.
+
+WHAT IS NEW, AND IT CHANGES THE ATTRIBUTION. Last row I blamed the 48 pct instability on
+the harness's send-without-drain defect, which a peer then fixed. The fix helped — 48 pct
+to 32 pct — but did NOT resolve it, and the redis arm on the SAME shape, through the SAME
+client, is stable to 2.2 pct. A client-side defect would move both arms. It does not.
+
+    THE RESIDUAL 32 PCT IS fr's OWN WORK. redis does the same work every time it answers
+    this command; fr does not.
+
+And the sign says what kind of work it is:
+
+    r(load, fr Ir) = -0.83
+
+NEGATIVE. The highest-load run (55.65) produced the LOWEST instruction count and the
+lowest-load run (17.18) the HIGHEST. This is not load adding work to fr — it is a FAST
+CLIENT making fr do more of it. When the client drains promptly, fr's non-blocking writes
+complete in smaller pieces, so the reply is delivered over MORE event-loop passes, each
+paying another writer-completion drain and pubsub-outbox drain — the 300.9M bloc profiled
+two rows ago. When the box is loaded the client drains slowly, fr's writes batch, and the
+per-pass overhead is amortised over fewer, larger chunks.
+
+    THE LEVER IS PER-WRITE-CHUNK OVERHEAD IN THE REPLY PATH, and the variance is itself the
+    evidence of waste: fr's own best draw is 24 pct cheaper than its worst on identical
+    input, so up to a quarter of the work in a bad draw is bookkeeping the good draw did
+    not need. A fix would both lower the mean AND make the shape measurable.
+
+NOT ATTEMPTED HERE, and the reason is stated rather than implied: the drain is an mpmc
+channel polled by `drain_writer_completions`, and the cheap-guard form (an atomic pending
+count consulted before `pool.try_recv()`) strands completions if the count is ever wrong,
+which hangs connections. That needs concurrency stress testing this session cannot give it.
+It is a designed change, not an edit.
+
+PROVENANCE:
+  ELF sha256           b8408df60e307fee... built LOCALLY at HEAD ae6236d11 from a tree
+                       whose only dirt was my own .beads update — REPRODUCIBLE FROM HEAD.
+  harness              scripts/shape_instr_per_op.py at ae6236d11, WITH the drain fix.
+                       N=2000/2N=4000, five draws per shape, both engines per invocation.
+  estimator            MIN-OF-K on both arms; per-run values listed so nothing is hidden
+                       behind an average.
+  host                 thinkstation1, 64 cores, /data 243G, governor powersave, one build.
+  PER-ARM loadavg/MHz  sinter_big 17.18/2660, 29.47/3580, 29.81/2944, 55.65/2646,
+                       29.74/2700 · sinter_2 23.45/2396, 27.66/3646, 31.61/3721,
+                       32.28/3609, 32.28/2792 · get_control 31.14/2478, 29.92/2308,
+                       28.65/2403, 28.65/2784, 29.72/2393. Window verified at open:
+                       18.30/16.83/18.24.
+
+RETRY PREDICATE: do NOT re-certify the crossover — three independent estimates agree at
+14.3/14.2/13.7 for fr's best draw, and the k=8..15 band already covers fr's worst. DO treat
+any future sinter_big number as a DRAW, not a measurement, until the per-write-chunk
+overhead is fixed; quote min-of-K and the range. The next lever is that overhead, and it is
+a reactor design change requiring concurrency tests, not a hot-path edit.
+
+---
+
+## MEASURED (frankenredis-zw36c) — REJECTED: guarding the writer-completion drain on an in-flight counter pays NOTHING measurable, and the reason is that the tax is per-ITERATION while every instrument I have divides by OPS
+
+Campaign output: no
+
+Claim class: SELF-SPEEDUP, REJECTED. No vs-incumbent claim is made.
+
+LEVER. `drain_writer_completions` ran on every event-loop iteration and its first
+`try_recv` returned `Empty` on almost all of them. ae6236d11 found it by diffing two
+callgrind dumps of the SAME ELF and shape: the mpsc `try_recv` plus the function around it
+moved 13.2M instructions between two runs purely because the loop spun a different number
+of times. It was the largest of nine per-iteration frames with no redis counterpart, so it
+looked like the obvious first cut. `WriterPool` gained an `inflight` count (incremented on
+enqueue, decremented on drain, read once per iteration); zero means the channel cannot hold
+anything and the drain is skipped. Code was c074fed30, now removed.
+
+MEASURED, reverse-patch A/B, arms proven to differ by the patch alone (build AFTER, BEFORE,
+AFTER again; the two AFTER SHAs matched at 2c5b252e — and the first attempt at this pair
+was DISCARDED because that check caught a peer edit landing mid-window, three distinct
+SHAs).
+
+    reproducible shapes, two passes interleaved
+
+    shape           BEFORE              AFTER               delta
+    get_control     1329.8 / 1324.8     1324.3 / 1331.5     +0.6   (+0.05 pct)
+    del_1_missing   1750.9 / 1753.1     1778.3 / 1751.8    +13.1   (+0.7 pct)
+    bitop_and       4509.5 / 4521.6     4515.7 / 4516.1     +0.3   (+0.01 pct)
+
+Nothing outside the ~0.6 pct noise floor, and the one figure that is (del_1_missing's
++0.7 pct) comes from a single run of 1778.3 whose sibling reads 1751.8, i.e. the same as
+BEFORE. No win.
+
+ACCEPTANCE TEST, which the bead specified in advance: does sinter_big's three-run spread
+come down? It does not.
+
+    BEFORE  534,428 / 575,315 / 616,583   spread 15.4 pct
+    AFTER   585,274 / 395,047 / 600,119   spread 51.9 pct
+
+WHY IT FAILED, AND THIS IS THE PART TO KEEP. The tax is per ITERATION. Every instrument in
+this harness divides by OPS. On a fully pipelined burst the reactor handles many commands
+per wakeup, so per-iteration cost divided by ops is arithmetically invisible — which is
+exactly why the small-reply shapes show nothing. The one regime where iterations-per-op is
+high is the large-reply regime, and that is the regime whose measurement is destroyed by
+the same per-iteration bookkeeping. The lever and the instrument fail in the same place.
+
+    So this is NOT "measured as zero". It is UNMEASURABLE with what exists: I cannot
+    distinguish a real 20-instruction-per-iteration saving from nothing, because no shape
+    in the corpus has both a high iteration-per-op ratio and a stable reading. Recording it
+    as a flat zero would be a stronger claim than the evidence supports.
+
+REVERTED, per section 4: a lever with no measured payment does not stay. The code was
+correct — the counter is race-free by construction (both sides run on the reactor thread,
+the workers never touch it) and its stranding failure mode was mutation-proven, since
+dropping the `fetch_add` in `try_enqueue` failed the test on the assertion that the counter
+must be non-zero before any worker has run. None of that is a reason to keep an unpaid
+change in a hot loop.
+
+RETRY PREDICATE, for whoever takes zw36c next: do not retry this lever until an
+instrument exists that scores per-iteration work on a per-ITERATION basis rather than per
+op. Concretely, retry only when one of these is available and the drain's cost times the
+measured iteration count exceeds the 0.6 pct instr/op floor on a shape that reproduces:
+  1. count loop iterations directly (a debug counter, or callgrind CALL COUNTS on the drain
+     rather than Ir) and show the count times the saved cost;
+  2. or build a shape with a LOW pipeline depth, where iterations-per-op approaches 1 —
+     the harness sends one burst and cannot currently do this;
+  3. then re-run the sinter_big spread as the acceptance test.
+Do not re-run the three shapes above; they cannot see this lever at any sample size.
+
+PROVENANCE: ELF 25446382e03cfc9782b21c6cd95feaa8e8af0d454f78cef2055f63778ab6a7ed BEFORE,
+2c5b252ecffe848fa90f853f7e2df93c7a7be6072194205f7397c1973cec733f AFTER, both computed by
+sha256sum (valgrind hosts the target, so no self-report; not KEEP-class). Built locally,
+RCH_CARGO_WRAPPER_BYPASS=1 exported, env -u CARGO_TARGET_DIR, no [RCH] line.
+thinkstation1, 64 cores, governor powersave, /data 240G. Loadavg SAMPLED BY ME per arm:
+25.23, 24.65, 28.92, 31.25, 31.25, 30.75, 30.75, 29.57, 28.24, 28.24, 27.10, 27.10 —
+the busiest window of my session, which is a further reason not to read the +0.05 to
++0.7 pct deltas as anything but noise. Mean CPU MHz SAMPLED BY ME per arm over 64 cores:
+2383-3682, a 55 pct spread inside the window.
