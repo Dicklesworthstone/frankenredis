@@ -18652,15 +18652,26 @@ command, parser, and run from derivation 1, and neither borrows the other's inpu
 
   48.0 and 48.05.
 
-STATED WEAKNESS, because the reasoning shape that produced it is the one that went
-wrong repeatedly today: derivation 2 assumes the harness printed the 2N=4000 frame
-table. At N=2000 the figure is 96.10. The harness output does not say which dump the
-frame table came from, and the divisor giving agreement was chosen AFTER seeing the
-agreement. What defends it is that the comparison value was derived independently —
-had the divisor been wrong, 96.10 would need to coincide with a separately obtained
-48.0, and it does not. Record as corroborated-twice with a factor-of-2 assumption on
-the second, NOT as directly instrumented. A direct per-call measurement would close
-it.
+STATED WEAKNESS — NOW RESOLVED, and the caveat is kept rather than deleted because
+how it closed is the point. As banked, derivation 2 assumed the harness printed the
+2N=4000 frame table; at N=2000 the figure would have been 96.10, and the divisor
+giving agreement was chosen AFTER seeing the agreement — the exact reasoning shape
+that produced several wrong mechanisms today.
+
+RESOLVED FROM THE HARNESS SOURCE, not from more measurement. scripts/
+shape_instr_per_op.py annotates the 2N dump at every call site (lines 640, 644, 654,
+all `cg.fr.2n.out`) and there are ZERO references to `cg.fr.n.out` anywhere in it.
+So the divisor is 4000, 48.05 stands and 96.10 is excluded. BlackCat's figure came
+from `callgrind_annotate` invoked explicitly on `cg.fr.2n.out`, so both derivations
+were on the same footing without either of us having checked.
+
+  FINAL: 48.0 instr per set_bulk call. Two independent derivations, divisor verified
+  in harness source. No free parameter in either. Directly instrumenting set_bulk
+  would still be stronger, but nothing is assumed.
+
+The five-second grep only happened because the assumption was written down instead
+of buried. That is the argument for stating weaknesses in the row rather than in a
+side channel.
 
 WHAT IT BUYS: it converts the LPOS COUNT residual from a share into a decomposition.
   keyword discrimination before parsing   removes 249  (144 wasted set_bulk + 105
