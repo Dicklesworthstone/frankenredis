@@ -175,6 +175,19 @@ SHAPES = {
     "zrangebyscore_plain": (["ZADD z 1 a 2 b 3 c"], ["ZRANGEBYSCORE", "z", "1", "3"]),
     "sintercard_lim": (["SADD s1 m1 m2 m3", "SADD s2 m2 m3 m4"],
                        ["SINTERCARD", "2", "s1", "s2", "LIMIT", "1"]),
+    # (frankenredis-q4plk) BASE/OPTION pairs, to test whether the cliff found on
+    # ZRANGEBYSCORE (3.0 -> 81.0 parses for two extra tokens) is general or is two
+    # anecdotes. Each pair differs ONLY by the option, so the parse-count delta is
+    # attributable to the option and nothing else.
+    "expire_base": (["SET s abcdefghijklmnop"], ["EXPIRE", "s", "10000"]),
+    "expire_nx_opt": (["SET s v", "EXPIRE s 10000"], ["EXPIRE", "s", "500", "NX"]),
+    "zadd_base": (["ZADD z 1 a"], ["ZADD", "z", "1", "a"]),
+    "zadd_xx_opt": (["ZADD z 1 a"], ["ZADD", "z", "XX", "1", "a"]),
+    "sintercard_base": (["SADD s1 m1 m2 m3", "SADD s2 m2 m3 m4"],
+                        ["SINTERCARD", "2", "s1", "s2"]),
+    "hrandfield_base": (["HSET h f1 v1"], ["HRANDFIELD", "h"]),
+    "hrandfield_count": (["HSET h f1 v1"], ["HRANDFIELD", "h", "1"]),
+    "getex_base": (["SET gx abcdefghijklmnop"], ["GETEX", "gx"]),
     # The control: a route none of the above levers touch.
     "get_control": (["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
 }
@@ -195,6 +208,75 @@ def free_port() -> int:
         return probe.getsockname()[1]
     finally:
         probe.close()
+
+
+class ReplyCounter:
+    """Count COMPLETE top-level RESP replies in a byte stream.
+
+    (frankenredis-58dp8) This exists because the burst loop used to count
+    `chunk.count(b"\\r\\n")` and treat every CRLF as one finished op. That is only
+    true for single-line replies. `SORT_RO sl ALPHA` on a three-element list
+    answers `*3\\r\\n$1\\r\\na\\r\\n$1\\r\\nb\\r\\n$1\\r\\nc\\r\\n` -- SEVEN CRLFs for ONE op -- so
+    the loop believed the burst was done after roughly a seventh of it, and the
+    `finally` block then terminated the engine while the rest was still in flight.
+    The dump that got written covered however much the engine happened to finish
+    first, which is a race against process teardown rather than a measurement.
+
+    That silently corrupted the two-point subtraction. Observed on sort_ro_alpha
+    at N=6000: Ir(N)=157,246,050 with Ir(2N)=166,702,190, which the old guard
+    passed because it only refused Ir(2N) <= Ir(N) -- and the harness printed
+    `1576.0 instr/op` and `0.9769x` for a route whose fr arm is ~26,100 instr/op.
+    A second run of the same pair printed `826.3` and `0.3481x`. The SAME defect
+    also produced honest-looking hard failures (Ir(2N)=48,463,918 against
+    Ir(N)=157,032,994), so the loud and the silent cases share one root cause.
+
+    Every shape whose reply is not a single line was affected: sort_ro_alpha,
+    mget_3, hmget/zmscore-style multi-bulk, sinter_2. Single-line shapes (GET,
+    integers, +OK) were counted correctly, which is why this went unnoticed.
+
+    Handles the RESP2 surface these shapes produce: `+`/`-`/`:` inline, `$` bulk
+    (including the `$-1` null), and `*` multibulk (including `*-1` and nesting).
+    """
+
+    def __init__(self):
+        self.buf = b""
+        self.complete = 0
+
+    def feed(self, chunk: bytes) -> None:
+        self.buf += chunk
+        while True:
+            consumed = self._one(self.buf)
+            if consumed is None:
+                return
+            self.buf = self.buf[consumed:]
+            self.complete += 1
+
+    def _one(self, buf: bytes):
+        """Bytes consumed by one complete reply at the head of `buf`, else None."""
+        end = buf.find(b"\r\n")
+        if end < 0:
+            return None
+        tag, head = buf[:1], buf[1:end]
+        if tag in (b"+", b"-", b":"):
+            return end + 2
+        if tag == b"$":
+            length = int(head)
+            if length < 0:
+                return end + 2
+            need = end + 2 + length + 2
+            return need if len(buf) >= need else None
+        if tag == b"*":
+            count = int(head)
+            if count < 0:
+                return end + 2
+            offset = end + 2
+            for _ in range(count):
+                inner = self._one(buf[offset:])
+                if inner is None:
+                    return None
+                offset += inner
+            return offset
+        raise RuntimeError("unparseable RESP tag %r" % tag)
 
 
 def total_ir(path: str) -> int:
@@ -291,16 +373,28 @@ def run_once(engine: str, seeds, cmd, ops: int, workdir: str, tag: str,
                 time.sleep(0.25)
         if sock is None:
             raise RuntimeError("%s never became ready under callgrind" % tag)
+        # (frankenredis-58dp8) Seeds are drained by REPLY, not by one recv(): a
+        # seed whose reply arrives in two segments used to leave the tail in the
+        # socket, where the burst loop then counted it as burst progress.
         for seed in seeds:
             sock.sendall(resp(*seed.split()))
-            sock.recv(4096)
+            seed_counter = ReplyCounter()
+            while seed_counter.complete < 1:
+                chunk = sock.recv(1 << 20)
+                if not chunk:
+                    raise RuntimeError("%s dropped the connection while seeding" % tag)
+                seed_counter.feed(chunk)
         sock.sendall(resp(*cmd) * ops)
-        seen = 0
-        while seen < ops:
+        # (frankenredis-58dp8) Wait for `ops` COMPLETE replies. See ReplyCounter
+        # for what counting CRLFs instead did to every multi-line-reply shape.
+        counter = ReplyCounter()
+        while counter.complete < ops:
             chunk = sock.recv(1 << 20)
             if not chunk:
-                raise RuntimeError("%s dropped the connection mid-burst" % tag)
-            seen += chunk.count(b"\r\n")
+                raise RuntimeError(
+                    "%s dropped the connection mid-burst after %d of %d replies"
+                    % (tag, counter.complete, ops))
+            counter.feed(chunk)
     finally:
         if sock is not None:
             sock.close()
@@ -338,8 +432,60 @@ def instr_per_op(engine: str, seeds, cmd, ops: int, workdir: str, label: str,
     return delta / ops, low, high
 
 
+def selftest() -> int:
+    """Prove the reply counter on the streams that broke the old CRLF count.
+
+    Each case carries the count the OLD `chunk.count(b"\\r\\n")` would have
+    produced, so the test shows the defect rather than only asserting the fix:
+    a case where the two agree proves nothing, and every multi-line case is one
+    where the old code overcounted and stopped the burst early.
+    """
+    sort_reply = b"*3\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n"
+    cases = [
+        ("inline +OK", b"+OK\r\n", 1, 1),
+        ("integer", b":1\r\n", 1, 1),
+        ("error", b"-ERR nope\r\n", 1, 1),
+        ("bulk", b"$3\r\nabc\r\n", 1, 2),
+        ("null bulk", b"$-1\r\n", 1, 1),
+        ("null array", b"*-1\r\n", 1, 1),
+        # The shape that exposed this: SEVEN CRLFs, ONE reply.
+        ("SORT_RO 3 elements", sort_reply, 1, 7),
+        ("SORT_RO x2", sort_reply * 2, 2, 14),
+        ("nested array", b"*2\r\n*1\r\n$1\r\na\r\n:7\r\n", 1, 4),
+        # A bulk payload containing CRLF: old code counted the DATA as replies.
+        ("bulk with embedded CRLF", b"$4\r\na\r\nb\r\n", 1, 3),
+    ]
+    failures = 0
+    for label, stream, expect, old_would_say in cases:
+        counter = ReplyCounter()
+        counter.feed(stream)
+        # Byte-at-a-time proves the counter survives arbitrary TCP segmentation,
+        # which is the condition the burst loop actually runs under.
+        split = ReplyCounter()
+        for i in range(len(stream)):
+            split.feed(stream[i:i + 1])
+        ok = counter.complete == expect and split.complete == expect
+        if not ok:
+            failures += 1
+        print("  %-26s replies=%-3d split=%-3d expect=%-3d  old CRLF count=%-3d  %s"
+              % (label, counter.complete, split.complete, expect, old_would_say,
+                 "ok" if ok else "FAIL"))
+    # A truncated reply must NOT count: this is what made the burst loop stop early.
+    partial = ReplyCounter()
+    partial.feed(sort_reply[:-4])
+    if partial.complete != 0:
+        failures += 1
+        print("  %-26s FAIL: counted an incomplete reply" % "truncated reply")
+    else:
+        print("  %-26s replies=0 (correctly withheld until complete)  ok" % "truncated reply")
+    print("selftest: %d case(s) failed" % failures)
+    return 1 if failures else 0
+
+
 def main() -> int:
     args = sys.argv[1:]
+    if "--selftest" in args:
+        return selftest()
     if "--list" in args:
         print("shapes: %s" % ", ".join(sorted(SHAPES)))
         return 0
