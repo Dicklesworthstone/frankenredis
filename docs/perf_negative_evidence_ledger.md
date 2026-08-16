@@ -20533,3 +20533,95 @@ stranded route, and names the next target.
 RETRY PREDICATE: front-classify BITCOUNT's range form. And SWEEP THE FAMILY rather than
 the shape — ZADD and BITCOUNT both had one form classified and its sibling stranded, so
 check every command where a base and an optioned form both have parsers.
+
+--------------------------------------------------------------------------------
+STOP — sinterstore_3src is 0.742x with only 7.4 PCT dispatch: the worst remaining
+below-parity shape is NOT a dispatch problem (frankenredis-z2ce3)
+
+Screened twelve more shapes; none is above parity, and the worst unsettled ratio is
+sinterstore_3src. Measured properly it turns out to be the cleanest STOP in the
+campaign, and it completes a calibration for reading dispatch share that the earlier
+rows lacked.
+
+CONVENTION: fr instructions per op / redis 7.2.4's. BELOW 1.0 = fr AHEAD.
+
+    screen (one run each)   sinterstore_3src  0.7723x  disp  7.4%  <- worst unsettled
+                            zrange_rev        0.4963x  disp 27.2%
+                            lpos_rank         0.4679x  disp 22.7%
+                            zrangebyscore_l   0.3554x  disp 23.1%
+                            set_base          0.5329x  disp 33.9%   <- see note
+                            hdel_1_missing    0.5615x  disp 17.9%
+                            getex_pxat        0.5631x  disp 15.4%
+                            mget_3            0.5810x  disp 14.2%
+                            getex_exat        0.5351x  disp 15.6%
+                            hincrbyfloat      0.4449x  disp 12.7%
+                            zrange_withscores 0.4172x  disp 17.7%
+
+    A/A control (get_control)   0.4153 / 0.4224 / 0.4009      spread 5.4 pct
+
+    sinterstore_3src, four runs  fr instr/op  redis instr/op  fr/redis  dispatch
+      run 1                         9892.1      13550.9        0.7300     7.4%
+      run 2                         9905.3      13296.7        0.7449     7.4%
+      run 3                         9926.9      13265.5        0.7483     7.4%
+      run 4                         9876.7      13246.8        0.7456     7.4%
+      mean                          9900.3      13340.0        0.7422     7.4%
+      spread                         0.51%       2.3%          2.5%       0.0%
+
+Monotonic on both arms in all four runs. The null (5.4 pct) exceeds the signal spread
+(2.5 pct), so the ratio is ~0.742 with roughly 5 pct uncertainty — safely below 1.0,
+not precise beyond that. Dispatch share reproduced EXACTLY at 7.4 pct four times.
+
+7.4 PCT IS THE LOWEST DISPATCH SHARE MEASURED ANYWHERE IN THIS CAMPAIGN. ~733 of fr's
+9,900 instr/op decide which command this is; the other 92.6 pct is genuine
+set-intersection and store work. The route is properly classified — `(5, Sinterstore)
+=> SetStore(Inter, 3)` — so there is nothing for a dispatch lever to recover. ANY
+improvement here has to come from the intersection algorithm or the store path, not
+from routing.
+
+That makes this the OPPOSITE finding from bitcount_range two rows above, and the
+contrast is what gives both rows their value: a high share meant "stranded, rewire it",
+and a low share means "classified, the cost is the work". The share distinguishes them
+and neither ratio does — sinterstore_3src (0.742x) and bitcount_range (0.865x) are
+close in ratio and could not be more different in what to do about them.
+
+THE CALIBRATION THIS COMPLETES, all on one ELF in one session, which is what makes it
+usable as a scale rather than a set of anecdotes:
+
+    dispatch share   shape                 state
+        7.4 pct      sinterstore_3src      classified; cost is real work
+       12.2          del_1_missing         classified
+       13.6          exists_missing        classified
+       15.9          bitcount_base         classified
+       20.5-20.6     touch_missing, get_control   classified (the reference band)
+       23.9          sort_ro_alpha         NO route exists at all
+       46.1          zadd_base             STRANDED (parser + executor exist)
+       46.4          bitcount_range        STRANDED (parser + executor exist)
+       51.0          expire_nx_opt         STRANDED (parser + executor exist)
+       58.0          zadd_xx_opt           STRANDED (parser + executor exist)
+
+Below ~21 pct means classified. Above ~46 pct has meant stranded every time it has been
+checked. NOTE THE ONE THAT BREAKS THE RULE: sort_ro_alpha at 23.9 pct sits in the
+"classified" band and has NO floor class, NO parser and NO executor — its dispatch is
+low precisely BECAUSE the command is so expensive (13,000 instr/op) that a full generic
+dispatch is only a quarter of it. A SHARE IS A RATIO AND A CHEAP COMMAND MAKES DISPATCH
+LOOK BIG. Always check the absolute instr/op alongside it.
+
+NOT INVESTIGATED, and flagged rather than claimed: set_base at 33.9 pct sits between
+the two bands on the single most frequent command in any Redis workload. It was one
+screen run, so per the expire_nx_opt correction it is a ranking hint and not a
+measurement. It is the obvious next shape to ABBA.
+
+PROVENANCE:
+  ELF sha256 (first 16)  c36c3fb0a66033de — built LOCALLY with
+                         RCH_CARGO_WRAPPER_BYPASS=1, env -u CARGO_TARGET_DIR,
+                         executable path from --message-format=json, COPIED to a
+                         private path and sha'd there. Contains 62ce27eb5.
+  tree                   HEAD plus a peer's uncommitted fr-server/src/main.rs.
+  harness                scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines
+                         in the SAME invocation.
+  host                   thinkstation1, 64 cores, /data 315G, no build this turn.
+
+RETRY PREDICATE: do NOT spend a dispatch lever on sinterstore_3src — 7.4 pct is the
+floor and there is nothing to take. If anyone wants this shape, attack the intersection
+or the store path and measure against fr's 9,900.3 instr/op baseline. And read the
+calibration above WITH the absolute instr/op beside it, never the share alone.
