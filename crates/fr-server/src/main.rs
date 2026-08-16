@@ -14825,6 +14825,13 @@ enum BorrowedDispatchFloorClass {
     /// classified and this form was not, leaving the range shape at 46.4 pct dispatch
     /// share against the base form's 16.0 pct.
     BitcountRange,
+    /// (frankenredis-f2zrr) `BITCOUNT key start end BYTE|BIT`, array length 5. Its
+    /// arity-2 and arity-4 siblings were both front-classified and this was not, so the
+    /// unit form reached its borrowed route only by walking the cascade. MEASURED
+    /// PRE-LEVER at 46.1-46.4 pct dispatch share against the arity-4 form's 19.8-20.2
+    /// pct, and 0.7907-0.8174x against Redis 7.2.4 across eight samples -- the worst
+    /// measured shape on the board at the time this was written.
+    BitcountUnit,
     Zrange,
     Hrandfield,
     BitposKeyBit,
@@ -16457,6 +16464,12 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // wider claim would capture it and the arm below would decline it to GENERIC.
         (4, BorrowedDispatchFloorCommand::Bitcount) => {
             Some(BorrowedDispatchFloorClass::BitcountRange)
+        }
+        // (frankenredis-f2zrr) The unit form. Arity 5 EXACTLY: BITCOUNT has no wider
+        // borrowed parser, so a range claim would reach shapes the arm must decline and
+        // a floor decline calls generic directly rather than returning to the cascade.
+        (5, BorrowedDispatchFloorCommand::Bitcount) => {
+            Some(BorrowedDispatchFloorClass::BitcountUnit)
         }
         (3, BorrowedDispatchFloorCommand::Hget) => Some(BorrowedDispatchFloorClass::Hget),
         (3, BorrowedDispatchFloorCommand::Sismember) => Some(BorrowedDispatchFloorClass::Sismember),
@@ -20552,6 +20565,32 @@ fn try_dispatch_floor_classified_action(
         // removed. The range form measured 46.4 pct dispatch share against the base
         // form's 16.0 pct, and 82 pct of its excess over base was dispatch rather than
         // the start/end handling an earlier STOP verdict attributed it to.
+        // (frankenredis-f2zrr) Mirrors the cascade arm at ~7885 exactly -- same parser,
+        // same executor, same generic fallthrough. Only the walk to reach it goes.
+        BorrowedDispatchFloorClass::BitcountUnit => {
+            if let Some(packet) =
+                parse_borrowed_plain_bitcount_unit_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_bitcount_borrowed(
+                    packet.key,
+                    Some((packet.start, packet.end, Some(packet.unit))),
+                    ts,
+                )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
         BorrowedDispatchFloorClass::BitcountRange => {
             if let Some(packet) =
                 parse_borrowed_plain_bitcount_range_packet(unparsed, &parser_config)
@@ -44676,6 +44715,81 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
     /// keeps a bogus option on the generic path. That is asserted separately below,
     /// because a parser check alone would pass with the guard deleted.
     #[test]
+    /// (frankenredis-f2zrr) BITCOUNT claims arities 2, 4 and 5 — and nothing else.
+    ///
+    /// Covered on BOTH sides of the claimed set, not just inside it. Arity 3 sits in a
+    /// hole between two claims (`BITCOUNT key start` is not a legal form) and arity 6 is
+    /// one past the top. A corpus that only asserted the claimed arities could not
+    /// detect an exclusion, which is how multi-key TOUCH sat at 3.2848x behind the
+    /// incumbent while passing its own test.
+    #[test]
+    fn bitcount_claims_two_four_and_five_only() {
+        let cfg = ParserConfig::default();
+        let pkt = |args: &[&[u8]]| -> Vec<u8> {
+            let mut p = format!("*{}\r\n$8\r\nBITCOUNT\r\n", args.len() + 1).into_bytes();
+            for a in args {
+                p.extend_from_slice(format!("${}\r\n", a.len()).as_bytes());
+                p.extend_from_slice(a);
+                p.extend_from_slice(b"\r\n");
+            }
+            p
+        };
+
+        for (args, want) in [
+            (
+                &[&b"k"[..]][..],
+                Some(super::BorrowedDispatchFloorClass::BitcountKey),
+            ),
+            // Arity 3 is a HOLE between the arity-2 and arity-4 claims: `BITCOUNT key
+            // start` is not a legal form, so nothing must claim it.
+            (&[&b"k"[..], &b"0"[..]][..], None),
+            (
+                &[&b"k"[..], &b"0"[..], &b"5"[..]][..],
+                Some(super::BorrowedDispatchFloorClass::BitcountRange),
+            ),
+            (
+                &[&b"k"[..], &b"0"[..], &b"5"[..], &b"BYTE"[..]][..],
+                Some(super::BorrowedDispatchFloorClass::BitcountUnit),
+            ),
+            // ONE PAST THE TOP: no parser exists, so it must keep walking.
+            (
+                &[&b"k"[..], &b"0"[..], &b"5"[..], &b"BYTE"[..], &b"x"[..]][..],
+                None,
+            ),
+        ] {
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(&pkt(args), &cfg),
+                want,
+                "BITCOUNT with {} argument(s) classified wrongly",
+                args.len()
+            );
+        }
+
+        // WHICH LAYER DISCRIMINATES: the EXECUTOR, not the parser. I assumed the
+        // opposite and the test caught it. parse_borrowed_plain_bitcount_unit_packet
+        // takes the unit as an OPAQUE BULK (main.rs ~21648) and accepts any 5th token;
+        // validation lives in execute_plain_bitcount_borrowed (fr-runtime ~19242), which
+        // matches BYTE/BIT and declines before any side effect. The arm's
+        // `&& let Some(response) = ...execute...` is therefore what routes a bogus unit
+        // to generic.
+        //
+        // Both are asserted because the pair is the contract: the parser must ACCEPT (or
+        // the claim strands valid input) and the executor must REJECT (or a bogus unit
+        // is served as if valid). Asserting only one leaves the other free to change.
+        for unit in [&b"BYTE"[..], &b"BIT"[..], &b"BOGUS"[..]] {
+            assert!(
+                super::parse_borrowed_plain_bitcount_unit_packet(
+                    &pkt(&[&b"k"[..], &b"0"[..], &b"5"[..], unit]),
+                    &cfg,
+                )
+                .is_some(),
+                "the unit parser is positional and must accept {:?}; validation is the \
+                 executor's job",
+                String::from_utf8_lossy(unit)
+            );
+        }
+    }
+
     fn zrank_family_claims_arity_three_and_four_only() {
         let cfg = ParserConfig::default();
         let pkt = |name: &[u8], extra: Option<&[u8]>| -> Vec<u8> {
