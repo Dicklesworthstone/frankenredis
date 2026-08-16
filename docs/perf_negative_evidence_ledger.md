@@ -20776,3 +20776,147 @@ fr's own instr/op against the 2,137.5 baseline after any lever. And when ranking
 dispatch levers from here on, weight by command frequency: SET's 21 pct per-op share is
 worth more in aggregate than zadd_xx_opt's 58 pct, and nothing in the per-shape table
 says so.
+
+## MEASURED NO-CHANGE (frankenredis-do85w / mg05w) — zadd_base is unmoved at 46.1 pct dispatch share and remains the worst route
+
+Claim class: COMPETITIVE — fr and the vendored Redis 7.2.4 binary in the SAME invocation.
+Same provenance limitation as the rows above (valgrind hosts the target, so no
+self-reported ELF SHA; ABBA repeats, not a bootstrap CI).
+
+    run  shape          fr instr/op   redis 7.2.4   fr/redis   dispatch share
+    A    zadd_base          4457.3        5267.9     0.8461x       46.1%
+    B    zadd_xx_opt        3208.4        5558.1     0.5772x       16.4%
+    B    zadd_xx_opt        3165.8        5716.1     0.5538x       16.4%
+    A    zadd_base          4453.6        5105.7     0.8723x       46.1%
+
+MEASURED AGAINST THE FOUR-RUN PRE-LEVER BASELINE BANKED EARLIER:
+
+    zadd_base   pre  fr ~4442  share 46.0-46.1 pct   ratio 0.7963-0.8724
+                post fr ~4455  share 46.1 pct        ratio 0.8461-0.8723
+                movement +0.3 pct
+
+**THIS IS A CONFIRMED NO-CHANGE, NOT AN AMBIGUOUS ONE, AND THAT DISTINCTION IS WHY THE
+BASELINE WAS WORTH BUILDING.** The baseline established a 9.6 pct ratio noise floor on
+this shape and required movement to exceed 10 pct before being called. Measured movement
+is 0.3 pct — two orders inside the floor, and the dispatch share is identical to a tenth
+of a point. Without the baseline this would have read as "roughly the same, hard to say".
+
+WHY IT DID NOT MOVE, from source rather than inference. The classifier holds:
+
+    (5, Zadd)                          -> ZaddFlag        the OPTION form
+    (arity >= 8, even)                 -> the variadic form
+    (4, Zadd)                          -> ABSENT
+
+`ZADD z 1 a` is array length FOUR. `c2973aa12 perf(dispatch): front-classify ZADD at
+array length 5` changed the arity-FIVE arm, which was already classified at 16.4 pct
+share before it landed and is still at 16.4 pct after. **The lever refined a route that
+was not stranded and left the stranded one untouched** — so zadd_base remains the worst
+measured ratio on the board at 0.8723x worst bound.
+
+THIS IS THE SECOND TIME A ZADD FIGURE HAS MISDIRECTED WORK ON THIS FAMILY. Earlier a
+1.242x reading for zadd_xx_opt was carried on a stale binary and pointed at the option
+form; the option form was already fine at 0.554x. Both errors point the same way: the
+stranded shape is the BASE form, and it has been passed over twice.
+
+THE LEVER IS UNAMBIGUOUS AND STILL AVAILABLE: an `(4, Zadd)` classifier arm plus a
+dispatch arm. `parse_borrowed_plain_zadd_packet` already exists and is reachable only
+from the cascade. Arity 4 EXACTLY — the option form at 5 and the variadic at >= 8 are
+already claimed, so a wider arm would collide with them.
+
+A/A NULL, from the ABBA repeats in this one invocation:
+
+    fr arm      zadd_base    4457.3 -> 4453.6   -0.08%   <- essentially exact
+                zadd_xx_opt  3208.4 -> 3165.8   -1.33%
+    redis arm   zadd_base    5267.9 -> 5105.7   -3.08%
+                zadd_xx_opt  5558.1 -> 5716.1   +2.84%
+    ratio       base 0.8461 -> 0.8723  3.10%  |  xx 0.5772 -> 0.5538  4.05%
+
+fr's zadd_base arm reproduced to 0.08 pct while the incumbent moved 3.08 pct — ninth
+consecutive row where the spread is incumbent-dominated. The dispatch SHARE, which
+carries no incumbent term at all, is the reliable half: 46.1 pct both runs.
+
+EXECUTABLE IDENTITIES, full 64-hex (computed post-run, see limitation above):
+  candidate  `ef698e0c28f74d21cee3d5cbcb13f2c01eb0f64666d7b7c373c00ebc22354dfc`
+             — contains c2973aa12; verified as an ancestor of HEAD before measuring.
+  incumbent  `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+
+Campaign output: yes — a landed lever measured as not having moved its intended target,
+called confidently because a noise floor existed to call it against.
+
+RETRY PREDICATE: take `(4, Zadd)`. Do not re-measure zadd_base before that arm exists —
+the shape has now been measured six times across three binaries at 46.0-46.1 pct share.
+
+--------------------------------------------------------------------------------
+CORRECTION — get_control is NOT front-classified, and the "classified band" in my
+calibration is really "EARLY IN THE CASCADE" (frankenredis-z2ce3)
+
+Following the set_base row, I checked which common commands are absent from the floor
+token table. FOUR ARE: GET, SET, HSET, MSET. The GET result invalidates the framing of
+the calibration two rows above, which I built on the assumption that get_control was a
+front-classified reference.
+
+    floor tokens: 131
+    absent, of the 35 most common commands checked: GET, SET, HSET, MSET
+
+GET IS NOT IN THE FLOOR TABLE, YET IT HAS THE CHEAPEST DISPATCH I HAVE MEASURED —
+275.4 instr/op, 20.6 pct. I have repeatedly called it "a front-classified route" and
+used it as the reference for what classification costs. That was wrong.
+
+WHY GET IS CHEAP ANYWAY: its cascade arm is at main.rs:6960, and the floor dispatch
+call is at ~6899. It is the FIRST ARM IN THE CASCADE — roughly sixty lines past the
+floor. So it pays one failed floor lookup plus one successful parser attempt, and
+nothing else. (The other `parse_borrowed_plain_get_packet` site, at 1288, is inside
+`parse_sharded_command` and belongs to the sharded reactor, not this path.)
+
+    SO THE CALIBRATION'S BANDS ARE RIGHT AND ITS LABELS ARE WRONG. "Below ~21 pct
+    means classified" should read: BELOW ~21 PCT MEANS CHEAP TO REACH — either
+    front-classified, or first in the cascade. Those are two different mechanisms
+    with the same cost, and dispatch share cannot tell them apart.
+
+THIS CHANGES THE SET LEVER, AND FOR THE BETTER. From the previous row: SET's arm is at
+7303 and pays 724.6 instr/op; GET's is at 6960 and pays 275.4. The ~450 instr/op
+difference is the WALK BETWEEN THEM — and what sits between is the seven SET option
+parsers at 7075-7224, each failing on a header byte pair, plus everything else in that
+span.
+
+So there are two ways to fix SET, not one:
+
+  A. add a floor class for `*3` SET — the change I proposed last row. It carries the
+     `9hnxt` trap: claim `*3` only, or every SET NX / SET EX / SET GET is sent to an
+     arm that refuses it and thence to GENERIC, a large regression on common shapes.
+
+  B. MOVE SET'S ARM EARLIER IN THE CASCADE, next to GET's. No classifier entry, no
+     arity claim, no possibility of swallowing the option forms — because the option
+     parsers keep their own arms and a `*3` packet still only matches base SET. The
+     cost model says this lands in the same place as (A): GET proves that first-in-
+     cascade already costs 275.
+
+(B) IS THE SAFER CHANGE AND I DID NOT SEE IT UNTIL GET'S ABSENCE FORCED THE QUESTION.
+It is also reversible and testable in isolation: reorder, measure fr's own instr/op
+against the 2,137.5 baseline, revert if it does not move. NOT VERIFIED — I have not
+checked whether the arms between 6960 and 7303 have ordering dependencies that make a
+move unsafe. Anything matching a `*3` prefix ahead of SET would need checking first.
+
+HSET AND MSET ARE ALSO ABSENT and were not measured. Both are common writes. Flagged,
+not claimed — per the expire_nx_opt correction, absence from the table is a structural
+fact but the cost of that absence is a measurement nobody has taken.
+
+WHAT SURVIVES UNCHANGED from the earlier rows: every dispatch SHARE and every fr
+instr/op figure. The stranded shapes really are stranded — ZADD, EXPIRE and BITCOUNT
+are mis-claimed at the wrong arity, which is a different defect from "absent" and is
+unaffected by this correction. Only the description of the reference point moves.
+
+PROVENANCE:
+  ELF sha256             c36c3fb0a66033deff0cf03dc6a313ef647d5970cd22596aac575120a5d2a297
+                         (same binary as the rows above; no new measurement was taken
+                         for this row, which is a source correction to the
+                         interpretation of measurements already banked)
+  method                 brace-matched body of `borrowed_dispatch_floor_command`,
+                         token regex allowing a trailing comma (131 tokens), checked
+                         against 35 common command names.
+  host                   thinkstation1, /data 315G, no build this turn.
+
+RETRY PREDICATE: do NOT re-measure get_control to check this — its numbers are fine,
+only their label was wrong. DO check the arms between 6960 and 7303 for ordering
+dependencies before attempting option (B), and DO measure HSET and MSET before
+assuming their absence costs anything.
