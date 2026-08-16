@@ -21639,3 +21639,103 @@ plus a noise-floor finding that invalidates a rule of thumb.
 RETRY PREDICATE: before measuring any swept shape, READ THE HARNESS DEFINITION and count
 its tokens — do not match by name. Most swept shapes need a NEW harness shape written
 first. And measure each shape's own A/A null rather than assuming ~3 pct incumbent noise.
+
+--------------------------------------------------------------------------------
+CONFIRMED UNMOVED — set_base still 33.9 pct dispatch; and the SAFER of its two fixes is
+now VERIFIED VIABLE (frankenredis-z2ce3)
+
+Completes the standings refresh the previous rows' predicates demanded, and resolves
+the one item those rows left explicitly NOT VERIFIED.
+
+CONVENTION: fr instructions per op / redis 7.2.4's. BELOW 1.0 = fr AHEAD.
+
+    A/A control (get_control)  0.4161 / 0.4276 / 0.4178      spread 2.8 pct
+
+    set_base             ELF c36c3fb0…        ELF 11b0c675…       change
+      fr instr/op           2137.5               2131.7           -0.27 pct
+      dispatch share        33.9 pct             33.9 pct          NONE
+      dispatch instr/op    ~724.6                ~723.0            none
+      fr/redis              0.5241x              0.5198x           within noise
+
+    NEW ELF, four runs   fr 2125.9 / 2133.6 / 2139.7 / 2127.4   spread 0.65 pct
+                         redis 4232.4 / 4019.6 / 4075.4 / 4082.3  spread 5.3 pct
+                         ratio 0.5023 / 0.5308 / 0.5250 / 0.5211  spread 5.7 pct
+                         dispatch 33.9 / 33.9 / 33.9 / 34.0
+
+Monotonic on both arms in all four runs. Plain SET is still absent from the floor token
+table and still walks ~450 instr/op further than GET.
+
+THE BLOCKER IS RESOLVED — AND MY FIRST CHECK OF IT WAS UNSOUND, which is worth
+recording because it is the day's recurring error in miniature.
+
+The earlier row proposed two fixes and marked one NOT VERIFIED: (B) move SET's cascade
+arm up beside GET's, which avoids the arity-claim trap entirely — provided nothing
+between them intercepts a `*3` packet.
+
+My first attempt grepped for prefix LITERALS in lines 6960-7303 and found only two.
+That was the wrong view: those parsers hardcode their prefixes INSIDE their own
+function bodies, so a literal-scan of the call-site range cannot see what actually
+matches. Same shape as the setter-callers grep, the single-line regex and the
+classifier-vs-dispatch-arm confusion — a view that structurally cannot show the thing
+being looked for.
+
+Done properly — enumerate the parsers CALLED in that span, then read each one's own
+prefix:
+
+    keyed_pop            b"*2\r\n$4\r\n"      watch      b"*2\r\n$5\r\n"
+    unwatch              b"*1\r\n$7\r\n"
+    set_nx, set_xx       b"*4\r\n$3\r\n"
+    set_relexpire,
+      set_opt_get,
+      set_absexpire      b"*5\r\n$3\r\n"
+    set_relexpire_get,
+      set_cond_relexpire b"*6\r\n$3\r\n"
+    key_arg1, key_arg2   prefix is a PARAMETER — call sites in this span pass
+                         b"*4\r\n$3\r\n" and b"*3\r\n$4\r\n"
+
+NOT ONE OF THEM MATCHES `*3\r\n$3\r\n` — arity 3 with a three-character command, which
+is what plain SET is. The seven SET option parsers are all `*4`/`*5`/`*6`, and the only
+`*3` in the span is `$4` (a four-character command). So a `*3` SET packet passes through
+the entire 6960-7303 span untouched, and MOVING SET'S ARM TO SIT BESIDE GET'S IS SAFE.
+
+    Option (B) is viable, needs no classifier entry, carries no arity-claim trap, and
+    cannot swallow the option forms because they keep their own arms and match on
+    prefixes SET does not have.
+
+SIZE, using the residual characterised two rows ago (landed rewires reach ~460 instr/op
+of dispatch, not get_control's 275):
+
+    fr 2131.7 - (723 - 460) = ~1,869 instr/op against redis 4,102.4 = ~0.456x
+    from 0.5198x — about a 1.14x movement.
+
+THAT IS THE SMALLEST AVAILABLE WIN OF THE FOUR REWIRES, AND PROBABLY THE MOST VALUABLE
+ANYWAY. SET's dispatch is only ~263 instr/op above the landing zone, where
+expire_nx_opt's is ~1,838. But per-op share is the wrong lens: SET is the most
+frequently issued command in any Redis workload, and nothing in a per-shape table
+weights for that. Rank these two by expected aggregate, not by per-op delta.
+
+STANDINGS, COMPLETE. Every shape this series identified has now been re-measured on the
+current ELF:
+    sort_ro_alpha    1.52x    only shape above parity; NOT a rewire (no route at all)
+    expire_nx_opt   ~1.03x    unmoved, 51.0 pct — largest per-op rewire remaining
+    set_base        0.520x    unmoved, 33.9 pct — smallest per-op, highest frequency
+    zadd_xx_opt     CROSSED   1.2416 -> 0.5582
+    zadd_base       CROSSED   0.8464 -> 0.5283
+    bitcount_range  CROSSED   0.8654 -> 0.5335
+
+PROVENANCE:
+  ELF sha256 (new)     11b0c67517b6130fac51679ec296db62d31163a6525c151f3c10e21ba86d4182
+                       built LOCALLY at HEAD 8ae6ea4b4 with RCH_CARGO_WRAPPER_BYPASS=1
+                       and env -u CARGO_TARGET_DIR, executable path from
+                       --message-format=json, COPIED to a private path and sha'd there.
+  ELF sha256 (old)     c36c3fb0a66033deff0cf03dc6a313ef647d5970cd22596aac575120a5d2a297
+  tree                 HEAD 8ae6ea4b4 plus a peer's uncommitted fr-server/src/main.rs.
+  harness              scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines in
+                       the SAME invocation.
+  host                 thinkstation1, 64 cores, /data 311G, no build this turn.
+
+RETRY PREDICATE: do NOT re-measure set_base again before a lever exists — it has now
+been confirmed unmoved on two ELFs. DO take option (B); the span is verified clear and
+it is the lower-risk of the two fixes. Verify after landing that the SET option forms
+(NX/XX/EX/GET) did not regress — they are the shapes an ordering change could disturb,
+and they are cheap to check with set_xx_opt and set_ex_opt.
