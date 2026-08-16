@@ -2452,6 +2452,46 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"HINCRBYFLOAT", b"s:ls", b"f", b"1"]));
     cmds.push(c(&[b"hincrbyfloat", b"h:if", b"f", b"0"]));
     cmds.push(c(&[b"HINCRBYFLOAT", b"h:if", b"f"]));
+    // (frankenredis-m6xu9) EXPIRE-family corpus, landed BEFORE the classifier change
+    // so these rows are first proven correct against 7.2.4 through the GENERIC route.
+    // Once PEXPIRE/PEXPIREAT/EXPIREAT are front-classified, the same rows then prove
+    // fast == generic == 7.2.4 without anyone having to trust a corpus written in the
+    // same commit as the thing it validates.
+    //
+    // The four commands differ only in UNIT (seconds vs milliseconds) and in
+    // RELATIVE vs ABSOLUTE. A route wired to the wrong sibling still replies 1 and
+    // still sets an expiry, so the reply alone cannot tell them apart -- the TTL has
+    // to be read back with a command of the OPPOSITE unit, which is what makes these
+    // rows discriminating rather than decorative. Same trap as SETEX/PSETEX.
+    cmds.push(c(&[b"SET", b"s:ex1", b"v"]));
+    cmds.push(c(&[b"EXPIRE", b"s:ex1", b"10000"]));
+    cmds.push(c(&[b"TTL", b"s:ex1"]));
+    cmds.push(c(&[b"SET", b"s:ex2", b"v"]));
+    cmds.push(c(&[b"PEXPIRE", b"s:ex2", b"10000000"]));
+    cmds.push(c(&[b"TTL", b"s:ex2"]));
+    cmds.push(c(&[b"SET", b"s:ex3", b"v"]));
+    cmds.push(c(&[b"EXPIREAT", b"s:ex3", b"4102444800"]));
+    cmds.push(c(&[b"EXPIRETIME", b"s:ex3"]));
+    cmds.push(c(&[b"SET", b"s:ex4", b"v"]));
+    cmds.push(c(&[b"PEXPIREAT", b"s:ex4", b"4102444800000"]));
+    cmds.push(c(&[b"EXPIRETIME", b"s:ex4"]));
+    cmds.push(c(&[b"PEXPIRETIME", b"s:ex4"]));
+    // Absent key: all four must answer 0 and create nothing.
+    cmds.push(c(&[b"PEXPIRE", b"s:absent", b"1000"]));
+    cmds.push(c(&[b"EXPIREAT", b"s:absent", b"4102444800"]));
+    cmds.push(c(&[b"PEXPIREAT", b"s:absent", b"4102444800000"]));
+    cmds.push(c(&[b"EXISTS", b"s:absent"]));
+    // Decline paths: non-integer and out-of-range must reach the generic route and
+    // produce redis's exact error, which is the half a fast route gets wrong.
+    cmds.push(c(&[b"PEXPIRE", b"s:ex2", b"notanint"]));
+    cmds.push(c(&[b"EXPIREAT", b"s:ex3", b"notanint"]));
+    cmds.push(c(&[b"PEXPIREAT", b"s:ex4", b"99999999999999999999"]));
+    cmds.push(c(&[b"PEXPIRE", b"s:ex2", b"9999999999999999"]));
+    // Mixed case and neighbouring arities.
+    cmds.push(c(&[b"pexpire", b"s:ex2", b"10000000"]));
+    cmds.push(c(&[b"expireat", b"s:ex3", b"4102444800"]));
+    cmds.push(c(&[b"PEXPIRE", b"s:ex2"]));
+    cmds.push(c(&[b"PEXPIREAT", b"s:ex4", b"4102444800000", b"extra"]));
     // (frankenredis-ozrro) COPY is claimed at arity 3 only; the REPLACE spelling
     // keeps the cascade. Both the create and the already-exists branches run,
     // and the destination is read back so a copy that returned 1 without
@@ -2561,6 +2601,13 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     // claims (1..=4 values, previously 5..=18). One row per command per new
     // arity, plus the outcomes their executors can decline on: a missing key
     // (SREM/ZREM/HDEL return 0 and must not create), and a WRONGTYPE target.
+    // DEL at one key, now claimed by the floor. Present, absent, and a second
+    // delete of the same key (0, not an error) are the three outcomes its
+    // executor can return.
+    cmds.push(c(&[b"SET", b"kv:d", b"v"]));
+    cmds.push(c(&[b"DEL", b"kv:d"]));
+    cmds.push(c(&[b"DEL", b"kv:d"]));
+    cmds.push(c(&[b"DEL", b"kv:never"]));
     cmds.push(c(&[b"SADD", b"kv:s", b"a"]));
     cmds.push(c(&[b"SADD", b"kv:s", b"b", b"c"]));
     cmds.push(c(&[b"SADD", b"kv:s", b"d", b"e", b"f"]));
