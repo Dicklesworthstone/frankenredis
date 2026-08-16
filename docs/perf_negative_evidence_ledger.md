@@ -22315,3 +22315,70 @@ RETRY PREDICATE: ZADD base, BITCOUNT range and the four expire conditionals rema
 exact-arity claims with no arity-N+1 shape. Two for two so far. Enumerate each command's
 parser CALL SITES before writing the shape — that enumeration, not the shape, is what
 distinguishes a complete claim from a lucky one.
+
+## MEASURED ATTRIBUTION (frankenredis-p98mw) — ZADD's arity-6 GAP is 0.7853x at 39.6 pct dispatch: a third instance, but a milder sub-case, and severity is not uniform
+
+Claim class: COMPETITIVE — fr and the vendored Redis 7.2.4 binary in the SAME invocation.
+Same provenance limitation as the rows above (valgrind hosts the target, so no
+self-reported ELF SHA; ABBA repeats, not a bootstrap CI).
+
+    run  shape        fr instr/op   redis 7.2.4   fr/redis   dispatch share
+    A    zadd_2pair       5376.9        7138.4     0.7532x       39.6%
+    B    zadd_base        2716.9        5183.8     0.5241x       16.7%   <- CONTROL
+    B    zadd_base        2645.0        5336.0     0.4957x       16.9%   <- CONTROL
+    A    zadd_2pair       5381.3        6852.1     0.7853x       39.6%
+
+Worst bound 0.7853x, which makes it the worst measured shape on the board — narrowly
+ahead of incrbyfloat_nondyadic's 0.7835x, and the two are inside each other's spreads.
+
+A DIFFERENT SUB-CASE FROM THE PREVIOUS TWO. TOUCH and MSETNX were EDGE exclusions: an
+exact-arity claim at the bottom of a command's range with everything above it unclaimed.
+ZADD is a GAP IN THE MIDDLE — the classifier claims 4, 5 and `>= 8 && even`, so arities 6
+and 7 fall between two claimed regions. `parse_borrowed_plain_zadd2_packet` pins `*6` with
+its own executor call, so the shape has a route it cannot reach.
+
+AND THE SEVERITY IS MARKEDLY LOWER, WHICH IS THE FINDING:
+
+    shape        stranded share   ratio      sub-case
+    touch_2         73.9 pct      3.2848x    edge exclusion
+    msetnx_2        70.5 pct      2.6703x    edge exclusion
+    zadd_2pair      39.6 pct      0.7853x    middle gap
+
+**39.6 pct sits just below the 40-70 pct stranded band, where the other two sat above it.**
+An unclaimed shape's cost is therefore NOT a constant — it depends on how far down the
+cascade its serving arm sits. TOUCH's and MSETNX's arms are deep enough that reaching them
+costs more than the op; ZADD's arity-6 arm is shallow enough that the walk roughly doubles
+it. **"Unclaimed" predicts a defect exists; it does not predict its size, and the three
+measured instances span 0.79x to 3.28x.** Anyone triaging the remaining exact-arity claims
+by count rather than by measurement will mis-rank them.
+
+THE SHAPE IS SEEDED WITH BOTH MEMBERS ALREADY PRESENT so every op is an update returning
+0 and the sorted set never changes size. Seeding only `z 1 a` would make the first op
+insert `b` and the rest update — two paths averaged into one figure, the same construction
+error the MSETNX shapes had to avoid.
+
+A/A NULL, from the ABBA repeats in this one invocation:
+
+    fr arm      zadd_2pair  5376.9 -> 5381.3   +0.08%
+                zadd_base   2716.9 -> 2645.0   -2.65%
+    redis arm   zadd_2pair  7138.4 -> 6852.1   -4.01%
+                zadd_base   5183.8 -> 5336.0   +2.94%
+    ratio       2pair 0.7532 -> 0.7853  4.26%  |  base 0.5241 -> 0.4957  5.41%
+
+A 4.26 pct ratio spread on a shape whose claim is "0.7853x worst bound" is wide relative
+to the 0.79-vs-0.78 margin against incrbyfloat_nondyadic, so **the two should be treated as
+tied for worst rather than ranked.** The 39.6-vs-16.8 pct SHARE gap carries no incumbent
+term and is the reliable evidence that this shape is stranded at all.
+
+EXECUTABLE IDENTITIES, full 64-hex (computed post-run, see limitation above):
+  candidate  `f3c2e2b949fddab8d8a2894e430536a955d9bcd9f197dcf65323fd2c15b43de7`
+  incumbent  `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+  tree       279da3941; NO rebuild — no crate code had changed, shape added is Python.
+
+Campaign output: yes — a third instance of the defect class, and the first evidence that
+its severity varies by an order depending on cascade depth.
+
+RETRY PREDICATE: claim ZADD at arity 6 (the parser exists; mirror its cascade arm), and
+check arity 7 for a parser at the same time rather than leaving a second gap. Do NOT
+assume the remaining exact-arity claims are as severe as TOUCH and MSETNX — measure each,
+because this one is four times milder.

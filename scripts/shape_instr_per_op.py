@@ -340,6 +340,18 @@ SHAPES = {
     "expire_base": (["SET s abcdefghijklmnop"], ["EXPIRE", "s", "10000"]),
     "expire_nx_opt": (["SET s v", "EXPIRE s 10000"], ["EXPIRE", "s", "500", "NX"]),
     "zadd_base": (["ZADD z 1 a"], ["ZADD", "z", "1", "a"]),
+    # (frankenredis-p98mw) ZADD at array length 6, the TWO-PAIR form, paired with
+    # zadd_base (length 4) so the two differ only by pair count.
+    #
+    # The classifier claims ZADD at 4, 5 and >= 8-even. Six and seven are a GAP in the
+    # middle of the claimed set -- not an exclusion at the edge, which is what the TOUCH
+    # and MSETNX cases were -- and parse_borrowed_plain_zadd2_packet pins *6 with its
+    # own executor call, so the shape has a route it cannot reach.
+    #
+    # Seeded with BOTH members already present so every op is an update returning 0 and
+    # the sorted set never changes size. Seeding only "z 1 a" would make the first op
+    # insert "b" and the rest update, averaging two paths into one figure.
+    "zadd_2pair": (["ZADD z 1 a 2 b"], ["ZADD", "z", "1", "a", "2", "b"]),
     "zadd_xx_opt": (["ZADD z 1 a"], ["ZADD", "z", "XX", "1", "a"]),
     "sintercard_base": (["SADD s1 m1 m2 m3", "SADD s2 m2 m3 m4"],
                         ["SINTERCARD", "2", "s1", "s2"]),
