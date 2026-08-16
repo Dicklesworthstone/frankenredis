@@ -23642,3 +23642,88 @@ RETRY PREDICATE: stop sampling these two against each other; the separation is s
 the intrinsic spread and no sample count fixes that. Re-check loadavg DURING a long run, not
 only before it — this one started at 15.8 and finished at 82.5, and a row certified on the
 opening reading alone would have misrepresented its own conditions.
+
+--------------------------------------------------------------------------------
+VERIFIED — the arity-6 ZADD arm is now CHAINED and the served form is unharmed; the fix
+is UNCOMMITTED; and load quintupled mid-run without moving the dispatch share
+(frankenredis-z2ce3, frankenredis-p98mw)
+
+Two rows ago this ledger reported a live regression: `(6, Zadd)` claimed both arity-6
+ZADD forms while its arm called only `zadd2_packet`, sending the flagged form to the
+GENERIC path. The arm now reads:
+
+    if let Some(packet) = parse_borrowed_plain_zadd2_packet(..)
+        && let Some(response) = runtime.execute_plain_zadd_borrowed(..)      { .. }
+    else if let Some(packet) = parse_borrowed_plain_zadd_flag2_packet(..)
+        && let Some(response) = runtime.execute_plain_zadd_flag2_borrowed(..) { .. }
+    else { parse_borrowed_multibulk_action(..) }
+
+That is exactly the idiom the regression row specified. IT IS NOT COMMITTED —
+`git status` shows `crates/fr-server/src/main.rs` modified and there are no code commits
+since ab4046b7e. Same exposure as the multi-key TOUCH fix earlier: if that file is
+reverted or swept, the regression returns.
+
+LOADAVG OBSERVED BY ME, both ends:
+    before  19.42 / 19.78 / 23.47        after  96.22 / 47.99 / 33.29
+
+The reported trigger was 8.44. The box read 19.42 at my own check — FOURTH CONSECUTIVE
+TURN in which a relayed loadavg was less than half the measured one (16.8->25.3,
+13->31.4, 6.88->24.7, 8.44->19.4). The throughput arm was deferred for the fifth time;
+the 15-minute average of 23.5 is more than double the ~10 gate.
+
+CONVENTION: fr instructions per op / redis 7.2.4's. BELOW 1.0 = fr AHEAD.
+
+    A/A control (get_control)  0.4233 / 0.3938 / 0.4316      spread 9.6 pct
+
+    zadd_2pair          BEFORE chaining      AFTER chaining
+      fr instr/op          3668.3               3645.1        -0.63 pct
+      dispatch share       15.7 pct             15.6 pct
+      dispatch instr/op    ~574.5               ~568.7        -1.0 pct
+      fr/redis             0.5143x              0.5012x       within the null
+
+    AFTER, four runs   fr 3656.1 / 3633.9 / 3665.1 / 3625.1   spread 1.1 pct
+                       dispatch 15.6 pct in ALL FOUR
+
+THE SERVED FORM IS UNHARMED. fr's cost moved 0.63 pct, inside its own 1.1 pct spread.
+That is the expected result and worth confirming rather than assuming: the first branch
+still matches zadd_2pair, so the added `else if` is never evaluated for this shape. THE
+FIX IS FREE FOR THE FORM THAT ALREADY WORKED — which is the question a chaining change
+actually raises, since the risk of adding a branch is that it perturbs the fast path.
+
+WHAT I STILL CANNOT CERTIFY, unchanged from the regression row: there is NO HARNESS
+SHAPE for the flagged arity-6 form, so the fix's actual benefit is unmeasured. Source
+now shows the arm reaches `execute_plain_zadd_flag2_borrowed`, which is the mechanism,
+but a green reading on zadd_2pair says nothing about it — that was precisely the trap
+that hid the original defect. A shape for the flagged form should land with the commit.
+
+AND THE STRONGEST LOAD-IMMUNITY EVIDENCE YET, larger than the doubling recorded two rows
+ago. System load went from 19.42 to 96.22 on the 1-minute during this run — a FIVEFOLD
+increase — and the dispatch share read 15.6 pct in all four runs without varying at the
+displayed precision, while fr's own cost held to 1.1 pct. The A/A control, which is a
+RATIO, degraded to a 9.6 pct spread over the same interval. So in one session:
+
+    fr instr/op      1.1 pct spread   under a 5x load swing
+    dispatch share   0.0 pct
+    A/A ratio        9.6 pct
+
+That is the numerator/denominator split this ledger has recorded from a dozen
+directions, now demonstrated under an extreme load excursion in a single run.
+
+PROVENANCE:
+  ELF sha256           36278f5eb6e9cc08d4a47ea9868a4d1c956ba47a627988dcd78e7c801eb02c88
+                       built LOCALLY at HEAD 2fe5e53a1 PLUS the uncommitted chaining fix
+                       described above, with RCH_CARGO_WRAPPER_BYPASS=1 and
+                       env -u CARGO_TARGET_DIR, executable path from
+                       --message-format=json, COPIED to a private path and sha'd there.
+                       NOT reproducible from HEAD alone — the fix is working-tree state.
+  prior ELF            773d819de62d62d7f496b2a1df8e82bd645228e9e366e64c6294190ffa6d8e2d
+  harness              scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines in
+                       the SAME invocation.
+  host                 thinkstation1, 64 cores, /data 296G, one build this pane.
+  loadavg              19.42/19.78/23.47 before, 96.22/47.99/33.29 after.
+
+RETRY PREDICATE: COMMIT THE CHAINING FIX — it is currently working-tree state carrying a
+regression repair. Do not re-measure zadd_2pair; it is unharmed and settled. Add a
+harness shape for the flagged arity-6 form and expect it to fall from the 46-58 pct band
+into the crossed set near 16 pct — that measurement, not this one, is what closes the
+ZADD family.
