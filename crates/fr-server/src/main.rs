@@ -14644,6 +14644,7 @@ enum BorrowedDispatchFloorClass {
     Pexpire,
     Expireat,
     Pexpireat,
+    Unlink(usize),
     /// (frankenredis-ozrro) Bare `ZRANDMEMBER key`, the single-member reply
     /// form. Its sibling [`Self::ZrandmemberCount`] was classified in an earlier
     /// slice, which left this one alone ~3,600 lines deep in the chain.
@@ -14870,6 +14871,11 @@ enum BorrowedDispatchFloorCommand {
     /// streaming executor were already present but sat ~880 lines deep in the
     /// inline chain, so every call paid the walk to reach them.
     Sinter,
+    /// `UNLINK key [key ...]` at 1..=5 keys, DEL's async-free sibling. In a
+    /// single-threaded engine the async free IS the synchronous free, so it
+    /// shares DEL's dispatcher; only the token and executor differ. It was the
+    /// last member of ozrro's "leave-alone group" still unclassified.
+    Unlink,
     /// `PEXPIRE`, `EXPIREAT`, `PEXPIREAT`, all at arity 3. (frankenredis-m6xu9)
     /// The rest of EXPIRE's family: each already had a parser and executor in
     /// the cascade at ~8751/8771/8791 while their classified sibling EXPIRE
@@ -15079,6 +15085,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'G', b'E', b'T', b'S', b'E', b'T'] => Some(BorrowedDispatchFloorCommand::Getset),
             [b'E', b'X', b'I', b'S', b'T', b'S'] => Some(BorrowedDispatchFloorCommand::Exists),
             [b'S', b'I', b'N', b'T', b'E', b'R'] => Some(BorrowedDispatchFloorCommand::Sinter),
+            [b'U', b'N', b'L', b'I', b'N', b'K'] => Some(BorrowedDispatchFloorCommand::Unlink),
             [b'S', b'E', b'T', b'B', b'I', b'T'] => Some(BorrowedDispatchFloorCommand::Setbit),
             [b'Z', b'C', b'O', b'U', b'N', b'T'] => Some(BorrowedDispatchFloorCommand::Zcount),
             [b'S', b'T', b'R', b'L', b'E', b'N'] => Some(BorrowedDispatchFloorCommand::Strlen),
@@ -15722,6 +15729,13 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // for the classified EXISTS control. (frankenredis-l9wvl)
         (array_len, BorrowedDispatchFloorCommand::Del) if (2..=6).contains(&array_len) => {
             Some(BorrowedDispatchFloorClass::Del(array_len - 1))
+        }
+        // Same range as DEL, same reason. ozrro measured the async-free sibling
+        // at 742/op (1.12x) and filed it "already shallow" on the cascade-bypass
+        // gap, which cannot see front-classification; every other member of that
+        // group has since been classified and won.
+        (array_len, BorrowedDispatchFloorCommand::Unlink) if (2..=6).contains(&array_len) => {
+            Some(BorrowedDispatchFloorClass::Unlink(array_len - 1))
         }
         // (frankenredis-ozrro) Two routes that WORK but sit ~1200 and ~2700 arms'
         // worth of prefix tests deep, so the walk to reach them costs more than
@@ -16928,76 +16942,116 @@ fn dispatch_floor_fast_lpos(
 /// Reuse the exact per-arity parsers that the late cascade arms used for DEL.
 /// A malformed frame or a runtime decline returns `None`, preserving the generic
 /// fallback and its error semantics.
+/// (frankenredis-l9wvl, frankenredis-nkvkp) DEL and its async-free sibling share
+/// one dispatcher: identical packet shapes, identical key counts, and in a
+/// single-threaded engine identical work — the async free IS the synchronous
+/// free. Only the command token and the executor differ, so the arms parse into
+/// a key array and the executor is selected once at the end rather than being
+/// repeated per arity.
 fn dispatch_floor_fast_del(
+    async_free: bool,
     nkeys: usize,
     unparsed: &[u8],
     parser_config: &ParserConfig,
     runtime: &mut Runtime,
     ts: u64,
 ) -> Option<(usize, RespFrame)> {
-    match nkeys {
-        // Single key: the generic key-only parser, same executor, one-key slice —
-        // byte-identical to the cascade arm this replaces.
+    // The RESP prefix encodes the command token's length, so it moves with the
+    // name: 3 for DEL, 6 for the async-free sibling.
+    let name: &[u8] = if async_free { b"UNLINK" } else { b"DEL" };
+    let mut keys: [&[u8]; 5] = [b""; 5];
+    let (consumed, count) = match nkeys {
+        // Single key: the generic key-only parser. Its arm existed only in the
+        // cascade (frankenredis-keyonlyfast), so reaching it cost the walk.
         1 => {
-            let packet = parse_borrowed_plain_key_only_packet(
+            let p = parse_borrowed_plain_key_only_packet(
                 unparsed,
                 parser_config,
-                b"*2\r\n$3\r\n",
-                b"DEL",
+                if async_free {
+                    b"*2\r\n$6\r\n"
+                } else {
+                    b"*2\r\n$3\r\n"
+                },
+                name,
             )?;
-            runtime
-                .execute_plain_del_borrowed(&[packet.key], ts)
-                .map(|response| (packet.consumed, response))
+            keys[0] = p.key;
+            (p.consumed, 1)
         }
         2 => {
-            let packet = parse_borrowed_plain_key_arg1_packet(
+            let p = parse_borrowed_plain_key_arg1_packet(
                 unparsed,
                 parser_config,
-                b"*3\r\n$3\r\n",
-                b"DEL",
+                if async_free {
+                    b"*3\r\n$6\r\n"
+                } else {
+                    b"*3\r\n$3\r\n"
+                },
+                name,
             )?;
-            runtime
-                .execute_plain_del_borrowed(&[packet.key, packet.arg], ts)
-                .map(|response| (packet.consumed, response))
+            keys[0] = p.key;
+            keys[1] = p.arg;
+            (p.consumed, 2)
         }
         3 => {
-            let packet = parse_borrowed_plain_key_arg2_packet(
+            let p = parse_borrowed_plain_key_arg2_packet(
                 unparsed,
                 parser_config,
-                b"*4\r\n$3\r\n",
-                b"DEL",
+                if async_free {
+                    b"*4\r\n$6\r\n"
+                } else {
+                    b"*4\r\n$3\r\n"
+                },
+                name,
             )?;
-            runtime
-                .execute_plain_del_borrowed(&[packet.key, packet.a, packet.b], ts)
-                .map(|response| (packet.consumed, response))
+            keys[0] = p.key;
+            keys[1] = p.a;
+            keys[2] = p.b;
+            (p.consumed, 3)
         }
         4 => {
-            let packet = parse_borrowed_plain_key_arg3_packet(
+            let p = parse_borrowed_plain_key_arg3_packet(
                 unparsed,
                 parser_config,
-                b"*5\r\n$3\r\n",
-                b"DEL",
+                if async_free {
+                    b"*5\r\n$6\r\n"
+                } else {
+                    b"*5\r\n$3\r\n"
+                },
+                name,
             )?;
-            runtime
-                .execute_plain_del_borrowed(&[packet.key, packet.a, packet.b, packet.c], ts)
-                .map(|response| (packet.consumed, response))
+            keys[0] = p.key;
+            keys[1] = p.a;
+            keys[2] = p.b;
+            keys[3] = p.c;
+            (p.consumed, 4)
         }
         5 => {
-            let packet = parse_borrowed_plain_key_arg4_packet(
+            let p = parse_borrowed_plain_key_arg4_packet(
                 unparsed,
                 parser_config,
-                b"*6\r\n$3\r\n",
-                b"DEL",
+                if async_free {
+                    b"*6\r\n$6\r\n"
+                } else {
+                    b"*6\r\n$3\r\n"
+                },
+                name,
             )?;
-            runtime
-                .execute_plain_del_borrowed(
-                    &[packet.key, packet.a, packet.b, packet.c, packet.d],
-                    ts,
-                )
-                .map(|response| (packet.consumed, response))
+            keys[0] = p.key;
+            keys[1] = p.a;
+            keys[2] = p.b;
+            keys[3] = p.c;
+            keys[4] = p.d;
+            (p.consumed, 5)
         }
-        _ => None,
-    }
+        _ => return None,
+    };
+    let slice = &keys[..count];
+    let response = if async_free {
+        runtime.execute_plain_unlink_borrowed(slice, ts)
+    } else {
+        runtime.execute_plain_del_borrowed(slice, ts)
+    }?;
+    Some((consumed, response))
 }
 
 fn dispatch_floor_fast_exists_into(
@@ -17393,9 +17447,25 @@ fn try_dispatch_floor_classified_action(
                 )
             }
         }
+        BorrowedDispatchFloorClass::Unlink(nkeys) => {
+            if let Some((consumed, response)) =
+                dispatch_floor_fast_del(true, nkeys, unparsed, &parser_config, runtime, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply { consumed, response })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
         BorrowedDispatchFloorClass::Del(nkeys) => {
             if let Some((consumed, response)) =
-                dispatch_floor_fast_del(nkeys, unparsed, &parser_config, runtime, ts)
+                dispatch_floor_fast_del(false, nkeys, unparsed, &parser_config, runtime, ts)
             {
                 Ok(BorrowedMultibulkAction::FastReply { consumed, response })
             } else {
@@ -43187,6 +43257,38 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
     #[test]
     fn dispatch_floor_classifier_recognizes_only_exact_target_tokens() {
         let cfg = ParserConfig::default();
+        // DEL's async-free sibling, same 1..=5 key range. It shares DEL's
+        // dispatcher, so the rows that matter are the ones proving the two are
+        // told apart: the six-byte token must reach its own class, and the RESP
+        // prefix carries the token length, so a packet whose declared length does
+        // not match the token must not classify.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*2\r\n$6\r\nuNlInK\r\n$1\r\nk\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Unlink(1))
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*6\r\n$6\r\nUNLINK\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Unlink(5))
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(b"*1\r\n$6\r\nUNLINK\r\n", &cfg),
+            None,
+            "UNLINK with no keys must not classify"
+        );
+        // 6 keys has no borrowed parser at either command, so both fall through.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*7\r\n$6\r\nUNLINK\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n$1\r\nf\r\n",
+                &cfg,
+            ),
+            None
+        );
         // (frankenredis-m6xu9) EXPIRE's three siblings, each at arity 3 only.
         // The near-miss rows matter here more than usual: PEXPIRE/EXPIREAT/
         // PEXPIREAT are prefixes and suffixes of one another across three

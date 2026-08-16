@@ -2604,6 +2604,15 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     // DEL at one key, now claimed by the floor. Present, absent, and a second
     // delete of the same key (0, not an error) are the three outcomes its
     // executor can return.
+    // DEL's async-free sibling now shares DEL's floor dispatcher, so the corpus
+    // proves the two are told apart on the wire as well as in the classifier:
+    // same shapes, and each must return what 7.2.4 returns.
+    cmds.push(c(&[b"SET", b"kv:u1", b"v"]));
+    cmds.push(c(&[b"SET", b"kv:u2", b"v"]));
+    cmds.push(c(&[b"UNLINK", b"kv:u1"]));
+    cmds.push(c(&[b"UNLINK", b"kv:u1"]));
+    cmds.push(c(&[b"UNLINK", b"kv:u2", b"kv:never"]));
+    cmds.push(c(&[b"UNLINK", b"kv:never"]));
     cmds.push(c(&[b"SET", b"kv:d", b"v"]));
     cmds.push(c(&[b"DEL", b"kv:d"]));
     cmds.push(c(&[b"DEL", b"kv:d"]));
