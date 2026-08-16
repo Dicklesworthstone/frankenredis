@@ -19,6 +19,10 @@ serde_json.workspace = true
 [features]
 bench-reference = []
 perf-ab-xtrim-minid-noop = ["fr-store/perf-ab-xtrim-minid-noop"]
+# (frankenredis-w08xv) Route every lowered redis.call back through the
+# LuaValue-vector argument path, so tests/lua_redis_call_allocation_census.rs
+# can measure the pre-lever arm from the same source tree.
+perf-ab-lua-argv-direct-bypass = []
 
 [dev-dependencies]
 proptest.workspace = true

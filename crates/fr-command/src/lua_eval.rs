@@ -390,6 +390,23 @@ impl CompiledChunk {
             top_level: ast.into_boxed_slice(),
         }
     }
+
+    /// (frankenredis-o500d) The compiled top-level statements, so a caller in
+    /// this crate can WALK what `compile_lua_chunk_cached` just parsed.
+    ///
+    /// FUNCTION LOAD has to reject a library that reads an undeclared global,
+    /// which vendored 7.2.4 catches by running the body in a sandbox exposing
+    /// only the declared globals. The AST answers the static half of that
+    /// exactly: the resolver substitutes `Expr::LocalName` for every local, so
+    /// an `Expr::Name` that survives compilation IS a global reference — which
+    /// is why this is worth exposing rather than text-scanning the source.
+    ///
+    /// Unused until the FUNCTION LOAD declared-globals check lands in
+    /// `lib.rs`; the allow goes away with that caller.
+    #[allow(dead_code)]
+    pub(crate) fn top_level(&self) -> &[(u32, Stmt)] {
+        &self.top_level
+    }
 }
 
 /// Stamp the real source line into a leading `user_script:1:` prefix. The
@@ -3271,6 +3288,21 @@ pub struct LuaState<'a> {
     /// the call returns — so nothing observable survives; it exists purely to
     /// keep one allocation per `redis.call` out of the hot loop.
     argv_scratch: Vec<Vec<u8>>,
+    /// (frankenredis-w08xv) Recycled argv BYTE buffers, the inner `Vec<u8>`s
+    /// that [`Self::argv_scratch`] used to drop on every `redis.call`.
+    ///
+    /// The allocation census on this path counts one allocation per argument
+    /// that reaches dispatch, because `dispatch_argv` takes `&[Vec<u8>]` and
+    /// every argument therefore has to exist as an owned buffer. That is a
+    /// floor only if the buffer has to be a FRESH one: a `redis.call`'s command
+    /// name is a string literal at essentially every call site, and copying its
+    /// bytes into a buffer the previous call already owned costs no allocator
+    /// traffic at all.
+    ///
+    /// Only ever holds CLEARED buffers, so nothing observable survives a call.
+    /// Both the count and the retained capacity are capped, so a one-off large
+    /// argument cannot pin memory in the pool.
+    argv_buf_pool: Vec<Vec<u8>>,
     /// (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0) Two-entry
     /// global-resolution cache.
     ///
@@ -3564,6 +3596,16 @@ const SCOPE_POOL_LIMIT: usize = 32;
 
 /// (frankenredis-a0wt5) Same bound for recycled call-argument buffers.
 const ARG_SCRATCH_POOL_LIMIT: usize = 32;
+
+/// (frankenredis-w08xv) Cap on recycled argv byte buffers. A `redis.call` takes
+/// a handful of arguments, so a small pool covers the steady state; the bound
+/// exists so a wide variadic call cannot leave the pool holding dozens.
+const ARGV_BUF_POOL_LIMIT: usize = 8;
+
+/// (frankenredis-w08xv) Only recycle a buffer whose capacity is small enough to
+/// be worth keeping. A `redis.call` that pushed a megabyte value through argv
+/// hands its buffer back to the allocator instead of pinning it in the pool.
+const ARGV_BUF_KEEP_CAPACITY: usize = 4096;
 
 fn is_lua_yield_signal(err: &str) -> bool {
     err == LUA_YIELD_SENTINEL
@@ -4240,6 +4282,7 @@ impl<'a> LuaState<'a> {
             call_depth: 0,
             lua_frame_kinds: Vec::new(),
             argv_scratch: Vec::new(),
+            argv_buf_pool: Vec::new(),
             global_cache: [None, None],
             global_cache_next: 0,
             field_cache: [None, None],
@@ -6302,6 +6345,183 @@ impl<'a> LuaState<'a> {
         result
     }
 
+    /// (frankenredis-w08xv) True when `args` can be materialised straight into
+    /// argv, one AST node per argument.
+    ///
+    /// Only a TRAILING vararg or call expands to more than one value, so any
+    /// other argument list has exactly `args.len()` arguments and each one is
+    /// known before evaluation. That is the whole admission test; the argument
+    /// SHAPES themselves are all handled, literals directly and everything else
+    /// through the unchanged `take_redis_arg`.
+    fn redis_argv_is_direct_buildable(args: &[Expr]) -> bool {
+        // (frankenredis-w08xv) Same-ELF A/B. Under this feature every lowered
+        // `redis.call` routes through the `LuaValue`-vector path exactly as it
+        // did before the direct builder, so `lua_redis_call_allocation_census`
+        // can measure both arms from ONE source tree rather than from a patch
+        // applied and reverted around two builds.
+        if cfg!(feature = "perf-ab-lua-argv-direct-bypass") {
+            return false;
+        }
+        !matches!(
+            args.last(),
+            Some(Expr::VarArgs | Expr::Call(..) | Expr::IntrinsicCall(..) | Expr::MethodCall(..))
+        )
+    }
+
+    /// (frankenredis-w08xv) Build a `redis.call` argv from the argument ASTs,
+    /// skipping the `LuaValue::Str` a string-literal argument used to be
+    /// materialised into.
+    ///
+    /// `Expr::Str` already holds an `Rc<[u8]>` built once at parse time, so the
+    /// old route allocated a fresh `Vec<u8>` for the literal, wrapped it in a
+    /// `LuaValue`, moved the buffer into argv and freed it one dispatch later —
+    /// one allocation per `redis.call`, since the command name is a literal at
+    /// essentially every call site. Copying those bytes into a RECYCLED buffer
+    /// removes the allocation outright rather than relocating it, which is what
+    /// the ledger rejected the `LuaValue::Str -> Rc<[u8]>` conversion for.
+    ///
+    /// The STAGING here is not cosmetic. Arguments are evaluated before any
+    /// invocation bookkeeping, because that is when the `LuaValue`-vector route
+    /// evaluates them: `eval_call_args` runs to completion before
+    /// `call_redis_intrinsic` touches `call_depth`, `lua_frame_kinds` or
+    /// `current_invocation_name`. An argument expression must therefore not see
+    /// the interpreter already inside the `redis.call` frame — otherwise a
+    /// builtin error raised while evaluating an argument could be attributed to
+    /// `redis.call`, and a script one level from `MAX_CALL_DEPTH` could fail at
+    /// a different point than it does today.
+    fn call_redis_intrinsic_direct(
+        &mut self,
+        intrinsic: RedisIntrinsic,
+        args: &[Expr],
+        env: &mut Env,
+        varargs: &mut Vec<LuaValue>,
+    ) -> Result<LuaValue, String> {
+        let mut argv = std::mem::take(&mut self.argv_scratch);
+        self.recycle_argv(&mut argv);
+        let mut vals = self.take_arg_buffer();
+
+        // PASS 1 -- evaluate left to right, OUTSIDE the invocation bookkeeping.
+        // A string literal has no side effect and cannot fail the argument-type
+        // check, so it goes straight into a recycled buffer; every other shape
+        // is evaluated here and converted in pass 2. Splitting the passes is
+        // what preserves the observable order: upstream (and fr's existing
+        // route) evaluates EVERY argument before rejecting one whose type cannot
+        // be a redis argument, so a later argument's side effects must still
+        // happen when an earlier argument is a table.
+        argv.reserve(args.len());
+        let mut built = Ok(());
+        for arg in args {
+            match arg {
+                Expr::Str(literal) => {
+                    let mut buf = self.take_argv_buf();
+                    buf.extend_from_slice(literal);
+                    argv.push(buf);
+                }
+                other => match self.eval_expr(other, env, varargs) {
+                    Ok(value) => {
+                        vals.push(value);
+                        // Placeholder for pass 2. An empty `Vec` owns no allocation.
+                        argv.push(Vec::new());
+                    }
+                    Err(e) => {
+                        built = Err(e);
+                        break;
+                    }
+                },
+            }
+        }
+
+        let result = match built {
+            Ok(()) => self.call_redis_intrinsic_prebuilt(intrinsic, &mut argv, &mut vals, args),
+            Err(e) => Err(e),
+        };
+
+        self.give_arg_buffer(vals);
+        self.recycle_argv(&mut argv);
+        self.argv_scratch = argv;
+        result
+    }
+
+    /// (frankenredis-w08xv) `call_redis_intrinsic` for an argv whose arguments
+    /// are already evaluated: identical invocation bookkeeping, then pass 2 of
+    /// the direct build followed by dispatch.
+    fn call_redis_intrinsic_prebuilt(
+        &mut self,
+        intrinsic: RedisIntrinsic,
+        argv: &mut [Vec<u8>],
+        vals: &mut [LuaValue],
+        args: &[Expr],
+    ) -> Result<LuaValue, String> {
+        self.call_depth += 1;
+        if self.call_depth > MAX_CALL_DEPTH {
+            self.call_depth -= 1;
+            return Err("script exceeded maximum call depth".to_string());
+        }
+        self.lua_frame_kinds.push(false);
+        let (name, is_pcall) = match intrinsic {
+            RedisIntrinsic::Call => ("redis.call", false),
+            RedisIntrinsic::PCall => ("redis.pcall", true),
+        };
+        let previous_name = self.current_invocation_name.replace(Cow::Borrowed(name));
+        let previous_method = std::mem::replace(&mut self.current_invocation_is_method, false);
+        let result = self.finish_direct_redis_call(argv, vals, args, is_pcall);
+        self.current_invocation_name = previous_name;
+        self.current_invocation_is_method = previous_method;
+        self.call_depth -= 1;
+        self.lua_frame_kinds.pop();
+        result
+    }
+
+    fn finish_direct_redis_call(
+        &mut self,
+        argv: &mut [Vec<u8>],
+        vals: &mut [LuaValue],
+        args: &[Expr],
+        is_pcall: bool,
+    ) -> Result<LuaValue, String> {
+        // Same wording and same pcall packaging as `redis_call_with_argv`.
+        // (frankenredis-sj52g)
+        let arg_error = |msg: &str, is_pcall: bool| -> Result<LuaValue, String> {
+            let body = format!("ERR {msg}");
+            if is_pcall {
+                let t = LuaTable::new();
+                t.set(
+                    LuaValue::Str(b"err".to_vec()),
+                    LuaValue::Str(body.into_bytes()),
+                );
+                Ok(LuaValue::Table(t))
+            } else {
+                Err(body)
+            }
+        };
+
+        if args.is_empty() {
+            return arg_error(
+                "Please specify at least one argument for this redis lib call",
+                is_pcall,
+            );
+        }
+
+        // PASS 2 -- convert the evaluated arguments through the unchanged
+        // `take_redis_arg`, so number formatting, the MOVE of a string value's
+        // bytes and the rejection wording are all byte-identical to the
+        // `LuaValue`-vector route.
+        let mut next_val = 0usize;
+        for (slot, arg) in args.iter().enumerate() {
+            if matches!(arg, Expr::Str(_)) {
+                continue;
+            }
+            let value = &mut vals[next_val];
+            next_val += 1;
+            match value.take_redis_arg() {
+                Ok(bytes) => argv[slot] = bytes,
+                Err(msg) => return arg_error(&msg, is_pcall),
+            }
+        }
+
+        self.dispatch_script_argv(argv, is_pcall)
+    }
+
     /// Evaluate the lowered call in a context that preserves all Lua return
     /// values.  `eval_expr` takes only the first value, while trailing calls in
     /// assignments, returns, and table constructors expand the full vector.
@@ -6314,6 +6534,11 @@ impl<'a> LuaState<'a> {
         varargs: &mut Vec<LuaValue>,
     ) -> Result<Vec<LuaValue>, String> {
         if self.intrinsic_redis_is_bound(intrinsic, env) {
+            if Self::redis_argv_is_direct_buildable(args) {
+                return self
+                    .call_redis_intrinsic_direct(intrinsic, args, env, varargs)
+                    .map(|value| vec![value]);
+            }
             let mut arg_vals = self.eval_call_args(args, env, varargs)?;
             let result = self.call_redis_intrinsic(intrinsic, &mut arg_vals);
             self.give_arg_buffer(arg_vals);
@@ -6350,6 +6575,9 @@ impl<'a> LuaState<'a> {
         varargs: &mut Vec<LuaValue>,
     ) -> Result<LuaValue, String> {
         if self.intrinsic_redis_is_bound(intrinsic, env) {
+            if Self::redis_argv_is_direct_buildable(args) {
+                return self.call_redis_intrinsic_direct(intrinsic, args, env, varargs);
+            }
             let mut arg_vals = self.eval_call_args(args, env, varargs)?;
             let result = self.call_redis_intrinsic(intrinsic, &mut arg_vals);
             self.give_arg_buffer(arg_vals);
@@ -10723,12 +10951,37 @@ impl<'a> LuaState<'a> {
     /// allocate, not alias.
     fn redis_call(&mut self, args: &mut [LuaValue], is_pcall: bool) -> Result<LuaValue, String> {
         let mut argv = std::mem::take(&mut self.argv_scratch);
-        argv.clear();
+        self.recycle_argv(&mut argv);
         let result = self.redis_call_with_argv(&mut argv, args, is_pcall);
-        // Drop the argument bytes now; keep only the outer buffer.
-        argv.clear();
+        // Drop the argument bytes now; keep only the outer buffer, and keep a
+        // bounded number of the inner byte buffers for the next call to fill.
+        // (frankenredis-w08xv)
+        self.recycle_argv(&mut argv);
         self.argv_scratch = argv;
         result
+    }
+
+    /// (frankenredis-w08xv) Empty `argv`, returning a bounded number of its byte
+    /// buffers to [`Self::argv_buf_pool`] instead of freeing every one of them.
+    ///
+    /// Every buffer is CLEARED before it enters the pool, so no argument bytes
+    /// outlive the call that produced them.
+    fn recycle_argv(&mut self, argv: &mut Vec<Vec<u8>>) {
+        for mut buf in argv.drain(..) {
+            if self.argv_buf_pool.len() < ARGV_BUF_POOL_LIMIT
+                && buf.capacity() > 0
+                && buf.capacity() <= ARGV_BUF_KEEP_CAPACITY
+            {
+                buf.clear();
+                self.argv_buf_pool.push(buf);
+            }
+        }
+    }
+
+    /// (frankenredis-w08xv) A cleared argv byte buffer, recycled when one is
+    /// available.
+    fn take_argv_buf(&mut self) -> Vec<u8> {
+        self.argv_buf_pool.pop().unwrap_or_default()
     }
 
     fn redis_call_with_argv(
@@ -10782,6 +11035,21 @@ impl<'a> LuaState<'a> {
             }
         }
 
+        self.dispatch_script_argv(argv, is_pcall)
+    }
+
+    /// (frankenredis-w08xv) Dispatch an argv that has already been materialised,
+    /// and convert the reply to a Lua value.
+    ///
+    /// Split out of [`Self::redis_call_with_argv`] so the direct-from-AST
+    /// argument builder can share every post-build behaviour verbatim — the
+    /// MONITOR mirror, the effect-form propagation, the script-context error
+    /// rewrites and the `redis.pcall` `{err=...}` packaging.
+    fn dispatch_script_argv(
+        &mut self,
+        argv: &[Vec<u8>],
+        is_pcall: bool,
+    ) -> Result<LuaValue, String> {
         let dirty_before = self.store.dirty;
         // (frankenredis-vr8rg) Dispatch the command with the script's RESP
         // version so handlers materialize RESP3 frames (Double/Map/Set/Null/
@@ -10835,7 +11103,7 @@ impl<'a> LuaState<'a> {
                         self.store,
                         self.now_ms,
                     )
-                    .unwrap_or_else(|| argv.clone());
+                    .unwrap_or_else(|| argv.to_vec());
                     self.store.record_script_propagation(&effect);
                 }
                 // (frankenredis-0czgc) redis.call must RAISE a command error reply
@@ -16046,6 +16314,156 @@ mod tests {
         )
         .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"hello".to_vec())));
+    }
+
+    #[test]
+    fn recycled_argv_buffers_do_not_leak_bytes_between_redis_calls() {
+        // (frankenredis-w08xv) The direct argv builder copies a string-literal
+        // argument into a buffer a PREVIOUS `redis.call` owned. If that buffer
+        // ever reached the copy without being cleared, the second call's
+        // argument would carry the first one's bytes as a prefix -- a wrong
+        // command name, or a value with a stale suffix. Every case here fails
+        // loudly if `recycle_argv` stops clearing.
+        let mut store = Store::new();
+
+        // A long literal value, then a short one through the same recycled
+        // buffer: a missing clear leaves 'sLONGVALUE...' in the key.
+        let frame = eval_script(
+            b"redis.call('SET', 'k', 'LONGVALUE-LONGVALUE-LONGVALUE') \
+              redis.call('SET', 'k', 's') \
+              return redis.call('GET', 'k')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"s".to_vec())));
+
+        // A long command name, then a short one: a missing clear makes the
+        // second call dispatch 'GETRANGEGET' (an unknown command), not GET.
+        let frame = eval_script(
+            b"redis.call('SETRANGE', 'k2', 0, 'abcdef') \
+              return redis.call('GET', 'k2')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"abcdef".to_vec())));
+
+        // A literal argument that follows a MOVED value argument reuses the
+        // buffer the moved value donated to the pool, which is the widest
+        // recycled buffer in play.
+        let frame = eval_script(
+            b"redis.call('SET', KEYS[1], ARGV[1]) \
+              redis.call('APPEND', KEYS[1], '!') \
+              return redis.call('GET', KEYS[1])",
+            &[b"k3".to_vec()],
+            &[b"0123456789abcdef0123456789abcdef".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(b"0123456789abcdef0123456789abcdef!".to_vec()))
+        );
+    }
+
+    #[test]
+    fn direct_argv_build_preserves_argument_evaluation_order_before_type_rejection() {
+        // (frankenredis-w08xv) The direct builder materialises literals in pass
+        // one and converts everything else in pass two, precisely so that a
+        // later argument's side effects still happen when an EARLIER argument
+        // has a type redis cannot accept. Upstream's luaArgsToRedisArgv runs
+        // after Lua has evaluated the whole argument list, so the marker below
+        // must be written even though argument two is a table.
+        //
+        // The side effect has to come from an argument shape the direct builder
+        // actually ADMITS: a trailing `f()` is multi-valued, so it routes to the
+        // LuaValue-vector path and would test nothing here. A field read whose
+        // table carries an `__index` function is a single value, so it stays on
+        // the direct path while still running Lua code as argument three.
+        let mut store = Store::new();
+
+        let err = eval_script(
+            b"local t = setmetatable({}, {__index = function(_, _) \
+                  redis.call('SET', 'marker', 'written') return 'x' end}) \
+              return redis.call('SET', {}, t.trigger)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect_err("a table argument must be rejected");
+        assert!(
+            err.contains("Lua redis lib command arguments must be strings or integers"),
+            "wrong wording: {err}"
+        );
+
+        let frame = eval_script(b"return redis.call('GET', 'marker')", &[], &[], &mut store, 0)
+            .unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(b"written".to_vec())),
+            "the trailing argument's side effect must happen before the type rejection"
+        );
+    }
+
+    #[test]
+    fn direct_argv_build_matches_the_value_route_on_arity_and_expansion() {
+        // (frankenredis-w08xv) A trailing multi-value argument is NOT direct
+        // buildable -- the argument count is not known from the AST -- so it
+        // must still route through the LuaValue-vector path and expand.
+        let mut store = Store::new();
+
+        let frame = eval_script(
+            b"redis.call('RPUSH', KEYS[1], unpack(ARGV)) return redis.call('LRANGE', KEYS[1], 0, -1)",
+            &[b"list".to_vec()],
+            &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"a".to_vec())),
+                RespFrame::BulkString(Some(b"b".to_vec())),
+                RespFrame::BulkString(Some(b"c".to_vec())),
+            ]))
+        );
+
+        // No arguments at all: the direct builder owns this wording now.
+        let err = eval_script(b"return redis.call()", &[], &[], &mut store, 0)
+            .expect_err("redis.call() with no arguments must error");
+        assert!(
+            err.contains("Please specify at least one argument for this redis lib call"),
+            "wrong wording: {err}"
+        );
+
+        // redis.pcall packages both failure modes as an {err=...} table rather
+        // than raising, exactly as the LuaValue-vector route did.
+        let frame = eval_script(b"return redis.pcall()", &[], &[], &mut store, 0).unwrap();
+        let RespFrame::Error(msg) = &frame else {
+            panic!("expected an error reply, got {frame:?}");
+        };
+        assert!(
+            msg.contains("Please specify at least one argument for this redis lib call"),
+            "wrong wording: {msg}"
+        );
+
+        let frame = eval_script(b"return redis.pcall('SET', 'k', {})", &[], &[], &mut store, 0)
+            .unwrap();
+        let RespFrame::Error(msg) = &frame else {
+            panic!("expected an error reply, got {frame:?}");
+        };
+        assert!(
+            msg.contains("Lua redis lib command arguments must be strings or integers"),
+            "wrong wording: {msg}"
+        );
     }
 
     #[test]
