@@ -230,6 +230,40 @@ CASES = [
     # wrong type and a bad numkeys must come back verbatim
     ("SINTERCARD", "1", "z:lim"),
     ("SINTERCARD", "0", "sc:1"),
+    # (frankenredis-zadd5) ZADD's single-flag form, array length 5 -- the shape
+    # zadd_xx measured 0.8959 on. Unclassified today: the class is
+    # `arity >= 8 && even`, so length 5 walks the cascade.
+    #
+    # The advisor calls length 5 AMBIGUOUS (six readings: NX/XX/GT/LT/CH/INCR) and
+    # that is TRUE but not a defect, because two existing parsers cover all six --
+    # zadd_flag is generic over the flag argument, and zadd_incr handles INCR, whose
+    # reply type differs. Both readings are exercised here so a class minted at 5
+    # cannot serve one and strand the other.
+    ("DEL", "za:k"),
+    ("ZADD", "za:k", "1", "m1"),
+    ("ZADD", "za:k", "XX", "5", "m1"),
+    ("ZADD", "za:k", "XX", "5", "absent"),
+    ("ZADD", "za:k", "NX", "9", "m1"),
+    ("ZADD", "za:k", "NX", "9", "m2"),
+    ("ZSCORE", "za:k", "m1"),
+    ("ZSCORE", "za:k", "m2"),
+    # GT/LT only move the score in one direction -- a route wired to a plain add
+    # returns the same COUNT here while leaving a different score behind.
+    ("ZADD", "za:k", "GT", "1", "m1"),
+    ("ZSCORE", "za:k", "m1"),
+    ("ZADD", "za:k", "GT", "99", "m1"),
+    ("ZSCORE", "za:k", "m1"),
+    ("ZADD", "za:k", "LT", "50", "m1"),
+    ("ZSCORE", "za:k", "m1"),
+    # CH changes the RETURN VALUE, not the data: added vs changed.
+    ("ZADD", "za:k", "CH", "77", "m1"),
+    # INCR returns the new SCORE, a bulk, not an integer count -- the reading a
+    # flag-only route would get wrong in reply TYPE, not just value.
+    ("ZADD", "za:k", "INCR", "3", "m1"),
+    ("ZADD", "za:k", "INCR", "3", "brand:new"),
+    # errors verbatim
+    ("ZADD", "za:k", "XX", "notanumber", "m1"),
+    ("ZADD", "s:1", "XX", "1", "m1"),
     # Errors must come from the generic path verbatim.
     ("ZMPOP", "1", "s:1", "MIN"),
     ("ZMPOP", "1", "z:mp", "SIDEWAYS"),
