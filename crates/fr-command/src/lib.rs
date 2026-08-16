@@ -13091,7 +13091,34 @@ fn function_library_first_undeclared_global(code: &[u8]) -> Option<(u32, String)
                 scan_expr(base, out);
                 scan_expr(key, out);
             }
-            Expr::Field(base, _) => scan_expr(base, out),
+            Expr::Field(base, field) => {
+                // (frankenredis-o500d) The sandbox gates FIELDS on the redis
+                // table too, and reports the FIELD name as the nonexistent
+                // global. At library load time 7.2.4 exposes exactly eight:
+                // register_function, log, the four LOG_* levels, and the two
+                // version constants. Everything else — call, pcall, setresp,
+                // sha1hex, error_reply, status_reply, breakpoint, debug,
+                // replicate_commands, set_repl and every REPL_* constant — is
+                // bound only during FCALL, so reading it at load time fails the
+                // load. Measured by probing 28 field names against live 7.2.4.
+                if matches!(base.as_ref(), Expr::Name(name) if name.as_ref() == "redis")
+                    && !matches!(
+                        field.as_ref(),
+                        "register_function"
+                            | "log"
+                            | "LOG_DEBUG"
+                            | "LOG_VERBOSE"
+                            | "LOG_NOTICE"
+                            | "LOG_WARNING"
+                            | "REDIS_VERSION"
+                            | "REDIS_VERSION_NUM"
+                    )
+                {
+                    *out = Some(field.to_string());
+                    return;
+                }
+                scan_expr(base, out);
+            }
             Expr::Call(callee, args) => {
                 scan_expr(callee, out);
                 for arg in args {
@@ -71310,6 +71337,57 @@ mod tests {
             ),
             Ok(RespFrame::BulkString(Some(_)))
         ));
+        // (frankenredis-6h3kp) The redis table's FIELDS are gated too, and the
+        // FIELD name is what gets reported. Probed against live 7.2.4 over 28
+        // field names: exactly eight are visible at library load time.
+        assert!(
+            err_text(load(
+                &mut store,
+                "#!lua name=cD\nlocal c = redis.call\nredis.register_function('aD', function() return 1 end)",
+            ))
+            .contains("nonexistent global variable 'call'"),
+            "redis.call is FCALL-time only and must fail the load"
+        );
+        for denied in ["pcall", "setresp", "sha1hex", "error_reply", "status_reply"] {
+            let code = format!(
+                "#!lua name=cE{denied}\nlocal c = redis.{denied}\nredis.register_function('aE{denied}', function() return 1 end)"
+            );
+            assert!(
+                err_text(load(&mut store, &code))
+                    .contains(&format!("nonexistent global variable '{denied}'")),
+                "redis.{denied} must fail the load"
+            );
+        }
+        // ... and the eight that ARE visible must still load, which is the
+        // negative case an over-eager allow-list would break.
+        for allowed in [
+            "register_function",
+            "log",
+            "LOG_DEBUG",
+            "LOG_VERBOSE",
+            "LOG_NOTICE",
+            "LOG_WARNING",
+            "REDIS_VERSION",
+            "REDIS_VERSION_NUM",
+        ] {
+            let code = format!(
+                "#!lua name=cF{allowed}\nlocal c = redis.{allowed}\nredis.register_function('aF{allowed}', function() return 1 end)"
+            );
+            assert!(
+                matches!(load(&mut store, &code), Ok(RespFrame::BulkString(Some(_)))),
+                "redis.{allowed} is visible at load time and must be accepted"
+            );
+        }
+        // A denied field inside a REGISTERED FUNCTION body is still fine — that
+        // is where redis.call legitimately lives.
+        assert!(matches!(
+            load(
+                &mut store,
+                "#!lua name=cG\nredis.register_function('aG', function() return redis.call('PING') end)",
+            ),
+            Ok(RespFrame::BulkString(Some(_)))
+        ));
+
         // The control the bead names: a body registering nothing must keep its
         // OWN wording and must not become a globals error.
         assert_eq!(
