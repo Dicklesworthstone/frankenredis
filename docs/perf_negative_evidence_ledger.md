@@ -22753,3 +22753,67 @@ author's own explanatory model for the residual.
 RETRY PREDICATE: do not schedule work around quiet windows for THIS gate; it gains
 nothing. Do stamp loadavg per run. And do not re-adopt the duration model without per-run
 DURATIONS — the load proxy points the wrong way.
+
+--------------------------------------------------------------------------------
+INADMISSIBLE AGAIN — the "quiet window" had already closed when the run started; a
+1-MINUTE LOADAVG DIP IS NOT A QUIET WINDOW (frankenredis-z2ce3)
+
+Attempted the one measurement this ledger has repeatedly deferred: the THROUGHPUT arm
+for expire_nx, which every previous attempt failed on nulls. The trigger was a reported
+loadavg of 16.8. By the time the run began the box was back at 25.
+
+    loadavg at my own check    25.31 (1 min)   24.72 (5 min)   26.91 (15 min)
+
+The 5- and 15-minute figures are the tell: the box has been at ~25 throughout. 16.8 was
+a momentary dip in the 1-minute average, and a balanced-square run takes long enough
+that it samples the 5-to-15-minute reality rather than the instant it was launched.
+
+    A 1-MINUTE LOADAVG IS A SNAPSHOT OF A WINDOW SHORTER THAN THE MEASUREMENT. Gate on
+    the 5- AND 15-minute averages, or on a sustained reading, never on the instant one.
+    This is the same failure as the stale `df` readings earlier in this campaign: a
+    number that was true when it was taken and false when it was acted on.
+
+RESULT, on ELF f3c2e2b9… with the expire lever, shape set unswept5:
+
+    shape           ratio               95% CI      null redis   null fr   verdict
+    expire_nx      1.0519   [1.0119, 1.1104]          1.0345     0.9918   NULL-FAILED
+    get_control    1.0827   [1.0132, 1.0979]          0.9801     1.0301   NULL-FAILED
+    lrange_neg     1.1495   [1.1098, 1.1832]          1.0065     1.0128   ADMISSIBLE
+    1 of 13 rows admissible; 12 null-failed
+
+WORSE THAN THE PREVIOUS ATTEMPT, not better. The earlier run on the SAME ELF and the
+SAME shape set returned 3 of 13 admissible with expire_nx at 1.0776; this one returns 1
+of 13 with expire_nx at 1.0519. Two runs of one binary over one shape set differ by 2.4
+pct on the shape of interest, and both fail its null.
+
+    SO THE THROUGHPUT CROSSING FOR expire_nx REMAINS UNMEASURED. Three attempts across
+    the campaign, all inadmissible. The instruction-count result (4509.6 -> 2567.9
+    instr/op, 0.19 pct spread, clean-tree ELF) is the only sound evidence for that
+    lever and should be quoted alone, with its unit named.
+
+get_control NULL-FAILED at 1.0827 and again sits INSIDE the range of the results
+(1.0519-1.2357). Both facts independently disqualify per-shape claims from this run,
+and the second has now held in every throughput run this campaign has produced.
+
+WHAT WOULD ACTUALLY WORK, recorded so the next attempt is not a fourth repetition:
+gate on the 15-minute average, not the 1-minute; require it BELOW ~10 on this 64-way
+box, not below 25; and re-check it AFTER the run as well as before, since a run that
+starts quiet and ends loud is indistinguishable in its output from one that was never
+quiet. None of the three attempts did the last of these, including this one.
+
+PROVENANCE:
+  ELF sha256           f3c2e2b949fddab8d8a2894e430536a955d9bcd9f197dcf65323fd2c15b43de7
+                       built LOCALLY at HEAD 279da3941 from a CLEAN tree with
+                       RCH_CARGO_WRAPPER_BYPASS=1 and env -u CARGO_TARGET_DIR,
+                       executable path from --message-format=json, COPIED to a private
+                       path and sha'd there. Contains the expire lever 0d0bcd5aa.
+  harness              scripts/balanced_square_ab.py --shapes unswept5 --expect-elf
+                       <full sha>, ABBA, one invocation.
+  host                 thinkstation1, 64 cores, /data 307G, no build this turn.
+  loadavg              25.31 / 24.72 / 26.91 at launch — RECORDED WITH THE ROW because
+                       the reported trigger of 16.8 did not survive contact with it.
+
+RETRY PREDICATE: do NOT attempt the expire_nx throughput arm a fourth time on a
+1-minute-loadavg trigger. If it is attempted again, gate on the 15-minute average below
+~10, record loadavg before AND after, and abandon the run if the after-reading has
+risen. Otherwise quote the instruction result and name its unit.
