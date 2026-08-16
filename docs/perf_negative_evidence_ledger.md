@@ -16908,3 +16908,50 @@ touches that command's own `parse_borrowed_plain_*` parser or `execute_plain_*`
 executor. For GEOHASH specifically, also retry if its route is ever simplified,
 since the reject rests on that route being unusually good rather than on the walk
 being cheap.
+
+## 2026-08-16: MEASUREMENT OWED AND NOW PAID — the zset RESTORE score round-trip is worth −30.2%, and the type ratio moves 5.33x → 3.72x (`frankenredis-jpvwi`, `frankenredis-w08xv`)
+
+Claim class: SELF-SPEEDUP. Campaign output: no. These are fr-vs-fr instruction
+counts for a landed change, plus a vs-incumbent ratio quoted only to size the
+remaining gap; no throughput claim is made from either.
+
+Commit `2db385b2a` shipped with NO post-change number, because rch refused nine
+consecutive build-sized jobs that night and the commit said so rather than
+estimating. This is that number.
+
+**Harness:** callgrind, two-point subtraction (200 ops vs 400 ops, differenced so
+startup cancels), pipelined `-P16` on one connection, `RESTORE dst 0 <payload>
+REPLACE` of a DUMP of a 128-member sorted set whose scores are all
+integer-encoded. **Host:** thinkstation1, measurement entirely LOCAL; rch used
+only to compile. **Worker:** `vmi1153651` built the post ELF, `vmi1152480` the
+pre. The post ELF was built `--base HEAD --clean-overlay` (receipt
+`base=fa04069399d927b89041738ceb06350ea7abb462`) specifically so that ~422 lines
+of another pane's uncommitted work in `lua_eval.rs` could not enter it — a plain
+working-tree build would have been unattributable.
+
+| stage | Ir/op | delta |
+|---|---:|---|
+| before either commit | 128,937 | — |
+| after `abc4ccaae` (reparse removed) | 101,755 | −27,182, −21.1% |
+| after `2db385b2a` (render removed) | **90,036** | −11,719, **−11.5%** |
+| **both** | | **−38,901, −30.2%** |
+| vendored Redis 7.2.4, same harness | 24,202 | — |
+
+So the round trip — render an integer score to decimal, then parse the text back
+to `f64` — was **30.2% of a zset RESTORE**. The fr/redis instruction ratio for
+this shape moves **5.33x → 3.72x**.
+
+**THE RATIO IS NOT THE LEVER AND MUST NOT BE QUOTED AS ONE.** `b1o02` established
+that most of the RESTORE-in-isolation gap is PREPAID: fr decodes eagerly and buys
+O(1) reads, redis attaches shallowly and defers the walk onto every read, with a
+measured break-even of 1.034 reads per RESTORE. A RESTORE-only number therefore
+says nothing about which engine is ahead in use. What these two commits removed is
+different in kind — a value rendered to text and immediately parsed back is waste
+on either side of that tradeoff, which is why it was worth taking and why the
+b1o02 rejection does not apply to it.
+
+Retry predicate: re-measure if the listpack decoder's span representation changes
+or if `PackedZSet` gains a member index, either of which moves the remaining
+profile. Reopen the round-trip question only if a profile shows a rendered value
+being reparsed on some other path — the hash and set RESTORE decoders were checked
+and do not have one, because their consumers genuinely want the bytes.
