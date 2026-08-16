@@ -375,6 +375,15 @@ SHAPES = {
     "lpos_count_opt": (["RPUSH l a b c d e"], ["LPOS", "l", "c", "COUNT", "1"]),
     "bitcount_base": (["SET bb abcdefghijklmnop"], ["BITCOUNT", "bb"]),
     "bitcount_range": (["SET bb abcdefghijklmnop"], ["BITCOUNT", "bb", "0", "5"]),
+    # (frankenredis-f2zrr) The UNIT form at array length 5, the N+1 shape for the
+    # arity-4 range claim. parse_borrowed_plain_bitcount_unit_packet exists and the
+    # classifier claims BITCOUNT only at 2 and 4, so this is the same stranded-sibling
+    # shape that measured 3.2848x on TOUCH and 2.6703x on MSETNX.
+    #
+    # WRITTEN BEFORE ANY LEVER, deliberately. On ZRANK I classified first and wrote the
+    # shape after, which made that lever's delta permanently unmeasurable. The shape has
+    # to exist first or the before/after cannot be taken.
+    "bitcount_unit": (["SET bb abcdefghijklmnop"], ["BITCOUNT", "bb", "0", "5", "BYTE"]),
     # (frankenredis-2e4tq) The arity-keyed mis-claim, second instance. ZRANGE k s e
     # WITHSCORES and ZRANGE k s e REV are both *5, and (5, Zrange) maps
     # unconditionally to ZrangeWithscores.

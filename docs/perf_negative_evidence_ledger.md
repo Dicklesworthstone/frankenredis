@@ -23108,3 +23108,84 @@ RETRY PREDICATE: do NOT re-run zadd_2pair. DO add a harness shape for the OTHER 
 ZADD form before treating the family as closed — this row establishes that one of the
 two is served and deliberately claims nothing about the other. set_base remains the last
 untaken rewire on the certified table at 34.0 pct dispatch.
+
+## MEASURED (frankenredis-f2zrr) — BITCOUNT's unit form is 0.7907x at 46.1 pct share, the new worst; and fr-arm stability is SHAPE-dependent, which qualifies my load-immunity claim
+
+Claim class: COMPETITIVE
+
+FrankenRedis/Redis 7.2.4 = 0.7907x worst bound, measured with the live vendored
+redis-server arm launched and run in the SAME invocation of shape_instr_per_op.py as the
+candidate, both under callgrind back to back.
+
+Campaign output: yes
+
+Same provenance limitation as the rows above (valgrind hosts the target, so no
+self-reported ELF SHA; ABBA repeats, not a bootstrap CI).
+
+    run  shape            fr instr/op   redis 7.2.4   fr/redis   share   loadavg
+    A    bitcount_unit        3785.5        4961.8     0.7629x   46.1%    13.07
+    B    bitcount_range       2328.4        4254.2     0.5473x   19.8%    13.07   <- CONTROL
+    B    bitcount_range       2227.9        4023.4     0.5537x   20.2%    12.98   <- CONTROL
+    A    bitcount_unit        3782.2        4783.5     0.7907x   46.1%    12.67
+
+    uptime before certifying: 14.48 / 16.56 / 22.93 — below the ~30 defer threshold.
+
+FOURTH INSTANCE OF THE STRANDED-SIBLING CLASS. `BITCOUNT key start end BYTE|BIT` is array
+length 5; `parse_borrowed_plain_bitcount_unit_packet` exists for it, and the classifier
+claims BITCOUNT only at 2 and 4. So the unit form reaches its borrowed route by walking
+the cascade: 46.1 pct dispatch share against its classified arity-4 sibling at 19.8-20.2
+pct. Worst bound 0.7907x makes it the worst measured shape on the board, displacing
+incrbyfloat_nondyadic's 0.7827x.
+
+    touch_2      73.9 pct   3.2848x   edge exclusion
+    msetnx_2     70.5 pct   2.6703x   edge exclusion
+    bitcount_unit 46.1 pct  0.7907x   N+1 gap        <- this row
+    zadd_2pair   39.6 pct   0.7853x   middle gap
+
+**THE SHAPE WAS WRITTEN BEFORE ANY LEVER, DELIBERATELY.** On ZRANK I classified first and
+wrote the shape after, which made that lever's delta permanently unmeasurable. Here the
+pre-lever figure exists, so whatever is done next can be attributed.
+
+**AND ONE NUMBER HERE QUALIFIES WHAT I BANKED LAST ROW.** I claimed the fr arm is
+load-immune, on 12 runs of incrbyfloat_nondyadic spanning loadavg 11-39 at 0.29 pct. In
+this row, at CONSTANT low load (13.07 and 12.98), fr's bitcount_range arm moved:
+
+    fr    bitcount_range   2328.4 -> 2227.9   -4.32 pct   <- same shape, same binary, load flat
+    fr    bitcount_unit    3785.5 -> 3782.2   -0.09 pct
+
+**So fr-arm stability is SHAPE-DEPENDENT, not a property of the harness.** Load-immunity
+and run-to-run stability are different claims and I conflated them: the incrbyfloat
+evidence shows the fr arm does not respond to LOAD, and it does not show that every fr
+arm is stable. bitcount_range varied 4.32 pct with load held flat, which no load
+explanation covers.
+
+A candidate mechanism, offered as hypothesis and not measured: fr's maps use a randomized
+hasher seeded per process, so probe counts can differ between invocations. That would make
+variance depend on how much hashing a shape does — bitcount_range does a keyspace lookup
+per op, incrbyfloat re-reads one key. It is testable by pinning the seed; I have not done
+so.
+
+CONSEQUENCE: the "fr arm is exact, quote the worst bound" habit these rows have built is
+safe only where the fr arm has been SEEN to be stable for that shape. Two ABBA runs give
+that evidence per shape and cost nothing extra — which is what ABBA is for, and why the
+0.7907x worst bound rather than the 0.7629x is the number quoted here.
+
+A/A NULL:
+
+    fr arm      bitcount_unit   3785.5 -> 3782.2   -0.09%
+                bitcount_range  2328.4 -> 2227.9   -4.32%
+    redis arm   bitcount_unit   4961.8 -> 4783.5   -3.59%
+                bitcount_range  4254.2 -> 4023.4   -5.42%
+    ratio       unit 0.7629 -> 0.7907  3.64%  |  range 0.5473 -> 0.5537  1.17%
+
+The 46.1-vs-19.8 pct SHARE gap carries no incumbent term and reproduces to a tenth of a
+point across both unit runs; it is the load-bearing evidence that this shape is stranded.
+
+EXECUTABLE IDENTITIES, full 64-hex (computed post-run, see limitation above):
+  candidate  `773d819de62d62d7f496b2a1df8e82bd645228e9e366e64c6294190ffa6d8e2d`
+  incumbent  `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+  tree       47a307984; NO rebuild — no crate code had changed since that binary.
+
+RETRY PREDICATE: classify BITCOUNT at arity 5 — the parser exists and the pre-lever figure
+is now on record, so the delta will be attributable. And stop quoting "the fr arm is
+exact" as general: check it per shape from the ABBA repeat you are already running.
