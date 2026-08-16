@@ -45,9 +45,35 @@ def norm(v):
     return v
 
 div=0
+DENIED="DEBUG command not allowed"
+
+def preflight(od,fr):
+    """Refuse to run when DEBUG is unavailable, instead of testing nothing.
+
+    (frankenredis-fjsbj) Every row here compares an oracle reply to an fr reply.
+    When DEBUG is denied on BOTH engines — the DEFAULT, since enable-debug-command
+    is off unless the server was booted with it — each row compares one identical
+    refusal string to another and PASSES. 11 of the 12 rows went green that way,
+    and the 12th (the only one asserting positive content) failed printing two
+    IDENTICAL strings under a "DIVERGE" header, which reads as an fr bug and is
+    not one. A denied DEBUG is a harness precondition failure, not parity.
+    """
+    bad=[]
+    for label,c in (("oracle",od),("fr",fr)):
+        r=c.cmd("debug","set-active-expire","1")
+        if isinstance(r,str) and DENIED in r:
+            bad.append(label)
+    if bad:
+        print("HARNESS INVALID: DEBUG is denied on %s — this gate compares DEBUG "
+              "replies, so every row would compare one refusal to another and pass "
+              "without testing DB resolution. Boot both engines with "
+              "--enable-debug-command yes." % " and ".join(bad))
+        sys.exit(2)
+
 def main():
     global div
     od=R(int(sys.argv[1])); fr=R(int(sys.argv[2]))
+    preflight(od,fr)
     # deterministic encodings: 200-elt list -> quicklist, 150-field hash -> hashtable
     for s in (od,fr):
         s.cmd("config","set","list-max-listpack-size","128")
@@ -68,11 +94,21 @@ def main():
         s.cmd("set","kht","db0scalar")
         s.cmd("select","0")
 
-    def chk(label, db, *cmd, resolve_only=False):
+    def chk(label, db, *cmd, resolve_only=False, expect_error=False):
         global div
         od.cmd("select",str(db)); fr.cmd("select",str(db))
         a=norm(od.cmd(*cmd)); b=norm(fr.cmd(*cmd))
         od.cmd("select","0"); fr.cmd("select","0")
+        # (frankenredis-fjsbj) A row whose ORACLE reply is an error proves nothing
+        # about DB resolution: a==b then just means both engines refused the same
+        # way. Only `object-missing db1` is supposed to error. Anything else
+        # erroring on 7.2.4 means the row stopped exercising what it names, so say
+        # that rather than banking a silent pass.
+        if not expect_error and isinstance(a,str) and a.startswith("-"):
+            print(f"HARNESS INVALID: row {label} [{' '.join(cmd)}] expects a real "
+                  f"DEBUG reply from redis 7.2.4 but got an error: {a!r}. The row "
+                  f"cannot test SELECTed-DB resolution.")
+            sys.exit(2)
         if resolve_only:
             # fr's HTSTATS-KEY emits canned stats (it cannot expose redis dict
             # bucket internals — WONTFIX, like DEBUG OBJECT lru:). Assert only that
@@ -99,7 +135,7 @@ def main():
     chk("object-str   db0", 0, "debug","object","kstr")
     chk("sdslen-str   db0", 0, "debug","sdslen","kstr")
     # missing key in a non-zero DB -> "no such key" on both (not a db0 fallthrough)
-    chk("object-missing db1", 1, "debug","object","kstr")
+    chk("object-missing db1", 1, "debug","object","kstr", expect_error=True)
 
     if div: print(f"\nFAIL: {div} divergence(s)"); sys.exit(1)
     print("OK: DEBUG OBJECT/SDSLEN/LISTPACK/QUICKLIST/HTSTATS-KEY resolve the SELECTed DB byte-exact vs redis 7.2.4")

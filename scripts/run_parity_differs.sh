@@ -203,6 +203,15 @@ if od != fd:
     print("  preflight: WARNING DEBUG asymmetry oracle=%s fr=%s — DEBUG-RELOAD gates "
           "(meta_encoding_chain_gate) will falsely diverge; launch BOTH with "
           "--enable-debug-command yes" % (od, fd))
+elif not od:
+    # (frankenredis-fjsbj) SYMMETRIC denial is the invisible case the asymmetry
+    # check above cannot see, and it is the DEFAULT when neither engine was booted
+    # with the flag. Every DEBUG row then compares one refusal string to an
+    # identical refusal string and passes, so a DEBUG gate reports green while
+    # testing nothing. Warn on it as loudly as on asymmetry.
+    print("  preflight: WARNING DEBUG denied on BOTH engines — DEBUG-bearing gates "
+          "compare one refusal to another and pass without testing anything; "
+          "launch BOTH with --enable-debug-command yes")
 if realigned:
     print("  preflight: realigned %d oracle config(s) to fr's compiled defaults" % realigned)
 PY
