@@ -2423,6 +2423,47 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"BITOP", b"NOT", b"bo:bad", b"bo:a", b"bo:b"]));
     cmds.push(c(&[b"BITOP", b"NAND", b"bo:bad", b"bo:a", b"bo:b"]));
     cmds.push(c(&[b"BITOP", b"AND", b"bo:bad", b"s:1", b"bo:a"]));
+    // (frankenredis-804l1) The THREE-source set stores are now front-classified
+    // alongside the two-source forms. The sources are deliberately ASYMMETRIC so
+    // operand ORDER is observable: SDIFFSTORE is not commutative, so a route that
+    // reordered or dropped a source passes a symmetric corpus and fails here. The
+    // members are chosen so inter/union/diff each yield a DIFFERENT non-empty set.
+    cmds.push(c(&[b"SADD", b"ss:a", b"m1", b"m2", b"m3", b"m4"]));
+    cmds.push(c(&[b"SADD", b"ss:b", b"m2", b"m3", b"m4", b"m5"]));
+    cmds.push(c(&[b"SADD", b"ss:c", b"m3", b"m4", b"m5", b"m6"]));
+    cmds.push(c(&[b"SINTERSTORE", b"ss:i", b"ss:a", b"ss:b", b"ss:c"]));
+    cmds.push(c(&[b"SMEMBERS", b"ss:i"]));
+    cmds.push(c(&[b"SUNIONSTORE", b"ss:u", b"ss:a", b"ss:b", b"ss:c"]));
+    cmds.push(c(&[b"SCARD", b"ss:u"]));
+    cmds.push(c(&[b"SDIFFSTORE", b"ss:d", b"ss:a", b"ss:b", b"ss:c"]));
+    cmds.push(c(&[b"SMEMBERS", b"ss:d"]));
+    // A different first operand is a different answer for DIFF.
+    cmds.push(c(&[b"SDIFFSTORE", b"ss:d2", b"ss:c", b"ss:a", b"ss:b"]));
+    cmds.push(c(&[b"SMEMBERS", b"ss:d2"]));
+    // The already-classified 2-source form must keep working.
+    cmds.push(c(&[b"SINTERSTORE", b"ss:i2", b"ss:a", b"ss:b"]));
+    cmds.push(c(&[b"SMEMBERS", b"ss:i2"]));
+    // An absent source empties the INTER, which DELETES the destination.
+    cmds.push(c(&[
+        b"SINTERSTORE",
+        b"ss:none",
+        b"ss:a",
+        b"ss:absent",
+        b"ss:c",
+    ]));
+    cmds.push(c(&[b"EXISTS", b"ss:none"]));
+    // Four sources stay on the generic path and must answer identically.
+    cmds.push(c(&[b"SADD", b"ss:e", b"m4"]));
+    cmds.push(c(&[
+        b"SUNIONSTORE",
+        b"ss:u4",
+        b"ss:a",
+        b"ss:b",
+        b"ss:c",
+        b"ss:e",
+    ]));
+    cmds.push(c(&[b"SCARD", b"ss:u4"]));
+    cmds.push(c(&[b"SINTERSTORE", b"ss:bad", b"ss:a", b"bo:a", b"ss:c"]));
     cmds.push(c(&[
         b"BITFIELD",
         b"b:2",

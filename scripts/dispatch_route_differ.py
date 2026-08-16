@@ -130,6 +130,36 @@ CASES = [
     ("BITOP", "NOT", "bo:bad", "bo:a", "bo:b"),
     ("BITOP", "NAND", "bo:bad", "bo:a", "bo:b"),
     ("BITOP", "AND", "bo:bad", "s:1", "bo:a"),
+
+    # ── 3-source set stores (frankenredis-804l1) ────────────────────────────
+    # The three sources are deliberately ASYMMETRIC so operand ORDER is
+    # observable: SDIFFSTORE is not commutative, so a route that reordered or
+    # dropped a source passes a symmetric corpus and fails here. The members are
+    # chosen so inter/union/diff each yield a DIFFERENT non-empty result.
+    ("SADD", "ss:a", "m1", "m2", "m3", "m4"),
+    ("SADD", "ss:b", "m2", "m3", "m4", "m5"),
+    ("SADD", "ss:c", "m3", "m4", "m5", "m6"),
+    ("SINTERSTORE", "ss:i", "ss:a", "ss:b", "ss:c"),
+    ("SMEMBERS", "ss:i"),
+    ("SUNIONSTORE", "ss:u", "ss:a", "ss:b", "ss:c"),
+    ("SCARD", "ss:u"),
+    ("SDIFFSTORE", "ss:d", "ss:a", "ss:b", "ss:c"),
+    ("SMEMBERS", "ss:d"),
+    # Order matters for DIFF: a different first operand is a different answer.
+    ("SDIFFSTORE", "ss:d2", "ss:c", "ss:a", "ss:b"),
+    ("SMEMBERS", "ss:d2"),
+    # The 2-source form must keep working (it was already classified).
+    ("SINTERSTORE", "ss:i2", "ss:a", "ss:b"),
+    ("SMEMBERS", "ss:i2"),
+    # An absent source: INTER with a missing key is empty, which DELETES the dest.
+    ("SINTERSTORE", "ss:none", "ss:a", "ss:absent", "ss:c"),
+    ("EXISTS", "ss:none"),
+    # Four sources stay on the generic path and must answer identically.
+    ("SADD", "ss:e", "m4"),
+    ("SUNIONSTORE", "ss:u4", "ss:a", "ss:b", "ss:c", "ss:e"),
+    ("SCARD", "ss:u4"),
+    # Wrong type as a source, verbatim from the generic path.
+    ("SINTERSTORE", "ss:bad", "ss:a", "bo:a", "ss:c"),
 ]
 
 def executing_image(conn):

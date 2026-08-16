@@ -14940,11 +14940,16 @@ enum BorrowedDispatchFloorClass {
     /// (frankenredis-ozrro) `ZREVRANGEBYLEX key max min`, the plain arity-4 form
     /// only — the `LIMIT` spelling has its own arm and keeps the cascade.
     Zrevrangebylex,
-    /// (frankenredis-ozrro) `SINTERSTORE|SUNIONSTORE|SDIFFSTORE dest src src` at
-    /// TWO source keys. One class carrying the operation, for the same reason
+    /// (frankenredis-ozrro) `SINTERSTORE|SUNIONSTORE|SDIFFSTORE dest src...`.
+    /// One class carrying the operation, for the same reason
     /// [`BorrowedDispatchFloorClass::ZsetStore`] carries its own: three adjacent
     /// literal-prefix arms otherwise get walked one after another.
-    SetStore(PlainSetStoreCmd),
+    ///
+    /// (frankenredis-804l1) `sources` was added so the THREE-source shape joins the
+    /// two-source one. Only 2 was classified, so the 3-source form — the shape the
+    /// authenticated 0.66-0.74x normalised loss was measured on — walked the whole
+    /// chain to reach a route that already existed deeper in it.
+    SetStore(PlainSetStoreCmd, u8),
     /// (frankenredis-ozrro) `ZINTER numkeys key key`, two sources, no options.
     Zinter2,
     /// (frankenredis-ozrro) `ZDIFF numkeys key key`, two sources, no options.
@@ -16087,14 +16092,30 @@ fn classify_borrowed_dispatch_floor_packet_impl<
             Some(BorrowedDispatchFloorClass::Zrevrangebylex)
         }
         (4, BorrowedDispatchFloorCommand::Sinterstore) => Some(
-            BorrowedDispatchFloorClass::SetStore(PlainSetStoreCmd::Inter),
+            BorrowedDispatchFloorClass::SetStore(PlainSetStoreCmd::Inter, 2),
         ),
         (4, BorrowedDispatchFloorCommand::Sunionstore) => Some(
-            BorrowedDispatchFloorClass::SetStore(PlainSetStoreCmd::Union),
+            BorrowedDispatchFloorClass::SetStore(PlainSetStoreCmd::Union, 2),
         ),
-        (4, BorrowedDispatchFloorCommand::Sdiffstore) => {
-            Some(BorrowedDispatchFloorClass::SetStore(PlainSetStoreCmd::Diff))
-        }
+        (4, BorrowedDispatchFloorCommand::Sdiffstore) => Some(
+            BorrowedDispatchFloorClass::SetStore(PlainSetStoreCmd::Diff, 2),
+        ),
+        // (frankenredis-804l1) The THREE-source forms. Only two sources were
+        // classified, so `SINTERSTORE dst a b c` walked the chain to reach a route
+        // that already existed deeper in it. Gated callgrind on that exact shape,
+        // 4,000 ops at 18,518 instr/op: ~10.5% goes to parse_borrowed_plain_* arms
+        // that cannot match it (key_arg3 4.02%, key_arg2 2.95%, key_arg4 1.85%,
+        // key_arg1 1.64%) on top of a 12.02% walk, against roughly 12% of actual set
+        // work. Four or more sources still take the generic path.
+        (5, BorrowedDispatchFloorCommand::Sinterstore) => Some(
+            BorrowedDispatchFloorClass::SetStore(PlainSetStoreCmd::Inter, 3),
+        ),
+        (5, BorrowedDispatchFloorCommand::Sunionstore) => Some(
+            BorrowedDispatchFloorClass::SetStore(PlainSetStoreCmd::Union, 3),
+        ),
+        (5, BorrowedDispatchFloorCommand::Sdiffstore) => Some(
+            BorrowedDispatchFloorClass::SetStore(PlainSetStoreCmd::Diff, 3),
+        ),
         // ZINTER and ZDIFF clear the threshold by NINE TIMES what their sibling
         // ZUNION measured (780/op, 1.08x) at the same arity in the same family.
         // ZUNION is deliberately absent: family resemblance is not evidence, and
@@ -17720,27 +17741,40 @@ fn try_dispatch_floor_classified_action(
                 )
             }
         }
-        BorrowedDispatchFloorClass::SetStore(cmd) => {
-            let (prefix, name) = match cmd {
-                PlainSetStoreCmd::Inter => (&b"*4\r\n$11\r\n"[..], &b"SINTERSTORE"[..]),
-                PlainSetStoreCmd::Union => (&b"*4\r\n$11\r\n"[..], &b"SUNIONSTORE"[..]),
-                PlainSetStoreCmd::Diff => (&b"*4\r\n$10\r\n"[..], &b"SDIFFSTORE"[..]),
+        BorrowedDispatchFloorClass::SetStore(cmd, sources) => {
+            // The array-length prefix is the ONLY part that varies with the source
+            // count; the name, parsers and executors are shared, and the executors
+            // already take a source SLICE. (frankenredis-804l1)
+            let (prefix, name) = match (cmd, sources) {
+                (PlainSetStoreCmd::Inter, 2) => (&b"*4\r\n$11\r\n"[..], &b"SINTERSTORE"[..]),
+                (PlainSetStoreCmd::Union, 2) => (&b"*4\r\n$11\r\n"[..], &b"SUNIONSTORE"[..]),
+                (PlainSetStoreCmd::Diff, 2) => (&b"*4\r\n$10\r\n"[..], &b"SDIFFSTORE"[..]),
+                (PlainSetStoreCmd::Inter, _) => (&b"*5\r\n$11\r\n"[..], &b"SINTERSTORE"[..]),
+                (PlainSetStoreCmd::Union, _) => (&b"*5\r\n$11\r\n"[..], &b"SUNIONSTORE"[..]),
+                (PlainSetStoreCmd::Diff, _) => (&b"*5\r\n$10\r\n"[..], &b"SDIFFSTORE"[..]),
             };
-            let response =
+            let dispatch = |runtime: &mut Runtime, dest: &[u8], srcs: &[&[u8]]| match cmd {
+                PlainSetStoreCmd::Inter => {
+                    runtime.execute_plain_sinterstore_borrowed(dest, srcs, ts)
+                }
+                PlainSetStoreCmd::Union => {
+                    runtime.execute_plain_sunionstore_borrowed(dest, srcs, ts)
+                }
+                PlainSetStoreCmd::Diff => runtime.execute_plain_sdiffstore_borrowed(dest, srcs, ts),
+            };
+            let response = if sources == 2 {
                 parse_borrowed_plain_key_arg2_packet(unparsed, &parser_config, prefix, name)
                     .and_then(|packet| {
-                        let sources = [packet.a, packet.b];
-                        let reply =
-                            match cmd {
-                                PlainSetStoreCmd::Inter => runtime
-                                    .execute_plain_sinterstore_borrowed(packet.key, &sources, ts),
-                                PlainSetStoreCmd::Union => runtime
-                                    .execute_plain_sunionstore_borrowed(packet.key, &sources, ts),
-                                PlainSetStoreCmd::Diff => runtime
-                                    .execute_plain_sdiffstore_borrowed(packet.key, &sources, ts),
-                            };
-                        reply.map(|reply| (packet.consumed, reply))
-                    });
+                        dispatch(runtime, packet.key, &[packet.a, packet.b])
+                            .map(|reply| (packet.consumed, reply))
+                    })
+            } else {
+                parse_borrowed_plain_key_arg3_packet(unparsed, &parser_config, prefix, name)
+                    .and_then(|packet| {
+                        dispatch(runtime, packet.key, &[packet.a, packet.b, packet.c])
+                            .map(|reply| (packet.consumed, reply))
+                    })
+            };
             if let Some((consumed, response)) = response {
                 Ok(BorrowedMultibulkAction::FastReply { consumed, response })
             } else {
