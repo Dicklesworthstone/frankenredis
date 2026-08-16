@@ -21065,3 +21065,72 @@ apply the same estimation method to zadd_base (46.1 pct), bitcount_range (46.4 p
 expire_nx_opt (51.0 pct), all of which are rewires with parsers and executors already
 present, and expect the estimate to be accurate to a few percent while landing a couple
 of hundred instr/op short of the reference route.
+
+--------------------------------------------------------------------------------
+CONFIRMED ACROSS TWO ELFs — sort_ro_alpha is UNMOVED by everything the campaign landed,
+and is the last shape above parity (frankenredis-z2ce3)
+
+Re-measured on a binary built at HEAD 8ae6ea4b4, which contains several dispatch levers
+landed since the ELF the earlier rows used. This is not a re-run for precision — that
+was forbidden by the previous row's own predicate — it is a check of whether the tree
+moved underneath the figure.
+
+CONVENTION: fr instructions per op / redis 7.2.4's. BELOW 1.0 = fr AHEAD.
+
+    A/A control (get_control)  0.4233 / 0.4279 / 0.4270      spread 1.1 pct
+
+    sort_ro_alpha        ELF c36c3fb0…        ELF 11b0c675…       change
+      fr instr/op          13002.6              12973.8           -0.22 pct
+      dispatch share        23.9 pct             23.9 pct          none
+      dispatch instr/op    ~3114                ~3105              none
+      fr/redis              1.5322x              1.5162x          within noise
+
+    NEW ELF, four runs   fr 12964.8 / 12990.8 / 12959.1 / 12980.4   spread 0.24 pct
+                         redis 8739.5 / 8512.0 / 8785.6 / 8215.4    spread 6.9 pct
+                         ratio 1.4835 / 1.5262 / 1.4750 / 1.5800    spread 7.1 pct
+                         dispatch 23.9 / 23.9 / 24.0 / 23.9
+
+Monotonic on both arms in all four runs.
+
+fr's OWN COST MOVED 0.22 PCT ACROSS TWO BINARIES — inside its own 0.24 pct run-to-run
+spread. That is the result: a tree that gained front-classification for ZADD arity 5
+and several other routes did not touch SORT_RO by even a measurable amount, which is
+exactly what "no floor class, no borrowed parser, no borrowed executor" predicts.
+Classification work cannot reach a command that has no route to classify.
+
+THE DISPATCH SHARE IS IDENTICAL TO A TENTH OF A POINT across two independently built
+binaries — 23.9 pct, ~3,105 instr/op both times. Alongside the eight runs on the old
+ELF this is now twelve runs of a figure that has never varied.
+
+THE RATIO IS THE UNRELIABLE PART AND THE REASON IS THE USUAL ONE. Its 7.1 pct spread
+is redis's 6.9 pct; fr contributes 0.24 pct. The A/A null was 1.1 pct in this session,
+so the instrument was fine and the denominator was not. Quote 1.52x from the combined
+evidence, never a third decimal.
+
+STANDINGS: sort_ro_alpha is the ONLY shape measured above parity. zadd_xx_opt crossed
+last row (1.2416x -> 0.5582x); expire_nx_opt was corrected to parity; nothing else
+screened above 1.0 across roughly sixty shapes.
+
+WHAT IT NEEDS, restated because it is the one item on the board that is NOT a rewire:
+a borrowed parser and a borrowed executor written from nothing, behind SORT_RO's full
+option-set parity surface. Every other stranded shape found — zadd_base, bitcount_range,
+expire_nx_opt, set_base — has a working parser and executor and needs only a classifier
+entry or an earlier cascade position. Costing SORT_RO off those precedents would
+underestimate it badly, and the dispatch share does not warn you: at 23.9 pct it sits
+in the same band as fully-reachable routes, because the command is expensive enough
+(13,000 instr/op) that a full generic dispatch is only a quarter of it.
+
+PROVENANCE:
+  ELF sha256 (new)     11b0c67517b6130fac51679ec296db62d31163a6525c151f3c10e21ba86d4182
+                       built LOCALLY at HEAD 8ae6ea4b4 with RCH_CARGO_WRAPPER_BYPASS=1
+                       and env -u CARGO_TARGET_DIR, executable path from
+                       --message-format=json, COPIED to a private path and sha'd there.
+  ELF sha256 (old)     c36c3fb0a66033deff0cf03dc6a313ef647d5970cd22596aac575120a5d2a297
+  tree                 HEAD 8ae6ea4b4 plus a peer's uncommitted fr-server/src/main.rs.
+  harness              scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines in
+                       the SAME invocation.
+  host                 thinkstation1, 64 cores, /data 314G, no build this turn.
+
+RETRY PREDICATE: sort_ro_alpha now has twelve runs across two ELFs and has never moved.
+Do NOT measure it again until a borrowed SORT_RO route exists. The next measurement on
+this shape should be of a lever, not of the shape.
