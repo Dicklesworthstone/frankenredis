@@ -18797,3 +18797,47 @@ RETRY PREDICATE: do NOT measure the sort with sinter_2/sinter_9 — the result i
 members and the answer is predetermined. Build a large-intersection shape first, cover
 generic AND intset arms, and only then decide. For sinter_9's actual 12,114 instr/op,
 attack the membership probe and per-key lookup instead.
+
+## GATE (frankenredis-gein3) — the SINTER sort is presentational, but THREE sorts are coupled by an order-sensitive test
+
+Source-verified under the build freeze, no build, no dumps. Refines the CANDIDATE and
+REFUTED-ON-SHAPE entries above.
+
+DOWNSTREAM-DEPENDENCY WORRY IS DEAD. `store.sinter()` has exactly ONE production caller
+(fr-command:14493, the SINTER command), so `out.sort_unstable()` at fr-store:20672 has no
+consumer but the reply encoder. `sinterstore` (22223) calls `sinter_value`, a different
+function that does not sort its output — its only sort is `other_sets.sort_by_key(|s|
+s.len())`, the INPUT cardinality ordering mirroring redis's
+`qsortCompareSetsByCardinality`, which is required work and stays.
+
+BUT THERE ARE THREE SORTS, NOT ONE:
+
+    fr-store:20672   out.sort_unstable()         Store::sinter
+    fr-store:20741   survivors.sort_unstable()   sinter_borrow_scan, generic arm
+    fr-store:20761   v.sort_unstable()           sinter_borrow_scan, intset arm
+
+AND `sinter_borrow_scan_matches_plain_sinter` (~68460) couples them with an
+ORDER-SENSITIVE `Vec == Vec` assertion; its own comment says the two paths stream "the
+SAME sorted members".
+
+CONSEQUENCE: removing the sort from `sinter` alone turns that test RED, and it reads as a
+correctness regression when it is two paths disagreeing on presentation. The natural
+response — put the sort back — SILENTLY KILLS THE LEVER. Same shape as the false-REJECT
+trap in the entry above, one layer over: a test going red for a reason unrelated to the
+defect.
+
+REQUIRED SEQUENCE: all three sorts in ONE commit, AND the assertion made order-insensitive
+AT THE ASSERTION (sort both sides there, or compare as sets) — never by restoring order in
+the code under test, which would leave the test asserting the thing being removed.
+
+STILL DOES NOT REVIVE THE LEVER ON CURRENT SHAPES. sinter_9's intersection is 3 members and
+sinter_2's is 2; the sort is under 0.5 pct there. This gate describes what to do once a
+large-intersection shape exists.
+
+Campaign output: yes — a gate that would have cost a build and then been mis-read as a
+regression.
+
+RETRY PREDICATE: prerequisite order is (1) large-intersection shape covering generic AND
+intset arms, (2) all three sorts removed in one commit with the assertion made
+order-insensitive, (3) measure ABBA. Skipping (1) files a false REJECT; skipping (2)
+produces a red test that looks like a regression.
