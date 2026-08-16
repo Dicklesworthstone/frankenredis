@@ -135,6 +135,32 @@ CASES = [
     # Wrong type through the newly-served length.
     ("HMGET", "s:1", "f1"),
     ("ZMSCORE", "s:1", "m1"),
+    # (frankenredis-ayiy7 / the worst measured ratio) ZRANGEBYSCORE's LIMIT form.
+    # Every array length of this command is UNAMBIGUOUS -- 4 plain, 5 WITHSCORES,
+    # 7 LIMIT, 8 WITHSCORES LIMIT -- yet only arity 4 is floor-classified, so the
+    # LIMIT form walks ~5,485 lines of cascade to reach an arm that already has a
+    # zero-copy executor. These rows gate the classification when it lands, and
+    # pin current behaviour until then.
+    ("ZADD", "z:lim", "1", "a", "2", "b", "3", "c", "4", "d"),
+    ("ZRANGEBYSCORE", "z:lim", "1", "4", "LIMIT", "0", "2"),
+    ("ZRANGEBYSCORE", "z:lim", "1", "4", "LIMIT", "1", "2"),
+    # offset past the end, and a negative count meaning "all from offset" --
+    # a route that clamped instead of following redis would pass a naive corpus.
+    ("ZRANGEBYSCORE", "z:lim", "1", "4", "LIMIT", "9", "2"),
+    ("ZRANGEBYSCORE", "z:lim", "1", "4", "LIMIT", "1", "-1"),
+    ("ZRANGEBYSCORE", "z:lim", "1", "4", "LIMIT", "0", "0"),
+    # exclusive and infinite bounds through the same form
+    ("ZRANGEBYSCORE", "z:lim", "(1", "+inf", "LIMIT", "0", "3"),
+    ("ZRANGEBYSCORE", "z:lim", "-inf", "+inf", "LIMIT", "0", "-1"),
+    # the neighbouring lengths that must NOT move
+    ("ZRANGEBYSCORE", "z:lim", "1", "4"),
+    ("ZRANGEBYSCORE", "z:lim", "1", "4", "WITHSCORES"),
+    ("ZRANGEBYSCORE", "z:lim", "1", "4", "WITHSCORES", "LIMIT", "0", "2"),
+    # missing key and wrong type through the LIMIT form
+    ("ZRANGEBYSCORE", "z:absent", "1", "4", "LIMIT", "0", "2"),
+    ("ZRANGEBYSCORE", "s:1", "1", "4", "LIMIT", "0", "2"),
+    # a non-LIMIT token at the same length must still reach generic verbatim
+    ("ZRANGEBYSCORE", "z:lim", "1", "4", "SIDEWAYS", "0", "2"),
     # Errors must come from the generic path verbatim.
     ("ZMPOP", "1", "s:1", "MIN"),
     ("ZMPOP", "1", "z:mp", "SIDEWAYS"),
