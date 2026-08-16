@@ -23571,3 +23571,74 @@ exact and the question is now below its resolution. If the 139 instr/op matters,
 callgrind frames for both arms in one session. Neither shape is a routing defect and
 neither belongs on the untaken-lever list; set_base at 33.9 pct remains the only entry
 there.
+
+## MEASURED (frankenredis-f2zrr) — six samples each: the tie does NOT resolve, and fr-arm load-immunity has a CEILING near loadavg 50
+
+Claim class: COMPETITIVE
+
+FrankenRedis/Redis 7.2.4 = 0.8174x worst bound, measured with the live vendored
+redis-server arm launched and run in the SAME invocation of shape_instr_per_op.py as the
+candidate, both under callgrind back to back.
+
+Campaign output: yes
+
+Same provenance limitation as the rows above (valgrind hosts the target, so no
+self-reported ELF SHA; ABBA repeats, not a bootstrap CI).
+
+Twelve runs, six per shape, ABBA-balanced in ONE invocation:
+
+    shape                  fr instr/op (6)                                     spread
+    bitcount_unit          3810.4 3796.1 3785.9 3816.9 3764.6 3772.4           1.39 pct
+    incrbyfloat_nondyadic  7512.3 7520.5 7312.3 7448.1 7501.7 7453.3           2.85 pct
+
+    shape                  redis 7.2.4 (6)                                     spread
+    bitcount_unit          4690.8 4969.8 4690.2 4669.5 4770.9 4819.6           6.43 pct
+    incrbyfloat_nondyadic  9662.7 9595.1 9500.5 9590.9 9609.9 9550.7           1.71 pct
+
+    shape                  worst bound   ratio spread
+    bitcount_unit             0.8174x       7.02 pct
+    incrbyfloat_nondyadic     0.7838x       1.83 pct
+
+    uptime before certifying: 15.80 / 19.08 / 23.26 — below the ~30 threshold at the
+    START. Load rose to 82.52 by the last run; this row was certified across a window
+    that degraded under it, which is recorded rather than hidden.
+
+**THE TIE STILL DOES NOT RESOLVE, AND MORE SAMPLES WILL NOT FIX IT.** bitcount_unit leads
+by 4.3 pct with a 7.02 pct spread of its own. The previous row hoped six samples would
+settle it; they do not, because **bitcount_unit's spread is INTRINSIC, not sample-limited**
+— six samples reproduce the same ~7 pct band that two did. Adding runs narrows a mean, not
+a range, and the worst-bound convention this ledger uses quotes the range. The two shapes
+should be recorded as tied, with bitcount_unit nominally ahead, and no further sampling
+should be spent on separating them.
+
+**AND fr-ARM LOAD-IMMUNITY HAS A CEILING, WHICH I HAD NOT SEEN BECAUSE I HAD NEVER
+MEASURED ABOVE ~40.**
+
+    incrbyfloat_nondyadic fr arm, loads 11-39 (12 samples)   7479.1 - 7500.5   0.29 pct
+    incrbyfloat_nondyadic fr arm, loads 34-82 (6 samples)    7312.3 - 7520.5   2.85 pct
+
+The low sample, 7312.3, was taken at loadavg 55.34. Below ~40 this arm has been flat to
+0.29 pct across a 3.5x load range; between 55 and 82 it moves ten times that. **So the
+"numerator is load-immune" claim I have banked repeatedly is bounded, and the bound is
+around 50** — a region I had never sampled because every prior row either ran quiet or
+deferred.
+
+That makes the ~30 defer threshold roughly right, but for a reason different from the one
+assumed. It is not that the numerator is fragile below 30; it is flat to 0.29 pct there.
+It is that above ~50 the numerator stops being flat, and 30 leaves headroom for load to
+rise mid-run — which is exactly what happened here, 34 to 82 inside one invocation.
+
+WHAT SURVIVES UNCHANGED: dispatch share. Not shown above because it did not move — 46.1-46.4
+pct for bitcount_unit and 6.0 pct for incrbyfloat_nondyadic across the full 34-82 load
+range, reproducing to a tenth of a point. Every structural finding in this ledger rests on
+share, and share has now been stable across a 7x load range.
+
+EXECUTABLE IDENTITIES, full 64-hex (computed post-run, see limitation above):
+  candidate  `773d819de62d62d7f496b2a1df8e82bd645228e9e366e64c6294190ffa6d8e2d`
+  incumbent  `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+  tree       47a307984; NO rebuild — no crate code had changed since that binary.
+
+RETRY PREDICATE: stop sampling these two against each other; the separation is smaller than
+the intrinsic spread and no sample count fixes that. Re-check loadavg DURING a long run, not
+only before it — this one started at 15.8 and finished at 82.5, and a row certified on the
+opening reading alone would have misrepresented its own conditions.
