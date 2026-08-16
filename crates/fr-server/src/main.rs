@@ -14883,6 +14883,14 @@ enum BorrowedDispatchFloorClass {
     /// this bead: walking to it cost 15,373 instructions per op, 4.27x the
     /// bypassed floor. Clients that probe the command table on connect pay it.
     CommandCount,
+    /// (frankenredis-ozrro) `HRANDFIELD key count`, fields-only. The mirror image
+    /// of the ZRANDMEMBER split: here the BARE form was classified first and the
+    /// COUNT form was the sibling left walking. WITHVALUES is a distinct packet
+    /// and keeps the cascade.
+    HrandfieldCount,
+    /// (frankenredis-ozrro) `PEXPIRETIME key`, the millisecond sibling of the
+    /// already-classified `EXPIRETIME`.
+    Pexpiretime,
     /// (frankenredis-ozrro) Bare `ZRANDMEMBER key`, the single-member reply
     /// form. Its sibling [`Self::ZrandmemberCount`] was classified in an earlier
     /// slice, which left this one alone ~3,600 lines deep in the chain.
@@ -15092,6 +15100,8 @@ enum BorrowedDispatchFloorCommand {
     Bitfield,
     BitfieldRo,
     Bitpos,
+    /// `PEXPIRETIME`. Only the bare `PEXPIRETIME key` form has a borrowed route.
+    Pexpiretime,
     /// `COMMAND`. Only the keyless `COMMAND COUNT` form has a borrowed route;
     /// every other subcommand declines and takes the generic path, which is
     /// where the cascade would have delivered it anyway.
@@ -15402,6 +15412,19 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             _ => None,
         },
         11 => match uppercase_ascii_token::<11>(token)? {
+            [
+                b'P',
+                b'E',
+                b'X',
+                b'P',
+                b'I',
+                b'R',
+                b'E',
+                b'T',
+                b'I',
+                b'M',
+                b'E',
+            ] => Some(BorrowedDispatchFloorCommand::Pexpiretime),
             [
                 b'S',
                 b'I',
@@ -15994,6 +16017,12 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // stranded on the generic path by a classification their parser declines.
         (4..=5, BorrowedDispatchFloorCommand::Sintercard) => {
             Some(BorrowedDispatchFloorClass::Sintercard)
+        }
+        (3, BorrowedDispatchFloorCommand::Hrandfield) => {
+            Some(BorrowedDispatchFloorClass::HrandfieldCount)
+        }
+        (2, BorrowedDispatchFloorCommand::Pexpiretime) => {
+            Some(BorrowedDispatchFloorClass::Pexpiretime)
         }
         // `COMMAND COUNT` is the only COMMAND subcommand with a borrowed route,
         // so a declined classification here costs nothing: DOCS/INFO/LIST/GETKEYS
@@ -19600,6 +19629,58 @@ fn try_dispatch_floor_classified_action(
                 });
             if let Some((consumed, response)) = hit {
                 Ok(BorrowedMultibulkAction::FastReply { consumed, response })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::HrandfieldCount => {
+            // Fields-only `HRANDFIELD key count`; the parser declines the
+            // WITHVALUES spelling, which is a higher arity anyway.
+            let hit = parse_borrowed_plain_hrandfield_count_packet(unparsed, &parser_config)
+                .and_then(|packet| {
+                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    runtime
+                        .execute_plain_hrandfield_count_borrowed_into(
+                            packet.key,
+                            packet.count,
+                            ts,
+                            client_resp3,
+                            out,
+                        )
+                        .map(|()| packet.consumed)
+                });
+            if let Some(consumed) = hit {
+                Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Pexpiretime => {
+            if let Some(packet) = parse_borrowed_plain_pexpiretime_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_keymeta_borrowed(
+                    PlainKeyMetaCmd::Pexpiretime,
+                    packet.key,
+                    ts,
+                )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,
@@ -43626,10 +43707,36 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
             ),
             Some(super::BorrowedDispatchFloorClass::Expiretime)
         );
-        // PEXPIRETIME is an eleven-byte token and is deliberately NOT claimed.
+        // (frankenredis-ozrro) PEXPIRETIME is now claimed too, with its own class
+        // and its own parser rather than being folded into EXPIRETIME's — a route
+        // wired to the seconds executor would answer three orders of magnitude
+        // low. Measured: walking to its arm cost 5,681 instructions per op, 2.68x
+        // the bypassed floor. Case-insensitivity and the near-miss tokens below
+        // are what keep this an "only exact tokens" test.
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(
                 b"*2\r\n$11\r\nPEXPIRETIME\r\n$1\r\nk\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Pexpiretime)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*2\r\n$11\r\npExPiReTiMe\r\n$1\r\nk\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Pexpiretime)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*2\r\n$12\r\nPEXPIRETIMEX\r\n$1\r\nk\r\n",
+                &cfg,
+            ),
+            None
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$11\r\nPEXPIRETIME\r\n$1\r\nk\r\n$1\r\nx\r\n",
                 &cfg,
             ),
             None

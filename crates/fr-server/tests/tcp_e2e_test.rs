@@ -2326,6 +2326,13 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"PEXPIRETIME", b"s:et"]));
     cmds.push(c(&[b"EXPIRETIME", b"s:1"]));
     cmds.push(c(&[b"EXPIRETIME", b"s:absent"]));
+    // (frankenredis-ozrro) PEXPIRETIME is now front-classified alongside its
+    // second-resolution sibling, so it needs the same decline coverage the
+    // EXPIRETIME rows above have: no TTL (-1) and absent key (-2). The fixed
+    // EXPIREAT row above is what keeps the two apart — a route wired to the
+    // seconds executor answers 4102444800 there instead of milliseconds.
+    cmds.push(c(&[b"PEXPIRETIME", b"s:1"]));
+    cmds.push(c(&[b"PEXPIRETIME", b"s:absent"]));
     // (frankenredis-ozrro) COPY is claimed at arity 3 only; the REPLACE spelling
     // keeps the cascade. Both the create and the already-exists branches run,
     // and the destination is read back so a copy that returned 1 without
@@ -2436,6 +2443,21 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"HSET", b"h:1", b"f3", b"v3"]));
     cmds.push(c(&[b"HGET", b"h:1", b"f1"]));
     cmds.push(c(&[b"HGET", b"h:1", b"nope"]));
+    // (frankenredis-ozrro) HRANDFIELD's COUNT form is now front-classified (the
+    // bare form already was). A three-field hash makes the deterministic
+    // branches pinnable: a count at or above the size returns every field, and
+    // count 0 returns empty. The absent-key and wrong-type rows are the ones
+    // that matter for the route, because it DECLINES there and has to fall
+    // through to the generic path. Negative counts sample WITH repetition and
+    // are genuinely random on both engines, so they are deliberately NOT
+    // compared here — the corpus asserts byte equality, and a random draw would
+    // be a flake generator; WITHVALUES is a higher arity and keeps the cascade.
+    cmds.push(c(&[b"HRANDFIELD", b"h:1", b"3"]));
+    cmds.push(c(&[b"HRANDFIELD", b"h:1", b"99"]));
+    cmds.push(c(&[b"HRANDFIELD", b"h:1", b"0"]));
+    cmds.push(c(&[b"HRANDFIELD", b"h:absent", b"3"]));
+    cmds.push(c(&[b"HRANDFIELD", b"s:1", b"3"]));
+    cmds.push(c(&[b"HRANDFIELD", b"h:1", b"x"]));
     // (frankenredis-ozrro) HMSET's classified arm is admitted across even
     // arities 4..=18 because its exact parser is keyed on PAIR COUNT, so several
     // counts have to run or the untaken ones are reachable only through the
