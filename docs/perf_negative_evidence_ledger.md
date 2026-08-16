@@ -25857,3 +25857,63 @@ not a wrapper, and the win here came from removing call layers, not from duplica
 DO re-measure per-probe cost if the probe chain is ever restructured; ~5 instr/op per probe
 is now a known constant to compare against, and sinter_9 at 24 probes is the shape with the
 best signal-to-noise for it.
+
+## MEASURED (bitcount_unit cell) — single-digit peel in the shared borrowed bulk parser: ~1.7 instr per BULK ARGUMENT, so it scales with argc and is near-null on the shape it was taken for
+
+Claim class: SELF-SPEEDUP, SMALL, LANDED. Not a vs-incumbent row.
+
+FIRST, THE CELL'S PREMISE IS STALE, confirmed a third time this session. bitcount_unit is
+assigned to me as "0.7907x with 46.1 pct dispatch share". On the current ELF it measures
+0.5163x / 0.5268x / 0.5229x with dispatch 21.7 pct three times running. The banked row at
+ledger:23447 has fr 3786.3 / redis 4672.7; I measure fr 2417.4 / redis 4682.1. THE REDIS
+ARM AGREES TO 0.2 PCT, so the denominator is stable and the change is entirely in fr's
+numerator -- a lever landed since that row was written. The cell is real, its numbers are not.
+
+THE LEVER. `parse_borrowed_plain_set_bulk` is the argument path for EVERY borrowed route.
+Its digit loop pays a set-up, a per-byte `input.get` bounds check and a `checked_mul` /
+`checked_add` pair only to discover on the FIRST iteration that the next byte is already
+`\r`. In the shapes that reach a borrowed route the bulk lengths are overwhelmingly one
+digit -- `BITCOUNT bb 0 5 BYTE` is $2,$1,$1,$4. Peeling that case reads the two bytes it
+needs and skips the loop entirely.
+
+MEASURED, interleaved, two binaries differing only by the peel, `--fr-only` (the redis arm
+is not involved in a self-speedup and is the noisy half):
+
+    shape          bulk args   dispatch base -> new        delta    total instr/op
+    mget_3              4      454.2 -> 447.6              -6.6     3137.0 -> 3126.7  -0.33 pct
+    bitcount_unit       4      ~522.9 -> ~517.8            -5.1     2395.4 -> 2408.5  within noise
+    sinter_9           10      1009.2 -> 992.4            -16.8    11855.4 -> 11852.1  within noise
+
+    ~1.7 instr per bulk argument, and it SCALES WITH ARGC exactly as the mechanism says it
+    should: 4 args -> ~6, 10 args -> ~17. Dispatch share fell on every shape and every
+    round (21.8->21.5, 14.5->14.3, 8.5->8.4); it is the load-invariant metric and it never
+    once went the other way.
+
+HONEST LIMIT, and it is the reason this row exists. On bitcount_unit -- the shape I was
+sent to -- the TOTAL did not improve: 2395.4 -> 2408.5, i.e. nominally 0.5 pct worse, inside
+the base arm's own 2.5 pct spread at loadavg 42-44. Only `mget_3` shows a total that moves
+(-0.33 pct, with both new readings below both base readings). So this is a real but SMALL
+lever whose effect is visible in dispatch cost and mostly invisible in the totals, and it is
+NOT a fix for the cell it was taken for. 5 instr/op out of 2400 was never going to be.
+
+WHY IT IS LANDED ANYWAY: it is byte-identical by construction and proven so, it costs
+nothing to carry, and it pays on every borrowed route in proportion to argument count --
+which is the opposite of a bench-path special case.
+
+  test      bulk_single_digit_peel_matches_the_unpeeled_reference, asserted against the
+            VERBATIM pre-change body: well-formed frames for every length 0..=140 against
+            eight max_bulk_len values, EVERY truncation of each (the peel reads
+            `input[idx+1]` before the old code did, so a frame ending between those
+            positions is exactly where an out-of-bounds read would show), every
+            single-byte corruption of a valid frame, non-zero cursors, and an exhaustive
+            sweep of all strings up to length 5 over {$,0,1,9,CR,LF,a}
+  mutation  dropping the `next == b'\r'` guard -> RED on "$10\r\nxxxxxxxxxx\r\n" max=10
+            dropping the max_bulk_len check   -> RED on "$1\r\nx\r\n" max=0
+  suite     fr-server 350 passed, 0 failed; fmt clean; clippy clean in my ranges
+
+RETRY PREDICATE. Do NOT re-measure this peel on bitcount_unit; three rounds show its total
+sits inside the base arm's spread and 5 instr/op cannot be resolved there. DO re-measure it
+on an argument-heavy shape if the parser changes again -- `sinter_9` at 10 args is the most
+sensitive one in the corpus, and its dispatch figure reproduces to 0.09 pct, which is what
+makes a 17-instruction move visible at all. And if bitcount_unit is ever assigned again,
+re-derive its ratio first: the row it is assigned from is two levers out of date.

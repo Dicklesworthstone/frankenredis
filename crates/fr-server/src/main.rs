@@ -17714,13 +17714,13 @@ fn try_dispatch_floor_classified_action(
                         response,
                     }),
                     None => parse_borrowed_multibulk_action(
-                    unparsed,
-                    parser_config,
-                    runtime,
-                    ts,
-                    out,
-                    argv_scratch,
-                ),
+                        unparsed,
+                        parser_config,
+                        runtime,
+                        ts,
+                        out,
+                        argv_scratch,
+                    ),
                 }
             } else if let Some(packet) =
                 parse_borrowed_plain_set_xx_packet(unparsed, &parser_config)
@@ -17734,13 +17734,13 @@ fn try_dispatch_floor_classified_action(
                         response,
                     }),
                     None => parse_borrowed_multibulk_action(
-                    unparsed,
-                    parser_config,
-                    runtime,
-                    ts,
-                    out,
-                    argv_scratch,
-                ),
+                        unparsed,
+                        parser_config,
+                        runtime,
+                        ts,
+                        out,
+                        argv_scratch,
+                    ),
                 }
             } else {
                 parse_borrowed_multibulk_action(
@@ -17772,13 +17772,13 @@ fn try_dispatch_floor_classified_action(
                     })
                 } else {
                     parse_borrowed_multibulk_action(
-                    unparsed,
-                    parser_config,
-                    runtime,
-                    ts,
-                    out,
-                    argv_scratch,
-                )
+                        unparsed,
+                        parser_config,
+                        runtime,
+                        ts,
+                        out,
+                        argv_scratch,
+                    )
                 }
             } else if let Some(packet) =
                 parse_borrowed_plain_set_opt_get_packet(unparsed, &parser_config)
@@ -17795,13 +17795,13 @@ fn try_dispatch_floor_classified_action(
                     })
                 } else {
                     parse_borrowed_multibulk_action(
-                    unparsed,
-                    parser_config,
-                    runtime,
-                    ts,
-                    out,
-                    argv_scratch,
-                )
+                        unparsed,
+                        parser_config,
+                        runtime,
+                        ts,
+                        out,
+                        argv_scratch,
+                    )
                 }
             } else if let Some((is_seconds, packet)) =
                 parse_borrowed_plain_set_absexpire_packet(unparsed, &parser_config)
@@ -17821,13 +17821,13 @@ fn try_dispatch_floor_classified_action(
                     })
                 } else {
                     parse_borrowed_multibulk_action(
-                    unparsed,
-                    parser_config,
-                    runtime,
-                    ts,
-                    out,
-                    argv_scratch,
-                )
+                        unparsed,
+                        parser_config,
+                        runtime,
+                        ts,
+                        out,
+                        argv_scratch,
+                    )
                 }
             } else {
                 parse_borrowed_multibulk_action(
@@ -17858,13 +17858,13 @@ fn try_dispatch_floor_classified_action(
                     })
                 } else {
                     parse_borrowed_multibulk_action(
-                    unparsed,
-                    parser_config,
-                    runtime,
-                    ts,
-                    out,
-                    argv_scratch,
-                )
+                        unparsed,
+                        parser_config,
+                        runtime,
+                        ts,
+                        out,
+                        argv_scratch,
+                    )
                 }
             } else if let Some((is_seconds, packet)) =
                 parse_borrowed_plain_set_relexpire_get_packet(unparsed, &parser_config)
@@ -17882,13 +17882,13 @@ fn try_dispatch_floor_classified_action(
                     })
                 } else {
                     parse_borrowed_multibulk_action(
-                    unparsed,
-                    parser_config,
-                    runtime,
-                    ts,
-                    out,
-                    argv_scratch,
-                )
+                        unparsed,
+                        parser_config,
+                        runtime,
+                        ts,
+                        out,
+                        argv_scratch,
+                    )
                 }
             } else {
                 parse_borrowed_multibulk_action(
@@ -29923,6 +29923,57 @@ fn parse_borrowed_plain_exists_eight_packet<'a>(
     })
 }
 
+/// Pre-fast-path behaviour of [`parse_borrowed_plain_set_bulk`], retained verbatim so the
+/// single-digit peel is testable against what it replaced rather than against my belief
+/// about what it replaced. Not used by the server.
+#[doc(hidden)]
+#[cfg(test)]
+fn parse_borrowed_plain_set_bulk_unpeeled_reference(
+    input: &[u8],
+    cursor: usize,
+    max_bulk_len: usize,
+) -> Option<(&[u8], usize)> {
+    if *input.get(cursor)? != b'$' {
+        return None;
+    }
+    let mut idx = cursor + 1;
+    let first = *input.get(idx)?;
+    let bulk_len = if first == b'0' {
+        idx += 1;
+        if !matches!(input.get(idx), Some(b'\r')) {
+            return None;
+        }
+        0usize
+    } else if first.is_ascii_digit() && first != b'0' {
+        let mut value = usize::from(first - b'0');
+        idx += 1;
+        while let Some(&byte) = input.get(idx) {
+            if byte == b'\r' {
+                break;
+            }
+            if !byte.is_ascii_digit() {
+                return None;
+            }
+            value = value.checked_mul(10)?;
+            value = value.checked_add(usize::from(byte - b'0'))?;
+            idx += 1;
+        }
+        value
+    } else {
+        return None;
+    };
+    if bulk_len > max_bulk_len || input.get(idx..idx + 2)? != b"\r\n" {
+        return None;
+    }
+    idx += 2;
+    let end = idx.checked_add(bulk_len)?;
+    if input.get(end..end + 2)? != b"\r\n" {
+        return None;
+    }
+    let arg = input.get(idx..end)?;
+    Some((arg, end + 2))
+}
+
 fn parse_borrowed_plain_set_bulk(
     input: &[u8],
     cursor: usize,
@@ -29933,6 +29984,41 @@ fn parse_borrowed_plain_set_bulk(
     }
     let mut idx = cursor + 1;
     let first = *input.get(idx)?;
+    // (bitcount_unit cell) SINGLE-DIGIT FAST PATH. Every borrowed route funnels its
+    // arguments through this parser, and in the shapes that reach a borrowed route the
+    // bulk lengths are overwhelmingly one digit -- `BITCOUNT bb 0 5 BYTE` is $2,$1,$1,$4,
+    // all of them. The general branch below pays a loop set-up, a per-byte `input.get`
+    // bounds check and a `checked_mul`/`checked_add` pair to discover on its FIRST
+    // iteration that the next byte is already `\r`. Peeling that case reads the two bytes
+    // it needs and skips all of it.
+    //
+    // Byte-identical by construction: this arm fires only when `first` is 1..=9 AND the
+    // very next byte is `\r`, which is exactly the input the loop would have consumed in
+    // one iteration to produce the same `value` and leave `idx` in the same place. Every
+    // other input falls through to the unchanged branches, and `0` keeps its own arm
+    // because a leading zero is only legal as the whole length.
+    if let Some(&next) = input.get(idx + 1)
+        && next == b'\r'
+        && first.is_ascii_digit()
+        && first != b'0'
+    {
+        let bulk_len = usize::from(first - b'0');
+        idx += 1;
+        if bulk_len > max_bulk_len {
+            return None;
+        }
+        // idx now points at the `\r` we just confirmed; the `\n` still needs checking.
+        if input.get(idx..idx + 2)? != b"\r\n" {
+            return None;
+        }
+        idx += 2;
+        let end = idx.checked_add(bulk_len)?;
+        if input.get(end..end + 2)? != b"\r\n" {
+            return None;
+        }
+        let arg = input.get(idx..end)?;
+        return Some((arg, end + 2));
+    }
     let bulk_len = if first == b'0' {
         idx += 1;
         if !matches!(input.get(idx), Some(b'\r')) {
@@ -33445,6 +33531,90 @@ fn handle_writable(
 
 #[cfg(test)]
 mod tests {
+    /// (bitcount_unit cell) The single-digit peel in `parse_borrowed_plain_set_bulk` must be
+    /// BYTE-IDENTICAL to the loop it short-circuits, for every input including the malformed
+    /// ones -- this parser is the argument path for EVERY borrowed route, so a divergence
+    /// here is a divergence everywhere at once, and the failure mode is silent: a wrongly
+    /// accepted frame is mis-parsed rather than rejected.
+    ///
+    /// Asserted against the verbatim pre-change body, not against expectations, and swept
+    /// rather than sampled: the peel fires on a narrow condition (`first` in 1..=9 AND the
+    /// next byte `\r`), so the cases that matter are the NEIGHBOURS of that condition.
+    #[test]
+    fn bulk_single_digit_peel_matches_the_unpeeled_reference() {
+        let both = |input: &[u8], cursor: usize, max: usize| {
+            let fast = super::parse_borrowed_plain_set_bulk(input, cursor, max);
+            let slow = super::parse_borrowed_plain_set_bulk_unpeeled_reference(input, cursor, max);
+            assert_eq!(
+                fast,
+                slow,
+                "diverged on {:?} cursor={cursor} max={max}",
+                String::from_utf8_lossy(input)
+            );
+        };
+
+        // 1. WELL-FORMED frames across the single-digit boundary and well past it, so both
+        //    the peeled range (1..=9) and the multi-digit range are covered, plus 0 which
+        //    keeps its own arm.
+        for n in 0usize..=140 {
+            let mut f = format!("${n}\r\n").into_bytes();
+            f.extend(std::iter::repeat_n(b'x', n));
+            f.extend_from_slice(b"\r\n");
+            for max in [0usize, 1, 8, 9, 10, n.saturating_sub(1), n, n + 1, 512] {
+                both(&f, 0, max);
+            }
+            // every TRUNCATION: the peel reads input[idx + 1] before the old code did, so
+            // a frame that ends between those two positions is exactly where an
+            // out-of-bounds read or an early accept would show up.
+            for cut in 0..f.len() {
+                both(&f[..cut], 0, 512);
+            }
+        }
+
+        // 2. SINGLE-BYTE CORRUPTIONS of a valid single-digit frame -- the peel's own domain.
+        let base = b"$5\r\nhello\r\n";
+        for pos in 0..base.len() {
+            for byte in [b'$', b'0', b'1', b'9', b'\r', b'\n', b'a', b'-', 0u8, 255u8] {
+                let mut f = base.to_vec();
+                f[pos] = byte;
+                both(&f, 0, 512);
+            }
+        }
+
+        // 3. NON-ZERO CURSOR, since every caller after the first argument uses one.
+        let chained = b"$1\r\na\r\n$2\r\nbb\r\n$12\r\nabcdefghijkl\r\n";
+        for cursor in 0..chained.len() {
+            both(chained, cursor, 512);
+        }
+
+        // 4. EXHAUSTIVE over short strings from the alphabet that can reach either arm.
+        //    Catches the shapes hand-written cases miss, e.g. "$1" with nothing after it,
+        //    "$\r\n", "$01\r\n", "$1a\r\n".
+        let alphabet = [b'$', b'0', b'1', b'9', b'\r', b'\n', b'a'];
+        let mut buf = [0u8; 5];
+        for len in 0..=5usize {
+            let mut counter = vec![0usize; len];
+            loop {
+                for (i, &c) in counter.iter().enumerate() {
+                    buf[i] = alphabet[c];
+                }
+                both(&buf[..len], 0, 512);
+                let mut i = 0;
+                while i < len {
+                    counter[i] += 1;
+                    if counter[i] < alphabet.len() {
+                        break;
+                    }
+                    counter[i] = 0;
+                    i += 1;
+                }
+                if i == len {
+                    break;
+                }
+            }
+        }
+    }
+
     use crate::{
         BlockingOp, CheckBlockedClientsContext, InlineParseResult, PendingClientUnblocksContext,
         REPLICA_ACK_INTERVAL_MS, REPLICA_RECONNECT_BACKOFF_MS, ReplOffset,
@@ -50761,7 +50931,10 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
                 }
                 other => panic!("unexpected class {other:?}"),
             };
-            assert!(reached, "{form:?} is claimed but NO chained parser accepts it");
+            assert!(
+                reached,
+                "{form:?} is claimed but NO chained parser accepts it"
+            );
         }
 
         // Base SET stays out of the floor table.
