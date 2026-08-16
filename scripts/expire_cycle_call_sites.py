@@ -15,6 +15,20 @@ seeding no TTLs at all, cannot see it. The moment ANY key carries a TTL the guar
 stops firing, and under pipelining the ratio of cycles is the pipeline depth: at -P16
 redis runs one fast cycle per loop while fr runs sixteen.
 
+MEASURABLE AT LAST (frankenredis-u5cmn). When this was filed the divergence could not
+be measured, because every bench seeds zero TTLs and bk7pi's early exit fires on all
+of them. expire_nx is the exception, and obvious in hindsight: `EXPIRE key seconds NX`
+CREATES a TTL, so after the first iteration count_expiring_keys() is non-zero, the
+guard stops firing, and every subsequent command runs a full cycle that upstream runs
+once per event loop.
+
+expire_nx is also the last sub-parity route in either shape set -- 0.9324, 0.9379 and
+0.9600, all ADMISSIBLE across two ELFs, worst bound 0.9013, surviving a quiet window
+at 23% capacity. Its executor is otherwise clean: classified at arity 4 as ExpireCond,
+flags resolved generically, and all three plain_expire_owned_argv calls gated behind
+get_or_insert_with so nothing allocates on the fast path. This cycle is the only
+unguarded work left on it.
+
 This does NOT claim the inline placement is wrong -- it may be deliberate, and a
 per-command cycle has latency advantages a timer does not. It claims the divergence
 is real, that its cost scales with pipeline depth on TTL-carrying workloads, and that
