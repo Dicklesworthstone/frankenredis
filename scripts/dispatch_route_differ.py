@@ -497,6 +497,44 @@ CASES = [
     ("LPUSHX", "l:x", "a", "b"),
     ("LRANGE", "l:x", "0", "-1"),
     ("RPUSHX", "s:1", "v"),
+    # (frankenredis-z2ce3) SET's OPTION FORMS. There is currently no option-form SET
+    # coverage in this corpus at all -- the eight existing SET rows are plain `SET k v`
+    # used as setup for other commands -- so an ordering or classification change around
+    # SET would not be caught here.
+    #
+    # This matters now because the last untaken dispatch lever is base SET, which sits at
+    # 33.9 pct dispatch because it is absent from the floor token table and its cascade
+    # arm is ~340 lines past GET's. The two candidate fixes are a floor class for `*3`
+    # SET, or moving its arm up beside GET's. BOTH reorder or reclassify around these
+    # option forms, and a `*3` claim that reached them would send every one to the GENERIC
+    # path -- which is what TOUCH and MSETNX measured (3.28x and 2.67x) when an exact
+    # claim left siblings behind.
+    #
+    # Every write below is followed by a READ that distinguishes it from plain SET. A
+    # reply-only corpus passes even if SET NX silently becomes SET, because both return
+    # +OK on a missing key -- the divergence is only visible in what the key holds.
+    ("DEL", "so:k"),
+    ("SET", "so:k", "first"),
+    ("SET", "so:k", "second", "NX"),     # key exists -> must NOT overwrite, returns nil
+    ("GET", "so:k"),                     # -> "first"
+    ("SET", "so:k", "third", "XX"),      # key exists -> must overwrite
+    ("GET", "so:k"),                     # -> "third"
+    ("SET", "so:absent", "v", "XX"),     # missing -> must NOT create, returns nil
+    ("EXISTS", "so:absent"),
+    ("SET", "so:nx2", "v", "NX"),        # missing -> must create
+    ("GET", "so:nx2"),
+    ("SET", "so:k", "fourth", "GET"),    # returns the PRIOR value
+    ("GET", "so:k"),
+    ("SET", "so:ex", "v", "EX", "100"),
+    ("TTL", "so:ex"),                    # a plain-SET mis-route would leave -1
+    ("SET", "so:ex", "w", "KEEPTTL"),
+    ("TTL", "so:ex"),                    # must still be ~100, not -1
+    ("SET", "so:ex", "x"),               # plain SET CLEARS the ttl
+    ("TTL", "so:ex"),                    # -> -1, the control for the row above
+    # The arity-3 form itself, which is what a move or a floor claim would touch.
+    ("SET", "so:plain", "v"),
+    ("GET", "so:plain"),
+
 ]
 
 def executing_image(conn):
