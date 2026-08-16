@@ -555,6 +555,28 @@ CASES = [
     ("SET", "so:plain", "v"),
     ("GET", "so:plain"),
 
+    # ---- PING, which had ZERO rows despite owning two cascade arms ----
+    #
+    # PING is served by parse_borrowed_plain_ping_upper_noarg_packet (an exact match on
+    # the literal b"*1\r\n$4\r\nPING\r\n") and by parse_borrowed_plain_ping_packet, which
+    # accepts BOTH the bare `*1` form and the `*2` form carrying a message. Two arms, two
+    # arities, and not one row in this corpus until now -- so the arity fast-reject in
+    # front of them was landing on an untested route.
+    #
+    # The `*2` row is the load-bearing one: a guard written as "arity == 1", the obvious
+    # reading of a command whose common form takes no argument, stops `PING message` from
+    # ever reaching its fast arm. That degrades to the generic path rather than answering
+    # wrongly, so it is a PERFORMANCE bug the reply cannot show -- but the reply CAN show
+    # the RESP type, and the two forms differ there: bare PING is a simple string (+PONG)
+    # while PING with a message is a BULK echo of the argument.
+    ("PING",),                       # -> +PONG (simple string)
+    ("PING", "hello"),               # -> "hello" (BULK, not +PONG)
+    ("PING", ""),                    # empty message is still a bulk, not +PONG
+    ("PING", "PONG"),                # message that LOOKS like the bare reply
+    ("ping",),                       # the exact-literal upper arm must not be the only one
+    ("PiNg", "MiXeD"),               # both slots case-folded
+    ("PING", "a", "b"),              # *3 -> arity error, verbatim from the generic path
+
     # ---- SET option forms that have their OWN fast route and NO corpus row ----
     #
     # The block above covers NX, XX, bare GET, EX-seconds and KEEPTTL. But SET is

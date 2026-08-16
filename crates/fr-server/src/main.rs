@@ -6906,8 +6906,9 @@ fn process_buffered_frames(
                     &mut argv_scratch,
                 ) {
                     action
-                } else if let Some(consumed) =
-                    parse_borrowed_plain_ping_upper_noarg_packet(unparsed, &parser_config)
+                } else if borrowed_arity_is(unparsed, b'1')
+                    && let Some(consumed) =
+                        parse_borrowed_plain_ping_upper_noarg_packet(unparsed, &parser_config)
                 {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                     if runtime
@@ -6930,8 +6931,8 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_ping_packet(unparsed, &parser_config)
+                } else if borrowed_arity_in(unparsed, b'1', b'2')
+                    && let Some(packet) = parse_borrowed_plain_ping_packet(unparsed, &parser_config)
                 {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                     if runtime
@@ -6956,8 +6957,8 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_get_packet(unparsed, &parser_config)
+                } else if borrowed_arity_is(unparsed, b'2')
+                    && let Some(packet) = parse_borrowed_plain_get_packet(unparsed, &parser_config)
                 {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
                     let default_read_allowed = *plain_get_read_gate_cache
@@ -6985,7 +6986,7 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
-                } else if borrowed_set_arity_is(unparsed, b'3')
+                } else if borrowed_arity_is(unparsed, b'3')
                     && let Some(packet) = parse_borrowed_plain_set_packet(unparsed, &parser_config)
                 {
                     let default_write_allowed =
@@ -7098,7 +7099,7 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
-                } else if borrowed_set_arity_is(unparsed, b'5')
+                } else if borrowed_arity_is(unparsed, b'5')
                     && let Some((is_seconds, packet)) =
                         parse_borrowed_plain_set_relexpire_packet(unparsed, &parser_config)
                 {
@@ -7128,7 +7129,7 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
-                } else if borrowed_set_arity_is(unparsed, b'6')
+                } else if borrowed_arity_is(unparsed, b'6')
                     && let Some((is_seconds, packet)) =
                         parse_borrowed_plain_set_relexpire_get_packet(unparsed, &parser_config)
                 {
@@ -7153,7 +7154,7 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
-                } else if borrowed_set_arity_is(unparsed, b'5')
+                } else if borrowed_arity_is(unparsed, b'5')
                     && let Some(packet) =
                         parse_borrowed_plain_set_opt_get_packet(unparsed, &parser_config)
                 {
@@ -7177,7 +7178,7 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
-                } else if borrowed_set_arity_is(unparsed, b'5')
+                } else if borrowed_arity_is(unparsed, b'5')
                     && let Some((is_seconds, packet)) =
                         parse_borrowed_plain_set_absexpire_packet(unparsed, &parser_config)
                 {
@@ -7207,7 +7208,7 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
-                } else if borrowed_set_arity_is(unparsed, b'4')
+                } else if borrowed_arity_is(unparsed, b'4')
                     && let Some(packet) =
                         parse_borrowed_plain_set_nx_packet(unparsed, &parser_config)
                 {
@@ -7230,7 +7231,7 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         ),
                     }
-                } else if borrowed_set_arity_is(unparsed, b'4')
+                } else if borrowed_arity_is(unparsed, b'4')
                     && let Some(packet) =
                         parse_borrowed_plain_set_xx_packet(unparsed, &parser_config)
                 {
@@ -7253,7 +7254,7 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         ),
                     }
-                } else if borrowed_set_arity_is(unparsed, b'6')
+                } else if borrowed_arity_is(unparsed, b'6')
                     && let Some((is_xx, is_seconds, packet)) =
                         parse_borrowed_plain_set_cond_relexpire_packet(unparsed, &parser_config)
                 {
@@ -28106,9 +28107,9 @@ fn parse_borrowed_plain_set_packet<'a>(
     })
 }
 
-/// Cheap fast-reject for the SET arm group in the borrowed cascade.
+/// Cheap fast-reject for arity-distinguishable arms in the borrowed cascade.
 ///
-/// Every `parse_borrowed_plain_set_*_packet` starts by requiring the literal prefix
+/// Every guarded `parse_borrowed_plain_*_packet` starts by requiring a literal prefix
 /// `*<arity>\r\n$3\r\nSET\r\n`, so it returns `None` for any input whose arity digit
 /// differs. Testing that ONE byte at the call site turns a mismatch from a real
 /// non-inlined call -- which re-checks its `ParserConfig` bounds before it ever looks at
@@ -28124,8 +28125,16 @@ fn parse_borrowed_plain_set_packet<'a>(
 /// (a `*4`) was paying SIX failed parser calls -- base SET `*3`, relexpire `*5`,
 /// relexpire_get `*6`, opt_get `*5`, absexpire `*5`, nx `*4` -- before reaching its own arm.
 #[inline(always)]
-fn borrowed_set_arity_is(input: &[u8], arity: u8) -> bool {
+fn borrowed_arity_is(input: &[u8], arity: u8) -> bool {
     input.get(1) == Some(&arity)
+}
+
+/// Range form of [`borrowed_arity_is`], for an arm that serves more than one arity.
+/// `PING` is the case that needs it: it accepts `*1` bare and `*2` carrying a message, so
+/// a single-digit guard would strand the message form on the generic path.
+#[inline(always)]
+fn borrowed_arity_in(input: &[u8], lo: u8, hi: u8) -> bool {
+    matches!(input.get(1), Some(&d) if d >= lo && d <= hi)
 }
 
 // (frankenredis-setexfast) Byte-prefix fast path for the no-flag `SET key value
