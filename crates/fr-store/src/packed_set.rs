@@ -638,11 +638,32 @@ impl HashFieldMap {
     /// because the caller promised uniqueness -- feeding it a duplicate corrupts the map.
     /// (frankenredis-fosf1)
     #[must_use]
+    /// (frankenredis-33832) The tier test in closed form: it depends on the pair COUNT
+    /// and the LONGEST element and on nothing else, so any caller that already knows
+    /// both can decide the tier without touching the pairs again.
+    ///
+    /// `hash_from_listpack_spans` is exactly such a caller — it computes
+    /// `max_element_len` while it builds the pair list, then used to call
+    /// `borrowed_pairs_need_hashtable`, which walked all of them a second time to
+    /// recompute what the first walk already knew. On the packed tier that walk never
+    /// short-circuits (nothing exceeds the threshold, so `any` runs to the end), which
+    /// is the common RESTORE case and the worst one.
+    ///
+    /// The two entry points share this one predicate so the threshold logic cannot
+    /// drift between the O(1) and the walking form.
+    #[must_use]
+    pub fn tier_needs_hashtable(pair_count: usize, max_element_len: usize) -> bool {
+        pair_count > PACKED_MAX_ENTRIES || max_element_len > PACKED_MAX_VALUE
+    }
+
+    #[must_use]
     pub fn borrowed_pairs_need_hashtable(pairs: &[(&[u8], &[u8])]) -> bool {
-        pairs.len() > PACKED_MAX_ENTRIES
-            || pairs
-                .iter()
-                .any(|(f, v)| f.len() > PACKED_MAX_VALUE || v.len() > PACKED_MAX_VALUE)
+        let max_element_len = pairs
+            .iter()
+            .map(|(f, v)| f.len().max(v.len()))
+            .max()
+            .unwrap_or(0);
+        Self::tier_needs_hashtable(pairs.len(), max_element_len)
     }
 
     #[must_use]
@@ -651,12 +672,23 @@ impl HashFieldMap {
         // and the byte budget each walked every pair, and both branches summed the
         // identical `f.len() + v.len() + 10`, so the second walk ran unconditionally.
         // One pass now yields both. Byte-identical — same conjunction, same total.
-        let mut to_hash = pairs.len() > PACKED_MAX_ENTRIES;
+        //
+        // (frankenredis-33832, second pass) The tier decision goes through
+        // `tier_needs_hashtable` rather than repeating the comparison inline, because
+        // this was the SECOND independent copy of that rule. `hash_from_listpack_spans`
+        // decides with the same rule whether to run the duplicate-field check, and only
+        // the HASHTABLE tier performs it — the packed tier keeps a duplicate verbatim,
+        // as redis does. If the two copies ever disagreed in the direction "dup check
+        // says packed, builder says hashtable", the builder would call
+        // `append_known_absent` on a duplicate that nothing had rejected and silently
+        // corrupt the map. One predicate, so they cannot disagree.
+        let mut max_element_len = 0_usize;
         let mut bytes = 0_usize;
         for (f, v) in pairs {
-            to_hash |= f.len() > PACKED_MAX_VALUE || v.len() > PACKED_MAX_VALUE;
+            max_element_len = max_element_len.max(f.len()).max(v.len());
             bytes += f.len() + v.len() + 10;
         }
+        let to_hash = Self::tier_needs_hashtable(pairs.len(), max_element_len);
         if to_hash {
             let mut h = CompactFieldMap::with_capacity(pairs.len(), bytes);
             for (field, value) in pairs {

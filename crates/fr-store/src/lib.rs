@@ -36876,9 +36876,18 @@ fn hash_from_listpack_spans(listpack: &[u8]) -> Result<(HashFieldMap, usize), St
     // skips the existence probe on the caller's promise of uniqueness, so a duplicate
     // would silently corrupt the map. There we DELIBERATELY diverge in fr's favour and
     // return an error where redis panics: refusing a payload beats crashing on it.
-    if HashFieldMap::borrowed_pairs_need_hashtable(&pairs)
-        && restore_pairs_have_duplicate_field(&pairs)
-    {
+    // (frankenredis-33832) O(1) tier test. This was
+    // `HashFieldMap::borrowed_pairs_need_hashtable(&pairs)`, which walked every pair to
+    // find the longest element — the loop above has just computed exactly that into
+    // `max_element_len`. On the packed tier the walk never short-circuits, because
+    // nothing exceeds the threshold and `any` therefore runs to the end, so the common
+    // RESTORE case paid a full second pass over all 2N elements to rediscover a value
+    // it already held. 33832's size sweep is what makes this worth taking: hash RESTORE
+    // is 1.80x redis at 8 fields and 4.54x at 160 with its FIXED cost at parity (1.08x),
+    // so every remaining item on this surface is per-element, and this one is a whole
+    // per-element pass.
+    let needs_hashtable = HashFieldMap::tier_needs_hashtable(pairs.len(), max_element_len);
+    if needs_hashtable && restore_pairs_have_duplicate_field(&pairs) {
         return Err(StoreError::InvalidDumpPayload);
     }
     Ok((
@@ -41291,6 +41300,95 @@ mod tests {
             HashFieldMap::borrowed_pairs_need_hashtable(&[(&b"f1"[..], long.as_slice())]),
             "this payload must actually be on the hashtable tier, or the test above proves nothing"
         );
+    }
+
+    /// (frankenredis-33832) The RESTORE tier test is now decided in O(1) from the pair
+    /// count and the longest element, both of which `hash_from_listpack_spans` already
+    /// computes, instead of re-walking every pair. The two forms must agree EXACTLY:
+    /// disagreeing by one element picks the wrong representation, and a payload that
+    /// should be on the hashtable tier but lands on the packed one silently skips the
+    /// duplicate-field check that only the hashtable tier performs — a correctness hole,
+    /// not a slow path.
+    ///
+    /// The oracle is the ORIGINAL predicate written out longhand with its thresholds as
+    /// LITERALS, not a restatement of either implementation. A test that derived the
+    /// expected answer from the constants would still pass if a constant moved.
+    #[test]
+    fn restore_tier_test_o1_form_matches_the_walk_it_replaced() {
+        fn oracle(pairs: &[(&[u8], &[u8])]) -> bool {
+            // Longhand copy of the pre-33832 body: >128 pairs, or any element >64 bytes.
+            pairs.len() > 128 || pairs.iter().any(|(f, v)| f.len() > 64 || v.len() > 64)
+        }
+
+        let short: &[u8] = b"v";
+        let at_limit = vec![b'x'; 64];
+        let over_limit = vec![b'x'; 65];
+
+        let mut cases: Vec<Vec<(&[u8], &[u8])>> = vec![
+            vec![],
+            vec![(b"f", short)],
+            // exactly at the VALUE threshold, and one past it, in both slots
+            vec![(b"f", at_limit.as_slice())],
+            vec![(b"f", over_limit.as_slice())],
+            vec![(at_limit.as_slice(), short)],
+            vec![(over_limit.as_slice(), short)],
+        ];
+        // Oversized element FIRST (where the old `any` short-circuited immediately) and
+        // LAST (where it scanned every pair) — the two ends of the walk it replaced.
+        cases.push(vec![(over_limit.as_slice(), short), (b"f2", short)]);
+        cases.push(vec![(b"f2", short), (over_limit.as_slice(), short)]);
+        // exactly at the COUNT threshold, and one past it, all elements short
+        for n in [128_usize, 129] {
+            cases.push((0..n).map(|_| (&b"f"[..], short)).collect());
+        }
+
+        for pairs in &cases {
+            let want = oracle(pairs);
+            let max_element_len = pairs
+                .iter()
+                .map(|(f, v)| f.len().max(v.len()))
+                .max()
+                .unwrap_or(0);
+            assert_eq!(
+                HashFieldMap::tier_needs_hashtable(pairs.len(), max_element_len),
+                want,
+                "O(1) form disagrees with the original predicate at len={} max={}",
+                pairs.len(),
+                max_element_len
+            );
+            assert_eq!(
+                HashFieldMap::borrowed_pairs_need_hashtable(pairs),
+                want,
+                "walking form disagrees with the original predicate at len={}",
+                pairs.len()
+            );
+        }
+    }
+
+    /// End-to-end companion: the O(1) test is fed `max_element_len` computed by
+    /// `hash_from_listpack_spans` itself, so the tier a real RESTORE lands on is what
+    /// actually matters. Straddles the value threshold in a payload, since an off-by-one
+    /// there is exactly the mistake the closed form could introduce.
+    #[test]
+    fn restore_lands_on_the_same_tier_either_side_of_the_value_threshold() {
+        let at_limit = vec![b'x'; 64];
+        let over_limit = vec![b'x'; 65];
+
+        let lp = encode_listpack_strings(&[b"f1", &at_limit, b"f2", b"v2"]).expect("listpack");
+        let (hash, _) = super::hash_from_listpack_spans(&lp).expect("packed-tier payload");
+        assert!(
+            matches!(hash, HashFieldMap::Packed(_)),
+            "a 64-byte value is AT the limit, not over it: must stay on the packed tier"
+        );
+        assert_eq!(hash.get(b"f1"), Some(at_limit.as_slice()));
+
+        let lp = encode_listpack_strings(&[b"f1", &over_limit, b"f2", b"v2"]).expect("listpack");
+        let (hash, _) = super::hash_from_listpack_spans(&lp).expect("hashtable-tier payload");
+        assert!(
+            matches!(hash, HashFieldMap::Hash(_)),
+            "a 65-byte value is over the limit and must promote to the hashtable tier"
+        );
+        assert_eq!(hash.get(b"f1"), Some(over_limit.as_slice()));
     }
 
     // ── (frankenredis-33832) RESTORE duplicate-field detector ──────────────────
