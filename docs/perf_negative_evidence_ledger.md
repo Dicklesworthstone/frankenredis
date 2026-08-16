@@ -20990,3 +20990,78 @@ form classified and its sibling stranded, and in ZADD's case the stranded form w
 common one. Enumerate every command with both a base and an optioned borrowed parser and
 check each has a classifier arm — this is a per-shape classification habit, not a property
 of options, and it has cost four separate measurement rounds to chase two instances.
+
+--------------------------------------------------------------------------------
+CONFIRMED — zadd_xx_opt CROSSED: 1.2416x -> 0.5582x, and the dispatch-share upper
+bound predicted it to within 1.2 pct (frankenredis-z2ce3, frankenredis-do85w)
+
+A peer landed an arity-5 ZADD floor claim and banked that zadd_base (arity 4) was
+unmoved by it. This verifies the shape the lever WAS aimed at, on a binary built at
+that commit, and it validates the estimation method the earlier rows used.
+
+CONVENTION: fr instructions per op / redis 7.2.4's. BELOW 1.0 = fr AHEAD.
+
+    A/A control (get_control)   0.4255 / 0.4246 / 0.4177      spread 1.9 pct
+
+    zadd_xx_opt          BEFORE (ELF c36c3fb0…)   AFTER (ELF 11b0c675…)
+      fr instr/op              7031.8                  3194.8       -54.6 pct
+      redis instr/op           5663.8                  5724.5        unchanged
+      fr/redis                 1.2416x                 0.5582x       2.22x better
+      dispatch share           58.0 pct                16.35 pct
+      dispatch instr/op        ~4075                   ~522
+
+    AFTER, four runs   fr 3182.2 / 3215.9 / 3163.0 / 3217.9   spread 1.7 pct
+                       redis 5662.1 / 5859.1 / 5653.4 / 5723.2  spread 3.6 pct
+                       ratio 0.5620 / 0.5489 / 0.5595 / 0.5623  spread 2.4 pct
+                       dispatch 16.4 / 16.3 / 16.4 / 16.3
+
+Monotonic on both arms in all four runs. The null (1.9 pct) is smaller than the signal
+spread (2.4 pct), so 0.5582x is quotable as measured.
+
+THE PREDICTION WAS ALMOST EXACT, AND THAT IS THE REUSABLE RESULT. The earlier row
+wrote, as an explicitly-labelled upper bound: "if zadd_xx_opt paid get_control's
+dispatch (~275 instr/op) instead of 4,075, fr would fall from 7,031.8 to roughly 3,232
+against redis's 5,663.8 — about 0.57x."
+
+    predicted fr instr/op   3,232        actual   3,194.8      1.2 pct low
+    predicted ratio         ~0.57        actual   0.5582       2 pct high
+
+So the method — take the measured dispatch instr/op, subtract the difference to a
+cheap-to-reach route, recompute — is accurate to a couple of percent WHEN THE LEVER IS
+A REWIRE. That is worth trusting for ranking the remaining stranded shapes, and it was
+built from nothing but a dispatch share and a reference route.
+
+Note the residual: the route did NOT reach get_control's 275.4 instr/op of dispatch. It
+reached 522 — roughly double. The prediction was accurate anyway because the bulk of
+the win was the 3,553 instr/op removed, not the last 250. Anyone using this method
+should treat "reaches the reference cost" as optimistic by a couple of hundred
+instr/op and still expect the estimate to hold.
+
+STANDINGS: shapes measured above parity drop from two to ONE. Only sort_ro_alpha
+(1.532x) remains, and it is the one that needs a route written from nothing rather
+than a rewire.
+
+WHAT IS STILL STRANDED IN THE ZADD FAMILY: the peer's own row records zadd_base (arity
+4) unmoved at 46.1 pct dispatch, which matches what the earlier row here predicted —
+the floor claims arities separately and a single arity-5 entry cannot reach arity 4.
+Arity 6 has two parsers (zadd2, zadd_flag2) and needs the in-arm chaining idiom. Both
+remain open.
+
+PROVENANCE:
+  ELF sha256 (AFTER)   11b0c67517b6130fac51679ec296db62d31163a6525c151f3c10e21ba86d4182
+                       built LOCALLY at HEAD 8ae6ea4b4 with RCH_CARGO_WRAPPER_BYPASS=1
+                       and env -u CARGO_TARGET_DIR, executable path from
+                       --message-format=json, COPIED to a private path and sha'd there.
+  ELF sha256 (BEFORE)  c36c3fb0a66033deff0cf03dc6a313ef647d5970cd22596aac575120a5d2a297
+                       the binary all previous rows in this series were measured on.
+  tree                 HEAD 8ae6ea4b4 plus a peer's uncommitted fr-server/src/main.rs;
+                       NOT reproducible from HEAD alone.
+  harness              scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines in
+                       the SAME invocation.
+  host                 thinkstation1, 64 cores, /data 315G, one build this pane.
+
+RETRY PREDICATE: do NOT re-run zadd_xx_opt — it has crossed and the null is tight. DO
+apply the same estimation method to zadd_base (46.1 pct), bitcount_range (46.4 pct) and
+expire_nx_opt (51.0 pct), all of which are rewires with parsers and executors already
+present, and expect the estimate to be accurate to a few percent while landing a couple
+of hundred instr/op short of the reference route.
