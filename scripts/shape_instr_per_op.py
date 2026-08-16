@@ -137,6 +137,14 @@ SHAPES = {
     # cascade. These pair with the RANK/WITHSCORES forms the arms DO serve, so the
     # two can be compared directly on one binary.
     "lpos_count": (["RPUSH lp a b c d e f g h"], ["LPOS", "lp", "e", "COUNT", "1"]),
+    # (frankenredis-uu33c) GETEX at arity 4. main.rs:16223 claims EVERY arity-4 GETEX
+    # as GetexExpire, but that arm tests only EX and PX (19167-19168). EXAT and PXAT
+    # are equally arity 4, so they are claimed and then DECLINED -- and a floor
+    # decline falls through to GENERIC rather than back to the cascade. EX is the
+    # form the arm serves and is the control.
+    "getex_ex":   (["SET gx vvvvvvvvvvvvvvvv"], ["GETEX", "gx", "EX", "10000"]),
+    "getex_exat": (["SET gx2 vvvvvvvvvvvvvvvv"], ["GETEX", "gx2", "EXAT", "4102444800"]),
+    "getex_pxat": (["SET gx3 vvvvvvvvvvvvvvvv"], ["GETEX", "gx3", "PXAT", "4102444800000"]),
     "lpos_rank": (["RPUSH lp2 a b c d e f g h"], ["LPOS", "lp2", "e", "RANK", "1"]),
     "zrange_rev": (["ZADD zr 1 a 2 b 3 c"], ["ZRANGE", "zr", "0", "-1", "REV"]),
     "zrange_withscores": (["ZADD zr2 1 a 2 b 3 c"],
