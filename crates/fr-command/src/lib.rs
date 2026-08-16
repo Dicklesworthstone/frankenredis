@@ -19115,6 +19115,24 @@ const ACL_CATEGORIES: &[&str] = &[
 /// `FORWARD_HASH_FIELD_TTL_COMMAND_ROWS` back into `COMMAND_TABLE`;
 /// `forward_hash_field_ttl_registration_is_off_for_7_2_4_parity` pins both
 /// halves so the two cannot drift apart while the switch is off.
+///
+/// FLIPPING THIS RE-ACTIVATES A KNOWN LATENT DEFECT: `frankenredis-ah4gx`. A read
+/// that reaps an expired hash field is counted as a WRITE by the propagation and
+/// notification gate — `fr-runtime` compares `dirty` before and after a command
+/// and compensates only for whole-key lazy expiry (`lazy_expired_propagation` has
+/// a single push site, whole-key only), while `Store::drop_expired_hash_fields`
+/// bumps `dirty` without registering. So a plain `HGET` would propagate itself and
+/// fire a spurious keyspace event.
+///
+/// It is unreachable TODAY only because of this switch: `hash_field_expires` has
+/// exactly one writer, `Store::hash_field_set_abs_expiry`, whose only production
+/// caller is the `HEXPIRE` handler that this constant gates. No RESTORE/RDB path
+/// applies field TTLs. Fix `ah4gx` BEFORE flipping this, or the defect ships with
+/// the retarget.
+///
+/// The obvious repair — pushing the key into `lazy_expired_propagation` — is
+/// WRONG: a field reap has no whole-key `DEL` to propagate, so it would emit a
+/// spurious `DEL` for a key that still exists. The compensation wants a COUNT.
 const FORWARD_HASH_FIELD_TTL_REGISTERED: bool = false;
 
 /// The `COMMAND_TABLE` rows for the 7.4 hash-field TTL family, kept out of the
