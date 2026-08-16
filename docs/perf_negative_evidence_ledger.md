@@ -16956,6 +16956,99 @@ profile. Reopen the round-trip question only if a profile shows a rendered value
 being reparsed on some other path — the hash and set RESTORE decoders were checked
 and do not have one, because their consumers genuinely want the bytes.
 
+## 2026-08-16 GentleStream: KEEP (COMPETITIVE) — the five rows the 31-round run had to REFUSE all pass at 61 rounds; 10/10 admissible (`frankenredis-bcva8`, `frankenredis-in98j`, `frankenredis-t7qgs`, `frankenredis-bj3mq`)
+
+Claim class: COMPETITIVE. Campaign output: yes. Every row is FrankenRedis against a
+live vendored Redis 7.2.4 arm in the SAME invocation, interleaved by the balanced
+square, each row carrying its own A/A null.
+
+**This is the follow-up the entry below asked for.** That run reported five rows
+NULL-FAILED — ZREVRANGE, ZRANGEBYSCORE, ZREVRANGEBYSCORE, ZDIFF, ZINTER — and named
+the round count as the principled knob, having already moved 21 → 31. Doubling to
+**61 rounds** lands all of them: **10 of 10 rows admissible, 0 null-failed**, every
+null inside ±0.02.
+
+**HARNESS:** `scripts/balanced_square_ab.py --shapes zsetreads --rounds 61
+--expect-elf fcc3c34f271f88cb`, square `ABBAABBA`, 50,000 ops/slot, `-P16`, null
+bound ±0.02, bootstrap 95% CI, servers unpinned. **The benchmark runs LOCALLY on
+thinkstation1; rch only compiled the ELF — RCH_WORKER `hz2`**, built `--base HEAD
+--clean-overlay` (receipt `base=0d16db8a95ada65a84e0361925b8f5d70a100f6d`) so no
+peer working-tree state could enter it. **Host, self-reported from inside the running
+processes:** thinkstation1, kernel 6.17.0-41-generic, 64 cores OBSERVED, governor
+`powersave`, ISA avx2, loadavg 12.61 at report time, fr threads observed 3, redis
+threads observed 6. fr server self-reported executable binary SHA-256
+`fcc3c34f271f88cbb9bf0b6b51d405390b339fed87fd51d4ca4394fd8c2fd6f8`; the vendored
+Redis 7.2.4 arm self-reported executable binary SHA-256
+`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`.
+**CV is provenance only and is NEVER a gate here, the bootstrap median CI being the
+only decision rule.**
+
+**Same-invocation A/A null, aggregated across the whole run:** every row carries its
+own two arm-nulls, all measured inside the same invocation as the A/B, giving 20 null
+observations. Their median is **1.003700x** with a bootstrap 95% median CI of
+**[0.996900, 1.007200]** — n=20, percentile bootstrap, 4,096 resamples, fixed seed,
+so the interval reproduces. Range 0.9900 to 1.0191, every one inside the ±0.02 bound.
+The per-row nulls in the table are the gate that actually admits or refuses each row;
+this aggregate is what bounds the run as a whole, and it is stated because a single
+row's null cannot do that.
+
+| row | fr/Redis | bootstrap 95% CI | null redis | null fr | verdict |
+|---|---:|---|---:|---:|---|
+| ZREVRANGEBYLEX | 1.3299x | [1.3119, 1.3414] | 0.9952 | 0.9966 | ADMISSIBLE |
+| ZRANGEBYSCORE | 1.2880x | [1.2616, 1.3057] | 1.0010 | 0.9900 | ADMISSIBLE |
+| ZDIFF | 1.2793x | [1.2707, 1.2955] | 1.0080 | 1.0064 | ADMISSIBLE |
+| ZREVRANGEBYSCORE | 1.2439x | [1.2285, 1.2553] | 0.9928 | 1.0091 | ADMISSIBLE |
+| SSCAN cursor-0 | 1.2334x | [1.2198, 1.2417] | 1.0096 | 1.0053 | ADMISSIBLE |
+| ZINTER | 1.2039x | [1.1910, 1.2131] | 0.9945 | 1.0031 | ADMISSIBLE |
+| ZSCAN cursor-0 | 1.1948x | [1.1753, 1.2091] | 1.0051 | 1.0095 | ADMISSIBLE |
+| HSCAN cursor-0 | 1.1685x | [1.1584, 1.1859] | 1.0191 | 0.9972 | ADMISSIBLE |
+| ZREVRANGE | 1.1541x | [1.1413, 1.1646] | 0.9935 | 1.0043 | ADMISSIBLE |
+| GET control | 1.1133x | [1.1027, 1.1208] | 1.0000 | 1.0173 | ADMISSIBLE |
+
+**THE CONTROL STILL EATS MOST OF THE MARGIN, and that correction is inherited, not
+re-litigated.** `GET` is untouched by any of this work and comes out **1.1133x**, so
+most of each raw margin is a general fr advantage on short `-P16` reads. Normalising
+by the control gives the route-attributable part, and the honest claim is the smaller
+number in every case:
+
+| row | raw | ÷ control | route-attributable |
+|---|---:|---:|---:|
+| ZREVRANGEBYLEX | 1.3299 | 1.1133 | **~1.195x** |
+| ZRANGEBYSCORE | 1.2880 | 1.1133 | **~1.157x** |
+| ZDIFF | 1.2793 | 1.1133 | **~1.149x** |
+| ZREVRANGEBYSCORE | 1.2439 | 1.1133 | **~1.117x** |
+| SSCAN cursor-0 | 1.2334 | 1.1133 | **~1.108x** |
+| ZINTER | 1.2039 | 1.1133 | **~1.081x** |
+| ZSCAN cursor-0 | 1.1948 | 1.1133 | **~1.073x** |
+| HSCAN cursor-0 | 1.1685 | 1.1133 | **~1.050x** |
+| ZREVRANGE | 1.1541 | 1.1133 | **~1.037x** |
+
+**INDEPENDENT REPRODUCTION of the entry below, which is the reason to trust either.**
+Different ELF (`fcc3c34f…` vs `3c90e4fa…`), different build worker (`hz2` vs
+`vmi1153651`), different round count, hours apart, same host: ZREVRANGEBYLEX
+**1.3299 vs 1.3291**, SSCAN **1.2334 vs 1.2176**, ZSCAN **1.1948 vs 1.1872**, HSCAN
+**1.1685 vs 1.1775**, GET control **1.1133 vs 1.0929**. Four routes within ~1.5% and
+the control within 2%.
+
+**WHAT I DID NOT DO, recorded so nobody repeats it.** My first instinct was to blame
+the refused nulls on cross-process placement and pin the servers — the technique that
+took a RESTORE cross-process A/A from 0.936434x to 0.994540x on this same host
+earlier today. That would have been a re-run of an ALREADY-REJECTED lever: the
+harness's own source documents that pinning was measured on this workload and did NOT
+improve it (unpinned cross-process A/A 0.9974 and 1.0106; pinned 1.0151 and 0.9896,
+one row null-failed). The two cases differ in shape — RESTORE is long ~40ms
+DEBUG-driven bursts on one connection, this is many short `-c1 -P16` ops — and the
+harness comment already says so. **A fix that is real for one workload is not
+transferable evidence for another**; the round count, not placement, was the knob
+this harness needed.
+
+**Retry predicate.** Re-take these rows after changes to the zset/scan read paths,
+the borrowed dispatch classifier, allocator/codegen, the fixture shapes, or the Redis
+version. **Invalidate rather than compare** if any row's own null leaves ±0.02, if the
+GET control is absent (nothing can be normalised without it), if the fr ELF is not
+built from a clean `--base HEAD --clean-overlay` baseline, or if the self-reported
+SHA-256s differ from those above.
+
 ## 2026-08-16: KEEP (COMPETITIVE) — four zset/scan read routes authenticated vs vendored 7.2.4, and the CONTROL eats most of the raw margin (`frankenredis-vlrnn`, `frankenredis-fhjnd`)
 
 Claim class: COMPETITIVE. Campaign output: yes. Every row is FrankenRedis against
