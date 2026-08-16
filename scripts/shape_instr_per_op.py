@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import os
 import re
+import select
 import socket
 import subprocess
 import sys
@@ -676,17 +677,62 @@ def run_once(engine: str, seeds, cmd, ops: int, workdir: str, tag: str,
                 if not chunk:
                     raise RuntimeError("%s dropped the connection while seeding" % tag)
                 seed_counter.feed(chunk)
-        sock.sendall(resp(*cmd) * ops)
-        # (frankenredis-58dp8) Wait for `ops` COMPLETE replies. See ReplyCounter
-        # for what counting CRLFs instead did to every multi-line-reply shape.
+        # (frankenredis-gein3) DRAIN WHILE SENDING. This loop used to be
+        # `sendall(payload)` followed by a recv loop, which never read a byte until
+        # the last command had been handed to the kernel. For a shape whose reply is
+        # a few bytes that is harmless -- the replies fit in the socket buffers and
+        # nothing accumulates. For a shape with a LARGE reply it is fatal to the
+        # measurement: sinter_big returns 512 members (~5.6 KB), so at 800 ops the
+        # server is holding megabytes it cannot write, its write buffer grows, and
+        # how much growth work it does depends on WHEN the kernel accepts writes
+        # relative to when the client happens to call recv. That is timing, and
+        # timing under valgrind is not reproducible.
+        #
+        # MEASURED, which is why this changed: three runs of the same ELF and shape
+        # at N=800 gave fr 630,043 / 472,292 / 552,633 instr/op -- a 33.4 pct spread
+        # and a vs-redis ratio ranging 1.0139 to 1.3565 -- while redis, which appends
+        # reply BLOCKS instead of growing one buffer, stayed inside 1.5 pct across
+        # every N. The same shape at N=400 reproduced to 1.7 pct. The instrument, not
+        # the engine, decided where the crossover appeared.
+        #
+        # Selecting on writability and readability together keeps the server's INPUT
+        # pipelined exactly as before -- it still sees a continuous command stream and
+        # still batches per wakeup -- while bounding what it has to buffer on the way
+        # out. Small-reply shapes are unaffected by construction (they never backlog),
+        # and that is asserted rather than assumed: see the reproduction table in the
+        # commit that introduced this.
+        payload = resp(*cmd) * ops
         counter = ReplyCounter()
-        while counter.complete < ops:
-            chunk = sock.recv(1 << 20)
-            if not chunk:
-                raise RuntimeError(
-                    "%s dropped the connection mid-burst after %d of %d replies"
-                    % (tag, counter.complete, ops))
-            counter.feed(chunk)
+        sock.setblocking(False)
+        sent = 0
+        reply_bytes = [0]
+        try:
+            while counter.complete < ops:
+                want_write = sent < len(payload)
+                readable, writable, _ = select.select(
+                    [sock], [sock] if want_write else [], [], 300)
+                if not readable and not writable:
+                    raise RuntimeError(
+                        "%s stalled mid-burst after %d of %d replies (%d of %d bytes sent)"
+                        % (tag, counter.complete, ops, sent, len(payload)))
+                if writable:
+                    try:
+                        sent += sock.send(payload[sent:sent + (1 << 20)])
+                    except BlockingIOError:
+                        pass
+                if readable:
+                    try:
+                        chunk = sock.recv(1 << 20)
+                    except BlockingIOError:
+                        continue
+                    if not chunk:
+                        raise RuntimeError(
+                            "%s dropped the connection mid-burst after %d of %d replies"
+                            % (tag, counter.complete, ops))
+                    reply_bytes[0] += len(chunk)
+                    counter.feed(chunk)
+        finally:
+            sock.setblocking(True)
     finally:
         if sock is not None:
             sock.close()
@@ -696,6 +742,32 @@ def run_once(engine: str, seeds, cmd, ops: int, workdir: str, tag: str,
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=60)
+    # (frankenredis-gein3) ADMISSIBILITY GUARD, and it exists because a row was banked
+    # that this would have stopped: SINTER "1.3764x at 512 members", from one pair on a
+    # shape whose fr arm spans 1.0139x to 1.3565x run to run.
+    #
+    # The defect class is specific. Above roughly a kilobyte of reply per op the server
+    # cannot hand every reply to the kernel as it is produced, so the event loop spins
+    # more times to write them out, and fr pays a FIXED bookkeeping tax per iteration --
+    # a WriterCompletion channel try_recv, drain_writer_completions,
+    # drain_pubsub_outboxes, drain_sharded_set_get_completions, apply_pending_client_
+    # unblocks, deliver_monitor_output and two clock reads -- whether or not there is
+    # anything to do. Iteration count depends on timing; timing under valgrind is not
+    # reproducible; so fr's instruction count stops being a function of the workload.
+    # Redis has no per-iteration counterpart and its arm stays inside 1.5 pct.
+    #
+    # Callgrind's determinism covers the COUNTER, not the WORKLOAD. This prints the
+    # reply volume so the reader can see which regime a shape is in.
+    #
+    # DELETION CONDITION: remove this when fr's per-iteration drains are guarded on
+    # cheap emptiness checks, and the same three-run spread on sinter_big comes in
+    # under the ~0.6 pct instr/op noise floor.
+    per_op = reply_bytes[0] / ops if ops else 0
+    if per_op > 1024 and tag.startswith("fr"):
+        print("  NOTE %-6s reply volume %.0f bytes/op -- above ~1 KB the fr arm is"
+              " timing-dependent (measured 12.8-33.4 pct spread on sinter_big). Do NOT"
+              " bank a ratio from a single pair on this shape; repeat and quote a range."
+              % (tag, per_op), file=sys.stderr)
     return total_ir(out)
 
 
