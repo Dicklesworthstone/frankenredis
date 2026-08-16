@@ -91,6 +91,26 @@ CASES = [
     # cascade and answer identically.
     ("ZMPOP", "1", "z:mp", "MIN", "COUNT", "2"),
     ("ZMPOP", "2", "z:absent", "z:mp", "MIN"),
+    # (frankenredis-2e4tq) ZRANGE's `*5` option set. The class is minted on ARITY
+    # ALONE, so REV/BYSCORE/BYLEX are all claimed as WITHSCORES and the arm now
+    # serves them off key_arg3 instead of dropping to generic. MossySparrow's
+    # warning applies here and is why all three are listed rather than the one
+    # that was measured: a discriminator covering only REV reproduces the bug one
+    # keyword over.
+    ("ZADD", "z:opt", "1", "a", "2", "b", "3", "c"),
+    ("ZRANGE", "z:opt", "0", "-1", "REV"),
+    ("ZRANGE", "z:opt", "0", "-1", "WITHSCORES"),
+    ("ZRANGE", "z:opt", "1", "3", "BYSCORE"),
+    ("ZRANGE", "z:opt", "[a", "[c", "BYLEX"),
+    # Reversed/empty ranges: a REV route wired to the forward executor answers
+    # these identically to the forward form and passes a same-order corpus.
+    ("ZRANGE", "z:opt", "0", "0", "REV"),
+    ("ZRANGE", "z:opt", "-1", "-1", "REV"),
+    ("ZRANGE", "z:absent", "0", "-1", "REV"),
+    # The `*5` token that is NOT an option: must still reach the generic path.
+    ("ZRANGE", "z:opt", "0", "-1", "SIDEWAYS"),
+    # Wrong type through the new fallback -- the error must be verbatim.
+    ("ZRANGE", "s:1", "0", "-1", "REV"),
     # Errors must come from the generic path verbatim.
     ("ZMPOP", "1", "s:1", "MIN"),
     ("ZMPOP", "1", "z:mp", "SIDEWAYS"),

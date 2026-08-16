@@ -310,6 +310,21 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
     # to carry large parse counts. A big dispatch prize is NOT the same as being
     # below parity end to end, so they get a wall-clock row before anyone acts.
     # All cleared shape_admission_probe on both engines: 6 admitted, 0 rejected.
+    # (frankenredis-2e4tq) The arity mis-claim family: a floor class keyed on
+    # ARITY ALONE whose arm runs a KEYWORD-discriminating parser, so the sibling
+    # option at that arity is claimed, declines, and falls through to the generic
+    # dispatcher. Attributed on instructions (ZRANGE REV 3270.5 dispatch against
+    # WITHSCORES 671.0; LPOS COUNT 2920.5 against base 466.9) but never clocked --
+    # frankenredis-ailri is the standing reason those are different claims. Each
+    # mis-claimed form is paired with the sibling that IS accepted, so the row is
+    # read against its own base rather than a global mean.
+    "misclaim": [
+        ("zrange_ws", ["ZADD z 1 a 2 b 3 c"], ["ZRANGE", "z", "0", "-1", "WITHSCORES"]),
+        ("zrange_rev", ["ZADD z 1 a 2 b 3 c"], ["ZRANGE", "z", "0", "-1", "REV"]),
+        ("lpos_base", ["RPUSH l a b c d e"], ["LPOS", "l", "c"]),
+        ("lpos_count_opt", ["RPUSH l a b c d e"], ["LPOS", "l", "c", "COUNT", "1"]),
+        ("get_control", ["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
+    ],
     "gaprejects": [
         ("hincrbyfloat", ["HSET h f 1"], ["HINCRBYFLOAT", "h", "f", "0"]),
         ("hsetnx_existing", ["HSET h f1 v1"], ["HSETNX", "h", "f1", "other"]),
