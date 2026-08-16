@@ -878,6 +878,23 @@ def main(argv_in: list[str]) -> int:
                   "measured ~1%)")
         print(f"\nsquare={SQUARE}  rounds={args.rounds}  ops/slot={args.ops}"
               f"  -P{args.pipeline}  null bound +/-{NULL_BOUND}")
+        # (fleet finding, 2026-08-16) Host load was already CAPTURED into the
+        # environment dict and never printed, so no banked row carried it. torch read
+        # zero-certified across 21 lanes for four ticks on contention alone, and the
+        # docstring above records this repo measuring A/A nulls of 0.85-1.07 at
+        # loadavg 58 -- a same-binary comparison whose true value is exactly 1.0000.
+        # A row that fails to certify under load is not a loss until it has been
+        # re-run in a quiet window, and that judgement is impossible after the fact
+        # unless the load is printed with the row.
+        try:
+            with open("/proc/loadavg") as _fh:
+                _l = _fh.read().split()
+            _n = os.cpu_count() or 1
+            print(f"  HOST LOAD {_l[0]} {_l[1]} {_l[2]} on {_n} cpus"
+                  f"  ({float(_l[0]) / _n * 100:.0f}% of 1-min capacity)"
+                  f"  -- quote this with every row")
+        except Exception:
+            print("  HOST LOAD unavailable")
 
         rows = []
         for label, seeds, bench_argv in shapes:
