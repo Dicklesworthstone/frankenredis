@@ -102,6 +102,17 @@ SHAPES = {
     # SETNX on an EXISTING key so the op is a no-op reply rather than a write that
     # grows the keyspace across the 2N run.
     "setnx_existing": (["SET nxk vvvvvvvvvvvvvvvv"], ["SETNX", "nxk", "wwww"]),
+    # (frankenredis-l9wvl) The keyed-values writes at ONE value. The floor classifier
+    # claims these only at array_len 7..=20 (5..18 values), so the single-value form
+    # -- the one actually issued most -- falls through the whole probe chain. Each is
+    # seeded to be a NO-OP at steady state so the 2N run does not grow the keyspace
+    # relative to the N run, which would put real work into the slope and hide the
+    # dispatch cost being measured.
+    "sadd_existing": (["SADD sd1 m"], ["SADD", "sd1", "m"]),
+    "srem_missing": (["SADD sr1 other"], ["SREM", "sr1", "m"]),
+    "zrem_missing": (["ZADD zr1 1 other"], ["ZREM", "zr1", "m"]),
+    "hdel_1_missing": (["HSET hd1 other v"], ["HDEL", "hd1", "f"]),
+    "del_1_missing": ([], ["DEL", "nosuchkey1"]),
     "getset_same": (["SET gsk vvvvvvvvvvvvvvvv"], ["GETSET", "gsk", "vvvvvvvvvvvvvvvv"]),
     "lset_head": (["RPUSH lsk a b c d e f g h"], ["LSET", "lsk", "0", "a"]),
     "incrbyfloat_same": (["SET ibf 1.5"], ["INCRBYFLOAT", "ibf", "0"]),
