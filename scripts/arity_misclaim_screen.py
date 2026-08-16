@@ -40,7 +40,10 @@ import re
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MAIN = os.path.join(REPO, "crates/fr-server/src/main.rs")
+# Overridable so the screen can be pointed at a HISTORICAL main.rs and validated
+# against a tree where the defect is known to exist. Without that, a run reporting
+# zero gaps is indistinguishable from a screen that cannot find any.
+MAIN = os.environ.get("FR_MAIN_RS") or os.path.join(REPO, "crates/fr-server/src/main.rs")
 CMDS = os.path.join(REPO, "legacy_redis_code/redis/src/commands")
 
 # (N, BorrowedDispatchFloorCommand::Cmd) => ... BorrowedDispatchFloorClass::Class
@@ -130,6 +133,165 @@ def option_forms(cmd):
     return mandatory, forms
 
 
+PREFIX = re.compile(r'b"\*(\d+)\\r\\n')
+
+# name -> minimum array length a length-flexible parser accepts (None = unknown)
+MINLEN: dict = {}
+
+
+def parser_prefixes():
+    """Fixed array length each named parser pins internally, when it pins one."""
+    src = open(MAIN, encoding="utf-8", errors="replace").read()
+    out = {}
+    for m in re.finditer(r"\nfn (parse_borrowed_\w+)", src):
+        name = m.group(1)
+        # Bound the body at the next top-level `fn`, NOT by a fixed window. A fixed
+        # window spilled into the following function and pinned
+        # parse_borrowed_plain_keys_multi_packet -- which reads its length
+        # dynamically and serves 10.. -- to a neighbour's literal `*9`, reporting
+        # SINTER/SUNION/SDIFF as range gaps they do not have.
+        nxt = src.find("\nfn ", m.end())
+        body = src[m.end():nxt if nxt != -1 else len(src)]
+        hits = {int(h) for h in PREFIX.findall(body)}
+        # A parser that derives the length at runtime pins no FIXED length -- but it
+        # usually still has a LOWER BOUND, and ignoring that is what made the first
+        # version of this mode vacuous: it reported zero gaps on the very tree where
+        # MGET was known broken, because keys_multi looked merely "flexible" when in
+        # fact it refuses anything under 10.
+        if 'strip_prefix(b"*")' in body:
+            lo = re.search(r"if arr_len < (\d+)", body)
+            MINLEN[name] = int(lo.group(1)) if lo else None
+            out[name] = None
+            continue
+        # One fixed prefix means the parser serves exactly that length. Several (or
+        # none) means it is length-flexible and this screen cannot bound it.
+        out[name] = hits.pop() if len(hits) == 1 else None
+    return out
+
+
+def arm_arities(prefixes):
+    """Array lengths each class arm can serve, or None when not boundable.
+
+    An arm pins a length two ways: a literal `b"*N\\r\\n"` passed to a generic parser
+    at the call site, or a named parser that pins one internally. If any parser it
+    calls is length-flexible, the arm is unbounded and we say so rather than guess.
+    """
+    src = open(MAIN, encoding="utf-8", errors="replace").read()
+    start = src.index("fn try_dispatch_floor_classified_action")
+    body = src[start:]
+    arms, order = {}, []
+    for m in re.finditer(r"\n        BorrowedDispatchFloorClass::(\w+)", body):
+        order.append((m.group(1), m.start()))
+    for i, (cls, pos) in enumerate(order):
+        end = order[i + 1][1] if i + 1 < len(order) else min(pos + 4000, len(body))
+        chunk = body[pos:end]
+        served = {int(h) for h in PREFIX.findall(chunk)}
+        flexible = False
+        minima = []
+        for called in re.findall(r"(parse_borrowed_\w+)\(", chunk):
+            pinned = prefixes.get(called)
+            if pinned is None:
+                if called == "parse_borrowed_multibulk_action":
+                    continue
+                lo = MINLEN.get(called)
+                if lo is None:
+                    flexible = True          # genuinely unbounded: do not guess
+                else:
+                    minima.append(lo)
+            else:
+                served.add(pinned)
+        # A flexible parser with a floor serves that floor and everything above it,
+        # so record it as coverage from `lo` upward rather than as an unknown.
+        arms.setdefault(cls, (set(), False, None))
+        prev, prev_flex, prev_min = arms[cls]
+        newmin = min([m for m in minima + [prev_min] if m is not None], default=None)
+        arms[cls] = (prev | served, prev_flex or flexible, newmin)
+    return arms
+
+
+RANGE_MINT = re.compile(
+    r"\((?:(\d+)\.\.=(\d+)|arity|array_len),\s*BorrowedDispatchFloorCommand::(\w+)\)"
+    r"(?:\s*if\s*\(?(\d+)\.\.=(\d+)\)?\.contains|\s*if\s*\w+\s*>=\s*(\d+))?"
+)
+
+
+def range_claims():
+    """Classes minted over a RANGE of arities, as (cmd, lo, hi_or_None, class)."""
+    src = open(MAIN, encoding="utf-8", errors="replace").read()
+    start = src.index("fn classify_borrowed_dispatch_floor_packet_impl")
+    body = src[start:src.index("\n}", start)]
+    out = []
+    for line in body.splitlines():
+        m = RANGE_MINT.search(line)
+        if not m:
+            continue
+        lo = m.group(1) or m.group(4) or m.group(6)
+        hi = m.group(2) or m.group(5)
+        if lo is None:
+            continue
+        idx = body.index(line)
+        cls = re.search(r"BorrowedDispatchFloorClass::(\w+)", body[idx:idx + 400])
+        out.append((m.group(3), int(lo), int(hi) if hi else None,
+                    cls.group(1) if cls else "?"))
+    return out
+
+
+def report_ranges():
+    prefixes = parser_prefixes()
+    arms = arm_arities(prefixes)
+    gaps, unbounded = [], []
+    for cmd, lo, hi, cls in range_claims():
+        served, flexible, floor = arms.get(cls, (set(), True, None))
+        if flexible or (not served and floor is None):
+            unbounded.append((cmd, lo, hi, cls))
+            continue
+        top = hi if hi is not None else max(list(served) + [floor or lo])
+        missing = [a for a in range(lo, top + 1)
+                   if a not in served and not (floor is not None and a >= floor)]
+        if missing:
+            gaps.append((cmd, lo, hi, cls, missing, sorted(served)))
+
+    print("RANGE GAPS -- %d class(es) minted over arities their arm cannot serve.\n"
+          "This is the MGET/PFADD sub-species: the class promises a range, the arm's\n"
+          "parsers pin specific lengths, and the arities in between fall to generic.\n"
+          % len(gaps))
+    for cmd, lo, hi, cls, missing, served in sorted(gaps):
+        rng = "%d..=%d" % (lo, hi) if hi else "%d.." % lo
+        print("  %-12s claims %-8s -> %-22s arm serves %s, UNSERVED %s"
+              % (cmd, rng, cls, served, missing))
+    print("\nUNBOUNDED -- %d class(es) whose arm calls a length-flexible parser; this\n"
+          "screen cannot bound them and does not guess." % len(unbounded))
+    return 0
+
+
+def self_test_ranges():
+    """Pin the parser facts that make --range non-vacuous.
+
+    The first version of --range reported ZERO gaps on 645845b0e, the tree where
+    MGET was known broken, because it treated a length-flexible parser as
+    unbounded and skipped it. keys_multi is not unbounded -- it refuses anything
+    under 10 -- and that floor is the whole defect. If these stop being read, the
+    mode silently goes quiet instead of going red.
+    """
+    prefixes = parser_prefixes()
+    bad = []
+    for name, kind, want in (
+        ("parse_borrowed_plain_keys_multi_packet", "min", 10),
+        ("parse_borrowed_plain_hmget_multi_packet", "min", 6),
+        ("parse_borrowed_plain_hmget2_packet", "fixed", 4),
+    ):
+        got = MINLEN.get(name) if kind == "min" else prefixes.get(name)
+        if got != want:
+            bad.append("%s %s bound read as %r, expected %r" % (name, kind, got, want))
+    for line in bad:
+        print("SELF-TEST FAIL: " + line)
+    if bad:
+        return 1
+    print("self-test: parser bounds read correctly (keys_multi>=10, "
+          "hmget_multi>=6, hmget2==4)")
+    return 0
+
+
 def self_test(ambiguous):
     """Require the screen to still catch the instances we already know about.
 
@@ -180,8 +342,11 @@ def main():
         else:
             clean.append((arity, cmd, cls, hits))
 
+    if "--range" in sys.argv:
+        return report_ranges()
+
     if "--self-test" in sys.argv:
-        return self_test(ambiguous)
+        return self_test(ambiguous) or self_test_ranges()
 
     print("AMBIGUOUS -- %d floor class(es) minted at an arity that several option "
           "forms share." % len(ambiguous))
