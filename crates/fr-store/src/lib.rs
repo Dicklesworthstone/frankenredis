@@ -8952,6 +8952,27 @@ impl Store {
     }
 
     pub fn del(&mut self, keys: &[Vec<u8>], now_ms: u64) -> u64 {
+        self.del_inner(keys, now_ms)
+    }
+
+    /// (frankenredis-z2ce3) Borrowed twin of [`Store::del`], for callers that already
+    /// hold the keys as slices into the read buffer.
+    ///
+    /// `execute_plain_del_borrowed` and `execute_plain_unlink_borrowed` take
+    /// `&[&[u8]]` — the whole point of the borrowed fast path — and then had to copy
+    /// every key into an owned `Vec<Vec<u8>>` purely because this function's parameter
+    /// was `&[Vec<u8>]`. The body never needed ownership: it only ever hands each key
+    /// to `drop_if_expired`, `internal_entries_remove` and two side-map removals, all
+    /// of which take `&[u8]`, and the one place that does need an owned key
+    /// (`last_del_removed`) is already gated on keyspace notifications being enabled.
+    ///
+    /// Both entry points share ONE body via `del_inner`, so the owned and borrowed
+    /// paths cannot drift in what they remove or what they record.
+    pub fn del_borrowed(&mut self, keys: &[&[u8]], now_ms: u64) -> u64 {
+        self.del_inner(keys, now_ms)
+    }
+
+    fn del_inner<K: AsRef<[u8]>>(&mut self, keys: &[K], now_ms: u64) -> u64 {
         let mut removed = 0_u64;
         self.last_del_removed.clear();
         // (perf) `last_del_removed` records the keys DEL/UNLINK actually removed so the command
@@ -8975,10 +8996,11 @@ impl Store {
             // per-rep rebuild caps precision, unlike non-destructive SINTERCARD's clean +3-4%);
             // the eliminated per-key lookup is itself gated at 1.75x isolated
             // (bitfield_resolve_lookup).
+            let key = key.as_ref();
             if self.expires_count != 0 {
                 self.drop_if_expired(key, now_ms);
             }
-            if self.internal_entries_remove(key.as_slice()).is_some() {
+            if self.internal_entries_remove(key).is_some() {
                 // (perf) Only stream keys ever populate `stream_groups` / `stream_last_ids`, so
                 // when both side-maps are empty (a DB with no streams — the common case) the two
                 // `remove` calls are pure wasted foldhash+probes on every deleted key. Guard on
@@ -8986,10 +9008,10 @@ impl Store {
                 // (a stale entry keeps the map non-empty and still gets removed). Mirrors the
                 // empty-sidemap fast-exit guard used elsewhere. O(1) check vs 2 hash+probes/key.
                 if !self.stream_groups.is_empty() {
-                    self.stream_groups.remove(key.as_slice());
+                    self.stream_groups.remove(key);
                 }
                 if !self.stream_last_ids.is_empty() {
-                    self.stream_last_ids.remove(key.as_slice());
+                    self.stream_last_ids.remove(key);
                 }
                 // Record the key actually removed so the command layer fires a
                 // "del"/"unlink" keyspace event ONLY for real removals — upstream
@@ -8997,7 +9019,7 @@ impl Store {
                 // a missing (or already-removed duplicate) key argument. Only when a
                 // notification could actually fire (see `record_removed` above).
                 if record_removed {
-                    self.last_del_removed.push(key.clone());
+                    self.last_del_removed.push(key.to_vec());
                 }
                 removed = removed.saturating_add(1);
             }
@@ -42744,6 +42766,64 @@ mod tests {
 
         // Observable post-state matches between the two configs.
         assert_eq!(off.entries, on.entries);
+    }
+
+    // (frankenredis-z2ce3) `del` and `del_borrowed` share one body, and this test is
+    // what keeps that true if someone later gives them separate ones. Everything a
+    // caller can observe is compared: the removed COUNT, the surviving entries, the
+    // expiry side-map, and `last_del_removed` under notifications — that last one
+    // matters most, because it is the single place the body needs an OWNED key and
+    // therefore the one line the borrowed path had to do differently.
+    #[test]
+    fn del_borrowed_is_observably_identical_to_owned_del() {
+        let seed = |store: &mut Store| {
+            store.set(b"a".to_vec(), b"1".to_vec(), None, 0);
+            store.set(b"b".to_vec(), b"2".to_vec(), None, 0);
+            store.set(b"c".to_vec(), b"3".to_vec(), None, 0);
+            // A volatile key, so the `expires_count != 0` branch is taken rather
+            // than skipped — the borrowed path must walk the same code.
+            store.set(b"vol".to_vec(), b"4".to_vec(), Some(60_000), 0);
+        };
+        // A duplicate and a miss, because both are counted differently from a plain
+        // removal and are where an as_ref() slip would show up.
+        let owned_keys = [
+            b"a".to_vec(),
+            b"b".to_vec(),
+            b"a".to_vec(),
+            b"missing".to_vec(),
+            b"vol".to_vec(),
+        ];
+        let borrowed_keys: Vec<&[u8]> = owned_keys.iter().map(|k| k.as_slice()).collect();
+
+        for notify in [0, NOTIFY_KEYEVENT | NOTIFY_GENERIC] {
+            let mut owned = Store::new();
+            let mut borrowed = Store::new();
+            owned.notify_keyspace_events = notify;
+            borrowed.notify_keyspace_events = notify;
+            seed(&mut owned);
+            seed(&mut borrowed);
+
+            let owned_count = owned.del(&owned_keys, 0);
+            let borrowed_count = borrowed.del_borrowed(&borrowed_keys, 0);
+
+            assert_eq!(
+                owned_count, borrowed_count,
+                "removed count must match (notify={notify})"
+            );
+            assert_eq!(
+                owned_count, 3,
+                "a, b and vol removed; the duplicate and the miss are not"
+            );
+            assert_eq!(
+                owned.take_last_del_removed(),
+                borrowed.take_last_del_removed(),
+                "the recorded removals must match, including their ORDER (notify={notify})"
+            );
+            assert_eq!(owned.entries, borrowed.entries);
+            assert_eq!(owned.expires_count, borrowed.expires_count);
+            assert!(borrowed.exists_no_stat(b"c", 0));
+            assert!(!borrowed.exists_no_stat(b"vol", 0));
+        }
     }
 
     #[test]

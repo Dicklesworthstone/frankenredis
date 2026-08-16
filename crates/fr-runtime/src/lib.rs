@@ -27244,8 +27244,11 @@ impl Runtime {
         let argv_len_sum = b"DEL".len() + keys.iter().map(|k| k.len()).sum::<usize>();
         let packet_id = self.plain_zremrange_write_preamble("del", argv_len_sum, now_ms);
         let st = self.chained_command_start();
-        let keys_owned: Vec<Vec<u8>> = keys.iter().map(|k| k.to_vec()).collect();
-        let count = self.server.store.del(&keys_owned, now_ms);
+        // (frankenredis-z2ce3) `del_borrowed` shares one body with `del` and needs no
+        // owned keys, so the copy this route used to make purely to satisfy the
+        // `&[Vec<u8>]` parameter is gone; the argv now materialises inside the
+        // breach-only closure like every other multi-key write route.
+        let count = self.server.store.del_borrowed(keys, now_ms);
         // Drain the removed-keys buffer the generic would consume for keyspace
         // events / propagation (no-ops under the plain-mode gate) so it does not
         // leak into a later command.
@@ -27256,9 +27259,9 @@ impl Runtime {
             "del",
             "DEL",
             || {
-                let mut argv = Vec::with_capacity(keys_owned.len() + 1);
+                let mut argv = Vec::with_capacity(keys.len() + 1);
                 argv.push(b"DEL".to_vec());
-                argv.extend(keys_owned.iter().cloned());
+                argv.extend(keys.iter().map(|k| k.to_vec()));
                 argv
             },
             elapsed_us,
@@ -27294,8 +27297,9 @@ impl Runtime {
         let argv_len_sum = b"UNLINK".len() + keys.iter().map(|k| k.len()).sum::<usize>();
         let packet_id = self.plain_zremrange_write_preamble("unlink", argv_len_sum, now_ms);
         let st = self.chained_command_start();
-        let keys_owned: Vec<Vec<u8>> = keys.iter().map(|k| k.to_vec()).collect();
-        let count = self.server.store.del(&keys_owned, now_ms);
+        // (frankenredis-z2ce3) See execute_plain_del_borrowed; UNLINK differs only in
+        // the name it records.
+        let count = self.server.store.del_borrowed(keys, now_ms);
         let _ = self.server.store.take_last_del_removed();
         let elapsed_us = self.finish_chained_command(st);
         let reply = RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX));
@@ -27303,9 +27307,9 @@ impl Runtime {
             "unlink",
             "UNLINK",
             || {
-                let mut argv = Vec::with_capacity(keys_owned.len() + 1);
+                let mut argv = Vec::with_capacity(keys.len() + 1);
                 argv.push(b"UNLINK".to_vec());
-                argv.extend(keys_owned.iter().cloned());
+                argv.extend(keys.iter().map(|k| k.to_vec()));
                 argv
             },
             elapsed_us,
@@ -60513,6 +60517,41 @@ mod tests {
                 b"mv2".to_vec()
             ],
             "pairs stay interleaved key/value in wire order"
+        );
+
+        // (frankenredis-z2ce3) DEL and UNLINK reached this closure through a
+        // DIFFERENT route from the five above: their owned copy fed Store::del's
+        // `&[Vec<u8>]` parameter as well as the closure, so removing it also
+        // required a borrowed twin in fr-store. Both halves are asserted here —
+        // the argv, and that the delete still actually happened.
+        rt.execute_frame(command(&[b"SET", b"d1", b"v"]), 1_000);
+        rt.execute_frame(command(&[b"SET", b"d2", b"v"]), 1_000);
+        let deleted = rt
+            .execute_plain_del_borrowed(&[&b"d1"[..], &b"d2"[..]], 1_000)
+            .expect("del fast path should serve this shape");
+        assert_eq!(
+            deleted,
+            RespFrame::Integer(2),
+            "the borrowed twin must remove the same keys the owned one did"
+        );
+        assert_eq!(
+            last_argv(&rt),
+            vec![b"DEL".to_vec(), b"d1".to_vec(), b"d2".to_vec()]
+        );
+
+        rt.execute_frame(command(&[b"SET", b"u1", b"v"]), 1_000);
+        let unlinked = rt
+            .execute_plain_unlink_borrowed(&[&b"u1"[..], &b"u:absent"[..]], 1_000)
+            .expect("unlink fast path should serve this shape");
+        assert_eq!(
+            unlinked,
+            RespFrame::Integer(1),
+            "a missing key must not be counted"
+        );
+        assert_eq!(
+            last_argv(&rt),
+            vec![b"UNLINK".to_vec(), b"u1".to_vec(), b"u:absent".to_vec()],
+            "the argv records every key ARGUMENT, including ones that removed nothing"
         );
     }
 
