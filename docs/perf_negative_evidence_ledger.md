@@ -18381,3 +18381,63 @@ measured shape remains behind Redis 7.2.4.
 RETRY PREDICATE: do not re-run. If sinter_2 is ever re-measured from a CLEAN tree,
 expect the ratio to move slightly — the WIP compiled into this ELF is unrelated to
 SINTER but is not nothing.
+
+## MEASURED (frankenredis-iqicb) — incrbyfloat_same frame attribution: the bignum is 16.02 pct
+
+Follows the ratio rows above. Those said incrbyfloat_same is the worst route with real
+absolute cost (0.6786x, 6074 instr/op) and that its dispatch share is 7.3 pct — the
+LOWEST on the board — so front-classification has nothing left to take. This is the
+frame-level attribution that says what DOES cost.
+
+CALLGRIND SELF-COST, fr arm, shape incrbyfloat_same, 2N=4000 ops:
+
+    16.02%  fr_store::bignat_to_long_double                   ~1019 instr/op
+     5.67%  fr_store::add_float_text
+     5.25%  fr_store::parse_long_double
+     3.93%  <fr_store::Store>::incrbyfloat_text
+     3.91%  internal_entries_insert_with_expiry_impl::<true>
+     3.45%  __memcpy_avx_unaligned_erms
+     3.21%  <fr_runtime::Runtime>::execute_plain_incrbyfloat_borrowed
+     2.98%  mi_free
+     2.94%  plain_borrowed_default_key_write_allows
+     2.71%  __memcmp_avx2_movbe
+     2.45%  mi_theap_malloc_aligned
+
+TEXT CONVERSION IS 26.94 pct of the op (bignat_to_long_double + add_float_text +
+parse_long_double). `bignat_to_long_double`'s own body at fr-store:38753 is short, so
+its 16.02 pct is INLINED BigNat limb work — bit_len, to_u128, shr_to_u128, bit,
+any_bits_below.
+
+THIS DOES NOT MAKE FR SLOW HERE. The route is 32 pct AHEAD of the incumbent; redis pays
+for the same job in __printf_fp_buffer_1 / ____strtold_l_internal / __mpn_mul_1. A big
+frame is not a deficit unless the incumbent's equivalent is smaller. 16.02 pct is an
+UPPER BOUND on what removing the bignum could take, not a predicted gain.
+
+MEASUREMENT-HYGIENE FINDING, worth more than the attribution to anyone else profiling
+here: **/data/tmp/fr_instr_* IS SHARED ACROSS PANES.** The first dump I opened was the
+most recent one, and it was a PEER'S SINTER run — profiled target
+`.../25998f5d-.../scratchpad/fr-sinter-measure`, frames sinter_prepare and
+PackedStrSet::contains. I caught it only because the frames did not match the shape I
+had asked for; a shape whose frames were plausible would have been attributed silently.
+ALWAYS check `Profiled target:` in the dump header names YOUR binary before reading a
+single frame. Picking "most recent" in that directory is picking someone else's
+workload.
+
+PROVENANCE:
+  ELF sha256 (first 16)  51708552264214d1 — reused, NO BUILD (/data 43G, 1G above the
+                         42G hard stop).
+  dump                   /data/tmp/fr_instr_u00thc9x, cg.fr.2n.out, profiled target
+                         VERIFIED as this session's binary.
+  ratio on that run      0.6786x, dispatch share 7.3 pct — consistent with the four
+                         earlier runs (range 0.6754-0.6815).
+  tree                   uncommitted peer WIP compiled in; not reproducible from HEAD
+                         alone.
+
+Campaign output: yes — names the frame the next lever must attack.
+
+RETRY PREDICATE: the lever is an EXACT fast path for short decimals that skips BigNat
+(10^exp = 2^exp * 5^exp, so only the power of five must divide out; design and tests in
+scratchpad/incrbyfloat_exact_fastpath.md). It is a fast path, so the correctness
+obligation is bit-identity with the bignum path on every input it ACCEPTS — declining is
+always safe. Do NOT re-profile to re-confirm these frames; DO re-profile if the parse
+path is restructured.
