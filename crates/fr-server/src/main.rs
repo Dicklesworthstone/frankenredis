@@ -14605,9 +14605,16 @@ enum BorrowedDispatchFloorClass {
     /// (frankenredis-ozrro) `HMGET key field...`, any count — two, three and the
     /// variadic parser are tried in the cascade's own order.
     Hmget,
-    /// (frankenredis-ozrro) `MGET key...`; the generic borrowed key parser
-    /// preserves all arities while avoiding the linear cascade.
+    /// (frankenredis-ozrro) `MGET key...` with NINE OR MORE keys — the domain
+    /// `parse_borrowed_plain_keys_multi_packet` actually serves. It refuses
+    /// `arr_len < 10` outright, so this class must never be handed a smaller
+    /// shape: the arm's only parser would decline and the packet would land on
+    /// the GENERIC path, skipping the exact-N arms that exist for it.
     Mget,
+    /// (frankenredis-opmo4) `MGET` with two through eight keys, carrying the key
+    /// count so the arm reaches the right exact-N parser in one step instead of
+    /// chaining seven of them.
+    MgetN(u8),
     /// (frankenredis-ozrro) `GETDEL key`.
     Getdel,
     /// (frankenredis-ozrro) `DECRBY key decrement`.
@@ -16060,7 +16067,17 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (arity, BorrowedDispatchFloorCommand::Hmget) if arity >= 3 => {
             Some(BorrowedDispatchFloorClass::Hmget)
         }
-        (arity, BorrowedDispatchFloorCommand::Mget) if arity >= 3 => {
+        // (frankenredis-opmo4) The classifier was widened to `arity >= 3` in
+        // 645845b0e without widening the PARSER: keys_multi was built for 9..=32
+        // keys (85d05dcba) and returns None below `arr_len < 10`. So every MGET
+        // from two to eight keys — the common case — was claimed here, declined
+        // by the arm's only parser, and dropped on the GENERIC path, bypassing
+        // the seven exact-N arms (mget_two..mget_eight) that exist for exactly
+        // those shapes. Split the class at the parser's real boundary.
+        (arity, BorrowedDispatchFloorCommand::Mget) if (3..=9).contains(&arity) => {
+            Some(BorrowedDispatchFloorClass::MgetN((arity - 1) as u8))
+        }
+        (arity, BorrowedDispatchFloorCommand::Mget) if arity >= 10 => {
             Some(BorrowedDispatchFloorClass::Mget)
         }
         // SINTER, variadic like MGET. `SINTER k` is arity 2.
@@ -18038,6 +18055,55 @@ fn try_dispatch_floor_classified_action(
                 Ok(BorrowedMultibulkAction::FastEncodedReply {
                     consumed: packet.consumed,
                 })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        // (frankenredis-opmo4) Two through eight keys. The count came from the
+        // classifier, so this dispatches straight to the one parser that can
+        // match rather than chaining seven that mostly cannot — the arity is
+        // already known, and re-deriving it by trial is what the cascade did.
+        BorrowedDispatchFloorClass::MgetN(nkeys) => {
+            let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+            let mut served: Option<usize> = None;
+            macro_rules! try_mget_exact {
+                ($parser:ident) => {{
+                    if let Some(packet) = $parser(unparsed, &parser_config)
+                        && runtime
+                            .execute_plain_mget_borrowed_into(
+                                &packet.keys,
+                                ts,
+                                client_resp3,
+                                out,
+                            )
+                            .is_some()
+                    {
+                        served = Some(packet.consumed);
+                    }
+                }};
+            }
+            match nkeys {
+                2 => try_mget_exact!(parse_borrowed_plain_mget_two_packet),
+                3 => try_mget_exact!(parse_borrowed_plain_mget_three_packet),
+                4 => try_mget_exact!(parse_borrowed_plain_mget_four_packet),
+                5 => try_mget_exact!(parse_borrowed_plain_mget_five_packet),
+                6 => try_mget_exact!(parse_borrowed_plain_mget_six_packet),
+                7 => try_mget_exact!(parse_borrowed_plain_mget_seven_packet),
+                8 => try_mget_exact!(parse_borrowed_plain_mget_eight_packet),
+                // Unreachable via the classifier, which only mints 2..=8. A
+                // decline here is still correct, not a panic: the generic path
+                // below serves any shape.
+                _ => {}
+            }
+            if let Some(consumed) = served {
+                Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,
@@ -43551,6 +43617,70 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             Some(super::BorrowedDispatchFloorClass::Sinter),
             "SINTERCARD must not classify as SINTER"
         );
+
+        // (frankenredis-opmo4) MGET's class must split where its PARSERS split.
+        //
+        // The first assertion is the load-bearing one, and it deliberately does
+        // not encode my belief about the boundary — it asks the parser. If
+        // keys_multi is ever widened to serve small arrays, this fails and sends
+        // the reader here rather than letting the classifier silently keep
+        // routing around a parser that would now cope.
+        assert!(
+            super::parse_borrowed_plain_keys_multi_packet(
+                b"*3\r\n$4\r\nMGET\r\n$1\r\na\r\n$1\r\nb\r\n",
+                &cfg,
+                b"MGET",
+            )
+            .is_none(),
+            "keys_multi is a 9..=32-key parser; the class split below exists because it \
+             DECLINES small arrays. If this now parses, revisit the split."
+        );
+        // ...so a two-key MGET must NOT be handed the multi class. Handing it
+        // over is not a slow path, it is a REGRESSION: the arm's only parser
+        // declines and the packet lands on the generic path, skipping the
+        // exact-N arm that exists for it. This is the assertion that 645845b0e
+        // needed and did not have.
+        assert_ne!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$4\r\nMGET\r\n$1\r\na\r\n$1\r\nb\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Mget),
+            "a 2-key MGET routed to the multi class lands on the generic path"
+        );
+        // Every arity in 2..=8 keys carries its own count, so the arm reaches
+        // the matching exact-N parser without trial.
+        for (packet, nkeys) in [
+            (&b"*3\r\n$4\r\nMGET\r\n$1\r\na\r\n$1\r\nb\r\n"[..], 2u8),
+            (&b"*4\r\n$4\r\nMGET\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n"[..], 3),
+            (
+                &b"*9\r\n$4\r\nMGET\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n$1\r\nf\r\n$1\r\ng\r\n$1\r\nh\r\n"[..],
+                8,
+            ),
+        ] {
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(packet, &cfg),
+                Some(super::BorrowedDispatchFloorClass::MgetN(nkeys)),
+                "MGET with {nkeys} keys must carry its count"
+            );
+        }
+        // Nine keys is the first arity keys_multi serves, and the boundary is
+        // where an off-by-one would hide: 8 keys above, 9 keys here.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*10\r\n$4\r\nMGET\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n$1\r\nf\r\n$1\r\ng\r\n$1\r\nh\r\n$1\r\ni\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Mget),
+            "9 keys is keys_multi's first served arity"
+        );
+        // A single-key MGET has no exact-N parser at all (mget_two is the
+        // smallest), so it must classify as neither.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(b"*2\r\n$4\r\nMGET\r\n$1\r\na\r\n", &cfg),
+            None,
+            "1-key MGET has no exact-N parser and must not classify"
+        );
         // (frankenredis-iqicb) HSETNX and HINCRBYFLOAT, both arity 4. HINCRBYFLOAT
         // also opens a NEW 12-character token group, so the near-miss row matters
         // more than usual: nothing else guards that length.
@@ -43697,12 +43827,19 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             ),
             None
         );
+        // (frankenredis-opmo4) This assertion previously required `Mget` for a
+        // FOUR-key MGET, and in doing so it pinned the defect: `Mget` is the
+        // class whose only parser, keys_multi, refuses anything below nine keys,
+        // so the shape it was pinning went to the generic path. The mixed-case
+        // token check it was really written for is preserved; only the class
+        // changed, because a 4-key MGET now carries its count to the exact-N arm
+        // that serves it.
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(
                 b"*5\r\n$4\r\nmGeT\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n",
                 &cfg,
             ),
-            Some(super::BorrowedDispatchFloorClass::Mget)
+            Some(super::BorrowedDispatchFloorClass::MgetN(4))
         );
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(
