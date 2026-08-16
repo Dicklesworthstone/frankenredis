@@ -137,9 +137,25 @@ PREFIX = re.compile(r'b"\*(\d+)\\r\\n')
 
 # name -> minimum array length a length-flexible parser accepts (None = unknown)
 MINLEN: dict = {}
+# name -> MAXIMUM array length it accepts. A flexible parser has BOTH bounds, and
+# checking only the lower one misses the mis-claim at the TOP of the range: a class
+# minted `arity >= 2` against a parser refusing `nkeys > 32` claims every 33-key call
+# it cannot serve (frankenredis-9hnxt).
+MAXLEN: dict = {}
+
+
+def const_values():
+    """`const NAME: usize = N;` from the same file, so caps are read not guessed."""
+    src = open(MAIN, encoding="utf-8", errors="replace").read()
+    return {m.group(1): int(m.group(2))
+            for m in re.finditer(r"const ([A-Z_]+): usize = (\d+);", src)}
+
+
+CONSTS: dict = {}
 
 
 def parser_prefixes():
+    CONSTS.update(const_values())
     """Fixed array length each named parser pins internally, when it pins one."""
     src = open(MAIN, encoding="utf-8", errors="replace").read()
     out = {}
@@ -161,6 +177,15 @@ def parser_prefixes():
         if 'strip_prefix(b"*")' in body:
             lo = re.search(r"if arr_len < (\d+)", body)
             MINLEN[name] = int(lo.group(1)) if lo else None
+            # Upper bound. The guard counts KEYS/FIELDS/MEMBERS, not array
+            # elements, so convert with the parser's own `let nX = arr_len - K`.
+            hi = re.search(r"n\w+ > ([A-Z_]+)", body)
+            off = re.search(r"let n\w+ = arr_len - (\d+);", body)
+            if hi and off:
+                cap = CONSTS.get(hi.group(1))
+                MAXLEN[name] = None if cap is None else cap + int(off.group(1))
+            else:
+                MAXLEN[name] = None
             out[name] = None
             continue
         # One fixed prefix means the parser serves exactly that length. Several (or
@@ -188,6 +213,7 @@ def arm_arities(prefixes):
         served = {int(h) for h in PREFIX.findall(chunk)}
         flexible = False
         minima = []
+        maxima = []
         for called in re.findall(r"(parse_borrowed_\w+)\(", chunk):
             pinned = prefixes.get(called)
             if pinned is None:
@@ -198,14 +224,18 @@ def arm_arities(prefixes):
                     flexible = True          # genuinely unbounded: do not guess
                 else:
                     minima.append(lo)
+                    maxima.append(MAXLEN.get(called))
             else:
                 served.add(pinned)
         # A flexible parser with a floor serves that floor and everything above it,
         # so record it as coverage from `lo` upward rather than as an unknown.
-        arms.setdefault(cls, (set(), False, None))
-        prev, prev_flex, prev_min = arms[cls]
+        arms.setdefault(cls, (set(), False, None, None))
+        prev, prev_flex, prev_min, prev_max = arms[cls]
         newmin = min([m for m in minima + [prev_min] if m is not None], default=None)
-        arms[cls] = (prev | served, prev_flex or flexible, newmin)
+        # An unknown ceiling on ANY parser means the arm's top is unknown.
+        allmax = maxima + ([prev_max] if prev_max is not None else [])
+        newmax = None if (not allmax or any(m is None for m in maxima)) else max(allmax)
+        arms[cls] = (prev | served, prev_flex or flexible, newmin, newmax)
     return arms
 
 
@@ -241,13 +271,17 @@ def report_ranges():
     arms = arm_arities(prefixes)
     gaps, unbounded = [], []
     for cmd, lo, hi, cls in range_claims():
-        served, flexible, floor = arms.get(cls, (set(), True, None))
+        served, flexible, floor, ceiling = arms.get(cls, (set(), True, None, None))
         if flexible or (not served and floor is None):
             unbounded.append((cmd, lo, hi, cls))
             continue
         top = hi if hi is not None else max(list(served) + [floor or lo])
         missing = [a for a in range(lo, top + 1)
                    if a not in served and not (floor is not None and a >= floor)]
+        # TOP OF THE RANGE: an open-ended class against a capped parser claims
+        # everything above the cap and serves none of it.
+        if hi is None and ceiling is not None:
+            missing.append("%d+ (parser caps at %d)" % (ceiling + 1, ceiling))
         if missing:
             gaps.append((cmd, lo, hi, cls, missing, sorted(served)))
 
@@ -275,20 +309,37 @@ def self_test_ranges():
     """
     prefixes = parser_prefixes()
     bad = []
-    for name, kind, want in (
-        ("parse_borrowed_plain_keys_multi_packet", "min", 10),
-        ("parse_borrowed_plain_hmget_multi_packet", "min", 6),
-        ("parse_borrowed_plain_hmget2_packet", "fixed", 4),
-    ):
-        got = MINLEN.get(name) if kind == "min" else prefixes.get(name)
-        if got != want:
-            bad.append("%s %s bound read as %r, expected %r" % (name, kind, got, want))
+    # FLOORS are being actively tuned (9hnxt moved keys_multi's, xqqwv moved
+    # hmget/zmscore's), so anchoring them to exact values would make this fail on
+    # every legitimate change and train people to ignore it. What must not regress
+    # is that a floor is READ AT ALL -- that was the vacuity, not the value.
+    for name in ("parse_borrowed_plain_keys_multi_packet",
+                 "parse_borrowed_plain_hmget_multi_packet"):
+        if MINLEN.get(name) is None:
+            bad.append("%s floor is unreadable; a flexible parser with no floor is "
+                       "treated as unbounded and skipped, which is exactly how this "
+                       "mode reported zero on a known-broken tree" % name)
+
+    # CEILINGS are structural -- they come from `const *_MULTI_MAX` and each
+    # parser's own `let nX = arr_len - K` offset, which differ (keys_multi -1,
+    # hmget_multi -2). Reading the constant without the offset gives the wrong
+    # array length, so these are pinned exactly.
+    for name, want in (("parse_borrowed_plain_keys_multi_packet", 33),
+                       ("parse_borrowed_plain_hmget_multi_packet", 34)):
+        if MAXLEN.get(name) != want:
+            bad.append("%s ceiling read as %r, expected array length %d"
+                       % (name, MAXLEN.get(name), want))
+
+    if prefixes.get("parse_borrowed_plain_hmget2_packet") != 4:
+        bad.append("hmget2 fixed prefix read as %r, expected 4"
+                   % prefixes.get("parse_borrowed_plain_hmget2_packet"))
+
     for line in bad:
         print("SELF-TEST FAIL: " + line)
     if bad:
         return 1
-    print("self-test: parser bounds read correctly (keys_multi>=10, "
-          "hmget_multi>=6, hmget2==4)")
+    print("self-test: floors readable, ceilings exact (keys_multi..33, "
+          "hmget_multi..34), hmget2 prefix==4")
     return 0
 
 
