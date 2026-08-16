@@ -33,6 +33,82 @@ Redis arm and numeric ratio; a SELF-SPEEDUP needs the heading label and cannot
 mark itself as campaign output. Missing or contradictory classification exits
 **8**.
 
+## 2026-08-16 GentleStream: COMPETITIVE KEEP (a LOSS, authenticated) — collection RESTORE decode is FrankenRedis/Redis 7.2.4 = 0.606011x live, and CORE PINNING is what makes the A/A null pass (`frankenredis-33832`)
+
+- **Claim class: COMPETITIVE. Campaign output: yes.** A numeric FrankenRedis/Redis
+  ratio against the actual vendored Redis 7.2.4 server running as a live side-by-side
+  arm in the same invocation. It is a LOSS, and it is recorded because an
+  authenticated loss is the map: this is the biggest remaining gap on the RESTORE
+  surface and every future lever there is measured against this number.
+- **The result: FrankenRedis/Redis 7.2.4 throughput = 0.606011x** on collection
+  RESTORE decode, bootstrap 95% median CI `[0.576524, 0.619733]`, reproduced in a
+  second independent invocation at **FrankenRedis/Redis 0.617816x**, CI
+  `[0.596007, 0.640927]`. The CIs overlap, so the honest headline is
+  **fr ≈ 0.61x of Redis here**, i.e. Redis is ~1.64x faster. The harness prints this
+  as the wall ratio `redis/fr_b`, which is the same number as the FrankenRedis/Redis
+  THROUGHPUT ratio because throughput is inverse time — stated both ways so nobody
+  re-derives the orientation. Absolute medians run 1: fr_b 36.519ms vs redis
+  21.518ms; run 2: fr_b 35.161ms vs redis 21.670ms.
+- **THE METHOD FINDING, which is the reusable part.** This row would not exist
+  without CPU pinning, and the fleet has been fighting the symptom for weeks. The
+  same harness, same ELFs, same workload, UNPINNED, produced an A/A null of
+  **0.936434x** (two identical fr processes differing by 6.4%) and a HOLD verdict —
+  twice, on two different days. Pinning each arm to its own core
+  (`taskset -c 60` redis, `61` fr_a, `62` fr_b, client on `40-52`) moved the A/A
+  null into tolerance and the A/B became recordable. The same-invocation A/A null
+  (two identical FrankenRedis processes, both arms measured inside the same
+  invocation as the A/B) read median **0.994540x**, bootstrap 95% median CI
+  `[0.966563, 1.038492]` on run 1, and median **1.013881x**, bootstrap 95% median CI
+  `[0.979627, 1.054527]` on run 2 — both medians inside the 0.98–1.02 band.
+  **A failing A/A null on this host is
+  substantially PROCESS PLACEMENT, not workload noise, and it is fixable with
+  `taskset` rather than by waiting for a quiet box.** Anyone whose competitive row
+  is stuck on a null should pin before concluding the lever is unmeasurable.
+- **A second null that does NOT invalidate this row, stated because the harness
+  prints it.** The within-process halves null (fr_b's early samples vs its late
+  ones) read 0.936139x on run 1 and 1.028321x on run 2. That measures drift ACROSS
+  the run — warmup and thermal — not position within a sample. The A/B is a
+  per-sample PAIRED ratio with both arms measured inside the same sample and the
+  arm order rotated across samples, so across-run drift cancels in the ratio; the
+  two-process A/A, which is paired the same way, is the control that matters and it
+  passed on both runs. Run 2 recovering to 1.028 confirms the run-1 halves figure
+  was transient rather than systematic. Recorded rather than hidden so the next
+  reader does not rediscover it and assume the row is void.
+- **Provenance.** Each live server self-reported its own executing image: the harness
+  reads the server's `process_id` from `INFO server`, resolves `/proc/<pid>/exe` and
+  hashes that, so these are self-reported rather than source-tree or commit hashes.
+  FrankenRedis, both A/A arms identical, self-reported executable binary SHA-256
+  `98c35cf76bb9747536a797c408ddeea45faa08a687b0dcfe809362a6f4497c2f`; the vendored
+  Redis 7.2.4 arm self-reported executable binary SHA-256
+  `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`.
+  **HARNESS**: `scripts/collection_reload_headtohead.py --competitive` — three live
+  arms in ONE Python invocation, arm order rotated within each round, 21 trials,
+  isolated RESTORE ... REPLACE of every payload (the decode half only; the DUMP
+  encode half is outside the timed region). **Workload**: 6000 keys — 2000 hashes,
+  2000 sets, 2000 zsets, 40 members each, `set_kind=str`, DBSIZE asserted equal at
+  6000 on both engines before timing. **RCH_WORKER**: `vmi1264463` built the fr ELF
+  from a clean `--base HEAD --clean-overlay` baseline. **same_host**:
+  `thinkstation1`, AMD Ryzen Threadripper PRO 5975WX, 32 physical cores / **64
+  threads observed**, governor `powersave`, ISA `avx2+bmi2+vaes` (no avx512), load
+  average 7.78 at run start on a 64-way box.
+  **CV is provenance only and is NEVER a gate here, the bootstrap median CI being
+  the only decision rule.**
+- **Where the 0.61x actually goes**, from the gated-callgrind breakdown banked in the
+  entry below: the decode is NOT dominated by anything Redis also pays. Redis
+  attaches the raw listpack after an O(1) header check because `sanitize-dump-payload`
+  defaults to NO; fr fully decodes, dedups and re-packs. `zset_from_listpack_spans`
+  is 60.68% of a zset RESTORE and `hash_from_listpack_spans` 47.23% of a hash one.
+  `decode_rdb_string` looks comparable at 21.15%/17.16%/10.93% inclusive but 157 of
+  its memcpys per op are LZF decompression that Redis pays too — parity work, not gap.
+- **Retry predicate.** Re-run after changes to the listpack decode arms, the
+  RESTORE build path, the dedup guards, allocator/codegen, the member count or
+  collection mix, or the Redis version. **Invalidate rather than compare** if the
+  arms are not pinned to distinct cores, if the two-process A/A CI fails to bracket
+  1.0, if the self-reported ELF SHAs differ from those above, if DBSIZE is not 6000
+  on both engines, or if either arm's error rate is non-zero — a `-CROSSSHARD` or
+  arity error counts as a completed request in some harnesses and silently fakes a
+  ratio.
+
 ## 2026-08-16 GentleStream: SELF-SPEEDUP KEEP — RESTORE stops re-walking the object it just built; hash −6.29%, set −4.70%, zset −4.22% instructions, measured as a ONE-ELF A/B (`frankenredis-3uuan`)
 
 - **Claim class: SELF-SPEEDUP. Campaign output: no.** Our code against our own
