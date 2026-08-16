@@ -19148,3 +19148,70 @@ RETRY PREDICATE: do not re-run the census to re-confirm 0.000. DO measure
 touch_missing and exists_missing with shape_instr_per_op.py to size it, and read a
 few-percent result as evidence about where the remaining fixed overhead is rather
 than as a failed lever.
+
+## MEASURED ATTRIBUTION (frankenredis-iqicb) — the exact-decimal fast path: incrbyfloat_same 0.6786x -> 0.4927x, bignum frame GONE
+
+Claim class: COMPETITIVE — fr and the vendored Redis 7.2.4 binary measured in the SAME
+invocation of shape_instr_per_op.py, both under callgrind back to back.
+
+SAME PROVENANCE LIMITATION as the LPOS attribution above, restated rather than assumed
+read: this is NOT a KEEP-class row. Under callgrind the process is VALGRIND, which execs
+the target internally, so no self-reported executing-binary SHA-256 is obtainable and the
+hash below was computed by me over the dump's target path AFTER the run. What ran is an
+ABBA repeat, not an A/A bootstrap median CI. Strong evidence about MECHANISM, weaker
+about magnitude.
+
+    run  shape             fr instr/op   redis 7.2.4   fr/redis   dispatch share
+    A    del_1_missing         1999.7        2613.0     0.7653x       12.2%
+    B    incrbyfloat_same      4411.0        8952.3     0.4927x       10.0%
+    B    incrbyfloat_same      4424.3        8957.9     0.4939x       10.0%
+    A    del_1_missing         2002.2        2656.2     0.7538x       12.2%
+
+DEL_1_MISSING REMAINS THE WORST RATIO ON THE BOARD at 0.7653x worst bound, statistically
+unchanged from the 0.7685x banked earlier — as expected, nothing has touched it.
+
+INCRBYFLOAT_SAME MOVED 0.6786x -> 0.4927x worst bound: fr 6076 -> 4424 instr/op, a saving
+of ~1652 instr/op (27.2 pct of the op).
+
+MECHANISM CONFIRMED — `bignat_to_long_double` HAS VANISHED from the profile. It was the
+single largest frame at 16.02 pct (4,076,000 Ir, ~1019 instr/op) and is now absent
+entirely. The allocator frames fell with it, which is the second signature predicted from
+`BigNat` being `Vec<u32>`-backed and grown by realloc per digit:
+
+    mi_free                  758,656 -> 506,635   (-33 pct)
+    mi_theap_malloc_aligned  624,518 -> 536,548   (-14 pct)
+
+MY PREDICTED CEILING OF 21.3 PCT WAS TOO LOW AND THE REASON MATTERS. I computed it from
+the top frames I had listed — bignat_to_long_double 16.02 plus parse_long_double 5.25.
+But the bignum PATH is wider than its top frames: `from_decimal_digits`, `mul_pow10`,
+`shl_bits`, `add_abs` and the allocator work each fell below the listing threshold
+individually while summing to real cost. **A ceiling built from a top-N frame list
+understates any lever that removes a whole call graph rather than one frame.**
+
+READ THIS AS THE BEST CASE, NOT A WORKLOAD AVERAGE. The shape seeds 1.5 and increments by
+0 — both DYADIC rationals, both inside the exact window. As recorded when the window was
+discovered, common money-shaped operands (0.1, 0.01, 3.14, 1.1) are NOT dyadic, decline,
+and take the unchanged bignum path. A representative figure needs a non-dyadic shape,
+which does not yet exist in the harness.
+
+A/A NULL, from the ABBA repeats in this one invocation:
+
+    fr arm      del_1_missing     1999.7 -> 2002.2   +0.13%
+                incrbyfloat_same  4411.0 -> 4424.3   +0.30%
+    redis arm   del_1_missing     2613.0 -> 2656.2   +1.65%   <- the noisy arm again
+                incrbyfloat_same  8952.3 -> 8957.9   +0.06%
+    ratio       del  0.7653 -> 0.7538  1.50%   |  incrbf 0.4927 -> 0.4939  0.24%
+
+The 27 pct movement on incrbyfloat clears that spread by more than an order.
+
+EXECUTABLE IDENTITIES, full 64-hex (computed post-run, see the limitation above):
+  candidate  `c36c3fb0a66033deff0cf03dc6a313ef647d5970cd22596aac575120a5d2a297`
+  incumbent  `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+             — matches the incumbent SHA recorded elsewhere in this ledger, confirming
+             the same vendored 7.2.4 binary as prior rows.
+  tree       31b22f983, rebuilt because peers had landed 202 lines of code (z2ce3,
+             50ntn) since the previous binary — measuring the stale one would have
+             attributed their work to mine.
+
+RETRY PREDICATE: do not re-run to re-confirm. DO build a NON-DYADIC incrbyfloat shape
+before quoting 0.4927x as anything but the fast window's best case.
