@@ -14731,6 +14731,12 @@ enum BorrowedDispatchFloorClass {
     Hlen,
     /// (frankenredis-ozrro) `LREM key count element`.
     Lrem,
+    /// (frankenredis-9u5z9) `ZMPOP numkeys key MIN|MAX`, the no-COUNT single-key
+    /// form. Authenticated at 0.7698x/0.7860x vs live 7.2.4 on a MISSING key —
+    /// where fr does essentially no work — because the packet walked most of the
+    /// cascade to reach a route that already existed. This is a CLASS variant;
+    /// its command-enum counterpart is [`BorrowedDispatchFloorCommand::Zmpop`].
+    Zmpop,
     /// (frankenredis-ozrro) `LPOP|RPOP key count`. The count forms have an
     /// exact borrowed parser/executor but were stranded late in the cascade.
     ListPopCount {
@@ -15116,6 +15122,10 @@ enum BorrowedDispatchFloorCommand {
     Sdiffstore,
     Zinter,
     Zdiff,
+    /// (frankenredis-9u5z9) `ZMPOP numkeys key MIN|MAX`. This is a COMMAND-enum
+    /// variant, not a class variant — the class it maps to is
+    /// [`BorrowedDispatchFloorClass::Zmpop`].
+    Zmpop,
 }
 
 fn uppercase_ascii_token<const N: usize>(token: &[u8]) -> Option<[u8; N]> {
@@ -15174,6 +15184,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'H', b'K', b'E', b'Y', b'S'] => Some(BorrowedDispatchFloorCommand::Hkeys),
             [b'H', b'V', b'A', b'L', b'S'] => Some(BorrowedDispatchFloorCommand::Hvals),
             [b'H', b'M', b'G', b'E', b'T'] => Some(BorrowedDispatchFloorCommand::Hmget),
+            [b'Z', b'M', b'P', b'O', b'P'] => Some(BorrowedDispatchFloorCommand::Zmpop),
             [b'H', b'S', b'C', b'A', b'N'] => Some(BorrowedDispatchFloorCommand::Hscan),
             [b'S', b'S', b'C', b'A', b'N'] => Some(BorrowedDispatchFloorCommand::Sscan),
             [b'Z', b'S', b'C', b'A', b'N'] => Some(BorrowedDispatchFloorCommand::Zscan),
@@ -15788,6 +15799,14 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // cannot reach either: it only records shapes that come out on the
         // GENERIC path, and these two match their arm and succeed.
         (4, BorrowedDispatchFloorCommand::Lrem) => Some(BorrowedDispatchFloorClass::Lrem),
+        // (frankenredis-9u5z9) `ZMPOP numkeys key MIN|MAX` is arity 4 and had an
+        // exact borrowed parser+executor sitting deep in the chain. Gated callgrind
+        // on the missing-key shape, 4,000 ops at 7,400 instr/op: the executor is
+        // 3.20% of the op while ~24% goes to parse_borrowed_plain_* arms that cannot
+        // match ZMPOP (key_arg2 alone is 8.66%) plus 6.30% of memcmp comparing
+        // command names. The COUNT form keeps its later arm; only the bare form
+        // moves, because only it has a fixed arity to classify on.
+        (4, BorrowedDispatchFloorCommand::Zmpop) => Some(BorrowedDispatchFloorClass::Zmpop),
         // The count forms use the same fixed arity and parser shape. Carrying
         // direction as data lets one front classifier skip both late literal
         // prefix arms without widening to no-count or blocking-pop variants.
@@ -17224,6 +17243,33 @@ fn try_dispatch_floor_classified_action(
 ) -> Option<Result<BorrowedMultibulkAction, RespParseError>> {
     let class = classify_borrowed_dispatch_floor_packet(unparsed, &parser_config)?;
     Some(match class {
+        BorrowedDispatchFloorClass::Zmpop => {
+            // Same parser and executor the deep cascade arm used; only the position
+            // changes, so the reply bytes and every side effect are unchanged. A
+            // declining executor falls through to the generic path exactly as before.
+            if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
+                unparsed,
+                &parser_config,
+                b"*4\r\n$5\r\n",
+                b"ZMPOP",
+            ) && let Some(response) =
+                runtime.execute_plain_zmpop1_borrowed(packet.key, packet.a, packet.b, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
         BorrowedDispatchFloorClass::Lrem => {
             if let Some(packet) = parse_borrowed_plain_lrem_packet(unparsed, &parser_config)
                 && let Some(response) = runtime.execute_plain_lrem_borrowed(

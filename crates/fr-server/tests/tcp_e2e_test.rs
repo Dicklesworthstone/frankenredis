@@ -2794,6 +2794,33 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"ZPOPMIN", b"z:1"]));
     cmds.push(c(&[b"ZPOPMAX", b"z:1", b"2"]));
     cmds.push(c(&[b"ZREM", b"z:1", b"c"]));
+    // (frankenredis-9u5z9) ZMPOP is now front-classified at arity 4. These run on a
+    // FRESH key for the same reason the ZREMRANGEBYSCORE block below does: by this
+    // point z:1 has been emptied, so a ZMPOP against it would answer nil whichever
+    // direction the route was wired to, and the case would prove nothing.
+    //
+    // The MIN row then the MAX row are what make the direction OBSERVABLE — MIN must
+    // take `a` (score 1) and MAX must take `d` (score 4). A route wired to the wrong
+    // executor passes a nil-only corpus and fails here.
+    cmds.push(c(&[
+        b"ZADD", b"z:mp", b"1", b"a", b"2", b"b", b"3", b"c", b"4", b"d",
+    ]));
+    cmds.push(c(&[b"ZMPOP", b"1", b"z:mp", b"MIN"]));
+    cmds.push(c(&[b"ZMPOP", b"1", b"z:mp", b"MAX"]));
+    cmds.push(c(&[b"ZRANGE", b"z:mp", b"0", b"-1", b"WITHSCORES"]));
+    // The missing-key branch, which is the shape the 0.7698x/0.7860x loss was
+    // measured on, so it is the one the classification most needs to keep exact.
+    cmds.push(c(&[b"ZMPOP", b"1", b"z:absent", b"MIN"]));
+    // Arities the classifier deliberately does NOT claim, so they must still reach
+    // the cascade and answer identically: the COUNT form (arity 6) and the
+    // two-key form (arity 5).
+    cmds.push(c(&[b"ZMPOP", b"1", b"z:mp", b"MIN", b"COUNT", b"2"]));
+    cmds.push(c(&[b"ZMPOP", b"2", b"z:absent", b"z:mp", b"MIN"]));
+    // Wrong type and a malformed direction: both must produce the generic path's
+    // error verbatim rather than a fast-route shortcut.
+    cmds.push(c(&[b"ZMPOP", b"1", b"s:1", b"MIN"]));
+    cmds.push(c(&[b"ZMPOP", b"1", b"z:mp", b"SIDEWAYS"]));
+    cmds.push(c(&[b"ZMPOP", b"0", b"z:mp", b"MIN"]));
     // (frankenredis-ozrro) On a FRESH key, because by this point z:1 has been
     // emptied by ZPOPMIN/ZPOPMAX/ZREM and every ZREMRANGEBYSCORE against it
     // removes nothing — so all of them answered 0 and the case proved nothing.
