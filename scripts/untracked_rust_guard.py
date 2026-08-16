@@ -178,17 +178,46 @@ def scan(root: Path) -> int:
         for path, ignored in untracked_rust_files(root)
         if path not in KNOWN_UNTRACKED
     ]
-    if offenders:
+    # BLOCK only on the INVISIBLE ones, and warn about the rest.
+    #
+    # (frankenredis-8a5j3) The networkx original fails on any untracked .rs, which is
+    # right for a repo with one author at a time. This checkout is shared by a dozen
+    # agents at once, and the first thing this guard did in production was block MY
+    # commit over a PEER's in-progress test file -- one that `git status` shows on
+    # every invocation. Blocking unrelated commits over a file everyone can already
+    # see buys no safety and costs a wedged shared branch, which is a failure mode
+    # this fleet has hit repeatedly today for other reasons.
+    #
+    # The hazard the guard exists for is unchanged and still fails hard: frankenlibc
+    # reached 273 files because they were GITIGNORED and therefore absent from
+    # `git status`, `git log`, `git blame` and review. Invisibility is the defect;
+    # being uncommitted for an hour is not.
+    blocking = [(p, i) for p, i in offenders if i]
+    visible = [(p, i) for p, i in offenders if not i]
+
+    if visible:
         print(
-            "untracked .rs files live in directories cargo compiles.\n"
-            "cargo builds every .rs under a crate's tests/ as its own test target, so one\n"
-            "that stops compiling aborts that crate's entire test run; an ignored file under\n"
-            "src/ that later gains a `mod` declaration breaks every checkout but yours.\n"
-            "Commit them, move them outside the crate, or delete them:"
+            "note: untracked .rs in a directory cargo compiles (visible in git status, "
+            "not blocking):"
         )
-        for path, ignored in offenders:
-            suffix = "   [GITIGNORED - invisible to review]" if ignored else ""
-            print(f"  {path}{suffix}")
+        for path, _ in visible:
+            print(f"  {path}")
+        print(
+            "  cargo builds these as targets, so commit or move them before they break "
+            "someone else's run."
+        )
+
+    if blocking:
+        print(
+            "GITIGNORED .rs files live in directories cargo compiles.\n"
+            "cargo builds every .rs under a crate's tests/ as its own test target, so one\n"
+            "that stops compiling aborts that crate's entire test run -- and because these\n"
+            "are ignored they are invisible to git status, git log, git blame and review.\n"
+            "An ignored file under src/ that later gains a mod declaration breaks every\n"
+            "checkout but yours. Commit them, move them outside the crate, or un-ignore them:"
+        )
+        for path, _ in blocking:
+            print(f"  {path}   [GITIGNORED - invisible to review]")
         return 1
     return 0
 
@@ -198,6 +227,11 @@ def self_check(root: Path) -> int:
 
     For a guard, "does it detect anything" is the whole question -- a scan that
     quietly covered nothing would pass forever and look identical to a clean repo.
+
+    The planted file must be INVISIBLE to be a real test, since visible untracked
+    files are only a warning. It is hidden via .git/info/exclude rather than
+    .gitignore: info/exclude is local and untracked, so this never touches a file
+    other agents share.
     """
     test_dirs = [d for d in cargo_source_dirs(root) if d.name == "tests"]
     if not test_dirs:
@@ -213,25 +247,41 @@ def self_check(root: Path) -> int:
         print("self-check: repo is already failing the guard; fix that first")
         return 1
 
-    planted.write_text("// planted by untracked_rust_guard.py self-check\n")
+    exclude = root / ".git" / "info" / "exclude"
+    original = exclude.read_text() if exclude.exists() else None
+    relative = planted.relative_to(root).as_posix()
     try:
-        relative = planted.relative_to(root).as_posix()
-        found = {path for path, _ in untracked_rust_files(root)}
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        with exclude.open("a") as fh:
+            fh.write(f"\n{relative}\n")
+        planted.write_text("// planted by untracked_rust_guard.py self-check\n")
+
+        if not is_ignored(root, relative):
+            print(f"self-check FAILED: could not make {relative} ignored; test is invalid")
+            return 1
+        found = {path: ign for path, ign in untracked_rust_files(root)}
         if relative not in found:
             print(f"self-check FAILED: planted {relative} was NOT detected")
             return 1
+        if not found[relative]:
+            print(f"self-check FAILED: {relative} not reported as gitignored")
+            return 1
         if scan(root) == 0:
-            print(f"self-check FAILED: guard passed despite {relative} being present")
+            print(f"self-check FAILED: guard passed despite invisible {relative}")
             return 1
     finally:
         planted.unlink(missing_ok=True)
+        if original is None:
+            exclude.unlink(missing_ok=True)
+        else:
+            exclude.write_text(original)
 
     if scan(root) != 0:
         print("self-check FAILED: guard still fails after removing the planted file")
         return 1
     print(
-        "self-check OK: guard is clean, fires on a planted .rs in a compiled "
-        "directory, and returns to clean when it is removed"
+        "self-check OK: guard is clean, FAILS on a gitignored .rs planted in a "
+        "compiled directory, and returns to clean when it is removed"
     )
     return 0
 
