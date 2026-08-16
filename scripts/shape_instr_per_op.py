@@ -135,6 +135,13 @@ SHAPES = {
     "lrem_missing": (["RPUSH l a b c"], ["LREM", "l", "0", "nosuch"]),
     "memory_usage": (["SET s abcdefghijklmnop"], ["MEMORY", "USAGE", "s"]),
     "expire_same": (["SET s abcdefghijklmnop"], ["EXPIRE", "s", "10000"]),
+    # (frankenredis-9tni0) Worst route measured in the campaign: 0.5717 and
+    # 0.6251 across two sweeps. Attribute before choosing a lever -- dispatch has
+    # been the answer four times and was NOT the answer for the TTL writes.
+    "sort_ro_alpha": (["RPUSH sl c a b"], ["SORT_RO", "sl", "ALPHA"]),
+    "geoadd_same": (["GEOADD g 13.361389 38.115556 P1"],
+                    ["GEOADD", "g", "13.361389", "38.115556", "P1"]),
+    "pfadd_same": (["PFADD hll a b c"], ["PFADD", "hll", "a"]),
     # The control: a route none of the above levers touch.
     "get_control": (["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
 }

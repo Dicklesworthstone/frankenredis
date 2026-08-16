@@ -285,6 +285,27 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
         ("lindex", ["RPUSH l a b c d e"], ["LINDEX", "l", "2"]),
         ("get_control", ["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
     ],
+    # (frankenredis-9tni0) Fourth unswept batch: families NO sweep had touched --
+    # streams, geo, HyperLogLog, SORT, set-cardinality intersections. All 15
+    # cleared scripts/shape_admission_probe.py on both engines, 0 rejected.
+    "unswept4": [
+        ("xlen", ["XADD xst 1-1 f v", "XADD xst 1-2 f v"], ["XLEN", "xst"]),
+        ("xrange_2", ["XADD xst 1-1 f v", "XADD xst 1-2 f v"], ["XRANGE", "xst", "-", "+"]),
+        ("geopos", ["GEOADD g 13.361389 38.115556 P1"], ["GEOPOS", "g", "P1"]),
+        ("geosearch", ["GEOADD g 13.361389 38.115556 P1", "GEOADD g 15.087269 37.502669 P2"],
+         ["GEOSEARCH", "g", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "ASC"]),
+        ("geoadd_same", ["GEOADD g 13.361389 38.115556 P1"],
+         ["GEOADD", "g", "13.361389", "38.115556", "P1"]),
+        ("pfadd_same", ["PFADD hll a b c"], ["PFADD", "hll", "a"]),
+        ("pfcount", ["PFADD hll a b c d e"], ["PFCOUNT", "hll"]),
+        ("sort_ro_alpha", ["RPUSH sl c a b"], ["SORT_RO", "sl", "ALPHA"]),
+        ("sintercard2", ["SADD s1 m1 m2 m3", "SADD s2 m2 m3 m4"], ["SINTERCARD", "2", "s1", "s2"]),
+        ("smismember2", ["SADD st m1 m2 m3"], ["SMISMEMBER", "st", "m1", "nope"]),
+        ("zrangebylex", ["ZADD z 0 a 0 b 0 c"], ["ZRANGEBYLEX", "z", "-", "+"]),
+        ("zcount", ["ZADD z 1 a 2 b 3 c"], ["ZCOUNT", "z", "1", "3"]),
+        ("hrandfield_c", ["HSET h f1 v1"], ["HRANDFIELD", "h", "1"]),
+        ("get_control", ["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
+    ],
     "storeops": [
         ("exists_8key", ["MSET e1 1 e2 1 e3 1 e4 1 e5 1 e6 1 e7 1 e8 1"],
          ["EXISTS", "e1", "e2", "e3", "e4", "e5", "e6", "e7", "e8"]),
