@@ -18869,3 +18869,34 @@ RETRY PREDICATE: prerequisite order is (1) large-intersection shape covering gen
 intset arms, (2) all three sorts removed in one commit with the assertion made
 order-insensitive, (3) measure ABBA. Skipping (1) files a false REJECT; skipping (2)
 produces a red test that looks like a regression.
+
+## GATE REFINEMENT (frankenredis-gein3) — the in-tree 4000-member SINTER bench cannot measure the sort, because both its arms sort
+
+Source-verified under the freeze. Prevents a false citation.
+
+`sinter_borrow_scan_reports_ab` (fr-store:68526) builds two 4000-member generic sets and
+prints `plain(owned+sort)=... | borrow_scan=... = ...x`. The label reads as though it
+isolates the sort. **It does not: `sinter_borrow_scan` sorts too** (fr-store:20741 generic
+arm, 20761 intset arm). Both arms sort, the sort cancels, and the printed ratio measures
+owned-copies vs borrowed-refs only.
+
+DO NOT CITE IT as evidence for or against the reply-sort lever. It is the same error as
+measuring the lever on sinter_9, one layer over: **an A/B with the thing under test
+present in both arms.** What it is good for is the FIXTURE — a ready 4000-member
+intersection and a working timing harness. Reuse the fixture, not the conclusion.
+
+COUPLING ASSERTION PINNED PRECISELY: fr-store:68452,
+`assert_eq!(sink_members, plain, "shape {shape} members")` — Vec == Vec, order-sensitive.
+A SECOND assertion at 68520 compares lengths only and is order-insensitive; it can stay.
+So prerequisite (2) changes exactly one assertion, not the whole test.
+
+ALSO WORTH RECORDING: the sort is currently paid on the FAST reply path too. The
+borrow-scan route exists to avoid per-member copies, and it still sorts the refs
+afterwards — so "the fast path" is not sort-free today.
+
+Campaign output: yes — stops a plausible-looking in-tree benchmark being read as evidence.
+
+RETRY PREDICATE: after removing the three sorts, `sinter_borrow_scan_reports_ab`'s printed
+ratio WILL move because both its numerators change. That movement is not evidence about
+this lever either. Measure with the new large-intersection harness shapes
+(sinter_large_generic / sinter_large_intset) against a pre-change ELF.
