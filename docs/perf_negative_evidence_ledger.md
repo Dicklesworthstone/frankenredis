@@ -23276,3 +23276,74 @@ PROVENANCE:
 RETRY PREDICATE: do NOT re-measure zadd_2pair — it is the served form and it is fine.
 DO add a shape for the flagged arity-6 form and expect it in the 46-58 pct band until
 the arm is chained. Treat the ZADD family as OPEN, not closed.
+
+## MEASURED (frankenredis-f2zrr) — six-run variance study: fr-arm stability differs 25x between two shapes of the SAME command, and the hash-seed hypothesis does not explain it
+
+Claim class: COMPETITIVE
+
+FrankenRedis/Redis 7.2.4 = 0.8315x worst bound, measured with the live vendored
+redis-server arm launched and run in the SAME invocation of shape_instr_per_op.py as the
+candidate, both under callgrind back to back.
+
+Campaign output: yes
+
+Same provenance limitation as the rows above (valgrind hosts the target, so no
+self-reported ELF SHA; ABBA repeats, not a bootstrap CI).
+
+    run  shape            fr instr/op   redis 7.2.4   fr/redis   share   loadavg
+    1    bitcount_range       2275.3        4173.9     0.5451x   19.9%    29.63
+    2    bitcount_unit        3781.4        4985.4     0.7585x   46.2%    29.63
+    3    bitcount_unit        3783.7        4969.3     0.7614x   46.2%    35.83
+    4    bitcount_range       2297.2        4250.1     0.5405x   20.0%    33.84
+    5    bitcount_range       2280.6        4098.3     0.5565x   20.0%    36.89
+    6    bitcount_unit        3788.3        4555.7     0.8315x   46.1%    44.75
+
+    uptime before certifying: 24.72 / 14.80 / 20.36 (the window was announced as 6.88).
+    Load rose 29.63 -> 44.75 DURING the six runs.
+
+THE OPEN ANOMALY IS REPRODUCIBLE AND IT IS NOT WHAT I GUESSED. Last row found fr's
+bitcount_range arm moving 4.32 pct at constant load and I proposed a per-process
+randomized hasher as the candidate mechanism. Five samples of each shape now exist:
+
+    bitcount_unit   3781.4  3782.2  3783.7  3785.5  3788.3   spread 0.18 pct
+    bitcount_range  2227.9  2275.3  2280.6  2297.2  2328.4   spread 4.51 pct
+
+**Same command, same binary, same host, differing by ONE ARGUMENT — and a 25x difference
+in fr-arm stability.** The variance is reproducible, so it is a property of the shape, not
+a one-off.
+
+**THE HASH-SEED HYPOTHESIS PREDICTS THE OPPOSITE PATTERN AND IS THEREFORE NOT SUPPORTED.**
+Both shapes perform the same single keyspace lookup, so seed-dependent probing should
+affect them roughly equally in ABSOLUTE terms. Measured absolute spreads are 6.9 instr/op
+(unit) against 100.5 (range) — a 14x difference in absolute variance for identical
+hashing work. Worse for the hypothesis: the STRANDED shape, which spends 46 pct of its
+time in a deterministic cascade walk, is the STABLE one, while the CLASSIFIED shape is the
+variable one. I record the hypothesis as refuted by its own prediction and offer no
+replacement — the mechanism is unknown.
+
+WHAT THIS DOES NOT UNDERMINE: the dispatch SHARE. Across all six runs, share reproduces to
+a tenth of a point (46.1-46.2 pct unit, 19.9-20.0 pct range) while load nearly doubled.
+Every stranded-sibling finding in this ledger rests on share, not on the ratio, and share
+is the figure that has never wobbled.
+
+FURTHER LOAD EVIDENCE, incidental but clean: load rose 29.63 -> 44.75 across these runs
+while fr's unit arm moved 0.18 pct and its range arm 0.96 pct WITHIN this invocation. The
+redis unit arm meanwhile spans 4555.7 to 4985.4 across five samples, 9.4 pct. Numerator
+load-immune, denominator not — consistent with every prior row.
+
+BECAUSE OF THAT DENOMINATOR SPREAD, the 0.8315x worst bound is quoted but should NOT be
+compared against incrbyfloat_nondyadic's 0.7827x to rank "worst". That 0.7827x was taken
+at loadavg 11 with a 0.28 pct ratio spread; this 0.8315x was taken at 44.75 with a 9.6 pct
+spread across the shape's five ratios. **Ranking two shapes measured in different load
+regimes is exactly the comparison this ledger has been warning about.** They should be
+re-run in the same window before either is called worst.
+
+EXECUTABLE IDENTITIES, full 64-hex (computed post-run, see limitation above):
+  candidate  `773d819de62d62d7f496b2a1df8e82bd645228e9e366e64c6294190ffa6d8e2d`
+  incumbent  `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+  tree       47a307984; NO rebuild — no crate code had changed since that binary.
+
+RETRY PREDICATE: do not rank shapes across load regimes. When two candidates for "worst"
+are within ~5 pct, measure them in the SAME invocation — the harness takes multiple shapes
+per run and that is what makes them comparable. And treat fr-arm stability as a per-shape
+fact to be observed, never assumed: two shapes of one command differ by 25x.
