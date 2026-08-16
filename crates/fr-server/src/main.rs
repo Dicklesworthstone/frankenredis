@@ -14748,6 +14748,17 @@ enum BorrowedDispatchFloorClass {
     /// cascade to reach a route that already existed. This is a CLASS variant;
     /// its command-enum counterpart is [`BorrowedDispatchFloorCommand::Zmpop`].
     Zmpop,
+    /// (frankenredis-nscqs) `BITOP <op> dest src...`, carrying the SOURCE COUNT so
+    /// one class covers both routed arities: 1 is `BITOP NOT dest src` and the
+    /// single-source AND/OR/XOR form, 2 is the two-source form.
+    ///
+    /// Authenticated as the largest gap on the online surface — AND ~0.679x and
+    /// NOT ~0.668x normalised vs live 7.2.4, so Redis is ~1.47x faster. This is a
+    /// CLASS variant; its command-enum counterpart is
+    /// [`BorrowedDispatchFloorCommand::Bitop`].
+    Bitop {
+        sources: u8,
+    },
     /// (frankenredis-ozrro) `LPOP|RPOP key count`. The count forms have an
     /// exact borrowed parser/executor but were stranded late in the cascade.
     ListPopCount {
@@ -15137,6 +15148,9 @@ enum BorrowedDispatchFloorCommand {
     /// variant, not a class variant — the class it maps to is
     /// [`BorrowedDispatchFloorClass::Zmpop`].
     Zmpop,
+    /// (frankenredis-nscqs) `BITOP`. COMMAND-enum variant; its class counterpart is
+    /// [`BorrowedDispatchFloorClass::Bitop`].
+    Bitop,
 }
 
 fn uppercase_ascii_token<const N: usize>(token: &[u8]) -> Option<[u8; N]> {
@@ -15196,6 +15210,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'H', b'V', b'A', b'L', b'S'] => Some(BorrowedDispatchFloorCommand::Hvals),
             [b'H', b'M', b'G', b'E', b'T'] => Some(BorrowedDispatchFloorCommand::Hmget),
             [b'Z', b'M', b'P', b'O', b'P'] => Some(BorrowedDispatchFloorCommand::Zmpop),
+            [b'B', b'I', b'T', b'O', b'P'] => Some(BorrowedDispatchFloorCommand::Bitop),
             [b'H', b'S', b'C', b'A', b'N'] => Some(BorrowedDispatchFloorCommand::Hscan),
             [b'S', b'S', b'C', b'A', b'N'] => Some(BorrowedDispatchFloorCommand::Sscan),
             [b'Z', b'S', b'C', b'A', b'N'] => Some(BorrowedDispatchFloorCommand::Zscan),
@@ -15818,6 +15833,20 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // command names. The COUNT form keeps its later arm; only the bare form
         // moves, because only it has a fixed arity to classify on.
         (4, BorrowedDispatchFloorCommand::Zmpop) => Some(BorrowedDispatchFloorClass::Zmpop),
+        // (frankenredis-nscqs) BITOP's two routed shapes, both of which had an exact
+        // borrowed parser+executor stranded deep in the chain. Gated callgrind on
+        // `BITOP AND bdst ba bb`, 4,000 ops: Store::bitop is 4.64% and
+        // execute_plain_bitop_borrowed 2.78% — 7.4% of real work — against ~14.5%
+        // in parse_borrowed_plain_* arms that cannot match BITOP and 7.87% of
+        // memcmp comparing command names. Arity 5 is `BITOP op dest src1 src2`;
+        // arity 4 is `BITOP NOT dest src` and the single-source AND/OR/XOR form.
+        // Wider source lists keep the generic path, as before.
+        (5, BorrowedDispatchFloorCommand::Bitop) => {
+            Some(BorrowedDispatchFloorClass::Bitop { sources: 2 })
+        }
+        (4, BorrowedDispatchFloorCommand::Bitop) => {
+            Some(BorrowedDispatchFloorClass::Bitop { sources: 1 })
+        }
         // The count forms use the same fixed arity and parser shape. Carrying
         // direction as data lets one front classifier skip both late literal
         // prefix arms without widening to no-count or blocking-pop variants.
@@ -17254,6 +17283,55 @@ fn try_dispatch_floor_classified_action(
 ) -> Option<Result<BorrowedMultibulkAction, RespParseError>> {
     let class = classify_borrowed_dispatch_floor_packet(unparsed, &parser_config)?;
     Some(match class {
+        BorrowedDispatchFloorClass::Bitop { sources } => {
+            // Same parsers and executor the two deep cascade arms used; only the
+            // position changes, so reply bytes and side effects are unchanged, and a
+            // declining executor still falls through to the generic path.
+            let routed = if sources == 2 {
+                parse_borrowed_plain_key_arg3_packet(
+                    unparsed,
+                    &parser_config,
+                    b"*5\r\n$5\r\n",
+                    b"BITOP",
+                )
+                .and_then(|packet| {
+                    // packet.key=op, a=dest, b=src1, c=src2.
+                    runtime
+                        .execute_plain_bitop_borrowed(
+                            packet.key,
+                            packet.a,
+                            &[packet.b, packet.c],
+                            ts,
+                        )
+                        .map(|response| (packet.consumed, response))
+                })
+            } else {
+                parse_borrowed_plain_key_arg2_packet(
+                    unparsed,
+                    &parser_config,
+                    b"*4\r\n$5\r\n",
+                    b"BITOP",
+                )
+                .and_then(|packet| {
+                    // packet.key=op, a=dest, b=src.
+                    runtime
+                        .execute_plain_bitop_borrowed(packet.key, packet.a, &[packet.b], ts)
+                        .map(|response| (packet.consumed, response))
+                })
+            };
+            if let Some((consumed, response)) = routed {
+                Ok(BorrowedMultibulkAction::FastReply { consumed, response })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
         BorrowedDispatchFloorClass::Zmpop => {
             // Same parser and executor the deep cascade arm used; only the position
             // changes, so the reply bytes and every side effect are unchanged. A

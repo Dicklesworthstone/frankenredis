@@ -1,19 +1,26 @@
 #!/usr/bin/env python3
-"""frankenredis-9u5z9: three-way ZMPOP equivalence — fr fast route vs fr generic
-path vs live Redis 7.2.4.
+"""Three-way equivalence for newly front-classified dispatch routes — fr fast route
+vs fr generic path vs live Redis 7.2.4.
+
+Covers frankenredis-9u5z9 (ZMPOP) and frankenredis-nscqs (BITOP).
 
 This is the scoped equivalent of `borrowed_fast_routes_agree_with_generic_dispatch_
-and_legacy_redis` for the ZMPOP rows only. It exists because that gate asserts on
-its FIRST mismatch and is currently RED at reply 110 on an unrelated HRANDFIELD
-ordering bug (frankenredis-brs56), which masks every later row including these.
+and_legacy_redis` for these routes only. It exists because that gate asserts on its
+FIRST mismatch and is currently RED at reply 110 on an unrelated HRANDFIELD ordering
+bug (frankenredis-brs56), which masks every later row including these. When brs56
+clears, the corpus rows in that gate are the permanent home and this becomes a fast
+scoped re-check rather than the primary evidence.
 
 The fr arms are the SAME ELF: FR_PERF_AB_CASCADE_BYPASS=1 selects the generic path,
 unset selects the front-classified fast route. So a difference between them is the
-route, not the build.
+route, not the build. That requires a binary built with
+`--features perf-ab-cascade-bypass`; without it both fr arms are the fast route and
+the fast-vs-generic column proves nothing, so the run is refused below.
 
-    zmpop_differ.py <redis_port> <fr_fast_port> <fr_generic_port>
+    dispatch_route_differ.py <redis_port> <fr_fast_port> <fr_generic_port>
 Exit 0 = all three agree on every case.
 """
+import os
 import socket
 import sys
 
@@ -95,9 +102,67 @@ CASES = [
     ("ZMPOP", "1", "z:mp2", "MAX"),
     ("ZMPOP", "1", "z:mp2", "MIN"),
     ("EXISTS", "z:mp2"),
+
+    # ── BITOP (frankenredis-nscqs) ──────────────────────────────────────────
+    # UNEQUAL source lengths are the case that matters: upstream zero-extends the
+    # shorter operand to the longest, so AND must clear the tail while OR/XOR keep
+    # it, and the reply is the LONGEST length. Equal-length operands hide all of it.
+    ("SET", "bo:a", "abcdefgh"),
+    ("SET", "bo:b", "abc"),
+    ("BITOP", "AND", "bo:and", "bo:a", "bo:b"),
+    ("GET", "bo:and"),
+    ("BITOP", "OR", "bo:or", "bo:a", "bo:b"),
+    ("GET", "bo:or"),
+    ("BITOP", "XOR", "bo:xor", "bo:a", "bo:b"),
+    ("GET", "bo:xor"),
+    # Arity 4: NOT and the single-source AND form share the other route.
+    ("BITOP", "NOT", "bo:not", "bo:a"),
+    ("GET", "bo:not"),
+    ("BITOP", "AND", "bo:and1", "bo:a"),
+    ("GET", "bo:and1"),
+    # A missing source is an empty string upstream, so AND empties the dest and
+    # DELETES it, replying 0.
+    ("BITOP", "AND", "bo:miss", "bo:a", "bo:absent"),
+    ("EXISTS", "bo:miss"),
+    ("BITOP", "OR", "bo:miss2", "bo:absent", "bo:absent"),
+    ("EXISTS", "bo:miss2"),
+    # Errors, verbatim from the generic path.
+    ("BITOP", "NOT", "bo:bad", "bo:a", "bo:b"),
+    ("BITOP", "NAND", "bo:bad", "bo:a", "bo:b"),
+    ("BITOP", "AND", "bo:bad", "s:1", "bo:a"),
 ]
 
+def executing_image(conn):
+    """Resolve the live server's own executable via its self-reported process_id."""
+    info = conn.cmd("INFO", "server")
+    pid = next(
+        line.split(":", 1)[1]
+        for line in info.splitlines()
+        if line.startswith("process_id:")
+    )
+    return os.path.realpath(f"/proc/{int(pid)}/exe")
+
+
 redis, fast, generic = Conn(RS), Conn(FF), Conn(FG)
+
+# REFUSE rather than report a meaningless column. Without the bypass feature
+# compiled in, FR_PERF_AB_CASCADE_BYPASS=1 does nothing and BOTH fr arms run the
+# fast route — the fast-vs-generic comparison would then pass by construction while
+# testing nothing, which is exactly the false-pass shape this script exists to avoid.
+fast_exe, generic_exe = executing_image(fast), executing_image(generic)
+if fast_exe != generic_exe:
+    raise SystemExit(
+        f"REFUSED: the two fr arms are different binaries ({fast_exe} vs {generic_exe}); "
+        "fast-vs-generic must be one ELF or a difference is a build artifact"
+    )
+with open(fast_exe, "rb") as image:
+    if b"FR_PERF_AB_CASCADE_BYPASS" not in image.read():
+        raise SystemExit(
+            f"REFUSED: {fast_exe} was not built with --features perf-ab-cascade-bypass, "
+            "so both fr arms are the fast route and the generic column proves nothing"
+        )
+print(f"one ELF, bypass feature present: {fast_exe}")
+
 bad = 0
 print(f"{'case':<38} {'fr fast':<22} {'fr generic':<22} {'redis 7.2.4'}")
 print("-" * 108)

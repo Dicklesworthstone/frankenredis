@@ -2388,6 +2388,41 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"BITPOS", b"b:1", b"1"]));
     cmds.push(c(&[b"BITPOS", b"b:1", b"0", b"0"]));
     cmds.push(c(&[b"BITPOS", b"b:1", b"0", b"0", b"-1"]));
+    // (frankenredis-nscqs) BITOP is now front-classified at arity 5 (two-source)
+    // and arity 4 (NOT / single-source). Sources of UNEQUAL length are the case
+    // that matters: upstream zero-extends the shorter operand to the longest, so
+    // AND must clear the tail while OR/XOR keep it, and the reply is the LONGEST
+    // source length, not the shortest. Equal-length operands hide all of that.
+    cmds.push(c(&[b"SET", b"bo:a", b"abcdefgh"]));
+    cmds.push(c(&[b"SET", b"bo:b", b"abc"]));
+    cmds.push(c(&[b"BITOP", b"AND", b"bo:and", b"bo:a", b"bo:b"]));
+    cmds.push(c(&[b"GET", b"bo:and"]));
+    cmds.push(c(&[b"BITOP", b"OR", b"bo:or", b"bo:a", b"bo:b"]));
+    cmds.push(c(&[b"GET", b"bo:or"]));
+    cmds.push(c(&[b"BITOP", b"XOR", b"bo:xor", b"bo:a", b"bo:b"]));
+    cmds.push(c(&[b"GET", b"bo:xor"]));
+    // Arity 4: NOT, and the single-source AND/OR/XOR form, which share the route.
+    cmds.push(c(&[b"BITOP", b"NOT", b"bo:not", b"bo:a"]));
+    cmds.push(c(&[b"GET", b"bo:not"]));
+    cmds.push(c(&[b"BITOP", b"AND", b"bo:and1", b"bo:a"]));
+    cmds.push(c(&[b"GET", b"bo:and1"]));
+    // Absent sources: upstream treats a missing key as an empty string, so AND
+    // yields an empty dest and DELETES it, returning 0.
+    cmds.push(c(&[b"BITOP", b"AND", b"bo:miss", b"bo:a", b"bo:absent"]));
+    cmds.push(c(&[b"EXISTS", b"bo:miss"]));
+    cmds.push(c(&[
+        b"BITOP",
+        b"OR",
+        b"bo:miss2",
+        b"bo:absent",
+        b"bo:absent",
+    ]));
+    cmds.push(c(&[b"EXISTS", b"bo:miss2"]));
+    // Errors must come from the generic path verbatim: NOT takes exactly one
+    // source, the op keyword must be known, and a source of the wrong type fails.
+    cmds.push(c(&[b"BITOP", b"NOT", b"bo:bad", b"bo:a", b"bo:b"]));
+    cmds.push(c(&[b"BITOP", b"NAND", b"bo:bad", b"bo:a", b"bo:b"]));
+    cmds.push(c(&[b"BITOP", b"AND", b"bo:bad", b"s:1", b"bo:a"]));
     cmds.push(c(&[
         b"BITFIELD",
         b"b:2",
