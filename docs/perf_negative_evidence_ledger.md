@@ -20178,3 +20178,67 @@ argument rather than an approximation.
 RETRY PREDICATE: re-profile before choosing the next target here. div_small was 18.39 pct
 across 16 passes and is now 2, so the profile has certainly reordered and the previous
 frame ranking is stale.
+
+## MEASURED ATTRIBUTION (frankenredis-z2ce3) — zadd_base 0.8264x at 46 pct dispatch is the new worst; zadd_xx_opt is 0.5540x, NOT 1.242x
+
+Claim class: COMPETITIVE — fr and the vendored Redis 7.2.4 binary in the SAME invocation.
+Same provenance limitation as the rows above (valgrind hosts the target, so no
+self-reported ELF SHA; ABBA repeats, not a bootstrap CI).
+
+    run  shape          fr instr/op   redis 7.2.4   fr/redis   dispatch share
+    A    zadd_xx_opt        3160.3        5704.9     0.5540x       16.4%
+    B    zadd_base          4481.5        5422.7     0.8264x       46.0%   <- WORST
+    B    zadd_base          4365.9        5482.9     0.7963x       45.9%
+    A    zadd_xx_opt        3217.9        5778.9     0.5568x       16.3%
+
+TWO FINDINGS, AND THE FIRST CORRECTS A ROW ON THIS BEAD.
+
+1. `zadd_xx_opt` MEASURES 0.5540x WORST BOUND — fr about 1.8x AHEAD — against the 1.242x
+   recorded for it. The discrepancy is not a convention inversion this time: BOTH figures
+   carry a dispatch share, which only this harness reports, so both came from the same
+   harness. The shares are what identify the cause: 58 pct there against 16.4 pct here.
+   58 pct is the STRANDED band; 16.4 pct is the front-classified band. **The earlier row
+   was measured on a binary from before ZADD's option forms were front-classified.** It
+   is stale, not wrong-at-the-time — and it is the first case in this campaign where a
+   row aged out because a peer's lever landed between measurement and reading.
+
+2. THE BASE FORM IS NOW THE WORST ROUTE ON THE BOARD at 0.8264x, displacing
+   incrbyfloat_nondyadic (0.7792x) and del_1_missing (0.7653x). Its 46.0 pct dispatch
+   share puts it squarely in the stranded band.
+
+AND THE INVERSION IS THE INTERESTING PART: `ZADD z 1 a` costs MORE than `ZADD z XX 1 a`
+— 4481 instr/op against 3160, a 42 pct penalty for using FEWER arguments. The option form
+is front-classified and the base form is not, so the plainest possible ZADD walks the
+cascade while its optioned sibling takes a direct route. Whoever classified the XX/NX/GT
+forms did not classify the bare one.
+
+    zadd_base    46.0 pct dispatch  ->  stranded, and it is the common case
+    zadd_xx_opt  16.4 pct dispatch  ->  front-classified
+
+PROFILE of zadd_xx_opt for contrast (the classified arm) shows no dispatch frame in the
+top set at all: hashbrown contains_key 7.69 pct, execute_plain_zadd_flag_borrowed 7.46
+pct, set_bulk 5.53 pct, zadd_with_options 5.53 pct. That is what a served route looks
+like.
+
+A/A NULL, from the ABBA repeats in this one invocation:
+
+    fr arm      zadd_xx_opt  3160.3 -> 3217.9   +1.82%
+                zadd_base    4481.5 -> 4365.9   -2.58%
+    redis arm   zadd_xx_opt  5704.9 -> 5778.9   +1.30%
+                zadd_base    5422.7 -> 5482.9   +1.11%
+    ratio       xx 0.5540 -> 0.5568  0.51%  |  base 0.8264 -> 0.7963  3.64%
+
+The base row's 3.64 pct spread is wide; the 42 pct gap between the two shapes clears it
+by an order, but the base figure itself should be quoted as a worst bound only.
+
+EXECUTABLE IDENTITIES, full 64-hex (computed post-run, see limitation above):
+  candidate  `b526caa0537587de82334d59b6e1bf4a33f97ce2f2e7c9da9685383c5edd1ba2`
+  incumbent  `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+  tree       344f8361d; NO rebuild — no crate code had changed since that binary.
+
+Campaign output: yes — retires a stale row and names the next front-classification target.
+
+RETRY PREDICATE: front-classify the BARE `ZADD key score member` form. Its optioned
+siblings are already done, so the token and class machinery exists; this is an
+(arity, cmd) arm plus a dispatch arm. Re-measure zadd_base afterwards, with zadd_xx_opt
+as the control that must not move.
