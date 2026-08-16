@@ -18174,3 +18174,71 @@ materially below 51 — the A/A null is the gate and it is not close. PREFER
 shape_instr_per_op.py on sinter_2 vs sinter_9, which counts instructions, is
 load-immune, worked on this host this hour, and is the pairing that attributed the
 gap in the first place.
+
+## MEASURED (frankenredis-iqicb) — incrbyfloat_same CONFIRMED as the worst route at 0.6815x; hincrbyfloat's 0.7510x row is stale
+
+DIRECTION: fr instr/op DIVIDED BY Redis 7.2.4 instr/op. BELOW 1.0 = fr AHEAD. Lower
+is better.
+
+    run  shape               fr instr/op   redis 7.2.4   fr/redis   dispatch share
+    A    hincrbyfloat            4221.0        9148.4     0.4614x       12.1%
+    B    incrbyfloat_same        6065.5        8954.5     0.6774x        7.3%
+    B    incrbyfloat_same        6093.4        9016.5     0.6758x        7.3%
+    A    hincrbyfloat            4240.7        9073.5     0.4673x       12.1%
+
+HINCRBYFLOAT WAS THE HYPOTHESIS AND IT IS WRONG. iqicb records it at 0.7510x, the
+worst post-lever ratio in that table, which made it the obvious candidate for "worst
+remaining route". It measures 0.4673x worst bound — fr ~53 pct AHEAD. The 0.7510x row
+is STALE and should not be quoted. Recorded as a refuted hypothesis rather than
+quietly dropped: the candidate was picked FROM the inventory, and the inventory was
+out of date, so the pick was wrong for a reason that will recur until the inventory is
+refreshed wholesale.
+
+SO INCRBYFLOAT_SAME REMAINS THE WORST MEASURED ROUTE, and it now has the strongest
+evidence in this ledger: FOUR runs across TWO INDEPENDENT INVOCATIONS with different
+orderings.
+
+    invocation 1 (with getset)   0.6815 / 0.6754
+    invocation 2 (with hincrbyf) 0.6774 / 0.6758
+    full range                   0.6754 - 0.6815, a 0.90 pct spread
+
+WORST BOUND ACROSS ALL FOUR: 0.6815x — fr ~32 pct AHEAD. Cross-invocation agreement
+matters more than repeat agreement inside one invocation, because it survives process
+start, seeding and teardown being redone.
+
+ATTRIBUTION FOR THE NEXT LEVER — IT IS NOT DISPATCH. incrbyfloat_same's dispatch share
+is 7.3 pct, the LOWEST of any shape measured on this ELF (lpos_count 27.2, getset 14.4,
+hincrbyfloat 12.1, sinter_2 12.6, sinter_9 8.3). Front-classification has nothing left
+to take here. The residual is COMPUTE: fr spends 6065-6093 instr/op against redis's
+8954-9016 while retiring far fewer, and iqicb's own notes place fr's cost in the float
+formatter frames (bignat_to_long_double, add_float_text) with redis paying MORE for the
+same job (__printf_fp_buffer_1, ____strtold_l_internal, __mpn_mul_1). A big frame is not
+a deficit unless the incumbent's equivalent is smaller — here it is not, which is why
+this route is 32 pct ahead despite the formatter dominating it.
+
+A/A NULL — ABBA in one invocation (hincrbyfloat, incrbyfloat, incrbyfloat, hincrbyfloat):
+
+    fr arm      hincrbyfloat      4221.0 -> 4240.7   +0.47%
+                incrbyfloat_same  6065.5 -> 6093.4   +0.46%
+    redis arm   hincrbyfloat      9148.4 -> 9073.5   -0.82%
+                incrbyfloat_same  8954.5 -> 9016.5   +0.69%
+    ratio       hincrbyfloat  0.4614 -> 0.4673   1.28% spread
+                incrbyfloat   0.6774 -> 0.6758   0.24% spread
+
+PROVENANCE:
+  ELF sha256 (first 16)  51708552264214d1 — same binary as the LPOS, SINTER and
+                         getset rows. REUSED, no build this turn (/data 44G, 2G above
+                         the 42G hard stop).
+  built                  LOCALLY, RCH_CARGO_WRAPPER_BYPASS=1, env -u CARGO_TARGET_DIR
+                         into this repo's own target/.
+  tree                   same caveat: uncommitted peer WIP in fr-command/lua_eval.rs,
+                         fr-persist/listpack.rs and several fr-runtime benches is
+                         compiled in. NOT reproducible from HEAD alone.
+
+Campaign output: yes — identifies the true worst route and refutes the inventory-based
+candidate.
+
+RETRY PREDICATE: do NOT pick the next candidate from cv3fm/iqicb's recorded ratios;
+two of them (getset 0.9799x, hincrbyfloat 0.7510x) are now known stale by 45 and 28
+points. Re-measure a shape before treating it as the worst. Attack incrbyfloat's
+FORMATTER, not its dispatch.
