@@ -80,9 +80,34 @@ We only use **Cargo** in this project, NEVER any other package manager.
 > `rch` defaults to *"Strict remote: off"* and **silently builds LOCALLY** when it cannot reserve a
 > remote slot; a local `cargo bench` drains ~73 GB/hour on this host. `RCH_REQUIRE_REMOTE=1` makes it
 > error instead. `env -u CARGO_TARGET_DIR` is mandatory because `~/.zshrc` globally exports
-> `CARGO_TARGET_DIR`, which makes rch artifact retrieval return ~0 bytes. If rch reports no remote
-> slot, that is a **blocker** — wait, retry, or do analysis-only work. Never fall back to a local
+> `CARGO_TARGET_DIR`, which makes rch artifact retrieval return ~0 bytes. Never fall back to a local
 > build; never run `maturin build`.
+>
+> ### ⚠️ If rch refuses your job, pass `-j 2` to CARGO before you wait (frankenredis-mgc2p)
+>
+> ```sh
+> RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo test -j 2 -p <crate> --lib
+> ```
+>
+> A refusal usually means the job asked for **more parallelism than any single worker can give**, so
+> no worker is admissible no matter how many slots are free fleet-wide. It is NOT contention, and
+> waiting does not help. Confirmed independently by three agents on three crates: `cargo test -p
+> fr-store --lib` refused ~8 spaced attempts over an hour and `-j2` was admitted first try;
+> `cargo test -p fr-runtime --test dump_restore_roundtrip` refused ~70 consecutive times and `-j2`
+> was admitted first try; `cargo test -p fr-command --lib` refused twice and `-j 2` ran 1215 tests
+> in 37s. `cargo check` slips through unmodified because it is a small job — which is the clue.
+>
+> **The `-j` belongs to `cargo`, not to `rch exec`.** `rch exec -j 2 -- cargo build …` fails with a
+> misleading `exec called with non-compilation command: 2 --base HEAD …` / RCH-E301, because rch
+> consumes the `-j` and treats the rest as the command.
+>
+> **Match the refusal, not one spelling of it.** The message is not always `insufficient_slots`; it
+> is also `(selection error: queue_timeout)`. Any log predicate must match at least
+> `no admissible|refusing local fallback|insufficient_slots|queue_timeout` — a grep for only the
+> first reports a refusal as *no output*, which reads as a pass.
+>
+> This matters beyond lost time: a silent refusal pushes people to gate in debug instead of release,
+> or to skip the gate.
 >
 > **Before you benchmark or write a REJECT, read [`docs/BENCH_METHODOLOGY.md`](docs/BENCH_METHODOLOGY.md).**
 > It carries the A/B substrate rule (both arms in ONE binary and ONE rch invocation, interleaved
