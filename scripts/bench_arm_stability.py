@@ -68,6 +68,24 @@ def main():
         sys.exit("no such binary: %s (build it separately; this script never does)"
                  % args.binary)
 
+    # WHOSE fr-server is under test? The vs_redis benches default FR_SERVER_BIN to
+    # target/release/frankenredis, which in this shared checkout is a RENDEZVOUS: I
+    # measured it three times believing it was my tree, and its sha turned out to
+    # belong to a build I did not make. Worse, the bench will invoke cargo to CREATE
+    # that binary if it is missing, so an innocent-looking bench run can start a
+    # build during a freeze.
+    fr_bin = os.environ.get("FR_SERVER_BIN")
+    if not fr_bin:
+        sys.exit("REFUSED: FR_SERVER_BIN is unset, so the bench would fall back to "
+                 "target/release/frankenredis -- a shared path whose contents you "
+                 "did not necessarily build, and which the bench will cargo-build "
+                 "if absent. Point it at a binary you made and can sha.")
+    if not os.path.exists(fr_bin):
+        sys.exit("FR_SERVER_BIN=%s does not exist" % fr_bin)
+    digest = subprocess.run(["sha256sum", fr_bin], capture_output=True, text=True,
+                            check=False).stdout.split()[0][:24]
+    print("fr-server under test: %s\n  sha256 %s" % (fr_bin, digest))
+
     runs = []
     for i in range(args.runs):
         cmd = [args.binary, "--bench", "--noplot",
