@@ -24645,3 +24645,85 @@ RETRY PREDICATE: do NOT re-screen this corpus. DO add shapes for LTRIM, SPOP, SR
 SMOVE, RPOPLPUSH, HSET and INCRBYFLOAT before anyone plans more front-classification work —
 they are the unclassified commands with no shape, and LTRIM's known 15,736 instr/op walk
 says the corpus is hiding its own worst case.
+
+--------------------------------------------------------------------------------
+PLACEMENT AUDIT (frankenredis-z2ce3) — the cross-core spread DOES reach my harness, but
+ONLY the DENOMINATOR: r(elapsed, redis Ir) = +0.98, r(MHz, fr Ir) = -0.11. I over-claimed
+two rows ago and this row bounds it
+
+Claim class: METHOD
+
+I have twice written that this instrument is frequency-immune. That is TRUE OF THE
+NUMERATOR AND FALSE OF THE DENOMINATOR, and the distinction was already documented in the
+harness's own docstring, which I should have been quoting instead of re-deriving:
+
+    "REPRODUCIBILITY IS ASYMMETRIC, and it is the DENOMINATOR that moves... The subtraction
+    cancels work proportional to OP COUNT, not work proportional to ELAPSED TIME, and
+    redis's serverCron is the latter -- under valgrind a run's duration varies, so its
+    background work does not divide out."
+
+That is a real mechanism by which clock and placement reach an instruction count, and it is
+exactly what the fleet's placement audits are asking about. Measured for THIS harness
+rather than assumed, eight consecutive `get_control` runs, same ELF:
+
+    run  elapsed  mean MHz    fr Ir(N)     redis Ir(N)    ratio
+     1    3.38s     2648      3,722,623    13,853,073    0.4180   <- slowest AND lowest clock
+     2    2.84s     2905      3,720,767    13,587,182    0.4183
+     3    2.86s     2771      3,722,481    13,588,881    0.4172
+     4    2.78s     3374      3,724,504    13,596,354    0.4159
+     5    2.78s     3359      3,719,474    13,590,337    0.4170
+     6    2.84s     2938      3,720,464    13,587,624    0.4181
+     7    2.77s     3313      3,723,952    13,584,161    0.4158
+     8    2.72s     3464      3,719,348    13,586,483    0.4274
+
+    fr arm spread                    0.139 pct   no outlier
+    redis arm spread, all eight      1.980 pct
+    redis arm spread WITHOUT run 1   0.090 pct   -- 22x tighter
+
+    r(elapsed, redis Ir) = +0.98      r(MHz, elapsed)  = -0.73
+    r(MHz,     redis Ir) = -0.57      r(MHz,    fr Ir) = -0.11
+
+THE CAUSAL CHAIN IS CONFIRMED END TO END: a low clock lengthens the run, a longer run takes
+more serverCron ticks, and those ticks land in redis's total where the op-count subtraction
+cannot remove them. r = +0.98 against elapsed is about as clean as this host produces. The
+fr arm, which has no timer work, sits at r = -0.11 and 0.139 pct — the immunity I claimed
+holds there and only there.
+
+    CORRECTED CLAIM: fr's NUMERATOR is immune to load, clock and placement (0.139 pct here,
+    0.64 pct across a 34 pct MHz swing in row 9e195955e). redis's DENOMINATOR is NOT: it
+    carries a ONE-SIDED, ADDITIVE contaminant proportional to elapsed time, ~2 pct on this
+    evidence and up to 8 pct per the docstring's own measurement.
+
+THE RIGHT ESTIMATOR FOLLOWS FROM THE SHAPE OF THE ERROR. serverCron work is additive and
+non-negative, so the contaminated readings can only be TOO HIGH — the minimum of K redis
+runs is the closest estimate of the op-proportional cost, and the MEAN is biased upward by
+construction. Here min-of-8 is 13,584,161 against a mean of 13,621,762, so the mean is
++0.28 pct inflated even with only one slow run in eight. Do not average the redis arm;
+take its minimum.
+
+DOES THIS ENDANGER ANYTHING I HAVE BANKED? Checked rather than asserted:
+
+  - The SET arm move (-19.3 pct) and the sort-key rejection (+3.9 pct, +52.5 pct) are
+    NUMERATOR-ONLY claims measured on the fr arm. Untouched.
+  - The SORT parity crossover at n=7 uses BOTH slopes and IS exposed. Re-solved with the
+    redis n=3 point inflated by the measured 2 pct and the docstring's worst-case 8 pct
+    (cron is absolute, so it is a negligible fraction of the much longer n=64 run):
+        inflation 0 pct -> crossover 7.02      2 pct -> 7.20      8 pct -> 7.70
+    The conclusion "fr is ahead for lists of 7 or more" survives its own worst case.
+
+PROVENANCE:
+  ELF sha256           1b1d66cd028dd406fdde74e0dceb968b57558ffb03e9faf77bc439d77c46d87e
+  harness              scripts/shape_instr_per_op.py, shape get_control, eight consecutive
+                       runs, nothing changed between them. Arms are SEQUENTIAL within one
+                       invocation (fr then redis under valgrind), so the two arms cannot
+                       contend with each other — the contention that matters is with the
+                       rest of the host, and it acts through elapsed time.
+  host                 thinkstation1, 64 cores, /data 280G, governor powersave, no build.
+  loadavg              11.57 / 16.21 / 24.65 at open, falling.
+  MHz PER ARM          recorded per run in the table above; 64-core mean 2648-3464 across
+                       the eight, host-wide spread 1429-4292 MHz = 3.00x.
+
+RETRY PREDICATE: do NOT re-run this audit. DO take min-of-K on the redis arm for any ratio
+within ~10 pct of 1.0, and say which estimator a row used. A single redis pair is fine for
+1.35x and useless for 1.05x — which is what the docstring said before I started, and what
+this row now has the correlation to justify.
