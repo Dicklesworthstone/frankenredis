@@ -22171,3 +22171,79 @@ independently built binaries have never moved fr's cost by more than 0.3 pct or 
 dispatch share by a tenth of a point. Do not measure it again until a borrowed SORT_RO
 route exists. The same applies to every shape in the table above: the next row in this
 ledger should be the RESULT OF A LEVER, not another reading of an unchanged shape.
+
+--------------------------------------------------------------------------------
+CONFIRMED ON COMMITTED CODE — multi-key TOUCH holds at 21.1 pct dispatch now that the
+fix is in HEAD; fr's cost matches the uncommitted measurement to 0.07 pct
+(frankenredis-z2ce3, frankenredis-p98mw)
+
+The previous TOUCH row measured a fix that existed only as uncommitted working-tree
+state, and set an explicit condition: "do NOT re-measure touch_2 until the fix is
+COMMITTED — a green number from an uncommitted tree is exactly the kind of evidence
+that evaporates. Once committed, one confirming run against fr's 2,083.2 instr/op
+baseline is enough."
+
+The fix landed as d75679cc1, "front-classify multi-key TOUCH at arities 3, 4 and 5".
+This is that one confirming run.
+
+CONVENTION: fr instructions per op / redis 7.2.4's. BELOW 1.0 = fr AHEAD.
+
+    A/A control (get_control)  0.3941 / 0.4242 / 0.4169      spread 7.6 pct
+
+    touch_2, four runs   fr 2080.8 / 2079.2 / 2074.4 / 2092.7   spread 0.88 pct
+                         redis 3512.1 / 3712.0 / 3733.8 / 3384.8  spread 10.3 pct
+                         ratio 0.5925 / 0.5601 / 0.5556 / 0.6183  spread 11.3 pct
+                         dispatch 21.1 / 21.1 / 21.1 / 21.0       ~438.5 instr/op
+
+    against the UNCOMMITTED-tree measurement one row above:
+      fr instr/op        2083.2  ->  2081.8      0.07 pct
+      dispatch instr/op  ~438.8  ->  ~438.5      0.07 pct
+      dispatch share      21.1 pct    21.1 pct   identical
+
+Monotonic on both arms in all four runs.
+
+THE COMMITTED FIX DELIVERS EXACTLY WHAT THE UNCOMMITTED ONE DID. fr's own cost and the
+dispatch instr/op both reproduce to seven hundredths of a percent across two
+independently built binaries — one from a dirty tree, one from HEAD plus a different
+peer's dirty delta. The 3.2848x defect is durably gone, and the evidence for that no
+longer depends on an uncommitted file.
+
+That is the whole reason the previous row refused to treat its own green number as
+final. A measurement of uncommitted state is a measurement of something that may not
+exist tomorrow; the recheck cost one build and converts it into a fact about the
+repository.
+
+ON THE RATIO, WHICH MOVED AND SHOULD BE IGNORED: 0.5572 -> 0.5816 looks like a 4 pct
+regression and is not. redis's arm swung 10.3 pct this session against fr's 0.88 pct,
+and the A/A null was 7.6 pct — the noisiest control in the series after set_base's
+10.0. With fr's numerator matching to 0.07 pct, the ratio movement is entirely the
+denominator. This is the same lesson every row in this series has reached from a
+different direction: MEASURE THE NUMERATOR.
+
+A CAVEAT ON THIS BINARY THAT IS WORTH STATING PLAINLY: the tree was NOT clean. I built
+expecting HEAD, and `git status` showed a peer's fresh uncommitted `main.rs` — a
+DIFFERENT delta from the one the previous row carried. So this ELF is HEAD plus
+somebody's in-progress work, and the only reason the comparison is sound is that the
+TOUCH claims themselves are now committed and both binaries agree on fr's cost to 0.07
+pct. Anyone reproducing this should expect a third number from a fourth tree state.
+
+STANDINGS UNCHANGED: sort_ro_alpha (~1.52x) is the only shape above parity and the only
+non-rewire. expire_nx_opt and set_base remain the untaken rewires, both with predictions
+on record and neither yet attempted.
+
+PROVENANCE:
+  ELF sha256           af63704223bad22ed3389a6aecc26a601634e0d2cbe02065a663c0724ff060b8
+                       built LOCALLY at HEAD 2034f26e7 (which contains d75679cc1) PLUS a
+                       peer's uncommitted crates/fr-server/src/main.rs, with
+                       RCH_CARGO_WRAPPER_BYPASS=1 and env -u CARGO_TARGET_DIR,
+                       executable path from --message-format=json, COPIED to a private
+                       path and sha'd there.
+  prior ELF            6e4adcdaad95f2c332677edf937eee89683096f1873a09ade221216911aaa0f6
+  harness              scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines in
+                       the SAME invocation.
+  host                 thinkstation1, 64 cores, /data 308G, one build this pane.
+
+RETRY PREDICATE: touch_2 is CLOSED. The fix is committed, confirmed on committed code,
+and fr's cost is settled at ~2,082 instr/op with 21.1 pct dispatch. Do not measure it
+again. The remaining open items are expire_nx_opt and set_base, and both need code
+rather than another reading.
