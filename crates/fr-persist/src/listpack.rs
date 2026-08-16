@@ -106,6 +106,7 @@ impl ListpackValueSpan {
     }
 
     #[must_use]
+    #[inline]
     pub fn as_bytes<'a>(&'a self, listpack: &'a [u8]) -> &'a [u8] {
         match self {
             Self::String(range) => &listpack[range.clone()],
@@ -771,6 +772,11 @@ fn decode_string_entry_range(
     }
 }
 
+// (frankenredis-33832) Inlined into the span loop: it is called once per listpack
+// element on the RESTORE decode path (80 calls per 40-field hash) and returns a
+// 40-byte `(ListpackValueSpan, usize)` tuple, so leaving it out of line pays a
+// full span copy from the return slot into the caller's Vec on every element.
+#[inline]
 fn decode_entry_value_span(
     data: &[u8],
     cursor: usize,

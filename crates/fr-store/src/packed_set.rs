@@ -609,7 +609,12 @@ impl HashFieldMap {
         if to_hash {
             let mut h = CompactFieldMap::with_capacity(pairs.len(), bytes);
             for (field, value) in pairs {
-                h.insert(field, value);
+                // (frankenredis-33832) The pairs are unique by this function's
+                // contract, so `insert`'s existence probe can only ever miss —
+                // it walked tags and compared full field bytes to rediscover
+                // that. Above the listpack threshold that probe measured 8,718
+                // instructions per op on a 160-field RESTORE.
+                h.append_known_absent(field, value);
             }
             HashFieldMap::Hash(h)
         } else {
@@ -1162,6 +1167,58 @@ impl CompactFieldMap {
         off
     }
 
+    /// Insert a field the caller has ALREADY proven absent, skipping the
+    /// existence probe.
+    ///
+    /// `insert` hashes, then walks `lookup_slot_prehashed` comparing tags and
+    /// full field bytes, before discovering what a bulk builder already knows:
+    /// the field is new. On a 160-field hash RESTORE that probe measured 8,718
+    /// instructions per op, against a caller that had just proven uniqueness
+    /// with its own pass. Placement still hashes and still probes for a free
+    /// slot — only the "is it already here?" walk disappears, so the resulting
+    /// map is identical to `insert`'s for unique input.
+    ///
+    /// CONTRACT: `field` must not already be present. Violating it stores a
+    /// duplicate rather than overwriting, which is why this is `pub(crate)` and
+    /// used only from the `from_unique_*` builders.
+    /// (frankenredis-33832)
+    pub(crate) fn append_known_absent(&mut self, field: &[u8], value: &[u8]) {
+        let h = self.hash(field);
+        // New field. Ensure load factor < 0.75 (count slots used incl tombstones).
+        let used = self.order.len() + self.tombs + 1;
+        if self.slots.is_empty() || used * 4 >= self.slots.len() * 3 {
+            let target = (self.order.len() + 1) * 2;
+            self.rehash(target.max(self.slots.len()));
+        }
+        let new_off = self.append_entry(field, value);
+        let pos = self.order.len();
+        self.order.push(new_off);
+        let mask = self.slots.len() - 1;
+        let tag = (h >> 56) as u8;
+        let mut slot = (h as usize) & mask;
+        let mut first_tomb: Option<usize> = None;
+        loop {
+            let s = self.slots[slot];
+            if s == CFM_EMPTY {
+                let target = first_tomb.unwrap_or(slot);
+                if self.slots[target] == CFM_TOMB {
+                    self.tombs -= 1;
+                }
+                self.slots[target] = (pos as u32) + 2;
+                self.tags[target] = tag;
+                self.slot_of.push(target as u32);
+                break;
+            }
+            if s == CFM_TOMB && first_tomb.is_none() {
+                first_tomb = Some(slot);
+            }
+            slot = (slot + 1) & mask;
+        }
+        // No `maybe_compact` here: a fresh build never marks an entry dead, so
+        // the compaction test can only ever be false. `insert` has to keep it
+        // because it reaches this path after an overwrite.
+    }
+
     /// Insert `field`→`value`; returns the previous value if the field existed.
     /// Matches `IndexMap::insert` (existing field keeps its position).
     pub(crate) fn insert(&mut self, field: &[u8], value: &[u8]) -> Option<Vec<u8>> {
@@ -1396,6 +1453,11 @@ impl CompactFieldMap {
 
     /// Reclaim dead arena bytes and/or shrink-rebuild the index when either has
     /// grown past half. Offsets change, so `order` + `slots` are rebuilt.
+    // (frankenredis-33832) Called once per insert, and its whole body is two
+    // comparisons that are false for every build that never deletes — but it was
+    // out of line, so each insert paid a call. Measured at 4,800 instructions per
+    // op on a 160-field hash RESTORE.
+    #[inline]
     fn maybe_compact(&mut self) {
         if self.dead * 2 > self.buf.len() && self.dead > 64 {
             let mut new_buf = Vec::with_capacity(self.buf.len() - self.dead);
@@ -6215,6 +6277,66 @@ mod tests {
             check(&c, &o);
         }
         assert!(!c.is_empty(), "expected a non-trivial residual map");
+    }
+
+    #[test]
+    fn append_known_absent_matches_insert_for_unique_pairs_33832() {
+        // (frankenredis-33832) `from_unique_pairs_borrowed` now places fields with
+        // `append_known_absent`, which SKIPS the existence probe on the strength of
+        // that function's documented no-duplicate-fields contract. This pins the
+        // claim that makes the skip legal: for unique input the resulting map must be
+        // indistinguishable from one built with the probing `insert`.
+        //
+        // Sized past PACKED_MAX_ENTRIES so the builder takes the CompactFieldMap
+        // branch — below the threshold it builds a PackedStrMap and this path never
+        // runs, which is exactly why the earlier 40-field measurement could not see
+        // this lever at all.
+        let owned: Vec<(Vec<u8>, Vec<u8>)> = (0..200u32)
+            .map(|i| {
+                (
+                    format!("field:{i}").into_bytes(),
+                    format!("value:{i}:padding").into_bytes(),
+                )
+            })
+            .collect();
+        let pairs: Vec<(&[u8], &[u8])> = owned
+            .iter()
+            .map(|(f, v)| (f.as_slice(), v.as_slice()))
+            .collect();
+
+        let built = HashFieldMap::from_unique_pairs_borrowed(&pairs);
+        let mut reference = CompactFieldMap::with_capacity(pairs.len(), 0);
+        for (field, value) in &pairs {
+            reference.insert(field, value);
+        }
+
+        assert_eq!(built.len(), reference.len(), "entry count diverged");
+        assert_eq!(
+            built.len(),
+            200,
+            "expected the hashtable branch, not packed"
+        );
+        // Iteration order is observable (HRANDFIELD, HGETALL), so compare it.
+        let built_entries: Vec<(Vec<u8>, Vec<u8>)> = built
+            .iter()
+            .map(|(f, v)| (f.to_vec(), v.to_vec()))
+            .collect();
+        let reference_entries: Vec<(Vec<u8>, Vec<u8>)> = reference
+            .iter()
+            .map(|(f, v)| (f.to_vec(), v.to_vec()))
+            .collect();
+        assert_eq!(built_entries, reference_entries, "iteration order diverged");
+        // And every field must still be findable through the slot table, which is
+        // what a mis-placed slot would break while leaving iteration intact.
+        for (field, value) in &pairs {
+            assert_eq!(
+                built.get(field),
+                Some(*value),
+                "lookup failed for {:?}",
+                String::from_utf8_lossy(field)
+            );
+        }
+        assert_eq!(built.get(b"field:absent".as_slice()), None);
     }
 
     #[test]
