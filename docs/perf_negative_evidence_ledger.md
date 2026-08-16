@@ -23189,3 +23189,90 @@ EXECUTABLE IDENTITIES, full 64-hex (computed post-run, see limitation above):
 RETRY PREDICATE: classify BITCOUNT at arity 5 — the parser exists and the pre-lever figure
 is now on record, so the delta will be attributable. And stop quoting "the fr arm is
 exact" as general: check it per shape from the ABBA repeat you are already running.
+
+--------------------------------------------------------------------------------
+LIVE REGRESSION — the arity-6 ZADD lever serves ONE of two forms and sends the other to
+GENERIC; the flagged form is now WORSE than before the lever
+(frankenredis-z2ce3, frankenredis-p98mw)
+
+The previous row measured zadd_2pair healthy at 15.7 pct dispatch and said explicitly:
+"the measurement is CONSISTENT with correct chaining and does not prove it… proving it
+needs a second shape or a reading of the arm, and I have done neither." This is that
+reading, and the arm is not chained.
+
+LOADAVG OBSERVED BY ME, both ends: 14.04 / 16.44 / 22.85 before, 12.09 / 15.69 / 22.37
+after. Under the ~30 defer line. No new measurement was needed — this row is settled
+from source, and the mechanism it relies on has four measured confirmations already in
+this ledger.
+
+THE ARM, VERBATIM:
+
+    BorrowedDispatchFloorClass::ZaddTwoPair => {
+        if let Some(packet) = parse_borrowed_plain_zadd2_packet(unparsed, &parser_config)
+            && let Some(response) = runtime.execute_plain_zadd_borrowed(...)
+        { Ok(FastReply { .. }) } else {
+            parse_borrowed_multibulk_action(          // <- GENERIC
+        }
+
+ONE PARSER. NO `.or_else`. The else branch is the generic dispatcher.
+
+AND THE CLAIM IS UNCONDITIONAL ON ARITY:
+
+    (6, BorrowedDispatchFloorCommand::Zadd) => Some(BorrowedDispatchFloorClass::ZaddTwoPair)
+
+TWO DISTINCT ZADD FORMS SHARE ARRAY LENGTH 6:
+
+    parse_borrowed_plain_zadd2_packet        b"*6\r\n$4\r\n"  two score/member pairs
+    parse_borrowed_plain_zadd_flag2_packet   b"*6\r\n$4\r\n"  a FLAG form — its body
+                                                              tests NX / XX / GT / …
+
+The flagged form still has a working cascade arm at 9573. But it can no longer be
+reached: `(6, Zadd)` claims it at the floor, `zadd2_packet` refuses it (wrong shape),
+and the else branch goes to GENERIC rather than back to the cascade.
+
+    BEFORE the lever: the flagged arity-6 form walked the cascade and was SERVED at 9573.
+    AFTER  the lever: it is claimed, declined, and lands on the GENERIC path.
+
+    THAT IS A REGRESSION, NOT A MISSED OPTIMISATION. It is the exact failure this
+    ledger named on frankenredis-9hnxt: a floor class is a promise its arm must keep,
+    and a claimed-then-declined packet does not fall back to the cascade.
+
+THE WARNING WAS ON RECORD BEFORE THE LEVER WAS WRITTEN. This series' ZADD row said:
+"Arity 6 has TWO parsers (zadd2, zadd_flag2), so that entry needs the in-arm chaining
+idiom rather than a single parser call." The lever was written with a single parser call.
+
+WHY THE MEASUREMENT COULD NOT CATCH IT, which is the reusable part: zadd_2pair exercises
+the form that IS served, and reads a healthy 15.7 pct. A green number on the served form
+is exactly what a half-chained arm produces. There is no harness shape for the flagged
+arity-6 form, so no amount of running the existing suite would surface this. IT WAS ONLY
+FINDABLE BY READING THE ARM — which the previous row committed to doing rather than
+inferring from the green reading it had.
+
+PREDICTED, for whoever fixes it: the flagged arity-6 form should currently measure in
+the 46-58 pct dispatch band, alongside the other mis-claimed shapes this ledger recorded
+before they were fixed (zadd_base 46.1, bitcount_range 46.4, expire_nx_opt 51.0,
+zadd_xx_opt 58.0). After chaining it should join the crossed set near 16 pct.
+
+THE FIX is the idiom already used elsewhere in this file — chain the second parser in
+the same arm before falling through:
+
+    if let Some(packet) = zadd2(..) && let Some(r) = execute(..) { .. }
+    else if let Some(packet) = zadd_flag2(..) && let Some(r) = execute_flag2(..) { .. }
+    else { parse_borrowed_multibulk_action(..) }
+
+and a harness shape for the flagged form should land with it, or the next reader is in
+the same position I was: unable to tell a half-chained arm from a working one.
+
+PROVENANCE:
+  source               crates/fr-server/src/main.rs at HEAD, clean tree. The arm, the
+                       arity map entry and both parser prefixes are quoted above and
+                       were read directly, not inferred.
+  supporting ELF       773d819de62d62d7f496b2a1df8e82bd645228e9e366e64c6294190ffa6d8e2d
+                       (previous row) — zadd_2pair 0.5143x at 15.7 pct dispatch, the
+                       SERVED form, four runs, A/A null 2.3 pct.
+  host                 thinkstation1, 64 cores, /data 301G, no build this turn.
+  loadavg              14.04/16.44/22.85 before, 12.09/15.69/22.37 after.
+
+RETRY PREDICATE: do NOT re-measure zadd_2pair — it is the served form and it is fine.
+DO add a shape for the flagged arity-6 form and expect it in the 46-58 pct band until
+the arm is chained. Treat the ZADD family as OPEN, not closed.
