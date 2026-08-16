@@ -13,7 +13,9 @@
 # (self-launchers via a `--redis-bin`/`--bin` grep; otherwise it tries the flag
 # form and falls back to positional on an argparse "unrecognized arguments"
 # error) and runs each with a per-script timeout so the slow drain-bounded ones
-# (keyspace_notif, client_tracking) can't wedge the whole run.
+# (keyspace_notif, client_tracking) can't wedge the whole run. A script this
+# runner cannot drive at all is reported SKIP, and that check runs BEFORE the
+# divergence check so it cannot be miscounted as a parity FAIL.
 #
 # Self-launching gates (those taking --bin/--redis-bin) build/manage their own
 # short-lived servers, so they are driven with the binary paths rather than the
@@ -225,6 +227,14 @@ for script in "$DIR"/*.py; do
     # cannot contaminate this one (self-launching gates use their own servers, so
     # this is a harmless no-op for them).
     cfg_state restore
+    # (frankenredis-vqpx8) This grep is deliberately kept, and deliberately loose.
+    # Probing `--help` for the advertised flag is more precise but WRONG here:
+    # propagation_rewrite_gate and parity_suite parse their arguments by hand from
+    # sys.argv, so --help throws and they would be demoted to the port-pair branch —
+    # and parity_suite takes POSITIONAL BINARY PATHS, so it would read a port number
+    # as a redis-server path. The looseness costs nothing now that a non-drivable
+    # script is classified SKIP before the divergence check below, which is what
+    # actually stopped the three non-gates from being counted as parity failures.
     if grep -qE -- "--redis-bin|add_argument\\(.--bin.\\)" "$script"; then
         # Self-launching gate: drive it with the binary paths. Fall back to
         # --bin-only for gates that don't take --redis-bin (e.g. fr<->fr ones).
@@ -251,6 +261,16 @@ for script in "$DIR"/*.py; do
     elif [ "$rc" -eq 0 ]; then
         echo "PASS  $name — ${last}"
         pass=$((pass + 1))
+    elif echo "$out" | grep -qiE "is not an executable file|unknown mode|unrecognized arguments|no such option|usage:" \
+         && ! echo "$out" | grep -qiE "DIVERGE|divergence|mismatch"; then
+        # (frankenredis-vqpx8) A wrong-CLI signature is checked BEFORE the
+        # divergence branch on purpose: these scripts announce their usage error
+        # with a line starting "FAIL", which the divergence pattern below matches,
+        # so a script this runner simply cannot drive was being reported as a
+        # parity failure. Ordering the cheap, decisive check first is what keeps
+        # "cannot run it" from masquerading as "the engines disagree".
+        echo "SKIP  $name (not drivable by this runner — run directly)"
+        skip=$((skip + 1))
     elif echo "$out" | grep -qiE "DIVERGE|^FAIL|divergence|mismatch"; then
         # Nonzero AND the script reported a divergence — but only count it as a
         # real parity FAIL if both servers are still alive. A server reaped
