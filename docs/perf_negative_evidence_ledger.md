@@ -24314,3 +24314,83 @@ RETRY PREDICATE: do not re-run either variant. If qj6jn is picked up again, take
 remaining sized slices (the rolling `hval` update, 1,152/key; the budget guard, 808/key),
 and profile the listpack arm to find where the batched form's +1,388 instr/op actually
 came from before assuming any literal-side lever.
+
+--------------------------------------------------------------------------------
+INSTRUMENT AUDIT (frankenredis-z2ce3) — the powersave/frequency correction does NOT reach
+a callgrind instruction count: a 34% MHz swing moves it 0.64%. The noise floor is ~0.6%
+and it comes from TWO-POINT SUBTRACTION, not from the host
+
+Claim class: METHOD
+
+THE CORRECTION THAT PROMPTED THIS. The host runs the `powersave` governor and cores swing
+1429-4292 MHz, so a QUIET window is a DOWNCLOCKED window and low-load timing trades
+contention noise for frequency error. That is correct and important — for WALL-CLOCK and
+throughput instruments. The instruction to audit your own instrument before blaming the
+host is what this row does, and the answer is that my instrument is not the one at risk.
+
+WHY IT CANNOT REACH THIS NUMBER, BY CONSTRUCTION. `scripts/shape_instr_per_op.py` reports
+callgrind `Ir` — instructions RETIRED, counted by a deterministic simulator. Clock rate is
+not an input to that count. A downclocked core executes the same instructions more slowly;
+valgrind reports the same number. Frequency error is a property of instruments that divide
+by TIME, and this one never measures time.
+
+MEASURED ANYWAY, because "by construction" is an argument and not evidence. Six identical
+runs, same ELF, same shape, back to back, at loadavg 33-37 with the governor free-running:
+
+    run   loadavg   mean MHz   Ir(N)       instr/op   dispatch
+     1     36.57      3826     3,715,270    1332.2     20.7%
+     2     35.40      3631     3,717,039    1337.1     20.6%
+     3     35.40      3782     3,720,288    1336.5     20.6%
+     4     34.09      3097     3,714,364    1340.7     20.6%
+     5     33.28      2856     3,715,750    1337.2     20.6%
+     6     33.28      3585     3,718,531    1337.3     20.6%
+
+    MHz swing across the six      2856 -> 3826 = 34.0 pct
+    Ir(N) raw spread               0.159 pct
+    instr/op spread                0.638 pct
+    dispatch share spread          0.1 of one point (20.6-20.7)
+
+The highest-MHz run produced the LOWEST instr/op and the lowest-MHz run landed mid-pack.
+Pearson r(MHz, instr/op) = -0.62 over six points, which is NOT significant at n=6 and I am
+not claiming a correlation of zero — I am claiming the BOUND, which does not depend on the
+sign: whatever the source, a 34 pct frequency swing is contained within 0.64 pct on this
+number. That is the useful statement and it holds however r came out.
+
+WHERE THE 0.64 PCT ACTUALLY COMES FROM, AND IT IS MY OWN METHOD. The RAW counts reproduce
+to 0.159 pct, four times tighter than the derived figure. Two-point subtraction is why:
+instr/op = (Ir(2N) - Ir(N)) / N, so a 0.16 pct wobble on two ~3.7M and ~6.4M numbers
+becomes ~0.2-0.4 pct on a ~2.67M difference. The subtraction that removes startup cost
+AMPLIFIES the residual nondeterminism. The remaining raw 0.16 pct is the server genuinely
+doing slightly different work run to run — cron ticks, epoll wakeups, allocator state — not
+measurement error.
+
+    THE INSTRUMENT'S NOISE FLOOR IS ~0.6 PCT ON instr/op, ~0.16 PCT ON RAW Ir, AND ~0.1
+    POINT ON DISPATCH SHARE. Effects above ~2 pct are safe to claim at ANY load on this
+    host. Effects below ~1 pct need more samples or the raw counts, NOT a quieter window.
+
+WHAT THIS CHANGES ABOUT MY OWN PAST ROWS. It vindicates the caution but not the reasoning.
+The option-form tax I banked at +0.58 pct was flagged as inside its own spread and carried
+only by dispatch share — correct, and now quantified: +0.58 pct IS the noise floor. The
+19.3 pct SET arm move and the +52.5 pct sort-key rejection are 30x and 80x the floor and
+were never at risk. But I also attached load caveats to instruction-count rows and deferred
+on load for them, and that was unnecessary: THE DEFERRALS THAT MATTERED WERE THE THROUGHPUT
+ONES. Six deferrals of a balanced-square run were right. Hedging an Ir row on loadavg was
+not.
+
+Stated so it is not over-read: this licenses INSTRUCTION-COUNT rows at any load. It
+licenses nothing about wall clock, cpu-ns/op, throughput or IPC, all of which divide by
+time or cycles and to which the frequency correction applies in full. For those, a stable
+window with both arms inside it remains the requirement, and MHz belongs in the row.
+
+PROVENANCE:
+  ELF sha256           1b1d66cd028dd406fdde74e0dceb968b57558ffb03e9faf77bc439d77c46d87e
+  harness              scripts/shape_instr_per_op.py, N=2000/2N=4000, shape get_control,
+                       six consecutive runs, no other change between them.
+  host                 thinkstation1, 64 cores, /data 281G, no build this turn.
+                       governor `powersave`, 64-core mean MHz recorded per run above.
+  loadavg              33.28 - 36.57 across the six runs; 38.43/50.77/40.43 at the start.
+
+RETRY PREDICATE: do NOT re-run this to confirm. DO re-run it if the harness ever stops
+using callgrind — the whole argument rests on Ir being simulated rather than sampled, and
+a switch to `perf stat` would make every word of it false, because hardware counters are
+sampled on real cores at real frequencies.
