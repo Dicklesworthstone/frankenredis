@@ -20113,3 +20113,68 @@ four runs is settled. The next step is CODE: floor entries for ZADD arities 4, 5
 with arity 6 chaining its two parsers, and each claim verified against the parser
 before landing. expire_nx_opt (1.024x, 51.0 pct dispatch) and bitcount_range (0.906x,
 46.4 pct) are the next two to attribute and were NOT investigated here.
+
+## MEASURED (frankenredis-iqicb) — chunked decimal division: the worst route goes 0.9528x -> 0.7792x
+
+Claim class: COMPETITIVE — fr and the vendored Redis 7.2.4 binary in the SAME invocation.
+Same provenance limitation as the rows above (valgrind hosts the target, so no
+self-reported ELF SHA; ABBA repeats, not a bootstrap CI).
+
+The previous row named `BigNat::div_small` as the target at 18.39 pct of the op
+(~1764 instr/op), the single dominant frame. This takes it.
+
+    run  shape                   fr instr/op   redis 7.2.4   fr/redis
+    A    incrbyfloat_nondyadic       7468.2        9584.3     0.7792x
+    B    incrbyfloat_same            4460.0        8884.4     0.5020x   <- CONTROL
+    B    incrbyfloat_same            4459.9        8955.2     0.4980x   <- CONTROL
+    A    incrbyfloat_nondyadic       7372.7        9581.7     0.7695x
+
+    worst bound   nondyadic  0.9528x -> 0.7792x    fr instr/op ~9024 -> ~7420
+    control       dyadic     0.4903x -> 0.5020x    fr instr/op ~4437 -> ~4460 (flat)
+
+~1604 instr/op removed, 17.8 pct of the op, moving the route from near-parity to 22 pct
+ahead of the incumbent.
+
+THE LEVER: `for _ in 0..m { div_small(10) }` became ceil(m/9) passes of `div_small(10^k)`.
+`div_small` walks EVERY LIMB on each call, and the guard scaling above makes the
+coefficient 4*m + 130 bits wide, so the old form did m full traversals -- SIXTEEN of them
+for `0.3333333333333333`. 10^9 fits in u32, so nine steps collapse into one pass and m=16
+becomes two.
+
+STICKY IS PRESERVED EXACTLY, which was the only thing that could make this unsound.
+Sticky means "some discarded digit was non-zero". Nine sequential divisions by 10 set it
+iff any intermediate remainder was non-zero, and `x mod 10^9 == 0` holds iff 10^9 divides
+x, iff all nine were exact. **The OR over steps equals the single combined test**, so the
+chunked remainder flags exactly the inputs the per-digit loop flagged.
+
+PREDICTION MATCHED, which is the mechanism evidence. div_small was ~1764 instr/op across
+16 passes; going to 2 passes should remove ~7/8 of it, ~1544. Measured ~1604. The
+CONTROL did not move -- the dyadic path never reaches the division loop at all, so a
+change there would have meant the chunking altered results rather than costs.
+
+A/A NULL, from the ABBA repeats in this one invocation:
+
+    fr arm      nondyadic  7468.2 -> 7372.7   -1.28%
+                dyadic     4460.0 -> 4459.9   -0.002%  <- essentially exact
+    redis arm   nondyadic  9584.3 -> 9581.7   -0.03%
+                dyadic     8884.4 -> 8955.2   +0.80%
+    ratio       nondyadic  0.7792 -> 0.7695  1.25%  |  dyadic  0.5020 -> 0.4980  0.80%
+
+The 17.8 pct movement clears the 1.25 pct spread by fourteen times.
+
+WHAT IS NOW THE WORST RATIO: this shape is still it, but only just -- 0.7792x against
+del_1_missing's 0.7653x, and the two are within each other's spreads. The INCRBYFLOAT
+route is no longer an outlier.
+
+EXECUTABLE IDENTITIES, full 64-hex (computed post-run, see limitation above):
+  candidate  `b526caa0537587de82334d59b6e1bf4a33f97ce2f2e7c9da9685383c5edd1ba2`
+  incumbent  `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+  tests      fr-store 913 passed, 0 failed; incrbyfloat 14 passed; long_double 1 passed;
+             the three exact-fast-path tests passed.
+
+Campaign output: yes — takes the dominant frame on the worst route with an exactness
+argument rather than an approximation.
+
+RETRY PREDICATE: re-profile before choosing the next target here. div_small was 18.39 pct
+across 16 passes and is now 2, so the profile has certainly reordered and the previous
+frame ranking is stale.

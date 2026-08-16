@@ -39057,11 +39057,32 @@ fn parse_long_double(bytes: &[u8]) -> Option<IntegerLongDouble> {
         let m = (-decimal_exp) as usize;
         let guard = 4 * m + 130;
         coefficient.shl_bits(guard);
+        // (frankenredis-iqicb) Divide by 10^m in ceil(m/9) passes, not m passes.
+        //
+        // This loop was `for _ in 0..m { div_small(10) }`, and `div_small` walks EVERY
+        // LIMB of the coefficient on each call. With the guard scaling above the
+        // coefficient is 4*m + 130 bits wide, so the old form did m full traversals --
+        // 16 of them for `0.3333333333333333`. Measured, div_small was 18.39 pct of a
+        // non-dyadic INCRBYFLOAT (~1764 instr/op), the single dominant frame.
+        //
+        // 10^9 = 1_000_000_000 fits in u32, so nine steps collapse into one pass and
+        // m = 16 becomes two passes instead of sixteen.
+        //
+        // THE STICKY FLAG IS PRESERVED EXACTLY, which is the only thing that could make
+        // this unsound. Sticky means "some discarded digit was non-zero". Dividing nine
+        // times by 10 sets it iff any intermediate remainder was non-zero, and
+        // `x mod 10^9 == 0` holds iff 10^9 divides x, iff all nine of those divisions
+        // were exact. So the chunked remainder is non-zero on exactly the inputs the
+        // per-digit loop flagged -- the OR over steps equals the single combined test.
         let mut sticky = false;
-        for _ in 0..m {
-            if coefficient.div_small(10) != 0 {
+        let mut remaining = m;
+        while remaining > 0 {
+            let step = remaining.min(9);
+            let divisor = 10u32.pow(step as u32);
+            if coefficient.div_small(divisor) != 0 {
                 sticky = true;
             }
+            remaining -= step;
         }
         bignat_to_long_double(negative, &coefficient, -(guard as i32), sticky)
     }
