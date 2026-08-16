@@ -192,14 +192,6 @@ fn write_varint_impl<const FAST: bool>(buf: &mut Vec<u8>, mut n: usize) {
     }
 }
 
-/// Same-binary A/B + byte-identity hook for [`write_varint_impl`].
-#[doc(hidden)]
-#[must_use]
-pub fn bench_write_varint<const FAST: bool>(n: usize) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(10);
-    write_varint_impl::<FAST>(&mut buf, n);
-    buf
-}
 
 fn encode_varint_array(mut n: usize) -> ([u8; 10], usize) {
     let mut buf = [0u8; 10];
@@ -6336,8 +6328,10 @@ mod tests {
         let mut saw_single = 0_u32;
         let mut saw_multi = 0_u32;
         for n in cases {
-            let fast = super::bench_write_varint::<true>(n);
-            let slow = super::bench_write_varint::<false>(n);
+            let mut fast = Vec::with_capacity(10);
+            super::write_varint_impl::<true>(&mut fast, n);
+            let mut slow = Vec::with_capacity(10);
+            super::write_varint_impl::<false>(&mut slow, n);
             assert_eq!(fast, slow, "encoding diverged for {n}");
 
             // And it must still decode back to `n`, so a change making BOTH arms
