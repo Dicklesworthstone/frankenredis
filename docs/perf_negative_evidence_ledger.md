@@ -18441,3 +18441,65 @@ scratchpad/incrbyfloat_exact_fastpath.md). It is a fast path, so the correctness
 obligation is bit-identity with the bignum path on every input it ACCEPTS — declining is
 always safe. Do NOT re-profile to re-confirm these frames; DO re-profile if the parse
 path is restructured.
+
+--------------------------------------------------------------------------------
+ACCEPTED — GEOADD and LPOS COUNT after-numbers, both landed levers that had none
+(frankenredis-tyujv, frankenredis-uu33c)
+
+Same ELF and method as the sinter_2 row above. No build: /data at 43G, one gig over
+the hard stop, existing binary re-run.
+
+CONVENTION: fr instructions per op / redis 7.2.4's. BELOW 1.0 = fr AHEAD.
+
+    shape          before            after (2 runs)      dispatch share
+    geoadd_same    0.7918x (57.9%)   0.3532x  0.3387x    57.9% -> 16.2%
+    lpos_count     0.8927x (32.2%)   0.4201x  0.4109x    32.2% -> 27.2%
+    lpos_rank      0.4311x (15.0%)   0.4534x             20.2%   (context)
+    lpos_base      --                0.5261x             16.4%   (context)
+    get_control    --                0.4181x / 0.4254x   20.6%   (control)
+
+GEOADD is the larger result: 2.29x on the ratio and dispatch share cut by 3.6x. It
+landed in 280383780 (swept there with an unrelated commit message, recorded on the
+bead) and had never been measured. LPOS COUNT is BlackCat's in-arm chaining, also
+landed in 280383780 and explicitly banked with no ratio; 2.15x.
+
+REPEATABILITY, and the asymmetry in it is worth recording:
+  geoadd_same  fr 3696.0 / 3696.1 instr/op -> 0.003 pct
+               ratio 0.3532 / 0.3387       -> 4.1 pct
+  lpos_count   fr 3227.7 / 3217.7 instr/op -> 0.31 pct
+               ratio 0.4201 / 0.4109       -> 2.2 pct
+  ALL the spread is on the INCUMBENT arm; fr's is essentially noiseless. That
+  matches the getset/incrbyfloat row above ("the incumbent arm is the noisier
+  one") and means a ratio's spread is NOT evidence about fr's stability. Claimed
+  movements are 129 pct and 115 pct, far outside either spread. Ir(2N) > Ir(N) on
+  both arms in every run.
+
+RESIDUAL WORTH CHASING, and it is LPOS not GEOADD: lpos_count's dispatch share fell
+only 32.2 -> 27.2 pct while its ratio halved, and it still sits well above its own
+siblings (lpos_rank 20.2 pct, lpos_base 16.4 pct) on the same command. Before the
+fix the count/rank gap was 17.2 points; it is now 7.0. So the chaining removed the
+generic fallthrough but something still costs ~7 points more than the RANK form —
+consistent with COUNT being served by a chained SECOND parser attempt after the
+RANK parser declines, where RANK matches first. Not attributed; do not assume.
+
+GEOADD by contrast is done: 16.2 pct is in the normal band for a front-classified
+route (get_control 20.6 pct, lpos_base 16.4 pct), so there is no dispatch left to
+recover.
+
+PROVENANCE:
+  ELF sha256 (first 16)  51708552264214d1 — same binary as every row above.
+  binary mtime           2026-08-16 10:27:50, after 280383780 (08:24:25), so BOTH
+                         levers are compiled in.
+  tree                   NOT reproducible from HEAD alone (peers' uncommitted WIP).
+  harness                scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines
+                         in the SAME invocation, env -u CARGO_TARGET_DIR.
+  host                   thinkstation1, 64 cores, loadavg ~51 — irrelevant to this
+                         method.
+
+Campaign output: yes — two landed levers move from unmeasured to measured, and the
+LPOS residual is now a located, sized question rather than an assumption.
+
+RETRY PREDICATE: do not re-run GEOADD. DO re-measure lpos_count against lpos_rank
+if anyone takes the 7-point residual, and attribute it before proposing a lever —
+the last three times a share was explained without attribution the mechanism was
+wrong.
