@@ -3140,7 +3140,26 @@ pub fn bench_lzf_compress_table<const HOIST: bool>(
     out_budget: usize,
 ) -> Option<Vec<u8>> {
     LZF_SCRATCH.with(|scratch| {
-        lzf_compress_dispatch::<true, HOIST>(input, out_budget, &mut scratch.borrow_mut())
+        lzf_compress_dispatch::<true, HOIST, true>(input, out_budget, &mut scratch.borrow_mut())
+    })
+}
+
+/// Same-binary A/B hook for the literal-run emission.
+///
+/// `BATCH == false` is production (one `Vec::push` per literal byte); `BATCH == true`
+/// copies a finished literal run out in one `extend_from_slice`. Batching was the
+/// candidate and it LOST on the payload that matters -- see the ledger. The arm is
+/// retained so the measurement can be re-run, not because it is on the live path. A literal run is always the contiguous window `input[ip - lit..ip]`,
+/// so the two arms write the same bytes in the same order and MUST return
+/// byte-identical output — asserted by
+/// `lzf_literal_batching_matches_per_push_arm_byte_for_byte`.
+#[doc(hidden)]
+pub fn bench_lzf_compress_literals<const BATCH: bool>(
+    input: &[u8],
+    out_budget: usize,
+) -> Option<Vec<u8>> {
+    LZF_SCRATCH.with(|scratch| {
+        lzf_compress_dispatch::<true, true, BATCH>(input, out_budget, &mut scratch.borrow_mut())
     })
 }
 
@@ -3394,7 +3413,12 @@ fn lzf_compress_with_scratch<const SIMD: bool>(
     out_budget: usize,
     scratch: &mut LzfScratch,
 ) -> Option<Vec<u8>> {
-    lzf_compress_dispatch::<SIMD, true>(input, out_budget, scratch)
+    // BATCH == false: the per-push literal arm. Batching the literal run into one
+    // `extend_from_slice` was MEASURED SLOWER on the listpack DUMP shape this kernel
+    // actually runs on (+8.1%, 17,226.7 -> 18,614.7 instr/op under callgrind) and is
+    // REJECTED as production; see the negative-evidence ledger. The batched arm is kept
+    // reachable through `bench_lzf_compress_literals` so the rejection stays reproducible.
+    lzf_compress_dispatch::<SIMD, true, false>(input, out_budget, scratch)
 }
 
 /// Choose the match-table representation ONCE per call and hand the compressor a
@@ -3406,7 +3430,7 @@ fn lzf_compress_with_scratch<const SIMD: bool>(
 /// `LzfScratch::{get,set}` — and exists so one binary can measure both arms.
 /// Both arms read and write the same slots in the same order and therefore emit
 /// byte-identical compressed output.
-fn lzf_compress_dispatch<const SIMD: bool, const HOIST: bool>(
+fn lzf_compress_dispatch<const SIMD: bool, const HOIST: bool, const BATCH: bool>(
     input: &[u8],
     out_budget: usize,
     scratch: &mut LzfScratch,
@@ -3423,7 +3447,7 @@ fn lzf_compress_dispatch<const SIMD: bool, const HOIST: bool>(
     if HOIST {
         if scratch.use_packed {
             if let Ok(table) = <&mut [u32; LZF_HSIZE]>::try_from(scratch.packed.as_mut_slice()) {
-                return lzf_compress_core::<SIMD, _>(
+                return lzf_compress_core::<SIMD, BATCH, _>(
                     input,
                     out_budget,
                     &mut LzfPackedTable(table),
@@ -3433,7 +3457,7 @@ fn lzf_compress_dispatch<const SIMD: bool, const HOIST: bool>(
         } else if let Ok(table) =
             <&mut [LzfHashSlot; LZF_HSIZE]>::try_from(scratch.htab.as_mut_slice())
         {
-            return lzf_compress_core::<SIMD, _>(
+            return lzf_compress_core::<SIMD, BATCH, _>(
                 input,
                 out_budget,
                 &mut LzfWideTable(table),
@@ -3441,10 +3465,10 @@ fn lzf_compress_dispatch<const SIMD: bool, const HOIST: bool>(
             );
         }
     }
-    lzf_compress_core::<SIMD, _>(input, out_budget, &mut LzfDynTable(scratch), generation)
+    lzf_compress_core::<SIMD, BATCH, _>(input, out_budget, &mut LzfDynTable(scratch), generation)
 }
 
-fn lzf_compress_core<const SIMD: bool, T: LzfHashTable>(
+fn lzf_compress_core<const SIMD: bool, const BATCH: bool, T: LzfHashTable>(
     input: &[u8],
     out_budget: usize,
     table: &mut T,
@@ -3467,6 +3491,20 @@ fn lzf_compress_core<const SIMD: bool, T: LzfHashTable>(
         return None;
     }
 
+    // BATCH == true defers the literal bytes instead of pushing them one at a time.
+    // A literal run is always a CONTIGUOUS window of the input: a run starts empty and
+    // only ever grows by `ip += 1`, and every event that moves `ip` by more than one
+    // (a match) resets `lit` to 0 first. So at any point the open run is exactly
+    // `input[ip - lit..ip]`, and it can be copied in one `extend_from_slice` when the
+    // run ends (a match, MAX_LIT, or the tail) instead of `lit` separate `Vec::push`
+    // calls, each of which re-tests capacity and re-stores the length.
+    //
+    // `out.len()` no longer tracks the C `op` pointer while a run is open, because the
+    // run's bytes have not been copied yet. Every place that compared `out.len()`
+    // against `out_budget` therefore uses the VIRTUAL length `out.len() + lit`, which
+    // is what `op` would be. That keeps the bail points -- and so the raw-vs-compressed
+    // decision, which is observable in the DUMP payload -- byte-exact with the
+    // per-push arm. (frankenredis-qj6jn slice 2)
     let mut out: Vec<u8> = Vec::with_capacity(out_budget);
     // The table stores ip+1 (0 = unset). Epoch tags make stale slots read as
     // unset, preserving the zero-initialised C table semantics without clearing
@@ -3579,12 +3617,16 @@ fn lzf_compress_core<const SIMD: bool, T: LzfHashTable>(
                 // byte-exact (e.g. "hello world hello world" stays raw). The
                 // inner test implies the outer, so collapse to the inner form.
                 // (frankenredis-wmh2p)
-                if out.len() - usize::from(lit == 0) + 4 >= out_budget {
+                let vlen = if BATCH { out.len() + lit } else { out.len() };
+                if vlen - usize::from(lit == 0) + 4 >= out_budget {
                     return None;
                 }
 
                 // Stop the open literal run (op[-lit-1] = lit-1; op -= !lit).
                 if lit > 0 {
+                    if BATCH {
+                        out.extend_from_slice(&input[ip - lit..ip]);
+                    }
                     out[lit_hdr_pos] = (lit - 1) as u8;
                 } else {
                     out.pop();
@@ -3628,13 +3670,18 @@ fn lzf_compress_core<const SIMD: bool, T: LzfHashTable>(
 
         if !emitted_match {
             // C: if (op >= out_end) return 0;  (before each literal byte)
-            if out.len() >= out_budget {
+            if (if BATCH { out.len() + lit } else { out.len() }) >= out_budget {
                 return None;
             }
-            out.push(input[ip]);
+            if !BATCH {
+                out.push(input[ip]);
+            }
             lit += 1;
             ip += 1;
             if lit == MAX_LIT {
+                if BATCH {
+                    out.extend_from_slice(&input[ip - lit..ip]);
+                }
                 out[lit_hdr_pos] = (lit - 1) as u8;
                 lit = 0;
                 lit_hdr_pos = out.len();
@@ -3646,14 +3693,19 @@ fn lzf_compress_core<const SIMD: bool, T: LzfHashTable>(
     // Tail: drain remaining 0..2 bytes as literals.
     // C: if (op + 3 > out_end) return 0;  -- reserve room for the tail
     // literals and the closing run header before flushing. (frankenredis-wmh2p)
-    if out.len() + 3 > out_budget {
+    if (if BATCH { out.len() + lit } else { out.len() }) + 3 > out_budget {
         return None;
     }
     while ip < in_len {
-        out.push(input[ip]);
+        if !BATCH {
+            out.push(input[ip]);
+        }
         lit += 1;
         ip += 1;
         if lit == MAX_LIT {
+            if BATCH {
+                out.extend_from_slice(&input[ip - lit..ip]);
+            }
             out[lit_hdr_pos] = (lit - 1) as u8;
             lit = 0;
             lit_hdr_pos = out.len();
@@ -3663,6 +3715,9 @@ fn lzf_compress_core<const SIMD: bool, T: LzfHashTable>(
 
     // Finalize the trailing literal run.
     if lit > 0 {
+        if BATCH {
+            out.extend_from_slice(&input[ip - lit..ip]);
+        }
         out[lit_hdr_pos] = (lit - 1) as u8;
     } else {
         out.pop();
@@ -6986,6 +7041,103 @@ mod tests {
                     "SIMD match-tail routing diverged (len={}, budget={budget})",
                     p.len()
                 );
+            }
+        }
+    }
+
+    /// Build the shared LZF equivalence corpus: pure runs, listpack-shaped RDB
+    /// payloads, an incompressible pseudo-random block (the literal path every
+    /// position), and the MAX_LIT / MAX_REF length boundaries.
+    fn lzf_equivalence_payloads() -> Vec<Vec<u8>> {
+        let mut payloads: Vec<Vec<u8>> = Vec::new();
+        payloads.push(vec![b'x'; 8192]);
+        payloads.push(vec![0u8; 4096]);
+        {
+            let mut p = Vec::new();
+            for i in 0..40u32 {
+                for element in [format!("f{i}"), format!("v{i}")] {
+                    p.push(0x80 | u8::try_from(element.len()).expect("short element"));
+                    p.extend_from_slice(element.as_bytes());
+                    p.push(u8::try_from(element.len() + 1).expect("short element"));
+                }
+            }
+            payloads.push(p);
+        }
+        {
+            let mut s: u32 = 0xC0FF_EE00;
+            let mut p = Vec::with_capacity(3000);
+            for _ in 0..3000 {
+                s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                p.push((s >> 24) as u8);
+            }
+            payloads.push(p);
+        }
+        {
+            // Alternating literal runs and long matches, so runs END on a match
+            // rather than on MAX_LIT — the flush site the per-push arm never had.
+            let mut p = Vec::new();
+            for i in 0..64u32 {
+                p.extend_from_slice(format!("{i:04}-unique-literal-prefix-").as_bytes());
+                p.extend_from_slice(&[b'Z'; 300]);
+            }
+            payloads.push(p);
+        }
+        for n in [1usize, 2, 3, 4, 31, 32, 33, 63, 64, 65, 263, 264, 265] {
+            payloads.push(vec![b'q'; n]);
+        }
+        // Exactly-MAX_LIT literal runs: a 32-byte incompressible block flushes on
+        // the MAX_LIT boundary, which is the other flush site.
+        for n in [32usize, 96, 128] {
+            let mut p = Vec::with_capacity(n);
+            for i in 0..n {
+                p.push((i as u8).wrapping_mul(37).wrapping_add(11));
+            }
+            payloads.push(p);
+        }
+        payloads
+    }
+
+    #[test]
+    fn lzf_literal_batching_matches_per_push_arm_byte_for_byte() {
+        // Production copies a literal run out in ONE `extend_from_slice` when the
+        // run ends (`bench_lzf_compress_literals::<true>`); the prior path pushed
+        // one byte at a time (`::<false>`). The batched arm no longer keeps
+        // `out.len()` equal to the C `op` pointer while a run is open, so every
+        // budget comparison had to switch to the virtual length `out.len() + lit`.
+        //
+        // That makes the BAIL POINT the thing most likely to break, and a bail is
+        // not a cosmetic difference: `None` is what makes DUMP fall back to the raw
+        // encoding, so an off-by-one here changes the payload on the wire. A few
+        // fixed budgets would miss it, so the budget is swept DENSELY across the
+        // whole interesting interval for every payload -- an off-by-one in the
+        // virtual length can then only survive if it is wrong at no budget at all.
+        for p in lzf_equivalence_payloads() {
+            let hi = p.len() + 8;
+            for budget in 0..=hi {
+                let per_push = super::bench_lzf_compress_literals::<false>(&p, budget);
+                let batched = super::bench_lzf_compress_literals::<true>(&p, budget);
+                assert_eq!(
+                    per_push,
+                    batched,
+                    "literal-run batching diverged (len={}, budget={budget})",
+                    p.len()
+                );
+                // Behavioural check, not just arm-vs-arm: whatever the batched arm
+                // emits must still decode back to the input. Two arms that agree on
+                // the same wrong bytes would satisfy the equality above alone.
+                if let Some(encoded) = batched {
+                    assert!(
+                        encoded.len() <= budget,
+                        "batched arm overran its budget (len={}, budget={budget})",
+                        p.len()
+                    );
+                    assert_eq!(
+                        super::lzf_decompress(&encoded, p.len()).as_deref(),
+                        Some(p.as_slice()),
+                        "batched output did not round-trip (len={}, budget={budget})",
+                        p.len()
+                    );
+                }
             }
         }
     }
