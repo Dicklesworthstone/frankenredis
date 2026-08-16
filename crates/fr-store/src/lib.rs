@@ -36603,38 +36603,22 @@ fn zset_from_flat_entries(entries: Vec<Vec<u8>>) -> Result<SortedSet, StoreError
 /// > max_listpack_value)` — member lengths only, scores never participate — so this
 /// loop reports `max(member.len())` and the caller skips that re-walk.
 fn zset_from_listpack_spans(listpack: &[u8]) -> Result<(SortedSet, usize), StoreError> {
-    let spans = fr_persist::listpack::decode_value_spans(listpack)
+    // (frankenredis-w08xv) The zset-specific decode never renders a score to
+    // decimal. The general `decode_value_spans` has to, because its callers are
+    // byte-oriented, and this path then parsed that text straight back to f64 —
+    // both halves of a round trip. Members still render, since an
+    // integer-encoded member's Redis-observable form IS its decimal bytes. An
+    // odd element count comes back as a decode error rather than being checked
+    // here.
+    let decoded = fr_persist::listpack::decode_zset_spans_and_scores(listpack)
         .map_err(|_| StoreError::InvalidDumpPayload)?;
-    if !spans.len().is_multiple_of(2) {
-        return Err(StoreError::InvalidDumpPayload);
-    }
 
-    let mut pairs: Vec<(&[u8], f64)> = Vec::with_capacity(spans.len() / 2);
+    let mut pairs: Vec<(&[u8], f64)> = Vec::with_capacity(decoded.len());
     let mut max_member_len = 0_usize;
-    let (span_pairs, _) = spans.as_chunks::<2>();
-    for pair in span_pairs {
-        let member = pair[0].as_bytes(listpack);
+    for (member_span, score) in &decoded {
+        let member = member_span.as_bytes(listpack);
         max_member_len = max_member_len.max(member.len());
-        // (frankenredis-w08xv) An integer-encoded score arrives as a number and
-        // the decoder renders it to decimal for the byte-oriented consumers.
-        // Taking that number directly skips a `str::parse::<f64>` of text this
-        // process just produced — the second half of a render-then-reparse round
-        // trip. String-encoded scores still parse, which is the only path that
-        // can produce a NaN, so the NaN rejection stays on exactly that branch.
-        let score = match pair[1].as_i64() {
-            Some(value) => value as f64,
-            None => {
-                let parsed = std::str::from_utf8(pair[1].as_bytes(listpack))
-                    .ok()
-                    .and_then(|raw| raw.parse::<f64>().ok())
-                    .ok_or(StoreError::InvalidDumpPayload)?;
-                if parsed.is_nan() {
-                    return Err(StoreError::InvalidDumpPayload);
-                }
-                parsed
-            }
-        };
-        pairs.push((member, score));
+        pairs.push((member, *score));
     }
 
     {

@@ -956,6 +956,86 @@ pub fn bench_decode_value_spans<const PRESIZE: bool>(
     decode_value_spans_impl::<PRESIZE>(data)
 }
 
+/// Decode a sorted-set listpack into (member span, score) pairs without ever
+/// rendering a score to decimal. (frankenredis-w08xv)
+///
+/// A zset listpack alternates member, score. `decode_value_spans` must render an
+/// integer-encoded entry to its canonical decimal bytes, because its callers are
+/// byte-oriented and cannot know the entry was an integer. On this path the
+/// SCORE is wanted as a number, so that rendering is the first half of a round
+/// trip whose second half — parsing the text back to `f64` — was removed
+/// separately. Rendering scores measured 13.1% of a 128-member zset RESTORE
+/// (`ListpackValueSpan::integer` plus `write_u64_digits`) under callgrind.
+///
+/// MEMBERS still render, because an integer-encoded member is a legitimate
+/// member whose Redis-observable form IS its decimal bytes. Only the score half
+/// skips it, which is why this is a separate function rather than a flag on the
+/// general decoder: a span that silently carried no bytes would be a correctness
+/// hazard for any caller that later asked for them.
+pub fn decode_zset_spans_and_scores(
+    data: &[u8],
+) -> Result<Vec<(ListpackValueSpan, f64)>, ListpackError> {
+    let (total_bytes, num_elements) = parse_header(data)?;
+    let end = (total_bytes as usize) - 1;
+    let mut cursor = LISTPACK_HEADER_SIZE;
+    let mut pairs = if num_elements != LISTPACK_HDR_NUMELE_UNKNOWN {
+        Vec::with_capacity(usize::from(num_elements) / 2)
+    } else {
+        Vec::new()
+    };
+    let mut pending: Option<ListpackValueSpan> = None;
+    let mut count = 0usize;
+    while cursor < end {
+        let (raw, consumed) = decode_entry_raw(data, cursor)?;
+        count += 1;
+        cursor = cursor
+            .checked_add(consumed)
+            .ok_or(ListpackError::TruncatedEntry)?;
+        if cursor > end {
+            return Err(ListpackError::TruncatedEntry);
+        }
+        match pending.take() {
+            // Member half: rendered exactly as the general decoder would.
+            None => {
+                pending = Some(match raw {
+                    RawListpackValue::String(range) => ListpackValueSpan::String(range),
+                    RawListpackValue::Integer(value) => ListpackValueSpan::integer(value),
+                });
+            }
+            Some(member) => {
+                // Score half: an integer-encoded score is taken as a number and
+                // never rendered. A string-encoded one is parsed, and that is the
+                // only branch that can produce NaN.
+                let score = match raw {
+                    #[allow(clippy::cast_precision_loss)]
+                    RawListpackValue::Integer(value) => value as f64,
+                    RawListpackValue::String(range) => {
+                        let text = std::str::from_utf8(&data[range])
+                            .map_err(|_| ListpackError::TruncatedEntry)?;
+                        let parsed: f64 =
+                            text.parse().map_err(|_| ListpackError::TruncatedEntry)?;
+                        if parsed.is_nan() {
+                            return Err(ListpackError::TruncatedEntry);
+                        }
+                        parsed
+                    }
+                };
+                pairs.push((member, score));
+            }
+        }
+    }
+    if cursor != end {
+        return Err(ListpackError::MissingTerminator);
+    }
+    if pending.is_some() {
+        return Err(ListpackError::ElementCountMismatch);
+    }
+    if num_elements != LISTPACK_HDR_NUMELE_UNKNOWN && count != usize::from(num_elements) {
+        return Err(ListpackError::ElementCountMismatch);
+    }
+    Ok(pairs)
+}
+
 fn decode_value_spans_impl<const PRESIZE: bool>(
     data: &[u8],
 ) -> Result<Vec<ListpackValueSpan>, ListpackError> {
@@ -1443,6 +1523,67 @@ mod tests {
         let spans = decode_value_spans(&lp).expect("decodes");
         assert_eq!(spans[0].as_i64(), None, "string spans have no integer");
         assert_eq!(spans[0].as_bytes(&lp), b"1.5");
+    }
+
+    /// (frankenredis-w08xv) The zset decode must agree with the general one on
+    /// every observable: the member bytes, the score value, and the rejections.
+    /// It differs only in NOT rendering scores, so this compares it against
+    /// `decode_value_spans` rather than against hand-written expectations —
+    /// the general decoder is the reference the whole RESTORE path already uses.
+    #[test]
+    fn zset_span_decode_agrees_with_the_general_decoder() {
+        // Integer-encoded scores (the path that skips rendering), a
+        // string-encoded fractional score, and an integer-encoded MEMBER whose
+        // decimal bytes must still be produced.
+        let lp = assemble(&[
+            &entry_6bit_str(b"alpha"),
+            &entry_7bit_uint(7),
+            &entry_7bit_uint(42),
+            &entry_6bit_str(b"1.5"),
+            &entry_6bit_str(b"omega"),
+            &entry_13bit_int(-9),
+        ]);
+
+        let general = decode_value_spans(&lp).expect("general decode");
+        let zset = decode_zset_spans_and_scores(&lp).expect("zset decode");
+        assert_eq!(zset.len() * 2, general.len(), "one pair per two entries");
+
+        for (i, (member, score)) in zset.iter().enumerate() {
+            assert_eq!(
+                member.as_bytes(&lp),
+                general[i * 2].as_bytes(&lp),
+                "member {i} must match the general decoder byte for byte"
+            );
+            let reference: f64 = std::str::from_utf8(general[i * 2 + 1].as_bytes(&lp))
+                .expect("score text is ascii")
+                .parse()
+                .expect("score text parses");
+            assert_eq!(
+                score.to_bits(),
+                reference.to_bits(),
+                "score {i} must equal what parsing the rendered decimal gives"
+            );
+        }
+        assert_eq!(zset[0].1, 7.0);
+        assert_eq!(zset[1].1, 1.5);
+        assert_eq!(zset[2].1, -9.0);
+        assert_eq!(
+            zset[1].0.as_bytes(&lp),
+            b"42",
+            "integer members still render"
+        );
+
+        // An ODD element count is not a valid zset listpack and must be rejected
+        // rather than silently dropping the dangling member.
+        let odd = assemble(&[
+            &entry_6bit_str(b"alpha"),
+            &entry_7bit_uint(7),
+            &entry_6bit_str(b"x"),
+        ]);
+        assert!(
+            decode_zset_spans_and_scores(&odd).is_err(),
+            "odd element count must be rejected"
+        );
     }
 
     #[test]
