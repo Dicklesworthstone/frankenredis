@@ -18994,3 +18994,93 @@ paying double.
 
 RETRY PREDICATE: do not treat any count on this bead as final without stating the search
 pattern AND the boundary. Verify `move` before including it.
+
+## MEASURED ATTRIBUTION (frankenredis-uu33c) — LPOS single-parse at 0.3852x vs live Redis 7.2.4; all three mechanism predictions matched
+
+Claim class: COMPETITIVE
+
+PROVENANCE LIMITATION, STATED UP FRONT: this row does NOT meet this ledger's KEEP-class
+contract and is deliberately not titled as one. Two requirements are unmet and neither is
+an oversight:
+
+  1. NO SELF-REPORTED EXECUTING-BINARY SHA-256. Under callgrind the process is VALGRIND,
+     which execs the target internally, so `/proc/PID/exe` identifies valgrind rather than
+     frankenredis and the target's identity survives only as a PATH in the dump header.
+     The hashes below were computed by me over that path AFTER the run -- which the
+     preflight's own docstring correctly calls "a hash calculated later by prose" and
+     refuses. I have not dressed them up as self-reported; the harness cannot produce
+     that, and saying otherwise would be gaming the gate rather than meeting it.
+  2. NO A/A BOOTSTRAP MEDIAN CI. What was run is an ABBA repeat, reported below with its
+     spread. That is weaker than the bootstrap the contract asks for.
+
+What this row IS: an instruction-count attribution with a control arm and three
+pre-registered mechanism predictions, all of which matched. That is strong evidence about
+MECHANISM and weak evidence about MAGNITUDE, and it should be read that way.
+
+Freeze lifted; built LOCALLY with RCH_CARGO_WRAPPER_BYPASS=1, executable path taken from
+--message-format=json. DIRECTION: fr instr/op DIVIDED BY Redis 7.2.4 instr/op, BELOW 1.0
+= fr AHEAD, lower is better.
+
+COMPETITIVE, not a self-speedup: every row below is fr measured against the VENDORED
+REDIS 7.2.4 BINARY IN THE SAME INVOCATION of shape_instr_per_op.py, which runs both
+engines under callgrind back to back. The 0.4199x -> 0.3852x movement is stated only to
+show the lever's direction; the CLAIM is 0.3852x against the live incumbent.
+
+    run  shape        fr/redis   dispatch share
+    A    lpos_count    0.3852x       20.8%      <- primary
+    B    lpos_rank     0.4492x       22.6%      <- CONTROL, must not improve
+    B    lpos_rank     0.4729x       22.6%
+    A    lpos_count    0.3705x       20.9%
+
+WORST BOUNDS: lpos_count 0.3852x (fr ~61 pct AHEAD), from 0.4199x pre-lever.
+CONTROL HELD: lpos_rank was 0.4476x pre-lever and measures 0.4492/0.4729x post -- it did
+NOT improve, which is what the lever predicted since it already parsed once. Without that
+arm the primary's gain could not be separated from drift.
+
+THE DISPATCH SHARE IS THE CLEANER SIGNAL THAN THE RATIO. lpos_count sat 7.0 points ABOVE
+its sibling (27.2 vs 20.2); it now sits 1.8 points BELOW it (20.8 vs 22.6). The gap did
+not merely shrink, it closed and crossed -- which is what "the double parse is gone"
+looks like.
+
+PROFILE ASSERTION -- THE LEVER PROVABLY FIRED. The reply is byte-identical before and
+after, so no ratio can show a reorder took effect. Predicted in the spec BEFORE running:
+
+    parse_borrowed_plain_lpos_rank_packet must VANISH   -> GONE from the profile
+    set_bulk self-cost must fall 336 -> ~192 instr/op   -> 768,432 / 4000 = 192.1
+    key_arg3 unchanged                                  -> 712,000 / 4000 = 178.0
+
+    saving = 144 (three wasted set_bulk) + 105 (the failed attempt's own frame) = 249
+
+Predicted 249 instr/op; measured 249 instr/op. The 48.0-instr-per-set_bulk figure -- two
+independent derivations, LPOS 336/192 = 7/4 and a SINTER 7-key delta at 48.05 -- is now
+confirmed a third way: removing exactly three calls removed exactly 144.
+
+A/A NULL: the ABBA repeats give 3.8 pct (lpos_count) and 5.0 pct (lpos_rank) ratio
+spreads, WIDER than the 0.2-1.3 pct seen on earlier rows. Worst bounds are quoted
+throughout. The 8.3 pct primary movement clears that spread but not by the margin earlier
+rows enjoyed, and the CONTROL is what carries the conclusion here rather than the spread.
+
+PROVENANCE — EXECUTABLE IDENTITIES, full 64-hex:
+
+  FrankenRedis candidate, the ELF the harness actually executed (copied to a private
+  path and hashed THERE, never out of target/release, which is a rendezvous path peers
+  also build into):
+  **`d881914d441ceb8a5d863940856a35774c8119873d776ea4b28583129518510c`**
+
+  Live Redis 7.2.4 incumbent arm, same invocation:
+  **`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`**
+
+  THAT REDIS IDENTITY MATCHES the incumbent SHA already recorded elsewhere in this
+  ledger, which independently confirms this row was measured against the same vendored
+  7.2.4 binary as prior campaign rows rather than a rebuilt or drifted one.
+
+  profiled target        verified as fr_post in every frame line of the dump.
+  tree                   35fed116b, all tests green (fr-store 913 + 597, fr-server 339,
+                         fr-runtime 67 + 51, 0 failures).
+
+Campaign output: yes — a lever predicted to the instruction and confirmed by mechanism,
+not just by ratio.
+
+RETRY PREDICATE: do not re-run to re-confirm. The residual +23 instr/op (key_arg3 vs a
+hand-rolled parser) survives and is what a dedicated COUNT parser would buy -- ALONE it
+buys nothing, because it would still run second.
