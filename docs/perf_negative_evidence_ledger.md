@@ -24394,3 +24394,74 @@ RETRY PREDICATE: do NOT re-run this to confirm. DO re-run it if the harness ever
 using callgrind — the whole argument rests on Ir being simulated rather than sampled, and
 a switch to `perf stat` would make every word of it false, because hardware counters are
 sampled on real cores at real frequencies.
+
+## MEASURED (frankenredis-qj6jn) — the LZF batching regression is ATTRIBUTED: 49 memcpy calls per op averaging 7.7 BYTES each, and the instrument reproduced to 0.0 instr/op across a 44-point loadavg swing
+
+Claim class: METHOD + ROOT CAUSE. Closes the retry predicate left open by the slice-2
+rejection row above, which said to profile the listpack arm before trying any other
+literal-side lever.
+
+PROVENANCE, per arm, both arms in the SAME window and back to back:
+
+    arm     loadavg   mean MHz at start   mean MHz at end
+    push      24.39                3373              2873
+    batch     24.39                2861              3942
+
+CPU MHz is recorded because the governor is free-running here, NOT because it corrects
+anything: callgrind Ir is a retired-instruction count from a deterministic simulator and
+clock rate is not an input to it. Note the two arms happened to run at materially
+DIFFERENT frequencies (2861 vs 3373 MHz at start) -- which is exactly the condition that
+would corrupt a wall-clock A/B, and it did not move this one by a single instruction.
+
+INSTRUMENT AUDIT, BY REPRODUCTION RATHER THAN BY ARGUMENT. The slice-2 row measured the
+listpack delta as +1,388.0 instr/op by two-point slope (reps 1000 vs 5000) at loadavg 68.
+This run measured it as +1,388.0 instr/op by whole-run attribution (reps 4000) at loadavg
+24.4, on a different build of the same source. Two different methods, a 44-point loadavg
+swing, and a ~500 MHz frequency difference between arms: identical to the tenth of an
+instruction. The instrument is not the thing at risk on this host.
+
+    delta(batch-push)          push          batch   function
+           +2,124,531    63,987,993     66,112,524   lzf_compress_dispatch (self)
+           +3,430,322             0      3,430,322   __memcpy_avx_unaligned_erms
+           +5,552,005    69,320,829     74,872,834   TOTAL  (= +1,388.0 instr/op)
+
+ROOT CAUSE, AND IT IS NOT WHAT THE SLICE-2 ROW GUESSED:
+
+    memcpy calls   push 0.10/op      batch 49.10/op
+    memcpy cost    17.5 Ir per call
+    copy size      380 input bytes / 49.1 calls = 7.7 BYTES PER COPY
+
+The batched arm issues FORTY-NINE library calls per compression to copy an average of
+7.7 bytes each. The split is 857.6 instr/op in memcpy (62%) and 530.4 instr/op inside the
+compressor (38%) -- and that second half is the surprise: the compressor got MORE
+expensive by 530 instr/op even though it no longer does the per-byte stores at all. Doing
+strictly less per-byte work and costing more is a code-generation effect (the added
+virtual-length arithmetic and the `&input[ip - lit..ip]` slice construction in the hot
+loop), not an algorithmic one.
+
+WHY THE >= 16 THRESHOLD VARIANT CHANGED NOTHING, now explained. The slice-2 row inferred
+from "threshold does nothing" that the runs must already be >= 16 bytes. That inference
+was WRONG and this measurement refutes it: the runs average 7.7 bytes, so the threshold
+was routing most of them to the push loop. It changed nothing because at that size the two
+paths COST THE SAME -- a 17.5-instruction memcpy call versus roughly 7.7 pushes at ~2.5
+instructions each. There was never a threshold that could win.
+
+THE STRUCTURAL REASON, and the generalisation worth keeping. `MAX_LIT` is `1 << 5`, so an
+LZF literal run can NEVER exceed 32 bytes. Bulk-copying a run therefore has a hard ceiling
+of 32 bytes per call, and whether it pays depends entirely on whether runs sit AT that cap
+or well under it:
+
+    incompressible input   literal at every position, runs pile up to the 32-byte cap,
+                           ~94 calls for 3000 bytes -> batching WINS (0.846x)
+    compressible input     frequent matches cut runs short (7.7 B here) -> batching LOSES
+
+So the slice-2 result is not "batching is slower", it is **batching is a function of run
+length, and compressible payloads structurally cannot supply long runs**. The listpack
+DUMP shape is compressible by construction -- that is why it is being compressed at all.
+
+RETRY PREDICATE: the literal-side lever is CLOSED, and not merely rejected -- no threshold,
+no chunk size and no bulk-copy primitive can win against 7.7-byte runs. The 530 instr/op
+of code-generation cost is the only part still worth anything, and only as a warning: on
+this kernel, adding arithmetic to the hot loop cost more than removing a per-byte store
+saved. Remaining qj6jn slices are unchanged (rolling `hval` 1,152/key; budget guard
+808/key), and both are inner-loop changes, so size them against that 530 before starting.
