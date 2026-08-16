@@ -75,6 +75,14 @@ SHAPES = {
     "pttl": (["SET bb abcdefghijklmnop", "PEXPIRE bb 900000000"], ["PTTL", "bb"]),
     "expiretime": (["SET kk vvvvvvvvvvvvvvvv", "EXPIREAT kk 4102444800"],
                    ["EXPIRETIME", "kk"]),
+    # (frankenredis-o3t0q) SECOND control, and it exists to falsify the first.
+    # get_control's keyspace has no TTLs at all, so fr's active-expire cycle has
+    # nothing to scan; the pttl shape must plant a volatile key, and
+    # run_active_expire_cycle showed up at 3.99% of PTTL. Reading a key that HAS a
+    # TTL separates "the TTL read is expensive" from "a volatile key in the
+    # keyspace is expensive", which the first control cannot do.
+    "get_volatile_control": (
+        ["SET vv abcdefghijklmnop", "PEXPIRE vv 900000000"], ["GET", "vv"]),
     # The control: a route none of the above levers touch.
     "get_control": (["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
 }
