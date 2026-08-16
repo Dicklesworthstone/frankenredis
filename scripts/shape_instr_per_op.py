@@ -352,6 +352,12 @@ SHAPES = {
     # the sorted set never changes size. Seeding only "z 1 a" would make the first op
     # insert "b" and the rest update, averaging two paths into one figure.
     "zadd_2pair": (["ZADD z 1 a 2 b"], ["ZADD", "z", "1", "a", "2", "b"]),
+    # (frankenredis-p98mw) ZRANK at the arity that was ALREADY classified (3) and the
+    # WITHSCORE form at arity 4 that was not, so the pair differs only by the option.
+    # Both are pure reads of an existing member, so every op is identical and the 2N run
+    # does not diverge from the N run.
+    "zrank_base": (["ZADD zk 1 m"], ["ZRANK", "zk", "m"]),
+    "zrank_withscore": (["ZADD zk 1 m"], ["ZRANK", "zk", "m", "WITHSCORE"]),
     "zadd_xx_opt": (["ZADD z 1 a"], ["ZADD", "z", "XX", "1", "a"]),
     "sintercard_base": (["SADD s1 m1 m2 m3", "SADD s2 m2 m3 m4"],
                         ["SINTERCARD", "2", "s1", "s2"]),

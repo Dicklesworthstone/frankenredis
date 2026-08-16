@@ -22817,3 +22817,149 @@ RETRY PREDICATE: do NOT attempt the expire_nx throughput arm a fourth time on a
 1-minute-loadavg trigger. If it is attempted again, gate on the 15-minute average below
 ~10, record loadavg before AND after, and abandon the run if the after-reading has
 risen. Otherwise quote the instruction result and name its unit.
+
+## MEASURED (frankenredis-p98mw) — ZRANK WITHSCORE certifies at 0.5717x / 22.3 pct share; its DELTA is unrecoverable because the classification preceded the shape
+
+Claim class: COMPETITIVE — fr and the vendored Redis 7.2.4 binary in the SAME invocation.
+Same provenance limitation as the rows above (valgrind hosts the target, so no
+self-reported ELF SHA; ABBA repeats, not a bootstrap CI).
+
+    run  shape             fr instr/op   redis 7.2.4   fr/redis   share   loadavg
+    A    zrank_withscore       2510.5        4674.0     0.5371x   22.3%    38.10
+    B    zrank_base            1913.4        3713.9     0.5152x   19.4%    35.93   <- CONTROL
+    B    zrank_base            1926.5        3970.3     0.4852x   19.3%    39.14   <- CONTROL
+    A    zrank_withscore       2545.3        4452.1     0.5717x   22.2%    39.14
+
+WHAT IS CERTIFIED: the arity-4 claim is HONOURED. Dispatch share is 22.2-22.3 pct, inside
+the front-classified band, against its already-classified arity-3 sibling at 19.3-19.4 pct.
+Worst bound 0.5717x, comfortably ahead of the incumbent. The lever routes the shape as
+intended.
+
+**WHAT CANNOT BE CERTIFIED, AND IT IS MY OWN PROCESS ERROR: THE DELTA.** No ZRANK shape
+existed before this run, so there is no pre-lever figure and there never can be one on this
+binary. I landed the classification in 47a307984 and wrote the shape afterwards —
+**violating the retry predicate I have written into four consecutive rows: "write the N+1
+shape FIRST".** That predicate existed because TOUCH and MSETNX were invisible until a
+shape existed; I applied it to finding defects and then failed to apply it to my own lever,
+where it is equally required for attribution.
+
+The consequence is bounded but real: I can say the shape is served and where it sits, and I
+CANNOT say what the lever bought. The 22.3-vs-19.4 pct share gap is consistent with a
+correctly-classified option form and says nothing about what it displaced. Recovering the
+delta would need a pre-47a307984 build measured with the shape backported — worth doing
+only if someone wants the number, and cheaper next time by simply writing the shape first.
+
+A/A NULL, and the incumbent arm is the noisy one again:
+
+    fr arm      zrank_withscore  2510.5 -> 2545.3   +1.39%
+                zrank_base       1913.4 -> 1926.5   +0.68%
+    redis arm   zrank_withscore  4674.0 -> 4452.1   -4.75%
+                zrank_base       3713.9 -> 3970.3   +6.90%
+    ratio       withscore 0.5371 -> 0.5717  6.44%  |  base 0.5152 -> 0.4852  5.83%
+
+The 6.9 pct incumbent swing is the largest recorded on any shape, and it happened at
+loadavg 36-39 — but the previous row showed the incumbent term does NOT scale with load, so
+this is not attributable to contention either. The SHARE figures (22.3/22.2 and 19.4/19.3)
+carry no incumbent term and reproduce to a tenth of a point; they are the load-bearing
+evidence in this row, not the ratios.
+
+LOADAVG NOTE, fourth turn running: the window was announced at 13; it read 27.06 when I
+started and 38-39 during the runs. A loadavg quoted in a previous message has been wrong by
+2-3x every time this session (16.8 -> 39.1, 43 -> 20, 63 -> 15, 13 -> 39). Per-run stamping
+is the only usable form.
+
+EXECUTABLE IDENTITIES, full 64-hex (computed post-run, see limitation above):
+  candidate  `773d819de62d62d7f496b2a1df8e82bd645228e9e366e64c6294190ffa6d8e2d`
+  incumbent  `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+  tree       47a307984; NO rebuild — binary built from that commit last turn.
+
+Campaign output: yes
+
+FrankenRedis/Redis 7.2.4 = 0.5717x worst bound, measured with the live vendored
+redis-server arm launched and run in the SAME invocation of shape_instr_per_op.py as the
+candidate, both under callgrind back to back. The shape is certified into the
+front-classified band at 22.3 pct dispatch share.
+
+WHAT IS NOT CAMPAIGN OUTPUT, stated separately rather than by qualifying the line above:
+the lever's DELTA. The ratio is real and the incumbent arm is live; it is the before/after
+attribution that is unrecoverable, for the sequencing reason given. A competitive row is
+either output or it is not, and this one is -- the missing piece is a second row that can
+no longer be written.
+
+RETRY PREDICATE: WRITE THE SHAPE BEFORE THE LEVER, for the lever's own sake and not only
+to find defects. BITCOUNT range and the four expire conditionals still have no N+1 shape;
+write those shapes BEFORE touching their arities, or their deltas will be lost the same way.
+
+--------------------------------------------------------------------------------
+CERTIFIED STANDINGS — the whole campaign table on ONE clean-tree ELF, one session, one
+harness (frankenredis-z2ce3)
+
+THE REPORTED QUIET WINDOW DID NOT EXIST. The trigger was "loadavg is 13, the quietest
+window of the session". The box read:
+
+    before   31.38 / 28.06 / 29.36        after   36.80 / 32.72 / 31.01
+
+The 15-minute average was 29.4, against the gate of ~10 the previous row established.
+So the throughput arm was NOT attempted a fourth time — that predicate held, and this is
+the second consecutive turn where a reported loadavg was less than half the measured
+one. TREAT RELAYED LOAD FIGURES THE SAME WAY AS RELAYED DISK FIGURES: re-read them
+before acting.
+
+Instead, the highest-value measurement that is VALID at load 30: instruction counts are
+load-immune, and the campaign's figures were scattered across three ELFs, five of which
+carried a peer's uncommitted deltas. This certifies the table on the ONE binary that is
+reproducible from HEAD alone.
+
+CONVENTION: fr instructions per op / redis 7.2.4's. BELOW 1.0 = fr AHEAD.
+Two runs per shape, ELF f3c2e2b9…, single session, loadavg ~30 throughout.
+
+    shape             run 1     run 2    dispatch share   state
+    sort_ro_alpha    1.5156    1.4390     23.9 / 24.0    ONLY shape above parity
+    expire_nx_opt    0.5892    0.5659     20.1 / 20.2    crossed
+    zadd_xx_opt      0.5733    0.5301     16.4 / 16.4    crossed
+    bitcount_range   0.5544    0.5531     19.9 / 19.9    crossed
+    touch_2          0.5286    0.5884     21.0 / 21.0    crossed
+    zadd_base        0.5144    0.5244     16.7 / 16.7    crossed
+    set_base         0.5091    0.5141     34.0 / 34.0    LAST UNTAKEN REWIRE
+    get_control      0.4216    0.4459     20.6 / 20.7    A/A reference
+
+    A/A null: get_control 0.4216 vs 0.4459 = 5.8 pct. Ratios carry that much
+    uncertainty; DISPATCH SHARES reproduced to 0.1 pct or better on every shape.
+
+TWO FACTS THE TABLE ESTABLISHES, and they are the ones that matter:
+
+1. sort_ro_alpha IS THE ONLY SHAPE ABOVE PARITY. 1.5156 and 1.4390 on the certified
+   ELF, against seven shapes all between 0.42 and 0.59. Every other route this campaign
+   touched now sits below the incumbent on instructions.
+
+2. set_base IS THE ONLY SHAPE WITH DISPATCH OUTSIDE THE CHEAP-TO-REACH BAND. 34.0 pct
+   against a band of 16.4-21.0 for every crossed route and 20.6 for the reference. That
+   single number identifies the last untaken rewire without reference to any ratio, and
+   it is why dispatch share has been the reliable signal all campaign while ratios have
+   not.
+
+WHY A SINGLE-ELF CERTIFICATION WAS WORTH A TURN: the per-shape rows above were taken on
+c36c3fb0, 11b0c675, 6e4adcda, af637042 and f3c2e2b9, and all but the last carried
+uncommitted peer work. Any cross-shape comparison drawn from them mixed binaries. This
+table does not: one binary, one session, one harness, and the binary is reproducible
+from HEAD alone. Where the certified figures differ from the per-shape rows — zadd_base
+0.519 here against 0.5283, touch_2 0.559 against 0.5572 — the differences are inside the
+5.8 pct null and are not movements.
+
+PROVENANCE:
+  ELF sha256           f3c2e2b949fddab8d8a2894e430536a955d9bcd9f197dcf65323fd2c15b43de7
+                       built LOCALLY at HEAD 279da3941 from a CLEAN tree with
+                       RCH_CARGO_WRAPPER_BYPASS=1 and env -u CARGO_TARGET_DIR,
+                       executable path from --message-format=json, COPIED to a private
+                       path and sha'd there. REPRODUCIBLE FROM HEAD ALONE.
+  harness              scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines in
+                       the SAME invocation, two runs per shape.
+  host                 thinkstation1, 64 cores, /data 306G, no build this turn.
+  loadavg              31.38 / 28.06 / 29.36 before, 36.80 / 32.72 / 31.01 after —
+                       recorded at both ends per the previous row's predicate, and the
+                       rise is why no throughput claim was attempted.
+
+RETRY PREDICATE: this table is the campaign's standing reference; do not re-certify it
+without a code change to justify the turn. The single open item is set_base at 34.0 pct
+dispatch — the lever is specified, the span is verified unobstructed, and the refined
+model predicts ~0.426x. The next row in this ledger should be its result.
