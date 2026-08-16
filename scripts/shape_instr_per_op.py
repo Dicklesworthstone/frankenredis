@@ -83,6 +83,15 @@ SHAPES = {
     # keyspace is expensive", which the first control cannot do.
     "get_volatile_control": (
         ["SET vv abcdefghijklmnop", "PEXPIRE vv 900000000"], ["GET", "vv"]),
+    # (frankenredis-hxgsz) The two worst raw-ratio routes found by the
+    # `unswept` sweep. Both are TTL-adjacent WRITES, and both are measured here
+    # rather than by wall clock because their nulls would not stand: persist_noop's
+    # failing nulls point in OPPOSITE directions across two runs and setex_same's
+    # confidence intervals do not overlap, so neither qualifies for null excusal.
+    # Instruction counts need no null at all.
+    "persist_noop": (["SET s abcdefghijklmnop"], ["PERSIST", "s"]),
+    "setex_same": ([], ["SETEX", "wx", "100", "vvvvvvvvvvvvvvvv"]),
+    "set_same": ([], ["SET", "wk", "vvvvvvvvvvvvvvvv"]),
     # The control: a route none of the above levers touch.
     "get_control": (["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
 }

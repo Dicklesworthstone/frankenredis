@@ -187,6 +187,38 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
     #
     # Every shape here was probed on BOTH engines before registration: identical
     # non-error reply, and the reply UNCHANGED after 200 repetitions.
+    # (frankenredis-hxgsz) Routes NO existing set covers. The four sets
+    # above are almost entirely reads on keys with no TTL, so whole families --
+    # the write path, the container-length reads, the key-metadata reads -- have
+    # never been measured against the incumbent at all. Every shape here cleared
+    # the same admission bar the others did, probed on BOTH engines before
+    # registration: identical non-error reply, and the reply UNCHANGED after 200
+    # repetitions (scratchpad/shape_admit_probe.py, 20 admitted, 0 rejected).
+    # setex_same is deliberately included: it is the only write here that leaves a
+    # TTL behind, and fr's per-command expire cycle makes that a different
+    # workload (frankenredis-kiyxn).
+    "unswept": [
+        ("strlen", ["SET s abcdefghijklmnop"], ["STRLEN", "s"]),
+        ("getrange", ["SET s abcdefghijklmnop"], ["GETRANGE", "s", "2", "9"]),
+        ("llen", ["RPUSH l a b c d e"], ["LLEN", "l"]),
+        ("lrange_5", ["RPUSH l a b c d e"], ["LRANGE", "l", "0", "-1"]),
+        ("hlen", ["HSET h f1 v1 f2 v2 f3 v3"], ["HLEN", "h"]),
+        ("hget", ["HSET h f1 v1 f2 v2 f3 v3"], ["HGET", "h", "f2"]),
+        ("scard", ["SADD st m1 m2 m3 m4 m5"], ["SCARD", "st"]),
+        ("zcard", ["ZADD z 1 a 2 b 3 c"], ["ZCARD", "z"]),
+        ("type", ["SET s abcdefghijklmnop"], ["TYPE", "s"]),
+        ("object_encoding", ["SET s abcdefghijklmnop"], ["OBJECT", "ENCODING", "s"]),
+        ("ttl_nonvolatile", ["SET s abcdefghijklmnop"], ["TTL", "s"]),
+        ("persist_noop", ["SET s abcdefghijklmnop"], ["PERSIST", "s"]),
+        ("set_same", [], ["SET", "wk", "vvvvvvvvvvvvvvvv"]),
+        ("setex_same", [], ["SETEX", "wx", "100", "vvvvvvvvvvvvvvvv"]),
+        ("setrange_same", ["SET sr abcdefghijklmnop"], ["SETRANGE", "sr", "3", "xy"]),
+        ("hset_same", ["HSET h f1 v1"], ["HSET", "h", "f1", "v1"]),
+        ("sadd_same", ["SADD st m1"], ["SADD", "st", "m1"]),
+        ("zadd_same", ["ZADD z 1 a"], ["ZADD", "z", "1", "a"]),
+        ("getex_persist", ["SET gx abcdefghijklmnop"], ["GETEX", "gx", "PERSIST"]),
+        ("get_control", ["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
+    ],
     "storeops": [
         ("exists_8key", ["MSET e1 1 e2 1 e3 1 e4 1 e5 1 e6 1 e7 1 e8 1"],
          ["EXISTS", "e1", "e2", "e3", "e4", "e5", "e6", "e7", "e8"]),
