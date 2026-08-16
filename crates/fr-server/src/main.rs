@@ -19596,42 +19596,66 @@ fn try_dispatch_floor_classified_action(
                 )
             }
         }
+        // (frankenredis-f3nry) Fused, for the reason recorded on the arity-6 arm
+        // below: chaining made the INCR reading pay zadd_flag's complete failed
+        // parse, MEASURED at 193.3 instr/op of dispatch (725.4 vs the flag
+        // reading's 532.1) and accounted for exactly by the callgrind frames --
+        // 95 in the declining parser plus 96 in the two set_bulk calls it repeats.
         BorrowedDispatchFloorClass::ZaddFlag => {
-            if let Some(packet) = parse_borrowed_plain_zadd_flag_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_zadd_flag_borrowed(
-                    packet.key,
-                    packet.flag,
-                    packet.score,
-                    packet.member,
-                    ts,
-                )
-            {
-                Ok(BorrowedMultibulkAction::FastReply {
-                    consumed: packet.consumed,
-                    response,
-                })
-            } else if let Some(packet) =
-                parse_borrowed_plain_zadd_incr_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_zadd_incr_borrowed(
-                    packet.key,
-                    packet.start,
-                    packet.end,
-                    ts,
-                )
-            {
-                Ok(BorrowedMultibulkAction::FastReply {
-                    consumed: packet.consumed,
-                    response,
-                })
-            } else {
-                parse_borrowed_multibulk_action(
+            match parse_borrowed_plain_zadd_arity5_packet(unparsed, &parser_config) {
+                Some(BorrowedPlainZaddArity5Packet::Flag(packet)) => {
+                    if let Some(response) = runtime.execute_plain_zadd_flag_borrowed(
+                        packet.key,
+                        packet.flag,
+                        packet.score,
+                        packet.member,
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            out,
+                            argv_scratch,
+                        )
+                    }
+                }
+                Some(BorrowedPlainZaddArity5Packet::Incr(packet)) => {
+                    if let Some(response) = runtime.execute_plain_zadd_incr_borrowed(
+                        packet.key,
+                        packet.start,
+                        packet.end,
+                        ts,
+                    ) {
+                        Ok(BorrowedMultibulkAction::FastReply {
+                            consumed: packet.consumed,
+                            response,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            out,
+                            argv_scratch,
+                        )
+                    }
+                }
+                None => parse_borrowed_multibulk_action(
                     unparsed,
                     parser_config,
                     runtime,
                     ts,
                     out,
                     argv_scratch,
-                )
+                ),
             }
         }
         BorrowedDispatchFloorClass::ZaddMulti => {
@@ -24162,10 +24186,26 @@ fn parse_borrowed_plain_zadd_flag2_packet<'a>(
     }
 }
 
-fn parse_borrowed_plain_zadd_flag_packet<'a>(
+// (frankenredis-f3nry) Array length 5 is the same fusion as length 6, one arity
+// down: `ZADD k <flag> score member` and `ZADD k INCR score member` share the
+// `*5\r\n$4\r\nZADD\r\n` header, the key, and the token after it, and that token is
+// again the discriminator. Chained, the INCR reading paid zadd_flag's complete
+// failed parse first -- MEASURED at 193.3 instr/op of dispatch (725.4 against the
+// flag reading's 532.1), which the callgrind frames account for exactly: 95 in the
+// declining parser's own body plus 96 in the two set_bulk calls it repeats.
+//
+// The two readings differ in more than their arguments: INCR replies with a BULK
+// score (or nil) where the flag forms reply with an integer count, which is why
+// they have separate executors and why INCR must never be admitted as a flag.
+enum BorrowedPlainZaddArity5Packet<'a> {
+    Flag(BorrowedPlainZaddFlagPacket<'a>),
+    Incr(BorrowedPlainKeyRangePacket<'a>),
+}
+
+fn parse_borrowed_plain_zadd_arity5_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,
-) -> Option<BorrowedPlainZaddFlagPacket<'a>> {
+) -> Option<BorrowedPlainZaddArity5Packet<'a>> {
     if config.max_array_len < 5 || config.max_bulk_len < b"ZADD".len() {
         return None;
     }
@@ -24179,24 +24219,41 @@ fn parse_borrowed_plain_zadd_flag_packet<'a>(
     }
     cursor += 2;
     let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
-    let (flag, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
-    if !(flag.eq_ignore_ascii_case(b"NX")
-        || flag.eq_ignore_ascii_case(b"XX")
-        || flag.eq_ignore_ascii_case(b"GT")
-        || flag.eq_ignore_ascii_case(b"LT")
-        || flag.eq_ignore_ascii_case(b"CH"))
-    {
+    let (arg1, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let is_flag = borrowed_plain_zadd_flag_token(arg1);
+    if !is_flag && !arg1.eq_ignore_ascii_case(b"INCR") {
         return None;
     }
     let (score, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     let (member, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
-    Some(BorrowedPlainZaddFlagPacket {
-        consumed,
-        key,
-        flag,
-        score,
-        member,
+    Some(if is_flag {
+        BorrowedPlainZaddArity5Packet::Flag(BorrowedPlainZaddFlagPacket {
+            consumed,
+            key,
+            flag: arg1,
+            score,
+            member,
+        })
+    } else {
+        BorrowedPlainZaddArity5Packet::Incr(BorrowedPlainKeyRangePacket {
+            consumed,
+            key,
+            start: score,
+            end: member,
+        })
     })
+}
+
+// (frankenredis-f3nry) A projection of the fused arity-5 parser, kept because the
+// borrowed cascade reaches the two readings at two different depths.
+fn parse_borrowed_plain_zadd_flag_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainZaddFlagPacket<'a>> {
+    match parse_borrowed_plain_zadd_arity5_packet(input, config)? {
+        BorrowedPlainZaddArity5Packet::Flag(packet) => Some(packet),
+        BorrowedPlainZaddArity5Packet::Incr(_) => None,
+    }
 }
 
 // (frankenredis-zaddflagmulti) ZADD with 1-2 flags (NX/XX/GT/LT/CH) + 2-6
@@ -24367,35 +24424,17 @@ fn parse_borrowed_plain_zadd_multi_packet<'a>(
     })
 }
 
+// (frankenredis-f3nry) The INCR projection of the fused arity-5 parser. `start` and
+// `end` are the score and the member; the KeyRange shape is what
+// execute_plain_zadd_incr_borrowed already takes.
 fn parse_borrowed_plain_zadd_incr_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,
 ) -> Option<BorrowedPlainKeyRangePacket<'a>> {
-    if config.max_array_len < 5 || config.max_bulk_len < b"ZADD".len() {
-        return None;
+    match parse_borrowed_plain_zadd_arity5_packet(input, config)? {
+        BorrowedPlainZaddArity5Packet::Incr(packet) => Some(packet),
+        BorrowedPlainZaddArity5Packet::Flag(_) => None,
     }
-    let mut cursor = input.strip_prefix(b"*5\r\n$4\r\n").and_then(|rest| {
-        rest.get(..4)
-            .filter(|command| command.eq_ignore_ascii_case(b"ZADD"))
-            .map(|_| input.len() - rest.len() + 4)
-    })?;
-    if input.get(cursor..cursor + 2)? != b"\r\n" {
-        return None;
-    }
-    cursor += 2;
-    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
-    let (flag, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
-    if !flag.eq_ignore_ascii_case(b"INCR") {
-        return None;
-    }
-    let (start, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
-    let (end, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
-    Some(BorrowedPlainKeyRangePacket {
-        consumed,
-        key,
-        start,
-        end,
-    })
 }
 
 fn parse_borrowed_plain_getrange_packet<'a>(
@@ -38014,6 +38053,126 @@ mod tests {
     // grammar rather than derived from the parser's own keyword list, so deleting
     // a guard in the parser fails a test instead of quietly changing what the
     // "expected" answer is.
+    // (frankenredis-f3nry) The arity-5 fusion. Its routing oracle is the opposite
+    // of the arity-6 one on INCR -- at length 5 INCR is a SERVED reading with its
+    // own executor, at length 6 it must reach generic -- so the two tests together
+    // pin that the guard is per-arity and not a blanket "INCR is special".
+    #[test]
+    fn borrowed_plain_zadd_arity5_parser_routes_flag_and_incr_readings() {
+        use crate::BorrowedPlainZaddArity5Packet as Reading;
+        let cfg = ParserConfig::default();
+
+        #[derive(Debug, PartialEq)]
+        enum Want {
+            Flag,
+            Incr,
+            Generic,
+        }
+
+        let corpus: &[(&[u8], Want, &str)] = &[
+            (
+                b"*5\r\n$4\r\nZADD\r\n$1\r\nk\r\n$2\r\nXX\r\n$1\r\n5\r\n$2\r\nm1\r\n",
+                Want::Flag,
+                "one flag then a pair",
+            ),
+            (
+                b"*5\r\n$4\r\nZADD\r\n$1\r\nk\r\n$2\r\ngt\r\n$1\r\n5\r\n$2\r\nm1\r\n",
+                Want::Flag,
+                "flags are case-insensitive",
+            ),
+            (
+                b"*5\r\n$4\r\nZADD\r\n$1\r\nk\r\n$4\r\nINCR\r\n$1\r\n5\r\n$2\r\nm1\r\n",
+                Want::Incr,
+                "INCR is a served reading at this arity",
+            ),
+            (
+                b"*5\r\n$4\r\nZADD\r\n$1\r\nk\r\n$4\r\nInCr\r\n$1\r\n5\r\n$2\r\nm1\r\n",
+                Want::Incr,
+                "INCR is case-insensitive too",
+            ),
+            // `ZADD k 1 a 2` is a score where an option must be: redis rejects it
+            // as a syntax error, and neither reading may claim it.
+            (
+                b"*5\r\n$4\r\nZADD\r\n$1\r\nk\r\n$1\r\n1\r\n$1\r\na\r\n$1\r\n2\r\n",
+                Want::Generic,
+                "a bare score in the option slot belongs to generic",
+            ),
+            (
+                b"*5\r\n$4\r\nZADD\r\n$1\r\nk\r\n$2\r\nZZ\r\n$1\r\n5\r\n$2\r\nm1\r\n",
+                Want::Generic,
+                "an unknown keyword belongs to generic",
+            ),
+            (
+                b"*5\r\n$5\r\nLPUSH\r\n$1\r\nk\r\n$2\r\nXX\r\n$1\r\n5\r\n$2\r\nm1\r\n",
+                Want::Generic,
+                "a different command at the same arity is not ZADD",
+            ),
+        ];
+
+        for (packet, want, why) in corpus {
+            let got = match crate::parse_borrowed_plain_zadd_arity5_packet(packet, &cfg) {
+                Some(Reading::Flag(_)) => Want::Flag,
+                Some(Reading::Incr(_)) => Want::Incr,
+                None => Want::Generic,
+            };
+            assert_eq!(&got, want, "{why}");
+        }
+    }
+
+    #[test]
+    fn borrowed_plain_zadd_arity5_projections_partition_the_readings() {
+        // Same partition property the arity-6 pair needs, and for the same reason:
+        // the cascade calls these two projections at two different depths, so if
+        // both could claim one packet the cascade and the floor arm would serve
+        // different readings of it and each would look self-consistent.
+        let cfg = ParserConfig::default();
+
+        for packet in [
+            &b"*5\r\n$4\r\nZADD\r\n$1\r\nk\r\n$2\r\nXX\r\n$1\r\n5\r\n$2\r\nm1\r\n"[..],
+            &b"*5\r\n$4\r\nZADD\r\n$1\r\nk\r\n$4\r\nINCR\r\n$1\r\n5\r\n$2\r\nm1\r\n"[..],
+            &b"*5\r\n$4\r\nZADD\r\n$1\r\nk\r\n$1\r\n1\r\n$1\r\na\r\n$1\r\n2\r\n"[..],
+        ] {
+            let flag = crate::parse_borrowed_plain_zadd_flag_packet(packet, &cfg).is_some();
+            let incr = crate::parse_borrowed_plain_zadd_incr_packet(packet, &cfg).is_some();
+            assert!(
+                !(flag && incr),
+                "the two arity-5 readings must stay mutually exclusive"
+            );
+            let fused = match crate::parse_borrowed_plain_zadd_arity5_packet(packet, &cfg) {
+                Some(crate::BorrowedPlainZaddArity5Packet::Flag(_)) => (true, false),
+                Some(crate::BorrowedPlainZaddArity5Packet::Incr(_)) => (false, true),
+                None => (false, false),
+            };
+            assert_eq!(
+                (flag, incr),
+                fused,
+                "cascade projections must agree with the fused routing"
+            );
+        }
+    }
+
+    #[test]
+    fn borrowed_plain_zadd_arity5_incr_binds_score_and_member_in_wire_order() {
+        // The INCR reading returns a KeyRange packet, whose {start, end} are
+        // {score, member}. Swapping them would still parse, still reply, and would
+        // increment a member named "42" by whatever "m22" parses to.
+        let cfg = ParserConfig::default();
+
+        let packet = crate::parse_borrowed_plain_zadd_incr_packet(
+            b"*5\r\n$4\r\nzAdD\r\n$3\r\nkey\r\n$4\r\nINCR\r\n$2\r\n42\r\n$3\r\nm22\r\n*1\r\n$4\r\nPING\r\n",
+            &cfg,
+        )
+        .expect("the INCR reading should parse");
+        assert_eq!(packet.key, b"key");
+        assert_eq!(packet.start, b"42", "fourth bulk is the increment");
+        assert_eq!(packet.end, b"m22", "fifth bulk is the member");
+        assert_eq!(
+            packet.consumed,
+            b"*5\r\n$4\r\nzAdD\r\n$3\r\nkey\r\n$4\r\nINCR\r\n$2\r\n42\r\n$3\r\nm22\r\n".len(),
+            "consumed must stop at this packet, not swallow the pipelined PING"
+        );
+    }
+
     #[test]
     fn borrowed_plain_zadd_arity6_parser_routes_each_reading_and_declines_incr() {
         use crate::BorrowedPlainZaddArity6Packet as Reading;

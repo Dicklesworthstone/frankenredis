@@ -382,6 +382,22 @@ SHAPES = {
     # two paths into one figure -- the same construction error the zadd_2pair comment
     # above warns about.
     "zadd_2flag": (["ZADD z 1 a"], ["ZADD", "z", "GT", "CH", "1", "a"]),
+    # (frankenredis-f3nry) The SECOND branch of the arity-5 arm, which is the same
+    # blind spot one arity down. `zadd_xx_opt` above is the FIRST branch and reads
+    # healthy whether or not the arm chains, exactly as zadd_2pair did at length 6 --
+    # so nothing in this suite could see the INCR reading paying zadd_flag's failed
+    # parse ahead of it. Pair it with zadd_xx_opt: same command, same array length,
+    # same key, differing only in which branch of the arm serves them.
+    #
+    # INCREMENT OF ZERO, and that is load-bearing rather than lazy. ZADD INCR is a
+    # MUTATING read: any nonzero step grows the score every op, so its bulk reply
+    # gains digits across the run (3 -> 12000 over 4000 ops) and the double-to-string
+    # cost is not constant -- the 2N run would then do strictly more work per op than
+    # the N run and the two-point subtraction would attribute the difference to
+    # dispatch. A zero step still takes the full INCR path, still replies with the
+    # score, and leaves every op identical. Same failure this file's zadd_2flag and
+    # zadd_2pair comments warn about, arrived at from the mutation side.
+    "zadd_incr": (["ZADD z 5 a"], ["ZADD", "z", "INCR", "0", "a"]),
     "sintercard_base": (["SADD s1 m1 m2 m3", "SADD s2 m2 m3 m4"],
                         ["SINTERCARD", "2", "s1", "s2"]),
     "hrandfield_base": (["HSET h f1 v1"], ["HRANDFIELD", "h"]),
