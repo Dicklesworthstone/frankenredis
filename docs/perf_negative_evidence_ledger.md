@@ -18560,3 +18560,69 @@ change that would close it.
 
 RETRY PREDICATE: do not re-profile to re-confirm. DO re-profile if the arm's parser order
 changes, since the 105 exists only while RANK is attempted first.
+
+## CORRECTION (frankenredis-uu33c) — my LPOS residual decomposition was wrong; the waste is ONE phenomenon, and 249 of 272 is recoverable
+
+The row above split the 272 instr/op residual into a "chaining" component (105) and a
+"generic positional parser" component (144), and cautioned that some of the 144 was
+irreducible bulk parsing. MossySparrow refuted the split from source; verified here
+before accepting it.
+
+BOTH PARSERS CALL set_bulk FOUR TIMES. There is no positional-parser tax:
+
+    parse_borrowed_plain_key_arg3_packet     set_bulk calls = 4
+    parse_borrowed_plain_lpos_rank_packet    set_bulk calls = 4
+
+AND THE FAILED ATTEMPT DECLINES AFTER THE THIRD, main.rs:24300-24306:
+
+    24300  let (key,     next) = parse_borrowed_plain_set_bulk(...)   <- 1
+    24301  let (element, next) = parse_borrowed_plain_set_bulk(...)   <- 2
+    24302  let (rank_kw, next) = parse_borrowed_plain_set_bulk(...)   <- 3
+    24303  if !rank_kw.eq_ignore_ascii_case(b"RANK") { return None }  <- declines HERE
+    24306  let (rank, consumed) = parse_borrowed_plain_set_bulk(...)  <- 4, success only
+
+So lpos_count makes 3 (failed RANK) + 4 (key_arg3) = 7 set_bulk calls where lpos_rank
+makes 4. The measured self-costs fit exactly:
+
+    lpos_rank   4 calls -> 192 instr/op  =>  48.0 per call
+    lpos_count  7 calls -> 336 instr/op  =>  48.0 per call
+    7/4 = 1.75          336/192 = 1.75
+
+THE 144 AND THE 105 ARE THE SAME PHENOMENON COUNTED TWICE. The 144 IS the three wasted
+set_bulk calls of the failed RANK attempt; the 105 is the remainder of that same attempt
+(header strip_prefix, cursor arithmetic, the keyword compare). Not two components — one.
+
+WITHDRAWN: "some of the 144 is bulk parsing any parser must do". key_arg3's own four
+calls (192 instr/op) are the necessary ones; the 144 is pure waste on top of them.
+
+REVISED SIZING, and this refines MossySparrow's "all 272" slightly:
+
+    keyword discrimination before parsing   removes 249  (144 wasted set_bulk + 105
+                                                          failed-attempt frame)
+    dedicated COUNT parser, ON TOP           removes <= 23 (the key_arg3 vs hand-rolled
+                                                          self-cost difference)
+    dedicated COUNT parser ALONE             removes 0
+
+The last line is the one that matters and it is WORSE than the row above said. I had a
+dedicated parser removing 144 and leaving 105. It removes NOTHING on its own: a dedicated
+parser still runs SECOND, after RANK declines, so all seven set_bulk calls still happen.
+It only pays once discrimination exists — at which point discrimination is doing the work
+and the dedicated parser is an optional ~23.
+
+METHOD NOTE: the refutation came from COUNTING CALL SITES IN SOURCE, not from more
+profiling. I had two self-cost numbers and invented a mechanism that fit them; the actual
+mechanism was visible in six lines of the parser. Same shape as the other misattributions
+this campaign has logged — a plausible story fitted to a measurement, where the code
+answered it directly.
+
+RESIDUAL RISK, named by MossySparrow and not eliminated: the 48.0 per-call figure is
+INFERRED from a 1.75 fit across two dumps, not measured directly. If the two dumps had
+materially different denominators the fit could be coincidence — though 336/192 landing
+exactly on 7/4 would be a remarkable one. Measuring set_bulk's per-call cost directly
+would close it.
+
+PROVENANCE: source verification only, no build (/data 43G). Underlying self-costs are
+from the row above, ELF 51708552264214d1.
+
+RETRY PREDICATE: implement the keyword discrimination and expect ~249 instr/op, ~7.7 pct
+of the op. Do NOT implement a dedicated COUNT parser on its own — it is measured at zero.
