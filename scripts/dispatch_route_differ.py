@@ -295,6 +295,27 @@ CASES = [
     ("MOVE", "mv:dup", "99"),
     ("MOVE", "mv:dup", "notanumber"),
     ("MOVE", "mv:dup", "-1"),
+    # (frankenredis-8xyox) NEGATIVE CASE for the MOVE allocation change. Hoisting
+    # key_owned/db_owned into the builder closure is only safe if the closure still
+    # produces the CORRECT argv when it actually runs. The closure is invoked from
+    # record_plain_zremrange_borrowed_metrics only on a slowlog / latency / time
+    # budget breach, so the fast path never exercises it -- which means a bug there
+    # would be invisible to every other MOVE row in this corpus.
+    #
+    # Forcing slowlog to log everything makes the closure run on every command, and
+    # SLOWLOG GET then shows the argv it built. If the hoist captured the wrong
+    # slices, or captured a dangling one, this is where it shows.
+    ("CONFIG", "SET", "slowlog-log-slower-than", "0"),
+    ("SLOWLOG", "RESET"),
+    ("SET", "mvneg:k", "v"),
+    ("MOVE", "mvneg:k", "1"),
+    # the MISS path through the same closure -- the case the hoist changes most,
+    # since it previously allocated and now must not
+    ("MOVE", "mvneg:absent", "1"),
+    ("SLOWLOG", "LEN"),
+    ("SLOWLOG", "GET", "3"),
+    ("CONFIG", "SET", "slowlog-log-slower-than", "10000"),
+    ("SLOWLOG", "RESET"),
     # Errors must come from the generic path verbatim.
     ("ZMPOP", "1", "s:1", "MIN"),
     ("ZMPOP", "1", "z:mp", "SIDEWAYS"),

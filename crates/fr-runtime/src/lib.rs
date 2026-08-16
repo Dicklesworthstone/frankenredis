@@ -16119,13 +16119,21 @@ impl Runtime {
         };
         let elapsed_us = self.finish_chained_command(start);
         let failed = matches!(reply, RespFrame::Error(_));
-        let key_owned = key.to_vec();
-        let db_owned = db_arg.to_vec();
-
+        // (frankenredis-jvskj) These two to_vec calls used to be EAGER, executed on
+        // every MOVE including a miss, purely so the builder closure below could
+        // capture them -- and the closure then cloned them again, so an invoked
+        // builder allocated FOUR times for two values. The closure is lazy and
+        // `key`/`db_arg` are `&[u8]` parameters that outlive it, so it can simply
+        // borrow them and allocate once, only if it actually runs.
+        //
+        // The miss path is what makes this worth doing: `MOVE missing 1` returns
+        // Integer(0) at the source-existence check well above here, yet still paid
+        // both allocations. Upstream moveCommand on a miss does lookupKeyWrite ->
+        // NULL -> addReply(czero), allocating nothing.
         self.record_plain_zremrange_borrowed_metrics(
             "move",
             "MOVE",
-            || vec![b"MOVE".to_vec(), key_owned.clone(), db_owned.clone()],
+            || vec![b"MOVE".to_vec(), key.to_vec(), db_arg.to_vec()],
             elapsed_us,
             now_ms,
             packet_id,
