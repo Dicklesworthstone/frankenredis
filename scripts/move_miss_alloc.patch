@@ -1,0 +1,65 @@
+Drop MOVE's two eager allocations on the miss path (frankenredis-jvskj)
+
+THE PREDICTION THIS TESTS. MOVE is my worst measured route and its own arm is the
+unstable one -- 15% between 100-sample runs against redis's 1%, 12% outliers against
+2% -- which is the allocator signature frankenlibc and frankentorch converged on
+independently. Hoisting these allocations is behaviour-neutral, so if the variance AND
+the gap both shrink the mechanism is confirmed; if only the variance moves, the gap is
+elsewhere and this stops being the lead.
+
+WHAT IT CHANGES. `key_owned`/`db_owned` were built EAGERLY on every MOVE -- including
+a miss, which returns Integer(0) at the source-existence check far above -- solely so
+the lazy builder closure could capture them. The closure then CLONED both, so an
+invoked builder allocated four times for two values. `key` and `db_arg` are `&[u8]`
+parameters that outlive the closure, so it borrows them and allocates once, only when
+it runs. Miss path goes from two allocations to zero; upstream moveCommand on a miss
+allocates nothing at all.
+
+NOT COMPILED. /data is at the 42G floor and no build of any kind is permitted, so this
+is verified structurally only: `git apply --check` rc=0. That is not a type check, and
+I have had a structural check pass on a patch that then failed to build. The borrow
+question is the one to watch -- the closure is passed to a `&mut self` method while
+capturing two function parameters, which should be fine because neither borrows from
+`self`, but "should" is doing work there.
+
+SCOPED TO MOVE DELIBERATELY. Five other executors share the exact pattern --
+zstore, zdiffstore, bitop (2 clones each), zinter, setstore (1 each) -- and the fix is
+mechanical in all of them. I am not touching them here: MOVE is the one with a
+measurement attached, and six uncompilable route changes is six times the risk of one.
+Once this is confirmed on the clock, the other five are a follow-up with a known
+answer.
+
+APPLY WITH:
+    git apply scripts/move_miss_alloc.patch
+    python3 scripts/build_preflight.py        # must clear
+    cargo check -p fr-runtime                 # THE step this patch has not had
+    <full suite, then FR_SERVER_BIN=<a binary you built> for any measurement>
+
+--- a/crates/fr-runtime/src/lib.rs
++++ b/crates/fr-runtime/src/lib.rs
+@@ -16119,13 +16119,21 @@
+         };
+         let elapsed_us = self.finish_chained_command(start);
+         let failed = matches!(reply, RespFrame::Error(_));
+-        let key_owned = key.to_vec();
+-        let db_owned = db_arg.to_vec();
+-
++        // (frankenredis-jvskj) These two to_vec calls used to be EAGER, executed on
++        // every MOVE including a miss, purely so the builder closure below could
++        // capture them -- and the closure then cloned them again, so an invoked
++        // builder allocated FOUR times for two values. The closure is lazy and
++        // `key`/`db_arg` are `&[u8]` parameters that outlive it, so it can simply
++        // borrow them and allocate once, only if it actually runs.
++        //
++        // The miss path is what makes this worth doing: `MOVE missing 1` returns
++        // Integer(0) at the source-existence check well above here, yet still paid
++        // both allocations. Upstream moveCommand on a miss does lookupKeyWrite ->
++        // NULL -> addReply(czero), allocating nothing.
+         self.record_plain_zremrange_borrowed_metrics(
+             "move",
+             "MOVE",
+-            || vec![b"MOVE".to_vec(), key_owned.clone(), db_owned.clone()],
++            || vec![b"MOVE".to_vec(), key.to_vec(), db_arg.to_vec()],
+             elapsed_us,
+             now_ms,
+             packet_id,

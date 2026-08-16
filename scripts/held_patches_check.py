@@ -39,6 +39,20 @@ def applies(path):
     return proc.returncode == 0, proc.stderr.strip()
 
 
+def already_landed(path):
+    """Is this patch's content ALREADY in the tree?
+
+    A patch that has been applied and committed no longer applies -- and reporting
+    that as rot is a false alarm, which is how a guard gets ignored. `git apply
+    --reverse --check` succeeds exactly when the change is already present, so it
+    separates "landed" from "rotted" without guessing.
+    """
+    proc = subprocess.run(
+        ["git", "apply", "--check", "--reverse", path],
+        cwd=REPO, capture_output=True, text=True, check=False)
+    return proc.returncode == 0
+
+
 def main():
     patches = held_patches()
     if not patches:
@@ -51,6 +65,8 @@ def main():
         name = os.path.relpath(path, REPO)
         if ok:
             print("  OK      %s" % name)
+        elif already_landed(path):
+            print("  LANDED  %s  (content already in the tree; not rot)" % name)
         else:
             rotted.append((name, err))
             print("  ROTTED  %s" % name)
