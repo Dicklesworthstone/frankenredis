@@ -318,6 +318,24 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
     # frankenredis-ailri is the standing reason those are different claims. Each
     # mis-claimed form is paired with the sibling that IS accepted, so the row is
     # read against its own base rather than a global mean.
+    # MEASURED 2026-08-16 on ELF a146507d78bdb55610c63397 -- the whole family has
+    # crossed, and none of these rows is sub-parity any more:
+    #
+    #   lpos_count_opt  1.1821 [1.1610, 1.2571]  nulls 1.0066/1.0286
+    #                   1.2483 [1.2230, 1.2743]  nulls 1.0099/1.0244
+    #     Both runs' nulls are off in the SAME direction by similar amounts and the
+    #     intervals overlap, which is the full excusability condition. Worst bound
+    #     1.1610. Was 0.9100 / 0.9361 / 0.9537 before 280383780 served LPOS COUNT
+    #     in the arm -- a peer's fix on a route this file attributed.
+    #
+    #   zrange_rev      1.1483 [1.1249, 1.1825] ADMISSIBLE  nulls 1.0123/0.9996
+    #                   1.1769 [1.1369, 1.2221]             nulls opposite
+    #     THIRD ELF for the jnf09 crossing (0.8658 -> 1.1570 on ELF1), now with an
+    #     admissible row on a binary built for an unrelated lever. Worst bound
+    #     1.1249.
+    #
+    #   zrange_ws 1.1800 ADMISSIBLE, lpos_base 1.1290 -- the accepted siblings are
+    #   ahead too, so no reading in this set is behind the incumbent.
     "misclaim": [
         ("zrange_ws", ["ZADD z 1 a 2 b 3 c"], ["ZRANGE", "z", "0", "-1", "WITHSCORES"]),
         ("zrange_rev", ["ZADD z 1 a 2 b 3 c"], ["ZRANGE", "z", "0", "-1", "REV"]),
