@@ -72116,9 +72116,16 @@ mod tests {
         payload[crc_offset..].copy_from_slice(&crc.to_le_bytes());
 
         let mut store2 = Store::new();
+        // (frankenredis-oczh9) An unsupported VERSION is an ENVELOPE rejection, so
+        // it carries redis's checksum wording rather than the body-parse variant.
+        // Asserting the exact error, not merely `is_err()`, is the point: this and
+        // `dump_restore_invalid_crc_rejected` are the only store-level pins that
+        // the two halves of the split stay distinguishable.
         assert_eq!(
             store2.restore_key(b"k", 0, &payload, false, 100),
-            Err(StoreError::InvalidDumpPayload)
+            Err(StoreError::GenericError(
+                "ERR DUMP payload version or checksum are wrong".to_string()
+            ))
         );
     }
 
@@ -74462,9 +74469,14 @@ mod tests {
         let last = payload.len() - 1;
         payload[last] ^= 0xFF;
         let mut store2 = Store::new();
+        // (frankenredis-oczh9) A corrupt CRC is an ENVELOPE rejection — see
+        // `restore_rejects_unsupported_dump_version` for why the exact error
+        // matters here rather than `is_err()`.
         assert_eq!(
             store2.restore_key(b"k", 0, &payload, false, 100),
-            Err(StoreError::InvalidDumpPayload)
+            Err(StoreError::GenericError(
+                "ERR DUMP payload version or checksum are wrong".to_string()
+            ))
         );
     }
 
