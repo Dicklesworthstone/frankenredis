@@ -18322,3 +18322,62 @@ RETRY PREDICATE: pick the next candidate from THIS table, not from cv3fm's origi
 del_1_missing is the worst ratio but likely the SMALLEST absolute prize (2003 instr/op
 total, ~245 of it dispatch); incrbyfloat_same is second-worst with 6x the absolute
 cost, so it is the better target despite the better ratio.
+
+--------------------------------------------------------------------------------
+ACCEPTED — sinter_2 CROSSED: 1.0388x -> 0.5031x, the last shape measured behind
+Redis 7.2.4 (frankenredis-9hnxt)
+
+The after-number the row above could not produce. Same ELF, same host, same hour;
+the only change is the harness, following that row's own retry predicate — use the
+instruction-count method, not throughput, when the box is loaded.
+
+CONVENTION: fr instructions per op / redis 7.2.4's. BELOW 1.0 = fr AHEAD.
+
+    shape         before              after            dispatch share
+    sinter_2      1.0388x  (25.5%)    0.5038x, 0.5022x    25.5% -> 12.6%
+    sinter_9      0.5470x  ( 6.6%)    0.5365x             ~unchanged, 8.3%
+    get_control   --                  0.4254x             20.8%
+
+REPEATABILITY (this is the null that matters for a two-point subtraction):
+  sinter_2 measured three times: 4381.3, 4373.1, 4357.7 instr/op -> 0.54% spread,
+  and 0.5038x / 0.5022x on the two runs that printed a ratio -> 0.32% spread. The
+  claimed movement is 2.07x. Monotonicity held on every run and both arms:
+  Ir(2N) > Ir(N) throughout (fr 18,526,790 > 9,780,502; redis 41,954,191 >
+  24,593,060), so no run was invalidated the way the SORT_RO rows were.
+
+THE PAIR INVERTED, WHICH IS THE PART THAT CONFIRMS THE DIAGNOSIS RATHER THAN JUST
+MEASURING IT. Before e67e11586, sinter_9 (0.5470x) was far better than sinter_2
+(1.0388x) — the LARGER shape winning, which is backwards for anything explained by
+per-element work. That inversion was the evidence that sinter_2 had no borrowed
+route at all: keys_multi refused arr_len < 10, a floor written for MGET/EXISTS,
+which SINTER/SUNION/SDIFF inherited despite having no exact-N parsers to fall back
+on. After the fix sinter_2 (0.5038x) is BETTER than sinter_9 (0.5365x), which is
+the expected ordering. The prediction was made on the bead before the measurement.
+
+Dispatch share halving, 25.5% -> 12.6%, is the mechanism showing through:
+parse_borrowed_plain_keys_multi_packet is now the TOP frame for sinter_2 at
+1,084,000 instructions — it is SERVING the 2-key case instead of declining it into
+the generic path.
+
+PROVENANCE:
+  ELF sha256 (first 16)  51708552264214d1 — same binary as the LPOS, SINTER, getset
+                         and INADMISSIBLE rows above. Copied to a private path and
+                         sha'd there; target/release is a shared rendezvous.
+  binary mtime           2026-08-16 10:27:50, after e67e11586 (08:07:19), so the
+                         lever is compiled in.
+  tree                   NOT reproducible from HEAD alone — peers' uncommitted WIP
+                         in fr-command/lua_eval.rs, fr-persist/listpack.rs and
+                         several fr-runtime benches was compiled in.
+  harness                scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines
+                         in the SAME invocation, env -u CARGO_TARGET_DIR.
+  host                   thinkstation1, 64 cores, loadavg ~51 — irrelevant to this
+                         method and that is the point of the row above.
+  no build               /data at 43G, one gig above the hard stop; existing binary
+                         re-run, nothing compiled.
+
+Campaign output: yes — e67e11586 is now empirical rather than structural, and NO
+measured shape remains behind Redis 7.2.4.
+
+RETRY PREDICATE: do not re-run. If sinter_2 is ever re-measured from a CLEAN tree,
+expect the ratio to move slightly — the WIP compiled into this ELF is unrelated to
+SINTER but is not nothing.
