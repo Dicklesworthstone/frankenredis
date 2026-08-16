@@ -49009,7 +49009,43 @@ mod tests {
             );
             f.to_bytes().hash(&mut golden);
         }
-        const GOLDEN_RAND_MEMBER_COUNT_REPLY_STREAM: u64 = 7727168197067802684;
+        // (frankenredis-brs56) The count >= size case is pinned SEMANTICALLY here,
+        // not only inside the opaque fingerprint below, because that case is the
+        // one whose meaning changed and a hash cannot say what it now means.
+        //
+        // Upstream t_set.c CASE 2 (and its t_hash.c / t_zset.c twins) returns the
+        // WHOLE collection in iteration order when the requested count reaches the
+        // collection size, consuming no randomness at all. `s` holds five members
+        // and this asks for 100, so the reply must be exactly SMEMBERS.
+        // On its OWN runtime: `fast` and `generic` have their command counters
+        // compared at the end of this test, so issuing extra commands against
+        // either of them would break that bookkeeping assertion rather than the
+        // one being made here.
+        let mut whole_rt = Runtime::default_strict();
+        whole_rt.execute_frame(command(&[b"SADD", b"s", b"a", b"b", b"c", b"d", b"e"]), 1);
+        assert_eq!(
+            whole_rt.execute_frame(command(&[b"SRANDMEMBER", b"s", b"100"]), 2),
+            whole_rt.execute_frame(command(&[b"SMEMBERS", b"s"]), 3),
+            "SRANDMEMBER s 100 (count >= size) must be the whole set in iteration order"
+        );
+
+        // (frankenredis-brs56) FINGERPRINT MOVED, and this is the justification
+        // rather than a regeneration to force green.
+        //
+        // Of the fourteen cases above exactly ONE changed meaning: `SRANDMEMBER s
+        // 100`, where count (100) >= size (5). The rest are sampling (count <
+        // size), negative-count, missing-key or wrong-type, and none of those
+        // paths were touched. The stream still shifts by more than that one reply,
+        // because CASE 2 used to run a partial Fisher-Yates over the whole index
+        // space and now draws NOTHING — so the store's RNG is at a different point
+        // for the sampling cases that follow. That is the upstream-faithful
+        // consequence of the fix, and fr's own RNG stream is not a parity contract
+        // (redis's generator differs regardless).
+        //
+        // What this test actually guards is untouched: `assert_eq!(f, g)` above
+        // still requires the borrowed fast path and the generic path to agree on
+        // every case, and it passed unchanged through this fix.
+        const GOLDEN_RAND_MEMBER_COUNT_REPLY_STREAM: u64 = 4420085778008163983;
         assert_eq!(
             golden.finish(),
             GOLDEN_RAND_MEMBER_COUNT_REPLY_STREAM,
