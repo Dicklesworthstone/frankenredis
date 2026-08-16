@@ -23817,3 +23817,79 @@ RETRY PREDICATE: do NOT re-run zadd_2flag; fr's cost is settled to 0.05 pct. If 
 wants the ~266 instr/op back for this reading, the lever is branch ORDER, not another
 parser — and it would cost zadd_2pair the same amount, so it is only worth doing with
 frequency data, which nobody in this campaign has.
+
+--------------------------------------------------------------------------------
+THE STABLE WINDOW COLLAPSED DURING ITS OWN VERIFICATION — and a same-ELF pre-lever
+baseline for set_base (frankenredis-z2ce3)
+
+The reported window was real: 1-minute 11.0 against a 5-minute of 14.5, close and both
+low, the first genuine convergence of the session. I verified it myself with three
+samples twenty seconds apart, exactly as the standing rule requires. It did not survive
+the verification.
+
+    sample 1    12.26 / 14.12 / 23.27      <- close and low, as reported
+    sample 2    26.49 / 17.35 / 24.14      <- 1-minute doubled
+    sample 3    31.15 / 18.88 / 24.49      <- 1-minute tripled
+    after run   56.53 / 29.13 / 27.68      <- 4.6x the starting value
+
+THIS IS THE VOLATILITY THESIS SETTLED, and it is a stronger result than any throughput
+row would have been. The window was correctly identified, correctly verified by the
+prescribed method, and evaporated inside forty seconds — the same forty seconds the
+verification took. A stability test cannot outrun the thing it is testing for: by the
+time three samples confirm a window, the window is already older than the samples.
+
+    THE THROUGHPUT ARM HAS NOW BEEN DEFERRED SIX TIMES on this host. It is not that the
+    box is never quiet — it was quiet at 11.0/14.5, briefly and genuinely. It is that a
+    balanced-square run needs minutes of quiet and this host does not produce them. That
+    is a property of the host, not of the harness or the operator, and it should be
+    stated as a conclusion rather than re-tested a seventh time.
+
+WHAT WAS RUN INSTEAD, on the evidence that instruction counts are load-immune (dispatch
+share held to 0.0 pct across a 5x excursion two rows ago, and to 0.9 pct across THIS
+run's 4.6x excursion): a same-ELF pre-lever baseline for the last untaken rewire.
+
+CONVENTION: fr instructions per op / redis 7.2.4's. BELOW 1.0 = fr AHEAD.
+
+    A/A control (get_control)  0.4295 / 0.4262 / 0.4178      spread 2.8 pct
+
+    set_base    fr 2134.9 / 2172.5 instr/op   spread 1.8 pct   disp 34.0 / 33.8 pct
+                                                               ~729.8 instr/op
+    set_same    fr 2125.5 / 2117.8            spread 0.36 pct  disp 34.1 / 34.1 pct
+                                                               ~723.1 instr/op
+
+THE TWO SET SHAPES AGREE TO 0.9 PCT ON DISPATCH INSTR/OP, reproducing the 0.26 pct
+agreement recorded earlier on a different ELF. That is the point of measuring both: the
+cost is a property of the ROUTE, so a lever measured on one can be quoted for the
+command, and a post-lever divergence between them would mean the change did something
+shape-specific and unintended.
+
+    PRE-LEVER BASELINE, on ELF cc597a5e, for the set_base arm-move lever:
+        set_base   2153.7 instr/op mean, 33.9 pct dispatch, ~729.8 instr/op
+        set_same   2121.7 instr/op mean, 34.1 pct dispatch, ~723.1 instr/op
+
+Recording it on the CURRENT ELF matters because the lever's predictions (~1,749 instr/op
+and ~0.426x, or ~1,909 and ~0.465x if the argv term does not apply to a reordering) were
+computed from a baseline taken three ELFs ago. Now the before and after will come from
+binaries one commit apart rather than from a table assembled across five.
+
+STANDINGS UNCHANGED: sort_ro_alpha (~1.52x) is the only shape above parity and the only
+non-rewire; set_base at 33.9 pct is the only shape outside the cheap-to-reach dispatch
+band and the last untaken lever. The ZADD family closed last row.
+
+PROVENANCE:
+  ELF sha256           cc597a5eac15c248773f2f824c801a0485f83471d78b80972db5788655369643
+                       built LOCALLY at HEAD 4db33f7c1 from a CLEAN tree with
+                       RCH_CARGO_WRAPPER_BYPASS=1 and env -u CARGO_TARGET_DIR, executable
+                       path from --message-format=json, COPIED to a private path and
+                       sha'd there. REPRODUCIBLE FROM HEAD ALONE.
+  harness              scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines in the
+                       SAME invocation, two runs per shape.
+  host                 thinkstation1, 64 cores, /data 294G, no build this turn.
+  loadavg              12.26 / 26.49 / 31.15 on the 1-minute across verification,
+                       56.53 / 29.13 / 27.68 after the run.
+
+RETRY PREDICATE: do NOT attempt the throughput arm a seventh time on this host — six
+deferrals, and this row shows a correctly-verified window lasting under a minute. If a
+throughput figure is genuinely required, it needs a different host or a harness that
+completes inside a sub-minute window. The set_base baseline above is the number to
+compare against when the arm-move lever lands; measure BOTH SET shapes after it.
