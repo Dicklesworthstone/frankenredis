@@ -16087,6 +16087,15 @@ fn classify_borrowed_dispatch_floor_packet_impl<
             Some(BorrowedDispatchFloorClass::Mget)
         }
         // SINTER, variadic like MGET. `SINTER k` is arity 2.
+        //
+        // (frankenredis-9hnxt) DELIBERATELY UNBOUNDED ABOVE, and that is not an
+        // oversight. keys_multi refuses `nkeys > KEYS_MULTI_MAX`, so a 33-key
+        // SINTER is claimed here and declined by the arm — but the CASCADE arm at
+        // ~7790 uses the SAME capped parser and would decline it too. Both routes
+        // end at the generic path, and claiming here SKIPS the cascade walk to get
+        // there. Over-claiming is a regression only when it shadows a route that
+        // could have served the shape; above the cap no route can, so the early
+        // claim is strictly cheaper. Bounding this would be a pessimisation.
         (arity, BorrowedDispatchFloorCommand::Sinter) if arity >= 2 => {
             Some(BorrowedDispatchFloorClass::Sinter)
         }
@@ -24206,8 +24215,22 @@ fn parse_borrowed_plain_hmget_multi_packet<'a>(
     if i == 0 || rest.get(i..i + 2)? != b"\r\n" {
         return None;
     }
-    // nfields = arr_len - 2 (HMGET + key); 4..=MAX here, 1-3 use dedicated paths.
-    if arr_len < 6 {
+    // nfields = arr_len - 2 (HMGET + key).
+    //
+    // (frankenredis-xqqwv) This floor was 6, on the comment's claim that "1-3 use
+    // dedicated paths". Only 2 and 3 do: hmget2 pins b"*4\r\n" and hmget3 pins
+    // b"*5\r\n", and there is no hmget1 anywhere in the tree. So ONE field --
+    // array length 3, the smallest legal HMGET -- was claimed by the floor class
+    // (`arity >= 3`), refused by all three parsers in the arm, and dropped on the
+    // generic dispatcher. The comment was off by one at its lower end and the
+    // floor was written to match it.
+    //
+    // Lowering to 3 cannot regress two or three fields: the arm chains hmget2 and
+    // hmget3 BEFORE this parser, so a shape they accept never reaches here. The
+    // only newly-served shape is the one that was falling to generic -- the same
+    // argument frankenredis-9hnxt made for keys_multi, whose floor of 10 was
+    // correct for MGET/EXISTS and wrong for SINTER/SUNION/SDIFF.
+    if arr_len < 3 {
         return None;
     }
     let nfields = arr_len - 2;
@@ -26925,7 +26948,17 @@ fn parse_borrowed_plain_zmscore_multi_packet<'a>(
     if i == 0 || rest.get(i..i + 2)? != b"\r\n" {
         return None;
     }
-    if arr_len < 6 {
+    // (frankenredis-xqqwv) Floor was 6, the exact twin of hmget_multi's and wrong for
+    // the same reason: zmscore2 pins b"*4\r\n", zmscore3 pins b"*5\r\n", and no
+    // zmscore1 exists anywhere, so `ZMSCORE key member` at array length 3 was claimed
+    // by `arity >= 3` and served by nothing. The arm chains zmscore2 and zmscore3
+    // before this parser, so lowering the floor cannot regress what they accept.
+    //
+    // NOT applied to smismember_multi, which carries an identical floor and an
+    // identical "1-3 are handled by dedicated paths" comment: its class is
+    // `(4..=5, Smismember)`, so array length 3 is never claimed and there is no
+    // mis-claim to fix.
+    if arr_len < 3 {
         return None;
     }
     let nmembers = arr_len - 2;
@@ -28231,9 +28264,13 @@ struct BorrowedPlainKeysMultiPacket<'a> {
 // the much slower generic borrowed dispatch — measured EXISTS 0.69x @9 keys,
 // MGET 0.80x @16 vs Redis 7.2.4. Parses the array count generically (with a
 // non-canonical leading-zero guard, matching the exact-N parsers) into a
-// `[&[u8]; 32]` array, reusing the byte-exact `_borrowed_into` executor. Serves
-// 9..=32 keys; <=8 keep their exact-N paths; >32 defers. `name` is single-digit
-// length (MGET=4, EXISTS=6).
+// `[&[u8]; 32]` array, reusing the byte-exact `_borrowed_into` executor. `name` is
+// single-digit length (MGET=4, EXISTS=6, SINTER=6, SDIFF=5, SUNION=6).
+//
+// (frankenredis-9hnxt) Now serves 1..=32 keys, not 9..=32. The original floor
+// assumed every caller had exact-N parsers below nine; SINTER/SUNION/SDIFF, added
+// later, do not. See the guard below for why lowering it cannot regress MGET or
+// EXISTS.
 fn parse_borrowed_plain_keys_multi_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,
@@ -28261,8 +28298,26 @@ fn parse_borrowed_plain_keys_multi_packet<'a>(
     if i == 0 || rest.get(i..i + 2)? != b"\r\n" {
         return None;
     }
-    // nkeys = arr_len - 1 (command + keys). Serve 9..=MAX; <=8 uses exact-N parsers.
-    if arr_len < 10 {
+    // nkeys = arr_len - 1 (command + keys).
+    //
+    // (frankenredis-9hnxt) This floor used to be `arr_len < 10`, on the reasoning
+    // in the header above: "<=8 keep their exact-N paths". That is true of MGET and
+    // EXISTS, the two commands this parser was written for. SINTER, SUNION and
+    // SDIFF were added as callers LATER and have NO exact-N parsers at all — `rg
+    // 'fn parse_borrowed_plain_sinter'` finds only sintercard2/sintercard3, a
+    // different command. So they inherited a floor that was never about them, and
+    // every SINTER with two to eight keys — the overwhelmingly common arity — was
+    // claimed at the floor, declined here, and dropped on the GENERIC path.
+    //
+    // That was the whole of sinter_2's 1.0388x, the last shape not ahead of Redis
+    // 7.2.4, against sinter_9's 0.5470x on the same command and executor. The only
+    // difference between those two numbers is whether this line returned None.
+    //
+    // Lowering the floor cannot regress the original callers: MGET at 2..=8 keys is
+    // front-classified to MgetN and reaches its exact-N parsers without coming
+    // here, and EXISTS selects keys_multi by an explicit `9..=KEYS_MULTI_MAX` arm.
+    // The only paths this newly serves are ones that were falling to generic.
+    if arr_len < 2 {
         return None;
     }
     let nkeys = arr_len - 1;
@@ -43627,6 +43682,96 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         }
     }
 
+    /// (frankenredis-9hnxt) SINTER/SUNION/SDIFF had NO borrowed route at their
+    /// common arity. The floor claims them from `array_len >= 2`, but the arm's
+    /// only parser refused `arr_len < 10` — a floor written for MGET and EXISTS,
+    /// which do have exact-N parsers below nine. These three, added as callers
+    /// later, do not: `rg 'fn parse_borrowed_plain_sinter'` finds only
+    /// sintercard2/sintercard3, a different command sharing a prefix.
+    ///
+    /// So every 2..=8-key SINTER was claimed, declined, and dropped on the generic
+    /// path, and the cascade arm would have declined it too. That was the whole of
+    /// sinter_2's 1.0388x — the last measured shape not ahead of Redis 7.2.4 —
+    /// against sinter_9's 0.5470x on the same command and the same executor.
+    ///
+    /// This is the pair-level invariant applied to the three commands, and unlike
+    /// BITFIELD (where the parser takes opaque bulks and the biconditional holds
+    /// trivially) it is meaningful here: the parser IS the discriminator, and the
+    /// key-count floor is a real boundary it can regress back to.
+    #[test]
+    fn set_algebra_floor_claims_are_honoured_at_every_claimed_arity() {
+        let cfg = ParserConfig::default();
+
+        fn packet(name: &[u8], keys: usize) -> Vec<u8> {
+            let mut p = format!("*{}\r\n${}\r\n", keys + 1, name.len()).into_bytes();
+            p.extend_from_slice(name);
+            p.extend_from_slice(b"\r\n");
+            for i in 0..keys {
+                p.extend_from_slice(format!("$2\r\ns{}\r\n", i % 10).as_bytes());
+            }
+            p
+        }
+
+        for (name, class) in [
+            (&b"SINTER"[..], super::BorrowedDispatchFloorClass::Sinter),
+            (&b"SUNION"[..], super::BorrowedDispatchFloorClass::Sunion),
+            (&b"SDIFF"[..], super::BorrowedDispatchFloorClass::Sdiff),
+        ] {
+            for keys in 1..=super::KEYS_MULTI_MAX {
+                let pkt = packet(name, keys);
+                let shown = String::from_utf8_lossy(name).to_string();
+
+                assert_eq!(
+                    super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
+                    Some(class.clone()),
+                    "{shown} with {keys} key(s) must classify"
+                );
+                // The claim must be one the arm's parser honours. Before 9hnxt this
+                // failed for every count below nine — silently, because the reply
+                // is identical either way and only a profile shows the difference.
+                assert!(
+                    super::parse_borrowed_plain_keys_multi_packet(&pkt, &cfg, name).is_some(),
+                    "{shown} with {keys} key(s) is claimed at the floor but keys_multi \
+                     declines it, so the packet lands on the GENERIC path"
+                );
+            }
+            // ABOVE THE PARSER'S CAPACITY THE CLAIM IS DELIBERATE, and the first
+            // version of this assertion had it backwards — it required the floor
+            // NOT to claim, fired on its first run, and I nearly "fixed" the
+            // classifier to satisfy it. Recording the reasoning because the wrong
+            // version is the intuitive one.
+            //
+            // The two outcomes are not symmetric. A classifier returning None
+            // falls through to the CASCADE; a classifier returning Some whose arm
+            // then declines calls parse_borrowed_multibulk_action directly and
+            // goes straight to GENERIC. So narrowing an over-broad claim is a win
+            // exactly when the cascade HAS an arm that serves the shape, and a
+            // pessimisation when it does not — it adds a walk that ends in the
+            // same place.
+            //
+            // For these three above KEYS_MULTI_MAX, it does not. Each has exactly
+            // ONE cascade arm (SINTER ~7790, SUNION ~7734, SDIFF ~7762), all using
+            // this same capped parser; SINTERCARD and SINTERSTORE are different
+            // commands. So an over-cap packet reaches generic either way, and
+            // claiming it here SKIPS the walk. Bounding the range would be
+            // strictly slower.
+            //
+            // What must therefore be asserted is not "must not claim" but "the
+            // claim shadows nothing": the parser declines, AND no other route
+            // could have served it. The first half is checkable here; the second
+            // is the comment above, and it is the half to re-verify if a new
+            // set-algebra arm is ever added to the cascade.
+            let over = packet(name, super::KEYS_MULTI_MAX + 1);
+            assert!(
+                super::parse_borrowed_plain_keys_multi_packet(&over, &cfg, name).is_none(),
+                "{} with {} keys must exceed the parser's capacity, or the cap moved \
+                 and the claimed range should move with it",
+                String::from_utf8_lossy(name),
+                super::KEYS_MULTI_MAX + 1
+            );
+        }
+    }
+
     #[test]
     fn dispatch_floor_classifier_recognizes_only_exact_target_tokens() {
         let cfg = ParserConfig::default();
@@ -43908,15 +44053,30 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         // keys_multi is ever widened to serve small arrays, this fails and sends
         // the reader here rather than letting the classifier silently keep
         // routing around a parser that would now cope.
+        //
+        // (frankenredis-9hnxt) AND IT FIRED, one commit later, exactly as designed.
+        // keys_multi's floor was lowered from `arr_len < 10` to `arr_len < 2`,
+        // because SINTER/SUNION/SDIFF were added as callers after that floor was
+        // written and have NO exact-N parsers to fall back to — which is what left
+        // sinter_2 the last shape not ahead of Redis. So the parser now DOES accept
+        // a 2-key MGET.
+        //
+        // The MGET class split below is nonetheless KEPT, and the reason is the
+        // point of this note: `mget_two` is a fixed-shape parser with no array-length
+        // scan and no bounds loop, so MgetN remains the better route for 2..=8 keys.
+        // The split is no longer load-bearing for CORRECTNESS — it is now a
+        // performance choice, where before it was the difference between a working
+        // route and the generic path. Assert the new boundary so the next reader
+        // gets the current fact rather than the historical one.
         assert!(
             super::parse_borrowed_plain_keys_multi_packet(
                 b"*3\r\n$4\r\nMGET\r\n$1\r\na\r\n$1\r\nb\r\n",
                 &cfg,
                 b"MGET",
             )
-            .is_none(),
-            "keys_multi is a 9..=32-key parser; the class split below exists because it \
-             DECLINES small arrays. If this now parses, revisit the split."
+            .is_some(),
+            "keys_multi now serves 1..=32 keys; if this declines again, the SINTER \
+             small-key route has silently reverted to the generic path"
         );
         // ...so a two-key MGET must NOT be handed the multi class. Handing it
         // over is not a slow path, it is a REGRESSION: the arm's only parser
