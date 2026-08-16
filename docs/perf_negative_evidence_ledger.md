@@ -20625,3 +20625,72 @@ RETRY PREDICATE: do NOT spend a dispatch lever on sinterstore_3src — 7.4 pct i
 floor and there is nothing to take. If anyone wants this shape, attack the intersection
 or the store path and measure against fr's 9,900.3 instr/op baseline. And read the
 calibration above WITH the absolute instr/op beside it, never the share alone.
+
+## MEASURED (frankenredis-f2zrr) — front-classifying BITCOUNT's range form: 0.9288x -> 0.5702x, and the refuted STOP verdict is confirmed refuted by the lever landing
+
+Claim class: COMPETITIVE — fr and the vendored Redis 7.2.4 binary in the SAME invocation.
+Same provenance limitation as the rows above (valgrind hosts the target, so no
+self-reported ELF SHA; ABBA repeats, not a bootstrap CI).
+
+    run  shape            fr instr/op   redis 7.2.4   fr/redis   dispatch share
+    A    bitcount_range       2302.6        4106.0     0.5608x       20.0%
+    B    bitcount             2059.2        3149.8     0.6537x       16.0%   <- CONTROL
+    B    bitcount             2035.7        3059.8     0.6653x       16.0%   <- CONTROL
+    A    bitcount_range       2338.1        4100.2     0.5702x       19.8%
+
+    worst bound   range  0.9288x -> 0.5702x    fr instr/op ~3705 -> ~2320
+    control       base   0.6278x -> 0.6653x    fr instr/op ~2027 -> ~2047 (flat)
+    share         range  46.4 pct -> 20.0 pct  (stranded band -> front-classified band)
+
+~1385 instr/op removed, 37 pct of the op. The route was the worst on the board and is now
+comfortably ahead of the incumbent.
+
+THE PREDICTION MATCHED TWICE, WHICH IS THE MECHANISM EVIDENCE. The previous row decomposed
+the range form's 1716.7 instr/op excess over base as 1411.0 dispatch (82 pct) and 305.7
+everything-else (18 pct), against a STOP verdict that had attributed the whole gap to
+"real work, not dispatch overhead". After the lever:
+
+    predicted dispatch recovered   1411.0    measured   ~1385    (within 2 pct)
+    predicted residual real work    305.7    measured    ~273    (within 11 pct)
+
+The residual is the genuine start/end handling, and it is what the STOP verdict claimed
+the ENTIRE 1716 was. It is 16 pct of it.
+
+THE CONTROL DID NOT MOVE — `bitcount` base was already classified at 16.0 pct share and
+stayed there, 2027 -> 2047 instr/op. That is what attributes the gain to this arm rather
+than to anything else that landed in the tree.
+
+THE LEVER: one class variant, one `(4, Bitcount)` classifier arm, and a dispatch arm
+mirroring the cascade arm at ~7863 exactly — same parser, same executor, same generic
+fallthrough. Arity 4 EXACTLY, not `>= 4`: the unit form
+(`BITCOUNT key start end BYTE|BIT`) is arity 5 with its own parser, so a wider claim would
+capture it and the arm would decline it to GENERIC — the `arity >= 3` defect this campaign
+has now hit five times.
+
+A/A NULL, from the ABBA repeats in this one invocation:
+
+    fr arm      bitcount_range  2302.6 -> 2338.1   +1.54%
+                bitcount        2059.2 -> 2035.7   -1.14%
+    redis arm   bitcount_range  4106.0 -> 4100.2   -0.14%
+                bitcount        3149.8 -> 3059.8   -2.86%
+    ratio       range 0.5608 -> 0.5702  1.68%  |  base 0.6537 -> 0.6653  1.77%
+
+The 37 pct movement clears the 1.68 pct spread by twenty-two times.
+
+A NOTE ON THE GATE RUN: `live_hot_partition_spreads_connections_across_reactors` failed
+once in the full fr-server suite and passed twice on isolated re-runs. It measures
+connection distribution across reactors, is timing-dependent, and has no relationship to
+BITCOUNT classification. Recorded as observed-flaky rather than silently re-run until
+green.
+
+EXECUTABLE IDENTITIES, full 64-hex (computed post-run, see limitation above):
+  candidate  `ef698e0c28f74d21cee3d5cbcb13f2c01eb0f64666d7b7c373c00ebc22354dfc`
+  incumbent  `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+  tests      fr-server 339 passed, 0 failed.
+
+Campaign output: yes — a STOP verdict refuted by measurement, then refuted again by the
+lever it had been discouraging.
+
+RETRY PREDICATE: SWEEP THE FAMILY. ZADD and BITCOUNT both had one form classified and its
+sibling stranded; that is a per-shape classification habit, not a property of options.
+Check every command where a base and an optioned form both have borrowed parsers.

@@ -14772,6 +14772,10 @@ enum BorrowedDispatchFloorClass {
     Srandmember,
     Getrange,
     BitcountKey,
+    /// (frankenredis-f2zrr) `BITCOUNT key start end`. Its sibling BitcountKey was
+    /// classified and this form was not, leaving the range shape at 46.4 pct dispatch
+    /// share against the base form's 16.0 pct.
+    BitcountRange,
     Zrange,
     Hrandfield,
     BitposKeyBit,
@@ -16350,6 +16354,15 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // (arity 4/5) fall through to the unchanged generic borrowed path.
         (2, BorrowedDispatchFloorCommand::Bitcount) => {
             Some(BorrowedDispatchFloorClass::BitcountKey)
+        }
+        // (frankenredis-f2zrr) The range form, measured stranded at 46.4 pct dispatch
+        // share while its already-classified base sibling sat at 16.0 pct. 82 pct of
+        // the range form's excess over base was dispatch, not the start/end handling a
+        // STOP verdict had attributed it to. Arity 4 exactly: the BITCOUNT unit form
+        // (`BITCOUNT key start end BYTE|BIT`) is arity 5 and has its own parser, so a
+        // wider claim would capture it and the arm below would decline it to GENERIC.
+        (4, BorrowedDispatchFloorCommand::Bitcount) => {
+            Some(BorrowedDispatchFloorClass::BitcountRange)
         }
         (3, BorrowedDispatchFloorCommand::Hget) => Some(BorrowedDispatchFloorClass::Hget),
         (3, BorrowedDispatchFloorCommand::Sismember) => Some(BorrowedDispatchFloorClass::Sismember),
@@ -20063,6 +20076,35 @@ fn try_dispatch_floor_classified_action(
             if let Some(packet) = parse_borrowed_plain_sismember_packet(unparsed, &parser_config)
                 && let Some(response) =
                     runtime.execute_plain_sismember_borrowed(packet.key, packet.member, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        // (frankenredis-f2zrr) Mirrors the cascade arm at ~7863 exactly — same parser,
+        // same executor, same generic fallthrough — so only the walk to reach it is
+        // removed. The range form measured 46.4 pct dispatch share against the base
+        // form's 16.0 pct, and 82 pct of its excess over base was dispatch rather than
+        // the start/end handling an earlier STOP verdict attributed it to.
+        BorrowedDispatchFloorClass::BitcountRange => {
+            if let Some(packet) =
+                parse_borrowed_plain_bitcount_range_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_bitcount_borrowed(
+                    packet.key,
+                    Some((packet.start, packet.end, None)),
+                    ts,
+                )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
