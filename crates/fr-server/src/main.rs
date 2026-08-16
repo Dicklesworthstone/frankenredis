@@ -9703,55 +9703,9 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
-                    parse_borrowed_plain_hsetnx_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_hsetnx_borrowed(
-                        packet.key,
-                        packet.start,
-                        packet.end,
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
                     parse_borrowed_plain_hincrby_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_hincrby_borrowed(
-                        packet.key,
-                        packet.start,
-                        packet.end,
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_hincrbyfloat_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_hincrbyfloat_borrowed(
                         packet.key,
                         packet.start,
                         packet.end,
@@ -14684,6 +14638,8 @@ enum BorrowedDispatchFloorClass {
     Getset,
     Lset,
     Incrbyfloat,
+    Hsetnx,
+    Hincrbyfloat,
     /// (frankenredis-ozrro) Bare `ZRANDMEMBER key`, the single-member reply
     /// form. Its sibling [`Self::ZrandmemberCount`] was classified in an earlier
     /// slice, which left this one alone ~3,600 lines deep in the chain.
@@ -14902,6 +14858,10 @@ enum BorrowedDispatchFloorCommand {
     Pexpiretime,
     /// `PERSIST`. Only the bare `PERSIST key` form has a borrowed route.
     Persist,
+    /// `HSETNX`, `HINCRBYFLOAT`. (frankenredis-iqicb) Hash twins of `SETNX` and
+    /// `INCRBYFLOAT`, same situation: parser and executor already present, no class.
+    Hsetnx,
+    Hincrbyfloat,
     /// `SETNX`, `GETSET`, `LSET`, `INCRBYFLOAT`. (frankenredis-iqicb) Each already
     /// had a borrowed parser and executor and merely sat deep in the probe chain.
     Setnx,
@@ -15104,6 +15064,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
         6 => match uppercase_ascii_token::<6>(token)? {
             [b'D', b'B', b'S', b'I', b'Z', b'E'] => Some(BorrowedDispatchFloorCommand::Dbsize),
             [b'P', b'S', b'E', b'T', b'E', b'X'] => Some(BorrowedDispatchFloorCommand::Psetex),
+            [b'H', b'S', b'E', b'T', b'N', b'X'] => Some(BorrowedDispatchFloorCommand::Hsetnx),
             [b'G', b'E', b'T', b'S', b'E', b'T'] => {
                 Some(BorrowedDispatchFloorCommand::Getset)
             }
@@ -15245,6 +15206,23 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
                 b'R',
                 b'E',
             ] => Some(BorrowedDispatchFloorCommand::Zrangebyscore),
+            _ => None,
+        },
+        12 => match uppercase_ascii_token::<12>(token)? {
+            [
+                b'H',
+                b'I',
+                b'N',
+                b'C',
+                b'R',
+                b'B',
+                b'Y',
+                b'F',
+                b'L',
+                b'O',
+                b'A',
+                b'T',
+            ] => Some(BorrowedDispatchFloorCommand::Hincrbyfloat),
             _ => None,
         },
         11 => match uppercase_ascii_token::<11>(token)? {
@@ -15893,6 +15871,10 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (4, BorrowedDispatchFloorCommand::Lset) => Some(BorrowedDispatchFloorClass::Lset),
         (3, BorrowedDispatchFloorCommand::Incrbyfloat) => {
             Some(BorrowedDispatchFloorClass::Incrbyfloat)
+        }
+        (4, BorrowedDispatchFloorCommand::Hsetnx) => Some(BorrowedDispatchFloorClass::Hsetnx),
+        (4, BorrowedDispatchFloorCommand::Hincrbyfloat) => {
+            Some(BorrowedDispatchFloorClass::Hincrbyfloat)
         }
         // `COMMAND COUNT` is the only COMMAND subcommand with a borrowed route,
         // so a declined classification here costs nothing: DOCS/INFO/LIST/GETKEYS
@@ -19642,6 +19624,40 @@ fn try_dispatch_floor_classified_action(
                     out,
                     argv_scratch,
                 )
+            }
+        }
+        BorrowedDispatchFloorClass::Hsetnx => {
+            if let Some(packet) = parse_borrowed_plain_hsetnx_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_hsetnx_borrowed(
+                    packet.key,
+                    packet.start,
+                    packet.end,
+                    ts,
+                )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(unparsed, parser_config, runtime, ts, out, argv_scratch)
+            }
+        }
+        BorrowedDispatchFloorClass::Hincrbyfloat => {
+            if let Some(packet) = parse_borrowed_plain_hincrbyfloat_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_hincrbyfloat_borrowed(
+                    packet.key,
+                    packet.start,
+                    packet.end,
+                    ts,
+                )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(unparsed, parser_config, runtime, ts, out, argv_scratch)
             }
         }
         BorrowedDispatchFloorClass::Setnx => {
@@ -42939,6 +42955,44 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
     #[test]
     fn dispatch_floor_classifier_recognizes_only_exact_target_tokens() {
         let cfg = ParserConfig::default();
+        // (frankenredis-iqicb) HSETNX and HINCRBYFLOAT, both arity 4. HINCRBYFLOAT
+        // also opens a NEW 12-character token group, so the near-miss row matters
+        // more than usual: nothing else guards that length.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*4\r\n$6\r\nHsEtNx\r\n$1\r\nh\r\n$1\r\nf\r\n$1\r\nv\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Hsetnx)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$6\r\nHSETNX\r\n$1\r\nh\r\n$1\r\nf\r\n",
+                &cfg,
+            ),
+            None
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*4\r\n$12\r\nHiNcRbYfLoAt\r\n$1\r\nh\r\n$1\r\nf\r\n$1\r\n1\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Hincrbyfloat)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*4\r\n$12\r\nHINCRBYFLOAU\r\n$1\r\nh\r\n$1\r\nf\r\n$1\r\n1\r\n",
+                &cfg,
+            ),
+            None
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$12\r\nHINCRBYFLOAT\r\n$1\r\nh\r\n$1\r\nf\r\n",
+                &cfg,
+            ),
+            None
+        );
         // (frankenredis-iqicb) The four plain-parser routes and their claimed arities.
         // Each asserts the claimed arity classifies and a NEIGHBOURING arity does not,
         // because an over-broad claim silently swallows shapes whose errors the fast

@@ -2426,6 +2426,32 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"INCRBYFLOAT", b"s:ls", b"1"]));
     cmds.push(c(&[b"incrbyfloat", b"s:if", b"0"]));
     cmds.push(c(&[b"INCRBYFLOAT", b"s:if"]));
+    // (frankenredis-iqicb) HSETNX and HINCRBYFLOAT, the hash twins. HSETNX reads the
+    // FIELD back after the failing case for the same reason SETNX does: not
+    // overwriting is the whole contract. HINCRBYFLOAT exercises several magnitudes
+    // because the trailing-zero-trimmed reply format is the fragile half, and the
+    // WRONGTYPE row uses a LIST key so the error comes from the type check rather
+    // than from parsing.
+    cmds.push(c(&[b"HSETNX", b"h:nx", b"f", b"first"]));
+    cmds.push(c(&[b"HSETNX", b"h:nx", b"f", b"second"]));
+    cmds.push(c(&[b"HGET", b"h:nx", b"f"]));
+    cmds.push(c(&[b"hsetnx", b"h:nx", b"g", b"mixed"]));
+    cmds.push(c(&[b"HGET", b"h:nx", b"g"]));
+    cmds.push(c(&[b"HSETNX", b"s:ls", b"f", b"v"]));
+    cmds.push(c(&[b"HSETNX", b"h:nx", b"f"]));
+    cmds.push(c(&[b"HSETNX", b"h:nx", b"f", b"v", b"extra"]));
+    cmds.push(c(&[b"HSET", b"h:if", b"f", b"10.5"]));
+    cmds.push(c(&[b"HINCRBYFLOAT", b"h:if", b"f", b"0.1"]));
+    cmds.push(c(&[b"HINCRBYFLOAT", b"h:if", b"f", b"-0.6"]));
+    cmds.push(c(&[b"HINCRBYFLOAT", b"h:if", b"f", b"5"]));
+    cmds.push(c(&[b"HGET", b"h:if", b"f"]));
+    cmds.push(c(&[b"HINCRBYFLOAT", b"h:if", b"absentfield", b"2.5"]));
+    cmds.push(c(&[b"HSET", b"h:if", b"bad", b"notanumber"]));
+    cmds.push(c(&[b"HINCRBYFLOAT", b"h:if", b"bad", b"1"]));
+    cmds.push(c(&[b"HINCRBYFLOAT", b"h:if", b"f", b"notanumber"]));
+    cmds.push(c(&[b"HINCRBYFLOAT", b"s:ls", b"f", b"1"]));
+    cmds.push(c(&[b"hincrbyfloat", b"h:if", b"f", b"0"]));
+    cmds.push(c(&[b"HINCRBYFLOAT", b"h:if", b"f"]));
     // (frankenredis-ozrro) COPY is claimed at arity 3 only; the REPLACE spelling
     // keeps the cascade. Both the create and the already-exists branches run,
     // and the destination is read back so a copy that returned 1 without
