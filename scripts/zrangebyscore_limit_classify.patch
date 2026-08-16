@@ -1,0 +1,105 @@
+Front-classify ZRANGEBYSCORE's LIMIT form (frankenredis-50ntn / ayiy7)
+
+WHY THIS IS A PATCH FILE AND NOT AN EDIT. /data has sat at 58.1-58.4G against a 59G
+floor for three turns, so there is no build slot and I cannot compile this. An
+uncompiled edit to crates/fr-server/src/main.rs reddens every pane's suite during a
+disk crisis, and an uncommitted edit does not stay parked -- last time one was swept
+into a peer's commit stripped of its caveats (frankenredis-fhgvc). A committed patch
+has the review value of real code and none of the blast radius.
+
+APPLY WITH:
+    git apply scripts/zrangebyscore_limit_classify.patch
+then, before trusting it:
+    python3 scripts/build_preflight.py          # must print CLEAR TO BUILD
+    cargo build --release -p fr-server --bin frankenredis --features perf-ab-cascade-bypass
+    strings <binary> | grep -c FR_PERF_AB_CASCADE_BYPASS    # must be 1, not 0
+    <three-way differ; the 14 ZRANGEBYSCORE rows are already in the corpus at 8bd375ac6>
+
+WHY IT IS SAFE TO CLAIM ARITY 7 WITHOUT A KEYWORD CHECK. Every ZRANGEBYSCORE array
+length carries exactly one form -- 4 plain, 5 WITHSCORES, 7 LIMIT, 8 WITHSCORES LIMIT
+(scripts/arity_misclaim_screen.py --advise ZRANGEBYSCORE). This is NOT ZRANGE, where
+arity 5 carries four rival forms and the discrimination had to live in the arm
+(frankenredis-jnf09). The arm below still tests the LIMIT token, because the classifier
+promises only a LENGTH and the token is what the parser was given.
+
+THE ARM IS A COPY OF THE CASCADE ARM AT main.rs:12375, with `out` in place of
+`&mut conn.write_buf`, which is the same transposition every other floor arm makes.
+The executor it calls -- execute_plain_zrangebyscore_limit_borrowed_into -- is the
+zero-copy `_into` member-borrow path and already exists; nothing new is written.
+
+--- a/crates/fr-server/src/main.rs
++++ b/crates/fr-server/src/main.rs
+@@ -14584,8 +14584,15 @@
+     /// (frankenredis-ozrro) `ZRANK key member`.
+     Zrank,
+     /// (frankenredis-ozrro) `ZRANGEBYSCORE key min max`, the plain arity-4 form
+-    /// only — WITHSCORES and LIMIT keep the cascade.
++    /// only — WITHSCORES keeps the cascade. LIMIT no longer does; see below.
+     Zrangebyscore,
++    /// (frankenredis-50ntn) `ZRANGEBYSCORE key min max LIMIT offset count`, arity 7.
++    /// ozrro left this on the cascade deliberately. It measured 0.7932 against Redis
++    /// 7.2.4 with a worst bound of 0.7713, replicated on two ELFs — the deepest
++    /// below-parity route holding an admissible row. The cost is the WALK: its arm
++    /// sits at ~12375, roughly 5,485 lines past the floor dispatch call, and the
++    /// shape censused at 81.0 parses per op against 9,755.4 instr of dispatch.
++    ZrangebyscoreLimit,
+     /// (frankenredis-ozrro) `ZREVRANGEBYSCORE key max min`, arity-4 form only.
+     Zrevrangebyscore,
+     /// (frankenredis-ozrro) `ZREVRANGE key start stop`, arity-4 form only —
+@@ -16173,6 +16180,12 @@
+         (4, BorrowedDispatchFloorCommand::Zrangebyscore) => {
+             Some(BorrowedDispatchFloorClass::Zrangebyscore)
+         }
++        // (frankenredis-50ntn) Arity 7 is the LIMIT form and nothing else: every
++        // ZRANGEBYSCORE length carries exactly one form, so this claim cannot
++        // mis-claim a sibling the way (5, Zrange) claimed REV/BYSCORE/BYLEX.
++        (7, BorrowedDispatchFloorCommand::Zrangebyscore) => {
++            Some(BorrowedDispatchFloorClass::ZrangebyscoreLimit)
++        }
+         (3, BorrowedDispatchFloorCommand::Append) => Some(BorrowedDispatchFloorClass::Append),
+         (4, BorrowedDispatchFloorCommand::Zremrangebyscore) => {
+             Some(BorrowedDispatchFloorClass::Zremrangebyscore)
+@@ -18733,6 +18746,43 @@
+             {
+                 Ok(BorrowedMultibulkAction::FastEncodedReply {
+                     consumed: packet.consumed,
++                })
++            } else {
++                parse_borrowed_multibulk_action(
++                    unparsed,
++                    parser_config,
++                    runtime,
++                    ts,
++                    out,
++                    argv_scratch,
++                )
++            }
++        }
++        // (frankenredis-50ntn) The arity-7 LIMIT form, mirroring the cascade arm at
++        // ~12375 with `out` in place of `&mut conn.write_buf`. The LIMIT token is
++        // still checked here: the classifier promises a LENGTH, and only the parser
++        // sees the token.
++        BorrowedDispatchFloorClass::ZrangebyscoreLimit => {
++            if let Some(packet) = parse_borrowed_plain_key_arg5_packet(
++                unparsed,
++                &parser_config,
++                b"*7\r\n$13\r\n",
++                b"ZRANGEBYSCORE",
++            ) && packet.c.eq_ignore_ascii_case(b"LIMIT")
++                && runtime
++                    .execute_plain_zrangebyscore_limit_borrowed_into(
++                        packet.key,
++                        packet.a,
++                        packet.b,
++                        packet.d,
++                        packet.e,
++                        ts,
++                        out,
++                    )
++                    .is_some()
++            {
++                Ok(BorrowedMultibulkAction::FastEncodedReply {
++                    consumed: packet.consumed,
+                 })
+             } else {
+                 parse_borrowed_multibulk_action(
