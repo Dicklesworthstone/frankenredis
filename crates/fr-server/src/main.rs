@@ -45395,13 +45395,17 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
             ),
             Some(super::BorrowedDispatchFloorClass::Sintercard)
         );
-        // The LIMIT spelling is arity 6 and keeps the cascade.
+        // (frankenredis-ex3il) The LIMIT spelling is arity 6 and IS now claimed: that
+        // lever widened the arm from `(4..=5, Sintercard)` to `(4..=6, ...)` and added
+        // the sintercard2_limit / sintercard4 parsers to serve it. This row asserted
+        // `None` for as long as arity 6 kept the cascade, so it is obsoleted BY the
+        // lever rather than violated by it.
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(
                 b"*6\r\n$10\r\nSINTERCARD\r\n$1\r\n2\r\n$2\r\ns1\r\n$2\r\ns2\r\n$5\r\nLIMIT\r\n$1\r\n1\r\n",
                 &cfg,
             ),
-            None
+            Some(super::BorrowedDispatchFloorClass::Sintercard)
         );
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(
