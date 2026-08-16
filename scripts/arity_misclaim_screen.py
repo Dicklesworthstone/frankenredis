@@ -270,10 +270,33 @@ def sweep():
             ambiguous.append((cmd, arity, cls, tuple(hits)))
         else:
             clean += 1
+    # RANGE mints were never checked for ambiguity: floor_claims() only extracts
+    # fixed `(N, Cmd)` patterns, so `(4..=5, Sintercard)` slipped past every
+    # ambiguity check this screen has. SINTERCARD is the instance -- array length 5
+    # is `(plain) x3` or `LIMIT x1`, and the arm holds only sintercard2/sintercard3.
+    for cmd, lo, hi, cls in range_claims():
+        got = form_map(cmd)
+        if got is None:
+            unmodelled += 1
+            continue
+        _b, _w, forms = got
+        top = hi if hi is not None else lo + 8
+        for arity in range(lo, top + 1):
+            hits = forms.get(arity, [])
+            if len(hits) >= 2:
+                ambiguous.append((cmd, arity, cls + " (range)", tuple(hits)))
+            else:
+                clean += 1
+
     print("AMBIGUOUS AT THEIR CLAIMED ARITY -- %d" % len(set(ambiguous)))
     for cmd, arity, cls, hits in sorted(set(ambiguous)):
-        print("  %-12s arity %-2d -> %-22s %s"
-              % (cmd, arity, cls, " | ".join(hits)))
+        # Commands with several INDEPENDENT flags (ZADD has NX/XX/GT/LT/CH/INCR)
+        # produce combinatorially many readings per length. Printing all eighteen
+        # buries the single-line findings that are actionable, so cap and count.
+        shown = " | ".join(hits[:4])
+        if len(hits) > 4:
+            shown += "  ... and %d more" % (len(hits) - 4)
+        print("  %-12s arity %-2d -> %-22s %s" % (cmd, arity, cls, shown))
     print("\nunambiguous: %d   still unmodelled: %d" % (clean, unmodelled))
     print("Each hit needs the ARM read: an arm may chain parsers and serve every")
     print("form (GETEX does), and a hit is ambiguity, never a confirmed defect.")
