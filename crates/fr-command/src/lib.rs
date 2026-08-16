@@ -13040,6 +13040,185 @@ fn zrangestore_cmd(
 
 // ── FUNCTION ────────────────────────────────────────────────────────
 
+/// (frankenredis-o500d) The first LOAD-TIME global reference in a FUNCTION LOAD
+/// library body that vendored 7.2.4's sandbox would refuse, as `(line, name)`.
+///
+/// Upstream compiles AND RUNS the library body at load time inside a sandbox
+/// whose global table exposes only the declared set, so reading any other global
+/// fails the load before anything registers. Probed against live 7.2.4, that set
+/// at library top level is exactly `redis` — `server`, `error`, `tonumber`,
+/// `type`, `pcall`, `table`, `string`, `math`, `cjson`, `_G` and twenty others
+/// are all refused.
+///
+/// This is the STATIC half of that rule and it deliberately UNDER-approximates:
+/// it reports only what it can prove, so it can never refuse a library upstream
+/// accepts. Two boundaries were measured rather than assumed:
+///
+///   * A global inside a REGISTERED FUNCTION body is fine — that body runs at
+///     FCALL time, not load time. `register_function('f', function() return
+///     tonumber('1') end)` loads on 7.2.4 and the call then returns 1. So the
+///     walk does not descend into function bodies.
+///   * `local c = redis.call` IS refused upstream, reported as the nonexistent
+///     global `'call'` — the sandbox gates FIELDS on the redis table too. That is
+///     a separate mechanism and is not implemented here; leaving it accepted is
+///     an under-approximation, which is safe.
+///
+/// The resolver substitutes `Expr::LocalName` for every local binding, so an
+/// `Expr::Name` surviving compilation IS a global reference — which is why the
+/// AST answers this and a text scan would not.
+fn function_library_first_undeclared_global(code: &[u8]) -> Option<(u32, String)> {
+    use lua_eval::{Expr, Stmt};
+
+    fn scan_expr(expr: &Expr, out: &mut Option<String>) {
+        if out.is_some() {
+            return;
+        }
+        match expr {
+            Expr::Name(name) => {
+                // The only global the library body may read at load time.
+                if name.as_ref() != "redis" {
+                    *out = Some(name.to_string());
+                }
+            }
+            // A function literal's body runs at FCALL time, not load time.
+            Expr::FunctionDef(_, _, _) => {}
+            Expr::BinOp(lhs, _, rhs) => {
+                scan_expr(lhs, out);
+                scan_expr(rhs, out);
+            }
+            Expr::UnaryOp(_, inner) => scan_expr(inner, out),
+            Expr::Index(base, key) => {
+                scan_expr(base, out);
+                scan_expr(key, out);
+            }
+            Expr::Field(base, _) => scan_expr(base, out),
+            Expr::Call(callee, args) => {
+                scan_expr(callee, out);
+                for arg in args {
+                    scan_expr(arg, out);
+                }
+            }
+            Expr::IntrinsicCall(_, fallback, args) => {
+                scan_expr(fallback, out);
+                for arg in args {
+                    scan_expr(arg, out);
+                }
+            }
+            Expr::MethodCall(obj, _, args) => {
+                scan_expr(obj, out);
+                for arg in args {
+                    scan_expr(arg, out);
+                }
+            }
+            Expr::TableConstructor(fields) => {
+                for field in fields {
+                    match field {
+                        lua_eval::TableField::Positional(value) => scan_expr(value, out),
+                        lua_eval::TableField::Named(_, value) => scan_expr(value, out),
+                        lua_eval::TableField::Index(key, value) => {
+                            scan_expr(key, out);
+                            scan_expr(value, out);
+                        }
+                    }
+                }
+            }
+            Expr::Nil
+            | Expr::Bool(_)
+            | Expr::Number(_)
+            | Expr::Str(_)
+            | Expr::LocalName(_, _)
+            | Expr::VarArgs => {}
+        }
+    }
+
+    fn scan_block(block: &[(u32, Stmt)]) -> Option<(u32, String)> {
+        for (line, stmt) in block {
+            let mut found = None;
+            match stmt {
+                Stmt::Assign(targets, values) => {
+                    for expr in targets.iter().chain(values) {
+                        scan_expr(expr, &mut found);
+                    }
+                }
+                Stmt::LocalAssign(_, values) | Stmt::Return(values) => {
+                    for expr in values {
+                        scan_expr(expr, &mut found);
+                    }
+                }
+                Stmt::Expression(expr) => scan_expr(expr, &mut found),
+                Stmt::If(arms, otherwise) => {
+                    for (cond, body) in arms {
+                        scan_expr(cond, &mut found);
+                        if found.is_none()
+                            && let Some(hit) = scan_block(body)
+                        {
+                            return Some(hit);
+                        }
+                    }
+                    if found.is_none()
+                        && let Some(body) = otherwise
+                        && let Some(hit) = scan_block(body)
+                    {
+                        return Some(hit);
+                    }
+                }
+                Stmt::NumericFor(_, start, stop, step, body) => {
+                    scan_expr(start, &mut found);
+                    scan_expr(stop, &mut found);
+                    if let Some(step) = step {
+                        scan_expr(step, &mut found);
+                    }
+                    if found.is_none()
+                        && let Some(hit) = scan_block(body)
+                    {
+                        return Some(hit);
+                    }
+                }
+                Stmt::GenericFor(_, values, body) => {
+                    for expr in values {
+                        scan_expr(expr, &mut found);
+                    }
+                    if found.is_none()
+                        && let Some(hit) = scan_block(body)
+                    {
+                        return Some(hit);
+                    }
+                }
+                Stmt::While(cond, body) => {
+                    scan_expr(cond, &mut found);
+                    if found.is_none()
+                        && let Some(hit) = scan_block(body)
+                    {
+                        return Some(hit);
+                    }
+                }
+                Stmt::Repeat(body, cond) => {
+                    if let Some(hit) = scan_block(body) {
+                        return Some(hit);
+                    }
+                    scan_expr(cond, &mut found);
+                }
+                Stmt::DoBlock(body) => {
+                    if let Some(hit) = scan_block(body) {
+                        return Some(hit);
+                    }
+                }
+                // Declaring a function does not RUN its body at load time.
+                Stmt::FunctionDecl(_, _, _, _)
+                | Stmt::LocalFunctionDecl(_, _, _, _)
+                | Stmt::Break => {}
+            }
+            if let Some(name) = found {
+                return Some((*line, name));
+            }
+        }
+        None
+    }
+
+    let chunk = lua_eval::compile_lua_chunk_cached(code).ok()?;
+    scan_block(chunk.top_level())
+}
+
 fn function_cmd(
     argv: &[Vec<u8>],
     store: &mut Store,
@@ -13111,6 +13290,24 @@ fn function_cmd(
             let mut body = b"ERR Error compiling function: user_function:".to_vec();
             body.extend_from_slice(&lua_eval::compile_error_line_bytes(&argv[code_idx]));
             return Err(CommandError::RawError(body));
+        }
+        // (frankenredis-o500d) Upstream RUNS the library body at load time in a
+        // sandbox exposing only the declared globals, so a read of anything else
+        // fails the load before anything registers. fr never executes the body;
+        // this is the static half of that rule, and it runs AFTER the compile
+        // check (a syntax error must still win) but BEFORE function_load, so a
+        // refused library leaves the store untouched exactly as a failed
+        // recompile does.
+        //
+        // Ordering against 'No functions registered' is measured, not guessed:
+        // upstream reports the nonexistent-global error for a body that reads an
+        // undeclared global even when that body registers nothing, and reports
+        // 'No functions registered' only when the body is otherwise clean — so
+        // this check comes first.
+        if let Some((line, name)) = function_library_first_undeclared_global(&argv[code_idx]) {
+            return Err(CommandError::Custom(format!(
+                "ERR Error registering functions: ERR user_function:{line}: Script attempted to access nonexistent global variable '{name}'"
+            )));
         }
         match store.function_load(&argv[code_idx], replace) {
             Ok(name) => Ok(RespFrame::BulkString(Some(name.into_bytes()))),
@@ -70988,6 +71185,137 @@ mod tests {
             .expect("function load lua");
             assert!(matches!(ok, RespFrame::BulkString(Some(_))));
         }
+    }
+
+    /// (frankenredis-o500d) Upstream RUNS a FUNCTION LOAD library body at load
+    /// time in a sandbox exposing only the declared globals; fr never executes
+    /// the body, so a library reading an undeclared global loaded clean and then
+    /// PERSISTED — showing up in FUNCTION LIST/DUMP and surviving restart, so a
+    /// redis->fr migration silently diverged on which libraries exist.
+    ///
+    /// Every expectation below was read off live vendored 7.2.4, including the
+    /// allowed set (probed: exactly `redis` is visible at library top level —
+    /// `error`, `tonumber`, `type`, `table`, `string`, `math`, `cjson`, `_G` and
+    /// twenty others are all refused) and the line numbering (the shebang counts
+    /// as line 1).
+    #[test]
+    fn function_load_rejects_undeclared_globals_like_upstream() {
+        fn load(store: &mut Store, code: &str) -> Result<RespFrame, CommandError> {
+            dispatch_argv(
+                &[
+                    b"FUNCTION".to_vec(),
+                    b"LOAD".to_vec(),
+                    code.as_bytes().to_vec(),
+                ],
+                store,
+                0,
+            )
+        }
+        fn err_text(res: Result<RespFrame, CommandError>) -> String {
+            // The globals check returns Custom; the 'No functions registered'
+            // control comes back from the store. Both are errors the client sees
+            // identically, so the helper accepts either and the assertions
+            // compare the WORDING.
+            match res {
+                Err(CommandError::Custom(msg)) => msg,
+                Err(CommandError::Store(fr_store::StoreError::GenericError(msg))) => msg,
+                other => panic!("expected an error reply, got {other:?}"),
+            }
+        }
+
+        let mut store = Store::new();
+
+        // A top-level read of an undeclared global fails the load, naming the
+        // global and the 1-based line in the FULL library text.
+        assert_eq!(
+            err_text(load(
+                &mut store,
+                "#!lua name=c2\nlocal x = nosuchglobal_zz\nredis.register_function('a2', function() return 1 end)",
+            )),
+            concat!(
+                "ERR Error registering functions: ERR user_function:2: ",
+                "Script attempted to access nonexistent global variable 'nosuchglobal_zz'"
+            )
+        );
+
+        // `tonumber` is NOT visible at library top level — the sandbox is
+        // tighter than an EVAL script's, which is the counter-intuitive part.
+        assert!(
+            err_text(load(
+                &mut store,
+                "#!lua name=c3\nlocal x = tonumber('1')\nredis.register_function('a3', function() return 1 end)",
+            ))
+            .contains("nonexistent global variable 'tonumber'")
+        );
+
+        // The line is the line of the reference, not of the library.
+        assert!(
+            err_text(load(
+                &mut store,
+                "#!lua name=c7\n\nlocal q = ccc_zz\nredis.register_function('a7', function() return 1 end)",
+            ))
+            .contains("user_function:3:")
+        );
+
+        // The FIRST offending global in source order is the one reported.
+        assert!(
+            err_text(load(
+                &mut store,
+                "#!lua name=c8\nlocal a = aaa_zz\nlocal b = bbb_zz\nredis.register_function('a8', function() return 1 end)",
+            ))
+            .contains("'aaa_zz'")
+        );
+
+        // A statement AFTER register_function still counts, and so does one
+        // inside a block that executes at load time.
+        assert!(
+            err_text(load(
+                &mut store,
+                "#!lua name=cB\nredis.register_function('aB', function() return 1 end)\nlocal q = ddd_zz",
+            ))
+            .contains("'ddd_zz'")
+        );
+        assert!(
+            err_text(load(
+                &mut store,
+                "#!lua name=cC\nif 1 == 1 then local w = eee_zz end\nredis.register_function('aC', function() return 1 end)",
+            ))
+            .contains("'eee_zz'")
+        );
+
+        // ── negative cases: these must all still be ACCEPTED ────────────────
+        // A global inside a REGISTERED FUNCTION body runs at FCALL time, not
+        // load time. Upstream loads this and the call returns 1; a walk that
+        // descended into function bodies would wrongly refuse it.
+        assert!(matches!(
+            load(
+                &mut store,
+                "#!lua name=c4\nredis.register_function('a4', function() return tonumber('1') end)",
+            ),
+            Ok(RespFrame::BulkString(Some(_)))
+        ));
+        // ... including a function nested inside that one.
+        assert!(matches!(
+            load(
+                &mut store,
+                "#!lua name=cA\nredis.register_function('aA', function() local g=function() return type(1) end return g() end)",
+            ),
+            Ok(RespFrame::BulkString(Some(_)))
+        ));
+        // Locals and `redis` itself are fine.
+        assert!(matches!(
+            load(
+                &mut store,
+                "#!lua name=c9\nlocal t = 5\nredis.register_function('a9', function() return t end)",
+            ),
+            Ok(RespFrame::BulkString(Some(_)))
+        ));
+        // The control the bead names: a body registering nothing must keep its
+        // OWN wording and must not become a globals error.
+        assert_eq!(
+            err_text(load(&mut store, "#!lua name=c6\nlocal z = 1")),
+            "ERR No functions registered"
+        );
     }
 
     #[test]
