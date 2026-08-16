@@ -18749,3 +18749,51 @@ Campaign output: candidate only — no lever attempted, no ratio claimed.
 RETRY PREDICATE: measure sinter_9's RESULT CARDINALITY before touching the sort. If it is
 a handful of members, drop this and attack the membership probe instead — 12,114 instr/op
 with 8.3 pct dispatch leaves a lot that is neither sort nor dispatch.
+
+## CANDIDATE REFUTED ON SHAPE (frankenredis-gein3) — the SINTER sort is unmeasurable with the existing shapes, and measuring it would file a FALSE REJECT
+
+Filed and refuted in the same freeze, from source, no build and no new dumps.
+
+My own retry predicate on the entry above said: "measure sinter_9's RESULT CARDINALITY
+before touching the sort." Done, by reading the shape definitions rather than running
+anything:
+
+    sinter_9   nine sets, EVERY one {m1, m2, m3}          -> intersection = 3 members
+    sinter_2   {m1,m2,m3} INTERSECT {m2,m3,m4}            -> intersection = 2 members
+
+The harness comment says so outright: "Every set holds the same three members so the
+intersection result is identical and only the key COUNT differs." That is deliberate and
+correct for what those shapes were built to isolate — with/without a borrowed parser —
+but it means the RESULT is 2-3 members.
+
+SORTING 3 ELEMENTS IS UNDER 0.5 PCT OF 12,114 instr/op. So the sort candidate is not
+merely small on these shapes, it is INVISIBLE.
+
+THE ACTIONABLE FORM OF THIS IS NOT "the lever is worthless". It is:
+
+  **MEASURING gein3 WITH sinter_2 OR sinter_9 WOULD PRODUCE A FALSE REJECT.** A perfect
+  fix scores ~0 on a 2-3 member result, the row gets filed REJECT, and the lever is
+  poisoned for whoever comes next — who will find a REJECT entry and not retry it. This
+  is the bench-must-reach-the-function-you-changed trap: the shape does not exercise the
+  code the change touches.
+
+A SHAPE THAT CAN SEE IT needs a LARGE intersection, since the sort is O(k log k) in
+result cardinality: e.g. two sets of ~1000 members overlapping in ~1000, so the reply is
+1000 members rather than 3. Note the two arms must be covered separately — the generic
+(string) arm and the intset arm, since sinter_borrow_scan records that byte-sort of
+decimal reps is not value order and the intset arm materializes for that reason.
+
+AND THE REDIRECT, which is where sinter_9's 12,114 instr/op actually goes. With a 3-member
+result, essentially none of that op is result processing. It is PER-KEY and PER-PROBE
+work: nine key lookups plus iterating the smallest set (3 members) probing eight others,
+~24 membership probes. That is where a lever on this shape must aim — the probe path and
+the per-key lookup, not the reply.
+
+Campaign output: yes — a candidate I filed one turn earlier, refuted on shape before any
+build was spent, plus the reason a naive measurement of it would have been actively
+harmful.
+
+RETRY PREDICATE: do NOT measure the sort with sinter_2/sinter_9 — the result is 2-3
+members and the answer is predetermined. Build a large-intersection shape first, cover
+generic AND intset arms, and only then decide. For sinter_9's actual 12,114 instr/op,
+attack the membership probe and per-key lookup instead.
