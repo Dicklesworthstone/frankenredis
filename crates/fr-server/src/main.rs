@@ -28,6 +28,7 @@ use std::net::{SocketAddr, TcpStream as StdTcpStream};
 #[cfg(unix)]
 use std::os::fd::{AsFd, AsRawFd};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
@@ -762,6 +763,21 @@ enum WriterCompletionStatus {
 struct WriterPool {
     jobs: mpsc::SyncSender<WriterJob>,
     completions: mpsc::Receiver<WriterCompletion>,
+    /// (frankenredis-zw36c) Jobs handed to the pool whose completion has not been
+    /// drained yet. Read once per event-loop iteration to skip an mpsc `try_recv`
+    /// that would find nothing.
+    ///
+    /// Race-free by construction rather than by ordering: BOTH sides of this counter
+    /// run on the reactor thread. `try_enqueue` increments, `try_recv` decrements,
+    /// and the worker threads only move an item from the job channel to the
+    /// completion channel -- they never touch it. So `inflight == 0` implies no job
+    /// is outstanding, which implies the completion channel is empty. Relaxed is
+    /// therefore not a weakening; there is no second thread to order against.
+    ///
+    /// The failure direction is safe too: if a worker dies without publishing a
+    /// completion the counter stays positive and the drain simply runs every
+    /// iteration exactly as it does today.
+    inflight: AtomicUsize,
 }
 
 impl WriterPool {
@@ -799,6 +815,7 @@ impl WriterPool {
         Ok(Self {
             jobs: job_tx,
             completions: completion_rx,
+            inflight: AtomicUsize::new(0),
         })
     }
 
@@ -814,11 +831,22 @@ impl WriterPool {
             stream,
             bytes,
             start,
-        })
+        })?;
+        self.inflight.fetch_add(1, Ordering::Relaxed);
+        Ok(())
     }
 
     fn try_recv(&self) -> Result<WriterCompletion, mpsc::TryRecvError> {
-        self.completions.try_recv()
+        let completion = self.completions.try_recv()?;
+        self.inflight.fetch_sub(1, Ordering::Relaxed);
+        Ok(completion)
+    }
+
+    /// (frankenredis-zw36c) O(1) precondition for the drain: with no job outstanding
+    /// the completion channel cannot hold anything, so the `try_recv` that would
+    /// return `Empty` is pure waste. It ran once per event-loop iteration.
+    fn has_inflight(&self) -> bool {
+        self.inflight.load(Ordering::Relaxed) != 0
     }
 }
 
@@ -33349,6 +33377,16 @@ fn drain_writer_completions(
     let Some(pool) = writer_pool else {
         return;
     };
+    // (frankenredis-zw36c) The whole body below used to run on EVERY event-loop
+    // iteration, and on the overwhelming majority of them the first `try_recv`
+    // returned `Empty`. Measured on sinter_big: the mpsc `try_recv` and this
+    // function together moved 13.2M instructions between two runs of the same ELF
+    // purely because the loop spun a different number of times, and neither is doing
+    // SINTER work. Redis has no per-iteration counterpart, which is why its arm is
+    // flat where fr's spans 12.8-33.4 pct.
+    if !pool.has_inflight() {
+        return;
+    }
 
     loop {
         let completion = match pool.try_recv() {
@@ -33723,6 +33761,85 @@ mod tests {
         ));
         assert_ne!(ltrim, 0, "0 is the empty-slot marker");
         assert_ne!(lrem, 0, "0 is the empty-slot marker");
+    }
+
+    /// (frankenredis-zw36c) The writer-completion drain is now skipped when the
+    /// pool reports nothing in flight, so the counter IS the correctness condition:
+    /// if it can ever read zero while a completion is still queued, that completion
+    /// is stranded and the client hangs waiting for the tail of its reply. No reply
+    /// -equality gate can see that — it is a liveness bug, not a wrong answer.
+    ///
+    /// The invariant asserted here is the one the guard depends on: after enqueuing
+    /// the counter is non-zero, it STAYS non-zero until the completion is actually
+    /// drained (not merely until the worker has written the bytes), and it returns
+    /// to zero only once the channel is empty. The peer socket read proves the job
+    /// really ran rather than the counter being decremented by a path that dropped
+    /// the work.
+    #[test]
+    fn writer_pool_inflight_counter_never_reads_empty_while_a_completion_is_queued() {
+        use std::io::Read;
+        use std::io::Write as _;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let client = std::net::TcpStream::connect(addr).expect("connect");
+        let (server_side, _) = listener.accept().expect("accept");
+
+        let poll = mio::Poll::new().expect("poll");
+        let waker =
+            std::sync::Arc::new(mio::Waker::new(poll.registry(), mio::Token(0)).expect("waker"));
+        let pool = crate::WriterPool::new(waker).expect("pool");
+
+        assert!(
+            !pool.has_inflight(),
+            "a fresh pool has nothing outstanding, so the drain must be skippable"
+        );
+
+        let payload = vec![b'x'; 64 * 1024];
+        pool.try_enqueue(mio::Token(7), server_side, payload.clone(), 0)
+            .expect("enqueue");
+        assert!(
+            pool.has_inflight(),
+            "the counter must go non-zero on enqueue, BEFORE any worker has run"
+        );
+
+        // Read the bytes the worker wrote, proving the job really executed.
+        let mut client = client;
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(30)))
+            .expect("timeout");
+        let mut got = vec![0u8; payload.len()];
+        client.read_exact(&mut got).expect("read the whole payload");
+        assert_eq!(got.len(), payload.len());
+
+        // The bytes are delivered, but the COMPLETION has not been drained yet, so
+        // the guard must still let the drain run. This is the case a naive counter
+        // (decremented by the worker after writing) would get wrong.
+        assert!(
+            pool.has_inflight(),
+            "delivery is not drainage: the completion is still queued"
+        );
+
+        let mut drained = 0;
+        for _ in 0..1000 {
+            match pool.try_recv() {
+                Ok(_) => {
+                    drained += 1;
+                    break;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+            }
+        }
+        assert_eq!(drained, 1, "the completion must be drainable");
+        assert!(
+            !pool.has_inflight(),
+            "once drained the counter returns to zero and the drain is skippable again"
+        );
+
+        let _ = client.write(&[]);
     }
 
     /// (frankenredis-4m3i4) The cascade bypass is a MEASUREMENT arm. Shipping a
