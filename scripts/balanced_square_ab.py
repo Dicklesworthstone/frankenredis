@@ -336,6 +336,22 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
     #
     #   zrange_ws 1.1800 ADMISSIBLE, lpos_base 1.1290 -- the accepted siblings are
     #   ahead too, so no reading in this set is behind the incumbent.
+    #
+    # REPLICATED on a SECOND ELF ab969ddb4dd88322db2c7809:
+    #   zrange_rev      1.1315 [1.0871, 1.1710] ADMISSIBLE  nulls 1.0033/1.0024
+    #   lpos_count_opt  1.1991 [1.1591, 1.2418]  nulls 0.9943/1.0280 (opposite)
+    #   zrange_ws       1.1857 [1.1717, 1.2169] ADMISSIBLE
+    #   lpos_base       1.1075 [1.0878, 1.1358] ADMISSIBLE
+    #
+    # STANDING, stated per route rather than for the family as a whole:
+    #   zrange_rev      REPLICATED STANDING -- ADMISSIBLE on BOTH ELFs (1.1483,
+    #                   1.1315). WORST BOUND 1.0871.
+    #   zrange_ws       ADMISSIBLE on both ELFs. Worst bound 1.1543.
+    #   lpos_base       ADMISSIBLE on ELF2. Worst bound 1.0878.
+    #   lpos_count_opt  three agreeing readings across two ELFs (1.1821, 1.2483,
+    #                   1.1991) but NO admissible row -- two excusable on ELF1, and
+    #                   ELF2's nulls are opposite. Worst bound 1.1591. Ahead beyond
+    #                   doubt; not admissible-certified.
     "misclaim": [
         ("zrange_ws", ["ZADD z 1 a 2 b 3 c"], ["ZRANGE", "z", "0", "-1", "WITHSCORES"]),
         ("zrange_rev", ["ZADD z 1 a 2 b 3 c"], ["ZRANGE", "z", "0", "-1", "REV"]),
