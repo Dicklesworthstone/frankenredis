@@ -25917,3 +25917,60 @@ on an argument-heavy shape if the parser changes again -- `sinter_9` at 10 args 
 sensitive one in the corpus, and its dispatch figure reproduces to 0.09 pct, which is what
 makes a 17-instruction move visible at all. And if bitcount_unit is ever assigned again,
 re-derive its ratio first: the row it is assigned from is two levers out of date.
+
+## MEASURED (frankenredis-33832) — the authenticated instrument CANNOT RUN on this host today: it needs three symmetric uncontended core blocks and exactly ONE of eight is uncontended. Two A/A nulls refused, 0.936x and 0.686x
+
+Claim class: INSTRUMENT AVAILABILITY. NO ratio is claimed, and that is the finding.
+
+WHY I RAN IT. fosf1 landed this session and removed the RESTORE duplicate-field check on
+the packed hash tier -- one of the three things 33832 names as its cause ("redis attaches
+the raw listpack after an O(1) header check; fr fully decodes, DEDUPS and re-packs"). That
+commit deliberately claimed no number. 33832 owns the authenticated instrument, so this was
+the place to close the loop.
+
+IT REFUSED, TWICE, and the refusal is correct. `collection_reload_headtohead.py
+--competitive` gates on a two-PROCESS A/A null landing in 0.98..1.02:
+
+    placement                          fr_a       fr_b      A/A null      verdict
+    fr 0-3 / fr 4-7 / redis 8-11     33.551ms   35.853ms   0.936258x     HOLD
+    fr 16-19 / fr 20-23 / redis 24-27 34.915ms  50.595ms   0.686135x     HOLD
+
+Both arms are the SAME ELF (a08b9bf7...), verified by the harness from /proc/<pid>/exe.
+Two identical processes differing by 6.4 pct and then 31.4 pct is not the engine.
+
+THE PRECONDITION, MEASURED RATHER THAN GUESSED. Summing every process's CPU against each
+physical core AND its SMT sibling, the eight aligned 4-core blocks rank:
+
+    cores  0-3  (sib 32-35)   27 pct     <- the only uncontended block on the machine
+    cores 20-23 (sib 52-55)  112 pct
+    cores 28-31 (sib 60-63)  138 pct
+    cores  4-7  (sib 36-39)  318 pct
+    cores 24-27 (sib 56-59)  354 pct
+    cores 16-19 (sib 48-51)  435 pct
+    cores  8-11 (sib 40-43)  477 pct
+    cores 12-15 (sib 44-47)  481 pct
+
+The method needs THREE such blocks -- two symmetric for the fr A/A pair, one for redis. The
+host offers ONE. Eight other agents' processes hold the rest, and `taskset` pins MY
+processes onto a core, it does not evict theirs. So the bead's own instruction ("PIN THE
+THREE SERVERS TO CORES OR THIS MODE CANNOT AUTHENTICATE ON A BUSY HOST") is necessary but
+not sufficient: pinning cannot manufacture a quiet core, and pinning ONTO a contended one is
+worse than not pinning, which is what the second placement shows.
+
+NOT OFFERED AS A MECHANISM. The obvious story -- fr_b was slower because its block was
+busier -- does NOT fit the second run, where fr_b sat on the QUIETER of the two blocks
+(112 pct vs 435 pct) and was 45 pct SLOWER. So the contention is real but its path is not
+established, and this row claims only what the two nulls show: identical ELFs, refused.
+
+WHAT THIS MEANS FOR THE BEAD. 33832's 0.606011x is a THROUGHPUT ratio and throughput is
+exactly the instrument that core contention reaches. Its authenticated figure was taken in
+a window this host is not currently in. Until it is, fosf1's effect on 33832 is unmeasured
+-- not zero, unmeasured -- and no one should quote a post-fosf1 RESTORE ratio.
+
+RETRY PREDICATE. Re-run the competitive harness when the block table above shows THREE
+blocks under ~50 pct combined core+sibling load; that check takes one `ps -eo psr,pcpu`
+sweep and costs nothing next to a refused 9-trial run. If the fleet is busy, prefer a
+LOAD-IMMUNE instrument instead: callgrind instruction counts on the RESTORE decode surface
+answer "did fr's work go down" without needing a quiet core at all, and that is the
+question fosf1 actually raises. The throughput ratio is only needed to restate 33832's
+headline.
