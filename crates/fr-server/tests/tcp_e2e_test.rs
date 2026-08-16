@@ -2557,6 +2557,32 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     // must still reach the generic path rather than being answered by the fast
     // route. SINTERCARD is included because it shares SINTER's six-byte prefix
     // and must not be claimed by it.
+    // Keyed-values writes at their SMALL arities, which the floor range now
+    // claims (1..=4 values, previously 5..=18). One row per command per new
+    // arity, plus the outcomes their executors can decline on: a missing key
+    // (SREM/ZREM/HDEL return 0 and must not create), and a WRONGTYPE target.
+    cmds.push(c(&[b"SADD", b"kv:s", b"a"]));
+    cmds.push(c(&[b"SADD", b"kv:s", b"b", b"c"]));
+    cmds.push(c(&[b"SADD", b"kv:s", b"d", b"e", b"f"]));
+    cmds.push(c(&[b"SADD", b"kv:s", b"g", b"h", b"i", b"j"]));
+    cmds.push(c(&[b"SREM", b"kv:s", b"a"]));
+    cmds.push(c(&[b"SREM", b"kv:missing", b"a"]));
+    cmds.push(c(&[b"LPUSH", b"kv:l", b"a"]));
+    cmds.push(c(&[b"RPUSH", b"kv:l", b"b", b"c"]));
+    cmds.push(c(&[b"LPUSH", b"kv:l", b"d", b"e", b"f", b"g"]));
+    cmds.push(c(&[
+        b"HSET", b"kv:h", b"f1", b"v1", b"f2", b"v2", b"f3", b"v3",
+    ]));
+    cmds.push(c(&[b"HDEL", b"kv:h", b"f1"]));
+    cmds.push(c(&[b"HDEL", b"kv:h", b"f2", b"f3"]));
+    cmds.push(c(&[b"HDEL", b"kv:missing", b"f"]));
+    cmds.push(c(&[b"ZADD", b"kv:z", b"1", b"a", b"2", b"b", b"3", b"c"]));
+    cmds.push(c(&[b"ZREM", b"kv:z", b"a"]));
+    cmds.push(c(&[b"ZREM", b"kv:z", b"b", b"c"]));
+    cmds.push(c(&[b"ZREM", b"kv:missing", b"a"]));
+    cmds.push(c(&[b"SADD", b"s:1", b"x"]));
+    cmds.push(c(&[b"LPUSH", b"s:1", b"x"]));
+    cmds.push(c(&[b"HDEL", b"s:1", b"x"]));
     cmds.push(c(&[b"SINTER", b"ss:a"]));
     cmds.push(c(&[b"SINTER", b"ss:a", b"ss:b"]));
     cmds.push(c(&[b"SINTER", b"ss:a", b"ss:b", b"ss:c"]));

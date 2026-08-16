@@ -16186,13 +16186,23 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (4, BorrowedDispatchFloorCommand::Zremrangebyrank) => {
             Some(BorrowedDispatchFloorClass::Zremrangebyrank)
         }
-        // Variadic keyed-values writes at 5..=18 values (array_len 7..=20): LPUSH/RPUSH/
+        // Variadic keyed-values writes at 1..=18 values (array_len 3..=20): LPUSH/RPUSH/
         // SADD/HDEL/SREM/ZREM. These have borrowed fast paths but are stranded deep in
         // the cascade: 5..=8 sit ~1350 lines down (chain A ~5208, chain B ~10259), and
         // 9..=18 exist ONLY in chain B (~9993..10233) — chain A drops them to the
         // generic path entirely. Routing the whole range here recovers both cliffs.
+        //
+        // The range started at 5 values, which left the SMALL arities — `SADD key
+        // member`, `HDEL key field`, `ZREM key member`, the shapes actually issued
+        // most — unreachable from the floor even though their command names are in
+        // the token table and their parsers already exist. Measured on the current
+        // binary before this change, `HDEL key field` spent 51.5% of the op in
+        // dispatch against ~21.5% for a classified route, so the small arities were
+        // paying the classifier AND the full cascade. (BlackCat measured it and
+        // handed it over; the guess that they were omitted because they sit early
+        // and were already cheap is what the measurement contradicts.)
         (array_len, cmd)
-            if (7..=20).contains(&array_len)
+            if (3..=20).contains(&array_len)
                 && matches!(
                     cmd,
                     BorrowedDispatchFloorCommand::Lpush
@@ -17021,6 +17031,45 @@ fn dispatch_floor_keyed_values_write(
     ts: u64,
 ) -> Option<(usize, RespFrame)> {
     match values {
+        // 1..=4 use packets with their own field spellings rather than v1..vN:
+        // values1 is key/member, values2 is key/start/end, values3 is key/f1..f3.
+        // The executor takes a slice either way, so the shapes converge here.
+        1 => {
+            let (cmd, p) = parse_borrowed_plain_keyed_values1_packet(unparsed, parser_config)?;
+            let response =
+                runtime.execute_plain_keyed_values_write_borrowed(cmd, p.key, &[p.member], ts)?;
+            Some((p.consumed, response))
+        }
+        2 => {
+            let (cmd, p) = parse_borrowed_plain_keyed_values2_packet(unparsed, parser_config)?;
+            let response = runtime.execute_plain_keyed_values_write_borrowed(
+                cmd,
+                p.key,
+                &[p.start, p.end],
+                ts,
+            )?;
+            Some((p.consumed, response))
+        }
+        3 => {
+            let (cmd, p) = parse_borrowed_plain_keyed_values3_packet(unparsed, parser_config)?;
+            let response = runtime.execute_plain_keyed_values_write_borrowed(
+                cmd,
+                p.key,
+                &[p.f1, p.f2, p.f3],
+                ts,
+            )?;
+            Some((p.consumed, response))
+        }
+        4 => {
+            let (cmd, p) = parse_borrowed_plain_keyed_values4_packet(unparsed, parser_config)?;
+            let response = runtime.execute_plain_keyed_values_write_borrowed(
+                cmd,
+                p.key,
+                &[p.v1, p.v2, p.v3, p.v4],
+                ts,
+            )?;
+            Some((p.consumed, response))
+        }
         5 => {
             let (cmd, p) = parse_borrowed_plain_keyed_values5_packet(unparsed, parser_config)?;
             let response = runtime.execute_plain_keyed_values_write_borrowed(
@@ -43031,6 +43080,57 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
     #[test]
     fn dispatch_floor_classifier_recognizes_only_exact_target_tokens() {
         let cfg = ParserConfig::default();
+        // The keyed-values-write range now starts at ONE value (array_len 3),
+        // where it previously started at five. These pin the new lower boundary
+        // in both directions: one value classifies, and array_len 2 — which is
+        // the arity-error shape, `SADD key` with no member — must NOT, or the
+        // fast route would claim a packet its parser has to decline.
+        for name in [
+            &b"SADD"[..],
+            &b"HDEL"[..],
+            &b"SREM"[..],
+            &b"ZREM"[..],
+            &b"LPUSH"[..],
+            &b"RPUSH"[..],
+        ] {
+            let one = format!(
+                "*3\r\n${}\r\n{}\r\n$1\r\nk\r\n$1\r\nv\r\n",
+                name.len(),
+                String::from_utf8_lossy(name)
+            );
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(one.as_bytes(), &cfg),
+                Some(super::BorrowedDispatchFloorClass::KeyedValuesWrite(1)),
+                "{} with one value must classify",
+                String::from_utf8_lossy(name)
+            );
+            let none = format!(
+                "*2\r\n${}\r\n{}\r\n$1\r\nk\r\n",
+                name.len(),
+                String::from_utf8_lossy(name)
+            );
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(none.as_bytes(), &cfg),
+                None,
+                "{} with no values must not classify",
+                String::from_utf8_lossy(name)
+            );
+        }
+        // ...and the 2/3/4 arities that were also outside the old range.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*4\r\n$4\r\nsAdD\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::KeyedValuesWrite(2))
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*6\r\n$4\r\nHDEL\r\n$1\r\nh\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::KeyedValuesWrite(4))
+        );
         // SINTER, variadic. Mixed case must classify; the arity-1 spelling (no
         // keys) must NOT, or the fast route would claim a shape its parser
         // declines; and SINTERCARD must not be swallowed by the 6-byte token —
@@ -43881,14 +43981,21 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
             ),
             Some(super::BorrowedDispatchFloorClass::KeyedValuesWrite(18))
         );
-        // Arity guards: 4 values (array_len 6) stays on the early cascade cluster;
-        // 19 values (array_len 21) has no borrowed parser → generic.
+        // Arity guard: 19 values (array_len 21) has no borrowed parser → generic.
+        //
+        // This assertion used to require 4 values (array_len 6) NOT to classify,
+        // on the stated grounds that it "stays on the early cascade cluster".
+        // That was a claim about cost, not a correctness invariant, and it was
+        // measured wrong: `HDEL key field` — one value, the same cluster — spent
+        // 51.5% of the op in dispatch against ~21.5% for a classified route. The
+        // small arities were paying the classifier AND the walk. They classify
+        // now, and the row below moved with the range rather than being deleted.
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(
                 b"*6\r\n$5\r\nLPUSH\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n",
                 &cfg,
             ),
-            None
+            Some(super::BorrowedDispatchFloorClass::KeyedValuesWrite(4))
         );
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(
