@@ -389,6 +389,20 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
     #   three different ELFs, while the newly classified path varies 16% on one.
     #   That is worth explaining before claiming the crossing.
     #
+    # EXPLAINED, and it was my method rather than the route. The fast-vs-generic
+    # comparison was never ABBA: each invocation pits fr against redis, and I was
+    # comparing two SEPARATE invocations, so host drift between them entered as
+    # effect. Run back-to-back instead, fast then generic with nothing in between:
+    #
+    #   fast     1.1377 [1.0880, 1.2058]  nulls 0.9790/1.0299
+    #   generic  0.8596 [0.8351, 0.9043]  nulls 0.9921/1.0070  ADMISSIBLE
+    #   -> 1.324x, intervals DISJOINT by a wide margin.
+    #
+    # The fast arm's nulls tightened from 1.1100 to within 3%, and its two most
+    # recent readings agree to four digits (1.1380, 1.1377). The 0.9813 outlier
+    # came from the noisiest window. So the 16% spread was cross-invocation drift,
+    # not an unstable route -- and the interleaved pairing is the one to trust.
+    #
     # expire_nx is the runner-up and is NOT yet a candidate: 0.9068 and 0.9111 agree
     # in direction across the same two ELFs, but BOTH runs null-failed.
     #
