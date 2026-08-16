@@ -264,6 +264,37 @@ CASES = [
     # errors verbatim
     ("ZADD", "za:k", "XX", "notanumber", "m1"),
     ("ZADD", "s:1", "XX", "1", "m1"),
+    # (frankenredis-move3) MOVE, measured BELOW PARITY in every run of
+    # exists_vs_redis/move_missing and unclassified: no BorrowedDispatchFloorCommand
+    # variant, no dedicated parser, executor present (execute_plain_move_borrowed).
+    # Cascade depth ~1800. Gate first, because MOVE mutates the KEYSPACE and a
+    # classified route that got the db wrong would be silently destructive rather
+    # than merely slow.
+    #
+    # Ordered last of the stateful rows and on its own keys: MOVE removes the key
+    # from db 0, so anything reading mv:* afterwards observes a different keyspace.
+    ("SET", "mv:src", "v1"),
+    ("MOVE", "mv:src", "1"),
+    ("EXISTS", "mv:src"),
+    # missing key -> 0, and the destination must NOT be created
+    ("MOVE", "mv:absent", "1"),
+    ("EXISTS", "mv:absent"),
+    # moving to the SAME db is an error upstream, not a no-op
+    ("SET", "mv:same", "v2"),
+    ("MOVE", "mv:same", "0"),
+    ("EXISTS", "mv:same"),
+    # a key that already exists in the destination must NOT be overwritten:
+    # MOVE returns 0 and the source stays put. A route that clobbered would still
+    # return 0 here, so the follow-up GET is what catches it.
+    ("SET", "mv:dup", "original"),
+    ("MOVE", "mv:dup", "1"),
+    ("SET", "mv:dup", "second"),
+    ("MOVE", "mv:dup", "1"),
+    ("GET", "mv:dup"),
+    # out-of-range and non-numeric db indices must error verbatim
+    ("MOVE", "mv:dup", "99"),
+    ("MOVE", "mv:dup", "notanumber"),
+    ("MOVE", "mv:dup", "-1"),
     # Errors must come from the generic path verbatim.
     ("ZMPOP", "1", "s:1", "MIN"),
     ("ZMPOP", "1", "z:mp", "SIDEWAYS"),
