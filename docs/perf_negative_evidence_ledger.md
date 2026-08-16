@@ -17528,3 +17528,64 @@ drops to one (e.g. `decode_entry` is deleted or the zset path stops using it), O
 the attempt uses `#[inline(always)]` AND reports the resulting code-size change
 alongside the instruction delta — forcing a three-site inline can cost more in
 i-cache than it saves in call overhead, and this row does not measure that.
+
+## 2026-08-16 QuietHarbor: REJECT — the memcmp in `GenericSet::contains` is NOT the member scan, and three rewrites of that scan moved the call count by exactly zero (`frankenredis-804l1`)
+
+LEVER: `PackedStrSet::contains` is `self.iter().any(|m| m == member)`, and slice
+`==` on `&[u8]` lowers to a CALL into `__memcmp_avx2_movbe`. Callgrind said that
+call cost 4,796,000 Ir over 32,000 calls from `GenericSet::contains` — 149.9 Ir to
+compare two-byte members, 6.47% of a whole `SINTERSTORE dst a b c`. So: compare
+short members inline and skip the call. `sinterstore_3src` translates instructions
+to throughput nearly 1:1 (frankenredis-f99bu), so ~6% of instructions should have
+been ~6% of throughput.
+
+MEASURED with scripts/shape_instr_per_op.py (callgrind two-point subtraction, N=2000
+and 2N=4000 `SINTERSTORE sidst sa sb sc` over three 5-member sets of 2-byte
+members). Baseline ELF sha256 36fc1bf5..., rch worker vmi1293453. Three candidates,
+each a full rebuild:
+
+| formulation | build worker | ELF sha256 | fr instr/op | memcmp calls from `GenericSet::contains` |
+|---|---|---|---|---|
+| baseline (`a == b`) | vmi1293453 | 36fc1bf5 | 18,259.4 | **32,000** |
+| early-exit byte loop | vmi1227854 | dbdbd3d8 | 17,985.1 | **32,000** |
+| branchless XOR-zip fold | vmi1152480 | a9e399eb | 18,186.1 | **32,000** |
+| widen to `[u8; 8]`, compare as `u64` | vmi1264463 | (unbanked) | 18,889.8 | **32,000** |
+
+THE CALL COUNT IS THE RESULT. Exactly 32,000 in all four ELFs, across three
+different implementations of the comparison. If those calls came from the member
+comparison, at least one rewrite would have moved them. They do not, so the premise
+was wrong and every instr/op number in that table is noise around a lever that never
+fired.
+
+WHAT THE COUNT ACTUALLY SAYS, and this is the part worth keeping: 32,000 calls /
+4,000 ops = 8 per op, and `GenericSet::contains` is itself called 8x per op. That is
+**one memcmp per `contains` call, independent of set size** — a 5-member linear scan
+would have produced up to five. So the call is something done ONCE per lookup, not
+per member compared, and "kill the per-member memcmp" was never the right
+description of it. Whoever picks this up next should find that one-per-call site
+before writing any code.
+
+SECOND REUSABLE FINDING: LLVM re-forms the obvious hand-written comparisons back
+into the call. Both `for i { if a[i] != b[i] { return false } }` and a branchless
+`zip`+XOR accumulate were recognised and rewritten; the `[u8; 8]` widening avoided
+recognition and still did not help, because of the premise error above. Do not
+assume an inline byte comparison stays inline — check the call count, not the source.
+
+THIRD, ON METHOD: instr/op wandered 17,985 / 18,186 / 18,890 across three rch
+workers while the call counts were byte-identical. That ±5% is codegen, not code —
+a direct measurement of the cross-worker hazard, and a reminder that comparing a
+candidate built on one worker against a baseline built on another can manufacture a
+5% "win" or "loss" out of nothing. The call-count column is worker-independent,
+which is why it decided this.
+
+Campaign output: no.
+
+RETRY PREDICATE: do not retry any rewrite of the member comparison. Retry only IF a
+caller-attributed callgrind run first identifies the one-per-`contains`-call memcmp
+site (it is not `PackedStrSet::contains`, which carries no memcmp edge in the
+baseline dump), AND that site is shown to be on the `SINTERSTORE` hot path rather
+than in setup. Never adjudicate the follow-up on instr/op alone across differently-
+built ELFs; require the memcmp call count to move.
+
+
+---
