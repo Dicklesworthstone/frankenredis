@@ -215,6 +215,17 @@ SHAPES = {
     "hrandfield_base": (["HSET h f1 v1"], ["HRANDFIELD", "h"]),
     "hrandfield_count": (["HSET h f1 v1"], ["HRANDFIELD", "h", "1"]),
     "getex_base": (["SET gx abcdefghijklmnop"], ["GETEX", "gx"]),
+    # (frankenredis-6iq5i) More BASE/OPTION pairs, widening the ranked list for the
+    # family the front-classification lever structurally skips.
+    "set_base": ([], ["SET", "sk", "vvvvvvvvvvvvvvvv"]),
+    "set_ex_opt": ([], ["SET", "sk", "vvvvvvvvvvvvvvvv", "EX", "100"]),
+    "set_xx_opt": (["SET sk v"], ["SET", "sk", "vvvvvvvvvvvvvvvv", "XX"]),
+    "getex_base2": (["SET gx abcdefghijklmnop"], ["GETEX", "gx"]),
+    "getex_ex_opt": (["SET gx abcdefghijklmnop"], ["GETEX", "gx", "EX", "100"]),
+    "lpos_base": (["RPUSH l a b c d e"], ["LPOS", "l", "c"]),
+    "lpos_count_opt": (["RPUSH l a b c d e"], ["LPOS", "l", "c", "COUNT", "1"]),
+    "bitcount_base": (["SET bb abcdefghijklmnop"], ["BITCOUNT", "bb"]),
+    "bitcount_range": (["SET bb abcdefghijklmnop"], ["BITCOUNT", "bb", "0", "5"]),
     # The control: a route none of the above levers touch.
     "get_control": (["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
 }
