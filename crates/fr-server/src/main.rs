@@ -14615,6 +14615,11 @@ enum BorrowedDispatchFloorClass {
     /// count so the arm reaches the right exact-N parser in one step instead of
     /// chaining seven of them.
     MgetN(u8),
+    /// (frankenredis-tyujv) `GEOADD key lon lat member` — the single-triple form,
+    /// arity 5, the only shape `parse_borrowed_plain_key_arg3_packet` serves for
+    /// this command. Multi-triple GEOADD is arity 8/11/... and has no parser
+    /// anywhere, so it is deliberately NOT claimed; see the arity map.
+    GeoaddOne,
     /// (frankenredis-ozrro) `GETDEL key`.
     Getdel,
     /// (frankenredis-ozrro) `DECRBY key decrement`.
@@ -14921,6 +14926,7 @@ enum BorrowedDispatchFloorCommand {
     Expiretime,
     Geodist,
     Geohash,
+    Geoadd,
     Geopos,
     Getbit,
     Getdel,
@@ -15122,6 +15128,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'G', b'E', b'T', b'D', b'E', b'L'] => Some(BorrowedDispatchFloorCommand::Getdel),
             [b'I', b'N', b'C', b'R', b'B', b'Y'] => Some(BorrowedDispatchFloorCommand::Incrby),
             [b'G', b'E', b'O', b'P', b'O', b'S'] => Some(BorrowedDispatchFloorCommand::Geopos),
+            [b'G', b'E', b'O', b'A', b'D', b'D'] => Some(BorrowedDispatchFloorCommand::Geoadd),
             [b'G', b'E', b'T', b'B', b'I', b'T'] => Some(BorrowedDispatchFloorCommand::Getbit),
             [b'R', b'E', b'N', b'A', b'M', b'E'] => Some(BorrowedDispatchFloorCommand::Rename),
             [b'Z', b'I', b'N', b'T', b'E', b'R'] => Some(BorrowedDispatchFloorCommand::Zinter),
@@ -16068,6 +16075,23 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // ZUNION measured (780/op, 1.08x) at the same arity in the same family.
         // ZUNION is deliberately absent: family resemblance is not evidence, and
         // classifying it would buy nothing while enlarging this match.
+        // (frankenredis-tyujv) GEOADD, the last stranded route: 57.9 pct of the op
+        // in dispatch, ~1,039 instr/op of FAILED probes to do ~980 of real work,
+        // with parser and executor both already present. Its arm sits ~2,970 lines
+        // past the floor call, so reaching it costs the whole walk.
+        //
+        // ARITY 5 ONLY, matching `parse_borrowed_plain_key_arg3_packet`'s single
+        // shape `*5\r\n$6\r\nGEOADD` exactly. Multi-triple GEOADD is arity 8, 11,
+        // ... and has NO parser anywhere in the tree.
+        //
+        // By the rule established on frankenredis-9hnxt, claiming those wider
+        // arities would in fact be harmless — no cascade arm serves them either
+        // (9876 is the only GEOADD arm), so they reach the generic path whichever
+        // way they get there, and claiming would skip the walk. It is left out
+        // anyway: the gain is unmeasured, and keeping the claim exactly equal to
+        // the parser's domain is what lets the pair-level invariant test assert a
+        // clean biconditional for this command instead of an exception.
+        (5, BorrowedDispatchFloorCommand::Geoadd) => Some(BorrowedDispatchFloorClass::GeoaddOne),
         (4, BorrowedDispatchFloorCommand::Zinter) => Some(BorrowedDispatchFloorClass::Zinter2),
         (4, BorrowedDispatchFloorCommand::Zdiff) => Some(BorrowedDispatchFloorClass::Zdiff2),
         (arity, BorrowedDispatchFloorCommand::Hmget) if arity >= 3 => {
@@ -18120,12 +18144,7 @@ fn try_dispatch_floor_classified_action(
                 ($parser:ident) => {{
                     if let Some(packet) = $parser(unparsed, &parser_config)
                         && runtime
-                            .execute_plain_mget_borrowed_into(
-                                &packet.keys,
-                                ts,
-                                client_resp3,
-                                out,
-                            )
+                            .execute_plain_mget_borrowed_into(&packet.keys, ts, client_resp3, out)
                             .is_some()
                     {
                         served = Some(packet.consumed);
@@ -18401,6 +18420,32 @@ fn try_dispatch_floor_classified_action(
                     consumed: packet.consumed,
                     response,
                 })
+            } else if let Some((consumed, response)) = parse_borrowed_plain_key_arg3_packet(
+                unparsed,
+                &parser_config,
+                b"*5\r\n$4\r\n",
+                b"LPOS",
+            )
+            .filter(|packet| packet.b.eq_ignore_ascii_case(b"COUNT"))
+            .and_then(|packet| {
+                // (frankenredis-uu33c) This class is minted on ARITY ALONE, so the
+                // sibling `*5` option forms land here too and the RANK parser above
+                // declines every one of them: `LPOS k e COUNT n` and `MAXLEN n`.
+                // COUNT is served here rather than by narrowing the class, because
+                // narrowing only pays when the CASCADE has an arm that serves the
+                // shape — and LPOS has none: only `lpos` (no-option) and `lpos_rank`
+                // exist, so an unclaimed COUNT would walk the whole cascade to reach
+                // the same generic path it reaches now. Chaining here is the ZRANGE
+                // (2e4tq) / GETEX / HMGET pattern.
+                //
+                // MAXLEN is deliberately NOT served: it has no executor, so it keeps
+                // falling through to generic below. Recorded as still-stranded rather
+                // than silently assumed handled.
+                runtime
+                    .execute_plain_lpos_count_borrowed(packet.key, packet.a, packet.c, ts)
+                    .map(|response| (packet.consumed, response))
+            }) {
+                Ok(BorrowedMultibulkAction::FastReply { consumed, response })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,
@@ -19039,6 +19084,34 @@ fn try_dispatch_floor_classified_action(
                 // alternate XADD option shape or malformed argument goes
                 // straight to the eventual generic borrowed route, preserving
                 // exact diagnostics while skipping irrelevant parser probes.
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        // (frankenredis-tyujv) Mirrors the cascade arm at ~9876 exactly: same
+        // parser, same prefix literal, same executor, same argument order
+        // (key=key, a=lon, b=lat, c=member). Declines to the generic dispatcher,
+        // as every floor arm does.
+        BorrowedDispatchFloorClass::GeoaddOne => {
+            if let Some(packet) = parse_borrowed_plain_key_arg3_packet(
+                unparsed,
+                &parser_config,
+                b"*5\r\n$6\r\n",
+                b"GEOADD",
+            ) && let Some(response) =
+                runtime.execute_plain_geoadd_borrowed(packet.key, packet.a, packet.b, packet.c, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
                 parse_borrowed_multibulk_action(
                     unparsed,
                     parser_config,
@@ -43772,6 +43845,85 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         }
     }
 
+    /// (frankenredis-tyujv) GEOADD's floor claim must equal its parser's domain
+    /// exactly — the pair-level invariant, applied before the route ships rather
+    /// than after a regression is found in it.
+    #[test]
+    fn geoadd_floor_claim_equals_its_parser_domain() {
+        let cfg = ParserConfig::default();
+
+        // The single-triple form: claimed, and honoured by the parser the arm
+        // reaches. Mixed case, because the token table matches case-insensitively
+        // and a byte-array comparison is exactly where that can be got wrong.
+        for pkt in [
+            &b"*5\r\n$6\r\nGEOADD\r\n$1\r\nk\r\n$3\r\n1.0\r\n$3\r\n2.0\r\n$1\r\nm\r\n"[..],
+            &b"*5\r\n$6\r\nGeOaDd\r\n$1\r\nk\r\n$3\r\n1.0\r\n$3\r\n2.0\r\n$1\r\nm\r\n"[..],
+        ] {
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(pkt, &cfg),
+                Some(super::BorrowedDispatchFloorClass::GeoaddOne),
+                "single-triple GEOADD must classify"
+            );
+            assert!(
+                super::parse_borrowed_plain_key_arg3_packet(
+                    pkt,
+                    &cfg,
+                    b"*5\r\n$6\r\n",
+                    b"GEOADD",
+                )
+                .is_some(),
+                "the claim must be honoured by the arm's parser"
+            );
+        }
+
+        // Multi-triple GEOADD has no parser anywhere, so the claim must not reach
+        // it. Not because claiming would be harmful — no cascade arm serves it
+        // either, so by frankenredis-9hnxt it would be neutral — but because the
+        // claim is deliberately kept equal to the parser's domain, and this is the
+        // assertion that keeps it so.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*8\r\n$6\r\nGEOADD\r\n$1\r\nk\r\n$3\r\n1.0\r\n$3\r\n2.0\r\n$2\r\nm1\r\n$3\r\n3.0\r\n$3\r\n4.0\r\n$2\r\nm2\r\n",
+                &cfg,
+            ),
+            None,
+            "multi-triple GEOADD has no parser and must not be claimed"
+        );
+
+        // GEOPOS shares the six-byte group and was ALREADY a floor command before
+        // GEOADD joined it, so the two must not be confused in either direction.
+        // This is the near-miss row that matters here: getting it wrong routes one
+        // command to another's executor, which is a WRONG ANSWER, not a slow one.
+        assert_ne!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*5\r\n$6\r\nGEOPOS\r\n$1\r\nk\r\n$3\r\n1.0\r\n$3\r\n2.0\r\n$1\r\nm\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::GeoaddOne),
+            "GEOPOS must never classify as GEOADD"
+        );
+        // ...and a token one byte off must fall through entirely.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*5\r\n$6\r\nGEOADX\r\n$1\r\nk\r\n$3\r\n1.0\r\n$3\r\n2.0\r\n$1\r\nm\r\n",
+                &cfg,
+            ),
+            None,
+            "GEOADX must not classify as GEOADD"
+        );
+        // The 7-byte neighbours must not be reached into by the 6-byte match.
+        for pkt in [
+            &b"*4\r\n$7\r\nGEODIST\r\n$1\r\nk\r\n$1\r\na\r\n$1\r\nb\r\n"[..],
+            &b"*3\r\n$7\r\nGEOHASH\r\n$1\r\nk\r\n$1\r\nm\r\n"[..],
+        ] {
+            assert_ne!(
+                super::classify_borrowed_dispatch_floor_packet(pkt, &cfg),
+                Some(super::BorrowedDispatchFloorClass::GeoaddOne),
+                "a 7-byte GEO token must not classify as GEOADD"
+            );
+        }
+    }
+
     #[test]
     fn dispatch_floor_classifier_recognizes_only_exact_target_tokens() {
         let cfg = ParserConfig::default();
@@ -44007,7 +44159,8 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         // in the ARM rather than the classifier, so what needs pinning is that
         // the arm's fallback is REACHABLE and REQUIRED -- three facts, each of
         // which would silently un-fix the route if it changed.
-        const ZRANGE_REV: &[u8] = b"*5\r\n$6\r\nZRANGE\r\n$1\r\nz\r\n$1\r\n0\r\n$2\r\n-1\r\n$3\r\nREV\r\n";
+        const ZRANGE_REV: &[u8] =
+            b"*5\r\n$6\r\nZRANGE\r\n$1\r\nz\r\n$1\r\n0\r\n$2\r\n-1\r\n$3\r\nREV\r\n";
 
         // 1. LOAD-BEARING, and it asks the parser rather than encoding a belief:
         // the WITHSCORES parser must DECLINE a REV packet. That decline is the
@@ -44120,7 +44273,10 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         // A single-key MGET has no exact-N parser at all (mget_two is the
         // smallest), so it must classify as neither.
         assert_eq!(
-            super::classify_borrowed_dispatch_floor_packet(b"*2\r\n$4\r\nMGET\r\n$1\r\na\r\n", &cfg),
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*2\r\n$4\r\nMGET\r\n$1\r\na\r\n",
+                &cfg
+            ),
             None,
             "1-key MGET has no exact-N parser and must not classify"
         );

@@ -944,11 +944,22 @@ fn plain_getbit_owned_argv(key: &[u8], offset_arg: &[u8]) -> Vec<Vec<u8>> {
     vec![b"GETBIT".to_vec(), key.to_vec(), offset_arg.to_vec()]
 }
 
-fn plain_lpos_owned_argv(key: &[u8], element: &[u8], rank: Option<&[u8]>) -> Vec<Vec<u8>> {
+/// (frankenredis-uu33c) The option is carried as (KEYWORD, value) rather than as a
+/// bare value with an implied `RANK`. The keyword used to be hardcoded here, which
+/// was correct while `RANK` was the only optioned form on a borrowed fast path — but
+/// this argv is what slowlog, latency sampling and the threat digest reconstruct the
+/// command from, so a second option form reusing it would have reported `LPOS k e
+/// RANK n` for a command the client sent as `COUNT n`. That is a reporting defect
+/// wearing a perf lever's clothes, and it is invisible to a reply-level differ.
+fn plain_lpos_owned_argv(
+    key: &[u8],
+    element: &[u8],
+    option: Option<(&[u8], &[u8])>,
+) -> Vec<Vec<u8>> {
     let mut argv = vec![b"LPOS".to_vec(), key.to_vec(), element.to_vec()];
-    if let Some(rank) = rank {
-        argv.push(b"RANK".to_vec());
-        argv.push(rank.to_vec());
+    if let Some((keyword, value)) = option {
+        argv.push(keyword.to_vec());
+        argv.push(value.to_vec());
     }
     argv
 }
@@ -18412,7 +18423,110 @@ impl Runtime {
         self.record_plain_lpos_borrowed_metrics(
             key,
             element,
-            Some(rank_arg),
+            Some((b"RANK", rank_arg)),
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    /// (frankenredis-uu33c) Borrowed fast path for `LPOS key element COUNT n`.
+    ///
+    /// COUNT is NOT a variant of the RANK reply and must not be folded into it:
+    /// upstream `t_list.c::lposCommand` returns an ARRAY whenever COUNT is present —
+    /// including an EMPTY array for no matches, where the no-COUNT form returns a
+    /// nil bulk. `fr-command`'s generic path encodes exactly that at the
+    /// `count.is_some()` branch, and this mirrors it.
+    ///
+    /// Rank defaults to 1 (upstream's initialiser), maxlen to 0 (unbounded), which
+    /// is the same `lpos_full` call the generic path bottoms out in — so keyspace
+    /// hit/miss accounting is identical and no second scan strategy is introduced.
+    ///
+    /// Argument validation is a DECLINE, never an error reply, matching the RANK
+    /// executor above: upstream uses `getPositiveLongFromObjectOrReply` and emits
+    /// "ERR COUNT can't be negative" for BOTH unparseable integers and explicit
+    /// negatives, so returning None hands both cases to generic, which owns the
+    /// exact error text. Reproducing that text here would be a second copy to drift.
+    pub fn execute_plain_lpos_count_borrowed(
+        &mut self,
+        key: &[u8],
+        element: &[u8],
+        count_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        let count = parse_i64_arg(count_arg).ok()?;
+        if count < 0 {
+            return None;
+        }
+        let count = u64::try_from(count).ok()?;
+        if self.policy.gate.max_array_len < 5
+            || self.policy.gate.max_bulk_len < b"LPOS".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || element.len() > self.policy.gate.max_bulk_len
+            || count_arg.len() > self.policy.gate.max_bulk_len
+            || !self.plain_borrowed_default_key_read_allows(now_ms)
+        {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("lpos");
+        self.session.last_argv_len_sum =
+            b"LPOS".len() + key.len() + element.len() + b"COUNT".len() + count_arg.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let result = self
+            .server
+            .store
+            .lpos_full(key, element, 1, Some(count), 0, now_ms);
+        let elapsed_us = self.finish_chained_command(start);
+        let reply = match result {
+            Ok(positions) => RespFrame::Array(Some(
+                positions
+                    .into_iter()
+                    .map(|pos| RespFrame::Integer(i64::try_from(pos).unwrap_or(i64::MAX)))
+                    .collect(),
+            )),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_lpos_borrowed_metrics(
+            key,
+            element,
+            Some((b"COUNT", count_arg)),
             elapsed_us,
             now_ms,
             packet_id,
@@ -18447,7 +18561,7 @@ impl Runtime {
         &mut self,
         key: &[u8],
         element: &[u8],
-        rank: Option<&[u8]>,
+        option: Option<(&[u8], &[u8])>,
         elapsed_us: u64,
         now_ms: u64,
         packet_id: u64,
@@ -18457,14 +18571,14 @@ impl Runtime {
         if self.server.store.slowlog_log_slower_than_us >= 0
             && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
         {
-            let argv_ref = argv.get_or_insert_with(|| plain_lpos_owned_argv(key, element, rank));
+            let argv_ref = argv.get_or_insert_with(|| plain_lpos_owned_argv(key, element, option));
             self.record_slowlog(argv_ref, elapsed_us, now_ms);
         }
 
         let threshold_ms = self.server.store.latency_tracker.threshold_ms;
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
-            let argv_ref = argv.get_or_insert_with(|| plain_lpos_owned_argv(key, element, rank));
+            let argv_ref = argv.get_or_insert_with(|| plain_lpos_owned_argv(key, element, option));
             self.server
                 .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
@@ -18481,7 +18595,7 @@ impl Runtime {
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
-            let argv_ref = argv.get_or_insert_with(|| plain_lpos_owned_argv(key, element, rank));
+            let argv_ref = argv.get_or_insert_with(|| plain_lpos_owned_argv(key, element, option));
             self.record_threat_event(ThreatEventInput {
                 now_ms,
                 packet_id,
@@ -48166,6 +48280,105 @@ mod tests {
         assert_eq!(
             direct.server.store.stat_total_error_replies,
             generic.server.store.stat_total_error_replies
+        );
+    }
+
+    #[test]
+    fn plain_lpos_count_borrowed_matches_generic_and_defers() {
+        // (frankenredis-uu33c) LPOS key element COUNT n (argc 5) borrow == generic.
+        //
+        // The case that a RANK-shaped implementation gets WRONG, and the reason this
+        // is a separate executor rather than a parameter on the RANK one: with COUNT
+        // present the reply is ALWAYS an ARRAY, so no matches is an EMPTY ARRAY where
+        // the no-COUNT form returns a nil bulk. COUNT 0 means ALL matches, not zero.
+        let mut direct = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut direct, &mut generic] {
+            rt.execute_frame(
+                command(&[b"RPUSH", b"l", b"a", b"b", b"c", b"b", b"a", b"b"]),
+                1,
+            );
+            rt.execute_frame(command(&[b"SET", b"s", b"v"]), 1);
+        }
+        let cases: [(&[u8], &[u8], &[u8]); 8] = [
+            (b"l", b"b", b"1"),       // fewer than available
+            (b"l", b"b", b"2"),       // exactly the first two
+            (b"l", b"b", b"3"),       // exactly all of them
+            (b"l", b"b", b"9"),       // more than available -> short array, not padded
+            (b"l", b"b", b"0"),       // 0 == ALL matches, the upstream special case
+            (b"l", b"zzz", b"2"),     // no matches -> EMPTY ARRAY, not nil
+            (b"missing", b"a", b"2"), // missing key
+            (b"s", b"a", b"2"),       // wrong type -> WRONGTYPE
+        ];
+        for (ts, (key, el, count)) in (2..).zip(cases) {
+            let f = direct
+                .execute_plain_lpos_count_borrowed(key, el, count, ts)
+                .expect("lpos COUNT fast path should engage");
+            let g = generic.execute_frame(command(&[b"LPOS", key, el, b"COUNT", count]), ts);
+            assert_eq!(f, g, "key={key:?} el={el:?} count={count:?}");
+        }
+        // Deferral: upstream emits "ERR COUNT can't be negative" for BOTH an explicit
+        // negative and an unparseable integer, so both must decline to generic rather
+        // than be answered here. Drive the declined shapes through generic on both
+        // runtimes so the stats stay in lockstep.
+        let defer: [&[u8]; 4] = [b"-1", b"-9223372036854775808", b"notint", b""];
+        for (ts, count) in (100u64..).zip(defer) {
+            assert!(
+                direct
+                    .execute_plain_lpos_count_borrowed(b"l", b"b", count, ts)
+                    .is_none(),
+                "lpos COUNT must defer count={count:?}"
+            );
+            let f = direct.execute_frame(command(&[b"LPOS", b"l", b"b", b"COUNT", count]), ts);
+            let g = generic.execute_frame(command(&[b"LPOS", b"l", b"b", b"COUNT", count]), ts);
+            assert_eq!(f, g, "defer count={count:?}");
+        }
+        assert_eq!(
+            direct.server.store.stat_keyspace_hits,
+            generic.server.store.stat_keyspace_hits
+        );
+        assert_eq!(
+            direct.server.store.stat_keyspace_misses,
+            generic.server.store.stat_keyspace_misses
+        );
+        assert_eq!(
+            direct.server.store.stat_total_error_replies,
+            generic.server.store.stat_total_error_replies
+        );
+    }
+
+    #[test]
+    fn plain_lpos_owned_argv_reports_the_option_the_client_sent() {
+        // (frankenredis-uu33c) This argv is what slowlog, latency sampling and the
+        // threat digest reconstruct the command from. The keyword used to be a
+        // hardcoded b"RANK", which was correct while RANK was the only optioned
+        // borrowed form — so a COUNT path reusing it would have reported a command
+        // the client never sent. A reply-level differ CANNOT see this: the reply is
+        // byte-identical either way, and only the introspection surfaces differ.
+        assert_eq!(
+            crate::plain_lpos_owned_argv(b"k", b"e", Some((b"COUNT", b"2"))),
+            vec![
+                b"LPOS".to_vec(),
+                b"k".to_vec(),
+                b"e".to_vec(),
+                b"COUNT".to_vec(),
+                b"2".to_vec()
+            ],
+            "COUNT must not be reported as RANK"
+        );
+        assert_eq!(
+            crate::plain_lpos_owned_argv(b"k", b"e", Some((b"RANK", b"2"))),
+            vec![
+                b"LPOS".to_vec(),
+                b"k".to_vec(),
+                b"e".to_vec(),
+                b"RANK".to_vec(),
+                b"2".to_vec()
+            ],
+        );
+        assert_eq!(
+            crate::plain_lpos_owned_argv(b"k", b"e", None),
+            vec![b"LPOS".to_vec(), b"k".to_vec(), b"e".to_vec()],
         );
     }
 
