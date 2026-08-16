@@ -57433,6 +57433,154 @@ mod tests {
         );
     }
 
+    /// (frankenredis-ah4gx) A READ that reaps an expired hash FIELD must not be
+    /// treated as a write.
+    ///
+    /// `lazy_expiry_on_access_propagates_del_and_not_the_read` pins this for
+    /// whole-key expiry, and the compensation it relies on is `lazy_count`:
+    /// every lazy eviction registers in `lazy_expired_propagation`, so the gate
+    /// at the top of this file can subtract them and see that the command
+    /// dirtied nothing of its own. `drop_expired_hash_fields` bumps `dirty` by
+    /// the number of fields reaped and registers NOTHING, so the subtraction has
+    /// nothing to subtract and a plain HGET looks like a write.
+    ///
+    /// Both halves the gate guards are asserted, because they fail independently:
+    /// the read must not propagate ITSELF to AOF/replicas, and it must not fire
+    /// the generic per-command keyspace event.
+    ///
+    /// NOTE ON REACHABILITY (frankenredis-ukm9j): HEXPIRE/HTTL/HPERSIST are no
+    /// longer registered on the 7.2.4 wire surface, so a client cannot create a
+    /// field TTL any more — the remaining producers are RDB load of a 7.4 file
+    /// and this store API. That narrows who can hit this in production; it does
+    /// not make the gate correct, and a test reaching the store directly is now
+    /// the ONLY way to exercise it, which is precisely why no differ can.
+    #[test]
+    fn hash_field_reap_on_a_read_does_not_propagate_the_read_or_notify() {
+        let mut rt = Runtime::default_strict();
+        rt.server.replication_runtime_state.ensure_replica(42);
+        // Access must trigger the LAZY path, not the active cycle.
+        rt.server.store.active_expire_enabled = false;
+
+        let subscriber = rt.new_session();
+        let reader = rt.swap_session(subscriber);
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"notify-keyspace-events", b"KEA"]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"PSUBSCRIBE", b"__keyevent@*__:*"]), 1),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"psubscribe".to_vec())),
+                RespFrame::BulkString(Some(b"__keyevent@*__:*".to_vec())),
+                RespFrame::Integer(1),
+            ]))
+        );
+        let subscriber = rt.swap_session(reader);
+
+        rt.execute_frame(
+            command(&[b"HSET", b"h", b"doomed", b"a", b"kept", b"b"]),
+            100,
+        );
+        // Field TTL set through the store: HEXPIRE is not on the 7.2.4 wire
+        // surface, and this is the same call the executor would have made.
+        assert_eq!(
+            rt.server.store.hash_field_set_abs_expiry(
+                b"h",
+                b"doomed",
+                1_000,
+                fr_store::HashFieldTtlCondition::None,
+                200,
+            ),
+            fr_store::HashFieldTtlSet::Applied
+        );
+        rt.drain_pubsub_for_client(subscriber.client_id);
+        let before = rt.aof_records().len();
+        let dirty_before = rt.server.store.dirty;
+
+        // HGETALL at t=5000. It must be a COLLECTION read: `drop_expired_hash_fields`
+        // is called from hgetall / hlen / hkeys / hvals / hrandfield only, and NOT
+        // from single-field HGET, which hides an expired field via
+        // `hash_field_is_expired` without reaping it. (ah4gx's refinement (b) says
+        // HGET is the cheapest repro; it is not a repro at all, and the `dirty`
+        // assertion below is what caught that.)
+        let reply = rt.execute_frame(command(&[b"HGETALL", b"h"]), 5_000);
+        let flat = match &reply {
+            RespFrame::Array(Some(items)) => items
+                .iter()
+                .filter_map(|f| match f {
+                    RespFrame::BulkString(Some(b)) => Some(b.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            other => panic!("HGETALL returned {other:?}"),
+        };
+        assert!(
+            !flat.iter().any(|f| f.as_slice() == b"doomed"),
+            "the expired field must not be visible, got {flat:?}"
+        );
+        assert!(
+            flat.iter().any(|f| f.as_slice() == b"kept"),
+            "the surviving field must still be there, got {flat:?}"
+        );
+
+        // THE ANTI-VACUITY ASSERTION, and it is the whole point of the test.
+        // Everything below only means something if THIS command reaped, and a
+        // reap is observable exactly as a `dirty` bump — that bump is what the
+        // propagation gate compares against `lazy_count`. Without this, a test
+        // where the reaper never ran passes and looks like a clean bill of
+        // health for a gate it never exercised.
+        let dirty_after = rt.server.store.dirty;
+        assert!(
+            dirty_after > dirty_before,
+            "the HGET must have reaped the expired field (dirty {dirty_before} -> \
+             {dirty_after}); if it did not, this test never reached the gate"
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"HGET", b"h", b"doomed"]), 5_000),
+            RespFrame::BulkString(None),
+            "the expired field must be gone"
+        );
+
+        let argvs: Vec<Vec<Vec<u8>>> = rt.aof_records()[before..]
+            .iter()
+            .map(|r| r.argv.clone())
+            .collect();
+        assert!(
+            !argvs.iter().any(|a| a
+                .first()
+                .is_some_and(|c| c.eq_ignore_ascii_case(b"HGETALL"))),
+            "an HGETALL that merely reaped an expired field must NOT propagate itself, got {argvs:?}"
+        );
+        // A field reap is not a whole-key deletion: the hash still exists, so a
+        // DEL would be actively wrong on the replica.
+        assert!(
+            !argvs.iter().any(
+                |a| a.first().is_some_and(|c| c.eq_ignore_ascii_case(b"DEL"))
+                    && a.get(1).is_some_and(|k| k.as_slice() == b"h")
+            ),
+            "a field reap must not propagate DEL for a key that still exists, got {argvs:?}"
+        );
+
+        let events = rt.drain_pubsub_for_client(subscriber.client_id);
+        let channels: Vec<String> = events
+            .iter()
+            .filter_map(|m| match m {
+                fr_store::PubSubMessage::PMessage { channel, .. } => {
+                    Some(String::from_utf8_lossy(channel).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !channels.iter().any(|c| c.ends_with(":hgetall")),
+            "a read must not fire a per-command keyspace event, got {channels:?}"
+        );
+    }
+
     #[test]
     fn lazy_expiry_on_access_propagates_del_and_not_the_read() {
         // (frankenredis-1d2xf) A command that lazily expires a key on access must
