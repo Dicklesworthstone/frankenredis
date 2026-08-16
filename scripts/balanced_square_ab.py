@@ -441,6 +441,16 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
     #
     # Note run 2 certified at 84% load while run 1 failed at 36%. Admissibility,
     # not loadavg, decides which row to believe.
+    # (frankenredis-bk8ag) The arity-6 ZADD two-flag form, which the ZaddTwoPair arm
+    # claimed and dropped on generic until 7e5657839 chained zadd_flag2. Measured
+    # ACROSS BUILDS rather than across bypass modes: fr-zadd predates the fix and
+    # fr-zadd6 contains it, so the two binaries differ by the actual commit.
+    # zadd_twopair is the reading the arm ALWAYS served -- it must not move.
+    "zadd6": [
+        ("zadd_twoflag", ["ZADD z6 1 m1"], ["ZADD", "z6", "XX", "CH", "5", "m1"]),
+        ("zadd_twopair", ["ZADD z6 1 m1"], ["ZADD", "z6", "7", "m1", "8", "m2"]),
+        ("get_control", ["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
+    ],
     "expirefair": [
         ("expire_plain_ok", ["SET e v"], ["EXPIRE", "e", "500"]),
         ("expire_xx_ok", ["SET s v", "EXPIRE s 10000"], ["EXPIRE", "s", "500", "XX"]),
