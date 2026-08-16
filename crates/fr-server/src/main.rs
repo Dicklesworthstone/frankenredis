@@ -15694,7 +15694,14 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (4, BorrowedDispatchFloorCommand::Xack) if xack_missing_floor_enabled() => {
             Some(BorrowedDispatchFloorClass::XackMissing)
         }
-        (array_len, BorrowedDispatchFloorCommand::Del) if (3..=6).contains(&array_len) => {
+        // DEL at 1..=5 keys (array_len 2..=6). The single-key form was left out:
+        // its fast path exists (`parse_borrowed_plain_key_only_packet` plus the
+        // same variadic executor, added by frankenredis-keyonlyfast) but lives in
+        // the cascade at ~8615, so `DEL key` matched the classifier's token table,
+        // failed this arity guard, and walked the chain anyway. Measured at
+        // 1.7353x redis with 57.2% of the op in dispatch, against 0.5791x/21.6%
+        // for the classified EXISTS control. (frankenredis-l9wvl)
+        (array_len, BorrowedDispatchFloorCommand::Del) if (2..=6).contains(&array_len) => {
             Some(BorrowedDispatchFloorClass::Del(array_len - 1))
         }
         // (frankenredis-ozrro) Two routes that WORK but sit ~1200 and ~2700 arms'
@@ -16902,6 +16909,19 @@ fn dispatch_floor_fast_del(
     ts: u64,
 ) -> Option<(usize, RespFrame)> {
     match nkeys {
+        // Single key: the generic key-only parser, same executor, one-key slice —
+        // byte-identical to the cascade arm this replaces.
+        1 => {
+            let packet = parse_borrowed_plain_key_only_packet(
+                unparsed,
+                parser_config,
+                b"*2\r\n$3\r\n",
+                b"DEL",
+            )?;
+            runtime
+                .execute_plain_del_borrowed(&[packet.key], ts)
+                .map(|response| (packet.consumed, response))
+        }
         2 => {
             let packet = parse_borrowed_plain_key_arg1_packet(
                 unparsed,
@@ -43080,6 +43100,17 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
     #[test]
     fn dispatch_floor_classifier_recognizes_only_exact_target_tokens() {
         let cfg = ParserConfig::default();
+        // DEL's single-key form, previously outside the 3..=6 guard. Arity 1
+        // (`DEL` with no key) is the arity-error shape and must NOT classify.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(b"*2\r\n$3\r\ndEl\r\n$1\r\nk\r\n", &cfg),
+            Some(super::BorrowedDispatchFloorClass::Del(1))
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(b"*1\r\n$3\r\nDEL\r\n", &cfg),
+            None,
+            "DEL with no keys must not classify"
+        );
         // The keyed-values-write range now starts at ONE value (array_len 3),
         // where it previously started at five. These pin the new lower boundary
         // in both directions: one value classifies, and array_len 2 — which is
@@ -43345,10 +43376,16 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             ),
             Some(super::BorrowedDispatchFloorClass::Del(5))
         );
+        // This row used to require single-key DEL NOT to classify, because it
+        // "keeps its existing dedicated route". It does have one — at ~8615, via
+        // the key-only parser — but that route is in the cascade, so reaching it
+        // cost the walk: 1.7353x redis with 57.2% of the op in dispatch, against
+        // 0.5791x/21.6% for the classified EXISTS control. Having a route and
+        // being cheap to reach are different properties, and this assertion
+        // conflated them. (frankenredis-l9wvl)
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(b"*2\r\n$3\r\nDEL\r\n$1\r\na\r\n", &cfg,),
-            None,
-            "single-key DEL keeps its existing dedicated route"
+            Some(super::BorrowedDispatchFloorClass::Del(1))
         );
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(
