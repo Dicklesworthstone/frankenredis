@@ -371,6 +371,24 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
     #     ELF1 9a4ed111  zadd_xx 0.8676 [0.8416, 0.8873] ADM  nulls 1.0071/0.9912
     #   WORST BOUND 0.8395. Control-normalised ~0.77-0.79 (get_control 1.1217/1.0947).
     #
+    # AFTER the arity-5 class landed (c2973aa12), on ELF a146507d78bdb55610c63397,
+    # both arms the same binary. NO admissible row either side -- the host went
+    # noisy, with nulls reaching 1.1100 -- so this is banked as SEPARATION, not as
+    # a certified crossing:
+    #
+    #   generic/unclassified  0.8671  0.8676  0.8833  0.8696   spread 1.9%
+    #     (first two are the pre-fix ELFs, both ADMISSIBLE; last two same-ELF)
+    #   fast/classified       0.9813  1.0862  1.1380            spread 16%
+    #
+    #   min(fast) 0.9813 > max(generic) 0.8833. The populations do not overlap
+    #   across 3 vs 4 runs. But the gap is 11% and the worst observed null
+    #   deviation is also 11% (fr null 1.1100), so the separation sits AT the
+    #   noise floor rather than above it. Re-measure when nulls pass.
+    #
+    #   Note which arm is noisy: the UNCLASSIFIED path is stable to 1.9% across
+    #   three different ELFs, while the newly classified path varies 16% on one.
+    #   That is worth explaining before claiming the crossing.
+    #
     # expire_nx is the runner-up and is NOT yet a candidate: 0.9068 and 0.9111 agree
     # in direction across the same two ELFs, but BOTH runs null-failed.
     #
