@@ -78,7 +78,11 @@ fn hmset_reply_owned_reference(runtime: &mut Runtime, key: &[u8], now_ms: u64, o
 /// `+OK\r\n` directly on success (`Some(None)`), or encode the error frame on failure.
 #[inline(never)]
 fn hmset_reply_ok_candidate(runtime: &mut Runtime, key: &[u8], now_ms: u64, out: &mut Vec<u8>) {
-    match runtime.execute_plain_hmset_borrowed_ok(black_box(key), black_box(&PAIRS), black_box(now_ms)) {
+    match runtime.execute_plain_hmset_borrowed_ok(
+        black_box(key),
+        black_box(&PAIRS),
+        black_box(now_ms),
+    ) {
         Some(None) => out.extend_from_slice(b"+OK\r\n"),
         Some(Some(response)) => response.encode_into(out),
         None => panic!("HMSET fast path must accept the benchmark pairs"),
@@ -248,7 +252,9 @@ fn run_instruction_ab(executable: &Path) -> Result<(), String> {
         "INSTRUCTIONS_SUMMARY rounds={STAT_ROUNDS} candidate_median={candidate_median:.0} reference_median={reference_median:.0} null_median={null_median:.9} null_p05={null_p05:.9} null_p95={null_p95:.9} null_cv_pct={null_cv_pct:.6} reference_over_candidate_median={effect_median:.9} speedup_cv_pct={effect_cv_pct:.6}"
     );
     if (null_median - 1.0).abs() >= 0.02 {
-        return Err(format!("null median exposes harness bias: {null_median:.9}"));
+        return Err(format!(
+            "null median exposes harness bias: {null_median:.9}"
+        ));
     }
     if effect_median <= null_p95 || effect_median <= 1.01 {
         return Err(format!(
@@ -269,13 +275,11 @@ fn hmset_reply_bytes(arm: Arm, runtime: &mut Runtime, key: &[u8], now_ms: u64) -
                 .expect("HMSET borrowed fast path must engage");
             response.encode_into(&mut out);
         }
-        Arm::Candidate => {
-            match runtime.execute_plain_hmset_borrowed_ok(key, &PAIRS, now_ms) {
-                Some(None) => out.extend_from_slice(b"+OK\r\n"),
-                Some(Some(response)) => response.encode_into(&mut out),
-                None => panic!("HMSET borrowed fast path must engage"),
-            }
-        }
+        Arm::Candidate => match runtime.execute_plain_hmset_borrowed_ok(key, &PAIRS, now_ms) {
+            Some(None) => out.extend_from_slice(b"+OK\r\n"),
+            Some(Some(response)) => response.encode_into(&mut out),
+            None => panic!("HMSET borrowed fast path must engage"),
+        },
     }
     out
 }
@@ -306,8 +310,16 @@ fn correctness_gate() {
         candidate, reference,
         "candidate replies/store state diverged from reference"
     );
-    assert_eq!(candidate.0[0].as_slice(), b"+OK\r\n", "HMSET create must reply +OK");
-    assert_eq!(candidate.0[1].as_slice(), b"+OK\r\n", "HMSET overwrite must reply +OK");
+    assert_eq!(
+        candidate.0[0].as_slice(),
+        b"+OK\r\n",
+        "HMSET create must reply +OK"
+    );
+    assert_eq!(
+        candidate.0[1].as_slice(),
+        b"+OK\r\n",
+        "HMSET overwrite must reply +OK"
+    );
     assert!(
         candidate.0[2].starts_with(b"-WRONGTYPE"),
         "HMSET on a string key must reply a WRONGTYPE error, got {:?}",

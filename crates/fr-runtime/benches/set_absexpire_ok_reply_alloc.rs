@@ -269,7 +269,9 @@ fn run_instruction_ab(executable: &Path) -> Result<(), String> {
         "INSTRUCTIONS_SUMMARY rounds={STAT_ROUNDS} candidate_median={candidate_median:.0} reference_median={reference_median:.0} null_median={null_median:.9} null_p05={null_p05:.9} null_p95={null_p95:.9} null_cv_pct={null_cv_pct:.6} reference_over_candidate_median={effect_median:.9} speedup_cv_pct={effect_cv_pct:.6}"
     );
     if (null_median - 1.0).abs() >= 0.02 {
-        return Err(format!("null median exposes harness bias: {null_median:.9}"));
+        return Err(format!(
+            "null median exposes harness bias: {null_median:.9}"
+        ));
     }
     if effect_median <= null_p95 || effect_median <= 1.01 {
         return Err(format!(
@@ -294,7 +296,9 @@ fn correctness_sequence(arm: Arm) -> (Vec<Vec<u8>>, Vec<RespFrame>, Vec<RespFram
         out.clear();
         let now = index as u64 + 1;
         match arm {
-            Arm::Reference => absexpire_reply_owned_reference(&mut runtime, key, value, now, &mut out),
+            Arm::Reference => {
+                absexpire_reply_owned_reference(&mut runtime, key, value, now, &mut out)
+            }
             Arm::Candidate => {
                 absexpire_reply_ok_candidate(&mut runtime, key, value, now, &mut out);
             }
@@ -323,7 +327,11 @@ fn correctness_gate() {
         "candidate replies/store state/TTL diverged from reference"
     );
     for reply in &candidate.0 {
-        assert_eq!(reply.as_slice(), b"+OK\r\n", "each absexpire SET reply must be +OK");
+        assert_eq!(
+            reply.as_slice(),
+            b"+OK\r\n",
+            "each absexpire SET reply must be +OK"
+        );
     }
     println!(
         "CORRECTNESS_GATE replies_store_state_and_ttl=identical cases={}",

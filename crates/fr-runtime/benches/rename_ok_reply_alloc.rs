@@ -105,7 +105,11 @@ fn run_loop(arm: Arm, repeats: usize) {
     let mut forward = true;
     for tick in 0..repeats {
         out.clear();
-        let (from, to): (&[u8], &[u8]) = if forward { (KEY_A, KEY_B) } else { (KEY_B, KEY_A) };
+        let (from, to): (&[u8], &[u8]) = if forward {
+            (KEY_A, KEY_B)
+        } else {
+            (KEY_B, KEY_A)
+        };
         match arm {
             Arm::Reference => {
                 rename_reply_owned_reference(
@@ -266,7 +270,9 @@ fn run_instruction_ab(executable: &Path) -> Result<(), String> {
         "INSTRUCTIONS_SUMMARY rounds={STAT_ROUNDS} candidate_median={candidate_median:.0} reference_median={reference_median:.0} null_median={null_median:.9} null_p05={null_p05:.9} null_p95={null_p95:.9} null_cv_pct={null_cv_pct:.6} reference_over_candidate_median={effect_median:.9} speedup_cv_pct={effect_cv_pct:.6}"
     );
     if (null_median - 1.0).abs() >= 0.02 {
-        return Err(format!("null median exposes harness bias: {null_median:.9}"));
+        return Err(format!(
+            "null median exposes harness bias: {null_median:.9}"
+        ));
     }
     if effect_median <= null_p95 || effect_median <= 1.01 {
         return Err(format!(
@@ -315,7 +321,10 @@ fn correctness_gate() {
     assert_eq!(ok_b, ok_g, "borrowed vs generic success reply diverged");
     assert_eq!(get_new_b, get_new_g, "renamed-to value diverged");
     assert_eq!(get_old_b, get_old_g, "renamed-from (now absent) diverged");
-    assert_eq!(err_b, err_g, "borrowed vs generic no-such-key error diverged");
+    assert_eq!(
+        err_b, err_g,
+        "borrowed vs generic no-such-key error diverged"
+    );
     assert_eq!(ok_b.as_slice(), b"+OK\r\n", "RENAME success must reply +OK");
     assert!(
         err_b.starts_with(b"-"),

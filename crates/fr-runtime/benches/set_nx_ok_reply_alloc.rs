@@ -60,7 +60,8 @@ fn command(parts: &[&[u8]]) -> RespFrame {
 /// reply frame and encode it into `out`, exactly like the pre-change consumer.
 #[inline(never)]
 fn set_nx_reply_owned_reference(runtime: &mut Runtime, now_ms: u64, out: &mut Vec<u8>) {
-    match runtime.execute_plain_set_nx_borrowed(black_box(KEY), black_box(VALUE), black_box(now_ms)) {
+    match runtime.execute_plain_set_nx_borrowed(black_box(KEY), black_box(VALUE), black_box(now_ms))
+    {
         Some(None) => {
             let response = RespFrame::SimpleString("OK".to_string());
             response.encode_into(out);
@@ -75,7 +76,8 @@ fn set_nx_reply_owned_reference(runtime: &mut Runtime, now_ms: u64, out: &mut Ve
 /// (`Some(None)`), or encode the nil frame when the key existed.
 #[inline(never)]
 fn set_nx_reply_ok_candidate(runtime: &mut Runtime, now_ms: u64, out: &mut Vec<u8>) {
-    match runtime.execute_plain_set_nx_borrowed(black_box(KEY), black_box(VALUE), black_box(now_ms)) {
+    match runtime.execute_plain_set_nx_borrowed(black_box(KEY), black_box(VALUE), black_box(now_ms))
+    {
         Some(None) => out.extend_from_slice(b"+OK\r\n"),
         Some(Some(response)) => response.encode_into(out),
         None => panic!("SET NX fast path must engage for the benchmark key"),
@@ -246,7 +248,9 @@ fn run_instruction_ab(executable: &Path) -> Result<(), String> {
         "INSTRUCTIONS_SUMMARY rounds={STAT_ROUNDS} candidate_median={candidate_median:.0} reference_median={reference_median:.0} null_median={null_median:.9} null_p05={null_p05:.9} null_p95={null_p95:.9} null_cv_pct={null_cv_pct:.6} reference_over_candidate_median={effect_median:.9} speedup_cv_pct={effect_cv_pct:.6}"
     );
     if (null_median - 1.0).abs() >= 0.02 {
-        return Err(format!("null median exposes harness bias: {null_median:.9}"));
+        return Err(format!(
+            "null median exposes harness bias: {null_median:.9}"
+        ));
     }
     if effect_median <= null_p95 || effect_median <= 1.01 {
         return Err(format!(
@@ -287,9 +291,16 @@ fn correctness_gate() {
 
     assert_eq!(ok_b, ok_g, "borrowed vs generic success reply diverged");
     assert_eq!(get_b, get_g, "stored value diverged");
-    assert_eq!(nil_b, nil_g, "borrowed vs generic nil (key exists) reply diverged");
+    assert_eq!(
+        nil_b, nil_g,
+        "borrowed vs generic nil (key exists) reply diverged"
+    );
     assert_eq!(ok_b.as_slice(), b"+OK\r\n", "SET NX write must reply +OK");
-    assert_eq!(nil_b.as_slice(), b"$-1\r\n", "SET NX on existing key must reply nil");
+    assert_eq!(
+        nil_b.as_slice(),
+        b"$-1\r\n",
+        "SET NX on existing key must reply nil"
+    );
     println!(
         "CORRECTNESS_GATE borrowed_matches_generic=write+exists reply_ok={:?} reply_nil={:?}",
         String::from_utf8_lossy(&ok_b),

@@ -16460,8 +16460,14 @@ mod tests {
             "wrong wording: {err}"
         );
 
-        let frame = eval_script(b"return redis.call('GET', 'marker')", &[], &[], &mut store, 0)
-            .unwrap();
+        let frame = eval_script(
+            b"return redis.call('GET', 'marker')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
         assert_eq!(
             frame,
             RespFrame::BulkString(Some(b"written".to_vec())),
@@ -16512,8 +16518,14 @@ mod tests {
             "wrong wording: {msg}"
         );
 
-        let frame = eval_script(b"return redis.pcall('SET', 'k', {})", &[], &[], &mut store, 0)
-            .unwrap();
+        let frame = eval_script(
+            b"return redis.pcall('SET', 'k', {})",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
         let RespFrame::Error(msg) = &frame else {
             panic!("expected an error reply, got {frame:?}");
         };

@@ -129,7 +129,6 @@ impl ListpackIntegerBytes {
     pub fn as_slice(&self) -> &[u8] {
         &self.bytes[..usize::from(self.len)]
     }
-
 }
 
 /// Narrow a decoded payload offset pair to the `u32` pair a span stores.
@@ -158,9 +157,7 @@ impl ListpackValueSpan {
     #[inline]
     pub fn as_bytes<'a>(&'a self, listpack: &'a [u8]) -> &'a [u8] {
         match self {
-            Self::String(range) => {
-                &listpack[range.start as usize..range.end as usize]
-            }
+            Self::String(range) => &listpack[range.start as usize..range.end as usize],
             Self::Integer(bytes) => bytes.as_slice(),
         }
     }
@@ -862,7 +859,10 @@ fn decode_entry_value_span(
         }
         let data_len = 1 + slen;
         let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
-        return Ok((ListpackValueSpan::String(narrow_span(start, end)?), entry_len));
+        return Ok((
+            ListpackValueSpan::String(narrow_span(start, end)?),
+            entry_len,
+        ));
     }
     if first & 0xE0 == 0xC0 {
         let second = *data.get(cursor + 1).ok_or(ListpackError::TruncatedEntry)?;
@@ -888,7 +888,10 @@ fn decode_entry_value_span(
         }
         let data_len = 2 + slen;
         let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
-        return Ok((ListpackValueSpan::String(narrow_span(start, end)?), entry_len));
+        return Ok((
+            ListpackValueSpan::String(narrow_span(start, end)?),
+            entry_len,
+        ));
     }
     match first {
         0xF0 => {
@@ -910,7 +913,10 @@ fn decode_entry_value_span(
             }
             let data_len = 5 + slen;
             let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
-            Ok((ListpackValueSpan::String(narrow_span(start, end)?), entry_len))
+            Ok((
+                ListpackValueSpan::String(narrow_span(start, end)?),
+                entry_len,
+            ))
         }
         0xF1 => {
             if cursor + 3 > data.len() {
@@ -1068,7 +1074,7 @@ pub fn decode_zset_spans_and_scores(
                 pending = Some(match raw {
                     RawListpackValue::String(range) => {
                         ListpackValueSpan::String(narrow_span(range.start, range.end)?)
-                    },
+                    }
                     RawListpackValue::Integer(value) => ListpackValueSpan::integer(value),
                 });
             }
