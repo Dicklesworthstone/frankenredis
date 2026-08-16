@@ -25670,3 +25670,101 @@ to show it cannot resolve a 2-3 pct effect. DO measure the tax when either becom
   2. The remaining seven frames are guarded too -- `try_recv`/`drain_writer_completions`
      are 13.2M of the 30.6M and dwarf the two taken here, so the aggregate may clear the
      noise floor where these two alone cannot.
+
+---
+
+## MEASURED (frankenredis-gein3, frankenredis-zw36c) — SINTER has no per-member deficit: fr leads 2.2-2.5x at every cardinality that reproduces, and the k=512 gap is not per-member work
+
+Campaign output: no
+
+Claim class: SELF-SPEEDUP. No new vs-incumbent KEEP is claimed here; the fr/redis figures
+are measured live in the same invocation and are reported to locate a deficit, not to bank
+a win. Both ELF identities are computed by sha256sum rather than self-reported, the
+standing limitation of every callgrind row here.
+
+TWO THINGS ARE CORRECTED, one of them mine.
+
+=== 1. THE PER-MEMBER MODEL DOES NOT EXIST ===
+
+The crossover has been argued three times from two shapes: sinter_2 (k=2, reproduces to
+0.16 pct) and sinter_big (k=512, does NOT reproduce -- 32 pct on the fr arm even after the
+drain fix). Every per-member number banked so far, including "fr 1,257.2 against redis
+902.6, +39.3 pct" and the k=14.2 crossover, is a two-point fit with sinter_big as an
+endpoint. Two new stable points, same two keys and the same fully overlapping seed so only
+cardinality varies:
+
+    k     fr instr/op   spread     redis instr/op   spread    fr/redis
+      2       4,303.4   0.16 pct         8,687.5   5.26 pct    0.4954
+     32      31,608.1   0.07 pct        78,873.5   0.62 pct    0.4007
+    128     374,180.7   0.04 pct       840,536.8   0.28 pct    0.4452
+
+    segment slopes, which is what shows the model cannot hold:
+      k=2 -> 32     fr   910.2 per extra member   redis 2,339.5
+      k=32 -> 128   fr 3,568.5                    redis 7,934.0
+
+7.34x the cost for 16x the members, then 11.84x for 4x: sub-linear, then nearly quadratic.
+BOTH engines steepen together (fr 11.84x, redis 10.66x), so it is a shared algorithmic
+regime change, not an fr defect. A line fitted across that returns whatever the endpoints
+imply -- which is how a model saying fr is 39.3 pct DEARER per member came out of an engine
+measured 2.2-2.5x AHEAD at every cardinality where the reading reproduces.
+
+I committed the same error before catching it. My first pass fitted k=2 -> k=32, got "fr
+61.1 pct cheaper per member", and predicted 0.3898x at k=512 against a measured 1.3811x.
+Being wrong by 3.5x is what sent me looking for a third point. TWO POINTS ALWAYS FIT A
+LINE; they cannot tell you the line is wrong. That applies to my fit and to the one I am
+correcting, equally.
+
+CONSEQUENCE FOR THE NEXT LEVER: the k=512 deficit is real -- the peer's min-of-5 has fr
+behind in 5 of 5 draws -- but it is not per-member work, and a lever aimed at fr's set
+membership would be aimed at the half fr is winning by 2.2x. The reversal appears between
+k=128 and k=512, together with the many-pass reply regime, which points at the per-pass
+reactor tax (zw36c) rather than at the intersection loop.
+
+=== 2. MY OWN 1 KB INSTABILITY THRESHOLD WAS WRONG ===
+
+ae6236d11 added a guard warning that above ~1 KB of reply per op the fr arm is
+timing-dependent. sinter_128 falsifies it: 1,414 bytes/op, and the tightest arm in the
+corpus at 0.037 pct over four runs. The measured bracket is 1,414 B/op stable against
+5,638 B/op unstable, so the line moves to 2 KB and the wording drops the claim that
+everything above it IS timing-dependent, which was an inference rather than an
+observation. Verified in both directions: silent on sinter_128, still firing on sinter_big.
+
+=== 3. AND THE WRITER-COMPLETION GUARD IS REJECTED AGAIN, THIS TIME ON THE RIGHT SHAPE ===
+
+f43f75333 rejected it saying the effect was UNMEASURABLE because every instrument divides
+by ops while the tax is per-iteration. 5546d3366 then measured a SIBLING lever -- the same
+guard applied to drain_pubsub_outboxes -- at -1.78 pct on sinter_2 with a flat control, so
+the class IS measurable and my shape choice (get_control, del_1_missing, bitop_and: all
+few-pass replies) was the reason I saw nothing. Re-ran mine on sinter_2, five draws per
+arm, arms interleaved, pair stability-proven (before 81871e20, after c84fa82a):
+
+    before  4309.7  4304.1  4261.2  4321.7  4307.8    mean 4300.9   spread 1.42 pct
+    after   4301.8  4266.8  4279.5  4305.5  4298.9    mean 4290.5   spread 0.91 pct
+
+    mean -0.24 pct, min-of-5 +0.13 pct -- inside either arm's own spread.
+
+The pubsub guard resolved at 4-8x its spread on this same shape; mine does not resolve at
+all, and the mechanism explains why rather than excusing it: drain_pubsub_outboxes built a
+Vec and set up a HashMap::drain iterator on every pass, while an empty mpsc try_recv is a
+couple of atomic loads. GUARDING PER-ITERATION WORK PAYS IN PROPORTION TO WHAT THE GUARDED
+BODY COSTS WHEN EMPTY -- the class is not uniformly a lever. My "unmeasurable" wording is
+withdrawn: it is measurable, it was measured, and it is zero within 1 pct.
+
+RETRY PREDICATE: do not retry the writer-completion guard until either the drain's
+empty-path cost is shown to exceed ~40 instructions per pass (callgrind call counts times
+per-call cost, not Ir), or a shape exists with a many-pass reply AND a sub-1 pct arm --
+sinter_128 is the current best candidate at 0.04 pct and should be tried first. Do not
+re-run get_control, del_1_missing or bitop_and against it at any sample size; their replies
+take too few passes to contain the effect.
+
+PROVENANCE: fr ELFs 81871e2025d9370c9543952d402fb85c8638a611e910a3d46c4511b50d528794
+(before) and c84fa82ab4636af1addc7e7872c37516f8e3bc536f8f79ea950c23e82aa261c9 (after),
+built locally with RCH_CARGO_WRAPPER_BYPASS=1 exported and env -u CARGO_TARGET_DIR, no
+[RCH] line, executable path from --message-format=json, and the pair proven to differ by
+the patch alone (build AFTER, BEFORE, AFTER again; the two AFTER SHAs matched).
+thinkstation1, 64 cores observed, governor powersave, /data 236G. Loadavg SAMPLED BY ME
+per arm across the draws: 16.10, 16.57, 16.57, 21.97, 27.10, 31.49, 35.46, 33.74, 33.74,
+32.00 -- a 2.2x excursion inside the measurement, which is why the arms were interleaved.
+Mean CPU MHz SAMPLED BY ME per arm over 64 cores: 2174-3984, an 83 pct spread. The
+cardinality table above was taken in a quieter window, 11.09/17.27/19.98 to
+22.76/18.89/20.20, MHz 2324-3984. Instruction counts only; no timing claim is made.
