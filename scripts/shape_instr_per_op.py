@@ -225,6 +225,33 @@ SHAPES = {
         "SADD n4 m1 m2 m3", "SADD n5 m1 m2 m3", "SADD n6 m1 m2 m3",
         "SADD n7 m1 m2 m3", "SADD n8 m1 m2 m3", "SADD n9 m1 m2 m3",
     ], ["SINTER", "n1", "n2", "n3", "n4", "n5", "n6", "n7", "n8", "n9"]),
+    # (frankenredis-gein3) LARGE-INTERSECTION SINTER. These exist because sinter_2 and
+    # sinter_9 CANNOT measure anything that scales with the RESULT: every set they seed
+    # holds the same three members, so both return 2-3 members no matter how many keys
+    # are involved. That is deliberate and correct for what they isolate (with vs
+    # without a borrowed parser), but it means any lever whose cost is O(result) scores
+    # ~0 on them and gets filed REJECT on a FALSE NEGATIVE -- which then stops the next
+    # person retrying it. fr sorts the SINTER reply (fr-store 20672/20741/20761) where
+    # redis sorts nothing; that sort is O(k log k) in the RESULT, so it is invisible at
+    # k=3 and only becomes measurable here.
+    #
+    # BOTH ARMS ARE COVERED SEPARATELY AND MUST STAY THAT WAY. sinter_borrow_scan takes
+    # a different path per encoding and its own comment records that a byte-sort of
+    # decimal representations is NOT value order, so the intset arm materializes where
+    # the generic arm streams borrowed refs. A single shape would exercise one of them
+    # and silently leave the other unmeasured.
+    #
+    # The intset shape stays at 500 members on purpose: set-max-intset-entries defaults
+    # to 512, so 1000 integers would convert away from intset and this would quietly
+    # become a second copy of the generic arm.
+    "sinter_large_generic": ([
+        "SADD lg1 " + " ".join("s%d" % i for i in range(1000)),
+        "SADD lg2 " + " ".join("s%d" % i for i in range(1000)),
+    ], ["SINTER", "lg1", "lg2"]),
+    "sinter_large_intset": ([
+        "SADD li1 " + " ".join(str(i) for i in range(500)),
+        "SADD li2 " + " ".join(str(i) for i in range(500)),
+    ], ["SINTER", "li1", "li2"]),
     "mget_3": (["MSET a 1 b 2 c 3"], ["MGET", "a", "b", "c"]),
     "pfadd_existing": (["PFADD hll a b c"], ["PFADD", "hll", "a"]),
     "pexpireat_same": (["SET s abcdefghijklmnop"],
