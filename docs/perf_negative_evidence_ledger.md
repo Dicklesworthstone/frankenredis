@@ -16956,6 +16956,106 @@ profile. Reopen the round-trip question only if a profile shows a rendered value
 being reparsed on some other path — the hash and set RESTORE decoders were checked
 and do not have one, because their consumers genuinely want the bytes.
 
+## 2026-08-16 GentleStream: COMPETITIVE KEEP — front-classifying BITOP and ZMPOP closes the largest gap on the online surface: 0.640x → 0.952x and 0.711x → 0.981x normalised, and a THIRD ELF proves the one regression next to it is NOT the code (`frankenredis-nscqs`, `frankenredis-9u5z9`)
+
+Claim class: COMPETITIVE. Campaign output: yes. Live vendored Redis 7.2.4 arm in the
+SAME invocation, balanced square, every row carrying its own A/A null.
+
+**Headline, in the campaign's orientation:** FrankenRedis/Redis 7.2.4 throughput is
+**1.0526x** on BITOP AND, **1.0697x** on BITOP NOT and **1.0844x** on ZMPOP-missing
+after this change, against **0.7133x**, **0.7134x** and **0.7918x** for the same
+shapes on a rebuild of the pre-change source. Normalised by the GET control those are
+0.952x / 0.961x / 0.981x, up from 0.640x / 0.640x / 0.711x.
+
+**The lever.** BITOP (cff6ed002) and ZMPOP (d27752bb4) had exact borrowed parsers and
+executors stranded deep in the cascade. Gated callgrind said the routes were cheap and
+the walk was not: on `BITOP AND` the real work is 7.4% of the op (Store::bitop 4.64% +
+execute_plain_bitop_borrowed 2.78%) against ~14.5% in `parse_borrowed_plain_*` arms
+that cannot match BITOP plus 7.87% of memcmp on command names; ZMPOP on a MISSING key
+was 3.20% work against ~24% non-matching parsers. Both are now front-classified by
+(arity, command), reusing the same parser and executor — position only.
+
+**THREE ELFs ON THREE DIFFERENT WORKERS**, which is what makes the attribution sound
+rather than assumed:
+
+| ELF | source | RCH_WORKER |
+|---|---|---|
+| `fcc3c34f271f88cbb9bf0b6b51d405390b339fed87fd51d4ca4394fd8c2fd6f8` | pre-change | `hz2` |
+| `36f36c9b3825970213655850e2ed10d669726ce4c475c1d49760184e964db9ec` | pre-change, REBUILT | `vmi1227854` |
+| `f46c2542bcb4694fc7000599be793dcf8081a3400b6429cf17070137e5b75205` | post-change | `vmi1293453` |
+
+| shape | pre @hz2 | pre-rebuild @vmi1227854 | post run 1 | post run 2 |
+|---|---:|---:|---:|---:|
+| BITOP AND | 0.7605 | 0.7133 | **1.0526** | **1.0538** |
+| BITOP NOT | 0.7494 | 0.7134 | **1.0697** | **1.0618** |
+| ZMPOP missing | 0.7698 | 0.7918 | **1.0844** | **1.0890** |
+| SCAN selective prefix | 1.1042 | **0.9122** | 0.8946 | 0.9042 |
+| GET control | 1.1186 | 1.1141 | 1.1143 | 1.1054 |
+
+**WORST-BOUND improvement**, post CI-low over pre-rebuild CI-high — the most
+pessimistic pairing the intervals allow, quoted per the replicated-standing
+convention rather than the headline medians:
+
+| route | worst-bound raw | normalised before | normalised after |
+|---|---:|---:|---:|
+| BITOP AND | **1.4457x** | 0.640x | **0.952x** |
+| BITOP NOT | **1.4560x** | 0.640x | **0.961x** |
+| ZMPOP missing | **1.3224x** | 0.711x | **0.981x** |
+
+BITOP was the largest authenticated gap on the online surface at ~0.64x normalised
+(Redis ~1.56x faster). It is now within 5% of the control. None of these routes
+overtakes the control, so none is claimed as a win over GET — the claim is that a
+1.4-1.5x gap closed to near-parity.
+
+**THE REGRESSION SITTING NEXT TO IT IS NOT THE CODE, and finding that out is why the
+third ELF exists.** SCAN selective-prefix fell 1.1042 → ~0.90 between the pre and post
+runs, on a route this change never touches, and it reproduced on both post runs. Rather
+than ship a win with an unexplained 19% regression beside it, I rebuilt the PRE-CHANGE
+SOURCE and re-ran: it also reads **0.9122**. Same source as the 1.1042 row, same host,
+different build and a later hour — so SCAN's drift tracks TIME/BUILD, not this commit.
+The GET control moved only 1.2% across all four runs, which is what bounds how much of
+the rest is real. Had I skipped this build I would have credited my change with a
+regression it did not cause, and the BITOP numbers would have been unattributable in
+the same breath.
+
+**HARNESS:** `scripts/balanced_square_ab.py --shapes storeops --rounds 61 --expect-elf
+<16 hex>`, square `ABBAABBA`, 50,000 ops/slot, `-P16`, null bound ±0.02, bootstrap 95%
+CI, servers unpinned. Benchmark ran LOCALLY on thinkstation1, 64 cores OBSERVED,
+governor `powersave`, ISA avx2; rch compiled only. Every fr arm self-reported its
+executable binary SHA-256 from `/proc/<pid>/exe`; the vendored Redis 7.2.4 arm
+self-reported executable binary SHA-256
+`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`.
+**CV is provenance only and is NEVER a gate here, the bootstrap median CI being the
+only decision rule.**
+**Same-invocation A/A null, aggregated over the 24 admissible arm-nulls of the two
+post runs:** median **1.002350x**, bootstrap 95% median CI **[1.000900, 1.004700]**,
+n=24, percentile bootstrap, 4,096 resamples, fixed seed. Every arm-null inside ±0.02.
+
+**ROWS REFUSED and not quoted:** `exists_8key` and `zunionstore_2key` null-failed in
+post run 1, `zmpop_missing` in post run 2, `zunionstore_2key` and `sdiffstore_3src` in
+the pre-rebuild. The ZMPOP figure above therefore rests on post run 1 plus the
+worst-bound pairing, and is the weaker of the three claims.
+
+**Correctness, not asserted:** 37 cases, 0 disagreements across fr fast route, fr
+generic path (SAME ELF via `FR_PERF_AB_CASCADE_BYPASS=1`) and live 7.2.4, via
+`scripts/dispatch_route_differ.py`, which REFUSES to run unless both fr arms resolve to
+one binary containing the bypass symbol.
+
+**What is left on these routes.** The classification removed dispatch overhead, not
+work. The residual is `Store::bitop` plus the keyspace lookups around it
+(`contains_key` 3.36%, `get_mut` 2.09%, `internal_entries_insert` 1.85%). Closing the
+last ~5% needs a different lever and should not be attempted by widening this one.
+The three-source set stores are untouched by this and remain the worst surface:
+SINTERSTORE ~0.66x, SDIFFSTORE ~0.69x, SUNIONSTORE ~0.74x normalised
+(`frankenredis-804l1`).
+
+**Retry predicate.** Re-take after changes to the front classifier, the BITOP/ZMPOP
+parsers or executors, `Store::bitop`, or allocator/codegen. **Invalidate rather than
+compare** if the GET control moves more than ~2% between the arms being compared, if
+either row's own null leaves ±0.02, if the pre and post ELFs are not both named with
+their build workers, or if a same-source rebuild is not available to separate code from
+drift — that last one is the control this entry turns on.
+
 ## 2026-08-16 GentleStream: COMPETITIVE — 91-round replication of the whole storeops set: BITOP AND is now ADMISSIBLE at 0.7568x, and all 12 routes reproduce within 3.1% (`frankenredis-9601c`)
 
 Claim class: COMPETITIVE. Campaign output: yes. Live vendored Redis 7.2.4 arm in the
