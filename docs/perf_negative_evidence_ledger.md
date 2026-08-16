@@ -19791,3 +19791,85 @@ before writing any lever: check for a SORT_RO floor class, borrowed parser and
 executor, in that order. And note for anyone reading the older SORT_RO retraction: its
 cause was removed by the collator memo, so that row's "do not measure this shape"
 advice is now stale.
+
+--------------------------------------------------------------------------------
+CONFIRMED — sort_ro_alpha is 1.532x on a QUIET box with a 0.77 pct A/A null, and the
+23.9 pct dispatch share is attributed: SORT_RO HAS NO BORROWED ROUTE AT ALL
+(frankenredis-z2ce3)
+
+The previous row measured this at ~1.5x with a 4.0 pct A/A null and said: do not
+re-run for a tighter ratio until the box is quieter, and attribute the dispatch share
+before proposing a lever. Both conditions are now met, in that order.
+
+CONVENTION: fr instructions per op / redis 7.2.4's. BELOW 1.0 = fr AHEAD. This shape
+is above it — the only one measured that is.
+
+    A/A control (get_control)   0.4179 / 0.4205 / 0.4173      spread 0.77 pct
+    loadavg at launch           9.49   (was 22.1, then noisier at 4.0 pct null)
+
+    sort_ro_alpha, four runs    fr instr/op   redis instr/op   fr/redis
+      run 1                       13024.9        8388.4         1.5527
+      run 2                       13043.8        8527.8         1.5296
+      run 3                       12984.2        8546.8         1.5192
+      run 4                       13007.9        8385.2         1.5513
+      spread                       0.46%          1.9%           2.2%
+
+    COMBINED with the previous session's four runs, same ELF, eight runs total:
+      fr      mean 13002.6 instr/op   spread 0.55 pct
+      redis   mean  8487.4            spread 3.5 pct
+      ratio   mean    1.5322          range 1.5015 - 1.5568
+
+Monotonicity `Ir(2N) > Ir(N)` held on both arms in all eight runs across both sessions.
+
+THE NULL IS NOW SMALLER THAN THE SIGNAL'S SPREAD, which it was not before: 0.77 pct
+against 2.2 pct. The previous row's refusal to quote a precise figure was correct at
+the time and is now liftable. Quote 1.532x. fr is ~53 pct behind Redis 7.2.4 on this
+shape and it is the ONLY shape measured above parity.
+
+THE ATTRIBUTION, WHICH THE PREVIOUS ROW REQUIRED AND DID NOT HAVE. Searching
+fr-server for a SORT_RO floor class, and fr-runtime for a borrowed sort executor:
+
+    rg 'Sort_ro|SortRo|b"SORT_RO"|Sortro'   crates/fr-server/src/main.rs   -> 0 hits
+    rg 'execute_plain_sort'                 crates/fr-runtime/src/lib.rs   -> 0 hits
+
+SORT_RO HAS NO FLOOR CLASS, NO BORROWED PARSER AND NO BORROWED EXECUTOR. The 23.9 pct
+dispatch share — ~3,114 instr/op against get_control's 275.4 on the same binary — is
+the full generic path, because that is the only path this command has.
+
+THAT CHANGES WHAT THE LEVER IS, and it is the reason to attribute before proposing.
+Every dispatch lever this campaign landed — GEOADD, SINTER, the keyed-values family,
+PFADD, MOVE, SPUBLISH — was a REWIRE: the parser and executor already existed and only
+the classifier entry was missing, which is why each was a handful of mechanical edits.
+SORT_RO IS NOT THAT. It needs a borrowed parser and a borrowed executor written from
+nothing, with the full parity surface of SORT_RO's option set behind it. Anyone
+costing this off the GEOADD precedent will underestimate it by a wide margin.
+
+SIZE OF THE PRIZE, stated so the effort can be judged against it: fr spends 13,002.6
+instr/op against redis's 8,487.4, an absolute deficit of 4,515 instr/op — the largest
+on the board in both absolute and ratio terms. Dispatch is ~3,114 of fr's total, so a
+borrowed route that reached front-classified dispatch cost (~275, as get_control does)
+would recover roughly 2,839 instr/op, about 63 pct of the deficit, leaving fr around
+10,164 against redis's 8,487 — approximately 1.20x. That would not reach parity, and
+the remainder is locale and sort work that the collator memo already attacked once.
+
+NOT VERIFIED: that estimate assumes a borrowed SORT_RO would pay get_control's
+dispatch cost. No route exists to measure, so it is an upper bound on the dispatch
+recovery, not a prediction of the ratio.
+
+PROVENANCE:
+  ELF sha256 (first 16)  c36c3fb0a66033de — built LOCALLY with
+                         RCH_CARGO_WRAPPER_BYPASS=1, env -u CARGO_TARGET_DIR,
+                         executable path from --message-format=json, COPIED to a
+                         private path and sha'd there. Contains 62ce27eb5. Same ELF
+                         as the previous session's four runs, so the eight-run
+                         combination is legitimate.
+  tree                   HEAD plus a peer's uncommitted fr-server/src/main.rs; NOT
+                         reproducible from HEAD alone.
+  harness                scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines
+                         in the SAME invocation.
+  host                   thinkstation1, 64 cores, loadavg 9.49, /data 319G, no build.
+
+RETRY PREDICATE: sort_ro_alpha is now measured to 2.2 pct against a 0.77 pct null on
+eight runs — do NOT re-run it again. The next work on this shape is CODE, not
+measurement: a borrowed parser and executor, costed as a new implementation rather
+than a rewire. Re-measure only after that exists.
