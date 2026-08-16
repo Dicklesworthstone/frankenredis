@@ -289,6 +289,7 @@ def main() -> int:
         frac = got[0] if got else float("nan")
         print("LADDER %-18s fr %8.1f instr/op   dispatch %8.1f (%.1f%%)"
               % (shape, fr_ipo, fr_ipo * frac, 100 * frac))
+        print("  callgrind dumps: %s" % workdir)
         return 0
     rd_ipo, rd_lo, rd_hi = instr_per_op(REDIS, seeds, cmd, ops, workdir, "redis")
     print("shape %s   N=%d 2N=%d" % (shape, ops, ops * 2))
