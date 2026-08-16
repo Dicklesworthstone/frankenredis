@@ -21283,3 +21283,67 @@ PROVENANCE:
 RETRY PREDICATE: do NOT re-run bitcount_range — it has crossed and fr's own cost is
 settled to 0.52 pct. DO use the method on the three remaining rewires; it is now
 two-for-two and the residual bias is known and small.
+
+## MEASURED (frankenredis-f2zrr) — the expire-family conditional forms: 1.0354x -> 0.5832x, and nothing is left at or behind the incumbent
+
+Claim class: COMPETITIVE — fr and the vendored Redis 7.2.4 binary in the SAME invocation.
+Same provenance limitation as the rows above (valgrind hosts the target, so no
+self-reported ELF SHA; ABBA repeats, not a bootstrap CI).
+
+    run  shape            fr instr/op   redis 7.2.4   fr/redis   dispatch share
+    A    expire_nx_opt        2569.9        4406.4     0.5832x       20.2%
+    B    expire_same          2801.0        5087.3     0.5506x       14.0%   <- CONTROL
+    B    expire_same          2800.4        5393.6     0.5192x       14.0%   <- CONTROL
+    A    expire_nx_opt        2570.7        4560.5     0.5637x       20.2%
+
+    worst bound   NX form  1.0354x -> 0.5832x   fr instr/op ~4509 -> ~2570
+    control       base     0.5280x -> 0.5506x   fr instr/op ~2804 -> ~2801 (flat)
+    share         NX form  51.1 pct -> 20.2 pct
+
+~1939 instr/op removed, 43 pct of the op. **The only shape this campaign had measured at
+or behind Redis 7.2.4 is now 0.58x**, and the board's worst is back to the 0.7x band.
+
+THE INVERSION CORRECTED, second family running. Before, `EXPIRE k 500 NX` cost MORE than
+`EXPIRE k 10000` — 4509 against 2804 instr/op — despite the conditional form doing
+strictly LESS work when the condition fails. Now 2570 against 2801: the option form is
+cheaper than the base, which is the correct ordering. As with ZADD, nothing about the
+parser or executor changed, only the route to them, and the inversion inverted back.
+
+FOUR COMMANDS IN ONE COMMIT, because the sweep showed them structurally identical:
+EXPIRE, PEXPIRE, EXPIREAT and PEXPIREAT all had an arity-4 conditional arm using the
+generic `key_arg2` parser plus their own `execute_plain_*_cond_borrowed`, all reachable
+only from the cascade. Chasing them individually would have been four more rounds.
+
+A TEST ASSERTED A FALSE PREMISE, AND THAT IS WHY THIS SAT UNFIXED. The near-miss guard
+`dispatch_floor_classifier_recognizes_only_exact_target_tokens` required these shapes NOT
+to classify, on the written premise that the option forms "have no borrowed parser;
+classifying them would strand them on the generic path." **Each has both a parser and an
+executor.** The test was not merely stale — it encoded a wrong fact, and it would have
+failed anyone who tried this lever, reading as though they had broken something. Updated
+to require the conditional class, with the measured cost of the false premise recorded in
+place: 1.0354x at 51 pct dispatch, against a sibling at 0.5118x and 13.9 pct.
+
+A/A NULL, from the ABBA repeats in this one invocation, and it is the starkest yet:
+
+    fr arm      expire_nx_opt  2569.9 -> 2570.7   +0.03%   <- essentially exact
+                expire_same    2801.0 -> 2800.4   -0.02%   <- essentially exact
+    redis arm   expire_nx_opt  4406.4 -> 4560.5   +3.50%
+                expire_same    5087.3 -> 5393.6   +6.02%   <- eleventh row running
+    ratio       NX 0.5832 -> 0.5637  3.34%  |  base 0.5506 -> 0.5192  5.71%
+
+**fr's two arms reproduced to 0.03 and 0.02 pct while the incumbent moved 3.5 and 6.0
+pct.** Every ratio spread in this row is imported. The 43 pct movement clears it by
+thirteen times.
+
+EXECUTABLE IDENTITIES, full 64-hex (computed post-run, see limitation above):
+  candidate  `77982cb5a457e48794c4842140d304437e2b98766b3311ad3354568bb24ac7f9`
+  incumbent  `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+  tests      fr-server 339 passed, 0 failed.
+
+Campaign output: yes — closes the campaign's only at-or-behind shape and removes a test
+that would have blocked the fix.
+
+RETRY PREDICATE: 23 of the 27 swept shapes remain. Work the list. Before each, check
+whether a near-miss guard asserts the shape must NOT classify — one already did, on a
+false premise, and a second would be enough to call that a pattern rather than an
+accident.

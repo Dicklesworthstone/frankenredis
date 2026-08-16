@@ -14742,6 +14742,16 @@ enum BorrowedDispatchFloorClass {
     /// form, was left in the cascade at 46.1 pct dispatch share against the option
     /// form's 16.4 pct -- so `ZADD z 1 a` cost MORE than `ZADD z XX 1 a`.
     ZaddBase,
+    /// (frankenredis-f2zrr) The `key ttl NX|XX|GT|LT` conditional forms at array
+    /// length 4. Every one had a working parser and executor reachable only from
+    /// the cascade while its no-flag sibling at length 3 was classified, so
+    /// `EXPIRE k 500 NX` measured 1.0354x against Redis 7.2.4 at 51 pct dispatch
+    /// share -- the only shape in this campaign at or behind the incumbent --
+    /// while `EXPIRE k 10000` measured 0.5118x at 13.9 pct.
+    ExpireCond,
+    PexpireCond,
+    ExpireatCond,
+    PexpireatCond,
     /// Variadic keyed-values write (LPUSH/RPUSH/SADD/HDEL/SREM/ZREM) carrying the
     /// value count (5..=8) — the forms stranded ~1350 lines deep in the cascade.
     KeyedValuesWrite(usize),
@@ -16219,6 +16229,22 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (3, BorrowedDispatchFloorCommand::Append) => Some(BorrowedDispatchFloorClass::Append),
         (4, BorrowedDispatchFloorCommand::Zremrangebyscore) => {
             Some(BorrowedDispatchFloorClass::Zremrangebyscore)
+        }
+        // (frankenredis-f2zrr) Arity 4 EXACTLY for each conditional form. The no-flag
+        // siblings at 3 are claimed elsewhere, and an over-claim would be worse than
+        // none: a floor decline calls the generic dispatcher directly rather than
+        // returning to the cascade.
+        (4, BorrowedDispatchFloorCommand::Expire) => {
+            Some(BorrowedDispatchFloorClass::ExpireCond)
+        }
+        (4, BorrowedDispatchFloorCommand::Pexpire) => {
+            Some(BorrowedDispatchFloorClass::PexpireCond)
+        }
+        (4, BorrowedDispatchFloorCommand::Expireat) => {
+            Some(BorrowedDispatchFloorClass::ExpireatCond)
+        }
+        (4, BorrowedDispatchFloorCommand::Pexpireat) => {
+            Some(BorrowedDispatchFloorClass::PexpireatCond)
         }
         (3, BorrowedDispatchFloorCommand::Expire) => Some(BorrowedDispatchFloorClass::Expire),
         // (frankenredis-m6xu9) EXPIRE's three siblings, same arity, same shape.
@@ -19118,6 +19144,110 @@ fn try_dispatch_floor_classified_action(
         // same executor, same generic fallthrough — so only the walk to reach it goes.
         // Measured stranded at 46.1 pct dispatch share across six runs on three binaries,
         // while its already-classified option sibling sat at 16.4 pct.
+        // (frankenredis-f2zrr) Mirrors the cascade arm exactly -- same generic
+        // key_arg2 parser, same conditional executor, same generic fallthrough.
+        BorrowedDispatchFloorClass::ExpireCond => {
+            if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
+                unparsed,
+                &parser_config,
+                b"*4\r\n$6\r\n",
+                b"EXPIRE",
+            ) && let Some(response) = runtime
+                .execute_plain_expire_cond_borrowed(packet.key, packet.a, packet.b, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        // (frankenredis-f2zrr) Mirrors the cascade arm exactly -- same generic
+        // key_arg2 parser, same conditional executor, same generic fallthrough.
+        BorrowedDispatchFloorClass::PexpireCond => {
+            if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
+                unparsed,
+                &parser_config,
+                b"*4\r\n$7\r\n",
+                b"PEXPIRE",
+            ) && let Some(response) = runtime
+                .execute_plain_pexpire_cond_borrowed(packet.key, packet.a, packet.b, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        // (frankenredis-f2zrr) Mirrors the cascade arm exactly -- same generic
+        // key_arg2 parser, same conditional executor, same generic fallthrough.
+        BorrowedDispatchFloorClass::ExpireatCond => {
+            if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
+                unparsed,
+                &parser_config,
+                b"*4\r\n$8\r\n",
+                b"EXPIREAT",
+            ) && let Some(response) = runtime
+                .execute_plain_expireat_cond_borrowed(packet.key, packet.a, packet.b, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        // (frankenredis-f2zrr) Mirrors the cascade arm exactly -- same generic
+        // key_arg2 parser, same conditional executor, same generic fallthrough.
+        BorrowedDispatchFloorClass::PexpireatCond => {
+            if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
+                unparsed,
+                &parser_config,
+                b"*4\r\n$9\r\n",
+                b"PEXPIREAT",
+            ) && let Some(response) = runtime
+                .execute_plain_pexpireat_cond_borrowed(packet.key, packet.a, packet.b, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
         BorrowedDispatchFloorClass::ZaddBase => {
             if let Some(packet) = parse_borrowed_plain_zadd_packet(unparsed, &parser_config)
                 && let Some(response) = runtime.execute_plain_zadd_borrowed(
@@ -44549,15 +44679,21 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         // PEXPIREAT are prefixes and suffixes of one another across three
         // different token-length groups, so a length mix-up would classify one as
         // another and silently answer with the wrong time base.
-        for (name, want) in [
-            (&b"PEXPIRE"[..], super::BorrowedDispatchFloorClass::Pexpire),
+        for (name, want, want_cond) in [
+            (
+                &b"PEXPIRE"[..],
+                super::BorrowedDispatchFloorClass::Pexpire,
+                super::BorrowedDispatchFloorClass::PexpireCond,
+            ),
             (
                 &b"EXPIREAT"[..],
                 super::BorrowedDispatchFloorClass::Expireat,
+                super::BorrowedDispatchFloorClass::ExpireatCond,
             ),
             (
                 &b"PEXPIREAT"[..],
                 super::BorrowedDispatchFloorClass::Pexpireat,
+                super::BorrowedDispatchFloorClass::PexpireatCond,
             ),
         ] {
             let ok = format!(
@@ -44571,8 +44707,15 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
                 "{} at arity 3 must classify",
                 String::from_utf8_lossy(name)
             );
-            // The option forms (NX/XX/GT/LT) are arity 4 and have no borrowed
-            // parser; classifying them would strand them on the generic path.
+            // (frankenredis-f2zrr) The option forms (NX/XX/GT/LT) are arity 4 and ARE
+            // now classified. This assertion previously required None, on the stated
+            // premise that they "have no borrowed parser" — that premise was FALSE:
+            // each has both a parser (the generic key_arg2 with its own prefix) and an
+            // `execute_plain_*_cond_borrowed` executor, reachable only from the cascade.
+            // The cost of believing it was measured: `EXPIRE k 500 NX` sat at 1.0354x
+            // against Redis 7.2.4 with 51 pct dispatch share — the only shape in this
+            // campaign at or behind the incumbent — while `EXPIRE k 10000` was 0.5118x
+            // at 13.9 pct. The row is obsoleted BY the lever, not violated by it.
             let opt = format!(
                 "*4\r\n${}\r\n{}\r\n$1\r\nk\r\n$2\r\n10\r\n$2\r\nNX\r\n",
                 name.len(),
@@ -44580,8 +44723,8 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             );
             assert_eq!(
                 super::classify_borrowed_dispatch_floor_packet(opt.as_bytes(), &cfg),
-                None,
-                "{} with an option token must not classify",
+                Some(want_cond),
+                "{} with an option token must classify to its conditional class",
                 String::from_utf8_lossy(name)
             );
         }
