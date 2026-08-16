@@ -68752,8 +68752,11 @@ mod tests {
         // the single remaining difference is the one under test: this arm CLONES
         // `new_sm` into `ordered` and drops the original.
         let t_old = std::time::Instant::now();
-        let mut dict: super::IndexMap<super::SharedZSetMember, f64, foldhash::quality::RandomState> =
-            super::IndexMap::with_hasher(foldhash::quality::RandomState::default());
+        let mut dict: super::IndexMap<
+            super::SharedZSetMember,
+            f64,
+            foldhash::quality::RandomState,
+        > = super::IndexMap::with_hasher(foldhash::quality::RandomState::default());
         let mut ordered = super::FullZSetOrder::with_capacity(0);
         for (i, m) in members.iter().enumerate() {
             let score = super::canonicalize_zero_score(i as f64);
