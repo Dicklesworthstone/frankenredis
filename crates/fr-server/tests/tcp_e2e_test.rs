@@ -2639,6 +2639,14 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"SADD", b"s:1", b"x"]));
     cmds.push(c(&[b"LPUSH", b"s:1", b"x"]));
     cmds.push(c(&[b"HDEL", b"s:1", b"x"]));
+    cmds.push(c(&[b"SUNION", b"ss:a"]));
+    cmds.push(c(&[b"SUNION", b"ss:a", b"ss:b"]));
+    cmds.push(c(&[b"SUNION", b"ss:a", b"ss:nope"]));
+    cmds.push(c(&[b"SUNION", b"ss:a", b"bo:a"]));
+    cmds.push(c(&[b"SDIFF", b"ss:a"]));
+    cmds.push(c(&[b"SDIFF", b"ss:a", b"ss:b"]));
+    cmds.push(c(&[b"SDIFF", b"ss:nope", b"ss:a"]));
+    cmds.push(c(&[b"SDIFF", b"ss:a", b"bo:a"]));
     cmds.push(c(&[b"SINTER", b"ss:a"]));
     cmds.push(c(&[b"SINTER", b"ss:a", b"ss:b"]));
     cmds.push(c(&[b"SINTER", b"ss:a", b"ss:b", b"ss:c"]));

@@ -14641,6 +14641,8 @@ enum BorrowedDispatchFloorClass {
     Hsetnx,
     Hincrbyfloat,
     Sinter,
+    Sunion,
+    Sdiff,
     Pexpire,
     Expireat,
     Pexpireat,
@@ -14871,6 +14873,8 @@ enum BorrowedDispatchFloorCommand {
     /// streaming executor were already present but sat ~880 lines deep in the
     /// inline chain, so every call paid the walk to reach them.
     Sinter,
+    Sunion,
+    Sdiff,
     /// `UNLINK key [key ...]` at 1..=5 keys, DEL's async-free sibling. In a
     /// single-threaded engine the async free IS the synchronous free, so it
     /// shares DEL's dispatcher; only the token and executor differ. It was the
@@ -15060,6 +15064,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'S', b'E', b'T', b'E', b'X'] => Some(BorrowedDispatchFloorCommand::Setex),
             [b'S', b'E', b'T', b'N', b'X'] => Some(BorrowedDispatchFloorCommand::Setnx),
             [b'S', b'C', b'A', b'R', b'D'] => Some(BorrowedDispatchFloorCommand::Scard),
+            [b'S', b'D', b'I', b'F', b'F'] => Some(BorrowedDispatchFloorCommand::Sdiff),
             [b'Z', b'C', b'A', b'R', b'D'] => Some(BorrowedDispatchFloorCommand::Zcard),
             [b'L', b'P', b'U', b'S', b'H'] => Some(BorrowedDispatchFloorCommand::Lpush),
             [b'R', b'P', b'U', b'S', b'H'] => Some(BorrowedDispatchFloorCommand::Rpush),
@@ -15085,6 +15090,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'G', b'E', b'T', b'S', b'E', b'T'] => Some(BorrowedDispatchFloorCommand::Getset),
             [b'E', b'X', b'I', b'S', b'T', b'S'] => Some(BorrowedDispatchFloorCommand::Exists),
             [b'S', b'I', b'N', b'T', b'E', b'R'] => Some(BorrowedDispatchFloorCommand::Sinter),
+            [b'S', b'U', b'N', b'I', b'O', b'N'] => Some(BorrowedDispatchFloorCommand::Sunion),
             [b'U', b'N', b'L', b'I', b'N', b'K'] => Some(BorrowedDispatchFloorCommand::Unlink),
             [b'S', b'E', b'T', b'B', b'I', b'T'] => Some(BorrowedDispatchFloorCommand::Setbit),
             [b'Z', b'C', b'O', b'U', b'N', b'T'] => Some(BorrowedDispatchFloorCommand::Zcount),
@@ -16060,6 +16066,14 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // SINTER, variadic like MGET. `SINTER k` is arity 2.
         (arity, BorrowedDispatchFloorCommand::Sinter) if arity >= 2 => {
             Some(BorrowedDispatchFloorClass::Sinter)
+        }
+        // SUNION and SDIFF, SINTER's siblings: same parser, same streaming
+        // executor, arms 30 and 60 lines away in the same chain.
+        (arity, BorrowedDispatchFloorCommand::Sunion) if arity >= 2 => {
+            Some(BorrowedDispatchFloorClass::Sunion)
+        }
+        (arity, BorrowedDispatchFloorCommand::Sdiff) if arity >= 2 => {
+            Some(BorrowedDispatchFloorClass::Sdiff)
         }
         (3, BorrowedDispatchFloorCommand::Hscan) => {
             Some(BorrowedDispatchFloorClass::Scan0(PlainScan0Cmd::Hscan))
@@ -17934,6 +17948,60 @@ fn try_dispatch_floor_classified_action(
                     .execute_plain_hmget_borrowed_into(
                         packet.key,
                         &packet.fields[..packet.len],
+                        ts,
+                        client_resp3,
+                        out,
+                    )
+                    .is_some()
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
+                    consumed: packet.consumed,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Sunion => {
+            let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+            if let Some(packet) =
+                parse_borrowed_plain_keys_multi_packet(unparsed, &parser_config, b"SUNION")
+                && runtime
+                    .execute_plain_sunion_borrowed_into(
+                        &packet.keys[..packet.len],
+                        ts,
+                        client_resp3,
+                        out,
+                    )
+                    .is_some()
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
+                    consumed: packet.consumed,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Sdiff => {
+            let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+            if let Some(packet) =
+                parse_borrowed_plain_keys_multi_packet(unparsed, &parser_config, b"SDIFF")
+                && runtime
+                    .execute_plain_sdiff_borrowed_into(
+                        &packet.keys[..packet.len],
                         ts,
                         client_resp3,
                         out,
@@ -43257,6 +43325,49 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
     #[test]
     fn dispatch_floor_classifier_recognizes_only_exact_target_tokens() {
         let cfg = ParserConfig::default();
+        // SINTER's siblings. SDIFF is five bytes and SUNION six, and SDIFFSTORE
+        // / SUNIONSTORE share their prefixes in longer token groups, so the
+        // negative rows guard that the shorter tokens do not reach into them.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$6\r\nsUnIoN\r\n$1\r\na\r\n$1\r\nb\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Sunion)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*2\r\n$5\r\nSDIFF\r\n$1\r\na\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Sdiff)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(b"*1\r\n$5\r\nSDIFF\r\n", &cfg),
+            None,
+            "SDIFF with no keys must not classify"
+        );
+        for (len, name, n) in [
+            (10usize, &b"SDIFFSTORE"[..], 4usize),
+            (11, &b"SUNIONSTORE"[..], 4),
+        ] {
+            let pkt = format!(
+                "*{}\r\n${}\r\n{}\r\n$1\r\nd\r\n$1\r\na\r\n$1\r\nb\r\n",
+                n,
+                len,
+                String::from_utf8_lossy(name)
+            );
+            let got = super::classify_borrowed_dispatch_floor_packet(pkt.as_bytes(), &cfg);
+            assert!(
+                !matches!(
+                    got,
+                    Some(super::BorrowedDispatchFloorClass::Sdiff)
+                        | Some(super::BorrowedDispatchFloorClass::Sunion)
+                ),
+                "{} must not classify as the plain form, got {got:?}",
+                String::from_utf8_lossy(name)
+            );
+        }
         // DEL's async-free sibling, same 1..=5 key range. It shares DEL's
         // dispatcher, so the rows that matter are the ones proving the two are
         // told apart: the six-byte token must reach its own class, and the RESP
