@@ -18054,3 +18054,63 @@ ahead of it.
 RETRY PREDICATE: re-run from a CLEAN tree before treating 0.4912x as reproducible,
 because of the WIP caveat above. Do not re-run merely to re-confirm the cross; the
 margin is far outside the spread.
+
+## MEASURED (frankenredis-iqicb) — incrbyfloat_same 0.6815x, and the withdrawn 1.2800x is now settled
+
+DIRECTION, STATED EXPLICITLY: fr instructions-per-op DIVIDED BY Redis 7.2.4
+instructions-per-op. BELOW 1.0 = fr AHEAD. Lower is better.
+
+    run  shape               fr instr/op   redis 7.2.4   fr/redis   dispatch share
+    A    getset_same             2734.9        5223.4     0.5236x       14.4%
+    B    incrbyfloat_same        6100.2        8950.7     0.6815x        7.3%
+    B    incrbyfloat_same        6105.7        9040.4     0.6754x        7.3%
+    A    getset_same             2752.3        5226.8     0.5266x       14.3%
+
+WORST BOUNDS: incrbyfloat_same 0.6815x (fr ~32 pct AHEAD), getset_same 0.5266x
+(fr ~47 pct AHEAD). incrbyfloat_same is the WORST ratio measured on this ELF, against
+lpos_count 0.4173x, sinter_2 0.4912x, sinter_9 0.5343x.
+
+THIS CLOSES THE WITHDRAWN INCRBYFLOAT HEADLINE. A 1.2800x figure was published on
+iqicb and later withdrawn as untrustworthy: it was a SINGLE run on a binary copied out
+of `target/release`, a rendezvous path peers also build into, whose sha was never
+verified. The replacement estimate was ~0.68x from four runs. This ABBA row, on an ELF
+sha'd at a private path, gives 0.6815/0.6754 — **the ~0.68x correction is confirmed and
+the 1.2800x is now positively excluded, not merely doubted.** A withdrawn number that
+stays merely withdrawn is a permanent question mark; this is the measurement that
+retires it.
+
+GETSET ALSO MOVED, and the inventory row for it is stale. cv3fm records getset_same at
+0.9799x, described as MARGINAL (2 pct ahead). It now measures 0.5266x. Something
+between that inventory and this ELF improved it by a further ~45 points; this row does
+NOT identify what, and no lever should be credited for it without attribution work.
+Recorded so the stale 0.9799x is not quoted as current.
+
+A/A NULL — ABBA in one invocation (getset, incrbyfloat, incrbyfloat, getset):
+
+    fr arm      getset_same       2734.9 -> 2752.3   +0.64%
+                incrbyfloat_same  6100.2 -> 6105.7   +0.09%
+    redis arm   getset_same       5223.4 -> 5226.8   +0.07%
+                incrbyfloat_same  8950.7 -> 9040.4   +1.00%
+    ratio       getset  0.5236 -> 0.5266   0.57% spread
+                incrbf  0.6815 -> 0.6754   0.90% spread
+
+Consistent with the sinter row: the incumbent arm is the noisier one. Both margins
+(32 pct, 47 pct) are far outside a sub-1 pct spread.
+
+PROVENANCE:
+  ELF sha256 (first 16)  51708552264214d1 — the SAME binary as the LPOS and SINTER
+                         rows, reused rather than rebuilt. No build was run this
+                         turn; /data was 45G, 3G above the hard stop.
+  built                  LOCALLY, RCH_CARGO_WRAPPER_BYPASS=1.
+  tree                   same HEAD-plus-uncommitted-WIP caveat as the sinter row:
+                         fr-command/lua_eval.rs, fr-persist/listpack.rs and several
+                         fr-runtime benches were uncommitted at build time and are
+                         compiled in. NOT reproducible from HEAD alone.
+  harness                scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines
+                         in the SAME invocation.
+
+Campaign output: yes — retires a withdrawn figure with a measurement.
+
+RETRY PREDICATE: do not re-run to re-confirm either ratio. DO re-measure getset_same
+from a clean tree if anyone needs to attribute its 0.9799x -> 0.5266x movement, which
+this row deliberately does not attempt.
