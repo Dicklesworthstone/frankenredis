@@ -420,10 +420,22 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
     #   0.9068                   NULL-FAILED
     #   0.9111                   NULL-FAILED
     #   0.9600 [0.9335, 0.9918]  ADMISSIBLE  (nulls 1.0141/1.0045)
-    # Spread 9%, and the ONLY admissible row is the HIGHEST of the four. Quoting
-    # 0.9600 alone would be picking the most flattering reading and calling it the
-    # certified one. Treat the route as 0.88-0.96, worst bound 0.8217, and get a
-    # second admissible row before acting on the magnitude.
+    # Spread 9%, and the ONLY admissible row was the HIGHEST of the four, so
+    # quoting it alone would have meant picking the most flattering reading.
+    #
+    # RESOLVED by a fifth run: 0.9291 [0.9132, 0.9561], nulls 1.0244/1.0289 --
+    # same direction, similar amounts, which is the stated excusability condition,
+    # and its interval OVERLAPS the admissible 0.9600. So there are now two
+    # trustworthy rows and they agree:
+    #
+    #   trustworthy   0.9600 (ADM)   0.9291 (excusable)   -> 0.93-0.96
+    #   null-failed   0.8817 (nulls OPPOSITE)  0.9068  0.9111
+    #
+    # The low readings are exactly the untrustworthy ones, and the second
+    # trustworthy row landed at 0.93 rather than near 0.88 -- so the gate was
+    # discriminating correctly, not flattering. Route is 0.93-0.96, worst bound
+    # 0.9132 across trustworthy rows (0.8217 if the contaminated runs are counted,
+    # which they should not be).
     #
     # expire_nx earlier history: 0.9068 and 0.9111 agree
     # in direction across the same two ELFs, but BOTH runs null-failed.
