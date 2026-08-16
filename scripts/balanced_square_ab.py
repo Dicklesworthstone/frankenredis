@@ -365,9 +365,16 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
     #   WORST BOUND across all four: 1.2294. Generic arm on both ELFs: 0.9806 and
     #   0.9876, intervals disjoint from every fast row.
     #
-    # NEXT SUB-PARITY ROUTE: zadd_xx 0.8671 [0.8395, 0.8795] ADMISSIBLE, nulls
-    # 0.9913/0.9866, worst bound 0.8395. It is the only clearly sub-parity row left
-    # in this set (expire_nx 0.9068 null-failed). Already attributed: ZADD length 5
+    # NEXT SUB-PARITY ROUTE, now with REPLICATED STANDING -- two ELFs, two
+    # admissible rows, 0.06% apart, which is the tightest replication in this file:
+    #     ELF2 ab969ddb  zadd_xx 0.8671 [0.8395, 0.8795] ADM  nulls 0.9913/0.9866
+    #     ELF1 9a4ed111  zadd_xx 0.8676 [0.8416, 0.8873] ADM  nulls 1.0071/0.9912
+    #   WORST BOUND 0.8395. Control-normalised ~0.77-0.79 (get_control 1.1217/1.0947).
+    #
+    # expire_nx is the runner-up and is NOT yet a candidate: 0.9068 and 0.9111 agree
+    # in direction across the same two ELFs, but BOTH runs null-failed.
+    #
+    # Already attributed: ZADD length 5
     # is unclassified -- the class is `arity >= 8 && even` -- while
     # parse_borrowed_plain_zadd_flag_packet and execute_plain_zadd_flag_borrowed
     # both already exist, with zadd_incr covering INCR separately because its reply
