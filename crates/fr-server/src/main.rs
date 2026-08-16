@@ -14742,6 +14742,15 @@ enum BorrowedDispatchFloorClass {
     /// form, was left in the cascade at 46.1 pct dispatch share against the option
     /// form's 16.4 pct -- so `ZADD z 1 a` cost MORE than `ZADD z XX 1 a`.
     ZaddBase,
+    /// (frankenredis-p98mw) Multi-key TOUCH at array lengths 3, 4 and 5. The
+    /// single-key form was front-classified with an EXACT arity claim, on the
+    /// reasoning that only it had a borrowed parser. That was wrong -- these three
+    /// have parsers and executors too -- and the exclusion measured 3.2848x against
+    /// Redis 7.2.4 at 73.9 pct dispatch share, the worst shape in this campaign,
+    /// while the classified single-key form sat at 0.6401x and looked healthy.
+    Touch2,
+    Touch3,
+    Touch4,
     /// (frankenredis-f2zrr) The `key ttl NX|XX|GT|LT` conditional forms at array
     /// length 4. Every one had a working parser and executor reachable only from
     /// the cascade while its no-flag sibling at length 3 was classified, so
@@ -16363,6 +16372,12 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // those shapes strictly WORSE off than unclassified. That is the `arity >= 3`
         // defect (opmo4 / xqqwv), which has already cost this campaign four instances.
         (2, BorrowedDispatchFloorCommand::Touch) => Some(BorrowedDispatchFloorClass::Touch),
+        // (frankenredis-p98mw) The multi-key forms. Each arity is claimed EXACTLY and
+        // separately because each has its own positional parser -- a range claim would
+        // reach arities with no parser and land them on generic.
+        (3, BorrowedDispatchFloorCommand::Touch) => Some(BorrowedDispatchFloorClass::Touch2),
+        (4, BorrowedDispatchFloorCommand::Touch) => Some(BorrowedDispatchFloorClass::Touch3),
+        (5, BorrowedDispatchFloorCommand::Touch) => Some(BorrowedDispatchFloorClass::Touch4),
         (3, BorrowedDispatchFloorCommand::Msetnx) => {
             Some(BorrowedDispatchFloorClass::MsetnxOnePair)
         }
@@ -19232,6 +19247,84 @@ fn try_dispatch_floor_classified_action(
                 b"PEXPIREAT",
             ) && let Some(response) = runtime
                 .execute_plain_pexpireat_cond_borrowed(packet.key, packet.a, packet.b, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        // (frankenredis-p98mw) Mirrors the cascade arm exactly -- same parser, same
+        // executor, same generic fallthrough.
+        BorrowedDispatchFloorClass::Touch2 => {
+            if let Some(packet) = parse_borrowed_plain_key_arg1_packet(
+                unparsed,
+                &parser_config,
+                b"*3\r\n$5\r\n",
+                b"TOUCH",
+            ) && let Some(response) =
+                runtime.execute_plain_touch_borrowed(&[packet.key, packet.arg], ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        // (frankenredis-p98mw) Mirrors the cascade arm exactly -- same parser, same
+        // executor, same generic fallthrough.
+        BorrowedDispatchFloorClass::Touch3 => {
+            if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
+                unparsed,
+                &parser_config,
+                b"*4\r\n$5\r\n",
+                b"TOUCH",
+            ) && let Some(response) =
+                runtime.execute_plain_touch_borrowed(&[packet.key, packet.a, packet.b], ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        // (frankenredis-p98mw) Mirrors the cascade arm exactly -- same parser, same
+        // executor, same generic fallthrough.
+        BorrowedDispatchFloorClass::Touch4 => {
+            if let Some(packet) = parse_borrowed_plain_key_arg3_packet(
+                unparsed,
+                &parser_config,
+                b"*5\r\n$5\r\n",
+                b"TOUCH",
+            ) && let Some(response) =
+                runtime.execute_plain_touch_borrowed(&[packet.key, packet.a, packet.b, packet.c], ts)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -44396,25 +44489,59 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             p
         }
 
-        for keys in 1..=4usize {
+        // (frankenredis-p98mw) THIS ASSERTION USED TO REQUIRE `keys == 1`, on the
+        // stated premise that "only the single-key form has a borrowed parser". THAT
+        // PREMISE WAS FALSE and it was mine: parser call sites pin TOUCH at array
+        // lengths 3, 4 and 5 as well (key_arg1/2/3 at main.rs ~12088/12161/12185),
+        // each with the same executor. The exclusion measured 3.2848x against Redis
+        // 7.2.4 at 73.9 pct dispatch share -- the worst shape in this campaign -- while
+        // this test passed, because it only ever asserted the arity I had claimed.
+        //
+        // A test written from a lever's own premise cannot falsify that premise. The
+        // corpus below now covers one arity BEYOND the claimed set for exactly that
+        // reason: keys=5 (array length 6) has no parser and must stay unclaimed.
+        for keys in 1..=5usize {
             let pkt = touch(keys);
             let got = super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg);
+            let want = match keys {
+                1 => Some(super::BorrowedDispatchFloorClass::Touch),
+                2 => Some(super::BorrowedDispatchFloorClass::Touch2),
+                3 => Some(super::BorrowedDispatchFloorClass::Touch3),
+                4 => Some(super::BorrowedDispatchFloorClass::Touch4),
+                _ => None,
+            };
             assert_eq!(
-                got,
-                (keys == 1).then_some(super::BorrowedDispatchFloorClass::Touch),
-                "TOUCH with {keys} key(s): only the single-key form has a borrowed \
-                 parser, so wider calls must stay unclaimed and keep walking"
+                got, want,
+                "TOUCH with {keys} key(s): arities 2-5 have positional parsers and are \
+                 claimed; wider calls have none and must keep walking"
             );
+            // Each claimed arity must be honoured by the parser ITS OWN arm reaches --
+            // a different positional parser per arity. The previous form hardcoded the
+            // arity-2 parser, so it could only ever check the one shape that was
+            // claimed, which is how the arity-3/4/5 gap survived this test.
             if got.is_some() {
-                assert!(
-                    super::parse_borrowed_plain_key_only_packet(
-                        &pkt,
-                        &cfg,
-                        b"*2\r\n$5\r\n",
-                        b"TOUCH",
+                let served = match keys {
+                    1 => super::parse_borrowed_plain_key_only_packet(
+                        &pkt, &cfg, b"*2\r\n$5\r\n", b"TOUCH",
                     )
                     .is_some(),
-                    "TOUCH {keys} claimed but the arm's parser declines it"
+                    2 => super::parse_borrowed_plain_key_arg1_packet(
+                        &pkt, &cfg, b"*3\r\n$5\r\n", b"TOUCH",
+                    )
+                    .is_some(),
+                    3 => super::parse_borrowed_plain_key_arg2_packet(
+                        &pkt, &cfg, b"*4\r\n$5\r\n", b"TOUCH",
+                    )
+                    .is_some(),
+                    4 => super::parse_borrowed_plain_key_arg3_packet(
+                        &pkt, &cfg, b"*5\r\n$5\r\n", b"TOUCH",
+                    )
+                    .is_some(),
+                    _ => unreachable!("only arities 2-5 are claimed"),
+                };
+                assert!(
+                    served,
+                    "TOUCH {keys} key(s) claimed but the arm's parser declines it"
                 );
             }
         }

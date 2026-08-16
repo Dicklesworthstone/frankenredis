@@ -21960,3 +21960,71 @@ PROVENANCE:
 RETRY PREDICATE: do NOT re-measure touch_2 until the fix is COMMITTED — a green number
 from an uncommitted tree is exactly the kind of evidence that evaporates. Once
 committed, one confirming run against fr's 2,083.2 instr/op baseline is enough.
+
+## MEASURED (frankenredis-p98mw) — multi-key TOUCH: 3.2848x -> 0.5737x, 83 pct of the op removed, the largest lever in this campaign
+
+Claim class: COMPETITIVE — fr and the vendored Redis 7.2.4 binary in the SAME invocation.
+Same provenance limitation as the rows above (valgrind hosts the target, so no
+self-reported ELF SHA; ABBA repeats, not a bootstrap CI).
+
+    run  shape           fr instr/op   redis 7.2.4   fr/redis   dispatch share
+    A    touch_2             2082.9        3867.5     0.5386x       21.1%
+    B    touch_missing       1667.1        2651.4     0.6288x       20.4%   <- CONTROL
+    B    touch_missing       1693.5        2545.1     0.6654x       20.3%   <- CONTROL
+    A    touch_2             2091.2        3645.1     0.5737x       21.0%
+
+    worst bound   touch_2  3.2848x -> 0.5737x   fr instr/op ~12,211 -> ~2,087
+    control       arity 2  0.6401x -> 0.6654x   fr instr/op ~1,679 -> ~1,680 (flat)
+    share         touch_2  73.9 pct -> 21.1 pct
+
+~10,124 instr/op removed, 83 pct of the op — the largest single movement this campaign has
+produced, and it takes the shape from 3.28x BEHIND the incumbent to 0.57x ahead.
+
+THE PER-KEY COST IS SANE AGAIN. `TOUCH k1 k2` cost 620 pct more than `TOUCH nosuchkey`
+before; it now costs 24 pct more, which is one extra key lookup. Nothing about the parser
+or executor changed — only the route.
+
+THIS CLOSES A DEFECT I INTRODUCED, AND THE TEST THAT HID IT WAS ALSO MINE. I claimed
+`(2, Touch)` exactly and wrote `touch_and_msetnx_claim_exactly_the_arity_their_parser_serves`
+to assert that arities above 2 must NOT classify — encoding my own false premise as a
+gate. It passed for as long as the premise was believed, because:
+
+  1. its expectation was `(keys == 1).then_some(Touch)`, derived FROM the claim; and
+  2. its parser-honour check hardcoded the arity-2 parser, so it could only ever verify
+     the one shape that was claimed.
+
+**A test written from a lever's own premise cannot falsify that premise.** Both halves are
+fixed: the expectation now enumerates all four claimed arities, the parser check dispatches
+to the parser each arm actually reaches, and the corpus runs ONE ARITY PAST the claimed set
+(keys=5, array length 6, which has no parser and must stay unclaimed) so the boundary is
+asserted from both sides.
+
+THREE TESTS IN THIS CAMPAIGN HAVE NOW ASSERTED A FALSE PREMISE: the stale SINTERCARD row,
+the expire-family guard claiming the conditional forms had no parser, and this one. The
+first two were other people's; this one is mine, which makes the pattern structural rather
+than a habit of any one author.
+
+A/A NULL, from the ABBA repeats in this one invocation:
+
+    fr arm      touch_2        2082.9 -> 2091.2   +0.40%
+                touch_missing  1667.1 -> 1693.5   +1.58%
+    redis arm   touch_2        3867.5 -> 3645.1   -5.75%
+                touch_missing  2651.4 -> 2545.1   -4.01%
+    ratio       touch_2 0.5386 -> 0.5737  6.52%  |  missing 0.6288 -> 0.6654  5.82%
+
+The incumbent arm is the noisier one again — and note SINTERCARD's redis arm was stable to
+0.15 pct two rows ago, so this is shape-dependent variance, not a host condition. The 83
+pct movement clears a 6.5 pct spread by thirteen times.
+
+EXECUTABLE IDENTITIES, full 64-hex (computed post-run, see limitation above):
+  candidate  `5b6592da685ce76a48b920a07f39f5e5783e9ca497626e90d510fa995875ec9f`
+  incumbent  `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+  tests      fr-server 339 passed, 0 failed.
+
+Campaign output: yes — the largest lever measured here, closing a regression this campaign
+created and repairing the test that concealed it.
+
+RETRY PREDICATE: every other exact-arity claim this campaign landed still lacks an
+arity-N+1 shape — MSETNX, ZADD base, BITCOUNT range, the four expire conditionals. TOUCH
+went from "carefully scoped" to 3.28x behind on exactly that gap. Write the N+1 shape
+before assuming any of them is harmless.
