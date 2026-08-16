@@ -338,6 +338,24 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
     # were probed and REJECTED: both engines return the same key SET in a
     # different ORDER, which is unspecified upstream and not a parity bug, but it
     # disqualifies them from a byte-exact throughput shape.
+    # (frankenredis-50ntn) MEASURED 2026-08-16 on ELF 9a4ed1114443026df7a71030,
+    # built locally with RCH_CARGO_WRAPPER_BYPASS=1 and --features
+    # perf-ab-cascade-bypass (strings check = 1), so both arms are the SAME binary
+    # and the comparison is the ROUTE, not the build:
+    #
+    #   zrangebyscore_l   generic path  0.9806 [0.9463, 0.9992]
+    #                     fast route    1.2555 [1.2294, 1.2758]  and 1.2673 replicate
+    #                     -> 1.280x, intervals DISJOINT, fast-arm runs 0.9% apart
+    #
+    #   sintercard_lim    generic       1.0434 [1.0126, 1.0742]  ADMISSIBLE
+    #                     fast          1.0605 [1.0396, 1.0779]  ADMISSIBLE
+    #
+    # zrangebyscore_l was 0.7932 [0.7713, 0.7980] before the floor class landed
+    # (31b22f983), so this route crossed from the deepest below-parity row I held
+    # to 25% ahead. CAVEAT: no ADMISSIBLE row for it -- all three runs null-failed,
+    # and only run 1's nulls were off in the same direction. The direction and
+    # magnitude are not in doubt (disjoint intervals against its own generic arm on
+    # one ELF); the row is not banked to the replicated-standing convention.
     "unswept5": [
         ("getrange_full", ["SET s abcdefghijklmnop"], ["GETRANGE", "s", "0", "-1"]),
         ("lrange_neg", ["RPUSH l a b c d e"], ["LRANGE", "l", "-3", "-1"]),

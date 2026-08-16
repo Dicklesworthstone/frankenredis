@@ -19424,3 +19424,77 @@ Campaign output: yes — prevents two winning routes being reverted as regressio
 RETRY PREDICATE: the actual worst ratio on the board is incrbyfloat_nondyadic at 0.9794x,
 recorded above. Attack that, not these. And quote no ratio in this campaign without
 either its convention or its absolute counts.
+
+--------------------------------------------------------------------------------
+MEASURED — del_1_missing is 0.765x, and ALL of its spread is redis-side and
+SHAPE-SPECIFIC, not instrument noise (frankenredis-z2ce3)
+
+The worst measured vs-incumbent ratio, re-measured with the load-immune instrument
+after the throughput ABBA null-failed on it. Both engines in the SAME invocation,
+three runs, plus a two-run A/A control. No build — existing binary re-run.
+
+CONVENTION: fr instructions per op / redis 7.2.4's. BELOW 1.0 = fr AHEAD.
+
+    del_1_missing        fr instr/op    redis instr/op    fr/redis    dispatch
+      run 1                 2002.2          2539.9         0.7883      12.2%
+      run 2                 2001.2          2613.6         0.7657      12.2%
+      run 3                 2001.8          2700.4         0.7413      12.2%
+      spread                 0.05%           6.3%           6.3%       0.00%
+
+    get_control (A/A)    fr instr/op    redis instr/op    fr/redis
+      run 1                 1335.9          3266.2         0.4090
+      run 2                 1336.1          3268.0         0.4089
+      spread                 0.015%          0.055%        0.02%
+
+Ir(2N) > Ir(N) on both arms of every run; no run invalidated.
+
+THE A/A NULL IS 0.02 pct, WHICH IS WHAT MAKES THE REST OF THIS ROW A FINDING RATHER
+THAN NOISE. get_control's ratio reproduces to two parts in ten thousand on the same
+binary, same host, same session. So the instrument is sound and load-immune at
+loadavg ~22, and del_1_missing's 6.3 pct swing CANNOT be attributed to the harness.
+
+WHERE THE SPREAD LIVES. fr's own cost is 2002.2 / 2001.2 / 2001.8 — a 0.05 pct
+spread, essentially noiseless. redis's is 2539.9 / 2613.6 / 2700.4 — 6.3 pct, and
+monotonically increasing across the three runs. Every bit of the ratio's movement is
+the DENOMINATOR. And it is shape-specific, not general: redis's GET cost in the same
+session held 0.055 pct.
+
+So something in Redis 7.2.4's DEL-on-a-missing-key path is nondeterministic run to
+run in a way its GET path is not. Candidates worth one probe each, NONE of them
+attributed here: an active-expire cycle landing inside the measured window, dict
+rehashing state carried between runs, or serverCron work. NOT INVESTIGATED — recorded
+so the next person does not re-derive the observation before starting.
+
+THE ACTIONABLE CONSEQUENCE, and it is a method rule rather than a number: FOR AN
+FR-SIDE LEVER ON THIS SHAPE, MEASURE fr's OWN instr/op, NOT THE RATIO. fr's arm is
+126x more stable than the ratio here (0.05 pct against 6.3 pct), and the ratio's
+instability is not ours to fix. A lever worth 2 pct of fr's 2002 instr/op is
+comfortably resolvable against 0.05 pct and completely invisible against 6.3 pct. The
+same reasoning retires the idea that this shape's ratio needs "more pairs" — more
+pairs of a noisy denominator does not help when the numerator is already exact.
+
+This also settles the question left open when z2ce3 was filed. The allocation lever's
+DEL/UNLINK half is worth two allocations per op; against fr's 2002.2 instr/op baseline
+that is measurable IF measured on fr's arm, and unmeasurable if measured on the ratio.
+Measure the numerator.
+
+DISPATCH SHARE IS UNCHANGED AND EXACT: 12.2 pct in all three runs, ~244.3 instr/op.
+That is consistent with the front-classification work being complete on this route and
+confirms the remaining ~87.8 pct is where any further lever must come from.
+
+PROVENANCE:
+  ELF sha256 (first 16)  c36c3fb0a66033de — built LOCALLY with
+                         RCH_CARGO_WRAPPER_BYPASS=1, env -u CARGO_TARGET_DIR,
+                         executable path from --message-format=json, COPIED to a
+                         private path and sha'd there. Contains 62ce27eb5.
+  tree                   HEAD at 62ce27eb5 plus a peer's uncommitted
+                         fr-server/src/main.rs; NOT reproducible from HEAD alone.
+  harness                scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines
+                         in the SAME invocation.
+  host                   thinkstation1, 64 cores, loadavg ~22.
+  no build               existing binary re-run; /data 321G.
+
+RETRY PREDICATE: do NOT re-run for a tighter ratio — the denominator is the unstable
+term and more runs will not fix it. DO probe redis's del-missing nondeterminism if
+anyone needs the ratio to be stable. And measure any fr-side lever on this shape
+against fr's 2002.2 instr/op baseline.
