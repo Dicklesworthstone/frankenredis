@@ -17874,3 +17874,70 @@ self-cost alone; that is precisely what made it look like a 2,267 instr/op win.
 
 
 ---
+## 2026-08-16 BlackCat: METHOD — TWO INVERTED RATIO CONVENTIONS are live in this ledger for the same command names; HSETNX and HINCRBYFLOAT appear under both and read as contradictions (`frankenredis-iqicb`)
+
+- **Claim class: METHOD. Campaign output: no.** No source change, no new
+  measurement, no verdict. This entry exists so two existing rows cannot be
+  misread against each other, and so the next agent states direction explicitly
+  rather than leaving a reader to infer which way is good.
+
+- **The collision.** Both of these are in this ledger, both are correct, and
+  they are the SAME two command names under OPPOSITE conventions:
+
+      2026-07-28 MossyBluff  HINCRBYFLOAT  3.5028x live Redis   COMPETITIVE KEEP
+      2026-07-28 MossyBluff  HSETNX        2.3353x live Redis   COMPETITIVE KEEP
+      2026-08-16 BlackCat    HINCRBYFLOAT  1.1294 -> 0.7510     front-classification
+      2026-08-16 BlackCat    HSETNX        1.6435 -> 0.5873     front-classification
+
+  A reader who does not know the metric sees HSETNX at 2.3353x and at 0.5873x
+  and concludes one of them is wrong. Neither is.
+
+- **The two conventions, stated so neither needs inferring.**
+  - **THROUGHPUT (MossyBluff's rows, and most COMPETITIVE rows here):**
+    FrankenRedis ops/sec DIVIDED BY Redis ops/sec, measured live at saturated
+    P16 against the vendored 7.2.4 running beside A/A controls in the same
+    invocation. **ABOVE 1.0 = fr AHEAD. HIGHER IS BETTER.** So HSETNX 2.3353x
+    means fr does 2.34x Redis's throughput on that shape.
+  - **INSTRUCTIONS (my rows, via `scripts/shape_instr_per_op.py`):** fr
+    instructions per op DIVIDED BY Redis instructions per op, counted under
+    callgrind. **BELOW 1.0 = fr AHEAD. LOWER IS BETTER.** So HSETNX 0.5873x
+    means fr retires 41 pct FEWER instructions than Redis on that shape.
+  - The two are RECIPROCAL IN DIRECTION but are NOT reciprocals in value, and
+    must never be converted into one another: they measure different quantities
+    (delivered throughput under contention vs retired instructions), on
+    different workloads (500-field pristine hash at P16 vs single-field shapes
+    at N/2N), under different noise regimes (host-load-sensitive vs
+    deterministic).
+
+- **Both rows say fr is ahead, in words:**
+  - HSETNX: fr does **2.34x Redis's throughput** (MossyBluff, 500-field, P16),
+    and after front-classification retires **41 pct fewer instructions** than
+    Redis on the single-field shape — from 64 pct BEHIND to 41 pct AHEAD.
+  - HINCRBYFLOAT: fr does **3.50x Redis's throughput** (MossyBluff, 500-field,
+    P16), and retires **25 pct fewer instructions** than Redis on the
+    single-field shape — from 13 pct BEHIND to 25 pct AHEAD.
+
+- **Rule for anyone adding a row here.** State the DIRECTION in words next to
+  the ratio — "fr is N pct ahead of Redis" — not only the figure. A ratio whose
+  convention must be inferred WILL be misquoted, and this ledger now contains
+  two live conventions that are inverted, so inference is not merely risky, it
+  is a coin flip. Name the metric (throughput / instructions), the workload, and
+  the direction.
+
+- **Related correction on the same bead.** My own INCRBYFLOAT row was published
+  here and on the bead as 1.2800x "still 28 pct behind Redis, a partial". Four
+  runs on a provenance-verified ELF give ~0.68x — fr about 32 pct AHEAD. The
+  withdrawn figure was a single run on a binary copied out of
+  `target/release/frankenredis`, a rendezvous path peers also build into, whose
+  sha I never verified was from my own build. Recorded as untrustworthy rather
+  than explained; the 87 pct discrepancy has no candidate commit behind it.
+
+Campaign output: no.
+
+RETRY PREDICATE: not applicable — this entry records a convention collision, not
+a lever. Do not retry anything on the strength of it. If the two conventions are
+ever unified, this entry should be superseded rather than deleted, because the
+historical rows keep their original metric.
+
+
+---
