@@ -280,6 +280,43 @@ SHAPES = {
          "SADD bg2 " + " ".join(f"m{i:04d}" for i in range(512))],
         ["SINTER", "bg1", "bg2"],
     ),
+    # (frankenredis-gein3) THE STABLE MID POINT, and it exists because the SINTER
+    # crossover has been argued three times from two shapes that cannot settle it.
+    # sinter_2 returns 2 members and reproduces to ~1.4 pct; sinter_big returns 512 and
+    # does NOT reproduce -- 32 pct on the fr arm even after the harness drain fix,
+    # because a reply that large takes many event-loop passes and fr pays per-pass
+    # bookkeeping whose count depends on timing. Every per-member number in this ledger
+    # so far, including the +39.3 pct per-member figure and the k=14 crossover, comes
+    # from a two-point fit with sinter_big as one of the points.
+    #
+    # Same TWO keys as sinter_2 and the same fully overlapping seed, so sinter_2 ->
+    # sinter_mid varies result cardinality and NOTHING else -- which is what a slope
+    # requires and what sinter_9 (which varies KEY count instead) cannot give.
+    #
+    # MEASURED: fr reproduces to 0.07 pct here over four runs and redis to 0.62 pct.
+    #
+    # WHAT THIS PAIR DOES NOT LICENSE, learned by making the mistake: a two-point fit
+    # is only a per-member cost if the cost is LINEAR in members, and SINTER's is not.
+    # k=2->32 costs 910 instr per extra member and k=32->128 costs 3,568, in BOTH
+    # engines -- 7.34x cost for 16x the members, then 11.84x for 4x. So any "instr per
+    # member" quoted from two points is really an average over whatever regime changes
+    # sit between them. Use three points and report the segments.
+    "sinter_mid": (
+        ["SADD md1 " + " ".join(f"m{i:04d}" for i in range(32)),
+         "SADD md2 " + " ".join(f"m{i:04d}" for i in range(32))],
+        ["SINTER", "md1", "md2"],
+    ),
+    # (frankenredis-gein3) THE BRACKET POINT. sinter_mid at k=32 is stable to 0.07 pct
+    # and sinter_big at k=512 is not stable at all, so the transition is somewhere
+    # between them. 128 members is ~1.4 KB of reply, just ABOVE the ~1 KB line where
+    # this file's NOTE guard says the fr arm starts depending on timing, so this shape
+    # is a direct test of that threshold rather than another data point beside it: if
+    # the 1 KB line is right, this one is unstable and k=32 is the last clean point.
+    "sinter_128": (
+        ["SADD c81 " + " ".join(f"m{i:04d}" for i in range(128)),
+         "SADD c82 " + " ".join(f"m{i:04d}" for i in range(128))],
+        ["SINTER", "c81", "c82"],
+    ),
     # (frankenredis-9hnxt) SINTER at NINE keys, the pair for sinter_2. keys_multi is
     # the only parser either SINTER call site uses and it refuses arr_len < 10, i.e.
     # fewer than nine keys -- and unlike MGET there are no exact-N SINTER parsers to
@@ -762,11 +799,19 @@ def run_once(engine: str, seeds, cmd, ops: int, workdir: str, tag: str,
     # DELETION CONDITION: remove this when fr's per-iteration drains are guarded on
     # cheap emptiness checks, and the same three-run spread on sinter_big comes in
     # under the ~0.6 pct instr/op noise floor.
+    # THRESHOLD CORRECTED BY MEASUREMENT (frankenredis-gein3). I first set this line at
+    # 1 KB from the sinter_big evidence alone, and sinter_128 then falsified it: at
+    # 1,414 bytes/op its fr arm reproduces to 0.037 pct over four runs, tighter than
+    # any small shape in the corpus. The stable/unstable bracket that is actually
+    # measured is 1,414 B/op stable against 5,638 B/op unstable, so the line goes
+    # between them and the wording drops the claim that everything above it IS
+    # timing-dependent -- which was an inference, not an observation.
     per_op = reply_bytes[0] / ops if ops else 0
-    if per_op > 1024 and tag.startswith("fr"):
-        print("  NOTE %-6s reply volume %.0f bytes/op -- above ~1 KB the fr arm is"
-              " timing-dependent (measured 12.8-33.4 pct spread on sinter_big). Do NOT"
-              " bank a ratio from a single pair on this shape; repeat and quote a range."
+    if per_op > 2048 and tag.startswith("fr"):
+        print("  NOTE %-6s reply volume %.0f bytes/op. MEASURED: stable at 1,414 B/op"
+              " (sinter_128, 0.04 pct over four runs), NOT stable at 5,638 B/op"
+              " (sinter_big, 12.8-33.4 pct). This shape is above the last point known"
+              " stable, so repeat it and quote a range rather than banking one pair."
               % (tag, per_op), file=sys.stderr)
     return total_ir(out)
 
