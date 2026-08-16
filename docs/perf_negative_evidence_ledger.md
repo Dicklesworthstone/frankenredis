@@ -24563,3 +24563,85 @@ RETRY PREDICATE: do NOT re-attribute this. DO stop quoting sort_ro_alpha's 1.49x
 standing parity gap without saying "at n=3"; the honest one-line summary is "fr is ahead of
 redis on SORT ALPHA for any list of 7 or more elements". If front-classification is taken
 up, the number to beat is 3,006 instr/op of dispatch against a classified route's ~275.
+
+--------------------------------------------------------------------------------
+SCREENED (frankenredis-z2ce3, frankenredis-ozrro) — 102 shapes ranked by ABSOLUTE dispatch:
+only THREE pay more than 1,000 instr/op, and the front-classification surface is nearly
+EXHAUSTED at 114 classified commands
+
+Claim class: METHOD (target ranking; no code change)
+
+The previous row retargeted SORT's fixed tax onto the open `ozrro` front-classification
+work and said the scope should be justified by HOW MANY commands still walk the cascade.
+This measures that instead of assuming it.
+
+STATIC FIRST: `borrowed_dispatch_floor_command` classifies **114 commands**. Absent and
+common: SORT, SORT_RO, LTRIM, SPOP, SRANDMEMBER, SMOVE, RPOPLPUSH, HSET, HINCRBY,
+ZRANGEBYSCORE, ZRANGEBYLEX, INCRBYFLOAT — plus GET and SET, which are absent from the table
+but sit at cascade positions 1 and 2 and are therefore cheap anyway.
+
+THEN MEASURED, all 102 harness shapes on one ELF, ranked by absolute dispatch instr/op
+(share alone is misleading — a 30 pct share of a small command is worth less than an 8 pct
+share of a large one):
+
+    dispatch  share   instr/op    ratio   shape
+      3123.0  24.0%    12990.6   1.5747   sort_ro_alpha
+      3005.7   2.2%   138682.7   0.6982   sort_ro_alpha_64
+      1007.6   8.3%    12109.3   0.5230   sinter_9
+    ------------------------------------------------ 1,000 instr/op
+       986.9  30.5%     3237.7   0.7352   set_xx_opt
+       966.0  22.4%     4314.1   0.6382   sintercard_lim
+       891.3  27.3%     3263.7   0.4822   zrange_rev
+       859.9  23.0%     3738.5   0.3606   zrangebyscore_l
+       755.3   5.0%    14963.7   0.6407   sunionstore_3src
+       745.4   7.5%     9948.1   0.7616   sinterstore_3src
+       730.3   7.7%     9451.6   0.6578   sdiffstore_3src
+       725.8  22.0%     3294.1   0.5826   zadd_incr
+       689.0  19.6%     3518.3   0.4941   set_ex_opt
+
+THE HEADLINE, AND IT CUTS AGAINST THE PLAN I WROTE LAST ROW: only THREE of 102 shapes pay
+more than 1,000 instr/op of dispatch, and TWO of them are the SORT shapes this campaign
+just finished attributing. The generic-route tax at ~3,006 instr/op is not a broad surface
+waiting to be harvested — in this corpus it is essentially UNIQUE TO SORT_RO. Everything
+else already sits between ~275 (front-classified) and ~1,000 (classified, or reached early
+in the cascade).
+
+    So "front-classify the commands still walking the cascade" is NOT a campaign. It is one
+    command. 114 are already done, and the measured tail is flat. I wrote last row that the
+    lever should be scoped by how many commands still walk the cascade; the answer is
+    approximately one, and that changes the lever from a programme into a single entry.
+
+LIMIT, STATED SO THIS IS NOT OVER-READ: this ranks the 102 shapes the harness HAS, not the
+whole command set. LTRIM, SPOP, SRANDMEMBER, SMOVE, RPOPLPUSH, HSET and INCRBYFLOAT are
+unclassified and have NO shape here, so they are unmeasured, not cheap. A prior row put the
+LTRIM cascade walk at 15,736 instr/op, which is 5x anything in this table — so the corpus
+is missing its own worst case, and the next honest step is shapes for those seven, not more
+levers on the ones already visible.
+
+THE BEST NON-SORT TARGET IS `set_xx_opt`: 986.9 instr/op at a 30.5 pct share, the highest
+share in the table. SET has no floor class at all, and its seven option arms sit at cascade
+positions 7 through 13, so `SET k v XX` pays six failed option parses to reach its own.
+At this ledger's measured 40-50 instr/op per failed non-inlined parse that is ~270 instr/op
+of pure position, and a floor class keyed on (arity 4, SET) / (arity 5, SET) chaining the
+existing parsers should take ~987 toward ~400. NOT ATTEMPTED THIS ROW: crates/fr-server/
+src/main.rs is `MM` — a peer has work BOTH staged and unstaged in it, and the SET arms have
+been re-indented under a new block, so the file is being restructured underneath me.
+
+PROVENANCE:
+  ELF sha256           1b1d66cd028dd406fdde74e0dceb968b57558ffb03e9faf77bc439d77c46d87e
+  harness              scripts/shape_instr_per_op.py, N=2000/2N=4000, one run per shape;
+                       102 shapes, single ELF, so every row shares an arm and the ranking
+                       is internally consistent even where a single run is not tight.
+  host                 thinkstation1, 64 cores, /data 280G, governor powersave, no build.
+  ALL ARMS IN ONE WINDOW, run consecutively:
+    at open            loadavg 35.79 / 29.66 / 31.46   MHz 1429-4017, mean 3362, spread 2.81x
+    at close           loadavg 16.23 / 21.94 / 28.54   MHz 1429-4292, mean 2991, spread 3.00x
+  instrument           callgrind Ir. The 3.00x CROSS-CORE MHz spread cannot reach these
+                       numbers: Ir is simulated, so core placement and clock are not inputs
+                       (measured at 0.64 pct across a 34 pct swing, row 9e195955e). MHz is
+                       recorded per the standing convention, not gated on.
+
+RETRY PREDICATE: do NOT re-screen this corpus. DO add shapes for LTRIM, SPOP, SRANDMEMBER,
+SMOVE, RPOPLPUSH, HSET and INCRBYFLOAT before anyone plans more front-classification work —
+they are the unclassified commands with no shape, and LTRIM's known 15,736 instr/op walk
+says the corpus is hiding its own worst case.
