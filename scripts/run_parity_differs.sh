@@ -71,7 +71,9 @@ PY
 # chasing 3 such phantoms). We snapshot the as-started baseline of the commonly
 # mutated configs from BOTH servers ONCE (the documented invocation runs this
 # right after a fresh start, so these are the compiled defaults the pair shares)
-# and restore them + FLUSHALL before every gate, so each gate sees a clean slate.
+# and restore them + FLUSHALL + FUNCTION FLUSH before every gate, so each gate
+# sees a clean slate. FUNCTION FLUSH is separate on purpose: FLUSHALL does not
+# drop libraries, so function residue leaks across gates (frankenredis-3cxs3).
 BASELINE_FILE="$(mktemp)"
 trap 'rm -f "$BASELINE_FILE"' EXIT
 
@@ -137,6 +139,16 @@ else:  # restore
         pass
     for c in byport.values():
         c("FLUSHALL")
+        # (frankenredis-3cxs3) FLUSHALL does NOT drop FUNCTION libraries, so
+        # a gate that loads one contaminates every later gate that reads function
+        # state. Observed: function_load_differ loads the o500d nil_index library,
+        # which fr accepts and redis 7.2.4 rejects (frankenredis-o500d), and the
+        # residue then made resp3_reply_type_gate report FUNCTION STATS
+        # libraries_count 1-vs-2 and an extra FUNCTION LIST entry -- a RESP3
+        # reply-TYPE gate failing on inherited state, with nothing wrong with any
+        # reply type. The o500d bug is real and function_load_differ still catches
+        # it; this only stops it being re-reported under someone else's name.
+        c("FUNCTION", "FLUSH")
 PY
 }
 
