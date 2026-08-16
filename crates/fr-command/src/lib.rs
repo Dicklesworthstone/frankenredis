@@ -19124,11 +19124,28 @@ const ACL_CATEGORIES: &[&str] = &[
 /// bumps `dirty` without registering. So a plain `HGET` would propagate itself and
 /// fire a spurious keyspace event.
 ///
-/// It is unreachable TODAY only because of this switch: `hash_field_expires` has
-/// exactly one writer, `Store::hash_field_set_abs_expiry`, whose only production
-/// caller is the `HEXPIRE` handler that this constant gates. No RESTORE/RDB path
-/// applies field TTLs. Fix `ah4gx` BEFORE flipping this, or the defect ships with
-/// the retarget.
+/// THIS SWITCH IS NOT THE ONLY ROUTE, AND THE DEFECT IS NOT DORMANT. An earlier
+/// version of this note said `hash_field_expires` has exactly one writer,
+/// `Store::hash_field_set_abs_expiry`, gated by this constant, and that "no
+/// RESTORE/RDB path applies field TTLs". The first half is right — including the
+/// `_with_event` wrapper, which has no production caller. The second half is
+/// wrong. `apply_rdb_entries_to_store` (fr-runtime, the `RdbValue::HashWithTtls`
+/// arm) writes `store.hash_field_expires` DIRECTLY, bypassing the setter, and has
+/// five production callers on the RDB load surfaces.
+///
+/// So the defect is reachable TODAY with this switch off: any RDB carrying a
+/// `HashWithTtls` entry seeds the map, and an ordinary `HGET` then reaps a field
+/// and trips the gate. Two live vectors — replicating from or loading an RDB
+/// produced by a Redis 7.4+ instance, and reloading an RDB written by an EARLIER
+/// fr build back when `HEXPIRE` was still dispatchable. Flipping this constant
+/// ADDS the client-triggerable route; it does not create the defect.
+///
+/// (The one-writer claim survived review because the write is a method chain split
+/// across three lines — `store` / `.hash_field_expires` / `.insert(...)` — so a
+/// single-line grep for `hash_field_expires.insert` finds only the setter. Grep the
+/// field name alone.)
+///
+/// Fix `ah4gx` BEFORE flipping this, and do not treat it as safe meanwhile.
 ///
 /// The obvious repair — pushing the key into `lazy_expired_propagation` — is
 /// WRONG: a field reap has no whole-key `DEL` to propagate, so it would emit a
