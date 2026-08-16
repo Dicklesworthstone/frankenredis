@@ -259,6 +259,32 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
         ("hstrlen", ["HSET h f1 v1"], ["HSTRLEN", "h", "f1"]),
         ("get_control", ["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
     ],
+    # (frankenredis-B3BEAD) Third unswept batch. The no-op / MISS family has been
+    # the richest vein measured so far -- PERSIST on a non-volatile key 1.7732x,
+    # UNLINK on a missing key 2.1708x -- so this leans into misses across every
+    # type, plus writes whose reply is stable under repetition. All 19 cleared
+    # scripts/shape_admission_probe.py on both engines, 0 rejected.
+    "unswept3": [
+        ("hdel_missing", ["HSET h f1 v1"], ["HDEL", "h", "nofield"]),
+        ("srem_missing", ["SADD st m1"], ["SREM", "st", "nomember"]),
+        ("zrem_missing", ["ZADD z 1 a"], ["ZREM", "z", "nomember"]),
+        ("lrem_missing", ["RPUSH l a b c"], ["LREM", "l", "0", "nosuch"]),
+        ("exists_missing", [], ["EXISTS", "nosuchkey"]),
+        ("touch_missing", [], ["TOUCH", "nosuchkey"]),
+        ("type_missing", [], ["TYPE", "nosuchkey"]),
+        ("get_missing", [], ["GET", "nosuchkey"]),
+        ("setnx_existing", ["SET nx v"], ["SETNX", "nx", "other"]),
+        ("lset_same", ["RPUSH l a b c"], ["LSET", "l", "0", "a"]),
+        ("setbit_same", ["SET bb abcdefghijklmnop"], ["SETBIT", "bb", "5", "0"]),
+        ("getset_same", ["SET gs vvvvvvvvvvvvvvvv"], ["GETSET", "gs", "vvvvvvvvvvvvvvvv"]),
+        ("bitcount", ["SET bb abcdefghijklmnop"], ["BITCOUNT", "bb"]),
+        ("bitpos", ["SET bb abcdefghijklmnop"], ["BITPOS", "bb", "1"]),
+        ("dbsize", ["SET s v"], ["DBSIZE"]),
+        ("smembers", ["SADD st m1 m2 m3 m4 m5"], ["SMEMBERS", "st"]),
+        ("hgetall", ["HSET h f1 v1 f2 v2 f3 v3"], ["HGETALL", "h"]),
+        ("lindex", ["RPUSH l a b c d e"], ["LINDEX", "l", "2"]),
+        ("get_control", ["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
+    ],
     "storeops": [
         ("exists_8key", ["MSET e1 1 e2 1 e3 1 e4 1 e5 1 e6 1 e7 1 e8 1"],
          ["EXISTS", "e1", "e2", "e3", "e4", "e5", "e6", "e7", "e8"]),
@@ -268,6 +294,17 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
         ("zmscore_9member",
          ["ZADD zm 1 m1 2 m2 3 m3 4 m4 5 m5 6 m6 7 m7 8 m8 9 m9"],
          ["ZMSCORE", "zm", "m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8", "m9"]),
+        # (frankenredis-hwcm1) KEYSPACE-SENSITIVE — do NOT compare this row across
+        # runs whose servers started with different ambient state. Measured directly:
+        # fr/redis is 0.847 with 3 keys in the db and 0.800 with 28, on one pair of
+        # live servers minutes apart, because fr's scan_in_db scales worse than
+        # redis's. Every other shape in this set is bounded by its own key.
+        #
+        # That matters here because these servers start in the REPO ROOT and load
+        # whatever `dump.rdb` is sitting there — proven the hard way when a stray
+        # RDB made the redis arm refuse to start outright. So the db this row scans
+        # is ambient, not fixture-controlled, and a moved/added/removed dump.rdb
+        # shifts it. If you need a comparable scan row, control the starting db.
         ("scan_prefix", ["MSET tenant:needle:1 1 tenant:decoy:1 1 tenant:decoy:2 1"],
          ["SCAN", "0", "MATCH", "tenant:needle:*", "COUNT", "100"]),
         ("zunionstore_2key", ["ZADD za 1 a 2 b 3 c 4 d", "ZADD zb 1 b 2 c 3 d 4 e"],
