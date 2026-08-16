@@ -268,6 +268,17 @@ SHAPES = {
     "hincrbyfloat": (["HSET h f 1"], ["HINCRBYFLOAT", "h", "f", "0"]),
     "hsetnx_existing": (["HSET h f1 v1"], ["HSETNX", "h", "f1", "other"]),
     "sinter_2": (["SADD s1 m1 m2 m3", "SADD s2 m2 m3 m4"], ["SINTER", "s1", "s2"]),
+    # (frankenredis-gein3) Every other SINTER shape returns TWO OR THREE members, so a
+    # lever whose cost is O(k log k) in RESULT cardinality — the reply sort fr does and
+    # redis does not — is arithmetically invisible on all of them: sorting 3 refs is tens
+    # of instructions against sinter_9's 12,114. This shape returns 512, which is the only
+    # way the corpus can see that sort at all. Same structural fix as sort_ro_alpha_64:
+    # a shape whose N is tiny cannot show a lever whose cost scales with N.
+    "sinter_big": (
+        ["SADD bg1 " + " ".join(f"m{i:04d}" for i in range(512)),
+         "SADD bg2 " + " ".join(f"m{i:04d}" for i in range(512))],
+        ["SINTER", "bg1", "bg2"],
+    ),
     # (frankenredis-9hnxt) SINTER at NINE keys, the pair for sinter_2. keys_multi is
     # the only parser either SINTER call site uses and it refuses arr_len < 10, i.e.
     # fewer than nine keys -- and unlike MGET there are no exact-N SINTER parsers to

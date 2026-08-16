@@ -25008,3 +25008,106 @@ RETRY PREDICATE: do NOT chase the remaining ~450 instr/op of SET option dispatch
 reordering or re-classifying — it is not there; 68vf8 already took it and this row is the
 remainder. DO apply the refined law before costing any front-classification lever: check
 whether the target's cascade arms already carry a cheap guard.
+
+--------------------------------------------------------------------------------
+MEASURED (frankenredis-gein3) — SINTER CROSSES AT k=14 AND THE CORPUS ONLY TESTS k=2..3:
+1.3764x at 512 members, fr's per-member cost is 39.3% WORSE than redis's. The reply-sort
+hypothesis is DEAD — it does not appear in the profile at all
+
+Claim class: COMPETITIVE
+
+gein3 asked, correctly, that result cardinality be measured before any lever, because the
+reply sort it targets is O(k log k) in RESULT size. Settled with ZERO builds: every SINTER
+shape in the corpus returns two or three members. `sinter_9` seeds nine sets each holding
+`m1 m2 m3`, so its intersection is THREE. Sorting three refs is tens of instructions
+against 12,110 instr/op — below this instrument's ~0.6 pct floor. The sort is real waste
+that redis genuinely does not do, and it is ARITHMETICALLY INVISIBLE on every shape that
+exists. Same structural error as the three-element SORT list two rows ago.
+
+Added `sinter_big` — two sets, 512 shared members — which is the only way the corpus can
+see a per-member lever at all. It found something much larger than the sort.
+
+    shape        result k   fr instr/op   redis instr/op   ratio
+    sinter_2         2          4,381.1        8,700.8     0.5035   fr AHEAD
+    sinter_9         3         12,110.0       23,083.1     0.5246   fr AHEAD
+    sinter_big     512        645,573.8      469,031.0     1.3764   fr BEHIND
+
+Two points at the SAME key count (sinter_2 and sinter_big are both 2-key) give the cost
+models, so the difference is result cardinality and nothing else:
+
+                  per member      fixed per command
+    fr              1,257.2             1,866.6
+    redis             902.6             6,895.6
+
+    fr's FIXED cost is 3.7x CHEAPER. fr's PER-MEMBER cost is 39.3 pct MORE EXPENSIVE.
+    Crossover k = 14.2.
+
+        k=2     fr    4,381   redis    8,701   0.5035
+        k=3     fr    5,638   redis    9,603   0.5871
+        k=32    fr   42,098   redis   35,779   1.1766
+        k=100   fr  127,591   redis   97,156   1.3133
+        k=512   fr  645,574   redis  469,031   1.3764
+
+THIS IS THE EXACT MIRROR OF THE SORT ROW, AND THE PAIR IS THE LESSON. SORT looked BAD at
+n=3 and is good beyond n=7, because fr's per-element work is cheaper and its intercept is
+worse. SINTER looks GOOD at k=2..3 and is bad beyond k=14, because fr's per-element work is
+worse and its intercept is better. In BOTH cases the corpus tested only the tiny end and
+the standing conclusion was an artefact of the shape, not a property of the command.
+
+    A ONE-POINT SHAPE MEASURES A COMMAND'S INTERCEPT AND CALLS IT THE COMMAND.
+
+WHERE THE PER-MEMBER EXCESS IS, from callgrind on the fr and redis arms of sinter_big:
+
+    fr set membership     lookup_slot_prehashed 192.8M + contains 96.3M + field_at 47.1M
+                          + memcmp 85.6M                                    = 421.8M
+    redis set membership  siphash 168.7M + dictFind 150.5M                  = 319.2M
+                                                                     fr +102.6M (+32 pct)
+
+    fr reactor bookkeeping  try_recv 105.0M + drain_writer_completions 96.0M
+                            + drain_pubsub_outboxes 46.2M + sub_timespec 53.7M = 300.9M
+    redis equivalent        NOTHING in its top frames                          = ~0
+
+    fr reply encode         encode_bulk_string_slice                        = 116.7M
+    redis reply machinery   _addReplyProtoToList 264.2M + _addReplyToBufferOrList 165.9M
+                            + prepareClientToWrite 159.8M                   = 589.9M
+                                                                     fr -473M (fr WINS)
+
+fr's REPLY ENCODING IS FIVE TIMES CHEAPER than redis's reply machinery — that is a genuine
+and large fr win and it is why fr still leads below k=14. It is spent again on set
+membership (+102.6M) and on reactor bookkeeping redis has no counterpart for (+300.9M):
+an mpmc writer-completion channel drained per write, a pubsub outbox drain, and clock
+reads. NO SORT FUNCTION APPEARS ANYWHERE IN THE PROFILE.
+
+    gein3's lever should be CLOSED as measured-and-too-small rather than attempted. Its
+    reasoning was sound and source-verified; the size was the open question and the answer
+    is that it is invisible even at k=512, where the sort should be at its most expensive.
+    The two real levers it uncovered are fr's per-member set membership and the
+    writer-completion drain.
+
+PROVENANCE:
+  ELF sha256           8515645e527f00b89c8aa915b53df4a004a6ba6100f5de199d18fab26ed1fe23
+                       NOT reproducible from HEAD: peers held fr-runtime, fr-store and
+                       dispatch_route_differ.py dirty.
+  harness              scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines in the
+                       SAME invocation; shape sinter_big added by this change.
+  estimator            single pair per shape. The RATIOS therefore carry the elapsed-time
+                       cron contaminant on the redis side (r=+0.98, measured two rows ago),
+                       nominally +/-8 pct. THE CONCLUSION SURVIVES IT: at k=512 the gap is
+                       +37.6 pct, and the crossover moves from 14.2 to ~16 even if redis is
+                       inflated the full 8 pct at BOTH points.
+  host                 thinkstation1, 64 cores, /data 262G, governor powersave, no build.
+  loadavg              22.24 - 32.20 across the arms.
+  MHz PER ARM          2833 / 2851 / 3551 (64-core mean, per run); cross-core spread ~3x.
+                       Ir is simulated; neither reaches these counts.
+  pool sizing          checked after torch's finding: the harness passes NO thread or
+                       reactor flags, and fr-server has no `available_parallelism`,
+                       `num_cpus` or shard default — it is a single-threaded reactor, so
+                       there is no machine-sized pool for the two arms to fight over.
+
+RETRY PREDICATE: do NOT attempt gein3's reply-sort removal — measured invisible at k=512.
+DO attack fr's per-member cost, which is the whole of the deficit: set membership
+(lookup_slot_prehashed + memcmp is 14 pct of the command against redis's siphash+dictFind)
+and the writer-completion drain (10.1 pct with no redis counterpart). And add a large-k
+shape for SUNION, SDIFF and SINTERSTORE before trusting THEIR ratios — all three are
+seeded at two or three members and every one of them is on the near side of an untested
+crossover.
