@@ -23727,3 +23727,93 @@ regression repair. Do not re-measure zadd_2pair; it is unharmed and settled. Add
 harness shape for the flagged arity-6 form and expect it to fall from the 46-58 pct band
 into the crossed set near 16 pct — that measurement, not this one, is what closes the
 ZADD family.
+
+--------------------------------------------------------------------------------
+PREDICTION MISSED IN A USEFUL DIRECTION — zadd_2flag is 25.9 pct dispatch, not ~16 and
+not 46-58: THE SECOND BRANCH OF A CHAINED ARM PAYS THE FIRST BRANCH'S FAILED PARSE
+(frankenredis-z2ce3, frankenredis-p98mw)
+
+The shape added last turn exists precisely to make this reading possible; the arity-6
+flagged ZADD form was invisible to the suite before it. Two outcomes were recorded in
+advance: ~16 pct if the chaining fix reaches this reading, 46-58 pct if it does not.
+
+LOADAVG OBSERVED BY ME. Stability sampled three times, twenty seconds apart, BEFORE
+deciding:
+
+    11.26 / 20.86 / 30.62      15.80 / 21.17 / 30.51      18.70 / 21.58 / 30.45
+    after the run: 15.28 / 19.78 / 29.12
+
+The 1-minute was RISING toward the 5-minute, so the box was reloading, not settling. That
+gates THROUGHPUT. It does not gate this row: dispatch share held to 0.0 pct across a 5x
+load excursion two rows ago, so instruction counts are load-immune and were run on that
+evidence rather than on a hoped-for window.
+
+CONVENTION: fr instructions per op / redis 7.2.4's. BELOW 1.0 = fr AHEAD.
+
+    A/A control (get_control)  0.4181 / 0.4195 / 0.4161      spread 0.8 pct
+
+    zadd_2flag, four runs   fr 3229.2 / 3229.6 / 3230.4 / 3230.8   spread 0.05 pct
+                            redis 6681.4 / 6304.4 / 6445.3 / 6575.1  spread 5.8 pct
+                            ratio 0.4833 / 0.5123 / 0.5012 / 0.4914  spread 5.8 pct
+                            dispatch 25.9 pct in all four, ~836 instr/op
+
+fr's numerator reproduced to 0.05 pct — joint-tightest of the campaign — against a 0.8
+pct null. The figure is solid.
+
+    predicted   ~16 pct (served) OR 46-58 pct (still stranded)
+    actual       25.9 pct — NEITHER
+
+WHAT IT MEANS, AND IT IS NOT AMBIGUOUS. 25.9 pct is far below the 46-58 pct band that
+every mis-claimed shape occupied before it was fixed, so THE CHAINING FIX DOES REACH THIS
+READING — it is served, not sent to generic. The regression reported three rows ago is
+genuinely repaired, and this is the first direct evidence of that, since every prior
+check could only see the form that was already working.
+
+But it is not at zadd_2pair's 15.7 pct either, and the gap is mechanical:
+
+    zadd_2pair   dispatch ~570 instr/op   FIRST branch of the arm
+    zadd_2flag   dispatch ~836 instr/op   SECOND branch
+    difference           ~266 instr/op
+
+~266 is about 5.5x the set_bulk constant this ledger established at 48.0 instr per call.
+The first branch, `zadd2_packet`, parses key plus four more bulks — score, member, score,
+member — before anything rejects it, and only then does the arm fall through to
+`zadd_flag2_packet`. So the flagged reading pays one complete failed two-pair parse on
+top of its own.
+
+    THE SECOND BRANCH OF A CHAINED ARM IS NOT FREE. It pays every earlier branch's
+    failed parse. Chaining converts a GENERIC fallthrough (~2,000+ instr/op) into a
+    wasted-parse tax (~266 here) — a large win, and not the same thing as being first.
+
+DESIGN CONSEQUENCE, which is the reusable output: ORDER THE BRANCHES BY FREQUENCY. In a
+chained arm the first form is served at full speed and each later one pays the sum of the
+failed parses ahead of it. This ledger's earlier LPOS row measured the same effect from
+the other side — three wasted set_bulk calls costing 144 instr/op when the RANK parser
+declined ahead of COUNT. Same mechanism, now measured inside a deliberately chained arm
+rather than an accidental one.
+
+I do NOT know which of the two arity-6 ZADD readings is more common in real traffic, and
+this row does not claim the current order is wrong. It claims only that the order has a
+measurable price and should be chosen rather than inherited.
+
+STANDINGS: the ZADD family is now CLOSED — arities 4, 5 and 6 all served, both arity-6
+readings confirmed, and the instrument that would have caught the original defect exists.
+sort_ro_alpha (~1.52x) remains the only shape above parity; set_base (33.9 pct) remains
+the last untaken rewire.
+
+PROVENANCE:
+  ELF sha256           cc597a5eac15c248773f2f824c801a0485f83471d78b80972db5788655369643
+                       built LOCALLY at HEAD 4db33f7c1 from a CLEAN tree with
+                       RCH_CARGO_WRAPPER_BYPASS=1 and env -u CARGO_TARGET_DIR, executable
+                       path from --message-format=json, COPIED to a private path and
+                       sha'd there. Contains the chaining fix 7e5657839.
+                       REPRODUCIBLE FROM HEAD ALONE.
+  harness              scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines in the
+                       SAME invocation; shape zadd_2flag added in 0f9bec218.
+  host                 thinkstation1, 64 cores, /data 295G, one build this pane.
+  loadavg              sampled 11.26/15.80/18.70 on the 1-minute before, 15.28 after.
+
+RETRY PREDICATE: do NOT re-run zadd_2flag; fr's cost is settled to 0.05 pct. If anyone
+wants the ~266 instr/op back for this reading, the lever is branch ORDER, not another
+parser — and it would cost zadd_2pair the same amount, so it is only worth doing with
+frequency data, which nobody in this campaign has.
