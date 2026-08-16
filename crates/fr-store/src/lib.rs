@@ -36797,28 +36797,17 @@ fn hash_from_listpack_spans(listpack: &[u8]) -> Result<(HashFieldMap, usize), St
     let (span_pairs, _) = spans.as_chunks::<2>();
     let mut pairs: Vec<(&[u8], &[u8])> = Vec::with_capacity(span_pairs.len());
     let mut max_element_len = 0_usize;
-    // (frankenredis-33832) Produce the map builder's tier decision and byte budget
-    // IN THIS WALK. `from_unique_pairs_borrowed` recomputed both by walking every
-    // pair a second time, touching the same `field.len()` / `value.len()` this loop
-    // already reads to maintain `max_element_len` — so the second walk was pure
-    // repetition on the RESTORE hot path. The rule below is copied verbatim from
-    // that constructor and is pinned against it by
-    // `presized_tier_matches_recomputed_tier`.
-    let mut to_hash = span_pairs.len() > crate::packed_set::PACKED_HASH_MAX_ENTRIES;
-    let mut budget_bytes = 0_usize;
     for pair in span_pairs {
         let field = pair[0].as_bytes(listpack);
         let value = pair[1].as_bytes(listpack);
         max_element_len = max_element_len.max(field.len()).max(value.len());
-        to_hash |= crate::packed_set::pair_forces_hash_tier(field, value);
-        budget_bytes += field.len() + value.len() + 10;
         pairs.push((field, value));
     }
     if restore_pairs_have_duplicate_field(&pairs) {
         return Err(StoreError::InvalidDumpPayload);
     }
     Ok((
-        HashFieldMap::from_unique_pairs_borrowed_presized(&pairs, to_hash, budget_bytes),
+        HashFieldMap::from_unique_pairs_borrowed(&pairs),
         max_element_len,
     ))
 }

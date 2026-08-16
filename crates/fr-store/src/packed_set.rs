@@ -227,24 +227,6 @@ fn read_varint_impl<const FAST: bool>(buf: &[u8], mut pos: usize) -> (usize, usi
 /// the O(n) packed scan grows — the observable OBJECT ENCODING `listpack`/
 /// `hashtable` flag is tracked separately (and stickily) by the Store from the
 /// *configured* thresholds, so the exact storage-promotion point is unobservable.
-/// Pair-count ceiling for the packed hash tier, exported for callers that are
-/// already walking the pairs and want the tier decision without a second walk.
-/// (frankenredis-33832) See [`HashFieldMap::from_unique_pairs_borrowed_presized`].
-pub const PACKED_HASH_MAX_ENTRIES: usize = PACKED_MAX_ENTRIES;
-
-/// Whether a single (field, value) pair on its own forces the hashtable tier.
-///
-/// (frankenredis-33832) Exported so the tier rule lives in ONE place. The RESTORE
-/// builder computes `to_hash` inside the walk it already performs, and if it
-/// spelled the `> PACKED_MAX_VALUE` comparison out for itself the two copies could
-/// drift apart silently — the packed tier would then be chosen for entries the
-/// packed form cannot address.
-#[inline]
-#[must_use]
-pub fn pair_forces_hash_tier(field: &[u8], value: &[u8]) -> bool {
-    field.len() > PACKED_MAX_VALUE || value.len() > PACKED_MAX_VALUE
-}
-
 const PACKED_MAX_ENTRIES: usize = 128;
 const PACKED_MAX_VALUE: usize = 64;
 
@@ -624,41 +606,6 @@ impl HashFieldMap {
             to_hash |= f.len() > PACKED_MAX_VALUE || v.len() > PACKED_MAX_VALUE;
             bytes += f.len() + v.len() + 10;
         }
-        Self::from_unique_pairs_borrowed_presized(pairs, to_hash, bytes)
-    }
-
-    /// [`Self::from_unique_pairs_borrowed`] for a caller that ALREADY walked the
-    /// pairs and can supply the tier decision and byte budget.
-    ///
-    /// (frankenredis-33832) The RESTORE builder `hash_from_listpack_spans` walks
-    /// every pair to materialise the borrowed slices and track `max_element_len`,
-    /// and then this constructor walked all of them a second time purely to
-    /// recompute `to_hash` and `bytes` — quantities the first walk is already in a
-    /// position to produce. Both walks touch `f.len()` and `v.len()` on the same
-    /// pairs, so the second one is pure repetition on the RESTORE hot path.
-    ///
-    /// CONTRACT: `to_hash` and `bytes` MUST equal what the loop in
-    /// `from_unique_pairs_borrowed` would compute, i.e.
-    ///   `to_hash = pairs.len() > PACKED_MAX_ENTRIES
-    ///              || any(f.len() > PACKED_MAX_VALUE || v.len() > PACKED_MAX_VALUE)`
-    ///   `bytes   = sum(f.len() + v.len() + 10)`
-    /// `bytes` is only a capacity hint, so getting it wrong costs a realloc rather
-    /// than correctness — but `to_hash` selects the REPRESENTATION, and getting it
-    /// wrong would build a `Packed` map holding entries the packed form cannot
-    /// address. `presized_tier_matches_recomputed_tier` pins both against the
-    /// original on generated corpora that straddle every threshold.
-    #[must_use]
-    pub fn from_unique_pairs_borrowed_presized(
-        pairs: &[(&[u8], &[u8])],
-        to_hash: bool,
-        bytes: usize,
-    ) -> Self {
-        debug_assert_eq!(
-            to_hash,
-            pairs.len() > PACKED_MAX_ENTRIES
-                || pairs.iter().any(|(f, v)| pair_forces_hash_tier(f, v)),
-            "caller's tier decision disagrees with the canonical rule"
-        );
         if to_hash {
             let mut h = CompactFieldMap::with_capacity(pairs.len(), bytes);
             for (field, value) in pairs {
@@ -6330,92 +6277,6 @@ mod tests {
             check(&c, &o);
         }
         assert!(!c.is_empty(), "expected a non-trivial residual map");
-    }
-
-    #[test]
-    fn presized_tier_matches_recomputed_tier() {
-        // (frankenredis-33832) `from_unique_pairs_borrowed_presized` lets the RESTORE
-        // builder hand over `to_hash`/`bytes` it already computed, skipping a second
-        // walk of every pair. `bytes` is only a capacity hint, but `to_hash` selects
-        // the REPRESENTATION, so this pins that a caller following the documented rule
-        // gets a map indistinguishable from the self-computing constructor.
-        //
-        // Sizes and lengths straddle BOTH thresholds — PACKED_MAX_ENTRIES on the pair
-        // count and PACKED_MAX_VALUE on an individual field/value — including one case
-        // that is under the count threshold but forced to the hash tier by a single
-        // oversized value, which is the combination a naive `pairs.len()`-only rule
-        // would get wrong.
-        let cases: &[(usize, usize, usize)] = &[
-            (0, 4, 4),
-            (1, 4, 4),
-            (PACKED_MAX_ENTRIES - 1, 4, 4),
-            (PACKED_MAX_ENTRIES, 4, 4),
-            (PACKED_MAX_ENTRIES + 1, 4, 4),
-            (8, PACKED_MAX_VALUE, PACKED_MAX_VALUE),
-            (8, PACKED_MAX_VALUE + 1, 4), // oversized FIELD forces the hash tier
-            (8, 4, PACKED_MAX_VALUE + 1), // oversized VALUE forces the hash tier
-            (PACKED_MAX_ENTRIES + 1, PACKED_MAX_VALUE + 1, 4),
-        ];
-
-        for &(n, flen, vlen) in cases {
-            let owned: Vec<(Vec<u8>, Vec<u8>)> = (0..n)
-                .map(|i| {
-                    let mut f = format!("f{i}:").into_bytes();
-                    f.resize(f.len().max(flen), b'F');
-                    let mut v = format!("v{i}:").into_bytes();
-                    v.resize(v.len().max(vlen), b'V');
-                    (f, v)
-                })
-                .collect();
-            let pairs: Vec<(&[u8], &[u8])> = owned
-                .iter()
-                .map(|(f, v)| (f.as_slice(), v.as_slice()))
-                .collect();
-
-            // Exactly the rule the doc comment states a caller must follow.
-            let mut to_hash = pairs.len() > PACKED_MAX_ENTRIES;
-            let mut bytes = 0_usize;
-            for (f, v) in &pairs {
-                to_hash |= super::pair_forces_hash_tier(f, v);
-                bytes += f.len() + v.len() + 10;
-            }
-
-            let reference = HashFieldMap::from_unique_pairs_borrowed(&pairs);
-            let presized =
-                HashFieldMap::from_unique_pairs_borrowed_presized(&pairs, to_hash, bytes);
-
-            // Same TIER. Checked first and explicitly: a map can agree on every
-            // entry while being the wrong representation, and the representation is
-            // what this parameter controls.
-            assert_eq!(
-                matches!(reference, HashFieldMap::Hash(_)),
-                matches!(presized, HashFieldMap::Hash(_)),
-                "tier diverged for n={n} flen={flen} vlen={vlen}"
-            );
-            assert_eq!(
-                matches!(reference, HashFieldMap::Hash(_)),
-                to_hash,
-                "the documented rule disagrees with what the constructor chose \
-                 for n={n} flen={flen} vlen={vlen}"
-            );
-            assert_eq!(
-                presized.len(),
-                reference.len(),
-                "entry count diverged for n={n}"
-            );
-            let got: Vec<(Vec<u8>, Vec<u8>)> = presized
-                .iter()
-                .map(|(f, v)| (f.to_vec(), v.to_vec()))
-                .collect();
-            let want: Vec<(Vec<u8>, Vec<u8>)> = reference
-                .iter()
-                .map(|(f, v)| (f.to_vec(), v.to_vec()))
-                .collect();
-            assert_eq!(
-                got, want,
-                "entries or ITERATION ORDER diverged for n={n} flen={flen} vlen={vlen}"
-            );
-        }
     }
 
     #[test]
