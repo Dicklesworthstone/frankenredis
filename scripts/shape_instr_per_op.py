@@ -68,6 +68,13 @@ SHAPES = {
         ["BITOP", "AND", "bdst", "ba", "bb"],
     ),
     "bitop_not": (["SET ba abcdefghijklmnop"], ["BITOP", "NOT", "bndst", "ba"]),
+    # (frankenredis-o3t0q) Below its own control in two balanced-square runs
+    # while sitting ABOVE 1.0 in raw terms -- the deficit only appears once the
+    # whole-process advantage is divided out, which is why it needs the exact
+    # instruction treatment rather than another wall-clock round.
+    "pttl": (["SET bb abcdefghijklmnop", "PEXPIRE bb 900000000"], ["PTTL", "bb"]),
+    "expiretime": (["SET kk vvvvvvvvvvvvvvvv", "EXPIREAT kk 4102444800"],
+                   ["EXPIRETIME", "kk"]),
     # The control: a route none of the above levers touch.
     "get_control": (["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
 }
