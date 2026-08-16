@@ -68572,8 +68572,8 @@ mod tests {
         // 1.5 = 15 * 10^-1; 15 % 5 == 0 -> sig 3 = 0b11, leading bit at position 1,
         // so mantissa = 3 << 62 and exponent = (2-1) + (-1) = 0. (3/4)*2^1 == 1.5.
         assert_eq!(
-            exact_small_decimal_to_long_double(false, b"15", -1),
-            Some(IntegerLongDouble {
+            super::exact_small_decimal_to_long_double(false, b"15", -1),
+            Some(super::IntegerLongDouble {
                 negative: false,
                 mantissa: 0xC000_0000_0000_0000,
                 exponent: 0
@@ -68581,8 +68581,8 @@ mod tests {
         );
         // 1 = 1 * 10^0 -> mantissa 1 << 63, exponent 0.
         assert_eq!(
-            exact_small_decimal_to_long_double(false, b"1", 0),
-            Some(IntegerLongDouble {
+            super::exact_small_decimal_to_long_double(false, b"1", 0),
+            Some(super::IntegerLongDouble {
                 negative: false,
                 mantissa: 0x8000_0000_0000_0000,
                 exponent: 0
@@ -68591,15 +68591,15 @@ mod tests {
         // Sign is carried through, and zero normalises to a non-negative zero exactly
         // as bignat_to_long_double does for an all-zero magnitude.
         assert_eq!(
-            exact_small_decimal_to_long_double(true, b"0", 0),
-            Some(IntegerLongDouble {
+            super::exact_small_decimal_to_long_double(true, b"0", 0),
+            Some(super::IntegerLongDouble {
                 negative: false,
                 mantissa: 0,
                 exponent: 0
             })
         );
         assert_eq!(
-            exact_small_decimal_to_long_double(true, b"1", 0).map(|v| v.negative),
+            super::exact_small_decimal_to_long_double(true, b"1", 0).map(|v| v.negative),
             Some(true)
         );
     }
@@ -68613,21 +68613,39 @@ mod tests {
     fn exact_small_decimal_fastpath_declines_what_it_cannot_represent() {
         // 1/3: 5^16 does not divide 3333333333333333, so it is NOT exact in binary.
         assert_eq!(
-            exact_small_decimal_to_long_double(false, b"3333333333333333", -16),
+            super::exact_small_decimal_to_long_double(false, b"3333333333333333", -16),
             None,
             "a significand the power of five does not divide must fall to the bignum"
         );
+        // NON-DYADIC DECIMALS THAT LOOK ORDINARY. These are the cases that make the
+        // fast window narrower than "short decimals" suggests: each has a factor of 5
+        // left in its denominator after the 2s are absorbed into the exponent, so none
+        // has an exact binary value and all must decline. Listed explicitly because the
+        // firing test above originally (and wrongly) asserted 3.14 would fire.
+        for (digits, exp10, human) in [
+            (&b"314"[..], -2, "3.14 = 157/50"),
+            (&b"1"[..], -1, "0.1 = 1/10"),
+            (&b"1"[..], -2, "0.01 = 1/100"),
+            (&b"11"[..], -1, "1.1 = 11/10"),
+        ] {
+            assert_eq!(
+                super::exact_small_decimal_to_long_double(false, digits, exp10),
+                None,
+                "{human} is not a dyadic rational and has no exact binary value, so the \
+                 fast path must decline it rather than answer approximately"
+            );
+        }
         // Beyond the 5^27 window in both directions.
-        assert_eq!(exact_small_decimal_to_long_double(false, b"1", 28), None);
-        assert_eq!(exact_small_decimal_to_long_double(false, b"1", -28), None);
+        assert_eq!(super::exact_small_decimal_to_long_double(false, b"1", 28), None);
+        assert_eq!(super::exact_small_decimal_to_long_double(false, b"1", -28), None);
         // 20 digits cannot be parsed into u64 without risking overflow.
         assert_eq!(
-            exact_small_decimal_to_long_double(false, b"12345678901234567890", 0),
+            super::exact_small_decimal_to_long_double(false, b"12345678901234567890", 0),
             None
         );
         // Non-digits and empties are refused rather than silently coerced.
-        assert_eq!(exact_small_decimal_to_long_double(false, b"", 0), None);
-        assert_eq!(exact_small_decimal_to_long_double(false, b"1a", 0), None);
+        assert_eq!(super::exact_small_decimal_to_long_double(false, b"", 0), None);
+        assert_eq!(super::exact_small_decimal_to_long_double(false, b"1a", 0), None);
     }
 
     /// (frankenredis-iqicb) The lever must actually FIRE on the operands it exists for.
@@ -68638,16 +68656,27 @@ mod tests {
     /// difference. This is the only functional assertion that can.
     #[test]
     fn exact_small_decimal_fastpath_fires_on_typical_incrbyfloat_operands() {
+        // THE WINDOW IS DYADIC RATIONALS, WHICH IS NARROWER THAN "SHORT DECIMALS" AND
+        // WAS NOT OBVIOUS UNTIL THIS TEST FAILED. A negative decimal exponent is exact
+        // only when 5^|exp| divides the significand — i.e. only when the value is a
+        // dyadic rational (halves, quarters, eighths ...). An earlier version of this
+        // list asserted 3.14 must fire; it must NOT. 3.14 is 314 * 10^-2 and
+        // 314 % 25 == 14, because 3.14 = 157/50 has a factor of 25 in its denominator
+        // and therefore no exact binary representation at all. The fast path declining
+        // it is correct; the assertion was wrong.
+        //
+        // CONSEQUENCE FOR THE LEVER, recorded here because it is easy to over-claim
+        // from: common money-shaped operands do NOT qualify — 0.1, 0.01, 3.14, 1.1 all
+        // decline and take the bignum path. See the declines test below.
         for (digits, exp10) in [
-            (&b"15"[..], -1),  // 1.5
-            (&b"25"[..], -2),  // 0.25
-            (&b"125"[..], -3), // 0.125
-            (&b"314"[..], -2), // 3.14
+            (&b"15"[..], -1),  // 1.5   = 3/2
+            (&b"25"[..], -2),  // 0.25  = 1/4
+            (&b"125"[..], -3), // 0.125 = 1/8
             (&b"1"[..], 0),    // 1
-            (&b"1"[..], 10),   // 1e10
+            (&b"1"[..], 10),   // 1e10  -- non-negative exponent, always exact if it fits
         ] {
             assert!(
-                exact_small_decimal_to_long_double(false, digits, exp10).is_some(),
+                super::exact_small_decimal_to_long_double(false, digits, exp10).is_some(),
                 "fast path declined {:?}e{exp10}, which is inside its exact window; a \
                  lever that declines its own motivating case is a no-op that still \
                  passes every correctness test",
