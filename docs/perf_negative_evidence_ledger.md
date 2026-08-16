@@ -25768,3 +25768,92 @@ per arm across the draws: 16.10, 16.57, 16.57, 21.97, 27.10, 31.49, 35.46, 33.74
 Mean CPU MHz SAMPLED BY ME per arm over 64 cores: 2174-3984, an 83 pct spread. The
 cardinality table above was taken in a quieter window, 11.09/17.27/19.98 to
 22.76/18.89/20.20, MHz 2324-3984. Instruction counts only; no timing claim is made.
+
+--------------------------------------------------------------------------------
+MEASURED (frankenredis-gein3) — the SINTER probe chain was not being inlined: ~5 instr/op
+per PROBE recovered, confirmed by DOSE-RESPONSE across three shapes against a flat null
+
+Claim class: COMPETITIVE
+
+`GenericSet::contains` is called once per member of the base set by `sinter_borrow_scan`,
+and a callgrind profile of a 512-member intersection showed it as its OWN frame at 96.3M
+instructions — a real call per probe rather than the enum match folding into the caller's
+loop. Nothing forbade inlining it; it simply was never hinted. Four `#[inline]`s on the
+thin wrappers of the probe chain: `GenericSet::contains`, `HashSet::contains`,
+`CompactFieldMap::contains_key`, `CompactFieldMap::lookup`. The worker,
+`lookup_slot_prehashed`, is deliberately NOT hinted — it is the real body and inlining it
+at every call site trades size for nothing.
+
+    shape         probes/op   BEFORE (4 draws)              AFTER (4 draws)         delta
+    sinter_9         24       11989.3 12012.6 11966.6       11863.7 11870.0
+                              11966.4   mean 11983.7        11861.8 11862.3
+                              spread 0.39 pct               mean 11864.5, 0.07 pct  -0.99 pct
+    sinter_2          2       4306.1 4319.2 4297.5 4305.9   4706.8* 4286.9 4290.7
+                              min 4297.5                    4290.3  min 4286.9      -0.25 pct
+    get_control       0       1326.4 1330.2 1329.4 1328.7   1330.3 1325.6 1327.7
+                              mean 1328.7                   1328.0  mean 1327.9     -0.06 pct
+                                                                                    NULL, FLAT
+    * one 9.7 pct outlier in the sinter_2 AFTER arm; min-of-K is quoted for that shape,
+      which is the estimator this ledger already established for an additive contaminant.
+
+THE EVIDENCE IS THE DOSE-RESPONSE, NOT THE SIZE. A 0.99 pct effect on one shape would be
+weak on its own — it is only 2.5x that arm's spread. But the saving tracks PROBE COUNT
+across three shapes, and the per-probe figure agrees to 6 pct between two of them derived
+independently:
+
+    sinter_9    119.2 instr/op over 24 probes  =  ~5.0 per probe
+    sinter_2     10.6 instr/op over  2 probes  =  ~5.3 per probe
+    get_control   0.8 instr/op over  0 probes  =  n/a, and it is FLAT
+
+A code-layout artefact would not scale with probe count, and would not leave the
+zero-probe shape unmoved. That is what makes this a measurement rather than a coincidence.
+
+WHAT IT DOES NOT DO, STATED PLAINLY: it does not meaningfully move my worst ratio.
+sinter_big runs 512 probes, so ~2,560 instr/op, against a command that costs ~645,000 —
+about 0.4 pct, and unmeasurable there anyway at that shape's 32 pct variance. SINTER's
+large-k deficit is reply-delivery-bound, not probe-bound, and this lever does not touch
+that. It is worth landing on its own terms — every set-membership caller pays it, it is
+free of risk, and it is precisely characterised — not as a fix for 1.3811x.
+
+CORRECTNESS. An `#[inline]` is a hint with no semantics, so it CANNOT be mutation-tested;
+pretending otherwise would be theatre. What is pinned instead is the probe path itself,
+which had no direct differential test: `contains` is now asserted against a LINEAR SCAN
+oracle written in the test, across both encodings and at the packed->hash promotion
+boundary (n = 0, 1, 7, 128, 129, 300), over present members, absent probes chosen to
+collide on length and prefix, and an exhaustive self-probe; plus a second test covering
+tombstones, which is the case `lookup_slot_prehashed`'s `s != CFM_TOMB` branch exists for.
+
+    MUTATION-TESTED HONESTLY, INCLUDING A MUTATION THAT SHOULD **NOT** FAIL. Deleting the
+    one-byte tag pre-check left the tests GREEN — correctly, because that check is a
+    performance filter and the memcmp behind it still validates, so removing it is
+    semantically neutral. Weakening the verify to compare LENGTH ONLY reddens on the
+    tombstone test. A guard suite that reddens on everything is not discriminating; this
+    one distinguishes a semantic change from a performance one.
+
+920 fr-store tests pass.
+
+PROVENANCE:
+  AFTER ELF            e5dbd27698f54ead...
+  BEFORE ELF           81871e2025d9370c...  same tree, same peer state, built minutes
+                       apart, differing ONLY by this change (stash / build / restore).
+                       Neither is reproducible from HEAD: both also carry my pubsub-drain
+                       guard, which is measured and committed to the ledger but BLOCKED
+                       from landing by IndigoOriole's reservation on fr-runtime. That
+                       change is present in BOTH arms, so it cancels.
+  harness              scripts/shape_instr_per_op.py at HEAD, N=2000/2N=4000, four draws
+                       per arm per shape. RESERVED by BlackThrush, so unmodified here —
+                       these are existing shapes only.
+  host                 thinkstation1, 64 cores, /data 233G, governor powersave, two builds.
+  PER-ARM loadavg/MHz  sinter_9 41.84/2857 then 46.63/2480 · sinter_2 53.93/2762 then
+                       49.16/2281 · get_control 41.98/2743 then 37.43/2794. Loads are high
+                       for this session; small-reply shapes are load-immune on this
+                       instrument and the flat null confirms it held.
+  reservations         I hold crates/fr-store/src/packed_set.rs. fr-runtime (IndigoOriole),
+                       fr-server/main.rs and the harness (BlackThrush) were all held by
+                       peers this turn, which is why the lever is in fr-store.
+
+RETRY PREDICATE: do NOT extend this by hinting `lookup_slot_prehashed` — it is the body,
+not a wrapper, and the win here came from removing call layers, not from duplicating work.
+DO re-measure per-probe cost if the probe chain is ever restructured; ~5 instr/op per probe
+is now a known constant to compare against, and sinter_9 at 24 probes is the shape with the
+best signal-to-noise for it.

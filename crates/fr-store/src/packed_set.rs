@@ -338,7 +338,14 @@ impl GenericSet {
         self.len() == 0
     }
 
+    // (frankenredis-gein3) SINTER probes this once PER MEMBER of the base set, and a
+    // callgrind profile of a 512-member intersection showed it as its OWN frame at 96.3M
+    // instructions -- i.e. the enum match was costing a real call per probe rather than
+    // folding into the caller's loop. Nothing here forbade inlining; it simply was not
+    // hinted. `#[inline]` is a hint with no semantics, so the guard against it is the
+    // differential test below plus the suite, not a mutation.
     #[must_use]
+    #[inline]
     pub fn contains(&self, member: &[u8]) -> bool {
         match self {
             GenericSet::Packed(p) => p.contains(member),
@@ -1119,6 +1126,7 @@ impl CompactFieldMap {
     }
 
     /// Returns the `order` position of `field`, or `None`.
+    #[inline]
     fn lookup(&self, field: &[u8]) -> Option<usize> {
         self.lookup_slot(field).map(|(pos, _)| pos)
     }
@@ -1383,6 +1391,7 @@ impl CompactFieldMap {
     }
 
     #[must_use]
+    #[inline]
     pub(crate) fn contains_key(&self, field: &[u8]) -> bool {
         self.lookup(field).is_some()
     }
@@ -1599,6 +1608,7 @@ impl CompactStrSet {
     }
 
     #[must_use]
+    #[inline]
     pub(crate) fn contains(&self, member: &[u8]) -> bool {
         self.inner.contains_key(member)
     }
@@ -7824,5 +7834,96 @@ mod tests {
                 "lp_bytes @ total={total} popn={popn}"
             );
         }
+    }
+
+    /// (frankenredis-gein3) The SINTER probe path — `GenericSet::contains` down through
+    /// `CompactFieldMap::lookup_slot_prehashed` — is the per-member cost of an
+    /// intersection, and it now carries `#[inline]` hints. A hint has no semantics, so it
+    /// cannot be mutation-tested; what CAN be pinned is that the probe itself answers
+    /// exactly as a linear scan does, across BOTH encodings and at the boundary where the
+    /// set flips from one to the other.
+    ///
+    /// The oracle is a linear scan written here, not anything derived from the structure
+    /// under test, so a bug in the hash, the tag pre-check, the varint decode or the
+    /// probe's wraparound all surface as a disagreement.
+    #[test]
+    fn generic_set_contains_agrees_with_a_linear_scan_across_both_encodings() {
+        use super::GenericSet;
+
+        // Spans the packed->hash promotion boundary so both arms of the enum are covered,
+        // including the size where the set has just converted.
+        for n in [0usize, 1, 7, 128, 129, 300] {
+            let mut set = GenericSet::default();
+            let members: Vec<Vec<u8>> = (0..n)
+                .map(|i| format!("m{i:04}").into_bytes())
+                .collect();
+            for m in &members {
+                set.insert(m.clone());
+            }
+
+            // Every member present must be found.
+            for m in &members {
+                assert!(
+                    set.contains(m),
+                    "n={n}: inserted member {:?} not found",
+                    String::from_utf8_lossy(m)
+                );
+            }
+
+            // Absent probes, including ones chosen to collide on length and prefix with
+            // real members, must be rejected.
+            for probe in [
+                b"".to_vec(),
+                b"m".to_vec(),
+                b"m0000x".to_vec(),
+                format!("m{:04}", n + 1).into_bytes(),
+                format!("m{n:04}").into_bytes(),
+                b"\xff\xfe".to_vec(),
+                vec![0u8; 3],
+            ] {
+                let want = members.iter().any(|m| m.as_slice() == probe.as_slice());
+                assert_eq!(
+                    set.contains(&probe),
+                    want,
+                    "n={n}: disagreed with linear scan on {:?}",
+                    String::from_utf8_lossy(&probe)
+                );
+            }
+
+            // And the exhaustive cross-check: every member against every probe position,
+            // which is what a real intersection does.
+            for m in &members {
+                let want = members.iter().any(|x| x == m);
+                assert_eq!(set.contains(m), want, "n={n}: self-probe disagreed");
+            }
+        }
+    }
+
+    /// Removal must leave the probe path correct: a tombstoned slot has to keep later
+    /// entries reachable, which is exactly the case `lookup_slot_prehashed`'s
+    /// `s != CFM_TOMB` branch exists for and the one an inlining change would expose if
+    /// it disturbed control flow.
+    #[test]
+    fn generic_set_contains_is_correct_across_tombstones() {
+        use super::GenericSet;
+        let mut set = GenericSet::default();
+        let members: Vec<Vec<u8>> = (0..200).map(|i| format!("k{i:04}").into_bytes()).collect();
+        for m in &members {
+            set.insert(m.clone());
+        }
+        // Remove every third member, then assert the survivors are all still reachable
+        // and the removed ones are all gone.
+        let mut removed = Vec::new();
+        for (i, m) in members.iter().enumerate() {
+            if i % 3 == 0 {
+                assert!(set.swap_remove(m), "remove reported absent for {i}");
+                removed.push(m.clone());
+            }
+        }
+        for (i, m) in members.iter().enumerate() {
+            let want = i % 3 != 0;
+            assert_eq!(set.contains(m), want, "after tombstoning, member {i} wrong");
+        }
+        assert_eq!(removed.len(), 67);
     }
 }
