@@ -14539,6 +14539,17 @@ enum BorrowedMultibulkAction {
 enum BorrowedDispatchFloorClass {
     /// (frankenredis-p98mw) `TOUCH key` at arity 2 only.
     Touch,
+    /// (frankenredis-z2ce3) `SET key value <option...>`, split by ARITY because that is
+    /// the axis the packet header already carries. One class per arity, each arm chaining
+    /// only the parsers that arity can possibly match.
+    ///
+    /// Base `SET key value` (arity 3) is deliberately NOT classified: its cascade arm
+    /// needs `plain_write_gate_cache`, which the floor dispatcher has no access to, and it
+    /// already sits at cascade position 2 costing ~377 instr/op against a classified
+    /// route's ~276. The option forms sat at positions 7-13 costing 858.
+    SetOpt4,
+    SetOpt5,
+    SetOpt6,
     /// (frankenredis-p98mw) ONE-PAIR MSETNX only. MSETNX is variadic upstream
     /// (`MSETNX k v [k v ...]`) and only the arity-3 form has a borrowed parser, so
     /// the name says so: widening this without adding a parser first would claim
@@ -14958,6 +14969,7 @@ impl PlainZsetStoreCmd {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BorrowedDispatchFloorCommand {
     Touch,
+    Set,
     Msetnx,
     Append,
     Bitcount,
@@ -15136,6 +15148,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
         3 => match uppercase_ascii_token::<3>(token)? {
             [b'T', b'T', b'L'] => Some(BorrowedDispatchFloorCommand::Ttl),
             [b'D', b'E', b'L'] => Some(BorrowedDispatchFloorCommand::Del),
+            [b'S', b'E', b'T'] => Some(BorrowedDispatchFloorCommand::Set),
             _ => None,
         },
         4 => match uppercase_ascii_token::<4>(token)? {
@@ -16388,6 +16401,14 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (2, BorrowedDispatchFloorCommand::Scard) => Some(BorrowedDispatchFloorClass::Scard),
         (2, BorrowedDispatchFloorCommand::Hlen) => Some(BorrowedDispatchFloorClass::Hlen),
         (2, BorrowedDispatchFloorCommand::Zcard) => Some(BorrowedDispatchFloorClass::Zcard),
+        // (frankenredis-z2ce3) SET is served ONLY by the SET arms — no other cascade arm
+        // parses a SET packet — so a form these classes claim and the arm then declines
+        // falls to GENERIC, which is exactly where it would have arrived after walking the
+        // whole cascade. The class therefore cannot strand a shape another arm would have
+        // served, which is the condition the floor-class rule actually requires.
+        (4, BorrowedDispatchFloorCommand::Set) => Some(BorrowedDispatchFloorClass::SetOpt4),
+        (5, BorrowedDispatchFloorCommand::Set) => Some(BorrowedDispatchFloorClass::SetOpt5),
+        (6, BorrowedDispatchFloorCommand::Set) => Some(BorrowedDispatchFloorClass::SetOpt6),
         (2, BorrowedDispatchFloorCommand::Ttl) => Some(BorrowedDispatchFloorClass::Ttl),
         (2, BorrowedDispatchFloorCommand::Getex) => Some(BorrowedDispatchFloorClass::Getex),
         (3, BorrowedDispatchFloorCommand::Getex) => Some(BorrowedDispatchFloorClass::GetexPersist),
@@ -17659,6 +17680,216 @@ fn try_dispatch_floor_classified_action(
             };
             if let Some((consumed, response)) = routed {
                 Ok(BorrowedMultibulkAction::FastReply { consumed, response })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        // (frankenredis-z2ce3) SET's option forms were the highest-dispatch non-SORT
+        // shapes in the 102-shape screen: set_xx_opt paid 858.4 instr/op against a
+        // front-classified route's 276.2, because SET has no floor class and its seven
+        // option arms sit at cascade positions 7-13. 68vf8's one-byte arity guard already
+        // removed the failed PARSER CALLS from that walk; this removes the WALK itself.
+        //
+        // Same parsers and executors the cascade arms use, so reply bytes and side effects
+        // are unchanged and a declining executor still reaches the generic path.
+        //
+        // Branch order inside each arm is by expected frequency, because in a chained arm
+        // every later branch pays each earlier failed parse (measured at 40-50 instr/op
+        // per non-inlined parser call): NX before XX, and EX before GET before EXAT.
+        BorrowedDispatchFloorClass::SetOpt4 => {
+            if let Some(packet) = parse_borrowed_plain_set_nx_packet(unparsed, &parser_config) {
+                match runtime.execute_plain_set_nx_borrowed(packet.key, packet.value, ts) {
+                    Some(None) => Ok(BorrowedMultibulkAction::FastOkReply {
+                        consumed: packet.consumed,
+                    }),
+                    Some(Some(response)) => Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: packet.consumed,
+                        response,
+                    }),
+                    None => parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                ),
+                }
+            } else if let Some(packet) =
+                parse_borrowed_plain_set_xx_packet(unparsed, &parser_config)
+            {
+                match runtime.execute_plain_set_xx_borrowed(packet.key, packet.value, ts) {
+                    Some(None) => Ok(BorrowedMultibulkAction::FastOkReply {
+                        consumed: packet.consumed,
+                    }),
+                    Some(Some(response)) => Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: packet.consumed,
+                        response,
+                    }),
+                    None => parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                ),
+                }
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::SetOpt5 => {
+            if let Some((is_seconds, packet)) =
+                parse_borrowed_plain_set_relexpire_packet(unparsed, &parser_config)
+            {
+                if runtime
+                    .execute_plain_set_relexpire_borrowed_ok(
+                        is_seconds,
+                        packet.key,
+                        packet.start,
+                        packet.end,
+                        ts,
+                    )
+                    .is_some()
+                {
+                    Ok(BorrowedMultibulkAction::FastOkReply {
+                        consumed: packet.consumed,
+                    })
+                } else {
+                    parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+                }
+            } else if let Some(packet) =
+                parse_borrowed_plain_set_opt_get_packet(unparsed, &parser_config)
+            {
+                if let Some(response) = runtime.execute_plain_set_opt_get_borrowed(
+                    packet.key,
+                    packet.start,
+                    packet.end,
+                    ts,
+                ) {
+                    Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: packet.consumed,
+                        response,
+                    })
+                } else {
+                    parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+                }
+            } else if let Some((is_seconds, packet)) =
+                parse_borrowed_plain_set_absexpire_packet(unparsed, &parser_config)
+            {
+                if runtime
+                    .execute_plain_set_absexpire_borrowed_ok(
+                        is_seconds,
+                        packet.key,
+                        packet.start,
+                        packet.end,
+                        ts,
+                    )
+                    .is_some()
+                {
+                    Ok(BorrowedMultibulkAction::FastOkReply {
+                        consumed: packet.consumed,
+                    })
+                } else {
+                    parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+                }
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::SetOpt6 => {
+            if let Some((is_xx, is_seconds, packet)) =
+                parse_borrowed_plain_set_cond_relexpire_packet(unparsed, &parser_config)
+            {
+                if let Some(response) = runtime.execute_plain_set_cond_relexpire_borrowed(
+                    is_xx,
+                    is_seconds,
+                    packet.key,
+                    packet.start,
+                    packet.end,
+                    ts,
+                ) {
+                    Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: packet.consumed,
+                        response,
+                    })
+                } else {
+                    parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+                }
+            } else if let Some((is_seconds, packet)) =
+                parse_borrowed_plain_set_relexpire_get_packet(unparsed, &parser_config)
+            {
+                if let Some(response) = runtime.execute_plain_set_relexpire_get_borrowed(
+                    is_seconds,
+                    packet.key,
+                    packet.start,
+                    packet.end,
+                    ts,
+                ) {
+                    Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: packet.consumed,
+                        response,
+                    })
+                } else {
+                    parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+                }
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,
@@ -28130,8 +28361,8 @@ fn borrowed_arity_is(input: &[u8], arity: u8) -> bool {
 }
 
 /// Range form of [`borrowed_arity_is`], for an arm that serves more than one arity.
-/// `PING` is the case that needs it: it accepts `*1` bare and `*2` carrying a message, so
-/// a single-digit guard would strand the message form on the generic path.
+/// `PING` is the case that needs it: it accepts `*1` bare and `*2` with a message, so a
+/// single-digit guard would strand the message form on the generic path.
 #[inline(always)]
 fn borrowed_arity_in(input: &[u8], lo: u8, hi: u8) -> bool {
     matches!(input.get(1), Some(&d) if d >= lo && d <= hi)
@@ -50467,5 +50698,99 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         assert!(
             super::parse_borrowed_plain_set_packet(&packet(&["GETEX", "k", "v"]), &cfg).is_none()
         );
+    }
+
+    /// (frankenredis-z2ce3) The SET option floor classes are keyed on ARITY, so each class
+    /// is a promise that its arm chains every parser that arity can match. Assert BOTH
+    /// halves — the classification AND the arm's coverage — because either alone passes
+    /// while the change is wrong: a class with no matching parser sends the shape to
+    /// GENERIC, and a parser with no class leaves it walking the cascade.
+    ///
+    /// Arity 3 is deliberately absent: base SET's cascade arm needs `plain_write_gate_cache`,
+    /// which the floor dispatcher cannot reach.
+    #[test]
+    fn set_option_floor_classes_claim_exactly_the_arities_their_arms_serve() {
+        let cfg = ParserConfig::default();
+        fn packet(args: &[&str]) -> Vec<u8> {
+            let mut p = format!("*{}\r\n", args.len()).into_bytes();
+            for a in args {
+                p.extend_from_slice(format!("${}\r\n{}\r\n", a.len(), a).as_bytes());
+            }
+            p
+        }
+        use super::BorrowedDispatchFloorClass as C;
+
+        // Every SET form that a borrowed parser serves, with the class that must claim it
+        // and the parser the arm must reach for it.
+        let served: &[(&[&str], C)] = &[
+            (&["SET", "k", "v", "NX"], C::SetOpt4),
+            (&["SET", "k", "v", "XX"], C::SetOpt4),
+            (&["SET", "k", "v", "EX", "10"], C::SetOpt5),
+            (&["SET", "k", "v", "PX", "10000"], C::SetOpt5),
+            (&["SET", "k", "v", "EXAT", "99999999999"], C::SetOpt5),
+            (&["SET", "k", "v", "PXAT", "99999999999"], C::SetOpt5),
+            (&["SET", "k", "v", "NX", "GET"], C::SetOpt5),
+            (&["SET", "k", "v", "XX", "GET"], C::SetOpt5),
+            (&["SET", "k", "v", "KEEPTTL", "GET"], C::SetOpt5),
+            (&["SET", "k", "v", "NX", "EX", "10"], C::SetOpt6),
+            (&["SET", "k", "v", "XX", "PX", "10000"], C::SetOpt6),
+            (&["SET", "k", "v", "EX", "10", "GET"], C::SetOpt6),
+        ];
+        for (form, want) in served {
+            let pkt = packet(form);
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
+                Some(*want),
+                "{form:?} classified wrongly"
+            );
+            // The promise: SOME parser the arm for that class chains must accept it.
+            let reached = match want {
+                C::SetOpt4 => {
+                    super::parse_borrowed_plain_set_nx_packet(&pkt, &cfg).is_some()
+                        || super::parse_borrowed_plain_set_xx_packet(&pkt, &cfg).is_some()
+                }
+                C::SetOpt5 => {
+                    super::parse_borrowed_plain_set_relexpire_packet(&pkt, &cfg).is_some()
+                        || super::parse_borrowed_plain_set_opt_get_packet(&pkt, &cfg).is_some()
+                        || super::parse_borrowed_plain_set_absexpire_packet(&pkt, &cfg).is_some()
+                }
+                C::SetOpt6 => {
+                    super::parse_borrowed_plain_set_cond_relexpire_packet(&pkt, &cfg).is_some()
+                        || super::parse_borrowed_plain_set_relexpire_get_packet(&pkt, &cfg)
+                            .is_some()
+                }
+                other => panic!("unexpected class {other:?}"),
+            };
+            assert!(reached, "{form:?} is claimed but NO chained parser accepts it");
+        }
+
+        // Base SET stays out of the floor table.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(&packet(&["SET", "k", "v"]), &cfg),
+            None,
+            "arity-3 SET must not be floor-classified"
+        );
+
+        // KNOWN AND DELIBERATE: these arity-4 forms are claimed by SetOpt4 and no chained
+        // parser accepts them, so the arm declines to GENERIC. That is safe only because
+        // no OTHER cascade arm parses a SET packet either — they reached generic before
+        // this change too, just after walking the whole cascade first. Pinned so that if
+        // a parser is ever added for them, this test fails and forces it into the arm.
+        for form in [
+            vec!["SET", "k", "v", "GET"],
+            vec!["SET", "k", "v", "KEEPTTL"],
+        ] {
+            let pkt = packet(&form);
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
+                Some(C::SetOpt4),
+                "{form:?} should still be claimed by arity"
+            );
+            assert!(
+                super::parse_borrowed_plain_set_nx_packet(&pkt, &cfg).is_none()
+                    && super::parse_borrowed_plain_set_xx_packet(&pkt, &cfg).is_none(),
+                "{form:?} gained a parser — add it to the SetOpt4 arm"
+            );
+        }
     }
 }

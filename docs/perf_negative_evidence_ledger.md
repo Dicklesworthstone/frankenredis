@@ -24921,3 +24921,90 @@ it was written. This is the measurement half. The lesson I am taking is the one 
 earlier row already stated and I failed to apply: COMMIT AS SOON AS IT COMPILES AND TESTS,
 THEN MEASURE — anything sitting in the working tree during a twenty-minute measurement
 belongs to whoever commits next.
+
+--------------------------------------------------------------------------------
+MEASURED (frankenredis-z2ce3) — SET option forms front-classified: dispatch -8.9% and
+-12.4%, and the PREDICTION MISSED 6x because a peer's one-byte arity guard had already
+taken most of it
+
+Claim class: COMPETITIVE
+
+SET had no floor class at all and its seven option arms sat at cascade positions 7-13.
+Added `Set` to the floor token table and three arity-keyed classes — SetOpt4 (NX, XX),
+SetOpt5 (EX|PX, <NX|XX|KEEPTTL> GET, EXAT|PXAT), SetOpt6 (<NX|XX> EX|PX, EX|PX GET) — each
+arm chaining exactly the parsers its arity can match, in frequency order.
+
+Arity 3 is deliberately NOT classified: base SET's cascade arm needs
+`plain_write_gate_cache`, which the floor dispatcher cannot reach, and it already sits at
+position 2. Claiming is safe under the floor-class rule because NOTHING ELSE in the cascade
+parses a SET packet: a form these classes claim and the arm declines reaches GENERIC, which
+is exactly where it arrived before after walking the whole cascade.
+
+    shape         OLD dispatch      NEW dispatch      delta          total
+    get_control   265.6 / 266.9     266.8 / 266.6     +0.15 pct      control, FLAT
+    set_base      320.8 / 319.9     320.8 / 321.7     +0.28 pct      unchanged BY DESIGN
+    set_xx_opt    791.5 / 793.8     723.1 / 721.1     -70.6  (-8.9)  3033.8 -> 2968.0, -2.2 pct
+    set_ex_opt    608.9 / 609.2     537.0 / 529.7     -75.7 (-12.4)  3511.6 -> 3432.6, -2.2 pct
+
+THE FIRST MEASUREMENT WAS CONFOUNDED AND I ALMOST BANKED IT. The before-arm was an ELF
+built earlier in the session; against it, set_xx_opt showed -135.1 and set_ex_opt -141.7 —
+twice the truth — AND set_base showed -52.4 on a route I had deliberately left alone. That
+last number is what gave it away: a shape that CANNOT have moved had moved, so something
+other than my change differed between the ELFs. get_control confirmed it at -3.8 pct.
+Peer edits to fr-runtime and fr-store had landed between the two builds.
+
+    THE FIX WAS TO REBUILD THE BEFORE ARM, not to argue about the size of the confound:
+    stash my main.rs change, build from the SAME peer state, restore. The control then went
+    flat (+0.15 pct) and set_base went flat (+0.28 pct), and the real effect is HALF what
+    the confounded pair claimed. **A control shape that moves is not a correction factor to
+    subtract — it is a signal to rebuild.**
+
+PREDICTION MISSED, AND THE MISS IS THE USEFUL PART. I predicted 858 -> ~400, a saving of
+~450 instr/op, from this ledger's own law that a cascade position costs ~45 instr/op and
+set_xx sits ~12 positions deep. Actual saving: 70.6.
+
+The law was measured on UNGUARDED arms, where each position costs a real non-inlined parser
+CALL. Between my screen and this lever, 68vf8 landed `borrowed_set_arity_is` — a one-byte
+arity check in front of each SET option arm — so those twelve positions are now twelve byte
+comparisons, not twelve calls. 12 x ~6 = ~72, which is what I measured.
+
+    REFINED LAW: a cascade position costs ~45 instr/op when it is an unguarded parser call
+    and ~6 when a one-byte guard rejects it first. **A cheap inline guard captures ~87 pct
+    of what front-classification would recover, at a fraction of the complexity.** Anyone
+    costing a front-classification lever must check whether the arms are already guarded —
+    if they are, the remaining prize is small.
+
+Landed anyway: -2.2 pct on both option shapes is real, reproduced to 0.3 pct within each
+arm, and sits 15x above the instrument's ~0.6 pct floor and 15x above a flat control. SET
+EX is a common production form. The 327 added lines duplicate the cascade arms, which is
+this file's established pattern — every floor arm says "same parsers and executor the deep
+cascade arm used; only the position changes".
+
+CORRECTNESS: unit test asserts BOTH halves of the promise — the arity->class map AND that
+some chained parser accepts every claimed form — over all twelve served forms, plus that
+arity 3 stays unclassified, plus a pin on the two arity-4 forms (GET, KEEPTTL) that no
+parser serves so the arm declines to generic. MUTATION-TESTED: remapping arity 5 to SetOpt4
+reddens it on `SET k v EX 10`. 349 fr-server tests pass. The unit test cannot prove the ARM
+chains those parsers (that needs a Runtime); the 19 SET option rows in
+dispatch_route_differ.py cover the routing end to end.
+
+PROVENANCE:
+  NEW ELF sha256       8515645e527f00b89c8aa915b53df4a004a6ba6100f5de199d18fab26ed1fe23
+  OLD ELF sha256       a25ace5fb46ddbb69525dca4de25163af858ba4667e0db0d98fe3abd29a128cb
+                       SAME peer state, built minutes apart, differing ONLY by this
+                       change (stash / build / restore). Neither is reproducible from HEAD
+                       alone: peers held fr-runtime, fr-store and dispatch_route_differ.py
+                       dirty throughout.
+  harness              scripts/shape_instr_per_op.py, N=2000/2N=4000, ABBA per shape.
+  estimator            fr-side dispatch instr/op, which is the numerator and immune. No
+                       fr/redis ratio is quoted: the denominator carries the elapsed-time
+                       cron contaminant measured at r=+0.98 two rows ago.
+  host                 thinkstation1, 64 cores, /data 270G, governor powersave, two builds.
+  loadavg              11.95 - 14.95 across the ABBA.
+  MHz PER ARM          2233-3963 (64-core mean, recorded per run); cross-core spread 2.98x.
+                       Ir is simulated, so neither reaches these counts.
+
+RETRY PREDICATE: do NOT chase the remaining ~450 instr/op of SET option dispatch by
+reordering or re-classifying — it is not there; 68vf8 already took it and this row is the
+remainder. DO apply the refined law before costing any front-classification lever: check
+whether the target's cascade arms already carry a cheap guard.
