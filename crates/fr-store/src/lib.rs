@@ -33761,6 +33761,37 @@ impl Store {
             ));
         }
 
+        // (frankenredis-niu8g) A function name is global across libraries.
+        // Upstream functions.c::functionLibCreateFunction looks the name up in
+        // the server-wide functions dict and fails the whole load with
+        // 'ERR Function <name> already exists'; fr had no such check, so a
+        // second library could re-register an existing name and SILENTLY SHADOW
+        // it — measured against live 7.2.4, fr accepted the second load and
+        // `FCALL myfunc` then ran the NEW library's body (returning 2) while
+        // redis rejected the load and kept running the original (returning 1).
+        // An operator loading an unrelated library could therefore repoint an
+        // existing function without any error.
+        //
+        // Checked BEFORE anything is inserted, so a rejected load leaves no
+        // partial state. A library being REPLACED does not collide with itself,
+        // which is what makes `FUNCTION LOAD REPLACE` of an existing library
+        // still work.
+        for entry in &functions {
+            let taken = self.function_libraries.iter().any(|(other_name, other)| {
+                other_name != &lib_name
+                    && other
+                        .functions
+                        .iter()
+                        .any(|existing| existing.name == entry.name)
+            });
+            if taken {
+                return Err(StoreError::GenericError(format!(
+                    "ERR Function {} already exists",
+                    entry.name
+                )));
+            }
+        }
+
         let library = FunctionLibrary {
             name: lib_name.clone(),
             engine,
@@ -74543,6 +74574,72 @@ mod tests {
             decode_rdb_string(body, 1, body.len()).expect("decode function library code");
         assert_eq!(1 + consumed, body.len());
         assert_eq!(code, library);
+    }
+
+    #[test]
+    fn function_load_rejects_a_function_name_another_library_already_registered() {
+        // (frankenredis-niu8g) Pinned against live vendored Redis 7.2.4, which
+        // answers `-ERR Function myfunc already exists` to the second load. fr
+        // accepted it and `FCALL myfunc` then ran the SECOND library's body,
+        // silently shadowing the first — so the negative case here is not just
+        // the error string but that the ORIGINAL library survives intact.
+        let mut store = Store::new();
+        let first = concat!(
+            "#!lua name=mylib\n",
+            "redis.register_function('myfunc', function(keys,args) return 1 end)"
+        );
+        let second = concat!(
+            "#!lua name=other\n",
+            "redis.register_function('myfunc', function(keys,args) return 2 end)"
+        );
+        assert_eq!(
+            store.function_load(first.as_bytes(), false).unwrap(),
+            "mylib"
+        );
+
+        let err = store
+            .function_load(second.as_bytes(), false)
+            .expect_err("a name another library owns must be refused");
+        match err {
+            StoreError::GenericError(msg) => {
+                assert_eq!(msg, "ERR Function myfunc already exists");
+            }
+            other => panic!("expected the upstream wording, got {other:?}"),
+        }
+
+        // The rejected load must leave NO trace: the original library is still
+        // the only one, and it still owns the name.
+        assert_eq!(
+            store.function_libraries.len(),
+            1,
+            "rejected load must not register"
+        );
+        assert!(store.function_libraries.contains_key("mylib"));
+        assert!(!store.function_libraries.contains_key("other"));
+
+        // A library may still be REPLACED by itself — it does not collide with
+        // its own registrations, which is the negative case a naive check fails.
+        let replacement = concat!(
+            "#!lua name=mylib\n",
+            "redis.register_function('myfunc', function(keys,args) return 3 end)"
+        );
+        assert_eq!(
+            store.function_load(replacement.as_bytes(), true).unwrap(),
+            "mylib",
+            "REPLACE of the owning library must still be allowed"
+        );
+        assert_eq!(store.function_libraries.len(), 1);
+
+        // A DIFFERENT function name in a second library is fine.
+        let distinct = concat!(
+            "#!lua name=other\n",
+            "redis.register_function('otherfunc', function(keys,args) return 4 end)"
+        );
+        assert_eq!(
+            store.function_load(distinct.as_bytes(), false).unwrap(),
+            "other"
+        );
+        assert_eq!(store.function_libraries.len(), 2);
     }
 
     #[test]
