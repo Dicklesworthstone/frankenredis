@@ -23893,3 +23893,87 @@ deferrals, and this row shows a correctly-verified window lasting under a minute
 throughput figure is genuinely required, it needs a different host or a harness that
 completes inside a sub-minute window. The set_base baseline above is the number to
 compare against when the arm-move lever lands; measure BOTH SET shapes after it.
+
+--------------------------------------------------------------------------------
+BOUNDING MY OWN CLAIM — "the numerator is load-immune" is TRUE BELOW ~40 AND UNVERIFIED
+ABOVE 50; and my load excursions were NOT caused by my builds (frankenredis-z2ce3,
+frankenredis-f2zrr, frankenredis-yq275)
+
+Two peer findings land on rows I have banked repeatedly. One bounds a claim of mine; the
+other would, if it applied, invalidate the reasoning behind another. My own recorded data
+answers both, and the answers differ.
+
+LOADAVG OBSERVED BY ME: 20.56 / 37.69 / 33.49. Stable but high — no certification run.
+This row is analysis of measurements already banked, with no new measurement taken.
+
+(1) THE LOAD-IMMUNITY CEILING — MY CLAIM WAS OVERSTATED AND I ACCEPT THE BOUND.
+
+frankenredis-f2zrr sampled the region I never did: fr's arm flat to 0.29 pct below ~40
+across a 3.5x load range, but moving 2.85 pct between loads 55 and 82. So the ceiling is
+near 50.
+
+I have asserted "instruction counts are load-immune" in several rows, most strongly after
+a run where load went 19.42 -> 96.22 and the DISPATCH SHARE held to 0.0 pct. That row's
+evidence was real but the claim drawn from it was too broad, and the distinction matters:
+
+    DISPATCH SHARE      held to 0.0-0.9 pct across every excursion I ran, including
+                        4.6x and 5x ones reaching 96. Still no counterexample.
+    fr instr/op         a DIFFERENT quantity, and this is where the ceiling lives.
+
+My own numerator spreads, against the loads they were taken at:
+
+    zrank_base       0.03 pct    load ~11.6
+    zadd_2flag       0.05 pct    load 11-18
+    zadd_base        0.12 pct    load moderate
+    set_same         0.36 pct    load 12 -> 56
+    zadd_2pair       1.1  pct    load 19 -> 96
+    set_base         1.8  pct    load 12 -> 56
+
+The broad pattern matches f2zrr: my tightest numerators came from quiet runs, my loosest
+from runs spanning into the 50s and 90s. BUT MY DATA DOES NOT INDEPENDENTLY ESTABLISH THE
+CEILING, and I will not claim it does: set_same (0.36 pct) and set_base (1.8 pct) were
+measured in the SAME run at the SAME loads and differ fivefold. Within-run, shape-to-shape
+variation is comparable to the effect being attributed to load. f2zrr's six-sample
+per-load design can separate those; my two-run pairs cannot.
+
+    CORRECTED CLAIM: dispatch share is load-immune across everything sampled to 96.
+    fr instr/op is flat below ~40 and DEGRADES ABOVE ~50 on f2zrr's evidence; my rows
+    are consistent with that and confounded by shape effects. Rows taken above load 50
+    should carry the caveat. Rows below 40 stand.
+
+Which rows are affected: the numerators in the zadd_2pair chaining row (load to 96) and
+the set_base baseline (load to 56). Neither conclusion changes — the chaining row's claim
+was a 0.63 pct move inside a 1.1 pct spread, i.e. "unharmed", which a wider spread only
+makes more conservative; and the baseline is a before-number whose after will be measured
+the same way. But both should be re-taken below load 40 if a tight figure is ever needed.
+
+(2) "THE BUILD DESTROYS THE WINDOW" — TRUE IN GENERAL, NOT THE CAUSE IN MY DATA.
+
+frankenredis-yq275 reports that building consumes the quiet window one meant to measure
+in. That is plausible and I have no reason to doubt it for their runs. It does NOT explain
+mine, and the ledger already contains the control:
+
+    row with no build   24.72 -> 52.62   (2.1x rise)
+    row with no build   11.59 ->  9.71   (fell)
+    row with ONE build  19.42 -> 96.22   (5.0x rise)
+    row with no build   12.26 -> 56.53   (4.6x rise)
+
+TWO OF MY THREE LARGEST EXCURSIONS HAPPENED ON TURNS WHERE I DID NOT BUILD, including the
+4.6x collapse of the verified-stable window. So the rises are external load, not
+self-inflicted. The volatility conclusion banked in that row stands as written.
+
+The two findings are compatible: a build can destroy a window, AND this host destroys
+windows on its own. Only the second is demonstrated by my data, and I would not have been
+able to tell them apart without having recorded build status in every row — which is the
+argument for recording provenance fields that seem redundant at the time.
+
+PROVENANCE:
+  no new measurement   this row re-reads loadavg and build-status fields recorded in
+                       eight prior rows of this ledger.
+  host                 thinkstation1, 64 cores, /data 292G, no build, no measurement.
+  loadavg              20.56 / 37.69 / 33.49.
+
+RETRY PREDICATE: do NOT re-run anything to confirm this. DO carry the "above 50" caveat on
+the two affected rows, and prefer sub-40 conditions when a tight numerator matters. The
+set_base lever's after-measurement should be taken below load 40 so it is comparable to a
+baseline that was not.
