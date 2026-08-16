@@ -4002,6 +4002,24 @@ fn now_unix_time() -> UnixTime {
     UnixTime { ms: us / 1000, us }
 }
 
+/// Duration of one event-loop pass, from the two wall-clock microsecond stamps the loop
+/// already takes. (frankenredis-zw36c)
+///
+/// This replaced `Instant::now()` + `.elapsed()`, which cost a third clock sample per pass
+/// plus a `Timespec` borrow-subtract. The trade is explicit: `Instant` is MONOTONIC and
+/// `SystemTime` is not, so a backward clock step (NTP) would otherwise produce a wrapped,
+/// astronomically large sample. `saturating_sub` yields 0 there instead -- a lost sample
+/// rather than a poisoned sum.
+///
+/// That is acceptable HERE and would not be everywhere: the only consumers are the INFO
+/// counters `stat_eventloop_cycles` and `stat_eventloop_duration_sum_usec`, i.e.
+/// observability, not control flow -- nothing branches on this value. Redis computes its
+/// own latency stats from `gettimeofday` the same way. Do NOT reuse this for a timeout or
+/// a deadline, where a clock step must not silently read as "no time passed".
+fn eventloop_cycle_duration_us(start_us: u64, end_us: u64) -> u64 {
+    end_us.saturating_sub(start_us)
+}
+
 fn now_ms() -> u64 {
     now_unix_time().ms
 }
@@ -4977,7 +4995,15 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
 
-        let eventloop_start = std::time::Instant::now();
+        // (frankenredis-zw36c) The loop head used to take THREE clock samples per pass:
+        // `Instant::now()` here, `now_unix_time()` here, and a third inside `.elapsed()`
+        // at the bottom -- whose `Timespec::sub_timespec` alone was 3.53M instructions,
+        // larger than the 2.35M of the reads themselves. A large reply is delivered over
+        // MANY passes, so this is paid per pass, and gein3 has since proved with a
+        // no-reply control that reply delivery is where fr's whole remaining SINTER
+        // deficit lives. `ts_us` below is already a microsecond timestamp; the cycle
+        // duration is now derived from it and one closing read, so the pass costs two
+        // samples and an integer subtract instead of three samples and a Timespec borrow.
         let timestamp = now_unix_time();
         let ts = timestamp.ms;
         let ts_us = timestamp.us;
@@ -5388,8 +5414,7 @@ fn main() -> ExitCode {
             cur_binds = new_binds;
         }
 
-        let eventloop_duration_us =
-            u64::try_from(eventloop_start.elapsed().as_micros()).unwrap_or(u64::MAX);
+        let eventloop_duration_us = eventloop_cycle_duration_us(ts_us, now_unix_time().us);
         runtime.record_eventloop_cycle(eventloop_duration_us);
 
         // Check for graceful shutdown request
@@ -33531,6 +33556,29 @@ fn handle_writable(
 
 #[cfg(test)]
 mod tests {
+    /// (frankenredis-zw36c) The event-loop cycle duration moved off `Instant` and onto the
+    /// two wall-clock stamps the pass already takes, which removed a third clock sample and
+    /// a `Timespec` borrow-subtract per pass. The reason that trade needs a test is the
+    /// property it gives up: `Instant` is monotonic and `SystemTime` is not, so the failure
+    /// mode is a BACKWARD clock step producing a wrapped, astronomically large sample that
+    /// would then be added into `stat_eventloop_duration_sum_usec` forever.
+    #[test]
+    fn eventloop_cycle_duration_saturates_instead_of_wrapping() {
+        // Ordinary forward case.
+        assert_eq!(super::eventloop_cycle_duration_us(1_000, 1_250), 250);
+        // Zero-length pass is legal and must not underflow.
+        assert_eq!(super::eventloop_cycle_duration_us(1_000, 1_000), 0);
+        // THE LOAD-BEARING CASE: a backward clock step. Wrapping arithmetic would give
+        // u64::MAX - 99 here and poison the INFO counter permanently; saturating gives a
+        // lost sample instead.
+        assert_eq!(super::eventloop_cycle_duration_us(1_100, 1_000), 0);
+        assert_eq!(super::eventloop_cycle_duration_us(u64::MAX, 0), 0);
+        // A forward step is NOT hidden -- it is a real elapsed reading as far as this
+        // counter is concerned, and pretending otherwise would need a monotonic clock,
+        // which is exactly what was removed.
+        assert_eq!(super::eventloop_cycle_duration_us(0, u64::MAX), u64::MAX);
+    }
+
     /// (bitcount_unit cell) The single-digit peel in `parse_borrowed_plain_set_bulk` must be
     /// BYTE-IDENTICAL to the loop it short-circuits, for every input including the malformed
     /// ones -- this parser is the argument path for EVERY borrowed route, so a divergence
