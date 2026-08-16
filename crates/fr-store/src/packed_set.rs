@@ -192,7 +192,6 @@ fn write_varint_impl<const FAST: bool>(buf: &mut Vec<u8>, mut n: usize) {
     }
 }
 
-
 fn encode_varint_array(mut n: usize) -> ([u8; 10], usize) {
     let mut buf = [0u8; 10];
     let mut len = 0usize;
@@ -5585,6 +5584,48 @@ impl CompactFieldMap {
 
 #[cfg(test)]
 mod tests {
+    /// (frankenredis-fosf1) Can the PACKED hash representation carry a DUPLICATE field,
+    /// the way redis 7.2.4 carries one in a listpack?
+    ///
+    /// This is the load-bearing unknown for removing RESTORE's dup check. Redis with the
+    /// default `sanitize-dump-payload no` does no duplicate detection at all: it attaches
+    /// the listpack verbatim, so `{f1:v1, f1:v2}` restores and then reports HLEN 2,
+    /// HGETALL [f1,v1,f1,v2] and HGET f1 -> v1 (FIRST wins). fr rejects the payload
+    /// outright today. Before deleting the check in `hash_from_listpack_spans` we have to
+    /// know whether the structure underneath can even represent what redis keeps --
+    /// deleting a guard whose invariant the storage still relies on would turn a rejected
+    /// payload into a corrupt hash, which is strictly worse than the parity gap.
+    ///
+    /// The test deliberately violates `from_unique_pairs_borrowed`'s documented "no
+    /// duplicates" contract, because that contract is exactly what is in question.
+    #[test]
+    fn packed_hash_representation_carries_a_duplicate_field_like_redis_does() {
+        let pairs: Vec<(&[u8], &[u8])> = vec![(b"f1", b"v1"), (b"f1", b"v2")];
+        let m = super::HashFieldMap::from_unique_pairs_borrowed(&pairs);
+        assert!(
+            matches!(m, super::HashFieldMap::Packed(_)),
+            "a 2-field hash must take the packed path; this test says nothing about the \
+             hashtable tier, whose append_known_absent genuinely requires uniqueness"
+        );
+        // redis: HLEN -> 2. Both entries are kept, not collapsed.
+        assert_eq!(
+            m.len(),
+            2,
+            "redis keeps BOTH entries; a collapse to 1 means the \
+                                packed map cannot represent what RESTORE must store"
+        );
+        // redis: HGET f1 -> v1, the FIRST occurrence.
+        assert_eq!(
+            m.get(b"f1"),
+            Some(&b"v1"[..]),
+            "lookup must resolve to the FIRST \
+                                                    occurrence, as redis does"
+        );
+        // redis: HGETALL -> [f1,v1,f1,v2], insertion order, duplicate included.
+        assert_eq!(m.get_index(0), Some((&b"f1"[..], &b"v1"[..])));
+        assert_eq!(m.get_index(1), Some((&b"f1"[..], &b"v2"[..])));
+    }
+
     use super::{
         ChunkedList, CompactFieldMap, CompactStrSet, GenericSet, HashFieldMap, LIST_CHUNK_TARGET,
         ListChunk, ListRepr, ListValue, PACKED_MAX_ENTRIES, PACKED_MAX_VALUE,
