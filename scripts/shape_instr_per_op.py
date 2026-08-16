@@ -128,6 +128,13 @@ SHAPES = {
     "getset_same": (["SET gs vvvvvvvvvvvvvvvv"], ["GETSET", "gs", "vvvvvvvvvvvvvvvv"]),
     "setbit_same": (["SET bb abcdefghijklmnop"], ["SETBIT", "bb", "5", "0"]),
     "get_missing": ([], ["GET", "nosuchkey"]),
+    # (frankenredis-7xa4m) OUT-OF-SAMPLE routes. The 284.2*parses+69.3 fit was
+    # made on 11 routes; these were not among them. Predict from the parse count
+    # first, then measure, so the coefficient is tested rather than illustrated.
+    "zrem_missing": (["ZADD z 1 a"], ["ZREM", "z", "nomember"]),
+    "lrem_missing": (["RPUSH l a b c"], ["LREM", "l", "0", "nosuch"]),
+    "memory_usage": (["SET s abcdefghijklmnop"], ["MEMORY", "USAGE", "s"]),
+    "expire_same": (["SET s abcdefghijklmnop"], ["EXPIRE", "s", "10000"]),
     # The control: a route none of the above levers touch.
     "get_control": (["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
 }
