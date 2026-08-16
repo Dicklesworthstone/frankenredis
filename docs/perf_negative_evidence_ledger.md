@@ -25974,3 +25974,95 @@ LOAD-IMMUNE instrument instead: callgrind instruction counts on the RESTORE deco
 answer "did fr's work go down" without needing a quiet core at all, and that is the
 question fosf1 actually raises. The throughput ratio is only needed to restate 33832's
 headline.
+
+---
+
+## MEASURED (frankenredis-33832) — hash RESTORE's tier test was a second full pass over the pairs: -1,267.7 instr/op at the packed maximum, and FLAT above it exactly as the mechanism predicts
+
+Campaign output: no
+
+Claim class: SELF-SPEEDUP. fr-before against fr-after. The vs-incumbent figures are
+measured live in the same invocation and are quoted to size the remaining gap, not as a
+win. Both ELF identities are computed by sha256sum, not self-reported -- valgrind hosts the
+target, the standing limitation of every callgrind row here. Not KEEP-class.
+
+LEVER (code in 2c176e6ac). `hash_from_listpack_spans` builds its pair list in a loop that
+already computes `max_element_len`, then called `borrowed_pairs_need_hashtable(&pairs)`,
+which walked all 2N elements again to rediscover exactly that. The tier test is a pure
+function of the pair COUNT and the LONGEST element, so it is now O(1). Taken because
+33832's size sweep shows hash RESTORE's FIXED cost is at parity (1.08x) and the whole gap
+is per-element -- and this was a whole per-element pass.
+
+MEASURED, reverse-patch A/B, arms proven to differ by the patch alone (build AFTER, BEFORE,
+AFTER again; the two AFTER SHAs matched -- and the first attempt at this pair was DISCARDED
+because that check caught a peer edit landing mid-window).
+
+    128 fields -- the packed tier's MAXIMUM, five draws per arm, interleaved
+
+      before   168,746.4  169,470.6  168,624.6  168,679.8  169,789.1   mean 169,062.1
+      after    168,362.7  167,427.3  167,363.2  167,398.7  168,420.1   mean 167,794.4
+
+      -1,267.7 instr/op = -0.75 pct, and the arms do NOT OVERLAP across five draws each:
+      before spans [168,624.6, 169,789.1], after spans [167,363.2, 168,420.1].
+
+DOSE-RESPONSE, which is worth more than the delta because it tests the MECHANISM rather
+than just the size:
+
+    fields   before      after       delta      note
+       40    69,246.3    69,143.2     -103.1    not resolved (spread 0.36-0.44 pct)
+      128   169,062.1   167,794.4   -1,267.7    -0.75 pct, arms disjoint
+      160   268,971.6   269,230.5     +258.9    FLAT -- predicted ZERO, and it is
+
+The 160-field row is the control and it is the part I would keep. The original predicate
+was `pairs.len() > PACKED_MAX_ENTRIES || any(...)`, so ABOVE 128 pairs the `||`
+short-circuits and the walk never ran at all -- the lever must be exactly zero there, and
+it measures +0.10 pct. The three rows fit one constant: 1,267.7 / 128 = 9.9 instructions
+per field-pair, which predicts 40 x 9.9 = 396 at 40 fields, consistent with the -103 +/-
+~280 actually seen there. An effect that appears where the mechanism says it must and
+vanishes where the mechanism says it cannot is a different claim from an effect that is
+merely large.
+
+HONEST SIZE. This is 0.75 pct of a surface measured at 2.45-2.51x behind redis 7.2.4 on
+this workload. It does not move the standing. 33832's structural item (b1o02, keep the
+listpack instead of re-packing) is still where the multiple lives, and its earlier attempt
+was REVERTED as ~0-gain, so it needs a different mechanism rather than a retry.
+
+THE MUTATION TEST FOUND MORE THAN THE LEVER, and this is the part that mattered. Flipping
+the value threshold from strictly-greater to greater-or-equal failed the unit test but NOT
+the end-to-end tier test -- impossible if there were one rule. There were two: the tier
+gating the duplicate-field check lived in `hash_from_listpack_spans`, the tier choosing the
+REPRESENTATION lived inline in `from_unique_pairs_borrowed`. Only the hashtable tier runs
+the duplicate check, and the hashtable builder uses `append_known_absent`, which skips the
+existence probe on a promise of uniqueness -- so a disagreement in the direction "dup check
+says packed, builder says hashtable" feeds a duplicate to a builder that trusts it cannot
+happen. Both now go through one predicate. After unification the same mutation fails BOTH
+tests, which is what says the e2e test is wired to the code it names.
+
+INSTRUMENT. `scripts/shape_instr_per_op.py` cannot express this shape at all -- its SHAPES
+table is whitespace-split strings and a DUMP payload is arbitrary bytes -- so this used a
+purpose-built two-point RESTORE harness (HSET one hash, DUMP it, then N x `RESTORE k 0
+<payload> REPLACE`, differenced at N and 2N). Validated before use: fr reproduces to
+0.03 pct on it. Its absolute ratio (2.13x at 40 fields) sits BELOW 33832's banked 2.81x
+because restoring repeatedly onto one existing key makes REPLACE free the previous value
+every op -- a cost both engines pay, which dilutes the ratio. Same-workload deltas are
+unaffected; cross-workload absolutes are not comparable to the banked table.
+
+    TRAP worth recording: callgrind writes its output file at process EXIT. Reading the
+    total before terminating the server returns 0, and a two-point subtraction of 0 minus 0
+    is 0 instr/op for every arm -- an instrument that reports every engine as free. Mine
+    did exactly that on the first run and now raises instead of returning zero.
+
+RETRY PREDICATE: do not re-measure this lever at or above 129 fields -- the original
+short-circuited there and the effect is zero by construction, which the 160-field control
+confirms. Re-measure only if PACKED_MAX_ENTRIES changes, since the whole benefit is bounded
+by it.
+
+PROVENANCE: fr ELFs d597315a9d4e4d38709dfd40c98dd491d94cc10a65a34b1a406e98b7de83129a
+(before) and a08b9bf774b20f2b79f5555a317edd857c48c77c75c99241dc5e9ecf2bfcbd28 (after),
+both built locally with RCH_CARGO_WRAPPER_BYPASS=1 exported and env -u CARGO_TARGET_DIR, no
+[RCH] line in either build log, executable path from --message-format=json.
+thinkstation1, 64 cores observed, governor powersave, /data 228G. Loadavg SAMPLED BY ME per
+arm: 13.35, 13.64, 13.99, 13.99, 14.23, 14.23, 14.64, 14.91, 14.91, 16.12 -- 1-min under
+5-min under 15-min throughout, the quietest window of my session. Mean CPU MHz SAMPLED BY
+ME per arm over 64 cores: 2,637-4,017, a 52 pct spread, which is why the arms were
+interleaved rather than run in blocks.
