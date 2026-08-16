@@ -6986,6 +6986,33 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
+                    parse_borrowed_plain_set_packet(unparsed, &parser_config)
+                {
+                    let default_write_allowed =
+                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
+                    if runtime
+                        .execute_plain_set_borrowed_with_default_write_gate(
+                            packet.key,
+                            packet.value,
+                            ts,
+                            default_write_allowed,
+                        )
+                        .is_some()
+                    {
+                        Ok(BorrowedMultibulkAction::FastOkReply {
+                            consumed: packet.consumed,
+                        })
+                    } else {
+                        parse_borrowed_multibulk_action(
+                            unparsed,
+                            parser_config,
+                            runtime,
+                            ts,
+                            &mut conn.write_buf,
+                            &mut argv_scratch,
+                        )
+                    }
+                } else if let Some(packet) =
                     parse_borrowed_plain_watch_packet(unparsed, &parser_config)
                 {
                     if runtime
@@ -7289,33 +7316,6 @@ fn process_buffered_frames(
                     };
                     if let Some(action) = action {
                         Ok(action)
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_set_packet(unparsed, &parser_config)
-                {
-                    let default_write_allowed =
-                        cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
-                    if runtime
-                        .execute_plain_set_borrowed_with_default_write_gate(
-                            packet.key,
-                            packet.value,
-                            ts,
-                            default_write_allowed,
-                        )
-                        .is_some()
-                    {
-                        Ok(BorrowedMultibulkAction::FastOkReply {
-                            consumed: packet.consumed,
-                        })
                     } else {
                         parse_borrowed_multibulk_action(
                             unparsed,
@@ -50009,5 +50009,70 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         assert!(!gate_fires(&["PING"]));
         assert!(!gate_fires(&["RESET"]));
         assert!(!gate_fires(&["QUIT"]));
+    }
+
+    /// The base-SET arm now sits immediately after GET, AHEAD of all seven SET
+    /// option arms (frankenredis-z2ce3). That reorder is only safe while the
+    /// arity-3 parser refuses every option form: an arm that claims `SET k v NX`
+    /// would answer it as a plain SET, and both return +OK, so the divergence is
+    /// invisible in the reply and only shows up in what the key holds afterwards.
+    ///
+    /// The option list below is hardcoded from the Redis 7.2.4 SET syntax rather
+    /// than derived from the parsers it guards, so relaxing a parser cannot also
+    /// relax the oracle.
+    #[test]
+    fn base_set_parser_refuses_every_option_form_it_now_runs_ahead_of() {
+        let cfg = ParserConfig::default();
+        fn packet(args: &[&str]) -> Vec<u8> {
+            let mut p = format!("*{}\r\n", args.len()).into_bytes();
+            for a in args {
+                p.extend_from_slice(format!("${}\r\n{}\r\n", a.len(), a).as_bytes());
+            }
+            p
+        }
+
+        // Positive: the shape the arm exists to serve.
+        let plain = packet(&["SET", "k", "v"]);
+        let got = super::parse_borrowed_plain_set_packet(&plain, &cfg)
+            .expect("arity-3 SET must be served by the base arm");
+        assert_eq!(got.key, b"k");
+        assert_eq!(got.value, b"v");
+        // Consumed must stop at the packet boundary. The arm runs earlier than it
+        // used to, so an over-long `consumed` would now eat a following pipelined
+        // command that twelve arms used to stand between it and.
+        assert_eq!(got.consumed, plain.len());
+
+        // Lowercase is the same shape; Redis dispatches case-insensitively.
+        assert!(super::parse_borrowed_plain_set_packet(&packet(&["set", "k", "v"]), &cfg).is_some());
+
+        // Negative: every option form served by an arm BELOW this one.
+        for form in [
+            vec!["SET", "k", "v", "NX"],
+            vec!["SET", "k", "v", "XX"],
+            vec!["SET", "k", "v", "GET"],
+            vec!["SET", "k", "v", "KEEPTTL"],
+            vec!["SET", "k", "v", "EX", "10"],
+            vec!["SET", "k", "v", "PX", "10000"],
+            vec!["SET", "k", "v", "EXAT", "99999999999"],
+            vec!["SET", "k", "v", "PXAT", "99999999999"],
+            vec!["SET", "k", "v", "EX", "10", "GET"],
+            vec!["SET", "k", "v", "NX", "EX", "10"],
+            vec!["SET", "k", "v", "XX", "GET"],
+        ] {
+            let pkt = packet(&form);
+            assert!(
+                super::parse_borrowed_plain_set_packet(&pkt, &cfg).is_none(),
+                "base SET arm claimed {form:?}, which an arm below it must serve"
+            );
+        }
+
+        // A truncated arity-3 SET must decline rather than read past the buffer.
+        let short = &plain[..plain.len() - 3];
+        assert!(super::parse_borrowed_plain_set_packet(short, &cfg).is_none());
+
+        // A different command of the same arity must not be claimed.
+        assert!(
+            super::parse_borrowed_plain_set_packet(&packet(&["GETEX", "k", "v"]), &cfg).is_none()
+        );
     }
 }
