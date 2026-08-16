@@ -14731,6 +14731,12 @@ enum BorrowedDispatchFloorClass {
     /// (frankenredis-ozrro) `ZADD key score member ...` with 3..8 pairs, plus the
     /// even-arity flag form the same classification necessarily catches.
     ZaddMulti,
+    /// (frankenredis-mg05w) `ZADD key <NX|XX|GT|LT|CH> score member`, array
+    /// length 5. zadd_xx measured 0.8676 and 0.8671 against Redis 7.2.4 on two
+    /// ELFs, both ADMISSIBLE, worst bound 0.8395 -- the deepest sub-parity row
+    /// held. The class was `arity >= 8 && even`, so this form was never claimed
+    /// even though its parser and executor both already existed.
+    ZaddFlag,
     /// Variadic keyed-values write (LPUSH/RPUSH/SADD/HDEL/SREM/ZREM) carrying the
     /// value count (5..=8) — the forms stranded ~1350 lines deep in the cascade.
     KeyedValuesWrite(usize),
@@ -16222,6 +16228,13 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // a flag (`ZADD k CH 1 a 2 b`) is declined by that parser, so the arm
         // below tries the flag-multi parser before giving up — otherwise
         // classifying here would strand the flag form on the generic path.
+        // (frankenredis-mg05w) Array length 5 is `ZADD key <flag> score member`.
+        // The advisor calls this length ambiguous -- six readings, NX/XX/GT/LT/CH
+        // and INCR -- and that is true but harmless here, because the arm below
+        // chains BOTH parsers: zadd_flag whitelists the five non-INCR flags and
+        // zadd_incr takes INCR, whose reply is a bulk score rather than a count.
+        // Neither can claim the other's shape, so no reading is stranded.
+        (5, BorrowedDispatchFloorCommand::Zadd) => Some(BorrowedDispatchFloorClass::ZaddFlag),
         (arity, BorrowedDispatchFloorCommand::Zadd) if arity >= 8 && arity.is_multiple_of(2) => {
             Some(BorrowedDispatchFloorClass::ZaddMulti)
         }
@@ -19057,6 +19070,47 @@ fn try_dispatch_floor_classified_action(
                     packet.before,
                     packet.pivot,
                     packet.element,
+                    ts,
+                )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        // (frankenredis-mg05w) `ZADD key <flag> score member`. Both parsers pin
+        // b"*5\r\n$4\r\n"; zadd_flag rejects INCR by whitelist, so the chain is
+        // exclusive and its order does not matter. A decline still reaches generic.
+        BorrowedDispatchFloorClass::ZaddFlag => {
+            if let Some(packet) = parse_borrowed_plain_zadd_flag_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_zadd_flag_borrowed(
+                    packet.key,
+                    packet.flag,
+                    packet.score,
+                    packet.member,
+                    ts,
+                )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else if let Some(packet) =
+                parse_borrowed_plain_zadd_incr_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_zadd_incr_borrowed(
+                    packet.key,
+                    packet.start,
+                    packet.end,
                     ts,
                 )
             {
