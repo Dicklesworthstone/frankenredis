@@ -1579,6 +1579,12 @@ impl Runtime {
     /// via CONFIG SET. Mirrors upstream's `enable-protected-configs`
     /// gate; defaults to "no". (br-frankenredis-protectedcfg)
     fn protected_configs_allowed(&self) -> bool {
+        // (frankenredis-fyi51) A startup directive is never gated: upstream checks
+        // PROTECTED_CONFIG in configSetCommand only, and applies config-file and
+        // command-line directives through a path that does not consult it.
+        if self.server.startup_config_application {
+            return true;
+        }
         self.server
             .config_overrides
             .get("enable-protected-configs")
@@ -4222,6 +4228,20 @@ pub struct ServerState {
     acl_file_path: Option<std::path::PathBuf>,
     /// Dynamically overridden CONFIG parameters (set via CONFIG SET, returned by CONFIG GET).
     config_overrides: HashMap<String, String>,
+    /// (frankenredis-fyi51) True only while a STARTUP directive — a config-file
+    /// line or a command-line argument — is being applied.
+    ///
+    /// Upstream enforces `PROTECTED_CONFIG` in `configSetCommand` only. Startup
+    /// directives take a different route (`loadServerConfigFromString` calls the
+    /// parameter's setter directly), so `redis-server --dir /path` is accepted
+    /// while a runtime `CONFIG SET dir /path` is refused. fr funnels startup
+    /// directives through its own CONFIG SET, which is a good reuse but inherited
+    /// the runtime-only gate, so fr refused `--dir` and exited without binding.
+    ///
+    /// This flag reproduces upstream's split WITHOUT touching the runtime
+    /// contract: the runtime refusal stays byte-identical to redis, which is the
+    /// half that already agreed and must not move.
+    startup_config_application: bool,
 
     // ── Pub/Sub global state ────────────────────────────────────────
     /// Channel → set of subscribed client IDs.
@@ -4366,6 +4386,7 @@ impl Default for ServerState {
             config_file_path: None,
             acl_file_path: None,
             config_overrides: HashMap::new(),
+            startup_config_application: false,
             pubsub_channel_subs: HashMap::new(),
             pubsub_pattern_subs: HashMap::new(),
             pubsub_shard_subs: HashMap::new(),
@@ -5957,6 +5978,20 @@ impl Runtime {
     /// an RDB snapshot to this path.
     pub fn set_rdb_path(&mut self, path: std::path::PathBuf) {
         self.server.set_rdb_path(path);
+    }
+
+    /// (frankenredis-fyi51) The RDB target currently in effect, so a caller can
+    /// tell whether a startup `dir`/`dbfilename` directive already set one.
+    ///
+    /// Startup applies those two through `execute_startup_config_directive`, which
+    /// updates this path. The server then had an unconditional
+    /// `set_rdb_path("dump.rdb")` default that overwrote it, so `--dir` was
+    /// accepted and then silently ignored — the RDB still landed in the cwd and
+    /// `CONFIG GET dir` still reported the cwd. Reading the effective path back is
+    /// what lets that default apply only when nothing has set one.
+    #[must_use]
+    pub fn rdb_path(&self) -> Option<&std::path::Path> {
+        self.server.rdb_path.as_deref()
     }
 
     pub fn set_acl_file_path(&mut self, path: std::path::PathBuf) {
@@ -8626,6 +8661,42 @@ impl Runtime {
         // Owned-frame callers (conformance, internal) keep passing the frame so
         // its exact wire structure feeds the threat-evidence digests verbatim.
         self.execute_frame_ref(&frame, now_ms)
+    }
+
+    /// (frankenredis-fyi51) Apply ONE startup directive — a config-file line or a
+    /// command-line argument — through the same `CONFIG SET` the runtime already
+    /// implements, minus the protected-config gate.
+    ///
+    /// `redis-server --dir /path` is accepted upstream while a runtime
+    /// `CONFIG SET dir /path` is refused, because `PROTECTED_CONFIG` is enforced
+    /// in `configSetCommand` only; startup directives reach the parameter's setter
+    /// directly. fr reused its own CONFIG SET for startup — good reuse — but
+    /// inherited the runtime gate with it, so `--dir` aborted the boot before the
+    /// listener bound.
+    ///
+    /// The flag is scoped to this call and restored afterwards, including on the
+    /// error path, so nothing about the RUNTIME refusal changes: that half already
+    /// matched redis byte-for-byte and is what a caller would break by reaching for
+    /// `enable-protected-configs` instead.
+    pub fn execute_startup_config_directive(
+        &mut self,
+        name: &[u8],
+        value: &[u8],
+        now_ms: u64,
+    ) -> RespFrame {
+        let previous = self.server.startup_config_application;
+        self.server.startup_config_application = true;
+        let reply = self.execute_frame(
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"CONFIG".to_vec())),
+                RespFrame::BulkString(Some(b"SET".to_vec())),
+                RespFrame::BulkString(Some(name.to_vec())),
+                RespFrame::BulkString(Some(value.to_vec())),
+            ])),
+            now_ms,
+        );
+        self.server.startup_config_application = previous;
+        reply
     }
 
     /// Execute a retained frame without cloning its nested RESP payload.
@@ -63812,6 +63883,58 @@ mod tests {
                 RespFrame::BulkString(Some(b"/tmp/fr-preserve".to_vec())),
             ]))
         );
+    }
+
+    /// (frankenredis-fyi51) A STARTUP directive applies a protected config; a
+    /// RUNTIME `CONFIG SET` of the same parameter still refuses.
+    ///
+    /// Both halves are asserted in one test because the bug was the asymmetry, not
+    /// either half alone: fr matched redis on the runtime refusal and diverged only
+    /// at startup, where `--dir` aborted the boot before the listener bound. A test
+    /// that only asserted the startup acceptance would pass just as well if the
+    /// protected gate had been deleted outright, which is the plausible wrong fix
+    /// and the one that would silently let a client relocate the RDB at runtime.
+    #[test]
+    fn startup_directive_applies_protected_config_but_runtime_config_set_still_refuses() {
+        let dir = std::env::temp_dir().join("fr_runtime_fyi51_startup_dir");
+        let _ = std::fs::create_dir_all(&dir);
+
+        let mut rt = Runtime::default_strict();
+        // No enable-protected-configs anywhere: this is a stock server, exactly as
+        // `redis-server --dir /path` is invoked.
+        assert!(!rt.protected_configs_allowed());
+
+        // STARTUP half: accepted, the way redis-server accepts the argument.
+        assert_eq!(
+            rt.execute_startup_config_directive(b"dir", dir.to_string_lossy().as_bytes(), 0),
+            RespFrame::SimpleString("OK".to_string()),
+            "a startup directive must apply a protected config; upstream enforces \
+             PROTECTED_CONFIG in configSetCommand only"
+        );
+
+        // RUNTIME half: still refused, byte-identically to redis. This is the half
+        // that already agreed and must not move.
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"dir", dir.to_string_lossy().as_bytes()]),
+                0,
+            ),
+            RespFrame::Error(
+                "ERR CONFIG SET failed (possibly related to argument 'dir') - can't set protected config"
+                    .to_string()
+            ),
+        );
+
+        // And the flag did not leak: a second runtime attempt is refused too, which
+        // is what a missing restore on the success path would break.
+        assert!(!rt.protected_configs_allowed());
+        assert!(matches!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"dbfilename", b"leaked.rdb"]),
+                0,
+            ),
+            RespFrame::Error(_)
+        ));
     }
 
     #[test]

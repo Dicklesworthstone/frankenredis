@@ -4635,15 +4635,15 @@ fn main() -> ExitCode {
         .map(|(n, v)| ("config file", n, v))
         .chain(cli_passthrough.iter().map(|(n, v)| ("command line", n, v)))
     {
-        let reply = runtime.execute_frame(
-            RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(b"CONFIG".to_vec())),
-                RespFrame::BulkString(Some(b"SET".to_vec())),
-                RespFrame::BulkString(Some(name.as_bytes().to_vec())),
-                RespFrame::BulkString(Some(value.as_bytes().to_vec())),
-            ])),
-            now_ms(),
-        );
+        // (frankenredis-fyi51) Startup directives go through the STARTUP entry
+        // point, not the plain runtime CONFIG SET. Upstream enforces
+        // PROTECTED_CONFIG in configSetCommand only, so `redis-server --dir /path`
+        // is accepted while a runtime `CONFIG SET dir /path` is refused; routing
+        // startup through the runtime path inherited the gate and made fr abort on
+        // `--dir` before it ever bound. Only the startup half moves — the runtime
+        // refusal stays byte-identical to redis.
+        let reply =
+            runtime.execute_startup_config_directive(name.as_bytes(), value.as_bytes(), now_ms());
         if let RespFrame::Error(err) = reply {
             if source == "command line" {
                 eprintln!("error: {source}: '{name} {value}': {err}");
@@ -4755,6 +4755,17 @@ fn main() -> ExitCode {
     // (reply OK, rdb_last_bgsave_status:ok, but nothing written to disk) — a
     // data-loss surprise and a divergence from redis 7.2.4. A config file's
     // dir/dbfilename (via configured_rdb_path) or --rdb still wins when present.
+    // (frankenredis-fyi51) A startup `dir`/`dbfilename` directive already set the
+    // runtime's RDB target above, and this default used to overwrite it — so
+    // `--dir /path` was accepted and then silently ignored: the snapshot still
+    // landed in the cwd and `CONFIG GET dir` still reported the cwd, which is
+    // arguably worse than the old hard refusal because nothing announces it.
+    // Adopt the effective path when one is already in force.
+    if rdb_path.is_none()
+        && let Some(effective) = runtime.rdb_path()
+    {
+        rdb_path = Some(effective.to_string_lossy().into_owned());
+    }
     if rdb_path.is_none() && sharded_set_get_workers.is_none() {
         rdb_path = Some("dump.rdb".to_string());
     }
