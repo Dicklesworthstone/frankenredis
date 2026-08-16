@@ -199,6 +199,37 @@ CASES = [
     ("MOVE", "mv:k", "1"),
     ("EXISTS", "mv:k"),
     ("MOVE", "mv:absent", "1"),
+    # (frankenredis-cv3fv) SINTERCARD. Three distinct situations at three lengths,
+    # and the corpus separates them deliberately because a fix aimed at one can
+    # silently move another:
+    #   len 5  CLAIMED and refused -- `(4..=5)` mints the class, sintercard3
+    #          validates numkeys != 3 and declines, so `SINTERCARD 1 k LIMIT n`
+    #          reaches generic.
+    #   len 6  NOT claimed at all, and AMBIGUOUS ((plain) x4 vs LIMIT x2), so
+    #          classifying it needs the numkeys bulk read rather than the length.
+    #          This is the shape sintercard_lim measured 0.7881 on.
+    #   len 8+ unique LIMIT forms, safe to claim on length alone.
+    ("SADD", "sc:1", "a", "b", "c", "d"),
+    ("SADD", "sc:2", "b", "c", "d", "e"),
+    ("SADD", "sc:3", "c", "d", "e", "f"),
+    # the claimed-and-refused length
+    ("SINTERCARD", "1", "sc:1", "LIMIT", "2"),
+    ("SINTERCARD", "3", "sc:1", "sc:2", "sc:3"),
+    # the ambiguous length: both readings, same array length
+    ("SINTERCARD", "2", "sc:1", "sc:2", "LIMIT", "1"),
+    ("SINTERCARD", "4", "sc:1", "sc:2", "sc:3", "sc:1"),
+    # LIMIT 0 means "no limit" upstream, not "return nothing" -- a route that
+    # treated it as a cap would pass every other row here
+    ("SINTERCARD", "2", "sc:1", "sc:2", "LIMIT", "0"),
+    # unique LIMIT lengths
+    ("SINTERCARD", "3", "sc:1", "sc:2", "sc:3", "LIMIT", "2"),
+    # empty intersection and a missing key
+    ("SINTERCARD", "2", "sc:1", "s:1"),
+    ("SINTERCARD", "1", "sc:absent"),
+    ("SINTERCARD", "2", "sc:1", "sc:absent", "LIMIT", "3"),
+    # wrong type and a bad numkeys must come back verbatim
+    ("SINTERCARD", "1", "z:lim"),
+    ("SINTERCARD", "0", "sc:1"),
     # Errors must come from the generic path verbatim.
     ("ZMPOP", "1", "s:1", "MIN"),
     ("ZMPOP", "1", "z:mp", "SIDEWAYS"),
