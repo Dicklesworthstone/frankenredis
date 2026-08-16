@@ -95,6 +95,16 @@ SHAPES = {
     # (frankenredis-iqicb) PSETEX is SETEX's millisecond sibling and sat beside it
     # in the same probe chain. Same shape so the two are directly comparable.
     "psetex_same": ([], ["PSETEX", "wy", "100000", "vvvvvvvvvvvvvvvv"]),
+    # (frankenredis-iqicb) The remaining commands that already have a
+    # parse_borrowed_plain_*_packet but no floor class. Screened on dispatch share
+    # before any of them is touched -- that screen is what correctly excluded
+    # RESTORE, whose share is 9.4%.
+    # SETNX on an EXISTING key so the op is a no-op reply rather than a write that
+    # grows the keyspace across the 2N run.
+    "setnx_existing": (["SET nxk vvvvvvvvvvvvvvvv"], ["SETNX", "nxk", "wwww"]),
+    "getset_same": (["SET gsk vvvvvvvvvvvvvvvv"], ["GETSET", "gsk", "vvvvvvvvvvvvvvvv"]),
+    "lset_head": (["RPUSH lsk a b c d e f g h"], ["LSET", "lsk", "0", "a"]),
+    "incrbyfloat_same": (["SET ibf 1.5"], ["INCRBYFLOAT", "ibf", "0"]),
     "set_same": ([], ["SET", "wk", "vvvvvvvvvvvvvvvv"]),
     # (frankenredis-mnzgy) The NO-OP / MISS family. PERSIST on a non-volatile key,
     # DEL and UNLINK on a key that does not exist: all three should early-return
@@ -145,6 +155,18 @@ SHAPES = {
     "geoadd_same": (["GEOADD g 13.361389 38.115556 P1"],
                     ["GEOADD", "g", "13.361389", "38.115556", "P1"]),
     "pfadd_same": (["PFADD hll a b c"], ["PFADD", "hll", "a"]),
+    # (frankenredis-nkvkp) The routes ozrro's walked-vs-bypassed GAP rejected or
+    # left alone. That metric compares the cascade against the GENERIC path and so
+    # cannot see the front-classification prize -- it rejected PERSIST at -132/op
+    # and front-classification then gave up 3326. Each of these needs a parse
+    # count before anyone treats its rejection as settled.
+    "hincrbyfloat": (["HSET h f 1"], ["HINCRBYFLOAT", "h", "f", "0"]),
+    "hsetnx_existing": (["HSET h f1 v1"], ["HSETNX", "h", "f1", "other"]),
+    "sinter_2": (["SADD s1 m1 m2 m3", "SADD s2 m2 m3 m4"], ["SINTER", "s1", "s2"]),
+    "mget_3": (["MSET a 1 b 2 c 3"], ["MGET", "a", "b", "c"]),
+    "pfadd_existing": (["PFADD hll a b c"], ["PFADD", "hll", "a"]),
+    "pexpireat_same": (["SET s abcdefghijklmnop"],
+                       ["PEXPIREAT", "s", "4102444800000"]),
     # The control: a route none of the above levers touch.
     "get_control": (["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
 }

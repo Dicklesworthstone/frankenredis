@@ -2386,6 +2386,46 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"GET", b"s:px3"]));
     cmds.push(c(&[b"PSETEX", b"s:px4", b"100000"]));
     cmds.push(c(&[b"PSETEX", b"s:px4", b"100000", b"vv", b"extra"]));
+    // (frankenredis-iqicb) The four remaining plain-parser routes, now front-classified.
+    // SETNX: both branches, and the key is read back after the FAILING case because the
+    // whole contract is that it must NOT overwrite.
+    cmds.push(c(&[b"SETNX", b"s:nx", b"first"]));
+    cmds.push(c(&[b"SETNX", b"s:nx", b"second"]));
+    cmds.push(c(&[b"GET", b"s:nx"]));
+    cmds.push(c(&[b"setnx", b"s:nx2", b"mixedcase"]));
+    cmds.push(c(&[b"GET", b"s:nx2"]));
+    cmds.push(c(&[b"SETNX", b"s:nx"]));
+    cmds.push(c(&[b"SETNX", b"s:nx", b"a", b"b"]));
+    // GETSET returns the OLD value and stores the new one, so both halves are read.
+    // The missing-key row must return nil AND still store.
+    cmds.push(c(&[b"GETSET", b"s:gs", b"one"]));
+    cmds.push(c(&[b"GETSET", b"s:gs", b"two"]));
+    cmds.push(c(&[b"GET", b"s:gs"]));
+    cmds.push(c(&[b"RPUSH", b"s:gslist", b"a"]));
+    cmds.push(c(&[b"GETSET", b"s:gslist", b"x"]));
+    cmds.push(c(&[b"GETSET", b"s:gs"]));
+    // LSET: valid index, negative index, out-of-range index (error), and WRONGTYPE.
+    cmds.push(c(&[b"RPUSH", b"s:ls", b"a", b"b", b"c"]));
+    cmds.push(c(&[b"LSET", b"s:ls", b"1", b"B"]));
+    cmds.push(c(&[b"LSET", b"s:ls", b"-1", b"C"]));
+    cmds.push(c(&[b"LRANGE", b"s:ls", b"0", b"-1"]));
+    cmds.push(c(&[b"LSET", b"s:ls", b"99", b"x"]));
+    cmds.push(c(&[b"LSET", b"s:absent", b"0", b"x"]));
+    cmds.push(c(&[b"LSET", b"s:1", b"0", b"x"]));
+    cmds.push(c(&[b"LSET", b"s:ls", b"notanint", b"x"]));
+    // INCRBYFLOAT: the reply FORMAT is the fragile part (redis trims trailing zeros),
+    // so several magnitudes are exercised, plus the non-numeric and WRONGTYPE errors.
+    cmds.push(c(&[b"SET", b"s:if", b"10.5"]));
+    cmds.push(c(&[b"INCRBYFLOAT", b"s:if", b"0.1"]));
+    cmds.push(c(&[b"INCRBYFLOAT", b"s:if", b"-0.6"]));
+    cmds.push(c(&[b"INCRBYFLOAT", b"s:if", b"5"]));
+    cmds.push(c(&[b"GET", b"s:if"]));
+    cmds.push(c(&[b"SET", b"s:ifbad", b"notanumber"]));
+    cmds.push(c(&[b"INCRBYFLOAT", b"s:ifbad", b"1"]));
+    cmds.push(c(&[b"INCRBYFLOAT", b"s:if", b"notanumber"]));
+    cmds.push(c(&[b"INCRBYFLOAT", b"s:ls", b"1"]));
+    cmds.push(c(&[b"incrbyfloat", b"s:if", b"0"]));
+    cmds.push(c(&[b"INCRBYFLOAT", b"s:if"]));
     // (frankenredis-ozrro) COPY is claimed at arity 3 only; the REPLACE spelling
     // keeps the cascade. Both the create and the already-exists branches run,
     // and the destination is read back so a copy that returned 1 without

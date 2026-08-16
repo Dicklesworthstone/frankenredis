@@ -8339,33 +8339,6 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
-                    parse_borrowed_plain_getset_packet(unparsed, &parser_config)
-                {
-                    let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
-                    if runtime
-                        .execute_plain_getset_borrowed_into(
-                            packet.key,
-                            packet.member,
-                            ts,
-                            client_resp3,
-                            &mut conn.write_buf,
-                        )
-                        .is_some()
-                    {
-                        Ok(BorrowedMultibulkAction::FastEncodedReply {
-                            consumed: packet.consumed,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
                     parse_borrowed_plain_append_packet(unparsed, &parser_config)
                 {
                     if let Some(response) =
@@ -9670,46 +9643,6 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
-                    parse_borrowed_plain_setnx_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) =
-                        runtime.execute_plain_setnx_borrowed(packet.key, packet.member, ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_incrbyfloat_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) =
-                        runtime.execute_plain_incrbyfloat_borrowed(packet.key, packet.member, ts)
-                    {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
                     parse_borrowed_plain_renamenx_packet(unparsed, &parser_config)
                 {
                     if let Some(response) =
@@ -9773,29 +9706,6 @@ fn process_buffered_frames(
                     parse_borrowed_plain_hsetnx_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_hsetnx_borrowed(
-                        packet.key,
-                        packet.start,
-                        packet.end,
-                        ts,
-                    ) {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_lset_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_lset_borrowed(
                         packet.key,
                         packet.start,
                         packet.end,
@@ -14770,6 +14680,10 @@ enum BorrowedDispatchFloorClass {
     Persist,
     Setex,
     Psetex,
+    Setnx,
+    Getset,
+    Lset,
+    Incrbyfloat,
     /// (frankenredis-ozrro) Bare `ZRANDMEMBER key`, the single-member reply
     /// form. Its sibling [`Self::ZrandmemberCount`] was classified in an earlier
     /// slice, which left this one alone ~3,600 lines deep in the chain.
@@ -14988,6 +14902,12 @@ enum BorrowedDispatchFloorCommand {
     Pexpiretime,
     /// `PERSIST`. Only the bare `PERSIST key` form has a borrowed route.
     Persist,
+    /// `SETNX`, `GETSET`, `LSET`, `INCRBYFLOAT`. (frankenredis-iqicb) Each already
+    /// had a borrowed parser and executor and merely sat deep in the probe chain.
+    Setnx,
+    Getset,
+    Lset,
+    Incrbyfloat,
     /// `PSETEX`. Millisecond sibling of `SETEX`; same borrowed route shape and the
     /// same decline on an out-of-range TTL.
     Psetex,
@@ -15128,6 +15048,9 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
         },
         4 => match uppercase_ascii_token::<4>(token)? {
             [b'E', b'C', b'H', b'O'] => Some(BorrowedDispatchFloorCommand::Echo),
+            [b'L', b'S', b'E', b'T'] => {
+                Some(BorrowedDispatchFloorCommand::Lset)
+            }
             [b'T', b'Y', b'P', b'E'] => Some(BorrowedDispatchFloorCommand::Type),
             [b'X', b'L', b'E', b'N'] => Some(BorrowedDispatchFloorCommand::Xlen),
             [b'H', b'L', b'E', b'N'] => Some(BorrowedDispatchFloorCommand::Hlen),
@@ -15156,6 +15079,9 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
         5 => match uppercase_ascii_token::<5>(token)? {
             [b'G', b'E', b'T', b'E', b'X'] => Some(BorrowedDispatchFloorCommand::Getex),
             [b'S', b'E', b'T', b'E', b'X'] => Some(BorrowedDispatchFloorCommand::Setex),
+            [b'S', b'E', b'T', b'N', b'X'] => {
+                Some(BorrowedDispatchFloorCommand::Setnx)
+            }
             [b'S', b'C', b'A', b'R', b'D'] => Some(BorrowedDispatchFloorCommand::Scard),
             [b'Z', b'C', b'A', b'R', b'D'] => Some(BorrowedDispatchFloorCommand::Zcard),
             [b'L', b'P', b'U', b'S', b'H'] => Some(BorrowedDispatchFloorCommand::Lpush),
@@ -15178,6 +15104,9 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
         6 => match uppercase_ascii_token::<6>(token)? {
             [b'D', b'B', b'S', b'I', b'Z', b'E'] => Some(BorrowedDispatchFloorCommand::Dbsize),
             [b'P', b'S', b'E', b'T', b'E', b'X'] => Some(BorrowedDispatchFloorCommand::Psetex),
+            [b'G', b'E', b'T', b'S', b'E', b'T'] => {
+                Some(BorrowedDispatchFloorCommand::Getset)
+            }
             [b'E', b'X', b'I', b'S', b'T', b'S'] => Some(BorrowedDispatchFloorCommand::Exists),
             [b'S', b'E', b'T', b'B', b'I', b'T'] => Some(BorrowedDispatchFloorCommand::Setbit),
             [b'Z', b'C', b'O', b'U', b'N', b'T'] => Some(BorrowedDispatchFloorCommand::Zcount),
@@ -15332,6 +15261,9 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
                 b'M',
                 b'E',
             ] => Some(BorrowedDispatchFloorCommand::Pexpiretime),
+            [b'I', b'N', b'C', b'R', b'B', b'Y', b'F', b'L', b'O', b'A', b'T'] => {
+                Some(BorrowedDispatchFloorCommand::Incrbyfloat)
+            }
             [
                 b'S',
                 b'I',
@@ -15956,6 +15888,12 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (2, BorrowedDispatchFloorCommand::Persist) => Some(BorrowedDispatchFloorClass::Persist),
         (4, BorrowedDispatchFloorCommand::Setex) => Some(BorrowedDispatchFloorClass::Setex),
         (4, BorrowedDispatchFloorCommand::Psetex) => Some(BorrowedDispatchFloorClass::Psetex),
+        (3, BorrowedDispatchFloorCommand::Setnx) => Some(BorrowedDispatchFloorClass::Setnx),
+        (3, BorrowedDispatchFloorCommand::Getset) => Some(BorrowedDispatchFloorClass::Getset),
+        (4, BorrowedDispatchFloorCommand::Lset) => Some(BorrowedDispatchFloorClass::Lset),
+        (3, BorrowedDispatchFloorCommand::Incrbyfloat) => {
+            Some(BorrowedDispatchFloorClass::Incrbyfloat)
+        }
         // `COMMAND COUNT` is the only COMMAND subcommand with a borrowed route,
         // so a declined classification here costs nothing: DOCS/INFO/LIST/GETKEYS
         // land on the generic path, which is exactly where walking the whole
@@ -19704,6 +19642,71 @@ fn try_dispatch_floor_classified_action(
                     out,
                     argv_scratch,
                 )
+            }
+        }
+        BorrowedDispatchFloorClass::Setnx => {
+            if let Some(packet) = parse_borrowed_plain_setnx_packet(unparsed, &parser_config)
+                && let Some(response) =
+                    runtime.execute_plain_setnx_borrowed(packet.key, packet.member, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(unparsed, parser_config, runtime, ts, out, argv_scratch)
+            }
+        }
+        BorrowedDispatchFloorClass::Incrbyfloat => {
+            if let Some(packet) = parse_borrowed_plain_incrbyfloat_packet(unparsed, &parser_config)
+                && let Some(response) =
+                    runtime.execute_plain_incrbyfloat_borrowed(packet.key, packet.member, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(unparsed, parser_config, runtime, ts, out, argv_scratch)
+            }
+        }
+        BorrowedDispatchFloorClass::Lset => {
+            if let Some(packet) = parse_borrowed_plain_lset_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_lset_borrowed(
+                    packet.key,
+                    packet.start,
+                    packet.end,
+                    ts,
+                )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(unparsed, parser_config, runtime, ts, out, argv_scratch)
+            }
+        }
+        BorrowedDispatchFloorClass::Getset => {
+            // GETSET writes its reply straight into the connection buffer, so unlike
+            // the others it needs `out` and the client's RESP version.
+            let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+            if let Some(packet) = parse_borrowed_plain_getset_packet(unparsed, &parser_config)
+                && runtime
+                    .execute_plain_getset_borrowed_into(
+                        packet.key,
+                        packet.member,
+                        ts,
+                        client_resp3,
+                        out,
+                    )
+                    .is_some()
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
+                    consumed: packet.consumed,
+                })
+            } else {
+                parse_borrowed_multibulk_action(unparsed, parser_config, runtime, ts, out, argv_scratch)
             }
         }
         BorrowedDispatchFloorClass::Psetex => {
@@ -42936,6 +42939,66 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
     #[test]
     fn dispatch_floor_classifier_recognizes_only_exact_target_tokens() {
         let cfg = ParserConfig::default();
+        // (frankenredis-iqicb) The four plain-parser routes and their claimed arities.
+        // Each asserts the claimed arity classifies and a NEIGHBOURING arity does not,
+        // because an over-broad claim silently swallows shapes whose errors the fast
+        // route cannot produce.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$5\r\nSeTnX\r\n$1\r\na\r\n$1\r\nv\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Setnx)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*4\r\n$5\r\nSETNX\r\n$1\r\na\r\n$1\r\nv\r\n$1\r\nx\r\n",
+                &cfg,
+            ),
+            None
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$6\r\nGeTsEt\r\n$1\r\na\r\n$1\r\nv\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Getset)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*2\r\n$6\r\nGETSET\r\n$1\r\na\r\n",
+                &cfg,
+            ),
+            None
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*4\r\n$4\r\nLsEt\r\n$1\r\na\r\n$1\r\n0\r\n$1\r\nv\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Lset)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$4\r\nLSET\r\n$1\r\na\r\n$1\r\n0\r\n",
+                &cfg,
+            ),
+            None
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$11\r\nInCrByFlOaT\r\n$1\r\na\r\n$1\r\n1\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Incrbyfloat)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*2\r\n$11\r\nINCRBYFLOAT\r\n$1\r\na\r\n",
+                &cfg,
+            ),
+            None
+        );
         // (frankenredis-iqicb) SETEX, claimed at arity 4 only. Mixed case classifies;
         // arity 3 and 5 must not, or the fast route would swallow shapes whose
         // errors it cannot produce.
