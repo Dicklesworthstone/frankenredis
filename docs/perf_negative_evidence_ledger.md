@@ -18948,3 +18948,49 @@ RETRY PREDICATE: a census on this shape must use two-point subtraction (warm, th
 3N, divide by the difference) so per-process construction cancels, and must assert the
 reply INSIDE the counting loop — a declined fast path would otherwise count nothing and
 pass vacuously, which is this campaign's most repeated failure mode.
+
+## EXTENSION (frankenredis-z2ce3) — the un-borrow defect is TEN executors, not seven; and the enumeration pattern is itself a hypothesis
+
+Source-verified under the freeze, no build. Extends MossySparrow's z2ce3.
+
+The defect has TWO SPELLINGS and each grep sees only its own:
+
+    SHAPE 1  keys.iter().map(|k| k.to_vec()).collect()   del, unlink, touch, exists_multi
+    SHAPE 2  let X_owned = Y.to_vec();                   move, zinter, setstore, zstore,
+                                                         zdiffstore, bitop
+
+Shape 2 across fr-runtime is TEN sites in SIX executors (16122, 16123, 25207, 26698,
+26834, 26835, 26949, 26950, 27022, 27023). Union with shape 1: **ten executors**, against
+the seven originally filed and the eight after the first correction.
+
+BITOP IS WORSE THAN THE BASE DEFECT. Its copies are unconditional AND their only readers
+clone them again inside the argv builder:
+
+    27022  let op_owned = op.to_vec();      27031  argv.push(op_owned.clone());
+    27023  let dest_owned = dest.to_vec();  27032  argv.push(dest_owned.clone());
+
+The non-logging path pays two `to_vec()` plus two clones where it needs zero — the
+closure could `to_vec()` straight from the borrowed slices.
+
+NOT VERIFIED: `execute_plain_move_borrowed` (16122-16123) matches the shape but its
+consumers were not read. Recorded as a candidate, not a member.
+
+THE METHOD FINDING, which is the transferable part and is now FOUR instances deep:
+**the enumeration pattern is itself a hypothesis, and it fails silently rather than
+loudly.** A grep for one spelling returns a confident, complete-looking list of exactly
+the cases that spelling covers, and nothing in the output signals the omission. Prior
+instances this campaign: suffix-vs-prefix token pairs (searched the wrong relation),
+a trailing-comma regex (dropped every multi-line token array, biasing toward short
+names), a whole-file vs fn-body token scan (inflated and truncated simultaneously). This
+one recurred ON the message that named the lesson, which is the strongest evidence it is
+structural rather than careless.
+
+FIX: enumerate by the PROPERTY — an unconditional owned copy whose only reader is the
+argv builder — across every spelling, or by structure rather than regex. And when two
+enumerations disagree, diff the member sets, never the totals.
+
+Campaign output: yes — extends a filed lever from seven routes to ten and finds one route
+paying double.
+
+RETRY PREDICATE: do not treat any count on this bead as final without stating the search
+pattern AND the boundary. Verify `move` before including it.
