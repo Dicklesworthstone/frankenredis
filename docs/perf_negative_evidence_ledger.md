@@ -22094,3 +22094,80 @@ RETRY PREDICATE: claim MSETNX at arity 5 (the parser exists; mirror its cascade 
 work the rest of the list — ZADD base, BITCOUNT range, the four expire conditionals. Two
 for two so far. Write the N+1 shape FIRST in every case: both defects were invisible until
 a shape existed, and neither would have been found by re-measuring the claimed form.
+
+--------------------------------------------------------------------------------
+CLOSING ROW — sort_ro_alpha unmoved across THREE ELFs and sixteen runs; the
+measurement loop on this campaign has converged (frankenredis-z2ce3)
+
+Third independently built binary, including the uncommitted multi-key TOUCH fix.
+Nothing moved. This row exists to close the shape, and to state plainly that further
+ABBA runs on it produce no information.
+
+CONVENTION: fr instructions per op / redis 7.2.4's. BELOW 1.0 = fr AHEAD.
+
+    A/A control (get_control)  0.4183 / 0.4288 / 0.4158      spread 3.1 pct
+
+    sort_ro_alpha, four runs   fr 13014.7 / 13025.2 / 12987.8 / 13007.6  spread 0.29 pct
+                               redis 8491.5 / 8333.6 / 8481.3 / 9016.0   spread 8.2 pct
+                               ratio 1.5327 / 1.5630 / 1.5314 / 1.4427   spread 8.3 pct
+                               dispatch 23.9 pct, all four
+
+    ACROSS THREE ELFs, sixteen runs total:
+      c36c3fb0…   fr 13002.6 instr/op   dispatch 23.9 pct
+      11b0c675…   fr 12973.8            dispatch 23.9 pct
+      6e4adcda…   fr 13008.8            dispatch 23.9 pct
+      spread of fr's own cost across three independent builds: 0.27 pct
+      dispatch share: 23.9 pct in ALL SIXTEEN RUNS, never varying by a tenth of a point
+
+Monotonic on both arms in every run of all three sessions.
+
+THE MEASUREMENT LOOP HAS CONVERGED, and saying so is the useful content of this row.
+Roughly seventy shapes have been measured or screened on this campaign. The position:
+
+    ABOVE PARITY          sort_ro_alpha   ~1.52x    NOT a rewire — no floor class, no
+                                                    borrowed parser, no executor. Needs
+                                                    a route written from nothing.
+    UNTAKEN REWIRES       expire_nx_opt   ~1.03x    51.0 pct dispatch, largest per-op
+                          set_base        0.520x    33.9 pct, highest FREQUENCY; the
+                                                    safer fix (move its cascade arm
+                                                    beside GET's) is verified unobstructed
+    CROSSED, CONFIRMED    zadd_xx_opt     1.2416 -> 0.5582
+                          zadd_base       0.8464 -> 0.5283
+                          bitcount_range  0.8654 -> 0.5335
+                          touch_2         3.2848 -> 0.5572   (fix UNCOMMITTED)
+    STOPS                 sinterstore_3src 7.4 pct dispatch — the cost is real work
+
+EVERY REMAINING SHAPE CARRIES A PREDICATE SAYING NOT TO RE-RUN IT, and those predicates
+were written for good reasons: the ratios are bounded by an incumbent arm that swings
+3-9 pct while fr's reproduces to a few tenths, and no additional runs fix a denominator.
+The next useful action on every open item is CODE, not measurement:
+
+    expire_nx_opt   claim arity 4 only; predicted ~0.61x, method three-for-three
+    set_base        move the cascade arm; predicted ~0.456x; verified no *3 matcher
+                    intervenes; regression-check set_xx_opt and set_ex_opt afterwards
+    touch_2         COMMIT THE FIX — it is currently uncommitted working-tree state
+    sort_ro_alpha   write a borrowed parser and executor; do NOT cost it off the
+                    rewire precedents
+
+WHAT THIS ROW IS WORTH, honestly: little on its own. Sixteen runs of an unchanging
+figure is confirmation, not discovery. It is banked because the standing instruction is
+to measure the worst ratio each turn, and the correct response once a loop converges is
+to say it has converged rather than to keep producing rows that repeat each other.
+
+PROVENANCE:
+  ELF sha256           6e4adcdaad95f2c332677edf937eee89683096f1873a09ade221216911aaa0f6
+                       built LOCALLY from the working tree at HEAD 199e1a778 plus the
+                       uncommitted multi-key TOUCH fix, with RCH_CARGO_WRAPPER_BYPASS=1
+                       and env -u CARGO_TARGET_DIR, executable path from
+                       --message-format=json, COPIED to a private path and sha'd there.
+  prior ELFs           11b0c67517b6130fac51679ec296db62d31163a6525c151f3c10e21ba86d4182
+                       c36c3fb0a66033deff0cf03dc6a313ef647d5970cd22596aac575120a5d2a297
+  harness              scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines in
+                       the SAME invocation.
+  host                 thinkstation1, 64 cores, /data 309G, no build this turn.
+
+RETRY PREDICATE: sort_ro_alpha is CLOSED to measurement. Sixteen runs across three
+independently built binaries have never moved fr's cost by more than 0.3 pct or the
+dispatch share by a tenth of a point. Do not measure it again until a borrowed SORT_RO
+route exists. The same applies to every shape in the table above: the next row in this
+ledger should be the RESULT OF A LEVER, not another reading of an unchanged shape.
