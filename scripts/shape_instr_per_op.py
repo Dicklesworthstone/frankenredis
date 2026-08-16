@@ -226,6 +226,11 @@ SHAPES = {
     "lpos_count_opt": (["RPUSH l a b c d e"], ["LPOS", "l", "c", "COUNT", "1"]),
     "bitcount_base": (["SET bb abcdefghijklmnop"], ["BITCOUNT", "bb"]),
     "bitcount_range": (["SET bb abcdefghijklmnop"], ["BITCOUNT", "bb", "0", "5"]),
+    # (frankenredis-2e4tq) The arity-keyed mis-claim, second instance. ZRANGE k s e
+    # WITHSCORES and ZRANGE k s e REV are both *5, and (5, Zrange) maps
+    # unconditionally to ZrangeWithscores.
+    "zrange_ws": (["ZADD z 1 a 2 b 3 c"], ["ZRANGE", "z", "0", "-1", "WITHSCORES"]),
+    "zrange_rev": (["ZADD z 1 a 2 b 3 c"], ["ZRANGE", "z", "0", "-1", "REV"]),
     # The control: a route none of the above levers touch.
     "get_control": (["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
 }
