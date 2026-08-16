@@ -77,6 +77,7 @@ import random
 import re
 import shutil
 import socket
+import tempfile
 import statistics
 import subprocess
 import sys
@@ -273,15 +274,59 @@ def provenance(fr_pid: int, redis_pid: int) -> dict:
     }
 
 
-def wait_ready(port: int, timeout_s: float = 30.0) -> None:
+def wait_ready(port: int, timeout_s: float = 30.0,
+               proc: subprocess.Popen | None = None) -> None:
+    """(frankenredis-yaul4) Fail on a DEAD server immediately, and say so.
+
+    Without the `proc` check a server that exits during startup is only noticed
+    30s later, and then only as a timeout -- or worse, the run proceeds and
+    provenance dies reading /proc/<pid>/exe of a corpse, which surfaces as a bare
+    FileNotFoundError naming a pid and nothing else. That is exactly how the
+    poisoned repo-root dump.rdb presented here.
+    """
     deadline = time.time() + timeout_s
     while time.time() < deadline:
+        if proc is not None and proc.poll() is not None:
+            raise SystemExit(
+                f"server on port {port} exited during startup with rc="
+                f"{proc.returncode} before answering PING -- it never ran, so "
+                f"there is no measurement here to interpret")
         probe = subprocess.run([CLI, "-p", str(port), "ping"],
                                capture_output=True, text=True)
         if probe.returncode == 0 and "PONG" in probe.stdout:
             return
         time.sleep(0.2)
     raise SystemExit(f"server on port {port} never became ready")
+
+
+def free_port() -> int:
+    """Bind port 0 and hand back what the kernel assigned."""
+    probe = socket.socket()
+    try:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+    finally:
+        probe.close()
+
+
+def assert_ours(port: int, proc: subprocess.Popen, label: str) -> None:
+    """(frankenredis-yaul4) The process answering on `port` must be the one we
+    started. PING proves only that SOMETHING listens: with the old fixed ports a
+    peer's server answered, our own engine exited unable to bind, and the run was
+    one step away from reporting a ratio measured on somebody else's binary. The
+    ELF sha in provenance() does not catch this -- it shas OUR pid, not the pid
+    that actually served the traffic."""
+    out = subprocess.run([CLI, "-p", str(port), "info", "server"],
+                         capture_output=True, text=True)
+    match = re.search(r"process_id:(\d+)", out.stdout)
+    if not match:
+        raise SystemExit(f"{label} on port {port}: INFO server carried no process_id")
+    served_by = int(match.group(1))
+    if served_by != proc.pid:
+        raise SystemExit(
+            f"{label} on port {port} is served by pid {served_by}, not the "
+            f"process we launched (pid {proc.pid}) -- another agent holds that "
+            f"port, so any ratio from this run would describe their binary")
 
 
 def seed(port: int, commands: list[str]) -> None:
@@ -382,8 +427,11 @@ def main(argv_in: list[str]) -> int:
     parser.add_argument("--rounds", type=int, default=9)
     parser.add_argument("--ops", type=int, default=50000)
     parser.add_argument("--pipeline", type=int, default=16)
-    parser.add_argument("--fr-port", type=int, default=27841)
-    parser.add_argument("--redis-port", type=int, default=27842)
+    # (frankenredis-yaul4) Ephemeral by default. The fixed pair 27841/27842 was
+    # found held by ANOTHER agent's run (an fr_post binary and its redis), so
+    # our own fr could not bind and exited while the squatter answered PING.
+    parser.add_argument("--fr-port", type=int, default=0)
+    parser.add_argument("--redis-port", type=int, default=0)
     parser.add_argument("--client-core", default=None)
     # (frankenredis-xvq1a) Optional server pinning. The per-arm nulls are each
     # arm's own first half over its second half — WITHIN-process drift — while the
@@ -432,6 +480,13 @@ def main(argv_in: list[str]) -> int:
     if shapes is None:
         raise SystemExit(f"unknown shape set {args.shapes}; try --list")
 
+    # (frankenredis-yaul4) 0 means "pick a free one"; an explicit --fr-port /
+    # --redis-port is still honoured, and identity-checked either way.
+    if args.fr_port == 0:
+        args.fr_port = free_port()
+    if args.redis_port == 0:
+        args.redis_port = free_port()
+
     def pinned(core: str | None, cmd: list[str]) -> list[str]:
         return (["taskset", "-c", core] + cmd) if core else cmd
 
@@ -439,17 +494,30 @@ def main(argv_in: list[str]) -> int:
         parser.error("--fr-core and --redis-core must be given together; pinning "
                      "one server and not the other is worse than pinning neither")
 
+    # (frankenredis-yaul4) Both engines run in a private directory. Bare,
+    # they inherit this process's cwd -- normally the repo root, shared by a dozen
+    # agents -- and load whatever dump.rdb is sitting there. An fr-written
+    # dump.rdb carrying a FUNCTION library redis 7.2.4 refuses makes redis abort
+    # during startup, which reached this harness as a FileNotFoundError on
+    # /proc/<pid>/exe inside provenance. A perf harness that cannot boot its
+    # incumbent has no ratio to report.
+    workdir = tempfile.mkdtemp(prefix="fr_balanced_square_")
+    fr_bin = os.path.abspath(args.fr_bin)
     fr = subprocess.Popen(
-        pinned(args.fr_core, [args.fr_bin, "--port", str(args.fr_port)]),
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    second_arm = ([args.fr_bin, "--port", str(args.redis_port)] if args.cross_null
-                  else [REDIS, "--port", str(args.redis_port),
+        pinned(args.fr_core, [fr_bin, "--port", str(args.fr_port),
+                              "--save", "", "--appendonly", "no"]),
+        cwd=workdir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    second_arm = ([fr_bin, "--port", str(args.redis_port),
+                   "--save", "", "--appendonly", "no"] if args.cross_null
+                  else [os.path.abspath(REDIS), "--port", str(args.redis_port),
                         "--save", "", "--appendonly", "no"])
-    redis = subprocess.Popen(pinned(args.redis_core, second_arm),
+    redis = subprocess.Popen(pinned(args.redis_core, second_arm), cwd=workdir,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
-        wait_ready(args.fr_port)
-        wait_ready(args.redis_port)
+        wait_ready(args.fr_port, proc=fr)
+        wait_ready(args.redis_port, proc=redis)
+        assert_ours(args.fr_port, fr, "fr")
+        assert_ours(args.redis_port, redis, "second arm")
         prov = provenance(fr.pid, redis.pid)
         if args.expect_elf and not prov["fr_elf_sha256"].startswith(args.expect_elf):
             raise SystemExit(
