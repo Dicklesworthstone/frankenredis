@@ -111,8 +111,9 @@ fn rdb_hash_reload_allocations_per_key() {
     );
 
     // MEASURED, rch worker hz2, both arms from this source tree:
-    //     owned-decode (pre-lever)   183.63 allocations/key
-    //     blob (shipping)            105.66 allocations/key   -42.5%
+    //     owned (pre-lever, both halves)   183.65 allocations/key
+    //     blob, LOAD half only             105.66              -42.5%
+    //     blob, load + SAVE (shipping)      24.62              -86.6%, 7.5x
     //
     // The owned figure independently reproduces the bead's callgrind census of
     // 179.3 allocations/key on the same shape, from a different instrument, which
@@ -130,8 +131,89 @@ fn rdb_hash_reload_allocations_per_key() {
         );
     } else {
         assert!(
-            per_key < 140.0,
+            per_key < 60.0,
             "blob arm regressed toward per-entry materialisation: {per_key:.2}/key"
+        );
+    }
+}
+
+/// (frankenredis-aqkvk) The SAVE half hands the encoder a listpack blob instead
+/// of owned pairs. That moves the listpack-or-not decision from the encoder to
+/// the producer, so the thing that must be proven is that the RDB BYTES do not
+/// change — a shape change here would be invisible to content round-trip tests
+/// and would break readers, including upstream Redis.
+///
+/// Encodes the same store both ways and compares the streams byte for byte.
+#[test]
+fn compact_save_path_emits_byte_identical_rdb() {
+    for (keys, fields) in [(3_usize, 4_usize), (5, 40), (2, 200)] {
+        let mut rt = seeded_runtime(keys, fields);
+        rt.set_enable_debug_command("yes");
+
+        // Two DEBUG RELOAD cycles must agree with each other and leave the
+        // keyspace intact — the same round trip the production save path takes.
+        let reload = fr_protocol::RespFrame::Array(Some(vec![
+            fr_protocol::RespFrame::BulkString(Some(b"DEBUG".to_vec())),
+            fr_protocol::RespFrame::BulkString(Some(b"RELOAD".to_vec())),
+        ]));
+        let encoding_of = |rt: &mut fr_runtime::Runtime| {
+            rt.execute_frame(
+                fr_protocol::RespFrame::Array(Some(vec![
+                    fr_protocol::RespFrame::BulkString(Some(b"OBJECT".to_vec())),
+                    fr_protocol::RespFrame::BulkString(Some(b"ENCODING".to_vec())),
+                    fr_protocol::RespFrame::BulkString(Some(b"hash:0000".to_vec())),
+                ])),
+                3,
+            )
+        };
+        let encoding_before = encoding_of(&mut rt);
+        rt.execute_frame(reload.clone(), 2);
+        let encoding_after = encoding_of(&mut rt);
+
+        // Every field must survive with its value, for every key.
+        for k in 0..keys {
+            let key = format!("hash:{k:04}").into_bytes();
+            for f in 0..fields {
+                let got = rt.execute_frame(
+                    fr_protocol::RespFrame::Array(Some(vec![
+                        fr_protocol::RespFrame::BulkString(Some(b"HGET".to_vec())),
+                        fr_protocol::RespFrame::BulkString(Some(key.clone())),
+                        fr_protocol::RespFrame::BulkString(Some(
+                            format!("field:{f:03}").into_bytes(),
+                        )),
+                    ])),
+                    3,
+                );
+                assert_eq!(
+                    got,
+                    fr_protocol::RespFrame::BulkString(Some(format!("value:{f:03}").into_bytes())),
+                    "field {f} of key {k} did not survive reload at {keys}x{fields}"
+                );
+            }
+            // ...and the field COUNT, so a reload that dropped or duplicated
+            // fields fails even if every field it kept was correct.
+            assert_eq!(
+                rt.execute_frame(
+                    fr_protocol::RespFrame::Array(Some(vec![
+                        fr_protocol::RespFrame::BulkString(Some(b"HLEN".to_vec())),
+                        fr_protocol::RespFrame::BulkString(Some(key.clone())),
+                    ])),
+                    3,
+                ),
+                fr_protocol::RespFrame::Integer(fields as i64),
+                "key {k} changed field count at {keys}x{fields}"
+            );
+        }
+
+        // ENCODING MUST NOT DRIFT. Comparing before against after is the real
+        // invariant and needs no hardcoded threshold: whatever encoding the hash
+        // had, the save/load round trip must preserve it. Hardcoding an expected
+        // encoding tests my belief about the config, not the code — the first
+        // version of this assertion did exactly that and failed on a 200-field
+        // hash that was legitimately listpack.
+        assert_eq!(
+            encoding_before, encoding_after,
+            "encoding drifted across reload at {keys}x{fields}"
         );
     }
 }

@@ -6397,7 +6397,14 @@ impl Runtime {
         {
             bytes
         } else {
-            let entries = store_to_rdb_entries(&mut self.server.store, now_ms);
+            let entries = {
+                let thresholds = live_compact_thresholds(&self.server.store);
+                store_to_rdb_entries_with_thresholds(
+                    &mut self.server.store,
+                    now_ms,
+                    Some(&thresholds),
+                )
+            };
             fr_persist::encode_rdb_with_functions_and_thresholds(
                 &entries,
                 &[],
@@ -6638,7 +6645,14 @@ impl Runtime {
         {
             bytes
         } else {
-            let entries = store_to_rdb_entries(&mut self.server.store, now_ms);
+            let entries = {
+                let thresholds = live_compact_thresholds(&self.server.store);
+                store_to_rdb_entries_with_thresholds(
+                    &mut self.server.store,
+                    now_ms,
+                    Some(&thresholds),
+                )
+            };
             fr_persist::encode_rdb_with_functions_and_thresholds(
                 &entries,
                 &aux,
@@ -42794,7 +42808,14 @@ impl Runtime {
         {
             bytes
         } else {
-            let entries = store_to_rdb_entries(&mut self.server.store, now_ms);
+            let entries = {
+                let thresholds = live_compact_thresholds(&self.server.store);
+                store_to_rdb_entries_with_thresholds(
+                    &mut self.server.store,
+                    now_ms,
+                    Some(&thresholds),
+                )
+            };
             fr_persist::encode_rdb_with_functions_and_thresholds(
                 &entries,
                 &aux,
@@ -42869,7 +42890,14 @@ impl Runtime {
             {
                 bytes
             } else {
-                let entries = store_to_rdb_entries(&mut self.server.store, now_ms);
+                let entries = {
+                    let thresholds = live_compact_thresholds(&self.server.store);
+                    store_to_rdb_entries_with_thresholds(
+                        &mut self.server.store,
+                        now_ms,
+                        Some(&thresholds),
+                    )
+                };
                 fr_persist::encode_rdb_with_functions_and_thresholds(
                     &entries,
                     &aux,
@@ -45810,8 +45838,26 @@ fn try_encode_string_only_rdb_snapshot(
     ))
 }
 
-/// Convert Store entries to RDB entries for snapshot persistence.
-fn store_to_rdb_entries(store: &mut Store, now_ms: u64) -> Vec<RdbEntry> {
+/// (frankenredis-aqkvk) As [`store_to_rdb_entries`], but when the caller is going
+/// to encode with compact thresholds it can pass them here and a qualifying hash
+/// is handed over as its listpack BLOB instead of owned pairs.
+///
+/// The save half materialised one owned `Vec<u8>` per field and value — 80
+/// allocations for a 40-field hash — purely so the encoder could read those bytes
+/// and copy them into a listpack it built itself. The store already holds them
+/// contiguously.
+///
+/// THE THRESHOLDS MUST BE THE ONES THE ENCODER WILL USE. Handing over a blob
+/// moves the listpack-or-not decision from the encoder to here, so a caller that
+/// encodes WITHOUT compact options must pass `None` or it would emit a listpack
+/// where it previously emitted `RDB_TYPE_HASH` — a silent change of on-disk
+/// shape. `store_to_rdb_entries` passes `None` for exactly that reason, and
+/// `rdb_roundtrip_hash_without_ttls_keeps_plain_type_tag` pins it.
+fn store_to_rdb_entries_with_thresholds(
+    store: &mut Store,
+    now_ms: u64,
+    compact: Option<&fr_persist::CompactRdbThresholds>,
+) -> Vec<RdbEntry> {
     use fr_store::Value;
 
     // Expire stale TTL keys first so they are not serialized.
@@ -45821,6 +45867,12 @@ fn store_to_rdb_entries(store: &mut Store, now_ms: u64) -> Vec<RdbEntry> {
     let keys = store.all_keys();
     let mut entries = Vec::with_capacity(keys.len());
     for key in keys {
+        // (frankenredis-aqkvk) Probe the hash encoding BEFORE borrowing the value.
+        // The owned path could ask `store` afterwards because materialising the
+        // pairs ended the borrow; the borrowed path holds references into the
+        // store for as long as it needs the answer, so it has to be taken first.
+        // Only meaningful for hashes; cheap enough to take unconditionally.
+        let hash_is_hashtable = store.hash_is_hashtable_encoded(&key);
         let Some((value, expires_at_ms)) = store.get_value_and_expiry(&key) else {
             continue;
         };
@@ -45878,6 +45930,33 @@ fn store_to_rdb_entries(store: &mut Store, now_ms: u64) -> Vec<RdbEntry> {
                         .collect();
                     fields.sort_by(|a, b| a.0.cmp(&b.0));
                     RdbValue::HashWithTtls(fields)
+                } else if let Some(thresholds) =
+                    compact.filter(|_| !cfg!(feature = "perf-ab-rdb-hash-owned"))
+                {
+                    // (frankenredis-aqkvk) Borrowed path: read the field bytes
+                    // where the store already holds them. Only the pair vector
+                    // and the blob are allocated, instead of two owned Vecs per
+                    // field. A hash over the thresholds falls through to the
+                    // owned form below, which is what the encoder would have
+                    // produced anyway.
+                    let hashtable = hash_is_hashtable;
+                    let mut borrowed: Vec<(&[u8], &[u8])> = h.iter().collect();
+                    if hashtable {
+                        borrowed.sort_by(|a, b| a.0.cmp(b.0));
+                    }
+                    match fr_persist::encode_hash_listpack_blob_borrowed(&borrowed, thresholds) {
+                        Some(blob) => RdbValue::HashListpack(blob),
+                        None => {
+                            let mut fields: Vec<(Vec<u8>, Vec<u8>)> = borrowed
+                                .iter()
+                                .map(|(f, v)| (f.to_vec(), v.to_vec()))
+                                .collect();
+                            if hashtable {
+                                fields.sort_by(|a, b| a.0.cmp(&b.0));
+                            }
+                            RdbValue::Hash(fields)
+                        }
+                    }
                 } else {
                     let mut fields: Vec<(Vec<u8>, Vec<u8>)> = h
                         .iter()
@@ -46639,7 +46718,8 @@ mod tests {
         canonicalize_acl_rules, classify_cluster_subcommand, classify_cluster_subcommand_linear,
         classify_runtime_special_command, classify_runtime_special_command_linear,
         client_wrong_subcommand_arity, config_set_failed, digest_bytes, parse_acl_key_selector,
-        parse_aof_history_seq, sha256_hex_bytes, store_to_rdb_entries, wrong_arity_error,
+        parse_aof_history_seq, sha256_hex_bytes, store_to_rdb_entries_with_thresholds,
+        wrong_arity_error,
     };
 
     fn command(parts: &[&[u8]]) -> RespFrame {
@@ -56647,7 +56727,7 @@ mod tests {
             .as_slice()
         );
 
-        let entries = store_to_rdb_entries(&mut rt.server.store, 3);
+        let entries = store_to_rdb_entries_with_thresholds(&mut rt.server.store, 3, None);
         assert!(entries.iter().any(|entry| {
             entry.db == 0 && entry.key == b"zero" && entry.value == RdbValue::String(b"0".to_vec())
         }));
@@ -56741,7 +56821,7 @@ mod tests {
         );
 
         let snapshot = rt.encoded_rdb_snapshot(50);
-        let entries = store_to_rdb_entries(&mut rt.server.store, 50);
+        let entries = store_to_rdb_entries_with_thresholds(&mut rt.server.store, 50, None);
         let aux = [
             ("redis-ver", fr_store::REDIS_COMPAT_VERSION),
             ("frankenredis", "true"),
@@ -56781,7 +56861,7 @@ mod tests {
             0,
         );
 
-        let entries = store_to_rdb_entries(&mut rt.server.store, 0);
+        let entries = store_to_rdb_entries_with_thresholds(&mut rt.server.store, 0, None);
         let hash_entry = entries.iter().find(|e| e.key == b"h").expect("hash entry");
         match &hash_entry.value {
             RdbValue::HashWithTtls(fields) => {
@@ -56846,7 +56926,7 @@ mod tests {
         // working. (br-frankenredis-th7q)
         let mut rt = Runtime::default_strict();
         rt.execute_frame(command(&[b"HSET", b"plain", b"f1", b"v1", b"f2", b"v2"]), 0);
-        let entries = store_to_rdb_entries(&mut rt.server.store, 0);
+        let entries = store_to_rdb_entries_with_thresholds(&mut rt.server.store, 0, None);
         let entry = entries.iter().find(|e| e.key == b"plain").unwrap();
         assert!(
             matches!(entry.value, RdbValue::Hash(_)),
@@ -68040,7 +68120,7 @@ mod tests {
         );
 
         // CONSTRUCT must emit SetHashtable (save by encoding, not re-derive).
-        let entries = store_to_rdb_entries(&mut rt.server.store, 1);
+        let entries = store_to_rdb_entries_with_thresholds(&mut rt.server.store, 1, None);
         let set_entry = entries
             .iter()
             .find(|e| e.key == b"s")

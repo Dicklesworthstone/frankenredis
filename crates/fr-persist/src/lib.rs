@@ -2162,6 +2162,44 @@ fn encode_hash_listpack_blob(fields: &[(Vec<u8>, Vec<u8>)]) -> Option<Vec<u8>> {
     finish_listpack_blob(encoded, fields.len().saturating_mul(2))
 }
 
+/// (frankenredis-aqkvk) Borrowed twin of [`encode_hash_listpack_blob`] plus the
+/// threshold test, returning the RAW listpack blob for `RdbValue::HashListpack`.
+///
+/// The save side used to materialise one owned `Vec<u8>` per field and value —
+/// 80 allocations for a 40-field hash — solely so the encoder could read their
+/// bytes and copy them into a listpack it built itself. The store already holds
+/// those bytes contiguously; this reads them in place, so the whole hash costs
+/// the blob allocation and nothing per field.
+///
+/// Byte-identical to `encode_compact_hash_listpack` minus its `rdb_encode_string`
+/// wrapper, which the `HashListpack` encoder arm applies instead — same
+/// thresholds, same entry encoding, same order.
+#[must_use]
+pub fn encode_hash_listpack_blob_borrowed(
+    fields: &[(&[u8], &[u8])],
+    thresholds: &CompactRdbThresholds,
+) -> Option<Vec<u8>> {
+    if fields.len() > thresholds.hash_max_listpack_entries {
+        return None;
+    }
+    if fields.iter().any(|(f, v)| {
+        f.len() > thresholds.hash_max_listpack_value || v.len() > thresholds.hash_max_listpack_value
+    }) {
+        return None;
+    }
+    let cap = LISTPACK_BLOB_OVERHEAD
+        + fields
+            .iter()
+            .map(|(f, v)| f.len() + v.len() + 22)
+            .sum::<usize>();
+    let mut encoded = listpack_blob_with_header(cap);
+    for (field, value) in fields {
+        encode_listpack_entry(&mut encoded, field);
+        encode_listpack_entry(&mut encoded, value);
+    }
+    finish_listpack_blob(encoded, fields.len().saturating_mul(2))
+}
+
 fn encode_compact_zset_listpack(
     members: &[(Vec<u8>, f64)],
     thresholds: &CompactRdbThresholds,
