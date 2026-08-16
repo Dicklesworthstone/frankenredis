@@ -42,6 +42,9 @@ import re
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# Observed 2026-08-16: MOVE, WAIT, bitfield_get, zcount, bitcount.
+NOOP_BASELINE = 5
 FR = os.path.join(REPO, "crates/fr-runtime/src/lib.rs")
 
 ALLOC = re.compile(r"\.to_vec\(\)|\.clone\(\)|format!\(|vec!\[|String::from|to_string\(\)"
@@ -107,9 +110,24 @@ def main():
     for after, total, name, n in rows[:top]:
         print("%6d %6d  %-52s %d" % (after, total, name, n))
 
+    noop = sum(1 for r in rows if r[0])
     print("\n%d executors have at least one allocation site; %d have one that a"
-          % (len(rows), sum(1 for r in rows if r[0])))
+          % (len(rows), noop))
     print("no-op call still pays. A count is not a cost -- rank here, then measure.")
+
+    # frankenredis ALREADY ran the allocator campaign that frankenlibc and
+    # frankentorch are now opening: gu5nf started at "58% of on-CPU samples were
+    # allocator" and closed 35 sub-beads driving per-request allocation to 0.089
+    # allocs/request at -P16. So the whole-program primitive is not the story here.
+    #
+    # What survived it is route-shaped, and that is exactly what a per-request
+    # average hides: a handful of executors still allocate on a path that returns
+    # a no-op reply. Baseline the residue so it cannot grow back quietly.
+    if noop > NOOP_BASELINE:
+        print("\nFAIL: %d executors allocate after a no-op reply, baseline %d. The "
+              "gu5nf campaign drove per-request allocation to 0.089 at -P16; "
+              "regrowing the residue is a decision, not a drift." % (noop, NOOP_BASELINE))
+        return 1
     return 0
 
 
