@@ -226,7 +226,8 @@ def dispatch_share(dump_path):
     return disp / attributed, sorted(top, reverse=True)[:5]
 
 
-def run_once(engine: str, seeds, cmd, ops: int, workdir: str, tag: str) -> int:
+def run_once(engine: str, seeds, cmd, ops: int, workdir: str, tag: str,
+             locale: str | None = None) -> int:
     out = os.path.join(workdir, "cg.%s.out" % tag)
     port = free_port()
     argv = ["valgrind", "--tool=callgrind", "--callgrind-out-file=" + out,
@@ -234,7 +235,14 @@ def run_once(engine: str, seeds, cmd, ops: int, workdir: str, tag: str) -> int:
             engine, "--port", str(port), "--save", "", "--appendonly", "no"]
     # cwd=workdir: never boot an engine in the repo root, which is shared and may
     # hold a dump.rdb redis refuses to load (frankenredis-7afsd).
-    proc = subprocess.Popen(argv, cwd=workdir,
+    # (frankenredis-3f7jb) Both engines must be pinned to the SAME locale for a
+    # SORT ALPHA row to mean anything: redis byte-compares under C and calls
+    # strcoll under a UTF-8 locale, and fr does the same by design (jaezc). An
+    # unpinned harness compares whatever each inherited.
+    env = None
+    if locale:
+        env = dict(os.environ, LC_ALL=locale, LC_COLLATE=locale, LANG=locale)
+    proc = subprocess.Popen(argv, cwd=workdir, env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     sock = None
     try:
@@ -275,10 +283,29 @@ def run_once(engine: str, seeds, cmd, ops: int, workdir: str, tag: str) -> int:
     return total_ir(out)
 
 
-def instr_per_op(engine: str, seeds, cmd, ops: int, workdir: str, label: str):
-    low = run_once(engine, seeds, cmd, ops, workdir, label + ".n")
-    high = run_once(engine, seeds, cmd, ops * 2, workdir, label + ".2n")
-    return (high - low) / ops, low, high
+def instr_per_op(engine: str, seeds, cmd, ops: int, workdir: str, label: str,
+                 locale: str | None = None):
+    low = run_once(engine, seeds, cmd, ops, workdir, label + ".n", locale)
+    high = run_once(engine, seeds, cmd, ops * 2, workdir, label + ".2n", locale)
+    delta = high - low
+    # (frankenredis-3f7jb) Two-point subtraction assumes the 2N run does strictly
+    # more work than the N run. When a command carries large or VARIABLE one-time
+    # initialisation -- SORT ALPHA under a UTF-8 locale loads ICU data on first use
+    # -- that can fail, and it failed here: a run produced Ir(2N) < Ir(N) and the
+    # harness cheerfully printed "-1.0112x", then on a retry "-479.7188x". A ratio
+    # with a negative or implausibly small numerator is not a measurement, and
+    # printing one is worse than refusing, because it looks like a result.
+    if delta <= 0:
+        raise SystemExit(
+            "%s: Ir(2N)=%d is NOT greater than Ir(N)=%d. The two-point subtraction "
+            "is invalid for this shape -- it has one-time work that did not cancel. "
+            "Re-run; if it persists, the shape needs a larger N or a warm-up."
+            % (label, high, low))
+    if delta < low * 0.01:
+        raise SystemExit(
+            "%s: Ir(2N)-Ir(N)=%d is under 1%% of Ir(N)=%d, so startup dominates and "
+            "the per-op figure is noise. Raise N." % (label, delta, low))
+    return delta / ops, low, high
 
 
 def main() -> int:
@@ -297,10 +324,16 @@ def main() -> int:
     # redis arm is half the wall-clock of every measurement (and the noisy half,
     # at ~8%). Building a ladder across a dozen commands is the case for it.
     fr_only = "--fr-only" in args
+    locale = None
+    for a in args:
+        if a.startswith("--locale="):
+            locale = a.split("=", 1)[1]
     ops = int(args[2]) if len(args) > 2 else 2000
     seeds, cmd = SHAPES[shape]
     workdir = tempfile.mkdtemp(prefix="fr_instr_")
-    fr_ipo, fr_lo, fr_hi = instr_per_op(fr_bin, seeds, cmd, ops, workdir, "fr")
+    if locale:
+        print("  both engines pinned to LC_ALL=%s" % locale)
+    fr_ipo, fr_lo, fr_hi = instr_per_op(fr_bin, seeds, cmd, ops, workdir, "fr", locale)
     if fr_only:
         got = dispatch_share(os.path.join(workdir, "cg.fr.2n.out"))
         frac = got[0] if got else float("nan")
@@ -308,7 +341,7 @@ def main() -> int:
               % (shape, fr_ipo, fr_ipo * frac, 100 * frac))
         print("  callgrind dumps: %s" % workdir)
         return 0
-    rd_ipo, rd_lo, rd_hi = instr_per_op(REDIS, seeds, cmd, ops, workdir, "redis")
+    rd_ipo, rd_lo, rd_hi = instr_per_op(REDIS, seeds, cmd, ops, workdir, "redis", locale)
     print("shape %s   N=%d 2N=%d" % (shape, ops, ops * 2))
     print("  fr     Ir(N)=%-14d Ir(2N)=%-14d -> %10.1f instr/op" % (fr_lo, fr_hi, fr_ipo))
     print("  redis  Ir(N)=%-14d Ir(2N)=%-14d -> %10.1f instr/op" % (rd_lo, rd_hi, rd_ipo))
