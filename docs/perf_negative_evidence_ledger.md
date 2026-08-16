@@ -17431,3 +17431,55 @@ than push), AND it is measured on `fr_store::decode_rdb_string` — the decoder 
 RESTORE path actually executes — rather than on this one. The 190-calls-per-op
 figure stands as a live target for whoever owns crates/fr-store/src/lib.rs; it is
 ~2,090 instructions per RESTORE at ~11 instructions per call.
+
+
+---
+
+## 2026-08-16 BlackCat: METHOD — cross-worker rch builds did NOT contaminate a locally-benchmarked row; eight untouched functions matched to ZERO instructions (`frankenredis-33832`)
+
+torch found the rch fleet is heterogeneous in glibc with no worker-pin flag, which
+raises the obvious question for every row here: if the two arms of an A/B were
+BUILT on different workers, is the delta the lever or the toolchain? For my
+RESTORE rows the answer is measurable rather than arguable, and it is no.
+
+SETUP: baseline ELF built on rch worker vmi1152480, candidate on vmi1153651, both
+benchmarked LOCALLY on thinkstation1 under callgrind (harness scratchpad
+cg_slope.sh + restore_profile.py + cg_delta.py, 200 keys x 40-field hash RESTORE).
+
+EVIDENCE — per-function self cost, instructions per op, on functions the change
+cannot touch:
+
+| function | vmi1152480 | vmi1153651 | delta |
+|---|---|---|---|
+| `crc64_redis_slice_table` | 1,195 | 1,195 | 0 |
+| `decode_rdb_string` | 5,662 | 5,662 | 0 |
+| `PackedStrMap::append` | 3,520 | 3,520 | 0 |
+| dup-field `HashMap::insert` | 4,174 | 4,174 | 0 |
+| `from_unique_pairs_borrowed` | 947 | 947 | 0 |
+| `parse_command_args_borrowed_into` | 400 | 400 | 0 |
+| `classify_command` | 380 | 380 | 0 |
+| `execute_frame_internal` | 493 | 493 | 0 |
+
+Zero, not "small". A later same-worker run reproduced the same property on a
+different pair (`decode_rdb_string` 26,703 -> 26,703, `append_entry`
+14,240 -> 14,240 across a build that changed two other functions).
+
+WHY IT HOLDS, so the scope of the reassurance is clear. The binaries link glibc
+DYNAMICALLY and both arms RUN on thinkstation1, so `memcpy`/`memcmp` and friends
+resolve to the same local glibc no matter which worker compiled them. And this
+repo sets rustflags `-Z threads=4` only — there is no `-C target-cpu=native`, so
+the emitted ISA is baseline x86-64 on every worker. Same toolchain pin, same
+Cargo.lock, same overlaid sources.
+
+WHERE THE CONCERN DOES STILL BITE, and this is the part worth keeping: a row
+benchmarked ON the workers rather than locally, or any build that turns on
+`-C target-cpu=native`, has none of these protections. The mitigation is cheap
+and general — include at least two functions your change cannot touch in the
+per-function attribution and show they moved by zero. If they did not, the row is
+measuring the toolchain, not the lever.
+
+RETRY PREDICATE: do not retry this check unless `.cargo/config.toml` gains a
+`target-cpu` or other codegen-affecting rustflag, the toolchain pin changes, or a
+row is benchmarked on an rch worker instead of locally. Under those conditions
+the zero-delta property has to be re-established before any cross-worker A/B is
+quoted.
