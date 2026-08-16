@@ -393,9 +393,24 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
     # pairings, two admissible rows per arm. The conditional path costs ~16%
     # relative to plain, on the same command, key and TTL state.
     #
-    # So the target is the Some(cond_token) branch of
-    # execute_plain_expire_kind_borrowed -- NOT dispatch (ruled out: classified and
-    # served) and NOT the active-expire cycle (ruled out by ttlprobe, kvuyy).
+    # THE CAUSAL READING WAS WRONG (frankenredis-kdehn). The measurement stands;
+    # what it means does not. execute_plain_expire_borrowed is 15 lines and
+    # DELEGATES to execute_plain_expire_kind_borrowed, so plain and conditional
+    # share ONE executor and both call pttl_no_stats. Worse, the benchmarked NX
+    # shape breaks at the `nx && remaining.is_some()` guard BEFORE
+    # expire_at_milliseconds -- so it does strictly LESS store work than plain,
+    # which performs the pttl read AND the set. A path doing less work cannot be
+    # slower because of that work.
+    #
+    # The two shapes also differ in OUTCOME: plain returns 1 having set a TTL, the
+    # NX form returns 0 having set nothing. So this pair does not isolate "the
+    # conditional" at all -- it compares a successful write against a rejected one.
+    #
+    # A fair control is an NX that SUCCEEDS (key with no existing TTL), against
+    # plain on the same key. Until that is run, the 1.08-vs-0.93 gap has no
+    # attributed cause: dispatch is ruled out, the expire cycle is ruled out
+    # (kvuyy), the shared executor is ruled out here, and the parsers differ only
+    # by the one bulk that arity 4 inherently carries.
     "expirecond": [
         ("expire_plain", ["SET e v"], ["EXPIRE", "e", "500"]),
         ("expire_nx_cond", ["SET s v", "EXPIRE s 10000"], ["EXPIRE", "s", "500", "NX"]),
