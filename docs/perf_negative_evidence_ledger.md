@@ -19282,3 +19282,84 @@ the next target.
 RETRY PREDICATE: attack the BIGNUM path, not fast-path coverage. And when quoting any
 INCRBYFLOAT figure, state the input class — the two differ by 2x on fr and by 6 pct on
 redis, so the shape choice, not the engine, dominates the number.
+
+--------------------------------------------------------------------------------
+NO ROW FOR THE TARGET SHAPE — del_missing null-failed; and the admissible rows are
+indistinguishable from the control (frankenredis-z2ce3)
+
+Ran the balanced-square ABBA on the shape set containing my worst measured
+vs-incumbent ratio. The target shape is not bankable and the rows that ARE admissible
+say something different from what they appear to say.
+
+CONVENTION FOR THIS ROW: throughput, fr ops/s / redis ops/s, ABOVE 1.0 = fr faster.
+This is the OPPOSITE direction from the instruction-count rows elsewhere in this
+ledger (fr instr / redis instr, below 1.0 = fr ahead). The two are different
+quantities and must never be compared; that confusion has already cost this campaign
+one withdrawn figure.
+
+    square=ABBAABBA, one invocation, 14 shapes, 6 admissible / 8 null-failed
+
+    shape             ratio              95% CI        null redis  null fr  verdict
+    del_missing      1.0367   [0.9666, 1.1183]            0.9593   1.0065  NULL-FAILED
+    unlink_missing   1.0431   [0.9967, 1.0897]            1.0244   1.0149  NULL-FAILED
+    expire_same      1.0808   [1.0372, 1.1146]            1.0073   0.9796  NULL-FAILED
+    pexpire_same     1.0853   [1.0729, 1.1279]            1.0081   0.9529  NULL-FAILED
+    expireat_same    1.0874   [1.0525, 1.1356]            0.9806   0.9910  ADMISSIBLE
+    lpos             1.1083   [1.0904, 1.1464]            0.9738   0.9873  NULL-FAILED
+    object_refcount  1.0788   [1.0246, 1.0970]            0.9862   0.9882  ADMISSIBLE
+    memory_usage     1.1114   [1.0863, 1.1370]            1.0146   0.9671  NULL-FAILED
+    hexists          1.1021   [1.0399, 1.1274]            0.9792   0.9740  NULL-FAILED
+    sismember        1.0739   [1.0645, 1.1327]            0.9823   1.0157  ADMISSIBLE
+    zscore           1.1306   [1.0791, 1.1519]            1.0139   0.9891  ADMISSIBLE
+    zrank            1.1138   [1.0732, 1.1302]            0.9924   1.0021  ADMISSIBLE
+    hstrlen          1.1174   [1.0770, 1.1772]            1.0217   0.9900  NULL-FAILED
+    get_control      1.1299   [1.0623, 1.1457]            1.0063   1.0036  ADMISSIBLE
+
+THE TARGET IS NOT BANKABLE. `del_missing` — the shape set's member nearest my worst
+measured ratio — NULL-FAILED, with a redis-side A/A null of 0.9593 against a bound of
++/-0.02. Its own CI [0.9666, 1.1183] straddles 1.0 anyway. No number for it.
+
+AND THE ADMISSIBLE ROWS DO NOT SAY WHAT THEY LOOK LIKE THEY SAY. Every one of the six
+sits between 1.0739 and 1.1306 — and so does `get_control`, at 1.1299. get_control
+shares dispatch and reply encoding with these shapes and is touched by none of the
+work in this campaign. When the control lands INSIDE the range of the results, the
+ratios are measuring a general fr-vs-redis throughput advantage on this host, not
+anything shape-specific. Normalised against the control every admissible row is
+0.95-1.00, i.e. nothing distinguishes them.
+
+So the honest reading is: fr is roughly 7-13 pct faster than Redis 7.2.4 on unpiped
+throughput across this whole set, uniformly, and NO SHAPE IN IT SHOWS A
+SHAPE-SPECIFIC EFFECT. That is a real if unexciting result and it is the one the run
+supports.
+
+WHY THE NULLS ARE BETTER THAN LAST TIME BUT STILL NOT GOOD ENOUGH: loadavg was 22.11
+at launch against 51.10 when this harness returned 0 of 6 admissible earlier today.
+Halving the load took it from 0/6 to 6/14. The nulls that failed are mostly
+REDIS-SIDE (0.9593, 0.9738, 0.9792, 1.0244, 1.0217), which matches the repeated
+finding that the incumbent arm is the noisier one and that a ratio's spread is not
+evidence about fr's stability.
+
+WHAT THIS DOES NOT TOUCH: the z2ce3 allocation lever landed in 62ce27eb5 is measured
+by COUNT (3.000/4.426 -> 0.000 allocations/op, control 6.957/7.188) and is unaffected
+by any of the above. Throughput at this load cannot resolve two allocations per op,
+and this run is not evidence for or against it.
+
+PROVENANCE:
+  ELF sha256 (first 16)  c36c3fb0a66033de — built LOCALLY with
+                         RCH_CARGO_WRAPPER_BYPASS=1 and env -u CARGO_TARGET_DIR,
+                         executable path taken from --message-format=json, then
+                         COPIED to a private path and sha'd THERE. An earlier attempt
+                         built through rch, which ran on worker vmi1227854 and never
+                         retrieved the binary — the artifact did not exist on this
+                         host at all.
+  tree                   HEAD at 62ce27eb5 plus a peer's uncommitted fr-server/main.rs;
+                         NOT reproducible from HEAD alone.
+  harness                scripts/balanced_square_ab.py --shapes unswept2 --expect-elf
+                         <full sha>, ABBAABBA, one invocation.
+  host                   thinkstation1, 64 cores, loadavg 22.11 at launch.
+
+RETRY PREDICATE: do NOT re-run this set for del_missing — the shape straddles 1.0 and
+its null fails. If the DEL/UNLINK half of z2ce3 is ever measured, use
+shape_instr_per_op.py on del_1_missing, which is load-immune and is what produced the
+0.7685x figure in the first place. And whenever a control lands inside the range of
+the results, normalise against it before reporting anything as a per-shape effect.
