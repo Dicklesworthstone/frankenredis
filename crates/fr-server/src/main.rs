@@ -14529,6 +14529,14 @@ enum BorrowedMultibulkAction {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BorrowedDispatchFloorClass {
+    /// (frankenredis-p98mw) `TOUCH key` at arity 2 only.
+    Touch,
+    /// (frankenredis-p98mw) ONE-PAIR MSETNX only. MSETNX is variadic upstream
+    /// (`MSETNX k v [k v ...]`) and only the arity-3 form has a borrowed parser, so
+    /// the name says so: widening this without adding a parser first would claim
+    /// shapes the arm must decline, and a floor decline goes to GENERIC rather than
+    /// back to the cascade.
+    MsetnxOnePair,
     BitfieldGet(PlainBitfieldGetCmd),
     BitfieldRoTwoGet,
     BitfieldSet,
@@ -14868,6 +14876,8 @@ impl PlainZsetStoreCmd {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BorrowedDispatchFloorCommand {
+    Touch,
+    Msetnx,
     Append,
     Bitcount,
     Bitfield,
@@ -15080,6 +15090,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'G', b'E', b'T', b'E', b'X'] => Some(BorrowedDispatchFloorCommand::Getex),
             [b'S', b'E', b'T', b'E', b'X'] => Some(BorrowedDispatchFloorCommand::Setex),
             [b'S', b'E', b'T', b'N', b'X'] => Some(BorrowedDispatchFloorCommand::Setnx),
+            [b'T', b'O', b'U', b'C', b'H'] => Some(BorrowedDispatchFloorCommand::Touch),
             [b'S', b'C', b'A', b'R', b'D'] => Some(BorrowedDispatchFloorCommand::Scard),
             [b'S', b'D', b'I', b'F', b'F'] => Some(BorrowedDispatchFloorCommand::Sdiff),
             [b'Z', b'C', b'A', b'R', b'D'] => Some(BorrowedDispatchFloorCommand::Zcard),
@@ -15105,6 +15116,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'R', b'P', b'U', b'S', b'H', b'X'] => Some(BorrowedDispatchFloorCommand::Rpushx),
             [b'D', b'B', b'S', b'I', b'Z', b'E'] => Some(BorrowedDispatchFloorCommand::Dbsize),
             [b'P', b'S', b'E', b'T', b'E', b'X'] => Some(BorrowedDispatchFloorCommand::Psetex),
+            [b'M', b'S', b'E', b'T', b'N', b'X'] => Some(BorrowedDispatchFloorCommand::Msetnx),
             [b'H', b'S', b'E', b'T', b'N', b'X'] => Some(BorrowedDispatchFloorCommand::Hsetnx),
             [b'G', b'E', b'T', b'S', b'E', b'T'] => Some(BorrowedDispatchFloorCommand::Getset),
             [b'E', b'X', b'I', b'S', b'T', b'S'] => Some(BorrowedDispatchFloorCommand::Exists),
@@ -16277,6 +16289,17 @@ fn classify_borrowed_dispatch_floor_packet_impl<
             Some(BorrowedDispatchFloorClass::ObjectRefcount)
         }
         (4, BorrowedDispatchFloorCommand::Setbit) => Some(BorrowedDispatchFloorClass::Setbit),
+        // (frankenredis-p98mw) EXACT ARITY on both, deliberately. TOUCH is variadic
+        // upstream (`TOUCH key [key ...]`) and MSETNX is variadic (`MSETNX k v [k v ...]`),
+        // but only the smallest form of each has a borrowed parser. A `>=` claim would
+        // capture the wider calls, the arm would decline them, and a floor decline calls
+        // the generic dispatcher DIRECTLY rather than returning to the cascade — leaving
+        // those shapes strictly WORSE off than unclassified. That is the `arity >= 3`
+        // defect (opmo4 / xqqwv), which has already cost this campaign four instances.
+        (2, BorrowedDispatchFloorCommand::Touch) => Some(BorrowedDispatchFloorClass::Touch),
+        (3, BorrowedDispatchFloorCommand::Msetnx) => {
+            Some(BorrowedDispatchFloorClass::MsetnxOnePair)
+        }
         (4, BorrowedDispatchFloorCommand::Zcount) => Some(BorrowedDispatchFloorClass::Zcount),
         (3, BorrowedDispatchFloorCommand::Zscore) => Some(BorrowedDispatchFloorClass::Zscore),
         (2, BorrowedDispatchFloorCommand::Srandmember) => {
@@ -18456,6 +18479,60 @@ fn try_dispatch_floor_classified_action(
                 served.map(|response| (packet.consumed, response))
             }) {
                 Ok(BorrowedMultibulkAction::FastReply { consumed, response })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        // (frankenredis-p98mw) Mirrors the cascade arm for TOUCH exactly, same parser,
+        // same executor, same generic fallthrough — only the walk to reach it is gone.
+        // Depth past the floor call was 1763 lines; depth RANKS a route, it does not
+        // SIZE one, so no saving is claimed from it.
+        BorrowedDispatchFloorClass::Touch => {
+            if let Some(packet) = parse_borrowed_plain_key_only_packet(
+                unparsed,
+                &parser_config,
+                b"*2\r\n$5\r\n",
+                b"TOUCH",
+            ) && let Some(response) = runtime.execute_plain_touch_borrowed(&[packet.key], ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        // (frankenredis-p98mw) The one-pair MSETNX form: key=k0, arg=v0. Multi-pair
+        // MSETNX has no borrowed parser and is NOT claimed, so it keeps walking the
+        // cascade rather than being captured and dropped on generic.
+        BorrowedDispatchFloorClass::MsetnxOnePair => {
+            if let Some(packet) = parse_borrowed_plain_key_arg1_packet(
+                unparsed,
+                &parser_config,
+                b"*3\r\n$6\r\n",
+                b"MSETNX",
+            ) && let Some(response) =
+                runtime.execute_plain_msetnx_borrowed(&[packet.key, packet.arg], ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,
@@ -43974,6 +44051,83 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             "arity-5 LPOS must still be claimed; if it stopped being claimed, MAXLEN \
              would reach the cascade instead of this arm's generic fallthrough"
         );
+    }
+
+    /// (frankenredis-p98mw) TOUCH and MSETNX claim ONE arity each, and the arities on
+    /// either side must keep walking.
+    ///
+    /// THE NEGATIVE CASE IS THE POINT. Both commands are variadic upstream but only
+    /// their smallest form has a borrowed parser, so a `>=` claim would capture the
+    /// wider calls, the arm would decline them, and a floor decline goes to GENERIC
+    /// rather than back to the cascade — strictly worse than never claiming them. That
+    /// is the `arity >= 3` defect in its original form (opmo4, xqqwv), and a test that
+    /// only checked the claimed arity would pass happily while the regression shipped.
+    #[test]
+    fn touch_and_msetnx_claim_exactly_the_arity_their_parser_serves() {
+        let cfg = ParserConfig::default();
+
+        fn touch(keys: usize) -> Vec<u8> {
+            let mut p = format!("*{}\r\n$5\r\nTOUCH\r\n", keys + 1).into_bytes();
+            for i in 0..keys {
+                p.extend_from_slice(format!("$2\r\nk{}\r\n", i % 10).as_bytes());
+            }
+            p
+        }
+        fn msetnx(pairs: usize) -> Vec<u8> {
+            let mut p = format!("*{}\r\n$6\r\nMSETNX\r\n", pairs * 2 + 1).into_bytes();
+            for i in 0..pairs {
+                p.extend_from_slice(
+                    format!("$2\r\nk{}\r\n$2\r\nv{}\r\n", i % 10, i % 10).as_bytes(),
+                );
+            }
+            p
+        }
+
+        for keys in 1..=4usize {
+            let pkt = touch(keys);
+            let got = super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg);
+            assert_eq!(
+                got,
+                (keys == 1).then_some(super::BorrowedDispatchFloorClass::Touch),
+                "TOUCH with {keys} key(s): only the single-key form has a borrowed \
+                 parser, so wider calls must stay unclaimed and keep walking"
+            );
+            if got.is_some() {
+                assert!(
+                    super::parse_borrowed_plain_key_only_packet(
+                        &pkt,
+                        &cfg,
+                        b"*2\r\n$5\r\n",
+                        b"TOUCH",
+                    )
+                    .is_some(),
+                    "TOUCH {keys} claimed but the arm's parser declines it"
+                );
+            }
+        }
+
+        for pairs in 1..=3usize {
+            let pkt = msetnx(pairs);
+            let got = super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg);
+            assert_eq!(
+                got,
+                (pairs == 1).then_some(super::BorrowedDispatchFloorClass::MsetnxOnePair),
+                "MSETNX with {pairs} pair(s): only the one-pair form has a borrowed \
+                 parser, so wider calls must stay unclaimed and keep walking"
+            );
+            if got.is_some() {
+                assert!(
+                    super::parse_borrowed_plain_key_arg1_packet(
+                        &pkt,
+                        &cfg,
+                        b"*3\r\n$6\r\n",
+                        b"MSETNX",
+                    )
+                    .is_some(),
+                    "MSETNX {pairs} pair(s) claimed but the arm's parser declines it"
+                );
+            }
+        }
     }
 
     #[test]
