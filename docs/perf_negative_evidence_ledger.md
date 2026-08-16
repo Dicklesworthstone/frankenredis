@@ -22382,3 +22382,87 @@ RETRY PREDICATE: claim ZADD at arity 6 (the parser exists; mirror its cascade ar
 check arity 7 for a parser at the same time rather than leaving a second gap. Do NOT
 assume the remaining exact-arity claims are as severe as TOUCH and MSETNX — measure each,
 because this one is four times milder.
+
+--------------------------------------------------------------------------------
+CONFIRMED — expire_nx_opt CROSSED 1.0278x -> 0.5756x; fourth validation of the method,
+and it reveals a term the model was missing (frankenredis-z2ce3, frankenredis-f2zrr)
+
+A peer took the lever this series recommended, landing it as 0d0bcd5aa
+"front-classify the expire-family conditional forms". Measured on a CLEAN tree — the
+first fully HEAD-reproducible ELF in several turns.
+
+CONVENTION: fr instructions per op / redis 7.2.4's. BELOW 1.0 = fr AHEAD.
+
+    A/A control (get_control)  0.4253 / 0.4173 / 0.4262      spread 2.1 pct
+
+    expire_nx_opt        BEFORE (ELF 11b0c675…)   AFTER (ELF f3c2e2b9…)
+      fr instr/op            4509.6                   2567.9        -43.1 pct
+      redis instr/op         4387.9                   4465.4        unchanged
+      fr/redis               1.0278x                  0.5756x        1.79x better
+      dispatch share         51.0 pct                 20.2 pct
+      dispatch instr/op     ~2298                     ~517.8
+
+    AFTER, four runs   fr 2567.4 / 2564.8 / 2569.7 / 2569.6   spread 0.19 pct
+                       redis 4414.4 / 4426.3 / 4691.7 / 4329.1  spread 8.4 pct
+                       ratio 0.5816 / 0.5795 / 0.5477 / 0.5936  spread 8.4 pct
+                       dispatch 20.2 pct, all four
+
+Monotonic on both arms in all four runs. fr's arm reproduced to 0.19 pct.
+
+THE PREDICTION, AND WHY ITS ERROR IS THE USEFUL PART. The previous row predicted, using
+the ~460 instr/op landing zone characterised from three earlier levers:
+
+    predicted fr instr/op   ~2,672      actual   2,567.9      4.1 pct HIGH
+    predicted ratio         ~0.609      actual   0.5756       5.8 pct high
+
+    running record:  zadd_xx_opt 1.2 pct | bitcount_range 0.9 pct
+                     zadd_base   2.1 pct | expire_nx_opt   4.1 pct
+
+Four for four within ~4 pct. But this one erred in the OPPOSITE DIRECTION from the
+known bias, and the arithmetic says why:
+
+    dispatch actually fell   2298.0 -> 517.8   =  1,780.2 instr/op
+    fr's total actually fell 4509.6 -> 2567.9  =  1,941.7 instr/op
+    unaccounted saving                            ~161.5 instr/op
+
+FRONT-CLASSIFICATION SAVES MORE THAN THE DISPATCH DELTA. Reaching a borrowed route does
+not only skip the walk — it also skips the GENERIC PATH'S OWN WORK, principally argv
+materialisation, which the dispatch-share figure does not count because it is not
+"deciding which command". My model attributed the entire win to dispatch and therefore
+UNDER-predicted it by roughly 160 instr/op.
+
+Two errors were partially cancelling in the earlier rows: dispatch lands ~50-250
+instr/op SHORT of the reference route (predicts too much saving), while the borrowed
+route saves ~160 beyond dispatch (predicts too little). On zadd_xx_opt, bitcount_range
+and zadd_base those roughly offset; here the second dominated. THE REFINED MODEL:
+
+    predicted fr = current fr - (current dispatch - ~500) - ~160
+
+and it should be quoted with a couple of percent of slack rather than as a point
+estimate, because both terms vary with the command.
+
+STANDINGS: expire_nx_opt has crossed, so sort_ro_alpha (~1.52x) is now the ONLY shape
+measured above parity anywhere in this campaign, and set_base (33.9 pct, ~723 instr/op
+of dispatch) is the LAST UNTAKEN REWIRE. Its prediction, restated with the refined
+model:
+
+    fr 2131.7 - (723 - 500) - 160  =  ~1,749 instr/op
+    against redis 4,102.4          =  ~0.426x, from 0.5198x
+
+PROVENANCE:
+  ELF sha256           f3c2e2b949fddab8d8a2894e430536a955d9bcd9f197dcf65323fd2c15b43de7
+                       built LOCALLY at HEAD 279da3941 with RCH_CARGO_WRAPPER_BYPASS=1
+                       and env -u CARGO_TARGET_DIR, executable path from
+                       --message-format=json, COPIED to a private path and sha'd there.
+                       TREE WAS CLEAN — this ELF IS reproducible from HEAD alone, which
+                       none of the previous six were.
+  prior ELF            11b0c67517b6130fac51679ec296db62d31163a6525c151f3c10e21ba86d4182
+  harness              scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines in
+                       the SAME invocation.
+  host                 thinkstation1, 64 cores, /data 306G, one build this pane.
+
+RETRY PREDICATE: expire_nx_opt is CLOSED — it has crossed and fr's cost is settled to
+0.19 pct. DO check the EXPIREAT conditional sibling, which this series flagged twice as
+very likely stranded on identical terms and which 0d0bcd5aa's message ("the
+expire-family conditional formS", plural) suggests may also have been fixed — there is
+no harness shape for it, so that needs one adding before it can be confirmed.
