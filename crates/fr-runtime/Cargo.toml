@@ -9,6 +9,9 @@ perf-ab-xtrim-minid-noop = [
     "fr-command/perf-ab-xtrim-minid-noop",
     "fr-store/perf-ab-xtrim-minid-noop",
 ]
+# (frankenredis-aqkvk) Forwards the fr-persist A/B arm so the allocation census
+# can select the pre-lever decode from one source tree.
+perf-ab-rdb-hash-owned = ["fr-persist/perf-ab-rdb-hash-owned"]
 
 [dependencies]
 foldhash = "0.2"
@@ -25,6 +28,7 @@ sha2.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+
 
 [[bench]]
 name = "replconf_option"

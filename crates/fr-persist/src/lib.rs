@@ -4426,13 +4426,29 @@ fn decode_rdb_prefix_impl<const MOVE_LEGACY_HASH_ZIPLIST_FIELDS: bool>(
                         // Vec<u8> per key `decode_listpack` allocated. The spans
                         // are dropped here and re-derived by the apply side, which
                         // is still far cheaper than materialising every entry.
-                        let spans = listpack::decode_value_spans(&listpack)
-                            .map_err(|_| PersistError::InvalidFrame)?;
-                        if !spans.len().is_multiple_of(2) {
-                            return Err(PersistError::InvalidFrame);
+                        if cfg!(feature = "perf-ab-rdb-hash-owned") {
+                            // Pre-lever arm: explode the blob into owned entries.
+                            let decoded = listpack::decode_listpack(&listpack)
+                                .map_err(|_| PersistError::InvalidFrame)?;
+                            if !decoded.len().is_multiple_of(2) {
+                                return Err(PersistError::InvalidFrame);
+                            }
+                            let mut fields = Vec::with_capacity(decoded.len() / 2);
+                            let mut it = decoded.into_iter();
+                            while let Some(field) = it.next() {
+                                let value = it.next().ok_or(PersistError::InvalidFrame)?;
+                                fields.push((field.into_bytes(), value.into_bytes()));
+                            }
+                            RdbValue::Hash(fields)
+                        } else {
+                            let spans = listpack::decode_value_spans(&listpack)
+                                .map_err(|_| PersistError::InvalidFrame)?;
+                            if !spans.len().is_multiple_of(2) {
+                                return Err(PersistError::InvalidFrame);
+                            }
+                            drop(spans);
+                            RdbValue::HashListpack(listpack)
                         }
-                        drop(spans);
-                        RdbValue::HashListpack(listpack)
                     }
                     RDB_TYPE_ZSET_LISTPACK => {
                         // Listpack of m1, score1, m2, score2, ... where each

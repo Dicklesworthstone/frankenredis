@@ -6,6 +6,10 @@ edition = "2024"
 [features]
 default = ["upstream-stream-rdb"]
 bench-reference = []
+# (frankenredis-aqkvk) Same-source A/B: decode a listpack-encoded hash into owned
+# entries the pre-lever way, so the allocation census can measure both arms from
+# one tree instead of two separately-built ELFs.
+perf-ab-rdb-hash-owned = []
 # (frankenredis-wt4eo) Redis-compatible RDB stream encoding (type 21,
 # STREAM_LISTPACKS_3) for SAVE, so fr's RDB files are loadable by upstream Redis.
 # fr can decode both type 15 (legacy fr-private) and type 21.
