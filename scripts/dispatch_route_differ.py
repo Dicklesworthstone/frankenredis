@@ -111,6 +111,30 @@ CASES = [
     ("ZRANGE", "z:opt", "0", "-1", "SIDEWAYS"),
     # Wrong type through the new fallback -- the error must be verbatim.
     ("ZRANGE", "s:1", "0", "-1", "REV"),
+    # (frankenredis-xqqwv) The SINGLE-FIELD forms. Both classes mint at `arity >= 3`
+    # while their arms pinned 4 and 5 and floored the multi parser at 6, so
+    # `HMGET key field` and `ZMSCORE key member` -- the smallest legal call each
+    # command has -- were claimed and served by nothing. The floors are now 3.
+    # These rows are the ONLY coverage that change has: no test in the tree names
+    # hmget or zmscore, so the suite going green says nothing about it.
+    ("HSET", "h:one", "f1", "v1", "f2", "v2"),
+    ("ZADD", "z:one", "1", "m1", "2", "m2"),
+    # The newly-served shape, present and absent field/member.
+    ("HMGET", "h:one", "f1"),
+    ("HMGET", "h:one", "nosuch"),
+    ("ZMSCORE", "z:one", "m1"),
+    ("ZMSCORE", "z:one", "nosuch"),
+    # The neighbours the exact-N parsers still own -- these must not have moved.
+    ("HMGET", "h:one", "f1", "f2"),
+    ("HMGET", "h:one", "f1", "f2", "nosuch"),
+    ("ZMSCORE", "z:one", "m1", "m2"),
+    # Missing key: a one-element reply array, which is where a mis-wired route
+    # that returns a bare bulk instead of a 1-array would diverge.
+    ("HMGET", "h:absent", "f1"),
+    ("ZMSCORE", "z:absent", "m1"),
+    # Wrong type through the newly-served length.
+    ("HMGET", "s:1", "f1"),
+    ("ZMSCORE", "s:1", "m1"),
     # Errors must come from the generic path verbatim.
     ("ZMPOP", "1", "s:1", "MIN"),
     ("ZMPOP", "1", "z:mp", "SIDEWAYS"),
