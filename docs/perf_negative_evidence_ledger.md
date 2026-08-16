@@ -20694,3 +20694,85 @@ lever it had been discouraging.
 RETRY PREDICATE: SWEEP THE FAMILY. ZADD and BITCOUNT both had one form classified and its
 sibling stranded; that is a per-shape classification habit, not a property of options.
 Check every command where a base and an optioned form both have borrowed parsers.
+
+--------------------------------------------------------------------------------
+MEASURED — set_base is 0.524x and PLAIN SET IS NOT IN THE FLOOR TOKEN TABLE AT ALL
+(frankenredis-z2ce3)
+
+Followed through on the shape flagged in the previous row: 33.9 pct dispatch from a
+single screen run, sitting between the classified and stranded bands, on the single
+most frequent command in any Redis workload.
+
+CONVENTION: fr instructions per op / redis 7.2.4's. BELOW 1.0 = fr AHEAD.
+
+    A/A control (get_control)  0.4240 / 0.4109 / 0.3816      spread 10.0 pct
+
+    set_base, four runs        fr instr/op  redis instr/op  fr/redis  dispatch
+      run 1                       2133.0       4142.4        0.5149    34.0%
+      run 2                       2149.0       4017.0        0.5350    33.8%
+      run 3                       2147.0       4076.3        0.5267    33.9%
+      run 4                       2120.8       4080.7        0.5197    33.9%
+      mean                        2137.5       4079.1        0.5241    33.9%
+      spread                       1.3%         3.1%          3.8%      0.6%
+
+Monotonic on both arms in all four runs. THE NULL IS 10.0 PCT THIS SESSION — the
+noisiest yet, and far larger than the 3.8 pct signal spread. The ratio is ~0.52 and
+should be quoted no more precisely than that. fr's own cost (1.3 pct) and the dispatch
+share (0.6 pct) are the trustworthy numbers, as they have been in every row.
+
+THE FINDING: `[b'S', b'E', b'T']` IS NOT IN THE FLOOR TOKEN TABLE. There is no
+`BorrowedDispatchFloorCommand::Set`, no arity entry and no floor class. Plain SET is
+not mis-claimed at the wrong arity like ZADD, EXPIRE and BITCOUNT — IT WAS NEVER ADDED.
+Every SET walks the cascade.
+
+    parser     main.rs:27503   parse_borrowed_plain_set_packet, cascade arm at 7303
+    executor   fr-runtime:9142 execute_plain_set_borrowed (and _ok at 9159)
+    floor      NOTHING
+
+WHY IT COSTS ONLY 725 AND NOT ~2,000, which is the part that hid it. Base SET's arm
+sits early in the chain, and the seven SET OPTION parsers ahead of it are all arity
+gated — `set_nx`/`set_xx` are `*4`, `set_relexpire`/`set_opt_get`/`set_absexpire` are
+`*5`, `set_relexpire_get`/`set_cond_relexpire` are `*6` — so a `*3` packet fails each
+on the FIRST BYTE PAIR of the header. Seven cheap failed compares, not seven re-parses.
+That is exactly the structure recorded on frankenredis-f2zrr, and it is why this route
+never looked bad enough to notice: an unclassified command that happens to be cheap to
+walk to.
+
+SO THE SIGNATURE OF "UNCLASSIFIED" IS NOT ALWAYS A HUGE DISPATCH SHARE. SET pays 724.6
+instr/op against get_control's 275.4 — 2.6x, not the 7x that zadd_xx_opt pays. The
+calibration in the previous row said "below ~21 pct means classified"; SET at 33.9 pct
+is above that band and IS unclassified, so the band held, but only just. A command with
+a cheap walk can hide in the middle of the scale.
+
+SIZE. The gap to a front-classified route is ~450 instr/op (724.6 against 275.4), about
+21 pct of SET's 2,137.5. That is a smaller per-op fraction than any other stranded shape
+found — AND IT IS ON THE MOST FREQUENTLY ISSUED COMMAND THERE IS. Per-op share is the
+wrong lens for ranking this one; frequency-weighted it is plausibly the largest
+remaining dispatch lever in the tree, and it is a REWIRE: parser and executor both
+exist, only the classifier entry is missing.
+
+Upper bound if it reached get_control's dispatch cost: fr 2,137.5 -> ~1,687 against
+redis's 4,079.1, about 0.41x from 0.524x. Not a prediction.
+
+THE `9hnxt` RULE, and it matters more here than usual: claim `*3` SET ONLY. The option
+forms at `*4`, `*5` and `*6` have their own parsers ahead of base in the cascade, and a
+claim that swallowed them would send each to an arm whose parser refuses it and thence
+to the GENERIC path — turning seven cheap header compares into a full generic dispatch
+for every SET NX, SET EX and SET GET in existence. That would be a large REGRESSION on
+common shapes, dressed as a win on one.
+
+PROVENANCE:
+  ELF sha256 (first 16)  c36c3fb0a66033de — built LOCALLY with
+                         RCH_CARGO_WRAPPER_BYPASS=1, env -u CARGO_TARGET_DIR,
+                         executable path from --message-format=json, COPIED to a
+                         private path and sha'd there. Contains 62ce27eb5.
+  tree                   HEAD plus a peer's uncommitted fr-server/src/main.rs.
+  harness                scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines
+                         in the SAME invocation.
+  host                   thinkstation1, 64 cores, /data 315G, no build this turn.
+
+RETRY PREDICATE: do NOT re-run for a tighter RATIO — the null was 10 pct. DO re-measure
+fr's own instr/op against the 2,137.5 baseline after any lever. And when ranking
+dispatch levers from here on, weight by command frequency: SET's 21 pct per-op share is
+worth more in aggregate than zadd_xx_opt's 58 pct, and nothing in the per-shape table
+says so.
