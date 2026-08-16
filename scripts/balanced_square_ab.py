@@ -411,6 +411,41 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
     # attributed cause: dispatch is ruled out, the expire cycle is ruled out
     # (kvuyy), the shared executor is ruled out here, and the parsers differ only
     # by the one bulk that arity 4 inherently carries.
+    # (frankenredis-kdehn) THE FAIR CONTROL. My earlier expirecond pair compared a
+    # successful write (plain, returns 1, does pttl AND expire_at_milliseconds)
+    # against a REJECTED one (NX on a key that already has a TTL, returns 0,
+    # breaks before the set). That is unequal work, so it could not isolate the
+    # condition.
+    #
+    # XX on a key that HAS a TTL succeeds on EVERY iteration -- the condition is
+    # satisfied, the TTL is rewritten, and a TTL still exists for the next call.
+    # So both shapes here return 1 and both perform the pttl read and the set.
+    # The ONLY difference is the presence of a condition token and its check.
+    #   both alike        -> the condition is free; the gap was the rejected write
+    #   XX behind plain   -> the condition check itself is the cost
+    #
+    # ANSWERED: the condition costs. ELF a146507d78bdb55610c63397.
+    #   run 1, HOST LOAD 23.30/64 (36%)  -- 0 of 3 admissible, UNTRUSTED
+    #     expire_plain_ok 1.0921   expire_xx_ok 0.9610
+    #   run 2, HOST LOAD 54.05/64 (84%)
+    #     expire_plain_ok 1.0782 [1.0552, 1.1374] nulls 0.9873/1.0107 ADMISSIBLE
+    #     expire_xx_ok    0.9693 [0.9229, 1.0410] nulls 0.9847/1.0058 STRADDLES-1
+    #
+    # Intervals DISJOINT (XX upper 1.0410 < plain lower 1.0552) and both runs agree
+    # in direction and magnitude. On EQUAL work -- both return 1, both do the pttl
+    # read and the set -- the conditional form is ~11% behind the plain one.
+    #
+    # PRECISE CLAIM: XX is below PLAIN. It is NOT demonstrably below parity: its CI
+    # includes 1.0, so the honest statement is that the condition costs relative to
+    # no condition, not that the route loses to the incumbent.
+    #
+    # Note run 2 certified at 84% load while run 1 failed at 36%. Admissibility,
+    # not loadavg, decides which row to believe.
+    "expirefair": [
+        ("expire_plain_ok", ["SET e v"], ["EXPIRE", "e", "500"]),
+        ("expire_xx_ok", ["SET s v", "EXPIRE s 10000"], ["EXPIRE", "s", "500", "XX"]),
+        ("get_control", ["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
+    ],
     "expirecond": [
         ("expire_plain", ["SET e v"], ["EXPIRE", "e", "500"]),
         ("expire_nx_cond", ["SET s v", "EXPIRE s 10000"], ["EXPIRE", "s", "500", "NX"]),
