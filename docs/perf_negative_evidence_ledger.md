@@ -18242,3 +18242,83 @@ RETRY PREDICATE: do NOT pick the next candidate from cv3fm/iqicb's recorded rati
 two of them (getset 0.9799x, hincrbyfloat 0.7510x) are now known stale by 45 and 28
 points. Re-measure a shape before treating it as the worst. Attack incrbyfloat's
 FORMATTER, not its dispatch.
+
+## MEASURED (frankenredis-cv3fm) — inventory REFRESHED on one ELF; del_1_missing is the worst route at 0.7685x
+
+DIRECTION: fr instr/op DIVIDED BY Redis 7.2.4 instr/op. BELOW 1.0 = fr AHEAD. Lower
+is better. All fifteen rows below are ONE ELF (51708552264214d1), one harness, each
+engine measured in the SAME invocation as its counterpart.
+
+WHY THIS EXISTS: candidate selection kept failing. Two rows picked from the recorded
+inventory were stale by 45 and 28 points (getset_same 0.9799 -> 0.5266, hincrbyfloat
+0.7510 -> 0.4673), so "pick the worst from the table" chose wrong twice running. This
+refreshes the table on a single binary so the next pick is made from current numbers.
+
+    shape               fr/redis   dispatch share
+    del_1_missing        0.7685x       12.2%   <- WORST
+    incrbyfloat_same     0.6786x        7.3%
+    pfadd_existing       0.6407x       16.1%
+    lset_head            0.6199x       16.7%
+    srem_missing         0.5937x       17.9%
+    hdel_1_missing       0.5552x       18.1%
+    hsetnx_existing      0.5508x       19.7%
+    expireat_same        0.5502x       14.3%
+    sinter_9             0.5343x        8.3%
+    zrem_missing         0.5326x       18.0%
+    getset_same          0.5266x       14.3%
+    setnx_existing       0.5169x       20.7%
+    sinter_2             0.4912x       12.6%
+    sadd_existing        0.4822x       18.8%
+    hincrbyfloat         0.4673x       12.1%
+    lpos_count           0.4173x       27.2%
+    geoadd_same          0.3451x       16.2%   <- best
+
+EVERY SHAPE IS AHEAD OF REDIS 7.2.4. The spread is 0.345x to 0.769x.
+
+NEW WORST, ABBA (del, incrbyfloat, incrbyfloat, del) in one invocation:
+
+    run  shape               fr instr/op   redis 7.2.4   fr/redis
+    A    del_1_missing           2003.5        2681.9     0.7471x
+    B    incrbyfloat_same        6099.9        9037.2     0.6750x
+    B    incrbyfloat_same        6076.3        8954.1     0.6786x
+    A    del_1_missing           2003.8        2607.4     0.7685x
+
+WORST BOUND 0.7685x — fr ~23 pct ahead, the narrowest margin on the board.
+
+A/A NULL, AND THE INCUMBENT ARM IS THE WHOLE OF THE SPREAD HERE:
+
+    fr arm      del_1_missing     2003.5 -> 2003.8   +0.01%   <- essentially exact
+                incrbyfloat_same  6099.9 -> 6076.3   -0.39%
+    redis arm   del_1_missing     2681.9 -> 2607.4   -2.78%   <- the noise
+                incrbyfloat_same  9037.2 -> 8954.1   -0.92%
+    ratio       del  0.7471 -> 0.7685   2.87% spread
+
+fr's del arm reproduces to 0.01 pct while the REDIS denominator swings 2.78 pct, so
+this shape's ratio carries ~3 pct uncertainty entirely from the incumbent. Quote the
+worst bound; do NOT adjudicate anything under ~5 pct on del_1_missing.
+
+ATTRIBUTION — THE NARROW MARGIN IS NOT A WEAKNESS IN FR. DEL of a MISSING key is
+nearly pure fixed overhead: redis retires only ~2650 instr/op total, its lowest of any
+shape here, so there is very little work to be better AT. fr's 2003 instr/op against
+that floor is a 23 pct win on an op that is almost all per-command overhead. This is
+the compute-per-reply-byte pattern: the advantage scales with how much work the
+command does, and DEL-on-missing does almost none. The lever, if one is wanted, is
+FIXED PER-COMMAND OVERHEAD (dispatch is already down to 12.2 pct), not the delete path
+— and the ceiling is small by construction.
+
+PROVENANCE:
+  ELF sha256 (first 16)  51708552264214d1 — reused, NO BUILD this turn (/data 43G,
+                         1G above the 42G hard stop).
+  built                  LOCALLY, RCH_CARGO_WRAPPER_BYPASS=1, env -u CARGO_TARGET_DIR
+                         into this repo's own target/.
+  tree                   uncommitted peer WIP (fr-command/lua_eval.rs,
+                         fr-persist/listpack.rs, several fr-runtime benches) compiled
+                         in. NOT reproducible from HEAD alone.
+
+Campaign output: yes — a current, single-ELF inventory replacing one that mis-selected
+candidates twice.
+
+RETRY PREDICATE: pick the next candidate from THIS table, not from cv3fm's original.
+del_1_missing is the worst ratio but likely the SMALLEST absolute prize (2003 instr/op
+total, ~245 of it dispatch); incrbyfloat_same is second-worst with 6x the absolute
+cost, so it is the better target despite the better ratio.
