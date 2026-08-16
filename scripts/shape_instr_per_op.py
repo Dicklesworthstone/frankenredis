@@ -235,6 +235,21 @@ SHAPES = {
     # redis sorts nothing; that sort is O(k log k) in the RESULT, so it is invisible at
     # k=3 and only becomes measurable here.
     #
+    # THE SHAPES FORM TWO ORTHOGONAL AXES, and reading a result without knowing which
+    # axis it moves along will attribute the wrong cause:
+    #
+    #     sinter_2  vs  sinter_9              KEY COUNT varies (2 -> 9)
+    #                                         result HELD at 2-3 members
+    #     sinter_2  vs  sinter_large_generic  RESULT SIZE varies (2 -> 1000)
+    #                                         key count HELD at 2, and since both are
+    #                                         arity 3 they take the SAME dispatch route,
+    #                                         so dispatch is held constant too
+    #
+    # That second pairing is the controlled one for anything O(result): per-key work,
+    # dispatch and parser are all identical between the two, so a difference between
+    # them is result-processing and nothing else. Do not compare sinter_9 against
+    # sinter_large_generic -- that moves BOTH axes at once and is uninterpretable.
+    #
     # BOTH ARMS ARE COVERED SEPARATELY AND MUST STAY THAT WAY. sinter_borrow_scan takes
     # a different path per encoding and its own comment records that a byte-sort of
     # decimal representations is NOT value order, so the intset arm materializes where
