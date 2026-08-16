@@ -20379,3 +20379,89 @@ peer holding the lever.
 RETRY PREDICATE: when mg05w lands, re-measure zadd_base with zadd_xx_opt as the control
 that must NOT move, and require the movement to exceed 10 pct before calling it. Do not
 quote a single zadd_base run — its ratio spread is 9.6 pct.
+
+--------------------------------------------------------------------------------
+CORRECTION + MEASURED — bitcount_range is 0.865x with a 46 pct dispatch share, and my
+earlier "STOP, this is real work" verdict on it was WRONG (frankenredis-z2ce3)
+
+frankenredis-f2zrr recorded BITCOUNT range as a STOP: "it already has its own parser
+one arm after base, same depth, no sibling ahead, no generic fallthrough. Its +1374 is
+REAL WORK, not dispatch overhead." That was reasoned from source and it is wrong. The
+paired measurement below refutes it on the same command.
+
+CONVENTION: fr instructions per op / redis 7.2.4's. BELOW 1.0 = fr AHEAD.
+
+    A/A control (get_control)   0.4101 / 0.4261 / 0.4044      spread 5.4 pct
+
+    bitcount_range, four runs   fr instr/op  redis instr/op  fr/redis  dispatch
+      run 1                        3727.8       4197.0        0.8882    46.5%
+      run 2                        3760.5       4321.4        0.8702    46.3%
+      run 3                        3738.2       4386.5        0.8522    46.4%
+      run 4                        3738.0       4392.1        0.8511    46.4%
+      mean                         3741.1       4324.3        0.8654    46.4%
+      spread                        0.87%        4.6%          4.3%      0.4%
+
+    bitcount_base, two runs      2052.2 / 2079.7 instr/op   0.6076 / 0.6183   15.9%
+
+Monotonic on both arms in every run. The null (5.4 pct) is LARGER than the signal
+spread (4.3 pct), so the ratio is ~0.865 with roughly 5 pct uncertainty — comfortably
+below 1.0, not precise beyond that. The DISPATCH SHARE reproduced to 0.4 pct and is
+the trustworthy number here.
+
+THE PAIRED CONTROL IS THE WHOLE ARGUMENT, and it is the same command:
+
+    bitcount_base    arity 2   FRONT-CLASSIFIED   dispatch 15.9 pct   ~327 instr/op
+    bitcount_range   arity 4   STRANDED           dispatch 46.4 pct   ~1,736 instr/op
+
+The stranded form pays 5.3x the dispatch instructions of its classified sibling. Same
+command, same executor family, same binary, same session — the only difference is
+whether the floor claims it.
+
+WHERE MY EARLIER REASONING FAILED, because the mistake is reusable. I compared the two
+parsers' positions WITHIN THE CASCADE — base at 7844, range at 7864, twenty lines
+apart — and concluded they were at "the same depth" so neither could have a dispatch
+problem the other lacked. But cascade position is irrelevant when one of them never
+enters the cascade at all. The floor claims BITCOUNT at ARITY 2 ONLY (main.rs:16351),
+so base is front-classified and skips the chain entirely, while range walks it. Two
+parsers twenty lines apart are NOT at the same depth if only one is reachable from the
+floor. I measured the distance between the arms and never checked whether the race
+started at the same place.
+
+ATTRIBUTED — REWIRE, not an implementation:
+
+    floor claim   main.rs:16351   (2, Bitcount) => ...        arity 2 ONLY
+    parsers       main.rs 7844 (base), 7864 (range), 7886 (unit) — all in the cascade
+    executor      fr-runtime:19220   execute_plain_bitcount_borrowed
+
+`BITCOUNT key start end` is arity 4, and the BITCOUNT/BIT unit form a fifth. Both have
+working parsers and a working executor and are claimed by nothing.
+
+SIZE, as an upper bound: if range paid base's dispatch cost (~327 instead of ~1,736),
+fr would fall from 3,741.1 to roughly 2,332 against redis's 4,324.3 — about 0.54x from
+0.865x. Not a prediction; it assumes the classified sibling's dispatch cost, which is
+a better-grounded assumption here than in the other rows because the sibling is the
+SAME COMMAND measured in the same session.
+
+THE `9hnxt` RULE: claim arity 4 (range) and check the unit form's arity separately.
+Arity 2 is already classified and must not be disturbed.
+
+THE STANDINGS ROW THIS REPLACES: f2zrr's ranked list called BITCOUNT range "+1374
+STOP — real work, has its own parser". Delete that verdict. Of the four rows in that
+list, two are now overturned — this one, and the LPOS repair recommendation corrected
+earlier — which says the list's method (excess over a shape's own base, from single
+runs, reasoned structurally) was not sound enough to rank levers by.
+
+PROVENANCE:
+  ELF sha256 (first 16)  c36c3fb0a66033de — built LOCALLY with
+                         RCH_CARGO_WRAPPER_BYPASS=1, env -u CARGO_TARGET_DIR,
+                         executable path from --message-format=json, COPIED to a
+                         private path and sha'd there. Contains 62ce27eb5.
+  tree                   HEAD plus a peer's uncommitted fr-server/src/main.rs.
+  harness                scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines
+                         in the SAME invocation.
+  host                   thinkstation1, 64 cores, /data 315G, no build this turn.
+
+RETRY PREDICATE: do NOT re-run for a tighter ratio — the null exceeds the spread. DO
+use the paired dispatch shares (15.9 vs 46.4 pct on the same command) as the evidence,
+and measure any lever against fr's 3,741.1 instr/op baseline. And when comparing two
+parsers' "depth", check first whether both are actually reached by the same path.
