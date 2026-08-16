@@ -6331,15 +6331,28 @@ impl<'a> LuaState<'a> {
             return Err("script exceeded maximum call depth".to_string());
         }
         self.lua_frame_kinds.push(false);
-        let (name, is_pcall) = match intrinsic {
-            RedisIntrinsic::Call => ("redis.call", false),
-            RedisIntrinsic::PCall => ("redis.pcall", true),
-        };
-        let previous_name = self.current_invocation_name.replace(Cow::Borrowed(name));
-        let previous_method = std::mem::replace(&mut self.current_invocation_is_method, false);
+        let is_pcall = matches!(intrinsic, RedisIntrinsic::PCall);
+        // (frankenredis-zsbhn) This frame does NOT set `current_invocation_name`.
+        //
+        // It used to, mirroring the generic `LuaValue::RustFunction` branch, and
+        // the write was dead: `current_invocation_name` is read only by the
+        // C-builtin bad-argument formatters (`lua_format_argerror`,
+        // `lua_check_number`, `lua_check_string`, `bad_argument_message`), and
+        // nothing on the call tree below `redis_call` reaches one. Arguments are
+        // already evaluated by the time this frame is entered; the conversion
+        // that follows is `take_redis_arg`, whose rejection is redis's single
+        // unified wording rather than a Lua bad-argument template; and dispatch
+        // leaves `LuaState` entirely (`dispatch_argv`, `resp_to_lua` and the
+        // error rewrites are free functions that never see `self`).
+        //
+        // So the name could never be observed from here, and `redis.call`'s
+        // errors are context-free by construction — which is what
+        // `redis_call_argument_rejection_is_context_free` pins. If a future
+        // change routes a bad-argument formatter through this frame, that test
+        // is what fails, and the fix is to restore the save/replace/restore of
+        // `current_invocation_name` and `current_invocation_is_method` here and
+        // in `call_redis_intrinsic_prebuilt`.
         let result = self.redis_call(args, is_pcall);
-        self.current_invocation_name = previous_name;
-        self.current_invocation_is_method = previous_method;
         self.call_depth -= 1;
         self.lua_frame_kinds.pop();
         result
@@ -6458,15 +6471,10 @@ impl<'a> LuaState<'a> {
             return Err("script exceeded maximum call depth".to_string());
         }
         self.lua_frame_kinds.push(false);
-        let (name, is_pcall) = match intrinsic {
-            RedisIntrinsic::Call => ("redis.call", false),
-            RedisIntrinsic::PCall => ("redis.pcall", true),
-        };
-        let previous_name = self.current_invocation_name.replace(Cow::Borrowed(name));
-        let previous_method = std::mem::replace(&mut self.current_invocation_is_method, false);
+        // (frankenredis-zsbhn) No `current_invocation_name` write here either —
+        // see the argument on `call_redis_intrinsic`, which this twin mirrors.
+        let is_pcall = matches!(intrinsic, RedisIntrinsic::PCall);
         let result = self.finish_direct_redis_call(argv, vals, args, is_pcall);
-        self.current_invocation_name = previous_name;
-        self.current_invocation_is_method = previous_method;
         self.call_depth -= 1;
         self.lua_frame_kinds.pop();
         result
@@ -16314,6 +16322,55 @@ mod tests {
         )
         .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"hello".to_vec())));
+    }
+
+    #[test]
+    fn redis_call_argument_rejection_is_context_free() {
+        // (frankenredis-zsbhn) `call_redis_intrinsic` no longer sets
+        // `current_invocation_name`, because nothing below `redis_call` can read
+        // it: the arguments are already evaluated, `take_redis_arg`'s rejection
+        // is redis's single unified wording rather than a Lua bad-argument
+        // template, and dispatch leaves `LuaState` entirely.
+        //
+        // The property that makes that safe is that a `redis.call` argument
+        // rejection says the SAME thing wherever it is raised from. Pin it from
+        // three enclosing contexts, including two that DO leave an invocation
+        // name set: `table.sort`'s comparator and `string.gsub`'s replacement
+        // both run Lua code from inside a C-builtin frame. If a bad-argument
+        // formatter is ever routed through the redis.call frame, one of these
+        // starts naming `sort` or `gsub` and this test is what catches it.
+        let mut store = Store::new();
+
+        let expected = "Lua redis lib command arguments must be strings or integers";
+        let cases: &[&[u8]] = &[
+            // Plain top level, no enclosing invocation.
+            b"return redis.call('SET', 'k', {})",
+            // Inside a comparator called by table.sort.
+            b"local t = {2, 1} \
+              table.sort(t, function(a, b) redis.call('SET', 'k', {}) return a < b end) \
+              return 1",
+            // Inside a replacement function called by string.gsub.
+            b"return string.gsub('aa', 'a', function() redis.call('SET', 'k', {}) end)",
+        ];
+        for src in cases {
+            let err = eval_script(src, &[], &[], &mut store, 0).expect_err(&format!(
+                "expected an error for {:?}",
+                String::from_utf8_lossy(src)
+            ));
+            assert!(
+                err.contains(expected),
+                "wrong wording from {:?}: {err}",
+                String::from_utf8_lossy(src)
+            );
+            // The enclosing builtin's name must not appear: redis's wording
+            // carries no invocation name at all, so any leak is visible here.
+            assert!(
+                !err.contains("bad argument") && !err.contains("'sort'") && !err.contains("'gsub'"),
+                "an enclosing invocation name leaked into a redis.call rejection \
+                 from {:?}: {err}",
+                String::from_utf8_lossy(src)
+            );
+        }
     }
 
     #[test]
