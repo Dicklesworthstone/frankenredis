@@ -620,6 +620,24 @@ impl HashFieldMap {
     /// `Vec<(Vec<u8>,Vec<u8>)>` and calling `from_unique_pairs`.
     /// Caller MUST guarantee the pairs have no duplicate fields.
     /// (BlackThrush: RESTORE decode zero-copy span build)
+    /// Does this pair set land on the HASHTABLE tier rather than the packed one?
+    ///
+    /// The tier test lives here, next to the build that performs it, so the two cannot
+    /// drift. `hash_from_listpack_spans` needs it to decide whether a RESTORE payload's
+    /// duplicate fields are survivable: the packed representation carries a duplicate
+    /// exactly as redis's listpack does (proven by
+    /// `packed_hash_representation_carries_a_duplicate_field_like_redis_does`), while the
+    /// hashtable tier is built with `append_known_absent`, which SKIPS the existence probe
+    /// because the caller promised uniqueness -- feeding it a duplicate corrupts the map.
+    /// (frankenredis-fosf1)
+    #[must_use]
+    pub fn borrowed_pairs_need_hashtable(pairs: &[(&[u8], &[u8])]) -> bool {
+        pairs.len() > PACKED_MAX_ENTRIES
+            || pairs
+                .iter()
+                .any(|(f, v)| f.len() > PACKED_MAX_VALUE || v.len() > PACKED_MAX_VALUE)
+    }
+
     #[must_use]
     pub fn from_unique_pairs_borrowed(pairs: &[(&[u8], &[u8])]) -> Self {
         // (frankenredis-33832) Same fuse as `from_unique_str_members`: the tier test

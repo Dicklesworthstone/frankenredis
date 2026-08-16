@@ -36842,7 +36842,31 @@ fn hash_from_listpack_spans(listpack: &[u8]) -> Result<(HashFieldMap, usize), St
         max_element_len = max_element_len.max(field.len()).max(value.len());
         pairs.push((field, value));
     }
-    if restore_pairs_have_duplicate_field(&pairs) {
+    // (frankenredis-fosf1) The duplicate check is gated on the TIER, because redis
+    // 7.2.4 gates it on exactly the same boundary.
+    //
+    // ORACLE, rdb.c:2453 (RDB_TYPE_HASH_LISTPACK): the payload goes through
+    // `lpValidateIntegrityAndDups(encoded, len, deep_integrity_validation, 1)` where
+    // `deep_integrity_validation` is `server.sanitize_dump_payload == SANITIZE_DUMP_YES`,
+    // and that config DEFAULTS TO NO (config.c:3139). With deep=0 the function returns
+    // `lpValidateIntegrity(...)` and builds NO dup dict at all (rdb.c:1800). So a
+    // listpack-encoded hash keeps a duplicate field VERBATIM: RESTORE succeeds, HLEN
+    // counts both, HGETALL returns both, HGET resolves to the first. Only above
+    // `hash_max_listpack_entries` does redis call `hashTypeConvert(o, OBJ_ENCODING_HT)`
+    // (rdb.c:2470), and only THERE does a duplicate matter -- t_hash.c:478 hits
+    // `serverPanic("Listpack corruption detected")` on the failing `dictAdd`.
+    //
+    // fr's two tiers line up with redis's two encodings, so the check moves rather than
+    // disappears. On the packed tier it was pure divergence: we rejected a payload the
+    // incumbent accepts, and the packed representation can hold the duplicate with
+    // redis's exact semantics anyway. On the hashtable tier it is load-bearing --
+    // `from_unique_pairs_borrowed` builds that tier with `append_known_absent`, which
+    // skips the existence probe on the caller's promise of uniqueness, so a duplicate
+    // would silently corrupt the map. There we DELIBERATELY diverge in fr's favour and
+    // return an error where redis panics: refusing a payload beats crashing on it.
+    if HashFieldMap::borrowed_pairs_need_hashtable(&pairs)
+        && restore_pairs_have_duplicate_field(&pairs)
+    {
         return Err(StoreError::InvalidDumpPayload);
     }
     Ok((
@@ -41189,6 +41213,74 @@ mod quicklist_dump_fix_tests {
 
 #[cfg(test)]
 mod tests {
+    /// (frankenredis-fosf1) THE PARITY FIX. Redis 7.2.4 restores a listpack-encoded hash
+    /// carrying a duplicate field and keeps it VERBATIM; fr used to refuse the payload
+    /// outright with "DUMP payload version or checksum are wrong" -- which is not even a
+    /// checksum failure, so anyone debugging it from the wire looked in the wrong place.
+    ///
+    /// Oracle: rdb.c:2453 runs `lpValidateIntegrityAndDups(.., deep_integrity_validation, 1)`
+    /// and `deep_integrity_validation` is `sanitize_dump_payload == SANITIZE_DUMP_YES`,
+    /// which defaults to NO (config.c:3139); with deep=0 no dup dict is built at all
+    /// (rdb.c:1800). Proven against a LIVE 7.2.4 in the bead: RESTORE -> OK, HLEN -> 2,
+    /// HGETALL -> [f1,v1,f1,v2], HGET f1 -> v1.
+    #[test]
+    fn restore_keeps_a_duplicate_field_on_the_packed_tier_like_redis_does() {
+        let lp = encode_listpack_strings(&[b"f1", b"v1", b"f1", b"v2"]).expect("listpack");
+        let (hash, _) = super::hash_from_listpack_spans(&lp)
+            .expect("redis 7.2.4 accepts this payload, so fr must accept it too");
+        assert_eq!(hash.len(), 2, "HLEN: redis counts BOTH entries");
+        assert_eq!(
+            hash.get(b"f1"),
+            Some(&b"v1"[..]),
+            "HGET: redis resolves to the FIRST occurrence"
+        );
+        assert_eq!(hash.get_index(0), Some((&b"f1"[..], &b"v1"[..])));
+        assert_eq!(
+            hash.get_index(1),
+            Some((&b"f1"[..], &b"v2"[..])),
+            "HGETALL: the duplicate is kept verbatim, in listpack order"
+        );
+    }
+
+    /// NEGATIVE CASE, and the reason the check is GATED rather than deleted. A fix that
+    /// removed `restore_pairs_have_duplicate_field` wholesale passes the test above and
+    /// fails this one.
+    ///
+    /// A 65-byte value exceeds PACKED_MAX_VALUE, so this two-pair hash lands on the
+    /// HASHTABLE tier, which `from_unique_pairs_borrowed` builds with
+    /// `append_known_absent` -- that skips the existence probe on the caller's promise of
+    /// uniqueness, so a duplicate would silently corrupt the map rather than be stored.
+    /// Redis reaches `serverPanic("Listpack corruption detected")` here (t_hash.c:478);
+    /// fr deliberately diverges in its own favour and returns an error, because refusing
+    /// a payload beats crashing on it.
+    #[test]
+    fn restore_still_rejects_a_duplicate_field_on_the_hashtable_tier() {
+        let long = vec![b'x'; 65];
+        let lp = encode_listpack_strings(&[b"f1", &long, b"f1", b"v2"]).expect("listpack");
+        assert!(
+            matches!(
+                super::hash_from_listpack_spans(&lp),
+                Err(StoreError::InvalidDumpPayload)
+            ),
+            "the hashtable tier cannot represent a duplicate; it must still be refused"
+        );
+    }
+
+    /// Control for the gate itself: a CLEAN payload on the hashtable tier must still load.
+    /// Without this, a gate that always reported "needs hashtable" would look correct.
+    #[test]
+    fn restore_hashtable_tier_without_duplicates_still_loads() {
+        let long = vec![b'x'; 65];
+        let lp = encode_listpack_strings(&[b"f1", &long, b"f2", b"v2"]).expect("listpack");
+        let (hash, _) = super::hash_from_listpack_spans(&lp).expect("clean hashtable-tier payload");
+        assert_eq!(hash.len(), 2);
+        assert_eq!(hash.get(b"f2"), Some(&b"v2"[..]));
+        assert!(
+            HashFieldMap::borrowed_pairs_need_hashtable(&[(&b"f1"[..], long.as_slice())]),
+            "this payload must actually be on the hashtable tier, or the test above proves nothing"
+        );
+    }
+
     // ── (frankenredis-33832) RESTORE duplicate-field detector ──────────────────
     // `restore_pairs_have_duplicate_field` replaced a `HashSet` with a stack-probed
     // table. It must be EXACTLY equivalent, so it is tested against an independent
@@ -68758,16 +68850,28 @@ mod tests {
             );
         }
         // Beyond the 5^27 window in both directions.
-        assert_eq!(super::exact_small_decimal_to_long_double(false, b"1", 28), None);
-        assert_eq!(super::exact_small_decimal_to_long_double(false, b"1", -28), None);
+        assert_eq!(
+            super::exact_small_decimal_to_long_double(false, b"1", 28),
+            None
+        );
+        assert_eq!(
+            super::exact_small_decimal_to_long_double(false, b"1", -28),
+            None
+        );
         // 20 digits cannot be parsed into u64 without risking overflow.
         assert_eq!(
             super::exact_small_decimal_to_long_double(false, b"12345678901234567890", 0),
             None
         );
         // Non-digits and empties are refused rather than silently coerced.
-        assert_eq!(super::exact_small_decimal_to_long_double(false, b"", 0), None);
-        assert_eq!(super::exact_small_decimal_to_long_double(false, b"1a", 0), None);
+        assert_eq!(
+            super::exact_small_decimal_to_long_double(false, b"", 0),
+            None
+        );
+        assert_eq!(
+            super::exact_small_decimal_to_long_double(false, b"1a", 0),
+            None
+        );
     }
 
     /// (frankenredis-iqicb) The lever must actually FIRE on the operands it exists for.
@@ -73053,8 +73157,19 @@ mod tests {
         }
     }
 
+    /// (frankenredis-fosf1) UPDATED IN PLACE, not deleted: this assertion had frozen the
+    /// DEFECT into the suite. It required `InvalidDumpPayload` for a duplicate field in a
+    /// small hash listpack -- which is precisely the payload redis 7.2.4 RESTOREs fine,
+    /// because with `sanitize-dump-payload no` (the default) it builds no dup dict at all
+    /// (rdb.c:1800, rdb.c:2453). Proven against a live 7.2.4: RESTORE -> OK, HLEN -> 2,
+    /// HGETALL -> [f1,v1,f1,v2], HGET f1 -> v1.
+    ///
+    /// So the test now asserts redis's behaviour instead of fr's old divergence, and keeps
+    /// asserting the thing it was really for -- that a duplicate is handled deliberately
+    /// rather than corrupting the map. The hashtable tier keeps its rejection; see
+    /// `restore_still_rejects_a_duplicate_field_on_the_hashtable_tier`.
     #[test]
-    fn restore_rejects_duplicate_hash_listpack_fields() -> Result<(), String> {
+    fn restore_keeps_duplicate_hash_listpack_fields_like_redis() -> Result<(), String> {
         let listpack = encode_listpack_strings(&[b"field".as_slice(), b"one", b"field", b"two"])
             .ok_or_else(|| "encode hash listpack".to_string())?;
         let mut body = vec![RDB_TYPE_HASH_LISTPACK];
@@ -73062,12 +73177,33 @@ mod tests {
         let payload = append_dump_footer(body);
 
         let mut store = Store::new();
-        match store.restore_key(b"h", 0, &payload, false, 100) {
-            Err(StoreError::InvalidDumpPayload) => Ok(()),
-            other => Err(format!(
-                "duplicate hash listpack fields should reject the dump, got {other:?}"
-            )),
+        store
+            .restore_key(b"h", 0, &payload, false, 100)
+            .map_err(|e| format!("redis 7.2.4 accepts this payload; fr must too, got {e:?}"))?;
+        // Read back through the COMMAND surface, which is where the divergence was
+        // observed against the live 7.2.4, rather than through internal structure.
+        let hlen = store.hlen(b"h", 0).map_err(|e| format!("hlen: {e:?}"))?;
+        if hlen != 2 {
+            return Err(format!("HLEN: redis keeps BOTH entries, got {hlen}"));
         }
+        let first = store
+            .hget(b"h", b"field", 0)
+            .map_err(|e| format!("hget: {e:?}"))?;
+        if first.as_deref() != Some(&b"one"[..]) {
+            return Err(format!(
+                "HGET: redis resolves to the FIRST occurrence, got {first:?}"
+            ));
+        }
+        let all = store
+            .hgetall(b"h", 0)
+            .map_err(|e| format!("hgetall: {e:?}"))?;
+        if all.len() != 2 {
+            return Err(format!(
+                "HGETALL: redis returns the duplicate verbatim, got {} pairs",
+                all.len()
+            ));
+        }
+        Ok(())
     }
 
     #[test]
