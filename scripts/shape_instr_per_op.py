@@ -178,6 +178,13 @@ SHAPES = {
     "pfadd_existing": (["PFADD hll a b c"], ["PFADD", "hll", "a"]),
     "pexpireat_same": (["SET s abcdefghijklmnop"],
                        ["PEXPIREAT", "s", "4102444800000"]),
+    # (frankenredis-m6xu9) The third stranded member of the EXPIRE family. Same
+    # arity-3 shape as expire_same and pexpireat_same so the four are directly
+    # comparable; the point of the set is that EXPIRE is classified and these are
+    # not. Absolute SECONDS, matching the parse_borrowed_plain_expireat_packet
+    # route at main.rs:8771.
+    "expireat_same": (["SET s abcdefghijklmnop"],
+                      ["EXPIREAT", "s", "4102444800"]),
     # (frankenredis-ee41v) ZRANGEBYSCORE with LIMIT reads 0.7979 and 0.7924 while
     # the PLAIN form measured 1.2601 in the zsetreads sweep -- same command, one
     # option, opposite sides of parity. Attribute before assuming which mechanism.
