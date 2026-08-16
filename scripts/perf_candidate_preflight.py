@@ -285,6 +285,22 @@ def check_candidate(terms, competitive=False):
     print("\nRead those rows before proceeding. If one is VOID (no A/A null and no")
     print("counted mechanism), say so explicitly in your new entry and cite it —")
     print("re-running a void row is legitimate; silently re-deriving it is not.")
+    print("")
+    print("A BLOCK MEANS SOMEONE HAS BEEN HERE. IT DOES NOT MEAN THEY MEASURED YOUR")
+    print("LEVER. These rows matched your target as a STRING; whether any of them")
+    print("measured the same QUANTITY is a judgement only you can make, and getting")
+    print("it wrong reads exactly like diligence. Before treating a row as an answer,")
+    print("check it measured your lever and not a neighbouring one:")
+    print("  * a cascade-BYPASS gap (candidate vs the generic path) is not a")
+    print("    front-CLASSIFICATION prize (recognised before the chain is entered).")
+    print("    frankenredis-nkvkp has four routes the gap rejected — PERSIST at")
+    print("    -132/op, LSET at 1.08x — where front-classification then gave up")
+    print("    3,326 and 4,177 instr/op. Both numbers are correct; they are")
+    print("    answers to different questions.")
+    print("  * an allocation or instruction count is not a throughput row, and a")
+    print("    row for one shape is not a row for another (frankenredis-1t8c5:")
+    print("    run-to-run spread is a property of the SHAPE, 0.09% on hget and")
+    print("    1.01% on sinter_2, so a tolerance quoted from one does not carry).")
     return 2
 
 
