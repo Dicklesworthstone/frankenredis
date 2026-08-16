@@ -25212,16 +25212,21 @@ impl Runtime {
         let reply = self.execute_plain_zinter_core(keys, now_ms);
         let elapsed_us = self.finish_chained_command(st);
         let failed = matches!(reply, RespFrame::Error(_));
-        let numkeys_owned = numkeys_arg.to_vec();
-        let keys_owned: Vec<Vec<u8>> = keys.iter().map(|k| k.to_vec()).collect();
+        // (frankenredis-z2ce3) Materialise INSIDE the closure. The closure runs only
+        // on a slowlog / latency / time-budget breach, so building the owned argv
+        // ahead of it spent 1 + nkeys heap allocations per call on a path that
+        // discards them — in a fast route whose entire premise is that the keys are
+        // borrowed. It also copied twice on the breach path, once to build the
+        // locals and again through `.clone()` here. The SCAN-family arm below has
+        // always done it this way; these arms were the outliers.
         self.record_plain_zremrange_borrowed_metrics(
             "zinter",
             "ZINTER",
             || {
-                let mut argv = Vec::with_capacity(keys_owned.len() + 2);
+                let mut argv = Vec::with_capacity(keys.len() + 2);
                 argv.push(b"ZINTER".to_vec());
-                argv.push(numkeys_owned.clone());
-                argv.extend(keys_owned.iter().cloned());
+                argv.push(numkeys_arg.to_vec());
+                argv.extend(keys.iter().map(|k| k.to_vec()));
                 argv
             },
             elapsed_us,
@@ -26703,16 +26708,15 @@ impl Runtime {
             Err(err) => CommandError::Store(err).to_resp(),
         };
         let failed = matches!(reply, RespFrame::Error(_));
-        let dest_owned = dest.to_vec();
-        let sources_owned: Vec<Vec<u8>> = sources.iter().map(|s| s.to_vec()).collect();
+        // (frankenredis-z2ce3) Breach-only materialisation; see execute_plain_zinter_borrowed.
         self.record_plain_zremrange_borrowed_metrics(
             name_lower,
             name_upper,
             || {
-                let mut argv = Vec::with_capacity(sources_owned.len() + 2);
+                let mut argv = Vec::with_capacity(sources.len() + 2);
                 argv.push(name_upper.as_bytes().to_vec());
-                argv.push(dest_owned.clone());
-                argv.extend(sources_owned.iter().cloned());
+                argv.push(dest.to_vec());
+                argv.extend(sources.iter().map(|s| s.to_vec()));
                 argv
             },
             elapsed_us,
@@ -26839,18 +26843,16 @@ impl Runtime {
         };
         let elapsed_us = self.finish_chained_command(st);
         let failed = matches!(reply, RespFrame::Error(_));
-        let dest_owned = dest.to_vec();
-        let nk_owned = numkeys_arg.to_vec();
-        let keys_owned: Vec<Vec<u8>> = keys.iter().map(|k| k.to_vec()).collect();
+        // (frankenredis-z2ce3) Breach-only materialisation; see execute_plain_zinter_borrowed.
         self.record_plain_zremrange_borrowed_metrics(
             name_lower,
             name_upper,
             || {
-                let mut argv = Vec::with_capacity(keys_owned.len() + 3);
+                let mut argv = Vec::with_capacity(keys.len() + 3);
                 argv.push(name_upper.as_bytes().to_vec());
-                argv.push(dest_owned.clone());
-                argv.push(nk_owned.clone());
-                argv.extend(keys_owned.iter().cloned());
+                argv.push(dest.to_vec());
+                argv.push(numkeys_arg.to_vec());
+                argv.extend(keys.iter().map(|k| k.to_vec()));
                 argv
             },
             elapsed_us,
@@ -26954,18 +26956,16 @@ impl Runtime {
         };
         let elapsed_us = self.finish_chained_command(st);
         let failed = matches!(reply, RespFrame::Error(_));
-        let dest_owned = dest.to_vec();
-        let nk_owned = numkeys_arg.to_vec();
-        let keys_owned: Vec<Vec<u8>> = keys.iter().map(|k| k.to_vec()).collect();
+        // (frankenredis-z2ce3) Breach-only materialisation; see execute_plain_zinter_borrowed.
         self.record_plain_zremrange_borrowed_metrics(
             "zdiffstore",
             "ZDIFFSTORE",
             || {
-                let mut argv = Vec::with_capacity(keys_owned.len() + 3);
+                let mut argv = Vec::with_capacity(keys.len() + 3);
                 argv.push(b"ZDIFFSTORE".to_vec());
-                argv.push(dest_owned.clone());
-                argv.push(nk_owned.clone());
-                argv.extend(keys_owned.iter().cloned());
+                argv.push(dest.to_vec());
+                argv.push(numkeys_arg.to_vec());
+                argv.extend(keys.iter().map(|k| k.to_vec()));
                 argv
             },
             elapsed_us,
@@ -27027,18 +27027,16 @@ impl Runtime {
             Err(err) => CommandError::Store(err).to_resp(),
         };
         let failed = matches!(reply, RespFrame::Error(_));
-        let op_owned = op.to_vec();
-        let dest_owned = dest.to_vec();
-        let sources_owned: Vec<Vec<u8>> = sources.iter().map(|s| s.to_vec()).collect();
+        // (frankenredis-z2ce3) Breach-only materialisation; see execute_plain_zinter_borrowed.
         self.record_plain_zremrange_borrowed_metrics(
             "bitop",
             "BITOP",
             || {
-                let mut argv = Vec::with_capacity(sources_owned.len() + 3);
+                let mut argv = Vec::with_capacity(sources.len() + 3);
                 argv.push(b"BITOP".to_vec());
-                argv.push(op_owned.clone());
-                argv.push(dest_owned.clone());
-                argv.extend(sources_owned.iter().cloned());
+                argv.push(op.to_vec());
+                argv.push(dest.to_vec());
+                argv.extend(sources.iter().map(|s| s.to_vec()));
                 argv
             },
             elapsed_us,
@@ -27204,14 +27202,14 @@ impl Runtime {
         }
         let elapsed_us = self.finish_chained_command(st);
         let reply = RespFrame::Integer(i64::from(!any_exists));
-        let pairs_owned: Vec<Vec<u8>> = pairs.iter().map(|p| p.to_vec()).collect();
+        // (frankenredis-z2ce3) Breach-only materialisation; see execute_plain_zinter_borrowed.
         self.record_plain_zremrange_borrowed_metrics(
             "msetnx",
             "MSETNX",
             || {
-                let mut argv = Vec::with_capacity(pairs_owned.len() + 1);
+                let mut argv = Vec::with_capacity(pairs.len() + 1);
                 argv.push(b"MSETNX".to_vec());
-                argv.extend(pairs_owned.iter().cloned());
+                argv.extend(pairs.iter().map(|p| p.to_vec()));
                 argv
             },
             elapsed_us,
@@ -60389,6 +60387,133 @@ mod tests {
             unreachable!("expected all slowlog array");
         };
         assert_eq!(all_entries.len(), 13);
+    }
+
+    // (frankenredis-z2ce3) The borrowed multi-key write executors build their
+    // slowlog/latency argv in a closure that runs ONLY on a slowlog, latency or
+    // time-budget breach. Nothing else in the tree calls it: every other test of
+    // these routes asserts the REPLY, and the reply is identical whether the argv
+    // is right, wrong, or reordered. That is the observed defect class this test
+    // exists for — the MOVE rows in scripts/dispatch_route_differ.py were added for
+    // the same reason, and this is the in-crate version covering six more routes.
+    //
+    // Threshold 0 makes the closure run on every command, so SLOWLOG sees exactly
+    // what a breach would have recorded. Each case asserts the FULL argv, because a
+    // dropped or duplicated element is the failure mode: these closures were just
+    // rewritten to materialise from the borrowed slices instead of from owned
+    // copies made ahead of the call, and mis-ordering `dest` against `numkeys` or
+    // dropping the command name would be invisible to every reply-equality gate.
+    #[test]
+    fn borrowed_multikey_write_routes_record_their_full_argv_on_a_breach() {
+        fn last_argv(rt: &Runtime) -> Vec<Vec<u8>> {
+            rt.server
+                .store
+                .slowlog
+                .back()
+                .expect("the executor must have recorded a slowlog entry")
+                .argv
+                .clone()
+        }
+
+        let mut rt = Runtime::default_strict();
+        rt.server.store.slowlog_max_len = 64;
+        rt.server.store.slowlog_log_slower_than_us = 0;
+
+        // Seed operands so each route takes its success path; a route that errored
+        // early could skip the recording entirely and pass a weaker assertion.
+        for f in [
+            command(&[b"SADD", b"sa", b"m1", b"m2"]),
+            command(&[b"SADD", b"sb", b"m2", b"m3"]),
+            command(&[b"ZADD", b"za", b"1", b"m1"]),
+            command(&[b"ZADD", b"zb", b"2", b"m1"]),
+            command(&[b"SET", b"ba", b"abc"]),
+            command(&[b"SET", b"bb", b"xyz"]),
+        ] {
+            rt.execute_frame(f, 1_000);
+        }
+
+        rt.execute_plain_sinterstore_borrowed(b"sdst", &[&b"sa"[..], &b"sb"[..]], 1_000)
+            .expect("sinterstore fast path should serve this shape");
+        assert_eq!(
+            last_argv(&rt),
+            vec![
+                b"SINTERSTORE".to_vec(),
+                b"sdst".to_vec(),
+                b"sa".to_vec(),
+                b"sb".to_vec()
+            ]
+        );
+
+        rt.execute_plain_zunionstore_borrowed(b"zdst", b"2", &[&b"za"[..], &b"zb"[..]], 1_000)
+            .expect("zunionstore fast path should serve this shape");
+        assert_eq!(
+            last_argv(&rt),
+            vec![
+                b"ZUNIONSTORE".to_vec(),
+                b"zdst".to_vec(),
+                b"2".to_vec(),
+                b"za".to_vec(),
+                b"zb".to_vec()
+            ],
+            "numkeys must sit between dest and the keys, in wire order"
+        );
+
+        rt.execute_plain_zdiffstore_borrowed(b"zdif", b"2", &[&b"za"[..], &b"zb"[..]], 1_000)
+            .expect("zdiffstore fast path should serve this shape");
+        assert_eq!(
+            last_argv(&rt),
+            vec![
+                b"ZDIFFSTORE".to_vec(),
+                b"zdif".to_vec(),
+                b"2".to_vec(),
+                b"za".to_vec(),
+                b"zb".to_vec()
+            ]
+        );
+
+        rt.execute_plain_zinter_borrowed(b"2", &[&b"za"[..], &b"zb"[..]], 1_000)
+            .expect("zinter fast path should serve this shape");
+        assert_eq!(
+            last_argv(&rt),
+            vec![
+                b"ZINTER".to_vec(),
+                b"2".to_vec(),
+                b"za".to_vec(),
+                b"zb".to_vec()
+            ],
+            "ZINTER has no dest: numkeys is the first argument"
+        );
+
+        rt.execute_plain_bitop_borrowed(b"AND", b"bdst", &[&b"ba"[..], &b"bb"[..]], 1_000)
+            .expect("bitop fast path should serve this shape");
+        assert_eq!(
+            last_argv(&rt),
+            vec![
+                b"BITOP".to_vec(),
+                b"AND".to_vec(),
+                b"bdst".to_vec(),
+                b"ba".to_vec(),
+                b"bb".to_vec()
+            ],
+            "the operation precedes dest; swapping them is the obvious mis-order"
+        );
+
+        rt.execute_plain_msetnx_borrowed(
+            &[&b"mk1"[..], &b"mv1"[..], &b"mk2"[..], &b"mv2"[..]],
+            1_000,
+        )
+        .expect("msetnx fast path should serve this shape");
+        assert_eq!(
+            last_argv(&rt),
+            vec![
+                b"MSETNX".to_vec(),
+                b"mk1".to_vec(),
+                b"mv1".to_vec(),
+                b"mk2".to_vec(),
+                b"mv2".to_vec()
+            ],
+            "pairs stay interleaved key/value in wire order"
+        );
     }
 
     #[test]
