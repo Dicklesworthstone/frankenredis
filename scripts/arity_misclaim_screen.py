@@ -250,6 +250,38 @@ def advise(cmd):
     return 0
 
 
+def arm_parsers():
+    """{class name: number of DISTINCT parsers its dispatch arm chains}.
+
+    The recurring defect in this tree is never a missing parser -- every instance
+    had its parser and executor already present. It is a class PROMISING more
+    readings than its arm CHAINS. ZaddTwoPair claimed twelve readings at array
+    length 6 and chained one parser; ZRANGE claimed four and chained one.
+
+    So the number worth printing beside "how many readings does this arity admit"
+    is "how many parsers does the arm actually try". A twelve-against-one row is
+    visible at a glance; bare ambiguity is not, which is why twenty-two ambiguous
+    rows went unread while a live regression sat among them.
+
+    This does NOT prove a defect. One generic parser can legitimately serve every
+    reading by resolving the token downstream -- ExpireCond does exactly that with
+    NX/XX/GT/LT, and GEODIST with its units. It is a ratio to look at, not a
+    verdict to act on.
+    """
+    src = open(MAIN, encoding="utf-8", errors="replace").read()
+    start = src.index("fn try_dispatch_floor_classified_action")
+    body = src[start:]
+    marks = [(m.group(1), m.start())
+             for m in re.finditer(r"\n        BorrowedDispatchFloorClass::(\w+)", body)]
+    out = {}
+    for i, (cls, pos) in enumerate(marks):
+        end = marks[i + 1][1] if i + 1 < len(marks) else min(pos + 4000, len(body))
+        chunk = body[pos:end]
+        parsers = {p for p in re.findall(r"(parse_borrowed_plain_\w+)\(", chunk)}
+        out[cls] = max(out.get(cls, 0), len(parsers))
+    return out
+
+
 def sweep():
     """Every fixed-arity class, checked against the variadic solver.
 
@@ -288,7 +320,10 @@ def sweep():
             else:
                 clean += 1
 
+    chained = arm_parsers()
     print("AMBIGUOUS AT THEIR CLAIMED ARITY -- %d" % len(set(ambiguous)))
+    print("`readings` is what the arity admits; `chained` is how many parsers the")
+    print("arm tries. A wide gap is where every regression in this tree has lived.\n")
     for cmd, arity, cls, hits in sorted(set(ambiguous)):
         # Commands with several INDEPENDENT flags (ZADD has NX/XX/GT/LT/CH/INCR)
         # produce combinatorially many readings per length. Printing all eighteen
@@ -296,7 +331,10 @@ def sweep():
         shown = " | ".join(hits[:4])
         if len(hits) > 4:
             shown += "  ... and %d more" % (len(hits) - 4)
-        print("  %-12s arity %-2d -> %-22s %s" % (cmd, arity, cls, shown))
+        base = cls.replace(" (range)", "")
+        n = chained.get(base)
+        print("  %-12s arity %-2d -> %-20s readings %2d  chained %s   %s"
+              % (cmd, arity, base, len(hits), "?" if n is None else str(n), shown))
     print("\nunambiguous: %d   still unmodelled: %d" % (clean, unmodelled))
     print("Each hit needs the ARM read: an arm may chain parsers and serve every")
     print("form (GETEX does), and a hit is ambiguity, never a confirmed defect.")
