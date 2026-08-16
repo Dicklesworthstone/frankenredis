@@ -386,17 +386,31 @@ impl GenericSet {
     #[must_use]
     pub fn from_unique_str_members<M: AsRef<[u8]>>(members: &[M]) -> Self {
         let n = members.len();
-        let packed =
-            n <= PACKED_MAX_ENTRIES && members.iter().all(|m| m.as_ref().len() <= PACKED_MAX_VALUE);
+        // (frankenredis-33832) ONE inspection pass instead of two. This ran an `all`
+        // over every member length to choose the tier, then a `map(...).sum()` over
+        // every member length AGAIN for the byte budget — and both branches computed
+        // the identical `len + 2` sum, so the second walk was unconditional. On the
+        // RESTORE hot path that is a whole extra traversal of the member list before
+        // any bytes move. Byte-identical: `packed` is the same conjunction and
+        // `bytes` the same total.
+        //
+        // Not a short-circuit regression: the `all` could bail early on an oversized
+        // member, but the sum it was paired with always visited every member anyway,
+        // so the fused loop never does more work than the pair it replaces.
+        let mut packed = n <= PACKED_MAX_ENTRIES;
+        let mut bytes = 0_usize;
+        for m in members {
+            let len = m.as_ref().len();
+            packed &= len <= PACKED_MAX_VALUE;
+            bytes += len + 2;
+        }
         if packed {
-            let bytes: usize = members.iter().map(|m| m.as_ref().len() + 2).sum();
             let mut p = PackedStrSet::with_capacity(bytes);
             for m in members {
                 p.append(m.as_ref());
             }
             GenericSet::Packed(p)
         } else {
-            let bytes: usize = members.iter().map(|m| m.as_ref().len() + 2).sum();
             let mut h = CompactStrSet::with_capacity(n, bytes);
             for m in members {
                 h.insert(m.as_ref());
@@ -582,19 +596,23 @@ impl HashFieldMap {
     /// (BlackThrush: RESTORE decode zero-copy span build)
     #[must_use]
     pub fn from_unique_pairs_borrowed(pairs: &[(&[u8], &[u8])]) -> Self {
-        let to_hash = pairs.len() > PACKED_MAX_ENTRIES
-            || pairs
-                .iter()
-                .any(|(f, v)| f.len() > PACKED_MAX_VALUE || v.len() > PACKED_MAX_VALUE);
+        // (frankenredis-33832) Same fuse as `from_unique_str_members`: the tier test
+        // and the byte budget each walked every pair, and both branches summed the
+        // identical `f.len() + v.len() + 10`, so the second walk ran unconditionally.
+        // One pass now yields both. Byte-identical — same conjunction, same total.
+        let mut to_hash = pairs.len() > PACKED_MAX_ENTRIES;
+        let mut bytes = 0_usize;
+        for (f, v) in pairs {
+            to_hash |= f.len() > PACKED_MAX_VALUE || v.len() > PACKED_MAX_VALUE;
+            bytes += f.len() + v.len() + 10;
+        }
         if to_hash {
-            let bytes: usize = pairs.iter().map(|(f, v)| f.len() + v.len() + 10).sum();
             let mut h = CompactFieldMap::with_capacity(pairs.len(), bytes);
             for (field, value) in pairs {
                 h.insert(field, value);
             }
             HashFieldMap::Hash(h)
         } else {
-            let bytes: usize = pairs.iter().map(|(f, v)| f.len() + v.len() + 10).sum();
             let mut p = PackedStrMap::with_capacity(bytes);
             for (field, value) in pairs {
                 p.append(field, value);
@@ -5479,11 +5497,86 @@ impl CompactFieldMap {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChunkedList, CompactFieldMap, CompactStrSet, LIST_CHUNK_TARGET, ListChunk, ListRepr,
-        ListValue, PACKED_MAX_ENTRIES, PACKED_STREAM_NODE_MAX_ENTRIES, PackedList, PackedStrMap,
-        PackedStrSet, PackedStreamFields, PackedStreamLog, PackedZSet, read_varint_impl,
-        write_varint, zset_cmp,
+        ChunkedList, CompactFieldMap, CompactStrSet, GenericSet, HashFieldMap, LIST_CHUNK_TARGET,
+        ListChunk, ListRepr, ListValue, PACKED_MAX_ENTRIES, PACKED_MAX_VALUE,
+        PACKED_STREAM_NODE_MAX_ENTRIES, PackedList, PackedStrMap, PackedStrSet, PackedStreamFields,
+        PackedStreamLog, PackedZSet, read_varint_impl, write_varint, zset_cmp,
     };
+
+    /// (frankenredis-33832) The fused single-pass tier/budget loop in the two RESTORE
+    /// bulk builders must choose the SAME tier as the two-walk form it replaced.
+    ///
+    /// The reference here is the original predicate written out longhand, not a
+    /// restatement of the new loop, and the matrix straddles both thresholds in both
+    /// directions: exactly at `PACKED_MAX_ENTRIES`, one over it, an oversized member
+    /// at the FIRST position (where the old `all` short-circuited immediately) and at
+    /// the LAST (where it scanned everything), plus the empty case.
+    #[test]
+    fn fused_tier_selection_matches_the_two_walk_form_it_replaced() {
+        // Every member must be DISTINCT. These builders carry `unique` in their name
+        // as a precondition and dedupe, so a repeated member silently changes the
+        // count and would mask the tier comparison this test exists to make — which
+        // is exactly how the first draft of this test failed.
+        let big = vec![b'x'; PACKED_MAX_VALUE + 1];
+        let distinct = |i: usize| format!("m{i:05}").into_bytes();
+
+        let mut shapes: Vec<(&str, Vec<Vec<u8>>)> = vec![
+            ("empty", vec![]),
+            ("one small", vec![distinct(0)]),
+            (
+                "oversized first",
+                vec![big.clone(), distinct(1), distinct(2)],
+            ),
+            (
+                "oversized last",
+                vec![distinct(1), distinct(2), big.clone()],
+            ),
+            ("exactly at max value", vec![vec![b'z'; PACKED_MAX_VALUE]]),
+        ];
+        shapes.push((
+            "exactly at max entries",
+            (0..PACKED_MAX_ENTRIES).map(distinct).collect(),
+        ));
+        shapes.push((
+            "one over max entries",
+            (0..=PACKED_MAX_ENTRIES).map(distinct).collect(),
+        ));
+
+        for (label, members) in &shapes {
+            // The ORIGINAL two-walk predicate, written out as the oracle.
+            let expect_packed = members.len() <= PACKED_MAX_ENTRIES
+                && members.iter().all(|m| m.len() <= PACKED_MAX_VALUE);
+            let expect_bytes: usize = members.iter().map(|m| m.len() + 2).sum();
+
+            let built = GenericSet::from_unique_str_members(members);
+            assert_eq!(
+                matches!(built, GenericSet::Packed(_)),
+                expect_packed,
+                "{label}: set tier diverged from the two-walk predicate"
+            );
+            assert_eq!(built.len(), members.len(), "{label}: member count changed");
+            let fused_bytes: usize = members.iter().map(|m| m.len() + 2).sum();
+            assert_eq!(fused_bytes, expect_bytes, "{label}: byte budget diverged");
+
+            // Same matrix through the hash builder, whose pair predicate is the twin.
+            // Fields are the distinct members; one short constant value keeps the
+            // VALUE side out of the tier decision except where the field forces it.
+            let value = b"v".as_slice();
+            let pairs: Vec<(&[u8], &[u8])> =
+                members.iter().map(|m| (m.as_slice(), value)).collect();
+            let expect_hash = pairs.len() > PACKED_MAX_ENTRIES
+                || pairs
+                    .iter()
+                    .any(|(f, v)| f.len() > PACKED_MAX_VALUE || v.len() > PACKED_MAX_VALUE);
+            let map = HashFieldMap::from_unique_pairs_borrowed(&pairs);
+            assert_eq!(
+                matches!(map, HashFieldMap::Hash(_)),
+                expect_hash,
+                "{label}: hash tier diverged from the two-walk predicate"
+            );
+            assert_eq!(map.len(), pairs.len(), "{label}: field count changed");
+        }
+    }
 
     // (frankenredis-pipsm) The single-byte varint fast path must return exactly what the
     // generic shift-accumulate loop returns — value AND cursor — for every encoding width,
