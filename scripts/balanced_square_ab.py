@@ -460,6 +460,19 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
     # RESOLVED by a fifth run: 0.9291 [0.9132, 0.9561], nulls 1.0244/1.0289 --
     # same direction, similar amounts, which is the stated excusability condition,
     # and its interval OVERLAPS the admissible 0.9600. So there are now two
+    # REPLICATED ON A SECOND ELF ab969ddb4dd88322db2c7809:
+    #   expire_nx  0.9379 [0.9013, 0.9530] ADMISSIBLE  nulls 0.9924/1.0164
+    # So expire_nx has ADMISSIBLE rows on TWO ELFs (0.9600 and 0.9379) with
+    # overlapping intervals -- REPLICATED STANDING as a sub-parity route.
+    # WORST BOUND 0.9013 across admissible rows.
+    #
+    # And an unplanned control for the ZADD lever: ELF2 predates c2973aa12, so it
+    # has NO arity-5 class, and it reads zadd_xx 0.8455 [0.8304, 0.8777] (nulls
+    # 0.9660/0.9816, same direction) -- agreeing with the pre-fix admissible pair
+    # 0.8671/0.8676. The post-lever ELF reads 1.1009 ADMISSIBLE. That is the
+    # crossing confirmed across two BUILDS differing by the actual commit, which is
+    # stronger than the same-ELF bypass comparison it was first shown with.
+    #
     # trustworthy rows and they agree:
     #
     #   trustworthy   0.9600 (ADM)   0.9291 (excusable)   -> 0.93-0.96
