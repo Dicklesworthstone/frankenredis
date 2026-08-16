@@ -144,6 +144,109 @@ MINLEN: dict = {}
 MAXLEN: dict = {}
 
 
+def advise(cmd):
+    """Before you claim an arity for a command, ask what ELSE has that length.
+
+    The screens above only inspect classes that EXIST. This answers the question
+    that comes first and is where the family's near-misses happen: dzik2 caught
+    PFADD one step before shipping, and GEOADD had to be worked out by hand
+    (frankenredis-wjzs9). It handles the variadic case the other modes park as
+    unmodelled, by solving for the repeat count rather than enumerating widths.
+
+    Array length = base + (sum of chosen optional widths) + W*n, for a command
+    with one variadic block of width W repeated n>=1 times. For each length we
+    report every option-subset admitting an integer n, so two or more means a
+    class minted there cannot know which form it has.
+    """
+    path = os.path.join(CMDS, cmd.lower() + ".json")
+    if not os.path.exists(path):
+        print("no incumbent spec for %s" % cmd)
+        return 1
+    spec = json.load(open(path))
+    spec = spec[list(spec)[0]]
+
+    base = 1              # the command name
+    opts = []             # (label, width) for each independent optional
+    var_width = None      # width of the single variadic block, if any
+
+    def fixed_width(arg):
+        if arg.get("type") == "pure-token":
+            return 1
+        if arg.get("type") == "block":
+            w = 1 if arg.get("token") else 0
+            for c in arg.get("arguments", []):
+                cw = fixed_width(c)
+                if cw is None:
+                    return None
+                w += cw
+            return w
+        if arg.get("type") == "oneof" or "arguments" in arg:
+            return None
+        return 2 if arg.get("token") else 1
+
+    for arg in spec.get("arguments", []):
+        w = fixed_width(arg)
+        if arg.get("multiple"):
+            if var_width is not None or w is None:
+                print("%s: more than one variadic argument, or an unmodelled one; "
+                      "this advisor does not guess" % cmd)
+                return 1
+            var_width = w
+            continue
+        if arg.get("type") == "oneof":
+            alts = []
+            for alt in arg.get("arguments", []):
+                aw = fixed_width(alt)
+                if aw is None:
+                    print("%s: unmodelled oneof alternative" % cmd)
+                    return 1
+                alts.append((alt.get("token") or alt.get("name", "?").upper(), aw))
+            if arg.get("optional"):
+                opts.append(alts)          # choose one, or none
+            else:
+                base += alts[0][1]
+            continue
+        if w is None:
+            print("%s: unmodelled argument %r" % (cmd, arg.get("name")))
+            return 1
+        if arg.get("optional"):
+            opts.append([(arg.get("token") or arg.get("name", "?").upper(), w)])
+        else:
+            base += w
+
+    # Every combination of "take one alternative of this optional, or skip it".
+    combos = [("", 0)]
+    for alts in opts:
+        nxt = []
+        for label, width in combos:
+            nxt.append((label, width))                     # skip
+            for tok, w in alts:
+                nxt.append((" ".join(x for x in [label, tok] if x), width + w))
+        combos = nxt
+
+    print("%s: base=%d, variadic block width=%s" % (cmd, base, var_width))
+    forms = {}
+    for label, width in combos:
+        if var_width:
+            for n in range(1, 6):
+                forms.setdefault(base + width + var_width * n, []).append(
+                    "%s x%d" % (label or "(plain)", n))
+        else:
+            forms.setdefault(base + width, []).append(label or "(plain)")
+    for length in sorted(forms):
+        if length > base + 14:
+            break
+        tag = "AMBIGUOUS" if len(forms[length]) > 1 else "unique   "
+        print("  array_len %2d  %s  %s" % (length, tag, " | ".join(forms[length])))
+    print("\nOnly `unique` lengths are safe to mint a class at without a keyword check.")
+    print("AMBIGUOUS means ambiguous TO A CLASSIFIER THAT SEES ONLY THE ARRAY LENGTH.")
+    print("A command carrying an explicit count -- LMPOP's `numkeys`, ZADD's pairing --")
+    print("can still be resolved, by READING that count at classification time rather")
+    print("than inferring it from the length. That costs a parse in the classifier, so")
+    print("it is a trade, not a free out; but do not read these rows as `impossible`.")
+    return 0
+
+
 def const_values():
     """`const NAME: usize = N;` from the same file, so caps are read not guessed."""
     src = open(MAIN, encoding="utf-8", errors="replace").read()
@@ -392,6 +495,12 @@ def main():
             ambiguous.append((arity, cmd, cls, hits))
         else:
             clean.append((arity, cmd, cls, hits))
+
+    if "--advise" in sys.argv:
+        i = sys.argv.index("--advise")
+        if i + 1 >= len(sys.argv):
+            sys.exit("--advise needs a command name, e.g. --advise GEOADD")
+        return advise(sys.argv[i + 1])
 
     if "--range" in sys.argv:
         return report_ranges()
