@@ -22247,3 +22247,71 @@ RETRY PREDICATE: touch_2 is CLOSED. The fix is committed, confirmed on committed
 and fr's cost is settled at ~2,082 instr/op with 21.1 pct dispatch. Do not measure it
 again. The remaining open items are expire_nx_opt and set_base, and both need code
 rather than another reading.
+
+## MEASURED (frankenredis-p98mw) — two-pair MSETNX: 2.6703x -> 0.6833x, 74 pct of the op removed
+
+Claim class: COMPETITIVE — fr and the vendored Redis 7.2.4 binary in the SAME invocation.
+Same provenance limitation as the rows above (valgrind hosts the target, so no
+self-reported ELF SHA; ABBA repeats, not a bootstrap CI).
+
+    run  shape       fr instr/op   redis 7.2.4   fr/redis   dispatch share
+    A    msetnx_2        2824.9        4138.8     0.6825x       20.8%
+    B    msetnx_1        2363.4        3317.5     0.7124x       19.4%   <- CONTROL
+    B    msetnx_1        2362.1        3318.9     0.7117x       19.4%   <- CONTROL
+    A    msetnx_2        2828.0        4138.7     0.6833x       20.8%
+
+    worst bound   two-pair  2.6703x -> 0.6833x   fr instr/op ~11,056 -> ~2,826
+    control       one-pair  0.7328x -> 0.7124x   fr instr/op ~2,368 -> ~2,363 (flat)
+    share         two-pair  70.5 pct -> 20.8 pct
+
+~8,230 instr/op removed, 74 pct of the op, taking the shape from 2.67x BEHIND the
+incumbent to 0.68x ahead. Per-pair cost is sane again: two pairs cost 20 pct more than
+one, where the gap was 365 pct.
+
+SECOND FIX OF THIS DEFECT CLASS IN TWO TURNS, and the arity set is now COMPLETE for both
+commands. MSETNX has exactly two parser call sites — arity 3 (`key_arg1`) and arity 5
+(`key_arg3`) — and no arity-7 parser, so claiming 3 and 5 covers everything the cascade
+could serve. TOUCH likewise now covers 2, 3, 4 and 5. **Both were verified by enumerating
+call sites rather than by reasoning about which forms "should" have parsers, which is the
+step whose absence caused both defects.**
+
+    command   before                                    after
+    TOUCH     arity 2 only    excluded 3.2848x          arities 2-5, excluded set empty
+    MSETNX    arity 3 only    excluded 2.6703x          arities 3 and 5, excluded set empty
+
+THE SAME TEST NEEDED THE SAME CORRECTION AGAIN, and it is worth recording that it was
+found by the lever rather than by review. `touch_and_msetnx_claim_exactly_the_arity_their
+_parser_serves` asserted `pairs == 1` on the premise that only the one-pair form had a
+parser — the identical false premise its TOUCH half carried, in the same function, fixed
+one turn earlier. **Correcting one half of a test does not correct the other half's
+premise**, and nothing in the first fix prompted a look at the second. Both halves now
+enumerate their claimed arities, dispatch the parser check per arity, and run one arity
+past the claimed set.
+
+A/A NULL — every figure under 0.12 pct, including both incumbent arms:
+
+    fr arm      msetnx_2  2824.9 -> 2828.0   +0.11%
+                msetnx_1  2363.4 -> 2362.1   -0.06%
+    redis arm   msetnx_2  4138.8 -> 4138.7   -0.002%
+                msetnx_1  3317.5 -> 3318.9   +0.04%
+    ratio       two-pair 0.6825 -> 0.6833  0.12%  |  one-pair 0.7124 -> 0.7117  0.10%
+
+The 74 pct movement clears that by six hundred times. This is the second shape (after
+SINTERCARD) where the incumbent arm is stable to ~0.1 pct, against EXPIRE and TOUCH where
+it moved 4-6 pct — reinforcing that incumbent variance is shape-dependent and cannot be
+assumed from another shape's null.
+
+WORST RATIO RETURNS TO incrbyfloat_nondyadic at 0.7835x, whose remaining cost is spread
+evenly across three BigNat frames and is a representation redesign rather than a fix.
+
+EXECUTABLE IDENTITIES, full 64-hex (computed post-run, see limitation above):
+  candidate  `f3c2e2b949fddab8d8a2894e430536a955d9bcd9f197dcf65323fd2c15b43de7`
+  incumbent  `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+  tests      fr-server 339 passed, 0 failed.
+
+Campaign output: yes — closes the second of two regressions this campaign created.
+
+RETRY PREDICATE: ZADD base, BITCOUNT range and the four expire conditionals remain
+exact-arity claims with no arity-N+1 shape. Two for two so far. Enumerate each command's
+parser CALL SITES before writing the shape — that enumeration, not the shape, is what
+distinguishes a complete claim from a lucky one.

@@ -14748,6 +14748,12 @@ enum BorrowedDispatchFloorClass {
     /// have parsers and executors too -- and the exclusion measured 3.2848x against
     /// Redis 7.2.4 at 73.9 pct dispatch share, the worst shape in this campaign,
     /// while the classified single-key form sat at 0.6401x and looked healthy.
+    /// (frankenredis-p98mw) Two-pair MSETNX, array length 5. The one-pair form was
+    /// front-classified with an EXACT arity claim on the reasoning that only it had a
+    /// borrowed parser; this one has a parser too, and the exclusion measured 2.6703x
+    /// against Redis 7.2.4 at 70.5 pct dispatch share while the claimed form sat at
+    /// 0.7328x. There is no arity-7 parser, so 3 and 5 are the complete set.
+    MsetnxTwoPair,
     Touch2,
     Touch3,
     Touch4,
@@ -16380,6 +16386,12 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (5, BorrowedDispatchFloorCommand::Touch) => Some(BorrowedDispatchFloorClass::Touch4),
         (3, BorrowedDispatchFloorCommand::Msetnx) => {
             Some(BorrowedDispatchFloorClass::MsetnxOnePair)
+        }
+        // (frankenredis-p98mw) The two-pair form. Arities 3 and 5 are the only ones
+        // with parsers, so this completes the set rather than widening toward shapes
+        // that would decline to generic.
+        (5, BorrowedDispatchFloorCommand::Msetnx) => {
+            Some(BorrowedDispatchFloorClass::MsetnxTwoPair)
         }
         (4, BorrowedDispatchFloorCommand::Zcount) => Some(BorrowedDispatchFloorClass::Zcount),
         (3, BorrowedDispatchFloorCommand::Zscore) => Some(BorrowedDispatchFloorClass::Zscore),
@@ -19265,6 +19277,33 @@ fn try_dispatch_floor_classified_action(
         }
         // (frankenredis-p98mw) Mirrors the cascade arm exactly -- same parser, same
         // executor, same generic fallthrough.
+        // (frankenredis-p98mw) Mirrors the cascade arm at ~11545 exactly -- same parser,
+        // same executor, same generic fallthrough. key=k0, a=v0, b=k1, c=v1.
+        BorrowedDispatchFloorClass::MsetnxTwoPair => {
+            if let Some(packet) = parse_borrowed_plain_key_arg3_packet(
+                unparsed,
+                &parser_config,
+                b"*5\r\n$6\r\n",
+                b"MSETNX",
+            ) && let Some(response) = runtime.execute_plain_msetnx_borrowed(
+                &[packet.key, packet.a, packet.b, packet.c],
+                ts,
+            ) {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
         BorrowedDispatchFloorClass::Touch2 => {
             if let Some(packet) = parse_borrowed_plain_key_arg1_packet(
                 unparsed,
@@ -44546,24 +44585,42 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
             }
         }
 
+        // (frankenredis-p98mw) SAME CORRECTION AS THE TOUCH HALF ABOVE, and the same
+        // root cause. This asserted `pairs == 1` on the premise that "only the one-pair
+        // form has a borrowed parser". FALSE: a key_arg3 call site pins MSETNX at array
+        // length 5 (main.rs ~11545). The excluded form measured 2.6703x against Redis
+        // 7.2.4 at 70.5 pct dispatch share while this test passed, because both its
+        // expectation and its parser check were derived from the claim being tested.
+        //
+        // Arities 3 and 5 are the COMPLETE set -- there is no arity-7 parser -- so
+        // pairs=3 below is the one-past case that must stay unclaimed.
         for pairs in 1..=3usize {
             let pkt = msetnx(pairs);
             let got = super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg);
+            let want = match pairs {
+                1 => Some(super::BorrowedDispatchFloorClass::MsetnxOnePair),
+                2 => Some(super::BorrowedDispatchFloorClass::MsetnxTwoPair),
+                _ => None,
+            };
             assert_eq!(
-                got,
-                (pairs == 1).then_some(super::BorrowedDispatchFloorClass::MsetnxOnePair),
-                "MSETNX with {pairs} pair(s): only the one-pair form has a borrowed \
-                 parser, so wider calls must stay unclaimed and keep walking"
+                got, want,
+                "MSETNX with {pairs} pair(s): one and two pairs have parsers and are \
+                 claimed; wider calls have none and must keep walking"
             );
             if got.is_some() {
-                assert!(
-                    super::parse_borrowed_plain_key_arg1_packet(
-                        &pkt,
-                        &cfg,
-                        b"*3\r\n$6\r\n",
-                        b"MSETNX",
+                let served = match pairs {
+                    1 => super::parse_borrowed_plain_key_arg1_packet(
+                        &pkt, &cfg, b"*3\r\n$6\r\n", b"MSETNX",
                     )
                     .is_some(),
+                    2 => super::parse_borrowed_plain_key_arg3_packet(
+                        &pkt, &cfg, b"*5\r\n$6\r\n", b"MSETNX",
+                    )
+                    .is_some(),
+                    _ => unreachable!("only one and two pairs are claimed"),
+                };
+                assert!(
+                    served,
                     "MSETNX {pairs} pair(s) claimed but the arm's parser declines it"
                 );
             }
