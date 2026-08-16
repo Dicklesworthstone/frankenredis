@@ -16956,6 +16956,47 @@ profile. Reopen the round-trip question only if a profile shows a rendered value
 being reparsed on some other path — the hash and set RESTORE decoders were checked
 and do not have one, because their consumers genuinely want the bytes.
 
+## 2026-08-16 GentleStream: REJECT — pre-sizing SCAN's result vector to COUNT costs more than the growth it avoids (`frankenredis-hwcm1`)
+
+Claim class: SELF-SPEEDUP. Campaign output: no. **Decision: REJECT**, reverted in
+6e1261fdd.
+
+**Lever.** `scan_in_db` builds its result with `Vec::new()` and pushes, so callgrind
+showed one `RawVec::grow_one` per SCAN (4,000 over 4,000 ops). The loop stops at
+`batch` matches, so `Vec::with_capacity(batch)` looked like an exact upper bound that
+removes the reallocation for free.
+
+**Counted mechanism, which is why this is falsifiable rather than a vibe.** It did
+remove the `grow_one`, and it still lost: `__rust_alloc` inside `scan_in_db` went
+**12,003 → 16,003** calls over 4,000 ops, and total instructions went **35,791,601
+with the presize vs 35,532,688 without** — the presize is 0.72% WORSE than the same
+build with only the encode dedup, and only 0.07% better than doing nothing at all.
+
+**Why.** COUNT is a SCAN BUDGET, not a result-size estimate. At `COUNT 100` with one
+matching key the presize allocates 100 `Vec<u8>` slots to hold 1, and that upfront
+allocation costs as much as the single growth it avoids. The lever would only pay on
+a workload whose match rate approaches COUNT, which is not the shape SCAN is used at.
+
+**Do not retry** as written. The reasoning "the loop is bounded by batch so batch is
+a safe capacity" is the specific thing refuted here — safe is not the same as cheap.
+
+**Retry predicate.** Reopen this surface only when one of these is measurably true:
+the observed match count per SCAN reaches at least half of COUNT on the workload
+being optimised (at which point the capacity is used rather than wasted, and the
+allocation trade inverts); or `scan_in_db` is changed to size the vector from an
+observed match rate rather than from COUNT, which is a different lever needing its
+own measurement; or the allocator changes such that one `with_capacity(100)` costs
+less than one `grow_one` on this path, which is the arithmetic that decided it.
+Re-measure by counting `__rust_alloc` calls inside `scan_in_db` over a fixed op
+count — the presize must come out at or below 12,003 per 4,000 ops to pay.
+
+**Harness/provenance.** Gated callgrind (`--instr-atstart=no` + `callgrind_control -i
+on/off`), 4,000 ops of `SCAN 0 MATCH tenant:needle:* COUNT 100` against a 3-key db,
+`scripts/cmd_drive.py` + valgrind callgrind 3.25.1, run LOCALLY on thinkstation1;
+three ELFs differing only in this change, built via rch on vmi1149989 / vmi1227854.
+**CV is provenance only and is NEVER a gate here** — this row is a counted mechanism,
+not a timing verdict, and no CI is claimed for it.
+
 ## 2026-08-16 GentleStream: COMPETITIVE KEEP — front-classifying the THREE-source set stores closes the last big online gap: 0.660x → 0.946x, 0.687x → 0.995x, 0.731x → 1.005x normalised (`frankenredis-804l1`)
 
 Claim class: COMPETITIVE. Campaign output: yes. Live vendored Redis 7.2.4 arm in the
