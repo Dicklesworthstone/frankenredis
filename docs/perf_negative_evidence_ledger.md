@@ -22466,3 +22466,74 @@ RETRY PREDICATE: expire_nx_opt is CLOSED — it has crossed and fr's cost is set
 very likely stranded on identical terms and which 0d0bcd5aa's message ("the
 expire-family conditional formS", plural) suggests may also have been fixed — there is
 no harness shape for it, so that needs one adding before it can be confirmed.
+
+## MEASURED (frankenredis-p98mw) — ZADD's arity-6 gap closed: 0.7853x -> 0.5184x, and the odd-arity gap is left OPEN on purpose
+
+Claim class: COMPETITIVE — fr and the vendored Redis 7.2.4 binary in the SAME invocation.
+Same provenance limitation as the rows above (valgrind hosts the target, so no
+self-reported ELF SHA; ABBA repeats, not a bootstrap CI).
+
+    run  shape        fr instr/op   redis 7.2.4   fr/redis   dispatch share
+    A    zadd_2pair       3682.1        7375.4     0.4992x       15.7%
+    B    zadd_base        2705.4        5121.2     0.5283x       16.7%   <- CONTROL
+    B    zadd_base        2711.1        5183.5     0.5230x       16.7%   <- CONTROL
+    A    zadd_2pair       3667.3        7074.6     0.5184x       15.7%
+
+    worst bound   two-pair  0.7853x -> 0.5184x   fr instr/op ~5,379 -> ~3,675
+    control       base      0.5241x -> 0.5283x   fr instr/op ~2,681 -> ~2,708 (flat)
+    share         two-pair  39.6 pct -> 15.7 pct
+
+~1,704 instr/op removed, 32 pct of the op. Two pairs now cost 35 pct more than one pair,
+which is one extra sorted-set insertion — the correct ordering.
+
+THIRD FIX OF THIS DEFECT CLASS, AND THE SMALLEST, EXACTLY AS THE SEVERITY SPREAD
+PREDICTED. The previous row measured this as a MIDDLE GAP at 39.6 pct share rather than an
+EDGE exclusion at 70+ pct, and recorded that "unclaimed predicts a defect exists, not its
+size". The fixes bear that out:
+
+    touch_2     73.9 pct share  3.2848x -> 0.5737x   83 pct of the op removed
+    msetnx_2    70.5 pct share  2.6703x -> 0.6833x   74 pct
+    zadd_2pair  39.6 pct share  0.7853x -> 0.5184x   32 pct
+
+**THE ODD-ARITY GAP IS DELIBERATELY LEFT OPEN AND UNCLAIMED.**
+`parse_borrowed_plain_zadd_flag_multi_packet` accepts arities 7..=14 (one or two flags
+plus N pairs), while the classifier's variadic arm is `arity >= 8 && even`. So arities 7,
+9, 11 and 13 remain unclaimed. I did NOT claim them, because:
+
+  * none is measured, and this defect class has spanned 0.79x to 3.28x across three
+    instances, so their size cannot be inferred from this one; and
+  * an over-claim is worse than no claim — a floor decline calls the generic dispatcher
+    directly rather than returning to the cascade — and I have not verified that
+    `zadd_flag_multi` accepts every packet at those arities that the classifier would
+    hand it.
+
+Claiming them on the strength of "the parser lists the arity" is precisely the reasoning
+that produced the TOUCH and MSETNX defects in reverse. Recorded as a known open gap with
+the parser's exact range, so the next person starts from the range rather than rediscovering
+it.
+
+A/A NULL, from the ABBA repeats in this one invocation:
+
+    fr arm      zadd_2pair  3682.1 -> 3667.3   -0.40%
+                zadd_base   2705.4 -> 2711.1   +0.21%
+    redis arm   zadd_2pair  7375.4 -> 7074.6   -4.08%
+                zadd_base   5121.2 -> 5183.5   +1.22%
+    ratio       2pair 0.4992 -> 0.5184  3.85%  |  base 0.5283 -> 0.5230  1.00%
+
+The 32 pct movement clears the 3.85 pct spread by eight times.
+
+WORST RATIO RETURNS TO incrbyfloat_nondyadic at 0.7835x, whose remaining cost is spread
+evenly across three BigNat frames.
+
+EXECUTABLE IDENTITIES, full 64-hex (computed post-run, see limitation above):
+  candidate  `d959cba13aedb271455f33b35b8154c5af466577fbc57f253a40e117112a66c1`
+  incumbent  `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+  tests      fr-server 339 passed, 0 failed.
+
+Campaign output: yes — third and mildest instance of the class, closed, with the remaining
+gap documented rather than guessed at.
+
+RETRY PREDICATE: measure ZADD at arity 7 BEFORE claiming it. BITCOUNT range and the four
+expire conditionals also remain exact-arity claims with no N+1 shape. Write the shape
+first in every case — three for three, the shape is what makes the defect visible and the
+severity is unpredictable without it.

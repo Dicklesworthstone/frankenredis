@@ -14753,6 +14753,17 @@ enum BorrowedDispatchFloorClass {
     /// borrowed parser; this one has a parser too, and the exclusion measured 2.6703x
     /// against Redis 7.2.4 at 70.5 pct dispatch share while the claimed form sat at
     /// 0.7328x. There is no arity-7 parser, so 3 and 5 are the complete set.
+    /// (frankenredis-p98mw) Two-pair ZADD, array length 6. The classifier claimed 4, 5
+    /// and `>= 8 && even`, so 6 fell in a GAP BETWEEN two claimed regions rather than
+    /// off an edge. Measured 0.7853x against Redis 7.2.4 at 39.6 pct dispatch share
+    /// while the classified arity-4 base sat at 0.5241x / 16.7 pct.
+    ///
+    /// NOT the whole gap: `parse_borrowed_plain_zadd_flag_multi_packet` accepts 7..=14
+    /// (one or two flags plus N pairs), and the `>= 8 && even` arm leaves the ODD
+    /// arities 7, 9, 11 and 13 unclaimed. Those are unmeasured and deliberately left
+    /// alone here -- the three measured instances of this defect span 0.79x to 3.28x,
+    /// so their size cannot be assumed from this one.
+    ZaddTwoPair,
     MsetnxTwoPair,
     Touch2,
     Touch3,
@@ -16290,6 +16301,9 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // the generic dispatcher directly rather than returning to the cascade.
         (4, BorrowedDispatchFloorCommand::Zadd) => Some(BorrowedDispatchFloorClass::ZaddBase),
         (5, BorrowedDispatchFloorCommand::Zadd) => Some(BorrowedDispatchFloorClass::ZaddFlag),
+        // (frankenredis-p98mw) The two-pair form, which sat in the gap between the
+        // arity-5 claim and the `>= 8 && even` claim below.
+        (6, BorrowedDispatchFloorCommand::Zadd) => Some(BorrowedDispatchFloorClass::ZaddTwoPair),
         (arity, BorrowedDispatchFloorCommand::Zadd) if arity >= 8 && arity.is_multiple_of(2) => {
             Some(BorrowedDispatchFloorClass::ZaddMulti)
         }
@@ -19279,6 +19293,31 @@ fn try_dispatch_floor_classified_action(
         // executor, same generic fallthrough.
         // (frankenredis-p98mw) Mirrors the cascade arm at ~11545 exactly -- same parser,
         // same executor, same generic fallthrough. key=k0, a=v0, b=k1, c=v1.
+        // (frankenredis-p98mw) Mirrors the cascade arm at ~8089 exactly -- same parser,
+        // same executor, same generic fallthrough.
+        BorrowedDispatchFloorClass::ZaddTwoPair => {
+            if let Some(packet) = parse_borrowed_plain_zadd2_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_zadd_borrowed(
+                    packet.key,
+                    &[packet.s1, packet.m1, packet.s2, packet.m2],
+                    ts,
+                )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
         BorrowedDispatchFloorClass::MsetnxTwoPair => {
             if let Some(packet) = parse_borrowed_plain_key_arg3_packet(
                 unparsed,
