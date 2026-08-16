@@ -23977,3 +23977,178 @@ RETRY PREDICATE: do NOT re-run anything to confirm this. DO carry the "above 50"
 the two affected rows, and prefer sub-40 conditions when a tight numerator matters. The
 set_base lever's after-measurement should be taken below load 40 so it is comparable to a
 baseline that was not.
+
+## MEASURED (frankenredis-set-option-route-corpus-lv4x1) — two instruments REJECTED for a route-entry question, and the third answered it: wall clock fails its own A/A null at loadavg 20
+
+Claim class: INSTRUMENT / METHOD. No vs-incumbent ratio is asserted by this row.
+
+The question was narrow and binary: do the four SET option shapes that had no dispatch
+route-corpus coverage (EXAT|PXAT, EX|PX n GET, NX|XX|KEEPTTL GET, NX|XX EX|PX n) actually
+ENTER their front-classified fast route? It matters because if both fr arms decline to the
+generic path, then fast == generic holds TRIVIALLY and every corpus row comparing them is a
+false pass — the exact shape scripts/dispatch_route_differ.py exists to prevent.
+
+REJECTED INSTRUMENT 1 — INFO commandstats usec_per_call.
+    Reported 0.003 us/call for SET, i.e. 3 nanoseconds per command, and ranked the fast arm
+    SLOWER than the bypass arm on two of four shapes. A figure that is physically impossible
+    is a broken instrument, not a surprising result. Not used. Do not reach for
+    cmdstat_*:usec on fr as a per-command cost proxy.
+
+REJECTED INSTRUMENT 2 — client-side wall clock, min-of-5 over 20k-op bursts.
+    A/A null (fast arm measured against ITSELF, same shape, same connection pattern):
+
+        1.140 vs 1.522 us/op  ->  0.7491x
+
+    A null that misses 1.0 by 25 pct invalidates every row taken with it, per section 1, so
+    the table it produced was discarded unread rather than reported with a caveat. Cause is
+    host contention, not the engines: loadavg was 18-23 throughout. This is the fourth
+    independent confirmation in this ledger that wall clock cannot resolve sub-2x effects on
+    this host above roughly loadavg 15.
+
+ACCEPTED INSTRUMENT — server-side cpu-ns/op, utime+stime read from /proc/<pid>/stat,
+bracketing only the burst, min of 7 x 60k ops. Same host, same window, loadavg 19.31.
+
+    A/A null (fast arm twice)                333 vs 333 cpu-ns/op   1.0000x
+    SET k v EXAT ts        (absexpire)       333 / 833             2.50x
+    SET k v PX n GET       (relexp_get)      333 / 833             2.50x
+    SET k v KEEPTTL GET    (opt_get)         333 / 833             2.50x
+    SET k v XX EX n        (cond_relex)      333 / 833             2.50x
+    SET k v NX EX n        (cond_relex)      167 / 500             3.00x
+    SET k v EX n           (already covered) 333 / 833             2.50x
+    CONTROL — shapes NO parser claims, which must NOT separate:
+    SET k v EX 100 XX GET  (*7 unclaimed)   1000 / 833             0.83x
+    SET k v GET XX         (*5 unclaimed)   1000 / 833             0.83x
+
+    fast arm = FR_PERF_AB_CASCADE_BYPASS unset; generic arm = FR_PERF_AB_CASCADE_BYPASS=1;
+    ONE ELF, sha256 c836f5ea46221261139ffaf985d7eb5eedcc6550f0f403f0ca30bfe15f16cac1.
+    CLK_TCK=100, so these are tick-quantized: read them as route-entry evidence, NOT as a
+    perf ratio. host thinkstation1. uptime before the run: 19.31 / 22.43 / 26.83.
+
+THE UNCLAIMED CONTROL IS WHAT MAKES THE ROW MEAN ANYTHING. Without it, "generic is 2.5x
+dearer" is unfalsifiable — a harness that printed 2.5x for every input would look identical.
+Claimed shapes separate 2.50-3.00x; shapes no parser claims land on 1.0 within quantization.
+So the routes are entered, and the corpus rows are not a false pass.
+
+REUSABLE: when a cheap instrument fails its A/A null under load, the next move is
+server-side CPU time, NOT a longer wall-clock run. /proc/<pid>/stat utime+stime nulled at
+exactly 1.0000x in the same window where wall clock nulled at 0.7491x, because it excludes
+client scheduling entirely. It is far cheaper than callgrind and needs no rebuild; its cost
+is 100Hz quantization, which is acceptable for order-of-magnitude questions like route
+admission and useless for a few-percent lever.
+
+ALSO FIXED, same file — a PERMANENT false-RED that had nothing to do with dispatch. The
+`SLOWLOG GET 3` row compared the entry's duration in microseconds and the client's ephemeral
+source port across three separate processes. Observed for the identical SET: redis 5us,
+fr-fast 4us, fr-gen 2us, three different ports. Those fields cannot ever agree, so the gate
+exited 1 on EVERY run and a real disagreement anywhere in the corpus was indistinguishable
+from the standing noise. Masked both fields and nothing else; id, timestamp, argv and client
+name still compare exactly, so the frankenredis-8xyox argv assertion the row was written to
+make is fully intact. Mutation-tested before trusting it: both noise fields absorbed, and
+6 of 6 real mutations still caught (argv key, argv command, argv dropped, entry id,
+timestamp, client name). Gate now: 330 cases, 0 disagreements, exit 0.
+
+RETRY PREDICATE: do not re-run the wall-clock arm to "confirm" 0.7491x. Do re-run the whole
+differ after any change to SET dispatch ordering or to the borrowed floor-token table — that
+is the change class these 92 rows were written to catch.
+
+--------------------------------------------------------------------------------
+MEASURED (frankenredis-z2ce3) — base SET moved from the fourteenth cascade arm to the
+second: 2129.6 -> 1719.1 instr/op, dispatch 723.4 -> 380.0, and the option forms pay
+40-50 instr/op each
+
+Claim class: COMPETITIVE
+
+CONVENTION: fr instructions per op / redis 7.2.4's. BELOW 1.0 = fr AHEAD.
+
+    set_base   0.5219x -> 0.4256x        set_same   0.5215x -> 0.4222x
+
+THE DEFECT. Arity-3 SET has no floor class, so it walks the inline cascade, and its arm
+sat behind GET, WATCH, UNWATCH, a keyed pop, two key-arg arms and ALL SEVEN SET option
+arms. The most common form of the command was the FOURTEENTH branch checked and paid
+thirteen failed parses to reach the one that serves it. The arm now sits immediately after
+GET's.
+
+TRUE A/B, BOTH ELFs IN THE SAME WINDOW, ABBA. The pre-lever binary was still on disk from
+an earlier row, so this is not a before-number quoted from a table assembled days apart —
+old and new were interleaved OLD/NEW/NEW/OLD within one window at loads 11.6-18.6.
+
+    shape         OLD (cc597a5e)      NEW (1b1d66cd)      delta        dispatch
+    get_control   1328.9 / 1337.3     1338.9 / 1338.6     +0.43 pct    20.7 -> 20.6 pct
+    set_base      2132.5 / 2126.7     1711.7 / 1726.5     -19.3 pct    723.4 -> 380.0
+    set_same      2122.4 / 2131.6     1721.9 / 1722.0     -19.0 pct    721.6 -> 379.9
+    set_xx_opt    3202.1 / 3216.9     3194.3 / 3262.0     +0.58 pct    947.5 -> 986.5
+    set_ex_opt    3564.8 / 3581.0     3641.9 / 3671.7     +2.35 pct    656.1 -> 706.0
+
+GET_CONTROL IS THE CONFOUND BOUND, AND IT IS THE REASON THIS ROW CAN BE TRUSTED. The new
+ELF was built from a working tree carrying a peer's uncommitted ZADD work, so it is NOT
+reproducible from HEAD alone and I will not claim it is. But GET's arm position is
+UNCHANGED by this lever, so any old-vs-new movement on get_control is pure code-layout and
+peer noise. It measured +0.43 pct with the dispatch share identical to a tenth of a point.
+That bounds the confound at half a percent against a 19.3 pct effect, and no ZADD code
+executes in a SET workload in any case.
+
+THE TWO SET SHAPES MOVED TOGETHER: 1719.1 vs 1722.0 instr/op (0.17 pct apart) and 380.0 vs
+379.9 on dispatch (0.03 pct). That was the stated pre-registered check — the cost is a
+property of the ROUTE, so a post-lever divergence would have meant the change did something
+shape-specific. It did not.
+
+    PREDICTED BEFORE THE RUN: ~1,749 instr/op and ~0.426x.
+    ACTUAL:                    1,719.1 instr/op and  0.4256x.
+
+Accurate to 1.7 pct on instructions and 0.1 pct on the ratio. That is the FIFTH validation
+of the prediction method (predicted fr = current fr - (current dispatch - ~500) - ~160).
+
+THE REGRESSION CHECK, WHICH IS A REAL COST AND IS NOT ROUNDED AWAY. Every arm the SET
+block jumped over now pays one failed base-SET parse:
+
+    set_xx_opt   +18.7 instr/op total, +39 on dispatch
+    set_ex_opt   +83.9 instr/op total, +50 on dispatch
+
+I expected a prefix compare failing on the first byte — `*4` against `*3` — and something
+near five instructions. It is 40-50, because the parser is a real non-inlined call that
+re-checks its config bounds before it ever looks at the prefix. That is consistent with the
+48.0 instr/call `set_bulk` constant this ledger established independently, so the number is
+believable rather than surprising. set_ex_opt's +2.35 pct sits outside its own 0.8 pct
+spread and is REAL, not noise; set_xx_opt's +0.58 pct sits inside its 2.1 pct spread and is
+directionally supported only by the dispatch share, which moved consistently in all four
+readings.
+
+    THE TRADE, STATED PLAINLY: base SET gains 410 instr/op; each option form loses 40-50.
+    That is worth it only because base SET is far more common than SET XX or SET EX in
+    real traffic, which is a judgement about workloads, not a measurement. If anyone's
+    traffic is mostly option-form SET, this lever is wrong for them and the fix is to
+    order the branches the other way.
+
+CORRECTNESS. The move is only safe while the base arm refuses every option form: plain SET
+and SET NX both return +OK, so an over-claim is invisible in the reply and shows up only in
+what the key holds afterwards. Test landed in b5c00a4af covering eleven option forms plus
+KEEPTTL and the combined NX EX / XX GET readings, asserting `consumed` stops at the packet
+boundary. MUTATION-TESTED: relaxing the parser to also accept `*4\r\n$3\r\n` reddens it on
+the first form. 345 fr-server tests pass.
+
+STANDINGS: set_base leaves the expensive-dispatch band — 33.9 pct to 22.1 pct, against
+get_control's front-classified 20.6 pct. THE LAST UNTAKEN REWIRE IS NOW TAKEN.
+sort_ro_alpha (~1.52x) remains the only shape above parity and is NOT a rewire: it needs a
+borrowed parser and executor written from nothing, and must not be costed off these
+precedents.
+
+PROVENANCE:
+  new ELF sha256       1b1d66cd028dd406fdde74e0dceb968b57558ffb03e9faf77bc439d77c46d87e
+                       built LOCALLY at HEAD b5c00a4af PLUS a peer's uncommitted ZADD work
+                       in the same file. NOT REPRODUCIBLE FROM HEAD ALONE — confound
+                       bounded at +0.43 pct by get_control, see above.
+  old ELF sha256       cc597a5eac15c248773f2f824c801a0485f83471d78b80972db5788655369643
+                       clean-tree build at HEAD 4db33f7c1, retained from an earlier row.
+  source sha256        abdbea8ca35b4f0c6be79bbfad7b0760ef0d1cdf3fb0f9ee5cce23b942c45605
+                       (crates/fr-server/src/main.rs as built)
+  harness              scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines in the
+                       SAME invocation, ABBA across the two ELFs.
+  host                 thinkstation1, 64 cores, /data 289G, one build this pane.
+  loadavg              11.64 - 18.63 across the ABBA, inside the sub-40 band this ledger
+                       established two rows ago for tight numerators. The A/A null spread
+                       0.43 pct, against 2.8 pct on the last high-load run.
+
+RETRY PREDICATE: do NOT re-run set_base or set_same; the effect is 19 pct against a 0.43
+pct null and reproduced on two shapes. DO re-take the option-form tax on a clean-tree ELF
+if anyone wants it tighter than "40-50 instr/op" — set_xx_opt's total is inside its own
+spread and only its dispatch share carries the signal.

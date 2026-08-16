@@ -21,8 +21,10 @@ the fast-vs-generic column proves nothing, so the run is refused below.
 Exit 0 = all three agree on every case.
 """
 import os
+import re
 import socket
 import sys
+import time
 
 RS, FF, FG = (int(a) for a in sys.argv[1:4])
 
@@ -535,6 +537,141 @@ CASES = [
     ("SET", "so:plain", "v"),
     ("GET", "so:plain"),
 
+    # ---- SET option forms that have their OWN fast route and NO corpus row ----
+    #
+    # The block above covers NX, XX, bare GET, EX-seconds and KEEPTTL. But SET is
+    # front-classified by SEVEN separate parsers, and four of them are not reached by
+    # any row above:
+    #
+    #   parse_borrowed_plain_set_relexpire_packet       PX half (only EX was covered)
+    #   parse_borrowed_plain_set_absexpire_packet       EXAT|PXAT      -- no coverage
+    #   parse_borrowed_plain_set_relexpire_get_packet   EX|PX n GET    -- no coverage
+    #   parse_borrowed_plain_set_opt_get_packet         NX|XX|KEEPTTL GET, of which
+    #                                                   only the *bare* GET was covered
+    #   parse_borrowed_plain_set_cond_relexpire_packet  NX|XX EX|PX n, BOTH orders
+    #
+    # Each is a separate `else if` arm that both parses AND executes without re-entering
+    # the generic path, so a wrong one is invisible to every row above. The rows below
+    # follow this file's rule: never assert on the reply alone. SET NX GET and SET XX GET
+    # return the same old value on an existing key while doing OPPOSITE things to it, and
+    # every expiry form replies +OK whether or not the TTL was actually installed -- so
+    # each write is followed by a GET/EXISTS/TTL that separates the readings.
+
+    # PX is the is_seconds=false half of the relexpire parser. The reply is +OK either
+    # way; only TTL tells PX from EX, and an EX/PX swap reads 100000 here, not 100.
+    ("DEL", "so:px"),
+    ("SET", "so:px", "v", "PX", "100000"),
+    ("TTL", "so:px"),                          # -> 100
+    ("PERSIST", "so:px"),                      # -> 1: a TTL really was installed
+    ("TTL", "so:px"),                          # -> -1, the control for the row above
+
+    # EXAT/PXAT. A PAST deadline is the time-independent discriminator: absolute means
+    # the key is gone immediately, relative would leave it alive for a second. This is
+    # the one shape where a mis-read is not a TTL-value bug but a lost/kept key.
+    ("DEL", "so:at"),
+    ("SET", "so:at", "v", "EXAT", "1"),        # 1970 -> written, already expired
+    ("EXISTS", "so:at"),                       # -> 0; read as relative EX this is 1
+    ("GET", "so:at"),                          # -> nil
+    ("SET", "so:at", "v", "PXAT", "1000"),
+    ("EXISTS", "so:at"),                       # -> 0
+    # A future absolute deadline, checked WITHOUT reading a ticking TTL: PERSIST returns
+    # 1 only if an expiry was actually attached, so this separates EXAT-honoured from
+    # EXAT-silently-dropped (which would also reply +OK) with no timing dependence.
+    ("SET", "so:at2", "v", "EXAT", str(int(time.time()) + 1000)),
+    ("PERSIST", "so:at2"),                     # -> 1
+    ("TTL", "so:at2"),                         # -> -1
+    ("GET", "so:at2"),                         # -> "v": the value survived
+
+    # SET key value EX|PX n GET (*6). Two independent effects in one route -- return the
+    # PRIOR value and install the TTL. A route that does one and forgets the other still
+    # replies plausibly, so both are read back.
+    ("DEL", "so:eg"),
+    ("SET", "so:eg", "one"),
+    ("SET", "so:eg", "two", "EX", "100", "GET"),   # -> "one"
+    ("GET", "so:eg"),                              # -> "two"
+    ("TTL", "so:eg"),                              # -> 100: the EX half applied too
+    ("DEL", "so:eg2"),
+    ("SET", "so:eg2", "v", "PX", "100000", "GET"), # missing key -> nil
+    ("GET", "so:eg2"),                             # -> "v"
+    ("TTL", "so:eg2"),                             # -> 100
+
+    # SET key value NX|XX|KEEPTTL GET (*5). NX GET and XX GET on an EXISTING key both
+    # reply the old value; they differ only in whether the write landed. A route that
+    # ignored the option would pass on replies alone and fail the GET after it.
+    ("DEL", "so:og"),
+    ("SET", "so:og", "first"),
+    ("SET", "so:og", "second", "NX", "GET"),   # exists -> "first", must NOT overwrite
+    ("GET", "so:og"),                          # -> "first"
+    ("SET", "so:og", "third", "XX", "GET"),    # exists -> "first", MUST overwrite
+    ("GET", "so:og"),                          # -> "third"
+    ("DEL", "so:og3"),
+    ("SET", "so:og3", "v", "XX", "GET"),       # missing -> nil, must NOT create
+    ("EXISTS", "so:og3"),                      # -> 0
+    ("DEL", "so:og4"),
+    ("SET", "so:og4", "v", "NX", "GET"),       # missing -> nil, MUST create
+    ("GET", "so:og4"),                         # -> "v"
+    # KEEPTTL GET has to preserve an expiry it never parsed -- the failure mode is a
+    # plain overwrite, which clears the TTL while returning exactly the right old value.
+    ("DEL", "so:kt"),
+    ("SET", "so:kt", "a", "EX", "100"),
+    ("SET", "so:kt", "b", "KEEPTTL", "GET"),   # -> "a"
+    ("TTL", "so:kt"),                          # -> 100, NOT -1
+    ("GET", "so:kt"),                          # -> "b"
+
+    # SET key value NX|XX EX|PX n (*6), the lock shape, in BOTH option orders -- the
+    # parser has a separate branch for each order and only one of them can be exercised
+    # by any single row. The load-bearing row is the TTL after a REFUSED NX: a route that
+    # arms the expiry before evaluating the condition replies nil correctly, leaves the
+    # value correctly untouched, and is caught ONLY by the TTL not having been re-armed.
+    ("DEL", "so:lock"),
+    ("SET", "so:lock", "v1", "NX", "EX", "100"),    # missing -> OK
+    ("GET", "so:lock"),                             # -> v1
+    ("TTL", "so:lock"),                             # -> 100
+    ("SET", "so:lock", "v2", "NX", "EX", "200"),    # exists -> nil, nothing changes
+    ("GET", "so:lock"),                             # -> v1
+    ("TTL", "so:lock"),                             # -> 100, NOT 200
+    ("SET", "so:lock", "v3", "XX", "PX", "50000"),  # exists -> OK
+    ("GET", "so:lock"),                             # -> v3
+    ("TTL", "so:lock"),                             # -> 50
+    # option-value-pair first, condition last: the parser's second branch.
+    ("DEL", "so:ord"),
+    ("SET", "so:ord", "v", "EX", "100", "NX"),
+    ("GET", "so:ord"),                              # -> v
+    ("TTL", "so:ord"),                              # -> 100
+    ("SET", "so:ord", "w", "PX", "50000", "XX"),    # exists -> OK
+    ("GET", "so:ord"),                              # -> w
+    ("TTL", "so:ord"),                              # -> 50
+    ("DEL", "so:ord2"),
+    ("SET", "so:ord2", "v", "PX", "100000", "XX"),  # missing -> nil, must NOT create
+    ("EXISTS", "so:ord2"),                          # -> 0
+
+    # Options are matched case-insensitively by every one of these parsers
+    # (eq_ignore_ascii_case). If the generic path and a fast route ever disagreed on
+    # case folding, only a lowercase row would show it.
+    ("DEL", "so:cs"),
+    ("SET", "so:cs", "v", "ex", "100"),
+    ("TTL", "so:cs"),                               # -> 100
+    ("SET", "so:cs", "w", "Px", "50000", "gEt"),    # -> "v"
+    ("TTL", "so:cs"),                               # -> 50
+
+    # Refusals. Every shape here must decline to the generic path and produce redis's
+    # error text VERBATIM; a fast route that computes an expiry from a bad number, or
+    # that admits a contradictory option pair, answers +OK where redis errors. The
+    # EXISTS at the end is the control that ties them together: not one of these rows
+    # is allowed to have written the key, so a route that errors AFTER writing -- which
+    # every row-by-row reply check would pass -- is caught there.
+    ("DEL", "so:err"),
+    ("SET", "so:err", "v", "EX", "0"),
+    ("SET", "so:err", "v", "EX", "-1"),
+    ("SET", "so:err", "v", "PX", "0"),
+    ("SET", "so:err", "v", "EX", "abc"),
+    ("SET", "so:err", "v", "EXAT", "0"),
+    ("SET", "so:err", "v", "NX", "EX", "0"),
+    ("SET", "so:err", "v", "EX", "0", "NX"),
+    ("SET", "so:err", "v", "NX", "XX"),
+    ("SET", "so:err", "v", "EX", "100", "KEEPTTL"),
+    ("EXISTS", "so:err"),                           # -> 0: none of the above wrote
+
 ]
 
 def executing_image(conn):
@@ -568,13 +705,37 @@ with open(fast_exe, "rb") as image:
         )
 print(f"one ELF, bypass feature present: {fast_exe}")
 
+def normalize(case, reply):
+    """Mask the fields of a reply that CANNOT agree across three separate processes.
+
+    Only SLOWLOG GET is affected. A slowlog entry is
+    `:id, :unix_ts, :duration_us, [argv], client_addr, client_name` and two of those
+    six are non-deterministic by construction: the duration in microseconds (three
+    different engines never execute a command in the same number of microseconds --
+    observed redis 5us / fr-fast 4us / fr-gen 2us for the same SET) and the client's
+    ephemeral source port. Comparing them made `SLOWLOG GET 3` a PERMANENT red that
+    had nothing to do with dispatch, which is worse than no row at all: the script
+    exited 1 on every run, so a real disagreement anywhere else in the corpus was
+    indistinguishable from the standing noise.
+
+    Masking is deliberately narrow. The row exists (frankenredis-8xyox) to prove the
+    hoisted metrics closure builds the correct ARGV, and id, timestamp, argv and
+    client name all still compare exactly -- so the assertion the row was written to
+    make is fully intact. Delete this function when SLOWLOG GET is no longer compared.
+    """
+    if len(case) >= 2 and case[0].upper() == "SLOWLOG" and case[1].upper() == "GET":
+        reply = re.sub(r"(:\d+,:\d+,):\d+,", r"\1:DUR,", reply)
+        reply = re.sub(r"127\.0\.0\.1:\d+", "ADDR", reply)
+    return reply
+
+
 bad = 0
 print(f"{'case':<38} {'fr fast':<22} {'fr generic':<22} {'redis 7.2.4'}")
 print("-" * 108)
 for case in CASES:
-    r = redis.cmd(*case)
-    f = fast.cmd(*case)
-    g = generic.cmd(*case)
+    r = normalize(case, redis.cmd(*case))
+    f = normalize(case, fast.cmd(*case))
+    g = normalize(case, generic.cmd(*case))
     label = " ".join(case)
     ok = (f == g) and (f == r)
     if not ok:
