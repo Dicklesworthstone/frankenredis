@@ -20920,3 +20920,73 @@ RETRY PREDICATE: do NOT re-measure get_control to check this — its numbers are
 only their label was wrong. DO check the arms between 6960 and 7303 for ordering
 dependencies before attempting option (B), and DO measure HSET and MSET before
 assuming their absence costs anything.
+
+## MEASURED (frankenredis-do85w) — front-classifying ZADD's base form: 0.8723x -> 0.5214x, and the base/option inversion is gone
+
+Claim class: COMPETITIVE — fr and the vendored Redis 7.2.4 binary in the SAME invocation.
+Same provenance limitation as the rows above (valgrind hosts the target, so no
+self-reported ELF SHA; ABBA repeats, not a bootstrap CI).
+
+    run  shape          fr instr/op   redis 7.2.4   fr/redis   dispatch share
+    A    zadd_base          2664.3        5110.3     0.5214x       16.9%
+    B    zadd_xx_opt        3177.0        6009.9     0.5286x       16.3%   <- CONTROL
+    B    zadd_xx_opt        3196.0        5794.2     0.5516x       16.4%   <- CONTROL
+    A    zadd_base          2708.4        5255.4     0.5154x       16.7%
+
+    worst bound   base    0.8723x -> 0.5214x    fr instr/op ~4455 -> ~2686
+    control       option  0.5538x -> 0.5516x    fr instr/op ~3187 -> ~3187 (flat)
+    share         base    46.1 pct -> 16.7 pct  (stranded band -> front-classified band)
+
+~1769 instr/op removed, 39.7 pct of the op. This shape had been the worst on the board and
+had been passed over TWICE — once by a stale 1.242x reading that pointed at the option
+form, once by an arity-5 lever that refined an already-classified route.
+
+THE INVERSION IS GONE, AND THAT IS THE CLEANEST CONFIRMATION THE CAUSE WAS DISPATCH.
+Before, `ZADD z 1 a` cost MORE than `ZADD z XX 1 a` — 4455 against 3187 instr/op, a 40 pct
+penalty for passing FEWER arguments. Now:
+
+    before   base 4455  >  option 3187     (fewer arguments cost 40 pct MORE)
+    after    base 2686  <  option 3187     (fewer arguments cost 16 pct LESS)
+
+The ordering is correct for the first time. Nothing about the executor or the parser
+changed; only the route to them. An inversion of that shape is a dispatch signature, and
+it inverted back exactly as predicted.
+
+THE MOVEMENT CLEARS THE NOISE FLOOR THIS SHAPE DEMANDED. The four-run pre-lever baseline
+established a 9.6 pct ratio spread on zadd_base and required movement to exceed 10 pct
+before being called. Measured movement is 40 pct — four times the floor, and the dispatch
+share moved 29.4 points, which carries no incumbent term at all.
+
+THE CONTROL DID NOT MOVE: zadd_xx_opt was already classified at 16.4 pct and stayed at
+16.3-16.4 pct, ~3187 instr/op both before and after. That is what attributes the gain to
+this arm.
+
+THE LEVER: one class variant, one `(4, Zadd)` classifier arm, and a dispatch arm mirroring
+the cascade arm at ~8111 exactly. Arity 4 EXACTLY — the option form at 5 and the variadic
+at >= 8 are already claimed, so a wider arm would collide with them, and an over-claim
+would be worse than none since a floor decline calls generic directly rather than
+returning to the cascade.
+
+A/A NULL, from the ABBA repeats in this one invocation:
+
+    fr arm      zadd_base    2664.3 -> 2708.4   +1.65%
+                zadd_xx_opt  3177.0 -> 3196.0   +0.60%
+    redis arm   zadd_base    5110.3 -> 5255.4   +2.84%
+                zadd_xx_opt  6009.9 -> 5794.2   -3.59%
+    ratio       base 0.5214 -> 0.5154  1.15%  |  option 0.5286 -> 0.5516  4.35%
+
+The 39.7 pct movement clears the 1.15 pct spread by thirty-five times.
+
+EXECUTABLE IDENTITIES, full 64-hex (computed post-run, see limitation above):
+  candidate  `11b0c67517b6130fac51679ec296db62d31163a6525c151f3c10e21ba86d4182`
+  incumbent  `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+  tests      fr-server 339 passed, 0 failed.
+
+Campaign output: yes — closes the shape that two previous readings had steered work away
+from.
+
+RETRY PREDICATE: SWEEP THE FAMILY. ZADD and BITCOUNT have now BOTH been found with one
+form classified and its sibling stranded, and in ZADD's case the stranded form was the
+common one. Enumerate every command with both a base and an optioned borrowed parser and
+check each has a classifier arm — this is a per-shape classification habit, not a property
+of options, and it has cost four separate measurement rounds to chase two instances.

@@ -14737,6 +14737,11 @@ enum BorrowedDispatchFloorClass {
     /// held. The class was `arity >= 8 && even`, so this form was never claimed
     /// even though its parser and executor both already existed.
     ZaddFlag,
+    /// (frankenredis-do85w) `ZADD key score member`, array length 4. Its OPTION
+    /// sibling at length 5 was classified while this, the plainest and commonest
+    /// form, was left in the cascade at 46.1 pct dispatch share against the option
+    /// form's 16.4 pct -- so `ZADD z 1 a` cost MORE than `ZADD z XX 1 a`.
+    ZaddBase,
     /// Variadic keyed-values write (LPUSH/RPUSH/SADD/HDEL/SREM/ZREM) carrying the
     /// value count (5..=8) — the forms stranded ~1350 lines deep in the cascade.
     KeyedValuesWrite(usize),
@@ -16238,6 +16243,11 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // chains BOTH parsers: zadd_flag whitelists the five non-INCR flags and
         // zadd_incr takes INCR, whose reply is a bulk score rather than a count.
         // Neither can claim the other's shape, so no reading is stranded.
+        // (frankenredis-do85w) Arity 4 EXACTLY. The option form at 5 and the variadic
+        // at >= 8 are already claimed below, so a wider arm would collide with them --
+        // and an over-claim here would be worse than none, since a floor decline calls
+        // the generic dispatcher directly rather than returning to the cascade.
+        (4, BorrowedDispatchFloorCommand::Zadd) => Some(BorrowedDispatchFloorClass::ZaddBase),
         (5, BorrowedDispatchFloorCommand::Zadd) => Some(BorrowedDispatchFloorClass::ZaddFlag),
         (arity, BorrowedDispatchFloorCommand::Zadd) if arity >= 8 && arity.is_multiple_of(2) => {
             Some(BorrowedDispatchFloorClass::ZaddMulti)
@@ -19104,6 +19114,33 @@ fn try_dispatch_floor_classified_action(
         // (frankenredis-mg05w) `ZADD key <flag> score member`. Both parsers pin
         // b"*5\r\n$4\r\n"; zadd_flag rejects INCR by whitelist, so the chain is
         // exclusive and its order does not matter. A decline still reaches generic.
+        // (frankenredis-do85w) Mirrors the cascade arm at ~8111 exactly — same parser,
+        // same executor, same generic fallthrough — so only the walk to reach it goes.
+        // Measured stranded at 46.1 pct dispatch share across six runs on three binaries,
+        // while its already-classified option sibling sat at 16.4 pct.
+        BorrowedDispatchFloorClass::ZaddBase => {
+            if let Some(packet) = parse_borrowed_plain_zadd_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_zadd_borrowed(
+                    packet.key,
+                    &[packet.start, packet.end],
+                    ts,
+                )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
         BorrowedDispatchFloorClass::ZaddFlag => {
             if let Some(packet) = parse_borrowed_plain_zadd_flag_packet(unparsed, &parser_config)
                 && let Some(response) = runtime.execute_plain_zadd_flag_borrowed(
