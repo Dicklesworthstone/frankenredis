@@ -22537,3 +22537,76 @@ RETRY PREDICATE: measure ZADD at arity 7 BEFORE claiming it. BITCOUNT range and 
 expire conditionals also remain exact-arity claims with no N+1 shape. Write the shape
 first in every case — three for three, the shape is what makes the defect visible and the
 severity is unpredictable without it.
+
+--------------------------------------------------------------------------------
+DISAMBIGUATION — expire_nx's two ledger figures measure DIFFERENT QUANTITIES IN
+OPPOSITE DIRECTIONS, and neither contradicts the other (frankenredis-z2ce3,
+frankenredis-tnbf5)
+
+Two rows now sit in this ledger for the same shape, hours apart, reading 0.5756 and
+0.9379. They look like a 63 pct disagreement. They are not in conflict at all, and the
+reason must be recorded before someone reconciles them by discarding one.
+
+    THIS SERIES        expire_nx_opt  0.5756x   fr INSTRUCTIONS / redis instructions
+                                                BELOW 1.0 = fr AHEAD
+                                                -> fr retires 42 pct FEWER instructions
+
+    frankenredis-tnbf5 expire_nx      0.9379    fr OPS/S / redis ops/s
+                                                ABOVE 1.0 = fr FASTER
+                                                -> fr is ~6 pct SLOWER in throughput
+
+Same command, same direction of interest, INVERTED CONVENTIONS AND DIFFERENT UNITS. A
+reader who takes both as "fr/redis, lower is better" concludes the shape both crossed
+and did not. This is the third convention collision in this campaign — after the
+gap-metric-versus-ratio mixing corrected on iqicb, and the withdrawn INCRBYFLOAT figure
+— and it is the most confusing of the three because both numbers are correct.
+
+I ATTEMPTED THE THROUGHPUT MEASUREMENT MYSELF AND IT IS INADMISSIBLE. On the
+lever-bearing ELF, one ABBA invocation over the shape set containing expire_nx:
+
+    expire_nx    1.0776  [1.0162, 1.1087]  nulls 0.9340 / 1.0163  NULL-FAILED
+    get_control  1.0971  [1.0705, 1.1106]  nulls 1.0000 / 1.0408  NULL-FAILED
+    3 of 13 rows admissible; 10 null-failed
+
+So I CANNOT claim the throughput crossing. The redis-side null of 0.9340 is 6.6 pct
+from its true value of 1.0, which is larger than the effect being measured. What the
+run does show, weakly, is DIRECTION: my post-lever ELF reads 1.0776 where tnbf5's
+pre-lever ELFs read 0.9379-0.9600, so throughput plausibly moved with instructions
+rather than against them. PLAUSIBLY, not measured — the null forbids more.
+
+AND get_control SITS INSIDE THE RANGE OF THE RESULTS AGAIN, at 1.0971 against a spread
+of 1.0292-1.2796. By the calibration recorded earlier in this ledger, that means most of
+these rows are a general fr-vs-redis throughput advantage on this host rather than
+anything shape-specific. Normalised against the control, expire_nx is 0.98 — i.e.
+indistinguishable from the control, which is a third reason not to bank a throughput
+claim from this run.
+
+WHAT THIS DOES NOT DISTURB: the instruction-count result stands untouched. fr's own
+cost on expire_nx_opt fell 4509.6 -> 2567.9 instr/op, a 43.1 pct reduction reproduced to
+0.19 pct, on a clean-tree ELF. That measurement does not depend on throughput agreeing
+with it.
+
+THE GENERAL POINT, WHICH IS WORTH MORE THAN THIS SHAPE: instructions and throughput are
+different quantities and CAN MOVE IN OPPOSITE DIRECTIONS. A route that retires fewer
+instructions can still be slower if it stalls more per instruction. This ledger already
+records that pattern once (a shape retiring 6 pct fewer instructions while burning 63
+pct more cycles). Any row quoting a ratio MUST name its unit and its direction in the
+row itself, not rely on the reader knowing which harness produced it.
+
+PROVENANCE:
+  ELF sha256           f3c2e2b949fddab8d8a2894e430536a955d9bcd9f197dcf65323fd2c15b43de7
+                       built LOCALLY at HEAD 279da3941 from a CLEAN tree with
+                       RCH_CARGO_WRAPPER_BYPASS=1 and env -u CARGO_TARGET_DIR,
+                       executable path from --message-format=json, COPIED to a private
+                       path and sha'd there. Contains the expire lever 0d0bcd5aa.
+  harness              scripts/balanced_square_ab.py --shapes unswept5 --expect-elf
+                       <full sha>, ABBA, one invocation. (The instruction figures came
+                       from scripts/shape_instr_per_op.py.)
+  host                 thinkstation1, 64 cores, /data 307G, no build this turn.
+
+RETRY PREDICATE: do NOT re-run the throughput arm for expire_nx on this host while
+get_control lands inside the results range and redis-side nulls run 6 pct — that
+harness cannot resolve a few percent here, which is exactly what the earlier
+INADMISSIBLE row in this ledger established. If the throughput crossing matters, it
+needs a quiet box, and the instruction result should be quoted meanwhile WITH ITS UNIT
+NAMED.
