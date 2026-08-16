@@ -259,7 +259,7 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
         ("hstrlen", ["HSET h f1 v1"], ["HSTRLEN", "h", "f1"]),
         ("get_control", ["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
     ],
-    # (frankenredis-B3BEAD) Third unswept batch. The no-op / MISS family has been
+    # (frankenredis-f9zmz) Third unswept batch. The no-op / MISS family has been
     # the richest vein measured so far -- PERSIST on a non-volatile key 1.7732x,
     # UNLINK on a missing key 2.1708x -- so this leans into misses across every
     # type, plus writes whose reply is stable under repetition. All 19 cleared

@@ -41,6 +41,7 @@ Usage: shape_instr_per_op.py <fr_bin> <shape> [ops]   (--list for shapes)
 from __future__ import annotations
 
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -99,6 +100,12 @@ SHAPES = {
     "del_missing": ([], ["DEL", "nosuchkey"]),
     "unlink_missing": ([], ["UNLINK", "nosuchkey"]),
     "pexpire_same": (["SET s abcdefghijklmnop"], ["PEXPIRE", "s", "10000000"]),
+    # (frankenredis-f9zmz) Worst rows of the third sweep, plus the pair that
+    # makes them readable: TOUCH and EXISTS on the SAME missing key came out
+    # 0.8730 and 1.0919, so any explanation has to account for both.
+    "lset_same": (["RPUSH l a b c"], ["LSET", "l", "0", "a"]),
+    "touch_missing": ([], ["TOUCH", "nosuchkey"]),
+    "exists_missing": ([], ["EXISTS", "nosuchkey"]),
     # The control: a route none of the above levers touch.
     "get_control": (["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
 }
@@ -128,6 +135,47 @@ def total_ir(path: str) -> int:
             if line.startswith(("summary:", "totals:")):
                 return int(line.split()[1])
     raise RuntimeError("no summary line in %s" % path)
+
+
+# (frankenredis-rzdi8) Frames that are "getting to the command" rather than
+# doing it. Kept explicit rather than inferred: the borrowed parser family is the
+# whole point, since an unclassified command attempts several of them against a
+# packet that is none of them before falling through to the generic path.
+DISPATCH_FRAMES = (
+    "process_buffered_frames", "execute_frame_internal", "command_table_index",
+    "dispatch_with_client_context", "classify_command", "push_ascii_lowercase_lossy",
+    "check_full_command_arity", "execute_dispatch", "parse_command_args_borrowed_into",
+    "try_dispatch_floor_classified_action", "parse_borrowed_plain_",
+    "effective_command_flags", "canonical_command_fullname",
+)
+
+
+def dispatch_share(dump_path):
+    """What fraction of a command is spent deciding WHICH command it is.
+
+    Check this BEFORE reaching for a front-classification lever. Measured shares
+    so far: a front-classified route (EXISTS on a missing key) sits at 21.5%,
+    while unclassified ones sit at 62-66% AND carry 8-14x the absolute dispatch
+    cost. A route can also be below parity with dispatch NOT the story at all --
+    PEXPIRE is 1.04x on instructions with a 0.90 throughput ratio, so no dispatch
+    lever can help it. Assuming instead of checking gets that case wrong.
+    """
+    out = subprocess.run(["callgrind_annotate", "--auto=no", "--threshold=99.5", dump_path],
+                         capture_output=True, text=True, timeout=900).stdout
+    disp = attributed = 0
+    top = []
+    for line in out.splitlines():
+        m = re.match(r"\s*([\d,]+) \(\s*[\d.]+%\)\s+(?:\?\?\?|[^\s]+):(.+?) \[", line)
+        if not m:
+            continue
+        ir, fn = int(m.group(1).replace(",", "")), m.group(2).strip()
+        attributed += ir
+        if any(d in fn for d in DISPATCH_FRAMES):
+            disp += ir
+            top.append((ir, fn))
+    if not attributed:
+        return None
+    return disp / attributed, sorted(top, reverse=True)[:5]
 
 
 def run_once(engine: str, seeds, cmd, ops: int, workdir: str, tag: str) -> int:
@@ -205,6 +253,15 @@ def main() -> int:
     print("  fr     Ir(N)=%-14d Ir(2N)=%-14d -> %10.1f instr/op" % (fr_lo, fr_hi, fr_ipo))
     print("  redis  Ir(N)=%-14d Ir(2N)=%-14d -> %10.1f instr/op" % (rd_lo, rd_hi, rd_ipo))
     print("  fr/redis instructions per op: %.4fx" % (fr_ipo / rd_ipo))
+    got = dispatch_share(os.path.join(workdir, "cg.fr.2n.out"))
+    if got:
+        frac, top = got
+        print("  fr dispatch share: %.1f%%  (~%.1f of %.1f instr/op deciding WHICH command)"
+              % (100 * frac, fr_ipo * frac, fr_ipo))
+        for ir, fn in top:
+            print("      %10d  %s" % (ir, fn[:66]))
+        print("  compare: a front-classified route (EXISTS on a missing key) is 21.5%;"
+              " 62-66% means the dispatch lever has something to bite on.")
     print("  callgrind dumps: %s" % workdir)
     return 0
 
