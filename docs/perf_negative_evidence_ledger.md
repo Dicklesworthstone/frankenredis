@@ -21208,3 +21208,78 @@ shape-at-a-time hunting with a 27-item enumeration.
 RETRY PREDICATE: take EXPIRE arity 4 first — it is the worst measured and the sweep
 confirms it stranded. Then work the list, not the shapes. And re-check TOUCH 3/4/5, which
 my own exact-arity claim missed.
+
+--------------------------------------------------------------------------------
+CONFIRMED — bitcount_range 0.8654x -> 0.5335x, and the upper bound predicted it to
+0.9 pct: TWO CONSECUTIVE ACCURATE PREDICTIONS (frankenredis-z2ce3)
+
+A peer front-classified BITCOUNT's range form between the two ELFs. Measured on the
+current binary, this is the second lever in a row whose outcome the dispatch-share
+method predicted before it was written.
+
+CONVENTION: fr instructions per op / redis 7.2.4's. BELOW 1.0 = fr AHEAD.
+
+    A/A control (get_control)  0.4095 / 0.4098 / 0.4365      spread 6.4 pct
+
+    bitcount_range       ELF c36c3fb0…        ELF 11b0c675…       change
+      fr instr/op           3741.1               2311.5           -38.2 pct
+      redis instr/op        4324.3               4337.1           unchanged
+      fr/redis              0.8654x              0.5335x           1.62x better
+      dispatch share        46.4 pct             19.9 pct
+      dispatch instr/op    ~1736                 ~459
+
+    NEW ELF, four runs   fr 2311.5 / 2314.1 / 2304.2 / 2316.3   spread 0.52 pct
+                         redis 4178.0 / 4307.0 / 4309.6 / 4553.6  spread 8.6 pct
+                         ratio 0.5533 / 0.5373 / 0.5347 / 0.5087  spread 8.1 pct
+                         dispatch 19.9 pct, all four
+
+Monotonic on both arms in all four runs. The null (6.4 pct) is comparable to the signal
+spread (8.1 pct), so the ratio is ~0.53 and no tighter — but the MOVEMENT (0.865 ->
+0.53) is an order of magnitude larger than either, and fr's own cost moved 38.2 pct
+against a 0.52 pct spread, which is unambiguous.
+
+THE PREDICTION, MADE BEFORE THE LEVER EXISTED. The earlier bitcount_range row wrote, as
+an explicit upper bound: "if range paid base's dispatch cost (~327 instead of ~1,736),
+fr would fall from 3,741.1 to roughly 2,332 against redis's 4,324.3 — about 0.54x."
+
+    predicted fr instr/op   2,332       actual   2,311.5      0.9 pct high
+    predicted ratio         ~0.54       actual   0.5335       1.2 pct high
+
+TWO IN A ROW. zadd_xx_opt was predicted to 1.2 pct on instr/op and 2 pct on ratio; this
+is 0.9 pct and 1.2 pct. The method — measure the dispatch instr/op, subtract the
+difference to a cheap-to-reach reference route, recompute — has now been validated
+twice on rewires, by different people implementing different commands.
+
+AND THE CAVEAT I ATTACHED LAST TIME WAS ALSO VALIDATED. I wrote: "treat 'reaches the
+reference cost' as optimistic by a couple of hundred instr/op and still expect the
+estimate to hold." bitcount_range reached 459 instr/op of dispatch, not the 327 its
+classified sibling pays — 132 short, exactly the shape of that warning. The estimate
+held anyway because the win is dominated by the ~1,277 removed rather than the last
+132. That caveat is now evidence rather than caution.
+
+STANDINGS AFTER THIS ROW: sort_ro_alpha (1.52x) remains the only shape above parity.
+Of the stranded shapes this series identified, TWO have now crossed — zadd_xx_opt and
+bitcount_range — and both crossed to within ~1 pct of the figure predicted from their
+dispatch share alone.
+
+STILL OPEN, with predictions on record to be checked the same way:
+    zadd_base       46.1 pct dispatch, arity 4, parser + executor exist
+    expire_nx_opt   51.0 pct dispatch, arity 4, parser + executor exist
+    set_base        33.9 pct dispatch, ABSENT from the token table entirely; two
+                    possible fixes (floor class, or move its cascade arm next to GET's)
+    sort_ro_alpha   23.9 pct, and NOT a rewire — no parser, no executor, no class
+
+PROVENANCE:
+  ELF sha256 (new)     11b0c67517b6130fac51679ec296db62d31163a6525c151f3c10e21ba86d4182
+                       built LOCALLY at HEAD 8ae6ea4b4 with RCH_CARGO_WRAPPER_BYPASS=1
+                       and env -u CARGO_TARGET_DIR, executable path from
+                       --message-format=json, COPIED to a private path and sha'd there.
+  ELF sha256 (old)     c36c3fb0a66033deff0cf03dc6a313ef647d5970cd22596aac575120a5d2a297
+  tree                 HEAD 8ae6ea4b4 plus a peer's uncommitted fr-server/src/main.rs.
+  harness              scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines in
+                       the SAME invocation.
+  host                 thinkstation1, 64 cores, /data 314G, no build this turn.
+
+RETRY PREDICATE: do NOT re-run bitcount_range — it has crossed and fr's own cost is
+settled to 0.52 pct. DO use the method on the three remaining rewires; it is now
+two-for-two and the residual bias is known and small.
