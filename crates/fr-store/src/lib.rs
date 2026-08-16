@@ -36625,6 +36625,92 @@ fn hash_from_flat_entries(entries: Vec<Vec<u8>>) -> Result<HashFieldMap, StoreEr
 /// `any(len > max_listpack_value)` over those same elements, so reporting the max
 /// from this loop lets the caller decide in O(1) instead of iterating the finished
 /// map a second time. Zero for an empty listpack, which the caller rejects anyway.
+/// Largest field count handled by the stack-probed duplicate detector below.
+/// Chosen to equal the packed-hash entry ceiling, so the whole listpack-encoded
+/// RESTORE range (the case that actually runs) is covered by the fast arm.
+const RESTORE_STACK_DUP_MAX: usize = 128;
+
+/// Cheap fixed-seed hash used ONLY to choose a starting probe slot.
+///
+/// Deliberately not a quality hasher: see `restore_pairs_have_duplicate_field`
+/// for why correctness cannot depend on it.
+#[inline]
+fn restore_field_probe_hash(bytes: &[u8]) -> u64 {
+    const SEED: u64 = 0x517c_c1b7_2722_0a95;
+    // Seed with the length so that a field and a longer field sharing its prefix
+    // start at different slots (they are distinct fields and must not pile up).
+    let mut h = bytes.len() as u64;
+    // `as_chunks::<8>` over `chunks_exact(8)`: the chunk length is a const, so
+    // this hands back `&[[u8; 8]]` and the per-chunk `try_into().expect(..)`
+    // that could not fail disappears with it. Byte-identical hash.
+    let (chunks, rest) = bytes.as_chunks::<8>();
+    for chunk in chunks {
+        h = (h.rotate_left(5) ^ u64::from_le_bytes(*chunk)).wrapping_mul(SEED);
+    }
+    if !rest.is_empty() {
+        let mut buf = [0u8; 8];
+        buf[..rest.len()].copy_from_slice(rest);
+        h = (h.rotate_left(5) ^ u64::from_le_bytes(buf)).wrapping_mul(SEED);
+    }
+    // Fold the high half down: the caller takes the LOW bits for the slot index.
+    h ^ (h >> 32)
+}
+
+/// Whether any field appears twice in a RESTORE pair list.
+///
+/// (frankenredis-33832) Replaces a `HashSet<&[u8], foldhash::quality::RandomState>`
+/// that was built and thrown away once per RESTORE. Measured on the hash RESTORE
+/// path, that set cost **105.6 instructions per field** — one `insert` call each,
+/// 15.9% of fr's 664.1 instr/element against redis 7.2.4's ~161-168. It also meant
+/// every field was hashed TWICE, because `from_unique_pairs_borrowed` immediately
+/// hashes them all again to build the map.
+///
+/// EXACTNESS DOES NOT DEPEND ON THE HASH. The table stores field INDICES, not
+/// hashes, and every occupied slot the probe touches is confirmed by comparing the
+/// real field bytes (`==` on `&[u8]`, so length is part of the comparison and a
+/// prefix never matches its extension). A weak or colliding hash costs extra
+/// probes and nothing else — it can never produce a wrong answer in either
+/// direction. That is what makes a fixed seed acceptable here.
+///
+/// WHY A FIXED SEED IS SAFE, stated because swapping a randomized hasher for a
+/// fixed one is normally a hash-flooding regression: the fast arm is bounded at
+/// `RESTORE_STACK_DUP_MAX` fields, so a payload crafted so that every field
+/// collides degenerates to at most 128*128/2 short byte comparisons on a 512-byte
+/// stack table — bounded, allocation-free, and far cheaper than the `HashSet` it
+/// replaces. Above that bound the randomized `HashSet` is kept, so the unbounded
+/// case retains its collision resistance.
+fn restore_pairs_have_duplicate_field(pairs: &[(&[u8], &[u8])]) -> bool {
+    if pairs.len() > RESTORE_STACK_DUP_MAX {
+        let mut seen: std::collections::HashSet<&[u8], foldhash::quality::RandomState> =
+            std::collections::HashSet::with_capacity_and_hasher(
+                pairs.len(),
+                foldhash::quality::RandomState::default(),
+            );
+        return !pairs.iter().all(|(field, _)| seen.insert(*field));
+    }
+    // Power-of-two slot count at >= 2x the entry ceiling keeps the load factor at
+    // or below 0.5, where linear probing averages ~1.5 probes.
+    const SLOTS: usize = RESTORE_STACK_DUP_MAX * 2;
+    debug_assert!(SLOTS.is_power_of_two());
+    // 0 is the empty sentinel, so slots hold `index + 1`.
+    let mut table = [0u16; SLOTS];
+    for (index, (field, _)) in pairs.iter().enumerate() {
+        let mut slot = (restore_field_probe_hash(field) as usize) & (SLOTS - 1);
+        loop {
+            let occupant = table[slot];
+            if occupant == 0 {
+                table[slot] = u16::try_from(index + 1).expect("index bounded by SLOTS/2");
+                break;
+            }
+            if pairs[usize::from(occupant) - 1].0 == *field {
+                return true;
+            }
+            slot = (slot + 1) & (SLOTS - 1);
+        }
+    }
+    false
+}
+
 fn hash_from_listpack_spans(listpack: &[u8]) -> Result<(HashFieldMap, usize), StoreError> {
     let spans = fr_persist::listpack::decode_value_spans(listpack)
         .map_err(|_| StoreError::InvalidDumpPayload)?;
@@ -36644,15 +36730,9 @@ fn hash_from_listpack_spans(listpack: &[u8]) -> Result<(HashFieldMap, usize), St
         max_element_len = max_element_len.max(field.len()).max(value.len());
         pairs.push((field, value));
     }
-    let mut seen: std::collections::HashSet<&[u8], foldhash::quality::RandomState> =
-        std::collections::HashSet::with_capacity_and_hasher(
-            pairs.len(),
-            foldhash::quality::RandomState::default(),
-        );
-    if !pairs.iter().all(|(field, _)| seen.insert(*field)) {
+    if restore_pairs_have_duplicate_field(&pairs) {
         return Err(StoreError::InvalidDumpPayload);
     }
-    drop(seen);
     Ok((
         HashFieldMap::from_unique_pairs_borrowed(&pairs),
         max_element_len,
@@ -40851,6 +40931,145 @@ mod quicklist_dump_fix_tests {
 
 #[cfg(test)]
 mod tests {
+    // ── (frankenredis-33832) RESTORE duplicate-field detector ──────────────────
+    // `restore_pairs_have_duplicate_field` replaced a `HashSet` with a stack-probed
+    // table. It must be EXACTLY equivalent, so it is tested against an independent
+    // `HashSet` reference rather than against itself.
+
+    /// Independent oracle. Deliberately a different data structure and a
+    /// different (randomly seeded) hasher from the code under test, so the two
+    /// cannot share a bug.
+    #[cfg(test)]
+    fn dup_reference(pairs: &[(&[u8], &[u8])]) -> bool {
+        let mut seen: std::collections::HashSet<&[u8]> = std::collections::HashSet::new();
+        !pairs.iter().all(|(field, _)| seen.insert(*field))
+    }
+
+    #[test]
+    fn restore_dup_detector_handles_the_named_edge_cases() {
+        let owned: Vec<Vec<u8>> = (0..130).map(|i| format!("f{i}").into_bytes()).collect();
+        let distinct = |n: usize| -> Vec<(&[u8], &[u8])> {
+            owned[..n]
+                .iter()
+                .map(|f| (f.as_slice(), b"v".as_slice()))
+                .collect()
+        };
+
+        assert!(!super::restore_pairs_have_duplicate_field(&[]), "empty");
+        assert!(
+            !super::restore_pairs_have_duplicate_field(&distinct(1)),
+            "single field"
+        );
+
+        // A field that is a PREFIX of another is a DIFFERENT field. This is the
+        // case a hash-only comparison (or one ignoring length) would get wrong.
+        assert!(
+            !super::restore_pairs_have_duplicate_field(&[
+                (b"a".as_slice(), b"1".as_slice()),
+                (b"ab".as_slice(), b"2".as_slice()),
+                (b"abc".as_slice(), b"3".as_slice()),
+            ]),
+            "prefix fields are distinct fields"
+        );
+
+        // The empty field name is a legal field, and two of them are a duplicate.
+        assert!(
+            super::restore_pairs_have_duplicate_field(&[
+                (b"".as_slice(), b"1".as_slice()),
+                (b"".as_slice(), b"2".as_slice()),
+            ]),
+            "two empty field names duplicate"
+        );
+
+        // Boundary between the stack arm and the HashSet fallback, on BOTH sides,
+        // clean and dirty. `RESTORE_STACK_DUP_MAX` is 128.
+        for n in [127_usize, 128, 129, 130] {
+            assert!(
+                !super::restore_pairs_have_duplicate_field(&distinct(n)),
+                "{n} distinct fields must not report a duplicate"
+            );
+
+            // Duplicate in the LAST position: the detector must still be scanning
+            // by the time it gets there (a loop that stopped early would pass the
+            // clean case above and fail here).
+            let mut dirty = distinct(n);
+            let first = dirty[0].0;
+            *dirty.last_mut().expect("n > 0") = (first, b"v".as_slice());
+            assert!(
+                super::restore_pairs_have_duplicate_field(&dirty),
+                "{n} fields with the first field repeated last must report a duplicate"
+            );
+        }
+    }
+
+    /// Randomised equivalence against the oracle, over an alphabet small enough
+    /// that real probe-hash collisions and real duplicates both occur often. A
+    /// detector that compared probe hashes instead of field bytes would report
+    /// false duplicates here.
+    #[test]
+    fn restore_dup_detector_matches_reference_on_randomised_corpora() {
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        let mut checked_dup = 0_u32;
+        let mut checked_clean = 0_u32;
+        for case in 0..600 {
+            // Sizes straddle the 128 stack bound so both arms are exercised.
+            let n = (next() % 140) as usize;
+            // Two generators, alternating. A single one is NOT enough: the first
+            // draft used only the narrow alphabet and produced 565 duplicate-bearing
+            // corpora against 35 clean ones, which left the "no duplicate" direction
+            // almost untested. NARROW forces frequent duplicates AND frequent probe
+            // collisions; WIDE makes duplicates rare so the clean direction is
+            // exercised on corpora that still fill the table.
+            let narrow = case % 2 == 0;
+            let fields: Vec<Vec<u8>> = (0..n)
+                .map(|_| {
+                    if narrow {
+                        let len = 1 + (next() % 3) as usize;
+                        (0..len).map(|_| b'a' + (next() % 6) as u8).collect()
+                    } else {
+                        let len = 6 + (next() % 3) as usize;
+                        (0..len).map(|_| b'a' + (next() % 26) as u8).collect()
+                    }
+                })
+                .collect();
+            let pairs: Vec<(&[u8], &[u8])> = fields
+                .iter()
+                .map(|f| (f.as_slice(), b"v".as_slice()))
+                .collect();
+
+            let expected = dup_reference(&pairs);
+            let actual = super::restore_pairs_have_duplicate_field(&pairs);
+            assert_eq!(
+                actual,
+                expected,
+                "case {case} (n={n}) disagreed with the HashSet reference; fields={:?}",
+                fields
+                    .iter()
+                    .map(|f| String::from_utf8_lossy(f).into_owned())
+                    .collect::<Vec<_>>()
+            );
+            if expected {
+                checked_dup += 1;
+            } else {
+                checked_clean += 1;
+            }
+        }
+
+        // A corpus that happened to be all-clean (or all-dirty) would make the
+        // assertion above vacuous in one direction, so prove both were covered.
+        assert!(
+            checked_dup > 50 && checked_clean > 50,
+            "corpus was one-sided: {checked_dup} with duplicates, {checked_clean} without"
+        );
+    }
+
     /// (frankenredis-6irj9) True when the host is quiet enough for a WALL-CLOCK
     /// A/B ratio to say anything about the code.
     ///
