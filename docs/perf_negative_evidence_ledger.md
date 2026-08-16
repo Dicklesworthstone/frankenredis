@@ -19930,3 +19930,91 @@ Campaign output: yes — repairs a regression this campaign's own lever introduc
 with the control that proves it.
 
 RETRY PREDICATE: attack `BigNat::div_small` next. Do not re-run this pair to re-confirm.
+
+--------------------------------------------------------------------------------
+MEASURED — zadd_base is 0.846x with a 46 PCT DISPATCH SHARE: a stranded route with
+parser and executor already present (frankenredis-z2ce3)
+
+Screened ten more shapes absent from the inventory. None is worse than sort_ro_alpha
+(1.532x, the only shape above parity), but one is worse than the previously-recorded
+worst BELOW parity, and it is stranded in the exact pattern this campaign has spent
+the day closing.
+
+CONVENTION: fr instructions per op / redis 7.2.4's. BELOW 1.0 = fr AHEAD.
+
+    screen (one run each)   zadd_base           0.8605x  <- worst below parity
+                            bitop_and           0.7450x
+                            sdiffstore_3src     0.6578x
+                            sunionstore_3src    0.6558x
+                            bitcount            0.6536x
+                            lpop_nocount_missing 0.6091x
+                            getex_base          0.5948x
+                            hrandfield_base     0.5655x
+                            set_ex_opt          0.5018x
+                            zrangebyscore_plain 0.3739x
+
+    A/A control (get_control)  0.4178 / 0.4173 / 0.4263        spread 2.2 pct
+
+    zadd_base, four runs     fr instr/op  redis instr/op  fr/redis  dispatch
+      run 1                     4384.7       5054.9        0.8674    46.4%
+      run 2                     4442.1       5403.5        0.8221    46.0%
+      run 3                     4450.2       5316.1        0.8371    46.0%
+      run 4                     4453.0       5185.3        0.8588    46.0%
+      mean                      4432.5       5240.0        0.8464    46.1%
+      spread                     1.5%         6.9%          5.5%      0.4%
+
+Monotonicity `Ir(2N) > Ir(N)` held on both arms in all four runs. Spread is again
+almost entirely redis-side (6.9 pct against fr's 1.5 pct), consistent with every other
+shape measured on this ELF.
+
+THE 46 PCT DISPATCH SHARE IS THE FINDING, not the ratio. ~2,045 of fr's 4,432
+instr/op go to deciding which command this is. For comparison on the same binary:
+get_control 20.6 pct, touch_missing 20.5 pct, exists_missing 13.6 pct, del_1_missing
+12.2 pct, sort_ro_alpha 23.9 pct. Forty-six percent is not in that band — it is in the
+band the pre-fix stranded routes occupied (DEL 57.2, SADD 51.2, HDEL 51.3 before
+front-classification), and the harness's own note says a share this high means the
+dispatch lever has something to bite on.
+
+ATTRIBUTED, and it is a REWIRE rather than an implementation:
+
+    token in the floor table        main.rs:15088   [b'Z',b'A',b'D',b'D'] -> Zadd
+    floor claim                     main.rs:16225   (arity, Zadd) if arity >= 8
+                                                    && arity.is_multiple_of(2)
+    cascade parsers                 SEVEN, at 8090, 8112, 9381, 9404, 9528, 9551, 9573
+    borrowed executor               fr-runtime:12027 execute_plain_zadd_borrowed
+
+`ZADD key score member` is ARITY 4. The floor claims ZADD only from arity 8 upward, so
+the base form — the commonest call the command has — matches the token table, finds no
+class, and walks the whole cascade to reach a parser and executor that already exist.
+
+THAT IS THE OPPOSITE SITUATION FROM sort_ro_alpha, measured one row above. SORT_RO has
+NO floor class, NO parser and NO executor: it needs a route written from nothing.
+zadd_base has all three and needs a classifier entry — the same handful of mechanical
+edits as GEOADD, MOVE, SPUBLISH and the keyed-values family. Two shapes, both flagged
+by dispatch share, with completely different costs to fix; the share alone does not
+distinguish them and the grep does.
+
+SIZE, as an upper bound: if a front-classified zadd_base paid get_control's dispatch
+cost (~275 instr/op) instead of 2,045, fr would fall from 4,432.5 to roughly 2,662
+against redis's 5,240 — about 0.51x, from 0.846x. NOT A PREDICTION: it assumes the
+route reaches front-classified dispatch cost, and the arity-4 parser must actually
+accept the shape the classifier would claim. The `9hnxt` rule applies — claim ONLY the
+arity the parser serves, or the decline lands on the generic path rather than back on
+the cascade, which is worse than leaving it stranded.
+
+PROVENANCE:
+  ELF sha256 (first 16)  c36c3fb0a66033de — built LOCALLY with
+                         RCH_CARGO_WRAPPER_BYPASS=1, env -u CARGO_TARGET_DIR,
+                         executable path from --message-format=json, COPIED to a
+                         private path and sha'd there. Contains 62ce27eb5.
+  tree                   HEAD plus a peer's uncommitted fr-server/src/main.rs; NOT
+                         reproducible from HEAD alone.
+  harness                scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines
+                         in the SAME invocation.
+  host                   thinkstation1, 64 cores, /data 319G, no build this turn.
+
+RETRY PREDICATE: do NOT re-run zadd_base for a tighter ratio — the denominator carries
+6.9 pct and the numerator is already 1.5 pct. The next step is CODE: verify which
+arities the seven zadd parsers actually serve, then add floor entries for exactly
+those. Re-measure fr's own instr/op against the 4,432.5 baseline afterwards, not the
+ratio.
