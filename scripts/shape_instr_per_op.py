@@ -106,6 +106,28 @@ SHAPES = {
     "lset_same": (["RPUSH l a b c"], ["LSET", "l", "0", "a"]),
     "touch_missing": ([], ["TOUCH", "nosuchkey"]),
     "exists_missing": ([], ["EXISTS", "nosuchkey"]),
+    # (frankenredis-c0ts5) Ladder shapes: cheap O(1) reads across every type, so
+    # the dispatch cost can be compared at constant (near-zero) real work. Mirrors
+    # the registrations in balanced_square_ab's unswept sets.
+    "hget": (["HSET h f1 v1 f2 v2 f3 v3"], ["HGET", "h", "f2"]),
+    "hlen": (["HSET h f1 v1 f2 v2 f3 v3"], ["HLEN", "h"]),
+    "scard": (["SADD st m1 m2 m3 m4 m5"], ["SCARD", "st"]),
+    "zcard": (["ZADD z 1 a 2 b 3 c"], ["ZCARD", "z"]),
+    "type": (["SET s abcdefghijklmnop"], ["TYPE", "s"]),
+    "strlen": (["SET s abcdefghijklmnop"], ["STRLEN", "s"]),
+    "sismember": (["SADD st m1 m2 m3"], ["SISMEMBER", "st", "m2"]),
+    "hexists": (["HSET h f1 v1"], ["HEXISTS", "h", "f1"]),
+    "lindex": (["RPUSH l a b c d e"], ["LINDEX", "l", "2"]),
+    "bitcount": (["SET bb abcdefghijklmnop"], ["BITCOUNT", "bb"]),
+    "llen": (["RPUSH l a b c d e"], ["LLEN", "l"]),
+    "ttl_nonvolatile": (["SET s abcdefghijklmnop"], ["TTL", "s"]),
+    # (frankenredis-c0ts5) Boundary probes: writes and variadic-key commands, to
+    # test what separates the cheap dispatch regime from the expensive one.
+    "hdel_missing": (["HSET h f1 v1"], ["HDEL", "h", "nofield"]),
+    "srem_missing": (["SADD st m1"], ["SREM", "st", "nomember"]),
+    "getset_same": (["SET gs vvvvvvvvvvvvvvvv"], ["GETSET", "gs", "vvvvvvvvvvvvvvvv"]),
+    "setbit_same": (["SET bb abcdefghijklmnop"], ["SETBIT", "bb", "5", "0"]),
+    "get_missing": ([], ["GET", "nosuchkey"]),
     # The control: a route none of the above levers touch.
     "get_control": (["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
 }
@@ -253,10 +275,21 @@ def main() -> int:
         return 2
     fr_bin = os.path.abspath(args[0])
     shape = args[1]
+    # (frankenredis-c0ts5) --fr-only skips the incumbent arm. The dispatch
+    # ladder needs fr's own instr/op and dispatch share, not a ratio, and the
+    # redis arm is half the wall-clock of every measurement (and the noisy half,
+    # at ~8%). Building a ladder across a dozen commands is the case for it.
+    fr_only = "--fr-only" in args
     ops = int(args[2]) if len(args) > 2 else 2000
     seeds, cmd = SHAPES[shape]
     workdir = tempfile.mkdtemp(prefix="fr_instr_")
     fr_ipo, fr_lo, fr_hi = instr_per_op(fr_bin, seeds, cmd, ops, workdir, "fr")
+    if fr_only:
+        got = dispatch_share(os.path.join(workdir, "cg.fr.2n.out"))
+        frac = got[0] if got else float("nan")
+        print("LADDER %-18s fr %8.1f instr/op   dispatch %8.1f (%.1f%%)"
+              % (shape, fr_ipo, fr_ipo * frac, 100 * frac))
+        return 0
     rd_ipo, rd_lo, rd_hi = instr_per_op(REDIS, seeds, cmd, ops, workdir, "redis")
     print("shape %s   N=%d 2N=%d" % (shape, ops, ops * 2))
     print("  fr     Ir(N)=%-14d Ir(2N)=%-14d -> %10.1f instr/op" % (fr_lo, fr_hi, fr_ipo))
