@@ -152,7 +152,33 @@ impl<'a> Iterator for PackedStrSetIter<'a> {
 
 /// LEB128 unsigned varint: 1 byte for lengths < 128 (the common case for
 /// listpack-eligible members ≤ 64 bytes), growing 7 bits at a time.
-fn write_varint(buf: &mut Vec<u8>, mut n: usize) {
+#[inline]
+fn write_varint(buf: &mut Vec<u8>, n: usize) {
+    write_varint_impl::<true>(buf, n);
+}
+
+/// (frankenredis-33832) Write-side twin of [`read_varint_impl`]'s `FAST` arm.
+///
+/// `FAST = true` emits a single-byte varint (`n < 0x80`) directly instead of
+/// entering the shift-accumulate loop. Every packed member is at most
+/// `PACKED_MAX_VALUE` (64) bytes and every packed map holds at most
+/// `PACKED_MAX_ENTRIES` (128) entries, so on the packed BUILD path — which is what
+/// RESTORE uses — the length is a single byte in essentially every call. The loop
+/// form still costs a mask, a shift, a compare and a branch before it can push that
+/// one byte. `PackedStrMap::append` measured 92 instructions per pair on a
+/// 100-field RESTORE with the cost spread thin across exactly this kind of
+/// bookkeeping.
+///
+/// Multi-byte values fall through to the byte-identical prior loop, so the encoding
+/// is unchanged for every input. `FAST = false` is the prior code, kept so the
+/// byte-identity gate can compare the two arms in one binary — the same convention
+/// `read_varint_impl` uses.
+#[inline]
+fn write_varint_impl<const FAST: bool>(buf: &mut Vec<u8>, mut n: usize) {
+    if FAST && n < 0x80 {
+        buf.push(n as u8);
+        return;
+    }
     loop {
         let mut byte = (n & 0x7f) as u8;
         n >>= 7;
@@ -164,6 +190,15 @@ fn write_varint(buf: &mut Vec<u8>, mut n: usize) {
             break;
         }
     }
+}
+
+/// Same-binary A/B + byte-identity hook for [`write_varint_impl`].
+#[doc(hidden)]
+#[must_use]
+pub fn bench_write_varint<const FAST: bool>(n: usize) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(10);
+    write_varint_impl::<FAST>(&mut buf, n);
+    buf
 }
 
 fn encode_varint_array(mut n: usize) -> ([u8; 10], usize) {
@@ -6277,6 +6312,52 @@ mod tests {
             check(&c, &o);
         }
         assert!(!c.is_empty(), "expected a non-trivial residual map");
+    }
+
+    #[test]
+    fn write_varint_fast_path_is_byte_identical_and_round_trips() {
+        // (frankenredis-33832) The FAST arm must be a pure speedup: identical bytes
+        // for EVERY input, not just the short ones it special-cases. Compared against
+        // the prior loop in the same binary via `bench_write_varint`, rather than the
+        // test re-implementing the encoder — a test whose oracle is a copy of the
+        // code under test proves nothing.
+        let mut cases: Vec<usize> = (0..1000).collect();
+        cases.extend([
+            0x7f,   // last single-byte value
+            0x80,   // first two-byte value
+            0x3fff, // last two-byte value
+            0x4000, // first three-byte value
+            0x1f_ffff,
+            0x20_0000,
+            usize::MAX / 2,
+            usize::MAX,
+        ]);
+
+        let mut saw_single = 0_u32;
+        let mut saw_multi = 0_u32;
+        for n in cases {
+            let fast = super::bench_write_varint::<true>(n);
+            let slow = super::bench_write_varint::<false>(n);
+            assert_eq!(fast, slow, "encoding diverged for {n}");
+
+            // And it must still decode back to `n`, so a change making BOTH arms
+            // wrong in the same way cannot pass.
+            let (decoded, consumed) = super::read_varint(&fast, 0);
+            assert_eq!(decoded, n, "round-trip value for {n}");
+            assert_eq!(consumed, fast.len(), "round-trip consumed length for {n}");
+
+            if fast.len() == 1 {
+                saw_single += 1;
+            } else {
+                saw_multi += 1;
+            }
+        }
+        // Both sides of the new branch must actually have been exercised, or the
+        // comparison above is vacuous on one of them.
+        assert!(
+            saw_single > 100 && saw_multi > 100,
+            "corpus did not exercise both paths: {saw_single} single-byte, {saw_multi} multi-byte"
+        );
     }
 
     #[test]
