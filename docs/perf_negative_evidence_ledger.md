@@ -25612,3 +25612,61 @@ invisible there by construction. DO look at the other two frames in the same blo
 `try_recv` + `drain_writer_completions` (201.0M) is 4x this one and is the real prize, but
 its cheap-guard form needs an atomic pending count whose failure mode is a stranded
 completion and a hung connection — a designed change with concurrency tests, not an edit.
+
+## MEASURED (frankenredis-zw36c) — the per-pass drain guards are BEHAVIOURALLY IDENTICAL and NOT MEASURABLE on sinter_big: five samples per arm span 13.7 and 29.8 pct, which quantifies the bead's own thesis
+
+Claim class: SELF-SPEEDUP, LANDED WITHOUT A PERF CLAIM. No ratio is asserted.
+
+THE LEVER. `drain_monitor_output` and `drain_pending_client_unblocks` are called ONCE PER
+EVENT-LOOP PASS. A large reply is delivered over many passes, so a server with no MONITOR
+attached and nothing blocked -- which is nearly every server nearly all the time -- paid a
+`mem::take`, a by-value `Vec` return and an empty-loop teardown on each pass to produce
+nothing. Both now fast-exit on `is_empty()`. Precedent in-tree: `drain_pubsub_outboxes`
+took the same treatment under gein3, including its `_unguarded_reference` twin.
+
+WHY THE GUARDS ARE SOUND BY CONSTRUCTION, which is the part that matters for a drain: each
+guard reads the SAME field the drain consumes, on the same thread. There is no separate
+flag, so there is no window in which work is published and missed. An item published after
+a guarded empty drain is seen on the NEXT pass -- exactly when an unguarded drain would
+have seen it. That is the failure mode the bead named ("a wrongly-guarded drain does not
+lose a little performance, it loses completions and hangs a client") and it is structurally
+excluded rather than tested away.
+
+  test      per_pass_drain_fast_exits_match_their_unguarded_references
+            asserts return value AND field state against the verbatim pre-guard bodies,
+            plus the publish-after-guarded-drain case for both drains
+  mutation  forcing the monitor guard to always fire turns it RED
+            (left [] vs right [(7, "+OK\r\n")])
+  suite     fr-runtime 600 passed, 0 failed
+
+NOT MEASURABLE, AND THIS IS THE USEFUL PART. sinter_big is the shape the tax shows on, and
+it cannot adjudicate the lever. Two binaries from sources differing ONLY by the two
+guards, interleaved, per-run loadavg and mean CPU MHz recorded:
+
+    arm      fr instr/op across five samples                       span
+    BASE     591,158  598,206  648,577  655,905  672,029          13.7 pct
+    GUARD    567,030  645,663  665,849  720,209  736,025          29.8 pct
+    loadavg 11.4-33.5, mean CPU MHz 2595-3968 across the ten runs
+
+The distributions OVERLAP ENTIRELY. Round 1 showed the guarded arm 1.6 pct better and
+round 2 showed it 23 pct worse; neither is a result. The bead sizes the whole nine-frame
+tax at roughly 2-3 pct of sinter_big, an order of magnitude under this shape's own spread.
+
+So this row banks the variance itself as the finding: **zw36c's claim that the per-pass
+bookkeeping "is what makes large-reply shapes unmeasurable" is confirmed with numbers** --
+fr's arm spans 13.7-29.8 pct on repeat while the harness's own docstring records redis's
+arm inside 1.5 pct. A lever cannot be adjudicated on a shape whose noise floor is ten times
+its expected effect, and reporting a ratio from either round would have been reading noise.
+
+The change is landed on the structural argument -- strictly less unconditional work, proven
+behaviourally identical -- and NOT on a measured win, which is why no number appears in its
+commit message.
+
+RETRY PREDICATE. Do NOT re-run sinter_big for this; five samples per arm is already enough
+to show it cannot resolve a 2-3 pct effect. DO measure the tax when either becomes true:
+  1. A shape exists whose event-loop PASS COUNT is controlled and reported, so the per-pass
+     cost can be divided out instead of inferred through a reply-size proxy. That is the
+     measurement zw36c actually needs and none of the current shapes provide it.
+  2. The remaining seven frames are guarded too -- `try_recv`/`drain_writer_completions`
+     are 13.2M of the 30.6M and dwarf the two taken here, so the aggregate may clear the
+     noise floor where these two alone cannot.

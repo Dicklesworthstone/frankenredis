@@ -7581,6 +7581,40 @@ impl Runtime {
     /// client-ID snapshot followed by one keyed removal per subscriber.
     #[cfg_attr(any(test, feature = "bench-reference"), inline(never))]
     pub fn drain_pubsub_outboxes(&mut self) -> Vec<(u64, Vec<fr_store::PubSubMessage>)> {
+        // (frankenredis-gein3) `deliver_pubsub_messages` calls this once per event-loop
+        // pass and returns immediately when the result is empty. A large reply is
+        // delivered over MANY passes — that is why a fast client makes fr do more work,
+        // r(load, fr Ir) = -0.83 — so a workload with no subscribers at all pays this
+        // iterator set-up on every one of them: 46.2M instructions, 2.32% of sinter_big,
+        // to produce nothing.
+        //
+        // Behaviourally identical, not merely equivalent: draining an empty map yields
+        // no items and has nothing to clear, so both the return value and the map's
+        // state are the same either way. `drain_pubsub_outboxes_unguarded_reference`
+        // keeps that claim honest.
+        if self.server.pubsub_outbox.is_empty() {
+            return Vec::new();
+        }
+        let mut outboxes = Vec::with_capacity(self.server.pubsub_outbox.len());
+        outboxes.extend(
+            self.server
+                .pubsub_outbox
+                .drain()
+                .filter(|(_, messages)| !messages.is_empty()),
+        );
+        outboxes
+    }
+
+    /// Verbatim PRE-GUARD body of [`Self::drain_pubsub_outboxes`], kept so the
+    /// fast-exit can be A/B'd for behaviour in the same binary rather than argued
+    /// about. Gated exactly like the shipping path's callers see it, so the oracle
+    /// cannot drift from the gate it validates.
+    #[cfg(any(test, feature = "bench-reference"))]
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn drain_pubsub_outboxes_unguarded_reference(
+        &mut self,
+    ) -> Vec<(u64, Vec<fr_store::PubSubMessage>)> {
         let mut outboxes = Vec::with_capacity(self.server.pubsub_outbox.len());
         outboxes.extend(
             self.server
@@ -7594,6 +7628,10 @@ impl Runtime {
     /// Return all client IDs that have pending pub/sub messages.
     #[cfg_attr(any(test, feature = "bench-reference"), inline(never))]
     pub fn pubsub_clients_with_pending(&self) -> Vec<u64> {
+        // (frankenredis-gein3) Same per-pass guard as `drain_pubsub_outboxes`.
+        if self.server.pubsub_outbox.is_empty() {
+            return Vec::new();
+        }
         let mut client_ids = Vec::with_capacity(self.server.pubsub_outbox.len());
         client_ids.extend(
             self.server
@@ -37024,7 +37062,26 @@ impl Runtime {
         self.server.store.stat_blocked_clients = self.server.blocked_client_ids.len() as u64;
     }
 
+    /// (frankenredis-zw36c) Same per-pass tax as `drain_monitor_output`: the event loop
+    /// calls this every iteration, and a server with nothing blocked pays the take and the
+    /// empty-loop teardown each time. The guard reads the SAME field the drain consumes,
+    /// so an unblock requested concurrently is seen on the next pass exactly as it would
+    /// have been without the guard -- a BLPOP cannot be delayed past its timeout by a
+    /// stale flag, because there is no flag.
+    /// `drain_pending_client_unblocks_unguarded_reference` keeps that claim honest.
     pub fn drain_pending_client_unblocks(&mut self) -> Vec<(u64, ClientUnblockMode)> {
+        if self.server.pending_client_unblocks.is_empty() {
+            return Vec::new();
+        }
+        std::mem::take(&mut self.server.pending_client_unblocks)
+    }
+
+    /// Pre-guard behaviour of [`Self::drain_pending_client_unblocks`], retained so the
+    /// equivalence is testable rather than asserted. Not used by the server.
+    #[doc(hidden)]
+    pub fn drain_pending_client_unblocks_unguarded_reference(
+        &mut self,
+    ) -> Vec<(u64, ClientUnblockMode)> {
         std::mem::take(&mut self.server.pending_client_unblocks)
     }
 
@@ -37119,7 +37176,30 @@ impl Runtime {
     }
 
     /// Drain pending monitor output for delivery.
+    /// (frankenredis-zw36c) `deliver_monitor_output` calls this ONCE PER EVENT-LOOP PASS,
+    /// and a large reply is delivered over many passes, so a server with no MONITOR
+    /// attached -- which is every server almost all of the time -- pays the take, the
+    /// by-value `Vec` return and the empty-loop teardown on every one of them to produce
+    /// nothing. Same treatment already landed for `drain_pubsub_outboxes`.
+    ///
+    /// Behaviourally identical, not merely equivalent: `mem::take` on an empty `Vec`
+    /// yields an empty `Vec` and leaves an empty `Vec` behind, so both the return value
+    /// and the field's state are the same either way. The guard reads the SAME field the
+    /// drain consumes, on the same thread, so there is no window in which a monitor line
+    /// could be published and missed -- it is simply seen on the next pass, which is when
+    /// an unguarded drain would have seen it too.
+    /// `drain_monitor_output_unguarded_reference` keeps that claim honest.
     pub fn drain_monitor_output(&mut self) -> Vec<(u64, Vec<u8>)> {
+        if self.server.monitor_output.is_empty() {
+            return Vec::new();
+        }
+        std::mem::take(&mut self.server.monitor_output)
+    }
+
+    /// Pre-guard behaviour of [`Self::drain_monitor_output`], retained so the equivalence
+    /// is testable rather than asserted. Not used by the server.
+    #[doc(hidden)]
+    pub fn drain_monitor_output_unguarded_reference(&mut self) -> Vec<(u64, Vec<u8>)> {
         std::mem::take(&mut self.server.monitor_output)
     }
 
@@ -73387,5 +73467,157 @@ user bob reset off nopass +@all
         assert!(!Runtime::command_advances_replication_offset(&argv(&[
             b"FUNCTION"
         ])));
+    }
+
+    /// (frankenredis-zw36c) The monitor and client-unblock drains now fast-exit when their
+    /// backing `Vec` is empty. Asserted against the verbatim pre-guard bodies, and the
+    /// FIELD STATE is asserted too, because a guard that skipped a needed clear would
+    /// still return the right `Vec` and pass a return-value-only check.
+    #[test]
+    fn per_pass_drain_fast_exits_match_their_unguarded_references() {
+        // 1. EMPTY, never populated -- the state a server with no MONITOR and nothing
+        //    blocked sits in, on every single event-loop pass.
+        let mut guarded = Runtime::new(RuntimePolicy::default());
+        let mut reference = Runtime::new(RuntimePolicy::default());
+        assert_eq!(
+            guarded.drain_monitor_output(),
+            reference.drain_monitor_output_unguarded_reference()
+        );
+        assert_eq!(
+            guarded.drain_pending_client_unblocks(),
+            reference.drain_pending_client_unblocks_unguarded_reference()
+        );
+        assert!(guarded.server.monitor_output.is_empty());
+        assert!(guarded.server.pending_client_unblocks.is_empty());
+
+        // 2. POPULATED -- the guard must not swallow real work, and must still CLEAR.
+        guarded.server.monitor_output.push((7, b"+OK\r\n".to_vec()));
+        reference
+            .server
+            .monitor_output
+            .push((7, b"+OK\r\n".to_vec()));
+        assert_eq!(
+            guarded.drain_monitor_output(),
+            reference.drain_monitor_output_unguarded_reference()
+        );
+        assert!(
+            guarded.server.monitor_output.is_empty(),
+            "the drain must still clear; a guard that skipped the take would leak the line \
+             into the next pass and deliver it twice"
+        );
+
+        guarded
+            .server
+            .pending_client_unblocks
+            .push((42, ClientUnblockMode::Timeout));
+        reference
+            .server
+            .pending_client_unblocks
+            .push((42, ClientUnblockMode::Timeout));
+        assert_eq!(
+            guarded.drain_pending_client_unblocks(),
+            reference.drain_pending_client_unblocks_unguarded_reference()
+        );
+        assert!(guarded.server.pending_client_unblocks.is_empty());
+
+        // 3. THE NEGATIVE CASE THE BEAD NAMES: "a monitor attached mid-burst must start
+        //    receiving without waiting for an unrelated wakeup", and "client unblock must
+        //    not be delayed past its timeout by a dirty-flag miss". Publish AFTER a
+        //    guarded empty drain and confirm the very next drain returns it. This is sound
+        //    by construction -- the guard reads the same field the drain consumes, so
+        //    there is no flag to go stale -- and this pins it.
+        assert!(guarded.drain_monitor_output().is_empty());
+        guarded
+            .server
+            .monitor_output
+            .push((9, b"+PONG\r\n".to_vec()));
+        assert_eq!(
+            guarded.drain_monitor_output(),
+            vec![(9, b"+PONG\r\n".to_vec())],
+            "a line published after a guarded empty drain must arrive on the NEXT pass"
+        );
+
+        assert!(guarded.drain_pending_client_unblocks().is_empty());
+        guarded
+            .server
+            .pending_client_unblocks
+            .push((11, ClientUnblockMode::Error));
+        assert_eq!(
+            guarded.drain_pending_client_unblocks(),
+            vec![(11, ClientUnblockMode::Error)],
+            "an unblock requested after a guarded empty drain must not be lost"
+        );
+    }
+
+    /// (frankenredis-gein3) `drain_pubsub_outboxes` and `pubsub_clients_with_pending`
+    /// now fast-exit on an empty outbox. The claim is BEHAVIOURAL IDENTITY, not mere
+    /// equivalence, so assert it against the verbatim pre-guard body rather than against
+    /// my expectation of it — and assert the MAP STATE too, since `drain()` mutates and a
+    /// guard that skipped a needed clear would still return the right Vec.
+    #[test]
+    fn drain_pubsub_outboxes_fast_exit_matches_the_unguarded_reference() {
+        use fr_store::PubSubMessage;
+        fn msg(c: &[u8]) -> PubSubMessage {
+            PubSubMessage::Message {
+                channel: c.to_vec(),
+                data: b"payload".to_vec(),
+            }
+        }
+
+        // 1. EMPTY, never populated — the case the guard actually changes, and the case
+        //    a no-subscriber workload hits on every event-loop pass.
+        let mut guarded = Runtime::new(RuntimePolicy::default());
+        let mut reference = Runtime::new(RuntimePolicy::default());
+        assert_eq!(
+            guarded.drain_pubsub_outboxes(),
+            reference.drain_pubsub_outboxes_unguarded_reference()
+        );
+        assert!(guarded.server.pubsub_outbox.is_empty());
+        assert!(guarded.pubsub_clients_with_pending().is_empty());
+
+        // 2. EMPTY BUT PREVIOUSLY POPULATED — the map keeps its allocation after a drain,
+        //    so this is a DIFFERENT state from (1) and is the one a real server sits in
+        //    once any publish has ever happened.
+        let mut guarded = Runtime::new(RuntimePolicy::default());
+        let mut reference = Runtime::new(RuntimePolicy::default());
+        for rt in [&mut guarded, &mut reference] {
+            rt.server.pubsub_outbox.insert(7, vec![msg(b"ch")]);
+        }
+        let _ = guarded.drain_pubsub_outboxes();
+        let _ = reference.drain_pubsub_outboxes_unguarded_reference();
+        assert_eq!(
+            guarded.drain_pubsub_outboxes(),
+            reference.drain_pubsub_outboxes_unguarded_reference(),
+            "second drain over a retained allocation must agree"
+        );
+        assert_eq!(
+            guarded.server.pubsub_outbox.len(),
+            reference.server.pubsub_outbox.len()
+        );
+
+        // 3. POPULATED, including the empty-Vec entry the filter must drop and which must
+        //    NOT be reported as a pending client.
+        let mut guarded = Runtime::new(RuntimePolicy::default());
+        let mut reference = Runtime::new(RuntimePolicy::default());
+        for rt in [&mut guarded, &mut reference] {
+            rt.server
+                .pubsub_outbox
+                .insert(1, vec![msg(b"a"), msg(b"b")]);
+            rt.server.pubsub_outbox.insert(2, vec![msg(b"c")]);
+            rt.server.pubsub_outbox.insert(3, Vec::new());
+        }
+        let mut pending = guarded.pubsub_clients_with_pending();
+        pending.sort_unstable();
+        assert_eq!(pending, vec![1, 2], "client 3 has no messages");
+
+        let mut got = guarded.drain_pubsub_outboxes();
+        let mut want = reference.drain_pubsub_outboxes_unguarded_reference();
+        got.sort_by_key(|(id, _)| *id);
+        want.sort_by_key(|(id, _)| *id);
+        assert_eq!(got, want);
+        assert_eq!(got.len(), 2, "the empty-Vec entry must be filtered out");
+        // Both must have CLEARED the map, guard or no guard.
+        assert!(guarded.server.pubsub_outbox.is_empty());
+        assert!(reference.server.pubsub_outbox.is_empty());
     }
 }
