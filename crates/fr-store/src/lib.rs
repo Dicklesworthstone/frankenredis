@@ -31338,7 +31338,16 @@ impl Store {
             None => db_prefix.clone(),
         };
         let upper: Option<Vec<u8>> = match lit {
-            Some(l) => prefix_range_end(&encode_db_key(db, l)),
+            // (frankenredis-hwcm1) Reuse `lower` instead of encoding the SAME
+            // (db, literal) a second time. In this arm `lower` IS
+            // `encode_db_key(db, l)` — the line above builds it from the identical
+            // inputs — so the range end is byte-identical either way, and the
+            // second encode was one allocation plus one copy per SCAN.
+            //
+            // Callgrind counted the duplication rather than my inferring it:
+            // `encode_db_key` ran 8,000 times over 4,000 SCANs, exactly 2 per op,
+            // on a shape whose reply is a cursor plus one key.
+            Some(_) => prefix_range_end(&lower),
             None if db == 0 => None,
             None => prefix_range_end(&db_prefix),
         };
@@ -31384,6 +31393,14 @@ impl Store {
         // (`PreparedGlob::matches` == `glob_match`); measured 1.7–2.3x on the per-key match for the
         // prefix/suffix shapes that dominate SCAN. (cc_fr)
         let prepared_glob = pattern.map(glob_prepare);
+        // (frankenredis-hwcm1) NOT pre-sized to `batch`, and that is deliberate —
+        // I tried it and MEASURED IT AS A LOSS. `Vec::with_capacity(batch)` does
+        // remove the `RawVec::grow_one` that callgrind showed once per SCAN, but
+        // COUNT is a SCAN BUDGET, not a result-size estimate: at `COUNT 100` with
+        // one matching key it allocates 100 slots to hold 1. The trade came out
+        // `__rust_alloc` 12,003 -> 16,003 over 4,000 ops with total Ir unchanged
+        // (35,815,172 -> 35,791,601, -0.07%), so the upfront allocation cost as
+        // much as the growth it avoided. Growing from empty is correct here.
         let mut result: Vec<Vec<u8>> = Vec::new();
         let mut last_key: Option<Vec<u8>> = None;
         let mut has_more = false;
