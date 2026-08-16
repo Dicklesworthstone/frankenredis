@@ -26115,10 +26115,17 @@ SINTERSTORE does the IDENTICAL 512-member intersection and writes the result to 
 instead of replying. It is 31 pct FASTER than redis and reproduces to 0.19 pct — two
 hundred times tighter than the same intersection with a reply attached.
 
-    SO fr's SET WORK IS AHEAD (0.69x) AND DETERMINISTIC. BOTH the 1.1193x deficit AND the
-    40 pct variance live entirely in REPLY DELIVERY. Every future SINTER lever should be
-    measured on sinterstore_big for the set half and sinter_big only for the reply half —
-    and sinterstore_big is now the STABLE large-k set-algebra shape the corpus lacked.
+    SO fr's SET WORK IS AHEAD (0.69x) AND DETERMINISTIC, and sinterstore_big is now the
+    STABLE large-k set-algebra shape the corpus lacked.
+
+    CORRECTION, MADE BEFORE ANYONE BUILDS ON IT (see the row below): I first wrote that
+    "both the deficit AND the variance live entirely in REPLY DELIVERY". THE VARIANCE HALF
+    STANDS — SINTERSTORE sends no reply at all, so there are no variable write passes, and
+    it reproduces to 0.19 pct against sinter_big's 40 pct. THE DEFICIT HALF DOES NOT
+    FOLLOW, because SINTERSTORE is NOT a no-reply control: it does not REMOVE the reply, it
+    SWAPS it for destination-set construction, and that is the MORE expensive of the two in
+    both engines — fr pays +531,769 instr/op for the store over the reply, redis +1,060,228.
+    A control that substitutes costlier work cannot isolate the cost it replaced.
 
 PROVENANCE:
   ELF sha256           e5dbd27698f54ead... built LOCALLY at HEAD 30f8a8284 from a clean
@@ -26139,3 +26146,68 @@ RETRY PREDICATE: MEASURE sdiff_big — it is landed but unmeasured, and it is th
 remaining shape that could still hide a crossover. Do NOT chase fr's set work: it is 0.69x
 and stable. DO attack reply delivery, and measure it as the DIFFERENCE between sinter_big
 and sinterstore_big, which isolates it exactly.
+
+--------------------------------------------------------------------------------
+CORRECTION (frankenredis-gein3) — SINTERSTORE is NOT a no-reply control: it SWAPS the reply
+for a costlier set build. The variance half of the previous row stands; the deficit half
+does not. Plus the dispatch screen moves from a scratchpad into the repo
+
+Claim class: METHOD + CORRECTION
+
+THE ERROR, CAUGHT BY RE-READING MY OWN NUMBERS RATHER THAN BY ANYONE ELSE. The row above
+concluded that "both the 1.1193x deficit AND the 40 pct variance live entirely in REPLY
+DELIVERY", on the strength of sinterstore_big measuring 0.6899x and reproducing to 0.19
+pct. The arithmetic that was sitting in the same row refutes half of it:
+
+    fr     SINTER  520,568   SINTERSTORE 1,052,338   the store costs +531,769 MORE
+    redis  SINTER  465,074   SINTERSTORE 1,525,302   the store costs +1,060,228 MORE
+
+SINTERSTORE DOES NOT REMOVE THE REPLY, IT REPLACES IT — and destination-set construction is
+the more expensive of the two in BOTH engines, roughly double the whole SINTER command for
+fr. A control that substitutes COSTLIER work cannot isolate the cost it replaced. I read
+"no reply" as "less work" without checking, and the number that disproves it was already on
+the page.
+
+WHAT SURVIVES, AND IT IS THE MORE USEFUL HALF:
+
+  - THE VARIANCE CONCLUSION STANDS. SINTERSTORE sends no reply to the client at all, so
+    there are no variable write passes, and it reproduces to 0.19 pct against sinter_big's
+    40 pct — two hundred times tighter on the identical 512-member intersection. The
+    variance IS reply delivery. That is what made sinter_big uncertifiable and what the
+    per-pass drain fast-exits moved.
+  - fr BEATS REDIS AT SINTERSTORE, 0.6899x/0.6905x, on a shape that is mostly set work plus
+    a set build. That is a real standing, just not an isolation.
+  - THE DEFICIT IS UN-ATTRIBUTED AGAIN. fr's 1.1193x at k=512 is not shown to be reply
+    delivery by this control, and no other evidence in this ledger separates fr's per-member
+    EMIT from its per-member PROBE. The honest state is: fr's per-member cost is ~1,020 and
+    redis's is 908 on this shape; where fr's 13 pct excess sits inside that is OPEN.
+
+    A CLEAN ISOLATION WOULD NEED A SHAPE THAT DOES THE SAME PROBES AND EMITS NOTHING —
+    SINTERCARD (returns a count) is the obvious candidate and does not exist in the corpus.
+    That, not another sinterstore reading, is the next instrument.
+
+ALSO LANDED: scripts/dispatch_share_screen.py, which until now existed ONLY in a scratchpad
+while it produced the 102-shape ranking banked in 211b3280e. That row's conclusion — the
+front-classification surface is ~ONE command, not a campaign — was not reproducible by
+anyone else. It now is. The tool carries its own findings and its own KNOWN LIMIT in the
+docstring (it ranks the shapes the harness HAS; LTRIM, SPOP, SRANDMEMBER, SMOVE, RPOPLPUSH,
+HSET and INCRBYFLOAT are unclassified with no shape, so they are unmeasured rather than
+cheap), and it DROPS a shape whose run produced no usable fr arm rather than scoring it
+zero — the first version of this screen mis-parsed the shape list and produced a plausible,
+entirely empty ranking, which is the failure its `--self-test` now guards. Mutation-tested:
+scoring failed runs as zero instead of dropping them reddens the self-test.
+
+PROVENANCE:
+  no new measurement   this row re-reads figures banked in the row above.
+  host                 thinkstation1, 64 cores, /data 220G, governor powersave, no build.
+  loadavg              70.19 / 42.41 / 26.81 — SPIKING, which is why nothing was certified
+                       this turn and why the work is a correction and a tool rather than a
+                       measured lever.
+  MHz                  not recorded: no arm was measured, so there is no per-arm figure to
+                       record, and quoting a host-wide mean for a row that measured nothing
+                       would be noise dressed as provenance.
+
+RETRY PREDICATE: do NOT re-derive the deficit from sinterstore_big — it cannot answer that
+question at any precision. DO add a SINTERCARD large-k shape (same probes, count reply) as
+the isolation instrument, and re-check anything else in this ledger that used a "control"
+which substitutes work rather than removing it.
