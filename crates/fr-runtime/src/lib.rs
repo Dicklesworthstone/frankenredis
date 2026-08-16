@@ -27082,14 +27082,16 @@ impl Runtime {
         }
         let elapsed_us = self.finish_chained_command(st);
         let reply = RespFrame::Integer(count);
-        let keys_owned: Vec<Vec<u8>> = keys.iter().map(|k| k.to_vec()).collect();
+        // (frankenredis-z2ce3) Same as TOUCH, and more clearly wasteful here: the
+        // loop above completes the entire command on borrows before anything is
+        // copied. The owned Vec existed only to feed the lazy closure below.
         self.record_plain_zremrange_borrowed_metrics(
             "exists",
             "EXISTS",
             || {
-                let mut argv = Vec::with_capacity(keys_owned.len() + 1);
+                let mut argv = Vec::with_capacity(keys.len() + 1);
                 argv.push(b"EXISTS".to_vec());
-                argv.extend(keys_owned.iter().cloned());
+                argv.extend(keys.iter().map(|k| k.to_vec()));
                 argv
             },
             elapsed_us,
@@ -27127,14 +27129,21 @@ impl Runtime {
         let count = self.server.store.touch(keys, now_ms);
         let elapsed_us = self.finish_chained_command(st);
         let reply = RespFrame::Integer(count);
-        let keys_owned: Vec<Vec<u8>> = keys.iter().map(|k| k.to_vec()).collect();
+        // (frankenredis-z2ce3) The owned copy used to be taken HERE, unconditionally,
+        // and its only reader was the closure below. That closure is lazy — it runs
+        // through `argv.get_or_insert_with` only when slowlog or latency sampling
+        // fires, both off by default — so the default path allocated a Vec plus one
+        // Vec<u8> per key to build an argv that was then never built. `Store::touch`
+        // already takes `&[&[u8]]`, so nothing else here ever wanted owned keys.
+        // Building them inside the closure moves the allocations into the branch
+        // that actually consumes them.
         self.record_plain_zremrange_borrowed_metrics(
             "touch",
             "TOUCH",
             || {
-                let mut argv = Vec::with_capacity(keys_owned.len() + 1);
+                let mut argv = Vec::with_capacity(keys.len() + 1);
                 argv.push(b"TOUCH".to_vec());
-                argv.extend(keys_owned.iter().cloned());
+                argv.extend(keys.iter().map(|k| k.to_vec()));
                 argv
             },
             elapsed_us,

@@ -19084,3 +19084,67 @@ not just by ratio.
 RETRY PREDICATE: do not re-run to re-confirm. The residual +23 instr/op (key_arg3 vs a
 hand-rolled parser) survives and is what a dedicated COUNT parser would buy -- ALONE it
 buys nothing, because it would still run second.
+
+--------------------------------------------------------------------------------
+ACCEPTED — borrowed TOUCH and EXISTS allocated on every call to build an argv that
+was never built: 3.000 and 4.426 allocations/op -> 0.000 (frankenredis-z2ce3)
+
+Same-source A/B, both arms from ONE tree with only the executor edit reverted between
+them, measured by an allocation census rather than a profiler.
+
+    shape                              before    after   control
+    borrowed TOUCH  (2 missing keys)    3.000    0.000
+    borrowed EXISTS (2 missing keys)    4.426    0.000
+    generic owned-argv TOUCH                             6.957 / 7.188
+
+THE DEFECT. Eight borrowed fast paths took an unconditional `to_vec()` whose ONLY
+reader was the lazy metrics closure — which runs through `argv.get_or_insert_with`
+only when slowlog or latency sampling fires, both off by default. So the default path
+allocated a Vec plus one Vec<u8> per key to build an argv that was then never built.
+`Store::touch` already accepted `&[&[u8]]`, and EXISTS completes its entire command
+on borrows before copying, so neither ever wanted owned keys at all.
+
+WHY A CENSUS AND NOT A RATIO. The count is exact, deterministic and load-immune, and
+it answers the question that matters first — did the lever fire — with an integer
+rather than a ratio that has to clear a noise floor.
+
+THE CONTROL ARM IS WHAT MAKES 0.000 MEAN ANYTHING. A bound on the fast path alone
+cannot distinguish "the lever eliminated the allocations" from "this census cannot
+see allocations at all". A generic owned-argv TOUCH reads 6.957/7.188 in the same
+run, so the instrument demonstrably has resolution. Without that arm a census that
+silently counted nothing would report 0.000 and pass.
+
+AND THE BEFORE-ARM FAILS THE TEST, which is the other half of the same discipline:
+the bound sits BETWEEN the two states, so neither arm can pass in the other's place.
+Reverting the executor edit reddens the census.
+
+A REAL BUG IN THE CENSUS, CAUGHT BY THE FULL SUITE AND WORTH RECORDING. The control
+started as its own `#[test]`. It passed TWICE in isolation and then FAILED under
+`cargo test -p fr-runtime`. Cause: `ALLOCS` is a process-global counter and cargo
+runs tests within a binary CONCURRENTLY, so a sibling test's allocations corrupt the
+figures nondeterministically. Folded into a single test. ANYTHING THAT COUNTS A
+PROCESS-GLOBAL MUST BE MEASURED IN ONE TEST — running the census alone hides this,
+which is exactly how it nearly shipped.
+
+NOT A COST CLAIM. The census links `CountingAlloc`, not the shipping mimalloc, so it
+counts allocation CALLS and says nothing about their cost. THE CENSUS PINS THE
+INVARIANT; A CALLGRIND ROW SIZES IT. `touch_missing` and `exists_missing` are harness
+shapes and remain unmeasured for instructions.
+
+REMAINING: six of the eight routes are unfixed — zinter, zstore, zdiffstore, setstore
+(a scalar `to_vec()` the original grep could not see), and DEL/UNLINK, which
+additionally need `Store::del` generic over `AsRef<[u8]>` because there the copy is
+genuinely passed to the store.
+
+PROVENANCE:
+  tree                   HEAD plus this commit's two executor edits; both census arms
+                         differ ONLY by those edits, nothing else.
+  harness                crates/fr-runtime/tests/borrowed_key_allocation_census.rs,
+                         two-point subtraction 128 vs 384 ops after a 64-op warm.
+  gate                   cargo test -p fr-runtime green, RCH_CARGO_WRAPPER_BYPASS=1,
+                         env -u CARGO_TARGET_DIR, /data 343G.
+
+RETRY PREDICATE: do not re-run the census to re-confirm 0.000. DO measure
+touch_missing and exists_missing with shape_instr_per_op.py to size it, and read a
+few-percent result as evidence about where the remaining fixed overhead is rather
+than as a failed lever.
