@@ -367,6 +367,40 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
     # executor. The only difference is whether a TTL exists anywhere, which is
     # exactly the condition the guard tests. If the gap tracks TTL presence, the
     # cycle is the cost; if both read alike, it is not and the lead dies.
+    # (frankenredis-kvuyy follow-up) expire_nx is sub-parity at ~0.95 with dispatch
+    # ruled out (classified, served, nothing allocating on the fast path) and the
+    # active-expire cycle ruled out by ttlprobe. So is the cost the CONDITIONAL, or
+    # EXPIRE generally?
+    #
+    # Same command, same key, same TTL state; the only difference is whether a
+    # condition token is present, which changes arity 3 -> 4 and class Expire ->
+    # ExpireCond. Both are classified and both are served, so this isolates the
+    # conditional work rather than the routing.
+    #   plain at parity + NX behind  -> the cost is the conditional path
+    #   both behind                  -> the cost is EXPIRE itself, and expire_nx
+    #                                   was never a conditional story
+    #
+    # ANSWERED, and it is the first branch. ELF a146507d78bdb55610c63397:
+    #   run 1, HOST LOAD 12.11/64 (19%)
+    #     expire_plain    1.0789 [1.0289, 1.1103]  nulls 1.0276/0.9988
+    #     expire_nx_cond  0.9315 [0.8993, 0.9637]  nulls 0.9937/1.0038  ADMISSIBLE
+    #   run 2, HOST LOAD 10.26/64 (16%)  -- 3 of 3 admissible, 0 null-failed
+    #     expire_plain    1.1273 [1.0860, 1.1595]  nulls 1.0066/0.9994  ADMISSIBLE
+    #     expire_nx_cond  0.9623 [0.9124, 0.9968]  nulls 1.0015/1.0092  ADMISSIBLE
+    #
+    # Plain EXPIRE is AHEAD (1.08-1.13, worst bound 1.0289); the conditional form
+    # is BEHIND (0.93-0.96, worst bound 0.8993). Intervals disjoint in BOTH
+    # pairings, two admissible rows per arm. The conditional path costs ~16%
+    # relative to plain, on the same command, key and TTL state.
+    #
+    # So the target is the Some(cond_token) branch of
+    # execute_plain_expire_kind_borrowed -- NOT dispatch (ruled out: classified and
+    # served) and NOT the active-expire cycle (ruled out by ttlprobe, kvuyy).
+    "expirecond": [
+        ("expire_plain", ["SET e v"], ["EXPIRE", "e", "500"]),
+        ("expire_nx_cond", ["SET s v", "EXPIRE s 10000"], ["EXPIRE", "s", "500", "NX"]),
+        ("get_control", ["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
+    ],
     "ttlprobe": [
         ("expire_nx_nottl", ["SET t v"], ["EXPIRE", "nosuch", "500", "NX"]),
         ("expire_nx_ttl", ["SET s v", "EXPIRE s 10000"], ["EXPIRE", "s", "500", "NX"]),
