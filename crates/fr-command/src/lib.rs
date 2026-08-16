@@ -29157,7 +29157,12 @@ fn posix_locale_to_bcp47(locale: &str) -> Option<String> {
     }
 }
 
-fn active_sort_alpha_collator() -> Option<CollatorBorrowed<'static>> {
+/// Resolve the `SORT ... ALPHA` collator from the process environment.
+///
+/// Callers want [`active_sort_alpha_collator`], which memoises this. Kept as its own
+/// function so the resolution is still directly testable (the tests below drive it
+/// through `posix_locale_to_bcp47`, which is where every interesting case lives).
+fn resolve_sort_alpha_collator() -> Option<CollatorBorrowed<'static>> {
     let locale = std::env::var("LC_ALL")
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -29176,6 +29181,32 @@ fn active_sort_alpha_collator() -> Option<CollatorBorrowed<'static>> {
     let mut options = CollatorOptions::default();
     options.alternate_handling = Some(AlternateHandling::Shifted);
     Collator::try_new(locale.into(), options).ok()
+}
+
+/// The collator every `SORT ... ALPHA` (without `STORE`) compares with, resolved once.
+///
+/// (frankenredis-7nfc0 named this cost; this is the lever.) The resolution behind it is
+/// not cheap and it was being paid ONCE PER COMMAND: three `getenv`s, a POSIX→BCP47
+/// rewrite, a `Locale` parse, and `Collator::try_new`, whose ICU data lookup is a
+/// zerotrie walk plus locale fallback. Censused on `SORT_RO sl ALPHA` over a
+/// three-element list, that resolution is roughly 12,500 instr/op against ~2,300 spent
+/// actually comparing — the lookup cost several times the work it enables, on a route
+/// where the list is short enough that it cannot amortise.
+///
+/// Memoising is sound because the inputs cannot change while the process runs:
+/// the answer is a pure function of `LC_ALL`/`LC_COLLATE`/`LANG`, and nothing in this
+/// workspace mutates the environment — there is no `std::env::set_var` call in any
+/// crate. `locale-collate` exists in the config table but is stored, not wired to
+/// collation, so `CONFIG SET locale-collate` does not reach here either. If either of
+/// those ever stops being true, this cache is the thing that has to change with it.
+///
+/// Returning a borrow rather than a fresh `CollatorBorrowed` is what makes it a cache:
+/// `CollatorBorrowed<'static>` is a view over ICU's compiled data, so cloning it per
+/// call would re-run the lookup this exists to avoid.
+fn active_sort_alpha_collator() -> Option<&'static CollatorBorrowed<'static>> {
+    static COLLATOR: std::sync::OnceLock<Option<CollatorBorrowed<'static>>> =
+        std::sync::OnceLock::new();
+    COLLATOR.get_or_init(resolve_sort_alpha_collator).as_ref()
 }
 
 /// Compare two `SORT ... ALPHA` elements.
@@ -29552,7 +29583,7 @@ fn sort_generic<const MOVE: bool>(
             // stable ordering of equal-key rows exactly while making `cmp` a
             // strict total order for the partial sort. (frankenredis-sortlim)
             let mut cmp = |a: &(usize, &[u8]), b: &(usize, &[u8])| {
-                let base = sort_alpha_compare(collator.as_ref(), a.1, b.1);
+                let base = sort_alpha_compare(collator, a.1, b.1);
                 let base = if desc { base.reverse() } else { base };
                 base.then_with(|| a.0.cmp(&b.0))
             };
@@ -60373,6 +60404,69 @@ mod tests {
             posix_locale_to_bcp47("de_DE.UTF-8@euro"),
             Some("de-DE".to_string())
         );
+    }
+
+    /// The `SORT ... ALPHA` collator is memoised (frankenredis-r9mqp), so assert BOTH
+    /// halves of that claim, because either alone can pass while the change is wrong:
+    ///
+    /// 1. It is really a cache. Two calls must hand back the SAME collator — compared by
+    ///    ADDRESS, not by value, since a re-resolution would be equal-but-distinct and a
+    ///    value comparison could not tell the two apart. This is what fails if a later
+    ///    edit turns the accessor back into a per-call `resolve`.
+    /// 2. Memoising did not change WHICH collator SORT gets. The cached answer must
+    ///    agree with a fresh `resolve_sort_alpha_collator()` — same Some/None, and where
+    ///    both are `Some`, the same ordering on a corpus that separates collation from
+    ///    byte order (`Banana` before `apple` collated, after it byte-wise; and the
+    ///    punctuation-vs-digit pairs that `AlternateHandling::Shifted` decides).
+    ///
+    /// Deliberately locale-agnostic: this runs under whatever locale the test host has,
+    /// so it asserts cached-equals-fresh rather than a fixed order. The fixed-order
+    /// assertion lives in `sort_alpha_en_us_collation_matches_non_store_probe`, which
+    /// builds its own en-US collator and does not depend on the environment.
+    ///
+    /// KNOWN LIMIT, stated so this is not read as stronger than it is: on a host whose
+    /// environment names no collating locale, both halves reduce to `None == None` and
+    /// the test cannot fail. It is regression protection, not the proof the cache
+    /// works. That proof is the callgrind census on `7nfc0`/`r9mqp`, taken with both
+    /// engines pinned to `en_US.UTF-8`, where the resolution frames (`getenv`,
+    /// the zerotrie walk, `DataLocale::write`, locale fallback) disappear from
+    /// `SORT_RO ALPHA` entirely — they cannot vanish unless the accessor stopped
+    /// resolving.
+    #[test]
+    fn sort_alpha_collator_is_memoised_and_agrees_with_a_fresh_resolution() {
+        let first = super::active_sort_alpha_collator();
+        let second = super::active_sort_alpha_collator();
+        match (first, second) {
+            (Some(first), Some(second)) => assert!(
+                std::ptr::eq(first, second),
+                "collator was re-resolved: the accessor is not memoising"
+            ),
+            (None, None) => {}
+            _ => panic!("memoised collator disagreed with itself across two calls"),
+        }
+
+        let fresh = super::resolve_sort_alpha_collator();
+        assert_eq!(
+            first.is_some(),
+            fresh.is_some(),
+            "cached collator presence disagrees with a fresh resolution"
+        );
+        if let (Some(cached), Some(fresh)) = (first, fresh.as_ref()) {
+            let corpus: [&[u8]; 8] = [
+                b"Banana", b"apple", b"-2", b"18", b"3.5", b"9x", b"", b"co-op",
+            ];
+            for left in corpus {
+                for right in corpus {
+                    assert_eq!(
+                        sort_alpha_compare(Some(cached), left, right),
+                        sort_alpha_compare(Some(fresh), left, right),
+                        "cached and freshly resolved collators disagree on {:?} vs {:?}",
+                        String::from_utf8_lossy(left),
+                        String::from_utf8_lossy(right),
+                    );
+                }
+            }
+        }
     }
 
     #[test]
