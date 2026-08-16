@@ -359,6 +359,20 @@ SHAPES = {
     "zrank_base": (["ZADD zk 1 m"], ["ZRANK", "zk", "m"]),
     "zrank_withscore": (["ZADD zk 1 m"], ["ZRANK", "zk", "m", "WITHSCORE"]),
     "zadd_xx_opt": (["ZADD z 1 a"], ["ZADD", "z", "XX", "1", "a"]),
+    # (frankenredis-z2ce3) The OTHER arity-6 ZADD reading: `ZADD key flag1 flag2 score
+    # member`, which parse_borrowed_plain_zadd_flag2_packet serves. Array length 6 is
+    # shared with the two-pair form, and for a while the floor claimed both while its arm
+    # called only the two-pair parser -- so this reading was claimed, declined, and sent
+    # to the GENERIC path. It was invisible to the suite because zadd_2pair exercises the
+    # form that WAS served and reads healthy either way; nothing here could tell a
+    # half-chained arm from a working one. This shape is what makes that distinguishable.
+    #
+    # GT with a score EQUAL to the seeded one so the condition is false and the member is
+    # never updated: every op is identical and the 2N run cannot diverge from the N run.
+    # Using a HIGHER score would update on the first op and no-op thereafter, averaging
+    # two paths into one figure -- the same construction error the zadd_2pair comment
+    # above warns about.
+    "zadd_2flag": (["ZADD z 1 a"], ["ZADD", "z", "GT", "CH", "1", "a"]),
     "sintercard_base": (["SADD s1 m1 m2 m3", "SADD s2 m2 m3 m4"],
                         ["SINTERCARD", "2", "s1", "s2"]),
     "hrandfield_base": (["HSET h f1 v1"], ["HRANDFIELD", "h"]),
