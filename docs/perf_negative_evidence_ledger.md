@@ -16956,6 +16956,83 @@ profile. Reopen the round-trip question only if a profile shows a rendered value
 being reparsed on some other path — the hash and set RESTORE decoders were checked
 and do not have one, because their consumers genuinely want the bytes.
 
+## 2026-08-16 GentleStream: COMPETITIVE NULL — the three "unmeasurable" mutating commands ARE measurable on their no-op path, and every one is INDISTINGUISHABLE FROM THE GET CONTROL (`frankenredis-va5me`, `frankenredis-5yhyh`, `frankenredis-wgrny`)
+
+Claim class: COMPETITIVE. Campaign output: yes. Live vendored Redis 7.2.4 arm in the
+SAME invocation, balanced square, every row carrying its own A/A null. **The result
+is a NULL and is banked as one** — no speedup is claimed for any of these routes.
+
+**What was blocked and why it no longer is.** The entry below records these three
+beads as unmeasurable by this harness "by design rather than by accident":
+`ZREMRANGEBYLEX`, `ZREMRANGEBYRANK` and `LPOP/RPOP COUNT` MUTATE their key, so
+redis-benchmark's tens of thousands of identical requests drain it within the first
+few and every later request measures the empty case. That diagnosis is correct. The
+fix is not to work around it but to remove it: measure each command on a genuine
+NO-OP shape, where request 1 and request 50,000 do the same work.
+
+  * `ZREMRANGEBYRANK zr 5 4` — start > stop, an empty rank range
+  * `ZREMRANGEBYLEX zl [x [a` — min > max, an empty lex range
+  * `LPOP nosuchlist 10` / `RPOP nosuchlist 10` — missing key, null array, creates nothing
+
+Each was probed on BOTH engines before being registered: identical non-error reply,
+and the collection size UNCHANGED after 200 repetitions (`zr` and `zl` stay at 3,
+`nosuchlist` stays absent). Added as the `mutnoop` shape set.
+
+**HARNESS:** `scripts/balanced_square_ab.py --shapes mutnoop --rounds 61
+--expect-elf fcc3c34f271f88cb`, square `ABBAABBA`, 50,000 ops/slot, `-P16`, null
+bound ±0.02, bootstrap 95% CI, servers unpinned. Benchmark ran LOCALLY on
+thinkstation1; **RCH_WORKER `hz2`** only compiled the ELF, `--base HEAD
+--clean-overlay` (receipt `base=0d16db8a95ada65a84e0361925b8f5d70a100f6d`). **Host,
+self-reported from inside the running processes:** thinkstation1, kernel
+6.17.0-41-generic, 64 cores OBSERVED, governor `powersave`, ISA avx2, loadavg 21.73,
+fr threads observed 3, redis threads observed 6. fr server self-reported executable
+binary SHA-256 `fcc3c34f271f88cbb9bf0b6b51d405390b339fed87fd51d4ca4394fd8c2fd6f8`;
+the vendored Redis 7.2.4 arm self-reported executable binary SHA-256
+`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`.
+**CV is provenance only and is NEVER a gate here, the bootstrap median CI being the
+only decision rule.**
+**Same-invocation A/A null, aggregated over all 10 arm-nulls:** median **1.001450x**,
+bootstrap 95% median CI **[0.997000, 1.004300]**, n=10, percentile bootstrap, 4,096
+resamples, fixed seed. Every arm-null inside ±0.02.
+
+| row | fr/Redis | bootstrap 95% CI | null redis | null fr | verdict |
+|---|---:|---|---:|---:|---|
+| ZREMRANGEBYLEX no-op | 1.1127x | [1.0925, 1.1234] | 0.9857 | 1.0161 | ADMISSIBLE |
+| GET control | 1.1100x | [1.0975, 1.1288] | 0.9970 | 1.0031 | ADMISSIBLE |
+| ZREMRANGEBYRANK no-op | 1.1083x | [1.0841, 1.1138] | 0.9960 | 1.0055 | ADMISSIBLE |
+| LPOP COUNT missing | 1.0916x | [1.0686, 1.1015] | 1.0000 | 1.0034 | ADMISSIBLE |
+| RPOP COUNT missing | 1.0882x | [1.0820, 1.1158] | 0.9998 | 1.0029 | ADMISSIBLE |
+
+**THE RESULT IS THAT THERE IS NO RESULT, and that is the finding.** 5 of 5 rows are
+admissible, so this is a clean measurement, not a failed one. But the GET control —
+untouched by any of this work — comes out **1.1100x**, and every route sits ON it:
+
+| row | raw | ÷ control | route-attributable |
+|---|---:|---:|---:|
+| ZREMRANGEBYLEX no-op | 1.1127 | 1.1100 | **1.002x** |
+| ZREMRANGEBYRANK no-op | 1.1083 | 1.1100 | **0.999x** |
+| LPOP COUNT missing | 1.0916 | 1.1100 | **0.983x** |
+| RPOP COUNT missing | 1.0882 | 1.1100 | **0.980x** |
+
+Every row's CI overlaps the control's `[1.0975, 1.1288]`. **No route-attributable
+difference is detectable at this shape in either direction.** The whole raw margin is
+the same general fr advantage on short `-P16` reads that the control measures, and
+two of the four normalise to slightly BELOW 1.0 — well inside the ±0.02 null band, so
+not a regression either. Nobody should quote 1.11x for these commands.
+
+**Scope, stated because it is the one way this row could be misread.** These measure
+the DISPATCH path — the cost of getting an empty-range or missing-key request in and
+its reply out. They say nothing about the cost of actually removing elements, which
+is the work a real ZREMRANGEBYRANK does. A future lever on the removal path is not
+covered by this row and needs its own shape.
+
+**Retry predicate.** Re-take after changes to the front classifier or borrowed
+parsers for these commands, to the empty-range/missing-key early returns, or to
+allocator/codegen. **Invalidate rather than compare** if the GET control is absent or
+itself null-fails, if any row's own null leaves ±0.02, if the no-op shapes stop being
+no-ops (re-run the probe: sizes must be unchanged after repetition), or if the
+self-reported SHA-256s differ from those above.
+
 ## 2026-08-16 GentleStream: KEEP (COMPETITIVE) — the five rows the 31-round run had to REFUSE all pass at 61 rounds; 10/10 admissible (`frankenredis-bcva8`, `frankenredis-in98j`, `frankenredis-t7qgs`, `frankenredis-bj3mq`)
 
 Claim class: COMPETITIVE. Campaign output: yes. Every row is FrankenRedis against a

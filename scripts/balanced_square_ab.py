@@ -142,6 +142,38 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
          ["EVAL", "for i=1,50 do redis.call('GET', KEYS[1]) end return 1", "1", "k"]),
         ("get_control", ["SET k val"], ["GET", "k"]),
     ],
+    # Commands that MUTATE their key, measured on their NO-OP path so the square is
+    # valid at all. (frankenredis-va5me, frankenredis-5yhyh, frankenredis-wgrny)
+    #
+    # These three beads were recorded as unmeasurable here, correctly: redis-benchmark
+    # fires tens of thousands of identical requests, so a real ZREMRANGEBYRANK /
+    # ZREMRANGEBYLEX / LPOP COUNT drains its key within the first few and every
+    # remaining request measures the EMPTY case. The ratio you get is then a fiction
+    # about a command that stopped running.
+    #
+    # A no-op shape removes the problem rather than working around it: request 1 and
+    # request 50,000 do exactly the same work, so the square measures one steady
+    # thing. Each shape below was probed on BOTH engines before being added here —
+    # identical non-error reply, and the collection size unchanged after 200
+    # repetitions (zr/zl stay at 3, nosuchlist stays absent).
+    #
+    # This is the DISPATCH-path cost of these commands, which is what the front
+    # classification work actually changed; it is NOT a claim about the cost of
+    # removing elements, and no row from this set may be quoted as one.
+    "mutnoop": [
+        # start > stop: an empty rank range, so nothing is removed and 0 comes back.
+        ("zremrangebyrank_noop", ["ZADD zr 1 a 2 b 3 c"],
+         ["ZREMRANGEBYRANK", "zr", "5", "4"]),
+        # min > max lexicographically: an empty lex range, same reasoning.
+        ("zremrangebylex_noop", ["ZADD zl 0 a 0 b 0 c"],
+         ["ZREMRANGEBYLEX", "zl", "[x", "[a"]),
+        # Missing key: the COUNT form returns a null array and creates nothing.
+        ("lpop_count_missing", [], ["LPOP", "nosuchlist", "10"]),
+        ("rpop_count_missing", [], ["RPOP", "nosuchlist", "10"]),
+        # Control: GET is untouched by the dispatch work these rows are about, and
+        # without it none of the rows above can be normalised.
+        ("get_control", ["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
+    ],
 }
 
 
