@@ -19498,3 +19498,70 @@ RETRY PREDICATE: do NOT re-run for a tighter ratio — the denominator is the un
 term and more runs will not fix it. DO probe redis's del-missing nondeterminism if
 anyone needs the ratio to be stable. And measure any fr-side lever on this shape
 against fr's 2002.2 instr/op baseline.
+
+## MEASURED ATTRIBUTION (frankenredis-900bw) — ZRANGEBYSCORE LIMIT is 0.3697x on the instruction harness, and the "1.26x" is the OTHER harness's inverted convention
+
+Claim class: COMPETITIVE — fr and the vendored Redis 7.2.4 binary in the SAME invocation.
+Same provenance limitation as the rows above (valgrind hosts the target, so no
+self-reported ELF SHA; ABBA repeats, not a bootstrap CI).
+
+FILED BECAUSE A 1.26x FIGURE WAS READ AS "fr IS BEHIND". It is not. Measured here on the
+instruction harness:
+
+    run  shape                  fr instr/op   redis 7.2.4 instr/op   fr/redis
+    A    zrangebyscore_l            3703.9              10018.2       0.3697x
+    B    zrangebyscore_plain        3505.4               9369.4       0.3741x
+    B    zrangebyscore_plain        3434.3               9214.8       0.3727x
+    A    zrangebyscore_l            3654.2              10157.5       0.3598x
+
+fr retires ~3654-3704 instructions where Redis retires ~10,018-10,158: **about 2.7x
+AHEAD**, worst bound 0.3697x. The raw columns need no convention to read.
+
+THE TWO CONVENTIONS, BOTH NOW VERIFIED FROM SOURCE rather than from memory or prose.
+They are exactly inverted, which is why the same route can be quoted as 0.37 and 1.26 in
+the same hour and both be correct:
+
+    scripts/shape_instr_per_op.py:717
+        print("  fr/redis instructions per op: %.4fx" % (fr_ipo / rd_ipo))
+        -> INSTRUCTIONS, fr divided by redis. BELOW 1.0 = fr ahead. LOWER IS BETTER.
+
+    scripts/balanced_square_ab.py:60
+        "Ratio convention is fr_ops_per_sec / redis_ops_per_sec, so > 1 means FrankenRedis"
+        -> THROUGHPUT, fr divided by redis. ABOVE 1.0 = fr ahead. HIGHER IS BETTER.
+
+So frankenredis-900bw's "crossed 0.98 to 1.26" is a WIN REPORTED CORRECTLY on the
+throughput harness — the route went from 2 pct behind to 26 pct ahead. Reading it against
+the instruction convention inverts it into a 26 pct loss.
+
+THIS IS THE THIRD CONVENTION INVERSION IN THREE TURNS (GEOADD 0.3471x and LPOS COUNT
+0.3858x were reported to me as "the fleet's worst regressions" and are its two best
+routes; now this). The failure is systemic, not careless: two harnesses, two ratios, both
+written fr-over-redis, and the metric decides the direction. THE FIX IS MECHANICAL — quote
+the ABSOLUTE COUNTS beside any ratio, or name the harness. Absolute counts cannot be
+inverted.
+
+A/A NULL, from the ABBA repeats in this one invocation:
+
+    fr arm      zrangebyscore_l      3703.9 -> 3654.2   -1.34%
+                zrangebyscore_plain  3505.4 -> 3434.3   -2.03%
+    redis arm   zrangebyscore_l     10018.2 -> 10157.5  +1.39%
+                zrangebyscore_plain  9369.4 -> 9214.8   -1.65%
+    ratio       l 0.3697 -> 0.3598  2.68%  |  plain 0.3741 -> 0.3727  0.37%
+
+A 2.7x margin clears those spreads by two orders.
+
+WHAT THE WORST RATIO ACTUALLY IS, unchanged by this row: incrbyfloat_nondyadic at
+0.9794x, where fr's bignum path runs 9334 instr/op against redis's 9530. That remains the
+only measured shape anywhere near parity.
+
+EXECUTABLE IDENTITIES, full 64-hex (computed post-run, see limitation above):
+  candidate  `c36c3fb0a66033deff0cf03dc6a313ef647d5970cd22596aac575120a5d2a297`
+  incumbent  `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+  tree       31b22f983; NO rebuild — no crate code had changed since that binary.
+
+Campaign output: yes — prevents a third winning route being actioned as a regression, and
+pins both conventions to source lines.
+
+RETRY PREDICATE: before treating any row as a regression, check WHICH HARNESS produced it.
+If the figure came from balanced_square_ab.py, above 1.0 is a win; if from
+shape_instr_per_op.py, below 1.0 is a win.
