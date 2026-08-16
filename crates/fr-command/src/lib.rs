@@ -18982,8 +18982,20 @@ pub fn check_full_command_arity(argv: &[Vec<u8>]) -> Result<(), &'static str> {
     };
     check_command_arity(name, argv.len())?;
     if argv.len() >= 2 {
-        let parent = String::from_utf8_lossy(name).to_ascii_lowercase();
-        if command_acl_parent_has_subcommands(&parent) {
+        // (frankenredis-aujcf) Ask the question on the RAW BYTES. This used to run
+        // `String::from_utf8_lossy(name).to_ascii_lowercase()` first — a UTF-8
+        // validation scan plus an owned `String` allocation — and then hand the
+        // result to a `&str` wrapper that immediately took `.as_bytes()` again.
+        // The answer is NO for every command that is not one of the ~15 container
+        // commands, so the overwhelmingly common path paid a scan and an allocation
+        // to be told no, on EVERY command with two or more arguments.
+        //
+        // `command_has_subcommands_bytes` was written for exactly this
+        // (frankenredis-light-cmd-dispatch-overhead-byq16) and its own doc comment
+        // says so — this call site simply never adopted it. The two strings are
+        // still built, but only inside the rare branch that needs them.
+        if command_has_subcommands_bytes(name) {
+            let parent = String::from_utf8_lossy(name).to_ascii_lowercase();
             let sub = String::from_utf8_lossy(&argv[1]).to_ascii_lowercase();
             let key = format!("{parent}|{sub}");
             if let Some(&(cmd_name, arity, ..)) = SUBCOMMAND_TABLE
@@ -60517,6 +60529,79 @@ mod tests {
     /// the zerotrie walk, `DataLocale::write`, locale fallback) disappear from
     /// `SORT_RO ALPHA` entirely — they cannot vanish unless the accessor stopped
     /// resolving.
+    /// (frankenredis-aujcf) `check_full_command_arity` now asks
+    /// `command_has_subcommands_bytes(name)` instead of allocating
+    /// `from_utf8_lossy(name).to_ascii_lowercase()` and asking the `&str` wrapper.
+    /// That is only sound if the two agree on EVERY input, so this compares them
+    /// directly against the exact expression the old code used.
+    ///
+    /// The interesting case is the last group: invalid UTF-8. The old path ran the
+    /// bytes through `from_utf8_lossy`, which substitutes U+FFFD, and the new path
+    /// does not decode at all. They still agree, because U+FFFD is not ASCII — no
+    /// byte sequence can become a container command's name by being replaced — but
+    /// that is a fact about the replacement character rather than something obvious
+    /// from the diff, so it is pinned rather than assumed.
+    #[test]
+    fn command_has_subcommands_bytes_matches_the_lossy_lowercase_form_it_replaced() {
+        let old = |name: &[u8]| -> bool {
+            // Verbatim the expression check_full_command_arity used to evaluate.
+            let parent = String::from_utf8_lossy(name).to_ascii_lowercase();
+            super::command_acl_parent_has_subcommands(&parent)
+        };
+
+        let mut cases: Vec<Vec<u8>> = Vec::new();
+        // Every container command, in three cases each — the old path lowercased
+        // before comparing, so case is exactly where a byte version could regress.
+        for container in [
+            "acl", "client", "cluster", "command", "config", "function", "latency", "memory",
+            "module", "object", "pubsub", "script", "slowlog", "xgroup", "xinfo",
+        ] {
+            cases.push(container.as_bytes().to_vec());
+            cases.push(container.to_ascii_uppercase().into_bytes());
+            let mixed: String = container
+                .chars()
+                .enumerate()
+                .map(|(i, c)| {
+                    if i % 2 == 0 {
+                        c.to_ascii_uppercase()
+                    } else {
+                        c
+                    }
+                })
+                .collect();
+            cases.push(mixed.into_bytes());
+        }
+        // Non-containers, including near-misses that share a prefix or suffix with
+        // one, so "true for everything" cannot pass.
+        for other in [
+            "get", "set", "GET", "hset", "conf", "configx", "co", "objec", "objects", "xgrou",
+            "xgroups", "", "acls", "aclx",
+        ] {
+            cases.push(other.as_bytes().to_vec());
+        }
+        // Invalid UTF-8, including bytes adjacent to a container name.
+        cases.push(vec![0xFF, 0xFE]);
+        cases.push(b"conf\xFFig".to_vec());
+        cases.push(b"config\xFF".to_vec());
+        cases.push(vec![0xC3, 0x28]);
+
+        let mut saw_true = false;
+        let mut saw_false = false;
+        for name in &cases {
+            let expected = old(name);
+            saw_true |= expected;
+            saw_false |= !expected;
+            assert_eq!(
+                super::command_has_subcommands_bytes(name),
+                expected,
+                "disagreement on {:?}",
+                String::from_utf8_lossy(name)
+            );
+        }
+        // Without this the whole loop could pass on a corpus that is all-false.
+        assert!(saw_true && saw_false, "corpus must exercise both answers");
+    }
+
     /// (frankenredis-ukm9j) The 7.4 hash-field TTL family must be absent from
     /// EVERY wire surface, and this pins all three at once because they are the
     /// three the six red gates observed independently: the command table (via
