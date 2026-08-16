@@ -22687,3 +22687,69 @@ denominator, and corrects a twelve-row misattribution.
 RETRY PREDICATE: do NOT re-run whole rows for load. Re-run the REDIS arm when a ratio sits
 within ~3 pct of a decision boundary. And stop quoting "incumbent variance is
 shape-dependent" as settled — duration is the better hypothesis and neither is proven.
+
+## MEASURED (frankenredis-iqicb) — load-immunity confirmed across a 2x load range; my own duration hypothesis is NOT supported
+
+Claim class: COMPETITIVE — fr and the vendored Redis 7.2.4 binary in the SAME invocation.
+Same provenance limitation as the rows above (valgrind hosts the target, so no
+self-reported ELF SHA; ABBA repeats, not a bootstrap CI).
+
+    run  shape                   fr instr/op   redis 7.2.4   fr/redis   loadavg
+    A    incrbyfloat_nondyadic       7481.5        9616.0     0.7780x    28.73
+    B    incrbyfloat_same            4449.9        9228.7     0.4822x    32.35
+    B    incrbyfloat_same            4457.4        8949.9     0.4980x    36.01
+    A    incrbyfloat_nondyadic       7479.1        9807.3     0.7626x    39.05
+
+    loadavg 1/5/15 before: 25.31 / 24.72 / 26.91     after: 39.05 / 27.88 / 27.90
+
+**THE QUIET WINDOW DID NOT EXIST BY THE TIME I MEASURED.** It was reported at 16.8;
+loadavg was 25.31 when this run started and 39.05 when it finished — it rose 54 pct
+DURING the four measurements. That accident produced a better experiment than the intended
+one: load nearly doubled mid-row with everything else held fixed.
+
+LOAD-IMMUNITY OF THE fr ARM, now across EIGHT runs spanning loadavg 19 to 39:
+
+    fr    incrbyfloat_nondyadic  7490.5  7490.5  7481.5  7479.1   spread 0.15 pct
+    redis incrbyfloat_nondyadic  9489.2  9778.0  9616.0  9807.3   spread 3.35 pct
+
+**fr's arm varies 0.15 pct across a doubling of host load; the incumbent's varies 3.35 pct
+on the same runs.** That settles the asymmetry recorded last row: this gate's numerator is
+load-immune in practice, not merely in principle.
+
+**BUT MY DURATION HYPOTHESIS IS NOT SUPPORTED, AND I AM RECORDING THAT AGAINST MYSELF.**
+Last row proposed that the incumbent's variance is serverCron work admitted by run
+duration, which predicts MORE variance at HIGHER load. Measured:
+
+    redis nondyadic pair at loadavg 19-21   ->  3.04 pct apart
+    redis nondyadic pair at loadavg 29-39   ->  1.99 pct apart
+
+Variance went DOWN as load went up. With two pairs that is weak evidence and certainly not
+a refutation of the serverCron mechanism itself — the docstring's reasoning about
+elapsed-time work still stands on its own. What it does refute is the simple monotonic
+model I implied: **"higher load produces a noisier incumbent arm" is not what the data
+shows**, so the ~3 pct denominator term should be treated as present-and-unexplained
+rather than as something a quiet window removes.
+
+CONSEQUENCE FOR THE FLEET FINDING, restated more precisely than last row could:
+
+  * Re-running a row in a quiet window will NOT tighten it here. The numerator does not
+    move with load, and the denominator did not tighten at lower load either.
+  * The ~3 pct incumbent term is a property of the measurement to be QUOTED, not a
+    contaminant to be waited out.
+  * A reported loadavg is unusable by the time work starts. 16.8 became 25.3 became 39.1
+    inside one row. Stamp it PER RUN — as these rows now do — and never gate a decision on
+    a loadavg quoted in a previous message.
+
+WORST RATIO unchanged: incrbyfloat_nondyadic, worst bound 0.7894x across all eight runs.
+
+EXECUTABLE IDENTITIES, full 64-hex (computed post-run, see limitation above):
+  candidate  `d959cba13aedb271455f33b35b8154c5af466577fbc57f253a40e117112a66c1`
+  incumbent  `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+  tree       6ef528727; NO rebuild — no crate code had changed since that binary.
+
+Campaign output: yes — confirms load-immunity across a 2x load range and refutes the
+author's own explanatory model for the residual.
+
+RETRY PREDICATE: do not schedule work around quiet windows for THIS gate; it gains
+nothing. Do stamp loadavg per run. And do not re-adopt the duration model without per-run
+DURATIONS — the load proxy points the wrong way.
