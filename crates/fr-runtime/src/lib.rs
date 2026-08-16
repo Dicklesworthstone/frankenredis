@@ -60737,8 +60737,12 @@ mod tests {
 
     #[test]
     fn blocked_wait_keeps_its_pre_getack_write_offset() {
+        use super::ReplOffset;
+
         let mut rt = Runtime::default_strict();
-        let wait = command(&[b"WAIT", b"1", b"300"]);
+        // `execute_wait_at_offset` re-evaluates an ALREADY-PARSED blocked WAIT, so it
+        // takes the argv the blocked client captured, not a RespFrame to parse.
+        let wait: Vec<Vec<u8>> = vec![b"WAIT".to_vec(), b"1".to_vec(), b"300".to_vec()];
 
         // The replica has acknowledged the client write at 27.  Sending the
         // GETACK control frame advances only the master's live offset to 64;
