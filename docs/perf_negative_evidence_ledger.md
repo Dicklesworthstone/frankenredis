@@ -24243,3 +24243,74 @@ RETRY PREDICATE: do NOT retry sort keys for SORT ALPHA at any N — the loss GRO
 which is the opposite of the amortisation the idea depends on. DO attribute the ~6,800
 instr/op fixed per-command cost with a callgrind two-point subtraction between the n=3 and
 n=64 dumps; the frames that do NOT scale with N are the target.
+
+## MEASURED (frankenredis-qj6jn slice 2) — REJECTED: batching the LZF literal run is 8.1 pct SLOWER on the listpack DUMP shape, and the threshold variant does not rescue it
+
+Claim class: SELF-SPEEDUP, REJECTED. Not a vs-incumbent row -- no redis arm was run.
+
+LEVER. `lzf_compress_core` emits literal bytes with one `Vec::push` per byte, each
+re-testing capacity and re-storing the length. A literal run is always the CONTIGUOUS
+window `input[ip - lit..ip]`, so the whole run can be copied in one `extend_from_slice`
+when it ends. This was slice 2 of the qj6jn plan, sized from the earlier line profile,
+which named the per-literal-byte push as the largest remaining item after slice 1
+(`use_packed` hoist) shipped at -5.56 pct.
+
+HYPOTHESIS: removing N capacity checks and N length stores per run is a win, largest on
+literal-heavy payloads.
+
+MEASURED, callgrind two-point slope (reps 1000 vs 5000, differenced so startup, payload
+construction and teardown cancel exactly). Instruction counts, so the loadavg 68 during
+the run does not affect them -- which is why callgrind and not the wall-clock bench.
+ELF sha256 47037e1e03b62dda26358595060f82ddff0aa6120ecf183f05caea5428f634ca, built
+locally (RCH_CARGO_WRAPPER_BYPASS=1, 0 [RCH] lines, exe path from --message-format=json).
+
+    payload                       per-push      batched      batched/per-push
+    listpack (the real shape)     17,226.7     18,614.7      1.081x   REGRESSION
+    random (incompressible)      123,223.7    104,312.7      0.846x
+    runs (match-heavy)             9,412.7      9,228.7      0.980x
+
+WHY REJECTED: listpack is the payload the 1.76x-vs-redis kernel gap was measured on and
+the shape hash/zset/list DUMP actually compresses. An 8.1 pct regression there is not
+bought by a 15.3 pct win on incompressible input, which is the FAILED-compression-attempt
+path, not the hot one.
+
+SECOND VARIANT, ALSO REJECTED. Hypothesis for the regression: `extend_from_slice` is a
+memcpy call whose overhead exceeds the two or three pushes it replaces on short runs, so
+bulk-copy only when `lit >= 16`. Measured: listpack 18,646.7 -- unchanged, and marginally
+worse than the unconditional form. The hypothesis was WRONG: the threshold changing
+nothing means the listpack literal runs are already >= 16 bytes, so they were taking the
+bulk path in both variants and the cost is NOT call overhead on short runs. Cause not
+identified; two variants is where this stops, per the standing rule that a streak of
+rejected micro-levers means the wrong thing is being optimised.
+
+REVERTED: production is `lzf_compress_dispatch::<SIMD, true, false>`, the per-push arm,
+i.e. no behaviour change. The batched arm is retained behind
+`bench_lzf_compress_literals::<BATCH>` (same-binary A/B hook, mirroring the existing SIMD
+and HOIST hooks) plus `examples/lzf_literal_ab.rs`, so this rejection is re-runnable
+rather than a claim on my word. NOTE: the sweeping commit 0bc96173c is titled
+"perf(lzf): batch literal-run emission", which OVERCLAIMS -- it swept my working tree
+mid-experiment. The code it landed is the correct reverted per-push production path; only
+its subject line suggests a shipped win. This ledger row is the record.
+
+MUTATION TESTING OF THE NEW EQUIVALENCE TEST, because a pin that cannot fail is worse
+than none. `lzf_literal_batching_matches_per_push_arm_byte_for_byte` sweeps the budget
+DENSELY (every value in 0..=len+8) over 21 payloads:
+
+    off-by-one in the MAX_LIT flush window   CAUGHT (len=3000, budget=3002)
+    match-path literal flush dropped         CAUGHT (len=8192, budget=100)
+    per-literal budget guard ignores `lit`   NOT caught
+    match-path budget guard ignores `lit`    NOT caught
+
+REUSABLE, and the reason the last two rows are not a test defect: a targeted search over
+~1.6M (payload, budget) pairs -- 4000 random payloads x alphabet sizes 1..16 x every
+budget -- found ZERO divergences for either guard mutation. Those two budget guards are
+early-exit optimisations, not correctness guards. The terminal `out.len() > out_budget`
+check is the load-bearing one, and the virtual length is monotonic, so a guard that fires
+late still returns None. Same shape as the earlier finding that of three identical-looking
+guards only one was load-bearing: do not assume a guard is observable because it looks
+like a bail.
+
+RETRY PREDICATE: do not re-run either variant. If qj6jn is picked up again, take the
+remaining sized slices (the rolling `hval` update, 1,152/key; the budget guard, 808/key),
+and profile the listpack arm to find where the batched form's +1,388 instr/op actually
+came from before assuming any literal-side lever.

@@ -61,13 +61,19 @@ fn main() {
     let batch = match args[1].as_str() {
         "batch" => true,
         "push" => false,
-        other => panic!("unknown arm {other}"),
+        other => {
+            eprintln!("unknown arm {other}");
+            std::process::exit(2);
+        }
     };
     let payload = match args[2].as_str() {
         "listpack" => listpack_like(40),
         "random" => incompressible(3000),
         "runs" => run_heavy(4096),
-        other => panic!("unknown payload {other}"),
+        other => {
+            eprintln!("unknown payload {other}");
+            std::process::exit(2);
+        }
     };
     let reps: usize = args[3].parse().expect("reps");
     let budget = payload.len().saturating_sub(4);
