@@ -16956,6 +16956,98 @@ profile. Reopen the round-trip question only if a profile shows a rendered value
 being reparsed on some other path — the hash and set RESTORE decoders were checked
 and do not have one, because their consumers genuinely want the bytes.
 
+## 2026-08-16 GentleStream: COMPETITIVE — the *STORE family, BITOP NOT and ZMPOP are a LOSS of 1.3-1.5x vs 7.2.4; multi-key reads and 2-key zset stores are wins (`frankenredis-8t4uu`, `frankenredis-ox2xq`, `frankenredis-uld9l`, `frankenredis-gdnqr`, `frankenredis-3nn63`, `frankenredis-fc7w0`, `frankenredis-9601c`)
+
+Claim class: COMPETITIVE. Campaign output: yes. Live vendored Redis 7.2.4 arm in the
+SAME invocation, balanced square, every row carrying its own A/A null. **The most
+important rows here are the LOSSES**: five shapes where Redis is 1.3-1.5x faster than
+FrankenRedis, none of which had an authenticated number before.
+
+**HARNESS:** `scripts/balanced_square_ab.py --shapes storeops --rounds 61
+--expect-elf fcc3c34f271f88cb`, square `ABBAABBA`, 50,000 ops/slot, `-P16`, null
+bound ±0.02, bootstrap 95% CI, servers unpinned. The `storeops` shape set is added by
+this change. Benchmark ran LOCALLY on thinkstation1; **RCH_WORKER `hz2`** only
+compiled the ELF, `--base HEAD --clean-overlay` (receipt
+`base=0d16db8a95ada65a84e0361925b8f5d70a100f6d`). **Host, self-reported from inside
+the running processes:** thinkstation1, kernel 6.17.0-41-generic, 64 cores OBSERVED,
+governor `powersave`, ISA avx2, fr threads observed 3, redis threads observed 6. fr
+server self-reported executable binary SHA-256
+`fcc3c34f271f88cbb9bf0b6b51d405390b339fed87fd51d4ca4394fd8c2fd6f8`; the vendored
+Redis 7.2.4 arm self-reported executable binary SHA-256
+`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`.
+**CV is provenance only and is NEVER a gate here, the bootstrap median CI being the
+only decision rule.**
+**Same-invocation A/A null over all 24 admissible arm-nulls:** median **0.998900x**,
+bootstrap 95% median CI **[0.995600, 1.000300]**, n=24, percentile bootstrap, 4,096
+resamples, fixed seed. Every one inside ±0.02.
+
+**Every *STORE shape is safe to hammer because it is IDEMPOTENT** — the destination is
+recomputed from unchanging sources, so request 50,000 produces exactly what request 1
+did. ZMPOP genuinely pops and is measured on a missing key. All thirteen shapes were
+probed on BOTH engines before registration: identical non-error reply, reply unchanged
+after 200 repetitions.
+
+| row | fr/Redis | bootstrap 95% CI | null redis | null fr | verdict |
+|---|---:|---|---:|---:|---|
+| ZUNIONSTORE 2-key | 1.4646x | [1.4536, 1.4882] | 1.0060 | 0.9956 | ADMISSIBLE |
+| ZINTERSTORE 2-key | 1.3558x | [1.3339, 1.3789] | 1.0085 | 0.9981 | ADMISSIBLE |
+| HMGET 9-field | 1.3033x | [1.2882, 1.3158] | 0.9859 | 0.9961 | ADMISSIBLE |
+| ZMSCORE 9-member | 1.2156x | [1.2024, 1.2371] | 0.9885 | 0.9956 | ADMISSIBLE |
+| EXISTS 8-key | 1.1722x | [1.1422, 1.1902] | 0.9988 | 1.0004 | ADMISSIBLE |
+| GET control | 1.1186x | [1.1087, 1.1330] | 0.9963 | 0.9990 | ADMISSIBLE |
+| SCAN selective prefix | 1.1042x | [1.0787, 1.1129] | 1.0000 | 1.0001 | ADMISSIBLE |
+| SUNIONSTORE 3-src | 0.8503x | [0.8428, 0.8607] | 0.9947 | 1.0013 | ADMISSIBLE |
+| SDIFFSTORE 3-src | 0.8146x | [0.8054, 0.8260] | 1.0066 | 1.0002 | ADMISSIBLE |
+| SINTERSTORE 3-src | 0.7920x | [0.7870, 0.8002] | 0.9902 | 1.0003 | ADMISSIBLE |
+| ZMPOP missing | 0.7698x | [0.7639, 0.7846] | 0.9925 | 1.0032 | ADMISSIBLE |
+| BITOP NOT | 0.7494x | [0.7350, 0.7590] | 0.9896 | 1.0026 | ADMISSIBLE |
+| BITOP AND | 0.7605x | [0.7470, 0.7689] | **1.0266** | 1.0027 | **NULL-FAILED** |
+
+**Control-normalised, which is the honest claim in both directions.** GET is untouched
+by any of this work and comes out **1.1186x**, so most of every raw margin — win or
+loss — is the general fr advantage on short `-P16` ops rather than the route:
+
+| row | raw | ÷ control | route-attributable |
+|---|---:|---:|---:|
+| ZUNIONSTORE 2-key | 1.4646 | 1.1186 | **~1.309x** |
+| ZINTERSTORE 2-key | 1.3558 | 1.1186 | **~1.212x** |
+| HMGET 9-field | 1.3033 | 1.1186 | **~1.165x** |
+| ZMSCORE 9-member | 1.2156 | 1.1186 | **~1.087x** |
+| EXISTS 8-key | 1.1722 | 1.1186 | **~1.048x** |
+| SCAN selective prefix | 1.1042 | 1.1186 | **~0.987x** (a NULL) |
+| SUNIONSTORE 3-src | 0.8503 | 1.1186 | **~0.760x** |
+| SDIFFSTORE 3-src | 0.8146 | 1.1186 | **~0.728x** |
+| SINTERSTORE 3-src | 0.7920 | 1.1186 | **~0.708x** |
+| ZMPOP missing | 0.7698 | 1.1186 | **~0.688x** |
+| BITOP NOT | 0.7494 | 1.1186 | **~0.670x** |
+
+**THE LOSSES ARE THE FINDING.** Five shapes sit BELOW 1.0 even on the raw ratio, so
+they are losses however you normalise: the three-source set stores, ZMPOP on a missing
+key, and BITOP NOT. Normalised, Redis is **1.3x to 1.5x faster** on all five. These
+are a new worst-ratio surface — bigger than the RESTORE gap in relative terms on
+BITOP NOT and ZMPOP — and none of them had an authenticated number before this run.
+Note ZMPOP is measured on a MISSING key, so its 0.688x is a pure dispatch/reply cost,
+not the cost of popping: fr is losing on the path where it does almost no work, which
+is the more surprising and more tractable of the two possibilities.
+
+**SCAN selective-prefix is a NULL, not a win** (`frankenredis-fc7w0`): 1.1042x raw,
+~0.987x normalised, CI overlapping the control. The 428.994x figure banked for
+selective literal-prefix KEYS does NOT carry over to SCAN with a MATCH pattern at
+cursor 0, and nobody should assume it does.
+
+**ONE ROW IS REFUSED AND IS NOT A RESULT IN EITHER DIRECTION.** BITOP AND's Redis-arm
+null came out **1.0266**, outside ±0.02, so its 0.7605x is not quoted and
+`frankenredis-9601c` stays OPEN for that half. Its sibling BITOP NOT passed its nulls
+cleanly and is quoted; that one row is not sufficient to close the bead, since the
+bead names both.
+
+**Retry predicate.** Re-take after changes to the *STORE build paths, the set-algebra
+kernels, BITOP, the ZMPOP dispatch/early-return, multi-key EXISTS/HMGET/ZMSCORE
+parsers, SCAN MATCH, or allocator/codegen. **Invalidate rather than compare** if the
+GET control is absent or itself null-fails, if any row's own null leaves ±0.02, if a
+*STORE shape stops being idempotent (re-run the probe: the reply must be unchanged
+after repetition), or if the self-reported SHA-256s differ from those above.
+
 ## 2026-08-16 GentleStream: COMPETITIVE NULL — the three "unmeasurable" mutating commands ARE measurable on their no-op path, and every one is INDISTINGUISHABLE FROM THE GET CONTROL (`frankenredis-va5me`, `frankenredis-5yhyh`, `frankenredis-wgrny`)
 
 Claim class: COMPETITIVE. Campaign output: yes. Live vendored Redis 7.2.4 arm in the
