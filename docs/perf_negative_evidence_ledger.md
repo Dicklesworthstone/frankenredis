@@ -20242,3 +20242,84 @@ RETRY PREDICATE: front-classify the BARE `ZADD key score member` form. Its optio
 siblings are already done, so the token and class machinery exists; this is an
 (arity, cmd) arm plus a dispatch arm. Re-measure zadd_base afterwards, with zadd_xx_opt
 as the control that must not move.
+
+--------------------------------------------------------------------------------
+CORRECTION + MEASURED — expire_nx_opt is AT PARITY, not above it; but its 51 pct
+dispatch share is real and it is a REWIRE (frankenredis-z2ce3)
+
+The previous row listed expire_nx_opt at 1.0240x as one of "three shapes above parity",
+on the strength of a SINGLE screen run. Four runs say otherwise.
+
+CONVENTION: fr instructions per op / redis 7.2.4's. BELOW 1.0 = fr AHEAD.
+
+    A/A control (get_control)  0.4068 / 0.4160 / 0.3930      spread 5.9 pct
+
+    expire_nx_opt, four runs   fr instr/op  redis instr/op  fr/redis  dispatch
+      run 1                       4494.9       4344.6        1.0346    51.0%
+      run 2                       4496.5       4554.4        0.9873    50.9%
+      run 3                       4481.8       4343.8        1.0318    51.0%
+      run 4                       4481.8       4648.6        0.9641    51.1%
+      mean                        4488.8       4472.9        1.0045    51.0%
+      spread                       0.33%        7.0%          7.3%      0.3%
+
+Monotonic on both arms in all four runs.
+
+THE RATIO IS NOT DISTINGUISHABLE FROM PARITY AND THE EARLIER FIGURE IS WITHDRAWN. Four
+runs straddle 1.0 (0.9641 to 1.0346), the mean is 1.0045, and the A/A null is 5.9 pct
+against a 7.3 pct signal spread. A null that large cannot resolve a 0.45 pct deviation
+from parity. expire_nx_opt is AT parity, and the count of shapes measured above parity
+drops from three to two: sort_ro_alpha (1.532x) and zadd_xx_opt (1.242x).
+
+THE LESSON IS ABOUT THE SCREEN, NOT THE SHAPE. A single screen run put this at 1.0240x
+and I carried that into a ledger row as "above parity". Screens are for RANKING —
+deciding what to measure next — and a single run must never become a claim. This one
+was wrong by more than its own headline: 1.0240 against a four-run mean of 1.0045,
+with the true uncertainty an order of magnitude larger than the difference. Any other
+figure in that screen table should be read the same way, including the ones I have not
+re-run.
+
+WHAT SURVIVES, AND IT IS THE ACTIONABLE HALF: the dispatch share. 51.0 pct, reproduced
+to 0.3 pct across four runs while the ratio moved 7.3 pct. ~2,290 of fr's 4,488.8
+instr/op decide which command this is, against get_control's 275.4 on the same binary.
+fr's OWN cost is stable to 0.33 pct. So the lever is real and measurable even though
+the ratio is not — which is the same conclusion the del_1_missing row reached from the
+other direction: MEASURE THE NUMERATOR.
+
+ATTRIBUTED — REWIRE, not an implementation:
+
+    floor claim      main.rs:16214   (3, Expire) => Expire        arity 3 ONLY
+    parser           main.rs:~8244   parse_borrowed_plain_key_arg2_packet
+                                     with b"*4\r\n$6\r\n" and b"EXPIRE"   arity 4
+    executor         fr-runtime:19447 execute_plain_expire_cond_borrowed
+
+`EXPIRE key seconds NX` is arity 4. The floor claims EXPIRE at arity 3 only, so the
+conditional form matches the token table, finds no class, and walks the cascade to
+reach a parser and executor that both already exist. Same shape as the ZADD family,
+same shape as GEOADD/MOVE/SPUBLISH before them.
+
+Note the sibling executors: `execute_plain_expireat_cond_borrowed` (19479) exists too,
+so EXPIREAT's conditional form is very likely stranded on identical terms. NOT
+MEASURED — flagged, not claimed.
+
+SIZE, as an upper bound: at get_control's dispatch cost fr would fall from 4,488.8 to
+roughly 2,474 against redis's 4,472.9 — about 0.55x from 1.0045x. Not a prediction; it
+assumes front-classified dispatch cost.
+
+THE `9hnxt` RULE: claim arity 4 ONLY. The arity-3 form is already classified and must
+not be disturbed, and any arity the key_arg2 parser does not accept would land on the
+generic path rather than back on the cascade.
+
+PROVENANCE:
+  ELF sha256 (first 16)  c36c3fb0a66033de — built LOCALLY with
+                         RCH_CARGO_WRAPPER_BYPASS=1, env -u CARGO_TARGET_DIR,
+                         executable path from --message-format=json, COPIED to a
+                         private path and sha'd there. Contains 62ce27eb5.
+  tree                   HEAD plus a peer's uncommitted fr-server/src/main.rs.
+  harness                scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines
+                         in the SAME invocation.
+  host                   thinkstation1, 64 cores, /data 314G, no build this turn.
+
+RETRY PREDICATE: do NOT re-run expire_nx_opt for a tighter RATIO — the null is 5.9 pct
+and the shape sits at parity; the ratio will not resolve. DO use fr's 4,488.8 instr/op
+baseline to measure any lever here. And treat every remaining single-run screen figure
+as a ranking hint, not a measurement, until it has four runs and a null beside it.
