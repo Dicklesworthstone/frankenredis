@@ -33946,8 +33946,16 @@ impl Store {
         if append {
             for name in restored_libraries.keys() {
                 if self.function_libraries.contains_key(name) {
+                    // (frankenredis-exdkr) UNQUOTED here, unlike FUNCTION LOAD.
+                    // Upstream really does word these two paths differently:
+                    // functions.c's load path formats the library name with
+                    // quotes ("Library 'x' already exists") while the restore
+                    // path does not ("Library x already exists"). Verified with
+                    // both engines live and a registry holding exactly ONE
+                    // library, so iteration order cannot account for it — fr had
+                    // copied the quoted spelling onto both.
                     return Err(StoreError::GenericError(format!(
-                        "ERR Library '{name}' already exists"
+                        "ERR Library {name} already exists"
                     )));
                 }
             }
@@ -74574,6 +74582,59 @@ mod tests {
             decode_rdb_string(body, 1, body.len()).expect("decode function library code");
         assert_eq!(1 + consumed, body.len());
         assert_eq!(code, library);
+    }
+
+    #[test]
+    fn function_restore_duplicate_library_error_is_unquoted_unlike_load() {
+        // (frankenredis-exdkr) Upstream words these two paths DIFFERENTLY:
+        // FUNCTION LOAD says "Library 'x' already exists" (quoted) and FUNCTION
+        // RESTORE says "Library x already exists" (unquoted). fr had copied the
+        // quoted spelling onto both. Verified against live vendored 7.2.4 with a
+        // registry holding exactly ONE library, so nothing here depends on which
+        // library iteration happens to reach first.
+        let mut store = Store::new();
+        let lib = concat!(
+            "#!lua name=onlylib\n",
+            "redis.register_function('onlyfn', function(keys,args) return 1 end)"
+        );
+        assert_eq!(
+            store.function_load(lib.as_bytes(), false).unwrap(),
+            "onlylib"
+        );
+
+        // LOAD keeps the QUOTED spelling.
+        match store.function_load(lib.as_bytes(), false).unwrap_err() {
+            StoreError::GenericError(msg) => {
+                assert_eq!(msg, "ERR Library 'onlylib' already exists");
+            }
+            other => panic!("expected the load wording, got {other:?}"),
+        }
+
+        // RESTORE APPEND onto the same registry uses the UNQUOTED spelling.
+        let payload = store.function_dump();
+        match store.function_restore(&payload, "APPEND").unwrap_err() {
+            StoreError::GenericError(msg) => {
+                assert_eq!(msg, "ERR Library onlylib already exists");
+            }
+            other => panic!("expected the restore wording, got {other:?}"),
+        }
+        // The default policy is APPEND, so it must word it the same way.
+        match store.function_restore(&payload, "").unwrap_err() {
+            StoreError::GenericError(msg) => {
+                assert_eq!(msg, "ERR Library onlylib already exists");
+            }
+            other => panic!("expected the restore wording, got {other:?}"),
+        }
+
+        // The non-colliding policies still succeed, which is the negative case:
+        // this must be a wording change, not a new rejection.
+        store
+            .function_restore(&payload, "FLUSH")
+            .expect("FLUSH policy restores");
+        store
+            .function_restore(&payload, "REPLACE")
+            .expect("REPLACE policy restores");
+        assert_eq!(store.function_libraries.len(), 1);
     }
 
     #[test]
