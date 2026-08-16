@@ -93,6 +93,29 @@ mark itself as campaign output. Missing or contradictory classification exits
   average 7.78 at run start on a 64-way box.
   **CV is provenance only and is NEVER a gate here, the bootstrap median CI being
   the only decision rule.**
+- **CROSS-WORKER BUILD HETEROGENEITY DOES NOT REACH THIS ROW, checked rather than
+  assumed** (2026-08-16, prompted by frankentorch finding the rch fleet heterogeneous
+  in glibc with no worker-pinning flag). For that hazard to bite, a row needs TWO
+  builds; this row has one. **Both FrankenRedis arms are the SAME FILE** — the harness
+  self-reported `fr_a` and `fr_b` at the identical SHA-256
+  `98c35cf76bb9747536a797c408ddeea45faa08a687b0dcfe809362a6f4497c2f`, so the A/A null
+  compares one build against itself, not two workers against each other. **The
+  incumbent is not rch-built at all**: `legacy_redis_code/redis/src/redis-server` is
+  the repo's prebuilt vendored 7.2.4 binary, identical for every agent. And **the
+  benchmark ran locally**, so both arms executed against one host's loader: host glibc
+  2.42, with both the fr ELF and the vendored redis requiring a max symbol version of
+  `GLIBC_2.38` — no asymmetry in either direction. The worker (`vmi1264463`) appears
+  in this row only as the machine that compiled one binary.
+  **"Worker-pinned" is therefore not applicable to this row**, and asking for it would
+  be the wrong control: the pinning that mattered here was CPU-core pinning on the
+  LOCAL host (`taskset -c 60/61/62`), which is what moved the A/A null from 0.936434x
+  to 0.994540x. The same structure holds for every balanced-square row I have banked
+  — one fr ELF, the prebuilt vendored incumbent, benchmark local.
+  **Where the hazard WOULD have bitten:** the two-binary A/B originally planned for
+  `frankenredis-3uuan` (control ELF vs candidate ELF). Those two builds landed on
+  different workers across this session's attempts, and the one-ELF design in the
+  entry below exists precisely to delete that axis. frankentorch's finding is
+  independent confirmation that the redesign was necessary, not merely tidy.
 - **Where the 0.61x actually goes**, from the gated-callgrind breakdown banked in the
   entry below: the decode is NOT dominated by anything Redis also pays. Redis
   attaches the raw listpack after an O(1) header check because `sanitize-dump-payload`
