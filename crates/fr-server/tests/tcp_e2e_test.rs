@@ -2351,6 +2351,25 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"persist", b"s:1"]));
     cmds.push(c(&[b"PERSIST"]));
     cmds.push(c(&[b"PERSIST", b"s:1", b"extra"]));
+    // (frankenredis-iqicb) SETEX front-classified at arity 4. The value and the TTL
+    // are both observable, so both are read back: a route wired to the wrong
+    // argument order would still reply +OK. The out-of-range and zero/negative
+    // seconds rows are the DECLINE path -- the executor refuses them and they must
+    // reach the generic route to produce redis's exact error, which is the half a
+    // fast route is most likely to get wrong. Mixed case and the wrong arities pin
+    // the classifier.
+    cmds.push(c(&[b"SETEX", b"s:sx", b"100", b"vv"]));
+    cmds.push(c(&[b"GET", b"s:sx"]));
+    cmds.push(c(&[b"TTL", b"s:sx"]));
+    cmds.push(c(&[b"setex", b"s:sx2", b"200", b"ww"]));
+    cmds.push(c(&[b"GET", b"s:sx2"]));
+    cmds.push(c(&[b"SETEX", b"s:sx3", b"0", b"vv"]));
+    cmds.push(c(&[b"SETEX", b"s:sx3", b"-1", b"vv"]));
+    cmds.push(c(&[b"SETEX", b"s:sx3", b"notanint", b"vv"]));
+    cmds.push(c(&[b"SETEX", b"s:sx3", b"9999999999999999", b"vv"]));
+    cmds.push(c(&[b"GET", b"s:sx3"]));
+    cmds.push(c(&[b"SETEX", b"s:sx4", b"100"]));
+    cmds.push(c(&[b"SETEX", b"s:sx4", b"100", b"vv", b"extra"]));
     // (frankenredis-ozrro) COPY is claimed at arity 3 only; the REPLACE spelling
     // keeps the cascade. Both the create and the already-exists branches run,
     // and the destination is read back so a copy that returned 1 without

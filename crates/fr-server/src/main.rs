@@ -9770,28 +9770,6 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
-                    parse_borrowed_plain_setex_packet(unparsed, &parser_config)
-                {
-                    // SETEX replies a constant +OK; route the non-allocating `_ok` twin to
-                    // FastOkReply so no `SimpleString("OK")` reply frame is allocated per SETEX.
-                    if runtime
-                        .execute_plain_setex_borrowed_ok(packet.key, packet.start, packet.end, ts)
-                        .is_some()
-                    {
-                        Ok(BorrowedMultibulkAction::FastOkReply {
-                            consumed: packet.consumed,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
                     parse_borrowed_plain_psetex_packet(unparsed, &parser_config)
                 {
                     // PSETEX replies a constant +OK; route the non-allocating `_ok` twin to
@@ -14812,6 +14790,7 @@ enum BorrowedDispatchFloorClass {
     /// already-classified `EXPIRETIME`.
     Pexpiretime,
     Persist,
+    Setex,
     /// (frankenredis-ozrro) Bare `ZRANDMEMBER key`, the single-member reply
     /// form. Its sibling [`Self::ZrandmemberCount`] was classified in an earlier
     /// slice, which left this one alone ~3,600 lines deep in the chain.
@@ -15030,6 +15009,10 @@ enum BorrowedDispatchFloorCommand {
     Pexpiretime,
     /// `PERSIST`. Only the bare `PERSIST key` form has a borrowed route.
     Persist,
+    /// `SETEX`. Only the bare `SETEX key seconds value` form has a borrowed route;
+    /// the executor still declines on out-of-range seconds and takes the generic
+    /// path, which is where the cascade would have delivered it anyway.
+    Setex,
     /// `COMMAND`. Only the keyless `COMMAND COUNT` form has a borrowed route;
     /// every other subcommand declines and takes the generic path, which is
     /// where the cascade would have delivered it anyway.
@@ -15190,6 +15173,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
         },
         5 => match uppercase_ascii_token::<5>(token)? {
             [b'G', b'E', b'T', b'E', b'X'] => Some(BorrowedDispatchFloorCommand::Getex),
+            [b'S', b'E', b'T', b'E', b'X'] => Some(BorrowedDispatchFloorCommand::Setex),
             [b'S', b'C', b'A', b'R', b'D'] => Some(BorrowedDispatchFloorCommand::Scard),
             [b'Z', b'C', b'A', b'R', b'D'] => Some(BorrowedDispatchFloorCommand::Zcard),
             [b'L', b'P', b'U', b'S', b'H'] => Some(BorrowedDispatchFloorCommand::Lpush),
@@ -15987,6 +15971,7 @@ fn classify_borrowed_dispatch_floor_packet_impl<
             Some(BorrowedDispatchFloorClass::Pexpiretime)
         }
         (2, BorrowedDispatchFloorCommand::Persist) => Some(BorrowedDispatchFloorClass::Persist),
+        (4, BorrowedDispatchFloorCommand::Setex) => Some(BorrowedDispatchFloorClass::Setex),
         // `COMMAND COUNT` is the only COMMAND subcommand with a borrowed route,
         // so a declined classification here costs nothing: DOCS/INFO/LIST/GETKEYS
         // land on the generic path, which is exactly where walking the whole
@@ -19726,6 +19711,28 @@ fn try_dispatch_floor_classified_action(
                 });
             if let Some(consumed) = hit {
                 Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Setex => {
+            // SETEX replies a constant +OK; the non-allocating `_ok` twin routes to
+            // FastOkReply so no SimpleString("OK") frame is allocated per SETEX.
+            if let Some(packet) = parse_borrowed_plain_setex_packet(unparsed, &parser_config)
+                && runtime
+                    .execute_plain_setex_borrowed_ok(packet.key, packet.start, packet.end, ts)
+                    .is_some()
+            {
+                Ok(BorrowedMultibulkAction::FastOkReply {
+                    consumed: packet.consumed,
+                })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,
@@ -42923,6 +42930,30 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
     #[test]
     fn dispatch_floor_classifier_recognizes_only_exact_target_tokens() {
         let cfg = ParserConfig::default();
+        // (frankenredis-iqicb) SETEX, claimed at arity 4 only. Mixed case classifies;
+        // arity 3 and 5 must not, or the fast route would swallow shapes whose
+        // errors it cannot produce.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*4\r\n$5\r\nSeTeX\r\n$1\r\na\r\n$2\r\n10\r\n$1\r\nv\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Setex)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$5\r\nSETEX\r\n$1\r\na\r\n$2\r\n10\r\n",
+                &cfg,
+            ),
+            None
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*5\r\n$5\r\nSETEX\r\n$1\r\na\r\n$2\r\n10\r\n$1\r\nv\r\n$1\r\nx\r\n",
+                &cfg,
+            ),
+            None
+        );
         // (frankenredis-33832) PERSIST, claimed at arity 2 only. Mixed case must
         // still classify; the arity-3 spelling and the near-miss token must NOT,
         // or the fast route would swallow shapes it cannot answer.
