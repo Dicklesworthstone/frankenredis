@@ -25111,3 +25111,82 @@ and the writer-completion drain (10.1 pct with no redis counterpart). And add a 
 shape for SUNION, SDIFF and SINTERSTORE before trusting THEIR ratios — all three are
 seeded at two or three members and every one of them is on the near side of an untested
 crossover.
+
+---
+
+## MEASURED (frankenredis-z2ce3) — DEL and UNLINK, the last two un-borrow sites: -12.7 and -13.3 pct, and the per-allocation constant reproduces a THIRD time
+
+Campaign output: no
+
+Claim class: SELF-SPEEDUP. fr-before against fr-after is maintenance by section 1. The
+vs-incumbent ratios are measured live against redis 7.2.4 in the same invocation and are
+context for where the routes sit, not the claim.
+
+Completes the slice whose six sibling routes were measured two rows above. Those six had
+eager owned copies feeding only a breach-time closure. DEL and UNLINK were left open there
+for a stated reason: their copy also fed `Store::del`, whose parameter was `&[Vec<u8>]`, so
+it needed a borrowed twin in fr-store rather than a closure rewrite. Code in 72092cd2c —
+`del` and `del_borrowed` now share one body through `del_inner<K: AsRef<[u8]>>`.
+
+    shape            BEFORE            AFTER             delta    pct
+    del_1_missing    2006.7 / 2005.6   1750.5 / 1750.7   -255.6  -12.7
+    unlink_missing   2023.7 / 2026.6   1768.9 / 1744.5   -268.5  -13.3
+    get_control      1330.8 / 1330.1   1325.1 / 1325.0     -5.4   -0.41   <- A/A NULL
+
+    ratios: del_1_missing  0.7931 / 0.7672 -> 0.6691 / 0.6689
+            unlink_missing 0.6426 / 0.7107 -> 0.6857 / 0.6550
+
+THE PREDICTION WAS ON RECORD IN 72092cd2c BEFORE THE BUILD: "DEL of N keys drops N+1
+allocate+copy+free triples, and the ledger row for the six sibling routes put that constant
+at ~120-140 instructions each." A one-key DEL therefore drops TWO triples — the outer Vec
+and the single key — predicting ~240-280. Measured 255.6, i.e. 128 per triple.
+
+That constant has now been reproduced THREE times on three different command families and
+two different mechanisms:
+
+    six closure-only routes   5 triples each   -597 to -708   -> ~120-140 each
+    DEL   (1 key)             2 triples        -255.6         -> 128
+    UNLINK(1 key)             2 triples        -268.5         -> 134
+
+which is what turns "we removed some allocations" into an attribution. It also predicts the
+win GROWS with key count: an eight-key DEL should drop nine triples, ~1,150 instr/op. No
+shape exists for that and I have not measured it, so it stays a prediction.
+
+A FIRST ATTEMPT AT THIS PAIR WAS CONTAMINATED AND WAS DISCARDED, which is the reusable part.
+A peer edit to crates/fr-store/src/packed_set.rs landed BETWEEN my two arm builds, so the
+two ELFs differed by that as well as by my patch. It was invisible until I rebuilt the AFTER
+arm and got a different SHA.
+
+    METHOD, and it costs one extra build: this release build is DETERMINISTIC — verified
+    directly, identical sources reproduced the ELF SHA exactly (e71790cb twice, with an
+    intervening `touch` to force a real relink). So building AFTER, then BEFORE, then AFTER
+    AGAIN and requiring the two AFTER SHAs to match is a PROOF that no peer edit landed
+    across the pair. On a shared checkout where a dozen agents commit under you, an A/B is
+    not clean because you built the arms close together; it is clean because you can show
+    the tree did not move. Discarded pair: before efbc29f4 / after 5876c6d4. Banked pair:
+    before efbc29f4 / after e71790cb, stability-proven.
+
+PROVENANCE:
+  ELF sha256   efbc29f4e87cc4f4e7a32828078a0e6c65f3c56976f9e852b026de7130329707  BEFORE
+               e71790cb8bb512108a01a05b9eced0501073e402921733b429d945e8d5abbf18  AFTER
+               COMPUTED BY sha256sum, not emitted by the process — the same provenance
+               limitation every shape_instr_per_op.py row in this ledger carries, because
+               valgrind hosts the target and it cannot self-report. Not KEEP-class, and
+               does not claim to be. Both built locally with RCH_CARGO_WRAPPER_BYPASS=1
+               exported and env -u CARGO_TARGET_DIR, no [RCH] line in either build log,
+               executable path from --message-format=json.
+  host         thinkstation1, 64 cores observed, governor powersave, /data 262G.
+  loadavg      SAMPLED BY ME per arm: 18.35 at the first arm falling to 15.96 at the last;
+               1-min under 5-min under 15-min throughout, a shedding window, recorded as
+               such rather than claimed quiet.
+  CPU MHz      SAMPLED BY ME per arm, mean over 64 cores, before->after each run:
+               3104->2336, 2509->2136, 2077->2347, 2552->2238, 2397->2789, 3007->2937,
+               3039->2989, 3113->2651, 2904->3221, 3005->3114, 3109->3455, 3511->3473.
+               A 66 pct spread (2077-3455) INSIDE the window. Both arms of every shape sit
+               on both sides of it and the null still came out at -0.41 pct, which is the
+               point of interleaving rather than blocking the arms.
+
+RETRY PREDICATE: do not re-run del_1_missing or unlink_missing; both arms reproduced to
+0.05 pct or better except unlink AFTER at 1.4 pct. The open question this row does NOT
+answer is whether the win scales linearly with key count — that needs a multi-key DEL shape,
+which does not exist in shape_instr_per_op.py today.
