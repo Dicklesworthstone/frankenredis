@@ -21577,3 +21577,65 @@ RETRY PREDICATE: do NOT re-run expire_nx_opt for a tighter RATIO — the cross-s
 null is 5.2 pct and the shape sits within a few percent of parity. DO take the lever:
 it is the last rewire, the estimate is ~0.61x, and the method behind that estimate is
 three-for-three. Measure fr's own instr/op against the 4,509.6 baseline afterwards.
+
+## MEASURED (frankenredis-f2zrr) — SINTERCARD's measurable shapes are both healthy, my sweep list is NOT name-matchable to harness shapes, and the tightest A/A null yet
+
+Claim class: COMPETITIVE — fr and the vendored Redis 7.2.4 binary in the SAME invocation.
+Same provenance limitation as the rows above (valgrind hosts the target, so no
+self-reported ELF SHA; ABBA repeats, not a bootstrap CI).
+
+    run  shape             fr instr/op   redis 7.2.4   fr/redis   dispatch share
+    A    sintercard_base       3977.4        6653.6     0.5978x       14.5%
+    B    sintercard_lim        4304.2        6776.8     0.6351x       22.2%
+    B    sintercard_lim        4303.9        6778.6     0.6349x       22.2%
+    A    sintercard_base       3978.3        6663.7     0.5970x       14.5%
+
+BOTH ARE FINE. 14.5 pct and 22.2 pct dispatch share are the front-classified band, and
+0.5970x / 0.6351x worst bounds are well ahead of the incumbent. Neither is a lever.
+
+**AND THAT REFUTES MY OWN USE OF THE SWEEP.** The 27-shape sweep flagged
+`(SINTERCARD, arity 3)` as stranded. I measured `sintercard_base` expecting it to be that
+shape — the name says "base", and the sweep said the base was stranded. It is not:
+
+    sintercard_base   SINTERCARD 2 s1 s2            = 4 tokens, arity 4  -> CLASSIFIED
+    sintercard_lim    SINTERCARD 2 s1 s2 LIMIT 1    = 6 tokens, arity 6  -> CLASSIFIED
+    the swept shape   SINTERCARD <n> <key>          = 3 tokens, arity 3  -> NO HARNESS SHAPE
+
+**The sweep enumerates (command, arity) pairs from SOURCE; the harness names shapes by
+intent. Matching one to the other by name is unsound**, and I did exactly that. Same
+error class as everything else this campaign has logged — inferring identity from a name
+instead of reading the definition. The sweep is still correct about what source says; it
+is simply not directly actionable, because most of its 27 shapes have NO harness coverage
+and cannot be measured until someone writes one. That is the same prerequisite the
+SINTER-sort candidate needed, and it should have been stated when the sweep was banked.
+
+WORST MEASURED RATIO IS THEREFORE UNCHANGED at incrbyfloat_nondyadic 0.7835x. Nothing
+measured this turn displaced it.
+
+THE TIGHTEST A/A NULL OF THE CAMPAIGN, and it breaks a twelve-row pattern:
+
+    fr arm      sintercard_base  3977.4 -> 3978.3   +0.02%
+                sintercard_lim   4304.2 -> 4303.9   -0.01%
+    redis arm   sintercard_base  6653.6 -> 6663.7   +0.15%
+                sintercard_lim   6776.8 -> 6778.6   +0.03%
+    ratio       base 0.5978 -> 0.5970  0.13%  |  lim 0.6351 -> 0.6349  0.03%
+
+Every figure is under 0.15 pct, INCLUDING the incumbent's. Twelve consecutive rows had
+the redis arm as the noisier one, moving 3-6 pct; here it is stable to 0.15 pct.
+**So the incumbent is not inherently noisy — its variance is SHAPE-DEPENDENT.** EXPIRE
+moved the redis arm 6.0 pct and SINTERCARD moves it 0.15 pct on the same host, same
+binary, same invocation style. A noise floor measured on one shape does NOT transfer to
+another, which invalidates any blanket "the incumbent wobbles ~3 pct" rule of thumb —
+including the one these rows have been implicitly building.
+
+EXECUTABLE IDENTITIES, full 64-hex (computed post-run, see limitation above):
+  candidate  `77982cb5a457e48794c4842140d304437e2b98766b3311ad3354568bb24ac7f9`
+  incumbent  `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+  tree       0d0bcd5aa; NO rebuild — no crate code had changed since that binary.
+
+Campaign output: yes — a negative result that corrects how the sweep list may be used,
+plus a noise-floor finding that invalidates a rule of thumb.
+
+RETRY PREDICATE: before measuring any swept shape, READ THE HARNESS DEFINITION and count
+its tokens — do not match by name. Most swept shapes need a NEW harness shape written
+first. And measure each shape's own A/A null rather than assuming ~3 pct incumbent noise.
