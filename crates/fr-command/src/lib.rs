@@ -3257,7 +3257,9 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 PK_HSET => Some(CommandId::Hset),
                 PK_HDEL => Some(CommandId::Hdel),
                 PK_HLEN => Some(CommandId::Hlen),
-                PK_HTTL => Some(CommandId::Httl),
+                // (frankenredis-ukm9j) Registration gate; falls through to the
+                // catch-all `None`, i.e. unknown command, exactly as 7.2.4 answers.
+                PK_HTTL if FORWARD_HASH_FIELD_TTL_REGISTERED => Some(CommandId::Httl),
                 PK_LPOP => Some(CommandId::Lpop),
                 PK_RPOP => Some(CommandId::Rpop),
                 PK_LLEN => Some(CommandId::Llen),
@@ -3509,7 +3511,8 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
             const PK_PFDEBUG: u64 = pack_cmd_u64(b"PFDEBUG");
             match pack_cmd_u64(cmd) {
                 PK_PEXPIRE => Some(CommandId::Pexpire),
-                PK_HEXPIRE => Some(CommandId::Hexpire),
+                // (frankenredis-ukm9j) Registration gate; see PK_HTTL.
+                PK_HEXPIRE if FORWARD_HASH_FIELD_TTL_REGISTERED => Some(CommandId::Hexpire),
                 PK_PERSIST => Some(CommandId::Persist),
                 PK_FLUSHDB => Some(CommandId::Flushdb),
                 PK_HGETALL => Some(CommandId::Hgetall),
@@ -3570,7 +3573,8 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
             const PK_SENTINEL: u64 = pack_cmd_u64(b"SENTINEL");
             match pack_cmd_u64(cmd) {
                 PK_EXPIREAT => Some(CommandId::Expireat),
-                PK_HPERSIST => Some(CommandId::Hpersist),
+                // (frankenredis-ukm9j) Registration gate; see PK_HTTL.
+                PK_HPERSIST if FORWARD_HASH_FIELD_TTL_REGISTERED => Some(CommandId::Hpersist),
                 PK_RENAMENX => Some(CommandId::Renamenx),
                 PK_FLUSHALL => Some(CommandId::Flushall),
                 PK_SMEMBERS => Some(CommandId::Smembers),
@@ -18216,7 +18220,9 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("unlink", -2, "write fast", 1, -1, 1),
     ("touch", -2, "readonly fast", 1, -1, 1),
     ("hset", -4, "write denyoom fast", 1, 1, 1),
-    ("hexpire", -6, "write denyoom fast", 1, 1, 1),
+    // (frankenredis-ukm9j) hexpire/httl/hpersist are 7.4 commands and 7.2.4
+    // answers "unknown command" for all three. Their rows live in
+    // FORWARD_HASH_FIELD_TTL_COMMAND_ROWS while the registration is off.
     ("hget", 3, "readonly fast", 1, 1, 1),
     ("hdel", -3, "write fast", 1, 1, 1),
     ("hexists", 3, "readonly fast", 1, 1, 1),
@@ -18230,8 +18236,6 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("hincrbyfloat", 4, "write denyoom fast", 1, 1, 1),
     ("hsetnx", 4, "write denyoom fast", 1, 1, 1),
     ("hstrlen", 3, "readonly fast", 1, 1, 1),
-    ("httl", -5, "readonly fast", 1, 1, 1),
-    ("hpersist", -5, "write fast", 1, 1, 1),
     ("hrandfield", -2, "readonly", 1, 1, 1),
     ("hscan", -3, "readonly", 1, 1, 1),
     ("lpush", -3, "write denyoom fast", 1, 1, 1),
@@ -19075,11 +19079,53 @@ const ACL_CATEGORIES: &[&str] = &[
     "scripting",
 ];
 
+/// Whether HEXPIRE/HTTL/HPERSIST are REGISTERED on the wire surface.
+///
+/// (frankenredis-ukm9j) fr targets Redis 7.2.4, where all three are unknown
+/// commands. frankenredis-ja8yu decided that in 6c9faf09a and left
+/// `redis_7_4_hash_field_ttl_commands_return_unknown_command_per_7_2_4_parity`
+/// as the guard; frankenredis-g1nuo (2248c4de3) later re-registered the family
+/// while implementing it, which turned that guard red along with five parity
+/// gates — version ceiling, ACL categories in two gates, cluster admin surface,
+/// and command introspection. The arithmetic was clean: COMMAND COUNT read 244
+/// against the oracle's 241, a delta of exactly these three.
+///
+/// This switch moves the REGISTRATION only. Every executor, the
+/// `hash_field_expires` storage, RDB tag 100 / `HashWithTtls` / `listpack_ex`
+/// persistence and their tests are g1nuo's work and are untouched — the unit
+/// tests call those executors directly, not through dispatch, so they still
+/// exercise them. Flipping this to `true` re-advertises the family, and the
+/// three sites it governs (packed-name dispatch, `COMMAND_TABLE`, the ACL
+/// category rows) are the three surfaces the six gates observe, which is why
+/// they went red and green together.
+///
+/// If fr ever retargets 7.4, flip this AND move
+/// `FORWARD_HASH_FIELD_TTL_COMMAND_ROWS` back into `COMMAND_TABLE`;
+/// `forward_hash_field_ttl_registration_is_off_for_7_2_4_parity` pins both
+/// halves so the two cannot drift apart while the switch is off.
+const FORWARD_HASH_FIELD_TTL_REGISTERED: bool = false;
+
+/// The `COMMAND_TABLE` rows for the 7.4 hash-field TTL family, kept out of the
+/// table itself while [`FORWARD_HASH_FIELD_TTL_REGISTERED`] is false.
+///
+/// Held here rather than deleted so re-registering is a data move rather than
+/// an archaeology exercise: these are the arities and flags g1nuo established
+/// against real 7.4 behaviour (`-6` for HEXPIRE, `-5` for the two readers).
+#[allow(dead_code)]
+const FORWARD_HASH_FIELD_TTL_COMMAND_ROWS: &[(&str, i64, &str, i64, i64, i64)] = &[
+    ("hexpire", -6, "write denyoom fast", 1, 1, 1),
+    ("httl", -5, "readonly fast", 1, 1, 1),
+    ("hpersist", -5, "write fast", 1, 1, 1),
+];
+
 /// Redis 7.4 hash-field TTL commands are newer than the vendored 7.2 command
 /// metadata used to generate `UPSTREAM_ACL_CATEGORY_ENTRIES`. Keep their ACL
 /// classification explicit until that source snapshot is upgraded, so `+@hash`
 /// and `-@write` guard these dispatched commands just like the rest of the
 /// hash family.
+///
+/// Applied only when [`FORWARD_HASH_FIELD_TTL_REGISTERED`] is set: a command
+/// 7.2.4 does not have must not appear in an ACL category listing either.
 const FORWARD_HASH_FIELD_TTL_ACL_ENTRIES: &[(&str, &[&str])] = &[
     ("hexpire", &["write", "hash", "fast"]),
     ("httl", &["read", "hash", "fast"]),
@@ -19273,13 +19319,18 @@ fn acl_category_maps() -> &'static AclCategoryMaps {
             }
             by_command.insert(name, categories.to_vec());
         }
-        for &(name, categories) in FORWARD_HASH_FIELD_TTL_ACL_ENTRIES {
-            for &cat in categories {
-                if let Some(list) = by_category.get_mut(cat) {
-                    list.push(name);
+        // (frankenredis-ukm9j) Only when the family is actually registered:
+        // 7.2.4 has no HEXPIRE/HTTL/HPERSIST, so ACL CAT hash/read/write must
+        // not list them either. Two of the six red gates were exactly this.
+        if FORWARD_HASH_FIELD_TTL_REGISTERED {
+            for &(name, categories) in FORWARD_HASH_FIELD_TTL_ACL_ENTRIES {
+                for &cat in categories {
+                    if let Some(list) = by_category.get_mut(cat) {
+                        list.push(name);
+                    }
                 }
+                by_command.insert(name, categories.to_vec());
             }
-            by_command.insert(name, categories.to_vec());
         }
         // (frankenredis-ywh2b) Snapshot the by_command map BEFORE applying
         // the static ACL overlay. by_command_info is the COMMAND INFO
@@ -30140,7 +30191,9 @@ mod tests {
         if eq_ascii_command(cmd, b"HSET") {
             return Some(CommandId::Hset);
         }
-        if eq_ascii_command(cmd, b"HEXPIRE") {
+        // (frankenredis-ukm9j) The reference mirrors the packed dispatch, gate
+        // included -- otherwise this reference would assert the drift back in.
+        if super::FORWARD_HASH_FIELD_TTL_REGISTERED && eq_ascii_command(cmd, b"HEXPIRE") {
             return Some(CommandId::Hexpire);
         }
         if eq_ascii_command(cmd, b"HGET") {
@@ -30179,10 +30232,10 @@ mod tests {
         if eq_ascii_command(cmd, b"HSTRLEN") {
             return Some(CommandId::Hstrlen);
         }
-        if eq_ascii_command(cmd, b"HTTL") {
+        if super::FORWARD_HASH_FIELD_TTL_REGISTERED && eq_ascii_command(cmd, b"HTTL") {
             return Some(CommandId::Httl);
         }
-        if eq_ascii_command(cmd, b"HPERSIST") {
+        if super::FORWARD_HASH_FIELD_TTL_REGISTERED && eq_ascii_command(cmd, b"HPERSIST") {
             return Some(CommandId::Hpersist);
         }
         if eq_ascii_command(cmd, b"LPUSH") {
@@ -34972,6 +35025,38 @@ mod tests {
         assert_eq!(out, RespFrame::BulkString(Some(b"v1".to_vec())));
     }
 
+    /// Route a hash-field-TTL argv straight to its executor.
+    ///
+    /// (frankenredis-ukm9j) The four tests below cover g1nuo's EXECUTORS, which
+    /// are fully intact — it is only the wire REGISTRATION that is off, so
+    /// `dispatch_argv` now answers "unknown command" for these names, as 7.2.4
+    /// does. Calling the executor directly keeps every one of their assertions
+    /// live instead of deleting coverage of working code; the alternative,
+    /// re-registering the family so its tests can reach it, is the drift itself.
+    ///
+    /// Deliberately NOT a general dispatcher: it panics on any other name, so a
+    /// later edit cannot quietly use it to reach a command that should be going
+    /// through `dispatch_argv`.
+    fn hash_field_ttl_executor(
+        argv: &[Vec<u8>],
+        store: &mut Store,
+        now_ms: u64,
+    ) -> Result<RespFrame, super::CommandError> {
+        match argv
+            .first()
+            .map(|name| name.to_ascii_uppercase())
+            .as_deref()
+        {
+            Some(b"HEXPIRE") => super::hexpire(argv, store, now_ms),
+            Some(b"HTTL") => super::httl(argv, store, now_ms),
+            Some(b"HPERSIST") => super::hpersist(argv, store, now_ms),
+            other => panic!(
+                "hash_field_ttl_executor is only for the 7.4 hash-field TTL family, got {:?}",
+                other.map(String::from_utf8_lossy)
+            ),
+        }
+    }
+
     #[test]
     fn hash_field_ttl_dispatch_reports_per_field_results_and_reaps_zero_ttl() {
         let mut store = Store::new();
@@ -34989,7 +35074,7 @@ mod tests {
         )
         .expect("seed hash");
 
-        let expire = dispatch_argv(
+        let expire = hash_field_ttl_executor(
             &[
                 b"HEXPIRE".to_vec(),
                 b"h".to_vec(),
@@ -35013,7 +35098,7 @@ mod tests {
             ]))
         );
 
-        let ttl = dispatch_argv(
+        let ttl = hash_field_ttl_executor(
             &[
                 b"HTTL".to_vec(),
                 b"h".to_vec(),
@@ -35036,7 +35121,7 @@ mod tests {
             ]))
         );
 
-        let persist = dispatch_argv(
+        let persist = hash_field_ttl_executor(
             &[
                 b"HPERSIST".to_vec(),
                 b"h".to_vec(),
@@ -35054,7 +35139,7 @@ mod tests {
             RespFrame::Array(Some(vec![RespFrame::Integer(1), RespFrame::Integer(-2)]))
         );
         assert_eq!(
-            dispatch_argv(
+            hash_field_ttl_executor(
                 &[
                     b"HTTL".to_vec(),
                     b"h".to_vec(),
@@ -35070,7 +35155,7 @@ mod tests {
             RespFrame::Array(Some(vec![RespFrame::Integer(-1), RespFrame::Integer(10)]))
         );
 
-        let zero_ttl = dispatch_argv(
+        let zero_ttl = hash_field_ttl_executor(
             &[
                 b"HEXPIRE".to_vec(),
                 b"h".to_vec(),
@@ -35088,7 +35173,7 @@ mod tests {
             RespFrame::Array(Some(vec![RespFrame::Integer(2)]))
         );
         assert_eq!(
-            dispatch_argv(
+            hash_field_ttl_executor(
                 &[
                     b"HTTL".to_vec(),
                     b"h".to_vec(),
@@ -35108,7 +35193,7 @@ mod tests {
     #[test]
     fn hash_field_ttl_dispatch_rejects_bad_fields_block() {
         let mut store = Store::new();
-        let missing_fields = dispatch_argv(
+        let missing_fields = hash_field_ttl_executor(
             &[
                 b"HEXPIRE".to_vec(),
                 b"h".to_vec(),
@@ -35128,7 +35213,7 @@ mod tests {
             )
         );
 
-        let mismatched_count = dispatch_argv(
+        let mismatched_count = hash_field_ttl_executor(
             &[
                 b"HTTL".to_vec(),
                 b"h".to_vec(),
@@ -35152,7 +35237,7 @@ mod tests {
     fn hash_field_ttl_dispatch_honors_conditions_and_wrongtype() {
         let mut store = Store::new();
         assert_eq!(
-            dispatch_argv(
+            hash_field_ttl_executor(
                 &[
                     b"HEXPIRE".to_vec(),
                     b"missing".to_vec(),
@@ -35187,7 +35272,7 @@ mod tests {
             (19, b"LT".as_slice(), 1),
         ] {
             assert_eq!(
-                dispatch_argv(
+                hash_field_ttl_executor(
                     &[
                         b"HEXPIRE".to_vec(),
                         b"h".to_vec(),
@@ -35214,7 +35299,7 @@ mod tests {
         )
         .expect("seed string");
         assert_eq!(
-            dispatch_argv(
+            hash_field_ttl_executor(
                 &[
                     b"HTTL".to_vec(),
                     b"string".to_vec(),
@@ -35249,7 +35334,7 @@ mod tests {
         let _ = store.drain_keyspace_notifications();
 
         assert_eq!(
-            dispatch_argv(
+            hash_field_ttl_executor(
                 &[
                     b"HEXPIRE".to_vec(),
                     b"h".to_vec(),
@@ -60432,6 +60517,65 @@ mod tests {
     /// the zerotrie walk, `DataLocale::write`, locale fallback) disappear from
     /// `SORT_RO ALPHA` entirely — they cannot vanish unless the accessor stopped
     /// resolving.
+    /// (frankenredis-ukm9j) The 7.4 hash-field TTL family must be absent from
+    /// EVERY wire surface, and this pins all three at once because they are the
+    /// three the six red gates observed independently: the command table (via
+    /// COMMAND COUNT / COMMAND INFO), the ACL category maps, and name dispatch
+    /// (via the version-ceiling probe). Any one of them regressing alone is a
+    /// red gate, so asserting only one would leave two ways back in.
+    ///
+    /// It also checks that the preserved rows are still INTACT while unused.
+    /// The point of holding them in `FORWARD_HASH_FIELD_TTL_COMMAND_ROWS`
+    /// instead of deleting them is that re-registering is a data move; that is
+    /// only true if the data does not rot, and an `#[allow(dead_code)]` const
+    /// is exactly the kind of thing that rots unwatched.
+    #[test]
+    fn forward_hash_field_ttl_registration_is_off_for_7_2_4_parity() {
+        assert!(
+            !super::FORWARD_HASH_FIELD_TTL_REGISTERED,
+            "fr targets 7.2.4; flipping this needs ja8yu and ukm9j reopened first"
+        );
+
+        for name in ["hexpire", "httl", "hpersist"] {
+            assert!(
+                super::command_table_index(name.as_bytes()).is_none(),
+                "{name} must not be in COMMAND_TABLE: it is what made COMMAND COUNT read 244 against the oracle's 241"
+            );
+            assert!(
+                super::classify_command(name.as_bytes()).is_none(),
+                "{name} must not dispatch: 7.2.4 answers 'unknown command'"
+            );
+            assert!(
+                super::classify_command(name.to_ascii_uppercase().as_bytes()).is_none(),
+                "{name} must not dispatch in upper case either"
+            );
+        }
+
+        // The neighbours in the same table region must survive, or the removal
+        // took more than it should have.
+        for kept in ["hset", "hget", "hstrlen", "hrandfield", "hscan"] {
+            assert!(
+                super::command_table_index(kept.as_bytes()).is_some(),
+                "{kept} is a 7.2.4 command and must still be registered"
+            );
+        }
+
+        let preserved: Vec<&str> = super::FORWARD_HASH_FIELD_TTL_COMMAND_ROWS
+            .iter()
+            .map(|&(name, ..)| name)
+            .collect();
+        assert_eq!(preserved, vec!["hexpire", "httl", "hpersist"]);
+        let arities: Vec<i64> = super::FORWARD_HASH_FIELD_TTL_COMMAND_ROWS
+            .iter()
+            .map(|&(_, arity, ..)| arity)
+            .collect();
+        assert_eq!(
+            arities,
+            vec![-6, -5, -5],
+            "preserved 7.4 arities have rotted"
+        );
+    }
+
     #[test]
     fn sort_alpha_collator_is_memoised_and_agrees_with_a_fresh_resolution() {
         let first = super::active_sort_alpha_collator();
@@ -67842,7 +67986,10 @@ mod tests {
         assert_eq!(commands_in_acl_category("admin").len(), 65);
         assert_eq!(commands_in_acl_category("connection").len(), 38);
         assert_eq!(commands_in_acl_category("dangerous").len(), 75);
-        assert_eq!(commands_in_acl_category("read").len(), 88);
+        // (frankenredis-ukm9j) 87, not 88: the extra entry was `httl`, a 7.4
+        // command the vendored 7.2 metadata this test claims to follow does not
+        // have. The count now matches the source it is named for.
+        assert_eq!(commands_in_acl_category("read").len(), 87);
 
         let connection = commands_in_acl_category("connection");
         assert!(connection.contains(&"command|docs"));
@@ -67860,10 +68007,23 @@ mod tests {
         let dangerous = commands_in_acl_category("dangerous");
         assert!(dangerous.contains(&"config|set"));
 
+        // (frankenredis-ukm9j) INVERTED, and deliberately: this used to assert
+        // that ACL CAT hash lists hexpire/httl/hpersist, which is 7.4 behaviour.
+        // 7.2.4 has no such commands, and the live oracle listed neither, so the
+        // old assertion was pinning the drift that turned two ACL gates red.
+        // The category itself must still be populated, or "absent" would pass
+        // vacuously on an empty list.
         let hash = commands_in_acl_category("hash");
-        assert!(hash.contains(&"hexpire"));
-        assert!(hash.contains(&"httl"));
-        assert!(hash.contains(&"hpersist"));
+        assert!(
+            hash.contains(&"hset"),
+            "hash category should still be populated"
+        );
+        for absent in ["hexpire", "httl", "hpersist"] {
+            assert!(
+                !hash.contains(&absent),
+                "{absent} is a 7.4 command and must not appear in ACL CAT hash under 7.2.4"
+            );
+        }
         assert!(dangerous.contains(&"acl|setuser"));
 
         let read = commands_in_acl_category("read");
