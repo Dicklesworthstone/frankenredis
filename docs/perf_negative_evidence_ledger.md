@@ -18114,3 +18114,63 @@ Campaign output: yes — retires a withdrawn figure with a measurement.
 RETRY PREDICATE: do not re-run to re-confirm either ratio. DO re-measure getset_same
 from a clean tree if anyone needs to attribute its 0.9799x -> 0.5266x movement, which
 this row deliberately does not attempt.
+
+--------------------------------------------------------------------------------
+INADMISSIBLE — balanced-square THROUGHPUT A/A null fails at loadavg 51 on the same
+ELF whose INSTRUCTION-COUNT rows above are sound (frankenredis-9hnxt)
+
+Attempted: bank an after-number for sinter_2, the last shape measured behind Redis
+7.2.4 (1.0388x, 25.5 pct dispatch share), following e67e11586 which gave
+SINTER/SUNION/SDIFF a borrowed route at 2..=8 keys by lowering keys_multi's floor
+from arr_len < 10 to < 2.
+
+RESULT: NO RATIO IS BANKABLE FROM THIS RUN. The harness ran its cross-process A/A
+mode — both arms the same ELF, so every ratio must be exactly 1.0000 — and the
+nulls failed:
+
+    square=ABBAABBA  rounds=9  ops/slot=50000  -P16  null bound +/-0.02
+    shape             ratio            95% CI        null redis  null fr  verdict
+    hincrbyfloat     0.9738   [0.9469, 1.0439]          0.9889   1.0184  STRADDLES-1
+    hsetnx_existing  0.9968   [0.9340, 1.3533]          0.9766   0.9543  NULL-FAILED
+    pfadd_existing   0.9998   [0.8870, 1.0724]          0.9930   1.0263  NULL-FAILED
+    sinter_2         1.0359   [0.9731, 1.1242]          0.9956   0.9981  STRADDLES-1
+    mget_3           1.0636   [0.9455, 1.2357]          1.0176   0.9273  NULL-FAILED
+    get_control      1.0233   [0.9392, 1.0585]          0.9886   1.0696  NULL-FAILED
+
+    0 of 6 rows admissible; 4 null-failed.
+
+get_control is the decisive one: its true value is 1.0000 by construction and it
+read 1.0233 with nulls spanning 0.9886/1.0696, well outside the +/-0.02 bound. A
+harness that cannot reproduce 1.0 on identical binaries cannot be trusted to
+resolve a 3.6 pct claim, and sinter_2's own 1.0359 is smaller than get_control's
+error.
+
+THE POINT WORTH KEEPING, because rows above use this SAME ELF and ARE sound:
+INSTRUCTION COUNTS AND THROUGHPUT DO NOT DEGRADE TOGETHER. The getset/incrbyfloat
+rows above were taken with scripts/shape_instr_per_op.py, which counts retired
+instructions — load-immune, and they held sub-1 pct spreads. This run used
+scripts/balanced_square_ab.py, which measures ops/s — load-SENSITIVE — at loadavg
+51.10 on 64 cores. Same binary, same host, same hour; one method admissible, the
+other not. Do not generalise either verdict to the other method.
+
+PROVENANCE:
+  ELF sha256 (first 16)  51708552264214d1 — the SAME binary as the LPOS, SINTER and
+                         getset rows above. Copied to a private path and sha'd
+                         there, not measured in target/release (a rendezvous).
+  binary mtime           2026-08-16 10:27:50, after e67e11586 (08:07:19) and
+                         280383780 (08:24:25), so both levers are compiled in.
+  tree                   NOT reproducible from HEAD alone — same uncommitted-WIP
+                         caveat as the rows above.
+  harness                scripts/balanced_square_ab.py --shapes gaprejects
+                         --cross-null --expect-elf <full sha>, ABBAABBA, 9 rounds.
+  host                   thinkstation1, 64 cores, governor powersave, loadavg
+                         51.10 / 29.60 / 18.68.
+
+Campaign output: NO. No lever accepted or rejected; sinter_2's after-number remains
+UNMEASURED and e67e11586 is still argued structurally rather than empirically.
+
+RETRY PREDICATE: do NOT re-run balanced_square_ab.py for sinter_2 until loadavg is
+materially below 51 — the A/A null is the gate and it is not close. PREFER
+shape_instr_per_op.py on sinter_2 vs sinter_9, which counts instructions, is
+load-immune, worked on this host this hour, and is the pairing that attributed the
+gap in the first place.
