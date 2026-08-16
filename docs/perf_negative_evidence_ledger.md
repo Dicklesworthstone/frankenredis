@@ -21134,3 +21134,77 @@ PROVENANCE:
 RETRY PREDICATE: sort_ro_alpha now has twelve runs across two ELFs and has never moved.
 Do NOT measure it again until a borrowed SORT_RO route exists. The next measurement on
 this shape should be of a lever, not of the shape.
+
+## MEASURED ATTRIBUTION (frankenredis-f2zrr) — expire_nx_opt straddles parity at 1.0354x worst bound, 51 pct dispatch; and a family sweep finds 27 stranded shapes
+
+Claim class: COMPETITIVE — fr and the vendored Redis 7.2.4 binary in the SAME invocation.
+Same provenance limitation as the rows above (valgrind hosts the target, so no
+self-reported ELF SHA; ABBA repeats, not a bootstrap CI).
+
+    run  shape            fr instr/op   redis 7.2.4   fr/redis   dispatch share
+    A    expire_nx_opt        4491.0        4337.6     1.0354x       51.1%
+    B    expire_same          2803.1        5476.8     0.5118x       13.9%   <- CONTROL
+    B    expire_same          2805.1        5312.7     0.5280x       13.9%   <- CONTROL
+    A    expire_nx_opt        4526.9        4534.9     0.9982x       51.0%
+
+**THE FIRST SHAPE THIS CAMPAIGN HAS MEASURED AT OR BEHIND THE INCUMBENT.** Worst bound
+1.0354x — fr retiring 3.5 pct MORE instructions than Redis 7.2.4. Stated precisely: the
+two runs are 1.0354x and 0.9982x, so the pair STRADDLES 1.0 within its own 3.6 pct
+spread. The honest reading is "at parity, worst bound slightly behind", not "fr is
+behind" — but every other shape on the board sits at 0.35-0.78x, so this is an outlier by
+a wide margin either way.
+
+ITS SIBLING IS TWICE AS FAST. `EXPIRE key ttl` measures 0.5118x at 13.9 pct dispatch;
+`EXPIRE key ttl NX` measures 1.0354x at 51.1 pct. Same command, same executor family, and
+the option form is TWICE the instructions of the base — 4509 against 2804 — while doing
+strictly less work per call. Dispatch is 51 pct of it, ~2300 instr/op.
+
+THIRD INSTANCE OF THE SAME FAMILY DEFECT, and the worst of the three:
+
+    ZADD      base stranded at 46.1 pct, option classified at 16.4 pct   (fixed)
+    BITCOUNT  base classified at 16.0 pct, range stranded at 46.4 pct    (fixed)
+    EXPIRE    base classified at 13.9 pct, NX option stranded at 51.0 pct
+
+SO I RAN THE FAMILY SWEEP THIS BEAD'S RETRY PREDICATE ASKED FOR, source-only. Matching
+every `(command, arity)` pinned by a parser call-site prefix literal against the arities
+the classifier actually claims gives **27 STRANDED SHAPES ON COMMANDS THAT ARE ALREADY
+FLOOR COMMANDS**:
+
+    COPY 4 | EXPIRE 4 | EXPIREAT 4 | MSETNX 5 | PEXPIRE 4 | PEXPIREAT 4
+    SINTERCARD 3,7 | TOUCH 3,4,5 | XADD 5 | XRANGE 6 | XREVRANGE 6 | ZINTER 5
+    ZMPOP 5,6,7 | ZRANGE 6 | ZRANGEBYLEX 7 | ZRANGEBYSCORE 5 | ZRANK 4
+    ZREVRANGE 5 | ZREVRANGEBYLEX 7 | ZREVRANGEBYSCORE 5,7 | ZREVRANK 4
+
+Each has a working parser reachable only from the cascade. **Chasing these one shape at a
+time has cost four measurement rounds for two fixes; the sweep found twenty-seven in one
+source pass and needed no build.**
+
+NOTE ONE OF THEM IS MINE: TOUCH at arities 3, 4 and 5. I claimed `(2, Touch)` exactly on
+frankenredis-p98mw, reasoning that only the single-key form had a borrowed parser. The
+sweep says parser call sites pin TOUCH at 3, 4 and 5 as well, so that reasoning was
+wrong and my exact-arity claim left three shapes stranded. Recorded against my own bead
+rather than left for someone else.
+
+A/A NULL, from the ABBA repeats in this one invocation:
+
+    fr arm      expire_nx_opt  4491.0 -> 4526.9   +0.80%
+                expire_same    2803.1 -> 2805.1   +0.07%   <- essentially exact
+    redis arm   expire_nx_opt  4337.6 -> 4534.9   +4.55%   <- the noisy arm, tenth row
+                expire_same    5476.8 -> 5312.7   -3.00%
+    ratio       nx 1.0354 -> 0.9982  3.60%  |  base 0.5118 -> 0.5280  3.16%
+
+fr's arms reproduced to 0.80 and 0.07 pct while the incumbent moved 4.55 and 3.00 pct.
+The 51-vs-14 pct dispatch share gap carries no incumbent term and is the reliable half of
+this row.
+
+EXECUTABLE IDENTITIES, full 64-hex (computed post-run, see limitation above):
+  candidate  `11b0c67517b6130fac51679ec296db62d31163a6525c151f3c10e21ba86d4182`
+  incumbent  `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+  tree       82bcd6a50; NO rebuild — no crate code had changed since that binary.
+
+Campaign output: yes — finds the only shape at or behind the incumbent, and replaces
+shape-at-a-time hunting with a 27-item enumeration.
+
+RETRY PREDICATE: take EXPIRE arity 4 first — it is the worst measured and the sweep
+confirms it stranded. Then work the list, not the shapes. And re-check TOUCH 3/4/5, which
+my own exact-arity claim missed.
