@@ -19363,3 +19363,64 @@ its null fails. If the DEL/UNLINK half of z2ce3 is ever measured, use
 shape_instr_per_op.py on del_1_missing, which is load-immune and is what produced the
 0.7685x figure in the first place. And whenever a control lands inside the range of
 the results, normalise against it before reporting anything as a per-shape effect.
+
+## MEASURED ATTRIBUTION (frankenredis-tyujv, frankenredis-uu33c) — GEOADD 0.3471x and LPOS COUNT 0.3858x are WINS, not regressions: the absolute counts settle it
+
+Claim class: COMPETITIVE — fr and the vendored Redis 7.2.4 binary in the SAME invocation.
+Same provenance limitation as the rows above (valgrind hosts the target, so no
+self-reported ELF SHA; ABBA repeats rather than a bootstrap CI).
+
+FILED BECAUSE THESE TWO WERE REPORTED TO ME AS "the fleet's worst regressions." They are
+the two BEST routes on the board. Recording the ABSOLUTE instruction counts alongside the
+ratio so the direction needs no convention to read:
+
+    run  shape         fr instr/op   redis 7.2.4 instr/op   fr/redis
+    A    geoadd_same       3694.5              10946.3       0.3375x
+    B    lpos_count        2897.4               7510.3       0.3858x
+    B    lpos_count        2942.8               7925.4       0.3713x
+    A    geoadd_same       3695.3              10645.2       0.3471x
+
+**fr executes ~3695 instructions per GEOADD where Redis 7.2.4 executes ~10,800 — fr does
+roughly ONE THIRD the work, about 2.9x faster. LPOS COUNT is ~2920 against ~7718, about
+2.6x faster.** No ratio convention is needed to see it: both raw columns are printed by
+the harness and fr's is the smaller one in every row.
+
+THE CONVENTION, CONFIRMED FROM HARNESS SOURCE rather than from memory or prose —
+scripts/shape_instr_per_op.py line 717 is literally:
+
+    print("  fr/redis instructions per op: %.4fx" % (fr_ipo / rd_ipo))
+
+fr instructions-per-op DIVIDED BY redis instructions-per-op. BELOW 1.0 = fr retires FEWER
+instructions = fr AHEAD. There is no reading of that expression under which 0.3471x is a
+regression.
+
+WHY THIS ROW EXISTS AT ALL, and it is a campaign hazard rather than a curiosity. This
+ledger already carries a METHOD entry recording TWO inverted ratio conventions in use
+(instructions fr/redis where lower is better, and older throughput rows where higher is
+better). A 0.35x read under the throughput convention looks like a 3x LOSS. Acting on
+that reading would mean "optimising" the two fastest routes in the tree — most likely by
+reverting the front-classification that produced them. **When a figure is quoted without
+its convention, print the absolute counts; they are convention-free.**
+
+A/A NULL, from the ABBA repeats in this one invocation:
+
+    fr arm      geoadd_same   3694.5 -> 3695.3   +0.02%   <- essentially exact
+                lpos_count    2897.4 -> 2942.8   +1.57%
+    redis arm   geoadd_same  10946.3 -> 10645.2  -2.75%
+                lpos_count    7510.3 -> 7925.4   +5.53%   <- the noisy arm, again
+    ratio       geoadd 0.3375 -> 0.3471  2.84%  |  lpos 0.3858 -> 0.3713  3.76%
+
+The redis arm moved 5.53 pct on lpos_count against fr's 0.02 pct on geoadd — the widest
+incumbent-side swing recorded so far, and the fifth row in a row where the spread is
+incumbent-dominated. A 2.6-2.9x margin clears it by two orders regardless.
+
+EXECUTABLE IDENTITIES, full 64-hex (computed post-run, see limitation above):
+  candidate  `c36c3fb0a66033deff0cf03dc6a313ef647d5970cd22596aac575120a5d2a297`
+  incumbent  `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+  tree       31b22f983; NO rebuild — no crate code had changed since that binary.
+
+Campaign output: yes — prevents two winning routes being reverted as regressions.
+
+RETRY PREDICATE: the actual worst ratio on the board is incrbyfloat_nondyadic at 0.9794x,
+recorded above. Attack that, not these. And quote no ratio in this campaign without
+either its convention or its absolute counts.
