@@ -25542,3 +25542,73 @@ thinkstation1, 64 cores, governor powersave, /data 240G. Loadavg SAMPLED BY ME p
 the busiest window of my session, which is a further reason not to read the +0.05 to
 +0.7 pct deltas as anything but noise. Mean CPU MHz SAMPLED BY ME per arm over 64 cores:
 2383-3682, a 55 pct spread inside the window.
+
+--------------------------------------------------------------------------------
+MEASURED (frankenredis-gein3) — the pub/sub outbox drain ran on EVERY event-loop pass with
+no subscribers: sinter_2 -1.78 pct against a FLAT control
+
+Claim class: COMPETITIVE
+
+FOUND BY THE CERTIFICATION ABOVE, not by reading code. That row showed fr's large-reply
+cost is dominated by PER-EVENT-LOOP-PASS overhead — r(load, fr Ir) = -0.83, a fast client
+making fr do more work because the reply is delivered over more passes. `drain_pubsub_outboxes`
+is one of the three frames in that bloc (46.2M, 2.32 pct of sinter_big), and it built a Vec
+and set up a `HashMap::drain` iterator EVERY pass even when no client has ever subscribed.
+Its only caller returns immediately if the result is empty.
+
+    if self.server.pubsub_outbox.is_empty() { return Vec::new(); }
+
+Same guard on `pubsub_clients_with_pending`, which had the identical shape.
+
+    shape         BEFORE (5 draws)                          AFTER (5 draws)
+    sinter_2      4378.0 4378.4 4378.7 4387.1 4385.9        4302.5 4324.2 4295.9 4297.3 4296.9
+                  mean 4381.6, spread 0.21 pct              mean 4303.4, spread 0.66 pct
+                                            -78.2 instr/op = -1.78 pct
+    get_control   1331.5 1328.7 1329.2 1328.6 1328.1        1331.4 1326.5 1328.6 1329.4 1328.6
+                  mean 1329.2, spread 0.26 pct              mean 1328.9, spread 0.37 pct
+                                            -0.3 instr/op = -0.02 pct   NULL, FLAT
+
+The effect is 4-8x either arm's own spread, and the control is flat to 0.02 pct — which is
+also what says the win is real rather than a code-layout shift, since a layout change would
+have moved get_control too (one did, by 2.7 pct, two rows ago).
+
+WHY THE SHAPE THAT WAS TARGETED CANNOT SHOW IT. This lever exists to reduce sinter_big's
+per-pass overhead, and sinter_big is exactly where it CANNOT be measured: that shape's fr
+arm spreads 32 pct, so an effect of this size is invisible there. It is measured on
+sinter_2 — same command, same reply path, stable arm — and the mechanism is per-pass, so
+the saving on a many-pass reply should be larger, not smaller. THAT IS AN EXPECTATION, NOT
+A MEASUREMENT, and it is not claimed as one.
+
+    get_control does NOT move, and that is informative rather than disappointing: a GET's
+    bulk reply is delivered in fewer passes than SINTER's array reply, so there is less
+    per-pass overhead to remove. The null being flat while a sibling shape moves 1.78 pct
+    is the signature of a per-pass cost, not a per-command one.
+
+CORRECTNESS. The claim is BEHAVIOURAL IDENTITY — draining an empty map yields no items and
+has nothing to clear — so it is asserted against a verbatim pre-guard body
+(`drain_pubsub_outboxes_unguarded_reference`, gated exactly as the shipping path is) rather
+than against my expectation of it. Three states, because "empty" is two different states:
+never-populated; emptied-but-allocation-retained, which is where a real server sits after
+any publish; and populated including an empty-Vec entry the filter must drop. MAP STATE is
+asserted as well as return value, since `drain` mutates and a guard that skipped a needed
+clear would still return the right Vec. MUTATION-TESTED: forcing the guard to fire
+unconditionally reddens it. 599 fr-runtime tests pass.
+
+PROVENANCE:
+  BEFORE ELF           b8408df60e307fee...  (HEAD ae6236d11, the certification ELF above)
+  AFTER ELF            ebe7850aa6e2a309...  same tree plus this change only
+  harness              scripts/shape_instr_per_op.py at ae6236d11 (with the drain fix),
+                       N=2000/2N=4000, five draws per arm per shape.
+  host                 thinkstation1, 64 cores, /data 237G, governor powersave, one build.
+  PER-ARM loadavg/MHz  ABBA pass at loadavg 15.10-17.96, mean MHz 2461-3166; five-draw pass
+                       immediately after in the same window. Window verified at open,
+                       18.30/16.83/18.24.
+  tree                 crates/fr-server/src/main.rs and the ledger were STAGED BY A PEER in
+                       the shared index during this work; committed path-limited so neither
+                       was swept.
+
+RETRY PREDICATE: do NOT try to confirm this on sinter_big — 32 pct variance, the effect is
+invisible there by construction. DO look at the other two frames in the same bloc:
+`try_recv` + `drain_writer_completions` (201.0M) is 4x this one and is the real prize, but
+its cheap-guard form needs an atomic pending count whose failure mode is a stranded
+completion and a hung connection — a designed change with concurrency tests, not an edit.
