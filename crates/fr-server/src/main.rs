@@ -6985,8 +6985,8 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_set_packet(unparsed, &parser_config)
+                } else if borrowed_set_arity_is(unparsed, b'3')
+                    && let Some(packet) = parse_borrowed_plain_set_packet(unparsed, &parser_config)
                 {
                     let default_write_allowed =
                         cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts);
@@ -7098,8 +7098,9 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
-                } else if let Some((is_seconds, packet)) =
-                    parse_borrowed_plain_set_relexpire_packet(unparsed, &parser_config)
+                } else if borrowed_set_arity_is(unparsed, b'5')
+                    && let Some((is_seconds, packet)) =
+                        parse_borrowed_plain_set_relexpire_packet(unparsed, &parser_config)
                 {
                     // `SET key value EX|PX <n>` unconditionally replies +OK; route the
                     // non-allocating `_ok` twin to FastOkReply so no `SimpleString("OK")`
@@ -7127,8 +7128,9 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
-                } else if let Some((is_seconds, packet)) =
-                    parse_borrowed_plain_set_relexpire_get_packet(unparsed, &parser_config)
+                } else if borrowed_set_arity_is(unparsed, b'6')
+                    && let Some((is_seconds, packet)) =
+                        parse_borrowed_plain_set_relexpire_get_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_set_relexpire_get_borrowed(
                         is_seconds,
@@ -7151,8 +7153,9 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_set_opt_get_packet(unparsed, &parser_config)
+                } else if borrowed_set_arity_is(unparsed, b'5')
+                    && let Some(packet) =
+                        parse_borrowed_plain_set_opt_get_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_set_opt_get_borrowed(
                         packet.key,
@@ -7174,8 +7177,9 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
-                } else if let Some((is_seconds, packet)) =
-                    parse_borrowed_plain_set_absexpire_packet(unparsed, &parser_config)
+                } else if borrowed_set_arity_is(unparsed, b'5')
+                    && let Some((is_seconds, packet)) =
+                        parse_borrowed_plain_set_absexpire_packet(unparsed, &parser_config)
                 {
                     // `SET key value EXAT|PXAT <ts>` unconditionally replies +OK; route the
                     // non-allocating `_ok` twin to FastOkReply so no `SimpleString("OK")` reply
@@ -7203,8 +7207,9 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         )
                     }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_set_nx_packet(unparsed, &parser_config)
+                } else if borrowed_set_arity_is(unparsed, b'4')
+                    && let Some(packet) =
+                        parse_borrowed_plain_set_nx_packet(unparsed, &parser_config)
                 {
                     // SET NX replies a constant +OK when it writes → FastOkReply (no reply-frame
                     // alloc); when the key already exists it replies nil, routed through FastReply.
@@ -7225,8 +7230,9 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         ),
                     }
-                } else if let Some(packet) =
-                    parse_borrowed_plain_set_xx_packet(unparsed, &parser_config)
+                } else if borrowed_set_arity_is(unparsed, b'4')
+                    && let Some(packet) =
+                        parse_borrowed_plain_set_xx_packet(unparsed, &parser_config)
                 {
                     // SET XX replies a constant +OK when the key existed and was overwritten →
                     // FastOkReply (no reply-frame alloc); an absent key replies nil via FastReply.
@@ -7247,8 +7253,9 @@ fn process_buffered_frames(
                             &mut argv_scratch,
                         ),
                     }
-                } else if let Some((is_xx, is_seconds, packet)) =
-                    parse_borrowed_plain_set_cond_relexpire_packet(unparsed, &parser_config)
+                } else if borrowed_set_arity_is(unparsed, b'6')
+                    && let Some((is_xx, is_seconds, packet)) =
+                        parse_borrowed_plain_set_cond_relexpire_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_set_cond_relexpire_borrowed(
                         is_xx,
@@ -28112,6 +28119,28 @@ fn parse_borrowed_plain_set_packet<'a>(
         key,
         value,
     })
+}
+
+/// Cheap fast-reject for the SET arm group in the borrowed cascade.
+///
+/// Every `parse_borrowed_plain_set_*_packet` starts by requiring the literal prefix
+/// `*<arity>\r\n$3\r\nSET\r\n`, so it returns `None` for any input whose arity digit
+/// differs. Testing that ONE byte at the call site turns a mismatch from a real
+/// non-inlined call -- which re-checks its `ParserConfig` bounds before it ever looks at
+/// the input bytes, measured at ~40-50 instr -- into a single compare.
+///
+/// This can only SKIP calls that would have returned `None`: `input[1] != arity` implies
+/// the prefix cannot match, so no shape the parser would have ACCEPTED is ever filtered
+/// out and the routing is unchanged. A multi-digit arity (>= 10) whose first digit
+/// happens to match still falls through to the parser, which rejects it on the `\r\n`.
+///
+/// Motivated by measurement, not by inspection: `set_xx_opt` was the worst fr/redis
+/// instruction ratio on the board at 0.6940x with a 30.5% dispatch share, and `SET k v XX`
+/// (a `*4`) was paying SIX failed parser calls -- base SET `*3`, relexpire `*5`,
+/// relexpire_get `*6`, opt_get `*5`, absexpire `*5`, nx `*4` -- before reaching its own arm.
+#[inline(always)]
+fn borrowed_set_arity_is(input: &[u8], arity: u8) -> bool {
+    input.get(1) == Some(&arity)
 }
 
 // (frankenredis-setexfast) Byte-prefix fast path for the no-flag `SET key value
