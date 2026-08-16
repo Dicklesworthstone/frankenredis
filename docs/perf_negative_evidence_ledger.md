@@ -16956,6 +16956,92 @@ profile. Reopen the round-trip question only if a profile shows a rendered value
 being reparsed on some other path — the hash and set RESTORE decoders were checked
 and do not have one, because their consumers genuinely want the bytes.
 
+## 2026-08-16 GentleStream: COMPETITIVE KEEP — front-classifying the THREE-source set stores closes the last big online gap: 0.660x → 0.946x, 0.687x → 0.995x, 0.731x → 1.005x normalised (`frankenredis-804l1`)
+
+Claim class: COMPETITIVE. Campaign output: yes. Live vendored Redis 7.2.4 arm in the
+SAME invocation, balanced square, every row carrying its own A/A null.
+
+**Headline, in the campaign's orientation:** FrankenRedis/Redis 7.2.4 throughput is
+**1.1266x** on SUNIONSTORE, **1.1158x** on SDIFFSTORE and **1.0612x** on SINTERSTORE
+at three sources after this change, against **0.8141x**, **0.7652x** and **0.7351x**
+before. These were the worst surface left after BITOP and ZMPOP were classified.
+
+**The lever** (31e0e6ada). Only the TWO-source arity was front-classified, so
+`SINTERSTORE dst a b c` walked the whole cascade to reach a route that already
+existed deeper in it. The class now carries its source count — `SetStore(cmd,
+sources)` — so arity 5 maps to 3 sources and uses the same executors, which already
+take a source slice. Four or more sources still take the generic path.
+
+Gated callgrind on `SINTERSTORE sidst sa sb sc`, 4,000 ops at 18,518 instr/op:
+`process_buffered_frames` 12.02%, `__memcmp_avx2_movbe` 10.50%, and ~10.5% across
+`parse_borrowed_plain_key_arg3/2/4/1` arms that cannot match this shape — against
+roughly 12% of actual set work (`PackedStrSet::contains` 4.43%, `sinter_prepare`
+2.56%, `sinterstore` 2.12%, `GenericSet::insert` 1.81%, `execute_plain_setstore_
+borrowed` 1.79%).
+
+**THREE PRE MEASUREMENTS ON TWO ELFs AND TWO WORKERS, TWO POST RUNS ON A THIRD:**
+
+| ELF | source | RCH_WORKER | role |
+|---|---|---|---|
+| `f46c2542bcb4694fc7000599be793dcf8081a3400b6429cf17070137e5b75205` | pre | `vmi1293453` | 2 runs |
+| `36f36c9b3825970213655850e2ed10d669726ce4c475c1d49760184e964db9ec` | pre, rebuilt | `vmi1227854` | 1 run |
+| `67b94f0cdc6a14f6b6664b6b33df591bc95a703903f321b8e29de67b1c8dd64b` | post | `vmi1152480` | 2 runs |
+
+| shape | pre (3 runs) | post (admissible) | worst-bound | normalised before → after |
+|---|---:|---:|---:|---:|
+| SUNIONSTORE 3-src | 0.8141–0.8200 | 1.1266 | **1.3493x** | 0.731x → **1.005x** |
+| SDIFFSTORE 3-src | 0.7652–0.7826 | 1.1158 | **1.3874x** | 0.687x → **0.995x** |
+| SINTERSTORE 3-src | 0.7351–0.7530 | 1.0612 | **1.3867x** | 0.660x → **0.946x** |
+
+Worst-bound is post CI-low over pre CI-high — the most pessimistic pairing the
+intervals allow. The three pre runs span two ELFs built on two different workers and
+agree within 2.4%, which is what makes the pre side a baseline rather than a single
+sample. GET control: 1.1141 pre, 1.1212/1.1253 post — 1.0% apart, bounding how much
+of the movement is attributable.
+
+**NULL HANDLING, stated because the rule matters.** `sdiffstore_3src` null-failed in
+post run 2 (fr arm 0.9781) and PASSED in run 1 (1.0030 / 1.0025). A failing null is
+excusable only when both runs are off in the same direction by a similar amount; this
+one is not — it passed cleanly in the other run, so run 2 is DISCARDED for that row
+and its figure rests on run 1 alone. Same treatment for `bitop_and` (null-failed run
+1, passed run 2) and `exists_8key` (null-failed run 1, passed run 2). No row here is
+quoted from a run whose own null failed.
+
+**SCAN selective-prefix stays at ~0.90** (0.9114 / 0.9045) across both post runs,
+consistent with the entry below: that drift was shown to track time/build rather than
+code by rebuilding the pre-change SOURCE and reproducing it. It is not attributed to
+this change either.
+
+**HARNESS:** `scripts/balanced_square_ab.py --shapes storeops --rounds 61
+--expect-elf <16 hex>`, square `ABBAABBA`, 50,000 ops/slot, `-P16`, null bound ±0.02,
+bootstrap 95% CI, servers unpinned. Benchmark ran LOCALLY on thinkstation1, 64 cores
+OBSERVED, governor `powersave`, ISA avx2; rch compiled only. Every fr arm
+self-reported its executable binary SHA-256 from `/proc/<pid>/exe`; the vendored Redis
+7.2.4 arm self-reported executable binary SHA-256
+`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`.
+**CV is provenance only and is NEVER a gate here, the bootstrap median CI being the
+only decision rule.**
+**Same-invocation A/A null, aggregated over the 22 admissible arm-nulls of the two
+post runs:** median **0.998900x**, bootstrap 95% median CI **[0.995000, 1.002300]**,
+n=22, percentile bootstrap, 4,096 resamples, fixed seed. Every one inside ±0.02.
+
+**Correctness, not asserted:** 56 cases, 0 disagreements across fr fast route, fr
+generic path (SAME ELF via `FR_PERF_AB_CASCADE_BYPASS=1`) and live 7.2.4, via
+`scripts/dispatch_route_differ.py`. The three sources are deliberately ASYMMETRIC so
+operand ORDER is observable — SDIFFSTORE is not commutative, and `a b c` yields {m1}
+where `c a b` yields {m6}, so a route that reordered or dropped a source fails.
+
+**What is left.** SINTERSTORE at 0.946x is the only one still meaningfully under the
+control; the residual is `PackedStrSet::contains` and the keyspace lookups, not
+dispatch. Do not widen this lever to chase it.
+
+**Retry predicate.** Re-take after changes to the front classifier, the set-algebra
+kernels, `PackedStrSet::contains`, or allocator/codegen. **Invalidate rather than
+compare** if the GET control moves more than ~2% between the arms compared, if a row's
+own null leaves ±0.02 in the run being quoted, if the pre and post ELFs are not both
+named with their build workers, or if no same-source rebuild is available to separate
+code from drift.
+
 ## 2026-08-16 GentleStream: COMPETITIVE KEEP — front-classifying BITOP and ZMPOP closes the largest gap on the online surface: 0.640x → 0.952x and 0.711x → 0.981x normalised, and a THIRD ELF proves the one regression next to it is NOT the code (`frankenredis-nscqs`, `frankenredis-9u5z9`)
 
 Claim class: COMPETITIVE. Campaign output: yes. Live vendored Redis 7.2.4 arm in the
