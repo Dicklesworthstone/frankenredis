@@ -23426,3 +23426,73 @@ code change. The throughput arm has now been deferred four times on 15-minute av
 of 20-30; if it is ever wanted, gate on a SUSTAINED 15-minute reading under 10 and
 re-check after, because three relayed "quiet window" figures in a row have not survived
 contact with /proc/loadavg.
+
+## MEASURED (frankenredis-f2zrr) — head-to-head in ONE invocation: bitcount_unit is the worst at 0.8103x, and my 0.18 pct stability figure was small-sample clustering
+
+Claim class: COMPETITIVE
+
+FrankenRedis/Redis 7.2.4 = 0.8103x worst bound, measured with the live vendored
+redis-server arm launched and run in the SAME invocation of shape_instr_per_op.py as the
+candidate, both under callgrind back to back.
+
+Campaign output: yes
+
+Same provenance limitation as the rows above (valgrind hosts the target, so no
+self-reported ELF SHA; ABBA repeats, not a bootstrap CI).
+
+    run  shape                   fr instr/op   redis 7.2.4   fr/redis   share   loadavg
+    A    bitcount_unit               3746.3        4919.3     0.7616x   46.4%    10.65
+    B    incrbyfloat_nondyadic       7484.1        9564.9     0.7825x    6.0%    10.65
+    B    incrbyfloat_nondyadic       7489.5        9532.3     0.7857x    6.0%    10.28
+    A    bitcount_unit               3786.3        4672.7     0.8103x   46.1%    10.28
+
+    uptime before certifying: 11.14 / 26.68 / 26.36 — quiet, and below the ~30 threshold.
+
+THE RANKING IS RESOLVED, AND ONLY BECAUSE BOTH SHAPES RAN IN ONE INVOCATION. The previous
+row refused to rank these two because 0.7827x came from loadavg 11 and 0.7907-0.8315x from
+loads 13-45, and warned that ranking across load regimes is the comparison this ledger
+keeps flagging. Measured together in a quiet window:
+
+    bitcount_unit          worst bound 0.8103x
+    incrbyfloat_nondyadic  worst bound 0.7857x
+
+**bitcount_unit is the worst measured shape on the board.**
+
+BUT THE TWO SHAPES ARE NOT EQUALLY TRUSTWORTHY, AND THE DIFFERENCE IS LARGE:
+
+    shape                  fr spread   redis spread   ratio spread
+    incrbyfloat_nondyadic    0.07 pct      0.34 pct      0.41 pct
+    bitcount_unit            1.07 pct      5.00 pct      6.39 pct
+
+Both at loadavg 10.28-10.65 — the quietest conditions this session has offered.
+**bitcount_unit is noisy on BOTH arms in a quiet window**, so its 0.8103x is a much softer
+figure than incrbyfloat_nondyadic's 0.7857x. The two worst bounds differ by 3.1 pct while
+bitcount_unit's own ratio spread is 6.4 pct: **the ranking is inside the noise of the
+shape that wins it.** Recorded as "bitcount_unit is worst, weakly" rather than as a clean
+ordering.
+
+**AND A CORRECTION TO MY OWN LAST ROW.** It reported bitcount_unit's fr arm as stable to
+0.18 pct across five samples, and used that to argue fr-arm stability is shape-dependent
+with unit as the stable case. Adding this row's two samples gives seven:
+
+    3746.3  3781.4  3782.2  3783.7  3785.5  3788.3        spread 1.13 pct
+
+The new low sits BELOW the entire previous range. **0.18 pct was five samples happening to
+cluster, not a stability property** — the conclusion "fr-arm stability is shape-dependent"
+still stands (bitcount_range spans 4.51 pct), but the specific claim that unit is stable
+to 0.18 pct does not. Five samples were too few to quote a spread from, and I quoted one.
+
+INCIDENTAL BUT WORTH RECORDING: incrbyfloat_nondyadic's dispatch share is 6.0 pct, the
+lowest of any shape measured in this campaign. It is a compute-bound route — which is
+consistent with its remaining cost being three BigNat frames and with dispatch levers
+having nothing to take there.
+
+EXECUTABLE IDENTITIES, full 64-hex (computed post-run, see limitation above):
+  candidate  `773d819de62d62d7f496b2a1df8e82bd645228e9e366e64c6294190ffa6d8e2d`
+  incumbent  `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+  tree       47a307984; NO rebuild — no crate code had changed since that binary.
+
+RETRY PREDICATE: do not quote a spread from fewer than ~6 samples; this row overturned a
+five-sample figure on its seventh. And when a ranking margin is smaller than the winner's
+own spread, say so rather than reporting the order — bitcount_unit leads by 3.1 pct with a
+6.4 pct spread, which is not an ordering, it is a tie with a nominal winner.
