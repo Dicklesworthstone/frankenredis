@@ -128,6 +128,19 @@ SHAPES = {
     # both are no-ops there (reply 0, create nothing), so the 2N run does not grow the
     # keyspace and the slope isolates dispatch rather than real work.
     "lpushx_missing": ([], ["LPUSHX", "nosuchlist", "v"]),
+    # (frankenredis-dzik2 follow-up) The arity-5 MIS-CLAIM shapes QuietHarbor found.
+    # main.rs:16122 maps (5, Lpos) -> LposRank and :16119 maps (5, Zrange) -> a
+    # WITHSCORES-shaped class. But arity 5 does not imply RANK or WITHSCORES: the
+    # option KEYWORD is what discriminates, and the classifier cannot see it. So
+    # LPOS k e COUNT n and ZRANGE k s e REV are claimed by arms whose parser will
+    # decline -- and a floor decline falls through to GENERIC, not back to the
+    # cascade. These pair with the RANK/WITHSCORES forms the arms DO serve, so the
+    # two can be compared directly on one binary.
+    "lpos_count": (["RPUSH lp a b c d e f g h"], ["LPOS", "lp", "e", "COUNT", "1"]),
+    "lpos_rank": (["RPUSH lp2 a b c d e f g h"], ["LPOS", "lp2", "e", "RANK", "1"]),
+    "zrange_rev": (["ZADD zr 1 a 2 b 3 c"], ["ZRANGE", "zr", "0", "-1", "REV"]),
+    "zrange_withscores": (["ZADD zr2 1 a 2 b 3 c"],
+                          ["ZRANGE", "zr2", "0", "-1", "WITHSCORES"]),
     "rpushx_missing": ([], ["RPUSHX", "nosuchlist", "v"]),
     "zpopmin_nocount_missing": ([], ["ZPOPMIN", "nosuchzset"]),
     "getset_same": (["SET gsk vvvvvvvvvvvvvvvv"], ["GETSET", "gsk", "vvvvvvvvvvvvvvvv"]),
