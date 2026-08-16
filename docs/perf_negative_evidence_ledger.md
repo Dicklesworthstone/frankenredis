@@ -20323,3 +20323,59 @@ RETRY PREDICATE: do NOT re-run expire_nx_opt for a tighter RATIO — the null is
 and the shape sits at parity; the ratio will not resolve. DO use fr's 4,488.8 instr/op
 baseline to measure any lever here. And treat every remaining single-run screen figure
 as a ranking hint, not a measurement, until it has four runs and a null beside it.
+
+## BASELINE (frankenredis-mg05w) — zadd_base pre-lever, FOUR runs across two invocations: 0.8724x worst bound, and the noise floor is ~10 pct
+
+Claim class: COMPETITIVE — fr and the vendored Redis 7.2.4 binary in the SAME invocation.
+Same provenance limitation as the rows above (valgrind hosts the target, so no
+self-reported ELF SHA; ABBA repeats, not a bootstrap CI).
+
+FILED AS A BASELINE, NOT A LEVER, AND DELIBERATELY SO. A peer holds `main.rs` with an
+in-flight ZADD floor class, classifier arm and dispatch arm under frankenredis-mg05w —
+exactly the lever the previous row's retry predicate named. Taking it would have
+duplicated their work and collided in a shared file. What is useful instead is a clean
+PRE-lever baseline on a verified ELF, so their delta is attributable rather than
+inferred.
+
+FOUR RUNS, TWO INVOCATIONS, one ELF:
+
+    shape        fr instr/op (4 runs)              redis 7.2.4 (4 runs)          ratio range
+    zadd_base    4481.5 4365.9 4452.8 4467.1       5422.7 5482.9 5408.1 5120.2   0.7963-0.8724
+    zadd_xx_opt  3160.3 3217.9 3186.9 3135.4       5704.9 5778.9 5941.5 5642.5   0.5364-0.5568
+
+    zadd_base    WORST BOUND 0.8724x   dispatch share 46.0-46.1 pct  (STRANDED)
+    zadd_xx_opt  WORST BOUND 0.5568x   dispatch share 16.3-16.4 pct  (classified)
+
+THE NOISE FLOOR IS THE POINT OF THIS ROW. Across four runs:
+
+    zadd_base    fr spread 2.6 pct   |   redis spread 7.1 pct   |   RATIO spread 9.6 pct
+    zadd_xx_opt  fr spread 2.6 pct   |   redis spread 5.3 pct   |   RATIO spread 3.7 pct
+
+**fr's arm is stable to 2.6 pct on both shapes while the incumbent swings 5-7 pct**, so
+the ratio spread is almost entirely imported. On zadd_base a lever must move MORE THAN
+~10 PCT to be distinguishable from the incumbent's own wobble with this harness. That is
+the widest noise floor recorded on any shape in this ledger, and it is the seventh
+consecutive row where the spread is incumbent-dominated.
+
+The expected lever comfortably clears it: front-classification should take fr from ~4442
+to roughly the classified sibling's ~3170, about 28 pct. But a smaller ZADD lever measured
+on this shape would be unresolvable, and should not be attempted here without a tighter
+instrument.
+
+THE STANDING INVERSION, restated for whoever lands the lever: `ZADD z 1 a` costs MORE than
+`ZADD z XX 1 a` — ~4442 against ~3170 instr/op, a 40 pct penalty for passing FEWER
+arguments, because the option forms are front-classified and the bare form is not.
+
+EXECUTABLE IDENTITIES, full 64-hex (computed post-run, see limitation above):
+  candidate  `b526caa0537587de82334d59b6e1bf4a33f97ce2f2e7c9da9685383c5edd1ba2`
+  incumbent  `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+  tree       344f8361d; NO rebuild — no committed crate code had changed since that
+             binary, and the peer's ZADD work is UNCOMMITTED so it is NOT in this ELF,
+             which is exactly what makes this a valid pre-lever baseline.
+
+Campaign output: yes — a pre-lever baseline with a quantified noise floor, handed to the
+peer holding the lever.
+
+RETRY PREDICATE: when mg05w lands, re-measure zadd_base with zadd_xx_opt as the control
+that must NOT move, and require the movement to exceed 10 pct before calling it. Do not
+quote a single zadd_base run — its ratio spread is 9.6 pct.
