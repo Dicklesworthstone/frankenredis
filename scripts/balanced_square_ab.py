@@ -358,6 +358,21 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
     #                     -> 1.279x, against 1.280x on ELF1. Two ELFs, 0.1% apart.
     #   sintercard_lim    fast    1.0777 [1.0192, 1.1095]  ADMISSIBLE
     #
+    # CERTIFIED CROSSING (frankenredis-50ntn). Four fast-route runs across two
+    # independently compiled ELFs, TWO of them admissible:
+    #     ELF1  1.2555 [1.2294, 1.2758]   1.2673 [1.2351, 1.2879]
+    #     ELF2  1.2634 [1.2381, 1.2977] ADM   1.2834 [1.2685, 1.3039] ADM
+    #   WORST BOUND across all four: 1.2294. Generic arm on both ELFs: 0.9806 and
+    #   0.9876, intervals disjoint from every fast row.
+    #
+    # NEXT SUB-PARITY ROUTE: zadd_xx 0.8671 [0.8395, 0.8795] ADMISSIBLE, nulls
+    # 0.9913/0.9866, worst bound 0.8395. It is the only clearly sub-parity row left
+    # in this set (expire_nx 0.9068 null-failed). Already attributed: ZADD length 5
+    # is unclassified -- the class is `arity >= 8 && even` -- while
+    # parse_borrowed_plain_zadd_flag_packet and execute_plain_zadd_flag_borrowed
+    # both already exist, with zadd_incr covering INCR separately because its reply
+    # is a bulk score rather than a count. The iqicb shape, not a mis-claim.
+    #
     # zrangebyscore_l was 0.7932 [0.7713, 0.7980] before the floor class landed
     # (31b22f983) -- the deepest below-parity row I held, itself replicated across
     # two ELFs. It is now 26% ahead with an ADMISSIBLE row on ELF2 and disjoint
