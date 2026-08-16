@@ -118,9 +118,18 @@ def main():
     rdir = tempfile.mkdtemp(prefix="fr_sortgate_")
     fp, rp = free_port(), free_port()
     # redis oracle in the C locale so SORT ALPHA collation == byte order (jaezc).
+    # (frankenredis-eq80s) fr must get the SAME locale. jaezc shipped real locale
+    # collation for non-STORE SORT ALPHA, so an fr left on the ambient locale
+    # collates while the pinned oracle compares bytes, and the gate reports 4
+    # divergences that are purely the harness's own locale asymmetry: every one is
+    # just '-2' vs '0', which is what a collation that ignores '-' at the primary
+    # level does with byte order ('-'=0x2D < '0'=0x30). Pinning only the oracle
+    # tests fr's ambient locale against redis's C locale, which is not a claim
+    # anyone wants to make.
     cenv = dict(os.environ, LC_ALL="C", LC_COLLATE="C")
     procs = [
         subprocess.Popen([fr, "--port", str(fp), "--enable-debug-command", "yes"],
+                         env=cenv,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL),
         subprocess.Popen([redis, "--port", str(rp), "--dir", rdir, "--save", "",
                           "--appendonly", "no"], env=cenv,
@@ -148,7 +157,7 @@ def main():
         print(f"FAIL — {len(diffs)} SORT divergence(s) vs redis 7.2.4 (C locale)")
         return 1
     print(f"PASS — SORT/SORT_RO semantics parity vs redis 7.2.4 "
-          f"({len(CASES)} cases, C-locale oracle; collation tracked in jaezc)")
+          f"({len(CASES)} cases, BOTH engines C-locale; collation tracked in jaezc)")
     return 0
 
 
