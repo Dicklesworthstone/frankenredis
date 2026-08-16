@@ -16956,6 +16956,61 @@ profile. Reopen the round-trip question only if a profile shows a rendered value
 being reparsed on some other path — the hash and set RESTORE decoders were checked
 and do not have one, because their consumers genuinely want the bytes.
 
+## 2026-08-16 GentleStream: COMPETITIVE — 91-round replication of the whole storeops set: BITOP AND is now ADMISSIBLE at 0.7568x, and all 12 routes reproduce within 3.1% (`frankenredis-9601c`)
+
+Claim class: COMPETITIVE. Campaign output: yes. Live vendored Redis 7.2.4 arm in the
+SAME invocation, balanced square, every row carrying its own A/A null. **13 of 13 rows
+admissible, 0 null-failed.**
+
+**What this settles.** The 61-round run below refused BITOP AND on its Redis-arm null
+(1.0266, outside ±0.02), so `frankenredis-9601c` could not close on half a result.
+Raising to **91 rounds** admits it — nulls **1.0005 / 1.0021** — at **0.7568x**,
+CI `[0.7458, 0.7673]`, **~0.679x** normalised against this run's 1.1151x GET control.
+BITOP AND is therefore a LOSS of the same size as its sibling BITOP NOT (~0.668x), and
+Redis 7.2.4 is roughly **1.47x faster** on both. More rounds is now the demonstrated
+knob for a straddling null on this host for the third time (21→31, 31→61, 61→91).
+
+**HARNESS:** `scripts/balanced_square_ab.py --shapes storeops --rounds 91
+--expect-elf fcc3c34f271f88cb`, square `ABBAABBA`, 50,000 ops/slot, `-P16`, null bound
+±0.02, bootstrap 95% CI, servers unpinned. Benchmark ran LOCALLY on thinkstation1;
+**RCH_WORKER `hz2`** only compiled the ELF, `--base HEAD --clean-overlay` (receipt
+`base=0d16db8a95ada65a84e0361925b8f5d70a100f6d`). fr server self-reported executable
+binary SHA-256 `fcc3c34f271f88cbb9bf0b6b51d405390b339fed87fd51d4ca4394fd8c2fd6f8`;
+the vendored Redis 7.2.4 arm self-reported executable binary SHA-256
+`e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`. 64 cores
+OBSERVED, governor `powersave`, ISA avx2.
+**CV is provenance only and is NEVER a gate here, the bootstrap median CI being the
+only decision rule.**
+**Same-invocation A/A null over all 26 arm-nulls:** median **1.000450x**, bootstrap
+95% median CI **[0.997750, 1.004100]**, n=26, percentile bootstrap, 4,096 resamples,
+fixed seed. Every one inside ±0.02.
+
+**THE REPLICATION IS THE POINT.** This is the same shape set, same ELF, same host,
+run independently at a different round count, and every one of the twelve routes lands
+within **3.1%** of its 61-round value — most within 2%:
+
+| row | 91 rounds | 61 rounds | delta | ÷ control (91) |
+|---|---:|---:|---:|---:|
+| ZUNIONSTORE 2-key | 1.4681x | 1.4646x | +0.2% | ~1.317x |
+| ZINTERSTORE 2-key | 1.3580x | 1.3558x | +0.2% | ~1.218x |
+| HMGET 9-field | 1.3219x | 1.3033x | +1.4% | ~1.185x |
+| ZMSCORE 9-member | 1.2527x | 1.2156x | +3.1% | ~1.123x |
+| EXISTS 8-key | 1.1532x | 1.1722x | −1.6% | ~1.034x |
+| GET control | 1.1151x | 1.1186x | −0.3% | — |
+| SCAN selective prefix | 1.0805x | 1.1042x | −2.1% | ~0.969x (a NULL) |
+| SUNIONSTORE 3-src | 0.8445x | 0.8503x | −0.7% | ~0.757x |
+| SDIFFSTORE 3-src | 0.8012x | 0.8146x | −1.6% | ~0.719x |
+| ZMPOP missing | 0.7860x | 0.7698x | +2.1% | ~0.705x |
+| SINTERSTORE 3-src | 0.7703x | 0.7920x | −2.7% | ~0.691x |
+| BITOP AND | 0.7568x | (refused) | — | ~0.679x |
+| BITOP NOT | 0.7452x | 0.7494x | −0.6% | ~0.668x |
+
+Every verdict below survives replication unchanged: the five losses stay losses, the
+five wins stay wins, and SCAN stays a null. The control itself moved 0.3%, which is
+what bounds how much of the per-row movement is real.
+
+**Retry predicate** and **invalidation conditions** are the same as the entry below.
+
 ## 2026-08-16 GentleStream: COMPETITIVE — the *STORE family, BITOP NOT and ZMPOP are a LOSS of 1.3-1.5x vs 7.2.4; multi-key reads and 2-key zset stores are wins (`frankenredis-8t4uu`, `frankenredis-ox2xq`, `frankenredis-uld9l`, `frankenredis-gdnqr`, `frankenredis-3nn63`, `frankenredis-fc7w0`, `frankenredis-9601c`)
 
 Claim class: COMPETITIVE. Campaign output: yes. Live vendored Redis 7.2.4 arm in the
