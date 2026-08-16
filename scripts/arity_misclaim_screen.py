@@ -280,6 +280,65 @@ def sweep():
     return 0
 
 
+def stranded():
+    """Commands with a cascade arm but NO floor class, and where it is safe to mint one.
+
+    p98mw, iqicb, tyujv and 50ntn are all asking the same two questions about
+    different commands: is this route classified, and if I classify it, at which
+    arity can I do so without claiming a shape the arm cannot serve. This answers
+    both in one table.
+
+    Cascade membership is `b"NAME"` appearing between the floor dispatch call and
+    the floor dispatch function -- crude, but it over-reports rather than
+    under-reports, and every row is meant to be confirmed by reading the arm.
+    """
+    src = open(MAIN, encoding="utf-8", errors="replace").read()
+    floor_call = src.index("try_dispatch_floor_classified_action(")
+    floor_fn = src.index("fn try_dispatch_floor_classified_action")
+    cascade = src[floor_call:floor_fn]
+
+    classified = set()
+    enum_start = src.index("enum BorrowedDispatchFloorCommand")
+    for m in re.finditer(r"^\s{4}(\w+),", src[enum_start:src.index("\n}", enum_start)],
+                         re.M):
+        classified.add(m.group(1).upper())
+
+    rows = []
+    for path in sorted(glob.glob(os.path.join(CMDS, "*.json"))):
+        name = os.path.basename(path)[:-5].upper()
+        if "-" in name or name in classified:
+            continue
+        token = 'b"%s"' % name
+        if token not in cascade:
+            continue
+        pos = cascade.index(token)
+        depth = src[:floor_call + pos].count("\n") - src[:floor_call].count("\n")
+        got = form_map(name)
+        if got is None:
+            safe = "unmodelled"
+        else:
+            _b, _w, forms = got
+            uniq = [n for n, f in sorted(forms.items()) if len(f) == 1][:6]
+            safe = ", ".join(str(n) for n in uniq) or "none"
+        rows.append((depth, name, safe))
+
+    print("STRANDED -- %d command(s) with a cascade arm and no floor class.\n"
+          "`safe arities` are lengths where exactly ONE form exists, so a class can\n"
+          "be minted there without a keyword check. Confirm each by reading the arm:\n"
+          "cascade membership here is a name match, which over-reports.\n" % len(rows))
+    print("DEPTH IS THE COST, NOT THE ABSENCE OF A CLASS. GET sits at depth ~358 with")
+    print("no floor class and measured 344.5 instr of dispatch at 0 parses -- a route")
+    print("at the top of the cascade is already cheap and is not a target. The routes")
+    print("worth classifying are the deep ones; ZRANGEBYSCORE's LIMIT arm is ~5,485")
+    print("deep and measured 9,755.4 (frankenredis-50ntn).\n")
+    print("  %-14s %8s   %s" % ("command", "depth", "safe arities"))
+    for depth, name, safe in sorted(rows):
+        mark = "   " if depth >= 1000 else " . "
+        print(" %s%-14s %8d   %s" % (mark, name, depth, safe))
+    print("\n  ( . = shallow enough that the walk is not the cost )")
+    return 0
+
+
 def const_values():
     """`const NAME: usize = N;` from the same file, so caps are read not guessed."""
     src = open(MAIN, encoding="utf-8", errors="replace").read()
@@ -528,6 +587,9 @@ def main():
             ambiguous.append((arity, cmd, cls, hits))
         else:
             clean.append((arity, cmd, cls, hits))
+
+    if "--stranded" in sys.argv:
+        return stranded()
 
     if "--sweep" in sys.argv:
         return sweep()
