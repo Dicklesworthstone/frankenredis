@@ -21496,3 +21496,84 @@ RETRY PREDICATE: do NOT take one of the three remaining bignum frames expecting 
 win — they are 34.5 pct spread evenly and are the representation, not an avoidable step.
 Prefer the 23 unworked shapes from the dispatch sweep, where the wins have been 37-43 pct
 and the mechanism is understood.
+
+--------------------------------------------------------------------------------
+CONFIRMED UNMOVED — expire_nx_opt still 51.0 pct dispatch on the current ELF: the last
+untaken rewire, and the largest dispatch share left on the board (frankenredis-z2ce3)
+
+My own predicate said to re-measure the remaining rewires on the current ELF before
+proposing anything, because two of three shapes checked that way had already crossed
+without my noticing. This one has not.
+
+CONVENTION: fr instructions per op / redis 7.2.4's. BELOW 1.0 = fr AHEAD.
+
+    A/A control (get_control)  0.4174 / 0.4008 / 0.3966      spread 5.2 pct
+
+    expire_nx_opt        ELF c36c3fb0…        ELF 11b0c675…       change
+      fr instr/op           4488.8               4509.6           +0.46 pct
+      dispatch share        51.0 pct             51.0 pct          NONE
+      dispatch instr/op    ~2290                 ~2298             none
+      fr/redis              1.0045x              1.0278x           see below
+
+    NEW ELF, four runs   fr 4507.3 / 4514.3 / 4508.7 / 4508.1   spread 0.16 pct
+                         redis 4337.7 / 4404.0 / 4407.2 / 4402.9  spread 1.6 pct
+                         ratio 1.0391 / 1.0250 / 1.0230 / 1.0239  spread 1.6 pct
+                         dispatch 51.0 pct, all four
+
+Monotonic on both arms in all four runs.
+
+UNMOVED IS THE RESULT. Dispatch share is identical to a tenth of a point across two
+independently built binaries and fr's own cost moved 0.46 pct. Three of four stranded
+rewires in this series crossed while I was measuring them; this one did not, so it is
+now the last one standing and the largest untaken dispatch share on the board.
+
+ON THE RATIO, AND WHY I AM NOT CLAIMING "ABOVE PARITY" DESPITE FOUR RUNS ABOVE 1.0.
+All four sit between 1.0230 and 1.0391, mean 1.0278 — a tighter picture than the
+previous session's 1.0045, because redis's arm behaved this time (1.6 pct against 7.0
+pct). But the A/A null was 5.2 pct, which is larger than the 2.8 pct deviation from
+parity being claimed. Within-session the comparison is tighter than that null suggests
+— fr 4509.6 at 0.16 pct against redis 4387.9 at 1.6 pct, a 121.7 instr/op gap that
+exceeds both arms' noise — but a cross-session null of 5.2 pct is the honest bound on
+the RATIO. Read it as AT-OR-JUST-ABOVE PARITY, combining to roughly 1.016 across both
+sessions. The dispatch share is the number to act on, and it is exact.
+
+PREDICTION, using the RESIDUAL CHARACTERISED IN THE PREVIOUS ROW rather than the
+reference route. Three landed rewires reached 522, 459 and 453 instr/op of dispatch,
+not get_control's 275.4. Taking ~460:
+
+    fr 4509.6 - (2298 - 460) = ~2,672 instr/op
+    against redis 4,387.9    = ~0.609x, from 1.0278x
+
+That is a 1.7x movement and it is now the largest single available win, since
+zadd_xx_opt has crossed. The estimate should be good to ~2 pct on the strength of three
+consecutive validations.
+
+STILL A REWIRE, unchanged from the earlier attribution: the floor claims (3, Expire)
+only; `parse_borrowed_plain_key_arg2_packet` with `b"*4\r\n$6\r\n"` and `b"EXPIRE"`
+sits in the cascade feeding `execute_plain_expire_cond_borrowed` (fr-runtime:19447).
+Claim arity 4 ONLY — arity 3 is already classified and must not be disturbed.
+
+AND THE SIBLING IS STILL FLAGGED AND STILL UNMEASURED:
+`execute_plain_expireat_cond_borrowed` (19479) exists, so EXPIREAT's conditional form
+is very likely stranded on identical terms. Nobody has measured it, including me.
+
+STANDINGS: sort_ro_alpha (1.52x) is the only shape above parity and is not a rewire.
+expire_nx_opt is the last untaken rewire. set_base (33.9 pct, absent from the token
+table) has not been re-measured on this ELF and, given the base rate, should be before
+anyone acts on it.
+
+PROVENANCE:
+  ELF sha256 (new)     11b0c67517b6130fac51679ec296db62d31163a6525c151f3c10e21ba86d4182
+                       built LOCALLY at HEAD 8ae6ea4b4 with RCH_CARGO_WRAPPER_BYPASS=1
+                       and env -u CARGO_TARGET_DIR, executable path from
+                       --message-format=json, COPIED to a private path and sha'd there.
+  ELF sha256 (old)     c36c3fb0a66033deff0cf03dc6a313ef647d5970cd22596aac575120a5d2a297
+  tree                 HEAD 8ae6ea4b4 plus a peer's uncommitted fr-server/src/main.rs.
+  harness              scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines in
+                       the SAME invocation.
+  host                 thinkstation1, 64 cores, /data 312G, no build this turn.
+
+RETRY PREDICATE: do NOT re-run expire_nx_opt for a tighter RATIO — the cross-session
+null is 5.2 pct and the shape sits within a few percent of parity. DO take the lever:
+it is the last rewire, the estimate is ~0.61x, and the method behind that estimate is
+three-for-three. Measure fr's own instr/op against the 4,509.6 baseline afterwards.
