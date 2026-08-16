@@ -113,6 +113,15 @@ SHAPES = {
     "zrem_missing": (["ZADD zr1 1 other"], ["ZREM", "zr1", "m"]),
     "hdel_1_missing": (["HSET hd1 other v"], ["HDEL", "hd1", "f"]),
     "del_1_missing": ([], ["DEL", "nosuchkey1"]),
+    # (frankenredis-l9wvl follow-up) The NO-COUNT pop forms. main.rs pins both as
+    # NOT classified on the stated grounds that each "keeps its existing dedicated
+    # route" -- the identical reasoning that was overturned for single-key DEL,
+    # where the route existed but sat in the cascade so reaching it cost the walk.
+    # Measured on a MISSING key so the op is a nil reply that mutates nothing:
+    # popping a real list would drain it across the 2N run and put real work into
+    # the slope, hiding the dispatch cost this is meant to isolate.
+    "lpop_nocount_missing": ([], ["LPOP", "nosuchlist"]),
+    "zpopmin_nocount_missing": ([], ["ZPOPMIN", "nosuchzset"]),
     "getset_same": (["SET gsk vvvvvvvvvvvvvvvv"], ["GETSET", "gsk", "vvvvvvvvvvvvvvvv"]),
     "lset_head": (["RPUSH lsk a b c d e f g h"], ["LSET", "lsk", "0", "a"]),
     "incrbyfloat_same": (["SET ibf 1.5"], ["INCRBYFLOAT", "ibf", "0"]),
