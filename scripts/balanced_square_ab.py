@@ -174,6 +174,51 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
         # without it none of the rows above can be normalised.
         ("get_control", ["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
     ],
+    # Multi-key reads and *STORE writes. (frankenredis-3nn63, frankenredis-gdnqr,
+    # frankenredis-fc7w0, frankenredis-uld9l, frankenredis-9601c, frankenredis-8t4uu,
+    # frankenredis-ox2xq)
+    #
+    # The *STORE commands WRITE, but they are safe to hammer because they are
+    # IDEMPOTENT: the destination is recomputed from unchanging sources, so request
+    # 50,000 produces exactly what request 1 did. That is a different property from
+    # the `mutnoop` set above, where the effect ACCUMULATED and the command had to be
+    # reduced to a no-op. ZMPOP genuinely pops, so it is measured on a missing key.
+    #
+    # Every shape here was probed on BOTH engines before registration: identical
+    # non-error reply, and the reply UNCHANGED after 200 repetitions.
+    "storeops": [
+        ("exists_8key", ["MSET e1 1 e2 1 e3 1 e4 1 e5 1 e6 1 e7 1 e8 1"],
+         ["EXISTS", "e1", "e2", "e3", "e4", "e5", "e6", "e7", "e8"]),
+        ("hmget_9field",
+         ["HSET hm f1 v1 f2 v2 f3 v3 f4 v4 f5 v5 f6 v6 f7 v7 f8 v8 f9 v9"],
+         ["HMGET", "hm", "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9"]),
+        ("zmscore_9member",
+         ["ZADD zm 1 m1 2 m2 3 m3 4 m4 5 m5 6 m6 7 m7 8 m8 9 m9"],
+         ["ZMSCORE", "zm", "m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8", "m9"]),
+        ("scan_prefix", ["MSET tenant:needle:1 1 tenant:decoy:1 1 tenant:decoy:2 1"],
+         ["SCAN", "0", "MATCH", "tenant:needle:*", "COUNT", "100"]),
+        ("zunionstore_2key", ["ZADD za 1 a 2 b 3 c 4 d", "ZADD zb 1 b 2 c 3 d 4 e"],
+         ["ZUNIONSTORE", "zdst", "2", "za", "zb"]),
+        ("zinterstore_2key", ["ZADD za 1 a 2 b 3 c 4 d", "ZADD zb 1 b 2 c 3 d 4 e"],
+         ["ZINTERSTORE", "zidst", "2", "za", "zb"]),
+        ("bitop_and", ["SET ba abcdefghijklmnop", "SET bb ponmlkjihgfedcba"],
+         ["BITOP", "AND", "bdst", "ba", "bb"]),
+        ("bitop_not", ["SET ba abcdefghijklmnop"], ["BITOP", "NOT", "bndst", "ba"]),
+        ("sunionstore_3src",
+         ["SADD sa m1 m2 m3 m4 m5", "SADD sb m3 m4 m5 m6 m7", "SADD sc m4 m5 m6 m7 m8"],
+         ["SUNIONSTORE", "sudst", "sa", "sb", "sc"]),
+        ("sinterstore_3src",
+         ["SADD sa m1 m2 m3 m4 m5", "SADD sb m3 m4 m5 m6 m7", "SADD sc m4 m5 m6 m7 m8"],
+         ["SINTERSTORE", "sidst", "sa", "sb", "sc"]),
+        ("sdiffstore_3src",
+         ["SADD sa m1 m2 m3 m4 m5", "SADD sb m3 m4 m5 m6 m7", "SADD sc m4 m5 m6 m7 m8"],
+         ["SDIFFSTORE", "sddst", "sa", "sb", "sc"]),
+        # ZMPOP pops, so it would drain any key it could reach; the missing-key form
+        # returns a null array and creates nothing.
+        ("zmpop_missing", [], ["ZMPOP", "1", "nosuchzset", "MIN"]),
+        # Control: GET is untouched by any of the dispatch work these rows measure.
+        ("get_control", ["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
+    ],
 }
 
 
