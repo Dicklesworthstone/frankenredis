@@ -19711,3 +19711,83 @@ own lever imposed.
 RETRY PREDICATE: attack `BigNat::div_small`. Before that, take the trailing-digit
 pre-check, which is nearly free and removes my lever's own 2.69 pct penalty on the shapes
 it declines.
+
+--------------------------------------------------------------------------------
+MEASURED — sort_ro_alpha is 1.526x and is the ONLY shape measured above parity; and
+the SORT_RO retraction's CAUSE IS FIXED (frankenredis-z2ce3)
+
+Screened six shapes absent from the refreshed inventory to find whether anything is
+worse than del_1_missing (0.7685x, previously "the worst"). One is, by a wide margin,
+and it is the only shape above 1.0 anywhere in the current standings.
+
+CONVENTION: fr instructions per op / redis 7.2.4's. BELOW 1.0 = fr AHEAD. This shape
+is ABOVE it.
+
+    screen (one run each)      sort_ro_alpha            1.5225x   <- WORST
+                               zpopmin_nocount_missing  0.6886x
+                               sintercard_base          0.5883x
+                               hrandfield_count         0.5608x
+                               memory_usage             0.4913x
+                               lrem_missing             0.4268x
+
+    sort_ro_alpha, four runs   fr instr/op    redis instr/op    fr/redis
+      run 1                      13026.6         8542.6          1.5249
+      run 2                      12972.7         8525.9          1.5216
+      run 3                      12989.0         8343.4          1.5568
+      run 4                      12971.8         8639.3          1.5015
+      spread                      0.42%           3.5%            3.7%
+      mean                       12990.0         8512.8          1.5262
+
+    get_control (A/A)            0.4350 / 0.4178                  4.0% spread
+
+MONOTONICITY HELD IN ALL FOUR RUNS, and that is the headline. `Ir(2N) > Ir(N)` on both
+arms with room to spare (fr 52.8M against 26.8M; redis 41M against 24M). The existing
+RETRACTION row in this ledger withdrew every SORT_RO instruction figure precisely
+because two-point subtraction failed on this shape — two of four runs violated
+monotonicity as ICU collation data loaded lazily in amounts that varied run to run and
+swamped a 2000-op signal.
+
+That no longer happens. The collator is now memoised behind a OnceLock, so the lazy
+load occurs once during warm-up rather than unpredictably inside the measured window.
+THE SHAPE THE LEDGER DECLARED UNMEASURABLE IS MEASURABLE AGAIN, and the retraction
+should be read as fixed-by-a-later-lever rather than as a permanent property. fr's
+12,990 instr/op is consistent with the ~13,274 recorded when that memo shipped.
+
+THE A/A NULL IS 4.0 PCT THIS SESSION AND BOUNDS WHAT MAY BE CLAIMED. get_control read
+0.4350 and 0.4178 — against 0.26 pct earlier today on the same binary and host, so
+the box is noisier now. The null is as large as the signal's own 3.7 pct spread.
+Therefore: the RANKING is safe (1.50-1.56 across four runs never approaches 1.0, and
+no plausible 4 pct error moves a 52 pct deficit to parity), but the PRECISION is not.
+Quote this as "about 1.5x, fr roughly 50 pct behind", never as 1.5262x.
+
+WHAT IT COSTS AND WHERE. fr spends 12,990 instr/op against redis's 8,513 — an
+absolute deficit of ~4,477 instr/op, the largest on the board in absolute terms as
+well as ratio. Of fr's total, DISPATCH IS 23.9 PCT — ~3,114 instr/op merely deciding
+which command this is, against 275.4 for get_control on the same binary. That is an
+order of magnitude more dispatch than a front-classified route pays and it alone is
+70 pct of the absolute deficit.
+
+So the obvious first lever is front-classification, NOT the collator: the collator memo
+already shipped and the remaining locale work is real work, whereas 3,114 instr/op of
+dispatch on a command that has a working executor is the same defect this campaign has
+been closing all day. NOT VERIFIED — I have not checked whether SORT_RO has a floor
+class, a borrowed parser or an executor, and the dispatch-share number alone does not
+prove a route exists to be reached. Attribute before proposing.
+
+PROVENANCE:
+  ELF sha256 (first 16)  c36c3fb0a66033de — built LOCALLY with
+                         RCH_CARGO_WRAPPER_BYPASS=1, env -u CARGO_TARGET_DIR,
+                         executable path from --message-format=json, COPIED to a
+                         private path and sha'd there. Contains 62ce27eb5.
+  tree                   HEAD plus a peer's uncommitted fr-server/src/main.rs; NOT
+                         reproducible from HEAD alone.
+  harness                scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines
+                         in the SAME invocation.
+  host                   thinkstation1, 64 cores, /data 320G, no build this turn.
+
+RETRY PREDICATE: do NOT re-run for a tighter ratio while the A/A null is 4 pct — wait
+for a quieter box or accept "about 1.5x". DO attribute the 23.9 pct dispatch share
+before writing any lever: check for a SORT_RO floor class, borrowed parser and
+executor, in that order. And note for anyone reading the older SORT_RO retraction: its
+cause was removed by the collator memo, so that row's "do not measure this shape"
+advice is now stale.

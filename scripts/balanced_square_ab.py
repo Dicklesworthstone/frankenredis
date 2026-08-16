@@ -350,12 +350,19 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
     #   sintercard_lim    generic       1.0434 [1.0126, 1.0742]  ADMISSIBLE
     #                     fast          1.0605 [1.0396, 1.0779]  ADMISSIBLE
     #
+    # REPLICATED on a SECOND ELF ab969ddb4dd88322db2c7809 -- same source, different
+    # compilation (codegen-units=1), so a one-off compilation artifact is ruled out:
+    #
+    #   zrangebyscore_l   generic 0.9876 [0.9605, 1.0073]  nulls 1.0072/0.9909
+    #                     fast    1.2634 [1.2381, 1.2977]  ADMISSIBLE
+    #                     -> 1.279x, against 1.280x on ELF1. Two ELFs, 0.1% apart.
+    #   sintercard_lim    fast    1.0777 [1.0192, 1.1095]  ADMISSIBLE
+    #
     # zrangebyscore_l was 0.7932 [0.7713, 0.7980] before the floor class landed
-    # (31b22f983), so this route crossed from the deepest below-parity row I held
-    # to 25% ahead. CAVEAT: no ADMISSIBLE row for it -- all three runs null-failed,
-    # and only run 1's nulls were off in the same direction. The direction and
-    # magnitude are not in doubt (disjoint intervals against its own generic arm on
-    # one ELF); the row is not banked to the replicated-standing convention.
+    # (31b22f983) -- the deepest below-parity row I held, itself replicated across
+    # two ELFs. It is now 26% ahead with an ADMISSIBLE row on ELF2 and disjoint
+    # fast-vs-generic intervals on BOTH ELFs. ELF1's three runs all null-failed;
+    # ELF2 supplies the admissible row, so the pair meets replicated standing.
     "unswept5": [
         ("getrange_full", ["SET s abcdefghijklmnop"], ["GETRANGE", "s", "0", "-1"]),
         ("lrange_neg", ["RPUSH l a b c d e"], ["LRANGE", "l", "-3", "-1"]),
