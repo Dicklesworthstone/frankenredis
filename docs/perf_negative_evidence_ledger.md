@@ -23496,3 +23496,78 @@ RETRY PREDICATE: do not quote a spread from fewer than ~6 samples; this row over
 five-sample figure on its seventh. And when a ranking margin is smaller than the winner's
 own spread, say so rather than reporting the order — bitcount_unit leads by 3.1 pct with a
 6.4 pct spread, which is not an ordering, it is a tie with a nominal winner.
+
+--------------------------------------------------------------------------------
+HYPOTHESIS REFUTED — the zrank_withscore dispatch gap is 186.6 instr/op, NOT the one
+extra argument's parse (frankenredis-z2ce3)
+
+The re-certification row flagged a 3-point dispatch gap between zrank_withscore (22.2
+pct) and zrank_base (19.3 pct) and explicitly did NOT claim it as a defect. This tests
+the obvious explanation and it does not survive.
+
+LOADAVG OBSERVED BY ME, both ends: 11.59 / 26.27 / 26.23 before, 9.71 / 23.22 / 25.18
+after. Under the ~30 defer line; instruction counts are load-immune regardless.
+
+CONVENTION: fr instructions per op / redis 7.2.4's. BELOW 1.0 = fr AHEAD.
+
+    A/A control (get_control)  0.4167 / 0.4156 / 0.4297      spread 3.4 pct
+
+    zrank_base        fr 1913.6 / 1914.1 instr/op   spread 0.03 pct   disp 19.3 pct
+                                                                      ~369.9 instr/op
+    zrank_withscore   fr 2487.4 / 2513.6            spread 1.05 pct   disp 22.2/22.3
+                                                                      ~556.5 instr/op
+
+zrank_base's numerator reproduced to 0.03 pct — the tightest figure in this entire
+campaign, and another datum for the load-immunity of instruction counting, taken while
+the 1-minute loadavg sat between 9.7 and 11.6.
+
+THE HYPOTHESIS AND ITS REFUTATION. ZRANK arity 4 is the WITHSCORE form only, so a single
+parser in that arm is CORRECT — this is not the half-chained shape found in the arity-6
+ZADD arm, and I checked before assuming. The remaining explanation offered was that
+WITHSCORE parses one more bulk than base, which by the constant this ledger established
+(parse_borrowed_plain_set_bulk = 48.0 instr per call, corroborated by two independent
+derivations) predicts a gap of ~48 instr/op.
+
+    predicted dispatch gap    ~48 instr/op   (one additional set_bulk)
+    measured dispatch gap     186.6 instr/op (556.5 - 369.9)
+    ratio to the constant     3.9x
+
+REFUTED. The gap is roughly four set_bulk calls' worth, not one. Whatever costs those
+extra ~139 instr/op is NOT the additional argument, and I am not going to invent a
+second mechanism to fit the number — that is the error this campaign has caught itself
+making five times.
+
+NOT ATTRIBUTED, AND NOT A DEFECT EITHER. Both shapes sit inside the 15.7-23.9 pct
+cheap-to-reach band established by the certified table, both are floor-classified, and
+neither shows the 46-58 pct signature of a mis-claim. So this is a cost question, not a
+routing question, and it does not belong on the stranded list.
+
+WHAT WOULD SETTLE IT, for whoever wants it: a frame-level comparison of the two arms in
+one callgrind session. The dispatch-share figure aggregates everything the harness
+attributes to "deciding which command", and 139 unexplained instr/op is small enough
+that only the frames will say whether it is a different parser, an extra keyword
+comparison, a wider packet struct, or reply-shape setup being counted on the dispatch
+side of the line.
+
+WHY THIS ROW EXISTS AT ALL: the previous row could have quietly dropped a 3-point gap it
+had labelled "unexplained". Testing the obvious explanation cost one measurement and
+produced a number that rules it out — which is more useful than the gap remaining
+unexamined, and cheaper than the alternative of someone later "explaining" it with the
+first plausible story.
+
+PROVENANCE:
+  ELF sha256           773d819de62d62d7f496b2a1df8e82bd645228e9e366e64c6294190ffa6d8e2d
+                       built LOCALLY at HEAD from a CLEAN tree with
+                       RCH_CARGO_WRAPPER_BYPASS=1 and env -u CARGO_TARGET_DIR,
+                       executable path from --message-format=json, COPIED to a private
+                       path and sha'd there. REPRODUCIBLE FROM HEAD ALONE.
+  harness              scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines in
+                       the SAME invocation, two runs per shape.
+  host                 thinkstation1, 64 cores, /data 298G, no build this turn.
+  loadavg              11.59/26.27/26.23 before, 9.71/23.22/25.18 after.
+
+RETRY PREDICATE: do NOT re-measure the ZRANK pair with this harness — the shares are
+exact and the question is now below its resolution. If the 139 instr/op matters, take
+callgrind frames for both arms in one session. Neither shape is a routing defect and
+neither belongs on the untaken-lever list; set_base at 33.9 pct remains the only entry
+there.
