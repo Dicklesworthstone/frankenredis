@@ -250,6 +250,74 @@ def advise(cmd):
     return 0
 
 
+# Snapshot 2026-08-16, AFTER the arity-6 ZADD fix (7e5657839). {class: chained}.
+# The point of a baseline here is narrow and specific: ZaddTwoPair sat in this table
+# at chained=1 while ZaddFlag was at 2, the screen printed both among twenty-two
+# ambiguous rows, and the regression shipped anyway. Reporting was never the problem.
+# So a DROP in any class's chain count, or a NEW ambiguous class arriving with fewer
+# parsers than its readings, now FAILS rather than printing.
+#
+# It deliberately does not baseline `readings`: that number comes from the incumbent's
+# grammar and changing it means the vendored Redis moved, which is a different event
+# needing a different conversation.
+CHAIN_BASELINE = {
+    "ExpireCond": 1,
+    "ExpireatCond": 1,
+    "GetexExpire": 1,
+    "LposRank": 1,
+    "PexpireCond": 1,
+    "PexpireatCond": 1,
+    "ZaddFlag": 2,
+    "ZaddTwoPair": 2,
+    "Zdiff2": 1,
+    "ZrangeWithscores": 2,
+}
+
+
+def guard():
+    """Fail when an arm chains FEWER parsers than the baseline, or a new one appears.
+
+    A low chain count is not itself a defect -- ExpireCond serves four readings with
+    one generic parser because the executor resolves the token downstream. What is
+    always worth stopping for is a class that USED to chain N and now chains fewer,
+    or a newly ambiguous class nobody has looked at.
+    """
+    chained = arm_parsers()
+    seen, bad = set(), []
+    for arity, cmd, cls in floor_claims():
+        got = form_map(cmd)
+        if got is None:
+            continue
+        _base, _w, forms = got
+        hits = forms.get(arity, [])
+        if len(hits) < 2:
+            continue
+        name = cls.replace(" (range)", "")
+        seen.add(name)
+        now = chained.get(name, 0)
+        was = CHAIN_BASELINE.get(name)
+        if was is None:
+            bad.append("%s (%s arity %d) is newly AMBIGUOUS -- %d readings, %d "
+                       "parser(s) chained. Read the arm and add it to the baseline "
+                       "deliberately." % (name, cmd, arity, len(hits), now))
+        elif now < was:
+            bad.append("%s chains %d parser(s), baseline %d. An arm that stopped "
+                       "trying a parser is how the arity-6 ZADD regression happened."
+                       % (name, now, was))
+
+    for name in sorted(set(CHAIN_BASELINE) - seen):
+        print("  note: %s is no longer ambiguous; drop it from the baseline when "
+              "convenient" % name)
+
+    for line in bad:
+        print("FAIL: " + line)
+    if bad:
+        return 1
+    print("guard: %d ambiguous classes, none chaining fewer parsers than baseline"
+          % len(seen))
+    return 0
+
+
 def arm_parsers():
     """{class name: number of DISTINCT parsers its dispatch arm chains}.
 
@@ -651,6 +719,9 @@ def main():
 
     if "--stranded" in sys.argv:
         return stranded()
+
+    if "--guard" in sys.argv:
+        return guard()
 
     if "--sweep" in sys.argv:
         return sweep()
