@@ -24727,3 +24727,85 @@ RETRY PREDICATE: do NOT re-run this audit. DO take min-of-K on the redis arm for
 within ~10 pct of 1.0, and say which estimator a row used. A single redis pair is fine for
 1.35x and useless for 1.05x — which is what the docstring said before I started, and what
 this row now has the correlation to justify.
+
+## MEASURED (frankenredis-set-arity-fast-reject-68vf8) — PLACEMENT AUDIT of shape_instr_per_op.py: the arms cannot contend, but the fr arm still moves 2.2 pct, and it is LOAD not core identity. Correcting my own -4.23 pct to a range
+
+Claim class: METHOD + CORRECTION OF A BANKED ROW.
+
+The fleet's placement audits came back mixed, so this measures the effect on THIS harness
+rather than inheriting anyone's conclusion. Host: 64 threads / 32 physical cores, 2-way
+SMT, observed core spread 1429-4293 MHz (3.00x).
+
+STRUCTURE FIRST. `scripts/shape_instr_per_op.py` runs the arms SEQUENTIALLY -- fr at
+line 793, redis at 804 -- so the two arms cannot contend with each other. That is the
+networkx case and it is where I expected the audit to end.
+
+IT DID NOT END THERE. Pinned to cpu4, toggling only the SMT sibling cpu36:
+
+    condition            fr instr/op        redis instr/op
+    A sibling idle       1339.6, 1339.8     3195.5, 3263.6
+    B sibling busy       1309.5, 1331.5     3138.1, 3136.6
+
+Both B values sit BELOW both A values, and the A pair agrees to 0.015%. So co-residency
+moves the fr arm by up to 2.2%.
+
+THE MECHANISM IS THE WORKLOAD, NOT THE COUNTER, and the distinction is the point. A
+callgrind Ir count cannot be changed by clock rate -- I demonstrated that separately, where
+an LZF delta reproduced at +1,388.0 instr/op twice across a 44-point loadavg swing and ~500
+MHz between arms. But that was a SINGLE-PROCESS COMPUTE LOOP. This harness is a
+CLIENT-SERVER pair, and timing changes the WORK ITSELF: how many commands arrive per
+`read()` sets the per-op amortised syscall cost. The simulator is still exact; it is
+faithfully counting a different amount of work. Same instrument, different exposure.
+
+PINNING DOES NOT FIX IT, because core identity is not the variable:
+
+    condition                   fr arm spread   null (get_control)
+    loadavg 16-17, UNPINNED         0.22-0.28%       +0.07%
+    loadavg 37-48, PINNED TO cpu4    1.04-2.20%       -0.80%
+
+Pinning to one core leaves the client and server contending with 60+ other busy threads.
+The precision of this harness is governed by HOST LOAD, and a quiet window buys more than
+an affinity mask does.
+
+CORRECTION TO THE ROW I BANKED. I reported the arity fast-reject at -4.23% from the
+low-load unpinned window (null +0.07%). Re-measured pinned at loadavg 37-48, 3 interleaved
+rounds:
+
+    BASE fr  3226.3, 3264.3, 3226.8   mean 3239.1
+    MINE fr  3118.9, 3118.5, 3151.1   mean 3129.5   -> -3.38%
+
+but that window's null was -0.80%, so it does not supersede the quiet one either. The
+honest statement is that the lever is **-3.4% to -4.2% depending on measurement
+conditions**, not -4.23% flat. The code and its structural safety argument are unchanged.
+
+WHAT IS ACTUALLY INVARIANT, and what I should have led with: the DISPATCH SHARE. Across
+every run in both conditions, at both load regimes, pinned and unpinned:
+
+    BASE  30.4%, 30.5%, 30.6%      MINE  27.5%, 27.5%, 27.5%, 27.5%, 27.5%
+
+A 3.0 percentage-point drop, reproducible to 0.1pp, and the MINE arm reported exactly
+27.5% five times out of five. It is a RATIO INTERNAL TO ONE RUN, so the batching effect
+that moves the absolute instr/op divides out of it. For a dispatch lever this is the
+better claim than the absolute delta.
+
+REUSABLE: before quoting an instr/op delta from a client-server harness, run the null at
+the SAME load you measured at and require it inside the arm's own spread. "Callgrind is
+deterministic" licenses the counter, not the workload.
+
+RETRY PREDICATE. Do NOT re-run the SMT toggle or re-pin: core identity was measured and
+is not the variable. Two concrete conditions would justify reopening this surface:
+
+  1. RE-MEASURE THE ARITY LEVER when the host holds loadavg <= 20 for the whole run and
+     `get_control` comes back inside +/-0.3%. That is the only condition under which the
+     absolute delta can be tightened from the -3.4%/-4.2% range to a single figure. If
+     the null misses +/-0.3%, the run does not count and the range stands.
+  2. REOPEN THE HARNESS ITSELF if `scripts/shape_instr_per_op.py` is ever changed to
+     drive the server with a pipelined or fixed-batch client. That would remove the
+     read()-batching channel this row identifies, and the fr arm's 2.2% co-residency
+     sensitivity should then fall to zero -- a claim that must be re-measured, not
+     assumed, using the same cpu4/cpu36 sibling toggle recorded above.
+
+For the arity lever specifically the surface is CLOSED unless condition 1 is met: the
+dispatch share (30.5% -> 27.5%, five of five runs at exactly 27.5%) is already invariant
+across both load regimes and both pinning conditions, so no further measurement can move
+the claim that the lever works -- only the size of its absolute delta is open.
