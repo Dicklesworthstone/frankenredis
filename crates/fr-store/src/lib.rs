@@ -20628,7 +20628,9 @@ impl Store {
         else {
             return Ok(Vec::new());
         };
-        let mut out: Vec<Vec<u8>> = match smallest.as_generic() {
+        // (frankenredis-gein3) no longer `mut`: the reply is returned exactly as the
+        // survivor walk produced it, because the sort that used to mutate it is gone.
+        let out: Vec<Vec<u8>> = match smallest.as_generic() {
             // String smallest set: walk it once, keep members present in every
             // other set, copy survivors directly into the output Vec (no result
             // set). Byte-identical to the prior path after the shared sort.
@@ -20690,8 +20692,18 @@ impl Store {
                 res.iter().map(|m| m.into_owned()).collect()
             }
         };
-        // (CrimsonHawk) sort_unstable: SINTER members are unique — byte-identical, pdqsort, no scratch alloc.
-        out.sort_unstable();
+        // (frankenredis-gein3) NO SORT. Redis 7.2.4's sinterGenericCommand (t_set.c:1277)
+        // sorts nothing: it qsorts the SETS by cardinality to pick the smallest to iterate
+        // — which `sinter_prepare` also does — and then streams members straight out of
+        // that iterator. There is no sort of the RESULT anywhere in it.
+        //
+        // fr's sort was not keeping us byte-identical to the incumbent, it was what made us
+        // DIVERGE. Measured live against 7.2.4 on a 4-member listpack intersection:
+        //     redis  zeta alpha mike bravo      (insertion order, as the listpack holds it)
+        //     fr     alpha bravo mike zeta      (sorted)
+        // Dropping the sort makes fr emit its own iteration order, which for a packed set
+        // IS insertion order — the same thing redis emits. Above set-max-listpack-entries
+        // both engines hash and neither order is specified, so nothing is promised there.
         Ok(out)
     }
 
@@ -20760,7 +20772,7 @@ impl Store {
                     }
                     survivors.push(member);
                 }
-                survivors.sort_unstable();
+                // (frankenredis-gein3) see `sinter`: redis sorts no SINTER result.
                 sink(SmembersScanEvent::Len(survivors.len()));
                 for m in survivors {
                     sink(SmembersScanEvent::Member(m));
@@ -20779,8 +20791,8 @@ impl Store {
                         res.retain_intersect(s);
                     }
                 }
-                let mut v: Vec<Vec<u8>> = res.iter().map(|m| m.into_owned()).collect();
-                v.sort_unstable();
+                // (frankenredis-gein3) see `sinter`: redis sorts no SINTER result.
+                let v: Vec<Vec<u8>> = res.iter().map(|m| m.into_owned()).collect();
                 sink(SmembersScanEvent::Len(v.len()));
                 for m in &v {
                     sink(SmembersScanEvent::Member(m));

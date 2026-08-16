@@ -555,6 +555,54 @@ CASES = [
     ("SET", "so:plain", "v"),
     ("GET", "so:plain"),
 
+    # ---- SINTER, which had ZERO rows and a LIVE ORDER DIVERGENCE ----
+    #
+    # (frankenredis-gein3) fr used to `sort_unstable()` the SINTER reply at three sites;
+    # redis 7.2.4's sinterGenericCommand (t_set.c:1277) sorts NOTHING -- it qsorts the SETS
+    # by cardinality to choose the smallest to iterate, then streams members straight out
+    # of that iterator. So the sort was not what kept fr byte-identical to the incumbent,
+    # it was what made fr DIVERGE, and with no SINTER row in this corpus nothing caught it.
+    # Measured live before the fix: redis "zeta alpha mike bravo", fr "alpha bravo mike zeta".
+    #
+    # THE MEMBERS ARE INSERTED IN NON-SORTED ORDER ON PURPOSE. With sorted input a
+    # re-introduced sort is invisible, because sorted(insertion order) == insertion order
+    # and every row stays green while the bug is back. `zeta` first is the whole test.
+    #
+    # SCOPE, stated because it bounds what these rows prove: every set here stays under
+    # set-max-listpack-entries (128), where BOTH engines keep a listpack and iterate it in
+    # insertion order, so the order is deterministic and comparable. Above that threshold
+    # both engines hash and neither documents an order -- these rows deliberately do not
+    # go there, and a corpus row that compared hashtable-regime order would be asserting
+    # something redis does not promise.
+    ("DEL", "si:a", "si:b", "si:c", "si:str"),
+    ("SADD", "si:a", "zeta", "alpha", "mike", "bravo"),
+    ("SADD", "si:b", "zeta", "alpha", "mike", "bravo"),
+    ("SINTER", "si:a", "si:b"),          # -> insertion order, NOT sorted
+    ("SINTERCARD", "2", "si:a", "si:b"),
+    # three-way, and a partial intersection so the surviving ORDER is a strict subsequence
+    # of the base set's insertion order rather than the whole of it
+    ("SADD", "si:c", "mike", "zeta"),
+    ("SINTER", "si:a", "si:b", "si:c"),
+    ("SINTER", "si:c", "si:a"),          # smallest-set-first pick changes which set drives
+    # single member: the degenerate case where order cannot discriminate, kept as a control
+    ("SADD", "si:one", "solo"),
+    ("SINTER", "si:one", "si:one"),
+    # empty intersection, and a missing key, which redis treats as the empty set
+    ("SADD", "si:d", "nothing"),
+    ("SINTER", "si:a", "si:d"),
+    ("SINTER", "si:a", "si:absent"),
+    ("SINTER", "si:absent", "si:a"),
+    ("SINTERCARD", "2", "si:a", "si:absent"),
+    # wrong type through the same route -- error text must come back verbatim
+    ("SET", "si:str", "v"),
+    ("SINTER", "si:a", "si:str"),
+    ("SINTER", "si:str", "si:a"),
+    # SINTERSTORE consumes the same survivor walk; the stored set must hold the same
+    # members, and SMEMBERS of it must not have been sorted on the way in either
+    ("SINTERSTORE", "si:dst", "si:a", "si:b"),
+    ("SMEMBERS", "si:dst"),
+    ("SCARD", "si:dst"),
+
     # ---- PING, which had ZERO rows despite owning two cascade arms ----
     #
     # PING is served by parse_borrowed_plain_ping_upper_noarg_packet (an exact match on

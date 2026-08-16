@@ -25303,3 +25303,83 @@ on both arms and report a range, never a point. To settle gein3's sort the ideal
 one whose reply is SMALL but whose SURVIVOR COUNT is large; that combination cannot exist,
 so the honest instrument is a direct microbench of the sort inside fr-store rather than an
 end-to-end shape.
+
+## MEASURED (frankenredis-gein3) — the SINTER k=14.2 crossover is REFUTED: it fitted one line across an ENCODING boundary. fr leads to k=128 and is behind only above it. And the sort was a live PARITY divergence, not a perf lever
+
+Claim class: CORRECTION OF A BANKED MODEL + PARITY FIX.
+
+THE ROW ABOVE PREDICTED A CROSSOVER AT k=14.2 from two points, k=2 and k=512, and warned
+in its own words that "A ONE-POINT SHAPE MEASURES A COMMAND'S INTERCEPT AND CALLS IT THE
+COMMAND." The two-point fit made the same error one level up: those two points sit in
+DIFFERENT COMPLEXITY REGIMES, so no single line through them means anything.
+
+MEASURED, filling in the region the model extrapolated across. Same harness, same method
+(callgrind two-point slope), fr ELF e71790cb8bb512108a01a05b9eced0501073e402921733b429d945e8d5abbf18.
+loadavg 12.6-19.2 and mean CPU MHz 2437-3590 recorded per run; a retired-instruction count
+is immune to both, and the placement question is closed fleet-wide.
+
+    k      fr instr/op    redis instr/op    ratio      set encoding
+      2        4,388.7          8,622.1    0.5090      listpack
+      8        6,905.0         15,705.9    0.4396      listpack
+     12        9,797.2         22,713.7    0.4313      listpack
+     14       11,346.8         26,556.7    0.4273      listpack   <- model predicted 1.0 HERE
+     16       13,000.6         30,540.0    0.4257      listpack
+     24       21,589.1         51,610.4    0.4183      listpack
+     48       63,839.3        148,868.4    0.4288      listpack
+    100      245,135.6        534,081.4    0.4590      listpack
+    128      386,695.2        841,704.3    0.4594      listpack
+    140      111,314.9        132,984.5    0.8371      hashtable
+    256      338,776.0        236,022.7    1.4354      hashtable
+    512      837,754.8        472,612.6    1.7726      hashtable
+
+AT k=14 THE RATIO IS 0.4273, NOT 1.0. fr is 2.3x FASTER there, and the ratio IMPROVES with
+k across the whole listpack regime rather than degrading. The predicted crossing does not
+exist.
+
+THE REAL BOUNDARY IS THE SET ENCODING, and it was verified rather than inferred:
+`OBJECT ENCODING` on BOTH engines returns `listpack` at k=128 and `hashtable` at k=140,
+with `set-max-listpack-entries 128` on both. Note the ABSOLUTE cost FALLS across it --
+fr 386,695 -> 111,315 and redis 841,704 -> 132,985 -- because a listpack intersection is
+O(n*m) linear scans while a hashtable one is O(n) probes. Fitting a line from a point
+inside the quadratic regime to a point inside the linear one produces a crossover that is
+an artefact of the fit.
+
+    listpack  regime (k <= 128)   fr AHEAD, 0.4183x - 0.5090x
+    hashtable regime (k >  128)   fr BEHIND, and worsening: 0.8371x, 1.4354x, 1.7726x
+
+So fr's worst vs-incumbent ratio on this command is 1.77x at k=512, it lives ENTIRELY in
+the hashtable regime, and the useful question is not "where is the crossover" but "why is
+fr's hashtable-set membership path behind while its listpack path is 2.3x ahead". My k=512
+came out 1.7726x where the earlier row banked 1.3764x on the same shape; both are in the
+same direction and class, but the earlier absolute (fr 645,573) does not reproduce here
+(837,755), so treat the magnitude as unsettled and the DIRECTION as solid.
+
+THE SORT WAS A PARITY BUG, WHICH IS NOT WHAT THE BEAD FILED IT AS. gein3 filed fr's
+`sort_unstable()` as pure added work; the callgrind profile in the row above then found NO
+sort function anywhere and the lever looked dead. It was not dead -- it was misfiled.
+Measured live against 7.2.4, 4 members inserted in non-sorted order, both listpack:
+
+    redis 7.2.4   SINTER -> zeta alpha mike bravo     (insertion order)
+    frankenredis  SINTER -> alpha bravo mike zeta     (sorted)   <- DIVERGENCE
+
+redis's sinterGenericCommand (t_set.c:1277) sorts the SETS by cardinality to choose which
+to iterate and then streams members straight out of that iterator; it sorts no result. The
+three fr sort sites are removed, and fr now returns `zeta alpha mike bravo` -- byte-equal
+to the incumbent.
+
+CORPUS, which is the reason this went unnoticed: `scripts/dispatch_route_differ.py` had
+ZERO SINTER rows. 21 added, and the members are inserted in NON-SORTED order deliberately,
+because with sorted input a re-introduced sort is invisible (sorted(insertion) ==
+insertion) and every row stays green while the bug is back. Rows stay under
+set-max-listpack-entries on purpose: above it both engines hash and neither documents an
+order, so asserting one there would pin something redis does not promise. Gate: 366 cases,
+0 disagreements. MUTATION: re-introducing `out.sort_unstable()` turns `SINTER si:a si:b`
+RED (fast arm [alpha,bravo,mike,zeta] vs generic and redis [zeta,alpha,mike,bravo]).
+
+RETRY PREDICATE. Do NOT re-measure the listpack regime or look for a crossover below
+k=128; nine points say there is none. DO reopen if either of these becomes true:
+  1. `set-max-listpack-entries` is changed from 128 on either engine -- the entire
+     boundary moves with it and every ratio above is regime-labelled by that constant.
+  2. A lever targets hashtable-set membership. That is where the whole 1.77x lives, and
+     the measurement to beat is k=256 and k=512 with `OBJECT ENCODING` asserted as
+     `hashtable` on both arms before the numbers are read.
