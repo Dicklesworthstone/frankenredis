@@ -100,10 +100,29 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
     "cascade": [
         ("sintercard", ["SADD sc:a m1 m2 m3", "SADD sc:b m2 m3 m4"],
          ["SINTERCARD", "2", "sc:a", "sc:b"]),
+        # (frankenredis-mnzgy) The next three do NOT meet the admission bar
+        # this file states, and scripts/shape_admission_probe.py flags them. They
+        # are annotated rather than removed, because deleting another agent's
+        # registered shapes is not this audit's call -- but do not read a ratio
+        # off them without reading this first.
+        #
+        # zrandmember/srandmember are RANDOM: the reply differs run to run and
+        # between engines, and its LENGTH differs too ("m9" is 2 bytes, "m10" is
+        # 3), so the two arms do not write identical byte counts. The per-call
+        # work is comparable, so the rows are indicative, not byte-exact.
         ("zrandmember", ["ZADD zz 1 a 2 b 3 c 4 d"], ["ZRANDMEMBER", "zz", "2"]),
         ("srandmember", ["SADD sbig m1 m2 m3 m4 m5 m6 m7 m8 m9 m10"],
          ["SRANDMEMBER", "sbig", "2"]),
-        ("copy", ["SET kk vvvvvvvvvvvvvvvv"], ["COPY", "kk", "kdst"]),
+        # COPY without REPLACE returned 1 on the FIRST call and 0 on every call
+        # after, so 19,999 of 20,000 ops measured the destination-exists early
+        # return rather than a copy -- the row was named "copy" and measured a
+        # no-op. REPLACE makes every op perform the copy and return 1, which is
+        # both what the name promises and stable under repetition.
+        ("copy", ["SET kk vvvvvvvvvvvvvvvv"], ["COPY", "kk", "kdst", "REPLACE"]),
+        # pttl's VALUE drifts (it returns remaining ms), but the digit count -- and
+        # so the reply byte length and the work done -- is constant at this TTL
+        # magnitude: 900000000 loses ~100ms over a 20k-op run and stays 9 digits.
+        # A SMALLER TTL here would change reply length mid-run and break the row.
         ("pttl", ["SET bb abcdefghijklmnop", "PEXPIRE bb 900000000"], ["PTTL", "bb"]),
         ("expiretime", ["SET kk vvvvvvvvvvvvvvvv", "EXPIREAT kk 4102444800"],
          ["EXPIRETIME", "kk"]),

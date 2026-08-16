@@ -135,12 +135,58 @@ def probe(client, seeds, cmd):
     return first, last
 
 
+def audit_registered(fr, rd):
+    """(frankenredis-mnzgy) Check EVERY shape balanced_square_ab has registered.
+
+    The bar is stated in that file and was applied by hand, per shape, as each was
+    added; nothing ever checked the set as a whole. Four of sixty did not meet it,
+    and one of those -- `copy` without REPLACE -- was measuring a destination-
+    exists early return on 19,999 of 20,000 ops under a row named "copy".
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "bsq", os.path.join(ROOT, "scripts", "balanced_square_ab.py"))
+    mod = importlib.util.module_from_spec(spec)
+    argv, sys.argv = sys.argv, ["x", "--list"]
+    try:
+        spec.loader.exec_module(mod)
+    except SystemExit:
+        pass
+    finally:
+        sys.argv = argv
+    bad, total = [], 0
+    for setname, entries in sorted(mod.SHAPE_SETS.items()):
+        for name, seeds, cmd in entries:
+            total += 1
+            f1, f2 = probe(fr, seeds, [str(x) for x in cmd])
+            r1, r2 = probe(rd, seeds, [str(x) for x in cmd])
+            why = []
+            if f1.startswith(b"-") or r1.startswith(b"-"):
+                why.append("ERROR reply")
+            if f1 != f2:
+                why.append("fr reply DRIFTS")
+            if r1 != r2:
+                why.append("redis reply DRIFTS")
+            if f1 != r1:
+                why.append("engines DISAGREE")
+            if why:
+                bad.append((setname, name, "; ".join(why)))
+    print("audited %d registered shapes" % total)
+    for s_, n_, w_ in bad:
+        print("  NON-CONFORMING  %-11s %-20s %s" % (s_, n_, w_))
+    return bad
+
+
 def main():
     fr_bin = sys.argv[1]
+    audit_all = "--audit-registered" in sys.argv[2:]
     fr_proc, fr = boot(fr_bin, [])
     rd_proc, rd = boot(REDIS, [])
     admit, reject = [], []
     try:
+        if audit_all:
+            audit_registered(fr, rd)
+            return
         for name, seeds, cmd in CANDIDATES:
             f1, f2 = probe(fr, seeds, cmd)
             r1, r2 = probe(rd, seeds, cmd)
