@@ -21739,3 +21739,67 @@ been confirmed unmoved on two ELFs. DO take option (B); the span is verified cle
 it is the lower-risk of the two fixes. Verify after landing that the SET option forms
 (NX/XX/EX/GET) did not regress — they are the shapes an ordering change could disturb,
 and they are cheap to check with set_xx_opt and set_ex_opt.
+
+## MEASURED (frankenredis-p98mw) — multi-key TOUCH is 3.2848x, 73.9 pct dispatch: the worst ratio in this campaign, and it is a defect I introduced
+
+Claim class: COMPETITIVE — fr and the vendored Redis 7.2.4 binary in the SAME invocation.
+Same provenance limitation as the rows above (valgrind hosts the target, so no
+self-reported ELF SHA; ABBA repeats, not a bootstrap CI).
+
+    run  shape           fr instr/op   redis 7.2.4   fr/redis   dispatch share
+    A    touch_2            12208.4        3716.6     3.2848x       73.9%
+    B    touch_missing       1695.6        2649.0     0.6401x       20.3%   <- CONTROL
+    B    touch_missing       1662.1        2703.1     0.6149x       20.4%   <- CONTROL
+    A    touch_2            12213.9        3810.7     3.2052x       73.8%
+
+**fr retires 3.28x MORE instructions than Redis 7.2.4 on `TOUCH k1 k2`.** Every other
+shape measured in this campaign sits between 0.35x and 0.78x; the previous worst was
+expire_nx_opt at 1.0354x. This is not a marginal row — 12,208 instr/op against the
+incumbent's 3,717.
+
+ONE EXTRA KEY COSTS 7.2x. `TOUCH nosuchkey` (arity 2) is 1,696 instr/op at 20.3 pct
+dispatch. `TOUCH tk1 tk2` (arity 3) is 12,208 at 73.9 pct. The executor work for a second
+key is trivial; the 10,512 instr/op difference is almost entirely dispatch — ~9,022 of it
+by share. **A 73.9 pct dispatch share is beyond the 40-70 pct stranded band this campaign
+uses as its screen**, which is the signature of paying the cascade walk AND the generic
+fallthrough rather than either alone.
+
+THIS IS MY DEFECT AND I FOUND IT BY TESTING MY OWN LEVER'S EXCLUSION. On
+frankenredis-p98mw I front-classified TOUCH at `(2, Touch)` EXACTLY, with a comment
+arguing the exact-arity claim was the careful choice because "only the smallest form of
+each has a borrowed parser" and a wider claim would strand shapes on generic. The
+reasoning was right in general and WRONG about TOUCH: a later source sweep found parser
+call sites pinning TOUCH at arities 3, 4 and 5. So the exact claim left three real shapes
+in the cascade, and the commonest multi-key form now measures 3.28x behind the incumbent.
+
+**NO EXISTING SHAPE COULD SEE IT.** `touch_missing` is arity 2 — the form I classified —
+so it measured 0.6401x and reported healthy while its siblings walked. That is the
+general trap, and it is worth stating plainly: **a lever's own shape cannot detect the
+shapes the lever excluded.** Any exact-arity claim needs a shape at arity N+1 to prove the
+exclusion was harmless, and this campaign has landed several exact-arity claims without
+one — TOUCH, MSETNX, ZADD base, BITCOUNT range, and the four expire conditionals.
+
+A/A NULL, from the ABBA repeats in this one invocation:
+
+    fr arm      touch_2        12208.4 -> 12213.9   +0.05%   <- essentially exact
+                touch_missing   1695.6 -> 1662.1    -1.98%
+    redis arm   touch_2         3716.6 -> 3810.7    +2.53%
+                touch_missing   2649.0 -> 2703.1    +2.04%
+    ratio       touch_2 3.2848 -> 3.2052  2.42%  |  missing 0.6401 -> 0.6149  3.94%
+
+A 228 pct deviation from parity clears a 2.4 pct spread by two orders.
+
+EXECUTABLE IDENTITIES, full 64-hex (computed post-run, see limitation above):
+  candidate  `77982cb5a457e48794c4842140d304437e2b98766b3311ad3354568bb24ac7f9`
+  incumbent  `e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7`
+  tree       0d0bcd5aa; NO rebuild — no crate code had changed since that binary, and the
+             shape added here is Python.
+
+Campaign output: yes — the campaign's worst measured shape, found by writing the shape
+that could see a gap my own lever created.
+
+RETRY PREDICATE: claim TOUCH at arities 3, 4 and 5 — the parsers exist and the cascade
+arms show what to mirror. THEN write an arity-N+1 shape for every other exact-arity claim
+this campaign has landed (MSETNX, ZADD base, BITCOUNT range, the four expire
+conditionals) before assuming any of them is harmless; TOUCH is proof that the exclusion
+can be worse than the claim was good.

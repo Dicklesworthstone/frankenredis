@@ -189,6 +189,17 @@ SHAPES = {
     # 0.8730 and 1.0919, so any explanation has to account for both.
     "lset_same": (["RPUSH l a b c"], ["LSET", "l", "0", "a"]),
     "touch_missing": ([], ["TOUCH", "nosuchkey"]),
+    # (frankenredis-p98mw) MULTI-KEY TOUCH, the arity-3 form, paired with touch_missing
+    # (arity 2) so the two differ ONLY by key count.
+    #
+    # This exists because of a mistake in my own lever. I front-classified TOUCH at
+    # `(2, Touch)` EXACTLY, on the stated reasoning that only the single-key form had a
+    # borrowed parser. A later source sweep found parser call sites pinning TOUCH at
+    # arities 3, 4 and 5 as well, so the exact-arity claim left those three stranded.
+    # There was no shape that could see it: touch_missing is arity 2 and measures the
+    # form I DID classify, so it reported healthy while three siblings walked the
+    # cascade. A lever's own shape cannot detect the shapes the lever excluded.
+    "touch_2": (["SET tk1 v", "SET tk2 v"], ["TOUCH", "tk1", "tk2"]),
     "exists_missing": ([], ["EXISTS", "nosuchkey"]),
     # (frankenredis-c0ts5) Ladder shapes: cheap O(1) reads across every type, so
     # the dispatch cost can be compared at constant (near-zero) real work. Mirrors
