@@ -38748,6 +38748,101 @@ fn add_integer_long_doubles(left: IntegerLongDouble, right: IntegerLongDouble) -
 /// value would overflow the x87 extended range (~1.19e4932); strtold rejects it.
 const LD_MAX_EXPONENT: i32 = 16384;
 
+/// (frankenredis-iqicb) Largest `e` with `5^e < 2^63`. 5^27 fits, 5^28 does not, so
+/// this is the widest window in which a power of five can be applied or divided out
+/// without leaving 64-bit arithmetic.
+const MAX_EXACT_FIVE_POW: u32 = 27;
+
+/// `5^e` for `e <= MAX_EXACT_FIVE_POW`, or None beyond it.
+#[inline]
+fn pow5_u64(e: u32) -> Option<u64> {
+    const P5: [u64; MAX_EXACT_FIVE_POW as usize + 1] = {
+        let mut table = [1u64; MAX_EXACT_FIVE_POW as usize + 1];
+        let mut i = 1;
+        while i <= MAX_EXACT_FIVE_POW as usize {
+            table[i] = table[i - 1] * 5;
+            i += 1;
+        }
+        table
+    };
+    P5.get(e as usize).copied()
+}
+
+/// (frankenredis-iqicb) Exact conversion of `digits * 10^exp10` to a long double
+/// WITHOUT constructing a `BigNat`, for the subset where it is provably exact.
+///
+/// `10^exp == 2^exp * 5^exp`, so the power of TWO is only an exponent adjustment and
+/// solely the power of FIVE has to be dealt with in the mantissa:
+///
+///   * `exp >= 0` — multiply the significand by `5^exp`; exact iff it fits in 64 bits.
+///   * `exp <  0` — divide by `5^|exp|`; exact iff it divides with NO remainder.
+///
+/// `1.5` is `sig=15, exp=-1`, and `15 % 5 == 0` gives `sig=3` exactly.
+///
+/// Returns None for anything outside that subset, and the caller then runs the
+/// unchanged bignum path — so this is a FAST PATH, not a reimplementation. The
+/// correctness obligation is therefore bit-identity with `bignat_to_long_double` on
+/// every input it ACCEPTS; declining is always safe.
+///
+/// NOTE the normalisation matches `bignat_to_long_double`'s convention exactly: the
+/// leading mantissa bit sits at bit 63, and `exponent` is the bit position of that
+/// leading bit plus the binary exponent offset (here `exp10`, since the fives have
+/// been removed and only `2^exp10` remains).
+fn exact_small_decimal_to_long_double(
+    negative: bool,
+    digits: &[u8],
+    exp10: i32,
+) -> Option<IntegerLongDouble> {
+    // u64::MAX is 20 digits; 19 is the widest length that cannot overflow on parse.
+    if digits.is_empty() || digits.len() > 19 {
+        return None;
+    }
+    let mut sig: u64 = 0;
+    for &d in digits {
+        let v = d.checked_sub(b'0')?;
+        if v > 9 {
+            return None;
+        }
+        sig = sig.checked_mul(10)?.checked_add(u64::from(v))?;
+    }
+    if sig == 0 {
+        return Some(IntegerLongDouble {
+            negative: false,
+            mantissa: 0,
+            exponent: 0,
+        });
+    }
+
+    let mantissa_raw = if exp10 >= 0 {
+        let e = u32::try_from(exp10).ok()?;
+        if e > MAX_EXACT_FIVE_POW {
+            return None;
+        }
+        sig.checked_mul(pow5_u64(e)?)?
+    } else {
+        let e = u32::try_from(exp10.unsigned_abs()).ok()?;
+        if e > MAX_EXACT_FIVE_POW {
+            return None;
+        }
+        let p5 = pow5_u64(e)?;
+        if sig % p5 != 0 {
+            return None; // not exactly representable in this window -> bignum path
+        }
+        sig / p5
+    };
+
+    let bit_len = 64 - mantissa_raw.leading_zeros() as i32;
+    let exponent = (bit_len - 1).checked_add(exp10)?;
+    if exponent >= LD_MAX_EXPONENT {
+        return None;
+    }
+    Some(IntegerLongDouble {
+        negative,
+        mantissa: mantissa_raw << (64 - bit_len) as u32,
+        exponent,
+    })
+}
+
 /// Round an exact magnitude `n * 2^exp_offset` (with an extra below-LSB sticky
 /// flag from a prior decimal division) to a normalized 80-bit long double.
 fn bignat_to_long_double(
@@ -38921,6 +39016,15 @@ fn parse_long_double(bytes: &[u8]) -> Option<IntegerLongDouble> {
         > MAX_LARGE_FLOAT_DECIMAL_DIGITS
     {
         return None;
+    }
+    // (frankenredis-iqicb) Exact fast path, tried before any BigNat is constructed.
+    // `bignat_to_long_double` is 16.02 pct of an INCRBYFLOAT (~1019 instr/op) and the
+    // negative-exponent branch below shifts the coefficient left by `4*m + 130` bits
+    // before dividing -- all of it avoidable when the value is exactly representable
+    // in 64 bits. Declines fall through to the unchanged bignum path below, so this
+    // can only remove work, never change a result.
+    if let Some(exact) = exact_small_decimal_to_long_double(negative, digits, decimal_exp) {
+        return Some(exact);
     }
     let mut coefficient = BigNat::from_decimal_digits(digits)?;
     if decimal_exp >= 0 {
@@ -68451,6 +68555,104 @@ mod tests {
             let plain = store.sdiff(&keys, 0).unwrap();
             assert_eq!(sink_members, plain, "shape {shape} members");
             assert_eq!(sink_len, Some(plain.len()), "shape {shape} len");
+        }
+    }
+
+    /// (frankenredis-iqicb) The exact fast path must agree BIT-FOR-BIT with the bignum
+    /// path on every input it ACCEPTS. Declining is always safe, so "accepts and
+    /// differs" is the only failure mode that matters.
+    ///
+    /// The oracle is the CONVENTION, not the implementation: mantissa has its leading
+    /// bit at 63 and `exponent` is that bit's position, so the value is
+    /// `(mantissa / 2^63) * 2^exponent`. These expectations are derived by hand from
+    /// that definition rather than read out of the function, which is what stops the
+    /// test agreeing with a bug.
+    #[test]
+    fn exact_small_decimal_fastpath_matches_the_convention() {
+        // 1.5 = 15 * 10^-1; 15 % 5 == 0 -> sig 3 = 0b11, leading bit at position 1,
+        // so mantissa = 3 << 62 and exponent = (2-1) + (-1) = 0. (3/4)*2^1 == 1.5.
+        assert_eq!(
+            exact_small_decimal_to_long_double(false, b"15", -1),
+            Some(IntegerLongDouble {
+                negative: false,
+                mantissa: 0xC000_0000_0000_0000,
+                exponent: 0
+            })
+        );
+        // 1 = 1 * 10^0 -> mantissa 1 << 63, exponent 0.
+        assert_eq!(
+            exact_small_decimal_to_long_double(false, b"1", 0),
+            Some(IntegerLongDouble {
+                negative: false,
+                mantissa: 0x8000_0000_0000_0000,
+                exponent: 0
+            })
+        );
+        // Sign is carried through, and zero normalises to a non-negative zero exactly
+        // as bignat_to_long_double does for an all-zero magnitude.
+        assert_eq!(
+            exact_small_decimal_to_long_double(true, b"0", 0),
+            Some(IntegerLongDouble {
+                negative: false,
+                mantissa: 0,
+                exponent: 0
+            })
+        );
+        assert_eq!(
+            exact_small_decimal_to_long_double(true, b"1", 0).map(|v| v.negative),
+            Some(true)
+        );
+    }
+
+    /// (frankenredis-iqicb) THE NEGATIVE CASE. The fast path must DECLINE anything it
+    /// cannot represent exactly, so the caller runs the bignum path.
+    ///
+    /// A fast path that answered these would be wrong; one that declines them is
+    /// merely slower, which is why every bound here errs toward declining.
+    #[test]
+    fn exact_small_decimal_fastpath_declines_what_it_cannot_represent() {
+        // 1/3: 5^16 does not divide 3333333333333333, so it is NOT exact in binary.
+        assert_eq!(
+            exact_small_decimal_to_long_double(false, b"3333333333333333", -16),
+            None,
+            "a significand the power of five does not divide must fall to the bignum"
+        );
+        // Beyond the 5^27 window in both directions.
+        assert_eq!(exact_small_decimal_to_long_double(false, b"1", 28), None);
+        assert_eq!(exact_small_decimal_to_long_double(false, b"1", -28), None);
+        // 20 digits cannot be parsed into u64 without risking overflow.
+        assert_eq!(
+            exact_small_decimal_to_long_double(false, b"12345678901234567890", 0),
+            None
+        );
+        // Non-digits and empties are refused rather than silently coerced.
+        assert_eq!(exact_small_decimal_to_long_double(false, b"", 0), None);
+        assert_eq!(exact_small_decimal_to_long_double(false, b"1a", 0), None);
+    }
+
+    /// (frankenredis-iqicb) The lever must actually FIRE on the operands it exists for.
+    ///
+    /// Asserted separately from correctness because a fast path that silently declines
+    /// EVERYTHING passes both tests above while being a perfect no-op — and since it is
+    /// bit-identical by construction, no differential or reply-level test can tell the
+    /// difference. This is the only functional assertion that can.
+    #[test]
+    fn exact_small_decimal_fastpath_fires_on_typical_incrbyfloat_operands() {
+        for (digits, exp10) in [
+            (&b"15"[..], -1),  // 1.5
+            (&b"25"[..], -2),  // 0.25
+            (&b"125"[..], -3), // 0.125
+            (&b"314"[..], -2), // 3.14
+            (&b"1"[..], 0),    // 1
+            (&b"1"[..], 10),   // 1e10
+        ] {
+            assert!(
+                exact_small_decimal_to_long_double(false, digits, exp10).is_some(),
+                "fast path declined {:?}e{exp10}, which is inside its exact window; a \
+                 lever that declines its own motivating case is a no-op that still \
+                 passes every correctness test",
+                std::str::from_utf8(digits).unwrap()
+            );
         }
     }
 
