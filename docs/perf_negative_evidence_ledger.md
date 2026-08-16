@@ -17996,3 +17996,61 @@ RETRY PREDICATE: MAXLEN is still stranded on generic (no executor) and is the
 remaining LPOS work. Do not re-run this shape to re-confirm the ratio; do re-run it
 if the arm's parser chain is reordered, since the mechanism above depends on RANK
 being attempted before key_arg3.
+
+## MEASURED (frankenredis-9hnxt) — sinter_2 has CROSSED: 1.1315x -> 0.4912x vs Redis 7.2.4
+
+DIRECTION, STATED EXPLICITLY: fr instructions-per-op DIVIDED BY Redis 7.2.4
+instructions-per-op. BELOW 1.0 = fr retires FEWER instructions = AHEAD. Lower is
+better. sinter_2 was the LAST measured shape BEHIND the incumbent (1.1315x on
+frankenredis-cv3fm); at a 0.4912x worst bound **fr is now ~51 pct AHEAD.**
+
+    run  shape       fr instr/op   redis 7.2.4   fr/redis   dispatch share
+    A    sinter_2        4373.3        8903.5     0.4912x       12.6%
+    B    sinter_9       12114.4       22676.4     0.5343x        8.3%
+    B    sinter_9       12132.2       22892.1     0.5300x        8.3%
+    A    sinter_2        4385.1        9049.0     0.4846x       12.6%
+
+WORST BOUND QUOTED: 0.4912x. Both sinter_2 runs are reported; the less favourable
+one is the number.
+
+NOT MY LEVER. The cross belongs to the SINTER small-N front-classification
+(MossySparrow, 54612204b/fe75ea01b line of work): SINTER had no exact-N parser below
+nine keys, so every 2-8 key call was claimed by a floor class whose only parser
+refused `arr_len < 10`, declined, and dropped on generic. This row is the
+confirmation that it landed the cross, measured rather than inferred.
+
+A/A NULL — NOT EXACT HERE, unlike the LPOS row above, and the difference is worth
+recording. Run ABBA (sinter_2, sinter_9, sinter_9, sinter_2) in ONE invocation:
+
+    fr arm      sinter_2  4373.3 -> 4385.1   +0.27%
+                sinter_9 12114.4 -> 12132.2  +0.15%
+    redis arm   sinter_2  8903.5 -> 9049.0   +1.63%   <- the noisy arm
+    ratio       0.4912 -> 0.4846             1.35% spread
+
+The fr arm is near-deterministic (0.15-0.27%) while the REDIS denominator moves
+1.63%, which is why the ratio spread exceeds either arm alone. The LPOS row's null
+was byte-identical; this one is not, so the margin here is ~51 pct against a 1.35 pct
+ratio spread — three orders clear, but the spread is real and a low-single-digit
+lever must NOT be adjudicated on this shape with this harness.
+
+PROVENANCE:
+  ELF sha256 (first 16)  51708552264214d1  — sha'd at a private path, not read out
+                         of target/release.
+  built                  LOCALLY, RCH_CARGO_WRAPPER_BYPASS=1. Rebuild was a 0.08s
+                         no-op, so this is the same ELF as the LPOS row.
+  tree                   HEAD ddaf8b7d6, BUT fr-command/src/lua_eval.rs,
+                         fr-persist/src/listpack.rs and several fr-runtime benches
+                         were UNCOMMITTED PEER WIP at build time and are therefore
+                         COMPILED INTO THIS BINARY. SINTER's path lives in
+                         fr-store/fr-runtime so the result should not depend on them,
+                         but the ELF is HEAD-plus-WIP and not reproducible from HEAD
+                         alone. Recorded rather than hidden.
+  harness                scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines
+                         in the SAME invocation.
+
+Campaign output: yes — the last shape measured behind Redis 7.2.4 is now measured
+ahead of it.
+
+RETRY PREDICATE: re-run from a CLEAN tree before treating 0.4912x as reproducible,
+because of the WIP caveat above. Do not re-run merely to re-confirm the cross; the
+margin is far outside the spread.
