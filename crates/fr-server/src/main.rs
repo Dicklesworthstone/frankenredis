@@ -9405,24 +9405,6 @@ fn process_buffered_frames(
                         )
                     }
                 } else if let Some(packet) =
-                    parse_borrowed_plain_persist_packet(unparsed, &parser_config)
-                {
-                    if let Some(response) = runtime.execute_plain_persist_borrowed(packet.key, ts) {
-                        Ok(BorrowedMultibulkAction::FastReply {
-                            consumed: packet.consumed,
-                            response,
-                        })
-                    } else {
-                        parse_borrowed_multibulk_action(
-                            unparsed,
-                            parser_config,
-                            runtime,
-                            ts,
-                            &mut conn.write_buf,
-                            &mut argv_scratch,
-                        )
-                    }
-                } else if let Some(packet) =
                     parse_borrowed_plain_zadd_incr_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime.execute_plain_zadd_incr_borrowed(
@@ -14829,6 +14811,7 @@ enum BorrowedDispatchFloorClass {
     /// (frankenredis-ozrro) `PEXPIRETIME key`, the millisecond sibling of the
     /// already-classified `EXPIRETIME`.
     Pexpiretime,
+    Persist,
     /// (frankenredis-ozrro) Bare `ZRANDMEMBER key`, the single-member reply
     /// form. Its sibling [`Self::ZrandmemberCount`] was classified in an earlier
     /// slice, which left this one alone ~3,600 lines deep in the chain.
@@ -15045,6 +15028,8 @@ enum BorrowedDispatchFloorCommand {
     Bitpos,
     /// `PEXPIRETIME`. Only the bare `PEXPIRETIME key` form has a borrowed route.
     Pexpiretime,
+    /// `PERSIST`. Only the bare `PERSIST key` form has a borrowed route.
+    Persist,
     /// `COMMAND`. Only the keyless `COMMAND COUNT` form has a borrowed route;
     /// every other subcommand declines and takes the generic path, which is
     /// where the cascade would have delivered it anyway.
@@ -15252,6 +15237,9 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
         7 => match uppercase_ascii_token::<7>(token)? {
             [b'C', b'O', b'M', b'M', b'A', b'N', b'D'] => {
                 Some(BorrowedDispatchFloorCommand::Command)
+            }
+            [b'P', b'E', b'R', b'S', b'I', b'S', b'T'] => {
+                Some(BorrowedDispatchFloorCommand::Persist)
             }
             [b'P', b'F', b'C', b'O', b'U', b'N', b'T'] => {
                 Some(BorrowedDispatchFloorCommand::Pfcount)
@@ -15998,6 +15986,7 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (2, BorrowedDispatchFloorCommand::Pexpiretime) => {
             Some(BorrowedDispatchFloorClass::Pexpiretime)
         }
+        (2, BorrowedDispatchFloorCommand::Persist) => Some(BorrowedDispatchFloorClass::Persist),
         // `COMMAND COUNT` is the only COMMAND subcommand with a borrowed route,
         // so a declined classification here costs nothing: DOCS/INFO/LIST/GETKEYS
         // land on the generic path, which is exactly where walking the whole
@@ -19737,6 +19726,25 @@ fn try_dispatch_floor_classified_action(
                 });
             if let Some(consumed) = hit {
                 Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Persist => {
+            if let Some(packet) = parse_borrowed_plain_persist_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_persist_borrowed(packet.key, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,
@@ -42915,6 +42923,30 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
     #[test]
     fn dispatch_floor_classifier_recognizes_only_exact_target_tokens() {
         let cfg = ParserConfig::default();
+        // (frankenredis-33832) PERSIST, claimed at arity 2 only. Mixed case must
+        // still classify; the arity-3 spelling and the near-miss token must NOT,
+        // or the fast route would swallow shapes it cannot answer.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*2\r\n$7\r\nPeRsIsT\r\n$1\r\na\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Persist)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$7\r\nPERSIST\r\n$1\r\na\r\n$1\r\nb\r\n",
+                &cfg,
+            ),
+            None
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*2\r\n$7\r\nPERSISS\r\n$1\r\na\r\n",
+                &cfg,
+            ),
+            None
+        );
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(
                 b"*5\r\n$4\r\nmGeT\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n",

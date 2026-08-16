@@ -2333,6 +2333,24 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     // seconds executor answers 4102444800 there instead of milliseconds.
     cmds.push(c(&[b"PEXPIRETIME", b"s:1"]));
     cmds.push(c(&[b"PEXPIRETIME", b"s:absent"]));
+    // (frankenredis-33832) PERSIST is now front-classified off the borrowed-parse
+    // cascade, where it sat behind ~six failed probes. Both OUTCOMES must be covered
+    // because they are different code paths, not just different integers: a key that
+    // HAS a TTL (returns 1 and mutates) and one that does not (returns 0 and must
+    // NOT mutate). The absent key pins the third branch. The bare-arity row keeps
+    // the decline path honest — PERSIST with no key must still reach the generic
+    // route and produce redis's arity error, since the fast route claims arity 2
+    // only.
+    cmds.push(c(&[b"SET", b"s:pt", b"v"]));
+    cmds.push(c(&[b"PEXPIRE", b"s:pt", b"900000000"]));
+    cmds.push(c(&[b"PERSIST", b"s:pt"]));
+    cmds.push(c(&[b"TTL", b"s:pt"]));
+    cmds.push(c(&[b"PERSIST", b"s:pt"]));
+    cmds.push(c(&[b"PERSIST", b"s:1"]));
+    cmds.push(c(&[b"PERSIST", b"s:absent"]));
+    cmds.push(c(&[b"persist", b"s:1"]));
+    cmds.push(c(&[b"PERSIST"]));
+    cmds.push(c(&[b"PERSIST", b"s:1", b"extra"]));
     // (frankenredis-ozrro) COPY is claimed at arity 3 only; the REPLACE spelling
     // keeps the cascade. Both the create and the already-exists branches run,
     // and the destination is read back so a copy that returned 1 without
