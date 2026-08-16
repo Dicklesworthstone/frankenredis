@@ -46109,6 +46109,37 @@ fn apply_rdb_entries_to_store(
                     );
                 }
             }
+            // (frankenredis-aqkvk) Build straight from borrowed spans off the
+            // listpack blob. The old route decoded the blob into one owned
+            // Vec<u8> per entry, handed those to hset_many, and the store copied
+            // them into PackedStrMap's flat arena and freed them — two copies and
+            // an alloc/free pair per element for bytes already contiguous in the
+            // blob. `hset_borrowed_many` takes exactly the flat
+            // [f0, v0, f1, v1, …] shape `decode_value_spans` produces.
+            //
+            // Duplicate fields keep RDB-LOAD semantics, which are NOT the RESTORE
+            // command's: hset_borrowed_many falls back to incremental inserts so
+            // the last value wins, whereas Store::restore_key rejects the payload.
+            // Routing this through hash_from_listpack_spans would have quietly
+            // turned a loadable RDB into a rejected one.
+            RdbValue::HashListpack(ref blob) => {
+                let spans = fr_persist::listpack::decode_value_spans(blob)
+                    .map_err(|_| PersistError::InvalidFrame)?;
+                if !spans.len().is_multiple_of(2) {
+                    return Err(PersistError::InvalidFrame);
+                }
+                let pairs: Vec<&[u8]> = spans.iter().map(|s| s.as_bytes(blob)).collect();
+                store
+                    .hset_borrowed_many(&key, &pairs, now_ms)
+                    .map_err(|_| PersistError::InvalidFrame)?;
+                if let Some(expires_at_ms) = entry.expire_ms {
+                    store.expire_at_milliseconds(
+                        &key,
+                        i64::try_from(expires_at_ms).unwrap_or(i64::MAX),
+                        now_ms,
+                    );
+                }
+            }
             RdbValue::HashWithTtls(ref fields) => {
                 // Seed the hash with every field, then reinstate per-field
                 // deadlines via hash_field_expires directly so the persist
@@ -66876,9 +66907,13 @@ mod tests {
             loaded_manifest
                 .base_rdb_entries
                 .iter()
+                // (frankenredis-aqkvk) A listpack-encoded hash decodes as its blob
+                // so the load path can build from borrowed spans; accept either
+                // spelling here, since what this assertion is about is that the
+                // db-1 hash reached the base RDB at all.
                 .any(|entry| entry.db == 1
                     && entry.key == b"db1:hash"
-                    && matches!(entry.value, RdbValue::Hash(_))),
+                    && matches!(entry.value, RdbValue::Hash(_) | RdbValue::HashListpack(_))),
             "SAVE manifest base RDB must include DB 1 hash, got {:?}",
             loaded_manifest.base_rdb_entries
         );

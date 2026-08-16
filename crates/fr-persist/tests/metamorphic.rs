@@ -65,6 +65,28 @@ fn canonicalise_decoded_set(value: &RdbValue) -> RdbValue {
                 .map(|member| member.to_string().into_bytes())
                 .collect(),
         ),
+        // (frankenredis-aqkvk) A listpack-encoded hash now decodes as the blob
+        // it was stored as, so put it back into the `Hash` spelling the
+        // generator produced by DECODING it. Exactly the IntSet precedent above:
+        // only the variant stops being load-bearing — every field and value is
+        // still compared by the arms below, so a blob whose contents drifted
+        // still fails, and a non-hash decoding as a hash still falls through to
+        // the catch-all.
+        RdbValue::HashListpack(blob) => {
+            let spans = fr_persist::listpack::decode_value_spans(blob)
+                .expect("a blob we just encoded must decode");
+            assert!(
+                spans.len().is_multiple_of(2),
+                "hash listpack must hold field/value pairs"
+            );
+            let (pairs, _) = spans.as_chunks::<2>();
+            RdbValue::Hash(
+                pairs
+                    .iter()
+                    .map(|p| (p[0].as_bytes(blob).to_vec(), p[1].as_bytes(blob).to_vec()))
+                    .collect(),
+            )
+        }
         other => other.clone(),
     }
 }
@@ -80,6 +102,7 @@ fn rdb_value_kind(value: &RdbValue) -> &'static str {
         RdbValue::IntSet(_) => "IntSet",
         RdbValue::SetHashtable(_) => "SetHashtable",
         RdbValue::Hash(_) => "Hash",
+        RdbValue::HashListpack(_) => "HashListpack",
         RdbValue::HashWithTtls(_) => "HashWithTtls",
         RdbValue::SortedSet(_) => "SortedSet",
         RdbValue::Stream(..) => "Stream",
@@ -369,7 +392,13 @@ fn unit_rdb_hash_roundtrip() {
     let encoded = encode_rdb(std::slice::from_ref(&entry), &[]);
     let (decoded, _) = decode_rdb(&encoded).unwrap();
     assert_eq!(decoded.len(), 1);
-    assert!(matches!(&decoded[0].value, RdbValue::Hash(fields) if fields.len() == 2));
+    // (frankenredis-aqkvk) A listpack-encoded hash decodes as its blob so the
+    // load path can build from borrowed spans; canonicalise before the shape
+    // check so this still asserts two fields rather than the spelling.
+    assert!(matches!(
+        canonicalise_decoded_set(&decoded[0].value),
+        RdbValue::Hash(ref fields) if fields.len() == 2
+    ));
 }
 
 #[test]

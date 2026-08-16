@@ -1317,6 +1317,17 @@ pub enum RdbValue {
     /// by re-deriving from content. (frankenredis-39is8)
     SetHashtable(Vec<Vec<u8>>),
     Hash(Vec<(Vec<u8>, Vec<u8>)>),
+    /// (frankenredis-aqkvk) A hash still in its RDB `HASH_LISTPACK` blob form.
+    ///
+    /// Decoding a listpack-encoded hash used to allocate one `Vec<u8>` per
+    /// entry and then hand those to the store, which copies the bytes into
+    /// `PackedStrMap`'s flat arena and frees them again — two copies and an
+    /// alloc/free pair per element for data that is already contiguous in the
+    /// decompressed blob. Carrying the blob lets the apply side build straight
+    /// from borrowed spans, the way `Store::restore_key` already does for the
+    /// RESTORE command. Same shape as the existing `IntSet` variant, which
+    /// exists so intset loads skip a decimal round trip.
+    HashListpack(Vec<u8>),
     /// Redis 7.4 hash with per-field TTLs. Each tuple is
     /// (field, value, Some(abs_deadline_ms)) for a TTL'd field or
     /// (field, value, None) for a field without a TTL. Encoded via
@@ -1964,6 +1975,17 @@ fn encode_rdb_internal(
                             rdb_encode_string(&mut buf, value);
                         }
                     }
+                }
+                // (frankenredis-aqkvk) A hash carried in blob form re-encodes
+                // VERBATIM. That is not just cheaper than re-deriving a listpack
+                // from decoded pairs — it is the more faithful round trip, since
+                // upstream saves by ENCODING rather than by re-deriving from
+                // content, the same reason `SetHashtable` exists separately from
+                // `Set`.
+                RdbValue::HashListpack(blob) => {
+                    buf.push(RDB_TYPE_HASH_LISTPACK);
+                    rdb_encode_string(&mut buf, &entry.key);
+                    rdb_encode_string(&mut buf, blob);
                 }
                 RdbValue::HashWithTtls(fields) => {
                     buf.push(RDB_TYPE_HASH_WITH_TTLS);
@@ -3749,6 +3771,50 @@ fn rdb_load_legacy_double(data: &[u8]) -> Option<(f64, usize)> {
     }
 }
 
+/// (frankenredis-aqkvk) Put an encoding-shaped decoded value back into its
+/// canonical spelling, for callers that compare a decode against the value they
+/// encoded.
+///
+/// `RdbValue` already carries variants that describe how a value was STORED
+/// rather than what it holds — `IntSet` for an all-integer set, `SetHashtable`
+/// for a sticky-hashtable one — because upstream saves by encoding rather than
+/// by re-deriving from content. `HashListpack` joins them: a listpack-encoded
+/// hash decodes as its blob so the load path can build from borrowed spans.
+///
+/// Round-trip tests want the content, not the spelling, so this maps the
+/// encoding-shaped variants back. It DECODES the blob rather than discarding
+/// it, so a value whose contents drifted still compares unequal.
+#[must_use]
+pub fn canonicalise_rdb_value(value: &RdbValue) -> RdbValue {
+    match value {
+        RdbValue::HashListpack(blob) => {
+            let Ok(spans) = listpack::decode_value_spans(blob) else {
+                return value.clone();
+            };
+            if !spans.len().is_multiple_of(2) {
+                return value.clone();
+            }
+            let (pairs, _) = spans.as_chunks::<2>();
+            RdbValue::Hash(
+                pairs
+                    .iter()
+                    .map(|p| (p[0].as_bytes(blob).to_vec(), p[1].as_bytes(blob).to_vec()))
+                    .collect(),
+            )
+        }
+        other => other.clone(),
+    }
+}
+
+/// (frankenredis-aqkvk) [`canonicalise_rdb_value`] over a decoded entry list.
+#[must_use]
+pub fn canonicalise_rdb_entries(mut entries: Vec<RdbEntry>) -> Vec<RdbEntry> {
+    for entry in &mut entries {
+        entry.value = canonicalise_rdb_value(&entry.value);
+    }
+    entries
+}
+
 /// Decode an RDB preamble and report the first byte after its checksum.
 ///
 /// Redis AOF replay can begin with an RDB preamble followed by RESP AOF records.
@@ -4337,18 +4403,36 @@ fn decode_rdb_prefix_impl<const MOVE_LEGACY_HASH_ZIPLIST_FIELDS: bool>(
                         // Pair owned decoded entries straight into `fields`.
                         // Moving string payloads avoids a clone+drop allocation;
                         // integer entries still render to canonical decimal bytes.
-                        let decoded = listpack::decode_listpack(&listpack)
+                        // (frankenredis-aqkvk) Carry the BLOB rather than decoding
+                        // it here. `decode_listpack` allocated one owned Vec<u8>
+                        // per entry (81 per 40-field key, measured) purely so the
+                        // apply side could copy those bytes into PackedStrMap's
+                        // flat arena and free them again. The apply arm now walks
+                        // borrowed spans off this blob instead, which is what
+                        // Store::restore_key already does for the RESTORE command.
+                        //
+                        // VALIDATION STAYS HERE. Carrying the blob must not make
+                        // the decoder accept payloads it used to reject: a
+                        // malformed or odd-length listpack has to fail at DECODE,
+                        // not later at apply, or a corrupt RDB reads as decodable
+                        // and every fuzz/corpus test asserting rejection silently
+                        // stops testing anything. Moving it to apply was my first
+                        // cut and `rdb_decodes_compact_hash_listpack_rejects_odd_
+                        // entry_count` caught it.
+                        //
+                        // `decode_value_spans` is the cheap way to keep it: it
+                        // validates the structure and yields borrowed ranges,
+                        // allocating one spans Vec instead of the ~81 owned
+                        // Vec<u8> per key `decode_listpack` allocated. The spans
+                        // are dropped here and re-derived by the apply side, which
+                        // is still far cheaper than materialising every entry.
+                        let spans = listpack::decode_value_spans(&listpack)
                             .map_err(|_| PersistError::InvalidFrame)?;
-                        if !decoded.len().is_multiple_of(2) {
+                        if !spans.len().is_multiple_of(2) {
                             return Err(PersistError::InvalidFrame);
                         }
-                        let mut fields = Vec::with_capacity(decoded.len() / 2);
-                        let mut it = decoded.into_iter();
-                        while let Some(field) = it.next() {
-                            let value = it.next().ok_or(PersistError::InvalidFrame)?;
-                            fields.push((field.into_bytes(), value.into_bytes()));
-                        }
-                        RdbValue::Hash(fields)
+                        drop(spans);
+                        RdbValue::HashListpack(listpack)
                     }
                     RDB_TYPE_ZSET_LISTPACK => {
                         // Listpack of m1, score1, m2, score2, ... where each
@@ -6049,7 +6133,10 @@ mod tests {
         }];
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _aux) = decode_rdb(&encoded).expect("decode");
-        assert_eq!(strip_stream_metadata(decoded), entries);
+        assert_eq!(
+            canonicalise_rdb_entries(strip_stream_metadata(decoded)),
+            entries
+        );
     }
 
     #[test]
@@ -6062,7 +6149,10 @@ mod tests {
         }];
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
-        assert_eq!(strip_stream_metadata(decoded), entries);
+        assert_eq!(
+            canonicalise_rdb_entries(strip_stream_metadata(decoded)),
+            entries
+        );
     }
 
     #[test]
@@ -6075,7 +6165,10 @@ mod tests {
         }];
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
-        assert_eq!(strip_stream_metadata(decoded), entries);
+        assert_eq!(
+            canonicalise_rdb_entries(strip_stream_metadata(decoded)),
+            entries
+        );
     }
 
     #[test]
@@ -6223,7 +6316,10 @@ mod tests {
         }];
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
-        assert_eq!(strip_stream_metadata(decoded), entries);
+        assert_eq!(
+            canonicalise_rdb_entries(strip_stream_metadata(decoded)),
+            entries
+        );
     }
 
     #[test]
@@ -6236,7 +6332,10 @@ mod tests {
         }];
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
-        assert_eq!(strip_stream_metadata(decoded), entries);
+        assert_eq!(
+            canonicalise_rdb_entries(strip_stream_metadata(decoded)),
+            entries
+        );
     }
 
     #[test]
@@ -6252,7 +6351,10 @@ mod tests {
         }];
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
-        assert_eq!(strip_stream_metadata(decoded), entries);
+        assert_eq!(
+            canonicalise_rdb_entries(strip_stream_metadata(decoded)),
+            entries
+        );
     }
 
     #[test]
@@ -6265,7 +6367,10 @@ mod tests {
         }];
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
-        assert_eq!(strip_stream_metadata(decoded), entries);
+        assert_eq!(
+            canonicalise_rdb_entries(strip_stream_metadata(decoded)),
+            entries
+        );
     }
 
     #[test]
@@ -6279,7 +6384,10 @@ mod tests {
         let aux = [("redis-ver", "7.0.0"), ("ctime", "1700000000")];
         let encoded = encode_rdb(&entries, &aux);
         let (decoded, aux_map) = decode_rdb(&encoded).expect("decode");
-        assert_eq!(strip_stream_metadata(decoded), entries);
+        assert_eq!(
+            canonicalise_rdb_entries(strip_stream_metadata(decoded)),
+            entries
+        );
         assert_eq!(aux_map.get("redis-ver").map(String::as_str), Some("7.0.0"));
         assert_eq!(aux_map.get("ctime").map(String::as_str), Some("1700000000"));
     }
@@ -6560,7 +6668,10 @@ mod tests {
         ];
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
-        assert_eq!(strip_stream_metadata(decoded), entries);
+        assert_eq!(
+            canonicalise_rdb_entries(strip_stream_metadata(decoded)),
+            entries
+        );
     }
 
     #[test]
@@ -6960,7 +7071,10 @@ mod tests {
         }];
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode lzf-encoded string");
-        assert_eq!(strip_stream_metadata(decoded), entries);
+        assert_eq!(
+            canonicalise_rdb_entries(strip_stream_metadata(decoded)),
+            entries
+        );
 
         // After REDIS0011 + RESIZEDB headers + RDB_TYPE_STRING + key,
         // we expect the value to start with 0xC3 (LZF special encoding).
@@ -6993,7 +7107,10 @@ mod tests {
             &encoded[..body_end.min(48)]
         );
         let (decoded, _) = decode_rdb(&encoded).expect("decode short string");
-        assert_eq!(strip_stream_metadata(decoded), entries);
+        assert_eq!(
+            canonicalise_rdb_entries(strip_stream_metadata(decoded)),
+            entries
+        );
     }
 
     #[test]
@@ -7126,7 +7243,10 @@ mod tests {
             RdbValue::IntSet(values) => {
                 RdbValue::Set(values.iter().copied().map(decimal_i64_bytes).collect())
             }
-            other => other.clone(),
+            // (frankenredis-aqkvk) Same job for the hash blob: this helper exists
+            // to undo encoding-shaped decode variants before a content
+            // comparison, and `HashListpack` is one, exactly as `IntSet` is.
+            other => super::canonicalise_rdb_value(other),
         }
     }
 
@@ -8171,7 +8291,16 @@ mod tests {
         let bytes = finalize_rdb_blob(&mut blob);
 
         let (entries, _) = decode_rdb(&bytes).expect("decode hash_listpack");
-        match &entries[0].value {
+        // (frankenredis-aqkvk) A listpack-encoded hash now decodes as the BLOB so
+        // the load path can build from borrowed spans. Assert the blob shape
+        // first — that is the decode contract this test names — then canonicalise
+        // to check the contents it actually holds.
+        assert!(
+            matches!(&entries[0].value, RdbValue::HashListpack(_)),
+            "HASH_LISTPACK must decode as the blob, got {:?}",
+            entries[0].value
+        );
+        match &canonicalise_rdb_value(&entries[0].value) {
             RdbValue::Hash(fields) => {
                 assert_eq!(
                     fields,
@@ -8403,6 +8532,18 @@ mod tests {
                 // declared "Set" above. (frankenredis-wuxai)
                 RdbValue::IntSet(values) => ("Set", values.len()),
                 RdbValue::Hash(fields) => ("Hash", fields.len()),
+                // ...and RDB_TYPE_HASH_LISTPACK decodes to the blob, which is
+                // still a hash for this check — the compact_hash_* seeds are
+                // declared "Hash" above. Cardinality comes from decoding the
+                // blob, so a seed whose field count drifted still fails.
+                // (frankenredis-aqkvk)
+                RdbValue::HashListpack(blob) => (
+                    "Hash",
+                    match super::canonicalise_rdb_value(&entries[0].value) {
+                        RdbValue::Hash(fields) => fields.len(),
+                        _ => panic!("seed {name}: hash listpack blob did not decode: {blob:?}"),
+                    },
+                ),
                 RdbValue::SortedSet(members) => ("SortedSet", members.len()),
                 _ => ("Other", 0),
             };
@@ -8657,6 +8798,16 @@ mod tests {
     /// `RdbStreamMetadata` for byte-identical re-encode; the live store never
     /// reads it (it rebuilds from the stream DATA). Round-trip tests assert on
     /// the data, so normalize that transient metadata away.
+    /// (frankenredis-aqkvk) Local alias for the library canonicaliser, so the
+    /// round-trip assertions below read as one normalisation step.
+    fn canonicalise_rdb_entries(entries: Vec<RdbEntry>) -> Vec<RdbEntry> {
+        super::canonicalise_rdb_entries(entries)
+    }
+
+    fn canonicalise_rdb_value(value: &RdbValue) -> RdbValue {
+        super::canonicalise_rdb_value(value)
+    }
+
     fn strip_stream_metadata(mut entries: Vec<RdbEntry>) -> Vec<RdbEntry> {
         for entry in &mut entries {
             if let RdbValue::Stream(_, _, _, metadata, _, _) = &mut entry.value {
@@ -8726,7 +8877,10 @@ mod tests {
         }];
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
-        assert_eq!(strip_stream_metadata(decoded), entries);
+        assert_eq!(
+            canonicalise_rdb_entries(strip_stream_metadata(decoded)),
+            entries
+        );
     }
 
     #[test]
@@ -8746,7 +8900,10 @@ mod tests {
         }];
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
-        assert_eq!(strip_stream_metadata(decoded), entries);
+        assert_eq!(
+            canonicalise_rdb_entries(strip_stream_metadata(decoded)),
+            entries
+        );
     }
 
     #[test]
@@ -8759,7 +8916,10 @@ mod tests {
         }];
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
-        assert_eq!(strip_stream_metadata(decoded), entries);
+        assert_eq!(
+            canonicalise_rdb_entries(strip_stream_metadata(decoded)),
+            entries
+        );
     }
 
     #[test]
@@ -8779,7 +8939,10 @@ mod tests {
         }];
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
-        assert_eq!(strip_stream_metadata(decoded), entries);
+        assert_eq!(
+            canonicalise_rdb_entries(strip_stream_metadata(decoded)),
+            entries
+        );
     }
 
     #[test]
@@ -8827,7 +8990,10 @@ mod tests {
         }];
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
-        assert_eq!(strip_stream_metadata(decoded), entries);
+        assert_eq!(
+            canonicalise_rdb_entries(strip_stream_metadata(decoded)),
+            entries
+        );
     }
 
     #[cfg(feature = "upstream-stream-rdb")]
@@ -9051,7 +9217,10 @@ mod tests {
         assert_ne!(encoded[14], UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3);
 
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
-        assert_eq!(strip_stream_metadata(decoded), entries);
+        assert_eq!(
+            canonicalise_rdb_entries(strip_stream_metadata(decoded)),
+            entries
+        );
     }
 
     #[test]
@@ -9196,7 +9365,10 @@ mod tests {
         ];
         let encoded = encode_rdb(&entries, &[("redis-ver", "7.2.0")]);
         let (decoded, aux) = decode_rdb(&encoded).expect("decode");
-        assert_eq!(strip_stream_metadata(decoded), entries);
+        assert_eq!(
+            canonicalise_rdb_entries(strip_stream_metadata(decoded)),
+            entries
+        );
         assert_eq!(aux.get("redis-ver").map(String::as_str), Some("7.2.0"));
     }
 
@@ -9701,6 +9873,13 @@ mod tests {
                 if let RdbValue::IntSet(values) = &entry.value {
                     entry.value =
                         RdbValue::Set(values.iter().copied().map(decimal_i64_bytes).collect());
+                }
+                // (frankenredis-aqkvk) Same reasoning for a listpack-encoded
+                // hash, which now decodes as its blob: canonicalise back to
+                // pairs so the comparison still tests every field and value and
+                // only the variant stops being load-bearing.
+                if matches!(&entry.value, RdbValue::HashListpack(_)) {
+                    entry.value = super::canonicalise_rdb_value(&entry.value);
                 }
                 match &mut entry.value {
                     RdbValue::Set(members) => members.sort(),
