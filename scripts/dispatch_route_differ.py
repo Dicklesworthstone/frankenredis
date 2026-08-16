@@ -204,6 +204,43 @@ CASES = [
     ("SCARD", "ss:u4"),
     # Wrong type as a source, verbatim from the generic path.
     ("SINTERSTORE", "ss:bad", "ss:a", "bo:a", "ss:c"),
+
+    # ── GEOADD (frankenredis-tyujv) ─────────────────────────────────────────
+    # The single-triple form newly reaches the floor. GEOADD's reply counts only
+    # ADDED members, so the update case is the one a mis-wired route passes: a
+    # route that re-adds instead of updating still replies 0 on the second call
+    # if it silently no-ops, and still replies 0 on the third if it ignores the
+    # new coordinates. ZSCORE is what separates those — the geohash is an exact
+    # integer, so it changes iff the coordinates were actually written.
+    ("GEOADD", "geo:a", "13.361389", "38.115556", "palermo"),
+    ("ZCARD", "geo:a"),
+    ("ZSCORE", "geo:a", "palermo"),
+    # Same member, SAME coords: replies 0, score unchanged.
+    ("GEOADD", "geo:a", "13.361389", "38.115556", "palermo"),
+    ("ZSCORE", "geo:a", "palermo"),
+    # Same member, DIFFERENT coords: still replies 0 (not an add) but the score
+    # MUST move. A route that dropped the update passes every reply-only row here.
+    ("GEOADD", "geo:a", "15.087269", "37.502669", "palermo"),
+    ("ZSCORE", "geo:a", "palermo"),
+    ("ZCARD", "geo:a"),
+    # Second distinct member, so the key holds more than one element.
+    ("GEOADD", "geo:a", "15.087269", "37.502669", "catania"),
+    ("ZRANGE", "geo:a", "0", "-1"),
+    # Multi-triple form: deliberately NOT claimed (no parser exists), so it must
+    # reach the cascade and answer identically.
+    ("GEOADD", "geo:m", "13.361389", "38.115556", "p1", "15.087269", "37.502669", "p2"),
+    ("ZCARD", "geo:m"),
+    # Out-of-range longitude: the error must come from the generic path verbatim.
+    ("GEOADD", "geo:a", "181.0", "38.115556", "bad"),
+    # Non-numeric coordinate, same requirement.
+    ("GEOADD", "geo:a", "notanumber", "38.115556", "bad"),
+    # Wrong type.
+    ("GEOADD", "s:1", "13.361389", "38.115556", "m"),
+    # NOTE: GEOPOS is deliberately NOT asserted here. It formats coordinates as
+    # floats, and any fr-vs-redis difference in that formatting is a pre-existing
+    # encoding question rather than a routing one — including it would make this
+    # gate red for a reason that has nothing to do with the floor claim. ZSCORE
+    # carries the same information as an exact integer.
     # (frankenredis-opmo4) PFADD, LPUSHX and RPUSHX newly reach the floor at ONE
     # value. PFADD's no-op is the fragile case: upstream pfaddCommand fires
     # signalModifiedKey / notifyKeyspaceEvent / server.dirty / HLL_INVALIDATE_CACHE
