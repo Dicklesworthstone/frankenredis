@@ -1,0 +1,221 @@
+Front-classify SINTERCARD's length-6 forms (frankenredis-ex3il)
+
+sintercard_lim is my second-worst measured ratio against the incumbent: 0.7881
+[0.7802, 0.8067]. The shape is `SINTERCARD 2 k1 k2 LIMIT n`, array length 6, and the
+class stopped at arity 5 -- so every SINTERCARD carrying a LIMIT walked the cascade.
+
+WHY THIS PATCH ADDS TWO PARSERS AND NOT ONE. Array length 6 admits BOTH readings:
+
+    SINTERCARD 4 k1 k2 k3 k4          four plain keys
+    SINTERCARD 2 k1 k2 LIMIT n        two keys with a LIMIT suffix
+
+Widening the class while serving only the LIMIT form would drop the plain four-key
+form on the generic path -- a NEW mis-claim, created by the fix, which is exactly the
+defect opmo4 repaired in MGET. Both parsers pin their own `numkeys`, so at most one can
+match a given packet and the chain order is immaterial.
+
+THE EXECUTOR NEEDS NOTHING. execute_plain_sintercard_borrowed already takes a `tail`
+slice and already implements the LIMIT suffix, including redis's rule that `LIMIT 0`
+means NO LIMIT rather than "return nothing". This patch only builds the tails.
+
+WHERE THE TOKEN CHECK LIVES, deliberately. `LIMIT` is verified in the parser, so a
+packet the arm cannot serve declines before any executor work. That is the placement
+that makes SINTERCARD's existing length-5 mis-claim cheap and ZDIFF's expensive
+(frankenredis-nq6mh). The COUNT is NOT re-validated in the parser: the executor already
+rejects negatives and treats 0 as no-limit, and duplicating that invites the two
+copies to disagree.
+
+HELD AS A PATCH, NOT APPLIED. /data is 53.4G against a 59G floor and has been below it
+for four turns, so this cannot be compiled. An uncompiled edit in main.rs reddens every
+pane's suite; an uncommitted one does not stay parked -- twice today one of mine was
+swept into a peer's commit stripped of its caveats (frankenredis-fhgvc).
+
+VERIFIED WITHOUT A COMPILER -- structural, not a type check:
+    git apply --check                     rc=0
+    brace delta, original vs patched      5 -> 5 unchanged
+    paren delta                           2 -> 2 unchanged
+    each new parser                       defined once, called once
+    class widened 4..=5 -> 4..=6, old mint gone
+
+THE GATE IS ALREADY IN, at 2978785dc. Note especially two rows there: `SINTERCARD 4
+sc:1 sc:2 sc:3 sc:1` is the plain length-6 form this widening must NOT strand, and
+`LIMIT 0` is the no-limit semantic a naive cap would break.
+
+APPLY WITH:
+    git apply scripts/sintercard_limit_classify.patch
+    python3 scripts/build_preflight.py       # must print CLEAR TO BUILD
+    cargo build --release -p fr-server --bin frankenredis --features perf-ab-cascade-bypass
+    strings <binary> | grep -c FR_PERF_AB_CASCADE_BYPASS    # must be 1
+    <three-way differ; SINTERCARD rows are already in the corpus>
+
+NOT MEASURED. Predict the LEVEL, not a ratio (frankenredis-1t8c5): a classified route
+reaches roughly 550 of dispatch. Do not carry ZRANGE's 0.8658 -> 1.1570 across; that
+route paid the generic constant and this one pays a walk.
+
+LEFT OUT: lengths 7 and up. Length 7 is ambiguous ((plain) x5 vs LIMIT x3) and would
+need two more parsers; lengths 8 and 9 are unique LIMIT forms and safe, but each is a
+separate claim deserving its own measurement rather than riding along unmeasured.
+
+--- a/crates/fr-server/src/main.rs
++++ b/crates/fr-server/src/main.rs
+@@ -15943,7 +15943,10 @@
+         // and SRANDMEMBER each have a second parser at a different arity, so the
+         // multi-member and no-count forms keep the cascade rather than being
+         // stranded on the generic path by a classification their parser declines.
+-        (4..=5, BorrowedDispatchFloorCommand::Sintercard) => {
++        // (frankenredis-ex3il) Widened 4..=5 -> 4..=6. Length 6 admits BOTH four
++        // plain keys and two keys with LIMIT, and the arm below now serves both, so
++        // the widening cannot strand a reading on the generic path.
++        (4..=6, BorrowedDispatchFloorCommand::Sintercard) => {
+             Some(BorrowedDispatchFloorClass::Sintercard)
+         }
+         (3, BorrowedDispatchFloorCommand::Hrandfield) => {
+@@ -20157,6 +20160,34 @@
+                                 .map(|response| (packet.consumed, response))
+                         },
+                     )
++                })
++                // (frankenredis-ex3il) Length 6, both readings. Each parser pins its
++                // own `numkeys`, so at most one matches and the order is immaterial.
++                .or_else(|| {
++                    parse_borrowed_plain_sintercard4_packet(unparsed, &parser_config).and_then(
++                        |packet| {
++                            let tail =
++                                [packet.numkeys, packet.k1, packet.k2, packet.k3, packet.k4];
++                            runtime
++                                .execute_plain_sintercard_borrowed(&tail, ts)
++                                .map(|response| (packet.consumed, response))
++                        },
++                    )
++                })
++                .or_else(|| {
++                    parse_borrowed_plain_sintercard2_limit_packet(unparsed, &parser_config)
++                        .and_then(|packet| {
++                            let tail = [
++                                packet.numkeys,
++                                packet.k1,
++                                packet.k2,
++                                packet.limit_token,
++                                packet.limit,
++                            ];
++                            runtime
++                                .execute_plain_sintercard_borrowed(&tail, ts)
++                                .map(|response| (packet.consumed, response))
++                        })
+                 });
+             if let Some((consumed, response)) = hit {
+                 Ok(BorrowedMultibulkAction::FastReply { consumed, response })
+@@ -21984,6 +22015,113 @@
+     })
+ }
+ 
++struct BorrowedPlainSintercard4Packet<'a> {
++    consumed: usize,
++    numkeys: &'a [u8],
++    k1: &'a [u8],
++    k2: &'a [u8],
++    k3: &'a [u8],
++    k4: &'a [u8],
++}
++
++// (frankenredis-ex3il) `SINTERCARD 4 key key key key`. Array length 6.
++//
++// This exists ONLY so that widening the class to length 6 cannot create a fresh
++// mis-claim. Length 6 admits TWO readings -- four plain keys, or two keys with a
++// LIMIT suffix -- so claiming it while serving only one of them would drop the
++// other on the generic path, which is the defect frankenredis-opmo4 fixed in MGET.
++// Both parsers validate `numkeys`, so exactly one can match a given packet.
++fn parse_borrowed_plain_sintercard4_packet<'a>(
++    input: &'a [u8],
++    config: &ParserConfig,
++) -> Option<BorrowedPlainSintercard4Packet<'a>> {
++    if config.max_array_len < 6 || config.max_bulk_len < b"SINTERCARD".len() {
++        return None;
++    }
++    let mut cursor = input.strip_prefix(b"*6\r\n$10\r\n").and_then(|rest| {
++        rest.get(..10)
++            .filter(|command| command.eq_ignore_ascii_case(b"SINTERCARD"))
++            .map(|_| input.len() - rest.len() + 10)
++    })?;
++    if input.get(cursor..cursor + 2)? != b"\r\n" {
++        return None;
++    }
++    cursor += 2;
++    let (numkeys, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
++    if numkeys != b"4" {
++        return None;
++    }
++    let (k1, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
++    let (k2, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
++    let (k3, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
++    let (k4, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
++    Some(BorrowedPlainSintercard4Packet {
++        consumed,
++        numkeys,
++        k1,
++        k2,
++        k3,
++        k4,
++    })
++}
++
++struct BorrowedPlainSintercard2LimitPacket<'a> {
++    consumed: usize,
++    numkeys: &'a [u8],
++    k1: &'a [u8],
++    k2: &'a [u8],
++    limit_token: &'a [u8],
++    limit: &'a [u8],
++}
++
++// (frankenredis-ex3il) `SINTERCARD 2 key key LIMIT n`, array length 6 -- the shape
++// sintercard_lim measured at 0.7881 against Redis 7.2.4. Until now every SINTERCARD
++// with a LIMIT walked the cascade: the class stopped at arity 5 and the arm held
++// only the two plain exact-N parsers.
++//
++// The LIMIT token is checked HERE rather than left to the executor, so a packet the
++// arm cannot serve declines before any executor work -- the placement that makes
++// SINTERCARD's existing mis-claim cheap and ZDIFF's expensive (frankenredis-nq6mh).
++// The COUNT itself is not validated here: `execute_plain_sintercard_borrowed` already
++// rejects a negative limit and treats 0 as "no limit", and duplicating that would
++// risk the two disagreeing.
++fn parse_borrowed_plain_sintercard2_limit_packet<'a>(
++    input: &'a [u8],
++    config: &ParserConfig,
++) -> Option<BorrowedPlainSintercard2LimitPacket<'a>> {
++    if config.max_array_len < 6 || config.max_bulk_len < b"SINTERCARD".len() {
++        return None;
++    }
++    let mut cursor = input.strip_prefix(b"*6\r\n$10\r\n").and_then(|rest| {
++        rest.get(..10)
++            .filter(|command| command.eq_ignore_ascii_case(b"SINTERCARD"))
++            .map(|_| input.len() - rest.len() + 10)
++    })?;
++    if input.get(cursor..cursor + 2)? != b"\r\n" {
++        return None;
++    }
++    cursor += 2;
++    let (numkeys, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
++    if numkeys != b"2" {
++        return None;
++    }
++    let (k1, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
++    let (k2, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
++    let (limit_token, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
++    if !limit_token.eq_ignore_ascii_case(b"LIMIT") {
++        return None;
++    }
++    let (limit, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
++    Some(BorrowedPlainSintercard2LimitPacket {
++        consumed,
++        numkeys,
++        k1,
++        k2,
++        limit_token,
++        limit,
++    })
++}
++
+ struct BorrowedPlainHlenPacket<'a> {
+     consumed: usize,
+     key: &'a [u8],
