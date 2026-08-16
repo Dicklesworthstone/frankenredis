@@ -18626,3 +18626,68 @@ from the row above, ELF 51708552264214d1.
 
 RETRY PREDICATE: implement the keyword discrimination and expect ~249 instr/op, ~7.7 pct
 of the op. Do NOT implement a dedicated COUNT parser on its own — it is measured at zero.
+
+--------------------------------------------------------------------------------
+MEASUREMENT — parse_borrowed_plain_set_bulk costs 48.0 instr per call, corroborated
+by two independent derivations (frankenredis-uu33c)
+
+Banked because it is the constant the LPOS COUNT residual analysis rests on, and it
+was carried in conversation rather than written down. No build: /data at 42G, the
+hard floor; both derivations reuse dumps and figures already produced.
+
+DERIVATION 1 (BlackCat, LPOS, from callgrind self-cost):
+  lpos_rank    4 set_bulk calls              -> 192 instr/op   = 48.0 per call
+  lpos_count   3 (failed RANK) + 4 (key_arg3) = 7 -> 336        = 48.0 per call
+  336/192 = 1.75 = 7/4 exactly.
+
+DERIVATION 2 (MossySparrow, SINTER, from a key-count delta — no failed attempt
+anywhere in it, which is what makes it independent):
+  parse_borrowed_plain_set_bulk self-cost
+    sinter_2     384,384
+    sinter_9   1,729,769
+    delta      1,345,385 over 7 extra keys = 192,197.9 per key = 48.05 per call
+
+Same command, same parser (keys_multi), differing only by key count. Different
+command, parser, and run from derivation 1, and neither borrows the other's inputs.
+
+  48.0 and 48.05.
+
+STATED WEAKNESS, because the reasoning shape that produced it is the one that went
+wrong repeatedly today: derivation 2 assumes the harness printed the 2N=4000 frame
+table. At N=2000 the figure is 96.10. The harness output does not say which dump the
+frame table came from, and the divisor giving agreement was chosen AFTER seeing the
+agreement. What defends it is that the comparison value was derived independently —
+had the divisor been wrong, 96.10 would need to coincide with a separately obtained
+48.0, and it does not. Record as corroborated-twice with a factor-of-2 assumption on
+the second, NOT as directly instrumented. A direct per-call measurement would close
+it.
+
+WHAT IT BUYS: it converts the LPOS COUNT residual from a share into a decomposition.
+  keyword discrimination before parsing   removes 249  (144 wasted set_bulk + 105
+                                                        failed-frame overhead)
+  dedicated COUNT parser ON TOP           removes <= 23 (key_arg3 vs hand-rolled)
+  dedicated COUNT parser ALONE            removes 0
+
+THE TRAP, and it is why this row exists rather than a bead comment: the earlier
+reading had a dedicated COUNT parser removing 144 and leaving 105, which reads as
+the cheap incremental option. It removes ZERO on its own — the parser still runs
+SECOND, after the RANK parser declines, so all seven set_bulk calls still happen.
+Anyone taking that framing ships a no-op, measures nothing, and files the lever
+REJECT for the next person.
+
+METHOD NOTE worth more than the constant: the mechanism was six lines of parser
+away the whole time, and was found by COUNTING CALL SITES, not by more profiling.
+Two self-cost numbers admitted a plausible wrong story (a positional-parser tax that
+does not exist — key_arg3 and lpos_rank_packet both call set_bulk exactly 4 times).
+Counting beat profiling; reading the decline point beat both.
+
+PROVENANCE:
+  ELF sha256 (first 16)  51708552264214d1 for derivation 2 (same binary as the
+                         sinter/geoadd/lpos rows above); derivation 1 is BlackCat's
+                         ELF, recorded on their row.
+  harness                scripts/shape_instr_per_op.py frame tables, reused — no
+                         new run for this row.
+  no build               /data 42G, hard floor. Zero builds from this pane.
+
+RETRY PREDICATE: do not re-derive. DO instrument set_bulk directly if anyone needs
+the factor-of-2 assumption removed, and do that BEFORE quoting 48.0 as measured.
