@@ -3611,6 +3611,16 @@ fn classify_runtime_special_command_linear(cmd: &[u8]) -> Option<RuntimeSpecialC
 /// Used on the replication-replay path so a replica's MONITOR echoes the SELECT
 /// (and PUBLISH / MULTI / EXEC) commands the primary streams, while the
 /// replication-internal REPLCONF (admin) stays hidden. (frankenredis-3s0ra)
+///
+/// COST NOTE (frankenredis-e6c9t): this is not cheap. `effective_command_flags`
+/// builds a `<parent>|<sub>` key and scans the 110-entry `SUBCOMMAND_TABLE`
+/// linearly, then this splits the matched flags string on whitespace. On
+/// `PUBSUB CHANNELS` those two frames were 2.59M and 0.47M Ir in a 2000/4000-op
+/// callgrind pair. It answers a question that only matters when a MONITOR client
+/// is attached, so every caller must test `monitor_clients.is_empty()` FIRST —
+/// `feed_monitors` already returns immediately in that case, which makes the
+/// short-circuit exactly behaviour-preserving. This function is pure (table
+/// lookups only), so skipping it has no observable effect beyond not spending it.
 fn command_should_feed_monitors(argv: &[Vec<u8>]) -> bool {
     // Resolve the effective flags including container subcommands, matching how
     // upstream call() tests the dispatched (sub)command's CMD_ADMIN /
@@ -37268,7 +37278,20 @@ impl Runtime {
                     // upstream's exclusion set. The db shown is the post-command
                     // selected_db, matching redis (SELECT mirrors its new db).
                     // (frankenredis-e8f9q, frankenredis-3s0ra)
-                    if command_should_feed_monitors(argv) {
+                    //
+                    // (frankenredis-e6c9t) The emptiness test comes FIRST. Every
+                    // special command — PUBSUB, SELECT, MULTI/EXEC, the whole
+                    // subscribe family — reaches this line, and
+                    // `command_should_feed_monitors` costs a 110-entry
+                    // SUBCOMMAND_TABLE scan plus a flags-string split to decide
+                    // something `feed_monitors` then discards on its own
+                    // `monitor_clients.is_empty()` early return. Ordering the
+                    // cheap O(1) test ahead of it is behaviour-identical (the
+                    // predicate is pure) and removes both frames from the
+                    // no-MONITOR path, which is every benchmark and almost every
+                    // production server.
+                    if !self.server.monitor_clients.is_empty() && command_should_feed_monitors(argv)
+                    {
                         self.feed_monitors(argv, now_ms, self.session.selected_db);
                     }
                 }
@@ -46661,7 +46684,10 @@ replica_announced:1\r\n",
             // upstream by CMD_ADMIN / CMD_SKIP_MONITOR so a queued CONFIG / DEBUG
             // stays hidden. DISCARDed queues never reach this loop, so a
             // discarded command is correctly never mirrored.
-            if command_should_feed_monitors(argv) {
+            //
+            // (frankenredis-e6c9t) Emptiness test first, same reasoning as the
+            // post-dispatch feed: this runs once per QUEUED command inside EXEC.
+            if !self.server.monitor_clients.is_empty() && command_should_feed_monitors(argv) {
                 self.feed_monitors(argv, now_ms, self.session.selected_db);
             }
 
@@ -61323,6 +61349,106 @@ mod tests {
                 b"\"EXEC\"\r\n".to_vec(),
             ],
             "MULTI, queued SET/INCR, then EXEC must all be mirrored in order"
+        );
+    }
+
+    /// (frankenredis-e6c9t) The two special-command monitor feeds now test
+    /// `monitor_clients.is_empty()` BEFORE `command_should_feed_monitors`, so the
+    /// 110-entry `SUBCOMMAND_TABLE` scan and the flags split disappear from every
+    /// command on a server with no MONITOR attached.
+    ///
+    /// This is the negative case that separates the reorder from the mistake it
+    /// invites. Hoisting the cheap test is only equivalent if the EXPENSIVE test
+    /// still runs when a monitor IS attached; an implementation that replaced the
+    /// predicate with the emptiness check — or that dropped it as "already handled
+    /// by feed_monitors" — leaks admin commands into MONITOR, which upstream
+    /// `call()` never does. `CONFIG GET` is the probe: it is a special command
+    /// (RuntimeSpecialCommand::Config, so it takes the early-return path this
+    /// change touches) whose `config|get` row carries `admin`, while the
+    /// `pubsub|channels` row on the same path does not. Both must be judged, and
+    /// judged differently, with a monitor attached.
+    #[test]
+    fn monitor_admin_gate_still_applies_to_special_commands_e6c9t() {
+        let mut rt = Runtime::default_strict();
+        rt.session.client_id = 77;
+        assert_eq!(
+            rt.execute_frame(command(&[b"MONITOR"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt.drain_monitor_output();
+
+        // Non-admin special command: mirrored.
+        let _ = rt.execute_frame(command(&[b"PUBSUB", b"CHANNELS"]), 2);
+        // Admin special command: NOT mirrored, though it runs the same path.
+        let _ = rt.execute_frame(command(&[b"CONFIG", b"GET", b"maxmemory"]), 3);
+        // Admin special command with no subcommand row of its own.
+        let _ = rt.execute_frame(command(&[b"SLOWLOG", b"GET"]), 4);
+        // Non-admin special command again, so a gate that simply stopped feeding
+        // after the first admin command is also caught.
+        let _ = rt.execute_frame(command(&[b"SELECT", b"0"]), 5);
+
+        let cmds: Vec<Vec<u8>> = rt
+            .drain_monitor_output()
+            .into_iter()
+            .map(|(_, line)| {
+                let pos = line.windows(2).position(|w| w == b"] ").unwrap();
+                line[pos + 2..].to_vec()
+            })
+            .collect();
+        assert_eq!(
+            cmds,
+            vec![
+                b"\"PUBSUB\" \"CHANNELS\"\r\n".to_vec(),
+                b"\"SELECT\" \"0\"\r\n".to_vec(),
+            ],
+            "admin special commands (CONFIG GET, SLOWLOG GET) must stay hidden \
+             while non-admin ones are mirrored"
+        );
+    }
+
+    /// (frankenredis-e6c9t) Same gate on the EXEC-queued feed, which is the second
+    /// call site the emptiness test was hoisted into. A queued admin command must
+    /// still be excluded from the mirrored transaction body.
+    #[test]
+    fn monitor_admin_gate_still_applies_to_exec_queued_commands_e6c9t() {
+        let mut rt = Runtime::default_strict();
+        rt.session.client_id = 78;
+        assert_eq!(
+            rt.execute_frame(command(&[b"MONITOR"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt.drain_monitor_output();
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"MULTI"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"maxmemory"]), 3),
+            RespFrame::SimpleString("QUEUED".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"qx", b"1"]), 4),
+            RespFrame::SimpleString("QUEUED".to_string())
+        );
+        let _ = rt.execute_frame(command(&[b"EXEC"]), 5);
+
+        let cmds: Vec<Vec<u8>> = rt
+            .drain_monitor_output()
+            .into_iter()
+            .map(|(_, line)| {
+                let pos = line.windows(2).position(|w| w == b"] ").unwrap();
+                line[pos + 2..].to_vec()
+            })
+            .collect();
+        assert_eq!(
+            cmds,
+            vec![
+                b"\"MULTI\"\r\n".to_vec(),
+                b"\"SET\" \"qx\" \"1\"\r\n".to_vec(),
+                b"\"EXEC\"\r\n".to_vec(),
+            ],
+            "a queued CONFIG GET is admin and must not appear between MULTI and EXEC"
         );
     }
 
