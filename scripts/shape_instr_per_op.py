@@ -324,6 +324,22 @@ SHAPES = {
     "zrevrangebyscore": (["ZADD zrbs 1 a 2 b 3 c"], ["ZREVRANGEBYSCORE", "zrbs", "3", "1"]),
     "zremrangebyrank_none": (["ZADD zrr 1 a 2 b"], ["ZREMRANGEBYRANK", "zrr", "100", "200"]),
     "substr": (["SET sbk abcdefghijklmnop"], ["SUBSTR", "sbk", "0", "3"]),
+    # (frankenredis-p98mw) The stranded routes that still have NO floor entry, each with a
+    # working borrowed parser and executor already in the cascade. PING is deliberately NOT
+    # here: it is fast-pathed at main.rs:3800/6181, AHEAD of the floor call at 6899, so it
+    # is not stranded and a floor entry would be dead weight.
+    #
+    # Screened on dispatch SHARE before any of them is touched, because depth past the
+    # floor says how far the walk is and not what it costs -- that is the screen that
+    # correctly excluded RESTORE at 9.4 pct.
+    #
+    # Steady-state no-ops so the 2N run does not grow the keyspace relative to N:
+    #   dump_small      read-only
+    #   randomkey_one   read-only, ONE key seeded so the reply is deterministic
+    #   lmpop_missing   missing key -> nil, pops nothing
+    "dump_small": (["SET dk abcdefghijklmnop"], ["DUMP", "dk"]),
+    "randomkey_one": (["SET rk1 vvvvvvvvvvvvvvvv"], ["RANDOMKEY"]),
+    "lmpop_missing": ([], ["LMPOP", "1", "nosuchlist", "LEFT", "COUNT", "1"]),
     "renamenx_exists": (["SET rnsrc v1", "SET rndst v2"], ["RENAMENX", "rnsrc", "rndst"]),
     "zunionstore_2": (["ZADD zu1 1 a 2 b", "ZADD zu2 3 c"],
                       ["ZUNIONSTORE", "zudst", "2", "zu1", "zu2"]),
