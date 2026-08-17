@@ -522,6 +522,10 @@ SHAPES = {
     # quoted without its member count.
     #
     # 64 members against the same fixed cost. Rank mode over the full range, so the copy
+    # STEADY STATE, and it is load-bearing: ZRANGESTORE is a WRITE, so the two-point
+    # subtraction is only valid because the destination is rewritten with the IDENTICAL
+    # result every call. Call 1 creates it and appears once in BOTH the N and 2N runs, so
+    # it cancels; calls 2..N are indistinguishable from each other.
     # is O(n) on both engines and the slopes are directly comparable. Destination is
     # rewritten with the identical result every call, so the keyspace stops changing
     # after the first and the two-point subtraction still sees a steady-state no-op.
@@ -573,6 +577,9 @@ SHAPES = {
     #     CONVERGE and both per-member rates fall toward BYSCORE's ~2,419.
     #   * if they stay ~2x apart -> encoding is NOT the driver and the rank/REV split has
     #     another cause, which no amount of listpack reasoning will explain.
+    #
+    # Both are WRITES and both are steady-state for the same reason as the 64-member
+    # pair: the destination is rewritten with the identical result on every call.
     "zrangestore_200": (
         [" ".join(["ZADD", "zr200src"] + [f"{i} m{i:03d}" for i in range(200)])],
         ["ZRANGESTORE", "zr200dst", "zr200src", "0", "-1"],
