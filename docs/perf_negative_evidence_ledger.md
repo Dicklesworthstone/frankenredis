@@ -8,6 +8,66 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## CERTIFIED (frankenredis-ozrro) — "the generic route costs ~2,000 instr/op of dispatch" is FALSE as a general rule: it ranges 486 to 3,013 across eight shapes, and route LABEL does not predict lever yield
+
+Claim class: MEASURED-STRUCTURE. One ELF `fr-after-scaniter` sha 7b67a14d2c866952 (= HEAD's
+code state), one window, `--fr-only` so no denominator is involved. Per-arm loadavg
+9.70-10.07 / 11.50-11.54 / 14.58-14.66 — the 1-minute BELOW the 5-minute on every arm, the
+quietest window of this campaign. No build was started in it.
+
+    shape             fr instr/op   dispatch   share   mechanism
+    pfmerge_2           108,609.5    3,012.7    2.8%   GENERIC PATH
+    sort_ro_alpha        12,727.2    2,851.3   22.4%   GENERIC PATH
+    lcs_2                 7,423.8    2,450.7   33.0%   GENERIC PATH
+    sinter_9             11,801.5      989.2    8.4%   classified route
+    zunionstore_2         7,746.1      805.2   10.4%   classified route
+    zinterstore_2         7,029.7      800.5   11.4%   classified route
+    zrangestore_all       5,012.8      681.7   13.6%   classified route
+    set_xx_opt            2,730.7      485.9   17.8%   GENERIC PATH
+
+WHAT I HAD BEEN ASSUMING, AND WHY IT LOOKED SOLID. Every generic-route command I had
+measured — SCAN 1,981, KEYS 1,970, scan_count 2,095, scan_iter 2,255 — landed near 2,000, so
+I began treating "on the generic route" as implying "~2,000 instr/op of dispatch available".
+That inference is not supported. Those four are all ONE COMMAND FAMILY. Across eight shapes
+the generic route spans 485.9 (set_xx_opt) to 3,012.7 (pfmerge_2), a 6.2x range, and the
+generic range OVERLAPS the classified one: set_xx_opt is on the generic path and pays LESS
+dispatch (485.9) than sinter_9 pays on a classified one (989.2).
+
+THE WITHIN-COMMAND CONSTANCY IS REAL AND IS A DIFFERENT CLAIM. SCAN's three option forms
+agreed to 0.9 instr/op, and gvm6z measured KEYS flat at 1,972/2,011/2,009 across a 32x
+keyspace change. Dispatch is a per-CALL constant FOR A GIVEN COMMAND. It is not a constant
+ACROSS commands, and I conflated the two.
+
+THERE ARE ALSO THREE TIERS, NOT TWO. The floor-classified commands from this campaign sit at
+263-576 (SCAN 313/445/574, KEYS 305, DUMP 306, SPOP 288). The shapes the harness labels
+"classified route" sit at 682-989 — 2-3x higher — so that label covers cascade arms and
+other non-floor routes, not the floor. Reading it as "already optimal" would write off
+sinter_9's 989.2 and zrangestore_all's 681.7 as done when both still carry several hundred
+instructions above the floor.
+
+CONSEQUENCE, and this is the operational part: A LEVER'S YIELD CANNOT BE PREDICTED FROM ITS
+ROUTE LABEL. It must be measured for that specific command before the work is planned.
+Front-classifying set_xx_opt would recover at most ~200 instr/op despite it being squarely on
+the generic path — the route said "worth ~2,000", the measurement says otherwise. Conversely
+the two biggest remaining blocks are sort_ro_alpha at 2,851.3 and lcs_2 at 2,450.7, which
+under this campaign's measured ~1.9x multiplier are worth roughly 5,400 and 4,700 instr/op.
+
+BOTH OF THOSE ARE EXTRACTION JOBS, WHICH IS THE HONEST STATE OF THE BOARD. Neither is a
+cheap mirror by the rule this ledger certified — is the work already a callable helper at the
+arity to be claimed?
+
+    SORT   `sort_generic` is 478 lines covering BY/GET/LIMIT/ALPHA/DESC/STORE plus locale
+           collation and a partial-sort window. `store.sort_elements` only LOADS elements;
+           it does not sort. No helper does the work.
+    LCS    15 `lcs_*` kernel functions now exist in fr-command but NONE is public and
+           `fn lcs` is still private, so the recent bit-parallel work did not expose a
+           callable helper either.
+
+pfmerge_2 tops the dispatch table at 3,012.7 but is the trap in it: that is 2.8% of a
+108,609.5 instr/op operation, and pfmerge already measures 0.8939x. Removing every
+instruction of its dispatch would move the ratio by under 3%. Rank by absolute dispatch to
+find candidates, then divide by the total before believing one.
+
 ## CERTIFIED (frankenredis-ozrro) — the whole front-classified SCAN/KEYS/SPOP family in one window, and a CORRECTION: my "load inflates the redis denominator" argument is NOT supported
 
 Claim class: COMPETITIVE. Single ELF `fr-after-scaniter` sha 7b67a14d2c866952, built from
