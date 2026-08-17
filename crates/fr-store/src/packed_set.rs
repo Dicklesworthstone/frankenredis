@@ -666,8 +666,62 @@ impl HashFieldMap {
         Self::tier_needs_hashtable(pairs.len(), max_element_len)
     }
 
+    /// The two quantities `from_unique_pairs_borrowed` derives by walking the pairs:
+    /// the longest single element, and the arena byte budget.
+    ///
+    /// (frankenredis-gvm6z) Split out so a caller that is ALREADY walking the pairs can
+    /// accumulate both in its own loop and hand them over, instead of paying a second
+    /// full per-element pass to rediscover them. This is the same shape 33832 removed
+    /// when it replaced `borrowed_pairs_need_hashtable` with `tier_needs_hashtable` —
+    /// that fix took the redundant walk out of the CALLER and left an identical one in
+    /// the CALLEE, which is what this removes.
+    #[must_use]
+    fn pair_walk_totals(pairs: &[(&[u8], &[u8])]) -> (usize, usize) {
+        let mut max_element_len = 0_usize;
+        let mut bytes = 0_usize;
+        for (f, v) in pairs {
+            max_element_len = max_element_len.max(f.len()).max(v.len());
+            bytes += f.len() + v.len() + 10;
+        }
+        (max_element_len, bytes)
+    }
+
     #[must_use]
     pub fn from_unique_pairs_borrowed(pairs: &[(&[u8], &[u8])]) -> Self {
+        let (max_element_len, bytes) = Self::pair_walk_totals(pairs);
+        Self::from_unique_pairs_borrowed_presized(pairs, max_element_len, bytes)
+    }
+
+    /// `from_unique_pairs_borrowed` for a caller that has already computed the pair-walk
+    /// totals. Same body, same tier predicate, same arena capacity — the walking form
+    /// above delegates here, so the two entry points cannot drift.
+    ///
+    /// (frankenredis-gvm6z) `hash_from_listpack_spans` is the caller this exists for: it
+    /// builds the pair list in a loop that already reads `field.len()` and `value.len()`
+    /// for `max_element_len`, so accumulating `bytes` there is free and the second pass
+    /// disappears. hash RESTORE's fixed cost is at parity (1.08x) while it is 1.80x at 8
+    /// fields and 4.54x at 160, so a whole per-element pass is exactly the axis that is
+    /// left to attack.
+    ///
+    /// # Panics (debug only)
+    /// Both arguments must equal what a walk of `pairs` would produce. Passing a wrong
+    /// `max_element_len` is not a mere pessimisation: `hash_from_listpack_spans` gates
+    /// its duplicate-field check on the SAME `tier_needs_hashtable(pairs.len(),
+    /// max_element_len)`, so a value that disagreed in the direction "dup check says
+    /// packed, builder says hashtable" would hand a duplicate to `append_known_absent`,
+    /// which skips the existence probe on the caller's promise of uniqueness and would
+    /// silently corrupt the map. The debug assert turns that into a test failure.
+    #[must_use]
+    pub fn from_unique_pairs_borrowed_presized(
+        pairs: &[(&[u8], &[u8])],
+        max_element_len: usize,
+        bytes: usize,
+    ) -> Self {
+        debug_assert_eq!(
+            (max_element_len, bytes),
+            Self::pair_walk_totals(pairs),
+            "presized totals must equal the walk they replace"
+        );
         // (frankenredis-33832) Same fuse as `from_unique_str_members`: the tier test
         // and the byte budget each walked every pair, and both branches summed the
         // identical `f.len() + v.len() + 10`, so the second walk ran unconditionally.
@@ -682,12 +736,9 @@ impl HashFieldMap {
         // says packed, builder says hashtable", the builder would call
         // `append_known_absent` on a duplicate that nothing had rejected and silently
         // corrupt the map. One predicate, so they cannot disagree.
-        let mut max_element_len = 0_usize;
-        let mut bytes = 0_usize;
-        for (f, v) in pairs {
-            max_element_len = max_element_len.max(f.len()).max(v.len());
-            bytes += f.len() + v.len() + 10;
-        }
+        //
+        // (frankenredis-gvm6z) The walk that used to stand here now lives in
+        // `pair_walk_totals`, so a caller holding the totals already can skip it.
         let to_hash = Self::tier_needs_hashtable(pairs.len(), max_element_len);
         if to_hash {
             let mut h = CompactFieldMap::with_capacity(pairs.len(), bytes);
@@ -6453,6 +6504,120 @@ mod tests {
             saw_single > 100 && saw_multi > 100,
             "corpus did not exercise both paths: {saw_single} single-byte, {saw_multi} multi-byte"
         );
+    }
+
+    #[test]
+    fn presized_pairs_builder_matches_the_walking_one_across_the_tier_boundary_gvm6z() {
+        // (frankenredis-gvm6z) `hash_from_listpack_spans` now hands the pair-walk totals
+        // to `from_unique_pairs_borrowed_presized` instead of letting the builder walk
+        // every pair a second time to rediscover them. The two entry points must be
+        // indistinguishable on every input.
+        //
+        // THE CORPUS STRADDLES BOTH TIER DIMENSIONS ON PURPOSE. The tier is
+        // `pair_count > PACKED_MAX_ENTRIES (128) || max_element_len > PACKED_MAX_VALUE
+        // (64)`, and a presized value that disagreed with the truth is not a mere
+        // pessimisation: `hash_from_listpack_spans` gates its duplicate-field check on
+        // the SAME predicate, so a disagreement in the direction "dup check says packed,
+        // builder says hashtable" sends a duplicate to `append_known_absent`, which
+        // skips the existence probe. A corpus that sat entirely on one side of either
+        // threshold would pass while that hazard was live.
+        fn build(count: usize, elem_len: usize) -> (Vec<u8>, Vec<u8>) {
+            // Observable form of a map: its tier plus its full insertion-ordered
+            // (field, value) sequence -- that is exactly what HGETALL emits.
+            let owned: Vec<(Vec<u8>, Vec<u8>)> = (0..count)
+                .map(|i| {
+                    let f = format!("f{i}");
+                    let mut v = format!("v{i}").into_bytes();
+                    v.resize(elem_len.max(v.len()), b'x');
+                    (f.into_bytes(), v)
+                })
+                .collect();
+            let pairs: Vec<(&[u8], &[u8])> = owned
+                .iter()
+                .map(|(f, v)| (f.as_slice(), v.as_slice()))
+                .collect();
+
+            let walking = HashFieldMap::from_unique_pairs_borrowed(&pairs);
+            let (max_element_len, bytes) = HashFieldMap::pair_walk_totals(&pairs);
+            let presized =
+                HashFieldMap::from_unique_pairs_borrowed_presized(&pairs, max_element_len, bytes);
+
+            fn digest(m: &HashFieldMap) -> Vec<u8> {
+                let mut out = match m {
+                    HashFieldMap::Hash(_) => b"H|".to_vec(),
+                    HashFieldMap::Packed(_) => b"P|".to_vec(),
+                };
+                for (f, v) in m.iter() {
+                    out.extend_from_slice(f);
+                    out.push(b'=');
+                    out.extend_from_slice(v);
+                    out.push(b';');
+                }
+                out
+            }
+            (digest(&walking), digest(&presized))
+        }
+
+        let mut saw_packed = 0;
+        let mut saw_hash = 0;
+        // Counts and element lengths on BOTH sides of, and exactly AT, each threshold.
+        for count in [0usize, 1, 2, 127, 128, 129, 200] {
+            for elem_len in [0usize, 1, 63, 64, 65, 200] {
+                let (walking, presized) = build(count, elem_len);
+                assert_eq!(
+                    walking, presized,
+                    "presized builder diverged at count={count} elem_len={elem_len}"
+                );
+                if walking.starts_with(b"H|") {
+                    saw_hash += 1;
+                } else {
+                    saw_packed += 1;
+                }
+            }
+        }
+        // Neither tier may be absent, or the comparison is vacuous on one of them --
+        // the packed tier is the common RESTORE case and the hashtable tier is the one
+        // where `append_known_absent` makes a wrong tier decision destructive.
+        assert!(
+            saw_packed > 0 && saw_hash > 0,
+            "corpus did not exercise both tiers: {saw_packed} packed, {saw_hash} hashtable"
+        );
+    }
+
+    #[test]
+    fn pair_walk_totals_are_the_quantities_the_builder_used_to_derive_gvm6z() {
+        // (frankenredis-gvm6z) The presized entry point is only sound if these two
+        // numbers are exactly what the removed walk produced. Asserted against a
+        // VERBATIM copy of the pre-change loop rather than against a restatement of it.
+        let specs: Vec<Vec<(Vec<u8>, Vec<u8>)>> = vec![
+            // empty: both totals must be 0, and `max` must not underflow or panic
+            vec![],
+            // zero-length field AND value: the `+ 10` per-pair overhead still counts
+            vec![(Vec::new(), Vec::new())],
+            // the longest element is a FIELD in one pair and a VALUE in another, so a
+            // reference that only ever looked at one side would pass on neither
+            vec![
+                (b"f".to_vec(), b"value".to_vec()),
+                (b"ffffffffff".to_vec(), Vec::new()),
+            ],
+            vec![(b"short".to_vec(), vec![b'x'; 40])],
+        ];
+        for spec in &specs {
+            let pairs: Vec<(&[u8], &[u8])> = spec
+                .iter()
+                .map(|(f, v)| (f.as_slice(), v.as_slice()))
+                .collect();
+            let mut want_max = 0_usize;
+            let mut want_bytes = 0_usize;
+            for (f, v) in &pairs {
+                want_max = want_max.max(f.len()).max(v.len());
+                want_bytes += f.len() + v.len() + 10;
+            }
+            assert_eq!(
+                HashFieldMap::pair_walk_totals(&pairs),
+                (want_max, want_bytes)
+            );
+        }
     }
 
     #[test]

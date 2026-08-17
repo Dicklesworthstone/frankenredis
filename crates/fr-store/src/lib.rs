@@ -36848,10 +36848,24 @@ fn hash_from_listpack_spans(listpack: &[u8]) -> Result<(HashFieldMap, usize), St
     let (span_pairs, _) = spans.as_chunks::<2>();
     let mut pairs: Vec<(&[u8], &[u8])> = Vec::with_capacity(span_pairs.len());
     let mut max_element_len = 0_usize;
+    // (frankenredis-gvm6z) `arena_bytes` is accumulated HERE, in the loop that already
+    // reads both lengths for `max_element_len`, so it costs two adds per pair. It used
+    // to be re-derived by a SECOND full pass over every pair inside
+    // `from_unique_pairs_borrowed`. That is the identical redundancy 33832 removed from
+    // this function's tier test and left in the builder: the fix replaced
+    // `borrowed_pairs_need_hashtable` (which walked) with `tier_needs_hashtable` (which
+    // does not), while the builder kept walking to find `max_element_len` AND the byte
+    // budget. hash RESTORE's fixed cost is already at parity (1.08x) and it is 1.80x at
+    // 8 fields rising to 4.54x at 160, so per-element passes are the whole of what is
+    // left. `+ 10` is the builder's own per-pair arena overhead and is duplicated here
+    // deliberately -- the debug assert in the presized entry point holds the two in
+    // agreement, and `from_unique_pairs_borrowed` still delegates to the same body.
+    let mut arena_bytes = 0_usize;
     for pair in span_pairs {
         let field = pair[0].as_bytes(listpack);
         let value = pair[1].as_bytes(listpack);
         max_element_len = max_element_len.max(field.len()).max(value.len());
+        arena_bytes += field.len() + value.len() + 10;
         pairs.push((field, value));
     }
     // (frankenredis-fosf1) The duplicate check is gated on the TIER, because redis
@@ -36891,7 +36905,7 @@ fn hash_from_listpack_spans(listpack: &[u8]) -> Result<(HashFieldMap, usize), St
         return Err(StoreError::InvalidDumpPayload);
     }
     Ok((
-        HashFieldMap::from_unique_pairs_borrowed(&pairs),
+        HashFieldMap::from_unique_pairs_borrowed_presized(&pairs, max_element_len, arena_bytes),
         max_element_len,
     ))
 }
