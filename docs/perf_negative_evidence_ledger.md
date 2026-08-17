@@ -41084,3 +41084,195 @@ BrownIbis reached that conclusion independently and recorded it in `5d66e739d`.
    (LSET/LTRIM) are the two batches that overlap neither their keyed-values executor nor those
    routes. Both files are reserved to 22:35Z; check
    `check_file_reservation_conflicts` before editing, not after.
+
+--------------------------------------------------------------------------------
+## 2026-08-17 CrimsonHawk: a fresh-key bulk RPUSH no longer builds the list in a representation it is about to throw away — 200-entry list DEBUG RELOAD 3.2931x -> 2.7621x, −16.12 pct, and the chunk-boundary obligation is discharged by test (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method). No timing
+verdict is claimed, and CV was NOT used — not as a gate, not as a filter, not as provenance.
+The only dispersion figures are the per-size A/A nulls, which are determinism checks on the
+instrument rather than noise estimates.
+
+Claim class: COMPETITIVE. Campaign output: yes — fr/Redis 7.2.4 measures 2.7621x after this
+change, from 3.2931x before, on the 200-entry list DEBUG RELOAD workload. The vendored Redis
+7.2.4 server process ran as a live incumbent arm in the same invocation as both fr arms, at
+65,523.4 instr/key.
+
+### THE OBLIGATION `7cb34d61e` LEFT OPEN IS DISCHARGED, AND IT WAS A REAL ONE
+
+That row specified this lever and refused to build it, because the incremental path chunks the
+FIRST `PACKED_MAX_ENTRIES` elements via `ChunkedList::from` and then appends the rest under the
+`fill` budget, while a bulk `impl From<VecDeque<Vec<u8>>> for ListValue` chunks all N uniformly
+by `LIST_CHUNK_TARGET` — and `quicklist_packed_nodes` emits ONE QUICKLIST NODE PER CHUNK, so a
+boundary difference is a DUMP-byte difference against the incumbent.
+
+    THAT WAS NOT A HYPOTHETICAL. The new test asserts it: for a 200-element batch,
+    `ListValue::from` produces the SAME ELEMENTS and DIFFERENT node blobs. An
+    element-only equivalence check would have passed it straight through.
+
+So the builder does not replace the sequence, it REPRODUCES it. Starting empty and Packed,
+`push_back` at index `i` sees `p.len() == i`, so it promotes at the first index where
+`i >= PACKED_MAX_ENTRIES || values[i].len() > PACKED_MAX_VALUE` — call it `i*`. `promote()`
+then builds `ChunkedList::from(VecDeque of values[..i*])` and `values[i*..]` are appended by
+`push_back_with_fill`. `ListValue::bulk_from_back` does exactly that, moving the owned elements
+into the `VecDeque` instead of writing them into a packed buffer and then allocating an owned
+copy of each to read them back out.
+
+### THE BOARD — FIVE SIZES
+
+    members   A/A null        ORIG          CAND        delta        vs redis 7.2.4
+        4    0.997002      12,944.5      12,989.5    +0.35 pct    1.1540x -> 1.1580x
+       40    0.999328      55,732.8      55,662.5    −0.13 pct    2.5981x -> 2.5948x
+      200    1.000005     215,772.7     180,984.7   −16.12 pct    3.2931x -> 2.7621x
+      400    1.000252     408,138.7     366,526.6   −10.20 pct    3.4040x -> 3.0569x
+     1000    0.999743   1,031,560.8     986,086.8    −4.41 pct    3.5423x -> 3.3862x
+
+  THE SHAPE IS THE MECHANISM. Nothing happens at or below `PACKED_MAX_ENTRIES` (128), because
+  a batch that cannot reach the count threshold takes the ordinary loop unchanged — n=4 and
+  n=40 are the fast path NOT being taken, and they read +0.35 pct against a 0.30 pct null and
+  −0.13 pct against a 0.067 pct null respectively, i.e. unmoved. Above 128 the saving appears
+  and its PERCENTAGE decays as the fixed cost is amortised over a longer list.
+
+  A REGRESSION I INTRODUCED AND THEN REMOVED, recorded because the first version shipped-shaped
+  fine: the builder originally scanned the whole batch for an over-long element before deciding
+  anything, which cost n=40 **+0.41 pct against a 0.134 pct null** — a real regression on the
+  most common list size, bought to win on the rarest. The count test is O(1) and is the only
+  reason to look ahead at all, so a batch that cannot reach the threshold now runs with NO
+  pre-scan, and when the batch does exceed it the look-ahead is bounded at `PACKED_MAX_ENTRIES`
+  regardless of length. n=40 moved +0.41 -> −0.13 pct. Both readings are in this row because
+  the first one is the reason the second is trustworthy.
+
+### A PREDICTION I REGISTERED AND THEN REFUTED
+
+I expected the saving to be a CONSTANT — the discarded packed phase is always exactly
+`PACKED_MAX_ENTRIES` elements — and n=200 vs n=1000 (−34,787.9 vs −45,474.0) said otherwise, so
+I fitted a two-component model: a constant `C` for the promote elimination plus `k` per tail
+element, since the tail loop also elides a `maybe_promote` that is a no-op once the value is a
+Deque. That fit gives C = 33,826.2 and k = 13.36, and it PREDICTED −37,459.4 at n=400.
+
+    MEASURED AT n=400: −41,612.1. The prediction is 11.1 pct UNDER. The model is REFUTED and
+    I am not banking it. Two points fitted with two parameters explain themselves by
+    construction; the third point is what tested it, and it failed. The saving is superlinear
+    in the tail by some term I have not identified, and this row claims the five measured
+    deltas and nothing more.
+
+### EQUIVALENCE
+
+`list_bulk_back_matches_incremental_push_qj6jn` builds every case BOTH ways — `default()` plus
+per-element `push_back`, and `bulk_from_back` — and compares the raw byte total, the length,
+`lp_bytes`, the full element sequence, and `quicklist_packed_node_blobs` at six `fill` values
+(−2, −1, −3, −5, 128, 32). 16 shapes: sizes 0/1/2/63/127/128/129/130/200/400 straddling the
+count threshold; a 200-element batch with an over-long element planted at index 0/1/5/127/128/129
+so promotion is forced BEFORE the count threshold (which is where a `min(count_threshold)` slip
+would surface); an all-over-long batch that promotes at index 0; and 200 elements each EXACTLY
+`PACKED_MAX_VALUE`, which must NOT promote on value.
+
+  AND THE TEST PROVES IT CAN FAIL. It asserts that the naive `ListValue::from` substitution
+  yields identical elements but DIFFERENT node blobs — so the node-blob comparison is
+  discriminating rather than vacuous, and nobody can replace this builder with the
+  shorter-looking one without the test objecting.
+
+### PROVENANCE
+
+  ELF           bench_elf_sha256 = e05bf1c97693971f2d897d30d2b7cec10dbb32416d1426781b0f7c4f16a23d64
+                (the 16-hex prefix e05bf1c97693971f was recorded at build time and this full
+                digest re-verifies it). `release-perf`, built locally with
+                RCH_CARGO_WRAPPER_BYPASS=1 and no `[RCH]` line. BOTH ARMS FROM THIS ONE ELF via
+                `FR_PERF_AB_LIST_BULK_BUILD_ORIG=1`, so no tree-stability question arises while
+                peers commit to other crates. NOT a `/proc/self/exe` self-report: every arm runs
+                under callgrind, so `/proc/<pid>/exe` is valgrind's binary — same convention and
+                disclaimer as `scripts/shape_instr_per_op.py::emit_bench_elf_sha`.
+  harness       scratchpad `reload_slope.py` + `zset_board.py`, K=4 -> K=12 DEBUG RELOAD slope,
+                one fresh working directory per point, soundness assertion active and silent.
+  incumbent     vendored redis 7.2.4, verified in-run sha=d2c8a4b9 == vendored source HEAD.
+  host          thinkstation1, 64 cores OBSERVED, powersave governor, /data 203G free.
+  window        THE QUIETEST OF THIS BEAD, and measured rather than quoted: CPU IDLE 87.2 pct
+                from a 2-second `/proc/stat` delta immediately before the board (the figure
+                handed to me for this window was 80 pct). PER-ARM loadavg/MHz —
+                n=4 9.70/11.64/14.41 -> 9.56, MHz mean 2234 then 2730;
+                n=40 9.56 -> 9.17, MHz mean 2110 then 2308;
+                n=200 9.23 -> 9.21, MHz mean 2599 then 2885;
+                n=1000 9.35 -> 11.23, MHz mean 2610 then 2567;
+                n=400 15.10/12.37/14.26 -> 14.18, MHz mean 3161 then 2716.
+                Max 4059-4292, min 1429 throughout — a 2.9x cross-core spread WITHIN single
+                samples, which is why this row is instruction-counted and not timed.
+  gates         fr-store 926 tests pass (+1 new); clippy --all-targets -D warnings clean; fmt
+                clean over my edits — four pre-existing hunks in peer-written regions of
+                `lib.rs` and `packed_set.rs` are left alone rather than swept in.
+
+### THE REPLICATED-STANDING CONVENTION DOES NOT APPLY
+
+It governs thin margins near parity. This route is 2.76x BEHIND after the change, so no
+standing against the incumbent is claimed, and the n=200 margin is four orders of magnitude
+above its own null. The two sub-threshold sizes are reported as UNMOVED rather than as a small
+win and a small loss, which is the conservative reading of both.
+
+RETRY PREDICATE:
+  1. The superlinear term is unexplained and worth one measurement, not a redesign: profile the
+     ORIG arm at n=400 and n=1000 and find what grows with the tail beyond the `maybe_promote`
+     elision. Reopen the model ONLY IF a third and fourth size fit a stated law within their
+     nulls — a two-point fit on this route has now failed once and does not get a second pass.
+  2. `LPUSH` has the same shape: `push_front` also runs `maybe_promote` per element and there is
+     no `bulk_from_front`. Take it only with the mirror-image equivalence test, because
+     `push_front_with_fill` explicitly zeroes `rpush_conversion_prefix_len` and that is a
+     DUMP-visible boundary claim.
+  3. Do NOT extend `bulk_from_back` to the EXISTING-key branch of `rpush_owned` without a new
+     equivalence test: appending to a list that is already Packed has a different promote index
+     and the head is not `values[..i*]`.
+
+--------------------------------------------------------------------------------
+## 2026-08-17 CrimsonHawk: KEEP (COMPETITIVE) — FOURTH FIT window, and the first on the IMPROVED route: PUBSUB CHANNELS certified at fr/redis **1.2304x**, against 1.3515x certified on the same route before the one-pass lever (`frankenredis-fpqns`, `frankenredis-dpu2y`)
+
+**Claim class: COMPETITIVE. Campaign output: yes.** A live vendored Redis 7.2.4 arm ran in
+the SAME invocation as the fr arm; incumbent verified in-run, redis-server sha=d2c8a4b9 ==
+vendored source HEAD, clean.
+
+  Executing binary, self-reported by the running image via /proc/<pid>/exe:
+    fr ELF sha256: d5bb403c162f27947c17395738e9a50e64dbe92ee7dddf4569d04e266a9b30f0
+  Built from a clean checkout at `2fb7ec8fe`. SCOPE NOTE: two commits have touched `crates/`
+  since, so this is the shipped state AS OF 2fb7ec8fe rather than exact current HEAD. Neither
+  is on the pubsub dispatch path, but the row does not claim to be HEAD.
+
+    WINDOW: FIT for ratio — load 12.74 / 12.50 / 13.62 | builds 0
+    CPU IDLE measured directly before the run: **87 pct** (vmstat)
+    PER-ARM: fr    loadavg 12.74/12.50/13.62, MHz mean 3002 then 2539 (max 4292)
+             redis loadavg 12.36/12.43/13.59, MHz mean 2577 then 2482 (max 4228)
+    fr 5254.0 instr/op   redis 4270.0 instr/op
+    fr/redis 1.2304x — live vendored Redis 7.2.4 arm in the SAME invocation as the fr arm.
+
+  EVIDENCE CLASS: deterministic instruction counts (callgrind Ir), not a timing verdict. CV
+  was not used, as a gate or otherwise. No bootstrap median CI is quoted for the COMPETITIVE
+  ratio because there is no sampling distribution to bootstrap; the decision gate is the A/A
+  null's bootstrap median CI below.
+
+  A/A NULL, same dispatch code, repeated draws: 5253.4 / 5253.8 / 5254.0, max/min 1.000114.
+  A/A null median **1.000000**, bootstrap 95% median CI **[0.999841, 1.000035]**.
+
+  THE COMPARISON THIS ROW EXISTS FOR, all four FIT draws on one route in one day:
+
+    ELF / commit            fr        redis     ratio     what changed
+    b74ea994 a36291636    5662.6    4514.6    1.2543x   pre-handle baseline
+    f68e2521 0fa2bef9b    5680.7    4123.1    1.3778x   + dpu2y handle (a +16.0 REGRESSION)
+    a0553f7a 29048d447    5672.7    4197.4    1.3515x   + AOF INFO fields (off this path)
+    d5bb403c 2fb7ec8fe    5254.0    4270.0   **1.2304x**  + one-pass command resolve
+
+  Against the 29048d447 row — the nearest certified predecessor — fr moved **-7.4 pct** while
+  redis moved **+1.7 pct**, so the ratio improvement is numerator-driven and the denominators
+  are close enough that the comparison is unusually clean for this host.
+
+  DENOMINATOR SPREAD IS NARROWING BUT NOT SETTLED: across all four FIT draws it is 9.5 pct;
+  across the last three it is 3.6 pct. The earlier method row stands — FIT admits a row, it
+  does not make the absolute ratio reproducible — but the trend is the right direction and
+  3.6 pct is close to the 3 pct my own retry predicate asked for.
+
+  WORST BOUND. Across ALL FIT draws today the worst is 1.3778x, but that is on a
+  PRE-improvement binary and is not the number for the current route. On the improved ELF I
+  have exactly ONE draw, so 1.2304x is a certified OBSERVATION and not yet a replicated
+  worst bound. Quote it as such.
+
+RETRY PREDICATE: reopen this row's headline WHEN two further FIT draws exist on ELF
+d5bb403c, or IF the FIT-only denominator spread on that ELF falls below 3 pct across three
+draws. Take one pair per quiet stretch, first run of the stretch, screening on `vmstat` idle and the 1m/5m spread rather
+than on loadavg level. Three draws on THAT ELF give a replicated worst bound for the
+improved route and would close the predicate I opened four rows ago. Do NOT mix the
+pre-improvement draws into that bound: they measure different code.
