@@ -29909,3 +29909,81 @@ asks. Neither applies, and this row does not contradict either:
 PROVENANCE: no measurement. Read-only scan of 3,366 result-shaped files under
 artifacts/. thinkstation1, /data 163-164G free, loadavg 17.69. No build was run for
 this audit.
+
+--------------------------------------------------------------------------------
+ATTRIBUTED (frankenredis-qj6jn) — hash RESTORE's memcpy is CALL OVERHEAD ON TINY COPIES:
+~240 libc calls per op at 15-101 instructions each. Every bounded micro-lever in the path is
+already shipped, INCLUDING the chunked back-reference copy I was about to propose
+
+Claim class: COMPETITIVE (caller-level attribution; no lever landed this row)
+
+Deepens `a2e8f03c4`, which attributed hash RESTORE by FRAME and left the 12.28 pct memcpy
+explicitly unattributed with "attribute it before proposing a fix". This attributes it.
+
+CALLER-LEVEL, same callgrind dump, 400 ops of a 40-field hash from a 350 B payload:
+
+    caller                              memcpy Ir      calls    calls/op   Ir/call
+    HashFieldMap::from_unique_pairs_..  1,620,040       16,040     40.1      101
+      (10.39 pct of the whole route — 85 pct of ALL memcpy)
+    fr_store::decode_rdb_string         1,060,400       64,800    162.0       16
+    PackedStrMap::append                  481,200       32,080     80.2       15
+
+THE SHAPE IS THE FINDING: ~240 libc memcpy calls to reconstitute 350 bytes. At 15-101
+instructions per call the CALLS cost more than the copying. `decode_rdb_string` is invoked
+exactly 400x — once per op, confirmed by its 400x `decode_length` and 400x
+`try_allocate_in` — yet issues 162 memcpy calls per invocation, one per LZF literal run and
+per back-reference.
+
+EVERY BOUNDED MICRO-LEVER IS ALREADY SHIPPED. I checked each against the source before
+proposing it, and that is the whole content of this row:
+  - varint single-byte fast path — SHIPPED (`write_varint_impl::<true>`, 33832)
+  - arena presize + one-pass tier/budget walk — SHIPPED (33832). a75e557f2 pushed it further
+    and was REVERTED in 486e4211d with NO stated reason, so that ground is contested.
+  - LZF table hoist — SHIPPED (`lzf_compress_dispatch::<SIMD, true, false>`)
+  - literal batching — REJECTED at +8.1 pct
+  - zset score round-trip — SHIPPED at -30.2 pct (jpvwi/w08xv)
+  - CHUNKED BACK-REFERENCE COPY — SHIPPED IN BOTH DECOMPRESSORS. I had banked this as my own
+    next candidate, complete with the LZ77 overlap hazard to guard. It already exists:
+    `fr_persist::lzf_decompress` (5boi9) and its twin `fr_store::lzf_decompress_string`
+    (CrimsonHawk), and the twin already solves the overlap correctly — `extend_from_within`
+    over a source range that GROWS each iteration, so a distance-1 run still propagates
+    byte-for-byte. There is a test, `lzf_decompress_chunked_matches_bytewise_...`.
+
+    THAT IS THE FIFTH PROPOSAL THIS SESSION KILLED BY READING THE SOURCE FIRST (after
+    BITCOUNT unit, GEOADD, LPOS COUNT and qj6jn's other three slices). The 162 memcpy calls
+    are not an un-chunked loop; they are what LZF's format costs after chunking, because a
+    literal run is capped at 32 bytes and matches are short.
+
+So the residual is structural, not a missing optimisation: fr RE-ENCODES the payload into its
+packed arena while redis retains the listpack VERBATIM. The ~240 calls exist because bytes
+are moved between representations.
+
+ENGAGING THE RESTORE-ISOLATION LAW, which the preflight gate stopped me on and was right to.
+An ISOLATED RESTORE ratio is not a deficit: fr pays to build the packed representation and is
+repaid on every read, break-even ~1.034 reads/RESTORE
+(`project_restore_isolation_gap_is_never_the_lever`). So 2.0844x must NOT be quoted as "fr is
+2x slower at hashes". It is a real deficit only BELOW ~1.034 reads per restore — DEBUG
+RELOAD, replica full-sync, MIGRATE, RDB startup — which is why qj6jn's 3.57x, taken on a
+DEBUG RELOAD loop, is the larger number. The row survives because the arena build and those
+240 calls are paid on the RESTORE side of the trade and therefore set WHERE the break-even
+sits; lowering them widens the set of workloads fr wins. That is a narrower and more
+defensible claim than "close a 2x gap".
+
+PRIMITIVE TO ATTACK: verbatim listpack retention + indexing (pf1vw), which removes the arena
+build (10.39 + 7.30 + 2.69 = ~20 pct of the route) instead of tuning it. Not a turn-sized
+unit; it needs a real budget and gating on the existing restore differs.
+
+PROVENANCE: no new build or measurement. Caller-level re-analysis of the dump banked in
+`a2e8f03c4` (ELF d494199504e80766, `restore_profile_frames.py`, 400 ops, 40 fields, 350 B),
+read with `callgrind_annotate --tree=caller` and `--tree=calling`. Host loadavg 23.08/22.81/
+29.09 at read time — irrelevant, since no measurement was taken.
+
+THIS ROW WAS WRITTEN TWICE. Its first copy was staged, gate-passed, and then LOST: a peer
+tree operation discarded the uncommitted edit, `git commit` found nothing staged, and the
+push that followed carried only peers' SHAs, which I misreported as mine. VERIFY A COMMIT BY
+GREPPING ITS CONTENT OUT OF HEAD, not by reading the push range — in a shared checkout the
+range you see may be someone else's work.
+
+RETRY PREDICATE: do NOT re-propose chunked copies, varint fast paths, arena presizing or the
+zset score round-trip; all are shipped and this row exists so the next agent does not spend a
+turn rediscovering that. Take pf1vw, or take a route outside RESTORE.
