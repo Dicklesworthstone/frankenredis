@@ -15067,6 +15067,8 @@ enum BorrowedDispatchFloorClass {
     Hrandfield,
     BitposKeyBit,
     BitposRange,
+    BitposStart,
+    BitposUnit,
     Incr,
     /// (frankenredis-ozrro) `DECR key`.
     Decr,
@@ -16852,6 +16854,24 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (5, BorrowedDispatchFloorCommand::Bitpos) if bitpos_range_floor_enabled() => {
             Some(BorrowedDispatchFloorClass::BitposRange)
         }
+        // (frankenredis-copydeficit) Arities 4 and 6, the two spellings the comment above
+        // used to hand to the cascade. This is the COPY deficit again and not a new route:
+        // execute_plain_bitpos_borrowed computes `argc = 4 + end.is_some() + unit.is_some()`,
+        // so it was written for 4, 5 and 6, and parse_borrowed_plain_bitpos_{start,unit}_packet
+        // already existed with cascade arms. Only the classification was missing, and the
+        // measurement is self-discriminating: arity 5 parses an `end` that arity 4 does not,
+        // so it does strictly MORE work, yet cost 2,481.2 instr/op against arity 4's 3,742.4
+        // because it was classified and arity 4 was not (dispatch 29.9 pct vs 52.3 pct).
+        //
+        // Listed as two exact arities rather than 3..=6: BITPOS has no other spellings, and
+        // each arm's parser pins its own `*N` prefix literal, so a claim the arm then declined
+        // would land on GENERIC rather than back on the cascade.
+        (4, BorrowedDispatchFloorCommand::Bitpos) if bitpos_start_unit_floor_enabled() => {
+            Some(BorrowedDispatchFloorClass::BitposStart)
+        }
+        (6, BorrowedDispatchFloorCommand::Bitpos) if bitpos_start_unit_floor_enabled() => {
+            Some(BorrowedDispatchFloorClass::BitposUnit)
+        }
         (2, BorrowedDispatchFloorCommand::Incr) => Some(BorrowedDispatchFloorClass::Incr),
         (4, BorrowedDispatchFloorCommand::Getrange) => Some(BorrowedDispatchFloorClass::Getrange),
         // Only plain `*4 ZRANGE key start stop` floors; WITHSCORES/REV/LIMIT/
@@ -16999,6 +17019,26 @@ fn bitpos_range_floor_enabled() -> bool {
 #[cfg(not(feature = "perf-ab-bitpos-range-floor"))]
 #[inline(always)]
 const fn bitpos_range_floor_enabled() -> bool {
+    true
+}
+
+/// (frankenredis-copydeficit) Preserve the pre-lever arity-4/6 BITPOS routing in the
+/// measurement ELF, so the A/B is one binary with an env flip rather than two builds.
+#[cfg(feature = "perf-ab-bitpos-start-unit-floor")]
+#[inline]
+fn bitpos_start_unit_floor_enabled() -> bool {
+    static ORIG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    !*ORIG.get_or_init(
+        || match std::env::var("FR_PERF_AB_BITPOS_START_UNIT_FLOOR_ORIG") {
+            Ok(value) => value == "1",
+            Err(_) => false,
+        },
+    )
+}
+
+#[cfg(not(feature = "perf-ab-bitpos-start-unit-floor"))]
+#[inline(always)]
+const fn bitpos_start_unit_floor_enabled() -> bool {
     true
 }
 
@@ -22234,6 +22274,59 @@ fn try_dispatch_floor_classified_action(
                     packet.key,
                     packet.bit,
                     Some((packet.start, Some(packet.end), None)),
+                    ts,
+                )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::BitposStart => {
+            // Route shortening only, exactly as BitposRange above: same parser, same
+            // executor, same generic fallback on any refusal.
+            if let Some(packet) = parse_borrowed_plain_bitpos_start_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_bitpos_borrowed(
+                    packet.key,
+                    packet.bit,
+                    Some((packet.start, None, None)),
+                    ts,
+                )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::BitposUnit => {
+            // The unit token is validated by the EXECUTOR, not here: a `BITPOS k b s e
+            // SIDEWAYS` reaches this arm, is declined below, and falls to generic with
+            // redis's error text, which is what the differ rows pin.
+            if let Some(packet) = parse_borrowed_plain_bitpos_unit_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_bitpos_borrowed(
+                    packet.key,
+                    packet.bit,
+                    Some((packet.start, Some(packet.end), Some(packet.unit))),
                     ts,
                 )
             {
@@ -36738,6 +36831,57 @@ mod tests {
     /// anything else so the generic still produces its error. `COPY src dst DB n` is the shape
     /// most likely to be mis-served by a loose keyword check.
     #[test]
+    /// (frankenredis-copydeficit) BITPOS arities 4 and 6 are now CLASSIFIED. Both were
+    /// stranded on the cascade behind parsers that already existed, and the deficit was
+    /// visible as dispatch share: 52.3 pct at arity 4 against 29.9 pct at the classified
+    /// arity 5, which does strictly more work.
+    ///
+    /// The assertions that matter are the NEGATIVE ones. A floor class is a promise its
+    /// arm must keep, so this pins that the table claims exactly the four arities BITPOS
+    /// has and nothing else -- a claim on an arity whose arm declines is a REGRESSION to
+    /// generic, not a fallback to the cascade.
+    fn bitpos_floor_classifier_claims_every_real_arity_and_no_other_copydeficit() {
+        let cfg = ParserConfig::default();
+        let claim = |packet: &[u8]| super::classify_borrowed_dispatch_floor_packet(packet, &cfg);
+        assert_eq!(
+            claim(b"*3\r\n$6\r\nBITPOS\r\n$1\r\nk\r\n$1\r\n1\r\n"),
+            Some(super::BorrowedDispatchFloorClass::BitposKeyBit)
+        );
+        assert_eq!(
+            claim(b"*4\r\n$6\r\nBITPOS\r\n$1\r\nk\r\n$1\r\n1\r\n$1\r\n2\r\n"),
+            Some(super::BorrowedDispatchFloorClass::BitposStart)
+        );
+        assert_eq!(
+            claim(b"*5\r\n$6\r\nBITPOS\r\n$1\r\nk\r\n$1\r\n1\r\n$1\r\n2\r\n$2\r\n-1\r\n"),
+            Some(super::BorrowedDispatchFloorClass::BitposRange)
+        );
+        assert_eq!(
+            claim(
+                b"*6\r\n$6\r\nBITPOS\r\n$1\r\nk\r\n$1\r\n1\r\n$1\r\n2\r\n$2\r\n-1\r\n$4\r\nBYTE\r\n"
+            ),
+            Some(super::BorrowedDispatchFloorClass::BitposUnit)
+        );
+        // Arities BITPOS does not have must NOT be claimed: there is no arm for them, so a
+        // claim would cost a failed classification and then land on generic anyway.
+        assert_eq!(claim(b"*2\r\n$6\r\nBITPOS\r\n$1\r\nk\r\n"), None);
+        assert_eq!(
+            claim(
+                b"*7\r\n$6\r\nBITPOS\r\n$1\r\nk\r\n$1\r\n1\r\n$1\r\n2\r\n$2\r\n-1\r\n$4\r\nBYTE\r\n$1\r\nx\r\n"
+            ),
+            None
+        );
+        // A bad unit token at arity 6 is still CLAIMED -- the arm cannot tell without
+        // parsing -- and is declined by the executor, which is why the differ pins that it
+        // still produces redis's error text.
+        assert_eq!(
+            claim(
+                b"*6\r\n$6\r\nBITPOS\r\n$1\r\nk\r\n$1\r\n1\r\n$1\r\n2\r\n$2\r\n-1\r\n$4\r\nNOPE\r\n"
+            ),
+            Some(super::BorrowedDispatchFloorClass::BitposUnit)
+        );
+    }
+
+    #[test]
     fn borrowed_plain_copy_packet_parsers_accept_and_refuse_copydeficit() {
         let cfg = ParserConfig::default();
 
@@ -49092,19 +49236,28 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         assert_eq!(packet.bit, b"1");
         assert_eq!(packet.start, b"0");
         assert_eq!(packet.end, b"7");
+        // (frankenredis-copydeficit) Both of these asserted None, and both expectations
+        // changed deliberately rather than to make a change pass. They were correct while
+        // no arm served arities 4 and 6 -- claiming a shape the arm declines sends it to
+        // GENERIC, which is worse than the cascade it came from. Arms exist now, reusing
+        // the parsers and executor that were already written for these exact spellings,
+        // so the claims are ones the arm keeps. The negative half of this test's job is
+        // taken over and widened by
+        // bitpos_floor_classifier_claims_every_real_arity_and_no_other_copydeficit, which
+        // pins that arities 2 and 7 are still NOT claimed.
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(
                 b"*4\r\n$6\r\nBITPOS\r\n$1\r\nb\r\n$1\r\n1\r\n$1\r\n0\r\n",
                 &cfg,
             ),
-            None
+            Some(super::BorrowedDispatchFloorClass::BitposStart)
         );
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(
                 b"*6\r\n$6\r\nBITPOS\r\n$1\r\nb\r\n$1\r\n1\r\n$1\r\n0\r\n$1\r\n7\r\n$4\r\nBYTE\r\n",
                 &cfg,
             ),
-            None
+            Some(super::BorrowedDispatchFloorClass::BitposUnit)
         );
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(

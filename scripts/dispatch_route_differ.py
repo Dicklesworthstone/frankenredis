@@ -797,6 +797,49 @@ CASES = [
     ("COPY", "cp:src", "cp:bad", "SIDEWAYS"),       # wrong token at arity 4
     ("COPY", "cp:src", "cp:bad", "REPLACE", "EXTRA"),
     ("EXISTS", "cp:bad"),                           # -> 0: no refusal wrote
+    # (frankenredis-copydeficit, second instance) BITPOS arities 4 and 6, newly claimed.
+    # The bit pattern is fixed by SETBIT so every answer is an exact index, not a
+    # coincidence, and the four arities are exercised against the SAME key so a route
+    # that silently changed the default range shows as a differing index.
+    ("DEL", "bp:k"),
+    ("SETBIT", "bp:k", "100", "1"),
+    ("SETBIT", "bp:k", "300", "1"),
+    ("BITPOS", "bp:k", "1"),                        # -> 100
+    ("BITPOS", "bp:k", "1", "2"),                   # start-only -> 100
+    ("BITPOS", "bp:k", "1", "20"),                  # start past the first bit -> 300
+    ("BITPOS", "bp:k", "1", "2", "-1"),             # -> 100
+    ("BITPOS", "bp:k", "1", "2", "-1", "BYTE"),     # -> 100
+    ("BITPOS", "bp:k", "1", "16", "-1", "BIT"),     # BIT units -> 100
+    ("BITPOS", "bp:k", "1", "101", "-1", "BIT"),    # -> 300
+    # Searching for a ZERO bit is where redis's "no end given" rule differs from the
+    # bounded one: unbounded may return the first bit past the string, bounded may not.
+    # A route that dropped the end, or invented one, diverges on exactly this pair.
+    # BYTES, not a str: the encoder here does `a.encode()` on a str, so "\xff\xff"
+    # would arrive as four UTF-8 bytes (0xC3 0xBF 0xC3 0xBF) whose first zero bit is at
+    # index 2 -- the rows would agree three ways while testing nothing they claim to.
+    ("SET", "bp:ones", b"\xff\xff"),
+    ("BITPOS", "bp:ones", "0"),                     # -> 16, past the end
+    ("BITPOS", "bp:ones", "0", "0"),                # start-only, still unbounded -> 16
+    ("BITPOS", "bp:ones", "0", "0", "-1"),          # bounded -> -1
+    ("BITPOS", "bp:ones", "0", "0", "-1", "BYTE"),  # -> -1
+    ("BITPOS", "bp:ones", "0", "0", "-1", "BIT"),   # -> -1
+    # Negative and out-of-range starts through the newly-claimed arities.
+    ("BITPOS", "bp:k", "1", "-1"),
+    ("BITPOS", "bp:k", "1", "-1", "-1"),
+    ("BITPOS", "bp:k", "1", "9999"),
+    ("BITPOS", "bp:k", "1", "9999", "-1", "BIT"),
+    # Missing key and wrong type through the newly-claimed arities.
+    ("BITPOS", "bp:absent", "1", "2"),
+    ("BITPOS", "bp:absent", "1", "2", "-1", "BYTE"),
+    ("BITPOS", "cp:h", "1", "2"),
+    ("BITPOS", "cp:h", "1", "2", "-1", "BYTE"),
+    # Refusals: each must reach generic with redis's text verbatim. The bad unit is the
+    # one the arm CLAIMS and the executor declines, so it exercises the decline path.
+    ("BITPOS", "bp:k", "1", "2", "-1", "NOPE"),
+    ("BITPOS", "bp:k", "2", "2"),                   # bit must be 0 or 1
+    ("BITPOS", "bp:k", "1", "notanint"),
+    ("BITPOS", "bp:k", "1", "2", "-1", "BYTE", "x"),
+
     # The DB spelling is arity 5 and is NOT claimed; it must not have moved.
     ("COPY", "cp:src", "cp:db", "DB", "3"),         # -> 1
     ("COPY", "cp:src", "cp:db", "DB", "3"),         # -> 0: exists, no REPLACE
@@ -865,7 +908,9 @@ for case in CASES:
     r = normalize(case, redis.cmd(*case))
     f = normalize(case, fast.cmd(*case))
     g = normalize(case, generic.cmd(*case))
-    label = " ".join(case)
+    # A case argument may be BYTES: some rows need a payload that is not valid UTF-8
+    # (BITPOS over 0xff bytes), and str would be re-encoded into something else.
+    label = " ".join(a if isinstance(a, str) else repr(a)[1:] for a in case)
     ok = (f == g) and (f == r)
     if not ok:
         bad += 1
