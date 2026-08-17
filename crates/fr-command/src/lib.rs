@@ -29550,7 +29550,168 @@ fn resolve_sort_alpha_collator() -> Option<CollatorBorrowed<'static>> {
     Collator::try_new(locale.into(), options).ok()
 }
 
-/// The collator every `SORT ... ALPHA` (without `STORE`) compares with, resolved once.
+/// Primary collation rank of one byte, `0` meaning "outside the ASCII fast path's
+/// domain". Root (and `en`) collation orders ASCII alphanumerics digits-then-letters with
+/// `a/A < b/B < ... < z/Z`, and case is a TERTIARY difference — so the two halves of a
+/// case pair share ONE primary rank here and are separated only by
+/// [`ascii_alnum_tertiary_table`].
+const fn ascii_alnum_primary_table() -> [u8; 256] {
+    let mut table = [0u8; 256];
+    let mut digit = 0usize;
+    while digit < 10 {
+        table[b'0' as usize + digit] = 1 + digit as u8;
+        digit += 1;
+    }
+    let mut letter = 0usize;
+    while letter < 26 {
+        table[b'a' as usize + letter] = 11 + letter as u8;
+        table[b'A' as usize + letter] = 11 + letter as u8;
+        letter += 1;
+    }
+    table
+}
+
+/// Tertiary (case) rank: lowercase and digits below uppercase, `0` outside the domain.
+const fn ascii_alnum_tertiary_table() -> [u8; 256] {
+    let mut table = [0u8; 256];
+    let mut digit = 0usize;
+    while digit < 10 {
+        table[b'0' as usize + digit] = 1;
+        digit += 1;
+    }
+    let mut letter = 0usize;
+    while letter < 26 {
+        table[b'a' as usize + letter] = 1;
+        table[b'A' as usize + letter] = 2;
+        letter += 1;
+    }
+    table
+}
+
+static ASCII_ALNUM_PRIMARY: [u8; 256] = ascii_alnum_primary_table();
+static ASCII_ALNUM_TERTIARY: [u8; 256] = ascii_alnum_tertiary_table();
+
+#[inline]
+fn in_ascii_alnum_collation_domain(value: &[u8]) -> bool {
+    value
+        .iter()
+        .all(|byte| ASCII_ALNUM_PRIMARY[*byte as usize] != 0)
+}
+
+/// Collate two `[0-9A-Za-z]`-only byte strings the way root/`en` collation does, without
+/// entering ICU. `None` means an input left the domain and the caller must fall back to
+/// the collator — this never guesses.
+///
+/// MEASURED MOTIVATION (callgrind, ELF `a9426571fcb48c07`, two-point delta at
+/// n=2000/4000): on `SORT_RO sl ALPHA` over a three-element list of ONE-character values,
+/// `CollationElements::next` + `CollatorBorrowed::compare` + `iter_next` + `init` + the
+/// code point trie come to **3,147 instr/op, 25.3% of the whole command** — roughly 1,050
+/// instructions to decide whether `"a"` sorts before `"b"`. On the 64-element shape the
+/// same frames are **81,297 instr/op, 60%**.
+///
+/// WHY BOTH INPUTS ARE SCANNED IN FULL before any comparison is made, rather than
+/// checking bytes as the comparison walks them: with `AlternateHandling::Shifted` a
+/// variable character (space, punctuation) is ignorable at the primary, secondary AND
+/// tertiary level, so ICU calls `"a"` and `"a "` EQUAL while the length rule below would
+/// call the shorter one smaller. A combining mark is the mirror image — it is a secondary
+/// difference carried by the PRECEDING letter, so `"ab"` vs `"a\u{0301}"` is decided by
+/// the letters rather than by length. Both live outside the domain and have to be
+/// recognised as such BEFORE the fast path commits to an answer, which a scan that
+/// stopped at the first difference would not do.
+#[inline]
+fn ascii_alnum_collate(left: &[u8], right: &[u8]) -> Option<Ordering> {
+    if !in_ascii_alnum_collation_domain(left) || !in_ascii_alnum_collation_domain(right) {
+        return None;
+    }
+    let shared = left.len().min(right.len());
+    for index in 0..shared {
+        let left_rank = ASCII_ALNUM_PRIMARY[left[index] as usize];
+        let right_rank = ASCII_ALNUM_PRIMARY[right[index] as usize];
+        if left_rank != right_rank {
+            return Some(left_rank.cmp(&right_rank));
+        }
+    }
+    // Primary weights are compared as a sequence, so a string whose weights are a proper
+    // prefix of the other's sorts first no matter what follows.
+    if left.len() != right.len() {
+        return Some(left.len().cmp(&right.len()));
+    }
+    for index in 0..shared {
+        let left_case = ASCII_ALNUM_TERTIARY[left[index] as usize];
+        let right_case = ASCII_ALNUM_TERTIARY[right[index] as usize];
+        if left_case != right_case {
+            return Some(left_case.cmp(&right_case));
+        }
+    }
+    // Equal at every level, and inside this domain that implies byte equality: equal
+    // primaries fix the letters and equal tertiaries fix their case.
+    Some(Ordering::Equal)
+}
+
+/// Multi-character probes for [`ascii_alnum_fast_path_agrees_with`], chosen for the
+/// CONTRACTIONS and reorderings that real locale tailorings apply to plain ASCII letters:
+/// Danish/Norwegian `aa` sorting as `å` (after `z`), Czech/Slovak `ch` after `h`, the
+/// Hungarian digraphs, Spanish traditional `ch`/`ll`, Estonian `z` after `s`, Lithuanian
+/// `y` after `i`, Swedish/Finnish `w` folded onto `v`. Each of those makes a tailored
+/// locale disagree with the table above on a pair drawn from this list, which is what
+/// turns the fast path off there. The case forms pin the tertiary rule and
+/// `0a`/`a0`/`9z`/`z9` pin digits-before-letters.
+const ASCII_ALNUM_TAILORING_PROBES: &[&str] = &[
+    "aa", "ab", "az", "aaa", "b", "ba", "ch", "ci", "cd", "cz", "cs", "d", "dz", "dzs", "gy", "h",
+    "hi", "i", "ij", "j", "ll", "lz", "ly", "ny", "nz", "rr", "sz", "ss", "t", "ty", "v", "vv",
+    "vw", "w", "wv", "ww", "x", "y", "yz", "z", "zs", "zz", "aA", "Aa", "AB", "aB", "Ab", "0a",
+    "a0", "9z", "z9",
+];
+
+/// Does `fast` reproduce `collator` exactly on the probe corpus?
+///
+/// This is the gate that makes the fast path safe against a collator this code did not
+/// choose. It is checked against the collator that will actually be used, so a locale
+/// tailoring the Latin letters — where the table above is simply WRONG — turns the fast
+/// path OFF rather than returning a wrong order. **A wrong table can therefore only cost
+/// the speedup, never an answer.** A probe that leaves the fast path's own domain is a
+/// failure too: the corpus exists to exercise the table, and one that declines proves
+/// nothing about it.
+///
+/// The comparator arrives as a function pointer rather than being called directly so that
+/// a test can hand in a deliberately WRONG one and watch this refuse — a gate nothing can
+/// fail is not a gate.
+///
+/// COST: 6,441 collator comparisons, ~6M instructions, paid ONCE per process on the first
+/// `SORT ... ALPHA` that has a collator at all — against ~1,000 instructions bought back
+/// on every in-domain comparison afterwards.
+fn ascii_alnum_fast_path_agrees_with(
+    collator: &CollatorBorrowed<'_>,
+    fast: fn(&[u8], &[u8]) -> Option<Ordering>,
+) -> bool {
+    let mut probes: Vec<String> = Vec::with_capacity(62 + ASCII_ALNUM_TAILORING_PROBES.len());
+    for byte in (b'0'..=b'9').chain(b'a'..=b'z').chain(b'A'..=b'Z') {
+        probes.push((byte as char).to_string());
+    }
+    probes.extend(ASCII_ALNUM_TAILORING_PROBES.iter().map(|probe| (*probe).to_string()));
+    for (index, left) in probes.iter().enumerate() {
+        for right in &probes[index..] {
+            let Some(fast_answer) = fast(left.as_bytes(), right.as_bytes()) else {
+                return false;
+            };
+            if fast_answer != collator.compare(left, right) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// The `SORT ... ALPHA` collator, plus whether the ASCII fast path was VALIDATED against
+/// that exact collator. The two travel together because either alone is unusable: the
+/// flag means nothing without the collator it was checked against.
+struct SortAlphaCollation {
+    collator: Option<CollatorBorrowed<'static>>,
+    ascii_fast_path: bool,
+}
+
+/// The collator every `SORT ... ALPHA` (without `STORE`) compares with, resolved once,
+/// together with the fast-path verdict for that collator.
 ///
 /// (frankenredis-7nfc0 named this cost; this is the lever.) The resolution behind it is
 /// not cheap and it was being paid ONCE PER COMMAND: three `getenv`s, a POSIX→BCP47
@@ -29569,11 +29730,20 @@ fn resolve_sort_alpha_collator() -> Option<CollatorBorrowed<'static>> {
 ///
 /// Returning a borrow rather than a fresh `CollatorBorrowed` is what makes it a cache:
 /// `CollatorBorrowed<'static>` is a view over ICU's compiled data, so cloning it per
-/// call would re-run the lookup this exists to avoid.
-fn active_sort_alpha_collator() -> Option<&'static CollatorBorrowed<'static>> {
-    static COLLATOR: std::sync::OnceLock<Option<CollatorBorrowed<'static>>> =
-        std::sync::OnceLock::new();
-    COLLATOR.get_or_init(resolve_sort_alpha_collator).as_ref()
+/// call would re-run the lookup this exists to avoid. The same argument extends to
+/// `ascii_fast_path`: it is a pure function of the collator, so it is decided with it.
+fn active_sort_alpha_collation() -> &'static SortAlphaCollation {
+    static COLLATION: std::sync::OnceLock<SortAlphaCollation> = std::sync::OnceLock::new();
+    COLLATION.get_or_init(|| {
+        let collator = resolve_sort_alpha_collator();
+        let ascii_fast_path = collator
+            .as_ref()
+            .is_some_and(|collator| ascii_alnum_fast_path_agrees_with(collator, ascii_alnum_collate));
+        SortAlphaCollation {
+            collator,
+            ascii_fast_path,
+        }
+    })
 }
 
 /// Compare two `SORT ... ALPHA` elements.
@@ -29596,9 +29766,35 @@ pub fn sort_alpha_compare(
     left: &[u8],
     right: &[u8],
 ) -> Ordering {
+    sort_alpha_compare_with_ascii_fast_path(collator, false, left, right)
+}
+
+/// [`sort_alpha_compare`] with the ASCII-alnum fast path available.
+///
+/// `ascii_fast_path` MUST come from [`active_sort_alpha_collation`], i.e. it must have
+/// been validated against the very `collator` passed here — which is why this is a
+/// separate entry point rather than a global flag consulted inside the comparator. The
+/// comparator is also handed collators the process did not resolve (the bench's A/B arms,
+/// and tests that build their own `en-US`), and a flag validated against a DIFFERENT
+/// collator would be exactly the silent wrong-answer this design exists to rule out.
+///
+/// `sort_alpha_compare` keeps its old signature and its old behaviour verbatim, so
+/// `benches/sort_alpha_compare.rs` and the existing pinning tests measure and assert the
+/// same thing they did before.
+pub fn sort_alpha_compare_with_ascii_fast_path(
+    collator: Option<&CollatorBorrowed<'_>>,
+    ascii_fast_path: bool,
+    left: &[u8],
+    right: &[u8],
+) -> Ordering {
     let Some(collator) = collator else {
         return left.cmp(right);
     };
+    if ascii_fast_path
+        && let Some(ordering) = ascii_alnum_collate(left, right)
+    {
+        return ordering;
+    }
     match (std::str::from_utf8(left), std::str::from_utf8(right)) {
         (Ok(left_str), Ok(right_str)) if !left_str.contains('\0') && !right_str.contains('\0') => {
             collator.compare(left_str, right_str)
@@ -29932,10 +30128,11 @@ fn sort_generic<const MOVE: bool>(
             elements = reordered;
         } else {
             // Alpha (lexicographic) sort
-            let collator = if store_dest.is_none() {
-                active_sort_alpha_collator()
+            let collation = active_sort_alpha_collation();
+            let (collator, ascii_fast_path) = if store_dest.is_none() {
+                (collation.collator.as_ref(), collation.ascii_fast_path)
             } else {
-                None
+                (None, false)
             };
             let mut indexed: Vec<(usize, &[u8])> = sort_keys
                 .iter()
@@ -29950,7 +30147,7 @@ fn sort_generic<const MOVE: bool>(
             // stable ordering of equal-key rows exactly while making `cmp` a
             // strict total order for the partial sort. (frankenredis-sortlim)
             let mut cmp = |a: &(usize, &[u8]), b: &(usize, &[u8])| {
-                let base = sort_alpha_compare(collator, a.1, b.1);
+                let base = sort_alpha_compare_with_ascii_fast_path(collator, ascii_fast_path, a.1, b.1);
                 let base = if desc { base.reverse() } else { base };
                 base.then_with(|| a.0.cmp(&b.0))
             };
@@ -61214,8 +61411,10 @@ mod tests {
 
     #[test]
     fn sort_alpha_collator_is_memoised_and_agrees_with_a_fresh_resolution() {
-        let first = super::active_sort_alpha_collator();
-        let second = super::active_sort_alpha_collator();
+        // Through the production accessor, which now hands out the whole
+        // `SortAlphaCollation` (collator + validated-fast-path flag) from ONE `OnceLock`.
+        let first = super::active_sort_alpha_collation().collator.as_ref();
+        let second = super::active_sort_alpha_collation().collator.as_ref();
         match (first, second) {
             (Some(first), Some(second)) => assert!(
                 std::ptr::eq(first, second),
@@ -61300,6 +61499,198 @@ mod tests {
                 b"apple".to_vec(),
             ]
         );
+    }
+
+    /// The exact collator the ASCII fast path has to be indistinguishable from — same
+    /// options as `resolve_sort_alpha_collator` builds, so these tests pin the shipping
+    /// configuration rather than a default one.
+    fn en_us_probe_collator() -> super::CollatorBorrowed<'static> {
+        let mut options = CollatorOptions::default();
+        options.alternate_handling = Some(AlternateHandling::Shifted);
+        let locale = "en-US".parse::<Locale>().expect("valid en-US locale");
+        Collator::try_new(locale.into(), options).expect("en-US collator")
+    }
+
+    /// Deterministic `[0-9A-Za-z]` strings for the randomised half of the corpus. A fixed
+    /// LCG rather than a seeded RNG so a failure names an input anyone can reproduce.
+    fn deterministic_ascii_alnum_corpus(count: usize) -> Vec<Vec<u8>> {
+        const ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut draw = |bound: usize| -> usize {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((state >> 33) as usize) % bound
+        };
+        let mut corpus = Vec::with_capacity(count);
+        for _ in 0..count {
+            // Length 1..=6, and short strings on purpose: the interesting disagreements
+            // are prefixes and case ties, both of which need collisions to appear.
+            let len = draw(6) + 1;
+            let mut value = Vec::with_capacity(len);
+            for _ in 0..len {
+                value.push(ALPHABET[draw(ALPHABET.len())]);
+            }
+            corpus.push(value);
+        }
+        corpus
+    }
+
+    /// The complete singleton surface: all 1,891 unordered pairs of ASCII alphanumerics.
+    /// A table that got one primary rank or the lowercase-before-uppercase tertiary rule
+    /// wrong cannot survive this.
+    #[test]
+    fn ascii_alnum_collate_reproduces_icu_on_every_single_character_pair() {
+        let collator = en_us_probe_collator();
+        let singles: Vec<String> = (b'0'..=b'9')
+            .chain(b'a'..=b'z')
+            .chain(b'A'..=b'Z')
+            .map(|byte| (byte as char).to_string())
+            .collect();
+        for (index, left) in singles.iter().enumerate() {
+            for right in &singles[index..] {
+                let fast = super::ascii_alnum_collate(left.as_bytes(), right.as_bytes())
+                    .unwrap_or_else(|| panic!("fast path declined in-domain {left:?}/{right:?}"));
+                assert_eq!(
+                    fast,
+                    collator.compare(left, right),
+                    "fast path disagreed with ICU on {left:?} vs {right:?}"
+                );
+            }
+        }
+    }
+
+    /// Multi-character agreement: the contraction/tailoring probes the startup gate uses,
+    /// plus 240 deterministic random strings, every pair of both. Singleton agreement is
+    /// not enough on its own — a contraction (`aa`, `ch`, `ll`) is precisely a rule that
+    /// singletons cannot show.
+    #[test]
+    fn ascii_alnum_collate_reproduces_icu_on_contraction_and_random_probes() {
+        let collator = en_us_probe_collator();
+        let mut corpus: Vec<Vec<u8>> = vec![Vec::new()];
+        corpus.extend(
+            super::ASCII_ALNUM_TAILORING_PROBES
+                .iter()
+                .map(|probe| probe.as_bytes().to_vec()),
+        );
+        corpus.extend(deterministic_ascii_alnum_corpus(240));
+        for (index, left) in corpus.iter().enumerate() {
+            for right in &corpus[index..] {
+                let (left_str, right_str) = (
+                    std::str::from_utf8(left).expect("ascii"),
+                    std::str::from_utf8(right).expect("ascii"),
+                );
+                let fast = super::ascii_alnum_collate(left, right)
+                    .unwrap_or_else(|| panic!("declined in-domain {left_str:?}/{right_str:?}"));
+                assert_eq!(
+                    fast,
+                    collator.compare(left_str, right_str),
+                    "fast path disagreed with ICU on {left_str:?} vs {right_str:?}"
+                );
+            }
+        }
+    }
+
+    /// Everything the fast path must refuse — and the reason the domain check has to cover
+    /// the WHOLE of both inputs instead of stopping at the first difference.
+    #[test]
+    fn ascii_alnum_collate_declines_every_input_outside_its_domain() {
+        for (left, right) in [
+            (&b"a"[..], &b"a "[..]),                 // trailing space: ignorable
+            (&b"ab"[..], &b"a-b"[..]),               // punctuation, same reason
+            (&b"a"[..], &b"a\xcc\x81"[..]),          // combining acute: SECONDARY difference
+            (&b"caf\xc3\xa9"[..], &b"cafe"[..]),     // multi-byte UTF-8
+            (&b"\xff\xfe"[..], &b"ab"[..]),          // not UTF-8 at all
+            (&b"a\0b"[..], &b"ab"[..]),              // embedded NUL
+            (&b"a_b"[..], &b"ab"[..]),               // underscore is not alphanumeric
+        ] {
+            assert_eq!(
+                super::ascii_alnum_collate(left, right),
+                None,
+                "fast path accepted out-of-domain {left:?} vs {right:?}"
+            );
+            assert_eq!(
+                super::ascii_alnum_collate(right, left),
+                None,
+                "fast path accepted out-of-domain {right:?} vs {left:?}"
+            );
+        }
+        // THE REASON the scan is total. ICU calls these two EQUAL (the space is variable
+        // and `AlternateHandling::Shifted` drops it at every compared level), while the
+        // fast path's length rule would have called the shorter one smaller. A domain
+        // check that stopped at the first differing byte would never see the space.
+        let collator = en_us_probe_collator();
+        assert_eq!(collator.compare("a", "a "), std::cmp::Ordering::Equal);
+    }
+
+    /// The startup gate must be able to FAIL, or it is decoration. Byte order is the
+    /// obvious wrong comparator (it puts every uppercase letter before every lowercase
+    /// one) and a comparator that always declines is the other failure mode — a corpus
+    /// that never exercises the table cannot validate it.
+    #[test]
+    fn ascii_alnum_fast_path_gate_refuses_a_comparator_that_disagrees() {
+        let collator = en_us_probe_collator();
+        assert!(
+            super::ascii_alnum_fast_path_agrees_with(&collator, super::ascii_alnum_collate),
+            "the shipped table must validate against en-US or the fast path never runs"
+        );
+
+        fn byte_order(left: &[u8], right: &[u8]) -> Option<std::cmp::Ordering> {
+            Some(left.cmp(right))
+        }
+        assert!(
+            !super::ascii_alnum_fast_path_agrees_with(&collator, byte_order),
+            "gate accepted byte order, which disagrees with ICU on every case pair"
+        );
+
+        fn always_declines(_: &[u8], _: &[u8]) -> Option<std::cmp::Ordering> {
+            None
+        }
+        assert!(
+            !super::ascii_alnum_fast_path_agrees_with(&collator, always_declines),
+            "gate accepted a comparator that never answered"
+        );
+    }
+
+    /// The property that actually ships: with the fast path ON, the comparator the SORT
+    /// call site uses must be INDISTINGUISHABLE from the collator-only form, over a corpus
+    /// that mixes in-domain and out-of-domain values (so the fallback edge is covered, not
+    /// just the fast one).
+    #[test]
+    fn sort_alpha_compare_with_ascii_fast_path_matches_the_collator_only_form() {
+        let collator = en_us_probe_collator();
+        let mut corpus: Vec<Vec<u8>> = vec![
+            Vec::new(),
+            b"a ".to_vec(),
+            b"a-b".to_vec(),
+            b" ".to_vec(),
+            b"caf\xc3\xa9".to_vec(),
+            b"caf\xe9".to_vec(),
+            b"\xff\xfe".to_vec(),
+            b"a\0b".to_vec(),
+            b"Banana".to_vec(),
+            b"apple".to_vec(),
+        ];
+        corpus.extend(
+            super::ASCII_ALNUM_TAILORING_PROBES
+                .iter()
+                .map(|probe| probe.as_bytes().to_vec()),
+        );
+        corpus.extend(deterministic_ascii_alnum_corpus(120));
+        for left in &corpus {
+            for right in &corpus {
+                assert_eq!(
+                    super::sort_alpha_compare_with_ascii_fast_path(
+                        Some(&collator),
+                        true,
+                        left,
+                        right
+                    ),
+                    super::sort_alpha_compare(Some(&collator), left, right),
+                    "fast path changed the answer for {left:?} vs {right:?}"
+                );
+            }
+        }
     }
 
     #[test]
