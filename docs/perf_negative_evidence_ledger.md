@@ -28685,3 +28685,80 @@ RETRY PREDICATE: check `BorrowedDispatchFloorClass::<Cmd>` before starting ANY f
 the token scans in both my tools are advisory and have now been wrong in both directions.
 Remaining [A] candidates worth measuring first are DUMP, PING and RANDOMKEY; PEXPIRETIME and
 ZREVRANGEBYLEX are already done by peers.
+
+--------------------------------------------------------------------------------
+DERIVED, BUILD-FREE (frankenredis-ozrro) — a command's dispatch cost is PREDICTABLE FROM ITS
+CASCADE DEPTH ALONE: 45.1 instr/op per arm position. PING is a FALSE target on my own [A]
+list, and DUMP/RANDOMKEY are quantified before anyone builds anything
+
+Claim class: METHOD
+
+The host is in I/O saturation — loadavg 438, 72 pct iowait, 387 blocked processes — so no
+build and no measurement this turn. This is what the existing rows already contain, read
+back.
+
+SIX COMMANDS, EACH MEASURED INDEPENDENTLY IN ITS OWN ABBA ROW, against their arm position
+in the borrowed cascade (163 arms between lines 6000-14000):
+
+    command      arm   measured dispatch   per position
+    smove        103           4,438           43.1
+    hincrby      102           4,343           42.6
+    zlexcount    101           4,305           42.6
+    renamenx      99           4,123           41.6
+    substr        78           3,378           43.3
+    rpoplpush     76           3,069           40.4
+
+    least-squares:  dispatch = 45.1 x arm position - 261
+
+    THE PER-POSITION FIGURE VARIES BY ONLY 40.4-43.3 ACROSS SIX COMMANDS with different
+    arities, parsers and executors. Depth is doing essentially all the work.
+
+AND 45.1 IS AN INDEPENDENT REDERIVATION OF A CONSTANT THIS LEDGER ALREADY HAD. The SET
+arm-move row measured "one failed non-inlined parser call = 40-50 instr/op" by moving a
+single arm and watching the jumped-over arms pay. This fit never used that number: it comes
+from six absolute dispatch measurements and a line count. Two unrelated derivations landing
+on the same constant is what makes it a property of the cascade rather than a coincidence of
+one experiment.
+
+PING IS A FALSE TARGET AND MY OWN [A] LIST SAID OTHERWISE. `corpus_coverage.py` reports
+membership — unclassified, fast path exists — and says NOTHING about depth. PING is arm 1
+OF 163. Its walk is one failed parse; there is no lever there at all, and I had it listed
+as one of four to work next. That is the THIRD way these name scans have misled me:
+
+    false [C]  — shared executors invisible, cost 300 duplicate lines
+    stale [A]  — peers had already classified two of my four
+    depth-blind — membership says nothing about the only variable that matters
+
+    [A] MUST BE RANKED BY ARM POSITION, NOT MEMBERSHIP. A command at arm 1 and a command at
+    arm 103 are both "unclassified with a fast path" and only one is worth a build.
+
+PREDICTIONS, RECORDED BEFORE ANY MEASUREMENT SO THE NEXT RUN CAN FALSIFY THEM:
+
+    dump       arm 60   predicted ~2,446 instr/op of dispatch, expect ~363 after
+                        (DUMP key = 2 bulks, by the 263 + ~100/bulk model) -> saving ~2,080
+    randomkey  arm 61   predicted ~2,491, expect ~263 after (1 bulk) -> saving ~2,230
+    ping       arm  1   nothing to recover
+
+    HONEST LIMIT ON THE FIT: all six points lie between arms 76 and 103, so the slope is
+    well constrained and the INTERCEPT is not. Extrapolating the line to arm 1 gives -215,
+    which is physically meaningless and shows the intercept is an artefact of a narrow
+    range. The PING conclusion does NOT rest on that extrapolation — it rests on PING being
+    arm 1, i.e. one failed parse deep, which needs no model at all. Treat the predictions
+    for arms 60-61 as interpolation-adjacent and the arm-1 claim as structural.
+
+PROVENANCE:
+  no measurement       derived entirely from figures already banked in six prior rows plus
+                       a line-position count. No build, no server, no harness run.
+  host                 thinkstation1, 64 cores, /data 154G, loadavg 438.82/191.46/89.07,
+                       72 pct iowait, 387 blocked processes — mostly external (smartedgar,
+                       mcp_agent_mail_rust, coding_agent_session_search).
+  MHz                  not recorded — nothing was measured, and a host-wide mean on a row
+                       that measured nothing would be noise dressed as provenance.
+  blocked              crates/fr-server/src/main.rs held by RusticHorizon; my ZLEXCOUNT
+                       floor entry is parked at scratchpad/zlexcount_floor.patch, filtered
+                       to my 6 of 10 hunks.
+
+RETRY PREDICATE: rank remaining floor-entry candidates by ARM POSITION and ignore anything
+above roughly arm 30 — below ~1,100 instr/op of dispatch the entry costs more review than it
+returns. Take DUMP and RANDOMKEY together when the host recovers; they are adjacent arms and
+one ABBA covers both. Do NOT build PING an entry.
