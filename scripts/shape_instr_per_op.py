@@ -393,6 +393,11 @@ SHAPES = {
     "scan_count": (["SET sc1 a", "SET sc2 b"], ["SCAN", "0", "COUNT", "100"]),
     "scan_match": (["SET sc1 a", "SET sc2 b"], ["SCAN", "0", "MATCH", "sc*"]),
     "scan_type": (["SET sc1 a", "SET sc2 b"], ["SCAN", "0", "TYPE", "string"]),
+    # (frankenredis-ozrro) The two-option form at arity 6 — what client scan_iter helpers
+    # actually emit. MATCH+COUNT is the canonical pair; the arity-8 three-option form is
+    # deliberately absent because it stays on the generic route by design.
+    "scan_iter": (["SET sc1 a", "SET sc2 b"],
+                  ["SCAN", "0", "MATCH", "sc*", "COUNT", "100"]),
     "lcs_2": (["SET lc1 ohmytext", "SET lc2 mynewtext"], ["LCS", "lc1", "lc2"]),
     # (frankenredis-gvm6z) The SIZE SIBLING for LCS, and the reason it exists is that
     # `lcs_2` measured 1.1085x -- the worst cell on my screen -- over strings of EIGHT and

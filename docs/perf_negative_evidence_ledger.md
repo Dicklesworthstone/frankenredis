@@ -8,6 +8,71 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## CERTIFIED (frankenredis-ozrro) — the scan_iter shape drops 8,530.1 → 5,148.7 instr/op (0.6594x), and the 1.9x sizing multiplier reproduces across three arities while the per-argument argv model is REFUTED by its own third point
+
+Claim class: COMPETITIVE + SELF-A/B. Before `fr-after-spop` (a46f3042e), after
+`fr-after-scaniter` (09ed7e2ef), both symbol-verified: execute_plain_scan_opt2_borrowed
+present 3x in the after arm and 0x in the before, with the arity-4 executor present in BOTH.
+Incumbent verified on every ratio run (redis-server sha d2c8a4b9 == vendored HEAD, clean).
+
+    shape         fr before   fr after     delta   disp before  disp after   ratio
+    scan_iter       8,530.1    5,148.7   -3,381.4     2,255.2      575.6    0.6594x
+    scan_count      4,286.7    4,282.8       -3.9       445.4      445.4    0.6440x  CONTROL
+    dump_small      2,701.8    2,698.2       -3.6       305.1      305.8    0.5428x  CONTROL
+
+`SCAN 0 MATCH sc* COUNT 100` is the shape client scan_iter helpers emit, so this is the
+common case, not an edge.
+
+TWO CONTROLS, AND THEY WERE LOAD-BEARING THIS TIME. The after ELF was built from a tree
+carrying a PEER'S UNCOMMITTED LCS work in fr-command — the exact "peer WIP contaminates your
+A/B" hazard this ledger has a row about. scan_count (front-classified in BOTH arms, so it
+must not move) came back -3.9 instr/op with dispatch IDENTICAL at 445.4, and dump_small
+-3.6. A cross-crate change large enough to shift layout would have shown up in at least one
+of them. The pair is clean; the contamination risk was real and was measured away rather
+than assumed away.
+
+Reproducibility bonus: scan_count on the SAME before-ELF read 4,285.2 / 446.2 in the earlier
+session and 4,286.7 / 445.4 here — 0.035% apart across separate runs, separate windows.
+
+THE 1.9x SIZING MULTIPLIER NOW HAS THREE POINTS:
+
+    shape        arity   total delta   dispatch delta   multiplier
+    scan_zero      2       -3,161.5        -1,668.3        1.89
+    scan_count     4       -3,180.1        -1,648.5        1.93
+    scan_iter      6       -3,381.4        -1,679.6        2.01
+
+1.89 / 1.93 / 2.01 across three arities, and independently ~1.8x from p98mw. Front-classifying
+a generic-route command returns about DOUBLE its measured dispatch share. Dispatch share
+remains a lower bound and the multiplier is now measured rather than estimated.
+
+THE PER-ARGUMENT ARGV MODEL IS REFUTED, BY THE THIRD POINT, AND I AM RECORDING IT BECAUSE I
+NEARLY BANKED IT. Two points invited a tidy law: non-dispatch saving -1,527 at arity 4 and
+-1,702 at arity 6 gives 87.5 instr per argument, which "obviously" is argv materialisation
+scaling with argument count. The arity-2 point kills it: -1,493.2. The three run
+-1,493 / -1,527 / -1,702, which is +34 for the first two arguments and +175 for the next
+two — not a line. The honest statement is that the non-dispatch saving is roughly constant
+at ~1,570 +/- 110 across arities 2-6, with no supported per-argument slope.
+
+This is the same trap as the SINTER k=14.2 crossover fitted across an encoding boundary, and
+as keys_star at n=2. A two-point fit produces a law-shaped object every time; it is the
+third point that decides whether it is a law. Caveat on the three points above: arity 2 came
+from a DIFFERENT ELF pair and window than 4 and 6, so it is the weakest of the three — but
+it is weak in the direction of refuting, and a point that refutes is not one to discard for
+being inconvenient.
+
+FRONT-CLASSIFIED DISPATCH BY ARITY, extended:
+
+    arity 1  ~274      arity 2  263-306    arity 3  391-409
+    arity 4  446-449   arity 6  575.6
+
+WINDOW — CERTIFIED. Per-arm loadavg 16.51-16.95 / 16.67-16.75 / 19.02-19.09; observed core
+MHz 1,429-4,143. The 1-minute and 5-minute averages agree to within 2% across every arm,
+which is the tightest window of this campaign, and both controls are flat to 0.13%. Note
+the fleet-level report for this window read 29.5 rising against a 5-minute of 19; my own
+uptime disagreed in the FAVOURABLE direction and the certification rests on my own reading,
+per the standing rule to check it myself. MHz is recorded because the campaign asks for it
+and is irrelevant to an instruction count.
+
 ## MEASURED (frankenredis-ozrro) — SCAN's arity-4 option forms each drop ~3,175 instr/op, the dispatch term is a per-call constant to 0.9 instr/op, and SPOP's lever is UNDEMONSTRABLE on the only shape that exists
 
 Claim class: COMPETITIVE + SELF-A/B. Before arm `fr-after-scankeys` (6ce613360, verified by
