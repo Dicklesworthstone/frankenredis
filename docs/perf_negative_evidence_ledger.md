@@ -8,6 +8,81 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-08-17 BrownIbis: METHOD — the campaign's ranking axis is cost-per-CALL, the value axis is cost-times-FREQUENCY, and the two differ by the one number nobody has measured (`frankenredis-g3z6n`, `frankenredis-e1w1r`)
+
+Not a verdict row: no lever, no A/B, no incumbent. It is arithmetic over per-call numbers already
+measured on this host today, and it exists because a standing predicate blocks a sized lever on a
+quantity that has never been defined precisely enough to test.
+
+NO BUILD, NO BENCH. Every input below is a figure already banked in this ledger.
+
+### THE PREDICATE IS AMBIGUOUS, AND THE TWO READINGS DIFFER BY 6.5x
+
+`NEGATIVE_EVIDENCE.md:5654` gates SORT front-classification on SORT showing up "**>=5 pct of a
+real mixed profile**". Five percent of WHAT is not stated, and the answer decides admissibility.
+Solving `f*ipo / (f*ipo + (1-f)*base) = target` for the call share `f`, with every other call a
+GET at 1,307 instr/op:
+
+    command                  instr/op   calls needed for   calls needed for
+                                          5 pct of instr     1 pct of instr
+    GET (get_control)          1307.0          5.000 pct          1.000 pct
+    TOUCH (classified)         1687.6          3.917 pct          0.776 pct
+    SPUBLISH (classified)      1824.3          3.634 pct          0.718 pct
+    MOVE (classified)          1923.8          3.452 pct          0.682 pct
+    SORT_RO n=3                8900.3          0.767 pct          0.148 pct
+    SORT_RO n=64              40637.2          0.169 pct          0.032 pct
+
+**SORT reaches 5 pct of INSTRUCTIONS at 0.77 pct of CALLS** — roughly one SORT per 130 GETs — and
+at n=64 it needs 0.17 pct. Read as call share the predicate is a high bar; read as instruction
+share it is a low one. **A perf lever's value is proportional to the instructions it removes, not
+to the calls it is attached to, so the instruction reading is the correct one** — and under it
+the predicate is nearly always satisfiable for an expensive command, which is close to saying it
+does not discriminate.
+
+### WHAT A FRONT-CLASSIFICATION LEVER IS ACTUALLY WORTH, WHICH IS LESS THAN ITS HEADLINE
+
+Whole-workload saving = `call_share x per_call_saving / average_op`. With the average op at 1,307-1,400
+instr/op (a GET-dominated profile) and the per-call savings measured today:
+
+    lever                                saves/call    @0.1 pct    @1 pct     @5 pct
+    SPUBLISH classify                          6483      0.46 pct   4.63 pct  23.16 pct
+    MOVE classify                              2533      0.18 pct   1.81 pct   9.05 pct
+    SORT_RO classify (e1w1r, sized)            2300      0.16 pct   1.64 pct   8.21 pct
+    SORT ALPHA collation + keys (shipped)      8157      0.58 pct   5.83 pct  29.13 pct
+
+**A −78 pct headline on SPUBLISH is worth 0.46 pct of a mixed workload if SPUBLISH is 0.1 pct of
+calls.** Both numbers are true and they are answers to different questions. The campaign has been
+ranking exclusively on the left-hand column.
+
+This is not an argument that the levers were wrong — every one of them removed real instructions
+from a real command, and the per-call numbers are certified where they claim to be. It is an
+argument that **the ORDER in which the remaining ones are taken cannot be derived from per-call
+cost alone**, and that a command's frequency can swing its value by two orders of magnitude
+across the plausible range.
+
+### WHAT THIS DOES AND DOES NOT SETTLE
+
+SETTLED: the shape of the answer. Anyone holding a real call mix can now price any banked lever in
+one multiplication, and `g3z6n` no longer needs a workload to be USEFUL — it needs one to be
+DECISIVE.
+
+NOT SETTLED, and it is the same gap `g3z6n` was filed for: the actual call shares. Every figure in
+the right-hand columns is a hypothetical, and the GET-dominated baseline is itself an assumption —
+a defensible one for a cache, and still an assumption. **Nothing here should be quoted as a
+measured whole-workload number.**
+
+### RETRY PREDICATE
+
+(1) `e1w1r` (SORT front-classification, sized at ~2,100-2,500 instr/op) should be unblocked on the
+INSTRUCTION reading of `NEGATIVE_EVIDENCE.md:5654`, since 0.77 pct of calls clears it — but the
+honest expected win is ~1.6 pct of a mixed workload at a 1 pct call share, not the 23-27 pct of
+the shape. Whoever takes it should quote both. (2) The decisive measurement is unchanged: one
+mixed-workload command mix, weighted by instructions, per `g3z6n` — INFO commandstats for the call
+mix (never its `usec_per_call`, which is not comparable across dispatch routes) or a callgrind run
+attributed per command with `frame_delta.py`. (3) Do NOT take another depth-ranked dispatch
+candidate before that exists; the depth screens are now measuring a quantity whose weight is
+unknown to within 100x.
+
 ## 2026-08-17 BrownIbis: KEEP (SELF-SPEEDUP) — the last two stranded commands are front-classified: SPUBLISH **8,307.8 -> 1,824.3 instr/op (-78.0 pct, 4.55x)** and MOVE **4,456.5 -> 1,923.8 (-56.8 pct, 2.32x)** (`frankenredis-p98mw`)
 
 Claim class: SELF-SPEEDUP. Campaign output: no. This is fr-before against fr-after; no incumbent
