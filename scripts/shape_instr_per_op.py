@@ -469,6 +469,24 @@ SHAPES = {
     # is O(n) on both engines and the slopes are directly comparable. Destination is
     # rewritten with the identical result every call, so the keyspace stops changing
     # after the first and the two-point subtraction still sees a steady-state no-op.
+    # (frankenredis-gvm6z) THE OPTION FORMS, which the floor class deliberately does NOT
+    # claim. `(5, Zrangestore)` is arity-5 EXACTLY because the arm's parser is a `*5`
+    # prefix literal; BYSCORE/BYLEX/REV/LIMIT are arity 6+ and still take the GENERIC
+    # path. That was an argued decision with no number attached, and "the class is correct
+    # to stop at 5" and "the option forms are cheap" are different claims. These measure
+    # the second one.
+    #
+    # Both are steady-state no-ops: REV over the full range and BYSCORE over the whole
+    # score band each rewrite the destination with the identical result every call, so the
+    # keyspace stops changing after the first and the two-point subtraction holds.
+    "zrangestore_rev": (
+        ["ZADD zrvsrc 1 a 2 b 3 c"],
+        ["ZRANGESTORE", "zrvdst", "zrvsrc", "0", "-1", "REV"],
+    ),
+    "zrangestore_byscore": (
+        ["ZADD zrbsrc 1 a 2 b 3 c"],
+        ["ZRANGESTORE", "zrbdst", "zrbsrc", "1", "3", "BYSCORE"],
+    ),
     "zrangestore_64": (
         [" ".join(["ZADD", "zr64src"] + [f"{i} m{i:02d}" for i in range(64)])],
         ["ZRANGESTORE", "zr64dst", "zr64src", "0", "-1"],

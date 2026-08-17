@@ -30874,3 +30874,75 @@ here. Use this pattern instead for any other front-classification whose remainde
 disputed: one bypass-feature build, both arms by env var, and assert the arms DIFFER before
 reading either. The option forms (arity 6+) still take the generic path and remain
 unmeasured; that is the only ZRANGESTORE work left.
+
+--------------------------------------------------------------------------------
+## CERTIFIED (frankenredis-gvm6z) — ZRANGESTORE's OPTION forms pay 3,802.6 instr/op of generic dispatch, the same per-call constant the base form paid before its floor class; ~3,115 instr/op each is unclaimed. And pfmerge_2 is adjudicated at 0.894x
+
+Claim class: COMPETITIVE. fr/redis instructions per op, both arms in ONE invocation,
+incumbent verified on every run. NO BUILD was started in this window — frankenfs measured a
+local release build taking loadavg 21.66 to 55.25 and closing its own measurement window, so
+every arm here runs on an ELF snapshotted in an earlier one.
+
+    shape                  fr instr/op  redis instr/op   ratio     fr dispatch
+    zrangestore_all            5,067.8      11,969.0   0.4234x     687.9 (13.6 pct)  CLASSIFIED
+    zrangestore_rev           10,310.7      12,687.2   0.8127x   3,802.8 (36.9 pct)  generic
+    zrangestore_byscore       10,884.1      14,991.4   0.7260x   3,802.5 (34.9 pct)  generic
+
+THE RESULT IS THE AGREEMENT, not any single number. Two option forms with different parsers,
+different range semantics and different reply sizes pay dispatch of **3,802.8 and 3,802.5** —
+they agree to **0.008 pct**. And that figure sits **0.40 pct** from the 3,787.6 the BASE form
+paid before it was front-classified. Three different ZRANGESTORE shapes, measured in two
+different windows on two different ELFs, put the generic dispatch cost at the same ~3,800
+instr/op. Dispatch on this route is a per-call constant that does not depend on the command's
+option shape at all.
+
+    PRIZE STILL ON THE TABLE: 3,802.6 -> 687.9 is **3,114.8 instr/op per option form**, the
+    same -81.9 pct the base form got. `(5, Zrangestore)` was deliberately arity-5 exactly
+    because the arm's `*5` prefix parser cannot serve arity 6 — that decision was correct and
+    is still correct. But "the class is right to stop at 5" and "the option forms are cheap"
+    are DIFFERENT CLAIMS, and I had only argued the first. The second is now measured and it
+    is false: they are not cheap. Claiming them needs a second parser and a second class at
+    arity 6, not a widening of this one, which would send shapes to GENERIC on decline.
+
+RATIOS HERE ARE INTERCEPT READINGS AND I AM NOT QUOTING THEM AS COMMAND CLAIMS. Every shape
+above holds THREE members. This repo has now read a one-point shape as a command claim four
+times, and `zrangestore_all` itself moved 0.7926x -> 0.0389x between 3 and 64 members. The
+0.8127x and 0.7260x above are single draws on 3-member zsets; treat them as the intercept
+regime only. **The dispatch column is the certified part** — it is fr-side, per-call, and
+reproduces across shapes, windows and ELFs.
+
+PFMERGE_2 ADJUDICATED, closing a caveat I left open two rows ago. I banked 0.8932x as a
+single draw and said explicitly it was NOT adjudicated because the harness carries roughly
++/-8 pct on the redis arm. Second draw: **0.8939x**, 0.08 pct apart, with dispatch identical
+at 3,012.7 both times. fr is ahead on PFMERGE at 0.894x and that number can now be quoted.
+Its dispatch is also large in absolute terms (3,012.7) though only 2.8 pct of a 108k-instr op.
+
+CROSS-WINDOW REPRODUCIBILITY of the classified base form, as a standing control:
+    fr 5,026.9 / 5,027.0 / 5,067.8    dispatch 683.6 / 684.1 / 687.9
+across three runs on two ELFs in two windows — 0.8 pct and 0.6 pct spreads.
+
+PROVENANCE:
+  fr ELF        61778add43b18a6b4ae913d952d86c5a994db21695bf5534f9f79d51e6942bb0, built in
+                an EARLIER window with RCH_CARGO_WRAPPER_BYPASS=1 exported and
+                env -u CARGO_TARGET_DIR, no [RCH] line, copied to a private path.
+  ELF vintage   CHECKED, not assumed: `git log 4a48f40ae..HEAD -- crates/fr-server/src/main.rs
+                crates/fr-command/src/lib.rs` returns exactly one commit since this binary
+                was built (09ed7e2ef, two-option SCAN front-classification), which touches
+                no ZRANGESTORE path. A stale ELF is a real hazard here — this repo's
+                staleness detector caught a measurement arm twice in five minutes — so the
+                check is recorded rather than waved at.
+  incumbent     `incumbent verified: redis-server sha=d2c8a4b9 == vendored source HEAD,
+                clean` on every run above.
+  host          thinkstation1, 64 cores observed, governor powersave, /data 165G, no build
+                started in this window.
+  per-arm load  all 13.60/12.35/15.87 -> 14.27/12.51/15.90; rev 14.27/12.51/15.90 ->
+                15.05/12.70/15.94; byscore 15.05/12.70/15.94 -> 15.37/12.81/15.96;
+                pfmerge 15.37/12.81/15.96 -> 15.41/12.95/15.95. Converged and flat.
+  per-arm MHz   all 3,177->2,731; rev 3,050->2,769; byscore 2,869->3,153;
+                pfmerge 3,232->2,503 mean. Cross-core 1,429-4,302 at a single instant.
+
+RETRY PREDICATE. Do NOT re-derive the option-form DISPATCH figure — three shapes across two
+ELFs already put it at 3,787-3,803 and a fourth will not add information. DO add a size
+sibling before quoting 0.8127x or 0.7260x as anything. If someone claims the arity-6 forms,
+the check is that the base form's 687.9 is unchanged afterwards: a second class must not
+perturb the one that already works.
