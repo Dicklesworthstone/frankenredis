@@ -18851,10 +18851,19 @@ fn try_dispatch_floor_classified_action(
         }
         BorrowedDispatchFloorClass::Hmset => {
             if let Some(packet) = parse_borrowed_plain_hmset_packet(unparsed, &parser_config) {
-                match runtime.execute_plain_hmset_borrowed_ok(
+                // (frankenredis-ozrro) Use the CACHED gate, not the `_ok` wrapper. That
+                // wrapper calls plain_borrowed_default_key_write_allows itself, so it paid the
+                // gate PER PACKET where the cascade amortises it per buffered pass — the same
+                // ~265 instr/op the MSET and HSET floor arms were losing before the cache was
+                // threaded in. HMSET was the last floor WRITE arm still on a non-gate variant.
+                // The `_ok` wrapper and this variant share a return type, so this is a drop-in.
+                let default_write_allowed =
+                    cached_plain_write_gate(write_gate_cache, runtime, ts);
+                match runtime.execute_plain_hmset_borrowed_with_default_write_gate(
                     packet.key,
                     &packet.pairs[..packet.len],
                     ts,
+                    default_write_allowed,
                 ) {
                     Some(None) => Ok(BorrowedMultibulkAction::FastOkReply {
                         consumed: packet.consumed,

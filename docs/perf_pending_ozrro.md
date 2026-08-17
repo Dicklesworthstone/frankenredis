@@ -21,6 +21,54 @@ commits cleanly. That is a workaround for a durability problem, NOT an attempt t
 the contract: the rows are unchanged, they are still subject to it, and merging them into the
 ledger is a mechanical step once the blocker clears.
 
+## MEASURED (frankenredis-ozrro) — HMSET was the last floor WRITE arm paying the gate per packet; switching it recovers 267.8 instr/op with the control FLAT, and the gate amortisation now has THREE agreeing points at ~267
+
+fr-only. Before arm `fr-after-gate`, after arm `fr-after-hmset`. Shape verified a genuine no-op
+first (dbsize and HGETALL both stable over 200 calls, reply +OK).
+
+    shape        before     after      delta    dispatch
+    hmset_2     3,300.4   3,032.6    -267.8     677.9 -> 679.3   (-8.1 pct)
+    dump_small  2,699.0   2,700.7      +1.7     312.2 -> 312.3   CONTROL
+
+THE CONTROL IS FLAT, which is what makes this the cleanest of the three gate measurements. The
+previous pair had to be control-corrected for a ~50 instr/op layout swing; here the untouched
+control moved 1.7, so -267.8 is attributable without correction. Dispatch is unchanged
+(677.9 -> 679.3), confirming the route was not touched — only the non-dispatch gate work.
+
+### THREE AGREEING POINTS, WHICH IS THE BAR THIS LEDGER SET FOR ITSELF
+
+    command   gate recovery (control-corrected)
+    MSET              -269.3
+    HSET              -263.7
+    HMSET             -269.5
+    spread              5.8  =  2.2 pct
+
+This ledger has four cases of a two-point law dispersing on the third (per-argument argv, the
+~2,000 generic dispatch premise, the ~522 miss tax, the build-count dose-response), and I wrote
+the rule that two points never establish a law here. Three commands agreeing to 2.2 pct is that
+bar cleared: the per-pass write-gate amortisation is worth ~267 instr/op per packet on a
+pipelined workload, and it is a property of the GATE rather than of any one command.
+
+### HOW HMSET WAS FOUND, AND WHAT THE SCREEN ALSO RULED OUT
+
+Only four executors have `_with_default_write_gate` variants — set, mset, hset, hmset. My three
+arms already used the cache; HMSET was still on the `_ok` wrapper, which calls
+`plain_borrowed_default_key_write_allows` itself and therefore pays per packet.
+
+The same screen ruled out the command that would have looked most attractive: SET needs NOTHING.
+It is served by the cascade arm at position 2 — the first lever of this campaign — and the
+cascade has always used the cached gate. A screen that finds the one remaining case and
+simultaneously stops you re-optimising the hottest command in the set is doing its job; the
+naive version of this work would have started with SET.
+
+### SCOPE, STATED NARROWLY
+
+Every floor WRITE arm whose executor lacks a gate-taking variant still pays per packet — SPOP
+among them, which I landed earlier. I am NOT claiming ~267 for those: adding a variant per
+command is real work and the number is measured only where a variant already existed. What IS
+established is the mechanism and its size, so the cost of the remaining arms is now predictable
+rather than unknown, and each is a self-contained follow-up with a known target.
+
 ## MEASURED (frankenredis-ozrro) — threading the cascade's per-pass gate cache into the floor recovers the whole ~265 it was losing: MSET now -16.2 pct and HSET -11.8 pct against pre-lever, control-corrected
 
 fr-only (load-immune), stamp FIT for fr-only on every run. Three ELFs, all built from this
