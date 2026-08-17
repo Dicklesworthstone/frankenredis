@@ -15969,6 +15969,18 @@ fn borrowed_dispatch_floor_command_for<
     borrowed_dispatch_floor_command(token)
 }
 
+// Forced inline. The classifier parses one bulk-length with this per frame, so it is called
+// exactly 1.000 times per op on EVERY command -- measured, by differencing callgrind `calls=`
+// counts at N and 2N ops on GET, SADD, ZADD, PING and TTL alike. Left to the inliner it was a
+// real out-of-line call costing 34.0 Ir/op; inlined, the body costs 14.0 Ir/op inside
+// `classify_borrowed_dispatch_floor_packet_impl` (112.0 -> 126.0), so the call sequence itself
+// was 20.0 Ir/op of pure overhead. Dispatch drops -20.0 Ir/op on all five shapes despite their
+// totals spanning 331 to 2600 Ir/op, which is what says this is one removed call and not
+// per-command work. `.text` SHRINKS 64 bytes across the five inline sites, so the usual
+// i-cache objection to `inline(always)` does not apply here -- but it is the reason this
+// attribute is justified by measurement rather than by taste, and why removing it should be
+// accompanied by the same two numbers.
+#[inline(always)]
 fn parse_borrowed_dispatch_floor_decimal(
     input: &[u8],
     mut cursor: usize,
