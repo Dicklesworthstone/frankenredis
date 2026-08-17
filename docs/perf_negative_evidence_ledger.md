@@ -8,6 +8,80 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-08-17 MossyOrchid: I WITHDRAW EVERY DISPATCH-SHARE FIGURE IN MY LAST THREE ROWS — BrownIbis's `7so0e` defect hits all of them, and recomputing hget two-point puts its dispatch at 428.0-583.0 instr/op against the 390.8 I published (`frankenredis-94lp3`, `frankenredis-7so0e`)
+
+Claim class: CORRECTION to my own rows. No build, no bench, no target writes — /data at 16G and
+100 pct used. Recomputed from callgrind dumps ALREADY on disk with `scripts/frame_delta.py`,
+which is the tool BrownIbis landed for exactly this.
+
+WHAT THEY FOUND, and it is upstream of four things I published today: `dispatch_share()` is
+evaluated on the 2N dump ALONE — startup, seeding and teardown included — and the caller then
+multiplies that share by the clean TWO-POINT instructions/op. A share of one population times a
+rate from another is not a per-op quantity. Their measured error ran -31 pct to +16 pct.
+
+I RECOMPUTED ONE OF MY OWN CELLS rather than assume the direction. `hget`, same dumps, two-point
+per frame:
+
+    canonical DISPATCH_FRAMES set          428.0 instr/op   24.0 pct
+    + classify_borrowed_dispatch_floor_..  583.0 instr/op   32.7 pct   (plainly dispatch; it is
+                                                                        the classified route's
+                                                                        own classifier, 155.0)
+    what I published for that shape        390.8 instr/op   21.9 pct
+
+So my figure was understated by 9.5-33 pct depending on where the frame set is drawn, in the same
+direction and the same magnitude as their `get_control` result. This is not a rounding quibble.
+
+WITHDRAWN, explicitly, so nobody carries them forward:
+  * `14-28 pct front-classified floor` across twelve shapes — every member is share-derived. The
+    floor is probably real and probably HIGHER; the band as printed is not a measurement.
+  * `tyujv`: "57.9 pct -> 16.2 pct dispatch share". The 16.2 is mine and withdrawn.
+  * `uu33c`: "32.2 pct -> 20.8 pct". The 20.8 is mine and withdrawn, and with it the claim that
+    LPOS COUNT's share has fallen INTO a floor — I cannot source either number soundly today.
+  * `5na4i` / ZINTERCARD + XPENDING: "~3,000 instr/op of dispatch, 31-41 pct". Withdrawn.
+
+WHAT SURVIVES, and why each survives rather than "probably fine":
+  * THE TWO-POINT TOTALS. `geoadd_same` 3,698.7, `lpos_count` 2,961.6, `zintercard_2` 7,548.4,
+    `xpending_empty` 6,485.5 and the rest come from the harness's clean two-point subtraction,
+    which is the half `7so0e` does NOT touch. `frame_delta` reconciled hget to 1,782.6 against a
+    published 1,784.2 — 0.09 pct apart, which is what a sound total looks like.
+  * `tyujv`'s CONCLUSION, on totals alone: GEOADD 8,263 -> 3,698.7 instr/op. That comparison
+    never needed a share, and the bead's premise is still gone.
+  * THE MECHANISM LABELS, including my own fix. It keys on one frame's share WITHIN a single
+    dump, so the population mismatch cannot reach it, and its margin is 100x (a 1.0 pct bar
+    against 0.01 pct seed residue) where this defect moves things by tens of percent. And it is
+    now independently confirmed by a different tool and method: `frame_delta` on hget's dumps
+    puts `execute_plain_hget_borrowed_into_with_default_read_gate`,
+    `classify_borrowed_dispatch_floor_packet_impl` and `parse_borrowed_plain_hget_packet` at the
+    top with NO generic frame in the top twenty. HGET is classified; the old label said GENERIC.
+  * `5na4i`'s CLASS. [C] was established by grepping for a parser, an executor and a floor entry
+    and finding none — source, not shares. ZINTERCARD and XPENDING are still the only GENERIC
+    PATH commands I found, and that label is sound per the point above. Only their SIZE is gone.
+
+THE LESSON I TAKE, since I quoted this metric in four rows across two turns without checking how
+it was computed: a share is TWO numbers, and I audited neither. The harness printed
+`dispatch NNN.N (XX.X pct)` next to a two-point total and I read the pairing as evidence that
+both came from the same subtraction. `feedback_a_gate_must_link_its_threshold_to_its_own_null`
+already says a threshold must be tied to its own null; the sibling rule is that a DERIVED figure
+must be tied to its own denominator, and neither of us checked which dump the denominator came
+from.
+
+HOW TO GET THE NUMBER PROPERLY, at zero build cost: the harness already prints
+`callgrind dumps: /data/tmp/fr_instr_XXXX`, and `scripts/frame_delta.py <dump_dir>` differences
+the N and 2N dumps per frame and reconciles against the whole-op figure on every run. That is
+how the hget row above was produced, under a full freeze.
+
+RETRY PREDICATE: do not re-quote any share from a `shape_instr_per_op.py` run made before
+`126fe0a6f`. Re-derive with `frame_delta.py` from the dumps, which are still on disk, and state
+which frame set was summed — the canonical `DISPATCH_FRAMES` misses
+`classify_borrowed_dispatch_floor_packet_impl`, worth 155.0 instr/op on hget alone, so the set
+itself needs a decision before the floor is re-measured.
+
+PROVENANCE: no build, no bench, no server. `scripts/frame_delta.py` over
+`/data/tmp/fr_instr_z2s3k2jc` (the hget run from this session, 2,000 ops). Host thinkstation1,
+/data 16G at 100 pct, loadavg 12.14 / 10.97 / 15.28. No MHz sample: nothing was timed.
+
+--------------------------------------------------------------------------------
+
 ## 2026-08-17 MossyOrchid: SPEC BEFORE BUILD — ZINTERCARD's borrowed trio is NOT a mechanical mirror of SINTERCARD's, and copying it reintroduces `zintercardwt` (wrong-type key must beat a bad LIMIT). Found by reading, under a build freeze (`frankenredis-5na4i`)
 
 Claim class: SOURCE. No build, no bench, no target writes — /data at 19-20G and 99 pct full.
