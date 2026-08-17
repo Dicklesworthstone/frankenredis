@@ -32386,3 +32386,96 @@ two ELFs at 27 and 343 loadavg agreeing to 0.32 pct. Do not quote 1.6112x withou
 pending entries". The remaining XPENDING work is the ~2,600 instr/op dispatch block, which
 needs a parser and executor written; and if anyone re-measures the populated arm, re-take the
 empty arm in the SAME window as its control rather than trusting this one.
+
+--------------------------------------------------------------------------------
+GATE AUDIT (frankenredis-p98mw) — my A/A null's own spread is 3.04 pct and I never measured
+it, my worst-bound correction is a CONSTANT applied to a bias that SCALES, and one of my own
+banked claims is retracted as a result
+
+Claim class: CORRECTNESS-NEUTRAL (analysis of banked numbers; no build, no measurement)
+
+Three sibling projects found their gates rejecting good measurements — frankenfs's SPREAD
+gate sitting at its median null, frankenscipy's clock gate biased against the FASTER arm,
+franken_networkx's A/A null arm-asymmetric. Both shapes are present here.
+
+1. THE NULL'S OWN SPREAD IS 3.04 PCT, AND I HAD NEVER COMPUTED IT. Across the whole ledger
+there are 35 distinct `get_control` fr-side readings — the SAME workload on the same
+harness — spanning 1,292.1 to 1,331.4 instr/op. That is a 3.04 pct band on a shape whose
+within-run repeatability the harness header quotes as 0.1 pct. The gap is the point: 0.1 pct
+is REPEATABILITY WITHIN ONE BUILD; 3.04 pct is REPRODUCIBILITY ACROSS BUILDS, and every
+before/after row I have banked is a cross-build comparison.
+
+    I have repeatedly written "NULL holds" for get_control moves of 0.2-0.6 pct and once
+    called +1.1 pct "null (slight)". Those readings carry NO information — they are five to
+    fifteen times inside the band. Worse in the other direction: a REAL layout shift of up to
+    ~3 pct would pass my null silently, so the null cannot detect what it exists to detect
+    below ~3 pct. That is frankenfs's shape exactly.
+
+    RE-ADJUDICATING MY OWN BANKED DELTAS against a 3.04 pct floor:
+
+        lcs_2  multi-word regression   +3.37 pct   survives, but BARELY — see retraction
+        lcs_64 multi-word regression  +10.57 pct   survives
+        lcs_64 after variant split     +9.44 pct   survives
+        set_nx_opt (fusion CONTROL)    +1.34 pct   INSIDE THE FLOOR
+        set_xx_opt (fusion lever)      -9.83 pct   survives
+        lcs_65 (cliff fix)            -76.42 pct   survives
+        scan_zero (front-classify)    -44.02 pct   survives
+
+    RETRACTION: `821862043` reported the SetOpt4 fusion's control as "NX pays 19.0 instr for
+    the discriminant", i.e. +1.34 pct. THAT NUMBER IS NOISE and I should not have quoted it.
+    The row's CONCLUSION is unaffected and I want to be precise about why: the control existed
+    to show NX did not absorb the ~282 instr a REORDER would have moved onto it, and 282 on
+    1,758 is 16 pct — five times the floor. So "NX did not pay the reorder cost" stands;
+    "NX paid exactly 19.0" does not.
+
+    SIMILARLY DOWNGRADED: `lcs_2`'s +3.37 pct sits at 1.1x the floor. I banked it as a
+    regression alongside lcs_64's +10.6 pct as if both were equally established. They are
+    not — lcs_64 is 3x the floor, lcs_2 is at its edge and should be read as "no worse than
+    ~3 pct", not as a measured +3.4.
+
+2. THE DENOMINATOR BIAS IS ONE-SIDED AND SCALES WITH THE GAP; MY CORRECTION IS A CONSTANT.
+The harness's two-point subtraction cancels work proportional to OP COUNT. redis's serverCron
+is proportional to ELAPSED TIME, so it does NOT cancel: the 2N run lasts ~2x as long and
+contributes ~2x, leaving ~1x of it inside the per-op difference. fr has no counterpart —
+the harness header says so outright.
+
+    THEREFORE THE ARM THAT RUNS LONGER IS INFLATED, AND THAT IS ALWAYS REDIS in the shapes I
+    measure. The denominator is systematically too large, so every ratio I have banked is
+    systematically too SMALL. My instrument flatters fr, and it flatters it MOST where the
+    performance gap is widest — at lcs_64 (0.1191x) redis's run is roughly eight times fr's,
+    so it accumulates roughly eight times the timer work.
+
+    `ade5101d9` banked worst bounds as measured x 1.08 for all eight crossings. The DIRECTION
+    is right (redis over-counted -> true ratio higher). THE MAGNITUDE IS NOT: 8 pct came from
+    get_control, whose ratio is ~0.41, and was then applied unchanged to lcs_64 at 0.13x and
+    lcs_128 at 0.14x where the runtime gap is 7-8x larger. A fixed correction on a bias that
+    scales with the gap is under-conservative exactly where my numbers are most impressive.
+
+3. A THRESHOLD SITTING AT THE OPERATING POINT: I classified `keys_star` as sub-parity at
+1.0153x. The harness's own header says the instrument is "useless for adjudicating 1.05x".
+A 1.5 pct margin is INSIDE its stated resolution near 1.0, so that classification was not
+supportable when I made it. The subsequent crossing to 0.5013x is 3x the floor and stands on
+its own; what does not stand is the claim that 1.0153x established it was behind beforehand.
+
+WHAT SURVIVES ALL OF THIS, unchanged: every crossing this campaign banked. The smallest is
+the SetOpt4 fusion at -9.83 pct, three times the floor; the rest are 44-89 pct. No conclusion
+about a route crossing parity is threatened by a 3 pct null or a few-percent denominator
+bias. What is threatened is PRECISION — the two-and-three-significant-figure deltas I have
+been quoting, and the small controls I read as confirmations.
+
+CHANGES I AM MAKING TO MY OWN PRACTICE, stated so they can be checked against later rows:
+  * Quote a delta as established only above ~3 pct; below that, say "inside the null band".
+  * Stop reading sub-1 pct control movements as confirmations. A control confirms by NOT
+    moving by the LEVER'S magnitude, not by sitting near zero.
+  * Scale the worst bound with the runtime gap rather than applying 1.08 flat, or state
+    plainly that the bound is only calibrated near the ratio it was measured at.
+  * Never classify a route as above/below parity inside +/-8 pct of 1.0.
+
+PROVENANCE: no build, no benchmark, no measurement — this is arithmetic over numbers already
+in this file. 35 get_control readings extracted from lines naming get_control; floor computed
+as (max-min)/min. Host at loadavg 603 / 89 pct iowait, which is why this was the work.
+
+RETRY PREDICATE: before the next A/B, measure the null TWICE on the two arms' own binaries
+and quote its spread in the row, rather than inheriting 3.04 pct from this file — the floor
+is a property of the build pair and the window, not a constant. And if a row's effect is
+under ~3 pct, do not bank it as a delta at all.
