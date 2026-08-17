@@ -29070,3 +29070,65 @@ PROVENANCE:
 RETRY PREDICATE: LMPOP's AFTER side is still unmeasured and this audit does not substitute
 for it — the entries are proven CORRECT here, not proven FASTER. One ABBA when builds
 reopen, lmpop_missing first.
+
+--------------------------------------------------------------------------------
+PREPARED, BUILD-FREE (frankenredis-ozrro) — DUMP and RANDOMKEY floor entries written and
+anchor-verified against HEAD, ready to apply in one command. RANDOMKEY's parser returns a
+LENGTH, not a packet, and writing it the usual way would not have compiled
+
+Claim class: METHOD (prepared change; no build, no measurement)
+
+Builds are halted for disk — 144G to 69G over four ticks against a 42G floor — and
+crates/fr-server/src/main.rs is reserved until ~04:28Z. Both constraints are external and
+temporary, so the useful thing is to have the change finished and verified when they lift
+rather than to start it then. `scratchpad/apply_dump_randomkey.py` applies both entries and
+their promise test in one command.
+
+WHAT WAS VERIFIED BY READING, because guessing here has cost this campaign six separate
+name-based errors:
+
+    DUMP       arity 2, prefix *2\r\n$4\r\n, 4-char token
+               execute_plain_dump_borrowed(packet.key, ts), parser returns a PACKET STRUCT
+               cascade arm 60 of 163 -> predicted ~2,445 instr/op of dispatch
+
+    RANDOMKEY  arity 1, prefix *1\r\n$9\r\n, 9-char token
+               execute_plain_randomkey_borrowed(ts) — takes NO KEY
+               parser returns Option<usize>, the CONSUMED LENGTH, NOT a packet struct
+               cascade arm 61 of 163 -> predicted ~2,490
+
+    THE RANDOMKEY DETAIL IS THE ONE THAT MATTERED. Every previous entry in this campaign
+    binds `packet.consumed`; RANDOMKEY's parser has no packet to bind, so the arm takes
+    `if let Some(consumed) = ...`. Written from the pattern rather than from the source, it
+    would not have compiled — and under a build halt that error would have sat undiscovered
+    in a parked patch until someone else hit it.
+
+ANCHOR DRY-RUN, run against HEAD without modifying anything: all six insertion points —
+command enum, 4-char match arm, 9-char match arm, class enum, arity map, arm dispatch — are
+present and UNIQUE. So the patch will apply cleanly unless main.rs moves under it, and the
+script asserts each count is exactly 1 rather than silently inserting at the wrong place.
+
+THE TEST IS WRITTEN TOO, and covers what these two shapes make easy to get wrong: DUMP and
+RANDOMKEY are adjacent arms with OPPOSITE forms, so they are tested together. RANDOMKEY must
+refuse ANY argument — upstream takes none, and a claim at arity 2 would send `RANDOMKEY x`
+to GENERIC — and the neighbours at both token lengths are pinned (TYPE and DECR at 4,
+SISMEMBER and PEXPIREAT at 9).
+
+PREDICTIONS, ALREADY ON RECORD AND UNCHANGED: dump ~2,445 -> ~363 after (2 bulks by the
+263 + ~100/bulk model), randomkey ~2,490 -> ~263 (1 bulk). Shapes exist — `dump_small` and
+`randomkey_one`, added by a peer in a8b3bcd1d — and the two arms are adjacent, so ONE ABBA
+with get_control settles both.
+
+PROVENANCE:
+  no build, no measurement, nothing certified.
+  host                 thinkstation1, 64 cores, /data 69G and falling (144G four ticks ago,
+                       42G floor); loadavg 41.26/96.59/136.91 and falling, CPU healthy —
+                       the constraint is DISK, not CPU.
+  MHz                  not recorded — nothing measured.
+  blocked by           external disk drawdown (two external Rust builds) and RusticHorizon's
+                       reservation on main.rs until ~04:28Z. Neither is mine to clear.
+
+RETRY PREDICATE: when builds resume AND main.rs frees, run the script, then
+`cargo test -p fr-server --bin frankenredis dump_and_randomkey_floor`, then matched
+before/after ELFs and one ABBA over dump_small, randomkey_one and get_control. If the
+anchor assertions fail, main.rs has moved — re-read the six insertion points rather than
+forcing the patch.
