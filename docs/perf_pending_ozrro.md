@@ -21,6 +21,59 @@ commits cleanly. That is a workaround for a durability problem, NOT an attempt t
 the contract: the rows are unchanged, they are still subject to it, and merging them into the
 ledger is a mechanical step once the blocker clears.
 
+## MEASURED (frankenredis-ozrro) — ZRANGE -198.7 instr/op confirms the closure-form class generalises: THREE conversions now land 191-204, and the vein reopens at 11 remaining candidates
+
+fr-only. Before `fr-hget-inline`, after `fr-zrange-gate`. All 29 floor tests pass.
+
+    shape          before     after     delta   dispatch
+    zrange_plain  2,570.5   2,371.8   -198.7    453.9 -> 465.1
+    type          1,400.3   1,397.8     -2.5    (holds -199.4 from its own conversion)
+    dump_small    2,702.1   2,707.5     +5.4    CONTROL
+
+Control-corrected: -204.1. Third point in the series:
+
+    HGET     -191.5   closure form
+    TYPE     -199.4   body form
+    ZRANGE   -198.7   closure form
+    spread     4 pct
+
+Three independent commands agreeing to 4 pct clears the bar this ledger sets (two points never
+establish a law here). The gate-inside-the-body/closure placement is worth ~195 per arm, and the
+let-chain placement is worth -21. The FORM, not the command, decides it.
+
+### THE VEIN REOPENS, NARROWER AND SIZED
+
+I closed it two rows ago at "~1 pct of arms qualify" because my form-classifier only recognised the
+literal `if let ... {` body form and left 59 arms unclassified. Screening for the CLOSURE form
+(`.and_then(|packet| { .. })`) — the form HGET had used — found FOURTEEN candidates. Three are now
+done, so ELEVEN remain at ~195 each. That is a real worklist rather than an executor count, and it
+is the third time this campaign a screen's blind spot changed a vein's size in one direction or the
+other.
+
+### TWO TRAPS IN ONE LEVER, BOTH OF WHICH WOULD HAVE PRODUCED A CONFIDENT NULL
+
+  1. WRONG TWIN. I first converted `execute_plain_zrange_borrowed` because my screen's regex
+     matched the command name out of `execute_plain_zrange_borrowed_into` and I patched the shorter
+     name. The floor arm calls `_into`. Converting an unused twin COMPILES and MEASURES AS ZERO.
+  2. WRONG SHAPE. The corpus had only `zrange_rev` and `zrange_withscores` — option forms that this
+     arm's own comment says fall through to generic. Neither reaches the plain arm. Measuring with
+     either would have read -0.
+
+Either alone would have produced "ZRANGE conversion: no effect", and with the closure class
+unproven at that point I might have written off eleven candidates. Both were caught by reading —
+the call site and the arm's comment — not by tooling, because both failure modes are silent.
+
+    RULE, earned twice in two rows: before measuring a conversion, verify (a) that the function you
+    changed is the one the call site uses, and (b) that the shape reaches the code you changed. The
+    harness will faithfully measure a path you did not touch.
+
+### STILL OPEN
+
+Eleven closure-form candidates: Bitop (write), ListPopCount, ZsetPopCount, ZrangeWithscores,
+LposRank, Zscore, Zrangestore6 (write), Getrange, Sintercard, HrandfieldCount, ZrandmemberCount,
+SrandmemberCount, GeohashSingle. Only Sintercard has a shape today; the rest need one added first,
+which is the cheap half. ZSCORE is the hottest of them and has no shape — that is the next lever.
+
 ## CLOSED (frankenredis-ozrro) — the read-gate vein is NOT a 93-arm sweep: 60 pct of floor arms are the let-chain form whose only legal gate placement measurably LOSES. Worth ~190 on ~1 pct of arms, and a per-arm inspection job for the rest
 
 Source analysis over all 165 floor arms; no build, no measurement. Closes the vein I opened three

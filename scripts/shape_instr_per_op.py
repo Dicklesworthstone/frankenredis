@@ -155,6 +155,11 @@ SHAPES = {
     "getex_exat": (["SET gx2 vvvvvvvvvvvvvvvv"], ["GETEX", "gx2", "EXAT", "4102444800"]),
     "getex_pxat": (["SET gx3 vvvvvvvvvvvvvvvv"], ["GETEX", "gx3", "PXAT", "4102444800000"]),
     "lpos_rank": (["RPUSH lp2 a b c d e f g h"], ["LPOS", "lp2", "e", "RANK", "1"]),
+    # (frankenredis-ozrro) PLAIN ZRANGE — no WITHSCORES/REV/LIMIT. The existing zrange_rev and
+    # zrange_withscores shapes exercise OPTION forms, which that floor arm's own comment says fall
+    # through to the generic path, so neither could measure a change to the plain arm. I nearly
+    # measured the wrong shape and reported a null.
+    "zrange_plain": (["ZADD zp 1 a 2 b 3 c"], ["ZRANGE", "zp", "0", "-1"]),
     "zrange_rev": (["ZADD zr 1 a 2 b 3 c"], ["ZRANGE", "zr", "0", "-1", "REV"]),
     "zrange_withscores": (["ZADD zr2 1 a 2 b 3 c"],
                           ["ZRANGE", "zr2", "0", "-1", "WITHSCORES"]),

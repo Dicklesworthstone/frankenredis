@@ -22052,13 +22052,19 @@ fn try_dispatch_floor_classified_action(
             // new. Higher-arity option forms fall through to the generic path.
             let hit =
                 parse_borrowed_plain_zrange_packet(unparsed, &parser_config).and_then(|packet| {
+                    // (frankenredis-ozrro) Cached read gate, inside the CLOSURE body — the
+                    // placement that measured -199.4 on TYPE, not the hoisted let-chain
+                    // placement that measured +21.0 on TTL and was reverted.
+                    let default_read_allowed = *read_gate_cache
+                        .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts));
                     runtime
-                        .execute_plain_zrange_borrowed_into(
+                        .execute_plain_zrange_borrowed_into_with_default_read_gate(
                             packet.key,
                             packet.start,
                             packet.end,
                             ts,
                             out,
+                            default_read_allowed,
                         )
                         .map(|()| packet.consumed)
                 });

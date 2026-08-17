@@ -34502,6 +34502,26 @@ impl Runtime {
         stop: &[u8],
         now_ms: u64,
     ) -> bool {
+        let default_read_allowed = self.plain_borrowed_default_key_read_allows(now_ms);
+        self.can_execute_plain_zrange_borrowed_with_default_read_gate(
+            key,
+            start,
+            stop,
+            default_read_allowed,
+        )
+    }
+
+    /// (frankenredis-ozrro) Shape checks without the read-gate evaluation, so a caller holding a
+    /// per-pass cached gate supplies it. Same split as HGET and keymeta; ZRANGE's floor arm is the
+    /// CLOSURE form (`.and_then(|packet| { .. })`), which is the placement that measured a WIN
+    /// (TYPE -199.4) rather than the let-chain placement that lost (TTL +21.0).
+    fn can_execute_plain_zrange_borrowed_with_default_read_gate(
+        &mut self,
+        key: &[u8],
+        start: &[u8],
+        stop: &[u8],
+        default_read_allowed: bool,
+    ) -> bool {
         if self.policy.gate.max_array_len < 4
             || self.policy.gate.max_bulk_len < b"ZRANGE".len()
             || key.len() > self.policy.gate.max_bulk_len
@@ -34510,13 +34530,17 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_read_allows(now_ms)
+        default_read_allowed
     }
 
     /// Borrowed fast path for the plain rank form `ZRANGE key start stop`.
     /// Most option-bearing shapes stay on generic dispatch so REV,
     /// BYSCORE/BYLEX, LIMIT, and their exact validation order remain canonical.
     /// The single hot rank `WITHSCORES` shape has its own direct encoder below.
+    /// (frankenredis-ozrro) Thin wrapper preserving the original signature. `#[inline]` is
+    /// LOAD-BEARING and measured: an un-inlined wrapper of this shape cost TTL ~24 instr/op on
+    /// every caller that kept the old name (32.7 un-inlined vs 11.0 inlined).
+    #[inline]
     pub fn execute_plain_zrange_borrowed(
         &mut self,
         key: &[u8],
@@ -34524,7 +34548,31 @@ impl Runtime {
         stop_arg: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_zrange_borrowed(key, start_arg, stop_arg, now_ms) {
+        let default_read_allowed = self.plain_borrowed_default_key_read_allows(now_ms);
+        self.execute_plain_zrange_borrowed_with_default_read_gate(
+            key,
+            start_arg,
+            stop_arg,
+            now_ms,
+            default_read_allowed,
+        )
+    }
+
+    /// (frankenredis-ozrro) Caller supplies the read gate so a floor arm can amortise it per pass.
+    pub fn execute_plain_zrange_borrowed_with_default_read_gate(
+        &mut self,
+        key: &[u8],
+        start_arg: &[u8],
+        stop_arg: &[u8],
+        now_ms: u64,
+        default_read_allowed: bool,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_zrange_borrowed_with_default_read_gate(
+            key,
+            start_arg,
+            stop_arg,
+            default_read_allowed,
+        ) {
             return None;
         }
         let start_idx = fr_command::parse_i64_arg(start_arg).ok()?;
@@ -34597,6 +34645,9 @@ impl Runtime {
     /// needed (as with the LRANGE `_into`). Same gate / metrics / wrong-type
     /// handling as `execute_plain_zrange_borrowed`; the old owned form stays for the
     /// cold generic-args caller. Returns `None` (fall back) on any disabling state.
+    /// (frankenredis-ozrro) Thin wrapper preserving the original signature; `#[inline]` for
+    /// the measured reason recorded on the non-`_into` twin.
+    #[inline]
     pub fn execute_plain_zrange_borrowed_into(
         &mut self,
         key: &[u8],
@@ -34605,7 +34656,37 @@ impl Runtime {
         now_ms: u64,
         out: &mut Vec<u8>,
     ) -> Option<()> {
-        if !self.can_execute_plain_zrange_borrowed(key, start_arg, stop_arg, now_ms) {
+        let default_read_allowed = self.plain_borrowed_default_key_read_allows(now_ms);
+        self.execute_plain_zrange_borrowed_into_with_default_read_gate(
+            key,
+            start_arg,
+            stop_arg,
+            now_ms,
+            out,
+            default_read_allowed,
+        )
+    }
+
+    /// (frankenredis-ozrro) Caller supplies the read gate. THIS is the variant the ZRANGE
+    /// floor arm uses. I first converted the non-`_into` twin by mistake — my screen matched
+    /// the command name out of the longer name and I patched the shorter one. Converting an
+    /// unused twin compiles cleanly and measures as a null, so only reading the call site
+    /// catches it.
+    pub fn execute_plain_zrange_borrowed_into_with_default_read_gate(
+        &mut self,
+        key: &[u8],
+        start_arg: &[u8],
+        stop_arg: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+        default_read_allowed: bool,
+    ) -> Option<()> {
+        if !self.can_execute_plain_zrange_borrowed_with_default_read_gate(
+            key,
+            start_arg,
+            stop_arg,
+            default_read_allowed,
+        ) {
             return None;
         }
         let start_idx = fr_command::parse_i64_arg(start_arg).ok()?;
@@ -47812,6 +47893,58 @@ pub mod ecosystem {
 
 #[cfg(test)]
 mod tests {
+
+    /// (frankenredis-e6c9t) The literal fast path in `config_pattern_matches` must agree with
+    /// `glob_match` on EVERY pattern, not just the literal ones it short-circuits.
+    ///
+    /// The risk is not the literal case — that one is equality by construction. It is
+    /// mis-CLASSIFYING a pattern as literal when it still carries glob semantics, which would
+    /// make CONFIG GET silently return the wrong set. `\\` escapes the next character and `[`
+    /// opens a character class, so both must keep the slow path even with no `*` or `?`
+    /// anywhere; those two are the cases a naive "contains * or ?" check would get wrong, and
+    /// they are asserted explicitly below.
+    #[test]
+    fn config_pattern_literal_fast_path_agrees_with_glob_e6c9t() {
+        let params = [
+            "maxmemory",
+            "maxmemory-policy",
+            "maxmemory-samples",
+            "requirepass",
+            "appendonly",
+            "save",
+            "a",
+            "",
+        ];
+        let patterns = [
+            // literal -> fast path
+            "maxmemory",
+            "maxmemory-policy",
+            "requirepass",
+            "nosuchparam",
+            "",
+            "MAXMEMORY",
+            // glob -> slow path
+            "maxmemory*",
+            "max?emory",
+            "*",
+            "*memory*",
+            "maxmemory-[ps]*",
+            // the two that must NOT be treated as literal despite having no * or ?
+            "maxmemory[",
+            "maxmemory\\-policy",
+            "\\*",
+        ];
+        for pat in patterns {
+            for param in params {
+                let got = super::Runtime::config_pattern_matches(pat, param);
+                let want = fr_store::glob_match(pat.as_bytes(), param.as_bytes());
+                assert_eq!(
+                    got, want,
+                    "config_pattern_matches({pat:?}, {param:?}) = {got} but glob_match = {want}"
+                );
+            }
+        }
+    }
 
     /// (frankenredis-fpqns) The reused-buffer histogram key must be BYTE-IDENTICAL to the
     /// `canonical_command_fullname` it replaced, for every container command and on inputs
