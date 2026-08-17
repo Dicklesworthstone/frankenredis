@@ -8,6 +8,485 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-08-17 MossyOrchid: REJECT — resize-then-index LZF decode DOES delete every memcpy call on the RESTORE path (−16.2 instr/token), and still loses, because safe Rust charges 14–16 instr/token to replace them and ~1 instr per output byte to initialise the buffer first (`frankenredis-33832`)
+
+Claim class: SELF-SPEEDUP, rejected. This retires BlackCat's 2026-08-16 retry predicate
+(ledger:19483) with numbers rather than leaving "190 memcpy calls per op stands as a live
+target" in the file as an invitation. Code reverted; the patch is not in the tree.
+
+THE LEVER, and it is exactly the one that row asked for. `fr_store::lzf_decompress_string`
+— the decoder RESTORE actually executes, not the fr-persist twin BlackCat edited by mistake
+— decompresses into `vec![0u8; expected_len]` and addresses it BY INDEX, so neither the
+capacity check nor the length store that killed the previous attempt exists. Copies go in
+FIXED 8-byte blocks (`[u8; 8]` via `try_into`), because a compile-time-constant length is
+what makes LLVM emit a register move instead of calling `memcpy`; over-writing up to 7 bytes
+past a token is sound in a pre-initialised buffer that is written strictly forward and only
+returned when `pos` reached `expected_len` exactly. Back-references keep byte-at-a-time
+propagation below distance 8, which is load-bearing: a blind block copy decodes `aaaaaaaa`
+as `a` plus seven zeros.
+
+THE MECHANISM FIRED — this is not another "the bench never reached the function" row:
+
+    objdump of the candidate ELF: `lzf_decompress_indexed` contains ZERO calls
+    (only `_Unwind_Resume`), against `lzf_decompress_growing`'s two RawVec calls
+    plus its per-token libc memcpy.
+    callgrind, 160-field hash, 300 ops: __memcpy_avx self cost 15,091 → 6,153
+    instr/op. 8,938 instructions of memcpy per op, deleted.
+
+AND IT STILL LOST. Same-tree A/B, one ELF per arm selected by
+`--features fr-store/perf-ab-lzf-growing`, both arms rebuilt back-to-back with cargo's own
+fingerprints as the tree-stability witness (a third build of the candidate finished in 0.06s,
+i.e. nothing the arms depend on moved between them):
+
+| shape | candidate | control (shipped) | delta | that arm's A/A |
+|---|---|---|---|---|
+| 40-field hash, 400 ops | 68,257.5 instr/op | 68,875.7 | **−618.2 (−0.90%)** | 131.5 (0.19%) |
+| 160-field hash, 400 ops | 273,644 (3 draws) | 268,484 (2 draws) | **+5,160 (+1.92%)** | 1,442 / 1,923 |
+| 2-field hash (payload not LZF) | 20,973.9 | 20,939.2 | +34.7 (+0.17%) | — |
+
+The 2-field row is the ZERO-UNIT NULL and it behaves: with a 44 B payload that is never LZF
+encoded, the lever cannot fire and the arms agree to 0.17%.
+
+WHY IT LOST, attributed rather than guessed (callgrind self cost, per op, 300 ops):
+
+| frame | 40f cand | 40f ctrl | Δ | 160f cand | 160f ctrl | Δ |
+|---|---|---|---|---|---|---|
+| lzf decode fn | 10,625 | 8,398 | +2,227 | 39,158 | 30,093 | +9,065 |
+| `__memcpy_avx` | 1,841 | 4,446 | −2,605 | 6,153 | 15,091 | −8,938 |
+| `__memset_avx2` | 1,445 | 1,395 | +50 | 5,271 | 2,719 | **+2,552** |
+
+Two costs, and the second is the one that generalises:
+
+  1. THE REPLACEMENT IS NOT CHEAPER THAN THE CALL. 16.0 instr/token of memcpy removed,
+     14–16 instr/token of guard + block copy added. The libc call was already at the safe-Rust
+     floor for these sizes, which is the same verdict BlackCat reached from the opposite
+     direction (a byte loop, +3.4%). Two independent implementations now bracket it.
+  2. `vec![0u8; expected_len]` IS NOT FREE AND CANNOT BE AVOIDED IN SAFE RUST. Initialising
+     the output costs ~1 instruction per output byte on this instrument (+2,552 instr/op at a
+     2,247 B payload, +50 at 567 B) and it scales with PAYLOAD SIZE while the memcpy saving
+     scales with TOKEN COUNT. That is why the sign flips between the two shapes, and it is
+     why the whole family is capped: writing into uninitialised capacity needs
+     `spare_capacity_mut` + `unsafe`, which `#![forbid(unsafe_code)]` rules out. BlackCat's
+     retry predicate — "write into ALREADY-INITIALISED capacity" — is therefore satisfiable
+     only by paying for the initialisation, and on payloads above ~1 KB that payment exceeds
+     the calls it buys back.
+
+A MEASUREMENT PROPERTY WORTH KEEPING, because it inflates both sides of this row: callgrind
+counts each iteration of an ERMS `rep movsb`/`rep stosb` as an instruction, so libc
+memcpy/memset read at roughly 1 instr/byte here while the hardware moves 32–64 B/cycle. Any
+instr/op row that trades a bulk primitive for open-coded copies is measuring a quantity the
+CPU does not charge linearly. This row's verdict does not turn on it (the +9,065 in-function
+cost is ordinary retired instructions), but a future cycles-based re-run could land elsewhere,
+and that is the one door this row leaves open.
+
+THE TOKEN DISTRIBUTION, measured because the threshold is only worth what it says
+(`scratchpad/tok.py`, walking the engine's own DUMP payload):
+
+    40 fields:  161 tokens (15 literal, 146 match) — matches 3/4/6 B, 100% ≤ 8 B
+    160 fields: 566 tokens (22 literal, 544 match) — matches 3/4/5/6 B, 100% ≤ 8 B
+
+So the 8-byte fast path covers essentially every token at BOTH sizes, and the inversion is
+NOT a token-mix shift. Do not re-derive this by widening the block to 16 bytes; the tokens are
+not there.
+
+PROVENANCE:
+  ELFs          candidate 01796723dd72b990, control 889e55b600cfefe7 (same tree, one feature
+                flag apart; harness self-check "not behind any commit touching crates/",
+                newest compiled commit bf136cd6b).
+  incumbent     verified in-run by the harness: redis-server sha=d2c8a4b9 == vendored source
+                HEAD, clean. fr/redis at 40 fields read 2.2502x (cand) vs 2.0614x (ctrl) —
+                DO NOT QUOTE EITHER: the redis denominator swung 10% (30,333.6 → 33,411.9
+                instr/op) between two runs minutes apart, three times its documented ~3%
+                serverCron contaminant. The fr-arm delta is the number.
+  harness       scripts/restore_instr_per_op.py and scripts/restore_profile_frames.py at HEAD.
+  host          thinkstation1, 64 cores, powersave, /data 117G free, loadavg 14.4–17.3 across
+                the window (1/5/15-min within 3 of each other = stable regime), observed CPU
+                MHz 2512 at the candidate arm and 4292 at the control arm — a 1.71x cross-core
+                spread that is exactly why this row is banked on instruction counts, which
+                this repo's instrument audit bounded at 0.64% across a 34% MHz swing.
+  tests         Nine tests shipped with the patch and all passed (933-test fr-store suite
+                green), including the discriminating distance-1 propagation case and a
+                differential corpus running BOTH arms in one ELF. They are reverted with the
+                lever; the shapes are listed above so the next attempt does not re-derive them.
+
+RETRY PREDICATE: do NOT retry any form of open-coded copying in either LZF decompressor. Two
+implementations from opposite directions (byte loop, fixed-block) have now measured worse than
+the libc call on the shapes that matter. The only remaining lever on this frame is to stop
+decompressing into a fresh buffer at all — i.e. pf1vw / b1o02, keep the listpack verbatim —
+which is the same conclusion 33832 has been pointing at, now with the last bounded alternative
+closed rather than untried. If someone re-opens it, they must (a) measure in CYCLES not
+instructions, because of the ERMS counting property above, and (b) show a shape whose payload
+is small enough that buffer initialisation stays under the call cost it removes.
+
+--------------------------------------------------------------------------------
+
+## CORRECTION (frankenredis-ozrro) — the gate fix I proposed last row would change NOTHING. The ~180 is a PER-PASS amortisation the cascade gets and a floor arm cannot, so "have the executor compute it internally" is a no-op and threading the cache is the only real fix
+
+Source reading only; no build, no measurement. Load 16.4 / 14.0 / 10.5 rising with a build in
+flight, so nothing was certifiable and nothing needed to be.
+
+### WHAT I PROPOSED, AND WHY IT IS EMPTY
+
+The previous row named two fixes for the ~180 instr/op the MSET/HSET floor arms pay for the
+write gate, and stated a preference:
+
+    1. PREFERRED — have the EXECUTOR compute the gate internally, as
+       `execute_plain_spop_borrowed` and the other floor writes already do.
+    2. thread the cascade's cache into the floor function.
+
+Option 1 is a no-op, and reading three functions shows it:
+
+    plain_borrowed_default_key_write_gate(&mut self, now_ms) -> bool {
+        self.plain_borrowed_default_key_write_allows(now_ms)      // a pub WRAPPER, nothing more
+    }
+
+    execute_plain_mset_borrowed_ok(pairs, now_ms) {
+        let default_write_allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.execute_plain_mset_borrowed_with_default_write_gate(pairs, now_ms, default_write_allowed)
+    }
+
+So the "no-gate" variant evaluates the SAME predicate through the same private function; it
+merely moves the call site from my arm into the executor. Identical work, per packet, either
+way. I proposed it because the other floor writes use that shape, which is a reason to think it
+is idiomatic and NOT a reason to think it is cheaper.
+
+### WHERE THE ~180 ACTUALLY COMES FROM
+
+`plain_write_gate_cache` is declared at main.rs:6731, OUTSIDE the per-packet loop, and reset only
+on specific events (6790, 6882, 6893). So the cascade evaluates the gate ONCE PER BUFFERED PASS
+and reuses it for every packet in that pass. The harness drives 2,000 identical commands, which
+batch into few passes, so the cascade's per-packet gate cost is ~0 amortised while a floor arm
+pays it in full on every packet.
+
+That reframes the finding: it is not that the floor route added a gate evaluation, it is that the
+floor route LOST AN AMORTISATION. Only option 2 recovers it, by giving the floor access to the
+same per-pass cache. Option 1 cannot, because no per-packet call site can amortise across packets.
+
+### WHY THIS MATTERS BEYOND THESE TWO COMMANDS
+
+Every floor arm serving a WRITE pays this, not just mine. The floor's own writes
+(`execute_plain_spop_borrowed` and friends) call `plain_borrowed_default_key_write_allows`
+internally and therefore pay it per packet too. If the amortisation is worth ~180 per packet on
+a batched workload, that is a cost the entire floor write surface carries and nobody has
+measured. It is invisible in a c=1 unpipelined shape and would show up under pipelining, which
+is the regime this campaign has mostly not measured.
+
+I am NOT claiming that number for the other arms — it is measured for MSET/HSET only. It is
+recorded as the question it raises.
+
+### RETRY PREDICATE
+
+  1. Option 2 is worth implementing only with a measurement that isolates it, and last row's
+     suggested bypass A/B CANNOT: that switch toggles floor-versus-generic, while this lever is
+     cascade-versus-floor. Correcting my own predicate again. The instrument that works is a
+     pipelined shape (several commands per pass) measured before and after threading the cache,
+     with `dump_small` as the layout control — because at ~180 the layout term (~40) is a
+     comparable size and a bare paired build cannot resolve it.
+  2. The floor-wide question reopens if a pipelined write shape shows floor-classified writes
+     paying a per-packet gate the cascade amortises. That needs a shape this corpus does not
+     have; adding one is cheap and should precede any code.
+
+## MEASURED (frankenredis-ozrro) — the MSET/HSET before/after pair, and the CONTROL moved 1.5 pct below its own eleven-reading band, so part of my measured delta is code LAYOUT and not the lever
+
+Both arms in one window; per-run stamps recorded because they disagree. Only the FIRST of six
+arms read FIT — builds appeared after it and the remaining five ran with 2-3 present. Per-arm
+loadavg 9.67-9.90 / 11.33-11.41 / 9.09-9.10, MHz 1,429-4,292. NOT a certification.
+
+    shape        before (ratio / total)   after (ratio / total)   d-total   dispatch
+    mset_2         0.4904x / 2,992.0        0.4812x / 2,771.4      -220.6   912.9 -> 497.1
+    hset_same      0.5260x / 2,341.0        0.5111x / 2,274.7       -66.3   681.2 -> 431.6
+    dump_small     0.5151x / 2,688.5        0.5248x / 2,648.6       -39.9   305.2 -> 304.4  CONTROL
+
+### THE CONTROL IS THE FINDING
+
+`dump_small` is untouched by this change and its fr arm fell 39.9 instr/op, 1.5 pct. Its
+established band across ELEVEN readings, six sessions, loadavg 8-66 and 0-12 builds, is
+2,686.3-2,703.7 — a 0.57 pct spread. 2,648.6 is BELOW that entire range. So the after-ELF is
+genuinely different for a command I did not touch, and the plausible cause is CODE LAYOUT: this
+lever added 239 lines to main.rs, which moves everything after it.
+
+That bounds the lever's real effect rather than settling it:
+
+    mset_2     raw -220.6   control-corrected -180.7   -> between -6.0 pct and -7.4 pct
+    hset_same  raw  -66.3   control-corrected  -26.4   -> between -1.1 pct and -2.8 pct
+
+Control-correcting by subtraction assumes the layout shift lands equally on every command, which
+is an assumption and not a measurement, so both bounds are quoted rather than a point estimate.
+The DISPATCH figures are unaffected by this: 912.9 -> 497.1 and 681.2 -> 431.6 reproduce the
+fr-only run's 915.4 -> 494.9 and 681.6 -> 431.9 to within 0.5 pct, so the route demonstrably
+moved. It is only the TOTAL that is contaminated.
+
+### WHAT THIS SAYS ABOUT MY OWN CROSS-BUILD PAIRS
+
+Every before/after total this campaign has reported from two separately built ELFs carries this
+same layout term, and until now the control had never moved enough to expose it. It did here
+because the change is large (239 lines) and the effect is small (26-220), so the layout term is
+a comparable size for the first time. The corollary is uncomfortable and worth stating: a
+cross-build pair can resolve a 3,000-instruction lever cleanly and cannot resolve a
+200-instruction one. The bypass-switch A/B (one binary, env-var toggle) is the only instrument
+here that excludes layout, and small levers need it rather than a paired build.
+
+### RATIOS, AT THE TWO SIGNIFICANT FIGURES THE DENOMINATOR SUPPORTS
+
+    mset_2     0.49x -> 0.48x
+    hset_same  0.53x -> 0.51x
+
+Both improve, both remain far below parity. The before-ratio for mset_2 read 0.4904x here
+against 0.5158x two sessions ago — 4.9 pct apart on the same ELF and shape, which is an
+independent confirmation of the ~4 pct intrinsic denominator width certified earlier, arrived at
+by accident rather than by design.
+
+### RETRY PREDICATE
+
+Reopen the net-effect question with a BYPASS-SWITCH A/B rather than a paired build: one ELF built
+with `--features perf-ab-cascade-bypass` at this commit, measured with FR_PERF_AB_CASCADE_BYPASS
+toggled. That excludes layout entirely and is the only way to size a sub-300-instruction lever
+here. The gate-removal follow-up (executor computes the write gate internally) should be measured
+the same way, and its target remains the ~180 identified in the previous row.
+
+## MEASURED (frankenredis-ozrro) — the MSET/HSET floor entries move the route as predicted but net only -8.6 pct and -2.2 pct, because the un-cached write gate I flagged as "not free" costs ~180 instr/op and eats most of the saving
+
+fr-only, so window quality is not load-bearing; stamp read FIT for fr-only on every run.
+Per-arm loadavg 15.24 / 12.13 / 8.64, MHz 1,429-4,238, 2 builds present. Before arm
+`fr-after-pubsub`, after arm `fr-after-msethset` (5e0195905, sha 3e75a16a).
+
+    shape        disp before -> after   d-disp   total before -> after   d-total   d-nondisp
+    mset_2            915.4 ->  494.9   -420.5      2,999.8 -> 2,742.3    -257.5     +163.0
+    hset_same         681.6 ->  431.9   -249.7      2,332.6 -> 2,280.6     -52.0     +197.7
+    dump_small        305.0 ->  306.2     +1.2            —                   —          —   CONTROL
+
+### THE ROUTE MOVED. THE SAVING DID NOT ARRIVE.
+
+Dispatch fell to 494.9 at arity 5 and 431.9 at arity 4, both inside the front-classified bands
+this campaign established (~520 and ~470) and in fact slightly better. So the entries work
+exactly as intended and the classifier is doing what it claims.
+
+But the TOTAL fell far less than the dispatch did, because non-dispatch work ROSE by 163.0 and
+197.7 — a per-call constant of ~180 +/- 18 across two unrelated commands, which is what makes it
+attributable rather than noise. That is the write gate. The commit message for the lever said:
+
+    "if a LATER cascade arm in the same pass would have reused the cached value, this route pays
+     one gate evaluation the cascade route might not have. That is the trade, and it is far
+     smaller than the walk being removed, but it is not zero and should not be described as
+     free."
+
+The first half of that was right and the last clause was wrong. It is not far smaller than the
+walk: it is 43 pct of MSET's dispatch saving and 79 pct of HSET's. Net delivery is -8.6 pct on
+MSET (against ~15 pct predicted) and -2.2 pct on HSET (against ~10 pct) — and HSET is close
+enough to a wash that at two significant figures its ratio does not move at all.
+
+### WHY THIS IS A GOOD OUTCOME TO HAVE MEASURED RATHER THAN ASSUMED
+
+I predicted 10-15 pct from the dispatch delta and the cascade multiplier, and the dispatch delta
+was RIGHT. The prediction failed on a term I had identified, written down, and then still
+under-weighted — I reasoned "smaller than the walk" without measuring it. A flagged caveat that
+is never quantified is a guess wearing a disclaimer.
+
+### THE FIX IS IDENTIFIED AND IS A REAL FOLLOW-UP LEVER
+
+The gate is computed per packet here only because
+`try_dispatch_floor_classified_action` does not receive the cascade's
+`plain_write_gate_cache`. Two ways out, in preference order:
+
+  1. Have the EXECUTOR compute the gate internally, as `execute_plain_spop_borrowed` and the
+     other floor writes already do — they call `plain_borrowed_default_key_write_allows`
+     themselves and take no gate parameter. That removes the double-accounting rather than
+     caching it, and matches the pattern the rest of the floor already uses.
+  2. Thread the cache into the floor function. Cheaper to write, but it widens a signature that
+     every floor arm shares for the benefit of three of them.
+
+Expected recovery is the full ~180 per call, which would put MSET at roughly -437 total (-15
+pct, the original prediction) and HSET at -230 (-10 pct). That is now a MEASURED target rather
+than an estimate, which is the useful thing this row produces.
+
+### RETRY PREDICATE
+
+Reopen as landed only when the after-measurement shows non-dispatch UNCHANGED (within the 0.57
+pct fr-arm precision) rather than +180, with dispatch still in the arity band. If non-dispatch
+does not return to its before-value, the gate has merely moved rather than been removed.
+
+## MEASURED (frankenredis-ozrro) — three runs of the SAME shape on the SAME ELF give ratios 0.4944x / 0.5274x / 0.5354x. The fr arm varies 0.056 pct and the redis arm 8.3 pct, so ALL ratio uncertainty is denominator uncertainty and it is ~8 pct, not the ~4 pct I banked
+
+`dump_small` on `fr-after-pubsub`, three consecutive invocations minutes apart. Window stamp on
+every run: loadavg 9.22-9.37 / 14.98-15.05 / 27.44-27.53, MHz 1,429-4,291, and 5-6 cargo/rustc
+processes present — I pre-checked ZERO builds and they appeared during the sequence, which the
+harness stamp caught and I would otherwise have missed. UNFIT for a ratio by my own gate, so
+this is SIZING and does not discharge the retry predicate it was run for.
+
+    run   fr instr/op   redis instr/op    ratio
+      1      2,697.3        5,456.2      0.4944x
+      2      2,696.1        5,112.2      0.5274x
+      3      2,697.6        5,038.2      0.5354x
+    spread    0.056 pct      8.30 pct    8.29 pct
+
+### THE NUMERATOR IS NOT THE PROBLEM AND NEVER WAS
+
+Three fr readings inside 1.5 instr/op — 0.056 pct — with 5-6 competing builds and the load
+halving underneath them. Across all EIGHT sessions the fr arm of this shape now spans
+2,686.3-2,703.7, 0.65 pct, over loadavg 14 to 66 and 0 to 12 concurrent builds. That is the
+instrument working.
+
+Every bit of the ratio spread is the denominator: 5,038.2 to 5,456.2 on identical input. Not a
+drift over sessions — three runs minutes apart on one binary.
+
+### CONSEQUENCE FOR WHAT IS ALREADY BANKED
+
+My earlier correction put the denominator at 1.6-4.0 pct and concluded ratios carry ~4 pct. That
+was too generous by half. A ratio measured in a window with builds carries ~8 pct, which means:
+
+  * Every ratio in this ledger quoted to four significant figures is over-precise. MSET 0.5158x
+    and HSET 0.5093x differ by 1.3 pct and are INDISTINGUISHABLE; I should not have presented
+    them as ordered.
+  * Any ratio within ~8 pct of parity is not established by a single dirty-window run. Checking
+    my own board for casualties: `keys_star` at 1.0269x was only 2.7 pct above parity — INSIDE
+    this band, so "KEYS is above parity" was never established by that measurement. It had
+    already been withdrawn on independent grounds (gvm6z showed it was an n=2 intercept
+    artefact, and the later reading was 0.4953x), so nothing downstream moves. It is recorded
+    because the number should not have been asserted in the first place.
+  * The large claims survive comfortably: PUBSUB NUMPAT 0.4630x, SCAN 1.2810x before and
+    0.6898x after, pubsub_channels 2.3324x. All are multiples of 8 pct away from any boundary
+    that matters.
+
+### THE HARNESS STAMP PAID FOR ITSELF ON ITS FIRST REAL USE
+
+I checked builds by hand immediately before launching: zero. Run 1 reported six. Without the
+per-run stamp I would have banked three "build-free" readings and concluded the denominator is
+intrinsically 8 pct wide, when what I actually measured is 8 pct wide WITH builds. That is the
+difference between a correct caveat and a wrong law, and it was caught by a line of output
+rather than by vigilance.
+
+### A SECOND SEQUENCE HALVES THE SPREAD WHEN THE BUILD COUNT HALVES
+
+Repeated in a calmer window with FEWER competing builds. Same shape, same ELF, stamps recorded
+per run:
+
+    sequence   builds   loadavg (1/5/15)        redis readings              spread
+    first       5-6     9.2-9.4 / 15.0 / 27.5   5,456.2 5,112.2 5,038.2     8.30 pct
+    second      3       10.6-11.2 / 13.3 / 24.8 5,112.5 5,216.7 5,041.4     3.48 pct
+
+    ratios, second sequence: 0.5262x / 0.5168x / 0.5350x -> 3.52 pct
+
+Halving the build count roughly halved the denominator spread. That is a DOSE-RESPONSE and it
+points at build interference rather than intrinsic width — which is the answer the retry
+predicate was asking for, arrived at from the opposite direction: I could not obtain a
+build-free window, so I varied the build count instead.
+
+TWO POINTS, AND THIS LEDGER HAS A STANDING RULE ABOUT THAT. Two points make a law-shaped object
+every time; three decide whether it is a law. The per-argument argv model, the "~2,000 generic
+dispatch" premise and the ~522 miss tax all looked solid on two and dispersed on the third. So
+this is recorded as SUGGESTIVE, not settled: 6 builds -> 8.3 pct, 3 builds -> 3.5 pct, and a
+zero-build sequence would extrapolate to roughly 2 pct if the relationship is real.
+
+WHY A BUILD-FREE SEQUENCE COULD NOT BE OBTAINED, twice: I hand-checked ZERO builds immediately
+before launching each sequence, and the harness stamp reported 6 and then 3 by the time the
+first run executed. Peers start builds continuously on this host, so "no builds running" is a
+property of an instant rather than of a window, and only a per-run stamp can tell you which one
+you actually got. That is now the strongest argument for the stamp existing.
+
+### RESOLVED IN A FIT WINDOW, AND IT GOES AGAINST MY OWN HYPOTHESIS
+
+Three runs with every stamp reading FIT and builds 0 throughout — the first genuinely clean
+ratio window of this campaign. Per-arm loadavg 8.73-9.07 / 9.75-9.80 / 16.49-16.55; MHz
+1,429-4,288.
+
+    run   fr instr/op   redis instr/op    ratio     stamp
+      1      2,697.6        5,047.1      0.5345x   FIT, builds 0
+      2      2,698.4        5,110.2      0.5280x   FIT, builds 0
+      3      2,688.3        5,263.6      0.5107x   FIT, builds 0
+    spread    0.376 pct      4.29 pct    4.66 pct
+
+The predicate was explicit: under 2 pct means the 8 pct was build interference and clean-window
+ratios keep three significant figures; otherwise the uncertainty is intrinsic and every banked
+ratio needs trimming to two. It reads 4.29 pct. **The uncertainty is intrinsic.**
+
+AND THE THIRD POINT KILLS LAST ROW'S DOSE-RESPONSE, WHICH I FLAGGED AS THE LIKELY OUTCOME:
+
+    builds   redis spread
+      5-6      8.30 pct
+      3        3.48 pct
+      0        4.29 pct     <- not monotone
+
+Zero builds is WIDER than three. So "halving the builds halves the spread" was a two-point
+artefact, and I recorded it as suggestive-not-settled for exactly this reason. That is now the
+FOURTH quantity in this ledger to look like a law on two points and disperse on the third, after
+the per-argument argv model, the "~2,000 generic dispatch" premise and the ~522 miss tax. The
+pattern is consistent enough to be a rule: in this system, two points never establish a law.
+
+### WHAT THIS OBLIGES, and it applies to my own rows first
+
+Every fr/redis ratio in this ledger is quoted to more precision than the instrument supports.
+The honest form is TWO significant figures:
+
+    PUBSUB NUMPAT   0.4630x -> 0.46x        SCAN before   1.2810x -> 1.28x
+    PUBSUB NUMSUB   0.5551x -> 0.56x        SCAN after    0.6898x -> 0.69x
+    MSET            0.5158x -> 0.52x        pubsub_channels 2.3324x -> 2.3x
+    HSET            0.5093x -> 0.51x        dump_small    ~0.51-0.53x
+
+MSET and HSET are then plainly the same number, which is the correct reading and which I got
+wrong when I presented them as ordered. No structural conclusion changes: every crossing this
+campaign claimed is 25 pct or more from parity, and 4-8 pct cannot reach that.
+
+The fr ARM keeps its precision. Eleven readings of this shape now span 2,688.3-2,703.7 — 0.57
+pct — across loadavg 8 to 66 and 0 to 12 concurrent builds. Self-A/B deltas and dispatch figures
+are unaffected by any of this; only the competitive ratio loses digits.
+
+### RETRY PREDICATE (superseded by the FIT sequence above; kept for the record)
+
+The question "is the denominator 8 pct wide intrinsically, or only with builds present" is NOT
+answered here. It needs three `dump_small` ratio runs whose stamps all read FIT — i.e. zero
+cargo/rustc for the whole sequence and 1min/5min within 15 pct. If the spread stays under 2 pct
+there, 8 pct is build interference and clean-window ratios can keep three significant figures.
+If it does not, every banked ratio needs trimming to two.
+
+## METHOD (frankenredis-ozrro) — a window gate, because four consecutive "clean window" reports did not reproduce on my own check, and the right threshold is DIFFERENT for an fr-only number than for a ratio
+
+`scripts/certification_window.py`, with a self-test. Source and process inspection only; no
+build, no measurement. It refused the window it was written in, which is the point.
+
+### THE TWO GATES ARE NOT THE SAME GATE
+
+Conflating them is why one blunt threshold would be wrong, and this campaign has the data to
+separate them:
+
+    fr-only   `dump_small`'s fr arm reads 2,686.3-2,703.7 across SIX sessions spanning loadavg
+              14 to 66 — 0.65 pct total spread. A dirty window costs wall-clock, not accuracy.
+    ratio     the same control's REDIS arm reads 5,045.8 / 5,046.6 / 5,050.8 / 5,345.9, the last
+              5.9 pct high with four peer builds running, and an earlier row showed the
+              variation does not track load monotonically, so it cannot be corrected after the
+              fact.
+
+So the tool takes `--for ratio` (strict, refuses outright if ANY cargo/rustc is running) or
+`--for fr-only` (lenient, notes them and passes).
+
+### IT GATES ON STATIONARITY, NOT ABSOLUTE LOAD, AND THAT IS DELIBERATE
+
+The recurring trap this session was the DECAYING window: a reassuring 1-minute over a much
+larger 5- and 15-minute, where a run straddles two regimes. The gate measures
+|1min - 5min| / 5min and uses the 15-minute as a settled-ness witness, so a low 1-minute under a
+90 15-minute reads as a dip rather than calm.
+
+It deliberately does NOT hard-fail on absolute load. This campaign's most reproducible rows were
+taken at loadavg 14-24; a gate that refused those would discard good work, which is the
+frankenpandas failure this ledger already has a row about wearing a different costume. A
+self-test case pins that steady load 22 stays usable.
+
+### WHY IT WAS WORTH MECHANISING
+
+Four ticks in a row reported a clean window and my own `uptime`/`pgrep` found otherwise — 4
+processes, then 36, then 3, then 7 rising within a minute of each other. Hand-checking caught
+all four, but it is exactly the check that gets skipped on the tick where it matters. Run live
+for this row it returned UNFIT for a ratio (7 cargo/rustc processes, 15-minute 43.91) and FIT
+for fr-only, which is the correct pair of answers and is why the denominator retry predicate
+below still cannot be discharged.
+
+### WHAT REMAINS BLOCKED, and by what
+
+  * The denominator-width test (three `dump_small` redis arms, spread under 2 pct decides
+    whether 5.9 pct is build interference or intrinsic) needs `--for ratio` to return FIT. It
+    has not yet.
+  * MSET/HSET floor entries need `crates/fr-server/src/main.rs`, reserved by RusticLark until
+    09:20Z. Their before-figures are now measured twice, 0.27 pct and 0.03 pct apart.
+
 ## MEASURED (frankenredis-ozrro) — MSET and HSET are ALREADY at ~0.51x, so their floor entries are a 10-15 pct improvement and not a parity crossing. Separately, the control's REDIS arm moved 5.9 pct, wider than the 1.6-4.0 pct I had banked
 
 Sizing run on `fr-after-pubsub` (d5be78419). NOT CERTIFIED: my own uptime check found FOUR
