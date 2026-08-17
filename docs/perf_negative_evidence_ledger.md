@@ -29234,3 +29234,72 @@ clean. Then close RANDOMKEY's half with one ABBA over dump_small, randomkey_one 
 get_control reporting ABSOLUTE dispatch. And treat `git add -A` in a shared tree as the
 hazard it is: it has now swept my work into peers' commits three times this session, and
 this time it broke the build.
+
+--------------------------------------------------------------------------------
+MEASURED (frankenredis-ozrro) — RANDOMKEY 1.3169x -> 0.5406x and DUMP 0.9561x -> 0.5253x.
+My after-predictions close ONE CONFIRMED and ONE MISSED HIGH, and the miss refines the cost
+model: the "+100 per bulk" term is too big at low arity
+
+Claim class: COMPETITIVE + PREDICTION CLOSED
+
+Measured on the working tree, which compiles; HEAD itself still carries the duplicate
+DUMP/RANDOMKEY definitions and does NOT compile (see the row above — the fix is staged and
+waiting on RusticLark's reservation to lapse at ~04:17Z). Peers here build the shared
+working tree rather than HEAD, so the local fleet is unaffected; a fresh clone would not be.
+
+    shape           BEFORE (p98mw)        AFTER (this row)          dispatch
+    randomkey_one   1.3169x  59.4 pct     0.5406x  16.0 pct         273.5 / 274.0
+    dump_small      0.9561x  48.7 pct     0.5253x  11.3 pct         307.6 / 303.8
+    get_control     —                     0.4074x  20.2 pct         261.7 / 259.7
+
+    RANDOMKEY CROSSED PARITY: 1.3169x -> 0.5406x, the ninth route to do so in this
+    campaign. DUMP was already at parity and is a COST REDUCTION, 0.9561x -> 0.5253x —
+    which is how I described it before measuring, and it stays described that way.
+
+MY TWO PREDICTIONS, SETTLED, AND ONE OF THEM IS WRONG:
+
+    randomkey   predicted ~263    measured 273.8    +4.1 pct   CONFIRMED
+    dump        predicted ~363    measured 305.7   -18.7 pct   OVER-PREDICTED
+
+THE MISS IS INFORMATIVE AND I HAD THE MODEL SLIGHTLY WRONG. "263 + ~100 per additional bulk
+parsed" was fitted on arity-3 and arity-4 commands, where it holds to 8 pct. DUMP is arity 2
+— command plus ONE key — and I counted it as two bulks, giving 363. Laid out by ARITY, the
+floor cost is not linear in bulks at all:
+
+    arity 1   randomkey  273.8
+    arity 2   get_control 263 / dump 305.7
+    arity 3   renamenx 391 / rpoplpush 409
+    arity 4   smove 466 / hincrby 454 / ltrim 498 / substr 439 / zlexcount 462
+
+    The step from arity 2 to 3 is ~100; from 3 to 4 it is ~60; from 1 to 2 it is
+    approximately nothing. So the model should read "roughly 265-305 at arity 1-2, ~400 at
+    arity 3, ~460 at arity 4" — a table, not a line. Quoting it as a per-bulk slope
+    over-predicts every short command, and DUMP is the first short one this campaign has
+    entered.
+
+    THIS IS THE FIRST OF TEN PREDICTIONS FROM THAT MODEL TO MISS, and it missed in the
+    direction the fit's own range warned about, exactly as the depth-law row said of
+    extrapolating below arm 30. Both models are interpolators being asked to extrapolate.
+
+The depth law itself is untouched by this: it predicts BEFORE dispatch from arm position and
+was independently confirmed at 1.3 pct on DUMP last row. What is corrected here is the
+AFTER-cost model, a different fit.
+
+PROVENANCE:
+  ELF sha256           d494199504e80766... built from the WORKING TREE (HEAD does not
+                       compile), one release build this pane, df checked immediately before
+                       (159G) and after (159G) as instructed.
+  harness              scripts/shape_instr_per_op.py at HEAD, N=2000/2N=4000, two draws per
+                       shape, both engines in the SAME invocation.
+  host                 thinkstation1, 64 cores, /data 159G, governor powersave.
+  PER-ARM loadavg/MHz  randomkey_one 42.20/3495 and 42.20/3059 · dump_small 40.99/3739 and
+                       44.43/3778 · get_control 47.60/3792 and 50.92/3754. Load ROSE from
+                       39 to 51 across the run, so this is not offered as a tight-ratio
+                       certification — these are small-reply shapes (fr 0.001 passes/op),
+                       the load-immune class, and both effects are 2-3x their before-values.
+  BEFORE figures       p98mw's, quoted and attributed.
+
+RETRY PREDICATE: stop quoting the after-cost model as "263 + ~100 per bulk" — use the arity
+table above. The depth law (45.1 per arm position, for BEFORE dispatch) is unaffected and
+still holds at 1.3 pct on its one independent test. Next candidates need `cascade_depth.py`
+re-run: DUMP and RANDOMKEY are now classified, so the list has changed under this row.
