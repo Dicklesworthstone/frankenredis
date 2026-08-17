@@ -4832,6 +4832,17 @@ fn main() -> ExitCode {
     // pool routes KEYS (`sharded_set_get_shard` = crc16_slot % workers). Modelling
     // the server on this dead path is what produced the stale hot-shard invariant
     // fixed in frankenredis-uiqc5.
+    // (frankenredis-zwtqi) The paragraph above is a COMMENT, and a comment cannot
+    // fail. This asserts the invariant it describes, so moving the early return —
+    // the edit that would silently resurrect the dead per-KEY design — trips here
+    // instead of producing a server that looks sharded and is not.
+    debug_assert!(
+        sharded_set_get_workers.is_none(),
+        "the --experimental-sharded-set-get-workers path must have returned into \
+         run_shared_nothing_server before this point; if it reaches here the dead \
+         per-KEY pool below has become live and the live per-CONNECTION design is \
+         being bypassed (see frankenredis-zwtqi, frankenredis-uiqc5)"
+    );
     let sharded_set_get_pool = if let Some(worker_count) = sharded_set_get_workers {
         match ShardedSetGetPool::new(worker_count, Arc::clone(&background_waker)) {
             Ok(pool) => {
@@ -33998,6 +34009,55 @@ mod tests {
         ));
         assert_ne!(ltrim, 0, "0 is the empty-slot marker");
         assert_ne!(lrem, 0, "0 is the empty-slot marker");
+    }
+
+    /// (frankenredis-zwtqi) The per-KEY `ShardedSetGetPool` is unreachable: the
+    /// `--experimental-sharded-set-get-workers` flag returns into
+    /// `run_shared_nothing_server` long before the pool is built, so the pool is
+    /// always `None` and this drain returns at its first line on every pass of
+    /// every configuration.
+    ///
+    /// That is worth a test rather than only the comment at the construction site,
+    /// because the deadness is what makes the code DANGEROUS rather than merely
+    /// unused: two plausible dispatch designs sit in this file, the dead one routes
+    /// KEYS (crc16_slot % workers) and the live one routes CONNECTIONS (round-robin
+    /// at accept), and modelling the server on the dead one is what produced the
+    /// stale hot-shard invariant that cost frankenredis-uiqc5 a full sweep abort.
+    /// I nearly spent a turn optimising this drain's body before checking whether
+    /// it runs.
+    ///
+    /// This pins the half that IS expressible as a unit test: given no pool, the
+    /// drain must be a no-op and must not touch the client map. The other half —
+    /// that the flag can never leave a pool here — is enforced by the debug_assert
+    /// at the construction site.
+    #[test]
+    fn dead_per_key_sharded_pool_drain_is_a_noop_without_a_pool() {
+        let mut clients: crate::ClientMap = crate::ClientMap::default();
+        let mut runtime = Runtime::default_strict();
+        let mut poll = mio::Poll::new().expect("poll");
+        let mut write_tokens = crate::TokenSet::default();
+        let mut closing_tokens = crate::TokenSet::default();
+        let mut deferred_tokens = crate::TokenSet::default();
+        let mut staging = crate::ShardedTickStaging::new(1);
+
+        crate::drain_sharded_set_get_completions(
+            None,
+            &mut clients,
+            &mut runtime,
+            &mut poll,
+            &mut write_tokens,
+            &mut closing_tokens,
+            &mut deferred_tokens,
+            0,
+            None,
+            &mut staging,
+        );
+
+        assert!(clients.is_empty(), "a poolless drain must touch no client");
+        assert!(
+            write_tokens.is_empty() && closing_tokens.is_empty() && deferred_tokens.is_empty(),
+            "a poolless drain must arm no token set"
+        );
     }
 
     /// (frankenredis-4m3i4) The cascade bypass is a MEASUREMENT arm. Shipping a
