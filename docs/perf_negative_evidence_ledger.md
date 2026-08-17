@@ -26417,3 +26417,82 @@ env -u CARGO_TARGET_DIR, no [RCH] line; the harness self-reported the same SHA f
 arms from /proc/<pid>/exe, which is what rules out an accidental mixed pair.
 thinkstation1, 64 cores observed, governor powersave, /data 219G. Per-arm loadavg and mean
 CPU MHz are in the block above, sampled by me before, during and after the run.
+
+--------------------------------------------------------------------------------
+ISOLATED (frankenredis-gein3) — fr's SINTER deficit is ENTIRELY EMIT: probe 265/member vs
+redis's 428 (fr 38 pct CHEAPER), emit 881 vs 499 (fr 77 pct WORSE). fr spends ~200
+event-loop passes delivering one reply; redis spends 0.13
+
+Claim class: COMPETITIVE
+
+The isolation shape landed last turn, and zw36c's new per-op EVENT-LOOP PASS counter landed
+alongside it. Together they answer the question this ledger has circled for six rows.
+
+BOTH ARMS, SAME ELF 2d5a352c, min-of-K:
+
+                        fr        redis     fr/redis
+    SINTER          586,751      474,643     1.2362x
+    SINTERCARD      135,663      219,287     0.6187x     fr AHEAD by 38 pct
+
+    per member       fr      redis
+    PROBE           265        428     fr 38 pct CHEAPER
+    EMIT            881        499     fr 77 pct WORSE
+
+SINTERCARD does the SAME probes and emits one integer (verified in source last row, and
+pinned by `sintercard_count_equals_sinter_cardinality_gein3`), so the subtraction is exact.
+
+    fr's SET WORK IS BETTER THAN REDIS'S. Every part of fr's 1.2362x deficit, and more,
+    lives in EMIT. fr's emit costs 3.3x its own probe; redis's costs 1.2x its own. Emit is
+    77 pct of fr's SINTER against 54 pct of redis's.
+
+THE PREDICTION I RECORDED LAST ROW HELD, WHICH IS WHAT LICENSES THE SUBTRACTION.
+sintercard_big reproduced to 0.51 pct (135,662.9 / 136,355.5 / 135,977.9) against
+sinter_big's 35 pct on the same ELF in the same window. Had it come back noisy, the
+variance attribution in this ledger would have been wrong; it did not.
+
+AND THE MECHANISM IS NOW MEASURED DIRECTLY RATHER THAN INFERRED. The new counter shows
+fr's instruction count tracking its PASS count draw for draw:
+
+    draw   fr passes/op   fr instr/op      redis passes/op
+     r1        178.7         586,751           0.134
+     r2        220.3         658,913           0.129
+     r3        267.8         790,593           0.130
+
+    slope 1,735 / 2,289 / 2,776 instructions per extra pass across the three pairs.
+
+REDIS DELIVERS THIS REPLY IN 0.13 PASSES PER OP — roughly one pass per eight commands. fr
+takes 179 to 268. That is ~1,700x more trips through the event loop for the same 512-member
+reply, and it is the whole of the emit gap AND the whole of the 35 pct run-to-run variance:
+the pass count is what varies, and each pass costs ~2,000 instructions.
+
+    SINTERCARD's pass count is 0.001/op — essentially zero, because there is no large reply
+    to dribble out. That is the control confirming the counter measures what it claims.
+
+WHAT THIS RETIRES AND WHAT IT OPENS. Three earlier candidate explanations are now dead:
+it is not the reply SORT (measured invisible, and removed by a peer as a parity fix), not
+per-member set membership (fr is 38 pct CHEAPER there), and not dispatch (0.1 pct share on
+this shape). The lever is fr writing a large reply in ~200 event-loop passes instead of a
+few. That is a reply-buffering/flush-policy question in the reactor, not a data-structure
+one — and at ~2,000 instructions per pass, collapsing 200 passes to even 20 would take
+~360,000 instr/op off this shape and move it from 1.2362x to roughly 0.48x.
+
+PROVENANCE:
+  ELF sha256           2d5a352cfd56c986... built LOCALLY at HEAD dc98ee11f from a CLEAN
+                       tree — REPRODUCIBLE FROM HEAD.
+  harness              scripts/shape_instr_per_op.py at dc98ee11f, which added the
+                       event-loop pass counter (zw36c). N=2000/2N=4000, three draws per
+                       shape, both engines in the SAME invocation.
+  estimator            MIN-OF-K per arm; all draws listed so nothing hides in an average.
+  host                 thinkstation1, 64 cores, /data 219G, governor powersave, one build.
+  PER-ARM loadavg/MHz  sintercard_big 16.35/3966, 17.24/2847, 17.20/2505 ·
+                       sinter_big 28.97/4010, 44.45/2496, 20.92/2635.
+                       Window was FALLING, not settled (1-min 12.66 against a 5-min of
+                       22.20), so this is not offered as a tight-ratio certification: the
+                       isolation rests on a 0.51 pct shape and a subtraction whose terms
+                       differ by 4x, both far outside any load effect on this instrument.
+
+RETRY PREDICATE: do NOT look for further SINTER levers in the set code — fr is ahead there
+and the question is closed. DO attack reply flushing: measure `event-loop passes per op`
+directly as the target metric, since it is 1,700x apart and each pass is worth ~2,000
+instructions. Any change should move the PASS COUNT; if it does not, it is not touching
+this.
