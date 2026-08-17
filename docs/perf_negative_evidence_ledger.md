@@ -27476,3 +27476,77 @@ by the incumbent; `scripts/_incumbent.py` is the one place to import from, and t
 failure modes are already covered by `shape_instr_per_op.py --self-test` (moved HEAD, dirty
 stamp, missing stamp, unreadable tree) plus a live-tree assertion that fails in any checkout
 that has actually drifted.
+
+--------------------------------------------------------------------------------
+MEASURED (frankenredis-ozrro) — RPOPLPUSH front-classified: 1.4792x -> 0.5182x, dispatch
+3,069.1 -> 409.1 (-86.7 pct). Second of the three hidden worst ratios cleared, and LTRIM
+held UNCHANGED as the sibling control
+
+Claim class: COMPETITIVE
+
+My retry predicate said to check FIRST whether each remaining target already has a borrowed
+parser and executor, because that is what made SMOVE a floor-table entry rather than a
+rewrite. Checked: RPOPLPUSH has both. LTRIM has NEITHER (parser 0, executor 0), so it is a
+different and larger job and was deliberately left alone — which is also what makes it the
+ideal control for this row.
+
+    shape                BEFORE                    AFTER                    delta
+    rpoplpush_missing    4,629.5 / 4,633.8         1,710.4 / 1,710.7        -63.1 pct
+                         dispatch 66.3 pct         dispatch 23.9 pct
+                         (~3,069.1 instr/op)       (~409.1 instr/op)        -86.7 pct
+                         ratio 1.4833x / 1.4751x   ratio 0.5360x / 0.5003x  CROSSED PARITY
+
+    ltrim_noop           6,169.0 / 6,166.9         6,167.9 / 6,169.0        +0.01 pct
+                         dispatch ~2,616.9         dispatch ~2,616.9        UNCHANGED
+    get_control          1,303.0 / 1,302.1         1,308.1 / 1,303.7        +0.25 pct  NULL
+
+LTRIM IS THE BEST CONTROL THIS CAMPAIGN HAS PRODUCED. It is unclassified, walks the same
+cascade, sits at 42.4 pct dispatch, and moved by 0.01 pct — its dispatch figure is identical
+to the instruction. A global dispatch change would have moved it; a code-layout shift would
+have moved get_control. Neither did, so the effect is RPOPLPUSH-specific, which is a
+stronger statement than a null alone can support.
+
+PREDICTION vs ACTUAL, from last row's retry predicate: "expect the classified floor to land
+near 450-500 instr/op of dispatch, not 275, for any command whose parser reads three bulks."
+RPOPLPUSH reads TWO bulks (src, dst) and landed at 409.1 — just under the band, in the
+direction the bulk count predicts. The constant is now calibrated across three points:
+
+    get_control (1 bulk)      ~263 instr/op of dispatch
+    rpoplpush   (2 bulks)     ~409
+    smove       (3 bulks)     ~466
+
+    A front-classified route costs roughly 263 + ~100 per additional bulk parsed. That is
+    the number to predict with, and it is why "front-classify it and you reach ~275" was
+    optimistic for both of these.
+
+STANDING: two of the three hidden worst ratios are cleared in two turns — SMOVE 1.5099x ->
+0.5144x and RPOPLPUSH 1.4792x -> 0.5182x, both by a floor-table entry over machinery that
+already existed. LTRIM (1.4792x measured here, 42.4 pct dispatch, 2,617 instr/op) is the
+last one and is NOT the same job: it has no borrowed parser and no borrowed executor, so it
+needs both written before a floor entry means anything.
+
+CORRECTNESS. Same promise as SMOVE's — a claimed packet the parser declines falls to
+GENERIC, not back to the cascade. The test asserts the classifier claims exactly arity 3 in
+both cases, that the arm's parser accepts what is claimed, that four wrong arities are
+refused by BOTH the classifier and the parser, and that SISMEMBER and PEXPIREAT (the other
+9-letter floor tokens) plus LMOVE — RPOPLPUSH's upstream successor — are not captured.
+MUTATION-TESTED: relaxing the arity map to `(_, Rpoplpush)` reddens on `["RPOPLPUSH"]`.
+355 fr-server tests pass.
+
+PROVENANCE:
+  AFTER ELF            a030eeec4c231c2c...
+  BEFORE ELF           2550a666795d8d14...  same tree, same peer state, built minutes apart,
+                       differing ONLY by this change (stash / build / restore).
+  harness              scripts/shape_instr_per_op.py at HEAD, N=2000/2N=4000, ABBA per
+                       shape, both engines in the SAME invocation.
+  host                 thinkstation1, 64 cores, /data 189G, governor powersave, two builds.
+  PER-ARM loadavg/MHz  rpoplpush_missing 14.14/3058, 14.05/2946, 14.05/2963, 13.80/2951 ·
+                       ltrim_noop 13.80/2822, 13.82/3032, 13.67/2872, 13.67/3000 ·
+                       get_control 13.30/2990, 14.72/3231, 14.72/3499, 14.98/3168.
+                       Window verified at open: 15.72 / 17.89 / 21.51, converged and low.
+                       Small-reply shapes throughout (fr 0.001 passes/op).
+
+RETRY PREDICATE: LTRIM is the only one of the three left and it needs a borrowed parser AND
+executor written first — do NOT add a floor entry for it before those exist, because a class
+whose arm cannot serve the shape sends it to GENERIC and is a REGRESSION. Cost the next
+front-classification with 263 + ~100 per bulk, not 275 flat.

@@ -14606,6 +14606,10 @@ enum BorrowedDispatchFloorClass {
     SetOpt4,
     SetOpt5,
     SetOpt6,
+    /// (frankenredis-ozrro) `RPOPLPUSH src dst` at arity 3, the whole command. Parser and
+    /// executor already existed; only the floor entry was missing, so it walked to cascade
+    /// line ~9111 and paid 3,070 instr/op of dispatch at a 66.3 pct share.
+    Rpoplpush,
     /// (frankenredis-ozrro) `SMOVE src dst member` at arity 4 only, which is the whole
     /// command — SMOVE is not variadic upstream. Its parser and executor already existed;
     /// only the floor entry was missing, so the command walked to cascade line ~9793 and
@@ -15033,6 +15037,7 @@ enum BorrowedDispatchFloorCommand {
     Touch,
     Set,
     Smove,
+    Rpoplpush,
     Msetnx,
     Append,
     Bitcount,
@@ -15355,6 +15360,9 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
         9 => match uppercase_ascii_token::<9>(token)? {
             [b'P', b'E', b'X', b'P', b'I', b'R', b'E', b'A', b'T'] => {
                 Some(BorrowedDispatchFloorCommand::Pexpireat)
+            }
+            [b'R', b'P', b'O', b'P', b'L', b'P', b'U', b'S', b'H'] => {
+                Some(BorrowedDispatchFloorCommand::Rpoplpush)
             }
             [b'S', b'I', b'S', b'M', b'E', b'M', b'B', b'E', b'R'] => {
                 Some(BorrowedDispatchFloorCommand::Sismember)
@@ -16471,6 +16479,9 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // whole cascade. The class therefore cannot strand a shape another arm would have
         // served, which is the condition the floor-class rule actually requires.
         (4, BorrowedDispatchFloorCommand::Smove) => Some(BorrowedDispatchFloorClass::Smove),
+        (3, BorrowedDispatchFloorCommand::Rpoplpush) => {
+            Some(BorrowedDispatchFloorClass::Rpoplpush)
+        }
         (4, BorrowedDispatchFloorCommand::Set) => Some(BorrowedDispatchFloorClass::SetOpt4),
         (5, BorrowedDispatchFloorCommand::Set) => Some(BorrowedDispatchFloorClass::SetOpt5),
         (6, BorrowedDispatchFloorCommand::Set) => Some(BorrowedDispatchFloorClass::SetOpt6),
@@ -17955,6 +17966,41 @@ fn try_dispatch_floor_classified_action(
                         argv_scratch,
                     )
                 }
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Rpoplpush => {
+            // (frankenredis-ozrro) Same parser and executor the cascade arm at ~9111 used;
+            // only the position changes, so the reply bytes and every side effect are
+            // unchanged and a declining executor still reaches the generic path. The
+            // executor encodes straight into the write buffer, which is `out` here.
+            //
+            // RPOPLPUSH is arity 3 and nothing else in the cascade parses an RPOPLPUSH
+            // packet, so the class cannot strand a shape another arm would have served.
+            let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+            if let Some(packet) =
+                parse_borrowed_plain_rpoplpush_packet(unparsed, &parser_config)
+                && runtime
+                    .execute_plain_rpoplpush_borrowed_into(
+                        packet.key,
+                        packet.member,
+                        ts,
+                        client_resp3,
+                        out,
+                    )
+                    .is_some()
+            {
+                Ok(BorrowedMultibulkAction::FastEncodedReply {
+                    consumed: packet.consumed,
+                })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,
@@ -51241,6 +51287,69 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
                 super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
                 Some(super::BorrowedDispatchFloorClass::Smove),
                 "{other:?} must not be claimed as Smove"
+            );
+        }
+    }
+
+    /// (frankenredis-ozrro) RPOPLPUSH's floor class, same promise as SMOVE's: a claimed
+    /// packet its parser then declines falls to GENERIC rather than back to the cascade,
+    /// so claiming an arity the parser refuses is a REGRESSION, not a wasted parse.
+    #[test]
+    fn rpoplpush_floor_class_claims_exactly_what_its_parser_accepts() {
+        let cfg = ParserConfig::default();
+        fn packet(args: &[&str]) -> Vec<u8> {
+            let mut p = format!("*{}\r\n", args.len()).into_bytes();
+            for a in args {
+                p.extend_from_slice(format!("${}\r\n{}\r\n", a.len(), a).as_bytes());
+            }
+            p
+        }
+
+        for served in [
+            packet(&["RPOPLPUSH", "src", "dst"]),
+            packet(&["rpoplpush", "src", "dst"]),
+        ] {
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(&served, &cfg),
+                Some(super::BorrowedDispatchFloorClass::Rpoplpush),
+            );
+            assert!(
+                super::parse_borrowed_plain_rpoplpush_packet(&served, &cfg).is_some(),
+                "the class claims arity 3, so the arm's parser must accept it"
+            );
+        }
+
+        // RPOPLPUSH is not variadic: no other arity may be claimed.
+        for wrong in [
+            vec!["RPOPLPUSH"],
+            vec!["RPOPLPUSH", "src"],
+            vec!["RPOPLPUSH", "src", "dst", "extra"],
+            vec!["RPOPLPUSH", "src", "dst", "e1", "e2"],
+        ] {
+            let pkt = packet(&wrong);
+            assert_ne!(
+                super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
+                Some(super::BorrowedDispatchFloorClass::Rpoplpush),
+                "{wrong:?} must not be claimed as Rpoplpush"
+            );
+            assert!(
+                super::parse_borrowed_plain_rpoplpush_packet(&pkt, &cfg).is_none(),
+                "{wrong:?} must not parse as RPOPLPUSH either"
+            );
+        }
+
+        // Other 9-letter commands sharing the new token's length must not collide, and
+        // LMOVE — RPOPLPUSH's four-arity successor upstream — must not be captured.
+        for other in [
+            vec!["SISMEMBER", "s", "m"],
+            vec!["PEXPIREAT", "k", "1"],
+            vec!["LMOVE", "src", "dst"],
+        ] {
+            let pkt = packet(&other);
+            assert_ne!(
+                super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
+                Some(super::BorrowedDispatchFloorClass::Rpoplpush),
+                "{other:?} must not be claimed as Rpoplpush"
             );
         }
     }
