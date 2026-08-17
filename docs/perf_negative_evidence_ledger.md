@@ -34745,3 +34745,76 @@ RETRY PREDICATE: do NOT implement the binary search. If the container-dispatch p
 revisited, take the duplicate SCAN (one pass returning arity AND flags), and size it by the
 `check_full_command_arity` + `effective_command_flags` self-cost remaining after
 `cc3c24cc9`, not by the memcmp frame.
+
+--------------------------------------------------------------------------------
+## 2026-08-17 RusticHorizon: CONFIG GET literal fast path — `glob_match` was 54.5 pct of the command and is now GONE from the profile; −22.1 pct same-tree, 5.80x → 4.60x (`frankenredis-e6c9t`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir), not a timing verdict; this
+harness's fr arm repeats to 0.09 pct. CV was not used, as a gate or otherwise.
+
+Claim class: COMPETITIVE. Campaign output: yes — fr/Redis 7.2.4 on `config_get_one` measures
+4.6047x after this change, from 5.7989x before, both arms live in the same invocation.
+
+`839b3c76e` filed CONFIG GET as the worst cell on the board and said it was NOT attributed.
+Attributed and partly fixed in one pass.
+
+ATTRIBUTION FIRST, and it named the fix immediately:
+
+    fr_store::glob_match                     21,326 instr/op   54.48 pct
+    Runtime::collect_config_entries           8,284 instr/op   21.16 pct
+
+`config_pattern_matches` is `glob_match(pattern, parameter)` and is evaluated once per known
+config parameter — 43 call sites. `CONFIG GET maxmemory` is a LITERAL pattern, so a literal
+request ran the full glob engine 43 times to answer a question byte equality settles.
+
+THE FIX IS EQUIVALENCE BY CONSTRUCTION, not by testing alone: a pattern containing none of
+`*`, `?`, `[` or `\` has no glob semantics left, so `glob_match` on it degenerates to exact
+byte equality. `\` is excluded because it ESCAPES, and `[` because it opens a class — either
+makes a pattern non-literal with no `*` or `?` anywhere, and those two are exactly what a
+naive "contains * or ?" check gets wrong. Both are asserted.
+
+SAME-TREE REVERSE-PATCH A/B:
+
+    shape             BEFORE      AFTER       delta
+    config_get_one   38,837.7    30,248.7    −22.11 pct  (−8,589.0 instr/op)
+    client_info      16,293.6    16,285.1    −0.05 pct   CONTROL: generic-route container,
+                                                          shares the dispatch path, does NOT
+                                                          use the config matcher
+    get_control       1,308.0     1,301.7    −0.48 pct   NULL
+
+    `client_info` is the control `cc3c24cc9` lacked and `839b3c76e` built: it exercises the
+    same container dispatch machinery but not the changed predicate, so it distinguishes "the
+    config matcher got cheaper" from "something global got cheaper". It did not move.
+
+THE PROFILE CONFIRMS THE MECHANISM RATHER THAN JUST THE NUMBER. Re-attributing the AFTER
+binary, `glob_match` is ABSENT from the profile entirely and `collect_config_entries` rises
+from 8,284 to 21,043 instr/op — it absorbed the now-inline byte comparisons. Cost moved from
+the glob engine into straight-line compares and 40 pct of it evaporated in the move.
+
+WHAT REMAINS, AND WHY IT IS THE NEXT LEVER RATHER THAN THIS ONE. `collect_config_entries` is
+now 68.9 pct of the command at 21,043 instr/op, which is ~297 instructions per parameter
+checked. That is far too much for a byte compare against a short literal, so the residue is
+not the comparison — it is the SHAPE of the function: 43 sequential `if
+config_pattern_matches(pattern, "<name>")` branches walked in order for a request naming ONE
+parameter. A literal request should be a direct lookup, not a 43-branch scan.
+
+    So CONFIG GET is still 4.60x behind, and I am not claiming this closed it. It removed the
+    glob engine; the linear scan behind it is untouched.
+
+PROVENANCE:
+  AFTER ELF     50300a659c52a378      BEFORE ELF  e4218472532984e1 (same tree,
+                reverse-patched, restored in the same command)
+  harness       scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines in the SAME
+                invocation. Incumbent verified in-run: sha=d2c8a4b9 == vendored HEAD.
+  host          thinkstation1, 64 cores, powersave, /data 118G, ONE PEER BUILD running.
+  PER-ARM loadavg/MHz  before config_get 13.70/2491, client_info 14.93/3334, null 14.93/4117 ·
+                after config_get 15.82/3296, client_info 16.23/4142, null 17.01/2505.
+                Window 1/5/15 = 13.70/14.08/15.53 rising to 17.01 across the run.
+  gates         fr-runtime 616+44+8 tests pass. Two clippy errors (`never used` at :29652,
+                `too many arguments` at :25820) are PRE-EXISTING and outside my hunks.
+
+RETRY PREDICATE: make a literal `CONFIG GET` a DIRECT LOOKUP instead of 43 sequential branch
+tests — that is the remaining 21,043 instr/op and it is the same class of fix as
+`SUBCOMMAND_TABLE`'s linear scan in `fpqns` lever 2, so the two should probably be taken
+together by whoever picks either up. Keep `client_info` as the control: it must NOT move for a
+config-only change, and it is what proves the effect is the config path rather than dispatch.

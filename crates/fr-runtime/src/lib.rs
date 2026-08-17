@@ -43323,7 +43323,26 @@ impl Runtime {
     }
 
     fn config_pattern_matches(pattern: &str, parameter: &str) -> bool {
-        glob_match(pattern.as_bytes(), parameter.as_bytes())
+        // (frankenredis-e6c9t) LITERAL FAST PATH. `CONFIG GET <name>` is overwhelmingly a
+        // literal parameter name, and this predicate is evaluated once per known config
+        // parameter -- 43 call sites -- so a literal request runs the full glob engine 43
+        // times to answer a question a byte compare settles. MEASURED: `CONFIG GET maxmemory`
+        // spent 21,326 instr/op inside `glob_match`, 54.5 pct of the whole command, which is
+        // why the route was 5.9x behind Redis 7.2.4.
+        //
+        // Equivalence is by construction, not by testing alone: a pattern containing none of
+        // `*`, `?`, `[` or `\` has no glob semantics left -- every byte is a literal -- so
+        // `glob_match` on it degenerates to exact byte equality. `\` is excluded because it
+        // ESCAPES the next character, and `[` because it opens a class; either makes the
+        // pattern non-literal even with no `*` or `?` present.
+        let bytes = pattern.as_bytes();
+        if !bytes
+            .iter()
+            .any(|b| matches!(b, b'*' | b'?' | b'[' | b'\\'))
+        {
+            return bytes == parameter.as_bytes();
+        }
+        glob_match(bytes, parameter.as_bytes())
     }
 
     fn handle_asking_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
