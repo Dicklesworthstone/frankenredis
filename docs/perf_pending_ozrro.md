@@ -21,6 +21,60 @@ commits cleanly. That is a workaround for a durability problem, NOT an attempt t
 the contract: the rows are unchanged, they are still subject to it, and merging them into the
 ledger is a mechanical step once the blocker clears.
 
+## MEASURED (frankenredis-ozrro) — threading the cascade's per-pass gate cache into the floor recovers the whole ~265 it was losing: MSET now -16.2 pct and HSET -11.8 pct against pre-lever, control-corrected
+
+fr-only (load-immune), stamp FIT for fr-only on every run. Three ELFs, all built from this
+campaign's own commits, with `dump_small` as the layout control in each.
+
+    shape        pre-lever   lever only   +gate cache   dispatch (three builds)
+    mset_2         2,999.8      2,742.3       2,523.4    915.4 -> 494.9 -> 499.8
+    hset_same      2,332.6      2,280.6       2,067.3    681.6 -> 431.9 -> 437.6
+    dump_small     2,688.5      2,648.6       2,699.0    305.2 -> 304.4 -> 312.2  CONTROL
+
+Control-corrected against pre-lever: mset -486.9 (-16.2 pct), hset -275.8 (-11.8 pct). Those
+are the ~15 pct and ~10 pct I predicted when the floor entries went in, and which the un-cached
+gate had been eating.
+
+### THE PREMISE WAS VERIFIED BEFORE THE FIX WAS BUILT, AND IT CORRECTED A SECOND THING I HAD WRITTEN
+
+My amortisation explanation only holds if the harness batches commands into passes, so I read
+the send loop instead of assuming: `payload = resp(*cmd) * ops`, sent as one concatenated
+stream, with the code's own comment confirming the server "still batches per wakeup". Verified.
+
+That reading also killed my own retry predicate, which said this fix needed "a pipelined shape
+this corpus does not have". EVERY shape here is already pipelined. The precondition was
+fictional and the fix was measurable with the shapes I already had — the third precondition I
+have had to retract on this one lever, after the bypass A/B (wrong toggle: it switches
+floor-versus-generic while this is cascade-versus-floor) and the executor-computes-internally
+fix (a no-op, same predicate per packet).
+
+### THE CHANGE
+
+`try_dispatch_floor_classified_action` has exactly ONE call site, inside the cascade function
+where `plain_write_gate_cache` is already in scope, so this is a signature widening plus a
+one-line swap in each of the three arms to `cached_plain_write_gate`. Every floor WRITE arm can
+now amortise the gate the way cascade arms always did.
+
+### THE CONTROL IS WIDER THAN I HAD ESTABLISHED, AND THAT BOUNDS THIS ROW
+
+`dump_small` across the three builds reads 2,688.5 / 2,648.6 / 2,699.0 — a 50.4 instr/op swing,
+1.9 pct, against the 0.57 pct band I had established from ELEVEN readings. So the cross-build
+LAYOUT term is ~50, not ~15, and every total here carries it. At effects of 200-490 that is a
+4-to-10x signal-to-noise margin, which is why the conclusion holds; it would NOT hold for a
+sub-100 lever, and this is the second row in a row to reach that conclusion from different data.
+
+The DISPATCH figures are unaffected by layout and are the cleaner evidence: 499.8 and 437.6
+remain inside the front-classified arity bands after the change, so the gate fix recovered
+non-dispatch work without disturbing the route.
+
+### WHAT I GOT WRONG AND WHAT IT COST
+
+The gate cost was estimated at ~180 from the first pair and measured at ~265 here. I called it
+"far smaller than the walk being removed" in the lever commit, which was wrong by enough to turn
+HSET from a -10 pct win into a -2.2 pct one until it was fixed. The lesson is narrow and worth
+keeping: I identified the term, wrote it down, and sized it by reasoning rather than measuring —
+and a caveat that is never quantified is a guess wearing a disclaimer.
+
 ## CORRECTION (frankenredis-ozrro) — the gate fix I proposed last row would change NOTHING. The ~180 is a PER-PASS amortisation the cascade gets and a floor arm cannot, so "have the executor compute it internally" is a no-op and threading the cache is the only real fix
 
 Source reading only; no build, no measurement. Load 16.4 / 14.0 / 10.5 rising with a build in

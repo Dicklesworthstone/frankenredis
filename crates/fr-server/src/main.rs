@@ -6960,6 +6960,7 @@ fn process_buffered_frames(
                     ts,
                     &mut conn.write_buf,
                     &mut argv_scratch,
+                                    &mut plain_write_gate_cache,
                 ) {
                     action
                 } else if borrowed_arity_is(unparsed, b'1')
@@ -17973,6 +17974,12 @@ fn try_dispatch_floor_classified_action(
     ts: u64,
     out: &mut Vec<u8>,
     argv_scratch: &mut Vec<Vec<u8>>,
+    // (frankenredis-ozrro) The cascade's PER-PASS write-gate cache, threaded in so floor WRITE
+    // arms amortise the gate exactly as cascade arms do. Measured: without it, MSET and HSET
+    // floor arms each paid ~180 instr/op that the cascade does not, because the cache lives
+    // outside the per-packet loop and the harness pipelines every command into few passes. The
+    // floor route was not adding a gate evaluation, it was LOSING AN AMORTISATION.
+    write_gate_cache: &mut Option<bool>,
 ) -> Option<Result<BorrowedMultibulkAction, RespParseError>> {
     let class = classify_borrowed_dispatch_floor_packet(unparsed, &parser_config)?;
     Some(match class {
@@ -21450,7 +21457,8 @@ fn try_dispatch_floor_classified_action(
             // it this way so no SimpleString("OK") frame is allocated per call.
             if let Some(packet) = parse_borrowed_plain_mset_packet(unparsed, &parser_config) {
                 let consumed = packet.consumed();
-                let default_write_allowed = runtime.plain_borrowed_default_key_write_gate(ts);
+                let default_write_allowed =
+                    cached_plain_write_gate(write_gate_cache, runtime, ts);
                 if runtime
                     .execute_plain_mset_borrowed_with_default_write_gate(
                         packet.pairs(),
@@ -21475,7 +21483,8 @@ fn try_dispatch_floor_classified_action(
             // (frankenredis-ozrro) Same parser and executor the cascade arm at ~7418 uses.
             if let Some(packet) = parse_borrowed_plain_hset_packet(unparsed, &parser_config) {
                 let pairs = [packet.field, packet.value];
-                let default_write_allowed = runtime.plain_borrowed_default_key_write_gate(ts);
+                let default_write_allowed =
+                    cached_plain_write_gate(write_gate_cache, runtime, ts);
                 if let Some(response) = runtime
                     .execute_plain_hset_borrowed_with_default_write_gate(
                         packet.key,
@@ -21506,7 +21515,8 @@ fn try_dispatch_floor_classified_action(
                 parse_borrowed_plain_hset_two_packet(unparsed, &parser_config)
             {
                 let pairs = [packet.field1, packet.value1, packet.field2, packet.value2];
-                let default_write_allowed = runtime.plain_borrowed_default_key_write_gate(ts);
+                let default_write_allowed =
+                    cached_plain_write_gate(write_gate_cache, runtime, ts);
                 if let Some(response) = runtime
                     .execute_plain_hset_borrowed_with_default_write_gate(
                         packet.key,
