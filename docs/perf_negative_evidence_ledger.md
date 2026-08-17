@@ -8,6 +8,94 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## REJECT (frankenredis-ozrro) — removing the 13 provably-dead cascade arms is worth ~24 instr/op, not the ~585 the depth law implies. The depth law and the miss tax are NOT on the same scale, and a third miss-tax mechanism is dead
+
+Source analysis plus one test; no new measurement. Load 19.7 / 28.8 / 98.1, still draining
+from the storm, so nothing here is certified and nothing needed to be.
+
+### THIRTEEN ARMS ARE UNREACHABLE, AND THAT IS NOW A CHECKED INVARIANT
+
+Arms 150-162 of 163 — `keyed_values9..14` and `exists_two..exists_eight` — cannot be reached.
+Every shape they serve is claimed earlier by a PARAMETERISED floor class, which my own
+`[A]`-candidate screen could not see because it greps for literal `(N, Cmd)` arity-map tuples:
+
+    EXISTS                  floor claims array_len 2..=KEYS_MULTI_MAX+1 (= 2..=33)
+                            arms serve 2..8 keys = array_len 3..9      -> inside
+    LPUSH RPUSH SADD        floor claims array_len 3..=20 for all six
+    HDEL SREM ZREM          arms serve 9..14 values = array_len 11..16 -> inside
+
+`deep_cascade_arms_are_unreachable_because_the_floor_claims_their_shapes_first` now pins this,
+asserting all 7 EXISTS arities and all 6x6 keyed-values shapes classify, plus that array_len 21
+is NOT claimed. It is a CORRECTNESS invariant rather than a perf one: if that coverage is ever
+narrowed, the keyed-values six fall to GENERIC rather than back to the cascade, which the
+comment on that floor arm already records as a REGRESSION rather than a missed optimisation.
+
+STATUS OF THAT TEST: written and VERIFIED PASSING (`cargo test -p fr-server --bin frankenredis
+deep_cascade_arms`, 1 passed), but NOT YET COMMITTED — my reservation on
+crates/fr-server/src/main.rs lapsed at 08:19Z and RusticLark holds it until 09:20Z. It is in the
+working tree, so a peer committing that file may sweep it in; if this row is read before the
+test appears in git history, that is why.
+
+### THE ARITHMETIC THAT KILLS THE REMOVAL
+
+The depth law (dispatch ~= 45.1 x arm - 261) says 13 arms are worth ~585 instr/op, which would
+make dead-arm removal a decent lever. My own miss-tax measurement says otherwise, and it is a
+measurement rather than a fit: an unclassified command that walks the ENTIRE 163-arm cascade
+and then falls to generic pays only ~305 instr/op more than one that skips floor and cascade
+altogether. If 163 arms of walking cost ~305, then 13 arms cost ~24.
+
+    depth law, 13 arms          ~585 instr/op    predicted
+    miss tax, pro-rated          ~24 instr/op    measured
+    ratio                          24x apart
+
+~24 instr/op does not repay touching a 163-arm dispatch structure, so the removal is REJECTED.
+The invariant test stays because it is worth having on correctness grounds alone.
+
+### WHY THE TWO NUMBERS DISAGREE, WHICH MATTERS BEYOND THIS LEVER
+
+They are not measuring the same thing, and I had been treating them as if they were. A command
+SERVED at arm 127 shows 6,214 instr/op of dispatch (PUBSUB, measured). A command that walks all
+163 arms and is served by GENERIC shows ~305 of walk cost. Both cannot be per-arm costs on the
+same scale, and the resolution is the one an earlier row already established for a different
+purpose: the dispatch-share metric attributes DIFFERENT FRAME SETS to a classified route and a
+generic route, so its values are not comparable across routes.
+
+    The depth law is therefore valid only WITHIN the served-at-depth regime it was fitted on,
+    and must not be used to price what a fall-through pays. It correctly predicted PUBSUB
+    (5,467 against 6,214 measured) because PUBSUB was served at depth — the same regime. It is
+    wrong by 24x for a walk-past, which is a different one.
+
+### A THIRD MISS-TAX MECHANISM IS DEAD
+
+Earlier rows killed arity and token-table size as explanations for the 294-361 spread in the
+miss tax. The natural third candidate was PREFIX SHARING: an arm whose `b"*N\r\n$M\r\n"`
+literal does not match exits in a few instructions, while a matching one forces a full token
+compare, so the tax should scale with how many routes share the packet's (arity, token-length)
+prefix. Counting the 418 prefix literals in the file:
+
+    shape            prefix    sites   measured tax
+    lcs_2            *3 $3        3        305.1
+    sort_ro_alpha    *3 $7       10        294.3
+    pfmerge_2        *4 $7        6        308.5
+    zintercard_2     *4 $10       5        360.6
+
+No correlation, and the two extremes are inverted: the shape with the MOST sharing (10) has the
+LOWEST tax, the one with the second FEWEST (5) has the highest. Refuted. Three mechanisms
+proposed, three dead, and I still cannot explain the spread — recorded as such rather than
+given a fourth guess.
+
+### RETRY PREDICATE
+
+  1. DEAD-ARM REMOVAL — reopen if a direct measurement contradicts the pro-rating, i.e. if a
+     same-commit bypass A/B on a fall-through shape shows the walk cost exceeding ~1,500
+     instr/op (which would put 13 arms above ~120 and make the change arguable). The cheap
+     version: measure a fall-through shape on a bypass ELF where the 13 arms have been
+     commented out, and compare against the same ELF unmodified. Until such a number exists,
+     585 is a fit and 24 is a measurement, and the measurement wins.
+  2. THE MISS-TAX SPREAD — reopen when a candidate mechanism makes a FALSIFIABLE prediction
+     before being measured. Three post-hoc explanations have now failed; the next one should be
+     stated as a prediction over at least three unmeasured shapes and then tested.
+
 ## MEASURED (frankenredis-ozrro) — PUBSUB NUMPAT 8,158.4 -> 1,531.5 instr/op (5.3x, 0.4630x of redis), the largest single lever of this campaign. My secondary claim about DECLINED shapes is REFUTED, and the measurement surfaced a new above-parity command at 2.3324x
 
 Before arm `fr-pair-bypass` (bac70fcb6), after arm `fr-after-pubsub` (d5be78419, sha
