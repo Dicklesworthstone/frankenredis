@@ -1368,6 +1368,41 @@ def classify_dispatch_mechanism(annotate_text: str):
     return "classified route", seen
 
 
+def classify_dispatch_mechanism_two_point(per_op_frames):
+    """Mechanism from the TWO-POINT per-frame deltas, where the answer is categorical.
+
+    (frankenredis-94lp3, 2026-08-17) MY OWN THRESHOLD WAS WEAKER THAN I CLAIMED, and this
+    replaces it with a measurement that needs no threshold at all.
+
+    The single-dump form above tests `dispatch_with_client_context`'s share against a 1.0 pct
+    bar, and I justified that bar as "three orders of magnitude clear of both sides". That
+    compared it to SEED RESIDUE at 0.01 pct, which is the wrong side to measure against: a
+    gate's margin is set by the CLOSEST case on the far side of the bar, not the farthest.
+    Measured across 35 dumps on disk, the closest GENERIC route sits at 2.56 pct — a margin of
+    2.56x, not 1000x. A generic route roughly 3x more expensive than that one would fall under
+    the bar and be reported CLASSIFIED, which is a false negative in exactly the direction that
+    hides work. (`feedback_a_gate_must_link_its_threshold_to_its_own_null`, applied to my own
+    gate rather than someone else's.)
+
+    Two-point removes the judgement call. Startup and seeding appear identically in the N and
+    2N dumps and cancel EXACTLY, so the frame's per-op cost is:
+
+        23 front-classified shapes   0.000 instr/op   (exactly zero, not "small")
+        12 generic-path shapes       2.562-5.043 pct of the op
+
+    Zero versus nonzero is not a threshold, it is a fact about which code ran. `per_op_frames`
+    is the {function: instr_per_op} mapping `frame_delta` already produces for the fixed
+    `dispatch_share`, so this costs no extra work where that is already computed.
+    """
+    per_op = 0.0
+    for fn, ir in per_op_frames.items():
+        if "dispatch_with_client_context" in fn:
+            per_op += ir
+    if per_op > 0.0:
+        return "GENERIC PATH", per_op
+    return "classified route", per_op
+
+
 def dispatch_mechanism(dump_path):
     """Which mechanism is this route paying: the parser walk, or the generic path?
 
@@ -1834,6 +1869,25 @@ def selftest() -> int:
         "   201,776 ( 2.50%)  ???:fr_command::classify_command [x]\n"
         "   150,900 ( 1.87%)  ???:fr_command::push_ascii_lowercase_lossy [x]\n"
     )
+    # (frankenredis-94lp3) The TWO-POINT form, and the margin measurement that motivated it.
+    # Case 1 is every front-classified shape measured: the frame's per-op delta is EXACTLY
+    # zero, because it runs only during seed/startup and cancels in the subtraction. Case 2 is
+    # the closest generic route on record (2.56 pct of its op) — the case that sets the single
+    # dump gate's real margin at 2.56x, not the 1000x I originally claimed against seed residue.
+    for frames, expect, name in (
+            ({"<fr_runtime::Runtime>::dispatch_with_client_context": 0.0,
+              "frankenredis::process_buffered_frames": 112.0}, "classified route",
+             "two-point: classified"),
+            ({"<fr_runtime::Runtime>::dispatch_with_client_context": 330.0,
+              "frankenredis::process_buffered_frames": 280.0}, "GENERIC PATH",
+             "two-point: generic")):
+        got, per_op = classify_dispatch_mechanism_two_point(frames)
+        if got == expect:
+            print("  %-26s %s (%.1f instr/op)  ok" % ("mechanism: " + name, expect, per_op))
+        else:
+            failures += 1
+            print("  %-26s FAIL: got %r, wanted %s" % ("mechanism: " + name, got, expect))
+
     for label_text, expect, name in (
             (classified_text, "classified", "seed residue (real hget dump)"),
             (generic_text, "GENERIC PATH", "true generic route")):

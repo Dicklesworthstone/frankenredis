@@ -8,6 +8,62 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-08-17 MossyOrchid: I AUDITED MY OWN GATE AND ITS MARGIN IS 2.56x, NOT THE 1000x I CLAIMED — measured against the wrong side. Two-point makes it categorical: 0.000 instr/op on 23 classified shapes, 2.56-5.04 pct on 12 generic ones (`frankenredis-94lp3`)
+
+Claim class: INSTRUMENT, correcting my own. No build, no bench, no server — /data at 12G and
+100 pct used; every figure below is `frame_delta.py` over dumps already on disk.
+
+WHAT I CLAIMED WHEN I SHIPPED THE GATE. My mechanism fix tests
+`dispatch_with_client_context`'s share in ONE annotate dump against a 1.0 pct bar, and I wrote
+that the threshold "sits three orders of magnitude clear of both sides ... and needs no tuning",
+citing seed residue at 0.01 pct against generic routes at 5-40 pct.
+
+THAT IS THE WRONG SIDE TO MEASURE. A gate's margin is set by the CLOSEST case on the far side of
+the bar, not the farthest. Measured across all 35 dumps from this session:
+
+    front-classified shapes (23)   dispatch_with_client_context = 0.000 pct of the op, EXACTLY
+    generic-path shapes (12)       2.562, 2.566, 2.567, 2.567, 2.568, 2.570, 2.572,
+                                   3.952, 4.048, 4.333, 5.043
+
+The closest generic route is **2.56 pct against a 1.0 pct bar — a margin of 2.56x**, not 1000x.
+A generic route roughly 3x more expensive per op than that one would fall UNDER the bar and be
+reported as `classified route`: a false negative in the direction that HIDES work, on a screen
+whose entire job is finding routes that still take the generic path. My own
+`feedback_a_gate_must_link_its_threshold_to_its_own_null` says a threshold must be tied to its
+own null; I tied mine to the comfortable side and did not check the other.
+
+THE FIX REMOVES THE THRESHOLD RATHER THAN RAISING IT. On a TWO-POINT basis the quantity is
+categorical: startup and seeding appear identically in the N and 2N dumps and cancel exactly, so
+`dispatch_with_client_context` costs **0.000 instr/op on every one of the 23 classified shapes**
+— zero, not "small" — and a nonzero amount on every generic one. Zero versus nonzero is not a
+tuning question, it is a fact about which code ran. `classify_dispatch_mechanism_two_point()`
+takes the `{function: instr_per_op}` map that `frame_delta` already builds for the now-fixed
+`dispatch_share`, so it costs nothing extra where that is computed.
+
+The single-dump form stays for callers holding only one dump, with its margin now documented
+honestly at the call site instead of overstated.
+
+TESTS: two new `--selftest` cases (pure computation, no server, no build, so they run under the
+freeze) pin the categorical rule at both ends — a frame map with the discriminator at 0.0 must
+read `classified route`, one with it at 330.0 must read `GENERIC PATH`. The three existing
+mechanism cases still pass, including the one that pins the ORIGINAL presence-only defect.
+
+WHY THIS MATTERS BEYOND MY GATE: the same 35 dumps produced today's other finding, that dispatch
+SHARE does not separate the two mechanisms at all (classified reaches 37.1 pct, generic starts at
+33.9 pct). So the mechanism label is the ONLY thing distinguishing them, which makes a 2.56x
+margin on that label thinner than it looked when the share was believed to corroborate it.
+
+PROVENANCE: no build, no bench, no server. `scripts/frame_delta.py --all` over 35 dump dirs under
+`/data/tmp/fr_instr_*` from this session's 10:10-10:23 window. Host thinkstation1, /data 12G at
+100 pct, loadavg 22.17 / 13.94 / 12.85. No MHz sample: nothing was timed.
+
+RETRY PREDICATE: prefer `classify_dispatch_mechanism_two_point` wherever both dumps exist. If a
+future screen reports a route CLASSIFIED on the single-dump form and something else suggests it
+is generic, re-run it two-point before believing either — the single-dump form's failure mode is
+now known and is a false NEGATIVE.
+
+--------------------------------------------------------------------------------
+
 ## 2026-08-17 MossyOrchid: RESTORED, SOUNDLY — the withdrawn floor recomputed two-point from dumps already on disk, and it kills its own headline: dispatch share NO LONGER SEPARATES classified from generic (classified reaches 37.1 pct, generic starts at 33.9 pct). ZINTERCARD/XPENDING's ~3,000 instr/op survives at 2,804-3,374 (`frankenredis-94lp3`, `frankenredis-7so0e`)
 
 Claim class: SELF-SPEEDUP sizing (fr-only), restoring figures I withdrew one row below. NO BUILD,
