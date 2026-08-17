@@ -86,6 +86,88 @@ import time
 SQUARE = "ABBAABBA"
 NULL_BOUND = 0.02
 
+
+def classify_row(ratio, ci_low, ci_high, null_redis, null_fr, null_bound=NULL_BOUND):
+    """Decide a row's verdict. PURE — no sockets, no timing, so it is unit-testable.
+
+    (frankenredis-enrhw) This used to be three inline branches, and the middle one
+    was wrong in a way that inline code hid: ADMISSIBLE required only that the
+    ratio's bootstrap CI exclude 1.0, and never that the effect exceed the null bias
+    the same row had just been FORGIVEN. So a row whose own instrument was measured
+    1.66% off (null_fr = 1.0166, admitted because 0.0166 <= 0.02) could be certified
+    on a ratio of 1.008 — an effect HALF the size of the bias in the instrument that
+    produced it. Observed nulls in this harness run 0.9928-1.0166, so the tolerated
+    bias reaches 1.7% while the old decision threshold was effectively zero.
+
+    The rule now: an effect must clear the LARGER of the two nulls' observed bias
+    before it counts. NULL_BOUND becomes the FLOOR ON WHAT MAY BE CLAIMED rather
+    than only a pass/fail filter. That is strictly stricter — it can refuse rows the
+    old rule admitted and can never admit one it refused — which is the safe
+    direction for a gate four panes run and I cannot exercise end to end.
+
+    Returns (verdict, binding_term) so a row can say WHICH constraint decided it;
+    a gate that cannot name its binding constraint gets re-litigated forever.
+    """
+    bias = max(abs(null_redis - 1.0), abs(null_fr - 1.0))
+    if abs(null_redis - 1.0) > null_bound or abs(null_fr - 1.0) > null_bound:
+        return "NULL-FAILED", "null_bound"
+    if ci_low <= 1.0 <= ci_high:
+        return "STRADDLES-1", "ci_brackets_1"
+    if abs(ratio - 1.0) <= bias:
+        # The effect is inside the instrument's own demonstrated error. Not a null
+        # failure (the nulls passed) and not a straddle (the CI is clean) — a third
+        # outcome the old three-branch rule had no name for, which is exactly why it
+        # returned ADMISSIBLE here.
+        return "UNDER-NULL", "effect_le_null_bias"
+    return "ADMISSIBLE", "effect_gt_null_bias"
+
+
+def _selftest_classify():
+    """Exercise the decision rule directly. No server, no timing, no build."""
+    B = NULL_BOUND
+    cases = [
+        # (name, ratio, ci_low, ci_high, n_redis, n_fr, expect)
+        # THE REGRESSION THIS FIXES: a real observed null with a small effect.
+        ("observed_null_small_effect", 1.008, 1.004, 1.012, 1.0000, 1.0166, "UNDER-NULL"),
+        # Same nulls, effect comfortably past the bias -> still admissible.
+        ("observed_null_big_effect", 1.250, 1.200, 1.300, 1.0000, 1.0166, "ADMISSIBLE"),
+        # Clean nulls, modest effect -> admissible (must not over-reject).
+        ("clean_nulls_modest_effect", 1.030, 1.020, 1.040, 1.0010, 0.9995, "ADMISSIBLE"),
+        # A null past the bound still fails first, whatever the effect.
+        ("null_over_bound", 2.000, 1.900, 2.100, 1.0500, 1.0000, "NULL-FAILED"),
+        # A straddling CI outranks the bias test.
+        ("straddles", 1.000, 0.980, 1.020, 1.0000, 1.0000, "STRADDLES-1"),
+        # BELOW 1.0 (fr slower) must be judged on MAGNITUDE, not sign — a gate that
+        # only guarded the fast side would be arm-asymmetric, the defect three
+        # projects hit today.
+        ("slow_side_under_null", 0.992, 0.988, 0.996, 1.0000, 1.0166, "UNDER-NULL"),
+        ("slow_side_real", 0.750, 0.700, 0.800, 1.0000, 1.0166, "ADMISSIBLE"),
+        # Exactly at the bias is NOT a claim (boundary is inclusive against us).
+        ("exactly_at_bias", 1.0166, 1.010, 1.020, 1.0000, 1.0166, "UNDER-NULL"),
+    ]
+    bad = 0
+    print("%-28s %-8s %-9s %-12s %s" % ("case", "ratio", "bias", "got", "expect"))
+    for name, ratio, lo, hi, nr, nf, expect in cases:
+        got, binding = classify_row(ratio, lo, hi, nr, nf, B)
+        bias = max(abs(nr - 1.0), abs(nf - 1.0))
+        ok = got == expect
+        bad += 0 if ok else 1
+        print("%-28s %-8.4f %-9.4f %-12s %-12s %s (%s)"
+              % (name, ratio, bias, got, expect, "ok" if ok else "FAIL", binding))
+    # A stricter rule must never ADMIT something the old rule refused. The old rule
+    # was: nulls_ok and not straddle -> ADMISSIBLE. So every ADMISSIBLE here must
+    # also have satisfied the old rule; assert that direction explicitly.
+    for name, ratio, lo, hi, nr, nf, _e in cases:
+        got, _b = classify_row(ratio, lo, hi, nr, nf, B)
+        old_admissible = (
+            abs(nr - 1.0) <= B and abs(nf - 1.0) <= B and not (lo <= 1.0 <= hi)
+        )
+        if got == "ADMISSIBLE" and not old_admissible:
+            print("MONOTONICITY VIOLATED on %s: new rule admits what old refused" % name)
+            bad += 1
+    print("selftest: %d case(s) failed" % bad)
+    return 1 if bad else 0
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BENCH = os.path.join(ROOT, "legacy_redis_code/redis/src/redis-benchmark")
 REDIS = os.path.join(ROOT, "legacy_redis_code/redis/src/redis-server")
@@ -855,13 +937,7 @@ def run_row(label: str, fr_port: int, redis_port: int, argv: list[str],
     ratio = statistics.median(ratios)
     low, high = bootstrap_ci(ratios)
     n_redis, n_fr = statistics.median(null_redis), statistics.median(null_fr)
-    nulls_ok = abs(n_redis - 1.0) <= NULL_BOUND and abs(n_fr - 1.0) <= NULL_BOUND
-    if not nulls_ok:
-        verdict = "NULL-FAILED"
-    elif low <= 1.0 <= high:
-        verdict = "STRADDLES-1"
-    else:
-        verdict = "ADMISSIBLE"
+    verdict, binding = classify_row(ratio, low, high, n_redis, n_fr)
     return {
         "label": label,
         "ratio": ratio,
@@ -869,6 +945,7 @@ def run_row(label: str, fr_port: int, redis_port: int, argv: list[str],
         "null_redis": n_redis,
         "null_fr": n_fr,
         "verdict": verdict,
+        "binding": binding,
     }
 
 
@@ -917,8 +994,14 @@ def main(argv_in: list[str]) -> int:
                              "come out 1.0. Not a competitive row.")
     parser.add_argument("--expect-elf", default=None)
     parser.add_argument("--list", action="store_true")
+    # (frankenredis-enrhw) Decision-rule test. Pure computation: no server, no
+    # timing, no build — so it runs under a build halt, which is exactly when a
+    # change to a gate most needs checking.
+    parser.add_argument("--selftest", action="store_true")
     args = parser.parse_args(argv_in)
 
+    if args.selftest:
+        return _selftest_classify()
     if args.list:
         for name, shapes in SHAPE_SETS.items():
             print(f"{name}: {', '.join(label for label, _, _ in shapes)}")
@@ -1023,7 +1106,7 @@ def main(argv_in: list[str]) -> int:
             print(f"  {row['label']:<14} {row['ratio']:.4f}"
                   f"  [{row['ci'][0]:.4f}, {row['ci'][1]:.4f}]"
                   f"  nulls {row['null_redis']:.4f}/{row['null_fr']:.4f}"
-                  f"  {row['verdict']}")
+                  f"  {row['verdict']} [{row['binding']}]")
 
         print(f"\nRATIO = fr ops/s / redis ops/s   (>1 means FrankenRedis faster)")
         print(f"{'shape':<14}{'ratio':>9}{'95% CI':>22}"
@@ -1031,7 +1114,8 @@ def main(argv_in: list[str]) -> int:
         for row in rows:
             ci_text = f"[{row['ci'][0]:.4f}, {row['ci'][1]:.4f}]"
             print(f"{row['label']:<14}{row['ratio']:>9.4f}{ci_text:>22}"
-                  f"{row['null_redis']:>12.4f}{row['null_fr']:>10.4f}  {row['verdict']}")
+                  f"{row['null_redis']:>12.4f}{row['null_fr']:>10.4f}  "
+                  f"{row['verdict']} [{row['binding']}]")
         admissible = [r for r in rows if r["verdict"] == "ADMISSIBLE"]
         print(f"\n{len(admissible)} of {len(rows)} rows admissible; "
               f"{sum(1 for r in rows if r['verdict'] == 'NULL-FAILED')} null-failed")
