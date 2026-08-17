@@ -29414,3 +29414,85 @@ RETRY PREDICATE: do NOT re-run the unclassified-command search; it is empty and 
 the evidence. If the cascade grows new arms, `cascade_depth.py` will surface them — that is
 what it is for. The next lever in this area is a [C] executor, which is a different and much
 larger job than the nine table entries that preceded it, and it should be costed as one.
+
+--------------------------------------------------------------------------------
+MEASURED (frankenredis-p98mw) — the three landed-unmeasured levers all CROSSED: LMPOP
+1.3786x -> 0.5026x, RANDOMKEY 1.3169x -> 0.5303x, DUMP 0.9561x -> 0.5278x. Dispatch down
+85-89 pct on all three, and get_control's null held to 0.06 pct
+
+Claim class: COMPETITIVE
+
+This closes the obligation left open across four ticks of disk emergency: LMPOP
+(`bba68310b`), RANDOMKEY (`018539206`) and DUMP (`51e01c28f`) were landed with no after-side
+number and were explicitly NOT claimed as wins. They are now measured.
+
+    shape           BEFORE                        AFTER                        delta
+    lmpop_missing   6,361.3  1.3786x  69.2 pct    2,368.2  0.5026x  27.3 pct   -62.8 pct
+                    dispatch ~4,400.2             dispatch ~646.6              -85.3 pct
+    randomkey_one   4,116.1  1.3169x  59.4 pct    1,699.4  0.5303x  16.0 pct   -58.7 pct
+                    dispatch ~2,446.0             dispatch ~271.7              -88.9 pct
+    dump_small      5,092.8  0.9561x  48.7 pct    2,697.8  0.5278x  11.3 pct   -47.0 pct
+                    dispatch ~2,478.4             dispatch ~304.6              -87.7 pct
+    get_control     1,305.0  dispatch 262.3       1,304.2  dispatch 262.2      NULL
+
+THE NULL IS THE REASON THIS ROW SURVIVES ITS OWN CONFOUND — see the provenance warning
+below. get_control moved -0.06 pct on total instructions and 0.1 instr/op on dispatch across
+two DIFFERENT trees built a day apart. A whole-process or layout shift large enough to
+manufacture a 47-63 pct effect cannot leave the control that still.
+
+THE COST MODEL HELD, and LMPOP is its best point yet. "A front-classified route costs ~263 +
+~100 per additional bulk parsed":
+
+    randomkey  1 bulk  (no args)   predicted ~263   actual 271.7   +3.3 pct
+    lmpop      5 bulks             predicted ~663   actual 646.6   -2.5 pct
+    dump       2 bulks             predicted ~363   actual 304.6   -16.1 pct
+
+Six points now, worst error 16 pct on DUMP, which is the one the model OVER-charged. The
+`cascade_depth.py` after-side predictions banked earlier (randomkey ~263, dump ~363) are
+therefore CONFIRMED for randomkey and PESSIMISTIC for dump — its before-side predictions
+were already confirmed to <2 pct, so that instrument is now validated on both sides with one
+known bias: it over-predicts the residual on short-key reads.
+
+DUMP IS THE INTERESTING ONE, and it is the one I ranked LAST. At 0.9561x it was already at
+parity, so I took it third and said in its commit that its share was recoverable overhead
+rather than a deficit. It returned the LARGEST ratio improvement of the three in relative
+terms (0.9561 -> 0.5278, a 45 pct cut) because dispatch was 48.7 pct of a route whose actual
+work is small. RANKING BY RATIO WOULD HAVE DROPPED IT ENTIRELY; ranking by SHARE caught it.
+That is the EXPIREAT lesson confirmed with a number instead of an argument: share measures
+what can be reclaimed, ratio measures where you stand, and a route at parity with a 49 pct
+share is a better lever than a route behind with a 15 pct one.
+
+PROVENANCE — READ THE WARNING.
+  AFTER ELF     d494199504e8076611bdf7bf93a3da79ea10bbc1f6a251a99716ac55b06a4867
+  WARNING: THIS ELF CORRESPONDS TO NO COMMIT. It was built from the working tree at
+                `ef8d7ad72` PLUS a peer's staged-but-uncommitted 59-line dedup of the
+                duplicate DUMP/RANDOMKEY entries. HEAD ITSELF DID NOT COMPILE at the time of
+                measurement (E0428, duplicate definitions — my fault, see below). The
+                measured code is the deduped tree, which is what will be committed; re-run
+                this row once it lands if you want an ELF that maps to a commit.
+  BEFORE ELF    009f6b0cb8bc6188cecc4b038e861d09f0017579e1f3b37e83cd4cf7cf18524a, a
+                DIFFERENT and older tree. This is a cross-tree A/B, not a reverse-patch one,
+                because main.rs was reserved by a peer and could not be patched. Tree drift
+                is a real confound and the null above is what bounds it.
+  harness       scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines in the SAME
+                invocation. Incumbent verified in-run: sha=d2c8a4b9 == vendored HEAD, clean.
+  host          thinkstation1, 64 cores, powersave, /data 151G.
+  PER-ARM loadavg/MHz  lmpop 17.07/2757 · randomkey 18.66/1429 · dump 18.66/2948 ·
+                get_control 18.48/3433. STABLE window (1/5/15 = 18.5/27.9/42.8, falling).
+                Note randomkey's arm sat at 1429 MHz and dump's at 2948 — a 2.06x cross-core
+                spread WITHIN one row, which is exactly why these are instruction counts and
+                not wall clock.
+
+I BROKE HEAD AND A PEER CAUGHT IT. Landing RANDOMKEY and DUMP uncompiled during the disk
+emergency collided with a peer landing the same two routes for ozrro; both sets of variants
+went in and HEAD stopped compiling. `991fb0317` diagnosed it. The lesson is not "do not land
+uncompiled" — that was correct under a 42G floor with kilobyte source files — it is that A
+FILE RESERVATION DOES NOT RESERVE A LEVER. Two agents mining the same ranked blind-spot list
+converge on the same top entry. Claim the ROW in the ranked list, not just the file.
+
+RETRY PREDICATE: the front-classification vein is now closed on EVIDENCE rather than on
+inventory (`ef8d7ad72` closed it on candidate count; this closes it on measured outcome).
+All seven routes taken in this campaign crossed: SMOVE, RPOPLPUSH, LTRIM, HINCRBY, LMPOP,
+RANDOMKEY, DUMP, every one from 0.95x-1.53x behind to 0.49x-0.53x. The next lever is NOT
+another floor entry; the remaining dispatch cost is the ~263 floor itself, which is now the
+articulation point and is paid by every classified route.
