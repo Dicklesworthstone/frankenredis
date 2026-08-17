@@ -25,6 +25,19 @@ parsers and executors, so depth does essentially all the work. 45.1 also indepen
 rederives this ledger's "one failed non-inlined parser call costs 40-50 instr/op", measured
 by an unrelated experiment (moving a single SET arm and watching the jumped-over arms pay).
 
+SCOPE LIMIT — READ THIS BEFORE CONCLUDING "NO CANDIDATES LEFT". This tool ranks arms
+that are IN the cascade. A command with no borrowed parser has NO ARM, so it is invisible
+here — and those are exactly the commands on the GENERIC route, the most expensive one
+there is. An empty candidate list means "no unclassified command sits DEEP IN THE CASCADE",
+never "no command is on an expensive route".
+
+I read it the second way and reported the vein closed. Six commands invisible to this tool
+were then measured cold and three came back ABOVE PARITY: scan 1.2810x, lcs 1.1115x,
+keys 1.0269x, each carrying ~2,000-2,400 instr/op of dispatch (ledger, this bead). This is
+the same shape of blind spot as `shared_executor_map.py` documents for `corpus_coverage.py`:
+a tool that ranks positions WITHIN a structure cannot see what never enters it. Use
+`corpus_coverage.py`'s [C] list for those; use this tool only to rank what is already an arm.
+
 HONEST LIMIT, because the fit is used to rank and not to certify: all six points lie between
 arms 76 and 103. The SLOPE is well constrained; the INTERCEPT is not, and extrapolating to
 arm 1 returns a negative number, which is meaningless. Predictions below arm ~30 should be

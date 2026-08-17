@@ -343,6 +343,25 @@ SHAPES = {
     "renamenx_exists": (["SET rnsrc v1", "SET rndst v2"], ["RENAMENX", "rnsrc", "rndst"]),
     "zunionstore_2": (["ZADD zu1 1 a 2 b", "ZADD zu2 3 c"],
                       ["ZUNIONSTORE", "zudst", "2", "zu1", "zu2"]),
+    # (frankenredis-ozrro) THIRD blind-spot batch. The front-classification vein is closed
+    # (zero unclassified commands left at any useful depth), so the only way to find another
+    # above-parity route is to make more of the [C] list measurable — commands with NO
+    # borrowed parser and NO executor, which go straight to GENERIC, the most expensive
+    # route there is. Chosen by traffic among the shapeable ones.
+    #
+    # Steady-state no-ops, as the two-point subtraction requires:
+    #   keys_star / scan_zero / lcs_2   read-only
+    #   zinterstore_2 / zrangestore_all / pfmerge_2  destination rewritten with the SAME
+    #                                    result every time, so the keyspace stops changing
+    #                                    after the first call
+    "keys_star": (["SET ks1 a", "SET ks2 b"], ["KEYS", "*"]),
+    "scan_zero": (["SET sc1 a", "SET sc2 b"], ["SCAN", "0"]),
+    "lcs_2": (["SET lc1 ohmytext", "SET lc2 mynewtext"], ["LCS", "lc1", "lc2"]),
+    "zinterstore_2": (["ZADD zi1 1 a 2 b", "ZADD zi2 3 b"],
+                      ["ZINTERSTORE", "zidst", "2", "zi1", "zi2"]),
+    "zrangestore_all": (["ZADD zrsrc 1 a 2 b 3 c"],
+                        ["ZRANGESTORE", "zrdst", "zrsrc", "0", "-1"]),
+    "pfmerge_2": (["PFADD pf1 a b c", "PFADD pf2 c d"], ["PFMERGE", "pfdst", "pf1", "pf2"]),
     "spop_missing": ([], ["SPOP", "nosuchset"]),
     "srandmember_1": (["SADD srm m1 m2 m3"], ["SRANDMEMBER", "srm"]),
     "smove_missing": (["SADD smsrc a b", "SADD smdst c"],

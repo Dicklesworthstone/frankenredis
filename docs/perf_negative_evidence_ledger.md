@@ -8,6 +8,58 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## (frankenredis-ozrro) The cascade-depth tool cannot see the GENERIC route — three above-parity commands were hiding behind a "vein closed" verdict
+
+I reported the front-classification vein CLOSED on `cascade_depth.py` returning zero
+candidates. That was a SCOPE error, not a measurement error. The tool ranks arms that are IN
+the borrowed cascade; a command with no borrowed parser has no arm and is invisible to it —
+and those are precisely the commands that fall to GENERIC, the most expensive route fr has.
+"No unclassified command sits deep in the cascade" is not "no command is on an expensive
+route", and I read the first as the second.
+
+Six commands from `corpus_coverage.py`'s [C] list, all invisible to the depth tool, measured
+cold on the current ELF (no build; screen, not certification — see the bias note below):
+
+    shape              fr instr/op   redis instr/op    fr/redis   dispatch (share)
+    scan_zero              7,139.7        5,573.7      1.2810x    1,981.5 (27.8%)
+    lcs_2                  7,159.4        6,441.1      1.1115x    2,443.6 (34.1%)
+    keys_star              5,731.4        5,581.1      1.0269x    1,969.9 (34.4%)
+    pfmerge_2            108,661.5      121,559.4      0.8939x    2,977.5 ( 2.7%)
+    zrangestore_all        9,991.2       12,430.1      0.8038x    3,670.1 (36.7%)
+    zinterstore_2          7,048.8       11,603.2      0.6075x      804.0 (11.4%)
+
+loadavg 15.0-15.3 / 21.2-21.7 / 36.5-37.1 falling; observed core MHz 1429-4192 (powersave,
+recorded per arm alongside the raw rows). 1-min and 5-min are far apart, so these RANK, they
+do not certify.
+
+THE BIAS RUNS THE SAFE WAY, which is why the screen is usable under load at all. fr's
+numerator is elapsed-immune (0.139%); redis's denominator carries elapsed-time `serverCron`
+work at r(elapsed, Ir) = +0.98. Load therefore INFLATES the denominator and makes every ratio
+look BETTER for fr. A shape reading above 1.0 under load is above 1.0 for real — the true
+figures are worse than the table. The three sub-parity rows are the ones that would need a
+quiet window before anyone trusts them, and nothing below is built on them.
+
+The dispatch column is the tell, and it is nearly flat at ~2,000-2,400 instr/op across the
+three above-parity rows, at 28-34% of the whole operation. That is the GENERIC signature: a
+front-classified route costs 274 (arity 1) to 498 (arity 4), so these pay roughly 4-8x the
+classified cost purely to decide WHICH command they are, before doing any work at all.
+
+zrangestore_all deserves a note against the temptation to skip it: it is ALREADY 0.80x
+ahead, yet it carries the LARGEST absolute dispatch in the batch at 3,670 instr/op, 36.7% of
+the op. Being ahead on ratio does not make the dispatch any less waste. Ranking this family
+by ratio alone would put the single biggest block of pure overhead last.
+
+REUSABLE, and this is the third instance in this repo: A TOOL THAT RANKS POSITIONS WITHIN A
+STRUCTURE CANNOT SEE WHAT NEVER ENTERS IT. `corpus_coverage.py` could not see shared
+executors and produced a duplicate PEXPIRETIME executor (b2df577ba); `cascade_depth.py`
+could not see non-arms and produced a false "vein closed". In both cases the tool was
+correct about its own domain and I extended its verdict past that domain. The scope limit is
+now in `cascade_depth.py`'s module docstring, so the next reader meets it before the ranking.
+
+NEXT: SCAN at 1.2810x is the worst measured shape on my board and the highest-traffic of the
+three. All three are [C] work — a borrowed parser plus a floor entry, LTRIM-shaped, not the
+one-line table entry that the previous nine routes needed.
+
 ## Standing laws (enforced — see scripts/perf_candidate_preflight.py)
 
 These are measured REJECTs whose conclusion GENERALISES, so a later row that quotes a
