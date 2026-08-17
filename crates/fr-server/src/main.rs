@@ -14593,6 +14593,22 @@ enum BorrowedMultibulkAction {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BorrowedDispatchFloorClass {
+    /// (frankenredis-ozrro) `MSET` at the ODD array lengths 5..17 its parser actually
+    /// serves — that parser is a `starts_with` ladder over exactly those seven, so the
+    /// guard lists them rather than using a range. Single-pair `MSET k v` (array_len 3)
+    /// has NO borrowed parser and is deliberately not claimed: claiming it would send a
+    /// refused shape to GENERIC instead of back to the cascade.
+    ///
+    /// Measured before: 912.9-915.4 instr/op of dispatch at cascade arm 19. Already at
+    /// ~0.52x, so this is an improvement on a winning hot command, not a crossing.
+    Mset,
+    /// (frankenredis-ozrro) `HSET key field value`, array_len 4 exactly. Measured before:
+    /// 681.6-681.8 instr/op of dispatch at cascade arm 16.
+    HsetSingle,
+    /// (frankenredis-ozrro) `HSET key f v f v`, array_len 6 exactly — a SEPARATE parser
+    /// from the single-pair form, which is why these are two classes and not one
+    /// parameterised class.
+    HsetTwo,
     /// (frankenredis-ozrro) `PUBSUB NUMPAT` at arity 2 and `PUBSUB NUMSUB <ch>` at
     /// arity 3. Both parsers and executors already existed, reached from cascade arms
     /// at ~127 of 163 — the deepest unclassified arms in the file.
@@ -15153,6 +15169,8 @@ impl PlainZsetStoreCmd {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BorrowedDispatchFloorCommand {
+    Mset,
+    Hset,
     Pubsub,
     Spop,
     Zrangestore,
@@ -15352,6 +15370,8 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             _ => None,
         },
         4 => match uppercase_ascii_token::<4>(token)? {
+            [b'M', b'S', b'E', b'T'] => Some(BorrowedDispatchFloorCommand::Mset),
+            [b'H', b'S', b'E', b'T'] => Some(BorrowedDispatchFloorCommand::Hset),
             [b'S', b'P', b'O', b'P'] => Some(BorrowedDispatchFloorCommand::Spop),
             [b'K', b'E', b'Y', b'S'] => Some(BorrowedDispatchFloorCommand::Keys),
             [b'S', b'C', b'A', b'N'] => Some(BorrowedDispatchFloorCommand::Scan),
@@ -16698,6 +16718,17 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         }
         (3, BorrowedDispatchFloorCommand::Pubsub) => {
             Some(BorrowedDispatchFloorClass::PubsubNumsub)
+        }
+        (array_len, BorrowedDispatchFloorCommand::Mset)
+            if matches!(array_len, 5 | 7 | 9 | 11 | 13 | 15 | 17) =>
+        {
+            Some(BorrowedDispatchFloorClass::Mset)
+        }
+        (4, BorrowedDispatchFloorCommand::Hset) => {
+            Some(BorrowedDispatchFloorClass::HsetSingle)
+        }
+        (6, BorrowedDispatchFloorCommand::Hset) => {
+            Some(BorrowedDispatchFloorClass::HsetTwo)
         }
         (2, BorrowedDispatchFloorCommand::Ttl) => Some(BorrowedDispatchFloorClass::Ttl),
         (2, BorrowedDispatchFloorCommand::Getex) => Some(BorrowedDispatchFloorClass::Getex),
@@ -21408,6 +21439,96 @@ fn try_dispatch_floor_classified_action(
                     argv_scratch,
                 )
             }
+        }
+        BorrowedDispatchFloorClass::Mset => {
+            // (frankenredis-ozrro) Same parser and executor the cascade arm at ~7501 uses.
+            // The gate is read directly rather than through `cached_plain_write_gate`: that
+            // cache lives in the cascade's own function and is not passed here, and a floor
+            // arm serves one packet so there is nothing to amortise inside it.
+            //
+            // FastOkReply, not FastReply: MSET always replies +OK, and the cascade arm routes
+            // it this way so no SimpleString("OK") frame is allocated per call.
+            if let Some(packet) = parse_borrowed_plain_mset_packet(unparsed, &parser_config) {
+                let consumed = packet.consumed();
+                let default_write_allowed = runtime.plain_borrowed_default_key_write_gate(ts);
+                if runtime
+                    .execute_plain_mset_borrowed_with_default_write_gate(
+                        packet.pairs(),
+                        ts,
+                        default_write_allowed,
+                    )
+                    .is_some()
+                {
+                    return Some(Ok(BorrowedMultibulkAction::FastOkReply { consumed }));
+                }
+            }
+            parse_borrowed_multibulk_action(
+                unparsed,
+                parser_config,
+                runtime,
+                ts,
+                out,
+                argv_scratch,
+            )
+        }
+        BorrowedDispatchFloorClass::HsetSingle => {
+            // (frankenredis-ozrro) Same parser and executor the cascade arm at ~7418 uses.
+            if let Some(packet) = parse_borrowed_plain_hset_packet(unparsed, &parser_config) {
+                let pairs = [packet.field, packet.value];
+                let default_write_allowed = runtime.plain_borrowed_default_key_write_gate(ts);
+                if let Some(response) = runtime
+                    .execute_plain_hset_borrowed_with_default_write_gate(
+                        packet.key,
+                        &pairs,
+                        ts,
+                        default_write_allowed,
+                    )
+                {
+                    return Some(Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: packet.consumed,
+                        response,
+                    }));
+                }
+            }
+            parse_borrowed_multibulk_action(
+                unparsed,
+                parser_config,
+                runtime,
+                ts,
+                out,
+                argv_scratch,
+            )
+        }
+        BorrowedDispatchFloorClass::HsetTwo => {
+            // (frankenredis-ozrro) Same parser and executor the cascade arm at ~7446 uses;
+            // the two-pair packet carries field1/value1/field2/value2 in wire order.
+            if let Some(packet) =
+                parse_borrowed_plain_hset_two_packet(unparsed, &parser_config)
+            {
+                let pairs = [packet.field1, packet.value1, packet.field2, packet.value2];
+                let default_write_allowed = runtime.plain_borrowed_default_key_write_gate(ts);
+                if let Some(response) = runtime
+                    .execute_plain_hset_borrowed_with_default_write_gate(
+                        packet.key,
+                        &pairs,
+                        ts,
+                        default_write_allowed,
+                    )
+                {
+                    return Some(Ok(BorrowedMultibulkAction::FastReply {
+                        consumed: packet.consumed,
+                        response,
+                    }));
+                }
+            }
+            parse_borrowed_multibulk_action(
+                unparsed,
+                parser_config,
+                runtime,
+                ts,
+                out,
+                argv_scratch,
+            )
         }
         BorrowedDispatchFloorClass::Ttl => {
             if let Some(packet) = parse_borrowed_plain_ttl_packet(unparsed, &parser_config)
@@ -54053,5 +54174,123 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
             None,
             "array_len 21 is outside the floor's 3..=20 range and must not be claimed"
         );
+    }
+
+    /// (frankenredis-ozrro) MSET and HSET floor classes claim EXACTLY the arities their parsers
+    /// serve, and nothing else. The arity sets are not guessable — MSET's parser is a
+    /// `starts_with` ladder over seven ODD lengths and HSET has two separate fixed-arity
+    /// parsers — so this asserts the whole served set and the boundaries either side.
+    ///
+    /// The single-pair `MSET k v` case is the one that matters most: it has NO borrowed parser,
+    /// so claiming array_len 3 would route a refused shape to GENERIC rather than back to the
+    /// cascade, which the keyed-values arm documents as a REGRESSION rather than a missed
+    /// optimisation.
+    #[test]
+    fn mset_hset_floor_classes_claim_exactly_the_arities_their_parsers_serve() {
+        let cfg = ParserConfig::default();
+        fn packet(args: &[&str]) -> Vec<u8> {
+            let mut p = format!("*{}\r\n", args.len()).into_bytes();
+            for a in args {
+                p.extend_from_slice(format!("${}\r\n{}\r\n", a.len(), a).as_bytes());
+            }
+            p
+        }
+        fn mset(pairs: usize) -> Vec<String> {
+            let mut v = vec!["MSET".to_string()];
+            for i in 0..pairs {
+                v.push(format!("k{i}"));
+                v.push(format!("v{i}"));
+            }
+            v
+        }
+        use super::BorrowedDispatchFloorClass as C;
+
+        // MSET: the seven served odd array lengths are 5,7,9,11,13,15,17 => 2..8 pairs.
+        for pairs in 2..=8usize {
+            let args = mset(pairs);
+            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            let pkt = packet(&refs);
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
+                Some(C::Mset),
+                "MSET with {pairs} pairs (array_len {}) must be claimed",
+                1 + pairs * 2
+            );
+            assert!(
+                super::parse_borrowed_plain_mset_packet(&pkt, &cfg).is_some(),
+                "MSET with {pairs} pairs must parse — the class promises what the parser serves"
+            );
+        }
+
+        // SINGLE-PAIR MSET IS NOT SERVED AND MUST NOT BE CLAIMED. This is the regression guard.
+        let one = mset(1);
+        let refs: Vec<&str> = one.iter().map(String::as_str).collect();
+        let pkt = packet(&refs);
+        assert!(
+            super::parse_borrowed_plain_mset_packet(&pkt, &cfg).is_none(),
+            "the mset parser ladder starts at array_len 5, so a single pair must not parse"
+        );
+        assert_ne!(
+            super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
+            Some(C::Mset),
+            "single-pair MSET must NOT be claimed: the parser refuses it, so a claim would send \
+             it to GENERIC instead of back to the cascade"
+        );
+
+        // Nine pairs (array_len 19) is past the ladder and must not be claimed either.
+        let nine = mset(9);
+        let refs: Vec<&str> = nine.iter().map(String::as_str).collect();
+        assert_ne!(
+            super::classify_borrowed_dispatch_floor_packet(&packet(&refs), &cfg),
+            Some(C::Mset),
+            "array_len 19 is past the parser's ladder"
+        );
+
+        // HSET: two separate fixed arities, and they must map to DIFFERENT classes.
+        let single = packet(&["HSET", "h", "f", "v"]);
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(&single, &cfg),
+            Some(C::HsetSingle)
+        );
+        assert!(super::parse_borrowed_plain_hset_packet(&single, &cfg).is_some());
+
+        let two = packet(&["HSET", "h", "f1", "v1", "f2", "v2"]);
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(&two, &cfg),
+            Some(C::HsetTwo)
+        );
+        assert!(super::parse_borrowed_plain_hset_two_packet(&two, &cfg).is_some());
+        assert_ne!(
+            super::classify_borrowed_dispatch_floor_packet(&two, &cfg),
+            Some(C::HsetSingle),
+            "the two-pair form has its own parser and must not be claimed by the single class"
+        );
+
+        // Three pairs (array_len 8) has no parser and must stay generic.
+        assert_ne!(
+            super::classify_borrowed_dispatch_floor_packet(
+                &packet(&["HSET", "h", "f1", "v1", "f2", "v2", "f3", "v3"]),
+                &cfg
+            ),
+            Some(C::HsetTwo),
+            "the three-pair HSET form has no borrowed parser and must reach generic"
+        );
+
+        // Case-insensitive, and neighbours at the same 4-char token length are unaffected.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(&packet(&["mset", "k", "v", "k2", "v2"]), &cfg),
+            Some(C::Mset)
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(&packet(&["hset", "h", "f", "v"]), &cfg),
+            Some(C::HsetSingle)
+        );
+        for other in [vec!["HGET", "h", "f"], vec!["MGET", "k", "k2"], vec!["SADD", "s", "m"]] {
+            let got = super::classify_borrowed_dispatch_floor_packet(&packet(&other), &cfg);
+            assert!(
+                got != Some(C::Mset) && got != Some(C::HsetSingle) && got != Some(C::HsetTwo),
+                "{other:?} must not be claimed by an MSET/HSET class"
+            );
+        }
     }
 }
