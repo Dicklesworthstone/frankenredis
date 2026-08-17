@@ -66,7 +66,20 @@ BLOCKS=$(ps -eo psr,pcpu --no-headers | awk '{l[$1]+=$2} END {for(c=0;c<64;c++) 
 NFREE=$(echo $BLOCKS | wc -w)
 echo "   free blocks: [${BLOCKS}] -> $NFREE (need 3)"
 if [ "$NFREE" -lt 3 ]; then
-  echo "REFUSE: only $NFREE uncontended blocks; the fleet is busy. Do not spend the run." >&2
+  LOAD1=$(cut -d' ' -f1 /proc/loadavg)
+  echo "REFUSE: only $NFREE uncontended blocks. Do not spend the run." >&2
+  # LOADAVG AND BLOCK AVAILABILITY ARE DIFFERENT MEASUREMENTS, and conflating them
+  # wastes windows in both directions. Measured 2026-08-16: three runs inside one
+  # window at loadavg 15.5-15.7 -- genuinely quiet by any usual reading, ~24 pct of
+  # 64 cores -- each found only 2 of 8 blocks under 50 pct combined core+sibling.
+  # The fleet was CONCENTRATED, not busy. Saying "the fleet is busy" at loadavg 15
+  # invites the reader to conclude the gate is broken and run anyway.
+  if awk -v l="$LOAD1" 'BEGIN{exit !(l < 25)}'; then
+    echo "   NOTE loadavg is $LOAD1 -- LOW. That is not a contradiction: loadavg" >&2
+    echo "   averages over all 64 cores while this gate needs three ALIGNED 4-core" >&2
+    echo "   blocks free. A concentrated fleet reads quiet and still cannot host a" >&2
+    echo "   pinned three-arm run. Do not override on the strength of the loadavg." >&2
+  fi
   echo "   Use scripts/restore_instr_per_op.py instead -- load-immune, no pinning." >&2
   exit 2
 fi
