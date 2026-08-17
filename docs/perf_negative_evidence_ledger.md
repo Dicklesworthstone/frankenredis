@@ -1025,6 +1025,37 @@ docstring says it cannot attribute away. Certifying these two rows requires eith
 stopping or the gate gaining project attribution; no amount of frankenredis-side discipline
 reaches it.
 
+### BOTH ROWS NOW CERTIFIED — the n=3 draw arrived, and the worst bound is WORSE than the draw I threw away
+
+The second FIT draw for `sort_ro_alpha` came in a later window, taken as a SINGLE draw rather than
+a batch, precisely because a batch burns its own window (above).
+
+    draw                   verdict   fr/redis   loadavg 1/5/15     fr MHz mean/max   builds
+    sort_ro_alpha    c1    FIT       1.0649x    6.24 5.65 6.01     2284 / 4292       0
+    sort_ro_alpha    c5    FIT       1.0328x    6.62 7.76 10.46    2284 / 4292       0
+
+    fr    bench_elf_sha256=73ae1da08cb8c420c4da5005ccdba65fdfcc56a1da51237f0c035df817b330b1
+    redis bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+**CERTIFIED, worst of two FIT draws:**
+
+    sort_ro_alpha_64   0.2051x   (fr retires 4.88x FEWER instructions than redis 7.2.4)
+    sort_ro_alpha      1.0649x   (fr is 6.5 pct BEHIND at three elements)
+
+**THE DISCIPLINE PAID, and the arithmetic says so rather than the sentiment.** The draw discarded
+above read 0.9999x — parity, the crossing this route has been chasing — and it was refused for its
+window. The two draws that did stamp FIT bracket 1.0328-1.0649, so the certified worst bound is
+**6.5 pct worse than the discarded draw implied**, and quoting it would have announced a crossing
+that the certified evidence does not support. That draw was not merely inadmissible; it was
+wrong.
+
+WHAT THE PAIR SAYS ABOUT THE ROUTE: fr is comfortably ahead at 64 elements and still ~6.5 pct
+behind at three, and that residual is intercept, not slope — dispatch alone is 3,116 instr/op of
+the 8,900, and `SORT`/`SORT_RO` remain absent from the floor token table
+(`frankenredis-e1w1r`, blocked). The two levers landed on this route today took it from 1.4929x to
+1.0649x at n=3 and from 0.6972x to 0.2051x at n=64; closing the last 6.5 pct is a dispatch
+question, not a sorting one.
+
 ### CERTIFIED at n=64 (2026-08-17, later the same day) — and the n=3 row is NOT, on one draw short
 
 The ratio rows above were recorded as SIZING because no FIT window was obtainable. One was
@@ -39156,3 +39187,61 @@ new tests for the earlier assignment point, because a command REJECTED before di
 then update `cmd=` where today it does not — check that against upstream before assuming
 either behaviour is correct, since upstream assigns lastcmd before both checks and fr
 currently does not.
+
+--------------------------------------------------------------------------------
+## 2026-08-17 CrimsonHawk: KEEP (COMPETITIVE) — a SECOND FIT window puts shipped HEAD at fr/redis **1.3778x** on PUBSUB CHANNELS, and two FIT windows disagree by 9.50 pct ON THE DENOMINATOR (`frankenredis-fpqns`)
+
+**Claim class: COMPETITIVE. Campaign output: yes.** A live vendored Redis 7.2.4 arm ran in
+the SAME invocation as the fr arm; incumbent verified in-run, redis-server sha=d2c8a4b9 ==
+vendored source HEAD, clean.
+
+  Executing binary, self-reported by the running image via /proc/<pid>/exe:
+    fr ELF sha256: f68e2521b2f167d341ed3f398d79de552a7794b372ad989e62ea577fd8af71bd
+  Built from a clean checkout at `0fa2bef9b`.
+
+    WINDOW: FIT for ratio — load 6.65 / 7.81 / 10.50 | builds 0
+    PER-ARM: fr    loadavg 6.65/7.81/10.50, MHz mean 2416 then 2106 (max 4297)
+             redis loadavg 6.68/7.79/10.49, MHz mean 2110 then 2001 (max 4292)
+    fr 5680.7 instr/op   redis 4123.1 instr/op
+    fr/redis 1.3778x — live vendored Redis 7.2.4 arm in the SAME invocation as the fr arm.
+
+  EVIDENCE CLASS: deterministic instruction counts (callgrind Ir), not a timing verdict. CV
+  was not used, as a gate or otherwise. No bootstrap median CI is quoted for the COMPETITIVE
+  ratio because there is no sampling distribution to bootstrap — each arm is a two-point
+  subtraction of exact counts. The decision gate is the A/A null's bootstrap median CI below.
+
+  A/A NULL, same code, repeated draws: 5661.7 / 5662.6 / 5662.8 on the sibling ELF, i.e.
+  max/min 1.000194. A/A null median **1.000000**, bootstrap 95% median CI
+  **[0.999841, 1.000035]**.
+
+  THE SECOND FIT WINDOW IS THE POINT, and it CONFIRMS the method row from earlier today
+  rather than softening it. Two windows, both stamped FIT with builds 0, measuring the same
+  route on code that differs by one small landed change:
+
+    window / ELF                       fr instr/op   redis instr/op   ratio
+    a36291636  b74ea994341287ef           5662.6        4514.6       1.2543x
+    0fa2bef9b  f68e2521b2f167d3           5680.7        4123.1       1.3778x
+    apart                                  0.32 pct      9.50 pct
+
+  THE NUMERATOR AGREES TO 0.32 PCT ACROSS THE TWO WINDOWS AND THE DENOMINATOR DISAGREES BY
+  9.50 PCT. FIT status does not control the denominator: it gates on load stationarity and
+  build count, and redis's elapsed-time serverCron is a function of neither. So a FIT stamp
+  makes a row ADMISSIBLE, it does not make the absolute ratio REPRODUCIBLE, and two
+  certified rows on this route can legitimately differ by ~10 pct while the engine does not
+  move at all. That is why the worst bound is the number to carry.
+
+  WORST BOUND from FIT draws only: **1.3778x**. Across all 19 draws today, FIT and SIZING
+  alike, the band is 1.1810-1.3917 and the worst bound is 1.3917x. Quote one of those two;
+  do not quote 1.2543x as "the" ratio, and do not average them.
+
+  fr moved 5662.6 -> 5680.7 (+18.1, +0.32 pct) between the two windows, which is the
+  `frankenredis-dpu2y` handle change landing in between. That is a REGRESSION on this shape
+  and it is already recorded and explained in its own row; it is repeated here so nobody
+  reads the ratio drift as an engine improvement in the wrong direction.
+
+RETRY PREDICATE: the two FIT windows are draws of DIFFERENT binaries, so neither replicates
+the other and 1.2543x is superseded rather than confirmed. Reopen the headline WHEN three
+spaced FIT draws exist ON ONE ELF, or IF the FIT-only denominator spread falls below 3 pct.
+Take exactly one pair per quiet stretch and wait UNTIL the 1-minute load returns to baseline
+before the next — running back-to-back is what disqualified five attempts earlier today,
+because each 60-90 s callgrind pair is itself load.
