@@ -30511,3 +30511,85 @@ window before touching any LCS code. If the cliff is confirmed, the multi-word v
 lever and it is a real algorithmic unit, not a table entry — budget accordingly and gate it on
 the existing `lcs_len_bitparallel_matches_scalar` equivalence test, which already exists and
 must be extended to the multi-word arm.
+
+--------------------------------------------------------------------------------
+MEASURED (frankenredis-p98mw) — THE LCS CLIFF IS REAL AND IT IS 11.6x: one byte per string
+takes fr from 0.1191x to 1.3382x. And in the fallback regime fr's matrix is a further 1.34x
+WORSE than the incumbent's, stable across two sizes
+
+Claim class: COMPETITIVE
+
+The falsification test from the previous row, resolved. Outcome 2 fired.
+
+    shape       size      fr instr/op    redis instr/op   ratio      dispatch share  regime
+    lcs_2        8x9          7,104.3         6,426.6    1.1054x       34.4 pct    bit-parallel
+    lcs_64      64x64        10,722.8        90,038.4    0.1191x       23.1 pct    bit-parallel
+    lcs_65      65x65       124,116.8        92,746.9    1.3382x        2.0 pct    FALLBACK
+    lcs_128    128x128      458,948.9       340,980.9    1.3460x        0.5 pct    FALLBACK
+    get_control   —           1,307.3         3,199.5    0.4086x       20.1 pct    NULL
+
+THE CLIFF, stated as the one-byte experiment it was designed to be:
+
+    fr     64x64 -> 65x65    10,722.8 -> 124,116.8    x11.57 MORE WORK
+    redis  64x64 -> 65x65    90,038.4 ->  92,746.9    +3.0 pct (smooth quadratic growth)
+    ratio                    0.1191x  ->   1.3382x    an 11.2x INVERSION
+
+ONE BYTE ON EACH STRING. No plausible amount of "more work" explains 11.57x on a 3 pct larger
+problem; what changed is the ALGORITHM, exactly as `build_lcs_dp` said it would — above a
+machine word on both inputs fr abandons the Crochemore-Iliopoulos-Pinzon-Rytter bit-parallel
+path for the classic O(n*m) matrix.
+
+THE LADDER VALIDATES ITSELF THREE WAYS, which is why I trust an 11x swing:
+  * fr bit-parallel 8x9 -> 64x64 grows only 1.51x for 57x the cells — that is the O(n+m)
+    build showing itself. A quadratic arm could not do that.
+  * redis 64 -> 128 grows 3.79x and fr's FALLBACK grows 3.70x, both ~4x for 4x the cells —
+    two independent quadratic arms agreeing.
+  * get_control is unmoved at 0.4086x against 0.4087x and 0.4092x in the two previous rows.
+
+SO NEITHER EARLIER NUMBER WAS THE COMMAND, AND BOTH WERE HONEST. 1.1054x is the bit-parallel
+INTERCEPT (dispatch is 34.4 pct of it). 0.1191x is the bit-parallel SLOPE at the largest input
+that still qualifies. The command's behaviour above 64 bytes — the regime a real LCS call
+lives in — was measured by neither and is 1.3382x.
+
+A SECOND, SEPARATE DEFICIT LIVES IN THE FALLBACK, and it would have been invisible without
+lcs_128. At 65x65 fr is 1.3382x; at 128x128 it is 1.3460x. Both arms are quadratic and both
+run the SAME algorithm, so this is a stable CONSTANT FACTOR: fr's flat-matrix DP retires ~34
+pct more instructions than redis's for identical work. That is a second lever, independent of
+the cliff, and it is the one that still matters even after the cliff is fixed.
+
+DISPATCH IS NOT THE LCS LEVER, now measured rather than argued. Dispatch share falls 34.4 ->
+23.1 -> 2.0 -> 0.5 pct across the ladder. At the sizes where LCS is actually behind it is HALF
+A PERCENT of the op. This confirms the correction in the previous row: front-classifying LCS
+would buy back an intercept that only exists where the algorithm is already free. Anyone
+sizing LCS off `lcs_2`'s 34.4 pct share is sizing a shape, not a command.
+
+THE LEVER, in priority order:
+  1. MULTI-WORD ALLISON-DIX VECTOR — carry the bit-parallel recurrence past 64 bytes with
+     `[u64; W]` and carry/borrow propagation through `v = (v + u) | (v - u)`. This is a
+     COMPLEXITY-CLASS change, O(n*m/64) vs O(n*m), and the ladder sizes it: it would take
+     lcs_65 from 124,116.8 toward ~11k and lcs_128 from 458,948.9 toward ~21k, i.e. from
+     1.34x behind to roughly 0.1x ahead. Gate on the existing
+     `lcs_len_bitparallel_matches_scalar_and_reports_ab_ratio` equivalence test, extended to
+     the multi-word arm, plus `lcs_reconstruction_bitparallel_matches_scalar`.
+  2. THE FALLBACK'S 1.34x CONSTANT FACTOR — worth taking only if (1) is refused, since (1)
+     makes the fallback unreachable for inputs up to 64*W bytes.
+
+PROVENANCE:
+  ELF           e2758879a3f343a43fa665d2ed43eacf9cbf19948ce3a3cf65e490f7786ca557, built
+                locally with RCH_CARGO_WRAPPER_BYPASS=1, zero [RCH] lines, at HEAD
+                `d13ff14a3` (only .beads wal + a peer's fr-persist BENCH file dirty, neither
+                linked into this binary).
+  harness       scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines in the SAME
+                invocation. Incumbent verified in-run: sha=d2c8a4b9 == vendored HEAD, clean.
+  host          thinkstation1, 64 cores, powersave, /data 158G.
+  PER-ARM loadavg/MHz  lcs_2 20.56/3213 · lcs_64 20.56/3153 · lcs_65 20.68/3266 ·
+                lcs_128 25.33/3195 · get_control 26.26/4041. Window 1/5/15 =
+                20.56/27.06/24.62 opening to 26.26/27.78/25.00 — CONVERGED, 1-min below
+                5-min at open. Cross-core spread 3153-4041 MHz (1.28x) within the row.
+                The effect is 11.57x; the spread is 1.28x and instruction counts are immune
+                to it anyway.
+
+RETRY PREDICATE: do NOT re-run the two-point version of this question — it is settled, and the
+four-point ladder is in the harness permanently. Take the multi-word vector. If someone reports
+LCS as "0.1x, we win", check the input sizes before believing it: that number only exists at
+<=64 bytes.
