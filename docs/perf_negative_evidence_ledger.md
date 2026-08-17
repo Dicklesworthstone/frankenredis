@@ -29303,3 +29303,51 @@ RETRY PREDICATE: stop quoting the after-cost model as "263 + ~100 per bulk" — 
 table above. The depth law (45.1 per arm position, for BEFORE dispatch) is unaffected and
 still holds at 1.3 pct on its one independent test. Next candidates need `cascade_depth.py`
 re-run: DUMP and RANDOMKEY are now classified, so the list has changed under this row.
+
+--------------------------------------------------------------------------------
+## CORRECTNESS GATE (frankenredis-gvm6z) — the adjacent-arity transposition test is load-bearing: reinstating HEAD's own LMPOP defect turns it RED, and my two UNCOMPILED commits are now gated
+
+Claim class: CORRECTNESS GATE. No ratio is claimed and none is implied.
+
+MUTATION CYCLE RUN, not prescribed. My previous commit's doc comment told the next
+reader to swap an adjacent pair and check for RED. Prescribing a mutation is not
+performing one, so:
+
+    HEAD as committed                            2 passed, 0 failed
+    (5,Lmpop)->Lmpop1Count, (6,Lmpop)->Lmpop2    2 FAILED
+        `["LMPOP","2","k1","k2","LEFT"] (arity 5) classified wrongly
+         — check for a transposed adjacent-arity entry`
+    restored                                     2 passed, 0 failed
+
+The mutation is not invented: it is byte-for-byte the state HEAD actually shipped and
+that 213de4e63 fixed. The gate reproduces the historical defect and rejects it.
+
+FALSE-PASS CHECK, because a name filter that matches nothing also exits 0. The runs
+above report `running 2 tests` and `364 filtered out`, so the test genuinely executed.
+Exit status alone would not have distinguished that.
+
+COMPILATION DEBT PAID. Two commits I landed during the disk emergency said UNCOMPILED
+in their first line. Both are now gated remotely (rch, correctness only, no local
+build slot and no local disk):
+    d0ea46f1a  transposition gate       cargo check --all-targets CLEAN; test passes
+    a75e557f2  RESTORE pair-walk lever  already reverted in 486e4211d as a re-run of
+                                        a REJECTED row; nothing to gate
+
+STILL RED, reported rather than left silent: `cargo clippy -p fr-store --all-targets`
+fails `-D warnings` on two COMMITTED warnings that are not mine and that I have not
+touched — `lib.rs:38911` useless conversion to the same type `u32`, and `lib.rs:38916`
+manual implementation of `.is_multiple_of()`. The worktree for that file is clean, so
+they predate this session's work. A third, `packed_set.rs:654` unused attribute — a
+`#[must_use]` orphaned when 2c176e6ac inserted a doc comment underneath it — is fixed
+in fdd57bc7d.
+
+PROCESS NOTE, and it is the reusable half. The lever I wrote before this one was an
+exact re-implementation of a row already REJECTED at :17843, and I only found that by
+grepping AFTER pushing. `scripts/perf_candidate_preflight.py check-candidate <symbol>`
+answers it in one command and exits 2. It is not wired into any hook — the pre-commit
+chain runs only `check-staged`, which validates NEW ledger entries and cannot know what
+you are about to write. Run it by hand, before the first line of code.
+
+PROVENANCE: no measurement. Correctness runs only, on rch worker vmi1227854, exit 0.
+thinkstation1, /data 156-165G free across the runs, loadavg 38.28 observed at the first
+gate. No local build was started; no MHz recorded because no arm was timed.
