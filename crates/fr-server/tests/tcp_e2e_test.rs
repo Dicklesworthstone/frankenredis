@@ -2298,6 +2298,24 @@ fn borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis() {
     cmds.push(c(&[b"PERSIST", b"s:6"]));
     cmds.push(c(&[b"TTL", b"s:6"]));
     cmds.push(c(&[b"EXPIRE", b"s:absent", b"100"]));
+
+    // ── (frankenredis-p98mw) MOVE and SPUBLISH, newly front-classified ──────
+    // Standing requirement: every new fast route joins this corpus, and the cases
+    // that matter are the ones where the route DECLINES and falls through mid-way,
+    // because that is the path its own unit test usually never covers.
+    cmds.push(c(&[b"SET", b"mv:1", b"v"]));
+    cmds.push(c(&[b"MOVE", b"mv:1", b"1"]));          // succeeds: key leaves db 0
+    cmds.push(c(&[b"EXISTS", b"mv:1"]));              // ...and is gone from db 0
+    cmds.push(c(&[b"MOVE", b"mv:absent", b"1"]));     // absent key: 0, no move
+    cmds.push(c(&[b"SET", b"mv:2", b"v"]));
+    cmds.push(c(&[b"MOVE", b"mv:2", b"0"]));          // same-db: ERROR, not a move
+    cmds.push(c(&[b"MOVE", b"mv:2", b"notanint"]));   // non-integer db: ERROR
+    cmds.push(c(&[b"MOVE", b"mv:2", b"99"]));         // out-of-range db: ERROR
+    cmds.push(c(&[b"EXISTS", b"mv:2"]));              // ...and mv:2 survived all three
+    cmds.push(c(&[b"SPUBLISH", b"sch:1", b"hello"]));  // no subscribers: 0
+    cmds.push(c(&[b"SPUBLISH", b"sch:1", b""]));       // empty payload
+    cmds.push(c(&[b"SPUBLISH", b"", b"hello"]));       // empty channel name
+
     // (frankenredis-ozrro) The classifier claims EXPIRE at arity 3 only, so the
     // option form has to stay on the cascade and answer identically. Same idea
     // for the SETRANGE offset that extends with zero padding, which is the shape

@@ -8,6 +8,141 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-08-17 BrownIbis: KEEP (SELF-SPEEDUP) — the last two stranded commands are front-classified: SPUBLISH **8,307.8 -> 1,824.3 instr/op (-78.0 pct, 4.55x)** and MOVE **4,456.5 -> 1,923.8 (-56.8 pct, 2.32x)** (`frankenredis-p98mw`)
+
+Claim class: SELF-SPEEDUP. Campaign output: no. This is fr-before against fr-after; no incumbent
+arm ran in these invocations and none is claimed. It is recorded here because the numbers are
+large, the prediction was registered in advance, and the method notes below are what the next
+person needs.
+
+RETRY PREDICATE, in brief here and in full at the end: run the borrowed-vs-generic differential
+(it was extended for these two routes but NOT executed, see GATES); do not widen either class
+beyond arity 3; and take no further depth-ranked dispatch work until the mixed-profile command mix
+on `frankenredis-g3z6n` says which commands are worth classifying at all.
+
+BINARIES (both `--clean-overlay`; the before arm is built from `e99a591ec^`, the commit
+immediately preceding the lever, so it CANNOT contain it):
+
+    before  bench_elf_sha256=9dd732b8c627bf091e0eab0c5c6e9986f300de791fef1131528ba4446225642d   base 1aadafc78, no overlay
+    after   bench_elf_sha256=1bca5d07e3399f151c71e370e3107cc1e244a57ae58ef141016b2b9c7aac787f   base 1509c73a1 + crates/fr-server/src/main.rs
+
+### THE MEASUREMENT
+
+    shape             before      after      delta        dispatch before -> after
+    spublish_nosub    8307.8     1824.3     -78.04 pct    6606.0 ->  746.0   (-88.7 pct)
+    move_missing      4456.5     1923.8     -56.83 pct    3012.0 ->  663.0   (-78.0 pct)
+    touch_missing     1686.5     1687.6     +0.07 pct      600.0 ->  600.0   <- CONTROL
+    get_control       1307.0     1302.2     -0.37 pct      457.0 ->  457.0   <- NULL
+
+**Both controls' dispatch is BIT-IDENTICAL across the pair.** `touch_missing` is the sharpest one
+available: TOUCH is an already-classified route, so it exercises the same floor-classifier code
+this change edits, and if the edit had perturbed classification generally it would have moved.
+It did not move by a single instruction.
+
+### AGAINST THE PREDICTION, WHICH WAS REGISTERED BEFORE THE EDIT
+
+    shape             predicted            actual        verdict
+    spublish_nosub    ~2,300-2,700         1,824.3       BEAT the band
+    move_missing      ~2,050-2,450         1,923.8       BEAT the band
+
+Both landed BELOW the predicted range, i.e. better than expected, and the stated reject threshold
+(under 25 pct) was never in doubt. The band was derived from an already-classified route's
+dispatch (~601-1,035); the actual landing is 746 and 663, inside that reference, so the model was
+right about WHERE they would land and slightly pessimistic about the total, because dispatch was a
+larger share of these two commands than of the routes the band came from.
+
+SPUBLISH was the largest dispatch block measured anywhere in this campaign — 6,606 instr/op,
+79.5 pct of the command, against 601 for a classified route — and it is now 746.
+
+### The A/A null, and the decision rule
+
+Eight draws of the SAME ELF on the claim-carrying shape, inside one top-level invocation, paired
+into four A/A ratios (`spublish_nosub`, after ELF):
+
+    draws    1836.3 1823.4 1826.1 1827.3 1825.4 1822.4 1836.8 1825.7   (spread 0.79 pct)
+    ratios   1.007075  0.999343  1.001646  1.006080
+
+**A/A null median 1.003863, with a bootstrap 95% median CI of [0.999343, 1.007075]** (20,000
+percentile-bootstrap resamples, seed 20260817, so the interval is reproducible). GATE: that
+bootstrap median-CI is the decision rule for this row — an A/B landing inside the null's own
+interval is refused however it reads. The A/B on that shape is **0.2196** and on `move_missing`
+**0.4317**, i.e. roughly 220x and 160x the null's half-width away from 1.0.
+
+**CV is diagnostic only and was never a gate here**; it is not computed at all. The instrument
+counts instructions in software, so dispersion is background work that failed to cancel rather
+than sampling error — this shape's 0.79 pct spread is wider than `sort_ro_alpha_64`'s 0.11 pct
+for exactly that reason: at 1,824 instr/op the fixed cron residue is a larger fraction, the same
+denominator-size effect this ledger records for ratios.
+
+### THE CORPUS WAS BLIND TO BOTH COMMANDS
+
+Neither had a harness shape before today, so no screen could see them: unmeasured rather than
+cheap, the same blind spot this ledger already records for LTRIM. `move_missing` and
+`spublish_nosub` were added first, both deliberately on the MISS path so the reply is stable on
+every iteration — MOVE on a PRESENT key succeeds once and returns 0 forever, which is exactly the
+first-request-only trap `shape_work_audit.py` exists to catch.
+
+### A BEFORE ARM THAT WAS CONTAMINATED, CAUGHT BY GIT ANCESTRY RATHER THAN BY MEASUREMENT
+
+My first before arm was built at `--base HEAD` while HEAD had already absorbed the lever — a peer
+sweep committed my working-tree edits as `e99a591ec` and `eb4ffa503` while I was still measuring,
+which is the third time today that sweep has moved someone's uncommitted work. `git merge-base
+--is-ancestor e99a591ec <base>` answers YES, so that arm contained the change it was supposed to
+predate and the A/B would have measured a NULL — I would have "rejected" a 78 pct win.
+
+**The check that caught it is one command and it belongs in every paired build**: assert the
+before arm's base is NOT an ancestor of the lever. A symbol check (`nm -C | grep -c`) is the
+other half and was NOT discriminating here: the change adds enum variants and match arms, which
+emit no symbol, so `nm` reads 0 in both arms. **A symbol check proves contamination when it fires
+and proves nothing when it does not** — it caught the `subcommand_table_index` case earlier today
+precisely because that one added a real function.
+
+### The pinned boundary that moved, and how its discrimination was preserved
+
+`dispatch_floor_classifier_recognizes_only_exact_target_tokens` asserted SPUBLISH classifies to
+`None`, with the comment "SPUBLISH is a different command with a different length; it keeps the
+cascade". That assertion now reads `Some(Spublish)`. Keeping the assertion rather than deleting it
+matters: what the test exists to prove is that the classifier DISCRIMINATES `PUBLISH` from
+`SPUBLISH`, and mapping them to two different classes proves that more strongly than mapping one
+to `None` did — a test satisfied by `None` would also be satisfied by a classifier that cannot see
+SPUBLISH at all.
+
+Three cases were added so the test still means "only exact tokens" rather than "these commands":
+`SPUBLISI` (8 bytes, one byte off, no such command) and `MOVF` must both classify to `None`, and
+`mOvE` must classify to `Some(Move)` so the case-insensitive path is pinned too.
+
+### GATES
+
+`cargo test -p fr-server --bins` 378 passed / 0 failed, including
+`borrowed_cascade_has_no_unreachable_duplicate_arms` and
+`deep_cascade_arms_are_unreachable_because_the_floor_claims_their_shapes_first`.
+`cargo clippy -p fr-server` clean, and verified to have actually recompiled (`Checking fr-server`)
+rather than returning a cached pass.
+
+**NOT RUN, and this is the gap:** the borrowed-vs-generic differential
+(`borrowed_fast_routes_agree_with_generic_dispatch_and_legacy_redis`, `--features
+perf-ab-cascade-bypass`) had NO cases for either command; twelve were added here — including the
+decline paths that matter, MOVE to the same db, to a non-integer db, to an out-of-range db, and
+SPUBLISH with an empty channel and an empty payload. **The corpus COMPILES but was not executed**,
+because `legacy_redis_code` is in `.rchignore` so the worker has no vendored redis and this test
+can never run remotely. Running it needs the scp-the-test-binary recipe. Whoever next touches
+these routes should run it.
+
+The structural argument for why this is a low risk rather than an unknown one: the floor route
+calls the SAME parser and the SAME executor as the cascade arm it bypasses, with the same literal
+prefix bytes. Only the path to them changed. That is also why a wrong literal here would be
+slow-not-wrong: the cascade arm would still answer, and only the saving would vanish.
+
+### RETRY PREDICATE
+
+(1) Run the differential above before treating these routes as gated. (2) Do NOT widen either
+class beyond arity 3: `MOVE key db` and `SPUBLISH channel message` have no option forms, which is
+the precondition that makes an exact-arity claim safe — a class keyed on an arity whose arm then
+declines regresses the shape to GENERIC rather than back to the cascade. (3) With these two, the
+board's stranded-command list is empty as far as the corpus can see; the next dispatch work needs
+the mixed-profile command mix (`frankenredis-g3z6n`) to say which commands are worth classifying
+at all, not another depth screen.
+
 ## 2026-08-17 MossyOrchid: ALL THREE ROUTES NOW HAVE REPLICATED STANDING — and the worst bounds separate them sharply: ZINTERCARD **1.2031x**, its LIMIT form **1.1955x**, XPENDING **1.0001x**. The third is at PARITY at its worst bound and must not be called a win (`frankenredis-5na4i`)
 
 Claim class: COMPETITIVE. Campaign output: yes. Every round below ran a live vendored redis 7.2.4
