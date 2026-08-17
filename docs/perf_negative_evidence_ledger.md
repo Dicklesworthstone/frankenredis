@@ -37928,3 +37928,36 @@ made stationary at the source: pin redis's cron (`hz`), or measure a fixed-WORK 
 subtract cron explicitly, or quote the disjoint-interval form above, which needs no FIT
 window because it compares two arms against the SAME contaminated denominator and the
 contamination cancels. The third is free and is what this row does.
+
+--------------------------------------------------------------------------------
+2026-08-17 CrimsonHawk: STATUS CORRECTION to the row immediately above — the hash index HAD
+already landed when I wrote "NOT LANDED". It is `280604ef7` (`frankenredis-fpqns`).
+
+  No number changes. The measurement, the arms, the worst bounds and the disjoint-interval
+  argument all stand exactly as banked; only the status sentence was wrong.
+
+  what happened   I checked the file RESERVATION at 13:06, saw BrownIbis still holding it,
+                  and wrote the row at ~13:19 on the assumption that blocked-from-committing
+                  meant not-on-main. The repo owner had committed it directly at 13:00:27,
+                  bundled with an unrelated SORT change in the same file. A reservation says
+                  who may WRITE the file; it says nothing about what is already in HEAD, and
+                  I treated the first as evidence of the second.
+  the check I skipped, which costs one command: `git log -S <symbol> -- <path>`. I ran it on
+                  the next turn and it answered immediately. `git status` showing the file
+                  clean was in front of me and I read it as "my edit is still staged"
+                  rather than "my edit is already committed".
+  verified        The landed code is byte-identical to the arm I measured, at both call
+                  sites: `.and_then(subcommand_table_index).map(|i| &SUBCOMMAND_TABLE[i])`
+                  in `check_full_command_arity`, and `let Some(i) =
+                  subcommand_table_index(key)` in `effective_command_flags`. So ELF
+                  de1fe57e68ce633a is a faithful build of what is now on main, and the
+                  -806.8 instr/op / -12.47 pct row describes shipped code.
+  also landed     my test `subcommand_table_index_matches_linear_scan_fpqns`, including the
+                  `len() == 129` assertion that stops the undercount being re-derived.
+
+  SHIPPED TOTAL ON THIS ROUTE TODAY, both levers now on main:
+      PUBSUB CHANNELS  8174.8 -> 6470.3 (`830af9fcc`, monitor-gate ordering)
+                       6470.3 -> 5663.5 (`280604ef7`, this hash index)
+                       -30.7 pct cumulative, both nulls flat throughout
+  Worst-bound fr/redis on the shipped state is 1.3736x, from the four paired replicates in
+  the row above. SIZING, not certified: no FIT window has been reachable all day.
