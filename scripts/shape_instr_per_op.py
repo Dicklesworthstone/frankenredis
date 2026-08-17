@@ -462,6 +462,13 @@ SHAPES = {
     # classification ATTEMPT, never a route. Read-only, so it is a true steady-state no-op.
     "zintercard_2": (["ZADD zc1 1 a 2 b", "ZADD zc2 3 b"],
                      ["ZINTERCARD", "2", "zc1", "zc2"]),
+    # (frankenredis-ozrro) The SAME unclassified command at a HIGHER arity, so the miss-tax
+    # measurement becomes a within-command dose-response instead of a cross-command
+    # comparison. If the tax scales with arity, this must exceed zintercard_2; if the tax is
+    # a floor-wide constant, the two must agree. Command identity, token length and reply
+    # shape are all held fixed — only the argument count moves.
+    "zintercard_limit": (["ZADD zc1 1 a 2 b", "ZADD zc2 3 b"],
+                         ["ZINTERCARD", "2", "zc1", "zc2", "LIMIT", "5"]),
     # (frankenredis-gvm6z) FOUR SHAPES FROM THE [C] BLIND SPOT. corpus_coverage.py puts the
     # blind spot at 53 commands, 50 of them with no borrowed machinery at all. Most of that
     # 50 is unshapeable by construction — blocking reads (BLPOP/BZPOPMAX), pub/sub, EXEC,

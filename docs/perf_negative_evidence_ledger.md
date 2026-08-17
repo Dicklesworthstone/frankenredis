@@ -8,6 +8,76 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## MEASURED (frankenredis-ozrro) — the miss-tax confound is RESOLVED (not a load artefact), and BOTH proposed mechanisms are refuted: it does not scale with arity, and it does not track token-table size
+
+Same ELF `fr-pair-bypass` (bac70fcb6, `--features perf-ab-cascade-bypass`), both arms the
+same binary switched by FR_PERF_AB_CASCADE_BYPASS, `--fr-only`. Per-arm loadavg
+14.09-14.19 / 24.85-25.05 / 21.24-21.28 — the 1-minute at 0.56x the 5-minute, i.e. decaying
+off the previous tick's spike. Observed core MHz 1,429-4,294. MEASURED, not certified.
+
+### THE CONFOUND IS RESOLVED: zintercard's elevated tax is REAL, not the load spike
+
+The previous row could not separate "ZINTERCARD's miss is genuinely more expensive" from "an
+artefact of the loadavg 13->44 spike it was measured in". Re-measured at loadavg 14, with
+lcs_2 run BACK-TO-BACK in the same window as an anchor:
+
+    shape             d-total   d-dispatch    prior d-dispatch (at load 44)
+    lcs_2               492.0        302.2                305.1
+    zintercard_2        591.9        348.5                360.6
+    zintercard_limit    629.3        352.1                    —
+
+zintercard_2 reproduces its elevated value at 348.5 having read 360.6 in the spike (3.4 pct
+apart), while lcs_2 sits at 302.2 in the SAME window. A 15 pct gap measured back-to-back
+under identical conditions is not a load artefact. The spike explanation is dead.
+
+The anchor also re-pins the instrument: lcs_2's BYPASS=1 arm read 6,804.5 here against
+6,792.1 last session — 0.18 pct apart across a window that spanned loadavg 13 to 44 and back.
+
+### REFUTED (a): THE TAX DOES NOT SCALE WITH ARITY
+
+`zintercard_limit` is the SAME command at arity 6 rather than 4 — identical token, identical
+reply shape, two extra arguments, nothing else moved. That is a within-command dose-response,
+which this ledger rates above any cross-command comparison.
+
+    ZINTERCARD arity 4   dispatch tax 348.5
+    ZINTERCARD arity 6   dispatch tax 352.1     +3.6, or 1.0 pct
+
+Two extra arguments cost 1 pct. The tax is flat in arity. My own previous row offered
+"it is a 10-char token at arity 4, the longest of the four, so the token match and arity-keyed
+lookup do more work before failing" — the arity half of that is now dead.
+
+### REFUTED (b): THE TAX DOES NOT TRACK TOKEN-TABLE SIZE
+
+The remaining half of that hypothesis was token length, via the length-keyed match arm: a
+longer name lands in a different arm, and an arm with more candidates should cost more to
+reject. Counting the entries per arm in the floor token table kills it:
+
+    name length   table entries   measured dispatch tax
+        3               3          302.2  (LCS)
+        7              16          294.3  (SORT_RO), 308.5 (PFMERGE)
+       10               6          348.5, 352.1 (ZINTERCARD)
+
+Length 7 carries FIVE TIMES the candidates of length 3 and taxes the same ~300. Length 10
+carries the fewest candidates of the three and taxes the MOST. Entry count does not explain
+the ordering, and neither does length monotonically.
+
+### WHERE THIS LEAVES IT
+
+The dispatch miss tax is ~300-350 instr/op, is reproducible per command to ~3 pct, is stable
+across operation sizes differing by 16x, is FLAT in arity, and is NOT explained by the token
+table. Two mechanisms proposed and two refuted; I do not have a third and am not going to
+invent one to close the row. What is safe to use:
+
+    * every command with no borrowed route pays ~300-350 instr/op of dispatch to be missed
+    * that figure is command-specific and must be measured for the command in question
+    * it does NOT vary with that command's arity, so one measurement per command suffices
+
+The parent row's corollary — that this is a floor-wide tax a single change might remove for
+many commands at once — is UNAFFECTED by these refutations, since neither mechanism was load
+bearing for it. But it is also no better supported: without knowing what drives the 15 pct
+spread, there is no way to predict what a cheaper-miss change would actually buy. That
+remains an open question with a measurement attached, not a lever.
+
 ## AMENDMENT to my own MISS TAX row (frankenredis-ozrro) — the third and fourth nulls REFUTE the ~522 constant. The TOTAL tax spans 514-657; the DISPATCH component holds at ~300 for three of four, and the fourth was measured during a loadavg spike from 13 to 44
 
 Same ELF `fr-pair-bypass` (bac70fcb6, `--features perf-ab-cascade-bypass`), same binary in
