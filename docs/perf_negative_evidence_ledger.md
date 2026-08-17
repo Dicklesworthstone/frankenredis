@@ -8,6 +8,61 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## PREPARED (frankenredis-ozrro) — the exact arity sets MSET and HSET serve, which correct my own "needs a parameterised class" claim: they need ARITY-SET GUARDS, and MSET's single-pair form is not served at all
+
+Source reading only. No build (36 peer build processes running, load 25.9/31.7/57.6) and no
+measurement. `crates/fr-server/src/main.rs` is reserved by RusticLark until 09:20Z, so the
+patch cannot land; this banks the error-prone half so what remains is mechanical.
+
+### WHAT THE PARSERS ACTUALLY SERVE
+
+    command  parser                                  accepted array_len        executor
+    HSET     parse_borrowed_plain_hset_packet         4 EXACTLY (`*4`)          execute_plain_hset_borrowed_with_default_write_gate
+    HSET     parse_borrowed_plain_hset_two_packet     6 EXACTLY (`*6`)          same
+    MSET     parse_borrowed_plain_mset_packet         5,7,9,11,13,15,17 only    execute_plain_mset_borrowed_with_default_write_gate
+
+All three existing cascade arms call the `*_with_default_write_gate` variant, which is the one a
+floor arm must borrow — fr-runtime also has plain `execute_plain_mset_borrowed` and
+`execute_plain_mset_borrowed_ok`, and picking either of those would silently change the gating.
+
+### CORRECTION TO MY OWN PREVIOUS ROW
+
+I said this "wants a PARAMETERISED class in the manner of `Exists(n)` and `KeyedValuesWrite(n)`"
+because both commands are variadic. That was wrong, and reading the parsers is what showed it.
+Neither parser is variadic in the sense that matters:
+
+  * HSET is TWO fixed-arity parsers, 4 and 6. Two ordinary fixed-arity floor rows, no
+    parameter — the pair count is not carried through a class discriminant at all.
+  * MSET is one parser with a hardcoded `starts_with` ladder over SEVEN odd array lengths. What
+    that needs is an ARITY-SET GUARD — `(n, Mset) if matches!(n, 5|7|9|11|13|15|17)` — not a
+    parameter, because the executor takes the packet and does not need the count.
+
+A parameterised class would have been more machinery than the problem has, and I would have
+built it on an assumption ("variadic") rather than on the parser.
+
+### THE OMISSION WORTH ITS OWN LINE: `MSET k v` IS NOT SERVED
+
+The ladder starts at `*5`. A single-pair `MSET key value` (array_len 3) matches NO borrowed
+parser and falls to the generic route today. That is either a deliberate choice nobody wrote
+down or an oversight, and it is the SMALLEST and probably commonest MSET there is.
+
+It also must NOT be swept into the floor guard on the assumption that the parser will cope:
+claiming array_len 3 for MSET would send a shape the parser refuses to GENERIC rather than back
+to the cascade, which the keyed-values arm's comment records as a REGRESSION rather than a
+missed optimisation. If single-pair MSET is worth serving, it needs a parser first, and that is
+a separate lever with its own before-measurement.
+
+### RETRY PREDICATE
+
+  1. The floor rows land when main.rs frees: two fixed-arity HSET rows (4, 6) and one MSET row
+     guarded on the seven odd lengths, each borrowing the parser and the
+     `*_with_default_write_gate` executor its cascade arm already uses. The after-measurement
+     must show dispatch inside the front-classified band for that arity, or the entry is not
+     doing what it claims and should be reverted rather than explained.
+  2. Single-pair MSET reopens as a SEPARATE lever only with a measurement of `MSET k v` showing
+     dispatch materially above the arity-3 band (~460). It is currently unmeasured and there is
+     no shape for it; adding one costs nothing and should precede any code.
+
 ## MEASURED (frankenredis-ozrro) — my own WORTH_IT=30 threshold is derived from a law that UNDER-predicts by ~50 pct at shallow arms, so it was dismissing hot commands: MSET pays 912.9 of dispatch at arm 19, not the 596 predicted, and HSET 681.8 at arm 16, not 461
 
 Sizing measurement, `--fr-only`, on `fr-after-pubsub` (d5be78419). Load 65.65 / 61.02 / 77.14
