@@ -41754,3 +41754,149 @@ RETRY PREDICATE: do NOT size a `config_get_one` lever from `e6c9t`'s 5.9-6.2x he
 describes a route that no longer exists. Re-derive from a current ELF first, and expect
 ~1.77x. Take a FIT-window draw before quoting any absolute figure for it, because at 1.77x
 the route is far enough from parity that the ranking is safe but the magnitude is not.
+
+## 2026-08-17 CrimsonHawk: AzureMouse's Timespec predicate REOPENS at **3.0020 calls/op on a plain GET** — and I withdraw my own "stays closed" from six hours ago, which was measured on one command and stated for all of them (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — this row ships no code, corrects one of my own conclusions, and reopens
+another agent's lever by their own stated threshold. The two files it would need are under a
+peer's exclusive reservation until 22:35Z.
+
+### THE CORRECTION FIRST
+
+Earlier today, in `e21fedf98`, I executed AzureMouse's retry predicate — "re-open the
+`Timespec::now` lever only if its uprobe count exceeds 1.10 calls/op on a workload" — measured
+**1.0000 calls/op on ZCARD**, and wrote that the lever STAYS CLOSED.
+
+**That conclusion was too broad and I withdraw it.** I measured one command and stated a
+verdict for all of them. The predicate says "on a workload", and there is a workload — an
+extremely ordinary one — where the count is 3.0020.
+
+The measurement itself stands: ZCARD on a keyspace with no volatile keys really is 1.0000
+calls/op. What was wrong was the generalisation, and the specific failure was choosing a shape
+whose SEEDING happened not to create an expiring key, then reading the result as a property of
+the command.
+
+### THE REAL DEPENDENCY IS KEYSPACE STATE, NOT COMMAND
+
+`get_volatile_control` is a plain `GET`. It reads **3.0020** `Timespec::now` calls/op and
+143 instr/op of `run_active_expire_cycle`. `get_control` — the same command, on a keyspace with
+no volatile key — reads 1.0000 and 40.
+
+The discriminating pair is tighter still, and it is two spellings of the same operation:
+
+  shape              Timespec::now/op   expire-cycle instr/op   keyspace has a volatile key?
+  ttl_nonvolatile          1.0040               40.1            NO
+  pttl                     2.9970              142.9            YES
+  expiretime               2.9990              143.0            YES
+  get_volatile_control     3.0020              143.0            YES  <- a plain GET
+  get_control              0.9980               40.0            NO   <- the same plain GET
+  zcard                    0.9980               40.0            NO
+  setex_same               3.0030              143.0            YES
+  expire_same              3.0010              156.0            YES
+
+**One volatile key anywhere in the keyspace switches this on for EVERY command.** That is not
+an edge case; it is the normal state of any deployment that uses TTLs at all, and it is the
+state `redis-benchmark` leaves behind the moment a single SETEX runs.
+
+### WHERE THE CALLS COME FROM, COUNTED
+
+  callers of Timespec::now on setex:   2.000 Instant::now, 1.000 Instant::elapsed
+  callers of Instant::now:             1.000 the command's own latency start (SET does this too)
+                                       1.000 run_active_expire_cycle, which TIMES ITSELF
+  callers of Instant::elapsed:         1.000 run_active_expire_cycle
+
+So the two extra clock reads are the active expire cycle bounding its own budget, not a
+duplicated latency timer. The chain `executor -> Runtime::run_active_expire_cycle ->
+ServerState::run_active_expire_cycle` is a three-frame DELEGATION, not three cycles — I read it
+as three independent invocations first and that was wrong; the call counts distinguish the two
+readings and the delegation reading is the correct one.
+
+### WHAT IS ALREADY OPTIMISED, SO NOBODY RE-DISCOVERS IT
+
+`ServerState::run_active_expire_cycle` at fr-runtime:4599 ALREADY has the obvious early-out:
+when `count_expiring_keys() == 0` it returns before the timed section, and the comment says so
+explicitly — "skipping it here avoids both `Instant::now` reads". That is exactly why the
+non-volatile shapes read 1.0000 and 40 instr. **The zero-volatile-key case is handled. The
+one-or-more case is the open question**, and it is open on every command, not just the ones
+that touch a TTL.
+
+### THE STRUCTURAL QUESTION THIS RAISES, STATED AS A QUESTION
+
+Redis calls `activeExpireCycle(ACTIVE_EXPIRE_CYCLE_FAST)` from `beforeSleep` — **once per event
+loop**. FrankenRedis calls it from the executors — **once per command**. On a pipelined batch
+the harness measures at ~2000 ops per buffered pass, so where redis runs one fast cycle fr runs
+two thousand.
+
+I am NOT claiming that is a free 103 instr/op. Moving it to per-pass changes WHEN memory is
+reclaimed, and reply correctness does not depend on it only because lazy expiry-on-access
+handles the read path. That is a design change with a semantics argument attached, and it needs
+someone to make that argument rather than to assume it. What this row establishes is the SIZE
+of what is at stake and the fact that it applies to every command once any key is volatile.
+
+### REGISTERED PREDICTION, BEFORE ANY EDIT
+
+If the fast cycle moves from per-command to per-pass:
+
+  get_volatile_control  1655.0 -> ~1512   (-143, -8.6 pct)
+  pttl                  2237.8 -> ~2095   (-143, -6.4 pct)
+  setex_same            3508.8 -> ~3366   (-143, -4.1 pct)
+
+ACCEPTANCE TEST, binary: `Timespec::now` must fall from ~3.000 to ~1.000 calls/op and
+`run_active_expire_cycle` instr/op from ~143 to ~40, ON A KEYSPACE THAT HAS VOLATILE KEYS.
+A run whose seeding leaves no volatile key proves nothing — that is the trap this row exists to
+document, and it is the one I fell into.
+
+NULL: `ttl_nonvolatile`, which already reads 1.0040 and 40.1 and must not move at all.
+
+REJECT THRESHOLD: under 90 instr/op saved on `get_volatile_control` means the cycle was not
+actually deferred.
+
+### COUNTED MECHANISM
+
+Eight shapes, each a two-point callgrind subtraction at N=2000 and 2N=4000 with startup and
+seeding cancelled. The split is bimodal with nothing in between: 0.998-1.004 calls/op and
+40-40.1 instr/op on the three non-volatile shapes, 2.997-3.003 and 142.9-156.0 on the five
+volatile ones. Call counts are deterministic integers and carry no confidence interval.
+
+CV was not used, as a gate or otherwise.
+
+### PROVENANCE
+
+  ELF           c13d2f7f6a349a82, plain `--release` at HEAD 7dfecf4f4, no feature flags, built
+                locally with RCH_CARGO_WRAPPER_BYPASS=1, path from `--message-format=json`,
+                copied to a private path and sha256'd there.
+  bench_elf_sha256=c13d2f7f6a349a8212c4173b8d327af07e23ac55f9887a4fe8f49caff9caa42a
+  incumbent     NOT RUN. Every number here is an fr-side count; no ratio against the incumbent
+                is claimed. The statement about redis calling the cycle from `beforeSleep` is
+                from upstream's source, not from a measurement of the vendored binary, and is
+                labelled as such.
+  harness       `scripts/shape_instr_per_op.py --fr-only`, `scripts/call_count_delta.py`
+                (including its `--top` and `--callers` modes), `scripts/frame_delta.py`.
+  host          thinkstation1, 64 cores observed, powersave governor, /data 201G free.
+  PER-ARM loadavg / CPU idle
+                discovery sweep    load 30.51 27.21 20.59, CPU idle 74.3 then 75.1 pct from
+                                   /proc/stat deltas, iowait 3.1 then 0.8 pct (two external
+                                   builds running)
+                Timespec map       load 16.33 23.66 19.83
+                volatile control   load 20.06 20.57 19.16
+  admissibility Instruction and call counts are deterministic and load-immune, which is the only
+                reason a row taken during two external builds is admissible. No timed row is
+                claimed.
+
+### RETRY PREDICATE
+
+1. **Any future measurement of the expire cycle, the clock, or anything downstream of them MUST
+   state whether the keyspace had a volatile key.** A shape whose seeding creates no TTL reads
+   1.0000 and looks clean; the identical command with one volatile key present reads 3.0020.
+   Two shapes in `shape_instr_per_op.py` differ in exactly this way — `get_control` and
+   `get_volatile_control` — and they are the pair to use.
+2. AzureMouse's Timespec lever is REOPENED by their own threshold (3.0020 against 1.10), but
+   the mechanism is NOT "an extra `Timespec::now` call to remove". Their row's finding that
+   INCR has no extra call stands — INCR on a non-volatile keyspace reads 1.0000. The extra
+   reads belong to the active expire cycle and go away only if that cycle moves.
+3. The per-command versus per-pass question needs a SEMANTICS argument about reclamation
+   timing, not a benchmark. Do not ship it on the instruction count alone. `beforeSleep`-style
+   placement is what upstream does and is the obvious target, but the reply path already
+   depends on lazy expiry-on-access rather than on this cycle, so the argument is about memory
+   and `INFO` accounting, not about correctness of replies.
