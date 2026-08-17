@@ -470,6 +470,19 @@ SHAPES = {
     # shape are all held fixed — only the argument count moves.
     "zintercard_limit": (["ZADD zc1 1 a 2 b", "ZADD zc2 3 b"],
                          ["ZINTERCARD", "2", "zc1", "zc2", "LIMIT", "5"]),
+    # (frankenredis-ozrro) PUBSUB sits at cascade arm ~127 of 163 — the DEEPEST unclassified
+    # arm — with two borrowed executors already present (numpat, numsub). The depth law
+    # predicts ~5,467 instr/op of dispatch there, but that law was fitted on arms 76-103 and
+    # extrapolating it to 127 is exactly the predicted-not-measured error this ledger has a
+    # correction about, so these shapes exist to MEASURE it before any floor entry is written.
+    #
+    # pubsub_channels is the DECLINE control and the interesting one: the arity-2 parser
+    # accepts ANY subcommand and the executor refuses anything but NUMPAT, so CHANNELS walks
+    # the whole cascade only to end up generic. It should show the walk cost without the
+    # executor's work.
+    "pubsub_numpat": ([], ["PUBSUB", "NUMPAT"]),
+    "pubsub_numsub": ([], ["PUBSUB", "NUMSUB", "ch1"]),
+    "pubsub_channels": ([], ["PUBSUB", "CHANNELS"]),
     # (frankenredis-gvm6z) FOUR SHAPES FROM THE [C] BLIND SPOT. corpus_coverage.py puts the
     # blind spot at 53 commands, 50 of them with no borrowed machinery at all. Most of that
     # 50 is unshapeable by construction — blocking reads (BLPOP/BZPOPMAX), pub/sub, EXEC,
@@ -1604,13 +1617,26 @@ def selftest() -> int:
     if not abs(one_arm / two_arm - 2 ** 0.5) < 0.01:
         failures += 1
         print("  %-26s FAIL: quadrature not applied to delta noise" % "null noise")
-    # The gate must sit ABOVE the median, or half of all good runs fail by construction --
-    # the frankenpandas failure this was computed in answer to.
-    if not NULL_GATE_PCT > NULL_HALF_RANGE_PCT:
+    # The gate must sit ABOVE the median OBSERVED deviation, or half of all good runs fail
+    # by construction -- the frankenpandas failure this was computed in answer to.
+    #
+    # (frankenredis-gvm6z) THIS COMPARISON USED TO BE `NULL_GATE_PCT > NULL_HALF_RANGE_PCT`,
+    # which is `3 * x > x`: a TAUTOLOGY. It could not fail for any positive constant, so the
+    # guard written to catch frankenpandas's failure was structurally incapable of catching
+    # it. Comparing against the OBSERVED sample instead makes it falsifiable -- and it is
+    # now close, 1.04x, because a quiet six-draw group came in at 0.320 pct.
+    observed = sorted(NULL_OBSERVED_HALF_RANGE_PCT)
+    mid = len(observed) // 2
+    observed_median = (observed[mid] if len(observed) % 2
+                       else (observed[mid - 1] + observed[mid]) / 2)
+    if not NULL_GATE_PCT > observed_median:
         failures += 1
-        print("  %-26s FAIL: gate at or below median deviation" % "null noise")
-    print("  %-26s flat=%.2f sigma  real=%.1f sigma  gate=%.3f%%  ok"
-          % ("null noise", flat, real, NULL_GATE_PCT))
+        print("  %-26s FAIL: gate %.3f%% at or below OBSERVED median %.3f%%"
+              % ("null noise", NULL_GATE_PCT, observed_median))
+    print("  %-26s flat=%.2f sigma  real=%.1f sigma  gate=%.3f%% vs observed median"
+          " %.3f%% (%.2fx)  ok"
+          % ("null noise", flat, real, NULL_GATE_PCT, observed_median,
+             NULL_GATE_PCT / observed_median))
 
     print("selftest: %d case(s) failed" % failures)
     return 1 if failures else 0
@@ -1658,6 +1684,14 @@ def provenance_self_test() -> int:
 # at all, which is the opposite failure: nothing was being discarded, and nothing was being
 # checked either.
 NULL_HALF_RANGE_PCT = 0.067
+# (frankenredis-gvm6z) OBSERVED half-ranges, so the gate can be checked against DATA rather
+# than against the constant it is algebraically derived from. The nine groups above were
+# recorded only as min/median/max, so those three are all that can be reconstructed of them;
+# the fourth is a group of six get_control draws measured on one ELF at loadavg 14.09-14.29
+# with the 1-minute FLAT across all six -- quiet, unspiked, and 4.8x the calibrated median.
+# It is recorded here because the calibration attributes its own 0.481 max to a loadavg
+# 13->44 spike, and this group had no spike to blame.
+NULL_OBSERVED_HALF_RANGE_PCT = [0.011, 0.067, 0.481, 0.320]
 # 3x the median: loose enough that 8 of 9 observed groups pass, tight enough to catch the
 # spike-contaminated one. A gate AT the median would reject half of all good runs.
 NULL_GATE_PCT = 3 * NULL_HALF_RANGE_PCT
