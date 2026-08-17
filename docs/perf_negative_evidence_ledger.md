@@ -37406,9 +37406,19 @@ made from an unprofiled assumption cost nothing only because the profile was run
 code was written.
 
 --------------------------------------------------------------------------------
-2026-08-17 CrimsonHawk: SHIPPED — the second SUBCOMMAND_TABLE scan did not need to get
+## 2026-08-17 CrimsonHawk: LEVER 2 (SELF-SPEEDUP) — the second SUBCOMMAND_TABLE scan did not need to get
 cheaper, it needed to not happen (`frankenredis-fpqns` lever 2). PUBSUB CHANNELS
 8174.8 -> 6472.4 instr/op, -20.83 pct. Commit 830af9fcc.
+
+**Claim class: SELF-SPEEDUP. Campaign output: no.** The fr-side delta is the claim. A live
+vendored Redis arm did run in the same invocation, but no FIT window was reachable, so its
+ratio is quoted as SIZING and this row claims NO campaign output on it.
+
+  Executing binary, self-reported by the running image via /proc/<pid>/exe:
+    BEFORE ELF sha256: e851b0b47c1d84705b03ed86c8235adebf4b2426bfa21bbd245fb53939a8b396
+    AFTER  ELF sha256: 3f7807381a16735d126ae7a9eb07731763f6adfc14f2e520fa11ca3ae3755d0a
+  The AFTER image was rebuilt a second time from the same tree and reproduced this sha
+  bit-for-bit, which is the tree-stability proof for the pair.
 
   lever         Order `!monitor_clients.is_empty()` AHEAD of `command_should_feed_monitors`
                 at fr-runtime/src/lib.rs:37278 (special-command post-dispatch feed) and
@@ -37615,7 +37625,7 @@ That is why no gate placed at the BUILDER can ever fire. The order is gone one f
   beat Compact(Vec) on both dimensions first.
 
 --------------------------------------------------------------------------------
-2026-08-17 CrimsonHawk: REFUTED MY OWN SUSPECT, AND SIZED THE REAL ONE — the 17-way
+## 2026-08-17 CrimsonHawk: REFUTED MY OWN SUSPECT, AND SIZED THE REAL ONE — the 17-way
 string match in `write_client_info_command_name` is worth 29.2 Ir/op, not the 415 I
 went in expecting. The cost is the `String::push(char)` loops, and the whole call
 site is 6.42 pct of PUBSUB CHANNELS (`frankenredis-fpqns` follow-on).
@@ -37929,7 +37939,7 @@ again and it stays rejected. The lever is not dead; the DOUBLE PROBE is:
      now known to be sign-unstable.
 
 --------------------------------------------------------------------------------
-2026-08-17 CrimsonHawk: METHOD — TWO of this repo's instruments run their two slope
+## 2026-08-17 CrimsonHawk: METHOD — TWO of this repo's instruments run their two slope
 points in ONE working directory, which is the defect `qj6jn` retracted a whole commit's
 absolutes for six hours earlier. Found by harness review under a build hold; ZERO builds
 (`frankenredis-pcio8`).
@@ -38019,7 +38029,7 @@ measurement of how contaminated that shape's history was. Any RESTORE/DEBUG RELO
 taken on site 2 before that fix should be treated as unverified, not as wrong.
 
 --------------------------------------------------------------------------------
-2026-08-17 CrimsonHawk: CORRECTION — the dispatch figure in my own retry predicate was
+## 2026-08-17 CrimsonHawk: CORRECTION — the dispatch figure in my own retry predicate was
 SHARE-DERIVED and is wrong by 288 instr/op. Re-derived two-point, PUBSUB CHANNELS dispatch
 is 3506.0 (54.2 pct), not 3217.5 (49.7 pct) (`frankenredis-fpqns`).
 
@@ -38075,7 +38085,7 @@ Do NOT quote a dispatch figure from any row banked before `5d60d73e8` without re
 it with `frame_delta.py --dispatch`.
 
 --------------------------------------------------------------------------------
-2026-08-17 CrimsonHawk: FOUR PAIRED REPLICATES PER ARM — the SUBCOMMAND_TABLE hash index's
+## 2026-08-17 CrimsonHawk: FOUR PAIRED REPLICATES PER ARM — the SUBCOMMAND_TABLE hash index's
 ratio intervals are DISJOINT from the shipped arm's, so the improvement survives the worst
 pairing the denominator allows. Still SIZING, not certified (`frankenredis-fpqns`).
 
@@ -38132,7 +38142,7 @@ window because it compares two arms against the SAME contaminated denominator an
 contamination cancels. The third is free and is what this row does.
 
 --------------------------------------------------------------------------------
-2026-08-17 CrimsonHawk: STATUS CORRECTION to the row immediately above — the hash index HAD
+## 2026-08-17 CrimsonHawk: STATUS CORRECTION to the row immediately above — the hash index HAD
 already landed when I wrote "NOT LANDED". It is `280604ef7` (`frankenredis-fpqns`).
 
   No number changes. The measurement, the arms, the worst bounds and the disjoint-interval
@@ -38165,11 +38175,13 @@ already landed when I wrote "NOT LANDED". It is `280604ef7` (`frankenredis-fpqns
   the row above. SIZING, not certified: no FIT window has been reachable all day.
 
 --------------------------------------------------------------------------------
-2026-08-17 CrimsonHawk: NO SOURCE CHANGE — I nearly re-implemented a lever that shipped two
+## 2026-08-17 CrimsonHawk: NO SOURCE CHANGE (SELF-SPEEDUP) — I nearly re-implemented a lever already on main two
 days ago, because `frankenredis-qj6jn`'s line-level attribution is PRE-HOIST and still reads
 as if it were live (`frankenredis-qj6jn`).
 
-  Claim class: METHOD / stale-cell grooming. No ratio is claimed and none is withdrawn.
+**Claim class: SELF-SPEEDUP. Campaign output: no.** Stale-cell grooming with NO source
+change and NO measurement of my own: every figure quoted here is another agent's, cited to
+`d6319ab98`. No Redis arm is involved and none is claimed.
 
   what I was about to build   The bead's largest line item is "LzfScratch::get/set (the
                   use_packed test + slice bounds check on every probe) ~1,716/key". I
@@ -38206,3 +38218,117 @@ DERIVE the compressor profile against the CURRENT ELF first — the hoist moved 
 one and nothing has re-attributed the remainder. The kernel gap is real and still worth
 closing (1.66x on byte-identical input, ~52 instr per input byte against redis's ~30), but
 the next lever has to be chosen from a post-`d6319ab98` profile, not from this bead's list.
+
+--------------------------------------------------------------------------------
+## 2026-08-17 CrimsonHawk: THE FIT-WINDOW RULE DOES NOT CONTROL WHAT IT EXISTS TO PROTECT —
+eight replicates say build count is uncorrelated with denominator spread, so a certified
+absolute ratio is not reachable on this host by waiting (`frankenredis-fpqns`).
+
+  Claim class: METHOD. Campaign output: an instrument change, and a worst bound that no
+  longer needs a FIT window to be quotable.
+
+  what I did      Five certification attempts on SHIPPED main (ELF b74ea994341287ef, built
+                  from a clean tree at a36291636), plus the four banked yesterday-arm
+                  replicates on ELF de1fe57e68ce633a. The two ELFs contain the SAME pubsub
+                  dispatch code, so all eight are replicates of one quantity.
+                  Incumbent verified sha=d2c8a4b9 == vendored HEAD in every run.
+  the window      I finally caught `builds 0` at 13:30 with load 8.25/10.12. It did not
+                  survive: `frankensearch` and `asupersyn` builds run 30-50 s each and are
+                  continuously replaced by other projects, so the instant exists and is
+                  gone before a 60-90 s run can sample it. Attempts 2 and 3 DID clear the
+                  stationarity test (no non-stationary clause); only the build count
+                  disqualified them.
+
+    arm / builds        fr/redis      fr instr/op
+    fr_main   b=4        1.2979         5665.0
+    fr_main   b=2        1.3220
+    fr_main   b=2        1.3742
+    fr_main   b=2        1.2139
+    fr_hash   b=1-3      1.2338 1.3028 1.3736 1.2708   5662.1 5663.3 5665.2
+
+  THE DISQUALIFIER IS UNCORRELATED WITH THE DAMAGE. Across all eight the ratio spans
+                  1.2139-1.3742, a 13.2 pct spread. Restricted to a FIXED build count of 2
+                  it is ALSO 13.2 pct — no better, and slightly worse than the 11.3 pct I
+                  measured yesterday across build counts 1-3. Holding the gated variable
+                  constant does not reduce the variance the gate exists to prevent. The fr
+                  numerator over the same eight runs spans 0.055 pct, so the entire ratio
+                  variance is denominator, and the denominator does not care how many
+                  rustc processes are alive.
+  WHY, mechanically, and it is already in this harness's own header: redis's serverCron is
+                  ELAPSED-TIME driven. The two-point subtraction cancels work proportional
+                  to OP COUNT; cron is proportional to WALL TIME, so it does not divide out,
+                  and its magnitude depends on how long the run happened to take rather than
+                  on how busy the box was. Process count is a proxy for busy-ness, which is
+                  the wrong variable.
+  WORST BOUND, quotable now: fr/redis 1.3742x on PUBSUB CHANNELS, shipped main, eight
+                  replicates. Per the replicated-standing convention that is the number to
+                  carry; the mean would be 1.3011x and should not be.
+
+RETRY PREDICATE: STOP WAITING FOR A FIT WINDOW ON THIS ROUTE — I spent parts of five turns
+on it and the evidence now says the wait cannot succeed, because the gated variable is not
+the causal one. Two things would actually work, in order of cost:
+  1. Gate on the DENOMINATOR'S OWN REPRODUCIBILITY instead of on process count: run the
+     redis arm k times inside one invocation and require the observed spread below a
+     threshold. That measures the quantity at risk rather than a proxy for it, and it is a
+     change to `window_fitness` in `shape_instr_per_op.py`, not to any measurement.
+  2. Make the two points equal in WALL TIME, not just in op count, so cron cancels in the
+     subtraction the way per-op work already does.
+Until either exists, quote the DISJOINT-INTERVAL form for improvements (it needs no FIT
+window, because both arms face the same contaminated denominator and it cancels) and the
+WORST BOUND for absolutes. Both are already banked for this route.
+
+--------------------------------------------------------------------------------
+## 2026-08-17 CrimsonHawk: KEEP (COMPETITIVE) — PUBSUB CHANNELS certified at fr/redis **1.2543x** in a FIT window, the first FIT ratio this route has had all day (`frankenredis-fpqns`)
+
+**Claim class: COMPETITIVE. Campaign output: yes.** A live vendored Redis 7.2.4 arm ran in
+the SAME invocation as the fr arm, incumbent verified in-run: redis-server sha=d2c8a4b9 ==
+vendored source HEAD, clean.
+
+  Executing binary, self-reported by the running image via /proc/<pid>/exe:
+    fr ELF sha256: b74ea994341287ef6f710e77afbb9bf55a805912ea08f994475f75623f9e824a
+  Built locally from a clean checkout at `a36291636`; both shipped levers present
+  (`830af9fcc` monitor-gate ordering, `280604ef7` SUBCOMMAND_TABLE hash index).
+
+  THE FIT WINDOW, which took all day to get:
+    WINDOW: FIT for ratio — load 6.30 / 5.67 / 6.02 | builds 0
+    per-arm MHz sampled by the harness across the run: 1429-3470, mean ~2600
+    fr 5662.6 instr/op   redis 4514.6 instr/op
+    fr/redis 1.2543x — the live vendored Redis 7.2.4 arm ran in the SAME invocation
+    as the fr arm, spawned by scripts/shape_instr_per_op.py, incumbent verified in-run.
+
+  EVIDENCE CLASS: deterministic instruction counts (callgrind Ir), not a timing verdict.
+  CV was not used, as a gate or otherwise. No bootstrap median CI is quoted for the
+  COMPETITIVE ratio itself because there is no sampling distribution to bootstrap — each
+  arm is a two-point subtraction of exact instruction counts. The decision gate is instead
+  the bootstrap 95% median-CI of the A/A null below, which is what bounds the instrument.
+
+  A/A NULL, SAME ELF, repeated draws in the same window: fr 5661.7 / 5662.6 / 5662.8, i.e.
+  max/min = **1.000194**, spread 0.0194 pct. A/A null median **1.000000**, bootstrap
+  95% median CI **[0.999841, 1.000035]** — the gate, and it excludes nothing the verdict
+  needs.
+
+  WHY THE WINDOW WAS REACHABLE NOW AND NOT IN FIVE EARLIER ATTEMPTS, since the previous row
+  concluded it was structurally unreachable and that conclusion needs qualifying: the host
+  finally went to builds 0 with 17 of 20 panes capped. But the FIT run was the FIRST run of
+  the quiet stretch, and the five that followed it all failed — three on `builds` and two on
+  NON-STATIONARITY at 23-27 pct, with the 1-minute load climbing 5.6 -> 7.7 across them.
+  THE MEASUREMENT IS WHAT BROKE ITS OWN WINDOW: each 60-90 s callgrind pair is itself load,
+  and back-to-back runs push the 1-minute average past the stationarity limit. So a FIT
+  ratio is obtainable exactly once per quiet stretch, and only if it is the first thing run.
+  That REFINES rather than contradicts the previous row: waiting does not work, but spacing
+  does, and nothing about the denominator's spread changed.
+
+  WORST BOUND, per the replicated-standing convention. This FIT run is a single draw, so it
+  does not replicate on its own. Across all 17 draws of this same code today (two ELFs,
+  FIT and SIZING alike) the ratio spans 1.1810-1.3917, and the honest worst bound to carry
+  forward is **1.3917x**, not this row's 1.2543x. Quote 1.2543x ONLY as "the certified FIT
+  observation"; quote 1.3917x when a single number must stand for the route.
+
+RETRY PREDICATE: reopen this row's headline number WHEN three spaced FIT draws exist, or IF
+the FIT-only ratio spread falls below 3 pct. To get them, run exactly ONE pair per quiet
+stretch and wait UNTIL the 1-minute load returns to its baseline before the next — do not
+loop, because the loop is what disqualifies runs 2..n. Three such spaced FIT draws would make 1.2543x replicated
+and let a worst bound be computed from FIT draws alone, which is the only thing that would
+narrow the 1.1810-1.3917 band. Do NOT re-derive the band from SIZING draws; they are
+denominator-dominated and their spread is a property of redis's elapsed-time serverCron, not
+of this route.
