@@ -8,6 +8,76 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-08-17 MossyOrchid: RESTORED, SOUNDLY — the withdrawn floor recomputed two-point from dumps already on disk, and it kills its own headline: dispatch share NO LONGER SEPARATES classified from generic (classified reaches 37.1 pct, generic starts at 33.9 pct). ZINTERCARD/XPENDING's ~3,000 instr/op survives at 2,804-3,374 (`frankenredis-94lp3`, `frankenredis-7so0e`)
+
+Claim class: SELF-SPEEDUP sizing (fr-only), restoring figures I withdrew one row below. NO BUILD,
+NO BENCH, NO SERVER — /data at 15G and 100 pct used. Every number here comes from `frame_delta.py`
+over callgrind dumps the harness already wrote, matched to shapes by their two-point totals.
+
+`dispatch_share()` HAS SINCE BEEN FIXED (it now differences N and 2N and borrows `frame_delta`'s
+frame list, and its docstring cites my withdrawal `b9c288a1d`). The fix also adopted the frame my
+correction flagged — `classify_borrowed_dispatch_floor_packet`, the floor classifier itself. I sum
+the SAME set here, so these figures and future harness output are comparable.
+
+    shape                 total    dispatch   share      previously published
+    command_count        3237.9       543.0   16.8       345.2 / 10.7
+    zrangestore_byscore  5861.9      1034.7   17.7       825.2 / 14.1
+    getex_ex             3518.6       736.0   20.9       540.9 / 15.4
+    geoadd_same          3698.8       772.0   20.9       600.9 / 16.2
+    ttl_nonvolatile      1720.1       465.0   27.0       301.7 / 17.5
+    lpos_count           2961.7       803.0   27.1       617.1 / 20.8
+    substr               2178.8       641.0   29.4       447.5 / 20.5
+    renamenx_exists      1934.7       593.0   30.7       398.0 / 20.6
+    hget                 1782.6       583.0   32.7       390.8 / 21.9
+    type                 1408.0       469.0   33.3       291.7 / 20.7
+    persist_noop         1597.3       540.0   33.8       319.6 / 20.0
+    lmpop_missing        2342.9       869.5   37.1       651.5 / 27.8
+    --- GENERIC PATH ---
+    xpending_populated   8274.2      2804.0   33.9      2608.2 / 31.5
+    xpending_empty       6484.0      2804.0   43.2      2633.9 / 40.6
+    zintercard_2         7546.7      3223.0   42.7      3025.5 / 40.1
+    zintercard_limit     8078.8      3374.0   41.8      3184.6 / 39.4
+
+THE HEADLINE I PUBLISHED IS DEAD, AND IT IS THE CORRECTED NUMBERS THAT KILL IT. I claimed a
+"14-28 pct front-classified FLOOR" cleanly below the generic routes. The sound floor is
+**16.8-37.1 pct**, and the generic four run **33.9-43.2 pct** — the two bands OVERLAP.
+`lmpop_missing`, front-classified, carries a HIGHER dispatch share (37.1) than
+`xpending_populated`, which is on the generic path (33.9). So dispatch share does NOT
+discriminate mechanism, and any screen that ranks front-classification candidates by share alone
+will mis-rank them. The discriminator is the MECHANISM LABEL, which is a different measurement
+(one frame's share within one dump, 100x margin) and which `frame_delta` independently confirms:
+hget's top frames are the classified route's, with no generic frame in the top twenty.
+
+That is the second time today this metric has produced a conclusion the corrected number reverses,
+and it is the more useful failure: the first was a wrong magnitude, this is a wrong ORDERING.
+
+WHAT SURVIVES AND IS NOW SOUNDLY SIZED. `5na4i`'s "~3,000 instr/op of dispatch" for ZINTERCARD and
+XPENDING, which I withdrew as share-derived, comes back at **2,804.0-3,374.0 instr/op** measured
+two-point. The estimate was right; the method was not. Those two commands remain the largest
+dispatch blocks on the measured board, they remain the only GENERIC PATH commands found, and they
+remain class [C] by source (no parser, no executor, no floor entry). The bead's sizing is restored
+with this row as its basis.
+
+WHAT IS STILL NOT RESTORED: `uu33c`'s share comparison. My corrected `lpos_count` is 27.1 pct
+against the bead's 32.2 pct, but the bead's figure was produced by another agent on another ELF by
+a method I cannot verify was two-point, and comparing a sound number against an unsound one is the
+error this whole thread is about. `tyujv`'s conclusion needs no restoration — it rested on TOTALS
+(GEOADD 8,263 -> 3,698.7 instr/op), which `7so0e` never touched.
+
+PROVENANCE: no build, no bench, no server. `scripts/frame_delta.py --all` over 35 dump directories
+under `/data/tmp/fr_instr_*` from this session's 10:10-10:23 window, shapes identified by matching
+each dump's two-point total against the totals published earlier today (all matched to within
+0.1 pct; `hget` reconciled 1782.6 against 1784.2). Host thinkstation1, /data 15G at 100 pct,
+loadavg 8.12 / 9.15 / 12.45. No MHz sample: nothing was timed, and instruction counts are the
+load-immune quantity.
+
+RETRY PREDICATE: do not rank front-classification candidates by dispatch SHARE — it does not
+separate the mechanisms, as the overlap above shows. Rank by the mechanism label first and by
+ABSOLUTE dispatch instr/op second; on today's board that ordering puts ZINTERCARD (3,223-3,374)
+and XPENDING (2,804) first by a wide margin over every classified route (543-1,035).
+
+--------------------------------------------------------------------------------
+
 ## 2026-08-17 MossyOrchid: I WITHDRAW EVERY DISPATCH-SHARE FIGURE IN MY LAST THREE ROWS — BrownIbis's `7so0e` defect hits all of them, and recomputing hget two-point puts its dispatch at 428.0-583.0 instr/op against the 390.8 I published (`frankenredis-94lp3`, `frankenredis-7so0e`)
 
 Claim class: CORRECTION to my own rows. No build, no bench, no target writes — /data at 16G and
