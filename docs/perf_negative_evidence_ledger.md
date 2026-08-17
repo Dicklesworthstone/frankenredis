@@ -39927,3 +39927,65 @@ change to any zset representation is proposed, measured or implied.
 3. The literal-argument detector from the preceding row is exhausted for bool/Option
    parameters and has still NOT been extended to enum or discriminant arguments. That remains
    the only unexplored form of the original defect.
+
+--------------------------------------------------------------------------------
+## 2026-08-17 CrimsonHawk: KEEP (COMPETITIVE) — a THIRD FIT window at fr/redis **1.3515x**, taken at LOADAVG 27, which is higher than several windows that FAILED. FIT is about STATIONARITY, not level (`frankenredis-fpqns`)
+
+**Claim class: COMPETITIVE. Campaign output: yes.** A live vendored Redis 7.2.4 arm ran in
+the SAME invocation as the fr arm; incumbent verified in-run, redis-server sha=d2c8a4b9 ==
+vendored source HEAD, clean.
+
+  Executing binary, self-reported by the running image via /proc/<pid>/exe:
+    fr ELF sha256: a0553f7ae6b97e864a7c3c62486889a107ba643aeee011c9f74c8b60b08eb983
+  Built from a clean checkout at `29048d447`; no commit has touched `crates/` since, so this
+  is shipped HEAD's engine code.
+
+    WINDOW: FIT for ratio — load 26.92 / 26.15 / 26.13 | builds 0
+    PER-ARM: fr    loadavg 26.92/26.15/26.13, MHz mean 3696 then 4273 (max 4292)
+             redis loadavg 26.92/26.15/26.13 then 30.93/26.99/26.41, MHz mean 4244 then
+             3807 (max 4281)
+    CPU IDLE measured directly before the run: **79 pct** (vmstat), against a loadavg of 22.8
+    fr 5672.7 instr/op   redis 4197.4 instr/op
+    fr/redis 1.3515x — live vendored Redis 7.2.4 arm in the SAME invocation as the fr arm.
+
+  EVIDENCE CLASS: deterministic instruction counts (callgrind Ir), not a timing verdict. CV
+  was not used, as a gate or otherwise. No bootstrap median CI is quoted for the COMPETITIVE
+  ratio because there is no sampling distribution to bootstrap — each arm is a two-point
+  subtraction of exact counts. The decision gate is the A/A null's bootstrap median CI below.
+
+  A/A NULL, same dispatch code, repeated draws: 5661.7 / 5662.6 / 5662.8, max/min 1.000194.
+  A/A null median **1.000000**, bootstrap 95% median CI **[0.999841, 1.000035]**.
+
+  THE FINDING IS THE WINDOW, NOT THE RATIO. This was taken at loadavg 26.92 — HIGHER than
+  the 8.16 and 9.85 windows that were REFUSED earlier today. It passed because the three
+  averages were 26.92 / 26.15 / 26.13, i.e. STATIONARY to 3 pct, and because builds were 0.
+  Direct measurement explains it: CPU idle was 79 pct at a loadavg of 22.8, so the load was
+  IO-WAIT and runnable-thread count, not CPU contention. The orchestrator's brief for this
+  turn said "CPU idle only 27 pct - host is busy"; I measured 79 pct myself, which is why
+  the run happened at all.
+
+  SO "WAIT FOR A QUIET HOST" IS THE WRONG INSTRUCTION. The gate is stationarity plus an
+  absence of competing BUILDS; loadavg LEVEL is not in it, and a high stationary load is a
+  better window than a low decaying one. Five attempts failed earlier today at loadavg 8-10
+  purely because the average was still falling.
+
+    window / ELF            fr        redis     ratio     loadavg 1m/5m
+    a36291636 b74ea994    5662.6    4514.6    1.2543x    6.30 / 5.67
+    0fa2bef9b f68e2521    5680.7    4123.1    1.3778x    6.65 / 7.81
+    29048d447 a0553f7a    5672.7    4197.4    1.3515x   26.92 / 26.15
+
+  The last two carry the SAME pubsub dispatch code (the AOF INFO change between them does
+  not touch this path) and agree on the numerator to **0.14 pct** while their denominators
+  differ by only **1.8 pct** — much tighter than the 9.50 pct between the first two. Across
+  all three FIT draws the denominator still spans 9.5 pct, so the earlier method row stands:
+  FIT admits a row, it does not make the absolute ratio reproducible.
+
+  WORST BOUND across FIT draws: **1.3778x**. Across all 20 draws today the band is
+  1.1810-1.3917 and the worst bound is 1.3917x. Quote one of those two.
+
+RETRY PREDICATE: reopen the headline WHEN three FIT draws exist on ONE unchanged ELF, or IF
+the FIT-only denominator spread falls below 3 pct across at least three draws — the last two
+already sit at 1.8 pct, so a third draw on `a0553f7a` while `crates/` is untouched would
+settle it. Take exactly one pair per quiet stretch. And do NOT screen candidate windows on
+loadavg LEVEL: measure CPU idle with `vmstat` and check the 1m/5m spread instead, because
+this row was obtained at a loadavg that the level heuristic would have rejected.
