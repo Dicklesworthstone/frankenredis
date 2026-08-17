@@ -36594,6 +36594,84 @@ mod tests {
         );
     }
 
+    /// (frankenredis-5na4i) The two ZINTERCARD parsers, and the shapes they must REFUSE.
+    ///
+    /// The refusals matter more than the acceptances: each `None` here is a shape whose error the
+    /// GENERIC path must produce, in upstream's order. `zintercardwt` records that a wrong-type
+    /// key beats a bad LIMIT, and the only way this route preserves that is by not claiming the
+    /// shape at all — so a parser that got loose here would change which error a client sees.
+    #[test]
+    fn borrowed_plain_zintercard_packet_parsers_accept_and_refuse_5na4i() {
+        let cfg = ParserConfig::default();
+
+        // Canonical argc-4 form, mixed case, with a following packet in the buffer.
+        let plain = crate::parse_borrowed_plain_zintercard2_packet(
+            b"*4\r\n$10\r\nZiNtErCaRd\r\n$1\r\n2\r\n$2\r\nz1\r\n$2\r\nz2\r\n*1\r\n$4\r\nPING\r\n",
+            &cfg,
+        )
+        .expect("canonical ZINTERCARD packet should parse");
+        assert_eq!(plain.numkeys, b"2");
+        assert_eq!(plain.k1, b"z1");
+        assert_eq!(plain.k2, b"z2");
+        assert_eq!(
+            plain.consumed,
+            b"*4\r\n$10\r\nZiNtErCaRd\r\n$1\r\n2\r\n$2\r\nz1\r\n$2\r\nz2\r\n".len()
+        );
+
+        // Canonical argc-6 LIMIT form; the keyword is matched case-insensitively.
+        let limited = crate::parse_borrowed_plain_zintercard_limit_packet(
+            b"*6\r\n$10\r\nZINTERCARD\r\n$1\r\n2\r\n$2\r\nz1\r\n$2\r\nz2\r\n$5\r\nlImIt\r\n$1\r\n7\r\n",
+            &cfg,
+        )
+        .expect("canonical ZINTERCARD LIMIT packet should parse");
+        assert_eq!(limited.k2, b"z2");
+        assert_eq!(limited.limit, b"7");
+
+        // Each parser pins its own arity, so neither can claim the other's shape.
+        assert!(
+            crate::parse_borrowed_plain_zintercard2_packet(
+                b"*6\r\n$10\r\nZINTERCARD\r\n$1\r\n2\r\n$2\r\nz1\r\n$2\r\nz2\r\n$5\r\nLIMIT\r\n$1\r\n7\r\n",
+                &cfg
+            )
+            .is_none(),
+            "the argc-4 parser must not claim the LIMIT form"
+        );
+        assert!(
+            crate::parse_borrowed_plain_zintercard_limit_packet(
+                b"*4\r\n$10\r\nZINTERCARD\r\n$1\r\n2\r\n$2\r\nz1\r\n$2\r\nz2\r\n",
+                &cfg
+            )
+            .is_none(),
+            "the LIMIT parser must not claim the plain form"
+        );
+
+        for (why, packet) in [
+            // numkeys that disagrees with the arity: "ERR syntax error" from the generic.
+            ("numkeys 3 at arity 4",
+             &b"*4\r\n$10\r\nZINTERCARD\r\n$1\r\n3\r\n$2\r\nz1\r\n$2\r\nz2\r\n"[..]),
+            ("numkeys 1 at arity 4",
+             &b"*4\r\n$10\r\nZINTERCARD\r\n$1\r\n1\r\n$2\r\nz1\r\n$2\r\nz2\r\n"[..]),
+            // A same-length sibling command must not be mistaken for this one.
+            ("SINTERCARD is 10 bytes too",
+             &b"*4\r\n$10\r\nSINTERCARD\r\n$1\r\n2\r\n$2\r\nz1\r\n$2\r\nz2\r\n"[..]),
+        ] {
+            assert!(
+                crate::parse_borrowed_plain_zintercard2_packet(packet, &cfg).is_none(),
+                "argc-4 parser should refuse: {why}"
+            );
+        }
+
+        // A trailing token that is not LIMIT is a syntax error the generic owns.
+        assert!(
+            crate::parse_borrowed_plain_zintercard_limit_packet(
+                b"*6\r\n$10\r\nZINTERCARD\r\n$1\r\n2\r\n$2\r\nz1\r\n$2\r\nz2\r\n$5\r\nCOUNT\r\n$1\r\n7\r\n",
+                &cfg
+            )
+            .is_none(),
+            "the LIMIT parser must refuse a non-LIMIT trailing keyword"
+        );
+    }
+
     #[test]
     fn borrowed_plain_ttl_pttl_type_packet_parsers_reject_same_prefix_siblings() {
         let cfg = ParserConfig::default();
