@@ -511,6 +511,18 @@ SHAPES = {
     "pubsub_numpat": ([], ["PUBSUB", "NUMPAT"]),
     "pubsub_numsub": ([], ["PUBSUB", "NUMSUB", "ch1"]),
     "pubsub_channels": ([], ["PUBSUB", "CHANNELS"]),
+    # (frankenredis-fpqns) CONTAINER COMMANDS ON THE GENERIC ROUTE, added to give the
+    # SUBCOMMAND_TABLE levers a PATH-SHARING control. The lever-1 row had none: its only
+    # candidates, pubsub_numsub and memory_usage, turned out to be front-classified and so
+    # never execute the code under test (9abeaa5c1). A control must share the CODE PATH, and
+    # dispatch share is what tells you which path a shape is on before you change anything --
+    # a front-classified route reads a few hundred instr/op, a generic one reads thousands.
+    #
+    # All three are read-only and steady-state, so the 2N run does not grow state.
+    "client_info": ([], ["CLIENT", "INFO"]),
+    "object_encoding": (["SET oe abcdefghijklmnop"], ["OBJECT", "ENCODING", "oe"]),
+    "config_get_one": ([], ["CONFIG", "GET", "maxmemory"]),
+
     # (frankenredis-gvm6z) FOUR SHAPES FROM THE [C] BLIND SPOT. corpus_coverage.py puts the
     # blind spot at 53 commands, 50 of them with no borrowed machinery at all. Most of that
     # 50 is unshapeable by construction — blocking reads (BLPOP/BZPOPMAX), pub/sub, EXEC,

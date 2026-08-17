@@ -34149,3 +34149,69 @@ RETRY PREDICATE: lever 2 next — `SUBCOMMAND_TABLE` is a `const` slice scanned 
 per container dispatch, and the 679 instr/op memcmp frame is its cost. Before starting it, add
 a shape for one generic-route container command (CLIENT INFO or OBJECT ENCODING) so the row
 has a path-sharing control; this row had none and says so.
+
+--------------------------------------------------------------------------------
+## 2026-08-17 RusticHorizon: lever 1 GENERALISES as a constant ~1,132 instr/op per generic-route container dispatch, the front-classified control is unmoved — and adding the control shapes found `CONFIG GET` at 6.2x, the worst cell of this campaign (`frankenredis-fpqns`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir), not a timing verdict; the fr
+arm of this harness repeats to 0.09 pct. CV was not used, as a gate or otherwise.
+
+Claim class: COMPETITIVE. Campaign output: yes — fr/Redis 7.2.4 on `config_get_one` measures
+5.8973x, both arms live in the same invocation.
+
+`cc3c24cc9` landed lever 1 and stated plainly that it had NO path-sharing control and a blast
+radius of one measured command, because the only candidates were front-classified. Its retry
+predicate said to add a generic-route container shape before lever 2. Three were added, and
+they answered three questions at once.
+
+    shape             BEFORE      AFTER       delta        route
+    client_info      17,421.3    16,287.0    −1,134.3     GENERIC
+    config_get_one   39,970.6    38,838.5    −1,132.1     GENERIC
+    object_encoding   2,233.8     2,236.6       +2.8      front-classified  <- NEGATIVE CONTROL
+    get_control       1,308.8     1,307.0       −1.8      NULL
+
+1. LEVER 1 GENERALISES, AND AS A CONSTANT. The saving is −1,134.3 and −1,132.1 on two
+   commands whose totals differ by 2.3x, against −1,021.6 on `pubsub_channels`. A constant
+   per-dispatch saving is exactly what four removed allocations predict, and it is much
+   stronger evidence for the mechanism than the single-command number was. `cc3c24cc9`'s
+   "blast radius of one measured command" is now superseded: it is every container command
+   on the generic route.
+
+2. THE NEGATIVE CONTROL WORKS. `object_encoding` is front-classified and moved +2.8 instr/op
+   on a 2,234 baseline. This is the control `cc3c24cc9` did not have, and it behaves exactly
+   as `9abeaa5c1` predicted a front-classified route would: the code is not on its path, so
+   the change is invisible to it.
+
+    HOW TO TELL THE ROUTES APART, refined: use ABSOLUTE dispatch instr/op, not the share.
+    `object_encoding` reads 16.6 pct and `client_info` 19.0 pct — nearly identical — but 370.2
+    against 3,099.5 instr/op is not. The percentage is diluted by whatever real work the
+    command does; the absolute figure is the route. I had the shares in front of me two rows
+    ago and they would not have separated these.
+
+3. A NEW AND MUCH LARGER DEFICIT: `CONFIG GET maxmemory` is 5.8973x BEHIND — fr 38,838.5
+   instr/op against Redis 7.2.4's ~6,586. That is the worst cell this campaign has measured,
+   two and a half times worse than the `PUBSUB CHANNELS` 2.47x that started this thread, and
+   it was invisible until a shape existed for it. Filed separately; not diagnosed here beyond
+   noting that its dispatch is only 3,373 of 38,838, so unlike PUBSUB the bulk is NOT command
+   lookup and the SUBCOMMAND_TABLE levers will barely touch it.
+
+    THE CORPUS WAS THE LIMITING INSTRUMENT AGAIN. This is the third time this session: the
+    blind-spot screen, the PUBSUB find, and now CONFIG GET. Each time the engine was fine and
+    the measurement did not exist. I added these three shapes to get a CONTROL, not to hunt,
+    and the hunt succeeded anyway.
+
+PROVENANCE: no new build — the same-tree reverse-patch pair from `cc3c24cc9` was reused
+(AFTER 44ec545aed2ad766, BEFORE e438576c212caa5b), so these deltas are same-tree.
+  harness       scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines in the SAME
+                invocation. Incumbent verified in-run: sha=d2c8a4b9 == vendored HEAD.
+  host          thinkstation1, 64 cores, powersave, /data 120G, ONE PEER BUILD running.
+  PER-ARM loadavg/MHz  before client_info 14.58/3336, config_get 14.53/3237, object_encoding
+                14.49/3314, null 14.49/3332 · after client_info 14.29/2610, config_get
+                13.95/2961, object_encoding 13.95/1429, null 13.63/1429. Window 1/5/15 =
+                14.58/16.65/17.40.
+
+RETRY PREDICATE: `client_info` is the control for lever 2 — it is generic-route, executes both
+SUBCOMMAND_TABLE frames, and is not the shape being optimised. Keep `object_encoding` as the
+negative control: it must NOT move for any SUBCOMMAND_TABLE lever, and if it does, the change
+is reaching a path it should not. And take CONFIG GET seriously as its own target: at 5.9x it
+dwarfs everything else on the board, and its dispatch share says the cause is elsewhere.
