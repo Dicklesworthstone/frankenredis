@@ -29676,3 +29676,236 @@ consumers (hash/zset/set/list `*_from_listpack_spans`) and gate on the existing 
 differs before claiming anything. Second candidate is the 12.3 pct memcpy, which is NOT yet
 attributed to a caller — attribute it before proposing a fix, since three of this session's
 four dead ends came from trusting a proposal instead of a measurement.
+
+## 2026-08-16 GentleStream: REJECT — `push_str` + `make_ascii_lowercase` loses to the per-byte loop it replaced, because a command name is 3-8 bytes (`frankenredis-cjhkd`)
+
+Claim class: SELF-SPEEDUP (rejected). Campaign output: yes — it retires a lever
+that reads as obviously correct and closes it with a mechanism, so the next
+person reading `push_ascii_lowercase_lossy` does not spend a slot on it. A code
+comment at the site carries the same numbers.
+
+THE CANDIDATE. `push_ascii_lowercase_lossy` (fr-runtime) lowercases the command
+name into a reused buffer on EVERY generic-path command, via
+`write_client_info_command_name` in `execute_dispatch`. It was measured by a peer
+at **192 instr/op** among the eleven zero-slope frames of the SORT intercept. Its
+ASCII fast path pushes one `char` per byte, and `String::push` is not a byte
+store — it re-checks capacity and runs `char::encode_utf8` every iteration. The
+proposal was one `push_str` (a single memcpy) plus `str::make_ascii_lowercase`
+(a vectorised byte-wise pass), both safe, no `as_mut_vec`, byte-identical output.
+
+IT IS SLOWER. Two fr ELFs from the SAME pinned base `6e3fb2970` with
+`--clean-overlay`, differing by exactly one overlay path
+(`crates/fr-runtime/src/lib.rs`). Self-reported binary SHA-256
+f0c2101d8362171ca93a57323c097cc2fc6c1994de9d9e618ed6f39c1afc2dc3 (BEFORE) and
+a4bcdb6a70720259b27ea00f462f3a21ac6fe5f43c39d88fce5c678fb9fff579 (AFTER); both
+sha'd at private scratchpad paths after copying, never read from
+`target/release`. Harness `scripts/shape_instr_per_op.py`, shape
+`sort_ro_alpha` (a generic-path command, so it pays this cost), both engines
+pinned to `LC_ALL=C`, N=2000/2N=4000 two-point subtraction, run locally on
+thinkstation1.
+
+    BEFORE  9167.2 then 9212.8 instr/op
+    AFTER   9258.5 then 9257.9 instr/op
+    WORST BOUND on the change, fastest BEFORE against slowest AFTER: +91.3
+    instr/op, +1.00 pct SLOWER. Best case for the candidate is still +45.1.
+
+NO CONFIDENCE INTERVAL IS CLAIMED, and none is needed: callgrind instruction
+counts are deterministic, so the replicate spread above IS the stability
+statement — BEFORE reproduces to 0.50 pct and AFTER to 0.006 pct, and the two
+arms never share an invocation. **CV is provenance only and is NEVER a gate
+here**, the deterministic replicate spread being the evidence instead.
+
+MECHANISM, so this is not read as noise at 1 pct. The bench reaches the function
+in BOTH arms (it appears in both dumps, so this is not a bench-does-not-reach
+result), and the cost lands exactly where the change is:
+
+    push_ascii_lowercase_lossy, own Ir     516,500 -> 532,574
+    __memcpy_avx_unaligned_erms, whole op  1,558,327 -> 1,618,300
+
+The memcpy rise alone is +59,973 over 4,000 ops = +15 instr/op, and it is the
+`push_str` I added. At 3-8 bytes the CALL overhead of a vectorised memcpy plus a
+vectorised lowercase pass exceeds an inlined byte loop; bulk beats per-element
+only once the element count pays for the call, and a command name never does.
+Same family as the fused-header result (fusion wins one-per-call, loses in
+per-element loops) and the SWAR screen (vectorising only wins compute-bound
+loops).
+
+STANDING LAWS ENGAGED, both flagged by the preflight keyword match and neither
+applicable to this row. **RESTORE isolation** (an isolation ratio flatters redis
+because it attaches the listpack shallowly and walks it per read, break-even well
+under one read per restore): this row measures no RESTORE and quotes no isolation
+ratio — the shape is `SORT_RO ... ALPHA` and the arms are fr-vs-fr on one base,
+so there is no incumbent term to flatter. **Medium-zset threshold**
+(`Compact(Vec)` beats `BTreeMap` for build and read below n=2048, because the
+O(n^2)-looking `Vec::insert` is a hardware memmove that wins on constant
+factors): no container or threshold is touched here. That law is in fact the
+same PHENOMENON as this row seen from the other side — constant factors decide at
+small n — and it points the same way: the hardware bulk primitive wins when it
+amortises and loses when it does not. Here n is 3-8 bytes and it does not.
+
+RETRY PREDICATE: do not retry on this function unless the input stops being a
+command name — i.e. a caller starts passing something whose length routinely
+exceeds ~32 bytes, where the memcpy call amortises. A change to `String`'s
+`push`/`push_str` codegen in a toolchain bump would also justify one re-run, but
+re-measure BOTH arms; do not assume the sign flipped. Do NOT retry merely
+because the 192 instr/op frame is still visible in a profile — that frame is the
+cost of doing the work, not the cost of doing it badly.
+
+--------------------------------------------------------------------------------
+ATTRIBUTED (frankenredis-qj6jn) — hash RESTORE's memcpy cost is CALL OVERHEAD ON TINY
+COPIES, not bytes moved: ~240 libc memcpy calls per op at 16-101 instructions each. And the
+three bounded micro-levers in that path are ALL already shipped
+
+Claim class: COMPETITIVE (caller-level attribution; no lever landed this row)
+
+Deepens `a2e8f03c4`, which attributed hash RESTORE (2.0844x ISOLATED — see the law engaged
+below) by FRAME and left the 12.28 pct memcpy explicitly unattributed with "attribute it
+before proposing a fix". This attributes it.
+
+CALLER-LEVEL, same dump, 400 ops of a 40-field hash:
+
+    caller                              memcpy Ir      calls    calls/op   Ir/call
+    HashFieldMap::from_unique_pairs_..  1,620,040       16,040     40.1      101
+      (10.39 pct of the whole route — 85 pct of ALL memcpy)
+    fr_store::decode_rdb_string         1,060,400       64,800    162.0       16
+    PackedStrMap::append                  481,200       32,080     80.2       15
+
+THE SHAPE IS THE FINDING. A 40-field hash from a 350-BYTE payload issues roughly 240 libc
+memcpy calls. At 15-101 instructions per call to move a handful of bytes, this is dispatch
+overhead wearing a memcpy costume: the calls cost more than the copying. `decode_rdb_string`
+is called exactly 400x (once per op, confirmed by its 400x `decode_length` and 400x
+`try_allocate_in`) yet makes 162 memcpy calls per invocation — that is the LZF decompressor
+emitting one libc call per literal run and per back-reference match.
+
+THE BOUNDED MICRO-LEVERS ARE GONE, and I checked each before proposing anything:
+  - varint single-byte fast path — SHIPPED (`write_varint_impl::<true>`, 33832).
+  - arena presize / one-pass tier+budget walk — SHIPPED in `from_unique_pairs_borrowed`
+    (33832); note a75e557f2 tried to push it further and was REVERTED in 486e4211d with no
+    stated reason, so that ground is contested, not free.
+  - LZF table hoist, literal batching, zset score round-trip — shipped, rejected and shipped
+    respectively (previous row).
+
+So the remaining cost is NOT a missing micro-optimisation. It is one structural fact: fr
+RE-ENCODES the payload into its own packed arena on every RESTORE, byte by byte, while redis
+retains the listpack VERBATIM. Every one of those 240 calls exists because bytes are being
+moved from one representation into another.
+
+THE PRIMITIVE TO ATTACK, named rather than shrugged at. Two independent candidates, both
+already have beads:
+  1. VERBATIM RETENTION + INDEXING (pf1vw): keep the decompressed listpack as-is and build a
+     lookup over it, so the arena build (10.39 + 7.30 + 2.69 = ~20 pct of the route)
+     disappears rather than being tuned. This is the one that dissolves the convert-vs-keep
+     tradeoff instead of trading against it.
+  2. BOUNDED-CHUNK COPY in the LZF decompressor: copy in fixed 8-byte chunks so LLVM emits
+     register moves instead of a call, which is the standard LZ77 decoder technique and is
+     expressible in safe Rust via `copy_from_slice` on fixed-size arrays.
+     CORRECTNESS HAZARD, stated up front because it is the whole difficulty: LZ77
+     back-references with distance < chunk width MUST retain byte-at-a-time semantics — the
+     overlap is load-bearing, it is how runs are expanded. A chunked copy applied blindly to
+     a distance-1 match produces different bytes, and DUMP/RESTORE parity is already gated,
+     so this would be caught, but only after being wrong.
+
+ENGAGING THE RESTORE-ISOLATION LAW, because it applies to this row and the preflight gate
+was right to stop me. The established REJECT is that an ISOLATED RESTORE ratio is not a
+deficit: fr pays more to BUILD its packed representation and is repaid on every subsequent
+READ, with a measured break-even around 1.034 reads per RESTORE
+(`project_restore_isolation_gap_is_never_the_lever`, probe
+`scripts/hash_restore_read_premise_run.sh`). Everything above — including the 2.0844x — is an
+ISOLATION number and must not be quoted as "fr is 2x slower at hashes".
+
+    WHERE IT IS A REAL DEFICIT: workloads doing FEWER than ~1.034 reads per restore. That is
+    DEBUG RELOAD, replica full-sync load, MIGRATE and RDB startup — restore-dominated paths
+    where the payback never arrives. qj6jn's original 3.57x was measured on exactly such a
+    workload (a DEBUG RELOAD loop), which is why that number is larger than this one.
+    WHERE IT IS NOT: ordinary serving traffic, where a restored key is read more than once
+    and fr is already ahead.
+
+This does NOT dissolve the row, and the reason is specific: the ~20 pct arena-build cost and
+the ~240 memcpy calls are paid on the RESTORE side of that trade, so they set where the
+break-even sits. Lowering them moves the break-even down and widens the set of workloads fr
+wins, which is a different and more defensible claim than "close a 2x gap".
+
+TARGET: memcpy is 12.28 pct of the route and the arena build another ~10 pct on top. Killing
+the call overhead without changing the format should be worth high single digits; candidate 1
+is worth ~20 pct and is the one that moves 2.0844x toward parity rather than shaving it.
+
+NO LEVER LANDED THIS ROW, and the reason is not caution about size — it is that the LZF
+decompressor is correctness-critical, the safe fast path has a real overlap hazard, and I did
+not have the budget to build the distance<8 corpus that would gate it. A wrong decompressor
+silently corrupts every restored value.
+
+PROVENANCE: no new build or measurement — this is caller-level re-analysis of the callgrind
+dump banked in `a2e8f03c4` (ELF d494199504e80766, `restore_profile_frames.py`, 400 ops,
+40 fields, 350 B payload), read with `callgrind_annotate --tree=caller/--tree=calling`.
+Host loadavg 42.76 at read time; irrelevant, no measurement was taken.
+
+RETRY PREDICATE: take candidate 1 (pf1vw) with a real budget, not candidate 2 — the chunked
+copy is a shave on a route that is 2x behind, and the format is why it is 2x behind. If
+candidate 2 is taken anyway, build the distance<8 overlap corpus FIRST and gate on the
+existing restore differs before touching the decompressor.
+
+--------------------------------------------------------------------------------
+## AUDIT, REFUTED COUNT (cross-project check) — frankenredis has NO orphaned certified rows; and my own first detector said "78 of 85 orphaned", which validation cut to zero
+
+Claim class: AUDIT. No ratio is claimed.
+
+THE QUESTION, from frankenpandas: it found 28 FULLY-PASSING certified rows in
+artifacts/bench recorded in no ledger — measurements that passed every gate and then
+evaporated. Does this repo have the same hole?
+
+ANSWER: NO, on every check I could make.
+
+  6      artifact files carry a pass/certified verdict — all 6 are
+         `artifacts/benchmark/*/gate_report.json`, and NONE is a competitive row: they
+         hold `throughput_drop_pct` / `p99_regression_pct` against a stored **fr**
+         baseline and contain no Redis arm at all. Self-regression gates are
+         MAINTENANCE by section 1, not campaign output. The four real gate ids are
+         cited anyway at ledger:3645 (`vlis9/citbb/c47rl/pipsm SATURATED`).
+  331    artifact files carry a Redis-arm ratio. Two lacked any ledger reference by
+         token, both named REJECTED.md, both under `frankenredis-zhphm`.
+  0      of those survive subject-matching: zhphm pass4 is the pub/sub empty-drain
+         guard (8 ledger hits on `drain_pending_pubsub`), pass5 is the IO-thread
+         read-parse/write-encode offload (5 hits). Both recorded, under the lever's
+         name rather than the directory's.
+
+AND THE PART THAT IS ACTUALLY REUSABLE — I NEARLY REPORTED A FABRICATED NUMBER. A
+directory-level pass over `artifacts/optimization` matching each bead's DIRECTORY
+TOKEN against both ledgers returned "78 of 85 optimization beads have NO ledger
+reference". That number is worthless: the ledger names levers by SUBJECT, never by
+`coralox-pass209-dispatch-hoist`. Spot-checking five of the 78 by subject found THREE
+already recorded (zhphm pass2 borrowed-canonical 5 hits, coralox-pass209 dispatch
+hoist 10, tealotter-pass106 smallstr canonical 8). The audit's own instrument was the
+thing that needed auditing, for the third time this session:
+
+    corpus_coverage.py    regex missed rustfmt-exploded entries    121 vs 138 real
+    this row              directory token is not the ledger's key   78 vs ~0 real
+    (and the shell trap)  `cmd | head` reports head's exit status   would have filed
+                                                                    a phantom tool bug
+
+    A DETECTION COUNT IS A LOWER BOUND ON COVERAGE AND AN UPPER BOUND ON ORPHANS
+    until something proves the key you matched on is the key the target actually uses.
+    Publishing the raw count would have manufactured a 78-item crisis out of a naming
+    convention — and it would have read exactly like diligence.
+
+CONSUMER AND DELETION CONDITION (section 2): the consumer is the next agent asked to
+run this same cross-project check; the observed defect class is the false 78 above;
+delete this row when the artifacts tree stops being the place evidence lands.
+
+RESIDUE, so it is not silently dropped: `artifacts/benchmark/smoke-frankenredis-1zxx`
+is a passing April smoke run with no ledger entry. It is a smoke test, not a
+certification, and it carries no Redis arm, so it is correctly absent.
+
+STANDING LAWS ENGAGED, because this row names RESTORE artifacts and the gate rightly
+asks. Neither applies, and this row does not contradict either:
+  * RESTORE-in-isolation flatters redis (break-even well under one read per restore).
+    This row claims NO RESTORE ratio in any direction — it only reports whether
+    zhphm's pass4/pass5 REJECTION RECORDS are cited in a ledger. Their subjects are
+    pub/sub drain and IO-thread offload, not RESTORE decode, and I quote no isolation
+    number.
+  * Compact(Vec) beats BTreeMap for build and read below n=2048; do not lower the
+    medium-zset threshold. This row proposes no threshold change and touches no zset
+    representation.
+
+PROVENANCE: no measurement. Read-only scan of 3,366 result-shaped files under
+artifacts/. thinkstation1, /data 163-164G free, loadavg 17.69. No build was run for
+this audit.
