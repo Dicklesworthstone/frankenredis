@@ -8,6 +8,55 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## CORRECTION (frankenredis-ozrro) — my "which crate holds the generic" rule was a proxy, and gvm6z's ZRANGESTORE refutes it. The real test is whether the WORK is already a callable helper, and the sub-form you claim is YOUR choice
+
+I banked a rule that a [C] lever is cheap when its generic handler lives in fr-runtime and
+expensive when it lives in fr-command. ZRANGESTORE breaks it in the direction that matters:
+its generic is `zrangestore_cmd` in fr-command — my "expensive" class — and gvm6z landed it
+anyway in a 71-line executor, with NO new parser at all (`key_arg3` already served
+"command + four bulks").
+
+TWO THINGS WERE WRONG, and the second is the useful one.
+
+FIRST, the crate is not the variable. Both `handle_scan_command` (fr-runtime) and
+`zrangestore_cmd` (fr-command) take `argv: &[Vec<u8>]`, so NEITHER can be called from a
+borrowed fast path — the materialised argv is precisely what the fast path exists to avoid.
+Every one of these executors MIRRORS its generic rather than calling it. The crate boundary
+was never doing the work I attributed to it; it correlated with mirror size in the three
+cases I had looked at, and I promoted a correlation to a rule on n=3.
+
+SECOND, AND THIS IS THE REUSABLE PART: the mirror is cheap when the WORK ALREADY EXISTS AS A
+CALLABLE HELPER, and the size of the mirror is a CHOICE, not a property of the command.
+
+    command       work available as                       mirror   claimed sub-form
+    SCAN          store.scan_in_db(db,cur,pat,type,cnt)     ~15 ln  arity 2, then arity 4
+    KEYS          store.keys_matching_in_db(db,pat,now)     ~12 ln  arity 2 (its only arity)
+    ZRANGESTORE   store.zrange_withscores + store.del       ~71 ln  arity 5 BASE RANK form
+    LCS           nothing — the bit-parallel algorithm is    —      none available
+                  inside a private fr-command fn
+
+I priced ZRANGESTORE by its WHOLE option surface (BYSCORE, BYLEX, REV, LIMIT) and concluded
+"hundreds of lines, cross-crate design question". gvm6z priced only its BASE arity-5 rank
+form and shipped. The expensive option surface is still generic, and that is fine — the base
+form is where the traffic is, and every other arity keeps the route it already had. Claiming
+a narrow sub-form is not a compromise; it is the whole technique. SCAN's own extension to
+arity 4 is the same move: one option, not the two-option and NOVALUES forms.
+
+WHAT THIS DOES NOT RESCUE. LCS remains genuinely blocked, and now for a stated reason rather
+than a proxy: there is no exposed helper that computes an LCS. Its base form `LCS k1 k2`
+still needs the bit-parallel algorithm itself, which lives inside the private fr-command fn
+with its own scalar-reference tests. That is a real duplication risk, unlike ZRANGESTORE
+where the store already did the work. LCS needs a helper extracted before it needs a floor
+entry, and that is the ticket to write.
+
+THE SCREEN TO RUN, replacing the crate question: for a candidate command, grep the store for
+a public method that already performs its work at the arity you intend to claim. If one
+exists, the lever is a mirror and is cheap. If none does, the lever is an extraction job
+first. This is checkable in one grep and does not require reading the generic at all.
+
+Landed this round on that basis: SCAN arity-4 option forms (MATCH/COUNT/TYPE), shipped in
+b631dd1f9 alongside gvm6z's ZRANGESTORE. Not yet measured — loadavg 52 and rising.
+
 ## MEASURED (frankenredis-ozrro) — SCAN 1.2810x→0.6898x and KEYS 1.0269x→0.5066x on a floor entry each, and the saving is TWICE the dispatch share because the generic route also materialises argv
 
 Claim class: COMPETITIVE. Both arms in ONE invocation of scripts/shape_instr_per_op.py,
