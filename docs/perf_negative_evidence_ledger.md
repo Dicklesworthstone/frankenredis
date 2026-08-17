@@ -27815,3 +27815,83 @@ locally with RCH_CARGO_WRAPPER_BYPASS=1 exported and env -u CARGO_TARGET_DIR, no
 line. thinkstation1, 64 cores, governor powersave, /data 188G. Loadavg 16.29-16.38 across
 the sweep, 12.68 at the end; mean CPU MHz 2226-2921 per repeat, recorded per line in the
 probe's output.
+
+--------------------------------------------------------------------------------
+MEASURED (frankenredis-ozrro) — LTRIM front-classified with a NEW borrowed executor:
+1.4925x -> 0.6172x, dispatch 2,621.1 -> 498.5 (-81.0 pct). ALL THREE hidden worst ratios
+are now cleared and NO measured shape remains above parity
+
+Claim class: COMPETITIVE
+
+The last of the three routes the new shapes exposed, and the only one that was NOT a
+floor-table entry over existing machinery. SMOVE and RPOPLPUSH each had a borrowed parser
+AND executor already; LTRIM had NEITHER, which my retry predicate flagged explicitly so
+that nobody added a floor class first — a class whose arm cannot serve the shape sends it
+to GENERIC and is a REGRESSION.
+
+    shape         BEFORE                    AFTER                     delta
+    ltrim_noop    6,166.8 / 6,180.6         2,453.7 / 2,453.7         -60.3 pct
+                  dispatch 42.5 / 42.4 pct  dispatch 20.3 / 20.3 pct
+                  (~2,621.1 instr/op)       (~498.5 instr/op)         -81.0 pct
+                  ratio 1.4669x / 1.5180x   ratio 0.6173x / 0.6171x   CROSSED PARITY
+
+    hset_same     2,340.4 / 2,342.6         2,347.2 / 2,332.8         -0.06 pct
+                  dispatch ~682.0           dispatch ~681.9           UNCHANGED
+    get_control   1,300.3 / 1,305.6         1,307.2 / 1,307.8         +0.35 pct  NULL
+
+The AFTER arm reproduced to 0.00 pct — 2,453.7 twice. `hset_same` is the sibling control:
+unclassified, walking the same cascade, 29.1 pct dispatch, and its dispatch figure is
+identical before and after. So this is LTRIM-specific, not a global dispatch change.
+
+WHAT WAS ACTUALLY WRITTEN, because this one carried real risk. The PARSER needed nothing —
+`parse_borrowed_plain_key_arg2_packet` is generic over prefix and command and already
+serves ZMPOP and XACK at this exact shape. The EXECUTOR did not exist, and a new borrowed
+executor is this repo's highest-yield bug vein: a fast path that returns the right REPLY
+while diverging in what the store holds. Rather than write one, I MIRRORED the proven
+`lset` trio — gate, executor, metrics — mechanically, so no bookkeeping step could be
+dropped: the same `plain_borrowed_default_key_write_allows` gate (which is what keeps the
+"ltrim" keyspace event, propagation, AOF and tracking out of the fast path), the same
+stats/session/expire-cycle/metrics/propagation sequence, the same error accounting. Two
+deliberate differences: LTRIM's bounds are a pair of 64-bit offsets, NOT truncated to i32
+the way LSET's index is upstream; and the store call is `ltrim(key, start, stop, now)`.
+
+CORRECTNESS IS TESTED WHERE LTRIM'S SEMANTICS BEND, against a twin runtime on the generic
+path, comparing reply AND surviving list AND key existence AND dirty AND the WHOLE-STORE
+DIGEST — the digest being what catches a divergence the reply cannot show. Eight range
+cases: full-range no-op, middle subset, negative pair, single element, start-beyond-end and
+start>stop (both of which EMPTY the list and must DELETE the key upstream), and both clamp
+directions. Plus the decline cases: non-integer bounds defer so the generic emits upstream's
+exact ordering, a missing key is a +OK no-op that must create nothing, and WRONGTYPE must
+match byte for byte and mutate nothing.
+
+    MUTATION-TESTED WITH THE VEIN'S OWN SIGNATURE: swapping start and stop in the store
+    call leaves the reply a correct `+OK` and reddens on the surviving elements. A reply-only
+    test would have passed that mutation.
+
+602 fr-runtime and 356 fr-server tests pass.
+
+THE COST MODEL HELD. Two rows ago I derived "a front-classified route costs ~263 + ~100 per
+additional bulk parsed" from three points. LTRIM's parser reads THREE bulks (key, start,
+stop), predicting ~463; actual 498.5, within 8 pct. Fourth point, same law.
+
+    STANDING: SMOVE 1.5099x -> 0.5144x, RPOPLPUSH 1.4792x -> 0.5182x, LTRIM 1.4925x ->
+    0.6172x. All three of the routes the corpus was hiding are cleared in three turns, and
+    NO SHAPE ON THE MEASURED BOARD IS ABOVE 1.0.
+
+PROVENANCE:
+  AFTER ELF            35f3e8d022c1d484...
+  BEFORE ELF           a030eeec4c231c2c...  same tree, built minutes apart, differing ONLY
+                       by this change (stash / build / restore over BOTH edited crates).
+  harness              scripts/shape_instr_per_op.py at HEAD, N=2000/2N=4000, ABBA per
+                       shape, both engines in the SAME invocation.
+  host                 thinkstation1, 64 cores, /data 188G, governor powersave, two builds.
+  PER-ARM loadavg/MHz  ltrim_noop 13.41/3205, 13.41/3076, 13.94/3118, 14.99/2842 ·
+                       hset_same 14.99/3511, 17.31/3680, 18.25/3136, 18.31/2779 ·
+                       get_control 18.31/2478, 18.04/2428, 18.04/2474, 17.56/2624.
+                       Window verified at open: 16.40 / 15.60 / 18.73, tightly converged.
+
+RETRY PREDICATE: do NOT go looking for more above-parity shapes in the existing corpus —
+there are none. The honest next move is MORE SHAPES, not more levers: this ledger has twice
+found that the corpus, not the engine, was the limiting instrument. Any new borrowed
+executor must mirror an existing gated trio and be tested against a twin runtime on
+`state_digest()`, not on the reply.

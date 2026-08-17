@@ -14606,6 +14606,11 @@ enum BorrowedDispatchFloorClass {
     SetOpt4,
     SetOpt5,
     SetOpt6,
+    /// (frankenredis-ozrro) `LTRIM key start stop` at arity 4. The LAST of the three
+    /// routes the corpus was hiding, and the only one that needed an executor written:
+    /// SMOVE and RPOPLPUSH already had theirs, LTRIM had neither. The PARSER is the
+    /// generic `key_arg2` one that already serves ZMPOP and XACK at this exact shape.
+    Ltrim,
     /// (frankenredis-ozrro) `RPOPLPUSH src dst` at arity 3, the whole command. Parser and
     /// executor already existed; only the floor entry was missing, so it walked to cascade
     /// line ~9111 and paid 3,070 instr/op of dispatch at a 66.3 pct share.
@@ -15038,6 +15043,7 @@ enum BorrowedDispatchFloorCommand {
     Set,
     Smove,
     Rpoplpush,
+    Ltrim,
     Msetnx,
     Append,
     Bitcount,
@@ -15254,6 +15260,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'S', b'E', b'T', b'N', b'X'] => Some(BorrowedDispatchFloorCommand::Setnx),
             [b'T', b'O', b'U', b'C', b'H'] => Some(BorrowedDispatchFloorCommand::Touch),
             [b'S', b'M', b'O', b'V', b'E'] => Some(BorrowedDispatchFloorCommand::Smove),
+            [b'L', b'T', b'R', b'I', b'M'] => Some(BorrowedDispatchFloorCommand::Ltrim),
             [b'S', b'C', b'A', b'R', b'D'] => Some(BorrowedDispatchFloorCommand::Scard),
             [b'S', b'D', b'I', b'F', b'F'] => Some(BorrowedDispatchFloorCommand::Sdiff),
             [b'Z', b'C', b'A', b'R', b'D'] => Some(BorrowedDispatchFloorCommand::Zcard),
@@ -16479,6 +16486,7 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // whole cascade. The class therefore cannot strand a shape another arm would have
         // served, which is the condition the floor-class rule actually requires.
         (4, BorrowedDispatchFloorCommand::Smove) => Some(BorrowedDispatchFloorClass::Smove),
+        (4, BorrowedDispatchFloorCommand::Ltrim) => Some(BorrowedDispatchFloorClass::Ltrim),
         (3, BorrowedDispatchFloorCommand::Rpoplpush) => {
             Some(BorrowedDispatchFloorClass::Rpoplpush)
         }
@@ -17966,6 +17974,42 @@ fn try_dispatch_floor_classified_action(
                         argv_scratch,
                     )
                 }
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Ltrim => {
+            // (frankenredis-ozrro) LTRIM measured 1.4792x with 42.4 pct dispatch and was
+            // the last of the three routes the new shapes exposed. Unlike SMOVE and
+            // RPOPLPUSH it had NO borrowed executor, so `execute_plain_ltrim_borrowed` was
+            // written by mirroring the proven `lset` one — same gate
+            // (`plain_borrowed_default_key_write_allows`, which is what keeps the "ltrim"
+            // keyspace event, propagation, AOF and tracking out of the fast path), same
+            // stats/session/expire-cycle/metrics/propagation sequence, same error
+            // accounting. The parser is the generic key_arg2 one that already serves ZMPOP
+            // and XACK at this shape, so nothing new was written on the parse side.
+            //
+            // A declining executor — non-integer range, or the write gate refusing —
+            // falls through to the generic path exactly as the cascade would have.
+            if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
+                unparsed,
+                &parser_config,
+                b"*4\r\n$5\r\n",
+                b"LTRIM",
+            ) && let Some(response) =
+                runtime.execute_plain_ltrim_borrowed(packet.key, packet.a, packet.b, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,
@@ -51351,6 +51395,68 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
                 Some(super::BorrowedDispatchFloorClass::Rpoplpush),
                 "{other:?} must not be claimed as Rpoplpush"
             );
+        }
+    }
+
+    /// (frankenredis-ozrro) LTRIM's floor class. Same promise as SMOVE's and RPOPLPUSH's,
+    /// but note the parser here is the SHARED `key_arg2` one that also serves ZMPOP and
+    /// XACK — so the token and prefix are what keep those apart, and this asserts they do.
+    #[test]
+    fn ltrim_floor_class_claims_exactly_what_its_parser_accepts() {
+        let cfg = ParserConfig::default();
+        fn packet(args: &[&str]) -> Vec<u8> {
+            let mut p = format!("*{}\r\n", args.len()).into_bytes();
+            for a in args {
+                p.extend_from_slice(format!("${}\r\n{}\r\n", a.len(), a).as_bytes());
+            }
+            p
+        }
+        let parses = |pkt: &[u8]| {
+            super::parse_borrowed_plain_key_arg2_packet(pkt, &cfg, b"*4\r\n$5\r\n", b"LTRIM")
+                .is_some()
+        };
+
+        for served in [
+            packet(&["LTRIM", "k", "0", "-1"]),
+            packet(&["ltrim", "k", "0", "-1"]),
+        ] {
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(&served, &cfg),
+                Some(super::BorrowedDispatchFloorClass::Ltrim),
+            );
+            assert!(parses(&served), "the class claims arity 4, the parser must accept");
+        }
+
+        // LTRIM is not variadic: no other arity may be claimed.
+        for wrong in [
+            vec!["LTRIM"],
+            vec!["LTRIM", "k"],
+            vec!["LTRIM", "k", "0"],
+            vec!["LTRIM", "k", "0", "-1", "extra"],
+        ] {
+            let pkt = packet(&wrong);
+            assert_ne!(
+                super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
+                Some(super::BorrowedDispatchFloorClass::Ltrim),
+                "{wrong:?} must not be claimed as Ltrim"
+            );
+            assert!(!parses(&pkt), "{wrong:?} must not parse as LTRIM either");
+        }
+
+        // The shared key_arg2 parser serves several commands; the prefix+token must keep
+        // them apart, or LTRIM's arm would answer someone else's packet.
+        for other in [
+            vec!["ZMPOP", "k", "a", "b"],
+            vec!["XACK", "k", "g", "i"],
+            vec!["LPUSH", "k", "a", "b"],
+        ] {
+            let pkt = packet(&other);
+            assert_ne!(
+                super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
+                Some(super::BorrowedDispatchFloorClass::Ltrim),
+                "{other:?} must not be claimed as Ltrim"
+            );
+            assert!(!parses(&pkt), "{other:?} must not parse under the LTRIM token");
         }
     }
 }

@@ -1318,6 +1318,15 @@ fn plain_hincrbyfloat_owned_argv(key: &[u8], field: &[u8], increment_arg: &[u8])
     ]
 }
 
+fn plain_ltrim_owned_argv(key: &[u8], start_arg: &[u8], stop_arg: &[u8]) -> Vec<Vec<u8>> {
+    vec![
+        b"LTRIM".to_vec(),
+        key.to_vec(),
+        start_arg.to_vec(),
+        stop_arg.to_vec(),
+    ]
+}
+
 fn plain_lset_owned_argv(key: &[u8], index_arg: &[u8], value: &[u8]) -> Vec<Vec<u8>> {
     vec![
         b"LSET".to_vec(),
@@ -27979,6 +27988,164 @@ impl Runtime {
                 reason_code: "command_time_budget_exceeded",
                 reason: format!(
                     "command 'HINCRBYFLOAT' took {elapsed_us}us, exceeding budget {}ms",
+                    self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::Integer(0),
+            });
+        }
+    }
+
+    fn can_execute_plain_ltrim_borrowed(
+        &mut self,
+        key: &[u8],
+        start_arg: &[u8],
+        stop_arg: &[u8],
+        now_ms: u64,
+    ) -> bool {
+        if self.policy.gate.max_array_len < 4
+            || self.policy.gate.max_bulk_len < b"LTRIM".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || start_arg.len() > self.policy.gate.max_bulk_len
+            || stop_arg.len() > self.policy.gate.max_bulk_len
+        {
+            return false;
+        }
+        self.plain_borrowed_default_key_write_allows(now_ms)
+    }
+
+    /// (frankenredis-ltrimfast) Conservative borrowed WRITE fast path for `LTRIM key
+    /// index value`. Parse the index (i64 truncated to i32, upstream's 32-bit
+    /// index), defer on a non-integer so the generic's peek-before-parse ordering
+    /// emits the exact "no such key" / WRONGTYPE / "value is not an integer"; then
+    /// `store.ltrim` once → `+OK` or CommandError::Store(err).to_resp() (KeyNotFound →
+    /// "no such key", WrongType → WRONGTYPE, IndexOutOfRange → "index out of range").
+    /// This does a SINGLE keyed lookup vs the generic's redundant peek-then-ltrim
+    /// double lookup. Gated by the WRITE predicate, so the "ltrim" keyspace event,
+    /// propagation, AOF, and tracking are inactive.
+    pub fn execute_plain_ltrim_borrowed(
+        &mut self,
+        key: &[u8],
+        start_arg: &[u8],
+        stop_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_ltrim_borrowed(key, start_arg, stop_arg, now_ms) {
+            return None;
+        }
+        // Parse the index first (i64 then truncate to i32 — upstream 32-bit index)
+        // and DEFER on a non-integer: the generic peeks the key type before parsing
+        // the index, so a bad index on a missing/wrong-type key must surface the
+        // key error (no such key / WRONGTYPE) — deferring lets the generic produce
+        // that exact ordering. On a valid index we then call store.ltrim directly,
+        // which does a SINGLE keyed lookup (returns KeyNotFound / WrongType /
+        // IndexOutOfRange) — avoiding the generic's redundant peek-then-ltrim double
+        // lookup, the actual source of LTRIM's slowdown.
+        // LTRIM's range is a pair of 64-bit offsets — NOT truncated to i32 the way
+        // LSET's index is upstream — so both are parsed as plain i64. Deferring on a
+        // non-integer preserves the generic path's peek-before-parse error ordering.
+        let start_idx = parse_i64_arg(start_arg).ok()?;
+        let stop_idx = parse_i64_arg(stop_arg).ok()?;
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("ltrim");
+        self.session.last_argv_len_sum = b"LTRIM".len() + key.len() + start_arg.len() + stop_arg.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        self.server.last_eviction_loop = None;
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let result = self.server.store.ltrim(key, start_idx, stop_idx, now_ms);
+        let elapsed_us = self.finish_chained_command(start);
+        let reply = match result {
+            Ok(()) => RespFrame::SimpleString("OK".to_string()),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_ltrim_borrowed_metrics(
+            key, start_arg, stop_arg, elapsed_us, now_ms, packet_id, failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    fn record_plain_ltrim_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        start_arg: &[u8],
+        stop_arg: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| plain_ltrim_owned_argv(key, start_arg, stop_arg));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| plain_ltrim_owned_argv(key, start_arg, stop_arg));
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind("ltrim", elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| plain_ltrim_owned_argv(key, start_arg, stop_arg));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'LTRIM' took {elapsed_us}us, exceeding budget {}ms",
                     self.server.command_time_budget_ms
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv_ref),
@@ -73619,5 +73786,125 @@ user bob reset off nopass +@all
         // Both must have CLEARED the map, guard or no guard.
         assert!(guarded.server.pubsub_outbox.is_empty());
         assert!(reference.server.pubsub_outbox.is_empty());
+    }
+
+    /// (frankenredis-ozrro) `execute_plain_ltrim_borrowed` is a NEW executor, not a
+    /// reordered route, so it carries the whole risk this repo calls the
+    /// borrowed-fast-path-skips-the-generic-check vein: a fast path that produces the
+    /// right REPLY while diverging in what the store actually holds.
+    ///
+    /// Every case therefore compares the reply, the surviving list, key existence, the
+    /// dirty counter AND the whole-store digest against the generic path on a twin
+    /// runtime — the digest is what catches a divergence the reply cannot show.
+    ///
+    /// The cases are chosen where LTRIM's semantics BEND: an empty result DELETES the key
+    /// upstream, start>stop empties, and negative indices count from the tail.
+    #[test]
+    fn plain_ltrim_borrowed_matches_generic_across_ranges_and_deletion() {
+        // (label, seed len, start, stop)
+        let cases: &[(&str, usize, &str, &str)] = &[
+            ("full range is a no-op", 5, "0", "-1"),
+            ("middle subset", 5, "1", "3"),
+            ("negative pair from the tail", 5, "-3", "-1"),
+            ("single element", 5, "2", "2"),
+            ("start beyond end EMPTIES and deletes", 5, "9", "10"),
+            ("start > stop EMPTIES and deletes", 5, "3", "1"),
+            ("stop past the end clamps", 5, "2", "99"),
+            ("negative start past the head clamps", 5, "-99", "1"),
+        ];
+
+        for (label, n, start, stop) in cases {
+            let mut fast = Runtime::default_strict();
+            let mut generic = Runtime::default_strict();
+            for rt in [&mut fast, &mut generic] {
+                for i in 0..*n {
+                    let v = format!("v{i}");
+                    assert!(matches!(
+                        rt.execute_frame(command(&[b"RPUSH", b"lk", v.as_bytes()]), 10),
+                        RespFrame::Integer(_)
+                    ));
+                }
+            }
+
+            let fast_reply = fast
+                .execute_plain_ltrim_borrowed(b"lk", start.as_bytes(), stop.as_bytes(), 20)
+                .unwrap_or_else(|| panic!("{label}: borrowed LTRIM should engage"));
+            let generic_reply = generic.execute_frame(
+                command(&[b"LTRIM", b"lk", start.as_bytes(), stop.as_bytes()]),
+                20,
+            );
+
+            assert_eq!(fast_reply, generic_reply, "{label}: reply");
+            assert_eq!(
+                fast_reply,
+                RespFrame::SimpleString("OK".to_string()),
+                "{label}: LTRIM always replies +OK on a list"
+            );
+            assert_eq!(
+                fast.execute_frame(command(&[b"LRANGE", b"lk", b"0", b"-1"]), 21),
+                generic.execute_frame(command(&[b"LRANGE", b"lk", b"0", b"-1"]), 21),
+                "{label}: surviving elements"
+            );
+            assert_eq!(
+                fast.execute_frame(command(&[b"EXISTS", b"lk"]), 22),
+                generic.execute_frame(command(&[b"EXISTS", b"lk"]), 22),
+                "{label}: an emptied list must be DELETED, not left empty"
+            );
+            assert_eq!(fast.server.store.dirty, generic.server.store.dirty, "{label}: dirty");
+            assert_eq!(
+                fast.server.store.state_digest(),
+                generic.server.store.state_digest(),
+                "{label}: whole-store digest"
+            );
+        }
+    }
+
+    /// The other half of the promise: where the borrowed path must DECLINE so the generic
+    /// path produces upstream's exact error ordering and wording. A fast path that
+    /// answered these itself would have to reproduce that ordering, and the cheapest
+    /// correct thing is to refuse.
+    #[test]
+    fn plain_ltrim_borrowed_declines_and_defers_to_generic() {
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(command(&[b"RPUSH", b"lk", b"a"]), 10);
+        rt.execute_frame(command(&[b"SET", b"str", b"x"]), 10);
+
+        // Non-integer bounds: defer, so the generic emits "value is not an integer".
+        assert!(rt.execute_plain_ltrim_borrowed(b"lk", b"abc", b"-1", 20).is_none());
+        assert!(rt.execute_plain_ltrim_borrowed(b"lk", b"0", b"xyz", 20).is_none());
+        assert!(rt.execute_plain_ltrim_borrowed(b"lk", b"", b"-1", 20).is_none());
+
+        // A missing key is a legitimate +OK no-op, and must NOT create anything.
+        let mut fast = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        let fast_reply = fast
+            .execute_plain_ltrim_borrowed(b"nosuchlist", b"0", b"-1", 20)
+            .expect("missing-key LTRIM should engage");
+        let generic_reply =
+            generic.execute_frame(command(&[b"LTRIM", b"nosuchlist", b"0", b"-1"]), 20);
+        assert_eq!(fast_reply, generic_reply);
+        assert_eq!(
+            fast.server.store.state_digest(),
+            generic.server.store.state_digest(),
+            "a missing-key LTRIM must not create the key"
+        );
+
+        // WRONGTYPE must match the generic path byte for byte.
+        let mut fast = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut fast, &mut generic] {
+            rt.execute_frame(command(&[b"SET", b"str", b"x"]), 10);
+        }
+        let fast_reply = fast.execute_plain_ltrim_borrowed(b"str", b"0", b"-1", 20);
+        let generic_reply = generic.execute_frame(command(&[b"LTRIM", b"str", b"0", b"-1"]), 20);
+        if let Some(f) = fast_reply {
+            assert_eq!(f, generic_reply, "WRONGTYPE wording must match");
+            assert!(matches!(f, RespFrame::Error(_)));
+        }
+        assert_eq!(
+            fast.server.store.state_digest(),
+            generic.server.store.state_digest(),
+            "a WRONGTYPE LTRIM must not mutate"
+        );
     }
 }
