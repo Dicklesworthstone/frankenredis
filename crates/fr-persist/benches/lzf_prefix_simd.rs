@@ -234,6 +234,9 @@ fn main() -> Result<(), String> {
 
         let mut nulls = Vec::with_capacity(ROUNDS);
         let mut speeds = Vec::with_capacity(ROUNDS);
+        // (frankenredis-qj6jn) Tag each null with its configuration so a refused row
+        // can be split by (orientation, null-position). See the LZF_DUMP_NULLS block.
+        let mut null_tags: Vec<(bool, bool)> = Vec::with_capacity(ROUNDS);
         for round in 0..=ROUNDS {
             let swap_within_pair = round % 2 == 1;
             let pair = |bf: &dyn Fn(&[u8]) -> usize, cf: &dyn Fn(&[u8]) -> usize| {
@@ -255,6 +258,7 @@ fn main() -> Result<(), String> {
                 continue;
             }
             nulls.push(nn);
+            null_tags.push((swap_within_pair, round % 4 < 2));
             speeds.push(sp);
         }
 
@@ -263,6 +267,30 @@ fn main() -> Result<(), String> {
             sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
             let above = nulls.iter().filter(|v| **v > 1.0).count();
             let below = nulls.iter().filter(|v| **v < 1.0).count();
+            // Split by configuration. A within-pair POSITION effect must land above
+            // 1.0 in one orientation and below in the other, because the swap puts
+            // t1/t2 in one and t2/t1 in the other. If BOTH orientations sit on the
+            // same side of 1.0, position is refuted and the cause is elsewhere.
+            for (want_swap, want_first) in
+                [(false, true), (false, false), (true, true), (true, false)]
+            {
+                let mut bucket: Vec<f64> = nulls
+                    .iter()
+                    .zip(null_tags.iter())
+                    .filter(|(_, (sw, nf))| *sw == want_swap && *nf == want_first)
+                    .map(|(v, _)| *v)
+                    .collect();
+                if bucket.is_empty() {
+                    continue;
+                }
+                bucket.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let above = bucket.iter().filter(|v| **v > 1.0).count();
+                eprintln!(
+                    "NULLSPLIT {label}: swap={want_swap} null_first={want_first} n={} above1={above} med={:.6}",
+                    bucket.len(),
+                    bucket[bucket.len() / 2]
+                );
+            }
             eprintln!(
                 "NULLDUMP {label}: n={} above1={above} below1={below} min={:.6} p25={:.6} med={:.6} p75={:.6} max={:.6}",
                 sorted.len(),
