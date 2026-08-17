@@ -37871,3 +37871,60 @@ field only CLIENT INFO / CLIENT LIST ever read. That is `frankenredis-dpu2y`, wh
 question is already settled and whose fix also closes `frankenredis-zbiy3`. Take it next.
 Do NOT quote a dispatch figure from any row banked before `5d60d73e8` without re-deriving
 it with `frame_delta.py --dispatch`.
+
+--------------------------------------------------------------------------------
+2026-08-17 CrimsonHawk: FOUR PAIRED REPLICATES PER ARM — the SUBCOMMAND_TABLE hash index's
+ratio intervals are DISJOINT from the shipped arm's, so the improvement survives the worst
+pairing the denominator allows. Still SIZING, not certified (`frankenredis-fpqns`).
+
+  Claim class: COMPETITIVE. Lever is WRITTEN AND MEASURED but NOT LANDED — blocked on
+  BrownIbis's `crates/fr-command/src/lib.rs` reservation (expires 18:59Z); banking the
+  evidence here so the window is not wasted if someone else lands it.
+
+  provenance   ELFs BEFORE 7fa92786b066d0b7 (shipped state: monitor-gate lever only, hash
+               index reverted), AFTER de1fe57e68ce633a. Incumbent verified in EVERY run:
+               redis-server sha=d2c8a4b9 == vendored source HEAD, clean.
+               Host thinkstation1, 64 logical, powersave.
+  PER-ARM loadavg / MHz, as required, from the harness's own stamps:
+               scan  fr 12.88/13.92/18.19 MHz mean 3400 -> 2998 (max 4293)
+                     redis 13.05/13.94/18.17 MHz mean 2947 -> 3161 (max 4217)
+               hash  fr 13.05/13.94/18.17 MHz mean 3278 -> 2967 (max 4076)
+                     redis 13.05/13.94/18.17 MHz mean 3028 -> 3253 (max 4119)
+               Cross-core spread 2.92x at a single instant, which is why nothing here is a
+               timing claim.
+  WINDOW: UNFIT, and I am not promoting it. External builds (another project's
+               `coding_agent_search` / `e2e_search_index` plus a workspace nextest) ran
+               throughout; the harness disqualifies any ratio on that and it is right to.
+               Load WAS stationary across all eight runs (12.88-13.99 / 13.92-14.22).
+
+    arm                fr instr/op (3 runs)      spread    paired fr/redis (4 runs)
+    shipped (scan)     6467.5 6472.4 6471.1      0.076 pct  1.5637 1.4823 1.4525 1.6424
+    hash index         5662.1 5665.2 5663.3      0.055 pct  1.2338 1.3028 1.3736 1.2708
+    delta              -806.8 instr/op, -12.47 pct
+
+  WORST BOUND, per the replicated-standing convention: shipped 1.6424x, hash index
+               1.3736x. Quote those, not the means.
+  THE INTERVALS ARE DISJOINT, which is the part that survives the noise. Worst hash
+               (1.3736) is BELOW best scan (1.4525), so every hash run beats every scan
+               run: the improvement holds under the most pessimistic pairing the two
+               intervals admit, even though neither ARM's absolute ratio is certifiable in
+               this window. A thin margin would not have survived this denominator; a
+               12.47 pct one does.
+
+  METHOD FINDING, independent of the lever and worth more than it. THE DENOMINATOR SWUNG
+  11.3 pct (4122.9 - 4589.3) ACROSS EIGHT RUNS IN A STATIONARY WINDOW. Load moved less than
+  1.1 units on the 1-minute average across the whole sequence, and the fr arms reproduced to
+  0.076 and 0.055 pct in the same runs. So the instability is NOT load non-stationarity and
+  it is NOT the instrument: it is redis's elapsed-time serverCron, exactly as this harness's
+  header predicts, and it persists at the same magnitude I measured earlier today in a
+  different window (14.5 pct). The build-count disqualifier is therefore not what protects
+  the denominator -- it did not change its spread here. Anyone waiting for `builds 0` to get
+  a stable denominator is waiting for the wrong signal.
+
+RETRY PREDICATE: do NOT chase a FIT window to certify this by repetition -- eight runs in a
+stationary window did not tighten the denominator below 11 pct, so more draws will not
+either. If a certified ABSOLUTE ratio is wanted on this route, the denominator has to be
+made stationary at the source: pin redis's cron (`hz`), or measure a fixed-WORK window and
+subtract cron explicitly, or quote the disjoint-interval form above, which needs no FIT
+window because it compares two arms against the SAME contaminated denominator and the
+contamination cancels. The third is free and is what this row does.
