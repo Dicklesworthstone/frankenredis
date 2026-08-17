@@ -60956,6 +60956,18 @@ mod tests {
     /// only true if the data does not rot, and an `#[allow(dead_code)]` const
     /// is exactly the kind of thing that rots unwatched.
     #[test]
+    // (frankenredis-p98mw) `FORWARD_HASH_FIELD_TTL_REGISTERED` is `const false`, so clippy
+    // sees `assert!(true)` and fires `assertions_on_constants`. THE ASSERTION IS THE POINT:
+    // it is a tripwire that fails the moment someone flips the const, which is exactly when
+    // the three surfaces below stop being absent. Deleting it to satisfy the lint would
+    // remove the guard the lint is complaining about.
+    //
+    // Allowed locally rather than left red because this ONE pre-existing error fails
+    // `clippy -p fr-command --all-targets -- -D warnings` for the whole crate, and a
+    // permanently-red gate is one every author filters out by hand — which is how a NEW
+    // error hides behind an old one. I filtered it myself across six turns of this session
+    // before fixing it.
+    #[allow(clippy::assertions_on_constants)]
     fn forward_hash_field_ttl_registration_is_off_for_7_2_4_parity() {
         assert!(
             !super::FORWARD_HASH_FIELD_TTL_REGISTERED,
