@@ -51,24 +51,13 @@ UPSTREAM = os.path.join(ROOT, "legacy_redis_code", "redis", "src", "server.c")
 # it appears and what a verifier must do to reach it. Grouped, because the groups have
 # very different reachability and therefore very different severity.
 DECLARED_ABSENT = {
-    # `if (server.aof_enabled)` inside `# Persistence` (server.c:5808). fr SUPPORTS AOF
-    # -- BGREWRITEAOF, CONFIG SET appendonly yes -- so this group is reachable with one
-    # config line and is the highest-value subset here.
-    #
-    # MEASURED 2026-08-17 against vendored redis-server 7.2.4 on a PRIVATE pair (the shared
-    # oracle was deliberately not mutated), fr ELF f68e2521b2f167d3:
-    #     appendonly no  (default): redis 30 persistence fields, fr 30 -- all six ABSENT
-    #                               from BOTH engines, so the two AGREE
-    #     appendonly yes:           redis 36 fields with all six present and zeroed,
-    #                               fr still 30 and emits NONE of them -- all six DIVERGE
-    # The first row is the control and it is the whole reason this went unnoticed: on a
-    # default server the engines agree, and only `CONFIG SET appendonly yes` separates them.
-    "aof_current_size": "aof_enabled",
-    "aof_base_size": "aof_enabled",
-    "aof_pending_rewrite": "aof_enabled",
-    "aof_buffer_length": "aof_enabled",
-    "aof_pending_bio_fsync": "aof_enabled",
-    "aof_delayed_fsync": "aof_enabled",
+    # IMPLEMENTED 2026-08-17 in 29048d447 and removed from this baseline, which is the
+    # deletion condition this gate was written with. The six AOF sizing fields
+    # (aof_current_size, aof_base_size, aof_pending_rewrite, aof_buffer_length,
+    # aof_pending_bio_fsync, aof_delayed_fsync) now render under `appendonly yes`, verified
+    # live: redis 36 persistence fields and fr 36, zero presence divergences in BOTH the
+    # on and off configurations. The gate flagged their arrival itself, via the
+    # "declared-absent field is now rendered" arm — which is what that arm is for.
     # NOT LISTED, and the reason is a correction: `slave_priority` and
     # `master_link_down_since_seconds` were in this baseline and are RENDERED. fr emits
     # them in the multi-line `write!` at fr-runtime/src/lib.rs:45698, which the first
