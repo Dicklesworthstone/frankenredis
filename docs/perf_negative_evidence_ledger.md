@@ -28092,3 +28092,78 @@ RETRY PREDICATE: keep measuring down the blind-spot list by TRAFFIC — this row
 second time a single measurement pass turned up a >1.2x route that had a complete fast path
 and no table entry. Before writing any executor, check the trio exists; three of the last
 four needed nothing. Cost the entry with 263 + ~100 per bulk (five points, worst error 8 pct).
+
+--------------------------------------------------------------------------------
+MEASURED (frankenredis-ozrro) — RENAMENX 1.5247x -> 0.4891x and SUBSTR 1.2927x -> 0.5279x,
+dispatch -90.5 pct and -87.0 pct. SIX routes cleared, all found by measuring the blind spot
+
+Claim class: COMPETITIVE
+
+Second measurement pass over the blind-spot list, chosen by traffic. Seven shapes landed
+and measured; TWO were above parity and both had complete borrowed machinery already:
+
+    renamenx_exists  5,978.0 instr/op  1.5361x  69.0 pct dispatch  ~4,125 instr/op
+    substr           5,372.9           1.2809x  62.9 pct           ~3,378
+
+69.0 pct is the highest dispatch share this campaign has recorded.
+
+    shape             BEFORE                    AFTER                     delta
+    renamenx_exists   5,978.0 / 5,971.3         1,934.4 / 1,929.1         -67.7 pct
+                      dispatch ~4,122.7 (69.0)  dispatch ~390.6 (20.2)    -90.5 pct
+                      ratio 1.4406x / 1.6088x   ratio 0.4897x / 0.4884x   CROSSED
+    substr            5,373.7 / 5,377.5         2,180.9 / 2,172.8         -59.5 pct
+                      dispatch ~3,378.4 (62.9)  dispatch ~439.4 (20.2)    -87.0 pct
+                      ratio 1.3017x / 1.2837x   ratio 0.5368x / 0.5189x   CROSSED
+
+    zlexcount         6,723.9 / 6,715.9         6,712.9 / 6,733.3         +0.05 pct
+                      dispatch 64.0 pct         dispatch 64.0 pct         UNCHANGED
+    get_control       1,309.3 / 1,302.9         1,307.3 / 1,306.5         +0.06 pct  NULL
+
+zlexcount IS THE SIBLING CONTROL AND ALSO THE NEXT TARGET, which is a useful accident: it
+is unclassified, walks the same cascade, sits at 64.0 pct dispatch and ~4,306 instr/op —
+the second-largest dispatch cost currently on the board — and it did not move. So these two
+entries are RENAMENX- and SUBSTR-specific, not a global dispatch change. I left it alone
+DELIBERATELY: at 0.7758x it is already AHEAD of redis, which is exactly the case this
+ledger keeps proving does not follow from being unclassified.
+
+THE COST MODEL, now seven points and still holding: "263 + ~100 per additional bulk parsed".
+RENAMENX reads TWO bulks (src, dst) -> predicted ~363, actual 390.6. SUBSTR reads THREE
+(key, start, end) -> predicted ~463, actual 439.4. Worst error across all seven is 8 pct.
+
+SIX ROUTES CLEARED — SMOVE, RPOPLPUSH, LTRIM, HINCRBY, RENAMENX, SUBSTR — every one
+1.29x-1.54x behind before and 0.49x-0.62x after. FIVE of the six needed nothing but a
+floor-table entry over parser, executor, gate and metrics that already existed. Only LTRIM
+needed an executor written.
+
+    AND EVERY ONE OF THE SIX WAS INVISIBLE UNTIL A SHAPE EXISTED FOR IT. The 102-shape
+    screen that ranked the corpus concluded the front-classification surface was ~ONE
+    command. It is at least seven, and the difference was never in the engine — it was in
+    what the corpus could see.
+
+CORRECTNESS. Both classes carry a name hazard, which is why they were tested together:
+RENAME is RENAMENX's shorter PREFIX and a different command, and GETRANGE is SUBSTR's
+upstream ALIAS with its own route. The test asserts each class claims exactly its arity in
+both cases, each parser accepts what is claimed, RENAME and GETRANGE are captured by
+NEITHER the classifier nor the sibling parser, and six wrong arities are refused.
+MUTATION-TESTED: relaxing SUBSTR's arity map to `(_, Substr)` reddens on `["SUBSTR"]`.
+358 fr-server tests pass.
+
+PROVENANCE:
+  AFTER ELF            974253852e32097a...
+  BEFORE ELF           f0df78ed0dcc8501...  same tree, built minutes apart, differing ONLY
+                       by this change (stash / build / restore).
+  harness              scripts/shape_instr_per_op.py at HEAD, N=2000/2N=4000, ABBA per
+                       shape. Seven new shapes verified as steady-state no-ops on a booted
+                       fr (200 executions each, DBSIZE and full KEYS compared) before use.
+  host                 thinkstation1, 64 cores, /data 156G, governor powersave, two builds.
+  PER-ARM loadavg/MHz  renamenx_exists 27.14/2474, 26.01/2633, 24.88/2966, 24.88/2306 ·
+                       substr 23.69/3181, 25.32/3879, 25.32/3358, 24.81/3872 ·
+                       zlexcount 23.87/2304, 23.87/2466, 23.00/2927, 22.43/2616 ·
+                       get_control 22.43/2757, 21.92/2730, 21.29/2756, 21.29/2656.
+                       Window at open 22.33 / 26.37 / 26.19, converged. Small-reply shapes
+                       throughout (fr 0.001 passes/op), the load-immune class.
+
+RETRY PREDICATE: ZLEXCOUNT is next by absolute dispatch (~4,306 instr/op, 64.0 pct) and its
+trio already exists — but it is 0.7758x, ALREADY AHEAD, so it is a cost reduction rather
+than a parity fix and should be described as one. Keep working the blind-spot list by
+traffic; two passes have now yielded six crossings, and the list is still 74 long.
