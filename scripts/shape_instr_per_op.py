@@ -1166,8 +1166,89 @@ def selftest() -> int:
     return 1 if failures else 0
 
 
+def incumbent_provenance(version_line: str, head_sha: str | None):
+    """Does the vendored redis BINARY match the vendored redis SOURCE it is built from?
+
+    (cross-project check) This harness measures every fr/redis ratio against a CHECKED-IN
+    binary at `legacy_redis_code/redis/src/redis-server`. Nothing rebuilds it, so if the
+    vendored source is ever updated and the binary is not, every ratio silently acquires a
+    stale DENOMINATOR -- and the denominator is the half nobody re-derives. franken_networkx
+    hit exactly this: an installed artifact 2,751 lines and twelve days behind its repo,
+    which INVERTED a ratio by 5.4x before anyone noticed.
+
+    redis stamps its build provenance into `--version` as `sha=<short>:<dirty>`, where
+    dirty=0 means the working tree was clean at build time. Comparing that to the vendored
+    tree's HEAD is a complete check: same commit AND clean means the binary is the source.
+
+    Returns (ok, message). Refuses on a DIRTY build too -- `sha=...:1` means the binary
+    contains changes that are not in any commit, so "which source is this" has no answer.
+    """
+    m = re.search(r"sha=([0-9a-f]+):(\d+)", version_line or "")
+    if not m:
+        return False, ("redis --version has no sha= stamp; cannot establish which source "
+                       "the incumbent binary was built from")
+    bin_sha, dirty = m.group(1), m.group(2)
+    if dirty != "0":
+        return False, ("incumbent binary was built from a DIRTY tree (sha=%s:%s); its "
+                       "source is not any commit" % (bin_sha, dirty))
+    if not head_sha:
+        return False, ("cannot read the vendored source tree HEAD; incumbent provenance "
+                       "is unverifiable")
+    if not head_sha.startswith(bin_sha):
+        return False, ("INCUMBENT DRIFT: binary built from %s but vendored source HEAD is "
+                       "%s -- rebuild redis-server or every ratio has a stale denominator"
+                       % (bin_sha, head_sha[:len(bin_sha) + 4]))
+    return True, "incumbent verified: redis-server sha=%s == vendored source HEAD, clean" % bin_sha
+
+
+def check_incumbent_provenance():
+    """Run `incumbent_provenance` against the live vendored tree; returns (ok, message)."""
+    try:
+        ver = subprocess.run([REDIS, "--version"], capture_output=True, text=True,
+                             timeout=30).stdout
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, "could not run the incumbent binary: %s" % exc
+    tree = os.path.join(ROOT, "legacy_redis_code/redis")
+    try:
+        head = subprocess.run(["git", "-C", tree, "rev-parse", "HEAD"],
+                              capture_output=True, text=True, timeout=30).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        head = None
+    return incumbent_provenance(ver, head or None)
+
+
+def provenance_self_test() -> int:
+    """`--self-test`: the incumbent-provenance guard, including the case it exists for."""
+    real = "Redis server v=7.2.4 sha=d2c8a4b9:0 malloc=jemalloc-5.3.0 bits=64"
+    ok, msg = incumbent_provenance(real, "d2c8a4b91e8c9f")
+    assert ok, "a matching clean build must verify: %s" % msg
+    # THE CROSS-PROJECT CASE. franken_networkx measured through an artifact 2,751 lines and
+    # twelve days behind its repo and it INVERTED a ratio by 5.4x. Here that is the vendored
+    # source moving while the checked-in binary does not.
+    ok, msg = incumbent_provenance(real, "ffffffff1234")
+    assert not ok and "INCUMBENT DRIFT" in msg, "moved HEAD must refuse: %s" % msg
+    # A dirty build has no identifiable source at all.
+    ok, msg = incumbent_provenance("Redis server v=7.2.4 sha=d2c8a4b9:1", "d2c8a4b91e8c")
+    assert not ok and "DIRTY" in msg, "dirty build must refuse: %s" % msg
+    ok, _ = incumbent_provenance("Redis server v=7.2.4", "d2c8a4b91e8c")
+    assert not ok, "a version string with no sha stamp must refuse"
+    ok, _ = incumbent_provenance(real, None)
+    assert not ok, "an unreadable source HEAD must refuse -- unverifiable is not verified"
+    # Short-vs-long sha comparison must not false-positive on a prefix mismatch.
+    ok, _ = incumbent_provenance(real, "d2c8a4b8ffff")
+    assert not ok, "a one-character sha difference must refuse"
+    # And the LIVE tree, so the test fails if this checkout's own arms have drifted.
+    live_ok, live_msg = check_incumbent_provenance()
+    assert live_ok, "this checkout's incumbent arm is not verifiable: %s" % live_msg
+    print("  incumbent provenance guard OK  (%s)" % live_msg)
+    print("PASS shape_instr_per_op self-test")
+    return 0
+
+
 def main() -> int:
     args = sys.argv[1:]
+    if "--self-test" in args:
+        return provenance_self_test()
     if "--selftest" in args:
         return selftest()
     if "--list" in args:
@@ -1190,6 +1271,12 @@ def main() -> int:
             locale = a.split("=", 1)[1]
     ops = int(args[2]) if len(args) > 2 else 2000
     seeds, cmd = SHAPES[shape]
+    prov_ok, prov_msg = check_incumbent_provenance()
+    print("  %s" % prov_msg)
+    if not prov_ok:
+        raise SystemExit("REFUSED: %s\n"
+                         "Every ratio this harness prints divides by that binary; a stale "
+                         "or unidentifiable denominator is worse than no measurement." % prov_msg)
     workdir = tempfile.mkdtemp(prefix="fr_instr_")
     if locale:
         print("  both engines pinned to LC_ALL=%s" % locale)

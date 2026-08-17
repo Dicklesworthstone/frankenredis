@@ -27304,3 +27304,55 @@ RETRY PREDICATE: front-classify SMOVE, RPOPLPUSH and LTRIM, in that order — 4,
 and 2,620 instr/op of dispatch against a front-classified route's ~275. Do NOT quote the
 1.4x ratios to more than two figures without repeat draws. And do NOT conclude "unclassified
 means behind": three of these six are unclassified and comfortably ahead.
+
+## VERIFIED (cross-project check) — this project's incumbent arm has NOT drifted, and the harness now proves it on every run instead of relying on someone checking by hand
+
+Claim class: PROVENANCE. Checked against this setup rather than assumed from another project's.
+
+THE PROMPT. franken_networkx found its INSTALLED package 2,751 lines and twelve days behind
+its repo, and that drift INVERTED a ratio by 5.4x. The question for this project is whether
+any measured arm goes through a packaged or checked-in artifact rather than a fresh build.
+
+ONE OF MINE DOES, AND IT IS THE DENOMINATOR. Every fr/redis ratio in this ledger divides by
+`legacy_redis_code/redis/src/redis-server`, a CHECKED-IN binary that nothing in the build
+rebuilds. If the vendored source were updated without rebuilding it, every ratio would
+silently acquire a stale denominator -- the half nobody re-derives.
+
+CHECKED, and it is clean:
+
+    binary self-report        sha=d2c8a4b9:0   (the :0 means built from a CLEAN tree)
+    vendored source HEAD      d2c8a4b91e8c     -> MATCHES
+    vendored tree status      clean, no uncommitted changes
+    file mtimes               no .c/.h newer than the binary (binary Apr 1, sources Apr 1/Mar 19)
+    tracked by this repo?     no commits to legacy_redis_code/redis/src in this history
+
+So the sinter_big 0.3800x row, the bitcount_unit rows, and every other ratio banked today
+divide by a binary that IS its source. No correction is owed.
+
+THE FR ARM IS FRESH BY CONSTRUCTION and was re-checked anyway: rebuilt at HEAD just now and
+the sha came back 9c59eb6de985e888..., byte-identical to the binary the last measurements
+used. Reproducible build, same input, same output.
+
+THE REAL GAP WAS THAT NOTHING ENFORCED ANY OF THIS. `shape_instr_per_op.py` -- the
+instrument that certified sinter_big -- recorded ZERO provenance for the incumbent arm: it
+printed fr's ELF sha and said nothing at all about the binary it was dividing by. That is
+precisely the shape networkx fell into, sitting in this repo's most-used harness. I found it
+by grepping, which is not a control.
+
+LANDED: `incumbent_provenance()` parses redis's own `sha=<short>:<dirty>` build stamp and
+compares it to the vendored tree's HEAD, and the harness REFUSES to measure if it cannot
+verify. Every run now prints, before any number:
+
+    incumbent verified: redis-server sha=d2c8a4b9 == vendored source HEAD, clean
+
+It refuses on all four failure modes, each of which is in `--self-test`: HEAD moved past the
+binary (the networkx case), a DIRTY build stamp (`:1` -- a binary whose source is no commit
+at all), a version string with no sha stamp, and an unreadable source tree. The self-test
+also asserts against the LIVE tree, so it fails in any checkout whose arms have actually
+drifted rather than only testing string handling.
+
+RETRY PREDICATE. This needs no re-checking on a schedule -- the guard runs on every
+invocation and refuses rather than warns. It DOES need extending if another harness starts
+measuring against a checked-in artifact: `restore_instr_per_op.py` and
+`collection_reload_headtohead.py` resolve the same vendored `REDIS` path and do not yet call
+it. That is the obvious next place, and it is cheap because the helper is already written.
