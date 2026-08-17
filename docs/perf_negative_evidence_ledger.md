@@ -8,6 +8,77 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## MEASURED (frankenredis-ozrro) — my own WORTH_IT=30 threshold is derived from a law that UNDER-predicts by ~50 pct at shallow arms, so it was dismissing hot commands: MSET pays 912.9 of dispatch at arm 19, not the 596 predicted, and HSET 681.8 at arm 16, not 461
+
+Sizing measurement, `--fr-only`, on `fr-after-pubsub` (d5be78419). Load 65.65 / 61.02 / 77.14
+with four peer builds in flight, so this is SIZING and is not certified — the control makes it
+usable anyway. Not a certification and not quoted as one.
+
+    shape         arity   dispatch measured   depth-law predicted   law error
+    mset_2          5           912.9  (30.5 pct)        596          -53 pct
+    hset_same       4           681.8  (29.2 pct)        461          -48 pct
+    dump_small      2           306.4  (11.3 pct)          —          CONTROL
+
+The control read 306.4 against 306.3 and 306.6 in the two previous sessions — 0.1 pct across a
+load range of 14 to 66. That is what makes a sizing run at loadavg 65 worth taking: fr's Ir
+does not care, and the control proves it in-window rather than by assertion.
+
+### THE THRESHOLD WAS CIRCULAR AND I DID NOT NOTICE
+
+`cascade_depth.py` documents WORTH_IT = 30: below that arm position "the depth saving does not
+repay the review cost". I then used that threshold in `floor_entry_candidates.py` to file MSET
+(arm 19) and HSET (arm 16) as "marginal" and close class [A] as exhausted.
+
+But WORTH_IT is derived FROM the depth law, and the law under-predicts:
+
+    arm 16    predicted   461    measured   681.8    -48 pct
+    arm 19    predicted   596    measured   912.9    -53 pct
+    arm 127   predicted 5,467    measured 6,214.4    -14 pct
+
+Under-prediction at BOTH ends, worst at the shallow end — which is exactly where the law's own
+docstring says its intercept is unconstrained, a caveat I wrote and then ignored when I let a
+number derived from it decide what to skip. A threshold computed from a biased fit inherits the
+bias, and here the bias runs in the direction that hides work.
+
+### AND THE RANKING HAD NO TRAFFIC DIMENSION AT ALL
+
+PUBSUB was the expensive-but-cold case: 6,214 of dispatch on a command nobody issues in a hot
+loop, which is why that row insisted on a traffic argument before building. MSET and HSET are
+the exact inverse — smaller blocks on commands that are among the hottest in any real workload.
+My screen ranked purely by predicted SIZE, so it surfaced the cold one and buried the hot ones.
+Size and traffic are two axes and I was sorting on one.
+
+Expected yield, sized from the measured dispatch and this campaign's front-classified bands
+(arity 4 ~446-498, arity 5 ~520 interpolated) at the CASCADE multiplier of ~1.12 — not the
+generic-route ~1.9x, because both are already cascade-served:
+
+    MSET   912.9 -> ~520   saves ~393 dispatch, ~440 total on a 2,991 op   ~15 pct
+    HSET   681.8 -> ~470   saves ~212 dispatch, ~237 total on a 2,339 op   ~10 pct
+
+### WHY THE PATCH IS NOT IN THIS COMMIT
+
+`crates/fr-server/src/main.rs` is reserved by RusticLark until 09:20Z, so no floor entry can
+land. Two things also make this more than a one-row table entry, and they should be designed
+rather than improvised:
+
+  * MSET and HSET are both VARIADIC. `MSET k v` is array_len 3 and `MSET k v k v` is 5; HSET is
+    4, 6, 8. A fixed-arity class covers one shape each, so this wants a PARAMETERISED class in
+    the manner of `Exists(n)` and `KeyedValuesWrite(n)` — which is also why my `[A]` screen
+    could not see those two as classified in the first place.
+  * The keyed-values arm's own comment records the hazard to respect: claiming an arity whose
+    parser then refuses the name sends it to GENERIC rather than back to the cascade, a
+    REGRESSION. Any range claimed here must be exactly what the parser serves.
+
+### RETRY PREDICATE
+
+  1. Reopen WORTH_IT itself: it should be re-derived from MEASURED dispatch at several arms
+     rather than from the fit. Three measured points now exist (16, 19, 127) and all three are
+     above the law. Until re-derived, treat WORTH_IT as a lower bound on what to consider, not
+     a cut-off — and never let it close a vein again.
+  2. MSET/HSET land when main.rs frees and a parameterised class is written; the measurement
+     above stands as the before-arm, and the after must show dispatch inside the arity band or
+     the entry is not doing what it claims.
+
 ## REJECT (frankenredis-ozrro) — removing the 13 provably-dead cascade arms is worth ~24 instr/op, not the ~585 the depth law implies. The depth law and the miss tax are NOT on the same scale, and a third miss-tax mechanism is dead
 
 Source analysis plus one test; no new measurement. Load 19.7 / 28.8 / 98.1, still draining
