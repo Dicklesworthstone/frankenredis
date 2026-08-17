@@ -27235,3 +27235,72 @@ absolute to the 0.606011x row. If a THROUGHPUT number is genuinely required, the
 needs a wider band justified by its measured null spread -- roughly 0.96..1.04 on this
 evidence -- and that is a change to the gate's contract that should be argued explicitly,
 not slipped in.
+
+--------------------------------------------------------------------------------
+MEASURED (frankenredis-ozrro, frankenredis-gein3) — the corpus WAS hiding its worst case:
+LTRIM, SMOVE and RPOPLPUSH are 1.43x-1.48x BEHIND redis with 42-67 pct dispatch share, and
+smove_missing's 4,438 instr/op of dispatch is the LARGEST this campaign has measured
+
+Claim class: COMPETITIVE
+
+MY OWN SCREEN ROW SAID THIS WOULD HAPPEN AND I AM THE ONE WHO HAD NOT CLOSED IT. Ranking
+102 shapes by absolute dispatch produced "the front-classification surface is ~ONE command,
+not a campaign" — with the stated limit that it ranks the shapes the harness HAS, and that
+LTRIM, SPOP, SRANDMEMBER, SMOVE, RPOPLPUSH, HSET and INCRBYFLOAT are unclassified with NO
+SHAPE, hence unmeasured rather than cheap. Six shapes later (INCRBYFLOAT already had two):
+
+    shape                instr/op   ratio      dispatch      dispatch instr/op
+    rpoplpush_missing     4,633.2   1.4822x     66.3 pct         3,070.1
+    ltrim_noop            6,177.2   1.4771x     42.4 pct         2,620.7
+    smove_missing         6,619.0   1.4272x     67.1 pct         4,438.5
+    hset_same             2,338.5   0.5173x     29.1 pct           680.9
+    srandmember_1         2,026.9   0.5703x     17.5 pct           354.5
+    spop_missing          1,601.1   0.6185x     20.9 pct           335.2
+
+THREE SHAPES ARE ABOVE PARITY — the first found since SORT, and the ONLY ones left on the
+board now that the set-algebra family is certified ahead. And their dispatch shares are the
+signature this harness documents for an unclassified route (62-66 pct):
+
+    smove_missing      4,438.5 instr/op of dispatch — LARGER THAN ANY SHAPE PREVIOUSLY
+                       MEASURED, including sort_ro_alpha's 3,123, which held the record.
+    rpoplpush_missing  3,070.1
+    ltrim_noop         2,620.7
+
+    The screen's top-25 table had exactly THREE shapes above 1,000 instr/op of dispatch.
+    Adding six shapes added THREE MORE, all in the top four. The ranking was not wrong; the
+    CORPUS was, and the conclusion drawn from it — that front-classification is one entry —
+    IS NOW RETIRED. It is at least four.
+
+THE THREE THAT ARE FINE ARE AS INFORMATIVE AS THE THREE THAT ARE NOT. `spop_missing`,
+`srandmember_1` and `hset_same` are unclassified too, and they sit at 0.52x-0.62x with
+17-29 pct dispatch. So "unclassified" does NOT imply "behind": these three do enough real
+work per call, or reach their route cheaply enough, that the walk does not dominate. What
+separates them is the ABSOLUTE dispatch cost, not the classification status — which is the
+argument for ranking by instructions rather than by share or by table membership.
+
+WHY THESE SHAPES ARE TRUSTWORTHY. Each is a NO-OP AT STEADY STATE, which the two-point
+subtraction requires: a mutating shape puts real work into the slope and hides the dispatch
+cost. That is asserted by construction (LTRIM 0 -1 keeps everything; SPOP/SMOVE/RPOPLPUSH
+target a missing key or member; HSET rewrites an identical value) and VERIFIED LIVE rather
+than argued: each shape was seeded on a booted fr, its command executed 200 times, and
+DBSIZE plus the full key list compared before and after. All six clean.
+
+PROVENANCE:
+  ELF sha256           9c59eb6de985e888... at HEAD 8ab1cf38d, the certification ELF from
+                       the row above.
+  harness              scripts/shape_instr_per_op.py; the six shapes are added by this
+                       change. ONE draw each — these are single readings, and the RATIOS
+                       carry the redis-side contaminant (+/-8 pct), which is why the
+                       claim is "1.43x-1.48x behind" and not a third decimal. The DISPATCH
+                       figures are fr-side and are the numbers to act on.
+  host                 thinkstation1, 64 cores, /data 191G, governor powersave, no build.
+  loadavg              20.92 - 23.85 across the six shapes; 55.74/36.00/28.82 observed
+                       when the turn opened, so NO certification was attempted. These are
+                       small-reply shapes — the load-immune class on this instrument, with
+                       fr pass counts of 0.001/op confirming no reply-path variance.
+  no-op verification   200 executions per shape against a live fr; DBSIZE and KEYS stable.
+
+RETRY PREDICATE: front-classify SMOVE, RPOPLPUSH and LTRIM, in that order — 4,438, 3,070
+and 2,620 instr/op of dispatch against a front-classified route's ~275. Do NOT quote the
+1.4x ratios to more than two figures without repeat draws. And do NOT conclude "unclassified
+means behind": three of these six are unclassified and comfortably ahead.

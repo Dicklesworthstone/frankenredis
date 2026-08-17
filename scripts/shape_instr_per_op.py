@@ -269,6 +269,30 @@ SHAPES = {
     "hincrbyfloat": (["HSET h f 1"], ["HINCRBYFLOAT", "h", "f", "0"]),
     "hsetnx_existing": (["HSET h f1 v1"], ["HSETNX", "h", "f1", "other"]),
     "sinter_2": (["SADD s1 m1 m2 m3", "SADD s2 m2 m3 m4"], ["SINTER", "s1", "s2"]),
+    # (frankenredis-gein3 / frankenredis-ozrro) THE COMMANDS THE CORPUS COULD NOT SEE.
+    # The dispatch screen ranks the shapes the harness HAS, and these are unclassified in
+    # `borrowed_dispatch_floor_command` AND had no shape at all, so every "the
+    # front-classification surface is ~one command" reading was drawn from a corpus that
+    # excluded them. That is not the same as their being cheap: this ledger records the
+    # LTRIM cascade walk at 15,736 instr/op, five times the largest dispatch cost in the
+    # whole ranked table.
+    #
+    # Each is seeded to be a NO-OP AT STEADY STATE, because the two-point subtraction
+    # requires the 2N run to do the same work per op as the N run. A shape that mutates
+    # puts real work into the slope and hides the dispatch cost being measured:
+    #   ltrim_noop      keeps the whole list (0 -1), so nothing is removed
+    #   spop_missing    missing key -> nil, creates nothing
+    #   srandmember_1   read-only by definition
+    #   smove_missing   member absent from the source -> 0, moves nothing
+    #   rpoplpush_missing  missing source -> nil, both keys untouched
+    #   hset_same       field already holds this value -> reply 0, no growth
+    "ltrim_noop": (["RPUSH tl a b c d e"], ["LTRIM", "tl", "0", "-1"]),
+    "spop_missing": ([], ["SPOP", "nosuchset"]),
+    "srandmember_1": (["SADD srm m1 m2 m3"], ["SRANDMEMBER", "srm"]),
+    "smove_missing": (["SADD smsrc a b", "SADD smdst c"],
+                      ["SMOVE", "smsrc", "smdst", "nosuchmember"]),
+    "rpoplpush_missing": (["RPUSH rplhdst x"], ["RPOPLPUSH", "nosuchlist", "rplhdst"]),
+    "hset_same": (["HSET hs f v"], ["HSET", "hs", "f", "v"]),
     # (frankenredis-gein3) Every other SINTER shape returns TWO OR THREE members, so a
     # lever whose cost is O(k log k) in RESULT cardinality — the reply sort fr does and
     # redis does not — is arithmetically invisible on all of them: sorting 3 refs is tens
