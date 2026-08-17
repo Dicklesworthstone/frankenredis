@@ -396,6 +396,24 @@ SHAPES = {
     #
     # REPLACE makes every op identical: the library exists from the first op onward, so the
     # 2N run does not grow the keyspace and the slope is load work rather than insertion.
+    # (frankenredis-gvm6z) MEASURED: fr 48,480.8 instr/op with dispatch 4,501.7 (9.3 pct),
+    # GENERIC PATH. That dispatch figure is the LARGEST absolute generic block measured in this
+    # campaign -- above the ZRANGESTORE arity-6 option forms (3,876), georadius_ro (3,293) and
+    # pfmerge_2 (3,013). fr-only, at loadavg 18.2-20.2, which is fine for this quantity: the
+    # A/A floor is ~4.46 instr ABSOLUTE, so 4,501 is not in question.
+    #
+    # BUT READ THIS BEFORE CLAIMING IT. FUNCTION is a CONTAINER command, and the generic frames
+    # here include `push_ascii_lowercase_lossy` and the container fullname path -- which is
+    # exactly what frankenredis-fpqns is attacking right now (reused buffer for the canonical
+    # `parent|sub` histogram key; every container command was still on
+    # `canonical_command_fullname`, allocating two owned Strings). So an unknown share of this
+    # 4,501 is already someone else's in-flight work, and the recoverable remainder is NOT
+    # 4,501 - 815. Re-measure after fpqns lands before sizing a lever here.
+    #
+    # A floor class is structurally possible -- `FUNCTION LOAD REPLACE <lib>` is arity 4, so
+    # (4, Function) with the arm discriminating on the subcommand -- but it needs main.rs and
+    # an executor, and the subcommand discriminant means the same both-variants trap the
+    # arity-6 work paid for: FUNCTION at arity 4 is not only LOAD.
     "function_load": ([], ["FUNCTION", "LOAD", "REPLACE", "#!lua name=fnperf\nredis.register_function('fnperf_f', function(keys, args) return 1 end)\n"]),
 
     # (frankenredis-ozrro) The arity-4 SCAN option forms, front-classified in b631dd1f9.
@@ -637,6 +655,11 @@ SHAPES = {
     "smove_missing": (["SADD smsrc a b", "SADD smdst c"],
                       ["SMOVE", "smsrc", "smdst", "nosuchmember"]),
     "rpoplpush_missing": (["RPUSH rplhdst x"], ["RPOPLPUSH", "nosuchlist", "rplhdst"]),
+    # (frankenredis-ozrro) HMSET is the last floor WRITE arm still calling a non-gate executor
+    # variant, so it pays the write gate PER PACKET where the cascade amortises it per pass.
+    # Idempotent: the same fields are set to the same values every call, so the keyspace stops
+    # changing after the first.
+    "hmset_2": (["HMSET h0 f1 v1 f2 v2"], ["HMSET", "h0", "f1", "v1", "f2", "v2"]),
     "hset_same": (["HSET hs f v"], ["HSET", "hs", "f", "v"]),
     # (frankenredis-gein3) Every other SINTER shape returns TWO OR THREE members, so a
     # lever whose cost is O(k log k) in RESULT cardinality — the reply sort fr does and
