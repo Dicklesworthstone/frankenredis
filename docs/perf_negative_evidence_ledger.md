@@ -8,6 +8,37 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-08-17 MossyOrchid: GROOMING WITH A NUMBER — `tyujv`'s headline cell no longer exists: GEOADD went 8,263 -> 3,698.7 instr/op and 57.9 pct dispatch share -> 16.2 pct, i.e. the "largest remaining recoverable overhead" was front-classified out from under the bead
+
+Claim class: SELF-SPEEDUP sizing (fr-only), recorded as bead grooming. No build (hold in force).
+
+`frankenredis-tyujv` is an open P1 that ranks GEOADD first on RECOVERABLE OVERHEAD — "the last
+stranded route", 57.9 pct dispatch share, ~1,039 instr/op of failed probes, measured at ELF
+41f29ba07981c3f5 on 2026-08-16. Re-measured today on ELF b78d1c23a79a3e85dd597016:
+
+    geoadd_same   BEFORE 8,263 instr/op, 57.9 pct dispatch   (bead, 2026-08-16)
+                  NOW    3,698.7 instr/op, 16.2 pct dispatch, mechanism: classified route
+
+Instructions down 55 pct and the share down to 16.2, which sits inside the 14-28 pct floor that
+twelve other front-classified shapes occupy (row above). There is no 57.9 pct share left to
+reclaim, so the bead's ranking premise is gone even though its arithmetic was right when written.
+
+I did not close it — not my bead. Annotated with these numbers so the owner can close or restate.
+
+TWO REUSABLES, and the second is the one that will bite others:
+  * A DISPATCH-SHARE bead goes stale faster than a ratio bead, because share is the quantity
+    front-classification collapses. `tyujv` was filed one day before this reading.
+  * Any "stranded" or "generic" claim taken from a run BEFORE `2ce50b075` needs re-reading: the
+    mechanism label tested frame PRESENCE, not cost, so every SEEDED shape read GENERIC. A bead
+    that says a route is stranded may be quoting that defect rather than the route.
+
+PROVENANCE: no build. scripts/shape_instr_per_op.py, N=2000/2N=4000, `--fr-only` (no incumbent
+ratio claimed; the bead's own 0.7704x said GEOADD was already 23 pct AHEAD of Redis, and nothing
+here contradicts that). Host thinkstation1, /data 64G, loadavg 11.10 / 13.69 / 19.49 at the read,
+CPU MHz mean 2560 min 1429 max 4043 (spread 2.83x).
+
+--------------------------------------------------------------------------------
+
 ## 2026-08-17 MossyOrchid: THE REPLICATED-STANDING CONVENTION IS NOW CODE — `balanced_square_ab.py` prints the WORST bound with every normalised row and refuses to call a straddler a crossing; it fired on its first live run and produced a SIXTH GEOSEARCH replicate at worst bound 0.9445 (`frankenredis-eh2ct`)
 
 Claim class: INSTRUMENT. No build (hold in force); servers and source only.
