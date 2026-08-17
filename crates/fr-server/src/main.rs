@@ -14593,6 +14593,19 @@ enum BorrowedMultibulkAction {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BorrowedDispatchFloorClass {
+    /// (frankenredis-ozrro) `PUBSUB NUMPAT` at arity 2 and `PUBSUB NUMSUB <ch>` at
+    /// arity 3. Both parsers and executors already existed, reached from cascade arms
+    /// at ~127 of 163 — the deepest unclassified arms in the file.
+    ///
+    /// A container's siblings share the token, so normally an arity-keyed class risks
+    /// sending them to GENERIC instead of back to the cascade. Here that is a WIN: only
+    /// two borrowed pubsub parsers exist, so CHANNELS/HELP/SHARDCHANNELS have no fast
+    /// path and today walk ~127 arms only to reach generic anyway. This gets them there
+    /// immediately. No shape ends up worse.
+    PubsubNumpat,
+    /// (frankenredis-ozrro) See `PubsubNumpat`. The NUMSUB parser is variadic (arity
+    /// 3+) but the floor is keyed on a fixed arity, so arity 4+ keeps the cascade route.
+    PubsubNumsub,
     /// (frankenredis-ozrro) `SPOP key count` at arity 3. Parser and executor ALREADY
     /// EXISTED — the shared `key_arg1` parser and `execute_plain_spop_count_borrowed`,
     /// reached from a cascade arm. Only the floor entry was missing, so the win here is
@@ -15132,6 +15145,7 @@ impl PlainZsetStoreCmd {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BorrowedDispatchFloorCommand {
+    Pubsub,
     Spop,
     Zrangestore,
     Touch,
@@ -15391,6 +15405,9 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             _ => None,
         },
         6 => match uppercase_ascii_token::<6>(token)? {
+            [b'P', b'U', b'B', b'S', b'U', b'B'] => {
+                Some(BorrowedDispatchFloorCommand::Pubsub)
+            }
             [b'S', b'U', b'B', b'S', b'T', b'R'] => Some(BorrowedDispatchFloorCommand::Substr),
             [b'L', b'P', b'U', b'S', b'H', b'X'] => Some(BorrowedDispatchFloorCommand::Lpushx),
             [b'R', b'P', b'U', b'S', b'H', b'X'] => Some(BorrowedDispatchFloorCommand::Rpushx),
@@ -16667,6 +16684,12 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (2, BorrowedDispatchFloorCommand::Spop) => Some(BorrowedDispatchFloorClass::Spop),
         (3, BorrowedDispatchFloorCommand::Spop) => {
             Some(BorrowedDispatchFloorClass::SpopCount)
+        }
+        (2, BorrowedDispatchFloorCommand::Pubsub) => {
+            Some(BorrowedDispatchFloorClass::PubsubNumpat)
+        }
+        (3, BorrowedDispatchFloorCommand::Pubsub) => {
+            Some(BorrowedDispatchFloorClass::PubsubNumsub)
         }
         (2, BorrowedDispatchFloorCommand::Ttl) => Some(BorrowedDispatchFloorClass::Ttl),
         (2, BorrowedDispatchFloorCommand::Getex) => Some(BorrowedDispatchFloorClass::Getex),
@@ -21307,6 +21330,56 @@ fn try_dispatch_floor_classified_action(
                 b"SPOP",
             ) && let Some(response) =
                 runtime.execute_plain_spop_count_borrowed(packet.key, packet.arg, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::PubsubNumpat => {
+            // (frankenredis-ozrro) Same parser and executor the cascade arm at ~10923 uses.
+            // The parser accepts ANY arity-2 PUBSUB and the executor refuses anything but
+            // NUMPAT, so a sibling subcommand declines to the generic path — which is where
+            // it was going anyway, now without the cascade walk.
+            if let Some(packet) = parse_borrowed_plain_pubsub_packet(unparsed, &parser_config)
+                && let Some(response) =
+                    runtime.execute_plain_pubsub_numpat_borrowed(packet.sub, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::PubsubNumsub => {
+            // (frankenredis-ozrro) Same variadic parser and executor the arm at ~10944 uses.
+            // Only arity 3 is claimed; arity 4+ keeps the cascade route.
+            if let Some(packet) =
+                parse_borrowed_plain_pubsub_numsub_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_pubsub_numsub_borrowed(
+                    packet.sub,
+                    &packet.channels,
+                    ts,
+                )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -53680,6 +53753,71 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
                 )
                 .is_none(),
                 "{other:?} must not parse as SPOP through the shared parser"
+            );
+        }
+    }
+
+    /// (frankenredis-ozrro) The PUBSUB floor classes. This container is the one case in this
+    /// campaign where claiming sibling subcommands is CORRECT rather than a promise breach,
+    /// and the test pins the reasoning: NUMPAT/NUMSUB are claimed AND parse, while sibling
+    /// subcommands are also claimed but must be REFUSED BY THE EXECUTOR rather than the
+    /// parser — which is what routes them to generic without a cascade walk.
+    #[test]
+    fn pubsub_floor_classes_claim_the_container_token_at_arity_two_and_three() {
+        let cfg = ParserConfig::default();
+        fn packet(args: &[&str]) -> Vec<u8> {
+            let mut p = format!("*{}\r\n", args.len()).into_bytes();
+            for a in args {
+                p.extend_from_slice(format!("${}\r\n{}\r\n", a.len(), a).as_bytes());
+            }
+            p
+        }
+        use super::BorrowedDispatchFloorClass as C;
+
+        for (args, want) in [
+            (vec!["PUBSUB", "NUMPAT"], C::PubsubNumpat),
+            (vec!["pubsub", "numpat"], C::PubsubNumpat),
+            (vec!["PUBSUB", "NUMSUB", "ch1"], C::PubsubNumsub),
+            (vec!["pubsub", "numsub", "ch1"], C::PubsubNumsub),
+            // Siblings share the token and ARE claimed. That is intended here.
+            (vec!["PUBSUB", "CHANNELS"], C::PubsubNumpat),
+            (vec!["PUBSUB", "HELP"], C::PubsubNumpat),
+            (vec!["PUBSUB", "CHANNELS", "pat"], C::PubsubNumsub),
+        ] {
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(&packet(&args), &cfg),
+                Some(want),
+                "{args:?} must be claimed"
+            );
+        }
+
+        // The arity-2 parser is PERMISSIVE by design: it accepts any subcommand and leaves
+        // the discrimination to the executor. If it ever started refusing siblings, they
+        // would still reach generic, but this asserts the division of labour the arm assumes.
+        for args in [vec!["PUBSUB", "NUMPAT"], vec!["PUBSUB", "CHANNELS"]] {
+            assert!(
+                super::parse_borrowed_plain_pubsub_packet(&packet(&args), &cfg).is_some(),
+                "{args:?} must parse; only the executor discriminates"
+            );
+        }
+
+        // Arity 4+ NUMSUB keeps the cascade route, because the floor is keyed on a fixed
+        // arity while that parser is variadic.
+        assert_ne!(
+            super::classify_borrowed_dispatch_floor_packet(
+                &packet(&["PUBSUB", "NUMSUB", "ch1", "ch2"]),
+                &cfg
+            ),
+            Some(C::PubsubNumsub),
+            "arity 4 must not be claimed by the arity-3 class"
+        );
+
+        // A different 6-char command must not be claimed as PUBSUB.
+        for other in [vec!["STRLEN", "k"], vec!["EXPIRE", "k", "1"], vec!["GETDEL", "k"]] {
+            let got = super::classify_borrowed_dispatch_floor_packet(&packet(&other), &cfg);
+            assert!(
+                got != Some(C::PubsubNumpat) && got != Some(C::PubsubNumsub),
+                "{other:?} must not be claimed as PUBSUB"
             );
         }
     }
