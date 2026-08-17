@@ -26334,3 +26334,86 @@ writer-completion guard on this instrument: it was rejected on a per-op measurem
 this row shows was the wrong denominator, and it is 13.2M of the 30.6M tax. If
 `eventloop_cycles` ever disappears from either engine's INFO the harness silently omits the
 line rather than reporting a wrong one, so an absent line means the field, not a zero.
+
+---
+
+## MEASURED (frankenredis-33832) — the "three free core blocks" retry predicate is NECESSARY BUT NOT SUFFICIENT: I satisfied it exactly and the A/A still refused, and a ONE-PROCESS null says the term is not placement
+
+Campaign output: no
+
+Claim class: METHOD. No vs-incumbent ratio is banked; the harness refused to
+authenticate one, and this row exists so the next agent does not spend the window
+re-deriving that.
+
+93dc9d374 could not run this instrument because only ONE of eight aligned 4-core blocks
+was uncontended, and set the retry predicate: "one `ps -eo psr,pcpu` sweep confirming
+three blocks under ~50 pct combined core+sibling load, before spending another 9-trial
+run." I checked that gate six times today. Five times it failed. The sixth time it passed
+with margin, so I ran it.
+
+    GATE, measured immediately before the run:
+      free block 0 (cores  0- 3): 14 pct     free block 6 (cores 24-27): 10 pct
+      free block 2 (cores  8-11): 33 pct     free block 7 (cores 28-31):  0 pct
+      FOUR blocks under 50 pct, three required.
+
+    PLACEMENT: redis on 0-3; fr_a on 24-27 and fr_b on 28-31 -- adjacent and
+    symmetric, the two quietest blocks on the machine.
+
+    WINDOW: loadavg 16.83 / 22.20 / 27.19 before, 17.24 / 22.20 / 27.16 after; the
+    1-minute sat under the 5-minute for the whole run and never approached the ~30
+    defer line. Mean CPU MHz over 64 cores: 2,800 before, 2,820 mid, 2,973 after.
+
+    RESULT, one invocation, three live arms, 9 trials, arm order rotated:
+      fr_a   median 41.955 ms   best 37.949
+      fr_b   median 36.345 ms   best 34.516
+      redis  median 24.782 ms   best 21.364
+      A/A null (fr_a/fr_b, two processes)  1.100567x  CI [0.941456, 1.312413]
+      A/A null (fr_b halves, ONE process)  0.804034x
+      A/B redis/fr_b 0.715949x CI [0.558094, 0.765970]
+      VERDICT: HOLD -- A/A outside 0.98..1.02, A/B not authenticated.
+
+    ELF identities self-reported by the harness from /proc/<pid>/exe: fr_a and fr_b
+    both 2d5a352cfd56c98699fd7d65359c41ffd51e29ae4c8ccd72e2ffcf741e7d1263, redis
+    e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7.
+
+THE FINDING IS THE ONE-PROCESS NULL, and it is why I am writing this rather than just
+retrying. fr_b's own two halves came out 0.804034x -- a SINGLE process, on a block
+measured at 0 pct contention, drifting 20 pct against itself across the run. That cannot
+be process placement, because there is only one process and it never moved. Every
+explanation built on where the arms sit -- including the block-contention model this
+bead's predicate encodes -- is therefore incomplete at best.
+
+So: three free blocks is NECESSARY (with one free block the harness refused twice at
+0.936 and 0.686) but NOT SUFFICIENT (with four free blocks and symmetric pinning it
+refused at 1.101). The dominant remaining term varies WITHIN the run, on a quiet block.
+I am not naming its mechanism. Frequency is the obvious suspect -- the governor is
+powersave and mean MHz rose 6 pct across the run -- but a 6 pct frequency move does not
+explain a 20 pct half-to-half swing, and I have not established the path. This row claims
+only what the two nulls show.
+
+CONSEQUENCE, and it is the actionable part: this instrument has now REFUSED THREE TIMES
+across two agents and three different placements. Nobody should treat "wait for a quiet
+window" as the remaining blocker on 33832's throughput number, because the quietest
+window of the session with four free blocks did not clear it. RESTORE throughput stays
+UNMEASURED, not zero, post-fosf1.
+
+USE THE INSTRUCTION INSTRUMENT INSTEAD. scripts/restore_instr_per_op.py landed this
+session precisely for this surface: it is load-immune (its fr arm reproduced to 0.85 pct
+at loadavg 57.28), it needs no pinning and no window, and it is what produced the only
+RESTORE deltas anyone has banked today. It answers a narrower question -- instructions,
+not wall clock -- but it answers it.
+
+RETRY PREDICATE, strengthened, because the old one is now known insufficient: do not
+spend another 9-trial run on the free-block sweep alone. Retry only when the
+DIAGNOSTIC one-process null (`fr_b halves`) is itself inside 0.98..1.02 on a short probe
+run -- that is the term that is failing, it is cheap to sample, and gating on it costs one
+short run instead of nine trials. If that null cannot be brought into band on this host at
+all, the honest conclusion is that wall-clock certification of this surface is not
+available here and the bead should say so rather than waiting for a window that has not
+arrived in seven attempts.
+
+PROVENANCE: fr ELF 2d5a352c... built locally with RCH_CARGO_WRAPPER_BYPASS=1 exported and
+env -u CARGO_TARGET_DIR, no [RCH] line; the harness self-reported the same SHA for both fr
+arms from /proc/<pid>/exe, which is what rules out an accidental mixed pair.
+thinkstation1, 64 cores observed, governor powersave, /data 219G. Per-arm loadavg and mean
+CPU MHz are in the block above, sampled by me before, during and after the run.
