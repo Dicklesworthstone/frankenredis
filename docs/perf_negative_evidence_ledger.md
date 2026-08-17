@@ -8,6 +8,99 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## MEASURED (frankenredis-ozrro) — PUBSUB NUMPAT 8,158.4 -> 1,531.5 instr/op (5.3x, 0.4630x of redis), the largest single lever of this campaign. My secondary claim about DECLINED shapes is REFUTED, and the measurement surfaced a new above-parity command at 2.3324x
+
+Before arm `fr-pair-bypass` (bac70fcb6), after arm `fr-after-pubsub` (d5be78419, sha
+4b9d7d85). Cross-tree pairing, stated rather than hidden — see the caveat. `dump_small` is the
+untouched control. Per-arm loadavg 16.89-18.07 / 36.63-37.52 / 120.37-121.56, falling steeply
+off the external build storm; observed core MHz 1,429-3,753. MEASURED, not certified.
+
+    shape             before     after       delta    disp before -> after   ratio after
+    pubsub_numpat    8,158.4   1,531.5   -6,626.9        6,214.4 ->   301.7    0.4630x
+    pubsub_numsub    9,223.2   2,498.1   -6,725.1        6,485.2 ->   462.0    0.5551x
+    pubsub_channels 10,278.2  10,183.5      -94.7        4,412.3 -> 4,310.3    2.3324x
+    dump_small       2,690.9   2,703.7      +12.8          306.3 ->   306.6    0.5358x  CONTROL
+
+NUMPAT falls 81.2 pct and NUMSUB 72.9 pct. Dispatch lands at 301.7 and 462.0 — squarely in the
+front-classified arity-2 and arity-3 bands (263-306, 391-498) this campaign established, which
+is the strongest evidence the route actually moved rather than the numbers wandering.
+
+### THE MULTIPLIER CONFIRMS A PREDICTION I MADE FOR A DIFFERENT LEVER
+
+    numpat  6,626.9 / 5,912.7 = 1.121
+    numsub  6,725.1 / 6,023.2 = 1.117
+
+~1.12, not the 1.89-2.02 measured for SCAN. That is exactly what the SPOP COUNT row predicted
+in advance and for the right reason: these routes were already served by the CASCADE, so there
+was never any argv materialisation to remove — only the walk. A generic-route lever removes
+dispatch PLUS argv (~1.9x); a cascade-route lever removes the walk alone (~1.12x). Two lever
+classes with different multipliers, and the distinction is now measured rather than argued.
+
+### MY CLAIM THAT REFUSED SIBLING SHAPES WOULD ALSO GET FASTER DOES NOT HOLD
+
+The prepared row argued the container hazard was INVERTED here — that CHANNELS/HELP/
+SHARDCHANNELS, having no fast path, would reach generic sooner and so also speed up, and that
+"no shape ends up worse". `pubsub_channels` was committed as the shape to demonstrate it.
+
+It moved -94.7 instr/op, or -0.9 pct, against a control that moved +0.5 pct in the same
+window. That is not a speedup; it is indistinguishable from noise, especially at the corrected
+~0.32 pct working precision. The reasoning was sound — CHANNELS is claimed, the parser accepts,
+the executor refuses, generic serves it — but the WALK it was supposed to skip evidently was
+not costing it much, while the same walk cost NUMPAT ~5,900. I cannot reconcile those two from
+these numbers, and I am not going to invent a mechanism: the claim is withdrawn as unsupported
+and the asymmetry is recorded as unexplained. What survives is the weaker and sufficient
+statement: no declined shape got WORSE, so the entry is safe.
+
+### NEW FINDING, WORSE THAN ANYTHING ELSE ON MY BOARD: pubsub_channels IS 2.3324x
+
+The measurement exposed a command I was not looking for. `PUBSUB CHANNELS` runs 10,183.5
+instr/op against redis's 4,366.1 — **2.3324x**, by far the worst ratio this campaign has
+recorded (previous worst was SCAN at 1.2810x before it was fixed). It still carries 4,310.3 of
+dispatch, 42.3 pct of the op, and it has NO borrowed parser or executor at all — so it is class
+[C], not [A], and needs machinery written rather than a table row.
+
+That is now the top-ranked open lever by ratio, and it arrived as a by-product of instrumenting
+a container I had almost dismissed as monitoring traffic. The traffic caveat still applies and
+still needs answering before anyone builds it.
+
+### RETRY PREDICATE for the withdrawn sibling claim, and for the unexplained asymmetry
+
+The hook is right to demand this: I withdrew a claim without saying what would bring it back.
+
+  1. REFUSED-SIBLING SPEEDUP — reopen if a SAME-COMMIT bypass A/B on `pubsub_channels`
+     (one ELF, `--features perf-ab-cascade-bypass`, FR_PERF_AB_CASCADE_BYPASS toggled) shows a
+     dispatch change exceeding 3x the observed null half-range. At the corrected working
+     precision of 0.32 pct on a 10,183 instr/op shape that is ~33 instr/op per arm, so ~100
+     instr/op on the delta. The -94.7 measured here sits right at that line on a CROSS-TREE
+     pair, which is exactly why it cannot settle it. Below ~100 on a same-commit pair, the
+     claim stays withdrawn.
+
+  2. THE ASYMMETRY — the same walk cost NUMPAT ~5,900 and CHANNELS ~102. Reopen the mechanism
+     question when a single measurement distinguishes these two hypotheses:
+       (a) CHANNELS never reached arm ~127 before the entry, in which case its before-dispatch
+           of 4,412.3 is generic-route cost and the walk was never in it. TEST: measure
+           `pubsub_channels` on a bypass ELF with BYPASS=1; if it matches the 4,412.3
+           before-figure within noise, CHANNELS was already going straight to generic.
+       (b) the walk is cheap for a packet the arms reject early on PREFIX and expensive for one
+           they must parse further. TEST: a third arity-2 PUBSUB subcommand with a different
+           token LENGTH should then differ measurably from CHANNELS.
+     Hypothesis (a) is the cheaper test and should be run first; it needs no new shape.
+
+  3. PUBSUB CHANNELS AT 2.3324x — this is a class [C] surface, not a table row, so before any
+     machinery is written it needs the traffic argument this ledger still does not have. Reopen
+     as a LEVER only if PUBSUB CHANNELS appears in a realistic workload profile; otherwise it
+     stays a recorded deficit, correctly measured and deliberately not worked.
+
+### CAVEATS
+
+The before arm is bac70fcb6 and the after is d5be78419 — several peer commits apart, so this is
+a cross-tree pair, not a same-commit A/B. Two things make the NUMPAT and NUMSUB conclusions
+safe anyway: the control drifted +0.5 pct while the effects are 73-81 pct, three orders of
+magnitude apart; and the after-dispatch landed inside the pre-established arity bands, which a
+tree-drift artefact would have no reason to do. The `pubsub_channels` -0.9 pct result is the
+one that a cross-tree pair CANNOT settle, and it is reported as "no change detected" rather
+than as a measurement of zero.
+
 ## CORRECTION (frankenredis-ozrro) — gvm6z found my null-gate guard was a TAUTOLOGY, and their fourth observation shows my noise calibration was too tight: the 7.2 sigma I banked is really 1.5-2.4 sigma, and the gap's support is REPRODUCIBILITY, not sigma
 
 Two defects in work I shipped, one structural and one quantitative. Source analysis and
