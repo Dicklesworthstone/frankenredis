@@ -8,6 +8,85 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-08-17 MossyOrchid: SELF-SPEEDUP — ZINTERCARD's LIMIT form front-classified too: **8,107 -> 3,666 instr/op, -55.0 pct** on the LARGER of the two cells. The code landed in `b50e03c3c` under a message that describes only its tests, so this row is the only record of what it does (`frankenredis-5na4i`)
+
+Claim class: SELF-SPEEDUP. Campaign output: no incumbent ratio is claimed here — no FIT window
+was obtainable, for the reason in the row below. The fr-side delta is the claim.
+
+WHY THIS ROW EXISTS AT ALL, stated plainly because it is a process fact worth having on record:
+I wrote and tested this change, and while my file reservation lapsed mid-work another pane
+committed my working tree as `b50e03c3c test(dispatch): pin ZINTERCARD 2-key parsers to their own
+arities`. The code is intact and correct in HEAD; the commit message describes the TESTS and not
+the lever, so a reader of the log would not know a 55 pct route landed. On a shared checkout the
+ledger is the durable record, not the commit message.
+
+WHAT IT DOES. `e43e4e3ff` front-classified `ZINTERCARD numkeys k1 k2` and claimed arity 4 ONLY,
+which deliberately left the LIMIT form on the generic path — and that was the BIGGER cell:
+8,107 instr/op against the plain form's 7,508. This adds the argc-6 exact-shape parser and
+widens the class.
+
+    zintercard_limit   BEFORE 8,127.9 / 8,085.4    AFTER 3,650.5 / 3,681.9
+                       -4,441 instr/op, -55.0 pct
+                       dispatch 3,488.1 (43.0 pct) -> 977.0 (26.6 pct)
+
+Measured `--fr-only`, interleaved, same tree. Instruction counts are the load-immune quantity
+(this repo's own audit bounds a 34 pct MHz swing at 0.64 pct), which is why this ran at loadavg
+17.40 and the arms still separate by 55 pct with 0.5-0.9 pct spread inside each arm.
+
+### The A/A null, and the decision rule
+
+Each draw is a SINGLE INVOCATION of `shape_instr_per_op.py` containing both points the delta is
+subtracted from (N and 2N), so every figure below is a same-invocation measurement; the A/A null
+is then formed across four such same-invocation draws of the IDENTICAL ELF, every ordered ratio
+(12 of them):
+
+    3650.5  3681.9  3695.5  3636.6     mean 3666.1, range 1.62 pct
+    A/A null median 1.000007, **bootstrap 95% median CI [0.989647, 1.010464]**
+    (20,000 percentile resamples, seed 20260817)
+
+GATE: that bootstrap median-CI is the decision rule. It is WIDER than the ones on my earlier
+rows — +/-1.0 pct rather than +/-0.05 pct — because these draws were taken at loadavg 9.6-17.4
+while the earlier ones sat near 6, and because there are four of them rather than five. Stated
+rather than hidden: the null band is 1 pct and the measured effect is 55.0 pct, so the row clears
+its own null by a factor of ~55, but a reader should not carry the +/-0.05 pct figure from the
+rows above onto this one.
+
+CV was not used, as a gate or otherwise. The quantity is deterministic callgrind instruction
+counts; dispersion is reported as the bootstrap median CI above and the raw draw range.
+
+THE CLASS CLAIM IS `(4 | 6)`, LISTED SEPARATELY, not the range `4..=6` that SINTERCARD uses.
+Arity 5 is `ZINTERCARD 1 k LIMIT n`, which neither parser serves — both pin `numkeys=2` — so a
+range would claim a shape the arm declines and strand it on GENERIC after a failed
+classification. That is the hazard `ex3il` hit widening SINTERCARD and the reason
+`project_floor_class_is_a_promise_its_arm_must_keep` exists; a narrower claim costs nothing here
+because the unclaimed shapes already go generic.
+
+THE TESTS PIN WHAT THE PARSERS MUST REFUSE, which matters more than what they accept: every
+refusal is a shape whose error the GENERIC must produce in upstream's order, and `zintercardwt`
+records that a wrong-type key must beat a bad LIMIT. Covered: numkeys disagreeing with the arity
+in both directions; SINTERCARD — a SAME-LENGTH sibling, 10 bytes like ZINTERCARD — not being
+mistaken for it; each parser refusing the other's arity; a non-LIMIT trailing keyword; and
+mixed-case command and keyword.
+
+PROVENANCE:
+  ELFs      before bench_elf_sha256=dd540a174eb85d585999cc8f9c1515cd61f46950cdc5b12612ae5b230bbd22b4
+            after  bench_elf_sha256=c23cc633c6e7e398 (16-hex prefix; the full hash is the
+            `target/release/frankenredis` built at 14:30 local from the tree of `b50e03c3c`)
+  harness   scripts/shape_instr_per_op.py, N=2000/2N=4000, `--fr-only`.
+  host      thinkstation1, 64 cores, powersave, /data 232G. PER-ARM loadavg 17.40 / 14.46 / 9.66
+            at the draws; CPU MHz not sampled per arm — nothing was timed, and the fr-side
+            quantity is load-immune.
+  gates     fr-server 378 + fr-runtime 626 tests pass.
+
+### RETRY PREDICATE
+
+Reopen when the vs-Redis ratio for `zintercard_limit` can be taken in a FIT window — that figure
+is the one thing this row does not have, and the window protocol in the row below (draws spaced
+>= 90 s, checked immediately before each) is the way to get it. Do not re-derive the fr-side
+delta; it is replicated and load-immune.
+
+--------------------------------------------------------------------------------
+
 ## 2026-08-17 MossyOrchid: INSTRUMENT — the ratio window gate is SELF-DEFEATING: each draw raises the 1-minute loadavg the NEXT draw's stationarity check reads, so replicated standing and a FIT window are close to mutually exclusive (`frankenredis-5na4i`)
 
 Claim class: SELF-SPEEDUP. Campaign output: no — this claims no ratio and moves no number. It
