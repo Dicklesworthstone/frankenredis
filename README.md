@@ -1317,10 +1317,10 @@ FrankenRedis emits the same observability surface Redis operators are used to, p
 | `server` | `redis_version` (advertised as `7.2.4` for client compatibility), `run_id`, `tcp_port`, `process_id`, `uptime_in_seconds`, `uptime_in_days`, `arch_bits`, `os`, etc. ~21 fields |
 | `clients` | `connected_clients`, `cluster_connections`, `maxclients`, `client_recent_max_input_buffer`, `client_recent_max_output_buffer`, `blocked_clients`, etc. |
 | `memory` | `used_memory`, `used_memory_rss` (read from `/proc/self/status`), `used_memory_peak`, `maxmemory`, `maxmemory_policy`, `mem_fragmentation_ratio`, etc. |
-| `persistence` | `loading`, `rdb_changes_since_last_save` (dirty counter), `rdb_bgsave_in_progress`, `rdb_last_save_time`, `aof_enabled`, `aof_rewrite_in_progress`, `aof_current_size`, etc. |
+| `persistence` | `loading`, `rdb_changes_since_last_save` (dirty counter), `rdb_bgsave_in_progress`, `rdb_last_save_time`, `aof_enabled`, `aof_rewrite_in_progress`, `aof_last_bgrewrite_status`, `aof_last_write_status`, etc. Not emitted: the AOF *sizing* group upstream prints when `appendonly yes` — `aof_current_size`, `aof_base_size`, `aof_pending_rewrite`, `aof_buffer_length`, `aof_pending_bio_fsync`, `aof_delayed_fsync` (`frankenredis-w1djx`). |
 | `stats` | `total_connections_received`, `total_commands_processed`, `instantaneous_ops_per_sec`, `total_net_input_bytes`, `total_net_output_bytes`, `rejected_connections`, `expired_keys`, `evicted_keys`, etc. |
 | `cpu` | `used_cpu_sys`, `used_cpu_user`, `used_cpu_sys_children`, `used_cpu_user_children` |
-| `replication` | `role`, `connected_slaves`, `master_replid`, `master_repl_offset`, plus per-replica lines and `min_slaves_to_write` / `min_slaves_max_lag` mirroring upstream |
+| `replication` | `role`, `connected_slaves`, `master_replid`, `master_repl_offset`, plus per-replica lines; on a replica, `master_host`, `master_link_status`, `slave_read_only`, `replica_announced`. Not emitted: `min_slaves_good_slaves` (the only `min_slaves_*` field upstream puts in this section) and `slave_priority` (`frankenredis-w1djx`). |
 | `commandstats` | per-command `calls`, `usec`, `usec_per_call`, `rejected_calls`, `failed_calls` |
 | `errorstats` | per-error-prefix counts (e.g., `errorstat_WRONGTYPE:count=N`) |
 | `latencystats` | per-event latency-monitor entries |
