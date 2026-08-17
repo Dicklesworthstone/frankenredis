@@ -55,6 +55,9 @@ import random
 import socket
 import statistics
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _incumbent import check_incumbent_provenance  # noqa: E402  (sys.path set above)
 import time
 
 
@@ -527,6 +530,29 @@ def main():
         if not (fk == aa_k == rk):
             raise RuntimeError(f"DBSIZE mismatch fr_a={aa_k!r} fr_b={fk!r} redis={rk!r}")
         fr_a_sha, fr_b_sha, redis_sha = running_image_sha(fr_aa), running_image_sha(fr), running_image_sha(rs)
+        # (cross-project check) VERIFY THE INCUMBENT CHAIN, because this harness attaches to
+        # PORTS rather than launching anything: running process -> vendored binary ->
+        # vendored source. franken_networkx measured through an artifact 2,751 lines behind
+        # its repo and it inverted a ratio by 5.4x; here the same hazard is a redis arm that
+        # is not the vendored build, or a vendored build that is not its source.
+        vendored_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        vendored_bin = os.path.join(vendored_root, "legacy_redis_code/redis/src/redis-server")
+        prov_ok, prov_msg = check_incumbent_provenance(
+            vendored_bin, os.path.join(vendored_root, "legacy_redis_code/redis"))
+        print("  %s" % prov_msg)
+        if not prov_ok:
+            raise SystemExit("REFUSED: %s\nEvery ratio here divides by the incumbent; a "
+                             "stale or unidentifiable denominator is worse than no "
+                             "measurement." % prov_msg)
+        vendored_sha = hashlib.sha256(open(vendored_bin, "rb").read()).hexdigest()
+        if redis_sha != vendored_sha:
+            # A WARNING, not a refusal: someone may deliberately be measuring a different
+            # redis build. But it must be said out loud, because the row would otherwise
+            # read as if it were against the vendored incumbent.
+            print("  WARNING: the redis arm on this port is NOT the vendored binary "
+                  "(running %s... vs vendored %s...); this row is not comparable to rows "
+                  "taken against the vendored incumbent"
+                  % (redis_sha[:12], vendored_sha[:12]))
         print(f"ELF_SHA256 fr_a={fr_a_sha} fr_b={fr_b_sha} redis={redis_sha}")
         if fr_a_sha != fr_b_sha:
             raise RuntimeError("A/A arms run different FrankenRedis images")

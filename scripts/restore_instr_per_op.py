@@ -47,6 +47,9 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REDIS = os.path.join(ROOT, "legacy_redis_code/redis/src/redis-server")
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _incumbent import require_incumbent  # noqa: E402  (path set above)
+
 
 def resp(*args):
     out = [b"*%d\r\n" % len(args)]
@@ -159,6 +162,9 @@ def run(binary, tag, port, members, ops, workdir):
 
 
 def main():
+    # (cross-project check) This harness divides every ratio by the vendored binary;
+    # verify it IS its source before printing a denominator.
+    require_incumbent(REDIS, os.path.join(ROOT, "legacy_redis_code/redis"))
     if len(sys.argv) != 4:
         print(__doc__.strip().splitlines()[-1], file=sys.stderr)
         return 2

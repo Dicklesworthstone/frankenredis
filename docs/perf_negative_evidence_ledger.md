@@ -27431,3 +27431,48 @@ RETRY PREDICATE: do the same for RPOPLPUSH and LTRIM — check FIRST whether eac
 a borrowed parser and executor, because that is what made this one a floor-table entry
 rather than a rewrite. Expect the classified floor to land near 450-500 instr/op of
 dispatch, not 275, for any command whose parser reads three bulks.
+
+## VERIFIED (cross-project check, follow-up) — all THREE harnesses now verify the incumbent chain, and this project's answer to the drift question is NO
+
+Claim class: PROVENANCE. Extends the previous row from one harness to every harness that
+divides by the incumbent.
+
+THE ANSWER FOR THIS PROJECT: NOT DRIFTED. The vendored `redis-server` self-reports
+`sha=d2c8a4b9:0`, the vendored source tree HEAD is `d2c8a4b91e8c`, they match, the tree is
+clean, and no `.c`/`.h` is newer than the binary. Every ratio banked today -- sinter_big
+0.3800x, the bitcount_unit rows, hash RESTORE 2.0572x -- divides by a binary that IS its
+source. No correction is owed to any row.
+
+THE GAP WAS COVERAGE, NOT DRIFT. The previous row guarded `shape_instr_per_op.py` only, and
+a guard that one of three callers runs is not a guard. The helper now lives in
+`scripts/_incumbent.py` and all three call it:
+
+    shape_instr_per_op.py          launches the vendored binary   -> REFUSES on failure
+    restore_instr_per_op.py        launches the vendored binary   -> REFUSES on failure
+    collection_reload_headtohead   attaches to PORTS              -> full chain, see below
+
+THE THIRD ONE NEEDED A DIFFERENT CHECK, and getting that right mattered. It never launches
+anything -- it attaches to whatever is listening -- so verifying the vendored binary alone
+would be verifying a file that need not be the process under measurement. It now checks the
+whole chain: running process image (which it already sha'd for its provenance line) ->
+vendored binary -> vendored source. Verified live just now: the redis arm's running image
+`e837dbb2...` equals the vendored binary's sha, and the vendored binary equals its source.
+
+SEVERITY IS SPLIT DELIBERATELY. A vendored binary that does not match its source is a
+REFUSAL -- that is drift and every ratio is wrong. A running redis that is not the vendored
+binary is a WARNING naming both shas, because someone may be deliberately measuring another
+build; what must not happen is the row reading as though it were against the vendored
+incumbent when it was not.
+
+REUSABLE: redis stamps its own build provenance into `--version` as `sha=<short>:<dirty>`.
+That single string answers both "which commit" and "was the tree clean", so the check costs
+one subprocess and needs no build-system cooperation. Any project vendoring a redis can use
+the same helper. The `:1` dirty case is refused, not warned: a binary whose source is no
+commit cannot be placed in a ledger at all.
+
+RETRY PREDICATE. No schedule -- the guard runs on every invocation and refuses rather than
+warns, so drift cannot pass silently. Extend it only when a FOURTH harness starts dividing
+by the incumbent; `scripts/_incumbent.py` is the one place to import from, and the four
+failure modes are already covered by `shape_instr_per_op.py --self-test` (moved HEAD, dirty
+stamp, missing stamp, unreadable tree) plus a live-tree assertion that fails in any checkout
+that has actually drifted.
