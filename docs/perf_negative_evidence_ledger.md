@@ -29132,3 +29132,45 @@ RETRY PREDICATE: when builds resume AND main.rs frees, run the script, then
 before/after ELFs and one ABBA over dump_small, randomkey_one and get_control. If the
 anchor assertions fail, main.rs has moved — re-read the six insertion points rather than
 forcing the patch.
+
+--------------------------------------------------------------------------------
+RECORDED, NOT MINE (frankenredis-p98mw, frankenredis-ozrro) — the BEFORE measurements for
+DUMP and RANDOMKEY exist only in two commit messages; banking them here, and my predictions
+for the same two remain UNVERIFIED
+
+Claim class: BOOKKEEPING + OPEN PREDICTION
+
+The DUMP and RANDOMKEY floor entries I prepared last tick landed in HEAD under p98mw's
+commits (51e01c28f, 018539206) — the shared working tree plus the fleet-wide emergency
+`git add -A` swept my uncommitted change, the same way my ledger rows were swept earlier
+this session. The code is off the host, which is what mattered this tick. Both commits say
+UNCOMPILED, and that still holds: nothing has built these.
+
+Their commit messages carry BEFORE measurements that exist nowhere else, and a commit
+message is not a findable place for a number:
+
+    DUMP        0.9561x   48.7 pct dispatch share
+    RANDOMKEY   1.3169x   59.4 pct dispatch share
+
+TWO DIFFERENT CASES, AND THIS LEDGER'S CONVENTION SAYS TO DESCRIBE THEM DIFFERENTLY.
+RANDOMKEY at 1.3169x is a PARITY FIX — the ninth above-parity route this campaign has
+turned up, all of them found only because a shape existed to measure them. DUMP at 0.9561x
+is essentially AT parity and is therefore a COST REDUCTION, like ZLEXCOUNT before it.
+Calling both "crossings" would overstate the second.
+
+MY PREDICTIONS REMAIN UNVERIFIED AND I WILL NOT CLAIM THEM AS CONFIRMED. I predicted the
+BEFORE dispatch in absolute terms — dump ~2,445 instr/op, randomkey ~2,490 — from the
+45.1-per-arm-position law. p98mw measured dispatch SHARE, not absolute instr/op, so the two
+cannot be compared without the totals, which are not banked. Combining them implies totals
+of ~5,021 for DUMP and ~4,192 for RANDOMKEY; those are plausible for these commands and are
+INFERENCES, not measurements.
+
+    TO CLOSE THIS: one ABBA over dump_small, randomkey_one and get_control, reporting
+    ABSOLUTE dispatch instr/op for both arms. That settles my two predictions and the
+    after-figures (~363 and ~263) in a single run. The shapes exist and the arms are
+    adjacent.
+
+PROVENANCE:
+  no build, no test, no measurement by me this tick. Disk at 16-18G, 100 pct full.
+  the BEFORE figures above are p98mw's, quoted from their commit messages and attributed.
+  the predictions are mine, from ledger 15bf17cb9, and are OPEN.
