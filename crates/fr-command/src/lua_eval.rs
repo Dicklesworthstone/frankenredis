@@ -3238,6 +3238,9 @@ pub struct LuaState<'a> {
     /// Mirrors upstream script_lua.c::luaSetTableProtectionRecursively
     /// applied to the globals table after init, plus the
     /// luaProtectedTableError __index handler.
+    /// (frankenredis-o500d) Names collected by `redis.register_function` during a
+    /// FUNCTION LOAD body execution. Empty for EVAL, which never sees that builtin.
+    registered_functions: Vec<Vec<u8>>,
     globals_locked: bool,
     /// (frankenredis-vr8rg) RESP version the script's `redis.call` /
     /// `redis.pcall` use to materialize replies, toggled by `redis.setresp`.
@@ -4253,6 +4256,32 @@ pub(crate) fn parse_register_function_args(
     Ok(RegisterFunctionSpec { name: name.clone() })
 }
 
+/// Globals for a FUNCTION LOAD body: the ordinary sandbox plus `redis.register_function`.
+///
+/// (frankenredis-o500d) LOAD-ONLY BY CONSTRUCTION, and that is the point. This builds a
+/// FRESH redis table and installs the builtin on it, rather than adding it to
+/// `lua_redis_table_template()`, so an EVAL script cannot see `register_function` — upstream
+/// does not give scripts that function, and sharing the template would have handed it to
+/// every script in the process.
+// (frankenredis-o500d) DEAD UNTIL WIRED, deliberately. This trio is reachable only from
+// tests until `function_load` in lib.rs calls `new_for_function_load` and executes the
+// library body. It is landed ahead of that step so the primitive can be verified in
+// isolation against a green differ, rather than arriving in the same commit that changes
+// FUNCTION LOAD's behaviour.
+// DELETION CONDITION for these three allows: remove them the moment lib.rs calls
+// `LuaState::new_for_function_load`. If they are still here after that, they are rot.
+#[allow(dead_code)]
+fn lua_function_load_globals() -> LuaGlobals {
+    let mut map = lua_base_globals_template().as_ref().clone();
+    let redis_table = lua_redis_table_template();
+    redis_table.set(
+        LuaValue::Str(b"register_function".to_vec()),
+        LuaValue::RustFunction(std::rc::Rc::from("redis.register_function")),
+    );
+    map.insert("redis".to_string(), LuaValue::Table(redis_table));
+    LuaGlobals::from_flat_map(map)
+}
+
 fn lua_redis_table_template() -> LuaTable {
     let redis_table = LuaTable::new_shared_template();
     redis_table.set(
@@ -4338,6 +4367,19 @@ impl<'a> LuaState<'a> {
         Self::with_globals(store, now_ms, globals)
     }
 
+    /// (frankenredis-o500d) A state whose sandbox exposes `redis.register_function`, for
+    /// executing a library body at load time. Not for EVAL.
+    #[allow(dead_code)] // see lua_function_load_globals: dead until lib.rs wires it
+    pub(crate) fn new_for_function_load(store: &'a mut Store, now_ms: u64) -> Self {
+        Self::with_globals(store, now_ms, lua_function_load_globals())
+    }
+
+    /// Names registered by the body executed on this state, in call order.
+    #[allow(dead_code)] // see lua_function_load_globals: dead until lib.rs wires it
+    pub(crate) fn registered_function_names(&self) -> &[Vec<u8>] {
+        &self.registered_functions
+    }
+
     fn new_with_cloned_globals_for_bench(store: &'a mut Store, now_ms: u64) -> Self {
         let globals = LuaGlobals::from_flat_map(lua_base_globals_template().as_ref().clone());
         Self::with_globals(store, now_ms, globals)
@@ -4359,6 +4401,7 @@ impl<'a> LuaState<'a> {
             now_ms,
             globals,
             globals_locked: false,
+            registered_functions: Vec::new(),
             resp_version: 2,
             call_depth: 0,
             lua_frame_kinds: Vec::new(),
@@ -7891,6 +7934,18 @@ impl<'a> LuaState<'a> {
         env: &mut Env,
     ) -> Result<Vec<LuaValue>, String> {
         match name {
+            // (frankenredis-o500d) Reachable only from `lua_function_load_globals`, which
+            // is the only place this name is installed. Structural validation lives in
+            // `parse_register_function_args`; the error WORDING is deliberately still a
+            // placeholder, because upstream's exact strings are not knowable from fr's
+            // source and `scripts/function_load_differ.py` is what will adjudicate them
+            // when this is wired into FUNCTION LOAD.
+            "redis.register_function" => {
+                let spec = parse_register_function_args(args)
+                    .map_err(|e| format!("register_function: malformed arguments ({e:?})"))?;
+                self.registered_functions.push(spec.name);
+                Ok(vec![LuaValue::Nil])
+            }
             "redis.call" => self.redis_call(args, false).map(|value| vec![value]),
             "redis.pcall" => self.redis_call(args, true).map(|value| vec![value]),
             // (note) `args` is already `&mut [LuaValue]`; redis_call moves string
@@ -15089,10 +15144,69 @@ mod tests {
 
     use super::{
         Env, LuaGlobals, LuaMap, LuaState, LuaTable, LuaValue, RegisterFunctionArgError,
-        RegisterFunctionSpec, SCRIPT_NOSCRIPT_ERROR, compile_check, eval_script,
-        json_to_lua_value, lua_base_globals_template, lua_raw_equal, lua_test_live_tables,
-        lua_value_to_json, overlay_filter_bit, parse_register_function_args,
+        RegisterFunctionSpec, SCRIPT_NOSCRIPT_ERROR, compile_check, eval_script, json_to_lua_value,
+        lua_base_globals_template, lua_raw_equal, lua_test_live_tables, lua_value_to_json,
+        overlay_filter_bit, parse_register_function_args,
     };
+
+    /// (frankenredis-o500d) The builtin must actually REGISTER when a real library body
+    /// runs, and must be INVISIBLE to EVAL.
+    ///
+    /// This is the end-to-end half the pure parser test cannot reach: it executes Lua
+    /// through `LuaState`, so it exercises the call_builtin arm, the load-only globals, and
+    /// the collector together. It also finally covers `LuaValue::Function` — the closure
+    /// case the parser test had to skip, because only a real execution produces one.
+    ///
+    /// THE EVAL ARM IS THE NEGATIVE CASE THAT MATTERS. Upstream does not give scripts
+    /// `register_function`; installing it on the shared `lua_redis_table_template()` would
+    /// have handed it to every EVAL in the process, and no test of the load path alone
+    /// would have noticed.
+    #[test]
+    fn register_function_collects_names_under_load_globals_and_is_absent_from_eval() {
+        let mut store = Store::new();
+        {
+            let mut st = LuaState::new_for_function_load(&mut store, 0);
+            let out = st.execute(
+                b"redis.register_function('alpha', function() return 1 end)\n\
+                  redis.register_function{function_name='beta', callback=function() return 2 end}\n\
+                  return 1",
+            );
+            assert!(out.is_ok(), "library body must run: {out:?}");
+            assert_eq!(
+                st.registered_function_names(),
+                &[b"alpha".to_vec(), b"beta".to_vec()],
+                "both calling conventions must register, in call order"
+            );
+        }
+        // A malformed registration must fail the body rather than silently registering.
+        {
+            let mut st = LuaState::new_for_function_load(&mut store, 0);
+            let out = st.execute(b"redis.register_function('only-a-name') return 1");
+            assert!(out.is_err(), "one-arg register_function must raise");
+            assert!(
+                st.registered_function_names().is_empty(),
+                "a refused registration must not be collected"
+            );
+        }
+        // EVAL must not see it at all.
+        {
+            let mut st = LuaState::new(&mut store, 0);
+            let out = st
+                .execute(
+                    b"if redis.register_function == nil then return 'absent' end return 'PRESENT'",
+                )
+                .expect("probe script runs");
+            // LuaValue has no PartialEq, so destructure rather than compare.
+            let LuaValue::Str(bytes) = out else {
+                panic!("probe must return a string, got {out:?}");
+            };
+            assert_eq!(
+                bytes,
+                b"absent".to_vec(),
+                "EVAL must not expose register_function"
+            );
+        }
+    }
 
     /// (frankenredis-o500d) `redis.register_function` accepts TWO calling conventions and
     /// this pins both, plus every way each can be malformed.
