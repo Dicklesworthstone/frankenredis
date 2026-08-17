@@ -33067,3 +33067,58 @@ still under 1.0, the routing has a real short-payload regression and needs its
 third run buys nothing. Do NOT re-litigate the four refuted null hypotheses
 (clock swing, ROUNDS parity, neighbouring-segment state, harness statistics) —
 all four are measured and closed on `qj6jn`.
+
+## 2026-08-17 GentleStream: AMENDMENT — `textish_8k`'s CAND null fails 2 of 2 in nominally quiet windows, and the now-binding adaptive threshold REFUSED a row the old constant gate passed three times (`frankenredis-ucye4`)
+
+Claim class: SELF-SPEEDUP (amendment to the MEASURED row above). Third and fourth
+certification attempts, same binary, self-reported ELF
+6b359a507cf2e69a5ada60ebb229a25380d359cd2d195833da2474347d20fb4f. No new build.
+
+WINDOW, and it is the point of half this entry: the orchestrator and I both read
+this as a quiet window — loadavg 9.72/16.86 with the 1-min and 5-min converged, the
+steadiest of the session. It did not hold. Run A entered at 11.27/16.82/72.51 and
+LEFT at 95.90/41.78/75.28, mean core clock 2851 -> 3787 MHz. A window that satisfies
+the 1-min/5-min convergence test at entry can still deteriorate 8x inside one run,
+so entry-time load is not a certification credential; both-sides capture is.
+
+FINDING 1 — `textish_8k` CANNOT BE CERTIFIED, and it is the ARM, not the host.
+Its CAND (AVX2) A/A null has now failed on both attempts:
+
+    run 2  CAND null CI [1.000134658, 1.003098998]   ORIG null med 1.000576
+    run A  CAND null CI [1.000501148, 1.008550777]   ORIG null med 0.997701
+
+Both times the ORIG null was healthy and would have passed on its own. Two
+independent windows, same arm, same direction. That is no longer "refused under
+load" — it is a reproducible instability of the AVX2 arm on text-ish input, which
+is exactly the shape whose guard requires no regression. The 0.964x from run 1
+therefore stays UNESTABLISHED rather than becoming a measured regression, and the
+routing stays UNSHIPPED.
+
+FINDING 2 — DEFECT 2 WAS LOAD-BEARING, demonstrated rather than argued. With the
+adaptive term now able to exceed the floor, run A's thresholds came out 1.023,
+1.023, 1.033 and 1.048 — every one above the old constant 1.01 — and
+`structured_512` at 1.021x was correctly declined as NULL because the window's own
+null radius put the noise floor at 4.8%. Under the pre-fix gate that same row would
+have read KEEP, as it did at 1.012x and 1.017x on the two earlier runs. So the old
+gate was certifying a sub-2% "win" on a shape whose noise floor exceeded it, three
+times, and the fix caught it the first time it was exercised in a noisy window.
+
+FINDING 3 — the long-tail wins replicate a third time, and they are the only rows
+that survive every window: runs_256x24 1.073x (prior 1.099/1.091), runs_512x12
+1.068x (prior 1.044/1.059), onebyte_8k 1.332x (prior 1.324/1.329). WORST BOUND
+across all three runs per workload: 1.073x, 1.044x, 1.324x. Correctness gate
+`byte_identical cases=5` passed on all seven runs to date.
+
+NO CONFIDENCE-INTERVAL CLAIM beyond the harness's own per-row bootstrap median CI
+over 81 rounds, printed with the null CIs for BOTH arms. **CV is provenance only and
+is NEVER a gate here**, the bootstrap median CI and the observed null bias being the
+deciding terms.
+
+RETRY PREDICATE, narrowed by these results: do NOT re-run this bench to chase
+`textish_8k` on this host — two nominally quiet windows both failed its CAND null,
+so a third attempt is buying the same answer. The open question is no longer
+measurement but MECHANISM: why is the AVX2 arm unstable on text-ish input
+specifically, when it is stable on runs/onebyte/structured? Answer that by
+instrumenting the arm (does the 128-byte routing gate even fire on this shape, and
+how often), not by re-running the A/B. Re-run only if the routing's 128-byte
+threshold or `fr_simd::common_prefix_len` changes.
