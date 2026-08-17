@@ -42075,3 +42075,95 @@ CV was not used, as a gate or otherwise.
 3. If the timed instrument is ever fixed — see the `get_control` normaliser work in `7dfecf4f4`,
    which widened what may be chosen as a control — this is one of the rows that becomes
    available again.
+
+--------------------------------------------------------------------------------
+## 2026-08-17 CrimsonHawk: REJECTED on the RIGHT shape this time — the `maybe_promote` guard eliminates its 18.0 instructions EXACTLY as predicted, and still loses, because it buys the rare regime at the common one's expense (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method). No timing
+verdict is claimed and CV was NOT used, as a gate or otherwise. Reverted; `crates/fr-store/`
+is byte-identical to HEAD.
+
+Claim class: COMPETITIVE. Campaign output: yes — fr/Redis 7.2.4 measures 0.5578x per RPUSH
+against an already-promoted list and 0.4491x against small lists, i.e. fr is roughly twice as
+fast as the incumbent on both. The vendored Redis 7.2.4 server process ran as a live incumbent
+arm in the same invocation as both fr arms, at 3,891.56 and 4,872.59 instr/push respectively.
+
+`02052d7f4` rejected this lever against a workload its own retry predicate had ruled out, and
+said: build the RPUSH-against-an-already-promoted-list shape FIRST, then re-take. Built
+(`push_slope.py`: seed past `PACKED_MAX_ENTRIES`, then K1 vs K2 single-element RPUSH commands,
+differenced), and re-taken.
+
+### THE MECHANISM IS CONFIRMED TO THE INSTRUCTION
+
+    regime                        maybe_promote frame     A/A null      delta
+    Deque  (seeded 200, large)      18.00 -> 0.00        1.000226      −8.30 instr/push
+    Packed (3,000 keys, <=2 each)   26.00 -> 26.00       0.998376      +4.38 instr/push
+
+  `1cd6025db` predicted 18.0 instructions per element from the reload profile. On the live
+  command path the frame goes to EXACTLY 0.00 in the Deque regime — the guard removes precisely
+  what was predicted, no more and no less. In the Packed regime it correctly cannot skip the
+  call (the repr CAN promote), the frame is untouched at 26.00, and the added discriminant test
+  is pure cost.
+
+### AND THAT IS WHY IT LOSES
+
+−8.30 on lists past 128 entries against +4.38 on lists under it. Redis's own default
+`list-max-listpack-size` is 128, so the Packed regime is the common case and the Deque regime
+is the exception — this is buying the rare path with the common one. It is the same trade I
+criticised and REMOVED from `a7668ed11` earlier today, where an unconditional pre-scan cost
++0.41 pct on 40-element lists to win on 200-element ones. Landing it here would re-introduce
+the shape I rejected there.
+
+    NEITHER REGIME IS COMFORTABLY OUTSIDE ITS OWN NULL EITHER: −0.38 pct against a 0.023 pct
+    null is real, but +0.20 pct against a 0.162 pct null is barely resolved, and a lever whose
+    SIGN depends on which side of a configurable threshold the workload sits is not something
+    to ship on two readings.
+
+### THE WORST BOUND, AND WHY THIS ROW QUOTES IT
+
+The Deque regime was drawn TWICE, and the two draws disagree: −8.30 and −17.33 instr/push.
+The ORIG arm is stable across them (2,170.54 and 2,172.26, 0.08 pct apart) — the CANDIDATE arm
+moves (2,162.23 and 2,154.93, 0.34 pct apart). That is the same candidate-only spread
+`1cd6025db` recorded on `bulk_from_back` (0.22 pct while ORIG held to 0.0001 pct), now seen on
+a second, unrelated candidate, which makes it a property of how these arms are built rather
+than a one-off.
+
+    SO THE ROW QUOTES −8.30, THE WORST OF THE TWO DRAWS, NOT THE MEAN AND NOT THE BETTER ONE.
+    Against the +4.38 Packed cost that is the honest comparison; quoting −17.33 would have
+    made the trade look twice as good as the least favourable reading supports.
+
+### PROVENANCE
+
+  ELF           bench_elf_sha256 = 2cb5ea06c05d7d3b00bbec867e76d41f89a2c01d3f18968166cb27869d57fa2d
+                `release-perf`, built locally with RCH_CARGO_WRAPPER_BYPASS=1, no `[RCH]` line.
+                BOTH ARMS FROM THIS ONE ELF via `FR_PERF_AB_LIST_PROMOTE_GUARD_ORIG=1`.
+  harness       scratchpad `push_slope.py`, a NEW instrument built for this row: seed a list,
+                then 2,000 vs 6,000 single-element RPUSH commands in two independent runs,
+                differenced, one fresh working directory per point. The Packed control spreads
+                pushes over 3,000 keys so no list ever crosses `PACKED_MAX_ENTRIES`.
+  incumbent     vendored redis 7.2.4, verified sha=d2c8a4b9 == vendored source HEAD.
+  host          thinkstation1, 64 cores OBSERVED, powersave governor, /data 197G free.
+  PER-ARM idle/loadavg/MHz   Deque draw 1: idle 82.1 pct, loadavg 18.14/18.16/18.53 -> 17.81,
+                MHz mean 2189 then 2257 (max 3968, min 1429). Deque draw 2: idle 86.3 pct,
+                loadavg 43.88/25.20/20.90 -> 41.72, MHz mean 1988 then 2756. Packed control:
+                idle 76.6 pct, loadavg 26.99/23.37/20.48 -> 25.79, MHz mean 2177 then 2602
+                (max 4166, min 1429). Every idle figure measured here from a `/proc/stat`
+                delta, not quoted.
+
+### A NOTE ON THE ONE THING THAT DID NOT REPRODUCE
+
+An intermediate run seeded with only 10 elements was labelled a "Packed control" and was NOT
+one: the list grows past 128 during the measured ops, so its marginal regime is Deque, which
+is why it also showed `maybe_promote` 18.00 -> 0.00. It is recorded because it is the second
+Deque draw quoted above, not because it controlled anything. The real Packed control had to
+spread pushes across keys so no single list ever crosses the threshold.
+
+RETRY PREDICATE — the lever is not the guard, it is the DOUBLE DISCRIMINANT TEST:
+  Both arms match on `self.repr` twice per push — once inside `maybe_promote` and once in
+  `push_back`'s own dispatch. A single match that promotes and dispatches in one pass would
+  remove a test from BOTH regimes instead of trading one against the other, and would not
+  depend on which side of `list-max-listpack-size` the workload sits. Reopen ONLY IF such a
+  single-match form is written AND both regimes measured, with the Packed arm required to be
+  no worse than its null — a Deque-only win does not qualify, which is exactly what this row
+  refuses. Note it needs care with the borrow checker: `promote()` takes `&mut self` while the
+  match holds `&mut self.repr`.
