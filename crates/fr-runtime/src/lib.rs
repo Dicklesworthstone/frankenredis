@@ -40603,6 +40603,9 @@ impl Runtime {
     /// Collect all config parameter entries matching a single pattern.
     #[cfg_attr(feature = "bench-reference", inline(never))]
     fn collect_config_entries(&self, pattern: &str, entries: &mut Vec<RespFrame>) {
+        // (frankenredis-e6c9t) Answer the literal/glob question ONCE. Every predicate
+        // below re-derived it from the same unchanging `pattern`, 233 times per call.
+        let is_literal = Self::config_pattern_is_literal(pattern);
         if pattern == "maxmemory*" {
             entries.push(RespFrame::BulkString(Some(
                 b"maxmemory-eviction-tenacity".to_vec(),
@@ -40645,7 +40648,7 @@ impl Runtime {
             }
             return;
         }
-        if Self::config_pattern_matches(pattern, "requirepass") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "requirepass") {
             entries.push(RespFrame::BulkString(Some(b"requirepass".to_vec())));
             entries.push(RespFrame::BulkString(Some(
                 self.server
@@ -40655,33 +40658,33 @@ impl Runtime {
                     .to_vec(),
             )));
         }
-        if Self::config_pattern_matches(pattern, "masterauth") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "masterauth") {
             entries.push(RespFrame::BulkString(Some(b"masterauth".to_vec())));
             entries.push(RespFrame::BulkString(Some(
                 self.server.masterauth.clone().unwrap_or_default(),
             )));
         }
-        if Self::config_pattern_matches(pattern, "masteruser") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "masteruser") {
             entries.push(RespFrame::BulkString(Some(b"masteruser".to_vec())));
             entries.push(RespFrame::BulkString(Some(
                 self.server.masteruser.clone().unwrap_or_default(),
             )));
         }
-        if Self::config_pattern_matches(pattern, "acllog-max-len") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "acllog-max-len") {
             entries.push(RespFrame::BulkString(Some(b"acllog-max-len".to_vec())));
             entries.push(RespFrame::BulkString(Some(
                 self.server.acllog_max_len.to_string().into_bytes(),
             )));
         }
         // Dynamic maxmemory — override the static default
-        if Self::config_pattern_matches(pattern, "maxmemory") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "maxmemory") {
             entries.push(RespFrame::BulkString(Some(b"maxmemory".to_vec())));
             entries.push(RespFrame::BulkString(Some(
                 self.server.maxmemory_bytes.to_string().into_bytes(),
             )));
         }
         // Dynamic slowlog params — override the static defaults
-        if Self::config_pattern_matches(pattern, "slowlog-log-slower-than") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "slowlog-log-slower-than") {
             entries.push(RespFrame::BulkString(Some(
                 b"slowlog-log-slower-than".to_vec(),
             )));
@@ -40693,25 +40696,25 @@ impl Runtime {
                     .into_bytes(),
             )));
         }
-        if Self::config_pattern_matches(pattern, "slowlog-max-len") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "slowlog-max-len") {
             entries.push(RespFrame::BulkString(Some(b"slowlog-max-len".to_vec())));
             entries.push(RespFrame::BulkString(Some(
                 self.server.store.slowlog_max_len.to_string().into_bytes(),
             )));
         }
-        if Self::config_pattern_matches(pattern, "maxclients") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "maxclients") {
             entries.push(RespFrame::BulkString(Some(b"maxclients".to_vec())));
             entries.push(RespFrame::BulkString(Some(
                 self.server.max_clients.to_string().into_bytes(),
             )));
         }
-        if Self::config_pattern_matches(pattern, "repl-backlog-size") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "repl-backlog-size") {
             entries.push(RespFrame::BulkString(Some(b"repl-backlog-size".to_vec())));
             entries.push(RespFrame::BulkString(Some(
                 self.server.repl_backlog_size.to_string().into_bytes(),
             )));
         }
-        if Self::config_pattern_matches(pattern, "repl-timeout") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "repl-timeout") {
             entries.push(RespFrame::BulkString(Some(b"repl-timeout".to_vec())));
             entries.push(RespFrame::BulkString(Some(
                 self.server.repl_timeout_sec.to_string().into_bytes(),
@@ -40727,28 +40730,28 @@ impl Runtime {
         } else {
             b"no".to_vec()
         };
-        if Self::config_pattern_matches(pattern, "slave-serve-stale-data") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "slave-serve-stale-data") {
             entries.push(RespFrame::BulkString(Some(
                 b"slave-serve-stale-data".to_vec(),
             )));
             entries.push(RespFrame::BulkString(Some(stale_value.clone())));
         }
-        if Self::config_pattern_matches(pattern, "replica-serve-stale-data") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "replica-serve-stale-data") {
             entries.push(RespFrame::BulkString(Some(
                 b"replica-serve-stale-data".to_vec(),
             )));
             entries.push(RespFrame::BulkString(Some(stale_value)));
         }
         let priority_value = self.server.replica_priority.to_string().into_bytes();
-        if Self::config_pattern_matches(pattern, "slave-priority") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "slave-priority") {
             entries.push(RespFrame::BulkString(Some(b"slave-priority".to_vec())));
             entries.push(RespFrame::BulkString(Some(priority_value.clone())));
         }
-        if Self::config_pattern_matches(pattern, "replica-priority") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "replica-priority") {
             entries.push(RespFrame::BulkString(Some(b"replica-priority".to_vec())));
             entries.push(RespFrame::BulkString(Some(priority_value)));
         }
-        if Self::config_pattern_matches(pattern, "repl-diskless-sync") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "repl-diskless-sync") {
             entries.push(RespFrame::BulkString(Some(b"repl-diskless-sync".to_vec())));
             entries.push(RespFrame::BulkString(Some(
                 if self.server.repl_diskless_sync {
@@ -40758,7 +40761,7 @@ impl Runtime {
                 },
             )));
         }
-        if Self::config_pattern_matches(pattern, "repl-diskless-sync-delay") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "repl-diskless-sync-delay") {
             entries.push(RespFrame::BulkString(Some(
                 b"repl-diskless-sync-delay".to_vec(),
             )));
@@ -40769,7 +40772,7 @@ impl Runtime {
                     .into_bytes(),
             )));
         }
-        if Self::config_pattern_matches(pattern, "cluster-allow-reads-when-down") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "cluster-allow-reads-when-down") {
             entries.push(RespFrame::BulkString(Some(
                 b"cluster-allow-reads-when-down".to_vec(),
             )));
@@ -40781,7 +40784,7 @@ impl Runtime {
                 },
             )));
         }
-        if Self::config_pattern_matches(pattern, "cluster-allow-pubsubshard-when-down") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "cluster-allow-pubsubshard-when-down") {
             entries.push(RespFrame::BulkString(Some(
                 b"cluster-allow-pubsubshard-when-down".to_vec(),
             )));
@@ -40793,7 +40796,7 @@ impl Runtime {
                 },
             )));
         }
-        if Self::config_pattern_matches(pattern, "cluster-link-sendbuf-limit") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "cluster-link-sendbuf-limit") {
             entries.push(RespFrame::BulkString(Some(
                 b"cluster-link-sendbuf-limit".to_vec(),
             )));
@@ -40804,7 +40807,7 @@ impl Runtime {
                     .into_bytes(),
             )));
         }
-        if Self::config_pattern_matches(pattern, "cluster-node-timeout") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "cluster-node-timeout") {
             entries.push(RespFrame::BulkString(Some(
                 b"cluster-node-timeout".to_vec(),
             )));
@@ -40812,7 +40815,7 @@ impl Runtime {
                 self.server.cluster_node_timeout.to_string().into_bytes(),
             )));
         }
-        if Self::config_pattern_matches(pattern, "cluster-migration-barrier") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "cluster-migration-barrier") {
             entries.push(RespFrame::BulkString(Some(
                 b"cluster-migration-barrier".to_vec(),
             )));
@@ -40823,7 +40826,7 @@ impl Runtime {
                     .into_bytes(),
             )));
         }
-        if Self::config_pattern_matches(pattern, "maxmemory-samples") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "maxmemory-samples") {
             entries.push(RespFrame::BulkString(Some(b"maxmemory-samples".to_vec())));
             entries.push(RespFrame::BulkString(Some(
                 self.server
@@ -40832,7 +40835,7 @@ impl Runtime {
                     .into_bytes(),
             )));
         }
-        if Self::config_pattern_matches(pattern, "busy-reply-threshold") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "busy-reply-threshold") {
             entries.push(RespFrame::BulkString(Some(
                 b"busy-reply-threshold".to_vec(),
             )));
@@ -40840,13 +40843,13 @@ impl Runtime {
                 self.server.command_time_budget_ms.to_string().into_bytes(),
             )));
         }
-        if Self::config_pattern_matches(pattern, "lua-time-limit") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "lua-time-limit") {
             entries.push(RespFrame::BulkString(Some(b"lua-time-limit".to_vec())));
             entries.push(RespFrame::BulkString(Some(
                 self.server.command_time_budget_ms.to_string().into_bytes(),
             )));
         }
-        if Self::config_pattern_matches(pattern, "client-query-buffer-limit") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "client-query-buffer-limit") {
             entries.push(RespFrame::BulkString(Some(
                 b"client-query-buffer-limit".to_vec(),
             )));
@@ -40854,13 +40857,13 @@ impl Runtime {
                 self.server.query_buffer_limit.to_string().into_bytes(),
             )));
         }
-        if Self::config_pattern_matches(pattern, "proto-max-bulk-len") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "proto-max-bulk-len") {
             entries.push(RespFrame::BulkString(Some(b"proto-max-bulk-len".to_vec())));
             entries.push(RespFrame::BulkString(Some(
                 self.server.proto_max_bulk_len.to_string().into_bytes(),
             )));
         }
-        if Self::config_pattern_matches(pattern, "client-output-buffer-limit") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "client-output-buffer-limit") {
             entries.push(RespFrame::BulkString(Some(
                 b"client-output-buffer-limit".to_vec(),
             )));
@@ -40869,7 +40872,7 @@ impl Runtime {
             )));
         }
         // Dynamic hz — override the static default
-        if Self::config_pattern_matches(pattern, "hz") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "hz") {
             entries.push(RespFrame::BulkString(Some(b"hz".to_vec())));
             entries.push(RespFrame::BulkString(Some(
                 self.server.hz.to_string().into_bytes(),
@@ -40916,13 +40919,13 @@ impl Runtime {
             ),
         ];
         for &(name, value) in encoding_params {
-            if Self::config_pattern_matches(pattern, name) {
+            if Self::config_pattern_matches_known(pattern, is_literal, name) {
                 entries.push(RespFrame::BulkString(Some(name.as_bytes().to_vec())));
                 entries.push(RespFrame::BulkString(Some(value.to_string().into_bytes())));
             }
         }
         // Dynamic list encoding threshold — live value from Store (signed)
-        if Self::config_pattern_matches(pattern, "list-max-listpack-size") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "list-max-listpack-size") {
             entries.push(RespFrame::BulkString(Some(
                 b"list-max-listpack-size".to_vec(),
             )));
@@ -40934,7 +40937,7 @@ impl Runtime {
                     .into_bytes(),
             )));
         }
-        if Self::config_pattern_matches(pattern, "list-max-ziplist-size") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "list-max-ziplist-size") {
             entries.push(RespFrame::BulkString(Some(
                 b"list-max-ziplist-size".to_vec(),
             )));
@@ -40947,7 +40950,7 @@ impl Runtime {
             )));
         }
         // Dynamic maxmemory-policy — live value from Store
-        if Self::config_pattern_matches(pattern, "maxmemory-policy") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "maxmemory-policy") {
             entries.push(RespFrame::BulkString(Some(b"maxmemory-policy".to_vec())));
             entries.push(RespFrame::BulkString(Some(
                 self.server
@@ -40958,7 +40961,7 @@ impl Runtime {
                     .to_vec(),
             )));
         }
-        if Self::config_pattern_matches(pattern, "appendonly") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "appendonly") {
             entries.push(RespFrame::BulkString(Some(b"appendonly".to_vec())));
             entries.push(RespFrame::BulkString(Some(
                 if self.server.aof_path.is_some() {
@@ -40968,7 +40971,7 @@ impl Runtime {
                 },
             )));
         }
-        if Self::config_pattern_matches(pattern, "stop-writes-on-bgsave-error") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "stop-writes-on-bgsave-error") {
             entries.push(RespFrame::BulkString(Some(
                 b"stop-writes-on-bgsave-error".to_vec(),
             )));
@@ -40980,7 +40983,7 @@ impl Runtime {
                 },
             )));
         }
-        if Self::config_pattern_matches(pattern, "appendfilename") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "appendfilename") {
             entries.push(RespFrame::BulkString(Some(b"appendfilename".to_vec())));
             let filename = self
                 .server
@@ -40991,7 +40994,7 @@ impl Runtime {
                 .unwrap_or_else(|| "appendonly.aof".to_string());
             entries.push(RespFrame::BulkString(Some(filename.into_bytes())));
         }
-        if Self::config_pattern_matches(pattern, "appenddirname") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "appenddirname") {
             entries.push(RespFrame::BulkString(Some(b"appenddirname".to_vec())));
             let dirname = self
                 .server
@@ -41009,7 +41012,7 @@ impl Runtime {
                 .unwrap_or_else(|| "appendonlydir".to_string());
             entries.push(RespFrame::BulkString(Some(dirname.into_bytes())));
         }
-        if Self::config_pattern_matches(pattern, "dbfilename") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "dbfilename") {
             entries.push(RespFrame::BulkString(Some(b"dbfilename".to_vec())));
             let filename = self
                 .server
@@ -41020,7 +41023,7 @@ impl Runtime {
                 .unwrap_or_else(|| "dump.rdb".to_string());
             entries.push(RespFrame::BulkString(Some(filename.into_bytes())));
         }
-        if Self::config_pattern_matches(pattern, "dir") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "dir") {
             entries.push(RespFrame::BulkString(Some(b"dir".to_vec())));
             // (frankenredis-vlh11) Upstream config.c resolves `dir`
             // to its absolute canonical path via chdir+getcwd at
@@ -41050,7 +41053,7 @@ impl Runtime {
             };
             entries.push(RespFrame::BulkString(Some(dirname.into_bytes())));
         }
-        if Self::config_pattern_matches(pattern, "aclfile") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "aclfile") {
             entries.push(RespFrame::BulkString(Some(b"aclfile".to_vec())));
             let path = self
                 .server
@@ -41080,7 +41083,7 @@ impl Runtime {
             ),
         ];
         for &(name, value) in ziplist_aliases {
-            if Self::config_pattern_matches(pattern, name) {
+            if Self::config_pattern_matches_known(pattern, is_literal, name) {
                 entries.push(RespFrame::BulkString(Some(name.as_bytes().to_vec())));
                 entries.push(RespFrame::BulkString(Some(value.to_string().into_bytes())));
             }
@@ -41088,7 +41091,7 @@ impl Runtime {
         // Dynamic enable-debug-command — emit the runtime field, not
         // the static "no" default. The static loop below skips this
         // name to avoid double-emit. (br-frankenredis-j29y)
-        if Self::config_pattern_matches(pattern, "enable-debug-command") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "enable-debug-command") {
             entries.push(RespFrame::BulkString(Some(
                 b"enable-debug-command".to_vec(),
             )));
@@ -41100,7 +41103,7 @@ impl Runtime {
         // listening port set via runtime.set_server_port at startup,
         // not the hardcoded "6379" default in CONFIG_STATIC_PARAMS.
         // The static loop below skips this name to avoid double-emit.
-        if Self::config_pattern_matches(pattern, "port") {
+        if Self::config_pattern_matches_known(pattern, is_literal, "port") {
             entries.push(RespFrame::BulkString(Some(b"port".to_vec())));
             entries.push(RespFrame::BulkString(Some(
                 self.server.store.server_port.to_string().into_bytes(),
@@ -41120,7 +41123,7 @@ impl Runtime {
             // MEASURED cause: `collect_config_entries` was 21,043 instr/op (68.9 pct of
             // CONFIG GET) after the glob engine was removed in the previous commit, and this
             // loop is where it lives.
-            if !Self::config_pattern_matches(pattern, name) {
+            if !Self::config_pattern_matches_known(pattern, is_literal, name) {
                 continue;
             }
             // Skip dynamically-managed params — we already emitted live values above.
@@ -43317,14 +43320,35 @@ impl Runtime {
         // `glob_match` on it degenerates to exact byte equality. `\` is excluded because it
         // ESCAPES the next character, and `[` because it opens a class; either makes the
         // pattern non-literal even with no `*` or `?` present.
-        let bytes = pattern.as_bytes();
-        if !bytes
+        Self::config_pattern_matches_known(pattern, Self::config_pattern_is_literal(pattern), parameter)
+    }
+
+    /// Does this pattern have any glob semantics left?
+    ///
+    /// (frankenredis-e6c9t) LOOP-INVARIANT, which is the whole point of it being its own
+    /// function. `collect_config_entries` evaluates the match predicate 233 times per
+    /// `CONFIG GET` — 43 named dynamic parameters plus the 190-entry static registry — and
+    /// the pattern does not change across any of them. Folding this scan into the predicate
+    /// re-derived the same answer 233 times, at O(len(pattern)) each.
+    #[inline]
+    fn config_pattern_is_literal(pattern: &str) -> bool {
+        !pattern
+            .as_bytes()
             .iter()
             .any(|b| matches!(b, b'*' | b'?' | b'[' | b'\\'))
-        {
-            return bytes == parameter.as_bytes();
+    }
+
+    /// Match with the literal/glob question ALREADY answered by the caller.
+    ///
+    /// `is_literal` must be `Self::config_pattern_is_literal(pattern)`; passing anything else
+    /// changes behaviour rather than just performance, which is why the only callers compute
+    /// it from that function and `config_pattern_matches` remains the safe wrapper.
+    #[inline]
+    fn config_pattern_matches_known(pattern: &str, is_literal: bool, parameter: &str) -> bool {
+        if is_literal {
+            return pattern.as_bytes() == parameter.as_bytes();
         }
-        glob_match(bytes, parameter.as_bytes())
+        glob_match(pattern.as_bytes(), parameter.as_bytes())
     }
 
     fn handle_asking_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
@@ -65986,6 +66010,89 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// (frankenredis-e6c9t) The literal/glob decision is now DATA — computed once by
+    /// `collect_config_entries` and handed to 43 predicates — so it can be wrong
+    /// independently of the matching itself, and `config_pattern_matches_known` will happily
+    /// honour a wrong flag. This pins the classifier's contract against a HARDCODED oracle.
+    ///
+    /// It deliberately does NOT re-run the fast-path-vs-glob-engine differential:
+    /// `config_pattern_literal_fast_path_agrees_with_glob_e6c9t` already does that over a
+    /// corpus including the `[` and `\` cases, and now exercises this classifier through the
+    /// `config_pattern_matches` wrapper, so duplicating it here would add maintenance and no
+    /// detection.
+    #[test]
+    fn config_pattern_classifier_matches_a_hardcoded_oracle_e6c9t() {
+        // Deriving the expectation from the same expression the classifier is written with
+        // would prove only that `==` works, so every answer below is written out by hand.
+        for (pattern, expect_literal) in [
+            ("maxmemory", true),
+            ("repl-timeout", true),
+            ("save", true),
+            ("", true),
+            ("maxmemory*", false),
+            ("*", false),
+            ("?axmemory", false),
+            ("[m]axmemory", false),
+            ("a\\*b", false),
+        ] {
+            assert_eq!(
+                Runtime::config_pattern_is_literal(pattern),
+                expect_literal,
+                "classifier disagreed on {pattern:?}"
+            );
+        }
+    }
+
+    /// (frankenredis-e6c9t) The hoisted flag is observable in exactly ONE direction, and this
+    /// is it: a glob pattern wrongly classified as literal collapses to a byte compare and
+    /// returns nothing. The opposite error — `false` for a literal — is invisible by
+    /// construction, because `glob_match` on a metacharacter-free pattern IS byte equality;
+    /// in that direction the flag is purely a performance hint and no test can detect it.
+    /// Said plainly so nobody later writes a test for the undetectable half and believes it.
+    ///
+    /// MUTATION-TESTED: forcing `is_literal = true` in `collect_config_entries` fails this
+    /// with "CONFIG GET repl-* lost repl-timeout; got []". It also fails four PRE-EXISTING
+    /// tests (`literal_and_glob_config_get_agree_on_every_static_param_e6c9t`, `ts4r4`,
+    /// `fr_p2c_004_u012`, `config_rewrite_under_resp3`), so this is a sharper message on an
+    /// already-covered failure mode rather than the only thing standing between the hoist and
+    /// a silent wrong answer. Kept for the `?` and infix-`*` shapes and for the diagnosis in
+    /// its failure text; deleting it would not open a hole.
+    #[test]
+    fn config_get_glob_patterns_survive_the_hoisted_literal_flag() {
+        let mut rt = Runtime::default_strict();
+        for (pattern, must_contain) in [
+            ("repl-*", "repl-timeout"),
+            ("slowlog-*", "slowlog-max-len"),
+            ("*-max-len", "acllog-max-len"),
+            ("appendonl?", "appendonly"),
+        ] {
+            let reply = rt.execute_frame(
+                command_owned(vec![
+                    b"CONFIG".to_vec(),
+                    b"GET".to_vec(),
+                    pattern.as_bytes().to_vec(),
+                ]),
+                0,
+            );
+            let RespFrame::Array(Some(entries)) = reply else {
+                panic!("CONFIG GET {pattern} did not return an array");
+            };
+            let names: Vec<String> = entries
+                .chunks(2)
+                .filter_map(|pair| match &pair[0] {
+                    RespFrame::BulkString(Some(n)) => {
+                        Some(String::from_utf8_lossy(n).into_owned())
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                names.iter().any(|n| n == must_contain),
+                "CONFIG GET {pattern} lost {must_contain}; got {names:?}"
+            );
         }
     }
 
