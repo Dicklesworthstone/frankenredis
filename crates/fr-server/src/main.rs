@@ -16402,7 +16402,11 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (3, BorrowedDispatchFloorCommand::Srandmember) => {
             Some(BorrowedDispatchFloorClass::SrandmemberCount)
         }
-        (3, BorrowedDispatchFloorCommand::Copy) => Some(BorrowedDispatchFloorClass::Copy),
+        // (frankenredis-copydeficit) Arity 3 is `COPY src dst`; arity 4 is `COPY src dst REPLACE`,
+        // which the arm below now serves. Listed as 3 | 4 rather than a range: `COPY src dst DB n`
+        // is arity 5 and is NOT served, so a range would claim it and strand it on the generic
+        // after a failed classification (project_floor_class_is_a_promise_its_arm_must_keep).
+        (3 | 4, BorrowedDispatchFloorCommand::Copy) => Some(BorrowedDispatchFloorClass::Copy),
         (2, BorrowedDispatchFloorCommand::Pttl) => Some(BorrowedDispatchFloorClass::Pttl),
         (2, BorrowedDispatchFloorCommand::Expiretime) => {
             Some(BorrowedDispatchFloorClass::Expiretime)
@@ -22874,12 +22878,25 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Copy => {
-            if let Some(packet) = parse_borrowed_plain_copy_packet(unparsed, &parser_config)
-                && let Some(response) =
-                    runtime.execute_plain_copy_borrowed(packet.key, packet.member, false, ts)
-            {
+            let hit = parse_borrowed_plain_copy_packet(unparsed, &parser_config)
+                .and_then(|packet| {
+                    runtime
+                        .execute_plain_copy_borrowed(packet.key, packet.member, false, ts)
+                        .map(|response| (packet.consumed, response))
+                })
+                // The two parsers pin different arities, so at most one matches.
+                .or_else(|| {
+                    parse_borrowed_plain_copy_replace_packet(unparsed, &parser_config).and_then(
+                        |packet| {
+                            runtime
+                                .execute_plain_copy_borrowed(packet.key, packet.member, true, ts)
+                                .map(|response| (packet.consumed, response))
+                        },
+                    )
+                });
+            if let Some((consumed, response)) = hit {
                 Ok(BorrowedMultibulkAction::FastReply {
-                    consumed: packet.consumed,
+                    consumed,
                     response,
                 })
             } else {
@@ -29047,6 +29064,46 @@ fn parse_borrowed_plain_copy_packet<'a>(
     cursor += 2;
     let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
     let (member, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainKeyMemberPacket {
+        consumed,
+        key,
+        member,
+    })
+}
+
+/// (frankenredis-copydeficit) `COPY src dst REPLACE` — the argc-4 form.
+///
+/// The floor class claimed arity 3 ONLY, so this form fell through to the cascade and paid the
+/// walk to reach its arm: measured 6,494 instr/op of dispatch out of 9,257 (70.2 pct) against
+/// ~600 of actual copy work, and 0.7916-0.8105x Redis 7.2.4 throughput — the worst cell on the
+/// board with replicated standing. The executor already takes the `replace` flag, so only this
+/// parser and a class entry were missing.
+///
+/// `REPLACE` is matched case-insensitively, as upstream parses it. Any other trailing token is
+/// refused here so the generic produces the syntax error, and `COPY src dst DB n` (also argc 4
+/// in wire terms once the keyword is counted) cannot be mistaken for it.
+fn parse_borrowed_plain_copy_replace_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainKeyMemberPacket<'a>> {
+    if config.max_array_len < 4 || config.max_bulk_len < b"COPY".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*4\r\n$4\r\n").and_then(|rest| {
+        rest.get(..4)
+            .filter(|command| command.eq_ignore_ascii_case(b"COPY"))
+            .map(|_| input.len() - rest.len() + 4)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (member, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (keyword, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    if !keyword.eq_ignore_ascii_case(b"REPLACE") {
+        return None;
+    }
     Some(BorrowedPlainKeyMemberPacket {
         consumed,
         key,
@@ -36671,6 +36728,77 @@ mod tests {
         assert_eq!(
             type_packet.consumed,
             b"*2\r\n$4\r\ntYpE\r\n$3\r\nkey\r\n".len()
+        );
+    }
+
+    /// (frankenredis-copydeficit) The COPY parsers, and the shapes they must REFUSE.
+    ///
+    /// The refusals are what keep the floor class honest: it now claims arity 3 AND 4, so both
+    /// parsers together must serve every argc-3 and argc-4 COPY the arm can reach, and refuse
+    /// anything else so the generic still produces its error. `COPY src dst DB n` is the shape
+    /// most likely to be mis-served by a loose keyword check.
+    #[test]
+    fn borrowed_plain_copy_packet_parsers_accept_and_refuse_copydeficit() {
+        let cfg = ParserConfig::default();
+
+        let plain = crate::parse_borrowed_plain_copy_packet(
+            b"*3\r\n$4\r\ncOpY\r\n$3\r\nsrc\r\n$3\r\ndst\r\n*1\r\n$4\r\nPING\r\n",
+            &cfg,
+        )
+        .expect("canonical COPY packet should parse");
+        assert_eq!(plain.key, b"src");
+        assert_eq!(plain.member, b"dst");
+
+        let replaced = crate::parse_borrowed_plain_copy_replace_packet(
+            b"*4\r\n$4\r\nCOPY\r\n$3\r\nsrc\r\n$3\r\ndst\r\n$7\r\nrEpLaCe\r\n",
+            &cfg,
+        )
+        .expect("canonical COPY REPLACE packet should parse");
+        assert_eq!(replaced.key, b"src");
+        assert_eq!(replaced.member, b"dst");
+        assert_eq!(
+            replaced.consumed,
+            b"*4\r\n$4\r\nCOPY\r\n$3\r\nsrc\r\n$3\r\ndst\r\n$7\r\nrEpLaCe\r\n".len()
+        );
+
+        // THE ONE THAT MATTERS: a trailing token that is not REPLACE must be refused, so
+        // `COPY src dst DB` cannot be served as though REPLACE had been given. Serving it would
+        // be a WRONG ANSWER (a copy into the wrong database semantics), not a slow path.
+        assert!(
+            crate::parse_borrowed_plain_copy_replace_packet(
+                b"*4\r\n$4\r\nCOPY\r\n$3\r\nsrc\r\n$3\r\ndst\r\n$2\r\nDB\r\n",
+                &cfg
+            )
+            .is_none(),
+            "the REPLACE parser must refuse a non-REPLACE trailing keyword"
+        );
+
+        // Each parser pins its own arity.
+        assert!(
+            crate::parse_borrowed_plain_copy_packet(
+                b"*4\r\n$4\r\nCOPY\r\n$3\r\nsrc\r\n$3\r\ndst\r\n$7\r\nREPLACE\r\n",
+                &cfg
+            )
+            .is_none(),
+            "the argc-3 parser must not claim the REPLACE form"
+        );
+        assert!(
+            crate::parse_borrowed_plain_copy_replace_packet(
+                b"*3\r\n$4\r\nCOPY\r\n$3\r\nsrc\r\n$3\r\ndst\r\n",
+                &cfg
+            )
+            .is_none(),
+            "the REPLACE parser must not claim the plain form"
+        );
+
+        // A same-prefix sibling must not be mistaken for COPY.
+        assert!(
+            crate::parse_borrowed_plain_copy_packet(
+                b"*3\r\n$4\r\nTYPE\r\n$3\r\nsrc\r\n$3\r\ndst\r\n",
+                &cfg
+            )
+            .is_none(),
+            "COPY parser should refuse a different 4-byte command"
         );
     }
 
@@ -49272,10 +49400,28 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
             ),
             Some(super::BorrowedDispatchFloorClass::Copy)
         );
-        // `COPY src dst REPLACE` and the `DB n` spelling stay on the cascade.
+        // (frankenredis-copydeficit) `COPY src dst REPLACE` IS now classified, and this
+        // expectation changed deliberately rather than to make a change pass. It previously
+        // asserted None because no arm served the REPLACE form, so claiming it would have
+        // stranded the shape on the generic path after a failed classification. The arm now
+        // serves it (parse_borrowed_plain_copy_replace_packet + execute_plain_copy_borrowed
+        // with replace=true), so the class may claim it: a floor class is a promise its arm
+        // must keep, and the arm now keeps this one. The measurement that motivated it:
+        // 6,494 of 9,257 instr/op were dispatch (70.2 pct) because this form walked the
+        // cascade, and it read 0.7916-0.8105x Redis throughput.
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(
                 b"*4\r\n$4\r\nCOPY\r\n$1\r\na\r\n$1\r\nb\r\n$7\r\nREPLACE\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Copy)
+        );
+        // The `DB n` spelling is arity 5 and is still NOT claimed — the arm cannot serve it, so
+        // the class must not promise it. This is the half of the original assertion that still
+        // protects the invariant, kept explicitly.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*5\r\n$4\r\nCOPY\r\n$1\r\na\r\n$1\r\nb\r\n$2\r\nDB\r\n$1\r\n3\r\n",
                 &cfg,
             ),
             None

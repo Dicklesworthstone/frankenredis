@@ -576,6 +576,14 @@ SHAPES = {
     # request still walks all ~190 entries of CONFIG_STATIC_PARAMS. Neither of these patterns
     # is one of the two hard-coded early-return globs (`maxmemory*`, `lazyfree*`), so both
     # genuinely enter the loop; `*` is additionally what monitoring clients actually send.
+    # (frankenredis-copydeficit) COPY is the worst measured cell on the board with replicated
+    # standing: balanced_square_ab puts it at 0.8105x and 0.7916x fr/redis ops/s (ADMISSIBLE
+    # both, get_control admissible alongside), i.e. Redis is ~1.25x faster and fr is 18-21 pct
+    # behind even at its most favourable interval end. No instruction shape existed for it,
+    # which is why the deficit has never been attributed. Same argv as the throughput shape so
+    # the two instruments describe the same work.
+    "copy_replace": (["SET kk vvvvvvvvvvvvvvvv"], ["COPY", "kk", "kdst", "REPLACE"]),
+
     "config_get_star": ([], ["CONFIG", "GET", "*"]),
     "config_get_prefix_glob": ([], ["CONFIG", "GET", "repl-*"]),
 

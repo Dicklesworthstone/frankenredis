@@ -760,6 +760,47 @@ CASES = [
     ("SET", "so:err", "v", "EX", "100", "KEEPTTL"),
     ("EXISTS", "so:err"),                           # -> 0: none of the above wrote
 
+    # (frankenredis-copydeficit) COPY's REPLACE form. The class claimed arity 3 only,
+    # so `COPY src dst REPLACE` walked the cascade to reach an executor that already
+    # took `replace: bool` -- 6,494 of 9,257 instr/op were dispatch. These rows gate
+    # the arity-4 claim, and each targets a specific way the new route could be wrong
+    # rather than re-checking the happy path five times.
+    ("SET", "cp:src", "v1"),
+    ("SET", "cp:dst", "old"),
+    # The arity-3 neighbour must NOT have moved, and must still REFUSE to overwrite.
+    ("COPY", "cp:src", "cp:dst"),                   # -> 0
+    ("GET", "cp:dst"),                              # -> "old": no write happened
+    ("COPY", "cp:src", "cp:dst", "REPLACE"),        # -> 1
+    ("GET", "cp:dst"),                              # -> "v1"
+    ("COPY", "cp:src", "cp:new", "REPLACE"),        # absent destination -> 1
+    # Absent SOURCE through the REPLACE form. A route that removed the destination
+    # before checking the source would answer 0 here and still pass -- the GET is
+    # what catches it, and cp:new is deliberately populated by the row above.
+    ("COPY", "cp:absent", "cp:new", "REPLACE"),     # -> 0
+    ("GET", "cp:new"),                              # -> "v1": destination survived
+    # Case folding, matched with eq_ignore_ascii_case like every sibling parser.
+    ("COPY", "cp:src", "cp:cf", "rEpLaCe"),         # -> 1
+    # The expiry must ride along. This is the row the executor's insert-with-expiry
+    # path exists for, and a fast route that inserted the value plainly reads -1.
+    ("SET", "cp:ttl", "v", "EX", "100"),
+    ("COPY", "cp:ttl", "cp:ttl2", "REPLACE"),
+    ("TTL", "cp:ttl2"),                             # -> 100
+    # A non-string source, and REPLACE over a destination of a DIFFERENT type: the
+    # destination's type must become the source's, not merely its value.
+    ("HSET", "cp:h", "f", "v"),
+    ("SET", "cp:sd", "still-a-string"),
+    ("COPY", "cp:h", "cp:sd", "REPLACE"),           # -> 1
+    ("TYPE", "cp:sd"),                              # -> hash
+    ("HGET", "cp:sd", "f"),                         # -> "v"
+    # Refusals, which must reach generic and produce redis's text VERBATIM.
+    ("COPY", "cp:src", "cp:src", "REPLACE"),        # same object -> error
+    ("COPY", "cp:src", "cp:bad", "SIDEWAYS"),       # wrong token at arity 4
+    ("COPY", "cp:src", "cp:bad", "REPLACE", "EXTRA"),
+    ("EXISTS", "cp:bad"),                           # -> 0: no refusal wrote
+    # The DB spelling is arity 5 and is NOT claimed; it must not have moved.
+    ("COPY", "cp:src", "cp:db", "DB", "3"),         # -> 1
+    ("COPY", "cp:src", "cp:db", "DB", "3"),         # -> 0: exists, no REPLACE
+
 ]
 
 def executing_image(conn):
