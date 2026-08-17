@@ -29351,3 +29351,66 @@ you are about to write. Run it by hand, before the first line of code.
 PROVENANCE: no measurement. Correctness runs only, on rch worker vmi1227854, exit 0.
 thinkstation1, /data 156-165G free across the runs, loadavg 38.28 observed at the first
 gate. No local build was started; no MHz recorded because no arm was timed.
+
+--------------------------------------------------------------------------------
+CLOSED (frankenredis-ozrro, frankenredis-p98mw) — the front-classification vein is
+EXHAUSTED: zero unclassified commands remain at any depth worth an entry, and the two
+families that could have hidden an ARITY gap are exactly covered
+
+Claim class: METHOD (vein closure; no build, no measurement this row)
+
+Ten routes have now been front-classified in this campaign — SMOVE, RPOPLPUSH, LTRIM,
+HINCRBY, RENAMENX, SUBSTR, ZLEXCOUNT, DUMP, RANDOMKEY, plus the SET option forms — and the
+instruction to "take the next route in that family" has no target left. That is worth
+stating with evidence rather than by running out of ideas.
+
+    `cascade_depth.py`:  CANDIDATES — a real command, unclassified, at depth >= 30:  ZERO
+    "none — every deep arm is either already classified or a family parser."
+
+The deepest arms in the whole cascade are now `keyed_values16/17/18` at positions 146-148,
+predicted ~6,320-6,414 instr/op — larger than anything this campaign ever measured. They are
+FAMILY parsers, not commands, so the obvious next question is whether a command can be
+"classified" while some ARITY of it still walks. That is a real failure mode: this ledger
+has recorded it five times (MGET 2-8, PFADD/LPUSHX/RPUSHX, LPOS COUNT, ZRANGE REV, and the
+LMPOP transposition that reached HEAD). CHECKED, on the two families where the deep arms
+live:
+
+    keyed_values   arms serve 1..18 values, i.e. array_len 3..20
+                   floor claims (3..=20) for LPUSH/RPUSH/SADD/HDEL/SREM/ZREM
+                   EXACT MATCH — no arity walks, and no over-claim either
+
+    EXISTS         arms serve 2..8 keys exactly, then `keys_multi` for the rest
+                   floor claims (2..=KEYS_MULTI_MAX+1) = 2..=33
+                   `dispatch_floor_fast_exists_into` matches 1..8 individually and falls
+                   through to keys_multi for 9..32, with `_ => None` above that
+                   FULLY COVERED — the claim and the arm agree at every N, including the
+                   part where the claim EXCEEDS the exact-N parsers, which is exactly where
+                   I expected to find the sixth instance of the promise bug and did not
+
+    THE DEEP ARMS ARE THEREFORE DEAD FOR THESE COMMANDS — the floor answers before the
+    cascade is walked — which is why they are expensive on paper and cost nothing in
+    practice. A depth ranking cannot tell those apart; only reading the claim can.
+
+WHAT IS ACTUALLY LEFT, so nobody re-runs this search:
+
+  * NOT individual commands. Zero candidates at depth >= 30, and the shallow ones are worth
+    less than the review they would cost (PING at arm 1 is the limiting case).
+  * NOT arity gaps in the two families that could plausibly hide one. Both exact.
+  * The [C] list from `corpus_coverage.py` — 57 commands with NO borrowed parser and NO
+    executor. Those are LTRIM-shaped jobs: an executor must be written first, mirroring an
+    existing gated trio, and tested against a twin runtime on `state_digest()`. LTRIM was
+    the single most expensive of the ten and the only one that needed this.
+  * `cascade_depth.py` CANNOT rank the [C] list, and that limit is worth stating: a [C]
+    command has no cascade arm at all, so it has no position — it goes straight to GENERIC,
+    the most expensive route there is. Ranking those needs traffic judgement, not a line
+    count, and this campaign has no traffic data.
+
+PROVENANCE:
+  no build, no measurement this row — the evidence is source reading plus the depth tool.
+  /data 156G checked; no build was started, so no second df was needed.
+  the ten routes' figures are in their own rows above; nothing is re-quoted here as new.
+
+RETRY PREDICATE: do NOT re-run the unclassified-command search; it is empty and this row is
+the evidence. If the cascade grows new arms, `cascade_depth.py` will surface them — that is
+what it is for. The next lever in this area is a [C] executor, which is a different and much
+larger job than the nine table entries that preceded it, and it should be costed as one.
