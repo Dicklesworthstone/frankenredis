@@ -31889,3 +31889,80 @@ pre-lever baseline on a CURRENT tree — my prime suspect is now drift, not the 
 open sort_ro_alpha or lcs_2 as deficits: both are intercepts with size siblings far ahead, and
 the only lever that touches them is front-classifying a class [C] generic route, which buys
 nothing at the sizes where those commands are actually used.
+
+--------------------------------------------------------------------------------
+## INSTRUMENT CHECK (frankenredis-gvm6z, cross-project) — frankenpandas's failure mode does NOT apply here, but the answer is two-sided: the fr-arm null clears the 2 pct gate by 8.2x while the RATIO null clears it by only 1.17x at its worst
+
+Claim class: INSTRUMENT CHECK. No lever ratio is claimed. Measured, not assumed.
+
+THE PROMPT. frankenpandas found its 2 pct A/A null limit sits exactly at its MEDIAN null
+deviation, so half its runs failed the null by construction and good measurements were being
+discarded. Asked to compute my own median null deviation against my gate.
+
+MY GATE: `scripts/perf_candidate_preflight.py:424` — "Require a same-invocation A/A median
+within 2% plus its bootstrap CI." So the limit is **2.00 pct**.
+
+### Half one: the fr arm. Nowhere near the gate.
+
+Six same-ELF draws of `get_control` taken in this window: 1314.6 / 1310.2 / 1306.2 / 1310.2 /
+1308.3 / 1314.5, spread 0.643 pct. Their 15 pairwise A/A nulls have a median deviation of
+0.328 pct. Combined with the six same-ELF nulls already banked this session (keys_star 0.161,
+zrangestore_all 0.002, bypass CLASSIFIED 0.115, bypass GENERIC 0.243, zrangestore_rev 0.170,
+zrangestore_64 0.043):
+
+    n = 21    MEDIAN null deviation 0.243 pct    worst 0.643 pct
+    gate 2.00 pct  ->  **8.2x headroom at the median**, 3.1x at the worst
+
+Nothing is being thrown away. This is the opposite of frankenpandas's situation, and it is
+why rows here have been able to claim things at the 0.03-0.2 pct level honestly.
+
+### Half two, and it is the half that matters: the RATIO null clears by 1.17x
+
+A COMPETITIVE row does not rest on the fr arm — it rests on fr/redis. The redis arm is NOT
+load-immune (3.4 pct across a 34-point load swing is on record here, plus roughly +/-8 pct on
+a single draw), so the ratio null is the quantity the gate must actually be read against.
+Same shape, same ELF, two draws:
+
+    zrangestore_all      0.4132 / 0.4162    0.73 pct
+    bypass CLASSIFIED    0.4169 / 0.4099    1.71 pct
+    bypass GENERIC       0.7639 / 0.7714    0.98 pct
+    zrangestore_64       0.0389 / 0.0392    0.77 pct
+    keys_star            1.0264 / 1.0353    0.87 pct
+    zrangestore_rev      0.8127 / 0.8180    0.65 pct
+    pfmerge_2            0.8932 / 0.8939    0.08 pct
+
+    n = 7    MEDIAN 0.77 pct    WORST 1.71 pct
+    gate 2.00 pct  ->  2.6x at the median, **1.17x at the worst**
+
+**One draw in seven came within 15 pct of failing the gate.** The two halves are 3.4x apart,
+and quoting the fr-arm figure as "my null" would have been the flattering half of a
+two-sided instrument. So: not frankenpandas's problem, but not the comfortable margin the
+first table alone suggests either.
+
+### Two method notes, both of which cut against me
+
+  * The comparison is CONSERVATIVE in my favour and I still report the tighter reading. The
+    gate is defined on a BOOTSTRAP MEDIAN, which is tighter than the single-pair deviations
+    tabulated above; measuring pairs against a median-defined gate overstates my deviation.
+    I have not corrected for that, because the correction moves the number the direction that
+    flatters me.
+  * The fresh six-draw null (median 0.328 pct) is WORSE than the banked same-invocation ones
+    (0.002-0.243 pct). Those six are separate process launches spread over ~5 minutes; the
+    banked ones are back-to-back within a window. **The null degrades with separation in
+    time**, so "same-invocation" in the gate's wording is load-bearing and not ceremony.
+
+CONSEQUENCE: no frankenredis row needs re-running on account of a too-tight null gate. But a
+COMPETITIVE row whose effect is under ~2 pct is inside this instrument's own ratio noise and
+should not be adjudicated on a single pair of draws — which is exactly why the pfmerge_2 row
+was held as "not adjudicated" until a second draw, and why the same-ELF bypass A/B was
+preferred over a two-build before/after.
+
+PROVENANCE: fr ELF 61778add43b18a6b4ae913d952d86c5a994db21695bf5534f9f79d51e6942bb0, no build
+in this window. incumbent verified per run. thinkstation1, /data 157G. Per-arm loadavg
+14.09-14.29 across all six draws, 5-min 18.5-18.8, 15-min 19.4-19.5 — stable throughout. MHz
+not attached: no ratio is being certified here and an instruction-count null does not depend
+on frequency.
+
+RETRY PREDICATE. Recompute the RATIO null, not the fr-arm null, if the redis arm or the
+harness changes. Do not quote the 0.243 pct figure as "the null" for a competitive claim; it
+describes only the numerator.
