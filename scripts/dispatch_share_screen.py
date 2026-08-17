@@ -25,6 +25,15 @@ for generic ones, i.e. it exaggerated exactly the classified-vs-generic gap this
 exists to rank. Four rows across two agents were withdrawn on it (`b9c288a1d`). The metric is
 fixed as of that bead; these figures predate the fix.
 
+AND THE OPENING ARGUMENT BELOW IS NOW MEASURED, NOT JUST REASONED. Recomputed two-point
+(`cbc702a54`), the front-classified band is 16.8-37.1 pct and the generic band 33.9-43.2 pct
+-- they OVERLAP, and `lmpop_missing` (classified) carries a HIGHER share than
+`xpending_populated` (generic). **Dispatch share does not discriminate mechanism.** Absolute
+instr/op still does, cleanly: classified routes 543-1,035, the generic pair 2,804-3,374, about
+3x apart with no overlap. So rank on the ABSOLUTE column exactly as this docstring already
+says, and do not use the share column to decide whether a route is stranded -- use the source
+test (`borrowed_dispatch_floor_command` entry, parser arm, executor) or the mechanism label.
+
 WHAT THE SCREEN FOUND (ELF 1b1d66cd, 102 shapes) -- WITHDRAWN, see above: only THREE shapes
 pay more than 1,000 instr/op of dispatch, and two of them are the SORT shapes. 114 commands are already
 floor-classified, so the tail is flat.
