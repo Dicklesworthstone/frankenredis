@@ -418,6 +418,47 @@ N and 2N dumps is tracked on `frankenredis-7so0e`; it was NOT done here because
 the time, and a metric change there needs its own reservation and self-test rather than a
 drive-by.
 
+### ADDENDUM, same day, same bead — the frame LIST was incomplete too, and it misses the floor classifier
+
+A new metric owes a completeness audit; the row above shipped without one. Running it: for each
+dump pair, every frame `DISPATCH_FRAMES` does NOT match, ranked by per-op cost. Three routing
+frames were missing.
+
+    classify_borrowed_dispatch_floor_packet_impl   157.0 SORT_RO / 112.0 get_control
+    parse_borrowed_dispatch_floor_decimal           51.0 both
+    Runtime::parser_config                          11.0 both
+
+`classify_borrowed_dispatch_floor_packet` **is the floor classifier** — the central function of
+the entire front-classification campaign — and the campaign's own metric was not counting it as
+dispatch.
+
+**So the figure in the row above is superseded by its own successor: `SORT_RO ... ALPHA` is
+3,116.0 instr/op, not 2,897.0.** `get_control` is 473.0, not 299.0. Both remain BIT-IDENTICAL
+across n=3, n=64 and both ELFs, so the per-call-constant finding is robust to how the set is
+defined and gets stronger, not weaker. Nothing else in the row above changes: the share-derived
+2,048.3–3,358.5 spread was already wrong by more than this correction is large, and in both
+directions.
+
+**THE ASYMMETRY POINTS THE SAME WAY AS THE DEFECT ABOVE.** The miss is **7.6 pct on the expensive
+generic route and 58 pct on the cheap classified one**. These screens exist to RANK routes against
+each other, so an under-count 8x heavier on classified routes systematically EXAGGERATES the gap
+between classified and generic — which is the exact quantity `4d9105516`'s "12 classified shapes
+sit on a 14-28 pct dispatch FLOOR" is made of. Two independent defects, both inflating the same
+conclusion.
+
+**3,116.0 IS A FLOOR, NOT A VALUE.** The list is still hand-maintained, and this repo already
+knows what that means (`shape_work_audit.py` hardcoded 18 shapes while its registries grew past
+70; a bead's detection regex read 54 where the answer was 73). Post-execution bookkeeping
+(`record_*_metrics`, `CommandHistogramTracker`) and background cron (`run_active_expire_cycle`,
+`drain_pending_pubsub`) are deliberately still excluded — they are neither dispatch nor the
+command, and folding them in would make dispatch absorb the elapsed-time residue that makes a
+small shape's A/A wide in the first place.
+
+Retry predicate for this addendum: before any dispatch figure is used to rank one route against
+another, re-run the completeness audit rather than trusting the list
+(`scratchpad/dispatch_completeness.py` pattern: print every unmatched frame above ~1 instr/op and
+read it). A routing frame in that output is a hole.
+
 ## 2026-08-17 BrownIbis: KEEP — SORT ALPHA stops calling ICU for ASCII: `sort_ro_alpha_64` 140,377.3 -> 48,771.8 instr/op (2.8783x), `sort_ro_alpha` 12,871.1 -> 9,248.7 (-28.1 pct), null flat at -0.06 pct (`frankenredis-cgeq5`)
 
 Claim class: COMPETITIVE. Campaign output: yes. Each ratio draw below started a live redis 7.2.4
