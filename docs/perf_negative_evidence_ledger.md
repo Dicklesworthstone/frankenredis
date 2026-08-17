@@ -28931,3 +28931,80 @@ PROVENANCE:
 RETRY PREDICATE: run `cascade_depth.py` before proposing ANY floor entry; it is now the
 cheapest correct answer to "is this worth building?". Take DUMP and RANDOMKEY together —
 adjacent arms, one ABBA covers both, and both predictions are already on record.
+
+--------------------------------------------------------------------------------
+MEASURED (frankenredis-p98mw) — the three remaining stranded routes, screened LIVE against
+7.2.4 before the host locked up: LMPOP 1.3786x / 69.2 pct, RANDOMKEY 1.3169x / 59.4 pct,
+DUMP 0.9561x / 48.7 pct. AND the row above's cascade-depth predictions are CONFIRMED to
+better than 2 pct
+
+Claim class: COMPETITIVE (before-side only — see the warning at the end)
+
+The row above banked cascade-depth PREDICTIONS for dump and randomkey and recorded "MHz not
+recorded — nothing was measured". These are the measurements. They were taken in the window
+before loadavg went to 525 and are banked now because they exist nowhere else.
+
+    shape           fr instr/op   redis instr/op   ratio      dispatch share
+    lmpop_missing      6,361.3        4,614.5      1.3786x    69.2 pct (~4,400.2)
+    randomkey_one      4,116.1        3,125.6      1.3169x    59.4 pct (~2,446.0)
+    dump_small         5,092.8        5,326.8      0.9561x    48.7 pct (~2,478.4)
+
+LMPOP's ~4,400 instr/op of dispatch is the largest this campaign has measured apart from
+SMOVE's 4,438 before it was fixed, and LMPOP had parser AND executor for all four of its
+forms already — only the floor entries were missing.
+
+THE PREDICTOR IS VALIDATED, which is the more reusable result. `cascade_depth.py`'s
+before-side predictions against my independent measurement:
+
+    dump        predicted ~2,445   measured 2,478.4   +1.4 pct
+    randomkey   predicted ~2,490   measured 2,446.0   -1.8 pct
+
+Two independent instruments, two commands, both inside 2 pct. The retry predicate one row
+up — "run cascade_depth.py before proposing ANY floor entry" — is now backed by measurement
+rather than by construction. Its AFTER-side predictions (~363 and ~263) remain untested.
+
+PING WAS CORRECTLY EXCLUDED, and for a reason worth keeping: it is fast-pathed at
+main.rs:3800 and 6181, both AHEAD of the floor dispatch call at 6899. A floor entry for
+PING is not a small win, it is DEAD WEIGHT — the packet never reaches the floor. The
+[A]-list screen that named ping alongside dump and randomkey was reading "has a borrowed
+fast path, has no floor class" and cannot see that a route is served EARLIER than the floor.
+Check where the existing fast path sits relative to 6899 before classifying anything.
+
+DUMP IS A JUDGEMENT CALL, NOT AN OBVIOUS LEVER. At 0.9561x it is already at parity, so its
+48.7 pct share is recoverable overhead rather than a deficit being closed — the EXPIREAT
+distinction. It is still worth taking (a 2,478 -> ~363 move would put it near 0.55x) but it
+should not be ranked above a route that is actually behind.
+
+WHAT IS LANDED AND WHAT IS NOT — READ THIS BEFORE QUOTING ANY OF IT.
+LMPOP's four floor classes landed in `bba68310b` with a guard test, and the AFTER SIDE WAS
+NEVER MEASURED: the host went into I/O saturation (loadavg 525, iowait 77 pct) and builds
+were banned before the post-fix ABBA could run. By section 1 that is landed-but-unmeasured,
+NOT a win. Do not quote a crossing for LMPOP. The BEFORE row above is real; the improvement
+is predicted only. RANDOMKEY and DUMP have no floor entry at all yet.
+
+A DELIBERATE MUTATION REACHED MAIN, and it cost three agents. While mutation-testing the
+LMPOP guard (transpose the arity-5 and arity-6 classes, confirm the test reddens, restore) a
+peer ran `git add -A` and committed the tree mid-mutation in `bba68310b`. A third agent then
+found the transposition as a live regression (`753f8019a`) and fixed it (`213de4e63`). The
+bug never existed in anyone's design. In a checkout this shared there is no revert window
+small enough to be safe — mutate a scratch COPY, never the working tree. The mitigation that
+worked was shipping the guard test in the SAME commit as the lever: it is what turned a
+silent wrong-executor route into a minutes-long incident.
+
+PROVENANCE:
+  ELF           009f6b0cb8bc6188cecc4b038e861d09f0017579e1f3b37e83cd4cf7cf18524a, built
+                locally with RCH_CARGO_WRAPPER_BYPASS=1, zero [RCH] lines in the log.
+  harness       scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines in the SAME
+                invocation. Incumbent verified in-run: redis-server sha=d2c8a4b9 ==
+                vendored source HEAD, clean.
+  host          thinkstation1, 64 cores observed, x86_64, governor powersave, /data 180G.
+  PER-ARM loadavg/MHz  lmpop_missing 33.45/3917 · randomkey_one 33.45/3740 ·
+                dump_small 33.45/3793. Taken in a STABLE window (1/5/15 = 33.45/28.66/28.30)
+                well before the spike; the ratios are instruction counts, and the redis
+                denominators across this session moved <0.15 pct against a 25->92 loadavg
+                swing, which is the evidence that this shape class is load-immune here.
+
+RETRY PREDICATE: when builds reopen, ONE ABBA covers the whole outstanding set — re-measure
+lmpop_missing to close out `bba68310b` (the only landed-unmeasured lever), then randomkey
+(1.3169x, still stranded, nothing written) and dump together as the row above suggests.
+Take RANDOMKEY before DUMP: it is behind, DUMP is already at parity.
