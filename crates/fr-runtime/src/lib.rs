@@ -1380,6 +1380,18 @@ fn push_ascii_lowercase_lossy(out: &mut String, bytes: &[u8]) {
     // is <= 0x7F so ascii-lowercasing keeps it valid 1-byte UTF-8, exactly what
     // `ch.to_ascii_lowercase()` produces for ASCII chars. Non-ASCII input (only a
     // malformed command name) keeps the char-correct slow path below.
+    //
+    // (frankenredis-cjhkd) DO NOT rewrite this loop as `push_str` +
+    // `str::make_ascii_lowercase`. It reads as an obvious win — one memcpy and a
+    // vectorised pass, instead of N `String::push(char)` calls that each re-check
+    // capacity and run `char::encode_utf8` — and it is MEASURED AS A LOSS on the
+    // only input this sees. Command names are 3-8 bytes, and at that length the
+    // memcpy CALL plus the vectorised pass cost more than the inlined byte loop:
+    // sort_ro_alpha 9167.2 / 9212.8 -> 9258.5 / 9257.9 instr/op, this function's
+    // own Ir 516,500 -> 532,574, and `__memcpy_avx_unaligned_erms` 1,558,327 ->
+    // 1,618,300 over 4,000 ops. Two ELFs, one pinned base, one overlay apart.
+    // Bulk beats per-element only once the element count pays for the call
+    // overhead, and a command name never does. Full row in the ledger.
     if bytes.is_ascii() {
         out.reserve(bytes.len());
         for &b in bytes {
