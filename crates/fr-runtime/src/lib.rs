@@ -866,6 +866,10 @@ fn plain_exists_owned_argv(keys: &[&[u8]]) -> Vec<Vec<u8>> {
     argv
 }
 
+fn plain_pexpiretime_owned_argv(key: &[u8]) -> Vec<Vec<u8>> {
+    vec![b"PEXPIRETIME".to_vec(), key.to_vec()]
+}
+
 fn plain_strlen_owned_argv(key: &[u8]) -> Vec<Vec<u8>> {
     vec![b"STRLEN".to_vec(), key.to_vec()]
 }
@@ -15815,6 +15819,144 @@ impl Runtime {
                 reason_code: "command_time_budget_exceeded",
                 reason: format!(
                     "command 'EXISTS' took {}us, exceeding budget {}ms",
+                    elapsed_us, self.server.command_time_budget_ms
+                ),
+                input_source: ThreatInputDigestSource::Argv(argv_ref),
+                output: &RespFrame::SimpleString("OK".to_string()),
+            });
+        }
+    }
+
+    fn can_execute_plain_pexpiretime_borrowed(&mut self, key: &[u8], now_ms: u64) -> bool {
+        if self.policy.gate.max_array_len < 2
+            || self.policy.gate.max_bulk_len < b"PEXPIRETIME".len()
+            || key.len() > self.policy.gate.max_bulk_len
+        {
+            return false;
+        }
+        self.plain_borrowed_default_key_read_allows(now_ms)
+    }
+
+    /// (frankenredis-ozrro) Borrowed READ fast path for `PEXPIRETIME key`.
+    ///
+    /// PEXPIRETIME sat in the corpus-coverage report's [B] PARTIAL bucket: it had a
+    /// borrowed PARSER and no executor, so a floor entry for it would have claimed the
+    /// shape and then declined into the GENERIC path — a regression rather than a no-op.
+    /// This is the missing half, generated from the `strlen` trio (single key, integer
+    /// reply, read gate) so no bookkeeping step could be dropped: same
+    /// `plain_borrowed_default_key_read` predicate, same stats/session/expire-cycle/
+    /// metrics/propagation sequence, same error accounting.
+    /// Conservative borrowed runtime fast path for `PEXPIRETIME key`: mirrors
+    /// `execute_plain_get_borrowed` (key borrowed from the read buffer, generic
+    /// argv materialization + dispatch skipped). Returns the string length, or a
+    /// WRONGTYPE error reply for a non-string key, exactly like the generic
+    /// handler. Returns None (fall back) on any disabling state.
+    /// (frankenredis-uz39v)
+    pub fn execute_plain_pexpiretime_borrowed(&mut self, key: &[u8], now_ms: u64) -> Option<RespFrame> {
+        if !self.can_execute_plain_pexpiretime_borrowed(key, now_ms) {
+            return None;
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("pexpiretime");
+        self.session.last_argv_len_sum = b"PEXPIRETIME".len() + key.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let result = self.server.store.expiretime_value(key, now_ms);
+        let elapsed_us = self.finish_chained_command(start);
+        // Mirrors the generic path's mapping exactly (fr-command's pexpiretime):
+        // a missing key is -2, a key with no TTL is -1, otherwise the ABSOLUTE
+        // expiry in MILLISECONDS. PEXPIRETIME has no error case, so `failed` below is
+        // always false — the branch is kept so this stays line-for-line comparable to
+        // the strlen trio it was generated from.
+        let reply = RespFrame::Integer(match result {
+            fr_store::ExpireTimeValue::KeyMissing => -2,
+            fr_store::ExpireTimeValue::NoExpiry => -1,
+            fr_store::ExpireTimeValue::ExpiresAt(abs_ms) => abs_ms as i64,
+        });
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_pexpiretime_borrowed_metrics(key, elapsed_us, now_ms, packet_id, failed);
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
+    fn record_plain_pexpiretime_borrowed_metrics(
+        &mut self,
+        key: &[u8],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        let mut argv: Option<Vec<Vec<u8>>> = None;
+        if self.server.store.slowlog_log_slower_than_us >= 0
+            && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
+        {
+            let argv_ref = argv.get_or_insert_with(|| plain_pexpiretime_owned_argv(key));
+            self.record_slowlog(argv_ref, elapsed_us, now_ms);
+        }
+
+        let threshold_ms = self.server.store.latency_tracker.threshold_ms;
+        let duration_ms = elapsed_us.div_ceil(1000);
+        if threshold_ms != 0 && duration_ms > threshold_ms {
+            let argv_ref = argv.get_or_insert_with(|| plain_pexpiretime_owned_argv(key));
+            self.server
+                .record_latency_sample(argv_ref, elapsed_us, now_ms);
+        }
+
+        if self.server.latency_tracking {
+            let kind = if failed {
+                CommandRecordKind::Failed
+            } else {
+                CommandRecordKind::Success
+            };
+            self.server
+                .store
+                .record_command_histogram_canonical_with_kind("pexpiretime", elapsed_us, kind);
+        }
+
+        if elapsed_us > (self.server.command_time_budget_ms * 1000) {
+            let argv_ref = argv.get_or_insert_with(|| plain_pexpiretime_owned_argv(key));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!(
+                    "command 'PEXPIRETIME' took {}us, exceeding budget {}ms",
                     elapsed_us, self.server.command_time_budget_ms
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv_ref),
@@ -73906,5 +74048,102 @@ user bob reset off nopass +@all
             generic.server.store.state_digest(),
             "a WRONGTYPE LTRIM must not mutate"
         );
+    }
+
+    /// (frankenredis-ozrro) `execute_plain_pexpiretime_borrowed` is a NEW executor, so it
+    /// carries the borrowed-fast-path-skips-the-generic-check risk: a fast path that
+    /// returns a plausible integer while diverging from what the generic path would say.
+    ///
+    /// PEXPIRETIME has exactly three outcomes and they are easy to confuse with each
+    /// other — -2 (no key), -1 (key, no TTL) and the ABSOLUTE expiry in MILLISECONDS.
+    /// The last is the one a seconds/milliseconds slip would corrupt while still looking
+    /// like a valid reply, so every case is compared against the generic path on a twin
+    /// runtime, along with the whole-store digest.
+    #[test]
+    fn plain_pexpiretime_borrowed_matches_generic_across_all_three_outcomes() {
+        // (label, setup, key)
+        let cases: &[(&str, &[&[&[u8]]], &[u8])] = &[
+            ("missing key -> -2", &[], b"nosuchkey"),
+            ("key with no TTL -> -1", &[&[b"SET", b"k", b"v"]], b"k"),
+            (
+                "key with a TTL -> absolute ms",
+                &[&[b"SET", b"k", b"v"], &[b"PEXPIRE", b"k", b"5000"]],
+                b"k",
+            ),
+            (
+                "TTL set in SECONDS still reports MILLISECONDS",
+                &[&[b"SET", b"k", b"v"], &[b"EXPIRE", b"k", b"7"]],
+                b"k",
+            ),
+            (
+                "absolute EXPIREAT in seconds",
+                &[&[b"SET", b"k", b"v"], &[b"EXPIREAT", b"k", b"4102444800"]],
+                b"k",
+            ),
+            (
+                "wrong type is still a TTL question, not an error",
+                &[&[b"RPUSH", b"lk", b"a"]],
+                b"lk",
+            ),
+        ];
+
+        for (label, setup, key) in cases {
+            let mut fast = Runtime::default_strict();
+            let mut generic = Runtime::default_strict();
+            for rt in [&mut fast, &mut generic] {
+                for cmd_args in setup.iter() {
+                    rt.execute_frame(command(cmd_args), 10);
+                }
+            }
+
+            let fast_reply = fast
+                .execute_plain_pexpiretime_borrowed(key, 20)
+                .unwrap_or_else(|| panic!("{label}: borrowed PEXPIRETIME should engage"));
+            let generic_reply = generic.execute_frame(command(&[b"PEXPIRETIME", key]), 20);
+
+            assert_eq!(fast_reply, generic_reply, "{label}");
+            assert!(
+                matches!(fast_reply, RespFrame::Integer(_)),
+                "{label}: PEXPIRETIME always replies an integer"
+            );
+            assert_eq!(
+                fast.server.store.state_digest(),
+                generic.server.store.state_digest(),
+                "{label}: a read must not mutate"
+            );
+        }
+    }
+
+    /// The two outcomes that are easiest to get right by accident and wrong in substance:
+    /// -1 and -2 are DIFFERENT answers, and a fast path that collapsed them would still
+    /// return a valid-looking negative integer.
+    #[test]
+    fn plain_pexpiretime_borrowed_distinguishes_missing_key_from_no_ttl() {
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(command(&[b"SET", b"present", b"v"]), 10);
+
+        assert_eq!(
+            rt.execute_plain_pexpiretime_borrowed(b"present", 20),
+            Some(RespFrame::Integer(-1)),
+            "an existing key with no TTL is -1"
+        );
+        assert_eq!(
+            rt.execute_plain_pexpiretime_borrowed(b"absent", 20),
+            Some(RespFrame::Integer(-2)),
+            "a missing key is -2, NOT -1"
+        );
+
+        // And the millisecond magnitude is real, not a seconds value: a 5s TTL set at
+        // t=20ms must report an absolute stamp far larger than 5.
+        rt.execute_frame(command(&[b"PEXPIRE", b"present", b"5000"]), 20);
+        match rt.execute_plain_pexpiretime_borrowed(b"present", 21) {
+            Some(RespFrame::Integer(ms)) => {
+                assert!(
+                    ms >= 5000,
+                    "expected an absolute millisecond stamp, got {ms} — a seconds/ms slip"
+                );
+            }
+            other => panic!("expected an integer, got {other:?}"),
+        }
     }
 }

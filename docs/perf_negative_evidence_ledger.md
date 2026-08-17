@@ -28228,3 +28228,66 @@ BUILDING, because three of the first six shapes drawn from this list were alread
 redis and needed nothing. `ping` in particular is high-traffic and worth a shape on its own
 merits. Do NOT treat [C]'s 58 as a backlog: roughly half are unshapeable here (blocking,
 admin, pubsub, EXEC, SELECT) and belong to no lever at all.
+
+--------------------------------------------------------------------------------
+LANDED (frankenredis-ozrro) — the missing half of PEXPIRETIME's borrowed path, which is
+what the ranked worklist is FOR: [B] PARTIAL means one piece exists, and the missing piece
+was in a file peers had not reserved
+
+Claim class: METHOD (enabling change; no measurement — loadavg 42.6 rising at request)
+
+RusticHorizon holds `crates/fr-server/src/main.rs` and `scripts/shape_instr_per_op.py`
+until ~03:53Z, so the [A] worklist — floor entries and shapes — is entirely blocked, and I
+did not override the guard. The worklist landed last row is what made a useful alternative
+findable in one command instead of by hunting: of the five [B] PARTIAL commands, FOUR lack
+the PARSER (main.rs, blocked) and exactly one, PEXPIRETIME, lacked the EXECUTOR — which
+lives in fr-runtime and was free.
+
+    PEXPIRETIME had a borrowed parser and no executor. A floor entry for it in that state
+    would have CLAIMED the shape and then declined into the GENERIC path — a regression,
+    not a no-op. That is precisely why the report separates [B] from [A], and this row is
+    the first time that distinction directed the work rather than merely described it.
+
+WHAT WAS WRITTEN. `execute_plain_pexpiretime_borrowed`, plus its gate and metrics,
+GENERATED from the proven `strlen` trio (single key, integer reply, read gate) rather than
+hand-written, so no bookkeeping step could be dropped: same
+`plain_borrowed_default_key_read` predicate, same stats/session/expire-cycle/metrics/
+propagation sequence, same error accounting. One deliberate difference: STRLEN returns
+`Result<usize>` while PEXPIRETIME returns an `ExpireTimeValue` with no error case, mapped
+exactly as fr-command's generic path does — KeyMissing -> -2, NoExpiry -> -1,
+ExpiresAt(abs_ms) -> abs_ms.
+
+CORRECTNESS, tested where this command is easy to get wrong in substance while still
+returning a plausible integer. Six cases against a twin runtime on the generic path,
+comparing reply AND the whole-store digest: missing key, key with no TTL, TTL set in
+MILLISECONDS, TTL set in SECONDS (which must still report milliseconds), an absolute
+EXPIREAT, and a wrong-type key — where PEXPIRETIME is still a TTL question rather than an
+error. Plus a second test pinning the two answers most easily collapsed: -1 and -2 are
+DIFFERENT, and the millisecond magnitude must be an absolute stamp rather than a seconds
+value.
+
+    MUTATION-TESTED: collapsing `KeyMissing => -2` to `-1` reddens BOTH tests, on
+    "a missing key is -2, NOT -1" and on the generic comparison. A fast path that returned
+    -1 for a missing key would look entirely valid to a reply-shape check.
+
+604 fr-runtime tests pass.
+
+THE WORKLIST MOVED WHILE I WORKED, which is the property that makes it a worklist: the
+blind spot is 62, down from 67 last row and 78 two rows ago, and [B] is down to two (move,
+spublish). Some of that is mine and some is peers landing concurrently — the number is a
+live reading, not a scoreboard.
+
+PROVENANCE:
+  no measurement       enabling change; loadavg 42.6/46.1/34.7 rising at request, 32.11
+                       observed. Nothing was certified.
+  host                 thinkstation1, 64 cores, /data 153G, governor powersave, no build.
+  MHz                  not recorded — no arm was measured.
+  blocked work         the RENAMENX + SUBSTR floor entries remain parked at
+                       scratchpad/renamenx_substr.patch behind RusticHorizon's reservation,
+                       measured and banked two rows above. Agent mail has now timed out on
+                       three send attempts, so the ledger is the handoff channel.
+
+RETRY PREDICATE: PEXPIRETIME is now [A] — it needs only a floor entry and a shape, both in
+reserved files, so it is the first thing to take when that reservation lapses. MEASURE IT
+FIRST: it is a cheap read and may well already be ahead of redis, in which case the entry
+is a cost reduction rather than a parity fix and should be described as one.
