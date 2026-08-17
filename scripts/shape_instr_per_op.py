@@ -387,6 +387,12 @@ SHAPES = {
         ["KEYS", "*"],
     ),
     "scan_zero": (["SET sc1 a", "SET sc2 b"], ["SCAN", "0"]),
+    # (frankenredis-ozrro) The arity-4 SCAN option forms, front-classified in b631dd1f9.
+    # Each is ONE option: the two-option forms keep the generic route by design, so a
+    # two-option shape here would measure the thing that did NOT change.
+    "scan_count": (["SET sc1 a", "SET sc2 b"], ["SCAN", "0", "COUNT", "100"]),
+    "scan_match": (["SET sc1 a", "SET sc2 b"], ["SCAN", "0", "MATCH", "sc*"]),
+    "scan_type": (["SET sc1 a", "SET sc2 b"], ["SCAN", "0", "TYPE", "string"]),
     "lcs_2": (["SET lc1 ohmytext", "SET lc2 mynewtext"], ["LCS", "lc1", "lc2"]),
     # (frankenredis-gvm6z) The SIZE SIBLING for LCS, and the reason it exists is that
     # `lcs_2` measured 1.1085x -- the worst cell on my screen -- over strings of EIGHT and
@@ -447,6 +453,21 @@ SHAPES = {
                       ["ZINTERSTORE", "zidst", "2", "zi1", "zi2"]),
     "zrangestore_all": (["ZADD zrsrc 1 a 2 b 3 c"],
                         ["ZRANGESTORE", "zrdst", "zrsrc", "0", "-1"]),
+    # (frankenredis-gvm6z) The SIZE SIBLING. `zrangestore_all` has THREE members, so its
+    # 0.7926x is an intercept reading, exactly like keys_star at n=2 (1.0353x -> 0.6806x
+    # by n=64) and lcs_2 at 8x9 chars (1.1085x -> 0.1190x at 64x64). The DISPATCH figure
+    # it reported -- 3,787.6 instr/op, the largest measured in this campaign -- is a
+    # per-CALL constant and so is size-independent; the RATIO is not, and must not be
+    # quoted without its member count.
+    #
+    # 64 members against the same fixed cost. Rank mode over the full range, so the copy
+    # is O(n) on both engines and the slopes are directly comparable. Destination is
+    # rewritten with the identical result every call, so the keyspace stops changing
+    # after the first and the two-point subtraction still sees a steady-state no-op.
+    "zrangestore_64": (
+        [" ".join(["ZADD", "zr64src"] + [f"{i} m{i:02d}" for i in range(64)])],
+        ["ZRANGESTORE", "zr64dst", "zr64src", "0", "-1"],
+    ),
     "pfmerge_2": (["PFADD pf1 a b c", "PFADD pf2 c d"], ["PFMERGE", "pfdst", "pf1", "pf2"]),
     "spop_missing": ([], ["SPOP", "nosuchset"]),
     "srandmember_1": (["SADD srm m1 m2 m3"], ["SRANDMEMBER", "srm"]),
@@ -1352,6 +1373,34 @@ def selftest() -> int:
         print("  %-26s replies=0 (correctly withheld until complete)  ok" % "truncated reply")
     _selftest_eventloop_cycles()
     print("  %-26s None-not-zero contract  ok" % "eventloop_cycles parser")
+
+    # (frankenredis-ozrro) Argument parsing must not depend on flag POSITION. The
+    # regression this pins: `<bin> <shape> --fr-only` read "--fr-only" as the ops count
+    # and died, and since the traceback goes to stderr a caller grepping stdout for a
+    # result line saw an empty arm rather than a failure.
+    argcases = [
+        (["fr", "get_control"], ["fr", "get_control"]),
+        (["fr", "get_control", "--fr-only"], ["fr", "get_control"]),
+        (["fr", "get_control", "4000", "--fr-only"], ["fr", "get_control", "4000"]),
+        (["fr", "get_control", "--fr-only", "4000"], ["fr", "get_control", "4000"]),
+        (["--fr-only", "fr", "get_control"], ["fr", "get_control"]),
+        (["fr", "get_control", "--locale=C", "--fr-only"], ["fr", "get_control"]),
+    ]
+    for given, want in argcases:
+        got = _positional_args(given)
+        if got != want:
+            failures += 1
+            print("  %-26s FAIL: %r -> %r, want %r" % ("arg parsing", given, got, want))
+    # And the ops default must survive a trailing flag rather than raising.
+    for given, want_ops in [(["fr", "s"], 2000), (["fr", "s", "--fr-only"], 2000),
+                            (["fr", "s", "500", "--fr-only"], 500)]:
+        p = _positional_args(given)
+        ops = int(p[2]) if len(p) > 2 else 2000
+        if ops != want_ops:
+            failures += 1
+            print("  %-26s FAIL: %r -> ops=%d, want %d" % ("ops default", given, ops, want_ops))
+    print("  %-26s flag position independent  ok" % "arg parsing")
+
     print("selftest: %d case(s) failed" % failures)
     return 1 if failures else 0
 
@@ -1385,6 +1434,16 @@ def provenance_self_test() -> int:
     return 0
 
 
+def _positional_args(args):
+    """Positional arguments only, with `--flags` removed regardless of position.
+
+    (frankenredis-ozrro) Split out so it is testable. Reading ops from a raw args[2] made
+    the documented `<bin> <shape> --fr-only` crash, and because the traceback goes to
+    stderr a caller grepping stdout saw an empty arm rather than an error.
+    """
+    return [a for a in args if not a.startswith("--")]
+
+
 def main() -> int:
     args = sys.argv[1:]
     if "--self-test" in args:
@@ -1394,12 +1453,15 @@ def main() -> int:
     if "--list" in args:
         print("shapes: %s" % ", ".join(sorted(SHAPES)))
         return 0
-    if len(args) < 2 or args[1] not in SHAPES:
-        print("usage: shape_instr_per_op.py <fr_bin> <shape> [ops]   (--list for shapes)",
-              file=sys.stderr)
+    # (frankenredis-ozrro) Positionals are separated from flags ONCE, up front, so flag
+    # ORDER never changes how the binary, shape or ops count are read.
+    positional = _positional_args(args)
+    if len(positional) < 2 or positional[1] not in SHAPES:
+        print("usage: shape_instr_per_op.py <fr_bin> <shape> [ops] [--fr-only] "
+              "[--locale=X]   (--list for shapes)", file=sys.stderr)
         return 2
-    fr_bin = os.path.abspath(args[0])
-    shape = args[1]
+    fr_bin = os.path.abspath(positional[0])
+    shape = positional[1]
     # (frankenredis-c0ts5) --fr-only skips the incumbent arm. The dispatch
     # ladder needs fr's own instr/op and dispatch share, not a ratio, and the
     # redis arm is half the wall-clock of every measurement (and the noisy half,
@@ -1409,7 +1471,15 @@ def main() -> int:
     for a in args:
         if a.startswith("--locale="):
             locale = a.split("=", 1)[1]
-    ops = int(args[2]) if len(args) > 2 else 2000
+    # (frankenredis-ozrro) ops comes from the POSITIONAL args only. It used to read args[2]
+    # directly, so the documented `<bin> <shape> --fr-only` — the flag's most natural
+    # invocation, and the one the comment above implies — died with
+    #   ValueError: invalid literal for int() with base 10: '--fr-only'
+    # The flag only worked if you happened to pass an explicit ops count before it. The
+    # traceback goes to stderr, so a caller that greps stdout for a result line sees an
+    # EMPTY ARM rather than a failure, which is how this survived: I lost a whole
+    # before-arm to it and read the silence as "no output" instead of "crashed".
+    ops = int(positional[2]) if len(positional) > 2 else 2000
     seeds, cmd = SHAPES[shape]
     prov_ok, prov_msg = _check_incumbent(
         REDIS, os.path.join(ROOT, "legacy_redis_code/redis"))

@@ -8,6 +8,73 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## MEASURED (frankenredis-ozrro) — SCAN's arity-4 option forms each drop ~3,175 instr/op, the dispatch term is a per-call constant to 0.9 instr/op, and SPOP's lever is UNDEMONSTRABLE on the only shape that exists
+
+Claim class: COMPETITIVE + SELF-A/B. Before arm `fr-after-scankeys` (6ce613360, verified by
+symbol scan to contain execute_plain_scan_borrowed but NOT scan_opt or spop), after arm
+`fr-after-spop` (a46f3042e, both present). Incumbent verified on every ratio run.
+
+    shape          fr before  fr after     delta   disp before  disp after  d-disp   d-nondisp
+    scan_count       7,465.3   4,285.2   -3,180.1     2,094.7      446.2  -1,648.5   -1,531.6
+    scan_match       8,023.1   4,848.8   -3,174.3     2,097.6      449.1  -1,648.5   -1,525.8
+    scan_type        7,982.6   4,812.5   -3,170.1     2,096.5      448.9  -1,647.6   -1,522.5
+    spop_missing     1,602.6   1,560.0      -42.6       335.9      287.5     -48.4       +5.8
+    dump_small       2,699.2   2,696.3       -2.9       305.3      304.8      -0.5       -2.4   CONTROL
+
+fr/redis on the after arm: scan_count 0.6510x, scan_match 0.7175x, scan_type 0.6970x,
+spop_missing 0.6028x, dump_small 0.5338x.
+
+THE CONTROL IS THE REASON THIS ROW IS TRUSTWORTHY. dump_small is front-classified and
+untouched by both changes; across two separately-built ELFs it moved 2,699.2 -> 2,696.3, a
+drift of 0.1%, with dispatch 305.3 -> 304.8. Any tree contamination or window artefact large
+enough to matter would have shown up there first.
+
+THE DISPATCH TERM IS A PER-CALL CONSTANT, MEASURED THREE INDEPENDENT WAYS. The three option
+forms do genuinely different work — a glob filter, a type filter, a count — yet their
+dispatch deltas are -1,648.5, -1,648.5 and -1,647.6, a spread of 0.9 instr/op, and their
+totals land within 10 of each other. Three commands cannot agree to 0.05% by accident; this
+is the same fixed overhead in all three, which is exactly what front-classification removes.
+
+THE 1.8x SIZING RULE IS NOW PINNED AT 1.93x. Total saving / dispatch saving = 3,175 / 1,648
+= 1.93. The non-dispatch half is -1,527 +/- 5 across the three, consistent with the ~1,400
+argv-materialisation constant this ledger derived from SCAN and KEYS and with p98mw's
+independently derived ~1.8x. Dispatch share remains a LOWER BOUND on what a generic-route
+command returns, and the multiplier is now measured rather than estimated.
+
+SPOP: LANDED, CORRECT, AND UNDEMONSTRABLE HERE. The lever moved spop_missing by -42.6
+instr/op (2.7%), nowhere near the ~3,000 the model predicts, and the reason is visible in
+the before arm: SPOP's dispatch was ALREADY only 335.9, not the ~2,000 a generic-route
+command carries. A missing-key SPOP is the cheapest SPOP there is and never reaches the
+expensive part of the generic path. It is also the ONLY steady-state shape available —
+a live SPOP removes a member, so it cannot be a no-op, and the two-point subtraction
+requires one.
+
+    Do NOT read -42.6 as "the SPOP lever is worthless." Read it as "this instrument cannot
+    price SPOP." The shape measures the intercept of a command whose cost is in the work,
+    which is the same error class as keys_star at n=2 (gvm6z) and SORT at n=3. Pricing SPOP
+    honestly needs a harness that can measure a MUTATING command — re-seeding between
+    batches, which the two-point subtraction is not built for. That is a tooling ticket, not
+    a perf claim, and nothing here should be quoted as a SPOP number.
+
+WINDOW. Per-arm loadavg spanned 12.07-13.31 / 15.58-16.89 / 20.49-21.58, falling
+monotonically; observed core MHz 1,429-3,557. The 1-minute sat ~1.25x the 5-minute, so this
+is a decaying window rather than a settled one. Two things make the fr-vs-fr deltas above
+sound anyway: fr's Ir is elapsed-immune (0.139%), and the control drifted 0.1% across the
+pair. The fr/redis RATIOS are the part that stays MEASURED rather than certified — a falling
+load deflates the redis denominator between arms, which biases ratios AGAINST fr, so those
+figures are conservative rather than flattering. MHz is irrelevant to an instruction count
+and is recorded only because the campaign asks for it.
+
+HARNESS BUG FIXED IN PASSING, and it cost me the first before-arm entirely.
+`shape_instr_per_op.py <bin> <shape> --fr-only` — the documented invocation — read
+"--fr-only" as the ops count and died with ValueError. Because the traceback goes to stderr
+and callers grep stdout for the result line, the arm came back EMPTY rather than failing
+loudly, and I initially read the silence as "no output" instead of "crashed". Positional
+args are now separated from flags once, up front, via a testable `_positional_args`, with
+six selftest cases pinning flag-position independence and three pinning the ops default.
+A silent empty arm is worse than a crash: a crash stops you, an empty arm invites you to
+report half a measurement.
+
 ## CORRECTION (frankenredis-ozrro) — my "which crate holds the generic" rule was a proxy, and gvm6z's ZRANGESTORE refutes it. The real test is whether the WORK is already a callable helper, and the sub-form you claim is YOUR choice
 
 I banked a rule that a [C] lever is cheap when its generic handler lives in fr-runtime and
