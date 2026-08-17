@@ -41123,52 +41123,21 @@ impl Runtime {
             if !Self::config_pattern_matches(pattern, name) {
                 continue;
             }
-            // Skip dynamically-managed params — we already emitted live values above
-            if name == "masterauth"
-                || name == "masteruser"
-                || name == "maxmemory"
-                || name == "maxmemory-policy"
-                || name == "slowlog-log-slower-than"
-                || name == "slowlog-max-len"
-                || name == "hz"
-                || name == "hash-max-listpack-entries"
-                || name == "hash-max-listpack-value"
-                || name == "hash-max-ziplist-entries"
-                || name == "hash-max-ziplist-value"
-                || name == "set-max-intset-entries"
-                || name == "set-max-listpack-entries"
-                || name == "set-max-listpack-value"
-                || name == "zset-max-listpack-entries"
-                || name == "zset-max-listpack-value"
-                || name == "zset-max-ziplist-entries"
-                || name == "zset-max-ziplist-value"
-                || name == "hll-sparse-max-bytes"
-                || name == "list-max-listpack-size"
-                || name == "list-max-ziplist-size"
-                || name == "appendonly"
-                || name == "stop-writes-on-bgsave-error"
-                || name == "appendfilename"
-                || name == "appenddirname"
-                || name == "dbfilename"
-                || name == "dir"
-                || name == "aclfile"
-                || name == "maxclients"
-                || name == "busy-reply-threshold"
-                || name == "lua-time-limit"
-                || name == "maxmemory-samples"
-                || name == "repl-backlog-size"
-                || name == "repl-timeout"
-                || name == "replica-serve-stale-data"
-                || name == "replica-priority"
-                || name == "slave-priority"
-                || name == "repl-diskless-sync"
-                || name == "repl-diskless-sync-delay"
-                || name == "client-query-buffer-limit"
-                || name == "proto-max-bulk-len"
-                || name == "client-output-buffer-limit"
-                || name == "enable-debug-command"
-                || name == "port"
-            {
+            // Skip dynamically-managed params — we already emitted live values above.
+            //
+            // (frankenredis-e6c9t) ONE SOURCE OF TRUTH, and this is a correctness change
+            // before it is anything else. This test was a 44-name `||` chain written out
+            // inline, and `config_static_param_is_dynamic` is the SAME 44 names written out
+            // again — two copies of one list, which was survivable while the copies were the
+            // only consumers. It stopped being survivable when
+            // `collect_config_static_literal_indexed` landed: that path answers a LITERAL
+            // `CONFIG GET` from an index built by filtering on the HELPER, while this path
+            // answers a GLOB request by filtering on the CHAIN. Any drift between them makes
+            // one parameter's visibility depend on whether the client asked for it by name or
+            // by wildcard — a silent divergence no existing test covers, since each path is
+            // self-consistent. Calling the helper makes the two paths filter on the same
+            // predicate by construction rather than by review.
+            if config_static_param_is_dynamic(name) {
                 continue;
             }
             // The pattern already matched at the top of the loop.
@@ -47970,6 +47939,133 @@ mod tests {
                     .collect::<Vec<_>>()
             );
         }
+    }
+
+    /// (frankenredis-e6c9t) EVERY PARAMETER THE SKIP PREDICATE HIDES MUST BE EMITTED
+    /// SOMEWHERE ELSE.
+    ///
+    /// Deliberately NOT the obvious assertion. "The index contains exactly the non-dynamic
+    /// names" cannot fail: the index is BUILT by filtering on that predicate, so testing it
+    /// against the predicate tests nothing. The real hazard the shared predicate creates is
+    /// one-sided — `config_static_param_is_dynamic` says "skip this in the static loop
+    /// BECAUSE a dedicated branch above already emitted it live", and nothing checks that the
+    /// dedicated branch exists. Add a name to that list without adding its branch and the
+    /// parameter silently disappears from `CONFIG GET` entirely.
+    ///
+    /// So this walks the names the predicate actually hides and requires each to come back
+    /// exactly once anyway. It generalises the four hand-picked names in
+    /// `config_get_literal_emits_each_key_exactly_once_e6c9t` to the whole list.
+    #[test]
+    fn every_dynamically_managed_param_is_still_emitted_exactly_once_e6c9t() {
+        use super::{CONFIG_STATIC_PARAMS, config_static_param_is_dynamic};
+
+        let rt = Runtime::new(RuntimePolicy::default());
+        let mut hidden = 0usize;
+        for &(name, _) in CONFIG_STATIC_PARAMS {
+            if !config_static_param_is_dynamic(name) {
+                continue;
+            }
+            hidden += 1;
+            let mut entries = Vec::new();
+            rt.collect_config_entries(name, &mut entries);
+            let hits = entries
+                .iter()
+                .step_by(2)
+                .filter(|e| matches!(e, RespFrame::BulkString(Some(k)) if k.as_slice() == name.as_bytes()))
+                .count();
+            assert_eq!(
+                hits, 1,
+                "{name:?} is skipped by the static loop as dynamically-managed, but a literal \
+                 CONFIG GET emitted it {hits} times — a skip with no live branch above the loop \
+                 makes the parameter invisible; two emissions means the skip was lost"
+            );
+        }
+        assert!(
+            hidden >= 40,
+            "the dynamic-skip predicate hid only {hidden} of the static table — it used to hide \
+             44, so either the table or the predicate moved and this test stopped covering it"
+        );
+    }
+
+    /// (frankenredis-e6c9t) THE DISCRIMINATING CASE, behavioural rather than structural.
+    ///
+    /// A naive collapse of the glob path's inline skip chain onto the shared predicate is only
+    /// correct if the two lists were identical to begin with. They were — but "were" is the
+    /// whole problem, so this pins the OBSERVABLE consequence instead of the lists: for every
+    /// static parameter, asking for it BY NAME and asking for it with a wildcard that matches
+    /// it must produce the same value, or no value from both.
+    ///
+    /// This is what a one-name divergence between the chain and the helper actually looks like
+    /// to a client, and it fails whichever direction the drift goes: a name the chain skips but
+    /// the helper admits is served by the literal path and missing from the sweep; a name the
+    /// helper skips but the chain admits is the reverse.
+    #[test]
+    fn literal_and_glob_config_get_agree_on_every_static_param_e6c9t() {
+        use super::CONFIG_STATIC_PARAMS;
+
+        let rt = Runtime::new(RuntimePolicy::default());
+
+        fn pick(entries: &[RespFrame], want: &str) -> Option<Vec<u8>> {
+            let mut idx = 0;
+            while idx + 1 < entries.len() {
+                if let (RespFrame::BulkString(Some(k)), RespFrame::BulkString(Some(v))) =
+                    (&entries[idx], &entries[idx + 1])
+                    && k.as_slice() == want.as_bytes()
+                {
+                    return Some(v.clone());
+                }
+                idx += 2;
+            }
+            None
+        }
+
+        // Route a LITERAL request exactly as the command handler does: try the index first,
+        // fall back to the ordered walk. Calling `collect_config_entries` directly here would
+        // walk both requests down the SAME path and the test would prove nothing.
+        fn by_literal(rt: &Runtime, name: &str) -> Option<Vec<u8>> {
+            let mut entries = Vec::new();
+            if !rt.collect_config_static_literal_indexed(name, name, &mut entries) {
+                rt.collect_config_entries(name, &mut entries);
+            }
+            pick(&entries, name)
+        }
+
+        fn by_glob(rt: &Runtime, glob: &str, name: &str) -> Option<Vec<u8>> {
+            let mut entries = Vec::new();
+            rt.collect_config_entries(glob, &mut entries);
+            pick(&entries, name)
+        }
+
+        let mut checked = 0usize;
+        for &(name, _) in CONFIG_STATIC_PARAMS {
+            // A wildcard that matches this name and nothing shorter: the name itself with a
+            // trailing `*`. It goes down the glob path; the bare name goes down the index.
+            let glob = format!("{name}*");
+            let by_glob = by_glob(&rt, &glob, name);
+            let by_literal = by_literal(&rt, name);
+            assert_eq!(
+                by_literal.is_some(),
+                by_glob.is_some(),
+                "{name:?} is reachable by literal CONFIG GET = {}, by wildcard = {} — the two \
+                 paths disagree about whether it exists",
+                by_literal.is_some(),
+                by_glob.is_some()
+            );
+            if let (Some(lit), Some(glob_value)) = (&by_literal, &by_glob) {
+                assert_eq!(
+                    lit,
+                    glob_value,
+                    "{name:?} has value {:?} by literal CONFIG GET but {:?} by wildcard",
+                    String::from_utf8_lossy(lit),
+                    String::from_utf8_lossy(glob_value)
+                );
+            }
+            checked += 1;
+        }
+        assert!(
+            checked >= 150,
+            "expected the static table to still be the ~190-entry registry, saw {checked}"
+        );
     }
 
     /// (frankenredis-e6c9t) The literal fast path in `config_pattern_matches` must agree with
