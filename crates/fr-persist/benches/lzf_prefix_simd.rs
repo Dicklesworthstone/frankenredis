@@ -233,6 +233,15 @@ fn main() -> Result<(), String> {
         }
 
         let mut nulls = Vec::with_capacity(ROUNDS);
+        // (frankenredis-ucye4) The SECOND null arm. The only null used to be
+        // orig-vs-orig, which certifies timing stability for the SCALAR arm while the
+        // candidate is the AVX2 path -- the worst arm to be blind to, since heavy AVX2
+        // can shift core frequency and thermal behaviour, so cand's run-to-run variance
+        // may legitimately differ from orig's. An orig-only null cannot see that, and a
+        // threshold derived from it is then too small, giving a false KEEP. Both arms are
+        // now nulled and BOTH must bracket 1.0, exactly as scripts/balanced_square_ab.py
+        // already does with null_redis and null_fr.
+        let mut nulls_cand = Vec::with_capacity(ROUNDS);
         let mut speeds = Vec::with_capacity(ROUNDS);
         // (frankenredis-qj6jn) Tag each null with its configuration so a refused row
         // can be split by (orientation, null-position). See the LZF_DUMP_NULLS block.
@@ -248,16 +257,17 @@ fn main() -> Result<(), String> {
                     b / time(cf, reps)
                 }
             };
-            let (nn, sp) = if round % 4 < 2 {
-                (pair(&orig, &orig), pair(&orig, &cand))
+            let (nn, nc, sp) = if round % 4 < 2 {
+                (pair(&orig, &orig), pair(&cand, &cand), pair(&orig, &cand))
             } else {
                 let effect = pair(&orig, &cand);
-                (pair(&orig, &orig), effect)
+                (pair(&orig, &orig), pair(&cand, &cand), effect)
             };
             if round == 0 {
                 continue;
             }
             nulls.push(nn);
+            nulls_cand.push(nc);
             null_tags.push((swap_within_pair, round % 4 < 2));
             speeds.push(sp);
         }
@@ -304,18 +314,51 @@ fn main() -> Result<(), String> {
         let null_cv_pct = cv(&nulls);
         let effect_cv_pct = cv(&speeds);
         let (null_ci95_low, null_ci95_high) = bootstrap_median_ci(&nulls);
+        let (cand_ci95_low, cand_ci95_high) = bootstrap_median_ci(&nulls_cand);
         let null_med = median(&mut nulls);
+        let cand_null_med = median(&mut nulls_cand);
         let speedup = median(&mut speeds);
+        // (frankenredis-ucye4) BOTH arms must be nulled. Reporting which arm failed is
+        // the point: "the null failed" sent me through four blind re-runs, and an
+        // orig-only null could not have implicated the AVX2 arm at all.
         if null_ci95_low > 1.0 || null_ci95_high < 1.0 {
             return Err(format!(
-                "{label}: A/A null CI does not bracket 1.0: \
-                 [{null_ci95_low:.9}, {null_ci95_high:.9}]"
+                "{label}: ORIG A/A null CI does not bracket 1.0: \
+                 [{null_ci95_low:.9}, {null_ci95_high:.9}] (cand null med {cand_null_med:.6})"
+            ));
+        }
+        if cand_ci95_low > 1.0 || cand_ci95_high < 1.0 {
+            return Err(format!(
+                "{label}: CAND A/A null CI does not bracket 1.0: \
+                 [{cand_ci95_low:.9}, {cand_ci95_high:.9}] -- the AVX2 arm is the one \
+                 an orig-only null could never have caught (orig null med {null_med:.6})"
             ));
         }
         let null_radius = (null_ci95_low - 1.0)
             .abs()
-            .max((null_ci95_high - 1.0).abs());
-        let decisive_threshold = (1.0 + 2.0 * null_radius).max(1.01);
+            .max((null_ci95_high - 1.0).abs())
+            .max((cand_ci95_low - 1.0).abs())
+            .max((cand_ci95_high - 1.0).abs());
+        // (frankenredis-ucye4) The threshold must be able to EXCEED the constant floor,
+        // or the adaptive term is dead code. Measured: null_radius is ~0.002, so
+        // `(1.0 + 2.0*null_radius).max(1.01)` always resolved to exactly 1.01 -- while
+        // this harness's own null MEDIAN moved 0.98844 -> 1.00257 between runs of the
+        // SAME binary, i.e. ~1.4% of drift under a 1% gate. An effect may not be claimed
+        // below the bias the instrument just demonstrated, which is the rule landed for
+        // scripts/balanced_square_ab.py in frankenredis-enrhw; apply it here too, taking
+        // the worse of the two arms' observed bias.
+        let observed_null_bias = (null_med - 1.0).abs().max((cand_null_med - 1.0).abs());
+        let adaptive = (2.0 * null_radius).max(observed_null_bias);
+        let decisive_threshold = (1.0 + adaptive).max(1.01);
+        let binding = if adaptive >= 0.01 {
+            if observed_null_bias > 2.0 * null_radius {
+                "observed_null_bias"
+            } else {
+                "2x_null_ci_radius"
+            }
+        } else {
+            "absolute_floor_1.01"
+        };
         let verdict = if speedup >= decisive_threshold {
             "KEEP"
         } else if speedup.recip() >= decisive_threshold {
@@ -349,7 +392,10 @@ fn main() -> Result<(), String> {
              bootstrap_resamples={BOOTSTRAP_RESAMPLES} null_cv_pct={null_cv_pct:.6} \
              effect_cv_pct={effect_cv_pct:.6} verdict={verdict} \
              same_invocation_aa=true position_balanced=true \
-             absolute_floor=1.01 cv_used_as_provenance_only=true"
+             absolute_floor=1.01 cv_used_as_provenance_only=true \
+             cand_null_med={cand_null_med:.9} \
+             cand_null_ci95=[{cand_ci95_low:.9},{cand_ci95_high:.9}] \
+             observed_null_bias={observed_null_bias:.9} binding={binding}"
         );
     }
 

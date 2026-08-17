@@ -32902,3 +32902,80 @@ RETRY PREDICATE: do NOT re-derive the cron-leak hypothesis; it is measured and d
 +/-8 pct denominator spread remains UNEXPLAINED and is the open question — it is the largest
 single source of imprecision in every ratio this campaign banks. If someone wants it, vary
 one input at a time as this row did, and name both outcomes first.
+
+## 2026-08-17 GentleStream: MEASURED — the LZF AVX2 match-tail routing is 1.09-1.33x on long tails, and `textish_8k` is UNDETERMINED because the AVX2 arm's own null fails there (`frankenredis-ucye4`, `frankenredis-qj6jn`)
+
+Claim class: SELF-SPEEDUP. This is fr-vs-fr — scalar match-tail loop versus AVX2
+routing inside one binary — so by section 1 it is MAINTENANCE, not a win. No
+vs-incumbent ratio is claimed or implied.
+
+WHY THIS ROW EXISTS AT ALL: this spec was written during the freeze and had never
+run, then refused every row for four runs with `A/A null CI does not bracket 1.0`
+and no way to tell why. Fixing the GATE was the lever; the numbers are what the
+fixed gate then produced.
+
+THE GATE DEFECTS FIXED (`ucye4`), both found by auditing my own gates after three
+other projects reported theirs mis-deciding:
+
+  1. ARM-ASYMMETRIC NULL. The only null was `pair(&orig,&orig)`; `pair(&cand,&cand)`
+     was never measured. It certified the SCALAR arm while the candidate is the AVX2
+     path. Now BOTH are nulled and both must bracket 1.0.
+  2. DEAD ADAPTIVE TERM. `(1.0 + 2.0*null_radius).max(1.01)` with a measured radius
+     of ~0.002 always resolved to exactly 1.01, so the null-derived term never bound
+     — under a harness whose own null median moved 0.98844 -> 1.00257 between runs of
+     the same binary (~1.4% drift under a 1% gate). The threshold now also clears the
+     OBSERVED null bias, the rule landed for balanced_square_ab in `enrhw`, and every
+     row prints which term bound it.
+
+RESULT, two runs, same binary, both arms in the same invocation and the same window:
+
+    workload         run 1 orig/cand   run 2 orig/cand   verdict   binding
+    runs_256x24        1.099x            1.091x          KEEP      2x_null_ci_radius
+    runs_512x12        1.044x            1.059x          KEEP      floor / 2x_radius
+    onebyte_8k         1.324x            1.329x          KEEP      2x_null_ci_radius
+    structured_512     1.012x            1.017x          KEEP      absolute_floor_1.01
+    textish_8k         0.964x REJECT     CAND NULL FAILED  UNDETERMINED
+
+WORST BOUND on the win side, slowest of the two runs per workload: 1.091x
+(runs_256x24), 1.044x (runs_512x12), 1.324x (onebyte_8k). Correctness gate
+`lzf_compressed_output=byte_identical cases=5` passed on every one of six runs.
+
+TEXTISH_8K IS NOT A MEASURED REGRESSION, and the distinction is the whole point of
+fixing defect 1. Run 1 reported 0.964x — a 3.6% regression on a workload whose
+guard says it must never regress. Run 2 REFUSED that row because the CAND null CI
+came out [1.000134658, 1.003098998], excluding 1.0, while the ORIG null median was
+1.000576 and would have passed. So the AVX2 arm is unstable on that shape and the
+apparent regression rests on it. **The pre-fix gate would have certified a
+regression it could not see the arm of.** Undetermined, not rejected.
+
+CONSEQUENCE FOR THE LEVER: it is NOT Pareto-safe as designed. Its own docstring
+predicts "INDISTINGUISHABLE on short-match / text / structured payloads (the
+guards - must never regress)", and `textish_8k` does not hold that up. Shipping the
+routing needs that shape resolved first, so the routing stays UNSHIPPED and the
+production path is unchanged.
+
+PROVENANCE. Self-reported ELF SHA-256, printed by the benchmark from inside its own
+process as `bench_elf_sha256`: run 1
+6b359a507cf2e69a5ada60ebb229a25380d359cd2d195833da2474347d20fb4f (run 2 identical
+binary, unmodified between runs). Built LOCALLY per the measurement rule
+(`RCH_CARGO_WRAPPER_BYPASS=1`, no `[RCH]` line, executable path taken from
+`--message-format=json`) — `rch` compiles remotely and does not return a linked
+binary, so a remote build here would have measured nothing. Host thinkstation1,
+powersave governor. Run 1 loadavg 25.57/42.86/128.77 entering and 17.36 leaving,
+CPU 2515 -> 2701 MHz. Run 2 loadavg 16.36/32.52/113.27 entering and 27.52 leaving,
+3144 -> 3001 MHz. Both are FALLING-load windows, stated because this host's clock
+tracks load and neither window was steady-state.
+
+NO CONFIDENCE-INTERVAL CLAIM beyond the harness's own: the per-row bootstrap median
+CI over 81 rounds is printed in each `MEDIAN_CI_EVIDENCE` line, and the null CIs for
+BOTH arms with it. **CV is provenance only and is NEVER a gate here**, the
+bootstrap median CI and the observed null bias being the deciding terms.
+
+RETRY PREDICATE: re-run only for `textish_8k`, and only to resolve whether its CAND
+null can be made to bracket 1.0 in a steadier window — if it can and the ratio is
+still under 1.0, the routing has a real short-payload regression and needs its
+128-byte gate re-examined. Do NOT re-run the three long-tail workloads to
+"confirm" them: they replicated at 1.09/1.04/1.32 with both nulls clean, and a
+third run buys nothing. Do NOT re-litigate the four refuted null hypotheses
+(clock swing, ROUNDS parity, neighbouring-segment state, harness statistics) —
+all four are measured and closed on `qj6jn`.
