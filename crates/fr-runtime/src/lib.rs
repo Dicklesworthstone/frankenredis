@@ -27462,6 +27462,157 @@ impl Runtime {
     /// start/stop are parsed BEFORE any store work, so a malformed integer declines with
     /// NOTHING touched — including the source keyspace hit/miss, which the generic path
     /// then records itself. Recording it here and then declining would double-count it.
+    /// (frankenredis-gvm6z) Borrowed WRITE fast path for the BOUND forms of arity-6
+    /// ZRANGESTORE: `dst src min max BYSCORE` and `dst src min max BYLEX`. No REV, no LIMIT
+    /// (LIMIT is arity 9 and stays generic).
+    ///
+    /// WHY IT EXISTS: routing arity 6 for the REV form ALONE was measured to tax BYSCORE and
+    /// BYLEX by +2.35 pct, because the arity-keyed floor class captured them and their arm
+    /// declined, paying a `key_arg4` parse to reach generic anyway (+289.8 instr/op of
+    /// dispatch; ledger REJECT row). Serving them removes the decline instead of the class.
+    ///
+    /// MIRRORS `fr_command::zrangestore_cmd` FOR THESE TWO FORMS BY CALL SEQUENCE, not by
+    /// reasoning about what the sequence ought to be: `record_source_key_lookups(src)`, then
+    /// the same guard and the same limited walk generic uses, then the shared tail. The walks
+    /// themselves also record a keyspace lookup; generic calls them identically, so whatever
+    /// accounting that produces is reproduced rather than corrected here. The equivalence
+    /// test compares `stat_keyspace_hits` against a twin runtime for exactly this reason.
+    ///
+    /// `force_skiplist` is TRUE here and FALSE on the rank path. Upstream creates BYSCORE /
+    /// BYLEX destinations skiplist-encoded (`zsetTypeCreate(-1, 0)`, frankenredis-t8rma),
+    /// while rank mode sizes by count. Getting it backwards changes the destination's
+    /// OBJECT ENCODING while leaving every reply byte identical, which no reply-comparing
+    /// test can see -- so the equivalence test probes encoding.
+    ///
+    /// Bounds are validated BEFORE any store work, so a malformed bound declines with
+    /// NOTHING touched and generic owns both the error reply and the keyspace hit.
+    pub fn execute_plain_zrangestore_bound_borrowed(
+        &mut self,
+        dst: &[u8],
+        src: &[u8],
+        min_arg: &[u8],
+        max_arg: &[u8],
+        lex: bool,
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if self.policy.gate.max_array_len < 6
+            || self.policy.gate.max_bulk_len < b"ZRANGESTORE".len()
+            || dst.len() > self.policy.gate.max_bulk_len
+            || src.len() > self.policy.gate.max_bulk_len
+            || min_arg.len() > self.policy.gate.max_bulk_len
+            || max_arg.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        let bounds = if lex {
+            fr_command::validate_lex_bound(min_arg).ok()?;
+            fr_command::validate_lex_bound(max_arg).ok()?;
+            None
+        } else {
+            Some((
+                fr_command::parse_score_bound(min_arg).ok()?,
+                fr_command::parse_score_bound(max_arg).ok()?,
+            ))
+        };
+        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+            return None;
+        }
+
+        let keyword_len = if lex {
+            b"BYLEX".len()
+        } else {
+            b"BYSCORE".len()
+        };
+        let argv_len_sum = b"ZRANGESTORE".len()
+            + dst.len()
+            + src.len()
+            + min_arg.len()
+            + max_arg.len()
+            + keyword_len;
+        let packet_id = self.plain_zremrange_write_preamble("zrangestore", argv_len_sum, now_ms);
+        let st = self.chained_command_start();
+        fr_command::record_source_key_lookups(&mut self.server.store, &[src], now_ms);
+        let reply = 'reply: {
+            let pairs =
+                if let Some((lo, hi)) = bounds {
+                    match fr_command::zscore_inverted_wrongtype_guard(
+                        &mut self.server.store,
+                        src,
+                        lo,
+                        hi,
+                        now_ms,
+                    ) {
+                        // Fully-inverted range on a zset or missing key: generic DELETES dst and
+                        // replies 0 before any walk.
+                        Ok(true) => {
+                            let dst_key = dst.to_vec();
+                            self.server
+                                .store
+                                .del(std::slice::from_ref(&dst_key), now_ms);
+                            break 'reply RespFrame::Integer(0);
+                        }
+                        Ok(false) => {}
+                        Err(err) => break 'reply err.to_resp(),
+                    }
+                    match self
+                        .server
+                        .store
+                        .zrangebyscore_withscores_limited(src, lo, hi, false, 0, None, now_ms)
+                    {
+                        Ok(pairs) => pairs,
+                        Err(err) => break 'reply CommandError::Store(err).to_resp(),
+                    }
+                } else {
+                    match self.server.store.zrangebylex_withscores_limited(
+                        src, min_arg, max_arg, false, 0, None, now_ms,
+                    ) {
+                        Ok(pairs) => pairs,
+                        Err(err) => break 'reply CommandError::Store(err).to_resp(),
+                    }
+                };
+            let count = i64::try_from(pairs.len()).unwrap_or(i64::MAX);
+            let dst_key = dst.to_vec();
+            if pairs.is_empty() {
+                self.server
+                    .store
+                    .del(std::slice::from_ref(&dst_key), now_ms);
+            } else {
+                self.server
+                    .store
+                    .zstore_from_pairs(dst_key, pairs, true, now_ms);
+            }
+            RespFrame::Integer(count)
+        };
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = matches!(reply, RespFrame::Error(_));
+        self.record_plain_zremrange_borrowed_metrics(
+            "zrangestore",
+            "ZRANGESTORE",
+            || {
+                vec![
+                    b"ZRANGESTORE".to_vec(),
+                    dst.to_vec(),
+                    src.to_vec(),
+                    min_arg.to_vec(),
+                    max_arg.to_vec(),
+                    if lex {
+                        b"BYLEX".to_vec()
+                    } else {
+                        b"BYSCORE".to_vec()
+                    },
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_reply(&reply);
+        Some(reply)
+    }
+
     pub fn execute_plain_zrangestore_borrowed(
         &mut self,
         dst: &[u8],
@@ -48474,6 +48625,94 @@ mod tests {
     }
 
     #[test]
+    fn plain_zrangestore_bound_borrowed_matches_generic_byscore_and_bylex_gvm6z() {
+        // (frankenredis-gvm6z) The BYSCORE/BYLEX arity-6 forms against the generic path.
+        //
+        // The ENCODING probe is the load-bearing one here. Upstream creates BYSCORE/BYLEX
+        // destinations skiplist-encoded while rank mode sizes by count, so the borrowed path
+        // passes force_skiplist=TRUE where the rank path passes false. Swap those and every
+        // reply stays byte-identical while OBJECT ENCODING diverges -- invisible to a
+        // reply-only comparison, which is why one is not enough.
+        let mut direct = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut direct, &mut generic] {
+            rt.execute_frame(
+                command(&[b"ZADD", b"zs", b"1", b"a", b"2", b"b", b"3", b"c"]),
+                1,
+            );
+            rt.execute_frame(command(&[b"SET", b"str", b"x"]), 1);
+            rt.execute_frame(command(&[b"ZADD", b"dst", b"9", b"stale"]), 1);
+        }
+        // (src, min, max, lex) with the generic keyword that must match it.
+        let cases: [(&[u8], &[u8], &[u8], bool); 9] = [
+            (b"zs", b"-inf", b"+inf", false), // whole score band
+            (b"zs", b"2", b"3", false),       // partial
+            (b"zs", b"(1", b"3", false),      // exclusive low bound
+            (b"zs", b"5", b"9", false),       // EMPTY -> dst deleted
+            (b"zs", b"-1", b"-2", false),     // fully inverted -> 0, dst deleted
+            (b"missing", b"-inf", b"+inf", false),
+            (b"str", b"-inf", b"+inf", false), // WRONGTYPE
+            (b"zs", b"-", b"+", true),         // whole lex band
+            (b"zs", b"[a", b"[b", true),       // partial lex
+        ];
+        let mut ts = 2;
+        for (src, min, max, lex) in cases {
+            let kw: &[u8] = if lex { b"BYLEX" } else { b"BYSCORE" };
+            let f = direct
+                .execute_plain_zrangestore_bound_borrowed(b"dst", src, min, max, lex, ts)
+                .expect("bound fast path should engage");
+            let g =
+                generic.execute_frame(command(&[b"ZRANGESTORE", b"dst", src, min, max, kw]), ts);
+            assert_eq!(f, g, "reply differs: {kw:?} src={src:?} {min:?}..{max:?}");
+            for probe in [
+                &[b"ZRANGE".as_slice(), b"dst", b"0", b"-1", b"WITHSCORES"][..],
+                &[b"OBJECT".as_slice(), b"ENCODING", b"dst"][..],
+                &[b"EXISTS".as_slice(), b"dst"][..],
+            ] {
+                let fp = direct.execute_frame(command(probe), ts);
+                let gp = generic.execute_frame(command(probe), ts);
+                assert_eq!(
+                    fp, gp,
+                    "dst state differs after {kw:?} src={src:?} {min:?}..{max:?} probe={probe:?}"
+                );
+            }
+            for rt in [&mut direct, &mut generic] {
+                rt.execute_frame(command(&[b"ZADD", b"dst", b"9", b"stale"]), ts);
+            }
+            ts += 1;
+        }
+
+        // Malformed bounds must DEFER with nothing touched: generic owns those error replies
+        // and the source keyspace hit that goes with them.
+        for (min, max, lex) in [
+            (b"notanum".as_slice(), b"3".as_slice(), false),
+            (b"1".as_slice(), b"nope".as_slice(), false),
+            (b"a".as_slice(), b"[b".as_slice(), true), // lex bound missing its [ or (
+            (b"[a".as_slice(), b"b".as_slice(), true),
+        ] {
+            assert!(
+                direct
+                    .execute_plain_zrangestore_bound_borrowed(b"dst", b"zs", min, max, lex, ts)
+                    .is_none(),
+                "malformed bound {min:?}..{max:?} lex={lex} must defer to generic"
+            );
+        }
+
+        assert_eq!(
+            direct.server.store.stat_keyspace_hits,
+            generic.server.store.stat_keyspace_hits
+        );
+        assert_eq!(
+            direct.server.store.stat_keyspace_misses,
+            generic.server.store.stat_keyspace_misses
+        );
+        assert_eq!(
+            direct.server.store.stat_total_error_replies,
+            generic.server.store.stat_total_error_replies
+        );
+    }
+
+    #[test]
     fn plain_zrangestore_borrowed_matches_generic_contents_and_encoding() {
         // (frankenredis-gvm6z) ZRANGESTORE's reply is only Integer(count), and that is
         // exactly why comparing replies is not enough: a swapped start/stop, or passing
@@ -48493,23 +48732,20 @@ mod tests {
             rt.execute_frame(command(&[b"ZADD", b"dst", b"9", b"stale"]), 1);
         }
         let cases: [(&[u8], &[u8], &[u8]); 7] = [
-            (b"src", b"0", b"-1"),      // full range over a live dst
-            (b"src", b"1", b"1"),       // single element
-            (b"src", b"0", b"0"),       // first only — catches a swapped start/stop
-            (b"src", b"-2", b"-1"),     // negative indices
-            (b"src", b"5", b"9"),       // EMPTY result -> dst must be deleted
-            (b"missing", b"0", b"-1"),  // missing src -> empty -> dst deleted
-            (b"str", b"0", b"-1"),      // WRONGTYPE source
+            (b"src", b"0", b"-1"),     // full range over a live dst
+            (b"src", b"1", b"1"),      // single element
+            (b"src", b"0", b"0"),      // first only — catches a swapped start/stop
+            (b"src", b"-2", b"-1"),    // negative indices
+            (b"src", b"5", b"9"),      // EMPTY result -> dst must be deleted
+            (b"missing", b"0", b"-1"), // missing src -> empty -> dst deleted
+            (b"str", b"0", b"-1"),     // WRONGTYPE source
         ];
         let mut ts = 2;
         for (src, start, stop) in cases {
             let f = direct
                 .execute_plain_zrangestore_borrowed(b"dst", src, start, stop, false, ts)
                 .expect("zrangestore fast path should engage");
-            let g = generic.execute_frame(
-                command(&[b"ZRANGESTORE", b"dst", src, start, stop]),
-                ts,
-            );
+            let g = generic.execute_frame(command(&[b"ZRANGESTORE", b"dst", src, start, stop]), ts);
             assert_eq!(f, g, "reply differs: src={src:?} {start:?}..{stop:?}");
 
             for probe in [
@@ -48584,14 +48820,21 @@ mod tests {
         let fwd = diverge
             .execute_plain_zrangestore_borrowed(b"dst", b"src", b"0", b"0", false, ts)
             .expect("forward engages");
-        let fwd_contents =
-            diverge.execute_frame(command(&[b"ZRANGE", b"dst", b"0", b"-1", b"WITHSCORES"]), ts);
+        let fwd_contents = diverge.execute_frame(
+            command(&[b"ZRANGE", b"dst", b"0", b"-1", b"WITHSCORES"]),
+            ts,
+        );
         let rev = diverge
             .execute_plain_zrangestore_borrowed(b"dst", b"src", b"0", b"0", true, ts)
             .expect("reversed engages");
-        let rev_contents =
-            diverge.execute_frame(command(&[b"ZRANGE", b"dst", b"0", b"-1", b"WITHSCORES"]), ts);
-        assert_eq!(fwd, rev, "both take exactly one member, so the COUNT is equal");
+        let rev_contents = diverge.execute_frame(
+            command(&[b"ZRANGE", b"dst", b"0", b"-1", b"WITHSCORES"]),
+            ts,
+        );
+        assert_eq!(
+            fwd, rev,
+            "both take exactly one member, so the COUNT is equal"
+        );
         assert_ne!(
             fwd_contents, rev_contents,
             "forward `0 0` must take the LOWEST member and reversed the HIGHEST — if these \

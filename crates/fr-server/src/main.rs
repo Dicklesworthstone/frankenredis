@@ -15015,6 +15015,14 @@ enum BorrowedDispatchFloorClass {
     /// are wider and the arm's parser would decline them, and a floor decline goes
     /// straight to GENERIC rather than back to the cascade.
     Zrangestore,
+    /// (frankenredis-gvm6z) `ZRANGESTORE dst src min max <REV|BYSCORE|BYLEX>` at arity 6 —
+    /// ALL THREE option forms, which is the point. Routing arity 6 for REV alone was
+    /// measured to tax BYSCORE and BYLEX by +2.35 pct each: the class is keyed on arity, so
+    /// it captured them, and their arm declined them to GENERIC after a `key_arg4` parse
+    /// (+289.8 instr/op of dispatch, ledger REJECT row). Serving all three removes the
+    /// decline rather than the class, which is what "a floor class is a promise its arm must
+    /// keep" requires. LIMIT forms are arity 9 and still reach generic.
+    Zrangestore6,
     Getrange,
     BitcountKey,
     /// (frankenredis-f2zrr) `BITCOUNT key start end`. Its sibling BitcountKey was
@@ -16787,6 +16795,11 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // for exactly the option forms it captured.
         (5, BorrowedDispatchFloorCommand::Zrangestore) => {
             Some(BorrowedDispatchFloorClass::Zrangestore)
+        }
+        // (frankenredis-gvm6z) Arity 6 EXACTLY: every option form at that arity is served by
+        // the arm, so nothing this class captures is declined.
+        (6, BorrowedDispatchFloorCommand::Zrangestore) => {
+            Some(BorrowedDispatchFloorClass::Zrangestore6)
         }
         (4, BorrowedDispatchFloorCommand::Zremrangebyrank) => {
             Some(BorrowedDispatchFloorClass::Zremrangebyrank)
@@ -21670,6 +21683,48 @@ fn try_dispatch_floor_classified_action(
                 });
             if let Some(consumed) = hit {
                 Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Zrangestore6 => {
+            // One `key_arg4` parse, then the discriminant selects among three executors.
+            // Every arity-6 option form is served, so this arm never declines a shape the
+            // class claimed -- an UNKNOWN keyword still falls through, but that is a syntax
+            // error generic must emit, not a form we refuse to serve.
+            let routed = parse_borrowed_plain_key_arg4_packet(
+                unparsed,
+                &parser_config,
+                b"*6\r\n$11\r\n",
+                b"ZRANGESTORE",
+            )
+            .and_then(|packet| {
+                let response = if packet.d.eq_ignore_ascii_case(b"REV") {
+                    runtime.execute_plain_zrangestore_borrowed(
+                        packet.key, packet.a, packet.b, packet.c, true, ts,
+                    )
+                } else if packet.d.eq_ignore_ascii_case(b"BYSCORE") {
+                    runtime.execute_plain_zrangestore_bound_borrowed(
+                        packet.key, packet.a, packet.b, packet.c, false, ts,
+                    )
+                } else if packet.d.eq_ignore_ascii_case(b"BYLEX") {
+                    runtime.execute_plain_zrangestore_bound_borrowed(
+                        packet.key, packet.a, packet.b, packet.c, true, ts,
+                    )
+                } else {
+                    None
+                };
+                response.map(|r| (packet.consumed, r))
+            });
+            if let Some((consumed, response)) = routed {
+                Ok(BorrowedMultibulkAction::FastReply { consumed, response })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,
@@ -52856,6 +52911,95 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
     /// but note the parser here is the SHARED `key_arg2` one that also serves ZMPOP and
     /// XACK — so the token and prefix are what keep those apart, and this asserts they do.
     #[test]
+    fn zrangestore6_floor_class_serves_every_arity_6_form_it_claims_gvm6z() {
+        // (frankenredis-gvm6z) The promise, stated as a test. A floor class is keyed on
+        // (arity, command), so `(6, Zrangestore)` claims REV, BYSCORE and BYLEX alike. An
+        // earlier version served only REV and the other two were declined to GENERIC after a
+        // `key_arg4` parse -- measured at +2.35 pct on BYSCORE and REJECTED on that basis.
+        // This asserts all three are both CLAIMED and REACHABLE by the arm's discriminant.
+        let cfg = ParserConfig::default();
+        fn packet(args: &[&str]) -> Vec<u8> {
+            let mut p = format!("*{}\r\n", args.len()).into_bytes();
+            for a in args {
+                p.extend_from_slice(format!("${}\r\n{}\r\n", a.len(), a).as_bytes());
+            }
+            p
+        }
+        fn parses<'a>(
+            pkt: &'a [u8],
+            cfg: &ParserConfig,
+        ) -> Option<super::BorrowedPlainKeyArg4Packet<'a>> {
+            super::parse_borrowed_plain_key_arg4_packet(pkt, cfg, b"*6\r\n$11\r\n", b"ZRANGESTORE")
+        }
+
+        // Each served form, in both cases, with the discriminant the arm dispatches on.
+        for (form, disc) in [
+            (vec!["ZRANGESTORE", "d", "s", "0", "-1", "REV"], &b"REV"[..]),
+            (vec!["zrangestore", "d", "s", "0", "-1", "rev"], &b"REV"[..]),
+            (
+                vec!["ZRANGESTORE", "d", "s", "1", "2", "BYSCORE"],
+                &b"BYSCORE"[..],
+            ),
+            (
+                vec!["ZRANGESTORE", "d", "s", "1", "2", "byscore"],
+                &b"BYSCORE"[..],
+            ),
+            (
+                vec!["ZRANGESTORE", "d", "s", "[a", "[z", "BYLEX"],
+                &b"BYLEX"[..],
+            ),
+            (
+                vec!["ZRANGESTORE", "d", "s", "[a", "[z", "bylex"],
+                &b"BYLEX"[..],
+            ),
+        ] {
+            let pkt_bytes = packet(&form);
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(&pkt_bytes, &cfg),
+                Some(super::BorrowedDispatchFloorClass::Zrangestore6),
+                "{form:?} must be claimed by the arity-6 class"
+            );
+            let pkt = parses(&pkt_bytes, &cfg).expect("arity 6 must parse via key_arg4");
+            assert!(
+                pkt.d.eq_ignore_ascii_case(disc),
+                "{form:?}: the arm dispatches on this discriminant, so it must match {disc:?}"
+            );
+        }
+
+        // An UNKNOWN keyword is still declined -- correctly, because it is a syntax error
+        // generic must emit, not an option form we refuse to serve.
+        let bogus = packet(&["ZRANGESTORE", "d", "s", "1", "2", "SIDEWAYS"]);
+        let pkt = parses(&bogus, &cfg).expect("it parses; the discriminant refuses");
+        assert!(
+            !pkt.d.eq_ignore_ascii_case(b"REV")
+                && !pkt.d.eq_ignore_ascii_case(b"BYSCORE")
+                && !pkt.d.eq_ignore_ascii_case(b"BYLEX")
+        );
+
+        // Neighbouring arities are not this class: 5 has its own, LIMIT forms are arity 9.
+        for wrong in [
+            vec!["ZRANGESTORE", "d", "s", "0", "-1"],
+            vec![
+                "ZRANGESTORE",
+                "d",
+                "s",
+                "1",
+                "2",
+                "BYSCORE",
+                "LIMIT",
+                "0",
+                "1",
+            ],
+        ] {
+            assert_ne!(
+                super::classify_borrowed_dispatch_floor_packet(&packet(&wrong), &cfg),
+                Some(super::BorrowedDispatchFloorClass::Zrangestore6),
+                "{wrong:?} must not be claimed as Zrangestore6"
+            );
+        }
+    }
+
+    #[test]
     fn zrangestore_floor_class_claims_exactly_what_its_parser_accepts_gvm6z() {
         // (frankenredis-gvm6z) A floor class is a PROMISE that its arm serves every shape
         // the class claims. A floor decline does NOT fall back to the cascade — it calls
@@ -52872,13 +53016,8 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
             p
         }
         let parses = |pkt: &[u8]| {
-            super::parse_borrowed_plain_key_arg3_packet(
-                pkt,
-                &cfg,
-                b"*5\r\n$11\r\n",
-                b"ZRANGESTORE",
-            )
-            .is_some()
+            super::parse_borrowed_plain_key_arg3_packet(pkt, &cfg, b"*5\r\n$11\r\n", b"ZRANGESTORE")
+                .is_some()
         };
 
         for served in [
@@ -52905,7 +53044,17 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
             vec!["ZRANGESTORE", "d", "s", "0", "-1", "REV"],
             vec!["ZRANGESTORE", "d", "s", "(a", "[z", "BYLEX"],
             vec!["ZRANGESTORE", "d", "s", "1", "2", "BYSCORE"],
-            vec!["ZRANGESTORE", "d", "s", "1", "2", "BYSCORE", "LIMIT", "0", "1"],
+            vec![
+                "ZRANGESTORE",
+                "d",
+                "s",
+                "1",
+                "2",
+                "BYSCORE",
+                "LIMIT",
+                "0",
+                "1",
+            ],
         ] {
             let pkt = packet(&wrong);
             assert_ne!(
@@ -52913,7 +53062,10 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
                 Some(super::BorrowedDispatchFloorClass::Zrangestore),
                 "{wrong:?} must not be claimed as Zrangestore"
             );
-            assert!(!parses(&pkt), "{wrong:?} must not parse as ZRANGESTORE either");
+            assert!(
+                !parses(&pkt),
+                "{wrong:?} must not parse as ZRANGESTORE either"
+            );
         }
 
         // key_arg3 is shared — the prefix+token pair is the only thing keeping the
