@@ -171,7 +171,55 @@ def resolve_inputs(args):
 
 USAGE = ("Usage: frame_delta.py <dump_dir> [ops] [--top N] [--all] [--by-file]\n"
          "       frame_delta.py <cg.n.out> <cg.2n.out> <ops> [--top N]\n"
+         "       frame_delta.py <dump_dir> --dispatch\n"
          "       frame_delta.py --self-test")
+
+# Frames that are "getting to the command" rather than doing it. Copied VERBATIM from
+# `shape_instr_per_op.py`'s DISPATCH_FRAMES (frankenredis-rzdi8) so the two answer the
+# same question about the same set; if that list moves, move this one with it.
+DISPATCH_FRAMES = (
+    "process_buffered_frames", "execute_frame_internal", "command_table_index",
+    "dispatch_with_client_context", "classify_command", "push_ascii_lowercase_lossy",
+    "check_full_command_arity", "execute_dispatch", "parse_command_args_borrowed_into",
+    "try_dispatch_floor_classified_action", "parse_borrowed_plain_",
+    "effective_command_flags", "canonical_command_fullname",
+    "dispatch_argv", "acl_permission_error_for_argv", "borrowed_fast_route_key",
+    "Utf8Chunks", "resolve_command_spec", "lookup_command",
+)
+
+
+def dispatch_cost(rows):
+    """(instr/op of dispatch, the frames that make it up), as a TWO-POINT delta.
+
+    WHY THIS EXISTS RATHER THAN `shape_instr_per_op.py`'s `dispatch share`
+    (frankenredis-cgeq5): that function takes the share from the **2N dump alone** --
+    startup, seeding and teardown included -- and the caller multiplies it by a clean
+    two-point instructions/op. Multiplying a share of one population by a rate from
+    another is not a per-op quantity, and it moves with anything that changes how big
+    the per-op part of the dump is. Its regex also requires a trailing ` [object]` on
+    the row, dropping every frame without one from BOTH numerator and denominator.
+
+    MEASURED, on the cgeq5 dump pairs: dispatch for `SORT_RO ... ALPHA` is
+    **2,897.0 instr/op, bit-identical across n=3 and n=64 and across the before/after
+    ELFs** -- which is what a per-call constant should look like, and the individual
+    frames are identical too (execute_frame_internal 457.0, command_table_index 350.0,
+    dispatch_with_client_context 330.0, classify_command 304.0, process_buffered_frames
+    280.0, parse_command_args_borrowed_into 250.0). The share method reported 2,535.3 /
+    2,048.3 / 3,358.5 / 2,517.9 for those same four arms: wrong by -12.5%, -29.3%,
+    +15.9% and -13.1%, in BOTH directions, and it manufactured a 487 instr/op
+    "reduction" from a change that never touched dispatch. `get_control` reads 299.0
+    here against 206.5-239.7 there.
+
+    Any front-classification target list ranked on the share figure is ranked on a
+    number that is not per-op. Re-rank on this one before spending a build.
+    """
+    total = 0.0
+    frames = [(ipo, name) for ipo, name in rows
+              if any(frame in name for frame in DISPATCH_FRAMES)]
+    for ipo, _ in frames:
+        total += ipo
+    return total, frames
+
 
 # A frame whose delta is under this many instr/op is inlining noise, not a finding:
 # callgrind is deterministic, but the optimizer can attribute one fixed cost to
@@ -256,6 +304,14 @@ def main():
 
     rows, process = frame_deltas(dump_n, dump_2n, ops, by_file=by_file)
     attributed = sum(ipo for ipo, _ in rows)
+    if "--dispatch" in args:
+        total, frames = dispatch_cost(rows)
+        print("dispatch:      %10.1f instr/op   %.1f%% of %.1f  (TWO-POINT, not a share "
+              "of one dump)" % (total, 100.0 * total / process, process))
+        for ipo, name in sorted(frames, reverse=True):
+            if abs(ipo) >= NOISE_FLOOR:
+                print("%12.1f  %s" % (ipo, name))
+        return
     print("whole process: %10.1f instr/op   (%s ops)"
           % (process if process is not None else float("nan"), ops))
     print("attributed:    %10.1f instr/op   across %d frames" % (attributed, len(rows)))
