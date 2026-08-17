@@ -37575,3 +37575,59 @@ move, so any movement means the edit changed the instrument rather than isolatin
 then re-run a persisting shape, where a CHANGE is the expected outcome and its size is the
 measurement of how contaminated that shape's history was. Any RESTORE/DEBUG RELOAD number
 taken on site 2 before that fix should be treated as unverified, not as wrong.
+
+--------------------------------------------------------------------------------
+2026-08-17 CrimsonHawk: CORRECTION — the dispatch figure in my own retry predicate was
+SHARE-DERIVED and is wrong by 288 instr/op. Re-derived two-point, PUBSUB CHANNELS dispatch
+is 3506.0 (54.2 pct), not 3217.5 (49.7 pct) (`frankenredis-fpqns`).
+
+  Claim class: METHOD + SELF-SPEEDUP correction. No incumbent ratio changes.
+
+  what was wrong   My row at :37049 closed with "dispatch is STILL 49.7 pct of PUBSUB
+                   CHANNELS after this (3217.5 of 6472.4)". That came from
+                   `shape_instr_per_op.py`'s `dispatch share`, which BrownIbis showed
+                   (agent-mail 19753) was a share of the 2N dump ALONE — startup, seeding
+                   and teardown included — multiplied by a clean two-point rate. A share of
+                   one population times a rate from another is not a per-op quantity. They
+                   measured errors of -29.3 pct to +15.9 pct on the cgeq5 arms, in BOTH
+                   directions, so it is not a bias anyone could correct after the fact.
+  reproduced here  On my own shape the error is -8.2 pct: 3217.5 published against 3506.0
+                   true, and the share understated dispatch's share of the command by 4.5
+                   POINTS (49.7 vs 54.2). Smaller than their worst case and in the same
+                   direction as three of their four arms.
+  already fixed    `5d60d73e8` made `dispatch_share` difference the two dumps, so the
+                   harness now agrees with `frame_delta.py --dispatch` to the printed digit
+                   — I re-ran both arms and they match exactly. Anyone re-deriving this
+                   today gets the right answer; anyone reading a row BANKED before that
+                   commit does not, which is why this correction exists rather than a
+                   silent re-run.
+
+  THE CORRECTED TWO-POINT ACCOUNT of the SUBCOMMAND_TABLE hash index, all figures now
+  deltas rather than shares, same paired ELFs (BEFORE 7fa92786b066d0b7, AFTER
+  de1fe57e68ce633a):
+
+    arm            total instr/op   dispatch    dispatch pct
+    linear scan          6472.9      3506.0        54.2
+    hash index           5669.9      2964.0        52.3
+    delta                -803.0      -542.0
+
+  WHERE THE OTHER 261 WENT, and it is not missing: `__memcmp_avx2_movbe` was 397 instr/op
+  on the scan arm and is GONE from the after profile, but it is libc and therefore not in
+  `DISPATCH_FRAMES`, so it lands in the total and not in the dispatch subtotal. A reader
+  differencing only the dispatch column would think a third of the saving evaporated.
+
+  FRAME-LEVEL CONFIRMATION that the mechanism is the one claimed:
+    frame                              scan arm   hash arm
+    fr_command::check_full_command_arity   696.0       67.0
+    fr_command::subcommand_table_index       --        87.0
+    __memcmp_avx2_movbe                    397.0    absent
+  696 -> 154 across the two resolver frames is the 129-entry walk being replaced by a hash
+  lookup, measured rather than inferred.
+
+RETRY PREDICATE: the largest single dispatch frame is now
+`fr_runtime::push_ascii_lowercase_lossy` at 726.0 instr/op — 24.5 pct of dispatch and 12.8
+pct of the whole command — and it is there to maintain `session.last_command_name` for a
+field only CLIENT INFO / CLIENT LIST ever read. That is `frankenredis-dpu2y`, whose design
+question is already settled and whose fix also closes `frankenredis-zbiy3`. Take it next.
+Do NOT quote a dispatch figure from any row banked before `5d60d73e8` without re-deriving
+it with `frame_delta.py --dispatch`.
