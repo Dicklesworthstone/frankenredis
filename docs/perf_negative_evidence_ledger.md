@@ -8,6 +8,64 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-08-17 MossyOrchid: SPEC BEFORE BUILD — ZINTERCARD's borrowed trio is NOT a mechanical mirror of SINTERCARD's, and copying it reintroduces `zintercardwt` (wrong-type key must beat a bad LIMIT). Found by reading, under a build freeze (`frankenredis-5na4i`)
+
+Claim class: SOURCE. No build, no bench, no target writes — /data at 19-20G and 99 pct full.
+
+The previous rows sized ZINTERCARD and XPENDING at ~3,000 instr/op of dispatch each and put them
+in class [C] (no parser, no executor, no floor entry). This row does the reading a [C] job needs
+BEFORE a build slot exists, so the slot is spent implementing rather than discovering.
+
+THE TEMPLATE IS SINTERCARD — same shape (`numkeys key [key ...] [LIMIT n]`), already
+front-classified, and its trio is four named places:
+
+    cascade arms  main.rs:10467/10486  parse_borrowed_plain_sintercard{2,3}_packet
+    name -> cmd   main.rs:15562        [b'S',b'I',...] => BorrowedDispatchFloorCommand::Sintercard
+    floor class   main.rs:16304        (4..=6, ..::Sintercard) => ..FloorClass::Sintercard
+    executor      fr-runtime:16883     execute_plain_sintercard_borrowed(tail, now_ms)
+
+And the comment above that floor class is worth reading before writing a new one: `ex3il` widened
+it 4..=5 -> 4..=6 only AFTER the arm could serve both readings of length 6 (four plain keys, or
+two keys plus LIMIT). Widen a class ahead of its arm and the extra shape is stranded on GENERIC —
+a REGRESSION, not a no-op (`project_floor_class_is_a_promise_its_arm_must_keep`).
+
+THE MIRROR IS UNSAFE IN EXACTLY ONE RESPECT, and that is the finding. **SINTERCARD parses LIMIT
+FIRST; ZINTERCARD MUST NOT.** fr-command/lib.rs:26060 records it explicitly
+(`frankenredis-zintercardwt`): upstream `zinterCardCommand` looks up and TYPE-CHECKS every input
+key BEFORE parsing the optional LIMIT clause, so a wrong-type key beats a bad or negative LIMIT
+and beats a trailing syntax error. fr once parsed LIMIT first, surfaced the wrong error, and that
+was fixed by name. The same source comment says SINTERCARD is a DIFFERENT upstream code path and
+is correct as it stands.
+
+So a borrowed ZINTERCARD executor copied from `execute_plain_sintercard_borrowed` would
+reintroduce a already-fixed divergence, **and no existing test would catch it**, because a fast
+path that only changes WHICH error is returned still returns an error. This is the
+`project_borrowed_fastpath_skips_generic_check_vein` failure mode arriving through a copy rather
+than an omission.
+
+SAFEST DESIGN, and it costs nothing on the cells that motivated the work: serve only the shapes
+that CANNOT error and return None for everything else, leaving the generic path owning error
+ordering entirely. Both measured shapes are happy paths (`zintercard_2` plain, `zintercard_limit`
+with a valid LIMIT), so declining every error shape forfeits none of the ~3,000 instr/op.
+
+THREE MORE THINGS THE EXECUTOR MUST DO, all read off the generic handler rather than assumed:
+  * accept BOTH `ValueType::ZSet` and `ValueType::Set` as operands — a SET is a valid zset-like
+    operand and rejecting it would be a wrong answer, not a slow path;
+  * call `record_source_key_lookups(store, &keys, now_ms)` so keyspace hit/miss accounting matches;
+    `peek_value_type` is deliberately NO-STAT, so the type check cannot stand in for it;
+  * finish on `store.zintercard_count_cached(&keys, limit, now_ms)` — the same call the generic
+    makes, so the cached-count path and its invalidation are shared rather than duplicated.
+
+WHAT THIS ROW IS NOT: a lever. Nothing was built, measured or landed. It is the reading that turns
+a [C] bead into an execution list, recorded because the alternative is that the next agent with a
+build slot spends it rediscovering that SINTERCARD is the wrong thing to copy verbatim.
+
+PROVENANCE: source only. Host thinkstation1, /data 19G at 99 pct, loadavg 20.79 / 16.20 / 19.31.
+No CPU MHz sample — nothing was timed, and a frequency on a row with no measurement would be
+decoration.
+
+--------------------------------------------------------------------------------
+
 ## 2026-08-17 MossyOrchid: GROOMING PASS 2 — `uu33c`'s 32.2 pct is now 20.8 pct and I cannot find a LIVE option-form mis-claim anywhere; `z2ce3` is source-verified DONE. Neither is closed, because neither is mine
 
 Claim class: SELF-SPEEDUP sizing (fr-only) + source verification. NO BUILD, NO BENCH — /data was
@@ -281,6 +339,84 @@ bead off a GENERIC label, check the floor class table for the command first; TYP
 piece already and the label was the only thing saying otherwise.
 
 --------------------------------------------------------------------------------
+
+## 2026-08-17 BrownIbis: CORRECTION to my own row `2a3135c90`, and to the metric every front-classification screen is ranked on — dispatch for `SORT_RO ... ALPHA` is **2,897.0 instr/op**, not the 2,048.3 I published, because `dispatch share` is a share of ONE dump multiplied by a rate from another (`frankenredis-7so0e`, `frankenredis-cgeq5`)
+
+Not a verdict row: no new lever, no new claim about fr vs Redis. It corrects a number I pushed
+and names a defect in a shared instrument. Found under the build freeze from callgrind dumps
+already on disk; NO BUILD was run to produce anything below.
+
+### What I got wrong
+
+`2a3135c90`'s retry predicate reads "`sort_ro_alpha` at n=3 is still 1.12x and its dispatch is
+2,048.3 of 9,248.7 (22.1 pct) on the GENERIC path". The dispatch figure is wrong. Measured as a
+two-point delta over the same `DISPATCH_FRAMES` set, it is **2,897.0 of 9,248.7 = 31.3 pct**.
+The conclusion that row draws — that SORT dispatch is the largest single block left on that
+shape — gets STRONGER. The number supporting it did not survive.
+
+### The defect
+
+`shape_instr_per_op.py:dispatch_share()` is called on `cg.fr.2n.out` ALONE (lines 2231, 2273),
+so its share is taken over a dump that still contains startup, seeding and teardown; the caller
+then multiplies that share by the clean TWO-POINT instructions/op. **A share of one population
+times a rate from another is not a per-op quantity.** Its row regex additionally requires a
+trailing ` [object]` suffix, which `callgrind_annotate` emits on some rows and not others, so
+every frame without one is dropped from BOTH numerator and denominator.
+
+### The evidence, and why it is conclusive rather than suggestive
+
+    arm                          two-point     harness said     error
+    sort_ro_alpha    before ELF     2897.0           2535.3    -12.5 pct
+    sort_ro_alpha    after ELF      2897.0           2048.3    -29.3 pct
+    sort_ro_alpha_64 before ELF     2897.0           3358.5    +15.9 pct
+    sort_ro_alpha_64 after ELF      2897.0           2517.9    -13.1 pct
+    get_control      both ELFs       299.0    206.5 / 239.7    -31 / -20 pct
+
+2,897.0 is **bit-identical across a 21x element-count span and across two different ELFs, frame
+for frame** — `execute_frame_internal` 457.0, `command_table_index` 350.0,
+`dispatch_with_client_context` 330.0, `classify_command` 304.0, `process_buffered_frames` 280.0,
+`parse_command_args_borrowed_into` 250.0, `push_ascii_lowercase_lossy` 197.0, `execute_dispatch`
+154.0, `acl_permission_error_for_argv` 106.0, `borrowed_fast_route_key` 92.0, `dispatch_argv`
+90.0. That is what a per-call constant looks like when it is measured as a delta, and it is what
+this ledger already predicted: `frankenredis-gvm6z` recorded that "the DISPATCH figures need no
+size sibling — they are per-call constants, held to +2 pct over a 67x member span". The share
+figure moves **33 pct** across the same span here. The prediction was right and the instrument
+was not measuring it.
+
+The errors run in BOTH directions, so this is not a scale factor anyone can divide out after
+the fact.
+
+**IT MANUFACTURES EFFECTS, which is the part that should worry the next reader.** The cgeq5 diff
+is confined to a collation comparator and cannot touch dispatch. The share method reported
+dispatch falling 2,535.3 → 2,048.3 across it — a 487 instr/op "reduction" produced entirely by
+the metric. I quoted it without noticing, in the same row that argues a change must be shown to
+be the one you made.
+
+### What this obliges of work that is not mine
+
+`dispatch_share_screen.py` exists to rank front-classification targets by absolute dispatch
+instr/op, the `211b3280e` screen IS that ranking, and `4d9105516`'s four GENERIC cells
+(zintercard_2 3,025.5, zintercard_limit 3,184.6, xpending_empty 2,633.9, xpending_populated
+2,608.2) and its "12 classified shapes sit on a 14-28 pct dispatch FLOOR" are all share-derived.
+I am NOT claiming that ranking flips — all four are generic-path commands and will likely
+cluster near 2,897 — but the FLOOR is the load-bearing half of the argument that the arity vein
+has no walker left, and it has never been measured as a delta. CrimsonHawk notified directly.
+
+`SORT_RO` also belongs in that GENERIC list and is absent from it: zero entries in
+`borrowed_dispatch_floor_command` (source-checked, the same test used for ZINTERCARD/XPENDING)
+and 2,897.0 instr/op of dispatch, inside the same ~3,000 band. That headline reads as a claim
+about the command surface; it is a claim about sixteen shapes.
+
+### Retry predicate
+
+Re-derive any dispatch figure with `scripts/frame_delta.py --dispatch <dump_dir>` (landed
+`126fe0a6f`, agrees with the whole-op two-point number by construction) before it is used to
+choose a target, and treat every banked share-derived dispatch number as carrying an error of
+unknown sign up to ~30 pct until it has been. Fixing `dispatch_share()` itself to difference the
+N and 2N dumps is tracked on `frankenredis-7so0e`; it was NOT done here because
+`shape_instr_per_op.py` is the shared harness, it was carrying a peer's uncommitted changes at
+the time, and a metric change there needs its own reservation and self-test rather than a
+drive-by.
 
 ## 2026-08-17 BrownIbis: KEEP — SORT ALPHA stops calling ICU for ASCII: `sort_ro_alpha_64` 140,377.3 -> 48,771.8 instr/op (2.8783x), `sort_ro_alpha` 12,871.1 -> 9,248.7 (-28.1 pct), null flat at -0.06 pct (`frankenredis-cgeq5`)
 
