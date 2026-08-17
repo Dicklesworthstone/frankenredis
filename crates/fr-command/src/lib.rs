@@ -13345,12 +13345,12 @@ fn function_cmd(
         // rule can see it (it is not statically decidable), so matching upstream means
         // EXECUTING the body at load time. Verified against the source, not guessed:
         //
-        //   * `lua_eval::LuaEval::with_globals(store, now_ms, globals)` already accepts a
+        //   * `lua_eval::LuaState::with_globals(store, now_ms, globals)` already accepts a
         //     CUSTOM globals table, which is exactly the declared-globals sandbox upstream
-        //     runs the body in. `LuaEval::execute(source)` returns Err(String) on a runtime
+        //     runs the body in. `LuaState::execute(source)` returns Err(String) on a runtime
         //     error, which is the row-4 signal.
         //   * Host functions are `LuaValue::RustFunction(Rc<str>)` dispatched by NAME in
-        //     `LuaEval::call_builtin`, and the `redis` table is assembled in
+        //     `LuaState::call_builtin`, and the `redis` table is assembled in
         //     `lua_redis_table_template()`.
         //   * THE BLOCKER: `register_function` has ZERO occurrences in lua_eval.rs. Execute
         //     a VALID library body today and it dies on the register_function call, turning

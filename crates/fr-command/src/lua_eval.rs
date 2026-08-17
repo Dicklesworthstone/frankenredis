@@ -4172,6 +4172,81 @@ fn build_lua_base_globals_template() -> LuaMap<String, LuaValue> {
     globals
 }
 
+/// What a `redis.register_function` call names. (frankenredis-o500d)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RegisterFunctionSpec {
+    pub(crate) name: Vec<u8>,
+}
+
+/// Why a `redis.register_function` call was refused.
+///
+/// (frankenredis-o500d) TYPED, NOT A MESSAGE, AND THAT IS DELIBERATE. Upstream's exact
+/// wire wording for each of these is not yet known here, and this repo has been punished
+/// repeatedly for inventing an error string and calling it parity. Structure is decidable
+/// from the source alone; wording is not, so it is deferred to the wiring step where
+/// `scripts/function_load_differ.py` can adjudicate it against live 7.2.4.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RegisterFunctionArgError {
+    /// Positional form with other than exactly (name, callback).
+    WrongArgCount(usize),
+    /// Positional name, or table `function_name`, was not a string.
+    NameNotString,
+    /// Positional callback, or table `callback`, was not callable.
+    CallbackNotCallable,
+    /// Table form with no `function_name` key.
+    MissingFunctionName,
+    /// Table form with no `callback` key.
+    MissingCallback,
+}
+
+/// Is this value callable? Both a Lua closure and a host builtin qualify.
+fn lua_value_is_callable(v: &LuaValue) -> bool {
+    matches!(v, LuaValue::Function(_) | LuaValue::RustFunction(_))
+}
+
+/// Parse the arguments of `redis.register_function`, which upstream accepts in TWO shapes:
+///
+///   redis.register_function('name', callback)
+///   redis.register_function{ function_name = 'name', callback = cb, ... }
+///
+/// (frankenredis-o500d) This is the structural half of the load-time execution slice, split
+/// out as a PURE function so it can be tested without a Lua state, without a store, and
+/// without touching FUNCTION LOAD's behaviour — nothing calls it yet. The table form's
+/// optional `flags` and `description` are accepted and ignored here; they affect FUNCTION
+/// LIST output, not whether the registration is well-formed, and adding them before the
+/// wiring exists would be inventing surface.
+pub(crate) fn parse_register_function_args(
+    args: &[LuaValue],
+) -> Result<RegisterFunctionSpec, RegisterFunctionArgError> {
+    // Table form: exactly one argument and it is a table.
+    if let [LuaValue::Table(t)] = args {
+        let Some(name_value) = t.get_str(b"function_name") else {
+            return Err(RegisterFunctionArgError::MissingFunctionName);
+        };
+        let LuaValue::Str(name) = name_value else {
+            return Err(RegisterFunctionArgError::NameNotString);
+        };
+        let Some(callback) = t.get_str(b"callback") else {
+            return Err(RegisterFunctionArgError::MissingCallback);
+        };
+        if !lua_value_is_callable(&callback) {
+            return Err(RegisterFunctionArgError::CallbackNotCallable);
+        }
+        return Ok(RegisterFunctionSpec { name });
+    }
+    // Positional form: exactly (name, callback).
+    if args.len() != 2 {
+        return Err(RegisterFunctionArgError::WrongArgCount(args.len()));
+    }
+    let LuaValue::Str(name) = &args[0] else {
+        return Err(RegisterFunctionArgError::NameNotString);
+    };
+    if !lua_value_is_callable(&args[1]) {
+        return Err(RegisterFunctionArgError::CallbackNotCallable);
+    }
+    Ok(RegisterFunctionSpec { name: name.clone() })
+}
+
 fn lua_redis_table_template() -> LuaTable {
     let redis_table = LuaTable::new_shared_template();
     redis_table.set(
@@ -15007,10 +15082,109 @@ mod tests {
     use fr_store::Store;
 
     use super::{
-        Env, LuaGlobals, LuaMap, LuaState, LuaTable, LuaValue, SCRIPT_NOSCRIPT_ERROR,
-        compile_check, eval_script, json_to_lua_value, lua_base_globals_template, lua_raw_equal,
-        lua_test_live_tables, lua_value_to_json, overlay_filter_bit,
+        Env, LuaGlobals, LuaMap, LuaState, LuaTable, LuaValue, RegisterFunctionArgError,
+        RegisterFunctionSpec, SCRIPT_NOSCRIPT_ERROR, compile_check, eval_script,
+        json_to_lua_value, lua_base_globals_template, lua_raw_equal, lua_test_live_tables,
+        lua_value_to_json, overlay_filter_bit, parse_register_function_args,
     };
+
+    /// (frankenredis-o500d) `redis.register_function` accepts TWO calling conventions and
+    /// this pins both, plus every way each can be malformed.
+    ///
+    /// THE NEGATIVE CASES ARE THE POINT. This parser is the gate that decides whether a
+    /// library body's registration is well-formed, so a version that accepted a
+    /// non-callable `callback`, or a table missing `function_name`, would let a library
+    /// register garbage that upstream refuses — which is the o500d defect class in the
+    /// first place. Each malformed shape is asserted to be REFUSED and to be refused for
+    /// the RIGHT structural reason, since a parser that collapsed every failure into one
+    /// error could not later be mapped onto upstream's distinct messages.
+    #[test]
+    fn register_function_args_accept_both_conventions_and_refuse_every_malformed_shape() {
+        let callback = || LuaValue::RustFunction(std::rc::Rc::from("redis.call"));
+        let table_form = |pairs: &[(&[u8], LuaValue)]| {
+            let t = LuaTable::new();
+            for (k, v) in pairs {
+                t.set(LuaValue::Str(k.to_vec()), v.clone());
+            }
+            vec![LuaValue::Table(t)]
+        };
+
+        // ACCEPTED — positional, and the name is carried through verbatim.
+        assert_eq!(
+            parse_register_function_args(&[LuaValue::Str(b"myfunc".to_vec()), callback()]),
+            Ok(RegisterFunctionSpec {
+                name: b"myfunc".to_vec()
+            })
+        );
+        // NOTE, and it is a real gap rather than an oversight: a Lua CLOSURE
+        // (`LuaValue::Function`) is also callable, and this test only exercises the host
+        // `RustFunction` arm, because constructing a `LuaFunc` here needs an evaluator and
+        // a compiled body. `lua_value_is_callable` covers it structurally via `matches!`,
+        // and the wiring step — which runs a real library body — is where a genuine closure
+        // becomes available. Add the case there rather than faking one here.
+
+        // ACCEPTED — table form, with the optional keys present and ignored.
+        assert_eq!(
+            parse_register_function_args(&table_form(&[
+                (b"function_name", LuaValue::Str(b"tbl".to_vec())),
+                (b"callback", callback()),
+                (b"description", LuaValue::Str(b"doc".to_vec())),
+            ])),
+            Ok(RegisterFunctionSpec {
+                name: b"tbl".to_vec()
+            })
+        );
+
+        // REFUSED — table form missing each required key, each for its own reason.
+        assert_eq!(
+            parse_register_function_args(&table_form(&[(b"callback", callback())])),
+            Err(RegisterFunctionArgError::MissingFunctionName)
+        );
+        assert_eq!(
+            parse_register_function_args(&table_form(&[(
+                b"function_name",
+                LuaValue::Str(b"n".to_vec())
+            )])),
+            Err(RegisterFunctionArgError::MissingCallback)
+        );
+        // REFUSED — present but wrong type.
+        assert_eq!(
+            parse_register_function_args(&table_form(&[
+                (b"function_name", LuaValue::Number(1.0)),
+                (b"callback", callback()),
+            ])),
+            Err(RegisterFunctionArgError::NameNotString)
+        );
+        assert_eq!(
+            parse_register_function_args(&table_form(&[
+                (b"function_name", LuaValue::Str(b"n".to_vec())),
+                (b"callback", LuaValue::Str(b"not a function".to_vec())),
+            ])),
+            Err(RegisterFunctionArgError::CallbackNotCallable)
+        );
+
+        // REFUSED — positional arity, on both sides of the accepted 2.
+        for n in [0usize, 1, 3] {
+            let args: Vec<LuaValue> = (0..n).map(|_| LuaValue::Str(b"x".to_vec())).collect();
+            assert_eq!(
+                parse_register_function_args(&args),
+                Err(RegisterFunctionArgError::WrongArgCount(n)),
+                "positional arity {n} must be refused"
+            );
+        }
+        // REFUSED — right arity, wrong types.
+        assert_eq!(
+            parse_register_function_args(&[LuaValue::Number(1.0), callback()]),
+            Err(RegisterFunctionArgError::NameNotString)
+        );
+        assert_eq!(
+            parse_register_function_args(&[
+                LuaValue::Str(b"n".to_vec()),
+                LuaValue::Str(b"nope".to_vec()),
+            ]),
+            Err(RegisterFunctionArgError::CallbackNotCallable)
+        );
+    }
 
     /// (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0) Scope buffers
     /// are recycled between pushes. The whole design rests on a recycled scope
