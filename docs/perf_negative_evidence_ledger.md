@@ -42540,3 +42540,105 @@ row removed. Do NOT re-derive the 249-test count from this row — re-count it, 
 five contributing tables are edited routinely. Keep `no-match` and `tcp-backlog` as the nulls;
 they distinguished this effect from a global one and cost nothing to run. A live-Redis ratio for
 this route has NOT been re-measured since the lever and is the honest next measurement.
+
+## 2026-08-17 BrownIbis: KEEP (SELF-SPEEDUP) — the floor classifier's bulk-length parser was a real out-of-line call on EVERY command, and forcing the inline takes dispatch **-20.0 instr/op on five shapes** while `.text` SHRINKS 64 bytes (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no
+
+LEVER: `#[inline(always)]` on `parse_borrowed_dispatch_floor_decimal`
+(`crates/fr-server/src/main.rs`), shipped in `c5a3b6d2f`. The classifier parses one
+bulk-length with it per frame, so it is called **exactly 1.000 times per op on every
+command** — not per element, per key or per argument. Left to the inliner it was a real
+call at five sites.
+
+MEASURED, callgrind two-point (N=20,000 and 2N=40,000 ops, whole-process differenced so
+startup, seeding and teardown cancel). Two ELFs built from a worktree pinned at base
+`5b323fa6a` differing in this one attribute, so no peer's uncommitted tree is in either
+arm. `bench_elf_sha256=5ed196dfb771b45d0cc20ae98dd4f8a6258335b0818928f061862ccba821f8b4`
+(before) and
+`bench_elf_sha256=0d192e87204be51d376209ae1e6aa3363059384f197111288a85a810a0e75bd0`
+(after). thinkstation1 / Threadripper PRO 5975WX / valgrind 3.25.1, per-arm host state
+load 18.30/18.77/20.65, CPU idle 66.9 pct, iowait 1.8 pct, mean 2762 MHz across 64 cores,
+/data 188G free. Instruction counts are software-counted and immune to load and MHz.
+
+| shape | dispatch before | after | delta | calls/op before -> after |
+|---|---|---|---|---|
+| get | 457.0 | 437.0 | **-20.0** | 1.000 -> 0.000 |
+| sadd | 624.0 | 604.1 | **-19.9** | 1.000 -> 0.000 |
+| zadd | 664.1 | 643.9 | **-20.2** | 1.000 -> 0.000 |
+| ping | 331.0 | 311.0 | **-20.0** | 1.000 -> 0.000 |
+| ttl | 509.0 | 489.0 | **-20.0** | 1.000 -> 0.000 |
+
+**THE CONSTANT IS THE EVIDENCE.** Those five commands' whole-op costs span 331 to 2600
+instr/op and the saving is -20.0 on all of them. That is what one removed call looks
+like; per-command work would scale with the command. The frames also say it mechanically:
+the body did not vanish, it MOVED —
+`classify_borrowed_dispatch_floor_packet_impl` goes 112.0 -> 126.0 absorbing it — so 34.0
+out-of-line minus 14.0 inlined IS the 20.0. There is no zero-unit null available for this
+lever and that absence is itself the point: the call is structural, one per frame, so no
+command can be found that does not pay it. The constancy across a 7.9x range of command
+cost does the work a zero-unit null would.
+
+CODE SIZE, because the standing retry predicate on the 2026-08-16 three-site inline row
+demands it of any `#[inline(always)]` attempt: `.text` 6,516,466 -> 6,516,402 bytes, **-64
+bytes** across five inline sites, and `nm` shows the out-of-line body gone entirely (1
+symbol -> 0). The i-cache objection that rejected that row points the other way here. Per
+that row's other requirement, the symbol was confirmed to DISAPPEAR from the profile
+before the lever was credited.
+
+GATE AND ITS OWN NULL. The A/A null and the A/B pairing come from one same-invocation run
+of the repeat harness, which interleaved both arms across three rounds rather than running
+one arm to completion and then the other, so any drift over the window falls on both arms
+alike. A/A null on the whole-process instrument, same ELF, four independent draws of GET,
+resampled ratio-of-medians: **median 1.00000, bootstrap 95% median CI [0.99730,
+1.00244]**.
+The gate is that the observed median ratio's CI must exclude 1.0 and lie outside that A/A
+band; the observed dispatch ratio is 437.0/457.0 = 0.95624, outside it by an order of
+magnitude. The verdict gate for this row is that bootstrap median-CI against the A/A band,
+and CV is provenance only and was not used as a gate anywhere in this row; no CV was
+computed. Host state is likewise provenance, not a gate, since instruction counts do not
+move with load.
+
+**WHAT THE WHOLE-PROCESS TOTALS DO AND DO NOT SUPPORT, quoting the WORST bound.** Four
+draws per arm. SADD and PING separate cleanly — after [1715.0, 1719.0] entirely below
+before [1731.6, 1771.5], and after [1055.0, 1065.7] entirely below before [1077.2,
+1088.0] — so the worst end-to-end bound is **-12.6 instr/op on SADD and -11.5 on PING**.
+GET and ZADD do NOT separate on totals and no end-to-end number is claimed for them. So
+the honest statement is: an exact -20.0 on the dispatch frame, and at worst -11.5
+end-to-end where the totals can resolve it. A single draw had suggested "GET -20.4" and
+that figure is WITHDRAWN — it sat inside its own arm's spread.
+
+**THE HARNESS FINDING THAT OUTLIVES THIS LEVER, and it is the reusable half.**
+`command_profile_frames.py`'s whole-process number is NOT reproducible at the level
+several rows have been quoting. Same ELF, four draws: SADD spans **39.9** instr/op, ZADD
+**38.9**, PING 10.8, GET 4.7. ZADD's single-draw delta read **+10.2 (a regression)** while
+the per-frame instrument on the same dumps read **-20.2 (a win)** — the totals had the
+SIGN wrong. Per-frame self costs are exact integers and reproduce across independently
+built ELFs. **Below roughly 40 instr/op, quote the frame, not the process total, or take
+repeats and report the range.**
+
+A SECOND INSTRUMENT DEFECT, found and fixed here: the call counter that produced the first
+version of this row resolved name ids only from `cfn=` lines. Callgrind shares ONE id
+table between `fn=` and `cfn=` and compresses repeats to a bare id, so ids first defined on
+an `fn=` line resolved to nothing, undercounting one dump more than the other. It printed
+`-1.000 calls/op`, a value that cannot exist, which is the only reason it was caught; a
+plausible wrong number would have shipped. On the strength of the broken counter I had
+claimed the earlier `+17` in this frame was an "inliner flip" from 0.000 to 1.000 calls/op.
+**Recounted correctly, that pair is FLAT at 1.000 calls/op in both arms**, so nothing about
+that `+17` is explained by call counts, and CrimsonHawk's row above — that it is not
+attributable to `getexgate` from data either of us holds — stands unchallenged by me. Two
+mechanisms I published for it were wrong and I am not proposing a third.
+
+RETRY PREDICATE: the same measurement now costs one build and names its own candidates.
+Every remaining per-op call on a GET, with its out-of-line body size in the shipped ELF,
+is `<fr_runtime::Runtime>::parser_config` **51 bytes** at 11.0 instr/op,
+`execute_plain_get_borrowed_into_with_default_read_gate` 83 bytes,
+`drain_pending_pubsub` 261 bytes and `parse_borrowed_plain_set_bulk` 363 bytes, each at
+1.000 calls/op. `parser_config` is the next one to take: it is 51 bytes, it is crossed
+per op, and being in `fr-runtime` it needs `#[inline]` to cross the crate boundary at all.
+Do NOT retry this shape on `try_dispatch_floor_classified_action` (36,363 bytes) or
+`classify_borrowed_dispatch_floor_packet_impl` (15,560 bytes) — forcing those inline is
+the case the 2026-08-16 row rejected, and at that size the code-growth argument is not
+close. Any retry must report the `.text` delta alongside the instruction delta and must
+confirm the symbol leaves the profile.
