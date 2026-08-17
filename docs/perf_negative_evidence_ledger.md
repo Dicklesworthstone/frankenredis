@@ -30065,3 +30065,67 @@ INTERCEPT and the crossover, not the n=2 ratio — the slope is not what the lev
 and should come back unchanged at 351.7 instr/key. If the slope moves, the lever did
 something it was not supposed to do. Any future KEYS shape must carry its keyspace size in
 its name.
+
+--------------------------------------------------------------------------------
+MEASURED (frankenredis-p98mw) — the GENERIC-route trio INDEPENDENTLY REPLICATED, and sized:
+SCAN 1.2237x, LCS 1.0963x, KEYS 1.0153x, each carrying ~2,000-2,450 instr/op of dispatch
+against a front-classified route's ~263-660. All three should cross parity on the floor entry
+alone
+
+Claim class: COMPETITIVE
+
+`bf856601a` (ozrro) screened six GENERIC-route shapes and found SCAN 1.2810x, LCS 1.1115x,
+KEYS 1.0269x. This is an INDEPENDENT re-measurement on a different binary in a different
+window, and it agrees:
+
+    shape        ozrro      mine       delta     dispatch share   dispatch instr/op
+    scan_zero    1.2810x    1.2237x    -4.5 pct    28.1 pct           1,987.7
+    lcs_2        1.1115x    1.0963x    -1.4 pct    34.4 pct           2,446.8
+    keys_star    1.0269x    1.0153x    -1.1 pct    34.9 pct           1,976.5
+    get_control     —       0.4092x       —        20.1 pct             263.6
+
+Two agents, two binaries, two windows, worst disagreement 4.5 pct — inside the +/-8 pct the
+harness documents for its redis denominator. THE TRIO IS REAL. These are the last shapes
+measured above parity now that the floor-entry vein is closed.
+
+THE SIZING IS THE NEW PART, and it is what makes these actionable rather than merely known.
+A front-classified route costs ~263 + ~100 per additional bulk (six points, worst error 16
+pct). Against that model:
+
+    shape        dispatch now   floor est.   recoverable   projected ratio
+    scan_zero      1,987.7        ~460         ~1,528         ~0.96x   CROSSES
+    lcs_2          2,446.8        ~560         ~1,887         ~0.81x   CROSSES
+    keys_star      1,976.5        ~360         ~1,617         ~0.73x   CROSSES
+
+All three cross parity on the dispatch saving ALONE, without touching their real work. That
+is the same arithmetic that held for the seven routes already crossed.
+
+BUT THESE ARE NOT ONE-ENTRY LEVERS, and that distinction is the reason this row exists
+separately from the sizing. All three are corpus class [C] — NO borrowed parser and NO
+borrowed executor. The seven crossings before them were class [A]: machinery already present,
+floor entry missing, four mechanical edits. These need a parser AND an executor WRITTEN, which
+is the LTRIM case (1.4925x -> 0.6172x, the one route in that series that needed real code).
+Anyone picking this up should budget for LTRIM-sized work per route, not SMOVE-sized.
+
+    EASIEST FIRST, by parse shape rather than by ratio: `KEYS <pattern>` and `SCAN <cursor>`
+    are both arity 2 with a single bulk. `LCS k1 k2` is arity 3. SCAN's full form carries
+    MATCH/COUNT/TYPE options, so a floor class must claim ARITY 2 ONLY and let the option
+    forms keep walking — claiming them would send an option form the arm cannot parse to
+    GENERIC instead of back to the cascade, which is strictly worse (the TOUCH defect).
+
+PROVENANCE:
+  ELF           3f027a4f7ebadb7767316134d4c0f6810295b2fd21bba160f260279778290815, built
+                locally with RCH_CARGO_WRAPPER_BYPASS=1, zero [RCH] lines. NOTE: built from
+                the working tree, not from HEAD — HEAD still does not compile (duplicate
+                DUMP/RANDOMKEY, see below), so this ELF maps to no commit.
+  harness       scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines in the SAME
+                invocation. Incumbent verified in-run: sha=d2c8a4b9 == vendored HEAD, clean.
+  host          thinkstation1, 64 cores, powersave, /data 150G.
+  PER-ARM loadavg/MHz  scan_zero 20.54/2939 · lcs_2 20.54/3414 · keys_star 20.54/4242 ·
+                get_control 20.54/3354. STABLE window, 1/5/15 = 20.5/23.4/27.8 and falling.
+                Cross-core spread 2939-4242 MHz (1.44x) WITHIN the row — instruction counts,
+                not wall clock, which is why that is tolerable.
+
+RETRY PREDICATE: take KEYS first (simplest parse, largest projected gain at ~0.73x), then
+SCAN, then LCS. Claim arity 2 ONLY for SCAN and KEYS. Re-measure before starting: this row is
+the third time a screen found a route already fixed by someone else mid-flight.
