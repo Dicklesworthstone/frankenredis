@@ -41409,3 +41409,162 @@ arm k times inside ONE invocation and require the observed spread below a thresh
 stamping FIT, which measures the quantity at risk instead of proxies for it. Until that
 exists, quote worst bounds and prefer the DISJOINT-INTERVAL form for improvements, which
 cancels the denominator entirely and needs no FIT window at all.
+
+## 2026-08-17 CrimsonHawk: THE READ GATE IS THE WRITE GATE'S TWIN — a flat **175.0 instr/op** on 16 measured read routes, 10.0 pct of a ZCARD, found by ranking the call graph rather than by reading source (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — this row ships no code. It is a MEASURED finding plus a prediction
+registered BEFORE any edit, banked now because the two files it needs are under a peer's
+exclusive reservation until 22:35Z and because a finding left in a transcript is a finding lost.
+
+### HOW IT WAS FOUND, WHICH IS THE REUSABLE PART
+
+Not by reading source and not by suspecting anything. `scripts/call_count_delta.py` answers
+"how often is X called", which requires already suspecting X. Inverting it — ranking EVERY
+function in the call graph by calls per op — makes a duplicated call announce itself.
+
+On `zcard`, exactly ONE function exceeded 2.0 calls/op:
+
+    4.000  __memcmp_avx2_movbe
+
+Four byte-compares for a two-token command is not obviously wrong, so the next question is who
+calls them. Attributing the callee to its CALLERS is what turned a curiosity into a lever:
+
+    2.000  <fr_runtime::Runtime>::plain_borrowed_default_key_read_allows
+    1.000  HashMap<String, CommandHistogram>::get_mut          (the histogram key compare)
+    1.000  HashMap<Box<[u8]>, Entry>::get_mut                  (the keyspace key compare)
+    0.002  HashMap<Vec<u8>, usize>::rustc_entry
+
+Two of the four memcmps come from a GATE PREDICATE. A predicate that reads booleans has no
+business doing string comparisons, and that is what made it worth measuring rather than
+skipping. They come from `current_acl_allows_default_key_command()`, called inside the gate.
+
+**The general lesson: rank the call graph before profiling instructions.** A function called
+4x/op announces itself in a ranking; in an instruction profile it appears as one modest frame
+and looks like intrinsic cost. This is the same instrument that settled AzureMouse's Timespec
+row at 1.0000 calls/op, used in the other direction.
+
+### THE FINDING
+
+`plain_borrowed_default_key_read_allows` is the READ-side counterpart of
+`plain_borrowed_default_key_write_allows`, and it has the identical defect: main.rs caches the
+answer once per buffered pass in `plain_get_read_gate_cache`, three floor arms consume it, and
+every other read arm re-derives it per packet.
+
+It is a CONSTANT, exactly as the write gate is:
+
+  shape        total instr/op   read-gate calls/op   read-gate instr/op   share
+  zcard             1742.6            1.0000              175.0          10.0 pct
+  llen              1683.2            1.0000              175.0          10.4 pct
+  strlen            1716.7            1.0000              175.0          10.2 pct
+  scard             1743.1            1.0000              175.0          10.0 pct
+  hlen              1713.3            1.0000              175.0          10.2 pct
+  sismember         2072.9            1.0000              175.0           8.4 pct
+  hget              1778.8            0.0000                0.0          CONVERTED (ozrro)
+  type              1387.2            0.0000                0.0          CONVERTED
+  get_control       1301.5            0.0000                0.0          CONVERTED
+
+175.0 on every unconverted arm and 0.0 on every converted one, with no intermediate value
+anywhere. That is what a fixed per-call cost looks like, and it is the same signature the write
+gate showed at 187.0.
+
+**Sixteen read routes measured at 1.0000 calls/op**: zcard, scard, hlen, strlen, sismember,
+llen, lindex, hexists, substr, object_encoding, memory_usage, ttl_nonvolatile, pttl,
+expiretime, randomkey_one — and three already converted. Three shapes (zscore, getrange,
+dbsize) failed to produce a dump in this survey and are UNMEASURED rather than converted; do
+not assume either way.
+
+### REGISTERED PREDICTION, BEFORE ANY EDIT
+
+Recorded here so it can be wrong in public. This is BrownIbis's discipline from `ghmgp`, which
+registered its numbers and a reject threshold before touching code, and it is the right way to
+stop a lever from being graded against a target drawn after the fact.
+
+  zcard      1742.6  ->  ~1568   (-175, -10.0 pct)
+  llen       1683.2  ->  ~1508   (-175, -10.4 pct)
+  strlen     1716.7  ->  ~1542   (-175, -10.2 pct)
+  sismember  2072.9  ->  ~1898   (-175,  -8.4 pct)
+
+ACCEPTANCE TEST, binary rather than statistical: the converted arm must go from **1.0000 to
+0.0000 calls/op** on `plain_borrowed_default_key_read_allows`. Noise cannot produce that and a
+neighbouring frame moving cannot fake it.
+
+REJECT THRESHOLD: a route saving materially under **140 instr/op** means the call was not
+actually removed, because the gate is a fixed 175. Do not accept a smaller saving as a partial
+win — diagnose it instead.
+
+NULL: an unconverted read arm from the list above, measured in the SAME ELF under the SAME env
+flip. It must read 1.0000 calls/op before and after, and must not move in instructions. When
+`lset_same` served this role on the write side its validity was later CONFIRMED by call count
+rather than assumed, and the same check applies here.
+
+### WHY THIS IS NOT A DUPLICATE OF THE WRITE-GATE ROWS
+
+Different predicate, different cache, different arms, different constant (175.0 against 187.0).
+The write-gate conversions are done for GETEX, the TTL family, the single-key string writes and
+a peer's keyed-values executor; none of them touches a read arm. A peer is active on the write
+side (`ghmgp`, ZADD and MSET by agreement), so this vein does not collide with theirs.
+
+### THE PREFLIGHT BLOCK, READ RATHER THAN OBEYED
+
+`check-candidate plain_borrowed_default_key_read_allows` returns BLOCKED with 10 rows. I read
+them. **None measured this quantity.** They are KEEPs for OTHER levers that merely mention the
+gate by name — the TTL dispatch-floor front gate (NEGATIVE_EVIDENCE.md:8851), ZRANK WITHSCORE
+(:10150), and the SINTER / SDIFF / SUNION borrow-scan fast paths (:10308, :10329, :10350) —
+plus a ledger-integrity audit at :8547. A block is a STRING MATCH, and this is the case the
+preflight's own warning describes: someone has been here, but not for this.
+
+More than that, the lever is already PROVEN POSITIVE on this exact predicate. `ozrro` converted
+HGET to the cached read gate for **-191.5 instr/op (-9.7 pct)**, described at the time as "the
+first non-GET read to do so". That is the same change this row proposes for the other sixteen
+arms, and the measurement above confirms HGET now reads 0.0000 calls/op while its unconverted
+neighbours read 1.0000. There is nothing to re-litigate; there is a conversion that stopped
+after one command.
+
+### COUNTED MECHANISM
+
+Sixteen shapes, each a two-point callgrind subtraction at N=2000 and 2N=4000 with startup and
+seeding cancelled. Marginal call counts are exact integers — 2000 in every unconverted case,
+0 in every converted one — and carry no confidence interval because callgrind call counts are
+deterministic. The instruction figure of 175.0 is likewise identical across six independently
+measured shapes.
+
+CV was not used, as a gate or otherwise.
+
+### PROVENANCE
+
+  ELF           c13d2f7f6a349a82, plain `--release` at HEAD 7dfecf4f4, no feature flags, built
+                locally with RCH_CARGO_WRAPPER_BYPASS=1, path from `--message-format=json`,
+                copied to a private path and sha256'd there.
+  bench_elf_sha256=c13d2f7f6a349a8212c4173b8d327af07e23ac55f9887a4fe8f49caff9caa42a
+  incumbent     NOT RUN. No redis arm was started; every number here is an fr-side count and no
+                ratio against the incumbent is claimed anywhere in this row.
+  harness       `scripts/shape_instr_per_op.py --fr-only`, `scripts/call_count_delta.py`,
+                `scripts/frame_delta.py`, plus two scratch tools used for the discovery and
+                described above (call-graph ranking, and callee-to-caller attribution).
+  host          thinkstation1, 64 cores observed, powersave governor, /data 201G free.
+  PER-ARM loadavg / CPU idle
+                discovery + first survey   load 9.80 10.80 12.63, CPU idle 88.8 pct from
+                                           /proc/stat deltas, iowait 0.1 pct
+                second survey              load 50.61 22.97 16.64 — an external build started
+                                           mid-survey and is recorded rather than hidden
+  admissibility Instruction and call counts are deterministic and load-immune, which is why the
+                second survey is admissible despite the spike to 50. No timed row is claimed
+                anywhere here, and none would be admissible in that window.
+
+### RETRY PREDICATE
+
+1. Take this the moment `crates/fr-server/src/main.rs` and `crates/fr-runtime/src/lib.rs` are
+   free — the reservation expires 22:35Z. Check
+   `check_file_reservation_conflicts` first, not after editing.
+2. Thread `default_read_allowed: Option<bool>` exactly as the write side did. Do NOT add
+   `_with_default_read_gate` twins: the pre-existing write-side twins duplicate their
+   executor's entire body, which is two copies to keep in sync each, and the read side has more
+   arms than the write side did.
+3. Start with the CHEAPEST commands, because the tax is fixed: LLEN, STRLEN, ZCARD, SCARD and
+   HLEN all pay over 10 pct. Grade each against the registered prediction above.
+4. SEPARATELY, and only after: the two memcmps inside
+   `current_acl_allows_default_key_command()` are a distinct sub-lever worth about 120 instr/op
+   of the 175 if they can be avoided on the default-user path. Do not bundle it with the
+   caching change — bundling would make the acceptance test above unreadable, since both would
+   move the same frame.
