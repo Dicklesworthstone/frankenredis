@@ -20,9 +20,16 @@ from a WINDOW of one file produced a 35-field "gap" that was mostly artifact: fr
 the Replication section in fr-runtime and the rest in fr-command, so `master_host`,
 `master_link_status`, `slave_read_only` and `replica_announced` all looked missing and are
 not. This gate instead asks whether each upstream field name appears ANYWHERE in crates/
-as a rendered `"<name>:` literal. That is a presence test with no window to get wrong. It
-over-approximates presence -- a name mentioned in a comment or a test would count -- which
-is the safe direction for a gate whose failure mode is a false ABSENCE claim.
+as a rendered `<name>:`, anchored at a quote OR a line start. That is a presence test with
+no window to get wrong. It over-approximates presence -- a name mentioned in a comment or
+a test counts -- which is the safe direction for a gate whose failure mode is a false
+ABSENCE claim.
+
+THE ANCHOR HAS ALREADY BEEN WRONG ONCE, in the direction that matters. Requiring a quote
+before the name missed fields rendered mid-way through a multi-line `write!`, and reported
+`slave_priority` and `master_link_down_since_seconds` absent while fr renders both. See
+`fr_rendered_names` for the full account. If you tighten this matcher, the thing to prove
+is that it still finds a field that does not begin its own string literal.
 
 Exit 0 = the absent set matches the declared baseline exactly.
 Exit 1 = a field went missing that was not declared (regression), or a declared-absent
@@ -53,12 +60,13 @@ DECLARED_ABSENT = {
     "aof_buffer_length": "aof_enabled",
     "aof_pending_bio_fsync": "aof_enabled",
     "aof_delayed_fsync": "aof_enabled",
-    # `# Replication`, emitted on a replica in the SAME sdscatprintf as slave_read_only
-    # and replica_announced (server.c:6060) -- both of which fr DOES render. One field
-    # dropped from a block whose siblings are implemented, so this is the sharpest row.
-    "slave_priority": "replica",
-    # `# Replication`, replica with a sync in progress or a downed link.
-    "master_link_down_since_seconds": "replica, link down",
+    # NOT LISTED, and the reason is a correction: `slave_priority` and
+    # `master_link_down_since_seconds` were in this baseline and are RENDERED. fr emits
+    # them in the multi-line `write!` at fr-runtime/src/lib.rs:45698, which the first
+    # version of `fr_rendered_names` could not see. See that function for the full
+    # account. fr renders all three of upstream's slave_priority / slave_read_only /
+    # replica_announced trio.
+    # `# Replication`, replica with a sync in progress.
     "master_sync_total_bytes": "replica, sync in progress",
     "master_sync_read_bytes": "replica, sync in progress",
     "master_sync_left_bytes": "replica, sync in progress",
@@ -100,11 +108,30 @@ def upstream_info_fields():
 
 
 def fr_rendered_names():
-    """Every `"<name>:` literal anywhere under crates/ — presence, with no window."""
+    """Every `<name>:` rendered anywhere under crates/ — presence, with no window.
+
+    THE ANCHOR IS `(^|")` AND THE FIRST VERSION OF THIS FUNCTION GOT IT WRONG, which is
+    worth keeping in the source because the failure was silent and pointed the unsafe way.
+    Requiring a literal quote before the name assumes every field begins a string literal.
+    It does not: fr renders the replica block as one multi-line `write!` whose continuation
+    lines start with the field name and no quote —
+
+        "master_host:{host}\\r\\n\\
+        master_port:{port}\\r\\n\\
+        ...
+        slave_priority:{}\\r\\n\\
+
+    — so `slave_priority` and `master_link_down_since_seconds` were reported ABSENT while
+    being rendered a few lines apart from fields the same gate reported present. That is a
+    false ABSENCE, the direction this gate must never fail in, and it reached a bead, a
+    commit message and the README before a source read caught it. Accepting a line start as
+    well as a quote restores the intended over-approximation: a name in a comment or a test
+    now counts as present, which can only ever HIDE a gap, never invent one.
+    """
     out = subprocess.run(
-        ["rg", "-oNI", r'"[a-z][a-z0-9_]{2,}\s*:', os.path.join(ROOT, "crates")],
+        ["rg", "-oNI", r'(^|")[a-z][a-z0-9_]{2,}\s*:', os.path.join(ROOT, "crates")],
         capture_output=True, text=True, check=False).stdout
-    return set(re.findall(r'"([a-z][a-z0-9_]{2,})\s*:', out))
+    return set(re.findall(r'([a-z][a-z0-9_]{2,})\s*:', out))
 
 
 def main():
