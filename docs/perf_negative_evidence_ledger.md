@@ -27356,3 +27356,78 @@ invocation and refuses rather than warns. It DOES need extending if another harn
 measuring against a checked-in artifact: `restore_instr_per_op.py` and
 `collection_reload_headtohead.py` resolve the same vendored `REDIS` path and do not yet call
 it. That is the obvious next place, and it is cheap because the helper is already written.
+
+--------------------------------------------------------------------------------
+MEASURED (frankenredis-ozrro) — SMOVE front-classified: 1.5099x -> 0.5144x, dispatch
+4,431.9 -> 465.8 instr/op (-89.5 pct), the largest single lever of this campaign
+
+Claim class: COMPETITIVE
+
+The shape landed last row exposed SMOVE as the worst route on the board — 67.1 pct dispatch
+share and 4,438 instr/op of it, larger than anything previously measured. Its borrowed
+parser AND executor already existed; only the floor entry was missing, so the command
+walked to cascade line ~9793 on every call. Added `Smove` to the floor token table, a class
+at arity 4, and an arm reusing the same parser and executor the cascade arm used.
+
+    shape             BEFORE                   AFTER                    delta
+    smove_missing     6,610.6 / 6,594.9        2,323.0 / 2,349.2        -64.6 pct
+                      dispatch 67.1 / 67.2 pct dispatch 19.9 / 19.9 pct
+                      (~4,431.9 instr/op)      (~465.8 instr/op)        -89.5 pct
+                      ratio 1.5099x            ratio 0.5144x / 0.5166x  CROSSED PARITY
+
+    get_control       1,308.2 / 1,308.8        1,308.1 / 1,306.7        -0.08 pct  NULL, FLAT
+    srandmember_1     2,027.8 / 2,011.3        2,029.3 / 2,029.1        +0.47 pct
+
+TWO CONTROLS, AND THE SECOND IS THE ONE THAT MATTERS. get_control being flat to 0.08 pct
+rules out a code-layout shift — the failure that once moved it 2.7 pct and nearly cost me a
+false claim. But `srandmember_1` is the better control here: it is ALSO unclassified, ALSO
+walks the cascade, and did NOT move (+0.47 pct, inside its own spread). So this is a
+SMOVE-specific route change and not a global dispatch effect, which a single null cannot
+distinguish.
+
+PREDICTION vs ACTUAL, recorded before the run: front-classification should take 4,438
+toward a classified route's ~275. Actual 465.8. The prediction was optimistic by ~190
+instr/op because SMOVE's parser reads THREE bulks (src, dst, member) where get_control's
+reads one — the floor entry removes the WALK, not the parse. Direction and magnitude right,
+constant slightly wrong, and the reason is mechanical.
+
+SMOVE goes from 51 pct BEHIND redis to 2x AHEAD in one entry. RPOPLPUSH (3,070 instr/op of
+dispatch, 1.4822x) and LTRIM (2,620, 1.4771x) are the same shape of problem and remain open.
+
+CORRECTNESS. A floor class is a promise its arm can serve the shape — a claimed packet the
+parser declines falls to GENERIC, not back to the cascade, so an over-claim is a REGRESSION
+rather than a wasted parse. The test asserts BOTH halves: the classifier claims exactly
+arity 4 (SMOVE is not variadic upstream) and the arm's parser accepts exactly what is
+claimed, over the served shape in both cases, five wrong arities, and three other 5-letter
+commands at arity 4 that must not collide with the new token. MUTATION-TESTED: relaxing the
+arity map to `(_, Smove)` reddens on `["SMOVE"]`. 354 fr-server tests pass.
+
+CROSS-PROJECT CHECK, answered for this harness rather than assumed. networkx found an
+INSTALLED package 2,751 lines and twelve days behind its repo, inverting a ratio 5.4x. My fr
+arm is a repo build I compile and pass by path, so it cannot drift. My REDIS arm is a
+vendored binary, `legacy_redis_code/redis/src/redis-server`, which is the same hazard shape.
+Verified: binary mtime 2026-04-01 23:38 against a newest-source mtime of 23:37, so it was
+built AFTER its sources; it reports `v=7.2.4 sha=d2c8a4b9 malloc=jemalloc-5.3.0`, matching
+this ledger's requirement that the incumbent be jemalloc; and `git log --since=2026-04-01 --
+legacy_redis_code/redis/src` is EMPTY with a clean tree, so no source has changed since.
+NO DRIFT. One caveat stated rather than buried: that binary is UNTRACKED in git, so the
+guarantee is local evidence (mtime ordering plus zero source commits), not version control
+— a fresh clone would have to rebuild it.
+
+PROVENANCE:
+  AFTER ELF            2550a666795d8d14...
+  BEFORE ELF           9c59eb6de985e888...  same tree and same peer state, built minutes
+                       apart, differing ONLY by this change (stash / build / restore).
+  harness              scripts/shape_instr_per_op.py at HEAD, N=2000/2N=4000, ABBA per
+                       shape, both engines in the SAME invocation.
+  host                 thinkstation1, 64 cores, /data 190G, governor powersave, two builds.
+  PER-ARM loadavg/MHz  smove_missing 19.96/2802, 19.96/3203, 19.96/3323, 23.01/3926 ·
+                       get_control 23.01/3634, 23.73/3750, 23.75/3262, 23.75/3303 ·
+                       srandmember_1 23.61/3325, 23.61/3173, 23.32/3275, 23.32/2892.
+                       Loadavg at turn open 17.26/20.37/24.03, falling. These are
+                       small-reply shapes (fr 0.001 passes/op), the load-immune class.
+
+RETRY PREDICATE: do the same for RPOPLPUSH and LTRIM — check FIRST whether each already has
+a borrowed parser and executor, because that is what made this one a floor-table entry
+rather than a rewrite. Expect the classified floor to land near 450-500 instr/op of
+dispatch, not 275, for any command whose parser reads three bulks.

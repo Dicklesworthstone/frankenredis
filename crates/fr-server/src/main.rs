@@ -14606,6 +14606,12 @@ enum BorrowedDispatchFloorClass {
     SetOpt4,
     SetOpt5,
     SetOpt6,
+    /// (frankenredis-ozrro) `SMOVE src dst member` at arity 4 only, which is the whole
+    /// command — SMOVE is not variadic upstream. Its parser and executor already existed;
+    /// only the floor entry was missing, so the command walked to cascade line ~9793 and
+    /// paid 4,438 instr/op of dispatch, 67.1 pct of the command and the LARGEST dispatch
+    /// cost measured in this campaign.
+    Smove,
     /// (frankenredis-p98mw) ONE-PAIR MSETNX only. MSETNX is variadic upstream
     /// (`MSETNX k v [k v ...]`) and only the arity-3 form has a borrowed parser, so
     /// the name says so: widening this without adding a parser first would claim
@@ -15026,6 +15032,7 @@ impl PlainZsetStoreCmd {
 enum BorrowedDispatchFloorCommand {
     Touch,
     Set,
+    Smove,
     Msetnx,
     Append,
     Bitcount,
@@ -15241,6 +15248,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'S', b'E', b'T', b'E', b'X'] => Some(BorrowedDispatchFloorCommand::Setex),
             [b'S', b'E', b'T', b'N', b'X'] => Some(BorrowedDispatchFloorCommand::Setnx),
             [b'T', b'O', b'U', b'C', b'H'] => Some(BorrowedDispatchFloorCommand::Touch),
+            [b'S', b'M', b'O', b'V', b'E'] => Some(BorrowedDispatchFloorCommand::Smove),
             [b'S', b'C', b'A', b'R', b'D'] => Some(BorrowedDispatchFloorCommand::Scard),
             [b'S', b'D', b'I', b'F', b'F'] => Some(BorrowedDispatchFloorCommand::Sdiff),
             [b'Z', b'C', b'A', b'R', b'D'] => Some(BorrowedDispatchFloorCommand::Zcard),
@@ -16462,6 +16470,7 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // falls to GENERIC, which is exactly where it would have arrived after walking the
         // whole cascade. The class therefore cannot strand a shape another arm would have
         // served, which is the condition the floor-class rule actually requires.
+        (4, BorrowedDispatchFloorCommand::Smove) => Some(BorrowedDispatchFloorClass::Smove),
         (4, BorrowedDispatchFloorCommand::Set) => Some(BorrowedDispatchFloorClass::SetOpt4),
         (5, BorrowedDispatchFloorCommand::Set) => Some(BorrowedDispatchFloorClass::SetOpt5),
         (6, BorrowedDispatchFloorCommand::Set) => Some(BorrowedDispatchFloorClass::SetOpt6),
@@ -17946,6 +17955,37 @@ fn try_dispatch_floor_classified_action(
                         argv_scratch,
                     )
                 }
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Smove => {
+            // (frankenredis-ozrro) Same parser and executor the cascade arm at ~9793 used;
+            // only the position changes, so reply bytes and every side effect — including
+            // the conditional SADD and its keyspace events — are unchanged, and a
+            // declining executor still falls through to the generic path exactly as before.
+            //
+            // SMOVE is arity 4 and nothing else in the cascade parses a SMOVE packet, so
+            // the class cannot strand a shape another arm would have served.
+            if let Some(packet) = parse_borrowed_plain_smove_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_smove_borrowed(
+                    packet.key,
+                    packet.start,
+                    packet.end,
+                    ts,
+                )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,
@@ -51128,6 +51168,79 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
                 super::parse_borrowed_plain_set_nx_packet(&pkt, &cfg).is_none()
                     && super::parse_borrowed_plain_set_xx_packet(&pkt, &cfg).is_none(),
                 "{form:?} gained a parser — add it to the SetOpt4 arm"
+            );
+        }
+    }
+
+    /// (frankenredis-ozrro) SMOVE's floor class is a promise that its arm can serve the
+    /// shape: a claimed packet the parser then declines falls to GENERIC, not back to the
+    /// cascade, so an over-claim is a REGRESSION rather than a wasted parse.
+    ///
+    /// Assert both halves — the classifier claims exactly arity 4, and the parser the arm
+    /// reaches accepts exactly what is claimed — because either alone passes while the
+    /// change is wrong.
+    #[test]
+    fn smove_floor_class_claims_exactly_what_its_parser_accepts() {
+        let cfg = ParserConfig::default();
+        fn packet(args: &[&str]) -> Vec<u8> {
+            let mut p = format!("*{}\r\n", args.len()).into_bytes();
+            for a in args {
+                p.extend_from_slice(format!("${}\r\n{}\r\n", a.len(), a).as_bytes());
+            }
+            p
+        }
+
+        // The one shape SMOVE has: src, dst, member.
+        let served = packet(&["SMOVE", "s", "d", "m"]);
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(&served, &cfg),
+            Some(super::BorrowedDispatchFloorClass::Smove),
+        );
+        assert!(
+            super::parse_borrowed_plain_smove_packet(&served, &cfg).is_some(),
+            "the class claims arity 4, so the arm's parser must accept it"
+        );
+        // Lowercase dispatches identically upstream.
+        let lower = packet(&["smove", "s", "d", "m"]);
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(&lower, &cfg),
+            Some(super::BorrowedDispatchFloorClass::Smove),
+        );
+        assert!(super::parse_borrowed_plain_smove_packet(&lower, &cfg).is_some());
+
+        // SMOVE is NOT variadic upstream, so no other arity may be claimed. Each of these
+        // is a wrong-arity SMOVE that must keep walking rather than be claimed and dropped
+        // on the generic path.
+        for wrong in [
+            vec!["SMOVE"],
+            vec!["SMOVE", "s"],
+            vec!["SMOVE", "s", "d"],
+            vec!["SMOVE", "s", "d", "m", "extra"],
+            vec!["SMOVE", "s", "d", "m", "e1", "e2"],
+        ] {
+            let pkt = packet(&wrong);
+            assert_ne!(
+                super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
+                Some(super::BorrowedDispatchFloorClass::Smove),
+                "{wrong:?} must not be claimed as Smove"
+            );
+            assert!(
+                super::parse_borrowed_plain_smove_packet(&pkt, &cfg).is_none(),
+                "{wrong:?} must not parse as SMOVE either"
+            );
+        }
+
+        // A different 5-letter command at arity 4 must not collide with the new token.
+        for other in [
+            vec!["SETEX", "k", "10", "v"],
+            vec!["LPUSH", "l", "a", "b"],
+            vec!["SCARD", "s", "x", "y"],
+        ] {
+            let pkt = packet(&other);
+            assert_ne!(
+                super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
+                Some(super::BorrowedDispatchFloorClass::Smove),
+                "{other:?} must not be claimed as Smove"
             );
         }
     }
