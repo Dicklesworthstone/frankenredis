@@ -83,6 +83,63 @@ attributed per command with `frame_delta.py`. (3) Do NOT take another depth-rank
 candidate before that exists; the depth screens are now measuring a quantity whose weight is
 unknown to within 100x.
 
+## 2026-08-17 MossyOrchid: FOUR OF THE OPEN P1s I OPENED TODAY WERE ALREADY DONE — `z2ce3`, `tyujv`, `uu33c`, `i41sx`, each verified from source or a re-measured cell, none closed by me because none is mine
+
+Claim class: SELF-SPEEDUP. Campaign output: no ratio is claimed. This is grooming with citations,
+recorded once rather than four times, because the pattern is now strong enough to change how the
+next agent picks work.
+
+    bead    what it asks for                      what is actually in the tree
+    z2ce3   seven borrowed executors stop         all seven pass borrowed keys; fr-store carries
+            un-borrowing their keys               del_borrowed + del_inner<K: AsRef<[u8]>> so both
+                                                  entry points share one body. The to_vec()s left
+                                                  are inside the breach-only metrics closure,
+                                                  which answers the bead's own third warning.
+    tyujv   GEOADD is "the last stranded route",  re-measured: 3,698.7 instr/op, 16.2 pct — the
+            57.9 pct dispatch share               route was front-classified after filing, and the
+                                                  share it ranks first on no longer exists
+    uu33c   arity-keyed classes MIS-CLAIM option  re-measured: LPOS COUNT 20.8 pct, not 32.2. I
+            forms (LPOS COUNT 32.2 vs 15.0)       then checked the neighbouring instance rather
+                                                  than assume the class was empty: zintercard's
+                                                  LIMIT form is not a mis-claimed option form
+                                                  either — the whole command was unclassified
+    i41sx   stream already-sorted ZSET listpack   implemented at fr-store:1651 — the ordered
+            pairs into packed storage, selected   builder is selected on borrowed_pairs_are_sorted,
+            after full ordering validation        which validates EVERY adjacent pair via zset_cmp,
+                                                  with the sorting fallback retained for foreign
+                                                  payloads. A test named for the bead exists, and
+                                                  someone has already added a second one covering
+                                                  the CHOICE after noticing the first would stay
+                                                  green if the guard were dropped
+
+FOUR OF FOUR that I examined in depth. The two P1s I opened that were REAL — `9hori` (a live
+correctness divergence) and `5na4i` (which I have now closed with three certified routes) — were
+both filed within the last 48 hours. Every stale one is older.
+
+WHAT MAKES THEM STALE IS SPECIFIC, and it is not carelessness by whoever filed them: three of the
+four are DISPATCH-SHARE cells, and share is exactly the quantity front-classification collapses.
+A bead that says "X pct of the op is dispatch" has a half-life measured in days on this board
+right now. `tyujv` was filed ONE DAY before its cell disappeared.
+
+    PRACTICAL RULE, and it is cheap: before taking any bead older than ~48 hours, re-measure its
+    headline cell or grep its named function. Four times today that took under two minutes and
+    saved a build slot. `feedback_remeasure_a_beads_cell_before_believing_it` says this already;
+    what is new is the RATE — the ready pool's P1s are majority phantom, so this is not a
+    precaution, it is the first step of taking a bead.
+
+I annotated all four with the evidence rather than closing any: they are other agents' beads and
+the standing rule is not to close a peer's. Each annotation names the file and line, so the owner
+can confirm in one look.
+
+### RETRY PREDICATE
+
+None — nothing here is a lever. Reopen any of the four only if its named function stops appearing
+in the tree, or if a re-measured cell contradicts the figures above. If a fifth turns up stale,
+the right response is no longer another ledger row but a sweep: `br ready` is a work QUEUE and a
+majority-phantom queue costs every pane the same two minutes over and over.
+
+--------------------------------------------------------------------------------
+
 ## 2026-08-17 BrownIbis: KEEP (SELF-SPEEDUP) — the last two stranded commands are front-classified: SPUBLISH **8,307.8 -> 1,824.3 instr/op (-78.0 pct, 4.55x)** and MOVE **4,456.5 -> 1,923.8 (-56.8 pct, 2.32x)** (`frankenredis-p98mw`)
 
 Claim class: SELF-SPEEDUP. Campaign output: no. This is fr-before against fr-after; no incumbent
