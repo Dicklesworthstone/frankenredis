@@ -32479,3 +32479,87 @@ RETRY PREDICATE: before the next A/B, measure the null TWICE on the two arms' ow
 and quote its spread in the row, rather than inheriting 3.04 pct from this file — the floor
 is a property of the build pair and the window, not a constant. And if a row's effect is
 under ~3 pct, do not bank it as a delta at all.
+
+--------------------------------------------------------------------------------
+## INSTRUMENT CHECK (frankenredis-gvm6z, cross-project) — the null constant this harness scores significance against is contradicted by a QUIET group of mine: 0.320 pct half-range against a 0.067 pct median and a 0.201 pct gate
+
+Claim class: INSTRUMENT CHECK. No lever ratio claimed. Analysis only — no build, no
+measurement, at 435M-2.1G free disk and loadavg 603.
+
+THE PROMPT asked for three gate shapes: a threshold at the operating point, a gate biased
+against one arm, and an arm-asymmetric null. Audited all three against this repo.
+
+### 1. Threshold at the operating point — FOUND, and it is not the one I expected
+
+`shape_instr_per_op.py` calibrates its noise model from NINE groups of same-(ELF, arm,
+shape) repeats: **min 0.011 pct, median 0.067 pct, max 0.481 pct**, with
+`NULL_HALF_RANGE_PCT = 0.067` and `NULL_GATE_PCT = 3 x median = 0.201 pct`. The max is
+attributed there to "the one pair measured across a loadavg 13->44 spike", i.e. explained
+away as contamination.
+
+I have an independent group: six `get_control` draws taken last window on one ELF, at
+loadavg **14.09-14.29 with the 1-minute flat across all six** — no spike, nothing to
+explain away.
+
+    my group   mean 1,310.7 instr/op   half-range 4.2   = **0.320 pct**
+    = 4.8x their median, and **1.59x their gate**
+
+So a quiet, flat, uncontaminated group lands NEAR their spike-attributed maximum and
+FAILS the 3x-median gate outright. Either the 0.067 pct median is not representative of
+this harness's small shapes, or the 0.481 pct outlier was never really about the load
+spike. Both readings say the same thing: the constant is calibrated below the operating
+point of at least some shapes.
+
+### 2. The consequence is the OPPOSITE of frankenpandas's, and worse
+
+frankenpandas's gate sat at its median, so half its good runs were discarded. Here the
+constant is used as a DIVISOR — `delta_sigma(delta, arm_a, arm_b)` scores a difference in
+units of it — so an understated constant does not discard good runs, it **publishes noise
+as signal**. The self-test pins two banked conclusions against it:
+
+    true noise    "flat" claim      "real" claim (LCS vs ZINTERCARD miss tax)
+    0.067 pct     0.53 sigma        7.16 sigma    REAL holds
+    0.150 pct     0.24 sigma        3.20 sigma    marginal
+    0.243 pct     0.15 sigma        1.97 sigma    NOT significant
+    0.320 pct     0.11 sigma        1.49 sigma    NOT significant
+
+**If the true half-range is anywhere near what my quiet group measured, the banked "REAL
+and command-specific" LCS-vs-ZINTERCARD result is a ~1.5-2 sigma effect, not 7.2.** The
+"flat" claim is safe under every assumption — understating noise cannot turn a real effect
+flat, only a flat one real, which is exactly the one-directional hazard here.
+
+I am NOT asserting the constant is wrong. I have one group against their nine, mine is on a
+1,310 instr/op shape while the pinned claims are on ~7,000 instr/op arms, and percentage
+noise plausibly falls with shape size — my own larger same-ELF nulls run 0.002-0.243 pct
+(zrangestore_all 5,027 -> 0.002; bypass GENERIC 9,368 -> 0.243). That size dependence is
+itself the untested assumption in a single scalar constant.
+
+### 3. Arm-asymmetric treatment — present, documented, and justified
+
+`run_once` carries `if per_op > 2048 and tag.startswith("fr")`, which fires only on the fr
+arm. It is an advisory print, not a gate: it rejects nothing and adjusts nothing, so it
+cannot bias a ratio. Its asymmetry is evidence-based — fr's arm spans 12.8-33.4 pct at
+5,638 B/op while redis's stays inside 1.5 pct — so it warns about the arm that is actually
+unstable. The residual gap is latent, not live: nothing would warn if the REDIS arm ever
+became reply-volume-unstable, because the check cannot fire for it.
+
+### 4. Bias against the faster arm — the mechanism exists here in mirror image
+
+frankenscipy found a clock gate biased against its faster arm. This harness's documented
+asymmetry runs the other way: redis's `serverCron` does work proportional to ELAPSED time,
+which the two-point subtraction (proportional to OP COUNT) cannot cancel, so a slower or
+more contended window inflates the DENOMINATOR. That is a bias against the SLOWER arm,
+which on nearly every shape here is redis — i.e. it flatters fr. It is documented as noise;
+whether it is systematic rather than symmetric is not established either way, and no row
+should treat a sub-3 pct fr/redis margin as settled until it is.
+
+RECOMMENDED RE-DERIVATION, for whoever has a quiet window: repeat one SMALL shape
+(get_control, ~1,300 instr/op) and one LARGE shape (~7,000+, e.g. lcs_2 or zintercard) six
+times each on one ELF in one flat window, and report half-range for both. If the two differ
+materially, `NULL_HALF_RANGE_PCT` cannot be a single scalar and `delta_sigma` needs the
+arm's magnitude, which it already takes, folded into the PERCENTAGE too. Until then, treat
+the 7.16 sigma as unconfirmed.
+
+PROVENANCE: no measurement taken for this row — it re-uses six draws banked last window
+(loadavg 14.09-14.29, ELF 61778add, incumbent verified at the time). No build, no engine
+started. thinkstation1, /data 435M-2.1G, loadavg 603 with 89 pct iowait.
