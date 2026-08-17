@@ -32047,3 +32047,61 @@ on frequency.
 RETRY PREDICATE. Recompute the RATIO null, not the fr-arm null, if the redis arm or the
 harness changes. Do not quote the 0.243 pct figure as "the null" for a competitive claim; it
 describes only the numerator.
+
+--------------------------------------------------------------------------------
+VERIFIED, NO LEVER LANDED (frankenredis-p98mw) — the BUG backlog is as stale as the perf
+backlog was: opmo4 is fixed AND guarded, o500d is 3-of-4 fixed with a green gate, and its
+remaining slice is blocked on machinery that does not exist
+
+Claim class: CORRECTNESS-NEUTRAL (verification only; no build measured, host at loadavg 48
+rising and certification was withheld)
+
+Load ruled out perf certification, so I went to the correctness queue, which the orders rank
+ABOVE ratio work. Three candidates, all checked against the source and the live differ rather
+than against their bead text:
+
+  frankenredis-opmo4 (P1 bug, OPEN) — FIXED AND GUARDED, just unclosed. The classifier now
+  splits `(3..=9, Mget) -> MgetN(arity-1)` from `(>=10, Mget) -> Mget`, so the exact-N arms
+  serve the common case instead of it being declined onto GENERIC. A regression test already
+  pins every arity 2..8 to its own count, the 8/9 boundary in both directions, and the
+  1-key case that must classify as neither — and its own comment reads "This is the assertion
+  that 645845b0e needed and did not have." Closed on that evidence.
+
+  frankenredis-o500d (P1 bug, OPEN) — 3 OF 4 DIVERGENCES FIXED, verified LIVE this turn by
+  running `scripts/function_load_differ.py` against both engines in one invocation:
+      top_level_error    fr == redis    (was a divergence)
+      undeclared_global  fr == redis    (was a divergence)
+      tonumber_call      fr == redis    (was a divergence)
+      nil_index          fr OK, redis ERR   <- the one real remaining gap
+      CONTROL_no_register / CONTROL_valid    both agree, so the probe discriminates
+  Gate exits 0: every divergence is a known tracked gap, and a NEW one would fail it.
+
+  THE REMAINING SLICE IS NOT TURN-SIZED, and the blocker is concrete rather than a feeling.
+  Row 4 (`local t = nil; t.field`) is a RUNTIME error on a LOCAL — no static scan can see it,
+  so matching upstream requires EXECUTING the body at load time. fr has an execution API
+  (`LuaEval::new` + `execute`), so I checked whether the additive version works: run the body
+  purely as a validation pass, keep the existing text-scan registration untouched.
+  IT DOES NOT. `register_function` DOES NOT EXIST anywhere in `lua_eval.rs` (zero
+  occurrences), so executing any VALID library body would fail on the register_function call
+  and turn CONTROL_valid — currently passing — into a divergence. Making this work means
+  adding `redis.register_function` with both upstream calling conventions and collecting its
+  registrations, which is precisely the "moves registration off the text-scan path" refactor
+  the bead warned about. Attempting it in a tail-of-turn would trade one known gap for a
+  broken gate.
+
+WHY THIS ROW EXISTS AT ALL: three P1 beads in a row have now cost a turn each to discover
+they were done. Combined with the five stale PERF proposals earlier in this session, the
+pattern is not specific to perf beads — THE WHOLE BACKLOG LAGS THE TREE. The cheap defence is
+already written down (`feedback_remeasure_a_beads_cell_before_believing_it`); this row extends
+it to bug beads, where the equivalent check is "run the differ" rather than "re-measure the
+cell", and the differ is usually already in scripts/.
+
+PROVENANCE: no build, no benchmark, no perf measurement. `function_load_differ.py` run live
+against vendored redis 7.2.4 and fr ELF 4d99931ef870966b on ephemeral ports; source read at
+HEAD 5512b0657. Host loadavg 31.71/26.11/22.18 at read time and rising through the turn —
+irrelevant to a differ, and the reason no ratio appears here.
+
+RETRY PREDICATE: o500d's last row needs `redis.register_function` in `lua_eval` FIRST — that
+is the unit of work, and it should be taken as its own bead with the differ as its gate, not
+bolted onto a perf turn. Do not attempt a static approximation of row 4: a runtime error on a
+local is not statically decidable, and a partial static rule would reject valid libraries.
