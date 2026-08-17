@@ -26862,3 +26862,84 @@ four are enough:
      the two arms need identical sibling occupancy, not merely identical block size.
 Do NOT spend another quiet window permuting cores without doing (1) first: the four rows
 above already show core choice moving the null by less than the null's own spread.
+
+---
+
+## MEASURED (frankenredis-33832, frankenredis-b1o02) — the RESTORE "deficit" INVERTS at less than half a read per restore: 2.73x in isolation, 0.57x with ONE HGETALL, and the break-even has fallen from 1.034 to 0.373 reads
+
+Campaign output: no
+
+Claim class: METHOD + CORRECTION OF MY OWN FRAMING. Both ELF identities computed by
+sha256sum, not self-reported; not KEEP-class.
+
+I SPENT THIS SESSION CALLING HASH RESTORE MY WORST vs-INCUMBENT RATIO -- 2.13x at 40
+fields, 2.45-2.51x at 128, 2.81x on the bead's workload -- and built three commits and two
+instruments on that framing. Every one of those numbers is RESTORE IN ISOLATION, and this
+repo already had a standing instruction against reading such a number as a loss:
+docs/NEGATIVE_EVIDENCE.md:5478 (2026-07-23, LISTS) closes with "Do not re-file the
+RESTORE-isolation gap as a loss; measure RESTORE+read", and :26054 (2026-08-08) closed
+b1o02 as a premise-REJECT on exactly that basis for HASHES.
+
+Re-measured on current HEAD, 64-field x 16B hash, both engines listpack-encoded with
+BYTE-IDENTICAL dump payloads (the probe asserts this before measuring), 20,000 ops, 3 reps:
+
+    workload                 fr instr/op   redis instr/op   fr/redis   wall fr/redis
+    RESTORE only                38,084.5        13,942.0     2.7316x       1.1028x
+    RESTORE + 1x HGETALL        54,098.4        94,326.0     0.5735x       0.5748x
+    RESTORE + 2x HGETALL        70,112.9       175,087.9     0.4004x       0.4454x
+    RESTORE + 4x HGETALL       102,125.6       336,664.5     0.3033x       0.3122x
+
+    marginal cost of ONE read:   fr 16,014.5    redis 80,761.9   -- redis pays 5.04x more
+    break-even  38,084.5 + N(16,014.5) = 13,942.0 + N(80,761.9)  ->  N = 0.373 reads/RESTORE
+
+THE BREAK-EVEN HAS MOVED 2.8x IN fr's FAVOUR SINCE THE 2026-08-08 ROW, which put it at
+1.034 reads/RESTORE with the 1-read point at 1.0188x (parity). It is now 0.373, and the
+1-read point is 0.5735x -- an outright win. fr's isolated RESTORE cost fell from 67,487 to
+38,084.5 instr/op, a 44 pct reduction, which is the fleet's RESTORE work over the last
+week showing up end to end. The lever direction did not change; the margin widened.
+
+SO THE ISOLATION NUMBER IS NOT A DEFICIT. A restored key read even ONCE puts fr ahead by
+1.74x, and the crossover is at four tenths of one read. There is no workload that restores
+hashes and never reads them.
+
+AND THE WALL CLOCK SAYS THE ISOLATION GAP IS SMALLER THAN INSTRUCTIONS SUGGEST ANYWAY:
+1.1028x wall against 2.7316x instructions on the same run. fr retires ~2.7x the
+instructions at materially better IPC, so even the isolated case is near parity in time.
+Any row quoting the instruction ratio alone -- including mine -- overstates it.
+
+WHAT THIS RETIRES:
+  - b1o02 (keep the listpack verbatim) stays closed as premise-REJECT, now with a WIDER
+    margin than when it was closed. It trades a read win for a restore win and the read
+    win is 5x larger per operation.
+  - My own recommendation, made in three consecutive turns, that b1o02 is "the only lever
+    with a multiple in it" on this surface. It is not a lever at all.
+  - 33832's framing. Its measurements are sound and its per-element attribution is sound;
+    what does not follow is that the isolated ratio is a gap worth closing. The bead should
+    carry this caveat or be re-scoped to RESTORE+read.
+
+WHY IT KEEPS BEING FORGOTTEN, which is the reusable part: the b1o02 premise-reject lives in
+docs/NEGATIVE_EVIDENCE.md while every RESTORE row this session was written into
+docs/perf_negative_evidence_ledger.md. Two ledgers, and the one being appended to did not
+carry the law. 33832 was filed eight days AFTER b1o02 closed and restates the isolation
+framing. I read 33832 carefully and still did not find the refutation, because it is not in
+the file I was working in. This row puts it in both.
+
+CODE LANDED WITH THIS ROW: scripts/hash_restore_read_premise_run.sh, a one-command driver
+for the existing probe. The probe needed both engines live and their PIDs wired in by hand
+for `perf stat -p PID`, and that friction is a real part of why its result was not
+re-checked in eight days. Verified end to end at 8,000 ops / 1 rep, reproducing 2.7506x /
+0.5753x / 0.4015x against the 20,000-op table above. It resolves redis by PORT rather than
+by binary name, because redis rewrites its process title to `redis-server *:PORT`.
+
+RETRY PREDICATE: do not open another RESTORE-decode lever on an isolation number. Run
+scripts/hash_restore_read_premise_run.sh first and quote the break-even; if it is below 1
+read per restore, the surface is not a deficit and the lever is not justified. Re-run the
+probe rather than trusting this row's constant, since the break-even has now moved twice.
+
+PROVENANCE: fr ELF 2d5a352cfd56c98699fd7d65359c41ffd51e29ae4c8ccd72e2ffcf741e7d1263 built
+locally with RCH_CARGO_WRAPPER_BYPASS=1 exported and env -u CARGO_TARGET_DIR, no [RCH] line;
+redis vendored 7.2.4. instructions:u per server pid via perf stat, fixed op count, writer on
+its own thread draining concurrently so neither direction blocks. thinkstation1, 64 cores,
+governor powersave, /data 208G. Loadavg sampled by me: 12.67/16.07/21.43 before and
+12.14/15.72/21.20 after; mean CPU MHz 2363 before, 2325 after -- a 1.6 pct frequency
+excursion across the run, the quietest instrument window of the session.
