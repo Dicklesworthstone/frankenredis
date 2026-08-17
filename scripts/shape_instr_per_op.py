@@ -1416,10 +1416,53 @@ def run_once(engine: str, seeds, cmd, ops: int, workdir: str, tag: str,
     return total_ir(out)
 
 
+def window_provenance() -> str:
+    """One line describing the WINDOW a measurement was taken in.
+
+    (frankenredis-1cmy9) This harness recorded nothing about the window, and its
+    REDIS arm is window-sensitive in a way its fr arm is not: `serverCron` does work
+    proportional to ELAPSED time, so a slower or more contended window makes redis
+    retire MORE instructions per op while fr's single-threaded loop is unaffected.
+    Measured consequence, same shape and same binaries within one sitting: the redis
+    arm of `sort_ro_alpha` read 1613.3, 1654.8, 2373.4, 2407.1 and 4707.5 instr/op --
+    a 2.9x spread on the DENOMINATOR -- with nothing in the output to tell the runs
+    apart. Two rows from different windows were therefore not comparable and looked
+    it, which is exactly what the standing orders' load-and-MHz provenance rule
+    exists to prevent.
+
+    Cheap enough to call per arm: two small /proc reads, no subprocess.
+    """
+    try:
+        with open("/proc/loadavg") as handle:
+            loadavg = " ".join(handle.read().split()[:3])
+    except OSError:
+        loadavg = "unknown"
+    mhz = "unknown"
+    try:
+        with open("/proc/cpuinfo") as handle:
+            speeds = [
+                float(line.split(":", 1)[1])
+                for line in handle
+                if line.startswith("cpu MHz")
+            ]
+        if speeds:
+            # Mean AND max: the governor varies per core, so a single core's figure
+            # is not the machine's. A wide mean-to-max gap is itself the warning.
+            mhz = "mean %.0f max %.0f" % (sum(speeds) / len(speeds), max(speeds))
+    except OSError:
+        pass
+    return "loadavg %s | cpu MHz %s" % (loadavg, mhz)
+
+
 def instr_per_op(engine: str, seeds, cmd, ops: int, workdir: str, label: str,
                  locale: str | None = None):
+    # Provenance is captured per ARM and on BOTH sides of it, because the window can
+    # move mid-arm: a drift between these two lines is the reason to distrust the row.
+    before = window_provenance()
     low = run_once(engine, seeds, cmd, ops, workdir, label + ".n", locale)
     high = run_once(engine, seeds, cmd, ops * 2, workdir, label + ".2n", locale)
+    print("  %-5s window: %s" % (label, before))
+    print("  %-5s window: %s   (after)" % (label, window_provenance()))
     delta = high - low
     # (frankenredis-3f7jb) Two-point subtraction assumes the 2N run does strictly
     # more work than the N run. When a command carries large or VARIABLE one-time
