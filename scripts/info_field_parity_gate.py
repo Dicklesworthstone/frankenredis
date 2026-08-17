@@ -70,8 +70,9 @@ DECLARED_ABSENT = {
     "master_sync_left_bytes": "replica, sync in progress",
     "master_sync_perc": "replica, sync in progress",
     "master_sync_last_io_seconds_ago": "replica, sync in progress",
-    # `# Replication`, only when repl_min_slaves_to_write is configured.
-    "min_slaves_good_slaves": "min-replicas-to-write set",
+    # IMPLEMENTED 2026-08-17 in f464351ec: min_slaves_good_slaves now renders under
+    # upstream's two-knob guard, sourced from the same good_replica_write_count fr already
+    # uses for its write-quorum gate. Removed per this gate's deletion condition.
     # `# Persistence`, only while an RDB/AOF load is in flight. Narrow window, low impact.
     "loading_start_time": "loading",
     "loading_total_bytes": "loading",
