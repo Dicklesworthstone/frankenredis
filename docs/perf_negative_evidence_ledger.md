@@ -26943,3 +26943,50 @@ its own thread draining concurrently so neither direction blocks. thinkstation1,
 governor powersave, /data 208G. Loadavg sampled by me: 12.67/16.07/21.43 before and
 12.14/15.72/21.20 after; mean CPU MHz 2363 before, 2325 after -- a 1.6 pct frequency
 excursion across the run, the quietest instrument window of the session.
+
+## MEASURED (frankenredis-33832) — the cross-process A/A residual is ATTRIBUTED to preload order by a controlled swap, but fixing it does NOT authenticate: the same PROCESS drifts 23 pct across its own trials
+
+Claim class: INSTRUMENT. A/B still not authenticated; no ratio claimed.
+
+THE ATTRIBUTION, which is the solid part. Four refusals had eliminated placement (the last
+two on quiet, same-CCD, cpu0-free symmetric blocks, same ELF, still ~6 pct apart). Added
+`--swap-preload` and reversed ONLY the preload order, holding cores fixed:
+
+    preload order           fr_a       fr_b      slower arm          A/A null
+    fr_b first (normal)   35.901ms   33.429ms   fr_a (2nd loaded)   1.102522x
+    fr_a first (swapped)  34.521ms   37.012ms   fr_b (2nd loaded)   0.937629x
+
+THE SLOW ARM FOLLOWS THE LOAD ORDER, NOT THE CORE SET. Whichever fr process is preloaded
+SECOND is the slower one, and that alone swings the null ~17 pct across 1.0. Same binary,
+same cores, one variable changed and the sign flipped with it. That is the cross-process
+residual identified, and it also corrects my previous row: I wrote that `fr_a` is preloaded
+FIRST. It is preloaded SECOND -- `fr_a` is the `--fr-aa-port` connection (line 331 assigns
+`fr_a_sha = running_image_sha(fr_aa)`), and the harness preloads `fr` before `fr_aa`. The
+hypothesis survived the correction; my attribution of which arm was which did not.
+
+THE FIX IS NECESSARY AND NOT SUFFICIENT. Added one discarded `time_restore` pass per arm
+before the timed trials, so no arm is measured in a state a previous arm was not. Re-run at
+loadavg 20.55 on the same cores:
+
+    fr_a 38.785ms   fr_b 41.281ms   A/A (two-process) 0.931421x    HOLD
+    A/A (fr_b HALVES, ONE process)  0.770562x
+
+THE SAME PROCESS'S OWN TWO HALVES ARE 23 PCT APART. That is a bigger term than the
+cross-process one it was meant to expose, and it cannot be placement, cannot be load order,
+and cannot be the engine differing from itself -- it is the SAME process, same core, same
+ELF, drifting across its own trial sequence. A single warmup pass does not absorb it, so
+whatever accumulates does so across many RESTOREs, not just the first.
+
+WHAT THIS MEANS FOR THE BEAD. 33832's authenticated 0.606011x stands as the last valid
+figure and fosf1's throughput effect remains unmeasured -- five attempts now. The A/B
+across today's runs sat at 0.505-0.707, straddling that figure, but every one failed its
+null and none is quotable.
+
+RETRY PREDICATE. Do NOT permute cores and do NOT add more warmup passes: the swap table
+above settles placement, and one pass already failed to absorb the drift. The next question
+is WHAT ACCUMULATES inside a single fr process across repeated RESTORE...REPLACE of the same
+keys. Concrete test: run one arm alone for 4x the trials and plot per-trial time against
+trial index. A monotone trend implicates growth (allocator arena, fragmentation, the DUMP
+cache, expired-key bookkeeping); a sawtooth implicates a periodic cycle (active expire,
+rehash). Only once that curve is flat can this harness authenticate anything, and until then
+the instrument -- not the engine -- is what 33832 is blocked on.

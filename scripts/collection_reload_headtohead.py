@@ -17,6 +17,7 @@ Usage: collection_reload_headtohead.py <redis_port> <fr_port> [--trials N]
        [--hashes H] [--sets S] [--zsets Z] [--members M]
        [--set-kind str|int]
        [--competitive --fr-aa-port PORT [--expect-fr-elf SHA256]]
+       [--swap-preload]   reverse which fr arm is preloaded first (33832 A/A attribution)
 Exit 0 always (informational).
 
 `--competitive` is the authentication mode. It needs two independent
@@ -249,6 +250,28 @@ def run_competitive_restore(fr_a, fr_b, redis):
     # and the default of 9 is not, so orders 0..2 ran twice and 3..5 once.
     rounds = max(1, TRIALS // len(ARM_ORDERS))
     round_min = {name: [] for name in arms}
+    # (frankenredis-33832) DISCARDED WARMUP ON EVERY ARM, and it is what finally makes the
+    # two-process A/A null mean anything.
+    #
+    # The null refused four times -- 0.936, 0.686, 1.076, 1.061 -- and placement was
+    # eliminated: the last two ran on quiet, same-CCD, cpu0-free symmetric blocks and still
+    # came out ~6 pct apart between two processes running the SAME ELF. `--swap-preload`
+    # then ATTRIBUTED it. Same cores, only the preload order reversed:
+    #
+    #     preload order          fr_a      fr_b     slower arm        A/A null
+    #     fr_b first (normal)   35.901ms  33.429ms  fr_a (2nd loaded)  1.102522x
+    #     fr_a first (swapped)  34.521ms  37.012ms  fr_b (2nd loaded)  0.937629x
+    #
+    # The slow arm FOLLOWS THE LOAD ORDER, not the core set: whichever fr process is
+    # preloaded SECOND is the slower one, and that alone moves the null ~17 pct across 1.0.
+    # A second-loaded process starts its timed trials with a colder allocator and colder
+    # page cache than the first, and no core mask touches either.
+    #
+    # One discarded pass per arm pays that cost before the clock starts. It is thrown away,
+    # so it cannot enter any sample; the only thing it changes is that arm N is no longer
+    # measured in a state arm N-1 was not.
+    for arm in arms:
+        time_restore(arms[arm], payloads)
     for trial in range(rounds * len(ARM_ORDERS)):
         sample = {}
         for arm in ARM_ORDERS[trial % len(ARM_ORDERS)]:
@@ -317,10 +340,34 @@ def main():
     fr, rs = Conn(FR), Conn(RS)
     fr_aa = Conn(FR_AA) if COMPETITIVE else None
     print(f"fr:{FR} redis:{RS}  hashes={HASHES} sets={SETS} zsets={ZSETS} members={MEMBERS} set_kind={SET_KIND}")
-    print("preloading identical collection-heavy DB into both...")
-    preload(fr)
-    if fr_aa is not None:
+    # (frankenredis-33832) PRELOAD ORDER IS A VARIABLE, so make it one.
+    #
+    # The competitive A/A null refused four times -- 0.936, 0.686, 1.076, 1.061 -- and
+    # placement was eliminated as the cause: the last two ran on quiet, same-CCD,
+    # cpu0-free symmetric blocks and still came out ~6 pct apart between two processes
+    # running the SAME ELF. In both quiet attempts the slower arm was `fr_a`, which is the
+    # `--fr-aa-port` connection and is preloaded SECOND here. A first-loaded and a
+    # second-loaded process differ in allocator arena state, page-cache warmth and heap
+    # layout, and no core mask touches any of that.
+    #
+    # `--swap-preload` reverses the two fr preloads so the asymmetry can be ATTRIBUTED
+    # rather than argued: run it both ways and see what the slow arm follows.
+    #   slow arm follows the LOAD ORDER  -> warmup; both fr arms need a discarded pass
+    #                                       before the timed trials
+    #   slow arm follows the CORE SET    -> spatial after all, and the blocks need
+    #                                       identical sibling occupancy, not just size
+    # Either answer is progress; a fifth core permutation is not, since the four rows
+    # above move the null by less than its own spread.
+    swap_preload = "--swap-preload" in sys.argv
+    print("preloading identical collection-heavy DB into both...%s"
+          % ("  [--swap-preload: fr_a first]" if swap_preload else ""))
+    if fr_aa is not None and swap_preload:
         preload(fr_aa)
+        preload(fr)
+    else:
+        preload(fr)
+        if fr_aa is not None:
+            preload(fr_aa)
     preload(rs)
     fk = fr.cmd("DBSIZE"); rk = rs.cmd("DBSIZE")
     print(f"DBSIZE fr={fk.decode()} redis={rk.decode()}")
