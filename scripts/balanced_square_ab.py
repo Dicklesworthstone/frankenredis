@@ -1390,6 +1390,34 @@ def main(argv_in: list[str]) -> int:
         admissible = [r for r in rows if r["verdict"] == "ADMISSIBLE"]
         print(f"\n{len(admissible)} of {len(rows)} rows admissible; "
               f"{sum(1 for r in rows if r['verdict'] == 'NULL-FAILED')} null-failed")
+        # (frankenredis-eh2ct) Say whether a CONTROL-NORMALISED figure is even
+        # available, because working that out by hand is how a bad one gets quoted.
+        # Twice in one sitting a run came back with the row admissible and the control
+        # refused, or the reverse: run 1 refused hgetall_64 and passed get_control,
+        # run 2 passed hgetall_64 and refused get_control. Either way the normalised
+        # value is UNAVAILABLE, and dividing an admissible row by an inadmissible
+        # control — or pairing rows across two windows — is precisely the error the
+        # same-invocation rule exists to prevent.
+        control = next((r for r in rows if r["label"] == "get_control"), None)
+        if control is None:
+            print("normalised: n/a -- no get_control row in this selection")
+        elif control["verdict"] != "ADMISSIBLE":
+            print(f"normalised: n/a -- get_control is {control['verdict']}"
+                  f" (ratio {control['ratio']:.4f}, nulls "
+                  f"{control['null_redis']:.4f}/{control['null_fr']:.4f});"
+                  " quote RAW ratios only from this run")
+        else:
+            print(f"normalised against get_control {control['ratio']:.4f}"
+                  " (admissible), for rows that are themselves admissible:")
+            for row in admissible:
+                if row["label"] == "get_control":
+                    continue
+                print("  %-22s %.4f" % (row["label"], row["ratio"] / control["ratio"]))
+            refused = [r["label"] for r in rows
+                       if r["verdict"] != "ADMISSIBLE" and r["label"] != "get_control"]
+            if refused:
+                print("  (no normalised figure for %s -- not admissible)"
+                      % ", ".join(refused))
         return 0
     finally:
         for proc in (fr, redis):
