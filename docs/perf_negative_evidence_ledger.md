@@ -32830,3 +32830,75 @@ every run. thinkstation1, 64 cores, governor powersave. Per-arm loadavg 20.27-30
 1-minute with the 5-minute at 39-46 and the 15-minute at 124-133 — a FALLING window, not a
 converged one, which is another reason the nulls are quoted per shape rather than assumed.
 Per-arm MHz 2,905-4,036 mean, cross-core 1,429-4,067.
+
+--------------------------------------------------------------------------------
+REFUTED, MY OWN CLAIM (frankenredis-p98mw) — the "serverCron leaks into the denominator and
+scales with the gap" finding from `ed6f4d590` is WRONG. A 100x change in serverCron frequency
+moves redis's instr/op by 5.7 pct and NOT MONOTONICALLY
+
+Claim class: REJECT (hypothesis refuted by direct experiment)
+
+`ed6f4d590`'s gate audit made three findings. The first (my A/A null's spread is 3.04 pct) and
+the third (I classified parity inside the instrument's resolution) stand. THE SECOND DOES NOT,
+and this row retracts it.
+
+THE CLAIM WAS: the two-point subtraction cancels op-proportional work, but redis's serverCron
+is ELAPSED-TIME proportional, so ~1x of it survives into the per-op difference; fr has no
+counterpart; therefore the denominator is systematically inflated, every banked ratio is
+systematically too small, and the inflation GROWS with the performance gap — making the flat
+x1.08 worst bound under-conservative exactly where my numbers look best.
+
+THE TEST, with both outcomes named before it ran: serverCron fires on a timer at `hz`. If it
+leaks into the difference, redis's measured instr/op must SCALE WITH HZ. Ran get_control's
+incumbent arm at hz 1, 10 and 100 — a 100x span — through a private copy of the harness
+patched to pass `--hz` to the INCUMBENT ONLY (fr has no counterpart and must not be
+perturbed). Everything else identical, all three in the same window.
+
+    redis --hz 1     3,136.8 instr/op
+    redis --hz 10    3,047.8 instr/op      <- DEFAULT, and the LOWEST of the three
+    redis --hz 100   3,222.5 instr/op
+
+    NOT MONOTONIC, and that is decisive. A hundredfold change in cron frequency should
+    dominate the number if cron work survives the subtraction; instead the spread is 5.7 pct
+    with the default sitting at the BOTTOM. That is the shape of noise, not of a leak.
+
+BOUNDING IT ANYWAY, since a refutation should say how big the thing it refutes could still
+be: taking the hz=100 minus hz=1 difference at face value (85.7 instr/op) attributes at most
+~86 instr/op to cron at hz=100, hence ~0.3 pct of the number at the default hz=10. That is
+five times INSIDE the 3.04 pct null band, i.e. unmeasurable by this instrument.
+
+AND THE "SCALES WITH THE GAP" HALF WAS WRONG ON ITS OWN TERMS, independent of the experiment.
+Cron cost per op is `hz * T(N) * cost / N`, and `T(N)` is itself proportional to `N *
+work_per_op`. The N cancels: cron-per-op is proportional to redis's own per-op work, so it is
+a roughly CONSTANT FRACTION of the denominator regardless of shape. It cannot grow with the
+performance gap, because both terms grow together. I reasoned about elapsed time without
+noticing the normalisation, which is the same error as reading a one-point shape as a command.
+
+WHAT SURVIVES:
+  * The +/-8 pct denominator spread is REAL and unexplained by cron. This run reproduced it —
+    5.7 pct across three runs whose ONLY difference was a setting that turns out not to
+    matter. Whatever drives it, it is not the timer.
+  * The flat x1.08 worst bound is therefore FINE as banked in `ade5101d9`. I called it
+    "under-conservative exactly where my numbers are most impressive"; that criticism is
+    withdrawn. No crossing needs re-quoting.
+  * The null-spread finding (3.04 pct) and the parity-classification finding are untouched,
+    and the retraction of `set_nx_opt`'s +1.34 pct as noise still stands — that came from the
+    null band, not from this hypothesis.
+
+PROVENANCE:
+  method        private copy of scripts/shape_instr_per_op.py at
+                scratchpad/hz_probe.py, patched ONLY to append `--hz` for the incumbent; the
+                repo harness is untouched. fr arm identical across all three (ELF
+                20fdecad4d3f7636), incumbent verified in-run sha=d2c8a4b9 == vendored HEAD.
+  host          thinkstation1, 64 cores, powersave, /data 135G.
+  PER-ARM loadavg/MHz  hz1 27.12/3970 (window mean 3275), hz10 28.07/3913 (mean 3683),
+                hz100 27.66/3907 (mean 2999). Window 1/5/15 = 27.7/32.3/106.5 — the 15-min
+                is still draining the bulk-resume backlog, so 1-min and 5-min had NOT
+                converged. Recorded rather than hidden: these are callgrind instruction
+                counts, the load-immune class, and the effect under test was a 100x
+                parameter change, not a few percent.
+
+RETRY PREDICATE: do NOT re-derive the cron-leak hypothesis; it is measured and dead. The
++/-8 pct denominator spread remains UNEXPLAINED and is the open question — it is the largest
+single source of imprecision in every ratio this campaign banks. If someone wants it, vary
+one input at a time as this row did, and name both outcomes first.
