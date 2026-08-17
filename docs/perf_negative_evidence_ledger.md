@@ -33658,3 +33658,88 @@ the per-call `canonical_command_fullname` String build (visible as format/lossy/
 the ~1.34x residual after dispatch. Do NOT screen only the families you already suspect: this
 was found in a batch of 24 chosen precisely because nobody had measured them, and 23 of the 24
 were fine.
+
+--------------------------------------------------------------------------------
+## 2026-08-17 RusticHorizon: THE DEFERRED WALL-CLOCK CERTIFICATION — the big instruction wins DO translate to TIME (bitcount 2.91x, sunionstore 7.20x, lpos 3.36x), but `broad_command_headtohead.py`'s A/A NULL FAILS at 0.67-1.27 and the failure is POSITIONAL (`frankenredis-p98mw`)
+
+Claim class: COMPETITIVE. Campaign output: yes — fr vs live vendored Redis 7.2.4, both
+servers up in the same run, in the quietest window of the campaign (uptime 5.81/5.61/5.58,
+all three averages agreeing, `pgrep rustc` = 0, /data 129G).
+
+WHY THIS WAS THE DEFERRED ONE. Every crossing this campaign has banked, mine included, is an
+INSTRUCTION ratio. The harness header warns in its own words that "the instruction ratio is
+NOT the throughput ratio, and the error is not even in a consistent direction", and this repo
+already has a case where fr retired 6 pct FEWER instructions while burning 63 pct MORE cycles
+(`project_zrangebyscore_ipc_stall_not_work_volume`). Wall clock is the load-sensitive
+instrument, so it is the measurement that genuinely needed this window.
+
+FIRST RESULT — THE INSTRUMENT'S A/A NULL FAILS, AND I RAN IT BEFORE TRUSTING ANY A/B. Two
+IDENTICAL fr instances, same ELF, same host, `broad_command_headtohead.py frA frB`:
+
+    cmd            A/A run 1   A/A run 2      should be
+    getrange          0.668       0.673        1.00      <- reproducible to 3 decimals
+    sunionstore       1.270       0.829        1.00      <- 1.53x swing between runs
+    bitcount          1.000       1.220        1.00
+    sintercard        1.060       1.220        1.00
+    zcount            1.200       1.030        1.00
+
+    NULL BAND: 0.67 to 1.27. ANY A/B RATIO INSIDE THAT RANGE FROM THIS HARNESS IS
+    UNINTERPRETABLE — including three of the four "known residual losses" its own docstring
+    advertises (sintercard, zcount, SINTER read).
+
+SECOND RESULT — THE FAILURE IS POSITIONAL, confirmed by experiment rather than inferred.
+`getrange` is the FIRST entry in the WORK dict. I took a private copy, removed it from slot 1,
+changed nothing else, and re-ran the A/A:
+
+    bitcount as 2nd entry:  1.00, 1.22   (runs 1 and 2)
+    bitcount as 1st entry:  0.88         (run 3, getrange gone)
+
+    THE PENALTY FOLLOWS THE POSITION, NOT THE COMMAND. The first command measured is charged
+    ~12-33 pct against the first-measured arm, which is warm-up bleeding into trial 1. The
+    rest of the table also calmed markedly, from a 0.83-1.27 spread to 0.97-1.02, so the
+    first entry appears to contaminate its neighbours too.
+
+    CONSEQUENCE: `getrange` is NOT a 0.59x loss. That number is the position artefact with a
+    real effect of at most 0.59/0.67 = 0.88x, itself inside the residual noise. The harness
+    has been reporting a phantom loss on whatever sits in slot 1.
+
+THIRD RESULT, AND THE ONE THE CAMPAIGN WANTED — the large instruction-count wins ARE real in
+wall clock. Only ratios outside the 0.67-1.27 null band are quoted; everything else is
+withheld as uninterpretable rather than reported favourably:
+
+    cmd            A/B ratio   A/A null   verdict
+    sunionstore       7.20       1.27     REAL, 5.7x outside the band
+    lpos              3.36       0.95     REAL
+    bitcount          2.91       1.00     REAL
+    sinterstore       2.66       0.94     REAL
+    sdiffstore        2.57       0.98     REAL
+    sintercard        1.83       1.06     REAL
+
+    WITHHELD as inside the null band: sinter3 1.07, smismember 0.90, zrangebyscore 1.04,
+    zrange_rev 1.04, hrandfield 1.16, zrandmember 1.08, srandmember 1.22, lrange_full 1.03,
+    zcount 1.08, getrange 0.59. Ten of sixteen commands say nothing at this resolution.
+
+SO THE HEADLINE IS BOTH HALVES: the set-algebra and bitmap wins this campaign banked on
+instruction counts hold up as TIME wins at 1.8x-7.2x, which is the validation nobody had
+done; and the instrument that shows it cannot resolve anything within +/-30 pct, which means
+most of its historical verdicts — including its own advertised loss list — were never
+measurements at all.
+
+PROVENANCE:
+  ELF           6cc189255c14d52d (both fr instances in the A/A; the fr arm in the A/B)
+  incumbent     legacy_redis_code/redis/src/redis-server, vendored 7.2.4
+  method        scripts/broad_command_headtohead.py, --trials 9, pipe 200, medians. Three
+                servers booted on free ephemeral ports in one invocation; A/A and A/B in the
+                SAME window minutes apart. Position probe used a PRIVATE copy; the repo
+                harness is untouched.
+  host          thinkstation1, 64 cores, powersave, /data 129G, no builds running.
+  PER-ARM loadavg/MHz  window opened 5.81/5.61/5.58 at 4042 MHz; A/A run 1 at load 9.29,
+                A/A run 2 at 9.87, position probe at 8.99. The load ROSE from 5.8 to ~9 as my
+                own three servers ran, which is the measurement perturbing its own window —
+                recorded because it is the exact effect pandas reported and it is mine here.
+
+RETRY PREDICATE: do NOT quote any `broad_command_headtohead.py` ratio inside 0.67-1.27
+without re-running its A/A first; the band is the instrument, not the engine. Fixing it means
+discarding trial 1 per command (or a warm-up pass before the timed trials) — until then, put
+a throwaway command in slot 1 and never read it. And the six REAL wins above should be
+re-run after that fix, because their magnitudes still carry the neighbour contamination.
