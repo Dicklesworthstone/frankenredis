@@ -8,6 +8,95 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-08-17 MossyOrchid: THE DISPATCH FRONTIER, RE-DERIVED ON THE CORRECTED LABEL — 12 shapes sit on a 14-28 pct front-classified FLOOR, the arity-guard vein has no walker left to bite, and the only GENERIC commands on the board are ZINTERCARD and XPENDING at ~40 pct / ~3,000 instr/op each
+
+Claim class: SELF-SPEEDUP sizing (fr-only; no incumbent ratio is claimed). No build this turn —
+external cargo loop was eating the volume, so this is the existing ELF plus source reading.
+
+WHY THIS ROW EXISTS. The previous row fixed `mechanism:` to key on COST rather than presence.
+That fix changes which levers are worth taking, because the vein that picks targets off that
+label — `project_cascade_arity_fast_reject_vein`, 307 unguarded arms — is aimed at routes that
+WALK the borrowed cascade, and the old label was calling front-classified routes GENERIC. So
+the target set had to be re-derived rather than assumed, and it did not survive.
+
+FIRST, THE FIX DISCRIMINATES — it does not just relabel everything "classified". Sixteen shapes,
+one ELF, `--fr-only`:
+
+    classified route (12)                          GENERIC PATH (4)
+      hget            1,784.2   21.9 pct             zintercard_2    7,548.4   40.1 pct
+      type            1,407.6   20.7 pct             xpending_empty  6,485.5   40.6 pct
+      ttl_nonvolatile 1,720.1   17.5 pct             zintercard_limit 8,079.6  39.4 pct
+      command_count   3,240.3   10.7 pct             xpending_populated 8,274.6 31.5 pct
+      lpos_count      2,961.6   20.8 pct
+      getex_ex        3,516.8   15.4 pct           dispatch instr/op on the GENERIC four:
+      substr          2,180.0   20.5 pct             3,025.5 / 2,633.9 / 3,184.6 / 2,608.2
+      renamenx_exists 1,935.7   20.6 pct
+      lmpop_missing   2,343.2   27.8 pct
+      persist_noop    1,597.4   20.0 pct
+      zrangestore_byscore 5,863.6 14.1 pct
+      geoadd_same     3,698.7   16.2 pct
+
+THE FLOOR IS REAL AND IT IS 14-28 PCT. Twelve diverse classified shapes — reads, writes,
+option forms, a zset range-store, a geo write — all land in a narrow band. That band is what
+front classification COSTS once it is working, and it is the thing an arity guard cannot
+reduce: a classified route never enters the 332-arm chain, so guarding arms in that chain
+cannot move it. **The arity vein's remaining 307 arms have no measurable target among these
+shapes.** Landing more guards would be unmeasurable by construction, which by this campaign's
+own standard means not landing them.
+
+AND IT WAS NOT THE OPTION-FORM PATTERN, which is what I expected to find. `uu33c` records
+arity-keyed floor classes MIS-CLAIMING option forms (LPOS COUNT at 32.2 pct against 15.0 for
+its base), so the obvious reading of `zintercard_limit` at 39.4 pct was "the LIMIT form falls
+through". It does not: the BASE form `zintercard_2` is 40.1 pct and equally GENERIC, and
+`xpending_empty` 40.6 pct matches `xpending_populated` 31.5 pct. Both COMMANDS are unclassified
+outright, not their option forms. Checking a pair before filing the option-form story is what
+separated these.
+
+SOURCE-VERIFIED CLASS, since the cost of the next lever depends on it entirely:
+
+    parse_borrowed_plain_zintercard* / _xpending*   in fr-server/main.rs :  0 hits
+    execute_plain_zintercard_borrowed / _xpending_  in fr-runtime        :  0 hits
+    BorrowedDispatchFloorCommand::{Zintercard,Xpending}                  :  absent
+
+So both are **[C]** in `corpus_coverage.py`'s ranking — no borrowed trio at all — and that
+script already files them under "unclassified but MEASURED (13) ... not all are behind". They
+are NOT the cheap [A] lever that took four routes from ~1.5x to ~0.5x on a floor-table entry
+alone; they need an executor written, which is a different and larger job and should be costed
+as one (`project_floor_table_entry_is_the_cheap_lever`).
+
+WHAT IS ACTUALLY ON OFFER: ~3,000 instr/op each, 31-41 pct of the op, on the two largest
+dispatch shares left on the measured board. For scale, front-classification prizes recorded
+elsewhere in this ledger run 3,326-4,177 instr/op, so this is the same order — it is simply
+not free.
+
+WHAT THIS ROW DOES NOT CLAIM: any vs-incumbent position. Every figure is `--fr-only`; whether
+fr is ahead or behind Redis on ZINTERCARD or XPENDING is untested here, and `corpus_coverage`
+explicitly warns that unclassified does not imply behind. A self-speedup of 3,000 instr/op is
+worth taking on its own terms, but it is not a crossing and must not be quoted as one.
+
+PROVENANCE:
+  NO BUILD     builds were held this turn (external cargo loop took /data 88G -> 67G in three
+               ticks). ELF b78d1c23a79a3e85dd597016, unchanged engine
+               (`git log <snapshot>..HEAD -- crates/` empty). Nothing was compiled.
+  harness      scripts/shape_instr_per_op.py at HEAD (with this session's mechanism fix),
+               N=2000/2N=4000, `--fr-only` so the lenient window gate applies and no
+               denominator is implied.
+  host         thinkstation1, 64 cores, powersave, /data 67G. Window across the sixteen runs:
+               loadavg 1-min 14.27-25.15, 5-min 22.5-28.8, 15-min 24-26. CPU MHz sampled at
+               the close: mean 2560 min 1429 max 4043 (spread 2.83x at one instant).
+  load-immunity fr Ir is the load-immune quantity here (0.65 pct across loadavg 14-66), which
+               is why a 14-28 pct band measured across a rising-load window is a floor and not
+               an artefact of when each shape ran.
+
+RETRY PREDICATE: do NOT add arity guards hoping to move any shape in the classified table
+above — they cannot reach it, and a null there proves nothing. The vein stays open only for a
+route that measures GENERIC PATH or carries a dispatch share far above the 14-28 pct floor; on
+today's corpus that is exactly ZINTERCARD and XPENDING, and for those the lever is a borrowed
+trio ([C] work), not a guard. Before writing either, re-measure the cell — three of the beads I
+checked this week described a machine that no longer exists.
+
+--------------------------------------------------------------------------------
+
 ## 2026-08-17 MossyOrchid: INSTRUMENT DEFECT FIXED — `mechanism:` labelled front-classified routes as GENERIC PATH because it tested frame PRESENCE, not COST. Every seeded shape was mislabelled, and the label nearly sent me to add a floor-table entry that has existed all along (`frankenredis-94lp3` correction)
 
 Claim class: INSTRUMENT. No ratio is claimed. Campaign output: yes — a wrong mechanism label
