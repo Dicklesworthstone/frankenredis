@@ -15,8 +15,15 @@
 # process and it never moved. So the term that actually fails is same-process
 # drift over time, and the free-block sweep cannot see it.
 #
-# THIS GATE SAMPLES THAT TERM DIRECTLY, with a SHORT probe (3 trials) instead of a
-# 9-trial certification. One short run tells you whether the long one can pass.
+# THIS GATE SAMPLES THAT TERM DIRECTLY, with a SHORT probe instead of a 9-trial
+# certification. One short run tells you whether the long one can pass.
+#
+# WARM-UP IS NOT OPTIONAL HERE (230c674ec): the within-process drift is a settling
+# transient spanning ~10 trials, so an unwarmed probe measures the transient rather
+# than the engine. Every probe below discards WARMUP passes per arm (default 8, the
+# measured count). An earlier version of this gate did not, and concluded from six
+# unwarmed samples that the host could not be certified at all -- that conclusion is
+# retracted.
 #
 #   stage 1  free-block sweep      (necessary, cheap, catches the busy-fleet case)
 #   stage 2  one-process null probe (the term that actually fails)
@@ -25,12 +32,13 @@
 # Exit 1 = the one-process null is out of band; a 9-trial run would refuse too.
 # Exit 2 = fewer than three free blocks, or below the 42G disk stop.
 #
-# Usage: restore_cert_gate.sh <fr_binary> [trials] [samples]
+# Usage: restore_cert_gate.sh <fr_binary> [trials] [samples] [warmup_passes]
 set -u
 
-FR=${1:?usage: restore_cert_gate.sh <fr_binary> [trials] [samples]}
+FR=${1:?usage: restore_cert_gate.sh <fr_binary> [trials] [samples] [warmup]}
 TRIALS=${2:-3}
 SAMPLES=${3:-3}
+WARMUP=${4:-8}
 REPO=/data/projects/frankenredis
 REDIS=$REPO/legacy_redis_code/redis/src/redis-server
 RS=47621; FA=47622; FB=47623
@@ -91,9 +99,11 @@ if [ $? -ne 0 ]; then echo "REFUSE: an arm never came up" >&2; exit 2; fi
 
 echo "== stage 2: one-process null, $SAMPLES probes of $TRIALS trials =="
 # THREE PROBES, NOT ONE, and this is a correction to this script's first version.
-# Measured across three separate probes at FALLING load, the one-process null read
-# 0.933081x (loadavg 20.0), 0.986818x (16.0) and 1.054018x (13.3) -- a 6 pct swing
-# with no relationship to load. A single probe therefore decides GO or REFUSE partly
+# Measured across three separate UNWARMED probes at FALLING load, the one-process
+# null read 0.933081x (loadavg 20.0), 0.986818x (16.0) and 1.054018x (13.3) -- a
+# 6 pct swing with no relationship to load. Those readings are superseded as
+# EVIDENCE ABOUT THE HOST (they were inside the settling transient), but they still
+# justify sampling more than once: a single draw decided GO or REFUSE by luck. A single probe therefore decides GO or REFUSE partly
 # by luck, which is exactly the failure this gate exists to catch, reproduced one
 # level up. The median of three is not a cure, but it stops one draw deciding, and
 # printing every sample lets the reader see the spread rather than trust the middle.
@@ -104,7 +114,8 @@ SAMPLES_SEEN=""
 LAST_OUT=""
 for probe in $(seq 1 "$SAMPLES"); do
   OUT=$(timeout 900 python3 scripts/collection_reload_headtohead.py $RS $FA \
-          --competitive --fr-aa-port $FB --trials "$TRIALS" 2>&1)
+          --competitive --fr-aa-port $FB --trials "$TRIALS" \
+          --warmup-passes "$WARMUP" 2>&1)
   LAST_OUT="$OUT"
   s=$(echo "$OUT" | sed -n 's/.*fr_b halves, one process) median=\([0-9.]*\)x.*/\1/p')
   aa=$(echo "$OUT" | sed -n 's/.*fr_a\/fr_b, two processes) median=\([0-9.]*\)x.*/\1/p')
@@ -124,18 +135,22 @@ if awk -v s="$SPREAD" 'BEGIN{exit !(s>0.04)}'; then
   echo "        the 0.04 band it is being judged against. The median is not meaningful" >&2
   echo "        and a 9-trial run cannot be predicted from it." >&2
   echo >&2
-  # Accumulated evidence, so a wide spread reads as a KNOWN property of this host
-  # rather than as bad luck worth re-rolling. Six samples, two sessions, loads 13-28:
-  #   0.917228  0.933081  0.960575  0.986818  1.054018  1.056353
-  # range 0.139, i.e. 3.5x the 0.04 band the null must fit inside, with no visible
-  # relationship to loadavg (the LOWEST-load sample, 13.3, produced 1.054018 -- one
-  # of the two worst). Seven certification attempts across two agents have now
-  # refused. If your spread is in that range you are seeing the same thing, not a
-  # bad window.
-  echo "        KNOWN: six samples over two sessions span 0.917-1.056 (range 0.139)," >&2
-  echo "        uncorrelated with load. This is a property of the host, not a bad" >&2
-  echo "        window -- re-running is unlikely to help. Use the load-immune" >&2
-  echo "        instruction instruments instead:" >&2
+  # CORRECTED (230c674ec). This block used to report six samples spanning
+  # 0.917-1.056 and conclude the spread was a property of the host that re-running
+  # would not fix. That was wrong, and the samples were the evidence for it: ALL SIX
+  # were taken WITHOUT warm-up, and the drift is a SETTLING TRANSIENT spanning about
+  # ten trials, measured by --drift-curve (first quartile fastest, then a plateau; a
+  # monotone-rise fraction near 0.5 rules out steady growth). Warming 8 passes moved
+  # the same-process null from 0.771 to 1.047 and the two-process null from 0.931 to
+  # 0.974. This gate now warms by default, so a wide spread here is NOT the same
+  # observation my earlier samples were.
+  echo "        NOTE: the pre-warmup samples this gate used to cite (0.917-1.056) are" >&2
+  echo "        SUPERSEDED -- that spread was a ~10-trial settling transient, not a" >&2
+  echo "        host property (230c674ec). This run warmed $WARMUP passes per arm." >&2
+  echo "        A wide spread STILL here is worth re-running in a quieter window:" >&2
+  echo "        the warmed null reached 0.974 at loadavg 32, and whether it enters" >&2
+  echo "        0.98..1.02 at loadavg ~15 is measured, not settled." >&2
+  echo "        Meanwhile the load-immune instruments answer the narrower question:" >&2
   echo "          scripts/restore_instr_per_op.py     fr/redis instr/op ratio" >&2
   echo "          scripts/restore_profile_frames.py   where the instructions go" >&2
   exit 1
