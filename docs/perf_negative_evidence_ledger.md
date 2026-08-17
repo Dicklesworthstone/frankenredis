@@ -8,6 +8,37 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## (frankenredis-ozrro) LCS is not a cheap [C] — the "which crate holds the generic" test predicts the cost of a front-classification
+
+SCAN and KEYS were cheap to front-classify for a reason that is not visible in the [A]/[B]/[C]
+split, and LCS — the third above-parity command from the same batch, and the one carrying the
+LARGEST dispatch of the three at 2,443.6 instr/op — is expensive for the same reason inverted.
+
+SCAN and KEYS each have a generic handler IN fr-runtime (`handle_scan_command` at 44168,
+`handle_db_keys_command` at 44138). A borrowed executor mirrors that handler directly: same
+store call, same arguments, same reply construction, in the same crate and the same impl
+block. Both reduced to a single store call at the arity the floor claims, and both were
+written, tested and passing inside one tick.
+
+LCS's generic lives in fr-command (`lcs`, fr-command:16598). There is no fr-runtime handler
+to mirror. A borrowed executor would therefore have to either widen a private fn's visibility
+across a crate boundary or REIMPLEMENT the command — and LCS is bit-parallel, with its own
+A/B-ratio tests pinning the bitparallel implementation against a scalar reference
+(fr-command:30600, 30677). Reimplementing that inside a fast path is precisely the duplication
+this repo has already paid for once, when a duplicate PEXPIRETIME executor was written against
+a shared executor that already existed (b2df577ba).
+
+REUSABLE, and it costs one grep to apply: BEFORE committing to a [C] lever, find which crate
+holds the generic handler. If it is in fr-runtime alongside the executor, the lever is a
+mirror and cheap. If it is in fr-command, the lever is a cross-crate design question and
+should be scoped as one, not picked up as filler work because it sits in the same measured
+batch as two cheap ones. The [A]/[B]/[C] split in `corpus_coverage.py` does not carry this
+distinction, and ranking by ratio or by dispatch size actively points the WRONG way here:
+LCS has the biggest dispatch of the three and is the most expensive to fix.
+
+LCS stays OPEN at 1.1115x with 2,443.6 instr/op of dispatch. It is worth doing; it is not
+worth doing badly to keep a batch tidy.
+
 ## (frankenredis-ozrro) The cascade-depth tool cannot see the GENERIC route — three above-parity commands were hiding behind a "vein closed" verdict
 
 I reported the front-classification vein CLOSED on `cascade_depth.py` returning zero
