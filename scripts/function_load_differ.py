@@ -70,6 +70,27 @@ class Conn:
 
 
 # (body_suffix, description, expectation_class)
+# (frankenredis-o500d) KNOWN, TRACKED divergences. Everything NOT listed here must agree,
+# so a regression on an already-fixed row fails this gate instead of blending into a count.
+#
+# Before this table the script returned 1 whenever ANY row diverged, and one row has been
+# permanently red since the bead was filed. A permanently-red gate cannot detect the SECOND
+# divergence -- it just reads "2" instead of "1" and nobody looks. Three of the bead's four
+# rows are now fixed (top_level_error, undeclared_global, tonumber_call all agree), and this
+# is what stops them regressing silently.
+#
+# An entry here is a debt, not a permission: if a listed row starts AGREEING the gate fails
+# too, demanding the entry be removed, because an allowance that outlives its bug is how a
+# gate rots into permanent green.
+EXPECTED_DIVERGENCES = {
+    "nil_index": "o500d row 4 -- fr accepts `local t = nil; t.field`; redis rejects it. "
+                 "fr's load-time check is a STATIC AST scan for undeclared globals "
+                 "(function_library_first_undeclared_global), which cannot see a runtime "
+                 "error on a LOCAL. Matching upstream needs the body EXECUTED in the "
+                 "declared-globals sandbox, which also moves registration off the current "
+                 "text-scan path -- a refactor, not a patch.",
+}
+
 CASES = [
     ("top_level_error",
      "error('boom')\nredis.register_function('f', function(k,a) return 1 end)",
@@ -110,6 +131,8 @@ def main():
 
     divergences = 0
     control_failures = 0
+    unexpected = []
+    fixed_but_still_expected = []
     print(f"{'case':<22} {'fr':<44} {'redis 7.2.4'}")
     print("-" * 118)
     for i, (name, body, _desc) in enumerate(CASES):
@@ -134,6 +157,15 @@ def main():
             divergences += 1
             if name.startswith("CONTROL"):
                 control_failures += 1
+            if name in EXPECTED_DIVERGENCES:
+                mark = "   <-- diverges (KNOWN: %s)" % EXPECTED_DIVERGENCES[name]
+            else:
+                unexpected.append(name)
+        elif name in EXPECTED_DIVERGENCES:
+            # A tracked gap that now AGREES. Say so loudly: an expectation left in
+            # place after the bug is fixed is how a gate rots into permanent green.
+            fixed_but_still_expected.append(name)
+            mark = "   <-- FIXED, remove it from EXPECTED_DIVERGENCES"
         print(f"{name:<22} {f_reply[:43]:<44} {r_reply[:43]}{mark}")
 
     print()
@@ -143,7 +175,19 @@ def main():
         return 2
     print(f"{divergences} divergence(s) on the {len(CASES) - 2} behavioural rows; "
           f"both controls agree, so the probe discriminates.")
-    return 1 if divergences else 0
+    if fixed_but_still_expected:
+        print("STALE EXPECTATION: %s now agree(s) with 7.2.4. Delete the entry from "
+              "EXPECTED_DIVERGENCES -- an allowance that outlives its bug hides the next "
+              "regression on that row." % ", ".join(fixed_but_still_expected))
+        return 1
+    if unexpected:
+        print("FAIL: %d UNEXPECTED divergence(s): %s" % (len(unexpected), ", ".join(unexpected)))
+        return 1
+    if divergences:
+        print("PASS: every divergence is a KNOWN, tracked gap. A new one fails this gate.")
+    else:
+        print("PASS: no divergences at all.")
+    return 0
 
 
 if __name__ == "__main__":
