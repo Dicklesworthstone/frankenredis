@@ -34964,3 +34964,72 @@ arms were flat in load and within 1 pct in clock, and the instruction ratio cros
 against callgrind. Re-measure only if `PackedZSetIter`, `zset_for_each_in_score_ranges`
 or the geo cell walk changes, or to measure a locality fix, in which case the row to
 beat is 157.1 L1 misses per op at IPC 1.387.
+
+## 2026-08-17 GentleStream: SELF-SPEEDUP — GEOSEARCH's L1 misses are ALLOCATION-dominated, and my own named suspect (the packed-zset walk) does not appear in the top seven (`frankenredis-eh2ct`)
+
+Claim class: SELF-SPEEDUP. Campaign output: no — this is a per-function attribution
+that retracts my own suspect list and hands a named target to the file's owner. No
+lever ships from it.
+
+WHAT I RETRACT. I banked that the GEOSEARCH miss deficit "points at the packed-zset
+walk — `zset_for_each_in_score_ranges` plus `PackedZSetIter::next`, 614 instr/op
+combined and the top memory-touching frames" and called a locality fix there "the
+actual lever". Per-function attribution of the D1mr column says otherwise: NEITHER
+function appears in the top seven miss owners. Ranking by instructions and then
+assuming the same ranking holds for misses was the error — the two columns rank
+differently, which is the entire reason to read the one you care about.
+
+WHERE THE MISSES ACTUALLY ARE, D1mr share of 114,442 simulated L1 read misses:
+
+    6.79%  _mi_page_malloc_zero            (mimalloc)
+    5.90%  fr_command::geo_collect_candidate
+    5.50%  __memcpy_avx_unaligned_erms     (libc)
+    4.24%  _mi_theap_malloc_zero           (mimalloc)
+    3.60%  mi_theap_malloc_aligned         (mimalloc)
+    3.50%  core::ptr::drop_glue::<fr_protocol::RespFrame>
+    3.50%  <fr_runtime::AclUser>::acl_permission_error_for_argv
+
+Allocator frames alone are 14.63 pct of all L1 read misses; with the memcpy and the
+RespFrame teardown that is about 23.6 pct. So the mechanism behind the confirmed
+hardware stall (IPC 1.387 vs 1.818, L1 miss rate 3.02 pct vs 1.92 pct) is PER-OP
+ALLOCATION, not the collection walk.
+
+TWO THINGS I CHECKED AND DID NOT "FIX", recorded so the next person does not repeat
+them:
+  * `zset_for_each_in_score_ranges` does `entries.contains_key(key)` and then
+    `entries.get_mut(key)` — two hash probes of one key, which looks exactly like the
+    duplicate-probe class. It is guarded by `lfu_tracking_enabled &&`, and LFU tracking
+    is OFF under the default eviction policy, so the second probe does not happen in
+    the configuration measured. Fixing it would have optimised a path that was not hot.
+  * `acl_permission_error_for_argv` (3.50 pct) early-returns `None` on the permit path,
+    so it allocates nothing there; its misses are pointer-chasing the ACL rule
+    structures, which is inherent to having rules rather than a lever.
+
+THE NAMED TARGET, for whoever holds the file: `fr_command::geo_collect_candidate` at
+5.90 pct of misses, plus whatever allocations it drives through mimalloc. I could not
+take it — `crates/fr-command/src/lib.rs` is leased by RusticHorizon until 13:33Z — and
+I am not editing a leased file.
+
+INSTRUMENT NOTE: these are SIMULATED misses, and this campaign has now measured that
+`--cache-sim` overstates the fr/redis miss RATIO by about 2.5x against hardware
+(3.6855x simulated versus 1.4722x measured, retracted in the row above). A RATIO
+between engines is what that error applies to; the SHARES above are within one engine's
+own profile, where the simulator is being used as a rank rather than a size, which is
+the use its measured error permits.
+
+PROVENANCE. fr ELF sha256 512fb8860e8926a3bc06, symboled, built LOCALLY
+(`RCH_CARGO_WRAPPER_BYPASS=1`, no `[RCH]` line, path from `--message-format=json`).
+Shape `geosearch_2`, the same shape the throughput board certifies at 0.9162
+control-normalised. Read from an existing dump — no new run, so no new window to
+record; the dump was taken at loadavg 16.64/17.62/17.02 with per-arm CPU MHz 2946 and
+2876. Callgrind counts are deterministic, which is why a dump taken under load is
+still readable.
+
+**CV is provenance only and is NEVER a gate here** — nothing above is gated on a spread
+statistic; these are event counts from a single deterministic profile.
+
+RETRY PREDICATE: do not re-attribute this shape — the dump is deterministic and on
+disk. Re-measure only after a change to `geo_collect_candidate`, to the geo cell walk,
+or to the reply construction, and then compare against 157.1 hardware L1 misses per op
+at IPC 1.387. Do NOT re-test the two non-levers above (the LFU-guarded double probe,
+the ACL permit path) — both are measured and closed here.

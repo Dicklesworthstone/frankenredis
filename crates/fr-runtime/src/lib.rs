@@ -41109,6 +41109,20 @@ impl Runtime {
         // Static configuration parameters that clients commonly probe.
         // If a parameter has been overridden via CONFIG SET, use the override.
         for &(name, default_value) in CONFIG_STATIC_PARAMS {
+            // (frankenredis-e6c9t) PATTERN FIRST. The dynamic-skip chain below is ~23 string
+            // comparisons and it used to run on ALL 190 entries of CONFIG_STATIC_PARAMS,
+            // before the pattern filter that eliminates 189 of them — roughly 4,370 string
+            // compares per CONFIG GET to answer a question about one parameter. Both
+            // predicates are pure and both must hold to emit, so evaluating the CHEAP one
+            // first is semantically identical and runs the expensive chain once instead of
+            // 190 times.
+            //
+            // MEASURED cause: `collect_config_entries` was 21,043 instr/op (68.9 pct of
+            // CONFIG GET) after the glob engine was removed in the previous commit, and this
+            // loop is where it lives.
+            if !Self::config_pattern_matches(pattern, name) {
+                continue;
+            }
             // Skip dynamically-managed params — we already emitted live values above
             if name == "masterauth"
                 || name == "masteruser"
@@ -41157,16 +41171,15 @@ impl Runtime {
             {
                 continue;
             }
-            if Self::config_pattern_matches(pattern, name) {
-                entries.push(RespFrame::BulkString(Some(name.as_bytes().to_vec())));
-                let value = self
-                    .server
-                    .config_overrides
-                    .get(name)
-                    .map(|v| v.as_bytes().to_vec())
-                    .unwrap_or_else(|| default_value.as_bytes().to_vec());
-                entries.push(RespFrame::BulkString(Some(value)));
-            }
+            // The pattern already matched at the top of the loop.
+            entries.push(RespFrame::BulkString(Some(name.as_bytes().to_vec())));
+            let value = self
+                .server
+                .config_overrides
+                .get(name)
+                .map(|v| v.as_bytes().to_vec())
+                .unwrap_or_else(|| default_value.as_bytes().to_vec());
+            entries.push(RespFrame::BulkString(Some(value)));
         }
         // (frankenredis-9m6lw) Hidden configs respond to exact-name CONFIG GET
         // but are skipped by glob/wildcard sweeps, mirroring upstream
@@ -47912,6 +47925,52 @@ pub mod ecosystem {
 
 #[cfg(test)]
 mod tests {
+
+    /// (frankenredis-e6c9t) The predicate reorder in the CONFIG_STATIC_PARAMS loop must not
+    /// change which entries are emitted.
+    ///
+    /// The reorder is `A && B` -> `B && A` on two pure predicates, so it is equivalent by
+    /// construction; this pins the one way a mistake would show. A dynamically-managed
+    /// parameter is emitted by an explicit branch ABOVE the loop and then SKIPPED inside it.
+    /// If the skip were lost or misplaced by the reorder, that parameter would be emitted
+    /// TWICE — once live, once from the static default table — and the second copy would
+    /// carry the WRONG (default) value. A caller-side dedup means a wildcard sweep would hide
+    /// that, so this asserts on LITERAL patterns, where the emitted count is exact.
+    #[test]
+    fn config_get_literal_emits_each_key_exactly_once_e6c9t() {
+        let rt = Runtime::new(RuntimePolicy::default());
+        // Two dynamically-managed params (emitted above the loop, skipped inside it) and two
+        // ordinary static ones (emitted only by the loop).
+        for pattern in [
+            "maxmemory",
+            "maxmemory-policy",
+            "appendfsync",
+            "tcp-keepalive",
+        ] {
+            let mut entries = Vec::new();
+            rt.collect_config_entries(pattern, &mut entries);
+            let keys: Vec<Vec<u8>> = entries
+                .iter()
+                .step_by(2)
+                .filter_map(|e| match e {
+                    RespFrame::BulkString(Some(b)) => Some(b.clone()),
+                    _ => None,
+                })
+                .collect();
+            let hits = keys
+                .iter()
+                .filter(|k| k.as_slice() == pattern.as_bytes())
+                .count();
+            assert_eq!(
+                hits, 1,
+                "literal CONFIG GET {pattern:?} emitted the key {hits} times, expected exactly 1; \
+                 keys were {:?}",
+                keys.iter()
+                    .map(|k| String::from_utf8_lossy(k).into_owned())
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
 
     /// (frankenredis-e6c9t) The literal fast path in `config_pattern_matches` must agree with
     /// `glob_match` on EVERY pattern, not just the literal ones it short-circuits.
