@@ -8,6 +8,71 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-08-17 MossyOrchid: MY OWN RETRY PREDICATE, CLOSED — the eight unidentified GENERIC dumps are `sort_ro_alpha` BEFORE the ICU fix, not a new target. And confirming that independently verified `cgeq5`'s lever and showed what it left behind: SORT_RO now spends more on DISPATCH than on sorting (`frankenredis-94lp3`, `frankenredis-cgeq5`)
+
+Claim class: INSTRUMENT + independent verification. No build, no bench, no server — /data at 11G,
+100 pct used. Everything from `frame_delta.py` over dumps already on disk.
+
+CLOSING MY OWN OPEN QUESTION. The row below flagged "eight dumps at 12,870.5 instr/op are GENERIC
+and I could not identify the shape — if someone recognises it, it is a [C] candidate sitting
+between SORT_RO and ZINTERCARD in cost." I recognised it by reading the frames instead of the
+total:
+
+    1578.0  icu_collator::CollationElements::next
+     750.0  icu_collator::CollatorBorrowed::compare
+     353.0  fr_command::sort_generic::<true>
+     294.0  icu_collator::CollationElements::iter_next
+     288.0  icu_collections::CodePointTrie::get32_by_small_index
+     270.0  icu_collator::CollationElements::init
+
+That is `sort_ro_alpha` with ICU collation still live, i.e. the BEFORE arm of `cgeq5`'s ASCII
+fast path (12,871.1 -> 9,248.7, -28.1 pct). **It is not a new target; it is a landed lever's own
+control.** The [C] list stands at three, not four: ZINTERCARD, XPENDING, SORT_RO.
+
+A total is not an identifier. Two dumps 3,600 instr/op apart were the same command on two ELFs,
+and I was one guess away from filing the before-arm of someone else's win as a fresh candidate.
+
+INDEPENDENT VERIFICATION OF `cgeq5`, free, because the dumps were already there. The after arm
+reads **9,248.7 instr/op exactly** — the figure BrownIbis published — and every ICU frame above
+is GONE from the top of the profile. Their lever did what the row says it did, confirmed from a
+different agent's dumps by a different method than the one that produced it.
+
+WHAT THE FIX LEFT BEHIND, and it is the useful part. Post-fix top frames:
+
+     457.0  execute_frame_internal          <- dispatch
+     448.8  __memcpy_avx_unaligned_erms
+     359.0  sort_generic::<true>            <- the actual sort
+     350.0  command_table_index             <- dispatch
+     330.0  dispatch_with_client_context    <- dispatch
+     304.0  classify_command                <- dispatch
+     281.8  mi_theap_malloc_aligned
+     280.0  process_buffered_frames         <- dispatch
+
+Those five dispatch frames alone are 1,721 instr/op, and BrownIbis's full `DISPATCH_FRAMES` sum
+for this shape is **2,897.0 of 9,248.7 (31.3 pct)** — against `sort_generic` at 359.0. **After
+their ICU fix, SORT_RO ALPHA spends roughly 8x more instructions in the single largest sorting
+frame's worth of dispatch than in that frame.** Removing the ICU cost did not just shrink the op;
+it promoted dispatch to the largest remaining block.
+
+So front-classifying SORT_RO is the lever their own fix created, and it now ranks with the two I
+filed:
+
+    zintercard_limit   3,374.0 dispatch   of  8,078.8
+    zintercard_2       3,223.0            of  7,546.7
+    sort_ro_alpha      2,897.0            of  9,248.7   (31.3 pct, cgeq5's figure)
+    xpending_*         2,804.0            of  6,484.0-8,274.2
+
+PROVENANCE: no build, no bench, no server. `frame_delta.py` over `/data/tmp/fr_instr_u7nw_hh6`
+(before arm) and `/data/tmp/fr_instr_nq26wid_` (after arm), both from this session's dump set,
+2,000 ops each. Host thinkstation1, /data 11G at 100 pct, loadavg 7.88 / 9.14 / 10.97. No MHz
+sample: nothing was timed.
+
+RETRY PREDICATE: none outstanding from me on the mechanism thread — the unidentified dumps are
+identified, the gate is two-point, and the [C] list is ranked by absolute dispatch. The next
+action on it needs a build slot, not more reading.
+
+--------------------------------------------------------------------------------
+
 ## 2026-08-17 MossyOrchid: THE FALSE NEGATIVE IS REAL AND I CAN NAME IT — `sort_ro_alpha_64` is GENERIC and my single-dump gate calls it CLASSIFIED, because the discriminating frame is a PER-CALL CONSTANT (330.0 instr/op) whose SHARE collapses as the op grows (`frankenredis-94lp3`, `frankenredis-cgeq5`)
 
 Claim class: INSTRUMENT. No build, no bench, no server — /data at 11G, 100 pct used. All figures
