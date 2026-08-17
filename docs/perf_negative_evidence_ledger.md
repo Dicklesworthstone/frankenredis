@@ -34818,3 +34818,73 @@ tests — that is the remaining 21,043 instr/op and it is the same class of fix 
 `SUBCOMMAND_TABLE`'s linear scan in `fpqns` lever 2, so the two should probably be taken
 together by whoever picks either up. Keep `client_info` as the control: it must NOT move for a
 config-only change, and it is what proves the effect is the config path rather than dispatch.
+
+## 2026-08-17 GentleStream: SELF-SPEEDUP — RETRACTING MY OWN 3.6855x: hardware puts GEOSEARCH's L1 miss ratio at 1.4722x, and confirms the stall mechanism it was evidence for (`frankenredis-eh2ct`)
+
+Claim class: SELF-SPEEDUP. Campaign output: no — this is a correction to a measurement
+I banked, plus the hardware confirmation of the mechanism behind it. No lever ships
+from it and no vs-incumbent win is claimed.
+
+WHAT I RETRACT. I banked "fr takes 3.6855x redis's L1 data-read misses" on GEOSEARCH
+from callgrind's `--cache-sim`. Hardware counters put it at **1.4722x** on misses per
+op and **1.5698x** on miss RATE. The simulator OVERSTATED by roughly 2.5x. I flagged
+that risk when banking it — the sibling proxy `--branch-sim` had already been measured
+and rejected, coming out at parity where hardware showed 6x — so the caution was
+warranted rather than ceremonial, and the number should never have been quoted as a
+size.
+
+WHAT SURVIVES, and it is the part that mattered: the MECHANISM. `perf stat`, real
+counters, both engines back to back in ONE window, each attached to the SERVER process
+only so the benchmark client is excluded:
+
+    metric              fr        redis     fr/redis
+    instructions/op  15,556.7   19,612.7    0.7932x   fr 21 pct FEWER
+    cycles/op        11,214.6   10,790.7    1.0393x   fr 4 pct MORE
+    IPC                 1.387      1.818    0.7632x   fr 24 pct worse
+    L1 misses/op        157.1      106.7    1.4722x
+    L1 miss RATE        3.02%      1.92%    1.5698x
+
+fr retires 21 pct fewer instructions and burns 4 pct MORE cycles, because IPC is 24
+pct worse and the L1 data miss rate is 1.57x higher. The hardware instruction ratio
+(0.7932x) independently reproduces callgrind's (0.7258x), which is what makes the
+disagreement specific to the MISS columns rather than to the run.
+
+TWO LEVERS THIS KEEPS RULED OUT, both eliminated by measurement earlier on this bead:
+work volume (fr already retires 21-27 pct fewer instructions) and the generic-route
+dispatch tax (share 19.3 pct, BELOW the 21.5 pct a front-classified route costs, even
+though GEOSEARCH is genuinely not front-classified). The lever is data locality, and
+the misses point at the packed-zset walk — `zset_for_each_in_score_ranges` plus
+`PackedZSetIter::next`, 614 instr/op combined and the top memory-touching frames.
+
+METHOD NOTE with a consumer: a simulated cache ratio is a SIGN and a RANK, not a SIZE.
+Both proxies this campaign has tested now have measured error bars against hardware —
+`--branch-sim` at parity versus 6x, `--cache-sim` at 3.69x versus 1.47x — so a
+simulated miss ratio may be used to choose between candidates and must not be used to
+size a prize.
+
+PROVENANCE. fr ELF sha256 512fb8860e8926a3bc06 (symboled, built LOCALLY with
+`RCH_CARGO_WRAPPER_BYPASS=1`, no `[RCH]` line, path from `--message-format=json`);
+vendored redis 7.2.4. Shape `GEOSEARCH g FROMLONLAT 15 37 BYRADIUS 200 km ASC` over an
+identically seeded two-member key, replies verified byte-identical (P2 first, ASC) on
+both engines before measuring. `redis-benchmark -n 200000 -c 1 -P 16`. Host
+thinkstation1, powersave governor. Load 14.84/14.77/15.89 entering and
+14.69/14.74/15.88 leaving — flat across both arms — with per-arm CPU MHz 2782 (fr) and
+2807 (redis), within 1 pct of each other. One external process held ~100 pct of a core
+throughout and is disclosed rather than hidden: it affects both arms equally in a
+back-to-back window and cannot manufacture an IPC gap of this size.
+
+**CV is provenance only and is NEVER a gate here** — nothing in this row is gated on a
+spread statistic; the retraction is a direct comparison of a simulated ratio against a
+hardware one.
+
+A THROUGHPUT NUMBER FROM THIS RUN THAT MUST NOT BE QUOTED: fr 220,750 rps versus redis
+218,340, i.e. fr marginally ahead, which contradicts the certified 0.9162
+control-normalised figure. It is NOT a counter-claim — no A/A null, no control shape,
+one run, different pipeline configuration. It is incidental output of a counter census
+and the certified figure stands until something carrying a null contradicts it.
+
+RETRY PREDICATE: do not re-run the counter census to re-confirm these ratios — both
+arms were flat in load and within 1 pct in clock, and the instruction ratio cross-checks
+against callgrind. Re-measure only if `PackedZSetIter`, `zset_for_each_in_score_ranges`
+or the geo cell walk changes, or to measure a locality fix, in which case the row to
+beat is 157.1 L1 misses per op at IPC 1.387.
