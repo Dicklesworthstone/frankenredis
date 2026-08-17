@@ -8,6 +8,63 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-08-17 MossyOrchid: THE FALSE NEGATIVE IS REAL AND I CAN NAME IT — `sort_ro_alpha_64` is GENERIC and my single-dump gate calls it CLASSIFIED, because the discriminating frame is a PER-CALL CONSTANT (330.0 instr/op) whose SHARE collapses as the op grows (`frankenredis-94lp3`, `frankenredis-cgeq5`)
+
+Claim class: INSTRUMENT. No build, no bench, no server — /data at 11G, 100 pct used. All figures
+`frame_delta.py` over dumps already on disk.
+
+The row below predicted that my 1.0 pct threshold could hide a sufficiently expensive generic
+route. It does, and the shape is one measured on this host today.
+
+`dispatch_with_client_context` IS A PER-CALL CONSTANT. Two-point, across every generic dump on
+disk, it is **exactly 330.0 instr/op** — on totals spanning 9,246 to 140,381 instr/op, i.e. a 15x
+span of workload:
+
+    shape                          total      frame      share of op   single-dump gate says
+    sort_ro_alpha                 9246.5      330.0       3.570 pct    GENERIC        (correct)
+    (unidentified, 8 dumps)      12870.5      330.0       2.564 pct    GENERIC        (correct)
+    sort_ro_alpha_64 post-fix    48771.3      330.0       0.677 pct    classified     WRONG
+    sort_ro_alpha_64 pre-fix    140381.8      330.0       0.235 pct    classified     WRONG
+
+That is BrownIbis's `cgeq5` finding arriving from the other direction: they measured
+`dispatch_with_client_context` at 330.0 and called dispatch a per-call constant; here the same
+330.0 holds across a 15x workload span, which is what makes the SHARE form unusable. A per-call
+constant divided by a growing op is a shrinking share — so the more expensive the command, the
+more certainly my gate hides it, which is precisely backwards from what a screen for expensive
+generic routes should do.
+
+BOTH READINGS OF `sort_ro_alpha_64` ARE MISCLASSIFIED by the single-dump form, before AND after
+the ICU fix that took it 140,377 -> 48,772. The fix moved the share from 0.235 to 0.677 pct and
+it stayed under the 1.0 pct bar either way. Two-point reads 330.0 both times and calls it GENERIC
+both times, correctly.
+
+SO THE TWO-POINT REPLACEMENT SHIPPED IN THE ROW BELOW IS NOT A TIDINESS FIX. It is the difference
+between seeing and not seeing a route that is (a) on the generic path and (b) among the most
+expensive shapes on the board — exactly the combination a front-classification screen exists to
+surface.
+
+AND IT ADDS A TARGET. **SORT_RO ... ALPHA is on the generic path**, at 9,246.5 instr/op with
+BrownIbis's independently measured 2,897.0 instr/op of total dispatch (31.3 pct). It belongs on
+the ranked [C] list beside ZINTERCARD (3,223-3,374) and XPENDING (2,804), and it was not on it
+before today because the label said classified.
+
+ONE ROUTE CAME BACK CLASSIFIED THAT I WOULD HAVE GUESSED OTHERWISE: `sinter_big`, 179,268-180,090
+instr/op across three dumps, frame 0.0 — front-classified despite being the largest shape here.
+Size does not predict mechanism in either direction; only the frame does.
+
+PROVENANCE: no build, no bench, no server. `frame_delta.py --all` over the dumps under
+`/data/tmp/fr_instr_*` from this session's 09:40-10:11 window, shapes identified by matching
+two-point totals against figures published today and in `cgeq5` (sort_ro_alpha 9,248.7,
+sort_ro_alpha_64 140,377.3 -> 48,771.8, sinter_big 179,793.7). Host thinkstation1, /data 11G at
+100 pct, loadavg 7.25 / 11.51 / 12.22. No MHz sample: nothing was timed.
+
+RETRY PREDICATE: the eight dumps at 12,870.5 are GENERIC and I could not identify the shape from
+its total — if someone recognises it, it is a [C] candidate sitting between SORT_RO and
+ZINTERCARD in cost. Beyond that, do not screen for generic routes with any SHARE-based rule; the
+numerator is constant and the denominator is the command, so the rule measures command size.
+
+--------------------------------------------------------------------------------
+
 ## 2026-08-17 MossyOrchid: I AUDITED MY OWN GATE AND ITS MARGIN IS 2.56x, NOT THE 1000x I CLAIMED — measured against the wrong side. Two-point makes it categorical: 0.000 instr/op on 23 classified shapes, 2.56-5.04 pct on 12 generic ones (`frankenredis-94lp3`)
 
 Claim class: INSTRUMENT, correcting my own. No build, no bench, no server — /data at 12G and
