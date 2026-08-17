@@ -8,6 +8,70 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## CERTIFIED (frankenredis-ozrro) — the whole front-classified SCAN/KEYS/SPOP family in one window, and a CORRECTION: my "load inflates the redis denominator" argument is NOT supported
+
+Claim class: COMPETITIVE. Single ELF `fr-after-scaniter` sha 7b67a14d2c866952, built from
+09ed7e2ef and verified to be HEAD's exact code state (no crates/ commits between). No build
+was started in this window — frankenfs reported a local release build taking loadavg 21.66 to
+55.25 and closing its own measurement window, so the ELF was reused rather than rebuilt.
+Incumbent verified on every row (redis-server sha=d2c8a4b9 == vendored HEAD, clean).
+
+    shape           fr instr/op   redis instr/op   fr/redis   dispatch
+    keys_star           2,721.1        5,493.3     0.4953x      305.1
+    dump_small          2,694.6        5,046.6     0.5339x      305.9   CONTROL
+    spop_missing        1,561.2        2,591.3     0.6025x      288.4
+    scan_iter           5,139.2        7,904.8     0.6501x      574.1
+    scan_count          4,281.9        6,583.8     0.6504x      445.4
+    scan_type           4,857.7        6,987.6     0.6952x      450.6
+    scan_zero           3,962.7        5,628.7     0.7040x      313.4
+    scan_match          4,843.6        6,822.6     0.7099x      448.9
+
+Per-arm loadavg 12.36-15.05 / 12.06-12.70 / 15.79-15.94; observed core MHz 1,429-4,290. The
+1-minute drifted up over the run (12.36 at the first arm, 15.05 at the last), so the early
+arms sit in a tighter window than the late ones; that is recorded rather than averaged away.
+
+FR'S NUMERATOR IS EXTRAORDINARILY STABLE. dump_small, untouched by any of this work, reads
+2,694.6 / 2,696.3 / 2,698.2 across THREE separate sessions, three separate windows and two
+separately built ELFs — a spread of 3.6 instr/op, 0.13%. That is the instrument's real
+precision on the fr side.
+
+CORRECTION — "LOAD INFLATES THE REDIS DENOMINATOR, SO MEASURING UNDER LOAD IS CONSERVATIVE
+FOR FR" IS NOT SUPPORTED AT THIS RESOLUTION, AND I USED IT REPEATEDLY. It rests on this
+ledger's r(elapsed, redis Ir) = +0.98, which is real over a wide elapsed range. But three
+shapes now have the SAME redis arm measured at three different loads, and none is monotone:
+
+    shape        redis Ir by 1-min loadavg              spread
+    scan_zero    L12.4->5,629  L15.1->5,574  L23.8->5,767   3.46%
+    keys_star    L14.3->5,493  L15.1->5,581  L23.8->5,369   3.95%
+    dump_small   L15.1->5,047  L16.5->4,971  L23.9->5,051   1.61%
+
+keys_star has its LOWEST denominator at its HIGHEST load — the exact opposite of the claimed
+bias — and scan_zero and keys_star move in OPPOSITE directions between the same two sessions.
+At loadavg 12-24 the denominator carries 1.6-4.0% run-to-run variation that load does not
+explain. The correlation does not vanish in principle; it is simply swamped in this range.
+
+    WHAT THIS CHANGES: nothing about any conclusion, and something about how I argued them.
+    Every ratio here is 0.49-0.71x, far outside a 4% band, so no crossing is at risk. But I
+    used the "conservative direction" argument several times to justify reporting numbers
+    from a ramping window, and that justification was unearned. The correct statement is:
+    fr's numerator is stable to 0.13%, the redis denominator to ~4%, so a RATIO carries ~4%
+    uncertainty and should not be quoted to four significant figures as though it were
+    exact. Differences between two of my own SCAN rows — 0.6501x vs 0.6504x, say — are well
+    inside that band and mean nothing.
+
+    Where the load argument DOES still hold is the fr-vs-fr self-A/B, and for a different
+    reason: both arms are fr, both are elapsed-immune at 0.139%, and the controls pin the
+    pair directly. Those deltas do not depend on the denominator at all.
+
+WHAT IS NOW FRONT-CLASSIFIED, and where the family stands: SCAN at arity 2, 4 and 6, KEYS,
+SPOP base form. Dispatch sits at 288-574 instr/op across all of them, tracking arity along
+the established table (arity 2 263-306, arity 4 439-498, arity 6 ~574) rather than the
+~2,000-2,255 the generic route charged. Every shape is comfortably ahead of vendored 7.2.4.
+
+STILL NOT MEASURABLE: SPOP's real cost. spop_missing is the only steady-state SPOP shape and
+it never reaches the expensive path; its 0.6025x says the missing-key form is ahead and
+nothing about a live pop. See the SPOP row.
+
 ## CERTIFIED (frankenredis-ozrro) — the scan_iter shape drops 8,530.1 → 5,148.7 instr/op (0.6594x), and the 1.9x sizing multiplier reproduces across three arities while the per-argument argv model is REFUTED by its own third point
 
 Claim class: COMPETITIVE + SELF-A/B. Before `fr-after-spop` (a46f3042e), after
