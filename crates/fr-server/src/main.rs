@@ -8292,7 +8292,7 @@ fn process_buffered_frames(
                     parse_borrowed_plain_expire_packet(unparsed, &parser_config)
                 {
                     if let Some(response) =
-                        runtime.execute_plain_expire_borrowed(packet.key, packet.member, ts)
+                        runtime.execute_plain_expire_borrowed(packet.key, packet.member, ts, None)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -8319,7 +8319,7 @@ fn process_buffered_frames(
                     b"EXPIRE",
                 ) {
                     if let Some(response) = runtime
-                        .execute_plain_expire_cond_borrowed(packet.key, packet.a, packet.b, ts)
+                        .execute_plain_expire_cond_borrowed(packet.key, packet.a, packet.b, ts, None)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -8342,7 +8342,7 @@ fn process_buffered_frames(
                     b"PEXPIRE",
                 ) {
                     if let Some(response) = runtime
-                        .execute_plain_pexpire_cond_borrowed(packet.key, packet.a, packet.b, ts)
+                        .execute_plain_pexpire_cond_borrowed(packet.key, packet.a, packet.b, ts, None)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -8365,7 +8365,7 @@ fn process_buffered_frames(
                     b"EXPIREAT",
                 ) {
                     if let Some(response) = runtime
-                        .execute_plain_expireat_cond_borrowed(packet.key, packet.a, packet.b, ts)
+                        .execute_plain_expireat_cond_borrowed(packet.key, packet.a, packet.b, ts, None)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -8388,7 +8388,7 @@ fn process_buffered_frames(
                     b"PEXPIREAT",
                 ) {
                     if let Some(response) = runtime
-                        .execute_plain_pexpireat_cond_borrowed(packet.key, packet.a, packet.b, ts)
+                        .execute_plain_pexpireat_cond_borrowed(packet.key, packet.a, packet.b, ts, None)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -8817,7 +8817,7 @@ fn process_buffered_frames(
                     parse_borrowed_plain_pexpire_packet(unparsed, &parser_config)
                 {
                     if let Some(response) =
-                        runtime.execute_plain_pexpire_borrowed(packet.key, packet.member, ts)
+                        runtime.execute_plain_pexpire_borrowed(packet.key, packet.member, ts, None)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -8837,7 +8837,7 @@ fn process_buffered_frames(
                     parse_borrowed_plain_expireat_packet(unparsed, &parser_config)
                 {
                     if let Some(response) =
-                        runtime.execute_plain_expireat_borrowed(packet.key, packet.member, ts)
+                        runtime.execute_plain_expireat_borrowed(packet.key, packet.member, ts, None)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -8857,7 +8857,7 @@ fn process_buffered_frames(
                     parse_borrowed_plain_pexpireat_packet(unparsed, &parser_config)
                 {
                     if let Some(response) =
-                        runtime.execute_plain_pexpireat_borrowed(packet.key, packet.member, ts)
+                        runtime.execute_plain_pexpireat_borrowed(packet.key, packet.member, ts, None)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -13829,7 +13829,7 @@ fn parse_borrowed_multibulk_action(
                         }
                         if let Some((key, seconds)) = borrowed_plain_expire_args(&borrowed_args)
                             && let Some(response) =
-                                runtime.execute_plain_expire_borrowed(key, seconds, ts)
+                                runtime.execute_plain_expire_borrowed(key, seconds, ts, None)
                         {
                             return Ok(BorrowedMultibulkAction::FastReply {
                                 consumed: parsed.consumed,
@@ -20080,9 +20080,18 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Pexpire => {
+            // (frankenredis-getexgate) The cached write gate, hoisted above the `if let`
+            // chain because `cached_plain_write_gate` borrows `runtime` mutably and the
+            // executor call already does. Measured at a FLAT 187.0 instr/op on every floor
+            // write route that re-derives it -- 11.7 pct of a PERSIST, 6.6 pct of an EXPIRE.
+            let default_write_allowed = if getex_write_gate_cache_enabled() {
+                Some(cached_plain_write_gate(write_gate_cache, runtime, ts))
+            } else {
+                None
+            };
             if let Some(packet) = parse_borrowed_plain_pexpire_packet(unparsed, &parser_config)
                 && let Some(response) =
-                    runtime.execute_plain_pexpire_borrowed(packet.key, packet.member, ts)
+                    runtime.execute_plain_pexpire_borrowed(packet.key, packet.member, ts, default_write_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -20100,9 +20109,18 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Expireat => {
+            // (frankenredis-getexgate) The cached write gate, hoisted above the `if let`
+            // chain because `cached_plain_write_gate` borrows `runtime` mutably and the
+            // executor call already does. Measured at a FLAT 187.0 instr/op on every floor
+            // write route that re-derives it -- 11.7 pct of a PERSIST, 6.6 pct of an EXPIRE.
+            let default_write_allowed = if getex_write_gate_cache_enabled() {
+                Some(cached_plain_write_gate(write_gate_cache, runtime, ts))
+            } else {
+                None
+            };
             if let Some(packet) = parse_borrowed_plain_expireat_packet(unparsed, &parser_config)
                 && let Some(response) =
-                    runtime.execute_plain_expireat_borrowed(packet.key, packet.member, ts)
+                    runtime.execute_plain_expireat_borrowed(packet.key, packet.member, ts, default_write_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -20120,9 +20138,18 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Pexpireat => {
+            // (frankenredis-getexgate) The cached write gate, hoisted above the `if let`
+            // chain because `cached_plain_write_gate` borrows `runtime` mutably and the
+            // executor call already does. Measured at a FLAT 187.0 instr/op on every floor
+            // write route that re-derives it -- 11.7 pct of a PERSIST, 6.6 pct of an EXPIRE.
+            let default_write_allowed = if getex_write_gate_cache_enabled() {
+                Some(cached_plain_write_gate(write_gate_cache, runtime, ts))
+            } else {
+                None
+            };
             if let Some(packet) = parse_borrowed_plain_pexpireat_packet(unparsed, &parser_config)
                 && let Some(response) =
-                    runtime.execute_plain_pexpireat_borrowed(packet.key, packet.member, ts)
+                    runtime.execute_plain_pexpireat_borrowed(packet.key, packet.member, ts, default_write_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -20140,9 +20167,18 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Expire => {
+            // (frankenredis-getexgate) The cached write gate, hoisted above the `if let`
+            // chain because `cached_plain_write_gate` borrows `runtime` mutably and the
+            // executor call already does. Measured at a FLAT 187.0 instr/op on every floor
+            // write route that re-derives it -- 11.7 pct of a PERSIST, 6.6 pct of an EXPIRE.
+            let default_write_allowed = if getex_write_gate_cache_enabled() {
+                Some(cached_plain_write_gate(write_gate_cache, runtime, ts))
+            } else {
+                None
+            };
             if let Some(packet) = parse_borrowed_plain_expire_packet(unparsed, &parser_config)
                 && let Some(response) =
-                    runtime.execute_plain_expire_borrowed(packet.key, packet.member, ts)
+                    runtime.execute_plain_expire_borrowed(packet.key, packet.member, ts, default_write_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -20238,13 +20274,22 @@ fn try_dispatch_floor_classified_action(
         // (frankenredis-f2zrr) Mirrors the cascade arm exactly -- same generic
         // key_arg2 parser, same conditional executor, same generic fallthrough.
         BorrowedDispatchFloorClass::ExpireCond => {
+            // (frankenredis-getexgate) The cached write gate, hoisted above the `if let`
+            // chain because `cached_plain_write_gate` borrows `runtime` mutably and the
+            // executor call already does. Measured at a FLAT 187.0 instr/op on every floor
+            // write route that re-derives it -- 11.7 pct of a PERSIST, 6.6 pct of an EXPIRE.
+            let default_write_allowed = if getex_write_gate_cache_enabled() {
+                Some(cached_plain_write_gate(write_gate_cache, runtime, ts))
+            } else {
+                None
+            };
             if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
                 unparsed,
                 &parser_config,
                 b"*4\r\n$6\r\n",
                 b"EXPIRE",
             ) && let Some(response) =
-                runtime.execute_plain_expire_cond_borrowed(packet.key, packet.a, packet.b, ts)
+                runtime.execute_plain_expire_cond_borrowed(packet.key, packet.a, packet.b, ts, default_write_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -20264,13 +20309,22 @@ fn try_dispatch_floor_classified_action(
         // (frankenredis-f2zrr) Mirrors the cascade arm exactly -- same generic
         // key_arg2 parser, same conditional executor, same generic fallthrough.
         BorrowedDispatchFloorClass::PexpireCond => {
+            // (frankenredis-getexgate) The cached write gate, hoisted above the `if let`
+            // chain because `cached_plain_write_gate` borrows `runtime` mutably and the
+            // executor call already does. Measured at a FLAT 187.0 instr/op on every floor
+            // write route that re-derives it -- 11.7 pct of a PERSIST, 6.6 pct of an EXPIRE.
+            let default_write_allowed = if getex_write_gate_cache_enabled() {
+                Some(cached_plain_write_gate(write_gate_cache, runtime, ts))
+            } else {
+                None
+            };
             if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
                 unparsed,
                 &parser_config,
                 b"*4\r\n$7\r\n",
                 b"PEXPIRE",
             ) && let Some(response) =
-                runtime.execute_plain_pexpire_cond_borrowed(packet.key, packet.a, packet.b, ts)
+                runtime.execute_plain_pexpire_cond_borrowed(packet.key, packet.a, packet.b, ts, default_write_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -20290,13 +20344,22 @@ fn try_dispatch_floor_classified_action(
         // (frankenredis-f2zrr) Mirrors the cascade arm exactly -- same generic
         // key_arg2 parser, same conditional executor, same generic fallthrough.
         BorrowedDispatchFloorClass::ExpireatCond => {
+            // (frankenredis-getexgate) The cached write gate, hoisted above the `if let`
+            // chain because `cached_plain_write_gate` borrows `runtime` mutably and the
+            // executor call already does. Measured at a FLAT 187.0 instr/op on every floor
+            // write route that re-derives it -- 11.7 pct of a PERSIST, 6.6 pct of an EXPIRE.
+            let default_write_allowed = if getex_write_gate_cache_enabled() {
+                Some(cached_plain_write_gate(write_gate_cache, runtime, ts))
+            } else {
+                None
+            };
             if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
                 unparsed,
                 &parser_config,
                 b"*4\r\n$8\r\n",
                 b"EXPIREAT",
             ) && let Some(response) =
-                runtime.execute_plain_expireat_cond_borrowed(packet.key, packet.a, packet.b, ts)
+                runtime.execute_plain_expireat_cond_borrowed(packet.key, packet.a, packet.b, ts, default_write_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -20316,13 +20379,22 @@ fn try_dispatch_floor_classified_action(
         // (frankenredis-f2zrr) Mirrors the cascade arm exactly -- same generic
         // key_arg2 parser, same conditional executor, same generic fallthrough.
         BorrowedDispatchFloorClass::PexpireatCond => {
+            // (frankenredis-getexgate) The cached write gate, hoisted above the `if let`
+            // chain because `cached_plain_write_gate` borrows `runtime` mutably and the
+            // executor call already does. Measured at a FLAT 187.0 instr/op on every floor
+            // write route that re-derives it -- 11.7 pct of a PERSIST, 6.6 pct of an EXPIRE.
+            let default_write_allowed = if getex_write_gate_cache_enabled() {
+                Some(cached_plain_write_gate(write_gate_cache, runtime, ts))
+            } else {
+                None
+            };
             if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
                 unparsed,
                 &parser_config,
                 b"*4\r\n$9\r\n",
                 b"PEXPIREAT",
             ) && let Some(response) =
-                runtime.execute_plain_pexpireat_cond_borrowed(packet.key, packet.a, packet.b, ts)
+                runtime.execute_plain_pexpireat_cond_borrowed(packet.key, packet.a, packet.b, ts, default_write_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -22862,8 +22934,17 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Persist => {
+            // (frankenredis-getexgate) The cached write gate, hoisted above the `if let`
+            // chain because `cached_plain_write_gate` borrows `runtime` mutably and the
+            // executor call already does. Measured at a FLAT 187.0 instr/op on every floor
+            // write route that re-derives it -- 11.7 pct of a PERSIST, 6.6 pct of an EXPIRE.
+            let default_write_allowed = if getex_write_gate_cache_enabled() {
+                Some(cached_plain_write_gate(write_gate_cache, runtime, ts))
+            } else {
+                None
+            };
             if let Some(packet) = parse_borrowed_plain_persist_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_persist_borrowed(packet.key, ts)
+                && let Some(response) = runtime.execute_plain_persist_borrowed(packet.key, ts, default_write_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,

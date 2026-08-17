@@ -876,6 +876,52 @@ CASES = [
     ("GETEX", "gx:k", "EX", "100", "PERSIST"),
     ("TTL", "gx:k"),                                # control: no refusal changed the TTL
 
+    # (frankenredis-getexgate) The nine TTL floor arms now read the CACHED write gate. All
+    # eight EXPIRE spellings delegate to one executor, so these rows walk a single key through
+    # every one of them AND through the NX/XX/GT/LT conditions, which is where a wrong cached
+    # answer would surface: the conditions make the REPLY depend on the existing TTL, so a
+    # route that ran when it should have declined returns 1 where redis returns 0.
+    ("DEL", "tt:k"),
+    ("SET", "tt:k", "v"),
+    ("EXPIRE", "tt:k", "100"),
+    ("TTL", "tt:k"),                                # -> 100
+    ("EXPIRE", "tt:k", "50", "GT"),                 # -> 0: 50 is not greater than 100
+    ("TTL", "tt:k"),                                # -> 100, unchanged
+    ("EXPIRE", "tt:k", "200", "GT"),                # -> 1
+    ("TTL", "tt:k"),                                # -> 200
+    ("EXPIRE", "tt:k", "300", "NX"),                # -> 0: a TTL already exists
+    ("EXPIRE", "tt:k", "100", "LT"),                # -> 1
+    ("EXPIRE", "tt:k", "100", "XX"),                # -> 1: a TTL exists
+    ("PERSIST", "tt:k"),                            # -> 1
+    ("PERSIST", "tt:k"),                            # -> 0: none left to remove
+    ("EXPIRE", "tt:k", "100", "XX"),                # -> 0: no TTL now
+    ("EXPIRE", "tt:k", "100", "NX"),                # -> 1: none existed
+    ("PEXPIRE", "tt:k", "50000"),
+    ("TTL", "tt:k"),                                # -> 50
+    ("EXPIREAT", "tt:k", "99999999999"),
+    ("PEXPIREAT", "tt:k", "99999999999000"),
+    ("PEXPIRE", "tt:k", "60000", "GT"),             # -> 0 against a far-future TTL
+    ("PERSIST", "tt:k"),
+    # A key with NO TTL, and a MISSING key, through every arity.
+    ("SET", "tt:n", "v"),
+    # MEASURED, not guessed: a key with NO TTL answers 0 to GT, because "no TTL" compares as
+    # infinite and 100 is not greater than it. This is the row most likely to be got wrong by
+    # a reimplementation, and it is pinned three ways here.
+    ("EXPIRE", "tt:n", "100", "GT"),                # -> 0
+    ("PERSIST", "tt:n"),
+    ("EXPIRE", "tt:absent", "100"),                 # -> 0
+    ("PEXPIRE", "tt:absent", "100"),
+    ("EXPIREAT", "tt:absent", "99999999999"),
+    ("PERSIST", "tt:absent"),
+    ("EXPIRE", "tt:absent", "100", "NX"),
+    # Wrong type and refusals: each must reach generic with redis's text verbatim.
+    ("EXPIRE", "cp:h", "100"),
+    ("PERSIST", "cp:h"),
+    ("EXPIRE", "tt:n", "notanint"),
+    ("EXPIRE", "tt:n", "100", "SIDEWAYS"),
+    ("EXPIRE", "tt:n", "100", "NX", "XX"),
+    ("TTL", "tt:n"),                                # control: no refusal changed the TTL
+
     # The DB spelling is arity 5 and is NOT claimed; it must not have moved.
     ("COPY", "cp:src", "cp:db", "DB", "3"),         # -> 1
     ("COPY", "cp:src", "cp:db", "DB", "3"),         # -> 0: exists, no REPLACE

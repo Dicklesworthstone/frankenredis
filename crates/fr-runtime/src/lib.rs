@@ -50467,7 +50467,7 @@ mod tests {
         }
         // existing key, positive TTL
         assert_eq!(
-            direct.execute_plain_expire_borrowed(b"a", b"100", 1000),
+            direct.execute_plain_expire_borrowed(b"a", b"100", 1000, None),
             Some(RespFrame::Integer(1))
         );
         assert_eq!(
@@ -50481,12 +50481,12 @@ mod tests {
         );
         // missing key -> 0
         assert_eq!(
-            direct.execute_plain_expire_borrowed(b"missing", b"100", 1000),
+            direct.execute_plain_expire_borrowed(b"missing", b"100", 1000, None),
             Some(RespFrame::Integer(0))
         );
         // past deadline (negative seconds) deletes the key and returns 1
         assert_eq!(
-            direct.execute_plain_expire_borrowed(b"gone", b"-1", 1000),
+            direct.execute_plain_expire_borrowed(b"gone", b"-1", 1000, None),
             Some(RespFrame::Integer(1))
         );
         assert_eq!(
@@ -50496,12 +50496,12 @@ mod tests {
         // defer: malformed seconds, and overflow
         assert!(
             direct
-                .execute_plain_expire_borrowed(b"a", b"notnum", 1000)
+                .execute_plain_expire_borrowed(b"a", b"notnum", 1000, None)
                 .is_none()
         );
         assert!(
             direct
-                .execute_plain_expire_borrowed(b"a", b"9999999999999999999", 1000)
+                .execute_plain_expire_borrowed(b"a", b"9999999999999999999", 1000, None)
                 .is_none()
         );
         // flagged form is rejected by the fr-server recognizer (argc 3 only).
