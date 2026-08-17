@@ -102,27 +102,124 @@ SIZE_SCALING_COMMANDS = frozenset({
 
 
 def seeded_collection_size(seeds):
-    """Largest collection the seed commands build, or 0 if none is discernible."""
-    best = 0
+    """Largest scaling input the seeds build, as (size, unit).
+
+    (frankenredis-eh2ct) THE FIRST VERSION OF THIS WAS WRONG IN THREE WAYS, and the
+    third one indicted my own fix:
+
+      * it took a MAX over individual seed commands instead of ACCUMULATING repeated
+        adds to the same key, so `xrange_2` (two XADDs) reported n=1;
+      * it did not know GEOADD, so `geosearch` (two GEOADDs) reported n=0;
+      * and therefore `geosearch_64` — the 64-member sibling I added specifically to
+        fix an intercept row — ALSO reported n=0 and would have been flagged as
+        degenerate by my own audit.
+
+    It also had no unit: BITCOUNT over `SET bb abcdefghijklmnop` scales with STRING
+    LENGTH, not with a collection, and reporting that as "0" implied no input at all
+    when the real answer is 16 bytes. A 16-byte BITCOUNT is still a fixed-cost row, so
+    flagging it was right for the wrong reason — and a detector that is right for the
+    wrong reason will be wrong when the shape changes.
+
+    Counts per KEY and returns the largest, so two seeds feeding one key add up while
+    two seeds feeding different keys do not.
+    """
+    per_key = {}
+    unit_of = {}
+
+    def bump(key, n, unit):
+        per_key[key] = per_key.get(key, 0) + n
+        unit_of[key] = unit
+
     for seed in seeds:
         tok = seed.split()
-        if not tok:
+        if len(tok) < 2:
             continue
-        cmd = tok[0].upper()
+        cmd, key = tok[0].upper(), tok[1]
+        rest = len(tok) - 2
         if cmd in ("RPUSH", "LPUSH", "SADD", "PFADD"):
-            best = max(best, len(tok) - 2)
+            bump(key, rest, "elements")
         elif cmd == "ZADD":
-            best = max(best, (len(tok) - 2) // 2)
+            bump(key, rest // 2, "elements")
         elif cmd in ("HSET", "HMSET"):
-            best = max(best, (len(tok) - 2) // 2)
+            bump(key, rest // 2, "fields")
         elif cmd == "MSET":
-            best = max(best, (len(tok) - 1) // 2)
+            # MSET has no single key: every pair is its own key, and a shape reading
+            # N of them (MGET a b c) scales with how many were seeded.
+            bump("<mset>", (len(tok) - 1) // 2, "keys")
+        elif cmd == "GEOADD":
+            bump(key, rest // 3, "members")
         elif cmd == "XADD":
-            best = max(best, 1)
-    return best
+            bump(key, 1, "entries")
+        elif cmd in ("SET", "SETRANGE"):
+            # Scaling unit is the VALUE's byte length, not a count.
+            value = tok[-1]
+            per_key[key] = max(per_key.get(key, 0), len(value))
+            unit_of[key] = "bytes"
+        elif cmd == "APPEND":
+            bump(key, len(tok[-1]), "bytes")
+    if not per_key:
+        return 0, "unknown"
+    key = max(per_key, key=lambda k: per_key[k])
+    return per_key[key], unit_of.get(key, "elements")
 
 
-def audit_shape_sizes(min_elements=4):
+def _selftest_sizes():
+    """Pin the size parser against HARDCODED expectations.
+
+    Deliberately not derived from SHAPE_SETS: an oracle read out of the thing under
+    test proves only that the code agrees with itself. Every expectation below was
+    counted by hand from the seed string.
+    """
+    cases = [
+        (["RPUSH sl c a b"], 3, "elements"),
+        (["RPUSH sl64 " + " ".join(f"w{i}" for i in range(64))], 64, "elements"),
+        (["SADD s1 m1 m2 m3", "SADD s2 m2 m3 m4"], 3, "elements"),
+        # Two adds to the SAME key must ACCUMULATE (the max-based bug).
+        (["SADD s1 m1 m2", "SADD s1 m3"], 3, "elements"),
+        (["ZADD zd1 1 a 2 b 3 c"], 3, "elements"),
+        (["HSET h f1 v1 f2 v2 f3 v3"], 3, "fields"),
+        # Two XADDs to one stream are TWO entries, not one.
+        (["XADD xst 1-1 f v", "XADD xst 1-2 f v"], 2, "entries"),
+        # GEOADD triples, single and repeated.
+        (["GEOADD g 13.36 38.11 P1", "GEOADD g 15.08 37.50 P2"], 2, "members"),
+        (["GEOADD g64 " + " ".join(f"13.{i} 37.{i} M{i}" for i in range(64))],
+         64, "members"),
+        (["MSET a 1 b 2 c 3"], 3, "keys"),
+        # A string shape's unit is BYTES, and 16 is not "no input".
+        (["SET bb abcdefghijklmnop"], 16, "bytes"),
+        ([], 0, "unknown"),
+    ]
+    bad = 0
+    print("%-46s %-8s %-10s %s" % ("seeds", "size", "unit", "expected"))
+    for seeds, want_n, want_unit in cases:
+        got_n, got_unit = seeded_collection_size(seeds)
+        ok = (got_n, got_unit) == (want_n, want_unit)
+        bad += 0 if ok else 1
+        shown = (seeds[0][:44] + "..") if seeds else "(none)"
+        print("%-46s %-8s %-10s %s %s"
+              % (shown, got_n, got_unit, f"{want_n} {want_unit}",
+                 "ok" if ok else "FAIL"))
+    print("size selftest: %d case(s) failed" % bad)
+    return 1 if bad else 0
+
+
+# (frankenredis-eh2ct) Per-UNIT minimums. Once the parser started reporting units it
+# became obvious that one threshold cannot serve them: `bitcount` seeds a 16-BYTE
+# string, and 16 compared against an element threshold of 4 reads as "big enough"
+# when 16 bytes is two words of work — still a fixed-cost row. Bytes need a much
+# higher bar than elements before per-unit cost can dominate the fixed cost.
+MIN_SCALING_INPUT = {
+    "elements": 4,
+    "fields": 4,
+    "members": 4,
+    "entries": 4,
+    "keys": 4,
+    "bytes": 64,
+    "unknown": 4,
+}
+
+
+def audit_shape_sizes(min_elements=None):
     """Flag registered shapes that measure an INTERCEPT and call it a command.
 
     (frankenredis-eh2ct) This exists because of a measured inversion, not a theory.
@@ -149,15 +246,17 @@ def audit_shape_sizes(min_elements=4):
             if not argv or argv[0].upper() not in SIZE_SCALING_COMMANDS:
                 continue
             total += 1
-            n = seeded_collection_size(seeds)
-            if n < min_elements:
-                flagged.append((n, set_name, label, argv[0].upper()))
+            n, unit = seeded_collection_size(seeds)
+            floor = min_elements or MIN_SCALING_INPUT.get(unit, 4)
+            if n < floor:
+                flagged.append((n, set_name, label, argv[0].upper(), unit))
     flagged.sort()
     print("size-scaling shapes registered: %d" % total)
-    print("seeded with fewer than %d elements: %d\n" % (min_elements, len(flagged)))
-    print("%-6s %-12s %-22s %s" % ("n", "set", "shape", "command"))
-    for n, set_name, label, cmd in flagged:
-        print("%-6s %-12s %-22s %s" % (n or "0/amb", set_name, label, cmd))
+    print("seeded below their unit's floor %s: %d\n"
+          % (MIN_SCALING_INPUT if min_elements is None else min_elements, len(flagged)))
+    print("%-6s %-10s %-12s %-22s %s" % ("size", "unit", "set", "shape", "command"))
+    for n, set_name, label, cmd, unit in flagged:
+        print("%-6s %-10s %-12s %-22s %s" % (n, unit, set_name, label, cmd))
     paired = {
         label
         for _shapes in SHAPE_SETS.values()
@@ -1156,7 +1255,11 @@ def main(argv_in: list[str]) -> int:
     args = parser.parse_args(argv_in)
 
     if args.selftest:
-        return _selftest_classify()
+        # Both pure-computation rules under one flag: the verdict classifier and the
+        # size parser that decides which rows are intercept rows.
+        rc = _selftest_classify()
+        print()
+        return rc | _selftest_sizes()
     if args.audit_sizes:
         return audit_shape_sizes()
     if args.list:
