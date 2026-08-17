@@ -278,6 +278,30 @@ STANDING_LAWS = (
 )
 
 
+def standing_laws_documented():
+    """Every gated law must be listed in the ledger people actually append to.
+
+    The gate alone is not enough: it fires at COMMIT time, after the row is written
+    and the work is done. The point of the ledger section is that the law is visible
+    BEFORE the lever is chosen. Checking them against each other means neither a law
+    added to the gate nor a row removed from the doc can drift out of sync silently —
+    which is exactly how the RESTORE law came to be invisible from this file for
+    eight days.
+
+    Returns the names that are gated but undocumented.
+    """
+    ledger = ROOT / "docs/perf_negative_evidence_ledger.md"
+    try:
+        text = ledger.read_text(encoding="utf-8")
+    except OSError:
+        return [name for name, _, _, _ in STANDING_LAWS]
+    section = text.split("## Standing laws", 1)
+    if len(section) == 1:
+        return [name for name, _, _, _ in STANDING_LAWS]
+    body = section[1].split("\n## ", 1)[0]
+    return [name for name, _, _, _ in STANDING_LAWS if name not in body]
+
+
 def violated_standing_laws(title, body):
     """Standing laws this entry triggers without engaging.
 
@@ -1100,6 +1124,11 @@ def self_test():
             len(violated_standing_laws(title, body)) == want,
             f"standing law: {label}",
         ))
+
+    checks.append((
+        standing_laws_documented() == [],
+        "every gated standing law is listed in the ledger's Standing laws section",
+    ))
 
     failed = [name for passed, name in checks if not passed]
     if failed:
