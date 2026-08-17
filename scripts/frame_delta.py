@@ -174,9 +174,23 @@ USAGE = ("Usage: frame_delta.py <dump_dir> [ops] [--top N] [--all] [--by-file]\n
          "       frame_delta.py <dump_dir> --dispatch\n"
          "       frame_delta.py --self-test")
 
-# Frames that are "getting to the command" rather than doing it. Copied VERBATIM from
-# `shape_instr_per_op.py`'s DISPATCH_FRAMES (frankenredis-rzdi8) so the two answer the
-# same question about the same set; if that list moves, move this one with it.
+# Frames that are "getting to the command" rather than doing it. The first block is
+# VERBATIM from `shape_instr_per_op.py`'s DISPATCH_FRAMES (frankenredis-rzdi8); if that
+# list moves, move this one with it.
+#
+# THE SECOND BLOCK IS THIS FILE'S ADDITION, and the first entry in it is the reason to
+# distrust any hand-maintained detector: `classify_borrowed_dispatch_floor_packet_impl`
+# IS the floor classifier -- the central function of the entire front-classification
+# campaign -- and the campaign's own metric was not counting it. Measured per-op on the
+# cgeq5 dumps, the three missing frames are 219.0 instr/op on `SORT_RO ... ALPHA` (7.6%)
+# and 174.0 on `get_control` (58%).
+#
+# THE ASYMMETRY IS THE DANGEROUS PART. These screens RANK commands against each other,
+# and a 58% under-count on a cheap classified route against 7.6% on an expensive generic
+# one systematically EXAGGERATES the gap between them -- which is exactly the quantity
+# the "classified routes sit on a 14-28 pct floor" claim is made of.
+#
+# This list is still hand-maintained, so any number it produces is a FLOOR, not a value.
 DISPATCH_FRAMES = (
     "process_buffered_frames", "execute_frame_internal", "command_table_index",
     "dispatch_with_client_context", "classify_command", "push_ascii_lowercase_lossy",
@@ -185,6 +199,15 @@ DISPATCH_FRAMES = (
     "effective_command_flags", "canonical_command_fullname",
     "dispatch_argv", "acl_permission_error_for_argv", "borrowed_fast_route_key",
     "Utf8Chunks", "resolve_command_spec", "lookup_command",
+    # --- additions (frankenredis-7so0e), each a routing decision made BEFORE any of the
+    # command's semantic work. Post-execution bookkeeping (`record_*_metrics`,
+    # `CommandHistogramTracker`) and background cron (`run_active_expire_cycle`,
+    # `drain_pending_pubsub`) are deliberately NOT here: they are neither dispatch nor
+    # the command, and folding them in would make dispatch absorb the elapsed-time
+    # residue that makes a small shape's A/A wide in the first place.
+    "classify_borrowed_dispatch_floor_packet",   # 157.0 SORT_RO / 112.0 GET
+    "parse_borrowed_dispatch_floor_",            # 51.0, constant across both
+    "parser_config",                             # 11.0, constant across both
 )
 
 
@@ -200,11 +223,13 @@ def dispatch_cost(rows):
     the row, dropping every frame without one from BOTH numerator and denominator.
 
     MEASURED, on the cgeq5 dump pairs: dispatch for `SORT_RO ... ALPHA` is
-    **2,897.0 instr/op, bit-identical across n=3 and n=64 and across the before/after
-    ELFs** -- which is what a per-call constant should look like, and the individual
+    **3,116.0 instr/op, bit-identical across n=3 and n=64 and across the before/after
+    ELFs** (2,897.0 of it on the harness's own frame list, plus the 219.0 that list
+    misses) -- which is what a per-call constant should look like, and the individual
     frames are identical too (execute_frame_internal 457.0, command_table_index 350.0,
     dispatch_with_client_context 330.0, classify_command 304.0, process_buffered_frames
-    280.0, parse_command_args_borrowed_into 250.0). The share method reported 2,535.3 /
+    280.0, parse_command_args_borrowed_into 250.0, classify_borrowed_dispatch_floor_packet
+    157.0). The share method reported 2,535.3 /
     2,048.3 / 3,358.5 / 2,517.9 for those same four arms: wrong by -12.5%, -29.3%,
     +15.9% and -13.1%, in BOTH directions, and it manufactured a 487 instr/op
     "reduction" from a change that never touched dispatch. `get_control` reads 299.0
