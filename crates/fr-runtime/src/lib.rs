@@ -4228,6 +4228,14 @@ pub struct ServerState {
     command_time_budget_ms: u64,
     /// Whether command latency histograms should be recorded for INFO latencystats.
     latency_tracking: bool,
+    /// (frankenredis-fpqns) Reused buffer for the canonical `parent|sub` histogram key of
+    /// CONTAINER commands. byq16 removed the per-command String allocation for ordinary
+    /// commands but left every container command (PUBSUB, CLIENT, OBJECT, MEMORY, ACL,
+    /// CONFIG, XINFO, ...) on `canonical_command_fullname`, which allocates TWO owned
+    /// Strings and runs `format!` on EVERY dispatch. MEASURED: `PUBSUB CHANNELS` is
+    /// 2.20-2.47x behind Redis 7.2.4 with format_inner, core::fmt::write and Utf8Chunks all
+    /// in its top ten frames, for a command that returns an empty array.
+    dispatch_fullname_scratch: String,
     /// Percentiles emitted by INFO latencystats.
     latency_percentiles: Vec<f64>,
     /// Last successful save timestamp (seconds since epoch).
@@ -4408,6 +4416,7 @@ impl Default for ServerState {
             command_time_budget_ms: 5000,
             last_save_time_sec: 0,
             latency_tracking: true,
+            dispatch_fullname_scratch: String::new(),
             latency_percentiles: vec![50.0, 99.0, 99.9],
             aof_path: None,
             aof_incr_file: None,
@@ -4967,9 +4976,23 @@ impl ServerState {
         // (frankenredis-light-cmd-dispatch-overhead-byq16)
         let parent = argv.first().map(Vec::as_slice).unwrap_or(b"");
         if argv.len() > 1 && fr_command::command_has_subcommands_bytes(parent) {
-            let key = canonical_command_fullname(argv);
+            // (frankenredis-fpqns) Build `parent|sub` into a REUSED buffer instead of
+            // `canonical_command_fullname`'s two allocations plus `format!`. Taken out of
+            // `self` and put back so the borrow checker sees no overlap with `self.store`;
+            // the String keeps its capacity, so after the first container command this is
+            // allocation-free. Byte-identical to the helper -- same lowercase pusher, same
+            // `|` separator, and this branch has already established both conditions the
+            // helper re-tests.
+            let mut key = std::mem::take(&mut self.dispatch_fullname_scratch);
+            key.clear();
+            push_ascii_lowercase_lossy(&mut key, parent);
+            key.push('|');
+            if let Some(sub) = argv.get(1) {
+                push_ascii_lowercase_lossy(&mut key, sub);
+            }
             self.store
                 .record_command_histogram_with_kind(&key, duration_us, kind);
+            self.dispatch_fullname_scratch = key;
         } else {
             let name = String::from_utf8_lossy(parent);
             self.store
@@ -4995,9 +5018,18 @@ impl ServerState {
         // String alloc for non-container commands. (frankenredis-byq16)
         let parent = argv.first().map(Vec::as_slice).unwrap_or(b"");
         if argv.len() > 1 && fr_command::command_has_subcommands_bytes(parent) {
-            let key = canonical_command_fullname(argv);
+            // (frankenredis-fpqns) Same reused-buffer build as
+            // record_command_histogram_outcome.
+            let mut key = std::mem::take(&mut self.dispatch_fullname_scratch);
+            key.clear();
+            push_ascii_lowercase_lossy(&mut key, parent);
+            key.push('|');
+            if let Some(sub) = argv.get(1) {
+                push_ascii_lowercase_lossy(&mut key, sub);
+            }
             self.store
                 .record_command_histogram_with_kind(&key, 0, CommandRecordKind::Rejected);
+            self.dispatch_fullname_scratch = key;
         } else {
             let name = String::from_utf8_lossy(parent);
             self.store
@@ -47592,6 +47624,63 @@ pub mod ecosystem {
 
 #[cfg(test)]
 mod tests {
+
+    /// (frankenredis-fpqns) The reused-buffer histogram key must be BYTE-IDENTICAL to the
+    /// `canonical_command_fullname` it replaced, for every container command and on inputs
+    /// that are not ASCII.
+    ///
+    /// THIS IS THE GATE FOR THE WHOLE LEVER. The key becomes an INFO commandstats row name
+    /// (`cmdstat_pubsub|channels`), so a divergence would not error — it would silently
+    /// split or rename a stats row, which no test of PUBSUB's reply would ever notice. The
+    /// non-UTF8 case is included deliberately: the old path went through
+    /// `String::from_utf8_lossy(..).to_ascii_lowercase()` and the new one through
+    /// `push_ascii_lowercase_lossy`, and those are only equivalent if the lossy replacement
+    /// agrees.
+    #[test]
+    fn container_histogram_key_matches_canonical_fullname_byte_for_byte_fpqns() {
+        let argv = |parts: &[&[u8]]| -> Vec<Vec<u8>> { parts.iter().map(|p| p.to_vec()).collect() };
+
+        let cases: Vec<Vec<Vec<u8>>> = vec![
+            argv(&[b"PUBSUB", b"CHANNELS"]),
+            argv(&[b"pubsub", b"numsub", b"ch1"]),
+            argv(&[b"CLIENT", b"INFO"]),
+            argv(&[b"OBJECT", b"ENCODING", b"k"]),
+            argv(&[b"MEMORY", b"USAGE", b"k"]),
+            argv(&[b"ACL", b"WHOAMI"]),
+            argv(&[b"CONFIG", b"GET", b"maxmemory"]),
+            argv(&[b"XINFO", b"STREAM", b"s"]),
+            // Mixed case, and a subcommand that is already lowercase.
+            argv(&[b"PuBsUb", b"ChAnNeLs"]),
+            // Non-ASCII and invalid UTF-8 in the subcommand position.
+            argv(&[b"CLIENT", b"\xc3\xa9TAT"]),
+            argv(&[b"CLIENT", b"\xff\xfe"]),
+        ];
+
+        for a in cases {
+            let parent = a[0].as_slice();
+            assert!(
+                fr_command::command_has_subcommands_bytes(parent),
+                "case must be a container command: {:?}",
+                String::from_utf8_lossy(parent)
+            );
+            // Exactly what the hot path now builds.
+            let mut got = String::new();
+            super::push_ascii_lowercase_lossy(&mut got, parent);
+            got.push('|');
+            if let Some(sub) = a.get(1) {
+                super::push_ascii_lowercase_lossy(&mut got, sub);
+            }
+            let want = super::canonical_command_fullname(&a);
+            assert_eq!(
+                got,
+                want,
+                "histogram key diverged for {:?}",
+                a.iter()
+                    .map(|p| String::from_utf8_lossy(p).into_owned())
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
     use std::time::Instant;
 
     #[test]
