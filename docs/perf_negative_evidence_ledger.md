@@ -33925,3 +33925,72 @@ did not move. Instrument the two call sites with a counter, or diff the callgrin
 between the two shapes — the answer decides whether the remaining 2.19x is more of the same or
 something else entirely. Do not extend this fix to other container commands until that is
 answered; it may be optimising a path they do not take.
+
+--------------------------------------------------------------------------------
+## 2026-08-17 RusticHorizon: MECHANISM RESOLVED for fbe5d999c — the name-building frames are PRESENT in PUBSUB CHANNELS and ABSENT in both "controls", which were front-classified and never executed the path under test (`frankenredis-fpqns`)
+
+Claim class: COMPETITIVE. Campaign output: yes — the underlying ratio is fr vs live vendored
+Redis 7.2.4 in the same invocation; this row resolves WHY it moved, using frame presence
+rather than a new ratio.
+
+`c89800a57` measured −9.76 pct on `PUBSUB CHANNELS` and refused to claim the mechanism,
+because `PUBSUB NUMSUB` takes what looked like the same branch and did not move. Its retry
+predicate said: explain that before believing the allocation/format story. Resolved, and the
+answer is that my control was invalid.
+
+FRAME PRESENCE IS THE EVIDENCE, and it is binary rather than a ratio:
+
+    frame                          pubsub_channels   pubsub_numsub   memory_usage
+    canonical_command_fullname          PRESENT          absent          absent
+    alloc::fmt::format::format_inner    PRESENT          absent          absent
+    core::fmt::write                    PRESENT          absent          absent
+    push_ascii_lowercase_lossy          PRESENT          absent          absent
+
+    dispatch instr/op                    4,314.3          467.7           360.0
+    dispatch share                        42.4 pct       18.7 pct        18.4 pct
+
+BOTH "CONTROLS" ARE FRONT-CLASSIFIED. 467.7 and 360.0 are the borrowed-floor cost — the same
+~263 + ~100/bulk this campaign has measured seven times — against CHANNELS' 4,314.3 on the
+GENERIC route. A front-classified route never reaches the generic metrics path, so it cannot
+pay the canonical-fullname build and cannot benefit from removing it. They did not move
+because the code I changed does not run there.
+
+    SO THE MECHANISM IS CONFIRMED: the −9.76 pct on CHANNELS is the two owned String
+    allocations plus `format!` in `canonical_command_fullname`, and ~994 instr/op is
+    entirely plausible for two lossy-lowercase allocations, the `core::fmt` machinery for a
+    two-argument format, and two frees.
+
+WHAT I GOT WRONG, AND IT IS A CONTROL-DESIGN ERROR, NOT AN ARITHMETIC ONE. I picked
+`pubsub_numsub` as the sibling control because it shares the command FAMILY — same container
+parent, same subcommand shape, same probe. It does not share the CODE PATH. A control has to
+exercise the path under test and differ only in the change; mine differed in the path itself,
+so its silence carried no information and I misread that silence as a refutation.
+
+    THE RULE: choose a control by CODE PATH, not by command family. The dispatch share tells
+    you which path a shape is on before you run anything — a front-classified route reads
+    ~260-660 instr/op of dispatch, a generic one reads thousands. Both of my controls
+    announced themselves as the wrong path in a number I had already printed and not read.
+
+SCOPE OF THE FIX, now that the path is understood: it benefits container commands that take
+the GENERIC route. Among every shape in the corpus, that is `pubsub_channels` alone —
+`memory_usage` and `pubsub_numsub` are front-classified, and the other container commands
+have no shape at all. So the fix is correct and its measured benefit is real, but its blast
+radius is one measured command until someone adds shapes for CLIENT/OBJECT/ACL/CONFIG/XINFO
+and checks which of those are still generic.
+
+WHAT DOES NOT CHANGE: `PUBSUB CHANNELS` is still 2.19x behind. The name build was ~10 pct of
+it. The remaining ~2.1x is unattributed and `frankenredis-fpqns` stays open.
+
+PROVENANCE: no new build; the BEFORE binary from `c89800a57` (ELF 34de94bf315b3f01) was
+reused, and the frame comparison is callgrind `--fr-only` dumps of three shapes on that one
+binary. Incumbent verified in-run on the ratio arms: sha=d2c8a4b9 == vendored HEAD.
+  host          thinkstation1, 64 cores, powersave, /data 123G, ONE PEER BUILD running.
+  PER-ARM loadavg/MHz  channels dump 14.65/—, numsub dump 14.65/—, memory_usage before
+                23.71/3121 and after 23.71/2463. Window 1/5/15 = 14.65/17.01/15.99 rising to
+                23.71 as a peer build ramped. No certification is claimed here: this row is
+                frame PRESENCE, which a loaded host cannot alter.
+
+RETRY PREDICATE: `fpqns` stays open on the remaining ~2.1x, and the next step is to attribute
+THAT, not to extend this fix. Before adding the same buffer to other container commands,
+check their dispatch share first — if it reads a few hundred instr/op they are
+front-classified and the change is dead code for them.
