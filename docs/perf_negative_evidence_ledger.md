@@ -34994,6 +34994,23 @@ RespFrame teardown that is about 23.6 pct. So the mechanism behind the confirmed
 hardware stall (IPC 1.387 vs 1.818, L1 miss rate 3.02 pct vs 1.92 pct) is PER-OP
 ALLOCATION, not the collection walk.
 
+PRECISION CORRECTION TO THE PARAGRAPH ABOVE, made the same day rather than left to
+mislead. "Neither function appears in the top seven" is true of SELF cost and reads as
+though the walk is irrelevant. It is not: the caller-callee edge
+`zset_for_each_in_score_ranges::<geo_search_core::{closure#0}>` carries **19,586 D1mr,
+17.11 pct of the total, at 4,000 calls — exactly one per op**. That is INCLUSIVE cost,
+so the misses happen INSIDE the walk, in the closure it drives. The correct statement is
+therefore narrower than my retraction: the walk's OWN memory access is not the problem,
+but it is the path through which the allocation-heavy candidate collection is reached,
+and 17.11 pct of all L1 read misses flow through it. A locality fix belongs in the
+callee (`geo_collect_candidate` and its allocations), not in the iterator — which is
+what the self-cost ranking was telling me, and what the inclusive number does NOT
+contradict.
+
+Reading self-cost and inclusive-cost as if they were the same column is how a caller
+gets exonerated or blamed wrongly. Both are quoted here so neither reading is available
+on its own.
+
 TWO THINGS I CHECKED AND DID NOT "FIX", recorded so the next person does not repeat
 them:
   * `zset_for_each_in_score_ranges` does `entries.contains_key(key)` and then
@@ -35004,6 +35021,31 @@ them:
   * `acl_permission_error_for_argv` (3.50 pct) early-returns `None` on the permit path,
     so it allocates nothing there; its misses are pointer-chasing the ACL rule
     structures, which is inherent to having rules rather than a lever.
+
+ALLOCATION CENSUS, and it REDIRECTS THE LEVER AGAIN — "reduce allocations" is not
+obviously right, because fr already allocates far less. Counted from the same dumps by
+two-point subtraction, using ONE canonical outermost entry per engine:
+
+    fr     `__rust_alloc`                     9.0 allocations per op
+    fr     all `__rust_*` entries             9.0   (realloc/zeroed negligible)
+    redis  `zmalloc` / `ztrymalloc_usable`   25.8 allocations per op
+
+**fr allocates about 2.9x FEWER times than redis and still has a 1.57x worse L1 miss
+rate.** So the deficit is not allocation VOLUME. It is the locality of the specific
+allocations fr does make — what is allocated, how large, how fresh — or allocator
+behaviour under mimalloc versus redis's jemalloc. A lever that simply removes
+allocations from the geo path may therefore buy less than the 14.63 pct allocator miss
+share suggests, and anyone taking it should measure misses rather than counting
+malloc calls.
+
+A FIRST COUNT OF MINE THAT I DISCARDED, so it is not repeated: grepping every
+alloc-ish frame gave fr 59.2 versus redis 128.8 per op. That is NOT comparable across
+engines — the pattern catches nested allocator internals, and mimalloc's
+(`mi_theap_malloc_aligned` calling `_mi_page_malloc_zero`) nest differently from
+jemalloc's, so it double-counts unevenly. Only an outermost-entry count is comparable.
+The caveat that remains on the 9.0 vs 25.8 figures: `zmalloc` is redis's wrapper and
+any allocation bypassing it is uncounted, so treat the ratio as approximate and the
+direction as solid.
 
 THE NAMED TARGET, for whoever holds the file: `fr_command::geo_collect_candidate` at
 5.90 pct of misses, plus whatever allocations it drives through mimalloc. I could not
