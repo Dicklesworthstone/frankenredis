@@ -19831,7 +19831,13 @@ pub fn command_has_acl_subcommands(parent: &str) -> bool {
 /// +16.0 instr/op REGRESSION on PUBSUB CHANNELS. Both answers fall out of one lookup, so a
 /// caller that needs both must take them together.
 ///
-/// Returns `(canonical, arity_ok)`.
+/// Returns `(canonical, full_arity_ok, parent_arity_ok)`.
+///
+/// (frankenredis-z5bc2) The PARENT-only verdict is returned separately because the ACL path
+/// needs exactly that and not the full one: `permission_error_for_set` suppresses an ACL
+/// denial when the command's own arity is wrong, and a container whose SUBCOMMAND arity is
+/// wrong must still be ACL-checked. Collapsing the two would change that behaviour, so they
+/// are handed out separately rather than the caller guessing which it holds.
 ///
 /// `arity_ok` is EXACTLY [`check_full_command_arity`]`(argv).is_ok()`, including its
 /// deliberate quirk: an UNKNOWN subcommand is NOT an arity failure — dispatch reports the
@@ -19844,31 +19850,36 @@ pub fn command_has_acl_subcommands(parent: &str) -> bool {
 /// Pinned against BOTH originals, on the same inputs, by
 /// `resolve_command_name_and_arity_matches_both_originals_dpu2y`.
 #[must_use]
-pub fn resolve_command_name_and_arity(argv: &[Vec<u8>]) -> (Option<&'static str>, bool) {
+pub fn resolve_command_name_and_arity(argv: &[Vec<u8>]) -> (Option<&'static str>, bool, bool) {
     let Some(name) = argv.first() else {
-        return (None, false);
+        return (None, false, false);
     };
     let parent_ok = check_command_arity(name, argv.len()).is_ok();
     if argv.len() >= 2 && command_has_subcommands_bytes(name) {
         let mut key_buf = [0u8; 64];
         let Some(key) = write_container_key(&mut key_buf, name, &argv[1]) else {
             // Key too long to be any entry: the same fall-through both originals take.
-            return (None, parent_ok);
+            return (None, parent_ok, parent_ok);
         };
         return match subcommand_table_index(key) {
             Some(i) => {
                 let (cmd_name, arity, ..) = SUBCOMMAND_TABLE[i];
                 let argc = argv.len() as i64;
-                let sub_ok = if arity > 0 { argc == arity } else { argc >= -arity };
-                (Some(cmd_name), parent_ok && sub_ok)
+                let sub_ok = if arity > 0 {
+                    argc == arity
+                } else {
+                    argc >= -arity
+                };
+                (Some(cmd_name), parent_ok && sub_ok, parent_ok)
             }
             // Unknown SUBCOMMAND: canonical is None (upstream's lookupSubcommand misses),
             // but arity is NOT failed — that is check_full_command_arity's documented rule.
-            None => (None, parent_ok),
+            None => (None, parent_ok, parent_ok),
         };
     }
     (
         command_table_index(name).map(|i| COMMAND_TABLE[i].0),
+        parent_ok,
         parent_ok,
     )
 }
@@ -30740,28 +30751,33 @@ mod tests {
         let argv = |parts: &[&str]| -> Vec<Vec<u8>> {
             parts.iter().map(|p| p.as_bytes().to_vec()).collect()
         };
+        // Ordered to cover, in turn: a plain known command; case variants; wrong arity
+        // (too few, then too many); a container subcommand and its variadic form; a bare
+        // container at argc 1; a known subcommand with wrong arity; a known parent with an
+        // UNKNOWN subcommand; DEBUG, which upstream does NOT treat as a container; unknown
+        // top-level names with and without an argument; and the empty name.
         let cases: &[&[&str]] = &[
             &["GET", "k"],
             &["get", "k"],
             &["gEt", "k"],
-            &["GET"],                       // known, wrong arity
-            &["GET", "k", "extra"],         // known, too many
+            &["GET"],
+            &["GET", "k", "extra"],
             &["PUBSUB", "CHANNELS"],
-            &["pubsub", "channels", "pat"], // variadic subcommand
-            &["CONFIG"],                    // container, argc == 1
-            &["CONFIG", "GET"],             // known sub, wrong arity
+            &["pubsub", "channels", "pat"],
+            &["CONFIG"],
+            &["CONFIG", "GET"],
             &["CONFIG", "GET", "maxmemory"],
-            &["CLIENT", "BOGUS"],           // known parent, UNKNOWN sub
+            &["CLIENT", "BOGUS"],
             &["CLIENT", "INFO"],
             &["OBJECT", "ENCODING", "k"],
-            &["BOGUS"],                     // unknown top-level
+            &["BOGUS"],
             &["BOGUS", "ARG"],
-            &["DEBUG", "SLEEP", "0"],       // NOT a container upstream
+            &["DEBUG", "SLEEP", "0"],
             &[""],
         ];
         for parts in cases {
             let a = argv(parts);
-            let (name, arity_ok) = super::resolve_command_name_and_arity(&a);
+            let (name, arity_ok, parent_ok) = super::resolve_command_name_and_arity(&a);
             assert_eq!(
                 name,
                 super::canonical_command_name(&a),
@@ -30772,14 +30788,29 @@ mod tests {
                 super::check_full_command_arity(&a).is_ok(),
                 "arity mismatch for {parts:?}"
             );
+            // (frankenredis-z5bc2) The parent-only verdict must match the function the ACL
+            // path calls, which is check_command_arity on argv[0] alone.
+            let expect_parent = a
+                .first()
+                .is_some_and(|n| super::check_command_arity(n, a.len()).is_ok());
+            assert_eq!(
+                parent_ok, expect_parent,
+                "parent arity mismatch for {parts:?}"
+            );
         }
         // The empty argv, which neither original is called with in production but both
         // define: no name, and arity cannot pass.
         let empty: Vec<Vec<u8>> = Vec::new();
-        assert_eq!(super::resolve_command_name_and_arity(&empty), (None, false));
+        assert_eq!(
+            super::resolve_command_name_and_arity(&empty),
+            (None, false, false)
+        );
         // Spot-check the quirk directly, so a future merge cannot "fix" it silently.
         let cb = argv(&["CLIENT", "BOGUS"]);
-        assert_eq!(super::resolve_command_name_and_arity(&cb), (None, true));
+        assert_eq!(
+            super::resolve_command_name_and_arity(&cb),
+            (None, true, true)
+        );
     }
 
     #[test]

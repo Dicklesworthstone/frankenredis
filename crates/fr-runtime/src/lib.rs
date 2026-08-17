@@ -2474,7 +2474,11 @@ impl AclUser {
     /// (frankenredis-d919b) Whether THIS single permission set (root or one
     /// selector) grants `argv` — the command together with all its keys and
     /// channels. Returns the first denial, or `None` when fully granted.
-    fn permission_error_for_set(&self, argv: &[Vec<u8>]) -> Option<AclCommandPermissionError> {
+    fn permission_error_for_set(
+        &self,
+        argv: &[Vec<u8>],
+        parent_arity_ok: Option<bool>,
+    ) -> Option<AclCommandPermissionError> {
         let Some(cmd) = argv.first() else {
             return Some(AclCommandPermissionError::Command);
         };
@@ -2483,7 +2487,16 @@ impl AclUser {
             return Some(AclCommandPermissionError::Command);
         }
 
-        if fr_command::check_command_arity(cmd, argv.len()).is_err() {
+        // (frankenredis-z5bc2) Reuse the parent-arity verdict resolved once per dispatch
+        // rather than looking the command up again. MEASURED: `command_table_index` ran
+        // 4.00 times per command on pubsub_channels at ~124 instr each, and THREE of those
+        // were `check_command_arity` calls from three separate consumers re-deriving the
+        // same answer from the same argv. `None` means nobody resolved it for us — the EXEC
+        // path and ACL DRYRUN both reach here without going through execute_dispatch — so
+        // we compute it exactly as before.
+        let arity_ok = parent_arity_ok
+            .unwrap_or_else(|| fr_command::check_command_arity(cmd, argv.len()).is_ok());
+        if !arity_ok {
             return None;
         }
 
@@ -2514,7 +2527,11 @@ impl AclUser {
     /// permitted when the ROOT permission set OR ANY selector grants the command
     /// together with its keys and channels (selectors are purely additive). When
     /// every set denies, the root set's denial is reported.
-    fn acl_permission_error_for_argv(&self, argv: &[Vec<u8>]) -> Option<AclCommandPermissionError> {
+    fn acl_permission_error_for_argv(
+        &self,
+        argv: &[Vec<u8>],
+        parent_arity_ok: Option<bool>,
+    ) -> Option<AclCommandPermissionError> {
         // Permit when the root set OR any selector grants the command with its
         // keys and channels; otherwise report the DEEPEST denial (a set that
         // granted the command but failed a key/channel surfaces as a key/channel
@@ -2526,7 +2543,7 @@ impl AclUser {
         };
         let mut best: Option<AclCommandPermissionError> = None;
         for set in std::iter::once(self).chain(self.selectors.iter()) {
-            let err = set.permission_error_for_set(argv)?;
+            let err = set.permission_error_for_set(argv, parent_arity_ok)?;
             let take = best.as_ref().is_none_or(|prev| depth(&err) > depth(prev));
             if take {
                 best = Some(err);
@@ -8535,7 +8552,11 @@ impl Runtime {
         self.session.is_authenticated()
     }
 
-    fn acl_permission_error(&self, argv: &[Vec<u8>]) -> Option<AclCommandPermissionError> {
+    fn acl_permission_error(
+        &self,
+        argv: &[Vec<u8>],
+        parent_arity_ok: Option<bool>,
+    ) -> Option<AclCommandPermissionError> {
         let username = self.session.current_user_name();
         let Some(user) = self.server.auth_state.get_user(username) else {
             // User was deleted while session is still active. In Redis, the
@@ -8544,7 +8565,7 @@ impl Runtime {
             return None;
         };
 
-        user.acl_permission_error_for_argv(argv)
+        user.acl_permission_error_for_argv(argv, parent_arity_ok)
     }
 
     #[must_use]
@@ -36783,6 +36804,11 @@ impl Runtime {
         // stale on that path. `None` there means "resolve it yourself", which is what it did
         // before.
         let mut resolved_arity_ok: Option<bool> = None;
+        // (frankenredis-z5bc2) The PARENT-only verdict, carried separately for the ACL path.
+        // `permission_error_for_set` suppresses an ACL denial when the command's OWN arity is
+        // wrong, so it must not see the full parent+subcommand verdict: a container with a bad
+        // SUBCOMMAND arity still has to be ACL-checked.
+        let mut resolved_parent_arity_ok: Option<bool> = None;
         // argv was materialized once by the caller (cloned from a borrowed frame
         // on the owned/conformance path, or moved out of the parsed frame on the
         // server hot path) and reused for both stats and execution.
@@ -36792,9 +36818,11 @@ impl Runtime {
             // keeps `c->lastcmd` as a POINTER and prints `lastcmd->fullname`, so this is
             // the same representation, and `None` reproduces upstream's NULL for a command
             // the table does not have (frankenredis-zbiy3).
-            let (canonical, arity_ok) = fr_command::resolve_command_name_and_arity(argv);
+            let (canonical, arity_ok, parent_ok) =
+                fr_command::resolve_command_name_and_arity(argv);
             self.session.last_command_name = canonical;
             resolved_arity_ok = Some(arity_ok);
+            resolved_parent_arity_ok = Some(parent_ok);
             // Upstream `argv_len_sum` (CLIENT INFO `argv-mem`): byte-length sum
             // of the live command's args. (frankenredis-clargvmem)
             self.session.last_argv_len_sum = argv.iter().map(Vec::len).sum();
@@ -36822,6 +36850,7 @@ impl Runtime {
                 packet_id,
                 unix_time_us,
                 resolved_arity_ok,
+                resolved_parent_arity_ok,
             )
         });
         if let RespFrame::Error(msg) = &reply {
@@ -37083,6 +37112,7 @@ impl Runtime {
         packet_id: u64,
         unix_time_us: Option<u64>,
         resolved_arity_ok: Option<bool>,
+        resolved_parent_arity_ok: Option<bool>,
     ) -> RespFrame {
         // Use pre-parsed argv if available, avoiding duplicate parsing.
         let argv = match argv_result {
@@ -37236,7 +37266,7 @@ impl Runtime {
             return reply;
         }
 
-        if let Some(permission_error) = self.acl_permission_error(argv) {
+        if let Some(permission_error) = self.acl_permission_error(argv, resolved_parent_arity_ok) {
             // Upstream rejects a command-level ACL denial with the authenticated
             // username and the command's canonical lowercase fullname (e.g.
             // `User u has no permissions to run the 'config|get' command`).
@@ -38891,6 +38921,7 @@ impl Runtime {
                     // resolved the command yet: the gate resolves it itself, exactly as
                     // before this parameter existed.
                     None,
+                    None,
                 )
                 .to_bytes()
             }
@@ -40093,7 +40124,7 @@ impl Runtime {
                     // canonical lowercase `cmd->fullname`. On success
                     // upstream replies `+OK\r\n`. (br-frankenredis-faqe)
                     let user_name_str = String::from_utf8_lossy(username);
-                    match u.acl_permission_error_for_argv(dryrun_argv) {
+                    match u.acl_permission_error_for_argv(dryrun_argv, None) {
                         None => RespFrame::SimpleString("OK".to_string()),
                         Some(AclCommandPermissionError::Command) => {
                             self.record_acl_log_event(
@@ -47122,7 +47153,7 @@ replica_announced:1\r\n",
         );
 
         for argv in &queued {
-            if let Some(permission_error) = self.acl_permission_error(argv) {
+            if let Some(permission_error) = self.acl_permission_error(argv, None) {
                 let command_name = String::from_utf8_lossy(&argv[0]).into_owned();
                 // Command-level denial uses the username + canonical lowercase
                 // fullname, matching upstream. (frankenredis-1ktss)
