@@ -819,7 +819,26 @@ PASSES: dict[str, float] = {}
 
 
 def _eventloop_cycles(sock) -> int | None:
-    """Read `eventloop_cycles` from INFO stats, or None if the engine omits it."""
+    """Read `eventloop_cycles` from INFO stats, or None if the engine omits it.
+
+    (frankenredis-gein3) THE COMPARABILITY OF THIS FIELD IS SOURCE-VERIFIED, because a
+    `passes per op` ratio between two engines is meaningless if they count a "pass" at
+    different granularities, and this harness has published a 1,700x difference on it:
+
+      redis  server.c:1760 `durationAddSample(EL_DURATION_TYPE_EL, el_duration)` — once
+             per event-loop iteration, in the beforeSleep/afterSleep pair.
+      fr     main.rs:5438 `runtime.record_eventloop_cycle(..)` — ONE call site, in the
+             main loop body, once per iteration.
+
+    Both are once-per-iteration, so the ratio is real rather than an artefact of where
+    the counter sits. IF A SECOND fr CALL SITE EVER APPEARS, or that one moves inside an
+    inner loop, every `passes per op` row in the ledger silently becomes wrong — check
+    this before trusting a pass-count comparison.
+
+    Returns None, never 0, when the field is absent or unparseable: a silent zero would
+    read as "this engine never cycles", which is the most flattering possible answer and
+    would be indistinguishable from a genuinely tight loop.
+    """
     sock.sendall(resp("INFO", "stats"))
     buf = b""
     while b"\r\n\r\n" not in buf and not buf.endswith(b"\r\n"):
@@ -836,6 +855,61 @@ def _eventloop_cycles(sock) -> int | None:
             except ValueError:
                 return None
     return None
+
+
+class _FakeSock:
+    """Minimal socket stand-in for `_eventloop_cycles`: replays a canned INFO reply."""
+
+    def __init__(self, payload: bytes):
+        self._payload = payload
+        self._sent = False
+
+    def sendall(self, _data):
+        return None
+
+    def recv(self, _n):
+        if self._sent:
+            return b""
+        self._sent = True
+        return self._payload
+
+
+def _selftest_eventloop_cycles() -> None:
+    """Guard the contract the `passes per op` metric rests on.
+
+    The failure this exists for is NOT a crash: it is `_eventloop_cycles` returning 0
+    instead of None when a field is missing, which would report an engine as doing zero
+    event-loop passes — the most flattering answer available, and one that looks like a
+    real result rather than a parse failure.
+    """
+    ok = _eventloop_cycles(_FakeSock(b"# Stats\r\neventloop_cycles:12345\r\n"))
+    assert ok == 12345, ok
+
+    # Field present among many, with the interesting neighbours upstream also emits.
+    many = (
+        b"# Stats\r\nexpired_keys:3\r\neventloop_cycles:77\r\n"
+        b"eventloop_duration_sum:900\r\ninstantaneous_eventloop_cycles_per_sec:4\r\n"
+    )
+    assert _eventloop_cycles(_FakeSock(many)) == 77
+
+    # Upstream's real neighbour: `instantaneous_eventloop_cycles_per_sec` contains
+    # `eventloop_cycles` as a substring. It is safe for a simple reason -- the colon
+    # disambiguates -- so on its own it does NOT test prefix-vs-substring matching, and
+    # claiming it did would be a test that names an invariant without exercising it.
+    only_instantaneous = b"# Stats\r\ninstantaneous_eventloop_cycles_per_sec:4\r\n"
+    assert _eventloop_cycles(_FakeSock(only_instantaneous)) is None
+
+    # THIS is the case that discriminates: a field ENDING in the name we want, colon and
+    # all. A prefix match rejects it; a substring match would return 9 and silently report
+    # another engine's counter as ours. Verified by mutation: relaxing the check to
+    # `b"eventloop_cycles:" in line` reddens here and nowhere else.
+    suffixed = b"# Stats\r\nshard_eventloop_cycles:9\r\n"
+    assert _eventloop_cycles(_FakeSock(suffixed)) is None
+
+    # Absent, empty and unparseable must all be None -- never 0.
+    assert _eventloop_cycles(_FakeSock(b"# Stats\r\nexpired_keys:3\r\n")) is None
+    assert _eventloop_cycles(_FakeSock(b"")) is None
+    assert _eventloop_cycles(_FakeSock(b"# Stats\r\neventloop_cycles:abc\r\n")) is None
 
 
 def run_once(engine: str, seeds, cmd, ops: int, workdir: str, tag: str,
@@ -1016,7 +1090,8 @@ def instr_per_op(engine: str, seeds, cmd, ops: int, workdir: str, label: str,
 
 
 def selftest() -> int:
-    """Prove the reply counter on the streams that broke the old CRLF count.
+    """Prove the reply counter on the streams that broke the old CRLF count, and the
+    `eventloop_cycles` parser contract the `passes per op` metric rests on.
 
     Each case carries the count the OLD `chunk.count(b"\\r\\n")` would have
     produced, so the test shows the defect rather than only asserting the fix:
@@ -1061,6 +1136,8 @@ def selftest() -> int:
         print("  %-26s FAIL: counted an incomplete reply" % "truncated reply")
     else:
         print("  %-26s replies=0 (correctly withheld until complete)  ok" % "truncated reply")
+    _selftest_eventloop_cycles()
+    print("  %-26s None-not-zero contract  ok" % "eventloop_cycles parser")
     print("selftest: %d case(s) failed" % failures)
     return 1 if failures else 0
 
