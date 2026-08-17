@@ -14606,6 +14606,14 @@ enum BorrowedDispatchFloorClass {
     SetOpt4,
     SetOpt5,
     SetOpt6,
+    /// (frankenredis-ozrro) `RENAMENX src dst` at arity 3. Second measurement pass over
+    /// the blind-spot list: 1.5361x with a 69.0 pct dispatch share, the HIGHEST share this
+    /// campaign has recorded. Parser, executor, gate and metrics all existed already.
+    Renamenx,
+    /// (frankenredis-ozrro) `SUBSTR key start end` at arity 4 — upstream's GETRANGE alias,
+    /// which is why it has its own token. 1.2809x with a 62.9 pct dispatch share, and the
+    /// borrowed machinery already existed.
+    Substr,
     /// (frankenredis-ozrro) `HINCRBY key field increment` at arity 4. Found by measuring
     /// the blind-spot shapes: 1.2944x with a 63.2 pct dispatch share and 4,343.6 instr/op
     /// of it, second only to SMOVE's 4,438 before that was fixed. Parser, executor, gate
@@ -15051,6 +15059,8 @@ enum BorrowedDispatchFloorCommand {
     Rpoplpush,
     Ltrim,
     Hincrby,
+    Renamenx,
+    Substr,
     Msetnx,
     Append,
     Bitcount,
@@ -15289,6 +15299,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             _ => None,
         },
         6 => match uppercase_ascii_token::<6>(token)? {
+            [b'S', b'U', b'B', b'S', b'T', b'R'] => Some(BorrowedDispatchFloorCommand::Substr),
             [b'L', b'P', b'U', b'S', b'H', b'X'] => Some(BorrowedDispatchFloorCommand::Lpushx),
             [b'R', b'P', b'U', b'S', b'H', b'X'] => Some(BorrowedDispatchFloorCommand::Rpushx),
             [b'D', b'B', b'S', b'I', b'Z', b'E'] => Some(BorrowedDispatchFloorCommand::Dbsize),
@@ -15414,6 +15425,9 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             _ => None,
         },
         8 => match uppercase_ascii_token::<8>(token)? {
+            [b'R', b'E', b'N', b'A', b'M', b'E', b'N', b'X'] => {
+                Some(BorrowedDispatchFloorCommand::Renamenx)
+            }
             [b'E', b'X', b'P', b'I', b'R', b'E', b'A', b'T'] => {
                 Some(BorrowedDispatchFloorCommand::Expireat)
             }
@@ -16497,6 +16511,10 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // served, which is the condition the floor-class rule actually requires.
         (4, BorrowedDispatchFloorCommand::Smove) => Some(BorrowedDispatchFloorClass::Smove),
         (4, BorrowedDispatchFloorCommand::Ltrim) => Some(BorrowedDispatchFloorClass::Ltrim),
+        (3, BorrowedDispatchFloorCommand::Renamenx) => {
+            Some(BorrowedDispatchFloorClass::Renamenx)
+        }
+        (4, BorrowedDispatchFloorCommand::Substr) => Some(BorrowedDispatchFloorClass::Substr),
         (4, BorrowedDispatchFloorCommand::Hincrby) => {
             Some(BorrowedDispatchFloorClass::Hincrby)
         }
@@ -17800,29 +17818,24 @@ fn try_dispatch_floor_classified_action(
         // Branch order inside each arm is by expected frequency, because in a chained arm
         // every later branch pays each earlier failed parse (measured at 40-50 instr/op
         // per non-inlined parser call): NX before XX, and EX before GET before EXAT.
+        // (frankenredis-f2zrr) ONE parse of the shared 3-bulk prefix, then a branch on the
+        // option token, replacing a chain that re-parsed the whole prefix to reach XX.
+        // Semantics are unchanged arm-for-arm: the same two executors, the same
+        // FastOkReply/FastReply/generic-fallthrough outcomes, the same refusal of every
+        // other *4 SET option.
         BorrowedDispatchFloorClass::SetOpt4 => {
-            if let Some(packet) = parse_borrowed_plain_set_nx_packet(unparsed, &parser_config) {
-                match runtime.execute_plain_set_nx_borrowed(packet.key, packet.value, ts) {
-                    Some(None) => Ok(BorrowedMultibulkAction::FastOkReply {
-                        consumed: packet.consumed,
-                    }),
-                    Some(Some(response)) => Ok(BorrowedMultibulkAction::FastReply {
-                        consumed: packet.consumed,
-                        response,
-                    }),
-                    None => parse_borrowed_multibulk_action(
-                        unparsed,
-                        parser_config,
-                        runtime,
-                        ts,
-                        out,
-                        argv_scratch,
-                    ),
-                }
-            } else if let Some(packet) =
-                parse_borrowed_plain_set_xx_packet(unparsed, &parser_config)
+            if let Some((packet, which)) =
+                parse_borrowed_plain_set_opt4_packet(unparsed, &parser_config)
             {
-                match runtime.execute_plain_set_xx_borrowed(packet.key, packet.value, ts) {
+                let outcome = match which {
+                    BorrowedPlainSetOpt4::Nx => {
+                        runtime.execute_plain_set_nx_borrowed(packet.key, packet.value, ts)
+                    }
+                    BorrowedPlainSetOpt4::Xx => {
+                        runtime.execute_plain_set_xx_borrowed(packet.key, packet.value, ts)
+                    }
+                };
+                match outcome {
                     Some(None) => Ok(BorrowedMultibulkAction::FastOkReply {
                         consumed: packet.consumed,
                     }),
@@ -17987,6 +18000,57 @@ fn try_dispatch_floor_classified_action(
                         argv_scratch,
                     )
                 }
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Renamenx => {
+            // (frankenredis-ozrro) Same parser and executor the cascade arm used; only the
+            // position changes, so the reply and every side effect are unchanged and a
+            // declining executor still reaches the generic path. RENAMENX is arity 3 and
+            // nothing else in the cascade parses a RENAMENX packet. RENAME is a DIFFERENT,
+            // shorter token and is unaffected.
+            if let Some(packet) = parse_borrowed_plain_renamenx_packet(unparsed, &parser_config)
+                && let Some(response) =
+                    runtime.execute_plain_renamenx_borrowed(packet.key, packet.member, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Substr => {
+            // (frankenredis-ozrro) As above. SUBSTR is upstream's GETRANGE alias with its
+            // own name, so GETRANGE keeps its own route and is unaffected by this entry.
+            if let Some(packet) = parse_borrowed_plain_substr_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_substr_borrowed(
+                    packet.key,
+                    packet.start,
+                    packet.end,
+                    ts,
+                )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,
@@ -28834,6 +28898,68 @@ fn parse_borrowed_plain_set_xx_packet<'a>(
         key,
         value,
     })
+}
+
+/// (frankenredis-f2zrr) Which set-if-condition an arity-4 `SET` carried.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum BorrowedPlainSetOpt4 {
+    Nx,
+    Xx,
+}
+
+// (frankenredis-f2zrr) FUSES the two same-arity SetOpt4 siblings into ONE pass.
+//
+// parse_borrowed_plain_set_nx_packet and parse_borrowed_plain_set_xx_packet are
+// byte-identical except for their final eq_ignore_ascii_case on the option token, and the
+// SetOpt4 arm chained them. So `SET k v XX` re-parsed the ENTIRE 3-bulk prefix — header,
+// key, value — only to reach a different two-byte compare. MEASURED against its own
+// first-in-group sibling rather than against a cost model: set_nx_opt pays 450.7 instr/op
+// of dispatch and set_xx_opt pays 733.9, an excess of 283.2 that is precisely one
+// duplicated 3-bulk parse.
+//
+// Parsing the prefix ONCE and branching on the token afterwards is why this is a fusion
+// and not a reordering: swapping the arms would move the same 283 instr onto NX, whereas
+// this removes it. set_nx_opt is the null that tells those two apart.
+//
+// The claim is exactly what the two parsers claimed together and no wider: an *4 SET whose
+// option token is NX or XX, either case. Every other option (GET/EX/PX/KEEPTTL/EXAT/PXAT)
+// and every malformed token still returns None and falls to the generic path.
+fn parse_borrowed_plain_set_opt4_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<(BorrowedPlainSetPacket<'a>, BorrowedPlainSetOpt4)> {
+    if config.max_array_len < 4 || config.max_bulk_len < b"SET".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*4\r\n$3\r\n").and_then(|rest| {
+        rest.get(..3)
+            .filter(|command| command.eq_ignore_ascii_case(b"SET"))
+            .map(|_| input.len() - rest.len() + 3)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (value, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (opt, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    // LENGTH IS CHECKED BY eq_ignore_ascii_case, which compares slice lengths first, so a
+    // longer token beginning "NX" (e.g. "NXX") is refused rather than truncated.
+    let which = if opt.eq_ignore_ascii_case(b"NX") {
+        BorrowedPlainSetOpt4::Nx
+    } else if opt.eq_ignore_ascii_case(b"XX") {
+        BorrowedPlainSetOpt4::Xx
+    } else {
+        return None;
+    };
+    Some((
+        BorrowedPlainSetPacket {
+            consumed,
+            key,
+            value,
+        },
+        which,
+    ))
 }
 
 // (frankenredis-setnxexfast) Byte-prefix fast path for `SET key value NX EX|PX time`
@@ -45806,28 +45932,6 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         );
     }
 
-    /// (frankenredis-p98mw) TOUCH and MSETNX claim ONE arity each, and the arities on
-    /// either side must keep walking.
-    ///
-    /// THE NEGATIVE CASE IS THE POINT. Both commands are variadic upstream but only
-    /// their smallest form has a borrowed parser, so a `>=` claim would capture the
-    /// wider calls, the arm would decline them, and a floor decline goes to GENERIC
-    /// rather than back to the cascade — strictly worse than never claiming them. That
-    /// is the `arity >= 3` defect in its original form (opmo4, xqqwv), and a test that
-    /// only checked the claimed arity would pass happily while the regression shipped.
-    #[test]
-    /// (frankenredis-p98mw) ZRANK / ZREVRANK claim arity 3 AND 4, and nothing wider.
-    ///
-    /// Written to the discipline the TOUCH defect taught: the corpus runs ONE ARITY
-    /// PAST the claimed set, because a test that only covers the claimed arities cannot
-    /// detect an exclusion. TOUCH passed its own test at 3.2848x behind the incumbent
-    /// for exactly that reason.
-    ///
-    /// The arity-4 arm additionally guards on the WITHSCORE keyword -- key_arg2 is
-    /// positional and accepts ANY fourth argument, so the guard, not the parser, is what
-    /// keeps a bogus option on the generic path. That is asserted separately below,
-    /// because a parser check alone would pass with the guard deleted.
-    #[test]
     /// (frankenredis-f2zrr) BITCOUNT claims arities 2, 4 and 5 — and nothing else.
     ///
     /// Covered on BOTH sides of the claimed set, not just inside it. Arity 3 sits in a
@@ -45903,6 +46007,18 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         }
     }
 
+    /// (frankenredis-p98mw) ZRANK / ZREVRANK claim arity 3 AND 4, and nothing wider.
+    ///
+    /// Written to the discipline the TOUCH defect taught: the corpus runs ONE ARITY
+    /// PAST the claimed set, because a test that only covers the claimed arities cannot
+    /// detect an exclusion. TOUCH passed its own test at 3.2848x behind the incumbent
+    /// for exactly that reason.
+    ///
+    /// The arity-4 arm additionally guards on the WITHSCORE keyword -- key_arg2 is
+    /// positional and accepts ANY fourth argument, so the guard, not the parser, is what
+    /// keeps a bogus option on the generic path. That is asserted separately below,
+    /// because a parser check alone would pass with the guard deleted.
+    #[test]
     fn zrank_family_claims_arity_three_and_four_only() {
         let cfg = ParserConfig::default();
         let pkt = |name: &[u8], extra: Option<&[u8]>| -> Vec<u8> {
@@ -45976,6 +46092,16 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         }
     }
 
+    /// (frankenredis-p98mw) TOUCH and MSETNX claim ONE arity each, and the arities on
+    /// either side must keep walking.
+    ///
+    /// THE NEGATIVE CASE IS THE POINT. Both commands are variadic upstream but only
+    /// their smallest form has a borrowed parser, so a `>=` claim would capture the
+    /// wider calls, the arm would decline them, and a floor decline goes to GENERIC
+    /// rather than back to the cascade — strictly worse than never claiming them. That
+    /// is the `arity >= 3` defect in its original form (opmo4, xqqwv), and a test that
+    /// only checked the claimed arity would pass happily while the regression shipped.
+    #[test]
     fn touch_and_msetnx_claim_exactly_the_arity_their_parser_serves() {
         let cfg = ParserConfig::default();
 
@@ -51253,9 +51379,19 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
             );
             // The promise: SOME parser the arm for that class chains must accept it.
             let reached = match want {
+                // (frankenredis-f2zrr) The arm now calls the FUSED parser, so the promise
+                // is checked through that one — an oracle still spelled as the old chain
+                // would go green while the arm it claims to gate did something else.
+                // The chain is kept beside it as an EQUIVALENCE assertion.
                 C::SetOpt4 => {
-                    super::parse_borrowed_plain_set_nx_packet(&pkt, &cfg).is_some()
-                        || super::parse_borrowed_plain_set_xx_packet(&pkt, &cfg).is_some()
+                    let fused = super::parse_borrowed_plain_set_opt4_packet(&pkt, &cfg).is_some();
+                    let chained = super::parse_borrowed_plain_set_nx_packet(&pkt, &cfg).is_some()
+                        || super::parse_borrowed_plain_set_xx_packet(&pkt, &cfg).is_some();
+                    assert_eq!(
+                        fused, chained,
+                        "{form:?}: fused parser diverged from the chain"
+                    );
+                    fused
                 }
                 C::SetOpt5 => {
                     super::parse_borrowed_plain_set_relexpire_packet(&pkt, &cfg).is_some()
@@ -51298,10 +51434,96 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
                 "{form:?} should still be claimed by arity"
             );
             assert!(
-                super::parse_borrowed_plain_set_nx_packet(&pkt, &cfg).is_none()
+                super::parse_borrowed_plain_set_opt4_packet(&pkt, &cfg).is_none()
+                    && super::parse_borrowed_plain_set_nx_packet(&pkt, &cfg).is_none()
                     && super::parse_borrowed_plain_set_xx_packet(&pkt, &cfg).is_none(),
                 "{form:?} gained a parser — add it to the SetOpt4 arm"
             );
+        }
+    }
+
+    /// (frankenredis-f2zrr) The fused SetOpt4 parser must claim EXACTLY what the two
+    /// chained parsers claimed together, and must report WHICH option it saw — routing a
+    /// NX packet to the XX executor would silently inverse set-if-exists into
+    /// set-if-not-exists, which no arity or reply-shape check would catch.
+    #[test]
+    fn fused_set_opt4_parser_matches_the_chain_it_replaced() {
+        use super::BorrowedPlainSetOpt4 as O;
+        let cfg = super::ParserConfig::default();
+        let packet = |parts: &[&str]| {
+            let mut out = format!("*{}\r\n", parts.len()).into_bytes();
+            for p in parts {
+                out.extend_from_slice(format!("${}\r\n{}\r\n", p.len(), p).as_bytes());
+            }
+            out
+        };
+
+        // ACCEPTED, and the discriminant must be right. Case-insensitive per RESP.
+        for (form, want) in [
+            (vec!["SET", "k", "v", "NX"], O::Nx),
+            (vec!["SET", "k", "v", "XX"], O::Xx),
+            (vec!["SET", "k", "v", "nx"], O::Nx),
+            (vec!["SET", "k", "v", "xX"], O::Xx),
+            (vec!["set", "k", "v", "NX"], O::Nx),
+        ] {
+            let pkt = packet(&form);
+            let (got, which) = super::parse_borrowed_plain_set_opt4_packet(&pkt, &cfg)
+                .unwrap_or_else(|| panic!("{form:?} must be accepted"));
+            assert_eq!(which, want, "{form:?} routed to the WRONG executor");
+            assert_eq!(got.key, b"k", "{form:?} key");
+            assert_eq!(got.value, b"v", "{form:?} value");
+            assert_eq!(got.consumed, pkt.len(), "{form:?} consumed");
+        }
+
+        // REFUSED. "NXX"/"XXX"/"N"/"X" are the cases a naive implementation that compared a
+        // PREFIX, or only the first byte, would wrongly accept — and "AB" is the one a
+        // length-only check would take. Each must fall to the generic path instead.
+        for form in [
+            vec!["SET", "k", "v", "NXX"],
+            vec!["SET", "k", "v", "XXX"],
+            vec!["SET", "k", "v", "N"],
+            vec!["SET", "k", "v", "X"],
+            vec!["SET", "k", "v", "AB"],
+            vec!["SET", "k", "v", "GET"],
+            vec!["SET", "k", "v", "KEEPTTL"],
+            vec!["SET", "k", "v", ""],
+            vec!["GET", "k", "v", "NX"],
+            vec!["SET", "k", "v"],
+            vec!["SET", "k", "v", "NX", "GET"],
+        ] {
+            let pkt = packet(&form);
+            assert!(
+                super::parse_borrowed_plain_set_opt4_packet(&pkt, &cfg).is_none(),
+                "{form:?} must NOT be claimed by the fused arity-4 parser"
+            );
+        }
+
+        // EQUIVALENCE with the chain it replaced, over the union of both accept sets. This
+        // is what makes the fusion a refactor rather than a re-specification.
+        for form in [
+            vec!["SET", "k", "v", "NX"],
+            vec!["SET", "k", "v", "XX"],
+            vec!["SET", "k", "v", "nx"],
+            vec!["SET", "k", "v", "GET"],
+            vec!["SET", "k", "v", "NXX"],
+            vec!["SET", "k", "v", "AB"],
+        ] {
+            let pkt = packet(&form);
+            let fused = super::parse_borrowed_plain_set_opt4_packet(&pkt, &cfg);
+            let nx = super::parse_borrowed_plain_set_nx_packet(&pkt, &cfg);
+            let xx = super::parse_borrowed_plain_set_xx_packet(&pkt, &cfg);
+            assert_eq!(
+                fused.is_some(),
+                nx.is_some() || xx.is_some(),
+                "{form:?}: fused accept set diverged from the chain"
+            );
+            // And the discriminant must agree with WHICH chained parser accepted.
+            if let Some((_, which)) = fused {
+                match which {
+                    O::Nx => assert!(nx.is_some(), "{form:?}: said Nx but set_nx refused"),
+                    O::Xx => assert!(xx.is_some(), "{form:?}: said Xx but set_xx refused"),
+                }
+            }
         }
     }
 
@@ -51576,6 +51798,84 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
                 super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
                 Some(super::BorrowedDispatchFloorClass::Hincrby),
                 "{other:?} must not be claimed as Hincrby"
+            );
+        }
+    }
+
+    /// (frankenredis-ozrro) RENAMENX and SUBSTR floor classes. Both carry a
+    /// PREFIX/ALIAS hazard worth pinning, which is why they are tested together:
+    /// RENAME is RENAMENX's shorter prefix, and GETRANGE is SUBSTR's upstream alias with
+    /// its own separate route. A token match that ignored LENGTH, or a class that
+    /// swallowed the alias, would answer another command's packet.
+    #[test]
+    fn renamenx_and_substr_floor_classes_claim_exactly_what_their_parsers_accept() {
+        let cfg = ParserConfig::default();
+        fn packet(args: &[&str]) -> Vec<u8> {
+            let mut p = format!("*{}\r\n", args.len()).into_bytes();
+            for a in args {
+                p.extend_from_slice(format!("${}\r\n{}\r\n", a.len(), a).as_bytes());
+            }
+            p
+        }
+        use super::BorrowedDispatchFloorClass as C;
+
+        for served in [
+            packet(&["RENAMENX", "s", "d"]),
+            packet(&["renamenx", "s", "d"]),
+        ] {
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(&served, &cfg),
+                Some(C::Renamenx)
+            );
+            assert!(super::parse_borrowed_plain_renamenx_packet(&served, &cfg).is_some());
+        }
+        for served in [
+            packet(&["SUBSTR", "k", "0", "3"]),
+            packet(&["substr", "k", "0", "3"]),
+        ] {
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(&served, &cfg),
+                Some(C::Substr)
+            );
+            assert!(super::parse_borrowed_plain_substr_packet(&served, &cfg).is_some());
+        }
+
+        // RENAME is RENAMENX's shorter prefix and a DIFFERENT command; GETRANGE is SUBSTR's
+        // alias and keeps its own route. Neither may be captured here.
+        for (form, bad) in [
+            (vec!["RENAME", "s", "d"], C::Renamenx),
+            (vec!["GETRANGE", "k", "0", "3"], C::Substr),
+        ] {
+            let pkt = packet(&form);
+            assert_ne!(
+                super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
+                Some(bad),
+                "{form:?} must not be captured"
+            );
+        }
+        assert!(
+            super::parse_borrowed_plain_renamenx_packet(&packet(&["RENAME", "s", "d"]), &cfg)
+                .is_none()
+        );
+        assert!(
+            super::parse_borrowed_plain_substr_packet(&packet(&["GETRANGE", "k", "0", "3"]), &cfg)
+                .is_none()
+        );
+
+        // Neither is variadic: no other arity may be claimed.
+        for (wrong, bad) in [
+            (vec!["RENAMENX"], C::Renamenx),
+            (vec!["RENAMENX", "s"], C::Renamenx),
+            (vec!["RENAMENX", "s", "d", "x"], C::Renamenx),
+            (vec!["SUBSTR"], C::Substr),
+            (vec!["SUBSTR", "k", "0"], C::Substr),
+            (vec!["SUBSTR", "k", "0", "3", "x"], C::Substr),
+        ] {
+            let pkt = packet(&wrong);
+            assert_ne!(
+                super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
+                Some(bad),
+                "{wrong:?} must not be claimed"
             );
         }
     }

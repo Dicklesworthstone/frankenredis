@@ -310,6 +310,23 @@ SHAPES = {
     "zremrangebyscore_none": (["ZADD zrs 1 a 2 b"],
                               ["ZREMRANGEBYSCORE", "zrs", "100", "200"]),
     "zrandmember_1": (["ZADD zrm 1 a 2 b 3 c"], ["ZRANDMEMBER", "zrm"]),
+    # (frankenredis-ozrro) Second batch from the blind-spot list, chosen by traffic. The
+    # first batch found HINCRBY at 1.2944x with a complete borrowed fast path and no floor
+    # entry, so this is the cheapest known way to find the next one.
+    #
+    # Steady-state no-ops again:
+    #   zrangebylex / zlexcount / zrevrangebyscore / substr  read-only by definition
+    #   zremrangebyrank_none  rank window past the end -> removes nothing
+    #   renamenx_exists       destination already exists -> reply 0, renames nothing
+    #   zunionstore_2         destination is rewritten with the SAME union every time
+    "zrangebylex": (["ZADD zbl 0 a 0 b 0 c"], ["ZRANGEBYLEX", "zbl", "[a", "[c"]),
+    "zlexcount": (["ZADD zlc 0 a 0 b 0 c"], ["ZLEXCOUNT", "zlc", "[a", "[c"]),
+    "zrevrangebyscore": (["ZADD zrbs 1 a 2 b 3 c"], ["ZREVRANGEBYSCORE", "zrbs", "3", "1"]),
+    "zremrangebyrank_none": (["ZADD zrr 1 a 2 b"], ["ZREMRANGEBYRANK", "zrr", "100", "200"]),
+    "substr": (["SET sbk abcdefghijklmnop"], ["SUBSTR", "sbk", "0", "3"]),
+    "renamenx_exists": (["SET rnsrc v1", "SET rndst v2"], ["RENAMENX", "rnsrc", "rndst"]),
+    "zunionstore_2": (["ZADD zu1 1 a 2 b", "ZADD zu2 3 c"],
+                      ["ZUNIONSTORE", "zudst", "2", "zu1", "zu2"]),
     "spop_missing": ([], ["SPOP", "nosuchset"]),
     "srandmember_1": (["SADD srm m1 m2 m3"], ["SRANDMEMBER", "srm"]),
     "smove_missing": (["SADD smsrc a b", "SADD smdst c"],
@@ -652,6 +669,18 @@ SHAPES = {
     "set_base": ([], ["SET", "sk", "vvvvvvvvvvvvvvvv"]),
     "set_ex_opt": ([], ["SET", "sk", "vvvvvvvvvvvvvvvv", "EX", "100"]),
     "set_xx_opt": (["SET sk v"], ["SET", "sk", "vvvvvvvvvvvvvvvv", "XX"]),
+    # (frankenredis-f2zrr) THE CONTROL FOR THE SetOpt4 FUSION, and it is the whole reason
+    # the fusion can be told apart from a reordering. SetOpt4 chains two same-arity
+    # parsers: set_nx is tried FIRST and set_xx only after it fails, so `SET k v XX`
+    # parses the identical 3-bulk prefix TWICE. NX is already first-in-group and pays one
+    # parse, so a fusion must move XX down to NX's cost and leave NX UNCHANGED.
+    #
+    # That asymmetry is what makes this a real null rather than a convenient one: simply
+    # SWAPPING the two arms would also fix XX, but it would push NX up by the same ~222
+    # instr. A row where both move is a reordering wearing a fusion's costume.
+    # Seeded so EVERY op is the same steady-state no-op (key exists -> NX declines, nil
+    # reply, no write), rather than op 1 writing and the rest declining.
+    "set_nx_opt": (["SET nxk2 v"], ["SET", "nxk2", "vvvvvvvvvvvvvvvv", "NX"]),
     "getex_base2": (["SET gx abcdefghijklmnop"], ["GETEX", "gx"]),
     "getex_ex_opt": (["SET gx abcdefghijklmnop"], ["GETEX", "gx", "EX", "100"]),
     "lpos_base": (["RPUSH l a b c d e"], ["LPOS", "l", "c"]),

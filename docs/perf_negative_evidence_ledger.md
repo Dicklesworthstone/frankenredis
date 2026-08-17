@@ -28497,3 +28497,105 @@ RETRY PREDICATE: wire `covered_commands()` into `corpus_coverage.py`'s executor 
 that file frees — it changes nothing today but stops the next person repeating my
 duplicate. Do NOT quote this row as "the [C] list was wrong": it was right, and this is
 the guard that keeps it right when a shared-executor command next lands in the blind spot.
+
+--------------------------------------------------------------------------------
+MEASURED (frankenredis-f2zrr) — SetOpt4 same-arity sibling retry FUSED: set_xx_opt
+0.6568x -> 0.5926x, dispatch 734.0 -> 480.9 (-34.5 pct). The control is the result: a
+REORDER would have moved the cost onto NX, and NX moved +19 instr, not +253
+
+Claim class: COMPETITIVE
+
+THE PREMISE I WAS HANDED WAS STALE, and finding that out was most of the turn. The cell
+named as worst -- "BITCOUNT unit form 0.7907x at 46.1 pct dispatch share" -- measures
+0.5060x at 21.4 pct today, because a772929b4 front-classified it. GEOADD, filed at 0.7704x
+with a 57.9 pct share and still OPEN as the "last stranded route", measures 0.3503x at
+16.0 pct. Both beads describe a machine that no longer exists. Screening ten option-form
+shapes against the live incumbent put the real worst cell at set_xx_opt, 0.6584x.
+
+    DO NOT TAKE A DISPATCH-SHARE FIGURE FROM A BEAD. Nine routes were front-classified in
+    the last several turns and nobody re-measured the beads they invalidated. Two of the
+    three highest-share cells on the open list are already fixed.
+
+THE MECHANISM, measured against its own sibling rather than against the cost model.
+SetOpt4 chained two same-arity parsers: parse_borrowed_plain_set_nx_packet, then
+parse_borrowed_plain_set_xx_packet. The two are byte-identical except for the final
+eq_ignore_ascii_case on the option token, so `SET k v XX` parsed the entire 3-bulk prefix
+-- header, key, value -- TWICE to reach a different two-byte compare.
+
+    set_nx_opt  first-in-group, ONE parse    dispatch 452.0 instr/op
+    set_xx_opt  second-in-group, TWO parses  dispatch 734.0 instr/op
+                                             excess    282.0 = one duplicated 3-bulk parse
+
+f2zrr's own single-point calibration put a wasted same-arity sibling at ~222 instr and
+labelled SET XX "small". Measured against its first-in-group sibling it is 282, and it was
+the worst live cell -- the label was optimistic on both counts.
+
+REVERSE-PATCH A/B, both arms from the SAME tree minutes apart, differing ONLY in the arm
+body (the fused parser stays defined in both, #[allow(dead_code)] in the BEFORE arm), so
+peer WIP in main.rs is common-mode:
+
+    shape         BEFORE                    AFTER                     delta
+    set_xx_opt    2,979.6 instr/op          2,686.8 instr/op          -9.83 pct
+                  dispatch 734.0 (24.6 pct) dispatch 480.9 (17.9 pct) -34.5 pct
+                  ratio 0.6568x             ratio 0.5926x
+
+    set_nx_opt    1,758.1  dispatch 452.0   1,781.6  dispatch 471.0   +19.0 instr
+    get_control   1,302.0  dispatch 263.0   1,307.0  dispatch 263.1   +0.1   NULL
+
+THE CONTROL IS THE ROW'S WHOLE VALUE, and it was written before the lever for exactly this
+reason. Simply SWAPPING the two arms would also have fixed XX -- and pushed the same ~282
+instr onto NX, netting nothing. Fusing parses the prefix once and branches on the token, so
+XX drops 253.1 while NX pays 19.0 for the discriminant. A row where both arms moved by the
+same magnitude in opposite directions is a reordering wearing a fusion's costume; this one
+is not. Net -234 instr per NX/XX pair.
+
+get_control's dispatch moved 263.0 -> 263.1 (+0.04 pct), which rules out a layout shift.
+
+CORRECTNESS. The fused parser claims exactly what the two chained parsers claimed together
+and no wider. Test asserts the discriminant (routing NX to the XX executor would silently
+invert set-if-exists into set-if-not-exists, which no arity or reply-shape check catches),
+case-insensitivity, key/value/consumed, and EQUIVALENCE with the chain over the union of
+both accept sets. Negative corpus: NXX, XXX, N, X, AB, GET, KEEPTTL, empty, wrong token,
+wrong arity, and the *5 sibling. MUTATION-TESTED TWICE -- inverting the discriminant reddens
+on ["SET","k","v","NX"], and replacing eq_ignore_ascii_case with starts_with reddens on the
+lowercase form. The existing floor-promise test was re-pointed at the fused parser, because
+an oracle still spelled as the old chain would go green while the arm it gates did
+something else.
+
+TWO DEAD TESTS FOUND AND REVIVED, unrelated to the lever but in the same family. On HEAD a
+doc comment had been inserted BETWEEN a #[test] attribute and its function, stacking three
+attributes on one function and orphaning two others:
+zrank_family_claims_arity_three_and_four_only and
+touch_and_msetnx_claim_exactly_the_arity_their_parser_serves compiled as ordinary dead
+functions and had stopped running. Both are arity-claim guards for the floor-class family
+this campaign keeps editing -- exactly the guards that catch a mis-claim. Clippy reported
+them as `never used`; the run list confirms neither executed before the fix and both pass
+after it. A #[test] that silently detaches is a false-pass reader class: the suite stayed
+green while two guards were absent.
+
+PROVENANCE:
+  AFTER ELF     b994f66ba9148210a748ec652ba6f4cd07eef7e87a2a09437ea022b3e6b087df
+  BEFORE ELF    24930b5e17788f926c8d1b920cab5db4695292346d62e263e7ba68a1b6c0f574
+  TREE STABILITY build AFTER -> BEFORE -> AFTER again; both AFTER builds hashed
+                b994f66b identically, and a forced recompile reproduced it, so the
+                build is deterministic and the two arms differ only by the lever.
+  harness       scripts/shape_instr_per_op.py at HEAD, N=2000/2N=4000, both engines in
+                the SAME invocation. Incumbent verified in-run: redis-server sha=d2c8a4b9
+                == vendored source HEAD, clean.
+  host          thinkstation1, 64 cores observed, x86_64, governor powersave, /data 184G.
+  PER-ARM loadavg/MHz  BEFORE set_xx_opt 32.94/3294, set_nx_opt 32.94/3294,
+                get_control 32.94/4117 · AFTER set_xx_opt 44.01/2998,
+                set_nx_opt 44.01/3194, get_control 44.01/3194.
+                LOAD SWUNG 25->92 ACROSS THE EARLIER PAIR AND THE REDIS DENOMINATORS MOVED
+                <0.15 pct (4532.8->4538.9 on set_xx_opt), which is the direct evidence that
+                this shape class is load-immune under callgrind rather than an assertion
+                that it ought to be.
+  independent replication: an earlier BEFORE arm built from a different tree state
+                (974253852e32097a) gave set_xx_opt 2,979.5 vs the reverse-patched arm's
+                2,979.6 -- 0.003 pct apart.
+
+RETRY PREDICATE: the remaining same-arity groups are SetOpt5 (three parsers: relexpire,
+opt_get, absexpire) and SetOpt6 (two). Last-in-group pays the whole group, so SetOpt5's
+third member should carry ~2 wasted parses at 4 bulks. Measure set_absexpire before
+assuming it. And re-measure a bead's cell before believing its share figure -- two of the
+three cells I checked this turn were already fixed.
