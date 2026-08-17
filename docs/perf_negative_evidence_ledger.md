@@ -26496,3 +26496,57 @@ and the question is closed. DO attack reply flushing: measure `event-loop passes
 directly as the target metric, since it is 1,700x apart and each pass is worth ~2,000
 instructions. Any change should move the PASS COUNT; if it does not, it is not touching
 this.
+
+## MEASURED (frankenredis-zw36c) — the event loop BUSY-SPUN for the whole duration of every large reply: 248.6 passes per command, and removing it cuts sinter_big instr/op by 75.6 pct
+
+Claim class: SELF-SPEEDUP, LARGE, MEASURED ON A LOAD-IMMUNE COUNT.
+
+FOUND BY THE DENOMINATOR, one row after landing it. `plan_tick`'s second parameter is
+`pending_commands` and its contract is "there is work you can progress on RIGHT NOW without
+waiting for an event, so do not sleep". The event loop was passing `write_tokens.len()`
+into that slot. Queued output is NOT that: it waits on the socket becoming writable, and
+epoll already reports exactly that -- `drive_client_output` registers `Interest::WRITABLE`
+for any connection with pending output. So for the entire duration of a large reply the
+loop polled with timeout 0, returned immediately, and paid the full nine-frame per-pass
+bookkeeping tax on every spin while making no progress the poll would not have made.
+
+    shape                     passes/op   fr instr/op
+    sinter_big  before          248.551      735,262.7
+    sinter_big  after             0.367      179,329.2     -75.6 pct
+    (redis on the same shape ~0.123 passes/op, ~465,000-472,000 instr/op)
+
+677x fewer passes. The instruction figure is a COUNT-driven change, and passes/op is itself
+a count, so neither is reachable by load -- measured at loadavg 15-18 and not certified as
+a timing claim.
+
+THE NO-REPLY CONTROL IS WHAT LOCALISED IT. sinterstore_big does the IDENTICAL 512-member
+intersection and writes to a key instead of replying: 0.001 passes/op. Same set work, same
+cardinality, no reply -> no spin. That is what proved the passes were entirely
+reply-delivery driven before any code was read.
+
+WHY IT WAS INVISIBLE FOR SO LONG. Every per-op instrument divided this by a denominator
+nobody reported, and the denominator varies 1871x between shapes. It also explains the
+prior rows retrospectively: gein3's no-reply control finding fr's SET work 31 pct FASTER
+with 0.19 pct spread while sinter_big carried the whole deficit and 40 pct variance;
+3d6f6c61b's drain fast-exits measuring -19.3 pct on this shape specifically (each guarded
+drain was being skipped ~250 times per command); and f43f75333's writer-completion guard
+"paying nothing measurable" per-op. All four are the same spin seen through different holes.
+
+SAFETY, checked rather than argued:
+  * edge-triggering is satisfied -- `try_flush` always drains to `WouldBlock`, so the next
+    writable edge is generated when the kernel frees buffer space; the writer-pool path
+    issues its own wakeup
+  * `tick_plan` feeds ONLY `poll_timeout_ms`; no other field is read
+  * dispatch_route_differ: 366 cases, 0 disagreements
+  * fr-server suite: 351 passed, 0 failed
+  * LATENCY, the actual risk of letting the loop sleep: 512-member SINTER round-trips
+    measured 0.10-0.13 ms on fr against redis's 0.14-0.16 ms. A 10 ms poll stall would have
+    shown as a max >= 10 ms. fr is now FASTER than redis on that round-trip.
+
+RETRY PREDICATE. Do not reintroduce a "pending writes, so do not sleep" argument to
+`plan_tick` without a latency table like the one above; the contract test
+`plan_tick_only_skips_sleeping_for_immediately_actionable_work` is there to force that
+justification. Re-measure sinter_big's vs-redis RATIO in a quiet window -- at 179,329 fr
+instr/op against redis's ~465,000 the shape has moved from ~1.4x BEHIND to roughly 2.6x
+AHEAD, which would retire the last cell where fr trailed on instructions, but that ratio is
+not claimed here because the redis arm was not re-run alongside.

@@ -4975,8 +4975,28 @@ fn main() -> ExitCode {
         // blocked case so the pause-expiry re-check below runs promptly.
         let has_paused = !paused_tokens.is_empty();
         let has_deferred = !deferred_tokens.is_empty() && !runtime.is_client_paused(now_ms());
-        let pending_writes = write_tokens.len();
-        let tick_plan = plan_tick(0, pending_writes, tick_budget, EventLoopMode::Normal);
+        // (frankenredis-zw36c) PENDING WRITES MUST NOT FORCE A ZERO-TIMEOUT POLL.
+        //
+        // `plan_tick`'s second parameter is `pending_commands`, and its contract is "there
+        // is work you can make progress on RIGHT NOW without waiting for an event, so do
+        // not sleep". Queued output is not that: it is waiting on the socket to become
+        // writable, and epoll reports exactly that -- `drive_client_output` registers
+        // `Interest::WRITABLE` for any connection with pending output. Feeding
+        // `write_tokens.len()` into that slot asked the loop to spin at timeout 0 for the
+        // entire duration of a large reply, paying the full nine-frame per-pass
+        // bookkeeping tax on every spin while making no progress the poll would not have
+        // made anyway.
+        //
+        // MEASURED with the passes-per-op instrument (a COUNT, so load cannot move it):
+        // sinter_big ran 289.2 event-loop passes PER COMMAND against redis's 0.123, while
+        // sinterstore_big -- the identical 512-member intersection with no reply -- ran
+        // 0.001. The passes were entirely reply-driven, and this is why.
+        //
+        // Edge-triggering is satisfied: `try_flush` always drains to `WouldBlock`, so the
+        // next writable edge is generated when the kernel buffer frees space, and the
+        // writer-pool path issues its own wakeup. Nothing here relies on the spin to make
+        // progress. `tick_plan` feeds only `poll_timeout_ms`; no other field is read.
+        let tick_plan = plan_tick(0, 0, tick_budget, EventLoopMode::Normal);
         let poll_timeout = if tick_plan.poll_timeout_ms == 0 || has_deferred {
             Some(std::time::Duration::from_millis(0))
         } else if has_blocked || has_paused {
@@ -33556,6 +33576,43 @@ fn handle_writable(
 
 #[cfg(test)]
 mod tests {
+    /// (frankenredis-zw36c) Pins the CONTRACT of `plan_tick`'s second parameter, because
+    /// misreading it cost a 677x pass amplification.
+    ///
+    /// The parameter is `pending_commands` and means "work you can progress on RIGHT NOW
+    /// without an event, so do not sleep". The loop was passing `write_tokens.len()` into
+    /// it. Queued output is NOT that -- it waits on socket writability, which epoll already
+    /// reports (`drive_client_output` registers `Interest::WRITABLE`). The result was a
+    /// zero-timeout spin for the whole duration of a large reply, paying the nine-frame
+    /// per-pass tax on every spin: sinter_big ran 248.6 event-loop passes PER COMMAND
+    /// against redis's 0.123, and 0.367 after the fix.
+    ///
+    /// If someone reintroduces a "we have pending writes, don't sleep" argument here, the
+    /// second assertion is what should make them justify it.
+    #[test]
+    fn plan_tick_only_skips_sleeping_for_immediately_actionable_work() {
+        let budget = super::TickBudget::default();
+        // Nothing to do without an event -> the loop MUST be allowed to sleep. This is the
+        // call the event loop now makes, and a zero here would restore the spin.
+        let idle = super::plan_tick(0, 0, budget, super::EventLoopMode::Normal);
+        assert!(
+            idle.poll_timeout_ms > 0,
+            "an idle Normal tick must sleep; a 0 timeout here is the busy-spin regression"
+        );
+        // Genuinely actionable work -> do not sleep. Pending WRITES are not this.
+        assert_eq!(
+            super::plan_tick(1, 0, budget, super::EventLoopMode::Normal).poll_timeout_ms,
+            0,
+            "pending accepts are actionable without an event"
+        );
+        assert_eq!(
+            super::plan_tick(0, 1, budget, super::EventLoopMode::Normal).poll_timeout_ms,
+            0,
+            "pending COMMANDS are actionable without an event -- but queued output is not \
+             a pending command, and passing it here is what caused the spin"
+        );
+    }
+
     /// (frankenredis-zw36c) The event-loop cycle duration moved off `Instant` and onto the
     /// two wall-clock stamps the pass already takes, which removed a third clock sample and
     /// a `Timespec` borrow-subtract per pass. The reason that trade needs a test is the
