@@ -26808,3 +26808,57 @@ RETRY PREDICATE: do NOT re-open SINTER on instructions — it is 0.3791x and the
 enumerated above. Do NOT remove the writer pool on the 2.6 pct in this row without a
 CONCURRENT wall-clock test; a serial single-client harness is the one workload where a
 writer pool can only look like overhead.
+
+## MEASURED (frankenredis-33832) — FOUR refusals: the competitive A/A null does not close even on quiet, symmetric, cpu0-free cores. The residual is NOT placement, and the null is noisier than the effect it gates
+
+Claim class: INSTRUMENT. The A/B is NOT authenticated and is not claimed.
+
+I banked a row earlier today saying this harness could not run because only ONE of eight
+core blocks was uncontended. That precondition is now MET -- five blocks under 50 pct
+combined core+sibling load -- and the harness STILL refuses. So the earlier explanation was
+true at the time and is NOT the whole story.
+
+    attempt   fr_a / fr_b / redis cores        A/A null    A/B redis/fr   verdict
+      1         0-3  /  4-7  /  8-11           0.936258x     0.589403x     HOLD
+      2        16-19 / 20-23 / 24-27           0.686135x     0.416366x     HOLD  (contended)
+      3         0-3  /  4-7  / 12-15           1.076401x     0.589410x     HOLD
+      4         8-11 / 12-15 /  0-3            1.060918x     0.649132x     HOLD
+
+    attempt 4 conditions: loadavg 11.47 / 16.64 / 21.96, mean CPU MHz 2214-2798, blocks at
+    4-18 pct, both fr arms same-CCD symmetric and neither containing cpu0 (which takes
+    interrupts and was the obvious suspect after attempt 3). ELF
+    9c59eb6de985e8882ec5ee27cc26f2fc96979bfccceb25b57ab7f3407635f71e on BOTH fr arms,
+    verified by the harness from /proc/<pid>/exe. Built locally, 0 [RCH] lines.
+
+TWO IDENTICAL PROCESSES, 6.1 PCT APART, ON QUIET SYMMETRIC CORES. Placement was improved
+three times -- off contended blocks, onto the same CCD, off cpu0 -- and the null went
+0.936 -> 1.076 -> 1.061. It is not converging on 1.0; it is wandering around it.
+
+THE NULL IS NOISIER THAN THE EFFECT IT GATES, which is the harness's own documented failure
+mode ("the null moved more than the 0.44-0.50 effect it was gating") reproduced on a
+different axis. Note what the A/B did across the same four attempts: 0.589, 0.416, 0.589,
+0.649. Excluding the contended run it sits at 0.589-0.649 -- a STABLE ~0.6x, i.e. fr's
+RESTORE decode taking ~1.6x redis's time, reproducing across three placements. The quantity
+we care about is steadier than the gate that is supposed to authenticate it.
+
+WHAT I AM NOT DOING: quoting 0.6x as a result. The harness refuses, the refusal is correct
+by its own contract, and a number that fails its null is not a measurement no matter how
+often it repeats. 33832's banked 0.606011x therefore still stands as the last AUTHENTICATED
+figure, and fosf1's effect on it remains unmeasured on the throughput axis.
+
+THE RESIDUAL IS PROBABLY NOT SPATIAL, and there is a directional clue. In attempts 3 and 4
+-- the two quiet ones -- fr_a is the SLOWER arm both times (37.928 vs 36.104; 39.911 vs
+37.733), and fr_a is the process the harness preloads FIRST. A first-loaded process differs
+from a second-loaded one in allocator arena state, page-cache warmth and heap layout, none
+of which a core mask touches. That is a hypothesis, not a finding: two samples with a
+consistent sign.
+
+RETRY PREDICATE, and it is a HARNESS change rather than another placement permutation --
+four are enough:
+  1. SWAP THE PRELOAD ORDER between fr_a and fr_b and re-run. If the slow arm follows the
+     load order rather than the core set, the residual is warmup, not placement, and the
+     fix is a discarded warmup pass on BOTH fr arms before the timed trials.
+  2. If the slow arm instead follows the CORE SET, the residual is spatial after all and
+     the two arms need identical sibling occupancy, not merely identical block size.
+Do NOT spend another quiet window permuting cores without doing (1) first: the four rows
+above already show core choice moving the null by less than the null's own spread.
