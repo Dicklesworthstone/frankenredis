@@ -172,6 +172,82 @@ borrowed routes already use it. (3) The list materialisation `to_vec` at 2,561.0
 is the other owned copy on this path. (4) Do NOT retry the same borrow trick on the numeric arms:
 they hold no borrow, so there is nothing there to remove.
 
+## 2026-08-17 MossyOrchid: ANSWERED — the ZINTERCARD +112 pct is an INLINING flip, not a routing change: adding ONE arm turned `parse_borrowed_multibulk_action` from 4,000 out-of-line calls into 1, and the chain's own call counts are IDENTICAL in both arms (`frankenredis-5na4i`)
+
+Claim class: MECHANISM, resolving the question two rows below. Certified window: loadavg 8.31
+falling to 14.76, /data 258G, CPU MHz 4017.9 — the clean window the orchestrator flagged, used
+for exactly the diagnostic I said it was needed for.
+
+THREE MEASUREMENTS, each answering one candidate.
+
+  1. MATCHED BUT NEVER SERVED. A probe arm where the helper runs and its result is consumed but
+     the branch is unsatisfiable (`black_box(tail.len()) == usize::MAX`), so the route can never
+     fire. Interleaved against an unmodified arm from the same tree:
+
+         BEFORE  7,508.5 / 7,509.8 instr/op        PROBE  7,647.1 / 7,609.1
+         cost of merely being matched: +118 instr/op, +1.6 pct
+
+     So the args helper is not the problem, and neither is the extra branch.
+
+  2. EVENT-LOOP PASSES. Identical at 0.001 per op across BEFORE, PROBE and the full lever. The
+     batching hypothesis — that serving per-command re-enters the loop where the generic path
+     drained a pipeline — is REFUTED.
+
+  3. CALL COUNTS, straight out of the callgrind dumps, and this is the answer:
+
+         frame                                  BEFORE    AFTER
+         parse_borrowed_plain_key_arg2_packet    4,002    4,002     <- IDENTICAL
+         parse_borrowed_multibulk_action         4,000        1     <- inlined away
+         process_buffered_frames                     6        0
+
+THE CHAIN RUNS THE SAME NUMBER OF TIMES IN BOTH ARMS. Adding one arm to
+`parse_borrowed_multibulk_action` — a ~4,200-line function — flipped it from being CALLED 4,000
+times to being INLINED into `process_buffered_frames`. That is why the earlier frame diff looked
+like "the cascade appeared": those frames were always executing, attributed to the out-of-line
+call in BEFORE and to inlined callees in AFTER. **The frame diff was an attribution artefact; the
++8,429 instr/op is not**, because the whole-process two-point total does not care where the
+compiler puts things.
+
+SO THE CORRECTED VERDICT, replacing both earlier attempts at a mechanism: the lever is rejected
+because adding an arm to this function changed its INLINING and the resulting code retires 112
+pct more instructions per op — a codegen regression, not extra logical work, not a routing
+change, and not an entry cost into the borrowed path. My fast path did what it was meant to do
+(generic dispatch frames fell by 1,491) and was buried by the codegen shift around it.
+
+WHAT THIS MEANS FOR THE OTHER [C] CANDIDATES, and it is narrower and stranger than what I wrote
+before: XPENDING and SORT_RO are not doomed by an "entry cost" — that generalisation was wrong
+and is withdrawn. What they face is that `parse_borrowed_multibulk_action` is large enough to sit
+on an inlining cliff, so ANY edit to it can move the whole function across that cliff. The cost
+is a property of the FUNCTION'S SIZE, not of the command being added.
+
+    PRACTICAL RULE: when adding an arm here, check the call count of
+    `parse_borrowed_multibulk_action` in the dump (`cfn=`/`calls=` lines) before and after. Same
+    count = your arm's cost is your arm's. Count collapsing to ~1 = you have moved the function
+    across the inlining boundary and the measurement is about codegen, not your route.
+
+REVERTED; nothing shipped. Two mechanisms of mine were withdrawn getting here — "entry cost of
+the borrowed path" and, before that, the dispatch-share floor — both because I published a story
+that fit the numbers I had rather than the numbers that would discriminate. The probe and the
+call counts are what discriminated, and both were cheap.
+
+PROVENANCE:
+  ELFs        BEFORE 1abf965cf51a4cf0 (rebuilt this window, byte-identical to the earlier
+              BEFORE despite an intervening peer commit), PROBE 91616072d8561117, LEVER
+              fef8559734250a0c.
+  harness     scripts/shape_instr_per_op.py N=2000/2N=4000 `--fr-only`, interleaved; call counts
+              parsed directly from `cg.fr.2n.out`; frame costs via scripts/frame_delta.py.
+  host        thinkstation1, 64 cores, powersave, /data 258G. PER-ARM loadavg 8.31 / 17.99 /
+              23.75 at the first build, 14.76 / 16.98 / 22.79 at the last draw; CPU MHz 4017.9
+              observed at the close.
+
+RETRY PREDICATE: ZINTERCARD is still worth ~3,291 instr/op of dispatch and still has no borrowed
+route. Retry it by placing the arm somewhere that does NOT perturb
+`parse_borrowed_multibulk_action`'s inlining — an exact-shape parser in the arity-guarded chain,
+or the floor class table — and verify with the call-count check above before believing any
+delta.
+
+--------------------------------------------------------------------------------
+
 ## 2026-08-17 MossyOrchid: CORRECTION to the row below — the +112 pct MEASUREMENT stands and is reproducible, but the MECHANISM I published for it does not: my arm sits in the LAST-RESORT function, so "it became a candidate and therefore entered the cascade" cannot be the explanation (`frankenredis-5na4i`)
 
 Claim class: CORRECTION, source. No build, no bench, no certification — external builds had the
