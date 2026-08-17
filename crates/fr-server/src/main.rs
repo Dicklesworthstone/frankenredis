@@ -52575,6 +52575,83 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
     /// but note the parser here is the SHARED `key_arg2` one that also serves ZMPOP and
     /// XACK — so the token and prefix are what keep those apart, and this asserts they do.
     #[test]
+    fn zrangestore_floor_class_claims_exactly_what_its_parser_accepts_gvm6z() {
+        // (frankenredis-gvm6z) A floor class is a PROMISE that its arm serves every shape
+        // the class claims. A floor decline does NOT fall back to the cascade — it calls
+        // GENERIC directly — so claiming an arity the arm's parser refuses is a
+        // REGRESSION for exactly the shapes it captured, not a no-op. ZRANGESTORE's
+        // option forms (BYSCORE/BYLEX/REV/LIMIT) are arity 6+ and the arm's parser is a
+        // `*5` prefix literal, so the class must claim arity 5 and nothing else.
+        let cfg = ParserConfig::default();
+        fn packet(args: &[&str]) -> Vec<u8> {
+            let mut p = format!("*{}\r\n", args.len()).into_bytes();
+            for a in args {
+                p.extend_from_slice(format!("${}\r\n{}\r\n", a.len(), a).as_bytes());
+            }
+            p
+        }
+        let parses = |pkt: &[u8]| {
+            super::parse_borrowed_plain_key_arg3_packet(
+                pkt,
+                &cfg,
+                b"*5\r\n$11\r\n",
+                b"ZRANGESTORE",
+            )
+            .is_some()
+        };
+
+        for served in [
+            packet(&["ZRANGESTORE", "d", "s", "0", "-1"]),
+            packet(&["zrangestore", "d", "s", "0", "-1"]),
+        ] {
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(&served, &cfg),
+                Some(super::BorrowedDispatchFloorClass::Zrangestore),
+            );
+            assert!(
+                parses(&served),
+                "the class claims arity 5, so the arm's parser must accept it"
+            );
+        }
+
+        // Every arity the arm cannot serve must NOT be claimed. The option forms are the
+        // ones that matter: each is a real ZRANGESTORE that must keep reaching generic.
+        for wrong in [
+            vec!["ZRANGESTORE"],
+            vec!["ZRANGESTORE", "d"],
+            vec!["ZRANGESTORE", "d", "s"],
+            vec!["ZRANGESTORE", "d", "s", "0"],
+            vec!["ZRANGESTORE", "d", "s", "0", "-1", "REV"],
+            vec!["ZRANGESTORE", "d", "s", "(a", "[z", "BYLEX"],
+            vec!["ZRANGESTORE", "d", "s", "1", "2", "BYSCORE"],
+            vec!["ZRANGESTORE", "d", "s", "1", "2", "BYSCORE", "LIMIT", "0", "1"],
+        ] {
+            let pkt = packet(&wrong);
+            assert_ne!(
+                super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
+                Some(super::BorrowedDispatchFloorClass::Zrangestore),
+                "{wrong:?} must not be claimed as Zrangestore"
+            );
+            assert!(!parses(&pkt), "{wrong:?} must not parse as ZRANGESTORE either");
+        }
+
+        // key_arg3 is shared — the prefix+token pair is the only thing keeping the
+        // commands apart, so a same-arity neighbour must not be answered by this arm.
+        for other in [
+            vec!["BITOP", "AND", "d", "a", "b"],
+            vec!["ZRANGEBYLEX", "k", "-", "+", "x"],
+        ] {
+            let pkt = packet(&other);
+            assert_ne!(
+                super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
+                Some(super::BorrowedDispatchFloorClass::Zrangestore),
+                "{other:?} must not be claimed as Zrangestore"
+            );
+            assert!(!parses(&pkt), "{other:?} must not parse as ZRANGESTORE");
+        }
+    }
+
+    #[test]
     fn ltrim_floor_class_claims_exactly_what_its_parser_accepts() {
         let cfg = ParserConfig::default();
         fn packet(args: &[&str]) -> Vec<u8> {
