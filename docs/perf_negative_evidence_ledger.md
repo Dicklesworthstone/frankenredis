@@ -8,6 +8,151 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-08-17 BrownIbis: KEEP — SORT ALPHA stops calling ICU for ASCII: `sort_ro_alpha_64` 140,377.3 -> 48,771.8 instr/op (2.8783x), `sort_ro_alpha` 12,871.1 -> 9,248.7 (-28.1 pct), null flat at -0.06 pct (`frankenredis-cgeq5`)
+
+Claim class: COMPETITIVE. Campaign output: yes. Each ratio draw below started a live redis 7.2.4
+server arm side-by-side with the fr arm inside the same invocation of
+`scripts/shape_instr_per_op.py`, and the incumbent binary was provenance-checked against the
+vendored source before either arm ran (`redis-server sha=d2c8a4b9 == vendored source HEAD, clean`).
+Headline: fr/redis 0.2459x on `sort_ro_alpha_64` and fr/redis 1.1210x on `sort_ro_alpha`, both the
+WORST of two draws. Follow-on to `frankenredis-r9mqp`, which memoised the collator RESOLUTION; this
+removes the COMPARISON.
+
+BINARIES (built `--base HEAD --clean-overlay`, so a peer's uncommitted `fr-store`/`fr-conformance`
+edits are excluded from BOTH arms — the tree held two dirty crates the whole session):
+
+    before  bench_elf_sha256=bccdf9130372cf9e69bc09e32456d2abde196b657f8aa387e68ff1f502de3fb5   base c3cc06128, no overlay
+    after   bench_elf_sha256=78356e8207072da463a561f98e3f81c8a1480043207f4a74fd5d0be02688aeb4   base 5abfd3db4 + crates/fr-command/src/lib.rs only
+
+Both SHAs are the harness's own `bench_elf_sha256` emission, computed from the executable mapping of
+the guest ELF and RE-VERIFIED after each arm — a `/proc/self/exe` self-report is impossible under
+callgrind, where that path is valgrind's own binary. Each ELF was copied out of the shared
+`target/release/` rendezvous to a private path BEFORE hashing, and every arm ran that private copy.
+
+`git diff c3cc06128..5abfd3db4` is docs and beads only — zero `crates/**` — so the two bases are the
+same code and the ELFs differ by exactly this lever.
+
+SELF A/B (callgrind, two-point subtraction at n=2000/4000, `--fr-only`, WINDOW: FIT for fr-only):
+
+    shape              before       after        delta
+    sort_ro_alpha     12,871.1     9,248.7      -28.15 pct
+    sort_ro_alpha_64 140,377.3    48,771.8      -65.25 pct   = 2.8783x
+    get_control        1,329.3     1,328.5      -0.06 pct    <- NULL, -0.8 instr/op
+
+`get_control` shares the dispatch, event loop and reply path and touches no collation; it moved by
+0.8 instructions out of 1,329 across a full rebuild.
+
+### Per-arm provenance
+
+All six A/B arms ran concurrently in one window, so the load figure is common; MHz is per arm, and
+is recorded because it is NOT monotonic in load on this host and cannot be inferred after the fact.
+Callgrind counts in software, so neither figure enters the numbers — they are provenance.
+
+    arm                        loadavg 1/5/15         cpu MHz mean / max
+    before sort_ro_alpha       13.48 17.12 19.39      2822 / 4140
+    after  sort_ro_alpha       13.48 17.12 19.39      2983 / 4140
+    before sort_ro_alpha_64    13.48 17.12 19.39      2827 / 4140
+    after  sort_ro_alpha_64    13.48 17.12 19.39      2855 / 4140
+    before get_control         13.48 17.12 19.39      2839 / 4140
+    after  get_control         13.48 17.12 19.39      2867 / 4162
+
+Host: AMD Ryzen Threadripper PRO 5975WX, 64 threads, governor `powersave`,
+`kernel.perf_event_paranoid = 4` (which is why the instrument is callgrind and not `perf`),
+valgrind 3.25.1. Every arm stamped WINDOW: FIT for fr-only.
+
+### The A/A null, and the decision rule
+
+Eight independent draws of the SAME ELF on the claim-carrying shape, inside one top-level
+invocation, paired into four A/A ratios (`sort_ro_alpha`, before ELF, 2000/4000 ops):
+
+    draws    12855.7 12856.1 12856.8 12827.3 12861.7 12829.3 12879.3 12850.1   (spread 0.40 pct)
+    ratios   0.999969  1.002300  1.002525  1.002272
+
+**A/A null median 1.002286, with a bootstrap 95% median CI of [0.999969, 1.002525]** (20,000
+percentile-bootstrap resamples, seed 20260817, so the interval is reproducible). GATE: that
+bootstrap median-CI is the decision rule for this row — an A/B that landed inside the null's own
+interval would be refused no matter how it read. The A/B on that shape is **0.7186** and on
+`sort_ro_alpha_64` **0.3474**, i.e. 115x and 250x the null's half-width away from 1.0.
+
+**CV is diagnostic only and was never a gate here**; it is not computed at all, because a row that
+reports one invites its use as one. The instrument is a counted one — callgrind counts instructions
+in software, so dispersion is background work that failed to cancel, not sampling error.
+
+A SECOND A/A, ON THE NULL SHAPE, AND IT IS THE HONEST LIMIT OF THAT ROW: eight draws of
+`get_control` on the after ELF gave **A/A null median 0.995159, bootstrap 95% median CI [0.969756,
+1.022765]** — a 5.9 pct spread on a 1,300-instr/op shape, because the two-point subtraction cancels
+work proportional to OP COUNT and this shape's residue is dominated by elapsed-time cron work (these
+draws ran eight-up at loadavg 35). **So the `get_control` −0.06 pct above must NOT be read as a
+0.06 pct-tight null**: on that shape this instrument cannot resolve anything below ~3 pct. It is
+reported because it is an order of magnitude below the effect either way, and because
+`sort_ro_alpha`'s own A/A — the one that carries the verdict — IS tight, at 0.25 pct.
+
+MECHANISM, BY DUMP DIFFERENCING — the frames did not get cheaper, they STOPPED EXISTING. Per-frame
+self instr/op on `sort_ro_alpha_64`, before -> after:
+
+    CollationElements::next        37,044.0 -> 0
+    CollatorBorrowed::compare      29,259.0 -> 0
+    CollationElements::iter_next   10,836.0 -> 0
+    CollationElements::init         5,418.0 -> 0
+    core::str::converts::from_utf8  7,511.5 -> 0     <- the fast path runs BEFORE UTF-8 validation
+    sort_alpha_compare              6,174.0 -> 7,071.0 (renamed _with_ascii_fast_path)
+
+90,068.5 removed, 897.0 added. A cache that did not work could not make those frames vanish; a
+change that altered WHICH collator is used could not leave the reply byte-identical to redis, and
+`sort_alpha_collation_differ.py` says it does (36/36, both engines under `en_US.UTF-8`).
+
+COMPETITIVE RATIO — WINDOW: UNFIT for ratio (2 cargo/rustc running, shared uid, none attributable
+away), so these are SIZING, not certified, and the WORST of each pair is what is quoted:
+
+    shape             draw 1     draw 2     WORST      previously banked (r9mqp)
+    sort_ro_alpha     1.0553x    1.1210x    1.1210x    1.4929x
+    sort_ro_alpha_64  0.2458x    0.2459x    0.2459x    0.6972x
+
+The n=64 pair agrees to 0.04 pct because its denominator is 198k instr/op, so redis's elapsed-time
+`serverCron` is proportionally invisible; the n=3 pair spans 6.2 pct, which is this harness's known
+denominator width and exactly why the worst bound is the one carried. **fr now retires ~4.07x FEWER
+instructions than redis 7.2.4 on a 64-element `SORT ALPHA`, and the n=3 deficit falls from 1.49x to
+1.12x.** The banked "parity crossover is n=7" is therefore stale in fr's favour and should be
+re-measured before it is quoted again.
+
+THE LEVER: a 256-entry primary-weight table plus a tertiary (case) pass reproducing root/`en`
+collation for inputs drawn entirely from `[0-9A-Za-z]`, tried ahead of the ICU call. Outside that
+domain nothing changes — the collator is still called, byte for byte.
+
+WHY A WRONG TABLE CANNOT PRODUCE A WRONG ANSWER, which is the only reason this is admissible at all:
+the table is VALIDATED at first use against the collator that will actually be used — all 1,891
+single-character pairs plus a contraction corpus aimed at the tailorings that reorder plain ASCII
+(da/no `aa` as `å`, cs/sk `ch`, the Hungarian digraphs, es traditional `ll`, et `z`, lt `y`, sv/fi
+`w`) — and a single disagreement turns the fast path OFF for the process. A tailored locale loses
+the speedup and keeps its order.
+
+THE DOMAIN CHECK IS TOTAL ON PURPOSE, and this is the part that would have been a silent wrong
+answer. With `AlternateHandling::Shifted` a space is ignorable at every compared level, so ICU calls
+`"a"` and `"a "` EQUAL (asserted in the test, not assumed) while a length rule would call the
+shorter one smaller. A combining mark is the mirror image: it is a secondary difference on the
+PRECEDING letter, so `"ab"` vs `"a\u{0301}"` is decided by the letters, not by length. Both are
+outside the domain, and a scan that stopped at the first differing byte would never reach either.
+
+GATES: `sort_alpha_collation_differ.py` 36/36 vs live redis 7.2.4 under `en_US.UTF-8` (the gate that
+can see collation at all — `sort_semantics_gate.py` runs BOTH engines in C locale, where the
+collator is `None` and this lever is invisible; it passes 29/29 and proves nothing about this row).
+`cargo test -p fr-command --lib` 1228 passed / 0 failed, including five new tests: exhaustive
+singleton agreement with ICU, contraction + 240 deterministic random probes, the out-of-domain
+decline set, comparator-equality end to end, and a MUTATION of the gate itself — byte order and an
+always-declines comparator both have to be REFUSED, because a gate nothing can fail is not a gate.
+
+RETRY PREDICATE. (1) The ratio rows above are SIZING; promote them only from a window that stamps
+FIT for ratio, and take the n=3 ratio as the worst of at least two redis draws — one draw of that
+denominator carries ~6 pct. (2) The next lever on this route is NOT collation: after this change
+`sort_ro_alpha_64` is 48,771.8 instr/op with the largest remaining frames being the comparator
+itself at 7,071, `RespFrame::encode_into` at 5,312 and `memcpy` at 4,397, i.e. reply materialisation
+rather than sorting. (3) `sort_ro_alpha` at n=3 is still 1.12x and its dispatch is 2,048.3 of
+9,248.7 (22.1 pct) on the GENERIC path — `SORT`/`SORT_RO` are still absent from the floor token
+table, and that is now the biggest single block left on this shape. (4) Do NOT widen the fast path's
+domain to punctuation or to non-ASCII without re-deriving the Shifted argument above; the domain is
+chosen so that no character in it is variable and none can carry a contraction in an untailored
+locale.
+
 ## 2026-08-17 MossyOrchid: MY OWN RETRY PREDICATE IS RETIRED, WITH EVIDENCE — doubling the rounds narrows the SHAPE to 0.8 pct and does NOT narrow the NORMALISER at all, so `get_control` is drift-limited and no round count can settle a thin normalised margin on this harness (`frankenredis-eh2ct`)
 
 Claim class: METHOD, negative. Campaign output: yes — it closes a question rather than
