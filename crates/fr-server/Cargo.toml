@@ -112,6 +112,10 @@ perf-ab-xtrim-minid-noop = [
     "fr-runtime/perf-ab-xtrim-minid-noop",
     "fr-command/perf-ab-xtrim-minid-noop",
 ]
+# (frankenredis-qj6jn) Measurement-only control arm for the fresh-key ZADD
+# collapse order. The control sets FR_PERF_AB_ZSET_COLLAPSE_ORDER_ORIG=1;
+# production compiles only the order-preserving path.
+perf-ab-zset-collapse-order = ["fr-runtime/perf-ab-zset-collapse-order"]
 # Measurement-only control arm for the exact standalone
 # `XTRIM key MINID ~ 0-0` dispatch floor. Controls preserve the current
 # guarded generic route; production builds compile only the floor route.

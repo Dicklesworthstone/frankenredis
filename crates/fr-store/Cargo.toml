@@ -22,6 +22,10 @@ perf-ab-xtrim-minid-noop = []
 # encoding refresh (re-walk the object that was just built) so BOTH arms of that
 # lever live in ONE ELF. Production builds compile the control away entirely.
 perf-ab-restore-encoding-rescan = []
+# (frankenredis-qj6jn) Measurement-only selector that restores the ORDER-DESTROYING
+# HashMap in the fresh-key ZADD collapse, so both arms of the order-preserving
+# lever live in ONE ELF. Production compiles the IndexMap path unconditionally.
+perf-ab-zset-collapse-order = []
 
 [dev-dependencies]
 proptest.workspace = true

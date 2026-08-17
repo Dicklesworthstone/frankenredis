@@ -36009,3 +36009,136 @@ in CLIENT INFO. Before starting it, settle the one parity question that decides 
 design: what `cmd=` must report for an UNKNOWN or malformed command, where there is no
 table entry to point at — measure it against live 7.2.4 rather than assuming, because
 that case is the whole reason the current code stores bytes instead of an index.
+
+--------------------------------------------------------------------------------
+## 2026-08-17 CrimsonHawk: the zset reload sort was not expensive, it was SELF-INFLICTED — the collapse map emitted hash order, so the builder sorted back an order the loader had already supplied. Preserving it takes zset DEBUG RELOAD 2.8748x -> 2.6049x, -9.39 pct (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method). Ir is exact, so
+the A/A null is a determinism check rather than a noise estimate. No timing verdict is claimed.
+
+Claim class: COMPETITIVE. Campaign output: yes — fr/Redis 7.2.4 on the zset DEBUG RELOAD
+workload measures 2.6049x after this change, from 2.8748x before, incumbent live in the same
+invocation as both fr arms.
+
+THE REPLICATED-STANDING CONVENTION DOES NOT APPLY TO THIS ROW, and saying so is part of the
+row. That convention exists for THIN margins near parity, where a claim of standing against the
+incumbent has to survive a second ELF and be quoted at its worst bound. Nothing here is near
+parity: the route is 2.60x BEHIND after the change, so no standing is claimed, and the quantity
+being defended is a 9.39 pct self-improvement against a 0.05 pct null — a 170x separation, not
+a thin one. (Contrast `3a75fc9d2`, where GEOSEARCH's 1.0094 crossing correctly failed to
+replicate and was quoted at its worst bound 0.9549. That is what the convention is for.)
+
+### THIS IS THE LEVER MY OWN PREVIOUS ROW SAID TO TAKE, AND IT REFUTES THE FIRST ATTEMPT
+
+The previous row REJECTED an is-sorted gate on the packed builder at +0.07 pct and recorded
+why: the gate could never fire, because `Store::zadd_plain_owned`'s fresh-key path collapses
+duplicate members through a `HashMap` and then hands the builder `latest.into_iter().collect()`
+— HASH order. The order was destroyed one frame before any gate could look at it.
+
+So the fix is not at the builder. It is to stop destroying the order:
+
+    let mut latest: HashMap<Vec<u8>, f64, foldhash::quality::RandomState> = ...
+    -> IndexMap<Vec<u8>, f64, foldhash::quality::RandomState>
+
+`IndexMap` has the SAME `insert` contract — returns the old value, last write wins — but keeps
+each member at its first-seen position, so the builder receives input order. It was already a
+dependency and already used elsewhere in this file. No extra allocation and no member clone:
+members still MOVE into the map, and `into_iter()` becomes a Vec drain instead of a hash-table
+walk. `added` / `changed` accounting is character-for-character unchanged.
+
+### THE BOARD
+
+    workload   A/A null       ORIG        CAND       delta       vs redis 7.2.4
+    zset       1.000544    80,720.9    73,142.3   -7,578.6    2.8748x -> 2.6049x
+                                                  (-9.39 pct)
+    hash       1.000577    68,581.6    68,559.6      -22.0    2.1849x -> 2.1842x   CONTROL
+                                                  (-0.03 pct)
+
+    THE NAMED FRAME MOVED, which is what separates this from a total-level inference:
+
+        sort (quicksort + drift::sort)   8,578.7  ->  1,465.2     -83 pct
+        lzf_compress                    10,402.5  -> 10,402.5     IDENTICAL
+        from_unique_pairs                   62.0  ->     62.0     IDENTICAL
+
+    The residual 1,465.2 is driftsort's O(n) run detection on input it now finds already
+    sorted — it is not skipped, it is short-circuited, and I am not claiming otherwise.
+
+    PREDICTED -7,000 instr/key FROM THE MECHANISM BEFORE BUILDING; MEASURED -7,578.6.
+
+  Both arms came from ONE ELF (sha 1c9a9a2c0092becb) via the repo's runtime-toggle convention,
+  `FR_PERF_AB_ZSET_COLLAPSE_ORDER_ORIG=1` selecting the order-destroying `HashMap`. Deliberate:
+  peers were committing to `fr-runtime` and `fr-command` throughout this window, and my earlier
+  two-binary pairing on this bead FAILED its tree-stability check for exactly that reason. A
+  same-ELF A/B has no tree-stability question to fail.
+
+### THE REGRESSION THIS HARNESS CANNOT SEE, MEASURED SEPARATELY
+
+`zadd_plain_owned` is not only the loader's path — the ZADD COMMAND uses it too, and for
+UNSORTED input the sort cannot be short-circuited, so that arm pays `IndexMap`'s per-insert Vec
+push and gets nothing back. The reload harness is blind to it by construction: seeding happens
+once per run and cancels in the slope. Measured directly instead, on the live command:
+
+    zadd_2pair (fr-only, N=2000)   ORIG 3,597.5   CAND 3,600.3   +0.08 pct
+
+  That harness's fr arm repeats to 0.09 pct, so +0.08 pct is inside its own reproducibility:
+  no regression on the live ZADD path. The claim is bounded accordingly — this row asserts a
+  reload win and NO live-ZADD regression, not a live-ZADD win.
+
+### EQUIVALENCE
+
+The output is unchanged by construction: the builder canonicalises to sorted order whatever it
+is handed, so the collapse map's iteration order cannot reach the stored value. What CAN reach
+it is the last-wins rule, and that is what the test pins, against an INDEPENDENT oracle — the
+same pairs applied ONE AT A TIME through the per-member path, which never touches the bulk
+collapse map. Compared on ordered members+scores, DUMP payload and OBJECT ENCODING, over seven
+shapes chosen for the ways an order-preserving collapse can plausibly go wrong: a repeated
+member whose LAST score is LOWER than its first (a "first wins" bug reads correct on every
+ascending fixture), a duplicate of the FIRST pair (which seeds the map before the loop), a
+triplicate, `-0.0` canonicalisation, score ties broken by member bytes, and the loader's own
+already-sorted shape plus its exact reverse. Every rotation of each input that leaves the
+last-wins outcome unchanged must build the same zset, and does.
+
+### PROVENANCE
+
+  ELF           1c9a9a2c0092becb, `release-perf`, built locally with
+                RCH_CARGO_WRAPPER_BYPASS=1 (no `[RCH]` line in the build output).
+  harness       scratchpad `reload_slope.py` + `zset_board.py`: seed an identical DB, run the
+                SAME server under callgrind at K=4 and K=12 DEBUG RELOADs and difference both
+                the whole-program Ir and every per-function Ir, so seeding, startup and
+                teardown cancel. One fresh working directory PER POINT — the defect corrected
+                earlier on this bead. All arms in ONE invocation, with the soundness assertion
+                (no frame marginal may exceed the whole, none may be negative) active and
+                silent throughout.
+  incumbent     vendored redis 7.2.4, verified: sha=d2c8a4b9 == vendored source HEAD, clean.
+  host          thinkstation1, 64 cores OBSERVED, powersave governor, /data 92-93G free.
+  PER-ARM loadavg/MHz   zset arms 27.64/24.01/22.53 -> 30.44/24.69/22.77, MHz mean 2225 then
+                2268 (max 4053-4120, min 1429); hash arms 29.20 -> 26.62, MHz mean 3466 then
+                2284 (max 4242-3993, min 1429-2486); zadd_2pair arms load 29.23 and 27.77, MHz
+                2395-4017 and 1429-3241. STABLE regime — 1/5/15 within 22.5-30.4 across the
+                whole run — which is the window the orders prefer over a merely quiet one.
+                Cross-core spread is 1429-4242 WITHIN single samples, which is why this row is
+                instruction-counted and not timed.
+  gates         fr-store 925 tests pass (+1 new); `cargo clippy -p fr-store --all-targets --
+                -D warnings` clean; the new test is confirmed to EXECUTE by name, not merely
+                to compile. `cargo fmt --check` reports four pre-existing hunks in peer-written
+                regions of this file and `packed_set.rs`, all outside my edits; they are left
+                alone rather than swept into this commit.
+
+### WHAT THIS DOES NOT CLOSE
+
+zset reload is still 2.60x behind and remains the worst of the five reload types (set_int
+1.97x, hash 2.18x, set 2.60x, list 2.67x). The structural item is unchanged and is not this
+bead's: redis writes out the listpack it already holds and reads it back verbatim, while fr
+transcodes in both directions.
+
+RETRY PREDICATE:
+  1. The remaining 1,465.2 of driftsort is run detection over 40 elements with a comparator
+     that reads an f64 and then member bytes. It is skippable only by telling the builder the
+     input is ordered — which is the gate the previous row rejected, and which would NOW fire.
+     Re-measure it on top of this change before assuming it is still worthless: its earlier
+     +0.07 pct was measured against an input that was never sorted.
+  2. The `foldhash` inserts are still paid to de-duplicate input that is unique by
+     construction. Removing them needs a loader-specific entry point, because no O(n) check
+     establishes member-uniqueness in general — sorted by (score, member), a repeated member
+     with two different scores need not be adjacent.
+  3. Do NOT quote this row as a RESTORE figure. Every number here is whole-job DEBUG RELOAD.
