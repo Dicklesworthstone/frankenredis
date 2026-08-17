@@ -245,6 +245,17 @@ SHAPES = {
     # would succeed and the rest fail, measuring two different paths in one average.
     "msetnx_1": (["SET mk1 v"], ["MSETNX", "mk1", "mv1"]),
     "msetnx_2": (["SET mk1 v"], ["MSETNX", "mk1", "mv1", "mk2", "mv2"]),
+    # (frankenredis-p98mw) The TWO commands of that bead's six that are still stranded --
+    # MSETNX, GEOADD, LMPOP and TOUCH have since been classified, which the bead does not
+    # say. Both were UNMEASURED rather than cheap: neither had a shape, so nothing in the
+    # corpus could see their cascade walk.
+    #
+    # Both deliberately take the MISS path, so the reply is stable across every iteration
+    # and the shape cannot drift into measuring a first-request-only effect (the `copy`
+    # no-op that `shape_work_audit.py` exists to catch). MOVE on a present key would
+    # succeed once and then return 0 forever, which is exactly that trap.
+    "move_missing": ([], ["MOVE", "nosuchkey", "1"]),
+    "spublish_nosub": ([], ["SPUBLISH", "shardchan", "m"]),
     "exists_missing": ([], ["EXISTS", "nosuchkey"]),
     # (frankenredis-c0ts5) Ladder shapes: cheap O(1) reads across every type, so
     # the dispatch cost can be compared at constant (near-zero) real work. Mirrors
