@@ -799,6 +799,45 @@ def dispatch_mechanism(dump_path):
     return "classified route", sorted(present | markers)
 
 
+# (frankenredis-zw36c) Event-loop PASS COUNT per op, sampled per run.
+#
+# fr pays nine frames of bookkeeping ONCE PER EVENT-LOOP PASS whether or not there is work
+# to do, and redis has no per-iteration counterpart of comparable weight. That tax has been
+# unadjudicable because every instrument here divides by OPS while the cost is per PASS, so
+# the denominator was never observed -- only inferred through a reply-size proxy. Two
+# separate agents hit that wall and said so in the ledger (f43f75333 and the zw36c row).
+#
+# Both engines expose `eventloop_cycles` in INFO stats (redis 7.0+; fr mirrors the field),
+# so the denominator is simply readable. Sampling it either side of the burst turns
+# "passes per op" into a measured quantity and makes per-pass levers divisible for the
+# first time.
+#
+# The two INFO commands are themselves ops and cost a pass or so each; against N=2000 that
+# is under 0.1 pct and it biases BOTH arms identically, so it cannot manufacture a
+# difference between them. Reported, not corrected for.
+PASSES: dict[str, float] = {}
+
+
+def _eventloop_cycles(sock) -> int | None:
+    """Read `eventloop_cycles` from INFO stats, or None if the engine omits it."""
+    sock.sendall(resp("INFO", "stats"))
+    buf = b""
+    while b"\r\n\r\n" not in buf and not buf.endswith(b"\r\n"):
+        chunk = sock.recv(1 << 20)
+        if not chunk:
+            return None
+        buf += chunk
+        if b"eventloop_cycles" in buf and buf.endswith(b"\r\n"):
+            break
+    for line in buf.split(b"\r\n"):
+        if line.startswith(b"eventloop_cycles:"):
+            try:
+                return int(line.split(b":", 1)[1])
+            except ValueError:
+                return None
+    return None
+
+
 def run_once(engine: str, seeds, cmd, ops: int, workdir: str, tag: str,
              locale: str | None = None) -> int:
     out = os.path.join(workdir, "cg.%s.out" % tag)
@@ -869,6 +908,7 @@ def run_once(engine: str, seeds, cmd, ops: int, workdir: str, tag: str,
         # out. Small-reply shapes are unaffected by construction (they never backlog),
         # and that is asserted rather than assumed: see the reproduction table in the
         # commit that introduced this.
+        cycles_before = _eventloop_cycles(sock)
         payload = resp(*cmd) * ops
         counter = ReplyCounter()
         sock.setblocking(False)
@@ -901,6 +941,9 @@ def run_once(engine: str, seeds, cmd, ops: int, workdir: str, tag: str,
                     counter.feed(chunk)
         finally:
             sock.setblocking(True)
+        cycles_after = _eventloop_cycles(sock)
+        if cycles_before is not None and cycles_after is not None:
+            PASSES[tag] = (cycles_after - cycles_before) / ops
     finally:
         if sock is not None:
             sock.close()
@@ -1053,6 +1096,9 @@ def main() -> int:
     if fr_only:
         got = dispatch_share(os.path.join(workdir, "cg.fr.2n.out"))
         frac = got[0] if got else float("nan")
+        fr_p = PASSES.get("fr.2n")
+        if fr_p is not None:
+            print("  event-loop passes per op: %.3f" % fr_p)
         print("LADDER %-18s fr %8.1f instr/op   dispatch %8.1f (%.1f%%)"
               % (shape, fr_ipo, fr_ipo * frac, 100 * frac))
         label, frames = dispatch_mechanism(os.path.join(workdir, "cg.fr.2n.out"))
@@ -1065,6 +1111,14 @@ def main() -> int:
     print("  fr     Ir(N)=%-14d Ir(2N)=%-14d -> %10.1f instr/op" % (fr_lo, fr_hi, fr_ipo))
     print("  redis  Ir(N)=%-14d Ir(2N)=%-14d -> %10.1f instr/op" % (rd_lo, rd_hi, rd_ipo))
     print("  fr/redis instructions per op: %.4fx" % (fr_ipo / rd_ipo))
+    # (frankenredis-zw36c) The per-PASS denominator, now observed rather than inferred.
+    # fr's per-iteration bookkeeping is paid once per pass, so a shape's passes/op is what
+    # converts that fixed tax into a per-op cost. A shape at ~1 pass/op cannot show a
+    # per-pass lever at all; one at many passes/op is where such a lever is visible.
+    fr_p, rd_p = PASSES.get("fr.2n"), PASSES.get("redis.2n")
+    if fr_p is not None and rd_p is not None:
+        print("  event-loop passes per op:     fr %.3f   redis %.3f   (fr/redis %.2fx)"
+              % (fr_p, rd_p, (fr_p / rd_p) if rd_p else float("nan")))
     got = dispatch_share(os.path.join(workdir, "cg.fr.2n.out"))
     if got:
         frac, top = got

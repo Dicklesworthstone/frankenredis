@@ -26278,3 +26278,59 @@ RETRY PREDICATE: run `sintercard_big` against `sinter_big` in the next window, m
 both arms. The DIFFERENCE is fr's per-member emit cost and is the first number that can
 tell whether fr's 13 pct per-member excess over redis is in EMIT or in PROBE. Do NOT quote
 either shape alone for that question.
+
+## MEASURED (frankenredis-zw36c) — the per-pass DENOMINATOR is now observed, and it is 1871x apart between the two engines: fr takes 231 event-loop passes per SINTER where redis takes 0.12
+
+Claim class: INSTRUMENT. It makes a whole class of previously unadjudicable levers divisible.
+
+THE BLOCKER THIS REMOVES. fr pays nine frames of bookkeeping ONCE PER EVENT-LOOP PASS
+whether or not there is work; redis has no per-iteration counterpart of comparable weight.
+Every instrument here divides by OPS while that cost is per PASS, so the denominator was
+never observed -- only inferred through a reply-size proxy. TWO agents hit that wall
+independently and recorded it: f43f75333 ("the tax is per-ITERATION while every instrument
+I have divides by OPS") rejecting the writer-completion guard, and my own zw36c row, where
+five samples per arm spanned 13.7 and 29.8 pct against an expected 2-3 pct effect.
+
+Both engines already expose `eventloop_cycles` in INFO stats (redis 7.0+; fr mirrors the
+field). Sampling it either side of the burst makes the denominator a measured quantity:
+
+    shape         fr passes/op   redis passes/op   fr/redis
+    get_control          0.001            0.002       0.33x
+    sinter_big         231.111            0.123    1871.34x
+
+    fr/redis instr/op on those same runs: get_control 0.4094x, sinter_big 1.4596x
+
+READ THE TWO ROWS TOGETHER, because that is the whole point. On a small reply BOTH engines
+amortise the loop across many pipelined commands -- fr 0.001 passes/op means ~1000 ops per
+pass -- and fr's per-pass tax is invisible because it is divided by a thousand. On a
+512-member reply fr takes TWO HUNDRED AND THIRTY-ONE passes for ONE command while redis
+takes 0.12, i.e. redis still serves ~8 commands per pass. That is a 1871x difference in how
+many times each engine pays its per-pass costs, and it is multiplicative with them.
+
+WHAT IT EXPLAINS, retroactively and precisely:
+  * why gein3's no-reply control found fr's SET work 31 pct FASTER than redis with 0.19 pct
+    spread while sinter_big carried the entire 1.1193x deficit and 40 pct variance -- the
+    set work runs once, the pass costs run 231 times;
+  * why 3d6f6c61b's drain fast-exits measured -19.3 pct on sinter_big specifically, a shape
+    where each guarded drain is skipped 231 times per command;
+  * why the same guards were unmeasurable on a per-op instrument, and why f43f75333's
+    writer-completion guard "paid nothing measurable" -- both were being divided by the
+    wrong denominator, and nobody could see it because nobody was reporting it.
+
+~5.6 KB of reply over 231 passes is roughly 24 bytes per pass, which is not a plausible
+socket-capacity story and is the next thing to look at. `try_flush` already loops to
+WouldBlock, so fr is not chunking its writes; something is returning to the loop far more
+often than the data requires. NOT diagnosed here -- this row lands the measurement, not the
+cause.
+
+The two INFO commands are themselves ops and cost about a pass each; against N=2000 that is
+under 0.1 pct and it biases BOTH arms identically, so it cannot manufacture a difference.
+Reported, not corrected for.
+
+RETRY PREDICATE. Any per-pass lever is now measurable and MUST be measured on a shape whose
+passes/op is reported and high -- sinter_big at 231 is the sensitive one; get_control at
+0.001 cannot show such a lever at all and a null there proves nothing. Re-open f43f75333's
+writer-completion guard on this instrument: it was rejected on a per-op measurement, which
+this row shows was the wrong denominator, and it is 13.2M of the 30.6M tax. If
+`eventloop_cycles` ever disappears from either engine's INFO the harness silently omits the
+line rather than reporting a wrong one, so an absent line means the field, not a zero.
