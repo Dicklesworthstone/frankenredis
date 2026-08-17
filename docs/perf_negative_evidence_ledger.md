@@ -29008,3 +29008,65 @@ RETRY PREDICATE: when builds reopen, ONE ABBA covers the whole outstanding set �
 lmpop_missing to close out `bba68310b` (the only landed-unmeasured lever), then randomkey
 (1.3169x, still stranded, nothing written) and dump together as the row above suggests.
 Take RANDOMKEY before DUMP: it is behind, DUMP is already at parity.
+
+--------------------------------------------------------------------------------
+AUDIT, ZERO-BUILD (frankenredis-p98mw) — the LMPOP transposition that reached main was a
+PERFORMANCE regression, not a correctness one, and the reason why is a design invariant
+worth stating: a floor arm re-checks its own arity prefix, so a class-table error degrades
+to slow, never to wrong — but ONLY where sibling classes have distinct arity prefixes
+
+Claim class: CORRECTNESS-NEUTRAL (no measurement; source audit at HEAD 475522136)
+
+Read-only audit of the landed-but-unmeasured LMPOP entries while builds are halted.
+
+ALL FOUR FLOOR ARMS MIRROR THEIR CASCADE COUNTERPARTS EXACTLY. Prefix, parser arity and
+executor agree in every case, checked pairwise against the cascade arms at 9662-9911:
+
+    class          prefix   parser                              executor
+    Lmpop1         *4       parse_borrowed_plain_key_arg2       execute_plain_lmpop1_borrowed
+    Lmpop2         *5       parse_borrowed_plain_key_arg3       execute_plain_lmpop2_borrowed
+    Lmpop1Count    *6       parse_borrowed_plain_key_arg4       execute_plain_lmpop1_count_borrowed
+    Lmpop2Count    *7       parse_borrowed_plain_key_arg5       execute_plain_lmpop2_count_borrowed
+
+THE SEVERITY OF 753f8019a WAS OVERSTATED, and correcting it matters because the record
+currently reads as a wrong-answer bug in shipped code. It was not. When the arity-5 and
+arity-6 classes were transposed, an arity-5 packet reached the `Lmpop1Count` arm, whose
+parser is handed the LITERAL `b"*6\r\n$5\r\n"` and begins with `input.strip_prefix(prefix)`.
+The prefix does not match, the parser returns None, and the arm falls through to
+`parse_borrowed_multibulk_action` — the same generic path the command took before the lever
+existed. Same for the *6 packet against the *5 arm. So the transposition made the LEVER
+INERT for two of LMPOP's four forms; it could not produce a wrong reply. A two-key pop was
+never answered through the one-key-plus-count executor.
+
+THE INVARIANT, stated so the next floor class can rely on it: THE ARM'S PREFIX LITERAL IS
+AN INDEPENDENT SECOND CHECK ON THE CLASS TABLE. Classification decides which arm runs; the
+arm's parser then re-derives the arity from the packet itself and refuses anything that does
+not match. A table error therefore costs performance, not correctness.
+
+AND ITS LIMIT, WHICH IS THE ACTIONABLE HALF: the invariant holds only because LMPOP's four
+classes carry FOUR DISTINCT arity prefixes. Where a family shares one prefix and
+discriminates on an inner keyword there is NO structural backstop — `SetOpt4` is exactly
+that case, since `SET k v NX` and `SET k v XX` are both `*4\r\n$3\r\n` and differ only in a
+token the parser reads itself. There a routing error DOES answer one command through the
+other's executor, silently inverting set-if-exists into set-if-not-exists. That is why the
+f2zrr test asserts WHICH executor the discriminant selects, and it is why that assertion is
+not ceremony: it is carrying the safety the prefix literal carries for LMPOP.
+
+    RULE: if a new floor family's classes share an arity prefix, the test MUST assert the
+    discriminant, not just the class. If they have distinct prefixes, class-level assertions
+    are sufficient and the parser backstops the rest.
+
+RESIDUAL GAP, NAMED RATHER THAN PAPERED OVER: the LMPOP guard test asserts classification
+and parser acceptance, NOT arm-to-executor wiring. For this family that gap is closed
+structurally by the argument above (distinct prefixes) plus this audit. It would NOT be
+closed for a shared-prefix family, and it is not a pattern to copy blindly.
+
+PROVENANCE:
+  no measurement       source audit only. Builds halted: /data 71G against a 42G floor,
+                       drawdown from two external Rust builds. Nothing was compiled or run.
+  reviewed at          HEAD 475522136, arms at main.rs:18079-18170, cascade at 9662-9911,
+                       class table at 16550-16553, parser at parse_borrowed_plain_key_arg2.
+
+RETRY PREDICATE: LMPOP's AFTER side is still unmeasured and this audit does not substitute
+for it — the entries are proven CORRECT here, not proven FASTER. One ABBA when builds
+reopen, lmpop_missing first.
