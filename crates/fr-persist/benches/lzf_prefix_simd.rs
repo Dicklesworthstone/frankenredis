@@ -258,6 +258,21 @@ fn main() -> Result<(), String> {
             speeds.push(sp);
         }
 
+        if std::env::var("LZF_DUMP_NULLS").is_ok() {
+            let mut sorted = nulls.clone();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let above = nulls.iter().filter(|v| **v > 1.0).count();
+            let below = nulls.iter().filter(|v| **v < 1.0).count();
+            eprintln!(
+                "NULLDUMP {label}: n={} above1={above} below1={below} min={:.6} p25={:.6} med={:.6} p75={:.6} max={:.6}",
+                sorted.len(),
+                sorted[0],
+                sorted[sorted.len() / 4],
+                sorted[sorted.len() / 2],
+                sorted[sorted.len() * 3 / 4],
+                sorted[sorted.len() - 1]
+            );
+        }
         let null_cv_pct = cv(&nulls);
         let effect_cv_pct = cv(&speeds);
         let (null_ci95_low, null_ci95_high) = bootstrap_median_ci(&nulls);
