@@ -26990,3 +26990,50 @@ trial index. A monotone trend implicates growth (allocator arena, fragmentation,
 cache, expired-key bookkeeping); a sawtooth implicates a periodic cycle (active expire,
 rehash). Only once that curve is flat can this harness authenticate anything, and until then
 the instrument -- not the engine -- is what 33832 is blocked on.
+
+## MEASURED (frankenredis-33832) — the within-process term is a SETTLING TRANSIENT of about ten trials, not growth; an 8-pass warmup takes the two-process null 0.931 -> 0.974 and the same-process null 0.771 -> 1.047
+
+Claim class: INSTRUMENT. Still HOLD; no A/B claimed.
+
+CHARACTERISED, with the shape rather than a summary statistic. Added `--drift-curve N`,
+which runs ONE arm and prints per-trial ms against trial index -- the previous row asked
+exactly this question and named monotone-vs-sawtooth as the discriminator:
+
+    run        quartile medians (ms)         first/last   monotone-rise fraction
+    36 trials   52.0  53.0  58.0  58.0         0.892x            0.60
+    40 trials   48.6  51.7  51.0  52.4         0.929x            0.51
+
+The first quartile is fastest in both runs and then it PLATEAUS, and a rise fraction near
+0.5 rules out steady growth. So the answer is neither of the two hypotheses I offered: not
+unbounded accumulation, not a periodic sawtooth, but a SETTLING TRANSIENT spanning roughly
+a quartile -- about ten trials. Which is exactly why the single discarded pass added in the
+previous row failed: one pass sits INSIDE the transient, so the arm was still climbing when
+the clock started.
+
+FIX AND EFFECT. Warmup raised from 1 to 8 discarded passes per arm (`--warmup-passes`,
+default 8, kept a knob rather than a constant since the count is measured):
+
+                                   before        after
+    A/A two-process null          0.931421x    0.974445x    (band is 0.98..1.02)
+    A/A same-process halves       0.770562x    1.046502x
+    A/B redis/fr                  0.504620x    0.595594x
+
+The same-process null -- the term that has no placement or load-order component at all, and
+which was the alarming one at 23 pct -- is now within 4.7 pct of unity. The two-process null
+misses the band by 0.006.
+
+STILL HOLD, AND I AM NOT ROUNDING IT IN. 0.974445 is outside 0.98..1.02, the harness refuses,
+and the refusal is correct. What has changed is that the residual is now small enough to be
+plausibly the host: this ran at loadavg 31.98, roughly double the quietest window seen today.
+That is a testable claim, not an excuse -- re-run at loadavg under ~15 and the null either
+enters the band or it does not.
+
+33832's authenticated 0.606011x still stands as the last valid figure; fosf1's throughput
+effect remains unmeasured, now six attempts in. Today's A/Bs have sat at 0.505-0.707 across
+every configuration, straddling that number, and not one of them is quotable.
+
+RETRY PREDICATE. Re-run `--competitive` unchanged at loadavg <= 15 with three blocks under
+50 pct combined core+sibling load. If the null enters 0.98..1.02, this bead is finally
+measurable and fosf1's effect can be read off it. If it does not, raise `--warmup-passes`
+to 16 and re-run `--drift-curve 80` first to see whether the plateau is genuinely flat that
+far out -- both runs above stop at 36-40 trials and cannot see past that.

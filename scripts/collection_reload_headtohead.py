@@ -18,6 +18,8 @@ Usage: collection_reload_headtohead.py <redis_port> <fr_port> [--trials N]
        [--set-kind str|int]
        [--competitive --fr-aa-port PORT [--expect-fr-elf SHA256]]
        [--swap-preload]   reverse which fr arm is preloaded first (33832 A/A attribution)
+       [--drift-curve N]  per-trial ms vs trial index for ONE fr arm (33832)
+       [--warmup-passes N] discarded passes per arm before timing (default 8)
 Exit 0 always (informational).
 
 `--competitive` is the authentication mode. It needs two independent
@@ -69,6 +71,9 @@ ZSETS = int(opt("--zsets", "2000"))
 MEMBERS = int(opt("--members", "40"))
 SET_KIND = opt("--set-kind", "str")
 COMPETITIVE = "--competitive" in sys.argv
+# (frankenredis-33832) Discarded passes per arm before timing; see the drift-curve table
+# at the warmup loop. Overridable so the count stays a measured knob, not a constant.
+WARMUP_PASSES = int(opt("--warmup-passes", "8"))
 FR_AA = int(opt("--fr-aa-port", "0"))
 EXPECT_FR_ELF = opt("--expect-fr-elf", "")
 
@@ -234,6 +239,48 @@ def bootstrap_median_ci(samples, seed=0, resamples=4096):
     return statistics.median(samples), lo, hi
 
 
+def run_drift_curve(arm, redis, trials):
+    """(frankenredis-33832) Per-trial RESTORE time for ONE arm against trial INDEX.
+
+    Everything else in this file compares arms. This deliberately does not: the
+    two-process A/A was chased through four core placements and then attributed to
+    preload order by `--swap-preload`, and warming every arm STILL left the same
+    process's own two halves 23 pct apart (fr_b halves null 0.770562x). A term that
+    large inside ONE process, on ONE core, running ONE ELF, is not comparable to
+    anything -- it has to be characterised on its own before any A/B built on top of
+    it can authenticate.
+
+    The SHAPE is the answer, which is why this prints the series rather than a summary
+    statistic:
+      * a monotone rise implicates GROWTH -- allocator arena, fragmentation, the DUMP
+        cache, expired-key bookkeeping accumulating across repeated RESTORE...REPLACE
+      * a sawtooth implicates a PERIODIC cycle -- active expire, incremental rehash
+      * a flat series with scatter implicates the HOST, and would mean the drift is not
+        fr's at all
+    """
+    keys = [k for k in redis.cmd("KEYS", "*")]
+    payloads = [(k, redis.cmd("DUMP", k)) for k in keys]
+    if any(payload is None for _, payload in payloads):
+        raise RuntimeError("DUMP returned nil while preparing the drift workload")
+    time_restore(arm, payloads)  # discarded warmup, same as the competitive path
+    # time_restore returns SECONDS (time.perf_counter delta); scale for display.
+    series = [1000.0 * time_restore(arm, payloads) for _ in range(trials)]
+    print("  trial      ms")
+    for i, ms in enumerate(series):
+        print("  %5d  %8.2f" % (i, ms))
+    n = len(series)
+    q = max(1, n // 4)
+    quarters = [statistics.median(series[i * q:(i + 1) * q]) for i in range(4)]
+    rises = sum(1 for a, b in zip(series, series[1:]) if b > a)
+    print("  quartile medians (ms): " + "  ".join("%.2f" % x for x in quarters))
+    print("  first/last quartile median ratio: %.4fx" % (quarters[0] / quarters[-1]))
+    print("  monotone-rise fraction: %.2f  (0.5 = no trend, ->1.0 = steady growth)"
+          % (rises / max(1, n - 1)))
+    print("  min %.2f ms  median %.2f ms  max %.2f ms  spread %.1f pct"
+          % (min(series), statistics.median(series), max(series),
+             100.0 * (max(series) - min(series)) / min(series)))
+
+
 def run_competitive_restore(fr_a, fr_b, redis):
     """One-invocation RESTORE A/A+A/B measurement with within-round rotation."""
     keys = [k for k in redis.cmd("KEYS", "*")]
@@ -270,8 +317,21 @@ def run_competitive_restore(fr_a, fr_b, redis):
     # One discarded pass per arm pays that cost before the clock starts. It is thrown away,
     # so it cannot enter any sample; the only thing it changes is that arm N is no longer
     # measured in a state arm N-1 was not.
-    for arm in arms:
-        time_restore(arms[arm], payloads)
+    # (frankenredis-33832) The warmup is EIGHT passes per arm, not one, and the count is
+    # measured rather than picked. `--drift-curve` characterised the within-process term:
+    #
+    #     run       quartile medians (ms)          first/last   monotone-rise fraction
+    #     36 trials  52.0  53.0  58.0  58.0          0.892x            0.60
+    #     40 trials  48.6  51.7  51.0  52.4          0.929x            0.51
+    #
+    # The first quartile is the fastest in both, then it PLATEAUS, and a rise fraction of
+    # ~0.5 rules out steady growth. So this is a settling transient spanning roughly a
+    # quartile -- about ten trials -- not unbounded accumulation. That is precisely why the
+    # single discarded pass added earlier did not absorb it: one pass is inside the
+    # transient, so the arm was still climbing when the clock started.
+    for _ in range(WARMUP_PASSES):
+        for arm in arms:
+            time_restore(arms[arm], payloads)
     for trial in range(rounds * len(ARM_ORDERS)):
         sample = {}
         for arm in ARM_ORDERS[trial % len(ARM_ORDERS)]:
@@ -359,6 +419,7 @@ def main():
     # Either answer is progress; a fifth core permutation is not, since the four rows
     # above move the null by less than its own spread.
     swap_preload = "--swap-preload" in sys.argv
+    drift_trials = int(opt("--drift-curve", "0"))
     print("preloading identical collection-heavy DB into both...%s"
           % ("  [--swap-preload: fr_a first]" if swap_preload else ""))
     if fr_aa is not None and swap_preload:
@@ -369,6 +430,12 @@ def main():
         if fr_aa is not None:
             preload(fr_aa)
     preload(rs)
+    if drift_trials:
+        print("\nDRIFT CURVE: one fr arm, %d trials, index vs ms "
+              "(33832: characterise the within-process term before comparing arms)"
+              % drift_trials)
+        run_drift_curve(fr, rs, drift_trials)
+        return 0
     fk = fr.cmd("DBSIZE"); rk = rs.cmd("DBSIZE")
     print(f"DBSIZE fr={fk.decode()} redis={rk.decode()}")
     if fr_aa is not None:
