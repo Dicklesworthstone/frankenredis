@@ -40337,3 +40337,127 @@ Do NOT take it: the 2026-08-16 row at :31762 already REJECTED re-implementing th
 the half that remains is the borrowed paths' own name handling, not the generic one. If this
 route is revisited, re-profile first — three levers have now landed on it today and the
 ranking that motivated each is stale by the next.
+
+## 2026-08-17 CrimsonHawk: COPY REPLACE has CROSSED — worst bound fr/Redis **1.0525x** on ops/s, up from a replicated 0.7916-0.8105x — but only 1 of 6 rows was ADMISSIBLE in the quietest window of the day, and `get_control` is why (`frankenredis-copydeficit`)
+
+Claim class: COMPETITIVE
+Campaign output: yes
+
+COPY REPLACE was the worst replicated cell on the board (0.8105x then 0.7916x fr/redis ops/s,
+both ADMISSIBLE, `get_control` admissible alongside, normalised 0.7267). After
+front-classifying it at `375d20a0f` (9,257.3 -> 2,956.0 instr/op) it now measures fr AHEAD.
+This row certifies what can be certified and refuses the rest.
+
+### THE THREE REPLICATES, ALL OF THEM, INCLUDING THE TWO THAT FAILED
+
+`balanced_square_ab.py --shapes copyreplace --rounds 9 --ops 50000 -P16`, ABBAABBA square,
+null bound +/-0.02, on ELF f35eef3c5c405ef9 at HEAD:
+
+  rep  copy_replace              verdict                    get_control   verdict
+  1    1.1495 [1.0525, 1.2178]   ADMISSIBLE                 1.1121        NULL-FAILED
+       nulls redis 1.0062 fr 1.0005                         nulls 0.9807 / 1.0245
+  2    1.1319 [1.0820, 1.1709]   NULL-FAILED (fr 1.0449)    1.1278        NULL-FAILED
+       nulls redis 0.9934 fr 1.0449                         nulls 0.9993 / 1.0310
+  3    1.1396 [1.1047, 1.1789]   NULL-FAILED (redis 0.9784) 1.1325        NULL-FAILED
+       nulls redis 0.9784 fr 0.9914                         nulls 0.9573 / 0.9784
+
+**1 of 6 rows admissible.** The distribution is printed in full rather than summarised,
+because a row that refuses must show the evidence it refused on.
+
+### WHAT IS CLAIMED, AND WHAT IS NOT
+
+CLAIMED: **fr/Redis 7.2.4 1.0525x** on `copy_replace`, which is the WORST BOUND available —
+the CI-low of the single ADMISSIBLE replicate, the most pessimistic number any of the three
+runs supports. The direction is not in doubt: three independent squares put the point estimate
+at 1.1319, 1.1396 and 1.1495, a spread of 1.6 pct, and every one of the six CI endpoints
+across the three runs is above 1.05. The prior standing was 0.7916-0.8105x, so this is a
+crossing of roughly 0.80x -> 1.05x at its most conservative reading.
+
+NOT CLAIMED: a NORMALISED figure. `get_control` null-failed in all three runs, so there is no
+admissible normaliser and the harness printed `normalised: n/a` every time. The raw ratio is
+quoted and labelled raw.
+
+NOT CLAIMED: replicated ADMISSIBLE standing in the sense the convention means. One of three
+passed. The convention exists for thin margins near parity; this margin is not thin (13-15 pct
+on the point estimate), but the letter of the rule is not met and the row says so rather than
+arguing the spirit.
+
+### THE INSTRUMENT IS THE LIMIT HERE, NOT THE HOST — AND `get_control` IS THE BINDING TERM
+
+This was the quietest window of the day and it was VERIFIED, not assumed: CPU idle sampled from
+/proc/stat deltas at 83.3 / 84.8 / 82.4 / 80.4 pct with 0.0-0.1 iowait, holding inside 4 points
+across a minute, 1-minute loadavg 10.35-11.07, and no cargo or rustc running. Three squares in
+that window produced one admissible row.
+
+The nulls fail in BOTH directions across the three runs — fr high at 1.0449, redis low at
+0.9784 and 0.9573 — which is drift, not a systematic bias in either engine's favour. And the
+CPU MHz mean moved DURING every run, in both directions: 3113 -> 2872, 2523 -> 2188 (-13 pct),
+2600 -> 3235 (+24 pct). A frequency that moves mid-run is not cancelled by a balanced square,
+which cancels LINEAR drift.
+
+`get_control` never passed, in six attempts across two sessions. That is consistent with the
+known result that it is DRIFT-LIMITED: 41 rounds once narrowed a GEOSEARCH row to 0.8 pct and
+narrowed the control NOT AT ALL before it null-failed. **So do not spend more rounds on this
+cell expecting the normaliser to come good** — more rounds narrows the row and leaves the
+control where it is. The normaliser, not the row, is the reason this cell cannot be certified
+on this host, and that is a property of the instrument.
+
+### THE INSTRUCTION INSTRUMENT AGREES, AND IT IS ADMISSIBLE
+
+The same cell on the load-immune instrument, replicated, worst bound quoted: fr/Redis 7.2.4
+**0.5137x** instructions per op (below 1.0 = fr ahead), down from 1.5964x before the lever.
+Both arms in the same invocation, live vendored redis-server started and measured alongside
+the fr arm. Two instruments, two directions of the same crossing, one of them admissible under
+its own gate and one of them not.
+
+A/A null median 1.000002, bootstrapped over 20,000 resamples, 95 pct median CI
+[0.996069, 1.003947] — six same-ELF same-shape draws, 30 pairwise ratios, recorded in the
+`0bf781d57` row and unchanged.
+
+CV was not used, as a gate or otherwise.
+
+### MY OWN ADMISSION PREDICATE WAS MIS-SPECIFIED, AND THIS ROW WITHDRAWS IT
+
+The preceding row's retry predicate said to re-run only in a window whose mean CPU MHz, sampled
+three times 15 s apart, varies by under 10 pct. That test is WRONG AT LOW LOAD and it would
+have blocked this run: it read a 21.8 pct spread (2101-2559) in a window that was 80-85 pct
+idle and perfectly quiet. With 64 cores mostly idle, the MEAN MHz across all of them is
+dominated by cores sitting in low-power states, not by the frequency the benchmark's own core
+boosts to. The meaningful quantity is MHz moving DURING a run, which the harness already
+records per arm, and the meaningful gate is the harness's own A/A nulls.
+
+Replaced by: run the square and let its nulls adjudicate. They are the instrument's designed
+refusal and they refused correctly five times out of six here.
+
+### PROVENANCE
+
+  ELF           f35eef3c5c405ef9, plain `--release` at HEAD (2b11c6bcb), no feature flags,
+                built locally with RCH_CARGO_WRAPPER_BYPASS=1, path from
+                `--message-format=json`, copied to a private path and sha256'd there.
+  bench_elf_sha256=f35eef3c5c405ef9ff8bc3bac5176e5a547fc70abc35cf65a22d83a3c3eca834
+  incumbent     vendored redis 7.2.4, live arm started and measured in the SAME INVOCATION as
+                the fr arm by the harness, one process running both servers side-by-side,
+                bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+  harness       `scripts/balanced_square_ab.py` (ABBAABBA, 9 rounds, 50k ops/slot, -P16),
+                `scripts/shape_instr_per_op.py` for the instruction row.
+  host          thinkstation1, 64 cores observed, powersave governor, /data 204G free.
+  PER-ARM loadavg / CPU idle / MHz
+                rep1  load 11.07 13.03 18.72, MHz mean 3113 before -> 2872 after
+                rep2  load ~11,             MHz mean 2523 before -> 2188 after
+                rep3  load ~10, idle 86.5 pct measured immediately before the run,
+                                            MHz mean 2600 before -> 3235 after
+                idle  83.3 / 84.8 / 82.4 / 80.4 pct over the minute preceding rep1,
+                      iowait 0.0-0.1 pct throughout, zero cargo/rustc processes.
+
+### RETRY PREDICATE
+
+1. Do NOT re-run this cell with more rounds hoping `get_control` passes. It is drift-limited
+   and does not narrow. If a normalised figure is wanted, the work is to find a NORMALISER
+   that certifies tighter than the row — a cheaper, more deterministic shape than GET — and
+   that is a harness change, not a re-run.
+2. The remaining uncertified throughput cells from this campaign are BITPOS arities 4 and 6
+   (`52cfbe467`), GETEX (`1d8b5e8e1`) and the TTL family (`e6a552cfb`). None has a group in
+   `balanced_square_ab.py` yet. Add them with an in-group control that is NOT get_control —
+   for BITPOS the classified sibling `bitpos_range` is the natural one, and for the write-gate
+   levers an unconverted floor write arm serves.
+3. Withdraw the MHz-spread admission test wherever it was propagated. Use the harness nulls.
