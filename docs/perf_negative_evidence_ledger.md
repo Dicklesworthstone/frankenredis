@@ -8,6 +8,66 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## MEASURED (frankenredis-ozrro) — MSET and HSET are ALREADY at ~0.51x, so their floor entries are a 10-15 pct improvement and not a parity crossing. Separately, the control's REDIS arm moved 5.9 pct, wider than the 1.6-4.0 pct I had banked
+
+Sizing run on `fr-after-pubsub` (d5be78419). NOT CERTIFIED: my own uptime check found FOUR
+cargo/rustc processes running and load 19.84 / 27.72 / 50.11 — the 1-minute and 5-minute 1.4x
+apart with the 15-minute still at 50, a decaying window with builds in it. The fleet report for
+this tick said "no builds running"; it did not reproduce locally, which is the fourth time this
+session that checking rather than trusting has changed what I did.
+
+Per-arm loadavg 21.01-23.64 / 27.40-27.81 / 49.41-49.55; observed core MHz 1,429-3,909.
+
+    shape         fr        redis      ratio     dispatch   prior dispatch   apart
+    mset_2     2,999.8    5,815.4    0.5158x       915.4        912.9        0.27 pct
+    hset_same  2,332.6    4,579.7    0.5093x       681.6        681.8        0.03 pct
+    dump_small 2,686.3    5,345.9    0.5025x       305.0        306.4        0.46 pct  CONTROL
+
+### THE PRIORITY FRAMING I USED WAS WRONG, AND THESE RATIOS ARE WHY
+
+Two rows ago I wrote that a circular threshold had "buried two of the hottest commands there
+are", which reads as urgency. The dispatch finding stands — 912.9 and 681.8 really were
+mis-sized by ~50 pct by a law-derived cutoff — but I had never measured their RATIOS, and both
+are already at ~0.51x. So the floor entries are worth ~15 pct on MSET and ~10 pct on HSET
+against redis figures fr is already beating by 2x. That is a real improvement on hot commands
+and worth taking; it is NOT a parity crossing, and I should not have implied one before
+measuring the denominator.
+
+Board state that follows, stated plainly because it is the useful summary: every HOT command
+this campaign has measured is now ahead of vendored 7.2.4. The only above-parity shape left on
+my board is `pubsub_channels` at 2.3324x, which is COLD. "Biggest ratio" and "worth doing" have
+fully decoupled, and the remaining work is improvement-on-wins rather than deficit-closing.
+
+### THE DENOMINATOR MOVES MORE THAN I BANKED
+
+`dump_small`'s fr arm is the most reproducible quantity I have: 2,690.9 / 2,696.3 / 2,698.2 /
+2,703.4 / 2,703.7 / 2,686.3 across six sessions — 0.65 pct total spread. Its REDIS arm over the
+same runs:
+
+    5,045.8   5,046.6   5,050.8   5,345.9
+
+The last is 5.9 pct above the other three. My earlier correction put the denominator's
+run-to-run variation at 1.6-4.0 pct and concluded ratios carry ~4 pct uncertainty. 5.9 pct is
+outside that, and it was measured in a window with four peer builds running — which is a
+plausible cause but not a demonstrated one, since that same correction showed the variation does
+NOT track load monotonically.
+
+    PRACTICAL CONSEQUENCE: a ratio quoted from a window with builds in it carries at least
+    +/-6 pct, not +/-4. That is wide enough to matter for any claim near parity, and it is
+    another reason the 0.5158x and 0.5093x above are worth taking as "comfortably ahead" rather
+    than as four-significant-figure facts.
+
+### RETRY PREDICATE
+
+  1. The denominator width reopens when `dump_small`'s redis arm is measured three times in a
+     window with NO builds running and NO peer cargo processes: if the spread stays under 2 pct
+     there, the 5.9 pct is build interference and the +/-4 pct figure holds for clean windows.
+     If it does not, the ratio uncertainty is intrinsic and every banked ratio in this ledger
+     needs its significant figures trimmed.
+  2. MSET/HSET floor entries land when main.rs frees, sized against the 915.4 and 681.6
+     before-figures, with the after required to fall inside the arity band. Their VALUE claim is
+     now explicitly "10-15 pct on an already-winning command", not a crossing.
+
 ## PREPARED (frankenredis-ozrro) — the exact arity sets MSET and HSET serve, which correct my own "needs a parameterised class" claim: they need ARITY-SET GUARDS, and MSET's single-pair form is not served at all
 
 Source reading only. No build (36 peer build processes running, load 25.9/31.7/57.6) and no
