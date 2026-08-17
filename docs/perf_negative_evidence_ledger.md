@@ -28762,3 +28762,57 @@ RETRY PREDICATE: rank remaining floor-entry candidates by ARM POSITION and ignor
 above roughly arm 30 — below ~1,100 instr/op of dispatch the entry costs more review than it
 returns. Take DUMP and RANDOMKEY together when the host recovers; they are adjacent arms and
 one ABBA covers both. Do NOT build PING an entry.
+
+--------------------------------------------------------------------------------
+VERIFIED, NOT MINE (frankenredis-p98mw) — HEAD's LMPOP arity map has classes 5 and 6
+TRANSPOSED, so both ALWAYS decline into GENERIC. A peer has the fix uncommitted; this is an
+independent confirmation so it cannot be lost
+
+Claim class: BUG (live in HEAD at bba68310b)
+
+Found while inspecting why my own push was blocked: `crates/fr-server/src/main.rs` showed a
+2-line working-tree diff that was NOT mine. It is RusticHorizon's in-flight fix, and it is
+correct. Verified independently against what each class's arm actually parses:
+
+    class          arm's parser demands
+    Lmpop1         *4
+    Lmpop2         *5
+    Lmpop1Count    *6
+    Lmpop2Count    *7
+
+    CORRECT map    (4, Lmpop1)  (5, Lmpop2)       (6, Lmpop1Count)  (7, Lmpop2Count)
+    HEAD's map     (4, Lmpop1)  (5, Lmpop1Count)  (6, Lmpop2)       (7, Lmpop2Count)
+                                 ^^^ transposed ^^^
+
+`LMPOP 2 k1 k2 LEFT` is arity 5 and is routed to a class whose parser demands `*6`;
+`LMPOP 1 k LEFT COUNT n` is arity 6 and is routed to one demanding `*5`. NEITHER CAN EVER
+MATCH, so both arities are claimed at the floor and then dropped on the GENERIC path — which
+this ledger has established four times is STRICTLY WORSE than never claiming them, because a
+floor decline does not fall back to the cascade.
+
+    THIS IS THE FLOOR-CLASS-IS-A-PROMISE FAILURE, in its purest form: the class is keyed on
+    an arity its own arm refuses. It is the fifth instance recorded here and the first that
+    reached HEAD.
+
+I did NOT touch the file. The fix is already sitting in the working tree under
+RusticHorizon's reservation, and my only contribution is this independent confirmation plus
+a durable record, because agent mail has timed out on every attempt this session and an
+uncommitted fix disappears with the session that holds it.
+
+WHAT WOULD HAVE CAUGHT IT: the floor-class promise test pattern every entry in this campaign
+carries — assert the classifier claims exactly the arities its arm's parser accepts, and
+mutation-test by widening the map. Applied to LMPOP, `(5, Lmpop1Count)` fails on the FIRST
+served shape, because `parse_borrowed_plain_key_arg4_packet(.., b"*6..")` cannot accept a
+5-element array. A four-arity family is exactly where the transposition risk lives and
+exactly where that test is worth its length.
+
+PROVENANCE:
+  no measurement       source verification only; no build, no server. Host in I/O
+                       saturation (loadavg 438, 72 pct iowait, 387 blocked processes).
+  MHz                  not recorded — nothing measured.
+  attribution          the FIX is RusticHorizon's, uncommitted at the time of writing. The
+                       verification and this row are mine.
+
+RETRY PREDICATE: if this row is still here and HEAD still has the transposed map, land
+RusticHorizon's two-line fix — it is already written. Then add the promise test for all four
+LMPOP arities; the family had none, which is why a transposition shipped.
