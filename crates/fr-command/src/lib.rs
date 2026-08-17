@@ -13339,6 +13339,31 @@ fn function_cmd(
         // undeclared global even when that body registers nothing, and reports
         // 'No functions registered' only when the body is otherwise clean — so
         // this check comes first.
+        // (frankenredis-p98mw) WHAT THE REMAINING SLICE NEEDS, recorded here rather than in
+        // a bead because this is where whoever takes it will be standing. Row 4 of the
+        // o500d differ — `local t = nil; t.field` — is a RUNTIME error on a LOCAL. No static
+        // rule can see it (it is not statically decidable), so matching upstream means
+        // EXECUTING the body at load time. Verified against the source, not guessed:
+        //
+        //   * `lua_eval::LuaEval::with_globals(store, now_ms, globals)` already accepts a
+        //     CUSTOM globals table, which is exactly the declared-globals sandbox upstream
+        //     runs the body in. `LuaEval::execute(source)` returns Err(String) on a runtime
+        //     error, which is the row-4 signal.
+        //   * Host functions are `LuaValue::RustFunction(Rc<str>)` dispatched by NAME in
+        //     `LuaEval::call_builtin`, and the `redis` table is assembled in
+        //     `lua_redis_table_template()`.
+        //   * THE BLOCKER: `register_function` has ZERO occurrences in lua_eval.rs. Execute
+        //     a VALID library body today and it dies on the register_function call, turning
+        //     the differ's CONTROL_valid row — currently passing — into a divergence. So the
+        //     unit is: add `redis.register_function` (both upstream calling conventions,
+        //     positional and table-form), collect its registrations on the evaluator, and
+        //     only then can execution replace `store.function_load`'s text scan below.
+        //   * It must be a LOAD-ONLY table: `register_function` must NOT appear in the EVAL
+        //     environment, or scripts gain a function upstream does not give them.
+        //
+        // Gate it on `scripts/function_load_differ.py`, which already discriminates (both
+        // controls agree) and already passes on rows 1-3. Do not attempt a static
+        // approximation of row 4: a partial static rule would reject valid libraries.
         if let Some((line, name)) = function_library_first_undeclared_global(&argv[code_idx]) {
             return Err(CommandError::Custom(format!(
                 "ERR Error registering functions: ERR user_function:{line}: Script attempted to access nonexistent global variable '{name}'"
