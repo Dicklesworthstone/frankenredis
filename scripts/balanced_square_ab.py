@@ -87,6 +87,93 @@ SQUARE = "ABBAABBA"
 NULL_BOUND = 0.02
 
 
+
+# (frankenredis-eh2ct) Commands whose cost SCALES with the collection they touch.
+# A shape running one of these over a 3-element collection measures the fixed
+# per-command cost, not the command — see `audit_shape_sizes`.
+SIZE_SCALING_COMMANDS = frozenset({
+    "SORT", "SORT_RO", "LRANGE", "SMEMBERS", "ZRANGE", "ZRANGEBYSCORE",
+    "ZRANGEBYLEX", "ZREVRANGE", "ZREVRANGEBYSCORE", "ZREVRANGEBYLEX", "HGETALL",
+    "HKEYS", "HVALS", "SINTER", "SUNION", "SDIFF", "ZDIFF", "ZINTER", "ZUNION",
+    "SINTERCARD", "ZINTERCARD", "MGET", "HMGET", "ZMSCORE", "SMISMEMBER",
+    "XRANGE", "XREVRANGE", "BITCOUNT", "LPOS", "SRANDMEMBER", "ZRANDMEMBER",
+    "HRANDFIELD", "GEOSEARCH", "PFCOUNT", "LCS", "KEYS", "SCAN",
+})
+
+
+def seeded_collection_size(seeds):
+    """Largest collection the seed commands build, or 0 if none is discernible."""
+    best = 0
+    for seed in seeds:
+        tok = seed.split()
+        if not tok:
+            continue
+        cmd = tok[0].upper()
+        if cmd in ("RPUSH", "LPUSH", "SADD", "PFADD"):
+            best = max(best, len(tok) - 2)
+        elif cmd == "ZADD":
+            best = max(best, (len(tok) - 2) // 2)
+        elif cmd in ("HSET", "HMSET"):
+            best = max(best, (len(tok) - 2) // 2)
+        elif cmd == "MSET":
+            best = max(best, (len(tok) - 1) // 2)
+        elif cmd == "XADD":
+            best = max(best, 1)
+    return best
+
+
+def audit_shape_sizes(min_elements=4):
+    """Flag registered shapes that measure an INTERCEPT and call it a command.
+
+    (frankenredis-eh2ct) This exists because of a measured inversion, not a theory.
+    `sort_ro_alpha` seeds a THREE-element list, and a 3-element sort does ~3
+    comparisons — so per-element and per-comparison cost are the same number and the
+    fixed per-command cost dominates the whole row. On that shape fr read 0.8118 and
+    SORT stood as "fr's worst route" for weeks. Adding a 64-element point put fr
+    AHEAD at 1.1097 (1.0195 control-normalised), and the n=3 row turned out to be
+    INADMISSIBLE in the same run — `null_redis` 1.0201, past the 0.02 bound, because
+    at three elements the INCUMBENT's own A/A null fails.
+
+    So a small shape is not automatically wrong; it is wrong when its row is read as
+    characterising the COMMAND. This flags the candidates; only SORT has been shown
+    to invert, and the rest are UNTESTED rather than known-bad.
+
+    Deletion condition: remove this when every scaling command on the board carries a
+    second, larger-N point, since then the crossover is always visible and there is
+    nothing left to warn about.
+    """
+    flagged = []
+    total = 0
+    for set_name, shapes in SHAPE_SETS.items():
+        for label, seeds, argv in shapes:
+            if not argv or argv[0].upper() not in SIZE_SCALING_COMMANDS:
+                continue
+            total += 1
+            n = seeded_collection_size(seeds)
+            if n < min_elements:
+                flagged.append((n, set_name, label, argv[0].upper()))
+    flagged.sort()
+    print("size-scaling shapes registered: %d" % total)
+    print("seeded with fewer than %d elements: %d\n" % (min_elements, len(flagged)))
+    print("%-6s %-12s %-22s %s" % ("n", "set", "shape", "command"))
+    for n, set_name, label, cmd in flagged:
+        print("%-6s %-12s %-22s %s" % (n or "0/amb", set_name, label, cmd))
+    paired = {
+        label
+        for _shapes in SHAPE_SETS.values()
+        for label, _s, _a in _shapes
+        if any(label.endswith(suf) for suf in ("_64", "_big", "_large"))
+    }
+    print("\nshapes that DO carry a larger-N sibling: %s"
+          % (", ".join(sorted(paired)) if paired else "(none)"))
+    print(
+        "\nA flagged row is not wrong — it is an INTERCEPT row. Quote it as fixed\n"
+        "per-command cost, or register a larger-N sibling before quoting it as the\n"
+        "command's ratio. SORT is the one case measured both ways: 0.8118 at n=3\n"
+        "(inadmissible) versus 1.1097 at n=64 (admissible)."
+    )
+    return 0
+
 def classify_row(ratio, ci_low, ci_high, null_redis, null_fr, null_bound=NULL_BOUND):
     """Decide a row's verdict. PURE — no sockets, no timing, so it is unit-testable.
 
@@ -1023,10 +1110,14 @@ def main(argv_in: list[str]) -> int:
     # timing, no build — so it runs under a build halt, which is exactly when a
     # change to a gate most needs checking.
     parser.add_argument("--selftest", action="store_true")
+    # (frankenredis-eh2ct) Server-free audit: which rows measure an intercept.
+    parser.add_argument("--audit-sizes", action="store_true")
     args = parser.parse_args(argv_in)
 
     if args.selftest:
         return _selftest_classify()
+    if args.audit_sizes:
+        return audit_shape_sizes()
     if args.list:
         for name, shapes in SHAPE_SETS.items():
             print(f"{name}: {', '.join(label for label, _, _ in shapes)}")
