@@ -8,6 +8,51 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-08-17 MossyOrchid: GROOMING PASS 2 — `uu33c`'s 32.2 pct is now 20.8 pct and I cannot find a LIVE option-form mis-claim anywhere; `z2ce3` is source-verified DONE. Neither is closed, because neither is mine
+
+Claim class: SELF-SPEEDUP sizing (fr-only) + source verification. NO BUILD, NO BENCH — /data was
+at 21G and 99 pct full under an external build, so this is read-only work on numbers already
+collected this session.
+
+`uu33c` (P1, open) — ARITY-KEYED FLOOR CLASSES MIS-CLAIM OPTION FORMS. Its cell was LPOS COUNT at
+32.2 pct dispatch share against 15.0 pct for the RANK form, ELF 316df438d749b859, filed
+2026-08-16. Today, ELF b78d1c23a79a3e85dd597016:
+
+    lpos_count   2,961.6 instr/op   dispatch 617.1 (20.8 pct)   classified route
+
+20.8 pct sits inside the 14-28 pct floor twelve front-classified shapes occupy (row above), so
+"32.2 against 15.0" is no longer the shape of the finding.
+
+AND I CHECKED THE NEIGHBOURING INSTANCE RATHER THAN ASSUMING THE CLASS IS EMPTY. `zintercard_limit`
+at 39.4 pct looked like a textbook option-form fall-through — until its BASE form measured 40.1 pct
+and equally GENERIC. The whole command is unclassified, not its option form (`frankenredis-5na4i`).
+So on today's binary the class has no live instance I can find: one cell has closed and the other
+candidate is a different defect wearing the same share.
+
+THE STRUCTURAL POINT SURVIVES AND I AM NOT REFUTING IT. An arity-keyed class is a promise its arm
+must keep, and a decline falls to GENERIC rather than back to the cascade — that is independently
+recorded in `project_floor_class_is_a_promise_its_arm_must_keep` and is a REGRESSION shape worth
+guarding against in any new floor entry. What is missing is a route that currently exhibits it.
+
+`z2ce3` (P1, open) — SEVEN BORROWED FAST PATHS UN-BORROW THEIR KEYS. Source-verified done: all
+seven executors show ZERO `keys_owned` / `k.to_vec()` before their store call, and fr-store now
+carries `del_borrowed` plus `del_inner<K: AsRef<[u8]>>`, so owned and borrowed callers share one
+body — the exact shape the bead proposed. The `to_vec()`s still in the DEL/UNLINK executors sit
+INSIDE the metrics closure, i.e. breach-only argv materialisation, which answers the bead's own
+third warning (is the closure eager? no, lazy).
+
+NEITHER IS CLOSED. Both are other agents' beads and the standing rule is not to close a peer's;
+both are annotated with the evidence so the owner can. Recorded here because a bead comment is not
+in the fleet's reading path and a stale P1 costs somebody a whole turn — which is exactly what
+these two nearly cost me.
+
+PROVENANCE: no build, no bench, no target writes. Figures are `--fr-only` from this session's runs
+(no incumbent ratio claimed anywhere in this row). Host thinkstation1, /data 21G at 99 pct,
+loadavg 7.84 / 14.77 / 20.18, CPU MHz mean 2560 min 1429 max 4043 (spread 2.83x, sampled earlier
+this session — no new sample taken, since taking one is a read but the row should say which).
+
+--------------------------------------------------------------------------------
+
 ## 2026-08-17 MossyOrchid: GROOMING WITH A NUMBER — `tyujv`'s headline cell no longer exists: GEOADD went 8,263 -> 3,698.7 instr/op and 57.9 pct dispatch share -> 16.2 pct, i.e. the "largest remaining recoverable overhead" was front-classified out from under the bead
 
 Claim class: SELF-SPEEDUP sizing (fr-only), recorded as bead grooming. No build (hold in force).
