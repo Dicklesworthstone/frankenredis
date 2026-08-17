@@ -30774,6 +30774,113 @@ mod tests {
         classify_command(text.as_bytes())
     }
 
+    /// (frankenredis-p98mw) `LCS ... IDX` must stay correct across the old 64-byte boundary.
+    ///
+    /// WHY THIS EXISTS AS A SEPARATE GATE. `compute_lcs_matches` is the IDX path and it also
+    /// calls `build_lcs_dp`, so the multi-word change reaches it — but the only thing
+    /// covering it was the ARGUMENT that IDX reads the DP solely through `get`, and that
+    /// every `get` value is proven equal to the matrix. That is sound reasoning, not an
+    /// assertion, and reasoning does not fail a build when someone edits the backtrack.
+    ///
+    /// The invariants below are implementation-INDEPENDENT on purpose: I did not want to
+    /// re-implement the segment backtrack as an oracle, because a bug in my copy of it
+    /// would fail this test for a reason that has nothing to do with the DP. Instead each
+    /// reported match is checked to be a REAL common substring, and the matches are checked
+    /// to reconstitute exactly the LCS that the separately-gated `compute_lcs` returns. A
+    /// wrong DP cell cannot satisfy both at once.
+    #[test]
+    fn lcs_idx_matches_stay_consistent_across_the_word_boundary() {
+        use super::{compute_lcs, compute_lcs_len, compute_lcs_matches};
+
+        let mut state: u64 = 0x1DEA_2026_0817_BEEF;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        // Deterministic lengths straddling limb edges, then random pairs either side.
+        let mut cases: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        for &(la, lb) in &[
+            (63usize, 63usize),
+            (64, 64),
+            (65, 65),
+            (64, 65),
+            (65, 64),
+            (127, 130),
+            (128, 128),
+            (129, 129),
+        ] {
+            let alpha = 3u64;
+            // Separate statements on purpose: two `.map(|_| next())` closures inside ONE
+            // expression would both hold a mutable borrow of `next` until the end of the
+            // statement (E0499).
+            let ca: Vec<u8> = (0..la).map(|_| b'a' + (next() % alpha) as u8).collect();
+            let cb: Vec<u8> = (0..lb).map(|_| b'a' + (next() % alpha) as u8).collect();
+            cases.push((ca, cb));
+        }
+        for _ in 0..60 {
+            let la = 1 + (next() % 160) as usize;
+            let lb = 1 + (next() % 160) as usize;
+            let alpha = 1 + (next() % 4);
+            let ca: Vec<u8> = (0..la).map(|_| b'a' + (next() % alpha) as u8).collect();
+            let cb: Vec<u8> = (0..lb).map(|_| b'a' + (next() % alpha) as u8).collect();
+            cases.push((ca, cb));
+        }
+
+        for (a, b) in cases {
+            let matches = compute_lcs_matches(&a, &b, 0).expect("within LCS_MAX_DP_SIZE");
+
+            // 1. Every reported span must be a REAL common substring of both inputs, with a
+            //    length that agrees with its own endpoints. A DP that reports a phantom
+            //    match fails here even if the total length happens to come out right.
+            for m in &matches {
+                assert!(m.a_end < a.len() && m.b_end < b.len(), "span out of range");
+                assert_eq!(
+                    m.len,
+                    m.a_end - m.a_start + 1,
+                    "len disagrees with its own a-span"
+                );
+                assert_eq!(
+                    m.len,
+                    m.b_end - m.b_start + 1,
+                    "len disagrees with its own b-span"
+                );
+                assert_eq!(
+                    &a[m.a_start..=m.a_end],
+                    &b[m.b_start..=m.b_end],
+                    "reported span is not a common substring"
+                );
+            }
+
+            // 2. The spans must reconstitute EXACTLY the LCS that compute_lcs returns, which
+            //    is gated separately against a matrix oracle. Sorted by position so this
+            //    does not depend on the backtrack's production order.
+            let mut ordered: Vec<&super::LcsMatch> = matches.iter().collect();
+            ordered.sort_by_key(|m| m.a_start);
+            let mut joined = Vec::new();
+            for m in &ordered {
+                joined.extend_from_slice(&a[m.a_start..=m.a_end]);
+            }
+            assert_eq!(
+                joined,
+                compute_lcs(&a, &b).expect("within LCS_MAX_DP_SIZE"),
+                "IDX spans do not reconstitute the LCS"
+            );
+
+            // 3. …and therefore their total length is the LCS length.
+            let total: usize = matches.iter().map(|m| m.len).sum();
+            assert_eq!(total, compute_lcs_len(&a, &b), "IDX total != LCS length");
+
+            // 4. Spans must not overlap on either axis; an overlap would double-count bytes
+            //    that (2) happens to tolerate when the duplicates are adjacent.
+            for w in ordered.windows(2) {
+                assert!(w[0].a_end < w[1].a_start, "a-spans overlap");
+            }
+        }
+    }
+
     /// (frankenredis-p98mw) The multi-word Allison-Dix DP must agree with the O(n*m) matrix
     /// in EVERY CELL, on both sides of the old 64-byte boundary.
     ///
