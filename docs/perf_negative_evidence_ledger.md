@@ -33743,3 +33743,97 @@ without re-running its A/A first; the band is the instrument, not the engine. Fi
 discarding trial 1 per command (or a warm-up pass before the timed trials) — until then, put
 a throwaway command in slot 1 and never read it. And the six REAL wins above should be
 re-run after that fix, because their magnitudes still carry the neighbour contamination.
+
+--------------------------------------------------------------------------------
+## 2026-08-17 RusticHorizon: REJECT my own harness fix, and RETRACT the "positional" diagnosis from `1f861bee9` — warm-up + ABBA did NOT tighten the A/A null, and the null fails on a DIFFERENT command in each window (`frankenredis-p98mw`)
+
+Claim class: SELF-SPEEDUP. Campaign output: no — this is fr-vs-fr instrument work, and the
+result is that my change did not help.
+
+`1f861bee9` reported "THE FAILURE IS POSITIONAL, confirmed by experiment": `getrange` nulled
+at 0.668/0.673 in slot 1, and removing it from slot 1 moved the penalty to `bitcount`
+(1.00/1.22 as 2nd entry -> 0.88 as 1st). I wrote a fix for that mechanism — a global warm-up
+pass plus ABBA-interleaved trials instead of block measurement — and tested it against the
+unmodified harness on the SAME pair of identical fr instances in the SAME window, so a loaded
+host is common-mode and only the null's TIGHTNESS is being compared.
+
+    cmd            OLD (block)   FIXED (warm-up + ABBA)
+    getrange          0.91            0.93
+    bitcount          0.99            0.99
+    sintercard        0.84            0.83
+    sinterstore       1.00            1.00
+    sunionstore       1.00            0.96
+    sdiffstore        1.01            0.92
+    lpos              1.01            1.00
+    zcount            1.00            1.01
+    spread           0.84-1.01       0.83-1.01
+
+    THE FIX DID NOT WORK. The two spreads are the same to within their own noise.
+
+COUNTED MECHANISM, because a near-1.0 wall-clock comparison is not evidence on its own and
+the ledger gate is right to demand this. The change removes NO timed work; it only reorders
+it, and the counts are exact:
+
+    timed batches per command, per arm    9 before   9 after    (TRIALS, unchanged)
+    commands timed                       16 before  16 after
+    total timed batches per arm         144 before 144 after
+    bytes per batch                      identical — the same WORK entry, PIPE=200
+    untimed warm-up batches per arm        16 before 176 after  (1 per command -> 1 per
+                                          command plus 2 full passes of 16 = 160 added)
+
+Stated as the gate wants it: the exact call count of TIMED pipeline calls is 144 per arm before and 144 per arm after, unchanged; the syscalls carrying them are identical because the batches are byte-identical. So both arms execute byte-identical timed work in both versions; the only differences are
+(a) 160 extra UNTIMED batches per arm before timing starts, and (b) the interleaving of the
+timed trials. A difference in the measured null would therefore have to come from the
+measurement, which is exactly what was being tested — and none appeared.
+
+AND THE DIAGNOSIS IT WAS BUILT ON DOES NOT HOLD. Two things falsify it, both visible above:
+
+  1. `getrange` in slot 1 nulls at 0.91 here, in the UNMODIFIED harness. Last window the same
+     command in the same slot read 0.668 and 0.673 — twice, which is what convinced me it was
+     systematic. It did not reproduce.
+  2. `sintercard` fails at 0.84/0.83 in BOTH versions this window, having read 1.06 and 1.22
+     last window. Its position never changed. So a swing of the same magnitude I attributed
+     to position occurs WITHOUT any position change.
+
+    WHAT I ACTUALLY DID WRONG: I confirmed a hypothesis with ONE unreplicated observation
+    (bitcount 1.00/1.22 -> 0.88) and wrote "confirmed by experiment". A single move of a
+    single command, against a null I had already shown swings by 0.4x between runs, cannot
+    distinguish the cause I proposed from the noise I had just finished documenting. I had
+    the evidence for that objection in my own row and did not apply it to my own conclusion.
+
+WHAT SURVIVES `1f861bee9`, unchanged:
+  * The A/A null of this harness FAILS. That is measured four times now across two windows,
+    and the band is roughly 0.83-1.27. Ten of sixteen commands remain uninterpretable.
+  * The six large wall-clock wins still clear it comfortably: sunionstore 7.20x, lpos 3.36x,
+    bitcount 2.91x, sinterstore 2.66x, sdiffstore 2.57x, sintercard 1.83x. Even sintercard,
+    whose null is the worst offender at 0.83, is 2.2x outside its own band.
+  * `getrange` is still not established as a loss — for the stronger reason that its null
+    reads 0.67 in one window and 0.91 in another.
+
+WHAT IS NOW WRONG in that row: the sentence "the penalty follows the POSITION, not the
+command", and the inference that trial-1 warm-up is the mechanism. The mechanism is
+UNIDENTIFIED. What is established is only that the null is wide and that WHICH command it
+fails on varies by window — which is a harder problem than a warm-up bug, because it means no
+fixed slot-1 workaround helps either.
+
+THE CHANGE IS KEPT ANYWAY, and I want to be explicit that this is a methodological argument
+and not a measured one. Block measurement — all N trials of arm A, then all N of arm B —
+makes any monotonic drift across the pair land on one arm as signal, and ABBA interleaving
+removes that bias class whether or not it is the dominant term here. This repo's instruction
+harness already measures ABBA per shape; this one did not. Keeping it costs nothing and
+removes a real mechanism. It just does not fix the null, and the code comments say so.
+
+PROVENANCE: no build. Two identical fr instances, ELF 6cc189255c14d52d, booted on ephemeral
+ports; both harness versions run against the SAME pair in the SAME invocation.
+  host          thinkstation1, 64 cores, powersave, /data 128G.
+  PER-ARM loadavg/MHz  13.43/12.04/8.74 at 3295 MHz, TWO PEER BUILDS RUNNING throughout.
+                That is why this is a like-for-like comparison and not a certification: the
+                absolute milliseconds are worthless here, the ratio BETWEEN the two harness
+                versions is not, because both saw the same load.
+
+RETRY PREDICATE: do NOT attempt another warm-up or ordering fix — that hypothesis is dead.
+The open question is why the null's failing command MIGRATES between windows; until that is
+understood, treat every ratio from this harness inside 0.83-1.27 as absent, and quote only
+effects several times outside it. And before writing "confirmed by experiment" again, ask
+whether one observation can separate the proposed cause from noise already documented in the
+same row.

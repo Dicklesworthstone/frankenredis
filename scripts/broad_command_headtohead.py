@@ -128,6 +128,21 @@ def main():
     print(f"fr:{FR} redis:{RED}  pipe={PIPE} trials={TRIALS}")
     print(f"{'cmd':<16}{'fr_ms':>8}{'redis_ms':>9}{'ratio':>7}  verdict")
     losses = []
+
+    # (frankenredis-p98mw) GLOBAL WARM-UP before any timing, so the first WORK entry is not
+    # measured on cold sockets, a cold allocator and a ramping clock.
+    #
+    # HONESTY NOTE: this did NOT measurably tighten the A/A null. Old vs new, same pair of
+    # identical binaries, same window: spread 0.84-1.01 before, 0.83-1.01 after. It is kept
+    # on methodological grounds only. The null of this harness FAILS (band ~0.83-1.27) and
+    # the command it fails on MIGRATES between windows -- getrange nulled 0.67 in one and
+    # 0.91 in another; sintercard nulled 1.22 in one and 0.83 in another with no change to
+    # its position. The mechanism is UNIDENTIFIED. Do not read any ratio inside that band.
+    for _ in range(2):
+        for _n, _c in WORK.items():
+            fr.pipe([_c] * PIPE)
+            red.pipe([_c] * PIPE)
+
     for name, c in WORK.items():
         batch = [c] * PIPE
 
@@ -137,8 +152,25 @@ def main():
             return time.perf_counter() - t
         b(fr)
         b(red)
-        rf = sorted(b(fr) for _ in range(TRIALS))
-        rr = sorted(b(red) for _ in range(TRIALS))
+        # (frankenredis-p98mw) INTERLEAVED AND ALTERNATING (ABBA), not two blocks. Measuring
+        # all TRIALS of fr and then all TRIALS of redis makes any monotonic drift across the
+        # pair -- frequency ramp, a neighbour's build starting, page-cache warming -- land on
+        # one arm as signal. Interleaving makes it common-mode; alternating which arm goes
+        # first cancels the residual within-pair ordering bias. The instruction harness in
+        # this repo already measures ABBA per shape; this one did not.
+        #
+        # This removes a real bias CLASS but is NOT the fix for this harness's null -- see
+        # the honesty note above. It is strictly better method, not a measured improvement.
+        rf, rr = [], []
+        for i in range(TRIALS):
+            if i % 2 == 0:
+                rf.append(b(fr))
+                rr.append(b(red))
+            else:
+                rr.append(b(red))
+                rf.append(b(fr))
+        rf.sort()
+        rr.sort()
         mf, mr = statistics.median(rf), statistics.median(rr)
         ratio = mr / mf
         v = "fr" if ratio > 1.05 else ("REDIS" if ratio < 0.9 else "~")
