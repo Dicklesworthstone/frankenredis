@@ -25607,6 +25607,128 @@ impl Runtime {
         Some(reply)
     }
 
+    /// (frankenredis-ozrro) Apply ONE `SCAN` option keyword to the option triple, exactly
+    /// as `handle_scan_command`'s option loop does. Shared by the arity-4 and arity-6 fast
+    /// paths so the two cannot disagree about which keywords are legal or what COUNT range
+    /// is in range — the COUNT > i64::MAX bound in particular is easy to drop on a retype,
+    /// and dropping it would make the fast path SERVE a value upstream rejects.
+    ///
+    /// Returns None to DECLINE (=> generic), never an error: every rejection here is a
+    /// case the generic answers with its own message.
+    fn apply_scan_option<'a>(
+        keyword: &[u8],
+        value: &'a [u8],
+        pattern: &mut Option<&'a [u8]>,
+        type_filter: &mut Option<&'a [u8]>,
+        count: &mut usize,
+    ) -> Option<()> {
+        if keyword.eq_ignore_ascii_case(b"MATCH") {
+            *pattern = Some(value);
+        } else if keyword.eq_ignore_ascii_case(b"TYPE") {
+            *type_filter = Some(value);
+        } else if keyword.eq_ignore_ascii_case(b"COUNT") {
+            let parsed = Self::parse_canonical_scan_cursor(value)?;
+            if parsed == 0 || parsed > i64::MAX as u64 {
+                // COUNT<=0 is "ERR syntax error" upstream; COUNT beyond i64 fails
+                // parse_i64_arg. Both must reach the generic to produce that error.
+                return None;
+            }
+            *count = usize::try_from(parsed).ok()?;
+        } else {
+            // Unknown option keyword: the generic emits "ERR syntax error".
+            return None;
+        }
+        Some(())
+    }
+
+    /// (frankenredis-ozrro) Borrowed READ fast path for the TWO-option SCAN forms at
+    /// arity 6 — `SCAN cursor MATCH p COUNT n` and its permutations. This is the shape
+    /// client scan_iter helpers emit, so it is the common case rather than an edge.
+    ///
+    /// Options are applied IN ORDER through the shared helper, which reproduces the
+    /// generic's last-wins behaviour on a repeated keyword (`MATCH a MATCH b` => b).
+    /// Rejecting duplicates here would invent a syntax error the generic never emits.
+    pub fn execute_plain_scan_opt2_borrowed(
+        &mut self,
+        cursor_arg: &[u8],
+        keyword1: &[u8],
+        value1: &[u8],
+        keyword2: &[u8],
+        value2: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if self.policy.gate.max_array_len < 6
+            || self.policy.gate.max_bulk_len < b"SCAN".len()
+            || cursor_arg.len() > self.policy.gate.max_bulk_len
+            || keyword1.len() > self.policy.gate.max_bulk_len
+            || value1.len() > self.policy.gate.max_bulk_len
+            || keyword2.len() > self.policy.gate.max_bulk_len
+            || value2.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        let cursor = Self::parse_canonical_scan_cursor(cursor_arg)?;
+        let mut pattern: Option<&[u8]> = None;
+        let mut type_filter: Option<&[u8]> = None;
+        let mut count: usize = 10;
+        Self::apply_scan_option(keyword1, value1, &mut pattern, &mut type_filter, &mut count)?;
+        Self::apply_scan_option(keyword2, value2, &mut pattern, &mut type_filter, &mut count)?;
+
+        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+            return None;
+        }
+        let packet_id = self.plain_read_borrowed_preamble(
+            "scan",
+            b"SCAN".len()
+                + cursor_arg.len()
+                + keyword1.len()
+                + value1.len()
+                + keyword2.len()
+                + value2.len(),
+            now_ms,
+        );
+        let st = self.chained_command_start();
+        let (next_cursor, keys) = self.server.store.scan_in_db(
+            self.session.selected_db,
+            cursor,
+            pattern,
+            type_filter,
+            count,
+            now_ms,
+        );
+        let reply = Self::scan0_reply_from_items(
+            next_cursor,
+            keys.into_iter()
+                .map(|key| RespFrame::BulkString(Some(key)))
+                .collect(),
+        );
+        let elapsed_us = self.finish_chained_command(st);
+        self.record_plain_zremrange_borrowed_metrics(
+            "scan",
+            "SCAN",
+            || {
+                vec![
+                    b"SCAN".to_vec(),
+                    cursor_arg.to_vec(),
+                    keyword1.to_vec(),
+                    value1.to_vec(),
+                    keyword2.to_vec(),
+                    value2.to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            // Cannot fail: cursor canonical, both keywords validated, count in range,
+            // scan_in_db infallible.
+            false,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_reply(&reply);
+        Some(reply)
+    }
+
     /// (frankenredis-ozrro) Borrowed READ fast path for the arity-4 SCAN option forms:
     /// `SCAN <cursor> MATCH <p>`, `SCAN <cursor> COUNT <n>`, `SCAN <cursor> TYPE <t>`.
     ///
@@ -25639,22 +25761,7 @@ impl Runtime {
         let mut pattern: Option<&[u8]> = None;
         let mut type_filter: Option<&[u8]> = None;
         let mut count: usize = 10;
-        if keyword.eq_ignore_ascii_case(b"MATCH") {
-            pattern = Some(value);
-        } else if keyword.eq_ignore_ascii_case(b"TYPE") {
-            type_filter = Some(value);
-        } else if keyword.eq_ignore_ascii_case(b"COUNT") {
-            let parsed = Self::parse_canonical_scan_cursor(value)?;
-            if parsed == 0 || parsed > i64::MAX as u64 {
-                // COUNT<=0 is "ERR syntax error" upstream; COUNT beyond i64 fails
-                // parse_i64_arg. Both must reach the generic to produce that error.
-                return None;
-            }
-            count = usize::try_from(parsed).ok()?;
-        } else {
-            // Unknown option keyword: the generic emits "ERR syntax error".
-            return None;
-        }
+        Self::apply_scan_option(keyword, value, &mut pattern, &mut type_filter, &mut count)?;
 
         if !self.plain_borrowed_default_key_read_allows(now_ms) {
             return None;
@@ -75024,6 +75131,95 @@ user bob reset off nopass +@all
         assert!(
             other_db.execute_plain_spop_borrowed(b"s", 20).is_none(),
             "SPOP on a non-zero db must fall through to the generic path"
+        );
+    }
+
+    /// (frankenredis-ozrro) The two-option SCAN forms must match the generic across every
+    /// permutation, INCLUDING the last-wins behaviour on a repeated keyword, and must
+    /// decline wherever the generic is more permissive.
+    ///
+    /// Repeated keywords are the case worth stating: the generic's option loop overwrites,
+    /// so `MATCH a MATCH b` means pattern=b. Rejecting that here would invent a syntax
+    /// error upstream never produces, which is a behaviour change wearing a speedup's
+    /// clothing.
+    #[test]
+    fn plain_scan_opt2_borrowed_matches_the_generic_across_permutations_and_duplicates() {
+        let seed = |rt: &mut Runtime| {
+            for i in 0..25 {
+                rt.execute_frame(command(&[b"SET", format!("k{i:02}").as_bytes(), b"v"]), 10);
+            }
+            rt.execute_frame(command(&[b"RPUSH", b"klist", b"a"]), 10);
+        };
+
+        for (k1, v1, k2, v2) in [
+            (b"MATCH".as_slice(), b"k*".as_slice(), b"COUNT".as_slice(), b"100".as_slice()),
+            (b"COUNT", b"100", b"MATCH", b"k*"),
+            (b"MATCH", b"k1*", b"COUNT", b"5"),
+            (b"MATCH", b"*", b"TYPE", b"string"),
+            (b"TYPE", b"string", b"MATCH", b"k*"),
+            (b"TYPE", b"list", b"COUNT", b"50"),
+            (b"COUNT", b"3", b"TYPE", b"string"),
+            (b"match", b"k*", b"count", b"7"),
+            // last-wins duplicates
+            (b"MATCH", b"nomatch*", b"MATCH", b"k*"),
+            (b"COUNT", b"1", b"COUNT", b"100"),
+            (b"TYPE", b"list", b"TYPE", b"string"),
+        ] {
+            for cursor in [b"0".as_slice(), b"9"] {
+                let mut fast = Runtime::default_strict();
+                let mut generic = Runtime::default_strict();
+                seed(&mut fast);
+                seed(&mut generic);
+
+                let fast_reply = fast
+                    .execute_plain_scan_opt2_borrowed(cursor, k1, v1, k2, v2, 20)
+                    .unwrap_or_else(|| {
+                        panic!("SCAN {cursor:?} {k1:?} {v1:?} {k2:?} {v2:?} must be served")
+                    });
+                let generic_reply =
+                    generic.execute_frame(command(&[b"SCAN", cursor, k1, v1, k2, v2]), 20);
+
+                assert_eq!(
+                    fast_reply, generic_reply,
+                    "SCAN {cursor:?} {k1:?} {v1:?} {k2:?} {v2:?} must match the generic"
+                );
+                assert_eq!(
+                    fast.server.store.state_digest(),
+                    generic.server.store.state_digest(),
+                    "SCAN is a read and must not mutate"
+                );
+            }
+        }
+
+        // Declines: a bad option in EITHER position must fall through, not just the first.
+        let mut rt = Runtime::default_strict();
+        seed(&mut rt);
+        for (k1, v1, k2, v2) in [
+            (b"MATCH".as_slice(), b"k*".as_slice(), b"BOGUS".as_slice(), b"x".as_slice()),
+            (b"BOGUS", b"x", b"MATCH", b"k*"),
+            (b"MATCH", b"k*", b"COUNT", b"0"),
+            (b"COUNT", b"0", b"MATCH", b"k*"),
+            (b"MATCH", b"k*", b"COUNT", b"9223372036854775808"),
+            (b"COUNT", b"-1", b"MATCH", b"k*"),
+            (b"MATCH", b"k*", b"NOVALUES", b"x"),
+        ] {
+            assert!(
+                rt.execute_plain_scan_opt2_borrowed(b"0", k1, v1, k2, v2, 20)
+                    .is_none(),
+                "SCAN 0 {k1:?} {v1:?} {k2:?} {v2:?} must fall through to the generic"
+            );
+        }
+
+        // The shared helper must give the SAME answer at arity 4 and arity 6 for the option
+        // it has in common — that equivalence is the whole reason it is shared.
+        let mut a4 = Runtime::default_strict();
+        let mut a6 = Runtime::default_strict();
+        seed(&mut a4);
+        seed(&mut a6);
+        assert_eq!(
+            a4.execute_plain_scan_opt_borrowed(b"0", b"COUNT", b"100", 20),
+            a6.execute_plain_scan_opt2_borrowed(b"0", b"COUNT", b"100", b"COUNT", b"100", 20),
+            "a repeated identical option must equal the single-option result"
         );
     }
 }
