@@ -201,7 +201,49 @@ def _selftest_sizes():
                  "ok" if ok else "FAIL"))
     print("size selftest: %d case(s) failed" % bad)
     bad += _selftest_normalised_bounds()
+    bad += _selftest_select_control()
     return 1 if bad else 0
+
+
+def _selftest_select_control() -> int:
+    """Which row becomes the normaliser, pinned on the three cases that can go wrong.
+
+    The failure this prevents is silent: picking the WRONG control does not error, it
+    prints a normalised figure computed against the wrong denominator, and the label in
+    the output is the only clue.
+    """
+    bad = 0
+
+    def row(label):
+        return {"label": label, "verdict": "ADMISSIBLE", "ratio": 1.0,
+                "ci": (0.99, 1.01), "null_redis": 1.0, "null_fr": 1.0}
+
+    # 1. An in-group control BEATS get_control when both are present. If this ever
+    #    returns get_control, every group that chose a sibling silently reverts to the
+    #    drift-limited normaliser the sibling was added to escape.
+    got = select_control([row("bitpos_start"), row("get_control"), row("bitpos_range_control")])
+    if got is None or got["label"] != "bitpos_range_control":
+        print(f"FAIL select_control: in-group control must win, got {got and got['label']}")
+        bad += 1
+
+    # 2. get_control is still selected when it is the only control, so every pre-existing
+    #    group keeps the exact behaviour it had before this was generalised.
+    got = select_control([row("hgetall_64"), row("get_control")])
+    if got is None or got["label"] != "get_control":
+        print(f"FAIL select_control: get_control must remain the fallback, got {got and got['label']}")
+        bad += 1
+
+    # 3. A selection with NO control returns None rather than silently electing a data
+    #    row. Electing one would normalise a row against itself or against an unrelated
+    #    shape and print a confident 1.0000.
+    got = select_control([row("bitpos_start"), row("bitpos_unit")])
+    if got is not None:
+        print(f"FAIL select_control: no control must yield None, got {got['label']}")
+        bad += 1
+
+    if not bad:
+        print("PASS select_control")
+    return bad
 
 
 def _selftest_normalised_bounds() -> int:
@@ -455,6 +497,33 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
          ["SET cp:src vvvvvvvvvvvvvvvv", "SET cp:dst old"],
          ["COPY", "cp:src", "cp:dst", "REPLACE"]),
         ("get_control", ["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
+    ],
+    # (frankenredis-copydeficit / getexgate) The shipped-but-uncertified cells, each with an
+    # IN-GROUP control that is NOT `get_control`. That choice is the point of these groups:
+    # get_control has now null-failed six times across two sessions and is drift-limited -- it
+    # does not narrow with rounds -- so it blocks normalisation of every group it sits in. A
+    # control that is a SIBLING OF THE ROW rather than a generic GET is both a tighter
+    # normaliser and a more direct falsifier, because it shares the row's code path up to the
+    # exact thing the lever changed.
+    "bitpos": [
+        # bitpos_range is the arity-5 form: already classified before the lever, untouched by
+        # it, same parser family and same executor as the two rows. If the rows move and it
+        # does not, the classification is what moved them.
+        ("bitpos_start", ["SET bp k 0", "SETBIT bp 100 1"], ["BITPOS", "bp", "1", "2"]),
+        ("bitpos_unit", ["SET bp k 0", "SETBIT bp 100 1"],
+         ["BITPOS", "bp", "1", "2", "-1", "BYTE"]),
+        ("bitpos_range_control", ["SET bp k 0", "SETBIT bp 100 1"],
+         ["BITPOS", "bp", "1", "2", "-1"]),
+    ],
+    # The write-gate levers: GETEX (1d8b5e8e1) and the TTL family (e6a552cfb). The control is
+    # LSET, which is a floor WRITE arm that still re-derives the gate per packet -- one of the
+    # arms the detector names and deliberately not converted. It therefore controls for the
+    # whole borrowed write path EXCEPT the one thing the lever changed.
+    "writegate": [
+        ("persist_noop", ["SET pk v"], ["PERSIST", "pk"]),
+        ("expire_same", ["SET ek v", "EXPIRE ek 100"], ["EXPIRE", "ek", "100"]),
+        ("getex_exat", ["SET gk vvvvvvvvvvvvvvvv"], ["GETEX", "gk", "EXAT", "99999999999"]),
+        ("lset_control", ["RPUSH lk a b c"], ["LSET", "lk", "0", "a"]),
     ],
     "cascade": [
         ("sintercard", ["SADD sc:a m1 m2 m3", "SADD sc:b m2 m3 m4"],
@@ -1173,6 +1242,41 @@ def provenance(fr_pid: int, redis_pid: int) -> dict:
     }
 
 
+def select_control(rows):
+    """Pick the normaliser: any row whose label ends in `_control`, preferring an
+    IN-GROUP one over `get_control`.
+
+    (frankenredis-copydeficit) This used to be a hardcoded lookup for the label
+    `get_control`, which made that one shape the normaliser for every group in the file.
+    It is a bad one, and measurably so: it has now null-failed EIGHT times across three
+    sessions, and it is DRIFT-LIMITED rather than sample-limited -- 41 rounds once
+    narrowed a GEOSEARCH row to 0.8 pct and narrowed the control not at all. A control
+    that cannot be narrowed by spending more rounds blocks normalisation of every row it
+    sits beside, permanently.
+
+    A SIBLING of the row is the better normaliser on both counts. It is tighter, because
+    it shares the row's code path up to the exact thing the lever changed; and it is a
+    stricter falsifier, because a generic GET can miss an effect that moved the whole
+    family while a sibling cannot. `bitpos_range` is the worked example: it is the arity
+    the lever did NOT touch, measured in the SAME square as the two arities it did, so
+    host drift is common-mode across all three.
+
+    Preference order matters when a selection contains both. The in-group control wins,
+    because `get_control` is the fallback for groups that never chose one -- not a
+    second opinion to be averaged in.
+
+    The admissibility contract is UNCHANGED. Whatever is selected must still come back
+    ADMISSIBLE before any normalised figure is printed, is still checked for being WIDER
+    than the row it normalises, and its rows are still checked for straddling 1.0. This
+    widens what may be chosen, not what may be claimed.
+    """
+    controls = [r for r in rows if r["label"].endswith("_control")]
+    if not controls:
+        return None
+    in_group = [r for r in controls if r["label"] != "get_control"]
+    return (in_group or controls)[0]
+
+
 def normalised_bounds(row_ratio, row_ci, control_ratio, control_ci):
     """Normalised point estimate plus the WORST and BEST bounds its intervals allow.
 
@@ -1598,22 +1702,23 @@ def main(argv_in: list[str]) -> int:
         # value is UNAVAILABLE, and dividing an admissible row by an inadmissible
         # control — or pairing rows across two windows — is precisely the error the
         # same-invocation rule exists to prevent.
-        control = next((r for r in rows if r["label"] == "get_control"), None)
+        control = select_control(rows)
         if control is None:
-            print("normalised: n/a -- no get_control row in this selection")
+            print("normalised: n/a -- no control row in this selection"
+                  " (name one `<something>_control`)")
         elif control["verdict"] != "ADMISSIBLE":
-            print(f"normalised: n/a -- get_control is {control['verdict']}"
+            print(f"normalised: n/a -- {control['label']} is {control['verdict']}"
                   f" (ratio {control['ratio']:.4f}, nulls "
                   f"{control['null_redis']:.4f}/{control['null_fr']:.4f});"
                   " quote RAW ratios only from this run")
         else:
-            print(f"normalised against get_control {control['ratio']:.4f}"
+            print(f"normalised against {control['label']} {control['ratio']:.4f}"
                   " (admissible), for rows that are themselves admissible:")
             print("  %-22s %8s %9s %9s  %s"
                   % ("shape", "point", "worst", "best", "verdict"))
             straddlers = []
             for row in admissible:
-                if row["label"] == "get_control":
+                if row["label"] == control["label"]:
                     continue
                 point, worst, best, verdict = normalised_bounds(
                     row["ratio"], row["ci"], control["ratio"], control["ci"])
@@ -1636,7 +1741,7 @@ def main(argv_in: list[str]) -> int:
                       " NO crossing may be claimed either way. Quote the WORST bound."
                       % ", ".join(straddlers))
             refused = [r["label"] for r in rows
-                       if r["verdict"] != "ADMISSIBLE" and r["label"] != "get_control"]
+                       if r["verdict"] != "ADMISSIBLE" and r["label"] != control["label"]]
             if refused:
                 print("  (no normalised figure for %s -- not admissible)"
                       % ", ".join(refused))

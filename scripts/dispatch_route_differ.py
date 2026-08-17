@@ -922,6 +922,63 @@ CASES = [
     ("EXPIRE", "tt:n", "100", "NX", "XX"),
     ("TTL", "tt:n"),                                # control: no refusal changed the TTL
 
+    # (frankenredis-getexgate) The ten single-key STRING write floor arms now read the cached
+    # write gate. Each has its own `can_execute_plain_*_borrowed` predicate, so unlike the TTL
+    # family this is ten independent edits and every one needs its own row. The reads
+    # interleaved between writes are the point: a wrong gate answer changes the VALUE, and a
+    # reply-only check would pass on the integer replies these commands return.
+    ("DEL", "sw:k"),
+    ("SET", "sw:k", "10"),
+    ("INCR", "sw:k"),                               # -> 11
+    ("DECR", "sw:k"),                               # -> 10
+    ("INCRBY", "sw:k", "5"),                        # -> 15
+    ("DECRBY", "sw:k", "3"),                        # -> 12
+    ("GET", "sw:k"),                                # -> "12": the arithmetic actually landed
+    ("INCRBYFLOAT", "sw:k", "0.5"),                 # -> "12.5"
+    ("GET", "sw:k"),
+    ("SET", "sw:a", "hello"),
+    ("APPEND", "sw:a", " world"),                   # -> 11
+    ("GET", "sw:a"),                                # -> "hello world"
+    ("SETRANGE", "sw:a", "6", "there"),             # -> 11
+    ("GET", "sw:a"),                                # -> "hello there"
+    ("SETRANGE", "sw:a", "20", "far"),              # zero-padding past the end
+    ("STRLEN", "sw:a"),                             # -> 23
+    ("DEL", "sw:b"),
+    ("SETBIT", "sw:b", "7", "1"),                   # -> 0
+    ("GET", "sw:b"),                                # -> "\x01"
+    ("SETBIT", "sw:b", "7", "0"),                   # -> 1
+    ("SETNX", "sw:new", "v"),                       # -> 1
+    ("SETNX", "sw:new", "other"),                   # -> 0
+    ("GET", "sw:new"),                              # -> "v": the second SETNX did NOT write
+    ("GETDEL", "sw:new"),                           # -> "v"
+    ("EXISTS", "sw:new"),                           # -> 0: GETDEL removed it
+    ("GETDEL", "sw:new"),                           # -> nil, second time
+    # Missing keys: INCR on a missing key creates it, APPEND on a missing key is a plain SET.
+    ("DEL", "sw:m"),
+    ("INCR", "sw:m"),                               # -> 1
+    ("DEL", "sw:m"),
+    ("APPEND", "sw:m", "x"),                        # -> 1
+    ("DEL", "sw:m"),
+    ("INCRBYFLOAT", "sw:m", "1.5"),
+    # Wrong type through every one of them.
+    ("INCR", "cp:h"),
+    ("DECRBY", "cp:h", "1"),
+    ("APPEND", "cp:h", "x"),
+    ("SETRANGE", "cp:h", "0", "x"),
+    ("SETBIT", "cp:h", "0", "1"),
+    ("GETDEL", "cp:h"),
+    ("SETNX", "cp:h", "x"),                         # -> 0: exists, regardless of type
+    # Refusals, each must reach generic with redis's text verbatim.
+    ("SET", "sw:nan", "notanumber"),
+    ("INCR", "sw:nan"),
+    ("INCRBY", "sw:nan", "1"),
+    ("INCRBYFLOAT", "sw:nan", "1"),
+    ("INCRBY", "sw:k", "notanint"),
+    ("SETBIT", "sw:b", "7", "2"),                   # bit must be 0 or 1
+    ("SETBIT", "sw:b", "-1", "1"),
+    ("SETRANGE", "sw:a", "-1", "x"),
+    ("GET", "sw:nan"),                              # control: no refusal wrote
+
     # The DB spelling is arity 5 and is NOT claimed; it must not have moved.
     ("COPY", "cp:src", "cp:db", "DB", "3"),         # -> 1
     ("COPY", "cp:src", "cp:db", "DB", "3"),         # -> 0: exists, no REPLACE

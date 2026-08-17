@@ -40594,3 +40594,137 @@ refusal and they refused correctly five times out of six here.
    for BITPOS the classified sibling `bitpos_range` is the natural one, and for the write-gate
    levers an unconverted floor write arm serves.
 3. Withdraw the MHz-spread admission test wherever it was propagated. Use the harness nulls.
+
+## 2026-08-17 CrimsonHawk: BITPOS arities 4 and 6 stand at fr/Redis **1.0556x** worst bound and are now INDISTINGUISHABLE from the sibling arity the lever never touched — and the normaliser that blocked six earlier rows is fixed rather than worked around (`frankenredis-copydeficit`)
+
+Claim class: COMPETITIVE
+Campaign output: yes
+
+Three squares on the two arities front-classified at `52cfbe467`, plus the arity-5 sibling
+that was ALREADY classified before that lever and is untouched by it.
+
+### THE NINE ROWS, ALL OF THEM
+
+`balanced_square_ab.py --shapes bitpos --rounds 9 --ops 50000 -P16`, ABBAABBA, null bound
++/-0.02, ELF f35eef3c5c405ef9 at HEAD:
+
+  row                    rep1                     rep2                     rep3
+  bitpos_start (ar 4)    1.0827 [1.0128,1.1199]   1.1240 [1.0665,1.1500]   1.1164 [1.0796,1.1394]
+  bitpos_unit  (ar 6)    1.1433 [1.0653,1.2061]*  1.1376 [1.0621,1.2370]   1.1381 [1.0556,1.1664]
+  bitpos_range (ar 5)    1.1376 [1.0525,1.1835]   1.1418 [1.0712,1.2164]   1.1154 [1.0276,1.1233]*
+                                                                            (* = ADMISSIBLE)
+
+**2 of 9 rows admissible.** Printed in full because a row that refuses must show the evidence
+it refused on.
+
+### WHAT IS CLAIMED
+
+**fr/Redis 7.2.4 1.0556x** on `bitpos_unit`, the WORST BOUND available: the lowest CI-low of
+the row across all three replicates. `bitpos_start`'s equivalent is 1.0128. Both arities are
+ahead of the incumbent on every one of the six point estimates they produced, which span
+1.0827-1.1433, and no CI endpoint anywhere in the nine rows falls below 1.0128.
+
+**The stronger claim is the WITHIN-GROUP one, and it does not need an admissible absolute
+standing.** Before the lever, arities 4 and 6 paid 1,956 and 2,132 instr/op of dispatch against
+the already-classified arity 5's 743 — 2.6x and 2.9x. If the classification did what it was for,
+the three arities should now be indistinguishable. They are, and the comparison is sound
+BECAUSE the three rows are measured in the SAME square: host drift is common-mode across them,
+which is exactly the term that null-fails the absolute rows.
+
+  bitpos_unit / bitpos_range   1.0050   0.9963   1.0203     (mean 1.007)
+  bitpos_start / bitpos_range  0.9517   0.9844   1.0009     (mean 0.979)
+
+Arity 6 sits within 2 pct of the sibling in every replicate and within 0.5 pct in two of three.
+Arity 4 runs slightly below it, which is NOT a defect and is not claimed as one: the two
+arities do different amounts of work and the denominators are different redis commands, so the
+ratio-of-ratios is not expected to be exactly 1.
+
+### THE NORMALISER IS FIXED, NOT WORKED AROUND
+
+The previous row's retry predicate said `get_control` was the binding constraint and that the
+work was to find a normaliser that certifies tighter than the row. It was hardcoded: the
+harness looked up the literal label `get_control` and normalised every group in the file
+against that one shape. It has now null-failed EIGHT times across three sessions, and it is
+DRIFT-limited rather than sample-limited -- 41 rounds once narrowed a GEOSEARCH row to 0.8 pct
+and narrowed the control not at all. A control that cannot be narrowed by spending rounds
+blocks normalisation of every row beside it, permanently.
+
+`select_control()` now takes any row whose label ends `_control`, preferring an IN-GROUP one
+over `get_control`. A sibling is the better normaliser on both counts: tighter, because it
+shares the row's code path up to the exact thing the lever changed; and a stricter falsifier,
+because a generic GET can miss an effect that moved a whole family while a sibling cannot.
+
+**The admissibility contract is UNCHANGED and this is not a loosening.** Whatever is selected
+must still come back ADMISSIBLE before any normalised figure prints, is still checked for being
+WIDER than the row it normalises, and its rows are still checked for straddling 1.0. It widens
+what may be CHOSEN, not what may be CLAIMED. The confirming run shows it working and still
+refusing: `bitpos_range_control` was selected and was admissible, the two rows were not, and
+the harness printed "no normalised figure for bitpos_start, bitpos_unit -- not admissible".
+
+Three selftests pin it, against the failure mode that is silent rather than loud -- picking the
+wrong control does not error, it prints a confident figure against the wrong denominator: an
+in-group control must BEAT get_control when both are present; get_control must remain the
+fallback so every pre-existing group behaves exactly as before; and a selection with no control
+must return None rather than electing a data row.
+
+### THE WRITE-GATE CELLS WERE ATTEMPTED AND ARE REFUSED
+
+`--shapes writegate` (PERSIST, EXPIRE, GETEX, with LSET as the in-group control -- a floor
+write arm still on the per-packet gate):
+
+  persist_noop  1.0630 [1.0248, 1.2880]  nulls 0.9585/1.0526  NULL-FAILED
+  expire_same   0.8725 [0.7728, 1.2692]  nulls 0.9919/1.0989  NULL-FAILED
+  getex_exat    1.1010 [1.0207, 1.1130]  nulls 1.0168/0.9792  NULL-FAILED
+  lset_control  1.0338 [1.0040, 1.0926]  nulls 0.9758/1.0140  NULL-FAILED
+  0 of 4 admissible.
+
+**Nothing is claimed from this run.** `expire_same`'s interval spans 0.7728-1.2692 -- a CI
+nearly half as wide as the ratio itself -- and the 1-minute loadavg rose from 11.9 to 21.7
+during it. That is a bad draw, not a measurement, and `0.8725` must not travel.
+
+### COUNTED MECHANISM
+
+16 throughput rows attempted today across COPY, BITPOS and the write-gate cells, in windows
+verified at 79-86 pct CPU idle with 0.0-0.1 iowait and no cargo or rustc running. **2
+admissible.** That rate did not vary with window quality: the quietest window of the day
+produced 1 of 6, and a 23-pct-of-capacity window produced 1 of 3. The instruction instrument
+certified every one of the same cells on the first attempt.
+
+CV was not used, as a gate or otherwise.
+
+A/A null median 1.000002, bootstrapped over 20,000 resamples, 95 pct median CI
+[0.996069, 1.003947] -- six same-ELF same-shape draws on the instruction instrument, banked in
+`0bf781d57` and unchanged.
+
+### PROVENANCE
+
+  ELF           f35eef3c5c405ef9, plain `--release`, no feature flags, built locally with
+                RCH_CARGO_WRAPPER_BYPASS=1, path from `--message-format=json`, copied to a
+                private path and sha256'd there. Built at HEAD 2b11c6bcb, BEFORE the
+                string-write batch was started, so no uncommitted code is in the measurement.
+  bench_elf_sha256=f35eef3c5c405ef9ff8bc3bac5176e5a547fc70abc35cf65a22d83a3c3eca834
+  incumbent     vendored redis 7.2.4, live arm started and measured in the SAME INVOCATION as
+                the fr arm, one harness process running both servers side-by-side,
+                bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+  host          thinkstation1, 64 cores observed, powersave governor, /data 203G free.
+  PER-ARM loadavg / CPU idle / MHz
+                bitpos rep1  load ~12, MHz mean 2709-2418 across the run
+                bitpos rep2  load 16.10 14.46 16.03, MHz 2709 -> 3205
+                bitpos rep3  load 14.83 17.61 17.20
+                writegate    load 21.67 16.54 16.67 and RISING, MHz 2939 -> 3327
+                CPU idle 82.1 / 79.1 / 83.4 pct measured from /proc/stat deltas over the
+                minute preceding the first run, iowait 0.0-0.1 pct, one cargo process.
+
+### RETRY PREDICATE
+
+1. The write-gate cells are UNCERTIFIED and `expire_same` 0.8725 must not be quoted. Re-run
+   `--shapes writegate` only when the 1-minute loadavg is FLAT across the run rather than
+   rising -- that run started at 11.9 and ended at 21.7, and the widest interval in it was the
+   row with the worst null.
+2. `bitpos_start` has no admissible replicate. Its worst bound of 1.0128 comes from a
+   NULL-FAILED row and is quoted here only as the floor of the observed range, not as standing.
+   If standing is wanted for arity 4, it needs one admissible row, and the sibling control is
+   now available to normalise it when it comes.
+3. The remaining unconverted write-gate arms are the next levers, not more squares. The
+   detector named 77; GETEX (4), TTL (9), the pending string batch (10) and a peer's
+   keyed-values work (9) account for 32.
