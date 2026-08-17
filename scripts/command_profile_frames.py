@@ -36,6 +36,7 @@ attribute a fixed cost to different frames between runs, so treat anything under
 """
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -135,11 +136,32 @@ def run(fr, ops, seed, cmd, work, tag):
     out = os.path.join(work, "cg.%s.out" % tag)
     if os.path.exists(out):
         os.remove(out)
+    # (frankenredis-h9h8m / frankenredis-pcio8, found by CrimsonHawk) ONE FRESH DIRECTORY
+    # PER POINT. Both points used to run in the shared `work` dir, as both `cwd` and
+    # `--dir`. A slope's two points must differ in NOTHING but the repeated operation, and
+    # that includes the filesystem state they start from: any profiled workload that
+    # persists — DEBUG RELOAD, SAVE/BGSAVE, BGREWRITEAOF, or a `--seed` that writes —
+    # leaves state the 2N point then starts by LOADING, so the 2N run does one extra
+    # startup load the N run did not, and it lands in the slope as if it were per-op cost.
+    #
+    # `--save ""` and `--appendonly no` stop only AUTOMATIC persistence, not a command the
+    # caller explicitly profiles, and this tool takes an arbitrary command.
+    #
+    # WHY THE RECONCILIATION CHECK BELOW CANNOT CATCH IT: that check asserts the frame
+    # table sums to PROGRAM TOTALS, and under this contamination it still does — the extra
+    # load is real work that really happened, counted honestly on both sides. A re-run does
+    # not disagree either, because callgrind Ir is deterministic; `qj6jn` records the wrong
+    # number reproducing perfectly. What caught it there was an ARITHMETIC IMPOSSIBILITY in
+    # a by-product: a frame marginal (10,583) exceeding the whole-program marginal (8,756).
+    # That assertion is now in `frame_delta.py` as a second, strictly-different guard.
+    point = os.path.join(work, "point.%s" % tag)
+    shutil.rmtree(point, ignore_errors=True)
+    os.makedirs(point, exist_ok=True)
     port = 47000 + (os.getpid() % 900) + (0 if tag == "n" else 1)
     proc = subprocess.Popen(
         ["valgrind", "--tool=callgrind", "--callgrind-out-file=" + out, fr,
-         "--port", str(port), "--save", "", "--appendonly", "no", "--dir", work],
-        cwd=work, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+         "--port", str(port), "--save", "", "--appendonly", "no", "--dir", point],
+        cwd=point, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     sock = None
     try:
         for _ in range(600):

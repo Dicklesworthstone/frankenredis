@@ -343,6 +343,23 @@ def main():
     if process is not None and abs(attributed - process) > max(1.0, 0.01 * abs(process)):
         print("WARNING: frames and PROGRAM TOTALS disagree by %.1f instr/op — read neither"
               % (attributed - process))
+    # SECOND, STRICTLY DIFFERENT GUARD (proposed by CrimsonHawk, frankenredis-pcio8). The
+    # reconciliation above cannot catch a CONTAMINATED SLOPE: if the two points differ in
+    # something other than the repeated operation — the classic case is both sharing one
+    # working directory, so the 2N point starts by loading state the N point never wrote —
+    # the extra work is real, counted honestly on both sides, and the sum still reconciles.
+    # A re-run does not disagree either, because Ir is deterministic; `qj6jn` records such
+    # a number reproducing perfectly. What exposed it there was an ARITHMETIC IMPOSSIBILITY:
+    # a single frame's marginal (10,583) exceeding the whole program's (8,756). One frame
+    # cannot cost more per op than the entire program does unless something else is
+    # negative, so this is a cheap witness for a class the first check is blind to.
+    if process is not None and rows and process > 0:
+        worst_ipo, worst_fn = rows[0]
+        if worst_ipo > process:
+            print("WARNING: frame %r is %.1f instr/op but the whole program moved only "
+                  "%.1f — a single frame cannot outcost the program. Suspect the two points "
+                  "differed in more than the repeated operation (shared working directory, "
+                  "leftover state, a different seed)." % (worst_fn[:60], worst_ipo, process))
     print()
     shown = rows if top is None else rows[:top]
     for ipo, name in shown:
