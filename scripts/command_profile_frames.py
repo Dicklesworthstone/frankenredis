@@ -19,6 +19,15 @@ move with loadavg or CPU MHz, so this needs no quiet window and no core pinning.
 
     command_profile_frames.py ./fr 2000 -- CONFIG GET maxmemory
 
+ONE FRAME CAN APPEAR AS SEVERAL ROWS. callgrind_annotate keys a row by `file:function`,
+and the file is where the INSTRUCTIONS live rather than where the function is written, so
+a function that inlined a callee from another crate is split across one row per
+contributing file. On a real profile `CollationElements::next` arrived as 16,254
+(elements.rs) + 15,372 (smallvec/lib.rs) + smaller pieces, so reading the largest row as
+"the frame" under-reports it by 2.4x. `frame_delta.py` aggregates by function and is the
+better reader when a frame's TOTAL cost is the question; this script keeps the file split
+because knowing which inlined body costs what is often the point of running it.
+
 READ THE OUTPUT THIS WAY: a frame's delta is what ONE op adds to it. A frame with a
 large single-run cost but a ~zero delta is startup and is not your problem. Negative
 deltas are noise around zero -- callgrind is deterministic, but inlining decisions can
@@ -79,10 +88,28 @@ def read_reply(sock, buf):
 FRAME_RE = re.compile(r"^\s*([\d,]+)\s+(?:\(\s*[\d.]+%\)\s+)?(\S.*?)\s*$")
 
 
+# A row that is not a frame but matches FRAME_RE anyway: `some_frame (16,052x)` is a
+# CALL COUNT printed under the frame it belongs to, carrying that frame's cost a second
+# time, and `... events annotated` closes the auto-annotation block.
+NON_FRAME_RE = re.compile(r"\(\s*[\d,]+x\)$|events annotated$")
+
+
 def annotate(dump):
-    """func -> self Ir, from callgrind_annotate. Excludes the PROGRAM TOTALS pseudo-row."""
+    """func -> self Ir, from callgrind_annotate. Excludes the PROGRAM TOTALS pseudo-row.
+
+    `--auto=no` IS LOAD-BEARING (frankenredis-cgeq5). Without it callgrind_annotate
+    appends the SOURCE of every hot file with each line's Ir count in the left column,
+    and a line of C matches FRAME_RE exactly as well as a real frame does -- e.g.
+    `return __builtin___memcpy_chk (__dest, __src, __len,`. Measured on two real dumps
+    from `shape_instr_per_op.py`, that fed in 3,222,800 and 3,222,697 phantom
+    instructions (0.57% and 1.57% of the profile), the bulk of it one
+    `__memcpy_avx_unaligned_erms (16,052x)` call-count row worth ~760 Ir/op of fake
+    frame -- enough to rank inside the top ten of a SORT profile. The shares printed by
+    this script divide by PROGRAM TOTALS and were therefore always honest; the FRAME
+    TABLE was not, and nothing in the output said so. The reconciliation check in main()
+    is what makes a recurrence loud."""
     proc = subprocess.run(
-        ["callgrind_annotate", "--threshold=100", dump],
+        ["callgrind_annotate", "--auto=no", "--threshold=100", dump],
         capture_output=True, text=True, check=True)
     costs, total = {}, None
     for line in proc.stdout.splitlines():
@@ -90,6 +117,8 @@ def annotate(dump):
         if not m:
             continue
         ir, name = int(m.group(1).replace(",", "")), m.group(2)
+        if NON_FRAME_RE.search(name):
+            continue
         # PROGRAM TOTALS is the SUM of every frame below it. Counting it as a frame
         # double-counts the whole profile and makes every share exactly half of what it
         # should be, which is how the first run of this script reported a 45 pct "frame".
@@ -192,6 +221,15 @@ def main():
     # deltas: a frame whose cost MOVED (inlining attributing it elsewhere) shows up as a
     # negative delta, and dropping those from the denominator inflates every share.
     total = (b_total - a_total) / ops
+    # The frames must ADD UP to the process. They did not for months: annotated source
+    # lines were entering the table as frames (see annotate()), and every individual row
+    # still looked plausible. A sum that overshoots PROGRAM TOTALS is the only signal
+    # that would have caught it, so it is now checked on every run rather than trusted.
+    attributed = sum(deltas.values())
+    if abs(attributed - total) > max(1.0, 0.005 * abs(total)):
+        print("\nWARNING: frames sum to %.1f Ir/op but PROGRAM TOTALS moved %.1f — the "
+              "frame table is not the process; read neither until that is explained."
+              % (attributed, total))
     print("\nTOTAL marginal cost: %10.1f Ir/op   (2N PROGRAM TOTALS minus N, over N)" % total)
     print("%10s  %7s  %s" % ("Ir/op", "share", "frame (self cost)"))
     print("-" * 100)
