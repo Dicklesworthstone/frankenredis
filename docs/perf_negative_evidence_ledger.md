@@ -8,6 +8,95 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-08-17 MossyOrchid: CERTIFIED — ZINTERCARD is **1.2557x / 1.2367x the throughput of Redis 7.2.4**, ADMISSIBLE in BOTH replicates, worst bound **1.2031x**. Certified on the contended-host harness after the quiet-window gate proved unreachable (`frankenredis-5na4i`)
+
+Claim class: COMPETITIVE. Campaign output: yes. Each round below ran a live vendored redis 7.2.4
+server arm side-by-side with the fr arm inside the same invocation of
+`scripts/balanced_square_ab.py`, both ELF SHA-256s read from `/proc/<pid>/exe` of the RUNNING
+processes so the harness cannot compare a build against itself by accident.
+
+WHY THIS HARNESS. `shape_instr_per_op.py` measures these routes exactly, but refuses a
+vs-incumbent RATIO unless zero `cargo`/`rustc` processes run for the whole draw — and on a
+20-pane box that is not attainable by any pane's own effort, because the check cannot attribute
+builds ("shared uid, so none can be attributed away"). I spent five attempts across four windows
+proving that, and fixed the half that WAS mine (draw spacing — see the row below; the
+stationarity complaint disappeared once draws were spaced). The build half is a fleet property.
+`balanced_square_ab.py` exists for exactly this: it does not ask the host to be quiet, it makes
+the comparison immune to a busy one via the balanced square `ABBAABBA` plus a per-arm A/A null,
+and it refuses per row when contention did bite.
+
+    run  shape              fr/redis ops/s          95% CI              nulls (redis/fr)  verdict
+    1    zintercard_2       1.2557        [1.2031, 1.2777]   1.0124 / 0.9965   ADMISSIBLE
+    2    zintercard_2       1.2367        [1.2253, 1.2873]   0.9994 / 1.0064   ADMISSIBLE
+    1    xpending_empty     1.0160        [1.0001, 1.0342]   1.0125 / 0.9942   ADMISSIBLE
+    2    zintercard_limit   1.2185        [1.1955, 1.2311]   0.9940 / 1.0198   ADMISSIBLE
+    1    zintercard_limit   1.2354        [1.1813, 1.2483]   0.9986 / 0.9789   NULL-FAILED
+    1,2  get_control        1.0881 / 1.1126                  1.0003 / 1.0410   NULL-FAILED both
+
+NOTE THE DIRECTION CONVENTION CHANGES BETWEEN HARNESSES and do not mix them: this file's
+instruction rows are fr/redis INSTRUCTIONS where BELOW 1.0 is fr ahead (ZINTERCARD reads 0.5390x
+there); these are fr/redis OPS/S where ABOVE 1.0 is fr ahead. Both say the same thing.
+
+**ONLY `zintercard_2` HAS REPLICATED STANDING** — ADMISSIBLE in both runs. Its WORST BOUND, the
+lowest CI-low across replicates, is **1.2031x**: at the most pessimistic reading the intervals
+allow, fr still serves 20 pct more ZINTERCARD per second than the incumbent.
+
+The other two are recorded but NOT certified, and the distinction is the point of the convention:
+`zintercard_limit` was ADMISSIBLE once and NULL-FAILED once (fr null 0.9789), so it has no
+standing; `xpending_empty` was ADMISSIBLE once at 1.0160 with a CI low of **1.0001** — a margin
+so thin the interval nearly touches parity, which is exactly the case the worst-bound rule exists
+to stop anyone quoting as a win. Neither may be called a crossing on this evidence.
+
+`get_control` NULL-FAILED in both runs (fr nulls 1.0410, 0.9758), so NO normalised figure is
+available and the rows above are RAW fr/redis. That is the honest form for an incumbent claim
+anyway; it is only the control-normalised statistic that needs the control to certify.
+
+### The A/A null, and the decision rule
+
+The harness's per-arm nulls ARE same-invocation A/A ratios by construction — each arm's
+first-half slots over its second-half slots, with the balanced square placing the halves
+symmetrically so a departure from 1.0 is drift rather than slot position. For `zintercard_2`
+across both replicates: 1.0124, 0.9965, 0.9994, 1.0064.
+
+    A/A null median 1.002900, **bootstrap 95% median CI [0.996500, 1.012400]**
+    (20,000 percentile resamples, seed 20260817)
+
+GATE: that bootstrap median-CI is the decision rule for this row. The band is +/-1.2 pct against
+a measured effect of +20.3 pct at the worst bound — the effect clears its own null by ~17x. Rows
+whose per-arm null left [0.98, 1.02] are reported NULL-FAILED above and are not results.
+
+CV was not used, as a gate or otherwise.
+
+PROVENANCE:
+  ELF        fr bench_elf_sha256=c23cc633c6e7e398df84f2297fd22c88b8ec13a4fb0ce2fed9aa41ac86c79f23
+             (self-reported from /proc/<pid>/exe of the running server); redis
+             e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7.
+  observed   fr_threads 3, redis_threads 5 (OBSERVED, not requested); host thinkstation1,
+             64 cores, kernel 6.17.0-41-generic, governor powersave, ISA avx2, servers unpinned.
+  harness    scripts/balanced_square_ab.py, square ABBAABBA, 21 rounds, 50,000 ops/slot, -P16,
+             per-arm null bound +/-0.02. Shape group `frontclass` added in this commit.
+  PER-ARM    run 1 loadavg 11.02 / 11.05 / 9.89, CPU MHz before mean 3233 (1429-4292, spread
+             3.00x), after mean 2619 (1429-4114, 2.88x).
+             run 2 loadavg 10.94 / 11.02 / 10.03, CPU MHz before mean 2570 (1429-4242, 2.97x),
+             after mean 2767 (1429-4212, 2.95x).
+             Both runs at 17 pct of 1-minute capacity, with peer builds running throughout —
+             which is the condition this harness is designed to measure through.
+  /data      231G.
+
+### RETRY PREDICATE
+
+  1. `zintercard_limit` and `xpending_empty` need a SECOND admissible replicate each before
+     either may be called certified. Re-run `--shapes frontclass --rounds 21`; the limit form
+     null-failed once at 0.9789, so more rounds (31-41) may be what it needs.
+  2. Do NOT quote `xpending_empty` at 1.0160 as a win at any point before that: its CI low is
+     1.0001 and a single draw whose interval touches parity is the exact shape of a phantom
+     crossing (`geosearch_64` was banked at 1.0094 and never replicated).
+  3. Do not re-attempt the instruction-count RATIO gate on this surface until the fleet can
+     guarantee zero cargo/rustc for 40 s; the fr-side instruction deltas are already certified
+     and load-immune, and this row supplies the incumbent comparison they lacked.
+
+--------------------------------------------------------------------------------
+
 ## 2026-08-17 MossyOrchid: SELF-SPEEDUP — ZINTERCARD's LIMIT form front-classified too: **8,107 -> 3,666 instr/op, -55.0 pct** on the LARGER of the two cells. The code landed in `b50e03c3c` under a message that describes only its tests, so this row is the only record of what it does (`frankenredis-5na4i`)
 
 Claim class: SELF-SPEEDUP. Campaign output: no incumbent ratio is claimed here — no FIT window

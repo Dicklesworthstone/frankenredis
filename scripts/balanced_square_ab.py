@@ -410,6 +410,25 @@ CLI = os.path.join(ROOT, "legacy_redis_code/redis/src/redis-cli")
 # measuring the harness, not the change.
 SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
     # The nine shapes front-classified onto the dispatch floor (frankenredis-ozrro).
+    # (frankenredis-5na4i) THE THROUGHPUT VIEW OF THE THREE FRONT-CLASSIFICATION ROUTES landed
+    # today. shape_instr_per_op.py measures them exactly but refuses a vs-incumbent RATIO unless
+    # zero cargo/rustc processes run for the whole draw, which on a 20-pane box is not attainable
+    # by any pane's own effort ("shared uid, so none can be attributed away"). THIS harness was
+    # built for precisely that situation: it does not require a quiet host, it makes the
+    # comparison immune to a busy one via the balanced square plus a per-arm A/A null, and it
+    # reports the worst bound directly. So the crossings get certified here or not at all.
+    "frontclass": [
+        ("zintercard_2",
+         ["ZADD zc:a 1 m1 2 m2 3 m3", "ZADD zc:b 2 m2 3 m3 4 m4"],
+         ["ZINTERCARD", "2", "zc:a", "zc:b"]),
+        ("zintercard_limit",
+         ["ZADD zc:a 1 m1 2 m2 3 m3", "ZADD zc:b 2 m2 3 m3 4 m4"],
+         ["ZINTERCARD", "2", "zc:a", "zc:b", "LIMIT", "2"]),
+        ("xpending_empty",
+         ["XADD xp:s 1-1 f v", "XGROUP CREATE xp:s xp:g 0"],
+         ["XPENDING", "xp:s", "xp:g"]),
+        ("get_control", ["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
+    ],
     "cascade": [
         ("sintercard", ["SADD sc:a m1 m2 m3", "SADD sc:b m2 m3 m4"],
          ["SINTERCARD", "2", "sc:a", "sc:b"]),
