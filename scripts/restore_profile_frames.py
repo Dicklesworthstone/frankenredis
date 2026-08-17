@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+"""Per-frame callgrind profile of ONE fr arm doing hash RESTOREs.
+
+(frankenredis-33832) Companion to scripts/restore_instr_per_op.py. That one gives
+the fr/redis instr/op RATIO; this one keeps the callgrind dump so you can ask WHERE
+the instructions go. Both exist because shape_instr_per_op.py cannot express RESTORE
+at all -- its SHAPES table is whitespace-split strings and a DUMP payload is
+arbitrary bytes.
+
+Load-immune, like every instruction-count instrument here: no quiet window, no core
+pinning. Verified while the host sat at loadavg 36.
+
+    restore_profile_frames.py <fr_binary> <members> <ops>
+    callgrind_annotate --threshold=60 <printed dump path>
+
+WHAT IT ESTABLISHED, 2026-08-16, 128-field hash, 300 ops, ELF 2d5a352c (self cost,
+27,083,795 Ir total):
+
+    27.73 pct  fr_store::decode_rdb_string      (LZF decompress + bulk decode)
+    18.51 pct  fr_persist::listpack::decode_value_spans
+    13.83 pct  __memcpy_avx_unaligned_erms
+
+AND THE POINT OF RECORDING IT: all three are already worked over or are parity work,
+which is a negative result worth not rediscovering.
+
+  - decode_rdb_string is dominated by LZF decompression, whose literal runs already
+    use extend_from_slice and whose back-references already use chunked
+    extend_from_within (frankenredis-5boi9). 33832's own attribution notes that most
+    of its memcpys are LZF that Redis pays too -- parity work, not gap.
+  - decode_value_spans already pre-sizes from the header element count, has its two
+    per-element helpers inlined, and its span type is capped at 32 bytes by a
+    compile-time assert.
+  - the memcpy is the copy Redis performs as well.
+
+So the remaining hash-RESTORE gap is NOT concentrated in the top three frames, which
+is the evidence for 33832's standing conclusion that the structural item (b1o02 --
+keep the listpack instead of re-packing it) is the only lever with a multiple in it.
+Re-run this after any RESTORE change to check that conclusion still holds rather
+than assuming it.
+"""
+import os
+import socket
+import subprocess
+import sys
+import time
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def resp(*args):
+    out = [b"*%d\r\n" % len(args)]
+    for a in args:
+        b = a if isinstance(a, bytes) else str(a).encode()
+        out.append(b"$%d\r\n%s\r\n" % (len(b), b))
+    return b"".join(out)
+
+
+def read_reply(sock, buf):
+    """Bulk-aware: DUMP's payload is binary and contains CRLF."""
+    while b"\r\n" not in buf:
+        buf += sock.recv(1 << 20)
+    line, rest = buf.split(b"\r\n", 1)
+    tag = line[:1]
+    if tag in (b"+", b"-", b":"):
+        return line, rest
+    if tag == b"$":
+        n = int(line[1:])
+        if n == -1:
+            return b"", rest
+        while len(rest) < n + 2:
+            rest += sock.recv(1 << 20)
+        return rest[:n], rest[n + 2:]
+    raise RuntimeError("unexpected reply tag %r" % tag)
+
+
+def main():
+    if len(sys.argv) != 4:
+        print("usage: restore_profile_frames.py <fr_binary> <members> <ops>", file=sys.stderr)
+        return 2
+    fr, members, ops = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+    work = os.path.join(ROOT, "target", "restore_profile")
+    os.makedirs(work, exist_ok=True)
+    out = os.path.join(work, "cg.restore.out")
+    port = 47900 + (os.getpid() % 90)
+
+    proc = subprocess.Popen(
+        ["valgrind", "--tool=callgrind", "--callgrind-out-file=" + out, fr,
+         "--port", str(port), "--save", "", "--appendonly", "no", "--dir", work],
+        cwd=work, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    sock = None
+    try:
+        for _ in range(600):
+            if proc.poll() is not None:
+                raise RuntimeError("server exited rc=%s" % proc.returncode)
+            try:
+                sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+                sock.settimeout(600)
+                sock.sendall(resp("PING"))
+                if b"PONG" in sock.recv(64):
+                    break
+                sock.close()
+                sock = None
+            except OSError:
+                time.sleep(0.25)
+        if sock is None:
+            raise RuntimeError("server never became ready under callgrind")
+
+        buf = b""
+        fields = []
+        for i in range(members):
+            fields += ["f%04d" % i, "v%04d" % i]
+        sock.sendall(resp("HSET", "src", *fields))
+        _, buf = read_reply(sock, buf)
+        sock.sendall(resp("DUMP", "src"))
+        payload, buf = read_reply(sock, buf)
+        if not payload:
+            raise RuntimeError("empty DUMP")
+
+        one = resp("RESTORE", "dst", "0", payload, "REPLACE")
+        sock.sendall(one * ops)
+        done = 0
+        while done < ops:
+            reply, buf = read_reply(sock, buf)
+            if reply.startswith(b"-"):
+                raise RuntimeError("RESTORE error: %r" % reply)
+            done += 1
+        print("ran %d RESTOREs of %d fields (payload %d B)" % (ops, members, len(payload)))
+    finally:
+        if sock is not None:
+            sock.close()
+        proc.terminate()
+        try:
+            proc.wait(timeout=180)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=60)
+
+    # Callgrind writes the dump at process EXIT; anything that reads it earlier sees
+    # an empty file and reports a profile of nothing.
+    if not os.path.exists(out) or os.path.getsize(out) == 0:
+        raise RuntimeError("no callgrind dump at %s -- the arm did not profile" % out)
+    print("dump: %s" % out)
+    print("next: callgrind_annotate --threshold=60 %s" % out)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
