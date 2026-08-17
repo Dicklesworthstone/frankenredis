@@ -1745,9 +1745,48 @@ NULL_OBSERVED_HALF_RANGE_PCT = [0.011, 0.067, 0.481, 0.320]
 NULL_GATE_PCT = 3 * NULL_HALF_RANGE_PCT
 
 
+# (frankenredis-gvm6z) MEASURED, THREE SIZES, PREDICTIONS REGISTERED FIRST. Six `--fr-only`
+# draws each on ONE ELF (f985f0c2), reported as SIGMA because sigma is sample-size independent
+# and half-range is not (that confound is recorded above):
+#
+#     size  1,305.2 instr/op   sigma 3.12   sigma-pct 0.2390
+#     size  7,290.5 instr/op   sigma 6.52   sigma-pct 0.0894
+#     size 108,610.1 instr/op  sigma 3.73   sigma-pct 0.0034
+#
+# THREE MODELS WERE PREDICTED BEFORE THE THIRD POINT RAN, AND ALL THREE ARE FALSIFIED:
+#     FLAT sigma-pct (0.089)  predicted 96.7 instr   measured 0.04x of it
+#     SQRT k=0.0814           predicted 26.8 instr   measured 0.14x
+#     power law slope -0.572  predicted 20.7 instr   measured 0.18x
+# My own sqrt hypothesis was the second of those. It is wrong.
+#
+# WHAT THE DATA SAYS: sigma is a small CONSTANT NUMBER OF INSTRUCTIONS -- 3.12 / 6.52 / 3.73,
+# a 2.09x spread while the shape size spans 83x. That is what a two-point subtraction should
+# leave behind: the work cancels, and what survives is a few instructions of per-run jitter
+# that does not scale with the work at all.
+#
+# WHY THE OLD PERCENTAGE LOOKED CORRECT, and this is the useful part: 0.067 pct of ~7,000 is
+# 4.88 instr, within 10 pct of the true absolute sigma. The constant was well calibrated AT
+# its calibration size and wrong away from it -- understating noise 5x at 1,305 instr/op
+# (anti-conservative, effects look more significant than they are) and overstating it 16x at
+# 108,610 (conservative). A single percentage errs in OPPOSITE DIRECTIONS depending on shape
+# size, which is worse than erring consistently.
+#
+# The pinned claims are essentially unmoved by the correction -- flat 0.53 -> 0.57 sigma, real
+# 7.16 -> 7.35 -- because both of their arms sit at ~7,000, exactly where the percentage was
+# accidentally right. No banked conclusion changes.
+NULL_SIGMA_INSTR = 4.46
+
+
 def null_noise_instr(instr_per_op):
-    """A/A noise in instr/op for a single measurement of this magnitude."""
-    return instr_per_op * NULL_HALF_RANGE_PCT / 100.0
+    """A/A noise for a single measurement, in ABSOLUTE instr/op.
+
+    `instr_per_op` is accepted and deliberately UNUSED: the measurement above shows the noise
+    does not scale with the arm's magnitude. The parameter is kept so callers and the
+    quadrature helper below need no change, and so that a future size-dependent model has
+    somewhere to go if a fourth size ever contradicts this one.
+    """
+    del instr_per_op  # noise is size-independent; see NULL_SIGMA_INSTR
+    return NULL_SIGMA_INSTR
 
 
 def delta_sigma(delta, arm_a_instr_per_op, arm_b_instr_per_op):
