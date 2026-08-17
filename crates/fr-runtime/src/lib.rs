@@ -933,9 +933,15 @@ fn plain_zmscore_owned_argv(key: &[u8], members: &[&[u8]]) -> Vec<Vec<u8>> {
 }
 
 // `tail` is [numkeys, key...]; reconstruct the full SINTERCARD argv for slowlog.
-fn plain_sintercard_owned_argv(tail: &[&[u8]]) -> Vec<Vec<u8>> {
+/// (frankenredis-5na4i) Owned argv for a `<CMD> numkeys key... [LIMIT n]` borrowed route.
+///
+/// Shared by SINTERCARD and ZINTERCARD because the ONLY difference between their argv is the
+/// command name, and this is built lazily inside a breach-only closure in both cases — it runs
+/// on a slowlog/latency/threat breach, not on the hot path
+/// (`project_breach_only_argv_materialisation_vein`).
+fn plain_numkeys_owned_argv(name: &'static [u8], tail: &[&[u8]]) -> Vec<Vec<u8>> {
     let mut argv = Vec::with_capacity(tail.len() + 1);
-    argv.push(b"SINTERCARD".to_vec());
+    argv.push(name.to_vec());
     argv.extend(tail.iter().map(|a| a.to_vec()));
     argv
 }
@@ -16979,9 +16985,184 @@ impl Runtime {
         Some(reply)
     }
 
+    /// Borrowed fast path for `ZINTERCARD numkeys key [key ...] [LIMIT n]`.
+    ///
+    /// (frankenredis-5na4i) ZINTERCARD measured 3,223-3,374 instr/op of dispatch out of
+    /// 7,546-8,078 — the largest dispatch block on the board, and one of only two commands
+    /// still reaching the GENERIC path (`xpending` is the other). It had no borrowed trio at
+    /// all: no parser arm, no executor, no floor entry.
+    ///
+    /// IT IS NOT A MECHANICAL COPY OF `execute_plain_sintercard_borrowed`, and the difference
+    /// is a correctness one that no existing test would catch. `frankenredis-zintercardwt`
+    /// records that upstream `zinterCardCommand` looks up and TYPE-CHECKS every input key
+    /// BEFORE parsing the optional LIMIT clause, so a wrong-type key beats a bad or negative
+    /// LIMIT and beats a trailing syntax error. fr once parsed LIMIT first, surfaced the wrong
+    /// error, and that was fixed by name. SINTERCARD is a DIFFERENT upstream code path and
+    /// parses LIMIT first legitimately — so copying its executor would silently reintroduce
+    /// the divergence, and a fast path that only changes WHICH error comes back still returns
+    /// an error.
+    ///
+    /// The design that avoids the whole question: SERVE ONLY THE SHAPES THAT CANNOT ERROR and
+    /// decline everything else, so the generic path keeps ownership of error ordering
+    /// entirely. Every `return None` below is a shape whose error the generic must produce.
+    /// Both measured shapes (`ZINTERCARD 2 z1 z2` and the same with `LIMIT n`) are happy
+    /// paths, so declining the error surface forfeits none of the win.
+    ///
+    /// A SET is a valid zset-like operand upstream, so `ValueType::Set` is accepted here;
+    /// rejecting it would be a wrong answer, not a slow path.
+    pub fn execute_plain_zintercard_borrowed(
+        &mut self,
+        tail: &[&[u8]],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        // tail = [numkeys, key..., ("LIMIT", n)?]
+        let numkeys = parse_i64_arg(tail.first()?).ok()?;
+        // numkeys <= 0 is a REPLY upstream ("at least 1 input key is needed"), not an error
+        // this path may invent.
+        if numkeys < 1 {
+            return None;
+        }
+        let numkeys = usize::try_from(numkeys).ok()?;
+        let keys_end = numkeys.checked_add(1)?;
+        // Fewer args than numkeys claims is "ERR syntax error" from the generic.
+        if tail.len() < keys_end {
+            return None;
+        }
+        let limit: u64 = if tail.len() == keys_end {
+            0
+        } else if tail.len() == keys_end.saturating_add(2)
+            && tail
+                .get(keys_end)
+                .is_some_and(|t| t.eq_ignore_ascii_case(b"LIMIT"))
+        {
+            let raw = parse_i64_arg(tail[keys_end + 1]).ok()?;
+            // "ERR LIMIT can't be negative" belongs to the generic, and per zintercardwt it
+            // must NOT beat a wrong-type key — declining is how that ordering is preserved.
+            if raw < 0 {
+                return None;
+            }
+            u64::try_from(raw).ok()?
+        } else {
+            return None;
+        };
+        let keys = &tail[1..keys_end];
+
+        let argc = tail.len().saturating_add(1);
+        if argc > MAX_COMMAND_ARITY
+            || self.policy.gate.max_array_len < argc
+            || self.policy.gate.max_bulk_len < b"ZINTERCARD".len()
+            || tail
+                .iter()
+                .any(|arg| arg.len() > self.policy.gate.max_bulk_len)
+        {
+            return None;
+        }
+        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+            return None;
+        }
+        // The zintercardwt ordering, preserved by DECLINING rather than by reproducing it: a
+        // key of any other type means the generic must run so WRONGTYPE is what the client
+        // sees. `peek_value_type` is deliberately no-stat, so this cannot perturb keyspace
+        // hit/miss accounting before the real lookups below.
+        for &key in keys {
+            match self.server.store.peek_value_type(key, now_ms) {
+                None | Some(fr_store::ValueType::ZSet) | Some(fr_store::ValueType::Set) => {}
+                Some(_) => return None,
+            }
+        }
+
+        // Past this point the command is committed: every remaining step must MATCH the
+        // generic rather than decline, or the bookkeeping below would be counted twice.
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("zintercard");
+        self.session.last_argv_len_sum =
+            b"ZINTERCARD".len() + tail.iter().map(|a| a.len()).sum::<usize>();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        // Mirror fr_command::record_source_key_lookups(store, keys): one exists_no_touch per
+        // key, so keyspace hit/miss accounting is identical to the generic path's.
+        for &key in keys {
+            let _ = self.server.store.exists_no_touch(key, now_ms);
+        }
+        let result = self.server.store.zintercard_count_cached(keys, limit, now_ms);
+        let elapsed_us = self.finish_chained_command(start);
+        let reply = match result {
+            Ok(count) => RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_sintercard_borrowed_metrics_named(
+            "zintercard",
+            b"ZINTERCARD",
+            tail,
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        if let RespFrame::Error(msg) = &reply {
+            self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        Some(reply)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn record_plain_sintercard_borrowed_metrics(
         &mut self,
+        tail: &[&[u8]],
+        elapsed_us: u64,
+        now_ms: u64,
+        packet_id: u64,
+        failed: bool,
+    ) {
+        self.record_plain_sintercard_borrowed_metrics_named(
+            "sintercard",
+            b"SINTERCARD",
+            tail,
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+    }
+
+    /// (frankenredis-5na4i) Same body for SINTERCARD and ZINTERCARD: the two differ only in the
+    /// name recorded for cmdstat / slowlog argv / threat text, exactly as
+    /// `execute_plain_unlink_borrowed` differs from the DEL one. Keeping ONE body means the two
+    /// routes cannot drift in which breaches they record.
+    #[allow(clippy::too_many_arguments)]
+    fn record_plain_sintercard_borrowed_metrics_named(
+        &mut self,
+        canonical: &'static str,
+        upper: &'static [u8],
         tail: &[&[u8]],
         elapsed_us: u64,
         now_ms: u64,
@@ -16992,14 +17173,14 @@ impl Runtime {
         if self.server.store.slowlog_log_slower_than_us >= 0
             && (elapsed_us as i64) >= self.server.store.slowlog_log_slower_than_us
         {
-            let argv_ref = argv.get_or_insert_with(|| plain_sintercard_owned_argv(tail));
+            let argv_ref = argv.get_or_insert_with(|| plain_numkeys_owned_argv(upper, tail));
             self.record_slowlog(argv_ref, elapsed_us, now_ms);
         }
 
         let threshold_ms = self.server.store.latency_tracker.threshold_ms;
         let duration_ms = elapsed_us.div_ceil(1000);
         if threshold_ms != 0 && duration_ms > threshold_ms {
-            let argv_ref = argv.get_or_insert_with(|| plain_sintercard_owned_argv(tail));
+            let argv_ref = argv.get_or_insert_with(|| plain_numkeys_owned_argv(upper, tail));
             self.server
                 .record_latency_sample(argv_ref, elapsed_us, now_ms);
         }
@@ -17012,11 +17193,11 @@ impl Runtime {
             };
             self.server
                 .store
-                .record_command_histogram_canonical_with_kind("sintercard", elapsed_us, kind);
+                .record_command_histogram_canonical_with_kind(canonical, elapsed_us, kind);
         }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
-            let argv_ref = argv.get_or_insert_with(|| plain_sintercard_owned_argv(tail));
+            let argv_ref = argv.get_or_insert_with(|| plain_numkeys_owned_argv(upper, tail));
             self.record_threat_event(ThreatEventInput {
                 now_ms,
                 packet_id,
@@ -17026,8 +17207,8 @@ impl Runtime {
                 action: "slow_command_detected",
                 reason_code: "command_time_budget_exceeded",
                 reason: format!(
-                    "command 'SINTERCARD' took {}us, exceeding budget {}ms",
-                    elapsed_us, self.server.command_time_budget_ms
+                    "command '{}' took {}us, exceeding budget {}ms",
+                    String::from_utf8_lossy(upper), elapsed_us, self.server.command_time_budget_ms
                 ),
                 input_source: ThreatInputDigestSource::Argv(argv_ref),
                 output: &RespFrame::Integer(0),
@@ -48556,6 +48737,101 @@ mod tests {
                 .map(|part| RespFrame::BulkString(Some((*part).to_vec())))
                 .collect(),
         ))
+    }
+
+    /// (frankenredis-5na4i) The ZINTERCARD borrowed route must be INVISIBLE: for every shape it
+    /// either declines, or returns exactly what the generic path returns.
+    ///
+    /// This is the reference-oracle form rather than hand-written expectations, because the
+    /// hazard here is not "wrong number" but "right number, wrong ERROR". `zintercardwt` records
+    /// that upstream type-checks every operand BEFORE parsing LIMIT, so a wrong-type key must
+    /// beat a negative LIMIT — an expectation table written by the same person who wrote the
+    /// fast path would encode the same misunderstanding twice. Comparing against the generic on
+    /// a TWIN runtime cannot.
+    #[test]
+    fn zintercard_borrowed_matches_the_generic_on_every_shape_5na4i() {
+        let shapes: Vec<Vec<&[u8]>> = vec![
+            // The two measured shapes: these MUST be served, or the lever is inert.
+            vec![b"ZINTERCARD", b"2", b"z1", b"z2"],
+            vec![b"ZINTERCARD", b"2", b"z1", b"z2", b"LIMIT", b"1"],
+            // LIMIT 0 is "no limit" upstream, not "limit to zero".
+            vec![b"ZINTERCARD", b"2", b"z1", b"z2", b"LIMIT", b"0"],
+            vec![b"ZINTERCARD", b"1", b"z1"],
+            // A SET is a valid zset-like operand.
+            vec![b"ZINTERCARD", b"2", b"z1", b"s1"],
+            vec![b"ZINTERCARD", b"2", b"z1", b"missing"],
+            // Error shapes — every one must be left to the generic.
+            vec![b"ZINTERCARD", b"0", b"z1"],
+            vec![b"ZINTERCARD", b"-1", b"z1"],
+            vec![b"ZINTERCARD", b"3", b"z1", b"z2"],
+            vec![b"ZINTERCARD", b"2", b"z1", b"z2", b"LIMIT", b"-1"],
+            vec![b"ZINTERCARD", b"2", b"z1", b"z2", b"LIMIT"],
+            vec![b"ZINTERCARD", b"2", b"z1", b"z2", b"NOTALIMIT", b"1"],
+            vec![b"ZINTERCARD", b"2", b"z1", b"z2", b"LIMIT", b"x"],
+            // THE ORDERING CASE: a wrong-type operand together with a bad LIMIT. Upstream
+            // answers WRONGTYPE, not the LIMIT error. The fast path must not decide this.
+            vec![b"ZINTERCARD", b"2", b"str", b"z2", b"LIMIT", b"-1"],
+            vec![b"ZINTERCARD", b"2", b"str", b"z2"],
+        ];
+
+        fn seed(rt: &mut Runtime) {
+            rt.execute_frame(command(&[b"ZADD", b"z1", b"1", b"a", b"2", b"b"]), 0);
+            rt.execute_frame(command(&[b"ZADD", b"z2", b"5", b"b", b"6", b"c"]), 0);
+            rt.execute_frame(command(&[b"SADD", b"s1", b"b"]), 0);
+            rt.execute_frame(command(&[b"SET", b"str", b"v"]), 0);
+        }
+
+        let mut served = 0usize;
+        for shape in &shapes {
+            let mut fast = Runtime::new(RuntimePolicy::default());
+            let mut generic = Runtime::new(RuntimePolicy::default());
+            seed(&mut fast);
+            seed(&mut generic);
+
+            let tail: Vec<&[u8]> = shape[1..].to_vec();
+            let got = fast.execute_plain_zintercard_borrowed(&tail, 100);
+            let want = generic.execute_frame(command(shape), 100);
+
+            if let Some(reply) = got {
+                served += 1;
+                assert_eq!(
+                    reply,
+                    want,
+                    "borrowed ZINTERCARD diverged from the generic on {:?}",
+                    shape
+                        .iter()
+                        .map(|p| String::from_utf8_lossy(p).into_owned())
+                        .collect::<Vec<_>>()
+                );
+                // A served shape must also leave the same keyspace accounting behind, which is
+                // what record_source_key_lookups exists for.
+                assert_eq!(
+                    fast.server.store.stat_keyspace_hits,
+                    generic.server.store.stat_keyspace_hits,
+                    "keyspace hits diverged on {:?}",
+                    shape
+                        .iter()
+                        .map(|p| String::from_utf8_lossy(p).into_owned())
+                        .collect::<Vec<_>>()
+                );
+                assert_eq!(
+                    fast.server.store.stat_keyspace_misses,
+                    generic.server.store.stat_keyspace_misses,
+                    "keyspace misses diverged on {:?}",
+                    shape
+                        .iter()
+                        .map(|p| String::from_utf8_lossy(p).into_owned())
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+        // The lever is only a lever if the shapes it was built for are actually served. Six of
+        // the shapes above are happy paths; the rest must fall through.
+        assert!(
+            served >= 6,
+            "borrowed ZINTERCARD served only {served} of the happy-path shapes — an inert fast \
+             path measures nothing"
+        );
     }
 
     fn command_owned(parts: Vec<Vec<u8>>) -> RespFrame {

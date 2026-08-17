@@ -14860,6 +14860,8 @@ enum BorrowedDispatchFloorClass {
     /// the two counts the cascade has exact parsers for. `LIMIT` spellings are a
     /// higher arity and keep the cascade.
     Sintercard,
+    /// (frankenredis-5na4i) `ZINTERCARD numkeys k1 k2`, the argc-4 form.
+    Zintercard,
     /// (frankenredis-ozrro) `ZRANDMEMBER key count`, the members-only form.
     /// (frankenredis-ozrro) Keyless `COMMAND COUNT`. The deepest arm measured on
     /// this bead: walking to it cost 15,373 instructions per op, 4.27x the
@@ -15292,6 +15294,7 @@ enum BorrowedDispatchFloorCommand {
     Setbit,
     Setrange,
     Sintercard,
+    Zintercard,
     Sismember,
     Smembers,
     Smismember,
@@ -15560,6 +15563,11 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             }
             [b'S', b'I', b'N', b'T', b'E', b'R', b'C', b'A', b'R', b'D'] => {
                 Some(BorrowedDispatchFloorCommand::Sintercard)
+            }
+            // (frankenredis-5na4i) Same length as SINTERCARD, so it costs nothing extra to
+            // recognise here — the match is on a fixed-width byte array.
+            [b'Z', b'I', b'N', b'T', b'E', b'R', b'C', b'A', b'R', b'D'] => {
+                Some(BorrowedDispatchFloorCommand::Zintercard)
             }
             [b'E', b'X', b'P', b'I', b'R', b'E', b'T', b'I', b'M', b'E'] => {
                 Some(BorrowedDispatchFloorCommand::Expiretime)
@@ -16303,6 +16311,14 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // the widening cannot strand a reading on the generic path.
         (4..=6, BorrowedDispatchFloorCommand::Sintercard) => {
             Some(BorrowedDispatchFloorClass::Sintercard)
+        }
+        // (frankenredis-5na4i) Arity 4 ONLY, deliberately narrower than SINTERCARD's 4..=6. A
+        // floor class is a promise its arm must keep: the arm below serves the argc-4 form and
+        // nothing else, so claiming 5 or 6 would strand the LIMIT form on GENERIC — which is
+        // where it already goes, but at the cost of a failed classification first
+        // (project_floor_class_is_a_promise_its_arm_must_keep).
+        (4, BorrowedDispatchFloorCommand::Zintercard) => {
+            Some(BorrowedDispatchFloorClass::Zintercard)
         }
         (3, BorrowedDispatchFloorCommand::Hrandfield) => {
             Some(BorrowedDispatchFloorClass::HrandfieldCount)
@@ -22255,6 +22271,33 @@ fn try_dispatch_floor_classified_action(
         // (frankenredis-ozrro) Eleventh batch. Every arm below routes to the SAME
         // parser and executor its cascade arm used, so the reply is identical by
         // construction and a decline still lands on the generic path.
+        BorrowedDispatchFloorClass::Zintercard => {
+            // (frankenredis-5na4i) One exact parser, one shape. Everything else about
+            // ZINTERCARD -- numkeys disagreeing with the arity, LIMIT, wrong-type operands --
+            // is declined by the parser or by the executor and falls to the generic path, which
+            // is where it goes today anyway. The executor owns the zintercardwt ordering rule
+            // (a wrong-type key must beat a bad LIMIT) by declining rather than reproducing it.
+            let hit = parse_borrowed_plain_zintercard2_packet(unparsed, &parser_config).and_then(
+                |packet| {
+                    let tail = [packet.numkeys, packet.k1, packet.k2];
+                    runtime
+                        .execute_plain_zintercard_borrowed(&tail, ts)
+                        .map(|response| (packet.consumed, response))
+                },
+            );
+            if let Some((consumed, response)) = hit {
+                Ok(BorrowedMultibulkAction::FastReply { consumed, response })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
         BorrowedDispatchFloorClass::Sintercard => {
             // Two exact parsers, one per key count. They are tried in the
             // cascade's own order; `SINTERCARD 3 a b` (a numkeys that disagrees
@@ -24239,6 +24282,50 @@ fn parse_borrowed_plain_sintercard2_packet<'a>(
     let (k1, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     let (k2, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
     Some(BorrowedPlainSintercard2Packet {
+        consumed,
+        numkeys,
+        k1,
+        k2,
+    })
+}
+
+struct BorrowedPlainZintercard2Packet<'a> {
+    consumed: usize,
+    numkeys: &'a [u8],
+    k1: &'a [u8],
+    k2: &'a [u8],
+}
+
+/// (frankenredis-5na4i) `ZINTERCARD 2 k1 k2` — the argc-4 form, exact-shape.
+///
+/// PLACED HERE ON PURPOSE. The first attempt at this route put an args helper in
+/// `parse_borrowed_multibulk_action` and measured +112 pct; call counts showed that adding an arm
+/// to that ~4,200-line function flipped it from 4,000 out-of-line calls to 1 inlined one, so the
+/// regression was CODEGEN, not routing (ledger 88468651c). The floor path is a different function
+/// and reaches the route before the cascade, which is why SINTERCARD is cheap here.
+fn parse_borrowed_plain_zintercard2_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainZintercard2Packet<'a>> {
+    if config.max_array_len < 4 || config.max_bulk_len < b"ZINTERCARD".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*4\r\n$10\r\n").and_then(|rest| {
+        rest.get(..10)
+            .filter(|command| command.eq_ignore_ascii_case(b"ZINTERCARD"))
+            .map(|_| input.len() - rest.len() + 10)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (numkeys, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    if numkeys != b"2" {
+        return None;
+    }
+    let (k1, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (k2, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainZintercard2Packet {
         consumed,
         numkeys,
         k1,
