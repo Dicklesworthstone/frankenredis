@@ -14863,6 +14863,12 @@ enum BorrowedDispatchFloorClass {
     /// (frankenredis-5na4i) `ZINTERCARD numkeys k1 k2`, the argc-4 form.
     Zintercard,
     Xpending,
+    /// (frankenredis-p98mw) `MOVE key db`, the argc-3 form and the only form there is.
+    Move,
+    /// (frankenredis-p98mw) `SPUBLISH shardchannel message`, argc-3. Measured at 6,606
+    /// instr/op of dispatch, 79.5 pct of the command -- the largest dispatch block on the
+    /// board when it was taken, against 601 for an already-classified route (TOUCH).
+    Spublish,
     /// (frankenredis-ozrro) `ZRANDMEMBER key count`, the members-only form.
     /// (frankenredis-ozrro) Keyless `COMMAND COUNT`. The deepest arm measured on
     /// this bead: walking to it cost 15,373 instructions per op, 4.27x the
@@ -15297,6 +15303,8 @@ enum BorrowedDispatchFloorCommand {
     Sintercard,
     Zintercard,
     Xpending,
+    Move,
+    Spublish,
     Sismember,
     Smembers,
     Smismember,
@@ -15384,6 +15392,9 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'S', b'C', b'A', b'N'] => Some(BorrowedDispatchFloorCommand::Scan),
             [b'E', b'C', b'H', b'O'] => Some(BorrowedDispatchFloorCommand::Echo),
             [b'L', b'S', b'E', b'T'] => Some(BorrowedDispatchFloorCommand::Lset),
+            // (frankenredis-p98mw) MOVE is 4 bytes and belongs in THIS length group;
+            // a row in the wrong group is dead code that still compiles.
+            [b'M', b'O', b'V', b'E'] => Some(BorrowedDispatchFloorCommand::Move),
             [b'T', b'Y', b'P', b'E'] => Some(BorrowedDispatchFloorCommand::Type),
             [b'X', b'L', b'E', b'N'] => Some(BorrowedDispatchFloorCommand::Xlen),
             [b'H', b'L', b'E', b'N'] => Some(BorrowedDispatchFloorCommand::Hlen),
@@ -15586,6 +15597,10 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             }
             [b'R', b'E', b'N', b'A', b'M', b'E', b'N', b'X'] => {
                 Some(BorrowedDispatchFloorCommand::Renamenx)
+            }
+            // (frankenredis-p98mw) SPUBLISH is 8 bytes.
+            [b'S', b'P', b'U', b'B', b'L', b'I', b'S', b'H'] => {
+                Some(BorrowedDispatchFloorCommand::Spublish)
             }
             [b'E', b'X', b'P', b'I', b'R', b'E', b'A', b'T'] => {
                 Some(BorrowedDispatchFloorCommand::Expireat)
@@ -16335,6 +16350,14 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (3, BorrowedDispatchFloorCommand::Xpending) => {
             Some(BorrowedDispatchFloorClass::Xpending)
         }
+        // (frankenredis-p98mw) Arity 3 is the ONLY arity either command has -- `MOVE key db` and
+        // `SPUBLISH shardchannel message` take no options -- so unlike ZINTERCARD and XPENDING
+        // above there is no shape the arm can be asked for and then refuse. That is what makes
+        // the exact-arity claim safe here rather than merely narrow: a floor class keyed on an
+        // arity whose arm then declines REGRESSES the shape to GENERIC instead of returning it
+        // to the cascade.
+        (3, BorrowedDispatchFloorCommand::Move) => Some(BorrowedDispatchFloorClass::Move),
+        (3, BorrowedDispatchFloorCommand::Spublish) => Some(BorrowedDispatchFloorClass::Spublish),
         (3, BorrowedDispatchFloorCommand::Hrandfield) => {
             Some(BorrowedDispatchFloorClass::HrandfieldCount)
         }
@@ -22286,6 +22309,63 @@ fn try_dispatch_floor_classified_action(
         // (frankenredis-ozrro) Eleventh batch. Every arm below routes to the SAME
         // parser and executor its cascade arm used, so the reply is identical by
         // construction and a decline still lands on the generic path.
+        // (frankenredis-p98mw) MOVE and SPUBLISH. Both mirror their existing cascade arms
+        // EXACTLY, including the literal prefix: `$4` for MOVE and `$8` for SPUBLISH. A wrong
+        // length byte there makes the arm decline every packet, which is slow-not-wrong and
+        // therefore silent -- the cascade arm below would still answer correctly and only the
+        // saving would vanish. The cascade arms stay where they are: a classified packet never
+        // reaches them, and an unclassified one still needs them.
+        BorrowedDispatchFloorClass::Move => {
+            let hit = parse_borrowed_plain_key_arg1_packet(
+                unparsed,
+                &parser_config,
+                b"*3\r\n$4\r\n",
+                b"MOVE",
+            )
+            .and_then(|packet| {
+                runtime
+                    .execute_plain_move_borrowed(packet.key, packet.arg, ts)
+                    .map(|response| (packet.consumed, response))
+            });
+            if let Some((consumed, response)) = hit {
+                Ok(BorrowedMultibulkAction::FastReply { consumed, response })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Spublish => {
+            // SPUBLISH channel message: key=channel, arg=message.
+            let hit = parse_borrowed_plain_key_arg1_packet(
+                unparsed,
+                &parser_config,
+                b"*3\r\n$8\r\n",
+                b"SPUBLISH",
+            )
+            .and_then(|packet| {
+                runtime
+                    .execute_plain_spublish_borrowed(packet.key, packet.arg, ts)
+                    .map(|response| (packet.consumed, response))
+            });
+            if let Some((consumed, response)) = hit {
+                Ok(BorrowedMultibulkAction::FastReply { consumed, response })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
         BorrowedDispatchFloorClass::Xpending => {
             let hit = parse_borrowed_plain_xpending_packet(unparsed, &parser_config).and_then(
                 |packet| {
