@@ -29598,3 +29598,81 @@ and it is a profiling question, not a table-entry one.
 PROVENANCE: no new measurement. Point figures are as banked in `0364fc0f4` (LMPOP, RANDOMKEY,
 DUMP), `821862043` (SET XX) and the SMOVE/RPOPLPUSH/LTRIM/HINCRBY rows above. Worst bounds
 are computed, not observed: measured x 1.08 per the harness's documented denominator spread.
+
+--------------------------------------------------------------------------------
+MEASURED + ATTRIBUTED (frankenredis-qj6jn) — hash RESTORE is 2.0844x and is now the worst
+route on the board by a wide margin. AND qj6jn's three named slices are ALL ALREADY DONE:
+the bead's proposal text is stale
+
+Claim class: COMPETITIVE (before-side attribution; no lever landed this row)
+
+PREFLIGHT KILLED THE BEAD'S OWN PROPOSALS, which is what the preflight is for. qj6jn names
+three slices; every one is already in the tree or already rejected:
+
+  1. "hoist the table representation choice out of the probe path" — SHIPPED. The
+     `LzfHashTable` trait with `LzfPackedTable`/`LzfWideTable` exists and
+     `lzf_compress_with_scratch` calls `lzf_compress_dispatch::<SIMD, true, false>`, i.e.
+     HOIST=true is the production arm. `LzfDynTable` is retained only as the A/B control.
+  2. "batch the literal run instead of one Vec::push per literal byte" — REJECTED at
+     +8.1 pct (17,226.7 -> 18,614.7 instr/op) and already in this ledger.
+  3. "the zset RESTORE score round-trip" — LANDED, worth -30.2 pct, type ratio 5.33x ->
+     3.72x (jpvwi/w08xv).
+
+That is the fourth bead this session whose numbers describe a machine that no longer exists
+(after BITCOUNT unit, GEOADD and LPOS COUNT). The rule in
+`feedback_remeasure_a_beads_cell_before_believing_it` now has a companion: RE-READ THE BEAD'S
+PROPOSED FIX AGAINST THE SOURCE, not just its measured cell. A stale proposal costs more than
+a stale number because it looks like work remaining.
+
+THE ROUTE ITSELF IS STILL BADLY SUB-PARITY, measured fresh:
+
+    hash RESTORE, 40 fields, 400 ops, 350 B payload
+    fr 68,828.4 instr/op   redis 33,021.0 instr/op   2.0844x
+
+For scale: every dispatch route this campaign crossed now sits at 0.50x-0.62x, and the
+largest dispatch cost ever measured was ~4,400 instr/op. RESTORE is burning 35,807 instr/op
+MORE than the incumbent on one hash. The dispatch vein is closed; this is where the gap is.
+
+ATTRIBUTION (self cost, callgrind, same binary and workload). Dispatch frames are 1-2 pct
+here, confirming the route is decode-bound and that no floor entry can touch it:
+
+    21.98 pct  fr_store::decode_rdb_string                    (LZF decompress + bulk decode)
+    13.52 pct  fr_persist::listpack::decode_value_spans
+    12.28 pct  __memcpy_avx_unaligned_erms                    (libc)
+     7.30 pct  PackedStrMap::append
+     5.45 pct  fr_store::hash_from_listpack_spans
+     3.18 pct  fr_persist::crc64_redis_slice_table
+     3.10 pct  __memset_avx2_unaligned_erms                   (libc)
+     2.69 pct  HashFieldMap::from_unique_pairs_borrowed
+
+WHAT I DID NOT DO, SAID PLAINLY: I did not land a code lever on this route this turn. The
+obvious candidate from the profile — making `decode_value_spans` yield an iterator instead of
+materialising a `Vec<ListpackValueSpan>`, which would attack the 13.5 pct decode plus part of
+the 12.3 pct memcpy and 3.1 pct memset — changes a signature shared by the hash, zset, set
+AND list restore paths. That is a wide blast radius on the persistence path, and I was not
+willing to start it without the budget to test all four consumers properly. Landing a
+half-tested change to RESTORE decode is how a corruption bug ships.
+
+A NOTE ON THE INTEGER ROUND-TRIP, so nobody repeats my dead end: `decode_value_spans` does
+format integer elements to decimal, and that is what the zset score fix attacked. It does NOT
+show up in the row above, because this harness seeds `f%04d`/`v%04d` — STRING fields and
+values, so the integer path is never entered. If someone wants to measure the hash-side
+integer round-trip they must first seed integer field values; the existing harness cannot see
+it. That is a gap in the instrument, not evidence the lever is absent.
+
+PROVENANCE:
+  ELF           d494199504e8076611bdf7bf93a3da79ea10bbc1f6a251a99716ac55b06a4867
+                (harness self-checked: "not behind any commit touching crates/")
+  harness       scripts/restore_instr_per_op.py (N=400/2N=800) and
+                scripts/restore_profile_frames.py, both at HEAD. Incumbent verified in-run:
+                sha=d2c8a4b9 == vendored source HEAD, clean.
+  host          thinkstation1, 64 cores, powersave, /data 163G, loadavg 22.25, 4025 MHz.
+  WORKLOAD CAVEAT the harness states its own: RESTORE ... REPLACE onto ONE existing key
+                dilutes the ratio (2.13x here vs 2.81x on the bead's 200-distinct-key
+                workload). Do not compare this absolute against a differently-shaped row.
+
+RETRY PREDICATE: attack `decode_value_spans`' Vec materialisation, but budget for all FOUR
+consumers (hash/zset/set/list `*_from_listpack_spans`) and gate on the existing restore
+differs before claiming anything. Second candidate is the 12.3 pct memcpy, which is NOT yet
+attributed to a caller — attribute it before proposing a fix, since three of this session's
+four dead ends came from trusting a proposal instead of a measurement.
