@@ -16,13 +16,75 @@ Two independent detectors, because either alone misses a case:
      destination and re-issue: if the command genuinely recomputes, the corruption
      is gone. If it short-circuits, the corruption survives.
 
+DRIFT, and why this now READS the registries instead of listing shapes
+(frankenredis-u6kdc): this audit hardcoded 18 shapes while the two
+registries it audits had grown past 70. A detector with a hand-maintained copy of
+its own domain silently stops covering the thing it was written for — the `copy`
+no-op it exists to catch could be re-registered today under a new name and this
+would pass. So the FIRST-vs-STEADY detector is now driven from
+`shape_instr_per_op.SHAPES` and `balanced_square_ab.SHAPE_SETS` directly, and
+cannot drift from them.
+
+The two detectors automate differently, and the asymmetry is the design:
+
+  * FIRST-vs-STEADY needs NO per-shape metadata — issue the argv twice and compare.
+    It is therefore run over EVERY registered shape.
+  * WORK-IS-REDONE needs a destination key and a corruption command, which cannot
+    be inferred from an argv. Those stay hand-written, and the run REPORTS how many
+    registered shapes lack that coverage rather than leaving the gap silent.
+
 Usage: shape_work_audit.py <fr_port>
+       shape_work_audit.py --coverage        (no server: print what would be audited)
 Exit 0 = every shape does its work on every request.
 """
+import importlib.util
+import os
 import socket
 import sys
 
-PORT = int(sys.argv[1])
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _load(module_name, rel_path):
+    """Import a sibling harness by path so its shape registry is the source of truth."""
+    spec = importlib.util.spec_from_file_location(
+        module_name, os.path.join(REPO, rel_path)
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def registered_shapes():
+    """Every (label, seeds, argv) the two perf registries define, de-duplicated.
+
+    Labels are namespaced by source because the two registries reuse names for
+    different argv (`get_control` exists in both with different seeds), and an audit
+    that silently collapsed them would test one and report two.
+    """
+    out = {}
+    try:
+        instr = _load("_fr_instr", "scripts/shape_instr_per_op.py")
+        for name, (seeds, cmd) in instr.SHAPES.items():
+            out[f"instr:{name}"] = (list(seeds), [str(a) for a in cmd])
+    except Exception as exc:  # noqa: BLE001 - a missing sibling must not hide the rest
+        print(f"WARN could not read shape_instr_per_op registry: {exc}", file=sys.stderr)
+    try:
+        square = _load("_fr_square", "scripts/balanced_square_ab.py")
+        for set_name, shapes in square.SHAPE_SETS.items():
+            for label, seeds, argv in shapes:
+                out[f"square:{set_name}:{label}"] = (
+                    list(seeds),
+                    [str(a) for a in argv],
+                )
+    except Exception as exc:  # noqa: BLE001
+        print(f"WARN could not read balanced_square_ab registry: {exc}", file=sys.stderr)
+    return out
+
+
+PORT = None
+if len(sys.argv) > 1 and sys.argv[1] != "--coverage":
+    PORT = int(sys.argv[1])
 
 
 class Conn:
@@ -108,6 +170,63 @@ SHAPES = [
     ("lpop_count_missing", ["LPOP","nosuchlist","10"], None, None),
     ("rpop_count_missing", ["RPOP","nosuchlist","10"], None, None),
 ]
+
+REGISTERED = registered_shapes()
+# Hand-written redone-coverage, keyed by the argv's command so it applies to a shape
+# under whatever label a registry gives it. dest + corruption cannot be inferred.
+REDONE_BY_COMMAND = {
+    (cmd[0].upper() if cmd else ""): (dest, corrupt)
+    for _label, cmd, dest, corrupt in SHAPES
+    if dest and corrupt
+}
+
+if "--coverage" in sys.argv:
+    # No server needed: this is the drift check itself.
+    with_redone = [
+        label
+        for label, (_s, argv) in sorted(REGISTERED.items())
+        if argv and argv[0].upper() in REDONE_BY_COMMAND
+    ]
+    print("registered shapes ............ %d" % len(REGISTERED))
+    print("  FIRST-vs-STEADY audited .... %d  (all of them: needs no metadata)"
+          % len(REGISTERED))
+    print("  WORK-IS-REDONE audited ..... %d  (needs a dest + corruption command)"
+          % len(with_redone))
+    print("  hardcoded list, for scale .. %d" % len(SHAPES))
+    missing = sorted(
+        {
+            (argv[0].upper() if argv else "?")
+            for _l, (_s, argv) in REGISTERED.items()
+            if not (argv and argv[0].upper() in REDONE_BY_COMMAND)
+        }
+    )
+    # WRITE-ish commands are the ones where a redone check MEANS something: they
+    # have a destination that can be corrupted. For a pure read the reply IS the
+    # work, so "no redone coverage" is not-applicable rather than missing — and
+    # printing one undifferentiated count would read as 123 defects.
+    DEST_WRITERS = (
+        "STORE", "BITOP", "COPY", "PFMERGE", "SMOVE", "RENAMENX", "RPOPLPUSH",
+        "LMOVE", "ZRANGESTORE", "GEORADIUS",
+    )
+    actionable = [m for m in missing if any(tok in m for tok in DEST_WRITERS)]
+    print("\ncommands with no redone coverage: %d distinct" % len(missing))
+    print("  of those, ones with a DESTINATION (where the check applies): %d"
+          % len(actionable))
+    if actionable:
+        print("  " + ", ".join(actionable))
+    print(
+        "  the remainder are reads, where the reply IS the work and this detector\n"
+        "  does not apply — that count is not a defect count."
+    )
+    print(
+        "\nThe first number is what this audit now covers and cannot drift from;\n"
+        "the redone gap is REPORTED rather than silent, which is the point."
+    )
+    sys.exit(0)
+
+if PORT is None:
+    print("usage: shape_work_audit.py <fr_port> | --coverage", file=sys.stderr)
+    sys.exit(2)
 
 c = Conn(PORT)
 c.cmd("FLUSHALL")
