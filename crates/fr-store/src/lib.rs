@@ -38908,12 +38908,17 @@ fn exact_small_decimal_to_long_double(
         }
         sig.checked_mul(pow5_u64(e)?)?
     } else {
-        let e = u32::try_from(exp10.unsigned_abs()).ok()?;
+        // `exp10` is `i32`, so `unsigned_abs()` is ALREADY `u32` — the `try_from` here
+        // was a u32->u32 conversion that could never fail, and its `.ok()?` could never
+        // take the None branch. Dropping it is semantics-preserving by construction.
+        // (The sibling `u32::try_from(exp10)` in the `exp10 >= 0` arm above is a REAL
+        // i32->u32 conversion and stays.)
+        let e = exp10.unsigned_abs();
         if e > MAX_EXACT_FIVE_POW {
             return None;
         }
         let p5 = pow5_u64(e)?;
-        if sig % p5 != 0 {
+        if !sig.is_multiple_of(p5) {
             return None; // not exactly representable in this window -> bignum path
         }
         sig / p5
