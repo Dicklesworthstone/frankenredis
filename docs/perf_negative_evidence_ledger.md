@@ -8,6 +8,84 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## MEASURED-STRUCTURE (frankenredis-ozrro) — class [A] is EXHAUSTED by ranking, not assertion: the stem-corrected screen finds 10 candidates and 0 clear the depth bar. One caveat: PUBSUB sits at arm 127 with two existing executors
+
+Source analysis only — no build, benchmark or measurement. Written during a fleet throttle
+(loadavg 635, 78 pct iowait, 677 blocked processes) with no build started.
+
+### THE SCREEN THAT MISLED ME THREE TIMES, AND WHAT CHANGED IN IT
+
+`scripts/floor_entry_candidates.py`, with a self-test. It matches the command STEM
+(`execute_plain_spop` finds `execute_plain_spop_count_borrowed`) instead of one exact name,
+and it reports CASCADE DEPTH alongside every candidate. Both changes come straight from
+failures banked in this ledger:
+
+    corpus_coverage.py   blind to SHARED executors        -> duplicate PEXPIRETIME shipped
+    cascade_depth.py     blind to commands with NO arm    -> false "vein closed"
+    per-command grep     blind to a VARIANT SPELLING      -> ~40 redundant lines written
+
+Each scan answered a narrower question than the one asked of it; each time a zero was read as
+"absent" instead of "this scan cannot see it". The depth column exists because "executor
+exists, floor entry missing" without depth makes ten near-worthless names look like a worklist
+— which is exactly what it did.
+
+### THE RESULT: 10 CANDIDATES, 0 WORTH DOING
+
+    command       arm   pred dispatch   verdict
+    pubsub        127          5,467    container — but see the caveat below
+    mset           19            596    marginal (below WORTH_IT=30)
+    hset           16            461    marginal (below WORTH_IT=30)
+    get             4              -    already at the front of the cascade
+    ping            1              -    already at the front of the cascade
+    xread/xreadgroup/spublish       -   admission guard refuses
+    move/bitfield_ro                -   no own arm (shared parser or non-cascade)
+
+get at arm 4 and ping at arm 1 were the instructive pair: both are genuine [A] hits by the
+"executor exists, no floor entry" test, and a floor entry for either buys the depth saving of
+three arms and one arm respectively. Had I acted on the unranked list I would have written a
+floor entry for GET — the hottest command in the set — for essentially nothing, and it would
+have looked like diligence.
+
+hset (16) and mset (19) sit below the WORTH_IT=30 threshold `cascade_depth.py` documents, and
+below arm ~30 that law's intercept is not constrained anyway, so "marginal" is the honest
+verdict rather than a number.
+
+### CAVEAT I AM NOT COMFORTABLE BURYING: PUBSUB
+
+My exclusion list gives PUBSUB the verdict "container / admission guard refuses", conflating
+two different reasons, and the conflation may be hiding the single deepest arm in the cascade:
+
+  * PUBSUB is at ARM 127 of 163 — the deepest unclassified arm, predicted ~5,467 instr/op of
+    dispatch, larger than any block this campaign has actually taken.
+  * The container argument is that work happens in SUBCOMMANDS, so a floor entry on the bare
+    token serves a packet with no real work. But the stem screen shows TWO executors already
+    exist — `execute_plain_pubsub_numpat_borrowed` and `execute_plain_pubsub_numsub_borrowed`
+    — and the floor is keyed on (arity, token), so `PUBSUB NUMPAT` at arity 2 and
+    `PUBSUB NUMSUB <ch>` at arity 3 are distinguishable by arity alone, exactly as SPOP's two
+    forms are.
+
+So the container exclusion is right for PUBSUB in general and possibly WRONG for these two
+shapes. What stops this being a claim: PUBSUB traffic is monitoring traffic, not data-path
+traffic, so a large dispatch block on a rarely-issued command may be worth nothing in any
+real workload — and this campaign has no shape for it, so its dispatch is PREDICTED by the
+depth law, never measured. Predicted-not-measured is precisely the error the premise
+correction two rows up was about.
+
+NEXT STEP if anyone takes it: add a `pubsub_numpat` shape and MEASURE the dispatch before
+writing a floor entry, rather than trusting 5,467 from a law fitted on arms 76-103 and
+extrapolated to 127. If it measures anywhere near the prediction it is the biggest remaining
+block on the board; if PUBSUB turns out to be admission-refused in practice, the entry is
+inert and the measurement costs one shape.
+
+### WHAT THIS CLOSES
+
+Class [A] — "the fast path exists, only the floor entry is missing" — is the vein that paid
+for nine of this campaign's early crossings. It is now exhausted for anything above the depth
+bar, and that is established by ranking every remaining candidate rather than by failing to
+find more. The two veins still open are both EXTRACTION jobs (SORT's 478-line `sort_generic`
+with no sorting helper exposed; LCS's 15 private `lcs_*` kernel functions), plus the PUBSUB
+question above.
+
 ## CORRECTION to my own PREPARED SPOP COUNT row (frankenredis-ozrro) — the executor ALREADY EXISTED with two live callers. A per-command grep for one spelling missed a VARIANT spelling; this is the third instance of that blind spot
 
 The prepared row banked during the build halt designed a ~40-line
