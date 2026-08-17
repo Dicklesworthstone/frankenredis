@@ -31010,3 +31010,70 @@ ELFs already put it at 3,787-3,803 and a fourth will not add information. DO add
 sibling before quoting 0.8127x or 0.7260x as anything. If someone claims the arity-6 forms,
 the check is that the base form's 687.9 is unchanged afterwards: a second class must not
 perturb the one that already works.
+
+--------------------------------------------------------------------------------
+## CERTIFIED (frankenredis-gvm6z) — all three ZRANGESTORE ratios collapse with member count, so 0.8127x / 0.7260x were intercept readings as suspected; and dispatch holds to +1.85 pct across a 21x member increase, which is the per-call-constant claim tested rather than asserted
+
+Claim class: COMPETITIVE. Both arms in ONE invocation, incumbent verified on every run.
+NO BUILD in this window — every arm on an ELF snapshotted earlier, vintage re-checked.
+
+MY OWN RETRY PREDICATE ASKED FOR EXACTLY THIS, and it is discharged:
+
+    shape                      n=3        n=64      collapse
+    zrangestore_rev          0.8180x -> 0.0922x       8.9x
+    zrangestore_byscore      0.7260x -> 0.2021x       3.6x
+    zrangestore_all (rank)   0.7926x -> 0.0389x      20.4x
+
+**All three are intercept readings.** No ZRANGESTORE ratio may be quoted without its
+member count. fr leads every form by a widening margin once the command does real work;
+the 3-member shapes measure fixed cost and nothing else.
+
+THE PER-CALL-CONSTANT CLAIM, TESTED. My previous rows lean on dispatch being independent
+of the work — it is what licenses reading a 3-member shape's dispatch figure as valid at
+every size. That was supported only by shapes that all had 3 members, i.e. by holding the
+variable fixed. Now varied 21x:
+
+    n=3   3,802.8 / 3,809.0 / 3,802.5     mean 3,804.8
+    n=64  3,874.1 / 3,876.5               mean 3,875.3
+    drift **+1.85 pct** across a 21x member increase
+
+So it is a per-call constant to about 2 pct, not exactly. **The honest form of the claim is
+"flat to ~2 pct over 3-64 members", not "independent of size"**, and the ~3,115 instr/op
+prize quoted for the option forms should carry that tolerance. The claim survives the test
+it had not previously been given; it is slightly weaker than how I stated it.
+
+A/A NULL, `zrangestore_rev` measured in two different windows on the same ELF:
+    fr 10,310.7 vs 10,328.2 = **1.00170x**   dispatch 3,802.8 vs 3,809.0 = 1.00163x
+
+AN OBSERVATION I CANNOT EXPLAIN, recorded rather than dressed up. At 64 members the redis
+arm costs 678,655 (rank) / 350,143 (REV) / 162,574 (BYSCORE) instr/op — the plain rank form
+is 1.9x REV and 4.2x BYSCORE on the INCUMBENT, for the same 64 members copied. I had a
+mechanism in mind (rank mode builds a listpack destination whose ordered insert is O(n^2)
+in memmove, while BYSCORE forces a skiplist) and it predicts BYSCORE cheap, which holds —
+but it also predicts REV at least as expensive as rank, and REV measured HALF. So the
+mechanism is wrong or incomplete and I am not publishing it as the explanation. What is
+recorded is the measurement. Anyone attacking redis-relative ZRANGESTORE cost should start
+by resolving this, not by assuming the listpack story.
+
+PROVENANCE:
+  fr ELF        61778add43b18a6b4ae913d952d86c5a994db21695bf5534f9f79d51e6942bb0, built in
+                an EARLIER window (RCH_CARGO_WRAPPER_BYPASS=1, env -u CARGO_TARGET_DIR, no
+                [RCH] line), copied to a private path before measuring.
+  ELF vintage   re-checked this window: still exactly one commit since the build touching
+                main.rs / fr-command / fr-runtime (09ed7e2ef, two-option SCAN), which
+                touches no ZRANGESTORE path.
+  incumbent     `incumbent verified: redis-server sha=d2c8a4b9 == vendored source HEAD,
+                clean` on every run.
+  host          thinkstation1, 64 cores observed, governor powersave, /data 165G, and NO
+                build started in this window — frankenfs measured a local release build
+                taking loadavg 21.66 to 55.25 and closing its own window.
+  per-arm load  rev_64 10.57/12.37/15.28 -> 10.46/12.25/15.20; byscore_64
+                10.46/12.25/15.20 -> 10.95/12.29/15.18; rev 10.95/12.29/15.18 ->
+                10.95/12.27/15.16. Tightly converged and flat across all three.
+  per-arm MHz   rev_64 2,750->2,893; byscore_64 3,256->2,826; rev 2,770->2,829 mean.
+                Cross-core 1,429-4,295 at a single instant.
+
+RETRY PREDICATE. The ZRANGESTORE size question is CLOSED — three forms, two sizes each, all
+collapsing. Do not add a third size. The open items are unchanged: the arity-6 forms are
+still unclaimed at ~3,115 instr/op each and need a SECOND parser and class (not a widening
+of `(5, Zrangestore)`), and the redis-side rank-vs-REV asymmetry above is unexplained.

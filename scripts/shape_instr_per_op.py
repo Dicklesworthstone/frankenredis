@@ -487,6 +487,24 @@ SHAPES = {
         ["ZADD zrbsrc 1 a 2 b 3 c"],
         ["ZRANGESTORE", "zrbdst", "zrbsrc", "1", "3", "BYSCORE"],
     ),
+    # (frankenredis-gvm6z) SIZE SIBLINGS for the two option forms. My own retry predicate
+    # asked for these before 0.8127x / 0.7260x are quoted as anything: both option shapes
+    # hold THREE members, and the classified base form moved 0.7926x -> 0.0389x between 3
+    # and 64. If the option ratios collapse the same way, those two numbers are confirmed
+    # intercept readings and nobody can cite them as "ZRANGESTORE REV is 0.81x".
+    #
+    # The DISPATCH figure is the part that must NOT move: it is a per-call constant, and
+    # the base form held it to 0.008 pct across two option forms. Predicted here: ~3,800
+    # instr/op at 64 members, unchanged from 3. A dispatch figure that moved with member
+    # count would falsify the per-call claim these rows rest on.
+    "zrangestore_rev_64": (
+        [" ".join(["ZADD", "zrv64src"] + [f"{i} m{i:02d}" for i in range(64)])],
+        ["ZRANGESTORE", "zrv64dst", "zrv64src", "0", "-1", "REV"],
+    ),
+    "zrangestore_byscore_64": (
+        [" ".join(["ZADD", "zrb64src"] + [f"{i} m{i:02d}" for i in range(64)])],
+        ["ZRANGESTORE", "zrb64dst", "zrb64src", "0", "63", "BYSCORE"],
+    ),
     "zrangestore_64": (
         [" ".join(["ZADD", "zr64src"] + [f"{i} m{i:02d}" for i in range(64)])],
         ["ZRANGESTORE", "zr64dst", "zr64src", "0", "-1"],
