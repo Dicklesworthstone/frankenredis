@@ -8,6 +8,87 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## PREPARED, UNCOMPILED (frankenredis-ozrro) — `SPOP key count` front-classification: the design, the step ORDER that is load-bearing, and an explicit warning that the expected yield is SMALL
+
+Written during a hard stop — /data at 27G against a 42G floor, loadavg 190/170/87, external
+build cycle running. NOTHING here was compiled, tested or measured. Recorded in the ledger
+rather than left in a session scratchpad so the design survives if the scratchpad does not.
+The mechanical patch is regenerable from what follows.
+
+### EXPECTED YIELD IS SMALL, AND SAYING SO UP FRONT IS THE POINT
+
+I front-classified base `SPOP key` earlier and measured **-42.6 instr/op**, far below the
+model, because spop_missing's before-dispatch was already only 335.9 rather than the ~2,000 a
+generic-route command usually carries. That is a measured fact about SPOP specifically, and
+this ledger's own correction says a lever's yield cannot be read off its route label. So the
+count form should NOT be expected to behave like the SCAN forms (-3,175 each). The reasons to
+take it anyway are that batch draining is what real workloads use the count form for, and it
+is a ~40-line mirror of a store call that already exists. If it measures small, that is the
+prediction, not a disappointment.
+
+### THE STEP ORDER IS LOAD-BEARING AND IS WHERE A MIRROR GOES WRONG
+
+fr-command::spop's arity-3 branch, in order:
+
+  1. count parse via parse_i64_arg; `parsed < 0` gives "ERR value is out of range, must be
+     positive" — the SAME message for negative AND unparseable (spopary).
+  2. **TYPE CHECK BEFORE THE count==0 SHORT-CIRCUIT** (cf9z1). `store.spop_count` loops
+     `for _ in 0..count`, so at count 0 it never touches the key, and a WRONGTYPE key would
+     silently return an empty array. The generic fires `peek_value_type` FIRST to stop that.
+     A mirror that just calls spop_count reintroduces exactly the bug cf9z1 fixed, and would
+     pass every test that does not specifically probe count 0 on a wrong-type key.
+  3. `peek_value_type`, NOT `value_type`: SPOP is a write reached via lookupKeyWrite, which
+     does not bump keyspace_hits (934ax).
+  4. Then, only when `count > 0 && count >= cardinality`, ONE `exists_no_touch` to record
+     exactly one keyspace_hit — upstream routes whole-set removal through a SUNION-style read
+     that counts one hit while the partial branch counts none (934ax). The
+     `set_cardinality_no_stats` and `peek_value_type` probes are the non-counting variants
+     precisely so this is the only hit.
+  5. RESP3 replies `RespFrame::Set`, RESP2 replies `RespFrame::Array`.
+
+### DECLINE SET, all landing on the generic path SPOP already uses
+
+  * non-canonical count — "007", "+5", "-1", "abc", "2x", empty. `parse_canonical_scan_cursor`
+    is a strict subset of `parse_i64_arg` over the accepted set, and the generic owns the
+    wording for everything it rejects.
+  * count > i64::MAX — the generic's parse_i64_arg fails there. WITHOUT this bound the fast
+    path would SERVE a value upstream REJECTS, which is a behaviour change wearing a
+    speedup's clothing. Same guard, same reason, as the SCAN COUNT option.
+  * count "0" is canonical and IS served — which is exactly why step 2 cannot be skipped.
+  * any session the borrowed-write admission guard refuses (db != 0, replicas, AOF,
+    notifications, tracking, MONITOR, MULTI, ...).
+
+### FLOOR SHAPE
+
+Arity 3 needs its OWN class beside the arity-2 base form, by necessity rather than tidiness:
+the reply is an Array (Set under RESP3) rather than a bulk string, and the keyspace_hits rules
+differ. Arity >3 stays generic because spopCommand emits its own "syntax error" there, not a
+table arity error (spopary), and only the generic produces that wording. The arm reads
+`client_resp3` BEFORE the let-chain — resp3 needs an immutable borrow of `runtime` and the
+executor a mutable one, so they cannot share a chain; hoisting keeps the arm the same shape as
+its siblings instead of needing an early return out of the match.
+
+### ORACLE NOTE
+
+SPOP is random, so reply EQUALITY against the generic is the wrong oracle and `state_digest()`
+equality is too — the same point the base-form row makes. The test compares reply SHAPE plus
+invariants: batch size is min(count, cardinality), every returned member is afterwards absent,
+the key dies iff the set is emptied, a missing key gives an empty array without creating
+anything, and count 0 on a wrong-type key ERRORS with byte-identical wording. That last case
+is the cf9z1 regression probe and is the one assertion that would catch a mirror written in
+the wrong order.
+
+### STATUS
+
+Two patch scripts exist and neither has been run against the tree. Both must be applied
+together — the floor arm calls the executor — and then:
+
+    cargo test -p fr-runtime plain_spop_count
+    cargo test -p fr-server --bin frankenredis spop_count_floor
+
+Nothing about this may be quoted as a result until those pass and an ABBA is taken in a
+settled window.
+
 ## MEASURED (frankenredis-ozrro) — this harness's median A/A null deviation is 0.067 pct, and it had NO null gate at all. Answering the fleet check: the frankenpandas failure mode is absent here, but the opposite one was present
 
 The fleet check, prompted by frankenpandas: its 2 pct A/A null limit sat exactly AT its median
