@@ -37,6 +37,60 @@ arms; this one adds a function, so it fires. **A symbol check proves contaminati
 and proves nothing when it does not** — the general check is that the before arm's base is not an
 ancestor of the lever.
 
+### The clean re-measure does not reproduce these figures, and two routes fall under the 150 instr/op bar I set beforehand
+
+The row above promised a clean re-measure against `5bc439a57^`. It has now been run, and it
+disagrees with the numbers above. **The published −203 / −204 / −203 is overstated.**
+
+Both arms built from COMMITTED shas with `--clean-overlay`, so neither carries a working tree.
+Per-arm loadavg 11.23 / 11.51 / 14.03, CPU idle 82 pct, iowait 0 pct. `nm -C` finds the lever
+symbol 0 times in the before arm and 1 in the after, so the pair is discriminating.
+
+    before  bench_elf_sha256=e550fb0c9ba1dc1b...   base 42555dae2 (= 5bc439a57^)
+    after   bench_elf_sha256=269a094411307ef7...   base 5bc439a57
+
+    shape             before     after      delta          published    threshold
+    sadd_existing     1969.6     1789.6     -180.0         -203.0       pass (>150)
+    lpushx_missing    2141.1     1999.4     -141.7         -204.0       **FAILS**
+    rpushx_missing    2138.8     1992.1     -146.7         -203.0       **FAILS**
+    zadd_base         2760.2     2765.3       +5.1           -0.1       control
+    get_control       1302.9     1323.8      +20.9           -0.8       null
+
+**MY REGISTERED RULE WAS "REJECT ANY ROUTE SAVING UNDER 150 instr/op".** On this pair LPUSHX at
+141.7 and RPUSHX at 146.7 fail it. I am not quietly keeping them because the first pair was
+kinder.
+
+### WHY THE TWO PAIRS DISAGREE, and what it means
+
+The null is the tell. `get_control` moved **+20.9 instr/op with its dispatch going 457 -> 473**,
+where on the first pair it moved −0.8 with dispatch flat. Something in the after arm costs
+unrelated commands ~16-21 instr/op, and that same something is subtracted from every saving here.
+The most likely candidate is the peer's `getexgate` work, which is inside `5bc439a57` and which
+this pair therefore cannot separate from mine — the disclosure above records that both levers
+landed in one commit.
+
+So the honest bound is: **my lever saves somewhere between about 142 and 204 instr/op per route,
+and no pair I can currently build isolates it**, because every after-arm available to me contains
+both changes. The spread between the two measurements (~23-60 instr/op) is the same order as the
+null movement (~21), which is exactly what an unseparated second change looks like.
+
+### WHAT WOULD SETTLE IT, and why I did not do it
+
+An arm carrying ONLY my change — i.e. `5bc439a57` with the getexgate hunks reverted. That means
+putting a modified file in the SHARED working tree, which this repo has already lost three agent
+commits to, and the peer may be mid-flight on the same file. **The cheaper and correct route is
+for the getexgate row to measure its own effect on `get_control`;** if that accounts for the
++20.9, both levers are explained and my routes can be re-derived by subtraction rather than by
+another build.
+
+### WHAT SURVIVES
+
+SADD at −180.0 clears the threshold on both pairs (−203 and −180) and is the claim I would still
+make. LPUSHX and RPUSHX are **withdrawn pending isolation** — they cleared the bar on one pair and
+failed it on the other, and one of those pairs is enough to refuse them under the rule I wrote
+before measuring. The mechanism is not in doubt: the gate call is gone from an executor that nine
+commands share. The SIZE of the win on two of those commands is.
+
 ### DISCLOSURE — this commit swept a peer's concurrent work, and the after-ELF carried it
 
 `5bc439a57` was made with `git commit -- <paths>`, which takes the WORKING TREE version of those
