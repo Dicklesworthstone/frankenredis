@@ -32675,3 +32675,65 @@ the 7.16 sigma as unconfirmed.
 PROVENANCE: no measurement taken for this row — it re-uses six draws banked last window
 (loadavg 14.09-14.29, ELF 61778add, incumbent verified at the time). No build, no engine
 started. thinkstation1, /data 435M-2.1G, loadavg 603 with 89 pct iowait.
+
+--------------------------------------------------------------------------------
+## BASELINE (frankenredis-gvm6z) — the BEFORE arm for the ZRANGESTORE arity-6 lever, with both A/A nulls and the accept/reject thresholds named BEFORE the lever exists
+
+Claim class: COMPETITIVE (baseline only). Both arms in ONE invocation, incumbent verified on
+every run. No conclusion is drawn here; this row exists so the lever cannot be judged against
+numbers chosen after seeing its result.
+
+    ELF 7adb365e, fresh at current HEAD, one window
+    shape                 draw   fr instr/op  redis instr/op   ratio     fr dispatch
+    zrangestore_rev         1       10,332.3      12,841.5   0.8046x    3,811.0 (36.9 pct)
+    zrangestore_rev         2       10,296.2      12,754.3   0.8073x    3,802.9 (36.9 pct)
+    zrangestore_byscore     1       10,937.1      14,921.6   0.7330x    3,819.2 (34.9 pct)
+    zrangestore_byscore     2       10,880.4      14,536.6   0.7485x    3,802.0 (34.9 pct)
+
+    A/A NULLS (same ELF, same shape, same window)
+      zrangestore_rev      fr 0.35 pct   dispatch 0.21 pct
+      zrangestore_byscore  fr 0.52 pct   dispatch 0.45 pct
+
+THE THRESHOLDS, FIXED NOW. The lever adds `(6, Zrangestore)` and an arm serving the REV form.
+
+  * SUCCESS on REV: dispatch falls from ~3,807 toward the ~690 the arity-5 class already
+    achieves. Anything less than a several-hundred-instruction drop is not the lever working.
+  * THE RISK, and it is why the BYSCORE null is here: the floor table is keyed on (arity,
+    command), so claiming arity 6 captures BYSCORE and BYLEX too. Their arm will parse
+    `key_arg4`, find the discriminant is not REV, and DECLINE to generic. They end at the
+    same place they do today, but they pay one extra four-bulk parse to get there. That is
+    the "floor class is a promise its arm must keep" hazard in its mild form: not a wrong
+    answer, an added cost.
+  * REJECT CONDITION: BYSCORE's fr instr/op rises by more than **0.52 pct** — its own
+    measured A/A null. Below that I cannot distinguish the regression from noise and will
+    say so rather than claim the lever is free.
+
+If the reject condition fires, the options are to serve all three arity-6 forms (REV via
+`zrevrange_withscores`, BYSCORE via `zrangebyscore_withscores_limited`, BYLEX via
+`zrangebylex_withscores_limited` — all one call each, all already present) or to leave arity
+6 unclaimed. Deciding that AFTER seeing the number is the failure this row exists to prevent.
+
+RETRY PREDICATE. Re-take this baseline, do not reuse it, if any of these change: the
+`(5, Zrangestore)` floor entry or its arm, `parse_borrowed_plain_key_arg4_packet`,
+`zrange_withscores` / `zrevrange_withscores`, the zset packed/skiplist thresholds, or the
+allocator/codegen. Re-take it ALSO if the AFTER arm is measured on a different ELF than
+7adb365e, since this is a cross-build comparison and only `get_control` licenses that.
+STANDING LAW ENGAGED: "Compact(Vec) beats BTreeMap for both build and read below n=2048;
+lowering the medium-zset threshold or moving medium zsets to a tree regresses both"
+(NEGATIVE_EVIDENCE.md:22581). This row proposes NO threshold change and no representation
+change -- it lists the zset packed/skiplist thresholds only as an INVALIDATION trigger for
+re-taking a baseline, i.e. if someone else moves them, these numbers stop being comparable.
+Nothing here argues for moving them.
+
+Invalidate rather than compare if either shape's A/A null in the AFTER window exceeds the
+0.35 pct (rev) / 0.52 pct (byscore) measured here, because the reject condition is defined
+in units of those nulls and a looser null makes it unfalsifiable.
+
+PROVENANCE: fr ELF 7adb365e85e954ae..., built LOCALLY this window with
+RCH_CARGO_WRAPPER_BYPASS=1 exported and env -u CARGO_TARGET_DIR, no [RCH] line, copied to a
+private path before measuring; `df` checked immediately before the build (136G) and after
+(136G). incumbent verified: redis-server sha=d2c8a4b9 == vendored source HEAD, clean, on
+every run. thinkstation1, 64 cores, governor powersave. Per-arm loadavg 20.27-30.42 on the
+1-minute with the 5-minute at 39-46 and the 15-minute at 124-133 — a FALLING window, not a
+converged one, which is another reason the nulls are quoted per shape rather than assumed.
+Per-arm MHz 2,905-4,036 mean, cross-core 1,429-4,067.
