@@ -8,6 +8,60 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## CORRECTION to my own PREPARED SPOP COUNT row (frankenredis-ozrro) — the executor ALREADY EXISTED with two live callers. A per-command grep for one spelling missed a VARIANT spelling; this is the third instance of that blind spot
+
+The prepared row banked during the build halt designed a ~40-line
+`execute_plain_spop_count_borrowed` from scratch, complete with the cf9z1 step ordering and the
+934ax keyspace_hits rules. All of that logic already existed, in a function of exactly that
+name, with TWO live callers in fr-server (a cascade arm at ~7142 and a second site at ~14281).
+Nothing needed writing.
+
+WHAT SCREENED IT WRONG. I checked for existing machinery with
+
+    grep -c "fn execute_plain_spop_borrowed"
+
+a per-command scan for ONE exact spelling. The real function is
+`execute_plain_spop_count_borrowed` — same command, different spelling — so the scan returned
+0 and I read that as "no executor". Only the `assert "already applied"` I had put at the top of
+my own patch script stopped the duplicate from landing.
+
+THIRD INSTANCE OF THE SAME BLIND SPOT, and the through-line is worth more than any of the three:
+
+    corpus_coverage.py could not see SHARED executors      -> duplicate PEXPIRETIME executor
+                                                              written AND shipped (b2df577ba)
+    cascade_depth.py could not see commands with NO arm    -> false "vein closed" verdict
+    a per-command grep could not see a VARIANT SPELLING    -> this
+
+Every time, a name-based scan answered a NARROWER question than the one I asked of it, and
+every time I read a zero as absence rather than as "this scan cannot see it". The cheap durable
+fix for this instance: grep the command STEM, `execute_plain_spop`, not a full name — that
+finds base, count and any future variant. The general fix is the one the earlier rows already
+state and I did not apply: before concluding a command has no machinery, confirm the SCAN can
+see machinery that is known to exist.
+
+WHAT WAS ACTUALLY MISSING, and it is the cheapest class there is: the floor-table entry alone.
+Class [A] in corpus_coverage.py's split — the same category as the nine routes that crossed
+parity on a table entry and nothing else. Shipped now: one class, one arity-map row, one arm
+that borrows the SHARED `key_arg1` parser with the same
+`b"*3\\r\\n$4\\r\\n"` / `b"SPOP"` literals the cascade arm uses, plus the existing executor.
+No parser, no executor, no reply logic written.
+
+    cargo test -p fr-server --bin frankenredis spop_count_floor
+    test spop_count_floor_class_claims_arity_three_and_leaves_four_generic ... ok
+
+SIZING, AND WHY THE MULTIPLIER MUST NOT BE APPLIED HERE. The executor was already reached, via
+the cascade. So this route was never on the generic path, and the ~1.9x generic-route
+multiplier this campaign measured does not apply to it. What is removed is the CASCADE WALK —
+the failed parser attempts between the front of the dispatch and SPOP's arm — not
+argv materialisation, which the cascade route was already avoiding. Expected yield is therefore
+the depth saving alone, which the cascade-depth law puts at roughly 45 instr/op per arm
+position skipped. Unmeasured; an ABBA in a settled window settles it, and it should be sized
+against `spop_count`-shaped shapes rather than against the SCAN numbers.
+
+The test also pins something specific to borrowing a SHARED parser: `key_arg1` serves other
+commands at the same arity, and only the prefix and token literals keep them apart. It asserts
+both directions — SPOP shapes parse through it, and SADD/SREM/HGET at arity 3 do not.
+
 ## PREPARED, UNCOMPILED (frankenredis-ozrro) — `SPOP key count` front-classification: the design, the step ORDER that is load-bearing, and an explicit warning that the expected yield is SMALL
 
 Written during a hard stop — /data at 27G against a 42G floor, loadavg 190/170/87, external

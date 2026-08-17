@@ -14593,6 +14593,17 @@ enum BorrowedMultibulkAction {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BorrowedDispatchFloorClass {
+    /// (frankenredis-ozrro) `SPOP key count` at arity 3. Parser and executor ALREADY
+    /// EXISTED — the shared `key_arg1` parser and `execute_plain_spop_count_borrowed`,
+    /// reached from a cascade arm. Only the floor entry was missing, so the win here is
+    /// the cascade WALK rather than generic-route removal, and it must not be sized with
+    /// the generic-route multiplier.
+    ///
+    /// Separate from the arity-2 `Spop` class by necessity: the reply is an Array (a Set
+    /// under RESP3) rather than a bulk string, and the keyspace_hits rules differ
+    /// (cf9z1, 934ax). Arity >3 stays generic, which is what emits spopCommand's own
+    /// syntax error rather than a table arity error (spopary).
+    SpopCount,
     /// (frankenredis-ozrro) `SCAN cursor <opt> <val> x3` at arity 8 — the three-option
     /// form. Arity 10 and beyond stay generic.
     ScanOpt3,
@@ -16654,6 +16665,9 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         }
         (2, BorrowedDispatchFloorCommand::Keys) => Some(BorrowedDispatchFloorClass::Keys),
         (2, BorrowedDispatchFloorCommand::Spop) => Some(BorrowedDispatchFloorClass::Spop),
+        (3, BorrowedDispatchFloorCommand::Spop) => {
+            Some(BorrowedDispatchFloorClass::SpopCount)
+        }
         (2, BorrowedDispatchFloorCommand::Ttl) => Some(BorrowedDispatchFloorClass::Ttl),
         (2, BorrowedDispatchFloorCommand::Getex) => Some(BorrowedDispatchFloorClass::Getex),
         (3, BorrowedDispatchFloorCommand::Getex) => Some(BorrowedDispatchFloorClass::GetexPersist),
@@ -21264,6 +21278,35 @@ fn try_dispatch_floor_classified_action(
                     packet.value3,
                     ts,
                 )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::SpopCount => {
+            // (frankenredis-ozrro) Borrows the SAME shared parser and executor the cascade
+            // arm at ~7142 uses, with the same prefix and token literals, so the reply and
+            // every side effect are unchanged and only the route position differs. A
+            // declining executor falls through to the generic path, which owns the error
+            // wording for a negative or unparseable count (spopary).
+            if let Some(packet) = parse_borrowed_plain_key_arg1_packet(
+                unparsed,
+                &parser_config,
+                b"*3\r\n$4\r\n",
+                b"SPOP",
+            ) && let Some(response) =
+                runtime.execute_plain_spop_count_borrowed(packet.key, packet.arg, ts)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -53551,5 +53594,93 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
             ),
             Some(C::ScanOpt3)
         );
+    }
+
+    /// (frankenredis-ozrro) The SPOP arity ladder. Arity 2 and 3 must be DISTINCT classes —
+    /// the count form replies with an Array (Set under RESP3) rather than a bulk string — and
+    /// arity >3 must stay generic, because spopCommand emits its own "syntax error" there
+    /// rather than a table arity error (spopary) and only the generic produces that wording.
+    ///
+    /// The parser assertion matters here specifically because this class borrows the SHARED
+    /// `key_arg1` parser, which also serves other commands at the same arity: the prefix and
+    /// token literals are the only thing keeping them apart, so this pins that they do.
+    #[test]
+    fn spop_count_floor_class_claims_arity_three_and_leaves_four_generic() {
+        let cfg = ParserConfig::default();
+        fn packet(args: &[&str]) -> Vec<u8> {
+            let mut p = format!("*{}\r\n", args.len()).into_bytes();
+            for a in args {
+                p.extend_from_slice(format!("${}\r\n{}\r\n", a.len(), a).as_bytes());
+            }
+            p
+        }
+        use super::BorrowedDispatchFloorClass as C;
+
+        for served in [
+            vec!["SPOP", "s", "1"],
+            vec!["SPOP", "s", "0"],
+            vec!["spop", "s", "100"],
+            // shape-legal but executor-declined; the class must still claim these so the
+            // decline is what routes them to the generic's error wording
+            vec!["SPOP", "s", "-1"],
+            vec!["SPOP", "s", "abc"],
+        ] {
+            let pkt = packet(&served);
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
+                Some(C::SpopCount),
+                "{served:?} must be claimed at arity 3"
+            );
+            assert!(
+                super::parse_borrowed_plain_key_arg1_packet(
+                    &pkt,
+                    &cfg,
+                    b"*3\r\n$4\r\n",
+                    b"SPOP"
+                )
+                .is_some(),
+                "{served:?} must parse through the shared key_arg1 parser"
+            );
+        }
+
+        // The two SPOP classes are distinct and each owns its arity.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(&packet(&["SPOP", "s"]), &cfg),
+            Some(C::Spop)
+        );
+        assert_ne!(
+            super::classify_borrowed_dispatch_floor_packet(&packet(&["SPOP", "s"]), &cfg),
+            Some(C::SpopCount)
+        );
+
+        // Arity 4+ and arity 1 stay generic.
+        for wrong in [vec!["SPOP", "s", "1", "extra"], vec!["SPOP"]] {
+            assert_ne!(
+                super::classify_borrowed_dispatch_floor_packet(&packet(&wrong), &cfg),
+                Some(C::SpopCount),
+                "{wrong:?} must reach the generic parser"
+            );
+        }
+
+        // The shared parser is prefix+token keyed, so a DIFFERENT 4-char command at the same
+        // arity must be refused by it as well as unclaimed by the class.
+        for other in [vec!["SADD", "s", "m"], vec!["SREM", "s", "m"], vec!["HGET", "h", "f"]] {
+            let pkt = packet(&other);
+            assert_ne!(
+                super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
+                Some(C::SpopCount),
+                "{other:?} must not be claimed as SPOP COUNT"
+            );
+            assert!(
+                super::parse_borrowed_plain_key_arg1_packet(
+                    &pkt,
+                    &cfg,
+                    b"*3\r\n$4\r\n",
+                    b"SPOP"
+                )
+                .is_none(),
+                "{other:?} must not parse as SPOP through the shared parser"
+            );
+        }
     }
 }
