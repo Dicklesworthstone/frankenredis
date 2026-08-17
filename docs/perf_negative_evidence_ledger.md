@@ -42642,3 +42642,53 @@ Do NOT retry this shape on `try_dispatch_floor_classified_action` (36,363 bytes)
 the case the 2026-08-16 row rejected, and at that size the code-growth argument is not
 close. Any retry must report the `.text` delta alongside the instruction delta and must
 confirm the symbol leaves the profile.
+
+--------------------------------------------------------------------------------
+## 2026-08-17 CrimsonHawk: do NOT port the −16.12 pct list bulk-build lever to sets, hashes or zsets — all three ALREADY build from the batch, and the list was the sole outlier (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: source reading only. No build, no measurement, no ratio. Recorded because
+the obvious next move after `a7668ed11` is "the other containers must have this too", and
+they do not — this retires that direction before anyone spends a build window on it.
+
+Claim class: SELF-SPEEDUP. Campaign output: no — this row banks no vs-incumbent ratio.
+
+`a7668ed11` measured −16.12 pct on a 200-entry list DEBUG RELOAD by giving the fresh-key
+bulk RPUSH a builder that picks the representation from the whole batch instead of starting
+Packed and converting at element 128. That is a general-looking defect, so the natural
+follow-up is to look for it in the other three container loads. It is not there.
+
+    container   fresh-key bulk load builds from the batch?
+    HASH        YES — `Store::hset_many` (fr-store/src/lib.rs:14785) confirms uniqueness in
+                one O(n) borrowed scan and calls `HashFieldMap::from_unique_pairs`; the
+                per-field `insert` loop is only the DUPLICATE fallback. Landed as
+                `frankenredis-qxfmr`, whose own comment names the O(n^2) it removed.
+    SET         YES — `Store::sadd_impl` fresh-key branch (fr-store/src/lib.rs:20151) tries
+                `SetValue::try_bulk_unique_ints` then `try_bulk_unique_strings`; the
+                `insert_borrowed` loop is only the fallback when neither applies.
+    ZSET        YES — `SortedSet::from_unique_pairs_with_limits` takes the whole batch and
+                picks Packed-vs-Full from it. Its remaining defect was ORDER, not late
+                representation discovery, and that was fixed separately in `c3cc06128`.
+    LIST        WAS THE ONLY ONE THAT DID NOT, until `a7668ed11`.
+
+  So the pattern to look for is not "does this container promote incrementally" — all four do,
+  and `GenericSet::insert`, `HashFieldMap::insert` and `ListValue::maybe_promote` are the same
+  shape line for line. It is "does the BULK LOAD PATH bypass that incremental discovery", and
+  three of four already did. The list's loader reached the store through `rpush_owned`, which
+  had no bulk constructor to reach for, so it fell through to the per-element loop by default.
+
+    THE REUSABLE IS THE DIAGNOSTIC, NOT THE FIX: a container whose incremental insert promotes
+    is only exposed if its bulk entry point lacks a batch constructor. Check the ENTRY POINT
+    before profiling the container.
+
+### WHAT THIS DOES NOT SAY
+
+It does not say the other three loads are optimal — only that this specific lever is already
+applied. `hset_many`'s uniqueness scan builds a `HashSet` of every field before deciding, and
+`sadd_impl`'s two `try_bulk_*` probes each walk the batch; whether those pre-passes pay for
+themselves is unmeasured here and is a different question from the one this row closes.
+
+RETRY PREDICATE: reopen the "port the list lever" idea ONLY IF a profile shows one of these
+three loads actually reaching its per-element fallback on a realistic RDB payload — for HASH
+that means duplicate fields in the saved hash, for SET it means a batch that is neither
+all-unique-ints nor all-unique-strings. Both are reachable but neither is the ordinary shape,
+so measure the fallback RATE first; a lever on a path taken 0 pct of the time is worth 0.
