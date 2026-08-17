@@ -40261,3 +40261,79 @@ RETRY PREDICATE:
      Reopen it only with a saving that exceeds its arm's null at n=200.
   3. Do NOT take the LZF kernel on this route. fr is AHEAD of the incumbent on both halves of
      the codec, and this bead's opening 1.76x premise has inverted to 0.90x.
+
+--------------------------------------------------------------------------------
+## 2026-08-17 CrimsonHawk: MEASURED (SELF-SPEEDUP) — resolving the command ONCE per dispatch recovers the duplication my own REJECT row measured: PUBSUB CHANNELS 5679.7 -> 5255.5 instr/op, **-7.47 pct**, and `write_container_key` is back at the 219 that row named as the exit condition (`frankenredis-dpu2y`)
+
+**Claim class: SELF-SPEEDUP. Campaign output: no.** Both arms are FrankenRedis code. No
+Redis arm is involved in this comparison and none is claimed; the vs-incumbent figure for
+this route lives in its own certified rows.
+
+  Executing binary, self-reported by the running image via /proc/<pid>/exe:
+    BEFORE ELF sha256: a0553f7ae6b97e864a7c3c62486889a107ba643aeee011c9f74c8b60b08eb983
+    AFTER  ELF sha256: d5bb403c162f27947c17395738e9a50e64dbe92ee7dddf4569d04e266a9b30f0
+
+  EVIDENCE CLASS: deterministic instruction counts (callgrind Ir), fr-only two-point
+  subtraction, two rounds per arm, arms alternated. CV was not used, as a gate or otherwise.
+  No bootstrap median CI is quoted for the effect because there is no sampling distribution
+  to bootstrap; the decision gate is the A/A null's bootstrap median CI below.
+
+  A/A NULL, same ELF, repeated draws: 5661.7 / 5662.6 / 5662.8, max/min 1.000194, median
+  1.000000, bootstrap 95% median CI [0.999841, 1.000035]. The effect is -424.2 instr/op
+  against a null spanning 0.02 pct — a separation of over two orders.
+
+  THIS ROW IS NOT KEEP-CLASS, ON PURPOSE, AND THE REASON IS A LIMITATION NOT A LABEL. The
+  KEEP contract requires a SAME-INVOCATION A/A, and I do not have one: those three draws are
+  three separate harness invocations of the same ELF, not one invocation containing both an
+  A/A and an A/B. For a deterministic instruction counter that is a weaker guarantee than it
+  sounds — callgrind Ir does not vary within an invocation any more than across them, which
+  is exactly what a 0.02 pct spread across three invocations shows — but it is NOT what the
+  contract asks for, and writing "same invocation" to satisfy the checker would have been
+  false. Anyone wanting this as a KEEP should re-take it with an A/A and an A/B inside one
+  invocation.
+
+  TAKEN AT LOADAVG 22-30 WITH BUILDS RUNNING, deliberately. fr instruction counts are
+  load-immune — 0.055 pct across 20 draws today — so a self-speedup needs no FIT window.
+  Only the vs-incumbent RATIO does, because the contaminant is redis's elapsed-time
+  serverCron. Waiting for a quiet host to measure an fr-side delta is wasted time.
+
+    shape                     before      after      delta
+    pubsub_channels          5679.7     5255.5    -424.2   -7.47 pct
+    client_info             15062.8    14550.7    -512.1   -3.40 pct
+    config_get_one          11313.2    10964.2    -349.0   -3.08 pct
+    get_control   (null)     1311.5     1302.9      -8.6   -0.66 pct
+    object_encoding (null)   2222.2     2216.9      -5.3   -0.24 pct
+
+  THE NULLS ARE NOT FLAT AND I AM NOT CALLING THEM FLAT. Both borrowed routes moved slightly,
+  in the SAME direction as the effect. The cause is almost certainly that adding a parameter
+  to `execute_frame_internal` shifts codegen on a path every command traverses, so a small
+  uniform gain is expected rather than surprising. The container routes moved 5x to 30x more,
+  so the attribution holds — but a reader deserves to know these carry real signal, not zero.
+
+  THE EXIT CONDITION WAS MET EXACTLY, which is the point of writing one:
+    frame                            before   after
+    write_container_key                438     219   <- the row's named condition
+    subcommand_table_index             174      87
+    command_has_subcommands_bytes      192     128
+    check_full_command_arity            67  absent   <- folded into the one pass
+
+  I ALSO CORRECT A STRUCTURAL CLAIM I BANKED TWO ROWS AGO. I wrote that the setter and the
+  gate "are in DIFFERENT functions and the gate runs FIRST", so a local could not carry the
+  value. The direction is the OPPOSITE: `execute_dispatch` (lib.rs:36592) CALLS
+  `execute_frame_internal` (lib.rs:36646), so the name resolves first and the gate runs
+  later. My first attempt failed on SCOPE and I read that as an ORDERING constraint without
+  checking. `grep` for the callers of both functions settles it in one command, and that is
+  the check I skipped.
+
+  NET ON THE ROUTE across both dpu2y commits: 5656.2 pre-handle -> 5672.2 with the handle
+  alone (+16.0, the REJECT) -> 5255.5 with one-pass resolution. **-400.7 instr/op, -7.09 pct**
+  against the pre-handle baseline. The handle change stays because it also fixed
+  `frankenredis-zbiy3`; it is now a win rather than a correctness fix paid for with a
+  regression.
+
+RETRY PREDICATE: the next-largest dispatch frame on this route is now
+`push_ascii_lowercase_lossy` at 363 instr/op, halved from 726 and no longer the top item.
+Do NOT take it: the 2026-08-16 row at :31762 already REJECTED re-implementing that loop, and
+the half that remains is the borrowed paths' own name handling, not the generic one. If this
+route is revisited, re-profile first — three levers have now landed on it today and the
+ranking that motivated each is stale by the next.
