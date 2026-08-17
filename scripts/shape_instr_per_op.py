@@ -456,6 +456,12 @@ SHAPES = {
     ),
     "zinterstore_2": (["ZADD zi1 1 a 2 b", "ZADD zi2 3 b"],
                       ["ZINTERSTORE", "zidst", "2", "zi1", "zi2"]),
+    # (frankenredis-ozrro) NULL-CONTROL shape for the miss-tax measurement. ZINTERCARD is
+    # verified unclassified — no floor entry, no borrowed parser, no cascade arm, no
+    # executor — so flipping FR_PERF_AB_CASCADE_BYPASS must change only the cost of the
+    # classification ATTEMPT, never a route. Read-only, so it is a true steady-state no-op.
+    "zintercard_2": (["ZADD zc1 1 a 2 b", "ZADD zc2 3 b"],
+                     ["ZINTERCARD", "2", "zc1", "zc2"]),
     "zrangestore_all": (["ZADD zrsrc 1 a 2 b 3 c"],
                         ["ZRANGESTORE", "zrdst", "zrsrc", "0", "-1"]),
     # (frankenredis-gvm6z) The SIZE SIBLING. `zrangestore_all` has THREE members, so its

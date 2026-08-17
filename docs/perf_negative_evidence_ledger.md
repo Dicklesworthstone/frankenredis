@@ -8,6 +8,65 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## AMENDMENT to my own MISS TAX row (frankenredis-ozrro) — the third and fourth nulls REFUTE the ~522 constant. The TOTAL tax spans 514-657; the DISPATCH component holds at ~300 for three of four, and the fourth was measured during a loadavg spike from 13 to 44
+
+Same ELF `fr-pair-bypass` (bac70fcb6, `--features perf-ab-cascade-bypass`), same binary in
+both arms, switched by FR_PERF_AB_CASCADE_BYPASS. `--fr-only`. Every command below was
+verified by SOURCE to have no borrowed route at all — no floor entry, no borrowed parser, no
+cascade arm, no executor — rather than by the harness's mechanism label, which is NOT
+reliable for this: it reports dump_small as "GENERIC PATH" when the bypass proves dump_small
+is floor-classified (2,063.4 -> 305.9 of dispatch when the route is restored).
+
+    shape           form                    arity   d-total   d-dispatch   loadavg at run
+    sort_ro_alpha   SORT_RO key ALPHA         3       529.2       294.3    13.67/12.28/12.92
+    lcs_2           LCS lc1 lc2               3       514.4       305.1    13.67/12.28/12.92
+    pfmerge_2       PFMERGE dst src1 src2     4       591.2       308.5    42.99/23.91/17.00
+    zintercard_2    ZINTERCARD 2 zc1 zc2      4       657.3       360.6    43.86/23.76/16.91
+
+MY OWN ROW SAID A THIRD POINT WAS NEEDED BEFORE ANYONE BUILT AGAINST ~522, AND THE THIRD
+POINT REFUTED IT. The total tax is not a constant: 514.4 to 657.3 is a 28 pct spread across
+four commands. Anyone sizing a lever as "bypass delta + 522" would be wrong by up to 135
+instr/op depending on the command. This is the third time in this campaign that a quantity
+looked constant on two points and dispersed on the third (after the per-argument argv model
+and the "~2,000 generic dispatch" premise), and it is the first time I predicted it in
+advance and the prediction paid.
+
+THE DISPATCH COMPONENT IS THE PART THAT SURVIVES, AND IT IS TIGHTER THAN THE TOTAL. Three of
+four sit at 294.3 / 305.1 / 308.5 — a 5 pct band across commands whose totals differ by 16x
+(pfmerge_2 is 108,620 instr/op, lcs_2 is 7,307). A quantity that stable across that range of
+operation size is measuring the lookup itself, which is what the miss tax was supposed to be.
+The TOTAL varies more because it also carries whatever else the generic path does differently
+per command, which is command-specific for the same reason dispatch is.
+
+THE FOURTH POINT IS CONFOUNDED AND I AM NOT RESOLVING IT HERE. zintercard_2's 360.6 is 18 pct
+above the other three, and it ran when loadavg had spiked from 13 to 43.86 mid-batch. fr's Ir
+is elapsed-immune at 0.139 pct, so load should NOT move an instruction count by 18 pct, which
+argues the difference is real and command-specific. But pfmerge_2 ran in the same spike and
+landed at 308.5, squarely in the band — so the spike does not obviously explain zintercard
+either way. Two candidate explanations, one measurement, and no basis to choose:
+
+    (a) ZINTERCARD's miss is genuinely more expensive — it is a 10-char token at arity 4,
+        the longest of the four, so the token match and arity-keyed lookup do more work
+        before failing.
+    (b) An artefact of the spike that pfmerge_2 happened to dodge.
+
+NEXT STEP, NAMED SO IT IS NOT QUIETLY DROPPED: re-run zintercard_2 with a fourth and fifth
+unclassified command in a settled window. If 360.6 reproduces, the miss tax scales with token
+length or arity and the arity table this campaign built for FRONT-CLASSIFIED dispatch has a
+mirror on the miss side. If it collapses to ~300, the dispatch tax is a genuine floor-wide
+constant and the corollary in the parent row — that every unclassified command pays ~300
+instr/op to be missed — stands as written.
+
+WHAT DOES NOT CHANGE. The reconciliation in the parent row used the tax to bridge the
+cross-build and bypass methods on three SCAN shapes and agreed to 1.5-3.0 pct. Those shapes
+were priced with the 514-529 pair, which remains the right magnitude for arity-2-to-6 SCAN;
+the reconciliation is unaffected. The command-specific multiplier finding (1.60 ZRANGESTORE
+to 2.02 SCAN) rests on the classified-vs-generic deltas, not on the tax, and is untouched.
+
+WINDOW: loadavg spanned 13.67/12.28/12.92 for the first two rows and 42.99-43.86/23.76-23.91/
+16.91-17.00 for the last two — a spike mid-batch, recorded per row above rather than
+averaged. Observed core MHz 1,429-4,082. This row is MEASURED, not certified.
+
 ## CERTIFIED (frankenredis-ozrro) — the bypass "null" is NOT null: an unclassified command pays a ~522 instr/op MISS TAX to be looked up and missed. That tax reconciles the cross-build and bypass methods to 3 pct, and shows the multiplier is COMMAND-SPECIFIC (1.60 ZRANGESTORE .. 2.02 SCAN), not 1.586 universal
 
 Claim class: MEASURED-STRUCTURE, single ELF `fr-pair-bypass` built at bac70fcb6 with
