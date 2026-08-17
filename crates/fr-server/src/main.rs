@@ -14629,6 +14629,14 @@ enum BorrowedDispatchFloorClass {
     Lmpop2,
     Lmpop1Count,
     Lmpop2Count,
+    /// (frankenredis-p98mw) `RANDOMKEY` at array length 1. Measured stranded at **1.3169x
+    /// with a 59.4 pct dispatch share and ~2,446 instr/op** of it, against ~1,670 of actual
+    /// work — fr pays more to FIND the command than to RUN it. Parser and executor both
+    /// existed already (cascade arm ~8745); only the floor entry was missing.
+    ///
+    /// Single form, so a distinct `*1\r\n$9\r\n` prefix and no discriminant to assert —
+    /// the arm's own prefix literal backstops the class table here.
+    Randomkey,
     /// (frankenredis-ozrro) `RENAMENX src dst` at arity 3. Second measurement pass over
     /// the blind-spot list: 1.5361x with a 69.0 pct dispatch share, the HIGHEST share this
     /// campaign has recorded. Parser, executor, gate and metrics all existed already.
@@ -15086,6 +15094,7 @@ enum BorrowedDispatchFloorCommand {
     Renamenx,
     Substr,
     Lmpop,
+    Randomkey,
     Msetnx,
     Append,
     Bitcount,
@@ -15417,6 +15426,9 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             }
             [b'R', b'P', b'O', b'P', b'L', b'P', b'U', b'S', b'H'] => {
                 Some(BorrowedDispatchFloorCommand::Rpoplpush)
+            }
+            [b'R', b'A', b'N', b'D', b'O', b'M', b'K', b'E', b'Y'] => {
+                Some(BorrowedDispatchFloorCommand::Randomkey)
             }
             [b'S', b'I', b'S', b'M', b'E', b'M', b'B', b'E', b'R'] => {
                 Some(BorrowedDispatchFloorCommand::Sismember)
@@ -16551,6 +16563,12 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (5, BorrowedDispatchFloorCommand::Lmpop) => Some(BorrowedDispatchFloorClass::Lmpop2),
         (6, BorrowedDispatchFloorCommand::Lmpop) => Some(BorrowedDispatchFloorClass::Lmpop1Count),
         (7, BorrowedDispatchFloorCommand::Lmpop) => Some(BorrowedDispatchFloorClass::Lmpop2Count),
+        // (frankenredis-p98mw) RANDOMKEY takes no arguments: arity 1 EXACTLY. `RANDOMKEY x`
+        // is an arity error, and claiming it would send that error to GENERIC instead of
+        // back to the cascade -- strictly worse than never claiming it.
+        (1, BorrowedDispatchFloorCommand::Randomkey) => {
+            Some(BorrowedDispatchFloorClass::Randomkey)
+        }
         (4, BorrowedDispatchFloorCommand::Hincrby) => {
             Some(BorrowedDispatchFloorClass::Hincrby)
         }
@@ -18075,7 +18093,29 @@ fn try_dispatch_floor_classified_action(
                 )
             }
         }
-        // (frankenredis-p98mw) `LMPOP 1 key LEFT|RIGHT`: key=numkeys, a=key, b=direction. Mirrors the cascade arm at ~9687 exactly -- same parser, same executor, same generic fallthrough; only the walk to reach it is removed.
+        // (frankenredis-p98mw) Mirrors the cascade arm at ~8745 exactly -- same parser,
+        // same executor, same generic fallthrough -- so only the walk to reach it is
+        // removed. Note the parser returns the CONSUMED length directly rather than a
+        // packet struct, because RANDOMKEY carries no arguments to borrow.
+        BorrowedDispatchFloorClass::Randomkey => {
+            if let Some(consumed) = parse_borrowed_plain_randomkey_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_randomkey_borrowed(ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply { consumed, response })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        // (frankenredis-p98mw) `LMPOP 1 key LEFT|RIGHT`: key=numkeys, a=key, b=direction.
+        // Mirrors the cascade arm at ~9687 exactly -- same parser, same executor, same
+        // generic fallthrough; only the walk to reach it is removed.
         BorrowedDispatchFloorClass::Lmpop1 => {
             if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
                 unparsed,
@@ -51824,6 +51864,91 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
                 "{other:?} must not be claimed as Rpoplpush"
             );
         }
+    }
+
+    /// (frankenredis-p98mw) RANDOMKEY claims array length 1 and NOTHING else.
+    ///
+    /// THE NEGATIVE CASE IS THE ARITY, and it is the `arity >= N` defect in its original
+    /// form (opmo4, xqqwv, and TOUCH at 3.2848x). RANDOMKEY takes no arguments, so
+    /// `RANDOMKEY x` is an arity error upstream. If the class claimed it, the arm's parser
+    /// would refuse it and the floor would decline to GENERIC rather than back to the
+    /// cascade — strictly worse than never claiming it, and invisible to a test that only
+    /// checked the served arity.
+    ///
+    /// Only class-level assertions are needed here, and that is a deliberate application of
+    /// the rule in the prefix-literal audit: RANDOMKEY has ONE form behind a distinct
+    /// `*1\r\n$9\r\n` prefix, so there is no discriminant a routing error could get wrong
+    /// and the arm's own prefix compare backstops the class table. A shared-prefix family
+    /// would need the discriminant asserted instead.
+    #[test]
+    fn randomkey_floor_class_claims_array_length_one_only() {
+        use super::BorrowedDispatchFloorClass as C;
+        let cfg = ParserConfig::default();
+        fn packet(args: &[&str]) -> Vec<u8> {
+            let mut p = format!("*{}\r\n", args.len()).into_bytes();
+            for a in args {
+                p.extend_from_slice(format!("${}\r\n{}\r\n", a.len(), a).as_bytes());
+            }
+            p
+        }
+
+        // Served, in every case: the token table is case-insensitive.
+        for form in [vec!["RANDOMKEY"], vec!["randomkey"], vec!["RandomKey"]] {
+            let pkt = packet(&form);
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
+                Some(C::Randomkey),
+                "{form:?} must be floor-classified"
+            );
+            // The floor-class promise: the arm's own parser must accept what was claimed.
+            assert!(
+                super::parse_borrowed_plain_randomkey_packet(&pkt, &cfg).is_some(),
+                "{form:?} is claimed but the arm's parser refuses it"
+            );
+        }
+
+        // The consumed length must cover the WHOLE packet, or the next pipelined command
+        // is parsed from the wrong offset.
+        let pkt = packet(&["RANDOMKEY"]);
+        assert_eq!(
+            super::parse_borrowed_plain_randomkey_packet(&pkt, &cfg),
+            Some(pkt.len()),
+            "the parser must consume the entire packet"
+        );
+
+        // NOT served: any other arity keeps walking the cascade.
+        for wrong in [
+            vec!["RANDOMKEY", "x"],
+            vec!["RANDOMKEY", "x", "y"],
+        ] {
+            let pkt = packet(&wrong);
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
+                None,
+                "{wrong:?} must not be floor-classified"
+            );
+        }
+
+        // Other 9-letter commands must not be captured by the new token. RPOPLPUSH shares
+        // its first letter and its length, so only the full-token compare separates them.
+        for other in [
+            vec!["RPOPLPUSH", "src", "dst"],
+            vec!["SISMEMBER", "s", "m"],
+            vec!["PEXPIREAT", "k", "1"],
+        ] {
+            let pkt = packet(&other);
+            assert_ne!(
+                super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
+                Some(C::Randomkey),
+                "{other:?} was captured by the RANDOMKEY token"
+            );
+        }
+
+        // And a bare 9-char lookalike must not parse under the RANDOMKEY prefix.
+        assert!(
+            super::parse_borrowed_plain_randomkey_packet(&packet(&["RANDOMKEZ"]), &cfg).is_none(),
+            "a one-byte-different token must not parse as RANDOMKEY"
+        );
     }
 
     /// (frankenredis-p98mw) LMPOP claims arities 4, 5, 6 and 7 — each to a DIFFERENT class
