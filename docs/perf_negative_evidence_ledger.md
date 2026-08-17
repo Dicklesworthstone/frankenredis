@@ -27176,3 +27176,62 @@ Run `--trials 36` at least THREE times in one quiet window and feed the nulls to
 straddling the band, the honest conclusion is that this harness cannot resolve a ~1.65x
 effect on this host at all, and 33832 needs a different instrument -- callgrind instruction
 counts on the RESTORE surface are load-immune and have never refused.
+
+## MEASURED (frankenredis-33832) — the gate's BAND is tighter than the harness's own null reproducibility: three nulls in ONE invocation read 1.026, 0.973, 0.979 against a 0.98..1.02 band. This instrument cannot authenticate on this host
+
+Claim class: INSTRUMENT, TERMINAL. Recommends abandoning this harness for the bead.
+
+WIRED THE GUARD I LANDED BUT DID NOT CALL. The previous row added `competitive_verdict`
+and only exercised it in `--self-test`, so nothing in the measurement path used it -- a
+guard nobody calls is not a guard. It now decides the verdict, and `--confirm N` repeats
+the whole sampling N times inside ONE invocation so reproducibility is enforced by the
+instrument instead of by a human remembering to run it twice. A lone invocation can no
+longer print an acceptance at all.
+
+THE RESULT THAT SETTLES IT. `--trials 12 --confirm 3`, one invocation, same warmed arms,
+loadavg 24.6:
+
+    round nulls: 1.026340, 0.972559, 0.978992      band 0.98..1.02
+    all three OUTSIDE, in both directions
+    A/B redis/fr_b 0.599393x  CI [0.574541, 0.603041]
+
+THE NULL WANDERS ABOUT +/-3 PCT AROUND UNITY WHILE THE BAND IT MUST LAND IN IS +/-2 PCT.
+That is not a tuning problem, it is a category one: the gate demands a precision the
+instrument does not have on this host. It also explains the whole seven-attempt history --
+0.936, 0.686, 1.076, 1.061, 0.974, 1.011(accepted), 0.930 -- as draws from a distribution
+centred near 1.0 with roughly 3 pct spread. The single acceptance was a draw, not a signal,
+which is exactly why it is not banked.
+
+Note the A/B's CI TIGHTENED with the extra rounds: [0.5745, 0.6030] against [0.5819,
+0.6217] and [0.5284, 0.5934] from single runs. The EFFECT is estimable; only its GATE is
+not. That asymmetry is the whole finding.
+
+THE ALTERNATIVE IS ALREADY IN THE REPO AND WORKS. `scripts/restore_instr_per_op.py`
+(landed by a peer today) measures the same surface with callgrind instruction counts, which
+are load-immune. Run just now at LOADAVG 50 -- five times the load that makes the timing
+harness refuse -- it returned hash RESTORE fr 68,923.9 vs redis 33,503.2 instr/op,
+2.0572x, with no gate to fail. Its own docstring is careful that this absolute is not
+comparable to 33832's banked 0.606011x because the workload differs (REPLACE onto one key
+vs 200 distinct keys), and that same-workload before/after deltas are what it is for.
+
+FRAME BREAKDOWN from the peer's `restore_profile_frames.py` on the same run, call counts
+verified rather than assumed (decode_rdb_string 1.00/op, decode_value_spans 1.00/op,
+PackedStrMap::append 40.02/op -- no redundant calls anywhere):
+
+    fr_store::decode_rdb_string            24.24 pct   8,571 instr/op
+    fr_persist::listpack::decode_value_spans 14.91 pct  5,273 instr/op
+    __memcpy_avx_unaligned_erms            12.02 pct
+    fr_store::packed_set::PackedStrMap::append 8.04 pct    71 instr/call
+
+`decode_value_spans` + `append` is ~23 pct of fr's RESTORE and redis does NONE of it: redis
+attaches the listpack verbatim while fr decodes it and copies every element into packed
+storage. There is no redundancy to delete -- the counts prove each runs exactly once per
+unit of work -- so the remaining gap is structural and belongs to pf1vw, not to a lever.
+
+RETRY PREDICATE. STOP using collection_reload_headtohead.py for 33832: seven attempts, one
+acceptance, and the band is provably tighter than the null's spread. Use
+restore_instr_per_op.py, quote it same-workload before/after, and do not compare its
+absolute to the 0.606011x row. If a THROUGHPUT number is genuinely required, the harness
+needs a wider band justified by its measured null spread -- roughly 0.96..1.04 on this
+evidence -- and that is a change to the gate's contract that should be argued explicitly,
+not slipped in.

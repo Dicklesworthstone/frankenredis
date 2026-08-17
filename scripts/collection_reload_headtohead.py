@@ -20,6 +20,7 @@ Usage: collection_reload_headtohead.py <redis_port> <fr_port> [--trials N]
        [--swap-preload]   reverse which fr arm is preloaded first (33832 A/A attribution)
        [--drift-curve N]  per-trial ms vs trial index for ONE fr arm (33832)
        [--warmup-passes N] discarded passes per arm before timing (default 8)
+       [--confirm N]      repeat sampling N times; accept only if EVERY null is in band
 Exit 0 always (informational).
 
 `--competitive` is the authentication mode. It needs two independent
@@ -74,6 +75,10 @@ COMPETITIVE = "--competitive" in sys.argv
 # (frankenredis-33832) Discarded passes per arm before timing; see the drift-curve table
 # at the warmup loop. Overridable so the count stays a measured knob, not a constant.
 WARMUP_PASSES = int(opt("--warmup-passes", "8"))
+# (frankenredis-33832) Repeats of the whole sampling within one invocation; the verdict
+# accepts only if EVERY round's null is in band. 1 = legacy behaviour, which can no longer
+# print an acceptance.
+CONFIRM_RUNS = int(opt("--confirm", "1"))
 FR_AA = int(opt("--fr-aa-port", "0"))
 EXPECT_FR_ELF = opt("--expect-fr-elf", "")
 
@@ -252,10 +257,15 @@ def competitive_verdict(nulls, lo=0.98, hi=1.02, min_runs=2):
     if EVERY one lands in band. One in-band null among several is evidence the gate is
     flaky, not evidence the arms are equal -- and a flaky gate is not a passed gate.
     """
-    if len(nulls) < min_runs:
-        return False, ("only %d null(s); a single in-band result is exactly the lucky PASS "
-                       "this guard exists to reject -- repeat the invocation" % len(nulls))
     outside = [n for n in nulls if not (lo <= n <= hi)]
+    if len(nulls) < min_runs:
+        # Report the band too when it ALSO fails, so a single out-of-band null does not
+        # read as "just needs another run".
+        extra = ("" if not outside
+                 else " (and it is outside %.2f..%.2f anyway)" % (lo, hi))
+        return False, ("only %d null(s)%s; a single in-band result is exactly the lucky "
+                       "PASS this guard exists to reject -- repeat the invocation"
+                       % (len(nulls), extra))
     if outside:
         return False, ("%d of %d nulls outside %.2f..%.2f: %s"
                        % (len(outside), len(nulls), lo, hi,
@@ -369,6 +379,19 @@ def run_competitive_restore(fr_a, fr_b, redis):
                 round_min[arm].append(min(elapsed[arm][window]))
 
     aa, aa_lo, aa_hi = bootstrap_median_ci(aa_ratios)
+    # `--confirm N`: repeat the ENTIRE sampling N-1 more times and keep each round's null,
+    # so reproducibility is decided inside one invocation instead of relying on a human to
+    # remember to run it twice. The extra rounds reuse the same warmed arms; only the
+    # sampling repeats.
+    aa_history = []
+    for _ in range(max(0, CONFIRM_RUNS - 1)):
+        extra = []
+        for trial in range(rounds * len(ARM_ORDERS)):
+            sample = {}
+            for arm in ARM_ORDERS[trial % len(ARM_ORDERS)]:
+                sample[arm] = time_restore(arms[arm], payloads)
+            extra.append(sample["fr_a"] / sample["fr_b"])
+        aa_history.append(statistics.median(extra))
     ab, ab_lo, ab_hi = bootstrap_median_ci(ab_ratios)
     # SAME-PROCESS A/A. The fr_a/fr_b null compares two separate fr PROCESSES, so
     # it nulls the engine and the process placement together — and on a busy
@@ -392,10 +415,28 @@ def run_competitive_restore(fr_a, fr_b, redis):
     if same_proc_aa is not None:
         print(f"  A/A null (fr_b halves, one process) median={same_proc_aa:.6f}x")
     print(f"  A/B redis/fr_b median={ab:.6f}x 95% CI=[{ab_lo:.6f}, {ab_hi:.6f}]")
-    if not 0.98 <= aa <= 1.02:
-        print("  VERDICT: HOLD — A/A median outside 0.98..1.02; A/B is not authenticated")
+    # (frankenredis-33832) THE VERDICT NOW REQUIRES REPRODUCTION, not one in-band null.
+    #
+    # Measured: at --trials 36 this harness returned 1.010713x (accepted) and then
+    # 0.930230x (refused) on two back-to-back invocations, same cores, same ELF, loadavg
+    # 18.68 vs 19.49, with the A/B moving 0.602060x -> 0.559893x alongside. Banking the
+    # first would have recorded a certified 0.60x that the very next run contradicts, and
+    # that single accepted run is the ONLY time this harness has ever authenticated in
+    # seven attempts. A gate that passes once in seven is not a gate.
+    #
+    # So a lone invocation can no longer print an acceptance. It records its null and says
+    # what is still needed; `--confirm N` repeats the whole sampling N times in ONE
+    # invocation and only accepts when EVERY null lands in band, via `competitive_verdict`.
+    nulls = aa_history + [aa]
+    accepted, why = competitive_verdict(nulls)
+    if accepted:
+        print("  VERDICT: COMPETITIVE ROW — %s; record A/B with its CI" % why)
+    elif len(nulls) < 2:
+        print("  VERDICT: HOLD — single invocation, null=%.6fx. %s" % (aa, why))
+        print("           re-run with --confirm 3 (or repeat by hand): one in-band null is "
+              "the lucky PASS this gate now rejects.")
     else:
-        print("  VERDICT: COMPETITIVE ROW — A/A median accepted; record A/B with its CI")
+        print("  VERDICT: HOLD — %s; A/B is not authenticated" % why)
 
 
 def self_test():
