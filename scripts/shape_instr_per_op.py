@@ -257,6 +257,26 @@ SHAPES = {
     "move_missing": ([], ["MOVE", "nosuchkey", "1"]),
     "spublish_nosub": ([], ["SPUBLISH", "shardchan", "m"]),
     "exists_missing": ([], ["EXISTS", "nosuchkey"]),
+
+    # (frankenredis-copydeficit, third sweep) EXISTS multi-key. The stranded-parser sweep
+    # puts exists_two..exists_eight at cascade positions 160-166 of 166 -- the LAST SEVEN
+    # ARMS WALKED -- while no class entry claims arities 3..9. exists_1 is the in-family
+    # control: same command, same executor family, but a different (claimed) route, so a
+    # difference between it and exists_2 is the routing and not the key count.
+    # ZRANGEBYLEX/ZREVRANGEBYLEX base arity 4 at cascade positions 141 and 140 of 166, and
+    # neither name appears in the floor name table AT ALL, so they can never be classified.
+    # zrange_4 is the control: the same arity on a sibling zset range command that IS
+    # classified, so the pair isolates routing from range work.
+    "zrangebylex_4": (["ZADD zl 0 a 0 b 0 c 0 d"], ["ZRANGEBYLEX", "zl", "-", "+"]),
+    "zrevrangebylex_4": (["ZADD zl 0 a 0 b 0 c 0 d"], ["ZREVRANGEBYLEX", "zl", "+", "-"]),
+    "zrange_4": (["ZADD zl 0 a 0 b 0 c 0 d"], ["ZRANGE", "zl", "0", "-1"]),
+
+    "exists_1": (["SET ek1 v"], ["EXISTS", "ek1"]),
+    "exists_2": (["SET ek1 v", "SET ek2 v"], ["EXISTS", "ek1", "ek2"]),
+    "exists_4": (["SET ek1 v", "SET ek2 v", "SET ek3 v", "SET ek4 v"],
+                 ["EXISTS", "ek1", "ek2", "ek3", "ek4"]),
+    "exists_8": (["SET ek%d v" % i for i in range(1, 9)],
+                 ["EXISTS"] + ["ek%d" % i for i in range(1, 9)]),
     # (frankenredis-c0ts5) Ladder shapes: cheap O(1) reads across every type, so
     # the dispatch cost can be compared at constant (near-zero) real work. Mirrors
     # the registrations in balanced_square_ab's unswept sets.

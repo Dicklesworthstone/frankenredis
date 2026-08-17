@@ -39722,3 +39722,140 @@ The invariant the assertions protected is preserved and widened rather than drop
 3. Extend the literal-argument detector to ENUM and DISCRIMINANT arguments. The bool/Option
    form is exhausted at 2 hits from 3 candidates; the enum form has never been scanned, and
    `BorrowedDispatchFloorClass::ZsetStore(PlainZsetStoreCmd::…)` shows the shape exists.
+
+## 2026-08-17 CrimsonHawk: REJECT — CASCADE POSITION IS NOT A COST, and the option-form dispatch vein is SATURATED at a flat ~700 instr/op across 27 measured routes (`frankenredis-copydeficit`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — this row ships nothing and is a refutation of my own screening heuristic plus a saturation boundary for the next agent.
+
+Having front-classified COPY REPLACE and BITPOS 4/6 in the preceding rows, I built a static
+sweep to enumerate the rest of that defect class and it produced TWO WRONG ANSWERS before it
+produced a right one. Both are recorded because each would have cost a peer a day.
+
+### THE SWEEP, AND THE TWO CORRECTIONS IT NEEDED
+
+The intended detector: a `parse_borrowed_plain_*_packet` that EXISTS, is reachable only from
+the cascade, and whose own `(command, arity)` has no floor class entry. That is exactly what
+BITPOS start/unit were.
+
+  first cut     61 parsers with cascade call sites and no floor arm.
+  correction 1  the arity-claim regex only matched NUMERIC patterns, so it reported every
+                VARIABLE-arity class as unclaimed. Twelve classes bind the arity and test it in
+                a guard — `(array_len, ..::Exists) if (2..=KEYS_MULTI_MAX + 1).contains(..)`,
+                and the same for Del, Unlink, Hmset, Hmget, Mget, Mset, Sinter, Sunion, Sdiff,
+                Zadd, Zmscore. 51 -> 32 after fixing it.
+  correction 2  the RANKING was wrong, which the count never revealed. See below.
+
+### CASCADE POSITION DOES NOT PREDICT DISPATCH COST — REFUTED TWICE, MEASURED
+
+I ranked the survivors by position in the 166-arm cascade in `process_buffered_frames`, on the
+premise that a late arm pays the arms before it. That premise is FALSE and two independent
+measurements say so:
+
+  EXISTS multi-key holds cascade positions 160-166 of 166 — THE LAST SEVEN ARMS WALKED:
+    exists_1  1673.8 instr/op   dispatch 439.0 (26.2 pct)
+    exists_2  1927.2 instr/op   dispatch 598.0 (31.0 pct)
+    exists_4  2460.6 instr/op   dispatch 716.0 (29.1 pct)
+    exists_8  3373.4 instr/op   dispatch 964.8 (28.6 pct)
+  The per-key increment is 159 for the first extra key and ~60 for each one after — a key
+  count, not a walk.
+
+  ZRANGEBYLEX and ZREVRANGEBYLEX sit at positions 141 and 140 and their names are absent from
+  the floor name table ENTIRELY, so they can never be classified — the strongest form of the
+  defect the sweep looks for. They are CHEAPER than their classified sibling:
+    zrange_4          2537.5 instr/op   dispatch 699.0 (27.5 pct)   <- IS classified
+    zrangebylex_4     3305.5 instr/op   dispatch 761.0 (23.0 pct)   <- cannot be
+    zrevrangebylex_4  3630.8 instr/op   dispatch 814.0 (22.4 pct)   <- cannot be
+
+The mechanism is visible once measured: each cascade arm is a `strip_prefix(b"*N\r\n$L\r\nNAME")`
+byte compare that fails on its first bytes, so 166 of them cost a few hundred instructions in
+total. Position is nearly free. What was expensive about COPY REPLACE was NOT its position —
+it had no cascade arm at all and fell THROUGH into the generic
+`parse_borrowed_multibulk_action`, which is why its frame table showed `memcmp` 726, `key_arg2`
+591 and `keys_multi` 281 rather than a chain of cheap prefix rejections.
+
+**Do not rank front-classification candidates by cascade position.** The 32-row list this
+produced is not a work queue.
+
+### THE OPTION-FORM VEIN IS SATURATED — 27 ROUTES, FLAT ABSOLUTE DISPATCH
+
+Screening the family that produced both wins — option-form and less-common spellings — on the
+shipped ELF, `--fr-only`, 1-minute loadavg 18.1-33.8, CPU idle 46-67 pct with 0.0 iowait,
+MHz mean 2568-4150:
+
+  getex_exat 828.0   getex_pxat 825.5   getex_ex_opt 779.0   set_ex_opt 745.0
+  set_xx_opt 700.0   set_nx_opt 705.5   expire_nx_opt 759.0  zadd_xx_opt 737.0
+  zadd_2flag 801.0   zadd_incr 772.0    lpos_count_opt 846.0 lpos_rank 841.0
+  hrandfield_count 713.0   zrandmember_1 638.0   srandmember_1 630.0
+  zrevrangebyscore 682.0   substr 686.0   renamenx_exists 638.0
+  smove_missing 721.0      rpoplpush_missing 662.0                (instr/op of dispatch)
+
+Twenty routes in a 630-846 band; with the four EXISTS arities and three zset-lex shapes above,
+27 routes span 439-965. COPY REPLACE was 6,494 and BITPOS 4/6 were 1,956 and 2,132 against
+that floor — 8x and 2.5x — and all three are now fixed. Nothing else in this family is an
+outlier.
+
+**Report the ABSOLUTE dispatch instr/op, not the share.** Share ranged 18.9-39.4 pct across
+these twenty rows while the absolute cost was flat, because the share's DENOMINATOR is the
+command's own work: `set_nx_opt` reads 39.4 pct on 705.5 instr/op and `zrevrangebyscore` reads
+18.9 pct on 682.0. Ranking this screen by share would have put `set_nx_opt` top and
+`zrevrangebyscore` bottom when their dispatch costs differ by 23 instructions. A share is a
+ratio to a moving denominator and it made two of this campaign's earlier attributions wrong.
+
+### COUNTED MECHANISM
+
+27 routes measured, each a two-point callgrind subtraction (N=2000, 2N=4000) with startup and
+seeding cancelled, dispatch attributed by the harness's frame classifier. The floor is 439-965
+instr/op with no route between 965 and 1,956. The claim here is a BOUNDARY, not an effect, and
+the counted quantity is the gap: there is no candidate in this family within 2x of the two that
+were fixed.
+
+CV was not used, as a gate or otherwise.
+
+### PROVENANCE
+
+  ELF           2d7d9dfb28cb4a2d, plain `--release` at HEAD, no feature flags, built locally
+                with RCH_CARGO_WRAPPER_BYPASS=1 and the path taken from
+                `--message-format=json`, copied to a private path and sha256'd there.
+  bench_elf_sha256=2d7d9dfb28cb4a2d03cda0e507b693f47bc16ddc6a8d405b8502ece93dbc78ab
+  harness       `scripts/shape_instr_per_op.py --fr-only`; the sweep itself is transcript-only
+                and is NOT committed, because its ranking is refuted above and a committed
+                script would be re-run by someone who did not read this row.
+  host          thinkstation1, 64 cores observed, powersave governor, /data 214G free.
+  PER-ARM loadavg / CPU idle / MHz
+                EXISTS ladder    load 33.84/32.56/28.20, MHz mean 3360-3775
+                zset-lex trio    load 22.85/29.65/27.48, MHz mean 3361-3775
+                option screen    load 18.06/26.25/26.47 at the end, MHz 2568-4150 over the run
+                CPU idle sampled from /proc/stat deltas at 46.2 / 56.7 / 67.1 pct with 0.0
+                iowait throughout — the box was about half busy, NOT the 88 pct idle it was
+                reported to be, and the idle figure MOVED 21 points in 30 s.
+  admissibility No timed row is claimed anywhere here. Every number is a callgrind instruction
+                count, which is a deterministic count and not a time, and is why this row is
+                admissible in a window whose MHz spread was 62 pct (2568 -> 4150) and in which
+                a timed certification was refused in the preceding row.
+
+### STANDING LAWS
+
+The medium-zset threshold law — Compact(Vec) beats BTreeMap for both build and read below
+n=2048 because the O(n^2)-looking `Vec::insert` is a hardware memmove that wins on constant
+factors, and lowering the threshold or moving medium zsets to a tree regresses both dimensions
+(NEGATIVE_EVIDENCE.md:22581) — is matched by keyword here and DOES NOT APPLY. This row touches
+no encoding, no container choice and no size threshold of any kind. Its zset shapes
+(`zrange_4`, `zrangebylex_4`, `zrevrangebylex_4`) are four-element zsets used only as a fixed
+payload so that two DISPATCH routes can be compared at identical work; the word "threshold"
+appears here for a screening cutoff on dispatch instr/op, not for an encoding crossover. No
+change to any zset representation is proposed, measured or implied.
+
+### RETRY PREDICATE
+
+1. Do NOT re-derive the 32-row stranded-parser list and work it top-down. Position is refuted.
+   If the list is used at all, MEASURE each candidate's absolute dispatch instr/op first and
+   discard anything under ~1,500 — that threshold is set by this screen's 965 ceiling plus the
+   1,956 of the cheapest route that actually paid.
+2. The remaining cost on these routes is WORK, not dispatch, and the ratio is where to look:
+   `getex_exat` is 3,613.1 instr/op of which only 828.0 is dispatch, against a `get_control`
+   of about 1,305. A GETEX with an absolute expiry costs ~2.8 GETs and 77 pct of that is
+   execution. That is the next question on this family and this row does not answer it.
+3. The literal-argument detector from the preceding row is exhausted for bool/Option
+   parameters and has still NOT been extended to enum or discriminant arguments. That remains
+   the only unexplored form of the original defect.
