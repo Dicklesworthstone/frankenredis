@@ -43,6 +43,7 @@ from __future__ import annotations
 import glob
 import os
 import subprocess
+import time
 import sys
 
 # Stationarity: how far the 1-minute may sit from the 5-minute, as a fraction of the 5-minute.
@@ -58,6 +59,45 @@ def loadavg():
     with open("/proc/loadavg") as fh:
         parts = fh.read().split()
     return float(parts[0]), float(parts[1]), float(parts[2])
+
+
+def cpu_idle_pct(sample_seconds=1.0):
+    """(idle pct, iowait pct) over a short sample, or (None, None) if unreadable.
+
+    (frankenredis-eh2ct) LOADAVG IS NOT A MEASURE OF AVAILABLE CPU and on this host the two
+    diverge sharply: loadavg 26.41 on 64 threads was measured at 83 pct idle with 1 pct
+    iowait, i.e. ~53 threads free, while the same reading a few minutes later at loadavg
+    28.41 was 77 pct idle. Loadavg counts runnable AND uninterruptibly-blocked tasks, so a
+    workload of many short-lived or briefly-blocked tasks inflates it without contending for
+    cores. This gate decides on loadavg, and two ratio draws it REFUSED at 65 pct idle landed
+    inside the range of the two it certified.
+
+    This is reported, NOT gated on: changing the criterion needs the study the ledger row
+    names (ten draws each on a large- and a small-denominator shape, spanning idle 40-100
+    pct), and that study is only possible if every row carries the column. Printing it costs
+    one sample and makes the data collect itself.
+    """
+    def snapshot():
+        with open("/proc/stat") as fh:
+            for line in fh:
+                if line.startswith("cpu "):
+                    f = [int(x) for x in line.split()[1:]]
+                    # user nice system idle iowait irq softirq steal ...
+                    return f
+        return None
+
+    first = snapshot()
+    if not first or len(first) < 5:
+        return None, None
+    time.sleep(sample_seconds)
+    second = snapshot()
+    if not second or len(second) < 5:
+        return None, None
+    delta = [b - a for a, b in zip(first, second)]
+    total = sum(delta)
+    if total <= 0:
+        return None, None
+    return 100.0 * delta[3] / total, 100.0 * delta[4] / total
 
 
 def build_processes():
@@ -136,6 +176,12 @@ def main():
     mhz = cpu_mhz()
 
     print(f"loadavg {one:.2f} / {five:.2f} / {fifteen:.2f}")
+    idle, iowait = cpu_idle_pct()
+    if idle is None:
+        print("cpu idle  unavailable")
+    else:
+        print(f"cpu idle  {idle:.0f} pct   iowait {iowait:.0f} pct"
+              f"   (REPORTED, not gated -- loadavg and idle diverge on this host)")
     print(f"cpu MHz {' '.join(str(m) for m in mhz) if mhz else 'unavailable'}")
     print(f"builds  {len(builds)}")
     for r in reasons:
@@ -177,6 +223,11 @@ def _self_test():
     assert fit, "fr-only must tolerate a drifting window"
 
     assert loadavg()[0] >= 0.0
+    # The idle sampler must return a sane pair or an explicit None -- never a bogus number,
+    # because a wrong idle figure printed beside a verdict is worse than no figure.
+    idle, iowait = cpu_idle_pct(sample_seconds=0.05)
+    assert (idle is None and iowait is None) or (0.0 <= idle <= 100.0 and 0.0 <= iowait <= 100.0), (
+        "cpu_idle_pct returned %r / %r" % (idle, iowait))
     print("self-test ok")
     return 0
 
