@@ -28364,3 +28364,63 @@ RETRY PREDICATE: before writing ANY borrowed executor, read the floor ARM for th
 or its closest sibling — a shared executor is invisible to a per-command name scan and
 visible in one line of the arm. Do not trust [C] as a work estimate until the tool
 understands shared executors.
+
+--------------------------------------------------------------------------------
+## CORRECTED INSTRUMENT (frankenredis-ozrro follow-up) — `corpus_coverage.py` reported 17 CLASSIFIED commands as unclassified; the floor count is 138, not 121, and the "78 of 218 blind spot" row inherits the undercount
+
+Claim class: INSTRUMENT DEFECT + CORRECTION. No ratio is claimed.
+
+THE DEFECT. `floor_classified()` reassembles command names from the floor table's byte-array
+patterns with `\[((?:b'[A-Z_]',\s*)*b'[A-Z_]')\]`. That requires the LAST byte literal to
+carry no trailing comma and `]` to follow immediately. rustfmt writes a short array that way
+and an exploded one the other way:
+
+    [b'S', b'M', b'O', b'V', b'E'] => ...              matched
+    [
+        b'Z', ... b'X',                               trailing comma, then a newline
+    ] => ...                                          NOT matched
+
+So every command name long enough for rustfmt to explode was invisible to the tool that
+exists to find unclassified commands.
+
+    floor-classified          121  ->  138
+    blind spot                 67  ->   62
+    unclassified but MEASURED  18  ->    6
+
+    falsely reported unclassified (17): bitfield_ro hincrbyfloat incrbyfloat pexpiretime
+    sinterstore srandmember sunionstore zinterstore zrandmember zrangebylex zrangebyscore
+    zremrangebylex zremrangebyrank zremrangebyscore zrevrangebylex zrevrangebyscore
+    zunionstore
+
+WHY THIS IS NOT COSMETIC, and how it was found. The report's entire job is to send someone
+to add a MISSING floor entry. A false positive sends them to add one that already exists. I
+picked ZRANGEBYLEX off this report as a stranded route — parser and executor present, "one
+table entry" — and it has carried a `(4, Zrangebylex)` floor entry the whole time. The cost
+was analysis, not a bad commit, only because the arity table was read before the edit.
+
+    This is the same failure class as the bead-count undercount already in this repo's
+    memory: a DETECTION REGEX IS A LOWER BOUND until something proves it saw the shapes the
+    source actually contains. The self-test asserted the single-line form and no other, so
+    it was green on exactly the inputs that worked.
+
+CORRECTED SET. After the fix, "stranded AND shaped" — the cheap-lever list — is only
+`hset`, `mset`, `zlexcount`; plus `dump`, `ping`, `randomkey` in [A] with no shape yet.
+
+  test      the self-test's floor fixture now carries a rustfmt-EXPLODED 11-byte entry
+            (ZRANGEBYLEX) alongside the single-line ones, and asserts it is picked up
+  mutation  restoring the old regex in a copy of the file -> RED, `{'ttl','smove'}` with
+            `zrangebylex` dropped, which is the live failure reproduced exactly
+
+CONSUMER AND DELETION CONDITION (orders section 2): the consumer is the next agent choosing
+a front-classification target off `corpus_coverage.py`; the gate is that report's [A] list;
+the observed defect class is the ZRANGEBYLEX false positive above; delete the exploded-form
+case if the floor table ever stops matching byte arrays.
+
+AFFECTED PRIOR ROW: the LANDED (frankenredis-ozrro) row that banks "the blind spot is 78 of
+218, not the seven I had been tracking" was computed with the broken regex. The direction of
+its argument stands — the blind spot was far larger than seven — but the figure is an
+overcount of the blind spot by the same 17 commands.
+
+PROVENANCE: no measurement, instrument only. thinkstation1, 64 cores observed, governor
+powersave, /data 186G free. loadavg 43.39/27.54/28.07 observed at the time of the run;
+no arm was measured so no MHz is recorded. No build was run for this change.

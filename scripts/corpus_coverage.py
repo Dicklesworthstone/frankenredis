@@ -58,11 +58,31 @@ def floor_classified(text: str) -> set[str]:
     The table matches byte arrays, not string literals, so the names are reassembled from
     `[b'S', b'M', b'O', b'V', b'E']` patterns. A regex over string literals finds NOTHING
     here — an earlier version of this analysis returned three bogus names that way.
+
+    THE PATTERN MUST TOLERATE RUSTFMT'S EXPLODED FORM, and the first version did not.
+    rustfmt keeps a short array on one line with no trailing comma, but breaks a long one
+    across lines AND adds a trailing comma:
+
+        [b'S', b'M', b'O', b'V', b'E'] => ...        <- matched
+        [
+            b'Z', b'R', b'A', b'N', b'G', b'E',
+            b'B', b'Y', b'L', b'E', b'X',            <- trailing comma, then a newline
+        ] => ...                                     <- was NOT matched
+
+    So every command name long enough to be exploded was invisible, and the tool reported
+    17 CLASSIFIED commands as unclassified: bitfield_ro, hincrbyfloat, incrbyfloat,
+    pexpiretime, sinterstore, srandmember, sunionstore, zinterstore, zrandmember,
+    zrangebylex, zrangebyscore, zremrangebylex, zremrangebyrank, zremrangebyscore,
+    zrevrangebylex, zrevrangebyscore, zunionstore — 121 counted against 138 real.
+    That is not a cosmetic undercount: this report's whole job is to send someone to add a
+    missing floor entry, and a false positive sends them to add one that already exists.
+    Observed live — ZRANGEBYLEX was picked off this report as a stranded route and it has
+    had a `(4, Zrangebylex)` floor entry the entire time.
     """
     start = text.index("fn borrowed_dispatch_floor_command(")
     body = text[start : text.index("\nfn ", start + 10)]
     out = set()
-    for m in re.finditer(r"\[((?:b'[A-Z_]',\s*)*b'[A-Z_]')\]", body):
+    for m in re.finditer(r"\[\s*((?:b'[A-Z_]'\s*,\s*)*b'[A-Z_]'\s*,?)\s*\]", body):
         out.add("".join(re.findall(r"b'([A-Z_])'", m.group(1))).lower())
     return out
 
@@ -169,12 +189,33 @@ def _self_test() -> int:
             [b'S', b'M', b'O', b'V', b'E'] => Some(X::Smove),
             _ => None,
         },
+        11 => match uppercase_ascii_token::<11>(token)? {
+            [
+                b'Z',
+                b'R',
+                b'A',
+                b'N',
+                b'G',
+                b'E',
+                b'B',
+                b'Y',
+                b'L',
+                b'E',
+                b'X',
+            ] => Some(X::Zrangebylex),
+            _ => None,
+        },
     }
 }
 fn next_function() {}
 '''
     got = floor_classified(floor)
-    assert got == {"ttl", "smove"}, got
+    # The exploded entry is the one that broke this: rustfmt puts a TRAILING COMMA after
+    # its last byte and a newline before the `]`, and the original pattern required
+    # neither. Dropping `zrangebylex` here is the exact live failure — the tool reported
+    # 121 classified commands against 138 real and sent someone to re-add a floor entry
+    # that already existed.
+    assert got == {"ttl", "smove", "zrangebylex"}, got
     assert re.findall(r'b"([A-Z]+)"', floor) == [], "string-literal scan must find nothing"
 
     # SHAPES: the ISSUED command, not the seed commands. `SADD` here is setup.
