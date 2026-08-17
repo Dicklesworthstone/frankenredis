@@ -14593,13 +14593,6 @@ enum BorrowedMultibulkAction {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BorrowedDispatchFloorClass {
-    /// (frankenredis-ozrro) `DUMP key` at arity 2, cascade arm 60 of 163. Parser,
-    /// executor, gate and metrics all already existed; only the floor entry was missing.
-    Dump,
-    /// (frankenredis-ozrro) `RANDOMKEY` at arity 1 — the whole command, no key. Its parser
-    /// returns the CONSUMED LENGTH rather than a packet struct, which is why the arm below
-    /// binds `consumed` directly instead of reading `packet.consumed`.
-    Randomkey,
     /// (frankenredis-ozrro) `ZLEXCOUNT key min max` at arity 4. The largest remaining
     /// dispatch cost on the board — ~4,306 instr/op at a 64.0 pct share — with parser,
     /// executor, gate and metrics all present and only the floor entry missing.
@@ -15097,8 +15090,6 @@ impl PlainZsetStoreCmd {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BorrowedDispatchFloorCommand {
     Touch,
-    Dump,
-    Randomkey,
     Zlexcount,
     Set,
     Smove,
@@ -15292,7 +15283,6 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             _ => None,
         },
         4 => match uppercase_ascii_token::<4>(token)? {
-            [b'D', b'U', b'M', b'P'] => Some(BorrowedDispatchFloorCommand::Dump),
             [b'E', b'C', b'H', b'O'] => Some(BorrowedDispatchFloorCommand::Echo),
             [b'L', b'S', b'E', b'T'] => Some(BorrowedDispatchFloorCommand::Lset),
             [b'T', b'Y', b'P', b'E'] => Some(BorrowedDispatchFloorCommand::Type),
@@ -15438,9 +15428,6 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             _ => None,
         },
         9 => match uppercase_ascii_token::<9>(token)? {
-            [b'R', b'A', b'N', b'D', b'O', b'M', b'K', b'E', b'Y'] => {
-                Some(BorrowedDispatchFloorCommand::Randomkey)
-            }
             [b'P', b'E', b'X', b'P', b'I', b'R', b'E', b'A', b'T'] => {
                 Some(BorrowedDispatchFloorCommand::Pexpireat)
             }
@@ -16602,10 +16589,6 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (6, BorrowedDispatchFloorCommand::Set) => Some(BorrowedDispatchFloorClass::SetOpt6),
         (4, BorrowedDispatchFloorCommand::Zlexcount) => {
             Some(BorrowedDispatchFloorClass::Zlexcount)
-        }
-        (2, BorrowedDispatchFloorCommand::Dump) => Some(BorrowedDispatchFloorClass::Dump),
-        (1, BorrowedDispatchFloorCommand::Randomkey) => {
-            Some(BorrowedDispatchFloorClass::Randomkey)
         }
         (2, BorrowedDispatchFloorCommand::Ttl) => Some(BorrowedDispatchFloorClass::Ttl),
         (2, BorrowedDispatchFloorCommand::Getex) => Some(BorrowedDispatchFloorClass::Getex),
@@ -21057,48 +21040,6 @@ fn try_dispatch_floor_classified_action(
                     consumed: packet.consumed,
                     response,
                 })
-            } else {
-                parse_borrowed_multibulk_action(
-                    unparsed,
-                    parser_config,
-                    runtime,
-                    ts,
-                    out,
-                    argv_scratch,
-                )
-            }
-        }
-        BorrowedDispatchFloorClass::Dump => {
-            // (frankenredis-ozrro) Same parser and executor the cascade arm at position 60
-            // used; only the position changes, so the reply and every side effect are
-            // unchanged and a declining executor still reaches the generic path.
-            if let Some(packet) = parse_borrowed_plain_dump_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_dump_borrowed(packet.key, ts)
-            {
-                Ok(BorrowedMultibulkAction::FastReply {
-                    consumed: packet.consumed,
-                    response,
-                })
-            } else {
-                parse_borrowed_multibulk_action(
-                    unparsed,
-                    parser_config,
-                    runtime,
-                    ts,
-                    out,
-                    argv_scratch,
-                )
-            }
-        }
-        BorrowedDispatchFloorClass::Randomkey => {
-            // (frankenredis-ozrro) RANDOMKEY takes no key, and its parser returns the
-            // CONSUMED LENGTH rather than a packet — hence `consumed` bound directly here.
-            // Same executor the cascade arm at position 61 used.
-            if let Some(consumed) =
-                parse_borrowed_plain_randomkey_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_randomkey_borrowed(ts)
-            {
-                Ok(BorrowedMultibulkAction::FastReply { consumed, response })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,

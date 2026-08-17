@@ -355,6 +355,37 @@ SHAPES = {
     #                                    result every time, so the keyspace stops changing
     #                                    after the first call
     "keys_star": (["SET ks1 a", "SET ks2 b"], ["KEYS", "*"]),
+    # (frankenredis-gvm6z) The SIZE SIBLING, and it exists because `keys_star` above
+    # seeds exactly TWO keys. `KEYS *` is O(keyspace), so at n=2 essentially none of the
+    # op is the scan: it is fixed cost plus dispatch, and this repo has already been
+    # burned twice by reading a one-point shape as if it measured the COMMAND (SORT at
+    # n=3 vs n=64, and the SINTER k-crossover fitted across an encoding boundary).
+    #
+    # Measured on ELF 3f027a4f, two draws: `keys_star` is fr 5657.5/5648.4 against redis
+    # 5512.0/5455.6 -- 1.0264x and 1.0353x, the only shape in that screen above 1.0 --
+    # with 34.9 pct of it dispatch, IDENTICAL to a tenth across both draws. Dispatch is a
+    # per-CALL cost, so on a two-key keyspace it is nearly the whole of the deficit; it
+    # cannot be, at 64. Quoting the n=2 number as "KEYS is behind" would be an INTERCEPT
+    # claim wearing the command's name.
+    #
+    # 32x the keys against the same fixed cost, so the two points separate the intercept
+    # from the slope. Read-only, so still a steady-state no-op for the two-point
+    # subtraction. Distinct prefix from `ks1`/`ks2` so the two shapes cannot alias if a
+    # future harness change ever seeds them into one server.
+    "keys_star_64": (
+        [" ".join(["MSET"] + [f"kb{i:02d} v{i:02d}" for i in range(64)])],
+        ["KEYS", "*"],
+    ),
+    # (frankenredis-gvm6z) The THIRD point, and it is not optional. A two-point fit is
+    # what produced this repo's refuted SINTER k=14.2 crossover -- it drew one line
+    # across a regime boundary and banked the intersection. Two points cannot tell a
+    # line from a curve, so 2 and 64 alone cannot license a slope. n=16 sits between
+    # them: the linear model fitted on 2 and 64 PREDICTS fr 10600 / redis 13372 here,
+    # and a measurement that misses those falsifies the model rather than decorating it.
+    "keys_star_16": (
+        [" ".join(["MSET"] + [f"kc{i:02d} v{i:02d}" for i in range(16)])],
+        ["KEYS", "*"],
+    ),
     "scan_zero": (["SET sc1 a", "SET sc2 b"], ["SCAN", "0"]),
     "lcs_2": (["SET lc1 ohmytext", "SET lc2 mynewtext"], ["LCS", "lc1", "lc2"]),
     "zinterstore_2": (["ZADD zi1 1 a 2 b", "ZADD zi2 3 b"],

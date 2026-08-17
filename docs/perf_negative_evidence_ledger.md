@@ -29987,3 +29987,81 @@ range you see may be someone else's work.
 RETRY PREDICATE: do NOT re-propose chunked copies, varint fast paths, arena presizing or the
 zset score round-trip; all are shipped and this row exists so the next agent does not spend a
 turn rediscovering that. Take pf1vw, or take a route outside RESTORE.
+
+--------------------------------------------------------------------------------
+## MEASURED (frankenredis-gvm6z) — "KEYS is the worst cell at 1.0353x" was an INTERCEPT claim; three points show fr is 1.61x FASTER PER KEY and leads from n≈4, and the deficit is 1,997 instr/op of per-CALL dispatch
+
+Claim class: COMPETITIVE. fr/redis instructions per op, both arms in ONE invocation of
+scripts/shape_instr_per_op.py, incumbent verified on every run.
+
+HOW THIS STARTED, because the near-miss is the point. A screen of the stranded-and-shaped
+routes put `keys_star` at 1.0353x — the ONLY shape above 1.0 and, against a 0.4064x
+control, apparently the worst cell on the board. `keys_star` seeds TWO KEYS. `KEYS *` is
+O(keyspace), so at n=2 almost none of the op is the scan. Banking that would have been an
+intercept claim wearing the command's name — the third instance of this exact error in
+this repo (SORT at n=3 vs n=64; the SINTER k=14.2 crossover fitted across an encoding
+boundary and since refuted).
+
+    n      fr instr/op   redis instr/op    ratio     fr dispatch
+     2         5,648.4        5,455.6    1.0353x     1,972.4  (34.9 pct)
+    16        10,966.1       13,111.5    0.8364x     2,010.8  (18.3 pct)
+    64        27,576.5       40,515.2    0.6806x     2,008.7  ( 7.3 pct)
+
+THE THIRD POINT IS A FALSIFICATION TEST, not decoration. A line fitted on n=2 and n=64
+alone PREDICTED fr 10,600 / redis 13,372 at n=16. Measured 10,966 / 13,112 — fr +3.5 pct,
+redis −2.0 pct. The linear model survives. Two points cannot tell a line from a curve, and
+a two-point fit is exactly what produced the refuted SINTER crossover.
+
+LEAST SQUARES OVER ALL THREE POINTS:
+
+    fr     351.7 instr/key    intercept 5,116.8
+    redis  566.9 instr/key    intercept 4,199.5
+
+    slope     fr/redis 0.6204  -> fr is 1.61x FASTER per key
+    intercept fr/redis 1.2184  -> fr is 1.22x behind on FIXED cost
+    crossover n = 4.26 keys
+
+**"KEYS is behind" is FALSE as a command-level claim.** fr loses only on keyspaces of
+three keys or fewer and wins by a widening margin thereafter. The n=2 shape measured the
+one regime where fr loses and would have reported it as the command.
+
+THE DISPATCH TERM IS A PER-CALL CONSTANT, AND THAT IS THE DOSE-RESPONSE NULL. Dispatch
+reads 1,972.4 / 2,010.8 / 2,008.7 across a 32x change in keyspace — mean 1,997.3, spread
+1.92 pct. A cost that does not move when the work moves 32x is not part of the work. It is
+1,997 of fr's 5,116.8 intercept, i.e. 39 pct of fr's entire fixed cost. Its frames are the
+full generic signature — `execute_frame_internal`, `command_table_index`,
+`parse_command_args_borrowed_into`, `execute_dispatch` — so KEYS takes the generic path:
+no borrowed parser, no floor class. `corpus_coverage.py` classes it [C], machinery to be
+written, not a one-entry lever.
+
+PREDICTION, stated as a prediction and NOT as a result: front-classifying KEYS to the
+measured front-classified band (~275 instr/op) would take fr's intercept to ~3,394 against
+redis's 4,199 — below it — moving the crossover under n=1 so fr leads at EVERY keyspace
+size, and buying ~7 pct at n=64. Nothing here measures that; it is the next lever's target.
+
+A/A NULL: the same ELF measured `keys_star` twice in this window — fr 5,657.5 then 5,648.4,
+**1.0016x** (0.16 pct). The redis arm across the same pair was 5,512.0 then 5,455.6 (1.03
+pct), consistent with this harness's documented asymmetry: the numerator is near-exact and
+the denominator carries redis's elapsed-time serverCron work.
+
+PROVENANCE:
+  fr ELF        sha256 3f027a4f7ebadb7767316134d4c0f6810295b2fd21bba160f260279778290815
+                built LOCALLY with RCH_CARGO_WRAPPER_BYPASS=1 exported and
+                env -u CARGO_TARGET_DIR; no [RCH] line; copied to a private path BEFORE
+                measuring, because target/release is a rendezvous in a shared checkout.
+                This is the sha of the file I passed to the harness, not a self-report
+                from /proc/<pid>/exe.
+  incumbent     `incumbent verified: redis-server sha=d2c8a4b9 == vendored source HEAD,
+                clean` printed by the harness on EVERY run above.
+  host          thinkstation1, 64 cores observed, governor powersave, /data 150G.
+  per-arm load  n=2 24.39/24.23/28.82 -> 25.00; n=16 27.53/25.26/28.64 -> 26.37;
+                n=64 25.25/24.58/28.60 -> 25.15. Converged 1/5/15 throughout.
+  per-arm MHz   2,417-2,621 mean observed, cross-core spread 1,429-4,093 at a single
+                instant. Both arms of each row ran inside the same window on this host.
+
+RETRY PREDICATE. Do NOT re-derive the n=2 ratio and do not quote 1.0353x without "at two
+keys" attached. Re-measure only after a KEYS floor class exists, and then check the
+INTERCEPT and the crossover, not the n=2 ratio — the slope is not what the lever touches
+and should come back unchanged at 351.7 instr/key. If the slope moves, the lever did
+something it was not supposed to do. Any future KEYS shape must carry its keyspace size in
+its name.
