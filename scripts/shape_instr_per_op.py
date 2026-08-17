@@ -505,6 +505,26 @@ SHAPES = {
         [" ".join(["ZADD", "zrb64src"] + [f"{i} m{i:02d}" for i in range(64)])],
         ["ZRANGESTORE", "zrb64dst", "zrb64src", "0", "63", "BYSCORE"],
     ),
+    # (frankenredis-gvm6z) ABOVE the listpack threshold. `zset-max-listpack-entries`
+    # defaults to 128 (redis config.c:3219), so a 64-member destination is a LISTPACK and a
+    # 200-member one is a SKIPLIST. At n=64 redis costs 10,927 instr per member in rank
+    # mode, 5,533 in REV and 2,419 in BYSCORE -- and BYSCORE is the one form upstream
+    # forces to skiplist (zsetTypeCreate(-1,0)). These two shapes test whether the
+    # destination ENCODING is what separates them.
+    #
+    # PREDICTIONS, recorded before the run so the result can falsify them:
+    #   * if encoding is the driver -> at n=200 both are skiplists, so rank and REV
+    #     CONVERGE and both per-member rates fall toward BYSCORE's ~2,419.
+    #   * if they stay ~2x apart -> encoding is NOT the driver and the rank/REV split has
+    #     another cause, which no amount of listpack reasoning will explain.
+    "zrangestore_200": (
+        [" ".join(["ZADD", "zr200src"] + [f"{i} m{i:03d}" for i in range(200)])],
+        ["ZRANGESTORE", "zr200dst", "zr200src", "0", "-1"],
+    ),
+    "zrangestore_rev_200": (
+        [" ".join(["ZADD", "zrv200src"] + [f"{i} m{i:03d}" for i in range(200)])],
+        ["ZRANGESTORE", "zrv200dst", "zrv200src", "0", "-1", "REV"],
+    ),
     "zrangestore_64": (
         [" ".join(["ZADD", "zr64src"] + [f"{i} m{i:02d}" for i in range(64)])],
         ["ZRANGESTORE", "zr64dst", "zr64src", "0", "-1"],

@@ -31302,3 +31302,73 @@ PROVENANCE:
 RETRY PREDICATE. Do not re-confirm ozrro's four numbers a third time — two ELFs at 0.0-0.9 pct
 is settled. If anyone takes the ZRANGESTORE REV form, the check is that `zrangestore_all`'s
 687.9 is UNCHANGED afterwards, and that the arity-5 class still claims arity 5 exactly.
+
+--------------------------------------------------------------------------------
+## MEASURED (frankenredis-gvm6z) — the rank-vs-REV asymmetry I banked as UNEXPLAINED is the destination ENCODING: they converge to 2.3 pct once both are skiplists, and redis's rank cost FALLS 39.8 pct when the destination gets 3.1x bigger
+
+Claim class: MEASURED-STRUCTURE, with a falsification test whose predictions were written
+into the shape file BEFORE the run. No build in this window; ELF snapshotted earlier.
+
+THE OPEN ITEM. Two rows ago I recorded that at 64 members redis costs 678,655 (rank) /
+350,143 (REV) / 162,574 (BYSCORE) instr/op for the same 64 members, said my
+listpack-vs-skiplist mechanism predicted BYSCORE cheap (it held) but also predicted REV at
+least as expensive as rank (it did not — REV measured HALF), and refused to publish the
+mechanism. This resolves the main half of it.
+
+THE TEST. `zset-max-listpack-entries` defaults to 128 (redis config.c:3219), so a 64-member
+destination is a LISTPACK and a 200-member one is a SKIPLIST. BYSCORE is the one form
+upstream already forces to skiplist (`zsetTypeCreate(-1, 0)`), which is why it was the cheap
+one. Predictions recorded in the shape file before running: if encoding is the driver, rank
+and REV CONVERGE at n=200; if they stay ~2x apart, encoding is not the driver.
+
+    redis           rank        REV       apart
+    n=64  LISTPACK  678,655.2  350,143.1   1.94x
+    n=200 SKIPLIST  408,744.8  418,087.4   1.02x   <- CONVERGED
+
+**Prediction confirmed.** And the sharpest single number is this: redis's rank-mode
+ZRANGESTORE costs **39.8 pct LESS at 200 members than at 64** — an absolute decrease while
+doing 3.1x more work. A cost that falls as the workload grows is not a scaling curve; it is a
+regime change, and it places the listpack-destination path as pathological for rank mode.
+
+WHAT IS STILL NOT EXPLAINED, and I am again not inventing it: WITHIN the listpack regime at
+n=64, REV was cheaper than rank by 1.94x. Insertion order is the obvious candidate — ascending
+scores append at a listpack's tail, descending insert at its head — but that predicts REV
+MORE expensive, the opposite sign of the measurement. So the encoding explains the rank/REV
+SPLIT (it vanishes when both are skiplists) without explaining its DIRECTION inside the
+listpack regime. That residual is the honest remainder.
+
+    NOTE FOR ANYONE FITTING THIS: do NOT fit a slope across 64 and 200. They sit on opposite
+    sides of the 128 encoding boundary, and a line drawn across a regime boundary is exactly
+    what produced this repo's refuted SINTER k=14.2 crossover.
+
+fr SHOWS NONE OF IT. At n=200 fr reads 117,337.7 (rank) and 119,905.3 (REV) — 2.19 pct apart
+— against redis's 408,744.8 and 418,087.4, i.e. **0.2871x and 0.2868x**. fr's two forms agree
+with each other at both sizes; it has no rank/REV split to explain because its builder is the
+same one-pass bulk build either way (frankenredis-zsetbulk).
+
+AND A THIRD CONFIRMATION OF THE PER-CALL DISPATCH CONSTANTS, now spanning 3 to 200 members —
+a 67x range — because these runs carried them for free:
+
+    classified (arity 5)  683.6 / 684.1 / 687.9 / 703.0          drift +2.84 pct
+    generic    (arity 6)  3,802.5 / 3,802.8 / 3,809.0 / 3,874.1 / 3,876.5 / 3,858.2   +1.95 pct
+
+The generic figure now rests on SIX measurements at three member counts. The ~3,115 instr/op
+option-form prize stands, with the ~3 pct tolerance these numbers actually support rather than
+the exactness my earlier rows implied.
+
+PROVENANCE:
+  fr ELF        61778add43b18a6b4ae913d952d86c5a994db21695bf5534f9f79d51e6942bb0, built in an
+                earlier window (RCH_CARGO_WRAPPER_BYPASS=1, env -u CARGO_TARGET_DIR, no [RCH]
+                line), copied to a private path. Vintage: one commit since, SCAN, no
+                ZRANGESTORE path touched.
+  incumbent     redis-server sha=d2c8a4b9 == vendored source HEAD, clean, verified per run.
+  host          thinkstation1, 64 cores, governor powersave, /data 164G, NO build in window.
+  per-arm load  zrangestore_200 9.67/10.63/13.18 -> 10.07/10.67/13.15; rev_200
+                10.07/10.67/13.15 -> 11.21/10.90/13.17. 1-min at or below the 5-min.
+  per-arm MHz   window mean 2,292-2,893 across the arms; cross-core 1,429-4,292 at a single
+                instant, as always on this host.
+
+RETRY PREDICATE. The rank/REV SPLIT is settled — do not re-measure it. The residual (why REV
+is cheaper than rank INSIDE the listpack regime) needs a redis-side profile, not another
+ratio: `callgrind_annotate --tree=calling` on the redis arm at n=64, comparing the two forms'
+callees, is the instrument. Do not fit any slope across the 128-member boundary.
