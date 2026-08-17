@@ -30,6 +30,9 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from shared_executor_map import covered_commands  # noqa: E402  (sys.path set above)
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CMD_TABLE = os.path.join(ROOT, "crates", "fr-command", "src", "lib.rs")
 FLOOR = os.path.join(ROOT, "crates", "fr-server", "src", "main.rs")
@@ -104,10 +107,25 @@ def borrowed_trio(server_text: str, runtime_text: str) -> dict[str, set[str]]:
             m.group(1).lower()
             for m in re.finditer(r"fn parse_borrowed_plain_([a-z0-9_]+?)_packet", server_text)
         },
+        # (frankenredis-gvm6z) UNION with the SHARED-executor map, because the per-command
+        # scan below CANNOT see a command dispatched through a shared executor that takes a
+        # discriminant -- `execute_plain_keymeta_borrowed(PlainKeyMetaCmd::Pexpiretime, ..)`
+        # matches no `fn execute_plain_pexpiretime_borrowed`. There are EIGHT such enums
+        # covering 32 commands.
+        #
+        # This is not hypothetical: `scripts/shared_executor_map.py` exists because acting on
+        # one of those false [C] labels produced a DUPLICATE PEXPIRETIME executor that
+        # nothing calls (ledger b2df577ba). That tool was written and then never wired into
+        # this report, so the report kept emitting the label that caused the mistake.
+        #
+        # The error is ONE-DIRECTIONAL: the per-command scan UNDERSTATES machinery, so it can
+        # only produce false [C]/[B], never a false [A]. The union therefore moves commands
+        # OUT of [C] and never into it.
         "executor": {
             m.group(1).lower()
             for m in re.finditer(r"fn execute_plain_([a-z0-9_]+?)_borrowed", runtime_text)
-        },
+        }
+        | covered_commands(runtime_text),
     }
 
 
@@ -247,6 +265,37 @@ fn next_function() {}
     assert "hincrbyfloat" in trio["parser"] and "hincrbyfloat" not in trio["executor"], (
         "hincrbyfloat must land in [B] PARTIAL, not [A] ready"
     )
+
+    # (frankenredis-gvm6z) A command served ONLY by a SHARED executor must still count as
+    # having one. The fixture is the POST-REMOVAL state of PEXPIRETIME, which is scheduled:
+    # b2df577ba landed a duplicate per-command PEXPIRETIME executor, found it REDUNDANT, and
+    # pinned it "removable rather than removed". The moment it goes, the per-command scan
+    # stops seeing pexpiretime, and without the shared-executor union this report emits the
+    # same false [C] that caused the duplicate to be written in the first place -- a loop.
+    #
+    # Fixture rather than live source ON PURPOSE: wiring the map in changes NOTHING about
+    # today's report (measured: [A]=1 [B]=2 [C]=46 both ways) precisely because the
+    # redundant duplicate is still present. A test asserting against live source would
+    # therefore pass for the wrong reason and stop testing anything the day it matters.
+    srv_only_parser = "fn parse_borrowed_plain_pexpiretime_packet(i: u8) {}"
+    rt_shared_only = "\n".join([
+        "pub enum PlainKeyMetaCmd {",
+        "    Ttl,",
+        "    Pexpiretime,",
+        "}",
+        "pub fn execute_plain_keymeta_borrowed(cmd: PlainKeyMetaCmd) {}",
+    ])
+    # The per-command scan alone is blind to it -- that is the defect being guarded.
+    per_command_only = {
+        m.group(1).lower()
+        for m in re.finditer(r"fn execute_plain_([a-z0-9_]+?)_borrowed", rt_shared_only)
+    }
+    assert "pexpiretime" not in per_command_only, per_command_only
+    assert "keymeta" in per_command_only, "the shared fn itself is what the scan sees instead"
+    # With the union it is found, so pexpiretime lands in [A]/[B], never [C].
+    trio_shared = borrowed_trio(srv_only_parser, rt_shared_only)
+    assert "pexpiretime" in trio_shared["executor"], trio_shared["executor"]
+    assert "pexpiretime" in trio_shared["parser"], trio_shared["parser"]
 
     print("self-test ok")
     return 0
