@@ -4220,15 +4220,21 @@ pub(crate) fn parse_register_function_args(
 ) -> Result<RegisterFunctionSpec, RegisterFunctionArgError> {
     // Table form: exactly one argument and it is a table.
     if let [LuaValue::Table(t)] = args {
-        let Some(name_value) = t.get_str(b"function_name") else {
+        // `LuaTable::get` takes a LuaValue key and returns Nil for a miss — there is no
+        // Option-returning accessor on LuaTable (`get_str` is on LuaTableInner, one layer
+        // down). So "absent" and "present but wrong type" are separated by testing Nil
+        // FIRST, which is also what keeps MissingFunctionName distinct from NameNotString.
+        let name_value = t.get(&LuaValue::Str(b"function_name".to_vec()));
+        if matches!(name_value, LuaValue::Nil) {
             return Err(RegisterFunctionArgError::MissingFunctionName);
-        };
+        }
         let LuaValue::Str(name) = name_value else {
             return Err(RegisterFunctionArgError::NameNotString);
         };
-        let Some(callback) = t.get_str(b"callback") else {
+        let callback = t.get(&LuaValue::Str(b"callback".to_vec()));
+        if matches!(callback, LuaValue::Nil) {
             return Err(RegisterFunctionArgError::MissingCallback);
-        };
+        }
         if !lua_value_is_callable(&callback) {
             return Err(RegisterFunctionArgError::CallbackNotCallable);
         }
