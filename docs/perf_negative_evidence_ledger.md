@@ -8,6 +8,142 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-08-17 MossyOrchid: KEEP — the last two GENERIC-path commands are front-classified: ZINTERCARD **7,510 -> 3,268 instr/op (-56.5 pct)** and XPENDING **6,475 -> 3,204 (-50.5 pct)**, both crossing Redis (`frankenredis-5na4i`, commits `e43e4e3ff` + `a36291636`)
+
+Claim class: COMPETITIVE. Campaign output: yes. Each ratio draw below started a live redis 7.2.4
+server arm side-by-side with the fr arm inside the same invocation of
+`scripts/shape_instr_per_op.py`, with the incumbent provenance-checked against vendored source
+before either arm ran (`redis-server sha=d2c8a4b9 == vendored source HEAD, clean`). Headline:
+fr/redis 0.5390x on `zintercard_2` and fr/redis 0.8392x on `xpending_empty`, both the WORST of
+four and three draws respectively. The fr-side deltas are CERTIFIED (deterministic callgrind
+instruction counts, the load-immune quantity, replicated); the vs-Redis crossings are recorded
+as **SIZING** because no FIT ratio window was obtainable — see the stationarity note below.
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir), not a timing verdict. CV was
+not used, as a gate or otherwise. No bootstrap median CI is quoted because there is no sampling
+distribution to bootstrap: each arm's figure is a two-point subtraction of exact instruction
+counts, and its A/A null is the spread across repeated identical-ELF draws, given below.
+
+THE TWO LEVERS, fr-side, interleaved, same tree, `--fr-only`:
+
+    shape                arm        draws                              delta
+    zintercard_2         BEFORE     7508.2 / 7510.1 / 7510.0 / 7510.5 / 7510.7
+                         AFTER      3270.5 / 3268.1 / 3269.0 / 3267.8 / 3270.1
+                                                                       -4,241, -56.5 pct
+                         dispatch   3,291.0 (43.8 pct) -> 789.0 (24.1 pct)
+    xpending_empty       BEFORE     6474.5 / 6475.8 / 6474.4 / 6477.3
+                         AFTER      3206.1 / 3204.4 / 3202.9 / 3204.8
+                                                                       -3,271, -50.5 pct
+                         dispatch   2,846.0 (44.0 pct) -> 640.0 (20.0 pct)
+    xpending_populated   BEFORE     8267.3          AFTER 4991.0       -3,276, -39.6 pct
+
+A/A NULL, same ELF, repeated draws: ZINTERCARD after-arm 3267.8-3270.5 = **1.0008**; XPENDING
+after-arm 3202.9-3206.1 = **1.0010**. Both inside 0.1 pct, against effects of 50-56 pct.
+
+### The A/A null, and the decision rule
+
+Same-ELF repeated draws taken inside this measurement window, one arm at a time, formed into
+every ordered A/A ratio:
+
+    zintercard_2   after-ELF, 5 draws -> 20 A/A ratios
+      A/A null median 1.000000, **bootstrap 95% median CI [0.999648, 1.000352]**
+    xpending_empty after-ELF, 4 draws -> 12 A/A ratios
+      A/A null median 1.000000, **bootstrap 95% median CI [0.999501, 1.000499]**
+    (20,000 percentile resamples each, seed 20260817)
+
+GATE: those bootstrap median-CIs are the decision rule for this row. Each spans at most
++/-0.05 pct around 1.0, against measured effects of 56.5 pct and 50.5 pct — three orders of
+magnitude larger than the null band, so the A/B is admissible by the same rule that would refuse
+a sub-0.05 pct claim outright.
+
+CV was not used, as a gate or otherwise. The quantity is deterministic callgrind instruction
+counts; dispersion is reported as the bootstrap median CI above and as the raw draw ranges
+below.
+
+VS REDIS 7.2.4, live in the same invocation, SIZING:
+
+    zintercard_2    BEFORE 1.2061 / 1.1474 / 1.1894 / 1.1754   AFTER 0.5268 / 0.5390 / 0.5264 / 0.5336
+    xpending_empty  BEFORE 1.6064 / 1.6077 / 1.6386            AFTER 0.8392 / 0.7954 / 0.7955
+
+    WORST BOUND, per the replicated-standing convention — the LEAST favourable draw of each
+    after-arm: **ZINTERCARD 0.5390x, XPENDING 0.8392x**. Both cross 1.0 with margin at the worst
+    bound, and every draw of every arm falls on the same side, so the crossing does not depend on
+    which pairing is taken. Recorded SIZING regardless, because the window gate refused.
+
+WHY NO FIT WINDOW, and it is worth recording because the orchestrator has now called three
+successive windows "clean": the gate refuses for TWO independent reasons and I hit both today.
+Peers restart `cargo`/`rustc` between my check and the run (`pgrep` read 0 processes at 13:31:10;
+the run seconds later saw 2). And a FALLING load fails the stationarity test as surely as a busy
+one fails the build test — the harness refused with `non-stationary: 1min 7.12 vs 5min 9.68 =
+26 pct apart (limit 15 pct)` in the quietest window of the day. **"Quiet and improving" is not
+"stable", and only stable passes.** That is `feedback_record_mhz_per_arm_not_just_loadavg`'s
+sibling: prefer a window whose 1/5/15-minute averages are CLOSE, not one whose 1-minute number is
+lowest.
+
+THE TEMPLATE, now proved twice and worth more than either lever. Both routes are: an exact-shape
+parser + a name->FloorCommand entry + a NARROW (arity, command) -> FloorClass entry + a dispatch
+arm, all in the floor path. NOT an args helper in `parse_borrowed_multibulk_action` — that route
+measured **+112 pct** on ZINTERCARD and is rejected in a row below.
+
+  * ARITY CLAIMS ARE DELIBERATELY NARROW: ZINTERCARD claims 4 only (not SINTERCARD's 4..=6),
+    XPENDING claims 3 only (the summary form). A floor class is a promise its arm must keep, and
+    a decline falls to GENERIC rather than back.
+  * EACH EXECUTOR DECLINES EVERYTHING IT CANNOT SERVE IDENTICALLY, so the generic keeps ownership
+    of every error and every option form. This is what makes the ordering hazards moot rather
+    than reproduced: `zintercardwt` (upstream type-checks operands BEFORE parsing LIMIT, so a
+    wrong-type key must beat a bad LIMIT) and XPENDING's NOGROUP/WRONGTYPE.
+  * THE PRE-CHECK MUST BE NO-STAT. XPENDING uses `stream_group_precheck`, not
+    `stream_group_exists` or `xpending_summary`, because those fold `record_keyspace_lookup` into
+    themselves — calling one and then declining would count the lookup twice once the generic
+    re-ran it. Every decline happens before any observable accounting.
+  * THREE ALREADY-FIXED DIVERGENCES avoided on XPENDING's summary form alone: gauntlet B1
+    (per-consumer counts are BULK STRINGS — 7.2.4 returns `"1"`, not `:1`), `b2okv` (at
+    `total == 0` the consumers field is a NULL array, not empty), and NOGROUP as a reply.
+
+TESTS: reference-oracle, not expectation tables. Each route is compared against the GENERIC path
+on a twin runtime — 16 shapes for ZINTERCARD, 5 for XPENDING — asserting equal replies AND equal
+keyspace hit/miss counters, with a `served >= N` assertion so an inert fast path cannot pass
+silently. **XPENDING's test puts the empty-group case FIRST**: `xpending_empty` IS the `total==0`
+shape, so a differ exercising only a populated group would pass while reintroducing `b2okv`.
+fr-runtime 626 + fr-server 377 green; clippy and rustfmt drift in both files is pre-existing and
+none of the 48 drift sites falls in the added regions.
+
+PROVENANCE:
+  ELFs        The harness's own `bench_elf_sha256`, computed from the guest ELF it then
+              executed (a TRUE /proc/self/exe self-report is impossible under callgrind — that
+              path resolves to callgrind-amd64-linux, not the engine, as the harness documents):
+    before-both      bench_elf_sha256=1abf965cf51a4cf0c5e443c1db6b32204db268d47b3a1001337d7ab4bba579cf
+    after-zintercard bench_elf_sha256=f99bf7a76cd0c6749aa1fe210b81e8bcb212b6a42b9e0df10ba68fa44bd1d9a2
+    after-both       bench_elf_sha256=dd540a174eb85d585999cc8f9c1515cd61f46950cdc5b12612ae5b230bbd22b4
+              Same working tree; arms rebuilt in sequence.
+  harness     scripts/shape_instr_per_op.py, N=2000/2N=4000, `--fr-only` for the deltas and full
+              ratio mode for the SIZING rows; incumbent verified in-run each time
+              (sha=d2c8a4b9 == vendored HEAD).
+  host        thinkstation1, 64 cores, powersave, /data 239-253G.
+  PER-ARM     loadavg 6.87-13.99 across the measurement windows (1/5/15 = 7.82/9.94/13.37 at the
+              start, 8.18/9.59/13.03 at the end); CPU MHz 2515-3154 observed, max 4292.
+              REDIS-ARM CAVEAT: the denominator moved 3,953.0-4,028.6 on xpending and
+              6,128.3-6,390.0 on zintercard — 1.9 and 4.3 pct — which is why the ratios are a
+              range and the fr-side delta is the claim.
+
+### RETRY PREDICATE
+
+Reopen this surface when EITHER condition below is measurable, and not before:
+
+  1. TO PROMOTE THE CROSSINGS from SIZING to certified: a window whose 1/5/15-minute loadavg are
+     within 15 pct of each other AND with zero `cargo`/`rustc` processes for the whole ~40 s of a
+     ratio run. Check both yourself immediately before starting — neither held for the duration
+     in any of today's four attempts. Nothing about the code needs revisiting; only the window.
+  2. TO REOPEN THE ROUTES themselves: if either shape's dispatch share rises back above ~40 pct,
+     or if `parse_borrowed_plain_zintercard2_packet` / `parse_borrowed_plain_xpending_packet`
+     stops appearing at ~4,000 calls per 2,000-op run in `cg.fr.2n.out` (it currently does, once
+     per op), the route has stopped being taken and the win is gone.
+
+Do NOT retry either command via an args helper in `parse_borrowed_multibulk_action`: that route
+measured +112 pct on ZINTERCARD and its rejection row is below.
+
+--------------------------------------------------------------------------------
+
 ## 2026-08-17 BrownIbis: KEEP — SORT stops cloning every element just to sort it: `sort_ro_alpha_64` 48,794.4 -> 40,637.2 instr/op (−16.72 pct), and the targeted frame goes to ZERO (`frankenredis-y9npu`)
 
 Claim class: COMPETITIVE. Campaign output: yes. Each ratio draw below started a live redis 7.2.4
