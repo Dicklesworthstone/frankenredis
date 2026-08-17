@@ -33994,3 +33994,82 @@ RETRY PREDICATE: `fpqns` stays open on the remaining ~2.1x, and the next step is
 THAT, not to extend this fix. Before adding the same buffer to other container commands,
 check their dispatch share first — if it reads a few hundred instr/op they are
 front-classified and the change is dead code for them.
+
+--------------------------------------------------------------------------------
+## 2026-08-17 RusticHorizon: THE REMAINING 2.19x ON PUBSUB CHANNELS IS ATTRIBUTED — two independent LINEAR SCANS of a 110-entry table per dispatch, each preceded by allocations to build the key, plus flags parsed by splitting a string (`frankenredis-fpqns`)
+
+Claim class: COMPETITIVE. Campaign output: yes — the route's standing is fr/Redis 7.2.4
+2.1922x on `pubsub_channels`, both arms live in the same invocation; this row attributes that
+2.19x rather than adding a ratio.
+
+`9abeaa5c1` closed the mechanism question for the −9.76 pct already landed and left the
+remaining ~2.1x unattributed, with a retry predicate to attribute THAT next. Done, on the
+post-fix binary, per-op figures derived from the 2N run (4,000 ops):
+
+    frame                                    instr/op   pct
+    fr_command::check_full_command_arity          862   9.09
+    fr_command::effective_command_flags           774   8.17
+    fr_runtime::push_ascii_lowercase_lossy        726   7.67
+    __memcmp_avx2_movbe (libc)                    679   7.17
+    fr_command::command_table_index               495   5.23
+    core::str::Split<IsWhitespace>::try_fold      471   4.97
+                                              -------
+    command lookup + validation                 3,281   36 pct of 9,201
+
+    REDIS ANSWERS THE WHOLE COMMAND IN ~4,200. fr spends ~3,281 deciding WHAT the command is
+    and whether it is allowed, for a command whose reply is an empty array.
+
+THE MECHANISM, read from source. Both hot frames do the same thing, independently, on every
+container dispatch:
+
+  `check_full_command_arity` (lib.rs:19210) — THREE allocations then a linear scan:
+        let parent = String::from_utf8_lossy(name).to_ascii_lowercase();   // alloc 1
+        let sub    = String::from_utf8_lossy(&argv[1]).to_ascii_lowercase(); // alloc 2
+        let key    = format!("{parent}|{sub}");                             // alloc 3 + fmt
+        SUBCOMMAND_TABLE.iter().find(|entry| entry.0 == key.as_str())       // O(110) strcmp
+
+  `effective_command_flags` (lib.rs:19268) — one allocation then the SAME scan again:
+        let mut key = Vec::with_capacity(..); key.extend(lowercased parent|sub);
+        SUBCOMMAND_TABLE.iter().find(|entry| entry.0.as_bytes() == key.as_slice())
+
+  and the flags it returns are a WHITESPACE-SEPARATED `&'static str`, so callers ask
+  questions by `flags.split_whitespace().any(|flag| flag == "write")` — which is the
+  `Split<IsWhitespace>` frame at 471 instr/op, and `__memcmp_avx2_movbe` at 679 is the two
+  table scans comparing entry names.
+
+    SO THE SAME KEY IS BUILT TWICE, WITH FOUR ALLOCATIONS BETWEEN THEM, AND THE SAME
+    110-ENTRY TABLE IS SCANNED TWICE, PER COMMAND.
+
+THE CODEBASE ALREADY KNOWS, WHICH IS THE PART WORTH NOTING. `check_full_command_arity` carries
+a comment explaining that its OUTER guard used to allocate on every command and that
+`command_has_subcommands_bytes` was written for exactly that (byq16) — "this call site simply
+never adopted it". The guard was fixed; the branch BEHIND the guard still does three
+allocations, a `format!` and a linear scan. The optimisation stopped at the boundary of the
+common case and left the container case untouched, which is precisely the shape of the fix I
+landed in `fbe5d999c` one layer up.
+
+THREE SEPARABLE LEVERS, sized from the table above rather than guessed:
+  1. Build the `parent|sub` key ONCE per dispatch and pass it to both callers — removes four
+     allocations and one of the two builds. Bounded by the 862 + 774 frames.
+  2. Replace `iter().find()` with a binary search or a match: `SUBCOMMAND_TABLE` is a `const`
+     slice of 110 entries and is already sorted by name in source order. Bounded by the 679
+     memcmp frame.
+  3. Store flags as a BITSET rather than a whitespace-separated string, so a flag test is a
+     mask instead of a split-and-compare. Bounded by the 471 Split frame, and it would touch
+     every flag query in the codebase, not just this route.
+
+    None of the three is speculative — each has a named frame and a per-op cost. Together
+    they bound at ~2,300 of the 3,281, which would put `pubsub_channels` near 6,900 instr/op
+    and roughly 1.6x rather than 2.19x. That is a sizing, not a promise: I have not built it.
+
+PROVENANCE: no new build; callgrind `--fr-only` on the post-fix binary from `fbe5d999c`
+(ELF 14c375e9edf5835f). Per-op figures are dump totals over the 2N run divided by 4,000.
+  host          thinkstation1, 64 cores, powersave, /data 123G, ONE PEER BUILD running.
+  PER-ARM loadavg/MHz  13.73/17.10/16.47 at the dump. No certification is claimed: this row
+                is frame attribution, which a loaded host does not alter.
+
+RETRY PREDICATE: take lever 1 first — it is the smallest, it removes four allocations, and it
+is the same edit already proven twice in this file (byq16, fbe5d999c). Do NOT start with the
+bitset: it is the largest blast radius of the three and the least contained. And keep
+`pubsub_numsub` OUT of the control set for any of them — `9abeaa5c1` established it is
+front-classified and never executes this path.
