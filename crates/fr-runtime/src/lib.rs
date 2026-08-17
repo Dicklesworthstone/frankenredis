@@ -45802,12 +45802,107 @@ impl Runtime {
             }
         );
         info.push_str("aof_last_cow_size:0\r\n");
+        // (frankenredis-w1djx) The AOF SIZING GROUP, which upstream emits only under
+        // `if (server.aof_enabled)` (server.c:5808) and fr emitted not at all.
+        //
+        // MEASURED before this change, private redis+fr pair, `CONFIG SET appendonly yes`
+        // then `INFO persistence`: redis 36 persistence fields, fr 30 — all six absent.
+        // With appendonly OFF both engines emit 30 and agree, which is why no ordinary
+        // INFO differ ever caught it: the cheap test is guaranteed to pass.
+        //
+        // A client that enables AOF and reads `aof_current_size` — the standard way to
+        // watch AOF growth, and what an auto-rewrite policy keys on — got a KeyError
+        // against fr where redis returns a number.
+        //
+        // The guard is upstream's, so the fields appear and disappear with appendonly
+        // exactly as they do there.
+        if self.server.aof_path.is_some() {
+            // Sizes come from the appendonlydir on disk. Upstream keeps running counters
+            // (`server.aof_current_size`) updated on every write; fr does not track bytes,
+            // so it stats the files it wrote. INFO is a rare, human-driven command, so a
+            // couple of stat calls here are cheaper than maintaining a counter on the
+            // write path — and unlike a counter they cannot drift from the real file.
+            let (base_size, current_size) = self.aof_on_disk_sizes();
+            let _ = write!(info, "aof_current_size:{current_size}\r\n");
+            let _ = write!(info, "aof_base_size:{base_size}\r\n");
+            // Upstream reports `server.aof_rewrite_scheduled` here — the SAME value it
+            // reports as `aof_rewrite_scheduled` above, under a second name. fr already
+            // tracks it, so this is the one field of the six that needed no new source.
+            let _ = write!(
+                info,
+                "aof_pending_rewrite:{}\r\n",
+                usize::from(self.server.aof_rewrite_scheduled)
+            );
+            // Upstream: `sdslen(server.aof_buf)`, the bytes accepted but not yet written.
+            // fr buffers RECORDS and flushes the tail past `aof_disk_flushed_records`, so
+            // the equivalent is the encoded length of that tail. Normally zero, because the
+            // incremental flush runs every event-loop pass.
+            let _ = write!(
+                info,
+                "aof_buffer_length:{}\r\n",
+                self.pending_aof_buffer_bytes()
+            );
+            // STRUCTURAL ZEROES, and they are zero because the mechanism does not exist
+            // rather than because it is unimplemented:
+            //   * upstream counts queued BIO_AOF_FSYNC jobs; fr has no background-IO
+            //     threads at all, so nothing can ever be queued.
+            //   * upstream increments aof_delayed_fsync when an everysec fsync is postponed
+            //     because a previous one is still running in that BIO thread — same absent
+            //     mechanism, so the counter can never advance.
+            // If fr ever grows background fsync, BOTH must become real counters.
+            info.push_str("aof_pending_bio_fsync:0\r\n");
+            info.push_str("aof_delayed_fsync:0\r\n");
+        }
         // Module fork tracking is module-only in upstream; fr has no module
         // subsystem so always report no module fork in flight.
         info.push_str("module_fork_in_progress:0\r\n");
         info.push_str("module_fork_last_cow_size:0\r\n");
         info.push_str("\r\n");
         RespFrame::BulkString(Some(info.into_bytes()))
+    }
+
+    /// (frankenredis-w1djx) `(aof_base_size, aof_current_size)` for INFO persistence, read
+    /// off the appendonlydir this server wrote.
+    ///
+    /// Upstream keeps both as running counters updated on the write path. fr does not track
+    /// AOF bytes, so it stats instead: the BASE size is the `<name>.<seq>.base.rdb` written
+    /// by the last rewrite, and the CURRENT size is that plus the live `<name>.<seq>.incr.aof`
+    /// — which is exactly upstream's decomposition (`aof_rewrite_base_size` is the size as of
+    /// the last rewrite; `aof_current_size` is the whole thing).
+    ///
+    /// Returns `(0, 0)` when the files are not there yet — an AOF enabled but never written
+    /// has no size, and upstream reports 0 in that state too. A stat failure is likewise 0
+    /// rather than an error: INFO must not fail because a file was being renamed under it.
+    fn aof_on_disk_sizes(&self) -> (u64, u64) {
+        let Some(path) = self.server.aof_path.as_ref() else {
+            return (0, 0);
+        };
+        let (dir, basename) = aof_manifest_target(path);
+        let seq = self.server.aof_current_seq;
+        let size_of = |name: String| -> u64 {
+            std::fs::metadata(dir.join(name))
+                .map(|m| m.len())
+                .unwrap_or(0)
+        };
+        let base = size_of(format!("{basename}.{seq}.base.rdb"));
+        let incr = size_of(format!("{basename}.{seq}.incr.aof"));
+        (base, base.saturating_add(incr))
+    }
+
+    /// (frankenredis-w1djx) Bytes accepted into the AOF but not yet written to disk —
+    /// upstream's `sdslen(server.aof_buf)`.
+    ///
+    /// fr buffers RECORDS rather than a byte string and flushes everything past
+    /// `aof_disk_flushed_records` on each event-loop pass, so the equivalent quantity is the
+    /// encoded length of that unflushed tail. It is normally 0 for exactly that reason; it
+    /// is non-zero only between a write and the next flush.
+    fn pending_aof_buffer_bytes(&self) -> usize {
+        let flushed = self.server.aof_disk_flushed_records;
+        let records = &self.server.aof_records;
+        if flushed >= records.len() {
+            return 0;
+        }
+        fr_persist::encode_aof_stream(&records[flushed..]).len()
     }
 
     fn handle_info_replication_section(&mut self) -> RespFrame {
@@ -70974,6 +71069,62 @@ mod tests {
     /// rewritten by the several sibling tests that pass a bare relative path to
     /// `set_aof_path`. A test asserting that absence fails for reasons that have nothing
     /// to do with this fix, which is exactly what it did when written that way.
+    /// (frankenredis-w1djx) The AOF sizing group appears only when appendonly is ON, which
+    /// is upstream's guard (`if (server.aof_enabled)`, server.c:5808) and also the reason
+    /// the gap survived: with appendonly OFF both engines emit neither field and AGREE.
+    ///
+    /// MEASURED before the fix on a private redis+fr pair: `CONFIG SET appendonly yes` then
+    /// `INFO persistence` gave redis 36 fields and fr 30, with all six absent from fr.
+    ///
+    /// THE OFF CASE IS THE DISCRIMINATING HALF. A fix that emitted these unconditionally
+    /// would pass any "are the fields present" test while diverging from upstream on every
+    /// default server — the far more common configuration — so absence is asserted first.
+    #[test]
+    fn info_persistence_aof_sizing_fields_follow_appendonly_w1djx() {
+        const SIZING: [&str; 6] = [
+            "aof_current_size",
+            "aof_base_size",
+            "aof_pending_rewrite",
+            "aof_buffer_length",
+            "aof_pending_bio_fsync",
+            "aof_delayed_fsync",
+        ];
+        let mut rt = Runtime::default_strict();
+
+        let info_off = match rt.execute_frame(command(&[b"INFO", b"persistence"]), 1) {
+            RespFrame::BulkString(Some(b)) => String::from_utf8_lossy(&b).into_owned(),
+            other => panic!("expected bulk INFO, got {other:?}"),
+        };
+        for field in SIZING {
+            assert!(
+                !info_off.contains(&format!("{field}:")),
+                "{field} must be ABSENT while appendonly is off — upstream guards the whole \
+                 group on server.aof_enabled"
+            );
+        }
+        // Sanity: the section really was rendered, so the absence above means something.
+        assert!(info_off.contains("aof_enabled:0\r\n"), "{info_off}");
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"appendonly", b"yes"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let info_on = match rt.execute_frame(command(&[b"INFO", b"persistence"]), 3) {
+            RespFrame::BulkString(Some(b)) => String::from_utf8_lossy(&b).into_owned(),
+            other => panic!("expected bulk INFO, got {other:?}"),
+        };
+        for field in SIZING {
+            assert!(
+                info_on.contains(&format!("{field}:")),
+                "{field} must be PRESENT once appendonly is on; got:\n{info_on}"
+            );
+        }
+        assert!(info_on.contains("aof_enabled:1\r\n"), "{info_on}");
+        // A never-written AOF has no size, and upstream reports 0 in that state too.
+        assert!(info_on.contains("aof_current_size:0\r\n"), "{info_on}");
+        assert!(info_on.contains("aof_base_size:0\r\n"), "{info_on}");
+    }
+
     #[test]
     fn bgrewriteaof_after_appendonly_no_writes_to_the_configured_dir_cnfiso() {
         let dir = std::env::temp_dir().join(format!(
@@ -70997,9 +71148,7 @@ mod tests {
         );
         assert_eq!(
             rt.execute_frame(command(&[b"BGREWRITEAOF"]), 3),
-            RespFrame::SimpleString(
-                "Background append only file rewriting started".to_string()
-            )
+            RespFrame::SimpleString("Background append only file rewriting started".to_string())
         );
 
         let landed = std::fs::read_dir(&dir)
