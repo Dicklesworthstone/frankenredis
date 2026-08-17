@@ -31,6 +31,7 @@ Modes:
       exit 5 = incomplete timing contract · exit 6 = CV-gated verdict
       exit 7 = missing retry predicate
       exit 9 = verdict heading outside a configured ledger schema
+      exit 10 = RESTORE ratio quoted without the RESTORE+read break-even
 
   check-staged
       Inspect every added OR modified verdict entry in every repository ledger
@@ -214,6 +215,38 @@ def retry_excerpt(body):
     if next_bullet != -1:
         excerpt = excerpt[:next_bullet]
     return excerpt.strip()
+
+
+RESTORE_RE = re.compile(r"\bRESTORE\b", re.IGNORECASE)
+RATIO_RE = re.compile(r"\b\d+\.\d+\s*x\b", re.IGNORECASE)
+# Any of these means the writer has engaged with the read premise, however they
+# phrase it. Deliberately generous: the gate exists to stop a row being written in
+# ignorance of the law, not to dictate wording.
+READ_PREMISE_RE = re.compile(
+    r"break-?even|reads?\s*/\s*RESTORE|RESTORE\s*\+\s*read|HGETALL|"
+    r"b1o02|hash_restore_read_premise|isolation",
+    re.IGNORECASE,
+)
+
+
+def restore_isolation_without_premise(body):
+    """A RESTORE ratio quoted without engaging the RESTORE+read break-even.
+
+    OBSERVED DEFECT CLASS, which is why this gate exists: b1o02 closed as a
+    premise-REJECT on 2026-08-08 in docs/NEGATIVE_EVIDENCE.md, establishing that a
+    RESTORE-in-ISOLATION ratio is not a deficit because fr's eager decode is a
+    prepaid cost that buys O(1) reads -- redis pays 5.04x more per read, and the
+    break-even is well under one read per restore. That law lives in one ledger
+    while RESTORE rows are routinely appended to the other. frankenredis-33832 was
+    filed EIGHT DAYS later restating the isolation framing, and three further
+    commits were built on it before anyone re-ran the probe.
+
+    DELETION CONDITION: delete this when the two ledgers are merged, or when
+    docs/perf_negative_evidence_ledger.md carries the standing laws itself.
+    """
+    if not RESTORE_RE.search(body) or not RATIO_RE.search(body):
+        return False
+    return READ_PREMISE_RE.search(body) is None
 
 
 def concrete_retry(body):
@@ -466,6 +499,7 @@ def check_entry_blocks(blocks):
     timing_contract = []
     cv_gated = []
     missing_retry = []
+    restore_isolation = []
     for title, body in blocks:
         is_reject = REJECT_RE.search(title) is not None
         is_keep = KEEP_RE.search(title) is not None
@@ -486,6 +520,8 @@ def check_entry_blocks(blocks):
             cv_gated.append(title)
         if (is_keep or is_reject) and not concrete_retry(body):
             missing_retry.append(title)
+        if (is_keep or is_reject) and restore_isolation_without_premise(body):
+            restore_isolation.append(title)
 
         if is_keep:
             classification = claim_class(body)
@@ -575,6 +611,18 @@ def check_entry_blocks(blocks):
             print(f"  offending heading: {title[:150]}")
         print("\nName the measurable condition that would justify reopening the surface.")
         return 7
+
+    if restore_isolation:
+        print("REJECTED: a RESTORE ratio quoted without the RESTORE+read break-even.")
+        for title in restore_isolation:
+            print(f"  offending heading: {title[:150]}")
+        print("\nRESTORE-in-isolation flatters redis: fr decodes eagerly, redis attaches")
+        print("the listpack shallowly and walks it on EVERY read. b1o02 closed as a")
+        print("premise-REJECT on this (docs/NEGATIVE_EVIDENCE.md), and the break-even is")
+        print("well under one read per restore -- so an isolation ratio is not a deficit.")
+        print("Run scripts/hash_restore_read_premise_run.sh and quote the break-even, or")
+        print("say why the read premise does not apply to your row.")
+        return 10
 
     reviewed = [
         title
