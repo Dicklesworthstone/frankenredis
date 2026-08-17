@@ -462,6 +462,38 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
     # sweep. The n=3 and n=64 SORT rows plus the control: that is the whole question,
     # and a set this small fits comfortably inside a single certification window,
     # which is why the 16-shape version of this run got killed at the tool timeout.
+    # (frankenredis-eh2ct) THREE SMALL/LARGE PAIRS IN ONE INVOCATION, to test whether
+    # the intercept problem the SORT row exposed generalises. The audit flagged 21
+    # size-scaling shapes seeded with <=3 elements, but only SORT had been measured
+    # both ways, so the claim "the board misdirects lever selection" rested on a
+    # single case. These are the three flagged shapes where fr measured BEHIND at
+    # tiny n in the unswept4 sweep (xrange_2 0.9935, geosearch 0.9841) plus hgetall,
+    # which is the most-quoted small-collection read — an inversion is only possible
+    # where fr currently trails, so those are the informative candidates.
+    #
+    # Both members of each pair run in the SAME invocation and window: comparing a
+    # small row from one run against a large row from another would reintroduce the
+    # cross-window error these pairs exist to remove.
+    "sizepairs": [
+        ("xrange_2", ["XADD xst 1-1 f v", "XADD xst 1-2 f v"],
+         ["XRANGE", "xst", "-", "+"]),
+        ("xrange_64",
+         ["XADD xst64 %d-1 f v" % (i + 1) for i in range(64)],
+         ["XRANGE", "xst64", "-", "+"]),
+        ("geosearch_2",
+         ["GEOADD g 13.361389 38.115556 P1", "GEOADD g 15.087269 37.502669 P2"],
+         ["GEOSEARCH", "g", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "ASC"]),
+        ("geosearch_64",
+         ["GEOADD g64 " + " ".join(
+             f"{13.0 + (i % 8) * 0.25} {37.0 + (i // 8) * 0.25} M{i:02d}"
+             for i in range(64))],
+         ["GEOSEARCH", "g64", "FROMLONLAT", "15", "37", "BYRADIUS", "500", "km", "ASC"]),
+        ("hgetall_3", ["HSET h f1 v1 f2 v2 f3 v3"], ["HGETALL", "h"]),
+        ("hgetall_64",
+         ["HSET h64 " + " ".join(f"f{i:02d} v{i:02d}" for i in range(64))],
+         ["HGETALL", "h64"]),
+        ("get_control", ["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
+    ],
     "sortsize": [
         ("sort_ro_alpha", ["RPUSH sl c a b"], ["SORT_RO", "sl", "ALPHA"]),
         ("sort_ro_alpha_64",
@@ -1112,6 +1144,15 @@ def main(argv_in: list[str]) -> int:
     parser.add_argument("--selftest", action="store_true")
     # (frankenredis-eh2ct) Server-free audit: which rows measure an intercept.
     parser.add_argument("--audit-sizes", action="store_true")
+    # (frankenredis-eh2ct) Certify a SUBSET of a set's shapes. A small/large pair plus
+    # its control is the whole question for an intercept check, and a 7-shape set at
+    # the round count admissibility actually needs (21-31) overruns the wall-clock
+    # budget of a single run — which is how one attempt got killed with no output at
+    # all. Filtering keeps both members of a pair in ONE invocation, which is the
+    # property that matters; splitting them across runs would reintroduce the
+    # cross-window error the pairs exist to remove.
+    parser.add_argument("--only", default=None,
+                        help="comma-separated shape labels to keep from --shapes")
     args = parser.parse_args(argv_in)
 
     if args.selftest:
@@ -1129,6 +1170,17 @@ def main(argv_in: list[str]) -> int:
         if not os.path.exists(path):
             raise SystemExit(f"missing binary: {path}")
     shapes = SHAPE_SETS.get(args.shapes)
+    if shapes is not None and args.only:
+        wanted = [w.strip() for w in args.only.split(",") if w.strip()]
+        by_label = {label: (label, seeds, argv) for label, seeds, argv in shapes}
+        missing = [w for w in wanted if w not in by_label]
+        if missing:
+            parser.error(
+                "--only names shapes not in set %r: %s (available: %s)"
+                % (args.shapes, ", ".join(missing),
+                   ", ".join(label for label, _s, _a in shapes))
+            )
+        shapes = [by_label[w] for w in wanted]
     if shapes is None:
         raise SystemExit(f"unknown shape set {args.shapes}; try --list")
 
