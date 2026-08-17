@@ -8,6 +8,81 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## CERTIFIED (frankenredis-ozrro) — the bypass "null" is NOT null: an unclassified command pays a ~522 instr/op MISS TAX to be looked up and missed. That tax reconciles the cross-build and bypass methods to 3 pct, and shows the multiplier is COMMAND-SPECIFIC (1.60 ZRANGESTORE .. 2.02 SCAN), not 1.586 universal
+
+Claim class: MEASURED-STRUCTURE, single ELF `fr-pair-bypass` built at bac70fcb6 with
+`--features perf-ab-cascade-bypass`, tree verified clean and fingerprint identical before and
+after the build. Both arms are the SAME BINARY, switched by FR_PERF_AB_CASCADE_BYPASS at
+runtime, so code layout, inlining and symbol addresses are identical between arms. `--fr-only`
+throughout; no denominator involved. Per-arm loadavg 12.81-13.67 / 12.04-12.28 / 12.87-12.92,
+observed core MHz 1,429-4,298. No build was started in this window.
+
+### THE NULL CONTROL FAILED, AND THAT IS THE RESULT
+
+I ran two shapes that have NO borrowed fast path in either arm — lcs_2 and sort_ro_alpha,
+both GENERIC PATH regardless of the switch. Flipping the bypass should have changed nothing.
+It changed both, in the same direction, by nearly the same amount:
+
+    shape           BYPASS=1 (skip)   BYPASS=0 (attempt)    delta   of which dispatch
+    lcs_2                  6,792.1             7,306.5      514.4        305.1
+    sort_ro_alpha         12,235.8            12,765.0      529.2        294.3
+
+Two unrelated commands agreeing to 2.9 pct on the total and 3.6 pct on the dispatch. This is
+not noise and it is not a lever: it is the cost of ATTEMPTING classification and MISSING —
+the floor table lookup plus the cascade walk that finds nothing — paid by every command that
+has no fast route. Call it the MISS TAX: ~522 instr/op, ~300 of it dispatch.
+
+I nearly banked this experiment without a null control. The deltas for the real shapes looked
+clean and self-consistent, and nothing in them hints that the baseline arm is not a baseline.
+
+### THE TAX RECONCILES TWO METHODS THAT LOOKED LIKE THEY DISAGREED
+
+The bypass arm goes STRAIGHT to generic, so it never pays the miss tax. Production, before a
+command is classified, DOES pay it. So the bypass A/B understates a lever's true value by
+exactly that tax, and adding it back reproduces my cross-build numbers:
+
+    shape        bypass delta   + miss tax   cross-build delta   apart
+    scan_zero         2,545.4      3,067.4             3,161.5   3.0 pct
+    scan_count        2,612.0      3,134.0             3,180.1   1.5 pct
+    scan_iter         2,802.0      3,324.0             3,381.4   1.7 pct
+
+Three shapes, two independent methods, agreeing to 3 pct once the tax is accounted for.
+Neither method was wrong; they measure different baselines. A cross-build A/B against a tree
+where the command was unclassified INCLUDES the miss tax, which is what production actually
+paid. The bypass A/B EXCLUDES it. For pricing a lever, the cross-build quantity is the honest
+one — or equivalently, bypass delta + ~522.
+
+### THE MULTIPLIER IS COMMAND-SPECIFIC, WHICH AMENDS gvm6z's AMENDMENT 3
+
+gvm6z corrected my "~1.9x" to "1.586x measured", on the grounds that a same-ELF A/B is the
+cleaner instrument. The instrument point is right and I have adopted it. The number is not
+universal. Corrected for the miss tax on both terms:
+
+    command        delta total   delta dispatch   multiplier
+    ZRANGESTORE        4,857.2          3,032.6      1.602
+    DUMP               3,630.6          2,057.5      1.764
+    KEYS               2,911.3          1,621.0      1.796
+    SCAN arity 2       3,067.4          1,625.7      1.886
+    SCAN arity 4       3,134.0          1,618.4      1.937
+    SCAN arity 6       3,324.0          1,646.8      2.018
+
+1.60 to 2.02, a 26 pct spread, and my original cross-build figures for SCAN (1.89 / 1.93 /
+2.01) reproduce to within 0.5 pct. So gvm6z's 1.586 is correct FOR ZRANGESTORE and wrong as a
+campaign constant — the same shape of error as the "~2,000 of generic dispatch" premise I
+corrected two rows ago, one level up. Dispatch is command-specific; the multiplier that
+converts dispatch into total saving is command-specific too. Use the command's own number or
+measure it.
+
+### COROLLARY WORTH ITS OWN LEVER
+
+Every command with no fast route pays ~300 instr/op of DISPATCH to be classified and missed,
+whether or not anything is ever done for it. That is a floor-wide tax on the unclassified
+tail, not a per-command cost, and it is the one quantity here that a single change could
+remove for many commands at once. Whether the lookup can be made to fail cheaper is untested
+and is NOT claimed — it is recorded as the next question, with the measurement that motivates
+it. Two data points is where this ledger has been burned before, so a third unclassified
+command should confirm ~522 before anyone builds against it.
+
 ## METHOD (frankenredis-ozrro) — the cascade-bypass A/B is genuinely ONE ELF, switched by an env var at runtime; building a second binary for it is a wasted build
 
 I read `#[cfg(feature = "perf-ab-cascade-bypass")]` at fr-server/src/main.rs:16955, concluded
