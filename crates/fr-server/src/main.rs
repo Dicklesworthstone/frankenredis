@@ -16323,7 +16323,11 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // nothing else, so claiming 5 or 6 would strand the LIMIT form on GENERIC — which is
         // where it already goes, but at the cost of a failed classification first
         // (project_floor_class_is_a_promise_its_arm_must_keep).
-        (4, BorrowedDispatchFloorCommand::Zintercard) => {
+        // (frankenredis-5na4i) Arity 4 and 6, listed SEPARATELY rather than as 4..=6. Arity 5 is
+        // `ZINTERCARD 1 k LIMIT n`, which the arm below does NOT serve (both parsers pin
+        // numkeys=2), so a range would claim a shape the arm declines and strand it on GENERIC
+        // after a failed classification — the exact hazard ex3il hit widening SINTERCARD.
+        (4 | 6, BorrowedDispatchFloorCommand::Zintercard) => {
             Some(BorrowedDispatchFloorClass::Zintercard)
         }
         // (frankenredis-5na4i) Arity 3 ONLY: the SUMMARY form. The extended form has a different
@@ -22309,14 +22313,26 @@ fn try_dispatch_floor_classified_action(
             // is declined by the parser or by the executor and falls to the generic path, which
             // is where it goes today anyway. The executor owns the zintercardwt ordering rule
             // (a wrong-type key must beat a bad LIMIT) by declining rather than reproducing it.
-            let hit = parse_borrowed_plain_zintercard2_packet(unparsed, &parser_config).and_then(
-                |packet| {
+            let hit = parse_borrowed_plain_zintercard2_packet(unparsed, &parser_config)
+                .and_then(|packet| {
                     let tail = [packet.numkeys, packet.k1, packet.k2];
                     runtime
                         .execute_plain_zintercard_borrowed(&tail, ts)
                         .map(|response| (packet.consumed, response))
-                },
-            );
+                })
+                // The two parsers pin different arities, so at most one can match and the order
+                // between them is immaterial.
+                .or_else(|| {
+                    parse_borrowed_plain_zintercard_limit_packet(unparsed, &parser_config).and_then(
+                        |packet| {
+                            let tail =
+                                [packet.numkeys, packet.k1, packet.k2, b"LIMIT", packet.limit];
+                            runtime
+                                .execute_plain_zintercard_borrowed(&tail, ts)
+                                .map(|response| (packet.consumed, response))
+                        },
+                    )
+                });
             if let Some((consumed, response)) = hit {
                 Ok(BorrowedMultibulkAction::FastReply { consumed, response })
             } else {
@@ -24318,6 +24334,58 @@ fn parse_borrowed_plain_sintercard2_packet<'a>(
         numkeys,
         k1,
         k2,
+    })
+}
+
+struct BorrowedPlainZintercardLimitPacket<'a> {
+    consumed: usize,
+    numkeys: &'a [u8],
+    k1: &'a [u8],
+    k2: &'a [u8],
+    limit: &'a [u8],
+}
+
+/// (frankenredis-5na4i) `ZINTERCARD 2 k1 k2 LIMIT n` — the argc-6 form.
+///
+/// The argc-4 route landed first and claimed arity 4 ONLY, which left this shape — the LARGER
+/// cell at 8,078.8 instr/op against the plain form's 7,546.7 — still on the generic path. The
+/// `LIMIT` keyword is matched case-insensitively here so the parser accepts exactly what the
+/// executor will; the VALUE is left entirely to the executor, which declines a negative or
+/// non-numeric limit so the generic keeps producing that error in upstream's order
+/// (`frankenredis-zintercardwt`: a wrong-type key must beat a bad LIMIT).
+fn parse_borrowed_plain_zintercard_limit_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainZintercardLimitPacket<'a>> {
+    if config.max_array_len < 6 || config.max_bulk_len < b"ZINTERCARD".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*6\r\n$10\r\n").and_then(|rest| {
+        rest.get(..10)
+            .filter(|command| command.eq_ignore_ascii_case(b"ZINTERCARD"))
+            .map(|_| input.len() - rest.len() + 10)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (numkeys, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    if numkeys != b"2" {
+        return None;
+    }
+    let (k1, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (k2, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (keyword, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    if !keyword.eq_ignore_ascii_case(b"LIMIT") {
+        return None;
+    }
+    let (limit, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainZintercardLimitPacket {
+        consumed,
+        numkeys,
+        k1,
+        k2,
+        limit,
     })
 }
 
