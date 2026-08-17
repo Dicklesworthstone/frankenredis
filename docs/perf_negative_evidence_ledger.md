@@ -28599,3 +28599,89 @@ opt_get, absexpire) and SetOpt6 (two). Last-in-group pays the whole group, so Se
 third member should carry ~2 wasted parses at 4 bulks. Measure set_absexpire before
 assuming it. And re-measure a bead's cell before believing its share figure -- two of the
 three cells I checked this turn were already fixed.
+
+--------------------------------------------------------------------------------
+MEASURED (frankenredis-ozrro) — ZLEXCOUNT front-classified: dispatch 4,304.9 -> 462.3
+(-89.3 pct), 0.7562x -> 0.2968x. A COST REDUCTION, not a parity fix — it was already ahead
+
+Claim class: COMPETITIVE
+
+The largest remaining dispatch cost on the board, and the seventh route cleared. Parser,
+executor, gate and metrics all existed; only the floor entry was missing.
+
+    shape        BEFORE                    AFTER                     delta
+    zlexcount    6,712.8 / 6,725.8         2,559.8 / 2,561.8         -61.9 pct
+                 dispatch 64.0 / 64.1 pct  dispatch 18.1 / 18.0 pct
+                 (~4,304.9 instr/op)       (~462.3 instr/op)         -89.3 pct
+                 ratio 0.7616x / 0.7507x   ratio 0.2980x / 0.2955x
+
+    zrangebylex  3,212.0 / 3,191.3         3,211.8 / 3,202.6         +0.17 pct  UNCHANGED
+    get_control  1,313.3 / 1,311.6         1,298.3 / 1,312.8         -0.53 pct  NULL
+
+    IT WAS ALREADY AHEAD AT 0.7562x AND IS NOW 0.2968x — from 1.3x ahead of redis to 3.4x.
+    This is a COST REDUCTION and I flagged it as one BEFORE building it, because the six
+    routes before it were parity fixes and describing this the same way would overstate it.
+    Being unclassified never implied being slow; it implied being unmeasured.
+
+`zrangebylex` is the sibling control and was chosen for the name hazard: it shares the `lex`
+stem and sits in the same zset family, so a token match that got LENGTH or ORDER wrong would
+have answered its packets through the count path. It moved 0.17 pct with an identical
+dispatch figure, so the entry is ZLEXCOUNT-specific.
+
+THE COST MODEL'S EIGHTH POINT, AND ITS BEST FIT YET. "263 + ~100 per additional bulk
+parsed": ZLEXCOUNT's parser reads THREE bulks (key, min, max), predicting ~463. Actual
+462.3 — 0.2 pct error. Across eight points the worst error is 8 pct.
+
+    1 bulk  get_control ~263    3 bulks  smove     ~466    3 bulks  hincrby   ~454
+    2 bulks rpoplpush   ~409    3 bulks  ltrim     ~498    3 bulks  substr    ~439
+    2 bulks renamenx    ~391    3 bulks  zlexcount ~462
+
+WHAT I CHECKED FIRST, AND WHY IT MATTERED. RusticLark's 188dffec6 showed my coverage tool
+UNDER-counts floor entries because rustfmt explodes some across lines — 138 classified, not
+121. My own rustfmt-robust rescan still only found 121, so 17 entries evade even that. Rather
+than trust either number I checked the DEFINITIVE signal, which is what my own retry
+predicate two rows ago told me to do: does a `BorrowedDispatchFloorClass::Zlexcount` exist?
+It did not — while `Pexpiretime` (6 refs) and `Zrevrangebylex` (4 refs) DID, both landed by
+peers since my last report. Two of the four commands on my own [A] list were already done.
+
+    THE NAME SCAN IS ADVISORY; THE CLASS/ARM IS THE FACT. That is now twice this has caught
+    me — once as a false [C] that cost 300 lines, once here as a stale [A] that would have
+    duplicated a peer's work.
+
+ALSO LANDED WHILE I WAS BLOCKED: my RENAMENX + SUBSTR entries and seven shapes reached HEAD
+via a peer picking up the parked patch, so the ledger handoff worked where agent mail (three
+timeouts) did not.
+
+CORRECTNESS. Test asserts the class claims exactly arity 4 in both cases, the parser accepts
+what is claimed, four wrong arities are refused by BOTH classifier and parser, and four
+zset/lex neighbours — ZREVRANGE (the other nine-letter token in the same match arm),
+ZRANGEBYLEX, ZREMRANGEBYLEX, ZRANGEBYSCORE — are captured by neither. MUTATION-TESTED:
+relaxing the arity map to `(_, Zlexcount)` reddens on `["ZLEXCOUNT"]`. 360 fr-server tests
+pass.
+
+PROVENANCE:
+  AFTER ELF            009f6b0cb8bc6188...
+  BEFORE ELF           b994f66ba9148210...  same tree, built minutes apart, differing ONLY
+                       by this change (stash / build / restore).
+  harness              scripts/shape_instr_per_op.py at HEAD, N=2000/2N=4000, ABBA per shape.
+  host                 thinkstation1, 64 cores, /data 184G, governor powersave, two builds.
+  PER-ARM loadavg/MHz  zlexcount 25.22/3834, 32.04/3793, 32.04/3871, 35.08/3818 ·
+                       zrangebylex 35.96/3779, 36.60/3394, 37.27/3830, 37.89/3837 ·
+                       get_control 38.30/3661, 37.96/3636, 37.96/3663, 37.64/3458.
+                       Window at open 19.74/26.50/28.04; load ROSE to 38 during the run, so
+                       this is not offered as a tight-ratio certification — small-reply
+                       shapes (fr 0.001 passes/op) are the load-immune class and the effect
+                       is 62 pct against a control that moved 0.17 pct.
+
+BLOCKED AT COMMIT TIME, AND THE CODE IS NOT IN HEAD. RusticHorizon re-reserved
+`crates/fr-server/src/main.rs` between my pre-flight check (clear at 02:25Z) and the commit
+minutes later — a race, not an oversight on either side. I did NOT override the guard. The
+measurement above stands on its own ELFs; the code is parked at
+`scratchpad/zlexcount_floor.patch`, FILTERED TO MY HUNKS ONLY this time rather than captured
+as a whole-file diff, because the previous parked patch was taken while peers had live
+uncommitted edits in the same shared working tree and would have carried theirs too.
+
+RETRY PREDICATE: check `BorrowedDispatchFloorClass::<Cmd>` before starting ANY floor entry —
+the token scans in both my tools are advisory and have now been wrong in both directions.
+Remaining [A] candidates worth measuring first are DUMP, PING and RANDOMKEY; PEXPIRETIME and
+ZREVRANGEBYLEX are already done by peers.
