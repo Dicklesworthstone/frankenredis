@@ -31570,3 +31570,52 @@ blocked on `main.rs` and `fr-runtime/src/lib.rs`, both held exclusive by MossySp
 07:19Z. Do not re-profile the incumbent here; if anyone wants the same treatment for another
 command, the pattern is: confirm the source-side frames are identical FIRST, then attribute
 only what differs.
+
+--------------------------------------------------------------------------------
+## INSTRUMENT CHECK (frankenredis-gvm6z) — the fleet-wide "placement gate had an inverted argmin" fix does not apply here: this repo's gate is a correct threshold filter, and none of my certifications were placement-gated at all
+
+Claim class: INSTRUMENT CHECK. No ratio claimed. Recorded so nobody in this repo spends a
+window re-running a certification on the strength of a fix that changes nothing here.
+
+THE PROMPT. frankenfs found a shared PLACEMENT GATE with an inverted argmin that was blocking
+three projects' certifications, and the fleet was told to re-run anything it had been
+blocking. Checked both halves of that for this repo rather than assuming either.
+
+1. **None of my certifications were placement-gated.** Every number I have banked came from
+   `scripts/shape_instr_per_op.py`, which does ZERO core pinning — `rg -c "il -c|taskset|
+   sched_setaffinity"` returns 0 matches against it. It boots both engines under callgrind
+   with no affinity control at all. My blockers have been an exclusive file reservation and
+   the no-build-in-a-measurement-window rule; neither is a placement gate.
+
+2. **This repo's placement gate is not inverted.** `scripts/restore_cert_gate.sh` stage 1 is a
+   THRESHOLD FILTER, not an argmin — there is no min-selection in it to invert:
+
+       core=$1%32; s[core]+=$2      # fold each core with its SMT sibling
+       for b in 0..7: t = sum(s[b*4 .. b*4+3]); if (t < 50) -> FREE
+
+   `t < 50` selects the LIGHTLY loaded blocks, which is the correct direction. `rg "argmin|
+   argmax|idxmin"` over `scripts/*.py` returns nothing. So the shared fix has no effect here
+   and no frankenredis row is owed a re-run because of it.
+
+RAN THE SWEEP ANYWAY, since it is two commands and the answer is useful to whoever owns
+frankenredis-33832 (hash RESTORE, 2.1273x, still the worst cell on the board):
+
+    loadavg 48.33 / 23.13 / 16.57
+    block 0 113%  1 230%  2 775%  3 227%  4 412%  5 227%  6 121%  7 219%
+    -> 0 of 8 free, needs 3.  REFUSE, and legitimately.
+
+So the RESTORE certification is still blocked — by real contention, not by a broken gate.
+
+AND A DATUM FOR THE GATE'S OWN LOADAVG NOTE. That script already warns that loadavg and block
+availability are different measurements, citing loadavg 15.5-15.7 finding only 2 of 8 blocks
+free. This adds the other end: **loadavg 48.33 -> 0 of 8**. Two points now, both showing the
+fleet CONCENTRATED rather than merely busy. The gate's refusal to accept a low loadavg as an
+override is well founded.
+
+WINDOW NOTE, because it is the operational lesson of this turn: the window was quoted to me as
+loadavg 16.7 and I measured 11.94 at the start of the turn; two minutes later it was 48.33.
+Checking `uptime` myself immediately before certifying — rather than trusting the figure in the
+prompt — is what kept a bad row from being banked. No certification was attempted.
+
+PROVENANCE: no measurement of either engine; `ps -eo psr,pcpu` and `/proc/loadavg` only. No
+build. thinkstation1, /data 159G.
