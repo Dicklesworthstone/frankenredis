@@ -38606,3 +38606,78 @@ and let a worst bound be computed from FIT draws alone, which is the only thing 
 narrow the 1.1810-1.3917 band. Do NOT re-derive the band from SIZING draws; they are
 denominator-dominated and their spread is a property of redis's elapsed-time serverCron, not
 of this route.
+
+--------------------------------------------------------------------------------
+## 2026-08-17 CrimsonHawk: REJECTED (SELF-SPEEDUP) — the `last_command_name` handle does NOT buy the 726 instr/op I sized it at; it re-resolves a key the arity check already resolved, and the container path is +16.0 instr/op WORSE. The correctness fix it carries is real and is why the code stays (`frankenredis-dpu2y`, `frankenredis-zbiy3`)
+
+**Claim class: SELF-SPEEDUP. Campaign output: no.** Both arms are FrankenRedis code; no
+Redis arm is involved in the perf comparison and none is claimed. (The CORRECTNESS half of
+this change was separately verified against a live vendored Redis 7.2.4 arm — see below.)
+
+  Executing binary, self-reported by the running image via /proc/<pid>/exe:
+    BEFORE ELF sha256: b74ea994341287ef6f710e77afbb9bf55a805912ea08f994475f75623f9e824a
+    AFTER  ELF sha256: 5f09bb8a7a1b943af64c54d3a86345c59b60abc3cf62f7e14260e39455d043fc
+
+  THE LEVER, and what I expected. `session.last_command_name` was a `String` rebuilt per
+  command — `clear()`, a byte-loop lowercase of argv[0], a 17-way `matches!`, then a second
+  byte-loop — and `push_ascii_lowercase_lossy` measured 726.0 instr/op, the largest single
+  dispatch frame on PUBSUB CHANNELS. I replaced it with `Option<&'static str>` pointing at
+  the command table's own canonical name, which is what upstream does (`c->lastcmd` is a
+  pointer). ~150 call sites, all mechanical.
+
+  MEASURED, and the headline number does not survive:
+
+    shape                                  BEFORE     AFTER     delta
+    pubsub_channels (container, generic)   5656.2    5672.2    **+16.0**   REGRESSION
+    get_control     (borrowed path)        1308.1    1303.8      -4.3
+    object_encoding (borrowed container)   2233.2    2215.5     -17.7
+
+  WHY, frame by frame on pubsub_channels — three frames DOUBLED:
+
+    frame                            BEFORE   AFTER   delta
+    push_ascii_lowercase_lossy         726     363    -363   (only HALF went away)
+    write_container_key                219     438    +219
+    command_has_subcommands_bytes      128     192     +64
+    subcommand_table_index              87     174     +87
+    net across these frames                            **+7**
+
+  `canonical_command_name` RE-RESOLVES the `parent|sub` key that `check_full_command_arity`
+  has already resolved on the same command, in the same dispatch. I removed one string build
+  and added a second key build plus a second hash lookup. The dispatch SHARE fell 2964 ->
+  2631 and that is what nearly fooled me: the work did not vanish, it MOVED OUT of
+  `DISPATCH_FRAMES` into fr-command, so reading the dispatch column alone shows a 333
+  instr/op "win" that the whole-process total contradicts.
+
+  MY OWN BEAD WARNED ME OFF THE NEIGHBOURING VERSION OF THIS and I walked into the class
+  anyway. dpu2y says: "Do NOT fix this by special-casing unknown names in the string builder.
+  That keeps the per-command String build and adds a lookup on top, making the slower thing
+  slower." I avoided that exact form and then added a lookup on top of a lookup instead.
+
+  THE SPLIT IS THE USEFUL RESULT. Borrowed/front-classified routes IMPROVE, because ~134 of
+  them replaced `clear()` + `push_str("lit")` with a pointer store (get_control -4.3,
+  object_encoding -17.7). Only the GENERIC path with a CONTAINER command regresses, because
+  only there is the key resolved twice. Most commands are not containers, so the practical
+  net is positive — but PUBSUB CHANNELS, the route this lever was chosen for, is worse.
+
+  THE CORRECTNESS FIX IS REAL AND IS WHY THE CODE STAYS. `frankenredis-zbiy3`: fr reported
+  `cmd=bogus` for an unknown command where Redis reports `cmd=NULL`. Re-run after this
+  change, live against vendored redis-server 7.2.4 (git sha1 d2c8a4b9) in one invocation,
+  scripts/client_info_cmd_field_differ.py now PASSES 8/8 — 5 controls plus the 3 cases that
+  diverged before, including the overwrite case. A third divergence was fixed on the way:
+  RESET blanked the field to an EMPTY string, rendering `cmd=`, where upstream's
+  `clearClientConnectionState` never touches `lastcmd` and leaves it naming `reset`.
+  Trading 0.28 pct on one shape for three fixed divergences is a good trade; claiming it as
+  a speedup would not be.
+
+RETRY PREDICATE: reopen this surface ONLY IF `check_full_command_arity` is changed to
+RETURN its resolved subcommand index, so the name can be stored from that lookup instead of
+a second one — and only WHEN a re-measure shows `write_container_key` back at ~219 instr/op
+rather than 438, which is the condition that says the duplication is actually gone. The 363
+instr/op that DID go away is real, and the remaining 363 plus the +370 of duplication are
+recoverable, but only by resolving the command ONCE per dispatch and sharing it. `check_full_command_arity` already computes `command_has_subcommands_bytes`,
+`write_container_key` and `subcommand_table_index` for the same argv; make it return the
+resolved index and store the name from that, instead of recomputing. That is the "one pass"
+the fpqns retry predicate asked for, extended to carry the canonical name. Do NOT re-run the
+handle lever on its own; it is measured and it is +16.0 on the container path. And do NOT
+size any future lever on this route from the dispatch column alone — this row is the proof
+that it can move 333 instr/op in the opposite direction to the truth.
