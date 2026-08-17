@@ -8,6 +8,95 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-08-17 MossyOrchid: REFUTED — GEOSEARCH's 1.0094 normalised CROSSING does not survive replication. Three admissible replicates scatter 0.9806 / 0.9937 / 1.0044 across parity, every interval brackets 1.0, and the WORST BOUND is 0.9549 (`frankenredis-eh2ct`)
+
+Claim class: COMPETITIVE, refuting. Campaign output: yes — it stops a thin-margin crossing
+being banked as a win, and it names the reason the statistic is unstable.
+
+WHAT WAS CLAIMED. `geosearch_64` was recorded at **1.1240 raw ADMISSIBLE, 1.0094 normalised —
+fr AHEAD. An inversion.** (banked in `balanced_square_ab.py`'s own sizepairs commentary). A
+0.94 pct margin on a normalised statistic is exactly the case the replicated-standing
+convention exists for, so I replicated it rather than quoting it.
+
+METHOD, unchanged from the convention: `scripts/balanced_square_ab.py`, balanced square
+`ABBAABBA`, 21 rounds, 50,000 ops/slot, `-P16`, per-arm A/A nulls bounded at +/-0.02, live
+vendored redis-server started in the same invocation, ELF SHA read from `/proc/<pid>/exe` of
+each RUNNING process. Four independent invocations on ONE ELF
+(`b78d1c23a79a3e85dd5970161c714ada`, built local, bypass wrapper, own target dir).
+
+    run  load 1/5/15        geosearch_64 raw        nulls        get_control raw          nulls        normalised
+    1    19.89 18.03 17.55  NULL-FAILED (1.0235)    —            NULL-FAILED              1.0184/1.0448  refused
+    2    28.40 22.21 19.18  1.0982 [1.0868,1.1083]  0.9838/1.0003  1.1198 [1.0634,1.1286] 1.0018/0.9832  0.9806
+    3    39.71 28.32 21.92  1.1117 [1.0917,1.1204]  1.0012/1.0034  1.1188 [1.0986,1.1433] 0.9942/0.9948  0.9937
+    4    31.77 26.08 22.10  1.1119 [1.1065,1.1297]  1.0019/1.0048  1.1071 [1.0906,1.1225] 1.0115/1.0155  1.0044
+
+Run 1 refused ITSELF — control and shape both null-failed — and is reported rather than
+dropped, because a run that fails its own null is evidence about the window, not a missing
+data point.
+
+THE WORST BOUND, which is what the convention says to quote for a thin margin. Most
+pessimistic pairing the intervals allow, shape CI-low over control CI-high:
+
+    run 2  1.0868 / 1.1286 = 0.9630
+    run 3  1.0917 / 1.1433 = 0.9549   <- WORST BOUND ACROSS REPLICATES
+    run 4  1.1065 / 1.1225 = 0.9857
+    (best bounds, for symmetry: 1.0422 / 1.0198 / 1.0359 — all above 1.0)
+
+So every replicate's normalised interval BRACKETS 1.0 in both directions, and the point
+estimates straddle it (two below, one above, spread 2.4 pct). **The crossing is not
+established.** Quoted per the convention: GEOSEARCH_64 is at parity with the control within
+measurement error, and at worst 4.5 pct behind it. `1.0094` should not be quoted as an
+inversion; it is one draw of a statistic whose draws include 0.9806.
+
+WHAT IS NOT IN DOUBT, and it matters that this row does not overstate itself: the RAW ratio is
+fr/redis and it is **1.0982 / 1.1117 / 1.1119 — fr is 10-11 pct FASTER THAN REDIS on this
+shape in all three admissible runs, and that figure is stable to 1.25 pct.** The sub-1.0
+number is NORMALISED against the GET control, i.e. it asks whether GEOSEARCH carries fr's
+usual advantage, not whether Redis wins. Redis does not win this shape.
+
+WHY THE NORMALISED FIGURE IS THE UNSTABLE ONE — the mechanism, not a shrug. Compare interval
+widths as a fraction of midpoint:
+
+    geosearch_64   2.0 pct / 2.6 pct / 2.1 pct
+    get_control    5.8 pct / 4.0 pct / 2.9 pct     <- 1.4x to 2.9x WIDER
+
+The control arm is noisier than the shape it is meant to stabilise, so dividing by it INJECTS
+more variance than it removes. All 2.4 pct of the normalised scatter is inherited from a
+denominator that moved 1.1 pct between runs while the numerator moved 1.25 pct with tighter
+intervals. A normaliser must be quieter than the row it normalises; this one is not.
+
+geosearch_2 NEVER CERTIFIED in four attempts — STRADDLES-1 every time (1.0109, 0.9790, 1.0025,
+1.0236). That reproduces the banked observation that half the small-n rows cannot be certified
+at all, and it is now four-for-four on this shape.
+
+PROVENANCE:
+  ELF          fr b78d1c23a79a3e85dd5970161c714ada36f8a6ce6982f7e9975830d0d0122177 (self-
+               reported from /proc/<pid>/exe of the running server), redis
+               e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7.
+  observed     fr_threads 3, redis_threads 5 (OBSERVED, not requested); host thinkstation1,
+               64 cores, kernel 6.17.0-41-generic, governor powersave, ISA avx2; servers
+               unpinned (measured to buy nothing on this workload).
+  PER-ARM      loadavg per run in the table above, harness-stamped inside each invocation.
+               CPU MHz sampled around run 4: BEFORE mean 2823 (min 1429, max 4214), AFTER
+               mean 2462 (min 1429, max 4024) — a 2.9x cross-core spread AT ONE INSTANT.
+  /data        98G free. One local build this turn, own CARGO_TARGET_DIR.
+
+INSTRUMENT GAP, stated because the next person will hit it: `balanced_square_ab.py` stamps
+loadavg into its provenance block but NOT CPU MHz, so a row taken from it cannot satisfy the
+per-arm-MHz requirement without the caller sampling `/proc/cpuinfo` by hand, as done here.
+Adding it to the provenance block is a one-line fix and would make every future row from this
+harness self-sufficient.
+
+RETRY PREDICATE: do not re-run geosearch_64 hoping for a cleaner crossing — three admissible
+replicates already bracket 1.0 and the limiting noise is the CONTROL, so more shape draws
+cannot resolve it. If the crossing is worth establishing, the fix is a quieter normaliser:
+either certify `get_control` to a tighter interval (more rounds on the control specifically) or
+normalise against a control whose CI is narrower than the row's, and only then quote a worst
+bound. Until then GEOSEARCH_64 is a RAW win over Redis (1.107x, replicated) and a normalised
+non-result.
+
+--------------------------------------------------------------------------------
+
 ## 2026-08-17 MossyOrchid: MEASURED COST OF A CORRECTNESS FIX — collapsing CONFIG GET's duplicated skip list onto one predicate costs at most a few hundred instr/op on the glob walk, and the paired control moved the WRONG WAY, which is the part worth keeping (`frankenredis-e6c9t`)
 
 Claim class: SELF-SPEEDUP, negative — this is the price of `44aea6d11`, not a win. Campaign
