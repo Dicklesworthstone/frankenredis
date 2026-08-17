@@ -27550,3 +27550,57 @@ RETRY PREDICATE: LTRIM is the only one of the three left and it needs a borrowed
 executor written first — do NOT add a floor entry for it before those exist, because a class
 whose arm cannot serve the shape sends it to GENERIC and is a REGRESSION. Cost the next
 front-classification with 263 + ~100 per bulk, not 275 flat.
+
+## CERTIFIED (frankenredis-gein3 / zw36c) — the SINTER k-sweep REGENERATED after the busy-spin removal: fr leads the ENTIRE range, both encodings, and the hashtable-regime deficit is retired
+
+Claim class: COMPETITIVE. fr/redis instructions per op, both arms live in one invocation of
+scripts/shape_instr_per_op.py, incumbent provenance verified on every run.
+
+WHY REGENERATED. The banked regime table was taken BEFORE 7462aa5d3 removed the event-loop
+busy-spin, so every absolute in it described code that no longer exists. A stale table does
+not merely age -- it actively misleads, because its hashtable rows said fr was BEHIND and
+worsening, which is now false. The `sinter_k*` shapes landed in 302cee286 exist exactly so
+this is one pass rather than an archaeology exercise.
+
+    k      fr instr/op      redis      ratio    passes/op   encoding   loadavg   MHz
+      2        4,279.1     8,684.0    0.4928      0.001     listpack     15.73   3187
+      8        6,515.6    15,385.9    0.4235      0.002     listpack     15.75   3279
+     14       10,684.6    26,672.1    0.4006      0.004     listpack     15.45   3122
+     48       61,569.1   149,391.3    0.4121      0.020     listpack     15.89   3075
+    128      373,418.5   841,447.5    0.4438      0.060     listpack     15.60   3087
+    140       50,664.8   132,904.2    0.3812      0.067     hashtable    13.36   3087
+    256       89,876.2   240,784.1    0.3733      0.187     hashtable    14.14   2825
+    512      180,474.4   467,160.7    0.3863      0.440     hashtable    14.98   2982
+
+    ELF 2550a666795d8d14184060e29327770a..., built locally, 0 [RCH] lines. Incumbent
+    verified as sha=d2c8a4b9 == vendored source HEAD, clean, on every one of the eight runs.
+
+THE HASHTABLE DEFICIT IS RETIRED, and the before/after is the whole row:
+
+    k        was      now
+    140    0.8371x  0.3812x
+    256    1.4354x  0.3733x
+    512    1.7726x  0.3863x
+
+It read "fr behind and worsening with k" and now reads fr ~2.6x AHEAD and FLAT. fr's
+absolutes fell 54-78 pct there (k=512: 837,755 -> 180,474) while REDIS's are unchanged
+within noise (469,011-473,678 across today's runs vs 467,161 here), so the move is entirely
+in fr's numerator and is not the incumbent drifting. `passes/op` names the mechanism
+directly: 0.440 at k=512 against the ~248 the loop used to spin.
+
+WHAT THE BOUNDARY IS NOW. Still visible, but as a cost STEP in BOTH engines rather than a
+deficit in one: absolutes FALL crossing 128 (fr 373,418 -> 50,665; redis 841,448 ->
+132,904) because a listpack intersection is O(n*m) linear scans and a hashtable one is O(n)
+probes. Both engines get cheaper; neither crosses the other. fr leads at every k measured,
+0.3733x-0.4928x.
+
+THIS CLOSES THE CROSSOVER STORY COMPLETELY. The original row derived "crossover at k=14.2"
+from a two-point fit spanning that boundary; the bracket shapes refuted it (0.4273x at
+k=14); and the spin removal has now erased the far-end deficit the fit was extrapolating
+toward. There is no k at which fr trails redis on SINTER instructions.
+
+RETRY PREDICATE. Re-run this sweep -- it is eight shapes and one command -- after ANY
+change to the event loop, the reply path, or set intersection, and after any change to
+`set-max-listpack-entries` on either engine, since every regime label above is keyed to 128.
+Do NOT quote the older table for any purpose except the history of the crossover argument;
+it describes removed code.

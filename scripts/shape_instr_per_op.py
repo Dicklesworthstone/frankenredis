@@ -330,15 +330,32 @@ SHAPES = {
     # RESULT SIZE varies between these shapes. If set-max-listpack-entries is ever changed
     # on either engine the boundary moves and every regime label above moves with it.
     #
-    # THE TABLE IS DATED, THE STRUCTURE IS NOT. Those absolutes predate the gein3 sort
-    # removal (fr used to sort the SINTER reply, an O(k log k) cost redis never paid), so
-    # they no longer reproduce and should not be diffed against: re-measured after it,
-    # k=140 fell 111,315 -> 82,500 and its ratio 0.8371x -> 0.6026x, which is the sort
-    # removal showing up exactly where an O(k log k) term should. What reproduces, and what
-    # these shapes exist to pin, is the REGIME STRUCTURE -- no crossing at k=14 (measured
-    # 0.4058x there after the change, against a model that predicted 1.0), fr ahead across
-    # the listpack regime, and the boundary sitting at the encoding change rather than at
-    # any point a two-point fit picks out.
+    # REGENERATED 2026-08-16 AFTER THE BUSY-SPIN REMOVAL (7462aa5d3). The table above is
+    # kept as history because it is what the crossover argument was built on; these are the
+    # numbers that describe the code as it stands. Same shapes, same harness, loadavg
+    # 13.4-15.9, mean CPU MHz 2825-3279, ELF 2550a666795d8d14:
+    #
+    #     k      fr instr/op      redis      ratio    passes/op   encoding
+    #       2        4,279.1     8,684.0    0.4928      0.001     listpack
+    #       8        6,515.6    15,385.9    0.4235      0.002     listpack
+    #      14       10,684.6    26,672.1    0.4006      0.004     listpack
+    #      48       61,569.1   149,391.3    0.4121      0.020     listpack
+    #     128      373,418.5   841,447.5    0.4438      0.060     listpack
+    #     140       50,664.8   132,904.2    0.3812      0.067     hashtable
+    #     256       89,876.2   240,784.1    0.3733      0.187     hashtable
+    #     512      180,474.4   467,160.7    0.3863      0.440     hashtable
+    #
+    # THE HASHTABLE-REGIME DEFICIT IS GONE. It read 0.837x / 1.435x / 1.773x -- fr behind
+    # and worsening with k -- and now reads 0.381x / 0.373x / 0.386x, fr about 2.6x ahead
+    # and FLAT. fr's absolutes fell 54-78 pct there (k=512: 837,755 -> 180,474) while
+    # redis's are unchanged, so the move is entirely fr's. passes/op says why: 0.440 at
+    # k=512 against the 248 that the event loop used to spin.
+    #
+    # So fr now leads across the ENTIRE range, both encodings, 0.373x-0.493x, and there is
+    # no crossover at any k. The encoding boundary is still visible as a cost STEP in both
+    # engines -- absolutes fall crossing 128 because a listpack intersection is O(n*m) and a
+    # hashtable one is O(n) -- but it no longer produces a deficit. Keep these shapes: they
+    # are what proves the boundary is a step and not a crossing.
     "sinter_k8": (
         ["SADD kb8_1 m0000 m0001 m0002 m0003 m0004 m0005 m0006 m0007",
          "SADD kb8_2 m0000 m0001 m0002 m0003 m0004 m0005 m0006 m0007"],
