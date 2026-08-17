@@ -14862,6 +14862,7 @@ enum BorrowedDispatchFloorClass {
     Sintercard,
     /// (frankenredis-5na4i) `ZINTERCARD numkeys k1 k2`, the argc-4 form.
     Zintercard,
+    Xpending,
     /// (frankenredis-ozrro) `ZRANDMEMBER key count`, the members-only form.
     /// (frankenredis-ozrro) Keyless `COMMAND COUNT`. The deepest arm measured on
     /// this bead: walking to it cost 15,373 instructions per op, 4.27x the
@@ -15295,6 +15296,7 @@ enum BorrowedDispatchFloorCommand {
     Setrange,
     Sintercard,
     Zintercard,
+    Xpending,
     Sismember,
     Smembers,
     Smismember,
@@ -15578,6 +15580,10 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             _ => None,
         },
         8 => match uppercase_ascii_token::<8>(token)? {
+            // (frankenredis-5na4i) XPENDING summary form; see the arity-3 class below.
+            [b'X', b'P', b'E', b'N', b'D', b'I', b'N', b'G'] => {
+                Some(BorrowedDispatchFloorCommand::Xpending)
+            }
             [b'R', b'E', b'N', b'A', b'M', b'E', b'N', b'X'] => {
                 Some(BorrowedDispatchFloorCommand::Renamenx)
             }
@@ -16319,6 +16325,11 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // (project_floor_class_is_a_promise_its_arm_must_keep).
         (4, BorrowedDispatchFloorCommand::Zintercard) => {
             Some(BorrowedDispatchFloorClass::Zintercard)
+        }
+        // (frankenredis-5na4i) Arity 3 ONLY: the SUMMARY form. The extended form has a different
+        // reply shape and its own option parsing, so claiming its arities would strand it.
+        (3, BorrowedDispatchFloorCommand::Xpending) => {
+            Some(BorrowedDispatchFloorClass::Xpending)
         }
         (3, BorrowedDispatchFloorCommand::Hrandfield) => {
             Some(BorrowedDispatchFloorClass::HrandfieldCount)
@@ -22271,6 +22282,27 @@ fn try_dispatch_floor_classified_action(
         // (frankenredis-ozrro) Eleventh batch. Every arm below routes to the SAME
         // parser and executor its cascade arm used, so the reply is identical by
         // construction and a decline still lands on the generic path.
+        BorrowedDispatchFloorClass::Xpending => {
+            let hit = parse_borrowed_plain_xpending_packet(unparsed, &parser_config).and_then(
+                |packet| {
+                    runtime
+                        .execute_plain_xpending_borrowed(packet.key, packet.group, ts)
+                        .map(|response| (packet.consumed, response))
+                },
+            );
+            if let Some((consumed, response)) = hit {
+                Ok(BorrowedMultibulkAction::FastReply { consumed, response })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
         BorrowedDispatchFloorClass::Zintercard => {
             // (frankenredis-5na4i) One exact parser, one shape. Everything else about
             // ZINTERCARD -- numkeys disagreeing with the arity, LIMIT, wrong-type operands --
@@ -24286,6 +24318,42 @@ fn parse_borrowed_plain_sintercard2_packet<'a>(
         numkeys,
         k1,
         k2,
+    })
+}
+
+struct BorrowedPlainXpendingPacket<'a> {
+    consumed: usize,
+    key: &'a [u8],
+    group: &'a [u8],
+}
+
+/// (frankenredis-5na4i) `XPENDING key group` — the argc-3 SUMMARY form, exact-shape.
+///
+/// The extended form (`[IDLE ms] start end count [consumer]`) is deliberately NOT claimed: it is
+/// a different reply shape with its own option parsing, and the floor class below claims arity 3
+/// only, so the extended form never reaches this parser.
+fn parse_borrowed_plain_xpending_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainXpendingPacket<'a>> {
+    if config.max_array_len < 3 || config.max_bulk_len < b"XPENDING".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*3\r\n$8\r\n").and_then(|rest| {
+        rest.get(..8)
+            .filter(|command| command.eq_ignore_ascii_case(b"XPENDING"))
+            .map(|_| input.len() - rest.len() + 8)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, next) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    let (group, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainXpendingPacket {
+        consumed,
+        key,
+        group,
     })
 }
 

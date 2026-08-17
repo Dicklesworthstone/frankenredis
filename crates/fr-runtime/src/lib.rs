@@ -16985,6 +16985,117 @@ impl Runtime {
         Some(reply)
     }
 
+    /// Borrowed fast path for the `XPENDING key group` SUMMARY form.
+    ///
+    /// (frankenredis-5na4i) XPENDING was the other command still reaching the GENERIC path,
+    /// at 2,804.0 instr/op of dispatch. Same template as the ZINTERCARD route landed in
+    /// `e43e4e3ff`: an exact-shape parser in the floor class table, a narrow arity claim, and an
+    /// executor that DECLINES anything it cannot serve identically.
+    ///
+    /// THREE DIVERGENCES THIS REPO HAS ALREADY FIXED BY NAME, all reachable by a careless copy
+    /// of the generic, and all live on the SUMMARY form:
+    ///   * gauntlet B1 — each per-consumer pending count is a BULK STRING, not an integer.
+    ///     Vendored 7.2.4 returns `"1"`, not `:1`.
+    ///   * frankenredis-b2okv — when `total == 0` the consumers field is a NULL array, NOT an
+    ///     empty one. fr emitted `*0` until that was fixed, and `xpending_empty` — one of the two
+    ///     measured shapes — IS the total==0 case, so the fast path is exactly the one that
+    ///     trips it.
+    ///   * NOGROUP is a REPLY, not an error, and WRONGTYPE comes from the store. Both are
+    ///     DECLINED here so the generic keeps producing them verbatim.
+    ///
+    /// WHY THE PRE-CHECK IS `stream_group_precheck`: `xpending_summary` folds
+    /// `record_keyspace_lookup` into itself, so calling it and THEN declining would count the
+    /// lookup twice once the generic re-ran it. `stream_group_precheck` is no-stat, so every
+    /// decline below happens before any observable accounting.
+    pub fn execute_plain_xpending_borrowed(
+        &mut self,
+        key: &[u8],
+        group: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if self.policy.gate.max_array_len < 3
+            || self.policy.gate.max_bulk_len < b"XPENDING".len()
+            || key.len() > self.policy.gate.max_bulk_len
+            || group.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+            return None;
+        }
+        // Missing key, wrong type, or missing group: all three belong to the generic, and this
+        // check reaches that verdict without touching keyspace stats.
+        match self.server.store.stream_group_precheck(key, group, now_ms) {
+            Ok(true) => {}
+            _ => return None,
+        }
+
+        self.server.store.stat_total_commands_processed += 1;
+        if self.session.connected_at_ms == 0 {
+            self.session.connected_at_ms = now_ms;
+        }
+        self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
+        self.session.last_command_name.clear();
+        self.session.last_command_name.push_str("xpending");
+        self.session.last_argv_len_sum = b"XPENDING".len() + key.len() + group.len();
+        let packet_id = next_packet_id();
+
+        self.apply_existing_client_reply_suppression_to_undispatched_reply();
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+
+        let start = self.chained_command_start();
+        let summary = self.server.store.xpending_summary(key, group, now_ms);
+        let elapsed_us = self.finish_chained_command(start);
+        let reply = match summary {
+            Ok(Some((total, min_id, max_id, per_consumer))) => {
+                let mut consumer_frames = Vec::with_capacity(per_consumer.len());
+                for (consumer, pending_count) in per_consumer {
+                    // gauntlet B1: BULK STRING, not Integer.
+                    consumer_frames.push(RespFrame::Array(Some(vec![
+                        RespFrame::BulkString(Some(consumer)),
+                        RespFrame::BulkString(Some(pending_count.to_string().into_bytes())),
+                    ])));
+                }
+                // frankenredis-b2okv: NULL array at total == 0, not an empty array.
+                let consumers_frame = if total == 0 {
+                    RespFrame::Array(None)
+                } else {
+                    RespFrame::Array(Some(consumer_frames))
+                };
+                RespFrame::Array(Some(vec![
+                    RespFrame::Integer(i64::try_from(total).unwrap_or(i64::MAX)),
+                    min_id.map_or(RespFrame::BulkString(None), |id| {
+                        RespFrame::BulkString(Some(fr_command::format_stream_id(id)))
+                    }),
+                    max_id.map_or(RespFrame::BulkString(None), |id| {
+                        RespFrame::BulkString(Some(fr_command::format_stream_id(id)))
+                    }),
+                    consumers_frame,
+                ]))
+            }
+            // The precheck said the group exists, so neither arm below is expected; if the store
+            // disagrees, hand the exact error the generic would produce rather than inventing one.
+            Ok(None) => return None,
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+
+        self.record_plain_sintercard_borrowed_metrics_named(
+            "xpending",
+            b"XPENDING",
+            &[key, group],
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+
+        Some(reply)
+    }
+
     /// Borrowed fast path for `ZINTERCARD numkeys key [key ...] [LIMIT n]`.
     ///
     /// (frankenredis-5na4i) ZINTERCARD measured 3,223-3,374 instr/op of dispatch out of
@@ -48737,6 +48848,75 @@ mod tests {
                 .map(|part| RespFrame::BulkString(Some((*part).to_vec())))
                 .collect(),
         ))
+    }
+
+    /// (frankenredis-5na4i) The XPENDING borrowed route must be INVISIBLE, and the EMPTY group
+    /// is tested FIRST on purpose.
+    ///
+    /// `b2okv` records that at `total == 0` upstream emits the consumers field as a NULL array,
+    /// not an empty one, and fr emitted `*0` until that was fixed. `xpending_empty` — one of the
+    /// two shapes this route was built for — IS the total==0 case, so a differ that only
+    /// exercised a populated group would pass while reintroducing exactly that bug. Comparing
+    /// against the generic on a twin runtime cannot.
+    #[test]
+    fn xpending_borrowed_matches_the_generic_on_every_shape_5na4i() {
+        let shapes: Vec<Vec<&[u8]>> = vec![
+            // THE b2okv CASE FIRST: group exists, nothing pending -> consumers must be NULL.
+            vec![b"XPENDING", b"xs", b"g"],
+            // Populated: per-consumer counts must be BULK STRINGS (gauntlet B1), not integers.
+            vec![b"XPENDING", b"xp", b"gp"],
+            // Declines: NOGROUP, missing key, wrong type, and the extended form.
+            vec![b"XPENDING", b"xs", b"nosuchgroup"],
+            vec![b"XPENDING", b"missing", b"g"],
+            vec![b"XPENDING", b"str", b"g"],
+        ];
+
+        fn seed(rt: &mut Runtime) {
+            rt.execute_frame(command(&[b"XADD", b"xs", b"1-1", b"f", b"v"]), 0);
+            rt.execute_frame(command(&[b"XGROUP", b"CREATE", b"xs", b"g", b"0"]), 0);
+            rt.execute_frame(command(&[b"XADD", b"xp", b"1-1", b"f", b"v"]), 0);
+            rt.execute_frame(command(&[b"XGROUP", b"CREATE", b"xp", b"gp", b"0"]), 0);
+            // Read the entry into the PEL so the populated case really is populated.
+            rt.execute_frame(
+                command(&[b"XREADGROUP", b"GROUP", b"gp", b"c1", b"COUNT", b"10",
+                          b"STREAMS", b"xp", b">"]),
+                0,
+            );
+            rt.execute_frame(command(&[b"SET", b"str", b"v"]), 0);
+        }
+
+        let mut served = 0usize;
+        for shape in &shapes {
+            let mut fast = Runtime::new(RuntimePolicy::default());
+            let mut generic = Runtime::new(RuntimePolicy::default());
+            seed(&mut fast);
+            seed(&mut generic);
+
+            let got = fast.execute_plain_xpending_borrowed(shape[1], shape[2], 100);
+            let want = generic.execute_frame(command(shape), 100);
+            let label: Vec<String> = shape
+                .iter()
+                .map(|p| String::from_utf8_lossy(p).into_owned())
+                .collect();
+
+            if let Some(reply) = got {
+                served += 1;
+                assert_eq!(reply, want, "borrowed XPENDING diverged from the generic on {label:?}");
+                assert_eq!(
+                    fast.server.store.stat_keyspace_hits, generic.server.store.stat_keyspace_hits,
+                    "keyspace hits diverged on {label:?}"
+                );
+                assert_eq!(
+                    fast.server.store.stat_keyspace_misses,
+                    generic.server.store.stat_keyspace_misses,
+                    "keyspace misses diverged on {label:?}"
+                );
+            }
+        }
+        assert!(
+            served >= 2,
+            "borrowed XPENDING served only {served} shapes — an inert fast path measures nothing"
+        );
     }
 
     /// (frankenredis-5na4i) The ZINTERCARD borrowed route must be INVISIBLE: for every shape it
