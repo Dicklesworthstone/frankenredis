@@ -30802,3 +30802,75 @@ with a REVERSE-PATCH A/B in one window: build AFTER, revert only the `(5, Zrange
 entry, build BEFORE, build AFTER again, and require the two AFTERs to agree before quoting
 the difference. Re-measure the option forms only if the class is ever widened past arity 5 —
 they are arity 6+, still take the generic path, and are unmeasured.
+
+--------------------------------------------------------------------------------
+## CERTIFIED (frankenredis-gvm6z) — the ZRANGESTORE lever is worth 4,335.2 instr/op, and the 1,848 "unattributed" remainder in my last row was MINE all along: 1,602.7 of it is non-dispatch work the borrowed route never does
+
+Claim class: COMPETITIVE. fr/redis instructions per op, both arms in ONE invocation,
+incumbent verified, and — the point of this row — **both arms from the SAME ELF**.
+
+MY OWN RETRY PREDICATE ASKED FOR A REVERSE-PATCH A/B. I could not run one: MossySparrow
+holds `crates/fr-server/src/main.rs` EXCLUSIVE until 07:19Z, and a stash/edit cycle on a
+file another pane holds is how you corrupt someone's measurement. The repo already owns a
+better instrument for this exact question — `--features perf-ab-cascade-bypass`, whose
+`FR_PERF_AB_CASCADE_BYPASS=1` sends the SAME binary down the generic route at RUNTIME. One
+build, one window, one ELF; only the route differs. That is strictly stronger than a
+reverse-patch A/B, which still compares two binaries.
+
+    shape zrangestore_all, ELF c3eaddbc, one window
+    arm            fr instr/op   redis instr/op    ratio     fr dispatch
+    CLASSIFIED-1       5,029.7      12,063.5     0.4169x     683.1 (13.6 pct)
+    CLASSIFIED-2       5,035.5      12,283.3     0.4099x     684.1 (13.6 pct)
+    GENERIC-1          9,356.5      12,248.9     0.7639x   3,412.8 (36.5 pct)
+    GENERIC-2          9,379.2      12,158.6     0.7714x   3,419.5 (36.5 pct)
+
+    THE LEVER          -4,335.2 instr/op   (-46.3 pct)   ratio 0.7676x -> 0.4134x
+      dispatch term    -2,732.6            (-80.0 pct)
+      NON-dispatch     -1,602.7
+
+**THE REMAINDER IS RESOLVED AND IT WAS NOT PEER DRIFT.** My previous row measured a 4,952
+instr/op improvement across two ELFs four hours apart, could attribute only 3,104 of it to
+dispatch, and said plainly that it would not claim the other 1,848 because peer commits sat
+between the builds. With the route as the ONLY variable, the same remainder appears at
+**1,602.7 instr/op and it belongs to this lever**: the borrowed route never materialises the
+five-element `Vec<Vec<u8>>` argv and never runs the generic execute/dispatch frames, and
+that work is counted as WORK, not as dispatch, by this harness's frame list. The honest
+caution last turn was correct in refusing to claim it, and wrong about where it came from.
+
+A/A NULLS, one per arm, same ELF and same shape:
+    CLASSIFIED 1.00115x     GENERIC 1.00243x
+
+THE INSTRUMENT PROVED IT WAS ON, which matters more than the nulls here. A feature that
+failed to compile in, or an env var that never reached the child, both fail SILENTLY and
+produce two identical arms that read as "no effect". The arms differ by 5.0x in dispatch
+(683.6 vs 3,416.2), so the bypass demonstrably engaged. A null result from this harness
+would have needed that check before it could be believed; a positive one gets it for free.
+
+CONTROL: the redis arm is untouched by this lever and behaves that way — 12,063.5 to
+12,283.3 across all four runs, 1.82 pct spread, with no trend between the arms.
+
+WHAT THIS ELF IS NOT: built with `perf-ab-cascade-bypass`, so both arms carry a runtime
+`OnceLock` check the production binary does not have. Absolute numbers are therefore not
+production numbers — though the classified arm here (5,032.6) sits 0.11 pct from the
+production AFTER ELF's 5,027.0, so that check costs almost nothing. **Only the DIFFERENCE
+within this ELF is claimed.**
+
+PROVENANCE:
+  fr ELF        c3eaddbc17a76c921e4704496c7b7de68b7f91687833f823953fe2bfaebab208, built
+                LOCALLY with RCH_CARGO_WRAPPER_BYPASS=1 exported, env -u CARGO_TARGET_DIR,
+                `--features perf-ab-cascade-bypass`, no [RCH] line, copied to a private
+                path before measuring.
+  incumbent     `incumbent verified: redis-server sha=d2c8a4b9 == vendored source HEAD,
+                clean` on every run.
+  host          thinkstation1, 64 cores observed, governor powersave, /data 165G.
+  per-arm load  C-1 16.46/16.64/18.95; C-2 16.46/16.64/18.95; G-1 16.02/16.55/18.91;
+                G-2 15.86/16.51/18.88. 1/5/15 converged and flat across all four.
+  per-arm MHz   C-1 2,730->3,455; C-2 3,503->3,209; G-1 3,298->2,873; G-2 2,668->3,110
+                mean; cross-core 1,429-4,296 at a single instant.
+
+RETRY PREDICATE. This question is CLOSED — do not re-run the ZRANGESTORE attribution, and
+do not re-open it with a reverse-patch A/B, which is a weaker instrument than the one used
+here. Use this pattern instead for any other front-classification whose remainder is
+disputed: one bypass-feature build, both arms by env var, and assert the arms DIFFER before
+reading either. The option forms (arity 6+) still take the generic path and remain
+unmeasured; that is the only ZRANGESTORE work left.
