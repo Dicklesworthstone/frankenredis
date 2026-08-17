@@ -12,8 +12,21 @@ command is worth less than an 8% share of a large one. `set_xx_opt` at 30.5% sha
 986.9 instr/op while `sinter_9` at 8.3% is 1007.6. Sort by the instructions, then read
 the share as context.
 
-WHAT THE SCREEN FOUND (ELF 1b1d66cd, 102 shapes): only THREE shapes pay more than
-1,000 instr/op of dispatch, and two of them are the SORT shapes. 114 commands are already
+⚠ EVERY NUMBER BELOW WAS PRODUCED BY A BROKEN METRIC AND IS WITHDRAWN (frankenredis-7so0e).
+Until this screen is re-run, treat the table as a list of SHAPES WORTH RE-MEASURING and not
+as values. `dispatch_share()` used to evaluate the share on the 2N dump ALONE -- startup,
+seeding and teardown included -- and multiply it by the clean two-point instructions/op; a
+share of one population times a rate from another is not per-op. On `SORT_RO ... ALPHA` it
+printed 2,048.3 / 2,517.9 / 2,535.3 / 3,358.5 across four arms whose true dispatch is 3,116.0
+in every one, and it manufactured a 487 instr/op "reduction" out of a change that never
+touched dispatch. Its frame list was ALSO missing `classify_borrowed_dispatch_floor_packet`
+-- the floor classifier itself -- which under-counted CLASSIFIED routes by 58% against 7.6%
+for generic ones, i.e. it exaggerated exactly the classified-vs-generic gap this screen
+exists to rank. Four rows across two agents were withdrawn on it (`b9c288a1d`). The metric is
+fixed as of that bead; these figures predate the fix.
+
+WHAT THE SCREEN FOUND (ELF 1b1d66cd, 102 shapes) -- WITHDRAWN, see above: only THREE shapes
+pay more than 1,000 instr/op of dispatch, and two of them are the SORT shapes. 114 commands are already
 floor-classified, so the tail is flat.
 
     3123.0  24.0%   12990.6   sort_ro_alpha

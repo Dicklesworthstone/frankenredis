@@ -1221,54 +1221,59 @@ def total_ir(path: str) -> int:
     return total_events(path)["Ir"]
 
 
-# (frankenredis-rzdi8) Frames that are "getting to the command" rather than
-# doing it. Kept explicit rather than inferred: the borrowed parser family is the
-# whole point, since an unclassified command attempts several of them against a
-# packet that is none of them before falling through to the generic path.
-DISPATCH_FRAMES = (
-    "process_buffered_frames", "execute_frame_internal", "command_table_index",
-    "dispatch_with_client_context", "classify_command", "push_ascii_lowercase_lossy",
-    "check_full_command_arity", "execute_dispatch", "parse_command_args_borrowed_into",
-    "try_dispatch_floor_classified_action", "parse_borrowed_plain_",
-    "effective_command_flags", "canonical_command_fullname",
-    # The first version of this list stopped above and UNDERCOUNTED the generic
-    # path, which is the path it exists to flag. Differencing UNLINK against DEL
-    # frame by frame surfaced four more that only appear once a command misses the
-    # borrowed floor: dispatch_argv (+104 instr/op), acl_permission_error_for_argv
-    # (+94), borrowed_fast_route_key (+92) and the Utf8Chunks iterator (+132) that
-    # push_ascii_lowercase_lossy drives. Together they were 422 instr/op of
-    # dispatch reported as if it were work.
-    "dispatch_argv", "acl_permission_error_for_argv", "borrowed_fast_route_key",
-    "Utf8Chunks", "resolve_command_spec", "lookup_command",
-)
+# (frankenredis-rzdi8, frankenredis-7so0e) Frames that are "getting to the command"
+# rather than doing it. THE LIST NOW LIVES IN `frame_delta.py` and is imported there by
+# `dispatch_share` below, because two copies drifted: this one was missing
+# `classify_borrowed_dispatch_floor_packet` -- the floor classifier itself, worth 112-157
+# instr/op -- so the metric steering the front-classification campaign was not counting
+# the campaign's own function. One definition, one answer.
 
 
-def dispatch_share(dump_path):
+def dispatch_share(dump_n, dump_2n, ops, whole_op):
     """What fraction of a command is spent deciding WHICH command it is.
 
-    Check this BEFORE reaching for a front-classification lever. Measured shares
-    so far: a front-classified route (EXISTS on a missing key) sits at 21.5%,
-    while unclassified ones sit at 62-66% AND carry 8-14x the absolute dispatch
-    cost. A route can also be below parity with dispatch NOT the story at all --
-    PEXPIRE is 1.04x on instructions with a 0.90 throughput ratio, so no dispatch
-    lever can help it. Assuming instead of checking gets that case wrong.
+    Check this BEFORE reaching for a front-classification lever. A route can be
+    below parity with dispatch NOT the story at all -- PEXPIRE is 1.04x on
+    instructions with a 0.90 throughput ratio, so no dispatch lever can help it.
+    Assuming instead of checking gets that case wrong.
+
+    (frankenredis-7so0e) THIS USED TO TAKE THE 2N DUMP ALONE, and the caller then
+    multiplied the resulting share by the clean two-point instructions/op. A share
+    of one population -- a dump that still contains startup, seeding and teardown --
+    times a rate from another is not a per-op quantity, and the error ran in BOTH
+    directions: on `SORT_RO ... ALPHA` the old form printed 2,048.3 / 2,517.9 /
+    2,535.3 / 3,358.5 across four arms whose true dispatch is 3,116.0 in every one
+    of them, bit-identical across a 21x element span and two ELFs. It also
+    manufactured a 487 instr/op "reduction" out of a change confined to a collation
+    comparator. Four rows across two agents were withdrawn on it (`b9c288a1d`).
+
+    It now differences the N and 2N dumps exactly like every other per-op number
+    here, and it borrows `frame_delta.py`'s parser and frame list so the two tools
+    cannot drift apart again -- the previous local copy of the list was missing
+    `classify_borrowed_dispatch_floor_packet`, i.e. the floor classifier itself,
+    which is 112-157 instr/op and hits CLASSIFIED routes hardest (58% of
+    `get_control`'s dispatch against 7.6% of `SORT_RO`'s) on screens whose whole
+    purpose is ranking classified against generic.
+
+    Returns `(fraction_of_whole_op, top_frames)` so both call sites and the printed
+    format are unchanged; `whole_op * fraction` is now the true per-op dispatch.
+    Still a FLOOR, not a value: the frame list is hand-maintained.
     """
-    out = subprocess.run(["callgrind_annotate", "--auto=no", "--threshold=99.5", dump_path],
-                         capture_output=True, text=True, timeout=900).stdout
-    disp = attributed = 0
-    top = []
-    for line in out.splitlines():
-        m = re.match(r"\s*([\d,]+) \(\s*[\d.]+%\)\s+(?:\?\?\?|[^\s]+):(.+?) \[", line)
-        if not m:
-            continue
-        ir, fn = int(m.group(1).replace(",", "")), m.group(2).strip()
-        attributed += ir
-        if any(d in fn for d in DISPATCH_FRAMES):
-            disp += ir
-            top.append((ir, fn))
-    if not attributed:
+    import frame_delta
+
+    try:
+        rows, _process = frame_delta.frame_deltas(dump_n, dump_2n, ops)
+    except (OSError, subprocess.SubprocessError, RuntimeError):
         return None
-    return disp / attributed, sorted(top, reverse=True)[:5]
+    disp = 0.0
+    top = []
+    for ipo, fn in rows:
+        if any(d in fn for d in frame_delta.DISPATCH_FRAMES):
+            disp += ipo
+            top.append((ipo, fn))
+    if not whole_op:
+        return None
+    return disp / whole_op, sorted(top, reverse=True)[:5]
 
 
 # (frankenredis-8280l) The FULL generic set. Presence of ALL of these together is
@@ -2228,7 +2233,8 @@ def main() -> int:
         print("  both engines pinned to LC_ALL=%s" % locale)
     fr_ipo, fr_lo, fr_hi = instr_per_op(fr_bin, seeds, cmd, ops, workdir, "fr", locale)
     if fr_only:
-        got = dispatch_share(os.path.join(workdir, "cg.fr.2n.out"))
+        got = dispatch_share(os.path.join(workdir, "cg.fr.n.out"),
+                             os.path.join(workdir, "cg.fr.2n.out"), ops, fr_ipo)
         frac = got[0] if got else float("nan")
         fr_p = PASSES.get("fr.2n")
         if fr_p is not None:
@@ -2270,13 +2276,14 @@ def main() -> int:
     if fr_p is not None and rd_p is not None:
         print("  event-loop passes per op:     fr %.3f   redis %.3f   (fr/redis %.2fx)"
               % (fr_p, rd_p, (fr_p / rd_p) if rd_p else float("nan")))
-    got = dispatch_share(os.path.join(workdir, "cg.fr.2n.out"))
+    got = dispatch_share(os.path.join(workdir, "cg.fr.n.out"),
+                         os.path.join(workdir, "cg.fr.2n.out"), ops, fr_ipo)
     if got:
         frac, top = got
         print("  fr dispatch share: %.1f%%  (~%.1f of %.1f instr/op deciding WHICH command)"
               % (100 * frac, fr_ipo * frac, fr_ipo))
         for ir, fn in top:
-            print("      %10d  %s" % (ir, fn[:66]))
+            print("      %10.1f  %s" % (ir, fn[:66]))
         print("  compare: a front-classified route (EXISTS on a missing key) is 21.5%;"
               " 62-66% means the dispatch lever has something to bite on.")
     print("  callgrind dumps: %s" % workdir)
