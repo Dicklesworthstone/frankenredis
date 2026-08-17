@@ -33581,3 +33581,80 @@ RETRY PREDICATE: do NOT re-measure FUNCTION LOAD hoping for a better number; the
 structural and upstream pays it too. DO apply the general form: before banking a favourable
 ratio on any command, confirm the differential for that command is green, because missing
 behaviour is indistinguishable from speed in this instrument.
+
+--------------------------------------------------------------------------------
+## 2026-08-17 RusticHorizon: A REAL DEFICIT, FOUND BY SCREENING THE CORPUS — `PUBSUB CHANNELS` is 2.20-2.47x BEHIND Redis 7.2.4, and 42.3 pct of it is dispatch that builds a formatted String per call (`frankenredis-p98mw`)
+
+Claim class: COMPETITIVE. Campaign output: yes — measured against live Redis 7.2.4 in the
+same invocation, three times, on a quiet host with no builds running.
+
+THE CORPUS WAS AGAIN THE LIMITING INSTRUMENT, not the engine. My last screen concluded "no
+algorithmic deficit remains" from 19 shapes. This turn I screened 24 MORE that had never been
+measured, in a genuinely quiet window (`pgrep rustc` = 0, load 8.8/9.4/17.9). Twenty-three
+were comfortably ahead at 0.45x-0.72x. One was not:
+
+    pubsub_channels   fr 10,189.2   redis 4,624.9 / 4,206.6   2.2033x / 2.4201x / 2.4668x
+    pubsub_numsub     fr      —     —                          0.6119x   <- SIBLING CONTROL
+
+    THE SIBLING IS THE CONTROL AND IT PASSES. `PUBSUB NUMSUB` is the same container command,
+    same dispatch machinery, same probe, and it sits at 0.6119x. So this is not "PUBSUB is
+    slow" and not a whole-process handicap — it is specific to CHANNELS.
+
+THE FR ARM IS EXACT AND THE SPREAD IS ALL DENOMINATOR, which is worth stating because the
+ratio looks unstable: fr measured 10,189.2 / 10,190.0 / 10,180.5 across three runs — 0.09 pct
+apart — while redis measured 4,624.9 and 4,206.6, 9.9 pct apart. That is precisely the
+asymmetry the harness header documents. The conservative reading is the LOWEST ratio, 2.20x,
+and the finding survives it: fr retires more than twice the incumbent's instructions to answer
+`PUBSUB CHANNELS` on an empty subscriber set.
+
+ATTRIBUTION (self cost, callgrind, same binary). Every frame in the top eight is DISPATCH or
+NAME-HANDLING machinery. None of it is pubsub work — the command returns an empty array:
+
+     8.24 pct  fr_command::check_full_command_arity
+     7.40 pct  fr_command::effective_command_flags
+     6.47 pct  __memcmp_avx2_movbe                       (libc)
+     4.73 pct  fr_command::command_table_index
+     4.50 pct  core::str::Split<IsWhitespace>::try_fold  <- splitting a string, per call
+     3.53 pct  Runtime::execute_frame_internal
+     3.47 pct  fr_runtime::push_ascii_lowercase_lossy
+     2.79 pct  core::str::lossy::Utf8Chunks::next        <- from_utf8_lossy
+     2.38 pct  alloc::fmt::format::format_inner          <- format!(), per call
+     2.03 pct  core::fmt::write
+     1.96 pct  fr_command::canonical_command_fullname
+
+THE MECHANISM, read from the source rather than guessed. `canonical_command_fullname`
+(fr-command/src/lib.rs:19717) does, on EVERY call:
+
+    let parent = String::from_utf8_lossy(argv[0]).to_ascii_lowercase();   // allocation 1
+    if container && has_sub {
+        return format!("{parent}|{}", from_utf8_lossy(sub).to_ascii_lowercase()); // 2 + fmt
+    }
+
+So a container command allocates two owned Strings and runs the formatting machinery to
+produce a key like `pubsub|channels`, before any work happens. That accounts for
+`Utf8Chunks::next`, `format_inner`, `core::fmt::write` and the malloc traffic in one step.
+The codebase ALREADY KNOWS this shape: `command_has_subcommands_bytes` carries the comment
+"so hot-path callers can decide without lowercasing the name into an owned String first"
+(byq16). The byte-wise escape hatch exists; this path does not take it.
+
+DISPATCH IS NOT THE WHOLE STORY, and the arithmetic says so. Dispatch is 4,313 of 10,189
+instr/op. Removing all of it would leave ~5,876 against redis's ~4,400 — still ~1.34x behind.
+So this needs BOTH the name-building fix and a look at the remaining work, and a floor-entry
+style lever alone would not close it. Sizing it as a pure dispatch win would over-promise,
+which is the error the class-[C] correction warned about from the other direction.
+
+PROVENANCE:
+  ELF           6cc189255c14d52d, built locally with RCH_CARGO_WRAPPER_BYPASS=1, zero [RCH]
+                lines, tree at HEAD 50c2661e2.
+  harness       scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines in the SAME
+                invocation. Incumbent verified in-run: sha=d2c8a4b9 == vendored HEAD, clean.
+  host          thinkstation1, 64 cores, powersave, /data 127G, NO builds running.
+  PER-ARM loadavg/MHz  screen 11.64/—, confirm run1 8.91/2513, run2 8.84/3144, ladder
+                8.8/—. Window 1/5/15 = 8.80/9.42/17.90 — the quietest of this session,
+                1-min and 5-min converged.
+
+RETRY PREDICATE: take `PUBSUB CHANNELS` as a TWO-part lever and size the parts separately —
+the per-call `canonical_command_fullname` String build (visible as format/lossy/malloc), and
+the ~1.34x residual after dispatch. Do NOT screen only the families you already suspect: this
+was found in a batch of 24 chosen precisely because nobody had measured them, and 23 of the 24
+were fine.
