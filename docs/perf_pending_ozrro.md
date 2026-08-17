@@ -21,6 +21,57 @@ commits cleanly. That is a workaround for a durability problem, NOT an attempt t
 the contract: the rows are unchanged, they are still subject to it, and merging them into the
 ledger is a mechanical step once the blocker clears.
 
+## CLOSED (frankenredis-ozrro) — the read-gate vein is NOT a 93-arm sweep: 60 pct of floor arms are the let-chain form whose only legal gate placement measurably LOSES. Worth ~190 on ~1 pct of arms, and a per-arm inspection job for the rest
+
+Source analysis over all 165 floor arms; no build, no measurement. Closes the vein I opened three
+rows ago at "~93 executors, ~190 net per arm", which was an executor count masquerading as a
+worklist.
+
+    floor arm form                                              count   share
+    let-chain  (`&& let Some(...)`) -> gate must be HOISTED         99   60 pct   MEASURED LOSS
+    body form  (gate can sit inside the `if let`)                    1    1 pct   MEASURED WIN
+    already converted (mine)                                         6    —
+    other shapes, unclassified by this screen                       59   36 pct   inspect individually
+
+### WHY THE FORM DECIDES THE OUTCOME
+
+Measured, on the same executor and the same predicate:
+
+    TYPE   gate inside the `if let` body     -199.4 instr/op
+    TTL    gate HOISTED above a let-chain      +21.0 instr/op (control-corrected)
+
+A let-chain arm reads `if let Some(packet) = parse(..) && let Some(response) = exec(..)`. A `let`
+statement cannot occupy the expression position of the second clause, so the cached gate has to be
+computed ABOVE the whole chain — before the parser has even run. That placement lost, twice
+measured, and I reverted TTL and PTTL because of it.
+
+So the vein's value is real (~190-200, confirmed on HGET and TYPE) and its SCOPE is not. 99 arms
+are disqualified by construction unless someone restructures the arm's control flow first, which is
+a manual rewrite per arm carrying the regression risk the TTL measurement demonstrated — for ~190.
+That trade is not obviously worth taking and should not be entered by sweep.
+
+### WHAT I GOT WRONG WHEN I OPENED IT
+
+I wrote: "a per-pass read-gate cache would save on EVERY borrowed read on a pipelined workload" and
+sized the vein at 93 executors. Both halves were wrong in the same way — I counted the executors
+that COMPUTE the gate without checking whether their call sites could USE a cache. An executor
+count is not a worklist, and the difference between them was 60 pct of the surface.
+
+This is the same error shape as the `[A]`-candidate screen that listed ten commands without their
+cascade depth, and as the `keys_star` intercept. Each time the count was right and the thing it was
+a count OF was wrong.
+
+### WHAT REMAINS, STATED SO IT IS NOT RE-OPENED BY SWEEP
+
+  * The 59 unclassified arms need INDIVIDUAL inspection: HGET qualified via a closure form
+    (`and_then(|packet| { .. })`) that this screen does not recognise, so some of the 59 are
+    genuine candidates. Each is worth ~190 and costs one inspection.
+  * The 99 let-chain arms are closed unless the arm is restructured first. Anyone tempted should
+    read the TTL row before starting.
+  * DONE and holding: HGET -191.5, TYPE -199.4, plus the write-gate trio (MSET -269.3, HSET -263.7,
+    HMSET -269.5) which had no such structural limit because `cached_plain_write_gate` was already
+    threaded and those arms were already body-form.
+
 ## MEASURED (frankenredis-ozrro) — the HGET wrapper is now `#[inline]`, and the measurement is a NULL by construction: no shape in this corpus can verify the saving, only that nothing regressed
 
     shape        pre-inline   post-inline   delta
