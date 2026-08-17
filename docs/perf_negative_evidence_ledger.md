@@ -26211,3 +26211,70 @@ RETRY PREDICATE: do NOT re-derive the deficit from sinterstore_big — it cannot
 question at any precision. DO add a SINTERCARD large-k shape (same probes, count reply) as
 the isolation instrument, and re-check anything else in this ledger that used a "control"
 which substitutes work rather than removing it.
+
+--------------------------------------------------------------------------------
+LANDED (frankenredis-gein3) — sintercard_big, the isolation shape the previous correction
+called for: SAME probes, ONE integer reply. Source-verified rather than assumed, and
+pinned by a test
+
+Claim class: METHOD (instrument; no measurement — loadavg 78.6 at request time)
+
+The row above retracted the claim that SINTERSTORE isolates fr's reply cost, because
+SINTERSTORE does not REMOVE the reply, it SWAPS it for a costlier destination-set build
+(+531,769 instr/op for fr). Its retry predicate named the instrument that WOULD isolate it:
+a shape doing the same probes and emitting nothing. That shape is now in the corpus.
+
+    "sintercard_big": SADD cb1/cb2 with 512 shared members; SINTERCARD 2 cb1 cb2
+
+    sinter_big MINUS sintercard_big = fr's per-member EMIT cost.
+
+"SAME COMMAND FAMILY" IS NOT "SAME CODE PATH", so this was verified in source before the
+shape was written — `Store::sintercard` has its OWN body, not a wrapper around SINTER's:
+
+  - Its generic arm is `for member in min_set.iter() { for s in &other_sets {
+    if !s.contains(member) ... } }` — structurally identical to `sinter_borrow_scan`'s
+    loop, through the same `GenericSet::contains` this ledger inlined two rows ago.
+  - It ALSO has an int-set fast path (`min_set.as_int_slice()`) that SINTER has no
+    equivalent of. The shape's members are STRINGS, so that path is bypassed and both
+    commands run the generic probe.
+  - It ALSO has a LIMIT early-stop and a declustered random-stride scan. The shape passes
+    NO LIMIT, so `declustered` is false and the scan is start=0 stride=1 — the same order
+    and the same NUMBER of probes, not an early-stopping sample.
+
+Each of those three would have silently invalidated the subtraction. This ledger's own
+warning that SINTERCARD does not enter `intersect_sorted_i64` is exactly this hazard, and
+it is why the check was done first.
+
+THE INVARIANT THE MEASUREMENT RESTS ON IS NOW A TEST, because the two commands do not share
+an implementation and nothing else guarded their agreement:
+`sintercard_count_equals_sinter_cardinality_gein3` asserts SINTERCARD's count equals
+SINTER's cardinality across identical, partial-overlap, disjoint, int-encoded,
+mixed-encoding, three-key and 300-member hash-backed cases — chosen to route through the
+int fast path, the generic probe, and the packed->hash boundary that `sintercard_big`
+actually measures. MUTATION-TESTED: disabling the generic probe's filter reddens it with
+"partial overlap: SINTERCARD counted 3 but SINTER returned 2 members". 923 fr-store tests
+pass.
+
+EXPECTED, RECORDED IN ADVANCE SO THE RUN CAN FALSIFY IT: `sintercard_big` should be STABLE
+where `sinter_big` is 40 pct variable, because its reply is one integer and there are no
+variable write passes — the same reason `sinterstore_big` reproduces to 0.19 pct. If it
+comes back NOISY, the variance is NOT reply delivery and this ledger's variance attribution
+is wrong too.
+
+NOT MEASURED THIS TURN, and deliberately so: loadavg was 78.6 at request and 59.51/56.99/
+36.36 when I checked, the highest of the session. The shape and its test are landed so the
+measurement is a single command for whoever holds the next quiet window.
+
+PROVENANCE:
+  no measurement       instrument only.
+  host                 thinkstation1, 64 cores, /data 219G, governor powersave, no build.
+  loadavg              59.51 / 56.99 / 36.36 observed; 78.6 reported at request.
+  MHz                  not recorded — no arm was measured, and a host-wide mean on a row
+                       that measured nothing is noise dressed as provenance.
+  reservations         held scripts/shape_instr_per_op.py and crates/fr-store/src/lib.rs
+                       while editing; released on commit.
+
+RETRY PREDICATE: run `sintercard_big` against `sinter_big` in the next window, min-of-K on
+both arms. The DIFFERENCE is fr's per-member emit cost and is the first number that can
+tell whether fr's 13 pct per-member excess over redis is in EMIT or in PROBE. Do NOT quote
+either shape alone for that question.

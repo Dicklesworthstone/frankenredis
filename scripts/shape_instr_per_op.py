@@ -384,6 +384,28 @@ SHAPES = {
          "SADD db2 " + " ".join(f"n{i:04d}" for i in range(512))],
         ["SDIFF", "db1", "db2"],
     ),
+    # (frankenredis-gein3) THE ISOLATION SHAPE. sinter_big says fr is 1.1193x at k=512;
+    # sinterstore_big does NOT explain why, because it does not REMOVE the reply, it swaps
+    # it for a destination-set build that costs MORE than the reply did (+531,769 instr/op
+    # for fr). A control that substitutes costlier work cannot isolate the cost it replaced.
+    #
+    # SINTERCARD does the SAME probes and emits ONE INTEGER. Verified in source, because
+    # "same command family" is not the same as "same code path":
+    #   - Store::sintercard's generic arm is `for member in min_set.iter() { for s in
+    #     &other_sets { if !s.contains(member) ... } }` — structurally identical to
+    #     sinter_borrow_scan's loop, through the same GenericSet::contains.
+    #   - Members are STRINGS, so `min_set.as_int_slice()` is None and the int-set fast
+    #     path (which SINTER would not take either) is bypassed.
+    #   - NO `LIMIT`, so `declustered` is false and the scan is start=0 stride=1, i.e. the
+    #     same order and the same number of probes rather than an early-stopping sample.
+    #
+    # So sinter_big MINUS sintercard_big is fr's per-member EMIT cost, and the reply here
+    # is small enough that this shape should be STABLE where sinter_big is 40 pct variable.
+    "sintercard_big": (
+        ["SADD cb1 " + " ".join(f"m{i:04d}" for i in range(512)),
+         "SADD cb2 " + " ".join(f"m{i:04d}" for i in range(512))],
+        ["SINTERCARD", "2", "cb1", "cb2"],
+    ),
     "sinterstore_big": (
         ["SADD sb1 " + " ".join(f"m{i:04d}" for i in range(512)),
          "SADD sb2 " + " ".join(f"m{i:04d}" for i in range(512))],

@@ -79686,4 +79686,93 @@ mod tests {
             }
         }
     }
+
+    /// (frankenredis-gein3) `sintercard_big` is the shape that isolates fr's per-member
+    /// EMIT cost, by doing the SAME probes as `sinter_big` and replying with one integer
+    /// instead of every member. That subtraction is only meaningful while the two
+    /// commands genuinely compute the SAME intersection, and they do NOT share an
+    /// implementation — `Store::sintercard` has its own body with an int-set fast path, a
+    /// LIMIT early-stop and an optional declustered stride that `Store::sinter` has no
+    /// equivalent of.
+    ///
+    /// So pin the invariant the measurement rests on: with no LIMIT, SINTERCARD's count
+    /// equals SINTER's cardinality, across the encodings and shapes that route through
+    /// different arms of that body.
+    #[test]
+    fn sintercard_count_equals_sinter_cardinality_gein3() {
+        // (label, sets) — chosen to hit both the int-set fast path and the generic
+        // `contains` probe loop, plus the degenerate cases around them.
+        let cases: Vec<(&str, Vec<Vec<&[u8]>>)> = vec![
+            ("identical strings", vec![
+                vec![b"m1".as_slice(), b"m2", b"m3"],
+                vec![b"m1".as_slice(), b"m2", b"m3"],
+            ]),
+            ("partial overlap", vec![
+                vec![b"m1".as_slice(), b"m2", b"m3"],
+                vec![b"m2".as_slice(), b"m3", b"m4"],
+            ]),
+            ("disjoint", vec![
+                vec![b"m1".as_slice(), b"m2"],
+                vec![b"n1".as_slice(), b"n2"],
+            ]),
+            // Integer members take `as_int_slice()` in sintercard and NOT in sinter, so
+            // this is the case where the two bodies diverge most.
+            ("int sets overlapping", vec![
+                vec![b"1".as_slice(), b"2", b"3", b"4"],
+                vec![b"3".as_slice(), b"4", b"5"],
+            ]),
+            ("int sets disjoint", vec![
+                vec![b"1".as_slice(), b"2"],
+                vec![b"7".as_slice(), b"8"],
+            ]),
+            // Mixed encodings: one int-encoded, one not, so the int fast path must bail.
+            ("mixed encodings", vec![
+                vec![b"1".as_slice(), b"2", b"3"],
+                vec![b"2".as_slice(), b"3", b"x"],
+            ]),
+            ("three keys", vec![
+                vec![b"a".as_slice(), b"b", b"c", b"d"],
+                vec![b"b".as_slice(), b"c", b"d"],
+                vec![b"c".as_slice(), b"d", b"e"],
+            ]),
+            // Large enough to leave the packed encoding and become hash-backed, which is
+            // the encoding sintercard_big actually measures.
+            ("large hash-backed", vec![
+                (0..300).map(|_| b"placeholder".as_slice()).collect(),
+                (0..300).map(|_| b"placeholder".as_slice()).collect(),
+            ]),
+        ];
+
+        for (label, sets) in cases {
+            let mut store = Store::new();
+            let mut names: Vec<Vec<u8>> = Vec::new();
+            for (i, members) in sets.iter().enumerate() {
+                let name = format!("k{i}").into_bytes();
+                if label == "large hash-backed" {
+                    // Distinct members; the overlap is the first 200 of each.
+                    for j in 0..300usize {
+                        let m = if j < 200 {
+                            format!("shared{j:04}")
+                        } else {
+                            format!("only{i}_{j:04}")
+                        };
+                        store.sadd(&name, &[m.as_bytes()], 0).unwrap();
+                    }
+                } else {
+                    store.sadd(&name, members, 0).unwrap();
+                }
+                names.push(name);
+            }
+            let keys: Vec<&[u8]> = names.iter().map(Vec::as_slice).collect();
+
+            let members = store.sinter(&keys, 0).expect("sinter");
+            let count = store.sintercard(&keys, 0, 0).expect("sintercard");
+            assert_eq!(
+                count as usize,
+                members.len(),
+                "{label}: SINTERCARD counted {count} but SINTER returned {} members",
+                members.len()
+            );
+        }
+    }
 }
