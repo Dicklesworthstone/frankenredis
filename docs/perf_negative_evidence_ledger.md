@@ -31420,3 +31420,78 @@ RETRY PREDICATE. The rank/REV SPLIT is settled — do not re-measure it. The res
 is cheaper than rank INSIDE the listpack regime) needs a redis-side profile, not another
 ratio: `callgrind_annotate --tree=calling` on the redis arm at n=64, comparing the two forms'
 callees, is the instrument. Do not fit any slope across the 128-member boundary.
+
+--------------------------------------------------------------------------------
+## MEASURED (frankenredis-gvm6z) — the last ZRANGESTORE residual is closed by a redis-side frame profile: `zzlInsert`'s FORWARD SEARCH is 101.7 pct of the rank-vs-REV gap, and my earlier guess had the right term with the wrong weight
+
+Claim class: MEASURED-STRUCTURE (incumbent-side mechanism). No ratio is claimed here beyond
+the ones already banked. No build in this window.
+
+THE OPEN ITEM, AND THE INSTRUMENT I PRESCRIBED FOR IT. My previous row settled that the
+destination ENCODING drives the rank/REV split (they converge to 1.02x once both are
+skiplists) but explicitly could not explain the DIRECTION inside the listpack regime, where
+REV is 1.94x CHEAPER. It named the instrument: `callgrind_annotate --tree=calling` on the
+REDIS arm, not another ratio. That is what this row runs.
+
+    redis arm, n=64, listpack destinations        RANK           REV        delta
+    listpack.c:lpValidateNext                780,045,268    84,945,268   695,100,000
+    listpack.c:lpNext                        481,652,676             -   481,652,676
+    t_zset.c:zzlInsert                       170,534,623    11,522,623   159,012,000
+                                                            SEARCH SUM 1,335,764,676
+    PROGRAM TOTALS                         2,723,535,243 1,409,781,777 1,313,753,466
+
+    **The three search frames are 101.7 pct of the entire gap.** Nothing else needs to be
+    invoked; the small overshoot is the other frames moving slightly the other way.
+
+THE SOURCE SIDE IS IDENTICAL, which is what makes the attribution clean rather than a
+correlation: `lpFind` is **518,233,526 in BOTH arms, to the instruction**, and
+`__memcmp_avx2_movbe` is 201,969,827 vs 201,882,061, 0.04 pct apart. Both forms read the same
+source listpack and do the same member comparisons. Everything that differs is on the
+DESTINATION insert.
+
+THE MECHANISM. `zzlInsert` maintains score order by scanning the destination listpack FORWARD
+from the head to find the insertion point.
+
+    ascending  (rank `0 -1`)  each new member has the HIGHEST score so far, so the scan
+                             traverses the ENTIRE existing listpack every time -> O(n^2)
+    descending (REV)         each new member has the LOWEST score so far, so the scan stops
+                             at the first element -> O(n)
+
+That is why `lpNext` is 481M in rank and absent in REV: it is the scan.
+
+AND IT CORRECTS MY OWN EARLIER GUESS, which is the part worth keeping. I wrote that insertion
+order was "the obvious candidate — ascending appends at a listpack's tail, descending inserts
+at its head — but that predicts REV MORE expensive, the opposite sign of the measurement", and
+dropped it. The memmove term I was reasoning about is REAL and does have the sign I predicted:
+`lpInsert` is 56,886,218 (rank) against 59,658,218 (REV), so REV genuinely pays MORE to move
+bytes. It is just **2.8 million instructions against a 1.34 BILLION search term** — 0.2 pct of
+it. I had the right physics for the wrong term and discarded a correct observation because I
+had weighed it against nothing. A frame profile costs one run and would have settled it then.
+
+WHY fr IS IMMUNE, stated as the mechanism rather than as a boast: fr's `zstore_from_pairs`
+bulk-builds the destination in ONE pass from already-ordered pairs (frankenredis-zsetbulk), so
+there is no per-element insertion search to be quadratic in. fr's rank and REV forms measure
+2.19 pct apart at n=200 and 0.0388x / 0.0915x at n=64; the asymmetry simply does not exist on
+its side.
+
+PROVENANCE:
+  fr ELF        61778add43b18a6b4ae913d952d86c5a994db21695bf5534f9f79d51e6942bb0 (the fr arm
+                is not the subject here; the profile is of the INCUMBENT).
+  incumbent     redis-server sha=d2c8a4b9 == vendored source HEAD, clean, verified per run.
+                Frames resolve to `legacy_redis_code/redis/src/{listpack,t_zset}.c`.
+  dumps         /data/tmp/fr_instr_s6_zphq_ (rank) and /data/tmp/fr_instr_crev8_i1 (REV),
+                `cg.redis.2n.out` in each, `callgrind_annotate --auto=no`.
+  reproduction  the two runs that produced these dumps re-measured 0.0388x and 0.0915x
+                against 0.0389x and 0.0922x banked earlier — 0.3 pct and 0.8 pct apart.
+  host          thinkstation1, 64 cores, governor powersave, /data 160G, NO build in window.
+  per-arm load  rank 8.85/10.68/12.73; REV 12.74/11.61/12.98.
+  per-arm MHz   window 2,292-2,893 mean observed; cross-core 1,429-4,292 at a single instant.
+
+RETRY PREDICATE. ZRANGESTORE is now fully accounted for and needs no further measurement: the
+lever is certified, the option forms are priced, the size dependence is closed, and the
+incumbent-side mechanism is explained frame by frame. The ONLY open item is landing the
+arity-6 forms (~3,115 instr/op each, +/-3 pct), which needs a SECOND parser and class and is
+blocked on `main.rs` and `fr-runtime/src/lib.rs`, both held exclusive by MossySparrow until
+07:19Z. Do not re-profile the incumbent here; if anyone wants the same treatment for another
+command, the pattern is: confirm the source-side frames are identical FIRST, then attribute
+only what differs.
