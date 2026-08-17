@@ -52229,6 +52229,112 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
     /// but note the parser here is the SHARED `key_arg2` one that also serves ZMPOP and
     /// XACK — so the token and prefix are what keep those apart, and this asserts they do.
     #[test]
+    /// (frankenredis-gvm6z) The ADJACENT-ARITY transposition gate.
+    ///
+    /// OBSERVED DEFECT CLASS, not a hypothetical: HEAD shipped `(5, Lmpop) =>
+    /// Lmpop1Count` and `(6, Lmpop) => Lmpop2` — the pair backwards. Fixed in
+    /// 213de4e63, which changed two lines and added NO test, so the same
+    /// transposition in any other family is still unguarded.
+    ///
+    /// WHY IT IS SILENT. Both entries are individually well-formed: each names a real
+    /// class whose arm exists. Nothing type-checks the PAIRING. The arm then declines
+    /// the packet it was handed, and a floor decline does not fall back to the cascade —
+    /// it goes straight to GENERIC. So a transposition is a pure pessimisation that
+    /// still returns the right bytes, which is exactly why it survived review and only
+    /// a differential screen found it.
+    ///
+    /// THE ORACLE IS HARDCODED FROM REDIS'S ARITY SEMANTICS, deliberately. A corpus
+    /// read back out of `classify_borrowed_dispatch_floor_packet`'s own table would
+    /// agree with any transposition and prove nothing. These invocations are written
+    /// from what the COMMAND means:
+    ///
+    ///     *5  LMPOP 2 k1 k2 LEFT           two keys, no COUNT
+    ///     *6  LMPOP 1 key LEFT COUNT 1     one key, with COUNT
+    ///
+    /// MUTATION CHECK for whoever revisits this: swap any adjacent pair below in the
+    /// arity table and this test must go RED on both halves of that pair. If swapping a
+    /// pair leaves it green, the pair is not actually covered here.
+    #[test]
+    fn adjacent_arity_floor_classes_are_not_transposed_gvm6z() {
+        let cfg = ParserConfig::default();
+        fn packet(args: &[&str]) -> Vec<u8> {
+            let mut p = format!("*{}\r\n", args.len()).into_bytes();
+            for a in args {
+                p.extend_from_slice(format!("${}\r\n{}\r\n", a.len(), a).as_bytes());
+            }
+            p
+        }
+        use super::BorrowedDispatchFloorClass as C;
+
+        // Families where two or more arities of the SAME command map to DIFFERENT
+        // classes — the only shape in which a transposition is possible.
+        let corpus: &[(&[&str], C)] = &[
+            // The regression this test exists for (p98mw / 213de4e63).
+            (&["LMPOP", "2", "k1", "k2", "LEFT"], C::Lmpop2),
+            (&["LMPOP", "1", "key", "LEFT", "COUNT", "1"], C::Lmpop1Count),
+            // BITCOUNT's three arities: bare key, byte range, unit-qualified range.
+            (&["BITCOUNT", "k"], C::BitcountKey),
+            (&["BITCOUNT", "k", "0", "5"], C::BitcountRange),
+            (&["BITCOUNT", "k", "0", "5", "BYTE"], C::BitcountUnit),
+            // SET's option forms, keyed purely on arity across three classes.
+            (&["SET", "k", "v", "NX"], C::SetOpt4),
+            (&["SET", "k", "v", "EX", "10"], C::SetOpt5),
+            (&["SET", "k", "v", "NX", "EX", "10"], C::SetOpt6),
+        ];
+
+        for (args, want) in corpus {
+            let pkt = packet(args);
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
+                Some(*want),
+                "{args:?} (arity {}) classified wrongly — check for a transposed \
+                 adjacent-arity entry",
+                args.len(),
+            );
+        }
+
+        // The pairing is the property, so state it directly: within one command, two
+        // different arities must never land on the SAME class. A transposition that
+        // merely swapped them would be caught above; this catches a copy-paste that
+        // duplicates one class across both arities, which the per-invocation
+        // assertions alone would not flag as obviously.
+        for (family, arities) in [
+            (
+                "LMPOP",
+                vec![
+                    vec!["LMPOP", "2", "k1", "k2", "LEFT"],
+                    vec!["LMPOP", "1", "key", "LEFT", "COUNT", "1"],
+                ],
+            ),
+            (
+                "BITCOUNT",
+                vec![
+                    vec!["BITCOUNT", "k"],
+                    vec!["BITCOUNT", "k", "0", "5"],
+                    vec!["BITCOUNT", "k", "0", "5", "BYTE"],
+                ],
+            ),
+        ] {
+            let classes: Vec<Option<C>> = arities
+                .iter()
+                .map(|a| super::classify_borrowed_dispatch_floor_packet(&packet(a), &cfg))
+                .collect();
+            for (i, ci) in classes.iter().enumerate() {
+                assert!(ci.is_some(), "{family} arity {} lost its class", arities[i].len());
+                for (j, cj) in classes.iter().enumerate().skip(i + 1) {
+                    assert_ne!(
+                        ci, cj,
+                        "{family}: arities {} and {} share a class — one of the two \
+                         arity-table entries is a copy of the other",
+                        arities[i].len(),
+                        arities[j].len(),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn ltrim_floor_class_claims_exactly_what_its_parser_accepts() {
         let cfg = ParserConfig::default();
         fn packet(args: &[&str]) -> Vec<u8> {
