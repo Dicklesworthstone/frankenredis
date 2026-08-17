@@ -3062,7 +3062,7 @@ pub fn encode_listpack_strings_blob(entries: &[&[u8]]) -> Option<Vec<u8>> {
 /// `capacity == 0` means "unknown", which reproduces the grow-from-empty behaviour exactly.
 /// A wrong non-zero capacity is a performance bug, never a correctness one: `Vec` grows if
 /// the hint was short and the emitted bytes are identical either way.
-fn encode_listpack_strings_blob_with_capacity(
+pub fn encode_listpack_strings_blob_with_capacity(
     entries: &[&[u8]],
     capacity: usize,
 ) -> Option<Vec<u8>> {

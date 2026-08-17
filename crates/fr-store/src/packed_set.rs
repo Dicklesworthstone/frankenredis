@@ -4072,6 +4072,30 @@ impl<'a> Iterator for ListChunkRevIter<'a> {
 // `forced_quicklist` is consulted — other budgets fall back to the stateless
 // estimate in `Store::object_encoding`).
 const LIST_LP_OVERHEAD: u64 = 7; // 4-byte total-bytes + 2-byte count header + 0xFF EOF
+
+/// (frankenredis-qj6jn) Is the promoted-list node encoder allowed to use the length the
+/// packing loop already computed? Production: always, compiled to a constant. Under
+/// `perf-ab-list-node-capacity` a control process sets
+/// `FR_PERF_AB_LIST_NODE_CAPACITY_ORIG=1` to restore the grow-from-empty buffer, so both
+/// arms live in ONE ELF. Separate from the fr-persist toggle on purpose: that site is
+/// already shipped and stays ON in both arms here, which is what isolates THIS change.
+#[cfg(feature = "perf-ab-list-node-capacity")]
+#[inline]
+fn list_node_capacity_enabled() -> bool {
+    static ORIG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    !*ORIG.get_or_init(
+        || match std::env::var("FR_PERF_AB_LIST_NODE_CAPACITY_ORIG") {
+            Ok(value) => value == "1",
+            Err(_) => false,
+        },
+    )
+}
+
+#[cfg(not(feature = "perf-ab-list-node-capacity"))]
+#[inline(always)]
+const fn list_node_capacity_enabled() -> bool {
+    true
+}
 const LIST_DEFAULT_BUDGET: u64 = 8192; // quicklistNodeLimit(-2) sz_limit
 /// quicklist.c `SIZE_SAFETY_LIMIT` — a packed node is never allowed to exceed
 /// this even when `list-max-listpack-size` is a positive (count) limit.
@@ -4689,6 +4713,50 @@ impl ListValue {
         (!chunks.is_empty()).then_some(chunks)
     }
 
+    /// (frankenredis-qj6jn) Encode one promoted-list quicklist node, handing the encoder the
+    /// length it already knows.
+    ///
+    /// `node_bytes` is maintained here exactly the way `packed_bytes` is maintained in
+    /// `fr_persist::encode_compact_list_quicklist2`: it starts at `LIST_LP_OVERHEAD` (7 — the
+    /// same value as `LISTPACK_BLOB_OVERHEAD`) and adds `list_lp_entry_bytes(elem)` per entry,
+    /// which is a byte-for-byte twin of `listpack_entry_encoded_len`. So at a flush it IS the
+    /// finished blob length and the node buffer never reallocates.
+    ///
+    /// This is the SECOND of the two call sites that reach the blob encoder. `65e785c95` wired
+    /// the fr-persist one and measured −2.90 pct at 40 entries and a NULL at 200; the call
+    /// records showed 200-entry lists are promoted and encode through THIS function instead,
+    /// at 24,988.8 instr/key. Recomputing a size here would be the O(n) lever already refused
+    /// in the ledger — this only passes a number the loop already has.
+    ///
+    /// The `debug_assert` is the guard that matters: `list_lp_entry_bytes` and
+    /// `listpack_entry_encoded_len` are INDEPENDENT implementations of the same size rule, in
+    /// different crates, and a drift between them would silently stop the hint being exact. In
+    /// release a wrong hint is only a performance bug, never a correctness one, because `Vec`
+    /// still grows and the emitted bytes are identical.
+    ///
+    /// `hint == 0` means UNKNOWN and is passed straight through as "no capacity", which
+    /// reproduces the grow-from-empty behaviour. That is not a special case invented here:
+    /// `ListChunk::Owned::lp_bytes` already documents `0` as "a mutable path touched the
+    /// chunk and the value must be recomputed before append/seal". Recomputing it HERE is
+    /// exactly the O(n) lever the ledger already refused, so an unknown length is left
+    /// unknown rather than rebuilt.
+    #[inline]
+    fn encode_node_blob(entries: &[&[u8]], hint: u64) -> Option<Vec<u8>> {
+        let capacity = if list_node_capacity_enabled() && hint != 0 {
+            usize::try_from(hint).unwrap_or(0)
+        } else {
+            0
+        };
+        let blob = fr_persist::encode_listpack_strings_blob_with_capacity(entries, capacity)?;
+        debug_assert!(
+            hint == 0 || blob.len() as u64 == hint,
+            "a non-zero node length hint must equal the finished listpack node length: \
+             hint {hint}, emitted {}",
+            blob.len()
+        );
+        Some(blob)
+    }
+
     pub(crate) fn quicklist_packed_nodes(&self, fill: i64) -> Option<Vec<QuicklistPackedNode<'_>>> {
         if let ListRepr::Deque(list) = &self.repr {
             let prefix_len = list.rpush_conversion_prefix_len.min(self.len());
@@ -4706,7 +4774,7 @@ impl ListValue {
                             fill,
                         )
                     {
-                        let blob = fr_persist::encode_listpack_strings_blob(&entries)?;
+                        let blob = Self::encode_node_blob(&entries, node_bytes)?;
                         nodes.push(QuicklistPackedNode {
                             bytes: Cow::Owned(blob),
                         });
@@ -4717,7 +4785,7 @@ impl ListValue {
                     entries.push(elem);
                 }
                 if !entries.is_empty() {
-                    let blob = fr_persist::encode_listpack_strings_blob(&entries)?;
+                    let blob = Self::encode_node_blob(&entries, node_bytes)?;
                     nodes.push(QuicklistPackedNode {
                         bytes: Cow::Owned(blob),
                     });
@@ -4740,14 +4808,17 @@ impl ListValue {
                 ListChunk::Owned {
                     elems,
                     front_biased,
-                    ..
+                    lp_bytes,
                 } if !elems.is_empty() => {
                     let slices: Vec<&[u8]> = if *front_biased {
                         elems.iter().rev().map(Vec::as_slice).collect()
                     } else {
                         elems.iter().map(Vec::as_slice).collect()
                     };
-                    let blob = fr_persist::encode_listpack_strings_blob(&slices)?;
+                    // (frankenredis-qj6jn) The chunk already carries its exact listpack
+                    // length; reversing for `front_biased` permutes the entries but not
+                    // their encoded sizes, so the total is the same either way.
+                    let blob = Self::encode_node_blob(&slices, *lp_bytes)?;
                     let first_len = if *front_biased {
                         elems.last()?.len()
                     } else {

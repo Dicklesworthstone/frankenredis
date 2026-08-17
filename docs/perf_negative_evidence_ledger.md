@@ -39989,3 +39989,140 @@ already sit at 1.8 pct, so a third draw on `a0553f7a` while `crates/` is untouch
 settle it. Take exactly one pair per quiet stretch. And do NOT screen candidate windows on
 loadavg LEVEL: measure CPU idle with `vmstat` and check the 1m/5m spread instead, because
 this row was obtained at a loadavg that the level heuristic would have rejected.
+
+--------------------------------------------------------------------------------
+## 2026-08-17 CrimsonHawk: the SECOND node-encoder call site — once a list outgrows the flat listpack it encodes through `packed_set.rs`, and that chunk already stores its exact listpack length. Handing it over is −1.49 pct at 200 entries, where the first lever was a NULL (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method). No timing
+verdict is claimed, and CV was NOT used — not as a gate, not as a filter, not as provenance.
+The only dispersion figure in this row is the A/A null per size, which is a determinism check
+on the instrument rather than a noise estimate.
+
+Claim class: COMPETITIVE. Campaign output: yes — fr/Redis 7.2.4 measures 3.2932x after this
+change, from 3.3431x before, on the 200-entry list DEBUG RELOAD workload. The vendored Redis
+7.2.4 server process ran as a live incumbent arm in the same invocation as both fr arms, and
+its own figure is in the board below (65,395.4 instr/key).
+
+### THIS CLOSES THE REACH BOUND THE PREVIOUS ROW LEFT OPEN, AND ITS CONDITION WAS MET
+
+`5fa7ddda4` measured the fr-persist node-capacity lever at −6.29 / −2.90 / −0.04 pct for 4 / 40
+/ 200 entries and reported the n=200 NULL rather than re-scoping the predicate. The call
+records said why: at 200 entries a list is promoted out of the flat listpack and its RDB encode
+is driven from `fr_store::packed_set::ListValue::quicklist_packed_nodes`, not from the
+fr-persist packer. The predicate for reopening was explicit — only if THAT site can supply an
+exact node length the way `packed_bytes` does, and never by recomputing one.
+
+    IT CAN, AND THE CODE ALREADY SAYS SO. `ListChunk::Owned` carries
+    `lp_bytes: u64`, documented in-tree as "Exact listpack byte length if known. `0` means a
+    mutable path touched the chunk and the value must be recomputed before append/seal", and
+    `owned_listpack_bytes` computes it as `LIST_LP_OVERHEAD + sum(list_lp_entry_bytes)` — the
+    same quantity, in the same units, as the fr-persist packer's `packed_bytes`.
+
+So the hint is passed through and `0` is passed through as `0`: an unknown length is left
+unknown and the buffer grows exactly as before. Recomputing it here would be the O(n) sizing
+pass this ledger already refused, and the sentinel makes declining to recompute the natural
+implementation rather than a special case.
+
+### THE BOARD
+
+    members   A/A null       ORIG        CAND       delta        vs redis 7.2.4
+       4      0.999428    12,962.3    12,970.5    +0.06 pct   1.1386x -> 1.1393x
+      40      1.000658    55,678.0    55,692.2    +0.03 pct   2.5863x -> 2.5870x
+     200      1.001162   218,622.6   215,357.5   −1.49 pct   3.3431x -> 3.2932x
+
+    frame          n=4              n=40                n=200
+    finish_grow    148.5 -> 148.5   440.6 -> 440.5      552.6 -> 371.5     −33 pct
+    realloc        352.1 -> 352.2  1,456.4 -> 1,456.2  1,870.4 -> 1,180.2  −37 pct
+
+  THE EFFECT IS EXACTLY WHERE THE MECHANISM SAYS IT SHOULD BE. Below promotion the chunk path
+  is not the encoder's caller and the frames do not move at all; at 200 entries, where it is,
+  realloc traffic falls 37 pct and the whole reload falls 1.49 pct — 13x that arm's own null.
+
+  THE TWO SUB-PROMOTION READINGS ARE BOTH POSITIVE (+0.06, +0.03), and both are inside their
+  own nulls (0.057 and 0.066 pct). The honest statement is "no measurable cost", not "free":
+  two same-signed readings at the noise floor are not evidence of a regression, but they are
+  not evidence of zero either, and I am not going to round them to a win.
+
+  TOGETHER WITH `5fa7ddda4` the two call sites now cover the whole size range — that lever
+  paid at 4 and 40 and was null at 200; this one is null at 4 and 40 and pays at 200. Neither
+  is a regression at any measured size.
+
+### SCOPE NOTE — ONE SITE IN THIS CHANGE IS UNMEASURED, AND SAYING SO IS THE POINT
+
+`quicklist_packed_nodes` has TWO arms that reach the encoder. This change wires both:
+
+  * the CHUNKS arm (`ListChunk::Owned`), which is what the measured workload takes and what
+    every number above comes from;
+  * the `rpush_conversion_prefix_len` arm, which maintains its own `node_bytes` accumulator in
+    the same shape and was wired first. It measured NOTHING on any of the three sizes — an
+    earlier build with only that arm wired read +0.12 / +0.04 / +0.00 pct, all inside their
+    nulls, because this workload never takes it.
+
+    So that arm is landed on the strength of its mechanism and its assertion, not on a ratio.
+    It is byte-identical by construction and free when unreached, but it is UNMEASURED and the
+    row says so rather than letting the chunks arm's number cover for it.
+
+### EQUIVALENCE
+
+Capacity never affects content; a wrong hint would be a performance bug, not a correctness one,
+because `Vec` still grows and the emitted bytes are identical. The hint's exactness is
+nonetheless asserted, and that assertion is load-bearing for a reason worth stating: the size
+rule is implemented TWICE, independently, in two crates — `fr_store::list_lp_entry_bytes` and
+`fr_persist::listpack_entry_encoded_len` — with two separate canonical-integer predicates
+(`list_lp_int` vs `parse_listpack_integer`). I read both: same branch structure, same width
+boundaries, same canonical rules (optional `-`, no `+`, no redundant leading zero, not `-0`),
+and both reject overflow — `parse::<i64>()` on one side, `checked_mul`/`checked_sub`/
+`checked_neg` on the other. A future drift between them would silently stop the hint being
+exact, so `debug_assert!(hint == 0 || blob.len() as u64 == hint)` fails loudly in tests and
+costs nothing in release. 925 fr-store tests pass with it live.
+
+### PROVENANCE
+
+  ELF           bench_elf_sha256 = 527a5c4044e2798b4dd51104f6345f0688ab3d558fb9418fe21225c0088d9eeb
+                (`release-perf`; the 16-hex prefix 527a5c4044e2798b was recorded at build
+                time and this full digest re-verifies it — the measured copy lives at a
+                private scratchpad path nothing else writes, so before and after agree.
+                NOT a `/proc/self/exe` self-report: every arm runs under callgrind, so
+                `/proc/<pid>/exe` is valgrind's binary and a true in-process self-report is
+                impossible for this harness. Same convention, and same disclaimer, as
+                `scripts/shape_instr_per_op.py::emit_bench_elf_sha`.)
+                Built locally with
+                RCH_CARGO_WRAPPER_BYPASS=1, no `[RCH]` line. BOTH ARMS FROM THIS ONE ELF via
+                `FR_PERF_AB_LIST_NODE_CAPACITY_ORIG=1`, so no tree-stability question arises
+                while peers commit to other crates. (The prior-arm-only ELF was
+                97c9a24750be5d1f.)
+  harness       scratchpad `reload_slope.py` + `zset_board.py`, K=4 -> K=12 DEBUG RELOAD slope,
+                one fresh working directory per point, soundness assertion active and silent.
+  incumbent     vendored redis 7.2.4, verified in-run sha=d2c8a4b9 == vendored source HEAD.
+  host          thinkstation1, 64 cores OBSERVED, powersave governor, /data 212G free.
+  PER-ARM loadavg/MHz   n=4   48.09/35.11/29.55 -> 42.45/34.34/29.36, MHz mean 3835 then 4055
+                        n=40  44.34/34.86/29.56 -> 38.82/33.99/29.33, MHz mean 2845 then 4113
+                        n=200 40.67/34.46/29.50 -> 35.57/33.71/29.37, MHz mean 2883 then 3062
+                        (max 4001-4166, min 1429-4101). Busy but FALLING and stable across the
+                        run; recorded per arm rather than as one figure because cross-core
+                        spread reached 1429-4079 within single samples. Admissible because Ir
+                        is a deterministic count, and the three A/A nulls (0.999428, 1.000658,
+                        1.001162) are the evidence the instrument held.
+  gates         fr-store 925 tests pass with the assertion live; clippy -p fr-store -p
+                fr-persist --all-targets -D warnings clean; fmt clean over my edits (four
+                pre-existing hunks in peer-written regions of `fr-store/src/lib.rs` and
+                `packed_set.rs:7946` are left alone, not swept in).
+
+### THE REPLICATED-STANDING CONVENTION DOES NOT APPLY
+
+It governs thin margins near parity, where standing against the incumbent must survive a second
+ELF and be quoted at its worst bound. This route is 3.29x BEHIND after the change, so no
+standing is claimed at all, and the n=200 margin is 13x its own null. The sub-promotion
+readings are reported as unmoved rather than as small wins, which is the conservative
+direction.
+
+RETRY PREDICATE:
+  1. The list reload is still 3.29x behind at 200 entries and ~2.59x at 40, and buffer growth
+     is no longer the top term there. Re-rank before taking anything else on this route: the
+     five-site growth map in the earlier rejection row is now partly spent.
+  2. Reopen the `rpush_conversion_prefix_len` arm ONLY IF a workload is found that actually
+     takes it — an LPUSH-built list, or one crossing the conversion prefix — and it shows a
+     delta exceeding that arm's null. Until then it stays landed-but-unmeasured, not a win.
+  3. Do NOT extend this to any call site lacking a maintained length. `ListChunk::Listpack`
+     needs no encode at all, and any site that would have to compute a size is the refused
+     lever again.
