@@ -8,6 +8,57 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-08-17 MossyOrchid: THE HALF-FIX FOR `9hori` IS WORSE THAN THE BUG — switching FUNCTION LOAD to executed registrations without the RELOAD paths turns a loud rejection into silent library loss on restart (`frankenredis-9hori`)
+
+Claim class: SOURCE / CORRECTNESS. No build, no bench, no artifact writes, no deletes — /data at
+5.0G, 100 pct used. Line-verified at HEAD.
+
+Recorded here rather than only on the bead because the hazard is a SHAPE, not a detail: it is the
+second time this week I have found a partial fix that trades a visible failure for an invisible
+one, and the bead is not in the fleet's reading path.
+
+THE BUG: `fr_store::function_load` derives registered names by TEXT-SCANNING the source for
+`register_function(...)` and requires literals, so a name or callback held in a LOCAL is
+invisible and fr FALSELY REJECTS a library 7.2.4 loads. The fix is sitting there —
+`lua_eval::function_load_execute` already executes the body and returns
+`Vec<RegisterFunctionSpec> { name, flags, description }`, and fr-command:13386 already calls it
+and THROWS THE SPECS AWAY before falling through to the scan.
+
+WHY IT CANNOT BE DONE IN ONE PLACE. `function_load` has six callers and they split on capability:
+
+    fr-runtime  6331, 6388, 6440, 6516, 6805   RDB load / replica apply / DEBUG RELOAD. None
+                                               executes the body. fr-runtime DEPENDS on
+                                               fr-command, so these CAN execute.
+    fr-store    34138                          FUNCTION RESTORE. fr-store cannot depend on
+                                               fr-command, so this one cannot execute where it
+                                               stands.
+
+THE HAZARD, stated so nobody ships the tempting half. fr persists the library SOURCE and
+re-derives registrations from it on every reload. Fix only the interactive path and a
+dynamically-registering library LOADS ONCE, then FAILS TO RELOAD — lost on restart, and a replica
+silently diverges from its primary. Today's behaviour is a rejection at load time: wrong, but
+LOUD and at the moment of the operator's action. The half-fix converts that into data loss
+discovered at the next restart. **A partial fix here is a regression even though it makes a
+failing case pass**, which is exactly the property that makes it attractive to land.
+
+So the command path and the five reload paths must land in ONE unit, with FUNCTION RESTORE's
+execution moved up to the command layer. Executing on reload is not a workaround: upstream
+re-evaluates library source on load, so it is the correct behaviour.
+
+THE GATE IS ALREADY BUILT AND IS SELF-INVALIDATING: `scripts/function_load_differ.py` carries
+three EXPECTED_DIVERGENCES (`dyn_name_local`, `dyn_name_concat`, `dyn_callback_local`) and FAILS
+on a stale allowance by design, so the fix is not done until those three entries are deleted and
+the differ still passes.
+
+NEGATIVE CASE THE OBVIOUS TEST SUITE MISSES: load a dynamic library, DEBUG RELOAD, then FUNCTION
+LIST. The half-fix passes every load-time test and loses the library only there. Two more on the
+bead (computed flags/description; FUNCTION RESTORE of a dynamic payload).
+
+PROVENANCE: source only. Host thinkstation1, /data 5.0G at 100 pct, loadavg 8.31 / 9.56 / 10.69.
+No MHz sample: nothing was timed.
+
+--------------------------------------------------------------------------------
+
 ## 2026-08-17 MossyOrchid: SPEC 2 OF 2 — XPENDING's summary form carries THREE already-fixed divergences a borrowed copy would reintroduce, and one of them sits on the exact shape being optimised (`frankenredis-5na4i`)
 
 Claim class: SOURCE. No build, no bench, no server, no deletes — /data at 8.2G, 100 pct used.
