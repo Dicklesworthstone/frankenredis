@@ -118,6 +118,8 @@ perf-ab-xtrim-minid-noop = [
 # collapse order. The control sets FR_PERF_AB_ZSET_COLLAPSE_ORDER_ORIG=1;
 # production compiles only the order-preserving path.
 perf-ab-zset-collapse-order = ["fr-runtime/perf-ab-zset-collapse-order"]
+# (frankenredis-qj6jn) Measurement-only control arm for the fresh-key bulk list build.
+perf-ab-list-bulk-build = ["fr-runtime/perf-ab-list-bulk-build"]
 # (frankenredis-qj6jn) Measurement-only control arm for the promoted-list node capacity.
 perf-ab-list-node-capacity = ["fr-runtime/perf-ab-list-node-capacity"]
 # (frankenredis-qj6jn) Measurement-only control arm for the quicklist node capacity.

@@ -17774,6 +17774,27 @@ impl Store {
     /// via `ListValue::push_back(Vec<u8>)`. Byte-identical to `rpush` on the same elements (same
     /// push_back / note_command_grow / bookkeeping; only the per-element clone is gone) — locked by
     /// `rpush_owned_matches_rpush_for_rdb_load_shapes`. Mirrors zset's zadd_plain_owned wiring.
+    /// (frankenredis-qj6jn) Is a fresh-key bulk RPUSH allowed to build the list directly
+    /// instead of building it Packed and converting? Production: always, compiled to a
+    /// constant. Under `perf-ab-list-bulk-build` a control process sets
+    /// `FR_PERF_AB_LIST_BULK_BUILD_ORIG=1` to restore the element-by-element loop, so both
+    /// arms live in ONE ELF.
+    #[cfg(feature = "perf-ab-list-bulk-build")]
+    #[inline]
+    fn list_bulk_build_enabled() -> bool {
+        static ORIG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        !*ORIG.get_or_init(|| match std::env::var("FR_PERF_AB_LIST_BULK_BUILD_ORIG") {
+            Ok(value) => value == "1",
+            Err(_) => false,
+        })
+    }
+
+    #[cfg(not(feature = "perf-ab-list-bulk-build"))]
+    #[inline(always)]
+    const fn list_bulk_build_enabled() -> bool {
+        true
+    }
+
     pub fn rpush_owned(
         &mut self,
         key: &[u8],
@@ -17819,12 +17840,26 @@ impl Store {
                 }
             }
             None => {
-                let mut l = ListValue::default();
-                let mut raw_add = 0u64;
-                for v in values {
-                    raw_add += v.len() as u64;
-                    l.push_back(v);
-                }
+                // (frankenredis-qj6jn) A fresh-key bulk RPUSH -- which is how the RDB loader
+                // rebuilds every list -- used to start Packed and discover at element 128 that
+                // it should not have been, then convert. `bulk_from_back` reproduces the exact
+                // same construction sequence (same promote index, same `ChunkedList::from`,
+                // same tail appends under `fill`) without writing the first 128 elements into
+                // a buffer it is about to discard and allocating an owned copy of each to get
+                // them back out. `list_bulk_back_matches_incremental_push_qj6jn` pins it
+                // against the incremental path on elements, lp_bytes and -- the part that
+                // could silently change bytes on the wire -- quicklist NODE boundaries.
+                let (mut l, raw_add) = if Self::list_bulk_build_enabled() {
+                    ListValue::bulk_from_back(values)
+                } else {
+                    let mut l = ListValue::default();
+                    let mut raw_add = 0u64;
+                    for v in values {
+                        raw_add += v.len() as u64;
+                        l.push_back(v);
+                    }
+                    (l, raw_add)
+                };
                 l.note_rpush_command_grow(
                     ListValue::empty_listpack_bytes(),
                     raw_add,

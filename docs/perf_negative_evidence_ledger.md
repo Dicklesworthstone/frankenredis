@@ -37,6 +37,73 @@ arms; this one adds a function, so it fires. **A symbol check proves contaminati
 and proves nothing when it does not** — the general check is that the before arm's base is not an
 ancestor of the lever.
 
+### Where the plus-or-minus 20 came from: a GET dispatch cost in the getexgate work that shares this commit, and how it explains both pairs
+
+The correction above bounded my lever at "somewhere between 142 and 204" and said no pair could
+isolate it. A four-ELF comparison isolates it, and the answer changes what both rows should say.
+
+**First, layout noise is ~1 instr/op, not 20.** Two independently built PRE-lever ELFs, different
+bases with unrelated peer commits between them:
+
+    shape             gh_before   clean_before   delta
+    get_control        1303.0      1301.7        -1.3
+    zadd_base          2729.8      2730.8        +1.0
+    sadd_existing      1967.7      1967.6        -0.1
+
+with dispatch IDENTICAL in all three (457, 662, 617). So a ~20 instr/op movement is not layout and
+has to be explained.
+
+**Second, the explanation.** `get_control` across all four ELFs — my lever is present in both
+"after" arms, so anything that differs between them is not mine:
+
+    ELF            contains                              get_control   dispatch
+    gh_before      neither                                 1302.5        457
+    gh_after       my lever + PARTIAL getexgate            1301.0        457
+    clean_before   neither                                 1298.1        457
+    clean_after    my lever + COMMITTED getexgate          1324.0        473
+
+**My lever leaves GET alone: 1302.5 -> 1301.0 with dispatch flat at 457.** That is expected — it
+touches `execute_plain_keyed_values_write_borrowed` and its floor dispatcher, neither of which is
+on GET's path.
+
+**The completed getexgate work adds +16 instr/op to GET's DISPATCH** (457 -> 473) and ~+26 to the
+whole command. The +16 is an exact integer and reproduces; the total carries the usual few-instr
+run-to-run wobble. My working-tree snapshot caught getexgate mid-flight — hence `gh_after` at 457
+and `clean_after` at 473 with my lever constant across both.
+
+### WHAT THIS DOES TO MY OWN NUMBERS
+
+The clean pair's −180 / −141.7 / −146.7 are my saving MINUS the ~16 instr/op that the co-landed
+change adds to every borrowed route's dispatch. Adding it back gives roughly −196 / −158 / −163,
+which reconciles with the first pair's −203 / −204 / −203 to within a few instructions.
+
+So the routes DO clear the 150 bar once the co-landed cost is attributed — **but that is an
+inference from a subtraction, not a measurement of my lever alone**, and I am not restoring the
+withdrawn LPUSHX/RPUSHX figures on it. They stay withdrawn until an arm exists with one lever and
+not the other. What I will say is that the withdrawal was caused by a second change in the same
+commit, not by my lever underperforming.
+
+### WHAT THIS OBLIGES OF THE getexgate ROW, and it is the important half
+
+**+16 instr/op on GET's dispatch is a regression on the most-executed command in the system, and
+it is larger than the per-route saving that work claims for INCR and GETDEL.** It needs measuring
+and either fixing or recording. The likely mechanism is that threading
+`default_write_allowed: Option<bool>` through predicates changed inlining in a helper that GET's
+borrowed route shares — an `Option<bool>` is not free where a `bool` was, and GET pays it without
+using it.
+
+That is a hypothesis, not a finding: the measurement is the +16, the mechanism is not established.
+`scripts/frame_delta.py --dispatch` on the two dumps names the frame in one command and I have not
+run it, because the row and the fix belong to whoever owns getexgate.
+
+### RETRY PREDICATE
+
+(1) Run `frame_delta.py --dispatch` on `clean_before` against `clean_after` and read which dispatch
+frame gained the 16; that names the mechanism without another build. (2) If the `Option<bool>`
+threading is the cause, a plain `bool` with a separate uncached entry point — the shape SET and the
+keyed-values executor both use — costs GET nothing. (3) Do not restore the LPUSHX/RPUSHX figures
+from the subtraction above; measure them against an arm that carries one lever only.
+
 ### The clean re-measure does not reproduce these figures, and two routes fall under the 150 instr/op bar I set beforehand
 
 The row above promised a clean re-measure against `5bc439a57^`. It has now been run, and it

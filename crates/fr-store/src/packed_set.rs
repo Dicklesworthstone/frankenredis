@@ -4464,6 +4464,87 @@ impl ListValue {
         }
     }
 
+    /// (frankenredis-qj6jn) Build a list from a whole batch appended at the back, WITHOUT
+    /// the packed intermediate the incremental path throws away.
+    ///
+    /// `Store::rpush_owned` on a fresh key does `ListValue::default()` then `push_back` per
+    /// element. Because the value starts Packed, a batch larger than `PACKED_MAX_ENTRIES`
+    /// writes its first 128 elements into a packed buffer, then `promote()` walks that buffer
+    /// allocating a fresh `Vec<u8>` PER ELEMENT to get the bytes back out, builds a `VecDeque`
+    /// and re-chunks it. On the RDB load path that happens on EVERY reload: measured at 12.95
+    /// pct of a 200-entry list DEBUG RELOAD (`maybe_promote` inclusive).
+    ///
+    /// EQUIVALENCE IS BY CONSTRUCTION, and the construction is the argument. Starting empty
+    /// and Packed, `push_back` at index `i` sees `p.len() == i`, so it promotes at the FIRST
+    /// index where `i >= PACKED_MAX_ENTRIES || values[i].len() > PACKED_MAX_VALUE` — call it
+    /// `i*`. `promote()` then builds `ChunkedList::from(VecDeque of values[..i*])`, and
+    /// `values[i*..]` are appended by `push_back_with_fill`. This reproduces exactly that
+    /// sequence: same `add_entry_bytes` order over all elements, the same `VecDeque` contents
+    /// (moved rather than copied out of a packed buffer), the same `ChunkedList::from`, and
+    /// the same tail appends. What it does NOT do is write the first `i*` elements into a
+    /// buffer it is about to discard.
+    ///
+    /// Deliberately NOT `impl From<VecDeque<Vec<u8>>> for ListValue`: that chunks all N
+    /// uniformly by `LIST_CHUNK_TARGET`, whereas the incremental path lets the first chunk
+    /// keep growing under the `fill` budget. Those differ, and chunk boundaries are quicklist
+    /// NODE boundaries in the DUMP, so substituting it would change bytes on the wire.
+    /// `list_bulk_back_matches_incremental_push_qj6jn` pins this against the incremental path.
+    ///
+    /// Returns the built value and the raw byte total the caller needs for growth accounting.
+    pub fn bulk_from_back(values: Vec<Vec<u8>>) -> (Self, u64) {
+        let mut list = ListValue::default();
+        let mut raw_add = 0u64;
+
+        // The count test is O(1) and it is the ONLY reason to look ahead at all. A batch that
+        // cannot reach `PACKED_MAX_ENTRIES` may still promote on an over-long element, but the
+        // ordinary loop already discovers that per element at no extra cost — so it runs with
+        // NO pre-scan, and a small list pays nothing for this fast path existing. (Measured:
+        // scanning unconditionally cost +0.41 pct at 40 elements, ~3x that arm's null, which
+        // is a regression on the most common list size to buy a win on the rarest.)
+        //
+        // When the batch DOES exceed the count threshold, an over-long element beyond index
+        // `PACKED_MAX_ENTRIES` cannot promote any earlier than the count does, so the look-ahead
+        // is bounded at `PACKED_MAX_ENTRIES` regardless of how long the batch is.
+        let promote_at = if values.len() > PACKED_MAX_ENTRIES {
+            let head = &values[..PACKED_MAX_ENTRIES];
+            Some(
+                head.iter()
+                    .position(|v| v.len() > PACKED_MAX_VALUE)
+                    .unwrap_or(PACKED_MAX_ENTRIES),
+            )
+        } else {
+            None
+        };
+
+        let Some(split) = promote_at else {
+            // Never promotes: the packed path is what the incremental loop would do anyway.
+            for v in values {
+                raw_add += v.len() as u64;
+                list.push_back(v);
+            }
+            return (list, raw_add);
+        };
+
+        let mut values = values;
+        let tail = values.split_off(split);
+        let head: VecDeque<Vec<u8>> = values
+            .into_iter()
+            .inspect(|v| raw_add += v.len() as u64)
+            .inspect(|v| list.lp_bytes += list_lp_entry_bytes(v))
+            .collect();
+        list.repr = ListRepr::Deque(Arc::new(ChunkedList::from(head)));
+        let fill = list.fill;
+        for v in tail {
+            raw_add += v.len() as u64;
+            list.add_entry_bytes(&v);
+            match &mut list.repr {
+                ListRepr::Packed(p) => p.push_back(&v),
+                ListRepr::Deque(d) => Arc::make_mut(d).push_back_with_fill(v, fill),
+            }
+        }
+        (list, raw_add)
+    }
+
     fn maybe_promote(&mut self, added_len: usize) {
         if let ListRepr::Packed(p) = &self.repr
             && (p.len() >= PACKED_MAX_ENTRIES || added_len > PACKED_MAX_VALUE)
@@ -7255,6 +7336,107 @@ mod tests {
         assert_eq!(
             z2.iter().collect::<Vec<_>>(),
             vec![(&b"x"[..], 0.0), (b"y", -0.0)]
+        );
+    }
+
+    /// (frankenredis-qj6jn) `ListValue::bulk_from_back` must be INDISTINGUISHABLE from
+    /// `default()` + `push_back` per element — not merely "a valid list".
+    ///
+    /// The thing that can silently differ is CHUNK BOUNDARIES, because
+    /// `quicklist_packed_nodes` emits one quicklist node per chunk and those nodes are the
+    /// DUMP payload. A builder that produced the same ELEMENTS with different chunking would
+    /// pass any content check and still change bytes on the wire against the incumbent, so
+    /// the node blobs are compared directly, at several `fill` values.
+    ///
+    /// Sizes straddle every boundary that can move `i*`: `PACKED_MAX_ENTRIES` (128) and
+    /// `PACKED_MAX_VALUE` (64), including the case where an over-long element forces an
+    /// EARLY promote before the count threshold is reached — which is exactly where a
+    /// `min(count_threshold)` slip would show up.
+    #[test]
+    fn list_bulk_back_matches_incremental_push_qj6jn() {
+        fn incremental(values: &[Vec<u8>]) -> (ListValue, u64) {
+            let mut l = ListValue::default();
+            let mut raw = 0u64;
+            for v in values {
+                raw += v.len() as u64;
+                l.push_back(v.clone());
+            }
+            (l, raw)
+        }
+
+        let short = |i: usize| format!("item-{i:05}").into_bytes();
+        let long = |i: usize| vec![b'a' + (i % 26) as u8; PACKED_MAX_VALUE + 1];
+
+        let mut cases: Vec<(String, Vec<Vec<u8>>)> = Vec::new();
+        for n in [0usize, 1, 2, 63, 127, 128, 129, 130, 200, 400] {
+            cases.push((format!("{n} short"), (0..n).map(short).collect::<Vec<_>>()));
+        }
+        // An over-long element forces promotion BEFORE the count threshold.
+        for at in [0usize, 1, 5, 127, 128, 129] {
+            let mut v: Vec<Vec<u8>> = (0..200).map(short).collect();
+            if at < v.len() {
+                v[at] = long(at);
+            }
+            cases.push((format!("200 short, long at {at}"), v));
+        }
+        // Every element over-long: promotes at index 0.
+        cases.push(("40 all long".into(), (0..40).map(long).collect()));
+        // Exactly at the value boundary must NOT promote on value.
+        cases.push((
+            "200 elements each exactly PACKED_MAX_VALUE".into(),
+            (0..200).map(|_| vec![b'z'; PACKED_MAX_VALUE]).collect(),
+        ));
+
+        for (label, values) in &cases {
+            let (want, want_raw) = incremental(values);
+            let (got, got_raw) = ListValue::bulk_from_back(values.clone());
+
+            assert_eq!(want_raw, got_raw, "{label}: raw byte total diverged");
+            assert_eq!(want.len(), got.len(), "{label}: length diverged");
+            assert_eq!(
+                want.listpack_byte_len(),
+                got.listpack_byte_len(),
+                "{label}: lp_bytes diverged"
+            );
+            assert_eq!(
+                want.iter().map(<[u8]>::to_vec).collect::<Vec<_>>(),
+                got.iter().map(<[u8]>::to_vec).collect::<Vec<_>>(),
+                "{label}: element sequence diverged"
+            );
+            // THE ONE THAT MATTERS: identical quicklist NODE boundaries, hence identical
+            // DUMP payload, at every fill the store can be configured with.
+            for fill in [-2i64, -1, -3, -5, 128, 32] {
+                assert_eq!(
+                    want.quicklist_packed_node_blobs(fill),
+                    got.quicklist_packed_node_blobs(fill),
+                    "{label}: quicklist node blobs diverged at fill={fill}"
+                );
+            }
+        }
+
+        // THE TEST MUST BE ABLE TO FAIL. The obvious "simplification" of
+        // `bulk_from_back` is to hand the batch to `impl From<VecDeque<Vec<u8>>> for
+        // ListValue`, which already encodes the same promote predicate. It chunks all N
+        // uniformly by LIST_CHUNK_TARGET, while the incremental path lets the first chunk
+        // keep growing under the `fill` budget — so it produces DIFFERENT node boundaries
+        // and would change DUMP bytes. Asserting that divergence here does two things: it
+        // proves the node-blob comparison above is discriminating rather than vacuous, and
+        // it stops anyone replacing this builder with the shorter-looking one.
+        let straddling: Vec<Vec<u8>> = (0..200).map(short).collect();
+        let naive = ListValue::from(straddling.iter().cloned().collect::<VecDeque<Vec<u8>>>());
+        let (correct, _) = ListValue::bulk_from_back(straddling.clone());
+        assert_eq!(
+            naive.iter().map(<[u8]>::to_vec).collect::<Vec<_>>(),
+            correct.iter().map(<[u8]>::to_vec).collect::<Vec<_>>(),
+            "the naive builder still holds the same ELEMENTS -- which is why an \
+             element-only check would not catch it"
+        );
+        assert_ne!(
+            naive.quicklist_packed_node_blobs(-2),
+            correct.quicklist_packed_node_blobs(-2),
+            "ListValue::from was expected to chunk DIFFERENTLY from the incremental path; \
+             if this now matches, the node-blob assertions above have stopped discriminating \
+             and this test needs a new adversary"
         );
     }
 
