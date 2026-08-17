@@ -57,6 +57,13 @@ from _incumbent import (  # noqa: E402  (sys.path set immediately above)
     incumbent_provenance,
 )
 
+# (frankenredis-eh2ct) Cache simulation is OFF by default: it roughly triples
+# callgrind's runtime, and every existing row was taken without it. `--cache-sim`
+# turns it on for a stall investigation. Simulated D1/LL misses are DETERMINISTIC, so
+# unlike an IPC census they can be taken on a contended host — which is the entire
+# reason this option exists.
+CACHE_SIM = [False]
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REDIS = os.path.join(ROOT, "legacy_redis_code/redis/src/redis-server")
 
@@ -1148,13 +1155,31 @@ class ReplyCounter:
         raise RuntimeError("unparseable RESP tag %r" % tag)
 
 
-def total_ir(path: str) -> int:
-    """Whole-process Ir from the callgrind summary line."""
+def total_events(path: str) -> dict:
+    """Whole-process event totals, keyed by the dump's own `events:` header.
+
+    (frankenredis-eh2ct) Reads every column rather than just Ir, so a cache-simulated
+    run yields D1/LL misses from the same dump the instruction count comes from. The
+    header is authoritative: callgrind emits a different column set depending on
+    --cache-sim, and positionally assuming "Ir is first, misses are next" is how a
+    row silently reports Dr as D1mr.
+    """
+    events, totals = None, None
     with open(path, "r", errors="replace") as fh:
         for line in fh:
-            if line.startswith(("summary:", "totals:")):
-                return int(line.split()[1])
-    raise RuntimeError("no summary line in %s" % path)
+            if line.startswith("events:"):
+                events = line.split()[1:]
+            elif line.startswith(("summary:", "totals:")):
+                totals = [int(v) for v in line.split()[1:]]
+                break
+    if events is None or totals is None:
+        raise RuntimeError("no events/summary line in %s" % path)
+    return dict(zip(events, totals))
+
+
+def total_ir(path: str) -> int:
+    """Whole-process Ir from the callgrind summary line."""
+    return total_events(path)["Ir"]
 
 
 # (frankenredis-rzdi8) Frames that are "getting to the command" rather than
@@ -1366,7 +1391,12 @@ def run_once(engine: str, seeds, cmd, ops: int, workdir: str, tag: str,
     out = os.path.join(workdir, "cg.%s.out" % tag)
     port = free_port()
     argv = ["valgrind", "--tool=callgrind", "--callgrind-out-file=" + out,
-            "--cache-sim=no", "--branch-sim=no",
+            "--cache-sim=%s" % ("yes" if CACHE_SIM[0] else "no"),
+            # --branch-sim stays OFF permanently: it was measured as a PROXY for the
+            # hardware branch-miss axis and REJECTED, because simulated mispredicts
+            # came out at parity while hardware showed 6x. Leaving it off keeps a
+            # known-useless column out of the dump. (frankenredis-lua census)
+            "--branch-sim=no",
             engine, "--port", str(port), "--save", "", "--appendonly", "no"]
     # cwd=workdir: never boot an engine in the repo root, which is shared and may
     # hold a dump.rdb redis refuses to load (frankenredis-7afsd).
@@ -1944,6 +1974,9 @@ def main() -> int:
     args = sys.argv[1:]
     if "--self-test" in args:
         return provenance_self_test()
+    if "--cache-sim" in args:
+        CACHE_SIM[0] = True
+        args = [a for a in args if a != "--cache-sim"]
     if "--selftest" in args:
         return selftest()
     if "--list" in args:
@@ -2034,6 +2067,23 @@ def main() -> int:
     print("  fr     Ir(N)=%-14d Ir(2N)=%-14d -> %10.1f instr/op" % (fr_lo, fr_hi, fr_ipo))
     print("  redis  Ir(N)=%-14d Ir(2N)=%-14d -> %10.1f instr/op" % (rd_lo, rd_hi, rd_ipo))
     print("  fr/redis instructions per op: %.4fx" % (fr_ipo / rd_ipo))
+    if CACHE_SIM[0]:
+        # (frankenredis-eh2ct) Per-op simulated misses, differenced the same way Ir is,
+        # so startup cancels. D1mr/DLmr are the memory-stall axis; a ratio far above
+        # the instruction ratio is the signature of "fewer instructions, more cycles".
+        fr_lo_ev = total_events(os.path.join(workdir, "cg.fr.n.out"))
+        fr_hi_ev = total_events(os.path.join(workdir, "cg.fr.2n.out"))
+        rd_lo_ev = total_events(os.path.join(workdir, "cg.redis.n.out"))
+        rd_hi_ev = total_events(os.path.join(workdir, "cg.redis.2n.out"))
+        print("  simulated misses per op (2N-N differenced):")
+        print("    %-6s %12s %12s %8s" % ("event", "fr", "redis", "fr/redis"))
+        for ev in ("Dr", "D1mr", "DLmr", "Dw", "D1mw", "DLmw"):
+            if ev not in fr_hi_ev or ev not in rd_hi_ev:
+                continue
+            f = (fr_hi_ev[ev] - fr_lo_ev[ev]) / ops
+            r = (rd_hi_ev[ev] - rd_lo_ev[ev]) / ops
+            ratio = ("%.4fx" % (f / r)) if r else "n/a"
+            print("    %-6s %12.1f %12.1f %8s" % (ev, f, r, ratio))
     # (frankenredis-zw36c) The per-PASS denominator, now observed rather than inferred.
     # fr's per-iteration bookkeeping is paid once per pass, so a shape's passes/op is what
     # converts that fixed tax into a per-op cost. A shape at ~1 pass/op cannot show a
