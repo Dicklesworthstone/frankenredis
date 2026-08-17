@@ -2357,9 +2357,25 @@ fn encode_compact_list_quicklist2(
     // Redis-compatible PLAIN/PACKED classification.
     let mut packed: Vec<&[u8]> = Vec::new();
     let mut packed_bytes = LISTPACK_BLOB_OVERHEAD;
-    let flush = |packed: &mut Vec<&[u8]>, buf: &mut Vec<u8>| -> Option<()> {
+    // (frankenredis-qj6jn) `packed_bytes` is not just the node-boundary accumulator: at the
+    // moment of a flush it IS the finished blob length, because it starts at
+    // LISTPACK_BLOB_OVERHEAD (the 6-byte header plus the 1-byte terminator) and adds
+    // exactly `lens[i]` per entry — the same per-entry byte count `encode_listpack_entry`
+    // writes. So the encoder can be handed its exact capacity for free, and the buffer
+    // never reallocates. Passing 0 restores the grow-from-empty arm for measurement.
+    let flush = |packed: &mut Vec<&[u8]>, buf: &mut Vec<u8>, node_bytes: usize| -> Option<()> {
         if !packed.is_empty() {
-            let lp = encode_listpack_strings_blob(packed)?;
+            let capacity = if quicklist_node_capacity_enabled() {
+                node_bytes
+            } else {
+                0
+            };
+            let lp = encode_listpack_strings_blob_with_capacity(packed, capacity)?;
+            debug_assert_eq!(
+                lp.len(),
+                node_bytes,
+                "packed_bytes must equal the finished listpack node length"
+            );
             rdb_encode_length(buf, 2); // PACKED
             rdb_encode_string(buf, &lp);
             packed.clear();
@@ -2376,7 +2392,7 @@ fn encode_compact_list_quicklist2(
             // path below; node_count counts an over-budget element as its own node either
             // way, so the count stays consistent). Previously `item.len() > budget` made
             // any >8 KiB element a PLAIN node, diverging from redis's DUMP bytes.
-            flush(&mut packed, &mut buf)?;
+            flush(&mut packed, &mut buf, packed_bytes)?;
             packed_bytes = LISTPACK_BLOB_OVERHEAD;
             rdb_encode_length(&mut buf, 1); // PLAIN
             rdb_encode_string(&mut buf, item);
@@ -2384,13 +2400,13 @@ fn encode_compact_list_quicklist2(
         }
         let entry_bytes = lens[i];
         if !packed.is_empty() && packed_bytes + entry_bytes > budget {
-            flush(&mut packed, &mut buf)?;
+            flush(&mut packed, &mut buf, packed_bytes)?;
             packed_bytes = LISTPACK_BLOB_OVERHEAD;
         }
         packed.push(item.as_slice());
         packed_bytes += entry_bytes;
     }
-    flush(&mut packed, &mut buf)?;
+    flush(&mut packed, &mut buf, packed_bytes)?;
     Some(buf)
 }
 
