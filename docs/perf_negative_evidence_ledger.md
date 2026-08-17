@@ -33447,3 +33447,72 @@ on every run. thinkstation1, 64 cores, governor powersave. Per-arm loadavg: BEFO
 20.27-30.42 (1-min), AFTER 22.93-31.08, with the 5-min at 39-52 and the 15-min at 69-133 —
 a settling window, which is why every figure here carries two draws and its own null. Per-arm
 MHz 2,804-4,036 mean, cross-core 1,429-4,238.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-17 RusticHorizon: CERTIFIED + RETRACTED — the multi-word LCS "regression" was TREE DRIFT; a same-tree reverse-patch A/B puts it at +0.71 pct on lcs_64, not +9.4 pct, and the null floor for a same-tree pair is 0.25 pct not 3.04 pct (`frankenredis-p98mw`)
+
+Claim class: COMPETITIVE. Campaign output: yes — both arms measured against live Redis
+7.2.4 in the same invocation by scripts/shape_instr_per_op.py; the retraction below concerns
+two fr-vs-fr deltas I previously over-attributed to my own change.
+
+`5512b0657` banked the multi-word LCS lever with "+9.4 pct on lcs_64, +2.6 pct on lcs_2,
+residual UNATTRIBUTED", and its retry predicate said: do not chase it without re-measuring
+the pre-lever baseline on a CURRENT tree, because the prime suspect is drift. This is that
+measurement, and the predicate was right.
+
+REVERSE-PATCH A/B, both arms built from the SAME tree minutes apart, differing ONLY in that
+the BEFORE arm restores the pre-lever `build_lcs_dp` (Full O(n*m) matrix above a machine
+word) and the pre-lever `compute_lcs_len` (scalar fallback). Peer WIP in the tree is therefore
+common-mode.
+
+    shape          BEFORE      AFTER       delta        vs this pair's null floor
+    lcs_64        11,626.3    11,708.6    +0.71 pct     ~3x the floor — real but tiny
+    lcs_2          7,287.6     7,281.3    -0.09 pct     INSIDE the floor
+    get_control    1,305.4     1,306.5
+    get_control    1,303.4     1,306.7    null run TWICE per arm, per ed6f4d590's predicate
+
+    NULL FLOOR FOR THIS BUILD PAIR: 1,303.4 to 1,306.7 = 0.25 pct.
+
+WHAT I GOT WRONG. The banked +9.4 pct compared a pre-lever binary built at HEAD `d13ff14a3`
+against a post-lever binary built many peer commits later. On the CURRENT tree the pre-lever
+arm measures 11,626.3, not the 10,722.8 that old binary gave — so roughly 8.7 of those 9.4
+points were TREE DRIFT from other people's commits, and about 0.7 were mine. `lcs_2`'s "+2.6
+pct" is likewise gone: it measures -0.09 pct, inside the floor.
+
+    RETRACTED: multi-word LCS does NOT cost 9-10 pct at 64 bytes. It costs 0.71 pct there and
+    nothing measurable at 8 bytes, against gains of 76-89 pct above the word boundary. The
+    trade I described as "real but a trade" is closer to free than I reported, and I reported
+    it the wrong way round — I was more confident about the cost than the evidence allowed.
+
+AND THE NULL FLOOR IS A PROPERTY OF THE BUILD PAIR, WHICH IS THE REUSABLE PART. `ed6f4d590`
+computed 3.04 pct from 35 get_control readings spread across many trees, agents and windows,
+and I applied it as if it were a constant. For a pair of binaries built minutes apart from one
+tree it is 0.25 pct — TWELVE TIMES tighter. Both numbers are correct for what they measure:
+3.04 pct bounds a CROSS-TREE comparison, 0.25 pct bounds a SAME-TREE one. Quoting the
+cross-tree floor for a same-tree A/B throws away an order of magnitude of resolution; quoting
+the same-tree floor for a cross-tree claim is the error that produced the phantom 9.4 pct.
+
+    THE RULE THAT FOLLOWS: a before/after row must say which kind of pair it is. If the two
+    binaries come from different trees, the comparison carries drift and the floor is percent-
+    scale. If they come from one tree, run the null twice per arm and quote THAT spread. There
+    is no single floor constant, and `ed6f4d590`'s retry predicate said exactly this — it is
+    now demonstrated rather than argued.
+
+PROVENANCE:
+  AFTER ELF     aae40cc94a24de63 (tree at HEAD ae3cd4c8b, incl. a peer's fr-persist WIP)
+  BEFORE ELF    07b4c0cac9b31789 (same tree, reverse-patched, restored immediately in the
+                same command; `git status crates/fr-command/` clean afterwards)
+  harness       scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines in the SAME
+                invocation. Incumbent verified in-run: sha=d2c8a4b9 == vendored HEAD.
+  host          thinkstation1, 64 cores, powersave, /data 123G, NO builds of mine concurrent.
+  PER-ARM loadavg/MHz  before lcs_64 26.06/1429, lcs_2 23.81/2400, null 23.81/2512 and
+                22.78/2398 · after lcs_64 22.78/2918, lcs_2 21.68/2440, null 20.74/3144 and
+                19.80/4203. Window 1/5/15 = 26.06/28.57/47.56, 1-min and 5-min converged,
+                15-min still draining the earlier storm. Cross-core spread 1429-4203 MHz
+                (2.94x) within the row — instruction counts, so it does not enter the result.
+
+RETRY PREDICATE: the LCS residual is CLOSED. Do not re-open it; there is no 9 pct to find.
+Before banking any before/after delta, state whether the pair is same-tree or cross-tree and
+quote the matching floor — and if it is cross-tree, expect percent-scale drift and say so
+rather than attributing it to the change.

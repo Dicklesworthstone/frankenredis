@@ -3401,9 +3401,36 @@ fn common_prefix_len(a: &[u8], b: &[u8]) -> usize {
 /// short matches, a win only where AVX2 is decidably ahead. `SIMD == false` is
 /// verbatim the original always-local behavior (the A/B control). (g9h0v follow-up)
 #[inline]
+/// Length of the common prefix of two match tails, optionally routing long tails
+/// through AVX2.
+///
+/// (frankenredis-qj6jn) THE GUARD USED TO TEST THE WRONG QUANTITY. It was
+/// `a.len().min(b.len()) >= 128`, which is the number of bytes AVAILABLE from the
+/// match position — not the length of the match TAIL. On an 8 KB text-ish payload
+/// there are almost always 128+ bytes available even when the shared prefix is ~14
+/// bytes, so every short match entered AVX2 to compare a dozen bytes and paid the
+/// setup for nothing. The intent recorded in the bench docstring is "long tails
+/// (>= 128 B, i.e. highly repetitive runs)", and the old condition could not
+/// express it, because a tail's length is not known until it has been compared.
+///
+/// So compare the first 128 bytes with the scalar word loop FIRST, and hand the
+/// remainder to AVX2 only when that probe runs the full 128. A tail shorter than
+/// the probe never reaches the wide path; a genuinely long one pays one extra
+/// 128-byte scalar pass it would have paid anyway.
+///
+/// BYTE-IDENTICAL to a single `common_prefix_len(a, b)` by construction: if the
+/// probe stops early at `head < 128` the whole prefix is `head`, and if it runs the
+/// full 128 the prefix is `128 + prefix(rest)`. Asserted over a corpus in
+/// `lzf_match_tail_len_simd_matches_scalar_on_every_tail_length`.
+///
+/// SIMD == true is the BENCH arm only; production calls this with SIMD == false.
 fn lzf_match_tail_len<const SIMD: bool>(a: &[u8], b: &[u8]) -> usize {
     if SIMD && a.len().min(b.len()) >= 128 {
-        return fr_simd::common_prefix_len(a, b);
+        let head = common_prefix_len(&a[..128], &b[..128]);
+        if head < 128 {
+            return head;
+        }
+        return 128 + fr_simd::common_prefix_len(&a[128..], &b[128..]);
     }
     common_prefix_len(a, b)
 }
@@ -4827,6 +4854,68 @@ pub fn read_rdb_file_with_functions(
 
 #[cfg(test)]
 mod tests {
+
+    /// (frankenredis-qj6jn) `lzf_match_tail_len::<true>` routes long tails through
+    /// AVX2 behind a scalar 128-byte probe. It must return EXACTLY what the scalar
+    /// path returns, at every tail length — a compressor whose match lengths differ
+    /// by one byte emits different output, so this is a correctness invariant, not a
+    /// tuning question.
+    ///
+    /// The lengths are chosen around the places the implementation can break:
+    /// 0 (empty), 1, 127 (one short of the probe), 128 (exactly the probe — the
+    /// boundary where the old and new code diverge in PATH but must agree in
+    /// RESULT), 129 (one past), and lengths well beyond so the AVX2 remainder is
+    /// non-trivial. Each is tested with the divergence at the very start, in the
+    /// middle, and absent entirely (full match), because a probe that mishandles
+    /// "no divergence at all" returns the wrong total.
+    #[test]
+    fn lzf_match_tail_len_simd_matches_scalar_on_every_tail_length() {
+        let sizes = [
+            0usize, 1, 2, 63, 64, 126, 127, 128, 129, 130, 191, 256, 257, 1024,
+        ];
+        let mut checked = 0usize;
+        let mut simd_eligible = 0usize;
+        for &n in &sizes {
+            // Build two equal buffers, then diverge at a chosen offset (or not at all).
+            let mut diverge_at: Vec<Option<usize>> = vec![None];
+            for d in [0usize, 1, 63, 127, 128, 129, 200] {
+                if d < n {
+                    diverge_at.push(Some(d));
+                }
+            }
+            for d in diverge_at {
+                let a: Vec<u8> = (0..n).map(|i| (i % 251) as u8).collect();
+                let mut b = a.clone();
+                if let Some(d) = d {
+                    b[d] = b[d].wrapping_add(1);
+                }
+                let scalar = super::lzf_match_tail_len::<false>(&a, &b);
+                let simd = super::lzf_match_tail_len::<true>(&a, &b);
+                assert_eq!(
+                    simd, scalar,
+                    "tail len {n}, divergence at {d:?}: SIMD routing returned {simd}, \
+                     scalar returned {scalar} — a differing match length changes the \
+                     compressed bytes"
+                );
+                // The expected prefix, computed independently of both.
+                let expected = d.unwrap_or(n);
+                assert_eq!(
+                    scalar, expected,
+                    "oracle disagrees at len {n}, diverge {d:?}"
+                );
+                if n >= 128 {
+                    simd_eligible += 1;
+                }
+                checked += 1;
+            }
+        }
+        // Guard against a corpus that never reaches the wide path: without a case at
+        // 128+ the routing is never exercised and this test passes vacuously.
+        assert!(
+            simd_eligible >= 8,
+            "corpus must exercise the >=128 routing; only {simd_eligible} of {checked} cases did"
+        );
+    }
     use fr_protocol::{RespFrame, RespParseError};
 
     /// Bytes captured by hexdumping the RDB that vendored redis 7.2.4 `SAVE`d for
