@@ -39110,3 +39110,49 @@ the fpqns retry predicate asked for, extended to carry the canonical name. Do NO
 handle lever on its own; it is measured and it is +16.0 on the container path. And do NOT
 size any future lever on this route from the dispatch column alone — this row is the proof
 that it can move 333 instr/op in the opposite direction to the truth.
+
+--------------------------------------------------------------------------------
+## 2026-08-17 CrimsonHawk: NOT WIRED (SELF-SPEEDUP) — the single-pass resolver my own retry predicate asked for is written and equivalence-tested, but the duplication CANNOT be removed by a local edit: the two resolutions are in DIFFERENT functions and the gate runs FIRST (`frankenredis-dpu2y`)
+
+**Claim class: SELF-SPEEDUP. Campaign output: no.** No measurement is claimed here at all —
+this row records a structural blocker found while implementing, and revises the retry
+predicate that sent me at it. No Redis arm is involved.
+
+  what the previous row asked for   "reopen ONLY IF `check_full_command_arity` is changed to
+                  RETURN its resolved subcommand index, so the name can be stored from that
+                  lookup instead of a second one". I wrote exactly that:
+                  `fr_command::resolve_command_name_and_arity` returns
+                  `(Option<&'static str>, bool)` off ONE table pass, and it is pinned against
+                  BOTH functions it folds together by
+                  `resolve_command_name_and_arity_matches_both_originals_dpu2y` over 17
+                  argv shapes.
+  WHY IT IS NOT WIRED, which is the finding. The two resolutions do not share a scope:
+                    `execute_dispatch`        (lib.rs:36571) stores the canonical NAME
+                    `execute_frame_internal`  (lib.rs:36886) runs the ARITY gate
+                  and the gate runs BEFORE dispatch. A local variable cannot carry the
+                  result from the setter to the gate, because the gate happens first; and it
+                  cannot carry it the other way without changing WHEN
+                  `last_command_name` is assigned. I wired it as a local, the compiler
+                  refused it as out of scope, and the reason is the ordering, not the syntax.
+  THE SHAPE THE FIX ACTUALLY NEEDS is the one upstream already has: resolve ONCE at the gate
+                  and carry the result on the SESSION, exactly as redis carries `c->cmd` /
+                  `c->lastcmd` / `c->realcmd` set together at `lookupCommand`
+                  (server.c:3865). That is per-command state, not a local, and it moves the
+                  ASSIGNMENT POINT of `last_command_name` earlier — which is MORE faithful
+                  (upstream assigns before the existence and arity checks) but is a
+                  behaviour change for rejected commands and needs its own tests.
+  what landed     the resolver and its equivalence test only. It is `pub`, so it is API
+                  rather than dead code, and 1230/1230 fr-command plus 628/628 fr-runtime
+                  pass with it present. The half-wired runtime edit was REVERTED rather than
+                  left in a shared tree; it is preserved in a stash and as
+                  `scratchpad/dpu2y_wiring.patch`.
+
+RETRY PREDICATE, replacing the one that was wrong about scope: take this ONLY as a
+session-carried resolution — add the resolved `(name, arity_ok)` to the session at the
+`execute_frame_internal` gate and have `execute_dispatch` READ it instead of resolving. The
+measurable condition is unchanged and still the right one: it has worked WHEN
+`write_container_key` reads ~219 instr/op on pubsub_channels rather than 438. Expect to need
+new tests for the earlier assignment point, because a command REJECTED before dispatch will
+then update `cmd=` where today it does not — check that against upstream before assuming
+either behaviour is correct, since upstream assigns lastcmd before both checks and fr
+currently does not.

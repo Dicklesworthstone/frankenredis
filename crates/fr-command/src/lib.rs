@@ -19821,6 +19821,58 @@ pub fn command_has_acl_subcommands(parent: &str) -> bool {
 /// Both lookups are O(1) — `command_table_index` and `subcommand_table_index` are foldhash
 /// maps — so this costs two hashes, which is what makes it cheaper than the byte-loop
 /// lowercase plus 17-way `matches!` it replaces at the call site.
+/// Resolve a command's canonical name AND its full-arity verdict in ONE table pass.
+///
+/// (frankenredis-dpu2y) MEASURED REASON THIS EXISTS. Storing the canonical name via
+/// [`canonical_command_name`] while separately calling [`check_full_command_arity`]
+/// resolved the SAME `parent|sub` key twice per generic dispatch, and the duplication cost
+/// more than the String build it replaced: `write_container_key` 219 to 438 instr/op,
+/// `subcommand_table_index` 87 to 174, `command_has_subcommands_bytes` 128 to 192, for a net
+/// +16.0 instr/op REGRESSION on PUBSUB CHANNELS. Both answers fall out of one lookup, so a
+/// caller that needs both must take them together.
+///
+/// Returns `(canonical, arity_ok)`.
+///
+/// `arity_ok` is EXACTLY [`check_full_command_arity`]`(argv).is_ok()`, including its
+/// deliberate quirk: an UNKNOWN subcommand is NOT an arity failure — dispatch reports the
+/// unknown-subcommand error separately — so a known parent with a bogus subcommand yields
+/// `(None, parent_arity_ok)` rather than `(None, false)`.
+///
+/// `canonical` is EXACTLY [`canonical_command_name`]`(argv)`: `None` when the table has no
+/// entry, which is what reproduces upstream's `cmd=NULL` (frankenredis-zbiy3).
+///
+/// Pinned against BOTH originals, on the same inputs, by
+/// `resolve_command_name_and_arity_matches_both_originals_dpu2y`.
+#[must_use]
+pub fn resolve_command_name_and_arity(argv: &[Vec<u8>]) -> (Option<&'static str>, bool) {
+    let Some(name) = argv.first() else {
+        return (None, false);
+    };
+    let parent_ok = check_command_arity(name, argv.len()).is_ok();
+    if argv.len() >= 2 && command_has_subcommands_bytes(name) {
+        let mut key_buf = [0u8; 64];
+        let Some(key) = write_container_key(&mut key_buf, name, &argv[1]) else {
+            // Key too long to be any entry: the same fall-through both originals take.
+            return (None, parent_ok);
+        };
+        return match subcommand_table_index(key) {
+            Some(i) => {
+                let (cmd_name, arity, ..) = SUBCOMMAND_TABLE[i];
+                let argc = argv.len() as i64;
+                let sub_ok = if arity > 0 { argc == arity } else { argc >= -arity };
+                (Some(cmd_name), parent_ok && sub_ok)
+            }
+            // Unknown SUBCOMMAND: canonical is None (upstream's lookupSubcommand misses),
+            // but arity is NOT failed — that is check_full_command_arity's documented rule.
+            None => (None, parent_ok),
+        };
+    }
+    (
+        command_table_index(name).map(|i| COMMAND_TABLE[i].0),
+        parent_ok,
+    )
+}
+
 #[must_use]
 pub fn canonical_command_name(argv: &[Vec<u8>]) -> Option<&'static str> {
     let parent = argv.first()?;
@@ -30670,6 +30722,66 @@ mod tests {
     /// negative set below, which a lookup that accidentally matched on a PREFIX or ignored
     /// case would fail — `write_container_key` lowercases, so the index must NOT fold case
     /// itself, and `"pubsub|"`/`"pubsub|channelsX"` must miss.
+    /// (frankenredis-dpu2y) The single-pass resolver must agree with BOTH functions it
+    /// folds together, on the same inputs — that is the whole claim, and an equivalence
+    /// refactor's only honest oracle is the code it replaces.
+    ///
+    /// The discriminating cases are the ones where the two originals DISAGREE with each
+    /// other, because a naive merge collapses them:
+    ///   * `CLIENT BOGUS` — canonical is None (the subcommand lookup misses) but arity is
+    ///     OK, since `check_full_command_arity` deliberately does not treat an unknown
+    ///     subcommand as an arity failure. A merge that returned `false` here would turn
+    ///     every unknown subcommand into an arity error.
+    ///   * `CONFIG` alone — a container at argc 1, so no subcommand is consulted at all and
+    ///     the canonical name is the container's own.
+    ///   * `GET` with no key — arity fails while the name still resolves.
+    #[test]
+    fn resolve_command_name_and_arity_matches_both_originals_dpu2y() {
+        let argv = |parts: &[&str]| -> Vec<Vec<u8>> {
+            parts.iter().map(|p| p.as_bytes().to_vec()).collect()
+        };
+        let cases: &[&[&str]] = &[
+            &["GET", "k"],
+            &["get", "k"],
+            &["gEt", "k"],
+            &["GET"],                       // known, wrong arity
+            &["GET", "k", "extra"],         // known, too many
+            &["PUBSUB", "CHANNELS"],
+            &["pubsub", "channels", "pat"], // variadic subcommand
+            &["CONFIG"],                    // container, argc == 1
+            &["CONFIG", "GET"],             // known sub, wrong arity
+            &["CONFIG", "GET", "maxmemory"],
+            &["CLIENT", "BOGUS"],           // known parent, UNKNOWN sub
+            &["CLIENT", "INFO"],
+            &["OBJECT", "ENCODING", "k"],
+            &["BOGUS"],                     // unknown top-level
+            &["BOGUS", "ARG"],
+            &["DEBUG", "SLEEP", "0"],       // NOT a container upstream
+            &[""],
+        ];
+        for parts in cases {
+            let a = argv(parts);
+            let (name, arity_ok) = super::resolve_command_name_and_arity(&a);
+            assert_eq!(
+                name,
+                super::canonical_command_name(&a),
+                "canonical mismatch for {parts:?}"
+            );
+            assert_eq!(
+                arity_ok,
+                super::check_full_command_arity(&a).is_ok(),
+                "arity mismatch for {parts:?}"
+            );
+        }
+        // The empty argv, which neither original is called with in production but both
+        // define: no name, and arity cannot pass.
+        let empty: Vec<Vec<u8>> = Vec::new();
+        assert_eq!(super::resolve_command_name_and_arity(&empty), (None, false));
+        // Spot-check the quirk directly, so a future merge cannot "fix" it silently.
+        let cb = argv(&["CLIENT", "BOGUS"]);
+        assert_eq!(super::resolve_command_name_and_arity(&cb), (None, true));
+    }
+
     #[test]
     fn subcommand_table_index_matches_linear_scan_fpqns() {
         let linear = |key: &[u8]| -> Option<usize> {
