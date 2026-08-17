@@ -31812,3 +31812,80 @@ no sibling — they are per-call constants, held to +2 pct over a 67x member spa
 ZRANGESTORE — and `georadius_ro` / `geosearch` are the two biggest unclaimed blocks after the
 ZRANGESTORE option forms. Neither has any borrowed machinery, so both are executor-writing
 jobs, not one-entry mirrors.
+
+--------------------------------------------------------------------------------
+PARTIAL (frankenredis-p98mw) — splitting the LCS narrow/wide variants recovered only ~1 of
+the ~10 points I attributed to the match guard: MY HYPOTHESIS WAS MOSTLY WRONG. And a
+19-shape screen finds NO remaining algorithmic deficit — every above-parity cell left is a
+small-n intercept
+
+Claim class: COMPETITIVE (maintenance on my own regression + a standings screen)
+
+TWO RESULTS, and the first is a refuted hypothesis.
+
+1. THE VARIANT SPLIT UNDER-DELIVERED. The previous row shipped multi-word LCS with a +10.6
+pct regression on lcs_64 and +3.4 pct on lcs_2, and its retry predicate blamed the
+`if *words == 1` GUARD that `LcsDp::get` had to evaluate O(n+m) times in the backtrack. I
+split `ColBits`/`RowBits` into narrow and wide VARIANTS so the hot arms match without a
+guard. Result:
+
+    shape    pre-lever    guarded            variant split       recovered
+    lcs_64    10,722.8    11,856.7 (+10.6)   11,735.2 (+9.4)     1.2 points
+    lcs_2      7,104.3     7,343.9 (+3.4)     7,291.6 (+2.6)     0.8 points
+    lcs_65   124,116.8    29,262.2           29,152.1
+    lcs_128  458,948.9    49,159.0           48,956.8
+    get_control 1,307.3    1,300.2            1,299.6            NULL
+
+    THE GUARD WAS ~1 POINT OF ~10. Shipping the split anyway because it is strictly better
+    and simpler, but the retry predicate that motivated it was wrong and I am recording that
+    rather than quietly banking the 1.2 points as a success. WHERE THE REMAINING ~9 POINTS
+    LIVE IS UNATTRIBUTED. A confound I will not argue away: the pre-lever 10,722.8 was taken
+    on ELF e2758879 at HEAD d13ff14a3 and many peer commits have landed since, so part of
+    the residual may be tree drift rather than my change. get_control moved only -0.6 pct
+    across the same span, which bounds but does not eliminate that.
+
+2. THE SCREEN: NO ALGORITHMIC DEFICIT REMAINS. Nineteen shapes measured against the live
+incumbent on one binary:
+
+    ahead:  sunion_big 0.1639 · lcs_128 0.1437 · lcs_64 0.1303 · lcs_65 0.3145 ·
+            zrangebyscore_l 0.3580 · sinter_large_generic 0.3840 · get_control 0.4058 ·
+            zrangestore_all 0.4127 · sismember 0.5481 · type 0.5538 · zadd_incr 0.5581 ·
+            hrandfield_base 0.5675 · strlen 0.5721 · touch_2 0.5841 · getex_base 0.5847 ·
+            zinterstore_2 0.6139 · sintercard_big 0.6228 · zpopmin_nocount_missing 0.6569 ·
+            pfmerge_2 0.8939
+    above:  sort_ro_alpha 1.4554 (n=3) · lcs_2 1.0834 (8 bytes)
+
+BOTH REMAINING CELLS ARE THE SAME ARTEFACT, and the size siblings prove it rather than
+assert it: sort_ro_alpha_64 is 0.6976x and lcs_64/lcs_128 are 0.13x/0.14x. SORT's dispatch is
+~2,850 instr/op at BOTH n=3 and n=64 — 22.4 pct of the op at n=3 and 2.1 pct at n=64. It is a
+FIXED cost, which is the definition of an intercept.
+
+    THE CAMPAIGN HAS CLOSED EVERY ALGORITHMIC DEFICIT IT CAN MEASURE. What is left is
+    per-command fixed cost on GENERIC-route commands at trivial input sizes.
+
+I RE-ATTRIBUTED SORT AGAINST THIS LEDGER'S OWN ADVICE, and it cost a profiling run. The
+existing retry predicate says "do NOT re-attribute this". I did, and it says exactly what was
+already banked: at n=3 the ICU collator dominates (CollationElements::next 12.02 pct,
+CollatorBorrowed::compare 5.46 pct, iter_next 2.27, CodePointTrie::get32 2.22, init 2.08 —
+~24 pct, plus from_utf8 2.61 and sort_alpha_compare 1.57). Read the retry predicates before
+profiling, not after.
+
+PROVENANCE:
+  AFTER ELF     4d99931ef870966b193809b545f506dfbfd454f544796d6a9bc85a400c238ab5
+  screen ELF    e501139ea0ab2172b82a15738f8ae10b63bb9acd101cacfd722a3b8a14cb2300
+  harness       scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines in the SAME
+                invocation. Incumbent verified in-run: sha=d2c8a4b9 == vendored HEAD, clean.
+  host          thinkstation1, 64 cores, powersave, /data 152G.
+  PER-ARM loadavg/MHz  screen taken at 12.23/11.54/12.95 (quiet, converged). The variant-split
+                ladder was taken at 47.21/35.43/22.84 and RISING — a DIFFERENT and much
+                noisier window than the 11.08 one its baseline came from. Recorded because it
+                matters: it is why I quote the split's gain as "~1 point" and not to three
+                decimals. Per-arm MHz 3892/3872/3098/4043/3171.
+  gates         cargo test -p fr-command 1218 passed 0 failed; clippy --no-deps -D warnings
+                clean for my hunks (pre-existing error at :60947 outside my diff); fmt clean.
+
+RETRY PREDICATE: do NOT chase the residual ~9 points further without first re-measuring the
+pre-lever baseline on a CURRENT tree — my prime suspect is now drift, not the code. And do not
+open sort_ro_alpha or lcs_2 as deficits: both are intercepts with size siblings far ahead, and
+the only lever that touches them is front-classifying a class [C] generic route, which buys
+nothing at the sizes where those commands are actually used.

@@ -16900,15 +16900,35 @@ enum LcsDp {
     /// Full scalar matrix; `dp[i * cols + j]`. (frankenredis-p98mw) TEST-ONLY: production
     /// is bit-parallel at every size now, so this exists purely as the equivalence oracle.
     #[cfg(test)]
-    Full { dp: Vec<u32>, cols: usize },
-    /// Pattern = `a` along rows; limb `words` per position, `v[j*words..]` is the LCS
-    /// vector after column `j`, so `dp[i][j] = i - prefix_popcount(v_j, i)`.
-    /// (frankenredis-p98mw) `words` was implicitly 1 and the arm was gated on
-    /// `a.len() <= 64`; it is now `ceil(a.len()/64)` and the gate is gone.
-    ColBits { v: Vec<u64>, words: usize },
-    /// Pattern = `b` along columns; `v[i*words..]` is the LCS vector after row `i`,
-    /// so `dp[i][j] = j - prefix_popcount(v_i, j)`.
-    RowBits { v: Vec<u64>, words: usize },
+    Full {
+        dp: Vec<u32>,
+        cols: usize,
+    },
+    /// Pattern = `a` along rows, ONE limb per position (pattern <= 64 bytes):
+    /// `dp[i][j] = i - popcount(v[j] & low_mask(i))`.
+    ColBits {
+        v: Vec<u64>,
+    },
+    /// Pattern = `b` along columns, one limb per position.
+    RowBits {
+        v: Vec<u64>,
+    },
+    /// (frankenredis-p98mw) Multi-limb forms for patterns > 64 bytes: `v[j*words..]` is
+    /// the LCS vector after column `j`.
+    ///
+    /// SEPARATE VARIANTS RATHER THAN A `words` FIELD ON THE NARROW ONES, and that is a
+    /// measured choice, not tidiness. `get` runs O(n+m) times inside `compute_lcs`'s
+    /// backtrack; carrying `words` on the hot variant forced a `if *words == 1` GUARD into
+    /// every match arm, which cost +10.6 pct on lcs_64 and +3.4 pct on lcs_2. Distinct
+    /// variants let the narrow arms match without a guard.
+    ColBitsWide {
+        v: Vec<u64>,
+        words: usize,
+    },
+    RowBitsWide {
+        v: Vec<u64>,
+        words: usize,
+    },
 }
 
 impl LcsDp {
@@ -16920,21 +16940,12 @@ impl LcsDp {
         match self {
             #[cfg(test)]
             LcsDp::Full { dp, cols } => dp[i * cols + j],
-            // (frankenredis-p98mw) The `words == 1` arms are the original single-word
-            // expressions and are NOT redundant with the general form below. `get` runs
-            // O(n+m) times inside `compute_lcs`'s backtrack, and routing the common case
-            // through a slice-and-loop MEASURED +15.0 pct on lcs_64 (10,722.8 -> 12,331.0
-            // instr/op) and +4.5 pct on lcs_2 before this specialisation was added.
-            LcsDp::ColBits { v, words } if *words == 1 => {
-                i as u32 - (v[j] & lcs_low_mask(i)).count_ones()
-            }
-            LcsDp::RowBits { v, words } if *words == 1 => {
-                j as u32 - (v[i] & lcs_low_mask(j)).count_ones()
-            }
-            LcsDp::ColBits { v, words } => {
+            LcsDp::ColBits { v } => i as u32 - (v[j] & lcs_low_mask(i)).count_ones(),
+            LcsDp::RowBits { v } => j as u32 - (v[i] & lcs_low_mask(j)).count_ones(),
+            LcsDp::ColBitsWide { v, words } => {
                 i as u32 - lcs_prefix_popcount(&v[j * words..(j + 1) * words], i)
             }
-            LcsDp::RowBits { v, words } => {
+            LcsDp::RowBitsWide { v, words } => {
                 j as u32 - lcs_prefix_popcount(&v[i * words..(i + 1) * words], j)
             }
         }
@@ -16975,7 +16986,7 @@ fn build_lcs_dp(a: &[u8], b: &[u8]) -> LcsDp {
                 cur = (cur.wrapping_add(u) | cur.wrapping_sub(u)) & full;
                 v.push(cur);
             }
-            return LcsDp::ColBits { v, words: 1 };
+            return LcsDp::ColBits { v };
         }
         let words = lcs_words_for(m);
         let (pm, full) = lcs_build_masks(a, words);
@@ -16992,7 +17003,7 @@ fn build_lcs_dp(a: &[u8], b: &[u8]) -> LcsDp {
             lcs_step_wide(&mut cur, &u, &full, &mut sum);
             v[(j + 1) * words..(j + 2) * words].copy_from_slice(&cur);
         }
-        LcsDp::ColBits { v, words }
+        LcsDp::ColBitsWide { v, words }
     } else {
         if n <= 64 {
             let mut pm = [0u64; 256];
@@ -17008,7 +17019,7 @@ fn build_lcs_dp(a: &[u8], b: &[u8]) -> LcsDp {
                 cur = (cur.wrapping_add(u) | cur.wrapping_sub(u)) & full;
                 v.push(cur);
             }
-            return LcsDp::RowBits { v, words: 1 };
+            return LcsDp::RowBits { v };
         }
         let words = lcs_words_for(n);
         let (pm, full) = lcs_build_masks(b, words);
@@ -17025,7 +17036,7 @@ fn build_lcs_dp(a: &[u8], b: &[u8]) -> LcsDp {
             lcs_step_wide(&mut cur, &u, &full, &mut sum);
             v[(i + 1) * words..(i + 2) * words].copy_from_slice(&cur);
         }
-        LcsDp::RowBits { v, words }
+        LcsDp::RowBitsWide { v, words }
     }
 }
 
