@@ -27,8 +27,30 @@ last command and overwrites the very field under test. So the name is set FIRST 
 case commands run after it, which is also exactly the overwrite behaviour upstream
 specifies.
 
+RUN AND CONFIRMED 2026-08-17 against vendored redis-server 7.2.4 (git sha1 d2c8a4b9, the
+binary at legacy_redis_code/redis/src/redis-server) on ports 16399/16400. All five controls
+AGREED and all three target cases DIVERGED, which is what promotes frankenredis-zbiy3 from
+a source-derived prediction to a measured divergence:
+
+    case                     redis 7.2.4        fr
+    known simple             get                get                agree
+    known container          pubsub|channels    pubsub|channels     agree
+    container bare argc==1   config             config              agree
+    known, wrong arity       get                get                agree
+    known, mixed case        get                get                agree
+    UNKNOWN name             NULL               bogus              DIVERGE
+    UNKNOWN subcommand       NULL               client|bogus       DIVERGE
+    known then UNKNOWN       NULL               bogus              DIVERGE
+
+The controls are what make that readable: they show the gate resolves the right row and the
+right field, so the three failures are the engine and not the harness. The third case is the
+one a naive fix breaks — upstream's assignment is unconditional, so an unknown command must
+OVERWRITE a previous good value rather than leave it standing.
+
 Usage: client_info_cmd_field_differ.py <oracle_port> <fr_port>
        Exit 0 = the cmd= field agrees on every case, 1 = divergence.
+       Currently EXITS 1 by design: it is a red gate tracking an open divergence, and it
+       goes green when frankenredis-dpu2y lands.
 """
 import sys
 
