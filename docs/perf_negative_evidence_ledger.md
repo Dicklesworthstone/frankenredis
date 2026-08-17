@@ -42167,3 +42167,133 @@ RETRY PREDICATE — the lever is not the guard, it is the DOUBLE DISCRIMINANT TE
   no worse than its null — a Deque-only win does not qualify, which is exactly what this row
   refuses. Note it needs care with the borrow checker: `promote()` takes `&mut self` while the
   match holds `&mut self.repr`.
+
+## 2026-08-17 CrimsonHawk: A **+16 instr/op** regression on UNCONVERTED floor-classified commands is real and reproduces — it is NOT attributable to `getexgate` from any data either of us holds, and a GATED A/B CANNOT settle it (`frankenredis-getexgate`, `frankenredis-ghmgp`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — this row ships nothing and qualifies my own KEEP at `552062a92`.
+
+BrownIbis reported that my write-gate work costs **+17 instr/op** in
+`parse_borrowed_dispatch_floor_decimal`, a frame on the path of every floor-classified
+command, and that their own savings shrank from −203/−204/−203 to −180/−141.7/−146.7 because
+their routes pay it too. Their per-command dispatch figures: GET 457 → 473, ZADD 662 → 681,
+SADD 617 → 642. They then diagnosed the mechanism as an INLINER FLIP rather than new work —
+the function's body never changed (`git log -L` empty across the range) and the call counts
+moved `parse_borrowed_dispatch_floor_decimal` 0.000 → 1.000 calls/op while
+`try_dispatch_floor_classified_action` went 2.000 → 0.000.
+
+That is a claim about my work costing more than it saves on most commands, so I verified it
+rather than accepting or disputing it.
+
+### THE REGRESSION IS REAL AND REPRODUCES
+
+Pre-`getexgate` ELF (built at BITPOS `52cfbe467`) against HEAD, fr-only, two commands:
+
+  zcard   1736.1 -> 1752.0   (+15.9)
+  llen    1674.4 -> 1691.3   (+16.9)
+
+Neither is a command any of my batches converted. So a ~+16 instr/op cost on unconverted
+floor-classified commands is confirmed independently, on a second machine-state and a different
+pair of commands from theirs.
+
+### IT IS NOT ATTRIBUTABLE TO `getexgate`, AND SAYING SO IS NOT A DEFENCE
+
+That ELF pair spans MANY commits, not one. Among them: BrownIbis's own keyed-values conversion
+(`5bc439a57`), the `w1djx` INFO work, and — most relevantly — `2fb7ec8fe perf(dispatch):
+resolve the command ONCE per dispatch`, which is itself a change to the shared dispatch path
+and lands squarely in the range. **No one holding this data can attribute the +16 to any single
+commit in it, including me, and including to my own advantage.**
+
+One asymmetry supports the inliner-flip reading over any frame-specific one: in MY build
+`parse_borrowed_dispatch_floor_decimal` reads **34.0 on both** ELFs, not 34.0 → 51.0. If the
+inliner is trading bodies against a size budget, WHICH frame absorbs the cost is
+build-dependent, so the frame identity is not the thing to anchor an attribution on.
+
+### THE GATED A/B CANNOT SETTLE IT — A LIMITATION OF MY OWN INSTRUMENT
+
+`perf-ab-getex-write-gate` flips my change inside ONE binary. Across that flip, unconverted
+floor commands are BIT-IDENTICAL:
+
+  zcard dispatch        552.0 ORIG    552.0 NEW
+  llen dispatch         523.0 ORIG    523.0 NEW
+  get_control dispatch  457.0 ORIG    457.0 NEW      (four draws, two replicates)
+
+**This does NOT refute the attribution and must not be quoted as if it does.** The env var
+selects a branch at RUNTIME; both arms' code is compiled into the ELF either way. If threading
+`Option<bool>` changed an INLINING decision, that decision is present in both arms and the
+instrument is blind to it BY CONSTRUCTION.
+
+That is a real limit on the same-ELF gate this campaign has leaned on all day, including in
+three of my own KEEP rows. **A gated A/B proves a RUNTIME path unchanged; it can say nothing
+about CODEGEN.** Any lever whose suspected mechanism is inlining, register allocation or code
+layout needs a PAIRED BUILD, not a gate flip.
+
+What the gated result does establish, narrowly: nothing about the runtime path changed for
+commands my batches never touched. The +16, whatever causes it, is not my routes executing
+differently.
+
+### WHAT WOULD SETTLE IT
+
+A paired build at `1d8b5e8e1^` against `1d8b5e8e1` — `getexgate`'s first commit and nothing
+else. I am not running it: it needs a checkout or a worktree in a shared checkout, which this
+campaign's standing rules forbid and which has already cost peers work today. BrownIbis holds
+the lease on both files and is better placed; I have told them so, told them the gated evidence
+does not settle it, and asked that their row state the attribution as resting on the paired
+build or as UNATTRIBUTED if they do not run it.
+
+### THE NET-SIGN QUESTION, STATED HONESTLY
+
+If the +16 does belong to `getexgate`, the arithmetic is not favourable in the general case.
+About 114 commands are floor-classified; 32 arms are converted. A converted route nets
+roughly −180 + 16 = −164; every other floor-classified command pays +16 for nothing. Whether
+the change is a net win then depends entirely on WORKLOAD MIX, and my KEEP at `552062a92`
+quoted per-route deltas without that qualification.
+
+**That row is hereby qualified, not withdrawn.** Its measurements stand — they were same-ELF,
+interleaved, replicated, with validated nulls — but they measure the CONVERTED routes only, and
+a reader entitled to conclude "this change is good for the server" needs the shared-path term
+too. If the paired build attributes the +16 to me, I will write the retraction rather than
+leave the qualification to carry it.
+
+### COUNTED MECHANISM
+
+Two ELFs, four shapes, two-point callgrind subtraction at N=2000 and 2N=4000. Dispatch
+subtotals across the gate flip are identical to the instruction (552.0, 523.0, 457.0 in both
+arms, all four draws), which is the strongest form the gated instrument can produce and is
+exactly why its blindness to codegen matters.
+
+CV was not used, as a gate or otherwise.
+
+### PROVENANCE
+
+  ELFs          pre-lever `fr_bp_ab` built at `52cfbe467`; `c13d2f7f6a349a82` at HEAD
+                `7dfecf4f4`; and the gated ELF built `--features perf-ab-getex-write-gate`,
+                both arms from that ONE binary via `FR_PERF_AB_GETEX_WRITE_GATE_ORIG`.
+  bench_elf_sha256=c13d2f7f6a349a8212c4173b8d327af07e23ac55f9887a4fe8f49caff9caa42a
+  incumbent     NOT RUN. Every number is an fr-side count; no ratio against the incumbent is
+                claimed.
+  harness       `scripts/shape_instr_per_op.py --fr-only`, `scripts/frame_delta.py`.
+  host          thinkstation1, 64 cores observed, powersave governor, /data 191G free.
+  PER-ARM loadavg / CPU idle / iowait
+                cross-ELF pair   load 21.60 27.41 23.65
+                gated A/B        load 17.61 25.27 23.15
+                CPU idle 57.3 pct from /proc/stat deltas, iowait 0.1 pct at the time of the
+                runs, with three external builds active on the host.
+  admissibility Instruction counts are deterministic and load-immune, which is why these rows
+                are admissible at loadavg 21-27 with three builds running. No timed row is
+                claimed.
+
+### RETRY PREDICATE
+
+1. **Do not quote the gated table as a refutation.** It proves the runtime path unchanged and
+   is blind to codegen. This is the row to cite when someone reaches for a gate flip to answer
+   an inlining question.
+2. The attribution is settled ONLY by a paired build at `1d8b5e8e1^` vs `1d8b5e8e1`. Until that
+   exists, the +16 is REAL, REPRODUCED and UNATTRIBUTED, and no row should say otherwise in
+   either direction.
+3. If it lands on `getexgate`, qualify or retract `552062a92` by workload mix rather than
+   deleting its measurements — they are correct for the converted routes and wrong only as a
+   general claim about the server.
+4. Audit the campaign's other same-ELF gated rows for the same blind spot. Any whose suspected
+   mechanism is inlining or code layout rather than executed work is under-evidenced by exactly
+   this argument, and at least three of mine used that instrument.
