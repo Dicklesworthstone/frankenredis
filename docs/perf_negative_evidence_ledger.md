@@ -8,6 +8,101 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-08-17 MossyOrchid: MEASURED COST OF A CORRECTNESS FIX — collapsing CONFIG GET's duplicated skip list onto one predicate costs at most a few hundred instr/op on the glob walk, and the paired control moved the WRONG WAY, which is the part worth keeping (`frankenredis-e6c9t`)
+
+Claim class: SELF-SPEEDUP, negative — this is the price of `44aea6d11`, not a win. Campaign
+output: yes. It certifies a change I landed unmeasured last turn and says plainly that it is a
+small regression, and it demonstrates a control that refutes its own row's precision.
+
+WHAT WAS MEASURED. `44aea6d11` replaced a 44-name inline `||` chain in the
+`CONFIG_STATIC_PARAMS` loop with the existing `config_static_param_is_dynamic` predicate, so
+the literal-lookup index and the glob walk can no longer drift apart. Both are pure filters, so
+the change is behaviour-preserving by construction; the open question was its cost.
+
+TWO NEW SHAPES FIRST, because the existing one cannot see this code. `config_get_one` is a
+LITERAL request and since the literal index landed it resolves without the ordered walk in the
+common case, so it no longer measures the walk. Added `config_get_star` (`CONFIG GET *`, which
+monitoring clients actually send) and `config_get_prefix_glob` (`CONFIG GET repl-*`). Neither
+is one of the two hard-coded early-return globs (`maxmemory*`, `lazyfree*`), so both genuinely
+enter the loop.
+
+THE GLOB HALF OF CONFIG GET IS NOT A DEFICIT — SIZING, not certified (the harness stamped the
+window UNFIT for a ratio at the time; recorded so nobody re-derives it):
+
+    config_get_star        fr 487,103.6   redis 651,504.0   0.7477x
+    config_get_prefix_glob fr  68,679.8   redis 109,607.8   0.6266x
+
+So the 4.60x CONFIG GET deficit is specific to the LITERAL cell. A wildcard sweep — the
+expensive-looking one — is already ahead of the incumbent.
+
+THE A/B, and it had to be built off-tree. A peer was editing `crates/fr-runtime/src/lib.rs`
+while I worked (their uncommitted hunks grew mid-command), so a reverse-patch of the shared
+working tree both FAILED to apply and would have been a mutation of a file someone else was
+inside — the failure mode that has already cost this fleet three commits. Instead:
+`git archive HEAD | tar -x` into a scratch tree, reverse-patch MY commit there, build BEFORE,
+re-apply, build AFTER, one private `CARGO_TARGET_DIR`. Both arms therefore differ in exactly
+one hunk and carry none of the peer's WIP.
+
+`--fr-only`, which the harness holds to the LENIENT window gate on the stated ground that fr's
+Ir is load-immune (0.65 pct across loadavg 14-66). Every run below was stamped
+`WINDOW: FIT for fr-only`. Arms INTERLEAVED, four draws each:
+
+    shape             BEFORE (mean)   AFTER (mean)    delta        dynamic-checks per op
+    config_get_star     486,898.6       488,053.8     +1,155.2     190
+    config_get_one       28,329.3        28,131.5      −197.8      ~1
+    get_control (null)    1,309.2         1,308.0        −1.2      0
+
+    config_get_star draws  BEFORE 486,734.1 / 486,764.9 / 486,942.3 / 487,153.1
+                           AFTER  487,578.0 / 487,942.9 / 488,036.1 / 488,658.0
+    Every AFTER draw exceeds every BEFORE draw — 4v4 with no overlap.
+
+AND HERE IS WHY I AM NOT QUOTING +1,155 AS THE COST. `config_get_one` is a control: a literal
+pattern makes the pattern test fail for 189 of the 190 entries, so the changed predicate runs
+about ONCE per op. No per-call mechanism can move that shape by 198 instructions. It moved
+anyway, and DOWNWARD. That is code layout, and it puts a floor of roughly ±200 instr/op under
+any claim from this pair of ELFs. The star shape's +1,155 is ~6x that floor and divides to
++6.1 instructions per changed call, which is the right order for a non-inlined call — so the
+direction is real and the magnitude is contaminated. The honest statement is: **the fix costs
+on the order of 0.1-0.25 pct of a `CONFIG GET *`, and this instrument cannot resolve it
+finer.** The null moved 1.2 instr/op, so the harness itself is fine; the noise is layout, not
+measurement.
+
+`#[inline]` ON THE PREDICATE: TRIED, NOT LANDED. If the cost is call overhead, inlining should
+erase it. Third arm, same scratch tree, two draws: 487,517.7 / 487,946.4, mean 487,732.1 —
+recovers about a quarter of the gap and stays above BEFORE. Two draws against a ±200 layout
+floor cannot resolve a 322-instruction difference, so adding the attribute would be decorating
+the code with an unproven number. Not taken.
+
+VERDICT: KEEP the change. It buys a class of silent divergence — a parameter visible by literal
+name and invisible by wildcard, or the reverse, with each path self-consistent and no test
+covering the seam — for at most a quarter of a percent of an admin command that is already
+0.75x the incumbent. Recording the price is the point; a correctness fix that is quietly a
+regression should be quietly a regression IN THE LEDGER, not in nobody's notes.
+
+PROVENANCE:
+  ELFs        BEFORE d830570bd3d1be9c (HEAD reverse-patched), AFTER 2f9f4b0ea8b33a52,
+              INLINE 678aa24d3e1cb155 — all three built from ONE `git archive HEAD` snapshot
+              in /data/tmp scratch, private CARGO_TARGET_DIR, never the shared cargo-target.
+  harness     scripts/shape_instr_per_op.py, N=2000/2N=4000, `--fr-only` (no denominator, so
+              no incumbent claim is made from these rows).
+  host        thinkstation1, 64 cores, powersave, /data 99-101G free.
+  PER-ARM     harness-stamped per run. Window across the A/B: loadavg 1-min 12.15-14.92,
+              5-min 17.63-20.18, 15-min 18.88-19.76; CPU MHz per-core samples spanning
+              1429-4291 IN THE SAME INSTANT (3.0x cross-core spread) — which is why this row
+              is instruction counts and why the fr-only lenient gate is the right one.
+              Builds running during the measured draws: 0.
+  SIZING rows the two vs-redis ratios above were taken at loadavg 12.27-23.59 with the harness
+              printing "WINDOW: this run is SIZING, not certified"; they are labelled SIZING
+              here for that reason and must not be promoted without a FIT ratio window.
+
+RETRY PREDICATE: do not re-run this A/B to sharpen +1,155 — the layout floor is ±200 on this
+shape pair and more draws will not move it; it needs a same-ELF selector (a `bench-reference`
+toggle) to eliminate layout, and building one would mean re-introducing the duplicated 44-name
+chain as a reference arm, which is the exact hazard the change removes. If someone wants the
+number badly enough to pay that, say so out loud in the row.
+
+--------------------------------------------------------------------------------
+
 ## 2026-08-17 MossyOrchid: REFUTED PRIOR — the "table-walk family" that produced BOTH of this campaign's largest deficits holds no third one. Five new shapes close it, and 13 shapes screened put fr ahead on twelve (`frankenredis-e6c9t` follow-on)
 
 Claim class: COMPETITIVE screen. No lever landed; the output is a refuted hypothesis and five
@@ -35548,3 +35643,95 @@ wrong to reach for first, which becomes correct only after the invariant is out 
 Before doing it, profile again: this lever changed which frame is on top, and the last plan
 made from an unprofiled assumption cost nothing only because the profile was run before the
 code was written.
+
+--------------------------------------------------------------------------------
+2026-08-17 CrimsonHawk: SHIPPED — the second SUBCOMMAND_TABLE scan did not need to get
+cheaper, it needed to not happen (`frankenredis-fpqns` lever 2). PUBSUB CHANNELS
+8174.8 -> 6472.4 instr/op, -20.83 pct. Commit 830af9fcc.
+
+  lever         Order `!monitor_clients.is_empty()` AHEAD of `command_should_feed_monitors`
+                at fr-runtime/src/lib.rs:37278 (special-command post-dispatch feed) and
+                :46684 (EXEC-queued feed). The third call site, the script feed, was
+                already inside such an early return.
+  hypothesis    `effective_command_flags` has ONE production caller — the CMD_ADMIN /
+                CMD_SKIP_MONITOR gate. It builds a `<parent>|<sub>` key, scans the
+                110-entry SUBCOMMAND_TABLE linearly, and splits the matched flags string.
+                Both call sites ran it BEFORE `feed_monitors`, which opens by returning on
+                `monitor_clients.is_empty()`. With no MONITOR attached the whole answer was
+                computed once per command and discarded. PUBSUB is
+                RuntimeSpecialCommand::Pubsub (lib.rs:3429), so PUBSUB CHANNELS takes that
+                path; so do SELECT, MULTI/EXEC, CLIENT, CONFIG and the subscribe family.
+  isomorphism   The predicate is pure (table lookups only) and `feed_monitors` already
+                discards its result when the monitor set is empty, so this is
+                behaviour-preserving BY CONSTRUCTION, not within a tolerance.
+  NOT the lever the retry predicate named. The 2026-08-17 row at :34775 said to take the
+                duplicate SCAN as one pass returning arity AND flags. That row stands and
+                its reasoning is still right for the MONITOR-ATTACHED case; it is simply no
+                longer on the critical path for anyone else. I did not implement it.
+  measured      paired reverse-patch A/B, both arms built from ONE tree in ONE window.
+                AFTER was built TWICE and came out bit-identical (3f7807381a16735d both
+                times), which is the proof the tree held still across the pair — a peer had
+                landed a listpack commit between my first two builds and I discarded that
+                first BEFORE arm rather than quote it.
+                BEFORE ELF e851b0b47c1d8470, AFTER ELF 3f7807381a16735d.
+  harness       scripts/shape_instr_per_op.py, callgrind two-point subtraction N=2000 /
+                2N=4000, --fr-only for the paired arms.
+  host          thinkstation1, 64 logical, powersave governor, load 14.87/14.89/16.75,
+                per-arm MHz recorded by the harness; cross-core spread 1429-4068 observed
+                WITHIN single arms, which is why nothing here is a timing number.
+
+  shape             BEFORE     AFTER      delta      route
+  pubsub_channels   8174.8     6472.4    -1702.4     special           -20.83 pct
+  client_info      16287.3    15135.3    -1152.0     special            -7.07 pct
+  config_get_one   28169.0    27341.4     -827.6     special            -2.94 pct
+  pubsub_numsub     2518.0     2508.8       -9.2     front-classified   -0.37 pct
+  object_encoding   2229.4     2231.8       +2.4     NOT special  <- NULL +0.11 pct
+  get_control       1308.3     1308.1       -0.2     NULL              -0.015 pct
+
+  TWO NULLS, and `object_encoding` is the one worth reusing. OBJECT is a container command
+                whose `object|encoding` row sits in the SAME table at index 83, so it
+                controls for "any container command" — but OBJECT is not a
+                RuntimeSpecialCommand, so it never reaches the changed line. It did not
+                move. That is what separates the special-command PATH from the table as the
+                cause; `get_control` alone could not have done it.
+  THE SAVING IS NOT CONSTANT, and I am not fitting a law to it. `config|get` carries
+                `admin` as its FIRST flag, so BEFORE it short-circuited the split on token
+                one and skipped the `feed_monitors` call entirely — least to save. The two
+                non-admin routes paid both. The residual 550 instr/op between client_info
+                (table index 26) and pubsub_channels (86) tracks table position, but that
+                is TWO POINTS across one mechanism and the magnitude is UNEXPLAINED. It is
+                recorded as unexplained rather than fitted.
+  ratio         SIZING, NOT CERTIFIED. No FIT window was reachable — peers built
+                continuously through the session and the harness disqualified every ratio
+                run on that basis, correctly. Four runs, incumbent verified sha=d2c8a4b9 ==
+                vendored HEAD each time:
+                  fr numerator  6472.4 / 6472.2 / 6473.1 / 6478.9   spread 0.10 pct
+                  redis denom   4905.1 / 4490.5 / 4289.2 / 4911.9   spread 14.5 pct
+                  ratio AFTER 1.319x-1.509x   ratio BEFORE 1.664x-1.906x
+                The 14.5 pct is ALL denominator, exactly as this harness's own header
+                predicts (redis's serverCron is elapsed-time work and does not divide out
+                of a two-point subtraction). Do not promote the bracket. The bead's
+                2.20-2.47x headline predates cc3c24cc9 and no longer describes the tree.
+  tests         two new tests assert the mirrored command list by EXACT VECTOR EQUALITY
+                with a monitor attached, so a leaked line fails them:
+                `monitor_admin_gate_still_applies_to_special_commands_e6c9t` (CONFIG GET and
+                SLOWLOG GET stay hidden; PUBSUB CHANNELS and SELECT are mirrored) and
+                `monitor_admin_gate_still_applies_to_exec_queued_commands_e6c9t`. 623/623
+                fr-runtime lib tests pass. HONEST LIMIT: I did NOT run a separate mutation
+                build. The discrimination follows from assert_eq! on a complete list rather
+                than from a mutation run, and mutating a shared checkout is banned here.
+                The guard is proven LIVE by the 1702.4 instr/op it moves, so it is at least
+                not a dead defensive branch.
+  peer          fr-runtime/src/lib.rs and the ledger both carried other agents' uncommitted
+                work during this turn. The commit was made with an explicit pathspec so
+                none of it rode along, and this ledger row waited until their staged edit
+                had landed.
+
+RETRY PREDICATE: dispatch is STILL 49.7 pct of PUBSUB CHANNELS after this (3217.5 of
+6472.4), so the route is not finished — `check_full_command_arity` and
+`command_table_index` are what remain, and `check_full_command_arity` is on EVERY command,
+not just the special ones. Before taking either, RE-PROFILE: this lever deleted the two
+frames that used to sit on top, so the ranking that produced the fpqns attribution is now
+stale. And re-derive the shape list first — the generalisation here was found by measuring
+three special-command shapes I had no prior reason to suspect, and `object_encoding` was
+worth more as a null than any of them were as a target.
