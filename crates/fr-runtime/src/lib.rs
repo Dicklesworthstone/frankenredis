@@ -19895,6 +19895,7 @@ impl Runtime {
         key: &[u8],
         seconds_arg: &[u8],
         now_ms: u64,
+        default_write_allowed: Option<bool>,
     ) -> Option<RespFrame> {
         self.execute_plain_expire_kind_borrowed(
             PlainExpireKind::RelativeSeconds,
@@ -19902,6 +19903,7 @@ impl Runtime {
             seconds_arg,
             None,
             now_ms,
+            default_write_allowed,
         )
     }
 
@@ -19911,6 +19913,7 @@ impl Runtime {
         key: &[u8],
         time_arg: &[u8],
         now_ms: u64,
+        default_write_allowed: Option<bool>,
     ) -> Option<RespFrame> {
         self.execute_plain_expire_kind_borrowed(
             PlainExpireKind::RelativeMilliseconds,
@@ -19918,6 +19921,7 @@ impl Runtime {
             time_arg,
             None,
             now_ms,
+            default_write_allowed,
         )
     }
 
@@ -19927,6 +19931,7 @@ impl Runtime {
         key: &[u8],
         time_arg: &[u8],
         now_ms: u64,
+        default_write_allowed: Option<bool>,
     ) -> Option<RespFrame> {
         self.execute_plain_expire_kind_borrowed(
             PlainExpireKind::AbsoluteSeconds,
@@ -19934,6 +19939,7 @@ impl Runtime {
             time_arg,
             None,
             now_ms,
+            default_write_allowed,
         )
     }
 
@@ -19943,6 +19949,7 @@ impl Runtime {
         key: &[u8],
         time_arg: &[u8],
         now_ms: u64,
+        default_write_allowed: Option<bool>,
     ) -> Option<RespFrame> {
         self.execute_plain_expire_kind_borrowed(
             PlainExpireKind::AbsoluteMilliseconds,
@@ -19950,6 +19957,7 @@ impl Runtime {
             time_arg,
             None,
             now_ms,
+            default_write_allowed,
         )
     }
 
@@ -19962,6 +19970,7 @@ impl Runtime {
         time_arg: &[u8],
         cond_token: &[u8],
         now_ms: u64,
+        default_write_allowed: Option<bool>,
     ) -> Option<RespFrame> {
         self.execute_plain_expire_kind_borrowed(
             PlainExpireKind::RelativeSeconds,
@@ -19969,6 +19978,7 @@ impl Runtime {
             time_arg,
             Some(cond_token),
             now_ms,
+            default_write_allowed,
         )
     }
 
@@ -19978,6 +19988,7 @@ impl Runtime {
         time_arg: &[u8],
         cond_token: &[u8],
         now_ms: u64,
+        default_write_allowed: Option<bool>,
     ) -> Option<RespFrame> {
         self.execute_plain_expire_kind_borrowed(
             PlainExpireKind::RelativeMilliseconds,
@@ -19985,6 +19996,7 @@ impl Runtime {
             time_arg,
             Some(cond_token),
             now_ms,
+            default_write_allowed,
         )
     }
 
@@ -19994,6 +20006,7 @@ impl Runtime {
         time_arg: &[u8],
         cond_token: &[u8],
         now_ms: u64,
+        default_write_allowed: Option<bool>,
     ) -> Option<RespFrame> {
         self.execute_plain_expire_kind_borrowed(
             PlainExpireKind::AbsoluteSeconds,
@@ -20001,6 +20014,7 @@ impl Runtime {
             time_arg,
             Some(cond_token),
             now_ms,
+            default_write_allowed,
         )
     }
 
@@ -20010,6 +20024,7 @@ impl Runtime {
         time_arg: &[u8],
         cond_token: &[u8],
         now_ms: u64,
+        default_write_allowed: Option<bool>,
     ) -> Option<RespFrame> {
         self.execute_plain_expire_kind_borrowed(
             PlainExpireKind::AbsoluteMilliseconds,
@@ -20017,6 +20032,7 @@ impl Runtime {
             time_arg,
             Some(cond_token),
             now_ms,
+            default_write_allowed,
         )
     }
 
@@ -20031,6 +20047,10 @@ impl Runtime {
     /// there, and on any flagged form (the recognizer matches only argc 3). Gated
     /// by the WRITE predicate, so propagation, AOF, keyspace events, and tracking
     /// are provably inactive.
+    /// (frankenredis-getexgate) `default_write_allowed` carries the CACHED answer to
+    /// `plain_borrowed_default_key_write_allows` when the caller has one, `None` otherwise.
+    /// Measured at a FLAT 187.0 instr/op on every floor write route that re-derives it, which
+    /// is 11.7 pct of a PERSIST and 6.6 pct of an EXPIRE.
     fn execute_plain_expire_kind_borrowed(
         &mut self,
         kind: PlainExpireKind,
@@ -20038,6 +20058,7 @@ impl Runtime {
         time_arg: &[u8],
         cond_token: Option<&[u8]>,
         now_ms: u64,
+        default_write_allowed: Option<bool>,
     ) -> Option<RespFrame> {
         let name_upper = kind.name_upper();
         if self.policy.gate.max_array_len < 3
@@ -20046,7 +20067,7 @@ impl Runtime {
         {
             return None;
         }
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_write_allows(now_ms)) {
             return None;
         }
         // A single NX|XX|GT|LT condition token (matching parse_expire_options for one
@@ -20199,14 +20220,19 @@ impl Runtime {
         }
     }
 
-    fn can_execute_plain_persist_borrowed(&mut self, key: &[u8], now_ms: u64) -> bool {
+    fn can_execute_plain_persist_borrowed(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        default_write_allowed: Option<bool>,
+    ) -> bool {
         if self.policy.gate.max_array_len < 2
             || self.policy.gate.max_bulk_len < b"PERSIST".len()
             || key.len() > self.policy.gate.max_bulk_len
         {
             return false;
         }
-        self.plain_borrowed_default_key_write_allows(now_ms)
+        default_write_allowed.unwrap_or_else(|| self.plain_borrowed_default_key_write_allows(now_ms))
     }
 
     /// (frankenredis-6s9dx) Conservative borrowed WRITE fast path for the
@@ -20215,8 +20241,13 @@ impl Runtime {
     /// dirty + the volatile-key bookkeeping), and the reply is `Integer(removed)`.
     /// Gated by the WRITE predicate, so propagation, AOF, the "persist" keyspace
     /// event, and tracking are provably inactive — no side effects are skipped.
-    pub fn execute_plain_persist_borrowed(&mut self, key: &[u8], now_ms: u64) -> Option<RespFrame> {
-        if !self.can_execute_plain_persist_borrowed(key, now_ms) {
+    pub fn execute_plain_persist_borrowed(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        default_write_allowed: Option<bool>,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_persist_borrowed(key, now_ms, default_write_allowed) {
             return None;
         }
 
@@ -36613,6 +36644,16 @@ impl Runtime {
                 self.server.replication_runtime_state.role,
                 ReplicationRoleState::Replica { .. }
             );
+        // (frankenredis-dpu2y) The full-arity verdict from the SAME table pass that resolves
+        // the name, handed to `execute_frame_internal` as a parameter rather than recomputed
+        // there. Resolving the `parent|sub` key twice per generic dispatch measured +16.0
+        // instr/op on PUBSUB CHANNELS — `write_container_key` 219 to 438,
+        // `subcommand_table_index` 87 to 174 — more than the String build the handle removed.
+        // A PARAMETER rather than session state on purpose: `execute_bytes` reaches
+        // `execute_frame_internal` without passing through here, and a stored value would go
+        // stale on that path. `None` there means "resolve it yourself", which is what it did
+        // before.
+        let mut resolved_arity_ok: Option<bool> = None;
         // argv was materialized once by the caller (cloned from a borrowed frame
         // on the owned/conformance path, or moved out of the parsed frame on the
         // server hot path) and reused for both stats and execution.
@@ -36622,7 +36663,9 @@ impl Runtime {
             // keeps `c->lastcmd` as a POINTER and prints `lastcmd->fullname`, so this is
             // the same representation, and `None` reproduces upstream's NULL for a command
             // the table does not have (frankenredis-zbiy3).
-            self.session.last_command_name = fr_command::canonical_command_name(argv);
+            let (canonical, arity_ok) = fr_command::resolve_command_name_and_arity(argv);
+            self.session.last_command_name = canonical;
+            resolved_arity_ok = Some(arity_ok);
             // Upstream `argv_len_sum` (CLIENT INFO `argv-mem`): byte-length sum
             // of the live command's args. (frankenredis-clargvmem)
             self.session.last_argv_len_sum = argv.iter().map(Vec::len).sum();
@@ -36643,7 +36686,14 @@ impl Runtime {
                 .map(|cmd| !eq_ascii_token(cmd, b"TOUCH"))
                 .unwrap_or(false);
         let reply = fr_store::with_touch_disabled(disable_touch, || {
-            self.execute_frame_internal(frame, argv_result, now_ms, packet_id, unix_time_us)
+            self.execute_frame_internal(
+                frame,
+                argv_result,
+                now_ms,
+                packet_id,
+                unix_time_us,
+                resolved_arity_ok,
+            )
         });
         if let RespFrame::Error(msg) = &reply {
             self.server.store.stat_total_error_replies += 1;
@@ -36903,6 +36953,7 @@ impl Runtime {
         now_ms: u64,
         packet_id: u64,
         unix_time_us: Option<u64>,
+        resolved_arity_ok: Option<bool>,
     ) -> RespFrame {
         // Use pre-parsed argv if available, avoiding duplicate parsing.
         let argv = match argv_result {
@@ -37149,8 +37200,13 @@ impl Runtime {
         // a known subcommand with the wrong argc reaches dispatch for its own
         // "wrong number of arguments for 'parent|sub'" error rather than a later
         // gate's wording.
-        let command_arity_ok = set_command_arity_ok(argv)
-            .unwrap_or_else(|| fr_command::check_full_command_arity(argv).is_ok());
+        // (frankenredis-dpu2y) Prefer the verdict resolved alongside the canonical name in
+        // execute_dispatch. `set_command_arity_ok` still gets first refusal so the floor fast
+        // path is untouched; only the fall-through changed, and it now reads a value already
+        // computed rather than resolving the same key a second time.
+        let command_arity_ok = set_command_arity_ok(argv).unwrap_or_else(|| {
+            resolved_arity_ok.unwrap_or_else(|| fr_command::check_full_command_arity(argv).is_ok())
+        });
         // (frankenredis-7tpx0) Upstream runs the CMD_PROTECTED gate
         // (server.c:3878 — DEBUG/MODULE enable check) BEFORE the pub/sub-context
         // gate. DEBUG is protected (enable-debug-command defaults to "no"), so a
@@ -38701,6 +38757,10 @@ impl Runtime {
                         .map_err(|_| CommandError::InvalidCommandFrame),
                     now_ms,
                     packet_id,
+                    None,
+                    // execute_bytes does not go through execute_dispatch, so nothing has
+                    // resolved the command yet: the gate resolves it itself, exactly as
+                    // before this parameter existed.
                     None,
                 )
                 .to_bytes()
