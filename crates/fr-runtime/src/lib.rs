@@ -5274,7 +5274,7 @@ pub struct ClientSession {
     /// Last command interaction timestamp in ms since epoch.
     pub last_interaction_ms: u64,
     /// Most recent command recorded for CLIENT LIST/INFO `cmd=`.
-    last_command_name: String,
+    last_command_name: Option<&'static str>,
     /// Sum of the byte-lengths of the most recent command's argv elements,
     /// mirroring upstream `client->argv_len_sum`. Surfaced as CLIENT INFO/LIST
     /// `argv-mem` for the currently-executing client only (idle clients report
@@ -5306,7 +5306,7 @@ impl Clone for ClientSession {
             output_buffer_bytes: self.output_buffer_bytes,
             connected_at_ms: self.connected_at_ms,
             last_interaction_ms: self.last_interaction_ms,
-            last_command_name: self.last_command_name.clone(),
+            last_command_name: self.last_command_name,
             last_argv_len_sum: self.last_argv_len_sum,
         }
     }
@@ -5335,7 +5335,7 @@ impl ClientSession {
     ) {
         self.clone_fields_except_transaction_tracking_and_command_from::<COPY_CLIENT_ID>(source);
         if self.last_command_name != source.last_command_name {
-            self.last_command_name.clone_from(&source.last_command_name);
+            self.last_command_name = source.last_command_name;
         }
     }
 
@@ -5467,7 +5467,7 @@ impl ClientSession {
         self.transaction_state.clone_from(&source.transaction_state);
         self.client_tracking.clone_from(&source.client_tracking);
         self.clone_fields_except_transaction_tracking_and_command_from::<true>(source);
-        self.last_command_name.clone_from(&source.last_command_name);
+        self.last_command_name = source.last_command_name;
     }
 
     #[cfg(any(test, feature = "bench-reference"))]
@@ -5492,7 +5492,7 @@ impl ClientSession {
         self.clone_scalar_metadata_from::<true>(source);
         self.clone_volatile_metadata_from(source);
         if self.last_command_name != source.last_command_name {
-            self.last_command_name.clone_from(&source.last_command_name);
+            self.last_command_name = source.last_command_name;
         }
     }
 
@@ -5524,7 +5524,7 @@ impl ClientSession {
         }
         self.clone_volatile_metadata_from(source);
         if self.last_command_name != source.last_command_name {
-            self.last_command_name.clone_from(&source.last_command_name);
+            self.last_command_name = source.last_command_name;
         }
     }
 
@@ -5565,7 +5565,7 @@ impl ClientSession {
         self.clone_scalar_metadata_from::<false>(source);
         self.clone_volatile_metadata_from(source);
         if self.last_command_name != source.last_command_name {
-            self.last_command_name.clone_from(&source.last_command_name);
+            self.last_command_name = source.last_command_name;
         }
     }
 
@@ -5579,7 +5579,7 @@ impl ClientSession {
         self.clone_scalar_metadata_from::<false>(source);
         self.clone_volatile_metadata_from(source);
         if self.last_command_name != source.last_command_name {
-            self.last_command_name.clone_from(&source.last_command_name);
+            self.last_command_name = source.last_command_name;
         }
     }
 
@@ -5615,7 +5615,7 @@ impl Default for ClientSession {
             output_buffer_bytes: 0,
             connected_at_ms: 0,
             last_interaction_ms: 0,
-            last_command_name: "NULL".to_string(),
+            last_command_name: None,
             last_argv_len_sum: 0,
         }
     }
@@ -5696,7 +5696,6 @@ impl ClientSession {
         self.client_no_touch = false;
         self.client_tracking = ClientTrackingState::default();
         self.client_reply = ClientReplyState::default();
-        self.last_command_name = String::new();
         self.last_argv_len_sum = 0;
         self.refresh_authentication_for_server(auth_state, false);
     }
@@ -7291,7 +7290,7 @@ impl Runtime {
         self.server
             .client_sessions
             .get(&client_id)
-            .map(|session| session.last_command_name.clone())
+            .map(|session| session.last_command_name.unwrap_or("NULL").to_string())
     }
 
     #[cfg(any(test, feature = "bench-reference"))]
@@ -9302,8 +9301,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("set");
+        self.session.last_command_name = Some("set");
         self.session.last_argv_len_sum = b"SET".len() + key.len() + value.len();
         let packet_id = next_packet_id();
 
@@ -9367,8 +9365,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("set");
+        self.session.last_command_name = Some("set");
         self.session.last_argv_len_sum = b"SET".len() + key.len() + value.len() + b"KEEPTTL".len();
         let packet_id = next_packet_id();
 
@@ -9423,8 +9420,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("set");
+        self.session.last_command_name = Some("set");
         self.session.last_argv_len_sum = b"SET".len() + key.len() + value.len() + b"GET".len();
         let packet_id = next_packet_id();
 
@@ -9503,8 +9499,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("set");
+        self.session.last_command_name = Some("set");
         self.session.last_argv_len_sum =
             b"SET".len() + key.len() + value.len() + opt.len() + b"GET".len();
         let packet_id = next_packet_id();
@@ -9673,8 +9668,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("set");
+        self.session.last_command_name = Some("set");
         self.session.last_argv_len_sum = b"SET".len() + key.len() + value.len() + b"XX".len();
         let packet_id = next_packet_id();
 
@@ -9797,8 +9791,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("set");
+        self.session.last_command_name = Some("set");
         self.session.last_argv_len_sum = b"SET".len() + key.len() + value.len() + b"NX".len();
         let packet_id = next_packet_id();
 
@@ -9941,8 +9934,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("set");
+        self.session.last_command_name = Some("set");
         self.session.last_argv_len_sum = b"SET".len()
             + key.len()
             + value.len()
@@ -10114,8 +10106,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("set");
+        self.session.last_command_name = Some("set");
         self.session.last_argv_len_sum =
             b"SET".len() + key.len() + value.len() + unit_upper.len() + time_arg.len();
         let packet_id = next_packet_id();
@@ -10201,8 +10192,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("set");
+        self.session.last_command_name = Some("set");
         self.session.last_argv_len_sum =
             b"SET".len() + key.len() + value.len() + unit_upper.len() + time_arg.len();
         let packet_id = next_packet_id();
@@ -10343,8 +10333,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("set");
+        self.session.last_command_name = Some("set");
         self.session.last_argv_len_sum = b"SET".len()
             + key.len()
             + value.len()
@@ -10480,8 +10469,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("set");
+        self.session.last_command_name = Some("set");
         self.session.last_argv_len_sum = b"SET".len() + key.len() + value.len();
         let packet_id = next_packet_id();
 
@@ -10566,8 +10554,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("mset");
+        self.session.last_command_name = Some("mset");
         self.session.last_argv_len_sum =
             b"MSET".len() + pairs.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>();
         let packet_id = next_packet_id();
@@ -10761,8 +10748,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("incr");
+        self.session.last_command_name = Some("incr");
         self.session.last_argv_len_sum = b"INCR".len() + key.len();
         let packet_id = next_packet_id();
 
@@ -10888,8 +10874,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("getdel");
+        self.session.last_command_name = Some("getdel");
         self.session.last_argv_len_sum = b"GETDEL".len() + key.len();
         let packet_id = next_packet_id();
 
@@ -11013,8 +10998,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("decr");
+        self.session.last_command_name = Some("decr");
         self.session.last_argv_len_sum = b"DECR".len() + key.len();
         let packet_id = next_packet_id();
 
@@ -11153,8 +11137,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("decrby");
+        self.session.last_command_name = Some("decrby");
         self.session.last_argv_len_sum = b"DECRBY".len() + key.len() + delta_arg.len();
         let packet_id = next_packet_id();
 
@@ -11286,8 +11269,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("append");
+        self.session.last_command_name = Some("append");
         self.session.last_argv_len_sum = b"APPEND".len() + key.len() + value.len();
         let packet_id = next_packet_id();
 
@@ -11438,8 +11420,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("setrange");
+        self.session.last_command_name = Some("setrange");
         self.session.last_argv_len_sum =
             b"SETRANGE".len() + key.len() + offset_arg.len() + value.len();
         let packet_id = next_packet_id();
@@ -11585,8 +11566,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str(cmd.name_lower());
+        self.session.last_command_name = Some(cmd.name_lower());
         self.session.last_argv_len_sum =
             cmd.name_upper().len() + key.len() + values.iter().map(|v| v.len()).sum::<usize>();
         let packet_id = next_packet_id();
@@ -11810,8 +11790,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("hset");
+        self.session.last_command_name = Some("hset");
         self.session.last_argv_len_sum =
             b"HSET".len() + key.len() + pairs.iter().map(|p| p.len()).sum::<usize>();
         let packet_id = next_packet_id();
@@ -11999,8 +11978,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("hmset");
+        self.session.last_command_name = Some("hmset");
         self.session.last_argv_len_sum =
             b"HMSET".len() + key.len() + pairs.iter().map(|p| p.len()).sum::<usize>();
         let packet_id = next_packet_id();
@@ -12166,8 +12144,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("zadd");
+        self.session.last_command_name = Some("zadd");
         self.session.last_argv_len_sum =
             b"ZADD".len() + key.len() + pairs.iter().map(|p| p.len()).sum::<usize>();
         let packet_id = next_packet_id();
@@ -12317,8 +12294,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("geoadd");
+        self.session.last_command_name = Some("geoadd");
         self.session.last_argv_len_sum =
             b"GEOADD".len() + key.len() + lon.len() + lat.len() + member.len();
         let packet_id = next_packet_id();
@@ -12471,8 +12447,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("xack");
+        self.session.last_command_name = Some("xack");
         self.session.last_argv_len_sum = b"XACK".len() + key.len() + group.len() + b"0-0".len();
         let packet_id = next_packet_id();
 
@@ -12594,8 +12569,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("xdel");
+        self.session.last_command_name = Some("xdel");
         self.session.last_argv_len_sum = b"XDEL".len() + key.len() + b"0-0".len();
         let packet_id = next_packet_id();
 
@@ -12713,8 +12687,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("xtrim");
+        self.session.last_command_name = Some("xtrim");
         self.session.last_argv_len_sum =
             b"XTRIM".len() + key.len() + b"MINID".len() + b"~".len() + b"0-0".len();
         let packet_id = next_packet_id();
@@ -12878,8 +12851,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("xadd");
+        self.session.last_command_name = Some("xadd");
         self.session.last_argv_len_sum = b"XADD".len()
             + key.len()
             + nomkstream_arg.map_or(0, <[u8]>::len)
@@ -13037,8 +13009,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("xadd");
+        self.session.last_command_name = Some("xadd");
         self.session.last_argv_len_sum = b"XADD".len()
             + key.len()
             + maxlen_keyword.len()
@@ -13205,8 +13176,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("zincrby");
+        self.session.last_command_name = Some("zincrby");
         self.session.last_argv_len_sum =
             b"ZINCRBY".len() + key.len() + delta_arg.len() + member.len();
         let packet_id = next_packet_id();
@@ -13366,8 +13336,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("zadd");
+        self.session.last_command_name = Some("zadd");
         self.session.last_argv_len_sum =
             b"ZADD".len() + key.len() + b"INCR".len() + delta_arg.len() + member.len();
         let packet_id = next_packet_id();
@@ -13548,8 +13517,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("zadd");
+        self.session.last_command_name = Some("zadd");
         self.session.last_argv_len_sum =
             b"ZADD".len() + key.len() + flag1.len() + flag2.len() + score_arg.len() + member.len();
         let packet_id = next_packet_id();
@@ -13746,8 +13714,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("zadd");
+        self.session.last_command_name = Some("zadd");
         self.session.last_argv_len_sum =
             b"ZADD".len() + key.len() + flag_arg.len() + score_arg.len() + member.len();
         let packet_id = next_packet_id();
@@ -13939,8 +13906,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("zadd");
+        self.session.last_command_name = Some("zadd");
         self.session.last_argv_len_sum = b"ZADD".len()
             + key.len()
             + flags.iter().map(|f| f.len()).sum::<usize>()
@@ -14086,8 +14052,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str(cmd.name_lower());
+        self.session.last_command_name = Some(cmd.name_lower());
         self.session.last_argv_len_sum = cmd.name_upper().len() + key.len();
         let packet_id = next_packet_id();
 
@@ -14247,8 +14212,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("get");
+        self.session.last_command_name = Some("get");
         self.session.last_argv_len_sum = b"GET".len() + key.len();
         let packet_id = next_packet_id();
 
@@ -14332,8 +14296,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("ping");
+        self.session.last_command_name = Some("ping");
         self.session.last_argv_len_sum = b"PING".len() + msg.map_or(0, <[u8]>::len);
         let packet_id = next_packet_id();
 
@@ -14435,8 +14398,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("echo");
+        self.session.last_command_name = Some("echo");
         self.session.last_argv_len_sum = b"ECHO".len() + msg.len();
         let packet_id = next_packet_id();
 
@@ -14537,8 +14499,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("smembers");
+        self.session.last_command_name = Some("smembers");
         self.session.last_argv_len_sum = b"SMEMBERS".len() + key.len();
         let packet_id = next_packet_id();
 
@@ -14625,8 +14586,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("sunion");
+        self.session.last_command_name = Some("sunion");
         self.session.last_argv_len_sum =
             b"SUNION".len() + keys.iter().map(|k| k.len()).sum::<usize>();
         let packet_id = next_packet_id();
@@ -14725,8 +14685,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str(cmd_lower);
+        self.session.last_command_name = Some(cmd_lower);
         self.session.last_argv_len_sum =
             cmd_upper.len() + key.len() + member.len() + b"WITHSCORE".len();
         let packet_id = next_packet_id();
@@ -14836,8 +14795,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("sdiff");
+        self.session.last_command_name = Some("sdiff");
         self.session.last_argv_len_sum =
             b"SDIFF".len() + keys.iter().map(|k| k.len()).sum::<usize>();
         let packet_id = next_packet_id();
@@ -14921,8 +14879,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("sinter");
+        self.session.last_command_name = Some("sinter");
         self.session.last_argv_len_sum =
             b"SINTER".len() + keys.iter().map(|k| k.len()).sum::<usize>();
         let packet_id = next_packet_id();
@@ -15011,10 +14968,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session
-            .last_command_name
-            .push_str(if values { "hvals" } else { "hkeys" });
+        self.session.last_command_name = Some(if values { "hvals" } else { "hkeys" });
         self.session.last_argv_len_sum = b"HKEYS".len() + key.len();
         let packet_id = next_packet_id();
 
@@ -15103,8 +15057,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("hgetall");
+        self.session.last_command_name = Some("hgetall");
         self.session.last_argv_len_sum = b"HGETALL".len() + key.len();
         let packet_id = next_packet_id();
 
@@ -15196,8 +15149,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("lrange");
+        self.session.last_command_name = Some("lrange");
         self.session.last_argv_len_sum =
             b"LRANGE".len() + key.len() + start_bytes.len() + stop_bytes.len();
         let packet_id = next_packet_id();
@@ -15277,8 +15229,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("get");
+        self.session.last_command_name = Some("get");
         self.session.last_argv_len_sum = b"GET".len() + key.len();
         let packet_id = next_packet_id();
 
@@ -15437,8 +15388,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("hget");
+        self.session.last_command_name = Some("hget");
         self.session.last_argv_len_sum = b"HGET".len() + key.len() + field.len();
         let packet_id = next_packet_id();
 
@@ -15595,8 +15545,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("hget");
+        self.session.last_command_name = Some("hget");
         self.session.last_argv_len_sum = b"HGET".len() + key.len() + field.len();
         let packet_id = next_packet_id();
 
@@ -15694,8 +15643,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("mget");
+        self.session.last_command_name = Some("mget");
         self.session.last_argv_len_sum =
             b"MGET".len() + keys.iter().map(|k| k.len()).sum::<usize>();
         let packet_id = next_packet_id();
@@ -15815,8 +15763,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("exists");
+        self.session.last_command_name = Some("exists");
         self.session.last_argv_len_sum =
             b"EXISTS".len() + keys.iter().map(|k| k.len()).sum::<usize>();
         let packet_id = next_packet_id();
@@ -15857,8 +15804,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("exists");
+        self.session.last_command_name = Some("exists");
         self.session.last_argv_len_sum =
             b"EXISTS".len() + keys.iter().map(|k| k.len()).sum::<usize>();
         let packet_id = next_packet_id();
@@ -15986,8 +15932,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("pexpiretime");
+        self.session.last_command_name = Some("pexpiretime");
         self.session.last_argv_len_sum = b"PEXPIRETIME".len() + key.len();
         let packet_id = next_packet_id();
 
@@ -16115,8 +16060,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("strlen");
+        self.session.last_command_name = Some("strlen");
         self.session.last_argv_len_sum = b"STRLEN".len() + key.len();
         let packet_id = next_packet_id();
 
@@ -16233,8 +16177,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("dump");
+        self.session.last_command_name = Some("dump");
         self.session.last_argv_len_sum = b"DUMP".len() + key.len();
         let packet_id = next_packet_id();
 
@@ -16327,8 +16270,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("randomkey");
+        self.session.last_command_name = Some("randomkey");
         self.session.last_argv_len_sum = b"RANDOMKEY".len();
         let packet_id = next_packet_id();
 
@@ -16381,8 +16323,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("move");
+        self.session.last_command_name = Some("move");
         self.session.last_argv_len_sum = b"MOVE".len() + key.len() + db_arg.len();
         let packet_id = next_packet_id();
 
@@ -16560,8 +16501,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("getrange");
+        self.session.last_command_name = Some("getrange");
         self.session.last_argv_len_sum =
             b"GETRANGE".len() + key.len() + start_arg.len() + end_arg.len();
         let packet_id = next_packet_id();
@@ -16634,8 +16574,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("getrange");
+        self.session.last_command_name = Some("getrange");
         self.session.last_argv_len_sum =
             b"GETRANGE".len() + key.len() + start_arg.len() + end_arg.len();
         let packet_id = next_packet_id();
@@ -16771,8 +16710,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("substr");
+        self.session.last_command_name = Some("substr");
         self.session.last_argv_len_sum =
             b"SUBSTR".len() + key.len() + start_arg.len() + end_arg.len();
         let packet_id = next_packet_id();
@@ -16938,8 +16876,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("sintercard");
+        self.session.last_command_name = Some("sintercard");
         self.session.last_argv_len_sum =
             b"SINTERCARD".len() + tail.iter().map(|a| a.len()).sum::<usize>();
         let packet_id = next_packet_id();
@@ -17035,8 +16972,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("xpending");
+        self.session.last_command_name = Some("xpending");
         self.session.last_argv_len_sum = b"XPENDING".len() + key.len() + group.len();
         let packet_id = next_packet_id();
 
@@ -17189,8 +17125,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("zintercard");
+        self.session.last_command_name = Some("zintercard");
         self.session.last_argv_len_sum =
             b"ZINTERCARD".len() + tail.iter().map(|a| a.len()).sum::<usize>();
         let packet_id = next_packet_id();
@@ -17368,8 +17303,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("zmscore");
+        self.session.last_command_name = Some("zmscore");
         self.session.last_argv_len_sum =
             b"ZMSCORE".len() + key.len() + members.iter().map(|m| m.len()).sum::<usize>();
         let packet_id = next_packet_id();
@@ -17452,8 +17386,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("zmscore");
+        self.session.last_command_name = Some("zmscore");
         self.session.last_argv_len_sum =
             b"ZMSCORE".len() + key.len() + members.iter().map(|m| m.len()).sum::<usize>();
         let packet_id = next_packet_id();
@@ -17619,8 +17552,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("smismember");
+        self.session.last_command_name = Some("smismember");
         self.session.last_argv_len_sum =
             b"SMISMEMBER".len() + key.len() + members.iter().map(|m| m.len()).sum::<usize>();
         let packet_id = next_packet_id();
@@ -17694,8 +17626,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("smismember");
+        self.session.last_command_name = Some("smismember");
         self.session.last_argv_len_sum =
             b"SMISMEMBER".len() + key.len() + members.iter().map(|m| m.len()).sum::<usize>();
         let packet_id = next_packet_id();
@@ -17858,8 +17789,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("hmget");
+        self.session.last_command_name = Some("hmget");
         self.session.last_argv_len_sum =
             b"HMGET".len() + key.len() + fields.iter().map(|f| f.len()).sum::<usize>();
         let packet_id = next_packet_id();
@@ -17934,8 +17864,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("hmget");
+        self.session.last_command_name = Some("hmget");
         self.session.last_argv_len_sum =
             b"HMGET".len() + key.len() + fields.iter().map(|f| f.len()).sum::<usize>();
         let packet_id = next_packet_id();
@@ -18102,8 +18031,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("sismember");
+        self.session.last_command_name = Some("sismember");
         self.session.last_argv_len_sum = b"SISMEMBER".len() + key.len() + member.len();
         let packet_id = next_packet_id();
 
@@ -18240,8 +18168,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("getbit");
+        self.session.last_command_name = Some("getbit");
         self.session.last_argv_len_sum = b"GETBIT".len() + key.len() + offset_arg.len();
         let packet_id = next_packet_id();
 
@@ -18392,8 +18319,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("memory|usage");
+        self.session.last_command_name = Some("memory|usage");
         // MEMORY and USAGE are case-invariant 6 + 5 bytes, plus the key.
         self.session.last_argv_len_sum = b"MEMORY".len() + b"USAGE".len() + key.len();
         let packet_id = next_packet_id();
@@ -18491,10 +18417,9 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        // Container command -> CLIENT INFO / cmdstat name is `object|encoding`
-        // (write_client_info_command_name lowercases the parent|sub form).
-        self.session.last_command_name.push_str("object|encoding");
+        // Container command -> CLIENT INFO / cmdstat name is `object|encoding`,
+        // which is exactly the SUBCOMMAND_TABLE entry `canonical_command_name` returns.
+        self.session.last_command_name = Some("object|encoding");
         // last_argv_len_sum = sum of the live arg byte lengths; OBJECT and
         // ENCODING are case-invariant 6 + 8 bytes regardless of how they were
         // typed, plus the key.
@@ -18544,8 +18469,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("object|encoding");
+        self.session.last_command_name = Some("object|encoding");
         self.session.last_argv_len_sum = b"OBJECT".len() + b"ENCODING".len() + key.len();
         let packet_id = next_packet_id();
 
@@ -18640,8 +18564,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("object|refcount");
+        self.session.last_command_name = Some("object|refcount");
         self.session.last_argv_len_sum = b"OBJECT".len() + b"REFCOUNT".len() + key.len();
         let packet_id = next_packet_id();
 
@@ -18756,8 +18679,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str(cmd.name_lower());
+        self.session.last_command_name = Some(cmd.name_lower());
         self.session.last_argv_len_sum = b"OBJECT".len() + cmd.sub_upper().len() + key.len();
         let packet_id = next_packet_id();
 
@@ -18911,8 +18833,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("lpos");
+        self.session.last_command_name = Some("lpos");
         self.session.last_argv_len_sum = b"LPOS".len() + key.len() + element.len();
         let packet_id = next_packet_id();
 
@@ -19003,8 +18924,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("lpos");
+        self.session.last_command_name = Some("lpos");
         self.session.last_argv_len_sum =
             b"LPOS".len() + key.len() + element.len() + b"RANK".len() + rank_arg.len();
         let packet_id = next_packet_id();
@@ -19104,8 +19024,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("lpos");
+        self.session.last_command_name = Some("lpos");
         self.session.last_argv_len_sum =
             b"LPOS".len() + key.len() + element.len() + b"COUNT".len() + count_arg.len();
         let packet_id = next_packet_id();
@@ -19244,8 +19163,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("command|count");
+        self.session.last_command_name = Some("command|count");
         self.session.last_argv_len_sum = b"COMMAND".len() + b"COUNT".len();
         let packet_id = next_packet_id();
 
@@ -19336,8 +19254,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("dbsize");
+        self.session.last_command_name = Some("dbsize");
         self.session.last_argv_len_sum = b"DBSIZE".len();
         let packet_id = next_packet_id();
 
@@ -19432,8 +19349,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("watch");
+        self.session.last_command_name = Some("watch");
         self.session.last_argv_len_sum = b"WATCH".len() + key.len();
         let packet_id = next_packet_id();
 
@@ -19532,8 +19448,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("unwatch");
+        self.session.last_command_name = Some("unwatch");
         self.session.last_argv_len_sum = b"UNWATCH".len();
         let packet_id = next_packet_id();
 
@@ -19673,8 +19588,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("bitpos");
+        self.session.last_command_name = Some("bitpos");
         self.session.last_argv_len_sum = b"BITPOS".len()
             + key.len()
             + bit_arg.len()
@@ -19864,8 +19778,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("bitcount");
+        self.session.last_command_name = Some("bitcount");
         self.session.last_argv_len_sum = b"BITCOUNT".len()
             + key.len()
             + range.map_or(0, |(s, e, u)| s.len() + e.len() + u.map_or(0, <[u8]>::len));
@@ -20158,8 +20071,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str(kind.name_lower());
+        self.session.last_command_name = Some(kind.name_lower());
         self.session.last_argv_len_sum =
             name_upper.len() + key.len() + time_arg.len() + cond_token.map_or(0, <[u8]>::len);
         let packet_id = next_packet_id();
@@ -20313,8 +20225,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("persist");
+        self.session.last_command_name = Some("persist");
         self.session.last_argv_len_sum = b"PERSIST".len() + key.len();
         let packet_id = next_packet_id();
 
@@ -20419,8 +20330,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("setnx");
+        self.session.last_command_name = Some("setnx");
         self.session.last_argv_len_sum = b"SETNX".len() + key.len() + value.len();
         let packet_id = next_packet_id();
 
@@ -20535,8 +20445,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("rpoplpush");
+        self.session.last_command_name = Some("rpoplpush");
         self.session.last_argv_len_sum = b"RPOPLPUSH".len() + src.len() + dst.len();
         let packet_id = next_packet_id();
 
@@ -20602,8 +20511,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("rpoplpush");
+        self.session.last_command_name = Some("rpoplpush");
         self.session.last_argv_len_sum = b"RPOPLPUSH".len() + src.len() + dst.len();
         let packet_id = next_packet_id();
 
@@ -20768,8 +20676,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("lmove");
+        self.session.last_command_name = Some("lmove");
         self.session.last_argv_len_sum =
             b"LMOVE".len() + src.len() + dst.len() + wherefrom.len() + whereto.len();
         let packet_id = next_packet_id();
@@ -20849,8 +20756,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("lmove");
+        self.session.last_command_name = Some("lmove");
         self.session.last_argv_len_sum =
             b"LMOVE".len() + src.len() + dst.len() + wherefrom.len() + whereto.len();
         let packet_id = next_packet_id();
@@ -21028,8 +20934,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("rename");
+        self.session.last_command_name = Some("rename");
         self.session.last_argv_len_sum = b"RENAME".len() + key.len() + newkey.len();
         let packet_id = next_packet_id();
 
@@ -21250,8 +21155,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str(name_lower);
+        self.session.last_command_name = Some(name_lower);
         self.session.last_argv_len_sum =
             name_upper.len() + key.len() + time_arg.len() + value.len();
         let packet_id = next_packet_id();
@@ -21380,8 +21284,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("hincrby");
+        self.session.last_command_name = Some("hincrby");
         self.session.last_argv_len_sum =
             b"HINCRBY".len() + key.len() + field.len() + increment_arg.len();
         let packet_id = next_packet_id();
@@ -21537,8 +21440,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("copy");
+        self.session.last_command_name = Some("copy");
         self.session.last_argv_len_sum =
             b"COPY".len() + key.len() + dest.len() + if replace { b"REPLACE".len() } else { 0 };
         let packet_id = next_packet_id();
@@ -21694,8 +21596,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("incrbyfloat");
+        self.session.last_command_name = Some("incrbyfloat");
         self.session.last_argv_len_sum = b"INCRBYFLOAT".len() + key.len() + increment_arg.len();
         let packet_id = next_packet_id();
 
@@ -21842,8 +21743,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("getex");
+        self.session.last_command_name = Some("getex");
         self.session.last_argv_len_sum = b"GETEX".len() + key.len();
         let packet_id = next_packet_id();
 
@@ -21918,8 +21818,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("getex");
+        self.session.last_command_name = Some("getex");
         self.session.last_argv_len_sum = b"GETEX".len() + key.len() + b"PERSIST".len();
         let packet_id = next_packet_id();
 
@@ -21997,8 +21896,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("getex");
+        self.session.last_command_name = Some("getex");
         self.session.last_argv_len_sum =
             b"GETEX".len() + key.len() + unit_upper.len() + time_arg.len();
         let packet_id = next_packet_id();
@@ -22071,8 +21969,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("getex");
+        self.session.last_command_name = Some("getex");
         self.session.last_argv_len_sum =
             b"GETEX".len() + key.len() + unit_upper.len() + time_arg.len();
         let packet_id = next_packet_id();
@@ -22199,8 +22096,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("getset");
+        self.session.last_command_name = Some("getset");
         self.session.last_argv_len_sum = b"GETSET".len() + key.len() + value.len();
         let packet_id = next_packet_id();
 
@@ -22265,8 +22161,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("getset");
+        self.session.last_command_name = Some("getset");
         self.session.last_argv_len_sum = b"GETSET".len() + key.len() + value.len();
         let packet_id = next_packet_id();
 
@@ -22422,8 +22317,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("hsetnx");
+        self.session.last_command_name = Some("hsetnx");
         self.session.last_argv_len_sum = b"HSETNX".len() + key.len() + field.len() + value.len();
         let packet_id = next_packet_id();
 
@@ -22579,8 +22473,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("linsert");
+        self.session.last_command_name = Some("linsert");
         self.session.last_argv_len_sum = b"LINSERT".len()
             + key.len()
             + if before {
@@ -22750,8 +22643,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("lrem");
+        self.session.last_command_name = Some("lrem");
         self.session.last_argv_len_sum = b"LREM".len() + key.len() + count_arg.len() + value.len();
         let packet_id = next_packet_id();
 
@@ -22904,8 +22796,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("zrangebylex");
+        self.session.last_command_name = Some("zrangebylex");
         self.session.last_argv_len_sum = b"ZRANGEBYLEX".len() + key.len() + min.len() + max.len();
         let packet_id = next_packet_id();
 
@@ -22980,8 +22871,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("zrangebylex");
+        self.session.last_command_name = Some("zrangebylex");
         self.session.last_argv_len_sum = b"ZRANGEBYLEX".len() + key.len() + min.len() + max.len();
         let packet_id = next_packet_id();
 
@@ -23053,8 +22943,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("zrevrangebylex");
+        self.session.last_command_name = Some("zrevrangebylex");
         self.session.last_argv_len_sum =
             b"ZREVRANGEBYLEX".len() + key.len() + max.len() + min.len();
         let packet_id = next_packet_id();
@@ -23437,8 +23326,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("zrevrangebylex");
+        self.session.last_command_name = Some("zrevrangebylex");
         self.session.last_argv_len_sum =
             b"ZREVRANGEBYLEX".len() + key.len() + max.len() + min.len();
         let packet_id = next_packet_id();
@@ -23647,8 +23535,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str(name_lower);
+        self.session.last_command_name = Some(name_lower);
         self.session.last_argv_len_sum = argv_len_sum;
         let packet_id = next_packet_id();
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
@@ -23863,8 +23750,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str(name_lower);
+        self.session.last_command_name = Some(name_lower);
         self.session.last_argv_len_sum = argv_len_sum;
         let packet_id = next_packet_id();
         self.apply_existing_client_reply_suppression_to_undispatched_reply();
@@ -28653,8 +28539,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("renamenx");
+        self.session.last_command_name = Some("renamenx");
         self.session.last_argv_len_sum = b"RENAMENX".len() + key.len() + newkey.len();
         let packet_id = next_packet_id();
 
@@ -28796,8 +28681,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("smove");
+        self.session.last_command_name = Some("smove");
         self.session.last_argv_len_sum = b"SMOVE".len() + src.len() + dst.len() + member.len();
         let packet_id = next_packet_id();
 
@@ -28954,8 +28838,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("setbit");
+        self.session.last_command_name = Some("setbit");
         self.session.last_argv_len_sum =
             b"SETBIT".len() + key.len() + offset_arg.len() + value_arg.len();
         let packet_id = next_packet_id();
@@ -29116,8 +28999,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("hincrbyfloat");
+        self.session.last_command_name = Some("hincrbyfloat");
         self.session.last_argv_len_sum =
             b"HINCRBYFLOAT".len() + key.len() + field.len() + increment_arg.len();
         let packet_id = next_packet_id();
@@ -29297,8 +29179,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("ltrim");
+        self.session.last_command_name = Some("ltrim");
         self.session.last_argv_len_sum = b"LTRIM".len() + key.len() + start_arg.len() + stop_arg.len();
         let packet_id = next_packet_id();
 
@@ -29451,8 +29332,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("lset");
+        self.session.last_command_name = Some("lset");
         self.session.last_argv_len_sum = b"LSET".len() + key.len() + index_arg.len() + value.len();
         let packet_id = next_packet_id();
 
@@ -29591,8 +29471,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("hstrlen");
+        self.session.last_command_name = Some("hstrlen");
         self.session.last_argv_len_sum = b"HSTRLEN".len() + key.len() + field.len();
         let packet_id = next_packet_id();
 
@@ -29728,8 +29607,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("hexists");
+        self.session.last_command_name = Some("hexists");
         self.session.last_argv_len_sum = b"HEXISTS".len() + key.len() + field.len();
         let packet_id = next_packet_id();
 
@@ -29854,8 +29732,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("llen");
+        self.session.last_command_name = Some("llen");
         self.session.last_argv_len_sum = b"LLEN".len() + key.len();
         let packet_id = next_packet_id();
 
@@ -30035,8 +29912,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str(cmd.name_lower());
+        self.session.last_command_name = Some(cmd.name_lower());
         self.session.last_argv_len_sum = cmd.name_upper().len() + key.len();
         let packet_id = next_packet_id();
 
@@ -30143,8 +30019,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str(cmd.name_lower());
+        self.session.last_command_name = Some(cmd.name_lower());
         self.session.last_argv_len_sum = cmd.name_upper().len() + key.len();
         let packet_id = next_packet_id();
 
@@ -30309,8 +30184,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str(cmd.name_lower());
+        self.session.last_command_name = Some(cmd.name_lower());
         self.session.last_argv_len_sum = cmd.name_upper().len() + key.len();
         let packet_id = next_packet_id();
 
@@ -30409,8 +30283,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("geodist");
+        self.session.last_command_name = Some("geodist");
         self.session.last_argv_len_sum =
             b"GEODIST".len() + key.len() + m1.len() + m2.len() + unit.map_or(0, <[u8]>::len);
         let packet_id = next_packet_id();
@@ -30589,8 +30462,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("zcount");
+        self.session.last_command_name = Some("zcount");
         self.session.last_argv_len_sum =
             b"ZCOUNT".len() + key.len() + min_arg.len() + max_arg.len();
         let packet_id = next_packet_id();
@@ -30758,8 +30630,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("zlexcount");
+        self.session.last_command_name = Some("zlexcount");
         self.session.last_argv_len_sum =
             b"ZLEXCOUNT".len() + key.len() + min_arg.len() + max_arg.len();
         let packet_id = next_packet_id();
@@ -32286,8 +32157,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("geohash");
+        self.session.last_command_name = Some("geohash");
         self.session.last_argv_len_sum = b"GEOHASH".len() + key.len() + member.len();
         let packet_id = next_packet_id();
 
@@ -32357,8 +32227,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("geopos");
+        self.session.last_command_name = Some("geopos");
         self.session.last_argv_len_sum =
             b"GEOPOS".len() + key.len() + members.iter().map(|m| m.len()).sum::<usize>();
         let packet_id = next_packet_id();
@@ -32596,8 +32465,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("bitfield");
+        self.session.last_command_name = Some("bitfield");
         self.session.last_argv_len_sum = b"BITFIELD".len()
             + key.len()
             + set_arg.len()
@@ -32751,8 +32619,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str(command_lower);
+        self.session.last_command_name = Some(command_lower);
         self.session.last_argv_len_sum =
             command_upper.len() + key.len() + get_arg.len() + enc_arg.len() + offset_arg.len();
         let packet_id = next_packet_id();
@@ -32892,8 +32759,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("bitfield_ro");
+        self.session.last_command_name = Some("bitfield_ro");
         self.session.last_argv_len_sum = b"BITFIELD_RO".len()
             + key.len()
             + get1.len()
@@ -33094,8 +32960,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str(cmd.name_lower());
+        self.session.last_command_name = Some(cmd.name_lower());
         self.session.last_argv_len_sum = cmd.name_upper().len() + key.len();
         let packet_id = next_packet_id();
 
@@ -33179,8 +33044,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("srandmember");
+        self.session.last_command_name = Some("srandmember");
         self.session.last_argv_len_sum = b"SRANDMEMBER".len() + key.len();
         let packet_id = next_packet_id();
 
@@ -33275,8 +33139,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("hrandfield");
+        self.session.last_command_name = Some("hrandfield");
         self.session.last_argv_len_sum = b"HRANDFIELD".len() + key.len();
         let packet_id = next_packet_id();
 
@@ -33388,8 +33251,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str(cmd.name_lower());
+        self.session.last_command_name = Some(cmd.name_lower());
         self.session.last_argv_len_sum = cmd.name_upper().len() + key.len() + count_arg.len();
         let packet_id = next_packet_id();
 
@@ -33505,8 +33367,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("srandmember");
+        self.session.last_command_name = Some("srandmember");
         self.session.last_argv_len_sum = b"SRANDMEMBER".len() + key.len() + count_arg.len();
         let packet_id = next_packet_id();
 
@@ -33611,8 +33472,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("hrandfield");
+        self.session.last_command_name = Some("hrandfield");
         self.session.last_argv_len_sum = b"HRANDFIELD".len() + key.len() + count_arg.len();
         let packet_id = next_packet_id();
 
@@ -33720,8 +33580,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("hrandfield");
+        self.session.last_command_name = Some("hrandfield");
         self.session.last_argv_len_sum =
             b"HRANDFIELD".len() + key.len() + count_arg.len() + b"WITHVALUES".len();
         let packet_id = next_packet_id();
@@ -33838,8 +33697,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("zrandmember");
+        self.session.last_command_name = Some("zrandmember");
         self.session.last_argv_len_sum =
             b"ZRANDMEMBER".len() + key.len() + count_arg.len() + b"WITHSCORES".len();
         let packet_id = next_packet_id();
@@ -33955,8 +33813,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("zrandmember");
+        self.session.last_command_name = Some("zrandmember");
         self.session.last_argv_len_sum = b"ZRANDMEMBER".len() + key.len() + count_arg.len();
         let packet_id = next_packet_id();
 
@@ -34136,8 +33993,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str(cmd.name_lower());
+        self.session.last_command_name = Some(cmd.name_lower());
         self.session.last_argv_len_sum = cmd.name_upper().len() + key.len() + member.len();
         let packet_id = next_packet_id();
 
@@ -34271,8 +34127,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("scard");
+        self.session.last_command_name = Some("scard");
         self.session.last_argv_len_sum = b"SCARD".len() + key.len();
         let packet_id = next_packet_id();
 
@@ -34409,8 +34264,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("lindex");
+        self.session.last_command_name = Some("lindex");
         self.session.last_argv_len_sum = b"LINDEX".len() + key.len() + index_arg.len();
         let packet_id = next_packet_id();
 
@@ -34484,8 +34338,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("lindex");
+        self.session.last_command_name = Some("lindex");
         self.session.last_argv_len_sum = b"LINDEX".len() + key.len() + index_arg.len();
         let packet_id = next_packet_id();
 
@@ -34657,8 +34510,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("zscore");
+        self.session.last_command_name = Some("zscore");
         self.session.last_argv_len_sum = b"ZSCORE".len() + key.len() + member.len();
         let packet_id = next_packet_id();
 
@@ -34729,8 +34581,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("zscore");
+        self.session.last_command_name = Some("zscore");
         self.session.last_argv_len_sum = b"ZSCORE".len() + key.len() + member.len();
         let packet_id = next_packet_id();
 
@@ -34885,8 +34736,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("zrange");
+        self.session.last_command_name = Some("zrange");
         self.session.last_argv_len_sum =
             b"ZRANGE".len() + key.len() + start_arg.len() + stop_arg.len();
         let packet_id = next_packet_id();
@@ -34999,8 +34849,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("zrange");
+        self.session.last_command_name = Some("zrange");
         self.session.last_argv_len_sum =
             b"ZRANGE".len() + key.len() + start_arg.len() + stop_arg.len();
         let packet_id = next_packet_id();
@@ -35091,8 +34940,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("zrange");
+        self.session.last_command_name = Some("zrange");
         self.session.last_argv_len_sum =
             b"ZRANGE".len() + key.len() + start_arg.len() + stop_arg.len() + b"WITHSCORES".len();
         let packet_id = next_packet_id();
@@ -35213,8 +35061,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("zrevrange");
+        self.session.last_command_name = Some("zrevrange");
         self.session.last_argv_len_sum =
             b"ZREVRANGE".len() + key.len() + start_arg.len() + stop_arg.len() + b"WITHSCORES".len();
         let packet_id = next_packet_id();
@@ -35980,8 +35827,7 @@ impl Runtime {
             self.session.connected_at_ms = now_ms;
         }
         self.session.last_interaction_ms = self.session.last_interaction_ms.max(now_ms);
-        self.session.last_command_name.clear();
-        self.session.last_command_name.push_str("incrby");
+        self.session.last_command_name = Some("incrby");
         self.session.last_argv_len_sum = b"INCRBY".len() + key.len() + delta_arg.len();
         let packet_id = next_packet_id();
 
@@ -36750,7 +36596,12 @@ impl Runtime {
         // on the owned/conformance path, or moved out of the parsed frame on the
         // server hot path) and reused for both stats and execution.
         if let Ok(argv) = &argv_result {
-            write_client_info_command_name(&mut self.session.last_command_name, argv);
+            // (frankenredis-dpu2y) Store the command table's own canonical name rather
+            // than rebuilding a lowercased `parent|sub` String on every command. Upstream
+            // keeps `c->lastcmd` as a POINTER and prints `lastcmd->fullname`, so this is
+            // the same representation, and `None` reproduces upstream's NULL for a command
+            // the table does not have (frankenredis-zbiy3).
+            self.session.last_command_name = fr_command::canonical_command_name(argv);
             // Upstream `argv_len_sum` (CLIENT INFO `argv-mem`): byte-length sum
             // of the live command's args. (frankenredis-clargvmem)
             self.session.last_argv_len_sum = argv.iter().map(Vec::len).sum();
@@ -39327,7 +39178,7 @@ impl Runtime {
                 .saturating_add(session.qbuf_free_bytes)
                 .saturating_add(16384)
                 .saturating_add(session.output_buffer_bytes),
-            session.last_command_name,
+            session.last_command_name.unwrap_or("NULL"),
             String::from_utf8_lossy(session.current_user_name()),
             redir,
             session.resp_protocol_version,
@@ -50944,7 +50795,7 @@ mod tests {
         let mut lc = Runtime::default_strict();
         lc.execute_frame(command(&[b"SET", b"i", b"1"]), 1);
         assert!(lc.execute_plain_object_encoding_borrowed(b"i", 2).is_some());
-        assert_eq!(lc.session.last_command_name, "object|encoding");
+        assert_eq!(lc.session.last_command_name, Some("object|encoding"));
     }
 
     #[test]
@@ -51056,7 +50907,7 @@ mod tests {
             let g = generic.execute_frame(command(&[b"MEMORY", b"USAGE", key]), ts);
             assert_eq!(f, g, "key={key:?}");
         }
-        assert_eq!(direct.session.last_command_name, "memory|usage");
+        assert_eq!(direct.session.last_command_name, Some("memory|usage"));
         assert_eq!(
             direct.server.store.stat_keyspace_hits,
             generic.server.store.stat_keyspace_hits
@@ -51088,7 +50939,7 @@ mod tests {
                 assert_eq!(out, g, "msg={msg:?} resp3={resp3}");
             }
         }
-        assert_eq!(direct.session.last_command_name, "echo");
+        assert_eq!(direct.session.last_command_name, Some("echo"));
         assert_eq!(
             direct.server.store.stat_total_commands_processed,
             generic.server.store.stat_total_commands_processed
@@ -51107,7 +50958,7 @@ mod tests {
         let g = generic.execute_frame(command(&[b"COMMAND", b"COUNT"]), 2);
         assert_eq!(f, g);
         assert!(matches!(f, RespFrame::Integer(n) if n > 0));
-        assert_eq!(direct.session.last_command_name, "command|count");
+        assert_eq!(direct.session.last_command_name, Some("command|count"));
         // case-insensitive
         assert!(direct.execute_plain_command_count_borrowed(3).is_some());
     }
@@ -51132,7 +50983,7 @@ mod tests {
         let g = generic.execute_frame(command(&[b"DBSIZE"]), 4);
         assert_eq!(f, g);
         assert_eq!(f, RespFrame::Integer(3));
-        assert_eq!(direct.session.last_command_name, "dbsize");
+        assert_eq!(direct.session.last_command_name, Some("dbsize"));
         // SELECT 1 -> defer (gate pins db 0)
         let mut rt = Runtime::default_strict();
         rt.execute_frame(command(&[b"SELECT", b"1"]), 5);
@@ -55477,7 +55328,7 @@ mod tests {
             generic.execute_frame(command(&[b"BITFIELD_RO", b"bf", b"GET", b"u8", b"0"]), 2);
 
         assert_eq!(fast_reply, generic_reply);
-        assert_eq!(fast.session.last_command_name, "bitfield_ro");
+        assert_eq!(fast.session.last_command_name, Some("bitfield_ro"));
         assert_eq!(
             fast.session.last_command_name,
             generic.session.last_command_name
@@ -55592,7 +55443,7 @@ mod tests {
         let generic_reply =
             generic.execute_frame(command(&[b"BITFIELD", b"bf", b"SET", b"u8", b"0", b"1"]), 2);
         assert_eq!(fast_reply, generic_reply);
-        assert_eq!(fast.session.last_command_name, "bitfield");
+        assert_eq!(fast.session.last_command_name, Some("bitfield"));
         assert_eq!(
             fast.execute_frame(command(&[b"BITFIELD", b"bf", b"GET", b"u8", b"0"]), 3),
             generic.execute_frame(command(&[b"BITFIELD", b"bf", b"GET", b"u8", b"0"]), 3)
@@ -61839,6 +61690,73 @@ mod tests {
     /// change touches) whose `config|get` row carries `admin`, while the
     /// `pubsub|channels` row on the same path does not. Both must be judged, and
     /// judged differently, with a monitor attached.
+    /// (frankenredis-dpu2y, frankenredis-zbiy3) `cmd=` is a HANDLE into the command table,
+    /// so an unknown command has no name to print and must report NULL — exactly as
+    /// upstream's `catClientInfoString` prints `lastcmd ? lastcmd->fullname : "NULL"`
+    /// (networking.c:2843) over a pointer assigned unconditionally from
+    /// `lookupCommand(argv, argc)` (server.c:3865).
+    ///
+    /// MEASURED against vendored 7.2.4 before the fix: fr answered `bogus` and
+    /// `client|bogus` where redis answered NULL, with five controls agreeing
+    /// (scripts/client_info_cmd_field_differ.py).
+    ///
+    /// The third case is the one a naive fix gets BACKWARDS. Upstream's assignment is
+    /// unconditional, so an unknown command must OVERWRITE a previous good value; a fix
+    /// that merely skips the update when the lookup misses would leave `get` standing and
+    /// is wrong in the opposite direction.
+    #[test]
+    fn client_info_cmd_is_null_for_an_unknown_command_dpu2y() {
+        let mut rt = Runtime::default_strict();
+        // Known simple command: the table's canonical name.
+        let _ = rt.execute_frame(command(&[b"GET", b"k"]), 1);
+        assert_eq!(rt.session.last_command_name, Some("get"));
+        // Case is normalised BY CONSTRUCTION — the table's name is printed, not the input.
+        let _ = rt.execute_frame(command(&[b"gEt", b"k"]), 2);
+        assert_eq!(rt.session.last_command_name, Some("get"));
+        // Known container: `parent|sub`.
+        let _ = rt.execute_frame(command(&[b"PUBSUB", b"CHANNELS"]), 3);
+        assert_eq!(rt.session.last_command_name, Some("pubsub|channels"));
+        // Bare container, argc == 1: lookup succeeds on the container entry itself.
+        let _ = rt.execute_frame(command(&[b"CONFIG"]), 4);
+        assert_eq!(rt.session.last_command_name, Some("config"));
+        // Wrong arity on a KNOWN command still reports it: upstream assigns lastcmd
+        // before commandCheckArity.
+        let _ = rt.execute_frame(command(&[b"GET"]), 5);
+        assert_eq!(rt.session.last_command_name, Some("get"));
+        // Unknown top-level name -> NULL, and it OVERWRITES the previous good value.
+        let _ = rt.execute_frame(command(&[b"BOGUS"]), 6);
+        assert_eq!(
+            rt.session.last_command_name, None,
+            "an unknown command must overwrite the previous name, not leave it standing"
+        );
+        // Known parent, UNKNOWN subcommand -> also NULL, not the parent's own name.
+        let _ = rt.execute_frame(command(&[b"GET", b"k"]), 7);
+        let _ = rt.execute_frame(command(&[b"CLIENT", b"BOGUS"]), 8);
+        assert_eq!(
+            rt.session.last_command_name, None,
+            "lookupCommandLogic misses on an unknown SUBCOMMAND too; it must not fall back \
+             to `client`"
+        );
+    }
+
+    /// (frankenredis-dpu2y) RESET must not blank the name. Upstream's
+    /// `clearClientConnectionState` (networking.c:1507) touches the monitor list and the
+    /// session flags but never `lastcmd`, so after RESET the field still names the RESET
+    /// command itself. fr used to clear it to an EMPTY string, which rendered `cmd=` —
+    /// neither upstream's `reset` nor a NULL.
+    #[test]
+    fn reset_leaves_the_last_command_name_naming_reset_dpu2y() {
+        let mut rt = Runtime::default_strict();
+        let _ = rt.execute_frame(command(&[b"GET", b"k"]), 1);
+        assert_eq!(rt.session.last_command_name, Some("get"));
+        let _ = rt.execute_frame(command(&[b"RESET"]), 2);
+        assert_eq!(
+            rt.session.last_command_name,
+            Some("reset"),
+            "RESET is itself a command and upstream never clears lastcmd"
+        );
+    }
+
     #[test]
     fn monitor_admin_gate_still_applies_to_special_commands_e6c9t() {
         let mut rt = Runtime::default_strict();
@@ -62390,7 +62308,7 @@ mod tests {
         peer.selected_db = 4;
         peer.connected_at_ms = 500;
         peer.last_interaction_ms = 750;
-        peer.last_command_name = "client|setname".to_string();
+        peer.last_command_name = Some("client|setname");
         rt.record_client_session(&peer);
 
         let list_all = rt.execute_frame(command(&[b"CLIENT", b"LIST"]), 4_000);
@@ -65904,7 +65822,7 @@ mod tests {
         );
         let generic_watch = generic.execute_frame(command(&[b"WATCH", b"k"]), 1);
         assert_eq!(direct_watch, generic_watch.to_bytes());
-        assert_eq!(direct.session.last_command_name, "watch");
+        assert_eq!(direct.session.last_command_name, Some("watch"));
 
         for rt in [&mut direct, &mut generic] {
             assert_eq!(
@@ -65943,7 +65861,7 @@ mod tests {
             Some(())
         );
         assert_eq!(out, b"+OK\r\n");
-        assert_eq!(rt.session.last_command_name, "unwatch");
+        assert_eq!(rt.session.last_command_name, Some("unwatch"));
         rt.execute_frame(command(&[b"MULTI"]), 4);
         rt.execute_frame(command(&[b"GET", b"k"]), 5);
         assert_eq!(
@@ -73551,7 +73469,7 @@ mod tests {
         // STATS (udl3y), FUNCTION STATS (asvh1).
         let mut rt = Runtime::default_strict();
         rt.session.client_id = 4;
-        rt.session.last_command_name = "auth".to_string();
+        rt.session.last_command_name = Some("auth");
         rt.record_acl_log_event("auth", "AUTH".to_string(), b"default".to_vec(), 1_000);
 
         let hello = rt.execute_frame(command(&[b"HELLO", b"3"]), 1);
@@ -73588,7 +73506,7 @@ mod tests {
         // is the existing 20-element flat Array of alternating k/v.
         let mut rt = Runtime::default_strict();
         rt.session.client_id = 4;
-        rt.session.last_command_name = "auth".to_string();
+        rt.session.last_command_name = Some("auth");
         rt.record_acl_log_event("auth", "AUTH".to_string(), b"default".to_vec(), 1_000);
 
         let reply = rt.execute_frame(command(&[b"ACL", b"LOG"]), 5_500);
@@ -73629,7 +73547,7 @@ mod tests {
     fn acl_log_reports_age_seconds_from_command_time() {
         let mut rt = Runtime::default_strict();
         rt.session.client_id = 4;
-        rt.session.last_command_name = "auth".to_string();
+        rt.session.last_command_name = Some("auth");
         rt.record_acl_log_event("auth", "AUTH".to_string(), b"default".to_vec(), 1_000);
 
         let reply = rt.execute_frame(command(&[b"ACL", b"LOG"]), 5_500);

@@ -19799,6 +19799,41 @@ pub fn command_has_acl_subcommands(parent: &str) -> bool {
 /// source of truth (delegating to [`command_acl_parent_has_subcommands`]);
 /// fr-runtime previously carried a divergent hardcoded list that wrongly
 /// namespaced DEBUG as `debug|sub`.
+/// The command table's own canonical name for `argv`, or `None` when the lookup misses.
+///
+/// (frankenredis-dpu2y) THE POINT IS THE `None`. Upstream's `catClientInfoString` prints
+/// `client->lastcmd ? client->lastcmd->fullname : "NULL"` (networking.c:2843), where
+/// `lastcmd` is a POINTER assigned unconditionally from `lookupCommand(argv, argc)`
+/// (server.c:3865) — so "unknown command" and "no name to print" are the same state, and
+/// upstream needs no special case for it. Returning `Option<&'static str>` reproduces that
+/// exactly: `None` IS lookup failure.
+///
+/// `lookupCommandLogic` (server.c:3133) misses in two distinct ways and both are mirrored
+/// here: an unknown top-level name, and — when the parent HAS subcommands — an unknown
+/// SUBCOMMAND. `CLIENT BOGUS` is therefore `None`, not `client`.
+///
+/// Differs from [`canonical_command_fullname`] in three ways that all matter to the caller:
+/// it allocates nothing, it returns the table's `&'static str` rather than a rebuilt
+/// `String`, and it reports the MISS instead of echoing the client's bytes back. The older
+/// function is retained for the callers that genuinely want a lossy display string for an
+/// unknown command (INFO commandstats keys count unknown commands under their raw name).
+///
+/// Both lookups are O(1) — `command_table_index` and `subcommand_table_index` are foldhash
+/// maps — so this costs two hashes, which is what makes it cheaper than the byte-loop
+/// lowercase plus 17-way `matches!` it replaces at the call site.
+#[must_use]
+pub fn canonical_command_name(argv: &[Vec<u8>]) -> Option<&'static str> {
+    let parent = argv.first()?;
+    if argv.len() >= 2 && command_has_subcommands_bytes(parent) {
+        let mut key_buf = [0u8; 64];
+        let key = write_container_key(&mut key_buf, parent, &argv[1])?;
+        // Parent is a container: upstream resolves the SUBCOMMAND and yields NULL when it
+        // does not exist, so a miss here must not fall back to the parent's own name.
+        return subcommand_table_index(key).map(|i| SUBCOMMAND_TABLE[i].0);
+    }
+    command_table_index(parent).map(|i| COMMAND_TABLE[i].0)
+}
+
 #[must_use]
 pub fn canonical_command_fullname(argv: &[Vec<u8>]) -> String {
     let parent = String::from_utf8_lossy(argv.first().map(Vec::as_slice).unwrap_or(b""))
