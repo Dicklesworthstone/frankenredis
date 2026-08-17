@@ -10,8 +10,16 @@
 //! path, so the routing is Pareto-safe: never a regression, a win only where LZF
 //! actually feeds long match tails (large repeated values in a DUMP payload).
 //!
-//! ORIG = `bench_lzf_compress::<false>`  (always-local, = production).
-//! CAND = `bench_lzf_compress::<true>`   (>= 128 B tails via fr_simd AVX2).
+//! ORIG = `bench_lzf_compress::<false>`  (always-local scalar word loop).
+//! CAND = `bench_lzf_compress::<true>`   (>= 128 B tails via fr_simd AVX2)
+//!                                        — **THIS IS PRODUCTION**.
+//!
+//! (frankenredis-qj6jn) The label "= production" used to sit on ORIG and was WRONG:
+//! `lzf_compress` calls `lzf_compress_with_scratch::<true>` and has since 4800f17e6
+//! (2026-07-11). So a regression measured on CAND is a regression IN THE SHIPPED
+//! DUMP/RDB PATH, not a candidate declined — and `textish_8k` was exactly that for a
+//! month. Read the sign accordingly: `orig/cand > 1` means PRODUCTION IS FASTER than
+//! a scalar-only build; `< 1` means production is paying for the routing.
 //! Expectation: WIN on long-run payloads, INDISTINGUISHABLE on short-match /
 //! text / structured payloads (the guards — must never regress). Both arms emit
 //! BYTE-IDENTICAL compressed bytes (asserted before timing).

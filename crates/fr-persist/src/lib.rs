@@ -3117,9 +3117,21 @@ pub fn lzf_compress(input: &[u8], out_budget: usize) -> Option<Vec<u8>> {
 }
 
 /// Same-binary A/B hook for the LZF match-tail SIMD routing (`lzf_match_tail_len`).
-/// `SIMD == false` is byte-for-byte the production path; `SIMD == true` routes
-/// `>= 128 B` match tails through `fr_simd`'s AVX2 kernel. Both produce identical
-/// compressed bytes (the kernel is bit-identical to the scalar loop).
+///
+/// (frankenredis-qj6jn) THE ARM LABELS WERE BACKWARDS AND IT MATTERED. This said
+/// "`SIMD == false` is byte-for-byte the production path". It is not: `lzf_compress`
+/// above calls `lzf_compress_with_scratch::<true>`, and has since 4800f17e6
+/// (2026-07-11). So `SIMD == true` IS production and `SIMD == false` is the
+/// hypothetical scalar-only build. Anyone reading the old comment would take a
+/// measured regression on the `true` arm as "a candidate we chose not to ship",
+/// when it was in fact live in the shipped DUMP/RDB path — which is exactly the
+/// mistake I made in the commit that fixed the guard.
+///
+/// `SIMD == true` (production) routes match tails through `fr_simd`'s AVX2 kernel
+/// once a scalar 128-byte probe confirms the tail actually reaches that far;
+/// `SIMD == false` always runs the local scalar word loop. Both produce identical
+/// compressed bytes (the kernel is bit-identical to the scalar loop), so the A/B
+/// measures time only.
 #[doc(hidden)]
 pub fn bench_lzf_compress<const SIMD: bool>(input: &[u8], out_budget: usize) -> Option<Vec<u8>> {
     LZF_SCRATCH.with(|scratch| {
