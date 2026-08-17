@@ -1058,6 +1058,15 @@ def provenance(fr_pid: int, redis_pid: int) -> dict:
             isa.append(feature)
     with open("/proc/loadavg") as handle:
         loadavg = " ".join(handle.read().split()[:3])
+    # (frankenredis-eh2ct) CPU MHz, and it is a RANGE on purpose. This block stamped
+    # loadavg but not clock, so every row taken from this harness had to have its
+    # frequency sampled by hand afterwards or go into the ledger without one — and a
+    # ratio without a frequency is not comparable across windows on this host. A single
+    # mean would be worse than nothing here: /proc/cpuinfo has shown 1429 MHz and 4214 MHz
+    # on different cores AT THE SAME INSTANT (2.9x), so the spread is the honest figure and
+    # the mean alone would imply a stability the host does not have. Read once here and
+    # once after the square finishes, so a governor step across the run is visible too.
+    mhz = cpu_mhz_summary()
     return {
         "host": socket.gethostname(),
         "kernel": platform.release(),
@@ -1065,11 +1074,34 @@ def provenance(fr_pid: int, redis_pid: int) -> dict:
         "governor": governor,
         "isa": isa[0] if isa else "unknown",
         "loadavg": loadavg,
+        "cpu_mhz": mhz,
         "fr_elf_sha256": running_image_sha(fr_pid),
         "redis_elf_sha256": running_image_sha(redis_pid),
         "fr_threads_observed": observed_threads(fr_pid),
         "redis_threads_observed": observed_threads(redis_pid),
     }
+
+
+def cpu_mhz_summary() -> str:
+    """Per-core clock as `mean/min/max`, or `unknown` where the kernel does not report it.
+
+    Returns a STRING rather than a number because the consumer is a provenance line and
+    the three figures must travel together; a caller that wants one of them can split it.
+    Never raises: a missing or malformed `cpu MHz` field degrades the provenance line, and
+    degrading provenance must not abort a measurement that is otherwise sound.
+    """
+    try:
+        with open("/proc/cpuinfo") as handle:
+            values = [float(line.split(":", 1)[1])
+                      for line in handle
+                      if line.startswith("cpu MHz")]
+    except (OSError, ValueError, IndexError):
+        return "unknown"
+    if not values:
+        return "unknown"
+    return "mean %.0f min %.0f max %.0f (spread %.2fx)" % (
+        sum(values) / len(values), min(values), max(values),
+        max(values) / min(values) if min(values) else float("nan"))
 
 
 def wait_ready(port: int, timeout_s: float = 30.0,
@@ -1383,6 +1415,13 @@ def main(argv_in: list[str]) -> int:
                   f"  -- quote this with every row")
         except Exception:
             print("  HOST LOAD unavailable")
+        # (frankenredis-eh2ct) Same argument as HOST LOAD, one variable along: this host
+        # runs powersave and its cores sit at DIFFERENT frequencies simultaneously, so a
+        # ratio without a clock is not comparable across windows. Printed here at the
+        # start and again after the last row, because a governor step DURING the square is
+        # exactly the drift the per-arm nulls are there to catch and the reader should be
+        # able to see it in the same output.
+        print(f"  CPU MHz (before) {prov['cpu_mhz']}")
 
         rows = []
         for label, seeds, bench_argv in shapes:
@@ -1399,6 +1438,7 @@ def main(argv_in: list[str]) -> int:
                   f"  nulls {row['null_redis']:.4f}/{row['null_fr']:.4f}"
                   f"  {row['verdict']} [{row['binding']}]")
 
+        print(f"  CPU MHz (after)  {cpu_mhz_summary()}")
         print(f"\nRATIO = fr ops/s / redis ops/s   (>1 means FrankenRedis faster)")
         print(f"{'shape':<14}{'ratio':>9}{'95% CI':>22}"
               f"{'null redis':>12}{'null fr':>10}  verdict")
