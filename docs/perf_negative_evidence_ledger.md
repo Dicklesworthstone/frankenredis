@@ -27668,3 +27668,71 @@ the banked probes; the harness self-reported the same SHA for both fr arms from
 /proc/<pid>/exe. Built locally with RCH_CARGO_WRAPPER_BYPASS=1 exported and
 env -u CARGO_TARGET_DIR, no [RCH] line. thinkstation1, 64 cores observed, governor
 powersave, /data 189G. Per-arm loadavg and mean CPU MHz are in the table.
+
+## CERTIFIED (frankenredis-33832) — hash RESTORE is 2.1273x, now the worst cell on the board; and a load-immune INSTRUMENT still needs a quiet window for its DENOMINATOR
+
+Claim class: COMPETITIVE. fr/redis instructions per op, both arms one invocation of
+scripts/restore_instr_per_op.py, incumbent provenance verified on every run.
+
+    round   fr instr/op   redis instr/op   ratio      loadavg   mean MHz
+      1        68,931.9        32,596.4   2.1147x      16.26      3097
+      2        68,997.9        32,247.2   2.1397x      16.40      3091
+      3        68,929.5        32,398.3   2.1276x      16.69      3335
+    mean       68,953.1        32,414.0   2.1273x
+
+    fr arm spread 0.10 pct | redis arm spread 1.08 pct | ratio spread 1.18 pct
+    ELF 2550a666795d8d14184060e29327770a..., built locally, 0 [RCH] lines.
+    incumbent verified: redis-server sha=d2c8a4b9 == vendored source HEAD, clean.
+
+WITH SINTER RETIRED THIS IS THE WORST CELL WE OWN. Every SINTER k now reads 0.373x-0.493x,
+bitcount_unit 0.52x, get_control 0.41x; hash RESTORE at 2.13x is the only surface where fr
+is meaningfully behind, and it is behind by more than 2x.
+
+THE METHOD FINDING, which corrects something I have been asserting all session. I have said
+repeatedly that callgrind instruction counts are load-immune and therefore need no quiet
+window. Half right, and the half that is wrong matters:
+
+    arm      at loadavg 50    at loadavg 16    delta
+    fr           68,923.9         68,953.1     0.04 pct   <- immune, as claimed
+    redis        33,503.2         32,414.0     3.4 pct    <- NOT immune
+    ratio          2.0572x          2.1273x    3.4 pct
+
+fr's arm reproduces to four hundredths of a percent across a 34-point load swing. redis's
+does not, because its serverCron is TIME-driven: under load a run takes longer in wall-clock
+and accumulates more background cron work, which callgrind faithfully counts. So the
+counter is load-immune but the WORKLOAD on the incumbent side is not, and a ratio inherits
+that. Quote instruction ratios from a quiet window or quote them with the load attached --
+the 2.0572x I banked earlier today at loadavg 50 was 3.4 pct optimistic in fr's favour and
+this row supersedes it.
+
+FRAME PROFILE, same window, same binary (self costs; call counts previously verified as
+decode_rdb_string 1.00/op, decode_value_spans 1.00/op, append 40.02/op):
+
+    fr_store::decode_rdb_string                24.24 pct
+    fr_persist::listpack::decode_value_spans   14.92 pct
+    __memcpy_avx_unaligned_erms                12.02 pct
+    fr_store::packed_set::PackedStrMap::append  8.04 pct
+    fr_store::hash_from_listpack_spans          6.01 pct
+    fr_persist::crc64_redis_slice_table         3.50 pct
+    HashFieldMap::from_unique_pairs_borrowed    2.96 pct
+
+CORRECTION: THE PAYLOAD IS NOT LZF-COMPRESSED. I previously reasoned that
+decode_rdb_string's cost was LZF decompression and cited a 1.16x decompress gap from an
+older row. `lzf` does not appear ANYWHERE in this profile down to a 95 pct threshold. At 350
+bytes this payload is stored raw, so decode_rdb_string is a length decode plus
+`data[start..end].to_vec()` and nothing else. That invalidates the "it is mostly LZF, and
+LZF is only 1.16x off" reasoning I used to argue there was no lever here.
+
+OPEN, AND STATED AS OPEN RATHER THAN GUESSED: `decode_dump_bulk` is four bounds checks, a
+`decode_length` that is a two-bit match, and one `to_vec`. None of that explains a 24 pct
+self cost, and `memcpy` is accounted separately in its own frame. Either the attribution is
+folding in inlined callees or something in that path is doing real work I have not found. I
+tried two candidate explanations (LZF, then decode_length) and both are refuted, so I am
+recording the anomaly instead of a third guess.
+
+RETRY PREDICATE. Answer the decode_rdb_string anomaly with
+`callgrind_annotate --tree=calling target/restore_profile/cg.restore.out` filtered to that
+frame, which resolves inlined callees rather than inferring them; if the cost is really in
+allocation, the fix is to decode into caller-provided storage rather than returning an owned
+`Vec` per string. Do NOT re-derive the 2.1273x ratio at high load -- the redis arm moves 3.4
+pct with it and the number will come back flattering.
