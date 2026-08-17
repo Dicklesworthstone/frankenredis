@@ -31,7 +31,7 @@ Modes:
       exit 5 = incomplete timing contract · exit 6 = CV-gated verdict
       exit 7 = missing retry predicate
       exit 9 = verdict heading outside a configured ledger schema
-      exit 10 = RESTORE ratio quoted without the RESTORE+read break-even
+      exit 10 = entry contradicts a standing law it does not engage
 
   check-staged
       Inspect every added OR modified verdict entry in every repository ledger
@@ -217,36 +217,87 @@ def retry_excerpt(body):
     return excerpt.strip()
 
 
-RESTORE_RE = re.compile(r"\bRESTORE\b", re.IGNORECASE)
 RATIO_RE = re.compile(r"\b\d+\.\d+\s*x\b", re.IGNORECASE)
-# Any of these means the writer has engaged with the read premise, however they
-# phrase it. Deliberately generous: the gate exists to stop a row being written in
-# ignorance of the law, not to dictate wording.
-READ_PREMISE_RE = re.compile(
-    r"break-?even|reads?\s*/\s*RESTORE|RESTORE\s*\+\s*read|HGETALL|"
-    r"b1o02|hash_restore_read_premise|isolation",
-    re.IGNORECASE,
+
+# STANDING LAWS that live in docs/NEGATIVE_EVIDENCE.md while rows are appended to
+# docs/perf_negative_evidence_ledger.md. Each is a measured REJECT whose conclusion
+# generalises, and each has already been re-litigated by someone who could not see it
+# from the file they were writing in.
+#
+# A law fires only when the entry TRIGGERS it and does not ENGAGE it. Engagement is
+# deliberately generous -- these refuse ignorance of a result, not a phrasing, so a row
+# arguing "this law does not apply because X" passes by naming it.
+#
+# DELETION CONDITION for the whole table: delete when the two ledgers are merged, or
+# when docs/perf_negative_evidence_ledger.md carries the standing laws itself.
+STANDING_LAWS = (
+    (
+        "RESTORE isolation",
+        # OBSERVED: b1o02 closed 2026-08-08 (NEGATIVE_EVIDENCE.md); frankenredis-33832
+        # filed EIGHT DAYS later on the isolation framing; three commits built on it.
+        re.compile(r"\bRESTORE\b", re.IGNORECASE),
+        re.compile(
+            r"break-?even|reads?\s*/\s*RESTORE|RESTORE\s*\+\s*read|HGETALL|"
+            r"b1o02|hash_restore_read_premise|isolation",
+            re.IGNORECASE,
+        ),
+        "RESTORE-in-isolation flatters redis: fr decodes eagerly, redis attaches the\n"
+        "listpack shallowly and walks it on EVERY read. The break-even is well under one\n"
+        "read per restore, so an isolation ratio is not a deficit. Run\n"
+        "scripts/hash_restore_read_premise_run.sh and quote the break-even.",
+    ),
+    (
+        "medium-zset threshold",
+        # OBSERVED: NEGATIVE_EVIDENCE.md:22581 -- the 2048 threshold is a genuine
+        # optimization, and the "incremental ZADD O(n^2)" reading is not a lever.
+        # `zsets?` because `\bzset\b` does not match the plural, which is how the
+        # rows actually read ("medium zsets"). Caught by the unit cases below it.
+        re.compile(r"\bzsets?\b.*\b(threshold|skiplist|btree|b-tree|tree)\b|"
+                   r"\b(skiplist|btree|b-tree)\b.*\bzsets?\b",
+                   re.IGNORECASE | re.DOTALL),
+        re.compile(r"2048|Compact\(Vec\)|memmove|22581|NOT a lever|constant factor",
+                   re.IGNORECASE),
+        "Compact(Vec) beats BTreeMap for BOTH build and read below n=2048 -- the\n"
+        "O(n^2)-looking Vec::insert is a hardware memmove that wins on constant factors.\n"
+        "Lowering the threshold or moving medium zsets to a tree regresses both\n"
+        "dimensions (NEGATIVE_EVIDENCE.md:22581).",
+    ),
+    (
+        "per-element buffer pooling",
+        # OBSERVED: NEGATIVE_EVIDENCE.md:26372 -- pool the container, not its elements.
+        re.compile(r"pool(ing|ed)?\b.*\b(buffer|alloc|element)|"
+                   r"\b(buffer|element)\b.*\bpool(ing|ed)?\b",
+                   re.IGNORECASE | re.DOTALL),
+        re.compile(r"allocator fast path|mimalloc|pool the container|26372",
+                   re.IGNORECASE),
+        "Pool the CONTAINER, not its elements. A recycling lever pays only when it removes\n"
+        "an allocation without adding a per-element pass; once the bookkeeping is\n"
+        "per-element, mimalloc's fast path beats it. Show the element allocation is NOT\n"
+        "already on an allocator fast path (NEGATIVE_EVIDENCE.md:26372).",
+    ),
 )
 
 
-def restore_isolation_without_premise(body):
-    """A RESTORE ratio quoted without engaging the RESTORE+read break-even.
+def violated_standing_laws(title, body):
+    """Standing laws this entry triggers without engaging.
 
-    OBSERVED DEFECT CLASS, which is why this gate exists: b1o02 closed as a
-    premise-REJECT on 2026-08-08 in docs/NEGATIVE_EVIDENCE.md, establishing that a
-    RESTORE-in-ISOLATION ratio is not a deficit because fr's eager decode is a
-    prepaid cost that buys O(1) reads -- redis pays 5.04x more per read, and the
-    break-even is well under one read per restore. That law lives in one ledger
-    while RESTORE rows are routinely appended to the other. frankenredis-33832 was
-    filed EIGHT DAYS later restating the isolation framing, and three further
-    commits were built on it before anyone re-ran the probe.
+    Searches the HEADING as well as the body. Caught by testing rather than
+    reasoning: a row headed "pooling the per-element binding buffers did not pay"
+    whose body says only "recycling the buffer allocations" never triggered, because
+    the word that names the lever lives in the heading. Ledger headings carry the
+    claim at least as often as the prose does.
 
-    DELETION CONDITION: delete this when the two ledgers are merged, or when
-    docs/perf_negative_evidence_ledger.md carries the standing laws itself.
+    A law only fires on an entry that also quotes a ratio, i.e. one making a
+    performance claim about the surface, not merely mentioning it in passing.
     """
-    if not RESTORE_RE.search(body) or not RATIO_RE.search(body):
-        return False
-    return READ_PREMISE_RE.search(body) is None
+    text = f"{title}\n{body}"
+    if not RATIO_RE.search(text):
+        return []
+    return [
+        (name, message)
+        for name, trigger, engagement, message in STANDING_LAWS
+        if trigger.search(text) and not engagement.search(text)
+    ]
 
 
 def concrete_retry(body):
@@ -520,8 +571,9 @@ def check_entry_blocks(blocks):
             cv_gated.append(title)
         if (is_keep or is_reject) and not concrete_retry(body):
             missing_retry.append(title)
-        if (is_keep or is_reject) and restore_isolation_without_premise(body):
-            restore_isolation.append(title)
+        if is_keep or is_reject:
+            for name, message in violated_standing_laws(title, body):
+                restore_isolation.append((title, name, message))
 
         if is_keep:
             classification = claim_class(body)
@@ -613,15 +665,15 @@ def check_entry_blocks(blocks):
         return 7
 
     if restore_isolation:
-        print("REJECTED: a RESTORE ratio quoted without the RESTORE+read break-even.")
-        for title in restore_isolation:
-            print(f"  offending heading: {title[:150]}")
-        print("\nRESTORE-in-isolation flatters redis: fr decodes eagerly, redis attaches")
-        print("the listpack shallowly and walks it on EVERY read. b1o02 closed as a")
-        print("premise-REJECT on this (docs/NEGATIVE_EVIDENCE.md), and the break-even is")
-        print("well under one read per restore -- so an isolation ratio is not a deficit.")
-        print("Run scripts/hash_restore_read_premise_run.sh and quote the break-even, or")
-        print("say why the read premise does not apply to your row.")
+        print("REJECTED: entry contradicts a STANDING LAW it does not engage.")
+        for title, name, message in restore_isolation:
+            print(f"  [{name}] {title[:120]}")
+            for line in message.splitlines():
+                print(f"      {line}")
+        print("\nThese laws are measured REJECTs in docs/NEGATIVE_EVIDENCE.md, which is a")
+        print("DIFFERENT file from the ledger you are appending to -- that split is why")
+        print("each has already been re-litigated. Engage the law (naming it is enough) or")
+        print("say why it does not apply to your row.")
         return 10
 
     reviewed = [
@@ -1017,6 +1069,38 @@ def self_test():
         )),
         "long-ledger unsupported level-3 verdict refusal",
     ))
+    # (standing laws) Each case is one the implementation FAILED before it was
+    # written: `\bzset\b` missed the plural "zsets"; the pooling trigger missed a
+    # lever named only in the heading; and the engagement list for pooling once
+    # accepted "per-element", the very phrase the law is about. Regexes over prose
+    # are exactly the thing that looks right and is not.
+    for label, title, body, want in (
+        ("zset plural triggers", "REJECTED: a skiplist for medium zsets did not pay",
+         "Lowered the threshold and moved medium zsets to a skiplist. Measured 1.02x.", 1),
+        ("zset singular triggers", "REJECTED: skiplist for a medium zset",
+         "Measured 1.02x.", 1),
+        ("zset engaged passes", "REJECTED: a skiplist for medium zsets did not pay",
+         "The 2048 threshold is a genuine optimization; re-tested anyway at 1.02x.", 0),
+        ("pooling named only in the heading triggers",
+         "REJECTED: pooling the per-element binding buffers did not pay",
+         "Recycling the buffer allocations measured 1.01x.", 1),
+        ("pooling engaged passes",
+         "REJECTED: pooling the per-element binding buffers did not pay",
+         "mimalloc's fast path already covers it; measured 1.01x.", 0),
+        ("RESTORE isolation triggers", "REJECTED: RESTORE decode is 2.81x redis",
+         "The lever did not move it.", 1),
+        ("RESTORE engaged passes", "REJECTED: RESTORE decode is 2.81x redis in isolation",
+         "Break-even 0.373 reads/RESTORE.", 0),
+        ("no ratio never fires", "correctness: RESTORE rejects a duplicate field",
+         "A skiplist zset pooling buffers, all named, but no ratio quoted.", 0),
+        ("unrelated row never fires", "KEEP: front-classify GEOADD",
+         "Dispatch share fell to 12.0 pct, 1.43x.", 0),
+    ):
+        checks.append((
+            len(violated_standing_laws(title, body)) == want,
+            f"standing law: {label}",
+        ))
+
     failed = [name for passed, name in checks if not passed]
     if failed:
         for name in failed:
