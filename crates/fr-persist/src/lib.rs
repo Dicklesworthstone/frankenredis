@@ -3023,11 +3023,61 @@ fn listpack_entry_encoded_len(entry: &[u8]) -> usize {
 /// chunk. Public so the in-memory `ChunkedList` can SEAL a full `Owned` chunk
 /// into the compact `Listpack` representation (frankenredis-99fwc).
 pub fn encode_listpack_strings_blob(entries: &[&[u8]]) -> Option<Vec<u8>> {
-    let mut encoded = listpack_blob_with_header(0);
+    encode_listpack_strings_blob_with_capacity(entries, 0)
+}
+
+/// [`encode_listpack_strings_blob`] for a caller that ALREADY KNOWS the finished size.
+///
+/// (frankenredis-qj6jn) The blob buffer used to start at capacity 6 and grow by doubling,
+/// so a list RDB-save reallocated ~7 times per node — each one a fresh mimalloc block and
+/// a memcpy of everything written so far. The obvious fix, pre-sizing by summing
+/// `listpack_entry_encoded_len` inside this function, was MEASURED AND REJECTED: that sum
+/// re-runs `parse_listpack_integer` on every entry — the same probe `encode_listpack_entry`
+/// then runs again — so it costs O(n) against an O(log n) realloc saving and INVERTS to a
+/// +1.87 pct regression at 200 entries. See the rejection row in the negative-evidence
+/// ledger.
+///
+/// This is that row's retry predicate, and it holds because the caller is not guessing:
+/// `encode_compact_list_quicklist2` already memoizes per-item lengths in `lens` and already
+/// accumulates them into `packed_bytes` to decide node boundaries. At the moment it flushes
+/// a node, `packed_bytes` IS the finished blob length. Passing it costs nothing — the sizing
+/// pass disappears rather than moving — and leaves only the realloc saving.
+///
+/// `capacity == 0` means "unknown", which reproduces the grow-from-empty behaviour exactly.
+/// A wrong non-zero capacity is a performance bug, never a correctness one: `Vec` grows if
+/// the hint was short and the emitted bytes are identical either way.
+fn encode_listpack_strings_blob_with_capacity(
+    entries: &[&[u8]],
+    capacity: usize,
+) -> Option<Vec<u8>> {
+    let mut encoded = listpack_blob_with_header(capacity);
     for entry in entries {
         encode_listpack_entry(&mut encoded, entry);
     }
     finish_listpack_blob(encoded, entries.len())
+}
+
+/// (frankenredis-qj6jn) Is the quicklist packer allowed to hand the blob encoder the size
+/// it already computed? Production: always, compiled to a constant. Under
+/// `perf-ab-quicklist-node-capacity` a control process sets
+/// `FR_PERF_AB_QUICKLIST_NODE_CAPACITY_ORIG=1` to restore the grow-from-empty buffer, so
+/// both arms live in ONE ELF.
+#[cfg(feature = "perf-ab-quicklist-node-capacity")]
+#[inline]
+fn quicklist_node_capacity_enabled() -> bool {
+    static ORIG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    !*ORIG.get_or_init(
+        || match std::env::var("FR_PERF_AB_QUICKLIST_NODE_CAPACITY_ORIG") {
+            Ok(value) => value == "1",
+            Err(_) => false,
+        },
+    )
+}
+
+#[cfg(not(feature = "perf-ab-quicklist-node-capacity"))]
+#[inline(always)]
+const fn quicklist_node_capacity_enabled() -> bool {
+    true
 }
 
 /// Finish a listpack blob built IN PLACE: `buf` must already start with a 6-byte
