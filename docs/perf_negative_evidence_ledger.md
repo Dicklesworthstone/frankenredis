@@ -42297,3 +42297,117 @@ CV was not used, as a gate or otherwise.
 4. Audit the campaign's other same-ELF gated rows for the same blind spot. Any whose suspected
    mechanism is inlining or code layout rather than executed work is under-evidenced by exactly
    this argument, and at least three of mine used that instrument.
+
+--------------------------------------------------------------------------------
+## 2026-08-17 CrimsonHawk: REJECTED — the fused push dispatch loses in BOTH regimes, and the reason it looked winnable is the finding: a same-ELF A/B whose toggle sits INSIDE the hot function MOVED ITS OWN CONTROL ARM by 27 instr/push (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method). No timing
+verdict is claimed and CV was NOT used, as a gate or otherwise. Reverted; `crates/fr-store/`
+is byte-identical to HEAD.
+
+Claim class: COMPETITIVE. Campaign output: yes — fr/Redis 7.2.4 measures 0.5481x per RPUSH
+against a large list and 0.4332x against small lists. The vendored Redis 7.2.4 server process
+ran as a live incumbent arm in the same invocation as both fr arms, at 3,910.68 and 5,006.48
+instr/push respectively.
+
+`df9a4da1d`'s retry predicate asked for exactly this: fuse the promote test into the dispatch
+match so a test comes out of BOTH regimes rather than trading one against the other, and
+reopen ONLY IF both regimes are measured with the Packed arm no worse than its null.
+
+### IT FAILS ITS OWN ADMISSION CONDITION
+
+    regime                        A/A null        ORIG        CAND       delta
+    Deque  (seed 200, large)      0.998327     2,143.46    2,162.52    +19.06  (+0.89 pct)
+    Packed (3,000 keys, small)    0.999347     2,168.91    2,171.69     +2.78  (+0.13 pct)
+
+Both regimes are WORSE, and the Packed arm is ~2x its null, so the predicate's admission
+condition is not met even before the deeper problem below. Rejected on its own terms.
+
+### THE DEEPER PROBLEM: THE CONTROL ARM WAS NOT THE BASELINE
+
+`maybe_promote` reads **0.00 in all four arms of this ELF** — including the two ORIG arms,
+which are supposed to be the unchanged pre-lever code that still calls it. In the PREVIOUS
+ELF, measured an hour earlier on the identical workload and harness, that same ORIG path read
+**18.00** and the whole push cost **2,170.54**. Here it costs **2,143.46**.
+
+    ELF                       ORIG arm, Deque regime      maybe_promote frame
+    2cb5ea06 (df9a4da1d)             2,170.54                   18.00
+    64e39375 (this row)              2,143.46                    0.00
+                                     -------                    -----
+    same source path                  −27.08                  ELIMINATED
+
+    ADDING THE CANDIDATE BRANCH TO `push_back` CHANGED CODEGEN FOR THE CONTROL TOO. The
+    function got a second body, rustc's inlining decision for `maybe_promote` flipped, and the
+    call vanished from the arm that is supposed to still be paying it. So this A/B compared a
+    candidate against a control that had already absorbed most of the win — and the 18
+    instructions `1cd6025db` measured were removed by the RESTRUCTURING, not by the fusion.
+
+  THAT IS A REAL LIMIT ON THE SAME-ELF CONVENTION AND IT IS WORTH STATING PLAINLY. The
+  convention's premise is that the ORIG arm reproduces production. It does when the toggle sits
+  in a DIFFERENT function from the hot path — which is where I put it for the zset collapse map,
+  the blob capacity and the bulk builder, whose effects (−9.39, −16.12, −1.49 pct) are one to
+  two orders of magnitude larger than the ~1.2 pct control shift seen here and are not
+  threatened by it. It fails when the toggle branch is placed INSIDE the hot function, because
+  then the candidate's mere presence rewrites the control.
+
+    CHEAP DETECTOR, and it is what caught this: carry a NAMED FRAME the lever is supposed to
+    move, and check the CONTROL arm still shows it. `maybe_promote` at 0.00 in a control that
+    is defined to call it is impossible, and it needed no extra run to see.
+
+### WHAT THIS SAYS ABOUT THE LEVER
+
+The 18.0 instr/element from `1cd6025db` is real and was measured on a clean ORIG. What is now
+clear is that it is recoverable by INLINING ALONE — the control arm of this ELF got it for free
+— and that fusing the two matches on top of that inlining costs more than it saves. So the
+lever was never the fusion, and `df9a4da1d`'s framing ("the lever is the double discriminant
+test") is itself refuted: with `maybe_promote` inlined, the second discriminant test is
+apparently free, and hand-fusing it defeats whatever the optimiser was doing.
+
+### PROVENANCE
+
+  ELF           bench_elf_sha256 = 64e3937531907cdf976e925ea0948d67dbed95ba5008c86dae6640aff4d4f837
+                `release-perf`, built locally with RCH_CARGO_WRAPPER_BYPASS=1, no `[RCH]` line.
+                BOTH ARMS FROM THIS ONE ELF via `FR_PERF_AB_FUSED_PUSH_DISPATCH_ORIG=1`.
+                Prior-ELF comparison figures are from 2cb5ea06c05d7d3b00bbec867e76d41f89a2c01d
+                3f18968166cb27869d57fa2d, same harness and workload.
+  harness       scratchpad `push_slope.py`, 2,000 vs 6,000 single-element RPUSH commands
+                differenced, one fresh working directory per point; the Packed control spreads
+                pushes over 3,000 keys so no list crosses `PACKED_MAX_ENTRIES`.
+  incumbent     vendored redis 7.2.4, verified sha=d2c8a4b9 == vendored source HEAD.
+  host          thinkstation1, 64 cores OBSERVED, powersave governor, /data 190-191G free.
+  window        CLEAN, and verified rather than quoted: CPU idle 85.2 pct and IOWAIT 0.01 pct
+                from a 3-second `/proc/stat` delta before starting, 72.1 and 82.0 pct measured
+                again inside each board. PER-ARM loadavg/MHz — Deque 16.59/18.54/20.63 -> 16.30,
+                MHz mean 2866 then 2446; Packed 17.90/18.68/20.58 -> 17.27, MHz mean 2272 then
+                2748. Max 4042-4142, min 1429.
+  equivalence   The existing `list_bulk_back_matches_incremental_push_qj6jn` gates this by
+                transitivity — it compares incremental `push_back` against the UNCHANGED
+                `bulk_from_back`, which an earlier row already pinned to the pre-fusion
+                `push_back` — and it passed with the fused form, extended to cover
+                `push_back_borrowed`. Correctness was never the reason for rejecting.
+
+### THE STANDING LAW THIS ROW SITS NEXT TO, AND WHY IT DOES NOT GOVERN IT
+
+  MEDIUM-ZSET THRESHOLD (`docs/NEGATIVE_EVIDENCE.md:22581`) — "Compact(Vec) beats BTreeMap for
+  BOTH build and read below n=2048; the O(n^2)-looking `Vec::insert` is a hardware memmove that
+  wins on constant factors, so lowering the threshold or moving medium zsets to a tree
+  regresses both dimensions." ENGAGED, AND IT DOES NOT APPLY: this row is about LISTS, not
+  zsets, and it changes no threshold, no tier boundary and no container choice. `PACKED_MAX_
+  ENTRIES` is read, never moved; both regimes are measured ON EITHER SIDE of it precisely so
+  the existing boundary is respected rather than tuned; and the rejected change was a control-
+  flow restructure inside `push_back` that leaves every representation exactly where the
+  current thresholds put it. The law's concern is a container swap justified by asymptotics,
+  and nothing here swaps a container. If a future attempt on this route reaches for a different
+  list representation — a tree, or a different promote threshold — THAT would be governed by
+  this law and would owe a build-and-read comparison first.
+
+RETRY PREDICATE:
+  1. The only remaining form of this lever is `#[inline]` on `maybe_promote` and NOTHING else —
+     no restructure, no toggle branch in `push_back`. That cannot be A/B'd in one ELF by
+     construction, so it needs a TWO-BINARY pair built back to back with the tree proven still
+     (build AFTER, BEFORE, AFTER again, require the two AFTERs bit-identical). Reopen ONLY IF
+     that pair shows both regimes no worse than their nulls.
+  2. FIRST establish what HEAD actually costs per push. Two ELFs' "control" arms disagree by
+     1.2 pct here and neither is a plain build, so the true baseline is currently unmeasured.
+  3. Any future same-ELF row on a HOT function must name a frame the control is required to
+     still show, and check it. Without that this row's defect is invisible.
