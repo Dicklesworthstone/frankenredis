@@ -14593,6 +14593,10 @@ enum BorrowedMultibulkAction {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BorrowedDispatchFloorClass {
+    /// (frankenredis-ozrro) `SCAN <cursor> MATCH|COUNT|TYPE <value>` at arity 4. The
+    /// bare cursor form is `Scan` above; this claims the single-option forms, which are
+    /// at least as common in production and were still falling to GENERIC.
+    ScanOpt,
     /// (frankenredis-ozrro) `KEYS <pattern>`, arity 2 — the generic's ONLY accepted
     /// arity, so this claim is exact by construction. It had no borrowed cascade arm,
     /// so it fell straight to GENERIC: 1,969.9 instr/op of dispatch, 34.4% of the
@@ -14969,6 +14973,13 @@ enum BorrowedDispatchFloorClass {
     Hget,
     Sismember,
     Srandmember,
+    /// (frankenredis-gvm6z) `ZRANGESTORE dst src start stop` at arity 5 — the RANK
+    /// form only. Measured at 3,787.6 instr/op of GENERIC dispatch, 38.0 pct of the op
+    /// and the largest absolute dispatch cost in this campaign, because zrangestore had
+    /// no borrowed machinery at all. Arity 5 EXACTLY: the BYSCORE/BYLEX/REV/LIMIT forms
+    /// are wider and the arm's parser would decline them, and a floor decline goes
+    /// straight to GENERIC rather than back to the cascade.
+    Zrangestore,
     Getrange,
     BitcountKey,
     /// (frankenredis-f2zrr) `BITCOUNT key start end`. Its sibling BitcountKey was
@@ -15099,6 +15110,7 @@ impl PlainZsetStoreCmd {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BorrowedDispatchFloorCommand {
+    Zrangestore,
     Touch,
     Keys,
     Scan,
@@ -15549,6 +15561,19 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             _ => None,
         },
         11 => match uppercase_ascii_token::<11>(token)? {
+            [
+                b'Z',
+                b'R',
+                b'A',
+                b'N',
+                b'G',
+                b'E',
+                b'S',
+                b'T',
+                b'O',
+                b'R',
+                b'E',
+            ] => Some(BorrowedDispatchFloorCommand::Zrangestore),
             [
                 b'P',
                 b'E',
@@ -16605,6 +16630,9 @@ fn classify_borrowed_dispatch_floor_packet_impl<
             Some(BorrowedDispatchFloorClass::Zlexcount)
         }
         (2, BorrowedDispatchFloorCommand::Scan) => Some(BorrowedDispatchFloorClass::Scan),
+        (4, BorrowedDispatchFloorCommand::Scan) => {
+            Some(BorrowedDispatchFloorClass::ScanOpt)
+        }
         (2, BorrowedDispatchFloorCommand::Keys) => Some(BorrowedDispatchFloorClass::Keys),
         (2, BorrowedDispatchFloorCommand::Ttl) => Some(BorrowedDispatchFloorClass::Ttl),
         (2, BorrowedDispatchFloorCommand::Getex) => Some(BorrowedDispatchFloorClass::Getex),
@@ -16695,6 +16723,14 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         }
         (3, BorrowedDispatchFloorCommand::Hget) => Some(BorrowedDispatchFloorClass::Hget),
         (3, BorrowedDispatchFloorCommand::Sismember) => Some(BorrowedDispatchFloorClass::Sismember),
+        // (frankenredis-gvm6z) Arity 5 EXACTLY. `ZRANGESTORE dst src min max` with
+        // BYSCORE/BYLEX/REV/LIMIT is arity 6+, and the arm's parser is a `*5` prefix
+        // literal that would decline those — a floor decline calls GENERIC directly
+        // rather than returning to the cascade, so a wider claim would be a regression
+        // for exactly the option forms it captured.
+        (5, BorrowedDispatchFloorCommand::Zrangestore) => {
+            Some(BorrowedDispatchFloorClass::Zrangestore)
+        }
         (4, BorrowedDispatchFloorCommand::Zremrangebyrank) => {
             Some(BorrowedDispatchFloorClass::Zremrangebyrank)
         }
@@ -21114,6 +21150,33 @@ fn try_dispatch_floor_classified_action(
                 )
             }
         }
+        BorrowedDispatchFloorClass::ScanOpt => {
+            // (frankenredis-ozrro) The executor validates the option keyword and the COUNT
+            // range, declining wherever the generic is more permissive so those packets
+            // reach the error the generic would have produced.
+            if let Some(packet) = parse_borrowed_plain_scan_opt_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_scan_opt_borrowed(
+                    packet.cursor,
+                    packet.keyword,
+                    packet.value,
+                    ts,
+                )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
         BorrowedDispatchFloorClass::Ttl => {
             if let Some(packet) = parse_borrowed_plain_ttl_packet(unparsed, &parser_config)
                 && let Some(response) =
@@ -21388,6 +21451,39 @@ fn try_dispatch_floor_classified_action(
                 });
             if let Some(consumed) = hit {
                 Ok(BorrowedMultibulkAction::FastEncodedReply { consumed })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Zrangestore => {
+            // (frankenredis-gvm6z) No new parser: `key_arg3` already serves
+            // "command + four bulks", which is exactly this shape (key=dst, a=src,
+            // b=start, c=stop). Same shared parser BITOP's arms use, distinguished by
+            // the prefix+token pair, so the only new code is the executor and this arm.
+            // A declining executor still reaches the generic path unchanged.
+            if let Some(packet) = parse_borrowed_plain_key_arg3_packet(
+                unparsed,
+                &parser_config,
+                b"*5\r\n$11\r\n",
+                b"ZRANGESTORE",
+            ) && let Some(response) = runtime.execute_plain_zrangestore_borrowed(
+                packet.key,
+                packet.a,
+                packet.b,
+                packet.c,
+                ts,
+            ) {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,
@@ -22845,6 +22941,44 @@ fn parse_borrowed_plain_llen_packet<'a>(
 // CURSOR, not a key: the struct field is named `key` by that shared type and SCAN takes no
 // key at all. Cursor VALIDITY is not checked here; execute_plain_scan_borrowed parses it
 // canonically and declines anything the generic would read differently.
+struct BorrowedPlainScanOptPacket<'a> {
+    consumed: usize,
+    cursor: &'a [u8],
+    keyword: &'a [u8],
+    value: &'a [u8],
+}
+
+// (frankenredis-ozrro) `SCAN <cursor> <keyword> <value>` (*4, 4-char token, three bulks).
+// Nothing is validated here beyond the shape: which keywords are legal, and what COUNT
+// values are in range, is the executor's decision, and it declines to the generic rather
+// than erroring.
+fn parse_borrowed_plain_scan_opt_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainScanOptPacket<'a>> {
+    if config.max_array_len < 4 || config.max_bulk_len < b"SCAN".len() {
+        return None;
+    }
+    let mut at = input.strip_prefix(b"*4\r\n$4\r\n").and_then(|rest| {
+        rest.get(..4)
+            .filter(|command| command.eq_ignore_ascii_case(b"SCAN"))
+            .map(|_| input.len() - rest.len() + 4)
+    })?;
+    if input.get(at..at + 2)? != b"\r\n" {
+        return None;
+    }
+    at += 2;
+    let (cursor, next) = parse_borrowed_plain_set_bulk(input, at, config.max_bulk_len)?;
+    let (keyword, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (value, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainScanOptPacket {
+        consumed,
+        cursor,
+        keyword,
+        value,
+    })
+}
+
 fn parse_borrowed_plain_scan_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,
@@ -52854,6 +52988,73 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
                 super::classify_borrowed_dispatch_floor_packet(&packet(&other), &cfg),
                 Some(C::Keys),
                 "{other:?} must not be claimed as KEYS"
+            );
+        }
+    }
+
+    /// (frankenredis-ozrro) The arity-4 SCAN class must claim the option forms and must NOT
+    /// disturb the arity-2 bare-cursor class or the arity-3/5+ forms, which stay generic.
+    #[test]
+    fn scan_opt_floor_class_claims_arity_four_only() {
+        let cfg = ParserConfig::default();
+        fn packet(args: &[&str]) -> Vec<u8> {
+            let mut p = format!("*{}\r\n", args.len()).into_bytes();
+            for a in args {
+                p.extend_from_slice(format!("${}\r\n{}\r\n", a.len(), a).as_bytes());
+            }
+            p
+        }
+        use super::BorrowedDispatchFloorClass as C;
+
+        for served in [
+            vec!["SCAN", "0", "COUNT", "100"],
+            vec!["SCAN", "0", "MATCH", "a*"],
+            vec!["SCAN", "0", "TYPE", "string"],
+            vec!["scan", "17", "count", "10"],
+            // Shape-legal but executor-declined; the CLASS must still claim them, because
+            // the decline is what routes them to the generic's error.
+            vec!["SCAN", "0", "BOGUS", "x"],
+            vec!["SCAN", "0", "COUNT", "0"],
+        ] {
+            let pkt = packet(&served);
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
+                Some(C::ScanOpt),
+                "{served:?} must be claimed at arity 4"
+            );
+            assert!(super::parse_borrowed_plain_scan_opt_packet(&pkt, &cfg).is_some());
+        }
+
+        // The bare form keeps its own class, and the two must not be confused.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(&packet(&["SCAN", "0"]), &cfg),
+            Some(C::Scan)
+        );
+
+        // Other arities stay generic: 3 and 5 are real SCAN shapes upstream
+        // (`SCAN 0 COUNT` is a syntax error; `SCAN 0 MATCH a* COUNT 10` is valid but
+        // two-option and not served here).
+        for wrong in [
+            vec!["SCAN", "0", "COUNT"],
+            vec!["SCAN", "0", "MATCH", "a*", "COUNT"],
+            vec!["SCAN", "0", "MATCH", "a*", "COUNT", "10"],
+        ] {
+            assert_ne!(
+                super::classify_borrowed_dispatch_floor_packet(&packet(&wrong), &cfg),
+                Some(C::ScanOpt),
+                "{wrong:?} must reach the generic parser"
+            );
+        }
+
+        // A 4-arity packet for another command must not be claimed as ScanOpt.
+        for other in [
+            vec!["SETRANGE", "k", "0", "v"],
+            vec!["LSET", "k", "0", "v"],
+        ] {
+            assert_ne!(
+                super::classify_borrowed_dispatch_floor_packet(&packet(&other), &cfg),
+                Some(C::ScanOpt),
+                "{other:?} must not be claimed as ScanOpt"
             );
         }
     }

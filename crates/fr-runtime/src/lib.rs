@@ -25607,6 +25607,103 @@ impl Runtime {
         Some(reply)
     }
 
+    /// (frankenredis-ozrro) Borrowed READ fast path for the arity-4 SCAN option forms:
+    /// `SCAN <cursor> MATCH <p>`, `SCAN <cursor> COUNT <n>`, `SCAN <cursor> TYPE <t>`.
+    ///
+    /// Mirrors `handle_scan_command` at argv.len()==4: that function parses exactly one
+    /// option keyword into the same (pattern, type_filter, count) triple and calls the
+    /// same `scan_in_db`. The default count of 10 is read off the generic, not assumed.
+    ///
+    /// Declines wherever the generic is MORE PERMISSIVE, so a declined packet reaches the
+    /// error or the reading the generic would have produced. The COUNT > i64::MAX bound is
+    /// the subtle one: the generic parses COUNT with parse_i64_arg and errors on overflow,
+    /// while the canonical cursor parser reused here accepts up to u64::MAX. Without that
+    /// bound this path would SERVE a value upstream REJECTS.
+    pub fn execute_plain_scan_opt_borrowed(
+        &mut self,
+        cursor_arg: &[u8],
+        keyword: &[u8],
+        value: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if self.policy.gate.max_array_len < 4
+            || self.policy.gate.max_bulk_len < b"SCAN".len()
+            || cursor_arg.len() > self.policy.gate.max_bulk_len
+            || keyword.len() > self.policy.gate.max_bulk_len
+            || value.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        let cursor = Self::parse_canonical_scan_cursor(cursor_arg)?;
+
+        let mut pattern: Option<&[u8]> = None;
+        let mut type_filter: Option<&[u8]> = None;
+        let mut count: usize = 10;
+        if keyword.eq_ignore_ascii_case(b"MATCH") {
+            pattern = Some(value);
+        } else if keyword.eq_ignore_ascii_case(b"TYPE") {
+            type_filter = Some(value);
+        } else if keyword.eq_ignore_ascii_case(b"COUNT") {
+            let parsed = Self::parse_canonical_scan_cursor(value)?;
+            if parsed == 0 || parsed > i64::MAX as u64 {
+                // COUNT<=0 is "ERR syntax error" upstream; COUNT beyond i64 fails
+                // parse_i64_arg. Both must reach the generic to produce that error.
+                return None;
+            }
+            count = usize::try_from(parsed).ok()?;
+        } else {
+            // Unknown option keyword: the generic emits "ERR syntax error".
+            return None;
+        }
+
+        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+            return None;
+        }
+        let packet_id = self.plain_read_borrowed_preamble(
+            "scan",
+            b"SCAN".len() + cursor_arg.len() + keyword.len() + value.len(),
+            now_ms,
+        );
+        let st = self.chained_command_start();
+        let (next_cursor, keys) = self.server.store.scan_in_db(
+            self.session.selected_db,
+            cursor,
+            pattern,
+            type_filter,
+            count,
+            now_ms,
+        );
+        let reply = Self::scan0_reply_from_items(
+            next_cursor,
+            keys.into_iter()
+                .map(|key| RespFrame::BulkString(Some(key)))
+                .collect(),
+        );
+        let elapsed_us = self.finish_chained_command(st);
+        self.record_plain_zremrange_borrowed_metrics(
+            "scan",
+            "SCAN",
+            || {
+                vec![
+                    b"SCAN".to_vec(),
+                    cursor_arg.to_vec(),
+                    keyword.to_vec(),
+                    value.to_vec(),
+                ]
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            // Cannot fail: cursor canonical, option keyword already validated, count in
+            // range, and scan_in_db is infallible.
+            false,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_reply(&reply);
+        Some(reply)
+    }
+
     fn execute_plain_scan0_borrowed(
         &mut self,
         which: u8, // b'S' set, b'H' hash, b'Z' zset
@@ -27182,6 +27279,103 @@ impl Runtime {
                 argv.push(numkeys_arg.to_vec());
                 argv.extend(keys.iter().map(|k| k.to_vec()));
                 argv
+            },
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_reply(&reply);
+        Some(reply)
+    }
+
+    /// (frankenredis-gvm6z) Conservative borrowed WRITE fast path for the RANK form
+    /// `ZRANGESTORE dst src start stop` (argc 5 — no BYSCORE/BYLEX/REV/LIMIT).
+    ///
+    /// MEASURED MOTIVE: `zrangestore_all` carries 3,787.6 instr/op of GENERIC dispatch —
+    /// 38.0 pct of the op, and the largest absolute dispatch cost measured in this
+    /// campaign, larger than KEYS's 1,997 — because zrangestore had no borrowed
+    /// machinery at all. Dispatch is a per-CALL constant (KEYS held it to 1.92 pct across
+    /// a 32x keyspace change), so that figure holds at every size even though the
+    /// shape's own 0.7926x ratio is a 3-member INTERCEPT and must not be quoted bare.
+    ///
+    /// Mirrors `fr_command::zrangestore_cmd` for this form EXACTLY. At argc 5 the option
+    /// loop never iterates and the "LIMIT without BYSCORE/BYLEX" check cannot fire, so
+    /// the generic reduces to `record_source_key_lookups(src)`, `zrange_withscores(src,
+    /// start, stop)`, then `empty ? del(dst) : zstore_from_pairs(dst, pairs, false)`,
+    /// replying `Integer(count)`.
+    ///
+    /// `force_skiplist` is FALSE deliberately. Upstream forces skiplist encoding only for
+    /// BYSCORE/BYLEX (`zsetTypeCreate(-1, 0)`); rank mode sizes by the exact count and
+    /// derives its encoding naturally (frankenredis-t8rma). Passing `true` here would
+    /// change the destination's OBJECT ENCODING while changing no reply — a divergence
+    /// no reply-comparing test could see.
+    ///
+    /// start/stop are parsed BEFORE any store work, so a malformed integer declines with
+    /// NOTHING touched — including the source keyspace hit/miss, which the generic path
+    /// then records itself. Recording it here and then declining would double-count it.
+    pub fn execute_plain_zrangestore_borrowed(
+        &mut self,
+        dst: &[u8],
+        src: &[u8],
+        start_arg: &[u8],
+        stop_arg: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if self.policy.gate.max_array_len < 5
+            || self.policy.gate.max_bulk_len < b"ZRANGESTORE".len()
+            || dst.len() > self.policy.gate.max_bulk_len
+            || src.len() > self.policy.gate.max_bulk_len
+            || start_arg.len() > self.policy.gate.max_bulk_len
+            || stop_arg.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        let start = fr_command::parse_i64_arg(start_arg).ok()?;
+        let stop = fr_command::parse_i64_arg(stop_arg).ok()?;
+        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+            return None;
+        }
+
+        let argv_len_sum =
+            b"ZRANGESTORE".len() + dst.len() + src.len() + start_arg.len() + stop_arg.len();
+        let packet_id = self.plain_zremrange_write_preamble("zrangestore", argv_len_sum, now_ms);
+        let st = self.chained_command_start();
+        // Generic ordering, kept in this order on purpose: the source keyspace hit/miss
+        // that upstream's lookupKeyRead records, THEN the no-stat range walk.
+        fr_command::record_source_key_lookups(&mut self.server.store, &[src], now_ms);
+        let reply = match self.server.store.zrange_withscores(src, start, stop, now_ms) {
+            Ok(pairs) => {
+                let count = i64::try_from(pairs.len()).unwrap_or(i64::MAX);
+                let dst_key = dst.to_vec();
+                if pairs.is_empty() {
+                    // Empty result DELETES dst — it does not leave a stale zset behind.
+                    self.server.store.del(std::slice::from_ref(&dst_key), now_ms);
+                } else {
+                    self.server
+                        .store
+                        .zstore_from_pairs(dst_key, pairs, false, now_ms);
+                }
+                RespFrame::Integer(count)
+            }
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let elapsed_us = self.finish_chained_command(st);
+        let failed = matches!(reply, RespFrame::Error(_));
+        // Breach-only argv materialisation; see execute_plain_zstore_borrowed.
+        self.record_plain_zremrange_borrowed_metrics(
+            "zrangestore",
+            "ZRANGESTORE",
+            || {
+                vec![
+                    b"ZRANGESTORE".to_vec(),
+                    dst.to_vec(),
+                    src.to_vec(),
+                    start_arg.to_vec(),
+                    stop_arg.to_vec(),
+                ]
             },
             elapsed_us,
             now_ms,
@@ -48105,6 +48299,94 @@ mod tests {
         assert!(
             rt.execute_plain_keymeta_borrowed(PlainKeyMetaCmd::Ttl, b"s", 4)
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn plain_zrangestore_borrowed_matches_generic_contents_and_encoding() {
+        // (frankenredis-gvm6z) ZRANGESTORE's reply is only Integer(count), and that is
+        // exactly why comparing replies is not enough: a swapped start/stop, or passing
+        // force_skiplist=true, keeps the COUNT correct while changing what is stored or
+        // how it is encoded. So every case compares the destination's CONTENTS and its
+        // OBJECT ENCODING and its existence, not just the reply.
+        let mut direct = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut direct, &mut generic] {
+            rt.execute_frame(
+                command(&[b"ZADD", b"src", b"1", b"a", b"2", b"b", b"3", b"c"]),
+                1,
+            );
+            rt.execute_frame(command(&[b"SET", b"str", b"x"]), 1);
+            // dst starts NON-EMPTY so the empty-result cases prove it is DELETED rather
+            // than merely left alone.
+            rt.execute_frame(command(&[b"ZADD", b"dst", b"9", b"stale"]), 1);
+        }
+        let cases: [(&[u8], &[u8], &[u8]); 7] = [
+            (b"src", b"0", b"-1"),      // full range over a live dst
+            (b"src", b"1", b"1"),       // single element
+            (b"src", b"0", b"0"),       // first only — catches a swapped start/stop
+            (b"src", b"-2", b"-1"),     // negative indices
+            (b"src", b"5", b"9"),       // EMPTY result -> dst must be deleted
+            (b"missing", b"0", b"-1"),  // missing src -> empty -> dst deleted
+            (b"str", b"0", b"-1"),      // WRONGTYPE source
+        ];
+        let mut ts = 2;
+        for (src, start, stop) in cases {
+            let f = direct
+                .execute_plain_zrangestore_borrowed(b"dst", src, start, stop, ts)
+                .expect("zrangestore fast path should engage");
+            let g = generic.execute_frame(
+                command(&[b"ZRANGESTORE", b"dst", src, start, stop]),
+                ts,
+            );
+            assert_eq!(f, g, "reply differs: src={src:?} {start:?}..{stop:?}");
+
+            for probe in [
+                &[b"ZRANGE".as_slice(), b"dst", b"0", b"-1", b"WITHSCORES"][..],
+                &[b"OBJECT".as_slice(), b"ENCODING", b"dst"][..],
+                &[b"EXISTS".as_slice(), b"dst"][..],
+            ] {
+                let fp = direct.execute_frame(command(probe), ts);
+                let gp = generic.execute_frame(command(probe), ts);
+                assert_eq!(
+                    fp, gp,
+                    "dst state differs after src={src:?} {start:?}..{stop:?} probe={probe:?}"
+                );
+            }
+            // Restore a non-empty dst so the NEXT case also starts from a live key.
+            for rt in [&mut direct, &mut generic] {
+                rt.execute_frame(command(&[b"ZADD", b"dst", b"9", b"stale"]), ts);
+            }
+            ts += 1;
+        }
+
+        // A malformed index must DEFER with nothing touched — the generic path owns that
+        // error reply, and the source keyspace hit/miss with it.
+        for bad in [
+            (b"notnum".as_slice(), b"-1".as_slice()),
+            (b"0".as_slice(), b"nope".as_slice()),
+            (b"".as_slice(), b"-1".as_slice()),
+        ] {
+            assert!(
+                direct
+                    .execute_plain_zrangestore_borrowed(b"dst", b"src", bad.0, bad.1, ts)
+                    .is_none(),
+                "malformed index {bad:?} must defer to generic"
+            );
+        }
+
+        // Keyspace accounting is the half a reply comparison cannot see.
+        assert_eq!(
+            direct.server.store.stat_keyspace_hits,
+            generic.server.store.stat_keyspace_hits
+        );
+        assert_eq!(
+            direct.server.store.stat_keyspace_misses,
+            generic.server.store.stat_keyspace_misses
+        );
+        assert_eq!(
+            direct.server.store.stat_total_error_replies,
+            generic.server.store.stat_total_error_replies
         );
     }
 
@@ -74502,6 +74784,88 @@ user bob reset off nopass +@all
         assert!(
             other_db.execute_plain_keys_borrowed(b"*", 20).is_none(),
             "KEYS on a non-zero db must fall through to the generic path"
+        );
+    }
+
+    /// (frankenredis-ozrro) The arity-4 SCAN option forms must be indistinguishable from the
+    /// generic, and must DECLINE every form where the generic is more permissive — most
+    /// importantly a COUNT above i64::MAX, which the canonical parser would otherwise accept
+    /// and SERVE where upstream errors.
+    #[test]
+    fn plain_scan_opt_borrowed_matches_the_generic_and_declines_the_permissive_forms() {
+        let seed = |rt: &mut Runtime| {
+            for i in 0..25 {
+                rt.execute_frame(command(&[b"SET", format!("k{i:02}").as_bytes(), b"v"]), 10);
+            }
+            rt.execute_frame(command(&[b"RPUSH", b"listkey", b"a"]), 10);
+        };
+
+        for (kw, val) in [
+            (b"MATCH".as_slice(), b"*".as_slice()),
+            (b"MATCH", b"k1*"),
+            (b"MATCH", b"nomatch*"),
+            (b"match", b"k0*"),
+            (b"COUNT", b"1"),
+            (b"COUNT", b"5"),
+            (b"COUNT", b"1000"),
+            (b"count", b"3"),
+            (b"TYPE", b"string"),
+            (b"TYPE", b"list"),
+            (b"TYPE", b"zset"),
+            (b"type", b"string"),
+        ] {
+            for cursor in [b"0".as_slice(), b"7"] {
+                let mut fast = Runtime::default_strict();
+                let mut generic = Runtime::default_strict();
+                seed(&mut fast);
+                seed(&mut generic);
+
+                let fast_reply = fast
+                    .execute_plain_scan_opt_borrowed(cursor, kw, val, 20)
+                    .unwrap_or_else(|| panic!("SCAN {cursor:?} {kw:?} {val:?} must be served"));
+                let generic_reply =
+                    generic.execute_frame(command(&[b"SCAN", cursor, kw, val]), 20);
+
+                assert_eq!(
+                    fast_reply, generic_reply,
+                    "SCAN {cursor:?} {kw:?} {val:?}: must reproduce the generic exactly"
+                );
+                assert_eq!(
+                    fast.server.store.state_digest(),
+                    generic.server.store.state_digest(),
+                    "SCAN {cursor:?} {kw:?} {val:?}: must not mutate"
+                );
+            }
+        }
+
+        let mut rt = Runtime::default_strict();
+        seed(&mut rt);
+        for (kw, val, why) in [
+            (b"COUNT".as_slice(), b"0".as_slice(), "COUNT 0 is a syntax error upstream"),
+            (b"COUNT", b"-1", "negative COUNT is a syntax error upstream"),
+            (b"COUNT", b"007", "non-canonical integer"),
+            (b"COUNT", b"abc", "not an integer"),
+            (
+                b"COUNT",
+                b"9223372036854775808",
+                "one past i64::MAX: parse_i64_arg fails upstream, canonical parse would not",
+            ),
+            (b"COUNT", b"18446744073709551615", "u64::MAX likewise"),
+            (b"NOVALUES", b"x", "SCAN does not recognise NOVALUES, only HSCAN does"),
+            (b"BOGUS", b"x", "unknown keyword is a syntax error upstream"),
+            (b"", b"x", "empty keyword"),
+        ] {
+            assert!(
+                rt.execute_plain_scan_opt_borrowed(b"0", kw, val, 20).is_none(),
+                "SCAN 0 {kw:?} {val:?} must fall through: {why}"
+            );
+        }
+
+        // A non-canonical CURSOR must decline regardless of a valid option.
+        assert!(
+            rt.execute_plain_scan_opt_borrowed(b"007", b"COUNT", b"10", 20)
+                .is_none(),
+            "non-canonical cursor must fall through even with a good option"
         );
     }
 }
