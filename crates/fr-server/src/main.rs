@@ -14593,6 +14593,13 @@ enum BorrowedMultibulkAction {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BorrowedDispatchFloorClass {
+    /// (frankenredis-ozrro) `DUMP key` at arity 2, cascade arm 60 of 163. Parser,
+    /// executor, gate and metrics all already existed; only the floor entry was missing.
+    Dump,
+    /// (frankenredis-ozrro) `RANDOMKEY` at arity 1 — the whole command, no key. Its parser
+    /// returns the CONSUMED LENGTH rather than a packet struct, which is why the arm below
+    /// binds `consumed` directly instead of reading `packet.consumed`.
+    Randomkey,
     /// (frankenredis-ozrro) `ZLEXCOUNT key min max` at arity 4. The largest remaining
     /// dispatch cost on the board — ~4,306 instr/op at a 64.0 pct share — with parser,
     /// executor, gate and metrics all present and only the floor entry missing.
@@ -14637,6 +14644,11 @@ enum BorrowedDispatchFloorClass {
     /// Single form, so a distinct `*1\r\n$9\r\n` prefix and no discriminant to assert —
     /// the arm's own prefix literal backstops the class table here.
     Randomkey,
+    /// (frankenredis-p98mw) `DUMP key` at array length 2. Measured at 0.9561x with a
+    /// 48.7 pct dispatch share (~2,478 instr/op) — note this one is ALREADY AT PARITY, so
+    /// its share is recoverable overhead rather than a deficit being closed. Ranked below
+    /// RANDOMKEY for that reason. Parser and executor existed (cascade arm ~8655).
+    Dump,
     /// (frankenredis-ozrro) `RENAMENX src dst` at arity 3. Second measurement pass over
     /// the blind-spot list: 1.5361x with a 69.0 pct dispatch share, the HIGHEST share this
     /// campaign has recorded. Parser, executor, gate and metrics all existed already.
@@ -15085,6 +15097,8 @@ impl PlainZsetStoreCmd {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BorrowedDispatchFloorCommand {
     Touch,
+    Dump,
+    Randomkey,
     Zlexcount,
     Set,
     Smove,
@@ -15095,6 +15109,7 @@ enum BorrowedDispatchFloorCommand {
     Substr,
     Lmpop,
     Randomkey,
+    Dump,
     Msetnx,
     Append,
     Bitcount,
@@ -15277,6 +15292,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             _ => None,
         },
         4 => match uppercase_ascii_token::<4>(token)? {
+            [b'D', b'U', b'M', b'P'] => Some(BorrowedDispatchFloorCommand::Dump),
             [b'E', b'C', b'H', b'O'] => Some(BorrowedDispatchFloorCommand::Echo),
             [b'L', b'S', b'E', b'T'] => Some(BorrowedDispatchFloorCommand::Lset),
             [b'T', b'Y', b'P', b'E'] => Some(BorrowedDispatchFloorCommand::Type),
@@ -15296,6 +15312,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'X', b'D', b'E', b'L'] => Some(BorrowedDispatchFloorCommand::Xdel),
             [b'L', b'R', b'E', b'M'] => Some(BorrowedDispatchFloorCommand::Lrem),
             [b'L', b'P', b'O', b'P'] => Some(BorrowedDispatchFloorCommand::Lpop),
+            [b'D', b'U', b'M', b'P'] => Some(BorrowedDispatchFloorCommand::Dump),
             [b'R', b'P', b'O', b'P'] => Some(BorrowedDispatchFloorCommand::Rpop),
             [b'Z', b'A', b'D', b'D'] => Some(BorrowedDispatchFloorCommand::Zadd),
             [b'C', b'O', b'P', b'Y'] => Some(BorrowedDispatchFloorCommand::Copy),
@@ -15421,6 +15438,9 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             _ => None,
         },
         9 => match uppercase_ascii_token::<9>(token)? {
+            [b'R', b'A', b'N', b'D', b'O', b'M', b'K', b'E', b'Y'] => {
+                Some(BorrowedDispatchFloorCommand::Randomkey)
+            }
             [b'P', b'E', b'X', b'P', b'I', b'R', b'E', b'A', b'T'] => {
                 Some(BorrowedDispatchFloorCommand::Pexpireat)
             }
@@ -16569,6 +16589,8 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (1, BorrowedDispatchFloorCommand::Randomkey) => {
             Some(BorrowedDispatchFloorClass::Randomkey)
         }
+        // (frankenredis-p98mw) DUMP takes exactly one key: arity 2 and nothing else.
+        (2, BorrowedDispatchFloorCommand::Dump) => Some(BorrowedDispatchFloorClass::Dump),
         (4, BorrowedDispatchFloorCommand::Hincrby) => {
             Some(BorrowedDispatchFloorClass::Hincrby)
         }
@@ -16580,6 +16602,10 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (6, BorrowedDispatchFloorCommand::Set) => Some(BorrowedDispatchFloorClass::SetOpt6),
         (4, BorrowedDispatchFloorCommand::Zlexcount) => {
             Some(BorrowedDispatchFloorClass::Zlexcount)
+        }
+        (2, BorrowedDispatchFloorCommand::Dump) => Some(BorrowedDispatchFloorClass::Dump),
+        (1, BorrowedDispatchFloorCommand::Randomkey) => {
+            Some(BorrowedDispatchFloorClass::Randomkey)
         }
         (2, BorrowedDispatchFloorCommand::Ttl) => Some(BorrowedDispatchFloorClass::Ttl),
         (2, BorrowedDispatchFloorCommand::Getex) => Some(BorrowedDispatchFloorClass::Getex),
@@ -18077,6 +18103,27 @@ fn try_dispatch_floor_classified_action(
             if let Some(packet) = parse_borrowed_plain_renamenx_packet(unparsed, &parser_config)
                 && let Some(response) =
                     runtime.execute_plain_renamenx_borrowed(packet.key, packet.member, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        // (frankenredis-p98mw) Mirrors the cascade arm at ~8655 exactly. DUMP returns a
+        // bulk payload, so this is FastReply with a response rather than an encoded reply.
+        BorrowedDispatchFloorClass::Dump => {
+            if let Some(packet) = parse_borrowed_plain_dump_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_dump_borrowed(packet.key, ts)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -21010,6 +21057,48 @@ fn try_dispatch_floor_classified_action(
                     consumed: packet.consumed,
                     response,
                 })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Dump => {
+            // (frankenredis-ozrro) Same parser and executor the cascade arm at position 60
+            // used; only the position changes, so the reply and every side effect are
+            // unchanged and a declining executor still reaches the generic path.
+            if let Some(packet) = parse_borrowed_plain_dump_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_dump_borrowed(packet.key, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Randomkey => {
+            // (frankenredis-ozrro) RANDOMKEY takes no key, and its parser returns the
+            // CONSUMED LENGTH rather than a packet — hence `consumed` bound directly here.
+            // Same executor the cascade arm at position 61 used.
+            if let Some(consumed) =
+                parse_borrowed_plain_randomkey_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_randomkey_borrowed(ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply { consumed, response })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,
@@ -51866,6 +51955,66 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         }
     }
 
+    /// (frankenredis-p98mw) DUMP claims array length 2 and NOTHING else.
+    ///
+    /// DUMP is variadic-looking but is not: `DUMP k1 k2` is an arity error upstream. A
+    /// `>=2` claim would capture it, the arm's parser would refuse it, and the floor would
+    /// decline to GENERIC rather than back to the cascade — the TOUCH defect exactly.
+    ///
+    /// Single form behind a distinct `*2\r\n$4\r\n` prefix, so class-level assertions are
+    /// sufficient per the prefix-literal invariant; there is no discriminant to get wrong.
+    #[test]
+    fn dump_floor_class_claims_array_length_two_only() {
+        use super::BorrowedDispatchFloorClass as C;
+        let cfg = ParserConfig::default();
+        fn packet(args: &[&str]) -> Vec<u8> {
+            let mut p = format!("*{}\r\n", args.len()).into_bytes();
+            for a in args {
+                p.extend_from_slice(format!("${}\r\n{}\r\n", a.len(), a).as_bytes());
+            }
+            p
+        }
+
+        for form in [vec!["DUMP", "k"], vec!["dump", "k"], vec!["DuMp", "k"]] {
+            let pkt = packet(&form);
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
+                Some(C::Dump),
+                "{form:?} must be floor-classified"
+            );
+            let parsed = super::parse_borrowed_plain_dump_packet(&pkt, &cfg)
+                .unwrap_or_else(|| panic!("{form:?} is claimed but the arm's parser refuses it"));
+            assert_eq!(parsed.key, b"k", "{form:?} key");
+            assert_eq!(parsed.consumed, pkt.len(), "{form:?} must consume the whole packet");
+        }
+
+        // NOT served: every other arity keeps walking the cascade.
+        for wrong in [vec!["DUMP"], vec!["DUMP", "k1", "k2"]] {
+            let pkt = packet(&wrong);
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
+                None,
+                "{wrong:?} must not be floor-classified"
+            );
+        }
+
+        // Other 4-letter commands must keep their own routes. LPOP sits beside DUMP in the
+        // same token group and is arity 2 as well, so only the full-token compare separates
+        // them — a match on length alone would answer a list pop with a serialized payload.
+        for other in [vec!["LPOP", "k"], vec!["TYPE", "k"], vec!["TTL", "k"]] {
+            let pkt = packet(&other);
+            assert_ne!(
+                super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
+                Some(C::Dump),
+                "{other:?} was captured by the DUMP token"
+            );
+            assert!(
+                super::parse_borrowed_plain_dump_packet(&pkt, &cfg).is_none(),
+                "{other:?} must not parse under the DUMP prefix"
+            );
+        }
+    }
+
     /// (frankenredis-p98mw) RANDOMKEY claims array length 1 and NOTHING else.
     ///
     /// THE NEGATIVE CASE IS THE ARITY, and it is the `arity >= N` defect in its original
@@ -52358,6 +52507,75 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
             assert!(
                 super::parse_borrowed_plain_zlexcount_packet(&pkt, &cfg).is_none(),
                 "{other:?} must not parse under the ZLEXCOUNT token"
+            );
+        }
+    }
+
+    /// (frankenredis-ozrro) DUMP and RANDOMKEY floor classes. Tested together because they
+    /// are adjacent arms with OPPOSITE shapes: DUMP is the ordinary key form, RANDOMKEY
+    /// takes no key at all and its parser returns a consumed length rather than a packet.
+    /// A floor class is a promise its arm can serve the shape — a claimed packet the parser
+    /// declines falls to GENERIC, not back to the cascade, so an over-claim is a REGRESSION.
+    #[test]
+    fn dump_and_randomkey_floor_classes_claim_exactly_what_their_parsers_accept() {
+        let cfg = ParserConfig::default();
+        fn packet(args: &[&str]) -> Vec<u8> {
+            let mut p = format!("*{}\r\n", args.len()).into_bytes();
+            for a in args {
+                p.extend_from_slice(format!("${}\r\n{}\r\n", a.len(), a).as_bytes());
+            }
+            p
+        }
+        use super::BorrowedDispatchFloorClass as C;
+
+        for served in [packet(&["DUMP", "k"]), packet(&["dump", "k"])] {
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(&served, &cfg),
+                Some(C::Dump)
+            );
+            assert!(super::parse_borrowed_plain_dump_packet(&served, &cfg).is_some());
+        }
+        for served in [packet(&["RANDOMKEY"]), packet(&["randomkey"])] {
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(&served, &cfg),
+                Some(C::Randomkey)
+            );
+            assert!(super::parse_borrowed_plain_randomkey_packet(&served, &cfg).is_some());
+        }
+
+        // Neither is variadic. RANDOMKEY in particular must refuse ANY argument: upstream
+        // takes none, and a claim at arity 2 would send `RANDOMKEY x` to GENERIC.
+        for (wrong, bad) in [
+            (vec!["DUMP"], C::Dump),
+            (vec!["DUMP", "k", "x"], C::Dump),
+            (vec!["RANDOMKEY", "x"], C::Randomkey),
+            (vec!["RANDOMKEY", "x", "y"], C::Randomkey),
+        ] {
+            let pkt = packet(&wrong);
+            assert_ne!(
+                super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
+                Some(bad),
+                "{wrong:?} must not be claimed"
+            );
+        }
+        assert!(super::parse_borrowed_plain_dump_packet(&packet(&["DUMP"]), &cfg).is_none());
+        assert!(
+            super::parse_borrowed_plain_randomkey_packet(&packet(&["RANDOMKEY", "x"]), &cfg)
+                .is_none()
+        );
+
+        // Neighbours at the same token lengths must not collide: DUMP shares 4 chars with
+        // several commands, RANDOMKEY shares 9 with SISMEMBER and PEXPIREAT.
+        for (other, bad) in [
+            (vec!["TYPE", "k"], C::Dump),
+            (vec!["DECR", "k"], C::Dump),
+            (vec!["SISMEMBER", "s", "m"], C::Randomkey),
+            (vec!["PEXPIREAT", "k", "1"], C::Randomkey),
+        ] {
+            assert_ne!(
+                super::classify_borrowed_dispatch_floor_packet(&packet(&other), &cfg),
+                Some(bad),
+                "{other:?} must not be claimed"
             );
         }
     }
