@@ -49343,14 +49343,46 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
             ),
             Some(super::BorrowedDispatchFloorClass::Publish)
         );
-        // SPUBLISH is a different command with a different length; it keeps the
-        // cascade.
+        // (frankenredis-p98mw) THIS BOUNDARY MOVED ON PURPOSE. SPUBLISH used to be
+        // unclassified and this asserted `None`; it is now classified as its OWN class.
+        // The assertion is kept rather than deleted because what it exists to prove is
+        // that the classifier discriminates PUBLISH from SPUBLISH -- and mapping them to
+        // two DIFFERENT classes proves that strictly more strongly than mapping one to
+        // `None` did. A test that only checked "SPUBLISH is not classified" would have
+        // been satisfied by a classifier that could not see SPUBLISH at all.
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(
                 b"*3\r\n$8\r\nSPUBLISH\r\n$2\r\nch\r\n$2\r\nhi\r\n",
                 &cfg,
             ),
+            Some(super::BorrowedDispatchFloorClass::Spublish)
+        );
+        // REPLACEMENT NEGATIVE CASE, so this test still means "only EXACT tokens" and not
+        // merely "these commands". Same length as SPUBLISH, one byte different, and no
+        // such command exists -- a classifier matching on length or prefix rather than the
+        // exact token would claim it.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$8\r\nSPUBLISI\r\n$2\r\nch\r\n$2\r\nhi\r\n",
+                &cfg,
+            ),
             None
+        );
+        // And the same guard for MOVE, which this change also classified: a 4-byte
+        // near-miss must not be claimed.
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$4\r\nMOVF\r\n$1\r\nk\r\n$1\r\n1\r\n",
+                &cfg,
+            ),
+            None
+        );
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(
+                b"*3\r\n$4\r\nmOvE\r\n$1\r\nk\r\n$1\r\n1\r\n",
+                &cfg,
+            ),
+            Some(super::BorrowedDispatchFloorClass::Move)
         );
         assert_eq!(
             super::classify_borrowed_dispatch_floor_packet(
