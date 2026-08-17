@@ -8062,7 +8062,7 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_incr_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_incr_borrowed(packet.key, ts) {
+                    if let Some(response) = runtime.execute_plain_incr_borrowed(packet.key, ts, None) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -8081,7 +8081,7 @@ fn process_buffered_frames(
                     parse_borrowed_plain_incrby_packet(unparsed, &parser_config)
                 {
                     if let Some(response) =
-                        runtime.execute_plain_incrby_borrowed(packet.key, packet.member, ts)
+                        runtime.execute_plain_incrby_borrowed(packet.key, packet.member, ts, None)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -8101,7 +8101,7 @@ fn process_buffered_frames(
                     parse_borrowed_plain_decrby_packet(unparsed, &parser_config)
                 {
                     if let Some(response) =
-                        runtime.execute_plain_decrby_borrowed(packet.key, packet.member, ts)
+                        runtime.execute_plain_decrby_borrowed(packet.key, packet.member, ts, None)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -8408,7 +8408,7 @@ fn process_buffered_frames(
                     parse_borrowed_plain_append_packet(unparsed, &parser_config)
                 {
                     if let Some(response) =
-                        runtime.execute_plain_append_borrowed(packet.key, packet.member, ts)
+                        runtime.execute_plain_append_borrowed(packet.key, packet.member, ts, None)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -8881,6 +8881,7 @@ fn process_buffered_frames(
                         packet.start,
                         packet.end,
                         ts,
+                        None,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -10082,7 +10083,7 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_decr_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_decr_borrowed(packet.key, ts) {
+                    if let Some(response) = runtime.execute_plain_decr_borrowed(packet.key, ts, None) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -10100,7 +10101,7 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_getdel_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_getdel_borrowed(packet.key, ts) {
+                    if let Some(response) = runtime.execute_plain_getdel_borrowed(packet.key, ts, None) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -10680,6 +10681,7 @@ fn process_buffered_frames(
                         packet.start,
                         packet.end,
                         ts,
+                        None,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -13724,7 +13726,7 @@ fn parse_borrowed_multibulk_action(
                     b'A' => {
                         if let Some((key, value)) = borrowed_plain_append_args(&borrowed_args)
                             && let Some(response) =
-                                runtime.execute_plain_append_borrowed(key, value, ts)
+                                runtime.execute_plain_append_borrowed(key, value, ts, None)
                         {
                             return Ok(BorrowedMultibulkAction::FastReply {
                                 consumed: parsed.consumed,
@@ -13765,7 +13767,7 @@ fn parse_borrowed_multibulk_action(
                     }
                     b'D' => {
                         if let Some(key) = borrowed_plain_decr_args(&borrowed_args)
-                            && let Some(response) = runtime.execute_plain_decr_borrowed(key, ts)
+                            && let Some(response) = runtime.execute_plain_decr_borrowed(key, ts, None)
                         {
                             return Ok(BorrowedMultibulkAction::FastReply {
                                 consumed: parsed.consumed,
@@ -13774,7 +13776,7 @@ fn parse_borrowed_multibulk_action(
                         }
                         if let Some((key, delta)) = borrowed_plain_decrby_args(&borrowed_args)
                             && let Some(response) =
-                                runtime.execute_plain_decrby_borrowed(key, delta, ts)
+                                runtime.execute_plain_decrby_borrowed(key, delta, ts, None)
                         {
                             return Ok(BorrowedMultibulkAction::FastReply {
                                 consumed: parsed.consumed,
@@ -13857,7 +13859,7 @@ fn parse_borrowed_multibulk_action(
                             });
                         }
                         if let Some(key) = borrowed_plain_getdel_args(&borrowed_args)
-                            && let Some(response) = runtime.execute_plain_getdel_borrowed(key, ts)
+                            && let Some(response) = runtime.execute_plain_getdel_borrowed(key, ts, None)
                         {
                             return Ok(BorrowedMultibulkAction::FastReply {
                                 consumed: parsed.consumed,
@@ -14030,7 +14032,7 @@ fn parse_borrowed_multibulk_action(
                     }
                     b'I' => {
                         if let Some(key) = borrowed_plain_incr_args(&borrowed_args)
-                            && let Some(response) = runtime.execute_plain_incr_borrowed(key, ts)
+                            && let Some(response) = runtime.execute_plain_incr_borrowed(key, ts, None)
                         {
                             return Ok(BorrowedMultibulkAction::FastReply {
                                 consumed: parsed.consumed,
@@ -14039,7 +14041,7 @@ fn parse_borrowed_multibulk_action(
                         }
                         if let Some((key, delta)) = borrowed_plain_incrby_args(&borrowed_args)
                             && let Some(response) =
-                                runtime.execute_plain_incrby_borrowed(key, delta, ts)
+                                runtime.execute_plain_incrby_borrowed(key, delta, ts, None)
                         {
                             return Ok(BorrowedMultibulkAction::FastReply {
                                 consumed: parsed.consumed,
@@ -14271,7 +14273,7 @@ fn parse_borrowed_multibulk_action(
                         if let Some((key, offset, value)) =
                             borrowed_plain_setrange_args(&borrowed_args)
                             && let Some(response) =
-                                runtime.execute_plain_setrange_borrowed(key, offset, value, ts)
+                                runtime.execute_plain_setrange_borrowed(key, offset, value, ts, None)
                         {
                             return Ok(BorrowedMultibulkAction::FastReply {
                                 consumed: parsed.consumed,
@@ -17879,6 +17881,14 @@ fn dispatch_floor_keyed_values_write(
     parser_config: &ParserConfig,
     runtime: &mut Runtime,
     ts: u64,
+    // (frankenredis-ghmgp) The per-pass write gate, threaded in so this class amortises it
+    // exactly as the SET and MSET floor arms already do. Without it every command riding
+    // `execute_plain_keyed_values_write_borrowed` -- SADD, LPUSH, RPUSH, PFADD, HDEL, SREM,
+    // ZREM, LPUSHX, RPUSHX -- re-derived the gate per command at a measured 187.0 instr/op,
+    // 9.5 pct of SADD. `ozrro` added this cache to the floor dispatcher for exactly this
+    // reason and this class never adopted it: it was not adding a gate evaluation, it was
+    // LOSING AN AMORTISATION.
+    default_write_allowed: bool,
 ) -> Option<(usize, RespFrame)> {
     match values {
         // 1..=4 use packets with their own field spellings rather than v1..vN:
@@ -17887,126 +17897,137 @@ fn dispatch_floor_keyed_values_write(
         1 => {
             let (cmd, p) = parse_borrowed_plain_keyed_values1_packet(unparsed, parser_config)?;
             let response =
-                runtime.execute_plain_keyed_values_write_borrowed(cmd, p.key, &[p.member], ts)?;
+                runtime.execute_plain_keyed_values_write_borrowed_with_default_write_gate(cmd, p.key, &[p.member], ts, default_write_allowed)?;
             Some((p.consumed, response))
         }
         2 => {
             let (cmd, p) = parse_borrowed_plain_keyed_values2_packet(unparsed, parser_config)?;
-            let response = runtime.execute_plain_keyed_values_write_borrowed(
+            let response = runtime.execute_plain_keyed_values_write_borrowed_with_default_write_gate(
                 cmd,
                 p.key,
                 &[p.start, p.end],
                 ts,
+                default_write_allowed,
             )?;
             Some((p.consumed, response))
         }
         3 => {
             let (cmd, p) = parse_borrowed_plain_keyed_values3_packet(unparsed, parser_config)?;
-            let response = runtime.execute_plain_keyed_values_write_borrowed(
+            let response = runtime.execute_plain_keyed_values_write_borrowed_with_default_write_gate(
                 cmd,
                 p.key,
                 &[p.f1, p.f2, p.f3],
                 ts,
+                default_write_allowed,
             )?;
             Some((p.consumed, response))
         }
         4 => {
             let (cmd, p) = parse_borrowed_plain_keyed_values4_packet(unparsed, parser_config)?;
-            let response = runtime.execute_plain_keyed_values_write_borrowed(
+            let response = runtime.execute_plain_keyed_values_write_borrowed_with_default_write_gate(
                 cmd,
                 p.key,
                 &[p.v1, p.v2, p.v3, p.v4],
                 ts,
+                default_write_allowed,
             )?;
             Some((p.consumed, response))
         }
         5 => {
             let (cmd, p) = parse_borrowed_plain_keyed_values5_packet(unparsed, parser_config)?;
-            let response = runtime.execute_plain_keyed_values_write_borrowed(
+            let response = runtime.execute_plain_keyed_values_write_borrowed_with_default_write_gate(
                 cmd,
                 p.key,
                 &[p.v1, p.v2, p.v3, p.v4, p.v5],
                 ts,
+                default_write_allowed,
             )?;
             Some((p.consumed, response))
         }
         6 => {
             let (cmd, p) = parse_borrowed_plain_keyed_values6_packet(unparsed, parser_config)?;
-            let response = runtime.execute_plain_keyed_values_write_borrowed(
+            let response = runtime.execute_plain_keyed_values_write_borrowed_with_default_write_gate(
                 cmd,
                 p.key,
                 &[p.v1, p.v2, p.v3, p.v4, p.v5, p.v6],
                 ts,
+                default_write_allowed,
             )?;
             Some((p.consumed, response))
         }
         7 => {
             let (cmd, p) = parse_borrowed_plain_keyed_values7_packet(unparsed, parser_config)?;
-            let response = runtime.execute_plain_keyed_values_write_borrowed(
+            let response = runtime.execute_plain_keyed_values_write_borrowed_with_default_write_gate(
                 cmd,
                 p.key,
                 &[p.v1, p.v2, p.v3, p.v4, p.v5, p.v6, p.v7],
                 ts,
+                default_write_allowed,
             )?;
             Some((p.consumed, response))
         }
         8 => {
             let (cmd, p) = parse_borrowed_plain_keyed_values8_packet(unparsed, parser_config)?;
-            let response = runtime.execute_plain_keyed_values_write_borrowed(
+            let response = runtime.execute_plain_keyed_values_write_borrowed_with_default_write_gate(
                 cmd,
                 p.key,
                 &[p.v1, p.v2, p.v3, p.v4, p.v5, p.v6, p.v7, p.v8],
                 ts,
+                default_write_allowed,
             )?;
             Some((p.consumed, response))
         }
         9 => {
             let (cmd, p) = parse_borrowed_plain_keyed_values9_packet(unparsed, parser_config)?;
-            let response = runtime.execute_plain_keyed_values_write_borrowed(
+            let response = runtime.execute_plain_keyed_values_write_borrowed_with_default_write_gate(
                 cmd,
                 p.key,
                 &[p.v1, p.v2, p.v3, p.v4, p.v5, p.v6, p.v7, p.v8, p.v9],
                 ts,
+                default_write_allowed,
             )?;
             Some((p.consumed, response))
         }
         10 => {
             let (cmd, p) = parse_borrowed_plain_keyed_values10_packet(unparsed, parser_config)?;
-            let response = runtime.execute_plain_keyed_values_write_borrowed(
+            let response = runtime.execute_plain_keyed_values_write_borrowed_with_default_write_gate(
                 cmd,
                 p.key,
                 &[p.v1, p.v2, p.v3, p.v4, p.v5, p.v6, p.v7, p.v8, p.v9, p.v10],
                 ts,
+                default_write_allowed,
             )?;
             Some((p.consumed, response))
         }
         11 => {
             let (cmd, p) = parse_borrowed_plain_keyed_values11_packet(unparsed, parser_config)?;
-            let response = runtime.execute_plain_keyed_values_write_borrowed(
+            let response = runtime.execute_plain_keyed_values_write_borrowed_with_default_write_gate(
                 cmd,
                 p.key,
                 &[
                     p.v1, p.v2, p.v3, p.v4, p.v5, p.v6, p.v7, p.v8, p.v9, p.v10, p.v11,
                 ],
                 ts,
+                default_write_allowed,
             )?;
             Some((p.consumed, response))
         }
         12 => {
             let (cmd, p) = parse_borrowed_plain_keyed_values12_packet(unparsed, parser_config)?;
-            let response = runtime.execute_plain_keyed_values_write_borrowed(
+            let response = runtime.execute_plain_keyed_values_write_borrowed_with_default_write_gate(
                 cmd,
                 p.key,
                 &[
                     p.v1, p.v2, p.v3, p.v4, p.v5, p.v6, p.v7, p.v8, p.v9, p.v10, p.v11, p.v12,
                 ],
                 ts,
+                default_write_allowed,
             )?;
             Some((p.consumed, response))
         }
         13 => {
             let (cmd, p) = parse_borrowed_plain_keyed_values13_packet(unparsed, parser_config)?;
-            let response = runtime.execute_plain_keyed_values_write_borrowed(
+            let response = runtime.execute_plain_keyed_values_write_borrowed_with_default_write_gate(
                 cmd,
                 p.key,
                 &[
@@ -18014,12 +18035,13 @@ fn dispatch_floor_keyed_values_write(
                     p.v13,
                 ],
                 ts,
+                default_write_allowed,
             )?;
             Some((p.consumed, response))
         }
         14 => {
             let (cmd, p) = parse_borrowed_plain_keyed_values14_packet(unparsed, parser_config)?;
-            let response = runtime.execute_plain_keyed_values_write_borrowed(
+            let response = runtime.execute_plain_keyed_values_write_borrowed_with_default_write_gate(
                 cmd,
                 p.key,
                 &[
@@ -18027,12 +18049,13 @@ fn dispatch_floor_keyed_values_write(
                     p.v13, p.v14,
                 ],
                 ts,
+                default_write_allowed,
             )?;
             Some((p.consumed, response))
         }
         15 => {
             let (cmd, p) = parse_borrowed_plain_keyed_values15_packet(unparsed, parser_config)?;
-            let response = runtime.execute_plain_keyed_values_write_borrowed(
+            let response = runtime.execute_plain_keyed_values_write_borrowed_with_default_write_gate(
                 cmd,
                 p.key,
                 &[
@@ -18040,12 +18063,13 @@ fn dispatch_floor_keyed_values_write(
                     p.v13, p.v14, p.v15,
                 ],
                 ts,
+                default_write_allowed,
             )?;
             Some((p.consumed, response))
         }
         16 => {
             let (cmd, p) = parse_borrowed_plain_keyed_values16_packet(unparsed, parser_config)?;
-            let response = runtime.execute_plain_keyed_values_write_borrowed(
+            let response = runtime.execute_plain_keyed_values_write_borrowed_with_default_write_gate(
                 cmd,
                 p.key,
                 &[
@@ -18053,12 +18077,13 @@ fn dispatch_floor_keyed_values_write(
                     p.v13, p.v14, p.v15, p.v16,
                 ],
                 ts,
+                default_write_allowed,
             )?;
             Some((p.consumed, response))
         }
         17 => {
             let (cmd, p) = parse_borrowed_plain_keyed_values17_packet(unparsed, parser_config)?;
-            let response = runtime.execute_plain_keyed_values_write_borrowed(
+            let response = runtime.execute_plain_keyed_values_write_borrowed_with_default_write_gate(
                 cmd,
                 p.key,
                 &[
@@ -18066,12 +18091,13 @@ fn dispatch_floor_keyed_values_write(
                     p.v13, p.v14, p.v15, p.v16, p.v17,
                 ],
                 ts,
+                default_write_allowed,
             )?;
             Some((p.consumed, response))
         }
         18 => {
             let (cmd, p) = parse_borrowed_plain_keyed_values18_packet(unparsed, parser_config)?;
-            let response = runtime.execute_plain_keyed_values_write_borrowed(
+            let response = runtime.execute_plain_keyed_values_write_borrowed_with_default_write_gate(
                 cmd,
                 p.key,
                 &[
@@ -18079,6 +18105,7 @@ fn dispatch_floor_keyed_values_write(
                     p.v13, p.v14, p.v15, p.v16, p.v17, p.v18,
                 ],
                 ts,
+                default_write_allowed,
             )?;
             Some((p.consumed, response))
         }
@@ -18817,9 +18844,17 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Incrby => {
+            // (frankenredis-getexgate) Cached write gate, hoisted above the `if let` chain:
+            // `cached_plain_write_gate` borrows `runtime` mutably and the executor call
+            // already does. A flat 187.0 instr/op when re-derived per packet.
+            let default_write_allowed = if getex_write_gate_cache_enabled() {
+                Some(cached_plain_write_gate(write_gate_cache, runtime, ts))
+            } else {
+                None
+            };
             if let Some(packet) = parse_borrowed_plain_incrby_packet(unparsed, &parser_config)
                 && let Some(response) =
-                    runtime.execute_plain_incrby_borrowed(packet.key, packet.member, ts)
+                    runtime.execute_plain_incrby_borrowed(packet.key, packet.member, ts, default_write_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -18883,8 +18918,16 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Getdel => {
+            // (frankenredis-getexgate) Cached write gate, hoisted above the `if let` chain:
+            // `cached_plain_write_gate` borrows `runtime` mutably and the executor call
+            // already does. A flat 187.0 instr/op when re-derived per packet.
+            let default_write_allowed = if getex_write_gate_cache_enabled() {
+                Some(cached_plain_write_gate(write_gate_cache, runtime, ts))
+            } else {
+                None
+            };
             if let Some(packet) = parse_borrowed_plain_getdel_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_getdel_borrowed(packet.key, ts)
+                && let Some(response) = runtime.execute_plain_getdel_borrowed(packet.key, ts, default_write_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -18902,9 +18945,17 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Decrby => {
+            // (frankenredis-getexgate) Cached write gate, hoisted above the `if let` chain:
+            // `cached_plain_write_gate` borrows `runtime` mutably and the executor call
+            // already does. A flat 187.0 instr/op when re-derived per packet.
+            let default_write_allowed = if getex_write_gate_cache_enabled() {
+                Some(cached_plain_write_gate(write_gate_cache, runtime, ts))
+            } else {
+                None
+            };
             if let Some(packet) = parse_borrowed_plain_decrby_packet(unparsed, &parser_config)
                 && let Some(response) =
-                    runtime.execute_plain_decrby_borrowed(packet.key, packet.member, ts)
+                    runtime.execute_plain_decrby_borrowed(packet.key, packet.member, ts, default_write_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -18922,8 +18973,16 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Decr => {
+            // (frankenredis-getexgate) Cached write gate, hoisted above the `if let` chain:
+            // `cached_plain_write_gate` borrows `runtime` mutably and the executor call
+            // already does. A flat 187.0 instr/op when re-derived per packet.
+            let default_write_allowed = if getex_write_gate_cache_enabled() {
+                Some(cached_plain_write_gate(write_gate_cache, runtime, ts))
+            } else {
+                None
+            };
             if let Some(packet) = parse_borrowed_plain_decr_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_decr_borrowed(packet.key, ts)
+                && let Some(response) = runtime.execute_plain_decr_borrowed(packet.key, ts, default_write_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -20036,9 +20095,17 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Append => {
+            // (frankenredis-getexgate) Cached write gate, hoisted above the `if let` chain:
+            // `cached_plain_write_gate` borrows `runtime` mutably and the executor call
+            // already does. A flat 187.0 instr/op when re-derived per packet.
+            let default_write_allowed = if getex_write_gate_cache_enabled() {
+                Some(cached_plain_write_gate(write_gate_cache, runtime, ts))
+            } else {
+                None
+            };
             if let Some(packet) = parse_borrowed_plain_append_packet(unparsed, &parser_config)
                 && let Some(response) =
-                    runtime.execute_plain_append_borrowed(packet.key, packet.member, ts)
+                    runtime.execute_plain_append_borrowed(packet.key, packet.member, ts, default_write_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -20196,12 +20263,21 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Setrange => {
+            // (frankenredis-getexgate) Cached write gate, hoisted above the `if let` chain:
+            // `cached_plain_write_gate` borrows `runtime` mutably and the executor call
+            // already does. A flat 187.0 instr/op when re-derived per packet.
+            let default_write_allowed = if getex_write_gate_cache_enabled() {
+                Some(cached_plain_write_gate(write_gate_cache, runtime, ts))
+            } else {
+                None
+            };
             if let Some(packet) = parse_borrowed_plain_setrange_packet(unparsed, &parser_config)
                 && let Some(response) = runtime.execute_plain_setrange_borrowed(
                     packet.key,
                     packet.start,
                     packet.end,
                     ts,
+                    default_write_allowed,
                 )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
@@ -20838,9 +20914,17 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::KeyedValuesWrite(values) => {
-            if let Some((consumed, response)) =
-                dispatch_floor_keyed_values_write(values, unparsed, &parser_config, runtime, ts)
-            {
+            // Bound BEFORE the call: passing it inline would borrow `runtime` mutably twice
+            // in one argument list.
+            let default_write_allowed = cached_plain_write_gate(write_gate_cache, runtime, ts);
+            if let Some((consumed, response)) = dispatch_floor_keyed_values_write(
+                values,
+                unparsed,
+                &parser_config,
+                runtime,
+                ts,
+                default_write_allowed,
+            ) {
                 Ok(BorrowedMultibulkAction::FastReply { consumed, response })
             } else {
                 parse_borrowed_multibulk_action(
@@ -21420,9 +21504,17 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Setbit => {
+            // (frankenredis-getexgate) Cached write gate, hoisted above the `if let` chain:
+            // `cached_plain_write_gate` borrows `runtime` mutably and the executor call
+            // already does. A flat 187.0 instr/op when re-derived per packet.
+            let default_write_allowed = if getex_write_gate_cache_enabled() {
+                Some(cached_plain_write_gate(write_gate_cache, runtime, ts))
+            } else {
+                None
+            };
             if let Some(packet) = parse_borrowed_plain_setbit_packet(unparsed, &parser_config)
                 && let Some(response) =
-                    runtime.execute_plain_setbit_borrowed(packet.key, packet.start, packet.end, ts)
+                    runtime.execute_plain_setbit_borrowed(packet.key, packet.start, packet.end, ts, default_write_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -22356,6 +22448,14 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Incr => {
+            // (frankenredis-getexgate) Cached write gate, hoisted above the `if let` chain:
+            // `cached_plain_write_gate` borrows `runtime` mutably and the executor call
+            // already does. A flat 187.0 instr/op when re-derived per packet.
+            let default_write_allowed = if getex_write_gate_cache_enabled() {
+                Some(cached_plain_write_gate(write_gate_cache, runtime, ts))
+            } else {
+                None
+            };
             // INCR mirrors ZCOUNT: the borrowed executor returns an integer
             // RespFrame (FastReply). It is a WRITE, but the executor enforces the
             // same write gate / AOF / replication / keyspace-notify path the
@@ -22364,7 +22464,7 @@ fn try_dispatch_floor_classified_action(
             // re-processes byte-exactly. Parser+executor already shipped; only the
             // dispatch-floor routing is new (frankenredis-incr-floor).
             if let Some(packet) = parse_borrowed_plain_incr_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_incr_borrowed(packet.key, ts)
+                && let Some(response) = runtime.execute_plain_incr_borrowed(packet.key, ts, default_write_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -22801,9 +22901,17 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Setnx => {
+            // (frankenredis-getexgate) Cached write gate, hoisted above the `if let` chain:
+            // `cached_plain_write_gate` borrows `runtime` mutably and the executor call
+            // already does. A flat 187.0 instr/op when re-derived per packet.
+            let default_write_allowed = if getex_write_gate_cache_enabled() {
+                Some(cached_plain_write_gate(write_gate_cache, runtime, ts))
+            } else {
+                None
+            };
             if let Some(packet) = parse_borrowed_plain_setnx_packet(unparsed, &parser_config)
                 && let Some(response) =
-                    runtime.execute_plain_setnx_borrowed(packet.key, packet.member, ts)
+                    runtime.execute_plain_setnx_borrowed(packet.key, packet.member, ts, default_write_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -22821,9 +22929,17 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Incrbyfloat => {
+            // (frankenredis-getexgate) Cached write gate, hoisted above the `if let` chain:
+            // `cached_plain_write_gate` borrows `runtime` mutably and the executor call
+            // already does. A flat 187.0 instr/op when re-derived per packet.
+            let default_write_allowed = if getex_write_gate_cache_enabled() {
+                Some(cached_plain_write_gate(write_gate_cache, runtime, ts))
+            } else {
+                None
+            };
             if let Some(packet) = parse_borrowed_plain_incrbyfloat_packet(unparsed, &parser_config)
                 && let Some(response) =
-                    runtime.execute_plain_incrbyfloat_borrowed(packet.key, packet.member, ts)
+                    runtime.execute_plain_incrbyfloat_borrowed(packet.key, packet.member, ts, default_write_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,

@@ -10721,14 +10721,22 @@ impl Runtime {
         true
     }
 
-    fn can_execute_plain_incr_borrowed(&mut self, key: &[u8], now_ms: u64) -> bool {
+    /// (frankenredis-getexgate) `default_write_allowed` is the CACHED write gate when the
+    /// caller has one, `None` to evaluate it. A flat 187.0 instr/op when re-derived.
+    fn can_execute_plain_incr_borrowed(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        default_write_allowed: Option<bool>,
+    ) -> bool {
         if self.policy.gate.max_array_len < 2
             || self.policy.gate.max_bulk_len < b"INCR".len()
             || key.len() > self.policy.gate.max_bulk_len
         {
             return false;
         }
-        self.plain_borrowed_default_key_write_allows(now_ms)
+        default_write_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_write_allows(now_ms))
     }
 
     /// Conservative borrowed runtime fast path for `INCR key`: mirrors
@@ -10738,8 +10746,13 @@ impl Runtime {
     /// generic handler. INCR is classified as a write, so it counts one write
     /// regardless of outcome. Returns None (fall back) on any disabling state.
     /// (frankenredis-q0qym)
-    pub fn execute_plain_incr_borrowed(&mut self, key: &[u8], now_ms: u64) -> Option<RespFrame> {
-        if !self.can_execute_plain_incr_borrowed(key, now_ms) {
+    pub fn execute_plain_incr_borrowed(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        default_write_allowed: Option<bool>,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_incr_borrowed(key, now_ms, default_write_allowed) {
             return None;
         }
 
@@ -10845,14 +10858,22 @@ impl Runtime {
         }
     }
 
-    fn can_execute_plain_getdel_borrowed(&mut self, key: &[u8], now_ms: u64) -> bool {
+    /// (frankenredis-getexgate) `default_write_allowed` is the CACHED write gate when the
+    /// caller has one, `None` to evaluate it. A flat 187.0 instr/op when re-derived.
+    fn can_execute_plain_getdel_borrowed(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        default_write_allowed: Option<bool>,
+    ) -> bool {
         if self.policy.gate.max_array_len < 2
             || self.policy.gate.max_bulk_len < b"GETDEL".len()
             || key.len() > self.policy.gate.max_bulk_len
         {
             return false;
         }
-        self.plain_borrowed_default_key_write_allows(now_ms)
+        default_write_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_write_allows(now_ms))
     }
 
     /// Conservative borrowed WRITE fast path for `GETDEL key`. Mirrors the generic
@@ -10864,8 +10885,13 @@ impl Runtime {
     /// notifications / tracking, so there is no propagation or "del" event to
     /// emit here — exactly as the generic path produces none in that state.
     /// Returns None (defers) on any disabling state. (frankenredis-piu1r)
-    pub fn execute_plain_getdel_borrowed(&mut self, key: &[u8], now_ms: u64) -> Option<RespFrame> {
-        if !self.can_execute_plain_getdel_borrowed(key, now_ms) {
+    pub fn execute_plain_getdel_borrowed(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        default_write_allowed: Option<bool>,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_getdel_borrowed(key, now_ms, default_write_allowed) {
             return None;
         }
 
@@ -10972,14 +10998,22 @@ impl Runtime {
         }
     }
 
-    fn can_execute_plain_decr_borrowed(&mut self, key: &[u8], now_ms: u64) -> bool {
+    /// (frankenredis-getexgate) `default_write_allowed` is the CACHED write gate when the
+    /// caller has one, `None` to evaluate it. A flat 187.0 instr/op when re-derived.
+    fn can_execute_plain_decr_borrowed(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        default_write_allowed: Option<bool>,
+    ) -> bool {
         if self.policy.gate.max_array_len < 2
             || self.policy.gate.max_bulk_len < b"DECR".len()
             || key.len() > self.policy.gate.max_bulk_len
         {
             return false;
         }
-        self.plain_borrowed_default_key_write_allows(now_ms)
+        default_write_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_write_allows(now_ms))
     }
 
     /// Conservative borrowed runtime fast path for `DECR key`: the exact twin of
@@ -10988,8 +11022,13 @@ impl Runtime {
     /// value, or a WRONGTYPE / "not an integer" / overflow error, exactly like
     /// the generic handler. Returns None (fall back) on any disabling state.
     /// (frankenredis-q0qym)
-    pub fn execute_plain_decr_borrowed(&mut self, key: &[u8], now_ms: u64) -> Option<RespFrame> {
-        if !self.can_execute_plain_decr_borrowed(key, now_ms) {
+    pub fn execute_plain_decr_borrowed(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        default_write_allowed: Option<bool>,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_decr_borrowed(key, now_ms, default_write_allowed) {
             return None;
         }
 
@@ -11095,11 +11134,14 @@ impl Runtime {
         }
     }
 
+    /// (frankenredis-getexgate) `default_write_allowed` is the CACHED write gate when the
+    /// caller has one, `None` to evaluate it. A flat 187.0 instr/op when re-derived.
     fn can_execute_plain_decrby_borrowed(
         &mut self,
         key: &[u8],
         delta_arg: &[u8],
         now_ms: u64,
+        default_write_allowed: Option<bool>,
     ) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"DECRBY".len()
@@ -11108,7 +11150,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_write_allows(now_ms)
+        default_write_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_write_allows(now_ms))
     }
 
     /// Conservative borrowed runtime fast path for `DECRBY key delta`: the twin
@@ -11123,8 +11166,9 @@ impl Runtime {
         key: &[u8],
         delta_arg: &[u8],
         now_ms: u64,
+        default_write_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_decrby_borrowed(key, delta_arg, now_ms) {
+        if !self.can_execute_plain_decrby_borrowed(key, delta_arg, now_ms, default_write_allowed) {
             return None;
         }
         // Only fast-path a well-formed integer delta whose negation is in range;
@@ -11237,7 +11281,15 @@ impl Runtime {
         }
     }
 
-    fn can_execute_plain_append_borrowed(&mut self, key: &[u8], value: &[u8], now_ms: u64) -> bool {
+    /// (frankenredis-getexgate) `default_write_allowed` is the CACHED write gate when the
+    /// caller has one, `None` to evaluate it. A flat 187.0 instr/op when re-derived.
+    fn can_execute_plain_append_borrowed(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        now_ms: u64,
+        default_write_allowed: Option<bool>,
+    ) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"APPEND".len()
             || key.len() > self.policy.gate.max_bulk_len
@@ -11245,7 +11297,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_write_allows(now_ms)
+        default_write_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_write_allows(now_ms))
     }
 
     /// Conservative borrowed runtime fast path for `APPEND key value`: mirrors
@@ -11259,8 +11312,9 @@ impl Runtime {
         key: &[u8],
         value: &[u8],
         now_ms: u64,
+        default_write_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_append_borrowed(key, value, now_ms) {
+        if !self.can_execute_plain_append_borrowed(key, value, now_ms, default_write_allowed) {
             return None;
         }
 
@@ -11372,12 +11426,15 @@ impl Runtime {
         }
     }
 
+    /// (frankenredis-getexgate) `default_write_allowed` is the CACHED write gate when the
+    /// caller has one, `None` to evaluate it. A flat 187.0 instr/op when re-derived.
     fn can_execute_plain_setrange_borrowed(
         &mut self,
         key: &[u8],
         offset: &[u8],
         value: &[u8],
         now_ms: u64,
+        default_write_allowed: Option<bool>,
     ) -> bool {
         if self.policy.gate.max_array_len < 4
             || self.policy.gate.max_bulk_len < b"SETRANGE".len()
@@ -11387,7 +11444,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_write_allows(now_ms)
+        default_write_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_write_allows(now_ms))
     }
 
     /// Borrowed fast path for the hot valid `SETRANGE key offset value` write
@@ -11401,8 +11459,9 @@ impl Runtime {
         offset_arg: &[u8],
         value: &[u8],
         now_ms: u64,
+        default_write_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_setrange_borrowed(key, offset_arg, value, now_ms) {
+        if !self.can_execute_plain_setrange_borrowed(key, offset_arg, value, now_ms, default_write_allowed) {
             return None;
         }
         let offset = parse_i64_arg(offset_arg).ok()?;
@@ -11541,12 +11600,57 @@ impl Runtime {
     /// (frankenredis-ev067 — the SADD/LPUSH/RPUSH analog of
     /// [`Self::execute_plain_append_borrowed`].) KEEP IN SYNC with the q0qym
     /// borrowed-write gate.
+    /// (frankenredis-ghmgp) Twin of [`Self::execute_plain_keyed_values_write_borrowed`] that
+    /// takes the default-key write gate as a PARAMETER instead of re-deriving it.
+    ///
+    /// main.rs already caches that answer per read-batch (`cached_plain_write_gate`) and
+    /// threads it into the floor dispatcher, and `execute_plain_set_borrowed_with_default_
+    /// write_gate` has consumed it that way since `ozrro`. This executor never adopted it, so
+    /// every command riding it paid the gate fresh: measured at **187.0 instr/op**, identical
+    /// on SADD (9.5 pct of the command) and on ZADD's sibling route, which is what a fixed
+    /// per-call constant looks like.
+    ///
+    /// ONE EXECUTOR, NINE COMMANDS: SADD, LPUSH, RPUSH, PFADD, HDEL, SREM, ZREM, LPUSHX,
+    /// RPUSHX — three of them (SADD, LPUSH, RPUSH) among the fifteen `redis-benchmark`
+    /// issues.
+    ///
+    /// SEMANTICS ARE SET'S, NOT NEW ONES. The gate reads session and server CONFIG state only
+    /// — auth/ACL, selected db, no-touch, transaction, subscription, client pause, disk-write
+    /// denial, `maxmemory_bytes != 0` (a CONFIG test, so no mid-batch memory edge),
+    /// min-replicas, AOF path, replication role. No command with a borrowed fast path can
+    /// move any of them, and main.rs clears the cache before every owned or generic execution.
+    /// If this cached gate were unsound, SET would be unsound today.
+    ///
+    /// The uncached entry point below is KEPT for any caller that is not the borrowed batch.
+    pub fn execute_plain_keyed_values_write_borrowed_with_default_write_gate(
+        &mut self,
+        cmd: PlainKeyedValuesCmd,
+        key: &[u8],
+        values: &[&[u8]],
+        now_ms: u64,
+        default_write_allowed: bool,
+    ) -> Option<RespFrame> {
+        self.plain_keyed_values_write_borrowed_inner(cmd, key, values, now_ms, default_write_allowed)
+    }
+
     pub fn execute_plain_keyed_values_write_borrowed(
         &mut self,
         cmd: PlainKeyedValuesCmd,
         key: &[u8],
         values: &[&[u8]],
         now_ms: u64,
+    ) -> Option<RespFrame> {
+        let allowed = self.plain_borrowed_default_key_write_allows(now_ms);
+        self.plain_keyed_values_write_borrowed_inner(cmd, key, values, now_ms, allowed)
+    }
+
+    fn plain_keyed_values_write_borrowed_inner(
+        &mut self,
+        cmd: PlainKeyedValuesCmd,
+        key: &[u8],
+        values: &[&[u8]],
+        now_ms: u64,
+        default_write_allowed: bool,
     ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < cmd.name_upper().len()
@@ -11557,7 +11661,7 @@ impl Runtime {
         {
             return None;
         }
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed {
             return None;
         }
 
@@ -20330,7 +20434,15 @@ impl Runtime {
         }
     }
 
-    fn can_execute_plain_setnx_borrowed(&mut self, key: &[u8], value: &[u8], now_ms: u64) -> bool {
+    /// (frankenredis-getexgate) `default_write_allowed` is the CACHED write gate when the
+    /// caller has one, `None` to evaluate it. A flat 187.0 instr/op when re-derived.
+    fn can_execute_plain_setnx_borrowed(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        now_ms: u64,
+        default_write_allowed: Option<bool>,
+    ) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"SETNX".len()
             || key.len() > self.policy.gate.max_bulk_len
@@ -20338,7 +20450,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_write_allows(now_ms)
+        default_write_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_write_allows(now_ms))
     }
 
     /// (frankenredis-6s9dx) Conservative borrowed WRITE fast path for `SETNX key
@@ -20351,8 +20464,9 @@ impl Runtime {
         key: &[u8],
         value: &[u8],
         now_ms: u64,
+        default_write_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_setnx_borrowed(key, value, now_ms) {
+        if !self.can_execute_plain_setnx_borrowed(key, value, now_ms, default_write_allowed) {
             return None;
         }
 
@@ -21574,11 +21688,14 @@ impl Runtime {
         }
     }
 
+    /// (frankenredis-getexgate) `default_write_allowed` is the CACHED write gate when the
+    /// caller has one, `None` to evaluate it. A flat 187.0 instr/op when re-derived.
     fn can_execute_plain_incrbyfloat_borrowed(
         &mut self,
         key: &[u8],
         increment_arg: &[u8],
         now_ms: u64,
+        default_write_allowed: Option<bool>,
     ) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"INCRBYFLOAT".len()
@@ -21587,7 +21704,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_write_allows(now_ms)
+        default_write_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_write_allows(now_ms))
     }
 
     /// (frankenredis-6s9dx) Conservative borrowed WRITE fast path for `INCRBYFLOAT
@@ -21605,8 +21723,9 @@ impl Runtime {
         key: &[u8],
         increment_arg: &[u8],
         now_ms: u64,
+        default_write_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_incrbyfloat_borrowed(key, increment_arg, now_ms) {
+        if !self.can_execute_plain_incrbyfloat_borrowed(key, increment_arg, now_ms, default_write_allowed) {
             return None;
         }
         // (1) wrong-type peek first (non-counting), matching generic ordering.
@@ -28838,12 +28957,15 @@ impl Runtime {
         }
     }
 
+    /// (frankenredis-getexgate) `default_write_allowed` is the CACHED write gate when the
+    /// caller has one, `None` to evaluate it. A flat 187.0 instr/op when re-derived.
     fn can_execute_plain_setbit_borrowed(
         &mut self,
         key: &[u8],
         offset_arg: &[u8],
         value_arg: &[u8],
         now_ms: u64,
+        default_write_allowed: Option<bool>,
     ) -> bool {
         if self.policy.gate.max_array_len < 4
             || self.policy.gate.max_bulk_len < b"SETBIT".len()
@@ -28853,7 +28975,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_write_allows(now_ms)
+        default_write_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_write_allows(now_ms))
     }
 
     /// (frankenredis-setbitfast) Conservative borrowed WRITE fast path for `SETBIT
@@ -28871,8 +28994,9 @@ impl Runtime {
         offset_arg: &[u8],
         value_arg: &[u8],
         now_ms: u64,
+        default_write_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_setbit_borrowed(key, offset_arg, value_arg, now_ms) {
+        if !self.can_execute_plain_setbit_borrowed(key, offset_arg, value_arg, now_ms, default_write_allowed) {
             return None;
         }
         // Same validation as generic setbit; defer on any failure for exact errors.
@@ -35838,11 +35962,14 @@ impl Runtime {
         }
     }
 
+    /// (frankenredis-getexgate) `default_write_allowed` is the CACHED write gate when the
+    /// caller has one, `None` to evaluate it. A flat 187.0 instr/op when re-derived.
     fn can_execute_plain_incrby_borrowed(
         &mut self,
         key: &[u8],
         delta_arg: &[u8],
         now_ms: u64,
+        default_write_allowed: Option<bool>,
     ) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"INCRBY".len()
@@ -35851,7 +35978,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_write_allows(now_ms)
+        default_write_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_write_allows(now_ms))
     }
 
     /// Conservative borrowed runtime fast path for `INCRBY key delta`: mirrors
@@ -35866,8 +35994,9 @@ impl Runtime {
         key: &[u8],
         delta_arg: &[u8],
         now_ms: u64,
+        default_write_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_incrby_borrowed(key, delta_arg, now_ms) {
+        if !self.can_execute_plain_incrby_borrowed(key, delta_arg, now_ms, default_write_allowed) {
             return None;
         }
         // Only fast-path a well-formed integer delta; defer the not-an-integer
@@ -50722,7 +50851,7 @@ mod tests {
         }
         for (ts, key) in (2..).zip([b"s".as_slice(), b"n", b"missing", b"l"]) {
             let f = direct
-                .execute_plain_getdel_borrowed(key, ts)
+                .execute_plain_getdel_borrowed(key, ts, None)
                 .expect("getdel fast path should engage");
             let g = generic.execute_frame(command(&[b"GETDEL", key]), ts);
             assert_eq!(f, g, "key={key:?}");
@@ -54328,14 +54457,14 @@ mod tests {
 
         // existing integer -> increment
         let inc = fast
-            .execute_plain_incr_borrowed(b"n", 2)
+            .execute_plain_incr_borrowed(b"n", 2, None)
             .expect("default INCR should take borrowed fast path");
         assert_eq!(inc, generic.execute_frame(command(&[b"INCR", b"n"]), 2));
         assert_eq!(inc, RespFrame::Integer(42));
 
         // missing key -> created at 1
         let created = fast
-            .execute_plain_incr_borrowed(b"fresh", 3)
+            .execute_plain_incr_borrowed(b"fresh", 3, None)
             .expect("new-key INCR should take borrowed fast path");
         assert_eq!(
             created,
@@ -54345,14 +54474,14 @@ mod tests {
 
         // non-integer string -> error
         let nan = fast
-            .execute_plain_incr_borrowed(b"nan", 4)
+            .execute_plain_incr_borrowed(b"nan", 4, None)
             .expect("not-an-int INCR should take borrowed fast path");
         assert_eq!(nan, generic.execute_frame(command(&[b"INCR", b"nan"]), 4));
         assert!(matches!(nan, RespFrame::Error(_)));
 
         // wrong type -> WRONGTYPE
         let wt = fast
-            .execute_plain_incr_borrowed(b"l", 5)
+            .execute_plain_incr_borrowed(b"l", 5, None)
             .expect("wrong-type INCR should take borrowed fast path");
         assert_eq!(wt, generic.execute_frame(command(&[b"INCR", b"l"]), 5));
         assert!(matches!(wt, RespFrame::Error(_)));
@@ -54384,10 +54513,10 @@ mod tests {
     fn plain_incr_borrowed_fast_path_disabled_in_non_default_states() {
         let mut rt = Runtime::default_strict();
         rt.execute_frame(command(&[b"SET", b"n", b"1"]), 1);
-        assert!(rt.execute_plain_incr_borrowed(b"n", 2).is_some());
+        assert!(rt.execute_plain_incr_borrowed(b"n", 2, None).is_some());
         // a configured replica link disables the write fast path
         rt.execute_frame(command(&[b"SUBSCRIBE", b"ch"]), 3);
-        assert!(rt.execute_plain_incr_borrowed(b"n", 4).is_none());
+        assert!(rt.execute_plain_incr_borrowed(b"n", 4, None).is_none());
     }
 
     #[test]
@@ -54412,26 +54541,26 @@ mod tests {
             (b"fresh", b"-2"),
         ] {
             let f = fast
-                .execute_plain_incrby_borrowed(k, d, 2)
+                .execute_plain_incrby_borrowed(k, d, 2, None)
                 .expect("well-formed INCRBY should take fast path");
             let g = generic.execute_frame(command(&[b"INCRBY", k, d]), 2);
             assert_eq!(f, g, "k={k:?} d={d:?}");
         }
 
         // overflow / wrong-type / not-an-integer value -> same errors
-        let ov = fast.execute_plain_incrby_borrowed(b"big", b"1", 3).unwrap();
+        let ov = fast.execute_plain_incrby_borrowed(b"big", b"1", 3, None).unwrap();
         assert_eq!(
             ov,
             generic.execute_frame(command(&[b"INCRBY", b"big", b"1"]), 3)
         );
         assert!(matches!(ov, RespFrame::Error(_)));
-        let wt = fast.execute_plain_incrby_borrowed(b"l", b"1", 4).unwrap();
+        let wt = fast.execute_plain_incrby_borrowed(b"l", b"1", 4, None).unwrap();
         assert_eq!(
             wt,
             generic.execute_frame(command(&[b"INCRBY", b"l", b"1"]), 4)
         );
         assert!(matches!(wt, RespFrame::Error(_)));
-        let nanv = fast.execute_plain_incrby_borrowed(b"nan", b"1", 5).unwrap();
+        let nanv = fast.execute_plain_incrby_borrowed(b"nan", b"1", 5, None).unwrap();
         assert_eq!(
             nanv,
             generic.execute_frame(command(&[b"INCRBY", b"nan", b"1"]), 5)
@@ -54439,7 +54568,7 @@ mod tests {
         assert!(matches!(nanv, RespFrame::Error(_)));
 
         // non-integer DELTA -> fast path defers (None), generic emits the error
-        assert!(fast.execute_plain_incrby_borrowed(b"n", b"x", 6).is_none());
+        assert!(fast.execute_plain_incrby_borrowed(b"n", b"x", 6, None).is_none());
 
         assert_eq!(
             fast.execute_frame(command(&[b"GET", b"n"]), 7),
@@ -54463,9 +54592,9 @@ mod tests {
     fn plain_incrby_borrowed_fast_path_disabled_in_non_default_states() {
         let mut rt = Runtime::default_strict();
         rt.execute_frame(command(&[b"SET", b"n", b"1"]), 1);
-        assert!(rt.execute_plain_incrby_borrowed(b"n", b"2", 2).is_some());
+        assert!(rt.execute_plain_incrby_borrowed(b"n", b"2", 2, None).is_some());
         rt.execute_frame(command(&[b"SELECT", b"1"]), 3);
-        assert!(rt.execute_plain_incrby_borrowed(b"n", b"2", 4).is_none());
+        assert!(rt.execute_plain_incrby_borrowed(b"n", b"2", 4, None).is_none());
     }
 
     #[test]
@@ -54489,7 +54618,7 @@ mod tests {
             ("wt", b"l"),
         ] {
             let f = fast
-                .execute_plain_decr_borrowed(key, 2)
+                .execute_plain_decr_borrowed(key, 2, None)
                 .expect("default DECR should take borrowed fast path");
             let g = generic.execute_frame(command(&[b"DECR", key]), 2);
             assert_eq!(f, g, "{label}");
@@ -54533,7 +54662,7 @@ mod tests {
             (b"fresh", b"4"),
         ] {
             let f = fast
-                .execute_plain_decrby_borrowed(k, d, 2)
+                .execute_plain_decrby_borrowed(k, d, 2, None)
                 .expect("well-formed DECRBY should take fast path");
             assert_eq!(
                 f,
@@ -54542,17 +54671,17 @@ mod tests {
             );
         }
         // wrong-type -> same WRONGTYPE
-        let wt = fast.execute_plain_decrby_borrowed(b"l", b"1", 3).unwrap();
+        let wt = fast.execute_plain_decrby_borrowed(b"l", b"1", 3, None).unwrap();
         assert_eq!(
             wt,
             generic.execute_frame(command(&[b"DECRBY", b"l", b"1"]), 3)
         );
         assert!(matches!(wt, RespFrame::Error(_)));
         // non-integer delta -> deferred (None)
-        assert!(fast.execute_plain_decrby_borrowed(b"n", b"x", 4).is_none());
+        assert!(fast.execute_plain_decrby_borrowed(b"n", b"x", 4, None).is_none());
         // LLONG_MIN delta -> deferred (None); generic emits "decrement would overflow"
         assert!(
-            fast.execute_plain_decrby_borrowed(b"n", b"-9223372036854775808", 5)
+            fast.execute_plain_decrby_borrowed(b"n", b"-9223372036854775808", 5, None)
                 .is_none()
         );
         assert!(matches!(
@@ -54569,11 +54698,11 @@ mod tests {
     fn plain_decr_decrby_borrowed_fast_path_disabled_in_non_default_states() {
         let mut rt = Runtime::default_strict();
         rt.execute_frame(command(&[b"SET", b"n", b"1"]), 1);
-        assert!(rt.execute_plain_decr_borrowed(b"n", 2).is_some());
-        assert!(rt.execute_plain_decrby_borrowed(b"n", b"2", 2).is_some());
+        assert!(rt.execute_plain_decr_borrowed(b"n", 2, None).is_some());
+        assert!(rt.execute_plain_decrby_borrowed(b"n", b"2", 2, None).is_some());
         rt.execute_frame(command(&[b"MULTI"]), 3);
-        assert!(rt.execute_plain_decr_borrowed(b"n", 4).is_none());
-        assert!(rt.execute_plain_decrby_borrowed(b"n", b"2", 4).is_none());
+        assert!(rt.execute_plain_decr_borrowed(b"n", 4, None).is_none());
+        assert!(rt.execute_plain_decrby_borrowed(b"n", b"2", 4, None).is_none());
     }
 
     #[test]
@@ -54589,7 +54718,7 @@ mod tests {
         }
         // grow existing -> "Hello" + " World" = 11
         let grow = fast
-            .execute_plain_append_borrowed(b"s", b" World", 2)
+            .execute_plain_append_borrowed(b"s", b" World", 2, None)
             .expect("default APPEND should take borrowed fast path");
         assert_eq!(
             grow,
@@ -54598,7 +54727,7 @@ mod tests {
         assert_eq!(grow, RespFrame::Integer(11));
         // create on missing key -> len of value
         let created = fast
-            .execute_plain_append_borrowed(b"fresh", b"abc", 3)
+            .execute_plain_append_borrowed(b"fresh", b"abc", 3, None)
             .expect("new-key APPEND should take borrowed fast path");
         assert_eq!(
             created,
@@ -54606,13 +54735,13 @@ mod tests {
         );
         assert_eq!(created, RespFrame::Integer(3));
         // append empty value to existing -> unchanged length
-        let noop = fast.execute_plain_append_borrowed(b"s", b"", 4).unwrap();
+        let noop = fast.execute_plain_append_borrowed(b"s", b"", 4, None).unwrap();
         assert_eq!(
             noop,
             generic.execute_frame(command(&[b"APPEND", b"s", b""]), 4)
         );
         // wrong type -> WRONGTYPE
-        let wt = fast.execute_plain_append_borrowed(b"l", b"x", 5).unwrap();
+        let wt = fast.execute_plain_append_borrowed(b"l", b"x", 5, None).unwrap();
         assert_eq!(
             wt,
             generic.execute_frame(command(&[b"APPEND", b"l", b"x"]), 5)
@@ -54646,10 +54775,10 @@ mod tests {
     fn plain_append_borrowed_fast_path_disabled_in_non_default_states() {
         let mut rt = Runtime::default_strict();
         rt.execute_frame(command(&[b"SET", b"s", b"v"]), 1);
-        assert!(rt.execute_plain_append_borrowed(b"s", b"x", 2).is_some());
+        assert!(rt.execute_plain_append_borrowed(b"s", b"x", 2, None).is_some());
         // a configured replica link / subscribe disables the write fast path
         rt.execute_frame(command(&[b"SUBSCRIBE", b"ch"]), 3);
-        assert!(rt.execute_plain_append_borrowed(b"s", b"x", 4).is_none());
+        assert!(rt.execute_plain_append_borrowed(b"s", b"x", 4, None).is_none());
     }
 
     #[test]
@@ -54662,7 +54791,7 @@ mod tests {
         }
 
         let overwrite = fast
-            .execute_plain_setrange_borrowed(b"s", b"2", b"XYZ", 2)
+            .execute_plain_setrange_borrowed(b"s", b"2", b"XYZ", 2, None)
             .expect("valid SETRANGE should take borrowed fast path");
         assert_eq!(
             overwrite,
@@ -54671,7 +54800,7 @@ mod tests {
         assert_eq!(overwrite, RespFrame::Integer(5));
 
         let create = fast
-            .execute_plain_setrange_borrowed(b"fresh", b"3", b"zz", 3)
+            .execute_plain_setrange_borrowed(b"fresh", b"3", b"zz", 3, None)
             .expect("missing-key SETRANGE should take borrowed fast path");
         assert_eq!(
             create,
@@ -54680,7 +54809,7 @@ mod tests {
         assert_eq!(create, RespFrame::Integer(5));
 
         let wrong_type = fast
-            .execute_plain_setrange_borrowed(b"l", b"0", b"x", 4)
+            .execute_plain_setrange_borrowed(b"l", b"0", b"x", 4, None)
             .expect("wrong-type SETRANGE should still reply on fast path");
         assert_eq!(
             wrong_type,
@@ -54697,19 +54826,19 @@ mod tests {
             generic.execute_frame(command(&[b"GET", b"fresh"]), 5)
         );
         assert!(
-            fast.execute_plain_setrange_borrowed(b"s", b"x", b"y", 6)
+            fast.execute_plain_setrange_borrowed(b"s", b"x", b"y", 6, None)
                 .is_none()
         );
         assert!(
-            fast.execute_plain_setrange_borrowed(b"s", b"-1", b"y", 6)
+            fast.execute_plain_setrange_borrowed(b"s", b"-1", b"y", 6, None)
                 .is_none()
         );
         assert!(
-            fast.execute_plain_setrange_borrowed(b"s", b"0", b"", 6)
+            fast.execute_plain_setrange_borrowed(b"s", b"0", b"", 6, None)
                 .is_none()
         );
         assert!(
-            fast.execute_plain_setrange_borrowed(b"s", b"600000000", b"y", 6)
+            fast.execute_plain_setrange_borrowed(b"s", b"600000000", b"y", 6, None)
                 .is_none()
         );
 
@@ -54732,12 +54861,12 @@ mod tests {
         let mut rt = Runtime::default_strict();
         rt.execute_frame(command(&[b"SET", b"s", b"abc"]), 1);
         assert!(
-            rt.execute_plain_setrange_borrowed(b"s", b"1", b"x", 2)
+            rt.execute_plain_setrange_borrowed(b"s", b"1", b"x", 2, None)
                 .is_some()
         );
         rt.execute_frame(command(&[b"MULTI"]), 3);
         assert!(
-            rt.execute_plain_setrange_borrowed(b"s", b"1", b"x", 4)
+            rt.execute_plain_setrange_borrowed(b"s", b"1", b"x", 4, None)
                 .is_none()
         );
     }

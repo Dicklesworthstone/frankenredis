@@ -8,6 +8,117 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-08-17 BrownIbis: KEEP (SELF-SPEEDUP) — one shared executor stops re-deriving a gate main.rs already caches: SADD **−10.30 pct**, LPUSHX **−9.52 pct**, RPUSHX **−9.49 pct**, and a write command on a DIFFERENT executor moves 0.1 instr/op (`frankenredis-ghmgp`)
+
+Claim class: SELF-SPEEDUP. Campaign output: no. fr-before against fr-after; no incumbent arm ran
+in these invocations and none is claimed.
+
+RETRY PREDICATE, in brief here and in full below: measure LPUSH/RPUSH/SADD at the shapes
+`redis-benchmark` actually issues before quoting this as a benchmark result; do not migrate another
+route without auditing its callers for paths outside the borrowed batch; and take the remaining
+executors in the order the bead records.
+
+A/A NULL, same invocation, eight draws of the after ELF on the claim shape paired into four
+ratios: **A/A null median 1.000878, bootstrap 95% median CI [0.999717, 1.002152]** (20,000
+percentile resamples, seed 20260817). GATE: that bootstrap median-CI is the decision rule for this
+row; an A/B inside the null's interval is refused however it reads. The A/B is 0.8970, about 85x
+the null half-width from 1.0. **CV is diagnostic only and was never a gate here** — it is not
+computed. Detail and the raw draws are in the A/A section below.
+
+BINARIES (both `--base HEAD --clean-overlay`, HEAD `ca932b4f5` unmoved across both builds):
+
+    before  bench_elf_sha256=69b53445e862017d77ea81b9f0f91b301b2de200f3667c83d18de8d7a50f433c
+    after   bench_elf_sha256=3586dfc6bed3c79da32ccf593093d9469db97f5f33f5a9636dc217629798c864
+
+SYMBOL-CHECKED, AND DISCRIMINATING THIS TIME: `nm -C` finds
+`keyed_values_write_borrowed_with_default_write_gate` **0 times in the before ELF and 1 in the
+after**. The same check was useless on my previous lever, which added only enum variants and match
+arms; this one adds a function, so it fires. **A symbol check proves contamination when it fires
+and proves nothing when it does not** — the general check is that the before arm's base is not an
+ancestor of the lever.
+
+### THE MEASUREMENT — per-arm loadavg 13.23 / 15.13 / 16.79, CPU idle 88 pct, iowait 0 pct
+
+    shape             before     after      delta             dispatch
+    sadd_existing     1971.8     1768.8     -203.0 (-10.30)   617 -> 624
+    lpushx_missing    2142.9     1938.9     -204.0 ( -9.52)   673 -> 680
+    rpushx_missing    2138.9     1935.9     -203.0 ( -9.49)   671 -> 678
+    zadd_base         2728.7     2728.6       -0.1 ( -0.00)   662 -> 663   <- CONTROL
+    get_control       1301.1     1300.3       -0.8 ( -0.06)   457 -> 457   <- NULL
+
+**THE CONTROL IS THE POINT.** `zadd_base` is a WRITE command paying the same gate — but through its
+own executor rather than the shared keyed-values one — and it moved **0.1 instr/op**. A change that
+had touched the gate generally, or perturbed dispatch, could not leave a same-class write command
+unmoved to a tenth of an instruction. The saving is the executor that was edited and nothing else.
+
+### AGAINST THE PREDICTION, REGISTERED BEFORE THE EDIT
+
+Predicted −187 instr/op per route, reject under 150. Measured −203, −204, −203: above prediction
+and clear of the threshold. The 187 was the gate frame's own self cost; the extra ~16 is the call
+overhead that goes with it, which a self-cost frame attribution does not include.
+
+### WHAT CHANGED
+
+`execute_plain_keyed_values_write_borrowed` (fr-runtime:11544) serves NINE commands — SADD, LPUSH,
+RPUSH, PFADD, HDEL, SREM, ZREM, LPUSHX, RPUSHX — and re-derived
+`plain_borrowed_default_key_write_allows` per command. main.rs has cached that answer per
+read-batch since `ozrro`, which added `write_gate_cache` to the floor dispatcher with the note that
+"the floor route was not adding a gate evaluation, it was LOSING AN AMORTISATION". This class never
+adopted it.
+
+Now: a `_with_default_write_gate` twin taking the bool, both entry points sharing one inner body so
+they cannot drift, and `dispatch_floor_keyed_values_write` threading the cached value from the
+class arm. The uncached entry point is KEPT for any caller that is not the borrowed batch.
+
+### THE CALLER AUDIT, which is the actual risk on a shared executor
+
+36 call sites, **all in main.rs, zero outside it** — no Lua, no replication replay, no generic
+route, no direct test callers. That is what made a wholesale migration safe rather than one command
+at a time, and it is the check to repeat for every other executor on this vein: nine commands
+riding one code path means one wrong migration would affect all nine at once.
+
+The gate's inputs are session and server CONFIG state only — auth/ACL, selected db, no-touch,
+transaction, subscription, client pause, disk-write denial, `maxmemory_bytes != 0` (a CONFIG test,
+so there is no mid-batch memory edge), min-replicas, AOF path, replication role. No command with a
+borrowed fast path can move any of them, and main.rs clears the cache before every owned or generic
+execution (:6790, :6882, :6893). **If this cached gate were unsound, SET would be unsound today.**
+
+### GATES
+
+`cargo test -p fr-server --bins` 380 passed / 0 failed. `cargo test -p fr-runtime --lib` 630 passed
+/ 0 failed. `cargo check --all-targets` clean, **verified by EXIT STATUS rather than by grepping
+output** — two racing invocations in one command line produced a stale "26 errors" that a later
+`Finished` line contradicted, and only the exit code settled which was true.
+
+NOT RUN: the borrowed-vs-generic differential, which cannot execute on a worker because
+`legacy_redis_code` is in `.rchignore`. All nine commands already had cascade arms reaching this
+same executor, so the reply path is unchanged and only the route to it moved — but that is an
+argument, not a gate, and it is the same gap this ledger already records for the p98mw routes.
+
+### The A/A null, and the decision rule
+
+Eight draws of the same ELF on the claim shape, inside one top-level invocation, paired into four
+A/A ratios (`sadd_existing`, after ELF):
+
+    draws    1768.6 1766.7 1769.4 1765.6 1767.1 1767.6 1765.5 1764.3   (spread 0.29 pct)
+    ratios   1.001075  1.002152  0.999717  1.000680
+
+**A/A null median 1.000878, with a bootstrap 95% median CI of [0.999717, 1.002152]** (20,000
+percentile-bootstrap resamples, seed 20260817). GATE: that bootstrap median-CI is the decision rule
+for this row — an A/B landing inside the null's own interval is refused however it reads. The A/B
+is **0.8970**, roughly 85x the null's half-width away from 1.0.
+
+**CV is diagnostic only and was never a gate here**; it is not computed at all.
+
+### RETRY PREDICATE
+
+(1) **These are not benchmark numbers.** `redis-benchmark` issues LPUSH, RPUSH and SADD; I measured
+LPUSHX, RPUSHX and SADD — the same executor and adjacent commands, but measure the benchmark's own
+shapes before quoting this as a benchmark result. (2) The vein continues and the bead holds the
+evidence: INCR (one parameter on an existing predicate), ZADD (needs its own twin), MSET at 9..=32
+pairs (the band the benchmark uses; the <=8 path is already migrated). (3) Every further migration
+repeats the caller audit — the gate is not the risk, the callers are.
+
 ## 2026-08-17 BrownIbis: METHOD, and it answers the question rather than adding to it — the ratio tracks NEITHER CPU idle NOR loadavg; it tracks DENOMINATOR SIZE, and two draws at identical idle differ by the whole spread (`frankenredis-eh2ct`, `frankenredis-fpqns`)
 
 Not a verdict row and NOT a promotion. No number here is certified, and the certified worst bounds
