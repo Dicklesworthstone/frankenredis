@@ -35858,3 +35858,65 @@ That is why no gate placed at the BUILDER can ever fire. The order is gone one f
   comparison is unaffected either way. If a future attempt reaches for a tree or an ordered
   map to preserve the loader's ordering, THAT would be governed by this law and would have to
   beat Compact(Vec) on both dimensions first.
+
+--------------------------------------------------------------------------------
+2026-08-17 CrimsonHawk: REFUTED MY OWN SUSPECT, AND SIZED THE REAL ONE — the 17-way
+string match in `write_client_info_command_name` is worth 29.2 Ir/op, not the 415 I
+went in expecting. The cost is the `String::push(char)` loops, and the whole call
+site is 6.42 pct of PUBSUB CHANNELS (`frankenredis-fpqns` follow-on).
+
+  context       After 830af9fcc removed `effective_command_flags` from this route, the
+                new top frame is `push_ascii_lowercase_lossy` at 726 Ir/op (11.24 pct),
+                measured on the post-fix ELF with scripts/command_profile_frames.py.
+                The ledger row at :31762 (GentleStream, 2026-08-16) already REJECTED
+                re-implementing that loop as `push_str` + `make_ascii_lowercase`, and its
+                retry predicate says not to retry merely because the frame is visible.
+                I did not retry it. I asked a different question: WHY is the frame 726
+                here when that row measured 192?
+  hypothesis    `write_client_info_command_name` runs on EVERY command to maintain
+                `session.last_command_name`, a value read only by CLIENT INFO / CLIENT
+                LIST. It lowercases the parent, then tests `matches!(out.as_str(), ...)`
+                against SEVENTEEN string literals to decide whether to append `|sub`. I
+                expected that 17-way chain to be the bulk of it.
+  method        TWO ceiling probes, each a deliberate measurement-only mutation built,
+                copied to a private path, and REVERTED before measuring — `git status`
+                verified empty both times, and the shared tree never held a mutation
+                across a measurement.
+                  fr_after2  e851..->3f78 baseline (HEAD content)
+                  fr_probe   whole call site removed
+                  fr_probe2  the 17-way match replaced by ONE integer compare chosen to
+                             be true for "pubsub", so control flow is IDENTICAL for this
+                             shape and only the match cost is removed
+
+  arm                              pubsub_channels   delta vs baseline
+  baseline                              6462.7        --
+  17-way match removed  (fr_probe2)     6433.5        -29.2   -0.45 pct
+  whole call site removed (fr_probe)    6047.5       -415.2   -6.42 pct
+
+  RESULT: THE MATCH IS 7 PCT OF THE CALL SITE. The other 386 Ir/op is the two
+                `push_ascii_lowercase_lossy` byte loops plus the String clear/reserve —
+                27.6 instructions per byte to lowercase 14 bytes. So :31762 was right
+                that the loop is where the time goes, and I was wrong about which half.
+                Recording it because "optimise the obvious 17-way string chain" is a
+                lever any reader of this profile would reach for, and it is worth 0.45
+                pct.
+  A NULL THAT TURNED OUT NOT TO BE ONE, worth more than the result. `get_control` moved
+                -2.5 Ir/op (-0.19 pct) on the whole-call-site probe. That is NOT evidence
+                the call site is cheap for GET — GET is FRONT-CLASSIFIED and never
+                reaches this line at all. A flat null from a route that does not execute
+                the changed code proves nothing, and I nearly banked it as though it did.
+                Anyone probing this line needs a null that DEMONSTRABLY reaches it.
+  host          thinkstation1, 64 logical, powersave, load ~13-15, per-arm MHz recorded
+                by the harness; callgrind Ir, so no timing claim is made.
+  NOT A LEVER I SHIPPED. Nothing was committed from either probe.
+
+RETRY PREDICATE: do NOT take the 17-way match, and do NOT re-run :31762's `push_str`
+rewrite — both are now measured dead ends. The live lever is STRUCTURAL and it is worth
+415 Ir/op on every container command: fr REBUILDS a lowercased `parent|sub` String on
+every command to serve a field only CLIENT INFO / CLIENT LIST ever reads, whereas redis
+keeps `c->lastcmd` as a POINTER to the command-table entry and builds no string at all.
+Store a HANDLE (command-table index plus subcommand index) and render the name on demand
+in CLIENT INFO. Before starting it, settle the one parity question that decides the
+design: what `cmd=` must report for an UNKNOWN or malformed command, where there is no
+table entry to point at — measure it against live 7.2.4 rather than assuming, because
+that case is the whole reason the current code stores bytes instead of an index.
