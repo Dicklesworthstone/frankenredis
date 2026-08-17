@@ -29677,9 +29677,23 @@ const ASCII_ALNUM_TAILORING_PROBES: &[&str] = &[
 /// a test can hand in a deliberately WRONG one and watch this refuse — a gate nothing can
 /// fail is not a gate.
 ///
-/// COST: 6,441 collator comparisons, ~6M instructions, paid ONCE per process on the first
-/// `SORT ... ALPHA` that has a collator at all — against ~1,000 instructions bought back
-/// on every in-domain comparison afterwards.
+/// COST: 6,441 collator comparisons, ~6.8M instructions, paid ONCE per process on the first
+/// `SORT ... ALPHA` that has a collator at all — against ~1,000 instructions bought back on
+/// every in-domain comparison afterwards. AUDITED RATHER THAN WAVED THROUGH, because it sits
+/// on a request path:
+///
+/// * **Amortisation.** It pays for itself after ~6,400 in-domain comparisons: one
+///   1,000-element `SORT ALPHA` (~10,000 comparisons), or ~2,000 three-element ones. Every
+///   comparison after that is pure profit.
+/// * **Latency of the ONE request that pays it.** ~6.8M instructions is roughly 1.7-3.4 ms
+///   natively. `slowlog-log-slower-than` defaults to 10,000 µs, so this stays under the
+///   slowlog bar — but it is the same ORDER as that bar, not orders below it. If the probe
+///   corpus ever grows, re-check that margin rather than assuming it.
+/// * **No lock contention, and the reason is structural rather than lucky.** `OnceLock`
+///   would block other threads behind the initialising one, but `SORT` is excluded from the
+///   per-core reactor path — `reactor_single_key_command` lists it among the commands that
+///   would reach outside a locked partition — so SORT executes serially and no second thread
+///   can be waiting on this init.
 fn ascii_alnum_fast_path_agrees_with(
     collator: &CollatorBorrowed<'_>,
     fast: fn(&[u8], &[u8]) -> Option<Ordering>,
