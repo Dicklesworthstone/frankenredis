@@ -25,11 +25,12 @@
 # Exit 1 = the one-process null is out of band; a 9-trial run would refuse too.
 # Exit 2 = fewer than three free blocks, or below the 42G disk stop.
 #
-# Usage: restore_cert_gate.sh <fr_binary> [trials]
+# Usage: restore_cert_gate.sh <fr_binary> [trials] [samples]
 set -u
 
-FR=${1:?usage: restore_cert_gate.sh <fr_binary> [trials]}
+FR=${1:?usage: restore_cert_gate.sh <fr_binary> [trials] [samples]}
 TRIALS=${2:-3}
+SAMPLES=${3:-3}
 REPO=/data/projects/frankenredis
 REDIS=$REPO/legacy_redis_code/redis/src/redis-server
 RS=47621; FA=47622; FB=47623
@@ -88,15 +89,40 @@ for port in (int(a) for a in sys.argv[1:4]):
 PY
 if [ $? -ne 0 ]; then echo "REFUSE: an arm never came up" >&2; exit 2; fi
 
-echo "== stage 2: one-process null probe ($TRIALS trials) -- the term that actually fails =="
-OUT=$(timeout 900 python3 scripts/collection_reload_headtohead.py $RS $FA \
-        --competitive --fr-aa-port $FB --trials "$TRIALS" 2>&1)
-echo "$OUT" | grep -E "A/A null|VERDICT" || true
-echo "   loadavg $(cut -d' ' -f1-3 /proc/loadavg)   mean MHz $(mhz)"
+echo "== stage 2: one-process null, $SAMPLES probes of $TRIALS trials =="
+# THREE PROBES, NOT ONE, and this is a correction to this script's first version.
+# Measured across three separate probes at FALLING load, the one-process null read
+# 0.933081x (loadavg 20.0), 0.986818x (16.0) and 1.054018x (13.3) -- a 6 pct swing
+# with no relationship to load. A single probe therefore decides GO or REFUSE partly
+# by luck, which is exactly the failure this gate exists to catch, reproduced one
+# level up. The median of three is not a cure, but it stops one draw deciding, and
+# printing every sample lets the reader see the spread rather than trust the middle.
+#
+# This is NOT retry-until-pass: every sample is reported, the decision uses the
+# MEDIAN, and a run where the samples disagree is called out rather than rerun.
+SAMPLES_SEEN=""
+LAST_OUT=""
+for probe in $(seq 1 "$SAMPLES"); do
+  OUT=$(timeout 900 python3 scripts/collection_reload_headtohead.py $RS $FA \
+          --competitive --fr-aa-port $FB --trials "$TRIALS" 2>&1)
+  LAST_OUT="$OUT"
+  s=$(echo "$OUT" | sed -n 's/.*fr_b halves, one process) median=\([0-9.]*\)x.*/\1/p')
+  aa=$(echo "$OUT" | sed -n 's/.*fr_a\/fr_b, two processes) median=\([0-9.]*\)x.*/\1/p')
+  [ -z "$s" ] && { echo "REFUSE: probe $probe reported no one-process null" >&2; exit 1; }
+  printf "   probe %s: one-process %sx   two-process %sx   loadavg %s   MHz %s\n" \
+         "$probe" "$s" "${aa:-?}" "$(cut -d' ' -f1 /proc/loadavg)" "$(mhz)"
+  SAMPLES_SEEN="$SAMPLES_SEEN $s"
+done
+OUT="$LAST_OUT"
 
-SAME=$(echo "$OUT" | sed -n 's/.*fr_b halves, one process) median=\([0-9.]*\)x.*/\1/p')
-if [ -z "$SAME" ]; then
-  echo "REFUSE: the probe did not report a one-process null; cannot judge." >&2
+SAME=$(echo $SAMPLES_SEEN | tr ' ' '\n' | sort -g | awk '{a[NR]=$1} END{print a[int((NR+1)/2)]}')
+SPREAD=$(echo $SAMPLES_SEEN | tr ' ' '\n' | sort -g \
+         | awk '{a[NR]=$1} END{printf "%.4f", a[NR]-a[1]}')
+echo "   samples:${SAMPLES_SEEN}  median ${SAME}x  spread ${SPREAD}"
+if awk -v s="$SPREAD" 'BEGIN{exit !(s>0.04)}'; then
+  echo "REFUSE: the one-process null itself spreads ${SPREAD} across probes, wider than" >&2
+  echo "        the 0.04 band it is being judged against. The median is not meaningful" >&2
+  echo "        and a 9-trial run cannot be predicted from it." >&2
   exit 1
 fi
 echo "   one-process null = ${SAME}x  (band 0.98..1.02)"
