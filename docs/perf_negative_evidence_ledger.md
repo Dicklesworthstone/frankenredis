@@ -27604,3 +27604,67 @@ change to the event loop, the reply path, or set intersection, and after any cha
 `set-max-listpack-entries` on either engine, since every regime label above is keyed to 128.
 Do NOT quote the older table for any purpose except the history of the crossover argument;
 it describes removed code.
+
+---
+
+## MEASURED (frankenredis-33832) — warm-up HELPS but is NOT sufficient: warmed at loadavg 10.7 with four free blocks, the one-process null still spreads 0.096 against a 0.04 band
+
+Campaign output: no
+
+Claim class: METHOD. No vs-incumbent ratio is banked; the harness refused. ELF identity
+computed by sha256sum, not self-reported.
+
+230c674ec found the within-process drift is a ~10-trial SETTLING TRANSIENT, warmed 8
+passes, moved the same-process null from 0.771 to 1.047 and the two-process null from
+0.931 to 0.974, and left an explicit open question: "re-run under loadavg 15 and it either
+enters the band or it does not." That refuted my earlier "this host cannot certify"
+verdict, which I retracted in 20aee9e9a. This answers the question it left.
+
+Ran under BETTER conditions than asked: loadavg 10.69 (not 15), FOUR free aligned blocks
+(three required), warm-up 8 passes, three probes of three trials, arms pinned
+redis->4-7 / fr_a->8-11 / fr_b->24-27.
+
+    probe   one-process   two-process   loadavg   mean MHz
+      1       0.930038x     1.059391x    10.69      3044
+      2       0.902445x     1.044218x    10.64      3510
+      3       0.998232x     1.115778x    10.64      3590
+
+    one-process median 0.930038x   SPREAD 0.0958   band 0.04
+    two-process: 1.044, 1.059, 1.116 -- all three OUTSIDE 0.98..1.02
+
+So it does NOT enter the band, and the answer is not marginal: every two-process null in
+the set misses, and the one-process spread is 2.4x the width of the band it must fit in.
+
+WARM-UP IS A REAL IMPROVEMENT AND I WANT THAT SEPARATED FROM THE VERDICT. Against my six
+UNWARMED samples (0.917-1.056, spread 0.139), eight warm-up passes narrowed the spread to
+0.096. That is a 31 pct reduction and it is consistent with 230c674ec's transient model.
+What it does not do is get under 0.04. The single 0.974 reading that motivated the
+retraction now looks like one favourable draw from a distribution still ~0.1 wide, which
+is exactly the failure mode this gate was built to stop -- a point estimate landing in
+band while the underlying term is far wider.
+
+WHAT I COULD NOT TEST, stated so nobody assumes it was ruled out: whether MORE warm-up
+closes it. I rebuilt and tried warm-up 24 twice; both attempts refused at stage 1 because
+block availability collapsed from four to two and then to one inside ninety seconds. The
+transient-length hypothesis predicts a longer warm-up should help, and it is untested.
+
+    RETRY PREDICATE: run the gate at --warmup 24 and again at 48, three probes each, and
+    compare the SPREAD (not the median) against the 0.0958 measured here. If the spread
+    falls monotonically with warm-up length, the transient is simply longer than ten
+    trials and the fix is a bigger constant. If it plateaus near 0.1, there is a second
+    term and no amount of warm-up will certify this surface. Do not schedule a 9-trial
+    certification until the spread is under 0.04.
+
+INSTRUMENT NOTE, and it is load-bearing on a fleet this active: the staleness detector
+landed in a73b12b46 caught my measurement arm TWICE within five minutes -- fr_cert two
+commits behind, then fr_cert2 one commit behind `perf(dispatch): front-classify RPOPLPUSH
+-- 1.4792x -> 0.5182x, dispatch -86.7 pct`, four minutes after I built it. Neither
+invalidates the nulls above, because an A/A null compares fr against fr and both arms are
+the SAME ELF, so staleness cancels exactly. It would invalidate an A/B, which is precisely
+why the check runs before every measurement now.
+
+PROVENANCE: fr ELF 2550a666795d8d14184060e29327770a45f098a5be81f4eb099efa9ed091f4a4 for
+the banked probes; the harness self-reported the same SHA for both fr arms from
+/proc/<pid>/exe. Built locally with RCH_CARGO_WRAPPER_BYPASS=1 exported and
+env -u CARGO_TARGET_DIR, no [RCH] line. thinkstation1, 64 cores observed, governor
+powersave, /data 189G. Per-arm loadavg and mean CPU MHz are in the table.
