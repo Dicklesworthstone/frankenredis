@@ -37,6 +37,28 @@ arms; this one adds a function, so it fires. **A symbol check proves contaminati
 and proves nothing when it does not** — the general check is that the before arm's base is not an
 ancestor of the lever.
 
+### DISCLOSURE — this commit swept a peer's concurrent work, and the after-ELF carried it
+
+`5bc439a57` was made with `git commit -- <paths>`, which takes the WORKING TREE version of those
+paths. CrimsonHawk's uncommitted `frankenredis-getexgate` work was in the same two files, so it
+is inside my commit under a message that describes only the keyed-values lever: the
+`default_write_allowed: Option<bool>` threading through `can_execute_plain_incr_borrowed`,
+`execute_plain_getdel_borrowed` and neighbours (fr-runtime hunks ~10721, ~10845, ~10972, ~11095,
+~11237). Their ledger row is owed against that sha and is not mine to write. Nothing was lost; the
+attribution was.
+
+**A pathspec commit does NOT isolate you from a co-edited file.** The check that would have caught
+it is `git diff --stat` on each path immediately before committing, against the line count you
+believe you wrote: mine read 263 insertions in a file where I had written about 50, and I looked
+only afterwards.
+
+**WHAT IT MEANS FOR THESE NUMBERS.** The after arm overlaid the working tree, so it contained their
+work; the before arm was clean HEAD and did not. The three measured shapes do not invoke INCR or
+GETDEL, and the same-class write control moved 0.1 instr/op — so I do not believe their change
+moved my figures, but `nm` cannot settle it because those predicates inline. **That is an argument,
+not a proof, and the row carries it rather than omitting it.** A clean re-measure against
+`5bc439a57^` would settle it and has not been run.
+
 ### THE MEASUREMENT — per-arm loadavg 13.23 / 15.13 / 16.79, CPU idle 88 pct, iowait 0 pct
 
     shape             before     after      delta             dispatch
