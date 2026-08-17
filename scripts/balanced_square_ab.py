@@ -573,6 +573,26 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
     # Both members of each pair run in the SAME invocation and window: comparing a
     # small row from one run against a large row from another would reintroduce the
     # cross-window error these pairs exist to remove.
+    #
+    # MEASURED OUTCOMES, recorded here because this is where the next person looks and
+    # because a stale label in exactly this position (`"= production"` on the wrong LZF
+    # arm) cost me a wrong claim earlier today. --rounds 31, LANG=en_US.UTF-8, live
+    # incumbent in the same invocation, normalised against get_control only when the
+    # control was itself admissible:
+    #
+    #   xrange_2      NEVER CERTIFIED in 2 attempts: STRADDLES-1 (CI [0.9665, 1.0075]),
+    #                 then NULL-FAILED (null_redis 1.0204). Too short to measure.
+    #   xrange_64     1.1206 / 1.1229 raw (0.2% apart), ADMISSIBLE both; 1.0124 normalised
+    #   geosearch_2   1.0202 raw ADMISSIBLE, 0.9162 normalised -- fr BEHIND the control
+    #   geosearch_64  1.1240 raw ADMISSIBLE, 1.0094 normalised -- fr AHEAD. An inversion.
+    #   hgetall_3     1.1722 raw ADMISSIBLE, 1.0641 normalised
+    #   hgetall_64    1.5466 raw ADMISSIBLE, 1.4040 normalised (raw replicated 3x within 1.3%)
+    #
+    # THE PATTERN THAT MATTERS: all four large-N siblings certified. Only two of the
+    # four small-N originals did -- sort_ro_alpha (elsewhere) and xrange_2 each failed
+    # to certify, for DIFFERENT reasons. So the board's small-n rows are not merely
+    # misleading about the command; half of the ones tested cannot be certified at all,
+    # and they have been quoted regardless.
     "sizepairs": [
         ("xrange_2", ["XADD xst 1-1 f v", "XADD xst 1-2 f v"],
          ["XRANGE", "xst", "-", "+"]),
