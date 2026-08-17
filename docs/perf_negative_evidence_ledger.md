@@ -36215,3 +36215,122 @@ RETRY PREDICATE:
      establishes member-uniqueness in general — sorted by (score, member), a repeated member
      with two different scores need not be adjacent.
   3. Do NOT quote this row as a RESTORE figure. Every number here is whole-job DEBUG RELOAD.
+
+--------------------------------------------------------------------------------
+## 2026-08-17 CrimsonHawk: REJECTED — pre-sizing the listpack blob buffer. The mechanism WORKS (realloc traffic −25 pct) and the lever still loses, because computing the exact size costs O(n) while the reallocs it removes are O(log n). Reading at ONE shape said −0.18 pct; at 200 members it is a +1.87 pct REGRESSION (`frankenredis-qj6jn`)
+
+Lever: `encode_listpack_strings_blob` starts its output buffer at capacity 6 and grows it by
+doubling, so a list RDB-save reallocs ~7 times per blob. Every sibling encoder in the same file
+already pre-sizes with `LISTPACK_BLOB_OVERHEAD + ...`, and `listpack_entry_encoded_len` — a
+function documented to equal EXACTLY the bytes `encode_listpack_entry` appends — already exists.
+This call site had simply never adopted it: the same shape as three levers that DID pay this
+week. Reverted; `crates/fr-persist/` is byte-identical to HEAD.
+
+### WHY THE LIST RELOAD WAS THE TARGET AT ALL
+
+With zset moved to 2.5693x by the previous row, `list` became the worst reload type at
+2.6764x, and its profile is unlike the others — no dominant frame, but the ALLOCATOR
+everywhere, where redis shows none in its top eight:
+
+    mi_theap_malloc_aligned  1,744.9      __memcpy_avx_unaligned_erms  5,141.2
+    _mi_theap_realloc_zero   1,321.1      redis, same workload:        no allocator frame
+    mi_free                  1,282.8                                   in the top 8
+    _mi_page_malloc_zero     1,218.4
+    -------------------------------
+    5,567 instr/key = 9.7 pct in the allocator
+
+Attributed off the callgrind CALL RECORDS rather than by frame name, `RawVecInner::finish_grow`
+runs **28.71 times per key per reload** for one 40-element list. Its callers, per key:
+
+    RawVecInner::reserve -> ...                      18.84 calls   4,794.3 Ir
+      of which  PackedStrSet::append                  7.58 calls   1,845.1   (fr-store)
+                encode_listpack_string_entry          6.00 calls   1,405.5   (fr-persist)
+                store_to_rdb_entries_with_thresholds  4.00 calls   1,350.0   (fr-runtime)
+    RawVec::grow_one -> ...
+      of which  decode_rdb_prefix_impl                5.04 calls   1,802.6   (fr-persist)
+                encode_rdb_internal                   5.00 calls   1,144.1   (fr-persist)
+
+    ~7,547 instr/key of buffer growth, 13.2 pct of the list reload, and it is the SAME defect
+    in five places: buffers that grow instead of being sized. That map is the useful part of
+    this row and it is why the lever looked obvious.
+
+### THE MECHANISM WORKED. THE LEVER STILL LOST.
+
+    frame            ORIG      CAND     change
+    finish_grow      567.6     440.5    −22 pct
+    realloc        1,939.4   1,456.3    −25 pct
+    encode_listpack_strings_blob (self)  794.0 -> 835.0   +41, the sizing pass
+    lzf_compress  6,111.5   6,111.5     IDENTICAL
+
+The reallocs really did go away. What killed it is the price of knowing the size.
+
+### DOSE-RESPONSE IS WHAT REFUTED IT, AND IT INVERTS
+
+One shape would have banked this. Three shapes reject it:
+
+    members   A/A null      ORIG        CAND       delta        vs redis 7.2.4
+       4      1.002585    13,850.9    13,137.0    −5.15 pct   1.2334x -> 1.1699x
+      40      0.999471    57,364.6    57,178.3    −0.32 pct   2.6711x -> 2.6624x
+     200      1.000515   218,367.0   222,454.2    +1.87 pct   3.3163x -> 3.3784x  REGRESSION
+
+    +1.87 pct at 200 members is 36x that arm's own null. It is not noise; it is the lever
+    working backwards.
+
+THE ARITHMETIC, AND IT IS THE WHOLE POINT. `listpack_entry_encoded_len` calls
+`parse_listpack_integer` — the SAME canonical-decimal probe `encode_listpack_entry` then runs
+again — so the sizing pass costs ~25 instr per entry and is O(n). The reallocs it removes are
+doublings: O(log n), measured at ~690 instr/key at 200 members and ~276 at 4. So the cost grows
+linearly against a saving that grows logarithmically, and the two cross somewhere around
+n = 20–40. At n = 40 — the default this campaign's reload harnesses happen to use — the two
+nearly cancel and the row reads −0.18 to −0.32 pct: a small, plausible, publishable-looking
+win that is a REGRESSION on any list big enough to matter.
+
+    A MARGINAL LEVER MEASURED AT ONE SIZE IS NOT A MARGINAL LEVER, IT IS AN UNKNOWN ONE. The
+    thin-margin discipline for this shape is dose-response, not a second ELF: a second ELF
+    would have reproduced −0.32 pct at n=40 twice and I would have shipped a regression with
+    a replication to vouch for it. Layout artefacts are what a second ELF catches; a
+    WRONG-SIGN-AT-SCALE lever is what dose-response catches, and only the second was the
+    hazard here.
+
+### VERIFIED AS A BY-PRODUCT, WORTH RECORDING SEPARATELY
+
+`listpack_entry_encoded_len` IS exact. Before rejecting the lever I pinned its contract on
+every encoding it branches on — 7-bit uint and its 127/128 boundary, the 13-bit int boundaries
+at ±4096, int16/24/32/64 including `i64::MIN`, non-canonical decimals that must stay strings
+(`007`, `-0`, `+1`, `1.0`, empty), and the 6-bit/12-bit string header boundaries at 63/64 and
+4095/4096 — and in every case the finished blob was exactly `LISTPACK_BLOB_OVERHEAD + sum`,
+with `capacity == len`. So the contract the quicklist packer depends on
+(`quicklist2_node_count`, the `lens` slice) is sound. That test is NOT retained: with the lever
+reverted its `capacity == len` half would fail, and its length half asserts an invariant no
+observed defect has ever violated.
+
+### PROVENANCE
+
+  ELF           86eaeae495fd7120, `release-perf`, built locally with
+                RCH_CARGO_WRAPPER_BYPASS=1, no `[RCH]` line. Both arms from this ONE ELF via
+                `FR_PERF_AB_LISTPACK_BLOB_PRESIZE_ORIG=1`.
+  harness       scratchpad `reload_slope.py` + `zset_board.py`, K=4 -> K=12 DEBUG RELOAD slope,
+                one fresh working directory per point, soundness assertion active and silent.
+  incumbent     vendored redis 7.2.4, verified sha=d2c8a4b9 == vendored source HEAD, clean.
+  host          thinkstation1, 64 cores OBSERVED, powersave, /data 91G free.
+  PER-ARM loadavg/MHz   17.30/18.11/20.52 rising to 17.86/18.18/20.49 across the run; MHz mean
+                2791, 3139, 2852, 2423 per arm (max 4070-4192, min 1429). STABLE regime.
+  gates         fr-persist 226+5+10+12 tests passed with the lever in place; clippy
+                --all-targets -D warnings clean; fmt clean. All reverted.
+
+RETRY PREDICATE — reopen this surface ONLY IF the sizing pass can be made free, i.e. only if
+a candidate reaches `encode_listpack_strings_blob` with per-entry lengths ALREADY computed by
+its caller, AND the resulting A/B shows a saving at n = 200 (not only at n = 4 and n = 40)
+that exceeds that arm's own A/A null. If any measured size regresses, it is the same lever
+again and it stays rejected. The lever is not dead; the DOUBLE PROBE is:
+  1. The caller already computes these lengths. `encode_rdb_internal`'s quicklist path walks
+     `listpack_entry_encoded_len` per item to pack nodes (see the `lens` slice comment at
+     `fr-persist/src/lib.rs:2398`, which exists precisely so the packer does not recompute).
+     Thread those lengths into `encode_listpack_strings_blob` instead of recomputing them and
+     the sizing pass costs ZERO — leaving only the −690/−276 instr/key realloc saving, which
+     is positive at every size measured here. That is the version worth building.
+  2. Do NOT substitute a cheap upper bound (`entry.len() + 11`). It removes the probe but
+     over-allocates ~40 pct, and this blob is RETAINED by `ChunkedList` SEAL, so it would buy
+     instructions with resident bytes on a keyspace whose RAM is already a tracked deficit.
+  3. Whatever is built, gate it at n = 4, 40 and 200. A single-size reading on this encoder is
+     now known to be sign-unstable.
