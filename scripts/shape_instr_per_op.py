@@ -388,6 +388,27 @@ SHAPES = {
     ),
     "scan_zero": (["SET sc1 a", "SET sc2 b"], ["SCAN", "0"]),
     "lcs_2": (["SET lc1 ohmytext", "SET lc2 mynewtext"], ["LCS", "lc1", "lc2"]),
+    # (frankenredis-gvm6z) The SIZE SIBLING for LCS, and the reason it exists is that
+    # `lcs_2` measured 1.1085x -- the worst cell on my screen -- over strings of EIGHT and
+    # NINE characters. LCS is O(n*m), so `lcs_2` runs a 72-cell DP: at 7,132 instr/op with
+    # 2,451 of that dispatch, almost none of the op is the algorithm. This repo has now
+    # read a one-point shape as a command claim three times (SORT n=3, the refuted SINTER
+    # k-crossover, and KEYS n=2 where 1.0353x inverted to 0.6806x by n=64), so LCS does
+    # not get quoted until it has a second point.
+    #
+    # 64x64 = 4,096 cells against 72 -- 57x the DP work on the same fixed cost. The two
+    # points are a FALSIFICATION TEST with both outcomes named in advance:
+    #   * ratio stays near 1.11  -> the deficit is in the DP kernel itself, and dispatch
+    #                               is not the lever; attack the inner loop.
+    #   * ratio falls toward the ~0.4-0.6 control band -> `lcs_2` was measuring the
+    #                               intercept, and 1.1085x must never be quoted bare.
+    # Strings differ every 8th character so the DP is neither degenerate-equal nor
+    # degenerate-disjoint, and both are read-only, so the shape stays a steady-state
+    # no-op for the two-point subtraction.
+    "lcs_64": (
+        ["SET lcA " + "abcdefgh" * 8, "SET lcB " + "abcdxfgh" * 8],
+        ["LCS", "lcA", "lcB"],
+    ),
     "zinterstore_2": (["ZADD zi1 1 a 2 b", "ZADD zi2 3 b"],
                       ["ZINTERSTORE", "zidst", "2", "zi1", "zi2"]),
     "zrangestore_all": (["ZADD zrsrc 1 a 2 b 3 c"],

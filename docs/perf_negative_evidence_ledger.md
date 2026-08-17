@@ -30301,3 +30301,93 @@ RETRY PREDICATE: LCS is now the ONLY shape left above parity (1.0736x, 34.4 pct 
 recoverable, x1.8 = ~3,570, projecting ~0.50x rather than the ~0.81x the old rule gave.
 `7f6d3b39a` says its generic lives in another crate, which raises the cost but does not change
 that arithmetic.
+
+--------------------------------------------------------------------------------
+## MEASURED + CORRECTION (frankenredis-gvm6z) — LCS's "1.1085x worst cell" is ALSO an intercept: at 64x64 fr is 0.1190x, 8.4x ahead. And I must correct a false statement in my own KEYS row
+
+Claim class: COMPETITIVE. fr/redis instructions per op, both arms in ONE invocation,
+incumbent verified on every run. Single draw per shape — directional, see the caveat.
+
+### FIRST, THE CORRECTION, because it is in a row already banked
+
+My KEYS row above says "`corpus_coverage.py` classes it [C], machinery to be written, not
+a one-entry lever." **That is false, and it was false when I wrote it.** The [A]/[B]/[C]
+split is computed ONLY over the blind spot — commands that are unclassified AND unshaped.
+`keys` HAS a shape, so it lands in "unclassified but MEASURED" and never receives an
+A/B/C label at all. I asserted a classification the tool structurally cannot emit. Checked
+by calling the tool's own functions rather than re-reading its printout.
+
+Worse for the conclusion I drew: a borrowed KEYS executor already existed as uncommitted
+peer work while I was measuring, and `6ce613360 perf(dispatch): front-classify SCAN and
+KEYS` has since made KEYS parser=True executor=True floor_classified=True. So KEYS was
+nearly a one-entry lever, which is the opposite of what my row told the next reader.
+
+**The measurements in that row stand; only that sentence is withdrawn.** Its n=2/16/64
+numbers were taken on ELF 3f027a4f BEFORE 6ce613360 and are therefore the BEFORE arm for
+that lever. Whoever validates it should use them, and should check the INTERCEPT and the
+crossover — the slope must come back unchanged at 351.7 instr/key.
+
+### SECOND, FOUR MORE SHAPES, AND THE SAME TRAP AGAIN
+
+    shape              fr instr/op   redis instr/op    ratio     fr dispatch
+    lcs_2                  7,132.0        6,433.9    1.1085x    2,451.3 (34.4 pct)
+    pfmerge_2            108,611.2      121,597.8    0.8932x    3,012.7 ( 2.8 pct)
+    zrangestore_all        9,979.2       12,590.0    0.7926x    3,787.6 (38.0 pct)
+    spop_missing           1,600.3        2,504.8    0.6389x      335.7 (21.0 pct)
+
+`lcs_2` came out the worst cell on the board at 1.1085x. Its strings are `ohmytext` and
+`mynewtext` — EIGHT and NINE characters, a 72-cell DP. LCS is O(n*m), so essentially none
+of those 7,132 instr/op is the algorithm.
+
+`lcs_64` was written with BOTH outcomes named before it ran: stay near 1.11 and the deficit
+is the DP kernel; fall toward the control band and 1.1085x was intercept. It fell.
+
+    lcs_64   fr 10,713.9   redis 90,030.6   **0.1190x — fr 8.4x AHEAD**   dispatch 2,472.3
+
+    fr     0.890 instr per DP cell
+    redis 20.775 instr per DP cell        redis/fr 23.3x
+
+**LCS is not a deficit in any regime that does real work.** 1.1085x must never be quoted
+without "at 8x9 characters" attached. This is the FOURTH time this repo has read a
+one-point shape as a command claim (SORT n=3, the refuted SINTER k-crossover, KEYS n=2
+inverting 1.0353x -> 0.6806x, now LCS inverting 1.1085x -> 0.1190x). Every one of them
+pointed the same way: the small shape flatters redis, because redis's fixed cost per
+command is LOWER and its per-unit cost is HIGHER.
+
+    THE RULE THIS EARNS: a shape whose command is O(n*m), O(n) or O(keyspace) is not a
+    measurement of that command until a second size exists. The screen ranks intercepts.
+
+CAVEAT, stated rather than buried: the LCS slope is a TWO-POINT fit and this repo has a
+refuted two-point crossover on record, so 0.890 vs 20.775 instr/cell is provisional and
+wants a third size before anyone builds on the 23.3x. The DIRECTION does not depend on the
+fit — 1.1085x and 0.1190x are measured points, not interpolations. Each ratio here is a
+single draw and the harness documents roughly +/-8 pct on the redis arm, which is
+irrelevant at 0.1190x and material for `pfmerge_2` at 0.8932x; do not treat pfmerge as
+adjudicated.
+
+STILL OPEN, and it is the one number here that is NOT explained away: `zrangestore_all`
+carries **3,787.6 instr/op of dispatch, 38.0 pct** — the largest absolute dispatch cost in
+any shape I have measured, larger than KEYS's 1,997. zrangestore has parser=False
+executor=False floor_classified=False: genuinely no borrowed machinery. Its 0.7926x is
+also a 3-member shape and so intercept-suspect, but dispatch is a per-CALL constant, so
+that figure is real at every size. That is the next lever, and it needs a size sibling
+first.
+
+PROVENANCE:
+  fr ELF        sha256 3f027a4f7ebadb7767316134d4c0f6810295b2fd21bba160f260279778290815,
+                built locally with RCH_CARGO_WRAPPER_BYPASS=1 exported and
+                env -u CARGO_TARGET_DIR, no [RCH] line, copied to a private path before
+                measuring. Same ELF as the KEYS row, so the two are comparable.
+  incumbent     `incumbent verified: redis-server sha=d2c8a4b9 == vendored source HEAD,
+                clean` on every run above.
+  host          thinkstation1, 64 cores observed, governor powersave, /data 166G.
+  per-arm load  lcs_2/pfmerge_2 21.36/22.31/26.38; zrangestore_all/spop_missing
+                19.27/21.77/26.11; lcs_64 23.64/19.35/12.02 -> 23.75/19.45/12.09.
+                NOT converged for lcs_64 (1-min above 15-min, rising), which is why this
+                row claims directional single draws and certifies nothing.
+  per-arm MHz   3,798 mean at the lcs_64 arm, cross-core 3,771-3,887.
+
+RETRY PREDICATE. Do not re-derive `lcs_2` and do not quote 1.1085x bare. Add a third LCS
+size before using the 23.3x per-cell figure for anything. For `zrangestore_all`, add a size
+sibling BEFORE reading its 0.7926x, but its 3,787.6 instr/op of dispatch may be acted on
+now, since a per-call constant does not depend on the shape's size.
