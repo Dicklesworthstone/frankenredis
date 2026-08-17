@@ -8,6 +8,91 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-08-17 MossyOrchid: ALL THREE ROUTES NOW HAVE REPLICATED STANDING — and the worst bounds separate them sharply: ZINTERCARD **1.2031x**, its LIMIT form **1.1955x**, XPENDING **1.0001x**. The third is at PARITY at its worst bound and must not be called a win (`frankenredis-5na4i`)
+
+Claim class: COMPETITIVE. Campaign output: yes. Every round below ran a live vendored redis 7.2.4
+arm side-by-side with the fr arm inside the same invocation of `scripts/balanced_square_ab.py`,
+with both ELF SHA-256s read from `/proc/<pid>/exe` of the RUNNING processes.
+
+Completes the row below by running the replicates its retry predicate asked for, at 31 rounds as
+the LIMIT form's single null failure suggested. Four invocations total:
+
+    shape             admissible draws (ratio, 95% CI)                       null-failed  WORST BOUND
+    zintercard_2      1.2557 [1.2031,1.2777]  1.2367 [1.2253,1.2873]
+                      1.2647 [1.2431,1.3035]                                     1        **1.2031x**
+    zintercard_limit  1.2185 [1.1955,1.2311]  1.2260 [1.2016,1.2545]              2        **1.1955x**
+    xpending_empty    1.0160 [1.0001,1.0342]  1.0316 [1.0144,1.0447]              2        **1.0001x**
+    get_control       1.1125 [1.0971,1.1579]                                      3        —
+
+WORST BOUND = the lowest CI-low across a shape's ADMISSIBLE draws, i.e. the most pessimistic
+reading its intervals allow, per the replicated-standing convention. Direction here is fr/redis
+OPS/S, so above 1.0 is fr ahead.
+
+WHAT SEPARATES THE THREE, and it is the whole reason to quote the worst bound rather than the
+headline:
+
+  * **ZINTERCARD plain, 1.2031x** — three admissible draws, every interval clear of parity by
+    20 pct. A real, replicated throughput win over the incumbent.
+  * **ZINTERCARD LIMIT, 1.1955x** — two admissible draws, likewise clear of parity by ~20 pct.
+    It needed 31 rounds to certify; at 21 it null-failed once (fr null 0.9789), which is the
+    harness catching contention rather than the route being unstable.
+  * **XPENDING summary, 1.0001x** — two admissible draws, BOTH above 1.0, so it has replicated
+    standing in form. But the worst bound is 1.0001: at the most pessimistic pairing the
+    intervals allow, fr is at PARITY with Redis, not ahead of it. **This is not a crossing and
+    must not be quoted as one.** The honest statement is: fr is somewhere between parity and
+    4.5 pct ahead on this shape, and the evidence cannot say where.
+
+That third row is the convention working. Its headline draws (1.0160, 1.0316) read like a win,
+and a point-estimate summary would have banked it as one — the same shape as `geosearch_64`'s
+1.0094, which never replicated. The worst bound refuses it.
+
+THE NULLS ALSO WORKED, which is worth stating because it is easy to read null failures as noise:
+the fourth invocation ran at loadavg 26.00 (up from 10.70) and the harness refused 3 of its 4
+rows on their own A/A nulls, keeping only `xpending_empty`, whose nulls were 1.0044/1.0088. A
+harness that had reported all four would have handed me a contended window's numbers.
+
+### The A/A null, and the decision rule
+
+The per-arm nulls are same-invocation A/A ratios by construction — each arm's first-half slots
+over its second-half slots, placed symmetrically by the `ABBAABBA` square. Across all admissible
+draws of the three shapes: 1.0124, 0.9965, 0.9994, 1.0064, 1.0080, 0.9824, 0.9990, 0.9928,
+1.0125, 0.9942, 1.0044, 1.0088.
+
+    A/A null median 1.001900, **bootstrap 95% median CI [0.995350, 1.008400]**
+    (20,000 percentile resamples, seed 20260817)
+
+GATE: that bootstrap median-CI is the decision rule. The band is +/-0.8 pct. It clears
+ZINTERCARD's ~20 pct effects by ~25x — and it does NOT clear XPENDING's worst bound of 0.01 pct,
+which is precisely why that row is reported as parity rather than as a win: the null band is
+eighty times wider than the margin being claimed.
+
+CV was not used, as a gate or otherwise.
+
+PROVENANCE:
+  ELF        fr bench_elf_sha256=c23cc633c6e7e398df84f2297fd22c88b8ec13a4fb0ce2fed9aa41ac86c79f23;
+             redis e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7.
+  observed   fr_threads 3, redis_threads 5; thinkstation1, 64 cores, powersave, avx2, unpinned.
+  harness    scripts/balanced_square_ab.py, ABBAABBA, 21 and 31 rounds, 50,000 ops/slot, -P16,
+             per-arm null bound +/-0.02, shape group `frontclass`.
+  PER-ARM    run 3 loadavg 10.70 / 11.16 / 10.43, CPU MHz before mean 2792 (1429-4294, spread
+             3.00x), after mean 2896 (1429-4114, 2.88x).
+             run 4 loadavg 26.00 / 17.28 / 12.88, CPU MHz after mean 3305 (1429-4117, 2.88x).
+             Runs 1-2 are in the row below.
+  /data      232G.
+
+### RETRY PREDICATE
+
+  1. XPENDING's summary form is the open one. To move it off parity, either the ROUTE needs more
+     of the op (its fr-side dispatch is already down from 2,846 to 640 instr/op, so the remaining
+     cost is the summary build itself), or the SHAPE needs to be larger — `xpending_populated`
+     was never run on this harness and has 32 pending entries rather than an empty group.
+     Measure that before concluding the route cannot beat the incumbent.
+  2. Do not re-run `zintercard_2` or `zintercard_limit` for more standing; three and two
+     admissible draws with intervals 20 pct clear of parity is sufficient, and each extra draw
+     costs a window someone else could certify in.
+
+--------------------------------------------------------------------------------
+
 ## 2026-08-17 MossyOrchid: CERTIFIED — ZINTERCARD is **1.2557x / 1.2367x the throughput of Redis 7.2.4**, ADMISSIBLE in BOTH replicates, worst bound **1.2031x**. Certified on the contended-host harness after the quiet-window gate proved unreachable (`frankenredis-5na4i`)
 
 Claim class: COMPETITIVE. Campaign output: yes. Each round below ran a live vendored redis 7.2.4
