@@ -29174,3 +29174,63 @@ PROVENANCE:
   no build, no test, no measurement by me this tick. Disk at 16-18G, 100 pct full.
   the BEFORE figures above are p98mw's, quoted from their commit messages and attributed.
   the predictions are mine, from ledger 15bf17cb9, and are OPEN.
+
+--------------------------------------------------------------------------------
+HEAD DID NOT COMPILE (frankenredis-ozrro, frankenredis-p98mw) — duplicate DUMP/RANDOMKEY
+entries from a swept working tree. FIX IS IN THE SHARED WORKING TREE, VERIFIED, UNCOMMITTED
+because RusticLark holds main.rs until ~04:17Z
+
+Claim class: BUG (live in HEAD) + HANDOFF
+
+Builds resumed this tick, so the first thing I did was compile the DUMP/RANDOMKEY entries
+that had landed UNCOMPILED under the disk halt. They do not compile:
+
+    error[E0428]: the name `Randomkey` is defined multiple times
+    error[E0428]: the name `Dump` is defined multiple times      (six occurrences)
+
+CAUSE, and it is a process failure rather than anyone's coding error. p98mw wrote their own
+DUMP and RANDOMKEY floor entries; I had prepared mine build-free and applied them the same
+tick; the fleet-wide emergency `git add -A` then swept my uncommitted change into their
+commits. Both sets landed — class enum, command enum, tokens, arity map and arms, each
+defined twice — and NOTHING COMPILED EITHER COPY because builds were halted for disk at the
+moment both went in. An emergency `git add -A` across a shared working tree is exactly the
+sequence that produces this, and it will produce it again.
+
+THE FIX, ALREADY APPLIED IN THE WORKING TREE AND VERIFIED: mine removed, p98mw's kept.
+Theirs stay because theirs carry the MEASUREMENTS (DUMP 0.9561x, 48.7 pct dispatch share,
+~2,478 instr/op) while mine carry only predictions. Removed by INVERTING my own apply
+script — each removal matches the exact string I inserted and asserts its occurrence count
+first, so it cannot take a neighbour with it. 366 fr-server tests pass.
+
+    IT IS UNCOMMITTED ONLY BECAUSE RusticLark HOLDS main.rs UNTIL ~04:17Z AND I DID NOT
+    OVERRIDE THE GUARD. In a shared working tree that is less serious than it sounds: the
+    fix is physically present in the checkout, so anyone who builds here gets the
+    compiling version. What is missing is the commit. RusticLark, who holds the file, can
+    simply commit it; agent mail has timed out on every attempt this session, so this row
+    is the channel.
+
+MY TEST WAS KEPT DELIBERATELY and is the one piece of mine that stays: it was not
+duplicated, it pins the floor-class promise for both commands regardless of whose entry
+implements them, and IT PASSES AGAINST p98mw's IMPLEMENTATION. An independent test
+validating someone else's entry is worth more than two copies of the entry.
+
+AND A PREDICTION CLOSED, THE FIRST INDEPENDENT TEST OF THE DEPTH LAW. I predicted DUMP's
+before-dispatch at ~2,445 instr/op purely from its cascade position (arm 60) and the
+45.1-per-position fit banked in 15bf17cb9. p98mw measured ~2,478.
+
+    predicted 2,445    measured 2,478    error 1.3 pct
+
+    The six points that law was fitted on were all mine, so this is the first time it has
+    been checked against someone else's measurement, and it held. RANDOMKEY's absolute
+    figure is still unbanked, so that half of the prediction (~2,490) remains OPEN.
+
+PROVENANCE:
+  one debug build this pane (cargo test), no release build, no benchmark, nothing certified.
+  /data 162G checked before the build and again after.
+  the ~2,478 figure is p98mw's, quoted from their doc comment and attributed.
+
+RETRY PREDICATE: commit the working-tree fix — it is verified and the tree is otherwise
+clean. Then close RANDOMKEY's half with one ABBA over dump_small, randomkey_one and
+get_control reporting ABSOLUTE dispatch. And treat `git add -A` in a shared tree as the
+hazard it is: it has now swept my work into peers' commits three times this session, and
+this time it broke the build.
