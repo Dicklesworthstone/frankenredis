@@ -453,6 +453,112 @@ borrowed routes already use it. (3) The list materialisation `to_vec` at 2,561.0
 is the other owned copy on this path. (4) Do NOT retry the same borrow trick on the numeric arms:
 they hold no borrow, so there is nothing there to remove.
 
+### REPLICATION ATTEMPT, and a finding about the certification rule itself
+
+Four more ratio draws, taken SEQUENTIALLY so my own runs could not perturb the window judging
+them. **Still SIZING: every one of the four stamped UNFIT.** The gate returned FIT for ratio
+immediately before the first run (builds 0, loadavg 8.38/9.50/12.88, 12 pct apart) and 2-4
+cargo/rustc processes reappeared during the runs. Not promoted.
+
+Per-arm provenance, which is the point of recording it:
+
+    draw                     loadavg 1/5/15      fr MHz mean/max   redis MHz mean/max   builds
+    sort_ro_alpha_64 r3      8.48 9.48 12.81     1971 / 4227       2108 / 4292          2
+    sort_ro_alpha    r3      8.40 9.43 12.76     2399 / 4292       2205 / 4292          4
+    sort_ro_alpha_64 r4      8.37 9.40 12.74     2088 / 4292       2117 / 4100          4
+    sort_ro_alpha    r4      8.60 9.40 12.68     2583 / 4270       2352 / 4244          4
+
+ALL FOUR DRAWS PER SHAPE, across two independent windows hours apart:
+
+    sort_ro_alpha_64   0.2048  0.2049  0.2050  0.2050   spread 0.10 pct   WORST 0.2050x
+    sort_ro_alpha      1.0373  1.0556  1.0490  1.0706   spread 3.21 pct   WORST 1.0706x
+
+**WORST BOUND, replicated-standing: 0.2050x at n=64 and 1.0706x at n=3.** The n=64 conclusion is
+unchanged — fr retires ~4.88x fewer instructions than redis 7.2.4 on a 64-element `SORT ALPHA`.
+The n=3 worst bound moves from 1.0556x to 1.0706x, i.e. slightly WORSE than the single pair
+suggested, which is exactly why the convention says take the worst of the replicates.
+
+### THE WINDOW REQUIREMENT SHOULD SCALE WITH THE DENOMINATOR, and here is the evidence
+
+The reason a ratio needs a quiet window at all is that the DENOMINATOR is elapsed-time
+contaminated: redis's `serverCron` is work proportional to duration, which the two-point
+subtraction cannot cancel. That contamination is a FIXED quantity, so its weight depends entirely
+on how big the denominator is:
+
+    shape             redis instr/op    4-draw spread
+    sort_ro_alpha_64      ~198,400          0.10 pct
+    sort_ro_alpha           ~8,400          3.21 pct
+
+Same instrument, same four windows, a 32x difference in sensitivity. On the 64-element shape the
+cron residue is proportionally invisible and the ratio reproduces to a tenth of a percent across
+windows that the gate refused; on the 3-element shape it is the dominant error term.
+
+So a blanket FIT/UNFIT gate is the right default and the wrong precision instrument. **A row whose
+denominator is ~200k instr/op is not meaningfully improved by a quiet window; a row whose
+denominator is ~8k is not rescued by one either — it needs replicates and a worst bound.** Both of
+these rows are quoted as SIZING regardless, because the gate is the standing contract and I am not
+carving an exception for my own numbers. Recorded so the next person sizing a window against a
+deadline knows which of their rows actually depends on it.
+
+RETRY PREDICATE for the FIT stamp specifically: the blockers are not frankenredis. Observed
+holding the gate UNFIT today were `cargo-nextest nextest run -p mcp-agent-mail-db` and a `cargo
+test --lib -j4 quill` — other projects under the same uid, which `certification_window.py`'s own
+docstring says it cannot attribute away. Certifying these two rows requires either those loops
+stopping or the gate gaining project attribution; no amount of frankenredis-side discipline
+reaches it.
+
+### CERTIFIED at n=64 (2026-08-17, later the same day) — and the n=3 row is NOT, on one draw short
+
+The ratio rows above were recorded as SIZING because no FIT window was obtainable. One was
+obtained. **`sort_ro_alpha_64` is now CERTIFIED; `sort_ro_alpha` is not, and is left as it is.**
+
+    draw                    verdict   fr/redis   loadavg 1/5/15     fr MHz mean/max   builds
+    sort_ro_alpha_64 c1     FIT       0.2051x    5.74 5.52 5.98     2431 / 4292       0
+    sort_ro_alpha_64 c2     FIT       0.2046x    6.30 5.67 6.02     2663 / 4301       0
+    sort_ro_alpha    c1     FIT       1.0649x    6.24 5.65 6.01     2284 / 4292       0
+    sort_ro_alpha    c2     UNFIT     (0.9999x)  6.91 5.83 6.07     2551 / 4267       2
+    sort_ro_alpha    c3     UNFIT     (1.0472x)  7.51 6.05 6.14     2384 / 4292       0
+    sort_ro_alpha    c4     UNFIT     (1.0195x)  7.55 6.08 6.15     2199 / 4292       0
+
+    fr    bench_elf_sha256=73ae1da08cb8c420c4da5005ccdba65fdfcc56a1da51237f0c035df817b330b1
+    redis bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+
+**CERTIFIED, worst of two FIT draws: `sort_ro_alpha_64` fr/redis = 0.2051x.** fr retires 4.88x
+fewer instructions than redis 7.2.4 on a 64-element `SORT ALPHA`, in a window stamping FIT with
+zero builds and 1.1 pct stationarity, with both engines' ELF SHA-256 recorded.
+
+**`sort_ro_alpha` has ONE FIT draw (1.0649x) and stays SIZING.** The replicated-standing
+convention wants the worst of at least two, and one is not two.
+
+### THE DISCARDED DRAW IS THE POINT
+
+`sort_ro_alpha` c2 read **0.9999x** — parity, the crossing this route has been chasing all day —
+and it is REFUSED: 2 cargo/rustc appeared and the window went 19 pct non-stationary mid-run. It
+is the most flattering number of the six and it is the one thrown away. Recorded here rather
+than silently dropped, because a convention that only ever discards unflattering draws is not a
+convention. If the crossing is real it will survive a FIT window; nothing here says it is.
+
+### A CERTIFYING RUN CREATES THE CONDITION THAT DISQUALIFIES IT
+
+Draws c3 and c4 failed on stationarity alone, with **zero builds**, at 24 pct — and the cause was
+my own measurement. Back-to-back callgrind arms raise the 1-minute load above the 5-minute, and
+`|1min - 5min| / 5min` is exactly what the gate tests. The instrument perturbs the quantity the
+gate reads, so a batch of sequential draws burns its own window: the first draw or two stamp FIT,
+and every one after fails.
+
+**How to actually get replicates:** space them, and re-check the gate immediately before each
+draw rather than once before the batch. Do NOT run them concurrently either — that raises the
+1-minute faster. This is why the four draws banked above arrived as two FIT and two UNFIT rather
+than four of anything, and it is a property of the METHOD, not of the host being busy.
+
+Combined with the two independent findings this file already carries — that build count is
+uncorrelated with denominator spread (`fpqns`), and that the spread is set by DENOMINATOR SIZE
+(0.10 pct at ~198k instr/op against 3.21 pct at ~8.4k, same instrument, same windows) — the
+picture is consistent: **a large-denominator ratio certifies easily and did not need the window;
+a small-denominator one is hard to certify and would not be fixed by the window either.**
+`sort_ro_alpha_64` is the first kind. `sort_ro_alpha` is the second, which is why it still has
+one draw after six attempts across four windows.
+
 ## 2026-08-17 MossyOrchid: ANSWERED — the ZINTERCARD +112 pct is an INLINING flip, not a routing change: adding ONE arm turned `parse_borrowed_multibulk_action` from 4,000 out-of-line calls into 1, and the chain's own call counts are IDENTICAL in both arms (`frankenredis-5na4i`)
 
 Claim class: MECHANISM, resolving the question two rows below. Certified window: loadavg 8.31
