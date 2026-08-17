@@ -35232,3 +35232,69 @@ RETRY PREDICATE, in the order I would take them:
      ~1,150 and ~800 per key). lzf is at 1.37x and is no longer the gap.
   3. The hashbrown rebuild on load is the architectural item and belongs to `b1o02`/`pf1vw`,
      not here.
+
+--------------------------------------------------------------------------------
+## 2026-08-17 RusticHorizon: the owed measurement for `f6fef2885` — the CONFIG GET predicate reorder is −9.11 pct, and the control came out BIT-IDENTICAL across both arms (`frankenredis-e6c9t`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir), not a timing verdict; this
+harness's fr arm repeats to 0.09 pct. CV was not used, as a gate or otherwise.
+
+Claim class: COMPETITIVE. Campaign output: yes — fr/Redis 7.2.4 on `config_get_one` measures
+4.0854x after this change, from 4.5557x before, both arms live in the same invocation.
+
+`f6fef2885` landed the reorder with four local builds running and said plainly that no
+certification was attempted and the ratio was OWED. Paid here, same-tree.
+
+    shape             BEFORE      AFTER       delta
+    config_get_one   30,025.9    27,289.1    −9.11 pct  (−2,736.8 instr/op)
+    client_info      15,122.5    15,122.5     0.00 pct  CONTROL — BIT-IDENTICAL
+    get_control       1,308.2     1,308.4    +0.02 pct  NULL
+
+    THE CONTROL IS EXACT, not merely small. `client_info` returned the identical figure to one
+    decimal on both binaries. It is a generic-route container command, so it shares the
+    dispatch machinery, and it does not touch `collect_config_entries` — which is precisely
+    the discrimination the control exists for. A change that had leaked outside the config
+    path could not have left it at 15,122.5 twice.
+
+THE ARITHMETIC CONFIRMS THE MECHANISM. The reorder removes ~190 x 23 = 4,370 string
+comparisons per CONFIG GET, replacing them with 190 cheap pattern compares plus one 23-compare
+chain. Measured saving 2,736.8 instr/op is ~0.63 instructions per removed comparison — right
+for `name == "literal"` where the length check rejects almost every pair before any bytes are
+read. A saving far above that would have meant I was removing something other than what I
+thought.
+
+CUMULATIVE ON CONFIG GET, all measured, three commits:
+    39,970  original                                    6.2108x
+    30,249  literal fast path, glob engine removed      4.6047x   (3b47bc73b)
+    27,289  predicate reorder                           4.0854x   (f6fef2885)
+    −31.7 pct in total, 6.21x → 4.09x.
+
+STILL THE WORST ROUTE ON THE BOARD, and worth stating against the standing brief: hash RESTORE
+re-measured at 2.2021x this session, so CONFIG GET at 4.09x is roughly twice as far behind —
+and RESTORE additionally carries the isolation law (break-even ~1.034 reads/RESTORE), which
+CONFIG GET does not. The remaining CONFIG GET cost is the 190-entry walk itself: even with the
+skip chain hoisted, every literal request still iterates all 190 static parameters. The
+indexed path that would avoid it already exists
+(`collect_config_static_literal_indexed`) and excludes dynamic parameters by construction.
+
+PROVENANCE:
+  AFTER ELF     68cfefc6fec15eb7      BEFORE ELF  4aa3913d9673bf3a (same tree,
+                reverse-patched, restored in the same command)
+  harness       scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines in the SAME
+                invocation. Incumbent verified in-run: sha=d2c8a4b9 == vendored HEAD.
+  host          thinkstation1, 64 cores, powersave, /data 102-104G, TWO PEER BUILDS running.
+  PER-ARM loadavg/MHz  before config_get 13.88/1429, client_info 13.89/1429, null 13.89/3144 ·
+                after config_get 13.90/2442, client_info 13.99/3424, null 14.47/2982.
+                Window 1/5/15 = 13.88/14.75/16.86, stable. CROSS-CORE SPREAD 1429-3424 MHz
+                (2.40x) WITHIN this row, with the two `config_get` arms at 1429 and 2442 —
+                which is exactly the frequency mismatch the standing orders warn about, and
+                exactly why this is an instruction count and not a timing number.
+  peer WIP      a peer is editing `fr-runtime/src/lib.rs` concurrently (their comment cites
+                this bead). Their changes were present in BOTH arms, so they are common-mode;
+                only the ledger is committed here, not the crate.
+
+RETRY PREDICATE: the next CONFIG GET lever is the 190-entry walk, not another predicate
+reorder — extend `collect_config_static_literal_indexed`'s index to dynamic parameters with a
+value resolver so a literal request is a hash lookup instead of a full-table iteration. Keep
+`client_info` as the control; it has now twice distinguished a config-path change from a
+global one, and once did so exactly.
