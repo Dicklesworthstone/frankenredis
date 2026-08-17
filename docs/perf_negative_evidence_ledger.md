@@ -28424,3 +28424,76 @@ overcount of the blind spot by the same 17 commands.
 PROVENANCE: no measurement, instrument only. thinkstation1, 64 cores observed, governor
 powersave, /data 186G free. loadavg 43.39/27.54/28.07 observed at the time of the run;
 no arm was measured so no MHz is recorded. No build was run for this change.
+
+--------------------------------------------------------------------------------
+LANDED + BOUNDED (frankenredis-ozrro) — the shared-executor blind spot is real and cost me
+300 lines, but its CURRENT effect on the coverage report is ZERO false positives. Guard
+landed; the [C] count of 57 stands exactly as reported
+
+Claim class: METHOD + CORRECTION-TO-A-CORRECTION
+
+Last row I found that `corpus_coverage.py` cannot see SHARED executors — fr dispatches
+several command families through one executor plus a discriminant, e.g.
+`execute_plain_keymeta_borrowed(PlainKeyMetaCmd::Pexpiretime, ..)` — and that acting on its
+[C] verdict is how I wrote a duplicate PEXPIRETIME executor. I wrote there that "[C] is an
+UPPER BOUND on work, not an estimate". That was the right shape of caution and I have now
+MEASURED it rather than left it as a caveat.
+
+`scripts/shared_executor_map.py` (new file, so unreserved) enumerates every
+`pub enum Plain*Cmd` in fr-runtime and the commands its variants name. There are EIGHT
+such enums covering 32 commands:
+
+    PlainBitfieldGetCmd   bitfield, bitfieldro
+    PlainCardinalityCmd   zcard, hlen, xlen, pfcount
+    PlainKeyMetaCmd       ttl, pttl, type, expiretime, pexpiretime
+    PlainKeyedPopCmd      lpop, rpop, spop, zpopmin, zpopmax
+    PlainKeyedValuesCmd   sadd, lpush, rpush, pfadd, hdel, srem, zrem, lpushx, rpushx
+    PlainObjectStatCmd    idletime, freq
+    PlainRandMemberCmd    srandmember, hrandfield, zrandmember
+    PlainRankCmd          zrank, zrevrank
+
+    A per-command scan sees NONE of these. So the failure mode is real, general, and worth
+    a guard — eight enums, not one wrinkle.
+
+AND THE MEASURED IMPACT ON THE CURRENT REPORT IS ZERO, WHICH I WILL NOT DRESS UP AS
+ANYTHING ELSE. Cross-referencing the 32 against the live blind spot:
+
+    blind spot                                       62
+    [C] as reported                                  57
+    [C] entries actually served by a shared executor  0
+    [B] entries actually served by a shared executor  0
+    corrected [C]                                    57   — UNCHANGED
+
+Every one of the 32 is already floor-classified or already has a shape, so none of them is
+in the blind spot at all. PEXPIRETIME was the single exception and it has since left the
+blind spot. **The [C] count of 57 is exact, not an over-count**, and my "upper bound"
+caveat last row — while correct in principle — describes a gap that is currently empty.
+
+    SO THIS ROW LANDS A GUARD AGAINST A RECURRENCE, NOT A FIX FOR A LIVE ERROR. The
+    distinction matters because the obvious way to write this up — "the tool was wrong,
+    here is the correction" — would imply the worklist has been overstating work, and it
+    has not. It overstated work exactly once, for exactly one command, and that command is
+    no longer in the list.
+
+THE SELF-TEST GUARDS BOTH DIRECTIONS, because the opposite error is just as damaging: a
+looser enum regex that pulled in unrelated `pub enum` declarations would OVERSTATE coverage
+and turn a real [C] into a missed lever. It asserts a non-`Plain*Cmd` enum contributes
+nothing, and that dispatch-MODE variants (`Ro` in `PlainBitfieldGetCmd`) are not reported
+as commands.
+
+604 fr-runtime tests unaffected; this is a scripts-only addition.
+
+PROVENANCE:
+  no measurement       tooling; loadavg 37.77/25.94/27.57 observed (the 18.8 in the request
+                       was stale), so nothing was certified.
+  host                 thinkstation1, 64 cores, /data 186G, governor powersave, no build.
+  MHz                  not recorded — no arm was measured.
+  blocked              main.rs, scripts/shape_instr_per_op.py (RusticHorizon, until ~03:53Z)
+                       and scripts/corpus_coverage.py (RusticLark, until ~03:11Z). Every
+                       [A] lever needs one of those, which is why this turn's work is in a
+                       new file.
+
+RETRY PREDICATE: wire `covered_commands()` into `corpus_coverage.py`'s executor set when
+that file frees — it changes nothing today but stops the next person repeating my
+duplicate. Do NOT quote this row as "the [C] list was wrong": it was right, and this is
+the guard that keeps it right when a shared-executor command next lands in the blind spot.
