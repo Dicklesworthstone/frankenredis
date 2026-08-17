@@ -8,6 +8,55 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## PREPARED (frankenredis-ozrro) — PUBSUB is the deepest unclassified arm at ~127 of 163, its machinery already exists, and it is the one container where claiming sibling subcommands is CORRECT
+
+No build, benchmark or measurement — builds were held for the external build cycle. Three
+shapes added and no-op verified against an existing ELF; the floor patch is written and
+UNCOMPILED.
+
+### THE PROMISE HAZARD IS INVERTED FOR THIS CONTAINER, AND THAT IS THE FINDING
+
+An arity-keyed floor class on a CONTAINER token is normally dangerous: siblings share the
+token, and an arm whose executor declines sends them to GENERIC instead of back to the
+cascade. That is a regression, and this ledger has a row saying so.
+
+PUBSUB inverts it, because only TWO borrowed pubsub parsers exist in the whole file:
+
+    parse_borrowed_plain_pubsub_packet         accepts ANY arity-2 PUBSUB, hands the
+                                              subcommand to the executor
+    execute_plain_pubsub_numpat_borrowed       `if !sub.eq_ignore_ascii_case(b"NUMPAT")
+                                              { return None; }`  (fr-runtime:30334)
+    parse_borrowed_plain_pubsub_numsub_packet  variadic, arity 3+, same discrimination
+
+So CHANNELS, HELP and SHARDCHANNELS have NO fast path. Today they walk ~127 arms, are accepted
+by the permissive parser, are refused by the executor, and reach the generic path anyway. A
+floor entry gets them to the SAME destination immediately. Both the served and the declined
+shapes get faster and no shape ends up worse — the opposite of the usual container hazard.
+`pubsub_channels` is committed as the shape that will demonstrate it.
+
+### WHY THE PATCH IS PREPARED AND NOT APPLIED
+
+The reason PUBSUB looks interesting is a PREDICTION: arm ~127 against a depth law
+(dispatch ~= 45.1 x arm - 261) fitted on arms 76-103, giving ~5,467 instr/op. Extrapolating
+that law 24 arms past its data is exactly the predicted-not-measured error the premise
+correction two rows up was about, and 5,467 would be larger than any block this campaign has
+actually taken. So the shapes go in first and the entry waits on a number.
+
+    pubsub_numpat     ["PUBSUB", "NUMPAT"]        reply :0
+    pubsub_numsub     ["PUBSUB", "NUMSUB", "ch1"] reply *2 ch1 :0
+    pubsub_channels   ["PUBSUB", "CHANNELS"]      reply *0        DECLINE control
+
+All three verified stable over 200 calls with dbsize unchanged.
+
+### WHAT WOULD ARGUE AGAINST TAKING IT, stated now so it is not rationalised away later
+
+PUBSUB is monitoring traffic, not data-path traffic. A large dispatch block on a command
+almost nobody issues in a hot loop is worth close to nothing in a real workload, whatever the
+instr/op says. If the measurement lands near the prediction the block is real — but the
+DECISION to take it still needs a traffic argument this ledger does not currently have, and
+"it was the biggest number on the board" is not one. NUMSUB is also variadic while the floor is
+keyed on fixed arity, so only arity 3 is claimable without further entries.
+
 ## MEASURED-STRUCTURE (frankenredis-ozrro) — class [A] is EXHAUSTED by ranking, not assertion: the stem-corrected screen finds 10 candidates and 0 clear the depth bar. One caveat: PUBSUB sits at arm 127 with two existing executors
 
 Source analysis only — no build, benchmark or measurement. Written during a fleet throttle
