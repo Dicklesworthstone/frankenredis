@@ -27468,9 +27468,17 @@ impl Runtime {
         src: &[u8],
         start_arg: &[u8],
         stop_arg: &[u8],
+        rev: bool,
         now_ms: u64,
     ) -> Option<RespFrame> {
-        if self.policy.gate.max_array_len < 5
+        // (frankenredis-gvm6z) `rev` selects the RANK-REVERSED form, `ZRANGESTORE dst src
+        // start stop REV` at arity 6. It is the ONLY difference: generic's rank branch is
+        // `if rev { zrevrange_withscores } else { zrange_withscores }` with identical
+        // arguments, and everything around it -- the source keyspace lookup, the
+        // empty-result delete, `force_skiplist=false`, the reply -- is shared. BYSCORE and
+        // BYLEX are NOT reachable here: they need score/lex bound parsing rather than
+        // `parse_i64_arg`, so the arm declines them to generic.
+        if self.policy.gate.max_array_len < if rev { 6 } else { 5 }
             || self.policy.gate.max_bulk_len < b"ZRANGESTORE".len()
             || dst.len() > self.policy.gate.max_bulk_len
             || src.len() > self.policy.gate.max_bulk_len
@@ -27485,14 +27493,25 @@ impl Runtime {
             return None;
         }
 
-        let argv_len_sum =
-            b"ZRANGESTORE".len() + dst.len() + src.len() + start_arg.len() + stop_arg.len();
+        let argv_len_sum = b"ZRANGESTORE".len()
+            + dst.len()
+            + src.len()
+            + start_arg.len()
+            + stop_arg.len()
+            + if rev { b"REV".len() } else { 0 };
         let packet_id = self.plain_zremrange_write_preamble("zrangestore", argv_len_sum, now_ms);
         let st = self.chained_command_start();
         // Generic ordering, kept in this order on purpose: the source keyspace hit/miss
         // that upstream's lookupKeyRead records, THEN the no-stat range walk.
         fr_command::record_source_key_lookups(&mut self.server.store, &[src], now_ms);
-        let reply = match self.server.store.zrange_withscores(src, start, stop, now_ms) {
+        let ranged = if rev {
+            self.server
+                .store
+                .zrevrange_withscores(src, start, stop, now_ms)
+        } else {
+            self.server.store.zrange_withscores(src, start, stop, now_ms)
+        };
+        let reply = match ranged {
             Ok(pairs) => {
                 let count = i64::try_from(pairs.len()).unwrap_or(i64::MAX);
                 let dst_key = dst.to_vec();
@@ -27515,13 +27534,19 @@ impl Runtime {
             "zrangestore",
             "ZRANGESTORE",
             || {
-                vec![
+                let mut argv = vec![
                     b"ZRANGESTORE".to_vec(),
                     dst.to_vec(),
                     src.to_vec(),
                     start_arg.to_vec(),
                     stop_arg.to_vec(),
-                ]
+                ];
+                if rev {
+                    // The slowlog/threat argv must be the argv the CLIENT sent, or a
+                    // breach on the REV form is recorded as the plain form.
+                    argv.push(b"REV".to_vec());
+                }
+                argv
             },
             elapsed_us,
             now_ms,
@@ -48479,7 +48504,7 @@ mod tests {
         let mut ts = 2;
         for (src, start, stop) in cases {
             let f = direct
-                .execute_plain_zrangestore_borrowed(b"dst", src, start, stop, ts)
+                .execute_plain_zrangestore_borrowed(b"dst", src, start, stop, false, ts)
                 .expect("zrangestore fast path should engage");
             let g = generic.execute_frame(
                 command(&[b"ZRANGESTORE", b"dst", src, start, stop]),
@@ -48506,6 +48531,74 @@ mod tests {
             ts += 1;
         }
 
+        // (frankenredis-gvm6z) THE REV FORM, arity 6. Same cases, `rev=true` against generic
+        // `ZRANGESTORE dst src start stop REV`. Reply-only comparison is especially weak
+        // here: for a FULL range the reversed and forward copies contain the SAME members
+        // and the count is identical, so a rev flag wired to the wrong branch would pass on
+        // the reply and on the contents. What separates them is the destination's SCORES
+        // being attached to the right members, which the WITHSCORES probe below reads.
+        for (src, start, stop) in cases {
+            let f = direct
+                .execute_plain_zrangestore_borrowed(b"dst", src, start, stop, true, ts)
+                .expect("zrangestore REV fast path should engage");
+            let g = generic.execute_frame(
+                command(&[b"ZRANGESTORE", b"dst", src, start, stop, b"REV"]),
+                ts,
+            );
+            assert_eq!(f, g, "REV reply differs: src={src:?} {start:?}..{stop:?}");
+            for probe in [
+                &[b"ZRANGE".as_slice(), b"dst", b"0", b"-1", b"WITHSCORES"][..],
+                &[b"OBJECT".as_slice(), b"ENCODING", b"dst"][..],
+                &[b"EXISTS".as_slice(), b"dst"][..],
+            ] {
+                let fp = direct.execute_frame(command(probe), ts);
+                let gp = generic.execute_frame(command(probe), ts);
+                assert_eq!(
+                    fp, gp,
+                    "REV dst state differs after src={src:?} {start:?}..{stop:?} probe={probe:?}"
+                );
+            }
+            for rt in [&mut direct, &mut generic] {
+                rt.execute_frame(command(&[b"ZADD", b"dst", b"9", b"stale"]), ts);
+            }
+            ts += 1;
+        }
+
+        // A DIRECT statement of the property, rather than an inference from the generic
+        // comparison: forward `0 0` takes the lowest-scored member and reversed takes the
+        // highest, so the two must differ.
+        //
+        // HONEST NOTE ON ITS VALUE: this is REDUNDANT for catching a mis-wired flag. Deleting
+        // the `if rev` branch so the flag is ignored trips the per-case WITHSCORES probe above
+        // first, on the `0 0` case, with `a/1` against `c/3` -- measured, not assumed. It is
+        // kept because it asserts fwd != rev WITHOUT reference to the generic path, so it
+        // still says something if the generic path is ever changed alongside the borrowed one.
+        // On its OWN runtime: this block calls the borrowed path twice with no matching
+        // generic call, so running it on `direct` would unbalance the keyspace-accounting
+        // comparison below. (It did — that assertion caught it at 34 hits against 32.)
+        let mut diverge = Runtime::default_strict();
+        diverge.execute_frame(
+            command(&[b"ZADD", b"src", b"1", b"a", b"2", b"b", b"3", b"c"]),
+            1,
+        );
+        let fwd = diverge
+            .execute_plain_zrangestore_borrowed(b"dst", b"src", b"0", b"0", false, ts)
+            .expect("forward engages");
+        let fwd_contents =
+            diverge.execute_frame(command(&[b"ZRANGE", b"dst", b"0", b"-1", b"WITHSCORES"]), ts);
+        let rev = diverge
+            .execute_plain_zrangestore_borrowed(b"dst", b"src", b"0", b"0", true, ts)
+            .expect("reversed engages");
+        let rev_contents =
+            diverge.execute_frame(command(&[b"ZRANGE", b"dst", b"0", b"-1", b"WITHSCORES"]), ts);
+        assert_eq!(fwd, rev, "both take exactly one member, so the COUNT is equal");
+        assert_ne!(
+            fwd_contents, rev_contents,
+            "forward `0 0` must take the LOWEST member and reversed the HIGHEST — if these \
+             match, the rev flag is not reaching the store call"
+        );
+        ts += 1;
+
         // A malformed index must DEFER with nothing touched — the generic path owns that
         // error reply, and the source keyspace hit/miss with it.
         for bad in [
@@ -48515,7 +48608,7 @@ mod tests {
         ] {
             assert!(
                 direct
-                    .execute_plain_zrangestore_borrowed(b"dst", b"src", bad.0, bad.1, ts)
+                    .execute_plain_zrangestore_borrowed(b"dst", b"src", bad.0, bad.1, false, ts)
                     .is_none(),
                 "malformed index {bad:?} must defer to generic"
             );

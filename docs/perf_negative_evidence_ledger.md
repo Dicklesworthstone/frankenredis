@@ -33252,3 +33252,83 @@ PEER builds in flight — irrelevant to a differential, and no perf number is cl
 RETRY PREDICATE: take `frankenredis-9hori` with the differ as its gate. Do NOT extend the text
 scan to understand variables — that is re-implementing an interpreter beside the one that is
 already running the body four lines earlier.
+
+--------------------------------------------------------------------------------
+## REJECT, SELF-SPEEDUP (frankenredis-gvm6z) — claiming ZRANGESTORE arity 6 for the REV form ALONE taxes BYSCORE and BYLEX by a measured +2.35 pct; the pre-registered reject condition fired and the routing is WITHHELD
+
+Claim class: SELF-SPEEDUP, REJECTED on its own pre-registered criterion. The effect measured
+is fr-before against fr-after; the incumbent arm is present, verified, and carried only as
+context, so it is not a competitive claim.
+
+Campaign output: no.
+
+THE CRITERION WAS FIXED BEFORE THE LEVER EXISTED, in the BASELINE row above: "REJECT
+CONDITION: BYSCORE's fr instr/op rises by more than 0.52 pct — its own measured A/A null."
+That row also pre-committed the two remedies, so this outcome is a decision already made
+rather than one improvised after seeing the number.
+
+    shape                arm      fr instr/op        ratio       fr dispatch
+    zrangestore_rev      BEFORE  10,332.3/10,296.2  0.8046/0.8073   3,811.0/3,802.9
+    zrangestore_rev      AFTER    5,255.2/5,220.1   0.4193/0.4066     759.1/757.1
+    zrangestore_byscore  BEFORE  10,937.1/10,880.4  0.7330/0.7485   3,819.2/3,802.0
+    zrangestore_byscore  AFTER   11,158.1/11,172.0  0.7409/0.7481   4,097.0/4,103.8
+
+    REV       dispatch 3,807 -> 758   **-80.1 pct**;  fr 10,314 -> 5,238  -49.2 pct
+    BYSCORE   fr 10,908.8 -> 11,165.1  **+2.35 pct**, against a 0.52 pct null -> 4.5x it
+              dispatch 3,810.6 -> 4,100.4  **+289.8 instr/op**
+
+A/A NULLS, two draws per shape per arm, same ELF each side:
+    rev      BEFORE 0.35 pct   AFTER 0.67 pct
+    byscore  BEFORE 0.52 pct   AFTER 0.12 pct
+
+COUNTED MECHANISM, which is why this is a reject and not a noise reading. The floor table is
+keyed on (arity, command), so a `(6, Zrangestore)` class captures BYSCORE and BYLEX as well
+as REV. Their arm parses `key_arg4`, finds the discriminant is not REV, and declines to
+GENERIC — the same place they reach today, so the ANSWER is unchanged. What changed is that
+they now pay one extra five-bulk parse to get there, and the dispatch column measures it at
+**+289.8 instr/op**, which is the cost of a `key_arg4` parse and nothing else. The +2.35 pct
+on the total and the +289.8 on dispatch agree: 256 of the 289 lands in the total.
+
+**THE REV PRIZE IS REAL AND LARGE — -80.1 pct dispatch, -49.2 pct total — AND IT IS NOT
+LANDED.** Routing arity 6 for REV alone is not free, and I am not going to describe a
+measured 2.35 pct regression on two sibling forms as acceptable after the fact.
+
+WHAT IS LANDED: the executor's `rev` parameter and its equivalence coverage, with NO floor
+route. `execute_plain_zrangestore_borrowed(.., rev, ..)` selects
+`zrevrange_withscores` over `zrange_withscores` and is proven against the generic path on
+seven cases at both `rev` values, comparing destination CONTENTS, OBJECT ENCODING and
+existence rather than the reply — the reply is `Integer(count)`, which a full-range reversed
+copy leaves identical. Mutation: deleting the `if rev` branch fails on the `0 0` case with
+`a/1` against `c/3`. Production calls it with `rev=false` only; the `rev=true` path is
+exercised by tests alone, which is deliberate groundwork for the remedy below and is stated
+so nobody reads it as live.
+
+THE REMEDY, pre-committed and now specified: serve ALL THREE arity-6 forms so nothing
+declines. All the machinery is `pub` and already reachable — `fr_command::parse_score_bound`,
+`validate_lex_bound`, `zscore_inverted_wrongtype_guard` (fr-runtime already calls
+`fr_command::` helpers 41 times), with `zrangebyscore_withscores_limited` /
+`zrangebylex_withscores_limited` for the walks. TWO THINGS MUST NOT BE MISSED: BYSCORE/BYLEX
+destinations are created skiplist-encoded upstream, so those paths need
+`force_skiplist=true` where rank mode uses false (frankenredis-t8rma), and BYSCORE needs
+generic's fully-inverted-range early return (`del(dst)`, reply 0) before the walk.
+
+RETRY PREDICATE. Re-run this comparison only after all three arity-6 forms are served, and
+judge it on the SAME criterion: BYSCORE's fr instr/op must not exceed its BEFORE mean by
+more than its own measured A/A null. Do not re-attempt the REV-only routing — its cost is
+now measured twice on each side and will not change. Invalidate rather than compare if the
+AFTER arm is built from a different ELF than the BEFORE, or if either shape's A/A null
+exceeds the values above.
+
+PROVENANCE:
+  BEFORE ELF sha256 7adb365e85e954aea7c39b4a9a4e2fb76d61936c12f03cebacf8dfe391f1be3c
+  AFTER  ELF sha256 10491b95d377bd57d1cd1f82669c88893b2c29b77e5a8a62f2a37ed251d816a6
+  These are file hashes of the private copies I measured, NOT self-reports from
+  /proc/<pid>/exe; the harness does not emit an in-process SHA and I am not going to imply
+  it does. Both built
+LOCALLY with RCH_CARGO_WRAPPER_BYPASS=1 exported and env -u CARGO_TARGET_DIR, no [RCH] line,
+each copied to a private path before measuring; `df` checked immediately before each build
+(136G, 130G). incumbent verified: redis-server sha=d2c8a4b9 == vendored source HEAD, clean,
+on every run. thinkstation1, 64 cores, governor powersave. Per-arm loadavg: BEFORE
+20.27-30.42 (1-min), AFTER 22.93-31.08, with the 5-min at 39-52 and the 15-min at 69-133 —
+a settling window, which is why every figure here carries two draws and its own null. Per-arm
+MHz 2,804-4,036 mean, cross-core 1,429-4,238.

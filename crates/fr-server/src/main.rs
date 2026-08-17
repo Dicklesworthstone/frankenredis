@@ -21697,6 +21697,7 @@ fn try_dispatch_floor_classified_action(
                 packet.a,
                 packet.b,
                 packet.c,
+                false,
                 ts,
             ) {
                 Ok(BorrowedMultibulkAction::FastReply {
@@ -53820,5 +53821,85 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
                 "{other:?} must not be claimed as PUBSUB"
             );
         }
+    }
+
+    /// (frankenredis-ozrro) THE DEEPEST 13 CASCADE ARMS ARE UNREACHABLE, and this pins it.
+    ///
+    /// Arms 150-162 of 163 are `keyed_values9..14` and `exists_two..exists_eight`. Every shape
+    /// they serve is claimed EARLIER by a parameterised floor class, so no packet can ever
+    /// reach them:
+    ///
+    ///   EXISTS            floor claims array_len 2..=KEYS_MULTI_MAX+1 (= 2..=33); the arms
+    ///                     serve 2..8 keys, i.e. array_len 3..9 — entirely inside it.
+    ///   LPUSH/RPUSH/SADD/ floor claims array_len 3..=20 for all six; the arms serve 9..14
+    ///   HDEL/SREM/ZREM    values, i.e. array_len 11..16 — entirely inside it.
+    ///
+    /// This is a CORRECTNESS invariant, not an optimisation one. If the floor's coverage is
+    /// ever narrowed — a range tightened, a command dropped from that `matches!` — these
+    /// shapes would silently start falling through, and for the keyed-values six the fall is
+    /// to GENERIC rather than back to the cascade, which the comment on that arm records as a
+    /// REGRESSION rather than a missed optimisation. This test goes red at that moment.
+    ///
+    /// Deliberately NOT a licence to delete those arms. Measurement says removal is worth
+    /// almost nothing: the miss tax bounds the cost of walking the WHOLE 163-arm cascade at
+    /// ~305 instr/op, so 13 arms are worth ~24 — see the ledger row.
+    #[test]
+    fn deep_cascade_arms_are_unreachable_because_the_floor_claims_their_shapes_first() {
+        let cfg = ParserConfig::default();
+        fn packet(args: &[&str]) -> Vec<u8> {
+            let mut p = format!("*{}\r\n", args.len()).into_bytes();
+            for a in args {
+                p.extend_from_slice(format!("${}\r\n{}\r\n", a.len(), a).as_bytes());
+            }
+            p
+        }
+        use super::BorrowedDispatchFloorClass as C;
+
+        // exists_two .. exists_eight: 2..8 keys => array_len 3..9.
+        for nkeys in 2..=8usize {
+            let mut args = vec!["EXISTS".to_string()];
+            for i in 0..nkeys {
+                args.push(format!("k{i}"));
+            }
+            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(&packet(&refs), &cfg),
+                Some(C::Exists(nkeys)),
+                "EXISTS with {nkeys} keys must be claimed by the floor, making the \
+                 exists_{nkeys} cascade arm unreachable"
+            );
+        }
+
+        // keyed_values9 .. keyed_values14: 9..14 values => array_len 11..16, for all six
+        // commands the floor's matches! arm lists.
+        for cmd in ["LPUSH", "RPUSH", "SADD", "HDEL", "SREM", "ZREM"] {
+            for nvalues in 9..=14usize {
+                let mut args = vec![cmd.to_string(), "k".to_string()];
+                for i in 0..nvalues {
+                    args.push(format!("v{i}"));
+                }
+                let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                assert_eq!(
+                    super::classify_borrowed_dispatch_floor_packet(&packet(&refs), &cfg),
+                    Some(C::KeyedValuesWrite(nvalues)),
+                    "{cmd} with {nvalues} values must be claimed by the floor, making the \
+                     keyed_values{nvalues} cascade arm unreachable"
+                );
+            }
+        }
+
+        // The boundaries matter as much as the interior: one PAST the floor's keyed-values
+        // range must NOT be claimed, or the classifier would be promising more than the arm
+        // serves. array_len 21 = 19 values.
+        let mut over = vec!["SADD".to_string(), "k".to_string()];
+        for i in 0..19usize {
+            over.push(format!("v{i}"));
+        }
+        let refs: Vec<&str> = over.iter().map(String::as_str).collect();
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(&packet(&refs), &cfg),
+            None,
+            "array_len 21 is outside the floor's 3..=20 range and must not be claimed"
+        );
     }
 }
