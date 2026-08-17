@@ -113,6 +113,26 @@ fn configure_runtime_for_fixture(runtime: &mut Runtime, fixture_name: &str) {
     // both implementations. (br-frankenredis-2di1)
     if fixture_name == "core_server.json" {
         runtime.set_config_file_path(Some(runtime_fixture_config_path(fixture_name)));
+        // (frankenredis-cnfiso) Give this RUN its own RDB and AOF targets. Two tests
+        // run this same fixture — `conformance_core_server` and
+        // `conformance_core_server_latency_history_is_fixture_isolated` — and cargo
+        // runs tests as THREADS in one process, so they share a working directory.
+        // Both fixtures reach persistence cases (DEBUG RELOAD saves then reloads,
+        // BGREWRITEAOF rewrites), so with the default cwd-relative targets they write
+        // the same two files concurrently and one of them loses:
+        //   debug_reload            expected +OK, got "ERR error saving dataset to disk"
+        //   bgrewriteaof_returns_message  got "ERR error rewriting AOF file"
+        // MEASURED: 2 of 195 fail under the default parallel runner and BOTH pass under
+        // `--test-threads=1`, which is the signature of a shared-artifact collision
+        // rather than a logic defect. A scheduling-dependent conformance suite is worse
+        // than a failing one, because the next person to see it regenerates a golden.
+        //
+        // Set programmatically rather than through CONFIG SET: this fixture asserts
+        // that `CONFIG SET dir` is REFUSED as a protected config, and that assertion
+        // must keep holding. It does not assert `CONFIG GET dir`/`dbfilename`, so
+        // moving the targets is invisible to every case in it.
+        runtime.set_rdb_path(runtime_fixture_artifact_path(fixture_name, "rdb"));
+        runtime.set_aof_path(runtime_fixture_artifact_path(fixture_name, "aof"));
     }
     // Conformance fixtures that exercise DEBUG must opt in. The
     // runtime defaults to enable-debug-command=no (matches upstream
@@ -126,6 +146,39 @@ fn configure_runtime_for_fixture(runtime: &mut Runtime, fixture_name: &str) {
     {
         runtime.set_enable_debug_command("yes");
     }
+}
+
+/// (frankenredis-cnfiso) A private DIRECTORY for this run's persistence artifacts,
+/// with `<basename>.<extension>` inside it.
+///
+/// Two things are deliberate here.
+///
+/// A pid+nanoseconds NAME — the shape `runtime_fixture_config_path` uses — is not
+/// enough. The colliding tests run the SAME fixture name concurrently as threads of
+/// one process, so pid does not separate them and two `SystemTime` reads on different
+/// cores can land on the same nanosecond. The process-wide counter makes the name
+/// unique by construction rather than by luck.
+///
+/// And the artifacts go in their OWN directory rather than loose in the shared temp
+/// dir, because the AOF rewrite does not write one file — it writes a base RDB, an
+/// incremental AOF and a manifest, each through a `.tmp` sibling plus a rename, then
+/// fsyncs the PARENT DIRECTORY and runs a history GC that reads it. Pointing all of
+/// that at a temp dir shared with every other process on the host makes the rewrite's
+/// success depend on unrelated writers. A directory nobody else names cannot be
+/// disturbed, which is the property this needs — unique filenames alone do not give it.
+fn runtime_fixture_artifact_path(fixture_name: &str, extension: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_ARTIFACT_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = NEXT_ARTIFACT_SEQ.fetch_add(1, Ordering::Relaxed);
+    let fixture_stem = fixture_name.strip_suffix(".json").unwrap_or(fixture_name);
+    let dir = std::env::temp_dir().join(format!(
+        "fr_conformance_{fixture_stem}_{}_{seq}",
+        std::process::id()
+    ));
+    // Best-effort: the persistence writers call `create_dir_all` themselves, and a
+    // failure here must not be reported as a fixture failure.
+    let _ = fs::create_dir_all(&dir);
+    dir.join(format!("{fixture_stem}.{extension}"))
 }
 
 fn runtime_fixture_config_path(fixture_name: &str) -> PathBuf {
