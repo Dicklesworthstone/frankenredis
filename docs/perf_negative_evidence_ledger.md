@@ -8,6 +8,75 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-08-17 BrownIbis: METHOD — the front-classification campaign is DONE on every command a standard benchmark issues, and the predicate blocking SORT cannot be discharged by benchmark data at all (`frankenredis-e1w1r`, `frankenredis-g3z6n`)
+
+Not a verdict row: no lever, no A/B, no incumbent. Source reading plus arithmetic over figures
+already banked. NO BUILD, NO BENCH — the host was at loadavg 75 with four builds running and
+nothing here needs either.
+
+### WHAT THE STANDARD BENCHMARK ACTUALLY ISSUES
+
+`legacy_redis_code/redis/src/redis-benchmark.c` issues exactly fifteen commands:
+
+    PING_INLINE  PING_MBULK  SET  GET  INCR  LPUSH  RPUSH  LPOP  RPOP
+    SADD  HSET  SPOP  ZADD  ZPOPMIN  XADD  MSET
+
+**SORT is not among them. Neither is SPUBLISH, MOVE, ZINTERCARD, XPENDING, GEOSEARCH, LTRIM or
+any other command this campaign has front-classified.**
+
+### CONSEQUENCE 1 — `e1w1r`'s predicate is undischargeable from any workload this repo has
+
+`NEGATIVE_EVIDENCE.md:5654` gates SORT front-classification on SORT reaching ">=5 pct of a real
+mixed profile". The only reproducible mixed profile available here issues **zero** SORT, so SORT
+is 0.000 pct of it on both the call and the instruction reading. The predicate therefore cannot
+be discharged by benchmark data in either reading — it requires a production trace, which is
+precisely and only what `g3z6n` asks for. **`e1w1r` stays blocked, and now for a stated reason
+rather than an unexamined one.**
+
+### CONSEQUENCE 2 — and this is the one that should change what the next agent does
+
+Checking the floor table against those fifteen (with the corrected byte-array detector, run
+against TOUCH and ZINTERCARD as canaries):
+
+    classified (13):  SET INCR LPUSH RPUSH LPOP RPOP SADD HSET SPOP ZADD ZPOPMIN XADD MSET
+    not classified (2): GET, PING
+
+and the two exceptions are not gaps. `try_dispatch_floor_classified_action` is called at
+main.rs:6956 and the PING and GET arms sit at :6967, :6992 and :7018 — the FIRST arms of the
+cascade, deliberately placed there rather than in the floor table. Measured today, `get_control`
+pays **457.0 instr/op of dispatch**, against ~600 for TOUCH and 746/663 for the two routes
+classified this afternoon. **The cascade head is CHEAPER than a floor class, so GET and PING are
+optimally placed already.**
+
+**So every command a standard benchmark issues is dispatch-optimal, and there is no
+front-classification work left that any reproducible comparison could see.** Further work in this
+vein is invisible to any published benchmark and its value rests entirely on a production trace
+nobody has.
+
+### WHAT THIS DOES NOT SAY
+
+It does not say the levers taken were wrong — SPUBLISH went 8,307.8 -> 1,824.3 and the
+instructions were real. It does not say rare commands do not matter; a workload that sorts is
+entitled to a fast SORT, and this repo's own competitive claims cover far more than fifteen
+commands. It says only that **the remaining dispatch surface is invisible to the one workload
+everybody can reproduce**, so ranking further candidates by depth or by per-call cost cannot
+establish that any of them is worth taking.
+
+Combined with the row above — whole-workload value is `call_share x per_call_saving / average_op`,
+and a −78 pct headline is worth 0.46 pct at a 0.1 pct call share — the honest summary is that the
+front-classification campaign has harvested everything measurable and its remaining candidates
+are unweighted.
+
+### RETRY PREDICATE
+
+(1) Do NOT take another front-classification candidate on a depth or dispatch-share ranking. The
+next one requires either a production command mix (`g3z6n`) showing the command is non-trivial, or
+a workload the project intends to publish against that issues it. (2) If the goal is a better
+number on a STANDARD benchmark, the dispatch surface is spent — the remaining levers on those
+fifteen commands are in execution, allocation and the reply path, not in getting to the command.
+(3) `e1w1r` reopens only on `g3z6n`, and this row is the reason its clause-2 cannot be satisfied
+any other way.
+
 ## 2026-08-17 BrownIbis: METHOD — the campaign's ranking axis is cost-per-CALL, the value axis is cost-times-FREQUENCY, and the two differ by the one number nobody has measured (`frankenredis-g3z6n`, `frankenredis-e1w1r`)
 
 Not a verdict row: no lever, no A/B, no incumbent. It is arithmetic over per-call numbers already
