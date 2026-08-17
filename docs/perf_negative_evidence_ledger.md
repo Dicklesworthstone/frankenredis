@@ -31213,3 +31213,92 @@ RETRY PREDICATE: the residual +10.6 pct at 64 bytes is recoverable by splitting 
 narrow and wide VARIANTS so the hot `get` arm carries no guard — worth doing only if someone
 shows LCS-on-short-strings traffic that matters, since the shape is already 7.6x ahead. Do
 NOT re-derive the borrow chain: it is unreachable by the subset argument above.
+
+--------------------------------------------------------------------------------
+## MEASURED, RECONCILING ozrro's PREMISE CORRECTION (frankenredis-gvm6z) — its four numbers reproduce on a DIFFERENT ELF to 0.0-0.9 pct, and two of its conclusions need amending: the generic range is 7.98x not 6.2x, and the biggest remaining dispatch block is NOT sort or lcs
+
+Claim class: MEASURED-STRUCTURE. `--fr-only` quantities plus two ratios; no build in this
+window; both arms in one invocation where a ratio is quoted, incumbent verified.
+
+FIRST, INDEPENDENT CONFIRMATION, which is the part that gives the rest of this row weight.
+ozrro's table was taken on ELF `7b67a14d`. I re-measured four of its shapes on `61778add`, a
+different binary from a different window:
+
+    shape              mine     theirs    apart
+    pfmerge_2        3,012.7   3,012.7    0.00 pct
+    sort_ro_alpha    2,851.0   2,851.3    0.01 pct
+    lcs_2            2,456.0   2,450.7    0.22 pct
+    zrangestore_all    687.9     681.7    0.91 pct
+
+Two agents, two ELFs, two windows, agreeing to a tenth of a percent. **The dispatch metric is
+the most reproducible quantity this campaign owns** and its conclusions can be relied on.
+
+### AMENDMENT 1 — the generic-route range is 7.98x, not 6.2x
+
+That row spans generic dispatch 485.9 (set_xx_opt) to 3,012.7 (pfmerge_2). It did not include
+the ZRANGESTORE OPTION forms, which I measured at **3,802.5-3,876.5** across four runs at two
+member counts. Including them:
+
+    485.9 -> 3,876.5   = **7.98x**, and pfmerge_2 is no longer the top of the generic range.
+
+This STRENGTHENS its conclusion rather than weakening it: route label predicts yield even less
+well than 6.2x suggested.
+
+### AMENDMENT 2 — the biggest remaining block is the ZRANGESTORE option forms, and unlike the other two it is not an extraction job
+
+That row names "the two biggest remaining blocks" as sort_ro_alpha (2,851.3) and lcs_2
+(2,450.7), and calls both EXTRACTION JOBS — 478-line `sort_generic`, etc. Both readings are
+right. But the ranking omits a bigger block that is also far cheaper to take:
+
+    block                      dispatch    over floor    est. total (x1.586)
+    ZRANGESTORE option form     3,875.3      3,575.3          ~5,672
+    pfmerge_2                   3,012.7      2,712.7          ~4,304
+    sort_ro_alpha               2,851.0      2,551.0          ~4,047
+    lcs_2                       2,456.0      2,156.0          ~3,420
+
+and the ZRANGESTORE REV form specifically IS a cheap mirror by that row's own test — "is the
+work already a callable helper at the arity to be claimed?" — because the arity-5 executor I
+landed differs from REV by ONE call (`zrevrange_withscores` for `zrange_withscores`) and the
+`*6` parser is the existing `key_arg4` shape. BYSCORE is medium (it needs `parse_score_bound`,
+which exists). So the board's cheapest large lever is not on that list at all.
+
+### AMENDMENT 3 — the multiplier is 1.586x measured, not ~1.9x
+
+That row converts dispatch blocks to totals with "this campaign's measured ~1.9x multiplier".
+I have a cleaner measurement of the same quantity: a SAME-ELF A/B on zrangestore_all, route as
+the only variable, gave dispatch -2,732.6 against total -4,335.2 = **1.586x**. A before/after
+across two builds cannot separate the multiplier from tree drift; the bypass-feature A/B can.
+The estimates above use 1.586. If 1.9 is right the blocks are larger, so the RANKING is
+unaffected — only the absolute estimates are, and they are estimates either way.
+
+### AN ELF-VINTAGE HAZARD, caught by accident and worth recording
+
+`lcs_2`'s dispatch reproduced to 0.22 pct, but its TOTAL did not:
+
+    3f027a4f (older, mine)   7,132.0
+    61778add (mine)          9,698.5      <- +36 pct
+    7b67a14d (HEAD, theirs)  7,423.8
+
+The LCS path got substantially more expensive and then came back, almost certainly across
+p98mw's LCS cliff work (c692aa91b). **Dispatch held to 0.2 pct across all three ELFs while
+the total moved 36 pct.** That is the concrete reason this campaign's cross-ELF comparisons
+must be made on dispatch and never on totals, and it means my `61778add` totals for lcs_2 are
+NOT representative of HEAD. I am not quoting them.
+
+Also, for anyone reading this row's ratios: `sort_ro_alpha` at 1.5083x and `lcs_2` at 1.5076x
+are THREE-element and 8x9-character shapes respectively — intercept readings, both already
+recorded as such (SORT's parity crossover is n=7; LCS inverts to 0.1190x at 64x64).
+
+PROVENANCE:
+  fr ELF        61778add43b18a6b4ae913d952d86c5a994db21695bf5534f9f79d51e6942bb0, built in an
+                earlier window (RCH_CARGO_WRAPPER_BYPASS=1, env -u CARGO_TARGET_DIR, no [RCH]
+                line), copied to a private path. Vintage re-checked: one commit since, SCAN.
+  incumbent     `incumbent verified: redis-server sha=d2c8a4b9 == vendored source HEAD, clean`.
+  host          thinkstation1, 64 cores, governor powersave, /data 164G, NO build in window.
+  per-arm load  sort_ro_alpha 9.32/10.91/13.87 both ends; lcs_2 9.32/10.91/13.87 ->
+                9.37/10.90/13.84. 1-minute BELOW the 5-minute on every arm.
+  per-arm MHz   sort_ro_alpha 2,669->2,880; lcs_2 2,691->2,292 mean; cross-core 1,429-4,292.
+
+RETRY PREDICATE. Do not re-confirm ozrro's four numbers a third time — two ELFs at 0.0-0.9 pct
+is settled. If anyone takes the ZRANGESTORE REV form, the check is that `zrangestore_all`'s
+687.9 is UNCHANGED afterwards, and that the arity-5 class still claims arity 5 exactly.
