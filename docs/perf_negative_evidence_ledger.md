@@ -8,6 +8,79 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-08-17 MossyOrchid: MY OWN RETRY PREDICATE IS RETIRED, WITH EVIDENCE — doubling the rounds narrows the SHAPE to 0.8 pct and does NOT narrow the NORMALISER at all, so `get_control` is drift-limited and no round count can settle a thin normalised margin on this harness (`frankenredis-eh2ct`)
+
+Claim class: METHOD, negative. Campaign output: yes — it closes a question rather than
+leaving a plausible next step that does not work, and the next agent who reaches for
+`get_control` to adjudicate a 1 pct margin now has the measurement that says don't.
+
+THE PREDICATE I LEFT AN HOUR AGO, in the row below: "the fix is a quieter normaliser: either
+certify `get_control` to a tighter interval (more rounds on the control specifically) ... and
+only then quote a worst bound." I ran it. It fails, and the way it fails is the useful part.
+
+TWO RUNS AT 41 ROUNDS — double the 21 the earlier replicates used, same ELF
+(`b78d1c23a79a3e85dd597016`), same square, same invocation-local incumbent:
+
+    run  rounds  load 1/5/15        geosearch_64            width   get_control              width
+    5    41      22.74 24.04 22.81  1.1001 [1.0911,1.1154]  2.2 pct 1.0963 [1.0788,1.1129]   3.1 pct
+    6    41      14.93 20.74 22.00  1.1072 [1.1038,1.1131]  0.8 pct 1.1351 [1.1185,1.1706]   NULL-FAILED
+
+SAMPLING NOISE SHRINKS WITH n. DRIFT DOES NOT. That is the whole finding, and the two columns
+separate cleanly across all six runs now on record:
+
+    geosearch_64 CI width   21r: 2.0 / 2.6 / 2.1 pct     41r: 2.2 / 0.8 pct   <- narrows
+    get_control  CI width   21r: 5.8 / 4.0 / 2.9 pct     41r: 3.1 / (failed)  <- does not
+
+The shape row behaves exactly as a sampled quantity should — at 41 rounds it reached a 0.8 pct
+interval, the tightest anything in this thread has produced. The control did not improve at
+all, and on the second 41-round run it failed its own A/A null outright (null_redis 0.9696).
+Its variance is therefore not sampling error that more rounds can average away; it is drift
+that more rounds merely sample for longer.
+
+THE CONTROL IS THE UNRELIABLE ARM, quantified over all six runs of this thread:
+
+    admissible   geosearch_64  5 of 6      get_control  4 of 6
+    null-failed  geosearch_64  1 of 6      get_control  2 of 6
+
+A normaliser that fails its own null a third of the time, and whose interval is wider than the
+row it is meant to stabilise, cannot adjudicate a 1 pct margin at ANY round count. Normalising
+against it converts a 0.8 pct measurement into a 3+ pct one.
+
+WORST BOUND, unchanged and now drawn from a wider pool. Most pessimistic pairing across every
+computable replicate (shape CI-low over control CI-high): 0.9630 / 0.9549 / 0.9857 / 0.9804 —
+**worst bound 0.9549**, and the 41-round pair adds nothing that moves it. GEOSEARCH_64's
+normalised crossing remains NOT ESTABLISHED, and this row says it cannot be established this
+way rather than inviting a seventh attempt.
+
+WHAT SURVIVES, and it got STRONGER: the RAW ratio. Five admissible draws — 1.0982 / 1.1117 /
+1.1119 / 1.1001 / 1.1072 — mean 1.1058, total spread 1.25 pct, and the tightest of them has a
+0.8 pct interval. **fr is ~1.106x faster than Redis 7.2.4 on GEOSEARCH_64, replicated five
+times against a live incumbent started in the same invocation.** That is the claim to carry;
+the normalised figure is a non-result and should stop being quoted in either direction.
+
+PROVENANCE:
+  ELF          fr b78d1c23a79a3e85dd597016... (self-reported from /proc/<pid>/exe of the
+               running server), redis e837dbb2556cff6b... == vendored HEAD.
+  harness      scripts/balanced_square_ab.py, ABBAABBA, 41 rounds, 50,000 ops/slot, -P16,
+               per-arm A/A nulls bounded +/-0.02, servers unpinned.
+  PER-ARM      run 5: loadavg 22.74/24.04/22.81, CPU MHz before mean 3917 (spread 1.00x),
+               after mean 2980 min 1429 max 4292 (spread 3.00x).
+               run 6: loadavg 14.93/20.74/22.00, CPU MHz before mean 2375 (spread 2.96x),
+               after mean 2473 min 1429 max 4068 (spread 2.85x).
+  NOTE         those MHz figures come from the stamp added in `e7bd18955` an hour ago, and
+               run 5 is the case that justifies it: the host went from a 1.00x cross-core
+               spread at the start of the square to 3.00x by the end. A row that recorded one
+               frequency for the run would have recorded a fiction.
+  /data        92G free. NO BUILD this turn — `git log 19c1440d1..HEAD -- crates/` is empty,
+               so the ELF measured last turn is still HEAD's engine.
+
+RETRY PREDICATE: none for the normalised statistic — it is closed. If someone wants a
+control-normalised GEOSEARCH figure they must first produce a normaliser that certifies
+admissible with a sub-1 pct interval, which `get_control` demonstrably does not on this host;
+until such a control exists, quote the RAW replicated 1.106x and say it is raw.
+
+--------------------------------------------------------------------------------
+
 ## 2026-08-17 MossyOrchid: REFUTED — GEOSEARCH's 1.0094 normalised CROSSING does not survive replication. Three admissible replicates scatter 0.9806 / 0.9937 / 1.0044 across parity, every interval brackets 1.0, and the WORST BOUND is 0.9549 (`frankenredis-eh2ct`)
 
 Claim class: COMPETITIVE, refuting. Campaign output: yes — it stops a thin-margin crossing
