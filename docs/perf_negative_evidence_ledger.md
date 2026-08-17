@@ -37,6 +37,47 @@ arms; this one adds a function, so it fires. **A symbol check proves contaminati
 and proves nothing when it does not** — the general check is that the before arm's base is not an
 ancestor of the lever.
 
+### The frame is named, and my mechanism guess was wrong: `parse_borrowed_dispatch_floor_decimal` 34.0 -> 51.0
+
+The row above hypothesised that threading `Option<bool>` changed inlining in a helper GET's route
+shares. **That is wrong.** Reading the two dumps with `frame_delta.py --dispatch` — no new build,
+the dumps were already on disk — every dispatch frame is flat except one:
+
+    frame                                          before   after   delta
+    process_buffered_frames                         185.0   184.0    -1.0
+    classify_borrowed_dispatch_floor_packet_impl    112.0   112.0     0.0
+    parse_borrowed_plain_set_bulk                    46.0    46.0     0.0
+    parse_borrowed_plain_ping_packet                 35.0    35.0     0.0
+    try_dispatch_floor_classified_action             34.0    34.0     0.0
+    parse_borrowed_dispatch_floor_decimal            34.0    51.0   **+17.0**
+    Runtime::parser_config                           11.0    11.0     0.0
+    ---------------------------------------------------------------------
+    dispatch total                                  457.0   473.0    +16.0
+
+**`parse_borrowed_dispatch_floor_decimal` gained 50 pct of its own cost**, and it is the floor
+classifier's digit parser — on the shared path of EVERY floor-classified command, not just GET.
+That is corroborated by the per-command dispatch figures already in this row: GET 457 -> 473
+(+16), ZADD 662 -> 681 (+19), SADD 617 -> 642 (+25). A regression in a helper GET happens to use
+would not move ZADD and SADD too.
+
+So the correct statement is stronger and narrower than the hypothesis it replaces: the getexgate
+work costs **+17 instr/op in one named frame, paid by every command the floor classifier admits**.
+
+WHY IT IS ALSO THE EXPLANATION FOR MY OWN SHRINKING NUMBERS: my routes are floor-classified, so
+they pay it too. The clean pair measured my saving MINUS this, which is why -203/-204/-203 became
+-180/-141.7/-146.7. It is one shared frame, not a per-route effect, which is why the shortfall was
+roughly constant.
+
+I have NOT diagnosed why that frame grew — the parser's own source, and whether getexgate added a
+call site, changed a bound, or defeated an inline, is the owner's to read. Naming the frame is
+where an outsider's contribution should stop; the fix needs the intent behind the change.
+
+RETRY PREDICATE for whoever takes it: read `parse_borrowed_dispatch_floor_decimal` against
+`5bc439a57^`, and if the growth is a new call site rather than a slower body, the cheaper fix is
+to hoist the call rather than to speed the parser. Confirm with the same one-command
+`frame_delta.py --dispatch` on a fresh pair; the frame is unambiguous, so no A/A is needed to see
+a 17-instruction move in it.
+
 ### Where the plus-or-minus 20 came from: a GET dispatch cost in the getexgate work that shares this commit, and how it explains both pairs
 
 The correction above bounded my lever at "somewhere between 142 and 204" and said no pair could
