@@ -34215,3 +34215,54 @@ SUBCOMMAND_TABLE frames, and is not the shape being optimised. Keep `object_enco
 negative control: it must NOT move for any SUBCOMMAND_TABLE lever, and if it does, the change
 is reaching a path it should not. And take CONFIG GET seriously as its own target: at 5.9x it
 dwarfs everything else on the board, and its dispatch share says the cause is elsewhere.
+
+--------------------------------------------------------------------------------
+## 2026-08-17 RusticHorizon: REJECT fpqns lever 2 before building it — the SUBCOMMAND_TABLE is NOT sorted, and its memcmp costs 2.6 instructions per comparison, so a binary search buys almost nothing for a 129-entry reordering (`frankenredis-fpqns`)
+
+Claim class: SELF-SPEEDUP. Campaign output: no — this rejects an fr-vs-fr optimisation before
+it was written; no incumbent ratio is claimed.
+
+`721a76e65` named three levers and bounded lever 2 — "replace `iter().find()` with a binary
+search or match over a const 110-entry slice" — at the 679 instr/op `__memcmp_avx2_movbe`
+frame. Two checks before writing it, and both say don't:
+
+  1. THE TABLE IS NOT SORTED. `SUBCOMMAND_TABLE` has 129 entries (not 110 — my earlier figure
+     was wrong) and `acl|cat` sits after `acl|genpass`. A binary search requires sorting it,
+     which is a 129-line reordering of a `const` whose order nothing currently documents as
+     free to change.
+
+  2. THE ARITHMETIC KILLS IT ANYWAY. 679 instr/op spread across two scans of 129 entries is
+     ~2.6 instructions per comparison. That is already close to the floor for a length check
+     plus a first-byte mismatch — `memcmp` is not the expensive part. What costs is ITERATING
+     129 entries twice, and the per-iteration overhead is in the loop, not in the compare a
+     binary search would eliminate. A binary search would remove ~7/8 of the iterations, so
+     the realistic ceiling is a few hundred instr/op on a route that now costs 8,174.
+
+    SO THE BOUND I PUBLISHED WAS THE WRONG BOUND. 679 is what memcmp costs, not what a binary
+    search would SAVE, and I quoted the first as if it were the second. The lesson is narrow
+    and repeatable: a frame's cost is an upper bound on removing that frame ENTIRELY, and a
+    lever that only makes a frame rarer must be sized by how much rarer, not by the frame.
+
+WHAT IS STILL WORTH DOING IN THAT FILE, and it is not a search algorithm: the same key is
+built twice and the same table scanned twice per container dispatch, once by
+`check_full_command_arity` and once by `effective_command_flags`. `cc3c24cc9` removed the
+duplicate key BUILD; the duplicate SCAN remains. Merging the two into one pass that returns
+both arity and flags removes a whole traversal rather than making one traversal cheaper. It
+needs the two call sites threaded together (they are in different crates today), which is why
+it is not a drive-by.
+
+NO MEASUREMENT WAS TAKEN, deliberately: this rejects a lever on a structural reading plus the
+arithmetic of an already-banked frame count, which is cheaper than building it and measuring a
+null result. If someone disagrees with the sizing, the falsifiable claim is "a binary search
+over a sorted SUBCOMMAND_TABLE saves less than 300 instr/op on `pubsub_channels`" — build it
+and show otherwise.
+
+PROVENANCE: no build, no measurement. Table sortedness and entry count read directly from
+`crates/fr-command/src/lib.rs`; the 679 instr/op memcmp figure is from the attribution banked
+in `721a76e65` (ELF 14c375e9edf5835f).
+  host          thinkstation1, /data 117G, ONE PEER BUILD running, loadavg 23.10/18.75/17.22.
+
+RETRY PREDICATE: do NOT implement the binary search. If the container-dispatch path is
+revisited, take the duplicate SCAN (one pass returning arity AND flags), and size it by the
+`check_full_command_arity` + `effective_command_flags` self-cost remaining after
+`cc3c24cc9`, not by the memcmp frame.
