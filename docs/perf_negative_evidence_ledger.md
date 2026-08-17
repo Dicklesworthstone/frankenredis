@@ -28816,3 +28816,52 @@ PROVENANCE:
 RETRY PREDICATE: if this row is still here and HEAD still has the transposed map, land
 RusticHorizon's two-line fix — it is already written. Then add the promise test for all four
 LMPOP arities; the family had none, which is why a transposition shipped.
+
+--------------------------------------------------------------------------------
+## NOT MEASURED (frankenredis-gvm6z) — no arm was run: the build slot was occupied for the whole window and the host went to loadavg 413. The next RESTORE lever is SOURCE-VERIFIED and specified, and that is the honest output
+
+Claim class: INSTRUMENT AVAILABILITY + SPECIFIED TARGET. NO ratio is claimed.
+
+WHY NOTHING WAS MEASURED, recorded rather than skipped past. A local measurement build needs
+the one build slot this pane is allowed, and `pgrep` showed a peer's paired A/B holding it
+continuously across the window (RENAMENX, SUBSTR, HINCRBY and a SetOpt4 fusion all landed
+from it in that time). `crates/fr-server/src/main.rs` was additionally held under an
+EXCLUSIVE Agent Mail reservation by RusticHorizon until 04:28Z, so the ZLEXCOUNT floor class
+this pane had scoped could not be written either. Then the host went to loadavg 413.64 /
+249.72 / 119.37 with /data falling 176G -> 118G in eight minutes.
+
+    Editing shared source mid-A/B is what makes a peer's BEFORE arm invalid, and this repo
+    has already paid for that once ("a peer's uncommitted WIP between your two builds IS
+    your A/B"). Declining to edit was the correct move, not a blocked one.
+
+WHAT THE WINDOW PRODUCED INSTEAD, source-verified against HEAD:
+
+  * an instrument defect fixed and pushed (188dffec6, row above): `corpus_coverage.py`
+    counted 121 floor-classified commands against 138 real.
+  * the stranded-and-shaped set re-derived from the CORRECTED report: `hset`, `mset`,
+    `zlexcount` only, plus `dump` / `ping` / `randomkey` in [A] with no shape. ZLEXCOUNT is
+    confirmed unclassified at HEAD (`git show HEAD:...` rather than the working tree, which
+    carried three peers' WIP): no `BorrowedDispatchFloorCommand::Zlexcount`, no arity entry,
+    while `parse_borrowed_plain_zlexcount_packet` (exact `*4`) and
+    `execute_plain_zlexcount_borrowed` (integer RespFrame) both exist. Cascade arm #116 of
+    257. That is the same one-table-entry shape that took SMOVE, RPOPLPUSH, RENAMENX and
+    SUBSTR from 1.29x-1.54x to 0.49x-0.62x.
+  * frankenredis-gvm6z filed against the WORST cell on the board rather than the assigned
+    one: `ListpackValueSpan` is <=32 bytes because its Integer variant inlines 20 digit
+    bytes, and a hash listpack's string entries -- 2N of them per RESTORE -- each pay that
+    for a variant they never take, against 8 bytes of `Range<u32>` actually used. The type
+    already carries a pinned assert stating the cost model: "~1 instruction per byte of it
+    per listpack entry". 33832 took this lever once (40 -> <=32, by deleting a cached i64);
+    the digit buffer is what remains and needs a representation change, not a field deletion.
+
+ASSIGNED CELL, RE-DERIVED FROM THE LEDGER RATHER THAN RE-RUN. This pane was sent to
+"BITCOUNT unit form, 0.7907x with 46.1 pct dispatch share". That row is two levers stale and
+the ledger already says so at :25889 -- 0.5163x / 0.5268x / 0.5229x with dispatch 21.7 pct,
+three runs, the redis arm agreeing to 0.2 pct so the move is entirely in fr's numerator. The
+floor class (5, Bitcount) -> BitcountUnit is present at HEAD, its parser accepts BYTE, and
+its executor does not decline it, so there is nothing stranded left there. Three panes were
+holding that same assignment simultaneously; the live worst cell is hash RESTORE at 2.1273x.
+
+PROVENANCE: no measurement, so no ELF, no MHz and no A/A null -- deliberately, rather than a
+number taken in a window that could not support one. thinkstation1, 64 cores observed,
+governor powersave. loadavg 30.32 -> 413.64 across the window; /data 159G -> 118G.

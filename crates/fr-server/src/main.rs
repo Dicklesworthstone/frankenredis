@@ -16548,8 +16548,8 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // A wider claim would send the unserved form to GENERIC instead of back to the
         // cascade, which is strictly worse than never claiming it.
         (4, BorrowedDispatchFloorCommand::Lmpop) => Some(BorrowedDispatchFloorClass::Lmpop1),
-        (5, BorrowedDispatchFloorCommand::Lmpop) => Some(BorrowedDispatchFloorClass::Lmpop1Count),
-        (6, BorrowedDispatchFloorCommand::Lmpop) => Some(BorrowedDispatchFloorClass::Lmpop2),
+        (5, BorrowedDispatchFloorCommand::Lmpop) => Some(BorrowedDispatchFloorClass::Lmpop2),
+        (6, BorrowedDispatchFloorCommand::Lmpop) => Some(BorrowedDispatchFloorClass::Lmpop1Count),
         (7, BorrowedDispatchFloorCommand::Lmpop) => Some(BorrowedDispatchFloorClass::Lmpop2Count),
         (4, BorrowedDispatchFloorCommand::Hincrby) => {
             Some(BorrowedDispatchFloorClass::Hincrby)
