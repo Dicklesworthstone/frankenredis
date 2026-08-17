@@ -28167,3 +28167,64 @@ RETRY PREDICATE: ZLEXCOUNT is next by absolute dispatch (~4,306 instr/op, 64.0 p
 trio already exists — but it is 0.7758x, ALREADY AHEAD, so it is a cost reduction rather
 than a parity fix and should be described as one. Keep working the blind-spot list by
 traffic; two passes have now yielded six crossings, and the list is still 74 long.
+
+--------------------------------------------------------------------------------
+LANDED (frankenredis-ozrro) — the blind-spot list is now RANKED by whether a borrowed fast
+path already exists, which turns 67 unknowns into FOUR one-entry levers and 58 rewrites
+
+Claim class: METHOD (instrument; no measurement — loadavg 41.2 at request)
+
+Six routes have now crossed from behind to ahead, and FIVE of the six needed nothing but a
+floor-table entry because parser, executor, gate and metrics all existed already. Only LTRIM
+needed an executor written, and that was much the most expensive of the six. So "does the
+borrowed machinery exist?" is the single best predictor of a cheap lever, and until now it
+had to be checked by hand, one command at a time, after picking a target.
+
+`scripts/corpus_coverage.py` now reads that from source too and splits the blind spot:
+
+    [A] fast path EXISTS, only the floor entry missing        4
+        dump   ping   randomkey   zrevrangebylex
+    [B] PARTIAL — parser or executor, not both                5
+        move   pexpiretime   spublish   zinterstore   zremrangebylex
+    [C] NO borrowed machinery, one must be written first     58
+
+    The 67 is down from 74 because last turn's seven shapes moved those commands out of
+    the unmeasured column — the list shrinks as it is worked, which is the property that
+    makes it a worklist rather than a census.
+
+WHY THE SPLIT IS NOT COSMETIC. A [C] command is not "[A] but harder"; it is a different job
+with a different risk. Mislabelling one as [A] would send someone to add a floor class whose
+arm cannot serve the shape — and a floor class whose arm declines sends the packet to
+GENERIC, so that is a REGRESSION rather than a no-op. This ledger has caught that exact
+error four times under its own name.
+
+THE SELF-TEST GUARDS THE ONE MISTAKE THAT WOULD PRODUCE IT: a greedy affix strip that
+confuses a command with one CONTAINING its name. `hincrbyfloat` is the live case — it has a
+parser and no executor, so it must land in [B]; a sloppier scan reports it in [A] and sends
+someone to add a floor entry for a command nothing can execute. The test asserts
+hincrbyfloat is in the parser set, NOT in the executor set, and lands in PARTIAL.
+
+NOT MEASURED: loadavg 41.2 at request. This is an instrument change; nothing was certified.
+
+HANDOFF, RECORDED HERE BECAUSE AGENT MAIL IS FAILING. Two send attempts to RusticHorizon
+timed out in the archive stage (the service reports 11 cumulative timeouts), so this is the
+durable copy. RusticHorizon holds `crates/fr-server/src/main.rs` and
+`scripts/shape_instr_per_op.py` until ~03:53Z. My RENAMENX + SUBSTR floor entries are
+MEASURED, TESTED and BLOCKED behind that reservation — I did not override the guard. The
+patch is at
+`/data/tmp/claude-1000/-data-projects-frankenredis/25998f5d-039b-4210-954d-5ea3835d494a/scratchpad/renamenx_substr.patch`
+(480 lines: two floor entries, one test, seven verified no-op shapes). Its measurement row
+is already banked one row above. Anyone may apply it; if nobody does, I will re-land it when
+the reservation lapses.
+
+PROVENANCE:
+  no measurement       instrument only; the figures quoted are from rows above.
+  host                 thinkstation1, 64 cores, /data 155G, governor powersave, no build.
+  loadavg              41.2 at request.
+  MHz                  not recorded — no arm was measured.
+
+RETRY PREDICATE: work [A] first and expect one table entry each — but MEASURE BEFORE
+BUILDING, because three of the first six shapes drawn from this list were already AHEAD of
+redis and needed nothing. `ping` in particular is high-traffic and worth a shape on its own
+merits. Do NOT treat [C]'s 58 as a backlog: roughly half are unshapeable here (blocking,
+admin, pubsub, EXEC, SELECT) and belong to no lever at all.

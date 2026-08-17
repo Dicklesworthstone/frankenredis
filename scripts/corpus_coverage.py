@@ -34,6 +34,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CMD_TABLE = os.path.join(ROOT, "crates", "fr-command", "src", "lib.rs")
 FLOOR = os.path.join(ROOT, "crates", "fr-server", "src", "main.rs")
 SHAPES = os.path.join(ROOT, "scripts", "shape_instr_per_op.py")
+RUNTIME = os.path.join(ROOT, "crates", "fr-runtime", "src", "lib.rs")
 
 # A container command's own name is dispatched, but its work lives in subcommands, so a
 # shape for the bare name would measure the wrong thing. Excluded from the blind spot with
@@ -66,6 +67,30 @@ def floor_classified(text: str) -> set[str]:
     return out
 
 
+def borrowed_trio(server_text: str, runtime_text: str) -> dict[str, set[str]]:
+    """Which commands already have borrowed machinery, split by piece.
+
+    This is the single best predictor of a CHEAP lever, and it is why the report ranks on
+    it: of the six routes this campaign moved from behind to ahead, FIVE needed nothing but
+    a floor-table entry, because parser, executor, gate and metrics all existed already.
+    Only LTRIM needed an executor written, and that was much the most expensive of the six.
+
+    A [C] command is not "harder by a little" — it is a different job, and mislabelling one
+    as [A] would send someone to add a floor class whose arm cannot serve the shape, which
+    sends it to GENERIC and is a REGRESSION rather than a no-op.
+    """
+    return {
+        "parser": {
+            m.group(1).lower()
+            for m in re.finditer(r"fn parse_borrowed_plain_([a-z0-9_]+?)_packet", server_text)
+        },
+        "executor": {
+            m.group(1).lower()
+            for m in re.finditer(r"fn execute_plain_([a-z0-9_]+?)_borrowed", runtime_text)
+        },
+    }
+
+
 def shaped(text: str) -> set[str]:
     """Every command any shape ISSUES (the measured command, not the seed commands)."""
     start = text.index("SHAPES")
@@ -85,9 +110,26 @@ def report() -> int:
     print(f"floor-classified         {len(classified)}")
     print(f"issued by some shape     {len(have_shape)}")
     print()
+    trio = borrowed_trio(open(FLOOR).read(), open(RUNTIME).read())
+    ready = [c for c in blind if c in trio["parser"] and c in trio["executor"]]
+    partial = [c for c in blind if (c in trio["parser"]) != (c in trio["executor"])]
+    bare = [c for c in blind if c not in trio["parser"] and c not in trio["executor"]]
+
+    def block(items):
+        for i in range(0, len(items), 6):
+            print("      " + "  ".join(f"{c:<16}" for c in items[i : i + 6]))
+
     print(f"UNCLASSIFIED **and** UNMEASURED — the blind spot ({len(blind)}):")
-    for i in range(0, len(blind), 8):
-        print("   " + "  ".join(f"{c:<14}" for c in blind[i : i + 8]))
+    print()
+    print(f"  [A] fast path EXISTS, only the floor entry missing ({len(ready)}) "
+          f"— one table entry each:")
+    block(ready)
+    print()
+    print(f"  [B] PARTIAL, parser or executor but not both ({len(partial)}):")
+    block(partial)
+    print()
+    print(f"  [C] NO borrowed machinery, one must be written first ({len(bare)}):")
+    block(bare)
     print()
     print(
         f"unclassified but MEASURED ({len(measured_unclassified)}) — known, and not all are "
@@ -144,6 +186,26 @@ fn next_function() {}
     got = shaped(shapes)
     assert got == {"smove", "get"}, got
     assert "sadd" not in got, "seed commands must not count as measured"
+
+    # The trio scan must not confuse a command with one that merely CONTAINS its name.
+    # hincrby vs hincrbyfloat is the live case: a greedy affix strip would report
+    # hincrbyfloat as [A] ready when nothing executes it, sending someone to add a floor
+    # class whose arm cannot serve the shape — a REGRESSION, not a no-op.
+    srv = "\n".join([
+        "fn parse_borrowed_plain_hincrby_packet(input: u8) {}",
+        "fn parse_borrowed_plain_hincrbyfloat_packet(input: u8) {}",
+        "fn parse_borrowed_plain_smove_packet(input: u8) {}",
+    ])
+    rt = "\n".join([
+        "pub fn execute_plain_hincrby_borrowed(x: u8) {}",
+        "pub fn execute_plain_smove_borrowed(x: u8) {}",
+    ])
+    trio = borrowed_trio(srv, rt)
+    assert trio["parser"] == {"hincrby", "hincrbyfloat", "smove"}, trio["parser"]
+    assert trio["executor"] == {"hincrby", "smove"}, trio["executor"]
+    assert "hincrbyfloat" in trio["parser"] and "hincrbyfloat" not in trio["executor"], (
+        "hincrbyfloat must land in [B] PARTIAL, not [A] ready"
+    )
 
     print("self-test ok")
     return 0
