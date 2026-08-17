@@ -14606,6 +14606,12 @@ enum BorrowedDispatchFloorClass {
     SetOpt4,
     SetOpt5,
     SetOpt6,
+    /// (frankenredis-ozrro) `HINCRBY key field increment` at arity 4. Found by measuring
+    /// the blind-spot shapes: 1.2944x with a 63.2 pct dispatch share and 4,343.6 instr/op
+    /// of it, second only to SMOVE's 4,438 before that was fixed. Parser, executor, gate
+    /// and metrics ALL already existed — only the floor entry was missing, so it walked to
+    /// cascade line ~9770 on every call.
+    Hincrby,
     /// (frankenredis-ozrro) `LTRIM key start stop` at arity 4. The LAST of the three
     /// routes the corpus was hiding, and the only one that needed an executor written:
     /// SMOVE and RPOPLPUSH already had theirs, LTRIM had neither. The PARSER is the
@@ -15044,6 +15050,7 @@ enum BorrowedDispatchFloorCommand {
     Smove,
     Rpoplpush,
     Ltrim,
+    Hincrby,
     Msetnx,
     Append,
     Bitcount,
@@ -15317,6 +15324,9 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             _ => None,
         },
         7 => match uppercase_ascii_token::<7>(token)? {
+            [b'H', b'I', b'N', b'C', b'R', b'B', b'Y'] => {
+                Some(BorrowedDispatchFloorCommand::Hincrby)
+            }
             [b'P', b'E', b'X', b'P', b'I', b'R', b'E'] => {
                 Some(BorrowedDispatchFloorCommand::Pexpire)
             }
@@ -16487,6 +16497,9 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         // served, which is the condition the floor-class rule actually requires.
         (4, BorrowedDispatchFloorCommand::Smove) => Some(BorrowedDispatchFloorClass::Smove),
         (4, BorrowedDispatchFloorCommand::Ltrim) => Some(BorrowedDispatchFloorClass::Ltrim),
+        (4, BorrowedDispatchFloorCommand::Hincrby) => {
+            Some(BorrowedDispatchFloorClass::Hincrby)
+        }
         (3, BorrowedDispatchFloorCommand::Rpoplpush) => {
             Some(BorrowedDispatchFloorClass::Rpoplpush)
         }
@@ -17974,6 +17987,36 @@ fn try_dispatch_floor_classified_action(
                         argv_scratch,
                     )
                 }
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Hincrby => {
+            // (frankenredis-ozrro) Same parser and executor the cascade arm at ~9770 used;
+            // only the position changes, so the reply and every side effect are unchanged
+            // and a declining executor still reaches the generic path. HINCRBY is arity 4
+            // and nothing else in the cascade parses a HINCRBY packet, so the class cannot
+            // strand a shape another arm would have served. Note HINCRBYFLOAT is a
+            // DIFFERENT token of a different length and is unaffected.
+            if let Some(packet) = parse_borrowed_plain_hincrby_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_hincrby_borrowed(
+                    packet.key,
+                    packet.start,
+                    packet.end,
+                    ts,
+                )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
             } else {
                 parse_borrowed_multibulk_action(
                     unparsed,
@@ -51457,6 +51500,83 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
                 "{other:?} must not be claimed as Ltrim"
             );
             assert!(!parses(&pkt), "{other:?} must not parse under the LTRIM token");
+        }
+    }
+
+    /// (frankenredis-ozrro) HINCRBY's floor class. Same promise as SMOVE's and LTRIM's,
+    /// with one extra hazard worth pinning: HINCRBYFLOAT shares the first seven letters,
+    /// so a token match that ignored LENGTH would capture it and answer a float command
+    /// with the integer path.
+    #[test]
+    fn hincrby_floor_class_claims_exactly_what_its_parser_accepts() {
+        let cfg = ParserConfig::default();
+        fn packet(args: &[&str]) -> Vec<u8> {
+            let mut p = format!("*{}\r\n", args.len()).into_bytes();
+            for a in args {
+                p.extend_from_slice(format!("${}\r\n{}\r\n", a.len(), a).as_bytes());
+            }
+            p
+        }
+
+        for served in [
+            packet(&["HINCRBY", "h", "f", "1"]),
+            packet(&["hincrby", "h", "f", "-3"]),
+        ] {
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(&served, &cfg),
+                Some(super::BorrowedDispatchFloorClass::Hincrby),
+            );
+            assert!(
+                super::parse_borrowed_plain_hincrby_packet(&served, &cfg).is_some(),
+                "the class claims arity 4, so the arm's parser must accept it"
+            );
+        }
+
+        // HINCRBYFLOAT is a DIFFERENT command that shares this token's prefix. It must be
+        // neither claimed nor parsed by the integer path, at its own arity or any other.
+        for float_form in [
+            vec!["HINCRBYFLOAT", "h", "f", "1.5"],
+            vec!["hincrbyfloat", "h", "f", "1.5"],
+        ] {
+            let pkt = packet(&float_form);
+            assert_ne!(
+                super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
+                Some(super::BorrowedDispatchFloorClass::Hincrby),
+                "{float_form:?} must NOT be captured by the HINCRBY class"
+            );
+            assert!(
+                super::parse_borrowed_plain_hincrby_packet(&pkt, &cfg).is_none(),
+                "{float_form:?} must not parse as HINCRBY"
+            );
+        }
+
+        // Not variadic: no other arity may be claimed.
+        for wrong in [
+            vec!["HINCRBY"],
+            vec!["HINCRBY", "h"],
+            vec!["HINCRBY", "h", "f"],
+            vec!["HINCRBY", "h", "f", "1", "extra"],
+        ] {
+            let pkt = packet(&wrong);
+            assert_ne!(
+                super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
+                Some(super::BorrowedDispatchFloorClass::Hincrby),
+                "{wrong:?} must not be claimed as Hincrby"
+            );
+            assert!(
+                super::parse_borrowed_plain_hincrby_packet(&pkt, &cfg).is_none(),
+                "{wrong:?} must not parse as HINCRBY either"
+            );
+        }
+
+        // Other 7-letter commands at arity 4 must not collide with the new token.
+        for other in [vec!["ZINCRBY", "z", "1", "m"], vec!["PERSIST", "k", "a", "b"]] {
+            let pkt = packet(&other);
+            assert_ne!(
+                super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
+                Some(super::BorrowedDispatchFloorClass::Hincrby),
+                "{other:?} must not be claimed as Hincrby"
+            );
         }
     }
 }

@@ -28015,3 +28015,80 @@ alphabetically. Do NOT treat the 78 as 78 levers: half are unshapeable here (blo
 BLPOP/BRPOP/BLMOVE, admin MIGRATE/FAILOVER/MODULE, pubsub SUBSCRIBE, transactional EXEC,
 connection SELECT/ASKING), and of the six shaped last time only THREE were behind — the
 other three were comfortably ahead. Unclassified does not imply slow; it implies unmeasured.
+
+--------------------------------------------------------------------------------
+MEASURED (frankenredis-ozrro) — HINCRBY front-classified: 1.3127x -> 0.5161x, dispatch
+4,342.9 -> 454.2 (-89.5 pct). Found by MEASURING the blind-spot shapes landed last row,
+which is the point of having computed the blind spot
+
+Claim class: COMPETITIVE
+
+Last row landed `scripts/corpus_coverage.py`, which put the blind spot at 78 of 218
+commands, and four shapes from the top of that list. Measuring those four is what found
+this: three were comfortably ahead (mset_2 0.5495x, zremrangebyscore_none 0.5591x,
+zrandmember_1 0.6627x) and ONE was not.
+
+    hincrby_zero   6,873.8 instr/op   1.2944x   63.2 pct dispatch   ~4,343.6 instr/op
+
+That is the second-largest dispatch cost this campaign has measured, behind only SMOVE's
+4,438 before it was fixed — and HINCRBY had a borrowed parser, executor, gate AND metrics
+already. Only the floor entry was missing, so it walked to cascade line ~9770 on every call.
+
+    shape           BEFORE                     AFTER                      delta
+    hincrby_zero    6,873.8 / 6,866.5          2,682.3 / 2,673.9          -61.0 pct
+                    dispatch 63.2 / 63.2 pct   dispatch 17.0 / 17.0 pct
+                    (~4,342.9 instr/op)        (~454.2 instr/op)          -89.5 pct
+                    ratio 1.3326x / 1.2928x    ratio 0.5137x / 0.5184x    CROSSED PARITY
+
+    hincrbyfloat    4,019.8 / 4,014.3          4,013.3 / 4,030.0          +0.11 pct
+                    dispatch ~508.2            dispatch ~509.5            UNCHANGED
+    get_control     1,314.3 / 1,302.3          1,302.1 / 1,296.5          -0.69 pct  NULL
+
+HINCRBYFLOAT IS THE CONTROL THAT MATTERS HERE, and it was chosen for a specific hazard
+rather than convenience: it shares HINCRBY's first SEVEN letters, so a token match that
+ignored LENGTH would capture it and answer a float command through the integer path. The
+unit test pins that; this row confirms it in the BINARY — the float sibling is unmoved to
+0.11 pct with an identical dispatch figure. get_control's -0.69 pct sits inside its own
+0.9 pct spread this round and rules out a layout shift.
+
+THE COST MODEL HELD AGAIN, and this is now its fifth point. "A front-classified route costs
+~263 + ~100 per additional bulk parsed": HINCRBY's parser reads THREE bulks (key, field,
+increment), predicting ~463. Actual 454.2 — within 2 pct.
+
+    1 bulk  get_control  ~263      3 bulks  smove      ~466
+    2 bulks rpoplpush    ~409      3 bulks  ltrim      ~498
+                                   3 bulks  hincrby    ~454
+
+FOUR ROUTES CLEARED IN FOUR TURNS — SMOVE, RPOPLPUSH, LTRIM, HINCRBY — every one of them
+1.29x-1.51x behind before and 0.51x-0.62x after. Three needed nothing but a floor-table
+entry over machinery that already existed; only LTRIM needed an executor written.
+
+    THE PATTERN IS NOW UNAMBIGUOUS: fr's slow routes are not slow because of their WORK.
+    They are slow because a command with a complete borrowed fast path was never added to
+    a lookup table, and the only reason nobody noticed is that no shape measured them.
+
+CORRECTNESS. Same floor-class promise as the previous three. The test asserts the classifier
+claims exactly arity 4 in both cases, the parser accepts what is claimed, HINCRBYFLOAT is
+neither claimed nor parsed by the integer path, four wrong arities are refused by BOTH, and
+two other 7-letter commands do not collide. MUTATION-TESTED: relaxing the arity map to
+`(_, Hincrby)` reddens on `["HINCRBY"]`. 357 fr-server tests pass.
+
+PROVENANCE:
+  AFTER ELF            f0df78ed0dcc8501...
+  BEFORE ELF           35f3e8d022c1d484...  same tree, built minutes apart, differing ONLY
+                       by this change (stash / build / restore).
+  harness              scripts/shape_instr_per_op.py at HEAD, N=2000/2N=4000, ABBA per
+                       shape, both engines in the SAME invocation.
+  host                 thinkstation1, 64 cores, /data 159G, governor powersave, two builds.
+  PER-ARM loadavg/MHz  hincrby_zero 24.40/2857, 23.17/2325, 23.17/2469, 22.03/2319 ·
+                       hincrbyfloat 22.03/3131, 20.99/3199, 20.11/2533, 19.54/3947 ·
+                       get_control 19.54/2405, 18.85/2300, 18.06/2521, 18.06/2349.
+                       Loadavg was 50.57/35.51/27.45 and RISING when the turn opened, so
+                       this is NOT offered as a tight-ratio certification: these are
+                       small-reply shapes (fr 0.001 passes/op), the load-immune class, and
+                       the effect is 61 pct against a null inside its own spread.
+
+RETRY PREDICATE: keep measuring down the blind-spot list by TRAFFIC — this row is the
+second time a single measurement pass turned up a >1.2x route that had a complete fast path
+and no table entry. Before writing any executor, check the trio exists; three of the last
+four needed nothing. Cost the entry with 263 + ~100 per bulk (five points, worst error 8 pct).
