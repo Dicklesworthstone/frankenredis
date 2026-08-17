@@ -14593,6 +14593,13 @@ enum BorrowedMultibulkAction {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BorrowedDispatchFloorClass {
+    /// (frankenredis-ozrro) `ZLEXCOUNT key min max` at arity 4. The largest remaining
+    /// dispatch cost on the board — ~4,306 instr/op at a 64.0 pct share — with parser,
+    /// executor, gate and metrics all present and only the floor entry missing.
+    ///
+    /// Unlike the six routes before it, ZLEXCOUNT is ALREADY AHEAD of redis at 0.7758x, so
+    /// this is a COST REDUCTION rather than a parity fix and should be described as one.
+    Zlexcount,
     /// (frankenredis-p98mw) `TOUCH key` at arity 2 only.
     Touch,
     /// (frankenredis-z2ce3) `SET key value <option...>`, split by ARITY because that is
@@ -14606,6 +14613,22 @@ enum BorrowedDispatchFloorClass {
     SetOpt4,
     SetOpt5,
     SetOpt6,
+    /// (frankenredis-p98mw) LMPOP's four forms, ONE CLASS PER ARITY.
+    ///
+    /// Measured stranded at **1.3786x with a 69.2 pct dispatch share and ~4,400 instr/op**
+    /// of it — the largest dispatch cost this campaign has measured apart from SMOVE's
+    /// 4,438, and LMPOP had parser and executor for all four forms already. Its arms sit
+    /// at cascade lines 9662-9912, ~2,770 past the floor call, so every LMPOP walked the
+    /// whole chain to reach a route that already existed.
+    ///
+    /// Four classes rather than one chained arm, deliberately: chaining same-token
+    /// parsers is what made `SET k v XX` parse its prefix twice (frankenredis-f2zrr), and
+    /// the packet header already carries the arity that discriminates them. Each arity
+    /// goes straight to the one parser that can serve it, so no form pays for another.
+    Lmpop1,
+    Lmpop2,
+    Lmpop1Count,
+    Lmpop2Count,
     /// (frankenredis-ozrro) `RENAMENX src dst` at arity 3. Second measurement pass over
     /// the blind-spot list: 1.5361x with a 69.0 pct dispatch share, the HIGHEST share this
     /// campaign has recorded. Parser, executor, gate and metrics all existed already.
@@ -15054,6 +15077,7 @@ impl PlainZsetStoreCmd {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BorrowedDispatchFloorCommand {
     Touch,
+    Zlexcount,
     Set,
     Smove,
     Rpoplpush,
@@ -15061,6 +15085,7 @@ enum BorrowedDispatchFloorCommand {
     Hincrby,
     Renamenx,
     Substr,
+    Lmpop,
     Msetnx,
     Append,
     Bitcount,
@@ -15278,6 +15303,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             [b'T', b'O', b'U', b'C', b'H'] => Some(BorrowedDispatchFloorCommand::Touch),
             [b'S', b'M', b'O', b'V', b'E'] => Some(BorrowedDispatchFloorCommand::Smove),
             [b'L', b'T', b'R', b'I', b'M'] => Some(BorrowedDispatchFloorCommand::Ltrim),
+            [b'L', b'M', b'P', b'O', b'P'] => Some(BorrowedDispatchFloorCommand::Lmpop),
             [b'S', b'C', b'A', b'R', b'D'] => Some(BorrowedDispatchFloorCommand::Scard),
             [b'S', b'D', b'I', b'F', b'F'] => Some(BorrowedDispatchFloorCommand::Sdiff),
             [b'Z', b'C', b'A', b'R', b'D'] => Some(BorrowedDispatchFloorCommand::Zcard),
@@ -15397,6 +15423,9 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             }
             [b'X', b'R', b'E', b'V', b'R', b'A', b'N', b'G', b'E'] => {
                 Some(BorrowedDispatchFloorCommand::Xrevrange)
+            }
+            [b'Z', b'L', b'E', b'X', b'C', b'O', b'U', b'N', b'T'] => {
+                Some(BorrowedDispatchFloorCommand::Zlexcount)
             }
             [b'Z', b'R', b'E', b'V', b'R', b'A', b'N', b'G', b'E'] => {
                 Some(BorrowedDispatchFloorCommand::Zrevrange)
@@ -16515,6 +16544,13 @@ fn classify_borrowed_dispatch_floor_packet_impl<
             Some(BorrowedDispatchFloorClass::Renamenx)
         }
         (4, BorrowedDispatchFloorCommand::Substr) => Some(BorrowedDispatchFloorClass::Substr),
+        // (frankenredis-p98mw) LMPOP claims exactly the four arities its parsers serve.
+        // A wider claim would send the unserved form to GENERIC instead of back to the
+        // cascade, which is strictly worse than never claiming it.
+        (4, BorrowedDispatchFloorCommand::Lmpop) => Some(BorrowedDispatchFloorClass::Lmpop1),
+        (5, BorrowedDispatchFloorCommand::Lmpop) => Some(BorrowedDispatchFloorClass::Lmpop1Count),
+        (6, BorrowedDispatchFloorCommand::Lmpop) => Some(BorrowedDispatchFloorClass::Lmpop2),
+        (7, BorrowedDispatchFloorCommand::Lmpop) => Some(BorrowedDispatchFloorClass::Lmpop2Count),
         (4, BorrowedDispatchFloorCommand::Hincrby) => {
             Some(BorrowedDispatchFloorClass::Hincrby)
         }
@@ -16524,6 +16560,9 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (4, BorrowedDispatchFloorCommand::Set) => Some(BorrowedDispatchFloorClass::SetOpt4),
         (5, BorrowedDispatchFloorCommand::Set) => Some(BorrowedDispatchFloorClass::SetOpt5),
         (6, BorrowedDispatchFloorCommand::Set) => Some(BorrowedDispatchFloorClass::SetOpt6),
+        (4, BorrowedDispatchFloorCommand::Zlexcount) => {
+            Some(BorrowedDispatchFloorClass::Zlexcount)
+        }
         (2, BorrowedDispatchFloorCommand::Ttl) => Some(BorrowedDispatchFloorClass::Ttl),
         (2, BorrowedDispatchFloorCommand::Getex) => Some(BorrowedDispatchFloorClass::Getex),
         (3, BorrowedDispatchFloorCommand::Getex) => Some(BorrowedDispatchFloorClass::GetexPersist),
@@ -18020,6 +18059,102 @@ fn try_dispatch_floor_classified_action(
             if let Some(packet) = parse_borrowed_plain_renamenx_packet(unparsed, &parser_config)
                 && let Some(response) =
                     runtime.execute_plain_renamenx_borrowed(packet.key, packet.member, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        // (frankenredis-p98mw) `LMPOP 1 key LEFT|RIGHT`: key=numkeys, a=key, b=direction. Mirrors the cascade arm at ~9687 exactly -- same parser, same executor, same generic fallthrough; only the walk to reach it is removed.
+        BorrowedDispatchFloorClass::Lmpop1 => {
+            if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
+                unparsed,
+                &parser_config,
+                b"*4\r\n$5\r\n",
+                b"LMPOP",
+            ) && let Some(response) = runtime.execute_plain_lmpop1_borrowed(packet.key, packet.a, packet.b, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        // (frankenredis-p98mw) `LMPOP 2 k1 k2 LEFT|RIGHT`: key=numkeys, a=k1, b=k2, c=direction. Mirrors ~9908.
+        BorrowedDispatchFloorClass::Lmpop2 => {
+            if let Some(packet) = parse_borrowed_plain_key_arg3_packet(
+                unparsed,
+                &parser_config,
+                b"*5\r\n$5\r\n",
+                b"LMPOP",
+            ) && let Some(response) = runtime.execute_plain_lmpop2_borrowed(packet.key, packet.a, packet.b, packet.c, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        // (frankenredis-p98mw) `LMPOP 1 key LEFT|RIGHT COUNT n`: c=COUNT keyword, d=count. Mirrors ~9662. THIS is the measured shape: 1.3786x, 69.2 pct dispatch share.
+        BorrowedDispatchFloorClass::Lmpop1Count => {
+            if let Some(packet) = parse_borrowed_plain_key_arg4_packet(
+                unparsed,
+                &parser_config,
+                b"*6\r\n$5\r\n",
+                b"LMPOP",
+            ) && let Some(response) = runtime.execute_plain_lmpop1_count_borrowed(packet.key, packet.a, packet.b, packet.c, packet.d, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        // (frankenredis-p98mw) `LMPOP 2 k1 k2 LEFT|RIGHT COUNT n`: d=COUNT keyword, e=count. Mirrors ~9883.
+        BorrowedDispatchFloorClass::Lmpop2Count => {
+            if let Some(packet) = parse_borrowed_plain_key_arg5_packet(
+                unparsed,
+                &parser_config,
+                b"*7\r\n$5\r\n",
+                b"LMPOP",
+            ) && let Some(response) = runtime.execute_plain_lmpop2_count_borrowed(packet.key, packet.a, packet.b, packet.c, packet.d, packet.e, ts)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -20802,6 +20937,34 @@ fn try_dispatch_floor_classified_action(
             if let Some(packet) = parse_borrowed_plain_setbit_packet(unparsed, &parser_config)
                 && let Some(response) =
                     runtime.execute_plain_setbit_borrowed(packet.key, packet.start, packet.end, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Zlexcount => {
+            // (frankenredis-ozrro) Same parser and executor the cascade arm used; only the
+            // position changes, so the reply and every side effect are unchanged and a
+            // declining executor still reaches the generic path. ZLEXCOUNT is arity 4 and
+            // nothing else in the cascade parses a ZLEXCOUNT packet.
+            if let Some(packet) = parse_borrowed_plain_zlexcount_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_zlexcount_borrowed(
+                    packet.key,
+                    packet.min,
+                    packet.max,
+                    ts,
+                )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -51663,6 +51826,131 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         }
     }
 
+    /// (frankenredis-p98mw) LMPOP claims arities 4, 5, 6 and 7 — each to a DIFFERENT class
+    /// — and nothing outside that set.
+    ///
+    /// THE ADJACENT-ARITY SWAP IS THE NEGATIVE CASE THAT MATTERS. `*5` is
+    /// `LMPOP 2 k1 k2 LEFT` (two keys, no count) and `*6` is `LMPOP 1 key LEFT COUNT n`
+    /// (one key, with count). They are neighbours in arity but different in arity-of-keys
+    /// AND in whether a count is present, so a class table off by one would answer a
+    /// two-key pop through the one-key-plus-count executor. Neither the reply shape nor
+    /// the arity check would catch that, so it is asserted per-form here.
+    ///
+    /// Arity 3 and arity 8 are covered because a `>=` style claim would capture them, the
+    /// arm would decline, and a floor decline goes to GENERIC rather than back to the
+    /// cascade — strictly worse than never claiming them.
+    #[test]
+    fn lmpop_floor_classes_claim_exactly_the_four_arities_their_parsers_serve() {
+        use super::BorrowedDispatchFloorClass as C;
+        let cfg = ParserConfig::default();
+        fn packet(args: &[&str]) -> Vec<u8> {
+            let mut p = format!("*{}\r\n", args.len()).into_bytes();
+            for a in args {
+                p.extend_from_slice(format!("${}\r\n{}\r\n", a.len(), a).as_bytes());
+            }
+            p
+        }
+
+        // Each served form -> its own class, and the parser that class's arm calls must
+        // accept it. Lowercase included: the token table is case-insensitive.
+        let served: &[(Vec<&str>, C)] = &[
+            (vec!["LMPOP", "1", "k", "LEFT"], C::Lmpop1),
+            (vec!["lmpop", "1", "k", "RIGHT"], C::Lmpop1),
+            (vec!["LMPOP", "2", "k1", "k2", "LEFT"], C::Lmpop2),
+            (vec!["LMPOP", "1", "k", "LEFT", "COUNT", "1"], C::Lmpop1Count),
+            (vec!["LMPOP", "2", "k1", "k2", "LEFT", "COUNT", "1"], C::Lmpop2Count),
+        ];
+        for (form, want) in served {
+            let pkt = packet(form);
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
+                Some(*want),
+                "{form:?} classified wrongly"
+            );
+            // The floor-class promise: the arm's own parser must accept what was claimed.
+            let accepted = match want {
+                C::Lmpop1 => {
+                    super::parse_borrowed_plain_key_arg2_packet(&pkt, &cfg, b"*4\r\n$5\r\n", b"LMPOP")
+                        .is_some()
+                }
+                C::Lmpop2 => {
+                    super::parse_borrowed_plain_key_arg3_packet(&pkt, &cfg, b"*5\r\n$5\r\n", b"LMPOP")
+                        .is_some()
+                }
+                C::Lmpop1Count => {
+                    super::parse_borrowed_plain_key_arg4_packet(&pkt, &cfg, b"*6\r\n$5\r\n", b"LMPOP")
+                        .is_some()
+                }
+                C::Lmpop2Count => {
+                    super::parse_borrowed_plain_key_arg5_packet(&pkt, &cfg, b"*7\r\n$5\r\n", b"LMPOP")
+                        .is_some()
+                }
+                other => panic!("unexpected class {other:?}"),
+            };
+            assert!(accepted, "{form:?} is claimed but its arm's parser refuses it");
+        }
+
+        // THE SWAP GUARD: the two-key form and the one-key-plus-count form are adjacent in
+        // arity and must not share a class.
+        assert_ne!(
+            super::classify_borrowed_dispatch_floor_packet(
+                &packet(&["LMPOP", "2", "k1", "k2", "LEFT"]), &cfg),
+            super::classify_borrowed_dispatch_floor_packet(
+                &packet(&["LMPOP", "1", "k", "LEFT", "COUNT", "1"]), &cfg),
+            "the *5 two-key form and the *6 one-key+COUNT form must not classify alike"
+        );
+        // And each parser must REFUSE the other's arity, which is what makes the classes
+        // separable at all.
+        assert!(
+            super::parse_borrowed_plain_key_arg3_packet(
+                &packet(&["LMPOP", "1", "k", "LEFT", "COUNT", "1"]),
+                &cfg, b"*5\r\n$5\r\n", b"LMPOP").is_none(),
+            "the *5 parser must refuse a *6 packet"
+        );
+        assert!(
+            super::parse_borrowed_plain_key_arg4_packet(
+                &packet(&["LMPOP", "2", "k1", "k2", "LEFT"]),
+                &cfg, b"*6\r\n$5\r\n", b"LMPOP").is_none(),
+            "the *6 parser must refuse a *5 packet"
+        );
+
+        // Outside the served set: must NOT be claimed, so they keep walking the cascade.
+        for wrong in [
+            vec!["LMPOP"],
+            vec!["LMPOP", "1"],
+            vec!["LMPOP", "1", "k"],
+            vec!["LMPOP", "2", "k1", "k2", "LEFT", "COUNT", "1", "extra"],
+        ] {
+            let pkt = packet(&wrong);
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
+                None,
+                "{wrong:?} must not be floor-classified"
+            );
+        }
+
+        // Other 5-letter L-commands must not be captured by the new token. LMOVE is the
+        // sharp one and is why this block exists: same token LENGTH, shares the `LM`
+        // prefix, and its `LMOVE src dst LEFT RIGHT` form is *5 — the SAME arity as
+        // Lmpop2. Only the full-token compare separates them, so a match that stopped at
+        // two bytes would answer a list MOVE through the multi-key POP executor.
+        for other in [
+            vec!["LMOVE", "src", "dst", "LEFT", "RIGHT"],
+            vec!["LTRIM", "k", "0", "-1"],
+            vec!["LPUSH", "k", "v"],
+        ] {
+            let pkt = packet(&other);
+            let got = super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg);
+            assert!(
+                !matches!(
+                    got,
+                    Some(C::Lmpop1) | Some(C::Lmpop2) | Some(C::Lmpop1Count) | Some(C::Lmpop2Count)
+                ),
+                "{other:?} was captured by an LMPOP class ({got:?})"
+            );
+        }
+    }
+
     /// (frankenredis-ozrro) LTRIM's floor class. Same promise as SMOVE's and RPOPLPUSH's,
     /// but note the parser here is the SHARED `key_arg2` one that also serves ZMPOP and
     /// XACK — so the token and prefix are what keep those apart, and this asserts they do.
@@ -51876,6 +52164,75 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
                 super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
                 Some(bad),
                 "{wrong:?} must not be claimed"
+            );
+        }
+    }
+
+    /// (frankenredis-ozrro) ZLEXCOUNT's floor class. The name hazard here is a FAMILY one:
+    /// ZLEXCOUNT sits among ZREVRANGE, ZRANGEBYLEX and ZREMRANGEBYLEX, several of which are
+    /// nine letters or share the `lex` stem, so a token match that got LENGTH or ORDER
+    /// wrong would answer a neighbour's packet through the count path.
+    #[test]
+    fn zlexcount_floor_class_claims_exactly_what_its_parser_accepts() {
+        let cfg = ParserConfig::default();
+        fn packet(args: &[&str]) -> Vec<u8> {
+            let mut p = format!("*{}\r\n", args.len()).into_bytes();
+            for a in args {
+                p.extend_from_slice(format!("${}\r\n{}\r\n", a.len(), a).as_bytes());
+            }
+            p
+        }
+
+        for served in [
+            packet(&["ZLEXCOUNT", "z", "[a", "[c"]),
+            packet(&["zlexcount", "z", "-", "+"]),
+        ] {
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(&served, &cfg),
+                Some(super::BorrowedDispatchFloorClass::Zlexcount),
+            );
+            assert!(
+                super::parse_borrowed_plain_zlexcount_packet(&served, &cfg).is_some(),
+                "the class claims arity 4, so the arm's parser must accept it"
+            );
+        }
+
+        // Not variadic: no other arity may be claimed.
+        for wrong in [
+            vec!["ZLEXCOUNT"],
+            vec!["ZLEXCOUNT", "z"],
+            vec!["ZLEXCOUNT", "z", "[a"],
+            vec!["ZLEXCOUNT", "z", "[a", "[c", "extra"],
+        ] {
+            let pkt = packet(&wrong);
+            assert_ne!(
+                super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
+                Some(super::BorrowedDispatchFloorClass::Zlexcount),
+                "{wrong:?} must not be claimed as Zlexcount"
+            );
+            assert!(
+                super::parse_borrowed_plain_zlexcount_packet(&pkt, &cfg).is_none(),
+                "{wrong:?} must not parse as ZLEXCOUNT either"
+            );
+        }
+
+        // The lex/zset neighbours, including the other nine-letter token in the same match
+        // arm, must not be captured by either the classifier or the parser.
+        for other in [
+            vec!["ZREVRANGE", "z", "0", "-1"],
+            vec!["ZRANGEBYLEX", "z", "[a", "[c"],
+            vec!["ZREMRANGEBYLEX", "z", "[a", "[c"],
+            vec!["ZRANGEBYSCORE", "z", "1", "2"],
+        ] {
+            let pkt = packet(&other);
+            assert_ne!(
+                super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
+                Some(super::BorrowedDispatchFloorClass::Zlexcount),
+                "{other:?} must not be claimed as Zlexcount"
+            );
+            assert!(
+                super::parse_borrowed_plain_zlexcount_packet(&pkt, &cfg).is_none(),
+                "{other:?} must not parse under the ZLEXCOUNT token"
             );
         }
     }
