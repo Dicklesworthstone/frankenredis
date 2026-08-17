@@ -26736,3 +26736,75 @@ spread across a 9-point load swing is not improved by a fourth. DO re-run the k-
 per-member cost moved and the old crossover no longer describes anything. And re-run
 33832's competitive harness when three core blocks are under ~50 pct combined
 core+sibling load: throughput is the one axis this row says nothing about.
+
+--------------------------------------------------------------------------------
+REPRODUCED + RESIDUAL CLOSED (frankenredis-gein3) — sinter_big 1.2362x -> 0.3791x
+independently on a different ELF, and the writer pool is NOT the remaining cost: disabling
+it entirely leaves the pass count unchanged
+
+Claim class: COMPETITIVE
+
+THE LEVER THIS LEDGER ISOLATED HAS LANDED, AND IT WORKED. Two rows ago I subtracted
+sintercard_big from sinter_big to show fr's deficit was ENTIRELY EMIT (probe 265/member
+against redis's 428, emit 881 against 499), measured the mechanism as event-loop passes —
+fr 178.7/op against redis 0.130 — and wrote that any fix must move the PASS COUNT or it is
+not touching this. zw36c's 7462aa5d3 then stopped the loop busy-spinning for the whole
+duration of every large reply, and 0d2eaffdf certified the result at 0.3800x.
+
+INDEPENDENT REPRODUCTION, on my own ELF built from a different tree state:
+
+    sinter_big   fr 178,891.6 / 179,732.0 instr/op    ratio 0.3791x / 0.3796x
+                 passes/op 0.372 / 0.386              (zw36c certified 0.3800x)
+
+    against 586,750 instr/op, 1.2362x and 178.7 passes/op measured here 25 minutes
+    earlier on ELF 2d5a352c.
+
+    PASSES 178.7 -> 0.37, a 480x collapse. INSTRUCTIONS -69 pct. RATIO 1.2362x -> 0.3791x.
+    The pass count was the right target and the prediction held exactly: the fix moved it,
+    and the instruction count followed.
+
+THE RESIDUAL I FLAGGED IS NOW CLOSED, AND IT IS NOT THE WRITER POOL. My last row named
+`WRITER_POOL_WORKERS=2` as the remaining suspect for the per-pass cost and said to
+coordinate rather than collide. Rather than edit it, I built a PROBE with the handoff
+disabled outright (`let writer_pool: Option<WriterPool> = None;`), measured against a
+matched baseline from the same tree, and reverted:
+
+                    fr instr/op          passes/op
+    pool ON      178,891.6 / 179,732.0   0.372 / 0.386
+    pool OFF     174,693.5 / 174,598.0   0.412 / 0.371
+
+    THE PASS COUNT IS UNCHANGED — 0.37-0.41 either way. The writer pool was never
+    responsible for the spin, and nobody should spend a build chasing it. That question is
+    answered by measurement rather than left as a suspicion, which is what the probe was
+    for.
+
+ONE OBSERVATION, DELIBERATELY NOT A RECOMMENDATION: with the pool off, fr retires 2.6 pct
+FEWER instructions (174,646 against 179,312 on the means), and both arms are now tight
+(0.05 pct and 0.5 pct) so that gap sits outside their spreads. It is REAL as an instruction
+count and I am NOT proposing the pool be removed on the strength of it: a writer pool exists
+to move work off the reactor thread under CONCURRENCY, and this harness runs ONE client
+serially. This ledger's own trap line applies — the instruction ratio is not the throughput
+ratio, and an instruction count cannot adjudicate a threading change. Anyone tempted by the
+2.6 pct owes it a concurrent wall-clock test first.
+
+STANDING: sinter_big was my worst measured ratio for eight rows and is now 0.3791x. Every
+candidate raised against SINTER is resolved — reply sort (invisible; removed by a peer as a
+parity fix), per-member membership (fr 38 pct CHEAPER), dispatch (0.3 pct share), writer
+pool (no effect, this row), and the event-loop spin (THE cause, fixed, −69 pct).
+
+PROVENANCE:
+  baseline ELF         f413986ff09a5e8f...  matched pair, same tree
+  probe ELF            9b7361f904670cba...  identical except the pool handoff disabled
+                       The probe is REVERTED; the tree carries only a peer's debug_assert
+                       (zwtqi), which compiles OUT in release and cannot reach either ELF.
+  harness              scripts/shape_instr_per_op.py at HEAD, N=2000/2N=4000, two draws per
+                       arm, both engines per invocation.
+  host                 thinkstation1, 64 cores, /data 210G, governor powersave, two builds.
+  PER-ARM loadavg/MHz  pool ON 19.65/2837 and 14.76/2475 · pool OFF 24.89/2171 and
+                       15.80/3438. Window checked before starting: 18.79/22.92/26.05,
+                       converging and moderate.
+
+RETRY PREDICATE: do NOT re-open SINTER on instructions — it is 0.3791x and the causes are
+enumerated above. Do NOT remove the writer pool on the 2.6 pct in this row without a
+CONCURRENT wall-clock test; a serial single-client harness is the one workload where a
+writer pool can only look like overhead.
