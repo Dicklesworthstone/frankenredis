@@ -41975,3 +41975,103 @@ PROMOTED list — i.e. a live command path, not a reload — and it shows a delt
 shape's own null. Build the shape FIRST; this row exists because I had a harness and used it
 instead of building the one the lever needed. And note the guard costs ~+0.10 pct wherever the
 repr is still Packed, so a shape mixing both regimes must show the Deque saving exceeding that.
+
+## 2026-08-17 CrimsonHawk: REJECT — the `drop_if_expired`-then-lookup pattern is NOT a vein. 26 fr-store sites match it statically; MEASURED, every single-key command does exactly 1.000 keyspace lookups/op and only `sinter_prepare` doubles (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — this row ships nothing and exists to stop 25 investigations that would
+each have come back empty.
+
+### THE HYPOTHESIS, AND WHY IT LOOKED GOOD
+
+`Store::sinter_prepare` loops `drop_if_expired(key)` over its keys and then loops
+`self.entries.get(*key)` over the same keys. Two passes, two lookups per key. Call counts on
+`sinter_2` confirmed it: `HashMap<Box<[u8]>, Entry>` lookups run **4.000 per op for TWO keys**,
+split `get_mut` 2.000 and `contains_key` 2.000.
+
+A static scan then found **26 fr-store functions** with the same shape — `drop_if_expired(...)`
+followed by at least one `self.entries.get/get_mut/contains_key` on the same key. Ranked by
+later-lookup count: `sinter_prepare` 5, `pfcount` 4, then `zrandmember`, `touch_lfu_impl`,
+`touch_key`, `spop`, `set_keep_ttl_borrowed`, `renamenx`, `exists_lfu_impl` at 2 each, and
+seventeen more at 1.
+
+At ~60 instructions per hashed lookup that reads like a broad vein.
+
+### MEASURED, AND IT IS NOT ONE
+
+Keyspace lookups per op, counted with `scripts/call_count_delta.py --top` and summed over the
+`HashMap<Box<[u8]>, fr_store::Entry>` methods:
+
+  shape              keys   lookups/op   verdict
+  zcard                1       1.000      optimal
+  get_control          1       1.000      optimal
+  pfadd_existing       1       1.000      optimal
+  spop_missing         1       1.000      optimal
+  renamenx_exists      2       2.000      optimal
+  touch_2              2       2.000      optimal
+  mget_3               3       3.000      optimal
+  sinter_2             2       4.000      TWO PER KEY
+
+**One lookup per key, everywhere except SINTER.** `spop` and `renamenx` are on the static list
+with 2 later lookups each and measure exactly one per key; `touch_key` and `exists_lfu_impl`
+likewise. The pattern exists in the source and does not exist in the binary — `drop_if_expired`
+does not perform a separate hashed lookup on the paths these commands actually take, so the
+"second" lookup is the only lookup.
+
+**This is the third static scan I have run today that over-reported, and the third time
+measurement corrected it.** The other two: cascade POSITION did not predict dispatch cost
+(EXISTS at arm 160-166 of 166 pays a normal 439-965 instr/op), and my arity-claim regex reported
+twelve variable-arity floor classes as unclaimed because it only matched numeric patterns. The
+standing lesson is now well paid for: **a source scan proposes, a count disposes.** Do not rank
+a work queue by a static match.
+
+### THE ONE REAL INSTANCE IS BLOCKED, AND NOT BY ME
+
+`sinter_prepare` genuinely does two lookups per key and is worth ~120 instr/op on a 2-key
+SINTER (4,291.9 instr/op total). It is NOT taken here.
+`check-candidate sinter_prepare` returns BLOCKED with 5 rows, and the binding one is MossyBluff's
+COMPETITIVE KEEP (NEGATIVE_EVIDENCE.md:617, `SINTERSTORE dst small large` at 3.2237x live Redis
+at saturated P16) whose retry predicate names **`Store::sinter_prepare` explicitly** among the
+things whose change reopens it.
+
+Changing it therefore obliges a re-validation of that row against a live incumbent at P16. The
+timed instrument returned **2 admissible rows in 16 attempts** across today's windows, including
+windows verified at 79-88 pct CPU idle, so that obligation cannot be discharged today. Taking
+the lever anyway would either invalidate a standing 3.2237x claim or leave it unverified, and
+neither is worth ~120 instr/op.
+
+### COUNTED MECHANISM
+
+Eight shapes, each a two-point callgrind subtraction at N=2000 and 2N=4000 with startup and
+seeding cancelled. Lookup counts are exact integers and land on whole numbers in every case —
+1.000, 2.000, 3.000, 4.000 — with no fractional values anywhere, which is itself evidence the
+attribution is clean. Call counts are deterministic and carry no confidence interval.
+
+CV was not used, as a gate or otherwise.
+
+### PROVENANCE
+
+  ELF           c13d2f7f6a349a82, plain `--release` at HEAD, no feature flags, built locally
+                with RCH_CARGO_WRAPPER_BYPASS=1, path from `--message-format=json`, copied to a
+                private path and sha256'd there.
+  bench_elf_sha256=c13d2f7f6a349a8212c4173b8d327af07e23ac55f9887a4fe8f49caff9caa42a
+  incumbent     NOT RUN. Every number is an fr-side count; no ratio against the incumbent is
+                claimed.
+  harness       `scripts/shape_instr_per_op.py --fr-only`, `scripts/call_count_delta.py`.
+  host          thinkstation1, 64 cores observed, powersave governor, /data 199G free.
+  PER-ARM loadavg / CPU idle
+                lookup census   load 18.16 18.84 18.91, CPU idle 83.2 pct from /proc/stat
+                                deltas, iowait 0.1 pct
+  admissibility Call counts are deterministic and load-immune. No timed row is claimed.
+
+### RETRY PREDICATE
+
+1. Do NOT re-derive the 26-site list and work it. It is a static match and 25 of the 26 measure
+   optimal. If the pattern is revisited, count `HashMap<Box<[u8]>, fr_store::Entry>` lookups per
+   op FIRST and discard anything at 1.000 per key.
+2. `sinter_prepare` reopens only for someone prepared to re-validate MossyBluff's 3.2237x
+   SINTERSTORE row against a live incumbent at P16, in a window where the timed instrument
+   actually admits. On this host that is the binding constraint, not the code change.
+3. If the timed instrument is ever fixed — see the `get_control` normaliser work in `7dfecf4f4`,
+   which widened what may be chosen as a control — this is one of the rows that becomes
+   available again.
