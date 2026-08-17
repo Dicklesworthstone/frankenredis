@@ -3238,9 +3238,11 @@ pub struct LuaState<'a> {
     /// Mirrors upstream script_lua.c::luaSetTableProtectionRecursively
     /// applied to the globals table after init, plus the
     /// luaProtectedTableError __index handler.
-    /// (frankenredis-o500d) Names collected by `redis.register_function` during a
+    /// (frankenredis-o500d) Registrations collected by `redis.register_function` during a
     /// FUNCTION LOAD body execution. Empty for EVAL, which never sees that builtin.
-    registered_functions: Vec<Vec<u8>>,
+    /// (frankenredis-9hori) Full specs, not just names: flags and description are only
+    /// recoverable from the runtime value.
+    registered_functions: Vec<RegisterFunctionSpec>,
     globals_locked: bool,
     /// (frankenredis-vr8rg) RESP version the script's `redis.call` /
     /// `redis.pcall` use to materialize replies, toggled by `redis.setresp`.
@@ -4179,6 +4181,11 @@ fn build_lua_base_globals_template() -> LuaMap<String, LuaValue> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RegisterFunctionSpec {
     pub(crate) name: Vec<u8>,
+    /// (frankenredis-9hori) Flags from the table form's `flags = {...}`, in declaration
+    /// order. Empty for the positional form, which upstream gives no flags either.
+    pub(crate) flags: Vec<Vec<u8>>,
+    /// Table form's `description`, if present.
+    pub(crate) description: Option<Vec<u8>>,
 }
 
 /// Why a `redis.register_function` call was refused.
@@ -4241,7 +4248,31 @@ pub(crate) fn parse_register_function_args(
         if !lua_value_is_callable(&callback) {
             return Err(RegisterFunctionArgError::CallbackNotCallable);
         }
-        return Ok(RegisterFunctionSpec { name });
+        // (frankenredis-9hori) flags/description are captured from the RUNTIME value, which
+        // is the whole point: the text scan in fr_store::function_load can only read them
+        // when they are written as literals, so a library that computes them loses its
+        // metadata even once the load itself is fixed.
+        let description = match t.get(&LuaValue::Str(b"description".to_vec())) {
+            LuaValue::Str(d) => Some(d),
+            _ => None,
+        };
+        let mut flags = Vec::new();
+        if let LuaValue::Table(ft) = t.get(&LuaValue::Str(b"flags".to_vec())) {
+            // Lua arrays are 1-based and dense; stop at the first hole, as `ipairs` does.
+            let mut idx = 1u32;
+            loop {
+                match ft.get(&LuaValue::Number(f64::from(idx))) {
+                    LuaValue::Str(f) => flags.push(f),
+                    _ => break,
+                }
+                idx += 1;
+            }
+        }
+        return Ok(RegisterFunctionSpec {
+            name,
+            flags,
+            description,
+        });
     }
     // Positional form: exactly (name, callback).
     if args.len() != 2 {
@@ -4253,7 +4284,12 @@ pub(crate) fn parse_register_function_args(
     if !lua_value_is_callable(&args[1]) {
         return Err(RegisterFunctionArgError::CallbackNotCallable);
     }
-    Ok(RegisterFunctionSpec { name: name.clone() })
+    // Positional form carries no flags or description, matching upstream.
+    Ok(RegisterFunctionSpec {
+        name: name.clone(),
+        flags: Vec::new(),
+        description: None,
+    })
 }
 
 /// Globals for a FUNCTION LOAD body: the ordinary sandbox plus `redis.register_function`.
@@ -4266,7 +4302,8 @@ pub(crate) fn parse_register_function_args(
 /// Execute a FUNCTION LOAD library body in the declared-globals sandbox.
 ///
 /// (frankenredis-o500d) This is the load-time execution upstream does and fr did not. Returns
-/// the names the body registered, or `(line, message)` for a RUNTIME error — the case a
+/// the registrations the body made — name, flags and description, all read off the RUNTIME
+/// value — or `(line, message)` for a RUNTIME error — the case a
 /// static scan cannot reach, e.g. `local t = nil; t.field`.
 ///
 /// The shebang is blanked (not stripped) by `lua_execution_source` so reported line numbers
@@ -4276,11 +4313,11 @@ pub(crate) fn function_load_execute(
     store: &mut Store,
     now_ms: u64,
     code: &[u8],
-) -> Result<Vec<Vec<u8>>, (u32, String)> {
+) -> Result<Vec<RegisterFunctionSpec>, (u32, String)> {
     let source = lua_execution_source(code);
     let mut state = LuaState::new_for_function_load(store, now_ms);
     match state.execute(source.as_ref()) {
-        Ok(_) => Ok(state.registered_function_names().to_vec()),
+        Ok(_) => Ok(state.registered_function_specs().to_vec()),
         Err(err) => Err((state.current_line, err)),
     }
 }
@@ -4387,8 +4424,8 @@ impl<'a> LuaState<'a> {
         Self::with_globals(store, now_ms, lua_function_load_globals())
     }
 
-    /// Names registered by the body executed on this state, in call order.
-    pub(crate) fn registered_function_names(&self) -> &[Vec<u8>] {
+    /// Registrations made by the body executed on this state, in call order.
+    pub(crate) fn registered_function_specs(&self) -> &[RegisterFunctionSpec] {
         &self.registered_functions
     }
 
@@ -7955,7 +7992,7 @@ impl<'a> LuaState<'a> {
             "redis.register_function" => {
                 let spec = parse_register_function_args(args)
                     .map_err(|e| format!("register_function: malformed arguments ({e:?})"))?;
-                self.registered_functions.push(spec.name);
+                self.registered_functions.push(spec);
                 Ok(vec![LuaValue::Nil])
             }
             "redis.call" => self.redis_call(args, false).map(|value| vec![value]),
@@ -15161,6 +15198,39 @@ mod tests {
         overlay_filter_bit, parse_register_function_args,
     };
 
+    /// (frankenredis-9hori) flags and description must be captured from the RUNTIME table.
+    ///
+    /// This is what makes the eventual fix able to preserve metadata. fr_store's text scan
+    /// reads flags/description only when they are written as string LITERALS in the source;
+    /// a library that computes them keeps loading but silently loses them from FUNCTION LIST.
+    /// Reading them off the evaluated table has no such blind spot, so these assertions use a
+    /// COMPUTED flag string and a computed description — the exact shapes a scan cannot see.
+    #[test]
+    fn register_function_captures_flags_and_description_from_the_runtime_table() {
+        let mut store = Store::new();
+        let mut st = LuaState::new_for_function_load(&mut store, 0);
+        let out = st.execute(
+            b"local f = 'no' .. '-writes'\n\
+              redis.register_function{function_name='m', callback=function() return 1 end,\
+                                      flags={f, 'allow-stale'}, description='d'..'esc'}\n\
+              return 1",
+        );
+        assert!(out.is_ok(), "body must run: {out:?}");
+        assert_eq!(st.registered_function_specs().len(), 1);
+
+        // Ordering matters: FUNCTION LIST reports flags in declaration order.
+        let spec = st
+            .registered_function_specs()
+            .first()
+            .cloned()
+            .expect("one spec");
+        assert_eq!(
+            spec.flags,
+            vec![b"no-writes".to_vec(), b"allow-stale".to_vec()]
+        );
+        assert_eq!(spec.description, Some(b"desc".to_vec()));
+    }
+
     /// (frankenredis-o500d) The builtin must actually REGISTER when a real library body
     /// runs, and must be INVISIBLE to EVAL.
     ///
@@ -15184,9 +15254,14 @@ mod tests {
                   return 1",
             );
             assert!(out.is_ok(), "library body must run: {out:?}");
+            let names: Vec<Vec<u8>> = st
+                .registered_function_specs()
+                .iter()
+                .map(|s| s.name.clone())
+                .collect();
             assert_eq!(
-                st.registered_function_names(),
-                &[b"alpha".to_vec(), b"beta".to_vec()],
+                names,
+                vec![b"alpha".to_vec(), b"beta".to_vec()],
                 "both calling conventions must register, in call order"
             );
         }
@@ -15196,7 +15271,7 @@ mod tests {
             let out = st.execute(b"redis.register_function('only-a-name') return 1");
             assert!(out.is_err(), "one-arg register_function must raise");
             assert!(
-                st.registered_function_names().is_empty(),
+                st.registered_function_specs().is_empty(),
                 "a refused registration must not be collected"
             );
         }
@@ -15245,7 +15320,9 @@ mod tests {
         assert_eq!(
             parse_register_function_args(&[LuaValue::Str(b"myfunc".to_vec()), callback()]),
             Ok(RegisterFunctionSpec {
-                name: b"myfunc".to_vec()
+                name: b"myfunc".to_vec(),
+                flags: Vec::new(),
+                description: None,
             })
         );
         // NOTE, and it is a real gap rather than an oversight: a Lua CLOSURE
@@ -15263,7 +15340,9 @@ mod tests {
                 (b"description", LuaValue::Str(b"doc".to_vec())),
             ])),
             Ok(RegisterFunctionSpec {
-                name: b"tbl".to_vec()
+                name: b"tbl".to_vec(),
+                flags: Vec::new(),
+                description: Some(b"doc".to_vec()),
             })
         );
 
