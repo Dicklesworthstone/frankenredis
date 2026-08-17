@@ -39314,3 +39314,130 @@ spaced FIT draws exist ON ONE ELF, or IF the FIT-only denominator spread falls b
 Take exactly one pair per quiet stretch and wait UNTIL the 1-minute load returns to baseline
 before the next — running back-to-back is what disqualified five attempts earlier today,
 because each 60-90 s callgrind pair is itself load.
+
+--------------------------------------------------------------------------------
+## 2026-08-17 CrimsonHawk: the retry predicate on the previously-refused pre-size PAYS once the size is not recomputed — the quicklist packer already holds the exact node length, and handing it over is -2.90 pct at 40 entries with no regression at any size (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method). Ir is exact and
+is not altered by host load or core frequency, which matters for this row because the window
+was busy — see PROVENANCE. No timing verdict is claimed.
+
+THE CODE IS ALREADY ON MAIN AS `65e785c95`, AND THIS ROW IS THE MEASUREMENT IT OWES. That
+commit is exactly the four files of this lever and nothing else, but it was authored from my
+working tree by a peer sweep before I had banked a ratio, so it landed with an accurate
+mechanism description and NO number. By section 1 that is landed-but-unmeasured, not a win.
+The ELF measured below was built from that identical source, so the provenance chain holds;
+what follows is the ratio, the dose-response and the reach bound that commit does not carry.
+
+Claim class: COMPETITIVE. Campaign output: yes — fr/Redis 7.2.4 on the list DEBUG RELOAD
+workload measures 2.5590x after this change, from 2.6353x before, at 40 entries, incumbent
+live in the same invocation as both fr arms.
+
+### THIS IS THE PREVIOUS ROW'S RETRY PREDICATE, EXECUTED — AND ITS LETTER IS NOT FULLY MET
+
+The preceding row REJECTED pre-sizing the listpack blob buffer: the mechanism worked (realloc
+−25 pct) but computing the size inside the encoder re-ran `parse_listpack_integer` on every
+entry, an O(n) cost against an O(log n) saving, which INVERTED to +1.87 pct at 200 entries. Its
+retry predicate was: reopen only if a candidate arrives with per-entry lengths ALREADY computed
+by the caller, AND shows a saving at n=200 exceeding that arm's null.
+
+The first half holds exactly. `encode_compact_list_quicklist2` already memoizes per-item
+lengths in `lens` and already accumulates them into `packed_bytes` to decide node boundaries —
+and at the moment it flushes a node, `packed_bytes` IS the finished blob length, because it
+starts at `LISTPACK_BLOB_OVERHEAD` and adds exactly the bytes `encode_listpack_entry` writes.
+So the encoder takes its capacity as an argument and the sizing pass does not move, it
+DISAPPEARS.
+
+    THE SECOND HALF DOES NOT HOLD, AND I AM NOT GOING TO PRETEND IT DOES. At n=200 this lever
+    measures −0.04 pct against a 0.037 pct null: a NULL, not a win. I wrote that predicate to
+    stop myself shipping the +1.87 pct regression again, and on that it is satisfied — the
+    regression is gone at every size. But it literally asked for a win at 200 and there isn't
+    one, so the row states the bound instead of quietly re-scoping it.
+
+### THE BOARD — DOSE-RESPONSE, THREE SIZES, AS THE PREDICATE REQUIRED
+
+    members   A/A null       ORIG        CAND       delta        vs redis 7.2.4
+       4      0.998841    13,851.1    12,979.6    −6.29 pct   1.2357x -> 1.1580x
+      40      1.000880    57,284.7    55,626.1    −2.90 pct   2.6353x -> 2.5590x
+     200      1.000372   218,538.3   218,442.8   −0.04 pct   3.3301x -> 3.3287x   NULL
+
+    Monotone decay to zero, and NEGATIVE AT NO SIZE — which is the whole difference from the
+    rejected version, whose same three sizes read −5.15 / −0.32 / +1.87. At n=40 the effect is
+    33x that arm's own null.
+
+    frame            n=4                n=40               n=200
+    finish_grow      221.5 -> 148.5     567.6 -> 440.5     552.6 -> 552.5   UNMOVED
+    realloc          628.2 -> 352.0   1,939.4 -> 1,456.3   1,870.4 -> 1,870.2  UNMOVED
+
+### WHY n=200 IS A NULL — DIAGNOSED OFF THE CALL RECORDS, NOT GUESSED
+
+The frames not moving at all (rather than moving a little) says the wired path is not being
+taken, and the callgrind CALL RECORDS say exactly which path is:
+
+    n=40    encode_listpack_strings_blob  <- fr_persist::encode_rdb_internal
+                                             1.00 calls/key, 6,029.0 Ir   (the path I wired;
+                                             `encode_compact_list_quicklist2` is inlined into it)
+    n=200   encode_listpack_strings_blob  <- fr_store::packed_set::ListValue::quicklist_packed_*
+                                             1.00 calls/key, 24,988.8 Ir  (NOT wired)
+
+At 200 entries the list has been promoted out of the flat listpack representation, and its RDB
+encoding is driven from `packed_set.rs` in fr-store rather than from the fr-persist packer. So
+this lever's reach is exactly the sizes the fr-persist packer serves, and n=200 is not a
+failure of the mechanism — it is a second, larger call site that has the same defect.
+
+### EQUIVALENCE
+
+Output is byte-identical by construction: capacity never affects content, and a wrong capacity
+would be a performance bug rather than a correctness one because `Vec` still grows. Both halves
+are gated by tests that already existed plus one assertion that did not:
+
+  * `debug_assert_eq!(lp.len(), node_bytes)` inside the flush — so every node built anywhere in
+    the suite proves `packed_bytes` really is the finished length. It is free in release.
+  * the existing `encode_compact_list_quicklist2_new` vs `_orig` equivalence test, which
+    compares against an INDEPENDENT pre-memoization baseline over seven shapes including
+    5,000-item integer and short-string lists (multi-node), 400 long strings, a 3,000-item
+    mixed list, an empty list, a single item, and an over-budget-but-under-1-GiB element that
+    must become its own node. `_new` delegates to the exact function edited here, so that test
+    gates this change directly, and it passed with the assertion live.
+
+  No new test was added: the invariant this lever depends on is precisely what those two
+  already assert together.
+
+### PROVENANCE
+
+  ELF           0d5b770644a34a83, `release-perf`, built locally with
+                RCH_CARGO_WRAPPER_BYPASS=1, no `[RCH]` line in the output. BOTH ARMS FROM THIS
+                ONE ELF via `FR_PERF_AB_QUICKLIST_NODE_CAPACITY_ORIG=1`, so no tree-stability
+                question arises while peers commit to other crates.
+  harness       scratchpad `reload_slope.py` + `zset_board.py`, K=4 -> K=12 DEBUG RELOAD slope,
+                one fresh working directory per point, soundness assertion active and silent.
+  incumbent     vendored redis 7.2.4, verified in-run sha=d2c8a4b9 == vendored source HEAD.
+  host          thinkstation1, 64 cores OBSERVED, powersave governor, /data 218G free.
+  PER-ARM loadavg/MHz   n=4   53.86/36.34/21.54 -> 50.65/36.22/21.66, MHz mean 2812 then 3376
+                        n=40  49.39/36.20/21.73 -> 45.25/35.73/21.73, MHz mean 3496 then 3060
+                        n=200 43.70/35.57/21.76 -> 87.32/47.30/25.98, MHz mean 3048 then 3167
+                        (max 3892-4020, min 1429 throughout).
+                A BUSY AND RISING WINDOW, recorded rather than hidden: the 1-minute average ran
+                43-87 and the n=200 arm straddled a load spike to 87. This row is admissible
+                anyway because callgrind Ir is a deterministic count, not a time — and the
+                three A/A nulls (0.998841, 1.000880, 1.000372) are the evidence that the
+                instrument held, not an assumption. A TIMED row taken in this window would not
+                be admissible and none is claimed.
+  gates         fr-persist 225 tests pass with the debug assertion live; clippy
+                --all-targets -D warnings clean; fmt --check clean.
+
+### THE REPLICATED-STANDING CONVENTION DOES NOT APPLY
+
+It governs thin margins near parity, where standing against the incumbent must survive a second
+ELF and be quoted at its worst bound. This route is 2.56x BEHIND after the change, so no
+standing is claimed. The n=40 margin is 33x its own null and the n=200 reading is reported as a
+NULL rather than as a small win, which is the conservative direction.
+
+RETRY PREDICATE — the next site is named and sized, and it is bigger than this one:
+  1. Wire the same capacity into `fr_store::packed_set::ListValue::quicklist_packed_*`, which
+     is where the encoder is reached from once a list is promoted (24,988.8 Ir/key at n=200,
+     11.4 pct of that reload). Reopen n=200 ONLY IF that call site can supply an exact node
+     length the way `packed_bytes` does here — if it cannot, do NOT recompute one, because
+     that is the rejected lever again.
+  2. Re-run all three sizes. A single-size reading on this encoder is now twice shown to be
+     sign- or reach-unstable.
