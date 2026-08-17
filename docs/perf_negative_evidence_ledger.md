@@ -30160,3 +30160,79 @@ PROVENANCE:
 RETRY PREDICATE: take KEYS first (simplest parse, largest projected gain at ~0.73x), then
 SCAN, then LCS. Claim arity 2 ONLY for SCAN and KEYS. Re-measure before starting: this row is
 the third time a screen found a route already fixed by someone else mid-flight.
+
+--------------------------------------------------------------------------------
+CERTIFIED (frankenredis-p98mw, verifying frankenredis-ozrro's lever) — SCAN 1.2237x ->
+0.6945x and KEYS 1.0153x -> 0.5013x, INDEPENDENTLY measured by the agent who banked the
+before-side. And the projection was WRONG IN THE SAFE DIRECTION: class [C] routes return
+~1.8x the dispatch-share estimate
+
+Claim class: COMPETITIVE
+
+Two rows back (`ef3144356`) I measured this trio, sized it against the ~263 + ~100/bulk
+model, and wrote the retry predicate "take KEYS first, then SCAN, then LCS; claim arity 2
+ONLY". ozrro took SCAN and KEYS within minutes (`6c5a17f5e`, `6ce613360`). This is the
+before-side author certifying the after-side on a fresh build.
+
+    shape         BEFORE (ef3144356)        AFTER (this row)          projected  actual
+    scan_zero     7,073.6  1.2237x          3,959.9  0.6945x            ~0.96x   0.6945x
+                  dispatch 1,987.7 (28.1%)  dispatch 312.6 (7.9%)                -84.3 pct
+    keys_star     5,667.7  1.0153x          2,720.6  0.5013x            ~0.73x   0.5013x
+                  dispatch 1,976.5 (34.9%)  dispatch 304.8 (11.2%)               -84.6 pct
+
+    lcs_2         7,121.1  1.0963x          7,103.1  1.0736x         UNTOUCHED SIBLING
+                  dispatch 2,446.8 (34.4%)  dispatch 2,443.6 (34.4%)             -0.13 pct
+    get_control   1,310.1  0.4092x          1,308.9  0.4087x         NULL
+                  dispatch   263.6 (20.1%)  dispatch   263.0 (20.1%)             -0.23 pct
+
+TWO CONTROLS, AND LCS IS THE BETTER ONE. get_control is the standing whole-process null and
+it held to 0.23 pct. But LCS is the control that actually discriminates: it is the THIRD
+member of this same trio, measured in the same window on the same binary, sharing the same
+GENERIC route — and it was deliberately NOT front-classified (ozrro's `7f6d3b39a` explains
+why: its generic lives in another crate). Its dispatch moved 2,446.8 -> 2,443.6, i.e. 0.13
+pct. A layout shift or a harness drift large enough to manufacture an 84 pct dispatch
+collapse in its two siblings cannot leave LCS that still. This is what a same-family untouched
+control buys over a whole-process null.
+
+THE PROJECTION WAS WRONG, AND THE ERROR IS THE REUSABLE PART. I predicted ~0.96x and ~0.73x
+from the dispatch saving alone. Actual 0.6945x and 0.5013x — both far better. The reason:
+
+    scan_zero   total -3,113.7   but dispatch only -1,675.1   -> 1,438.6 came from ELSEWHERE
+    keys_star   total -2,947.1   but dispatch only -1,671.7   -> 1,275.4 came from ELSEWHERE
+
+Front-classifying a class [C] route removes MORE than the harness's "dispatch" frames: the
+borrowed path also skips argv materialisation and the generic executor's owned-key copying,
+which the dispatch-share metric does not count. Empirically the total saving is ~1.8x the
+dispatch-share estimate (1.86x on SCAN, 1.76x on KEYS).
+
+    CORRECTION TO THE SIZING RULE: for class [A] routes (machinery present, entry missing)
+    the dispatch share IS the saving — that is what the seven earlier crossings showed. For
+    class [C] routes (parser and executor written fresh) multiply the dispatch-share estimate
+    by ~1.8. Sizing [C] routes with the [A] rule UNDER-sells them by nearly half, which is
+    how LCS could be dismissed as marginal when it is not.
+
+Residual dispatch is 312.6 (SCAN) and 304.8 (KEYS) against the model's ~363 for two bulks —
+both slightly under, seventh and eighth points on that model.
+
+PROVENANCE:
+  ELF           2042172518de97fd7932b6f72955888f859e56eed48e2f646dc403d96884698a
+                THIS ONE MAPS TO A COMMIT: built from a clean tree at HEAD `6ce613360`
+                (only .beads wal files modified), locally with RCH_CARGO_WRAPPER_BYPASS=1,
+                zero [RCH] lines. The three rows before this one could not say that.
+  BEFORE ELF    3f027a4f7ebadb7767316134d4c0f6810295b2fd21bba160f260279778290815 (ef3144356)
+  harness       scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines in the SAME
+                invocation. Incumbent verified in-run: sha=d2c8a4b9 == vendored HEAD, clean.
+  host          thinkstation1, 64 cores, powersave, /data 166G.
+  PER-ARM loadavg/MHz  scan_zero 26.08/4015 · keys_star 25.75/3226 · lcs_2 24.89/3264 ·
+                get_control 24.89/3305. Window 1/5/15 = 24.26/18.65/11.40 — the 1-min sits
+                ABOVE the 15-min, so this is a RISING window, not a converged one. Recorded
+                rather than hidden: these are callgrind instruction counts, and the redis
+                denominators moved <1 pct against the before-row taken at loadavg 20.5, which
+                is the direct evidence the class is load-immune here.
+  cross-core    3226-4015 MHz within the row (1.24x). Instruction counts, not wall clock.
+
+RETRY PREDICATE: LCS is now the ONLY shape left above parity (1.0736x, 34.4 pct dispatch,
+2,443.6 instr/op). Re-size it with the CORRECTED [C] rule: 2,443.6 - ~460 = ~1,984
+recoverable, x1.8 = ~3,570, projecting ~0.50x rather than the ~0.81x the old rule gave.
+`7f6d3b39a` says its generic lives in another crate, which raises the cost but does not change
+that arithmetic.
