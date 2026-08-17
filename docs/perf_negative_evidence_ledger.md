@@ -37961,3 +37961,46 @@ already landed when I wrote "NOT LANDED". It is `280604ef7` (`frankenredis-fpqns
                        -30.7 pct cumulative, both nulls flat throughout
   Worst-bound fr/redis on the shipped state is 1.3736x, from the four paired replicates in
   the row above. SIZING, not certified: no FIT window has been reachable all day.
+
+--------------------------------------------------------------------------------
+2026-08-17 CrimsonHawk: NO SOURCE CHANGE — I nearly re-implemented a lever that shipped two
+days ago, because `frankenredis-qj6jn`'s line-level attribution is PRE-HOIST and still reads
+as if it were live (`frankenredis-qj6jn`).
+
+  Claim class: METHOD / stale-cell grooming. No ratio is claimed and none is withdrawn.
+
+  what I was about to build   The bead's largest line item is "LzfScratch::get/set (the
+                  use_packed test + slice bounds check on every probe) ~1,716/key". I
+                  preflighted `LzfScratch` (CLEAR), read my own 2026-06-28 row saying the
+                  fixed-array-table opt was "PROVEN neutral (the bounds checks weren't the
+                  cost)", concluded the surviving mechanism must be the per-probe
+                  `use_packed` BRANCH rather than the bounds check, and went to monomorphise
+                  it out of the inner loop.
+  what is actually there  `LzfPackedTable` and `LzfWideTable` already exist, and
+                  `lzf_compress_dispatch::<SIMD, true, false>` — `HOIST == true`, production
+                  — already resolves `use_packed` once per call and hands the core a
+                  monomorphised fixed-size-array view. `LzfDynTable` survives only as the
+                  fallback and as the `HOIST == false` measurement arm. `d6319ab98`
+                  (2026-08-15) did exactly the change I had designed, for exactly the reason
+                  I had derived, and measured it: lzf_compress self 17,665 -> 16,683
+                  instr/key, -5.56 pct.
+  SO THE BEAD'S NUMBERS ARE STALE ON THE SAME DAY THEY WERE FILED. The attribution was taken
+                  on 2026-08-15 and the hoist landed on 2026-08-15; the bead was not updated.
+                  Anyone reading it today sees ~1,716/key against an item that is largely
+                  gone, and the kernel ratio it headlines (1.76x, 17,665 vs redis 10,044) is
+                  now 1.66x (16,683 vs 10,044) on the author's own post-fix figure. The three
+                  remaining line items — rolling hval ~1,152/key, budget guard ~808/key, IDX
+                  hash ~630/key — were measured in the same pre-hoist profile and carry the
+                  same doubt.
+  cost of not checking  I spent one turn's reading on it. The check that would have caught
+                  it immediately is `git log -S <symbol> -- <path>` on the mechanism, not on
+                  the bead id — the bead id appears on FIVE qj6jn commits and none of their
+                  subjects mentions the accessor. Reading the code before designing is what
+                  actually caught it, at the point where I opened `lzf_compress_dispatch` to
+                  find out why `LzfDynTable` was still being used and found that it is not.
+
+RETRY PREDICATE: do NOT take any of qj6jn's four line items on the numbers as written. RE-
+DERIVE the compressor profile against the CURRENT ELF first — the hoist moved the largest
+one and nothing has re-attributed the remainder. The kernel gap is real and still worth
+closing (1.66x on byte-identical input, ~52 instr per input byte against redis's ~30), but
+the next lever has to be chosen from a post-`d6319ab98` profile, not from this bead's list.
