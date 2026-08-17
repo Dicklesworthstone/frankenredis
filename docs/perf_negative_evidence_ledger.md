@@ -26682,3 +26682,57 @@ computed by sha256sum; the harness independently self-reported the same SHA for 
 arms from /proc/<pid>/exe on the runs that produced these samples. thinkstation1, 64 cores
 observed, governor powersave, /data 211G. Per-arm loadavg and mean CPU MHz were recorded
 with each probe: 13.3/2926, 16.0/3086, 20.0/2800, 27.5/2928, 27.5/3020, 22.4/2681.
+
+## CERTIFIED (frankenredis-zw36c / gein3) — sinter_big is 0.3800x: the last cell where fr trailed redis on instructions is RETIRED, and the 40 pct variance was the spin all along
+
+Claim class: COMPETITIVE. fr/redis instructions per op, both arms live in the same
+invocation of scripts/shape_instr_per_op.py, three rounds.
+
+    round   fr instr/op   redis instr/op   ratio     fr passes/op   loadavg   mean MHz
+      1       179,842.1       473,677.6   0.3797x        0.422        24.92      4001
+      2       179,750.7       472,037.9   0.3808x        0.382        15.61      2679
+      3       177,981.8       469,011.5   0.3795x        0.392        21.53      3287
+    mean      179,191.5       471,575.7   0.3800x
+
+    fr arm spread 1.04 pct | redis arm spread 0.99 pct | RATIO spread 0.34 pct
+    ELF 73946c4e7ebbef779c6d0fe58a67351068aa7af19dcc56f28680e937af045fde,
+    built locally, RCH_CARGO_WRAPPER_BYPASS=1, 0 [RCH] lines.
+
+THE RATIO REPRODUCED TO 0.34 PCT ACROSS A 9-POINT LOADAVG SWING AND 1,322 MHz OF CLOCK
+SPREAD. That is what a retired-instruction count under callgrind is supposed to do, and it
+is why this is banked at loadavg 15-25 rather than waiting for a quiet window: the
+instrument does not divide by time.
+
+WHERE THIS SHAPE HAS BEEN. It was the ONLY cell where fr trailed redis on instructions:
+
+    1.3811x  ->  1.1193x  ->  0.3800x
+    (before   after drain    after the busy-spin
+     guards)  fast-exits)     removal, this row)
+
+sinter_big now runs at 38 pct of redis's instructions -- 2.63x AHEAD, from 1.38x behind.
+
+THE VARIANCE WAS THE SPIN, AND THAT WAS A PREDICTION, NOT A POST-HOC STORY. gein3 recorded
+this shape's fr arm spanning 40 pct on repeat while sinterstore_big -- the identical
+intersection with no reply -- held 0.19 pct, and used that gap to argue the deficit lived
+in reply delivery. If the busy-spin was the cause, removing it had to collapse the variance
+as well as the mean. It did: 40 pct -> 1.04 pct, and passes/op 248.6 -> 0.39. The engine
+was never noisy; it was spinning a timing-dependent number of times per reply.
+
+WHAT THIS RETIRES AND WHAT IT DOES NOT:
+  * RETIRED: "fr is behind redis above set-max-listpack-entries". At 0.3800x on k=512 there
+    is no hashtable-regime deficit left to attack, and the hashtable-set MEMBERSHIP lever I
+    named two rows ago is moot -- that +32 pct frame-sum was being read against a
+    denominator inflated ~250x by the spin.
+  * NOT CLAIMED: throughput. This is instructions. frankenredis-33832's authenticated
+    throughput harness still has not run since fosf1, and its 0.606011x headline remains
+    the open question.
+  * NOT RE-DERIVED: the k-sweep regime table. Every absolute in it predates this change, so
+    the crossover figures there are now stale in fr's favour; the LANDED sinter_k* shapes
+    regenerate it in one pass when someone needs it.
+
+RETRY PREDICATE. Do not re-measure sinter_big for this claim -- three rounds at 0.34 pct
+spread across a 9-point load swing is not improved by a fourth. DO re-run the k-sweep
+(sinter_k8..sinter_k256, all in the repo now) to redraw the regime table, since fr's
+per-member cost moved and the old crossover no longer describes anything. And re-run
+33832's competitive harness when three core blocks are under ~50 pct combined
+core+sibling load: throughput is the one axis this row says nothing about.
