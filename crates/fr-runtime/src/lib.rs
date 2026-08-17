@@ -40982,6 +40982,10 @@ impl Runtime {
         // (frankenredis-e6c9t) Answer the literal/glob question ONCE. Every predicate
         // below re-derived it from the same unchanging `pattern`, 233 times per call.
         let is_literal = Self::config_pattern_is_literal(pattern);
+        // (frankenredis-e6c9t) Where this function's output started. A LITERAL pattern can
+        // match at most one name, so once anything has been pushed the rest of the walk is
+        // provably dead — see the checkpoint before the CONFIG_STATIC_PARAMS loop.
+        let entry_mark = entries.len();
         if pattern == "maxmemory*" {
             entries.push(RespFrame::BulkString(Some(
                 b"maxmemory-eviction-tenacity".to_vec(),
@@ -41484,6 +41488,34 @@ impl Runtime {
             entries.push(RespFrame::BulkString(Some(
                 self.server.store.server_port.to_string().into_bytes(),
             )));
+        }
+        // (frankenredis-e6c9t) A LITERAL PATTERN THAT HAS ALREADY MATCHED IS DONE.
+        //
+        // Everything below this point — 190 CONFIG_STATIC_PARAMS entries and 7
+        // CONFIG_STATIC_HIDDEN_PARAMS entries — tests the pattern against a name. For a
+        // literal the predicate is `pattern.as_bytes() == parameter.as_bytes()`, so at most
+        // ONE name in the whole function can be true, and if one already fired above then
+        // all 197 remaining tests are guaranteed to fail. They ran anyway.
+        //
+        // MEASURED, fr ELF d5bb403c162f2794, two-point callgrind (N=2000/4000): this
+        // function is 3129.0 instr/op on `CONFIG GET maxmemory`, 28.5 pct of the whole
+        // command, and it evaluates 249 name tests to answer a question about one parameter.
+        // The walk is POSITION-INDEPENDENT — matching at chain position 40 measured 3029.0
+        // and matching NOTHING measured 3312.0, i.e. matching last is cheaper than matching
+        // fifth — which is what you get from independent `if`s with no early exit, and is
+        // why reordering the chain can never help this route.
+        //
+        // OUTPUT IS UNCHANGED, not merely believed to be. `handle_config_get` already
+        // dedupes this function's output through `seen`, keeping the FIRST pair for a name
+        // and dropping later ones. So a name that appears both above and in the static
+        // tables already emitted only its first copy; returning here drops a pair that was
+        // being discarded a few lines later anyway. A literal cannot match a DIFFERENT name
+        // below, because exact byte equality admits exactly one.
+        //
+        // The glob path is untouched and must be: a wildcard legitimately matches many
+        // names, so it still walks everything.
+        if is_literal && entries.len() > entry_mark {
+            return;
         }
         // Static configuration parameters that clients commonly probe.
         // If a parameter has been overridden via CONFIG SET, use the override.
@@ -48470,6 +48502,84 @@ mod tests {
                 keys.iter()
                     .map(|k| String::from_utf8_lossy(k).into_owned())
                     .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// (frankenredis-e6c9t) THE LITERAL EARLY EXIT MUST NOT SWALLOW A NAME.
+    ///
+    /// `collect_config_entries` returns as soon as a LITERAL pattern has pushed anything,
+    /// skipping the 190-entry `CONFIG_STATIC_PARAMS` walk and the 7-entry hidden walk below
+    /// it. That is sound only because a literal admits exactly one name and the caller
+    /// already deduped — but the failure mode if the reasoning is wrong is silent and total:
+    /// a parameter returns EMPTY instead of returning a wrong value, and an empty CONFIG GET
+    /// looks like an unknown parameter rather than like a bug.
+    ///
+    /// So this asserts the property the exit could destroy, over every name in both static
+    /// tables: each one, asked for as a literal, still comes back. Note this is NOT the
+    /// tautological shape — the tables supply the input DOMAIN, while the assertion is about
+    /// what the function DOES with each input, which the tables do not determine.
+    ///
+    /// WHY `>= 1` AND NOT `== 1`, stated because a loosened bound usually means a test being
+    /// bent to fit: this assertion was written as `== 1` and FAILED on `dynamic-hz`, which
+    /// came back twice. The cause is not the early exit — `CONFIG_STATIC_PARAMS` simply
+    /// lists `("dynamic-hz", "yes")` TWICE, at :1841 and :1896, so 186 entries carry 185
+    /// distinct names. The caller's `seen` dedup has always hidden it, and both copies carry
+    /// the same value, so nothing observable is wrong; it costs one wasted push per wildcard
+    /// sweep. The exit can only ever REMOVE entries, so `>= 1` is the bound that tests it,
+    /// and the duplicate is left for whoever owns that table rather than silently deleted
+    /// here to make a perf commit's test go green.
+    #[test]
+    fn config_get_literal_early_exit_still_answers_every_static_name_e6c9t() {
+        let rt = Runtime::new(RuntimePolicy::default());
+        for &(name, _) in crate::CONFIG_STATIC_PARAMS
+            .iter()
+            .chain(crate::CONFIG_STATIC_HIDDEN_PARAMS.iter())
+        {
+            let mut entries = Vec::new();
+            rt.collect_config_entries(name, &mut entries);
+            let hits = entries
+                .iter()
+                .step_by(2)
+                .filter(|e| {
+                    matches!(e, RespFrame::BulkString(Some(b)) if b.as_slice() == name.as_bytes())
+                })
+                .count();
+            assert!(
+                hits >= 1,
+                "literal CONFIG GET {name:?} came back {hits} times, expected at least 1 — the \
+                 early exit for an already-matched literal has swallowed it"
+            );
+        }
+    }
+
+    /// (frankenredis-e6c9t) THE EARLY EXIT IS FOR LITERALS ONLY; A GLOB STILL SWEEPS.
+    ///
+    /// The exit is gated on `is_literal` precisely because a wildcard legitimately matches
+    /// many names, and returning after the first would truncate the sweep to whatever the
+    /// chain above happened to emit. `*` is the strongest case: it matches everything, so it
+    /// must still reach the tables BELOW the checkpoint even though the chain ABOVE it has
+    /// already pushed plenty.
+    #[test]
+    fn config_get_glob_still_reaches_the_tables_below_the_early_exit_e6c9t() {
+        let rt = Runtime::new(RuntimePolicy::default());
+        let mut entries = Vec::new();
+        rt.collect_config_entries("*", &mut entries);
+        let keys: Vec<&[u8]> = entries
+            .iter()
+            .step_by(2)
+            .filter_map(|e| match e {
+                RespFrame::BulkString(Some(b)) => Some(b.as_slice()),
+                _ => None,
+            })
+            .collect();
+        // `requirepass` is emitted by the chain ABOVE the checkpoint; `tcp-backlog` only by
+        // the CONFIG_STATIC_PARAMS loop BELOW it. Both must be present under a glob.
+        for name in ["requirepass", "tcp-backlog"] {
+            assert!(
+                keys.contains(&name.as_bytes()),
+                "glob CONFIG GET * lost {name:?} — the literal early exit is firing on a \
+                 wildcard, which truncates the sweep"
             );
         }
     }

@@ -42411,3 +42411,132 @@ RETRY PREDICATE:
      1.2 pct here and neither is a plain build, so the true baseline is currently unmeasured.
   3. Any future same-ELF row on a HOT function must name a frame the control is required to
      still show, and check it. Without that this row's defect is invisible.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-17 CrimsonHawk: KEEP (SELF-SPEEDUP) — a literal `CONFIG GET` walked 249 name tests to answer a question about one parameter; `collect_config_entries` 3129.0 -> 491.0 instr/op, -25.35 pct on `config_get_one` (`frankenredis-e6c9t`)
+
+Claim class: SELF-SPEEDUP. Campaign output: no. This is an fr-side instruction reduction
+measured against fr, with NO live Redis arm in this invocation, so it is maintenance and not a
+campaign ratio. The route's standing ratio is 1.7692x (mine, `7ade2fd5a`) and I am deliberately
+NOT multiplying it by this reduction to manufacture a competitive number.
+
+ELFs, both built in a private tree from `git archive HEAD` so no peer WIP entered either arm,
+then copied to private paths and measured there rather than at `target/release`, which is a
+rendezvous in a shared checkout and not an output. Executing binary, self-reported by the
+running image via `/proc/<pid>/exe` — the server was started, its own running image read back
+out of proc and hashed, so this identifies what EXECUTED rather than what was launched:
+
+  BEFORE  server ELF sha-256: 43cf34cb201da4dcbabdeb6f22644f67eda684ca7cb8704990d8160d95690eff
+  AFTER   server ELF sha-256: a83288eb439c804db1608bf1cbe2ffcc3a59fd9664fc089bda31070850a9918a
+
+The running images emitted those themselves as
+bench_elf_sha256=43cf34cb201da4dcbabdeb6f22644f67eda684ca7cb8704990d8160d95690eff and
+bench_elf_sha256=a83288eb439c804db1608bf1cbe2ffcc3a59fd9664fc089bda31070850a9918a.
+
+Both self-reports match the `sha256sum` of the private copies exactly, so no substitution
+happened between build, copy and measurement.
+
+TREE STABILITY IS PROVEN, NOT ASSERTED. Built AFTER, then BEFORE, then AFTER again in the same
+tree; the two AFTER builds are BIT-IDENTICAL (`a83288eb...` twice), so nothing drifted between
+the arms.
+
+### The count, which is the whole finding
+
+`collect_config_entries` runs 1.00x per op and evaluates a config-name test 249 times: 40
+inlined `if Self::config_pattern_matches_known(...)` (independent `if`s, ZERO `else if`, no early
+return on the literal path), plus loops of 8 `encoding_params`, 4 `ziplist_aliases`, 190
+`CONFIG_STATIC_PARAMS` and 7 `CONFIG_STATIC_HIDDEN_PARAMS`. For a literal the predicate is
+`pattern.as_bytes() == parameter.as_bytes()`, so at most ONE of the 249 can be true.
+
+MEASURED PROOF that the walk ran to completion, three arms on the unchanged BEFORE ELF:
+
+  CONFIG GET maxmemory              10817.2 instr/op   collect 3129.0   chain position 5 of 40
+  CONFIG GET port                   10604.7            collect 3029.0   chain position 40 of 40
+  CONFIG GET zzz-no-such-parameter   9829.9            collect 3312.0   matches nothing
+
+Matching LAST is cheaper than matching FIFTH, and matching NOTHING is the most expensive arm of
+all. Position buys nothing, which is what independent `if`s with no early exit predict — and it
+is why a further predicate REORDER cannot help this route.
+
+### The lever
+
+One checkpoint before the `CONFIG_STATIC_PARAMS` loop: `if is_literal && entries.len() >
+entry_mark { return; }`. Output is unchanged because `handle_config_get` ALREADY dedupes through
+`seen`, keeping the first pair for a name, so the checkpoint drops pairs that were being
+discarded a few lines later. The glob path is untouched; a wildcard legitimately matches many
+names and still walks everything.
+
+  arm                        BEFORE     AFTER        delta     collect BEFORE -> AFTER
+  CONFIG GET maxmemory      10817.2    8075.5    -2741.7  -25.35 pct    3129.0 -> 491.0
+  CONFIG GET port           10604.7    7951.9    -2652.8  -25.02 pct    3029.0 -> 450.0
+  NULL  no-match             9829.9    9831.0       +1.1   +0.011 pct   3312.0 -> 3318.0
+  NULL  tcp-backlog          8129.2    8139.7      +10.5   +0.129 pct      0.0 ->    0.0
+
+THE TWO NULLS ARE THE ARMS THE LEVER CANNOT MOVE, and they are internal to the same route rather
+than borrowed from an unrelated command. A pattern matching nothing never pushes, so the
+checkpoint cannot fire; `tcp-backlog` is answered by the pre-existing static index and never
+enters this function at all. Both stayed flat while the two matching arms moved 25 pct.
+
+A/A NULL, same instrument, same arm, same ELF (`43cf34cb...`) on both sides, draws alternated
+between arms so host drift lands on both, gives a median ratio 0.999669, bootstrapped 95% median
+CI [0.997884, 1.003526]. That is arm-A median 10824.6 over arm-B median 10828.2. Raw draws, arm A
+10824.6 / 10866.4 / 10805.3 / 10822.4 / 10826.4 and arm B 10836.2 / 10842.9 / 10822.9 / 10825.2
+/ 10828.2. Every measurement in this row, both arms and the null, was taken within one
+top-level invocation of the same harness on the same host.
+
+THE VERDICT IS GATED ON THAT BOOTSTRAP MEDIAN-CI AND NOTHING ELSE: the effect (-25.35 pct) sits
+far outside the null CI, whose widest excursion is 0.35 pct. CV is provenance only and was not
+used as a gate anywhere in this row; no CV was computed. Host state is likewise provenance
+only: load 12-25 and CPU MHz 1429-3349 across the arms, and the counts did not track either,
+which is the point of an instruction-count instrument.
+
+### Correctness
+
+241-case CONFIG GET differential between the two ELFs, byte-for-byte identical: 198 literal
+names (every entry of both static tables plus every name in the chain), 15 globs including `*`,
+8 edge cases (case variants, empty pattern, a 200-char pattern, and TWO backslash patterns), 8
+multi-pattern requests, and 12 post-`CONFIG SET` re-reads covering names that match above the
+checkpoint and below it. Harness at `scratchpad/cfg_differ.py`. Two harness artefacts had to be
+removed first and are worth naming because both LOOKED like lever bugs: the engines listened on
+different ports (`port` differs legitimately) and had different cwds (`dir` differs
+legitimately). 632/632 `fr-runtime` pass, including two new tests.
+
+The backslash case matters and is not decoration: this function contains TWO different literal
+predicates. `config_pattern_is_literal` excludes `\`, while the local `pattern_is_literal` before
+the hidden-params loop does not. I did NOT unify them — that would be a behaviour change wearing
+a cleanup's clothes. The checkpoint uses the stricter one, so a backslash pattern falls through
+to the full walk, which is the safe direction.
+
+A PRE-EXISTING DEFECT SURFACED BY THE TEST AND LEFT ALONE: `CONFIG_STATIC_PARAMS` lists
+`("dynamic-hz", "yes")` TWICE, at :1841 and :1896, so 186 entries carry 185 distinct names. The
+caller's dedup has always hidden it and both copies carry the same value, so nothing observable
+is wrong. My test was written as `== 1`, failed on it, and is now `>= 1` with the reason stated
+in the test body — a loosened bound with an unexplained cause is how a gate gets bent.
+
+### The four rows the preflight blocked on, and why this is not any of them
+
+`check-candidate collect_config_entries` blocks with 4 rows. `:10096` (CalmHeron, `0fedn`)
+SHIPPED the static literal index — that index is real, and this row measures that it DECLINES
+for every DYNAMIC parameter, which is why `maxmemory` still paid the full walk. `:37905` removed
+the glob engine. `:38316` reordered predicates and banked "extend the index to dynamic
+parameters" as the next lever.
+
+`:38495` is the one that matters. RusticHorizon RETRACTED that retry predicate, arguing the
+table walk was "arithmetically incapable" of being the cost because 223 byte compares cannot
+cost 27,000 instructions. That argument was CORRECT about the number it was aimed at, and the
+loop-invariant fix it produced took the function 27,339 -> 11,580. It does not transfer to the
+residual: after that fix `collect_config_entries` is 3129.0 instr/op over 249 tests, about 12.6
+instructions per test, which is exactly what an inlined length-check-then-compare costs. The
+retracted theory was that the walk explained 27,000; the measured claim here is that it explains
+3,129. And this lever is not the deprecated one — it does not extend the index to dynamic
+parameters, it stops the walk early.
+
+RETRY PREDICATE: `collect_config_entries` is now 491.0 instr/op on `maxmemory`, and what remains
+is the 40-`if` chain ABOVE the checkpoint, which a literal still walks in full to reach its
+match. The next lever is an index over the CHAIN's 40 names, not another checkpoint; take it only
+if a fresh profile still shows ~490 instr/op there, and expect at most ~490, not the 3,129 this
+row removed. Do NOT re-derive the 249-test count from this row — re-count it, because two of the
+five contributing tables are edited routinely. Keep `no-match` and `tcp-backlog` as the nulls;
+they distinguished this effect from a global one and cost nothing to run. A live-Redis ratio for
+this route has NOT been re-measured since the lever and is the honest next measurement.
