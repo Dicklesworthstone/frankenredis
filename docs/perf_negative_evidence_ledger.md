@@ -28865,3 +28865,69 @@ holding that same assignment simultaneously; the live worst cell is hash RESTORE
 PROVENANCE: no measurement, so no ELF, no MHz and no A/A null -- deliberately, rather than a
 number taken in a window that could not support one. thinkstation1, 64 cores observed,
 governor powersave. loadavg 30.32 -> 413.64 across the window; /data 159G -> 118G.
+
+--------------------------------------------------------------------------------
+LANDED (frankenredis-ozrro) — cascade_depth.py ranks floor-entry candidates by DEPTH, and
+building it caught FOUR false positives in its own first drafts, ending at TWO real
+candidates rather than 73
+
+Claim class: METHOD
+
+The banked retry predicate said to rank remaining candidates by ARM POSITION, because depth
+is what the 45.1-instr/op-per-position law says drives dispatch cost. This is that tool. It
+is a new file, which is why it could land at all: main.rs is reserved until 04:28Z and the
+host is still at loadavg 344, so no floor entry and no measurement was possible this turn.
+
+    163 cascade arms; 140 commands already floor-classified
+
+    CANDIDATES — a real command, unclassified, at depth >= 30:
+      arm 61  randomkey   predicted ~2,490 instr/op of dispatch
+      arm 60  dump        predicted ~2,445
+
+THE VALUE HERE IS NOT THE TWO CANDIDATES, IT IS THE FOUR WAYS THE FIRST DRAFTS WERE WRONG.
+Each was caught by checking rather than shipping, and each is a distinct failure of
+name-based matching in this codebase:
+
+    1. PARSER STEM != COMMAND. The deepest arms are `exists_two`..`exists_eight`,
+       `keyed_values9`..`keyed_values14`, `keys_multi` — exact-N and family parsers, not
+       commands. Reported as candidates they gave 73. Cross-referencing COMMAND_TABLE cut
+       it to 9.
+    2. CLASS NAME != COMMAND NAME. GEOHASH's floor class is `GeohashSingle`; HKEYS and
+       HVALS map to shared classes under other names again. Keying "is it classified?" on
+       `BorrowedDispatchFloorClass::<Cmd>` called all three unclassified when the floor
+       reaches them fine. Keying on `BorrowedDispatchFloorCommand::<Cmd>` — the enum whose
+       variants ARE the command names — fixed it, 9 down to 3.
+    3. CONTAINERS. PUBSUB sits at arm 127 and would have headed the report, but its work is
+       in subcommands, so an entry on the bare name serves a packet carrying no work. 3
+       down to 2.
+    4. And from the row before this one: PING at arm 1 was on my [A] list at all.
+
+    73 -> 9 -> 3 -> 2. THE FIRST NUMBER WAS THIRTY-SIX TIMES THE LAST. Every step came from
+    asking "what is this name actually?" instead of trusting that a name means what it
+    looks like.
+
+    THE PATTERN ACROSS ALL FOUR, AND ACROSS THE TWO EARLIER TOOL BUGS (rustfmt-exploded
+    entries; invisible shared executors): ONLY THE ENUM WHOSE VARIANTS ARE DEFINED BY
+    COMMAND NAME CAN BE TRUSTED. Parser names describe shapes, class names describe shapes,
+    table scans miss formatting. Six name-based checks in this repo have now been wrong,
+    each in a new way.
+
+The self-test pins all four: a parser stem that is not a command, a class reference that is
+not classification, a container, and that the fit reproduces the three measured points it
+was built from within 6 pct.
+
+PREDICTIONS UNCHANGED AND STILL OPEN: dump ~2,445 -> ~363 after (2 bulks), randomkey
+~2,490 -> ~263 after (1 bulk). Shapes for both already exist — a peer added `dump_small`
+and `randomkey_one` in a8b3bcd1d — so the measurement is one ABBA when main.rs frees and
+the host settles.
+
+PROVENANCE:
+  no measurement       tooling only. No build: loadavg 344.49/207.14/136.04 at the start of
+                       this turn against the request's reported 40, and main.rs is reserved
+                       by RusticHorizon until 04:28Z.
+  host                 thinkstation1, 64 cores, /data 150G recovered from 96G.
+  MHz                  not recorded — nothing was measured.
+
+RETRY PREDICATE: run `cascade_depth.py` before proposing ANY floor entry; it is now the
+cheapest correct answer to "is this worth building?". Take DUMP and RANDOMKEY together —
+adjacent arms, one ABBA covers both, and both predictions are already on record.
