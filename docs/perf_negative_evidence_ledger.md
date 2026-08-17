@@ -80,6 +80,12 @@ covering the seam — for at most a quarter of a percent of an admin command tha
 regression should be quietly a regression IN THE LEDGER, not in nobody's notes.
 
 PROVENANCE:
+  SNAPSHOT    all three arms come from `git archive` of HEAD `69c287ed5`, which PREDATES
+              `6b671dbb7` (the loop-invariant hoist that took CONFIG GET 27,339 -> 11,580
+              instr/op). That commit landed while these draws were running. It does not
+              invalidate the A/B — both arms sit on the same snapshot and differ in one hunk —
+              but it does mean the ABSOLUTES here are pre-hoist. Quote the +1,155 (and the
+              +6.1 per changed call), never the percentage, against a post-hoist op.
   ELFs        BEFORE d830570bd3d1be9c (HEAD reverse-patched), AFTER 2f9f4b0ea8b33a52,
               INLINE 678aa24d3e1cb155 — all three built from ONE `git archive HEAD` snapshot
               in /data/tmp scratch, private CARGO_TARGET_DIR, never the shared cargo-target.
@@ -35735,3 +35741,120 @@ frames that used to sit on top, so the ranking that produced the fpqns attributi
 stale. And re-derive the shape list first — the generalisation here was found by measuring
 three special-command shapes I had no prior reason to suspect, and `object_encoding` was
 worth more as a null than any of them were as a target.
+
+--------------------------------------------------------------------------------
+## 2026-08-17 CrimsonHawk: REJECTED — an is-sorted gate on the OWNED zset bulk builder, +0.07 pct (inside its own null). The gate CANNOT fire, because the RDB load path hashes the order away before the builder ever sees it — and that is the real, larger finding (`frankenredis-qj6jn`)
+
+Lever: `SortedSet::from_unique_pairs_with_limits` sorts unconditionally. Hypothesis: on the
+RDB / DEBUG RELOAD path its input already arrives in score order, so the sort is waste —
+exactly the argument the BORROWED twin twenty lines below it already makes, in a comment that
+says so: "RDB_TYPE_ZSET_LISTPACK is normally written in this order by Redis." Measured ratio:
++0.07 pct on zset, +0.03 pct on the hash control, both INSIDE the A/A null. Rejected, reverted,
+tree restored byte-identical to HEAD.
+
+### WHY IT LOOKED LIKE A GOOD LEVER
+
+The clean per-type reload board (previous row) puts zset worst at 2.9039x, and zset carries a
+frame the other four types do not:
+
+    core::slice::sort::stable::quicksort     5,544.6   6.86 pct
+    core::slice::sort::stable::drift::sort   2,033.2   2.52 pct
+
+Caller attribution off the callgrind call records — not guessed from the frame name — put ALL
+of it on one site: `<fr_store::SortedSet>::from_unique_pairs_with_limits`, 1.08 calls per key
+per reload, 9,097.7 INCLUSIVE instr/key, 11.3 pct of the operation. Redis sorts nothing here.
+The ordered-build constructor and the is-sorted predicate ALREADY EXISTED for the borrowed
+path (`from_sorted_unique_pairs_borrowed`, `borrowed_pairs_are_sorted`); the owned path — the
+one RDB load actually uses — had simply never adopted them. That is the "machinery exists, the
+call site never took it" shape that has paid repeatedly in this campaign.
+
+### THE MEASUREMENT, AND THE ONE THING IT PROVES
+
+    workload   A/A null      ORIG        CAND      delta      vs redis 7.2.4
+    zset       1.000024    80,725.7    80,780.4     +54.7   2.9062x -> 2.9081x
+                                                 (+0.07 pct)
+    hash       0.999572    68,526.6    68,544.1     +17.5   2.1916x -> 2.1922x
+                                                 (+0.03 pct)   NEGATIVE CONTROL
+
+    THE DIAGNOSTIC IS THE SORT FRAME, NOT THE TOTAL: 8,563.2 -> 8,576.3. UNCHANGED. The gate
+    did not reduce the sort, it never fired at all — `pairs_are_sorted` returned FALSE on every
+    zset the reload built. The +54.7 is the cost of the refused check, and it is inside the
+    null, so this row also does not get to claim the check is free.
+
+  Both arms came from ONE ELF (sha a9426571fcb48c07) via the repo's own runtime-toggle
+  convention, `FR_PERF_AB_ZSET_SORTED_GATE_ORIG=1` selecting the pre-lever sort. That was
+  deliberate: a peer was editing `fr-runtime/src/lib.rs` between any two builds today, and my
+  earlier two-binary pairing FAILED its tree-stability check for exactly that reason. A
+  same-ELF A/B has no tree-stability question to fail.
+
+### THE MECHANISM — AND IT IS WORTH MORE THAN THE LEVER WAS
+
+`from_unique_pairs_with_limits` is not called by an RDB-specific builder. Its only caller on
+this path is `Store::zadd_plain_owned`: the RDB loader REPLAYS the zset as a bulk ZADD. And the
+fresh-key bulk ZADD path dedups through a hash map:
+
+    let mut latest = HashMap::with_hasher(foldhash::quality::RandomState::default());
+    ...
+    latest.insert(member, canonicalize_zero_score(score));   // once per member
+    ...
+    SortedSet::from_unique_pairs_with_limits(latest.into_iter().collect(), ...)
+
+`latest.into_iter()` yields HASH order. So the pipeline is:
+
+    listpack  (already in score order, already unique, by construction)
+      -> decode_zset_listpack_pairs        -> Vec in score order
+        -> zadd_plain_owned -> HashMap      -> ORDER DESTROYED, one hash per member
+          -> .collect()                     -> Vec in arbitrary order
+            -> sort_by                      -> O(n log n) to REBUILD the order it just destroyed
+              -> packed build
+
+    fr HASHES EVERY MEMBER TO DE-DUPLICATE INPUT THAT IS ALREADY UNIQUE, THROWS AWAY AN
+    ORDER IT WAS HANDED, AND THEN SORTS TO GET THAT ORDER BACK. Redis does none of the three:
+    it appends the listpack it read, in the order it read it.
+
+That is why no gate placed at the BUILDER can ever fire. The order is gone one frame earlier.
+
+### RETRY PREDICATE — where the lever actually is, and what would refute it
+
+  1. The fix is a DISTINCT ENTRY POINT for the loader, not a smarter general ZADD. The RDB /
+     RESTORE path knows its input is unique and ordered; a general `ZADD k 1 a 2 a` does not,
+     and no O(n) check can establish member-uniqueness in general (sorted by (score, member),
+     a repeated member with two different scores need not be adjacent). So: add a bulk
+     constructor the loader calls directly, and leave `zadd_plain_owned` alone.
+  2. SIZE IT AT THE SORT PLUS THE HASHING, not the sort alone: 8,563 instr/key of sort is
+     10.6 pct of an 80,770 instr/key zset reload, and the `foldhash` inserts and the
+     `HashMap` allocation are on top of it. Do NOT quote a total until both are measured —
+     this row's whole lesson is that the sort's 11.3 pct inclusive figure named a symptom.
+  3. REFUTED IF the loader's input turns out not to be unique or not ordered. Test it before
+     building: assert both properties on the decoded pairs on the reload path. That check is
+     the cheap half of the lever and it is what this row skipped.
+  4. Gate on `state_digest()`, not on the reply, and keep a NON-zset type from the per-type
+     board as the control — it must not move.
+
+### THE TWO STANDING LAWS THIS ROW SITS NEXT TO, AND WHY NEITHER GOVERNS IT
+
+  RESTORE ISOLATION (`docs/NEGATIVE_EVIDENCE.md`) — "RESTORE-in-isolation flatters redis: fr
+  decodes eagerly, redis attaches the listpack shallowly and walks it on EVERY read, so the
+  break-even is well under one read per restore and an isolation ratio is not a deficit."
+  ENGAGED, AND IT DOES NOT APPLY: nothing here is measured in isolation. Every figure in this
+  row and the two above it is DEBUG RELOAD — a save AND a load, driven through the live server
+  in the same invocation as the incumbent, which is the whole-job shape the law asks for
+  rather than the isolated-decode shape it forbids. The law's own remedy (quote a break-even
+  in reads per restore) is not available for a reload because a reload is not followed by a
+  read; it IS the job. What the law does correctly warn against is reading this row as a
+  RESTORE deficit — it is not one, and the per-type board above is a reload board, not a
+  RESTORE board. The bead's stale "zset RESTORE 3.82x" line is exactly the conflation the law
+  exists to stop, which is a further reason not to quote it.
+
+  MEDIUM-ZSET THRESHOLD (`docs/NEGATIVE_EVIDENCE.md:22581`) — "Compact(Vec) beats BTreeMap for
+  BOTH build and read below n=2048; the O(n^2)-looking `Vec::insert` is a hardware memmove that
+  wins on constant factors, so lowering the threshold or moving medium zsets to a tree
+  regresses both dimensions." ENGAGED, AND THIS ROW DOES NOT TOUCH IT: the lever changed no
+  threshold, no tier boundary and no representation. It stayed inside the PACKED tier (n=40,
+  far under `zset-max-listpack-entries`), and the only thing it proposed to skip was a sort of
+  an already-materialised `Vec` immediately before the same packed buffer was written. The
+  retry predicate above keeps that constraint: a distinct bulk entry point for the loader
+  builds the SAME packed representation the current path builds, so the law's build-and-read
+  comparison is unaffected either way. If a future attempt reaches for a tree or an ordered
+  map to preserve the loader's ordering, THAT would be governed by this law and would have to
+  beat Compact(Vec) on both dimensions first.
