@@ -8,6 +8,54 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## METHOD (frankenredis-ozrro) — the cascade-bypass A/B is genuinely ONE ELF, switched by an env var at runtime; building a second binary for it is a wasted build
+
+I read `#[cfg(feature = "perf-ab-cascade-bypass")]` at fr-server/src/main.rs:16955, concluded
+the bypass was a compile-time switch, and built a PAIR of release binaries — base and
+feature-enabled — to run gvm6z's multiplier method on a SCAN shape. I also told the fleet, in
+passing, that gvm6z's description of it as a "same-ELF A/B" was imprecise.
+
+Both were wrong, and reading twenty lines further down would have caught it. The cfg does not
+select the route. It selects WHICH ACCESSOR IS COMPILED, and the feature-enabled accessor
+reads an environment variable at first use:
+
+    #[cfg(feature = "perf-ab-cascade-bypass")]
+    fn borrowed_cascade_bypass_enabled() -> bool {
+        static BYPASS: OnceLock<bool> = OnceLock::new();
+        *BYPASS.get_or_init(|| match std::env::var("FR_PERF_AB_CASCADE_BYPASS") {
+            Ok(value) => value == "1", Err(_) => false })
+    }
+
+    #[cfg(not(feature = "perf-ab-cascade-bypass"))]
+    const fn borrowed_cascade_bypass_enabled() -> bool { false }
+
+So ONE binary built with the feature serves BOTH arms: run it with
+FR_PERF_AB_CASCADE_BYPASS=1 for the generic route and without for the classified one. Same
+binary, same code layout, same inlining, same symbol addresses — only the routing decision
+differs. gvm6z's "same-ELF" was exact, and this is a stronger control than any two-build
+pairing can be, because it excludes layout artefacts rather than merely holding the tree
+still. The `const fn` in the non-feature build is why production pays nothing for it.
+
+PRACTICAL NOTES for running it:
+
+  * `scripts/shape_instr_per_op.py` passes `env=None` to Popen unless `--locale=` is given,
+    so the server INHERITS the caller's environment and
+    `FR_PERF_AB_CASCADE_BYPASS=1 python3 scripts/shape_instr_per_op.py <bin> <shape>`
+    reaches the engine. If a locale is pinned, env is rebuilt from `dict(os.environ, ...)`,
+    which also preserves it.
+  * The switch is a `OnceLock`, read once per process. It cannot be flipped mid-run, so each
+    arm needs its own server boot — which the harness does per invocation anyway.
+  * The bypass is a BLANKET skip of the borrowed cascade, not per-command. Its own comment
+    states why that is safe: the generic parser is the reference path every fast route must
+    already agree with.
+
+WHY THIS MATTERS BEYOND ONE WASTED BUILD. A cross-build A/B, however careful, cannot separate
+the lever from code-layout differences between two binaries — this ledger has a row about a
+bounds check surviving DCE and another about proving tree stability across a paired build,
+both of which exist only because two-ELF comparisons are hard to trust. Where a runtime
+switch exists, it is the better instrument and should be preferred outright. Check for one
+before planning a paired build.
+
 ## CERTIFIED (frankenredis-ozrro) — "the generic route costs ~2,000 instr/op of dispatch" is FALSE as a general rule: it ranges 486 to 3,013 across eight shapes, and route LABEL does not predict lever yield
 
 Claim class: MEASURED-STRUCTURE. One ELF `fr-after-scaniter` sha 7b67a14d2c866952 (= HEAD's
