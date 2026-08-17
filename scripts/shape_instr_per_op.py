@@ -62,6 +62,15 @@ from _incumbent import (  # noqa: E402  (sys.path set immediately above)
 # turns it on for a stall investigation. Simulated D1/LL misses are DETERMINISTIC, so
 # unlike an IPC census they can be taken on a contended host — which is the entire
 # reason this option exists.
+#
+# CALIBRATION, measured against hardware so the next user does not over-read a ratio.
+# On GEOSEARCH the simulator reported fr taking 3.6855x redis's L1 read misses.
+# `perf stat` on the same shape, both engines back to back in one window, reported
+# 1.4722x on misses per op and 1.5698x on miss RATE (3.02% vs 1.92%), with IPC 1.387
+# vs 1.818. So the DIRECTION was right and the MAGNITUDE was overstated by about 2.5x.
+# Treat a simulated ratio as a sign and a rank, never as a size — the sibling proxy
+# `--branch-sim` was worse still, coming out at parity where hardware showed 6x, which
+# is why it stays off permanently below.
 CACHE_SIM = [False]
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -534,6 +543,26 @@ SHAPES = {
     "client_info": ([], ["CLIENT", "INFO"]),
     "object_encoding": (["SET oe abcdefghijklmnop"], ["OBJECT", "ENCODING", "oe"]),
     "config_get_one": ([], ["CONFIG", "GET", "maxmemory"]),
+
+    # (frankenredis-e6c9t follow-on) THE TABLE-WALK FAMILY, which is where this campaign's two
+    # largest deficits both came from and where neither was being looked for. PUBSUB CHANNELS
+    # (2.47x) and CONFIG GET (5.90x) are the same shape of command: answer a question from a
+    # static registry. Both were found BY ACCIDENT, as controls for something else, and the
+    # reason is stated in e6c9t's own bead -- "no shape existed for it before, so nobody had
+    # measured it". These four close the rest of that family, so the next one is found on
+    # purpose:
+    #   INFO            builds a large report string from live counters (two sizes, so a
+    #                   per-section cost can be separated from the fixed report cost)
+    #   COMMAND COUNT   answers from the command table without emitting it
+    #   COMMAND DOCS    emits ONE command's metadata out of that same table
+    #   CLIENT LIST     walks the connection registry
+    # All four are read-only, take no key, and are safe to repeat, so the two-point slope
+    # subtraction applies unchanged.
+    "info_default": ([], ["INFO"]),
+    "info_section": ([], ["INFO", "server"]),
+    "command_count": ([], ["COMMAND", "COUNT"]),
+    "command_docs_one": ([], ["COMMAND", "DOCS", "GET"]),
+    "client_list": ([], ["CLIENT", "LIST"]),
 
     # (frankenredis-gvm6z) FOUR SHAPES FROM THE [C] BLIND SPOT. corpus_coverage.py puts the
     # blind spot at 53 commands, 50 of them with no borrowed machinery at all. Most of that

@@ -8,6 +8,82 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-08-17 MossyOrchid: REFUTED PRIOR — the "table-walk family" that produced BOTH of this campaign's largest deficits holds no third one. Five new shapes close it, and 13 shapes screened put fr ahead on twelve (`frankenredis-e6c9t` follow-on)
+
+Claim class: COMPETITIVE screen. No lever landed; the output is a refuted hypothesis and five
+permanent shapes, so the next agent does not re-mine ground that is now measured.
+
+THE PRIOR, and it was a good one. PUBSUB CHANNELS (2.47x) and CONFIG GET (5.90x) are the same
+shape of command — answer a question from a static registry — and BOTH were found by accident,
+as controls for something else. e6c9t's bead states the reason plainly: "no shape existed for
+it before, so nobody had measured it." That predicts more of the same family is sitting
+unmeasured. It is not.
+
+FIVE SHAPES ADDED to `scripts/shape_instr_per_op.py`, chosen to close the family rather than
+sample it — INFO at two sizes (so a per-section cost separates from the fixed report cost),
+COMMAND COUNT (answers from the command table without emitting it), COMMAND DOCS (emits one
+entry out of that same table), CLIENT LIST (walks the connection registry):
+
+    shape              fr instr/op    redis instr/op    fr/redis
+    info_default        102,897.5       125,559.3       0.8195x
+    info_section         15,290.2        32,694.4       0.4677x
+    command_docs_one     15,659.9        15,753.7       0.9940x
+    client_list          17,476.9        17,622.9       0.9917x
+    command_count         3,232.5         2,895.9       1.1162x   <- the only one above 1.0
+
+AND EIGHT UNOWNED SHAPES SCREENED in the same window, none of which was above parity either:
+zunionstore_2 0.4179x · memory_usage 0.4809x · dump_small 0.5131x · lcs_128 0.1435x ·
+scan_type 0.6918x · sort_ro_alpha_64 0.6966x · xpending_populated 0.8011x · function_load
+0.9500x.
+
+THE ONE CELL ABOVE PARITY IS NOT RESOLVABLE TO TWO DECIMALS, and saying so is the point of
+this row. Two draws of `command_count` minutes apart:
+
+    draw    fr          redis       ratio
+    1       3,232.5     2,895.9     1.1162x
+    2       3,240.3     3,029.7     1.0695x
+            0.24% apart  4.6% apart
+
+The fr arm repeats to 0.24 pct; the REDIS arm moved 4.6 pct and took the ratio with it. So the
+honest statement is "COMMAND COUNT is marginally behind, somewhere around 1.07-1.12x", and
+anyone quoting 1.1162x as the cell is quoting a denominator excursion. This is the same
+denominator instability my LZF row hit today (redis swung 10 pct on `config_get`-sized work) —
+on this harness the fr-side delta is the trustworthy quantity and the ratio is not, whenever
+the absolute is small enough for serverCron to matter.
+
+NO BEAD FILED, deliberately. COMMAND COUNT already HAS a borrowed fast route
+(`parse_borrowed_plain_command_count_packet`, zarlk) and its dispatch share is 10.7 pct, so
+the residue is ~337 instr/op on a ~2,900 instr/op protocol floor, on an admin command no
+workload runs hot. Filing it would add a bead whose own measurement cannot distinguish it from
+its denominator's noise. It is recorded here instead; if someone wants it, pin the redis arm
+first (more draws, or a quieter window) and only then decide whether ~337 instr/op is worth a
+turn.
+
+WHAT THIS LEAVES. The board's deficits are the three already known and all three are owned:
+CONFIG GET 4.60x (e6c9t, literal direct-lookup already landed at
+`collect_config_static_literal_indexed`), PUBSUB CHANNELS ~2.2x (fpqns), hash RESTORE 2.08x
+(33832, whose bounded decode levers I closed in the row below). The registry-command
+hypothesis that found two of those is now spent.
+
+PROVENANCE:
+  ELF        10ad7c8fe1599877a0a2735add8fd462, built local (RCH_CARGO_WRAPPER_BYPASS=1) from
+             HEAD c6b594d7b's tree; harness self-check "not behind any commit touching crates/".
+  incumbent  verified in-run every invocation: redis-server sha=d2c8a4b9 == vendored HEAD, clean.
+  harness    scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines in the SAME invocation.
+  host       thinkstation1, 64 cores, powersave, /data 110G. Window 1/5/15 = 8.29/13.89/15.72
+             rising to 15.71/15.33/15.90 across the screen — stable regime, no build running.
+             PER-ARM (harness-reported): loadavg 14.11-15.15, CPU MHz mean 2654-3832, max
+             4046-4291. The cross-core spread is why this is banked on instruction counts.
+
+RETRY PREDICATE: do not re-screen this family — these five shapes are in the harness now, so
+re-running is one command per cell and re-deriving is waste. The next place to look for an
+unmeasured deficit is NOT another command class; it is a different AXIS on commands already
+shaped, which is what `command_docs_one` hints at: it sits at parity on instructions while
+taking 4.74x more event-loop passes per op than redis (fr 0.022 vs redis 0.005). That is the
+`zw36c` per-iteration tax showing up on a reply-size axis no instr/op row can adjudicate.
+
+--------------------------------------------------------------------------------
+
 ## 2026-08-17 MossyOrchid: REJECT — resize-then-index LZF decode DOES delete every memcpy call on the RESTORE path (−16.2 instr/token), and still loses, because safe Rust charges 14–16 instr/token to replace them and ~1 instr per output byte to initialise the buffer first (`frankenredis-33832`)
 
 Claim class: SELF-SPEEDUP, rejected. This retires BlackCat's 2026-08-16 retry predicate
