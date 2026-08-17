@@ -492,6 +492,22 @@ SHAPES = {
     ),
     # Summary form against a group with an EMPTY pending list: still exercises the whole
     # lookup/group-resolve path, and reads nothing that changes.
+    # (frankenredis-gvm6z) THE POPULATED SIBLING, required by my own retry predicate before
+    # xpending_empty's 1.6060x may be quoted as anything. XPENDING's summary form walks the
+    # group's pending-entries list, so the empty-PEL shape measures the INTERCEPT and
+    # nothing else -- the same trap that made keys_star (1.0353x -> 0.6806x), lcs_2
+    # (1.1085x -> 0.1190x) and zrangestore_all (0.7926x -> 0.0389x) misread as command
+    # claims. XREADGROUP with `>` moves the entries into the PEL, where they stay: nothing
+    # here ACKs, so the pending set is identical on every call and XPENDING is read-only,
+    # which keeps the two-point subtraction valid.
+    "xpending_populated": (
+        [" ".join(["XADD", "xpps", f"{i}-1", "f", "v"]) for i in range(1, 33)]
+        + [
+            "XGROUP CREATE xpps xppg 0",
+            "XREADGROUP GROUP xppg c1 COUNT 32 STREAMS xpps >",
+        ],
+        ["XPENDING", "xpps", "xppg"],
+    ),
     "xpending_empty": (
         ["XADD xps 1-1 f v", "XGROUP CREATE xps xpg 0"],
         ["XPENDING", "xps", "xpg"],

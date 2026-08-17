@@ -32240,3 +32240,71 @@ RETRY PREDICATE: o500d's last row needs `redis.register_function` in `lua_eval` 
 is the unit of work, and it should be taken as its own bead with the differ as its gate, not
 bolted onto a perf turn. Do not attempt a static approximation of row 4: a runtime error on a
 local is not statically decidable, and a partial static rule would reject valid libraries.
+
+--------------------------------------------------------------------------------
+## MEASURED (frankenredis-gvm6z) — XPENDING inverts too: 1.6112x at zero pending entries, 0.7783x at 32, fr 3.72x faster PER ENTRY, crossover n=16.4. Sixth intercept trap, and this one carries its own cross-load control
+
+Claim class: COMPETITIVE. Both arms in ONE invocation, incumbent verified on every run.
+
+MY OWN RETRY PREDICATE required this before `xpending_empty`'s 1.6060x could be quoted as
+anything. Discharged:
+
+    shape                fr instr/op  redis instr/op    ratio     fr dispatch
+    xpending_empty (0)       6,488.8       4,027.3   1.6112x    2,634.9 (40.6 pct)
+    xpending_populated(32)   8,255.0      10,606.0   0.7783x    2,603.4 (31.5 pct)
+
+    fr     55.2 instr per pending entry   intercept 6,488.8
+    redis 205.6 instr per pending entry   intercept 4,027.3
+    -> fr is **3.72x faster per entry**, 1.61x behind on FIXED cost, crossover **n=16.4**
+
+**"XPENDING is 1.6x behind" is FALSE as a command claim.** fr loses only on groups with fewer
+than ~16 pending entries — i.e. on the near-empty case — and wins by a widening margin on any
+group doing real work. This is the SIXTH one-point shape in this repo to invert or collapse
+once given a size (SORT n=3, the refuted SINTER crossover, KEYS n=2, LCS 8x9, ZRANGESTORE
+3-member, now XPENDING at an empty PEL). Every one flattered the incumbent, because redis's
+fixed cost per command is lower and its per-unit cost is higher.
+
+THE SEED WAS VERIFIED TO POPULATE, not assumed. A shape whose XREADGROUP silently failed
+would leave the PEL empty and measure the empty case TWICE — two arms that agree, a null
+result, and no way to tell it from a real one. Booted the ELF directly and read the wire:
+`XGROUP CREATE` -> `+OK`, `XREADGROUP` -> 32 entries delivered, `XPENDING` -> `:32` with range
+1-1..32-1 and consumer c1 holding 32.
+
+### The load caveat is DISCHARGED HERE, by control rather than by argument
+
+These arms ran at **loadavg 343-381**, which would normally make a ratio inadmissible — the
+redis arm is the load-sensitive half (3.4 pct across a 34-point swing is on record here). But
+`xpending_empty` was measured TWICE, on two ELFs, twelve-fold apart in load:
+
+    load  27.6, ELF 61778add:  fr 6,474.6   redis 4,031.5   1.6060x
+    load 343.5, ELF 20fdecad:  fr 6,488.8   redis 4,027.3   1.6112x
+    fr arm +0.22 pct,  **REDIS arm -0.10 pct**
+
+The incumbent arm reproduced to a tenth of a percent across a 12x load swing on this shape, so
+the denominator is not being inflated here and the populated row measured minutes later at the
+same load is admissible on the same evidence. This is a control, not an assurance: it says
+nothing about other shapes, whose redis arms have moved 3.4 pct under far smaller swings.
+
+DISPATCH, again a per-call constant: 2,634.9 at zero entries against 2,603.4 at 32 — **-1.20
+pct across the whole range**. It is 2,603-2,635 whatever the PEL holds, so the ~2,600 instr/op
+block is claimable at any size. XPENDING remains unclassified with no borrowed machinery.
+
+PROVENANCE:
+  fr ELF        20fdecad4d3f76362823dd48b8fba34076b82cbf0a1e92c4f654c20986b581d6, built
+                LOCALLY this window with RCH_CARGO_WRAPPER_BYPASS=1 exported and
+                env -u CARGO_TARGET_DIR, no [RCH] line, copied to a private path before
+                measuring. The build cost 7G of /data (124G -> 117G), recorded because the
+                external cycle took this host 141G -> 2.2G earlier today.
+  incumbent     `incumbent verified: redis-server sha=d2c8a4b9 == vendored source HEAD,
+                clean` on both runs.
+  host          thinkstation1, 64 cores observed, governor powersave, /data 107-132G.
+  per-arm load  empty 343.47/138.71/98.58 -> 363.13/146.18/101.22; populated
+                363.13/146.18/101.22 -> 380.98/153.48/103.82. VERY HIGH and rising; see the
+                cross-load control above for why the row stands anyway.
+  per-arm MHz   empty 3,498 -> 3,306; populated 3,388 -> 2,254 mean; cross-core 1,429-4,185.
+
+RETRY PREDICATE. Do not re-derive the empty-PEL ratio — it now has two independent draws on
+two ELFs at 27 and 343 loadavg agreeing to 0.32 pct. Do not quote 1.6112x without "at zero
+pending entries". The remaining XPENDING work is the ~2,600 instr/op dispatch block, which
+needs a parser and executor written; and if anyone re-measures the populated arm, re-take the
+empty arm in the SAME window as its control rather than trusting this one.
