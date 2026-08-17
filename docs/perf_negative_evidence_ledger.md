@@ -36753,3 +36753,93 @@ again and it stays rejected. The lever is not dead; the DOUBLE PROBE is:
      instructions with resident bytes on a keyspace whose RAM is already a tracked deficit.
   3. Whatever is built, gate it at n = 4, 40 and 200. A single-size reading on this encoder is
      now known to be sign-unstable.
+
+--------------------------------------------------------------------------------
+2026-08-17 CrimsonHawk: METHOD — TWO of this repo's instruments run their two slope
+points in ONE working directory, which is the defect `qj6jn` retracted a whole commit's
+absolutes for six hours earlier. Found by harness review under a build hold; ZERO builds
+(`frankenredis-pcio8`).
+
+  Claim class: METHOD. No ratio is claimed and none is withdrawn.
+
+  the rule    A slope's two points must differ in NOTHING but the repeated operation,
+              and that includes THE FILESYSTEM STATE THEY START FROM. qj6jn's K2 point
+              began by loading the dump.rdb its K1 point left behind, so the two points
+              differed by one full startup RDB load and the premise that startup cancels
+              was void. Error was -68.5 pct on the redis arm and +24.7 pct on fr, in
+              OPPOSITE directions, so it did not cancel: a true 2.9039x was reported as
+              11.5048x (69c287ed5 withdrawing 7e1180ff9).
+  site 1      `scripts/command_profile_frames.py` — `work = ROOT/target/cmd_profile`,
+              created once and passed as both `cwd=` and `--dir` for the `n` and `2n`
+              points. Patch written and handed to BrownIbis, who holds the reservation
+              (agent-mail 19743); NOT committed by me and NOT executed. The pre-commit
+              reservation guard is what stopped me, and it was right to.
+  site 2      `scripts/shape_instr_per_op.py` — ONE `tempfile.mkdtemp(prefix='fr_instr_')`
+              shared by the fr N point, the fr 2N point AND the redis arm (~line 2226).
+              NOT fixed, deliberately: it is the fleet's primary instrument, several panes
+              are on it, and no verification run was possible this turn.
+  EXPOSURE IS NARROW, WHICH IS THE PART TO GET RIGHT. Only workloads that WRITE PERSISTENT
+              STATE are affected: DEBUG RELOAD, SAVE/BGSAVE, BGREWRITEAOF, RESTORE paths
+              that touch disk, or any `--seed` that persists. `--save ""` and
+              `--appendonly no` stop AUTOMATIC persistence only — they do not stop a
+              command the caller explicitly profiles, and both tools accept an arbitrary
+              command. Every in-memory shape (GET, PUBSUB CHANNELS, OBJECT ENCODING,
+              SINTER, CONFIG GET, CLIENT INFO) is UNAFFECTED, so numbers already banked on
+              those shapes do NOT need re-running — including my own from today.
+  WHY THE EXISTING GUARDS ARE BLIND TO IT, which is the reusable half:
+              * the frames-sum-to-PROGRAM-TOTALS reconciliation in
+                `command_profile_frames.py` still passes, because the extra startup load
+                is REAL WORK that really happened, counted honestly in both the frame
+                table and the total. It caught the `--auto=no` phantom-frame bug; it
+                cannot catch this one.
+              * re-running does not disagree. callgrind Ir is deterministic, and qj6jn
+                records that the wrong number "reproduced perfectly". A stable number is
+                not a correct one.
+              * what DID catch it was an arithmetic impossibility in a by-product nobody
+                was watching: a frame marginal (lzf_compress 10,583) exceeding the
+                whole-program marginal (8,756).
+  CHEAP DETECTOR, free and general, worth adding to every slope harness: assert
+              max(frame marginal) <= whole-program marginal, and assert no frame marginal
+              is negative. This is STRICTLY DIFFERENT from the sum-reconciliation check
+              already present, and it is the one that fires on this bug.
+  a second instance the same day, which is why this is filed as a CLASS and not a one-off:
+              `frankenredis-h9h8m` is the same shared-filesystem-state failure in the
+              CONFORMANCE harness — two tests running one persistence fixture as THREADS
+              of one process, both landing on a cwd-relative AOF path. That one also
+              exposed a real engine bug: BGREWRITEAOF after `CONFIG SET appendonly no`
+              forgot the configured AOF location, because `aof_path` is nulled while
+              `aof_config_path` survives.
+
+  STANDING LAW ENGAGED — [RESTORE isolation], docs/NEGATIVE_EVIDENCE.md, my own
+              2026-08-08 REJECT closing b1o02. It says: do not re-file the
+              RESTORE-ISOLATION gap as a loss; measure RESTORE+read. It applies to this
+              row twice over, and it CHANGES one of my conclusions rather than merely
+              coexisting with it.
+              (a) It does NOT rescue site 2. The law is about which QUANTITY is worth
+                  quoting; this row is about whether the INSTRUMENT measured the quantity
+                  it claims. A contaminated slope is wrong at every read count, including
+                  the ones the law prefers, so "measure RESTORE+read instead" does not
+                  make a shared-directory slope admissible.
+              (b) It DEMOTES gvm6z, and I am correcting my own grooming note above.
+                  I recorded gvm6z's "hash RESTORE is the worst cell on the board,
+                  2.1273x" as standing. It does not. `scripts/restore_instr_per_op.py`
+                  issues only `RESTORE dst 0 <payload> REPLACE` in a loop — ZERO reads —
+                  so 2.1273x is a pure isolation ratio, precisely the number the law says
+                  is not a deficit. Measured at the time: break-even is ~1.03 reads per
+                  RESTORE, and above it fr WINS, because redis pays 2.81x MORE per read
+                  (28,624 instr/HGETALL for fr against 80,379 for redis) — it walks the
+                  listpack fr already decoded.
+              WHAT SURVIVES, precisely: gvm6z's LEVER is still legitimate. Making
+              `decode_value_spans` cheaper improves the 0-read end while giving up none of
+              the per-read advantage, so it is a free win in both regimes. What does NOT
+              survive is its RANKING premise — "worst cell on the board" is what promotes
+              it under the worst-ratio rule, and a cell measured at a read count nobody
+              runs cannot carry that. Anyone taking gvm6z should take it as an ordinary
+              lever on a known frame, not as the board's worst deficit.
+
+RETRY PREDICATE: do NOT "fix" site 2 blind. Run one NON-PERSISTING shape before and after
+and require the instr/op to be UNCHANGED — a shape that writes nothing cannot legitimately
+move, so any movement means the edit changed the instrument rather than isolating it. Only
+then re-run a persisting shape, where a CHANGE is the expected outcome and its size is the
+measurement of how contaminated that shape's history was. Any RESTORE/DEBUG RELOAD number
+taken on site 2 before that fix should be treated as unverified, not as wrong.
