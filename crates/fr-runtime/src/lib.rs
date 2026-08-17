@@ -15372,6 +15372,25 @@ impl Runtime {
     }
 
     fn can_execute_plain_hget_borrowed(&mut self, key: &[u8], field: &[u8], now_ms: u64) -> bool {
+        let default_read_allowed = self.plain_borrowed_default_key_read_allows(now_ms);
+        self.can_execute_plain_hget_borrowed_with_default_read_gate(
+            key,
+            field,
+            default_read_allowed,
+        )
+    }
+
+    /// (frankenredis-ozrro) The shape checks WITHOUT the read-gate evaluation, so a caller that
+    /// already holds the gate for this pass can supply it instead of recomputing. The gate is a
+    /// per-connection/per-server predicate, not a per-packet one, which is why it is cacheable
+    /// at all — see `plain_get_read_gate_cache` in fr-server, which the GET cascade arm has
+    /// always used and nothing else did.
+    fn can_execute_plain_hget_borrowed_with_default_read_gate(
+        &mut self,
+        key: &[u8],
+        field: &[u8],
+        default_read_allowed: bool,
+    ) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"HGET".len()
             || key.len() > self.policy.gate.max_bulk_len
@@ -15379,7 +15398,7 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_read_allows(now_ms)
+        default_read_allowed
     }
 
     /// Conservative borrowed runtime fast path for `HGET key field`: mirrors
@@ -15507,6 +15526,9 @@ impl Runtime {
     /// then a 2nd copy). Mirrors `execute_plain_get_borrowed_into`; the win scales
     /// with field-value size. Returns `None` (no bytes written) before any output
     /// when the gate defers, so the fallback is byte-safe. (TealHeron)
+    /// (frankenredis-ozrro) Thin wrapper preserving the original signature: computes the read
+    /// gate and delegates. Every pre-existing caller keeps working unchanged; only callers that
+    /// hold a per-pass cached gate should use the `_with_default_read_gate` form below.
     pub fn execute_plain_hget_borrowed_into(
         &mut self,
         key: &[u8],
@@ -15515,7 +15537,34 @@ impl Runtime {
         resp3: bool,
         out: &mut Vec<u8>,
     ) -> Option<()> {
-        if !self.can_execute_plain_hget_borrowed(key, field, now_ms) {
+        let default_read_allowed = self.plain_borrowed_default_key_read_allows(now_ms);
+        self.execute_plain_hget_borrowed_into_with_default_read_gate(
+            key,
+            field,
+            now_ms,
+            resp3,
+            out,
+            default_read_allowed,
+        )
+    }
+
+    /// (frankenredis-ozrro) As `execute_plain_hget_borrowed_into`, but the caller supplies the
+    /// read gate. Lets a floor arm amortise it across a buffered pass the way the GET cascade
+    /// arm already does, instead of paying it per packet.
+    pub fn execute_plain_hget_borrowed_into_with_default_read_gate(
+        &mut self,
+        key: &[u8],
+        field: &[u8],
+        now_ms: u64,
+        resp3: bool,
+        out: &mut Vec<u8>,
+        default_read_allowed: bool,
+    ) -> Option<()> {
+        if !self.can_execute_plain_hget_borrowed_with_default_read_gate(
+            key,
+            field,
+            default_read_allowed,
+        ) {
             return None;
         }
 
@@ -27518,6 +27567,8 @@ impl Runtime {
     ///
     /// Bounds are validated BEFORE any store work, so a malformed bound declines with
     /// NOTHING touched and generic owns both the error reply and the keyspace hit.
+    /// (frankenredis-gvm6z) The arity-6 forms: the limit-capable body with no LIMIT. Kept at
+    /// this signature so its existing floor arm needs no change.
     pub fn execute_plain_zrangestore_bound_borrowed(
         &mut self,
         dst: &[u8],
@@ -27527,7 +27578,36 @@ impl Runtime {
         lex: bool,
         now_ms: u64,
     ) -> Option<RespFrame> {
-        if self.policy.gate.max_array_len < 6
+        self.execute_plain_zrangestore_bound_limit_borrowed(
+            dst, src, min_arg, max_arg, lex, None, now_ms,
+        )
+    }
+
+    /// (frankenredis-gvm6z) Same body, with the arity-9 `LIMIT offset count` tail.
+    ///
+    /// MEASURED MOTIVE: `zrangestore_limit` sits on the GENERIC path at 3,961.5 instr/op of
+    /// dispatch (36.3 pct), in the 3,800-4,100 band the arity-6 forms paid before they were
+    /// classified, so the surface is open and worth ~3,147 instr/op.
+    ///
+    /// LIMIT IS PARSED WITH THE GENERIC PATH'S OWN HELPERS rather than re-derived. Upstream
+    /// accepts a NEGATIVE offset -- `parse_limit_offset_arg` returns usize::MAX so `.skip()`
+    /// yields empty, matching redis's `offset >= ll` short-circuit -- and clamps a negative
+    /// count via `parse_limit_count_arg`. Re-implementing either rule is how this path would
+    /// diverge on inputs no reply-comparing test would think to try.
+    ///
+    /// The arity-9 form always carries BYSCORE or BYLEX, so generic's "LIMIT without
+    /// BYSCORE/BYLEX is a syntax error" post-loop check can never fire here.
+    pub fn execute_plain_zrangestore_bound_limit_borrowed(
+        &mut self,
+        dst: &[u8],
+        src: &[u8],
+        min_arg: &[u8],
+        max_arg: &[u8],
+        lex: bool,
+        limit: Option<(&[u8], &[u8])>,
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if self.policy.gate.max_array_len < if limit.is_some() { 9 } else { 6 }
             || self.policy.gate.max_bulk_len < b"ZRANGESTORE".len()
             || dst.len() > self.policy.gate.max_bulk_len
             || src.len() > self.policy.gate.max_bulk_len
@@ -27546,6 +27626,23 @@ impl Runtime {
                 fr_command::parse_score_bound(max_arg).ok()?,
             ))
         };
+        // Parsed BEFORE any store work, exactly as the bounds are: a malformed offset or
+        // count is generic's error to emit, and we must not have touched the store to
+        // decide that.
+        let (limit_offset, limit_count) = match limit {
+            Some((offset_arg, count_arg)) => {
+                if offset_arg.len() > self.policy.gate.max_bulk_len
+                    || count_arg.len() > self.policy.gate.max_bulk_len
+                {
+                    return None;
+                }
+                (
+                    { let v = fr_command::parse_i64_arg(offset_arg).ok()?; if v < 0 { return None; } v as usize },
+                    fr_command::parse_limit_count_arg(count_arg).ok()?,
+                )
+            }
+            None => (0usize, None),
+        };
         if !self.plain_borrowed_default_key_write_allows(now_ms) {
             return None;
         }
@@ -27560,7 +27657,8 @@ impl Runtime {
             + src.len()
             + min_arg.len()
             + max_arg.len()
-            + keyword_len;
+            + keyword_len
+            + limit.map_or(0, |(o, c)| b"LIMIT".len() + o.len() + c.len());
         let packet_id = self.plain_zremrange_write_preamble("zrangestore", argv_len_sum, now_ms);
         let st = self.chained_command_start();
         fr_command::record_source_key_lookups(&mut self.server.store, &[src], now_ms);
@@ -27589,14 +27687,16 @@ impl Runtime {
                     match self
                         .server
                         .store
-                        .zrangebyscore_withscores_limited(src, lo, hi, false, 0, None, now_ms)
+                        .zrangebyscore_withscores_limited(
+                            src, lo, hi, false, limit_offset, limit_count, now_ms,
+                        )
                     {
                         Ok(pairs) => pairs,
                         Err(err) => break 'reply CommandError::Store(err).to_resp(),
                     }
                 } else {
                     match self.server.store.zrangebylex_withscores_limited(
-                        src, min_arg, max_arg, false, 0, None, now_ms,
+                        src, min_arg, max_arg, false, limit_offset, limit_count, now_ms,
                     ) {
                         Ok(pairs) => pairs,
                         Err(err) => break 'reply CommandError::Store(err).to_resp(),
@@ -27621,7 +27721,7 @@ impl Runtime {
             "zrangestore",
             "ZRANGESTORE",
             || {
-                vec![
+                let mut argv = vec![
                     b"ZRANGESTORE".to_vec(),
                     dst.to_vec(),
                     src.to_vec(),
@@ -27632,7 +27732,15 @@ impl Runtime {
                     } else {
                         b"BYSCORE".to_vec()
                     },
-                ]
+                ];
+                if let Some((offset_arg, count_arg)) = limit {
+                    // The slowlog/threat argv must be what the CLIENT sent, or a breach on the
+                    // LIMIT form is recorded as the plain bound form.
+                    argv.push(b"LIMIT".to_vec());
+                    argv.push(offset_arg.to_vec());
+                    argv.push(count_arg.to_vec());
+                }
+                argv
             },
             elapsed_us,
             now_ms,
@@ -48710,6 +48818,104 @@ mod tests {
         assert!(
             rt.execute_plain_keymeta_borrowed(PlainKeyMetaCmd::Ttl, b"s", 4)
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn plain_zrangestore_limit_borrowed_matches_generic_including_negative_offset_gvm6z() {
+        // (frankenredis-gvm6z) The arity-9 `LIMIT offset count` tail against the generic path.
+        //
+        // The case this test exists for is NEGATIVE OFFSET. Upstream accepts it: redis parses
+        // the offset as a long and only short-circuits via `offset >= ll`, which never fires
+        // for a negative, so the result comes out empty by a different route. fr matches that
+        // by having `parse_limit_offset_arg` return usize::MAX so `.skip()` empties the walk.
+        // A borrowed path that re-derived "offset must be >= 0" would REJECT the command and
+        // emit an error where generic returns 0 -- a divergence on an input nobody would think
+        // to try, which is why the helper is reused rather than reimplemented.
+        let mut direct = Runtime::default_strict();
+        let mut generic = Runtime::default_strict();
+        for rt in [&mut direct, &mut generic] {
+            rt.execute_frame(
+                command(&[b"ZADD", b"zs", b"1", b"a", b"2", b"b", b"3", b"c"]),
+                1,
+            );
+            rt.execute_frame(command(&[b"ZADD", b"dst", b"9", b"stale"]), 1);
+        }
+        let cases: [(&[u8], &[u8], &[u8], &[u8], bool); 8] = [
+            (b"-inf", b"+inf", b"0", b"2", false),  // ordinary window
+            (b"-inf", b"+inf", b"1", b"1", false),  // offset skips the first
+            (b"-inf", b"+inf", b"0", b"0", false),  // count 0 -> empty -> dst deleted
+            (b"-inf", b"+inf", b"0", b"-1", false), // negative count -> "all"
+            (b"-inf", b"+inf", b"-1", b"2", false), // NEGATIVE OFFSET -> empty, not an error
+            (b"-inf", b"+inf", b"9", b"2", false),  // offset past the end -> empty
+            (b"-", b"+", b"0", b"2", true),         // BYLEX with a window
+            (b"-", b"+", b"-1", b"2", true),        // BYLEX, negative offset
+        ];
+        let mut ts = 2;
+        for (min, max, off, cnt, lex) in cases {
+            let kw: &[u8] = if lex { b"BYLEX" } else { b"BYSCORE" };
+            let f = direct
+                .execute_plain_zrangestore_bound_limit_borrowed(
+                    b"dst",
+                    b"zs",
+                    min,
+                    max,
+                    lex,
+                    Some((off, cnt)),
+                    ts,
+                )
+                .expect("limit fast path should engage");
+            let g = generic.execute_frame(
+                command(&[b"ZRANGESTORE", b"dst", b"zs", min, max, kw, b"LIMIT", off, cnt]),
+                ts,
+            );
+            assert_eq!(f, g, "reply differs: {kw:?} {min:?}..{max:?} LIMIT {off:?} {cnt:?}");
+            for probe in [
+                &[b"ZRANGE".as_slice(), b"dst", b"0", b"-1", b"WITHSCORES"][..],
+                &[b"OBJECT".as_slice(), b"ENCODING", b"dst"][..],
+                &[b"EXISTS".as_slice(), b"dst"][..],
+            ] {
+                let fp = direct.execute_frame(command(probe), ts);
+                let gp = generic.execute_frame(command(probe), ts);
+                assert_eq!(
+                    fp, gp,
+                    "dst state differs after {kw:?} LIMIT {off:?} {cnt:?} probe={probe:?}"
+                );
+            }
+            for rt in [&mut direct, &mut generic] {
+                rt.execute_frame(command(&[b"ZADD", b"dst", b"9", b"stale"]), ts);
+            }
+            ts += 1;
+        }
+
+        // A malformed offset or count must DEFER, leaving the error to generic.
+        for (off, cnt) in [
+            (b"notanum".as_slice(), b"2".as_slice()),
+            (b"0".as_slice(), b"nope".as_slice()),
+        ] {
+            assert!(
+                direct
+                    .execute_plain_zrangestore_bound_limit_borrowed(
+                        b"dst",
+                        b"zs",
+                        b"-inf",
+                        b"+inf",
+                        false,
+                        Some((off, cnt)),
+                        ts,
+                    )
+                    .is_none(),
+                "malformed LIMIT {off:?} {cnt:?} must defer to generic"
+            );
+        }
+
+        assert_eq!(
+            direct.server.store.stat_keyspace_hits,
+            generic.server.store.stat_keyspace_hits
+        );
+        assert_eq!(
+            direct.server.store.stat_total_error_replies,
+            generic.server.store.stat_total_error_replies
         );
     }
 

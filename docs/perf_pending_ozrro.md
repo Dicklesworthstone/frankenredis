@@ -21,6 +21,63 @@ commits cleanly. That is a workaround for a durability problem, NOT an attempt t
 the contract: the rows are unchanged, they are still subject to it, and merging them into the
 ledger is a mechanical step once the blocker clears.
 
+## MEASURED (frankenredis-ozrro) — HGET is the first non-GET read to use a cached read gate: -191.5 instr/op (-9.7 pct) with a FLAT control. My own 200-267 predicate NARROWLY FAILS on net, and the miss is informative: the gate is ~207 and the cache LOOKUP costs ~15
+
+fr-only, control flat. Before arm `fr-after-hmset`, after arm `fr-after-readgate`. All 29 floor
+tests pass.
+
+    shape        before     after      delta   dispatch
+    hget        1,973.9   1,782.4    -191.5    376.0 -> 391.5   (+15.5)
+    dump_small  2,697.8   2,700.6      +2.8    312.0 -> 313.2   CONTROL
+
+### THE PREDICATE FAILED BY 4 PCT AND I AM RECORDING IT AS A FAILURE
+
+I wrote, before measuring: "validated only if the delta lands in 200-267 with the control flat and
+dispatch unchanged." Two of three held — the control moved 2.8 and the mechanism is confirmed —
+but the delta is 191.5, below the band, and dispatch did NOT stay unchanged. So the predicate is
+not satisfied as written, and the honest reading is that my lower bound was wrong rather than that
+the result is bad.
+
+DECOMPOSING IT EXPLAINS BOTH DEVIATIONS AT ONCE:
+
+    non-dispatch   -207.0    the read gate, no longer evaluated per packet
+    dispatch        +15.5    the cache lookup, which is new work in the arm
+    net            -191.5
+
+So the read gate really is ~207, a strict subset of the write side's ~267 exactly as the predicate
+argument said it should be — the subset reasoning was right and only my numeric floor was too
+high. And the +15.5 is a cost I had not accounted for anywhere: a cached gate is not free, it is
+one branch and one Option read per packet. On the write side that same overhead was already inside
+the ~267 net and so never showed up separately.
+
+### THE PLANNING NUMBER FOR THE REST OF THE VEIN IS ~190 NET, NOT 200-267
+
+That matters because the vein is ~93 executors. Sizing it at the write-side figure would have
+overstated the total by roughly 40 pct. Anyone converting further read arms should use:
+
+    gross gate recovery   ~207 per packet
+    cache lookup cost      ~15 per packet
+    NET expected          ~190 per packet, and only on arms that are actually hot
+
+### WHY HGET AND NOT SOMETHING HOTTER
+
+TTL and TYPE have no per-command executor — both are served by the shared
+`execute_plain_keymeta_borrowed(PlainKeyMetaCmd::...)`, so converting them means converting a
+shared executor used by five commands at once, which is a different and larger job. GET is already
+cached and was the existence proof. HGET is the hottest read with its own executor, a floor arm and
+a shape, which is why it was the right validation target rather than the most attractive one.
+
+### IMPLEMENTATION NOTES WORTH KEEPING
+
+The EXISTING `plain_get_read_gate_cache` was reused rather than a second cache added: it already
+holds this exact predicate and is already reset at the four points that invalidate it (main.rs
+6788, 6862, 6880, 6891). A parallel cache would be a second thing to keep in sync, and this ledger
+has a row about an enumeration lagging the machinery it gates.
+
+No body was duplicated. `execute_plain_hget_borrowed_into` now takes the gate and a thin wrapper
+preserves the original signature, so every pre-existing caller is untouched — the same shape as
+`execute_plain_mset_borrowed_ok`. That is what kept a cross-crate change to two mechanical edits.
+
 ## MEASURED-STRUCTURE (frankenredis-ozrro) — the READ gate is cached for GET AND NOTHING ELSE, so every other borrowed read pays it per packet on BOTH routes. That kills the asymmetry lever for reads and exposes a larger one: a read-gate cache is worth ~200-267 per packet across the entire read surface
 
 Source reading only; no build, no measurement. Load 18.6 / 18.0 / 16.3, one peer build, gate FIT

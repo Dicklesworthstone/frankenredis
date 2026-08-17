@@ -6961,6 +6961,7 @@ fn process_buffered_frames(
                     &mut conn.write_buf,
                     &mut argv_scratch,
                                     &mut plain_write_gate_cache,
+                    &mut plain_get_read_gate_cache,
                 ) {
                     action
                 } else if borrowed_arity_is(unparsed, b'1')
@@ -17980,6 +17981,11 @@ fn try_dispatch_floor_classified_action(
     // outside the per-packet loop and the harness pipelines every command into few passes. The
     // floor route was not adding a gate evaluation, it was LOSING AN AMORTISATION.
     write_gate_cache: &mut Option<bool>,
+    // (frankenredis-ozrro) The read-gate cache, same reasoning. This is the EXISTING
+    // `plain_get_read_gate_cache`, which held this exact predicate for the GET cascade arm and
+    // nothing else; reused rather than duplicated so there is one value and one set of reset
+    // points to keep correct.
+    read_gate_cache: &mut Option<bool>,
 ) -> Option<Result<BorrowedMultibulkAction, RespParseError>> {
     let class = classify_borrowed_dispatch_floor_packet(unparsed, &parser_config)?;
     Some(match class {
@@ -21811,13 +21817,19 @@ fn try_dispatch_floor_classified_action(
             let hit =
                 parse_borrowed_plain_hget_packet(unparsed, &parser_config).and_then(|packet| {
                     let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
+                    // (frankenredis-ozrro) Cached read gate: the GET cascade arm has always
+                    // amortised this predicate per pass and every other read paid it per
+                    // packet. This is the first non-GET arm to use it.
+                    let default_read_allowed = *read_gate_cache
+                        .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts));
                     runtime
-                        .execute_plain_hget_borrowed_into(
+                        .execute_plain_hget_borrowed_into_with_default_read_gate(
                             packet.key,
                             packet.member,
                             ts,
                             client_resp3,
                             out,
+                            default_read_allowed,
                         )
                         .map(|()| packet.consumed)
                 });
