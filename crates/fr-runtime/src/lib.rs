@@ -44316,10 +44316,26 @@ impl Runtime {
     /// inverse of [`load_aof`]'s manifest branch. Returns the new sequence.
     /// (frankenredis-oe6qt)
     fn rewrite_aof_manifest(&mut self, now_ms: u64) -> Result<u64, PersistError> {
+        // (frankenredis-cnfiso) Fall back to the CONFIGURED path before the bare
+        // cwd-relative name. `CONFIG SET appendonly no` sets `aof_path = None` while
+        // leaving `aof_config_path` intact, and upstream's bgrewriteaofCommand does not
+        // gate on appendonly — so a BGREWRITEAOF after that toggle used to forget where
+        // the AOF was configured to live and write `./appendonly.aof.*` into whatever
+        // the process cwd happened to be. Anything that configured a location (a
+        // startup `dir`/`appendfilename` directive, `CONFIG SET appendonly yes`, or
+        // `set_aof_path`) now keeps it across the toggle. When nothing ever configured
+        // one, `aof_config_path` is None and the previous default applies unchanged, so
+        // this only affects servers that HAVE a configured location — where honouring it
+        // is the more faithful behaviour, not a new one.
+        //
+        // Found via a test-isolation failure: two conformance tests running the same
+        // persistence fixture as threads of one process both landed on the cwd default
+        // here and raced, so `bgrewriteaof_returns_ok` failed for whichever lost.
         let path = self
             .server
             .aof_path
             .clone()
+            .or_else(|| self.server.aof_config_path.clone())
             .unwrap_or_else(|| std::path::PathBuf::from("appendonly.aof"));
         let (dir, basename) = aof_manifest_target(&path);
         let seq = self.server.aof_current_seq.saturating_add(1);
@@ -70560,6 +70576,82 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&aof_path);
+    }
+
+    /// (frankenredis-cnfiso) A BGREWRITEAOF issued after `CONFIG SET appendonly no`
+    /// must still write to the CONFIGURED AOF location, not to the process cwd.
+    ///
+    /// Upstream's bgrewriteaofCommand does not gate on appendonly, and fr's
+    /// `CONFIG SET appendonly no` sets `aof_path = None` while leaving
+    /// `aof_config_path` intact — so the rewrite used to fall through to a bare
+    /// cwd-relative `"appendonly.aof"` and drop the artifacts wherever the process
+    /// happened to be running. That is what made two conformance tests running the
+    /// same persistence fixture as threads of one process race each other.
+    ///
+    /// THE LOCATION ASSERTION IS WHAT DISCRIMINATES: asserting only "BGREWRITEAOF
+    /// returns OK" passes against the buggy code, because writing to the cwd succeeds
+    /// too. Under the bug the private directory receives NOTHING — manifest, base RDB
+    /// and incr all go to the cwd — so requiring the full appendonlydir trio to be
+    /// present next to the configured path fails loudly without the fix.
+    ///
+    /// Deliberately NOT asserted: the absence of a cwd-relative `appendonly.aof.*`.
+    /// That reads like the obvious negative half and it is unsound here — the repo root
+    /// already contains `appendonly.aof.manifest` and friends, committed and also
+    /// rewritten by the several sibling tests that pass a bare relative path to
+    /// `set_aof_path`. A test asserting that absence fails for reasons that have nothing
+    /// to do with this fix, which is exactly what it did when written that way.
+    #[test]
+    fn bgrewriteaof_after_appendonly_no_writes_to_the_configured_dir_cnfiso() {
+        let dir = std::env::temp_dir().join(format!(
+            "fr_runtime_bgrewriteaof_cnfiso_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+        let aof_path = dir.join("appendonly.aof");
+
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(aof_path.clone());
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"cnfiso:key", b"v"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        // Toggle AOF off. This nulls `aof_path` but must not forget the location.
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"appendonly", b"no"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"BGREWRITEAOF"]), 3),
+            RespFrame::SimpleString(
+                "Background append only file rewriting started".to_string()
+            )
+        );
+
+        let landed = std::fs::read_dir(&dir)
+            .map(|it| {
+                let mut names: Vec<String> = it
+                    .filter_map(Result::ok)
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect();
+                names.sort();
+                names
+            })
+            .unwrap_or_default();
+        for expected in [
+            "appendonly.aof.manifest",
+            "appendonly.aof.1.base.rdb",
+            "appendonly.aof.1.incr.aof",
+        ] {
+            assert!(
+                landed.iter().any(|n| n == expected),
+                "rewrite must land next to the configured AOF path: {expected} missing from \
+                 {} (found {landed:?})",
+                dir.display()
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

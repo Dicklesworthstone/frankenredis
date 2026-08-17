@@ -8,6 +8,69 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-08-17 MossyOrchid: INSTRUMENT DEFECT FIXED — `mechanism:` labelled front-classified routes as GENERIC PATH because it tested frame PRESENCE, not COST. Every seeded shape was mislabelled, and the label nearly sent me to add a floor-table entry that has existed all along (`frankenredis-94lp3` correction)
+
+Claim class: INSTRUMENT. No ratio is claimed. Campaign output: yes — a wrong mechanism label
+does not produce a wrong number, it produces a wrongly-chosen LEVER, which is worse because
+nothing downstream looks broken.
+
+HOW I FOUND IT, which is the part worth copying. I measured `type` and `sismember` while
+looking for cascade-walk targets and both reported **GENERIC PATH** — meaning no fast path.
+`TYPE` is fully wired: a cascade arm at position 85, a floor class entry
+`(2, BorrowedDispatchFloorCommand::Type)`, a floor dispatch arm, and a `PlainKeyMetaCmd::Type`
+executor. A route that complete reporting GENERIC is either a real regression worth a bead or
+a broken label, and the way to tell is to stop reading the label and read the COST.
+
+    hget, 4,000 ops, route total ~7.1M Ir (1,784 instr/op)
+      dispatch_with_client_context        728 Ir   0.01 pct   ~0.18 per op
+      execute_frame_internal            1,646 Ir   0.02 pct
+      command_table_index               1,572 Ir   0.02 pct
+      classify_command                    456 Ir   0.01 pct
+
+728 instructions is a few CALLS, not 4,000 of them. `hget` was front-classified by `3ece2ea92`
+with a cached read gate and it is still classified; the generic frames come from SEEDING and
+STARTUP, which run through the generic path a handful of times before the measured burst.
+
+THE RULE WAS PRESENCE-ONLY, and its own comment already contained the correction. It required
+all three of `execute_frame_internal`, `dispatch_with_client_context`, `command_table_index` to
+APPEAR, plus a marker — while the comment above it says "the discriminating frame is
+`dispatch_with_client_context` ALONE ... The other three frames here appear in classified
+routes too (HGET shows three of them, PERSIST four)". The measurement that produced the comment
+was right; the code that implemented it keyed on the wrong property.
+
+BLAST RADIUS: every shape carrying SEED commands, which is most of them. Confirmed mislabelled
+in one sitting: `hget`, `type`, `ttl_nonvolatile` — all three now label `classified route`.
+`command_count`, which has NO seeds, was labelled correctly before and after, and that is
+exactly the tell: the bug tracked whether a shape had seeds, not which route it took.
+
+THE FIX: gate on the discriminating frame's SHARE (>= 1.0 pct) instead of its presence, and
+say why when it is below the bar. A real generic route reads 5-40 pct here against seed residue
+at 0.01 pct, so the threshold sits three orders of magnitude clear of both sides and needs no
+tuning. Parsing is split into a pure `classify_dispatch_mechanism(annotate_text)` so the rule
+is testable without a dump.
+
+TESTS, and one of them pins the DEFECT rather than the fix: `--selftest` now carries the real
+hget annotate rows as a fixture (classified) and a synthetic generic route (GENERIC PATH), plus
+a third assertion that the OLD presence-only rule would have called the hget fixture GENERIC.
+If someone reverts to presence testing, that third case goes red instead of the fixture
+silently becoming vacuous.
+
+WHAT THIS INVALIDATES: any banked `mechanism:` label on a SEEDED shape taken before this
+commit. It does not touch a single instr/op figure — the counting was always right, only the
+label was wrong — so no ratio in this ledger moves.
+
+PROVENANCE: no build, no ratio. `scripts/shape_instr_per_op.py` at HEAD, ELF
+b78d1c23a79a3e85dd597016 (unchanged engine, `git log <snapshot>..HEAD -- crates/` empty).
+Host thinkstation1, /data 88G, loadavg 19.07 rising to 54.24 across the session — irrelevant
+to a label, and stated so nobody re-runs it looking for a quiet window.
+
+RETRY PREDICATE: if a route still reports GENERIC PATH after this, believe it — the share test
+is now three orders of magnitude clear of seed residue. Before filing a missing-floor-entry
+bead off a GENERIC label, check the floor class table for the command first; TYPE had every
+piece already and the label was the only thing saying otherwise.
+
+--------------------------------------------------------------------------------
+
 ## 2026-08-17 BrownIbis: KEEP — SORT ALPHA stops calling ICU for ASCII: `sort_ro_alpha_64` 140,377.3 -> 48,771.8 instr/op (2.8783x), `sort_ro_alpha` 12,871.1 -> 9,248.7 (-28.1 pct), null flat at -0.06 pct (`frankenredis-cgeq5`)
 
 Claim class: COMPETITIVE. Campaign output: yes. Each ratio draw below started a live redis 7.2.4

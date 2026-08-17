@@ -1297,6 +1297,72 @@ GENERIC_PATH_FRAMES = (
 GENERIC_PATH_MARKERS = ("classify_command", "push_ascii_lowercase_lossy")
 
 
+# (frankenredis-94lp3 CORRECTION, 2026-08-17) PRESENCE IS NOT THE SIGNAL. COST IS.
+#
+# The rule above tested whether the frame names APPEAR in the annotate output. They
+# appear in a front-classified route too, because SEEDING and STARTUP run through the
+# generic path a handful of times before the measured burst begins — so every shape that
+# carries seed commands was labelled GENERIC PATH regardless of the route it takes.
+#
+# MEASURED on `hget`, which commit 3ece2ea92 front-classified with a cached read gate:
+#
+#     dispatch_with_client_context      728 Ir      <- 0.01 pct of the run, ~0.18/op
+#     execute_frame_internal          1,646 Ir
+#     command_table_index             1,572 Ir
+#     classify_command                  456 Ir
+#     (the route itself is 1,784 instr/op x 4,000 ops = ~7.1M Ir)
+#
+# 728 instructions is a few CALLS, not 4,000 of them. A route on the generic path pays
+# this frame on EVERY op and reads in the hundreds of instr/op; a classified one pays it
+# only for whatever ran outside the burst. Three routes I measured in one sitting —
+# `hget`, `type`, `ttl_nonvolatile` — were all mislabelled GENERIC, and the label sent me
+# looking for a missing floor-table entry for TYPE that has existed all along.
+#
+# So the discriminator is the frame's SHARE, not its presence. The threshold is set well
+# below any real generic route (they read 5-40 pct here) and well above seed residue
+# (0.01 pct), so it does not need to be tuned finely to be right.
+GENERIC_PATH_MIN_SHARE_PCT = 1.0
+
+_ANNOTATE_ROW = re.compile(r"^\s*([\d,]+)\s*\(\s*([\d.]+)%\)", re.M)
+
+
+def _frame_share_pct(annotate_text: str, frame: str) -> float:
+    """Largest percentage callgrind_annotate attributes to a row naming `frame`.
+
+    Returns 0.0 when the frame does not appear at all. Takes the MAX rather than the sum
+    because a frame can legitimately appear on several rows (different call chains) and
+    any one of them exceeding the bar is enough to say the path was taken per-op.
+    """
+    best = 0.0
+    for line in annotate_text.splitlines():
+        if frame not in line:
+            continue
+        match = _ANNOTATE_ROW.match(line)
+        if match:
+            best = max(best, float(match.group(2)))
+    return best
+
+
+def classify_dispatch_mechanism(annotate_text: str):
+    """Pure half of `dispatch_mechanism`, so the rule is testable without a dump.
+
+    Returns (label, frames_seen). GENERIC PATH requires the DISCRIMINATING frame to carry
+    a material share, not merely to be present.
+    """
+    present = {f for f in GENERIC_PATH_FRAMES if f in annotate_text}
+    markers = {m for m in GENERIC_PATH_MARKERS if m in annotate_text}
+    seen = sorted(present | markers)
+    share = _frame_share_pct(annotate_text, "dispatch_with_client_context")
+    if share >= GENERIC_PATH_MIN_SHARE_PCT and len(present) == len(GENERIC_PATH_FRAMES):
+        return "GENERIC PATH", seen
+    if present or markers:
+        # Say WHY it is not generic, so a reader does not re-derive this the hard way.
+        return ("classified route (generic frames present but "
+                "dispatch_with_client_context is %.2f pct — seed/startup residue, "
+                "not per-op)" % share), seen
+    return "classified route", seen
+
+
 def dispatch_mechanism(dump_path):
     """Which mechanism is this route paying: the parser walk, or the generic path?
 
@@ -1305,11 +1371,7 @@ def dispatch_mechanism(dump_path):
     """
     out = subprocess.run(["callgrind_annotate", "--auto=no", "--threshold=99.5", dump_path],
                          capture_output=True, text=True, timeout=900).stdout
-    present = {f for f in GENERIC_PATH_FRAMES if f in out}
-    markers = {m for m in GENERIC_PATH_MARKERS if m in out}
-    if len(present) == len(GENERIC_PATH_FRAMES) and markers:
-        return "GENERIC PATH", sorted(present | markers)
-    return "classified route", sorted(present | markers)
+    return classify_dispatch_mechanism(out)
 
 
 # (frankenredis-zw36c) Event-loop PASS COUNT per op, sampled per run.
@@ -1747,6 +1809,46 @@ def selftest() -> int:
         print("  %-26s replies=0 (correctly withheld until complete)  ok" % "truncated reply")
     _selftest_eventloop_cycles()
     print("  %-26s None-not-zero contract  ok" % "eventloop_cycles parser")
+
+    # (frankenredis-94lp3 CORRECTION) The mechanism label must key on COST, not presence.
+    # Case 1 is the REAL hget annotate shape, numbers copied from the dump: every generic
+    # frame present, all of them seed/startup residue. The old presence rule called this
+    # GENERIC PATH, which is how three front-classified routes got mislabelled in one
+    # sitting. Case 2 is a genuine generic route, where the same frame carries per-op cost.
+    classified_text = (
+        "     1,646 ( 0.02%)  ???:<fr_runtime::Runtime>::execute_frame_internal [x]\n"
+        "     1,572 ( 0.02%)  ???:fr_command::command_table_index [x]\n"
+        "       728 ( 0.01%)  ???:<fr_runtime::Runtime>::dispatch_with_client_context [x]\n"
+        "       456 ( 0.01%)  ???:fr_command::classify_command [x]\n"
+        "       120 ( 0.00%)  ???:fr_command::push_ascii_lowercase_lossy [x]\n"
+    )
+    generic_text = (
+        " 1,204,331 (14.90%)  ???:<fr_runtime::Runtime>::execute_frame_internal [x]\n"
+        "   372,118 ( 4.60%)  ???:fr_command::command_table_index [x]\n"
+        "   688,004 ( 8.51%)  ???:<fr_runtime::Runtime>::dispatch_with_client_context [x]\n"
+        "   201,776 ( 2.50%)  ???:fr_command::classify_command [x]\n"
+        "   150,900 ( 1.87%)  ???:fr_command::push_ascii_lowercase_lossy [x]\n"
+    )
+    for label_text, expect, name in (
+            (classified_text, "classified", "seed residue (real hget dump)"),
+            (generic_text, "GENERIC PATH", "true generic route")):
+        got, _frames = classify_dispatch_mechanism(label_text)
+        if got.startswith(expect):
+            print("  %-26s %s  ok" % ("mechanism: " + name, expect))
+        else:
+            failures += 1
+            print("  %-26s FAIL: got %r, wanted %s" % ("mechanism: " + name, got, expect))
+    # The defect itself, pinned: under the OLD presence-only rule the hget dump satisfied
+    # every condition. If someone reverts to presence testing, this goes red.
+    _old_rule_would_say_generic = (
+        all(f in classified_text for f in GENERIC_PATH_FRAMES)
+        and any(m in classified_text for m in GENERIC_PATH_MARKERS))
+    if not _old_rule_would_say_generic:
+        failures += 1
+        print("  %-26s FAIL: the regression fixture no longer reproduces the old defect"
+              % "mechanism: fixture")
+    else:
+        print("  %-26s old presence rule would say GENERIC  ok" % "mechanism: defect shown")
 
     # (frankenredis-ozrro) Argument parsing must not depend on flag POSITION. The
     # regression this pins: `<bin> <shape> --fr-only` read "--fr-only" as the ops count
