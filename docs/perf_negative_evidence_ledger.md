@@ -26550,3 +26550,135 @@ justification. Re-measure sinter_big's vs-redis RATIO in a quiet window -- at 17
 instr/op against redis's ~465,000 the shape has moved from ~1.4x BEHIND to roughly 2.6x
 AHEAD, which would retire the last cell where fr trailed on instructions, but that ratio is
 not claimed here because the redis arm was not re-run alongside.
+
+--------------------------------------------------------------------------------
+INSTRUMENT AUDIT (frankenredis-gein3) — the 1,700x pass-count gap is REAL, not a counting
+artefact: both engines increment once per event-loop iteration, verified in source and now
+recorded in the harness with a discriminating test
+
+Claim class: METHOD
+
+Last row published `event-loop passes per op: fr 179-268, redis 0.130` and built a lever on
+it. A ratio between two engines' counters is meaningless if they count at different
+granularities, so before attacking the reply path I checked WHERE each counter increments.
+It survived:
+
+    redis  server.c:1760  durationAddSample(EL_DURATION_TYPE_EL, el_duration)
+                          once per iteration, in the beforeSleep/afterSleep pair
+    fr     main.rs:5438   runtime.record_eventloop_cycle(..)
+                          ONE call site, main loop body, once per iteration
+
+Both once-per-iteration, so the 1,700x is a real difference in how many times the loop runs
+and not an artefact of where the counter sits. THAT VERIFICATION EXISTED ONLY IN A
+CONVERSATION; it is now in the harness docstring beside the field, with both file:line
+citations and the failure it guards — if a SECOND fr call site ever appears, or that one
+moves inside an inner loop, every `passes per op` row in this ledger silently becomes wrong.
+
+ALSO CHECKED, AND ALSO CLEAN: `_eventloop_cycles` returns None, never 0, when the field is
+missing or unparseable. A silent zero would read as "this engine never cycles" — the most
+flattering possible answer, and indistinguishable from a genuinely tight loop. That is the
+same defect class as the screen tool's drop-vs-score-zero, so it is now pinned by
+`--selftest`.
+
+THE TEST I FIRST WROTE CLAIMED A TRAP IT DID NOT TEST, and the mutation caught me. I
+asserted that `instantaneous_eventloop_cycles_per_sec` — upstream's real neighbour — guards
+prefix-vs-substring matching. Relaxing the parser to `b"eventloop_cycles:" in line` left the
+suite GREEN, because the colon already disambiguates: that neighbour does not contain
+`eventloop_cycles:`. The case passed for a simpler reason than the comment claimed.
+
+    Fixed by adding a case that DOES discriminate — `shard_eventloop_cycles:9`, a field
+    ending in the name with its colon, which a prefix match rejects and a substring match
+    would report as our counter. The mutation now reddens there and nowhere else. A test
+    that NAMES an invariant may not TEST it, and the only way to find out is to break the
+    thing on purpose.
+
+WHAT THIS TURN DID NOT DO, and why. The named lever is fr's reply flushing. I did not edit
+the reactor: zw36c has ALREADY fixed the idle spin (their test states that passing queued
+output as "pending commands" was its cause), my ELF was built AFTER that fix and still shows
+179-268 passes, `try_flush` writes to WouldBlock without an artificial cap, and the write
+chunk constants are 64KB/256KB. So the residual is not the obvious candidates, the area is
+actively owned by another agent, and load was 45.6 rising with no certification possible —
+editing a shared reactor blind, unable to measure the result, is how a regression ships.
+The instrument that makes the next attempt measurable is what landed instead.
+
+PROVENANCE:
+  no new measurement   source verification plus a parser test; the pass figures quoted are
+                       from the row above (ELF 2d5a352c).
+  host                 thinkstation1, 64 cores, /data 213G, governor powersave, no build.
+  loadavg              33.05 / 29.85 / 28.52 observed; 45.6 rising at request.
+  MHz                  not recorded — no arm was measured.
+  reservations         held scripts/shape_instr_per_op.py while editing; released on commit.
+
+RETRY PREDICATE: before quoting ANY `passes per op` figure, confirm fr still has exactly one
+`record_eventloop_cycle` call site. To attack the residual, first answer WHY a 5.6KB reply
+needs ~200 iterations when `try_flush` drains to WouldBlock — the writer pool
+(WRITER_POOL_WORKERS=2) is the remaining suspect, and it is zw36c's ground, so coordinate
+rather than collide.
+
+---
+
+## MEASURED (frankenredis-33832) — CLOSING the wall-clock question on this host: the one-process null spans 0.917-1.056 over six samples, 3.5x the band it must fit inside
+
+Campaign output: no
+
+Claim class: METHOD. No vs-incumbent ratio is banked. This row renders the verdict my own
+retry predicate asked for, so the eighth and ninth certification windows are not spent.
+
+THE PREDICATE I WROTE IN 49f462500 said: gate on the DIAGNOSTIC one-process null landing
+inside 0.98..1.02 on a short probe, and "if it cannot be brought into band on this host at
+all, the honest conclusion is that wall-clock certification of this surface is not
+available here and the bead should say so rather than waiting for a window that has not
+arrived." It cannot. Six samples now, two sessions, loads from 13 to 28:
+
+    0.917228   0.933081   0.960575   0.986818   1.054018   1.056353
+    n=6   min 0.917228   median 0.960575   max 1.056353   RANGE 0.1391
+
+The band is 0.04 wide. The term that must fit inside it swings 0.139 — three and a half
+times wider — and a SINGLE process is what swings: these are fr_b measured against itself,
+same binary, same pinned block, halves of one run.
+
+AND IT IS NOT LOAD. The lowest-load sample of the six (loadavg 13.3) produced 1.054018,
+one of the two worst readings; the highest-load sample (27.5) produced 0.917228, the other
+one. Seven certification attempts across two agents have now refused, at one free core
+block and at four, pinned symmetrically and not, between loadavg 13 and 78.
+
+WHAT IS THEREFORE SETTLED, and what is not:
+
+  SETTLED  collection_reload_headtohead.py --competitive cannot authenticate an A/B on
+           this host under current conditions. Not "has not yet"; its gate is narrower
+           than the noise floor of its own diagnostic null. Waiting for a quieter window
+           is not the remedy — the quietest windows produced the worst readings.
+
+  NOT SETTLED  whether fr is actually slower than redis 7.2.4 on RESTORE in wall-clock
+           terms. That question is open and this row does not answer it. RESTORE
+           throughput remains UNMEASURED, not zero, post-fosf1.
+
+  UNCHANGED  the instruction-count answer, which is measurable here and has been all
+           along: hash RESTORE is 2.13x redis at 40 fields and 2.45-2.51x at 128 on the
+           repeatable one-key workload, and 2.81x on the bead's 200-key workload.
+
+THE MECHANISM IS STILL NOT ESTABLISHED and I am not asserting one. A single pinned process
+on an uncontended block drifting 14 pct against itself is consistent with frequency
+behaviour under the powersave governor, but mean MHz moved only 6 pct across the run where
+the null moved 20, so the numbers do not close and I will not pretend they do. Naming the
+mechanism is a separate piece of work from establishing that the instrument cannot be used.
+
+CODE LANDED WITH THIS ROW: scripts/restore_cert_gate.sh now carries the six-sample
+distribution and prints it on a spread refusal, so the next reader sees a KNOWN property of
+the host rather than an unlucky draw worth re-rolling. Verified live — its first end-to-end
+stage-2 run produced 0.960575 / 0.917228 / 1.056353, spread 0.1391, REFUSE — and the
+decision boundary is checked at 0.0399 (proceed) against 0.0400 (proceed) and 0.1210
+(refuse).
+
+RETRY PREDICATE: do not schedule another certification window for this surface. Retry only
+if one of these changes: the governor is pinned to performance (currently powersave, and
+not settable from an agent), or the harness gains a within-process paired design that does
+not require two processes to null each other. Absent one of those, use
+scripts/restore_instr_per_op.py and scripts/restore_profile_frames.py, both load-immune and
+both already landed.
+
+PROVENANCE: fr ELF 2d5a352cfd56c98699fd7d65359c41ffd51e29ae4c8ccd72e2ffcf741e7d1263,
+computed by sha256sum; the harness independently self-reported the same SHA for both fr
+arms from /proc/<pid>/exe on the runs that produced these samples. thinkstation1, 64 cores
+observed, governor powersave, /data 211G. Per-arm loadavg and mean CPU MHz were recorded
+with each probe: 13.3/2926, 16.0/3086, 20.0/2800, 27.5/2928, 27.5/3020, 22.4/2681.

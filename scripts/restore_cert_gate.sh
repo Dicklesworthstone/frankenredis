@@ -123,6 +123,21 @@ if awk -v s="$SPREAD" 'BEGIN{exit !(s>0.04)}'; then
   echo "REFUSE: the one-process null itself spreads ${SPREAD} across probes, wider than" >&2
   echo "        the 0.04 band it is being judged against. The median is not meaningful" >&2
   echo "        and a 9-trial run cannot be predicted from it." >&2
+  echo >&2
+  # Accumulated evidence, so a wide spread reads as a KNOWN property of this host
+  # rather than as bad luck worth re-rolling. Six samples, two sessions, loads 13-28:
+  #   0.917228  0.933081  0.960575  0.986818  1.054018  1.056353
+  # range 0.139, i.e. 3.5x the 0.04 band the null must fit inside, with no visible
+  # relationship to loadavg (the LOWEST-load sample, 13.3, produced 1.054018 -- one
+  # of the two worst). Seven certification attempts across two agents have now
+  # refused. If your spread is in that range you are seeing the same thing, not a
+  # bad window.
+  echo "        KNOWN: six samples over two sessions span 0.917-1.056 (range 0.139)," >&2
+  echo "        uncorrelated with load. This is a property of the host, not a bad" >&2
+  echo "        window -- re-running is unlikely to help. Use the load-immune" >&2
+  echo "        instruction instruments instead:" >&2
+  echo "          scripts/restore_instr_per_op.py     fr/redis instr/op ratio" >&2
+  echo "          scripts/restore_profile_frames.py   where the instructions go" >&2
   exit 1
 fi
 echo "   one-process null = ${SAME}x  (band 0.98..1.02)"
