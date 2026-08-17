@@ -4263,14 +4263,28 @@ pub(crate) fn parse_register_function_args(
 /// `lua_redis_table_template()`, so an EVAL script cannot see `register_function` — upstream
 /// does not give scripts that function, and sharing the template would have handed it to
 /// every script in the process.
-// (frankenredis-o500d) DEAD UNTIL WIRED, deliberately. This trio is reachable only from
-// tests until `function_load` in lib.rs calls `new_for_function_load` and executes the
-// library body. It is landed ahead of that step so the primitive can be verified in
-// isolation against a green differ, rather than arriving in the same commit that changes
-// FUNCTION LOAD's behaviour.
-// DELETION CONDITION for these three allows: remove them the moment lib.rs calls
-// `LuaState::new_for_function_load`. If they are still here after that, they are rot.
-#[allow(dead_code)]
+/// Execute a FUNCTION LOAD library body in the declared-globals sandbox.
+///
+/// (frankenredis-o500d) This is the load-time execution upstream does and fr did not. Returns
+/// the names the body registered, or `(line, message)` for a RUNTIME error — the case a
+/// static scan cannot reach, e.g. `local t = nil; t.field`.
+///
+/// The shebang is blanked (not stripped) by `lua_execution_source` so reported line numbers
+/// match the file the user sent. Callback bodies are NOT run here: a function literal is only
+/// defined at load time, which is exactly why the static scan skips their contents too.
+pub(crate) fn function_load_execute(
+    store: &mut Store,
+    now_ms: u64,
+    code: &[u8],
+) -> Result<Vec<Vec<u8>>, (u32, String)> {
+    let source = lua_execution_source(code);
+    let mut state = LuaState::new_for_function_load(store, now_ms);
+    match state.execute(source.as_ref()) {
+        Ok(_) => Ok(state.registered_function_names().to_vec()),
+        Err(err) => Err((state.current_line, err)),
+    }
+}
+
 fn lua_function_load_globals() -> LuaGlobals {
     let mut map = lua_base_globals_template().as_ref().clone();
     let redis_table = lua_redis_table_template();
@@ -4369,13 +4383,11 @@ impl<'a> LuaState<'a> {
 
     /// (frankenredis-o500d) A state whose sandbox exposes `redis.register_function`, for
     /// executing a library body at load time. Not for EVAL.
-    #[allow(dead_code)] // see lua_function_load_globals: dead until lib.rs wires it
     pub(crate) fn new_for_function_load(store: &'a mut Store, now_ms: u64) -> Self {
         Self::with_globals(store, now_ms, lua_function_load_globals())
     }
 
     /// Names registered by the body executed on this state, in call order.
-    #[allow(dead_code)] // see lua_function_load_globals: dead until lib.rs wires it
     pub(crate) fn registered_function_names(&self) -> &[Vec<u8>] {
         &self.registered_functions
     }

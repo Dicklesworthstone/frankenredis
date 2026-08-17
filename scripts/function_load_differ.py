@@ -82,14 +82,13 @@ class Conn:
 # An entry here is a debt, not a permission: if a listed row starts AGREEING the gate fails
 # too, demanding the entry be removed, because an allowance that outlives its bug is how a
 # gate rots into permanent green.
-EXPECTED_DIVERGENCES = {
-    "nil_index": "o500d row 4 -- fr accepts `local t = nil; t.field`; redis rejects it. "
-                 "fr's load-time check is a STATIC AST scan for undeclared globals "
-                 "(function_library_first_undeclared_global), which cannot see a runtime "
-                 "error on a LOCAL. Matching upstream needs the body EXECUTED in the "
-                 "declared-globals sandbox, which also moves registration off the current "
-                 "text-scan path -- a refactor, not a patch.",
-}
+# (frankenredis-o500d) EMPTY, and it should stay that way. `nil_index` lived here until fr
+# began EXECUTING the library body at load time (lua_eval::function_load_execute); the differ
+# itself flagged the entry as stale the moment the row went green, which is the behaviour that
+# keeps an allowance from outliving its bug. All four behavioural rows now agree with 7.2.4.
+#
+# Add an entry ONLY with a bug id and a reason, never to make a red run green.
+EXPECTED_DIVERGENCES: dict[str, str] = {}
 
 CASES = [
     ("top_level_error",

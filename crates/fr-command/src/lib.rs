@@ -13257,7 +13257,9 @@ fn function_library_first_undeclared_global(code: &[u8]) -> Option<(u32, String)
 fn function_cmd(
     argv: &[Vec<u8>],
     store: &mut Store,
-    _now_ms: u64,
+    // (frankenredis-o500d) No longer unused: FUNCTION LOAD now executes the library body,
+    // and the evaluator needs the clock.
+    now_ms: u64,
 ) -> Result<RespFrame, CommandError> {
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("FUNCTION"));
@@ -13367,6 +13369,24 @@ fn function_cmd(
         if let Some((line, name)) = function_library_first_undeclared_global(&argv[code_idx]) {
             return Err(CommandError::Custom(format!(
                 "ERR Error registering functions: ERR user_function:{line}: Script attempted to access nonexistent global variable '{name}'"
+            )));
+        }
+        // (frankenredis-o500d) EXECUTE the body, which is what upstream does and what the
+        // static scan above cannot substitute for: row 4 of the differ,
+        // `local t = nil; t.field`, is a RUNTIME error on a LOCAL and is not statically
+        // decidable. Runs AFTER the static check (an undeclared global must still report
+        // its own message and line) and BEFORE `function_load`, so a body that raises
+        // leaves the store untouched exactly as a failed recompile does.
+        //
+        // Registration itself still goes through `store.function_load`'s scan; the names
+        // collected here are not yet authoritative. Replacing the scan with them is a
+        // separate change with its own parity surface (FUNCTION LIST/DUMP ordering), and
+        // bundling it here would put two behaviour changes behind one differ run.
+        if let Err((line, message)) =
+            lua_eval::function_load_execute(store, now_ms, &argv[code_idx])
+        {
+            return Err(CommandError::Custom(format!(
+                "ERR Error registering functions: ERR user_function:{line}: {message}"
             )));
         }
         match store.function_load(&argv[code_idx], replace) {
