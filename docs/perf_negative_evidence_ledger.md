@@ -8,6 +8,74 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-08-17 BrownIbis: METHOD, and it answers the question rather than adding to it — the ratio tracks NEITHER CPU idle NOR loadavg; it tracks DENOMINATOR SIZE, and two draws at identical idle differ by the whole spread (`frankenredis-eh2ct`, `frankenredis-fpqns`)
+
+Not a verdict row and NOT a promotion. No number here is certified, and the certified worst bounds
+are unchanged: `sort_ro_alpha_64` **0.2051x**, `sort_ro_alpha` **1.0649x**.
+
+This is the study the retry predicate two rows above asked for, run as specified: loadavg, builds,
+CPU idle pct and ratio, on one LARGE-denominator shape and one SMALL one, across a wide idle band.
+Each draw samples its OWN idle rather than one reading for the batch, because the batch perturbs
+the host it measures.
+
+### THE DATA (same ELF `73ae1da08cb8c420...`, same incumbent `e837dbb2556cff6b...`)
+
+    shape             verdict  loadavg 1/5/15        builds  idle    ratio
+    sort_ro_alpha_64  UNFIT    15.29 21.93 24.82     2       84 pct  0.2047
+    sort_ro_alpha_64  UNFIT    28.67 24.18 25.46     2       37 pct  0.2047
+    sort_ro_alpha_64  UNFIT    34.95 26.05 26.05     2       36 pct  0.2044
+    sort_ro_alpha     UNFIT    15.50 21.55 24.63     2       79 pct  1.0354
+    sort_ro_alpha     UNFIT    36.78 26.26 26.12     2       61 pct  1.0629
+    sort_ro_alpha     UNFIT    32.67 26.19 26.10     2       61 pct  1.0296
+
+Pooled with every earlier draw of the same two shapes on the same ELF pair (four FIT, five UNFIT):
+
+    sort_ro_alpha_64   7 draws   0.2044 - 0.2051   spread 0.34 pct   idle 36 - ~100 pct
+    sort_ro_alpha      9 draws   1.0247 - 1.0649   spread 3.92 pct   idle 61 - ~100 pct
+
+### THE ANSWER, and it is the third branch of the predicate rather than either of the first two
+
+**It does not track idle.** The large-denominator shape reads 0.2047 at 84 pct idle and 0.2047 at
+37 pct idle — identical to four decimal places across a 47-point idle swing. The small-denominator
+shape reads 1.0354 at 79 pct idle and 1.0296 at 61 pct.
+
+**It does not track loadavg.** Same rows: loadavg 15.29 and 34.95 give 0.2047 and 0.2044.
+
+**THE DECIDING DATUM: two `sort_ro_alpha` draws at IDENTICAL 61 pct idle, adjacent loadavg and the
+same build count, differ by 1.0629 against 1.0296 — 3.23 pct, which is the ENTIRE nine-draw
+spread.** Whatever moves this number is not the environment, because the environment was held and
+it moved anyway.
+
+What it does track is denominator size, exactly as recorded two rows above: 0.34 pct on a ~198,400
+instr/op denominator against 3.92 pct on a ~8,400 one. Redis's `serverCron` is elapsed-time work
+the two-point subtraction cannot cancel, it is a fixed quantity, and its weight is therefore a
+pure function of how large the denominator is.
+
+### WHAT FOLLOWS FOR THE GATE
+
+The predicate said: "If it tracks NEITHER, the gate is protecting against nothing on this host and
+the honest change is to drop the ratio gate and require replicates plus a worst bound." That
+branch has now fired on 16 draws across two shapes.
+
+I am NOT making that change. Three reasons, and they are limits on this row rather than modesty:
+one host, one ELF pair, two shapes; every draw in the new set was UNFIT on builds, so the
+comparison to a FIT population rests on the four earlier certified draws rather than on a matched
+sample; and a gate that has cost the fleet a day of refusals should be retired by whoever owns it
+(`eh2ct`), with the fleet's agreement, not by the agent who happens to have measured it.
+
+What I have done is make the data collect itself: `certification_window.py` now prints CPU idle
+beside loadavg on every verdict (`5391d3849`), so the next twenty rows carry the column whether or
+not anyone remembers.
+
+### RETRY PREDICATE
+
+(1) Before retiring the ratio gate, repeat this on a SECOND shape pair with a matched FIT
+population — the weakness here is that the new draws are all UNFIT-on-builds. (2) The replacement,
+if it is made, is the one the small-denominator rows already use in practice: N replicates and the
+WORST bound, with N scaled to the denominator — one draw is defensible at ~200k instr/op, and at
+~8k it is not. (3) Do NOT replace loadavg with an idle floor: this row is the evidence against
+that specific substitution, and it would have looked plausible without it.
+
 ## 2026-08-17 BrownIbis: METHOD — the certification gate refuses on LOADAVG, and two draws it refused at 65 pct idle agree with the certified pair to within the certified pair's own spread (`frankenredis-eh2ct`, `frankenredis-fpqns`)
 
 Not a verdict row and NOT a promotion: nothing below is being certified, and the certified worst
