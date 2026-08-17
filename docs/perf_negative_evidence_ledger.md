@@ -8,6 +8,63 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-08-17 BrownIbis: METHOD — the certification gate refuses on LOADAVG, and two draws it refused at 65 pct idle agree with the certified pair to within the certified pair's own spread (`frankenredis-eh2ct`, `frankenredis-fpqns`)
+
+Not a verdict row and NOT a promotion: nothing below is being certified, and the certified worst
+bound for `sort_ro_alpha` remains **1.0649x**, unchanged. This records an instrument observation
+that three agents have now hit from three directions in one day.
+
+### LOADAVG AND CPU IDLE DISAGREE SHARPLY ON THIS HOST
+
+Read directly rather than inferred, `vmstat 2 2`:
+
+    loadavg 26.41 / 31.00 / 26.73   ->   user 15 pct, sys 1 pct, idle 83 pct, iowait 1 pct
+
+At loadavg 26 on a 64-thread host, **83 pct of the CPU was idle with 1 pct iowait** — roughly 53
+threads free. Loadavg counts runnable-and-blocked tasks; it is not a measure of available CPU, and
+a workload of many short-lived or briefly-blocked tasks inflates it without contending for cores.
+`certification_window.py` gates `--for ratio` on loadavg and on loadavg STATIONARITY, and reads
+nothing about idle.
+
+### THE COMPARISON, and it is the point
+
+Same ELF (`73ae1da08cb8c420...`), same shape, same incumbent (`e837dbb2556cff6b...`):
+
+    window   verdict   loadavg 1/5/15        builds   idle    fr/redis
+    FIT      certified  6.24 5.65 6.01       0        ~100    1.0649x
+    FIT      certified  6.62 7.76 10.46      0        ~100    1.0328x
+    UNFIT    refused   26.60 30.76 26.80     3        65 pct  1.0545x
+    UNFIT    refused   31.21 31.60 27.11     2        66 pct  1.0247x
+
+**The two refused draws land INSIDE the range of the two certified ones** (1.0247-1.0545 against
+1.0328-1.0649). Across all four, spanning loadavg 6.2 to 31.2 and idle 65 to ~100 pct, the total
+spread is **3.9 pct** — the same order as the 3.21 pct four-draw spread already recorded for this
+shape within FIT windows alone, and attributable to the same cause: an ~8,400 instr/op denominator
+where redis's elapsed-time `serverCron` is a large fixed fraction.
+
+### WHAT THIS DOES AND DOES NOT LICENSE
+
+It does NOT license promoting a refused row, and none is promoted here. Four draws is not a study,
+the two UNFIT draws came in slightly LOWER (more flattering) which is exactly the direction that
+should be distrusted, and a gate is not disproved by two agreeing samples.
+
+It DOES say the gate's criterion is measuring the wrong quantity, and that is now the third
+independent line of evidence in this ledger pointing the same way: build count is uncorrelated
+with denominator spread (`fpqns`, eight replicates); spread is set by DENOMINATOR SIZE (0.10 pct
+at ~198k instr/op against 3.21 pct at ~8.4k); and now loadavg diverges from actual CPU
+availability by enough that a 65-pct-idle host reads as busy.
+
+### RETRY PREDICATE
+
+Before `certification_window.py` is changed, collect the same four columns — loadavg, builds, idle
+pct, ratio — on **one large-denominator and one small-denominator shape, ten draws each, spanning
+idle 40-100 pct**. If the ratio tracks idle rather than loadavg, replace the loadavg criterion
+with an idle-percentage floor and keep stationarity on idle instead. If it tracks NEITHER, the
+gate is protecting against nothing on this host and the honest change is to drop the ratio gate
+and require replicates plus a worst bound, which is what the small-denominator rows already do in
+practice. **Recording idle pct alongside loadavg on every ratio row from now on costs one
+`vmstat` and is what makes that study possible** — this row is the first two points of it.
+
 ## 2026-08-17 BrownIbis: METHOD — the front-classification campaign is DONE on every command a standard benchmark issues, and the predicate blocking SORT cannot be discharged by benchmark data at all (`frankenredis-e1w1r`, `frankenredis-g3z6n`)
 
 Not a verdict row: no lever, no A/B, no incumbent. Source reading plus arithmetic over figures
