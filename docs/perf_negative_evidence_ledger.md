@@ -8,6 +8,72 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-08-17 MossyOrchid: INSTRUMENT — the ratio window gate is SELF-DEFEATING: each draw raises the 1-minute loadavg the NEXT draw's stationarity check reads, so replicated standing and a FIT window are close to mutually exclusive (`frankenredis-5na4i`)
+
+Claim class: SELF-SPEEDUP. Campaign output: no — this claims no ratio and moves no number. It
+explains five failed certification attempts across three windows the orchestrator called clean,
+and it names the protocol change that would fix them.
+
+WHAT I WAS TRYING TO DO: promote two crossings from SIZING to certified. That needs a window the
+harness stamps `FIT for ratio`, which requires (a) zero `cargo`/`rustc` processes and (b)
+1-minute and 5-minute loadavg within 15 pct.
+
+MEASURED, this window, which was the quietest of the day (1m/5m/15m = 6.30/5.67/6.02, 10.0 pct
+apart, `pgrep` reading ZERO cargo/rustc immediately before):
+
+    run 1 (fr_b2)     UNFIT: builds 2                     1min 6.30 -> ...
+    run 2 (fr_floor)  UNFIT: builds 2 + non-stationary    1min 6.91 vs 5min 5.83 = 19 pct
+    run 3 (fr_b2)     UNFIT: builds 2 + non-stationary    1min 7.32 vs 5min 5.94 = 23 pct
+    run 4 (fr_floor)  UNFIT: builds 2 + non-stationary    1min 7.62 vs 5min 6.02 = 27 pct
+
+The 1-minute average climbs monotonically across MY OWN runs while the 5-minute barely moves.
+Isolated deliberately, two `--fr-only` draws back to back with nothing else changed:
+
+    before   1min 7.46   5min 6.12    (gap 18 pct)
+    after 2  1min 8.14   5min 6.28    (gap 23 pct)
+
+**Each draw adds ~0.3-0.7 to the 1-minute load and widens the very gap the next draw is gated
+on.** A ratio draw runs FOUR callgrind executions (fr at N and 2N, redis at N and 2N), so it
+contributes more than the `--fr-only` pair measured above. The gate therefore degrades as you
+replicate, and the replicated-standing convention REQUIRES replication — the two requirements
+pull against each other by construction.
+
+THIS IS NOT THE HOST BEING BUSY, and that distinction is the point. `pgrep` read zero
+cargo/rustc seconds before run 1; the "builds 2" in every row above is peers starting work
+inside my 40-second window, which is a separate and also real problem on a 20-pane box. The
+stationarity failures are MINE.
+
+It is the same class of error this repo already recorded from another project —
+`pandas found the mid-run load spikes are its OWN measurement` — arriving here as a GATE that
+consumes the quantity its own subject perturbs.
+
+THE FIX IS A PROTOCOL, NOT A PATCH, and it is testable: SPACE THE DRAWS. The 1-minute average
+decays with a ~60 s time constant, so leaving 90-120 s of unrelated work between draws lets it
+return to the 5-minute baseline before the next run reads it. Back-to-back draws — the natural
+way to interleave arms, and what every row of mine has done — is the worst possible schedule for
+this gate.
+
+A HARNESS-SIDE FIX EXISTS TOO and is worth considering by whoever owns the gate: read the
+stationarity inputs ONCE at the start of a measurement SESSION rather than per invocation, or
+subtract the harness's own children from the load estimate. Both are more invasive than spacing
+the draws, so I am recording the option rather than taking it.
+
+WHAT THIS MEANS FOR THE TWO CROSSINGS BELOW: unchanged. Their fr-side deltas are certified
+(deterministic instruction counts, A/A bootstrap CIs of +/-0.05 pct against effects of 50-56
+pct), their ratios stay SIZING, and the worst bounds stand at 0.5390x and 0.8392x. Nothing about
+the code is in doubt; only the window protocol was, and now it is named.
+
+### RETRY PREDICATE
+
+Attempt the promotion again ONLY with draws spaced >= 90 s apart, checking `pgrep -c 'cargo|rustc'`
+AND the 1m/5m gap immediately before each one, and abandon the attempt the moment either fails
+rather than continuing — every extra run makes the next one likelier to fail. If three spaced
+draws still cannot produce two FIT ratio runs on this host, the gate should be treated as
+unreachable for replicated ratios and the convention reopened, because a rule that cannot be
+satisfied is worse than no rule.
+
+--------------------------------------------------------------------------------
+
 ## 2026-08-17 MossyOrchid: KEEP — the last two GENERIC-path commands are front-classified: ZINTERCARD **7,510 -> 3,268 instr/op (-56.5 pct)** and XPENDING **6,475 -> 3,204 (-50.5 pct)**, both crossing Redis (`frankenredis-5na4i`, commits `e43e4e3ff` + `a36291636`)
 
 Claim class: COMPETITIVE. Campaign output: yes. Each ratio draw below started a live redis 7.2.4
