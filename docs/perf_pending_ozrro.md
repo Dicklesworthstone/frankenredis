@@ -21,6 +21,57 @@ commits cleanly. That is a workaround for a durability problem, NOT an attempt t
 the contract: the rows are unchanged, they are still subject to it, and merging them into the
 ledger is a mechanical step once the blocker clears.
 
+## MEASURED-STRUCTURE (frankenredis-ozrro) — the READ gate is cached for GET AND NOTHING ELSE, so every other borrowed read pays it per packet on BOTH routes. That kills the asymmetry lever for reads and exposes a larger one: a read-gate cache is worth ~200-267 per packet across the entire read surface
+
+Source reading only; no build, no measurement. Load 18.6 / 18.0 / 16.3, one peer build, gate FIT
+for fr-only and UNFIT for a ratio — neither needed.
+
+### THE ASYMMETRY DOES NOT EXTEND TO READS, WHICH IS THE FIRST THING TO GET RIGHT
+
+The write-gate finding was that the cascade amortises per pass while floor arms paid per packet.
+I went looking for the same asymmetry on the read side and it is not there:
+
+    cache                        consumers
+    plain_write_gate_cache       11, via `cached_plain_write_gate`
+    plain_get_read_gate_cache     1, inline at main.rs:7021 — the GET cascade arm, nothing else
+
+So every borrowed read EXCEPT GET computes `plain_borrowed_default_key_read_allows` per packet, in
+the cascade and in the floor alike. There is no amortisation for a floor read arm to lose, and no
+lever of the kind I took for MSET/HSET/HMSET. Had I assumed the write result generalised, I would
+have written gate-taking variants for read executors and measured nothing.
+
+### WHAT IT EXPOSES INSTEAD, AND WHY IT IS BIGGER
+
+The absence of a read cache is itself the opportunity. GET has one because someone bothered; the
+other 93 internal call sites of `plain_borrowed_default_key_read_allows` in fr-runtime do not. A
+per-pass read-gate cache would save on EVERY borrowed read on a pipelined workload — TTL, TYPE,
+EXISTS, HGET, MGET, SCAN, DUMP and the rest — which is the largest command class there is.
+
+SIZE, bounded rather than claimed: the write predicate is the read predicate PLUS the write-only
+gates (no disk-write denial, no min-replicas-to-write), so the read gate is a strict subset of the
+one measured at ~267 across three commands. That puts it at 200-267 per packet, and the lower
+bound is the honest figure to plan with until one instance is measured.
+
+### WHY THIS IS A VEIN AND NOT A LEVER
+
+93 executors compute the read gate internally, and each needs a `_with_default_read_gate` variant
+before its arm can use a cache — the same shape of change as the write side, but 93 times rather
+than 4. GET already proves the pattern works and is the existence proof, not the whole job.
+
+The tractable unit is ONE hot read at a time, each a self-contained change with a known target.
+Ranked by traffic among reads that have a floor arm and a shape in this corpus: TTL, TYPE, EXISTS,
+HGET. GET is already done and must not be re-attempted — it is served by the cascade arm with the
+cache, exactly as SET is on the write side, and both are the traps a naive traffic-ordered sweep
+would hit first.
+
+### RETRY PREDICATE
+
+Take ONE of TTL/TYPE/EXISTS/HGET: add `_with_default_read_gate` to its executor, switch its floor
+arm to a new `cached_plain_read_gate` helper, and measure with `dump_small` as the layout control.
+The claim is validated only if the delta lands in 200-267 with the control flat and dispatch
+unchanged. If it comes in far below 200, the read predicate is genuinely cheaper than the write
+one and the whole vein should be re-sized before any further arms are converted.
+
 ## MEASURED (frankenredis-ozrro) — HMSET was the last floor WRITE arm paying the gate per packet; switching it recovers 267.8 instr/op with the control FLAT, and the gate amortisation now has THREE agreeing points at ~267
 
 fr-only. Before arm `fr-after-gate`, after arm `fr-after-hmset`. Shape verified a genuine no-op
