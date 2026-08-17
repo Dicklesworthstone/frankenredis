@@ -40928,3 +40928,159 @@ CV was not used, as a gate or otherwise.
    stronger acceptance test than any instruction delta because it cannot be produced by noise.
 3. Both files this needs are reserved until 22:35Z. Check
    `check_file_reservation_conflicts` before starting, not after editing.
+
+## 2026-08-17 CrimsonHawk: KEEP (COMPETITIVE) — the write-gate campaign's 23 converted arms stand at fr/Redis **0.5290x** worst bound, the mechanism is COUNTED at 1.0000 -> 0.0000 calls/op, and the lever was BrownIbis's finding before it was my code (`frankenredis-getexgate`, `frankenredis-ghmgp`)
+
+Claim class: COMPETITIVE
+Campaign output: yes
+
+This row is owed. Three batches shipped with commit messages and no ledger entry, and one of
+them shipped under someone else's commit message. Both are corrected here.
+
+### ATTRIBUTION FIRST, BECAUSE THE ORDER MATTERS
+
+**BrownIbis found this lever and gave it away.** They measured
+`plain_borrowed_default_key_write_allows` at 187.0 instr/op on SADD and ZADD against 0.0 on
+the already-migrated SET and HSET, filed it as `frankenredis-ghmgp` with the full evidence,
+and messaged it to me at 19:49Z *because I held the `fr-runtime` lease* — "it's yours if you
+want it while you're in there". They also registered a prediction before any edit (zadd
+2729.7 -> ~2543, sadd 1970.3 -> ~1783) and a reject threshold (under 150 instr/op saved means
+the call was not actually removed), which is the discipline this ledger is for.
+
+They then implemented their half themselves and, in `5bc439a57`, committed with a pathspec
+over two files that held my uncommitted work — so **my INCR/DECR/INCRBY/DECRBY/INCRBYFLOAT/
+APPEND/SETRANGE/SETBIT/GETDEL/SETNX conversions are in `5bc439a57` under a message describing
+only their keyed-values lever.** They disclosed it unprompted in `1f234aa17` and told me
+directly, including that their own after-ELF therefore contained my code and that they could
+not prove it harmless by `nm` because the predicates inline — recording it as an argument
+rather than a proof. That is the right way to handle a contaminated arm and it is worth more
+to this ledger than the lever.
+
+Their general fix is worth repeating: `git commit -- <paths>` does NOT protect a co-edited
+file; it commits whatever is in the tree at those paths. The check is `git diff --stat` per
+path immediately before committing, against what you believe you wrote.
+
+### THE MECHANISM, COUNTED RATHER THAN INFERRED
+
+The cascade evaluates the 24-condition write gate ONCE PER BUFFERED PASS via
+`plain_write_gate_cache`. An unconverted floor arm calls an executor that evaluates it ONCE
+PER PACKET. The floor arms were never adding a gate — they were LOSING AN AMORTISATION.
+
+Every earlier row asserted that from instruction deltas. `scripts/call_count_delta.py`
+(`e21fedf98`) counts it. On current HEAD c13d2f7f6a349a82:
+
+  setnx_existing  0.0000 calls/op    persist_noop  0.0000    getex_exat  0.0000
+  sadd_existing   0.0000 (BrownIbis's keyed-values conversion, independently confirmed)
+  lset_same       1.0000 (never converted — still open)
+
+0.0000 is "once per pass" rounding to zero at ~2000 ops per buffered pass, not "never".
+
+### THE FR-SIDE DELTAS, EACH FROM A SAME-ELF ENV FLIP
+
+All measured on ONE binary with `FR_PERF_AB_GETEX_WRITE_GATE_ORIG`, interleaved ORIG/NEW, two
+replicates each, callgrind two-point (2000/4000 ops, startup and seeding subtracted):
+
+  GETEX (1d8b5e8e1)     getex_base -12.7 pct, getex_exat -6.5, getex_pxat -6.3, getex_ex_opt -6.5
+  TTL (e6a552cfb)       persist_noop -14.3, expire_nx_opt -9.5, expire_same -9.1, pexpire_same -8.6
+  strings (5bc439a57)   setnx_existing -12.1, incrbyfloat_same -5.0
+
+**Every batch carried a null and every null held**: `lset_same` (a floor write arm still on the
+per-packet gate, in the same ELF under the same flip) moved +0.2 and -0.3 pct across two
+batches, and `set_same` (converted under `ozrro` long ago, so it must not move either) moved
++0.6 pct. Those two nulls are now VALIDATED rather than assumed — the call counts show
+`lset_same` genuinely reads 1.0000 calls/op on both ELFs, so it was a real control and not a
+shape that happened to sit still.
+
+The tax is a CONSTANT, not proportional, which is why the cheap commands pay most: the same
+187.0 instr/op is 14.3 pct of a PERSIST and 5.0 pct of an INCRBYFLOAT. Work this vein from the
+cheap end.
+
+### STANDING AGAINST THE INCUMBENT — REPLICATED, WORST BOUND QUOTED
+
+fr against Redis 7.2.4 instructions per op, two-point, both replicates given and the WORST of
+each pair quoted. Below 1.0 means fr ahead. Each row is a SINGLE INVOCATION containing both
+the fr arm and a live vendored redis-server arm started, seeded and measured side-by-side by
+the harness, so numerator and denominator share one window and one host state:
+
+  shape             r1        r2        WORST BOUND
+  persist_noop      0.4679x   0.4791x   0.4791x
+  setnx_existing    0.4600x   0.4704x   0.4704x
+  expire_same       0.5006x   0.5079x   0.5079x
+  getex_exat        0.5189x   0.5290x   0.5290x
+
+fr against Redis 7.2.4 0.5290x is the worst bound across all four cells and all eight draws.
+
+**NO THROUGHPUT STANDING IS CLAIMED for any of these cells.** They have none. The ops/s
+instrument returned 2 admissible rows in 16 attempts today across windows verified at 79-88
+pct CPU idle, and the one `writegate` square that ran came back 0 of 4 admissible with
+`expire_same` at 0.8725 on a CI spanning 0.7728-1.2692 while loadavg rose 11.9 -> 21.7. That
+number must not travel.
+
+A/A null median 1.000002, bootstrapped over 20,000 resamples, 95% median CI
+[0.996069, 1.003947] — six same-ELF same-shape draws of one shape on one ELF, 30 pairwise
+ratios, banked in `0bf781d57`. Each A/B row above is a single invocation containing both arms,
+and the A/A is the same instrument's own null. The smallest effect claimed here is 5.0 pct, which is 12x the null's half-width.
+
+CV was not used, as a gate or otherwise; the gate is the bootstrap 95% median CI quoted above, and an effect inside that interval is not claimed.
+
+### EQUIVALENCE
+
+`scripts/dispatch_route_differ.py`: **528 cases, 0 disagreements**, three-way — fr fast route
+vs fr generic path via `FR_PERF_AB_CASCADE_BYPASS=1` ON THE SAME ELF vs live redis 7.2.4,
+re-run against HEAD after BrownIbis's keyed-values conversion landed, so it covers both our
+halves. 111 rows are new across the three batches.
+
+The rows were written per failure mode. Three worth naming, because each catches something a
+reply-shape check cannot:
+  - TTL's NX/XX/GT/LT forms make the REPLY depend on the existing TTL, so an arm that ran when
+    it should have declined answers 1 where redis answers 0.
+  - The string writes reply with INTEGERS, so interleaved GET/STRLEN/EXISTS reads are what
+    prove the VALUE landed: SETNX twice then GET, GETDEL then EXISTS, SETRANGE then STRLEN.
+  - GETEX at every arity in both directions — TTL absent, set, re-read without change,
+    PERSISTed, re-set — because a wrong cached gate answer changes state silently.
+
+The correctness argument is that this is not a new gate: it is the SAME predicate and the SAME
+`plain_write_gate_cache` the SET/MSET/HSET/HMSET arms have read since `ozrro`, so it inherits
+their invalidation points rather than creating any, and it reads only session and CONFIG state.
+BrownIbis reached that conclusion independently and recorded it in `5d66e739d`.
+
+### PROVENANCE
+
+  ELF           c13d2f7f6a349a82, plain `--release` at HEAD 7dfecf4f4, no feature flags, for
+                the vs-incumbent rows and the call counts. The fr-side A/B rows used gated
+                ELFs (`--features perf-ab-getex-write-gate`), both arms from ONE binary via
+                the env flip. All built locally with RCH_CARGO_WRAPPER_BYPASS=1, path from
+                `--message-format=json`, copied to a private path and sha256'd there.
+  bench_elf_sha256=c13d2f7f6a349a8212c4173b8d327af07e23ac55f9887a4fe8f49caff9caa42a
+  incumbent     vendored redis 7.2.4, live arm started and measured in the SAME INVOCATION as
+                the fr arm, one harness process running both servers side-by-side,
+                bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+  harness       `scripts/shape_instr_per_op.py`, `scripts/call_count_delta.py`,
+                `scripts/dispatch_route_differ.py`.
+  host          thinkstation1, 64 cores observed, powersave governor, /data 202G free.
+  PER-ARM loadavg / CPU idle / MHz
+                vs-incumbent draws  load 7.66 12.09 13.81 at the end, MHz mean 2550
+                call counts         load 11.16 11.87 13.94
+                GETEX A/B           load 29.61 33.54 29.86, MHz mean 4113
+                TTL A/B             load 16.53 20.16 23.54, MHz mean 2961
+                string A/B          load 11.18 12.99 16.76
+                CPU idle 88.8 pct from /proc/stat deltas before the vs-incumbent draws,
+                iowait 0.1 pct; 80-85 pct during the string A/B.
+  admissibility Every number here is a callgrind instruction count or call count — deterministic,
+                load-immune, and the reason these rows are admissible in windows where the
+                timed instrument was refused.
+
+### RETRY PREDICATE
+
+1. **Take the next batch from the MEASURED worklist, not the static scan.** Eleven of twelve
+   sampled write shapes still read 1.0000 calls/op on HEAD: LSET, GETSET, HINCRBY,
+   HINCRBYFLOAT, HSETNX, ZREMRANGEBYRANK, LTRIM, SMOVE, RENAMENX, MOVE, MSETNX. Verify each
+   with `call_count_delta.py` BEFORE and AFTER — 1.0000 then 0.0000 is a stronger acceptance
+   test than any instruction delta, because noise cannot produce it.
+2. **Honour BrownIbis's reject threshold**: a route saving materially under 150 instr/op means
+   the call was not actually removed, because the gate is a fixed 187.
+3. **Coordinate before starting.** BrownIbis has offered to stay off ZADD and MSET 9..=32 if I
+   take them. The hash family (HINCRBY/HINCRBYFLOAT/HSETNX) and the single-key list writes
+   (LSET/LTRIM) are the two batches that overlap neither their keyed-values executor nor those
+   routes. Both files are reserved to 22:35Z; check
+   `check_file_reservation_conflicts` before editing, not after.
