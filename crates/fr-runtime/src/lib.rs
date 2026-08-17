@@ -27637,7 +27637,7 @@ impl Runtime {
                     return None;
                 }
                 (
-                    { let v = fr_command::parse_i64_arg(offset_arg).ok()?; if v < 0 { return None; } v as usize },
+                    fr_command::parse_limit_offset_arg(offset_arg).ok()?,
                     fr_command::parse_limit_count_arg(count_arg).ok()?,
                 )
             }
@@ -29649,13 +29649,30 @@ impl Runtime {
         key: &[u8],
         now_ms: u64,
     ) -> bool {
+        let default_read_allowed = self.plain_borrowed_default_key_read_allows(now_ms);
+        self.can_execute_plain_keymeta_borrowed_with_default_read_gate(
+            cmd,
+            key,
+            default_read_allowed,
+        )
+    }
+
+    /// (frankenredis-ozrro) Shape checks WITHOUT the read-gate evaluation, so a caller holding
+    /// the gate for this buffered pass supplies it instead of recomputing per packet. Measured
+    /// on HGET: the gate is ~207 instr/op and a cached lookup ~15, so ~190 net per arm.
+    fn can_execute_plain_keymeta_borrowed_with_default_read_gate(
+        &mut self,
+        cmd: PlainKeyMetaCmd,
+        key: &[u8],
+        default_read_allowed: bool,
+    ) -> bool {
         if self.policy.gate.max_array_len < 2
             || self.policy.gate.max_bulk_len < cmd.name_upper().len()
             || key.len() > self.policy.gate.max_bulk_len
         {
             return false;
         }
-        self.plain_borrowed_default_key_read_allows(now_ms)
+        default_read_allowed
     }
 
     /// Conservative borrowed fast path for `TTL` / `PTTL` / `TYPE`. Calls the
@@ -29664,13 +29681,44 @@ impl Runtime {
     /// gated by `plain_borrowed_default_key_read_allows`, skipping only the
     /// owned-argv materialization + generic dispatch machinery. Never errors
     /// (TTL/PTTL/TYPE have no WRONGTYPE). (frankenredis-keymeta-fastpath)
+    /// (frankenredis-ozrro) Thin wrapper preserving the original signature: computes the read
+    /// gate and delegates, so all pre-existing callers are unchanged.
+    ///
+    /// `#[inline]` IS LOAD-BEARING AND WAS MEASURED. Without it the wrapper cost TTL ~24 instr/op
+    /// against the monolithic original, and TWELVE of the seventeen call sites go through it — so
+    /// "preserves existing callers unchanged" was true for compilation and false for performance.
+    /// A refactor that adds a call frame to a hot shared executor is not free just because it is
+    /// behaviour-preserving.
+    #[inline]
     pub fn execute_plain_keymeta_borrowed(
         &mut self,
         cmd: PlainKeyMetaCmd,
         key: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_keymeta_borrowed(cmd, key, now_ms) {
+        let default_read_allowed = self.plain_borrowed_default_key_read_allows(now_ms);
+        self.execute_plain_keymeta_borrowed_with_default_read_gate(
+            cmd,
+            key,
+            now_ms,
+            default_read_allowed,
+        )
+    }
+
+    /// (frankenredis-ozrro) Caller supplies the read gate, so a floor arm can amortise it across
+    /// a buffered pass the way the GET cascade arm always has.
+    pub fn execute_plain_keymeta_borrowed_with_default_read_gate(
+        &mut self,
+        cmd: PlainKeyMetaCmd,
+        key: &[u8],
+        now_ms: u64,
+        default_read_allowed: bool,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_keymeta_borrowed_with_default_read_gate(
+            cmd,
+            key,
+            default_read_allowed,
+        ) {
             return None;
         }
 
@@ -29745,6 +29793,9 @@ impl Runtime {
     /// encode_into` in both RESP2 and RESP3 (the type names are clean `'static`
     /// literals, so `push_inline_sanitized` is a no-op). Same gate/stats/metrics/
     /// expiry semantics as the `RespFrame` path.
+    /// (frankenredis-ozrro) Thin wrapper preserving the original signature. `#[inline]` for the
+    /// same measured reason as its non-`_into` twin above.
+    #[inline]
     pub fn execute_plain_keymeta_borrowed_into(
         &mut self,
         cmd: PlainKeyMetaCmd,
@@ -29752,7 +29803,30 @@ impl Runtime {
         now_ms: u64,
         out: &mut Vec<u8>,
     ) -> Option<()> {
-        if !self.can_execute_plain_keymeta_borrowed(cmd, key, now_ms) {
+        let default_read_allowed = self.plain_borrowed_default_key_read_allows(now_ms);
+        self.execute_plain_keymeta_borrowed_into_with_default_read_gate(
+            cmd,
+            key,
+            now_ms,
+            out,
+            default_read_allowed,
+        )
+    }
+
+    /// (frankenredis-ozrro) Caller supplies the read gate; see the non-`_into` twin above.
+    pub fn execute_plain_keymeta_borrowed_into_with_default_read_gate(
+        &mut self,
+        cmd: PlainKeyMetaCmd,
+        key: &[u8],
+        now_ms: u64,
+        out: &mut Vec<u8>,
+        default_read_allowed: bool,
+    ) -> Option<()> {
+        if !self.can_execute_plain_keymeta_borrowed_with_default_read_gate(
+            cmd,
+            key,
+            default_read_allowed,
+        ) {
             return None;
         }
 
@@ -48829,9 +48903,15 @@ mod tests {
         // the offset as a long and only short-circuits via `offset >= ll`, which never fires
         // for a negative, so the result comes out empty by a different route. fr matches that
         // by having `parse_limit_offset_arg` return usize::MAX so `.skip()` empties the walk.
-        // A borrowed path that re-derived "offset must be >= 0" would REJECT the command and
-        // emit an error where generic returns 0 -- a divergence on an input nobody would think
-        // to try, which is why the helper is reused rather than reimplemented.
+        //
+        // WHAT A RE-DERIVED RULE ACTUALLY COSTS, stated correctly: a borrowed path that decided
+        // "offset must be >= 0" would DECLINE, not diverge -- declining hands the command to
+        // generic, which still answers 0. So the reply stays right and the fast path is
+        // silently lost on every negative offset. That is why this test asserts the path
+        // ENGAGES (`.expect("limit fast path should engage")`) rather than only comparing
+        // replies: a reply-only test cannot see a fast path quietly falling back. Mutation
+        // run: replacing the helper with a naive `v < 0 -> None` fails here on exactly that
+        // expect, and on nothing else.
         let mut direct = Runtime::default_strict();
         let mut generic = Runtime::default_strict();
         for rt in [&mut direct, &mut generic] {

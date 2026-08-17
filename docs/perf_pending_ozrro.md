@@ -21,6 +21,63 @@ commits cleanly. That is a workaround for a durability problem, NOT an attempt t
 the contract: the rows are unchanged, they are still subject to it, and merging them into the
 ledger is a mechanical step once the blocker clears.
 
+## MEASURED (frankenredis-ozrro) — TYPE gains 199.4 instr/op from the cached read gate, TTL/PTTL are REVERTED because the same change made TTL worse, and the refactor's own wrapper cost 24 until `#[inline]` fixed it
+
+fr-only, control flat throughout. Shared `keymeta` executor (TTL/PTTL/TYPE/EXPIRETIME/
+PEXPIRETIME) given gate-taking variants; only TYPE keeps the cached gate.
+
+    shape             baseline    final     delta   note
+    type               1,599.7   1,400.3   -199.4   cached gate, KEPT
+    ttl_nonvolatile    1,716.4   1,727.4     +11.0   reverted; +9.0 control-corrected, inside +/-10
+    dump_small         2,702.3   2,704.3      +2.0   CONTROL
+
+### THE SHARED EXECUTOR IS WHY THIS IS TRUSTWORTHY, AND IT NEARLY WENT THE OTHER WAY
+
+Converting `keymeta` reached five arms at once, and the two MEASURABLE ones disagreed: TYPE -189,
+TTL +21 (both control-corrected, first pass). Same executor, same predicate — the only difference
+is WHERE the gate is computed. TYPE's sits inside the `if let` body; TTL and PTTL are let-chains,
+where a `let` cannot occupy the expression position of `&& let Some(response) = ...`, so the gate
+had to be HOISTED above the parser check. The hoisted placement lost.
+
+Had I converted TTL alone — the obvious single-command choice — I would have banked a small
+regression and could reasonably have written off the whole ~93-site read-gate vein. The vein is
+real; it is the let-chain placement that fails. That is a result a single-command conversion
+cannot produce.
+
+So: TYPE keeps the cache, TTL and PTTL are reverted with the reasoning at both sites. PTTL is
+reverted DESPITE never being measured, because the honest default for an unmeasured arm sharing
+the losing pattern is to revert it, not to assume TYPE's result generalises.
+
+### A COST I CLAIMED WAS FREE, AND WAS NOT
+
+To keep 12 of 17 call sites compiling unchanged I left thin wrappers with the original signatures,
+and described that as preserving existing callers "unchanged". True for compilation, FALSE for
+performance:
+
+    TTL, original monolithic executor              1,716.4
+    TTL, wrapper present, un-inlined               1,749.1    +32.7
+    TTL, wrapper present, `#[inline]`              1,727.4    +11.0 raw, +9.0 corrected
+
+The un-inlined wrapper cost ~24 instr/op on every caller that kept the old name — cascade arms and
+generic paths I had no business slowing down. `#[inline]` recovers it to within the +/-10 fr-arm
+precision band, and the measurement is recorded at the site so the attribute is not removed as
+cosmetic later. A refactor that adds a call frame to a hot shared executor is not free because it
+is behaviour-preserving.
+
+### VEIN STATUS, with a precondition it did not have before
+
+    per-arm value    ~190-200 net   (HGET -191.5, TYPE -199.4)
+    PRECONDITION     only arms whose gate can sit INSIDE the `if let` body qualify.
+                     Let-chain arms need a different approach or should be skipped.
+    wrapper rule     any wrapper added to preserve callers MUST be `#[inline]`, measured not assumed
+
+### STILL OPEN, and reported rather than hidden
+
+`execute_plain_hget_borrowed_into`'s wrapper is still un-inlined — my inline patch reported SKIP
+(found 0) because that docstring differs from the one I assumed. HGET's own arm calls the
+gate-taking variant directly so its -191.5 stands, but any legacy caller of that wrapper is paying
+the ~24. That is a one-line follow-up and it is named here so it is not lost.
+
 ## MEASURED (frankenredis-ozrro) — HGET is the first non-GET read to use a cached read gate: -191.5 instr/op (-9.7 pct) with a FLAT control. My own 200-267 predicate NARROWLY FAILS on net, and the miss is informative: the gate is ~207 and the cache LOOKUP costs ~15
 
 fr-only, control flat. Before arm `fr-after-hmset`, after arm `fr-after-readgate`. All 29 floor

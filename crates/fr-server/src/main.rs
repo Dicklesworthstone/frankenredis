@@ -21556,9 +21556,18 @@ fn try_dispatch_floor_classified_action(
             )
         }
         BorrowedDispatchFloorClass::Ttl => {
+            // (frankenredis-ozrro) REVERTED to the uncached gate. This arm is a let-chain, so a
+            // cached gate had to be HOISTED above the parser check -- and measured, that made TTL
+            // 21 instr/op WORSE (control-corrected) while TYPE, whose gate sits inside the `if let`
+            // body, improved 189. Same executor, same predicate; only the placement differs, and
+            // the hoisted placement lost. Not shipping a regression to keep a pattern tidy.
             if let Some(packet) = parse_borrowed_plain_ttl_packet(unparsed, &parser_config)
                 && let Some(response) =
-                    runtime.execute_plain_keymeta_borrowed(PlainKeyMetaCmd::Ttl, packet.key, ts)
+                    runtime.execute_plain_keymeta_borrowed(
+                        PlainKeyMetaCmd::Ttl,
+                        packet.key,
+                        ts,
+                    )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -21577,8 +21586,19 @@ fn try_dispatch_floor_classified_action(
         }
         BorrowedDispatchFloorClass::Type => {
             if let Some(packet) = parse_borrowed_plain_type_packet(unparsed, &parser_config) {
+                // (frankenredis-ozrro) Gate hoisted ABOVE the `runtime.` chain: computing it
+                // inline would borrow `runtime` immutably inside a call that already borrows it
+                // mutably. Same reason the HGET arm hoists it.
+                let default_read_allowed = *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts));
                 if runtime
-                    .execute_plain_keymeta_borrowed_into(PlainKeyMetaCmd::Type, packet.key, ts, out)
+                    .execute_plain_keymeta_borrowed_into_with_default_read_gate(
+                        PlainKeyMetaCmd::Type,
+                        packet.key,
+                        ts,
+                        out,
+                        default_read_allowed,
+                    )
                     .is_some()
                 {
                     Ok(BorrowedMultibulkAction::FastEncodedReply {
@@ -22697,9 +22717,18 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Pttl => {
+            // (frankenredis-ozrro) REVERTED to the uncached gate. This arm is a let-chain, so a
+            // cached gate had to be HOISTED above the parser check -- and measured, that made TTL
+            // 21 instr/op WORSE (control-corrected) while TYPE, whose gate sits inside the `if let`
+            // body, improved 189. Same executor, same predicate; only the placement differs, and
+            // the hoisted placement lost. Not shipping a regression to keep a pattern tidy.
             if let Some(packet) = parse_borrowed_plain_pttl_packet(unparsed, &parser_config)
                 && let Some(response) =
-                    runtime.execute_plain_keymeta_borrowed(PlainKeyMetaCmd::Pttl, packet.key, ts)
+                    runtime.execute_plain_keymeta_borrowed(
+                        PlainKeyMetaCmd::Pttl,
+                        packet.key,
+                        ts,
+                    )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
