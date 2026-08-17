@@ -41900,3 +41900,78 @@ CV was not used, as a gate or otherwise.
    placement is what upstream does and is the obvious target, but the reply path already
    depends on lazy expiry-on-access rather than on this cycle, so the argument is about memory
    and `INFO` accounting, not about correctness of replies.
+
+--------------------------------------------------------------------------------
+## 2026-08-17 CrimsonHawk: REJECTED — an inline guard on `maybe_promote`, measured at +0.10 pct against a workload MY OWN RETRY PREDICATE HAD ALREADY RULED OUT. The lever may well be real; this measurement cannot say, and that is the finding (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method). No timing
+verdict is claimed and CV was NOT used, as a gate or otherwise. Reverted;
+`crates/fr-store/` is byte-identical to HEAD.
+
+Claim class: SELF-SPEEDUP. Campaign output: no — no vs-incumbent ratio is banked by this row.
+
+### WHAT I BUILT, AND WHY IT LOOKED SOUND
+
+`1cd6025db` measured `ListValue::maybe_promote` shedding **exactly 18.0 instructions per
+element**, validated on two disjoint intervals. It is a two-term threshold test that is not
+inlined at its five call sites — because the `promote()` it guards is large — so every push
+pays a real call to a function that, once the repr is a `Deque`, can only ever answer "no".
+Hoisting that discriminant test to the call site, where it inlines, is a two-line change whose
+equivalence is immediate: the guard is the first condition of the callee's own body.
+
+### AND IT MEASURED NOTHING, FOR A REASON I HAD ALREADY WRITTEN DOWN
+
+    members   A/A null        ORIG          CAND        delta
+       40    1.001239      55,898.4      55,951.7    +0.10 pct
+      200    0.999239     181,022.2     181,195.9    +0.10 pct
+     1000    0.999814     986,325.5     986,237.0    −0.01 pct
+
+The 18 instr/element does not appear because THE RELOAD PATH NO LONGER REACHES IT. `a7668ed11`
+replaced the loader's element-by-element loop: above 128 the head is built by
+`ChunkedList::from` and the tail by an inlined loop that never calls `maybe_promote` at all, and
+at or below 128 every element is still Packed, so the new guard's discriminant test answers
+"yes, it could promote" and the call happens anyway — the check is pure addition there, which is
+what the two +0.10 pct readings are.
+
+    `1cd6025db`'s OWN RETRY PREDICATE SAID THIS: "reopen as its own lever ONLY IF a shape that
+    drives RPUSH on an already-promoted list shows a delta exceeding its null; do not assume
+    the reload figure carries, because the reload path no longer reaches it." I then measured
+    it on the reload shape anyway, because that is the harness I had built and pointed at this
+    route all day. The predicate was right and I did not follow it.
+
+    THE INSTRUMENT WAS NOT WRONG AND THE NULLS DID NOT FAIL. Nothing here was noise: three
+    sizes, three passing nulls, a clean +0.10 / +0.10 / −0.01. A correct measurement of the
+    wrong workload is still a wasted build, and it is not the kind of error a tighter gate
+    catches — only reading your own retry predicate before reaching for the nearest harness
+    does.
+
+### WHAT SURVIVES
+
+The 18.0 instr/element figure from `1cd6025db` is UNAFFECTED — it was measured on the ORIG arm,
+which does take the `push_back` path, and its exact reproduction on two disjoint intervals
+stands. What is refuted is only the assumption that a reload workload can still see it.
+
+  So the guard is neither confirmed nor refuted as a lever. It is UNMEASURED against the path
+  it targets, and it is reverted rather than landed-on-a-hunch: a two-line change that cost
+  +0.10 pct on the only workload I put in front of it has no claim on the tree.
+
+### PROVENANCE
+
+  ELF           bench_elf_sha256 = 04dc00ac001a85f49e0e7e348e894f942dfad5aa407a3ba2280d2f23c236cfdf
+                `release-perf`, built locally with RCH_CARGO_WRAPPER_BYPASS=1, no `[RCH]` line.
+                BOTH ARMS FROM THIS ONE ELF via `FR_PERF_AB_LIST_PROMOTE_GUARD_ORIG=1`.
+  harness       scratchpad `reload_slope.py` + `zset_board.py`, K=4 -> K=12 DEBUG RELOAD slope,
+                one fresh working directory per point, soundness assertion active and silent.
+  incumbent     vendored redis 7.2.4, verified in-run sha=d2c8a4b9 == vendored source HEAD.
+  host          thinkstation1, 64 cores OBSERVED, powersave governor, /data 201G free.
+  window        CPU IDLE 84.8 pct, measured here from a 2-second `/proc/stat` delta immediately
+                before the board; the figure handed to me for this window was 49 pct. PER-ARM
+                loadavg/MHz — n=40 12.71/19.66/18.82 -> 12.27, MHz mean 2945 then 2861;
+                n=200 12.09 -> 16.16, MHz mean 2611 then 3913; n=1000 21.35 -> 20.78, MHz mean
+                2924 then 2800. Max 4010-4167, min 1429-3853.
+
+RETRY PREDICATE: reopen ONLY IF a shape is built that drives RPUSH or LPUSH against an ALREADY
+PROMOTED list — i.e. a live command path, not a reload — and it shows a delta exceeding that
+shape's own null. Build the shape FIRST; this row exists because I had a harness and used it
+instead of building the one the lever needed. And note the guard costs ~+0.10 pct wherever the
+repr is still Packed, so a shape mixing both regimes must show the Deque saving exceeding that.
