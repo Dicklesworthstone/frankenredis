@@ -25489,6 +25489,124 @@ impl Runtime {
         Some(value)
     }
 
+    /// (frankenredis-ozrro) Borrowed READ fast path for the base keyspace scan `SCAN
+    /// <cursor>` — no MATCH, no COUNT, no TYPE. Measured at 1.2810x of vendored 7.2.4,
+    /// the worst shape on this board, with 1,981.5 instr/op (27.8% of the whole
+    /// operation) spent in GENERIC dispatch before any work happens.
+    ///
+    /// Byte-identical to `handle_scan_command` for the shape it accepts: that function,
+    /// at argv.len()==2, parses the cursor and calls the SAME `scan_in_db` with the same
+    /// `None` pattern, `None` type filter and the same default count of 10, then builds
+    /// the same two-element reply.
+    ///
+    /// Declines are FREE here in a way they are not for the other floor classes. SCAN has
+    /// no borrowed cascade arm at all, so a decline falls to the generic path — which is
+    /// precisely where the packet goes today. The usual "a floor class is a promise its
+    /// arm must keep" hazard, where a decline lands somewhere WORSE than the status quo,
+    /// cannot apply to a command whose status quo is already generic.
+    ///
+    /// Returns None (=> generic) for a non-canonical cursor or a disallowed session.
+    fn execute_plain_scan_borrowed(&mut self, cursor_arg: &[u8], now_ms: u64) -> Option<RespFrame> {
+        if self.policy.gate.max_array_len < 2
+            || self.policy.gate.max_bulk_len < b"SCAN".len()
+            || cursor_arg.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        // Strict subset of parse_scan_cursor_arg: same value for everything it accepts,
+        // None for the '+'/'-'/leading-zero/overflow forms the generic must handle.
+        let cursor = Self::parse_canonical_scan_cursor(cursor_arg)?;
+        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+            return None;
+        }
+        let packet_id =
+            self.plain_read_borrowed_preamble("scan", b"SCAN".len() + cursor_arg.len(), now_ms);
+        let st = self.chained_command_start();
+        // selected_db is pinned to 0 by the admission guard above; read it rather than
+        // hardcoding, so this stays correct if that guard is ever relaxed.
+        let (next_cursor, keys) = self.server.store.scan_in_db(
+            self.session.selected_db,
+            cursor,
+            None,
+            None,
+            10,
+            now_ms,
+        );
+        let reply = Self::scan0_reply_from_items(
+            next_cursor,
+            keys.into_iter()
+                .map(|key| RespFrame::BulkString(Some(key)))
+                .collect(),
+        );
+        let elapsed_us = self.finish_chained_command(st);
+        self.record_plain_zremrange_borrowed_metrics(
+            "scan",
+            "SCAN",
+            || vec![b"SCAN".to_vec(), cursor_arg.to_vec()],
+            elapsed_us,
+            now_ms,
+            packet_id,
+            // Cannot fail: canonical cursor, no key to mistype, scan_in_db is infallible.
+            false,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_reply(&reply);
+        Some(reply)
+    }
+
+    /// (frankenredis-ozrro) Borrowed READ fast path for `KEYS <pattern>`. Measured at
+    /// 1.0269x of vendored 7.2.4 with 1,969.9 instr/op — 34.4% of the operation — spent
+    /// in GENERIC dispatch before a single key is matched.
+    ///
+    /// Byte-identical to `handle_db_keys_command`: same `keys_matching_in_db` on the same
+    /// db with the same pattern, same Array-of-BulkString reply. The pattern is passed
+    /// through WITHOUT inspection on purpose — malformed globs such as `[abc`, `[a-]` and
+    /// `[z-a]` are ordinary (usually empty) results upstream, not errors, so validating
+    /// here would invent an error reply the generic path never produces.
+    ///
+    /// Returns None (=> generic) only for a disallowed session or an oversized argument.
+    fn execute_plain_keys_borrowed(&mut self, pattern: &[u8], now_ms: u64) -> Option<RespFrame> {
+        if self.policy.gate.max_array_len < 2
+            || self.policy.gate.max_bulk_len < b"KEYS".len()
+            || pattern.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+            return None;
+        }
+        let packet_id =
+            self.plain_read_borrowed_preamble("keys", b"KEYS".len() + pattern.len(), now_ms);
+        let st = self.chained_command_start();
+        let matched =
+            self.server
+                .store
+                .keys_matching_in_db(self.session.selected_db, pattern, now_ms);
+        let reply = RespFrame::Array(Some(
+            matched
+                .into_iter()
+                .map(|key| RespFrame::BulkString(Some(key)))
+                .collect(),
+        ));
+        let elapsed_us = self.finish_chained_command(st);
+        self.record_plain_zremrange_borrowed_metrics(
+            "keys",
+            "KEYS",
+            || vec![b"KEYS".to_vec(), pattern.to_vec()],
+            elapsed_us,
+            now_ms,
+            packet_id,
+            // Cannot fail: arity is fixed by the floor class and a malformed glob is a
+            // normal empty result upstream, never an error.
+            false,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_reply(&reply);
+        Some(reply)
+    }
+
     fn execute_plain_scan0_borrowed(
         &mut self,
         which: u8, // b'S' set, b'H' hash, b'Z' zset
@@ -74227,5 +74345,163 @@ user bob reset off nopass +@all
                 "{label}: neither path may mutate"
             );
         }
+    }
+
+    /// (frankenredis-ozrro) The borrowed keyspace-SCAN fast path must be INDISTINGUISHABLE
+    /// from the generic `SCAN <cursor>` it bypasses — same reply and same keyspace — across
+    /// every cursor position, and must DECLINE every form it does not reproduce exactly.
+    ///
+    /// The reply is compared against the generic executed on a SEPARATE runtime seeded
+    /// identically, not against a hardcoded expectation. A hardcoded oracle here would be
+    /// derived from the same paging arithmetic it is meant to check, which this repo has
+    /// already learned is tautological.
+    #[test]
+    fn plain_scan_borrowed_matches_the_generic_path_and_declines_what_it_cannot_reproduce() {
+        // More keys than the default COUNT of 10, so the corpus actually pages and a
+        // next_cursor other than 0 is exercised. A 2-key db would make every cursor
+        // terminal and the paging comparison vacuous.
+        let seed = |rt: &mut Runtime| {
+            for i in 0..25 {
+                rt.execute_frame(command(&[b"SET", format!("k{i:02}").as_bytes(), b"v"]), 10);
+            }
+        };
+
+        for cursor in [
+            b"0".as_slice(),
+            b"1",
+            b"9",
+            b"10",
+            b"11",
+            b"24",
+            b"25",
+            b"26",
+            b"1000",
+        ] {
+            let mut fast = Runtime::default_strict();
+            let mut generic = Runtime::default_strict();
+            seed(&mut fast);
+            seed(&mut generic);
+
+            let fast_reply = fast
+                .execute_plain_scan_borrowed(cursor, 20)
+                .unwrap_or_else(|| panic!("canonical cursor {cursor:?} must be served"));
+            let generic_reply = generic.execute_frame(command(&[b"SCAN", cursor]), 20);
+
+            assert_eq!(
+                fast_reply,
+                generic_reply,
+                "cursor {cursor:?}: fast path must reproduce the generic reply exactly"
+            );
+            assert_eq!(
+                fast.server.store.state_digest(),
+                generic.server.store.state_digest(),
+                "cursor {cursor:?}: SCAN is a read and must not mutate"
+            );
+        }
+
+        // Non-canonical cursors MUST decline. Each of these is a form the generic
+        // parse_scan_cursor_arg reads differently (or rejects), so serving it here would
+        // be a behaviour change rather than a speedup.
+        let mut rt = Runtime::default_strict();
+        seed(&mut rt);
+        for declined in [
+            b"".as_slice(), // empty
+            b"007",         // leading zeros: generic reads 7, canonical refuses
+            b"+5",          // explicit sign
+            b"-1",          // negative wrap to u64::MAX
+            b"1x",          // trailing garbage
+            b"x",           // not a number
+            b" 1",          // leading space
+            b"18446744073709551616", // u64 overflow
+        ] {
+            assert!(
+                rt.execute_plain_scan_borrowed(declined, 20).is_none(),
+                "cursor {declined:?} must fall through to the generic path"
+            );
+        }
+
+        // A non-zero selected db must decline: the admission guard pins db 0, and serving
+        // another db here is how the Lua path once leaked foreign-db key names (m05ll).
+        let mut other_db = Runtime::default_strict();
+        seed(&mut other_db);
+        other_db.execute_frame(command(&[b"SELECT", b"1"]), 20);
+        assert!(
+            other_db.execute_plain_scan_borrowed(b"0", 20).is_none(),
+            "SCAN on a non-zero db must fall through to the generic path"
+        );
+    }
+
+    /// (frankenredis-ozrro) The borrowed KEYS fast path must be INDISTINGUISHABLE from the
+    /// generic `KEYS <pattern>` it bypasses, including for the malformed-glob forms that
+    /// upstream treats as ordinary results rather than errors.
+    ///
+    /// The patterns below are taken from the behaviours this suite ALREADY pins elsewhere
+    /// (`[z-a]`, `[\-]`, `[a-]`, `[!a]`, `[abc`) precisely because those are the cases a
+    /// hand-written fast path is most likely to "helpfully" reject. Each is compared
+    /// against the generic on a separately-seeded runtime, never against a hardcoded
+    /// expectation derived from the same matcher under test.
+    #[test]
+    fn plain_keys_borrowed_matches_the_generic_path_across_globs_including_malformed_ones() {
+        let seed = |rt: &mut Runtime| {
+            for k in [
+                b"alpha".as_slice(),
+                b"beta",
+                b"alp",
+                b"a",
+                b"-",
+                b"!a",
+                b"[abc",
+                b"z",
+            ] {
+                rt.execute_frame(command(&[b"SET", k, b"v"]), 10);
+            }
+        };
+
+        for pattern in [
+            b"*".as_slice(),
+            b"a*",
+            b"alp*",
+            b"alpha",
+            b"nomatch*",
+            b"",
+            b"?",
+            b"[ab]*",
+            // Malformed / edge globs that upstream answers with a normal array.
+            b"[z-a]",
+            b"[\\-]",
+            b"[a-]",
+            b"[!a]",
+            b"[abc",
+        ] {
+            let mut fast = Runtime::default_strict();
+            let mut generic = Runtime::default_strict();
+            seed(&mut fast);
+            seed(&mut generic);
+
+            let fast_reply = fast
+                .execute_plain_keys_borrowed(pattern, 20)
+                .unwrap_or_else(|| panic!("pattern {pattern:?} must be served"));
+            let generic_reply = generic.execute_frame(command(&[b"KEYS", pattern]), 20);
+
+            assert_eq!(
+                fast_reply, generic_reply,
+                "pattern {pattern:?}: fast path must reproduce the generic reply exactly"
+            );
+            assert_eq!(
+                fast.server.store.state_digest(),
+                generic.server.store.state_digest(),
+                "pattern {pattern:?}: KEYS is a read and must not mutate"
+            );
+        }
+
+        // A non-zero selected db must decline — the admission guard pins db 0, and serving
+        // another db from here is how foreign-db key names would leak (cf. m05ll).
+        let mut other_db = Runtime::default_strict();
+        seed(&mut other_db);
+        other_db.execute_frame(command(&[b"SELECT", b"1"]), 20);
+        assert!(
+            other_db.execute_plain_keys_borrowed(b"*", 20).is_none(),
+            "KEYS on a non-zero db must fall through to the generic path"
+        );
     }
 }
