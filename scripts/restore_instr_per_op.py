@@ -47,6 +47,28 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REDIS = os.path.join(ROOT, "legacy_redis_code/redis/src/redis-server")
 
+# (frankenredis-gvm6z) A/A NOISE FLOOR FOR THIS HARNESS'S ARMS, in ABSOLUTE instr/op.
+#
+# This file had no noise guidance at all, which matters more here than elsewhere: 33832 has
+# already adjudicated five micro-levers on this surface, and a reader reaching for the sibling
+# harness's percentage constant (0.067 pct) would compute 46 instr/op of noise on a ~69,000
+# instr/op RESTORE arm. The measured floor is ~4.5, so that fallback overstates it TENFOLD and
+# would bury any real effect under ~30 instr/op.
+#
+# MEASURED (shape_instr_per_op.py, six --fr-only draws each on one ELF, three sizes spanning
+# 83x): sigma is 3.12 / 6.52 / 3.73 instr at 1,305 / 7,290 / 108,610 instr/op -- a 2.09x
+# spread against an 83x size range, i.e. NOT proportional to the arm. Three models were
+# predicted in advance and all three failed: flat percentage (0.04x), sqrt (0.14x) and a
+# fitted power law (0.18x). What survives is a small constant number of instructions, which
+# is what a two-point subtraction should leave once the work cancels.
+#
+# CARRIED, NOT RE-MEASURED HERE. The figure comes from the sibling harness's shapes, and this
+# one differs in payload and in booting a fresh engine per arm. Treat it as an order-of-
+# magnitude floor rather than a calibrated gate until someone repeats the six-draw procedure
+# on a RESTORE shape; the honest use is "is my delta ~10 instr or ~1,000", which is the
+# question the five micro-levers on this surface actually turned on.
+NULL_SIGMA_INSTR = 4.46
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _incumbent import require_incumbent  # noqa: E402  (path set above)
 
@@ -191,6 +213,11 @@ def main():
             print("  %-6s Ir(N)=%-14d Ir(2N)=%-14d -> %10.1f instr/op  (payload %d B)"
                   % (name, a, b, results[name], plen))
         print("  fr/redis instructions per op: %.4fx" % (results["fr"] / results["redis"]))
+        # (frankenredis-gvm6z) Print the NOISE FLOOR next to the number, because this harness
+        # had none and the natural fallback is wrong here by an order of magnitude.
+        print("  A/A noise floor: sigma ~%.2f instr/op ABSOLUTE (size-independent); a delta "
+              "needs ~%.0f instr/op to clear 2 sigma on one arm" % (NULL_SIGMA_INSTR,
+                                                                   2 * NULL_SIGMA_INSTR))
     return 0
 
 
