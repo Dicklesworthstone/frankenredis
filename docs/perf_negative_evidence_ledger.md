@@ -8,6 +8,71 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## MEASURED (frankenredis-ozrro) — SCAN 1.2810x→0.6898x and KEYS 1.0269x→0.5066x on a floor entry each, and the saving is TWICE the dispatch share because the generic route also materialises argv
+
+Claim class: COMPETITIVE. Both arms in ONE invocation of scripts/shape_instr_per_op.py,
+incumbent verified on every run (redis-server sha=d2c8a4b9 == vendored source HEAD, clean).
+Shipped in 6ce613360. NOT CERTIFIED — see the window note at the bottom.
+
+    shape        fr before   fr after    delta    dispatch before -> after   ratio before -> after
+    scan_zero      7,139.7    3,978.2   -3,161.5   1,981.5 -> 313.2          1.2810x -> 0.6898x
+    keys_star      5,731.4    2,719.6   -3,011.8   1,969.9 -> 305.0          1.0269x -> 0.5066x
+    dump_small           —    2,693.7          —          — -> 304.7               — -> 0.5191x
+
+dump_small is the UNTOUCHED CONTROL: already front-classified, not modified by this change,
+and it reads 304.7 instr/op of dispatch against the two new arms' 313.2 and 305.0. All three
+sit inside the front-classified arity-2 band of 263-306 established across this campaign, so
+the new arms landed on the same floor the existing ones occupy rather than somewhere novel.
+
+THE PREDICTION WAS NEARLY 2x TOO CONSERVATIVE, AND THAT IS THE REUSABLE PART. I predicted
+SCAN would fall by its dispatch share alone (~1,675, to ~5,443). It fell by 3,161.5. Subtract
+dispatch from both arms and the missing saving appears in the NON-DISPATCH term:
+
+    SCAN   non-dispatch  5,158.2 -> 3,665.0   -1,493.2
+    KEYS   non-dispatch  3,761.5 -> 2,414.6   -1,346.9
+
+~1,350-1,500 on two INDEPENDENT commands with different work, different arities and different
+store calls. A per-call constant of that size, freed by nothing except leaving the generic
+route, has the signature of ARGV MATERIALISATION: the generic path builds a Vec<Vec<u8>>
+before it executes, and callgrind attributes those allocations to command work, not to
+dispatch. The "dispatch share" figure is therefore a LOWER BOUND on what front-classifying a
+generic-route command returns, roughly half of it.
+
+    CORRECTED MODEL:  saving ~= dispatch_share + ~1,400   (was: dispatch_share)
+
+This also retro-explains why the nine table-entry routes over-delivered against their
+predictions and connects directly to the breach-only argv materialisation vein.
+
+WHAT THE LEVER ACTUALLY WAS, for anyone pricing the next one. Neither command had a borrowed
+cascade arm at ALL — they went straight to GENERIC — so neither could be found by
+cascade_depth.py, which ranks arms INSIDE the cascade. Both were cheap for one reason: their
+generic handlers live in fr-runtime (handle_scan_command:44168, handle_db_keys_command:44138)
+and reduce, at the claimed arity, to a SINGLE store call. The executor mirrors that call; it
+reimplements nothing. LCS, from the same measured batch and carrying the LARGEST dispatch of
+the three, is NOT cheap for the inverse reason (its generic is in fr-command and is
+bit-parallel) — see the LCS row.
+
+KEYS'S "ABOVE PARITY" READING WAS AN INTERCEPT, and gvm6z caught it independently while this
+was in flight. keys_star seeds TWO keys; KEYS * is O(keyspace), so at n=2 almost none of the
+op is the scan. Over three sizes fr is 1.61x FASTER PER KEY (351.7 vs 566.9 instr/key) and
+leads from n≈4.26. "KEYS is behind" is false as a command-level claim, and my one-point shape
+made exactly the error this ledger already has a row about. The LEVER survives that
+correction intact, because gvm6z also measured the dispatch term at 1,972.4 / 2,010.8 /
+2,008.7 across a 32x keyspace change — a per-CALL constant of ~1,997 that is pure fixed
+overhead at every size. Removing it helps at n=2 and n=64 alike; only the framing was wrong.
+
+WINDOW — NOT CERTIFIED, AND THE HONEST REASON. Per-arm loadavg 23.76/18.64/11.44,
+24.34/18.84/11.54, 23.91/18.85/11.58; observed core MHz 1429-4118. The 1-minute average sits
+at ~2x the 15-minute, so this is a RAMPING window, not a converged one, and the fleet-wide
+report of a quiet 6.2/5.1/5.2 did not reproduce on my own uptime check at any point.
+
+The fr numerators stand regardless: fr's Ir is elapsed-immune at 0.139%. It is the redis
+DENOMINATOR that carries elapsed-time serverCron work (r = +0.98). The crossings are robust
+to that: taking the LOWEST redis figure observed for each shape across both sessions as a
+conservative denominator still gives SCAN 3,978.2/5,573.7 = 0.7137x and KEYS
+2,719.6/5,368.8 = 0.5066x. No plausible denominator error reaches parity. A certified row
+still wants a stable window; this one is banked as MEASURED, not CERTIFIED.
+
 ## (frankenredis-ozrro) LCS is not a cheap [C] — the "which crate holds the generic" test predicts the cost of a front-classification
 
 SCAN and KEYS were cheap to front-classify for a reason that is not visible in the [A]/[B]/[C]
