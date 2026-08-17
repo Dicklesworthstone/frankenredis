@@ -10796,7 +10796,7 @@ fn process_buffered_frames(
                 } else if let Some(packet) =
                     parse_borrowed_plain_getex_packet(unparsed, &parser_config)
                 {
-                    if let Some(response) = runtime.execute_plain_getex_borrowed(packet.key, ts) {
+                    if let Some(response) = runtime.execute_plain_getex_borrowed(packet.key, ts, None) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -10815,7 +10815,7 @@ fn process_buffered_frames(
                     parse_borrowed_plain_getex_persist_packet(unparsed, &parser_config)
                 {
                     if let Some(response) =
-                        runtime.execute_plain_getex_persist_borrowed(packet.key, ts)
+                        runtime.execute_plain_getex_persist_borrowed(packet.key, ts, None)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -10844,7 +10844,7 @@ fn process_buffered_frames(
                     let is_px = packet.a.eq_ignore_ascii_case(b"PX");
                     if (is_ex || is_px)
                         && let Some(response) = runtime
-                            .execute_plain_getex_relexpire_borrowed(is_ex, packet.key, packet.b, ts)
+                            .execute_plain_getex_relexpire_borrowed(is_ex, packet.key, packet.b, ts, None)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -10855,7 +10855,7 @@ fn process_buffered_frames(
                         let is_pxat = packet.a.eq_ignore_ascii_case(b"PXAT");
                         if (is_exat || is_pxat)
                             && let Some(response) = runtime.execute_plain_getex_absexpire_borrowed(
-                                is_exat, packet.key, packet.b, ts,
+                                is_exat, packet.key, packet.b, ts, None,
                             )
                         {
                             Ok(BorrowedMultibulkAction::FastReply {
@@ -17022,6 +17022,26 @@ const fn bitpos_range_floor_enabled() -> bool {
     true
 }
 
+/// (frankenredis-getexgate) Preserve the pre-lever PER-PACKET write-gate evaluation on the
+/// GETEX floor arms, so the A/B is one binary and an env flip. That matters more than usual
+/// here: fr-runtime currently carries a peer's uncommitted INFO work, so two separate builds
+/// would differ by their change as well as mine.
+#[cfg(feature = "perf-ab-getex-write-gate")]
+#[inline]
+fn getex_write_gate_cache_enabled() -> bool {
+    static ORIG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    !*ORIG.get_or_init(|| match std::env::var("FR_PERF_AB_GETEX_WRITE_GATE_ORIG") {
+        Ok(value) => value == "1",
+        Err(_) => false,
+    })
+}
+
+#[cfg(not(feature = "perf-ab-getex-write-gate"))]
+#[inline(always)]
+const fn getex_write_gate_cache_enabled() -> bool {
+    true
+}
+
 /// (frankenredis-copydeficit) Preserve the pre-lever arity-4/6 BITPOS routing in the
 /// measurement ELF, so the A/B is one binary with an env flip rather than two builds.
 #[cfg(feature = "perf-ab-bitpos-start-unit-floor")]
@@ -20937,8 +20957,21 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Getex => {
+            // (frankenredis-getexgate) Hoisted ABOVE the `if let` chain rather than computed
+            // inside it, because `cached_plain_write_gate` borrows `runtime` mutably and the
+            // executor call already does. On a cache HIT this is a load and a branch; on a miss
+            // it evaluates the 24-condition predicate ONCE for the whole buffered pass, which
+            // is the amortisation the floor arms were missing. Evaluating it before the parse
+            // is known to succeed costs nothing measurable and avoids duplicating the generic
+            // fallback arm three times.
+            let default_write_allowed = if getex_write_gate_cache_enabled() {
+                Some(cached_plain_write_gate(write_gate_cache, runtime, ts))
+            } else {
+                None
+            };
             if let Some(packet) = parse_borrowed_plain_getex_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_getex_borrowed(packet.key, ts)
+                && let Some(response) =
+                    runtime.execute_plain_getex_borrowed(packet.key, ts, default_write_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -20956,6 +20989,18 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::GetexExpire => {
+            // (frankenredis-getexgate) Hoisted ABOVE the `if let` chain rather than computed
+            // inside it, because `cached_plain_write_gate` borrows `runtime` mutably and the
+            // executor call already does. On a cache HIT this is a load and a branch; on a miss
+            // it evaluates the 24-condition predicate ONCE for the whole buffered pass, which
+            // is the amortisation the floor arms were missing. Evaluating it before the parse
+            // is known to succeed costs nothing measurable and avoids duplicating the generic
+            // fallback arm three times.
+            let default_write_allowed = if getex_write_gate_cache_enabled() {
+                Some(cached_plain_write_gate(write_gate_cache, runtime, ts))
+            } else {
+                None
+            };
             if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
                 unparsed,
                 &parser_config,
@@ -20966,7 +21011,13 @@ fn try_dispatch_floor_classified_action(
                 let is_px = packet.a.eq_ignore_ascii_case(b"PX");
                 if (is_ex || is_px)
                     && let Some(response) = runtime
-                        .execute_plain_getex_relexpire_borrowed(is_ex, packet.key, packet.b, ts)
+                        .execute_plain_getex_relexpire_borrowed(
+                            is_ex,
+                            packet.key,
+                            packet.b,
+                            ts,
+                            default_write_allowed,
+                        )
                 {
                     Ok(BorrowedMultibulkAction::FastReply {
                         consumed: packet.consumed,
@@ -20977,7 +21028,11 @@ fn try_dispatch_floor_classified_action(
                     let is_pxat = packet.a.eq_ignore_ascii_case(b"PXAT");
                     if (is_exat || is_pxat)
                         && let Some(response) = runtime.execute_plain_getex_absexpire_borrowed(
-                            is_exat, packet.key, packet.b, ts,
+                            is_exat,
+                            packet.key,
+                            packet.b,
+                            ts,
+                            default_write_allowed,
                         )
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
@@ -21007,9 +21062,25 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::GetexPersist => {
+            // (frankenredis-getexgate) Hoisted ABOVE the `if let` chain rather than computed
+            // inside it, because `cached_plain_write_gate` borrows `runtime` mutably and the
+            // executor call already does. On a cache HIT this is a load and a branch; on a miss
+            // it evaluates the 24-condition predicate ONCE for the whole buffered pass, which
+            // is the amortisation the floor arms were missing. Evaluating it before the parse
+            // is known to succeed costs nothing measurable and avoids duplicating the generic
+            // fallback arm three times.
+            let default_write_allowed = if getex_write_gate_cache_enabled() {
+                Some(cached_plain_write_gate(write_gate_cache, runtime, ts))
+            } else {
+                None
+            };
             if let Some(packet) =
                 parse_borrowed_plain_getex_persist_packet(unparsed, &parser_config)
-                && let Some(response) = runtime.execute_plain_getex_persist_borrowed(packet.key, ts)
+                && let Some(response) = runtime.execute_plain_getex_persist_borrowed(
+                    packet.key,
+                    ts,
+                    default_write_allowed,
+                )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,

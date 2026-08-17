@@ -840,6 +840,42 @@ CASES = [
     ("BITPOS", "bp:k", "1", "notanint"),
     ("BITPOS", "bp:k", "1", "2", "-1", "BYTE", "x"),
 
+    # (frankenredis-getexgate) The four GETEX floor arms now read the CACHED write gate
+    # instead of re-deriving the 24-condition predicate per packet. The gate is the SAME
+    # predicate the SET/MSET/HSET/HMSET arms already cache, so it shares their invalidation
+    # points -- these rows exist to prove the ANSWER did not change, at each arity and in
+    # both directions (a key with a TTL and a key without).
+    ("DEL", "gx:k"),
+    ("SET", "gx:k", "v"),
+    ("TTL", "gx:k"),                                # -> -1
+    ("GETEX", "gx:k"),                              # arity 2, no TTL change
+    ("TTL", "gx:k"),                                # -> -1: still no TTL
+    ("GETEX", "gx:k", "EX", "100"),
+    ("TTL", "gx:k"),                                # -> 100
+    ("GETEX", "gx:k"),                              # arity 2 must NOT clear it
+    ("TTL", "gx:k"),                                # -> 100
+    ("GETEX", "gx:k", "PERSIST"),
+    ("TTL", "gx:k"),                                # -> -1
+    ("GETEX", "gx:k", "PX", "50000"),
+    ("TTL", "gx:k"),                                # -> 50
+    ("GETEX", "gx:k", "EXAT", "99999999999"),
+    ("GETEX", "gx:k", "PXAT", "99999999999000"),
+    ("PERSIST", "gx:k"),
+    # Missing key and wrong type through every arity: the gate decides whether the fast path
+    # runs at all, so a wrong cached answer shows up as a changed reply here first.
+    ("GETEX", "gx:absent"),
+    ("GETEX", "gx:absent", "EX", "100"),
+    ("GETEX", "gx:absent", "PERSIST"),
+    ("GETEX", "cp:h"),
+    ("GETEX", "cp:h", "EX", "100"),
+    # Refusals must still reach generic with redis's text verbatim.
+    ("GETEX", "gx:k", "EX", "0"),
+    ("GETEX", "gx:k", "EX", "-1"),
+    ("GETEX", "gx:k", "EX", "notanint"),
+    ("GETEX", "gx:k", "SIDEWAYS", "1"),
+    ("GETEX", "gx:k", "EX", "100", "PERSIST"),
+    ("TTL", "gx:k"),                                # control: no refusal changed the TTL
+
     # The DB spelling is arity 5 and is NOT claimed; it must not have moved.
     ("COPY", "cp:src", "cp:db", "DB", "3"),         # -> 1
     ("COPY", "cp:src", "cp:db", "DB", "3"),         # -> 0: exists, no REPLACE
