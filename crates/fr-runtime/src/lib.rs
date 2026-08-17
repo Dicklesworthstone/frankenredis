@@ -21707,11 +21707,21 @@ impl Runtime {
         }
     }
 
+    /// (frankenredis-getexgate) `default_write_allowed` is the CACHED answer to
+    /// `plain_borrowed_default_key_write_allows` when the caller already has one, and `None`
+    /// when it does not. The predicate is 24 server- and session-level conditions and the
+    /// floor arms were re-deriving it PER PACKET, where the cascade amortises it per buffered
+    /// pass -- the same "losing an amortisation" the SET/MSET/HSET/HMSET arms hit before the
+    /// cache was threaded to them. Threaded as an Option rather than duplicated into a
+    /// `_with_default_write_gate` twin, so each executor keeps ONE body: the four GETEX
+    /// executors would otherwise have become eight, and the existing twins already have to be
+    /// kept in sync by hand.
     fn can_execute_plain_getex_borrowed(
         &mut self,
         key: &[u8],
         arg_count: usize,
         now_ms: u64,
+        default_write_allowed: Option<bool>,
     ) -> bool {
         if self.policy.gate.max_array_len < arg_count
             || self.policy.gate.max_bulk_len < b"GETEX".len()
@@ -21721,7 +21731,10 @@ impl Runtime {
         }
         // GETEX is CMD_WRITE: the WRITE gate's role==Master requirement makes a
         // read-only replica defer to the generic path (which emits READONLY).
-        self.plain_borrowed_default_key_write_allows(now_ms)
+        match default_write_allowed {
+            Some(allowed) => allowed,
+            None => self.plain_borrowed_default_key_write_allows(now_ms),
+        }
     }
 
     /// (frankenredis-6s9dx) Conservative borrowed fast path for the no-option
@@ -21733,8 +21746,13 @@ impl Runtime {
     /// through). Gated by the WRITE predicate, so propagation, AOF, and tracking
     /// are inactive (the no-option form never modifies, so there is nothing to
     /// propagate anyway).
-    pub fn execute_plain_getex_borrowed(&mut self, key: &[u8], now_ms: u64) -> Option<RespFrame> {
-        if !self.can_execute_plain_getex_borrowed(key, 2, now_ms) {
+    pub fn execute_plain_getex_borrowed(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+        default_write_allowed: Option<bool>,
+    ) -> Option<RespFrame> {
+        if !self.can_execute_plain_getex_borrowed(key, 2, now_ms, default_write_allowed) {
             return None;
         }
 
@@ -21806,9 +21824,10 @@ impl Runtime {
         &mut self,
         key: &[u8],
         now_ms: u64,
+        default_write_allowed: Option<bool>,
     ) -> Option<RespFrame> {
         if self.policy.gate.max_bulk_len < b"PERSIST".len()
-            || !self.can_execute_plain_getex_borrowed(key, 3, now_ms)
+            || !self.can_execute_plain_getex_borrowed(key, 3, now_ms, default_write_allowed)
         {
             return None;
         }
@@ -21868,8 +21887,9 @@ impl Runtime {
         key: &[u8],
         time_arg: &[u8],
         now_ms: u64,
+        default_write_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_getex_borrowed(key, 4, now_ms) {
+        if !self.can_execute_plain_getex_borrowed(key, 4, now_ms, default_write_allowed) {
             return None;
         }
         // Same validation as SET's EX/PX relexpire; defer on any failure.
@@ -21945,8 +21965,9 @@ impl Runtime {
         key: &[u8],
         time_arg: &[u8],
         now_ms: u64,
+        default_write_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_getex_borrowed(key, 4, now_ms) {
+        if !self.can_execute_plain_getex_borrowed(key, 4, now_ms, default_write_allowed) {
             return None;
         }
         let raw = parse_i64_arg(time_arg).ok()?;
@@ -45600,7 +45621,8 @@ impl Runtime {
             dispatch_command_section(self, "stats", &mut info)?;
         }
         if is_replication
-            && let RespFrame::BulkString(Some(bytes)) = self.handle_info_replication_section()
+            && let RespFrame::BulkString(Some(bytes)) =
+                self.handle_info_replication_section(now_ms)
         {
             info.extend_from_slice(&bytes);
         }
@@ -45905,7 +45927,7 @@ impl Runtime {
         fr_persist::encode_aof_stream(&records[flushed..]).len()
     }
 
-    fn handle_info_replication_section(&mut self) -> RespFrame {
+    fn handle_info_replication_section(&mut self, now_ms: u64) -> RespFrame {
         self.server.refresh_replica_ack_snapshots();
         let backlog = &self.server.replication_runtime_state.backlog;
         let connected_replicas = self.server.replication_runtime_state.replicas.len();
@@ -45974,6 +45996,24 @@ replica_announced:1\r\n",
         }
 
         let _ = write!(info, "connected_slaves:{connected_replicas}\r\n");
+        // (frankenredis-w1djx) Upstream emits this immediately after connected_slaves and
+        // ONLY when both min-replicas knobs are active — "If min-slaves-to-write is active,
+        // write the number of slaves currently considered 'good'" (server.c:6073-6079). The
+        // guard is `repl_min_slaves_to_write && repl_min_slaves_max_lag`, reproduced exactly,
+        // so on a default server neither engine emits the field and they agree.
+        //
+        // fr already computes the same quantity for its own write-quorum gate
+        // (`good_replica_write_count`, which counts replicas whose ack lag is within
+        // min_replicas_max_lag) and already guards that gate on the identical pair of
+        // conditions. So this reports the number fr is ALREADY deciding writes on, rather
+        // than a second, independently-derived count that could disagree with it.
+        if self.server.min_replicas_to_write != 0 && self.server.min_replicas_max_lag != 0 {
+            let _ = write!(
+                info,
+                "min_slaves_good_slaves:{}\r\n",
+                self.good_replica_write_count(now_ms)
+            );
+        }
         info.push_str("master_failover_state:no-failover\r\n");
         let _ = write!(info, "master_replid:{}\r\n", backlog.replid);
         info.push_str("master_replid2:0000000000000000000000000000000000000000\r\n");
@@ -71079,6 +71119,66 @@ mod tests {
     /// THE OFF CASE IS THE DISCRIMINATING HALF. A fix that emitted these unconditionally
     /// would pass any "are the fields present" test while diverging from upstream on every
     /// default server — the far more common configuration — so absence is asserted first.
+    /// (frankenredis-w1djx) `min_slaves_good_slaves` appears only when BOTH min-replicas
+    /// knobs are active, which is upstream's guard (server.c:6073-6079) and again the reason
+    /// the gap was invisible: on a default server neither engine emits it and they agree.
+    ///
+    /// THE OFF CASE IS THE DISCRIMINATING HALF, exactly as with the AOF group. A fix that
+    /// emitted this unconditionally would satisfy any presence check while diverging from
+    /// upstream on every default server, so absence is asserted first — and asserted with
+    /// BOTH knobs individually zeroed, because upstream's condition is a conjunction and a
+    /// fix that tested only one of them would pass a single-knob test.
+    #[test]
+    fn info_replication_min_slaves_good_slaves_follows_both_knobs_w1djx() {
+        let field = "min_slaves_good_slaves:";
+        let section = |rt: &mut Runtime| -> String {
+            match rt.execute_frame(command(&[b"INFO", b"replication"]), 1) {
+                RespFrame::BulkString(Some(b)) => String::from_utf8_lossy(&b).into_owned(),
+                other => panic!("expected bulk INFO, got {other:?}"),
+            }
+        };
+
+        let mut rt = Runtime::default_strict();
+        let out = section(&mut rt);
+        assert!(out.contains("connected_slaves:"), "{out}");
+        assert!(
+            !out.contains(field),
+            "must be ABSENT by default — upstream guards it on both knobs being set"
+        );
+
+        // min-replicas-to-write set. max-lag already defaults to 10 in BOTH engines, so
+        // the conjunction is now satisfied and the field must appear. (My first version of
+        // this test asserted absence here, on the wrong assumption that max-lag defaults to
+        // 0; the code was right and the test was wrong.)
+        let _ = rt.execute_frame(
+            command(&[b"CONFIG", b"SET", b"min-replicas-to-write", b"1"]),
+            2,
+        );
+        let out = section(&mut rt);
+        assert!(
+            out.contains(field),
+            "must be PRESENT once both knobs are set; got:\n{out}"
+        );
+        assert!(
+            out.contains("min_slaves_good_slaves:0\r\n"),
+            "no replicas are connected, so no replica can be good; got:\n{out}"
+        );
+
+        // Now zero the OTHER knob. Upstream's condition is a CONJUNCTION, so the field must
+        // disappear again — this is the case a one-knob implementation gets wrong, and it is
+        // the only way to exercise the second half of the guard.
+        let _ = rt.execute_frame(
+            command(&[b"CONFIG", b"SET", b"min-replicas-max-lag", b"0"]),
+            3,
+        );
+        let out = section(&mut rt);
+        assert!(
+            !out.contains(field),
+            "max-lag 0 must switch it off even with to-write set — the guard is a \
+             conjunction; got:\n{out}"
+        );
+    }
+
     #[test]
     fn info_persistence_aof_sizing_fields_follow_appendonly_w1djx() {
         const SIZING: [&str; 6] = [
@@ -73057,7 +73157,7 @@ mod tests {
 
         let generic_reply = generic.execute_frame(command(&[b"GETEX", b"k", b"PERSIST"]), 4);
         let fast_reply = fast
-            .execute_plain_getex_persist_borrowed(b"k", 4)
+            .execute_plain_getex_persist_borrowed(b"k", 4, None)
             .expect("exact GETEX PERSIST should use fast path");
         assert_eq!(fast_reply, generic_reply);
         assert_eq!(
@@ -73066,15 +73166,15 @@ mod tests {
         );
 
         assert_eq!(
-            fast.execute_plain_getex_persist_borrowed(b"missing", 6),
+            fast.execute_plain_getex_persist_borrowed(b"missing", 6, None),
             Some(generic.execute_frame(command(&[b"GETEX", b"missing", b"PERSIST"]), 6))
         );
         assert_eq!(
-            fast.execute_plain_getex_persist_borrowed(b"not", 7),
+            fast.execute_plain_getex_persist_borrowed(b"not", 7, None),
             Some(generic.execute_frame(command(&[b"GETEX", b"not", b"PERSIST"]), 7))
         );
         let wrongtype = fast
-            .execute_plain_getex_persist_borrowed(b"list", 8)
+            .execute_plain_getex_persist_borrowed(b"list", 8, None)
             .expect("wrong-type GETEX PERSIST should execute fast path");
         let generic_wrongtype = generic.execute_frame(command(&[b"GETEX", b"list", b"PERSIST"]), 8);
         assert_eq!(wrongtype, generic_wrongtype);
@@ -73115,7 +73215,7 @@ mod tests {
             let generic_reply =
                 generic.execute_frame(command(&[b"GETEX", b"k", unit, time_arg]), 4);
             let fast_reply = fast
-                .execute_plain_getex_absexpire_borrowed(is_seconds, b"k", time_arg, 4)
+                .execute_plain_getex_absexpire_borrowed(is_seconds, b"k", time_arg, 4, None)
                 .expect("exact GETEX EXAT/PXAT should use fast path");
             assert_eq!(fast_reply, generic_reply);
             assert_eq!(
@@ -73124,15 +73224,15 @@ mod tests {
             );
 
             assert_eq!(
-                fast.execute_plain_getex_absexpire_borrowed(is_seconds, b"missing", time_arg, 6),
+                fast.execute_plain_getex_absexpire_borrowed(is_seconds, b"missing", time_arg, 6, None),
                 Some(generic.execute_frame(command(&[b"GETEX", b"missing", unit, time_arg]), 6))
             );
             assert_eq!(
-                fast.execute_plain_getex_absexpire_borrowed(is_seconds, b"not", time_arg, 7),
+                fast.execute_plain_getex_absexpire_borrowed(is_seconds, b"not", time_arg, 7, None),
                 Some(generic.execute_frame(command(&[b"GETEX", b"not", unit, time_arg]), 7))
             );
             let wrongtype = fast
-                .execute_plain_getex_absexpire_borrowed(is_seconds, b"list", time_arg, 8)
+                .execute_plain_getex_absexpire_borrowed(is_seconds, b"list", time_arg, 8, None)
                 .expect("wrong-type GETEX EXAT/PXAT should execute fast path");
             let generic_wrongtype =
                 generic.execute_frame(command(&[b"GETEX", b"list", unit, time_arg]), 8);
@@ -73145,17 +73245,17 @@ mod tests {
         setup(&mut generic);
         setup(&mut fast);
         assert_eq!(
-            fast.execute_plain_getex_absexpire_borrowed(true, b"k", b"0", 9),
+            fast.execute_plain_getex_absexpire_borrowed(true, b"k", b"0", 9, None),
             None
         );
         assert_eq!(
-            fast.execute_plain_getex_absexpire_borrowed(false, b"k", b"abc", 9),
+            fast.execute_plain_getex_absexpire_borrowed(false, b"k", b"abc", 9, None),
             None
         );
 
         let generic_past = generic.execute_frame(command(&[b"GETEX", b"k", b"EXAT", b"1"]), 2_000);
         let fast_past = fast
-            .execute_plain_getex_absexpire_borrowed(true, b"k", b"1", 2_000)
+            .execute_plain_getex_absexpire_borrowed(true, b"k", b"1", 2_000, None)
             .expect("past positive EXAT should use fast path");
         assert_eq!(fast_past, generic_past);
         assert_eq!(
