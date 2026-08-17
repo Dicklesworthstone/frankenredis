@@ -370,6 +370,18 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
     # (frankenredis-9tni0) Fourth unswept batch: families NO sweep had touched --
     # streams, geo, HyperLogLog, SORT, set-cardinality intersections. All 15
     # cleared scripts/shape_admission_probe.py on both engines, 0 rejected.
+    # (frankenredis-r9mqp) TWO POINTS ON ONE COMMAND, kept as its own set so the
+    # crossover can be re-checked in a few minutes rather than by running a 16-shape
+    # sweep. The n=3 and n=64 SORT rows plus the control: that is the whole question,
+    # and a set this small fits comfortably inside a single certification window,
+    # which is why the 16-shape version of this run got killed at the tool timeout.
+    "sortsize": [
+        ("sort_ro_alpha", ["RPUSH sl c a b"], ["SORT_RO", "sl", "ALPHA"]),
+        ("sort_ro_alpha_64",
+         ["RPUSH sl64 " + " ".join(f"w{i:02d}{'Ab'[i % 2]}" for i in range(64))],
+         ["SORT_RO", "sl64", "ALPHA"]),
+        ("get_control", ["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
+    ],
     "unswept4": [
         ("xlen", ["XADD xst 1-1 f v", "XADD xst 1-2 f v"], ["XLEN", "xst"]),
         ("xrange_2", ["XADD xst 1-1 f v", "XADD xst 1-2 f v"], ["XRANGE", "xst", "-", "+"]),
@@ -381,6 +393,19 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
         ("pfadd_same", ["PFADD hll a b c"], ["PFADD", "hll", "a"]),
         ("pfcount", ["PFADD hll a b c d e"], ["PFCOUNT", "hll"]),
         ("sort_ro_alpha", ["RPUSH sl c a b"], ["SORT_RO", "sl", "ALPHA"]),
+        # (frankenredis-r9mqp) The n=3 sibling above is an INTERCEPT measurement
+        # wearing the command's name, and this harness had only that one. A SORT of
+        # three elements does ~3 comparisons, so per-element cost and per-comparison
+        # cost are the same number and the fixed per-command cost dominates the whole
+        # row. Measured on the instruction sibling: fr's per-element collation is 34%
+        # CHEAPER than redis's and fr is AHEAD from n=7 up (0.6972x at n=64), while at
+        # n=3 it reads 1.49x BEHIND. A board carrying only the n=3 point therefore
+        # reports SORT as fr's worst route when fr wins it at every realistic length.
+        # This 64-element variant gives the board a second point so the crossover is
+        # visible instead of inferred. Mixed case so COLLATION decides, not byte order.
+        ("sort_ro_alpha_64",
+         ["RPUSH sl64 " + " ".join(f"w{i:02d}{'Ab'[i % 2]}" for i in range(64))],
+         ["SORT_RO", "sl64", "ALPHA"]),
         ("sintercard2", ["SADD s1 m1 m2 m3", "SADD s2 m2 m3 m4"], ["SINTERCARD", "2", "s1", "s2"]),
         ("smismember2", ["SADD st m1 m2 m3"], ["SMISMEMBER", "st", "m1", "nope"]),
         ("zrangebylex", ["ZADD z 0 a 0 b 0 c"], ["ZRANGEBYLEX", "z", "-", "+"]),
