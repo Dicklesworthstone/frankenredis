@@ -979,6 +979,70 @@ CASES = [
     ("SETRANGE", "sw:a", "-1", "x"),
     ("GET", "sw:nan"),                              # control: no refusal wrote
 
+    # (frankenredis-getexgate) READ-GATE BATCH 1, landed BEFORE the change it gates.
+    # SCARD/ZCARD/HLEN/LLEN/STRLEN/SISMEMBER/LINDEX/HEXISTS are about to stop re-deriving
+    # `plain_borrowed_default_key_read_allows` per packet and read the cached answer instead
+    # (175.0 instr/op, 10.4 pct of an LLEN). These rows pin TODAY's behaviour so the change is
+    # graded against a corpus it did not author -- the same reason the 6oxxn rows were landed
+    # ahead of their classification.
+    #
+    # A wrong cached gate answer does not crash: it makes the fast route run when it should
+    # have declined, and these commands answer with INTEGERS and BULK STRINGS that look
+    # plausible either way. So each command is exercised on a populated key, a MISSING key, and
+    # a WRONG-TYPE key, because those three take different branches through the gate.
+    ("DEL", "rg:s", "rg:z", "rg:h", "rg:l", "rg:str"),
+    ("SADD", "rg:s", "a", "b", "c"),
+    ("ZADD", "rg:z", "1", "a", "2", "b"),
+    ("HSET", "rg:h", "f1", "v1", "f2", "v2"),
+    ("RPUSH", "rg:l", "x", "y", "z"),
+    ("SET", "rg:str", "hello"),
+    # populated
+    ("SCARD", "rg:s"),                              # -> 3
+    ("ZCARD", "rg:z"),                              # -> 2
+    ("HLEN", "rg:h"),                               # -> 2
+    ("LLEN", "rg:l"),                               # -> 3
+    ("STRLEN", "rg:str"),                           # -> 5
+    ("SISMEMBER", "rg:s", "a"),                     # -> 1
+    ("SISMEMBER", "rg:s", "zzz"),                   # -> 0, member absent
+    ("LINDEX", "rg:l", "0"),                        # -> "x"
+    ("LINDEX", "rg:l", "-1"),                       # -> "z", negative index
+    ("LINDEX", "rg:l", "99"),                       # -> nil, out of range
+    ("HEXISTS", "rg:h", "f1"),                      # -> 1
+    ("HEXISTS", "rg:h", "nosuch"),                  # -> 0, field absent
+    # MISSING key: every one of these must answer the empty/zero form, not an error.
+    ("SCARD", "rg:absent"),                         # -> 0
+    ("ZCARD", "rg:absent"),                         # -> 0
+    ("HLEN", "rg:absent"),                          # -> 0
+    ("LLEN", "rg:absent"),                          # -> 0
+    ("STRLEN", "rg:absent"),                        # -> 0
+    ("SISMEMBER", "rg:absent", "a"),                # -> 0
+    ("LINDEX", "rg:absent", "0"),                   # -> nil
+    ("HEXISTS", "rg:absent", "f1"),                 # -> 0
+    # WRONG TYPE: each must produce redis's WRONGTYPE text verbatim. rg:str is a string, so
+    # every container command is wrong-typed against it, and SCARD against a list likewise.
+    ("SCARD", "rg:str"),
+    ("ZCARD", "rg:str"),
+    ("HLEN", "rg:str"),
+    ("LLEN", "rg:str"),
+    ("SISMEMBER", "rg:str", "a"),
+    ("LINDEX", "rg:str", "0"),
+    ("HEXISTS", "rg:str", "f1"),
+    ("STRLEN", "rg:l"),                             # string command on a list
+    ("SCARD", "rg:l"),                              # set command on a list
+    ("HLEN", "rg:z"),                               # hash command on a zset
+    # An EMPTY container cannot be created directly, so it is made by draining one. This is the
+    # case a route that conflates "absent" with "empty" gets wrong, and both answer 0.
+    ("RPUSH", "rg:drain", "only"),
+    ("LPOP", "rg:drain"),
+    ("LLEN", "rg:drain"),                           # -> 0, and the key is now gone
+    ("EXISTS", "rg:drain"),                         # -> 0
+    # Arity refusals must still reach generic with redis's text verbatim.
+    ("SCARD",),
+    ("LINDEX", "rg:l"),
+    ("HEXISTS", "rg:h"),
+    ("SISMEMBER", "rg:s"),
+    ("LINDEX", "rg:l", "notanint"),
+
     # The DB spelling is arity 5 and is NOT claimed; it must not have moved.
     ("COPY", "cp:src", "cp:db", "DB", "3"),         # -> 1
     ("COPY", "cp:src", "cp:db", "DB", "3"),         # -> 0: exists, no REPLACE
