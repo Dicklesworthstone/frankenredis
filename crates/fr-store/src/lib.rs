@@ -41239,6 +41239,82 @@ mod quicklist_dump_fix_tests {
 
 #[cfg(test)]
 mod tests {
+    /// (frankenredis-gvm6z / frankenredis-i41sx) The zset RESTORE builder SELECTION, which
+    /// nothing covered end to end.
+    ///
+    /// `from_unique_borrowed_pairs_with_limits` chooses between the ordered bulk-builder and
+    /// the sorting one on `PackedZSet::borrowed_pairs_are_sorted`. i41sx's existing test
+    /// (`packed_zset_borrowed_sorted_builder_matches_sorting_builder_i41sx`) exercises the two
+    /// BUILDERS directly and never the CHOICE between them, so a regression that dropped the
+    /// guard and always called the sorted builder would keep that test green while silently
+    /// storing a foreign payload in WIRE order. RESTORE accepts legal foreign listpacks that
+    /// are not score/member ordered and must normalise them; that is the behaviour at risk.
+    ///
+    /// Covered at BOTH tiers, because the selection only exists in the packed branch: at
+    /// 3 members (packed) and above `SORTED_SET_PACKED_DEFAULT_MAX_ENTRIES` (the Full tier,
+    /// which sorts via its dict and has no selection to get wrong). If only the packed tier
+    /// were tested, a threshold change would silently drop the coverage.
+    #[test]
+    fn zset_builder_selection_normalises_an_unordered_payload_gvm6z() {
+        fn build(pairs: Vec<(&[u8], f64)>) -> Vec<(Vec<u8>, f64)> {
+            super::SortedSet::from_unique_borrowed_pairs_with_limits(
+                pairs,
+                super::SORTED_SET_PACKED_DEFAULT_MAX_ENTRIES,
+                super::SORTED_SET_PACKED_DEFAULT_MAX_VALUE,
+            )
+            .iter_asc()
+            .map(|(m, s)| (m.to_vec(), s))
+            .collect()
+        }
+        let want: Vec<(Vec<u8>, f64)> = vec![
+            (b"alpha".to_vec(), 0.0),
+            (b"beta".to_vec(), 1.0),
+            (b"gamma".to_vec(), 2.0),
+        ];
+
+        // PACKED tier: ordered input and the SAME set shuffled must be indistinguishable.
+        let ordered: Vec<(&[u8], f64)> =
+            vec![(b"alpha", 0.0), (b"beta", 1.0), (b"gamma", 2.0)];
+        let unordered: Vec<(&[u8], f64)> =
+            vec![(b"gamma", 2.0), (b"alpha", 0.0), (b"beta", 1.0)];
+        assert_eq!(build(ordered), want, "ordered payload must round-trip");
+        assert_eq!(
+            build(unordered),
+            want,
+            "UNORDERED foreign payload must be normalised, not stored in wire order"
+        );
+
+        // Equal scores: order is then by MEMBER, which is the case a score-only comparison
+        // would pass and a correct one would not.
+        let eq_scores: Vec<(&[u8], f64)> = vec![(b"c", 5.0), (b"a", 5.0), (b"b", 5.0)];
+        assert_eq!(
+            build(eq_scores),
+            vec![
+                (b"a".to_vec(), 5.0),
+                (b"b".to_vec(), 5.0),
+                (b"c".to_vec(), 5.0)
+            ],
+            "equal scores must order by member"
+        );
+
+        // FULL tier: same property above the packed threshold, where there is no selection.
+        let n = super::SORTED_SET_PACKED_DEFAULT_MAX_ENTRIES + 8;
+        let members: Vec<Vec<u8>> = (0..n).map(|i| format!("m{i:04}").into_bytes()).collect();
+        let mut big: Vec<(&[u8], f64)> = members
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (m.as_slice(), i as f64))
+            .collect();
+        let want_big: Vec<(Vec<u8>, f64)> =
+            big.iter().map(|(m, s)| (m.to_vec(), *s)).collect();
+        big.reverse();
+        assert_eq!(
+            build(big),
+            want_big,
+            "UNORDERED payload above the packed threshold must also normalise"
+        );
+    }
+
     /// (frankenredis-fosf1) THE PARITY FIX. Redis 7.2.4 restores a listpack-encoded hash
     /// carrying a duplicate field and keeps it VERBATIM; fr used to refuse the payload
     /// outright with "DUMP payload version or checksum are wrong" -- which is not even a
