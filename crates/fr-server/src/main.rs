@@ -14593,6 +14593,9 @@ enum BorrowedMultibulkAction {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BorrowedDispatchFloorClass {
+    /// (frankenredis-ozrro) `SCAN cursor <opt> <val> x3` at arity 8 — the three-option
+    /// form. Arity 10 and beyond stay generic.
+    ScanOpt3,
     /// (frankenredis-ozrro) `SCAN cursor <opt> <val> <opt> <val>` at arity 6 — the
     /// shape client scan_iter helpers emit, and the common case rather than an edge.
     ScanOpt2,
@@ -16645,6 +16648,9 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         }
         (6, BorrowedDispatchFloorCommand::Scan) => {
             Some(BorrowedDispatchFloorClass::ScanOpt2)
+        }
+        (8, BorrowedDispatchFloorCommand::Scan) => {
+            Some(BorrowedDispatchFloorClass::ScanOpt3)
         }
         (2, BorrowedDispatchFloorCommand::Keys) => Some(BorrowedDispatchFloorClass::Keys),
         (2, BorrowedDispatchFloorCommand::Spop) => Some(BorrowedDispatchFloorClass::Spop),
@@ -21243,6 +21249,37 @@ fn try_dispatch_floor_classified_action(
                 )
             }
         }
+        BorrowedDispatchFloorClass::ScanOpt3 => {
+            // (frankenredis-ozrro) All three option pairs go through the same shared
+            // executor the arity-4 and arity-6 arms use, applied in order, so duplicates
+            // are last-wins as the generic's option loop makes them.
+            if let Some(packet) = parse_borrowed_plain_scan_opt3_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_scan_opt3_borrowed(
+                    packet.cursor,
+                    packet.keyword1,
+                    packet.value1,
+                    packet.keyword2,
+                    packet.value2,
+                    packet.keyword3,
+                    packet.value3,
+                    ts,
+                )
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
         BorrowedDispatchFloorClass::Ttl => {
             if let Some(packet) = parse_borrowed_plain_ttl_packet(unparsed, &parser_config)
                 && let Some(response) =
@@ -23018,6 +23055,55 @@ struct BorrowedPlainScanOptPacket<'a> {
 // Nothing is validated here beyond the shape: which keywords are legal, and what COUNT
 // values are in range, is the executor's decision, and it declines to the generic rather
 // than erroring.
+struct BorrowedPlainScanOpt3Packet<'a> {
+    consumed: usize,
+    cursor: &'a [u8],
+    keyword1: &'a [u8],
+    value1: &'a [u8],
+    keyword2: &'a [u8],
+    value2: &'a [u8],
+    keyword3: &'a [u8],
+    value3: &'a [u8],
+}
+
+// (frankenredis-ozrro) `SCAN <cursor> <kw> <val> <kw> <val> <kw> <val>` (*8, 4-char token,
+// seven bulks). Shape only — keyword legality and COUNT range are the executor's decision,
+// and it declines to the generic rather than erroring.
+fn parse_borrowed_plain_scan_opt3_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainScanOpt3Packet<'a>> {
+    if config.max_array_len < 8 || config.max_bulk_len < b"SCAN".len() {
+        return None;
+    }
+    let mut at = input.strip_prefix(b"*8\r\n$4\r\n").and_then(|rest| {
+        rest.get(..4)
+            .filter(|command| command.eq_ignore_ascii_case(b"SCAN"))
+            .map(|_| input.len() - rest.len() + 4)
+    })?;
+    if input.get(at..at + 2)? != b"\r\n" {
+        return None;
+    }
+    at += 2;
+    let (cursor, next) = parse_borrowed_plain_set_bulk(input, at, config.max_bulk_len)?;
+    let (keyword1, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (value1, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (keyword2, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (value2, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (keyword3, next) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    let (value3, consumed) = parse_borrowed_plain_set_bulk(input, next, config.max_bulk_len)?;
+    Some(BorrowedPlainScanOpt3Packet {
+        consumed,
+        cursor,
+        keyword1,
+        value1,
+        keyword2,
+        value2,
+        keyword3,
+        value3,
+    })
+}
+
 struct BorrowedPlainScanOpt2Packet<'a> {
     consumed: usize,
     cursor: &'a [u8],
@@ -53391,6 +53477,79 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
                 &cfg
             ),
             Some(C::ScanOpt2)
+        );
+    }
+
+    /// (frankenredis-ozrro) The arity-8 SCAN class, and the boundary that now matters: the
+    /// arity-2 / 4 / 6 / 8 classes must be exactly four distinct classes, and arity 10 (the
+    /// four-option form) must still reach the generic parser.
+    #[test]
+    fn scan_opt3_floor_class_claims_arity_eight_and_leaves_ten_generic() {
+        let cfg = ParserConfig::default();
+        fn packet(args: &[&str]) -> Vec<u8> {
+            let mut p = format!("*{}\r\n", args.len()).into_bytes();
+            for a in args {
+                p.extend_from_slice(format!("${}\r\n{}\r\n", a.len(), a).as_bytes());
+            }
+            p
+        }
+        use super::BorrowedDispatchFloorClass as C;
+
+        for served in [
+            vec!["SCAN", "0", "MATCH", "a*", "COUNT", "100", "TYPE", "string"],
+            vec!["SCAN", "0", "COUNT", "100", "TYPE", "string", "MATCH", "a*"],
+            vec!["scan", "9", "match", "a*", "count", "10", "type", "list"],
+            vec!["SCAN", "0", "MATCH", "a*", "COUNT", "100", "BOGUS", "x"],
+        ] {
+            let pkt = packet(&served);
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(&pkt, &cfg),
+                Some(C::ScanOpt3),
+                "{served:?} must be claimed at arity 8"
+            );
+            assert!(super::parse_borrowed_plain_scan_opt3_packet(&pkt, &cfg).is_some());
+        }
+
+        // The four SCAN classes must be distinct and each must own its own arity.
+        let ladder = [
+            (vec!["SCAN", "0"], C::Scan),
+            (vec!["SCAN", "0", "COUNT", "10"], C::ScanOpt),
+            (vec!["SCAN", "0", "COUNT", "10", "MATCH", "a*"], C::ScanOpt2),
+            (
+                vec!["SCAN", "0", "COUNT", "10", "MATCH", "a*", "TYPE", "string"],
+                C::ScanOpt3,
+            ),
+        ];
+        for (args, want) in &ladder {
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(&packet(args), &cfg),
+                Some(*want),
+                "{args:?} must map to its own class"
+            );
+        }
+
+        // Arity 10 is the four-option form; upstream accepts it and this path does not
+        // serve it, so it must remain generic.
+        for wrong in [
+            vec!["SCAN", "0", "MATCH", "a*", "COUNT", "10", "TYPE", "string", "COUNT"],
+            vec![
+                "SCAN", "0", "MATCH", "a*", "COUNT", "10", "TYPE", "string", "COUNT", "5",
+            ],
+        ] {
+            assert_ne!(
+                super::classify_borrowed_dispatch_floor_packet(&packet(&wrong), &cfg),
+                Some(C::ScanOpt3),
+                "{wrong:?} must reach the generic parser"
+            );
+        }
+
+        // An arity-8 packet for another command must not be claimed.
+        assert_ne!(
+            super::classify_borrowed_dispatch_floor_packet(
+                &packet(&["GEOADD", "k", "1", "2", "m", "3", "4", "n"]),
+                &cfg
+            ),
+            Some(C::ScanOpt3)
         );
     }
 }

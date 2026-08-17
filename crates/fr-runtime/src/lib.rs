@@ -25641,29 +25641,32 @@ impl Runtime {
         Some(())
     }
 
-    /// (frankenredis-ozrro) Borrowed READ fast path for the TWO-option SCAN forms at
-    /// arity 6 — `SCAN cursor MATCH p COUNT n` and its permutations. This is the shape
-    /// client scan_iter helpers emit, so it is the common case rather than an edge.
+    /// (frankenredis-ozrro) The single borrowed READ fast path for ALL option forms of
+    /// `SCAN` — one option, two, or three. Mirrors `handle_scan_command`'s option loop:
+    /// each (keyword, value) pair is applied in order through `apply_scan_option`, so a
+    /// repeated keyword is last-wins exactly as upstream's loop makes it, and the same
+    /// `scan_in_db` is called with the resulting (pattern, type_filter, count) triple.
     ///
-    /// Options are applied IN ORDER through the shared helper, which reproduces the
-    /// generic's last-wins behaviour on a repeated keyword (`MATCH a MATCH b` => b).
-    /// Rejecting duplicates here would invent a syntax error the generic never emits.
-    pub fn execute_plain_scan_opt2_borrowed(
+    /// `min_array_len` is the arity the caller's floor class claims, checked against the
+    /// parser gate. It is passed in rather than derived from `opts.len()` so the gate
+    /// check keeps matching the packet the classifier actually accepted.
+    ///
+    /// Declines (=> generic) on a non-canonical cursor, an unknown option keyword, a COUNT
+    /// outside 1..=i64::MAX, an oversized argument, or a session the borrowed-read
+    /// admission guard refuses.
+    fn execute_plain_scan_opts_borrowed(
         &mut self,
         cursor_arg: &[u8],
-        keyword1: &[u8],
-        value1: &[u8],
-        keyword2: &[u8],
-        value2: &[u8],
+        opts: &[(&[u8], &[u8])],
+        min_array_len: usize,
         now_ms: u64,
     ) -> Option<RespFrame> {
-        if self.policy.gate.max_array_len < 6
+        if self.policy.gate.max_array_len < min_array_len
             || self.policy.gate.max_bulk_len < b"SCAN".len()
             || cursor_arg.len() > self.policy.gate.max_bulk_len
-            || keyword1.len() > self.policy.gate.max_bulk_len
-            || value1.len() > self.policy.gate.max_bulk_len
-            || keyword2.len() > self.policy.gate.max_bulk_len
-            || value2.len() > self.policy.gate.max_bulk_len
+            || opts.iter().any(|(k, v)| {
+                k.len() > self.policy.gate.max_bulk_len || v.len() > self.policy.gate.max_bulk_len
+            })
         {
             return None;
         }
@@ -25671,22 +25674,17 @@ impl Runtime {
         let mut pattern: Option<&[u8]> = None;
         let mut type_filter: Option<&[u8]> = None;
         let mut count: usize = 10;
-        Self::apply_scan_option(keyword1, value1, &mut pattern, &mut type_filter, &mut count)?;
-        Self::apply_scan_option(keyword2, value2, &mut pattern, &mut type_filter, &mut count)?;
+        for (keyword, value) in opts {
+            Self::apply_scan_option(keyword, value, &mut pattern, &mut type_filter, &mut count)?;
+        }
 
         if !self.plain_borrowed_default_key_read_allows(now_ms) {
             return None;
         }
-        let packet_id = self.plain_read_borrowed_preamble(
-            "scan",
-            b"SCAN".len()
-                + cursor_arg.len()
-                + keyword1.len()
-                + value1.len()
-                + keyword2.len()
-                + value2.len(),
-            now_ms,
-        );
+        let argv_len_sum = b"SCAN".len()
+            + cursor_arg.len()
+            + opts.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>();
+        let packet_id = self.plain_read_borrowed_preamble("scan", argv_len_sum, now_ms);
         let st = self.chained_command_start();
         let (next_cursor, keys) = self.server.store.scan_in_db(
             self.session.selected_db,
@@ -25707,19 +25705,19 @@ impl Runtime {
             "scan",
             "SCAN",
             || {
-                vec![
-                    b"SCAN".to_vec(),
-                    cursor_arg.to_vec(),
-                    keyword1.to_vec(),
-                    value1.to_vec(),
-                    keyword2.to_vec(),
-                    value2.to_vec(),
-                ]
+                let mut argv = Vec::with_capacity(2 + opts.len() * 2);
+                argv.push(b"SCAN".to_vec());
+                argv.push(cursor_arg.to_vec());
+                for (keyword, value) in opts {
+                    argv.push(keyword.to_vec());
+                    argv.push(value.to_vec());
+                }
+                argv
             },
             elapsed_us,
             now_ms,
             packet_id,
-            // Cannot fail: cursor canonical, both keywords validated, count in range,
+            // Cannot fail: cursor canonical, keywords validated, count in range,
             // scan_in_db infallible.
             false,
         );
@@ -25727,6 +25725,56 @@ impl Runtime {
         self.server.propagate_expired_key_deletions(&lazy_evicted);
         self.account_plain_borrowed_error_reply(&reply);
         Some(reply)
+    }
+
+    /// (frankenredis-ozrro) `SCAN cursor <opt> <val> <opt> <val> <opt> <val>` at arity 8 —
+    /// the three-option form, previously left on the generic route and pinned there by a
+    /// test. Thin wrapper over the shared impl.
+    pub fn execute_plain_scan_opt3_borrowed(
+        &mut self,
+        cursor_arg: &[u8],
+        keyword1: &[u8],
+        value1: &[u8],
+        keyword2: &[u8],
+        value2: &[u8],
+        keyword3: &[u8],
+        value3: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        self.execute_plain_scan_opts_borrowed(
+            cursor_arg,
+            &[
+                (keyword1, value1),
+                (keyword2, value2),
+                (keyword3, value3),
+            ],
+            8,
+            now_ms,
+        )
+    }
+
+    /// (frankenredis-ozrro) Borrowed READ fast path for the TWO-option SCAN forms at
+    /// arity 6 — `SCAN cursor MATCH p COUNT n` and its permutations. This is the shape
+    /// client scan_iter helpers emit, so it is the common case rather than an edge.
+    ///
+    /// Options are applied IN ORDER through the shared helper, which reproduces the
+    /// generic's last-wins behaviour on a repeated keyword (`MATCH a MATCH b` => b).
+    /// Rejecting duplicates here would invent a syntax error the generic never emits.
+    pub fn execute_plain_scan_opt2_borrowed(
+        &mut self,
+        cursor_arg: &[u8],
+        keyword1: &[u8],
+        value1: &[u8],
+        keyword2: &[u8],
+        value2: &[u8],
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        self.execute_plain_scan_opts_borrowed(
+            cursor_arg,
+            &[(keyword1, value1), (keyword2, value2)],
+            6,
+            now_ms,
+        )
     }
 
     /// (frankenredis-ozrro) Borrowed READ fast path for the arity-4 SCAN option forms:
@@ -25748,67 +25796,7 @@ impl Runtime {
         value: &[u8],
         now_ms: u64,
     ) -> Option<RespFrame> {
-        if self.policy.gate.max_array_len < 4
-            || self.policy.gate.max_bulk_len < b"SCAN".len()
-            || cursor_arg.len() > self.policy.gate.max_bulk_len
-            || keyword.len() > self.policy.gate.max_bulk_len
-            || value.len() > self.policy.gate.max_bulk_len
-        {
-            return None;
-        }
-        let cursor = Self::parse_canonical_scan_cursor(cursor_arg)?;
-
-        let mut pattern: Option<&[u8]> = None;
-        let mut type_filter: Option<&[u8]> = None;
-        let mut count: usize = 10;
-        Self::apply_scan_option(keyword, value, &mut pattern, &mut type_filter, &mut count)?;
-
-        if !self.plain_borrowed_default_key_read_allows(now_ms) {
-            return None;
-        }
-        let packet_id = self.plain_read_borrowed_preamble(
-            "scan",
-            b"SCAN".len() + cursor_arg.len() + keyword.len() + value.len(),
-            now_ms,
-        );
-        let st = self.chained_command_start();
-        let (next_cursor, keys) = self.server.store.scan_in_db(
-            self.session.selected_db,
-            cursor,
-            pattern,
-            type_filter,
-            count,
-            now_ms,
-        );
-        let reply = Self::scan0_reply_from_items(
-            next_cursor,
-            keys.into_iter()
-                .map(|key| RespFrame::BulkString(Some(key)))
-                .collect(),
-        );
-        let elapsed_us = self.finish_chained_command(st);
-        self.record_plain_zremrange_borrowed_metrics(
-            "scan",
-            "SCAN",
-            || {
-                vec![
-                    b"SCAN".to_vec(),
-                    cursor_arg.to_vec(),
-                    keyword.to_vec(),
-                    value.to_vec(),
-                ]
-            },
-            elapsed_us,
-            now_ms,
-            packet_id,
-            // Cannot fail: cursor canonical, option keyword already validated, count in
-            // range, and scan_in_db is infallible.
-            false,
-        );
-        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
-        self.server.propagate_expired_key_deletions(&lazy_evicted);
-        self.account_plain_borrowed_error_reply(&reply);
-        Some(reply)
+        self.execute_plain_scan_opts_borrowed(cursor_arg, &[(keyword, value)], 4, now_ms)
     }
 
     /// (frankenredis-ozrro) Borrowed WRITE fast path for the base `SPOP key` form.
@@ -75221,5 +75209,88 @@ user bob reset off nopass +@all
             a6.execute_plain_scan_opt2_borrowed(b"0", b"COUNT", b"100", b"COUNT", b"100", 20),
             "a repeated identical option must equal the single-option result"
         );
+    }
+
+    /// (frankenredis-ozrro) The arity-8 three-option SCAN form against the generic, plus the
+    /// invariant that makes collapsing the three executors safe: a form expressed through the
+    /// wider wrapper must equal the same form through the narrower one when the extra options
+    /// are redundant. If the wrappers ever stop agreeing, they have drifted and one of them
+    /// is no longer the shared impl.
+    #[test]
+    fn plain_scan_opt3_borrowed_matches_the_generic_and_agrees_with_the_narrower_wrappers() {
+        let seed = |rt: &mut Runtime| {
+            for i in 0..25 {
+                rt.execute_frame(command(&[b"SET", format!("k{i:02}").as_bytes(), b"v"]), 10);
+            }
+            rt.execute_frame(command(&[b"RPUSH", b"klist", b"a"]), 10);
+        };
+
+        for (k1, v1, k2, v2, k3, v3) in [
+            (b"MATCH".as_slice(), b"k*".as_slice(), b"COUNT".as_slice(), b"100".as_slice(),
+             b"TYPE".as_slice(), b"string".as_slice()),
+            (b"COUNT", b"100", b"MATCH", b"k*", b"TYPE", b"string"),
+            (b"TYPE", b"string", b"COUNT", b"5", b"MATCH", b"k1*"),
+            (b"MATCH", b"*", b"TYPE", b"list", b"COUNT", b"50"),
+            (b"match", b"k*", b"count", b"7", b"type", b"string"),
+            // last-wins across three options
+            (b"MATCH", b"nomatch*", b"COUNT", b"1", b"MATCH", b"k*"),
+            (b"COUNT", b"1", b"COUNT", b"2", b"COUNT", b"100"),
+        ] {
+            for cursor in [b"0".as_slice(), b"11"] {
+                let mut fast = Runtime::default_strict();
+                let mut generic = Runtime::default_strict();
+                seed(&mut fast);
+                seed(&mut generic);
+                let fast_reply = fast
+                    .execute_plain_scan_opt3_borrowed(cursor, k1, v1, k2, v2, k3, v3, 20)
+                    .unwrap_or_else(|| panic!("SCAN {cursor:?} {k1:?}.. must be served"));
+                let generic_reply = generic
+                    .execute_frame(command(&[b"SCAN", cursor, k1, v1, k2, v2, k3, v3]), 20);
+                assert_eq!(
+                    fast_reply, generic_reply,
+                    "SCAN {cursor:?} {k1:?} {v1:?} {k2:?} {v2:?} {k3:?} {v3:?} must match"
+                );
+                assert_eq!(
+                    fast.server.store.state_digest(),
+                    generic.server.store.state_digest(),
+                    "SCAN is a read and must not mutate"
+                );
+            }
+        }
+
+        // A bad option in ANY of the three positions must decline.
+        let mut rt = Runtime::default_strict();
+        seed(&mut rt);
+        for (k1, v1, k2, v2, k3, v3) in [
+            (b"BOGUS".as_slice(), b"x".as_slice(), b"MATCH".as_slice(), b"k*".as_slice(),
+             b"COUNT".as_slice(), b"10".as_slice()),
+            (b"MATCH", b"k*", b"BOGUS", b"x", b"COUNT", b"10"),
+            (b"MATCH", b"k*", b"COUNT", b"10", b"BOGUS", b"x"),
+            (b"MATCH", b"k*", b"COUNT", b"0", b"TYPE", b"string"),
+            (b"MATCH", b"k*", b"COUNT", b"9223372036854775808", b"TYPE", b"string"),
+        ] {
+            assert!(
+                rt.execute_plain_scan_opt3_borrowed(b"0", k1, v1, k2, v2, k3, v3, 20)
+                    .is_none(),
+                "a bad option in any position must fall through"
+            );
+        }
+
+        // Cross-wrapper agreement: the three wrappers share one impl, so a redundant
+        // repetition must not change the answer.
+        let mut a = Runtime::default_strict();
+        let mut b = Runtime::default_strict();
+        let mut c = Runtime::default_strict();
+        seed(&mut a);
+        seed(&mut b);
+        seed(&mut c);
+        let one = a.execute_plain_scan_opt_borrowed(b"0", b"COUNT", b"100", 20);
+        let two = b.execute_plain_scan_opt2_borrowed(b"0", b"COUNT", b"100", b"COUNT", b"100", 20);
+        let three = c.execute_plain_scan_opt3_borrowed(
+            b"0", b"COUNT", b"100", b"COUNT", b"100", b"COUNT", b"100", 20,
+        );
+        assert!(one.is_some(), "the one-option form must be served");
+        assert_eq!(one, two, "arity-4 and arity-6 wrappers must agree");
+        assert_eq!(two, three, "arity-6 and arity-8 wrappers must agree");
     }
 }
