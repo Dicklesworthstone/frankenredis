@@ -8,6 +8,87 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## MEASURED (frankenredis-ozrro) — this harness's median A/A null deviation is 0.067 pct, and it had NO null gate at all. Answering the fleet check: the frankenpandas failure mode is absent here, but the opposite one was present
+
+The fleet check, prompted by frankenpandas: its 2 pct A/A null limit sat exactly AT its median
+null deviation, so half its runs failed the null by construction and good measurements were
+being discarded. Measure your own median and compare it to your gate.
+
+### THE ANSWER: MEDIAN 0.067 pct, AND THERE WAS NO GATE TO COMPARE IT TO
+
+Every same-(ELF, arm, shape) repeat accumulated across this campaign. A cross-ELF pair is not
+a null and none is used as one:
+
+    shape           arm         mean       half-range    pct
+    scan_count      full      4,282.4          0.45     0.011
+    scan_count      fr-only   4,285.9          0.75     0.017
+    zintercard_2    BYPASS=1  6,853.9          3.25     0.047
+    dump_small      fr-only   2,700.5          1.30     0.048
+    dump_small      full      2,696.4          1.80     0.067   <- median
+    lcs_2           BYPASS=0  7,301.5          5.00     0.068
+    lcs_2           BYPASS=1  6,798.3          6.20     0.091
+    scan_iter       full      5,143.9          4.75     0.092
+    zintercard_2    BYPASS=0  7,478.4         35.95     0.481
+
+    n = 9 groups   min 0.011   MEDIAN 0.067   max 0.481   (half-range, pct)
+
+So: frankenpandas's failure mode is ABSENT here, and not because the gate was well chosen.
+There was no gate. Nothing was being discarded, and nothing was being checked either — every
+"that delta looks clean" judgement this campaign has made was made by eye against a precision
+figure quoted from a single control shape.
+
+A gate at 3x the median (0.201 pct half-range) passes 8 of 9 groups. The one failure is
+zintercard_2's BYPASS=0 pair at 0.481 pct — 7x the median — which is precisely the pair
+measured across the loadavg 13->44 spike and already flagged as spike-affected in an earlier
+row. The gate independently identifies the run I had already quarantined, which is the
+behaviour a gate should have.
+
+### THE NOISE FIGURE ADJUDICATES TWO CLAIMS I HAD ALREADY BANKED, AND BOTH SURVIVE
+
+A delta is the difference of two noisy measurements, so its noise is the two arms' noise added
+IN QUADRATURE, not one arm's. Scoring a delta against single-arm noise overstates significance
+by 1.41x — the size of error that makes an in-noise effect look publishable.
+
+    claim                                    delta    sigma   banked as     verdict
+    ZINTERCARD arity 4 vs 6 miss tax           3.6     0.53   FLAT          holds
+    LCS vs ZINTERCARD miss tax                46.3     7.2    REAL          holds
+
+The arity result being INSIDE noise is what a null result should look like, and is the correct
+reading of "flat" — not a weakness in it. The command-specific result at 7.2 sigma is not
+close to the line.
+
+### WHAT IS NOW IN THE HARNESS, so this is checkable rather than remembered
+
+`scripts/shape_instr_per_op.py` now carries `NULL_HALF_RANGE_PCT = 0.067`,
+`NULL_GATE_PCT = 3x` that, and two helpers — `null_noise_instr(ipo)` and
+`delta_sigma(delta, arm_a, arm_b)`. Four selftest cases pin them: the arity claim must read
+under 1 sigma, the command-specific claim must read over 5, the delta noise must be in
+quadrature (a single-arm version is caught by a 1.41x ratio assertion), and the gate must sit
+strictly ABOVE the median — that last one is the frankenpandas failure encoded as a test, so
+nobody can tighten the gate onto the median without going red.
+
+### THE RATIO NULL IS THE TIGHT ONE, AND gvm6z MEASURED IT IN THE SAME TICK
+
+Everything above is the FR ARM only — an instruction count on one engine. gvm6z ran the same
+fleet check on the RATIO and found the fr-arm null clears a 2 pct gate by 8.2x while the ratio
+null clears it by only 1.17x at worst. The two results are complementary rather than
+competing, and together they say something neither says alone: the numerator is not the
+problem. My own earlier row measured the redis DENOMINATOR carrying 1.6-4.0 pct run-to-run
+variation that load does not explain, which is precisely why a ratio null is ~30x looser than
+an fr-arm null. So 0.067 pct is the precision available to a self-A/B, and nothing like it is
+available to a competitive ratio. Quote the fr-arm figure only for fr-vs-fr deltas.
+
+### LIMIT, stated because it bounds what the number means
+
+All nine groups are PAIRS. A half-range over two samples is a weak estimator of spread; the
+median across nine independent pairs is more trustworthy than any single row of the table. The
+0.481 pct outlier also shows the distribution has a tail that pairs cannot characterise, and
+that tail is environmental rather than intrinsic — it appeared under a load spike. Treat
+0.067 pct as the quiet-window figure and do not assume it holds while loadavg is moving.
+
+WINDOW: loadavg 14.23 / 18.84 / 19.52, falling, 1-minute below 5-minute; no measurement was
+taken for this row — it is arithmetic over previously recorded runs plus a source change.
+
 ## MEASURED (frankenredis-ozrro) — the miss-tax confound is RESOLVED (not a load artefact), and BOTH proposed mechanisms are refuted: it does not scale with arity, and it does not track token-table size
 
 Same ELF `fr-pair-bypass` (bac70fcb6, `--features perf-ab-cascade-bypass`), both arms the

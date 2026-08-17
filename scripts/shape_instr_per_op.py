@@ -1501,6 +1501,39 @@ def selftest() -> int:
             print("  %-26s FAIL: %r -> ops=%d, want %d" % ("ops default", given, ops, want_ops))
     print("  %-26s flag position independent  ok" % "arg parsing")
 
+    # (frankenredis-ozrro) The null-noise helpers, pinned against the two live claims they
+    # were derived to adjudicate. If either assertion flips, a banked conclusion is wrong.
+    #
+    #   ZINTERCARD arity 4 vs arity 6 miss tax: 348.5 vs 352.1, arms ~6,851 and ~7,454.
+    #   Banked as FLAT. Must be inside noise.
+    #
+    #   LCS vs ZINTERCARD miss tax: 302.2 vs 348.5, arms ~6,798 and ~6,851.
+    #   Banked as REAL and command-specific. Must be far outside noise.
+    flat = delta_sigma(352.1 - 348.5, 6851.0, 7454.0)
+    real = delta_sigma(348.5 - 302.2, 6851.0, 6798.0)
+    if not flat < 1.0:
+        failures += 1
+        print("  %-26s FAIL: arity dose-response reads %.2f sigma, banked as flat"
+              % ("null noise", flat))
+    if not real > 5.0:
+        failures += 1
+        print("  %-26s FAIL: lcs-vs-zintercard reads %.2f sigma, banked as real"
+              % ("null noise", real))
+    # A delta must be scored against BOTH arms in quadrature, never one arm alone --
+    # single-arm noise overstates significance by ~1.4x.
+    one_arm = 100.0 / null_noise_instr(7000.0)
+    two_arm = delta_sigma(100.0, 7000.0, 7000.0)
+    if not abs(one_arm / two_arm - 2 ** 0.5) < 0.01:
+        failures += 1
+        print("  %-26s FAIL: quadrature not applied to delta noise" % "null noise")
+    # The gate must sit ABOVE the median, or half of all good runs fail by construction --
+    # the frankenpandas failure this was computed in answer to.
+    if not NULL_GATE_PCT > NULL_HALF_RANGE_PCT:
+        failures += 1
+        print("  %-26s FAIL: gate at or below median deviation" % "null noise")
+    print("  %-26s flat=%.2f sigma  real=%.1f sigma  gate=%.3f%%  ok"
+          % ("null noise", flat, real, NULL_GATE_PCT))
+
     print("selftest: %d case(s) failed" % failures)
     return 1 if failures else 0
 
@@ -1532,6 +1565,44 @@ def provenance_self_test() -> int:
     print("  incumbent provenance guard OK  (%s)" % live_msg)
     print("PASS shape_instr_per_op self-test")
     return 0
+
+
+# (frankenredis-ozrro) MEASURED A/A precision of this harness's fr arm, so a future claim
+# can be checked against noise instead of eyeballed. Median half-range over NINE groups of
+# same-(ELF, arm, shape) repeats accumulated across this campaign:
+#
+#     min 0.011%   median 0.067%   max 0.481%
+#
+# The max is the one pair measured across a loadavg 13->44 spike and is the ONLY group that
+# would fail a 3x-median gate. This was computed in answer to a fleet-wide check prompted by
+# frankenpandas, whose 2% null limit sat exactly AT its median deviation, so half its runs
+# failed by construction and good measurements were discarded. This harness had no null gate
+# at all, which is the opposite failure: nothing was being discarded, and nothing was being
+# checked either.
+NULL_HALF_RANGE_PCT = 0.067
+# 3x the median: loose enough that 8 of 9 observed groups pass, tight enough to catch the
+# spike-contaminated one. A gate AT the median would reject half of all good runs.
+NULL_GATE_PCT = 3 * NULL_HALF_RANGE_PCT
+
+
+def null_noise_instr(instr_per_op):
+    """A/A noise in instr/op for a single measurement of this magnitude."""
+    return instr_per_op * NULL_HALF_RANGE_PCT / 100.0
+
+
+def delta_sigma(delta, arm_a_instr_per_op, arm_b_instr_per_op):
+    """How many noise-sigma a measured DELTA between two arms represents.
+
+    A delta is the difference of two noisy measurements, so its noise is the two arms'
+    noise added in quadrature — NOT one arm's. Reporting a delta against single-arm noise
+    overstates significance by ~1.4x, which is exactly the size of error that makes an
+    in-noise effect look publishable.
+    """
+    noise = (null_noise_instr(arm_a_instr_per_op) ** 2
+             + null_noise_instr(arm_b_instr_per_op) ** 2) ** 0.5
+    if noise == 0:
+        return float("inf")
+    return abs(delta) / noise
 
 
 def _positional_args(args):
