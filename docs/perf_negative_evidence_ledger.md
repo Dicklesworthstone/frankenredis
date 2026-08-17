@@ -8,6 +8,85 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-08-17 MossyOrchid: REJECT — giving ZINTERCARD a borrowed route made it **+112 pct SLOWER** (7,503 -> 15,932 instr/op), because a command that currently SKIPS the borrowed path pays the whole cascade walk the moment it becomes a candidate (`frankenredis-5na4i`)
+
+Claim class: SELF-SPEEDUP, rejected and reverted. Campaign output: yes — it measures the ENTRY
+COST of the borrowed path, which every [C] front-classification proposal on this board has been
+costing at zero, including my own spec three turns ago.
+
+THE LEVER. ZINTERCARD was one of two commands still reaching the GENERIC path, at 3,223-3,374
+instr/op of dispatch — the largest such block measured. I wrote the borrowed trio the way my own
+spec described: an args helper (`borrowed_plain_zintercard_args`) plus an executor
+(`execute_plain_zintercard_borrowed`) mirroring SINTERCARD's, with the `zintercardwt` ordering
+hazard handled by DECLINING every shape that can error so the generic keeps error ownership.
+
+It compiles, it is correct, and it is 2.1x slower.
+
+SAME-TREE A/B, reverse-patched, both arms interleaved, `--fr-only` (fr Ir is the load-immune
+quantity). The AFTER rebuild reproduced its sha byte-for-byte after the BEFORE build, so the tree
+held still across the pair:
+
+    arm        draw 1     draw 2     dispatch share
+    BEFORE     7507.5     7499.6     3,291.0 (43.8 pct)
+    AFTER     15935.3    15929.5    11,225.0 (70.5 pct)
+    delta     +8,429 instr/op, +112 pct
+
+WHY, and this is the transferable part. Frame-level, the two profiles are not the same route:
+
+    BEFORE, top frames        execute_frame_internal 452, classify_command 424,
+                              dispatch_with_client_context 327, memcmp 311.7
+                              — the generic path, and NO cascade frames at all.
+    AFTER, top frames         process_buffered_frames 2,993, memcmp 2,155.3,
+                              parse_borrowed_plain_key_arg2 1,156, key_arg3 780,
+                              key_arg1 722, key_arg4 418, keys_multi 330, key_arg5 273
+                              — the borrowed-parse CASCADE, absent before.
+    my executor itself        291.0 instr/op. It is not the problem; it is cheap.
+
+ZINTERCARD previously was not a borrowed candidate AT ALL, so the packet skipped the entire
+borrowed machinery and went straight to generic. Making it a candidate — by adding an args
+helper in the first-byte group — makes it ENTER that machinery, walk the exact-shape parser
+chain, fail every arm, and only then reach my route. **The walk costs ~8,400 instr/op on this
+shape, 2.8x the ~3,000 of generic dispatch the lever was meant to save.**
+
+WHAT I SKIPPED, AND IT WAS THE WHOLE THING. My own spec listed SINTERCARD's trio as FOUR
+locations including `parse_borrowed_plain_sintercard{2,3}_packet` — exact-shape cascade parsers.
+I reasoned my way out of them ("the minimal correct change avoids the arity-class table
+entirely, and its promise hazard"), and that reasoning is what cost 112 pct. SINTERCARD is cheap
+because it is recognised EARLY by an exact parser; the args helper is the last resort, not the
+mechanism.
+
+THE GENERAL RULE THIS BUYS, which is worth more than the lever: **for a command that currently
+skips the borrowed path, the entry cost of that path is a real, measurable debit that must be
+paid before any dispatch saving is collected.** On this shape it is ~8,400 instr/op. Any [C]
+proposal — `corpus_coverage.py`'s 58 of them — must measure the walk to its intended arm
+position BEFORE the executor is written, because the prize (~3,000) is smaller than the entry
+fee unless the arm sits early in the chain. `project_cascade_arm_order_is_a_lever` says arm
+POSITION is a lever; this says arm EXISTENCE is a debit.
+
+REVERTED. Working tree clean; nothing of this shipped. The executor and its reference-oracle
+test (16 shapes, fast path vs generic on a twin runtime, comparing reply AND keyspace hit/miss
+counters) both worked and are described in `5na4i` for whoever takes it with an early parser.
+
+PROVENANCE:
+  ELFs         BEFORE 1abf965cf51a4cf0, AFTER fef8559734250a0c — same working tree,
+               reverse-patch pair, AFTER rebuilt to an identical sha after the BEFORE build.
+  harness      scripts/shape_instr_per_op.py, N=2000/2N=4000, `--fr-only`; frame attribution via
+               scripts/frame_delta.py on the dumps those runs produced.
+  gates        fr-runtime 625+44+8+... tests pass, fr-server 377+12+... pass, and the new
+               reference-oracle test passes with 6 of 16 shapes served (an inert fast path is
+               asserted against, so "it declines everything" cannot pass silently).
+  host         thinkstation1, 64 cores, powersave, /data 275G. PER-ARM loadavg 9.92-17.56 at the
+               build, 12.49-52.56 across the measurement window; CPU MHz not sampled per arm —
+               instruction counts are the load-immune quantity and the two arms interleaved.
+
+RETRY PREDICATE: do NOT retry ZINTERCARD with an args-helper route. If it is retried, add an
+exact-shape parser EARLY in the cascade first and measure the walk cost to that position with
+`frame_delta` BEFORE writing the executor — the executor was never the expensive part. And
+re-measure the 3,223-3,374 dispatch prize on a current ELF: this row's BEFORE arm reads 3,291.0,
+so the prize is real, but it is smaller than this path's entry fee.
+
+--------------------------------------------------------------------------------
+
 ## 2026-08-17 MossyOrchid: THE HALF-FIX FOR `9hori` IS WORSE THAN THE BUG — switching FUNCTION LOAD to executed registrations without the RELOAD paths turns a loud rejection into silent library loss on restart (`frankenredis-9hori`)
 
 Claim class: SOURCE / CORRECTNESS. No build, no bench, no artifact writes, no deletes — /data at
