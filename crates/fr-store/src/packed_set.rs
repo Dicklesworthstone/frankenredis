@@ -637,7 +637,7 @@ impl HashFieldMap {
     /// hashtable tier is built with `append_known_absent`, which SKIPS the existence probe
     /// because the caller promised uniqueness -- feeding it a duplicate corrupts the map.
     /// (frankenredis-fosf1)
-    #[must_use]
+    ///
     /// (frankenredis-33832) The tier test in closed form: it depends on the pair COUNT
     /// and the LONGEST element and on nothing else, so any caller that already knows
     /// both can decide the tier without touching the pairs again.
