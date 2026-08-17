@@ -26,12 +26,15 @@ this tool applies both:
     Reporting "executor exists, floor entry missing" WITHOUT the depth is how a list of ten
     near-worthless candidates looks like a worklist.
 
-WHAT IT FOUND when written (fr-server at c7572f3a7): ten stem-matched candidates, and NONE
-clears the bar. get is at arm 4 and ping at arm 1 — already at the front, so a floor entry
-buys nothing. hset (16) and mset (19) sit below the WORTH_IT threshold `cascade_depth.py`
-documents. move, spublish and bitfield_ro have no arm of their own. The remainder are stream
-and pubsub commands, which the borrowed admission guard refuses anyway. Class [A] is
-EXHAUSTED for anything worth doing — established by ranking, not by assertion.
+WHAT IT FOUND when first written, AND WHY THAT VERDICT WAS WRONG. It filed hset (arm 16) and
+mset (arm 19) as "marginal, below WORTH_IT" and declared class [A] exhausted. Both were then
+MEASURED: 681.8 and 912.9 instr/op of dispatch, against the law's 461 and 596 — the law
+under-predicts by ~50 pct at shallow arms, and WORTH_IT is DERIVED FROM that law, so the cutoff
+was circular. Two of the hottest commands in any workload were buried by a threshold computed
+from a biased fit. This tool now (a) prefers a MEASURED number over the fit wherever one
+exists, (b) reports an unmeasured shallow arm as UNSIZED rather than as cheap, because a
+prediction must never close a vein, and (c) flags HOT commands, since ranking by predicted size
+alone is what surfaced PUBSUB (6,214 instr/op, issued by almost nobody) ahead of MSET and HSET.
 
 Usage:
     floor_entry_candidates.py [--all]   # --all shows front-of-cascade candidates too
@@ -78,13 +81,57 @@ def has_executor(command: str, stems: set[str]) -> list[str]:
 
 
 def floor_classified(floor_src: str) -> set[str]:
-    """Commands with a floor entry, keyed on the COMMAND enum (named after the command)."""
+    """Commands with a floor entry, keyed on the COMMAND enum (named after the command).
+
+    (frankenredis-ozrro) The COMMAND enum is the reliable key — a CLASS is named for the SHAPE
+    it serves (GeohashSingle, KeyedValuesWrite), not the command. But a command reached only
+    through a PARAMETERISED class arm still appears here, because those arms match on
+    `(array_len, BorrowedDispatchFloorCommand::Foo)` and so mention the command enum. That is
+    why this works for EXISTS and the keyed-values six even though no literal `(N, Cmd)` tuple
+    exists for them — a distinction that cost me a false "class [A] is exhausted" verdict when
+    a DIFFERENT grep of mine looked for the literal tuples instead.
+    """
     return {
         m.group(1).lower()
         for m in re.finditer(
             r"BorrowedDispatchFloorCommand::([A-Z][A-Za-z0-9]*)", floor_src
         )
     }
+
+
+# (frankenredis-ozrro) MEASURED dispatch, instr/op, from banked ledger rows. The depth law
+# UNDER-predicts — -48 pct at arm 16, -53 pct at arm 19, -14 pct at arm 127 — so where a real
+# measurement exists it replaces the prediction outright. WORTH_IT is derived FROM that law,
+# which made it circular: I used a law-derived cutoff to file MSET and HSET as "marginal" and
+# closed the vein twice, burying a ~15 pct win on one of the hottest commands there is.
+MEASURED_DISPATCH = {
+    "mset": 912.9,
+    "hset": 681.8,
+    "pubsub": 6214.4,   # before its floor entry landed
+}
+
+# The CHEAPEST front-classified dispatch observed in this campaign (arity 2). Compared against
+# deliberately, because it is a LOWER BOUND on what a floor entry costs: a candidate that beats
+# even the cheapest possible destination by a clear margin is worth taking regardless of its
+# arity, and one that does not needs its own arity band worked out before anyone bothers.
+#
+# An earlier draft of this file tried to pick a per-arity band here and keyed the lookup on the
+# ARM POSITION instead of the arity, via an expression that silently always returned 306. Both
+# candidates still cleared it, so the verdicts were right by luck — which is exactly how a
+# broken comparison survives review. Using one documented bound is honest; faking per-arity
+# precision from data this file does not have is not.
+FRONT_CLASSIFIED_FLOOR_MIN = 306
+
+# Commands hot enough that a small block still matters. Traffic is the axis this screen used to
+# ignore entirely, which is how it surfaced PUBSUB (6,214 instr/op, and almost nobody issues it
+# in a hot loop) while burying MSET and HSET. Sorting on size alone is sorting on one axis of
+# two. Curated by hand and deliberately short: these are the commands that appear in
+# redis-benchmark's default set or in ordinary client hot paths.
+HOT_COMMANDS = {
+    "get", "set", "mset", "mget", "incr", "decr", "hset", "hget", "hgetall", "del",
+    "exists", "expire", "lpush", "rpush", "lpop", "rpop", "sadd", "srem", "sismember",
+    "zadd", "zscore", "zrange", "scan", "ttl", "type", "setex", "getset", "append",
+}
 
 
 def cascade_positions(floor_src: str) -> dict[str, int]:
@@ -125,27 +172,46 @@ def report(show_all: bool) -> int:
     print(f"{'command':<14}{'arm':>5}{'pred dispatch':>15}  verdict")
     worth = []
     for _, c, hits, arm in rows:
+        hot = " HOT" if c in HOT_COMMANDS else ""
+        measured = MEASURED_DISPATCH.get(c)
         if c in NOT_SERVABLE:
             verdict = "admission guard refuses / container"
         elif arm is None:
             verdict = "no own arm (shared parser or non-cascade)"
+        elif measured is not None:
+            # A measurement always beats the fit. Compare against the band this arity would
+            # land in rather than against a law-derived arm threshold.
+            band = FRONT_CLASSIFIED_FLOOR_MIN
+            if measured > band * 1.3:
+                verdict = f"CANDIDATE — MEASURED {measured:.0f} vs band ~{band}{hot}"
+                worth.append((arm, c))
+            else:
+                verdict = f"measured {measured:.0f}, inside band ~{band}{hot}"
         elif arm >= WORTH_IT:
-            verdict = "CANDIDATE"
+            verdict = f"CANDIDATE — predicted deep{hot}"
             worth.append((arm, c))
-        elif arm >= 10:
-            verdict = f"marginal (below WORTH_IT={WORTH_IT})"
         else:
-            verdict = "already at the front of the cascade"
+            # (frankenredis-ozrro) A PREDICTION NEVER CLOSES A VEIN. This used to say
+            # "marginal (below WORTH_IT)" for arms 10-29 and "already at the front" below 10,
+            # both of which read as verdicts. They are not: the law under-predicts by ~50 pct
+            # at exactly these depths, so an unmeasured shallow arm is UNSIZED, not cheap.
+            verdict = f"UNSIZED — predicted {SLOPE * arm + INTERCEPT:.0f}, needs a shape{hot}"
+            if c in HOT_COMMANDS:
+                worth.append((arm, c))
         if not show_all and verdict.startswith("already"):
             continue
         pred = f"{SLOPE * arm + INTERCEPT:.0f}" if arm else "-"
         print(f"{c:<14}{arm if arm else '-':>5}{pred:>15}  {verdict}")
 
-    print(f"\nCANDIDATES at depth >= {WORTH_IT} ({len(worth)}):")
+    print(f"\nCANDIDATES — measured above the floor, or HOT and unsized ({len(worth)}):")
     for arm, c in sorted(worth, reverse=True):
         print(f"  arm {arm:>3}  {c}")
     if not worth:
-        print("  none — class [A] is exhausted for anything worth doing.")
+        print("  none measured above its band, and no hot command left UNSIZED.")
+        print("  NOTE: that is not the same as 'exhausted'. This screen has produced two")
+        print("  false exhausted verdicts already — once by missing parameterised classes,")
+        print("  once by trusting a law-derived cutoff. Say 'nothing left to size', not")
+        print("  'nothing left'.")
     return 0
 
 
