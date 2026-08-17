@@ -14593,6 +14593,11 @@ enum BorrowedMultibulkAction {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BorrowedDispatchFloorClass {
+    /// (frankenredis-ozrro) `SPOP key`, arity 2 — the base no-COUNT form, and the
+    /// first WRITE front-classified in this campaign. The COUNT form has a different
+    /// reply shape (Array, or Set under RESP3) and its own keyspace_hits rules, so
+    /// arity 3 keeps the generic path.
+    Spop,
     /// (frankenredis-ozrro) `SCAN <cursor> MATCH|COUNT|TYPE <value>` at arity 4. The
     /// bare cursor form is `Scan` above; this claims the single-option forms, which are
     /// at least as common in production and were still falling to GENERIC.
@@ -15110,6 +15115,7 @@ impl PlainZsetStoreCmd {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BorrowedDispatchFloorCommand {
+    Spop,
     Zrangestore,
     Touch,
     Keys,
@@ -15307,6 +15313,7 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             _ => None,
         },
         4 => match uppercase_ascii_token::<4>(token)? {
+            [b'S', b'P', b'O', b'P'] => Some(BorrowedDispatchFloorCommand::Spop),
             [b'K', b'E', b'Y', b'S'] => Some(BorrowedDispatchFloorCommand::Keys),
             [b'S', b'C', b'A', b'N'] => Some(BorrowedDispatchFloorCommand::Scan),
             [b'E', b'C', b'H', b'O'] => Some(BorrowedDispatchFloorCommand::Echo),
@@ -16634,6 +16641,7 @@ fn classify_borrowed_dispatch_floor_packet_impl<
             Some(BorrowedDispatchFloorClass::ScanOpt)
         }
         (2, BorrowedDispatchFloorCommand::Keys) => Some(BorrowedDispatchFloorClass::Keys),
+        (2, BorrowedDispatchFloorCommand::Spop) => Some(BorrowedDispatchFloorClass::Spop),
         (2, BorrowedDispatchFloorCommand::Ttl) => Some(BorrowedDispatchFloorClass::Ttl),
         (2, BorrowedDispatchFloorCommand::Getex) => Some(BorrowedDispatchFloorClass::Getex),
         (3, BorrowedDispatchFloorCommand::Getex) => Some(BorrowedDispatchFloorClass::GetexPersist),
@@ -21177,6 +21185,29 @@ fn try_dispatch_floor_classified_action(
                 )
             }
         }
+        BorrowedDispatchFloorClass::Spop => {
+            // (frankenredis-ozrro) Write path: the executor's own guard refuses replicas,
+            // AOF, keyspace notifications, tracking and MONITOR, so a SERVED SPOP has no
+            // consumer that would need it rewritten as SREM <key> <member>. Declines reach
+            // the generic path SPOP uses today.
+            if let Some(packet) = parse_borrowed_plain_spop_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_spop_borrowed(packet.key, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
         BorrowedDispatchFloorClass::Ttl => {
             if let Some(packet) = parse_borrowed_plain_ttl_packet(unparsed, &parser_config)
                 && let Some(response) =
@@ -22977,6 +23008,29 @@ fn parse_borrowed_plain_scan_opt_packet<'a>(
         keyword,
         value,
     })
+}
+
+// (frankenredis-ozrro) `SPOP key` (*2, 4-char token, one trailing bulk) — same packet shape
+// as DUMP/SCAN/KEYS, hence the shared BorrowedPlainGetPacket. Here the bulk really IS a key,
+// unlike SCAN's cursor and KEYS's glob pattern.
+fn parse_borrowed_plain_spop_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainGetPacket<'a>> {
+    if config.max_array_len < 2 || config.max_bulk_len < b"SPOP".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*2\r\n$4\r\n").and_then(|rest| {
+        rest.get(..4)
+            .filter(|command| command.eq_ignore_ascii_case(b"SPOP"))
+            .map(|_| input.len() - rest.len() + 4)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    Some(BorrowedPlainGetPacket { consumed, key })
 }
 
 fn parse_borrowed_plain_scan_packet<'a>(
@@ -53055,6 +53109,62 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
                 super::classify_borrowed_dispatch_floor_packet(&packet(&other), &cfg),
                 Some(C::ScanOpt),
                 "{other:?} must not be claimed as ScanOpt"
+            );
+        }
+    }
+
+    /// (frankenredis-ozrro) The SPOP floor class must claim ONLY the base arity-2 form.
+    /// Arity 3 is `SPOP key count`, which replies with an Array (a Set under RESP3) and
+    /// carries different keyspace_hits rules; arity >3 is a syntax error emitted by
+    /// spopCommand itself rather than a table arity error. Both must keep the generic path
+    /// that produces those behaviours.
+    #[test]
+    fn spop_floor_class_claims_the_base_form_only() {
+        let cfg = ParserConfig::default();
+        fn packet(args: &[&str]) -> Vec<u8> {
+            let mut p = format!("*{}\r\n", args.len()).into_bytes();
+            for a in args {
+                p.extend_from_slice(format!("${}\r\n{}\r\n", a.len(), a).as_bytes());
+            }
+            p
+        }
+        use super::BorrowedDispatchFloorClass as C;
+
+        for served in [packet(&["SPOP", "s"]), packet(&["spop", "s"]), packet(&["SpOp", "k"])] {
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(&served, &cfg),
+                Some(C::Spop)
+            );
+            assert!(super::parse_borrowed_plain_spop_packet(&served, &cfg).is_some());
+        }
+
+        for wrong in [
+            vec!["SPOP"],
+            vec!["SPOP", "s", "1"],
+            vec!["SPOP", "s", "0"],
+            vec!["SPOP", "s", "1", "extra"],
+        ] {
+            assert_ne!(
+                super::classify_borrowed_dispatch_floor_packet(&packet(&wrong), &cfg),
+                Some(C::Spop),
+                "{wrong:?} must reach the generic parser"
+            );
+        }
+        assert!(super::parse_borrowed_plain_spop_packet(&packet(&["SPOP"]), &cfg).is_none());
+
+        // Neighbours at the same 4-char token length, including the sibling classes this
+        // campaign added, must not be claimed as SPOP.
+        for other in [
+            vec!["SADD", "s", "m"],
+            vec!["SREM", "s", "m"],
+            vec!["SCAN", "0"],
+            vec!["KEYS", "*"],
+            vec!["DUMP", "k"],
+        ] {
+            assert_ne!(
+                super::classify_borrowed_dispatch_floor_packet(&packet(&other), &cfg),
+                Some(C::Spop),
+                "{other:?} must not be claimed as SPOP"
             );
         }
     }

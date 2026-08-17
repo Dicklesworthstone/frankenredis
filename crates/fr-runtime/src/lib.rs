@@ -25704,6 +25704,57 @@ impl Runtime {
         Some(reply)
     }
 
+    /// (frankenredis-ozrro) Borrowed WRITE fast path for the base `SPOP key` form.
+    /// Mirrors fr-command::spop's no-COUNT branch exactly: one `store.spop`, which owns
+    /// the member removal, the empty-set autodelete and the dirty accounting, then
+    /// BulkString(member) or a null bulk for a missing/empty set.
+    ///
+    /// The COUNT form is deliberately NOT served: it has a different reply shape (Array,
+    /// or Set under RESP3) and its own keyspace_hits rules, so it keeps the generic path.
+    ///
+    /// Randomness needs no propagation rewrite inside this guard.
+    /// `plain_borrowed_default_key_write_allows` already refuses whenever a replica has
+    /// ever connected, AOF is enabled, keyspace notifications are on, MONITOR is attached
+    /// or client tracking is active — every consumer that would need SPOP logged as
+    /// SREM <key> <member>. Outside that envelope this path is never taken.
+    pub fn execute_plain_spop_borrowed(&mut self, key: &[u8], now_ms: u64) -> Option<RespFrame> {
+        if self.policy.gate.max_array_len < 2
+            || self.policy.gate.max_bulk_len < b"SPOP".len()
+            || key.len() > self.policy.gate.max_bulk_len
+        {
+            return None;
+        }
+        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+            return None;
+        }
+        let packet_id =
+            self.plain_zremrange_write_preamble("spop", b"SPOP".len() + key.len(), now_ms);
+        let start = self.chained_command_start();
+        let result = self.server.store.spop(key, now_ms);
+        let elapsed_us = self.finish_chained_command(start);
+        // Served, not declined, on WRONGTYPE: store.spop errors without mutating, and
+        // declining would re-run a write on the generic path after a partial attempt.
+        let reply = match result {
+            Ok(Some(member)) => RespFrame::BulkString(Some(member)),
+            Ok(None) => RespFrame::BulkString(None),
+            Err(err) => CommandError::Store(err).to_resp(),
+        };
+        let failed = matches!(reply, RespFrame::Error(_));
+        self.record_plain_zremrange_borrowed_metrics(
+            "spop",
+            "SPOP",
+            || vec![b"SPOP".to_vec(), key.to_vec()],
+            elapsed_us,
+            now_ms,
+            packet_id,
+            failed,
+        );
+        let lazy_evicted = self.server.store.take_lazy_expired_propagation();
+        self.server.propagate_expired_key_deletions(&lazy_evicted);
+        self.account_plain_borrowed_error_reply(&reply);
+        Some(reply)
+    }
+
     fn execute_plain_scan0_borrowed(
         &mut self,
         which: u8, // b'S' set, b'H' hash, b'Z' zset
@@ -74866,6 +74917,113 @@ user bob reset off nopass +@all
             rt.execute_plain_scan_opt_borrowed(b"007", b"COUNT", b"10", 20)
                 .is_none(),
             "non-canonical cursor must fall through even with a good option"
+        );
+    }
+
+    /// (frankenredis-ozrro) SPOP is RANDOM, so the fast path cannot be compared to the
+    /// generic by reply — two runtimes will legitimately pop different members. It is
+    /// compared on the INVARIANTS that must hold identically instead:
+    ///   * the popped member was in the set, and is afterwards NOT
+    ///   * cardinality drops by exactly one
+    ///   * the key is deleted when the last member goes, matching the generic
+    ///   * a missing key returns a null bulk and creates nothing
+    ///   * WRONGTYPE is served in place and mutates nothing
+    ///
+    /// A digest comparison would be wrong here for the same reason: identical inputs
+    /// legitimately produce different states. This is the one place in this campaign where
+    /// state_digest() equality is NOT the right oracle.
+    #[test]
+    fn plain_spop_borrowed_preserves_the_generic_invariants_under_randomness() {
+        fn card(rt: &mut Runtime, key: &[u8]) -> i64 {
+            match rt.execute_frame(command(&[b"SCARD", key]), 30) {
+                RespFrame::Integer(n) => n,
+                other => panic!("SCARD returned {other:?}"),
+            }
+        }
+
+        // Pop the set empty one member at a time; every step must hold the invariants.
+        let mut rt = Runtime::default_strict();
+        for m in [b"a".as_slice(), b"b", b"c", b"d"] {
+            rt.execute_frame(command(&[b"SADD", b"s", m]), 10);
+        }
+        let mut seen: Vec<Vec<u8>> = Vec::new();
+        for expected_remaining in (0..4).rev() {
+            let before = card(&mut rt, b"s");
+            let reply = rt
+                .execute_plain_spop_borrowed(b"s", 20)
+                .expect("SPOP on a live set must be served");
+            let member = match reply {
+                RespFrame::BulkString(Some(m)) => m,
+                other => panic!("expected a member, got {other:?}"),
+            };
+            assert!(
+                !seen.contains(&member),
+                "SPOP returned {member:?} twice — it must remove what it returns"
+            );
+            assert_eq!(
+                rt.execute_frame(command(&[b"SISMEMBER", b"s", &member]), 30),
+                RespFrame::Integer(0),
+                "the popped member must be gone from the set"
+            );
+            seen.push(member);
+            assert_eq!(card(&mut rt, b"s"), before - 1, "cardinality must drop by one");
+            assert_eq!(card(&mut rt, b"s"), expected_remaining);
+        }
+        assert_eq!(seen.len(), 4, "every member must come back exactly once");
+
+        // Emptied set: the key is gone, and further pops are null bulks that create nothing.
+        assert_eq!(
+            rt.execute_frame(command(&[b"EXISTS", b"s"]), 30),
+            RespFrame::Integer(0),
+            "the key must be deleted when its last member is popped"
+        );
+        assert_eq!(
+            rt.execute_plain_spop_borrowed(b"s", 20),
+            Some(RespFrame::BulkString(None))
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"EXISTS", b"s"]), 30),
+            RespFrame::Integer(0),
+            "SPOP on a missing key must not create it"
+        );
+
+        // Missing key, never populated: null bulk, matching the generic.
+        let mut fresh = Runtime::default_strict();
+        assert_eq!(
+            fresh.execute_plain_spop_borrowed(b"nosuchset", 20),
+            Some(RespFrame::BulkString(None))
+        );
+        let generic_missing = fresh.execute_frame(command(&[b"SPOP", b"othermissing"]), 20);
+        assert_eq!(generic_missing, RespFrame::BulkString(None));
+
+        // WRONGTYPE is served in place and must not mutate.
+        let mut wrong = Runtime::default_strict();
+        wrong.execute_frame(command(&[b"SET", b"str", b"v"]), 10);
+        let digest_before = wrong.server.store.state_digest();
+        let fast_err = wrong
+            .execute_plain_spop_borrowed(b"str", 20)
+            .expect("WRONGTYPE is served, not declined");
+        assert!(matches!(fast_err, RespFrame::Error(_)), "expected WRONGTYPE");
+        assert_eq!(
+            wrong.server.store.state_digest(),
+            digest_before,
+            "a refused SPOP must not mutate"
+        );
+        let mut wrong_generic = Runtime::default_strict();
+        wrong_generic.execute_frame(command(&[b"SET", b"str", b"v"]), 10);
+        assert_eq!(
+            fast_err,
+            wrong_generic.execute_frame(command(&[b"SPOP", b"str"]), 20),
+            "the WRONGTYPE wording must match the generic byte for byte"
+        );
+
+        // A non-zero db must decline — SPOP is a write and the guard pins db 0.
+        let mut other_db = Runtime::default_strict();
+        other_db.execute_frame(command(&[b"SELECT", b"1"]), 20);
+        other_db.execute_frame(command(&[b"SADD", b"s", b"a"]), 20);
+        assert!(
+            other_db.execute_plain_spop_borrowed(b"s", 20).is_none(),
+            "SPOP on a non-zero db must fall through to the generic path"
         );
     }
 }
