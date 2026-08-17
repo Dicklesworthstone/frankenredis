@@ -409,6 +409,40 @@ SHAPES = {
         ["SET lcA " + "abcdefgh" * 8, "SET lcB " + "abcdxfgh" * 8],
         ["LCS", "lcA", "lcB"],
     ),
+    # (frankenredis-p98mw) THE THIRD LCS REGIME, and the reason it exists is that lcs_2 and
+    # lcs_64 sit on the SAME SIDE of a boundary neither of them crosses.
+    #
+    # Read from the source, not guessed: `build_lcs_dp` (fr-command) selects the
+    # Crochemore-Iliopoulos-Pinzon-Rytter bit-parallel LCS when `a.len() <= 64` OR
+    # `b.len() <= 64` -- an O(n+m) build of Allison-Dix vectors with O(1) cell lookup.
+    # When BOTH strings exceed a machine word it falls back to `LcsDp::Full`, the classic
+    # flat O(n*m) u32 matrix, which is the SAME algorithm redis runs.
+    #
+    # So lcs_2 (8x9) and lcs_64 (64x64) are both bit-parallel: one measures that regime's
+    # INTERCEPT, the other its SLOPE advantage. 64x64 is the LAST size before the cliff.
+    # Neither says anything about LCS above 64 bytes, which is where a real LCS call lives.
+    #
+    # FALSIFICATION TEST, both outcomes named in advance:
+    #   * lcs_65 lands near lcs_64's ratio -> the fallback is not the cliff it looks like
+    #     and the matrix arm is competitive; leave it alone.
+    #   * lcs_65 jumps toward or above 1.0 while lcs_64 sits far below -> confirmed cliff at
+    #     the word boundary, and the lever is a MULTI-WORD Allison-Dix vector ([u64; W] with
+    #     carry propagation through the `v = (v+u)|(v-u)` recurrence), which carries the
+    #     bit-parallel advantage past 64 bytes instead of surrendering to redis's algorithm.
+    #
+    # 65 is chosen deliberately over a round number: it is the SMALLEST input that takes the
+    # fallback, so the two arms differ by ONE byte of input and ~nothing of real work. A
+    # discontinuity there cannot be explained by problem size.
+    # 128 is the same regime with 4x the cells, to separate a fixed fallback cost from an
+    # O(n*m) one. Both read-only, so both stay steady-state no-ops for the subtraction.
+    "lcs_65": (
+        ["SET lcE " + ("abcdefgh" * 8) + "x", "SET lcF " + ("abcdxfgh" * 8) + "y"],
+        ["LCS", "lcE", "lcF"],
+    ),
+    "lcs_128": (
+        ["SET lcG " + "abcdefgh" * 16, "SET lcH " + "abcdxfgh" * 16],
+        ["LCS", "lcG", "lcH"],
+    ),
     "zinterstore_2": (["ZADD zi1 1 a 2 b", "ZADD zi2 3 b"],
                       ["ZINTERSTORE", "zidst", "2", "zi1", "zi2"]),
     "zrangestore_all": (["ZADD zrsrc 1 a 2 b 3 c"],

@@ -30391,3 +30391,74 @@ RETRY PREDICATE. Do not re-derive `lcs_2` and do not quote 1.1085x bare. Add a t
 size before using the 23.3x per-cell figure for anything. For `zrangestore_all`, add a size
 sibling BEFORE reading its 0.7926x, but its 3,787.6 instr/op of dispatch may be acted on
 now, since a per-call constant does not depend on the shape's size.
+
+--------------------------------------------------------------------------------
+SOURCE-DERIVED, NO MEASUREMENT (frankenredis-p98mw) — the LCS contradiction resolves as
+NEITHER NUMBER BEING WRONG: 1.1085x and ~0.1x are the intercept and the slope of the SAME
+regime, and both sit on the same side of a boundary neither crosses. fr abandons its
+algorithm above 64 bytes
+
+Claim class: STRUCTURAL (no ratio banked this row — deliberately; see the last section)
+
+gvm6z built `lcs_64` as a falsification test with both outcomes named in advance, which is
+why this was answerable at all. `lcs_2` (8x9) read 1.1085x; `lcs_64` (64x64) inverted to
+~0.1x. The instruction was to decide which is real before banking either. The answer is that
+the question is malformed, and the source says why.
+
+`build_lcs_dp` (crates/fr-command/src/lib.rs) selects:
+
+    a.len() <= 64   -> LcsDp::ColBits   Crochemore-Iliopoulos-Pinzon-Rytter bit-parallel,
+    b.len() <= 64   -> LcsDp::RowBits   Allison-Dix vectors: O(n+m) build, O(1) cell lookup
+    otherwise       -> LcsDp::Full      classic flat O(n*m) u32 matrix
+
+    THE FALLBACK IS REDIS'S OWN ALGORITHM. Above a machine word on BOTH inputs, fr stops
+    being cleverer than the incumbent and runs the same quadratic matrix fill.
+
+So both measured points are inside the bit-parallel regime. `lcs_2` measures its INTERCEPT
+(a 72-cell DP — almost none of that op is the algorithm, which is why 2,451 of its 7,132
+instr/op was dispatch). `lcs_64` measures its SLOPE ADVANTAGE at 4,096 cells — and 64x64 is
+the LARGEST input that still takes the bit-parallel path. The two numbers are consistent, not
+contradictory, and NEITHER generalises: one byte more on both strings changes the algorithm.
+
+    1.1085x MUST NOT BE QUOTED as an LCS deficit — it is a fixed-cost artefact, and this repo
+    has now read a one-point shape as a command claim FOUR times (SORT n=3, the refuted SINTER
+    k-crossover, KEYS n=2 which inverted 1.0353x -> 0.6806x by n=64, and this).
+    ~0.1x MUST NOT BE QUOTED as "fr is 10x faster at LCS" either — it is measured exactly at
+    the last size before fr surrenders its algorithm.
+
+This also CORRECTS MY OWN PREVIOUS ROW (`451fd51e5`), which called LCS "the only shape left
+above parity" and re-sized it at ~0.50x under the corrected [C] rule. That framing treated
+LCS as a dispatch problem. It is not: front-classifying LCS would buy back its intercept on
+inputs where the algorithm is free, and buy nothing at all in the regime that matters. THE
+FLOOR ENTRY IS NOT THE LCS LEVER — do not spend a turn on it.
+
+THE INSTRUMENT GAP IS NOW CLOSED, two shapes added:
+    lcs_65   65x65, the SMALLEST input that takes the fallback. Chosen over a round number
+             deliberately: it differs from lcs_64 by ONE byte per string and ~nothing of real
+             work, so a discontinuity there cannot be explained by problem size.
+    lcs_128  same regime, 4x the cells, to separate a fixed fallback cost from an O(n*m) one.
+
+FALSIFICATION, outcomes named in advance as gvm6z did:
+    * lcs_65 lands near lcs_64 -> the fallback is not a cliff, the matrix arm is competitive,
+      leave it alone and close LCS.
+    * lcs_65 jumps toward or above 1.0 while lcs_64 sits far below -> confirmed cliff at the
+      word boundary, and the lever is a MULTI-WORD Allison-Dix vector: `[u64; W]` with carry
+      propagation through the `v = (v + u) | (v - u)` recurrence, carrying the bit-parallel
+      advantage past 64 bytes instead of surrendering to the incumbent's algorithm. That is a
+      complexity-class lever (O(n*m/64) vs O(n*m)), not a constant-factor one.
+
+WHY NO RATIO IS BANKED HERE. Host loadavg was 52.2 and RISING at turn open, and the standing
+instruction was explicitly not to certify. Everything above is read out of the source and out
+of already-banked rows; the two new shapes are the instrument, not a result. The measurement
+they exist for is ONE ABBA when the host settles.
+
+PROVENANCE: no build, no benchmark, no measurement. Source read at HEAD `451fd51e5`:
+`build_lcs_dp` and `LcsDp` at crates/fr-command/src/lib.rs:16802-16880. Shapes verified by
+loading the harness module and asserting seed lengths straddle the threshold
+(lcs_2 8/9 and lcs_64 64/64 bit-parallel; lcs_65 65/65 and lcs_128 128/128 fallback).
+
+RETRY PREDICATE: run the four-point ladder lcs_2 / lcs_64 / lcs_65 / lcs_128 in ONE quiet
+window before touching any LCS code. If the cliff is confirmed, the multi-word vector is the
+lever and it is a real algorithmic unit, not a table entry — budget accordingly and gate it on
+the existing `lcs_len_bitparallel_matches_scalar` equivalence test, which already exists and
+must be extended to the multi-word arm.
