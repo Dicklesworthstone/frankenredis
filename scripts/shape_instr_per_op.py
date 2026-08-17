@@ -44,6 +44,7 @@ import os
 import re
 import select
 import socket
+import difflib
 import subprocess
 
 import sys
@@ -1433,6 +1434,17 @@ def selftest() -> int:
     a case where the two agree proves nothing, and every multi-line case is one
     where the old code overcounted and stopped the burst early.
     """
+    # (frankenredis-gvm6z) THE "did you mean" CONTRACT. The failure is one I made twice
+    # in one window: `corpus_coverage.py` reports COMMAND names and this harness keys on
+    # SHAPE names, so `hset` and `mset` were passed here, produced no fr arm, and the
+    # reply was a generic usage line that mentioned neither the shape nor the right name.
+    # Two runs were lost to it. These pin the two real cases plus the prefix fallback.
+    assert "hset_same" in suggest_shapes("hset"), suggest_shapes("hset")
+    assert "mset_2" in suggest_shapes("mset"), suggest_shapes("mset")
+    assert "zrangestore_all" in suggest_shapes("zrangestore"), suggest_shapes("zrangestore")
+    # A name matching nothing must yield nothing rather than a misleading suggestion.
+    assert suggest_shapes("zzzzzzzzzzzz_no_such", ["get_control"]) == []
+
     sort_reply = b"*3\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n"
     cases = [
         ("inline +OK", b"+OK\r\n", 1, 1),
@@ -1615,6 +1627,26 @@ def _positional_args(args):
     return [a for a in args if not a.startswith("--")]
 
 
+def suggest_shapes(name: str, shapes=None) -> list[str]:
+    """Shape names close to `name`, for the "did you mean" line.
+
+    (frankenredis-gvm6z) The mistake this exists for: `corpus_coverage.py` reports
+    COMMANDS while SHAPES are named after the shape, so the natural error is passing
+    `hset` when the shape is `hset_same`.
+
+    I first wrote this with a prefix-match FALLBACK for when ratio similarity returns
+    nothing, reasoning that a short command name scores badly against a longer shape
+    name. Then I measured it: across sixteen real command names (hset, mset, zrangestore,
+    keys, lcs, spop, sort_ro, pfmerge, zunion, geosearch, scan, dump, randomkey, xpending,
+    bitcount, smove) `difflib` returned candidates EVERY time, so the fallback never fired
+    once. It was unreachable, and the only self-test I could write for it needed a
+    contrived fixture — which is the tell. Removed rather than carried untested; if ratio
+    finds nothing the caller still prints the shape count and points at `--list`.
+    """
+    return difflib.get_close_matches(name, SHAPES if shapes is None else shapes,
+                                     n=5, cutoff=0.4)
+
+
 def main() -> int:
     args = sys.argv[1:]
     if "--self-test" in args:
@@ -1627,9 +1659,23 @@ def main() -> int:
     # (frankenredis-ozrro) Positionals are separated from flags ONCE, up front, so flag
     # ORDER never changes how the binary, shape or ops count are read.
     positional = _positional_args(args)
-    if len(positional) < 2 or positional[1] not in SHAPES:
+    if len(positional) < 2:
         print("usage: shape_instr_per_op.py <fr_bin> <shape> [ops] [--fr-only] "
               "[--locale=X]   (--list for shapes)", file=sys.stderr)
+        return 2
+    if positional[1] not in SHAPES:
+        # (frankenredis-gvm6z) A WRONG SHAPE NAME AND A WRONG ARGUMENT COUNT ARE
+        # DIFFERENT MISTAKES and used to print the same generic usage line. The failure
+        # this fixes is one I made: the corpus tool and this harness key on different
+        # things -- corpus_coverage.py lists COMMANDS (`hset`, `mset`) while SHAPES are
+        # named after the shape (`hset_same`, `mset_2`) -- so reading a command name out
+        # of the coverage report and passing it here is the natural error, and the reply
+        # was a usage line that never mentioned the shape or hinted the right name.
+        print(f"error: no such shape {positional[1]!r}", file=sys.stderr)
+        near = suggest_shapes(positional[1])
+        if near:
+            print("   did you mean: %s" % ", ".join(near), file=sys.stderr)
+        print("   --list prints all %d shapes" % len(SHAPES), file=sys.stderr)
         return 2
     fr_bin = os.path.abspath(positional[0])
     shape = positional[1]
