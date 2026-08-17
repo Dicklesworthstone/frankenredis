@@ -39441,3 +39441,227 @@ RETRY PREDICATE — the next site is named and sized, and it is bigger than this
      that is the rejected lever again.
   2. Re-run all three sizes. A single-size reading on this encoder is now twice shown to be
      sign- or reach-unstable.
+
+## 2026-08-17 CrimsonHawk: KEEP (COMPETITIVE) — two stranded arities crossed the incumbent on the instruction instrument (COPY REPLACE **0.5137x**, BITPOS start **0.5114x** / unit **0.4568x**), and the THROUGHPUT certification of the same cells was REFUSED BY ITS OWN NULL in the same hour (`frankenredis-copydeficit`)
+
+Claim class: COMPETITIVE
+Campaign output: yes
+
+Two routes shipped, `375d20a0f` (COPY `src dst REPLACE`) and `52cfbe467` (BITPOS arities 4
+and 6). Neither needed a line of new execution logic. Both were found by the same detector,
+and the second was found BY the detector rather than by reading code, which is the part worth
+keeping.
+
+### THE DETECTOR, AND ITS POPULATION IS NOW EXHAUSTED
+
+The COPY fingerprint was an arm calling an executor with a HARDCODED literal for a parameter
+no claimed arity could ever set: `execute_plain_copy_borrowed(..., false, ..)` at every call
+site, for an executor whose third parameter is `replace: bool`. That is mechanically
+detectable. Scanning every floor arm in `try_dispatch_floor_classified_action` for
+`execute_plain_*_borrowed` calls whose variant argument is only ever ONE literal returns six
+executors, of which three pass a single value:
+
+  bitcount(None)   — already claims all three arities BITCOUNT has (2, 4, 5). No deficit.
+  xadd(None)       — the MAXLEN dispatch cliff, closed at 1.733x. Not reopened.
+  bitpos(None)     — THE HIT.
+
+So the yield of this detector is 2 of 3, and it is now spent for bool/Option literals. It has
+NOT been extended to enum or discriminant arguments, which is the obvious next form and is not
+claimed here.
+
+BITPOS's own class comment admitted the deficit in words — "Start-only and unit-qualified
+forms remain on the unchanged generic cascade" — and
+`execute_plain_bitpos_borrowed` computes `argc = 4 + end.is_some() + unit.is_some()`, so it
+was authored for arities 4, 5 and 6 while only 5 was ever routed to it. Both parsers already
+existed with cascade arms. Two class entries and two floor arms were the whole change.
+
+### THE CORROBORATING SIGNAL IS AN ORDERING INVERSION, NOT A DISPATCH SHARE
+
+A dispatch-share percentage cannot distinguish "this route is stranded" from "this command is
+cheap", and this campaign has attributed a mechanism wrongly three times on exactly that kind
+of evidence. BITPOS supplies a better one at no cost. Arity 5 parses an `end` that arity 4
+does not, so it does STRICTLY MORE WORK — yet it was 1,251 instr/op CHEAPER, because 5 was
+classified and 4 was not. After the change the ordering inverts back to what the work volume
+demands. No theory of dispatch cost is required to read that.
+
+  BITPOS arity   classified   instr/op   dispatch share
+  3 plain        yes           2224.6     27.8 pct
+  4 start        NO            3742.4     52.3 pct   <- more expensive than arity 5
+  5 range        yes           2481.2     29.9 pct
+  6 unit         NO            4028.1     52.9 pct
+
+### FR-SIDE A/B — ONE ELF, AN ENV FLIP, AND A FREE NULL
+
+Gated on `FR_PERF_AB_BITPOS_START_UNIT_FLOOR_ORIG`, so both arms are the SAME BINARY and no
+tree-stability question arises while peers commit. Interleaved ORIG/NEW, two replicates each.
+
+  shape          ORIG             NEW              delta     dispatch share
+  bitpos_start   3740.6  3732.7   2389.8  2387.9   -36.1 pct  52.2 -> 29.0 pct
+  bitpos_unit    4032.7  4017.3   2620.9  2618.3   -34.9 pct  52.8 -> 30.9 pct
+  bitpos_range   2489.0  2482.0   2481.2  2481.9   -0.15 pct  29.9 -> 29.9 pct
+
+`bitpos_range` is the null and it is a real one rather than a claimed one: it is the
+already-classified sibling, it lives in the same ELF, it is exercised under the same gate flip,
+and the gate does not reach it. It moved 0.15 pct while the treated shapes moved 35-36 pct.
+
+COPY REPLACE, measured the same way before the gate convention was applied to it: 9257.3 /
+9258.0 -> 2956.0 / 2965.5, -68.1 pct, dispatch share 70.1 -> 25.8 pct.
+
+### STANDING AGAINST THE INCUMBENT — INSTRUCTION INSTRUMENT, REPLICATED, WORST BOUND QUOTED
+
+fr/redis instructions per op, two-point (N=2000, 2N=4000, startup and seeding subtracted).
+Below 1.0 means fr ahead. Both replicates given; the WORST of each pair is the quoted bound.
+
+Every row below is a fr against Redis 7.2.4 ratio taken with a live vendored redis-server
+arm that the harness started, seeded and measured in the SAME INVOCATION as the fr arm — one
+`shape_instr_per_op.py` process runs both servers side-by-side per row, so the numerator and
+the denominator come from the same window and the same host state, not from two runs joined
+afterwards.
+
+  shape          r1        r2        WORST BOUND
+  copy_replace   0.5137x   0.5057x   0.5137x
+  bitpos_start   0.5114x   0.5040x   0.5114x
+  bitpos_unit    0.4530x   0.4568x   0.4568x
+  bitpos_range   0.4774x   0.4882x   0.4882x   (control, untouched by either commit)
+
+Stated inline so the numbers are not only in the table: COPY REPLACE is fr/Redis 7.2.4
+0.5137x at its worst replicated bound, BITPOS arity 4 is fr/Redis 7.2.4 0.5114x and BITPOS
+arity 6 is fr/Redis 7.2.4 0.4568x, each against the live vendored redis-server arm named above.
+
+COPY REPLACE's PRIOR reading on this instrument was 1.5964x (fr 9257.7, redis 5799.0), so this
+is a crossing of 1.5964x -> 0.5137x. The denominator is the reason to believe it: redis read
+5799.0 instr/op before and 5794.9 / 5862.7 after, a spread of 1.2 pct across sessions hours
+apart. The redis arm is NOT immune to host load the way the fr arm is (`serverCron` does
+elapsed-time work), and load-inflation of the denominator would flatter fr — so a stable
+denominator is what licenses the ratio, not the fr numerator's own stability.
+
+### THE A/A NULL FOR THE INSTRUCTION INSTRUMENT, MEASURED HERE RATHER THAN CITED
+
+Six A/A draws — SAME ELF (2d7d9dfb28cb4a2d), SAME shape (`copy_replace`), SAME `--fr-only`
+arm, nothing varied between them — taken back to back at 1-minute loadavg 13.61-15.03, MHz
+mean 2851-3516:
+
+  2973.9  2979.3  2968.5  2961.3  2943.6  2935.6   instr/op
+
+All 30 ordered pairwise ratios of those draws, seed 20260817:
+
+  A/A null median 1.000002, bootstrapped over 20,000 resamples, 95% median CI
+  [0.996069, 1.003947]
+
+So the instrument's own null resolves to about +/-0.4 pct, against effects of -36.1 pct,
+-34.9 pct and -68.1 pct and standing ratios that moved 1.5964x -> 0.5137x. The smallest
+claim in this row is 88x the null's half-width, so nothing here rests on the null's precision.
+
+Stated precisely because it is stronger than the usual form and should not be read as the
+usual form: each A/B row is a SINGLE INVOCATION containing both the fr arm and the live
+vendored redis-server arm, so every ratio is same-invocation by construction. The A/A above
+is deliberately NOT within one invocation — it is six SEPARATE invocations of the same
+harness on the same ELF, which therefore bounds inter-invocation and host-drift noise as
+well as within-run noise, and is the more conservative null of the two. A within-invocation
+A/A would have reported a smaller interval and claimed more.
+
+CV was not used, as a gate or otherwise; the gate above is the bootstrap 95 pct median CI.
+
+### THE THROUGHPUT CERTIFICATION OF THE SAME CELL WAS REFUSED, AND THE REFUSAL IS THE POINT
+
+`balanced_square_ab.py --shapes copyreplace --rounds 9 --ops 50000 -P16` on the shipped ELF:
+
+  copy_replace   1.1128  [1.0835, 1.1580]  nulls 0.9997/1.0259  NULL-FAILED [null_bound]
+  get_control    1.1116  [1.0893, 1.1750]  nulls 0.9913/0.9708  NULL-FAILED [null_bound]
+  0 of 2 rows admissible; 2 null-failed; normalised n/a
+
+**The 1.1128 IS NOT QUOTED ANYWHERE AS A RESULT.** It is recorded here only so that a later
+passing run cannot be mistaken for the first attempt. Both rows failed, in OPPOSITE directions
+(fr nulls 1.0259 and 0.9708 against a +/-0.02 bound), which is the signature of drift rather
+than of a systematic bias.
+
+The cause is in the harness's own provenance and did not need diagnosing: CPU MHz fell from
+mean 2765 to mean 2242 DURING the run, a 19 pct drop, at a 1-minute loadavg that barely moved
+(14.89 -> 14.50). Three further samples 15 s apart afterwards read 3516 / 2851 / 3328 MHz at a
+FLAT loadavg of 29.5 / 31.1 / 30.9 — a 23 pct swing with no load signal to predict it. This is
+`feedback_record_mhz_per_arm_not_just_loadavg` again: MHz is not monotonic in load, and a
+window reported as quiet on loadavg was not quiet on the axis that determines a timed ratio.
+The ABBAABBA square cancels LINEAR drift; a mid-run frequency cliff is not linear.
+
+An interleaved instruction row taken in that same window IS admissible and is the one quoted
+above, because callgrind Ir is a deterministic count and not a time.
+
+### EQUIVALENCE
+
+`scripts/dispatch_route_differ.py`: 418 cases, 0 disagreements, three-way — fr fast route vs
+fr generic path via `FR_PERF_AB_CASCADE_BYPASS=1` ON THE SAME ELF vs live redis 7.2.4. 50 rows
+are new (24 COPY, 26 BITPOS). Rows were written per failure mode rather than per happy path:
+
+  - an absent SOURCE through `COPY src dst REPLACE` must leave the destination INTACT. A route
+    that removed the destination before checking the source answers 0 and passes every
+    reply-by-reply check; the following GET is what catches it.
+  - the expiry must ride along a COPY, and REPLACE over a destination of a DIFFERENT type must
+    change its type and not merely its value.
+  - BITPOS for a ZERO bit with and without an end, which is where redis's own rule differs:
+    unbounded may return the first bit PAST the string (16) and bounded may not (-1). A route
+    that dropped the end or invented one diverges on exactly that pair and nowhere else.
+
+TWO FIXTURE BUGS were found and fixed while writing those rows, both of the class that agrees
+three ways while testing nothing it claims:
+  - `SET bp:ones "\xff\xff"` was a str, and the encoder's `.encode()` sent four UTF-8 bytes
+    (0xC3 0xBF 0xC3 0xBF) whose first zero bit is at index 2. All three arms agreed on 2 and
+    the unbounded/bounded distinction was never exercised. Sending bytes makes it 16 vs -1.
+  - the label builder assumed `str`, so the corpus could not hold a bytes argument at all.
+
+CV was not used, as a gate or otherwise.
+
+### TWO PRE-EXISTING TEST EXPECTATIONS WERE CHANGED, AND WHY THAT IS NOT SELF-WEAKENING
+
+`dispatch_floor_classifier_recognizes_only_exact_target_tokens` asserted that COPY arity 4 and
+BITPOS arities 4 and 6 were NOT claimed. Those assertions were CORRECT when written: a floor
+class is a promise its arm must keep, and claiming a shape the arm declines sends it to GENERIC
+rather than back to the cascade, which is worse than leaving it alone. Arms exist now, so the
+claims are ones the arm keeps.
+
+The invariant the assertions protected is preserved and widened rather than dropped:
+  - COPY: the arity-5 `DB n` spelling is still asserted UNCLAIMED, in the same test.
+  - BITPOS: a new test pins that arities 2 and 7 — which BITPOS does not have — are still
+    unclaimed, and that a bad unit token at arity 6 IS claimed and then DECLINED by the
+    executor rather than answered.
+
+### PROVENANCE
+
+  ELF           fr-side A/B  e44bc0461cd08b59, `--features perf-ab-bitpos-start-unit-floor`,
+                BOTH ARMS FROM THIS ONE ELF via the env flip.
+                vs-incumbent 2d7d9dfb28cb4a2d, plain `--release` at HEAD, no feature flags, so
+                the quoted ratios describe what ships.
+                differ       built `--features perf-ab-cascade-bypass`; both fr arms are that
+                one ELF, so a fast-vs-generic difference is the route and not the build.
+                All built locally with RCH_CARGO_WRAPPER_BYPASS=1, path taken from
+                `--message-format=json`, copied to a private path and sha256'd there.
+  bench_elf_sha256=2d7d9dfb28cb4a2d03cda0e507b693f47bc16ddc6a8d405b8502ece93dbc78ab
+  incumbent     vendored redis 7.2.4,
+                bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+  harness       `scripts/shape_instr_per_op.py` (two-point callgrind),
+                `scripts/balanced_square_ab.py` (ABBAABBA square),
+                `scripts/dispatch_route_differ.py` (three-way equivalence).
+  host          thinkstation1, 64 cores observed, powersave governor, /data 214-221G free.
+  PER-ARM loadavg/MHz
+                fr-side A/B   loadavg 36.56/29.69/18.64 -> 31.45/39.40/25.78, MHz mean 2765-3502
+                vs-incumbent  copy_replace  fr window 24.22/25.65/23.74 MHz mean 3502 max 4112
+                                            redis window 25.48/25.89/23.83 MHz mean 3541,
+                                            then 2901 after
+                              remaining shapes 24-31 1-minute throughout, MHz mean 2851-3516
+                square        14.89/29.59/24.65 at start, 14.50/29.26/24.57 at the row,
+                              MHz mean 2765 before -> 2242 after (the failure, above)
+  gates         `cargo test -p fr-server` green (380 + 12 + the tcp e2e set); differ 418/0.
+
+### RETRY PREDICATE
+
+1. The COPY REPLACE and BITPOS THROUGHPUT cells are UNCERTIFIED and must not be quoted from
+   the instruction ratio, which is a different instrument. Re-run
+   `balanced_square_ab.py --shapes copyreplace` ONLY in a window whose MHz is sampled at least
+   three times 15 s apart and varies by under 10 pct — loadavg alone did not predict this
+   failure and must not be used as the admission test on its own. Both `copy_replace` and
+   `get_control` must come back ADMISSIBLE, and the normalised figure quoted, not the raw.
+2. A `bitpos` group does not exist in `balanced_square_ab.py`. Add one before claiming any
+   throughput standing for arities 4 and 6; `bitpos_range` is the natural in-group control
+   because it is the classified sibling this change does not touch.
+3. Extend the literal-argument detector to ENUM and DISCRIMINANT arguments. The bool/Option
+   form is exhausted at 2 hits from 3 candidates; the enum form has never been scanned, and
+   `BorrowedDispatchFloorClass::ZsetStore(PlainZsetStoreCmd::…)` shows the shape exists.
