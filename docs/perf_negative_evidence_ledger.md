@@ -27895,3 +27895,56 @@ there are none. The honest next move is MORE SHAPES, not more levers: this ledge
 found that the corpus, not the engine, was the limiting instrument. Any new borrowed
 executor must mirror an existing gated trio and be tested against a twin runtime on
 `state_digest()`, not on the reply.
+
+## MEASURED (frankenredis-33832) — the "24 pct decode_rdb_string" frame is an INLINING ARTIFACT, the real law is 4 memcpy calls per hash field, and REPLACING those memcpys with a byte loop is 9.0 pct SLOWER
+
+Claim class: ROOT CAUSE + REJECTED LEVER.
+
+THE ANOMALY IS RESOLVED, and the answer is that the frame label was lying. The previous row
+recorded `fr_store::decode_rdb_string` at 24.24 pct self cost and flagged it as
+unexplained: the function is four bounds checks, a two-bit `decode_length`, and one
+`to_vec`. `callgrind_annotate --tree=calling` shows what it actually contains:
+
+    decode_rdb_string  ->  __memcpy_avx_unaligned_erms      324,000x   (162 per op)
+                       ->  RawVecInner::try_allocate_in       2,000x   (1 per op)
+                       ->  fr_store::decode_length            2,000x   (1 per op)
+
+ONE allocation and ONE length decode, as the source says -- and 162 memcpy calls. Those are
+inlined callees attributed to the enclosing frame, not work the function's own body does.
+Verified by varying the workload rather than by reading the disassembly:
+
+    fields=10  ->  42.0 memcpy calls per op
+    fields=40  -> 162.0 memcpy calls per op          exactly 4*fields + 2
+
+Perfectly linear in ELEMENT count, which a whole-string copy cannot be. So anyone reading
+"decode_rdb_string 24 pct" and going to optimise a length decode would be optimising the
+wrong function; the cost is the per-element REPACK inlined into it. `PackedStrMap::append`
+accounts for two of the four (`extend_from_slice` of field and of value); `write_varint`
+accounts for none, having already been given a single-byte push fast path.
+
+THE OBVIOUS LEVER FROM THAT IS A LOSS. Field and value in this workload are 2-3 bytes, so
+each `extend_from_slice` is a full `memcpy` CALL (~16 instructions) to copy two bytes.
+Replacing both with a reserve-then-push-bytes loop below a 16-byte threshold:
+
+    append via extend_from_slice (incumbent)   68,603.3 instr/op
+    append via short byte loop                 74,784.5 instr/op    +9.0 pct SLOWER
+
+Reverted. The per-byte loop costs more than the call it removes, even after a single
+`reserve` and even at two bytes.
+
+THE PAIR IS THE LESSON, AND I HAVE NOW PAID FOR IT TWICE IN OPPOSITE DIRECTIONS:
+
+    qj6jn slice 2   replaced per-byte pushes WITH extend_from_slice   +8.1 pct SLOWER
+    this row        replaced extend_from_slice WITH per-byte pushes   +9.0 pct SLOWER
+
+Both incumbents won, on runs averaging 7.7 bytes and 2-3 bytes respectively. Whatever
+intuition says about "memcpy call overhead dominates a short copy" or "a loop beats a call",
+it is wrong in BOTH directions here at roughly the same magnitude. The compiler's existing
+lowering is already the better one for the access pattern it sits in. Do not swap a byte-copy
+form on reasoning; if it must be tried, measure it first -- it is a 15-minute A/B on
+restore_instr_per_op.py, whose fr arm reproduces to 0.04 pct.
+
+RETRY PREDICATE. Do not re-run either swap. The 4-memcpy-per-field law stands as the
+quantified shape of the repack, and the only way to remove those copies is to stop
+repacking -- keep the listpack verbatim, which is pf1vw. Anyone attacking hash RESTORE
+should target the element count, not the copy form.
