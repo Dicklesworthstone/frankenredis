@@ -40126,3 +40126,138 @@ RETRY PREDICATE:
   3. Do NOT extend this to any call site lacking a maintained length. `ListChunk::Listpack`
      needs no encode at all, and any site that would have to compute a size is the refused
      lever again.
+
+--------------------------------------------------------------------------------
+## 2026-08-17 CrimsonHawk: the list reload re-ranked — fr is now FASTER than Redis 7.2.4 at the LZF codec itself, so the entire 3.31x is transcode, and the next lever is blocked on an equivalence obligation I could not discharge (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method). No timing
+verdict is claimed, and CV was NOT used — not as a gate, not as a filter, not as provenance.
+The only dispersion figures anywhere on this bead are A/A nulls, which are determinism checks
+on the instrument rather than noise estimates.
+
+Claim class: COMPETITIVE. Campaign output: yes — fr/Redis 7.2.4 measures 0.9037x on
+`lzf_compress` and 0.7362x on `lzf_decompress` for the 200-entry list DEBUG RELOAD workload.
+The vendored Redis 7.2.4 server process ran as a live incumbent arm in the same invocation as
+the fr arm, and both per-frame figures are in the table below.
+
+`fbe557ea7`'s retry predicate said to RE-RANK this route before taking anything else, because
+buffer growth was no longer the top term and the five-site growth map from the earlier
+rejection row was partly spent. Done, and it changes what should be worked next in two ways.
+
+### FR IS AHEAD OF THE INCUMBENT ON THE CODEC. THE GAP IS ENTIRELY TRANSCODE.
+
+    frame                fr        redis    fr/redis
+    lzf_compress    27,743.0    30,700.6    0.9037x   fr AHEAD
+    lzf_decompress   9,899.0    13,446.5    0.7362x   fr AHEAD
+    crc                 ~0.0     8,387.3    fr does not appear in the profile at all
+    ---------------------------------------------
+    codec + crc     37,642.0    52,534.4
+      as pct of that engine's own reload   17.5 pct   80.6 pct
+
+    WHOLE ROUTE     215,417.8   65,167.5    3.3056x
+    NON-CODEC       177,775.8   12,633.1   14.0724x   <- the entire deficit
+
+  Redis spends four fifths of a list reload in the codec and CRC and almost nothing else. fr
+  spends under a fifth there — and beats it — then spends 177,776 instr/key transcoding
+  against redis's 12,633. This retires two directions at once: the LZF kernel is NOT the lever
+  on this route any more (bead `qj6jn`'s original 1.76x premise is now 0.90x, i.e. INVERTED),
+  and neither is buffer growth.
+
+### WHERE THE TRANSCODE GOES, ATTRIBUTED OFF THE CALL RECORDS
+
+    __memcpy_avx_unaligned_erms                       18,104.0   8.40 pct
+    fr_store::packed_set::list_lp_entry_bytes         10,800.0   5.01 pct
+    mimalloc (malloc + page_malloc_zero + free)       14,258.2   6.62 pct
+    ListValue::maybe_promote        (INCLUSIVE)       27,903.9  12.95 pct
+    fr_persist::listpack::decode_entry_raw             5,800.0   2.69 pct
+    fr_persist::encode_listpack_string_entry           5,200.0   2.41 pct
+
+TWO SPECIFIC FINDINGS, both from caller attribution rather than frame names:
+
+  1. `list_lp_entry_bytes` IS COMPUTED 2.17 TIMES PER ELEMENT. For 200 elements it is called
+     433.34 times per key per reload:
+
+         ListValue::push_back        200.00 calls   6,600.0 Ir   (the necessary one)
+         ListChunk::from_vec         138.67          4,576.0     (re-walks a whole chunk)
+         ChunkedList::push_back_with_fill 78.00      2,574.0
+         ListValue::push_back_borrowed    16.67        550.0
+
+  2. `maybe_promote` IS TRIVIAL BUT ITS CALLEE IS NOT. It is called once per element (200/key)
+     and is a two-term threshold test, yet its INCLUSIVE cost is 27,903.9 instr/key — 12.95 pct
+     of the whole reload — because `promote()` fires mid-build on EVERY reload. The loader
+     rebuilds the list element by element into a Packed listpack, crosses
+     `PACKED_MAX_ENTRIES` at element 128, and then converts: `promote()` walks the packed
+     buffer, allocates a fresh `Vec<u8>` PER ELEMENT (`e.to_vec()`), builds a `VecDeque`, and
+     re-chunks it — after which the remaining elements are pushed into the new representation.
+
+         So on every reload fr writes 128 elements into a buffer it is about to throw away,
+         then allocates 128 owned copies to get them back out. Redis installs the decoded
+         listpack as a quicklist node and does none of it.
+
+### THE LEVER THIS POINTS AT, AND WHY I DID NOT SHIP IT
+
+The obvious fix is to decide the representation ONCE from the batch, which the RDB path can do
+because `Store::rpush_owned` receives the whole `Vec<Vec<u8>>` at once. The promote rule is
+exactly computable from a batch — the incremental path ends in `Deque` iff
+`N > PACKED_MAX_ENTRIES` or some element exceeds `PACKED_MAX_VALUE` — and
+`impl From<VecDeque<Vec<u8>>> for ListValue` ALREADY encodes precisely that predicate, so the
+representation choice is not the hard part.
+
+    THE HARD PART IS CHUNK BOUNDARIES, AND I COULD NOT DISCHARGE IT. The incremental path
+    produces `ChunkedList::from(VecDeque of the FIRST 128)` and then appends the remainder with
+    `push_back_with_fill`, which splits by the `fill` budget. A bulk `ListValue::from` chunks
+    all N uniformly by `LIST_CHUNK_TARGET`. Those need not agree — and
+    `quicklist_packed_nodes` emits ONE QUICKLIST NODE PER CHUNK, so a chunk-boundary difference
+    is a DUMP-byte difference, i.e. a wrong answer against the incumbent rather than a slow
+    one. This route's DUMP parity is already gated, so the divergence would be caught, but
+    "the gate will catch it" is not an equivalence argument and I am not shipping a
+    parity-surface change on one.
+
+  Recorded as a specified, UNBUILT lever rather than an attempted one. The reconnaissance
+  above is the part that is finished.
+
+### PROVENANCE
+
+  ELF           bench_elf_sha256 = 527a5c4044e2798b4dd51104f6345f0688ab3d558fb9418fe21225c0088d9eeb
+                (`release-perf`, the `fbe557ea7` tree; env unset, so the shipped path.) NOT a
+                `/proc/self/exe` self-report: every arm runs under callgrind, so `/proc/<pid>/exe`
+                is valgrind's binary and an in-process self-report is impossible for this
+                harness — same convention and same disclaimer as
+                `scripts/shape_instr_per_op.py::emit_bench_elf_sha`.
+  harness       scratchpad `reload_slope.py`, K=4 -> K=12 DEBUG RELOAD slope, one fresh working
+                directory per point, soundness assertion (no frame marginal may exceed the
+                whole, none may be negative) active and silent. Caller attribution is parsed
+                from the callgrind `cfn=`/`calls=` records, not inferred from frame names.
+  incumbent     vendored redis 7.2.4, verified in-run sha=d2c8a4b9 == vendored source HEAD.
+  host          thinkstation1, 64 cores OBSERVED, powersave governor, /data 209G free.
+  window        loadavg 21.55 / 22.07 / 24.97 — STABLE, all three within 3.4 of each other.
+                CPU IDLE 72.3 pct, measured here from a 2-second `/proc/stat` delta rather than
+                quoted: the figure I was handed for this window was 57 pct, and the two are far
+                enough apart that recording which one was observed matters. MHz spanned
+                1429-4214 across cores within single samples, which is why this row is
+                instruction-counted and not timed.
+
+  NO A/A NULL IS REPORTED because this row contains no A/B: it is one profile of one binary
+  against the live incumbent. The ratios above are between two ENGINES in one invocation, not
+  between two arms of fr, so a null would be measuring nothing. Every ratio this bead has
+  banked as a lever carries its own null; this one is a re-rank.
+
+  THE REPLICATED-STANDING CONVENTION DOES NOT APPLY to the 3.31x, which is a deficit, not a
+  crossing. It WOULD apply to the two codec figures if anyone wanted to bank "fr is faster than
+  redis at LZF" as a standing claim: 0.9037x and 0.7362x are single-ELF, single-window readings
+  and are recorded here as PROFILE ATTRIBUTION, not as certified standing. Anyone promoting
+  them to a claim owes a second ELF and the worst bound.
+
+RETRY PREDICATE:
+  1. Take the bulk-construction lever ONLY IF chunk-boundary equivalence is established FIRST,
+     as a test and not as an argument: build the same element sequence both ways — incrementally
+     via `push_back`, and in bulk — and assert the resulting `DUMP` payloads are byte-identical
+     across sizes that straddle `PACKED_MAX_ENTRIES` (127, 128, 129, 200, 5000) and across
+     `fill` values. If they diverge, the lever needs a bulk builder that REPRODUCES the
+     incremental chunking, not `ListValue::from`.
+  2. `list_lp_entry_bytes` at 2.17 computations per element is a smaller, INDEPENDENT lever with
+     no parity surface — the redundant callers are `ListChunk::from_vec` and
+     `push_back_with_fill`, both of which re-walk elements whose lengths a caller already has.
+     Reopen it only with a saving that exceeds its arm's null at n=200.
+  3. Do NOT take the LZF kernel on this route. fr is AHEAD of the incumbent on both halves of
+     the codec, and this bead's opening 1.76x premise has inverted to 0.90x.
