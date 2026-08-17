@@ -19243,6 +19243,49 @@ fn write_container_key<'b>(buf: &'b mut [u8; 64], parent: &[u8], sub: &[u8]) -> 
     Some(&buf[..n])
 }
 
+/// Index of a `<parent>|<sub>` key in [`SUBCOMMAND_TABLE`], by hash rather than by scan.
+///
+/// (frankenredis-fpqns) THE TABLE HAS 129 ENTRIES and container dispatch walked ALL of
+/// them to resolve one subcommand. `command_table_index` already solved exactly this
+/// problem for the top-level table with a foldhash map (frankenredis-cmdidxhash); this is
+/// the same fix for the sibling table, which never adopted it.
+///
+/// WHY THIS IS NOT THE LEVER THE LEDGER REJECTED. The 2026-08-17 row at :36046 rejected a
+/// BINARY SEARCH over this table, on two grounds, and neither carries here:
+///   * "the table is NOT sorted, so a binary search requires a 129-line reordering of a
+///     `const` whose order nothing documents as free to change" — a hash index needs no
+///     ordering at all, and the table is left byte-for-byte alone.
+///   * "what costs is ITERATING 129 entries, and a binary search removes only ~7/8 of the
+///     iterations" — that arithmetic is the argument FOR a hash, which removes all of
+///     them. The row bounded the wrong mechanism, and says so itself.
+/// That row's retry predicate asked for the duplicate SCAN to be collapsed. Half of that
+/// duplication is already gone (`830af9fcc` took the flags scan off the no-MONITOR path);
+/// this removes the walk itself from the half that remains.
+///
+/// FIRST MATCH WINS, matching the `.find()` this replaces: `or_insert` keeps the earliest
+/// index for a repeated name. All 129 names are currently unique, so the two are
+/// indistinguishable today — the tie-break is preserved so they stay indistinguishable if
+/// a duplicate is ever added.
+///
+/// The key is already ASCII-lowercased by [`write_container_key`] and every table name is
+/// lowercase ASCII, so no case folding happens here.
+fn subcommand_table_index(key: &[u8]) -> Option<usize> {
+    static INDEX: OnceLock<HashMap<Vec<u8>, usize, foldhash::quality::RandomState>> =
+        OnceLock::new();
+    let index = INDEX.get_or_init(|| {
+        let mut map: HashMap<Vec<u8>, usize, foldhash::quality::RandomState> =
+            HashMap::with_capacity_and_hasher(
+                SUBCOMMAND_TABLE.len() * 2,
+                foldhash::quality::RandomState::default(),
+            );
+        for (i, &(table_name, ..)) in SUBCOMMAND_TABLE.iter().enumerate() {
+            map.entry(table_name.as_bytes().to_vec()).or_insert(i);
+        }
+        map
+    });
+    index.get(key).copied()
+}
+
 pub fn check_full_command_arity(argv: &[Vec<u8>]) -> Result<(), &'static str> {
     let Some(name) = argv.first() else {
         return Err("");
@@ -19267,11 +19310,10 @@ pub fn check_full_command_arity(argv: &[Vec<u8>]) -> Result<(), &'static str> {
             // be any table entry: nothing matches, exactly as before.
             let mut key_buf = [0u8; 64];
             let key = write_container_key(&mut key_buf, name, &argv[1]);
-            if let Some(&(cmd_name, arity, ..)) = key.and_then(|k| {
-                SUBCOMMAND_TABLE
-                    .iter()
-                    .find(|entry| entry.0.as_bytes() == k)
-            }) {
+            if let Some(&(cmd_name, arity, ..)) = key
+                .and_then(subcommand_table_index)
+                .map(|i| &SUBCOMMAND_TABLE[i])
+            {
                 let argc = argv.len() as i64;
                 let ok = if arity > 0 {
                     argc == arity
@@ -19310,11 +19352,9 @@ pub fn effective_command_flags(argv: &[Vec<u8>]) -> Option<&'static str> {
         // (frankenredis-fpqns) Same stack-buffer key as check_full_command_arity.
         let mut key_buf = [0u8; 64];
         if let Some(key) = write_container_key(&mut key_buf, cmd, sub)
-            && let Some(entry) = SUBCOMMAND_TABLE
-                .iter()
-                .find(|entry| entry.0.as_bytes() == key)
+            && let Some(i) = subcommand_table_index(key)
         {
-            return Some(entry.2);
+            return Some(SUBCOMMAND_TABLE[i].2);
         }
     }
     get_command_flags(cmd)
@@ -29987,27 +30027,46 @@ fn sort_generic<const MOVE: bool>(
                 .as_ref()
                 .is_some_and(|p| matches!(plan_sort_pattern(p), SortPattern::StringKey { .. }));
 
-        // Build sort keys for each element (skipped for the numeric fast path).
-        // The pattern's `*`/`->` split is invariant across elements, so it is
-        // planned ONCE and every element reuses a single key buffer.
-        let sort_keys: Vec<Option<Vec<u8>>> = if numeric_fast {
-            Vec::new()
+        // Build sort keys for each element. `None` means THE ELEMENT IS ITS OWN KEY,
+        // and in that case NO KEY ARRAY IS BUILT AT ALL.
+        //
+        // (frankenredis-y9npu) This was `elements.iter().map(|el| Some(el.clone()))`
+        // for the no-BY case — one heap allocation and one memcpy per element, for a
+        // copy that is never mutated, purely so the alpha arm below had something to
+        // borrow that was not `elements`. Measured on a 64-element `SORT ALPHA`: 2,035
+        // instr/op of `from_iter` on top of ~n of the operation's allocations, in a
+        // command where the allocator was already 17 pct and the sort itself 2.5 pct.
+        // The alpha arm now borrows `elements` directly and reduces its window to a
+        // permutation before mutating it.
+        //
+        // The pattern's `*`/`->` split is invariant across elements, so it is planned
+        // ONCE — and the `NoStar` test is hoisted OUT of the per-element loop here,
+        // where it was previously re-evaluated for every element.
+        let sort_keys: Option<Vec<Option<Vec<u8>>>> = if numeric_fast {
+            // Never read: the `!alpha && numeric_fast` arm takes weights straight from
+            // the store and does not consult this.
+            None
         } else {
             match by_pattern.as_ref() {
-                None => elements.iter().map(|el| Some(el.clone())).collect(),
+                None => None,
                 Some(pattern) => {
                     let plan = plan_sort_pattern(pattern);
-                    let mut keybuf: Vec<u8> = Vec::new();
-                    elements
-                        .iter()
-                        .map(|el| match &plan {
-                            // BY without '*' is the dontsort case (never reaches
-                            // here); upstream's BY resolution falls back to the
-                            // element value itself.
-                            SortPattern::NoStar => Some(el.clone()),
-                            _ => resolve_sort_pattern(store, &plan, el, now_ms, &mut keybuf),
-                        })
-                        .collect()
+                    if matches!(plan, SortPattern::NoStar) {
+                        // BY without '*' is the dontsort case (never reaches here);
+                        // upstream's BY resolution falls back to the element value
+                        // itself, which is exactly what `None` denotes here.
+                        None
+                    } else {
+                        let mut keybuf: Vec<u8> = Vec::new();
+                        Some(
+                            elements
+                                .iter()
+                                .map(|el| {
+                                    resolve_sort_pattern(store, &plan, el, now_ms, &mut keybuf)
+                                })
+                                .collect(),
+                        )
+                    }
                 }
             }
         };
@@ -30089,8 +30148,14 @@ fn sort_generic<const MOVE: bool>(
         } else if !alpha {
             // Numeric sort: parse sort keys as f64
             let mut scored: Vec<(f64, usize)> = Vec::with_capacity(elements.len());
-            for (idx, sk) in sort_keys.iter().enumerate() {
-                let val = sk.as_deref().unwrap_or(b"0");
+            for idx in 0..elements.len() {
+                // `None` = no BY pattern, so the element IS the weight. The `"0"`
+                // default belongs to the BY case alone: a pattern lookup that misses
+                // scores as zero, which a no-BY element never does.
+                let val: &[u8] = match &sort_keys {
+                    None => &elements[idx],
+                    Some(keys) => keys[idx].as_deref().unwrap_or(b"0"),
+                };
                 let s = match std::str::from_utf8(val) {
                     Ok(text) => text,
                     Err(_) => {
@@ -30148,14 +30213,20 @@ fn sort_generic<const MOVE: bool>(
             } else {
                 (None, false)
             };
-            let mut indexed: Vec<(usize, &[u8])> = sort_keys
-                .iter()
-                .enumerate()
-                .map(|(idx, sk)| {
-                    let val: &[u8] = sk.as_deref().unwrap_or(b"");
-                    (idx, val)
-                })
-                .collect();
+            // `None` = no BY pattern, so each element sorts on ITSELF and the slices
+            // below borrow `elements` directly rather than a per-element copy of it.
+            let mut indexed: Vec<(usize, &[u8])> = match &sort_keys {
+                None => elements
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, el)| (idx, el.as_slice()))
+                    .collect(),
+                Some(keys) => keys
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, sk)| (idx, sk.as_deref().unwrap_or(b"")))
+                    .collect(),
+            };
             // NULL (empty) sorts before non-empty; DESC negates the key compare.
             // The trailing index compare (NOT reversed by DESC) reproduces the
             // stable ordering of equal-key rows exactly while making `cmp` a
@@ -30170,17 +30241,23 @@ fn sort_generic<const MOVE: bool>(
             } else {
                 partial_sort_window(&mut indexed, start, end, &mut cmp);
             }
+            // (frankenredis-y9npu) Reduce the window to a PERMUTATION and let `indexed`
+            // die before `elements` is mutated. With no BY pattern the sorted slices
+            // borrow `elements` itself, so the `mem::take` below cannot coexist with
+            // them. Cost is one `Vec<usize>` of the window's length against the n
+            // per-element allocations the key clone used to make. The two numeric arms
+            // need no such step: their `scored` is `Vec<(f64, usize)>` and carries no
+            // borrow at all, which is why this is the only arm that changed shape.
+            let order: Vec<usize> = indexed[start..end].iter().map(|(idx, _)| *idx).collect();
+            drop(indexed);
             // Materialise ONLY the window the LIMIT keeps (see numeric arm).
             let reordered: Vec<Vec<u8>> = if MOVE {
-                indexed[start..end]
+                order
                     .iter()
-                    .map(|(idx, _)| std::mem::take(&mut elements[*idx]))
+                    .map(|idx| std::mem::take(&mut elements[*idx]))
                     .collect()
             } else {
-                indexed[start..end]
-                    .iter()
-                    .map(|(idx, _)| elements[*idx].clone())
-                    .collect()
+                order.iter().map(|idx| elements[*idx].clone()).collect()
             };
             elements = reordered;
         }
@@ -30546,6 +30623,63 @@ mod tests {
         // Sanity: a known command resolves and the arity field is reachable.
         let idx = super::command_table_index(b"set").expect("SET present");
         assert!(super::COMMAND_TABLE[idx].0.eq_ignore_ascii_case("set"));
+    }
+
+    /// (frankenredis-fpqns) `subcommand_table_index` must answer exactly what the
+    /// `.iter().find(|e| e.0.as_bytes() == k)` scan it replaced answered, for every one of
+    /// the 129 entries and for the inputs that are not entries.
+    ///
+    /// The reference here is the REPLACED EXPRESSION rather than a hand-written list, which
+    /// is the right oracle for an equivalence refactor: the claim being tested is "same
+    /// answer as before", not "these are the correct names". The hand-written half is the
+    /// negative set below, which a lookup that accidentally matched on a PREFIX or ignored
+    /// case would fail — `write_container_key` lowercases, so the index must NOT fold case
+    /// itself, and `"pubsub|"`/`"pubsub|channelsX"` must miss.
+    #[test]
+    fn subcommand_table_index_matches_linear_scan_fpqns() {
+        let linear = |key: &[u8]| -> Option<usize> {
+            super::SUBCOMMAND_TABLE
+                .iter()
+                .position(|entry| entry.0.as_bytes() == key)
+        };
+        assert_eq!(
+            super::SUBCOMMAND_TABLE.len(),
+            129,
+            "entry count changed — re-derive it before trusting any row that quotes it; a \
+             line-anchored regex undercounts this table at 110 because 19 entries are not \
+             at a line start"
+        );
+        for &(name, ..) in super::SUBCOMMAND_TABLE {
+            let b = name.as_bytes();
+            assert_eq!(
+                super::subcommand_table_index(b),
+                linear(b),
+                "mismatch for {name:?}"
+            );
+        }
+        // Not entries. Case variants are included deliberately: the caller lowercases, so
+        // an index that folded case would ACCEPT input the scan rejected.
+        for bad in [
+            &b"pubsub|"[..],
+            b"pubsub|channelsX",
+            b"pubsub|CHANNELS",
+            b"PUBSUB|channels",
+            b"channels",
+            b"|",
+            b"",
+            b"\xff\xfe",
+            b"config|get\0",
+            &[b'x'; 200][..],
+        ] {
+            assert_eq!(
+                super::subcommand_table_index(bad),
+                linear(bad),
+                "mismatch for {bad:?}"
+            );
+        }
+        // Sanity: a known container subcommand resolves and its row is reachable.
+        let idx = super::subcommand_table_index(b"pubsub|channels").expect("present");
+        assert_eq!(super::SUBCOMMAND_TABLE[idx].0, "pubsub|channels");
     }
 
     #[test]
