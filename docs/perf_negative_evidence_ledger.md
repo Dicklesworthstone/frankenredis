@@ -41609,3 +41609,110 @@ CV was not used, as a gate or otherwise.
    of the 175 if they can be avoided on the default-user path. Do not bundle it with the
    caching change — bundling would make the acceptance test above unreadable, since both would
    move the same frame.
+
+--------------------------------------------------------------------------------
+## 2026-08-17 CrimsonHawk: the superlinear term in `a7668ed11` is NAMED — three frames shed cost at exactly 27, 18 and 12 instructions per element, validated at three sizes, and the whole saving still grows sublinearly because the new builder pays some of it back (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir), per-frame marginals only. No
+ratio is certified in this row and no timing verdict is claimed; CV was NOT used, as a gate or
+otherwise. This is attribution, which a loaded host does not alter — see the window note.
+
+Claim class: SELF-SPEEDUP. Campaign output: no — this row banks no vs-incumbent ratio. It
+closes an open predicate on a lever whose ratio was already banked in `a7668ed11`.
+
+`a7668ed11` shipped the bulk list build and left one thing explicitly open: it had REFUTED its
+own two-component model (predicted −37,459.4 at n=400, measured −41,612.1, 11.1 pct under) and
+said the saving was "superlinear in the tail by some term I have not identified". Identified.
+
+### THE TERM IS PER-ELEMENT CALL OVERHEAD, AND IT IS EXACTLY LINEAR
+
+Per-frame marginals of (ORIG − CAND), same ELF, both arms selected by
+`FR_PERF_AB_LIST_BULK_BUILD_ORIG`:
+
+    frame                                    n=200      n=400     n=1000   slope/element
+    ListValue::push_back                    4,504.0    9,904.0   26,104.0      27.0
+    ListValue::maybe_promote                5,930.0    9,530.0   20,330.0      18.0
+    Store::rpush_owned                      2,414.0    4,814.0   12,014.0      12.0
+                                                                              ----
+                                                                              57.0
+
+    THE SLOPES ARE EXACT AND THEY AGREE ACROSS TWO INDEPENDENT INTERVALS. push_back:
+    (9,904−4,504)/200 = 27.0 and (26,104−9,904)/600 = 27.0. maybe_promote: 3,600/200 = 18.0
+    and 10,800/600 = 18.0. rpush_owned: 2,400/200 = 12.0 and 7,200/600 = 12.0. Not one
+    rounding error between them.
+
+    THIS IS A VALIDATION, NOT A FIT, and the distinction is the whole reason the row exists.
+    The model `a7668ed11` refuted was two parameters fitted to two points, which explains
+    itself by construction. Here each slope is computed from one interval and CONFIRMED on a
+    second, disjoint one; a wrong mechanism has no reason to reproduce to the instruction.
+
+MECHANISM. ORIG's tail runs `l.push_back(v)` per element, which is a non-inlined call that
+does `add_entry_bytes`, then a second non-inlined call to `maybe_promote`, then the repr
+match. CAND's tail loop performs the same work inlined, and `maybe_promote` is a no-op there
+by construction — once the value is a Deque nothing in the loop can turn it back into a Packed
+list, so the check can only ever answer "no". So the per-element saving is CALL OVERHEAD I did
+not set out to remove and did not account for: 27 for the `push_back` frame, 18 for a
+non-inlined no-op, and 12 for the loop that used to live in `rpush_owned`.
+
+    Part of the `rpush_owned` figure is ATTRIBUTION MOVEMENT rather than work removed — that
+    loop now lives inside `bulk_from_back`. It is reported as a frame delta, which is what it
+    is, and not as a saving.
+
+### AND THE WHOLE SAVING STILL DOES NOT FOLLOW FROM IT
+
+    n         ORIG          CAND        whole delta    three frames    difference
+    200     215,986.8     181,198.6      −34,788.2       12,848         −21,940
+    400     408,138.3     367,347.8      −40,790.5       24,248         −16,543
+    1000  1,031,799.6     986,399.1      −45,400.5       58,448         +13,048
+
+  The three frames UNDER-account at small N (the rest is the constant promote elimination
+  spread across the allocator, memcpy and `from_vec`) and OVER-account at large N, because
+  `bulk_from_back` itself is a new cost that offsets them. That offset is why the whole saving
+  grows sublinearly while its largest components grow linearly.
+
+    SO THERE IS STILL NO LAW FOR THE TOTAL, AND I AM NOT FITTING ONE. What is now established
+    is the mechanism and three exact per-element slopes. The total is reported as five
+    measured deltas, exactly as `a7668ed11` reported it.
+
+### AN INSTRUMENT OBSERVATION WORTH RECORDING
+
+Re-running n=400 on the SAME ELF gave ORIG 408,138.3 against 408,138.7 in `a7668ed11` — a
+difference of 0.4 instr/key, 0.0001 pct, which is what a deterministic count should look like.
+The CAND arm gave 367,347.8 against 366,526.6, a difference of 821.2, or 0.22 pct.
+
+    THE TWO ARMS ARE NOT EQUALLY REPRODUCIBLE, and only the candidate moves. 0.22 pct is ~9x
+    that size's A/A null (1.000252) and nowhere near the −10.20 pct effect, so it does not
+    threaten the banked row — but it is a real property of the new path, most likely allocator
+    state around the `split_off`, and a future lever on this route should not assume the
+    candidate arm is as reproducible as the control. Anyone quoting a sub-1 pct effect on
+    `bulk_from_back` owes a repeat draw.
+
+### PROVENANCE
+
+  ELF           bench_elf_sha256 = e05bf1c97693971f2d897d30d2b7cec10dbb32416d1426781b0f7c4f16a23d64
+                — the same binary `a7668ed11` measured, both arms from it via
+                `FR_PERF_AB_LIST_BULK_BUILD_ORIG=1`. No build was made for this row.
+  harness       scratchpad `reload_slope.py` + `frame_diff.py`, K=4 -> K=12 DEBUG RELOAD slope,
+                one fresh working directory per point, soundness assertion active and silent.
+  host          thinkstation1, 64 cores OBSERVED, powersave governor, /data 201G free.
+  window        LOADED, and deliberately used anyway. loadavg 31.83 / 25.27 / 18.23 — rising
+                over the 15-minute average, i.e. NOT stable — with 19 cargo/rustc processes
+                live. CPU IDLE 81.1 pct measured here from a 3-second `/proc/stat` delta; the
+                figure handed to me for this window was 49 pct, and the two are far enough
+                apart that recording which was observed matters.
+                THIS WINDOW WOULD NOT CERTIFY A RATIO AND THIS ROW DOES NOT CONTAIN ONE.
+                Per-frame Ir marginals are deterministic counts; the ORIG arm reproducing to
+                0.0001 pct against a reading taken at loadavg 15 is the evidence for that,
+                not an assumption.
+
+RETRY PREDICATE:
+  1. The 18 instr/element on `maybe_promote` is a NON-INLINED CALL THAT CAN ONLY ANSWER "NO"
+     once the repr is a Deque — and ORIG still pays it on the ordinary `push_back` path, which
+     every RPUSH command uses, not just the loader. Reopen as its own lever ONLY IF a shape
+     that drives RPUSH on an already-promoted list shows a delta exceeding its null; do not
+     assume the reload figure carries, because the reload path no longer reaches it.
+  2. Do NOT re-derive a law for the total saving from two sizes. That has now failed once and
+     been superseded once; any future model owes three sizes with disjoint intervals.
+  3. The candidate arm's 0.22 pct run-to-run spread is unexplained. Reopen ONLY IF a sub-1 pct
+     lever is proposed on this path, in which case it must be measured across repeat draws
+     rather than a single pair.
