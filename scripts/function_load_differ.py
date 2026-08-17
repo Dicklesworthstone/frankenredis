@@ -88,7 +88,11 @@ class Conn:
 # keeps an allowance from outliving its bug. All four behavioural rows now agree with 7.2.4.
 #
 # Add an entry ONLY with a bug id and a reason, never to make a red run green.
-EXPECTED_DIVERGENCES: dict[str, str] = {}
+EXPECTED_DIVERGENCES: dict[str, str] = {
+    "dyn_name_local": "p98mw -- fr TEXT-SCANS the source for register_function(...) to derive the registered names, so a name or callback held in a LOCAL is invisible and fr answers 'first/second argument to redis.register_function must be a ...' for a library 7.2.4 loads. FALSE REJECTION. The fix is to use the names collected by lua_eval::function_load_execute (already returned, currently discarded) instead of the scan; that touches fr-store's function_load and its FUNCTION LIST/DUMP surface, so it is its own change.",
+    "dyn_name_concat": "p98mw -- fr TEXT-SCANS the source for register_function(...) to derive the registered names, so a name or callback held in a LOCAL is invisible and fr answers 'first/second argument to redis.register_function must be a ...' for a library 7.2.4 loads. FALSE REJECTION. The fix is to use the names collected by lua_eval::function_load_execute (already returned, currently discarded) instead of the scan; that touches fr-store's function_load and its FUNCTION LIST/DUMP surface, so it is its own change.",
+    "dyn_callback_local": "p98mw -- fr TEXT-SCANS the source for register_function(...) to derive the registered names, so a name or callback held in a LOCAL is invisible and fr answers 'first/second argument to redis.register_function must be a ...' for a library 7.2.4 loads. FALSE REJECTION. The fix is to use the names collected by lua_eval::function_load_execute (already returned, currently discarded) instead of the scan; that touches fr-store's function_load and its FUNCTION LIST/DUMP surface, so it is its own change.",
+}
 
 CASES = [
     ("top_level_error",
@@ -103,6 +107,20 @@ CASES = [
     ("nil_index",
      "local t = nil\nlocal y = t.field\nredis.register_function('f', function(k,a) return 1 end)",
      "nil index at load time"),
+    # (frankenredis-p98mw) DYNAMIC REGISTRATION ARGUMENTS. fr derives the registered names
+    # by TEXT-SCANNING the source for `register_function(...)`; a name or callback held in a
+    # LOCAL is invisible to that scan, so fr refuses libraries 7.2.4 loads. This is a FALSE
+    # REJECTION -- the opposite failure direction from o500d rows 1-4, and the reason these
+    # rows exist rather than being folded into the executed-body work.
+    ("dyn_name_local",
+     "local n = 'dyn'\nredis.register_function(n, function(k,a) return 1 end)",
+     "registration name supplied by a local"),
+    ("dyn_name_concat",
+     "local n = 'a' .. 'b'\nredis.register_function(n, function(k,a) return 1 end)",
+     "registration name computed at load time"),
+    ("dyn_callback_local",
+     "local cb = function(k,a) return 1 end\nredis.register_function('f', cb)",
+     "registration callback supplied by a local"),
     # ---- controls: both arms MUST already agree on these ----
     ("CONTROL_no_register",
      "local x = 1",

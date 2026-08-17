@@ -33193,3 +33193,62 @@ specifically, when it is stable on runs/onebyte/structured? Answer that by
 instrumenting the arm (does the 128-byte routing gate even fire on this shape, and
 how often), not by re-running the A/B. Re-run only if the routing's 128-byte
 threshold or `fr_simd::common_prefix_len` changes.
+
+--------------------------------------------------------------------------------
+BUG FOUND, ZERO BUILDS (frankenredis-9hori) — FUNCTION LOAD text-scans for
+register_function, so a name or callback held in a LOCAL is invisible and fr FALSELY REJECTS
+libraries 7.2.4 loads. Found by hypothesis, confirmed live, gated in the differ
+
+Claim class: CORRECTNESS (no build, no measurement — the binary from `8ab6f07af` was reused)
+
+FOUND BY ASKING WHAT THE PART I DELIBERATELY DID NOT FIX WOULD BREAK. `8ab6f07af` closed
+o500d by executing the library body, and I held scope: registration still went through
+`store.function_load`'s TEXT SCAN, with a note that swapping it had its own parity surface.
+The obvious question is what a text scan cannot see — and the answer is anything computed.
+
+    body                                                fr                       redis 7.2.4
+    local n = 'dyn'      ; register_function(n, fn)     ERR first argument ...    OK
+    local n = 'a' .. 'b' ; register_function(n, fn)     ERR first argument ...    OK
+    local cb = function..; register_function('f', cb)   ERR second argument ...   OK
+    CONTROL              ; register_function('f', fn)   OK                        OK
+
+THE DIRECTION IS THE POINT. o500d rows 1-4 were fr ACCEPTING what redis refuses. This is fr
+REFUSING what redis accepts, which is worse for a migration: a mixed fleet silently LOSES
+libraries rather than gaining them, and the failure is at load time with a message that
+blames the user's arguments rather than fr.
+
+CAUSE: `fr_store::function_load` (fr-store/src/lib.rs:33663) derives registered names by
+scanning the SOURCE TEXT for `register_function(...)` and requires string/function LITERALS
+in the argument positions. A variable is invisible to it, so it reports "first argument to
+redis.register_function must be a string" about an argument that is, at runtime, a string.
+
+THE FIX IS ALREADY HALF-BUILT AND CURRENTLY DISCARDED: `lua_eval::function_load_execute`
+returns the names collected by the real `redis.register_function` builtin — the interpreter
+sees the runtime value, so a local is no harder than a literal. Registration should use those
+instead of the scan. NOT done here because swapping the source of truth touches fr-store's
+`function_load` plus the FUNCTION LIST / FUNCTION DUMP surface (ordering, flags, description),
+and bundling it would put two behaviour changes behind one differ run — the same reason it
+was held out of `8ab6f07af`.
+
+GATED RATHER THAN LEFT LOOSE: the three cases are in `scripts/function_load_differ.py` as
+EXPECTED_DIVERGENCES with the bug id and cause. The differ still exits 0, both controls still
+agree, and a NEW divergence on any row still fails — while the file's own stale-allowance
+check will fail the moment these rows go green, exactly as it did for `nil_index` one commit
+ago. That mechanism has now caught a stale allowance once and is carrying three live ones.
+
+A NOTE ON HOW THE FIRST PROBE MISLED ME, since the diagnosis moved twice. My hypothesis was
+that the STATIC declared-globals scan (`function_library_first_undeclared_global`) failed to
+track local scope, because it flags any `Expr::Name` that is not "redis". The probe's first
+run seemed to confirm it. It was wrong twice over: `local b = a + 1` PASSES (so locals are not
+uniformly flagged), and the actual error text — visible only once I stopped truncating the
+reply at 40 characters — names the register_function ARGUMENTS, not a global. TRUNCATING THE
+DIFFER OUTPUT HID THE ANSWER FOR TWO ITERATIONS. Print the whole error before theorising about
+which layer produced it.
+
+PROVENANCE: no build. fr ELF 4c2f84cc35dad03f (the binary built for `8ab6f07af`), vendored
+redis 7.2.4, both live on ephemeral ports in one probe invocation. Host loadavg 15.24 with two
+PEER builds in flight — irrelevant to a differential, and no perf number is claimed here.
+
+RETRY PREDICATE: take `frankenredis-9hori` with the differ as its gate. Do NOT extend the text
+scan to understand variables — that is re-implementing an interpreter beside the one that is
+already running the body four lines earlier.
