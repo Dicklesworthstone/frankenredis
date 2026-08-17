@@ -49,6 +49,9 @@ mhz() { awk '/cpu MHz/{s+=$4;n++} END{printf "%.0f", s/n}' /proc/cpuinfo; }
 cleanup() { pkill -f "4762[123]" 2>/dev/null; }
 trap cleanup EXIT
 
+# Warn if the arm predates a commit to crates/ -- a stale binary gives a clean,
+# reproducible, WRONG number (see scripts/assert_fresh_build.py).
+python3 "$REPO/scripts/assert_fresh_build.py" "$FR" || true
 free_g=$(df -BG --output=avail /data | tail -1 | tr -dc '0-9')
 if [ "$free_g" -lt 42 ]; then
   echo "REFUSE: /data has ${free_g}G free, below the 42G hard stop" >&2

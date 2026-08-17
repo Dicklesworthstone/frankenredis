@@ -163,6 +163,18 @@ def main():
         print(__doc__.strip().splitlines()[-1], file=sys.stderr)
         return 2
     fr_bin, members, ops = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+    # Resolve the binary BEFORE anything chdirs: these run the engine with
+    # cwd set to a workdir, so a relative path like target/release/frankenredis
+    # becomes "command not found" (rc=127) rather than an obvious error.
+    fr_bin = os.path.abspath(fr_bin)
+    # (cross-project check, 2026-08-16) franken_networkx measured through an
+    # INSTALLED package that had drifted twelve days behind its repo and INVERTED a
+    # ratio by 5.4x. Checking my own arm found the same class: a scratchpad binary
+    # two commits stale, one of them worth -75.6 pct on the shape being discussed.
+    # A stale arm yields a clean, reproducible, WRONG number, so warn before, not after.
+    subprocess.run([sys.executable,
+                    os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "assert_fresh_build.py"), fr_bin], check=False)
     port = 47800 + (os.getpid() % 200) * 4
     with tempfile.TemporaryDirectory(dir="/data/tmp") as workdir:
         results = {}

@@ -37,6 +37,9 @@ cleanup() { pkill -f "4771[12]" 2>/dev/null; }
 trap cleanup EXIT
 cleanup; sleep 1
 
+# Warn if the arm predates a commit to crates/ -- a stale binary gives a clean,
+# reproducible, WRONG number (see scripts/assert_fresh_build.py).
+python3 "$REPO/scripts/assert_fresh_build.py" "$FR_BIN" || true
 mkdir -p "$WORK/rs" "$WORK/fr"
 echo "PRE  loadavg $(cut -d' ' -f1-3 /proc/loadavg)  mean MHz $(mhz)"
 
