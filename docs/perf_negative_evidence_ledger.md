@@ -41716,3 +41716,41 @@ RETRY PREDICATE:
   3. The candidate arm's 0.22 pct run-to-run spread is unexplained. Reopen ONLY IF a sub-1 pct
      lever is proposed on this path, in which case it must be measured across repeat draws
      rather than a single pair.
+
+--------------------------------------------------------------------------------
+## 2026-08-17 CrimsonHawk: MEASURED (SIZING) — two unmapped routes get ratios, and `config_get_one` at **1.7692x** is now the worst route I can see, independently confirming the peer figure that supersedes `e6c9t`'s 5.9-6.2x headline (`frankenredis-e6c9t`)
+
+  Claim class: SELF-SPEEDUP. Campaign output: no. A live vendored Redis 7.2.4 arm ran in the
+  same invocation for both rows, but the window was CONTAMINATED (loadavg 38.18/28.02/20.58
+  rising, 7 cargo/rustc processes, CPU idle 72 pct measured by vmstat), so these are SIZING
+  figures for RANKING and no competitive claim is made on either.
+
+  fr ELF d5bb403c162f27947c17395738e9a50e64dbe92ee7dddf4569d04e266a9b30f0, clean checkout at
+  2fb7ec8fe. Incumbent verified in-run, redis-server sha=d2c8a4b9 == vendored source HEAD.
+
+    shape             fr/redis instr    reading
+    client_info           0.8419x       fr AHEAD by 16 pct
+    config_get_one        1.7692x       fr BEHIND by 77 pct
+    pubsub_channels       1.3251x       (replicated worst bound, three FIT draws, this ELF)
+
+  WHY THIS IS WORTH A ROW AT ALL: `e6c9t`'s heading still reads "CONFIG GET maxmemory is
+  5.9-6.2x behind Redis 7.2.4 -- the worst cell measured in this campaign". That magnitude is
+  stale by 3.4x. Two CONFIG levers landed on it today (`3b47bc73b`, `6b671dbb7`) and a peer
+  banked 1.7730x afterwards; my 1.7692x is an INDEPENDENT draw on a different ELF that lands
+  within 0.2 pct of theirs. The bead is still pointing at the right route — it remains the
+  worst I can measure — but anyone sizing a lever from its headline would over-estimate the
+  available win by more than 3x.
+
+  RANKING IS SAFE HERE EVEN THOUGH THE WINDOW IS NOT. All three shapes were drawn against the
+  same contaminated denominator within minutes, and today's replicated evidence puts that
+  contamination at ~8 pct on this instrument. The gaps between 0.84x, 1.33x and 1.77x are far
+  wider than that, so the ORDER is trustworthy while none of the absolute figures is.
+
+  `client_info` at 0.8419x is the first ratio this route has had. It is also a route I moved
+  twice today (-512.1 instr/op from the one-pass resolve, -191.7 from the ACL reuse), so it
+  sits ahead of the incumbent rather than behind it and needs no further attention.
+
+RETRY PREDICATE: do NOT size a `config_get_one` lever from `e6c9t`'s 5.9-6.2x heading — it
+describes a route that no longer exists. Re-derive from a current ELF first, and expect
+~1.77x. Take a FIT-window draw before quoting any absolute figure for it, because at 1.77x
+the route is far enough from parity that the ranking is safe but the magnitude is not.
