@@ -30660,3 +30660,80 @@ RETRY PREDICATE: do NOT re-run the two-point version of this question — it is 
 four-point ladder is in the harness permanently. Take the multi-word vector. If someone reports
 LCS as "0.1x, we win", check the input sizes before believing it: that number only exists at
 <=64 bytes.
+
+--------------------------------------------------------------------------------
+## CERTIFIED (frankenredis-gvm6z) — ZRANGESTORE front-classification: dispatch 3,787.6 -> 683.5 instr/op (-81.9 pct), ratio 0.7926x -> 0.4147x, with 1,848 instr/op of the improvement NOT attributable to this lever
+
+Claim class: COMPETITIVE. fr/redis instructions per op, both arms in ONE invocation of
+scripts/shape_instr_per_op.py, incumbent verified on every run.
+
+    shape zrangestore_all (3 members)
+    arm      ELF        fr instr/op  redis instr/op   ratio     dispatch
+    BEFORE   3f027a4f       9,979.2      12,590.0   0.7926x   3,787.6 (38.0 pct)
+    AFTER-1  61778add       5,026.9      12,164.8   0.4132x     683.6 (13.6 pct)
+    AFTER-2  61778add       5,027.0      12,078.1   0.4162x     683.4 (13.6 pct)
+
+    dispatch   3,787.6 -> 683.5   **-81.9 pct**
+    fr total   9,979.2 -> 5,027.0  -49.6 pct
+    ratio      0.7926x -> 0.4147x  (mean of the two AFTER draws)
+
+A/A NULL: the two AFTER draws are the same ELF on the same shape — fr 5,026.9 vs 5,027.0,
+**1.00002x**, and dispatch 683.6 vs 683.4. The numerator is essentially exact.
+
+THE CONTROL IS WHAT LICENSES THIS COMPARISON, and it is the reason this row exists rather
+than a hand-wave. BEFORE and AFTER are DIFFERENT ELFs built about four hours apart with
+many peers' commits in between — SPOP, KEYS and SCAN floor classes, LCS work — so this is
+NOT a reverse-patch A/B and must not be read as one. `get_control` measured **0.4064x** in
+the BEFORE window and **0.4063x** in the AFTER window, 0.02 pct apart, on the two ELFs.
+The incumbent arm agrees too: redis 12,590.0 (BEFORE, at loadavg 26) against 12,164.8 /
+12,078.1 (AFTER, at loadavg 15) — a 3.4 pct spread in the direction and magnitude this
+harness documents for the redis arm under load, on a command my lever does not touch.
+
+AND THE PART I CANNOT CLAIM. Dispatch fell 3,104.1 instr/op; the fr total fell 4,952.2.
+**1,848.1 instr/op of the improvement is NOT explained by the dispatch term.** Some of it
+should be real and mine — the borrowed route never materialises the 5-element
+`Vec<Vec<u8>>` argv, and that saving is counted as work rather than dispatch — but I have
+not separated that from four hours of peer commits, and I am not going to pretend the
+whole -49.6 pct is this lever. **The defensible claim is the dispatch collapse**: it is
+route-specific, it is fr-side, it reproduces to 0.03 pct across two draws, and nothing a
+peer landed touches ZRANGESTORE's classification.
+
+SIZE SIBLING, because `zrangestore_all` has THREE members and this repo has read a
+one-point shape as a command claim four times:
+
+    zrangestore_64   fr 26,368.4 / 26,379.7   redis 678,655.2 / 673,412.2   **0.0389x / 0.0392x**
+
+fr is ~25.6x ahead at 64 members, two draws, fr arm 0.04 pct apart. NO PER-MEMBER SLOPE IS
+CLAIMED FOR REDIS, and the reason is a falsification the numbers performed on themselves: a
+two-point linear fit puts redis's intercept at **-20,704 instr/op**, which is impossible for
+a fixed cost. Redis's ZRANGESTORE is SUPERLINEAR in member count over this range — consistent
+with rebuilding the destination by incremental insert where fr bulk-builds it in one O(n)
+pass (frankenredis-zsetbulk) — so a line is the wrong model and I am not fitting one.
+fr's own points are consistent with a line at 349.9 instr/member, intercept 3,977.
+
+    THE 0.7926x IN MY EARLIER ROW WAS AN INTERCEPT READING and is now superseded twice
+    over: by the lever, and by the member count. Do not quote it.
+
+PROVENANCE:
+  fr ELFs       BEFORE 3f027a4f7ebadb7767316134d4c0f6810295b2fd21bba160f260279778290815
+                AFTER  61778add43b18a6b4ae913d952d86c5a994db21695bf5534f9f79d51e6942bb0
+                Both built LOCALLY with RCH_CARGO_WRAPPER_BYPASS=1 exported and
+                env -u CARGO_TARGET_DIR, no [RCH] line, each copied to a private path
+                BEFORE measuring (target/release is a rendezvous in this shared checkout).
+                File shas of the copies measured, not /proc/<pid>/exe self-reports.
+  incumbent     `incumbent verified: redis-server sha=d2c8a4b9 == vendored source HEAD,
+                clean` printed on every run in both windows.
+  host          thinkstation1, 64 cores observed, governor powersave, /data 165G.
+  per-arm load  AFTER-1 13.61/15.07/19.90; AFTER-2 14.28/15.19/19.91; zrangestore_64
+                14.28/15.19/19.91 and 18.90/16.11/19.87. 1/5/15 converged throughout.
+                BEFORE was taken at 19.27/21.77/26.11 — a different, busier window, which
+                is exactly why the control and the redis arm are quoted above.
+  per-arm MHz   AFTER-1 3,103 -> 3,304 mean; AFTER-2 3,345 -> 3,124; control 2,928 -> 2,829.
+                Cross-core spread 1,429-4,285 at a single instant, as always on this host.
+
+RETRY PREDICATE. Do NOT re-derive this as a before/after across rebuilt ELFs — that is what
+the control had to rescue here. If the 1,848 instr/op remainder matters to anyone, settle it
+with a REVERSE-PATCH A/B in one window: build AFTER, revert only the `(5, Zrangestore)` floor
+entry, build BEFORE, build AFTER again, and require the two AFTERs to agree before quoting
+the difference. Re-measure the option forms only if the class is ever widened past arity 5 —
+they are arity 6+, still take the generic path, and are unmeasured.
