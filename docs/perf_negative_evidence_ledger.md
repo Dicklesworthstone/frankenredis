@@ -31137,3 +31137,79 @@ RETRY PREDICATE. The ZRANGESTORE size question is CLOSED — three forms, two si
 collapsing. Do not add a third size. The open items are unchanged: the arity-6 forms are
 still unclaimed at ~3,115 instr/op each and need a SECOND parser and class (not a widening
 of `(5, Zrangestore)`), and the redis-side rank-vs-REV asymmetry above is unexplained.
+
+--------------------------------------------------------------------------------
+SHIPPED + CERTIFIED (frankenredis-p98mw) — multi-word Allison-Dix LCS: lcs_65 1.3382x ->
+0.3151x and lcs_128 1.3460x -> 0.1442x, a 4.2x and 6.9x cut in fr's own instruction count.
+COSTS a 10.6 pct regression at 64 bytes and 3.4 pct at 8 — both reported, neither hidden
+
+Claim class: COMPETITIVE
+
+The lever the previous row specified, built and measured. `build_lcs_dp` and
+`compute_lcs_len` now carry the Crochemore-Iliopoulos-Pinzon-Rytter recurrence across
+`ceil(len/64)` limbs instead of surrendering to an O(n*m) matrix above a machine word.
+
+    shape        BEFORE                     AFTER                      delta
+    lcs_65       124,116.8   1.3382x        29,262.2   0.3151x        -76.4 pct  CROSSED
+    lcs_128      458,948.9   1.3460x        49,159.0   0.1442x        -89.3 pct  CROSSED
+    lcs_64        10,722.8   0.1191x        11,856.7   0.1318x        +10.6 pct  REGRESSED
+    lcs_2          7,104.3   1.1054x         7,343.9   1.1425x         +3.4 pct  REGRESSED
+    get_control    1,307.3   0.4086x         1,300.2   0.4233x         -0.5 pct  NULL
+
+THE REGRESSIONS ARE REAL AND I CHASED THEM TWICE BEFORE ACCEPTING THEM. First cut replaced
+the single-word path outright and cost +103 pct on lcs_64 and +33 pct on lcs_2 — the wide
+form heap-allocates its 256-limb mask table and vector every call where the narrow one used
+a stack array and a register. Restoring the verbatim `m <= 64` construction took it to
++15.0 pct; specialising `LcsDp::get` for `words == 1` (it runs O(n+m) times inside the
+backtrack, and a slice-and-loop there is not free) took it to +10.6 pct. The residue is the
+extra branch and the wider enum, and I stopped there rather than add variant duplication for
+it.
+
+    THE TRADE, stated plainly: at <=64 bytes fr WAS 0.1191x and is now 0.1318x — still 7.6x
+    ahead of the incumbent, and 10.6 pct of a 7.6x lead is not a competitive loss. At 65
+    bytes fr WAS 1.3382x BEHIND and is now 0.3151x ahead. Above the word boundary the win is
+    4.2x-6.9x on fr's own instruction count. I would take this trade again, and it is a
+    trade, not a free win.
+
+CORRECTNESS. `LcsDp::Full` and `compute_lcs_len_scalar` are now `#[cfg(test)]` — production
+builds no matrix at any size, and they survive purely as equivalence oracles. Two new gates:
+  * `lcs_multiword_dp_agrees_with_the_matrix_in_every_cell` compares EVERY dp[i][j], not
+    just the final length, because each cell feeds `compute_lcs`'s backtrack and one wrong
+    cell silently changes the returned substring rather than erroring. Lengths straddle
+    every limb edge (63/64/65/127/128/129/130) in both orders so ColBits and RowBits are
+    both exercised, plus all-equal and fully-disjoint degenerates at 130 bytes.
+  * `lcs_multiword_reconstruction_is_byte_identical_across_the_boundary` compares the
+    STRING against an independent matrix+backtrack oracle over 300 random pairs up to 200
+    bytes — two subsequences can share a length, so an equal-length assertion would pass
+    while the reply changed.
+The pre-existing `lcs_len_bitparallel_matches_scalar` fuzz already spans 0..90 and so
+already crossed the boundary; it gates the widened `compute_lcs_len` unchanged.
+
+MUTATION TESTING FOUND DEAD CODE I HAD WRITTEN MYSELF, and this is the part worth keeping.
+I implemented the step as a bignum add AND a bignum subtract with borrow propagation.
+Zeroing the carry reddened four tests; ZEROING THE BORROW LEFT EVERYTHING GREEN. That is not
+a test gap — `u = v & pm[c]` is a bitwise SUBSET of `v`, so `v - u` can never borrow and is
+exactly `v & !u`. The borrow chain was provably unreachable. It is now gone and the step is
+one add-with-carry plus a mask, which is cheaper as well as honest. A guard that cannot
+fire is not conservatism, it is a claim about the algorithm that nobody checked.
+
+PROVENANCE:
+  AFTER ELF     5a2e7ab72c8f070d5b49c65d198c902a9d8716b7afb8199e4ddad14a41d8e033
+  BEFORE ELF    e2758879a3f343a43fa665d2ed43eacf9cbf19948ce3a3cf65e490f7786ca557 (the row
+                that measured the cliff, HEAD d13ff14a3)
+  harness       scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines in the SAME
+                invocation. Incumbent verified in-run: sha=d2c8a4b9 == vendored HEAD, clean.
+  host          thinkstation1, 64 cores, powersave, /data 165G.
+  PER-ARM loadavg/MHz  lcs_2 11.08/3434 · lcs_64 11.08/2511 · lcs_65 11.95/1429 ·
+                lcs_128 12.36/1429 · get_control 13.60/2772. Window 1/5/15 =
+                11.08/11.82/15.82 — the quietest of this session and CONVERGED.
+                Cross-core spread 1429-3434 MHz (2.40x) within the row, which is exactly why
+                these are instruction counts: the two largest effects here are 4.2x and 6.9x.
+  gates         cargo test -p fr-command 1218 passed 0 failed; clippy --no-deps -D warnings
+                clean for my hunks (one pre-existing error at :60949 is outside my diff);
+                cargo fmt applied.
+
+RETRY PREDICATE: the residual +10.6 pct at 64 bytes is recoverable by splitting ColBits into
+narrow and wide VARIANTS so the hot `get` arm carries no guard — worth doing only if someone
+shows LCS-on-short-strings traffic that matters, since the shape is already 7.6x ahead. Do
+NOT re-derive the borrow chain: it is unreachable by the subset argument above.

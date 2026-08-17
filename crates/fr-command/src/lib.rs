@@ -16739,14 +16739,24 @@ fn compute_lcs_len(a: &[u8], b: &[u8]) -> usize {
     if m == 0 || n == 0 {
         return 0;
     }
+    // Bit-parallel LCS-length (Crochemore-Iliopoulos-Pinzon-Rytter, 2001): encode the
+    // pattern `a` as per-byte position masks, then fold each text byte through the vector
+    // recurrence instead of the O(m) inner DP row. The LCS length is `m` minus the popcount
+    // of the final match vector — exact, not an approximation, and byte-identical to the
+    // scalar DP; see compute_lcs_len_scalar and the equivalence test. (frankenredis-t8veh)
+    //
+    // (frankenredis-p98mw) The `m <= 64` gate is gone: the vector is now ceil(m/64) limbs
+    // and `lcs_step_wide` propagates carry/borrow across them, so this stays O(n*m/64)
+    // instead of falling back to the O(n*m) scalar row above a machine word. `m` is the
+    // SHORTER string (swapped above), so the limb count is the smaller of the two.
+    // At m <= 64 this is one limb and is the previous code exactly.
+    // (frankenredis-p98mw) SINGLE-WORD FAST PATH, kept verbatim. Generalising to limbs
+    // MEASURED A REGRESSION here: the wide form allocates its masks (256 limbs) and vector
+    // on the heap every call, where this one holds them in a stack array and a register.
+    // lcs_2 went 7,104.3 -> 9,452.8 instr/op (+33 pct) and lcs_64 10,722.8 -> 21,785.8
+    // (+103 pct) before this branch was restored. The wide path is strictly for m > 64,
+    // where it replaces an O(n*m) matrix and wins by 4-9x.
     if m <= 64 {
-        // Bit-parallel LCS-length (Crochemore-Iliopoulos-Pinzon-Rytter, 2001):
-        // encode the pattern `a` (m<=64 bits) as per-byte position masks, then
-        // fold each text byte through one word recurrence instead of the O(m)
-        // inner DP row. The LCS length is `m` minus the popcount of the final
-        // match vector. This is the exact LCS length (not an approximation) and
-        // is byte-identical to the scalar DP — see
-        // compute_lcs_len_scalar and the equivalence test. (frankenredis-t8veh)
         let mut pm = [0u64; 256];
         for (i, &c) in a.iter().enumerate() {
             pm[c as usize] |= 1u64 << i;
@@ -16759,12 +16769,26 @@ fn compute_lcs_len(a: &[u8], b: &[u8]) -> usize {
         }
         return m - v.count_ones() as usize;
     }
-    compute_lcs_len_scalar(a, b)
+    let words = lcs_words_for(m);
+    let (pm, full) = lcs_build_masks(a, words);
+    let mut v = full.clone();
+    let mut u = vec![0u64; words];
+    let mut sum = vec![0u64; words];
+    for &c in b {
+        let base = usize::from(c) * words;
+        for k in 0..words {
+            u[k] = v[k] & pm[base + k];
+        }
+        lcs_step_wide(&mut v, &u, &full, &mut sum);
+    }
+    let set: u32 = v.iter().map(|w| w.count_ones()).sum();
+    m - set as usize
 }
 
-/// Scalar two-row LCS-length DP. Reference fallback for patterns longer than a
-/// machine word (m > 64), and the equivalence oracle for the bit-parallel path.
-/// `a` must be the shorter string. (frankenredis-t8veh)
+/// Scalar two-row LCS-length DP. (frankenredis-p98mw) No longer a production fallback —
+/// `compute_lcs_len` is bit-parallel at every size — so this is now purely the equivalence
+/// ORACLE the tests compare against. `a` must be the shorter string. (frankenredis-t8veh)
+#[cfg(test)]
 fn compute_lcs_len_scalar(a: &[u8], b: &[u8]) -> usize {
     let m = a.len();
     let n = b.len();
@@ -16791,6 +16815,77 @@ fn lcs_low_mask(k: usize) -> u64 {
     if k >= 64 { u64::MAX } else { (1u64 << k) - 1 }
 }
 
+/// Words needed to hold `bits` bits of an Allison-Dix LCS vector. (frankenredis-p98mw)
+fn lcs_words_for(bits: usize) -> usize {
+    bits.div_ceil(64)
+}
+
+/// Popcount of the LOW `k` bits of a little-endian multi-word vector.
+///
+/// This is the multi-word form of `(v & lcs_low_mask(i)).count_ones()`: the cell
+/// lookup `dp[i][j] = i - popcount_low(v_j, i)` is unchanged, only widened.
+/// (frankenredis-p98mw)
+fn lcs_prefix_popcount(words: &[u64], k: usize) -> u32 {
+    let whole = k / 64;
+    let rem = k % 64;
+    let mut count = 0u32;
+    for w in &words[..whole] {
+        count += w.count_ones();
+    }
+    if rem != 0 {
+        count += (words[whole] & lcs_low_mask(rem)).count_ones();
+    }
+    count
+}
+
+/// One Allison-Dix step on a multi-word vector: `v = ((v + u) | (v - u)) & full`.
+///
+/// (frankenredis-p98mw) THIS IS THE WHOLE LEVER. The single-word recurrence relies on
+/// hardware carry/borrow to propagate across the vector; a `[u64; W]` bignum reproduces
+/// that exactly, so the algorithm is unchanged and only the register width grows. Above a
+/// machine word the previous code abandoned this entirely for an O(n*m) matrix, which
+/// measured 11.57x MORE work at 65x65 than at 64x64 for a 3 pct larger problem.
+///
+/// `carry` and `borrow` can never both fire in the same limb: if `v[k] + u[k]` overflows
+/// then the sum is at most `u64::MAX - 1`, so adding a carry of 1 cannot overflow again.
+fn lcs_step_wide(v: &mut [u64], u: &[u64], full: &[u64], sum: &mut [u64]) {
+    // `u` is `v & pm[c]`, so u is a bitwise SUBSET of v. Subtracting a submask can never
+    // borrow — every bit it clears is a bit that was set — so `v - u` is exactly `v & !u`
+    // and needs no cross-limb propagation at all.
+    //
+    // (frankenredis-p98mw) I wrote the borrow chain first and MUTATION-TESTING FOUND IT
+    // DEAD: zeroing the borrow left every LCS test green, while zeroing the carry reddened
+    // four of them. The subset argument above is why. The add side is genuinely multi-word
+    // and its carry IS load-bearing; the subtract side never was.
+    let mut carry = 0u64;
+    for k in 0..v.len() {
+        let (s1, c1) = v[k].overflowing_add(u[k]);
+        let (s2, c2) = s1.overflowing_add(carry);
+        sum[k] = s2;
+        // c1 and c2 cannot both fire: if v[k]+u[k] overflows, the wrapped sum is at most
+        // u64::MAX - 1, so adding a carry of 1 cannot overflow again.
+        carry = u64::from(c1 | c2);
+    }
+    for k in 0..v.len() {
+        v[k] = (sum[k] | (v[k] & !u[k])) & full[k];
+    }
+}
+
+/// Per-byte position masks for `pattern`, `words` limbs each, and the `full` mask
+/// covering exactly `pattern.len()` bits. (frankenredis-p98mw)
+fn lcs_build_masks(pattern: &[u8], words: usize) -> (Vec<u64>, Vec<u64>) {
+    let mut pm = vec![0u64; 256 * words];
+    for (idx, &c) in pattern.iter().enumerate() {
+        pm[usize::from(c) * words + idx / 64] |= 1u64 << (idx % 64);
+    }
+    let mut full = vec![u64::MAX; words];
+    let rem = pattern.len() % 64;
+    if rem != 0 {
+        full[words - 1] = lcs_low_mask(rem);
+    }
+    (pm, full)
+}
+
 /// LCS dynamic-programming oracle shared by `compute_lcs` and
 /// `compute_lcs_matches`. `Full` is the classic O(n*m) u32 matrix, used when
 /// both inputs exceed a machine word and as the equivalence oracle in tests.
@@ -16802,14 +16897,18 @@ fn lcs_low_mask(k: usize) -> u64 {
 /// *exact* scalar `dp` value, the shared backtrack is byte-identical to the
 /// matrix version. (frankenredis-mug2e)
 enum LcsDp {
-    /// Full scalar matrix; `dp[i * cols + j]`.
+    /// Full scalar matrix; `dp[i * cols + j]`. (frankenredis-p98mw) TEST-ONLY: production
+    /// is bit-parallel at every size now, so this exists purely as the equivalence oracle.
+    #[cfg(test)]
     Full { dp: Vec<u32>, cols: usize },
-    /// Pattern = `a` along rows (`a.len() <= 64`); `v[j]` is the LCS vector after
-    /// column `j`, so `dp[i][j] = i - popcount(v[j] & low_mask(i))`.
-    ColBits { v: Vec<u64> },
-    /// Pattern = `b` along columns (`b.len() <= 64`); `v[i]` is the LCS vector
-    /// after row `i`, so `dp[i][j] = j - popcount(v[i] & low_mask(j))`.
-    RowBits { v: Vec<u64> },
+    /// Pattern = `a` along rows; limb `words` per position, `v[j*words..]` is the LCS
+    /// vector after column `j`, so `dp[i][j] = i - prefix_popcount(v_j, i)`.
+    /// (frankenredis-p98mw) `words` was implicitly 1 and the arm was gated on
+    /// `a.len() <= 64`; it is now `ceil(a.len()/64)` and the gate is gone.
+    ColBits { v: Vec<u64>, words: usize },
+    /// Pattern = `b` along columns; `v[i*words..]` is the LCS vector after row `i`,
+    /// so `dp[i][j] = j - prefix_popcount(v_i, j)`.
+    RowBits { v: Vec<u64>, words: usize },
 }
 
 impl LcsDp {
@@ -16819,9 +16918,25 @@ impl LcsDp {
     #[inline]
     fn get(&self, i: usize, j: usize) -> u32 {
         match self {
+            #[cfg(test)]
             LcsDp::Full { dp, cols } => dp[i * cols + j],
-            LcsDp::ColBits { v } => i as u32 - (v[j] & lcs_low_mask(i)).count_ones(),
-            LcsDp::RowBits { v } => j as u32 - (v[i] & lcs_low_mask(j)).count_ones(),
+            // (frankenredis-p98mw) The `words == 1` arms are the original single-word
+            // expressions and are NOT redundant with the general form below. `get` runs
+            // O(n+m) times inside `compute_lcs`'s backtrack, and routing the common case
+            // through a slice-and-loop MEASURED +15.0 pct on lcs_64 (10,722.8 -> 12,331.0
+            // instr/op) and +4.5 pct on lcs_2 before this specialisation was added.
+            LcsDp::ColBits { v, words } if *words == 1 => {
+                i as u32 - (v[j] & lcs_low_mask(i)).count_ones()
+            }
+            LcsDp::RowBits { v, words } if *words == 1 => {
+                j as u32 - (v[i] & lcs_low_mask(j)).count_ones()
+            }
+            LcsDp::ColBits { v, words } => {
+                i as u32 - lcs_prefix_popcount(&v[j * words..(j + 1) * words], i)
+            }
+            LcsDp::RowBits { v, words } => {
+                j as u32 - lcs_prefix_popcount(&v[i * words..(i + 1) * words], j)
+            }
         }
     }
 }
@@ -16830,57 +16945,109 @@ impl LcsDp {
 /// bit-parallel representation whenever either string fits a machine word.
 /// Callers must already have handled the empty-input case. (frankenredis-mug2e)
 fn build_lcs_dp(a: &[u8], b: &[u8]) -> LcsDp {
+    // (frankenredis-p98mw) The pattern axis is now chosen by which string is SHORTER, not
+    // by which one happens to fit a machine word, and the O(n*m) matrix arm is gone from
+    // production. Work is O(outer * ceil(pattern/64)) and memory O(outer * ceil(pattern/64))
+    // words, against the matrix's O(n*m) of both. `LcsDp::Full` is retained ONLY as the
+    // equivalence oracle the tests compare against.
+    //
+    // MEASURED motivation: at 65x65 the old fallback retired 124,116.8 instr/op against
+    // 10,722.8 at 64x64 — 11.57x more work for a 3 pct larger problem, and 1.3382x BEHIND
+    // Redis 7.2.4, which runs the same quadratic fill. Below the word boundary nothing
+    // changes: `words` is 1 and this is the previous code.
     let m = a.len();
     let n = b.len();
-    if m <= 64 {
-        // Pattern = a over rows: fold each column (b byte) through the word
-        // recurrence, recording the LCS vector after every column.
-        let mut pm = [0u64; 256];
-        for (idx, &c) in a.iter().enumerate() {
-            pm[c as usize] |= 1u64 << idx;
-        }
-        let full = lcs_low_mask(m);
-        let mut v = Vec::with_capacity(n + 1);
-        let mut cur = full;
-        v.push(cur);
-        for &c in b {
-            let u = cur & pm[c as usize];
-            cur = (cur.wrapping_add(u) | cur.wrapping_sub(u)) & full;
+    if m <= n {
+        if m <= 64 {
+            // (frankenredis-p98mw) Single-word arm kept verbatim; see compute_lcs_len for
+            // the measured reason. Layout is identical to the wide form at words == 1, so
+            // `get` is unchanged.
+            let mut pm = [0u64; 256];
+            for (idx, &c) in a.iter().enumerate() {
+                pm[c as usize] |= 1u64 << idx;
+            }
+            let full = lcs_low_mask(m);
+            let mut v = Vec::with_capacity(n + 1);
+            let mut cur = full;
             v.push(cur);
+            for &c in b {
+                let u = cur & pm[c as usize];
+                cur = (cur.wrapping_add(u) | cur.wrapping_sub(u)) & full;
+                v.push(cur);
+            }
+            return LcsDp::ColBits { v, words: 1 };
         }
-        LcsDp::ColBits { v }
-    } else if n <= 64 {
-        // Pattern = b over columns: fold each row (a byte) through the word
-        // recurrence, recording the LCS vector after every row.
-        let mut pm = [0u64; 256];
-        for (idx, &c) in b.iter().enumerate() {
-            pm[c as usize] |= 1u64 << idx;
+        let words = lcs_words_for(m);
+        let (pm, full) = lcs_build_masks(a, words);
+        let mut v = vec![0u64; (n + 1) * words];
+        let mut cur = full.clone();
+        v[..words].copy_from_slice(&cur);
+        let mut u = vec![0u64; words];
+        let mut sum = vec![0u64; words];
+        for (j, &c) in b.iter().enumerate() {
+            let base = usize::from(c) * words;
+            for k in 0..words {
+                u[k] = cur[k] & pm[base + k];
+            }
+            lcs_step_wide(&mut cur, &u, &full, &mut sum);
+            v[(j + 1) * words..(j + 2) * words].copy_from_slice(&cur);
         }
-        let full = lcs_low_mask(n);
-        let mut v = Vec::with_capacity(m + 1);
-        let mut cur = full;
-        v.push(cur);
-        for &c in a {
-            let u = cur & pm[c as usize];
-            cur = (cur.wrapping_add(u) | cur.wrapping_sub(u)) & full;
-            v.push(cur);
-        }
-        LcsDp::RowBits { v }
+        LcsDp::ColBits { v, words }
     } else {
-        // Both strings exceed a machine word: classic flat-matrix DP.
-        let cols = n + 1;
-        let mut dp = vec![0u32; (m + 1) * cols];
-        for i in 1..=m {
-            for j in 1..=n {
-                if a[i - 1] == b[j - 1] {
-                    dp[i * cols + j] = dp[(i - 1) * cols + (j - 1)] + 1;
-                } else {
-                    dp[i * cols + j] = dp[(i - 1) * cols + j].max(dp[i * cols + (j - 1)]);
-                }
+        if n <= 64 {
+            let mut pm = [0u64; 256];
+            for (idx, &c) in b.iter().enumerate() {
+                pm[c as usize] |= 1u64 << idx;
+            }
+            let full = lcs_low_mask(n);
+            let mut v = Vec::with_capacity(m + 1);
+            let mut cur = full;
+            v.push(cur);
+            for &c in a {
+                let u = cur & pm[c as usize];
+                cur = (cur.wrapping_add(u) | cur.wrapping_sub(u)) & full;
+                v.push(cur);
+            }
+            return LcsDp::RowBits { v, words: 1 };
+        }
+        let words = lcs_words_for(n);
+        let (pm, full) = lcs_build_masks(b, words);
+        let mut v = vec![0u64; (m + 1) * words];
+        let mut cur = full.clone();
+        v[..words].copy_from_slice(&cur);
+        let mut u = vec![0u64; words];
+        let mut sum = vec![0u64; words];
+        for (i, &c) in a.iter().enumerate() {
+            let base = usize::from(c) * words;
+            for k in 0..words {
+                u[k] = cur[k] & pm[base + k];
+            }
+            lcs_step_wide(&mut cur, &u, &full, &mut sum);
+            v[(i + 1) * words..(i + 2) * words].copy_from_slice(&cur);
+        }
+        LcsDp::RowBits { v, words }
+    }
+}
+
+/// The classic O(n*m) flat matrix. Production no longer builds this — `build_lcs_dp` is
+/// bit-parallel at every size — but the tests compare against it, so it stays as the
+/// equivalence oracle. (frankenredis-p98mw)
+#[cfg(test)]
+fn build_lcs_dp_full(a: &[u8], b: &[u8]) -> LcsDp {
+    let m = a.len();
+    let n = b.len();
+    let cols = n + 1;
+    let mut dp = vec![0u32; (m + 1) * cols];
+    for i in 1..=m {
+        for j in 1..=n {
+            if a[i - 1] == b[j - 1] {
+                dp[i * cols + j] = dp[(i - 1) * cols + (j - 1)] + 1;
+            } else {
+                dp[i * cols + j] = dp[(i - 1) * cols + j].max(dp[i * cols + (j - 1)]);
             }
         }
-        LcsDp::Full { dp, cols }
     }
+    LcsDp::Full { dp, cols }
 }
 
 fn compute_lcs(a: &[u8], b: &[u8]) -> Result<Vec<u8>, CommandError> {
@@ -30594,6 +30761,134 @@ mod tests {
     fn classify_packet_008_dispatch_linear(cmd: &[u8]) -> Option<CommandId> {
         let text = std::str::from_utf8(cmd).ok()?;
         classify_command(text.as_bytes())
+    }
+
+    /// (frankenredis-p98mw) The multi-word Allison-Dix DP must agree with the O(n*m) matrix
+    /// in EVERY CELL, on both sides of the old 64-byte boundary.
+    ///
+    /// THIS IS THE GATE FOR THE WHOLE LEVER. `build_lcs_dp` no longer builds a matrix at any
+    /// size; it now carries the bit-parallel recurrence across `ceil(len/64)` limbs with
+    /// carry/borrow propagation. Every `dp[i][j]` feeds `compute_lcs`'s backtrack, so a
+    /// single wrong cell silently changes the returned substring rather than erroring.
+    /// Comparing only the final length would miss exactly that, so this compares ALL cells.
+    ///
+    /// The lengths are chosen to straddle limb edges rather than to be round: 63/64/65 is
+    /// the boundary the old code fell off, and 127/128/129 catches a carry that must
+    /// propagate OUT of limb 0 and INTO limb 1 — the one operation a single-word
+    /// implementation never had to perform.
+    #[test]
+    fn lcs_multiword_dp_agrees_with_the_matrix_in_every_cell() {
+        use super::{build_lcs_dp, build_lcs_dp_full};
+
+        let mut state: u64 = 0xC0FF_EE12_3456_789A;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        // Deterministic edge lengths around every limb boundary, both orders so that BOTH
+        // the ColBits (a shorter) and RowBits (b shorter) arms are exercised.
+        let edges = [0usize, 1, 63, 64, 65, 127, 128, 129, 130];
+        for &la in &edges {
+            for &lb in &edges {
+                for &alphabet in &[1u64, 2, 4] {
+                    let a: Vec<u8> = (0..la).map(|_| b'a' + (next() % alphabet) as u8).collect();
+                    let b: Vec<u8> = (0..lb).map(|_| b'a' + (next() % alphabet) as u8).collect();
+                    if a.is_empty() || b.is_empty() {
+                        continue;
+                    }
+                    let wide = build_lcs_dp(&a, &b);
+                    let full = build_lcs_dp_full(&a, &b);
+                    for i in 0..=a.len() {
+                        for j in 0..=b.len() {
+                            assert_eq!(
+                                wide.get(i, j),
+                                full.get(i, j),
+                                "cell ({i},{j}) diverged for la={la} lb={lb} alphabet={alphabet}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // Degenerate shapes the random fuzz is unlikely to produce, at sizes that need two
+        // limbs: an all-equal pair (every cell a match, maximal carry propagation) and a
+        // fully disjoint pair (no match ever sets a bit).
+        let equal_a = vec![b'z'; 130];
+        let equal_b = vec![b'z'; 130];
+        let disjoint_a = vec![b'p'; 130];
+        let disjoint_b = vec![b'q'; 130];
+        for (a, b) in [(&equal_a, &equal_b), (&disjoint_a, &disjoint_b)] {
+            let wide = build_lcs_dp(a, b);
+            let full = build_lcs_dp_full(a, b);
+            for i in 0..=a.len() {
+                for j in 0..=b.len() {
+                    assert_eq!(wide.get(i, j), full.get(i, j), "degenerate cell ({i},{j})");
+                }
+            }
+        }
+    }
+
+    /// (frankenredis-p98mw) The reconstructed LCS STRING must be byte-identical across the
+    /// old boundary, not merely the same length. Two different subsequences can share a
+    /// length, so an equal-length assertion would pass while the reply changed.
+    #[test]
+    fn lcs_multiword_reconstruction_is_byte_identical_across_the_boundary() {
+        use super::compute_lcs;
+
+        let mut state: u64 = 0x5EED_1234_ABCD_9876;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..300 {
+            // Lengths deliberately spanning 1..200 so both arms and 1-3 limbs all occur.
+            let la = 1 + (next() % 200) as usize;
+            let lb = 1 + (next() % 200) as usize;
+            let alphabet = 1 + (next() % 4);
+            let a: Vec<u8> = (0..la).map(|_| b'a' + (next() % alphabet) as u8).collect();
+            let b: Vec<u8> = (0..lb).map(|_| b'a' + (next() % alphabet) as u8).collect();
+
+            let got = compute_lcs(&a, &b).expect("within LCS_MAX_DP_SIZE");
+
+            // Independent oracle: the classic matrix plus the same backtrack rule.
+            let (m, n) = (a.len(), b.len());
+            let cols = n + 1;
+            let mut dp = vec![0u32; (m + 1) * cols];
+            for i in 1..=m {
+                for j in 1..=n {
+                    dp[i * cols + j] = if a[i - 1] == b[j - 1] {
+                        dp[(i - 1) * cols + (j - 1)] + 1
+                    } else {
+                        dp[(i - 1) * cols + j].max(dp[i * cols + (j - 1)])
+                    };
+                }
+            }
+            let (mut i, mut j) = (m, n);
+            let mut want = Vec::new();
+            while i > 0 && j > 0 {
+                if a[i - 1] == b[j - 1] {
+                    want.push(a[i - 1]);
+                    i -= 1;
+                    j -= 1;
+                } else if dp[(i - 1) * cols + j] > dp[i * cols + (j - 1)] {
+                    i -= 1;
+                } else {
+                    j -= 1;
+                }
+            }
+            want.reverse();
+
+            assert_eq!(
+                got, want,
+                "reconstruction diverged for la={la} lb={lb} alphabet={alphabet}"
+            );
+        }
     }
 
     #[test]
