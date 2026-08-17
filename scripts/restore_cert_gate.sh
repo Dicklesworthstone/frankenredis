@@ -157,30 +157,19 @@ SAME=$(echo $SAMPLES_SEEN | tr ' ' '\n' | sort -g | awk '{a[NR]=$1} END{print a[
 SPREAD=$(echo $SAMPLES_SEEN | tr ' ' '\n' | sort -g \
          | awk '{a[NR]=$1} END{printf "%.4f", a[NR]-a[1]}')
 echo "   samples:${SAMPLES_SEEN}  median ${SAME}x  spread ${SPREAD}"
+# SPREAD IS A WARNING, NOT A REFUSAL -- changed on a pre-registered rule, in a second
+# window, and only after the prediction held. It used to refuse here. The evidence: at a
+# FIXED warmup of 24, nine repeats across two windows gave medians
+#   1.0042 0.9993 1.0015 0.9974 0.9913 | 1.0078 1.0164 1.0150 1.0100
+# -- ALL NINE inside 0.98..1.02 -- while their spreads ranged 0.0026 to 0.2298. A
+# statistic that varies 90-fold at fixed warmup is measuring the shared host, not the
+# settling term, so refusing on it rejected windows the certification could pass. The
+# MEDIAN is what the certification's own A/A band tests, so the median decides.
 if awk -v s="$SPREAD" 'BEGIN{exit !(s>0.04)}'; then
-  echo "REFUSE: the one-process null itself spreads ${SPREAD} across probes, wider than" >&2
-  echo "        the 0.04 band it is being judged against. The median is not meaningful" >&2
-  echo "        and a 9-trial run cannot be predicted from it." >&2
-  echo >&2
-  # CORRECTED (230c674ec). This block used to report six samples spanning
-  # 0.917-1.056 and conclude the spread was a property of the host that re-running
-  # would not fix. That was wrong, and the samples were the evidence for it: ALL SIX
-  # were taken WITHOUT warm-up, and the drift is a SETTLING TRANSIENT spanning about
-  # ten trials, measured by --drift-curve (first quartile fastest, then a plateau; a
-  # monotone-rise fraction near 0.5 rules out steady growth). Warming 8 passes moved
-  # the same-process null from 0.771 to 1.047 and the two-process null from 0.931 to
-  # 0.974. This gate now warms by default, so a wide spread here is NOT the same
-  # observation my earlier samples were.
-  echo "        NOTE: the pre-warmup samples this gate used to cite (0.917-1.056) are" >&2
-  echo "        SUPERSEDED -- that spread was a ~10-trial settling transient, not a" >&2
-  echo "        host property (230c674ec). This run warmed $WARMUP passes per arm." >&2
-  echo "        A wide spread STILL here is worth re-running in a quieter window:" >&2
-  echo "        the warmed null reached 0.974 at loadavg 32, and whether it enters" >&2
-  echo "        0.98..1.02 at loadavg ~15 is measured, not settled." >&2
-  echo "        Meanwhile the load-immune instruments answer the narrower question:" >&2
-  echo "          scripts/restore_instr_per_op.py     fr/redis instr/op ratio" >&2
-  echo "          scripts/restore_profile_frames.py   where the instructions go" >&2
-  exit 1
+  echo "   NOTE spread ${SPREAD} exceeds 0.04. Measured as ambient host noise rather" >&2
+  echo "   than a warm-up property (0.0026-0.2298 at fixed warmup), so it does not" >&2
+  echo "   decide -- but a 9-trial run in this window will be noisy. Prefer a calmer" >&2
+  echo "   moment if one is available." >&2
 fi
 echo "   one-process null = ${SAME}x  (band 0.98..1.02)"
 if awk -v v="$SAME" 'BEGIN{exit !(v>=0.98 && v<=1.02)}'; then
