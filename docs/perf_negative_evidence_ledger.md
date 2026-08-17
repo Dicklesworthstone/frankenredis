@@ -40728,3 +40728,149 @@ A/A null median 1.000002, bootstrapped over 20,000 resamples, 95 pct median CI
 3. The remaining unconverted write-gate arms are the next levers, not more squares. The
    detector named 77; GETEX (4), TTL (9), the pending string batch (10) and a peer's
    keyed-values work (9) account for 32.
+
+## 2026-08-17 CrimsonHawk: AzureMouse's Timespec retry predicate EXECUTED — 1.0000 calls/op against its own 1.10 threshold, so the lever STAYS CLOSED — and the write-gate campaign's mechanism is now COUNTED rather than inferred (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — this row ships no lever. It executes another agent's retry predicate to a
+verdict, converts my own campaign's asserted mechanism into a counted one, and publishes a
+measured worklist. It contains no FrankenRedis/Redis ratio and claims no standing.
+
+Two files this campaign lives in — `crates/fr-server/src/main.rs` and
+`crates/fr-runtime/src/lib.rs` — are held under an exclusive peer reservation until 22:35Z, so
+this turn was spent on questions answerable with measurement alone. That constraint produced a
+better instrument than the one I would have reached for.
+
+### THE INSTRUMENT: CALL COUNTS, NOT INSTRUCTION SHARES
+
+`scripts/call_count_delta.py`, committed with this row. Same two-point subtraction the rest of
+the campaign uses — startup, seeding and teardown appear identically in the N-op and 2N-op
+dumps and cancel exactly — but differencing `calls=` rather than instruction cost, so the
+answer is CALLS PER OP.
+
+This is the campaign's own stated decisive instrument and it did not exist as a tool.
+AzureMouse's row says it plainly: four hypotheses died there and "the decisive instrument was
+an exact call count, not a share, a rate, or a cycles/op figure". A share cannot separate
+"called twice" from "expensive once"; a count can.
+
+One implementation note that is a correctness bug if missed: callgrind INTERNS callee names.
+`cfn=(id) name` declares and a later bare `cfn=(id)` refers back. Resolving only the declaring
+form undercounts every callee after its first appearance — silently, and in the direction that
+makes a duplicated call look single.
+
+### AZUREMOUSE'S RETRY PREDICATE, EXECUTED TO A VERDICT
+
+That row (2026-07-25, corrected 2026-07-27) rejected the Timespec lever on INCR and set the
+condition to reopen: **"re-open the `Timespec::now` lever only if its uprobe count exceeds 1.10
+calls/op on a workload."**
+
+Measured on `zcard` — deliberately a DIFFERENT command from the one that row used, on a fresh
+ELF at HEAD:
+
+  Timespec>::now       2078 -> 4078   delta 2000   CALLS/OP 1.0000
+  sub_timespec         2069 -> 4069   delta 2000   CALLS/OP 1.0000
+  clock_gettime        2081 -> 4081   delta 2000   CALLS/OP 1.0000
+
+**1.0000 against a 1.10 threshold. The lever STAYS CLOSED**, and the REJECT is now confirmed
+rather than merely unrefuted: it holds on a second command and a current ELF. The ~120 instr/op
+that `Timespec::now` + `sub_timespec` cost on a GETEX is the intrinsic cost of ONE vDSO clock
+read, not a duplicated one, so there is nothing to remove by deduplication and the residual is
+a syscall-path question rather than a call-count one.
+
+A control ran in the same measurement: `record_canonical_with_kind` also read 1.0000 calls/op,
+which is its expected once-per-command, so the instrument was not simply printing 1.0000 for
+everything.
+
+### THE WRITE-GATE MECHANISM, COUNTED
+
+My three shipped batches (`1d8b5e8e1`, `e6a552cfb`, and the string writes swept into
+`5bc439a57`) all claimed the same mechanism: the floor arms were not adding a gate evaluation,
+they were LOSING AN AMORTISATION — the cascade evaluates
+`plain_borrowed_default_key_write_allows` once per buffered pass, the unconverted floor arms
+once per packet. Every row asserted that from instruction deltas. It is now counted.
+
+On the pre-string-batch ELF f35eef3c5c405ef9:
+
+  persist_noop    0.0000 calls/op   converted (e6a552cfb)
+  expire_same     0.0000            converted (e6a552cfb)
+  lset_same       1.0000            never converted
+  setnx_existing  1.0000            not yet converted WHEN THIS ELF WAS BUILT
+
+On current HEAD c13d2f7f6a349a82:
+
+  setnx_existing  0.0000   my string batch, landed via 5bc439a57
+  sadd_existing   0.0000   a PEER's keyed-values conversion (ghmgp), independently confirmed
+  getex_exat      0.0000   1d8b5e8e1
+  lset_same       1.0000   still open
+
+Three things fall out that were previously assumptions:
+
+1. **The mechanism is exactly as claimed.** 1.0000 -> 0.0000 calls/op is the amortisation, and
+   0.0000 is "once per pass" rounding to zero at ~2000 ops per buffered pass, not "never".
+2. **`lset_same` was a VALID null.** Every one of my A/B rows used it as the untouched control
+   and reported it flat. It reads 1.0000 calls/op on both ELFs, so it genuinely still pays the
+   gate — the null was a real control and not a shape that happened not to move.
+3. **The ORIG arm of my string-write A/B was genuinely unconverted.** `setnx_existing` reads
+   1.0000 on the older ELF and 0.0000 on HEAD. The -12.1 pct I reported was measured across a
+   real conversion boundary.
+
+### A MEASURED WORKLIST, REPLACING A STATIC ESTIMATE
+
+My earlier row said "77 arms" from a static scan of the floor dispatcher. That was an estimate
+from source. Sampling twelve write shapes on HEAD by call count gives a measurement:
+
+  STILL PAYING 1.0000 calls/op:
+    lset_same, getset_same, hincrby_zero, hincrbyfloat, hsetnx_existing,
+    zremrangebyrank_none, ltrim_noop, smove_missing, renamenx_exists,
+    move_missing, msetnx_1
+  ALREADY CONVERTED:
+    setbit_same (0.0000)
+
+Eleven of twelve sampled shapes are still on the per-packet gate, at ~187 instr/op each. The
+hash family (HINCRBY, HINCRBYFLOAT, HSETNX) and the single-key list writes (LSET, LTRIM) are
+the obvious next batches, and neither overlaps the keyed-values executor a peer converted.
+
+**Use this instrument to pick them, not the static scan.** A call count says whether a given
+shape actually reaches the gate at runtime; the source scan says only that a path exists.
+
+### COUNTED MECHANISM
+
+Four call-count measurements per shape (two dumps x two ELFs), 2000 and 4000 ops, marginal
+counts exact integers: 2000 in every unconverted case and 0 in every converted one. These are
+counts, not estimates, and they carry no confidence interval because callgrind call counts are
+deterministic.
+
+CV was not used, as a gate or otherwise.
+
+### PROVENANCE
+
+  ELFs          f35eef3c5c405ef9ff8bc3bac5176e5a547fc70abc35cf65a22d83a3c3eca834 (HEAD
+                2b11c6bcb, pre-string-batch) and c13d2f7f6a349a82 (current HEAD 7dfecf4f4).
+                Both plain `--release`, no feature flags, built locally with
+                RCH_CARGO_WRAPPER_BYPASS=1, path from `--message-format=json`, copied to a
+                private path and sha256'd there.
+  bench_elf_sha256=f35eef3c5c405ef9ff8bc3bac5176e5a547fc70abc35cf65a22d83a3c3eca834
+  harness       `scripts/shape_instr_per_op.py --fr-only` for the dumps,
+                `scripts/call_count_delta.py` (new, committed here) for the counts.
+  incumbent     NOT RUN. No redis arm was started and no ratio against redis is claimed
+                anywhere in this row; every number here is an fr-side call count.
+  host          thinkstation1, 64 cores observed, powersave governor, /data 203G free.
+  PER-ARM loadavg / CPU idle
+                Timespec counts    load 11.16 11.87 13.94
+                HEAD verification  load ~11-14
+                worklist survey    load 18.48 14.03 14.48 by the end
+                CPU idle 87.0 / 85.7 pct from /proc/stat deltas before the run, iowait 0.1 pct.
+  admissibility Call counts are deterministic integers and are immune to load by construction,
+                which is why this row is admissible in any window. No timed row is claimed.
+
+### RETRY PREDICATE
+
+1. The Timespec lever is CLOSED at 1.0000 calls/op. Do not reopen it on instruction share,
+   cycles/op or vDSO share — AzureMouse's row already killed four hypotheses that way. Reopen
+   only on a count above 1.10, and `scripts/call_count_delta.py` is now the way to get one.
+2. Take the next write-gate batch from the MEASURED list above, not the static scan. HINCRBY /
+   HINCRBYFLOAT / HSETNX is one coherent batch; LSET / LTRIM is another. Verify each with a
+   call count BEFORE and AFTER: the before must read 1.0000 and the after 0.0000, which is a
+   stronger acceptance test than any instruction delta because it cannot be produced by noise.
+3. Both files this needs are reserved until 22:35Z. Check
+   `check_file_reservation_conflicts` before starting, not after editing.
