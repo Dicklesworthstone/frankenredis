@@ -8,6 +8,30 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## Standing laws (enforced — see scripts/perf_candidate_preflight.py)
+
+These are measured REJECTs whose conclusion GENERALISES, so a later row that quotes a
+ratio on the same surface must engage them. They are listed HERE, in the ledger that
+gets appended to, because they were established in `docs/NEGATIVE_EVIDENCE.md` — a
+different file — and every one of them has already been re-litigated by someone who
+could not see it from the file they were writing in. `frankenredis-33832` was filed
+eight days after the RESTORE law closed and restated the framing it refutes.
+
+`perf_candidate_preflight.py` refuses (exit 10) a KEEP/REJECT entry that triggers one of
+these and quotes a ratio without engaging it. Naming the law, its line reference, or its
+mechanism all count as engaging; a row arguing "this does not apply because X" passes.
+This table and the gate's `STANDING_LAWS` are checked against each other by the gate's
+own self-test, so neither can drift.
+
+| law | established | claim |
+| --- | --- | --- |
+| RESTORE isolation | `NEGATIVE_EVIDENCE.md:5711`, `:26266` | A RESTORE-in-isolation ratio is not a deficit: fr decodes eagerly, redis attaches the listpack shallowly and walks it on every read. Break-even is well under one read per restore. Run `scripts/hash_restore_read_premise_run.sh`. |
+| medium-zset threshold | `NEGATIVE_EVIDENCE.md:22581` | `Compact(Vec)` beats a tree for BOTH build and read below n=2048 — the O(n²)-looking `Vec::insert` is a hardware memmove. Lowering the threshold or moving medium zsets to a tree/skiplist regresses both dimensions. |
+| per-element buffer pooling | `NEGATIVE_EVIDENCE.md:26372` | Pool the CONTAINER, not its elements. Recycling pays only when it removes an allocation without adding a per-element pass; once the bookkeeping is per-element, mimalloc's fast path beats it. |
+
+DELETION CONDITION: delete this section and the gate's table when the two ledgers are
+merged into one file.
+
 ## Verdict and claim conventions
 
 This internal ledger keeps the full retraction and correction trail. Public
@@ -27037,3 +27061,66 @@ RETRY PREDICATE. Re-run `--competitive` unchanged at loadavg <= 15 with three bl
 measurable and fosf1's effect can be read off it. If it does not, raise `--warmup-passes`
 to 16 and re-run `--drift-curve 80` first to see whether the plateau is genuinely flat that
 far out -- both runs above stop at 36-40 trials and cannot see past that.
+
+--------------------------------------------------------------------------------
+CERTIFIED (frankenredis-gein3) — the whole large-k set-algebra family, fr AHEAD on every
+shape (0.16x-0.69x); sdiff_big measured for the first time at 0.2649x; and the no-reply
+shape being UNMOVED confirms the spin fix acted on reply delivery and nothing else
+
+Claim class: COMPETITIVE
+
+Closes the retry predicate I have carried for four rows — "MEASURE sdiff_big, it is landed
+but unmeasured, and it is the one remaining shape that could still hide a crossover" — and
+refreshes two shapes whose numbers predated the event-loop spin fix and were therefore
+stale.
+
+    shape             reply           fr instr/op          redis instr/op       ratio
+    sunion_big        1024 members    417,120 / 416,338    2,569,835/2,561,853  0.1623/0.1625
+    sdiff_big          512 members    482,587 / 482,353    1,822,011/1,819,186  0.2649/0.2651
+    sinter_big         512 members    178,892 / 179,732    ~471,000             0.3791/0.3796
+    sinterstore_big    NONE (stores)  1,055,304            1,525,086            0.6920
+    sintercard_big     one integer      135,663              219,287            0.6187
+
+    fr is AHEAD ON EVERY LARGE-k SET-ALGEBRA SHAPE, by 1.4x to 6.2x. sdiff_big reproduces
+    to 0.05 pct and sunion_big to 0.19 pct — these are tight numbers, not draws.
+
+NO CROSSOVER EXISTS OUTSIDE SINTER. sdiff_big was the last candidate and it is 0.2649x,
+nearly 4x ahead. The k~14 crossover this ledger chased for six rows was never a set-algebra
+property; it was SINTER's alone, it was caused by the event-loop spin, and it is gone.
+
+THE UNPLANNED CONTROL IS THE BEST PART OF THIS ROW. `sinterstore_big` measured 0.6899x and
+0.6905x BEFORE the spin fix and 0.6920x AFTER — unchanged to 0.3 pct — while every shape
+that sends a large reply moved by 2.6x to 3.3x:
+
+    sinter_big    1.2362x -> 0.3791x     large reply, 512 members
+    sunion_big    0.4156x -> 0.1623x     large reply, 1024 members
+    sinterstore   0.6899x -> 0.6920x     NO REPLY — UNMOVED
+
+    A reply-path fix should move reply-bearing shapes and leave the storing sibling alone.
+    That is exactly what happened, and nobody designed this control: sinterstore_big was
+    added as a failed isolation attempt two rows before the fix existed. Its pass count
+    (0.001/op, against sunion_big's 0.91-1.02) is the same statement in the other units.
+
+STANDING, AND THIS RETIRES THE LINE: the set-algebra family is now fr's strongest measured
+ground rather than its weakest. The worst ratio in the family is sinterstore_big at 0.6920x,
+which is a SET-BUILD shape with no reply — meaning what remains is real work, not
+bookkeeping, and it is still 1.4x ahead of redis.
+
+PROVENANCE:
+  ELF sha256           9c59eb6de985e888... built LOCALLY at HEAD 8ab1cf38d from a CLEAN
+                       tree — REPRODUCIBLE FROM HEAD.
+  harness              scripts/shape_instr_per_op.py at HEAD, N=2000/2N=4000, both engines
+                       in the SAME invocation. Two draws each for sdiff_big and sunion_big;
+                       ONE draw for sinterstore_big, whose figure is corroborated by two
+                       pre-fix draws that agree to 0.3 pct.
+  host                 thinkstation1, 64 cores, /data 207G, governor powersave, one build.
+  PER-ARM loadavg/MHz  sdiff_big 21.78/3509 and 23.30/2561 · sunion_big 18.85/2627 and
+                       32.68/2442 · sinterstore_big 30.48/3183. Window verified settled
+                       before starting: 19.42 / 17.76 / 21.19, 1-min and 5-min close and
+                       both moderate.
+
+RETRY PREDICATE: do NOT re-measure this family on instructions — every shape is ahead and
+the causes are enumerated. The only number left worth attention is sinterstore_big's
+0.6920x, and it is a genuine set-build cost rather than an artefact, so treat it as the
+floor rather than a defect. If a large-k crossover is ever suspected again, check the PASS
+COUNT first: it separated reply-bound from work-bound in one reading here.
