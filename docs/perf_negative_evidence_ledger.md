@@ -33837,3 +33837,91 @@ understood, treat every ratio from this harness inside 0.83-1.27 as absent, and 
 effects several times outside it. And before writing "confirmed by experiment" again, ask
 whether one observation can separate the proposed cause from noise already documented in the
 same row.
+
+--------------------------------------------------------------------------------
+## 2026-08-17 RusticHorizon: MEASURED, MECHANISM UNCONFIRMED — reusing a buffer for the container histogram key is worth −9.76 pct on PUBSUB CHANNELS same-tree, but the sibling on the SAME code path did not move (`frankenredis-fpqns`)
+
+NOT BANKED AS A KEEP, deliberately: the improvement is measured but its mechanism is not,
+and a row that cannot say WHY it got faster should not enter the standings. Retitled from
+"PARTIAL WIN" for that reason after the ledger gate asked for a KEEP's full timing
+contract — the gate was right that this is not one.
+
+Claim class: COMPETITIVE. Campaign output: yes — fr vs live vendored Redis 7.2.4 in the same
+invocation, with a same-tree reverse-patch A/B and both a sibling control and a null.
+
+`2fff29ad0` found `PUBSUB CHANNELS` at 2.20-2.47x behind with `format_inner`, `core::fmt::write`
+and `Utf8Chunks::next` in its top ten frames. The cause looked plain: `byq16` removed the
+per-command String allocation for ORDINARY commands but left every CONTAINER command (PUBSUB,
+CLIENT, OBJECT, MEMORY, ACL, CONFIG, XINFO, ...) calling `canonical_command_fullname`, which
+allocates two owned Strings and runs `format!` on every dispatch. This replaces that with a
+reused buffer on `ServerState`, filled via the existing `push_ascii_lowercase_lossy`.
+
+SAME-TREE REVERSE-PATCH A/B, both arms built minutes apart from one tree, differing only in
+those two call sites:
+
+    shape             BEFORE      AFTER      delta
+    pubsub_channels  10,185.2    9,191.4    -9.76 pct   (2.3105x -> 2.1922x)
+    pubsub_numsub     2,507.5    2,505.2    -0.09 pct   SIBLING CONTROL
+    get_control       1,297.5    1,306.9    +0.72 pct   NULL
+
+Stated for the gate: fr/Redis 7.2.4 on `pubsub_channels` measures 2.1922x after this
+change, from 2.3105x before, both arms live in the same invocation.
+
+    The effect is real and it is NOT drift — this is the same-tree measurement my own LCS
+    retraction (`157b325d4` lineage) said to run before believing a cross-tree delta. The
+    cross-tree number happened to agree at -9.8 pct, which is reassuring rather than
+    evidence.
+
+BUT THE MECHANISM IS NOT ESTABLISHED, AND I AM NOT GOING TO CLAIM IT. `PUBSUB NUMSUB ch1`
+takes the SAME branch — `argv.len() > 1 && command_has_subcommands_bytes("pubsub")` is true
+for both — so it should have saved the SAME roughly-constant per-call cost. It saved 2.3
+instr/op. If the saving were the two String allocations plus `format!`, numsub would have
+shown it too, and on a 2,507 instr/op baseline a ~994 saving would have been unmissable.
+
+    SO ONE OF TWO THINGS IS TRUE and I have not separated them: either the saving on CHANNELS
+    is not the allocation/format work I attributed it to, or NUMSUB does not reach these call
+    sites at all. ~994 instr/op is also larger than two small String allocations and a format!
+    ought to cost, which points the same way. The number is measured; the story is not.
+
+    I am recording this rather than shipping the tidy version, because the tidy version —
+    "removed a per-call allocation, saved 9.8 pct" — is exactly what this row would say if I
+    stopped at the result I wanted. The control is what caught it, and a control only earns
+    its place if a surprising reading changes the write-up.
+
+WHAT THIS DOES NOT DO: close the gap. `PUBSUB CHANNELS` is still 2.19x behind. That is
+consistent with the sizing in `2fff29ad0`, which said dispatch was only half the gap and that
+a dispatch-style lever alone would leave ~1.34x — the remaining work is unattributed and the
+bead stays open.
+
+CORRECTNESS. The histogram key becomes an INFO commandstats row name (`cmdstat_pubsub|channels`),
+so a divergence would not error — it would silently rename or split a stats row, which no test
+of PUBSUB's reply would notice. The gate asserts the reused-buffer key is BYTE-IDENTICAL to
+`canonical_command_fullname` across eight container commands, mixed case, and two inputs that
+are not ASCII (one valid UTF-8, one invalid), because the old path went through
+`from_utf8_lossy(..).to_ascii_lowercase()` and the new one through `push_ascii_lowercase_lossy`
+— equivalent only if the lossy replacement agrees.
+
+A NOTE ON A MISTAKE THAT COST A BUILD: I first added the scratch field to `Runtime` because
+that is where `dispatch_peer_addr_cache` lives. The call sites are on `ServerState`. Same
+misattribution class I wrote up for `LuaEval`/`LuaState` two turns ago — reading a symbol
+correctly and attaching it to the wrong type. The compiler caught it before commit this time,
+which is the only reason it cost a build rather than a red main.
+
+PROVENANCE:
+  AFTER ELF     14c375e9edf5835f      BEFORE ELF  34de94bf315b3f01 (same tree, reverse-patched,
+                restored in the same command; `git status crates/fr-runtime/` clean after)
+  harness       scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines in the SAME
+                invocation. Incumbent verified in-run: sha=d2c8a4b9 == vendored HEAD.
+  host          thinkstation1, 64 cores, powersave, /data 126G, ONE PEER BUILD running.
+  PER-ARM loadavg/MHz  before channels 12.72/2542, numsub 13.07/2610, null 13.22/3119 ·
+                after channels 13.22/2394, numsub 13.36/2412, null 13.41/3144. Window
+                1/5/15 = 12.72/15.85/14.71.
+  gates         fr-runtime 614+44+8 tests pass; the two clippy `too many arguments` errors at
+                :25765 and :28929 are PRE-EXISTING and outside my hunks; 27 of 28 fmt diffs
+                likewise pre-existing, the one inside my range (47675) is fixed.
+
+RETRY PREDICATE: before anyone claims the allocation/format story, EXPLAIN WHY `pubsub_numsub`
+did not move. Instrument the two call sites with a counter, or diff the callgrind frames
+between the two shapes — the answer decides whether the remaining 2.19x is more of the same or
+something else entirely. Do not extend this fix to other container commands until that is
+answered; it may be optimising a path they do not take.
