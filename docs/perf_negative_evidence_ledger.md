@@ -34073,3 +34073,79 @@ is the same edit already proven twice in this file (byq16, fbe5d999c). Do NOT st
 bitset: it is the largest blast radius of the three and the least contained. And keep
 `pubsub_numsub` OUT of the control set for any of them — `9abeaa5c1` established it is
 front-classified and never executes this path.
+
+--------------------------------------------------------------------------------
+## 2026-08-17 RusticHorizon: LEVER 1 OF THREE MEASURED — a stack-buffer container key removes four heap allocations per dispatch and is worth −11.1 pct on PUBSUB CHANNELS, same-tree (`frankenredis-fpqns`)
+
+EVIDENCE CLASS, stated because the ledger gate asked for a wall-clock timing contract on an
+earlier draft of this heading: this is a DETERMINISTIC INSTRUCTION COUNT (callgrind Ir), not
+a timing verdict. The fr arm of this harness repeats to 0.09 pct across runs — measured three
+times on this very route in `2fff29ad0` — so a bootstrap median CI over trials would be
+reporting the width of a ruler with no ticks. CV was not used, as a gate or otherwise. The
+heading avoids KEEP wording for that reason and not to route around the check; a wall-clock
+claim on this route would owe the full contract and is not made here.
+
+Claim class: COMPETITIVE. Campaign output: yes — fr/Redis 7.2.4 on `pubsub_channels` measures
+2.0223x after this change, from 2.1446x before, both arms live in the same invocation.
+
+`721a76e65` attributed the route's remaining 2.19x and named three separable levers, ordered
+smallest-first. This is lever 1: build the `parent|sub` key in a stack buffer instead of on
+the heap. `check_full_command_arity` was making THREE allocations (two
+`from_utf8_lossy(..).to_ascii_lowercase()` plus a `format!`) and `effective_command_flags` a
+fourth (`Vec::with_capacity`), per container dispatch, for a key only ever compared against
+ASCII table names.
+
+SAME-TREE REVERSE-PATCH A/B, both arms built minutes apart from one tree, differing only in
+those two key builds:
+
+    shape             BEFORE     AFTER      delta
+    pubsub_channels  9,195.4    8,173.8    −11.11 pct   (−1,021.6 instr/op)
+    get_control      1,309.9    1,308.8    −0.08 pct    NULL
+
+    THE fr-SIDE DELTA IS THE RESULT. The ratio moved 2.1446x -> 2.0223x, but the redis
+    denominators behind those (4,287 and 4,041) differ by 5.7 pct, inside the +/-8 pct this
+    harness documents. So −1,021.6 instr/op is the number that is solid; treat the ratio
+    movement as approximate. That is my own `ed6f4d590` rule applied to my own row.
+
+CUMULATIVE ON THIS ROUTE, all same-tree measured: 10,189 -> 9,191 (`fbe5d999c`, the histogram
+key) -> 8,174 (here). −19.8 pct in total, 2.47x -> 2.02x. Still 2.02x behind, and levers 2
+(binary search over the 110-entry `SUBCOMMAND_TABLE`, bounded by the 679 instr/op memcmp
+frame) and 3 (flags as a bitset rather than a split string, bounded by 471) are untouched.
+
+SIZING CHECK, because a lever should be scored against its own prediction: `721a76e65` bounded
+levers 1+2 together at 862 + 774 = 1,636 instr/op. Lever 1 alone returned 1,021.6, i.e. 62 pct
+of that bound — consistent with the split, since the residue in those frames is the linear
+scan that lever 2 targets and this change did not touch.
+
+NO PATH-SHARING CONTROL EXISTS, and I am saying so rather than reusing a bad one.
+`9abeaa5c1` established that `pubsub_numsub` and `memory_usage` are front-classified and never
+execute this code, so they cannot serve as controls here — a control must share the code path.
+No other generic-route container command has a shape in the corpus. `get_control` bounds
+whole-process drift only. Adding a CLIENT/OBJECT/CONFIG shape would give this route a real
+control and is the cheapest missing instrument.
+
+CORRECTNESS. The old path lowercased via `from_utf8_lossy`, the new one lowercases BYTES, and
+those differ on non-UTF8 input. The gate asserts the property that matters — the two agree on
+whether a `SUBCOMMAND_TABLE` entry MATCHES — across eleven inputs including two invalid-UTF8
+subcommands and an invalid parent, plus byte-identity for pure-ASCII input. Table names are
+ASCII, so a key containing any non-ASCII byte matches nothing either way. The over-length case
+returns None rather than truncating, and that is tested explicitly: a truncated key could
+collide with a SHORTER table entry and grant a different command's arity, which is the one way
+this could have failed silently.
+
+PROVENANCE:
+  AFTER ELF     44ec545aed2ad766      BEFORE ELF  e438576c212caa5b (same tree,
+                reverse-patched, restored in the same command)
+  harness       scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines in the SAME
+                invocation. Incumbent verified in-run: sha=d2c8a4b9 == vendored HEAD.
+  host          thinkstation1, 64 cores, powersave, /data 121-123G, ONE PEER BUILD running.
+  PER-ARM loadavg/MHz  before channels 20.45/3965, before null 20.45/2751 · after channels
+                19.85/2515, after null 19.39/2617. Window 1/5/15 = 20.45/16.55/16.87.
+                Instruction counts, so the peer build does not enter the numerator; it is
+                why the ratio's denominator is quoted as approximate above.
+  gates         1223 fr-command tests pass; clippy --all-targets -D warnings CLEAN.
+
+RETRY PREDICATE: lever 2 next — `SUBCOMMAND_TABLE` is a `const` slice scanned linearly TWICE
+per container dispatch, and the 679 instr/op memcmp frame is its cost. Before starting it, add
+a shape for one generic-route container command (CLIENT INFO or OBJECT ENCODING) so the row
+has a path-sharing control; this row had none and says so.

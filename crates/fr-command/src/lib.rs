@@ -16221,7 +16221,11 @@ fn parse_u64_arg(arg: &[u8]) -> Result<u64, CommandError> {
 
 /// Parse a LIMIT count that can be negative (Redis uses -1 to mean "unlimited").
 /// Returns None for negative values, Some(n) for non-negative.
-fn parse_limit_count_arg(arg: &[u8]) -> Result<Option<usize>, CommandError> {
+// (frankenredis-gvm6z) `pub` so the borrowed ZRANGESTORE arity-9 path can parse LIMIT
+// exactly as the generic path does, rather than re-deriving the negative-offset and
+// negative-count clamping rules that `zrangestore_cmd` relies on. Same reason
+// `parse_score_bound` and `validate_lex_bound` are already public.
+pub fn parse_limit_count_arg(arg: &[u8]) -> Result<Option<usize>, CommandError> {
     let val = parse_i64_arg(arg)?;
     if val < 0 {
         return Ok(None);
@@ -16231,7 +16235,11 @@ fn parse_limit_count_arg(arg: &[u8]) -> Result<Option<usize>, CommandError> {
         .map_err(|_| CommandError::InvalidInteger)
 }
 
-fn parse_limit_offset_arg(arg: &[u8]) -> Result<usize, CommandError> {
+// (frankenredis-gvm6z) `pub` so the borrowed ZRANGESTORE arity-9 path can parse LIMIT
+// exactly as the generic path does, rather than re-deriving the negative-offset and
+// negative-count clamping rules that `zrangestore_cmd` relies on. Same reason
+// `parse_score_bound` and `validate_lex_bound` are already public.
+pub fn parse_limit_offset_arg(arg: &[u8]) -> Result<usize, CommandError> {
     let val = parse_i64_arg(arg)?;
     if val < 0 {
         return Ok(usize::MAX);
@@ -19199,6 +19207,42 @@ pub fn check_command_arity(name: &[u8], argc: usize) -> Result<(), &'static str>
 /// NOT treated as an arity failure here — dispatch handles unknown-subcommand
 /// errors separately. (frankenredis-7tpx0)
 #[must_use = "callers gate on the arity result"]
+/// Write `parent|sub`, ASCII-lowercased, into `buf` and return the filled slice.
+///
+/// (frankenredis-fpqns) The two container-dispatch hot frames each built this key on the
+/// heap: `check_full_command_arity` with two `from_utf8_lossy(..).to_ascii_lowercase()`
+/// Strings plus a `format!`, and `effective_command_flags` with a `Vec::with_capacity`.
+/// MEASURED at 862 and 774 instr/op on `PUBSUB CHANNELS`, for a key that is only ever
+/// compared against ASCII `SUBCOMMAND_TABLE` names.
+///
+/// Byte-wise lowercasing is equivalent to the lossy path FOR THIS USE: table entries are
+/// pure ASCII, so a key containing any non-ASCII byte matches nothing either way — the lossy
+/// path replaces such bytes with U+FFFD (3 bytes, never ASCII) and this one passes them
+/// through, and neither can collide with an ASCII entry. Pinned by the non-UTF8 cases in
+/// `container_key_matches_the_allocating_form_fpqns`.
+///
+/// Returns None when the key does not fit, so the caller can fall back rather than truncate
+/// — a truncated key could collide with a SHORTER table entry, which is the one way this
+/// could go wrong silently.
+fn write_container_key<'b>(buf: &'b mut [u8; 64], parent: &[u8], sub: &[u8]) -> Option<&'b [u8]> {
+    let n = parent.len().checked_add(1)?.checked_add(sub.len())?;
+    if n > buf.len() {
+        return None;
+    }
+    let mut i = 0;
+    for &b in parent {
+        buf[i] = b.to_ascii_lowercase();
+        i += 1;
+    }
+    buf[i] = b'|';
+    i += 1;
+    for &b in sub {
+        buf[i] = b.to_ascii_lowercase();
+        i += 1;
+    }
+    Some(&buf[..n])
+}
+
 pub fn check_full_command_arity(argv: &[Vec<u8>]) -> Result<(), &'static str> {
     let Some(name) = argv.first() else {
         return Err("");
@@ -19218,13 +19262,16 @@ pub fn check_full_command_arity(argv: &[Vec<u8>]) -> Result<(), &'static str> {
         // says so — this call site simply never adopted it. The two strings are
         // still built, but only inside the rare branch that needs them.
         if command_has_subcommands_bytes(name) {
-            let parent = String::from_utf8_lossy(name).to_ascii_lowercase();
-            let sub = String::from_utf8_lossy(&argv[1]).to_ascii_lowercase();
-            let key = format!("{parent}|{sub}");
-            if let Some(&(cmd_name, arity, ..)) = SUBCOMMAND_TABLE
-                .iter()
-                .find(|entry| entry.0 == key.as_str())
-            {
+            // (frankenredis-fpqns) Stack buffer instead of three heap allocations and a
+            // `format!`. The `None` arm keeps the previous behaviour for a key too long to
+            // be any table entry: nothing matches, exactly as before.
+            let mut key_buf = [0u8; 64];
+            let key = write_container_key(&mut key_buf, name, &argv[1]);
+            if let Some(&(cmd_name, arity, ..)) = key.and_then(|k| {
+                SUBCOMMAND_TABLE
+                    .iter()
+                    .find(|entry| entry.0.as_bytes() == k)
+            }) {
                 let argc = argv.len() as i64;
                 let ok = if arity > 0 {
                     argc == arity
@@ -19260,13 +19307,12 @@ pub fn get_command_flags(name: &[u8]) -> Option<&'static str> {
 pub fn effective_command_flags(argv: &[Vec<u8>]) -> Option<&'static str> {
     let cmd = argv.first()?;
     if let Some(sub) = argv.get(1) {
-        let mut key = Vec::with_capacity(cmd.len() + 1 + sub.len());
-        key.extend(cmd.iter().map(u8::to_ascii_lowercase));
-        key.push(b'|');
-        key.extend(sub.iter().map(u8::to_ascii_lowercase));
-        if let Some(entry) = SUBCOMMAND_TABLE
-            .iter()
-            .find(|entry| entry.0.as_bytes() == key.as_slice())
+        // (frankenredis-fpqns) Same stack-buffer key as check_full_command_arity.
+        let mut key_buf = [0u8; 64];
+        if let Some(key) = write_container_key(&mut key_buf, cmd, sub)
+            && let Some(entry) = SUBCOMMAND_TABLE
+                .iter()
+                .find(|entry| entry.0.as_bytes() == key)
         {
             return Some(entry.2);
         }
@@ -68104,6 +68150,76 @@ mod tests {
         // Plain commands are unchanged.
         assert_eq!(canonical_command_fullname(&argv(&["GET", "k"])), "get");
         assert_eq!(canonical_command_fullname(&argv(&[])), "");
+    }
+
+    /// (frankenredis-fpqns) The stack-buffer container key must equal the allocating form it
+    /// replaced, on every input class including the ones that motivated the caution.
+    ///
+    /// The old path was `from_utf8_lossy(..).to_ascii_lowercase()` joined by `format!`; the
+    /// new one lowercases BYTES. Those differ on non-UTF8 input — lossy substitutes U+FFFD —
+    /// so this asserts the property that actually matters: whatever the two produce, they
+    /// agree on whether a SUBCOMMAND_TABLE entry matches. A key with any non-ASCII byte
+    /// cannot match an ASCII table name under either scheme, and that is what is pinned.
+    ///
+    /// The over-length case is the one that could go wrong SILENTLY: truncating instead of
+    /// returning None could collide with a shorter table entry and grant a wrong arity.
+    #[test]
+    fn container_key_matches_the_allocating_form_fpqns() {
+        fn old_form(parent: &[u8], sub: &[u8]) -> String {
+            let p = String::from_utf8_lossy(parent).to_ascii_lowercase();
+            let s = String::from_utf8_lossy(sub).to_ascii_lowercase();
+            format!("{p}|{s}")
+        }
+        let cases: &[(&[u8], &[u8])] = &[
+            (b"CONFIG", b"GET"),
+            (b"config", b"get"),
+            (b"OBJECT", b"ENCODING"),
+            (b"PUBSUB", b"CHANNELS"),
+            (b"ClIeNt", b"InFo"),
+            (b"MEMORY", b"USAGE"),
+            (b"ACL", b"WHOAMI"),
+            // Not a container / not a real subcommand: must match nothing, both ways.
+            (b"CONFIG", b"NOSUCHSUB"),
+            // Non-ASCII and invalid UTF-8.
+            (b"CONFIG", b"\xc3\xa9"),
+            (b"CONFIG", b"\xff\xfe"),
+            (b"\xff", b"GET"),
+        ];
+        for (parent, sub) in cases {
+            let mut buf = [0u8; 64];
+            let new = super::write_container_key(&mut buf, parent, sub).expect("fits");
+            let old = old_form(parent, sub);
+            let new_hit = super::SUBCOMMAND_TABLE
+                .iter()
+                .any(|e| e.0.as_bytes() == new);
+            let old_hit = super::SUBCOMMAND_TABLE.iter().any(|e| e.0 == old.as_str());
+            assert_eq!(
+                new_hit,
+                old_hit,
+                "table-match disagreement for {:?}|{:?}: new key {:?}, old key {:?}",
+                String::from_utf8_lossy(parent),
+                String::from_utf8_lossy(sub),
+                String::from_utf8_lossy(new),
+                old
+            );
+            // For pure-ASCII input the keys must be byte-identical, not merely agree.
+            if parent.is_ascii() && sub.is_ascii() {
+                assert_eq!(new, old.as_bytes(), "ASCII key diverged");
+            }
+        }
+
+        // Over-length must return None rather than truncate: a truncated key could collide
+        // with a SHORTER table entry and grant that entry's arity to a different command.
+        let long = vec![b'a'; 64];
+        let mut buf = [0u8; 64];
+        assert!(
+            super::write_container_key(&mut buf, &long, b"get").is_none(),
+            "over-length key must refuse, never truncate"
+        );
+        // And the boundary just under it still works.
+        let fits = vec![b'a'; 60];
+        let mut buf2 = [0u8; 64];
+        assert!(super::write_container_key(&mut buf2, &fits, b"ab").is_some());
     }
 
     #[test]
