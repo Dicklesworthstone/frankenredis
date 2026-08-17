@@ -29496,3 +29496,53 @@ All seven routes taken in this campaign crossed: SMOVE, RPOPLPUSH, LTRIM, HINCRB
 RANDOMKEY, DUMP, every one from 0.95x-1.53x behind to 0.49x-0.53x. The next lever is NOT
 another floor entry; the remaining dispatch cost is the ~263 floor itself, which is now the
 articulation point and is paid by every classified route.
+
+--------------------------------------------------------------------------------
+STANDINGS (frankenredis-p98mw) — the dispatch campaign's eight crossings, quoted at their
+WORST defensible bound rather than their measured point. All eight survive it
+
+Claim class: COMPETITIVE (bookkeeping row — no new measurement, no new build)
+
+WHY A WORST BOUND AT ALL. This harness's own header records that the fr numerator is nearly
+exact (0.1 pct across repeats) while the redis DENOMINATOR carries roughly +/-8 pct, because
+the two-point subtraction cancels work proportional to OP COUNT and redis's serverCron is
+proportional to ELAPSED TIME. A single pair of runs therefore bounds a ratio from above at
+measured x 1.08 — the case where redis's true instruction count is 8 pct lower than observed.
+Every number below is quoted both ways so nobody has to re-derive it.
+
+    route         before     measured   WORST BOUND   still ahead?
+    SMOVE         1.5099x    0.5144x      0.5556x       yes
+    RPOPLPUSH     1.4792x    0.5182x      0.5597x       yes
+    LTRIM         1.4925x    0.6172x      0.6666x       yes
+    HINCRBY       1.3127x    0.5161x      0.5574x       yes
+    LMPOP         1.3786x    0.5026x      0.5428x       yes
+    RANDOMKEY     1.3169x    0.5303x      0.5727x       yes
+    DUMP          0.9561x    0.5278x      0.5700x       yes
+    SET k v XX    0.6568x    0.5926x      0.6400x       yes   (fusion, not a floor entry)
+
+EVERY CROSSING SURVIVES ITS WORST BOUND WITH MARGIN. The tightest is LTRIM at 0.6666x and
+the fusion at 0.6400x; the loosest is LMPOP at 0.5428x. Nothing here is close enough to 1.0
+for the +/-8 pct to matter, which is the condition the harness header sets for trusting a
+single pair of runs ("fine for 1.35x or 1.79x, useless for adjudicating 1.05x"). Had any row
+landed above ~0.92x I would owe it a repeated redis arm; none did.
+
+WHAT IS AND IS NOT CLAIMED. These are INSTRUCTIONS PER OP, not throughput. The harness's own
+trap note applies: the instruction ratio is not the throughput ratio and the error is not
+even consistent in direction. Do not project a wall-clock win from this table.
+
+SEVEN OF THE EIGHT WERE THE SAME EDIT. SMOVE, RPOPLPUSH, HINCRBY, LMPOP, RANDOMKEY and DUMP
+each needed only a floor-table entry over parser and executor that already existed; LTRIM
+needed an executor written. The eighth (SET XX) is a different mechanism — fusing two
+same-arity parsers that were chained — and is the one to generalise from now, since the
+floor-entry vein is closed on both inventory (`ef8d7ad72`) and measured outcome (`0364fc0f4`).
+
+THE REMAINING DISPATCH COST IS NOW THE FLOOR ITSELF. Post-crossing dispatch shares sit at
+11-27 pct, and the residual tracks the cost model at ~263 + ~100 per additional bulk parsed
+(six points, worst error 16 pct). That ~263 is paid by EVERY classified route, so it is the
+articulation point: one lever there is worth more than any remaining single route. Nobody has
+attributed what the 263 is made of — that attribution is the next piece of work on this vein,
+and it is a profiling question, not a table-entry one.
+
+PROVENANCE: no new measurement. Point figures are as banked in `0364fc0f4` (LMPOP, RANDOMKEY,
+DUMP), `821862043` (SET XX) and the SMOVE/RPOPLPUSH/LTRIM/HINCRBY rows above. Worst bounds
+are computed, not observed: measured x 1.08 per the harness's documented denominator spread.
