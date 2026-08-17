@@ -294,6 +294,22 @@ SHAPES = {
     #   rpoplpush_missing  missing source -> nil, both keys untouched
     #   hset_same       field already holds this value -> reply 0, no growth
     "ltrim_noop": (["RPUSH tl a b c d e"], ["LTRIM", "tl", "0", "-1"]),
+    # (frankenredis-ozrro) FROM THE BLIND-SPOT LIST, which scripts/corpus_coverage.py now
+    # computes: 78 of 218 commands are BOTH unclassified at the floor AND issued by no
+    # shape. That is not "fine", it is UNKNOWN — the previous six drawn from this list
+    # produced three routes at 1.43x-1.48x, one the largest dispatch cost ever measured
+    # here. These four are the highest-traffic shapeable entries left.
+    #
+    # Steady-state no-ops, as the two-point subtraction requires:
+    #   mset_2              rewrites the values already present -> reply +OK, no growth
+    #   hincrby_zero        increments by 0 -> field value unchanged
+    #   zremrangebyscore_none  score window holds no member -> removes nothing
+    #   zrandmember_1       read-only by definition
+    "mset_2": (["MSET mk1 v1 mk2 v2"], ["MSET", "mk1", "v1", "mk2", "v2"]),
+    "hincrby_zero": (["HSET hib f 5"], ["HINCRBY", "hib", "f", "0"]),
+    "zremrangebyscore_none": (["ZADD zrs 1 a 2 b"],
+                              ["ZREMRANGEBYSCORE", "zrs", "100", "200"]),
+    "zrandmember_1": (["ZADD zrm 1 a 2 b 3 c"], ["ZRANDMEMBER", "zrm"]),
     "spop_missing": ([], ["SPOP", "nosuchset"]),
     "srandmember_1": (["SADD srm m1 m2 m3"], ["SRANDMEMBER", "srm"]),
     "smove_missing": (["SADD smsrc a b", "SADD smdst c"],

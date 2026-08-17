@@ -27948,3 +27948,70 @@ RETRY PREDICATE. Do not re-run either swap. The 4-memcpy-per-field law stands as
 quantified shape of the repack, and the only way to remove those copies is to stop
 repacking -- keep the listpack verbatim, which is pf1vw. Anyone attacking hash RESTORE
 should target the element count, not the copy form.
+
+--------------------------------------------------------------------------------
+LANDED (frankenredis-ozrro) — the blind spot is 78 of 218 commands, not the seven I had
+been tracking, and it is now COMPUTED rather than rediscovered by accident
+
+Claim class: METHOD (instrument; no measurement — loadavg 56.8 rising at request)
+
+My retry predicate last row said the honest next move is MORE SHAPES, not more levers,
+because twice this session the CORPUS rather than the engine was the limiting instrument.
+Both times the gap was found by accident. `scripts/corpus_coverage.py` makes it computable
+by cross-referencing three sources, all read from source rather than assumed:
+
+    fr-command COMMAND_TABLE                     218 commands fr implements
+    fr-server  borrowed_dispatch_floor_command   118 floor-classified
+    scripts    SHAPES                             70 issued by some shape
+
+    UNCLASSIFIED **and** UNMEASURED — the blind spot:  78
+
+I had been tracking SEVEN. It is 78 — 36 pct of the command table. The list includes
+workhorses (mset, hincrby, keys, scan, sort, dump, restore, move, renamenx, substr,
+pfmerge), whole families (zunionstore, zinterstore, zintercard, zrangebylex, zlexcount,
+zrandmember, zremrangebyrank, zremrangebyscore, zrangestore, lmpop, geosearch, lcs) and the
+stream reads (xread, xreadgroup, xpending, xclaim, xautoclaim).
+
+    A BLIND-SPOT COMMAND IS UNKNOWN, NOT FINE, and that is the distinction a ranked screen
+    silently erases. The previous six shapes drawn from this list produced THREE routes at
+    1.43x-1.48x — SMOVE, RPOPLPUSH and LTRIM — one of them the largest dispatch cost ever
+    measured in this campaign, and all three have since crossed to 0.51x-0.62x.
+
+Container commands (ACL, CLIENT, CONFIG, OBJECT, XINFO and the rest) are excluded WITH THE
+REASON RECORDED rather than silently dropped: their work lives in subcommands, so a shape
+for the bare name would measure the wrong thing.
+
+THE TOOL'S OWN FAILURE MODES ARE TESTED, and both are ones I actually hit while doing this
+by hand earlier in the session:
+  * the floor table matches BYTE ARRAYS (`[b'S', b'M', b'O', b'V', b'E']`), so a
+    string-literal regex over it finds NOTHING — an earlier hand-rolled version of this
+    analysis returned three bogus names that way. The self-test asserts the byte-array
+    parse succeeds AND that the string-literal scan finds nothing.
+  * a shape's SEED commands must not count as measured. `smove_missing` seeds with SADD;
+    counting that would mark SADD covered when nothing measures it. The self-test asserts
+    the issued command is picked up and the seed is not.
+  * COMMAND_TABLE entries inside comments must not count.
+
+FOUR SHAPES LANDED from the top of the list — mset_2, hincrby_zero,
+zremrangebyscore_none, zrandmember_1 — chosen as the highest-traffic shapeable entries.
+Each is a steady-state no-op, which the two-point subtraction requires, and that is VERIFIED
+LIVE rather than argued: seeded on a booted fr, command executed 200 times, DBSIZE, the full
+KEYS list and every key's TYPE compared before and after, plus value-level checks that
+HINCRBY 0 leaves the field at 5 and ZREMRANGEBYSCORE removes nothing (ZCARD still 2). All
+clean.
+
+NOT MEASURED: loadavg 56.8 rising at request, 46.31/29.17/21.91 observed. The shapes are
+landed so the measurement is one command in the next quiet window.
+
+PROVENANCE:
+  no measurement       instrument only.
+  host                 thinkstation1, 64 cores, /data 177G, governor powersave, no build.
+  loadavg              46.31 / 29.17 / 21.91 observed; 56.8 rising at request.
+  MHz                  not recorded — no arm was measured.
+
+RETRY PREDICATE: measure the four new shapes first — they are the highest-traffic entries
+and MSET in particular is a workhorse. Then work down the blind-spot list by traffic, not
+alphabetically. Do NOT treat the 78 as 78 levers: half are unshapeable here (blocking
+BLPOP/BRPOP/BLMOVE, admin MIGRATE/FAILOVER/MODULE, pubsub SUBSCRIBE, transactional EXEC,
+connection SELECT/ASKING), and of the six shaped last time only THREE were behind — the
+other three were comfortably ahead. Unclassified does not imply slow; it implies unmeasured.
