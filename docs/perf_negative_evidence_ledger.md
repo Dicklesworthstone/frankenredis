@@ -31678,3 +31678,67 @@ prompt — is what kept a bad row from being banked. No certification was attemp
 
 PROVENANCE: no measurement of either engine; `ps -eo psr,pcpu` and `/proc/loadavg` only. No
 build. thinkstation1, /data 159G.
+
+--------------------------------------------------------------------------------
+## MEASURED (frankenredis-gvm6z) — four blind-spot commands measured for the first time; XPENDING is 1.6060x, the worst ratio on my board, and all four carry 2,629-3,293 instr/op of generic dispatch
+
+Claim class: MEASURED-STRUCTURE for the dispatch column; the RATIOS here are DIRECTIONAL and
+are NOT certified — see the window note. No build in this window.
+
+WHY THESE FOUR. `corpus_coverage.py` puts the blind spot at 53 commands, 50 with no borrowed
+machinery. Most of that 50 is unshapeable by construction — blocking reads, pub/sub, EXEC,
+SELECT, admin verbs whose cost is not a per-command figure. These four are the ones that ARE
+shapeable, and all four are `readonly` in COMMAND_TABLE, so each is a steady-state no-op by
+construction rather than by argument.
+
+    shape             fr instr/op  redis instr/op   ratio      fr dispatch
+    xpending_empty        6,474.6       4,031.5   1.6060x    2,629.4 (40.6 pct)
+    georadius_ro_1       12,021.2      14,913.3   0.8061x    3,293.2 (27.4 pct)
+    geosearch_1          11,898.8      17,394.2   0.6841x    3,251.6 (27.3 pct)
+    zunion_2              9,484.9      12,527.6   0.7571x    2,790.8 (29.4 pct)
+
+**All four executed — none was silently dropped**, which is the check that matters when adding
+shapes: a shape that errors produces no fr arm, is dropped from a ranking, and reads as CHEAP
+when it is actually UNMEASURED. Verified per shape rather than inferred from the ranking.
+
+XPENDING IS THE FIND, AND ITS RATIO IS AN INTERCEPT READING. 1.6060x is the worst ratio I have
+measured in this campaign — fr retires 61 pct MORE instructions than the incumbent. But the
+shape asks XPENDING against a group whose pending list is EMPTY, i.e. the minimum-work case,
+so essentially all of those 6,474.6 instructions are fixed cost. This repo has read a
+one-point shape as a command claim five times now (SORT n=3, the refuted SINTER crossover,
+KEYS n=2, LCS 8x9, ZRANGESTORE 3-member), and every one inverted or collapsed with size.
+**Nobody may say "XPENDING is 1.6x behind" on the strength of this row.** What can be said is
+that fr's XPENDING INTERCEPT is behind, and that 2,629.4 of it is dispatch.
+
+FOUR NEW ENTRIES IN THE GENERIC-DISPATCH RANKING, which is the durable part. Against the
+blocks already banked — zrangestore option forms 3,875, pfmerge_2 3,013, sort_ro_alpha 2,851,
+lcs_2 2,456 — these land at 3,293 / 3,252 / 2,791 / 2,629, so `georadius_ro` and `geosearch`
+are now the SECOND and THIRD largest generic blocks known, both above pfmerge_2. The generic
+range widens again: 485.9 (set_xx_opt) to 3,876.5.
+
+WINDOW NOTE, and it is why the ratio column is not certified. Measured at loadavg 27.6-31.4
+with the 1-minute above the 5-minute. The fr arm is the load-immune half — it has reproduced
+to 0.04 pct within this session and dispatch agreed to 0.008 pct across two option forms — so
+the dispatch column is reportable. The redis arm is NOT load-immune (3.4 pct across a 34-point
+swing is on record here) and carries roughly +/-8 pct on a single draw besides. Every ratio
+above is a single draw in a busy window; treat them as directional only.
+
+PROVENANCE:
+  fr ELF        61778add43b18a6b4ae913d952d86c5a994db21695bf5534f9f79d51e6942bb0, built in an
+                earlier window (RCH_CARGO_WRAPPER_BYPASS=1, env -u CARGO_TARGET_DIR, no [RCH]
+                line), copied to a private path. NO build started in this window.
+  incumbent     redis-server sha=d2c8a4b9 == vendored source HEAD, clean, verified per run.
+  host          thinkstation1, 64 cores, governor powersave, /data 152G.
+  per-arm load  zunion_2 31.35; georadius_ro_1 30.20; geosearch_1 28.83; xpending_empty 27.64
+                (1-minute, falling across the set but all well above the 5-minute at start).
+  per-arm MHz   not sampled per arm this run — the ratios are not being certified, and a
+                frequency figure attached to an uncertified ratio invites it to be read as
+                one. The dispatch column is an instruction count and does not depend on it.
+
+RETRY PREDICATE. Before ANY of these four ratios is quoted, add a size sibling: XPENDING
+against a POPULATED pending list (the empty-PEL form measures the intercept), GEOSEARCH and
+GEORADIUS_RO over a multi-member geo set, ZUNION over larger inputs. The DISPATCH figures need
+no sibling — they are per-call constants, held to +2 pct over a 67x member span on
+ZRANGESTORE — and `georadius_ro` / `geosearch` are the two biggest unclaimed blocks after the
+ZRANGESTORE option forms. Neither has any borrowed machinery, so both are executor-writing
+jobs, not one-entry mirrors.

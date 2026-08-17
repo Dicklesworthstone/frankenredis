@@ -462,6 +462,32 @@ SHAPES = {
     # classification ATTEMPT, never a route. Read-only, so it is a true steady-state no-op.
     "zintercard_2": (["ZADD zc1 1 a 2 b", "ZADD zc2 3 b"],
                      ["ZINTERCARD", "2", "zc1", "zc2"]),
+    # (frankenredis-gvm6z) FOUR SHAPES FROM THE [C] BLIND SPOT. corpus_coverage.py puts the
+    # blind spot at 53 commands, 50 of them with no borrowed machinery at all. Most of that
+    # 50 is unshapeable by construction — blocking reads (BLPOP/BZPOPMAX), pub/sub, EXEC,
+    # SELECT, and admin verbs whose cost is not a per-command figure. These four are the
+    # ones that ARE shapeable, and all four are flagged `readonly` in COMMAND_TABLE, so
+    # each is a steady-state no-op for the two-point subtraction by construction rather
+    # than by argument.
+    #
+    # The precedent for spending shapes here: the last six drawn from this list produced
+    # THREE routes at 1.43x-1.48x, and my own zrangestore_all draw found the largest
+    # absolute dispatch cost in the campaign. A blind-spot command is UNKNOWN, not fine.
+    "zunion_2": (["ZADD zu1 1 a", "ZADD zu2 2 b"], ["ZUNION", "2", "zu1", "zu2"]),
+    "georadius_ro_1": (
+        ["GEOADD grk 13.361389 38.115556 P1"],
+        ["GEORADIUS_RO", "grk", "13.361389", "38.115556", "200", "km"],
+    ),
+    "geosearch_1": (
+        ["GEOADD gsk 13.361389 38.115556 P1"],
+        ["GEOSEARCH", "gsk", "FROMLONLAT", "13.361389", "38.115556", "BYRADIUS", "200", "km"],
+    ),
+    # Summary form against a group with an EMPTY pending list: still exercises the whole
+    # lookup/group-resolve path, and reads nothing that changes.
+    "xpending_empty": (
+        ["XADD xps 1-1 f v", "XGROUP CREATE xps xpg 0"],
+        ["XPENDING", "xps", "xpg"],
+    ),
     "zrangestore_all": (["ZADD zrsrc 1 a 2 b 3 c"],
                         ["ZRANGESTORE", "zrdst", "zrsrc", "0", "-1"]),
     # (frankenredis-gvm6z) The SIZE SIBLING. `zrangestore_all` has THREE members, so its
