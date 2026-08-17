@@ -8,6 +8,70 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-08-17 MossyOrchid: CORRECTION to the row below — the +112 pct MEASUREMENT stands and is reproducible, but the MECHANISM I published for it does not: my arm sits in the LAST-RESORT function, so "it became a candidate and therefore entered the cascade" cannot be the explanation (`frankenredis-5na4i`)
+
+Claim class: CORRECTION, source. No build, no bench, no certification — external builds had the
+host at loadavg 30-52 and the window was explicitly unusable for a ratio; this is dump analysis
+and source reading only.
+
+WHAT I PUBLISHED an hour ago: that giving ZINTERCARD a borrowed route made the packet "ENTER that
+machinery, walk the exact-shape parser chain, fail every arm, and only then reach my route", with
+the entry cost of the borrowed path as the general lesson.
+
+WHAT THE SOURCE SAYS. My arm went into `parse_borrowed_multibulk_action`
+(fr-server/main.rs:13702-17970). That function is the LAST RESORT of the chain in
+`process_buffered_frames`:
+
+    if bypass                                        -> parse_borrowed_multibulk_action
+    else if try_dispatch_floor_classified_action(..)  -> floor route      (main.rs:17971)
+    else if arity_guard && parse_borrowed_plain_X()   -> ~332 exact arms
+    else                                              -> parse_borrowed_multibulk_action
+
+So the packet reaches my arm only AFTER the floor attempt has declined and every cascade arm has
+failed. Adding an arm THERE cannot cause the chain in front of it to run — it already ran, or the
+arm is never reached at all. My published mechanism is therefore not established by the evidence
+I had, and I am withdrawing it rather than leaving a plausible story in the ledger.
+
+WHAT IS ESTABLISHED, and none of it changes:
+  * the delta: 7,507.5 / 7,499.6 -> 15,935.3 / 15,929.5 instr/op, +8,429, +112 pct, same tree,
+    reverse-patch pair, AFTER rebuilt to a byte-identical sha, interleaved draws 0.1 pct apart;
+  * the frame diff, which is unambiguous about WHAT moved even if not yet about why:
+
+        removed (generic dispatch)          added (cascade + my route)
+        execute_frame_internal      -452    process_buffered_frames    +2709
+        classify_command            -424    __memcmp_avx2_movbe        +1844
+        dispatch_with_client_context-327    parse_..._key_arg2_packet  +1117
+        command_table_index         -288    parse_..._key_arg3_packet   +780
+        (total generic removed    -1,491)   parse_..._key_arg1_packet   +684
+                                            parse_..._key_arg4_packet   +418
+                                            parse_..._keys_multi_packet +330
+                                            execute_plain_zintercard    +291
+                                            parse_..._key_arg5_packet   +273
+                                            borrowed_plain_zintercard_args +90
+
+    My fast path DID remove the generic dispatch it targeted (-1,491, close to the 3,291 dispatch
+    figure once the shared frames are accounted). It was swamped by ~8,400 that appeared in the
+    chain in front of it — frames that read ZERO in the BEFORE arm.
+  * the verdict: REJECT, reverted, nothing shipped.
+
+THE OPEN QUESTION, stated precisely so the next person starts from it rather than from my story:
+**why does the BEFORE arm show `parse_borrowed_plain_key_arg3/4/5_packet` and `keys_multi` at
+exactly 0.0 instr/op, when the chain that contains them runs before the function I edited?**
+Either ZINTERCARD exits that chain early today by a route I have not found, or those arms are
+guarded by something my change disturbed. `process_buffered_frames` self cost moving 284 -> 2,993
+says the chain body itself is where the time went, and its arms are inlined into it.
+
+NEXT DIAGNOSTIC, which needs a quiet window rather than more reading: build a third arm with ONLY
+`borrowed_plain_zintercard_args` added and the executor call REMOVED (the helper cannot then
+serve anything), and measure. If the cascade frames still appear, the cost is in being matched by
+the helper at all; if they do not, it is in the executor's decline path. That separates the two
+candidates in one build.
+
+I am leaving the row below intact rather than editing it, so the correction is visible as a
+correction. Read them together; where they disagree, this one is later and narrower.
+
+--------------------------------------------------------------------------------
+
 ## 2026-08-17 MossyOrchid: REJECT — giving ZINTERCARD a borrowed route made it **+112 pct SLOWER** (7,503 -> 15,932 instr/op), because a command that currently SKIPS the borrowed path pays the whole cascade walk the moment it becomes a candidate (`frankenredis-5na4i`)
 
 Claim class: SELF-SPEEDUP, rejected and reverted. Campaign output: yes — it measures the ENTRY
