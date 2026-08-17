@@ -27736,3 +27736,82 @@ frame, which resolves inlined callees rather than inferring them; if the cost is
 allocation, the fix is to decode into caller-provided storage rather than returning an owned
 `Vec` per string. Do NOT re-derive the 2.1273x ratio at high load -- the redis arm moves 3.4
 pct with it and the number will come back flattering.
+
+---
+
+## MEASURED (frankenredis-33832) — the settling transient is longer than 8 passes: at warmup 24 the within-process null's MEDIAN is in band 5 times out of 5, while its SPREAD is ambient noise
+
+Campaign output: no
+
+Claim class: METHOD. No vs-incumbent ratio banked. ELF identity computed by sha256sum.
+
+THE EXPERIMENT WAS BLOCKED BY A PRECONDITION IT DOES NOT NEED, and that is the first
+finding. The certification gate refuses on the one-process null -- `fr_b halves`, ONE
+process against ITSELF -- but obtaining it ran collection_reload_headtohead.py
+--competitive, which needs THREE aligned 4-core blocks free at once (two fr arms plus
+redis). Measured across two sessions, that precondition is the binding constraint and
+loadavg does not predict it:
+
+    loadavg 10.69 -> 4 blocks      loadavg 14.31 -> 1 block
+    loadavg 13.38 -> 2 blocks      loadavg 15.72 -> 3 blocks
+    loadavg 13.01 -> 2 blocks      loadavg 16.69 -> 0, then 1, then 2
+
+So the warm-up sweep went unrun for two turns for want of placement it never required.
+A process compared against itself needs ONE block. scripts/fr_self_drift_probe.py does
+exactly that -- no redis arm, no second fr, no cross-process nulling -- and ran
+immediately in a window where the three-block gate had refused four times.
+
+    CROSS-CHECK before trusting it: at warmup 8 it reports spread 0.0915, against the
+    three-arm gate's 0.0958 measured minutes earlier. Two independent paths -- different
+    process count, different timing code, different harness -- agreeing to 0.004 on the
+    quantity in dispute.
+
+THE SWEEP, three repeats per point, loadavg 16.4, one pinned block at 1 pct load:
+
+    warmup  8    halves median 1.0690    spread 0.0915
+    warmup 24    halves median 1.0042    spread 0.0039
+    warmup 48    halves median 1.0018    spread 0.0600
+
+The pre-registered rule asked whether the spread falls monotonically. It appeared to,
+and I re-ran rather than banking one draw -- which is the whole point of the gate I
+built. Four more repeats at warmup 24:
+
+    medians  1.0042  0.9993  1.0015  0.9974  0.9913     ALL inside 0.98..1.02
+    spreads  0.0039  0.0603  0.2298  0.0026  0.0409     0.0026 to 0.2298
+
+SO THE TWO STATISTICS SAY DIFFERENT THINGS, and separating them is the result:
+
+  THE MEDIAN IS THE SETTLING TERM, AND WARM-UP 24 FIXES IT. Five samples out of five
+  land within 0.9 pct of unity, against 1.0690 -- outside the band -- at warmup 8.
+  230c674ec's "~10-trial transient" was the right shape and the wrong constant: eight
+  passes still sit inside it, twenty-four clear it, forty-eight buy nothing.
+
+  THE SPREAD IS AMBIENT HOST NOISE, NOT A WARM-UP PROPERTY. It ranges 0.0026 to 0.2298
+  at a FIXED warmup of 24, on a shared machine, so it cannot be a property of the
+  engine or of the warm-up length. My single 0.0039 was a favourable draw, and I nearly
+  banked it as "24 solves it" -- exactly the error the spread check exists to catch,
+  committed by the person who built the check.
+
+CONSEQUENCE FOR THE GATE, and I am flagging rather than rewriting it: restore_cert_gate.sh
+hard-refuses when the spread exceeds 0.04. On this evidence that criterion is judging
+ambient noise rather than the settling term, so it will refuse windows the certification
+could actually pass. The defensible criterion is the MEDIAN across several repeats -- which
+is also what the certification's own A/A band tests. Changing a gate's decision rule on
+five samples taken in one window is not something to do in the same turn as the
+measurement; it wants a second window first.
+
+LANDED HERE: the probe, and the gate's warm-up default moved 8 -> 24 with the sweep
+recorded beside it. The default is now measured rather than inherited.
+
+RETRY PREDICATE: re-run scripts/fr_self_drift_probe.py at warmup 24 in a DIFFERENT window
+and check whether the medians stay inside 0.98..1.02 (predicted: yes) and whether the
+spread is still uncorrelated with warm-up length (predicted: yes). If both hold, change the
+gate to judge the median and demote the spread to a warning, then spend a 9-trial
+certification -- which on this evidence can now pass.
+
+PROVENANCE: fr ELF a030eeec4c231c2c... (verified current by scripts/assert_fresh_build.py
+immediately before the sweep; the same detector caught two stale arms earlier today). Built
+locally with RCH_CARGO_WRAPPER_BYPASS=1 exported and env -u CARGO_TARGET_DIR, no [RCH]
+line. thinkstation1, 64 cores, governor powersave, /data 188G. Loadavg 16.29-16.38 across
+the sweep, 12.68 at the end; mean CPU MHz 2226-2921 per repeat, recorded per line in the
+probe's output.

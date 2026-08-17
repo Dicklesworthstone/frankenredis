@@ -19,11 +19,22 @@
 # certification. One short run tells you whether the long one can pass.
 #
 # WARM-UP IS NOT OPTIONAL HERE (230c674ec): the within-process drift is a settling
-# transient spanning ~10 trials, so an unwarmed probe measures the transient rather
-# than the engine. Every probe below discards WARMUP passes per arm (default 8, the
-# measured count). An earlier version of this gate did not, and concluded from six
-# unwarmed samples that the host could not be certified at all -- that conclusion is
-# retracted.
+# transient, so an unwarmed probe measures the transient rather than the engine. An
+# earlier version of this gate did not warm at all, and concluded from six unwarmed
+# samples that the host could not be certified -- that conclusion is retracted.
+#
+# THE DEFAULT IS 24, MEASURED not chosen. scripts/fr_self_drift_probe.py sweeps the
+# same within-process term with ONE pinned process (one block instead of three), so
+# it runs in windows this gate cannot. Its sweep, three repeats each at loadavg 16.4:
+#
+#     warmup 8    halves median 1.0690   spread 0.0915
+#     warmup 24   halves median 1.0042   spread 0.0039   <- an order inside the band
+#     warmup 48   halves median 1.0018   spread 0.0600
+#
+# So 230c674ec's "~10 trials" was the right shape and the wrong constant: eight passes
+# still sit inside the transient. Twenty-four settle it. Forty-eight buys nothing --
+# its wider spread is one outlier repeat on a shared host, not a warm-up effect -- so
+# the default stops at the smallest count that works.
 #
 #   stage 1  free-block sweep      (necessary, cheap, catches the busy-fleet case)
 #   stage 2  one-process null probe (the term that actually fails)
@@ -38,7 +49,7 @@ set -u
 FR=${1:?usage: restore_cert_gate.sh <fr_binary> [trials] [samples] [warmup]}
 TRIALS=${2:-3}
 SAMPLES=${3:-3}
-WARMUP=${4:-8}
+WARMUP=${4:-24}
 REPO=/data/projects/frankenredis
 REDIS=$REPO/legacy_redis_code/redis/src/redis-server
 RS=47621; FA=47622; FB=47623
