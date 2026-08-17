@@ -35298,3 +35298,116 @@ reorder — extend `collect_config_static_literal_indexed`'s index to dynamic pa
 value resolver so a literal request is a hash lookup instead of a full-table iteration. Keep
 `client_info` as the control; it has now twice distinguished a config-path change from a
 global one, and once did so exactly.
+
+--------------------------------------------------------------------------------
+## CORRECTION (frankenredis-qj6jn, CrimsonHawk) — my slope harness let the two measurement points start from DIFFERENT filesystem state, so every absolute instr/key and every RATIO in the row above is withdrawn. The lever itself survives unchanged at -4.58 pct; the corrected reload ratio is 2.2843x -> 2.1797x, not 2.5455x -> 2.4267x
+
+Found and fixed within the hour, by an internal-consistency check rather than by a
+re-run agreeing with itself. Same binaries, same method, same incumbent.
+
+### THE DEFECT
+
+`DEBUG RELOAD` writes `dump.rdb` into the server's `--dir`. My `slope()` ran the K1 and
+K2 points in ONE shared working directory, so:
+
+    K1 run   starts with an EMPTY dir   -> no startup RDB load
+    K2 run   starts with K1's dump.rdb  -> loads the whole dataset at startup
+
+The slope method's entire premise is that seeding, startup and teardown are identical at
+both points and therefore cancel. They were not. The K2 point carried one extra full RDB
+load that the K1 point did not, so the difference was `d * reload + 1 * startup_load`
+reported as `d * reload`.
+
+    A SLOPE'S TWO POINTS MUST DIFFER IN NOTHING BUT THE REPEATED OPERATION — INCLUDING
+    THE FILESYSTEM STATE THEY START FROM. One fresh working directory per point.
+
+### WHAT CAUGHT IT, AND WHY A RE-RUN WOULD NOT HAVE
+
+Not noise, and not disagreement between runs — callgrind Ir is deterministic, so the
+wrong number reproduced perfectly. What caught it was an ARITHMETIC IMPOSSIBILITY in a
+by-product I was not even looking at: on a zset workload the incumbent's whole-program
+marginal came out 8,756 instr/key while its own `lzf_compress` frame marginal was
+10,583. A single frame cannot exceed the whole, so the whole was wrong.
+
+    CHEAP, GENERAL DETECTOR: assert max(frame marginal) <= whole-program marginal, and
+    assert no frame marginal is NEGATIVE. Both are free, both are impossible under a
+    sound slope, and both fire on this defect.
+
+Confirmed by measuring two DISJOINT windows on the same workload — a linear per-reload
+cost must give the same answer twice:
+
+    after the fix     slope 4->12     slope 12->20    disagreement
+    redis                27,796.2        27,919.0        0.44 pct   SOUND
+    fr                   80,718.8        80,724.1        0.01 pct   SOUND
+
+### MAGNITUDE — IT IS NOT A ROUNDING TERM AND IT IS NOT SYMMETRIC
+
+    200 keys x 40-member zset       contaminated      clean     error
+    redis  DEBUG RELOAD instr/key         8,756.1   27,814.0    -68.5 pct
+    fr     DEBUG RELOAD instr/key       100,736.9   80,769.7    +24.7 pct
+    implied fr/redis ratio                11.5048x    2.9039x    3.96x TOO HIGH
+
+An engine that loads a bigger RDB at startup, or does more work per load, is hit
+differently. That is why the contaminated ratio was wrong by 4x rather than by a
+constant that would have cancelled.
+
+### THE CORRECTED A/B FOR THE CHANGE IN COMMIT 7e1180ff9
+
+Same two ELFs (BEFORE 1c5b9634121e8a5d, AFTER e67ca3e2a48d7a34), same tree-stability
+proof, incumbent verified in-run sha=d2c8a4b9 == vendored HEAD, one invocation:
+
+    workload   A/A null      BEFORE       AFTER      delta      vs redis 7.2.4
+    hash       1.000606    71,786.7    68,497.9   -3,288.8   2.2843x -> 2.1797x
+                                                 (-4.58 pct)
+    string     1.002157     8,218.0     8,234.0      +16.0   0.4690x -> 0.4699x  CONTROL
+                                                 (+0.20 pct)
+
+  THE LEVER IS UNAFFECTED IN THE TERMS THAT MATTER. The effect is -4.58 pct against
+  -4.67 pct reported, i.e. the PERCENTAGE barely moved, because the contamination
+  inflated the baseline and the delta together. `decode_value_spans` 4,752.0 -> 4,270.0;
+  `lzf_compress` 11,675.5 and `lzf_decompress` 3,996.0 IDENTICAL in both arms.
+  The negative control now reads +0.20 pct against its own 0.216 pct null — unmoved,
+  though its null is 4x looser than the hash workload's and the honest statement is
+  "inside its own reproducibility", not "-0.05 pct".
+
+  WITHDRAWN from the previous row: every absolute instr/key figure, 2.5455x -> 2.4267x,
+  -3,630.7, and the "45 instr/entry against the 56 predicted" arithmetic (the corrected
+  figure is 3,288.8/80 = 41 instr/entry, still inside the 56 the attribution predicted).
+  The mechanism, the attribution, the equivalence argument and the tests are untouched:
+  none of them depended on the harness.
+
+### THE PER-TYPE BOARD, MEASURED CLEAN — AND WHAT IT SAYS ABOUT WHERE TO GO NEXT
+
+Same corrected harness, 200 keys x 40 members, incumbent live in the same invocation:
+
+    type       fr instr/key      redis     fr/redis
+    set_int         22,728.1   11,534.8     1.9704x
+    hash            68,535.5   31,297.4     2.1898x
+    set             53,041.3   20,374.6     2.6033x
+    list            57,279.6   21,476.4     2.6671x
+    zset            80,769.7   27,814.0     2.9039x   <- worst
+
+  The whole reload surface sits in a 1.97-2.90x band. I had a contaminated sweep showing
+  zset at 11.5048x and list at 3.8345x; BOTH ARE ARTEFACTS of the defect above and are
+  recorded here only so nobody chases them. Note also that the bead's own text says zset
+  RESTORE is 3.82x — the clean whole-reload figure is 2.90x.
+
+  ZSET IS THE WORST, AND IT HAS A FRAME THE OTHER FOUR TYPES DO NOT:
+
+    core::slice::sort::stable::quicksort   5,544.6   6.86 pct
+    core::slice::sort::stable::drift::sort 2,033.2   2.52 pct
+                                           -------
+    sorting on zset reload                 7,577.8   9.39 pct of the op
+
+  Redis sorts NOTHING on this path: the listpack it saved is already in score order, and
+  it rebuilds by appending in that order. fr re-sorts data that arrived sorted. That is
+  an algorithmic term, not a constant-factor one, and it is the largest single non-codec
+  frame on the worst reload type.
+
+RETRY PREDICATE: take the zset reload sort. Confirm first, cheaply, that the input really
+is ordered on this path (a zset listpack is score-ordered by construction upstream, but fr
+must be shown to preserve that through `decode_zset_listpack_pairs`), then replace the
+sort with an is-sorted check plus an ordered build, keeping the sort as the fallback for
+input that is NOT ordered. Gate on `state_digest()` rather than on the reply, and keep a
+NON-zset type from the board above as the control — it must not move. The sort's caller
+lives in `crates/fr-store/src/packed_set.rs`, so check that reservation before starting.
