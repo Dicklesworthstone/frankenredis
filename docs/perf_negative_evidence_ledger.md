@@ -33516,3 +33516,68 @@ RETRY PREDICATE: the LCS residual is CLOSED. Do not re-open it; there is no 9 pc
 Before banking any before/after delta, state whether the pair is same-tree or cross-tree and
 quote the matching floor — and if it is cross-tree, expect percent-scale drift and say so
 rather than attributing it to the change.
+
+--------------------------------------------------------------------------------
+## 2026-08-17 RusticHorizon: PRICING MY OWN CORRECTNESS FIX — executing the library body costs +150 pct on FUNCTION LOAD, and it CONSUMED A PHANTOM 2.5x: the pre-fix 0.3963x was measuring work fr was not doing (`frankenredis-o500d`)
+
+Claim class: SELF-SPEEDUP. Campaign output: no — the headline delta is fr-vs-fr (execution on
+vs off inside one binary), which is MAINTENANCE by section 1. The vs-incumbent ratios are
+reported because they are what makes the self-comparison worth banking, not as a win.
+
+`8ab6f07af` made FUNCTION LOAD execute the library body to close o500d's last divergence. I
+never measured what that cost, and a correctness fix that silently triples a command is not
+"free" just because it is correct. Reverse-patch A/B, both arms from the SAME tree minutes
+apart, differing ONLY in whether `lua_eval::function_load_execute` is called:
+
+    arm                       fr instr/op   fr/redis    delta
+    BEFORE (no execution)        19,426.2    0.3963x
+    AFTER  (execution)           48,614.0    0.9925x    +29,187.8 instr/op, +150.3 pct
+    get_control BEFORE            1,310.8    0.4096x
+    get_control AFTER             1,296.8    0.4161x    null pair spread 1.08 pct
+
+    The effect is 140x the null spread. Nothing subtle here.
+
+THE PHANTOM IS THE POINT, AND IT IS WHY THIS ROW EXISTS. Before the fix fr answered FUNCTION
+LOAD at 0.3963x — apparently 2.5x FASTER than Redis 7.2.4. It was not faster. It was skipping
+the body execution that upstream performs, so the ratio was measuring ABSENT WORK. Any
+FUNCTION LOAD number taken before `8ab6f07af` is void, and nobody had banked one only because
+nobody had measured this path.
+
+    THE GENERAL FORM, which is the reusable part: A COMMAND THAT IS MISSING BEHAVIOUR WILL
+    MEASURE FAST, AND THE INSTRUMENT CANNOT TELL YOU WHY. This campaign's whole premise is
+    ratios against a live incumbent, and a ratio is only meaningful when both engines are
+    doing the same job. Before quoting a favourable number on a command, check the
+    differential first — o500d's differ was RED on this exact path while 0.3963x would have
+    looked like a win.
+
+WHERE FUNCTION LOAD NOW STANDS, stated to my own gate-audit rule rather than favourably:
+0.9925x is INSIDE the +/-8 pct the harness documents for its denominator near 1.0, and my own
+`ed6f4d590` rule says never to classify parity inside that band. So the honest statement is
+that fr and Redis 7.2.4 are INDISTINGUISHABLE on FUNCTION LOAD, not that fr is level or ahead.
+I am applying that rule to a number of mine that it would have been easy to round in my favour.
+
+IS THE COST ACCEPTABLE? Yes, and the reasoning is not "correctness wins arguments": FUNCTION
+LOAD is an administrative, once-per-library operation, upstream pays the same cost for the
+same reason, and the alternative is the o500d divergence where fr persists libraries 7.2.4
+refuses. A 150 pct regression on a hot path would be a different conversation.
+
+PROVENANCE:
+  AFTER ELF     6cc189255c14d52d (tree at HEAD 75d782f8c)
+  BEFORE ELF    f164c61576e6090c (same tree, `function_load_execute` call removed, restored
+                immediately in the same command; `git status crates/fr-command/` clean after)
+  shape         `function_load` added to scripts/shape_instr_per_op.py this turn: FUNCTION
+                LOAD REPLACE of a fixed one-function library. REPLACE makes every op identical
+                so the 2N run does not grow state and the slope is load work.
+  harness       N=2000/2N=4000, both engines in the SAME invocation. Incumbent verified
+                in-run: sha=d2c8a4b9 == vendored source HEAD, clean.
+  host          thinkstation1, 64 cores, powersave, /data 127G, NO builds running (checked
+                `pgrep rustc` = 0 before starting).
+  PER-ARM loadavg/MHz  before function_load 12.59/2529, before get_control 12.30/3433,
+                after function_load 12.20/4242, after get_control 11.86/1429. Window
+                1/5/15 = 12.59/13.34/22.99, 1-min and 5-min converged and falling.
+                Cross-core spread 1429-4242 MHz (2.97x) within the row — instruction counts.
+
+RETRY PREDICATE: do NOT re-measure FUNCTION LOAD hoping for a better number; the cost is
+structural and upstream pays it too. DO apply the general form: before banking a favourable
+ratio on any command, confirm the differential for that command is green, because missing
+behaviour is indistinguishable from speed in this instrument.

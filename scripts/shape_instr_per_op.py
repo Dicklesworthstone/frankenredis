@@ -388,6 +388,16 @@ SHAPES = {
         ["KEYS", "*"],
     ),
     "scan_zero": (["SET sc1 a", "SET sc2 b"], ["SCAN", "0"]),
+    # (frankenredis-o500d) FUNCTION LOAD, added because 8ab6f07af made fr EXECUTE the
+    # library body at load time and I never measured what that cost. Upstream executes it
+    # too, so this is a real vs-incumbent comparison rather than a self-speedup: before the
+    # change fr was doing strictly LESS work than redis here and any favourable ratio would
+    # have been measuring the missing execution, not speed.
+    #
+    # REPLACE makes every op identical: the library exists from the first op onward, so the
+    # 2N run does not grow the keyspace and the slope is load work rather than insertion.
+    "function_load": ([], ["FUNCTION", "LOAD", "REPLACE", "#!lua name=fnperf\nredis.register_function('fnperf_f', function(keys, args) return 1 end)\n"]),
+
     # (frankenredis-ozrro) The arity-4 SCAN option forms, front-classified in b631dd1f9.
     # Each is ONE option: the two-option forms keep the generic route by design, so a
     # two-option shape here would measure the thing that did NOT change.
