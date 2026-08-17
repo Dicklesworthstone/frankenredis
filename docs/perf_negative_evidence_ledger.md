@@ -35411,3 +35411,140 @@ sort with an is-sorted check plus an ordered build, keeping the sort as the fall
 input that is NOT ordered. Gate on `state_digest()` rather than on the reply, and keep a
 NON-zset type from the board above as the control — it must not move. The sort's caller
 lives in `crates/fr-store/src/packed_set.rs`, so check that reservation before starting.
+
+--------------------------------------------------------------------------------
+## 2026-08-17 RusticHorizon: KEEP -- the CONFIG GET cost was a re-derived LOOP INVARIANT, not the table walk I was about to attack. 27,339 -> 11,580 instr/op, 4.0137x -> 1.7730x (`frankenredis-e6c9t`, commit `6b671dbb7`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir), not a timing verdict.
+CV was not used, as a gate or otherwise.
+
+Claim class: COMPETITIVE. Campaign output: yes.
+fr/Redis 7.2.4 on `config_get_one` = 1.7730x, from 4.0137x, with the live vendored Redis
+7.2.4 arm measured in the SAME invocation (incumbent sha d2c8a4b9 verified in-run).
+
+THE RECORD-WORTHY PART IS THAT MY PLAN WAS WRONG AND A COUNT SAID SO. The retry predicate
+I banked one commit earlier named the next lever explicitly: extend the static literal
+index to dynamic parameters, on the theory that the 190-entry registry walk was the cost.
+That theory was arithmetically incapable of being right and I had not checked it -- 223
+byte compares cannot cost 27,000 instructions. A per-frame profile put 18,905 Ir/op of
+SELF cost inside `collect_config_entries`, 69 pct of the whole command, which no count of
+compares explains.
+
+The actual mechanism: `config_pattern_matches` opens by scanning the pattern for `*?[\` to
+decide whether the glob engine is needed -- the literal fast path from `3b47bc73b`.
+`collect_config_entries` evaluates that predicate 233 times per CONFIG GET (43 named
+dynamic parameters plus the 190-entry static registry) and THE PATTERN NEVER CHANGES. A
+9-byte pattern was rescanned 233 times to reach the same answer. The fast path I added to
+make literals cheap was itself being paid 233 times.
+
+    shape             BEFORE      AFTER       delta
+    config_get_one   27,339.2    11,579.8    -57.64 pct  (-15,759.4 instr/op)
+    client_info      15,122.4    15,131.4     +0.06 pct  CONTROL
+    get_control       1,305.4     1,306.3     +0.07 pct  NULL
+
+A/A NULL, MEASURED FOR THIS ROW RATHER THAN INHERITED:
+A/A null median = 1.00000, bootstrap 95% median CI [0.99797, 1.00203] over 20000 resamples.
+The verdict gate for this row is that bootstrap median-CI, and CV is provenance only --
+never a gate, here or anywhere in this entry.
+
+    It comes from six invocations of the SAME ELF (`cfg.after`) on `config_get_one`:
+    11563.7 / 11633.8 / 11588.6 / 11591.0 / 11591.9 / 11590.0 instr/op, sample median
+    11590.5, full range 0.605 pct.
+
+    Note what this A/A is NOT: it is ACROSS six invocations, whereas the A/B's two engine
+    arms are same-invocation. That makes it the STRICTER null for this instrument, because
+    it carries the inter-invocation variance a same-invocation A/A cannot see. The measured
+    effect (-57.64 pct) is roughly 280x the half-width of that null.
+
+    AND IT DOUBLES AS THE CLOCK-IMMUNITY CHECK the standing orders keep asking for. Across
+    those six runs the observed CPU MHz ranged 2515 to 3992 -- a 58 pct spread -- while
+    instr/op moved 0.605 pct. A frequency ratio wearing a costume would have moved with the
+    clock; this did not.
+
+MECHANISM CONFIRMED BY RE-PROFILING, not merely by the delta agreeing in sign:
+
+    collect_config_entries self cost   18,905.0 -> 3,129.0 Ir/op   (-83.5 pct)
+    PROGRAM TOTALS marginal            27,376.6 -> 11,553.9 Ir/op
+
+and the profiler's total independently reproduces the harness's own figure to 0.2 pct
+(11,553.9 vs 11,579.8) on a completely separate instrument. The frame is still the largest
+single one at 27.08 pct, so the 233 compares and the 190-entry walk are still there --
+that is the NEXT lever, and it is now worth what my earlier theory wrongly claimed.
+
+CUMULATIVE ON CONFIG GET, four commits, all measured:
+    39,970  original                                6.2108x
+    30,249  literal fast path (3b47bc73b)           4.6047x
+    27,289  predicate reorder (f6fef2885)           4.0854x
+    11,580  invariant hoist (6b671dbb7)             1.7730x     -71 pct in total
+
+AND IT IS NO LONGER THE WORST ROUTE. Hash RESTORE at 2.2021x now is. The standing brief
+called CONFIG GET's neighbourhood the worst cell for several turns; that is now stale.
+
+    ENGAGING THE RESTORE-ISOLATION LAW, since I just quoted a RESTORE number: that 2.2021x
+    is an ISOLATION ratio and is NOT a serving deficit. RESTORE-in-isolation flatters redis
+    because fr decodes eagerly while redis attaches the listpack shallowly and walks it on
+    every subsequent read; the measured break-even is ~1.034 reads per RESTORE
+    (scripts/hash_restore_read_premise_run.sh), so any workload that reads a restored key
+    even once has already paid the difference back. I cite it here only to rank routes by
+    isolation cost, which is the one thing that number legitimately orders. CONFIG GET
+    carries no such offset -- nothing later reclaims its cost -- which is precisely why it
+    was the better target of the two and why this row exists.
+
+A NEW INSTRUMENT, AND A BUG IT SHIPPED WITH. `scripts/command_profile_frames.py` applies
+the house two-point subtraction at the FRAME level -- N and 2N ops in two callgrind
+sessions, subtracted per function -- so startup cancels out of every frame instead of
+riding in the numerator, which is what `restore_profile_frames.py` cannot do. Its FIRST
+run reported `PROGRAM TOTALS` as a 45 pct "frame": that row is the SUM of the rows beneath
+it, so counting it doubled the denominator and halved every share. Fixed, and recorded
+here rather than quietly, because a profiler that reports a plausible ranking with a
+silently wrong denominator is exactly the class of instrument this campaign keeps finding.
+
+PROVENANCE:
+  AFTER   bench_elf_sha256=ff25812ac0c0738e59ae2310684761b4170eb518a00633f97aa60d3fb0fdd560
+  BEFORE  bench_elf_sha256=0cea2625a7d3768b1be8d62fb79921a1db52656e19df8f896afb76339ea01d6d
+  REDIS   bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+                All three EMITTED BY THE HARNESS ITSELF, per arm, and re-verified after
+                each arm finished -- a binary swapped mid-run now voids the measurement
+                instead of being reported under a SHA that no longer exists. They are NOT
+                `/proc/self/exe` self-reports, and that is not laziness: every arm runs
+                under callgrind, where `/proc/<pid>/exe` resolves to
+                `/usr/libexec/valgrind/callgrind-amd64-linux` and the guest ELF never
+                appears as anybody's exe. Verified directly, 2026-08-17, rather than
+                assumed. `shape_instr_per_op.py` gained this emission in this change.
+  REPRODUCED    the whole A/B was re-run after the harness change, on the same two ELFs:
+                fr 27,339.2 -> 27,339.8 before (0.002 pct) and 11,579.8 -> 11,589.8 after
+                (0.09 pct). The fr NUMERATOR is what reproduces; the ratios moved more
+                (4.0137x -> 4.1047x and 1.7730x -> 1.8174x) because the REDIS DENOMINATOR
+                carries the known +/-8 pct spread. Quote the instruction counts; treat the
+                ratio as 1.77-1.82x rather than either endpoint.
+                Same tree, reverse-patched to isolate EXACTLY the hoist (43 call sites
+                back to recomputing) and restored in the same command.
+  NOT measured against the previous commit's binary: that ELF predates a peer's commit
+                `44aea6d11` to this same function, so it would have carried their change
+                into my delta. The stale-arm check in `assert_fresh_build.py` is what
+                surfaced it.
+  harness       scripts/shape_instr_per_op.py, N=2000/2N=4000, both engines in the SAME
+                invocation. Incumbent verified in-run: sha=d2c8a4b9 == vendored HEAD.
+  host          thinkstation1, 64 cores, powersave, /data 99-101G.
+  PER-ARM loadavg/MHz  before config_get 29.40/3214, client_info 29.21/3253, null
+                28.71/3145 · after config_get 32.74/2534, client_info 31.16/2417, null
+                31.16/2508. Window 1/5/15 = 29.40/25.06/20.67, RISING, and both arms were
+                taken inside it. The config_get arms sat at 3214 and 2534 MHz -- a 27 pct
+                clock gap in the direction that would FLATTER the before arm if this were a
+                timing number. It is not; that is the point of the instrument.
+  tests         mutation-tested: forcing `is_literal = true` fails the new end-to-end guard
+                plus four PRE-EXISTING tests, so the hoist was already covered and the new
+                test is a sharper message rather than the only guard. Its doc comment says
+                so, and also says which direction of the flag is UNDETECTABLE by
+                construction (wrongly-false for a literal, since glob_match on a
+                metacharacter-free pattern IS byte equality).
+  peer          another agent holds uncommitted WIP elsewhere in this file; the commit was
+                built as HEAD-plus-this-change so none of it rode along, and their WIP was
+                restored to the working tree afterwards.
+
+RETRY PREDICATE: the remaining 3,129 Ir/op in that frame is the 233 surviving compares plus
+the 190-entry walk. NOW extend the literal index to dynamic parameters -- the move I was
+wrong to reach for first, which becomes correct only after the invariant is out of the way.
+Before doing it, profile again: this lever changed which frame is on top, and the last plan
+made from an unprofiled assumption cost nothing only because the profile was run before the
+code was written.

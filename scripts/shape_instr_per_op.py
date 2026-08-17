@@ -40,6 +40,7 @@ Usage: shape_instr_per_op.py <fr_bin> <shape> [ops]   (--list for shapes)
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import select
@@ -558,6 +559,15 @@ SHAPES = {
     #   CLIENT LIST     walks the connection registry
     # All four are read-only, take no key, and are safe to repeat, so the two-point slope
     # subtraction applies unchanged.
+    # (frankenredis-e6c9t) THE GLOB HALF OF CONFIG GET, which had no shape at all.
+    # `config_get_one` is a LITERAL request and since the literal index landed it no longer
+    # touches the ordered static walk, so it cannot measure that walk any more. A wildcard
+    # request still walks all ~190 entries of CONFIG_STATIC_PARAMS. Neither of these patterns
+    # is one of the two hard-coded early-return globs (`maxmemory*`, `lazyfree*`), so both
+    # genuinely enter the loop; `*` is additionally what monitoring clients actually send.
+    "config_get_star": ([], ["CONFIG", "GET", "*"]),
+    "config_get_prefix_glob": ([], ["CONFIG", "GET", "repl-*"]),
+
     "info_default": ([], ["INFO"]),
     "info_section": ([], ["INFO", "server"]),
     "command_count": ([], ["COMMAND", "COUNT"]),
@@ -1415,8 +1425,34 @@ def _selftest_eventloop_cycles() -> None:
     assert _eventloop_cycles(_FakeSock(b"# Stats\r\neventloop_cycles:abc\r\n")) is None
 
 
+def _sha256_file(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def emit_bench_elf_sha(engine: str, tag: str) -> str:
+    """Report the SHA-256 of the ELF this arm is about to run, and prove it held still.
+
+    A TRUE `/proc/self/exe` self-report is IMPOSSIBLE for this harness and it is worth
+    saying why rather than leaving the next reader to assume it was skipped out of
+    laziness. Every arm runs under callgrind, and `/proc/<pid>/exe` of that process
+    resolves to `/usr/libexec/valgrind/callgrind-amd64-linux`, not to the engine —
+    verified directly, 2026-08-17. The guest ELF never appears as anybody's `exe`.
+
+    So this hashes the file, which leaves exactly one hole: the binary being REPLACED
+    between the hash and the run. `target/release/<bin>` is a rendezvous in a shared
+    checkout, so that is a real event here, not a hypothetical. The caller closes it by
+    re-hashing after the arm finishes and refusing to report a SHA that moved.
+    """
+    return _sha256_file(engine)
+
+
 def run_once(engine: str, seeds, cmd, ops: int, workdir: str, tag: str,
              locale: str | None = None) -> int:
+    sha_before = emit_bench_elf_sha(engine, tag)
     out = os.path.join(workdir, "cg.%s.out" % tag)
     port = free_port()
     argv = ["valgrind", "--tool=callgrind", "--callgrind-out-file=" + out,
@@ -1535,6 +1571,17 @@ def run_once(engine: str, seeds, cmd, ops: int, workdir: str, tag: str,
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=60)
+    # The ELF must be the SAME one this arm started with. In a shared checkout
+    # `target/release/<bin>` is a rendezvous, so a peer's build landing mid-arm would
+    # otherwise be reported under the SHA of a binary that no longer exists.
+    sha_after = _sha256_file(engine)
+    if sha_after != sha_before:
+        raise RuntimeError(
+            "%s: the ELF CHANGED under the arm (%s then %s). This measurement is void; "
+            "copy the binary to a private path and re-run." % (tag, sha_before, sha_after))
+    print("    %-6s bench_elf_sha256=%s  (harness-computed and re-verified after the "
+          "arm; NOT a /proc/self/exe self-report, which callgrind makes impossible)"
+          % (tag, sha_before), flush=True)
     # (frankenredis-gein3) ADMISSIBILITY GUARD, and it exists because a row was banked
     # that this would have stopped: SINTER "1.3764x at 512 members", from one pair on a
     # shape whose fr arm spans 1.0139x to 1.3565x run to run.
