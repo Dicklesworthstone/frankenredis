@@ -1717,6 +1717,45 @@ def delta_sigma(delta, arm_a_instr_per_op, arm_b_instr_per_op):
     return abs(delta) / noise
 
 
+def _window_verdict(kind):
+    """(fit, one_line) from scripts/certification_window.py, or (None, reason) if unavailable.
+
+    (frankenredis-ozrro) IMPORTED rather than reimplemented. A second copy of the thresholds
+    would drift from the first, and this harness has already been bitten by a guard that
+    tested its own constants instead of the world.
+
+    Every measurement this harness prints now carries its own window verdict, because the
+    alternative is what I have been doing by hand: deciding after the fact whether a number
+    counts as certified. Four consecutive fleet "clean window" reports were wrong; a stamp on
+    the output is not something a later reader has to reconstruct.
+    """
+    gate = os.path.join(ROOT, "scripts", "certification_window.py")
+    if not os.path.exists(gate):
+        return None, "certification_window.py not present"
+    try:
+        r = subprocess.run([sys.executable, gate, "--for", kind],
+                           capture_output=True, text=True, timeout=20, check=False)
+    except Exception as exc:                                    # noqa: BLE001
+        return None, f"window gate failed to run: {exc}"
+    load = mhz = builds = "?"
+    reasons = []
+    for line in r.stdout.splitlines():
+        line = line.strip()
+        if line.startswith("loadavg "):
+            load = line[len("loadavg "):]
+        elif line.startswith("cpu MHz "):
+            mhz = line[len("cpu MHz "):]
+        elif line.startswith("builds "):
+            builds = line[len("builds "):].strip()
+        elif line.startswith("- "):
+            reasons.append(line[2:])
+    fit = r.returncode == 0
+    summary = ("load %s | MHz %s | builds %s" % (load, mhz, builds))
+    if reasons:
+        summary += "  [%s]" % "; ".join(reasons)
+    return fit, summary
+
+
 def _positional_args(args):
     """Positional arguments only, with `--flags` removed regardless of position.
 
@@ -1805,6 +1844,20 @@ def main() -> int:
         raise SystemExit("REFUSED: %s\n"
                          "Every ratio this harness prints divides by that binary; a stale "
                          "or unidentifiable denominator is worse than no measurement." % prov_msg)
+    # (frankenredis-ozrro) Stamp the window BEFORE measuring, and pick the strictness from
+    # what this invocation will actually print: --fr-only produces no denominator, and fr's Ir
+    # is load-immune (0.65 pct across six sessions spanning loadavg 14-66), so it is held to
+    # the lenient gate. A ratio run is held to the strict one.
+    kind = "fr-only" if fr_only else "ratio"
+    fit, window = _window_verdict(kind)
+    if fit is None:
+        print("  WINDOW: UNKNOWN (%s) — label any number from this run by hand" % window)
+    elif fit:
+        print("  WINDOW: FIT for %s — %s" % (kind, window))
+    else:
+        print("  WINDOW: UNFIT for %s — %s" % (kind, window))
+        print("  WINDOW: this run is SIZING, not certified. Do not promote it without a"
+              " FIT window.")
     workdir = tempfile.mkdtemp(prefix="fr_instr_")
     if locale:
         print("  both engines pinned to LC_ALL=%s" % locale)
