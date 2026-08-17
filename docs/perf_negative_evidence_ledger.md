@@ -35075,3 +35075,160 @@ disk. Re-measure only after a change to `geo_collect_candidate`, to the geo cell
 or to the reply construction, and then compare against 157.1 hardware L1 misses per op
 at IPC 1.387. Do NOT re-test the two non-levers above (the LFU-guarded double probe,
 the ACL permit path) — both are measured and closed here.
+
+--------------------------------------------------------------------------------
+## 2026-08-17 CrimsonHawk: DEBUG RELOAD 2.5455x -> 2.4267x — the listpack span decoder returned a ~40-byte tuple through a `Result` and the caller copied it AGAIN; decoding in place removes 3,630.7 instr/key, 45 per listpack entry (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method). Ir is exact,
+so the A/A null is a determinism check rather than a noise estimate, and the row is immune to
+host load and CPU frequency. No timing verdict is claimed.
+
+Claim class: COMPETITIVE. Campaign output: yes — fr/Redis 7.2.4 on the collection DEBUG RELOAD
+workload measures 2.4267x after this change, from 2.5455x before, with the incumbent live in
+the SAME Python invocation as both fr arms.
+
+### FIRST, THE BEAD'S OWN NUMBERS WERE STALE AND I RE-MEASURED THEM
+
+`frankenredis-qj6jn` opened at "DEBUG RELOAD per key: fr 95,277 vs redis 26,720, fr 3.57x
+WORSE, of which lzf_compress fr 1.76x". On today's HEAD, on the bead's own workload:
+
+    DEBUG RELOAD, per key      fr 77,533.1   redis 30,562.8    2.5368x   (bead said 3.57x)
+      of which lzf_compress    fr 17,360.5   redis 12,716.2    1.3652x   (bead said 1.76x)
+      of which lzf_decompress  fr  8,246.2   redis  7,754.6    1.0633x
+      of which crc64           fr      ~0    redis  3,954.8    fr ahead
+
+So the compressor slices already landed on this bead moved lzf from 1.76x to 1.37x, and the
+bead's headline ratio is 1.0x better than its text. Re-measure a bead's cell before taking its
+named next lever — the third time this campaign has found that.
+
+### THE NEXT SLICE THE BEAD NAMED IS NOT THE ONE WORTH TAKING, AND THE PROFILE SAYS WHY
+
+The bead's ranked follow-ups were all inside the compressor. But the compressor is no longer
+where the gap is. Redis spends 80 pct of its whole reload in the LZF codec plus CRC (12,716 +
+7,755 + 3,955 = 24,426 of 30,563) and almost nothing else — `lpNext` 160, `lpFind` 154. fr
+spends only 33 pct there. The gap is the OTHER 52,000 instr/key fr spends against redis's
+~6,100: fr's storage representation is not its wire representation, so every reload
+transcodes, while redis writes the listpack it already holds out verbatim.
+
+Ranking fr's non-LZF frames named the target immediately:
+
+    fr_persist::listpack::decode_value_spans      11,864.2   15.29 pct  <- largest non-LZF
+    __memcpy_avx_unaligned_erms                    6,281.6    8.09
+    hashbrown::HashMap insert (rebuild on load)    4,258.2    5.49
+    fr_persist::encode_listpack_string_entry       3,280.0    4.23
+
+### ATTRIBUTION: HALF OF THE DECODER WAS MOVING A VALUE, NOT DECODING ONE
+
+Line-level callgrind on a `release-perf` (line-tables) build, 192,000 listpack entries, put
+`decode_value_spans` at 117 instr PER ENTRY and split it:
+
+    ptr::write            16   the 28-32 byte span written into the return slot
+    Result plumbing       16
+    tuple construction    12   `Ok((span, entry_len))`, built at EIGHT return points
+    Vec::push             12   the SECOND copy, out of the return slot into the caller's Vec
+                       -----
+    the fat move          56   of 117 = 48 pct
+
+`ListpackValueSpan` is 28-32 bytes because its `Integer` variant carries the rendered decimal
+inline (`[u8; 20] + len`), so `Result<(ListpackValueSpan, usize), ListpackError>` is ~40 bytes.
+A string entry — which is the whole of a hash reload — needs 12 of them. The function already
+carried an `#[inline]` and a comment (33832) naming this exact hazard; `#[inline]` did not
+collapse it, because eight separate return points each materialise the tuple.
+
+### THE LEVER
+
+`decode_entry_value_span_into(data, cursor, out) -> Result<usize, ListpackError>`: push the
+span straight into the caller's `Vec` and return only the consumed length. The span is
+constructed once, where it lives. No type changed, no public signature changed, one call site.
+
+EQUIVALENCE IS ARGUED AND TESTED. The ORDER of fallible steps is preserved exactly, so error
+PRECEDENCE is unchanged — `entry_len_with_backlen` is still evaluated before `narrow_span` in
+every string arm — and `out.push` is the last action on every success path, so a failing entry
+leaves nothing behind. The pre-lever function is kept VERBATIM as a `#[cfg(test)]` reference
+oracle (it cannot be reached by shipped code, so it cannot be quietly "fixed" to match a
+regression), and four tests compare the two arms on normalised
+`(Result<usize, E>, Vec<span>)` — one comparison that covers success-vs-failure, the exact
+error variant, the span, the consumed length AND the push count:
+
+  * all 20 listpack encodings + both boundary values of every integer width, hardcoded rather
+    than produced by the encoder under test, each asserted to actually DECODE (otherwise "the
+    arms agree" is satisfied by both rejecting it and the corpus silently stops covering)
+  * 17 NEGATIVE cases — truncated payloads, wrong backlens, `u32::MAX` string lengths, invalid
+    encoding bytes, the EOF terminator read as an entry, and a cursor walked past the end —
+    each required to be rejected with the sink left untouched
+  * proptest over arbitrary bytes at an arbitrary cursor (this is what covers the precedence
+    orderings the hand-written cases cannot enumerate), and over encoded listpacks end to end
+
+### THE BOARD
+
+    workload   A/A null      BEFORE       AFTER      delta     vs redis 7.2.4
+    hash       1.000461    77,817.4    74,186.7   -3,630.7   2.5455x -> 2.4267x
+                                                 (-4.67 pct)
+    string     1.001174     8,543.8     8,539.7       -4.1   0.4688x -> 0.4685x   CONTROL
+                                                 (-0.05 pct)
+
+    hash    = 200 keys x 40-field listpack hash (the bead's workload), 80 entries/key.
+    string  = 200 keys x one 1,200-byte compressible string. It runs the same RDB save/load
+              and the same LZF codec but never decodes a listpack entry, so it separates "the
+              span decoder got cheaper" from "the reload got cheaper". It did not move: -0.05
+              pct, INSIDE its own null.
+
+  A/A NULL is `fr-before` against `fr-before`, two independent runs. Ir is deterministic, so
+  1.000461 and 1.001174 are the harness's own reproducibility (the residue is the seeding
+  pipeline, not the kernel). The effect is 100x the null.
+
+  -3,630.7 / 80 entries = 45 instr per listpack entry, against the 56 the attribution put on
+  the fat move. The mechanism predicted the magnitude before the build.
+
+  CONFINEMENT, from the same dumps: `lzf_compress` is 11,675.5 and `lzf_decompress` 4,495.5 in
+  BOTH arms — not close, IDENTICAL — so nothing outside the decoder moved.
+
+### PROVENANCE
+
+  BEFORE ELF    1c5b9634121e8a5d      AFTER ELF   e67ca3e2a48d7a34
+  TREE STABILITY PROVEN, and this is not a formality — it caught a bad window on the retry.
+                Built AFTER, reverse-patched to BEFORE, rebuilt, re-applied and rebuilt AFTER
+                again: after-1 == after-2 bit for bit, and BEFORE reproduced the sha of a
+                binary built from the same tree 20 minutes earlier. Both arms differ ONLY in
+                `crates/fr-persist/src/listpack.rs`.
+                A SECOND paired build, attempted later against a newer HEAD, FAILED this check
+                (after-1 652131cdf114bff9 != after-2 7185fd7df1cbb244) because a peer committed
+                and then re-dirtied `fr-runtime/src/lib.rs` mid-window. That attempt is
+                DISCARDED and no number from it appears here; the row above is the stable one.
+  SHIPPED CODE  the production half of the measured AFTER source is byte-identical to what is
+                committed (diffed with `mod tests` excluded); the only later edits were in
+                `#[cfg(test)]` code, to take UBS criticals from 5 to 0.
+  harness       scratchpad `reload_slope.py` + `ab_board.py`: seed an identical DB, run the
+                SAME server under callgrind at K=4 and K=12 DEBUG RELOADs and difference both
+                the whole-program Ir and every per-function Ir, so seeding, startup and
+                teardown cancel exactly. All arms — A/A, before, after, incumbent — run in ONE
+                invocation.
+  incumbent     verified in-run: redis-server sha=d2c8a4b9 == vendored source HEAD, clean.
+  host          thinkstation1, 64 cores OBSERVED, powersave, /data 104-117G free.
+  PER-ARM loadavg/MHz   hash arms 34.01/25.24/19.61 falling to 28.33, MHz mean 2467-2475
+                (max 4003-3925, min 1429); string arms 29.41 -> 28.33, MHz mean 2928 then 2316
+                (max 4148, min 1429). Cross-core spread is 1429-4148 WITHIN a single sample,
+                which is exactly why this row is instruction-counted and not timed.
+  gates         fr-persist 225 + 5 + 10 + 12 tests pass; `cargo clippy -p fr-persist
+                --all-targets -- -D warnings` clean; `cargo fmt --check` clean; `ubs` exit 0
+                with Critical 0, matching the HEAD baseline for the same file.
+
+### WHAT THIS DOES NOT CLOSE
+
+DEBUG RELOAD is still 2.43x behind and this took 4.67 pct of it. The remaining structure is
+above: fr transcodes on every reload because its in-memory representation is not the listpack
+it saved, and redis does not. The frames that remain are `decode_value_spans` at ~4,800/key
+(now roughly 72 instr/entry, of which the 28-32 byte span write is still the largest single
+term), the hashbrown rebuild at 4,258/key, and the encode half at ~5,100/key.
+
+RETRY PREDICATE, in the order I would take them:
+  1. SHRINK `ListpackValueSpan` to 12 bytes (tag + `Range<u32>`) by moving the rendered decimal
+     of an integer entry into a side arena the decoder returns alongside the spans. That is the
+     residual span-write cost and it is bead `frankenredis-gvm6z`'s exact framing. It changes
+     the decoder's public shape, so it needs `crates/fr-store/src/lib.rs` — held by a peer all
+     of today — and should be taken with that reservation in hand, not around it.
+  2. DO NOT take the remaining compressor slices this bead names (batch-the-literal-run is
+     already REJECTED at +8.1 pct in this file; the rolling-hval and budget-guard lines are
+     ~1,150 and ~800 per key). lzf is at 1.37x and is no longer the gap.
+  3. The hashbrown rebuild on load is the architectural item and belongs to `b1o02`/`pf1vw`,
+     not here.

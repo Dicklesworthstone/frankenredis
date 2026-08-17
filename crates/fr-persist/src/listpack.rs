@@ -831,22 +831,42 @@ fn decode_string_entry_range(
     }
 }
 
-// (frankenredis-33832) Inlined into the span loop: it is called once per listpack
-// element on the RESTORE decode path (80 calls per 40-field hash) and returns a
-// 40-byte `(ListpackValueSpan, usize)` tuple, so leaving it out of line pays a
-// full span copy from the return slot into the caller's Vec on every element.
+// (frankenredis-qj6jn) Decode ONE entry straight into the caller's `Vec` and return
+// only the consumed length.
+//
+// The previous form returned `Result<(ListpackValueSpan, usize), ListpackError>`.
+// `ListpackValueSpan` is 28-32 bytes because its `Integer` variant carries the
+// rendered decimal inline, so that tuple is ~40 bytes wrapped in a `Result` — and it
+// was built in the callee's return slot, moved out into the caller's locals, then
+// copied AGAIN by `values.push(value)`. `#[inline]` did not collapse it: the function
+// has eight return points, each materialising the tuple separately.
+//
+// Measured on the DEBUG RELOAD decode path (200 keys x 40-field hash, callgrind slope,
+// 80 entries/key), the old form spent 117 instr per listpack entry, of which the fat
+// move accounted for ~56: `ptr::write` 16, `Result` plumbing 16, tuple construction 12
+// and `Vec::push` 12. Pushing in place removes the return slot and the second copy —
+// the span is constructed once, directly where it lives.
+//
+// Byte-for-byte equivalent to the old form, and the ORDER of fallible steps is
+// preserved exactly so error PRECEDENCE is unchanged: `entry_len_with_backlen` is
+// still evaluated before `narrow_span` in every string arm, and `out.push` is the last
+// action on every success path, so a failing entry leaves nothing behind. (Even that
+// is unobservable — every error path discards the whole `Vec` — but keeping it true
+// means the reference oracle can compare pushes as well as results.)
 #[inline]
-fn decode_entry_value_span(
+fn decode_entry_value_span_into(
     data: &[u8],
     cursor: usize,
-) -> Result<(ListpackValueSpan, usize), ListpackError> {
+    out: &mut Vec<ListpackValueSpan>,
+) -> Result<usize, ListpackError> {
     let first = *data.get(cursor).ok_or(ListpackError::TruncatedEntry)?;
 
     if first & 0x80 == 0 {
         let value = i64::from(first & 0x7F);
         let data_len = 1;
         let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
-        return Ok((ListpackValueSpan::integer(value), entry_len));
+        out.push(ListpackValueSpan::integer(value));
+        return Ok(entry_len);
     }
     if first & 0xC0 == 0x80 {
         let slen = (first & 0x3F) as usize;
@@ -859,10 +879,8 @@ fn decode_entry_value_span(
         }
         let data_len = 1 + slen;
         let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
-        return Ok((
-            ListpackValueSpan::String(narrow_span(start, end)?),
-            entry_len,
-        ));
+        out.push(ListpackValueSpan::String(narrow_span(start, end)?));
+        return Ok(entry_len);
     }
     if first & 0xE0 == 0xC0 {
         let second = *data.get(cursor + 1).ok_or(ListpackError::TruncatedEntry)?;
@@ -874,7 +892,8 @@ fn decode_entry_value_span(
         };
         let data_len = 2;
         let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
-        return Ok((ListpackValueSpan::integer(signed), entry_len));
+        out.push(ListpackValueSpan::integer(signed));
+        return Ok(entry_len);
     }
     if first & 0xF0 == 0xE0 {
         let second = *data.get(cursor + 1).ok_or(ListpackError::TruncatedEntry)?;
@@ -888,10 +907,8 @@ fn decode_entry_value_span(
         }
         let data_len = 2 + slen;
         let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
-        return Ok((
-            ListpackValueSpan::String(narrow_span(start, end)?),
-            entry_len,
-        ));
+        out.push(ListpackValueSpan::String(narrow_span(start, end)?));
+        return Ok(entry_len);
     }
     match first {
         0xF0 => {
@@ -913,10 +930,8 @@ fn decode_entry_value_span(
             }
             let data_len = 5 + slen;
             let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
-            Ok((
-                ListpackValueSpan::String(narrow_span(start, end)?),
-                entry_len,
-            ))
+            out.push(ListpackValueSpan::String(narrow_span(start, end)?));
+            Ok(entry_len)
         }
         0xF1 => {
             if cursor + 3 > data.len() {
@@ -925,7 +940,8 @@ fn decode_entry_value_span(
             let raw = i16::from_le_bytes([data[cursor + 1], data[cursor + 2]]);
             let data_len = 3;
             let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
-            Ok((ListpackValueSpan::integer(i64::from(raw)), entry_len))
+            out.push(ListpackValueSpan::integer(i64::from(raw)));
+            Ok(entry_len)
         }
         0xF2 => {
             if cursor + 4 > data.len() {
@@ -940,7 +956,8 @@ fn decode_entry_value_span(
             };
             let data_len = 4;
             let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
-            Ok((ListpackValueSpan::integer(signed), entry_len))
+            out.push(ListpackValueSpan::integer(signed));
+            Ok(entry_len)
         }
         0xF3 => {
             if cursor + 5 > data.len() {
@@ -954,7 +971,8 @@ fn decode_entry_value_span(
             ]);
             let data_len = 5;
             let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
-            Ok((ListpackValueSpan::integer(i64::from(raw)), entry_len))
+            out.push(ListpackValueSpan::integer(i64::from(raw)));
+            Ok(entry_len)
         }
         0xF4 => {
             if cursor + 9 > data.len() {
@@ -972,7 +990,8 @@ fn decode_entry_value_span(
             ]);
             let data_len = 9;
             let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
-            Ok((ListpackValueSpan::integer(raw), entry_len))
+            out.push(ListpackValueSpan::integer(raw));
+            Ok(entry_len)
         }
         _ => Err(ListpackError::InvalidEncoding(first)),
     }
@@ -1129,8 +1148,7 @@ fn decode_value_spans_impl<const PRESIZE: bool>(
         Vec::new()
     };
     while cursor < end {
-        let (value, consumed) = decode_entry_value_span(data, cursor)?;
-        values.push(value);
+        let consumed = decode_entry_value_span_into(data, cursor, &mut values)?;
         cursor = cursor
             .checked_add(consumed)
             .ok_or(ListpackError::TruncatedEntry)?;
@@ -1152,6 +1170,334 @@ fn decode_value_spans_impl<const PRESIZE: bool>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── (frankenredis-qj6jn) in-place span decode: equivalence oracle ──────────
+    //
+    // FROZEN copy of the pre-lever `decode_entry_value_span`: it builds the
+    // `(ListpackValueSpan, usize)` tuple and returns it, exactly as production did
+    // before the entry was decoded straight into the caller's `Vec`. It lives here,
+    // not in the crate, so it can never be reached by shipped code and can never be
+    // silently "fixed" to match a regression.
+    //
+    // This is the isomorphism proof for the lever: the two implementations are
+    // independent code paths over the same input, so agreement on BOTH the decoded
+    // spans and the exact error variant is real evidence, not a tautology. If a
+    // later edit changes production's behaviour deliberately, this test fails and
+    // forces the change to be argued rather than absorbed.
+    fn reference_decode_entry_value_span(
+        data: &[u8],
+        cursor: usize,
+    ) -> Result<(ListpackValueSpan, usize), ListpackError> {
+        let first = *data.get(cursor).ok_or(ListpackError::TruncatedEntry)?;
+
+        if first & 0x80 == 0 {
+            let value = i64::from(first & 0x7F);
+            let entry_len = entry_len_with_backlen(data, cursor, 1)?;
+            return Ok((ListpackValueSpan::integer(value), entry_len));
+        }
+        if first & 0xC0 == 0x80 {
+            let slen = (first & 0x3F) as usize;
+            let start = cursor + 1;
+            let end = start
+                .checked_add(slen)
+                .ok_or(ListpackError::StringLengthOverflow)?;
+            if end > data.len() {
+                return Err(ListpackError::TruncatedEntry);
+            }
+            let entry_len = entry_len_with_backlen(data, cursor, 1 + slen)?;
+            return Ok((
+                ListpackValueSpan::String(narrow_span(start, end)?),
+                entry_len,
+            ));
+        }
+        if first & 0xE0 == 0xC0 {
+            let second = *data.get(cursor + 1).ok_or(ListpackError::TruncatedEntry)?;
+            let raw = (u16::from(first & 0x1F) << 8) | u16::from(second);
+            let signed = if raw & 0x1000 != 0 {
+                (raw as i64) - 0x2000
+            } else {
+                raw as i64
+            };
+            let entry_len = entry_len_with_backlen(data, cursor, 2)?;
+            return Ok((ListpackValueSpan::integer(signed), entry_len));
+        }
+        if first & 0xF0 == 0xE0 {
+            let second = *data.get(cursor + 1).ok_or(ListpackError::TruncatedEntry)?;
+            let slen = ((u32::from(first & 0x0F) << 8) | u32::from(second)) as usize;
+            let start = cursor + 2;
+            let end = start
+                .checked_add(slen)
+                .ok_or(ListpackError::StringLengthOverflow)?;
+            if end > data.len() {
+                return Err(ListpackError::TruncatedEntry);
+            }
+            let entry_len = entry_len_with_backlen(data, cursor, 2 + slen)?;
+            return Ok((
+                ListpackValueSpan::String(narrow_span(start, end)?),
+                entry_len,
+            ));
+        }
+        match first {
+            0xF0 => {
+                if cursor + 5 > data.len() {
+                    return Err(ListpackError::TruncatedEntry);
+                }
+                let slen = u32::from_le_bytes([
+                    data[cursor + 1],
+                    data[cursor + 2],
+                    data[cursor + 3],
+                    data[cursor + 4],
+                ]) as usize;
+                let start = cursor + 5;
+                let end = start
+                    .checked_add(slen)
+                    .ok_or(ListpackError::StringLengthOverflow)?;
+                if end > data.len() {
+                    return Err(ListpackError::TruncatedEntry);
+                }
+                let entry_len = entry_len_with_backlen(data, cursor, 5 + slen)?;
+                Ok((
+                    ListpackValueSpan::String(narrow_span(start, end)?),
+                    entry_len,
+                ))
+            }
+            0xF1 => {
+                if cursor + 3 > data.len() {
+                    return Err(ListpackError::TruncatedEntry);
+                }
+                let raw = i16::from_le_bytes([data[cursor + 1], data[cursor + 2]]);
+                let entry_len = entry_len_with_backlen(data, cursor, 3)?;
+                Ok((ListpackValueSpan::integer(i64::from(raw)), entry_len))
+            }
+            0xF2 => {
+                if cursor + 4 > data.len() {
+                    return Err(ListpackError::TruncatedEntry);
+                }
+                let bytes = [data[cursor + 1], data[cursor + 2], data[cursor + 3], 0];
+                let raw_u32 = u32::from_le_bytes(bytes);
+                let signed = if raw_u32 & 0x00_80_00_00 != 0 {
+                    (raw_u32 as i64) - 0x0100_0000
+                } else {
+                    raw_u32 as i64
+                };
+                let entry_len = entry_len_with_backlen(data, cursor, 4)?;
+                Ok((ListpackValueSpan::integer(signed), entry_len))
+            }
+            0xF3 => {
+                if cursor + 5 > data.len() {
+                    return Err(ListpackError::TruncatedEntry);
+                }
+                let raw = i32::from_le_bytes([
+                    data[cursor + 1],
+                    data[cursor + 2],
+                    data[cursor + 3],
+                    data[cursor + 4],
+                ]);
+                let entry_len = entry_len_with_backlen(data, cursor, 5)?;
+                Ok((ListpackValueSpan::integer(i64::from(raw)), entry_len))
+            }
+            0xF4 => {
+                if cursor + 9 > data.len() {
+                    return Err(ListpackError::TruncatedEntry);
+                }
+                let raw = i64::from_le_bytes([
+                    data[cursor + 1],
+                    data[cursor + 2],
+                    data[cursor + 3],
+                    data[cursor + 4],
+                    data[cursor + 5],
+                    data[cursor + 6],
+                    data[cursor + 7],
+                    data[cursor + 8],
+                ]);
+                let entry_len = entry_len_with_backlen(data, cursor, 9)?;
+                Ok((ListpackValueSpan::integer(raw), entry_len))
+            }
+            _ => Err(ListpackError::InvalidEncoding(first)),
+        }
+    }
+
+    /// Run one entry through both implementations and require identical outcomes.
+    ///
+    /// Both sides are normalised to `Result<(Vec<span>, consumed), error>` so ONE
+    /// comparison covers everything that could diverge: success-vs-failure, the exact
+    /// error variant, the decoded span, the consumed length, AND how many spans were
+    /// pushed. The reference pushes exactly one span on success and none on failure by
+    /// construction, so comparing the whole vector is what pins the in-place arm to
+    /// the same discipline — a rewrite that pushed before validating, or pushed twice,
+    /// fails here even though its returned value would look correct.
+    fn assert_entry_arms_agree(data: &[u8], cursor: usize) {
+        let (want_res, want_spans) = match reference_decode_entry_value_span(data, cursor) {
+            Ok((span, consumed)) => (Ok(consumed), vec![span]),
+            Err(err) => (Err(err), Vec::new()),
+        };
+        let mut got_spans: Vec<ListpackValueSpan> = Vec::new();
+        let got_res = decode_entry_value_span_into(data, cursor, &mut got_spans);
+        assert_eq!(
+            (want_res, want_spans),
+            (got_res, got_spans),
+            "span decode arms diverged at cursor {cursor}"
+        );
+    }
+
+    /// Every listpack encoding, plus the boundary values of each integer width,
+    /// decoded identically by both arms. Hardcoded encodings — not produced by the
+    /// encoder under test — so the corpus cannot inherit a bug from it.
+    #[test]
+    fn inplace_span_decode_matches_reference_across_all_encodings() {
+        // A 6-bit string header at its maximum length (63) plus the payload it
+        // promises — the boundary between the 6-bit and 12-bit string encodings.
+        let mut max6 = vec![0xBFu8];
+        max6.extend(std::iter::repeat_n(b'q', 63));
+
+        // (encoding bytes WITHOUT backlen, human label)
+        let bodies: Vec<(Vec<u8>, &str)> = vec![
+            (vec![0x00], "7-bit uint 0"),
+            (vec![0x7F], "7-bit uint 127"),
+            (vec![0x80], "6-bit string, empty"),
+            (vec![0x83, b'a', b'b', b'c'], "6-bit string 'abc'"),
+            (max6, "6-bit string at max length 63"),
+            (vec![0xC0, 0x00], "13-bit int 0"),
+            (vec![0xDF, 0xFF], "13-bit int -1"),
+            (vec![0xD0, 0x00], "13-bit int, sign bit set"),
+            (vec![0xE0, 0x00], "12-bit string, empty"),
+            (vec![0xE0, 0x02, b'h', b'i'], "12-bit string 'hi'"),
+            (vec![0xF1, 0x00, 0x80], "int16 i16::MIN"),
+            (vec![0xF1, 0xFF, 0x7F], "int16 i16::MAX"),
+            (vec![0xF2, 0x00, 0x00, 0x80], "int24 min"),
+            (vec![0xF2, 0xFF, 0xFF, 0x7F], "int24 max"),
+            (vec![0xF3, 0x00, 0x00, 0x00, 0x80], "int32 i32::MIN"),
+            (vec![0xF3, 0xFF, 0xFF, 0xFF, 0x7F], "int32 i32::MAX"),
+            (
+                vec![0xF4, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80],
+                "int64 i64::MIN",
+            ),
+            (
+                vec![0xF4, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F],
+                "int64 i64::MAX",
+            ),
+            (vec![0xF0, 0x00, 0x00, 0x00, 0x00], "32-bit string, empty"),
+            (
+                vec![0xF0, 0x01, 0x00, 0x00, 0x00, b'z'],
+                "32-bit string 'z'",
+            ),
+        ];
+        for (body, label) in &bodies {
+            // Append the well-formed backlen so the entry is complete.
+            let mut entry = body.clone();
+            assert!(
+                body.len() < 128,
+                "test bodies stay in the 1-byte backlen range"
+            );
+            entry.push(body.len() as u8);
+            assert_entry_arms_agree(&entry, 0);
+            // Every fixture must actually DECODE — otherwise "the arms agree" would be
+            // satisfied by both of them rejecting it, and the corpus would silently
+            // stop covering the encoding it names.
+            let mut got: Vec<ListpackValueSpan> = Vec::new();
+            assert!(
+                decode_entry_value_span_into(&entry, 0, &mut got).is_ok(),
+                "{label} must decode, not be rejected"
+            );
+            assert_eq!(got.len(), 1, "{label} must yield exactly one span");
+        }
+    }
+
+    /// NEGATIVE CASES. Each is malformed in a way that a naive in-place rewrite gets
+    /// wrong: a rewrite that pushes the span BEFORE validating the backlen would
+    /// leave a phantom entry; one that reorders `narrow_span` ahead of
+    /// `entry_len_with_backlen` would report the wrong error variant; one that
+    /// forgets a bounds test would panic instead of returning `Err`.
+    #[test]
+    fn inplace_span_decode_matches_reference_on_malformed_entries() {
+        let cases: Vec<(Vec<u8>, &str)> = vec![
+            (vec![], "empty buffer"),
+            (vec![0x00], "7-bit uint with the backlen byte missing"),
+            (vec![0x00, 0x09], "7-bit uint with a WRONG backlen"),
+            (vec![0x83, b'a'], "6-bit string truncated mid-payload"),
+            (
+                vec![0x83, b'a', b'b', b'c'],
+                "6-bit string, backlen missing",
+            ),
+            (
+                vec![0x83, b'a', b'b', b'c', 0x02],
+                "6-bit string, wrong backlen",
+            ),
+            (vec![0xC0], "13-bit int missing its second byte"),
+            (vec![0xE0], "12-bit string missing its length byte"),
+            (vec![0xE0, 0xFF], "12-bit string length past the buffer"),
+            (
+                vec![0xF0, 0xFF, 0xFF, 0xFF, 0xFF],
+                "32-bit string len u32::MAX",
+            ),
+            (vec![0xF0, 0x01, 0x00], "32-bit string header truncated"),
+            (vec![0xF1, 0x00], "int16 truncated"),
+            (vec![0xF2, 0x00, 0x00], "int24 truncated"),
+            (vec![0xF3, 0x00, 0x00, 0x00], "int32 truncated"),
+            (vec![0xF4, 0x00], "int64 truncated"),
+            (vec![0xF5], "invalid encoding byte 0xF5"),
+            (vec![0xFF], "the EOF terminator, decoded as an entry"),
+        ];
+        for (data, label) in &cases {
+            assert_entry_arms_agree(data, 0);
+            let mut sink: Vec<ListpackValueSpan> = Vec::new();
+            assert!(
+                decode_entry_value_span_into(data, 0, &mut sink).is_err(),
+                "{label} must be rejected, not decoded"
+            );
+            assert!(sink.is_empty(), "{label} must leave the sink untouched");
+        }
+        // Reading past the end of a buffer must be an error, never a panic.
+        let data = [0x83u8, b'a', b'b', b'c', 0x04];
+        for cursor in 0..=data.len() + 2 {
+            assert_entry_arms_agree(&data, cursor);
+        }
+    }
+
+    proptest::proptest! {
+        /// Arbitrary bytes at an arbitrary cursor: the two arms must never diverge,
+        /// and neither may panic. This is what covers the error-PRECEDENCE orderings
+        /// the hand-written cases above cannot enumerate.
+        #[test]
+        fn inplace_span_decode_matches_reference_on_arbitrary_bytes(
+            data in proptest::collection::vec(proptest::num::u8::ANY, 0..64usize),
+            cursor in 0..70usize,
+        ) {
+            assert_entry_arms_agree(&data, cursor);
+        }
+
+        /// Whole-listpack level: a real encoded listpack decodes to the same span
+        /// vector through the production entry point as through the reference loop.
+        #[test]
+        fn inplace_value_spans_match_reference_loop_on_encoded_listpacks(
+            entries in proptest::collection::vec(
+                proptest::collection::vec(proptest::num::u8::ANY, 0..40usize),
+                0..24usize,
+            ),
+        ) {
+            let slices: Vec<&[u8]> = entries.iter().map(|e| e.as_slice()).collect();
+            let Some(blob) = crate::encode_listpack_strings_blob(&slices) else {
+                return Ok(());
+            };
+            // Reference: the pre-lever loop, verbatim.
+            let mut want: Vec<ListpackValueSpan> = Vec::new();
+            let (total_bytes, _) = parse_header(&blob).expect("encoder emits a valid header");
+            let end = (total_bytes as usize) - 1;
+            let mut cursor = LISTPACK_HEADER_SIZE;
+            while cursor < end {
+                let (value, consumed) =
+                    reference_decode_entry_value_span(&blob, cursor).expect("valid entry");
+                want.push(value);
+                cursor += consumed;
+            }
+            let got = decode_value_spans(&blob).expect("valid listpack decodes");
+            proptest::prop_assert_eq!(&got, &want);
+            // And the spans still resolve to the bytes that went in.
+            for (span, original) in got.iter().zip(entries.iter()) {
+                proptest::prop_assert_eq!(span.as_bytes(&blob), original.as_slice());
+            }
+        }
+    }
 
     // (frankenredis-vqjz1) Lock the itoa2 magnitude rendering against the original
     // single-digit div-by-10 reference across digit boundaries + i64 extremes.
