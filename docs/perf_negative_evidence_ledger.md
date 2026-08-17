@@ -8,6 +8,45 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-08-17 MossyOrchid: SPEC 2 OF 2 — XPENDING's summary form carries THREE already-fixed divergences a borrowed copy would reintroduce, and one of them sits on the exact shape being optimised (`frankenredis-5na4i`)
+
+Claim class: SOURCE. No build, no bench, no server, no deletes — /data at 8.2G, 100 pct used.
+
+Completes the execution list for the [C] targets: ZINTERCARD's spec landed earlier, this is
+XPENDING's. Both measured shapes are the SUMMARY form (argc 3, `XPENDING key group`); the
+extended form is not measured and should stay generic.
+
+The summary form is one branch (fr-command:10588) and it is small — which is exactly why copying
+it carelessly is plausible. It carries three divergences this repo has already fixed BY NAME:
+
+  1. **gauntlet B1** — each per-consumer pending count is a BULK STRING, not an integer.
+     Vendored 7.2.4 returns `"1"`, not `:1`. An `Integer` here is a WRONG ANSWER, not a slow path.
+  2. **frankenredis-b2okv** — when `total == 0` the consumers field is a NULL array (`*-1`), NOT
+     an empty array. fr emitted `*0` until that was fixed. **This is on the measured shape**:
+     `xpending_empty` IS the total==0 case, so the fast path being written is the one that trips
+     it.
+  3. NOGROUP is a REPLY (`xpending_nogroup_error`), not an `Err`; WRONGTYPE arrives via the `?`
+     on `xpending_summary`. A fast path that invents either diverges.
+
+SAFEST DESIGN, identical in shape to the ZINTERCARD spec: serve only `argc == 3` where
+`xpending_summary` returns `Some`, decline everything else, and let the generic own every error
+and the whole extended surface. Both measured shapes are `Some`-cases, so this forfeits none of
+the 2,804.0 instr/op.
+
+THE TEST ORDER MATTERS AND IS THE POINT OF THIS ROW: exercise the EMPTY group first. A differ
+that only tests a populated group passes while emitting `*0` for the empty one — which is
+precisely how `b2okv` shipped the first time. The optimisation and the historical bug live on
+the same shape.
+
+Recorded because the pattern generalises: the cheapest-looking branch of a command is the one
+whose edge cases were fixed longest ago, so its correctness history is the part a fast-path
+author has least reason to read and most reason to.
+
+PROVENANCE: source only, no measurement. Host thinkstation1, /data 8.2G at 100 pct, loadavg
+10.60 / 11.02 / 11.39. No MHz sample: nothing was timed.
+
+--------------------------------------------------------------------------------
+
 ## 2026-08-17 MossyOrchid: MY OWN RETRY PREDICATE, CLOSED — the eight unidentified GENERIC dumps are `sort_ro_alpha` BEFORE the ICU fix, not a new target. And confirming that independently verified `cgeq5`'s lever and showed what it left behind: SORT_RO now spends more on DISPATCH than on sorting (`frankenredis-94lp3`, `frankenredis-cgeq5`)
 
 Claim class: INSTRUMENT + independent verification. No build, no bench, no server — /data at 11G,
