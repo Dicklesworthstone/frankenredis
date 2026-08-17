@@ -21,6 +21,36 @@ commits cleanly. That is a workaround for a durability problem, NOT an attempt t
 the contract: the rows are unchanged, they are still subject to it, and merging them into the
 ledger is a mechanical step once the blocker clears.
 
+## MEASURED (frankenredis-ozrro) — the HGET wrapper is now `#[inline]`, and the measurement is a NULL by construction: no shape in this corpus can verify the saving, only that nothing regressed
+
+    shape        pre-inline   post-inline   delta
+    hget            1,782.4       1,782.7    +0.3   unchanged
+    type            1,400.3       1,399.8    -0.5   -199.4 win holds
+    dump_small      2,704.3       2,702.2    -2.1   CONTROL
+
+HGET did not move, and it could not have: its floor arm calls
+`execute_plain_hget_borrowed_into_with_default_read_gate` DIRECTLY, so it never traversed the
+wrapper being inlined. The ~24 instr/op this recovers is paid only by LEGACY callers that kept the
+old name, and no shape in this corpus exercises those paths.
+
+So this row claims exactly two things and not a third: the change does not regress the arm that IS
+measurable, and the ~24 figure is carried over BY ANALOGY from the keymeta wrapper where it was
+measured directly (TTL 32.7 un-inlined, 11.0 inlined). Calling it "verified for HGET" would be
+borrowing a number across a boundary the shapes cannot cross — the same error as sizing the read
+gate from the write gate, which cost me a failed predicate two rows ago.
+
+### WHY IT WAS MISSED THE FIRST TIME, AND WHY THE PATCH REPORTED IT
+
+My inline patch printed `SKIP (found 0)` rather than silently succeeding: the docstring I anchored
+on turned out to be a continuation of a prior author's comment block, not standalone text. A patch
+that "succeeds" while matching nothing is the failure mode that produces a confident report of work
+not done, and the count assert is the only reason it surfaced. That is the sixth text-matching
+assumption of mine to be wrong this campaign and roughly the fourth caught by a guard rather than
+by the compiler.
+
+The justification is now recorded AT THE SITE with its measurement, because `#[inline]` on a
+trivial delegating function is precisely what a later reader strips as noise.
+
 ## MEASURED (frankenredis-ozrro) — TYPE gains 199.4 instr/op from the cached read gate, TTL/PTTL are REVERTED because the same change made TTL worse, and the refactor's own wrapper cost 24 until `#[inline]` fixed it
 
 fr-only, control flat throughout. Shared `keymeta` executor (TTL/PTTL/TYPE/EXPIRETIME/

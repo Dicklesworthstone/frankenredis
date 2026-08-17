@@ -15529,6 +15529,12 @@ impl Runtime {
     /// (frankenredis-ozrro) Thin wrapper preserving the original signature: computes the read
     /// gate and delegates. Every pre-existing caller keeps working unchanged; only callers that
     /// hold a per-pass cached gate should use the `_with_default_read_gate` form below.
+    ///
+    /// `#[inline]` IS LOAD-BEARING AND MEASURED, not cosmetic: the equivalent keymeta wrapper cost
+    /// TTL 32.7 instr/op un-inlined and 11.0 inlined, so an un-inlined wrapper charges ~24 to every
+    /// caller that kept the old name. "Preserves existing callers unchanged" was true for
+    /// compilation and false for performance until this attribute was added.
+    #[inline]
     pub fn execute_plain_hget_borrowed_into(
         &mut self,
         key: &[u8],
