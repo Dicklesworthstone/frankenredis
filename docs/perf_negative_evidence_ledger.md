@@ -8,6 +8,69 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## CORRECTION (frankenredis-ozrro) — gvm6z found my null-gate guard was a TAUTOLOGY, and their fourth observation shows my noise calibration was too tight: the 7.2 sigma I banked is really 1.5-2.4 sigma, and the gap's support is REPRODUCIBILITY, not sigma
+
+Two defects in work I shipped, one structural and one quantitative. Source analysis and
+arithmetic only; no build or measurement.
+
+### THE GUARD COULD NOT FAIL
+
+I shipped, and described in both a ledger row and a commit message, "the frankenpandas failure
+encoded as a test so it cannot be reintroduced":
+
+    if not NULL_GATE_PCT > NULL_HALF_RANGE_PCT:      # NULL_GATE_PCT = 3 * NULL_HALF_RANGE_PCT
+
+That is `3x > x`. A tautology for any positive constant. The one test written specifically to
+make a known failure mode impossible was structurally incapable of failing, and I asserted the
+opposite twice. gvm6z caught it (5c1ed4938) and made it compare against the OBSERVED sample
+instead, which is the right fix: a guard on a derived constant tests algebra, a guard on data
+tests the world.
+
+The general lesson is sharper than the bug: a self-test that references only constants defined
+in the same file cannot detect anything about reality. Every assertion I add to that selftest
+should name at least one OBSERVED quantity, or it is decoration.
+
+### THE CALIBRATION WAS TOO TIGHT, AND MY OWN STATED LIMIT IS WHY
+
+My median came from NINE groups, all PAIRS. I flagged that as a limit — "a half-range over two
+samples is a weak estimator of spread" — and then used the number as though it were not. gvm6z
+added a fourth observation my calibration could not have produced: SIX draws of get_control on
+one ELF at loadavg 14.09-14.29 with the 1-minute FLAT across all six, giving 0.320 pct. Quiet,
+unspiked, and 4.8x my median. My row attributed its own 0.481 max to a loadavg 13->44 spike;
+this group had no spike to blame, so "0.067 is the quiet-window figure" does not survive.
+
+    observed half-ranges  [0.011, 0.067, 0.320, 0.481]   median 0.1935 pct
+    my shipped gate       0.201 pct  ->  only 1.04x above the observed median
+
+So the gate I set to avoid frankenpandas's failure now sits 4 pct above the median it was
+supposed to clear comfortably. It is provisionally TOO TIGHT, and the fix is not to widen it by
+taste but to recalibrate with MULTI-DRAW groups instead of pairs.
+
+### WHAT THIS DOES TO A SIGNIFICANCE CLAIM I BANKED
+
+                                   sigma/arm   delta noise   lcs-vs-zintercard 46.3   arity 3.6
+    my pair-derived 0.067 pct           4.7          6.6            7.0 sigma          0.54
+    observed median 0.1935 pct         13.5         19.2            2.4 sigma          0.19
+    gvm6z quiet 6-draw 0.320 pct       22.4         31.7            1.5 sigma          0.11
+
+The "LCS vs ZINTERCARD miss tax differs, 7.2 sigma, REAL" claim used the tightest plausible
+calibration. At the observed median it is 2.4 sigma and at the quiet 6-draw figure 1.5 sigma —
+NOT established by that test. I am not withdrawing the conclusion, because what actually
+supports it was never the sigma: both commands were measured TWICE in independent sessions and
+windows (zintercard 360.6 -> 348.5, lcs 305.1 -> 302.2), the gap is present in both, and it
+reproduces at ~3 pct. Reproducibility across sessions is the evidence; the sigma was
+decoration dressed as rigour, and I should have quoted the repeats.
+
+The ARITY result is unaffected and this is why null results are the robust kind: 0.54, 0.19 and
+0.11 sigma are all "flat". A looser noise estimate cannot turn a non-effect into an effect.
+
+### NEXT, and it needs measurement rather than argument
+
+Recalibrate NULL_HALF_RANGE_PCT from groups of at least SIX draws per (ELF, arm, shape), not
+pairs, in a window with the 1-minute average flat. Until then treat 0.067 pct as a floor on the
+instrument's precision and ~0.32 pct as the honest working figure, and quote repeats rather
+than sigma for any gap smaller than a few hundred instr/op.
+
 ## PREPARED (frankenredis-ozrro) — PUBSUB is the deepest unclassified arm at ~127 of 163, its machinery already exists, and it is the one container where claiming sibling subcommands is CORRECT
 
 No build, benchmark or measurement — builds were held for the external build cycle. Three
