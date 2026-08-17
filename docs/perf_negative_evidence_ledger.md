@@ -8,6 +8,170 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-08-17 BrownIbis: KEEP — SORT stops cloning every element just to sort it: `sort_ro_alpha_64` 48,794.4 -> 40,637.2 instr/op (−16.72 pct), and the targeted frame goes to ZERO (`frankenredis-y9npu`)
+
+Claim class: COMPETITIVE. Campaign output: yes. Each ratio draw below started a live redis 7.2.4
+server arm side-by-side with the fr arm inside the same invocation of
+`scripts/shape_instr_per_op.py`, with the incumbent provenance-checked against vendored source
+before either arm ran (`redis-server sha=d2c8a4b9 == vendored source HEAD, clean`). Headline:
+fr/redis 0.2049x on `sort_ro_alpha_64` and fr/redis 1.0556x on `sort_ro_alpha`, both the WORST of
+two draws. Follow-on to `frankenredis-cgeq5`, which removed the ICU call; this removes the copy.
+
+BINARIES (both `--base HEAD --clean-overlay`, and `git diff` between the two bases touches ZERO
+`crates/**` files, so the ELFs differ by exactly this change):
+
+    before  bench_elf_sha256=46520db541cc5ff7aa40f575854cc863645cd1202ca3238841b398daf261429f
+    after   bench_elf_sha256=73ae1da08cb8c420c4da5005ccdba65fdfcc56a1da51237f0c035df817b330b1
+
+Both SHAs are the harness's own `bench_elf_sha256`, computed from the guest ELF's executable
+mapping and re-verified after each arm; each binary was copied out of the shared
+`target/release/` rendezvous to a private path BEFORE hashing, and every arm ran that copy.
+
+### Per-arm provenance
+
+Callgrind counts in software, so neither figure enters the numbers; they are provenance, and MHz
+is recorded per arm because it is not monotonic in load on this host.
+
+    arm                        loadavg 1/5/15         cpu MHz mean / max
+    before sort_ro_alpha_64    12.86 31.20 28.67      3002 / 4224
+    after  sort_ro_alpha_64    13.12 30.95 28.60      2952 / 4292
+
+Host: AMD Ryzen Threadripper PRO 5975WX, 64 threads, governor `powersave`,
+`kernel.perf_event_paranoid = 4`, valgrind 3.25.1. Every A/B arm stamped WINDOW: FIT for fr-only.
+
+### The measurement
+
+    shape              before       after        delta
+    sort_ro_alpha_64  48,794.4    40,637.2      −16.72 pct
+    sort_ro_alpha      9,248.8     8,900.3      −3.77 pct
+    get_control        1,327.2     1,328.5      +0.10 pct   <- NULL
+    dispatch (both)     3,116.0     3,113.0      −0.10 pct   <- untouched, as predicted
+
+### The A/A null, and the decision rule
+
+Eight draws of the SAME ELF on the claim-carrying shape, one top-level invocation, paired into
+four A/A ratios (`sort_ro_alpha_64`, after ELF):
+
+    draws    40615.0 40661.9 40661.6 40641.1 40645.8 40626.7 40662.1 40650.1
+    ratios   0.998847  1.000504  1.000470  1.000295
+
+**A/A null median 1.000383, bootstrap 95% median CI [0.998847, 1.000504]** (20,000 percentile
+resamples, seed 20260817). GATE: that bootstrap median-CI is the decision rule for this row — an
+A/B landing inside the null's own interval is refused however it reads. The A/B is **0.8328**,
+roughly 380x the null's half-width away from 1.0.
+
+**CV is diagnostic only and was never a gate here**; it is not computed at all. The instrument
+counts instructions in software, so dispersion is background work that failed to cancel rather
+than sampling error.
+
+### MECHANISM — the frame I targeted went to ZERO, and nothing else moved
+
+Per-frame two-point delta (`scripts/frame_delta.py`), `sort_ro_alpha_64`, before -> after:
+
+    Vec<Option<Vec<u8>>>::from_iter (the key clone)   2,035.0 -> 0
+    mi_theap_malloc_aligned                           2,927.0 -> 1,529.0
+    mi_free                                           2,927.0 -> 1,585.0
+    __memcpy_avx_unaligned_erms                       4,397.4 -> 3,437.4
+    ---- untouched, and bit-identical, which is the control ----
+    sort_alpha_compare_with_ascii_fast_path           7,071.0 -> 7,071.0
+    RespFrame::encode_into'2                          5,312.0 -> 5,312.0
+    Vec<Vec<u8>>::from_iter (the list to_vec)         2,561.0 -> 2,561.0
+
+The named reductions total 5,735 of the 8,157 measured; the remainder is the dropped container's
+own allocation and drop glue, below the print cut. **A change that removed different work could
+not leave the comparator, the reply encoder and the list materialisation identical to the
+instruction.**
+
+### What the change is
+
+`SORT`'s no-BY case built `sort_keys` as `elements.iter().map(|el| Some(el.clone()))` — one heap
+allocation and one memcpy per element, for a copy that is never mutated, existing only so the
+alpha arm had something to borrow that was not `elements` (the window materialisation
+`mem::take`s out of `elements`). `sort_keys` is now `Option<Vec<...>>` and is simply **absent**
+for no-BY: the alpha arm borrows `elements` directly and reduces its sorted window to a
+`Vec<usize>` permutation, letting the borrows die before the mutation. One allocation of the
+window's length replaces n per-element allocations.
+
+**ONLY THE ALPHA ARM NEEDED RESTRUCTURING**, which is the part worth keeping: both numeric arms
+build `Vec<(f64, usize)>`, which carries no borrow, so NLL already ends the borrow at its last use
+and the `mem::take` was always legal there. The `NoStar` test also moved OUT of the per-element
+loop, where it had been re-evaluated for every element.
+
+### A CONTAMINATED ARM, FOUND AFTER THE FACT, AND BOUNDED RATHER THAN WAVED AWAY
+
+The after ELF contains a change that is NOT mine. A peer had an uncommitted subcommand-table
+lever in `crates/fr-command/src/lib.rs` while I held an exclusive reservation on that file; rch
+overlays the WORKING TREE, so my `--overlay-path` carried their edit into the after arm and not
+the before arm. Proven, not suspected: `nm -C` finds `subcommand_table_index` **5 times in the
+after ELF and 0 times in the before ELF**. They then committed both changes together as
+`280604ef7`, which is also how I noticed.
+
+Two independent bounds say it does not carry this row:
+
+  * STRUCTURAL. Their lever accelerates the CONTAINER-command subcommand lookup, reached from
+    `check_full_command_arity` / `effective_command_flags` only after
+    `command_has_subcommands_bytes(name)` answers yes. `SORT`/`SORT_RO` are not container
+    commands, so the changed code is behind a gate this shape never passes.
+  * MEASURED. Their only channel is those dispatch frames, and dispatch across the pair moved
+    **3,116.0 -> 3,113.0, i.e. -3.0 instr/op** — at most 0.04 pct of the 8,157.2 measured here.
+
+The frame-level mechanism above is what makes this safe to state rather than merely hope: 5,735
+of the 8,157 is attributed to frames only my change touches, and the comparator, reply encoder
+and list materialisation are bit-identical across the pair.
+
+WHAT I WOULD DO DIFFERENTLY: an exclusive file reservation does not stop a peer editing the file,
+and `--overlay-path` silently ships whatever is in the tree. **Diff the overlaid file against the
+base before building, or symbol-check the pair afterwards** — the `nm` check above costs one
+second and would have caught this before the measurement rather than after. I did not re-measure
+on a clean pair because the only way to build a corrected before arm is to put a reverted file in
+the SHARED working tree, and this repo has already lost three agent-commits to a peer sweeping a
+deliberate mutation out of exactly that.
+
+### Competitive ratio — WINDOW: UNFIT for ratio, so SIZING, not certified
+
+One cargo/rustc running and a non-stationary window (1min 10.20 against 5min 25.00). WORST of two
+draws is what is quoted:
+
+    shape             draw 1     draw 2     WORST      before this change
+    sort_ro_alpha_64  0.2048x    0.2049x    0.2049x    0.2459x
+    sort_ro_alpha     1.0373x    1.0556x    1.0556x    1.1210x
+
+**fr now retires 4.88x FEWER instructions than redis 7.2.4 on a 64-element `SORT ALPHA`**, and the
+n=3 deficit narrows to 1.06x. The n=64 pair agrees to 0.05 pct because its denominator is ~198k
+instr/op, where redis's elapsed-time `serverCron` is proportionally invisible.
+
+### A BAD MEASUREMENT I CAUGHT BEFORE IT REACHED THIS ROW
+
+The first ratio attempt measured the WRONG BINARY. A `sed` meant to repoint the runner renamed its
+output files but silently failed on the ELF path, because the source spells it
+`os.path.join(SB, "bins", "after.elf")` and the pattern assumed `bins/after.elf`. It produced
+0.2459x / 0.2456x — plausible, in range, and identical to the PREVIOUS lever's published figures,
+which is exactly what gave it away: this binary retires 40,637 instr/op where that one retired
+48,771, so the ratio could not legitimately be unchanged. **A rename that half-succeeds is worse
+than one that fails**, and the harness-default trap this ledger already records
+(`frankenredis-ozrro`, "always pass POST explicitly") has a sibling: verify the substitution took
+effect, do not verify that the command exited 0.
+
+### GATES
+
+`sort_alpha_collation_differ.py` 36/36 byte-exact vs live redis 7.2.4 under `en_US.UTF-8` — the
+only gate that can see collation at all, and the one that would catch a permutation applied to the
+wrong array. `sort_semantics_gate.py` 29/29 (BY / GET / LIMIT / DESC / STORE / dontsort, both
+engines C-locale). `cargo test -p fr-command --lib` 1228 passed / 0 failed — the same count as
+before the change, including `sort_move_matches_clone_reference`, which pins the MOVE arm against
+its clone reference and is precisely the test a permutation bug would redden.
+
+### RETRY PREDICATE
+
+(1) The ratio rows are SIZING; promote them only from a window stamping FIT for ratio, and take the
+n=3 ratio as the worst of at least two redis draws. (2) The NEXT lever on this route is the reply
+block, not the sort: `RespFrame::encode_into'2` 5,312 + `drop_glue::<RespFrame>` 1,920 + 484 +
+`write_u64_digits` 586 is ~8,300 instr/op, 20 pct of what remains, and it needs no new design —
+`fr_protocol::encode_bulk_string_slice` already streams into a byte buffer and fr-runtime's
+borrowed routes already use it. (3) The list materialisation `to_vec` at 2,561.0 is untouched and
+is the other owned copy on this path. (4) Do NOT retry the same borrow trick on the numeric arms:
+they hold no borrow, so there is nothing there to remove.
+
 ## 2026-08-17 MossyOrchid: CORRECTION to the row below — the +112 pct MEASUREMENT stands and is reproducible, but the MECHANISM I published for it does not: my arm sits in the LAST-RESORT function, so "it became a candidate and therefore entered the cascade" cannot be the explanation (`frankenredis-5na4i`)
 
 Claim class: CORRECTION, source. No build, no bench, no certification — external builds had the
