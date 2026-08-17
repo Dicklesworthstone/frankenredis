@@ -143,6 +143,83 @@ board's stranded-command list is empty as far as the corpus can see; the next di
 the mixed-profile command mix (`frankenredis-g3z6n`) to say which commands are worth classifying
 at all, not another depth screen.
 
+## 2026-08-17 MossyOrchid: XPENDING'S PARITY WAS THE SHAPE, NOT THE ROUTE — on a group with 32 pending entries it is **1.2289x / 1.2136x Redis 7.2.4, worst bound 1.1960x**, while the EMPTY group straddles 1.0 in a third draw (`frankenredis-5na4i`)
+
+Claim class: COMPETITIVE. Campaign output: yes. Each round ran a live vendored redis 7.2.4 arm
+side-by-side with the fr arm inside the same invocation of `scripts/balanced_square_ab.py`, ELF
+SHA-256s read from `/proc/<pid>/exe` of the running processes.
+
+THE PREVIOUS ROW LEFT ONE QUESTION and its retry predicate named the experiment: `xpending_empty`
+had replicated standing but a worst bound of 1.0001x — parity — and I could not tell whether the
+ROUTE was weak or the SHAPE was. `xpending_empty` returns a NULL consumers array and does almost
+no work beyond the group lookup, so a 2,206 instr/op dispatch saving lands on a very small op.
+Added `xpending_populated` (32 entries in the PEL, one consumer) to the harness and ran it.
+
+    shape               draw 1                    draw 2                    verdict
+    xpending_populated  1.2289 [1.2211, 1.2350]   1.2136 [1.1960, 1.2385]   ADMISSIBLE, ADMISSIBLE
+    xpending_empty      1.0466 [1.0351, 1.0658]   1.0331 [0.9966, 1.0529]   ADMISSIBLE, STRADDLES-1
+    get_control         NULL-FAILED               1.1367 [1.0979, 1.1428]
+
+**XPENDING ON REAL WORK: WORST BOUND 1.1960x**, replicated standing, both intervals ~20 pct clear
+of parity — the same magnitude as the two ZINTERCARD forms (1.2031x and 1.1955x). The route is a
+genuine throughput win over the incumbent.
+
+**XPENDING ON AN EMPTY GROUP IS PARITY, now confirmed from the other direction.** Its third draw
+came back **STRADDLES-1 with CI [0.9966, 1.0529]** — an interval that brackets 1.0 outright, which
+is a stronger statement than the 1.0001x worst bound that first flagged it. Two independent
+mechanisms (worst bound, then a bracketing CI) now say the same thing about that cell.
+
+SO THE EARLIER VERDICT WAS RIGHT AND IS NOW EXPLAINED. I reported `xpending_empty` as parity
+rather than as the win its headline draws (1.0160, 1.0316, 1.0466) suggested; the reason is that
+the empty summary form is nearly all fixed cost, so removing dispatch from it moves little. It is
+not evidence against the route, and this row is why the distinction mattered: quoting the
+headline would have banked a win on the one shape where the route cannot show one, while the
+shape that CAN was never measured.
+
+    REUSABLE: when a front-classification win vanishes on one shape of a command, check whether
+    that shape DOES ENOUGH WORK for the saving to matter before concluding anything about the
+    route. `xpending_empty`'s whole op is small enough that a 2,206 instr/op dispatch saving is
+    swamped; `xpending_populated` has 32 entries to aggregate and shows the full 1.20x.
+
+### The A/A null, and the decision rule
+
+Per-arm nulls are same-invocation A/A ratios by construction (each arm's first-half slots over
+its second-half, placed symmetrically by the `ABBAABBA` square). For `xpending_populated` across
+both replicates: 1.0153, 1.0026, 0.9963, 0.9938.
+
+    A/A null median 0.999450, **bootstrap 95% median CI [0.993800, 1.015300]**
+    (20,000 percentile resamples, seed 20260817)
+
+GATE: that bootstrap median-CI is the decision rule. The band is +/-1.1 pct against a worst-bound
+effect of +19.6 pct — the effect clears its own null by ~18x. `get_control` NULL-FAILED in draw 1
+(fr null 0.9758) so no normalised figure is available; the ratios above are RAW fr/redis ops/s,
+which is the form an incumbent claim needs anyway.
+
+CV was not used, as a gate or otherwise.
+
+PROVENANCE:
+  ELF        fr bench_elf_sha256=c23cc633c6e7e398df84f2297fd22c88b8ec13a4fb0ce2fed9aa41ac86c79f23;
+             redis e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7.
+  observed   fr_threads 3, redis_threads 5; thinkstation1, 64 cores, powersave, avx2, unpinned.
+  harness    scripts/balanced_square_ab.py, ABBAABBA, 31 rounds, 50,000 ops/slot, -P16, per-arm
+             null bound +/-0.02, shape group `frontclass` (this commit adds `xpending_populated`).
+  PER-ARM    draw 1 loadavg 10.19 / 16.08 / 14.08, CPU MHz before mean 2233 (1429-4250, spread
+             2.97x), after mean 2478 (1429-4266, 2.99x).
+             draw 2 loadavg 8.97 / 13.59 / 13.41, CPU MHz before mean 2177 (1429-4292, 3.00x),
+             after mean 2219 (1429-4296, 3.01x).
+  /data      222-223G.
+
+### RETRY PREDICATE
+
+The three front-classified routes are now certified on the shapes where they can be: ZINTERCARD
+plain 1.2031x, ZINTERCARD LIMIT 1.1955x, XPENDING populated 1.1960x, all replicated worst bounds.
+Do not re-run them for more standing. `xpending_empty` stays recorded as PARITY and should not be
+re-measured hoping for a win — the shape is too small for the saving to show, and three draws plus
+a bracketing CI have said so. Reopen only if the SUMMARY BUILD itself is optimised, which is the
+remaining cost on that shape now that dispatch is 640 instr/op.
+
+--------------------------------------------------------------------------------
+
 ## 2026-08-17 MossyOrchid: ALL THREE ROUTES NOW HAVE REPLICATED STANDING — and the worst bounds separate them sharply: ZINTERCARD **1.2031x**, its LIMIT form **1.1955x**, XPENDING **1.0001x**. The third is at PARITY at its worst bound and must not be called a win (`frankenredis-5na4i`)
 
 Claim class: COMPETITIVE. Campaign output: yes. Every round below ran a live vendored redis 7.2.4

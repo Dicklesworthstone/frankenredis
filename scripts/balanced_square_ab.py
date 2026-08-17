@@ -427,6 +427,18 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
         ("xpending_empty",
          ["XADD xp:s 1-1 f v", "XGROUP CREATE xp:s xp:g 0"],
          ["XPENDING", "xp:s", "xp:g"]),
+        # (frankenredis-5na4i) The POPULATED summary form. `xpending_empty` certified with a
+        # worst bound of 1.0001x — replicated standing, but at PARITY, so the route's throughput
+        # win is unproven. That shape returns a NULL consumers array and does almost no work
+        # beyond the group lookup, which is exactly the reply-shape the b2okv fix is about. This
+        # one has 32 entries in the PEL and one consumer, so the summary actually has something
+        # to aggregate; if the route cannot beat the incumbent here either, the cost is the
+        # summary build and not the dispatch it already removed (2,846 -> 640 instr/op).
+        ("xpending_populated",
+         ["XADD xpp:s %d-1 f v" % i for i in range(1, 33)]
+         + ["XGROUP CREATE xpp:s xpp:g 0",
+            "XREADGROUP GROUP xpp:g c1 COUNT 32 STREAMS xpp:s >"],
+         ["XPENDING", "xpp:s", "xpp:g"]),
         ("get_control", ["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
     ],
     "cascade": [
