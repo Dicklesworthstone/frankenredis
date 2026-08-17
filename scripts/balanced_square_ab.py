@@ -441,6 +441,21 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
          ["XPENDING", "xpp:s", "xpp:g"]),
         ("get_control", ["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
     ],
+    # (frankenredis-copydeficit) COPY's REPLACE form, front-classified at 9,257.3 ->
+    # 2,956.0 instr/op fr-side. Its standing was the worst replicated cell on the board
+    # (0.8105x then 0.7916x fr/redis ops/s, both ADMISSIBLE with get_control admissible
+    # alongside), so this is a crossing candidate and needs the worst bound, not a point.
+    #
+    # REPLACE is what makes the shape repeatable under redis-benchmark: the arity-3
+    # spelling answers 1 once and 0 for every iteration after, so it would measure a
+    # refusal, not a copy. That also means the arity-3 sibling is NOT a work-comparable
+    # control here -- it is a dispatch control only, and the honest one is get_control.
+    "copyreplace": [
+        ("copy_replace",
+         ["SET cp:src vvvvvvvvvvvvvvvv", "SET cp:dst old"],
+         ["COPY", "cp:src", "cp:dst", "REPLACE"]),
+        ("get_control", ["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
+    ],
     "cascade": [
         ("sintercard", ["SADD sc:a m1 m2 m3", "SADD sc:b m2 m3 m4"],
          ["SINTERCARD", "2", "sc:a", "sc:b"]),

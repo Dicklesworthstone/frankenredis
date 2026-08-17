@@ -584,6 +584,20 @@ SHAPES = {
     # the two instruments describe the same work.
     "copy_replace": (["SET kk vvvvvvvvvvvvvvvv"], ["COPY", "kk", "kdst", "REPLACE"]),
 
+    # (frankenredis-copydeficit, second instance) BITPOS. The class claims arity 3 and 5;
+    # the command also has arity 4 (`key bit start`) and 6 (`... start end BYTE|BIT`), and
+    # BOTH are unambiguous. What makes this the same defect rather than a new route: the
+    # executor's own argc arithmetic is `4 + end.is_some() + unit.is_some()`, so it was
+    # written for 4, 5 and 6, and parse_borrowed_plain_bitpos_{start,unit}_packet already
+    # exist -- they simply have no floor arm, only a cascade one. bitpos_range is the
+    # already-classified sibling and is the control that separates "this form is stranded"
+    # from "BITPOS is expensive".
+    "bitpos_start": (["SET bp k 0", "SETBIT bp 100 1"], ["BITPOS", "bp", "1", "2"]),
+    "bitpos_range": (["SET bp k 0", "SETBIT bp 100 1"], ["BITPOS", "bp", "1", "2", "-1"]),
+    "bitpos_unit": (["SET bp k 0", "SETBIT bp 100 1"],
+                    ["BITPOS", "bp", "1", "2", "-1", "BYTE"]),
+    "bitpos_plain": (["SET bp k 0", "SETBIT bp 100 1"], ["BITPOS", "bp", "1"]),
+
     "config_get_star": ([], ["CONFIG", "GET", "*"]),
     "config_get_prefix_glob": ([], ["CONFIG", "GET", "repl-*"]),
 
