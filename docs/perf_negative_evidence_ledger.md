@@ -27124,3 +27124,55 @@ the causes are enumerated. The only number left worth attention is sinterstore_b
 0.6920x, and it is a genuine set-build cost rather than an artefact, so treat it as the
 floor rather than a defect. If a large-k crossover is ever suspected again, check the PASS
 COUNT first: it separated reply-bound from work-bound in one reading here.
+
+## MEASURED (frankenredis-33832) — the "settling transient" was ME reading a trend off two short runs; the term is SCATTER. Trials took the null into band ONCE and it did not reproduce, so 0.602060x is NOT banked
+
+Claim class: CORRECTION OF MY OWN PRIOR ROW + INSTRUMENT. No A/B claimed.
+
+I REFUTED MY OWN PREVIOUS ROW. It concluded from two runs (36 and 40 trials) that the
+within-process term was "a settling transient spanning about ten trials", because the first
+quartile was fastest in both and then plateaued. Run it longer and that disappears:
+
+    trials   quartile medians (ms)          first/last   monotone-rise fraction
+      36      52.0  53.0  58.0  58.0          0.892x            0.60
+      40      48.6  51.7  51.0  52.4          0.929x            0.51
+      80      44.36 43.26 44.70 43.83         1.0122x           0.44   <- FLAT
+
+At 80 trials there is no trend at all: first/last 1.0122x, rise fraction 0.44, and a 53.6
+pct spread that is scatter rather than drift. Two short runs produced an apparent transient
+the way any noisy series does when you cut it into four pieces and read the first one. That
+is the same error this ledger has caught three times in other hands, committed here in mine.
+
+WHAT ACTUALLY MOVED THE NULL WAS SAMPLE COUNT, and only sometimes:
+
+    config                          A/A two-process   same-process   A/B        verdict
+    warmup 8, trials 9                 0.974445x        1.046502x   0.595594x   HOLD
+    warmup 8, trials 36  (run 1)       1.010713x        1.001522x   0.602060x   ACCEPTED
+    warmup 8, trials 36  (run 2)       0.930230x        1.104862x   0.559893x   HOLD
+
+    run 1 loadavg 18.68, run 2 loadavg 19.49, mean CPU MHz 2582-2902, same cores, same ELF
+    9c59eb6de985e8882ec5ee27cc26f2fc96979bfccceb25b57ab7f3407635f71e on both fr arms.
+
+RUN 1 IS THE ONLY TIME THIS HARNESS HAS EVER AUTHENTICATED, AND I AM NOT BANKING IT. Run 2
+is the same config, the same cores and effectively the same load, and it refuses. A PASS
+that does not reproduce is not a pass -- and the A/B moved with it, 0.602060x -> 0.559893x,
+so the effect estimate is no steadier than its gate. Quoting 0.602060x because it happened
+to clear the band once is exactly the reward-hacking shape this campaign exists to avoid.
+
+CODE LANDED, so the next person cannot bank a lucky PASS either: `competitive_verdict`
+takes the FULL LIST of nulls from repeated invocations and passes only if EVERY one is in
+band AND there are at least two. A single in-band null now returns False with the reason
+spelled out. Exercised in the harness `--self-test` against the two real numbers above.
+
+WHERE THIS LEAVES THE BEAD. 33832's 0.606011x remains the last figure that ever
+authenticated, and it is now SEVEN attempts since fosf1 without a reproducible replacement.
+Worth noting the A/Bs have clustered 0.505-0.707 all day with the two 36-trial runs at
+0.602 and 0.560 -- consistent with the banked 0.606011x and with fosf1 having changed
+nothing measurable on this axis, which is a suspicion and not a result.
+
+RETRY PREDICATE. Do not add warmup passes and do not permute cores; both are eliminated.
+Run `--trials 36` at least THREE times in one quiet window and feed the nulls to
+`competitive_verdict`. If it passes, the A/B is finally bankable. If the nulls keep
+straddling the band, the honest conclusion is that this harness cannot resolve a ~1.65x
+effect on this host at all, and 33832 needs a different instrument -- callgrind instruction
+counts on the RESTORE surface are load-immune and have never refused.

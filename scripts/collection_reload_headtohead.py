@@ -239,6 +239,30 @@ def bootstrap_median_ci(samples, seed=0, resamples=4096):
     return statistics.median(samples), lo, hi
 
 
+def competitive_verdict(nulls, lo=0.98, hi=1.02, min_runs=2):
+    """(frankenredis-33832) A PASS is only a pass if it REPRODUCES.
+
+    Measured the hard way: at --trials 36 this harness produced A/A nulls of 1.010713x
+    (accepted) and then 0.930230x (refused) on two back-to-back invocations at the same
+    settings and the same loadavg, with the A/B moving 0.602060x -> 0.559893x alongside.
+    Banking the first would have recorded a certified 0.60x that the very next run
+    contradicts.
+
+    So the verdict takes the FULL LIST of nulls from repeated invocations and passes only
+    if EVERY one lands in band. One in-band null among several is evidence the gate is
+    flaky, not evidence the arms are equal -- and a flaky gate is not a passed gate.
+    """
+    if len(nulls) < min_runs:
+        return False, ("only %d null(s); a single in-band result is exactly the lucky PASS "
+                       "this guard exists to reject -- repeat the invocation" % len(nulls))
+    outside = [n for n in nulls if not (lo <= n <= hi)]
+    if outside:
+        return False, ("%d of %d nulls outside %.2f..%.2f: %s"
+                       % (len(outside), len(nulls), lo, hi,
+                          ", ".join("%.6f" % n for n in outside)))
+    return True, "all %d nulls within %.2f..%.2f" % (len(nulls), lo, hi)
+
+
 def run_drift_curve(arm, redis, trials):
     """(frankenredis-33832) Per-trial RESTORE time for ONE arm against trial INDEX.
 
@@ -375,6 +399,25 @@ def run_competitive_restore(fr_a, fr_b, redis):
 
 
 def self_test():
+    # (frankenredis-33832) competitive_verdict: a PASS must REPRODUCE.
+    # The two cases below are real, taken from back-to-back invocations at --trials 36,
+    # same settings and same loadavg: 1.010713x accepted, then 0.930230x refused, with the
+    # A/B moving 0.602060x -> 0.559893x alongside. Banking the first would have recorded a
+    # certified 0.60x that the next run contradicts.
+    ok, why = competitive_verdict([1.010713, 0.930230])
+    assert not ok, "a run pair with one out-of-band null must NOT pass: %s" % why
+    ok, why = competitive_verdict([1.010713])
+    assert not ok, "a SINGLE in-band null is the lucky PASS this guard rejects: %s" % why
+    ok, why = competitive_verdict([1.005, 0.995, 1.011])
+    assert ok, "three in-band nulls must pass: %s" % why
+    ok, _ = competitive_verdict([])
+    assert not ok, "no nulls must not pass"
+    ok, _ = competitive_verdict([0.98, 1.02])
+    assert ok, "the band is inclusive at both edges"
+    ok, _ = competitive_verdict([0.9799, 1.0])
+    assert not ok, "just outside the low edge must fail"
+    print("  competitive_verdict: reproducibility guard OK")
+
     assert len(ARM_ORDERS) == 6
     for arm in ("fr_a", "fr_b", "redis"):
         assert [order.index(arm) for order in ARM_ORDERS].count(0) == 2
