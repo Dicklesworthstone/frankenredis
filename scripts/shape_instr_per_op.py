@@ -544,6 +544,17 @@ SHAPES = {
         ["GEOADD grk 13.361389 38.115556 P1"],
         ["GEORADIUS_RO", "grk", "13.361389", "38.115556", "200", "km"],
     ),
+    # (frankenredis-eh2ct) THE SAME SHAPE the throughput board certifies, registered here
+    # so one shape can be read on both metrics. `geosearch_1` below is close but NOT
+    # identical -- one member instead of two, and no ASC -- and comparing an instruction
+    # ratio from one shape against a throughput ratio from another is exactly the
+    # cross-shape error the size pairs exist to remove. balanced_square_ab certified this
+    # shape at 1.0202 raw / 0.9162 control-normalised (fr BEHIND); this entry is what makes
+    # the instruction reading comparable to that number rather than merely adjacent to it.
+    "geosearch_2": (
+        ["GEOADD g 13.361389 38.115556 P1", "GEOADD g 15.087269 37.502669 P2"],
+        ["GEOSEARCH", "g", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "ASC"],
+    ),
     "geosearch_1": (
         ["GEOADD gsk 13.361389 38.115556 P1"],
         ["GEOSEARCH", "gsk", "FROMLONLAT", "13.361389", "38.115556", "BYRADIUS", "200", "km"],
