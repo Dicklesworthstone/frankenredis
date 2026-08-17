@@ -14593,6 +14593,16 @@ enum BorrowedMultibulkAction {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BorrowedDispatchFloorClass {
+    /// (frankenredis-ozrro) `KEYS <pattern>`, arity 2 — the generic's ONLY accepted
+    /// arity, so this claim is exact by construction. It had no borrowed cascade arm,
+    /// so it fell straight to GENERIC: 1,969.9 instr/op of dispatch, 34.4% of the
+    /// operation, at 1.0269x of vendored 7.2.4.
+    Keys,
+    /// (frankenredis-ozrro) `SCAN <cursor>` — the base keyspace scan, arity 2, no
+    /// MATCH/COUNT/TYPE. It had NO borrowed cascade arm at all, so it fell straight to
+    /// GENERIC: 1,981.5 instr/op of dispatch, 27.8% of the operation, at 1.2810x of
+    /// vendored 7.2.4. The option forms keep the arity that sends them to generic.
+    Scan,
     /// (frankenredis-ozrro) `ZLEXCOUNT key min max` at arity 4. The largest remaining
     /// dispatch cost on the board — ~4,306 instr/op at a 64.0 pct share — with parser,
     /// executor, gate and metrics all present and only the floor entry missing.
@@ -15090,6 +15100,8 @@ impl PlainZsetStoreCmd {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BorrowedDispatchFloorCommand {
     Touch,
+    Keys,
+    Scan,
     Zlexcount,
     Set,
     Smove,
@@ -15283,6 +15295,8 @@ fn borrowed_dispatch_floor_command(token: &[u8]) -> Option<BorrowedDispatchFloor
             _ => None,
         },
         4 => match uppercase_ascii_token::<4>(token)? {
+            [b'K', b'E', b'Y', b'S'] => Some(BorrowedDispatchFloorCommand::Keys),
+            [b'S', b'C', b'A', b'N'] => Some(BorrowedDispatchFloorCommand::Scan),
             [b'E', b'C', b'H', b'O'] => Some(BorrowedDispatchFloorCommand::Echo),
             [b'L', b'S', b'E', b'T'] => Some(BorrowedDispatchFloorCommand::Lset),
             [b'T', b'Y', b'P', b'E'] => Some(BorrowedDispatchFloorCommand::Type),
@@ -16590,6 +16604,8 @@ fn classify_borrowed_dispatch_floor_packet_impl<
         (4, BorrowedDispatchFloorCommand::Zlexcount) => {
             Some(BorrowedDispatchFloorClass::Zlexcount)
         }
+        (2, BorrowedDispatchFloorCommand::Scan) => Some(BorrowedDispatchFloorClass::Scan),
+        (2, BorrowedDispatchFloorCommand::Keys) => Some(BorrowedDispatchFloorClass::Keys),
         (2, BorrowedDispatchFloorCommand::Ttl) => Some(BorrowedDispatchFloorClass::Ttl),
         (2, BorrowedDispatchFloorCommand::Getex) => Some(BorrowedDispatchFloorClass::Getex),
         (3, BorrowedDispatchFloorCommand::Getex) => Some(BorrowedDispatchFloorClass::GetexPersist),
@@ -21051,6 +21067,53 @@ fn try_dispatch_floor_classified_action(
                 )
             }
         }
+        BorrowedDispatchFloorClass::Scan => {
+            // (frankenredis-ozrro) The executor re-parses the cursor canonically and
+            // declines the '+'/'-'/leading-zero/overflow forms, plus any session the
+            // borrowed-read admission guard refuses. Those declines land on the generic
+            // path — which is where every SCAN goes today — so unlike the other floor
+            // classes there is no worse-than-status-quo case to protect against here.
+            if let Some(packet) = parse_borrowed_plain_scan_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_scan_borrowed(packet.key, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
+        BorrowedDispatchFloorClass::Keys => {
+            // (frankenredis-ozrro) The pattern is handed to the executor UNINSPECTED: a
+            // malformed glob is an ordinary empty result upstream, not an error, so the
+            // only declines here are a disallowed session or an oversized argument, both
+            // of which land on the generic path KEYS already uses.
+            if let Some(packet) = parse_borrowed_plain_keys_packet(unparsed, &parser_config)
+                && let Some(response) = runtime.execute_plain_keys_borrowed(packet.key, ts)
+            {
+                Ok(BorrowedMultibulkAction::FastReply {
+                    consumed: packet.consumed,
+                    response,
+                })
+            } else {
+                parse_borrowed_multibulk_action(
+                    unparsed,
+                    parser_config,
+                    runtime,
+                    ts,
+                    out,
+                    argv_scratch,
+                )
+            }
+        }
         BorrowedDispatchFloorClass::Ttl => {
             if let Some(packet) = parse_borrowed_plain_ttl_packet(unparsed, &parser_config)
                 && let Some(response) =
@@ -22777,6 +22840,55 @@ fn parse_borrowed_plain_llen_packet<'a>(
 // string (nil on a missing key). No fast path existed, so per-command DUMP fell to
 // the generic argv path (measured 0.66x). Reuses execute_plain_dump_borrowed +
 // store.dump_key (payload cache + keyspace accounting) -> byte-identical.
+// (frankenredis-ozrro) `SCAN <cursor>` (*2, 4-char token, one trailing bulk) — the same
+// packet shape as DUMP below, which is why it reuses BorrowedPlainGetPacket. The bulk is a
+// CURSOR, not a key: the struct field is named `key` by that shared type and SCAN takes no
+// key at all. Cursor VALIDITY is not checked here; execute_plain_scan_borrowed parses it
+// canonically and declines anything the generic would read differently.
+fn parse_borrowed_plain_scan_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainGetPacket<'a>> {
+    if config.max_array_len < 2 || config.max_bulk_len < b"SCAN".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*2\r\n$4\r\n").and_then(|rest| {
+        rest.get(..4)
+            .filter(|command| command.eq_ignore_ascii_case(b"SCAN"))
+            .map(|_| input.len() - rest.len() + 4)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    Some(BorrowedPlainGetPacket { consumed, key })
+}
+
+// (frankenredis-ozrro) `KEYS <pattern>` (*2, 4-char token, one trailing bulk) — the same
+// packet shape as DUMP below, hence the shared BorrowedPlainGetPacket. The bulk is a glob
+// PATTERN, not a key: the struct field is named `key` by that shared type and KEYS takes no
+// key. The pattern is NOT validated here; malformed globs are normal empty results upstream.
+fn parse_borrowed_plain_keys_packet<'a>(
+    input: &'a [u8],
+    config: &ParserConfig,
+) -> Option<BorrowedPlainGetPacket<'a>> {
+    if config.max_array_len < 2 || config.max_bulk_len < b"KEYS".len() {
+        return None;
+    }
+    let mut cursor = input.strip_prefix(b"*2\r\n$4\r\n").and_then(|rest| {
+        rest.get(..4)
+            .filter(|command| command.eq_ignore_ascii_case(b"KEYS"))
+            .map(|_| input.len() - rest.len() + 4)
+    })?;
+    if input.get(cursor..cursor + 2)? != b"\r\n" {
+        return None;
+    }
+    cursor += 2;
+    let (key, consumed) = parse_borrowed_plain_set_bulk(input, cursor, config.max_bulk_len)?;
+    Some(BorrowedPlainGetPacket { consumed, key })
+}
+
 fn parse_borrowed_plain_dump_packet<'a>(
     input: &'a [u8],
     config: &ParserConfig,
@@ -52166,10 +52278,6 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         }
     }
 
-    /// (frankenredis-ozrro) LTRIM's floor class. Same promise as SMOVE's and RPOPLPUSH's,
-    /// but note the parser here is the SHARED `key_arg2` one that also serves ZMPOP and
-    /// XACK — so the token and prefix are what keep those apart, and this asserts they do.
-    #[test]
     /// (frankenredis-gvm6z) The ADJACENT-ARITY transposition gate.
     ///
     /// OBSERVED DEFECT CLASS, not a hypothetical: HEAD shipped `(5, Lmpop) =>
@@ -52275,6 +52383,9 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
         }
     }
 
+    /// (frankenredis-ozrro) LTRIM's floor class. Same promise as SMOVE's and RPOPLPUSH's,
+    /// but note the parser here is the SHARED `key_arg2` one that also serves ZMPOP and
+    /// XACK — so the token and prefix are what keep those apart, and this asserts they do.
     #[test]
     fn ltrim_floor_class_claims_exactly_what_its_parser_accepts() {
         let cfg = ParserConfig::default();
@@ -52623,6 +52734,126 @@ $1\r\n0\r\n$3\r\nGET\r\n$2\r\nu8\r\n$1\r\n8\r\n",
                 super::classify_borrowed_dispatch_floor_packet(&packet(&other), &cfg),
                 Some(bad),
                 "{other:?} must not be claimed"
+            );
+        }
+    }
+
+    /// (frankenredis-ozrro) The SCAN floor class must claim EXACTLY the base `SCAN <cursor>`
+    /// form and nothing else. The option forms carry a different arity and must keep
+    /// reaching the generic parser that actually implements MATCH, COUNT and TYPE — a claim
+    /// at any of those arities would send them to a fast path that cannot honour them.
+    #[test]
+    fn scan_floor_class_claims_exactly_the_base_cursor_form() {
+        let cfg = ParserConfig::default();
+        fn packet(args: &[&str]) -> Vec<u8> {
+            let mut p = format!("*{}\r\n", args.len()).into_bytes();
+            for a in args {
+                p.extend_from_slice(format!("${}\r\n{}\r\n", a.len(), a).as_bytes());
+            }
+            p
+        }
+        use super::BorrowedDispatchFloorClass as C;
+
+        for served in [packet(&["SCAN", "0"]), packet(&["scan", "0"]), packet(&["ScAn", "17"])] {
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(&served, &cfg),
+                Some(C::Scan),
+                "the base cursor form must be claimed, case-insensitively"
+            );
+            assert!(super::parse_borrowed_plain_scan_packet(&served, &cfg).is_some());
+        }
+
+        // The parser must not care whether the cursor is VALID — declining an odd cursor is
+        // the executor's job, and refusing it here would silently move the decline earlier
+        // without changing the outcome.
+        assert!(super::parse_borrowed_plain_scan_packet(&packet(&["SCAN", "007"]), &cfg).is_some());
+
+        // Option forms and the bare command must NOT be claimed.
+        for wrong in [
+            vec!["SCAN"],
+            vec!["SCAN", "0", "COUNT", "100"],
+            vec!["SCAN", "0", "MATCH", "a*"],
+            vec!["SCAN", "0", "TYPE", "string"],
+            vec!["SCAN", "0", "MATCH", "a*", "COUNT", "100"],
+        ] {
+            assert_ne!(
+                super::classify_borrowed_dispatch_floor_packet(&packet(&wrong), &cfg),
+                Some(C::Scan),
+                "{wrong:?} must reach the generic parser"
+            );
+        }
+
+        // Neighbours sharing the 4-char token length must not be claimed as SCAN. SADD and
+        // COPY in particular are arity-3 writes; DUMP and TYPE are arity-2 reads, which is
+        // the case a bare arity check would get wrong.
+        for other in [
+            vec!["DUMP", "k"],
+            vec!["TYPE", "k"],
+            vec!["PTTL", "k"],
+            vec!["DECR", "k"],
+            vec!["SADD", "s", "m"],
+        ] {
+            assert_ne!(
+                super::classify_borrowed_dispatch_floor_packet(&packet(&other), &cfg),
+                Some(C::Scan),
+                "{other:?} must not be claimed as SCAN"
+            );
+        }
+    }
+
+    /// (frankenredis-ozrro) The KEYS floor class must claim exactly arity 2 — which is the
+    /// generic's only accepted arity — and must claim it for ANY pattern, including the
+    /// malformed globs upstream answers with an ordinary array. Refusing those at the
+    /// parser would not be a safe conservatism: it would move a served shape onto the
+    /// generic path for no reason.
+    #[test]
+    fn keys_floor_class_claims_arity_two_for_any_pattern() {
+        let cfg = ParserConfig::default();
+        fn packet(args: &[&str]) -> Vec<u8> {
+            let mut p = format!("*{}\r\n", args.len()).into_bytes();
+            for a in args {
+                p.extend_from_slice(format!("${}\r\n{}\r\n", a.len(), a).as_bytes());
+            }
+            p
+        }
+        use super::BorrowedDispatchFloorClass as C;
+
+        for pattern in ["*", "a*", "", "[abc", "[z-a]", "[a-]", "[!a]", "?"] {
+            let served = packet(&["KEYS", pattern]);
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(&served, &cfg),
+                Some(C::Keys),
+                "KEYS {pattern:?} must be claimed"
+            );
+            assert!(
+                super::parse_borrowed_plain_keys_packet(&served, &cfg).is_some(),
+                "KEYS {pattern:?} must parse — a malformed glob is not a parse failure"
+            );
+        }
+        assert_eq!(
+            super::classify_borrowed_dispatch_floor_packet(&packet(&["keys", "*"]), &cfg),
+            Some(C::Keys),
+            "the token match is case-insensitive"
+        );
+
+        // Wrong arities must NOT be claimed: upstream answers them with wrong-arity errors
+        // from the generic path, and a claim here would route them to a parser that cannot
+        // produce that error.
+        for wrong in [vec!["KEYS"], vec!["KEYS", "a", "b"]] {
+            assert_ne!(
+                super::classify_borrowed_dispatch_floor_packet(&packet(&wrong), &cfg),
+                Some(C::Keys),
+                "{wrong:?} must reach the generic parser"
+            );
+        }
+
+        // Neighbours at the same token length must not be claimed as KEYS, and KEYS must
+        // not be claimed as one of them.
+        for other in [vec!["DUMP", "k"], vec!["TYPE", "k"], vec!["SCAN", "0"]] {
+            assert_ne!(
+                super::classify_borrowed_dispatch_floor_packet(&packet(&other), &cfg),
+                Some(C::Keys),
+                "{other:?} must not be claimed as KEYS"
             );
         }
     }

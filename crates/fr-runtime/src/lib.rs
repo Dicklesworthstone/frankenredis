@@ -25506,7 +25506,7 @@ impl Runtime {
     /// cannot apply to a command whose status quo is already generic.
     ///
     /// Returns None (=> generic) for a non-canonical cursor or a disallowed session.
-    fn execute_plain_scan_borrowed(&mut self, cursor_arg: &[u8], now_ms: u64) -> Option<RespFrame> {
+    pub fn execute_plain_scan_borrowed(&mut self, cursor_arg: &[u8], now_ms: u64) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < 2
             || self.policy.gate.max_bulk_len < b"SCAN".len()
             || cursor_arg.len() > self.policy.gate.max_bulk_len
@@ -25566,7 +25566,7 @@ impl Runtime {
     /// here would invent an error reply the generic path never produces.
     ///
     /// Returns None (=> generic) only for a disallowed session or an oversized argument.
-    fn execute_plain_keys_borrowed(&mut self, pattern: &[u8], now_ms: u64) -> Option<RespFrame> {
+    pub fn execute_plain_keys_borrowed(&mut self, pattern: &[u8], now_ms: u64) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < 2
             || self.policy.gate.max_bulk_len < b"KEYS".len()
             || pattern.len() > self.policy.gate.max_bulk_len
