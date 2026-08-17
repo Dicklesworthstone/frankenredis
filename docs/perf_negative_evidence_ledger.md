@@ -28291,3 +28291,76 @@ RETRY PREDICATE: PEXPIRETIME is now [A] — it needs only a floor entry and a sh
 reserved files, so it is the first thing to take when that reservation lapses. MEASURE IT
 FIRST: it is a cheap read and may well already be ahead of redis, in which case the entry
 is a cost reduction rather than a parity fix and should be described as one.
+
+--------------------------------------------------------------------------------
+CORRECTION (frankenredis-ozrro) — the PEXPIRETIME executor I landed last row is REDUNDANT.
+`corpus_coverage.py` cannot see SHARED executors, so its [A]/[B]/[C] split is wrong for
+every command served by one, and I acted on it without checking the arm
+
+Claim class: CORRECTION + METHOD
+
+WHAT I GOT WRONG. Last row I wrote `execute_plain_pexpiretime_borrowed` because the
+coverage tool reported PEXPIRETIME as [B] PARTIAL — parser present, executor missing. It
+was already served, by the SHARED `execute_plain_keymeta_borrowed`, which handles TTL,
+PTTL, TYPE, EXPIRETIME and PEXPIRETIME through a `PlainKeyMetaCmd` discriminant.
+`PlainKeyMetaCmd::Pexpiretime` has existed the whole time. Nothing calls my version.
+
+THE ROOT CAUSE IS THE TOOL I LANDED TWO ROWS AGO, and it invalidates part of its own
+headline. `borrowed_trio` matches `fn execute_plain_([a-z0-9_]+?)_borrowed` — one executor
+per command. A command served by a shared executor matches NOTHING, so:
+
+    * [C] "NO borrowed machinery, one must be written first" is a FALSE POSITIVE for any
+      shared-executor command. Someone acting on it writes a duplicate, which is exactly
+      what I did.
+    * [B] PARTIAL is likewise wrong for those commands.
+    * [A] is unaffected — it requires the per-command executor to be FOUND, so a shared one
+      cannot create a false [A].
+
+    THE ERROR IS ONE-DIRECTIONAL: the tool UNDERSTATES how much machinery exists. Every
+    lever it has pointed at so far was real, which is why nothing before this row is
+    affected — but its [C] count of 57-58 is an UPPER BOUND on work, not an estimate.
+
+I ALSO HAD THE EVIDENCE AND DID NOT USE IT. The floor arm for the sibling command names
+the shared executor in plain text — `execute_plain_keymeta_borrowed(PlainKeyMetaCmd::
+Expiretime, ..)`. Reading the ARM, which is the thing a floor entry actually needs to work,
+would have shown this in one grep. The rule I had already written for myself two rows ago
+was "before writing any executor, check the trio exists"; the missing half is CHECK THE
+ARM, because the arm is where a shared executor becomes visible.
+
+WHAT I DID INSTEAD OF DELETING IT. The standing instruction is to delete nothing without
+asking, and this is my own dead code rather than a peer's, so I have marked it and proved
+it removable rather than removing it:
+
+    * the executor now carries a SUPERSEDED — DO NOT WIRE THIS UP notice at its definition,
+      naming the shared executor that replaces it and the tool bug that produced it;
+    * `plain_pexpiretime_borrowed_is_redundant_with_the_shared_keymeta_executor` asserts the
+      two produce IDENTICAL replies across all six outcomes (missing key, no TTL, ms TTL,
+      seconds TTL, absolute EXPIREAT, wrong type) and that neither mutates the store.
+
+    That test is the evidence needed to delete it WITHOUT re-testing, and until then it
+    guards the pair against silently diverging. REMOVAL IS THE RIGHT END STATE and I am
+    asking rather than assuming.
+
+604 fr-runtime tests pass, plus the new equivalence test.
+
+FOR WHOEVER HOLDS THE TOOL: `scripts/corpus_coverage.py` is currently reserved by
+RusticLark, so I could not fix it here. The fix is to add shared-executor discriminants to
+the executor set — scan `enum PlainKeyMetaCmd` (and any sibling dispatch enum) and treat
+each variant as an executor for the command it names. Until that lands, treat [C] as "no
+PER-COMMAND executor" rather than "no executor".
+
+PROVENANCE:
+  no measurement       correction; loadavg 13.01/25.64/30.02 falling, nothing certified.
+  host                 thinkstation1, 64 cores, /data 188G (up 37G, another project cleaned
+                       its target), governor powersave, no build.
+  blocked work         RENAMENX + SUBSTR remain parked behind RusticHorizon's reservation on
+                       main.rs and the harness until ~03:53Z. NOTE FOR WHOEVER APPLIES THAT
+                       PATCH: it was captured as a whole-file diff while peers had live
+                       uncommitted edits in the SAME shared working tree, so it may carry
+                       their hunks as well as mine — re-filter it to my hunks before
+                       applying, or re-derive it from the ledger row two above.
+
+RETRY PREDICATE: before writing ANY borrowed executor, read the floor ARM for the command
+or its closest sibling — a shared executor is invisible to a per-command name scan and
+visible in one line of the arm. Do not trust [C] as a work estimate until the tool
+understands shared executors.

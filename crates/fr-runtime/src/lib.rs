@@ -15837,6 +15837,15 @@ impl Runtime {
         self.plain_borrowed_default_key_read_allows(now_ms)
     }
 
+    /// SUPERSEDED — DO NOT WIRE THIS UP. `PEXPIRETIME` is already served by the SHARED
+    /// `execute_plain_keymeta_borrowed(PlainKeyMetaCmd::Pexpiretime, ..)`, which also
+    /// serves TTL, PTTL, TYPE and EXPIRETIME. I added this believing none existed, because
+    /// `scripts/corpus_coverage.py` matches `execute_plain_<cmd>_borrowed` per command and
+    /// cannot see a shared executor. Nothing calls this; it is kept only until its removal
+    /// is approved, and
+    /// `plain_pexpiretime_borrowed_is_redundant_with_the_shared_keymeta_executor` pins the
+    /// two as behaviourally identical so it can go without re-testing.
+    ///
     /// (frankenredis-ozrro) Borrowed READ fast path for `PEXPIRETIME key`.
     ///
     /// PEXPIRETIME sat in the corpus-coverage report's [B] PARTIAL bucket: it had a
@@ -74144,6 +74153,67 @@ user bob reset off nopass +@all
                 );
             }
             other => panic!("expected an integer, got {other:?}"),
+        }
+    }
+
+    /// (frankenredis-ozrro) MY MISTAKE, PINNED SO IT CAN BE REMOVED SAFELY.
+    ///
+    /// I added `execute_plain_pexpiretime_borrowed` believing PEXPIRETIME had no borrowed
+    /// executor. It already had one: the SHARED `execute_plain_keymeta_borrowed`, which
+    /// serves TTL, PTTL, TYPE, EXPIRETIME and PEXPIRETIME through `PlainKeyMetaCmd`. My
+    /// coverage tool matches `execute_plain_<cmd>_borrowed` per command and cannot see a
+    /// shared executor, so it reported PEXPIRETIME as [B] PARTIAL when it was already
+    /// served — and I acted on that without checking the floor arm, which names the shared
+    /// executor plainly.
+    ///
+    /// Nothing calls my version. Rather than delete it unasked, this test proves the two
+    /// are behaviourally IDENTICAL across every outcome, which is the evidence needed to
+    /// remove it safely and, until then, guards against the pair silently diverging.
+    #[test]
+    fn plain_pexpiretime_borrowed_is_redundant_with_the_shared_keymeta_executor() {
+        let cases: &[(&str, &[&[&[u8]]], &[u8])] = &[
+            ("missing key", &[], b"nosuchkey"),
+            ("no TTL", &[&[b"SET", b"k", b"v"]], b"k"),
+            (
+                "millisecond TTL",
+                &[&[b"SET", b"k", b"v"], &[b"PEXPIRE", b"k", b"5000"]],
+                b"k",
+            ),
+            (
+                "second TTL",
+                &[&[b"SET", b"k", b"v"], &[b"EXPIRE", b"k", b"7"]],
+                b"k",
+            ),
+            (
+                "absolute EXPIREAT",
+                &[&[b"SET", b"k", b"v"], &[b"EXPIREAT", b"k", b"4102444800"]],
+                b"k",
+            ),
+            ("wrong type", &[&[b"RPUSH", b"lk", b"a"]], b"lk"),
+        ];
+
+        for (label, setup, key) in cases {
+            let mut mine = Runtime::default_strict();
+            let mut shared = Runtime::default_strict();
+            for rt in [&mut mine, &mut shared] {
+                for cmd_args in setup.iter() {
+                    rt.execute_frame(command(cmd_args), 10);
+                }
+            }
+
+            let mine_reply = mine.execute_plain_pexpiretime_borrowed(key, 20);
+            let shared_reply =
+                shared.execute_plain_keymeta_borrowed(PlainKeyMetaCmd::Pexpiretime, key, 20);
+
+            assert_eq!(
+                mine_reply, shared_reply,
+                "{label}: the duplicate must agree with the shared keymeta executor"
+            );
+            assert_eq!(
+                mine.server.store.state_digest(),
+                shared.server.store.state_digest(),
+                "{label}: neither path may mutate"
+            );
         }
     }
 }
