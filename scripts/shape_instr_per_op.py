@@ -611,6 +611,22 @@ SHAPES = {
         [" ".join(["ZADD", "zrv200src"] + [f"{i} m{i:03d}" for i in range(200)])],
         ["ZRANGESTORE", "zrv200dst", "zrv200src", "0", "-1", "REV"],
     ),
+    # (frankenredis-gvm6z) THE LAST UNMEASURED ZRANGESTORE SURFACE. The arity-6 option forms
+    # are now all floor-classified; the LIMIT forms are arity 9 and still take the generic
+    # path. My own retry predicate named them as the only ZRANGESTORE work left.
+    #
+    # PREDICTION, registered before the run: if this is on the generic path its dispatch
+    # should land near the ~3,800-4,100 instr/op the arity-6 forms paid BEFORE they were
+    # classified, because dispatch on this route is a per-call constant (held to +2 pct over a
+    # 67x member span). If it comes in near the classified band (~690-815) then something
+    # already claims it and the surface is not open at all.
+    #
+    # Steady state: the destination is rewritten with the identical result every call, the
+    # same argument the other write-issuing ZRANGESTORE shapes rest on.
+    "zrangestore_limit": (
+        ["ZADD zrlsrc 1 a 2 b 3 c"],
+        ["ZRANGESTORE", "zrldst", "zrlsrc", "1", "3", "BYSCORE", "LIMIT", "0", "2"],
+    ),
     "zrangestore_64": (
         [" ".join(["ZADD", "zr64src"] + [f"{i} m{i:02d}" for i in range(64)])],
         ["ZRANGESTORE", "zr64dst", "zr64src", "0", "-1"],
