@@ -8,6 +8,52 @@ Convention: ratios are fr/redis (>1.0 = fr slower / more RAM). "Measured" = ran 
 release A/B; "Reasoned" = algorithmic certainty without a release bench (cargo-check-only
 turns). Keep claims honest — mark which.
 
+## 2026-08-17 MossyOrchid: THE REPLICATED-STANDING CONVENTION IS NOW CODE — `balanced_square_ab.py` prints the WORST bound with every normalised row and refuses to call a straddler a crossing; it fired on its first live run and produced a SIXTH GEOSEARCH replicate at worst bound 0.9445 (`frankenredis-eh2ct`)
+
+Claim class: INSTRUMENT. No build (hold in force); servers and source only.
+
+WHY. I hand-computed worst bounds twice this session for the same shape, and the reason
+`geosearch_64` was ever banked as "1.0094 normalised, an inversion, fr AHEAD" is that a POINT
+ESTIMATE travelled alone while its own intervals admitted both directions. A convention that
+lives in a reviewer's head gets skipped; one the harness prints does not.
+
+WHAT IT PRINTS NOW, per admissible row against an admissible control:
+
+    shape                     point     worst      best  verdict
+    geosearch_64             1.0029    0.9445    1.0768  STRADDLES-1  <- normaliser WIDER
+                                                          than the row (7.0 vs 6.0 pct)
+    NOTE: geosearch_64 STRADDLE 1.0 -- their intervals admit both directions, so NO
+    crossing may be claimed either way. Quote the WORST bound.
+
+`worst` is row CI-low over control CI-high, `best` the reverse — the most pessimistic and most
+optimistic pairings the intervals allow. STRADDLES-1 is not a soft warning: it says no
+directional claim is available from that row at all.
+
+THE SECOND FLAG is the drift finding from earlier today made automatic: when the CONTROL's
+relative interval is at least as wide as the row's, the normalised figure inherits more
+variance than it removes, and the row says so inline. On the run above the control was 7.0 pct
+against the row's 6.0.
+
+AND IT IMMEDIATELY EARNED ITS KEEP: that live run is a SIXTH replicate of the disputed cell.
+Point 1.0029 — above 1.0, exactly the shape of number that got banked as a crossing — with a
+worst bound of 0.9445. Six replicates now: 0.9806 / 0.9937 / 1.0044 / 1.0035 / (41-round pair)
+/ 1.0029, every one bracketing 1.0. The crossing has never once survived its own bounds.
+
+TESTS: `--selftest` (pure computation, no server, no build, so it runs under a build hold)
+carries the real run-4 numbers as a fixture and asserts STRADDLES-1, plus a clear AHEAD and a
+clear BEHIND so the rule is shown to discriminate rather than to refuse everything. A fourth
+assertion pins the DEFECT — that the fixture's point estimate is above 1.0 while its worst
+bound is below it — so if someone reverts to reporting point estimates the case goes red
+instead of the fixture quietly becoming vacuous.
+
+PROVENANCE: no build (external cargo loop; /data 64G). ELF b78d1c23a79a3e85dd597016, engine
+unchanged. Live verification run: 15 rounds, both rows ADMISSIBLE, nulls 0.9932/1.0165 and
+0.9886/1.0092. PER-ARM loadavg 27.71 / 18.89 / 20.78 rising during the run, CPU MHz after
+mean 2202 min 1429 max 3969 (spread 2.78x) — the wide intervals in that run are the load
+showing up honestly, which is what makes it a good demonstration of the bounds.
+
+--------------------------------------------------------------------------------
+
 ## 2026-08-17 MossyOrchid: THE DISPATCH FRONTIER, RE-DERIVED ON THE CORRECTED LABEL — 12 shapes sit on a 14-28 pct front-classified FLOOR, the arity-guard vein has no walker left to bite, and the only GENERIC commands on the board are ZINTERCARD and XPENDING at ~40 pct / ~3,000 instr/op each
 
 Claim class: SELF-SPEEDUP sizing (fr-only; no incumbent ratio is claimed). No build this turn —

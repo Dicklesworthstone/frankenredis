@@ -200,7 +200,52 @@ def _selftest_sizes():
               % (shown, got_n, got_unit, f"{want_n} {want_unit}",
                  "ok" if ok else "FAIL"))
     print("size selftest: %d case(s) failed" % bad)
+    bad += _selftest_normalised_bounds()
     return 1 if bad else 0
+
+
+def _selftest_normalised_bounds() -> int:
+    """The bounds rule, pinned on the row that motivated it.
+
+    Case 1 is `geosearch_64` run 4, numbers copied from the banked measurement. Its POINT
+    estimate is 1.0044 — above 1.0, and it was banked elsewhere at 1.0094 and described as
+    "an inversion, fr AHEAD". Its own bounds run 0.9857-1.0359, so it is a STRADDLES-1 and
+    no crossing may be claimed. If this ever returns AHEAD, the harness has gone back to
+    quoting point estimates and the thing that produced a phantom inversion is back.
+    """
+    cases = [
+        # label, row ratio/ci, control ratio/ci, want verdict, want wider-normaliser
+        ("geosearch_64 run4", 1.1119, (1.1065, 1.1297), 1.1071, (1.0906, 1.1225),
+         "STRADDLES-1", True),
+        ("clear ahead", 1.3000, (1.2800, 1.3200), 1.1000, (1.0900, 1.1100),
+         "AHEAD", False),
+        ("clear behind", 0.9000, (0.8900, 0.9100), 1.1000, (1.0900, 1.1100),
+         "BEHIND", False),
+    ]
+    failures = 0
+    print("%-22s %8s %9s %9s  %-12s %s"
+          % ("normalised-bounds case", "point", "worst", "best", "verdict", "check"))
+    for label, r, rci, c, cci, want_verdict, want_wider in cases:
+        point, worst, best, verdict = normalised_bounds(r, rci, c, cci)
+        wider = normaliser_is_wider(r, rci, c, cci)
+        ok = verdict == want_verdict and wider == want_wider
+        failures += 0 if ok else 1
+        print("%-22s %8.4f %9.4f %9.4f  %-12s %s"
+              % (label, point, worst, best, verdict,
+                 "ok" if ok else "FAIL (wanted %s, wider=%s)" % (want_verdict, want_wider)))
+    # The defect itself: a point estimate ABOVE 1.0 whose worst bound is BELOW it. A rule
+    # that only reported the point would have called case 1 a crossing.
+    point, worst, _best, _v = normalised_bounds(1.1119, (1.1065, 1.1297),
+                                                1.1071, (1.0906, 1.1225))
+    if not (point > 1.0 and worst < 1.0):
+        failures += 1
+        print("  %-20s FAIL: fixture no longer reproduces point>1 with worst<1"
+              % "bounds: defect shown")
+    else:
+        print("  %-20s point %.4f > 1.0 but worst %.4f < 1.0  ok"
+              % ("bounds: defect shown", point, worst))
+    print("normalised-bounds selftest: %d case(s) failed" % failures)
+    return failures
 
 
 # (frankenredis-eh2ct) Per-UNIT minimums. Once the parser started reporting units it
@@ -1082,6 +1127,55 @@ def provenance(fr_pid: int, redis_pid: int) -> dict:
     }
 
 
+def normalised_bounds(row_ratio, row_ci, control_ratio, control_ci):
+    """Normalised point estimate plus the WORST and BEST bounds its intervals allow.
+
+    (frankenredis-eh2ct) THE CONVENTION, MOVED OUT OF PEOPLE'S HEADS. A thin normalised
+    margin is quoted per the replicated-standing convention as the most PESSIMISTIC pairing
+    the two intervals allow — row CI-low over control CI-high — and a point estimate on its
+    own has twice been read as a crossing when the bounds bracket 1.0. `geosearch_64` was
+    banked at 1.0094 normalised and called an inversion; three replicates later put it at
+    0.9806 / 0.9937 / 1.0044 with a worst bound of 0.9549, i.e. never a crossing at all.
+    Computing this by hand is what allowed the point estimate to travel alone, so the
+    harness computes it now.
+
+    Returns (point, worst, best, verdict). STRADDLES-1 means the intervals admit both
+    directions and NO crossing may be claimed in either.
+    """
+    point = row_ratio / control_ratio
+    worst = row_ci[0] / control_ci[1]
+    best = row_ci[1] / control_ci[0]
+    if worst > 1.0:
+        verdict = "AHEAD"
+    elif best < 1.0:
+        verdict = "BEHIND"
+    else:
+        verdict = "STRADDLES-1"
+    return point, worst, best, verdict
+
+
+def relative_ci_width_pct(ratio, ci) -> float:
+    """Interval width as a percentage of the point estimate."""
+    if not ratio:
+        return float("nan")
+    return (ci[1] - ci[0]) / ratio * 100.0
+
+
+def normaliser_is_wider(row_ratio, row_ci, control_ratio, control_ci) -> bool:
+    """Is the denominator noisier than the row it is meant to stabilise?
+
+    (frankenredis-eh2ct) MEASURED, not assumed: over six runs `get_control`'s interval ran
+    5.8 / 4.0 / 2.9 / 3.1 pct against `geosearch_64`'s 2.0 / 2.6 / 2.1 / 0.8, and doubling
+    the rounds narrowed the SHAPE to 0.8 pct while leaving the control unchanged — sampling
+    noise shrinks with n, drift does not. When this is true the normalised figure inherits
+    more variance than it removes, and a sub-1 pct margin on it is not adjudicable at any
+    round count. Worth saying out loud on the row rather than leaving the reader to compare
+    two intervals by eye.
+    """
+    return (relative_ci_width_pct(control_ratio, control_ci)
+            >= relative_ci_width_pct(row_ratio, row_ci))
+
+
 def cpu_mhz_summary() -> str:
     """Per-core clock as `mean/min/max`, or `unknown` where the kernel does not report it.
 
@@ -1469,10 +1563,32 @@ def main(argv_in: list[str]) -> int:
         else:
             print(f"normalised against get_control {control['ratio']:.4f}"
                   " (admissible), for rows that are themselves admissible:")
+            print("  %-22s %8s %9s %9s  %s"
+                  % ("shape", "point", "worst", "best", "verdict"))
+            straddlers = []
             for row in admissible:
                 if row["label"] == "get_control":
                     continue
-                print("  %-22s %.4f" % (row["label"], row["ratio"] / control["ratio"]))
+                point, worst, best, verdict = normalised_bounds(
+                    row["ratio"], row["ci"], control["ratio"], control["ci"])
+                note = ""
+                if normaliser_is_wider(row["ratio"], row["ci"],
+                                       control["ratio"], control["ci"]):
+                    note = ("  <- normaliser WIDER than the row (%.1f vs %.1f pct): it "
+                            "injects more variance than it removes"
+                            % (relative_ci_width_pct(control["ratio"], control["ci"]),
+                               relative_ci_width_pct(row["ratio"], row["ci"])))
+                if verdict == "STRADDLES-1":
+                    straddlers.append(row["label"])
+                print("  %-22s %8.4f %9.4f %9.4f  %s%s"
+                      % (row["label"], point, worst, best, verdict, note))
+            if straddlers:
+                # The failure this prevents is specific and it has happened: a point
+                # estimate of 1.0094 travelled as "an inversion, fr AHEAD" while its own
+                # bounds ran 0.9549-1.0422.
+                print("  NOTE: %s STRADDLE 1.0 -- their intervals admit both directions, so"
+                      " NO crossing may be claimed either way. Quote the WORST bound."
+                      % ", ".join(straddlers))
             refused = [r["label"] for r in rows
                        if r["verdict"] != "ADMISSIBLE" and r["label"] != "get_control"]
             if refused:
