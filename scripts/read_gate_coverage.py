@@ -96,6 +96,67 @@ def shape_commands(path: Path):
     return out
 
 
+def threaded_but_never_supplied(server_path: Path, runtime_path: Path):
+    """Routes that TAKE `default_read_allowed` but whose every call site passes a literal None.
+
+    A source scan counts such a route as converted -- the parameter is there -- while the census
+    shows it still paying, because nothing ever supplies a real value. UNWATCH is the proof case:
+    `de407ba56` threaded the parameter through `execute_plain_unwatch_borrowed_into`, and the
+    route stayed at 1.000 calls/op and an 86.0 frame because it has NO floor class, so no
+    per-pass cache exists in any caller's scope to hand it.
+
+    This is the same failure the whole vein keeps repeating in a new place: the scan measures a
+    PROXY (a parameter exists) rather than the THING (a cached value reaches the predicate).
+    """
+    rt = runtime_path.read_text(errors="replace")
+    sv = server_path.read_text(errors="replace")
+    takers = set(re.findall(r"    (?:pub )?fn (\w+)\(\n(?:[^)]*?)default_read_allowed: Option<bool>",
+                            rt))
+    stranded = []
+    for fn in sorted(takers):
+        sites = []
+        for m in re.finditer(r"(?<![\w])" + re.escape(fn) + r"\(", sv):
+            op = m.end() - 1
+            d, j = 0, op
+            while j < len(sv):
+                if sv[j] == "(":
+                    d += 1
+                elif sv[j] == ")":
+                    d -= 1
+                    if d == 0:
+                        break
+                j += 1
+            sites.append(sv[op:j + 1])
+        if sites and all("default_read_allowed" not in c for c in sites):
+            stranded.append((fn, len(sites)))
+
+    # A route is only STRANDED if NO VARIANT of it ever receives a cached value. `hmget`'s
+    # RespFrame variant is None-only and that is correct -- the floor arm uses
+    # `execute_plain_hmget_borrowed_into`, which does get the cache. Reporting the RespFrame
+    # variant alone would be the same proxy-for-thing error this whole check exists to catch,
+    # so group by base name and keep a route only when every variant is starved.
+    def base(name):
+        return re.sub(r"_into$", "", name)
+
+    supplied_bases = set()
+    for fn in takers:
+        for m in re.finditer(r"(?<![\w])" + re.escape(fn) + r"\(", sv):
+            op = m.end() - 1
+            d, j = 0, op
+            while j < len(sv):
+                if sv[j] == "(":
+                    d += 1
+                elif sv[j] == ")":
+                    d -= 1
+                    if d == 0:
+                        break
+                j += 1
+            if "default_read_allowed" in sv[op:j + 1]:
+                supplied_bases.add(base(fn))
+                break
+    return [(fn, n) for fn, n in stranded if base(fn) not in supplied_bases]
+
+
 def command_of(fn: str) -> str:
     """Best-effort command name for a route, for coverage matching only."""
     s = re.sub(r"^(can_)?execute_plain_", "", fn)
@@ -167,6 +228,16 @@ def main() -> int:
               "shape measures the error path\n    just as reproducibly as a correct one measures "
               "the command.")
 
+    stranded = threaded_but_never_supplied(Path(args.shapes).parent.parent /
+                                          "crates/fr-server/src/main.rs", Path(args.runtime))
+    if stranded:
+        print(f"\n*** THREADED BUT NEVER SUPPLIED ({len(stranded)}) -- NO variant of these routes ever "
+              f"receives a\n    cached value, so a source scan counts them CONVERTED while they still "
+              f"pay at runtime.\n    UNWATCH is the confirmed case: no floor class, so no caller has a "
+              f"cache to hand it.\n    The census adjudicates, not the scan:")
+        for fn, n in stranded:
+            print(f"    {fn:56} {n} call site(s), all None")
+
     if unclassified:
         print(f"\n!!! {len(unclassified)} gate occurrences could NOT be classified into the three "
               f"known forms.\n    A fourth form would make every source-derived total suspect. "
@@ -176,7 +247,7 @@ def main() -> int:
                 print(f"    {args.runtime}:{ln}  in {fn}\n        {txt}")
 
     # Non-zero when the instruments disagree about coverage, so this can gate a claim.
-    return 1 if (invisible or unclassified) else 0
+    return 1 if (invisible or unclassified or stranded) else 0
 
 
 if __name__ == "__main__":
