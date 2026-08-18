@@ -46052,3 +46052,74 @@ Do NOT quote 0.8969 or 0.8956 as the standing -- the convention is the worst bou
 rounds=9 or ops=200,000, both measured worse here. The open work this exposes is `get_control`
 as this group's normaliser: a normaliser wider than every row it divides needs its own row, and
 until it has one every `sizepairs` normalised figure inherits an interval it did not earn.
+
+## 2026-08-18 BrownIbis: REJECT (UNRESOLVED, not refuted) — emitting small bulk payloads as a const-length store removes the `memcpy` CALL exactly (**1.003 -> 0.003 calls/op**) and the saving is **not measurable on a whole-server profile**: my own constructed nulls moved +3 and +11, and the 8-byte size moved the WRONG WAY (`frankenredis-iqicb`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no
+
+LEVER: in `fr_protocol::encode_bulk_string_slice`, emit payload+CRLF for `len <= 8` as one
+CONST-length array (via `<[u8; N]>::try_from` and a const-generic helper) instead of
+`extend_from_slice(bytes)` on a runtime-length slice, which lowers to a
+`__memcpy_avx_unaligned_erms` CALL. NOT SHIPPED. The idea came from a real observation: that
+call runs **1.000 times per op on every GET** and its frame carried **83.5 instr/op** while the
+value being copied was ONE byte.
+
+MEASURED, callgrind two-point (N=20,000 and 2N=40,000), both arms from a worktree pinned at
+HEAD `f5798b546` differing only in this change.
+`bench_elf_sha256=d814892cadd1cef2328962945796ae9880309b9608b76203477c12658d0d59ee` (before),
+`bench_elf_sha256=a9c7fe769a3117a2d92413b3a16d61b16bd5326d668843520efbc52c39c77dd1` (after). Per-arm host state: load 11.29/14.33/19.97 then
+6.90/10.51/16.47, CPU idle 89.0 pct then 88.2 pct measured from `/proc/stat`, iowait 0.0 pct,
+mean 2290-2630 MHz across 64 cores, /data 128G. Instruction counts are software-counted and
+immune to load and MHz.
+
+**WHAT IS EXACT:** the call is gone. `memcpy` calls/op **1.003 -> 0.003**, measured by
+differencing callgrind `calls=` counts. `encode_bulk_string_slice`'s own frame drops 57.0 ->
+51.0. `.text` grows 800 bytes for the eight monomorphisations.
+
+**WHAT IS NOT MEASURABLE, which is the verdict.** Whole-op medians over two rounds per arm, by
+value size — the last two sizes fall through the new path and are NULLS BY CONSTRUCTION:
+
+| value size | before (median) | after (median) | delta | role |
+|---|---|---|---|---|
+| 1 B | 971.6 | 945.4 | -26 | new path |
+| 3 B | 974.2 | 958.9 | -15 | new path |
+| 8 B | 967.0 | 990.8 | **+24** | new path — WRONG DIRECTION |
+| 16 B | 975.2 | 978.2 | +3 | null |
+| 64 B | 1056.8 | 1068.2 | +11 | null |
+
+**The nulls moved and one dosed size moved the wrong way**, against within-arm spreads of 15 to
+37 instr/op. A lever whose constructed nulls drift by +3 and +11 has not been measured; it has
+been guessed at. The 8-byte case is the one the design says should benefit MOST among the fast
+sizes, and it is the one that got worse, which is not a pattern I can explain and not one I will
+ship on.
+
+**THE INSTRUMENT ITSELF IS PART OF THE FINDING.** `__memcpy_avx_unaligned_erms` is a SHARED libc
+routine with many callers, so its attributed per-op cost is NOT stable: reading the same arm and
+shape from two consecutive rounds gave **55.3 and 69.8 instr/op**. That is why the original
+83.5 could never have been the prize — it was never one call's cost. **A frame belonging to a
+shared libc routine cannot be attributed to one call site by the two-point method**, and I
+should have checked that before designing against the number.
+
+GATE AND ITS OWN NULL. The A/A null and the A/B pairing come from one same-invocation run
+interleaving both arms across two rounds, so drift falls on both alike. A/A null on the
+whole-process instrument, same ELF, four draws of GET, resampled ratio-of-medians: median
+1.00000, bootstrap 95% median CI [0.99730, 1.00244]. The verdict gate for this row is that
+bootstrap median-CI, and CV is provenance only and was not used as a gate anywhere in this row;
+no CV was computed. Host state is likewise provenance, not a gate. On this evidence the median
+ratio's interval does not exclude 1.0 for any dosed size, which is exactly why the verdict is
+UNRESOLVED rather than a win.
+
+CORRECTNESS was fine and is recorded so a retry does not have to redo it: wire output is
+BYTE-IDENTICAL on both arms for value sizes 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 16, 64 and 300
+with binary (non-ASCII) content, plus a four-element MGET. Size 0 matters because the match's
+`_` arm instantiates N=8, so an empty value takes the `try_from` Err fallback rather than
+panicking.
+
+RETRY PREDICATE: reopen only if the encode path is measured on an instrument where the signal is
+not buried under ~950 instr/op of unrelated server work — `crates/fr-protocol/benches/encode_bulk_small_len.rs`
+already exists for exactly this shape and is where this belongs. Reopen if that microbench shows
+the const-length store beating `extend_from_slice` by more than its own null band at sizes 1
+through 8. **Do NOT re-derive the prize from the `__memcpy_avx_unaligned_erms` frame in a
+whole-server profile** — that frame is shared by many callers and moved 55.3 to 69.8 between two
+readings of the same arm.
