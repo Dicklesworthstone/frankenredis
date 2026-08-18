@@ -48039,3 +48039,73 @@ load on this target, which is the assumption that made the change look free. **U
 `sadd_existing` as the instrument for anything touching this parser**: it calls it 2.000 times
 per op and its between-draw spread is 0.1 instr/op, so it resolves single-instruction effects
 that `get_control` (spread 28.6) cannot see at all.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: CORRECTION — the check I published one row ago overturns two of that row's five claims: `cycles` STRADDLES 1 across four runs and `branch-misses` clears its own null by only 1.3x. The A/A null UNDERSTATED the A/B noise by 6x (`frankenredis-eh2ct`)
+
+`2ff051637` (mine) certified five hardware quantities and closed with a check: "swap the arm
+order and show the bias reverses". I ran it. It did not reverse -- it revealed that two of those
+five were never resolvable at this sample size, and the instrument's own A/A null is what misled
+me about which.
+
+  fr    bench_elf_sha256=e2f1a5544bc94dcdda9af8485bf8323b9af4666e848fda8915f21e9dd7072399
+  redis bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+  `perf stat` on the server pid, `redis-benchmark -n 300000 -P 16`, four effect runs: two with fr
+  measured FIRST, two with the incumbent measured first. Per-arm loadavg 7.01-11.41.
+
+  quantity          fr-first          incumbent-first    range        verdict
+  instructions      0.7884  0.7923    0.7857  0.7904     0.84 pct     RESOLVED, fr ahead ~21 pct
+  IPC gap           1.3229  1.2984    1.2471  1.3260     all > 1.24   RESOLVED, worst 1.2471
+  cache-misses      2.6889  2.3949    2.3006  2.5021     all > 2.30   RESOLVED, worst 2.3006
+  cycles            1.0430  1.0287    0.9798  1.0480     STRADDLES 1  NOT RESOLVED
+  branch-misses     1.1559  1.0930    1.0396  1.0474     worst 1.0396 NOT RESOLVED
+
+### WITHDRAWN from `2ff051637`
+
+  * "while burning 1.0430x the CYCLES" in its claim line, and "cycles/op 1.0430x measured,
+    ~1.035x corrected -- fr BEHIND" in its certified block. The ratio straddles 1.0 across four
+    runs (0.9798 to 1.0480) and no direction may be claimed.
+  * "branch-misses 1.1559x worst -- ~a third of the cycle gap". The worst of four runs is
+    1.0396x against a 3.00 pct A/A null: a 1.3x margin. `8c4f86a63` retracted a branch
+    conclusion drawn from a rejected instrument; this retracts one drawn from a real instrument
+    at insufficient resolution. The axis is UNRESOLVED, not eliminated and not established.
+  * the retry criterion "a lever succeeds only IF fr's cycles per op FALL below the incumbent's
+    7686.6". That threshold is unusable: in the swapped order fr ALREADY reads 7714.4 against
+    7873.2, i.e. below it, with no code change at all.
+  * my "~0.8 pct order correction". The effect is not an order bias.
+
+### The instrument lesson, which is the part worth keeping
+
+My A/A null measured 1.08 pct worst bias on `cycles` and I treated that as the resolution floor.
+The A/B spread on the same counter is 7 pct -- SIX TIMES WIDER. An A/A between two copies of the
+SAME binary running the SAME work has correlated noise that cancels in the ratio; an A/B between
+two ENGINES with different code, different allocators and different syscall patterns does not.
+So an A/A null bounds the instrument's bias and does NOT bound an A/B's variance, and I used it
+as though it did.
+
+That is why I first read the swap as an order effect: one swapped draw at 0.9798 against two
+fr-first draws above 1.03 looked systematic. The second swapped draw at 1.0480 killed that
+reading. One draw per arrangement is enough to see a difference and never enough to attribute
+one.
+
+### The arithmetic that reconciles it, and why it does not rescue the claim
+
+instructions 0.79x times an IPC gap of [1.2471, 1.3260] gives a cycles ratio of [0.985, 1.048].
+The true value is therefore probably just above 1 -- fr burning a percent or two more cycles --
+which is exactly what the throughput standing implies. But that interval STRADDLES 1 too, so the
+product is no more quotable than the direct measurement. What survives is that fr retires a
+fifth fewer instructions and executes them at a materially lower rate; whether the two cancel to
+fr's disadvantage is below this harness's resolution.
+
+NONE OF THIS TOUCHES THE THROUGHPUT STANDING. `f8067cba3` certifies `geosearch_2` BEHIND at
+0.8578 control-normalised on two admissible draws agreeing to 0.15 pct, on a different harness
+with its own nulls. fr is behind on this shape; the cycles-per-op framing simply cannot show it.
+
+RETRY PREDICATE: `cycles` and `branch-misses` on this shape need roughly 40x the sample to
+resolve a 2 pct effect against a 7 pct spread, so do NOT quote either from a run of this size in
+either direction, and do NOT use the withdrawn 7686.6 threshold. A lever on `geosearch_2` should
+be judged on the THROUGHPUT harness against 0.8578, or on `cache-misses`, whose worst-of-four
+2.3006x clears its 18.26 pct null by 7x and is the one microarchitectural quantity here that
+four runs agree on. Before quoting any A/B counter from this harness, measure its A/B spread
+across at least four runs; its A/A null will understate that spread, on this evidence by 6x.
