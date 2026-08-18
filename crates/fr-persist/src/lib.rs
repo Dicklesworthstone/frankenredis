@@ -3273,7 +3273,7 @@ pub fn bench_lzf_compress_table<const HOIST: bool>(
     out_budget: usize,
 ) -> Option<Vec<u8>> {
     LZF_SCRATCH.with(|scratch| {
-        lzf_compress_dispatch::<true, HOIST, true, true, false, false>(input, out_budget, &mut scratch.borrow_mut())
+        lzf_compress_dispatch::<true, HOIST, true, true, false, false, false>(input, out_budget, &mut scratch.borrow_mut())
     })
 }
 
@@ -3292,7 +3292,7 @@ pub fn bench_lzf_compress_literals<const BATCH: bool>(
     out_budget: usize,
 ) -> Option<Vec<u8>> {
     LZF_SCRATCH.with(|scratch| {
-        lzf_compress_dispatch::<true, true, BATCH, true, false, false>(input, out_budget, &mut scratch.borrow_mut())
+        lzf_compress_dispatch::<true, true, BATCH, true, false, false, false>(input, out_budget, &mut scratch.borrow_mut())
     })
 }
 
@@ -3319,13 +3319,34 @@ pub fn bench_lzf_compress_literals<const BATCH: bool>(
 /// cheaper conservative test first, as vendored lzf_c.c does. The exact test still decides
 /// whenever it is reached, so both arms MUST return byte-identical output -- asserted by
 /// lzf_two_tier_match_budget_matches_exact_arm_byte_for_byte.
+/// Same-binary A/B hook for the epoch tag width (slice 7).
+///
+/// WIDETAG == false keeps the 8-bit tag, which wraps every 255 calls and clears 256 KiB.
+/// WIDETAG == true uses a 16-bit tag for inputs under 64 KiB, wrapping every 65,535.
+/// Both arms MUST return byte-identical output -- asserted by
+/// lzf_wide_epoch_tag_matches_narrow_arm_byte_for_byte, which also covers the
+/// representation switch.
+#[doc(hidden)]
+pub fn bench_lzf_compress_widetag<const WIDETAG: bool>(
+    input: &[u8],
+    out_budget: usize,
+) -> Option<Vec<u8>> {
+    LZF_SCRATCH.with(|scratch| {
+        lzf_compress_dispatch::<true, true, false, false, true, true, WIDETAG>(
+            input,
+            out_budget,
+            &mut scratch.borrow_mut(),
+        )
+    })
+}
+
 #[doc(hidden)]
 pub fn bench_lzf_compress_tier<const TIER: bool>(
     input: &[u8],
     out_budget: usize,
 ) -> Option<Vec<u8>> {
     LZF_SCRATCH.with(|scratch| {
-        lzf_compress_dispatch::<true, true, false, false, true, TIER>(
+        lzf_compress_dispatch::<true, true, false, false, true, TIER, false>(
             input,
             out_budget,
             &mut scratch.borrow_mut(),
@@ -3339,7 +3360,7 @@ pub fn bench_lzf_compress_xortag<const XORTAG: bool>(
     out_budget: usize,
 ) -> Option<Vec<u8>> {
     LZF_SCRATCH.with(|scratch| {
-        lzf_compress_dispatch::<true, true, false, false, XORTAG, false>(
+        lzf_compress_dispatch::<true, true, false, false, XORTAG, false, false>(
             input,
             out_budget,
             &mut scratch.borrow_mut(),
@@ -3353,7 +3374,7 @@ pub fn bench_lzf_compress_guard<const GUARD: bool>(
     out_budget: usize,
 ) -> Option<Vec<u8>> {
     LZF_SCRATCH.with(|scratch| {
-        lzf_compress_dispatch::<true, true, false, GUARD, false, false>(input, out_budget, &mut scratch.borrow_mut())
+        lzf_compress_dispatch::<true, true, false, GUARD, false, false, false>(input, out_budget, &mut scratch.borrow_mut())
     })
 }
 
@@ -3448,6 +3469,45 @@ impl<const XORTAG: bool> LzfHashTable for LzfPackedTable<'_, XORTAG> {
     }
 }
 
+/// (frankenredis-qj6jn slice 7) Packed table view for `in_len < 64 KiB`:
+/// `(gen16 << 16) | pos_plus_one`. Identical in kind to `LzfPackedTable`, with eight more
+/// bits given to the epoch tag and eight fewer to the position -- which is the whole point,
+/// because the tag is what forces the 256 KiB clear when it wraps. A 16-bit tag wraps every
+/// 65,535 calls rather than every 255.
+///
+/// A SEPARATE TYPE rather than a runtime shift on the existing one: a variable shift would
+/// add an instruction to every probe and give back what slice 5 bought.
+struct LzfPacked16Table<'a, const XORTAG: bool>(&'a mut [u32; LZF_HSIZE]);
+
+impl<const XORTAG: bool> LzfHashTable for LzfPacked16Table<'_, XORTAG> {
+    #[inline]
+    fn get(&self, index: usize, generation: u32) -> u32 {
+        let slot = self.0[index];
+        if XORTAG {
+            // Slice 5's argument, with the shift changed from 24 to 16 and its
+            // precondition changed to match: a differing tag leaves the top 16 bits set,
+            // so the result is at least 1 << 16, while this layout is only selected when
+            // in_len < 1 << 16 and therefore ip <= (1 << 16) - 2. The caller's existing
+            // `r < ip` guard rejects it for free, exactly as before.
+            slot ^ (generation << 16)
+        } else if (slot >> 16) == (generation & 0xFFFF) {
+            slot & 0xFFFF
+        } else {
+            0
+        }
+    }
+
+    #[inline]
+    fn set(&mut self, index: usize, generation: u32, pos_plus_one: u32) {
+        if XORTAG {
+            // pos_plus_one <= in_len < 1 << 16, so it cannot reach the tag bits.
+            self.0[index] = (generation << 16) | pos_plus_one;
+        } else {
+            self.0[index] = ((generation & 0xFFFF) << 16) | (pos_plus_one & 0xFFFF);
+        }
+    }
+}
+
 /// Wide table view (`in_len >= 16 MiB`), where `pos_plus_one` no longer fits the
 /// packed 24-bit field.
 struct LzfWideTable<'a>(&'a mut [LzfHashSlot; LZF_HSIZE]);
@@ -3504,6 +3564,18 @@ struct LzfScratch {
     // Inputs >= 16 MiB can't pack pos into 24 bits, so they keep `htab`.
     packed: Vec<u32>,
     packed_generation: u8,
+    // (frankenredis-qj6jn slice 7) The 8-bit tag above wraps every 255 compressions and
+    // pays a 256 KiB `fill(0)` when it does -- MEASURED at 6.32 pct of the whole
+    // compressor, 1048 instructions per call amortised. The tag is only 8 bits because
+    // the slot spends 24 on the position, and every payload this kernel actually sees is
+    // far under 64 KiB, where 16 bits of position are enough. This counter drives the
+    // 16-bit-tag layout, which wraps every 65,535 calls instead: the same clear, 256x
+    // less often.
+    packed_generation16: u16,
+    // Which layout `packed` currently holds: 0 = indeterminate (freshly sized), 1 = the
+    // 16-bit-tag layout, 2 = the 8-bit-tag layout. The two layouts read each other's
+    // tags as live, so switching between them MUST clear.
+    packed_mode: u8,
     use_packed: bool,
 }
 
@@ -3514,20 +3586,48 @@ impl LzfScratch {
             htab: Vec::new(),
             packed: Vec::new(),
             packed_generation: 0,
+            packed_generation16: 0,
+            packed_mode: 0,
             use_packed: false,
         }
     }
 
     /// Returns the active generation tag (u32 for the wide path; the packed path
     /// ignores the return and uses `packed_generation` internally).
-    fn begin_call(&mut self, hsize: usize, in_len: usize) -> u32 {
+    fn begin_call(&mut self, hsize: usize, in_len: usize, wide_tag: bool) -> u32 {
         // pos_plus_one is ip+1 <= in_len, so a 24-bit field holds it iff in_len
         // < 2^24. Above that, fall back to the 8-byte epoch table.
         self.use_packed = in_len < (1 << 24);
         if self.use_packed {
             if self.packed.len() != hsize {
                 self.packed.resize(hsize, 0);
+                // A freshly sized table is all zeros, so it is valid for EITHER layout
+                // and needs no clear; adopt the requested one directly rather than
+                // going through `packed_mode == 0` and paying a redundant 256 KiB fill
+                // on the very first compression.
+                self.packed_mode = if wide_tag { 1 } else { 2 };
                 self.packed_generation = 0;
+                self.packed_generation16 = 0;
+            }
+            let want: u8 = if wide_tag { 1 } else { 2 };
+            if self.packed_mode != want {
+                // Representation change. A slot written as (gen8 << 24) | pos is
+                // indistinguishable from one written as (gen16 << 16) | pos, so the
+                // stale entries would read as live under the new layout. This is the
+                // one clear slice 7 adds, and it happens only when a caller crosses
+                // 64 KiB -- not per call.
+                self.packed.fill(0);
+                self.packed_mode = want;
+                self.packed_generation = 0;
+                self.packed_generation16 = 0;
+            }
+            if wide_tag {
+                self.packed_generation16 = self.packed_generation16.wrapping_add(1);
+                if self.packed_generation16 == 0 {
+                    self.packed.fill(0);
+                    self.packed_generation16 = 1;
+                }
+                return u32::from(self.packed_generation16);
             }
             self.packed_generation = self.packed_generation.wrapping_add(1);
             if self.packed_generation == 0 {
@@ -3692,7 +3792,7 @@ fn lzf_compress_with_scratch<const SIMD: bool>(
     // shape, -258 on incompressible and -91 on run-heavy -- a win on every payload, and
     // bit-identical across three draws. Sound only while in_len < 16 MiB, which is exactly
     // when this table representation is chosen.
-    lzf_compress_dispatch::<SIMD, true, false, false, true, true>(input, out_budget, scratch)
+    lzf_compress_dispatch::<SIMD, true, false, false, true, true, true>(input, out_budget, scratch)
 }
 
 /// Choose the match-table representation ONCE per call and hand the compressor a
@@ -3711,6 +3811,7 @@ fn lzf_compress_dispatch<
     const GUARD: bool,
     const XORTAG: bool,
     const TIER: bool,
+    const WIDETAG: bool,
 >(
     input: &[u8],
     out_budget: usize,
@@ -3724,9 +3825,24 @@ fn lzf_compress_dispatch<
     }
     // Sizes/resizes the active table and returns this call's epoch tag. Must run
     // before the fixed-size view is taken: it is what guarantees the length.
-    let generation = scratch.begin_call(LZF_HSIZE, input.len());
+    // The 16-bit-tag layout is only reachable through the HOISTed path: the fallback
+    // probes go through `LzfScratch::{get,set}`, which decode the 8-bit layout, so letting
+    // begin_call adopt the wide tag without a matching table view would hand those probes
+    // slots they would misread.
+    let wide_tag = WIDETAG && HOIST && input.len() < (1 << 16);
+    let generation = scratch.begin_call(LZF_HSIZE, input.len(), wide_tag);
     if HOIST {
         if scratch.use_packed {
+            if wide_tag
+                && let Ok(table) = <&mut [u32; LZF_HSIZE]>::try_from(scratch.packed.as_mut_slice())
+            {
+                return lzf_compress_core::<SIMD, BATCH, GUARD, TIER, _>(
+                    input,
+                    out_budget,
+                    &mut LzfPacked16Table::<XORTAG>(table),
+                    generation,
+                );
+            }
             if let Ok(table) = <&mut [u32; LZF_HSIZE]>::try_from(scratch.packed.as_mut_slice()) {
                 return lzf_compress_core::<SIMD, BATCH, GUARD, TIER, _>(
                     input,
@@ -7679,6 +7795,74 @@ mod tests {
                         super::lzf_decompress(&encoded, p.len()).as_deref(),
                         Some(p.as_slice()),
                         "tiered output did not round-trip (len={}, budget={budget})",
+                        p.len()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lzf_wide_epoch_tag_matches_narrow_arm_byte_for_byte() {
+        // Slice 7 gives the epoch tag 16 bits instead of 8 for inputs under 64 KiB, so the
+        // 256 KiB wrap-clear happens 256x less often. The tag width is invisible to the
+        // output BY CONSTRUCTION -- between wraps either width identifies the generation
+        // uniquely -- so the interesting failures are the two places that reasoning stops
+        // holding.
+        //
+        // FIRST: the wrap itself. Both counters must invalidate the table when they roll
+        // over, and the 8-bit one rolls every 255 calls, so the loop below runs well past
+        // 255 compressions to cross it repeatedly against a WARM table.
+        let payloads = lzf_equivalence_payloads();
+        for round in 0..3 {
+            for p in &payloads {
+                for budget in [0usize, 1, p.len() / 2, p.len(), p.len() + 8] {
+                    let narrow = super::bench_lzf_compress_widetag::<false>(p, budget);
+                    let wide = super::bench_lzf_compress_widetag::<true>(p, budget);
+                    assert_eq!(
+                        narrow,
+                        wide,
+                        "wide epoch tag diverged (round={round}, len={}, budget={budget})",
+                        p.len()
+                    );
+                    if let Some(encoded) = wide {
+                        assert_eq!(
+                            super::lzf_decompress(&encoded, p.len()).as_deref(),
+                            Some(p.as_slice()),
+                            "wide-tag output did not round-trip (len={}, budget={budget})",
+                            p.len()
+                        );
+                    }
+                }
+            }
+        }
+
+        // SECOND, and the one a same-size corpus cannot reach: the REPRESENTATION SWITCH.
+        // A payload at or above 64 KiB uses the 8-bit layout, and a slot written as
+        // (gen8 << 24) | pos is indistinguishable from (gen16 << 16) | pos -- so crossing
+        // the boundary with a warm table must clear, or the stale entries read as live and
+        // the output changes. Alternate across the boundary repeatedly.
+        let small = lzf_equivalence_payloads().into_iter().next().expect("payload");
+        let mut big = Vec::with_capacity(70_000);
+        let mut s: u32 = 0x1234_5678;
+        for _ in 0..70_000 {
+            s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            big.push((s >> 24) as u8);
+        }
+        for _ in 0..4 {
+            for (p, budget) in [(&small, small.len()), (&big, big.len())] {
+                let narrow = super::bench_lzf_compress_widetag::<false>(p, budget);
+                let wide = super::bench_lzf_compress_widetag::<true>(p, budget);
+                assert_eq!(
+                    narrow, wide,
+                    "wide epoch tag diverged across the 64 KiB representation switch (len={})",
+                    p.len()
+                );
+                if let Some(encoded) = wide {
+                    assert_eq!(
+                        super::lzf_decompress(&encoded, p.len()).as_deref(),
+                        Some(p.as_slice()),
+                        "switch-crossing output did not round-trip (len={})",
                         p.len()
                     );
                 }

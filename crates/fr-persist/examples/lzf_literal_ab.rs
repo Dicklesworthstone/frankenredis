@@ -55,7 +55,7 @@ fn run_heavy(len: usize) -> Vec<u8> {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() != 4 {
-        eprintln!("usage: lzf_literal_ab <batch|push|guard|noguard|tag|xortag|exact|tier> <listpack|random|runs> <reps>");
+        eprintln!("usage: lzf_literal_ab <batch|push|guard|noguard|tag|xortag|exact|tier|tag8|tag16> <listpack|random|runs> <reps>");
         std::process::exit(2);
     }
     // slice 2 arms: batch|push. slice 3 arms: guard|noguard (the per-literal-byte
@@ -64,7 +64,16 @@ fn main() {
     let arm = args[1].as_str();
     if !matches!(
         arm,
-        "batch" | "push" | "guard" | "noguard" | "tag" | "xortag" | "exact" | "tier"
+        "batch"
+            | "push"
+            | "guard"
+            | "noguard"
+            | "tag"
+            | "xortag"
+            | "exact"
+            | "tier"
+            | "tag8"
+            | "tag16"
     ) {
         eprintln!("unknown arm {arm}");
         std::process::exit(2);
@@ -75,6 +84,8 @@ fn main() {
     let slice5 = matches!(arm, "tag" | "xortag");
     // slice 6 arms: exact|tier -- the match-path budget test.
     let slice6 = matches!(arm, "exact" | "tier");
+    // slice 7 arms: tag8|tag16 -- the epoch tag width.
+    let slice7 = matches!(arm, "tag8" | "tag16");
     let payload = match args[2].as_str() {
         "listpack" => listpack_like(40),
         "random" => incompressible(3000),
@@ -100,6 +111,9 @@ fn main() {
     let e0 = fr_persist::bench_lzf_compress_tier::<false>(&payload, budget);
     let e1 = fr_persist::bench_lzf_compress_tier::<true>(&payload, budget);
     assert_eq!(e0, e1, "tier arms diverged; a speedup here would be meaningless");
+    let w0 = fr_persist::bench_lzf_compress_widetag::<false>(&payload, budget);
+    let w1 = fr_persist::bench_lzf_compress_widetag::<true>(&payload, budget);
+    assert_eq!(w0, w1, "widetag arms diverged; a speedup here would be meaningless");
     println!(
         "arm={} payload={} len={} budget={budget} encoded={:?} reps={reps}",
         args[1],
@@ -110,7 +124,13 @@ fn main() {
 
     let mut sink = 0usize;
     for _ in 0..reps {
-        let out = if slice6 {
+        let out = if slice7 {
+            if arm == "tag8" {
+                fr_persist::bench_lzf_compress_widetag::<false>(black_box(&payload), black_box(budget))
+            } else {
+                fr_persist::bench_lzf_compress_widetag::<true>(black_box(&payload), black_box(budget))
+            }
+        } else if slice6 {
             if arm == "exact" {
                 fr_persist::bench_lzf_compress_tier::<false>(black_box(&payload), black_box(budget))
             } else {
