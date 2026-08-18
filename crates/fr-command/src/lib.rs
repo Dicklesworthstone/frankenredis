@@ -13412,6 +13412,19 @@ fn function_cmd(
         // a cross-library clash (functions.c:367), to names however they were obtained.
         let specs = match lua_eval::function_load_execute(store, now_ms, &argv[code_idx]) {
             Ok(specs) => specs,
+            // (frankenredis-fnukn) Line 0 means the interpreter reported a
+            // `redis.register_function` ARGUMENT refusal, which 7.2.4 emits with no source
+            // location: `ERR Error registering functions: ERR <phrase>`. A body that genuinely
+            // raises does carry `user_function:<line>:`, and the differ's top_level_error /
+            // undeclared_global / tonumber_call / nil_index rows agree with 7.2.4 on exactly that
+            // shape -- so the segment is right there and wrong here. Before 9hori moved FUNCTION
+            // LOAD onto the executed path, the argument refusals came from fr-store's scan and
+            // carried the measured wording; this restores it.
+            Err((0, message)) => {
+                return Err(CommandError::Custom(format!(
+                    "ERR Error registering functions: ERR {message}"
+                )));
+            }
             Err((line, message)) => {
                 return Err(CommandError::Custom(format!(
                     "ERR Error registering functions: ERR user_function:{line}: {message}"

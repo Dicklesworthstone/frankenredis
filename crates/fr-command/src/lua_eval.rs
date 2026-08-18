@@ -4328,6 +4328,50 @@ impl RegisterFunctionArgError {
     }
 }
 
+/// Every `RegisterFunctionArgError`, so a message can be recognised as one of them.
+///
+/// (frankenredis-fnukn) Listed as VALUES rather than as a second copy of the strings: the
+/// recognition below compares against `upstream_message()`, so the set cannot drift from the
+/// wording it is meant to recognise. `WrongArgCount`'s payload is irrelevant to its message.
+const ALL_REGISTER_FUNCTION_ARG_ERRORS: [RegisterFunctionArgError; 13] = [
+    RegisterFunctionArgError::WrongArgCount(0),
+    RegisterFunctionArgError::FirstArgNotString,
+    RegisterFunctionArgError::SecondArgNotFunction,
+    RegisterFunctionArgError::FunctionNameNotString,
+    RegisterFunctionArgError::CallbackNotFunction,
+    RegisterFunctionArgError::MissingFunctionName,
+    RegisterFunctionArgError::MissingCallback,
+    RegisterFunctionArgError::SingleArgNotTable,
+    RegisterFunctionArgError::NamedKeyNotString,
+    RegisterFunctionArgError::UnknownArgument,
+    RegisterFunctionArgError::DescriptionNotString,
+    RegisterFunctionArgError::FlagsNotTable,
+    RegisterFunctionArgError::UnknownFlag,
+];
+
+/// Is this interpreter error a `redis.register_function` ARGUMENT refusal?
+///
+/// (frankenredis-fnukn) These carry NO source location upstream -- the measured wording is
+/// `ERR Error registering functions: ERR <phrase>` with no `user_function:<line>:` segment,
+/// whereas a body that genuinely raises does report one. The command layer needs to tell the two
+/// apart, and the message is the only thing that crosses the boundary.
+///
+/// The interpreter may have stamped its own `user_script:<n>: ` prefix on the way out (see
+/// `restamp`), so that is tolerated and stripped before the comparison.
+fn is_register_function_arg_message(msg: &str) -> Option<&str> {
+    let bare = match msg.strip_prefix("user_script:") {
+        Some(rest) => match rest.find(": ") {
+            Some(i) => &rest[i + 2..],
+            None => msg,
+        },
+        None => msg,
+    };
+    ALL_REGISTER_FUNCTION_ARG_ERRORS
+        .iter()
+        .any(|e| e.upstream_message() == bare)
+        .then_some(bare)
+}
+
 /// Is this value callable? Both a Lua closure and a host builtin qualify.
 fn lua_value_is_callable(v: &LuaValue) -> bool {
     matches!(v, LuaValue::Function(_) | LuaValue::RustFunction(_))
@@ -4553,7 +4597,15 @@ pub fn function_load_execute(
     let mut state = LuaState::new_for_function_load(store, now_ms);
     match state.execute(source.as_ref()) {
         Ok(_) => Ok(state.registered_function_specs().to_vec()),
-        Err(err) => Err((state.current_line, err)),
+        // (frankenredis-fnukn) LINE 0 MEANS "no source location applies". A
+        // `redis.register_function` argument refusal is reported by 7.2.4 without a
+        // `user_function:<line>:` segment -- measured, and pinned by fr-store's
+        // `function_load_table_form_rejects_unknown_field` -- while a body that raises does carry
+        // one. The command layer cannot distinguish them from the message alone without this.
+        Err(err) => match is_register_function_arg_message(&err) {
+            Some(bare) => Err((0, bare.to_string())),
+            None => Err((state.current_line, err)),
+        },
     }
 }
 
@@ -15891,6 +15943,45 @@ mod tests {
             ])),
             Err(RegisterFunctionArgError::DescriptionNotString)
         );
+    }
+
+    /// (frankenredis-fnukn) A registration refusal must be recognisable from its message alone,
+    /// because that is all that crosses the interpreter boundary, and the command layer uses it
+    /// to decide whether to emit a `user_function:<line>:` segment. 7.2.4 emits none for these.
+    #[test]
+    fn register_function_refusals_are_recognised_and_runtime_errors_are_not() {
+        // Every variant's own message is recognised, so the set cannot drift from the wording.
+        for err in super::ALL_REGISTER_FUNCTION_ARG_ERRORS {
+            let msg = err.upstream_message();
+            assert_eq!(
+                super::is_register_function_arg_message(msg),
+                Some(msg),
+                "unrecognised refusal message: {msg}"
+            );
+        }
+
+        // The interpreter may stamp its own source prefix on the way out; it is stripped.
+        assert_eq!(
+            super::is_register_function_arg_message("user_script:7: unknown flag given"),
+            Some("unknown flag given")
+        );
+
+        // A GENUINE runtime error must NOT be recognised -- it keeps its line, and the differ's
+        // top_level_error / undeclared_global / tonumber_call / nil_index rows depend on that.
+        for msg in [
+            "boom",
+            "user_script:3: Script attempted to access nonexistent global variable 'nosuch'",
+            "attempt to index a nil value",
+            // near-misses: a refusal phrase must match WHOLE, not as a substring
+            "unknown flag given to something else",
+            "prefix unknown flag given",
+        ] {
+            assert_eq!(
+                super::is_register_function_arg_message(msg),
+                None,
+                "runtime error wrongly taken for a refusal: {msg}"
+            );
+        }
     }
 
     /// (frankenredis-lua-rediscall-loop-interpreter-bound-d3al0) Scope buffers
