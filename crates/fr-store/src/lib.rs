@@ -5516,6 +5516,56 @@ impl CommandHistogramTracker {
         }
     }
 
+
+    /// Record a command the caller STATICALLY KNOWS has no direct field, going straight to the
+    /// `HashMap` and skipping the direct-field `match` entirely.
+    ///
+    /// (frankenredis-getexgate) That match is not free. Extending the direct-field set to
+    /// twenty-five commands MEASURED a **+20.3 instr/op worst-bound tax** on `substr` -- a
+    /// literal call site outside the set -- replicated over three draws, and the tax GROWS with
+    /// the set because a `match` on `&str` tests more length buckets as they fill. A call site
+    /// passing a string literal already knows at compile time whether its command is in the set,
+    /// so it should not pay a runtime test to rediscover that.
+    ///
+    /// The `debug_assert` is the interlock. Routing a DIRECT-field command here would record it
+    /// into the map under the same name its field already uses, and `all()` would then emit the
+    /// command TWICE -- the duplicate `INFO commandstats` row described in `092150b5d`. Debug
+    /// builds and the whole test suite catch that immediately; release builds pay nothing.
+    pub fn record_map_with_kind(
+        &mut self,
+        command: &str,
+        latency_us: u64,
+        kind: CommandRecordKind,
+    ) {
+        debug_assert!(
+            !Self::is_direct_histogram_name(command),
+            "record_map_with_kind called with a command that HAS a direct field: {command:?}; \
+             this would double-count it in all() and INFO commandstats"
+        );
+        if let Some(histogram) = self.histograms.get_mut(command) {
+            histogram.record_with_kind(latency_us, kind);
+        } else {
+            self.histograms
+                .entry(command.to_string())
+                .or_default()
+                .record_with_kind(latency_us, kind);
+        }
+    }
+
+    /// Whether a canonical lowercase name has a direct field.
+    ///
+    /// Generated from `with_direct_histogram_fields!`, the same list that drives the recorder,
+    /// `get`, `all` and `reset`, so it cannot drift from them: adding a command to the list
+    /// automatically tightens this predicate and therefore the interlock above.
+    #[must_use]
+    pub fn is_direct_histogram_name(command: &str) -> bool {
+        macro_rules! name_match {
+            ($($name:literal => $field:ident),* $(,)?) => {
+                matches!(command, $($name)|*)
+            };
+        }
+        with_direct_histogram_fields!(name_match)
+    }
     /// Bench-only reference arm: record a canonical command straight through the
     /// `HashMap<String>` path (the pre-direct-field behaviour), bypassing the
     /// `get`/`set`/…/`hset`/`zadd`/`incr` direct fields. Mirrors the fallback in
@@ -7464,6 +7514,19 @@ impl Store {
     ) {
         self.command_histograms
             .record_canonical_with_kind(canonical_lower, latency_us, kind);
+    }
+
+    /// Like `record_command_histogram_canonical_with_kind`, but for a caller that statically
+    /// knows the command has NO direct histogram field -- it skips the direct-field match.
+    /// See `CommandHistogramTracker::record_map_with_kind` for the measured reason.
+    pub fn record_command_histogram_map_with_kind(
+        &mut self,
+        canonical_lower: &str,
+        latency_us: u64,
+        kind: CommandRecordKind,
+    ) {
+        self.command_histograms
+            .record_map_with_kind(canonical_lower, latency_us, kind);
     }
 
     /// Get histogram data for a specific command.
