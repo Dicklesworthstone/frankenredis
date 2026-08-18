@@ -50361,6 +50361,7 @@ RETRY PREDICATE:
      `note_rpush_command_grow` after its loop exactly as `lpush_impl` did.
 
 --------------------------------------------------------------------------------
+
 ## 2026-08-18 CrimsonHawk: MEASURED — all four `cascade` candidates use FEWER cycles than the incumbent, and only TWO have a genuine server-CPU shortfall: `publish`'s is NOT CPU at all (0.9980x against its own control)
 
 DISCHARGES the obligation in `80044f42c`, which withdrew "deficit" language from `pttl`/`publish`
@@ -50421,6 +50422,7 @@ and needs a second draw before it is called anything. And note none of these fou
 described as behind the INCUMBENT: all four use fewer cycles than Redis.
 
 --------------------------------------------------------------------------------
+
 ## 2026-08-18 CrimsonHawk: MEASURED — `pttl` and `expiretime` REPLICATE a server-CPU shortfall against fr's own baseline (1.0680x and 1.0535x conservative), while still using FEWER cycles than the incumbent
 
 DISCHARGES the obligation in `9cc18b19a`: "take a second draw on `expiretime` and `pttl` before
@@ -50482,6 +50484,104 @@ already measured that ONE volatile key changes per-command costs engine-wide, wh
 seed creates by construction. A lever SUCCEEDS only IF the shape's cycles-vs-same-run-control
 falls at or below `get_control`'s own 1.0000 with the null shown. Do NOT chase `publish` on
 cycles, and do NOT quote `getbit` until it has a second draw.
+
+--------------------------------------------------------------------------------
+## 2026-08-18 CrimsonHawk: MECHANISM + TWO CORRECTIONS TO MY OWN PREDICATES — LINSERT is NOT a reversal (redis splits the node AT the insertion point, 5 of 5 exact), and RPUSH's late fill is confirmed present but MASKED, which makes it a PERF lead rather than a parity one (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: differential behaviour against a live vendored redis 7.2.4 in the same probe
+invocation, plus source reading. NO BUILD — the project's build slot was taken, so this row
+measures with the `8c3376c09` binary and changes no code. No timing verdict is claimed, no
+instruction counts are quoted, and CV was NOT used, as a gate or otherwise. This row banks no
+vs-incumbent ratio. Campaign output: no.
+
+`8c3376c09` left two leads. Both were investigable without a build, and BOTH were mischaracterised
+in the predicate that named them.
+
+### CORRECTION 1 — LINSERT IS NOT A REVERSAL; IT IS A SPLIT AT THE INSERTION POINT
+
+I called it "an exact reversal, the cheapest remaining lead" on the strength of ONE measurement
+at the midpoint. Varying the insertion position destroys that reading:
+
+    fill -1, seed 250, before = [4257]
+    insert at   5 pct   redis [224, 4053]     fr [2128, 2149]
+                25 pct  redis [1074, 3203]    fr [2128, 2149]
+                50 pct  redis [2145, 2132]    fr [2132, 2145]     <- the ONLY near-mirror
+                75 pct  redis [3199, 1078]    fr [2132, 2145]
+                95 pct  redis [4049, 228]     fr [2132, 2145]
+
+  Redis's split tracks the insertion offset LINEARLY; fr's is a fixed budget split that ignores
+  it. At the midpoint — and only there — those two produce nearly the same pair of sizes in
+  opposite order, which is what made a boundary bug look like a direction bug.
+
+  THE RULE IS FULLY DETERMINED, and it is arithmetic rather than a guess. Node 0 is everything
+  BEFORE the insertion point PLUS the inserted element:
+
+      node0_bytes = LIST_LP_OVERHEAD + pos * entry_bytes + inserted_entry_bytes
+      pos  12 -> 224    62 -> 1074    125 -> 2145    187 -> 3199    237 -> 4049
+      predicted == observed at ALL FIVE positions.
+
+  So LINSERT needs real node-boundary state — the node must be split where the element landed.
+  It is NOT the cheap ordering fix `8c3376c09` advertised, and I am retracting that framing
+  before someone spends a build slot on it.
+
+    THE REUSABLE IS THE SAMPLING ERROR, NOT THE RULE. A single insertion position at the exact
+    midpoint is the one place where "split at the insert" and "split by budget" coincide up to
+    order. `feedback_dose_response_validates_a_marginal_lever` says a one-point effect is not
+    evidence; this is the same failure in a correctness probe, and it cost a wrong predicate.
+
+### CORRECTION 2 — RPUSH'S LATE FILL IS REAL, MASKED, AND THEREFORE A PERF LEAD
+
+`8c3376c09` fixed `lpush_impl` adopting the fill after its push loop and noted RPUSH "has the
+same call shape... but does not show". Source confirms the shape: `rpush_owned` runs
+`bulk_from_back(values)` (or the `push_back` loop) and only THEN calls
+`note_rpush_command_grow`, so a fresh key chunks its whole batch against `ListValue::default()`'s
+`-2`.
+
+  IT IS MASKED FOR A REASON THAT IS ITSELF THE FINDING. At `list-max-listpack-size 128` with 300
+  elements, chunks built against the stale 8 KiB budget hold all 300 — one chunk, which would
+  DUMP as `[5107]`. The observed fr table is `[2183, 2183, 755]` = 128 + 128 + 44 entries, which
+  is exactly what the FORWARD ACCUMULATOR produces. So the chunk path is refused
+  (`list_node_exceeds_limit` sees 300 entries against a 128 budget) and every bulk-RPUSH DUMP
+  walks the accumulator instead.
+
+    THAT IS NOT A PARITY BUG — the accumulator's answer is correct for a tail-grown list, which
+    is why six of six RPUSH shapes agree. It is a WASTED-WORK hypothesis: fr builds chunk
+    boundaries it then discards, and DUMP re-walks every element. Whether that is worth
+    measuring is a question for a turn with a build slot, and it belongs to the DUMP-cost family
+    (`project_list_dump_cache_shipped`), not to this parity arc.
+
+### WHAT THIS ROW DOES NOT CLAIM
+
+No fix is shipped and nothing is measured in instructions. The workload sweep is unchanged at 4
+of 42 (`8c3376c09`), the mutation sweep at 3 of 14. The LINSERT row in the mutation sweep is one
+of those 3 and is now EXPLAINED rather than closed.
+
+### PROVENANCE
+
+  ELF           bench_elf_sha256 = d7ca6e28f844845b5a45e12ba5011fefb93cab72078900244fe1e7ff93cb2bf5
+                — the `8c3376c09` build, unchanged. NO BUILD was run: the project's build slot
+                was in flight and the standing rule is ONE PER PROJECT.
+  probes        scratchpad `linsert_split_probe.py` (new: five insertion positions x three
+                shapes), plus the arithmetic check of the split rule.
+  incumbent     vendored redis 7.2.4, booted per probe on a free port with its own temp dir; fr
+                and redis in the SAME invocation.
+  host          thinkstation1, 64 cores OBSERVED, powersave governor, uptime 2 days 19:30,
+                loadavg 8.72/10.24/10.69, /data 98G. Recorded for completeness: this row's
+                evidence is byte comparison, immune to load.
+
+RETRY PREDICATE:
+  1. LINSERT: implement "split the containing node at the insertion point, inserted element
+     ending node 0" ONLY as part of the node-boundary representation. The oracle is
+     `linsert_split_probe.py` — all five positions must match, not just the midpoint.
+  2. RPUSH late fill: measure the DUMP cost of the accumulator path against the chunk path
+     before changing anything, on a bulk-built list past the conversion threshold. If
+     `adopt_fill` lets the chunk path serve those DUMPs, the win is skipping a full element walk;
+     if the chunk path still refuses for another reason, there is no win and the ordering change
+     is cosmetic. DO NOT land `adopt_fill` on RPUSH as a "consistency" fix without that number —
+     it changes chunk boundaries on the most heavily benchmarked list path in the campaign.
+  3. Both remaining parity families (queue/history, LINSERT split) now provably need the same
+     node-boundary representation. Cost them TOGETHER, not separately: 4 of 42 workload shapes
+     plus 1 of 14 mutations is the whole remaining prize.
 
 ## 2026-08-18 BrownIbis: KEEP (SELF-SPEEDUP) — the read-gate vein is now CLOSED: nine more floor arms stop re-deriving the gate their own pass cached, **175.0 instr/op each on all eight measured arms**, against a null that reads the same integer on both arms (`frankenredis-getexgate`)
 
