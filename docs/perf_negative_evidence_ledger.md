@@ -59398,3 +59398,85 @@ arm, no ratio claimed.
    whose error direction is set by draw order. Measured both ways in one batch of four.
 3. `xpending_empty` and `zintercard_2` still rest on worst-of-three. Re-draw them 5+5 before
    quoting either in a summary, or state that they have not been.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: ALL FOUR numkeys targets re-drawn 5+5 — every effect is REAL (all DISJOINT), and worst-of-three erred in BOTH directions by up to **0.84 pct** across the four
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — completes the re-draw the numkeys row owed and closes the methodological
+question with n=4 rather than n=2.
+
+The numkeys row published four worst-of-three bounds. Two rows since re-drew two of them 5+5 and
+found the method optimistic once and pessimistic once. This finishes the set, because leaving two
+figures resting on a method I had just shown to be arbitrary would have been quoting evidence I
+had already undermined.
+
+### THE COMPLETE PICTURE
+
+  shape             b-spread  a-spread     gap   median   **adversarial**   published   error
+  xpending_empty      0.41 pct  0.36 pct  +121.1  -4.73 pct   **-4.34 pct**   -4.50 pct  -0.16
+  zintercard_2        1.81 pct  1.19 pct  +102.0  -3.63 pct   **-3.56 pct**   -3.54 pct  +0.02
+  sintercard_base     0.87 pct  0.86 pct  +120.4  -4.00 pct   **-3.35 pct**   -2.86 pct  +0.49
+  zintercard_limit    2.29 pct  1.23 pct   +82.1  -4.22 pct   **-2.57 pct**   -3.41 pct  -0.84
+
+`gap` is worst-AFTER minus best-BEFORE. **All four are DISJOINT over ten runs each**: every AFTER
+run beats every BEFORE run, by 82 to 121 instr/op. The lever is unambiguous on all four shapes,
+which is a stronger statement than any of the eight bounds above.
+
+### THE METHOD QUESTION, SETTLED AT n=4
+
+Worst-of-three erred **-0.16, +0.02, +0.49, -0.84** — both directions, no pattern, magnitude up
+to 0.84 pct on effects of 2.6-4.3 pct. That is up to a third of the effect size, decided by which
+draws happened to pair.
+
+**It is not a conservative method and it is not a biased one. It is a noisy one**, and its noise
+is invisible in the output: a worst-of-three bound looks like a floor and reads like a floor
+whichever corner it landed on. The two shapes with the widest self-noise (`zintercard_limit` at
+2.29 pct, `zintercard_2` at 1.81 pct) produced the largest and the smallest errors respectively,
+so self-noise does not even predict the size of the mistake.
+
+### THE FINAL NUMBERS FOR THIS LEVER
+
+    xpending_empty      **-4.34 pct**
+    zintercard_2        **-3.56 pct**
+    sintercard_base     **-3.35 pct**
+    zintercard_limit    **-2.57 pct**
+
+Weakest of the four: `zintercard_limit` at -2.57 pct. All quoted adversarially — worst AFTER
+against best BEFORE — which is the most pessimistic figure the data supports.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+Each shape's five-run BEFORE series IS its A/A: same binary, same shape, spreads 0.41-2.29 pct as
+tabulated. Every effect clears its own shape's spread, and the disjointness is checked against
+that shape's own range rather than a pooled envelope — which is the point of doing it per shape.
+No bootstrap median-CI is quoted: these are DISJOINT-RANGE claims, not median-difference claims.
+CV was not used, as a gate or otherwise. Instructions by two-point subtraction with `--fr-only`,
+so load-immune, no incumbent arm, no ratio claimed — the run spanned loadavg 6.8 to 20.7 and the
+figures are unaffected by construction.
+
+### PROVENANCE
+
+  ELF           before `4491969bfb7b9be3c1905163ee521a2abec2125d6be627fb239f876571a07dd8`,
+                after  `2c46b7522eca42f15f92eb441dd1b4235b3a03069d1a3189ccddbd47af355bd2`
+  bench_elf_sha256=2c46b7522eca42f15f92eb441dd1b4235b3a03069d1a3189ccddbd47af355bd2
+  incumbent     NOT RUN — no ratio is claimed by this row.
+  harness       `scripts/shape_instr_per_op.py` 2000 ops `--fr-only`, 40 runs total across the
+                four shapes.
+  host          /data 53-54G free, above the 42G brake. loadavg 6.81 through 20.68; zero
+                frankenredis builds in flight throughout.
+  disposition   MEASUREMENT ONLY. NO BUILD — both ELFs already on disk. The lever's CODE remains
+                HELD behind BrownIbis's exclusive lease on `crates/fr-store/src/lib.rs` and
+                `crates/fr-runtime/src/lib.rs` to 15:32:49Z; diff preserved as
+                `RECOVERY_CrimsonHawk_numkeys_trio.patch` and blobs `ef530e119`, `60c2f65db`.
+
+### RETRY PREDICATE
+
+1. Quote this lever at the four adversarial figures above. The earlier worst-of-three numbers are
+   superseded for all four shapes.
+2. Do NOT call a worst-of-N bound conservative. Measured error at n=4: both directions, up to
+   0.84 pct, uncorrelated with the shape's self-noise.
+3. For any effect under ~5 pct that will be quoted in a summary or a standing, run 5+5 and check
+   disjointness. It costs ten runs and removes draw-order from the argument.
+4. Re-open any of these four only if a 5-run AFTER series overlaps a 5-run BEFORE series.
