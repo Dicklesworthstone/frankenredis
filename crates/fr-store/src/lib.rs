@@ -34566,6 +34566,48 @@ impl Store {
         buf
     }
 
+    /// Decode a FUNCTION DUMP body into its library codes, registering nothing.
+    ///
+    /// (frankenredis-9hori) Split out of `function_restore` so that registration and DECODING
+    /// stop being the same step. The store cannot run Lua -- it cannot depend on `fr-command` --
+    /// so it cannot know which functions a library registers at runtime; only the command layer
+    /// can. Handing back the codes lets that layer execute each one and supply the real
+    /// registrations to `function_load_with_registrations`, which is what FUNCTION LOAD already
+    /// does since `8cae02235`.
+    ///
+    /// The loop is moved VERBATIM, error for error and in the same order, because those errors
+    /// are on the wire: `ERR Pre-GA function format not supported` for opcode 246, `ERR given
+    /// type is not a function` for any other non-FUNCTION2 opcode, and `ERR Invalid dump data`
+    /// for a malformed string. `function_restore_policy_errors_match_redis` pins them.
+    fn function_restore_library_codes(body: &[u8]) -> Result<Vec<Vec<u8>>, StoreError> {
+        let mut codes = Vec::new();
+        let mut pos = 0usize;
+        while pos < body.len() {
+            let opcode = body[pos];
+            pos += 1;
+            if opcode == 246 {
+                return Err(StoreError::GenericError(
+                    "ERR Pre-GA function format not supported".to_string(),
+                ));
+            }
+            if opcode != RDB_OPCODE_FUNCTION2 {
+                return Err(StoreError::GenericError(
+                    "ERR given type is not a function".to_string(),
+                ));
+            }
+            let (code, consumed) = decode_rdb_string(body, pos, body.len()).map_err(|err| {
+                if matches!(err, StoreError::InvalidDumpPayload) {
+                    StoreError::GenericError("ERR Invalid dump data".to_string())
+                } else {
+                    err
+                }
+            })?;
+            pos += consumed;
+            codes.push(code);
+        }
+        Ok(codes)
+    }
+
     /// Restore function libraries from a serialized blob.
     pub fn function_restore(&mut self, data: &[u8], policy: &str) -> Result<(), StoreError> {
         let flush = policy.eq_ignore_ascii_case("FLUSH");
@@ -34617,29 +34659,16 @@ impl Store {
             ));
         }
         let data = &data[..footer_offset];
-        let mut pos = 0;
         let mut incoming = Store::new();
-        while pos < data.len() {
-            let opcode = data[pos];
-            pos += 1;
-            if opcode == 246 {
-                return Err(StoreError::GenericError(
-                    "ERR Pre-GA function format not supported".to_string(),
-                ));
-            }
-            if opcode != RDB_OPCODE_FUNCTION2 {
-                return Err(StoreError::GenericError(
-                    "ERR given type is not a function".to_string(),
-                ));
-            }
-            let (code, consumed) = decode_rdb_string(data, pos, data.len()).map_err(|err| {
-                if matches!(err, StoreError::InvalidDumpPayload) {
-                    StoreError::GenericError("ERR Invalid dump data".to_string())
-                } else {
-                    err
-                }
-            })?;
-            pos += consumed;
+        for code in Self::function_restore_library_codes(data)? {
+            // (frankenredis-9hori) STILL THE TEXT SCAN, and still wrong for the same reason
+            // FUNCTION LOAD was: a library whose names are computed at runtime scans as
+            // registering nothing, so `finish_function_load` answers `ERR No functions
+            // registered` and the whole payload fails to restore. The registrations cannot be
+            // collected here because `fr-store` cannot depend on `fr-command` and so cannot run
+            // Lua; the decode above is split out precisely so the FUNCTION RESTORE command
+            // handler, which CAN, is able to execute each library and call
+            // `function_load_with_registrations` per code. Wiring that is the next commit.
             incoming.function_load(&code, false)?;
         }
 
