@@ -57681,6 +57681,42 @@ mod tests {
     }
 
     #[test]
+    /// (frankenredis-2ubu0) A SERVER-TO-SERVER link must never inherit the pre-AUTH caps.
+    ///
+    /// `parser_config()` keys them on `!is_authenticated()`, which reads the runtime's CURRENT
+    /// SESSION -- right for a client socket, wrong for the replica's master stream, the initial
+    /// sync and the sentinel's monitoring connections, none of which authenticate as a client.
+    /// Capped, those refuse a replicated wide command, any replicated value over 16 KiB, and an
+    /// INFO reply. None of that surfaces as a client-visible error, so only a test catches it.
+    #[test]
+    fn internal_link_parser_config_is_never_pre_auth_capped_2ubu0() {
+        let mut runtime = Runtime::default_strict();
+        runtime.set_requirepass(Some(b"secret".to_vec()));
+
+        // The client view IS capped -- asserted so this cannot pass trivially on a build where
+        // the caps never applied.
+        let client = runtime.parser_config();
+        let authed = client
+            .pre_auth
+            .expect("an unauthenticated client must carry the authenticated limits");
+        assert_eq!(client.max_array_len, fr_protocol::UNAUTH_MAX_MULTIBULK_LEN);
+        assert_eq!(client.max_bulk_len, fr_protocol::UNAUTH_MAX_BULK_LEN);
+
+        // The internal-link view is NOT capped, and its limits are the authenticated ones.
+        let link = runtime.internal_link_parser_config();
+        assert!(
+            link.pre_auth.is_none(),
+            "an internal link must not carry the pre-AUTH caps"
+        );
+        assert_eq!(link.max_array_len, authed.max_array_len);
+        assert_eq!(link.max_bulk_len, authed.max_bulk_len);
+        assert!(
+            link.max_bulk_len > fr_protocol::UNAUTH_MAX_BULK_LEN,
+            "a replicated value over the pre-AUTH cap must still parse"
+        );
+    }
+
+    #[test]
     fn fr_p2c_001_u001c_client_sessions_isolate_auth_protocol_db_and_transaction_state() {
         let mut server = ServerState::default();
         server.auth_state.set_requirepass(Some(b"secret".to_vec()));
