@@ -49143,3 +49143,72 @@ and it failed. Re-run `frontclass` at rounds=36 in any window and take the harne
 answer. The still-open question this leaves is why `get_control` is admissible in one screen and
 null-failing in another an hour apart -- that, not loadavg, is what determines whether a group
 certifies, and it is worth a row of its own.
+
+## 2026-08-18 BrownIbis: KEEP (COMPETITIVE) — PING certified against live Redis 7.2.4 at **0.3687x worst bound** (fr 810.0 vs redis 2196.7 instr/op), and the same shape's denominator moving 9.3 pct in an UNFIT window versus 0.96 pct here VINDICATES the stationarity gate I had proposed relaxing (`frankenredis-iqicb`)
+
+Claim class: COMPETITIVE
+Campaign output: yes
+
+RATIO CONVENTION: every figure is **fr instructions per op DIVIDED BY Redis 7.2.4 instructions per
+op**, so BELOW 1.0 means fr retires FEWER instructions and is AHEAD. Lower is better. Stated in
+one line for the record: **fr against vendored Redis 7.2.4 = 0.3687x** on the worst of two draws,
+from a live Redis arm run in the SAME invocation as the fr arm by `scripts/shape_instr_per_op.py`.
+
+WINDOW: `certification_window.py --for ratio` returned **FIT** immediately before the run (0
+builds, stationarity inside the limit). It had returned UNFIT minutes earlier at 15 pct apart
+against a 15 pct limit, and repeatedly before that during a long decay.
+
+MEASURED, shape `ping` (added in `f2432c58e`), N=20,000 and 2N=40,000, two draws:
+
+| draw | fr instr/op | redis instr/op | fr/redis |
+|---|---|---|---|
+| 1 | 810.0 | 2196.7 | **0.3687x** |
+| 2 | 810.1 | 2217.7 | 0.3653x |
+
+**Quoting the WORST bound: 0.3687x** — fr retires **2.71x fewer instructions** than the incumbent
+on this shape. Per-arm host state: loadavg 7.87-8.13 / 8.99-9.02 / 10.06, CPU idle 88.1 pct
+measured from `/proc/stat`, iowait 0 pct, mean 2038-2542 MHz across 64 cores (max 4293), /data
+102G. `bench_elf_sha256=1b0693d1e58c6ff20f429f2cd7d294f090683f55ef0f5d74af846cca637c0c3c` (fr),
+`bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7` (redis).
+
+**BASE, STATED PRECISELY BECAUSE IT IS NOT HEAD.** The fr ELF is the AFTER arm of `7275e6221`,
+i.e. HEAD `e7e0998ce` plus the PING hoist. Peers have since landed 167 insertions across two
+crate files, so this certifies a real shipped state rather than the current tip. Building a fresh
+ELF would have put a compiler on the host and disqualified the window, which had already refused
+five times tonight; a certified number at a named commit is worth more than another sizing row at
+the tip.
+
+**THIS RUN VINDICATES THE GATE I PROPOSED RELAXING, WHICH IS THE MOST USEFUL THING IN THE ROW.**
+In `2f3230224` I recommended a `--for instr-ratio` mode that would skip the stationarity test,
+on six draws of `geosearch_1` whose denominator held to 0.6 pct. I retracted that in `d22cf2d10`
+after PING's denominator moved **9.3 pct** (1920.5 -> 2098.7) in an UNFIT window. Here, on the
+SAME shape in a FIT window, it moves **0.96 pct** (2196.7 -> 2217.7):
+
+    ping denominator, UNFIT (decaying)   1920.5 / 2098.7   9.3 pct apart
+    ping denominator, FIT (this run)     2196.7 / 2217.7   0.96 pct apart
+
+Same command, same instrument, an order of magnitude difference in denominator stability,
+separated only by the gate's verdict. **The stationarity rule is doing real work on cheap
+commands, and the exemption I proposed would have admitted exactly the runs it correctly
+refuses.** The fr numerator, by contrast, is stable in both regimes (810.0 / 810.1 here, 0.01 pct
+apart) — as instruction counts under callgrind should be.
+
+DISPATCH: PING's dispatch share is **13.3 pct (108.0 of 810.0)**, the lowest on the board, after
+`7275e6221` took it from 301.0. For comparison the hoisted GET sits at 190.0 and a front-classified
+route at ~21.5 pct.
+
+GATE AND ITS OWN NULL. Both draws come from the same certified window with the arms run back to
+back inside one invocation, so drift falls on both alike. A/A null on the whole-process
+instrument, same ELF, four draws of GET, resampled ratio-of-medians: median 1.00000, bootstrap
+95% median CI [0.99730, 1.00244]. The verdict gate for this row is that bootstrap median-CI, and
+CV is provenance only and was not used as a gate anywhere in this row; no CV was computed. Host
+state is likewise provenance for the numerator but NOT for the denominator, which is the whole
+point of the paragraph above.
+
+RETRY PREDICATE: re-certify only if the fr numerator moves more than 5 pct from 810, or if the
+peers' 167 insertions are shown to touch PING's route — check with
+`scripts/frame_delta.py --dispatch` against the 108.0 reference before assuming the figure still
+holds at the tip. **Do not quote 0.3653x**: the replicated standing convention takes the worst of
+the two draws. And do not read this as PING in general — it is the uppercase no-arg form, which is
+the only one the hoisted arm serves; `PING message` still goes below the classifier and would need
+its own row.
