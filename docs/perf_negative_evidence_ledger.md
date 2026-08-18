@@ -55975,3 +55975,69 @@ cache-fill floor from `a1600b784`). **The vein remains open**, and before quotin
 run `scripts/read_gate_coverage.py` — it reconciles the source scan against shape coverage and
 exits non-zero when they disagree, which is the check that would have caught all four of this
 vein's undercounts.
+
+## 2026-08-18 BrownIbis: SIZING — the standing brief's "GEOSEARCH just crossed 1.0x" does **NOT** reproduce: three draws put fr at **0.66x to 0.76x**, worst bound **0.7608x**, nowhere near parity. NOT certified, and the reason is my own bookkeeping (`frankenredis-eh2ct`)
+
+Claim class: COMPETITIVE
+Campaign output: no
+
+RATIO CONVENTION: every figure is **fr instructions per op DIVIDED BY Redis 7.2.4 instructions
+per op**, so BELOW 1.0 means fr retires FEWER instructions and is AHEAD. Lower is better. Both
+arms run in the SAME invocation of `scripts/shape_instr_per_op.py` against the live vendored
+incumbent (`redis-server sha=d2c8a4b9 == vendored source HEAD, clean`, verified per run).
+
+**WHY THIS ROW EXISTS.** The campaign brief has carried "GEOSEARCH just crossed 1.0x — thin
+margins need the replicated-standing convention" for many hours. A thin margin at parity is worth
+protecting, so I measured it. **It is not thin.**
+
+| shape | draw | fr instr/op | redis instr/op | fr/redis | window |
+|---|---|---|---|---|---|
+| geosearch_1 | a | 11509.7 | 17446.2 | **0.6597x** | FIT unconfirmed (see below) |
+| geosearch_2 | a | 12606.2 | 17031.3 | **0.7402x** | UNFIT — 30 pct non-stationary |
+| geosearch_2 | b | 12700.6 | 16692.7 | **0.7608x** | UNFIT — 2 builds, 36 pct non-stationary |
+
+**Quoting the WORST bound across the replicated pair: 0.7608x** — fr retires **1.31x fewer
+instructions** than the incumbent on `geosearch_2`. On `geosearch_1` it is 0.6597x. Three
+independent draws across two shapes agree that GEOSEARCH sits in the **0.66-0.76x** band, which
+is not a thin margin and not near 1.0x.
+
+**THIS IS SIZING, NOT A CERTIFICATION, AND THE REASON IS MINE.** The window was **FIT** when I
+started — the first stationary window in hours (0 builds, 4.7 pct apart) — and I confirmed it
+again after building the ELF. I then ran two `geosearch_1` draws that both printed
+`WINDOW: FIT for ratio` **and filtered the ratio lines out of my own output**, keeping only the
+window banner. By the time I captured a ratio the load had decayed to 30 pct non-stationary and
+two peer builds had started, so the three numbers I actually hold are one whose window I cannot
+attest and two the gate explicitly refused. **A number whose window I did not record is not
+certified, however good it looks**, and the convention exists precisely to stop me promoting it.
+
+**WHAT I AM AND AM NOT CLAIMING.** I am claiming that the 1.0x figure in the standing brief does
+not reproduce on either harness GEOSEARCH shape, by a margin far larger than the instrument's
+noise — `geosearch_1`'s own between-draw spread is documented at 286.6 instr/op, and the gap here
+is ~5,900. I am **not** claiming 0.7608x as a certified standing figure, and it should not be
+promoted until two FIT draws replicate it. I am also not claiming the brief was wrong about
+something else it may have meant: this measures **instructions per op**, and a claim about
+wall-clock, throughput, or a different GEOSEARCH form would need its own measurement.
+
+**DISPATCH, recorded because it sizes the next lever.** `geosearch_1`'s dispatch share is **27.3
+pct (~3144.2 of 11509.7 instr/op)**, against 21.5 pct for a front-classified route. The top
+frames are `parse_command_args_borrowed_into` 563.1, `classify_command` 492.0,
+`execute_frame_internal` 424.0, `dispatch_with_client_context` 331.0. That is consistent with
+`d0cf8bf30`'s finding that GEOSEARCH's prize is **~760 instr/op rather than ~3,190**, because its
+executor is argv-based and argv construction survives front-classification.
+
+GATE AND ITS OWN NULL. The two `geosearch_2` draws come from one same-invocation run each, arms
+back to back, so drift falls on both alike. A/A null on the whole-process instrument, same ELF,
+four draws of GET, resampled ratio-of-medians: median 1.00000, bootstrap 95% median CI [0.99730,
+1.00244]. The verdict gate for this row is that bootstrap median-CI, and CV is provenance only
+and was not used as a gate anywhere in this row; no CV was computed. Host state is provenance for
+the numerator and materially more for the denominator, which is why the UNFIT verdicts are
+recorded against the rows they belong to rather than summarised away. Per-arm: draw a loadavg
+9.00/12.92/12.86, draw b 8.05/12.52/12.73, CPU idle 93-94 pct, MHz 1429-3377, /data 67G.
+`bench_elf_sha256=d4ed46e260c6508610689a6699ffe86207a71e116eaf2b93e65a7cda01a9afb5` (fr, built at
+HEAD `9c91e509c`); incumbent `redis-server sha=d2c8a4b9`.
+
+RETRY PREDICATE: re-run both shapes in a FIT window and **capture the ratio line, not just the
+window banner** — that is the whole failure here. Two FIT draws of `geosearch_2` replicating
+inside 0.74-0.77x would make the worst bound certifiable; a draw outside 0.60-0.80x on either
+shape means something moved and this sizing is stale. **Do not carry "GEOSEARCH just crossed
+1.0x" forward** without a measurement attached: three draws contradict it.
