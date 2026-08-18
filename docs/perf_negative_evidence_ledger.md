@@ -44614,3 +44614,91 @@ nothing else -- the `compile_error!` at main.rs:12 makes a both-features build f
 rather than silently pick one. If the miss rate does not move, the allocator hypothesis is
 closed for this shape and the geo cell walk is the last surface standing from the prior row's
 three.
+
+--------------------------------------------------------------------------------
+## 2026-08-18 CrimsonHawk: SELF-SPEEDUP — an API hazard in the sized-hint twins I committed today: the two "hand it the number you already have" levers have DIFFERENT failure modes, and I stated the benign one in a way that does not carry to the other (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: source reading. No build, no run — the fleet is under a build hold at /data
+56G. No ratio is claimed and none is withdrawn. CV was not used, as a gate or otherwise.
+
+Claim class: SELF-SPEEDUP. Campaign output: no.
+
+THERE IS NO BUG IN THE TREE. Every caller today is correct. This row is about an API that
+invites a wrong answer and is guarded only by a `debug_assert`, and about a sentence I wrote
+that would mislead the next person to extend it.
+
+### THE TWO HINTS ARE NOT ALIKE
+
+Four levers on this bead pass a precomputed number into a callee rather than let it recompute.
+Two of them pass a BUFFER CAPACITY; two pass a BYTE TOTAL. I described the first kind like
+this, in `fbe557ea7` and again in the row for `encode_listpack_strings_blob_with_capacity`:
+
+    "A wrong non-zero capacity is a performance bug, never a correctness one: `Vec` grows if
+     the hint was short and the emitted bytes are identical either way."
+
+That is exactly true THERE, and it does not transfer. Traced by source:
+
+    capacity hint    -> Vec::with_capacity                     -> allocation size only
+                                                                  EMITTED BYTES CANNOT CHANGE
+
+    lp_bytes hint    -> push_back_owned_impl: *lp_bytes += added
+                     -> accepts_append: quicklist_packed_node_accepts_local(
+                            elems.len(), *lp_bytes, elem.len(), fill)
+                     -> chunk boundary decision
+                     -> quicklist_packed_nodes emits ONE NODE PER CHUNK
+                     -> DUMP PAYLOAD
+
+  So a wrong `added` in `push_back_owned_sized` / `push_back_with_fill_sized` is NOT a
+  performance bug. It moves quicklist node boundaries, and node boundaries are bytes on the
+  wire against the incumbent. In release the `debug_assert_eq!` is compiled out and nothing
+  else checks it.
+
+    THIS IS THE SAME CHAIN I ALREADY RELIED ON IN THE OTHER DIRECTION. `4c2ed3ecf` argued its
+    equivalence test was sufficient BECAUSE "a wrong per-chunk lp_bytes changes
+    accepts_append, hence node boundaries, hence those blobs". That argument is sound, and its
+    contrapositive is this hazard. I used the chain to justify the test and did not write down
+    what it means for the API.
+
+### WHY THE TREE IS SAFE TODAY, AND WHY THAT IS NOT ENOUGH
+
+`push_back_with_fill_sized` has exactly one caller — `bulk_from_back`'s tail loop — which
+computes `let entry_bytes = list_lp_entry_bytes(&v);` and passes that same binding three lines
+later. Correct by construction and easy to see. The hazard is prospective: the previous row
+identified FOUR more live push sites that should route into these sized twins, and each new
+caller is an opportunity to pass `elem.len()`, or a stale local, or the value for the wrong
+element, with the only guard being a debug assertion that CI may or may not run in a debug
+profile.
+
+### THE FIX IS FREE, AND IT IS A TYPE
+
+Make the sized twins take a newtype whose ONLY constructor is the computing function:
+
+    #[derive(Clone, Copy)] struct EntryBytes(u64);
+    fn list_lp_entry_bytes(elem: &[u8]) -> EntryBytes   // sole constructor
+    fn push_back_owned_sized(&mut self, elem: Vec<u8>, added: EntryBytes)
+
+A caller cannot then pass `elem.len()` or an unrelated `u64` at all — it will not compile —
+and the value still travels as a bare `u64` at runtime, so the lever's saving is untouched.
+That converts a debug-only runtime check into a compile-time one at zero cost, which is the
+right trade for a value that reaches the wire.
+
+    I am NOT making that change under the build hold. It is a type change across several
+    signatures and it must not land without `cargo check`, the fr-store suite and the node-blob
+    equivalence test, none of which I can run right now.
+
+### CORRECTION TO MY OWN WORDING
+
+The sentence quoted above should have been scoped when I wrote it. Corrected for the record:
+**a wrong CAPACITY hint is a performance bug; a wrong BYTE-TOTAL hint is a wrong answer.**
+Anyone extending the sized-twin pattern should assume the second unless they have traced the
+hint to its destination, as above.
+
+RETRY PREDICATE:
+  1. Land the `EntryBytes` newtype BEFORE routing any of the four live push sites into the
+     sized twins. Reopen the routing lever only after the newtype is in, so the new call sites
+     are checked by the compiler rather than by a debug assertion.
+  2. Gate it on the existing `list_bulk_back_matches_incremental_push_qj6jn` plus a
+     `cargo check` in RELEASE profile — the point of the change is precisely that release
+     builds currently carry no check at all.
+  3. Do NOT relax the debug assertions when the newtype lands; belt and braces cost nothing in
+     release and the assertion is what would catch a bad `list_lp_entry_bytes` itself.
