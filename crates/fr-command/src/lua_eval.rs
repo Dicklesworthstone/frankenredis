@@ -8402,10 +8402,18 @@ impl<'a> LuaState<'a> {
         match name {
             // (frankenredis-o500d) Reachable only from `lua_function_load_globals`, which
             // is the only place this name is installed. Structural validation lives in
-            // `parse_register_function_args`; the error WORDING is deliberately still a
-            // placeholder, because upstream's exact strings are not knowable from fr's
-            // source and `scripts/function_load_differ.py` is what will adjudicate them
-            // when this is wired into FUNCTION LOAD.
+            // `parse_register_function_args`.
+            //
+            // THE WORDING IS NO LONGER A PLACEHOLDER. This comment said it was, and said so
+            // directly above the line that renders upstream's own strings -- `b7a2fca3a` lifted
+            // all thirteen literals out of `function_lua.c` into
+            // `RegisterFunctionArgError::upstream_message`, and `94eaa0cbe` then corrected the
+            // envelope FUNCTION LOAD wraps around them. A stale comment claiming work is
+            // outstanding is worse than none: it invites the next reader to redo it.
+            //
+            // What `scripts/function_load_differ.py` still has to adjudicate is narrower than
+            // this once claimed -- the PHRASES are decidable from the incumbent's source and are
+            // taken from it; only the surrounding envelope needs a live 7.2.4 to confirm.
             "redis.register_function" => {
                 // (frankenredis-o500d) Upstream's own phrase, not a placeholder. The
                 // envelope FUNCTION LOAD wraps around it is unchanged and still unadjudicated.
