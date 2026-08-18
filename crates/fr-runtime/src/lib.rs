@@ -30403,6 +30403,7 @@ impl Runtime {
         cmd: PlainCardinalityCmd,
         key: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> bool {
         if self.policy.gate.max_array_len < 2
             || self.policy.gate.max_bulk_len < cmd.name_upper().len()
@@ -30410,7 +30411,9 @@ impl Runtime {
         {
             return false;
         }
-        if !self.plain_borrowed_default_key_read_allows(now_ms) {
+        if !default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
+        {
             return false;
         }
         // PFCOUNT only fast-paths a pure cache HIT (no recompute/dirty/propagate);
@@ -30436,8 +30439,9 @@ impl Runtime {
         cmd: PlainCardinalityCmd,
         key: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_cardinality_borrowed(cmd, key, now_ms) {
+        if !self.can_execute_plain_cardinality_borrowed(cmd, key, now_ms, default_read_allowed) {
             return None;
         }
 
@@ -55836,7 +55840,7 @@ mod tests {
         // XLEN
         for key in [b"x".as_slice(), b"missing", b"s"] {
             let f = direct
-                .execute_plain_cardinality_borrowed(PlainCardinalityCmd::Xlen, key, ts)
+                .execute_plain_cardinality_borrowed(PlainCardinalityCmd::Xlen, key, ts, None)
                 .expect("xlen fast path");
             let g = generic.execute_frame(command(&[b"XLEN", key]), ts);
             assert_eq!(f, g, "XLEN key={key:?}");

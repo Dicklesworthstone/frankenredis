@@ -8578,6 +8578,7 @@ fn process_buffered_frames(
                         PlainCardinalityCmd::Hlen,
                         packet.key,
                         ts,
+                        None,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -8600,6 +8601,7 @@ fn process_buffered_frames(
                         PlainCardinalityCmd::Zcard,
                         packet.key,
                         ts,
+                        None,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -9342,6 +9344,7 @@ fn process_buffered_frames(
                         PlainCardinalityCmd::Xlen,
                         packet.key,
                         ts,
+                        None,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -10552,6 +10555,7 @@ fn process_buffered_frames(
                         PlainCardinalityCmd::Pfcount,
                         packet.key,
                         ts,
+                        None,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -14036,7 +14040,7 @@ fn parse_borrowed_multibulk_action(
                         }
                         if let Some((cmd, key)) = borrowed_plain_cardinality_args(&borrowed_args)
                             && let Some(response) =
-                                runtime.execute_plain_cardinality_borrowed(cmd, key, ts)
+                                runtime.execute_plain_cardinality_borrowed(cmd, key, ts, None)
                         {
                             return Ok(BorrowedMultibulkAction::FastReply {
                                 consumed: parsed.consumed,
@@ -14467,7 +14471,7 @@ fn parse_borrowed_multibulk_action(
                     b'X' => {
                         if let Some((cmd, key)) = borrowed_plain_cardinality_args(&borrowed_args)
                             && let Some(response) =
-                                runtime.execute_plain_cardinality_borrowed(cmd, key, ts)
+                                runtime.execute_plain_cardinality_borrowed(cmd, key, ts, None)
                         {
                             return Ok(BorrowedMultibulkAction::FastReply {
                                 consumed: parsed.consumed,
@@ -14506,7 +14510,7 @@ fn parse_borrowed_multibulk_action(
                         }
                         if let Some((cmd, key)) = borrowed_plain_cardinality_args(&borrowed_args)
                             && let Some(response) =
-                                runtime.execute_plain_cardinality_borrowed(cmd, key, ts)
+                                runtime.execute_plain_cardinality_borrowed(cmd, key, ts, None)
                         {
                             return Ok(BorrowedMultibulkAction::FastReply {
                                 consumed: parsed.consumed,
@@ -21353,11 +21357,17 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Pfcount => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             if let Some(packet) = parse_borrowed_plain_pfcount_packet(unparsed, &parser_config)
                 && let Some(response) = runtime.execute_plain_cardinality_borrowed(
                     PlainCardinalityCmd::Pfcount,
                     packet.key,
                     ts,
+                    default_read_allowed,
                 )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
@@ -22064,11 +22074,17 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Xlen => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             if let Some(packet) = parse_borrowed_plain_xlen_packet(unparsed, &parser_config)
                 && let Some(response) = runtime.execute_plain_cardinality_borrowed(
                     PlainCardinalityCmd::Xlen,
                     packet.key,
                     ts,
+                    default_read_allowed,
                 )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
@@ -22159,11 +22175,17 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Hlen => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             if let Some(packet) = parse_borrowed_plain_hlen_packet(unparsed, &parser_config)
                 && let Some(response) = runtime.execute_plain_cardinality_borrowed(
                     PlainCardinalityCmd::Hlen,
                     packet.key,
                     ts,
+                    default_read_allowed,
                 )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
@@ -22182,11 +22204,17 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Zcard => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             if let Some(packet) = parse_borrowed_plain_zcard_packet(unparsed, &parser_config)
                 && let Some(response) = runtime.execute_plain_cardinality_borrowed(
                     PlainCardinalityCmd::Zcard,
                     packet.key,
                     ts,
+                    default_read_allowed,
                 )
             {
                 Ok(BorrowedMultibulkAction::FastReply {
