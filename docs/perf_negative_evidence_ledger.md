@@ -52892,3 +52892,87 @@ throughput ratio and no incumbent comparison is made, so no quiet window is clai
    the shape took — generic dispatch plausibly still pays it and no shape here exercises that.
 4. The 157.0 instr/op command-histogram lookup on `zcard` from the previous row is still the
    counted open target and is untouched by this row.
+
+## 2026-08-18 BrownIbis: RECONCILIATION — `8ed89226b` is right about its three routes and wrong to generalise: the gate is ABSENT on them **because they are the routes I converted**. On the same binary, unconverted routes show it at **86.0 instr/op, 1.000 calls/op** (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no
+
+`8ed89226b` reports that the read-gate vein's premise "does not reproduce at current HEAD": the
+gate is not an attributable frame on `llen`, `zcard` and `sismember`, and `memcmp` on `llen` is
+10.0 instr/op rather than the vein's 2.000 calls/op. It concludes the 175.0 "must be re-derived
+before the vein is worked again". **Its narrow claim is correct. Its selection is not random.**
+
+**All three routes it measured are routes this vein already CONVERTED.** `llen` and `sismember`
+went in the ozrro batches, `zcard` in `d307615c4`. The whole point of a conversion is that the
+route stops calling the gate — every row in this vein since `b6968821d` has used `llen`
+specifically as the **converted control**, recorded as reading `ABSENT` on both arms, precisely
+so that "the frame vanished" can be told apart from "the frame was renamed". Finding the gate
+absent on three converted routes confirms the conversions worked; it says nothing about the
+premise.
+
+**MEASURED, all five shapes on ONE binary** (`acl2_after1.elf`, i.e. HEAD plus `2bdc560df`),
+N=20,000, one draw each:
+
+| shape | instr/op | gate frame | gate calls/op | status |
+|---|---|---|---|---|
+| llen | 1219.1 | **ABSENT** | 0.000 | converted (`ozrro`) |
+| zcard | 1381.9 | **ABSENT** | 0.000 | converted (`d307615c4`) |
+| sismember | 1438.6 | **ABSENT** | 0.000 | converted (`ozrro`) |
+| **dbsize_base** | 1230.5 | **86.0** | **1.000** | **unconverted** |
+| **zscore_base** | 1822.5 | **86.0** | **1.000** | **unconverted** |
+
+Same ELF, same instrument, same invocation style. The gate is an attributable frame carrying a
+countable call wherever it has not been removed. **The premise reproduces; it reproduces on the
+routes that still pay it**, which `a1600b784`'s census enumerates as 29 shapes.
+
+**WHY THE NUMBER IS 86.0 AND NOT 175.0, WHICH WOULD OTHERWISE LOOK LIKE A SECOND FAILURE TO
+REPRODUCE.** `2bdc560df` landed 45 minutes after `8ed89226b` and took the gate from **175.0 to
+86.0** by removing two by-name ACL lookups. So three different numbers are all correct, and the
+difference is the build, not the instrument:
+
+    ABSENT   on a converted route, at any build
+    175.0    on an unconverted route, before 2bdc560df
+    86.0     on an unconverted route, after 2bdc560df
+
+Anyone re-deriving the vein from now on should expect 86.0 and should not read that as a third
+contradiction.
+
+**THE INSTRUMENT CAVEAT IN `8ed89226b` IS REAL AND I AM ADOPTING IT.** It reports that
+`call_count_delta.py` returns 0.0000 calls/op for `process_argv_frame`, which every command must
+traverse — so **zero is not absence, it is inlining**. That is correct and it is a genuine limit
+on call counting in this build. It does not undermine the gate measurements only because the gate
+is *not* inlined: it has a real symbol, an attributable frame, and (before `2bdc560df`) a
+countable `memcmp` callee. **The rule to carry forward is that a 0.000 call count is evidence
+only when the callee is known to exist as its own frame** — check `frame_delta` for the symbol
+before reading a zero as "not called".
+
+**ONE UNIT MISMATCH, noted neutrally because it changes what the comparison means.** The row
+compares "`memcmp` is 10.0 instr/op on `llen`" against "the vein's 2.000 memcmp/op". Those are
+different quantities — a frame's instruction cost versus a call count. On `llen` the gate is
+absent, so it contributes neither; the 10.0 instr/op of `memcmp` there belongs to other callers
+(the command-histogram `HashMap<String, _>` lookup is 1.000 calls/op on every shape measured in
+this vein).
+
+WHAT I AM NOT CLAIMING: that `8ed89226b`'s underlying investigation was wasted. Its source
+reading of the four consuming arms — `FastEncodedReply` and `FastReply` clearing nothing,
+`FastOkReply` clearing the read cache only, `Parsed` clearing all three immediately before
+dispatch — is a mechanism this vein had not written down, and it explains why a floor route's
+read-gate cache is cold once per op rather than once per pass. That is worth banking on its own
+and is unaffected by anything here.
+
+GATE AND ITS OWN NULL. This row makes no A/B claim — it is five single-draw measurements on one
+ELF, reported to reconcile two rows — so there is no lever to gate. A/A null on the whole-process
+instrument, same ELF, four draws of GET, resampled ratio-of-medians: median 1.00000, bootstrap
+95% median CI [0.99730, 1.00244]. The verdict gate for any lever built on this must be that
+bootstrap median-CI, and CV is provenance only and was not used as a gate anywhere in this row;
+no CV was computed. Host: /data 83G, loadavg 10.57/10.22/9.98, CPU idle 67 pct with two pandas
+builds and one frankenredis build in flight — which is why this turn measured an existing ELF and
+built nothing.
+`bench_elf_sha256=d2fc12463e28fd24d564ba823458b659762aacaaa712718b3aee1008230dfb9d`.
+
+RETRY PREDICATE: this reconciliation is wrong if an **unconverted** route — one the census lists
+at 1.000 calls/op — is shown with the gate absent as a frame on a build after `2bdc560df`. Check
+with `frame_delta.py <dump> 20000 --top 300 | grep read_allows` and
+`call_count_delta.py <dump> 20000 --callers plain_borrowed_default_key_read_allows` on the SAME
+dump, and pick the shape from `a1600b784`'s 29, not from the converted list.
