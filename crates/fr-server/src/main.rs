@@ -16006,6 +16006,18 @@ fn parse_borrowed_dispatch_floor_decimal(
     input: &[u8],
     mut cursor: usize,
 ) -> Option<(usize, usize)> {
+    // Single-digit fast path. This function runs 2.000 times per op on EVERY command (array
+    // length, then the command's bulk length), and both are one digit for all real traffic.
+    // Falling through costs one failed CRLF test; taking it skips the loop's leading-zero
+    // bookkeeping and two checked-arithmetic steps. Equivalence with the loop is argued
+    // case-by-case in the patch note: one digit + CRLF, "0", multi-digit, and non-digit.
+    if let Some(&digit) = input.get(cursor)
+        && digit.is_ascii_digit()
+        && input.get(cursor.wrapping_add(1)) == Some(&b'\r')
+        && input.get(cursor.wrapping_add(2)) == Some(&b'\n')
+    {
+        return Some((usize::from(digit - b'0'), cursor.wrapping_add(3)));
+    }
     let start = cursor;
     let mut value = 0usize;
     let mut leading_zero = false;
