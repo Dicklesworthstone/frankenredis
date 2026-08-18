@@ -301,6 +301,14 @@ SHAPES = {
     "scard": (["SADD st m1 m2 m3 m4 m5"], ["SCARD", "st"]),
     "zcard": (["ZADD z 1 a 2 b 3 c"], ["ZCARD", "z"]),
     "type": (["SET s abcdefghijklmnop"], ["TYPE", "s"]),
+    # (frankenredis-iqicb) ZERO-DOSE BASELINES. `PING` takes no key and no argument, so it
+    # never reaches `parse_borrowed_plain_set_bulk` and never touches the store: it is the
+    # null BY CONSTRUCTION for any key-, argument- or store-side lever, and the cheapest
+    # command on the board for reading the fixed per-command floor. `echo_arg` is the
+    # one-argument sibling -- it parses a bulk argument but still touches no key -- which
+    # separates "parses an argument" from "looks something up".
+    "ping": ([], ["PING"]),
+    "echo_arg": ([], ["ECHO", "abcdefgh"]),
     "strlen": (["SET s abcdefghijklmnop"], ["STRLEN", "s"]),
     "sismember": (["SADD st m1 m2 m3"], ["SISMEMBER", "st", "m2"]),
     "hexists": (["HSET h f1 v1"], ["HEXISTS", "h", "f1"]),
