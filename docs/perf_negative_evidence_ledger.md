@@ -56438,3 +56438,89 @@ a fixed key count — so the RESTORE and all setup cancel and what is left is ex
   3. Do NOT read the −17.15 pct integer figure as an incumbent gain. `48eb38749` measured redis's
      marginal integer read at 213,776 against fr's 40,012 — fr was already 5.34x ahead there, and
      this widens a lead rather than closing a gap.
+
+--------------------------------------------------------------------------------
+
+## PREDICTION REGISTERED BEFORE MEASURING — 29 literal sites naming a DIRECT-field command still walk the 25-arm match to reach the field the literal already names
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — nothing is measured or shipped here. Two peer builds held this project's
+slot for the whole window, so no arm was compiled and no number below is measured.
+
+Registering the prediction and a BINARY acceptance test BEFORE writing the measurement, because
+this vein has already produced one case where I predicted eight conversions and got one, and one
+where I predicted a fall-through gain and got zero. Both were only unarguable afterwards because
+the prediction was on the record first.
+
+### THE REMAINING SHAPE OF THE VEIN
+
+After the map conversion and the enum seam, the call sites still on
+`record_command_histogram_canonical_with_kind` split exactly three ways, counted not assumed:
+
+     29  literal, command HAS a direct field   <- walk the 25-arm match to reach a field the
+                                                  literal names at compile time. THE TARGET.
+      0  literal, command has no direct field  <- already converted to the map path
+      9  RUNTIME name                          <- must stay; they can carry any name
+
+The 29 span 17 commands: `exists get getbit getrange hexists hget hset hstrlen incr lindex llen
+scard set sismember strlen zadd zscore`. A generator was written and DRY-RUN against a scratch
+copy of HEAD: 29 sites converted, 17 distinct commands, 0 misclassified, 9 runtime sites left
+alone, 74 lines changed across single-line and multi-line call forms. Prerequisites verified
+present at HEAD — `HistSlot` imported in `fr-runtime`, `Store::record_command_histogram_slot_with_kind`
+public, the enum generated from the source-of-truth list.
+
+The transformation is behaviour-preserving by construction:
+`record_canonical_with_kind("llen", ..)` matches `"llen"` and lands in the `llen` field;
+`record_slot_with_kind(HistSlot::llen, ..)` lands in the `llen` field. Same bucket, no match.
+
+### THE PREDICTION, AND THE TEST THAT WOULD FALSIFY IT
+
+The enum seam measured **-26.9 to -48.0 instr/op** for exactly this shortcut — discriminant
+straight to field, no string match — on `zcard`, `hlen` and `zrank`. The 29 sites are the same
+shortcut applied to literal callers.
+
+**PREDICTED: every shape whose command is in the 17 gains 25-50 instr/op.**
+
+**ACCEPTANCE TEST, binary:** `get_control` must gain at least **20.0 instr/op**. It is the
+highest-traffic shape in the campaign, `"get"` is in the set, and it has been measured FLAT
+through both prior batches of this vein — `-0.03 pct` in the map conversion and untouched by the
+enum seam, because neither reached its call sites. If converting the literal `"get"` sites does
+not move it, then the match is not what these shapes are paying and the framing is wrong again.
+
+**REJECT the lever if** `get_control` moves less than 20.0 instr/op, or if any converted shape
+REGRESSES beyond the same-invocation A/A envelope.
+
+### WHAT WOULD MAKE THE PREDICTION WRONG, STATED IN ADVANCE
+
+The `match` is length-bucketed. `"get"` is three characters and shares that bucket with `"set"`
+and `"ttl"`, so a GET already resolves in one length test plus at most three short compares — it
+may be near-free ALREADY, in which case the 29 sites are cheap and this yields nothing. That is
+the same mechanism that made the enum seam's fall-through half read zero, and it is the reason
+`get_control` is the acceptance test rather than a decoration.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No measurement was taken, so no A/A, no bootstrap interval, no ratio and no quiet window are
+claimed. When it is measured: same-invocation A/A over at least SIX shapes including
+`get_control`, which has set the envelope twice in this session and once read -13.3 instr/op
+against itself.
+
+### PROVENANCE
+
+  ELF           NONE BUILT. Two peer builds held this project's single slot throughout; load
+                18.76 rising. No arm compiled, no shape run.
+  incumbent     NOT RUN — no ratio is claimed.
+  host          /data 62G free, above the 42G floor.
+  method        Source census by regex over `crates/fr-runtime/src/lib.rs`, plus a generator
+                dry-run against a scratch copy of HEAD with the converted/skipped sets asserted
+                disjoint from and equal to the direct-field list.
+  disposition   SPECIFIED AND DRY-RUN, NOT BUILT. No source file changed.
+
+### RETRY PREDICATE
+
+1. Build it, then measure `get_control` FIRST. If it gains under 20.0 instr/op the lever is
+   rejected on its own registered test and the remaining 28 sites are not worth converting.
+2. Measure at least one shape per enum-free command in the set, not only the cheap ones.
+   `getrange` and `hstrlen` are the longest names in the set and most likely to collide in their
+   length buckets; `get` and `set` are the shortest and least likely.
+3. Do not average the draws. Three draws, worst bound, as with every row in this vein.
