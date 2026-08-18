@@ -89,9 +89,17 @@ class Conn:
 #
 # Add an entry ONLY with a bug id and a reason, never to make a red run green.
 EXPECTED_DIVERGENCES: dict[str, str] = {
-    "dyn_name_local": "p98mw -- fr TEXT-SCANS the source for register_function(...) to derive the registered names, so a name or callback held in a LOCAL is invisible and fr answers 'first/second argument to redis.register_function must be a ...' for a library 7.2.4 loads. FALSE REJECTION. The fix is to use the names collected by lua_eval::function_load_execute (already returned, currently discarded) instead of the scan; that touches fr-store's function_load and its FUNCTION LIST/DUMP surface, so it is its own change.",
-    "dyn_name_concat": "p98mw -- fr TEXT-SCANS the source for register_function(...) to derive the registered names, so a name or callback held in a LOCAL is invisible and fr answers 'first/second argument to redis.register_function must be a ...' for a library 7.2.4 loads. FALSE REJECTION. The fix is to use the names collected by lua_eval::function_load_execute (already returned, currently discarded) instead of the scan; that touches fr-store's function_load and its FUNCTION LIST/DUMP surface, so it is its own change.",
-    "dyn_callback_local": "p98mw -- fr TEXT-SCANS the source for register_function(...) to derive the registered names, so a name or callback held in a LOCAL is invisible and fr answers 'first/second argument to redis.register_function must be a ...' for a library 7.2.4 loads. FALSE REJECTION. The fix is to use the names collected by lua_eval::function_load_execute (already returned, currently discarded) instead of the scan; that touches fr-store's function_load and its FUNCTION LIST/DUMP surface, so it is its own change.",
+    # (frankenredis-9hori) dyn_name_local, dyn_name_concat and dyn_callback_local were removed
+    # from this table when the text scan stopped being the source of truth for registrations.
+    # FUNCTION LOAD, the five reload paths and FUNCTION RESTORE now execute the library body and
+    # register whatever `redis.register_function` was actually called with, and FCALL falls back
+    # to executing when the scan cannot express the function.
+    #
+    # THEY ARE REMOVED WHILE THE FIX IS STILL UNCOMPILED, deliberately. This table's own rule is
+    # that an expectation left in place after a bug is fixed is how a gate rots into permanent
+    # green, and the code that made these three diverge is gone. If the fix is wrong, these cases
+    # fail here as UNEXPECTED divergences, which is the signal that is wanted -- an allowance
+    # would have hidden it behind a stale excuse instead.
 }
 
 CASES = [

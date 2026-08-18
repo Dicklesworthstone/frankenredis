@@ -13976,19 +13976,54 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     let previous_read_only = store.script_read_only;
     store.script_read_only = is_ro || has_no_writes;
     store.script_nesting_level += 1;
-    let result = match lua_eval::eval_script(
-        wrapper_script.as_bytes(),
-        &keys_vec,
-        &args_vec,
-        store,
-        now_ms,
-    ) {
-        Ok(frame) => Ok(frame),
-        Err(e) => Ok(RespFrame::Error(format_fcall_runtime_error(
-            &e,
-            func_name,
-            target_func_line.unwrap_or(2),
-        ))),
+    // (frankenredis-9hori) `target_func_line` is Some exactly when the SCAN above produced a
+    // `local function <func_name>(` line for the function being called. Both transform forms --
+    // positional and table -- emit that same prefix, so None means the scan could not express
+    // this function as text: the name or the callback was held in a local, computed, or
+    // otherwise not a literal. That is the case fr rejects today and Redis 7.2.4 accepts.
+    //
+    // FALLING BACK ONLY THERE IS WHAT MAKES THIS SAFE TO LAND WITHOUT A DIFFER RUN. Every
+    // library the scan can express keeps the identical code path, the identical wrapper script
+    // and the identical `on @user_function:<N>` wording, which was matched to vendored 7.0+
+    // deliberately (frankenredis-tos1j) and is pinned by tests. The executing path serves only
+    // inputs that are hard errors right now, so there is no behaviour to regress -- a dynamic
+    // library currently cannot even be registered, and if it could, the wrapper would call a
+    // name that was never defined.
+    //
+    // The line number for a failure on this path comes from the interpreter's `current_line`
+    // rather than from a scanned definition line, because there is no scanned line to use. It
+    // is reported through the same formatter so the shape of the error is unchanged.
+    let result = if target_func_line.is_none() {
+        match lua_eval::function_call_execute(
+            store,
+            now_ms,
+            &script,
+            func_name.as_bytes(),
+            keys_vec,
+            args_vec,
+        ) {
+            Ok(frame) => Ok(frame),
+            Err((line, e)) => Ok(RespFrame::Error(format_fcall_runtime_error(
+                &e,
+                func_name,
+                line as usize,
+            ))),
+        }
+    } else {
+        match lua_eval::eval_script(
+            wrapper_script.as_bytes(),
+            &keys_vec,
+            &args_vec,
+            store,
+            now_ms,
+        ) {
+            Ok(frame) => Ok(frame),
+            Err(e) => Ok(RespFrame::Error(format_fcall_runtime_error(
+                &e,
+                func_name,
+                target_func_line.unwrap_or(2),
+            ))),
+        }
     };
     store.script_nesting_level -= 1;
     store.script_read_only = previous_read_only;
