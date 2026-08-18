@@ -49622,6 +49622,121 @@ $1\r\n0\r\n$3\r\nget\r\n$3\r\ni16\r\n$2\r\n#1\r\n";
         }
     }
 
+    /// Every arity-5 option form the classifier CLAIMS must be one its arm can actually serve.
+    ///
+    /// (frankenredis-uu33c) A floor class is a PROMISE THAT ITS ARM CAN SERVE THE SHAPE. Where the
+    /// class is keyed on ARITY but the arm discriminates on an option KEYWORD, arity cannot keep
+    /// that promise, and nothing checks it: the reply is byte-identical whether a shape is
+    /// front-classified, walked to via the cascade, or dropped on generic, so
+    /// `scripts/dispatch_route_differ.py` passes every instance of this defect. Four have now
+    /// been found, all by hand.
+    ///
+    /// SIBLING TEST, DIFFERENT FAMILY: `keyed_values_classifier_claims_exactly_what_its_parsers_accept`
+    /// covers the ARITY-keyed family (PFADD/LPUSHX/RPUSHX against the six variadic names), where the
+    /// discriminator is the VALUE COUNT. This one covers the family where the discriminator is an
+    /// option KEYWORD, which arity cannot see at all. Neither subsumes the other.
+    ///
+    /// THE ORACLE IS HARDCODED, NOT DERIVED. A table computed from the parsers would agree with
+    /// whatever the parsers do, INCLUDING with the bug. These rows say what the arms are supposed
+    /// to serve; the assertions say what they do.
+    ///
+    /// BICONDITIONAL, on purpose. The forward direction catches OVER-claiming (the classifier
+    /// claims a form its arm strands on generic). The reverse catches UNDER-claiming — and that is
+    /// not hypothetical: `882ace426` narrowed these very claims to require the keyword the class
+    /// was NAMED for, which stopped claiming LPOS COUNT and ZRANGE REV/BYSCORE/BYLEX even though
+    /// their arms serve them natively, pushing four working fast paths onto the cascade. It was
+    /// reverted in `d80794fc4`. This test fails on that commit in the reverse direction.
+    #[test]
+    fn arity_five_floor_claims_match_what_their_arms_serve() {
+        let cfg = ParserConfig::default();
+
+        // (packet, keyword, arm-serves-it) — the oracle. `arm serves it` is read off the arm
+        // bodies: LposRank branches RANK/COUNT and returns None for anything else
+        // (`main.rs` ~20555); ZrangeWithscores serves WITHSCORES via its own parser and then
+        // chains key_arg3 for REV/BYSCORE/BYLEX (~20379).
+        let lpos_rows: [(&[u8], &[u8], bool); 3] = [
+            (b"*5\r\n$4\r\nLPOS\r\n$1\r\nk\r\n$1\r\ne\r\n$4\r\nRANK\r\n$1\r\n1\r\n", b"RANK", true),
+            (b"*5\r\n$4\r\nLPOS\r\n$1\r\nk\r\n$1\r\ne\r\n$5\r\nCOUNT\r\n$1\r\n1\r\n", b"COUNT", true),
+            // MAXLEN is a real LPOS option the arm deliberately leaves on generic. It is
+            // CLAIMED and NOT SERVED, so it is the one live over-claim in this pair — recorded
+            // here as a known gap rather than asserted away. If the arm ever serves it, the
+            // `!serves` assertion below fails and this row must be updated: an allowance left in
+            // place after the gap closes is how a gate rots into permanent green.
+            (b"*5\r\n$4\r\nLPOS\r\n$1\r\nk\r\n$1\r\ne\r\n$6\r\nMAXLEN\r\n$1\r\n1\r\n", b"MAXLEN", false),
+        ];
+
+        for (packet, keyword, arm_serves) in lpos_rows {
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(packet, &cfg),
+                Some(super::BorrowedDispatchFloorClass::LposRank),
+                "arity-5 LPOS is claimed on arity alone, so {} must still classify",
+                String::from_utf8_lossy(keyword)
+            );
+
+            // PARSER HONOUR. The claim is only worth something if the arm's parser accepts the
+            // packet; asserting the classifier against the oracle alone would prove that the
+            // classifier matches a table a human wrote, not that the arm can serve the shape.
+            let parsed = super::parse_borrowed_plain_key_arg3_packet(
+                packet,
+                &cfg,
+                b"*5\r\n$4\r\n",
+                b"LPOS",
+            )
+            .expect("the LposRank arm parses every arity-5 LPOS with key_arg3");
+            assert_eq!(
+                parsed.b, keyword,
+                "key_arg3 must land the option keyword in field b"
+            );
+
+            let served =
+                parsed.b.eq_ignore_ascii_case(b"RANK") || parsed.b.eq_ignore_ascii_case(b"COUNT");
+            assert_eq!(
+                served,
+                arm_serves,
+                "LPOS {} : arm-serves disagrees with the oracle",
+                String::from_utf8_lossy(keyword)
+            );
+        }
+
+        let zrange_rows: [(&[u8], &[u8]); 4] = [
+            (b"*5\r\n$6\r\nZRANGE\r\n$1\r\nk\r\n$1\r\n0\r\n$2\r\n-1\r\n$10\r\nWITHSCORES\r\n", b"WITHSCORES"),
+            (b"*5\r\n$6\r\nZRANGE\r\n$1\r\nk\r\n$1\r\n0\r\n$2\r\n-1\r\n$3\r\nREV\r\n", b"REV"),
+            (b"*5\r\n$6\r\nZRANGE\r\n$1\r\nk\r\n$1\r\n1\r\n$1\r\n3\r\n$7\r\nBYSCORE\r\n", b"BYSCORE"),
+            (b"*5\r\n$6\r\nZRANGE\r\n$1\r\nk\r\n$2\r\n[a\r\n$2\r\n[c\r\n$5\r\nBYLEX\r\n", b"BYLEX"),
+        ];
+
+        for (packet, keyword) in zrange_rows {
+            assert_eq!(
+                super::classify_borrowed_dispatch_floor_packet(packet, &cfg),
+                Some(super::BorrowedDispatchFloorClass::ZrangeWithscores),
+                "arity-5 ZRANGE is claimed on arity alone, so {} must still classify",
+                String::from_utf8_lossy(keyword)
+            );
+
+            // The arm tries the WITHSCORES parser first and CHAINS key_arg3 for the others, so
+            // parser honour here means at least one of the two accepts — and for the chained
+            // forms the keyword must land where the arm reads it.
+            if keyword.eq_ignore_ascii_case(b"WITHSCORES") {
+                assert!(
+                    super::parse_borrowed_plain_zrange_withscores_packet(packet, &cfg).is_some(),
+                    "the WITHSCORES parser must accept its own form"
+                );
+            } else {
+                let parsed = super::parse_borrowed_plain_key_arg3_packet(
+                    packet,
+                    &cfg,
+                    b"*5\r\n$6\r\n",
+                    b"ZRANGE",
+                )
+                .expect("the chained key_arg3 parse must accept the sibling option forms");
+                assert_eq!(
+                    parsed.c, keyword,
+                    "key_arg3 must land ZRANGE's option keyword in field c"
+                );
+            }
+        }
+    }
+
     #[test]
     fn dispatch_floor_classifier_recognizes_only_exact_target_tokens() {
         let cfg = ParserConfig::default();
