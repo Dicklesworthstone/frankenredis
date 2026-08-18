@@ -51087,3 +51087,100 @@ RETRY PREDICATE:
      harness. It is a RATIO of two large numbers rather than a small difference, so it is far
      less exposed to this error — but it has not been re-taken under the bracketed form and
      should not be quoted to more than its first two digits.
+
+## 2026-08-18 BrownIbis: KEEP (SELF-SPEEDUP) + **RETRACTION** — ten more read routes take the cached gate at **175.0 instr/op each** (5.6 to 12.5 pct), and the "vein is now CLOSED" I published in `78235a718` was wrong by a factor of nine: a census found **18 of 20 shapes still paying it** (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no
+
+**THE RETRACTION COMES FIRST BECAUSE IT INVALIDATES A CLAIM ALREADY IN THIS FILE.**
+`78235a718` stated "the read-gate vein is now CLOSED", listed two remaining routes, and said
+`object_encoding` "calls the gate **three** times rather than once, so it is a different shape
+of problem and not a tenth instance of this one". Both statements are false:
+
+1. **`can_execute_plain_object_encoding_borrowed` calls the gate ONCE.** My survey printed 40
+   lines from the function's start; the function is 9 lines long, so the window ran past its
+   end and counted `can_execute_plain_object_refcount_borrowed` and
+   `can_execute_plain_memory_usage_borrowed` as if they were part of it. It is a tenth
+   instance, and it is converted below.
+2. **The vein was nowhere near closed.** A census of 20 read shapes on the shipped binary
+   found **EIGHTEEN still at 1.000 calls/op**; only `type` and `ttl_nonvolatile` (both keymeta,
+   which uses the twin form) read 0.000. The "twelve routes" I treated as the population came
+   from `d7c67e802`, which was the set a peer's 24-shape sweep had **measured** — not the set
+   that exists. A source scan of `fr-runtime` puts the untouched population near **50**.
+
+**The general error is worth more than the specific one: I took a peer's measured sample as an
+enumeration.** A sweep reports what it looked at. Nothing in `d7c67e802` claimed completeness,
+and I supplied that claim myself.
+
+LEVER: the same transformation, applied to **PUBSUB NUMPAT, PUBSUB NUMSUB, TOUCH** (four
+arities), **RANDOMKEY, DUMP, BITCOUNT, BITPOS, OBJECT ENCODING, OBJECT REFCOUNT, COMMAND
+COUNT** — **18 floor arms**, because BITCOUNT and BITPOS are each split across several arity
+classes (`BitcountKey/Range/Unit`, `BitposKeyBit/Range/Start/Unit`) rather than having one class
+each. Shipped in `acaf5f45d`.
+
+**A SECOND DERIVATION FORM, not present in the previous two batches.** Some routes put the gate
+in a `can_execute_*` predicate tail; others put it inline in the executor as
+`if !self.plain_borrowed_default_key_read_allows(now_ms) { return None; }`. Both become the
+Option fallback, but a converter that only knows the first form silently misses the second —
+which is part of why the population looked smaller than it is.
+
+| shape | gate calls/op | gate frame | whole-op worst bound | 175/before | role |
+|---|---|---|---|---|---|
+| **pubsub_numpat** | **1.000 -> 0.000** | **175.0 -> ABSENT** | +211.8 | **12.5 pct** | beneficiary |
+| **pubsub_numsub** | **1.000 -> 0.000** | **175.0 -> ABSENT** | +185.6 | 7.6 pct | beneficiary |
+| **touch_2** | **1.000 -> 0.000** | **175.0 -> ABSENT** | +178.2 | 9.0 pct | beneficiary |
+| **randomkey_one** | **1.000 -> 0.000** | **175.0 -> ABSENT** | +149.2 | 11.3 pct | beneficiary |
+| **dump_small** | **1.000 -> 0.000** | **175.0 -> ABSENT** | +160.4 | 7.0 pct | beneficiary |
+| **bitcount_base** | **1.000 -> 0.000** | **175.0 -> ABSENT** | +176.6 | 9.2 pct | beneficiary |
+| **bitpos_plain** | **1.000 -> 0.000** | **175.0 -> ABSENT** | +202.1 | 8.4 pct | beneficiary |
+| **object_encoding** | **1.000 -> 0.000** | **175.0 -> ABSENT** | +190.2 | 8.6 pct | beneficiary |
+| **command_count** | **1.000 -> 0.000** | **175.0 -> ABSENT** | +209.1 | 5.6 pct | beneficiary |
+| mget_3 | 1.000 -> 1.000 | **175.0 -> 175.0** | +15.4 | — | **EXACT null** |
+| llen | 0.000 -> 0.000 | ABSENT -> ABSENT | -3.7 | — | converted control |
+
+(Whole-op convention: `min(before) - max(after)`, so POSITIVE is an improvement.)
+
+**Quoting the WORST bound: 175.0 instr/op on every one of the nine measured**, ranging from
+**12.5 pct of a PUBSUB NUMPAT** (of 1401.9) to 5.6 pct of a COMMAND COUNT (of 3109.7). The
+verdict is the frame and the call count; the whole-op column corroborates and nothing more.
+
+The null is EXACT — `mget_3` is census-confirmed at 1.000 and deliberately NOT converted, and
+reads **the same integer on both arms**. `llen` was converted in the first batch and reads zero
+on both, which is what distinguishes *removed* from *renamed*.
+
+OBJECT REFCOUNT and the TOUCH 1/3/4-key arities are converted but have no harness shape, so
+**9 of the 13 distinct commands are measured** and the rest are inference from sharing an
+executor with one that is.
+
+CORRECTNESS: **103 commands byte-identical** between the arms in one pipelined pass — CLIENT
+NO-TOUCH on and off, SELECT to db3 and back, MULTI/EXEC, a volatile key, lowercase forms,
+WRONGTYPE, missing keys, every BITCOUNT and BITPOS arity, all six OBJECT ENCODING container
+types, and the malformed forms that must NOT fast-path (bad range integer, bad BYTE|BIT unit,
+a bit argument that is not 0/1, unknown OBJECT and PUBSUB subcommands). **RANDOMKEY is
+nondeterministic on a multi-key database, so it is exercised on a db holding exactly one key**,
+where its answer is forced and a divergence would mean a behavioural difference.
+
+BUILD PROVENANCE: paired build in a worktree pinned at `cdbc69ebf`, built AFTER, BEFORE, AFTER
+again. The two AFTERs are bit-identical
+(`bench_elf_sha256=fb31a0817f2328dc905667b1ea31b5855cc9524866d1cf8c2fb7dd043bb6ddb8`) and
+BEFORE distinct
+(`bench_elf_sha256=dce7473feb6d5ddc7e97f2e4d028c40f8679bc16661ee9d3bb7cd1d4432a23d3`). Host:
+/data 96G, loadavg 13.69/10.81/9.87, CPU idle 88 pct.
+
+GATE AND ITS OWN NULL. Both arms were measured in one same-invocation interleaved run, two
+rounds, so drift falls on both alike. The A/A null and the A/B pairing are same-invocation. A/A
+null on the whole-process instrument, same ELF, four draws of GET, resampled ratio-of-medians:
+median 1.00000, bootstrap 95% median CI [0.99730, 1.00244]. The verdict gate for this row is
+that bootstrap median-CI, and CV is provenance only and was not used as a gate anywhere in this
+row; no CV was computed. Host state is provenance, not a gate.
+
+RETRY PREDICATE: revisit a converted route only if it is observed calling
+`plain_borrowed_default_key_read_allows` above **0.000 calls/op**. **Do NOT treat this vein as
+closed** — that is the mistake this row exists to correct. The remaining census-confirmed
+unconverted shapes are `mget_3` (held as the null), `zrangebylex` (2960), `zrangebyscore_plain`
+(3262), `zrank_withscore` (2390), `lpos_rank` (2566), `lpos_count_opt` (2674), `hrandfield_count`
+(2279), `sintercard_base` (3779) and `zintercard_2` (3104), and the source population is larger
+still. Before claiming the vein is finished, run the census — `call_count_delta.py <dump> 20000
+--callers plain_borrowed_default_key_read_allows` over a broad shape set — and quote its output,
+not a source scan and not a peer's sample.
