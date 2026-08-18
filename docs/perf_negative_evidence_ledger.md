@@ -53991,3 +53991,78 @@ lookup because the compiler had already done better than the source suggested.
    direct-field name. The 14 runtime call sites are the constraint.
 4. Take a same-invocation A/A over at least SIX shapes before quoting any effect near 1 pct. Two
    shapes read +/-1.0 instr/op on this instrument where six read 0.508 pct.
+
+--------------------------------------------------------------------------------
+
+## VERIFIED — the ten new direct histogram fields report identically to Redis 7.2.4, and a greedy `calls=` regex made the harness say the opposite twice
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — a correctness verification of already-shipped work, plus one reusable
+instrument trap.
+
+`092150b5d` fixed a defect where seven commands gained direct histogram fields and vanished from
+`INFO commandstats` because the readout was never extended. My own row then added TEN more
+commands to that set. The unit guard is generated from the same list so it cannot structurally
+drift — but that is a claim about the code. This is the claim about the BEHAVIOUR, against the
+vendored Redis 7.2.4 as oracle.
+
+Each command driven exactly three times on both engines after `CONFIG RESETSTAT`, comparing the
+`calls=` counter, not merely presence:
+
+    zcard 3/3   hlen 3/3   type 3/3   zscore 3/3   exists 3/3   ttl 3/3
+    getbit 3/3  hstrlen 3/3  zrank 3/3  getrange 3/3
+    llen 3/3 (earlier batch, control)   get 3/3 (original field, control)
+    CONFIG RESETSTAT cleared every one.   failures: 0
+
+### THE TRAP, WHICH IS THE REUSABLE PART
+
+The harness first reported **all twelve MISMATCH at 0 calls on BOTH engines**, Redis included.
+That shape — a uniform, symmetric failure — is the signature of a broken instrument, not a broken
+server, and it was: the parse was
+
+    sed 's/.*calls=\([0-9]*\).*/\1/'
+
+An `INFO commandstats` line reads
+
+    cmdstat_zcard:calls=3,usec=8,usec_per_call=2.67,rejected_calls=0,failed_calls=0
+
+**`rejected_calls=` and `failed_calls=` both contain the substring `calls=`**, and `.*` is
+greedy, so the capture always landed on `failed_calls=0`. The harness read 0 for every command on
+every engine and would have reported a total, symmetric regression. Anchoring it —
+`sed 's/^[^:]*:calls=\([0-9]*\).*/\1/'` — gives 3/3 on all twelve.
+
+A first fix attempt blamed the `\r` that `INFO` puts on every line. That was a real defect in the
+same function and fixing it changed nothing, which is worth recording too: **the first plausible
+cause of a wrong number is not necessarily the operative one**, and a fix that does not move the
+output has not been validated by the output.
+
+Anyone parsing `INFO commandstats` for `calls`, `usec`, `rejected_calls` or `failed_calls` must
+anchor the field. `usec=` is inside `usec_per_call=` as well, so the same trap is there.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No timing, no ratio, no instruction count — this row compares integer counters between two
+engines, so no A/A, no bootstrap interval and no quiet window apply, and none is claimed. The
+control is structural instead: `llen` and `get` are commands whose fields predate this change and
+must read 3/3 for the run to mean anything, and both do.
+
+### PROVENANCE
+
+  ELF           fr `b9020687621a86bcf60963b997bc6b0bd2d31d177b8e7580d71dea80a22a3b8a`
+  bench_elf_sha256=b9020687621a86bcf60963b997bc6b0bd2d31d177b8e7580d71dea80a22a3b8a
+  incumbent     vendored `legacy_redis_code/redis/src/redis-server` (Redis 7.2.4), same harness
+                invocation, same command sequence, as the ORACLE — not as a performance arm.
+  harness       `cmdstat_check10.sh`, three runs of each command after `CONFIG RESETSTAT`.
+  host          /data 83G free. NO BUILD was started: three cargo and five rustc were running for
+                other projects and this project's slot was held throughout; the ELF is the one
+                already built for the shipped row.
+  disposition   VERIFICATION ONLY. No source file changed.
+
+### RETRY PREDICATE
+
+1. Re-run this whenever `with_direct_histogram_fields!` gains an entry. It is cheap, needs no
+   build if an ELF exists, and it is the check that `f9c0d03f7` lacked for seven commands.
+2. A uniform failure across BOTH engines is an instrument verdict, not a server verdict. Debug
+   the harness against one engine before writing up a divergence.
+3. Anchor every `INFO commandstats` field parse. `calls=` is a substring of two other fields and
+   `usec=` of a third.
