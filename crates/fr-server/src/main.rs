@@ -57,6 +57,27 @@ const DEFAULT_MODE: &str = "strict";
 /// sockets (one per bind address, mirroring redis CONFIG_BINDADDR_MAX); client
 /// connection handles start at `MAX_LISTENERS`. Lets CONFIG SET bind rebind a
 /// multi-address listener set without colliding with client tokens.
+/// Stack size for every thread fr spawns that can execute a command.
+///
+/// (frankenredis-thread-stack-size-1tlyh) fr set none anywhere, so its workers took Rust's
+/// default 2 MiB while the process's main thread got the OS default of ~8 MiB. That matters
+/// because fr executes commands -- INCLUDING Lua scripts -- on spawned workers, whereas upstream
+/// runs scripts on the main thread. A recursion limit is only a defence if the engine survives
+/// everything it ADMITS, and fr's cjson encode frame is fat enough that a depth INSIDE upstream's
+/// own limit of 1000 overflowed 2 MiB: `cargo test -p fr-command --lib zo5ac` aborted the process
+/// until that arm was pinned to an explicitly sized thread.
+///
+/// 8 MiB equalises a worker with the thread upstream runs scripts on, and clears the incumbent's
+/// own worker-thread floor -- bio.c:116 sets REDIS_THREAD_STACK_SIZE to 4 MiB and doubles the
+/// platform default until it reaches it.
+///
+/// NOT PROVEN SUFFICIENT, and the bead says so: the measured facts are that 2 MiB overflows and
+/// 64 MiB does not. Bisecting fr's real frame cost needs a build. This is strictly more headroom
+/// than before and matches the incumbent; it is not a claim that 1000-deep encode now fits.
+/// Stacks are reserved address space, not resident memory, so the cost of the larger reservation
+/// is not RSS.
+const WORKER_THREAD_STACK_SIZE: usize = 8 * 1024 * 1024;
+
 const MAX_LISTENERS: usize = 16;
 
 /// (frankenredis-w1djx) Token of the Unix domain socket listener, taken from the LAST slot of the
@@ -966,6 +987,7 @@ impl WriterPool {
             let wake = Arc::clone(&waker);
             thread::Builder::new()
                 .name(format!("fr-writer-{worker_idx}"))
+                .stack_size(WORKER_THREAD_STACK_SIZE)
                 .spawn(move || {
                     loop {
                         let recv_result = {
@@ -1637,6 +1659,7 @@ impl ShardedSetGetPool {
             let pending = Arc::clone(&wake_pending);
             let handle = thread::Builder::new()
                 .name(format!("fr-set-get-shard-{worker_idx}"))
+                .stack_size(WORKER_THREAD_STACK_SIZE)
                 .spawn(move || run_sharded_set_get_worker(job_rx, tx, wake, pending))?;
             jobs.push(job_tx);
             workers.push(handle);
@@ -2135,6 +2158,7 @@ impl SharedNothingWorkerPool {
             let worker_stats = Arc::clone(&reactor_stats);
             thread::Builder::new()
                 .name(format!("fr-set-get-shard-{worker_idx}"))
+                .stack_size(WORKER_THREAD_STACK_SIZE)
                 .spawn(move || {
                     run_shared_nothing_worker(
                         worker_idx,
