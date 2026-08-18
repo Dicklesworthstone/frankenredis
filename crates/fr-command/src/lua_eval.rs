@@ -13133,7 +13133,35 @@ fn resp_to_lua(frame: &RespFrame, resp3: bool) -> LuaValue {
     }
 }
 
+/// Nesting ceiling for a script's reply, the analogue of the `lua_checkstack`
+/// guard upstream applies at the top of `luaReplyToRedisReply`
+/// (src/script_lua.c:600). There the reply walk asks for 4 Lua stack slots per
+/// level and errors once the stack cannot grow past `LUAI_MAXCSTACK` (8000,
+/// luaconf.h:446), which puts upstream's effective ceiling on the order of two
+/// thousand nested levels.
+///
+/// fr has no Lua C stack to interrogate, so the honest analogue is a fixed
+/// depth. 2000 is chosen to satisfy both constraints at once: it is the same
+/// order as upstream's ceiling, and at the measured 416 bytes per level of
+/// `lua_to_resp_at_depth` it occupies 832 KB — under 40 pct of the 2 MiB stack
+/// a spawned reactor thread gets, leaving the frames below the walk their room.
+///
+/// This bound is NOT reachable by bounding the parser: the structure is built
+/// at RUNTIME, so `local t = {} for i = 1, 300000 do t = {t} end return t` is a
+/// flat, tiny chunk that no syntax-level counter sees.
+const LUA_REPLY_MAX_DEPTH: u32 = 2000;
+
 pub fn lua_to_resp(val: &LuaValue, resp3: bool) -> RespFrame {
+    lua_to_resp_at_depth(val, resp3, 0)
+}
+
+fn lua_to_resp_at_depth(val: &LuaValue, resp3: bool, depth: u32) -> RespFrame {
+    if depth > LUA_REPLY_MAX_DEPTH {
+        // Upstream replies an error and pops rather than aborting, so a
+        // pathological reply costs the client its reply and nothing else. A
+        // Rust stack overflow would abort the whole process instead.
+        return RespFrame::Error("reached lua stack limit".to_string());
+    }
     match val {
         LuaValue::Nil => RespFrame::BulkString(None),
         // (frankenredis-0gz4g) Upstream luaReplyToRedisReply uses addReplyBool
@@ -13206,7 +13234,12 @@ pub fn lua_to_resp(val: &LuaValue, resp3: bool) -> RespFrame {
                 let pairs = inner
                     .hash_pairs()
                     .into_iter()
-                    .map(|(k, v)| (lua_to_resp(&k, resp3), lua_to_resp(&v, resp3)))
+                    .map(|(k, v)| {
+                        (
+                            lua_to_resp_at_depth(&k, resp3, depth + 1),
+                            lua_to_resp_at_depth(&v, resp3, depth + 1),
+                        )
+                    })
                     .collect();
                 return RespFrame::Map(Some(pairs));
             }
@@ -13239,7 +13272,7 @@ pub fn lua_to_resp(val: &LuaValue, resp3: bool) -> RespFrame {
                 }
                 // Other-hash keys (numeric non-array, boolean, …).
                 for (k, _) in &inner_borrow.other_hash {
-                    items.push(lua_to_resp(k, resp3));
+                    items.push(lua_to_resp_at_depth(k, resp3, depth + 1));
                 }
                 return RespFrame::Array(Some(items));
             }
@@ -13297,7 +13330,7 @@ pub fn lua_to_resp(val: &LuaValue, resp3: bool) -> RespFrame {
                 if matches!(item, LuaValue::Nil) {
                     break;
                 }
-                items.push(lua_to_resp(&item, resp3));
+                items.push(lua_to_resp_at_depth(&item, resp3, depth + 1));
             }
             RespFrame::Array(Some(items))
         }
@@ -15856,10 +15889,11 @@ mod tests {
     use fr_store::Store;
 
     use super::{
-        Env, LuaGlobals, LuaMap, LuaState, LuaTable, LuaValue, RegisterFunctionArgError,
-        RegisterFunctionSpec, SCRIPT_NOSCRIPT_ERROR, compile_check, eval_script, json_to_lua_value,
-        lua_base_globals_template, lua_raw_equal, lua_test_live_tables, lua_value_to_json,
-        overlay_filter_bit, parse_lua_chunk_located, parse_register_function_args,
+        Env, LUA_REPLY_MAX_DEPTH, LuaGlobals, LuaMap, LuaState, LuaTable, LuaValue,
+        RegisterFunctionArgError, RegisterFunctionSpec, SCRIPT_NOSCRIPT_ERROR, compile_check,
+        eval_script, json_to_lua_value, lua_base_globals_template, lua_raw_equal,
+        lua_test_live_tables, lua_value_to_json, overlay_filter_bit, parse_lua_chunk_located,
+        parse_register_function_args,
     };
 
     /// (frankenredis-9hori) flags and description must be captured from the RUNTIME table.
@@ -22127,6 +22161,96 @@ end
         assert!(
             parse_lua_chunk_located(sequential.as_bytes()).is_ok(),
             "300 sequential shallow nests must parse: depth is nesting, not a running total"
+        );
+    }
+
+    /// `lua_to_resp` walks the script's return value recursively and had no
+    /// bound, so a reply nested deeply enough exhausted the stack — and a Rust
+    /// stack overflow ABORTS the process rather than unwinding.
+    ///
+    /// Bounding the PARSER does not reach this: the structure is built at
+    /// runtime by a loop, so the chunk below is flat and short and no
+    /// syntax-level counter ever sees it. That is the whole point of this test.
+    ///
+    /// Upstream refuses instead — `luaReplyToRedisReply` (src/script_lua.c:600)
+    /// checks `lua_checkstack(lua, 4)` at every level and, on failure, replies
+    /// "reached lua stack limit" and pops. The error therefore appears AT the
+    /// ceiling, nested inside the reply, rather than replacing the whole reply.
+    ///
+    /// The 64 MiB thread is a TEST-PROFILE accommodation, matching what
+    /// `cjson_encode_bounds_nesting_at_upstreams_limit_zo5ac` already does: this
+    /// workspace defines no [profile.test], so tests run at opt-level 0 where
+    /// frames are far fatter than the 416 bytes per level measured in the
+    /// shipping release binary. It is not a claim about production.
+    #[test]
+    fn lua_reply_walk_bounds_nesting_like_upstream_luareplytoredisreply() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let mut store = Store::new();
+                let frame = eval_script(
+                    b"local t = {} for i = 1, 3000 do t = {t} end return t",
+                    &[],
+                    &[],
+                    &mut store,
+                    0,
+                )
+                .expect("a reply past the ceiling must be refused, not abort the process");
+
+                let mut cur = &frame;
+                let mut levels = 0usize;
+                while let RespFrame::Array(Some(items)) = cur {
+                    if items.len() != 1 {
+                        break;
+                    }
+                    levels += 1;
+                    cur = &items[0];
+                }
+
+                assert!(
+                    matches!(cur, RespFrame::Error(m) if m.as_str() == "reached lua stack limit"),
+                    "expected upstream's error at the ceiling, got {cur:?} after {levels} levels"
+                );
+                assert_eq!(
+                    levels,
+                    LUA_REPLY_MAX_DEPTH as usize + 1,
+                    "the walk must stop at the ceiling exactly — off by this much means the \
+                     depth is being counted at the wrong place"
+                );
+            })
+            .expect("spawn the sized thread")
+            .join()
+            .expect("the reply walk must not overflow the stack");
+    }
+
+    /// The control for the guard above: a reply well inside the ceiling must
+    /// convert unchanged. A bound that also truncated ordinary replies would
+    /// trade a crash for a correctness bug.
+    #[test]
+    fn lua_reply_walk_leaves_shallow_nesting_untouched() {
+        let mut store = Store::new();
+        let frame = eval_script(
+            b"local t = {} for i = 1, 100 do t = {t} end return t",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("100 levels is inside the ceiling");
+
+        let mut cur = &frame;
+        let mut levels = 0usize;
+        while let RespFrame::Array(Some(items)) = cur {
+            if items.len() != 1 {
+                break;
+            }
+            levels += 1;
+            cur = &items[0];
+        }
+        assert_eq!(levels, 100, "100 nested tables must survive the walk intact");
+        assert!(
+            matches!(cur, RespFrame::Array(Some(items)) if items.is_empty()),
+            "the innermost value is the empty table the loop started from, got {cur:?}"
         );
     }
 
