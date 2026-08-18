@@ -338,17 +338,50 @@ def audit_shape_sizes(min_elements=None):
             if n < floor:
                 flagged.append((n, set_name, label, argv[0].upper(), unit))
     flagged.sort()
+
+    # (frankenredis-eh2ct) WHICH flagged rows still need work, per GROUP.
+    #
+    # A small row is not removed when its sibling lands -- it is the intercept half of the
+    # pair and stays on the board deliberately. So the raw flagged count never falls, and
+    # reading it as progress says "no progress" forever. What matters is whether a flagged
+    # row has a larger-N twin IN ITS OWN GROUP: the audit reports per (group, shape), and a
+    # twin registered elsewhere does not make THIS row readable as a per-element ratio.
+    #
+    # Stems, because the naming is not uniform and never was: `mget_3` pairs with `mget_64`,
+    # `smismember2` with `smismember_64`, `hgetall_3` with `hgetall_64`, `bitcount` with
+    # `bitcount_big`. Strip the sibling suffix from candidates and any trailing element count
+    # from the small label, then compare within the group.
+    sibling_suffixes = ("_64", "_big", "_large")
+
+    def _stem(label):
+        for suf in sibling_suffixes:
+            if label.endswith(suf):
+                label = label[: -len(suf)]
+                break
+        return label.rstrip("_0123456789")
+
+    siblings_by_group = {
+        set_name: {_stem(label) for label, _s, _a in shapes
+                   if any(label.endswith(suf) for suf in sibling_suffixes)}
+        for set_name, shapes in SHAPE_SETS.items()
+    }
+    unpaired = [row for row in flagged
+                if _stem(row[2]) not in siblings_by_group.get(row[1], set())]
+
     print("size-scaling shapes registered: %d" % total)
-    print("seeded below their unit's floor %s: %d\n"
-          % (MIN_SCALING_INPUT if min_elements is None else min_elements, len(flagged)))
-    print("%-6s %-10s %-12s %-22s %s" % ("size", "unit", "set", "shape", "command"))
+    print("seeded below their unit's floor %s: %d (%d of them with NO larger-N twin in "
+          "their group)\n"
+          % (MIN_SCALING_INPUT if min_elements is None else min_elements,
+             len(flagged), len(unpaired)))
+    print("%-6s %-10s %-12s %-22s %-12s %s" % ("size", "unit", "set", "shape", "twin?", "command"))
     for n, set_name, label, cmd, unit in flagged:
-        print("%-6s %-10s %-12s %-22s %s" % (n, unit, set_name, label, cmd))
+        twin = "paired" if _stem(label) in siblings_by_group.get(set_name, set()) else "NEEDS TWIN"
+        print("%-6s %-10s %-12s %-22s %-12s %s" % (n, unit, set_name, label, twin, cmd))
     paired = {
         label
         for _shapes in SHAPE_SETS.values()
         for label, _s, _a in _shapes
-        if any(label.endswith(suf) for suf in ("_64", "_big", "_large"))
+        if any(label.endswith(suf) for suf in sibling_suffixes)
     }
     print("\nshapes that DO carry a larger-N sibling: %s"
           % (", ".join(sorted(paired)) if paired else "(none)"))
@@ -466,6 +499,18 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
         ("zintercard_limit",
          ["ZADD zc:a 1 m1 2 m2 3 m3", "ZADD zc:b 2 m2 3 m3 4 m4"],
          ["ZINTERCARD", "2", "zc:a", "zc:b", "LIMIT", "2"]),
+        # (frankenredis-eh2ct) 64-member siblings, overlapping in 32. The LIMIT form keeps
+        # its limit SMALL on purpose: LIMIT is an early-exit, so a large-N row with a large
+        # limit would measure the same intersection walk as the unlimited form and the pair
+        # would stop isolating anything.
+        ("zintercard_2_64",
+         ["ZADD zc64:a " + " ".join(f"{i} m{i:02d}" for i in range(64)),
+          "ZADD zc64:b " + " ".join(f"{i} m{i:02d}" for i in range(32, 96))],
+         ["ZINTERCARD", "2", "zc64:a", "zc64:b"]),
+        ("zintercard_limit_64",
+         ["ZADD zc64:a " + " ".join(f"{i} m{i:02d}" for i in range(64)),
+          "ZADD zc64:b " + " ".join(f"{i} m{i:02d}" for i in range(32, 96))],
+         ["ZINTERCARD", "2", "zc64:a", "zc64:b", "LIMIT", "2"]),
         ("xpending_empty",
          ["XADD xp:s 1-1 f v", "XGROUP CREATE xp:s xp:g 0"],
          ["XPENDING", "xp:s", "xp:g"]),
@@ -528,6 +573,11 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
     "cascade": [
         ("sintercard", ["SADD sc:a m1 m2 m3", "SADD sc:b m2 m3 m4"],
          ["SINTERCARD", "2", "sc:a", "sc:b"]),
+        # (frankenredis-eh2ct) 64-member sibling, 32 in common.
+        ("sintercard_64",
+         ["SADD sc64:a " + " ".join(f"m{i:02d}" for i in range(64)),
+          "SADD sc64:b " + " ".join(f"m{i:02d}" for i in range(32, 96))],
+         ["SINTERCARD", "2", "sc64:a", "sc64:b"]),
         # (frankenredis-mnzgy) The next three do NOT meet the admission bar
         # this file states, and scripts/shape_admission_probe.py flags them. They
         # are annotated rather than removed, because deleting another agent's
@@ -716,10 +766,17 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
         ("setbit_same", ["SET bb abcdefghijklmnop"], ["SETBIT", "bb", "5", "0"]),
         ("getset_same", ["SET gs vvvvvvvvvvvvvvvv"], ["GETSET", "gs", "vvvvvvvvvvvvvvvv"]),
         ("bitcount", ["SET bb abcdefghijklmnop"], ["BITCOUNT", "bb"]),
+        # (frankenredis-eh2ct) BITCOUNT's axis is BYTES, and 16 of them is one AVX register:
+        # the row cannot see a popcount loop at all. 1024 bytes is 64 registers' worth.
+        ("bitcount_big", ["SET bb1k " + "abcdefghijklmnop" * 64], ["BITCOUNT", "bb1k"]),
         ("bitpos", ["SET bb abcdefghijklmnop"], ["BITPOS", "bb", "1"]),
         ("dbsize", ["SET s v"], ["DBSIZE"]),
         ("smembers", ["SADD st m1 m2 m3 m4 m5"], ["SMEMBERS", "st"]),
         ("hgetall", ["HSET h f1 v1 f2 v2 f3 v3"], ["HGETALL", "h"]),
+        # (frankenredis-eh2ct) Same reason as the unswept4 twins: per-group pairing.
+        ("hgetall_64",
+         ["HSET h64 " + " ".join(f"f{i:02d} v{i:02d}" for i in range(64))],
+         ["HGETALL", "h64"]),
         ("lindex", ["RPUSH l a b c d e"], ["LINDEX", "l", "2"]),
         ("get_control", ["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
     ],
@@ -793,9 +850,20 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
     "unswept4": [
         ("xlen", ["XADD xst 1-1 f v", "XADD xst 1-2 f v"], ["XLEN", "xst"]),
         ("xrange_2", ["XADD xst 1-1 f v", "XADD xst 1-2 f v"], ["XRANGE", "xst", "-", "+"]),
+        # (frankenredis-eh2ct) Twins for the two unswept4 rows that had none. Identical to
+        # the sizepairs versions on purpose: the audit reports per (group, shape), so each
+        # group needs its own pair to be readable as a per-element ratio.
+        ("xrange_64",
+         ["XADD xst64 %d-1 f v" % (i + 1) for i in range(64)],
+         ["XRANGE", "xst64", "-", "+"]),
         ("geopos", ["GEOADD g 13.361389 38.115556 P1"], ["GEOPOS", "g", "P1"]),
         ("geosearch", ["GEOADD g 13.361389 38.115556 P1", "GEOADD g 15.087269 37.502669 P2"],
          ["GEOSEARCH", "g", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "ASC"]),
+        ("geosearch_64",
+         ["GEOADD g64 " + " ".join(
+             f"{13.0 + (i % 8) * 0.25} {37.0 + (i // 8) * 0.25} M{i:02d}"
+             for i in range(64))],
+         ["GEOSEARCH", "g64", "FROMLONLAT", "15", "37", "BYRADIUS", "500", "km", "ASC"]),
         ("geoadd_same", ["GEOADD g 13.361389 38.115556 P1"],
          ["GEOADD", "g", "13.361389", "38.115556", "P1"]),
         ("pfadd_same", ["PFADD hll a b c"], ["PFADD", "hll", "a"]),
@@ -815,6 +883,13 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
          ["RPUSH sl64 " + " ".join(f"w{i:02d}{'Ab'[i % 2]}" for i in range(64))],
          ["SORT_RO", "sl64", "ALPHA"]),
         ("sintercard2", ["SADD s1 m1 m2 m3", "SADD s2 m2 m3 m4"], ["SINTERCARD", "2", "s1", "s2"]),
+        # (frankenredis-eh2ct) unswept4 carries its own SINTERCARD row, so it needs its own
+        # sibling: the audit reports per (group, shape), and a twin registered in another
+        # group does not make THIS row readable as a per-element ratio.
+        ("sintercard2_64",
+         ["SADD sc64:a " + " ".join(f"m{i:02d}" for i in range(64)),
+          "SADD sc64:b " + " ".join(f"m{i:02d}" for i in range(32, 96))],
+         ["SINTERCARD", "2", "sc64:a", "sc64:b"]),
         ("smismember2", ["SADD st m1 m2 m3"], ["SMISMEMBER", "st", "m1", "nope"]),
         # (frankenredis-eh2ct) SMISMEMBER's size axis is the number of members QUERIED --
         # that is what the reply length tracks -- so the sibling asks about 64, half of
@@ -823,8 +898,19 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
          ["SADD s64a " + " ".join(f"m{i:02d}" for i in range(64))],
          ["SMISMEMBER", "s64a"] + [f"m{i:02d}" for i in range(32, 96)]),
         ("zrangebylex", ["ZADD z 0 a 0 b 0 c"], ["ZRANGEBYLEX", "z", "-", "+"]),
+        # (frankenredis-eh2ct) ZRANGEBYLEX over 64 equal-score members: the lex range is the
+        # whole set, so the reply scales while the command form does not.
+        ("zrangebylex_64",
+         ["ZADD zlex64 " + " ".join(f"0 m{i:02d}" for i in range(64))],
+         ["ZRANGEBYLEX", "zlex64", "-", "+"]),
         ("zcount", ["ZADD z 1 a 2 b 3 c"], ["ZCOUNT", "z", "1", "3"]),
         ("hrandfield_c", ["HSET h f1 v1"], ["HRANDFIELD", "h", "1"]),
+        # (frankenredis-eh2ct) HRANDFIELD's size axis is the COUNT requested, not the hash:
+        # at count 1 the reply is one field however large the hash is. 64 fields requested
+        # from a 64-field hash, which is also the only count that cannot repeat.
+        ("hrandfield_c_64",
+         ["HSET h64 " + " ".join(f"f{i:02d} v{i:02d}" for i in range(64))],
+         ["HRANDFIELD", "h64", "64"]),
         ("get_control", ["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
     ],
     # (frankenredis-32f3p) The routes ozrro's gap metric left alone that turned out
@@ -1164,9 +1250,21 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
         ("lpos_rank", ["RPUSH l a b c d e"], ["LPOS", "l", "c", "RANK", "1"]),
         ("sintercard_lim", ["SADD s1 m1 m2 m3", "SADD s2 m2 m3 m4"],
          ["SINTERCARD", "2", "s1", "s2", "LIMIT", "1"]),
+        # (frankenredis-eh2ct) Limit stays at 1, as above: the point of the pair is the SET
+        # size, and raising the limit with it would measure a different thing.
+        ("sintercard_lim_64",
+         ["SADD sc64:a " + " ".join(f"m{i:02d}" for i in range(64)),
+          "SADD sc64:b " + " ".join(f"m{i:02d}" for i in range(32, 96))],
+         ["SINTERCARD", "2", "sc64:a", "sc64:b", "LIMIT", "1"]),
         ("sadd_existing2", ["SADD st m1 m2"], ["SADD", "st", "m1", "m2"]),
         ("zrangebyscore_l", ["ZADD z 1 a 2 b 3 c"],
          ["ZRANGEBYSCORE", "z", "1", "3", "LIMIT", "0", "2"]),
+        # (frankenredis-eh2ct) The LIMIT count scales WITH the range here, unlike the
+        # SINTERCARD pairs: for ZRANGEBYSCORE the limit bounds the REPLY, so holding it at 2
+        # would keep the reply at two elements and measure the intercept again.
+        ("zrangebyscore_l_64",
+         ["ZADD z64 " + " ".join(f"{i} m{i:02d}" for i in range(64))],
+         ["ZRANGEBYSCORE", "z64", "0", "63", "LIMIT", "0", "64"]),
         ("hdel_existing", ["HSET h f1 v1"], ["HDEL", "h", "nofield2"]),
         ("append_empty", ["SET s abcdefghijklmnop"], ["APPEND", "s", ""]),
         ("get_control", ["SET kk vvvvvvvvvvvvvvvv"], ["GET", "kk"]),
@@ -1192,6 +1290,14 @@ SHAPE_SETS: dict[str, list[tuple[str, list[str], list[str]]]] = {
         # is ambient, not fixture-controlled, and a moved/added/removed dump.rdb
         # shifts it. If you need a comparable scan row, control the starting db.
         ("scan_prefix", ["MSET tenant:needle:1 1 tenant:decoy:1 1 tenant:decoy:2 1"],
+         ["SCAN", "0", "MATCH", "tenant:needle:*", "COUNT", "100"]),
+        # (frankenredis-eh2ct) SCAN's cost is the KEYS WALKED, not the keys returned, so the
+        # sibling grows the decoy population and keeps the needle count small -- that is the
+        # selective-prefix shape hwcm1 is about. COUNT stays 100 so one call still walks the
+        # whole cursor in both rows.
+        ("scan_prefix_64",
+         ["MSET " + " ".join(f"tenant:decoy:{i:02d} 1" for i in range(64)),
+          "MSET tenant:needle:1 1 tenant:needle:2 1"],
          ["SCAN", "0", "MATCH", "tenant:needle:*", "COUNT", "100"]),
         ("zunionstore_2key", ["ZADD za 1 a 2 b 3 c 4 d", "ZADD zb 1 b 2 c 3 d 4 e"],
          ["ZUNIONSTORE", "zdst", "2", "za", "zb"]),
