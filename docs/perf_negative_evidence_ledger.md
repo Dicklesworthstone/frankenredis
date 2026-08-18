@@ -47482,3 +47482,78 @@ isolates the histogram call (a `fr-store` bench in the style of
 effect was finally resolved after a whole-server profile could not see it). **Do not re-derive
 the prize from `Utf8Chunks::next` alone**: 87.0 instr/op is what the validation costs, not what
 removing it nets, and the measured net on the target shape was -43.3.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: RETRACTION — my "branch mispredicts ELIMINATED" in `ee11062ab` used an instrument this ledger had ALREADY REJECTED for that axis, and its "do NOT re-test branches" would have suppressed the correct measurement (`frankenredis-eh2ct`)
+
+WITHDRAWN, in full, from `ee11062ab`:
+
+  * the heading clause "branch mispredicts ELIMINATED"
+  * the section "Branch mispredicts are NOT the mechanism"
+  * "That retires the branch-miss hypothesis for this shape"
+  * "branch mispredicts ELIMINATED (fr 5.75 pct fewer)" in that row's mechanism chain
+  * "Do NOT re-test branches" in its reopen clause
+
+The measurement behind them is not withdrawn -- callgrind `--branch-sim=yes` did read fr 98.6
+mispredicts per op against redis 104.6. What is withdrawn is every CONCLUSION drawn from it,
+because this ledger already settled that no conclusion may be drawn from that instrument.
+
+### The row I should have read before running it
+
+`perf_negative_evidence_ledger.md:21004` (2026-08-15, `frankenredis-w08xv`) is titled "REJECTED
+AS AN INSTRUMENT — callgrind `--branch-sim` cannot arbitrate the EVAL branch-miss axis", and
+:21031 states it without qualification:
+
+    THE INSTRUMENT IS REJECTED FOR THAT AXIS. Total simulated mispredicts come out at PARITY --
+    fr 1,220/op against Redis 1,116/op -- where the hardware reading that the EVAL thesis rests
+    on is 6x. [...] No branch-miss conclusion may be drawn from `--branch-sim`, in EITHER
+    DIRECTION, and the earlier hardware row is neither confirmed nor retracted by it.
+
+My reading was fr 98.6 against redis 104.6 -- PARITY, the identical signature that row records
+as the instrument's known failure mode. I then reported it as a refutation. `:38016` states the
+calibration in one line: "`--branch-sim` at parity versus 6x, `--cache-sim` at 3.69x versus
+1.47x". And `shape_instr_per_op.py:1700` carries the same warning in code, where the harness
+pins `--branch-sim=no` PERMANENTLY and says why. Three places in this repo say do not do this.
+
+### How it happened, stated because the mechanism is more useful than the apology
+
+I did not run `scripts/perf_candidate_preflight.py check-candidate` before opening the branch
+hypothesis. That is the campaign's standing pre-flight and its entire purpose is to surface
+prior rows covering the ground -- it would have returned :21004 on the first line. I ran it for
+levers earlier this session and skipped it here because a MECHANISM probe did not feel like a
+"candidate". It is: an instrument choice is a candidate for being already-rejected, and this one
+was, three months of rows ago.
+
+### The damage, ranked
+
+The harmful part is not the wrong conclusion, which was one row old. It is the reopen clause:
+"Do NOT re-test branches" instructs the next reader to skip the axis, using authority derived
+from an instrument that cannot speak to it. `:21040` gives the CORRECT retry predicate for this
+axis and it is executable: `kernel.perf_event_paranoid <= 1`, then
+`perf stat -e branch-misses,cycles,instructions` against both engines in one invocation. On this
+host paranoid reads -1 and `perf stat` returns real counter values, so the precondition is met
+and the measurement is available to anyone, now.
+
+### What in `ee11062ab` still stands
+
+The depth-16 control and everything resting on it are untouched, because they rest on
+`--cache-sim`, whose bias this ledger has measured (3.69x simulated against 1.47x hardware) as a
+RATIO overstatement rather than a direction reversal, and because the load-bearing result there
+is a DIFFERENCE between two pipeline depths measured on one instrument: Dw fr/redis 1.3738x at
+depth 100 against 0.9955x at depth 16, and D1 read misses 2.7279x against 2.7013x. The
+conclusion that the write/memset gap was my own harness artifact stands. The conclusion that
+read-miss locality survives a 6x depth change stands. Only the branch section falls.
+
+RETRY PREDICATE: the branch axis for `geosearch_2` is OPEN, not eliminated. Settle it with the
+hardware invocation at `:21040`, both engines in one invocation, two-point over N and 2N so
+startup cancels, recording loadavg and CPU MHz per arm because hardware counters are NOT
+load-immune the way callgrind instruction counts are. Do NOT use `--branch-sim` for it in either
+direction. And run `check-candidate` before opening an instrument, not only before opening a
+lever -- that is the specific habit this row exists to fix.
+
+CONCRETELY: the branch axis may be declared eliminated for `geosearch_2` only IF a hardware
+`perf stat` run shows fr's branch-miss RATE at or below the incumbent's, and it may be declared
+the mechanism only IF fr's hardware branch misses per op EXCEED the incumbent's by enough to
+account for the standing instruction-rate gap. Until one of those readings exists, treat the
+axis as untested and cite this row rather than `ee11062ab`.
