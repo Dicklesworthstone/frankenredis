@@ -59480,3 +59480,98 @@ figures are unaffected by construction.
 3. For any effect under ~5 pct that will be quoted in a summary or a standing, run 5+5 and check
    disjointness. It costs ten runs and removes draw-order from the argument.
 4. Re-open any of these four only if a 5-run AFTER series overlaps a 5-run BEFORE series.
+
+## 2026-08-18 CrimsonHawk: KEEP (SELF-SPEEDUP) — the pop that reversed the chunk instead of shifting it: LPOP's memcpy falls 4,231.7 → 477.4 per op, −39.62 pct worst on a pop shape, and fr crosses from 1.1722x BEHIND the incumbent to 0.6672x ahead (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: TWO-BINARY A/B with the A/A and the A/B in ONE INVOCATION and the candidate arm
+BRACKETED by control arms, plus deterministic per-frame counts differenced across POP COUNTS at a
+FIXED key count, and a live redis 7.2.4 arm for the crossing. CV was NOT used, as a gate or
+otherwise — no coefficient of variation appears in this row's decision path and none was computed.
+No timing verdict is claimed: the measurand is a retired-instruction COUNT.
+
+THE SAME-INVOCATION A/A null median is 1.000113, bootstrap 95% CI [0.999432, 1.000354] over five
+draws, taken in the same invocation as the A/B it gates. The bootstrap median-CI is the verdict
+gate and it excludes zero.
+
+Claim class: SELF-SPEEDUP. Campaign output: no — the vs-incumbent figures below are SIZING (the
+gate cannot return FIT while any cargo runs under the shared uid) and nothing is banked.
+
+### PROVENANCE
+
+  ELF           AFTER `99e32657383c8a9ef60468534a02f92f6e7afe76a4f8c68424a2e803ffd1b81b`,
+                BEFORE `5275985dc3c20363006cff32eb60347fc4614c8e1558cc2f38e3765c1f2067bb`.
+  bench_elf_sha256=99e32657383c8a9ef60468534a02f92f6e7afe76a4f8c68424a2e803ffd1b81b
+
+### THE LEVER `25d7cdc9a` SPECIFIED, BUILT
+
+That row found `ChunkedList::pop_front` doing `make_mut().remove(0)` — `make_mut` normalises a
+chunk to FORWARD order, un-reversing a `front_biased` one on the way in, and then `remove(0)` shifts
+every remaining entry. `pop_front_owned` replaces it: a `Listpack` chunk materialises REVERSED with
+`front_biased = true`, an already-biased chunk is used as-is, and the removal is `Vec::pop`.
+
+It is the exact mirror of `push_front_owned_impl`, which has always reversed a chunk so repeated
+LPUSH can `push` at the tail instead of `insert(0)`. The flag and every index that respects it
+already existed; this path had been throwing them away.
+
+    SELF cost per LPOP, 400-element list, 15-byte elements
+      __memcpy_avx_unaligned_erms   4,231.7 -> 477.4
+
+### THE MEASUREMENT
+
+    bracketed A/B, 400-element lists, 120 LPOPs per key, slope 10 vs 30 keys
+      −39.6245 / −39.6245 / −39.6539 / −39.6189 / −39.6529 pct
+      A/B median −39.6245 pct, bootstrap 95% CI [−39.6539, −39.6189], n=5
+      WORST SINGLE DRAW −39.6189 pct  <- the figure this row claims
+      null ratio 1.000113. 90-93 pct idle, loadavg 9.30-9.79.
+
+    vs redis 7.2.4, instructions per LPOP (SIZING), WORST of two draws each
+      15-byte elements   1.1722x  ->  0.6672x     <- fr crosses from behind to ahead
+      60-byte elements   0.6374x  ->  0.6265x     <- the control, unchanged within noise
+
+### THE SHAPE THIS COULD HAVE REGRESSED, AND WHAT IT ACTUALLY DID
+
+Leaving a chunk front-biased makes a later `push_back` into it an `insert(0)`. That is a real trade
+and it was measured rather than argued:
+
+    instructions per LPOP+RPUSH cycle, 15-byte elements
+      100-element list (PACKED repr)     10,078.1 -> 10,073.6   −0.04 pct, and +0.04 pct on a
+                                                                 second draw — a NULL, because at
+                                                                 100 entries the list never reaches
+                                                                 the chunked path at all
+      200-element list (chunked)         10,416.7 -> 10,076.0   −3.27 pct
+      400-element list (chunked)         13,861.9 -> 10,091.1   −27.20 pct
+
+  The alternating queue does not regress; it improves, because head and tail are different chunks
+  once a list spans more than one — and a list only becomes chunked at 129 entries, so a chunked
+  list always has at least two chunks. The single-chunk-and-chunked case that would show the trade
+  requires popping a chunked list back down to one chunk and is NOT measured here.
+
+### PARITY
+
+    pop SEQUENCES (LPOP/RPOP interleaved with LPUSH/RPUSH, five scripts x four pools x three fills
+      x four lengths), BEFORE vs AFTER:                              0 of 240 diverging
+      the same 240 vs redis 7.2.4 on LRANGE/LLEN after every step:   0 of 240 diverging
+    LRANGE / LINDEX / LLEN sweep, BEFORE vs AFTER and vs redis:      0 of 160 each
+    BEFORE-vs-AFTER DUMP BYTES:                                      0 of 84 diverging
+    workload sweep vs redis 7.2.4:                                   4 of 42, UNCHANGED
+    fr-store 944, 0 failures; clippy clean; fmt back to its baseline.
+
+  ORACLE: `pop_front_preserves_order_against_a_vec_model_qj6jn` runs each list against a `VecDeque`
+  model — pop a third from the front checking BOTH the value and the surviving order after every
+  pop; then push into the now-biased chunk from both ends and check `iter()` and `get()` at four
+  indices; then drain alternately from both ends. Lists are built at the BACK, at the FRONT and at
+  BOTH ends, at lengths straddling 128. The interleaved phase is the point: `front_biased` changes
+  the meaning of every index, so a forgotten reversal shows as a wrong ORDER, not a wrong length.
+
+### RETRY PREDICATES
+
+  1. The single-chunk-and-chunked alternating case is the one shape this trade could still lose on,
+     and it is unmeasured because it needs a list popped down from 129+ to one chunk. Construct it
+     explicitly before assuming the null above covers it.
+  2. `pop_back` still goes through `make_mut()`, so an RPOP on a front-biased chunk un-reverses it —
+     O(entries) — and a workload that alternates LPOP and RPOP on one chunk would thrash. Not
+     measured. The mirror fix is available but should not be written without a shape that shows the
+     cost.
+  3. `25d7cdc9a` flagged this path as a CANDIDATE explanation for the four unclosed
+     `queue RPUSH+LPOP` DUMP divergences. This lever did NOT change them — still 4 of 42 — so that
+     candidate is now eliminated.

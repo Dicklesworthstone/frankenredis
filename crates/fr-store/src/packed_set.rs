@@ -3403,6 +3403,59 @@ impl ListChunk {
         }
     }
 
+    /// Remove the LOGICAL FIRST element, keeping the chunk in reversed physical order so the
+    /// removal is a `Vec::pop` rather than a `Vec::remove(0)`.
+    ///
+    /// (frankenredis-qj6jn) `pop_front` used to go through `make_mut`, which NORMALISES a chunk to
+    /// forward order — it un-reverses a `front_biased` chunk on the way in — and then did
+    /// `remove(0)`, shifting every remaining entry. Measured on a 400-element list of 15-byte
+    /// elements, that shift was `__memcpy_avx_unaligned_erms` at 4,231.7 instructions per LPOP,
+    /// 48 pct of the whole command, and it scaled with ENTRIES per chunk rather than bytes: at
+    /// 60-byte elements, where a chunk holds about six times fewer entries, the same copy read
+    /// 643.3.
+    ///
+    /// This is the exact mirror of `push_front_owned_impl`, which already reverses a chunk so a
+    /// repeated LPUSH can `push` at the tail instead of `insert(0)`. The `front_biased` flag and
+    /// every index that respects it already exist; this path stops throwing that away.
+    ///
+    /// The materialisation from `Listpack` collects REVERSED for the same reason — otherwise the
+    /// first pop of a retained chunk would build forward and immediately reverse it.
+    ///
+    /// A chunk left front-biased makes a later `push_back` into it an `insert(0)`. That trade is
+    /// not new: `push_front_owned_impl` has always left chunks biased the other way, and in a
+    /// queue the head and tail are different chunks once a list spans more than one. The
+    /// single-chunk alternating case is measured in this lever's ledger row.
+    fn pop_front_owned(&mut self) -> Option<Vec<u8>> {
+        if let Self::Listpack { bytes, entries } = self {
+            let elems: Vec<Vec<u8>> = entries
+                .iter()
+                .rev()
+                .map(|entry| entry.as_bytes(bytes).to_vec())
+                .collect();
+            *self = Self::Owned {
+                elems: Arc::new(elems),
+                lp_bytes: 0,
+                front_biased: true,
+            };
+        }
+        match self {
+            Self::Owned {
+                elems,
+                lp_bytes,
+                front_biased,
+            } => {
+                *lp_bytes = 0;
+                let elems = Arc::make_mut(elems);
+                if !*front_biased {
+                    elems.reverse();
+                    *front_biased = true;
+                }
+                elems.pop()
+            }
+            Self::Listpack { .. } => unreachable!("packed listpack node was materialized"),
+        }
+    }
+
     fn make_mut(&mut self) -> &mut Vec<Vec<u8>> {
         if let Self::Listpack { bytes, entries } = self {
             let elems = entries
@@ -3845,7 +3898,7 @@ impl ChunkedList {
     }
 
     fn pop_front(&mut self) -> Option<Vec<u8>> {
-        let out = self.chunks.front_mut()?.make_mut().remove(0);
+        let out = self.chunks.front_mut()?.pop_front_owned()?;
         self.len -= 1;
         self.rpush_conversion_prefix_len = self
             .rpush_conversion_prefix_len
@@ -6371,6 +6424,107 @@ impl CompactFieldMap {
 
 #[cfg(test)]
 mod tests {
+
+    /// (frankenredis-qj6jn) `pop_front` now keeps the chunk in REVERSED physical order so the
+    /// removal is a `Vec::pop` instead of a `Vec::remove(0)`. `front_biased` changes the meaning of
+    /// every index into a chunk, so this drives the operations that index one — against a plain
+    /// `Vec` model, over lists built at the BACK, at the FRONT and at BOTH ends, at lengths that
+    /// straddle the 128-entry chunk boundary.
+    ///
+    /// The interleaved phase is the point: a chunk left front-biased by a pop is then pushed into,
+    /// read through `get`, and iterated, which is exactly where a forgotten reversal would show as
+    /// a wrong ORDER rather than a wrong length.
+    #[test]
+    fn pop_front_preserves_order_against_a_vec_model_qj6jn() {
+        for len in [1usize, 2, 127, 128, 129, 300] {
+            for build in ["back", "front", "both"] {
+                let mut list = super::ListValue::default();
+                let mut model: std::collections::VecDeque<Vec<u8>> =
+                    std::collections::VecDeque::new();
+                for i in 0..len {
+                    let e = format!("{build}{i:05}").into_bytes();
+                    match build {
+                        "back" => {
+                            list.push_back(e.clone());
+                            model.push_back(e);
+                        }
+                        "front" => {
+                            list.push_front(e.clone());
+                            model.push_front(e);
+                        }
+                        _ => {
+                            if i % 2 == 0 {
+                                list.push_back(e.clone());
+                                model.push_back(e);
+                            } else {
+                                list.push_front(e.clone());
+                                model.push_front(e);
+                            }
+                        }
+                    }
+                }
+
+                // Phase 1: pop a third from the front, checking each value AND the surviving order.
+                for _ in 0..(len / 3) {
+                    assert_eq!(
+                        list.pop_front(),
+                        model.pop_front(),
+                        "{build}/{len}: popped value diverged"
+                    );
+                    let got: Vec<Vec<u8>> = list.iter().map(<[u8]>::to_vec).collect();
+                    let want: Vec<Vec<u8>> = model.iter().cloned().collect();
+                    assert_eq!(got, want, "{build}/{len}: order diverged after a pop");
+                }
+
+                // Phase 2: push into the now-biased chunk from BOTH ends, then index and iterate.
+                for i in 0..4usize {
+                    let b = format!("B{i}").into_bytes();
+                    let f = format!("F{i}").into_bytes();
+                    list.push_back(b.clone());
+                    model.push_back(b);
+                    list.push_front(f.clone());
+                    model.push_front(f);
+                }
+                let got: Vec<Vec<u8>> = list.iter().map(<[u8]>::to_vec).collect();
+                let want: Vec<Vec<u8>> = model.iter().cloned().collect();
+                assert_eq!(
+                    got, want,
+                    "{build}/{len}: order diverged after interleaved pushes"
+                );
+                for idx in [0usize, 1, want.len() / 2, want.len() - 1] {
+                    assert_eq!(
+                        list.get(idx).map(<[u8]>::to_vec),
+                        want.get(idx).cloned(),
+                        "{build}/{len}: get({idx}) diverged"
+                    );
+                }
+
+                // Phase 3: drain the rest from the front and from the back, alternating.
+                while !model.is_empty() {
+                    assert_eq!(
+                        list.pop_front(),
+                        model.pop_front(),
+                        "{build}/{len}: drain front"
+                    );
+                    assert_eq!(
+                        list.pop_back(),
+                        model.pop_back(),
+                        "{build}/{len}: drain back"
+                    );
+                }
+                assert_eq!(
+                    list.len(),
+                    0,
+                    "{build}/{len}: list not empty after draining"
+                );
+                assert_eq!(
+                    list.pop_front(),
+                    None,
+                    "{build}/{len}: pop on empty must be None"
+                );
+            }
+        }
+    }
 
     /// (frankenredis-qj6jn) `for_each_borrowed` hoists the chunk-kind match out of the per-element
     /// loop. It must yield EXACTLY what `iter()` yields, in the same order, for every
