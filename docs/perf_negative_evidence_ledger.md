@@ -45684,3 +45684,122 @@ raw in all four attempts, at 1.1042 / 1.1290 / 1.1081 / 1.1107, and is the stabl
 pair. Note also that the harness flagged the normaliser as WIDER than the row in both admissible
 draws (3.0 vs 2.1 pct, 3.1 vs 1.3 pct); `get_control` as this group's normaliser still needs its
 own row.
+
+--------------------------------------------------------------------------------
+## 2026-08-18 CrimsonHawk: the LIVE RPUSH path computed each element's listpack length twice — routing it through the sized twin is worst bound −1.56 pct, and the Packed regime is provably untouched (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method), TWO-BINARY A/B
+with tree stability proven. CV was NOT used, as a gate or otherwise. No timing verdict claimed.
+
+Claim class: COMPETITIVE. Campaign output: yes — fr/Redis 7.2.4 measures 0.5531x per RPUSH
+against a large list after this change, from 0.5619x before. The vendored Redis 7.2.4 server
+process ran as a live incumbent arm in the same invocation as both fr arms, at 3,850.65
+instr/push.
+
+This lands the three items the last three rows specified, in the order they specified: the PIN
+test first, then the `EntryBytes` newtype, then the routing lever the newtype makes safe.
+
+THE CODE IS ALREADY ON MAIN AS `f0f7823e4`, AND THIS ROW IS THE MEASUREMENT IT OWES. That
+commit is exactly my two files and is correctly attributed to this bead, but it was authored
+from my working tree by a peer sweep before I had banked a ratio, so it landed with an accurate
+description of the newtype and NO number — the second time today (`65e785c95` was the first).
+By section 1 that is landed-but-unmeasured, not a win. The ELFs measured below were built from
+that identical source.
+
+### THE ADMISSION CONDITION `df9a4da1d` SET AND FAILED IS NOW MET
+
+    regime                    draws                       worst bound   frame
+    Deque  (large lists)   −2.52 / −1.56 / −1.56 pct        −1.56 pct   54.00 -> 27.00
+    Packed (small lists)   −0.47 / +0.06 pct                 +0.06 pct  27.00 -> 27.00
+
+  `df9a4da1d` rejected a different attempt at this because it bought the Deque regime at the
+  Packed one's expense. This does not: the Packed arm's two draws STRADDLE ZERO and its frame
+  is provably unchanged, because a Packed list never reaches `push_back_with_fill` at all —
+  there is no mechanism by which it could cost. Reported as unmoved, not as a small win.
+
+  THE FRAME IS THE EVIDENCE, and it is categorical rather than statistical: on the Deque path
+  `list_lp_entry_bytes` goes from 54.00 to 27.00 instructions per push. That is two calls per
+  element becoming one, at the 27.00 per call this bead measured exactly on the loader tail in
+  `4c2ed3ecf`. The whole delta is ~34, the extra ~7 being the call overhead around it.
+
+### THE WORST BOUND, AND WHY DRAW 1 IS NOT IT
+
+    draw   A/A null      BEFORE      AFTER      delta       vs redis 7.2.4
+      1   0.990426     2,166.21   2,111.66   −2.52 pct    0.5639x -> 0.5497x
+      2   0.999794     2,163.52   2,129.67   −1.56 pct    0.5619x -> 0.5531x
+      3   0.999892     2,163.55   2,129.89   −1.56 pct    0.5612x -> 0.5525x
+
+  Draw 1's A/A null is 0.990426 — nearly 1 pct off unity, where draws 2 and 3 come in at 0.02
+  and 0.01 pct. Its −2.52 pct is the OPTIMISTIC reading and it is the one with the failing
+  null, so it is reported and not used. Draws 2 and 3 agree to 0.19 instr/push. The row claims
+  −1.56 pct.
+
+### WHY A TWO-BINARY A/B AND NOT THE SAME-ELF TOGGLE
+
+`push_back` IS the per-element hot function here, and `fdb578bac` measured a toggle placed
+inside a per-element hot function moving its own CONTROL arm by rewriting its inlining. So the
+same-ELF convention is not available for this lever, and the pair was built with the stability
+protocol instead: AFTER, BEFORE, AFTER again, requiring the two AFTERs bit-identical.
+
+    A1 bd996f3bc50cfae7   A2 bd996f3bc50cfae7   B 5e1e547778d2fc3d
+
+  A1 and A2 are byte-identical, so the tree held still across all three builds, and the arms
+  differ only in `ListValue::push_back` and `ListValue::push_back_borrowed`.
+
+### THE SAFETY SCAFFOLDING THAT RIDES WITH IT
+
+  `EntryBytes(u64)`, whose ONLY constructor is `EntryBytes::of`, which calls
+  `list_lp_entry_bytes`. The sized push twins now take it instead of a bare `u64`. The hazard
+  row explained why: that value is added into a chunk's `lp_bytes`, which feeds
+  `accepts_append` -> chunk boundary -> one quicklist node per chunk -> DUMP payload, so a
+  wrong length is a WRONG ANSWER against the incumbent, and in release the `debug_assert`s are
+  compiled out. Passing `elem.len()` or a stale local now fails to COMPILE. The value still
+  travels as a bare `u64`, so the levers keep their saving.
+
+  `list_lp_entry_bytes_matches_fr_persist_twin_qj6jn` pins fr-store's copy of the listpack size
+  rule against `fr_persist::listpack_entry_encoded_len`, newly exposed `#[doc(hidden)] pub`
+  following this crate's existing convention. The two are INDEPENDENT implementations of the
+  same upstream layout in different crates, two shipped levers depend on their agreement, and
+  until now the only thing keeping them in step was a comment. 42 literal boundary cases: every
+  integer width and both signs including `i64::MIN`, non-canonical decimals that must stay
+  strings, the 6/12/32-bit string header boundaries at 63/64 and 4095/4096, and the backlen
+  boundaries. Deletion condition: delete it when one of the two functions is deleted.
+
+### PROVENANCE
+
+  ELFs          BEFORE 5e1e547778d2fc3d, AFTER bd996f3bc50cfae7 (A1 == A2 bit-identical),
+                `release-perf`, built locally with RCH_CARGO_WRAPPER_BYPASS=1. Every build log
+                checked for BOTH `^error` and rch refusals: 0 of each, three builds. `df` run
+                immediately before each build; /data held at 130G throughout.
+  harness       scratchpad `push_slope.py`, 2,000 vs 6,000 single-element RPUSH commands
+                differenced, one fresh working directory per point; the Packed control spreads
+                pushes over 3,000 keys so no list crosses `PACKED_MAX_ENTRIES`. BOTH ARMS USE
+                THE SAME WINDOW, which its own correction row requires — that harness's
+                absolute is window-dependent by 2-3 pct and only within-window differences are
+                comparable.
+  incumbent     vendored redis 7.2.4, verified sha=d2c8a4b9 == vendored source HEAD.
+  host          thinkstation1, 64 cores OBSERVED, powersave governor, /data 130G.
+  PER-ARM loadavg/MHz   Deque draw 1 79.08/42.54/23.42 -> 78.83, MHz mean 4047 then 3917, idle
+                44.9 pct; draw 2 69.54 -> 67.01, MHz mean 3939 then 3865, idle 59.0 pct; draw 3
+                64.29 -> 61.14, MHz mean 3873 then 3877, idle 62.1 pct. Packed draw 1 53.63 ->
+                52.54, MHz mean 3833 then 3973, idle 27.2 pct; draw 2 50.57 -> 49.48, MHz mean
+                3914 then 3886, idle 68.8 pct. Every idle figure measured from a `/proc/stat`
+                delta, not quoted. A BUSY WINDOW, and the reason it is admissible is visible in
+                the data rather than asserted: draws 2 and 3 nulled at 0.02 and 0.01 pct and
+                agreed to 0.19 instr/push while the load fell from 69 to 61.
+
+### THE REPLICATED-STANDING CONVENTION
+
+Applied as the three-draw worst bound. NOT used to claim standing against the incumbent, and
+here that is worth stating positively rather than as a disclaimer: fr is roughly TWICE as fast
+as Redis 7.2.4 on this path already — 0.5531x on a large list and 0.4499x on small ones — so
+there is no crossing at stake and nothing thin about the standing.
+
+RETRY PREDICATE:
+  1. The FRONT paths (`push_front`, `push_front_borrowed_impl`) still double-compute, and
+     `push_front_with_fill` has no sized twin. Take them ONLY with a node-blob equivalence test
+     covering `rpush_conversion_prefix_len`, which that function explicitly zeroes — it is a
+     DUMP-visible boundary claim and the front pair is NOT the mechanical mirror of the back.
+  2. `ChunkedList::push_back` (packed_set.rs, hardcoded fill -2) is the last unsized caller.
+     It is internal and its call rate is unmeasured; attribute before touching it.
+  3. Do not reuse draw 1's −2.52 pct. Its null failed.
