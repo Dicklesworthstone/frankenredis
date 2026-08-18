@@ -348,6 +348,7 @@ def main():
 
     divergences = 0
     control_failures = 0
+    envelope_mismatches = []
     unexpected = []
     fixed_but_still_expected = []
     print(f"{'case':<22} {'fr':<44} {'redis 7.2.4'}")
@@ -369,6 +370,15 @@ def main():
         f_reply = classify(fr.cmd("FUNCTION", "LOAD", "REPLACE", src))
         agree = (r_reply.split(":")[0] == f_reply.split(":")[0]) and (
             r_reply.startswith("ERR") == f_reply.startswith("ERR"))
+        # (frankenredis-fnukn) The rule above compares the FIRST COLON SEGMENT, so two errors
+        # agreeing on `ERR Error registering functions` count as agreement however their tails
+        # differ. That is exactly how fnukn's measured wording regressed unnoticed when 9hori
+        # moved FUNCTION LOAD onto the executed path and the refusal gained a
+        # `user_function:<line>:` segment upstream does not emit. Collected and printed, NOT
+        # failed: promoting it needs a run against two live servers to separate real envelope
+        # bugs from tails that legitimately differ, and the freeze forbids that.
+        if agree and r_reply.startswith("ERR") and f_reply != r_reply:
+            envelope_mismatches.append((name, f_reply, r_reply))
         mark = "" if agree else "   <-- DIVERGES"
         if not agree:
             divergences += 1
@@ -390,6 +400,15 @@ def main():
         print(f"HARNESS INVALID: {control_failures} CONTROL row(s) diverged — the probe "
               f"is not measuring what it claims. Fix the harness before trusting any row.")
         return 2
+    if envelope_mismatches:
+        print()
+        print(f"ENVELOPE MISMATCH — {len(envelope_mismatches)} row(s) that the first-segment rule")
+        print("counted as AGREEING, but whose full error text differs. Not a failure here; read")
+        print("them before trusting the count above. (frankenredis-fnukn)")
+        for name, f_reply, r_reply in envelope_mismatches:
+            print(f"  {name}")
+            print(f"    fr        {f_reply}")
+            print(f"    redis     {r_reply}")
     print(f"{divergences} divergence(s) on the {len(CASES) - 2} behavioural rows; "
           f"both controls agree, so the probe discriminates.")
     if fixed_but_still_expected:
