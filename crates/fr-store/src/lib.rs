@@ -34356,7 +34356,16 @@ impl Store {
                 });
             }
         }
-        functions.sort_by(|a, b| b.name.cmp(&a.name));
+        // (frankenredis-9hori) NO SORT. The scan pushes in SOURCE order, which is this path's
+        // analogue of `redis.register_function` call order -- the order
+        // `function_load_with_registrations` preserves. A name-DESCENDING sort used to sit here
+        // with no comment, which made the same library list differently depending on whether it
+        // was registered by the executed path or re-derived by this one.
+        //
+        // Parity cannot decide the order and does not need to: functions.c::functionListCommand
+        // walks `li->functions` with dictGetIterator/dictNext, so upstream emits hash-bucket
+        // order -- neither sorted nor registration order. Consistency between fr's own two paths
+        // is the criterion, and this is the side that had to move.
 
         // (frankenredis-9hori) Everything from here is independent of HOW the registrations
         // were obtained, so it is shared with `function_load_with_registrations`.
@@ -34457,13 +34466,15 @@ impl Store {
     /// evaluation has to happen in a layer above and be passed down. That is the whole reason
     /// this is a second entry point rather than a fix inside the existing one.
     ///
-    /// ORDER IS OBSERVABLE AND THE TWO PATHS DISAGREE. This one preserves the order the specs
-    /// arrive in, which is the order `redis.register_function` was called -- upstream's order,
-    /// and what FUNCTION LIST should report. The scanning path instead sorts by name DESCENDING
-    /// (`functions.sort_by(|a, b| b.name.cmp(&a.name))`). That difference becomes visible on
-    /// FUNCTION LIST and FUNCTION DUMP the moment a caller is switched over, so it is called out
-    /// here rather than quietly reconciled: changing the scanning path's order is a separate
-    /// parity decision with its own differ run.
+    /// ORDER IS OBSERVABLE, AND THE TWO PATHS NOW AGREE. This one preserves the order the specs
+    /// arrive in, which is the order `redis.register_function` was called; the scanning path
+    /// preserves SOURCE order, its analogue of the same thing. They used to disagree -- the scan
+    /// sorted by name DESCENDING -- which made one library list two ways depending on which path
+    /// registered it. That sort is gone (frankenredis-9hori).
+    ///
+    /// Upstream cannot arbitrate the choice: `functionListCommand` walks `li->functions` with
+    /// dictGetIterator/dictNext, so 7.2.4 emits hash-bucket order, neither sorted nor
+    /// registration order. Consistency between fr's own paths is what decided it.
     pub fn function_load_with_registrations(
         &mut self,
         code: &[u8],
