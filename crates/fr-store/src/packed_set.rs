@@ -4159,6 +4159,13 @@ pub struct ChunkedListIter<'a> {
 impl<'a> Iterator for ChunkedListIter<'a> {
     type Item = &'a [u8];
 
+    // (frankenredis-qj6jn) `#[inline]`: this forwarder is called ONCE PER ELEMENT by every
+    // borrowed list read, and out of line it was its own callgrind frame. Profiled on
+    // `LRANGE 0 -1` over a 300-element RESTORED list, the two layers cost 27.20 and 26.08
+    // instructions per element -- 53 between them, against an `encode_bulk_string_slice` that
+    // costs 58, for what is a match and a tail call. The layering is worth keeping (it is what
+    // lets a retained listpack chunk hand out borrowed spans); the CALLS are not.
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             if let Some(current) = &mut self.current
@@ -4184,6 +4191,13 @@ enum ListChunkIter<'a> {
 impl<'a> Iterator for ListChunkIter<'a> {
     type Item = &'a [u8];
 
+    // (frankenredis-qj6jn) `#[inline]`: this forwarder is called ONCE PER ELEMENT by every
+    // borrowed list read, and out of line it was its own callgrind frame. Profiled on
+    // `LRANGE 0 -1` over a 300-element RESTORED list, the two layers cost 27.20 and 26.08
+    // instructions per element -- 53 between them, against an `encode_bulk_string_slice` that
+    // costs 58, for what is a match and a tail call. The layering is worth keeping (it is what
+    // lets a retained listpack chunk hand out borrowed spans); the CALLS are not.
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             Self::Owned(iter) => iter.next().map(Vec::as_slice),
@@ -5541,6 +5555,13 @@ pub enum ListValueIter<'a> {
 
 impl<'a> Iterator for ListValueIter<'a> {
     type Item = &'a [u8];
+    // (frankenredis-qj6jn) `#[inline]`: this forwarder is called ONCE PER ELEMENT by every
+    // borrowed list read, and out of line it was its own callgrind frame. Profiled on
+    // `LRANGE 0 -1` over a 300-element RESTORED list, the two layers cost 27.20 and 26.08
+    // instructions per element -- 53 between them, against an `encode_bulk_string_slice` that
+    // costs 58, for what is a match and a tail call. The layering is worth keeping (it is what
+    // lets a retained listpack chunk hand out borrowed spans); the CALLS are not.
+    #[inline]
     fn next(&mut self) -> Option<&'a [u8]> {
         match self {
             ListValueIter::Packed(it) => it.next(),

@@ -56327,3 +56327,114 @@ and an effect inside that interval is not claimed.
    `push_redis_double_ascii`, which is a different defect.
 4. Never run a paired build against a concurrent builder in the same target dir. The two AFTER
    arms diverge with HEAD and every peer file unchanged, and only ELF identity reveals it.
+
+## 2026-08-18 CrimsonHawk: KEEP (SELF-SPEEDUP) — the borrowed list read paid TWO un-inlined iterator forwarders per element; inlining them is −10.10 pct worst on a read-dominated shape and −17.15 pct off one LRANGE (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method), deterministic
+whole-shape SELF-cost totals differenced across READ COUNTS at a fixed key count, and TWO-BINARY
+A/B with the A/A and the A/B in ONE INVOCATION and the candidate arm BRACKETED by control arms, on
+two element kinds. CV was NOT used, as a gate or otherwise — no coefficient of variation appears in
+this row's decision path and none was computed. No timing verdict is claimed: the measurand is a
+retired-instruction COUNT.
+
+THE SAME-INVOCATION A/A null median is 1.003869, bootstrap 95% CI [0.998124, 1.005488] on the
+string read shape and 0.995875, CI [0.992193, 0.997499] on the integer one, each taken in the same
+invocation as the A/B it gates. The bootstrap median-CI is the verdict gate and it excludes zero on
+both.
+
+Claim class: SELF-SPEEDUP. Campaign output: no — no vs-incumbent ratio is banked; the incumbent
+appears only as the parity oracle that must NOT move.
+
+### PROVENANCE
+
+  ELF           AFTER `327deee584e403ae4bf896aba3c6bedc6890fa1128ce4c2fe3d2c0a81405380d`,
+                BEFORE `844d8cc11371a711683fd8c044909c4a393d5a55408a7d243280760ad55a9bf2`.
+  bench_elf_sha256=327deee584e403ae4bf896aba3c6bedc6890fa1128ce4c2fe3d2c0a81405380d
+
+  Booted and hashed from `/proc/<pid>/exe`. Not a self-report and not claimed as one.
+
+### THE READ SIDE, WHICH `48eb38749` SAID TO LOOK AT AND NOBODY HAD PROFILED
+
+That row measured fr's marginal full read at 46,311 instructions per key for 300 elements and
+observed that nobody had ever profiled `LRANGE` on a restored list. Differencing two READ COUNTS at
+a fixed key count — so the RESTORE and all setup cancel and what is left is exactly one read:
+
+    per LRANGE(0,-1), restored 300-element string list
+      17,400.0   58.00/elem   fr_protocol::encode_bulk_string_slice
+       8,160.0   27.20/elem   <ListValueIter as Iterator>::next
+       7,824.0   26.08/elem   <ListChunkIter as Iterator>::next
+       4,382.6   14.61/elem   __memcpy_avx_unaligned_erms
+       4,290.0   14.30/elem   <Store>::lrange_borrow_scan_impl
+
+  TWO iterator forwarders, 53.28 instructions per element between them — as much as the RESP
+  encoder — for what each of them IS: a match and a tail call. `ListValueIter::next` is a two-arm
+  match forwarding to the inner iterator; `ListChunkIter::next` is a three-arm match whose retained
+  arm is `entries.next().map(|e| e.as_bytes(bytes))`. Neither carried `#[inline]`, and neither had
+  been inlined: both were their own callgrind frames.
+
+  The LAYERING is worth keeping — it is what lets a retained listpack chunk hand out borrowed spans
+  without copying. The CALLS are not. `#[inline]` on all three `next` implementations
+  (`ListValueIter`, `ListChunkIter`, `ChunkedListIter`) removes them:
+
+    AFTER: both iterator frames ABSENT; `lrange_borrow_scan_impl` 14.30 -> 46.50 instr/elem,
+    absorbing them. 67.58 -> 46.50 per element across the three frames, −21.08.
+
+  CHECKED THE FRAME, NOT THE ATTRIBUTE, per `feedback_a_helper_only_pays_if_the_compiler_folds_it`:
+  a plain `#[inline]` has been a NULL on this codebase before (`308db786f`) and a helper that
+  declined to inline cost 31 instructions per element (`69f8a0f72`). Here the symbols are gone from
+  the profile, which is the only evidence that settles it.
+
+### THE MEASUREMENT
+
+    deterministic, per LRANGE(0,-1), differenced across read counts
+      all-string    46,602.2 -> 40,165.5    −6,436.7    −13.81 pct
+      all-integer   40,001.2 -> 33,141.4    −6,859.8    −17.15 pct
+
+    whole-op A/B, RESTORE + THREE reads per key, slope 10 vs 30 keys
+      ALL-STRING   −10.4844 / −10.0989 / −10.4032 / −10.1794 / −10.5891 pct
+        median −10.4032 pct, CI [−10.5891, −10.0989], n=5; null ratio 1.003869
+        WORST SINGLE DRAW −10.0989 pct  <- the figure this row claims for strings
+      ALL-INTEGER  median −11.6318 pct, CI [−12.2285, −11.1238], n=4; null ratio 0.995875
+        WORST SINGLE DRAW −11.1238 pct  <- the figure this row claims for integers
+
+    88-91 pct idle, loadavg 7.2-7.9, MHz mean 1900-2500 against a 1429-4292 spread.
+
+### AND A COST ON THE RESTORE SHAPE, MEASURED AND ACCEPTED
+
+    RESTORE+DUMP, deterministic totals
+      all-string    58,138.8 -> 58,287.3    +148.5    +0.26 pct
+      all-integer   72,596.9 -> 72,664.8     +67.9    +0.09 pct
+
+  Inlining three forwarders into every list-iterating caller moves code layout, and the
+  RESTORE+DUMP path pays a little for it — the same layout contagion `36a66d696` and `69f8a0f72`
+  both hit. It is reported rather than left for someone to find. The trade is not close: one read
+  saves 6,437 instructions per key on strings where the restore-and-dump pays back 149, and
+  `48eb38749` measured the break-even for this workload class at 0.124 reads per RESTORE, so any
+  workload that reads at all is far past the point where this wins.
+
+### PARITY
+
+    LRANGE / LINDEX / LLEN over str, int, mixed and 200-byte pools, x fills −2/−1/4/128/300,
+    x n 3..300, x built-vs-RESTORED — BEFORE vs AFTER:                0 of 160 diverging
+      the same 160 vs redis 7.2.4:                                    0 of 160 diverging
+    BEFORE-vs-AFTER DUMP BYTES:                                       0 of 84 diverging
+    workload sweep vs redis 7.2.4:                                    4 of 42, UNCHANGED
+    fr-store 941, 0 failures; clippy clean; fmt unchanged by this change.
+
+  The read probe covers negative and out-of-range LRANGE bounds and both LINDEX directions
+  deliberately: this change touches the ITERATOR, so a fencepost would show as a wrong element at a
+  boundary rather than as a wrong payload length.
+
+### RETRY PREDICATES
+
+  1. `encode_bulk_string_slice` is now the largest single term on the read at 58.00 instructions per
+     element, for what is a length header and a payload copy of a 15-byte element. It is on the
+     UNIVERSAL reply path, so treat it the way `write_u64_digits` had to be treated — reopen ONLY
+     with a candidate that shows a per-element figure below 58.00 AND a null on a small-reply shape
+     that does not use lists at all.
+  2. The +0.26 pct on RESTORE+DUMP is real and was accepted, not dismissed. If a future row on that
+     path measures a regression it cannot explain, this is a candidate cause; the number to compare
+     against is 58,138.8 -> 58,287.3 per key at 300 string elements.
+  3. Do NOT read the −17.15 pct integer figure as an incumbent gain. `48eb38749` measured redis's
+     marginal integer read at 213,776 against fr's 40,012 — fr was already 5.34x ahead there, and
+     this widens a lead rather than closing a gap.
