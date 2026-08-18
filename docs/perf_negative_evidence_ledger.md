@@ -44328,3 +44328,66 @@ RETRY PREDICATE:
      (LPUSH-side / borrowed). Reopen ONLY IF a fresh attribution shows it recomputing rather
      than receiving, and only with a workload that actually drives it — this bead has twice
      measured a lever against a path that no longer reached it.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: CORRECTION — the GEOSEARCH figure everyone quotes is NOT in this ledger, and the row the ledger DOES return is a different shape, 33 points away and the opposite side of parity (`frankenredis-eh2ct`)
+
+NO MEASUREMENT. This is a source trace taken under a build hold; every figure is quoted from a
+file in this repo, and the point of the row is that the file is not this one.
+
+### Ask this ledger for GEOSEARCH's standing and it answers with the wrong shape
+
+`grep geosearch docs/perf_negative_evidence_ledger.md` returns exactly one row carrying a
+ratio: `geosearch_1` at 0.6841x (:36174). Read as GEOSEARCH's standing that says fr is 46 pct
+AHEAD and the margin is not thin at all. I reached exactly that conclusion this turn and it is
+WRONG.
+
+The certified figure lives in the harness sources:
+
+    scripts/balanced_square_ab.py:746
+      geosearch_2    1.0202 raw ADMISSIBLE, 0.9162 normalised -- fr BEHIND the control
+      geosearch_64   1.1240 raw ADMISSIBLE, 1.0094 normalised -- fr AHEAD. An inversion.
+
+`geosearch_1` is NOT that shape: one member instead of two, and no ASC.
+`scripts/shape_instr_per_op.py:648` states the hazard in its own words -- "comparing an
+instruction ratio from one shape against a throughput ratio from another is exactly the
+cross-shape error the size pairs exist to remove" -- and registers `geosearch_2` on the
+instruction board precisely so the two are comparable. The ledger never received either
+number, so the only GEOSEARCH ratio greppable here is the one that comment warns against using.
+
+### Three ways this single number is misread, in increasing order of how easy it is to miss
+
+1. RAW AND NORMALISED DISAGREE IN SIGN. Raw 1.0202 puts fr marginally AHEAD of the incumbent;
+   normalised against `get_control`, 0.9162 puts fr BEHIND. A standing instruction to quote the
+   WORST bound on this shape is answered by 0.9162, not by 1.0202. "GEOSEARCH just crossed
+   1.0x" is a true statement about the raw figure and a false one about the normalised figure,
+   and the two are one line apart in the same comment.
+
+2. THE SIZE PAIR INVERTS. `geosearch_2` normalises BEHIND, `geosearch_64` normalises AHEAD.
+   That is this bead's whole thesis observed on its own headline shape: the small-N row is the
+   one being quoted and its large-N sibling disagrees about the direction.
+
+3. THE CROSS-SHAPE SUBSTITUTION, which is the one that got me. Nothing about `geosearch_1`
+   announces that it is a different shape; it is named like a sibling, it sits in the same
+   table, it carries a clean ratio, and it is the only GEOSEARCH ratio in the file a reader is
+   most likely to search. The gap between the two readings is 0.6841x against 0.9162x -- 33
+   points, and they fall on opposite sides of parity.
+
+### What is NOT claimed here
+
+That 0.9162 is wrong. It is a certified, admissible figure and this row does not contradict it.
+`:38036` already refuses to quote a 220,750-vs-218,340 rps throughput reading against it on the
+grounds that it carries no A/A null, no control shape, and one run -- correctly, and that
+refusal still stands. What is claimed is only that the certifying figure is unreachable from
+the ledger and that the ledger's nearest answer is a different shape.
+
+RETRY PREDICATE: do not re-derive GEOSEARCH's standing by grepping this ledger -- that is the
+defect this row exists to record, and it will keep returning `geosearch_1`. Read
+`balanced_square_ab.py:746` for the throughput figure and treat 0.9162 as the worst bound until
+a replicated draw replaces it. THE MEASUREMENT WORTH TAKING, when a quiet host and a lifted
+build hold coincide: `geosearch_2` now has BOTH a registered instruction shape and a certified
+throughput figure, so it can be read on both metrics on ONE shape -- the comparison the size
+pairs were built to make possible, which nobody has taken. Expect the throughput side to be the
+harder half: `balanced_square_ab.py:743` records `xrange_2` as NEVER CERTIFIED in two attempts,
+straddling 1 and then null-failing, so a small-N throughput row on this family is not a given.
