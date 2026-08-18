@@ -63849,3 +63849,79 @@ current fusion, and it needs measuring rather than assuming.
      that has been at loadavg 17-26 throughout.
   3. Do not attribute this regression to lever 1. Its guard was mutation-pinned in `a845844ee`, and
      the failure-point ordering above is not a signature it could produce.
+
+## 2026-08-18 CrimsonHawk: SIZING — the digit-leading RESTORE regression is GONE: 1.5998x certified BEHIND becomes 0.9756x AHEAD, and the letter-leading control lands where its certified bound says it should (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method) with a LIVE redis
+7.2.4 arm, both sides in ONE INVOCATION and INTERLEAVED fr / redis / fr / redis per draw. CV was
+NOT used, as a gate or otherwise — no coefficient of variation appears in this row's decision path
+and none was computed. No timing verdict is claimed: the measurand is a retired-instruction COUNT.
+NO BUILD was run — a disk throttle forbids cargo entirely; both arms are already-compiled ELFs.
+
+**Claim class: SIZING, NOT CERTIFIED.** `certification_window.py --for ratio` returned UNFIT at
+BOTH ends of the run — loadavg 22.1-26.2 with nine projects building, idle as low as 49.9 pct. The
+numbers below are quoted because the movement is 60 pct and the control behaves, not because the
+window was fit. They are not campaign output and must not be quoted as a bound.
+
+  fr arm    `target/release/frankenredis`, sha256 `3c80ba7ad9d4ce1c...`, carrying levers 1
+            (`2904626f5`) and 2 (`15b146e10`) and the fr-persist pre-filter (`ec6eacac7`)
+  incumbent vendored redis 7.2.4
+  host      per-draw loadavg and MHz recorded inline below
+
+### TWO DRAWS ARE VOID, AND BOTH FAILURES HIT THE INCUMBENT ARM
+
+    STR      draw 1   redis 51,199.4 / 51,316.8   -- against 64,377 and 64,742 in draws 2 and 3.
+                      The incumbent arm read ~20 pct LOW, which inflated the ratio to 1.1532x.
+    DIGITSTR draw 1   redis A/A +20.747 pct       -- self-reported, 25x the 0.84 pct floor.
+
+Both are discarded. Note the direction: a cheap incumbent arm makes FR look WORSE, so voiding them
+IMPROVES the numbers below — the opposite of the direction that should make a reader comfortable,
+which is exactly why the nulls and the cross-draw comparison are printed rather than summarised.
+`feedback_ir_ratio_resolves_to_0p84_pct_in_a_quiet_window` recorded this same signature: at low
+idle the damage lands on the incumbent and is conservative, so it never gets caught by a sanity
+check on fr alone.
+
+### THE SURVIVING DRAWS
+
+    LETTER-LEADING (control)   0.9178 / 0.9157      worst 0.9178x
+      certified standing bound 0.9115x (`353776cb8`) — 0.69 pct apart, in a window at 50-55 pct idle
+      idle 55.2-55.6 pct | loadavg 22.19-26.17 | MHz mean 2937-4011
+
+    DIGIT-LEADING              0.9756 / 0.9740      worst 0.9756x
+      certified BEFORE the levers: 1.5998x (`0bb42f113`)
+      idle 75.3-76.0 pct | loadavg 24.36-24.65 | MHz mean 2891-3503
+
+**The control is what licenses reading the other number.** A letter-leading list never reaches the
+new guard term, so its ratio should be unchanged; it reads 0.9178x against a certified 0.9115x,
+0.69 pct apart in a window the gate refuses. That is the instrument declaring itself usable at this
+magnitude — and it is also why a 0.7 pct claim would be worthless here while a 60 pct one is not.
+
+### WHAT MOVED
+
+    digit-leading RESTORE+DUMP    1.5998x BEHIND  ->  0.9756x AHEAD
+    frame that caused it          173.20/elem     ->  40.07/elem  (`e83407622`)
+
+`0bb42f113` certified that fr's string RESTORE lead did not survive the first byte of each element:
+letter-leading 0.9115x ahead, digit-leading 1.5998x behind, on payloads identical but for that
+byte. That asymmetry is now gone at sizing precision. The 1.77x swing the certified row reported is
+down to roughly 1.06x between the two shapes.
+
+### WHAT THIS DOES NOT SETTLE
+
+  * It is SIZING. The crossing needs a FIT window and three clean draws before `1.5998x` may be
+    replaced anywhere as a certified figure.
+  * It says nothing about the TIMESTAMP shape. `73e9a7b74` attributes a 22.6 pct frame REGRESSION
+    on `20260818T%06d` to lever 2's fused parse failing late, and that shape was not run here. A
+    ratio for `%015d` improving does not license a claim about digit-leading data in general — the
+    two shapes differ precisely in where the parse dies.
+  * The levers remain a mixed result until the timestamp shape is measured against the incumbent
+    too.
+
+### RETRY PREDICATES
+
+  1. Re-run all three shapes — letter, `%015d`, `20260818T%06d` — against the incumbent in ONE
+     invocation in a FIT window. That is the run that decides whether the levers are net positive.
+  2. Keep the letter-leading control in every run and keep printing per-draw A/A for BOTH arms. Two
+     of six draws here were void and both were only visible from the incumbent's own numbers.
+  3. Until then, `0bb42f113`'s 1.5998x remains the certified digit-leading figure of record, with
+     this row attached as the reason to expect it to move.
