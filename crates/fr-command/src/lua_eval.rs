@@ -4248,10 +4248,18 @@ impl RegisterFunctionSpec {
 pub(crate) enum RegisterFunctionArgError {
     /// Positional form with other than exactly (name, callback).
     WrongArgCount(usize),
-    /// Positional name, or table `function_name`, was not a string.
-    NameNotString,
-    /// Positional callback, or table `callback`, was not callable.
-    CallbackNotCallable,
+    /// POSITIONAL first argument was not a string.
+    ///
+    /// (frankenredis-o500d) Split from the table form's equivalent because upstream words the
+    /// same defect differently per calling convention, so one shared variant cannot carry a
+    /// faithful message.
+    FirstArgNotString,
+    /// POSITIONAL second argument was not callable.
+    SecondArgNotFunction,
+    /// TABLE form `function_name` was present but not a string.
+    FunctionNameNotString,
+    /// TABLE form `callback` was present but not callable.
+    CallbackNotFunction,
     /// Table form with no `function_name` key.
     MissingFunctionName,
     /// Table form with no `callback` key.
@@ -4270,6 +4278,54 @@ pub(crate) enum RegisterFunctionArgError {
     /// A flags entry that is not a string, or a string outside `scripts_flags_def`
     /// (script.c:34): no-writes, allow-oom, allow-stale, no-cluster, allow-cross-slot-keys.
     UnknownFlag,
+}
+
+impl RegisterFunctionArgError {
+    /// Upstream's own refusal text for this shape.
+    ///
+    /// (frankenredis-o500d) Every string here is a literal lifted from
+    /// `function_lua.c::luaRegisterFunctionReadNamedArgs` / `luaRegisterFunctionReadFlags` /
+    /// `luaRegisterFunction`, which push them through `luaPushError` as the bare phrase. The
+    /// enclosing envelope is fr's and is NOT claimed to match: FUNCTION LOAD wraps whatever the
+    /// builtin returns in `ERR Error registering functions: ERR user_function:<line>: `, and
+    /// whether that matches 7.2.4 byte for byte is what `scripts/function_load_differ.py` has to
+    /// settle against a live server. The PHRASE is decidable from the incumbent's source; the
+    /// envelope is not, and this changes only the phrase.
+    pub(crate) fn upstream_message(&self) -> &'static str {
+        match self {
+            Self::WrongArgCount(_) => "wrong number of arguments to redis.register_function",
+            Self::FirstArgNotString => "first argument to redis.register_function must be a string",
+            Self::SecondArgNotFunction => {
+                "second argument to redis.register_function must be a function"
+            }
+            Self::FunctionNameNotString => {
+                "function_name argument given to redis.register_function must be a string"
+            }
+            Self::CallbackNotFunction => {
+                "callback argument given to redis.register_function must be a function"
+            }
+            Self::MissingFunctionName => {
+                "redis.register_function must get a function name argument"
+            }
+            Self::MissingCallback => "redis.register_function must get a callback argument",
+            Self::SingleArgNotTable => {
+                "calling redis.register_function with a single argument is only applicable to \
+                 Lua table (representing named arguments)."
+            }
+            Self::NamedKeyNotString => {
+                "named argument key given to redis.register_function is not a string"
+            }
+            Self::UnknownArgument => "unknown argument given to redis.register_function",
+            Self::DescriptionNotString => {
+                "description argument given to redis.register_function must be a string"
+            }
+            Self::FlagsNotTable => {
+                "flags argument to redis.register_function must be a table representing function \
+                 flags"
+            }
+            Self::UnknownFlag => "unknown flag given",
+        }
+    }
 }
 
 /// Is this value callable? Both a Lua closure and a host builtin qualify.
@@ -4360,12 +4416,12 @@ pub(crate) fn parse_register_function_args(
             match key_bytes.as_slice() {
                 b"function_name" => {
                     if !matches!(value, LuaValue::Str(_)) {
-                        return Err(RegisterFunctionArgError::NameNotString);
+                        return Err(RegisterFunctionArgError::FunctionNameNotString);
                     }
                 }
                 b"callback" => {
                     if !lua_value_is_callable(&value) {
-                        return Err(RegisterFunctionArgError::CallbackNotCallable);
+                        return Err(RegisterFunctionArgError::CallbackNotFunction);
                     }
                 }
                 b"description" => {
@@ -4407,20 +4463,20 @@ pub(crate) fn parse_register_function_args(
         // `LuaTable::get` takes a LuaValue key and returns Nil for a miss — there is no
         // Option-returning accessor on LuaTable (`get_str` is on LuaTableInner, one layer
         // down). So "absent" and "present but wrong type" are separated by testing Nil
-        // FIRST, which is also what keeps MissingFunctionName distinct from NameNotString.
+        // FIRST, which is what keeps MissingFunctionName distinct from FunctionNameNotString.
         let name_value = t.get(&LuaValue::Str(b"function_name".to_vec()));
         if matches!(name_value, LuaValue::Nil) {
             return Err(RegisterFunctionArgError::MissingFunctionName);
         }
         let LuaValue::Str(name) = name_value else {
-            return Err(RegisterFunctionArgError::NameNotString);
+            return Err(RegisterFunctionArgError::FunctionNameNotString);
         };
         let callback = t.get(&LuaValue::Str(b"callback".to_vec()));
         if matches!(callback, LuaValue::Nil) {
             return Err(RegisterFunctionArgError::MissingCallback);
         }
         if !lua_value_is_callable(&callback) {
-            return Err(RegisterFunctionArgError::CallbackNotCallable);
+            return Err(RegisterFunctionArgError::CallbackNotFunction);
         }
         // (frankenredis-9hori) flags/description are captured from the RUNTIME value, which
         // is the whole point: the text scan in fr_store::function_load can only read them
@@ -4458,10 +4514,10 @@ pub(crate) fn parse_register_function_args(
         return Err(RegisterFunctionArgError::WrongArgCount(args.len()));
     }
     let LuaValue::Str(name) = &args[0] else {
-        return Err(RegisterFunctionArgError::NameNotString);
+        return Err(RegisterFunctionArgError::FirstArgNotString);
     };
     if !lua_value_is_callable(&args[1]) {
-        return Err(RegisterFunctionArgError::CallbackNotCallable);
+        return Err(RegisterFunctionArgError::SecondArgNotFunction);
     }
     // Positional form carries no flags or description, matching upstream.
     Ok(RegisterFunctionSpec {
@@ -8299,8 +8355,10 @@ impl<'a> LuaState<'a> {
             // source and `scripts/function_load_differ.py` is what will adjudicate them
             // when this is wired into FUNCTION LOAD.
             "redis.register_function" => {
+                // (frankenredis-o500d) Upstream's own phrase, not a placeholder. The
+                // envelope FUNCTION LOAD wraps around it is unchanged and still unadjudicated.
                 let spec = parse_register_function_args(args)
-                    .map_err(|e| format!("register_function: malformed arguments ({e:?})"))?;
+                    .map_err(|e| e.upstream_message().to_string())?;
                 // (frankenredis-9hori) Keep the callback too. `parse_register_function_args`
                 // has ALREADY validated the argument shape and callability by this point, so
                 // this is pure extraction and cannot accept anything the parser rejected --
@@ -15731,14 +15789,14 @@ mod tests {
                 (b"function_name", LuaValue::Number(1.0)),
                 (b"callback", callback()),
             ])),
-            Err(RegisterFunctionArgError::NameNotString)
+            Err(RegisterFunctionArgError::FunctionNameNotString)
         );
         assert_eq!(
             parse_register_function_args(&table_form(&[
                 (b"function_name", LuaValue::Str(b"n".to_vec())),
                 (b"callback", LuaValue::Str(b"not a function".to_vec())),
             ])),
-            Err(RegisterFunctionArgError::CallbackNotCallable)
+            Err(RegisterFunctionArgError::CallbackNotFunction)
         );
 
         // REFUSED — a lone non-table argument is its own upstream error, not an arity error.
@@ -15758,14 +15816,14 @@ mod tests {
         // REFUSED — right arity, wrong types.
         assert_eq!(
             parse_register_function_args(&[LuaValue::Number(1.0), callback()]),
-            Err(RegisterFunctionArgError::NameNotString)
+            Err(RegisterFunctionArgError::FirstArgNotString)
         );
         assert_eq!(
             parse_register_function_args(&[
                 LuaValue::Str(b"n".to_vec()),
                 LuaValue::Str(b"nope".to_vec()),
             ]),
-            Err(RegisterFunctionArgError::CallbackNotCallable)
+            Err(RegisterFunctionArgError::SecondArgNotFunction)
         );
 
         // ---- (frankenredis-o500d) shapes upstream REFUSES and fr used to ACCEPT ----
