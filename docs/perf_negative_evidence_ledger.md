@@ -62203,3 +62203,99 @@ median-CI: the claim is a worst-of-FIT-draws bound. CV was not used, as a gate o
    17-24 pct non-stationary window with no peer builds present, and the gate will refuse them.
 4. `sort_ro_alpha_64` at 0.194x needs FIT draws before it is quoted, despite two UNFIT draws
    agreeing to four decimal places.
+
+## 2026-08-18 CrimsonHawk: NO RUN THIS TURN — /data is at 41G, under the 42G brake, so no build and no measurement was taken; lever 2 is staged as an anchor-verified patch instead, and the repo's own disk consumers are itemised (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: none required — this row runs no measurement and claims no number about fr or the
+incumbent. CV was NOT used and no timing verdict is claimed. What it records is a disk
+census and a patch that has been anchor-verified but NOT applied.
+
+Claim class: not applicable. Campaign output: no.
+
+### THE BRAKE WAS HIT, AND THE TWO FIGURES IN THE BRIEF DISAGREED
+
+The turn brief carried **41G** in its header and **45G** in its body. `df` says:
+
+    /dev/mapper/ubuntu--vg-ubuntu--lv  1.9T  1.8T  41G  98% /
+
+**41G is below the 42G brake**, so the header was correct and the body stale. No build was started
+and no callgrind run was made — the latter is not covered by the brake but writes to `/data` and
+burns CPU on a host at loadavg 25.87. The certification gate independently returned UNFIT at
+51 pct non-stationary, so nothing certifiable was available this turn regardless.
+
+**Check `df` rather than the brief when the brief disagrees with itself.** Either figure alone
+would have been believed; it was the disagreement that forced the check.
+
+### WHAT THIS REPO IS ACTUALLY HOLDING
+
+    target             28G     regenerable, but deleting it forces a full rebuild on every agent
+    .worktrees        2.8G     a worktree tree inside the repo
+    artifacts         1.9G     historical profiling dumps
+    .git              1.2G
+    legacy_redis_code 244M     the vendored incumbent — needed, and small
+
+Single files over 50M, all `perf.data` from past passes:
+
+    209M  artifacts/optimization/frankenredis-6kecb/baseline/setex-p16-1m.perf.data
+    196M  artifacts/optimization/frankenredis-pe47p/baseline/setex-p16-1m.perf.data.old
+    186M  artifacts/optimization/frankenredis-wooin/baseline/setex-p16-1m.perf.data
+    176M  artifacts/optimization/frankenredis-pe47p/baseline/setex-p16-1m.perf.data
+    136M  artifacts/optimization/frankenredis-6tsou/pass2/candidate-getdel-hit-p16-300k.perf.data
+
+Also present and NOT mine: four untracked callgrind outputs in `scripts/` (`cg.lzfr.*`, 1.5M
+total) from someone's LZF work. **Nothing here has been deleted** — deletion needs explicit
+permission and most of it is other agents' evidence. This is a census for whoever holds that
+permission, not an action.
+
+For scale, measured earlier today: `frankenpandas` holds **60G across five target dirs**, and this
+session's own scratch tree holds **23G**, almost all of it abandoned per-session target dirs from
+PRIOR sessions rather than anything live.
+
+### LEVER 2 IS STAGED, ANCHOR-VERIFIED, AND NOT APPLIED
+
+The generator at `scratchpad/lever2_reorder.py` reports `anchor OK: exactly one occurrence`
+against today's `packed_set.rs`. It is content-anchored rather than line-anchored so it survives
+HEAD movement, refuses if the anchor count is not exactly 1, and is idempotent. **The source tree
+was not modified** — an unbuilt edit in a shared checkout breaks every other agent's build, which
+is a worse failure than waiting.
+
+The patch, recorded here so it outlives the scratchpad:
+
+    -    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+    -        return false;
+    -    }
+    -    if digits[0] == b'0' && digits.len() > 1 {
+    -        return false;
+    -    }
+    +    if digits.is_empty() {
+    +        return false;
+    +    }
+    +    if digits[0] == b'0' && digits.len() > 1 {
+    +        return false;
+    +    }
+    +    if !digits.iter().all(u8::is_ascii_digit) {
+    +        return false;
+    +    }
+
+Both blocks are necessary conditions on INDEPENDENT properties of the same slice, so the order
+carries no semantics, and `digits[0]` stays in bounds because the emptiness test still runs first.
+
+### WHEN IT IS BUILT
+
+  1. `cargo test -p fr-store` is REQUIRED, not optional. The `debug_assert_eq!` in
+     `from_restored_nodes` compares the derived chunk total against the full walk and is the
+     oracle for this change — and it only exists in a debug build, so a release-only check would
+     prove nothing.
+  2. `%015d` must fall toward the letter-leading control. `20260818T%06d` and `7f3a%011d` must
+     **NOT** move: `all()` short-circuits at bytes 9 and 2 respectively, so they never reached the
+     wasted scan. Their non-movement is the control that says the reorder did what it claims
+     rather than something broader.
+  3. The certified letter-leading bounds — 0.9115x RESTORE and 0.6077x RPUSH+LTRIM — must not move
+     either. Every lever in this set is gated on a digit-leading first byte.
+
+### RETRY PREDICATES
+
+  1. Apply and measure as soon as /data clears 42G and a FIT window is available. Nothing about
+     this lever needs re-deriving; it needs a build.
+  2. If the anchor check ever reports a count other than 1, STOP and re-read the function. A
+     generator that force-applies a drifted anchor is how a mechanical change becomes a bug.
