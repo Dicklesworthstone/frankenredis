@@ -5406,6 +5406,22 @@ macro_rules! with_direct_histogram_fields {
             "lpushx" => lpushx,
             "setex" => setex,
             "expiretime" => expiretime,
+            // (frankenredis-ozrro, second batch) Ten more, selected the same way -- by what
+            // fraction of their OWN hot path the record step is, MEASURED per command:
+            //   touch 14.16, unlink 12.80, pttl 9.71, expire 8.64, persist 7.87,
+            //   pexpire 6.83, zrem 5.62, srem 5.51, hdel 5.51, lrem 5.22 pct.
+            // `mset` (3.85) and `hmset` (3.13) were MEASURED and left out: they crowd the
+            // same length buckets for less than half the return of the worst one included.
+            "pttl" => pttl,
+            "persist" => persist,
+            "expire" => expire,
+            "pexpire" => pexpire,
+            "srem" => srem,
+            "hdel" => hdel,
+            "zrem" => zrem,
+            "lrem" => lrem,
+            "unlink" => unlink,
+            "touch" => touch,
         }
     };
 }
@@ -5512,6 +5528,18 @@ pub struct CommandHistogramTracker {
     lpushx: Option<CommandHistogram>,
     setex: Option<CommandHistogram>,
     expiretime: Option<CommandHistogram>,
+    // (frankenredis-ozrro, second batch) See `with_direct_histogram_fields!` for the
+    // per-command fractions these were selected on.
+    pttl: Option<CommandHistogram>,
+    persist: Option<CommandHistogram>,
+    expire: Option<CommandHistogram>,
+    pexpire: Option<CommandHistogram>,
+    srem: Option<CommandHistogram>,
+    hdel: Option<CommandHistogram>,
+    zrem: Option<CommandHistogram>,
+    lrem: Option<CommandHistogram>,
+    unlink: Option<CommandHistogram>,
+    touch: Option<CommandHistogram>,
     histograms: HashMap<String, CommandHistogram, foldhash::quality::RandomState>,
 }
 
