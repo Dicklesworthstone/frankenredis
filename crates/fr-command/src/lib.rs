@@ -21738,7 +21738,7 @@ fn command_info_subcommand_entry(
 /// its admin-flagged subcommands, returning the bare parent entry.
 const SUBCOMMAND_PARENTS_WITH_INFO: &[&str] = &[
     "acl", "client", "cluster", "command", "config", "function", "latency", "memory", "module",
-    "object", "pubsub", "script", "slowlog", "xgroup", "xinfo",
+    "object", "pubsub", "script", "sentinel", "slowlog", "xgroup", "xinfo",
 ];
 
 fn command_info_subcommands(name: &str) -> Vec<RespFrame> {
@@ -21760,11 +21760,19 @@ fn command_info_subcommands(name: &str) -> Vec<RespFrame> {
 /// fans out subcommand entries via SUBCOMMAND_TABLE. Set comes from
 /// the `container` field across legacy_redis_code/redis/src/commands/
 /// *.json — every parent that appears at least once in subcommand
-/// JSON files. SENTINEL is intentionally omitted (upstream's SENTINEL
-/// container is excluded from COMMAND DOCS for non-sentinel servers).
+/// JSON files.
+///
+/// SENTINEL used to be omitted here, with the reason given as "upstream's
+/// SENTINEL container is excluded from COMMAND DOCS for non-sentinel servers".
+/// That reason was right and the mechanism was wrong: this list is a `&[&str]`
+/// with no access to `store`, so omitting the parent suppressed the nesting in
+/// SENTINEL MODE too, where upstream emits all 21. The exclusion is now enforced
+/// where it can see the mode -- `command_table_row_is_visible` gates every
+/// caller of `command_docs_subcommands`, so a standalone server never reaches
+/// this list with "sentinel" and a sentinel server gets the full fan-out.
 const SUBCOMMAND_PARENTS_WITH_DOCS: &[&str] = &[
     "acl", "client", "cluster", "command", "config", "debug", "function", "latency", "memory",
-    "module", "object", "pubsub", "script", "slowlog", "xgroup", "xinfo",
+    "module", "object", "pubsub", "script", "sentinel", "slowlog", "xgroup", "xinfo",
 ];
 
 fn command_docs_subcommands(name: &str, resp: i64) -> Vec<RespFrame> {
@@ -82497,6 +82505,86 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// In sentinel mode the parent must NEST its 21 subcommands, not just list them.
+    ///
+    /// This is the half of the gap that survived the flat listing. `COMMAND INFO`
+    /// puts a container's subcommands in field 9 of its own row, built by
+    /// `command_info_subcommands`, which consults an allowlist of parent names --
+    /// and that allowlist is a plain `&[&str]` with no `store`, so it could not
+    /// express "only in sentinel mode" and simply left SENTINEL out. The result
+    /// was a row that existed, carried the right arity and flags, and reported an
+    /// EMPTY subcommands array on a server where upstream reports 21.
+    ///
+    /// A client cannot tell that apart from a container that genuinely has no
+    /// subcommands, which is why it needs its own assertion rather than riding on
+    /// the flat COMMAND LIST count: the two are built by different functions from
+    /// the same table, and the listing one was already green.
+    #[test]
+    fn sentinel_mode_nests_subcommands_in_the_parent_row() {
+        let mut store = Store::new();
+        store.sentinel_mode = true;
+
+        let info = dispatch_argv(
+            &[b"COMMAND".to_vec(), b"INFO".to_vec(), b"sentinel".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("command info sentinel");
+        let RespFrame::Array(Some(items)) = info else {
+            panic!("expected Array, got {info:?}");
+        };
+        let RespFrame::Array(Some(row)) = &items[0] else {
+            panic!("sentinel mode must return a row, got {:?}", items[0]);
+        };
+        let RespFrame::Array(Some(subs)) = &row[9] else {
+            panic!("field 9 is the subcommands array, got {:?}", row[9]);
+        };
+        assert_eq!(
+            subs.len(),
+            21,
+            "COMMAND INFO sentinel must nest all 21 subcommands, not an empty array"
+        );
+
+        // COMMAND DOCS fans out through a SECOND allowlist and a second builder,
+        // so it fails independently of the one above.
+        let docs = dispatch_argv(
+            &[b"COMMAND".to_vec(), b"DOCS".to_vec(), b"sentinel".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("command docs sentinel");
+        let RespFrame::Array(Some(pairs)) = docs else {
+            panic!("expected Array, got {docs:?}");
+        };
+        assert_eq!(pairs.len(), 2, "one (name, docs) pair for sentinel");
+        let RespFrame::Array(Some(fields)) = &pairs[1] else {
+            panic!("expected a docs map, got {:?}", pairs[1]);
+        };
+        let has_subcommands = fields
+            .iter()
+            .any(|f| matches!(f, RespFrame::BulkString(Some(b)) if b == b"subcommands"));
+        assert!(
+            has_subcommands,
+            "COMMAND DOCS sentinel must carry a subcommands field in sentinel mode"
+        );
+
+        // And the standalone side of the same two paths stays empty, since the
+        // allowlists no longer carry the exclusion themselves.
+        let mut plain = Store::new();
+        assert!(!plain.sentinel_mode);
+        let docs = dispatch_argv(
+            &[b"COMMAND".to_vec(), b"DOCS".to_vec(), b"sentinel".to_vec()],
+            &mut plain,
+            0,
+        )
+        .expect("command docs sentinel standalone");
+        assert_eq!(
+            docs,
+            RespFrame::Array(Some(vec![])),
+            "standalone COMMAND DOCS must not resolve the sentinel container"
+        );
     }
 
     #[test]
