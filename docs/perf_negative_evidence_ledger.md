@@ -45240,3 +45240,139 @@ argument applies to any other length parser on a hot path, but do NOT assume it:
 because it runs TWICE per op, and a parser called once would return about half of it, below the
 ~40 instr/op resolution of the whole-process instrument and therefore only measurable on the
 frame.
+
+## 2026-08-18 CrimsonHawk: KEEP (COMPETITIVE) — EVALSHA indexed by SHA: **4.5408x -> 1.1631x** worst bound vs Redis 7.2.4 on a 4 KB script, and the per-byte SIZE DEPENDENCE is eliminated (`frankenredis-sf510`)
+
+Claim class: COMPETITIVE
+Campaign output: yes
+
+Shipped in `0c70eaec3`. This is the lever `frankenredis-sf510` predicted from source reading
+under a build hold, and the prediction held exactly.
+
+### THE DEFECT
+
+EVALSHA is handed a SHA and then paid a full `to_vec()` copy of the script body PLUS a
+full-body hash, to probe `LUA_COMPILED_CHUNK_CACHE` — which is keyed on SOURCE BYTES. It
+already held a stable identifier for the thing it was looking up. Both costs are O(script size)
+and both were per call, on a path that is O(1) after the first compile.
+
+### STANDING AGAINST THE INCUMBENT, REPLICATED, WORST BOUND QUOTED
+
+fr against Redis 7.2.4 instructions per op, two-point (N=1000, 2N=2000, startup and seeding
+cancelled). ABOVE 1.0 means fr behind. Each row is a SINGLE INVOCATION containing both the fr
+arm and a live vendored redis-server arm started, seeded and measured side-by-side.
+
+  shape           BEFORE (worst)   AFTER (worst)
+  evalsha_large   4.5408x          **1.1631x**     (r1 1.1620, r2 1.1631)
+  evalsha_small   1.2345x          1.1985x         (r1 1.1872, r2 1.1985)
+
+Stated inline so the figure does not live only in a table: EVALSHA on a 4 KB script is now
+fr/Redis 7.2.4 1.1631x at its worst replicated bound, down from fr/Redis 7.2.4 4.5408x, measured
+against the live vendored redis-server arm named in the provenance below.
+
+### THE RESULT IS THE ELIMINATED SLOPE, NOT THE RATIO
+
+fr-side, interleaved across the two ELFs, two replicates each:
+
+  shape           before               after                delta
+  evalsha_large   42215.7  42218.1     10770.9  10775.4     -74.5 pct
+  evalsha_small   11076.9  11080.2     10849.7  10779.0      -2.4 pct
+
+Large and small now cost THE SAME (10,770.9 against 10,849.7 instr/op) where large previously
+cost 3.8x small. That is the claim worth making: the two shapes differ ONLY by 4000 bytes of Lua
+COMMENT, so the interpreter executes the identical `return 1` in both, and the old gap was
+therefore pure per-byte overhead rather than any execution work. A flat line across the size
+ladder is what "O(1) after the first compile" looks like, and it is a stronger statement than
+any single ratio.
+
+### WHY IT IS SOUND, AND THE GUARD THAT MAKES IT SO
+
+CONTENT-ADDRESSED KEY: a SHA1 always denotes the same bytes, so an entry in the SHA index can
+never be stale, and it needs no invalidation on SCRIPT FLUSH for exactly the reason the existing
+bytes-keyed cache needs none. Both caches hold the SAME `Rc<CompiledChunk>` — this adds an
+index, not a second copy of the compiled program — and it mirrors the existing 256-entry bound
+and clear policy so the two cannot diverge in memory behaviour.
+
+THE GUARD: because the index deliberately OUTLIVES SCRIPT FLUSH, and cannot know whether this
+server still KNOWS the script, existence is checked FIRST against `script_cache` before the
+index is consulted. Remove that and a flushed script EXECUTES where Redis 7.2.4 returns
+NOSCRIPT — a wrong answer, not a slow one.
+
+Pinned by `evalsha_after_script_flush_returns_noscript_even_though_the_chunk_is_still_compiled_sf510`,
+which is written to be load-bearing: it runs a live EVALSHA to POPULATE the index BEFORE
+flushing, so the post-flush call is served from a WARM cache. Without that first call the test
+would pass even with the guard deleted.
+
+The guard was NOT mutation-tested, deliberately: a peer swept this checkout once while a
+deliberate mutation was in place and shipped it
+(`feedback_never_mutation_test_in_a_shared_checkout`). Reasoned instead — with the guard removed
+the warm index hits and the call returns `Integer(1)` rather than NOSCRIPT, which is precisely
+what the assertion rejects.
+
+### A REGRESSION FOUND AND FIXED BEFORE SHIPPING
+
+The first implementation measured **+1.7 pct on `evalsha_small`**. Cause: it normalised the SHA
+into a fresh `String` while `script_get` lowercased it again internally — two allocations per
+call, which on an 8-byte script costs more than the body hash the change removes. Normalising
+once through a new `Store::script_contains_hex` turned that into **-2.4 pct**.
+
+Recorded because the intermediate state was a real lever that was NEGATIVE for the common case:
+tiny scripts are the norm and a 4 KB EVALSHA is not. Shipping the first version would have
+traded the common case for the rare one while reporting a 74 pct win.
+
+### COUNTED MECHANISM
+
+Two-point callgrind subtraction at N=1000 and 2N=2000, startup and seeding cancelled, so the
+SCRIPT LOAD seeding is not in these figures. Instruction counts as tabulated; the fr-side A/B is
+interleaved across two ELFs with two replicates per cell, and every cell reproduces within 0.7
+pct of its pair.
+
+The instrument carries its own null, measured in a single invocation of the same harness on one
+ELF and one shape: A/A null median 1.000002, bootstrapped over 20,000 resamples, 95% median CI
+[0.996069, 1.003947], from six draws and 30 pairwise ratios (banked in `0bf781d57`). The
+smallest effect claimed here is -2.4 pct, which is 6x the null's half-width.
+
+CV was not used, as a gate or otherwise; the gate is the bootstrap 95% median CI quoted above,
+and an effect inside that interval is not claimed.
+
+### EQUIVALENCE
+
+`cargo test -p fr-command` 1231 passed 0 failed (1230 before, plus the new guard test);
+`cargo test -p fr-store` 926 passed 0 failed. No differ corpus applies: this changes no reply
+bytes and no dispatch routing, only which cache the compiled chunk is found in. The behavioural
+risk is confined to the FLUSH interaction, which the guard test covers directly.
+
+### PROVENANCE
+
+  ELF           77bc28f80d32d3f0, plain `--release`, no feature flags, built locally with
+                RCH_CARGO_WRAPPER_BYPASS=1, path taken from `--message-format=json`, copied to a
+                private path and sha256'd there. BEFORE arm is `10e367dc8f1e2767` at HEAD
+                `7860d231d`, one change apart.
+  bench_elf_sha256=77bc28f80d32d3f0d389acffc47b435804a5199eb28d29a263a0bf3390b45618
+  incumbent     vendored redis 7.2.4, live arm started, seeded and measured in the SAME
+                INVOCATION as the fr arm, one harness process running both servers side-by-side.
+  harness       `scripts/shape_instr_per_op.py`; the `evalsha_small` / `evalsha_large` shapes
+                and the list-seed support they required landed in `7860d231d`.
+  host          thinkstation1, 64 cores observed, powersave governor. /data 131G before the
+                first build and 130G after the last, re-checked between builds because the
+                volume swung to 362M and back earlier in the session.
+  PER-ARM loadavg / CPU MHz
+                fr-side A/B      load 8.93 12.87 10.91 and 8.24 12.31 10.78
+                vs-incumbent     load 8.24 12.31 10.78, CPU MHz mean 2434
+                suites           load 14.45 14.84 11.24
+  admissibility Instruction counts are deterministic and load-immune. No timed row is claimed,
+                and none was taken.
+
+### RETRY PREDICATE
+
+1. Reopen only if `evalsha_large` and `evalsha_small` diverge again by more than 5 pct fr-side —
+   that is the signature of the size dependence returning, and it is a cheaper check than any
+   ratio. A single size cannot detect it.
+2. Do NOT apply this fix shape to FCALL. `frankenredis-kbyhy` measures 55.3013x at 32 functions
+   and its dominant term is the per-call allocator traffic and Lua globals/scope clone
+   (~53,000 and ~23,000 instr/op respectively), not the cache key. A cache-key change there
+   removes ~28,000 of ~413,000 and would leave 53x looking like 50x while appearing to have
+   fixed it. Reject any FCALL fix whose effect on `fcall_lib32` is under 100,000 instr/op.
+3. The remaining EVALSHA gap is 1.1631x, i.e. fr still retires ~16 pct more instructions than
+   Redis on a trivial script. That residue is the general Lua-interpreter gap
+   (ledger:13594), not this lever, and should be attacked there rather than here.
