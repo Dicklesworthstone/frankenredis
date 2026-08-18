@@ -54518,3 +54518,89 @@ digits. That left the plumbing on both sides of it visible in the profile:
   3. This row measures a list of integers. Do not re-derive its percentage for hash/set/zset
      RESTORE; quote 26.00 instructions per integer entry (18.00 + 8.00) until those shapes are
      measured — `feedback_quote_instr_per_element_when_the_denominator_moves`.
+
+## 2026-08-18 CrimsonHawk: CORRECTION to my own two rows — a `*malloc*` glob counts mimalloc's NESTED frames, so my allocation counts were 3x too high: get_integer allocates ONCE, mget_3 THREE times (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — no code changed and no ratio is claimed. This corrects figures I published
+in `8094e30f7` and `9d0643afe` before anyone builds on them.
+
+### WHAT I GOT WRONG
+
+I counted allocations with `call_count_delta.py <dump> <ops> malloc`. In this binary that glob
+matches the WHOLE mimalloc entry chain, not one function:
+
+  __rustc::__rust_alloc          1.000
+  mi_malloc_aligned              0.999
+  mi_theap_malloc_aligned        0.999
+
+Those are three FRAMES of ONE allocation. So every allocation was counted three times, and the
+figures I published are 3x too high:
+
+  shape         I published      TRUE (__rust_alloc / free)
+  get_integer   "3 allocations"  1.0000 / 1.0050   -> ONE
+  mget_3        "malloc 9.0390"  3.0000 / 3.0085   -> THREE, one per value
+  get_control   -                0.0000 / 0.0040   -> none
+
+`free` has no such chain and agrees with `__rust_alloc` on all three shapes, which is what makes
+this a counting artefact rather than a real difference.
+
+### WHAT SURVIVES UNCHANGED
+
+Every INSTRUCTION figure. Those are two-point differences of callgrind counts, not call counts,
+and they never went through the glob:
+
+  get_integer 1112.8 instr/op vs get_control 936.0 — the integer read still costs +176.8 instr/op,
+  18.9 pct more than the string read of the same key.
+
+  mget_3: integer_decimal_bytes 252.0 instr/op self, __memcpy_avx_unaligned_erms 199.8.
+
+The mechanism is untouched too: `Value::string_bytes` returns `Cow::Owned` for the Integer arm
+and `Cow::Borrowed` for the String arm, and `integer_decimal_bytes` allocates a Vec then does a
+variable-length `extend_from_slice`. What changes is only the SIZE of the allocation half: one
+allocation per value, not three.
+
+### THE REUSABLE, WHICH IS THE POINT OF THIS ROW
+
+**Do not count allocations with a `*malloc*` substring in this repo.** mimalloc's aligned entry
+points nest, so the count inflates by roughly 3x. Count `__rust_alloc`, or count `free`, and
+prefer agreeing on both. The same trap applies to any glob over an allocator's internals —
+`*alloc*` would be worse still.
+
+This is the second time a substring match has cost me a claim in this campaign: a greedy `calls=`
+regex was recorded doing the same thing in `eac2f9700`. A detector that matches by substring needs
+its matches PRINTED once and read, not just summed.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No timed quantity and no ratio are claimed. The counts are exact integers from two-point
+differencing at N=2000 and 2N=4000 on one ELF; `get_control` is the negative control at 0.0000
+`__rust_alloc` calls/op on the same binary.
+
+For the instrument generally, measured in a single invocation of the same harness on one ELF and
+one shape: A/A null median 1.000002, bootstrapped over 20,000 resamples, 95% median CI
+[0.996069, 1.003947], from six draws and 30 pairwise ratios, banked in `0bf781d57`.
+
+CV was not used, as a gate or otherwise; the gate is the bootstrap 95% median CI quoted above,
+and an effect inside that interval is not claimed.
+
+### PROVENANCE
+
+  ELF           `4a16b4242e7c86ea774a7f973ecf0dfd6b66493292cd43527d15d764151273ec`, reused; NO
+                build was run for this row.
+  bench_elf_sha256=4a16b4242e7c86ea774a7f973ecf0dfd6b66493292cd43527d15d764151273ec
+  incumbent     NOT RUN — no ratio is claimed by this row.
+  harness       `scripts/shape_instr_per_op.py`, `scripts/call_count_delta.py --callers`.
+  host          /data 75G free. loadavg 8.53 14.13 14.14, CPU idle 85 pct, iowait 0, zero
+                frankenredis rustc processes verified by process args.
+  disposition   NO CODE CHANGED. The target in `8094e30f7` stands with its allocation half
+                divided by three.
+
+### RETRY PREDICATE
+
+1. The acceptance test in `8094e30f7` is amended: `integer_decimal_bytes` 3.0000 -> 0.0000
+   calls/op on `mget_3` and `__rust_alloc` 3.0000 -> 0.0000 — NOT `malloc` 9.0390.
+2. Any row in either ledger quoting an allocations-per-op figure derived from a `malloc` substring
+   should be divided by three before it is trusted, or re-taken against `__rust_alloc`.
+3. When adding a detector that matches by substring, print the matched symbol names once and read
+   them. Both times this has bitten me the fix was visible in one line of output.
