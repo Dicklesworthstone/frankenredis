@@ -53894,3 +53894,100 @@ knowing before anyone re-attributes this route:
      element, untouched by this whole arc. `NEGATIVE_EVIDENCE.md:5684` rejected making the decode
      LAZY; nothing has yet measured the cost of the eager walk itself, and that is where the next
      real headroom on the RESTORE shape is.
+
+--------------------------------------------------------------------------------
+
+## TARGET — the generic dispatch already HOLDS a command enum and converts it to a string so the recorder can match the string back to a field. Scoped: the seam is 3 call sites, not 93
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — nothing is measured or shipped here. A build was in flight for this
+project for the whole window, so no arm was compiled and no number below is new.
+
+My own row shipping the ten direct histogram fields registered the successor: *"Re-open as a
+COMMAND-ID dispatch, not a longer name match. Success predicate: the fall-through tax returns to
+0.0 within the A/A interval AND the winners keep their 90+ instr/op."* This scopes that, and the
+scoping changed the design twice.
+
+### THE ROUND TRIP, WHICH IS THE WHOLE WASTE
+
+At the generic dispatch sites (`fr-runtime` 33484, 34529, 34681) the code holds a command ENUM
+and calls:
+
+    store.record_command_histogram_canonical_with_kind(cmd.name_lower(), elapsed_us, kind)
+
+`name_lower()` is a `match` from enum variant to `&'static str`. `record_canonical_with_kind`
+then runs a 25-arm `match` on that string to recover which direct field to use. **An enum
+discriminant is converted to a string so that a string match can convert it back into a field
+selector.** Both matches are pure loss: the second one is the +20.3 instr/op fall-through tax I
+measured and shipped, and the first is the setup for it.
+
+### SCOPING, AND WHY THE OBVIOUS DESIGN IS THE WRONG ONE
+
+First instinct was a compile-time slot API for the literal call sites, since the recorder's own
+doc says callers pass "a static literal". Counted instead of assumed, across `fr-runtime`:
+
+    112  call sites of record_command_histogram_canonical_with_kind
+     93  pass a string LITERAL, across 80 distinct commands
+     29  of those name a command that HAS a direct field (17 commands)
+     14  pass a RUNTIME string (cmd.name_lower(), canonical, cmd_lower, name_lower, ...)
+
+**That design cannot work, and the count is what shows it.** Eight of the twenty-five
+direct-field commands — `hlen`, `lpush`, `rpush`, `sadd`, `ttl`, `type`, `zcard`, `zrank` — have
+NO literal call site at all. They reach the recorder only through `cmd.name_lower()`. Five of
+them (`zcard`, `hlen`, `type`, `ttl`, `zrank`) are commands I measured gaining 92.8-114.5
+instr/op from their direct fields, so they certainly arrive; they just do not arrive by a literal.
+
+A literal-only slot API would therefore leave them on the string path, and — worse — removing the
+25-arm match to kill the tax would then route them to the HashMap under the same name as their
+direct field, so `all()` would emit the command TWICE and `INFO commandstats` would show a
+duplicate row. That is the same class of defect as the readout bug fixed in `092150b5d`,
+reintroduced from the other side.
+
+### THE SEAM THAT DOES WORK
+
+Convert at the ENUM, not at the literal. The three generic sites are the only ones that need to
+change, and every one of the eight commands above flows through them.
+
+  STAGE 1 — `hist_slot(self) -> Option<HistSlot>` on each small command enum
+  (`PlainKeyedValuesCmd` and its siblings, each already carrying a `name_lower` match of the same
+  shape), plus a `record_command_histogram_slot`. A match on an enum discriminant is a jump table
+  or a compare chain over integers; a match on `&str` is length-bucketed byte comparison. This
+  removes the 25-arm string match from the generic path for BOTH direct-field and fall-through
+  commands. Expected to take the +20.3 tax toward 0 while leaving the HashMap probe intact for
+  fall-through.
+
+  STAGE 2 — index the histograms by a global command ID (`Vec<CommandHistogram>` addressed by
+  discriminant) so fall-through commands stop hashing a name at all. This is what removes the
+  83-93 instr/op probe from the ~60 commands that still pay it. It needs one ID space across the
+  several command enums plus the generic table, which is the hard part and the reason it is
+  staged second rather than attempted at once.
+
+### WHAT IS NOT CLAIMED
+
+No measurement was taken. The 83-93 instr/op probe and the +20.3 tax are quoted from rows already
+banked, not re-derived here. Stage 1's benefit is an EXPECTATION from the shape of the two
+matches and must be measured before it is believed — an enum match is not free, and this campaign
+has already recorded one case where replacing a lookup with arithmetic was SLOWER than the
+lookup because the compiler had already done better than the source suggested.
+
+### PROVENANCE
+
+  ELF           NONE BUILT. A peer build held this project's single build slot for the entire
+                window; no arm was compiled and no shape was run.
+  incumbent     NOT RUN — no ratio is claimed.
+  host          /data 84G free, loadavg 8.30 9.20 10.11, one peer cargo+rustc throughout.
+  method        Source scoping only: call-site census by regex over `crates/fr-runtime/src/lib.rs`
+                with literal and non-literal arguments counted separately, cross-checked against
+                the direct-field list in `with_direct_histogram_fields!`.
+  disposition   SPECIFIED, NOT BUILT. No source file changed.
+
+### RETRY PREDICATE
+
+1. Build STAGE 1 first and measure `substr` (fall-through control) plus two direct-field commands
+   on the generic path. Ship only if the tax moves toward 0 AND no winner loses its gain.
+2. Do NOT build a literal-only slot API. Eight direct-field commands have no literal call site;
+   the count is in this row and the failure mode is a duplicated `INFO commandstats` row.
+3. Do NOT remove the 25-arm string match while ANY runtime-named caller can still pass a
+   direct-field name. The 14 runtime call sites are the constraint.
+4. Take a same-invocation A/A over at least SIX shapes before quoting any effect near 1 pct. Two
+   shapes read +/-1.0 instr/op on this instrument where six read 0.508 pct.
