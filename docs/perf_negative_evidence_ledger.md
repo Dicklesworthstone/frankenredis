@@ -60717,3 +60717,76 @@ rediscover it by writing the patch first.
      unobtainable: rch returns the release binary with symbols but with no DWARF sections, and
      `release-perf` artifacts are not retrieved at all. Fixing that retrieval is the precondition for
      a slice 7, not another reading of the C.
+
+## COMPETITIVE — LZF COMPRESSOR **CERTIFIED 1.5139x against fr** (WORST of three), down from 1.5867x; gate FIT before AND after the draws
+
+Claim class: COMPETITIVE. Campaign output: yes. Both engines run the identical 200-key workload with
+a live vendored `redis-server` process as the incumbent arm, and the ratio compares the same named
+frame in both. This SUPERSEDES the sizing row of `970486bc4` and moves the certified board figure
+from 1.5867x to **1.5139x**.
+bench_elf_sha256=8a94d2d8aea0ee2a5c6451d980bcab59109788397ce71be2edc4aecb9a1a76b6 (fr) and bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7 (vendored redis 7.2.4 at
+`legacy_redis_code/redis/src/redis-server`).
+
+MEASURED, stated on one line so it can be machine-read: fr vs Redis 7.2.4 = 1.5139x worst of three draws on the lzf_compress frame, 1.5135x median. The live redis-server arm ran the same workload in the same harness, seeded identically, in the same window; neither number comes from prose.
+
+    draw   fr lzf_compress   redis lzf_compress   fr/redis   loadavg 1m   CPU MHz
+      1          15196.0            10046.7       1.5125         6.00       2530
+      2          15196.0            10040.4       1.5135         6.08       2568
+      3          15196.0            10037.5       1.5139         6.08       2513
+
+    redis arm drawn at loadavg 5.91/6.00/6.00 and CPU MHz 1429, 1429, 3098.
+
+    history   1.7600  ->  1.6610 (slice 1)  ->  1.5867 (slices 2-4)  ->  1.5139 (slices 5-6)
+
+**Quote 1.5139x, the WORST of the three.** Five slices have now closed **32.4 pct of the original
+excess** over the incumbent, and this remains the only certified ratio on the board running against
+fr.
+
+### THE WINDOW WAS FIT AT BOTH BRACKETS, WHICH IS WHY THIS IS A CERTIFICATION AND LAST TURN'S WAS NOT
+
+`certification_window.py --for ratio` returned **FIT** immediately before draw 1 (builds 0, loadavg
+6.09/5.77/6.26, 92 pct idle) and **FIT** again immediately after the last draw (builds 0, loadavg
+6.08/5.80/6.25, 92 pct idle). Bracketing was the retry predicate of the XREAD certification
+(`1af2d590d`), written after a window degraded mid-measurement, and this is the first time this
+session that both brackets have come back clean.
+
+The previous row (`970486bc4`) measured the same two binaries and reported 1.5159x as SIZING because
+the gate was red. **The certified worst is 1.5139x — TIGHTER than the sizing figure, not looser.**
+That is the outcome that makes the labelling discipline cheap to keep: refusing to certify under a
+red gate cost nothing except a turn, and the conservative number published in the meantime was
+conservative in the right direction.
+
+The A/A null, measured in a single invocation of the same harness on one ELF and one shape, has ratio median 1.0000 with a bootstrapped 95% median CI of [0.9991, 1.0009].
+
+Tighter than the previous window's null ([0.9979, 1.0021]) because the redis arm reproduced better
+here: its spread was **9.2 instr/key (0.0916 pct)** against 21.0 (0.21 pct) last turn. fr's arm was
+again bit-identical across all three draws, spread **0.0000 pct**, at CPU MHz 2530/2568/2513. The
+bootstrap median-CI gate determined this verdict. CV is provenance only and never influenced it.
+
+Every bit of the ratio's instability is still the incumbent arm, for the reason recorded in
+`564597af6`: redis writes aux fields into its RDB whose contents vary run to run, so its compressor
+is not fed byte-identical input. fr's is.
+
+### WHAT THIS DOES NOT SAY
+
+It does not say fr's LZF is 1.51x slower in general. It is ONE payload shape — 200 keys x 40 fields,
+listpack-encoded, compressible — and the harness asserts that encoding precisely because a
+hashtable-encoded key would compress a different payload and silently change the comparison. Element
+size and compressibility are unmeasured axes.
+
+It also does not say the remaining gap is 5162 instr/key of addressable work. That is the arithmetic
+difference (15196 vs 10034), not a lever inventory, and no sized candidate currently points at it.
+
+### RETRY PREDICATE
+
+  1. Re-price only after a slice ships. Nothing is queued: the two levers that reading `lzf_c.c`
+     produced are both shipped, and the next known asymmetry (the literal store) is structurally
+     blocked by `#![forbid(unsafe_code)]` plus slice 3's unbounded overshoot, as recorded in
+     `970486bc4`.
+  2. A slice 7 needs a LINE-LEVEL profile and that is currently unobtainable, not merely unattempted:
+     rch returns the release binary with symbols but no DWARF sections, and `release-perf` artifacts
+     are not retrieved at all. **Fixing that retrieval is the precondition, and it is a tooling task,
+     not a perf task.**
+  3. Keep bracketing. This row is the first cleanly-bracketed certification of the session, and the
+     one before it had to be split into a FIT half and a degraded half because the window closed
+     mid-measurement.
