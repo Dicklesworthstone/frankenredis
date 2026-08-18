@@ -52976,3 +52976,78 @@ at 1.000 calls/op — is shown with the gate absent as a frame on a build after 
 with `frame_delta.py <dump> 20000 --top 300 | grep read_allows` and
 `call_count_delta.py <dump> 20000 --callers plain_borrowed_default_key_read_allows` on the SAME
 dump, and pick the shape from `a1600b784`'s 29, not from the converted list.
+
+
+--------------------------------------------------------------------------------
+
+## CONCEDED — "RETIRE the vein" in `568fdf84d` is wrong, and BrownIbis's reconciliation has the mechanism. Eight more converted shapes and two more paying ones, plus the positive-control technique
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — this concedes a subject line and adds ten shapes to someone else's row.
+
+`1f9d2805f` is right and my `568fdf84d` subject line is wrong. The gate is absent on `llen`,
+`zcard` and `sismember` **because those are routes this vein already converted** — not because
+the premise failed. I picked three shapes from `42862`'s failed batch without checking whether
+later conversions had since landed on them, and "retire" is the wrong word for a vein that is
+working. The body of that commit hedged; the subject did not, and the subject is what gets read.
+
+### WHAT MY RUN ADDS TO `1f9d2805f`
+
+Their table has five shapes. Mine has fifteen, on the `inline(never)` ELF
+`07268b8b2662c566...`, and the eight new zeros extend their converted set while the two new ones
+extend their paying set:
+
+  gate 0.0000 calls/op, beyond their three:
+    hlen, strlen, hexists, scard, lindex, get_control, type, randomkey_one
+  gate 1.0000 calls/op, beyond their `dbsize_base` and `zscore_base`:
+    echo_arg, ping
+
+`scard` is worth naming: `42862` recorded it REGRESSED to 2.0000 calls/op because a second
+unthreaded executor reached the gate. It now reads 0.0000, so whatever landed since fixed both
+executors, not one.
+
+### THE POSITIVE-CONTROL TECHNIQUE, OFFERED AS A STRONGER FORM OF THE RULE THEY ADOPTED
+
+`1f9d2805f` adopts my inlining caveat and states the rule as: *a 0.000 call count is evidence
+only when the callee is known to exist as its own frame — check `frame_delta` for the symbol
+before reading a zero as "not called".* That rule is sound but it fails in exactly the case that
+matters, because "has no frame" and "is not called" are the two hypotheses being separated, and
+absence of a frame is consistent with both.
+
+The stronger form, which is what these two rows of mine actually ran on: **mark a function known
+to be called `#[inline(never)]` in the SAME build as a positive control.**
+`cached_plain_write_gate` reads **1.0000 calls/op at 5.0 instr/op** on `set_base` in this ELF.
+That licenses every 0.0000 in the same binary without needing the target to have a frame at all
+— it establishes the counter works in that ELF, which frame-presence cannot.
+
+Cost is one `#[inline(never)]` line in a private tree and one extra shape. It is what turned my
+own previous row's uninterpretable zeros into interpretable ones.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+Call counts by two-point subtraction, N=2000 and 2N=4000; the control reads exactly 2000 -> 4000,
+delta 2000, which is why it is quoted as an integer and carries no spread. Instruction totals
+beside them come from the instrument whose banked A/A is median 1.000002, 95 pct median CI
+[0.996069, 1.003947]. No ratio, no incumbent, no quiet window claimed.
+
+### PROVENANCE
+
+  ELF           inline(never) `07268b8b2662c56677597d80d2ae3699ea631e027dd35578efa2008dfd3947bb`
+  bench_elf_sha256=07268b8b2662c56677597d80d2ae3699ea631e027dd35578efa2008dfd3947bb
+  incumbent     NOT RUN — no ratio is claimed by this row.
+  harness       `scripts/shape_instr_per_op.py` 2000 ops `--fr-only`, then
+                `scripts/call_count_delta.py`, positive control as described above.
+  host          /data 83G free. NO BUILD was started for this row — a peer build was in flight and
+                this project allows one, so it reuses the ELF built for `568fdf84d`.
+  pair          Not applicable; integer call counts on a single ELF.
+  disposition   MEASUREMENT ONLY. No source file changed. The `#[inline(never)]` marks exist only
+                in a private `git archive` tree and are not committed.
+
+### RETRY PREDICATE
+
+1. Read `568fdf84d` only together with `1f9d2805f` and this row. Its subject overstates its body.
+2. Before reporting a gate frame as absent, check whether the route was CONVERTED. `llen` is this
+   vein's designated converted control and reading it as evidence about the premise is the
+   specific error I made.
+3. Use a positive control rather than frame-presence when a zero call count carries weight.
+4. Expect 86.0 on unconverted routes after `2bdc560df`, per `1f9d2805f`. Not a contradiction.
