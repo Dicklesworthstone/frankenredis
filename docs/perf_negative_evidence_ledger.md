@@ -55590,3 +55590,108 @@ The two sides move in OPPOSITE directions when the elements become integers:
      answer it.
   3. Do NOT quote 3.29x as the current gap. It is superseded on every composition measured here,
      and on the string shape the sign has changed.
+
+--------------------------------------------------------------------------------
+
+## KEEP (SELF-SPEEDUP) — the enum seam: six generic-dispatch sites stop stringifying a discriminant so a string match can turn it back. `zrank` **-3.12 pct**, `zcard` **-2.97 pct**, `hlen` **-1.81 pct** worst bound — and the fall-through half of the prediction FAILED
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — instruction-level self-speedup, no vs-incumbent ratio is claimed.
+
+The TARGET row scoping this said the generic dispatch "already HOLDS a command enum and converts
+it to a string so the recorder can match the string back to a field", and put the seam at 3 call
+sites. Both halves of that were wrong in detail and the measurement corrects them.
+
+### WHAT WAS BUILT
+
+`HistSlot`, generated from `with_direct_histogram_fields!`, with one variant per direct field plus
+`Other(&'static str)`. Each generic-dispatch command enum gained `hist_slot()`, DERIVED from its
+own `name_lower` arms rather than transcribed, and the call sites now pass a slot instead of a
+name. **Six enums, not three** — `PlainKeyedValuesCmd`, `PlainKeyedPopCmd`, `PlainObjectStatCmd`,
+`PlainCardinalityCmd`, `PlainRandMemberCmd`, `PlainRankCmd`, 25 variants, 6 of which map to a
+direct field.
+
+### THE MEASUREMENT — THREE DRAWS, WORST BOUND QUOTED
+
+Both ELFs from the SAME HEAD `1b41cc346`, differing ONLY in the six call sites: the BEFORE arm is
+HEAD with those six lines reverted to `name_lower()`, leaving `hist_slot` and `HistSlot` present
+but unused, so nothing but the call site differs.
+
+  shape         enum / slot kind      draws                    worst bound
+  zrank_base    Rank / DIRECT         -48.0, -46.7, -44.5      **-3.12 pct**
+  zcard         Cardinality / DIRECT  -37.7, -36.7, -39.1      **-2.97 pct**
+  hlen          Cardinality / DIRECT  -26.9, -21.5, -54.0      **-1.81 pct**
+
+### THE HALF THAT FAILED, WHICH IS THE MORE USEFUL RESULT
+
+I expected `Other` commands to gain too — they also stopped walking the 25-arm match. They did
+not:
+
+    xlen           -0.56 pct      srandmember_1  +0.64 pct
+    zrandmember_1  +0.08 pct      hdel_missing   -0.25 pct
+
+**None is claimed in either direction**, including the two that read positive. The mechanism that
+explains it is the one already banked for this match: rustc switches on LENGTH first and compares
+bytes only within a bucket. `srandmember` and `zrandmember` are ELEVEN characters and no direct
+field name is eleven characters, so the length switch already rejected them in one step — there
+was never a walk to remove. The win is available only where the name COLLIDES with a direct-field
+name in its length bucket, and it is largest where the command lands in a field.
+
+That also retires the framing in my own TARGET row. The seam is not "the string match is pure
+loss for every command through here". It is "the string match is loss for commands whose length
+bucket is contested", which is a much narrower claim and is the one the numbers support.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+Same-invocation A/A on the BEFORE binary, six shapes: **A/A null median 0.999572; bootstrap 95%
+median CI [0.996752, 1.001514]**, 20,000 resamples, widest single deviation 0.491 pct. CV was not
+used, as a gate or otherwise; that bootstrap median-CI is the gate for this verdict and an effect
+inside it is not claimed.
+
+**The envelope is optimistic and I am saying so rather than exploiting it.** `get_control` is a
+CONTROL — it does not go through any converted site and must not move — and it read **+0.67 pct**
+in the A/B, above the 0.491 pct envelope this A/A produced. A control that moves outside the
+envelope means the envelope understates run-to-run variation, so nothing near it is claimed here:
+only the three effects at 3.7x-6.4x the envelope are, and each is replicated three times with the
+sign never in doubt. `hlen` is the weakest, spanning -1.81 to -4.42 pct, and is quoted at its
+WORST draw.
+
+### PROVENANCE
+
+  ELF           before `209252650cadd416bb1923a786978c40c952329cb9f14b7ba58dedad2d4fb62f`,
+                after  `005e283d26d8763f5cd87c9dbf327659f4e67679e1737453470f438cc001a110`
+  bench_elf_sha256=005e283d26d8763f5cd87c9dbf327659f4e67679e1737453470f438cc001a110
+  incumbent     NOT RUN — no ratio is claimed by this row.
+  harness       `scripts/shape_instr_per_op.py` 2000 ops `--fr-only`.
+  host          /data 60G free, checked immediately before each build, above the 42G floor.
+                Per-arm loadavg 8.59 9.63 10.71 at 2410 MHz through 21.84 13.87 12.08 at
+                3144 MHz. Instructions by two-point subtraction, so load and MHz do not enter.
+  pair          Both ELFs from the SAME HEAD `1b41cc346`, built back to back, one build at a
+                time with the slot polled to zero before each, exit-checked, DISTINCT SHA-256.
+                The BEFORE tree was verified to contain 6 `cmd.hist_slot()` sites before they
+                were reverted and 0 after.
+  tests         `cargo test -p fr-store --lib` 940 passed, `-p fr-runtime --lib` 633 passed,
+                0 failed. `cargo check --all-targets -p fr-store -p fr-runtime -p fr-server`
+                clean.
+  disposition   SHIPPED — but see below.
+
+### THE CODE REACHED MAIN BEFORE THIS MEASUREMENT EXISTED, AND THAT IS WORTH RECORDING
+
+My working-tree edits were swept into a peer's commit while I was still building the arms, so the
+lever reached `main` UNMEASURED and this row supplies the number retroactively rather than
+gating the landing. That is the third sweep in one session in this file pair and the second in
+my direction. It also invalidated my first attempt at a pair: the "BEFORE" I built from HEAD
+already contained the lever, and only the ELF SHA-256 comparison plus a `grep` for the converted
+sites caught it before any number was quoted. **Verify the BEFORE arm does NOT contain the thing
+under test, by content and not by provenance, whenever the shared checkout is in play.**
+
+### RETRY PREDICATE
+
+1. RE-OPEN THIS SURFACE IF: `zcard` on the shipped ELF measures above **1230.0 instr/op** or
+   `zrank_base` above **1420.0** at 2000 ops. Those are the AFTER draws plus the envelope; above
+   them the slot path has regressed to the string match.
+2. Do NOT extend the enum seam expecting a fall-through gain. Four `Other` commands measured flat
+   here. Extend it for a command that lands in a DIRECT field, or whose name shares a length
+   bucket with one; otherwise there is nothing to remove.
+3. `get_control` moved 0.67 pct as a control in this run. Treat any single-draw effect under
+   1 pct on this instrument as unmeasured, whatever a six-shape A/A envelope says.
