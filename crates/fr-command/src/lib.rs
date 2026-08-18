@@ -13926,13 +13926,19 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     // rename, and it is not worth landing blind: this commit is unbuilt under the /data freeze
     // and the probe fix above already removes two copies of this same size per call. Sized, not
     // guessed -- one library copy per FCALL, independent of how much work the function does.
-    let (script, has_no_writes) = match store.function_get(func_name) {
+    let (script, has_no_writes, has_allow_oom) = match store.function_get(func_name) {
         Some((lib, func)) => {
             let no_writes = func
                 .flags
                 .iter()
                 .any(|f| f.eq_ignore_ascii_case("no-writes"));
-            (lib.code.clone(), no_writes)
+            // (frankenredis-oo3aw) A function declares allow-oom in its own registered flags
+            // rather than in a shebang, so it is read here alongside no-writes.
+            let allow_oom = func
+                .flags
+                .iter()
+                .any(|f| f.eq_ignore_ascii_case("allow-oom"));
+            (lib.code.clone(), no_writes, allow_oom)
         }
         None => {
             return Ok(RespFrame::Error("ERR Function not found".to_string()));
@@ -13972,7 +13978,9 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     let keys_vec: Vec<Vec<u8>> = keys.to_vec();
     let args_vec: Vec<Vec<u8>> = args.to_vec();
     let previous_read_only = store.script_read_only;
+    let previous_allow_oom = store.script_allow_oom;
     store.script_read_only = is_ro || has_no_writes;
+    store.script_allow_oom = has_allow_oom;
     store.script_nesting_level += 1;
     // (frankenredis-9hori) `target_func_line` is Some exactly when the SCAN above produced a
     // `local function <func_name>(` line for the function being called. Both transform forms --
@@ -14025,6 +14033,7 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     };
     store.script_nesting_level -= 1;
     store.script_read_only = previous_read_only;
+    store.script_allow_oom = previous_allow_oom;
     result
 }
 
@@ -26630,7 +26639,9 @@ fn eval_cmd(
     let keys_vec: Vec<Vec<u8>> = keys.to_vec();
     let args_vec: Vec<Vec<u8>> = args.to_vec();
     let previous_read_only = store.script_read_only;
+    let previous_allow_oom = store.script_allow_oom;
     store.script_read_only = read_only_script || script_shebang_has_no_writes_flag(script);
+    store.script_allow_oom = script_shebang_has_allow_oom_flag(script);
     store.script_nesting_level += 1;
     let result = match lua_eval::eval_compiled_script(compiled, &keys_vec, &args_vec, store, now_ms)
     {
@@ -26639,6 +26650,7 @@ fn eval_cmd(
     };
     store.script_nesting_level -= 1;
     store.script_read_only = previous_read_only;
+    store.script_allow_oom = previous_allow_oom;
     result
 }
 
@@ -26718,7 +26730,9 @@ fn evalsha_cmd(
     let keys_vec: Vec<Vec<u8>> = keys.to_vec();
     let args_vec: Vec<Vec<u8>> = args.to_vec();
     let previous_read_only = store.script_read_only;
+    let previous_allow_oom = store.script_allow_oom;
     store.script_read_only = read_only_script || no_writes;
+    store.script_allow_oom = allow_oom;
     store.script_nesting_level += 1;
     let result = match lua_eval::eval_compiled_script(compiled, &keys_vec, &args_vec, store, now_ms)
     {
@@ -26732,6 +26746,7 @@ fn evalsha_cmd(
     };
     store.script_nesting_level -= 1;
     store.script_read_only = previous_read_only;
+    store.script_allow_oom = previous_allow_oom;
     result
 }
 
@@ -26846,6 +26861,18 @@ pub fn script_shebang_is_oom_exempt(script: &[u8]) -> bool {
     };
     script_shebang_line_has_flag(line, "allow-oom")
         || script_shebang_line_has_flag(line, "no-writes")
+}
+
+/// Does the shebang declare `allow-oom`?
+///
+/// (frankenredis-oo3aw) The twin of `script_shebang_has_no_writes_flag` below, over the same
+/// shared `flags=` parser. A script with NO shebang is upstream's EVAL_COMPAT_MODE and carries no
+/// flags at all, so this is false for it by construction -- which is the case the bead reports.
+fn script_shebang_has_allow_oom_flag(script: &[u8]) -> bool {
+    let Some(first_line_end) = script.iter().position(|&b| b == b'\n') else {
+        return script_shebang_line_has_flag(script, "allow-oom");
+    };
+    script_shebang_line_has_flag(&script[..first_line_end], "allow-oom")
 }
 
 fn script_shebang_line_has_no_writes(line: &[u8]) -> bool {

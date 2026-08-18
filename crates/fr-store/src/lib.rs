@@ -6450,6 +6450,14 @@ pub struct Store {
     pub script_nesting_level: usize,
     /// Whether the current script/function execution context forbids writes.
     pub script_read_only: bool,
+    /// Does the running script or function carry upstream's `allow-oom` flag?
+    ///
+    /// (frankenredis-oo3aw) `SCRIPT_ALLOW_OOM`. Set at the three script entrypoints beside
+    /// `script_read_only` above and restored the same way, because it has the same lifetime: it
+    /// describes the script currently executing, and a nested call must not inherit it.
+    /// `script.c::scriptVerifyOOM` short-circuits on it before every other test, so an
+    /// allow-oom script keeps writing over maxmemory exactly as upstream allows.
+    pub script_allow_oom: bool,
     /// Set by the runtime when this instance is a read-only replica serving a
     /// client command, so writes attempted from inside a script/function (whose
     /// inner redis.call bypasses the runtime's top-level read-only gate) are
@@ -6903,6 +6911,7 @@ impl Default for Store {
             aof_enabled: false,
             script_nesting_level: 0,
             script_read_only: false,
+            script_allow_oom: false,
             is_read_only_replica: false,
             lua_error_line: 1,
             script_propagation_mode: SCRIPT_PROPAGATE_ALL,

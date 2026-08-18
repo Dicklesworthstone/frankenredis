@@ -3272,6 +3272,12 @@ pub struct LuaState<'a> {
     /// which `resp_to_lua` then converts with upstream's RESP3 Lua mapping
     /// (`{double=…}` / `{map=…}` / `{set=…}` / nil / `{big_number=…}`).
     resp_version: i64,
+    /// Has any inner call of THIS script already written?
+    ///
+    /// (frankenredis-oo3aw) Upstream's `SCRIPT_WRITE_DIRTY`. The OOM gate refuses only while the
+    /// script has made no writes yet -- its comment: "only if this is the first write in the
+    /// context of this script, otherwise we can't stop in the middle."
+    script_wrote: bool,
     call_depth: usize,
     /// (frankenredis-0k259) Per-frame kind stack used to satisfy Lua 5.1's
     /// `luaL_where(L, level)` semantics from `error()` / `assert()`. Each
@@ -4874,6 +4880,7 @@ impl<'a> LuaState<'a> {
             registered_functions: Vec::new(),
             registered_callbacks: Vec::new(),
             resp_version: 2,
+            script_wrote: false,
             call_depth: 0,
             lua_frame_kinds: Vec::new(),
             argv_scratch: Vec::new(),
@@ -11691,6 +11698,26 @@ impl<'a> LuaState<'a> {
         // afterward so the script's own reply to the client is unaffected.
         let saved_resp_version = self.store.dispatch_client_ctx.resp_protocol_version;
         self.store.dispatch_client_ctx.resp_protocol_version = self.resp_version;
+        // (frankenredis-oo3aw) UPSTREAM'S scriptVerifyOOM, per inner call. Every conjunct is
+        // upstream's, in upstream's order: an allow-oom script is exempt outright; otherwise a
+        // deny-oom command is refused while maxmemory is set, the pre-command OOM sample says the
+        // server was already over it when the script STARTED, and this script has not written
+        // yet. `over_maxmemory_live` is published by the runtime before dispatch, so it is
+        // sampled once per script rather than re-derived per call.
+        //
+        // Rejecting EVAL itself at dispatch would be wrong -- it over-refuses read-only bodies
+        // that 7.2.4 runs happily over maxmemory -- which is why the gate lives here, on the
+        // inner call, exactly where upstream puts it.
+        if !self.store.script_allow_oom
+            && !self.script_wrote
+            && self.store.maxmemory_bytes_live != 0
+            && self.store.over_maxmemory_live
+            && argv
+                .first()
+                .is_some_and(|name| crate::command_is_denyoom(name))
+        {
+            return Err("OOM command not allowed when used memory > 'maxmemory'.".to_string());
+        }
         let command_result = if let Some(intercepted) = script_command_intercept(argv) {
             intercepted
         } else {
@@ -11726,6 +11753,11 @@ impl<'a> LuaState<'a> {
                 // MONITOR clients are attached.
                 self.store.record_script_monitor(argv);
                 let dirty_after = self.store.dirty;
+                // (frankenredis-oo3aw) First write in this script's context: from here the OOM
+                // gate stops firing, because upstream will not stop a script mid-way.
+                if dirty_after > dirty_before {
+                    self.script_wrote = true;
+                }
                 if dirty_after > dirty_before || command_may_propagate_from_script(argv) {
                     // (frankenredis-x1225) Record the DETERMINISTIC effect form so
                     // a script's XADD `*` / SPOP / INCRBYFLOAT (etc.) propagates a
