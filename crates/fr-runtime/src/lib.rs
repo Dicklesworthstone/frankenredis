@@ -57967,6 +57967,91 @@ mod tests {
     }
 
     #[test]
+    fn info_debug_section_is_emitted_only_when_named_w1djx() {
+        // (frankenredis-w1djx) `# Debug` is the one section upstream gates on an EXPLICIT name.
+        // server.c:6238 guards it with `dictFind(section_dict, "debug")` ALONE, and
+        // `genInfoSectionDict` never adds "debug" to the dict for `all` or `everything` -- those
+        // only set flags. So INFO, INFO all and INFO everything must all omit it.
+        //
+        // This is worth a test because fr has a `section_requested()` helper that returns true
+        // for all/everything/default, it is the obvious thing to reach for, and using it here
+        // would emit the section in three cases upstream does not -- a divergence no differ on
+        // this board would report, since every engine renders SOME sections and none of them
+        // compares the section LIST.
+        //
+        // The contrast row is `# Commandstats` directly above: that one IS included by INFO all,
+        // so a reader can see the two rules are different rather than assuming one.
+        let mut rt = Runtime::default_strict();
+
+        let named = rt.execute_frame(command(&[b"INFO", b"debug"]), 1);
+        let RespFrame::BulkString(Some(bytes)) = named else {
+            panic!("expected bulk info response");
+        };
+        let body = String::from_utf8(bytes).expect("utf8 info");
+        assert!(body.contains("# Debug\r\n"), "{body}");
+        for field in [
+            "eventloop_duration_aof_sum:",
+            "eventloop_duration_cron_sum:",
+            "eventloop_duration_max:",
+            "eventloop_cmd_per_cycle_max:",
+        ] {
+            assert!(body.contains(field), "INFO debug missing {field}: {body}");
+        }
+
+        let omitted: [(u64, &[&[u8]], &str); 3] = [
+            (2, &[b"INFO"], "(default)"),
+            (3, &[b"INFO", b"all"], "all"),
+            (4, &[b"INFO", b"everything"], "everything"),
+        ];
+        for (ts, argv, label) in omitted {
+            let out = rt.execute_frame(command(argv), ts);
+            let RespFrame::BulkString(Some(bytes)) = out else {
+                panic!("expected bulk info response");
+            };
+            let body = String::from_utf8(bytes).expect("utf8 info");
+            assert!(
+                !body.contains("# Debug"),
+                "INFO {label} must NOT carry the Debug section -- upstream gates it on an \
+                 explicit name only: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn eventloop_breakdown_keeps_maxima_and_sums_w1djx() {
+        // (frankenredis-w1djx) The four Debug counters are two different KINDS, and confusing
+        // them is silent: a sum reported where a maximum belongs grows without bound and looks
+        // like a busy server, while a maximum reported where a sum belongs stops moving and looks
+        // like an idle one. Both render fine.
+        //
+        //   eventloop_duration_max        MAXIMUM over cycles
+        //   eventloop_cmd_per_cycle_max   MAXIMUM over cycles
+        //   eventloop_duration_aof_sum    SUM
+        //   eventloop_duration_cron_sum   SUM
+        let mut rt = Runtime::default_strict();
+
+        // A maximum, not the last value and not a running total.
+        rt.record_eventloop_cycle(10);
+        rt.record_eventloop_cycle(40);
+        rt.record_eventloop_cycle(25);
+        assert_eq!(
+            rt.eventloop_duration_max_usec(),
+            40,
+            "the cycle duration must be a MAXIMUM: 25 arriving after 40 must not lower it, and \
+             the three must not be summed"
+        );
+
+        rt.record_eventloop_breakdown(5, 7, 3);
+        rt.record_eventloop_breakdown(6, 8, 2);
+        assert_eq!(rt.server.eventloop_duration_aof_sum_usec, 11, "AOF is a SUM");
+        assert_eq!(rt.server.eventloop_duration_cron_sum_usec, 15, "cron is a SUM");
+        assert_eq!(
+            rt.server.eventloop_cmd_per_cycle_max, 3,
+            "commands-per-cycle is a MAXIMUM: a quieter second cycle must not lower it"
+        );
+    }
+
+    #[test]
     fn info_under_resp3_includes_all_command_owned_sections() {
         // Regression (frankenredis-ffqgl follow-up): the INFO aggregator
         // delegates server/clients/memory/stats/cpu/modules/errorstats/
