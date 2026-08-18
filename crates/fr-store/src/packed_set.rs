@@ -5208,12 +5208,12 @@ impl ListValue {
             return None;
         };
         let mut nodes = Vec::with_capacity(list.chunks.len());
-        let mut previous: Option<(usize, u64)> = None;
         for chunk in &list.chunks {
-            let (bytes, entries_len, first_len) = match chunk {
+            // (frankenredis-qj6jn) `first_len` used to feed the maximal-packing refusal removed
+            // below; nothing reads it now, so it is no longer computed.
+            let (bytes, entries_len) = match chunk {
                 ListChunk::Listpack { bytes, entries } if !entries.is_empty() => {
-                    let first_len = entries.first()?.as_bytes(bytes).len();
-                    (Cow::Borrowed(bytes.as_slice()), entries.len(), first_len)
+                    (Cow::Borrowed(bytes.as_slice()), entries.len())
                 }
                 ListChunk::Owned {
                     elems,
@@ -5229,12 +5229,7 @@ impl ListValue {
                     // length; reversing for `front_biased` permutes the entries but not
                     // their encoded sizes, so the total is the same either way.
                     let blob = Self::encode_node_blob(&slices, *lp_bytes)?;
-                    let first_len = if *front_biased {
-                        elems.last()?.len()
-                    } else {
-                        elems.first()?.len()
-                    };
-                    (Cow::Owned(blob), elems.len(), first_len)
+                    (Cow::Owned(blob), elems.len())
                 }
                 _ => return None,
             };
@@ -5243,17 +5238,20 @@ impl ListValue {
             if list_node_exceeds_limit(fill, bytes_len, entries_len as u64) {
                 return None;
             }
-            if let Some((previous_count, previous_bytes)) = previous
-                && quicklist_packed_node_accepts_local(
-                    previous_count,
-                    previous_bytes,
-                    first_len,
-                    fill,
-                )
-            {
-                return None;
-            }
-            previous = Some((entries_len, bytes_len));
+            // (frankenredis-qj6jn) The maximal-packing refusal that `52a34c73a` removed from the
+            // RETAINED path lived here too, on fr's OWN chunks: "if the previous node could still
+            // accept this node's first element, give up and re-derive". A head-grown list has its
+            // PARTIAL chunk FIRST, so it fired on every LPUSH-built list and sent it to the
+            // forward accumulator, which emits the boundaries REVERSED.
+            //
+            // Upstream requires no such packing. Its own DUMP of a head-grown list is
+            // [17 27 27] at fill 4 and [535 775 775 775 675] at fill 128 — partial node first,
+            // adjacent to a full one. Removing the refusal took the workload sweep from 23 of 42
+            // diverging to 8, closing LPUSH one-at-a-time, stack and alternating outright.
+            //
+            // The per-node budget check above (`list_node_exceeds_limit`) still rejects a chunk
+            // that is too BIG for the current fill, which is the check that actually protects the
+            // payload; only the "could have been packed tighter" opinion is gone.
             nodes.push(QuicklistPackedNode { bytes });
         }
         (!nodes.is_empty()).then_some(nodes)

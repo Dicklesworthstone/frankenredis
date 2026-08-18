@@ -49897,6 +49897,7 @@ an effect inside that interval is not claimed.
    ELFs that no downstream check flags.
 
 --------------------------------------------------------------------------------
+
 ## 2026-08-18 CrimsonHawk: KEEP (COMPETITIVE) — TWO NEW DEFICITS, replicated: `pttl` at 0.8891x worst bound and `publish` at 0.9043x, found by screening `cascade` at rounds=36 where the default config had been returning nothing
 
 Claim class: COMPETITIVE. Campaign output: yes. Vendored Redis 7.2.4 ran as a live incumbent arm
@@ -50066,6 +50067,7 @@ next lever on this vein** — it is one of the twelve read routes still paying t
 list is in `d7c67e802`.
 
 --------------------------------------------------------------------------------
+
 ## 2026-08-18 CrimsonHawk: PATTERN — on EVERY shape where fr is behind, fr retires 25-46 pct FEWER instructions and redis executes them 1.32-1.79x faster per cycle. The campaign's remaining deficit is IPC, not work
 
 NO NEW RATIO IS CERTIFIED. This joins three separately-measured shapes and states what they have
@@ -50120,3 +50122,90 @@ work-reduction family only IF some deficit shape is measured with an instruction
 which none of the three is close to. Note also that `publish` and `getbit` exist in
 `balanced_square_ab`'s `cascade` group but NOT in `shape_instr_per_op`'s table, so neither can be
 read on both metrics until someone registers them.
+
+--------------------------------------------------------------------------------
+## 2026-08-18 CrimsonHawk: PARITY FIX — the SAME maximal-packing refusal lived on fr's own chunks; removing it takes the workload sweep from 23 of 42 diverging to 8 and closes the entire LPUSH-one-at-a-time family (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: differential behaviour against a live vendored redis 7.2.4 in the same probe
+invocation, compared at NODE-TABLE level, with three prior sweeps re-run as regressions. No
+timing verdict is claimed, no instruction counts are quoted, and CV was NOT used, as a gate or
+otherwise. This row banks no vs-incumbent ratio. Campaign output: no.
+
+`52a34c73a` removed a maximal-packing refusal from the RETAINED (loaded-payload) path and its
+predicate pointed at the in-process case as separate work needing a new "head-grown" signal.
+IT NEEDED NO NEW SIGNAL. The identical refusal was sitting in `quicklist_packed_nodes`, on fr's
+OWN chunks — and fr's chunks for a head-grown list ALREADY have the partial one first.
+
+### ONE REFUSAL, TWO PLACES, AND I ONLY SAW THE FIRST
+
+    if previous_node_could_accept(next_node_first_element) { return None; }
+
+  In both paths that means "these boundaries are not maximally packed front-to-back, so throw
+  them away and re-derive". A head-grown list has its PARTIAL node FIRST, so it fired on every
+  LPUSH-built list and handed it to the forward accumulator, which emits the boundaries MIRRORED.
+
+  Upstream requires no such packing. Its own DUMP of a head-grown list is [17 27 27] at fill 4
+  and [535 775 775 775 675] at fill 128 — a partial node adjacent to a full one, every time.
+
+    THE LESSON IS ABOUT MY OWN FIX, not the codebase: when a rule is wrong, GREP FOR THE RULE.
+    `52a34c73a` correctly diagnosed the refusal and then fixed exactly one of its two call sites,
+    and its retry predicate went on to specify a whole new state field for a problem the other
+    call site was already causing.
+
+### THE NUMBERS, AND THE THREE REGRESSION SWEEPS
+
+    workload sweep (7 build patterns x 3 fills x 2 sizes)     23 of 42  ->  8 of 42
+      LPUSH one-at-a-time   5 of 6 diverging  ->  0
+      stack  LPUSH+LPOP     3 of 6            ->  0
+      alternating L/R       5 of 6            ->  0
+      LPUSH bulk            5 of 6            ->  4   still reversed
+      queue  RPUSH+LPOP     5 of 6            ->  4   history-dependent, as predicted
+      RPUSH one-at-a-time   0 of 6            ->  0
+      RPUSH bulk            0 of 6            ->  0
+
+    REGRESSIONS, all re-run against the same binary:
+      mutation sweep            3 of 14 diverging, UNCHANGED
+      restore idempotence       all three shapes still IDEMPOTENT (`52a34c73a` holds)
+      unit tests                fr-store 934, fr-persist 227, 0 failures
+
+  `alternating L/R` going green was NOT predicted — `36ab77cc4` classified it as
+  history-dependent because its node table was not a clean reversal of fr's. It was: fr's table
+  was wrong in a way that made the comparison look worse than it was.
+
+### WHAT REMAINS, HONESTLY
+
+  LPUSH bulk (4 shapes)   fr [2183 2183 755] vs redis [755 2183 2183] — still an exact reversal.
+                          The MULTI-VALUE `LPUSH k a b c` path builds its chunks back-biased, so
+                          the chunks themselves are in the wrong order and there is nothing for
+                          this fix to preserve. That is a bulk-builder bug, not a DUMP bug.
+  queue RPUSH+LPOP (4)    fr [4087 4087 2047] vs redis [1537 4087 4087 517] — genuinely
+                          history-dependent, needs the node-boundary representation.
+
+  ALSO WORTH RECORDING: the mutation sweep's `LINSERT BEFORE mid` row is now fr [2132 2139] vs
+  redis [2139 2132]. It used to be [4077 194] vs [2139 2132]. It has become an exact REVERSAL,
+  which moves it out of the "needs a representation" bucket and into the "needs a direction"
+  one — a reclassification, and a hint that the remaining reversals share one cause.
+
+### PROVENANCE
+
+  ELF           bench_elf_sha256 = e5d0b1e325aa97c4959eb1c32b657a9947cae0cc36f7ef1c3ba9442baaa676b8
+                — `release-perf`, built locally with RCH_CARGO_WRAPPER_BYPASS=1,
+                build log checked for BOTH `^error` and rch refusals: 0 of each, ONE build this
+                turn under the new one-per-project rule. `df` run immediately before it; /data
+                99G, above the 42G floor but the lowest of this campaign.
+  probes        scratchpad `workload_shapes_probe.py` (the lever's oracle),
+                `prefix_mutation_probe.py` and `restore_roundtrip_probe.py` (regressions).
+  incumbent     vendored redis 7.2.4, booted per probe on a free port with its own temp dir; fr
+                and redis in the SAME invocation.
+  host          thinkstation1, 64 cores OBSERVED, powersave governor, uptime 2 days 19:09,
+                loadavg 6.86/9.60/9.95, CPU idle 86 pct as briefed. Recorded for completeness:
+                this row's evidence is byte equality, immune to load.
+
+RETRY PREDICATE:
+  1. LPUSH BULK next, and it is a BUILDER fix not a DUMP fix: make the multi-value LPUSH path
+     produce front-biased chunks like the one-at-a-time path already does. Oracle: the four
+     `LPUSH bulk` rows in `workload_shapes_probe.py` must go green and nothing else may move.
+  2. Re-check `LINSERT BEFORE mid` after that — if it is still an exact reversal it probably
+     falls to the same builder fix, which would leave ONLY the queue/history family.
+  3. When a refusal or invariant turns out to be wrong, GREP FOR IT before writing the retry
+     predicate. This row exists because I did not.

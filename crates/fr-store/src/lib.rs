@@ -74745,6 +74745,76 @@ mod tests {
         );
     }
 
+    /// (frankenredis-qj6jn) An LPUSH-built list must DUMP with its PARTIAL node FIRST, matching
+    /// upstream, instead of having its node boundaries reversed.
+    ///
+    /// `quicklist_packed_nodes` refused fr's own chunks whenever a previous node could still
+    /// accept the next one's first element — maximal front-to-back packing. A head-grown list
+    /// has its partial chunk FIRST, so the refusal fired on every LPUSH-built list and sent it to
+    /// the forward accumulator, which emits the boundaries mirrored.
+    ///
+    /// Measured against vendored redis 7.2.4 at `list-max-listpack-size 128`, 300 elements
+    /// pushed with LPUSH: redis [755 2183 2183], fr [2183 2183 755]. Removing the refusal took
+    /// the workload sweep from 23 of 42 diverging to 8.
+    ///
+    /// The assertion is DIRECTIONAL rather than a literal table: the first node must be the
+    /// SMALL one. That survives a change of element width, where pinning 755 would not.
+    #[test]
+    fn lpush_built_list_dumps_partial_node_first_qj6jn() {
+        fn node_sizes(store: &mut Store, key: &[u8]) -> Vec<usize> {
+            let payload = store.dump_key(key, 100).unwrap();
+            assert_eq!(payload[0], RDB_TYPE_LIST_QUICKLIST_2);
+            let data_end = payload.len() - DUMP_TRAILER_LEN;
+            let (count, consumed) = decode_length(&payload, 1).unwrap();
+            let mut cursor = 1 + consumed;
+            let mut out = Vec::new();
+            for _ in 0..count {
+                let (_container, consumed) = decode_length(&payload, cursor).unwrap();
+                cursor += consumed;
+                let (blob, consumed) = decode_rdb_string(&payload, cursor, data_end).unwrap();
+                cursor += consumed;
+                out.push(blob.len());
+            }
+            out
+        }
+
+        let mut store = Store::new();
+        store.list_max_listpack_size = 128;
+        for i in 0..300 {
+            store
+                .lpush(b"l", &[format!("vvvvvvvvvv{i:05}").into_bytes()], 100)
+                .unwrap();
+        }
+
+        let sizes = node_sizes(&mut store, b"l");
+        assert!(
+            sizes.len() > 1,
+            "precondition -- must be multi-node, got {sizes:?}"
+        );
+        assert!(
+            sizes[0] < sizes[1],
+            "head-grown list must keep its PARTIAL node FIRST, got {sizes:?}"
+        );
+        assert!(
+            sizes[1..].windows(2).all(|w| w[0] == w[1]),
+            "the remaining nodes are the full ones and must be uniform, got {sizes:?}"
+        );
+
+        // The RPUSH-built mirror image is unchanged: partial node LAST.
+        let mut store = Store::new();
+        store.list_max_listpack_size = 128;
+        for i in 0..300 {
+            store
+                .rpush(b"r", &[format!("vvvvvvvvvv{i:05}").into_bytes()], 100)
+                .unwrap();
+        }
+        let sizes = node_sizes(&mut store, b"r");
+        assert!(
+            sizes[sizes.len() - 1] < sizes[0],
+            "tail-grown list must keep its PARTIAL node LAST, got {sizes:?}"
+        );
+    }
+
     /// (frankenredis-qj6jn) DUMP -> RESTORE -> DUMP must be IDEMPOTENT: a loaded payload's node
     /// boundaries are AUTHORITATIVE and must not be re-derived.
     ///
