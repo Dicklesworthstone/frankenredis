@@ -10611,7 +10611,7 @@ impl<'a> LuaState<'a> {
                     }
                 } else {
                     // Lua pattern matching
-                    if let Some(m) = lua_pattern_find(&s, &pattern, init) {
+                    if let Some(m) = lua_pattern_find(&s, &pattern, init)? {
                         let mut result = vec![
                             LuaValue::Number((m.start + 1) as f64), // 1-indexed
                             LuaValue::Number(m.end as f64),         // inclusive end
@@ -10656,7 +10656,7 @@ impl<'a> LuaState<'a> {
                 // (frankenredis-vfv8s) Validate pattern eagerly.
                 // (frankenredis-uqnq6) inv_name routes the prefix.
                 lua_pattern_validate_named(self.current_invocation_name.as_deref(), &pattern)?;
-                if let Some(m) = lua_pattern_find(&s, &pattern, init) {
+                if let Some(m) = lua_pattern_find(&s, &pattern, init)? {
                     Ok(lua_match_captures(&s, &m))
                 } else {
                     Ok(vec![LuaValue::Nil])
@@ -10678,7 +10678,7 @@ impl<'a> LuaState<'a> {
                 let mut matches: Vec<Vec<LuaValue>> = Vec::new();
                 let mut pos = 0;
                 while pos <= s.len() {
-                    if let Some(m) = lua_pattern_find(&s, &pattern, pos) {
+                    if let Some(m) = lua_pattern_find(&s, &pattern, pos)? {
                         matches.push(lua_match_captures(&s, &m));
                         pos = if m.end == m.start { m.end + 1 } else { m.end };
                     } else {
@@ -10785,7 +10785,7 @@ impl<'a> LuaState<'a> {
                     {
                         break;
                     }
-                    if let Some(m) = lua_pattern_find(&s, &pattern, pos) {
+                    if let Some(m) = lua_pattern_find(&s, &pattern, pos)? {
                         result.extend_from_slice(&s[pos..m.start]);
                         // (frankenredis-76y97) Dispatch on the repl
                         // value type per Lua 5.1 spec: string uses %0/%N
@@ -12553,6 +12553,40 @@ fn lua_set_match(pat: &[u8], pi: usize, ch: u8) -> bool {
 
 /// Core recursive pattern matcher.
 /// Returns the end position (exclusive) of the match on success.
+/// Upstream's `LUA_MAXCAPTURES` (deps/lua/src/luaconf.h:633). `start_capture`
+/// raises "too many captures" once this many are already open
+/// (lstrlib.c:333), so a pattern with more capture groups than this is an
+/// ERROR in 7.2.4, not a match that happens to have many captures.
+const LUA_MAXCAPTURES: usize = 32;
+
+thread_local! {
+    /// Set when the matcher must RAISE rather than merely fail to match.
+    ///
+    /// `lua_pat_match` returns `Option`, and upstream signals this class of
+    /// fault with `luaL_error`, which is a longjmp: the match is ABANDONED, not
+    /// backtracked into some other alternative that might still succeed. A flag
+    /// read once at the boundary reproduces exactly that without threading a
+    /// `Result` through the matcher's whole recursive call graph, and costs
+    /// nothing per recursion — `lua_pattern_find` prefers the error over any
+    /// hit, so a match found by later backtracking cannot mask it.
+    static LUA_PATTERN_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+fn lua_pattern_error_set(msg: &str) {
+    LUA_PATTERN_ERROR.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        // Keep the FIRST fault: it is the one upstream's longjmp would have
+        // carried out of the match.
+        if slot.is_none() {
+            *slot = Some(msg.to_string());
+        }
+    });
+}
+
+fn lua_pattern_error_take() -> Option<String> {
+    LUA_PATTERN_ERROR.with(|slot| slot.borrow_mut().take())
+}
+
 fn lua_pat_match(
     s: &[u8],
     mut si: usize,
@@ -12579,6 +12613,10 @@ fn lua_pat_match(
             if pi + 1 < pat.len() && pat[pi + 1] == b')' {
                 // Position capture
                 let cap_idx = captures.len();
+                if captures.len() >= LUA_MAXCAPTURES {
+                    lua_pattern_error_set("too many captures");
+                    return None;
+                }
                 captures.push(LuaCapture::Position(si));
                 if let Some(end) = lua_pat_match(s, si, pat, pi + 2, captures, depth + 1) {
                     return Some(end);
@@ -12588,6 +12626,10 @@ fn lua_pat_match(
             }
             // Start substring capture
             let cap_idx = captures.len();
+            if captures.len() >= LUA_MAXCAPTURES {
+                lua_pattern_error_set("too many captures");
+                return None;
+            }
             captures.push(LuaCapture::Substring(si, None)); // open capture
             if let Some(end) = lua_pat_match(s, si, pat, pi + 1, captures, depth + 1) {
                 return Some(end);
@@ -12791,7 +12833,10 @@ fn lua_pat_lazy(
 
 /// Top-level pattern match: try matching pattern at each position starting from `init`.
 /// If pattern starts with ^, only try at `init`.
-fn lua_pattern_find(s: &[u8], pat: &[u8], init: usize) -> Option<LuaPatMatch> {
+fn lua_pattern_find(s: &[u8], pat: &[u8], init: usize) -> Result<Option<LuaPatMatch>, String> {
+    // A stale fault from an earlier call would poison this one; gsub drives
+    // this function in a loop.
+    let _ = lua_pattern_error_take();
     let (anchored, pat_start) = if !pat.is_empty() && pat[0] == b'^' {
         (true, 1)
     } else {
@@ -12800,14 +12845,18 @@ fn lua_pattern_find(s: &[u8], pat: &[u8], init: usize) -> Option<LuaPatMatch> {
 
     if anchored {
         let mut captures = Vec::new();
-        if let Some(end) = lua_pat_match(s, init, pat, pat_start, &mut captures, 0) {
-            return Some(LuaPatMatch {
+        let hit = lua_pat_match(s, init, pat, pat_start, &mut captures, 0);
+        if let Some(msg) = lua_pattern_error_take() {
+            return Err(msg);
+        }
+        if let Some(end) = hit {
+            return Ok(Some(LuaPatMatch {
                 start: init,
                 end,
                 captures,
-            });
+            }));
         }
-        return None;
+        return Ok(None);
     }
 
     // (BlackThrush) Reuse ONE captures buffer across start positions instead of allocating a fresh
@@ -12819,15 +12868,19 @@ fn lua_pattern_find(s: &[u8], pat: &[u8], init: usize) -> Option<LuaPatMatch> {
     let mut captures = Vec::new();
     for start in init..=s.len() {
         captures.clear();
-        if let Some(end) = lua_pat_match(s, start, pat, pat_start, &mut captures, 0) {
-            return Some(LuaPatMatch {
+        let hit = lua_pat_match(s, start, pat, pat_start, &mut captures, 0);
+        if let Some(msg) = lua_pattern_error_take() {
+            return Err(msg);
+        }
+        if let Some(end) = hit {
+            return Ok(Some(LuaPatMatch {
                 start,
                 end,
                 captures,
-            });
+            }));
         }
     }
-    None
+    Ok(None)
 }
 
 /// Extract capture values from a match. If no explicit captures, return the whole match.
@@ -22325,6 +22378,53 @@ end
             0,
         );
         assert!(frame.is_ok(), "a backtracking pattern must not abort the process");
+    }
+
+    /// Upstream's `start_capture` raises "too many captures" once
+    /// `LUA_MAXCAPTURES` (32, luaconf.h:633) are already open (lstrlib.c:333).
+    /// fr implemented every other pattern error and not this one, so a pattern
+    /// Redis REFUSES matched happily here.
+    ///
+    /// The placement matters as much as the limit. Upstream checks when a
+    /// capture actually OPENS, not when the pattern is compiled, so a pattern
+    /// with more groups than the maximum is fine as long as the match fails
+    /// before reaching the 33rd. Validating the pattern eagerly would have been
+    /// simpler and would have refused scripts 7.2.4 accepts — the third case
+    /// below is what holds that line.
+    #[test]
+    fn lua_pattern_caps_captures_at_upstreams_maximum() {
+        let mut store = Store::new();
+
+        // 33 groups against 33 matching bytes: the 33rd capture really opens.
+        let over = "local p = string.rep('(a)', 33) \
+                    return string.match(string.rep('a', 33), p)";
+        let outcome = eval_script(over.as_bytes(), &[], &[], &mut store, 0);
+        let text = format!("{outcome:?}");
+        assert!(
+            text.contains("too many captures"),
+            "33 opened captures must raise upstream's error, got {text}"
+        );
+
+        // Exactly 32 is the last accepted count, not the first refused one.
+        let at_limit = "local p = string.rep('(a)', 32)                         return string.match(string.rep('a', 32), p) == 'a'";
+        let frame = eval_script(at_limit.as_bytes(), &[], &[], &mut store, 0)
+            .expect("32 captures is inside upstream's maximum");
+        assert_eq!(
+            frame,
+            RespFrame::Integer(1),
+            "32 captures must still match; refusing here would be off by one"
+        );
+
+        // 40 groups, but the subject fails at the first byte, so capture 33
+        // never opens and upstream never raises. Must be a plain non-match.
+        let never_reached = "return string.match('b', string.rep('(a)', 40)) == nil";
+        let frame = eval_script(never_reached.as_bytes(), &[], &[], &mut store, 0)
+            .expect("a pattern whose 33rd capture is never reached must not raise");
+        assert_eq!(
+            frame,
+            RespFrame::Integer(1),
+            "upstream checks at capture-open, so this is nil and NOT an error"
+        );
     }
 
     #[test]
