@@ -64130,3 +64130,92 @@ present here.
    surface found here had a bounded twin one function away.
 3. Do NOT re-run the name-level census expecting it to find this class. It reported all seven
    surfaces clean, four separate times.
+
+## 2026-08-18 CrimsonHawk: MEASURED without a build — the 1000-deep cjson stack overflow is a DEV-PROFILE artifact: the shipping binary's encode frame is 288 bytes, so upstream's limit costs 13.7 pct of a 2 MiB worker stack and the narrowest of the three walkers has 5.2x headroom (`frankenredis-thread-stack-size-1tlyh`)
+
+EVIDENCE CLASS: static read of the SHIPPING release ELF's function prologues — a deterministic
+compile-time constant, not a timing measurement. CV was NOT used and no timing verdict is claimed.
+NO BUILD and NO SERVER: a disk throttle forbids cargo entirely, `/data` is at 49G, and this needed
+neither. Provenance computed by the run: `target/release/frankenredis`, sha256
+`3c80ba7ad9d4ce1c2d9d3cf42525c213f1a4a55888cd56cdb3402ac40489c257`, built 2026-08-18 18:34:17.
+
+Claim class: MEASUREMENT. Campaign output: no — no vs-incumbent ratio is involved.
+
+### THE INSTRUMENT, WHICH IS THE REUSABLE PART
+
+The bead asked for the maximum encode depth that survives a 2 MiB stack and observed, correctly,
+that a stack overflow ABORTS rather than unwinding, so it cannot be binary-searched in-process — it
+proposed one process per depth. That harness cannot be built under a cargo throttle, and it is not
+needed, because **a recursion's per-level stack cost is a compile-time constant sitting in the
+function prologue**:
+
+    per-level bytes = 8 (return address) + 8 * (leading register pushes) + the `sub $N,%rsp` immediate
+
+`objdump` on the binary already on disk answers in milliseconds what running to depth answers in
+minutes, and it answers it exactly rather than to within one process's luck.
+
+### THE THREE RECURSIVE WALKERS OVER USER-SUPPLIED STRUCTURE
+
+    walker          symbol                        B/level  push  sub   1000 deep   pct of 2 MiB  fits
+    cjson.encode    lua_value_to_json_at_depth      288      6   232    288,000      13.7 pct    7,281
+    cjson.decode    JsonParser::parse_value         352      6   296    352,000      16.8 pct    5,957
+    cmsgpack.pack   cmsgpack_pack_value             400      6   344    400,000      19.1 pct    5,242
+
+Each cycle was CONFIRMED direct rather than assumed: 5, 2 and 3 self-calls respectively appear in
+each function's own disassembly, so one level is one frame. Two details that would otherwise have
+produced wrong numbers — `json_to_lua_value` has ZERO self-calls and delegates into
+`JsonParser::parse_value`, which is where the recursion actually lives; and `cmsgpack_pack_table`
+has no symbol at all because it is inlined into `cmsgpack_pack_value`, which is why that frame is
+the fattest of the three.
+
+### WHY THE BEAD'S OVERFLOW IS REAL AND STILL DOES NOT INDICT PRODUCTION
+
+The overflow was measured under `cargo test -p fr-command --lib zo5ac`. This workspace defines
+`[profile.release-perf]` and NOTHING ELSE — no `[profile.dev]`, no `[profile.test]` — so that
+command runs at **opt-level 0 with no inlining and debug assertions on**, which is a different frame
+size question from the one the server asks. Checked rather than assumed, because the whole finding
+rests on it.
+
+So the bead's decision branch — *"IF THE SURVIVING DEPTH IS BELOW 1000, the fix is a decision, not a
+bug report"* — does NOT fire. The surviving depth is 5,242 at worst, 5.2x the limit that admits the
+input. No production change is required, and in particular the encoder's frame does not need
+shrinking.
+
+### WHAT THIS DOES NOT SETTLE
+
+  * **The 2 MiB is not all available.** The reactor loop, dispatch and the Lua interpreter's own
+    frames sit below the walker. The figures above are the walker's share, not the whole stack's
+    occupancy — which is why the gate's ceiling is 50 pct rather than 100.
+  * **It is one ELF.** Frames move when the encoder changes; that is a reason to re-read the number,
+    never to re-assume it. Hence the gate rather than a note.
+  * **The dev-profile hazard is untouched and still real.** `9a4ca2c28` had to run that test arm on
+    an explicitly sized thread, and it must stay: the test suite genuinely does overflow there.
+  * Setting an explicit `stack_size` on the reactor/worker spawns remains available as
+    defence-in-depth, but nothing measured here justifies it as a fix.
+
+### THE GATE
+
+`scripts/recursion_stack_budget_gate.py`, server-free and build-free. Mutation-tested on all four
+of its failure paths before being believed:
+
+    M0 baseline                     exit 0   PASS, narrowest margin 5.2x
+    M1 missing ELF, no flag         exit 1   refuses to pass for lack of a subject
+    M2 missing ELF, --allow-missing exit 0   SKIP, banner says NOTHING WAS CHECKED
+    M3 --stack 262144               exit 1   all three flagged, 109.9 / 134.3 / 152.6 pct
+    M4 an ELF without the symbols   exit 1   NOT FOUND is a failure, never a skip
+
+M1 and M4 are the two that matter. A gate that goes green because it could not find its subject is
+the false-pass mode this ledger keeps recording, so a missing binary FAILS unless the caller passes
+a flag whose output says in words that nothing was checked, and an inlined-away symbol FAILS rather
+than being quietly dropped from the table.
+
+### RETRY PREDICATES
+
+  1. Run the gate after any change to the cjson or cmsgpack walkers. It needs no build of its own —
+     it reads whatever release ELF exists.
+  2. If a walker's symbol ever reports NOT FOUND, do not lower the ceiling to make it pass: the
+     recursion has been inlined into a caller and the per-level cost must be re-derived from that
+     caller's prologue.
+  3. The open scope the bead names is the interpreter's own call depth, which is bounded in FRAMES
+     by `MAX_CALL_DEPTH` rather than in BYTES. The same prologue read would price it, and it is not
+     priced here.
