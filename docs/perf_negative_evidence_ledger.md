@@ -45440,3 +45440,79 @@ The certification bar is unchanged -- both nulls inside +/-0.02 -- and the row t
 standing 0.9162 control-normalised figure, quoting the WORST bound. If rounds=36 also
 null-fails with the two nulls again agreeing to 3 decimal places, the drift is faster than one
 round and the shape needs a different harness, not a different parameter.
+
+## 2026-08-18 BrownIbis: KEEP (SELF-SPEEDUP), WORKLOAD-MIX — hoisting GET's arm above the floor classifier takes GET dispatch **394.0 -> 190.0 instr/op (-51.8 pct)** and charges **+7 to +18 to every other command**; break-even is a GET share of 3.3 to 8.1 pct (`frankenredis-iqicb`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no
+
+LEVER: move the existing GET cascade arm above `try_dispatch_floor_classified_action`, guarded
+by the literal header `*2\r\n$3\r\n`. Shipped in `91f652459`. Same condition, parser, executor
+and reply — only the POSITION changes.
+
+WHY IT EXISTS: the floor-table census (`scripts/floor_table_census.py`, canary-guarded) found
+135 tokens naming 35 of 37 hot commands, missing only GET and PING, and PING has two dedicated
+arms. So GET is the single hot command the classifier structurally cannot name: it walked GET's
+header, failed, returned None, and the FOURTH arm then served it.
+
+MEASURED, callgrind two-point (N=20,000 and 2N=40,000), both arms from a worktree pinned at
+HEAD `9fc27dda9` differing only in this change.
+`bench_elf_sha256=667a40f9fb116599f4ffbc2120bfcab59f202ab1fc5ccdb348c7b0765deb7895` (before),
+`bench_elf_sha256=6eb6fb5328143ef3fd8409ab656348f4d17c7980980a3505e130e7318e506655` (after). Per-arm host state: load 48.88/42.72/25.31 and
+55.33/30.62/18.41, CPU idle 63.1 pct and 69.9 pct measured from `/proc/stat`, iowait 1.2 and
+2.8 pct, mean 2153-3285 MHz across 64 cores, /data 130G. **The host was heavily loaded and no
+ratio is claimed here** — instruction counts are software-counted and immune to load and MHz.
+
+| shape | dispatch before | after | delta |
+|---|---|---|---|
+| **get** | 394.0 | **190.0** | **-204.0 (-51.8 pct)** |
+| ttl | 475.0 | 493.0 | **+18.0** |
+| del | 400.0 | 418.0 | **+18.0** |
+| sadd | 590.2 | 598.5 | +8.3 |
+| ping | 294.0 | 301.0 | +7.0 |
+
+**QUOTING THE WORST BOUND: +18.0 instr/op on TTL and DEL.** They are arity-2 three-letter
+commands, so they pass the 8-byte header guard and pay the extra three-byte NAME test before
+falling through; every other shape is rejected on the single 8-byte compare at +7 to +8.3.
+
+**THIS IS A WORKLOAD-MIX CLAIM AND THE ROW SAYS SO IN ITS HEADING.** Break-even GET share is
+**8.1 pct** against the +18 tax and **3.3 pct** against the +7 one. Above that the mix wins,
+below it the mix loses, and **a workload containing no GET at all is a pure loss of 7 to 18
+instr/op per command**. The lever is defensible because GET is the most-executed command in
+essentially every real Redis workload and the asymmetry is 204 against 18, but that is an
+argument about MIX, not a claim that nothing got slower — two shapes measurably did.
+
+The gain exceeds the ~120 instr/op the declining classification costs because GET also stops
+walking the two PING arms that sat between the classifier and its own.
+
+`.text` SHRINKS 448 bytes.
+
+CORRECTNESS: 14 command forms answer byte-identically on both arms, chosen for the shapes this
+reorder could confuse — TTL and DEL share GET's exact 13-byte header, `GETDEL` shares its
+prefix, `SOMETHINGGET` ends in the three bytes the name test reads, plus both GET arity errors
+and a 200-byte key. Nothing about GET's semantics can change, because the classifier never
+served GET; the arm that serves it is the same arm.
+
+METHOD NOTE worth keeping: the BEFORE arm rebuilt **byte-identical** to an ELF built earlier in
+the same session from the same source (`667a40f9fb116599f4ffbc21`), which is an unplanned
+build-determinism check on the paired-build protocol.
+
+GATE AND ITS OWN NULL. The A/A null and the A/B pairing come from one same-invocation run
+interleaving both arms across two rounds, so drift falls on both alike. A/A null on the
+whole-process instrument, same ELF, four draws of GET, resampled ratio-of-medians: median
+1.00000, bootstrap 95% median CI [0.99730, 1.00244]. The verdict gate for this row is that
+bootstrap median-CI, and CV is provenance only and was not used as a gate anywhere in this row;
+no CV was computed. Host state is likewise provenance, not a gate. The verdict rests on the
+dispatch FRAME, whose figures are exact integers; at -204.0 this is the first lever in this
+vein big enough that the whole-process instrument could also see it, and it did.
+
+RETRY PREDICATE: revisit this ONLY IF the target workload's GET share falls below 8.1 pct, or
+if the classifier's own cost falls below ~120 instr/op — either change shrinks the prize below
+the tax, and both are measurable on the dispatch FRAME (`get` 190.0 and `ttl` 493.0 are now the
+reference values). **Do NOT generalise this into hoisting more commands.** Each hoist adds its
+own guard to every command that follows it, so the second hoist pays the first one's tax and
+charges its own; the reason this one clears is that GET is the single most-executed command AND
+the only hot one the classifier cannot name, and no second command has both properties. The
+classifier costing 120-200 instr/op while a hoisted GET costs 190 total is the datum that
+should drive the NEXT lever — make the classifier cheaper for everyone rather than route more
+commands around it.
