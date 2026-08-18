@@ -52564,3 +52564,122 @@ elements, more nodes.
      which is what a fixed allocator cost looks like. If a future lever claims to remove the
      COPY rather than the allocation, it must show a per-node saving that GROWS with node size,
      or it is measuring this one again.
+
+--------------------------------------------------------------------------------
+
+## The read-gate vein's premise does not reproduce at current HEAD — re-derive the 175.0 before working it
+
+`42862` recorded a failed read-gate conversion and left retry item 2 open: *"Diagnose why
+`read_gate_cache` does not persist on the floor path before threading anything else. Until that is
+understood the conversion cannot pay."* I set out to answer exactly that. The source reading gave
+a clean mechanism, the counts then refused to confirm it, and chasing why produced a more useful
+result than the diagnosis would have been: **the vein's own premise no longer measures.**
+
+### THE SOURCE MECHANISM I FOUND, AND WHY IT IS NOT BANKED AS THE ANSWER
+
+The packet loop's consuming arms are asymmetric, and the asymmetry lines up exactly with the
+read/write split the failed row observed:
+
+  main.rs:13574  FastEncodedReply  clears NOTHING
+  main.rs:13589  FastReply         clears NOTHING
+  main.rs:13635  FastOkReply       clears the READ cache only (13640) — write cache deliberately kept
+  main.rs:13663  Parsed            clears ALL THREE (13672-13674), on the line BEFORE it dispatches
+
+That predicts the observed 1.0000 vs ~0.0005: write shapes reply `+OK` and take `FastOkReply`,
+whose comment states the write cache is kept on purpose; read shapes reach the floor through
+`Parsed`, which sets `plain_get_read_gate_cache = None` immediately before calling
+`process_argv_frame`. On that path the cache is not a cache — it is a per-command temporary,
+structurally guaranteed cold, one clear and one fill per op forever.
+
+**This is NOT banked as the confirmed mechanism, because I could not count it.** It is a reading,
+and readings are what the retry predicate warned against.
+
+### WHY IT COULD NOT BE COUNTED, AND WHAT THAT REVEALED
+
+`call_count_delta.py` on a fresh `llen` dump returned **0.0000 calls/op** for
+`plain_borrowed_default_key_read_allows`, `plain_borrowed_default_key_read_gate` AND
+`process_argv_frame` — the last of which every command must traverse, so zero is not absence, it
+is inlining. `set_base` likewise returned 0.0000 for `cached_plain_write_gate`. Call counting
+cannot adjudicate this build.
+
+`frame_delta.py` then showed why that matters. On three of the eight routes the failed conversion
+targeted, the gate is not an attributable frame at all, and every route is far cheaper than the
+vein row recorded:
+
+  shape       vein row `42862`   current HEAD   delta      gate frame   memcmp
+  llen              1689.4          1214.9     -474.5      absent        10.0
+  zcard             1724.5          1375.0     -349.5      absent      not in top 10
+  sismember         2070.1          1590.8     -479.3      absent        66.1
+
+The vein is premised on a flat **175.0 instr/op** gate carrying **2.000 memcmp/op** from a
+by-name ACL lookup. On `llen` the entire process spends 10.0 instr/op in `memcmp`.
+
+### THE CLAIM, STATED NO WIDER THAN THE EVIDENCE
+
+**The 175.0 is not reproducible as an attributable cost on these three routes at this build, and
+must be re-derived before the vein is worked again.** That is the whole claim.
+
+What is explicitly NOT claimed: that the gate's work is gone. Inlining relocates cost into the
+caller, it does not remove it — the gate's predicate could be executing in full inside
+`classify_borrowed_dispatch_floor_packet_impl` (146-178 instr/op here) or the executor
+(167-180 instr/op) and be invisible to both instruments I used. Separating those two worlds needs
+an `#[inline(never)]` measurement build, which is the correct next step and is not this row.
+
+Nor is the -349 to -479 drop attributed. It is larger than the 175 the gate could explain, and
+`da47c18ca` (this session's expire-cycle rate limit, -26.08 pct on a plain `GET`) is per-command
+and applies to every one of these routes, so it is a plausible large contributor — but the vein
+row's build differed in other ways too and no paired build was run. **Reading a delta off another
+row's build is a comparison, not an attribution**, and it is recorded here as the former.
+
+### THE COUNTED SUCCESSOR TARGET
+
+While the gate is invisible, something adjacent is not. On `zcard`:
+
+  70.0  <fr_store::CommandHistogramTracker>::record_canonical_with_kind
+  87.0  <hashbrown::HashMap<String, CommandHistogram>>::get_mut::<str>
+  ----
+ 157.0  instr/op = **11.4 pct of a 1375.0 instr/op ZCARD**
+
+A per-command metrics lookup keyed by the command NAME STRING, hashing and comparing a `String`
+key on every single command. On `llen` `record_canonical_with_kind` is 43.0 and the map lookup
+does not surface separately, so the cost is route-dependent and must be counted per route rather
+than assumed flat — the exact error `42862` made. This is left as a TARGET with a number, not
+opened as a lever.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+Instructions via two-point subtraction, so startup and seeding cancel exactly and the figures are
+load-immune — the banked A/A for this instrument is median 1.000002, 95 pct median CI
+[0.996069, 1.003947], which on a ~1400 instr/op shape is about +/-5 instr/op. Every delta quoted
+above is 349+ instr/op, two orders above that interval. No throughput ratio and no incumbent
+comparison is made by this row, so no quiet window was required and none is claimed.
+
+### PROVENANCE
+
+  ELF           fr `1997c099ffb0ca5eab7fd21b3f27e1ff46760c2a6185000156531573f5e8ad47`
+  bench_elf_sha256=1997c099ffb0ca5eab7fd21b3f27e1ff46760c2a6185000156531573f5e8ad47
+  incumbent     NOT RUN — no ratio is claimed by this row.
+  harness       `scripts/shape_instr_per_op.py` at 2000 ops `--fr-only`, then
+                `scripts/frame_delta.py` and `scripts/call_count_delta.py` on its own dumps.
+  host          /data 88G free. Per-arm: llen loadavg 12.86 10.46 10.00 CPU 2661 MHz mean;
+                zcard loadavg 12.06 10.67 10.09 CPU 2258 MHz mean; sismember loadavg
+                11.81 10.64 10.09 CPU 2340 MHz mean. Instructions, so MHz and load do not enter.
+  pair          Single build, no A/B — the comparison column is quoted FROM `42862` and is
+                labelled a comparison, not a paired measurement.
+  disposition   MEASUREMENT ONLY. No source file changed.
+
+### RETRY PREDICATE
+
+1. Do NOT open the read-gate vein on the strength of the banked 175.0. Re-derive it first, on a
+   build with `plain_borrowed_default_key_read_allows` marked `#[inline(never)]`, and confirm the
+   gate still costs what the vein says before threading a single route.
+2. If that build shows the gate below ~60 instr/op, the vein is finished and the remaining
+   `default_read_allowed` threading should stop where it is.
+3. Do NOT count calls on an optimised build to prove a route does or does not reach a function.
+   `process_argv_frame` reads 0.0000 calls/op on a shape that certainly calls it. A zero from
+   `call_count_delta.py` means "inlined or absent" and only a frame-level or `inline(never)`
+   measurement separates those.
+4. The `FastOkReply`-vs-`Parsed` cache asymmetry above is a READING and remains unconfirmed. If
+   the vein survives step 1, confirm it by counting on an `inline(never)` build before acting.
+5. The 157.0 instr/op command-histogram lookup on `zcard` is counted and open. Count it per route
+   first — it is 43.0 on `llen` and does not surface the same way.
