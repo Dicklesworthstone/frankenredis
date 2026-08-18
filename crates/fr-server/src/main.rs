@@ -9132,6 +9132,7 @@ fn process_buffered_frames(
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
+                            None,
                         )
                         .is_some()
                     {
@@ -9797,7 +9798,7 @@ fn process_buffered_frames(
                     parse_borrowed_plain_zcount_packet(unparsed, &parser_config)
                 {
                     if let Some(response) = runtime
-                        .execute_plain_zcount_borrowed(packet.key, packet.min, packet.max, ts)
+                        .execute_plain_zcount_borrowed(packet.key, packet.min, packet.max, ts, None)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -11248,6 +11249,7 @@ fn process_buffered_frames(
                                 ts,
                                 client_resp3,
                                 &mut conn.write_buf,
+                                None,
                             )
                             .is_some()
                         {
@@ -11292,6 +11294,7 @@ fn process_buffered_frames(
                                 packet.b,
                                 ts,
                                 &mut conn.write_buf,
+                                None,
                             )
                             .is_some()
                         {
@@ -11317,6 +11320,7 @@ fn process_buffered_frames(
                                 packet.b,
                                 ts,
                                 &mut conn.write_buf,
+                                None,
                             )
                             .is_some()
                         {
@@ -11342,6 +11346,7 @@ fn process_buffered_frames(
                                 packet.b,
                                 ts,
                                 &mut conn.write_buf,
+                                None,
                             )
                             .is_some()
                         {
@@ -11406,6 +11411,7 @@ fn process_buffered_frames(
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
+                            None,
                         )
                         .is_some()
                     {
@@ -12454,6 +12460,7 @@ fn process_buffered_frames(
                                 ts,
                                 client_resp3,
                                 &mut conn.write_buf,
+                                None,
                             )
                             .is_some()
                         {
@@ -12493,6 +12500,7 @@ fn process_buffered_frames(
                             packet.b,
                             ts,
                             &mut conn.write_buf,
+                            None,
                         )
                         .is_some()
                     {
@@ -12527,6 +12535,7 @@ fn process_buffered_frames(
                                 packet.e,
                                 ts,
                                 &mut conn.write_buf,
+                                None,
                             )
                             .is_some()
                     {
@@ -12560,6 +12569,7 @@ fn process_buffered_frames(
                                 ts,
                                 client_resp3,
                                 &mut conn.write_buf,
+                                None,
                             )
                             .is_some()
                         {
@@ -12599,6 +12609,7 @@ fn process_buffered_frames(
                             packet.b,
                             ts,
                             &mut conn.write_buf,
+                            None,
                         )
                         .is_some()
                     {
@@ -12632,6 +12643,7 @@ fn process_buffered_frames(
                                 ts,
                                 client_resp3,
                                 &mut conn.write_buf,
+                                None,
                             )
                             .is_some()
                         {
@@ -12676,6 +12688,7 @@ fn process_buffered_frames(
                                 packet.e,
                                 ts,
                                 &mut conn.write_buf,
+                                None,
                             )
                             .is_some()
                     {
@@ -12705,6 +12718,7 @@ fn process_buffered_frames(
                             packet.b,
                             ts,
                             &mut conn.write_buf,
+                            None,
                         )
                         .is_some()
                     {
@@ -12808,6 +12822,7 @@ fn process_buffered_frames(
                                 packet.e,
                                 ts,
                                 &mut conn.write_buf,
+                                None,
                             )
                             .is_some()
                     {
@@ -14596,6 +14611,7 @@ fn parse_borrowed_multibulk_action(
                                     ts,
                                     client_resp3,
                                     out,
+                                    None,
                                 )
                                 .is_some()
                             {
@@ -14626,6 +14642,7 @@ fn parse_borrowed_multibulk_action(
                                     ts,
                                     client_resp3,
                                     out,
+                                    None,
                                 )
                                 .is_some()
                             {
@@ -19779,6 +19796,11 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::ZrangeWithscores => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
             if let Some(packet) =
                 parse_borrowed_plain_zrange_withscores_packet(unparsed, &parser_config)
@@ -19790,6 +19812,7 @@ fn try_dispatch_floor_classified_action(
                         ts,
                         client_resp3,
                         out,
+                        default_read_allowed,
                     )
                     .is_some()
             {
@@ -19814,14 +19837,17 @@ fn try_dispatch_floor_classified_action(
                 let served = if packet.c.eq_ignore_ascii_case(b"REV") {
                     runtime.execute_plain_zrange_rev_borrowed_into(
                         packet.key, packet.a, packet.b, ts, out,
+                        default_read_allowed,
                     )
                 } else if packet.c.eq_ignore_ascii_case(b"BYSCORE") {
                     runtime.execute_plain_zrange_byscore_borrowed_into(
                         packet.key, packet.a, packet.b, ts, out,
+                        default_read_allowed,
                     )
                 } else if packet.c.eq_ignore_ascii_case(b"BYLEX") {
                     runtime.execute_plain_zrange_bylex_borrowed_into(
                         packet.key, packet.a, packet.b, ts, out,
+                        default_read_allowed,
                     )
                 } else {
                     // Includes the WITHSCORES packet itself when the executor
@@ -19965,13 +19991,18 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Zrevrange => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
                 unparsed,
                 &parser_config,
                 b"*4\r\n$9\r\n",
                 b"ZREVRANGE",
             ) && runtime
-                .execute_plain_zrevrange_borrowed_into(packet.key, packet.a, packet.b, ts, out)
+                .execute_plain_zrevrange_borrowed_into(packet.key, packet.a, packet.b, ts, out, default_read_allowed)
                 .is_some()
             {
                 Ok(BorrowedMultibulkAction::FastEncodedReply {
@@ -20047,6 +20078,11 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Zrevrangebyscore => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
                 unparsed,
                 &parser_config,
@@ -20055,6 +20091,7 @@ fn try_dispatch_floor_classified_action(
             ) && runtime
                 .execute_plain_zrevrangebyscore_borrowed_into(
                     packet.key, packet.a, packet.b, ts, out,
+                    default_read_allowed,
                 )
                 .is_some()
             {
@@ -20173,6 +20210,11 @@ fn try_dispatch_floor_classified_action(
         // still checked here: the classifier promises a LENGTH, and only the parser
         // sees the token.
         BorrowedDispatchFloorClass::ZrangebyscoreLimit => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             if let Some(packet) = parse_borrowed_plain_key_arg5_packet(
                 unparsed,
                 &parser_config,
@@ -20182,6 +20224,7 @@ fn try_dispatch_floor_classified_action(
                 && runtime
                     .execute_plain_zrangebyscore_limit_borrowed_into(
                         packet.key, packet.a, packet.b, packet.d, packet.e, ts, out,
+                        default_read_allowed,
                     )
                     .is_some()
             {
@@ -20288,13 +20331,18 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Zrangebyscore => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             if let Some(packet) = parse_borrowed_plain_key_arg2_packet(
                 unparsed,
                 &parser_config,
                 b"*4\r\n$13\r\n",
                 b"ZRANGEBYSCORE",
             ) && runtime
-                .execute_plain_zrangebyscore_borrowed_into(packet.key, packet.a, packet.b, ts, out)
+                .execute_plain_zrangebyscore_borrowed_into(packet.key, packet.a, packet.b, ts, out, default_read_allowed)
                 .is_some()
             {
                 Ok(BorrowedMultibulkAction::FastEncodedReply {
@@ -22461,9 +22509,14 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Zcount => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             if let Some(packet) = parse_borrowed_plain_zcount_packet(unparsed, &parser_config)
                 && let Some(response) =
-                    runtime.execute_plain_zcount_borrowed(packet.key, packet.min, packet.max, ts)
+                    runtime.execute_plain_zcount_borrowed(packet.key, packet.min, packet.max, ts, default_read_allowed)
             {
                 Ok(BorrowedMultibulkAction::FastReply {
                     consumed: packet.consumed,
@@ -22481,6 +22534,11 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Zscore => {
+            // (frankenredis-getexgate) Cached READ gate, as the ozrro-converted arms take it.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             // ZSCORE writes its score reply straight into `out` via the `_into`
             // executor (encode_redis_double, no intermediate RespFrame), so this
             // is a FastEncodedReply — not the FastReply shape ZCOUNT uses. The
@@ -22498,6 +22556,7 @@ fn try_dispatch_floor_classified_action(
                             ts,
                             client_resp3,
                             out,
+                            default_read_allowed,
                         )
                         .map(|()| packet.consumed)
                 });

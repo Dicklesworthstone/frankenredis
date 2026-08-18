@@ -24279,8 +24279,9 @@ impl Runtime {
         min_arg: &[u8],
         max_arg: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_zbyscore_borrowed(b"ZRANGE".len(), key, min_arg, max_arg, now_ms)
+        if !self.can_execute_plain_zbyscore_borrowed(b"ZRANGE".len(), key, min_arg, max_arg, now_ms, default_read_allowed)
         {
             return None;
         }
@@ -24335,8 +24336,9 @@ impl Runtime {
         max_arg: &[u8],
         now_ms: u64,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
-        if !self.can_execute_plain_zbyscore_borrowed(b"ZRANGE".len(), key, min_arg, max_arg, now_ms)
+        if !self.can_execute_plain_zbyscore_borrowed(b"ZRANGE".len(), key, min_arg, max_arg, now_ms, default_read_allowed)
         {
             return None;
         }
@@ -24400,8 +24402,9 @@ impl Runtime {
         min: &[u8],
         max: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_zbyscore_borrowed(b"ZRANGE".len(), key, min, max, now_ms) {
+        if !self.can_execute_plain_zbyscore_borrowed(b"ZRANGE".len(), key, min, max, now_ms, default_read_allowed) {
             return None;
         }
         if !plain_lex_bound_well_formed(min) || !plain_lex_bound_well_formed(max) {
@@ -24459,8 +24462,9 @@ impl Runtime {
         max: &[u8],
         now_ms: u64,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
-        if !self.can_execute_plain_zbyscore_borrowed(b"ZRANGE".len(), key, min, max, now_ms) {
+        if !self.can_execute_plain_zbyscore_borrowed(b"ZRANGE".len(), key, min, max, now_ms, default_read_allowed) {
             return None;
         }
         if !plain_lex_bound_well_formed(min) || !plain_lex_bound_well_formed(max) {
@@ -24538,6 +24542,7 @@ impl Runtime {
         offset_arg: &[u8],
         count_arg: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
         if !self.can_execute_plain_zbyscore_borrowed(
             b"ZREVRANGEBYSCORE".len(),
@@ -24545,6 +24550,7 @@ impl Runtime {
             max_arg,
             min_arg,
             now_ms,
+            default_read_allowed,
         ) {
             return None;
         }
@@ -24646,6 +24652,7 @@ impl Runtime {
         count_arg: &[u8],
         now_ms: u64,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
         if !self.can_execute_plain_zbyscore_borrowed(
             b"ZREVRANGEBYSCORE".len(),
@@ -24653,6 +24660,7 @@ impl Runtime {
             max_arg,
             min_arg,
             now_ms,
+            default_read_allowed,
         ) {
             return None;
         }
@@ -24738,8 +24746,9 @@ impl Runtime {
         offset_arg: &[u8],
         count_arg: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_zbyscore_borrowed(b"ZREVRANGEBYLEX".len(), key, max, min, now_ms)
+        if !self.can_execute_plain_zbyscore_borrowed(b"ZREVRANGEBYLEX".len(), key, max, min, now_ms, default_read_allowed)
         {
             return None;
         }
@@ -24828,8 +24837,9 @@ impl Runtime {
         count_arg: &[u8],
         now_ms: u64,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
-        if !self.can_execute_plain_zbyscore_borrowed(b"ZREVRANGEBYLEX".len(), key, max, min, now_ms)
+        if !self.can_execute_plain_zbyscore_borrowed(b"ZREVRANGEBYLEX".len(), key, max, min, now_ms, default_read_allowed)
         {
             return None;
         }
@@ -24907,6 +24917,7 @@ impl Runtime {
         start_arg: &[u8],
         stop_arg: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
         if !self.can_execute_plain_zbyscore_borrowed(
             b"ZRANGE".len(),
@@ -24914,6 +24925,7 @@ impl Runtime {
             start_arg,
             stop_arg,
             now_ms,
+            default_read_allowed,
         ) {
             return None;
         }
@@ -24979,6 +24991,7 @@ impl Runtime {
         stop_arg: &[u8],
         now_ms: u64,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
         if !self.can_execute_plain_zbyscore_borrowed(
             b"ZRANGE".len(),
@@ -24986,6 +24999,7 @@ impl Runtime {
             start_arg,
             stop_arg,
             now_ms,
+            default_read_allowed,
         ) {
             return None;
         }
@@ -25196,6 +25210,7 @@ impl Runtime {
         max_arg: &[u8],
         now_ms: u64,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
         if !self.can_execute_plain_zbyscore_borrowed(
             b"ZRANGEBYSCORE".len(),
@@ -25203,6 +25218,7 @@ impl Runtime {
             min_arg,
             max_arg,
             now_ms,
+            default_read_allowed,
         ) {
             return None;
         }
@@ -25262,6 +25278,7 @@ impl Runtime {
         min_arg: &[u8],
         now_ms: u64,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
         if !self.can_execute_plain_zbyscore_borrowed(
             b"ZREVRANGEBYSCORE".len(),
@@ -25269,6 +25286,7 @@ impl Runtime {
             max_arg,
             min_arg,
             now_ms,
+            default_read_allowed,
         ) {
             return None;
         }
@@ -25326,6 +25344,7 @@ impl Runtime {
         a: &[u8],
         b: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> bool {
         if self.policy.gate.max_array_len < 4
             || self.policy.gate.max_bulk_len < name_len
@@ -25335,7 +25354,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_read_allows(now_ms)
+        default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// (frankenredis-zbyscorefast) Borrowed READ fast path for `ZRANGEBYSCORE key
@@ -25348,6 +25368,7 @@ impl Runtime {
         min_arg: &[u8],
         max_arg: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
         if !self.can_execute_plain_zbyscore_borrowed(
             b"ZRANGEBYSCORE".len(),
@@ -25355,6 +25376,7 @@ impl Runtime {
             min_arg,
             max_arg,
             now_ms,
+            default_read_allowed,
         ) {
             return None;
         }
@@ -25409,6 +25431,7 @@ impl Runtime {
         offset_arg: &[u8],
         count_arg: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
         if !self.can_execute_plain_zbyscore_borrowed(
             b"ZRANGEBYSCORE".len(),
@@ -25416,6 +25439,7 @@ impl Runtime {
             min_arg,
             max_arg,
             now_ms,
+            default_read_allowed,
         ) {
             return None;
         }
@@ -25518,6 +25542,7 @@ impl Runtime {
         count_arg: &[u8],
         now_ms: u64,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
         if !self.can_execute_plain_zbyscore_borrowed(
             b"ZRANGEBYSCORE".len(),
@@ -25525,6 +25550,7 @@ impl Runtime {
             min_arg,
             max_arg,
             now_ms,
+            default_read_allowed,
         ) {
             return None;
         }
@@ -25685,6 +25711,7 @@ impl Runtime {
         max_arg: &[u8],
         min_arg: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
         if !self.can_execute_plain_zbyscore_borrowed(
             b"ZREVRANGEBYSCORE".len(),
@@ -25692,6 +25719,7 @@ impl Runtime {
             max_arg,
             min_arg,
             now_ms,
+            default_read_allowed,
         ) {
             return None;
         }
@@ -25744,6 +25772,7 @@ impl Runtime {
         start_arg: &[u8],
         stop_arg: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
         if !self.can_execute_plain_zbyscore_borrowed(
             b"ZREVRANGE".len(),
@@ -25751,6 +25780,7 @@ impl Runtime {
             start_arg,
             stop_arg,
             now_ms,
+            default_read_allowed,
         ) {
             return None;
         }
@@ -25812,6 +25842,7 @@ impl Runtime {
         stop_arg: &[u8],
         now_ms: u64,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
         if !self.can_execute_plain_zbyscore_borrowed(
             b"ZREVRANGE".len(),
@@ -25819,6 +25850,7 @@ impl Runtime {
             start_arg,
             stop_arg,
             now_ms,
+            default_read_allowed,
         ) {
             return None;
         }
@@ -30957,6 +30989,7 @@ impl Runtime {
         min_arg: &[u8],
         max_arg: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> bool {
         if self.policy.gate.max_array_len < 4
             || self.policy.gate.max_bulk_len < b"ZCOUNT".len()
@@ -30966,7 +30999,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_read_allows(now_ms)
+        default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Borrowed runtime fast path for `ZCOUNT key min max` — mirrors the generic
@@ -30984,8 +31018,9 @@ impl Runtime {
         min_arg: &[u8],
         max_arg: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_zcount_borrowed(key, min_arg, max_arg, now_ms) {
+        if !self.can_execute_plain_zcount_borrowed(key, min_arg, max_arg, now_ms, default_read_allowed) {
             return None;
         }
         // Parse BEFORE any side effect; a bad bound falls back to generic for the
@@ -35066,6 +35101,7 @@ impl Runtime {
         key: &[u8],
         member: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"ZSCORE".len()
@@ -35074,7 +35110,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_read_allows(now_ms)
+        default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed runtime fast path for `ZSCORE key member`: mirrors
@@ -35090,8 +35127,9 @@ impl Runtime {
         key: &[u8],
         member: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_zscore_borrowed(key, member, now_ms) {
+        if !self.can_execute_plain_zscore_borrowed(key, member, now_ms, default_read_allowed) {
             return None;
         }
 
@@ -35161,8 +35199,9 @@ impl Runtime {
         now_ms: u64,
         resp3: bool,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
-        if !self.can_execute_plain_zscore_borrowed(key, member, now_ms) {
+        if !self.can_execute_plain_zscore_borrowed(key, member, now_ms, default_read_allowed) {
             return None;
         }
 
@@ -35515,9 +35554,16 @@ impl Runtime {
         now_ms: u64,
         resp3: bool,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
-        if !self.can_execute_plain_zrange_borrowed(key, start_arg, stop_arg, now_ms)
-            || self.policy.gate.max_array_len < 5
+        // (frankenredis-getexgate) ZRANGE's predicate already has a `_with_default_read_gate`
+        // twin; this executor called the BARE wrapper, which derives the gate itself, while
+        // its floor arm computed the per-pass value and had nowhere to put it.
+        let gate = default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms));
+        if !self.can_execute_plain_zrange_borrowed_with_default_read_gate(
+            key, start_arg, stop_arg, gate,
+        ) || self.policy.gate.max_array_len < 5
             || self.policy.gate.max_bulk_len < b"WITHSCORES".len()
         {
             return None;
@@ -35631,6 +35677,7 @@ impl Runtime {
         now_ms: u64,
         resp3: bool,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
         if !self.can_execute_plain_zbyscore_borrowed(
             b"ZREVRANGE".len(),
@@ -35638,6 +35685,7 @@ impl Runtime {
             start_arg,
             stop_arg,
             now_ms,
+            default_read_allowed,
         ) || self.policy.gate.max_array_len < 5
             || self.policy.gate.max_bulk_len < b"WITHSCORES".len()
         {
@@ -35757,6 +35805,7 @@ impl Runtime {
         now_ms: u64,
         resp3: bool,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
         if !self.can_execute_plain_zbyscore_borrowed(
             b"ZRANGEBYSCORE".len(),
@@ -35764,6 +35813,7 @@ impl Runtime {
             min_arg,
             max_arg,
             now_ms,
+            default_read_allowed,
         ) || self.policy.gate.max_array_len < 5
             || self.policy.gate.max_bulk_len < b"WITHSCORES".len()
         {
@@ -35919,6 +35969,7 @@ impl Runtime {
         now_ms: u64,
         resp3: bool,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
         if !self.can_execute_plain_zbyscore_borrowed(
             b"ZREVRANGEBYSCORE".len(),
@@ -35926,6 +35977,7 @@ impl Runtime {
             max_arg,
             min_arg,
             now_ms,
+            default_read_allowed,
         ) || self.policy.gate.max_array_len < 5
             || self.policy.gate.max_bulk_len < b"WITHSCORES".len()
         {
@@ -36078,8 +36130,9 @@ impl Runtime {
         now_ms: u64,
         resp3: bool,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
-        if !self.can_execute_plain_zbyscore_borrowed(b"ZRANGE".len(), key, min_arg, max_arg, now_ms)
+        if !self.can_execute_plain_zbyscore_borrowed(b"ZRANGE".len(), key, min_arg, max_arg, now_ms, default_read_allowed)
             || self.policy.gate.max_array_len < 6
             || self.policy.gate.max_bulk_len < b"WITHSCORES".len()
         {
@@ -52927,7 +52980,7 @@ mod tests {
             }
 
             let hit = fast
-                .execute_plain_zscore_borrowed(b"z", b"a", 2)
+                .execute_plain_zscore_borrowed(b"z", b"a", 2, None)
                 .expect("default ZSCORE should take borrowed fast path");
             assert_eq!(
                 hit,
@@ -52936,7 +52989,7 @@ mod tests {
             );
 
             let miss_member = fast
-                .execute_plain_zscore_borrowed(b"z", b"nope", 3)
+                .execute_plain_zscore_borrowed(b"z", b"nope", 3, None)
                 .expect("missing-member ZSCORE should take borrowed fast path");
             assert_eq!(
                 miss_member,
@@ -52945,7 +52998,7 @@ mod tests {
             assert_eq!(miss_member, RespFrame::BulkString(None));
 
             let miss_key = fast
-                .execute_plain_zscore_borrowed(b"nokey", b"a", 4)
+                .execute_plain_zscore_borrowed(b"nokey", b"a", 4, None)
                 .expect("missing-key ZSCORE should take borrowed fast path");
             assert_eq!(
                 miss_key,
@@ -52953,7 +53006,7 @@ mod tests {
             );
 
             let wt = fast
-                .execute_plain_zscore_borrowed(b"str", b"a", 5)
+                .execute_plain_zscore_borrowed(b"str", b"a", 5, None)
                 .expect("wrong-type ZSCORE should take borrowed fast path");
             assert_eq!(
                 wt,
@@ -53006,7 +53059,7 @@ mod tests {
             for (ts, (key, member)) in (2..).zip(cases) {
                 let mut out = Vec::new();
                 direct
-                    .execute_plain_zscore_borrowed_into(key, member, ts, resp3, &mut out)
+                    .execute_plain_zscore_borrowed_into(key, member, ts, resp3, &mut out, None)
                     .expect("zscore direct encoder should take borrowed fast path");
                 let generic_reply =
                     generic.execute_frame(command(&[b"ZSCORE".as_slice(), key, member]), ts);
@@ -53257,10 +53310,10 @@ mod tests {
             // Dedicated ZREVRANGE: _into vs owned fast path vs generic (bytes).
             let mut out = Vec::new();
             into_rt
-                .execute_plain_zrevrange_borrowed_into(b"z", start, stop, ts, &mut out)
+                .execute_plain_zrevrange_borrowed_into(b"z", start, stop, ts, &mut out, None)
                 .expect("ZREVRANGE _into fast path");
             let owned = owned_rt
-                .execute_plain_zrevrange_borrowed(b"z", start, stop, ts)
+                .execute_plain_zrevrange_borrowed(b"z", start, stop, ts, None)
                 .expect("ZREVRANGE owned fast path");
             assert_eq!(out, encode_frame(owned.clone()), "ZREVRANGE _into != owned");
             assert_eq!(
@@ -53275,10 +53328,10 @@ mod tests {
             // ZRANGE ... REV: _into vs owned fast path vs generic (bytes).
             let mut out2 = Vec::new();
             into_rt
-                .execute_plain_zrange_rev_borrowed_into(b"z", start, stop, ts, &mut out2)
+                .execute_plain_zrange_rev_borrowed_into(b"z", start, stop, ts, &mut out2, None)
                 .expect("ZRANGE REV _into fast path");
             let owned2 = owned_rt
-                .execute_plain_zrange_rev_borrowed(b"z", start, stop, ts)
+                .execute_plain_zrange_rev_borrowed(b"z", start, stop, ts, None)
                 .expect("ZRANGE REV owned fast path");
             assert_eq!(
                 out2,
@@ -53298,10 +53351,10 @@ mod tests {
         // Missing key -> empty array (both paths).
         let mut out = Vec::new();
         into_rt
-            .execute_plain_zrevrange_borrowed_into(b"nokey", b"0", b"9", ts, &mut out)
+            .execute_plain_zrevrange_borrowed_into(b"nokey", b"0", b"9", ts, &mut out, None)
             .expect("missing-key ZREVRANGE _into");
         let owned = owned_rt
-            .execute_plain_zrevrange_borrowed(b"nokey", b"0", b"9", ts)
+            .execute_plain_zrevrange_borrowed(b"nokey", b"0", b"9", ts, None)
             .expect("missing-key ZREVRANGE owned");
         assert_eq!(out, b"*0\r\n");
         assert_eq!(out, encode_frame(owned));
@@ -53310,10 +53363,10 @@ mod tests {
         // Wrong-type -> WRONGTYPE error (both paths).
         let mut out = Vec::new();
         into_rt
-            .execute_plain_zrevrange_borrowed_into(b"str", b"0", b"1", ts, &mut out)
+            .execute_plain_zrevrange_borrowed_into(b"str", b"0", b"1", ts, &mut out, None)
             .expect("wrong-type ZREVRANGE _into");
         let owned = owned_rt
-            .execute_plain_zrevrange_borrowed(b"str", b"0", b"1", ts)
+            .execute_plain_zrevrange_borrowed(b"str", b"0", b"1", ts, None)
             .expect("wrong-type ZREVRANGE owned");
         assert!(out.starts_with(b"-WRONGTYPE"));
         assert_eq!(out, encode_frame(owned));
@@ -53363,6 +53416,7 @@ mod tests {
                 direct
                     .execute_plain_zrange_withscores_borrowed_into(
                         key, start, stop, ts, resp3, &mut out,
+                        None,
                     )
                     .expect("rank ZRANGE WITHSCORES should take borrowed fast path");
                 let generic_reply = generic.execute_frame(
@@ -53385,6 +53439,7 @@ mod tests {
                         9,
                         resp3,
                         &mut Vec::new(),
+                        None,
                     )
                     .is_none(),
                 "bad integer args stay on generic dispatch for canonical error text"
@@ -53445,6 +53500,7 @@ mod tests {
                 direct
                     .execute_plain_zrevrange_withscores_borrowed_into(
                         key, start, stop, ts, resp3, &mut out,
+                        None,
                     )
                     .expect("ZREVRANGE WITHSCORES should take borrowed fast path");
                 let generic_reply = generic.execute_frame(
@@ -53467,6 +53523,7 @@ mod tests {
                         9,
                         resp3,
                         &mut Vec::new(),
+                        None,
                     )
                     .is_none(),
                 "bad integer args stay on generic dispatch for canonical error text"
@@ -53528,6 +53585,7 @@ mod tests {
                 direct
                     .execute_plain_zrangebyscore_withscores_borrowed_into(
                         key, min, max, ts, resp3, &mut out,
+                        None,
                     )
                     .expect("ZRANGEBYSCORE WITHSCORES should take borrowed fast path");
                 let generic_reply = generic.execute_frame(
@@ -53550,6 +53608,7 @@ mod tests {
                         90,
                         resp3,
                         &mut Vec::new(),
+                        None,
                     )
                     .is_none(),
                 "non-float bound stays on generic dispatch for canonical error text"
@@ -53604,6 +53663,7 @@ mod tests {
                 direct
                     .execute_plain_zrevrangebyscore_withscores_borrowed_into(
                         key, max, min, ts, resp3, &mut out,
+                        None,
                     )
                     .expect("ZREVRANGEBYSCORE WITHSCORES should take borrowed fast path");
                 let generic_reply = generic.execute_frame(
@@ -53626,6 +53686,7 @@ mod tests {
                         90,
                         resp3,
                         &mut Vec::new(),
+                        None,
                     )
                     .is_none(),
                 "non-float bound stays on generic dispatch for canonical error text"
@@ -53678,7 +53739,7 @@ mod tests {
         ]) {
             let mut out = Vec::new();
             direct
-                .execute_plain_zrangebyscore_borrowed_into(key, min, max, ts, &mut out)
+                .execute_plain_zrangebyscore_borrowed_into(key, min, max, ts, &mut out, None)
                 .expect("ZRANGEBYSCORE _into");
             assert_eq!(
                 out,
@@ -53698,7 +53759,7 @@ mod tests {
         ]) {
             let mut out = Vec::new();
             direct
-                .execute_plain_zrevrangebyscore_borrowed_into(key, max, min, ts, &mut out)
+                .execute_plain_zrevrangebyscore_borrowed_into(key, max, min, ts, &mut out, None)
                 .expect("ZREVRANGEBYSCORE _into");
             assert_eq!(
                 out,
@@ -53715,7 +53776,8 @@ mod tests {
                     b"bad",
                     b"+inf",
                     90,
-                    &mut Vec::new()
+                    &mut Vec::new(),
+                    None,
                 )
                 .is_none()
         );
@@ -53726,7 +53788,8 @@ mod tests {
                     b"bad",
                     b"-inf",
                     91,
-                    &mut Vec::new()
+                    &mut Vec::new(),
+                    None,
                 )
                 .is_none()
         );
@@ -53765,7 +53828,7 @@ mod tests {
         ]) {
             let mut out = Vec::new();
             direct
-                .execute_plain_zrange_byscore_borrowed_into(key, min, max, ts, &mut out)
+                .execute_plain_zrange_byscore_borrowed_into(key, min, max, ts, &mut out, None)
                 .expect("ZRANGE BYSCORE _into");
             let mut want = Vec::new();
             generic
@@ -53783,7 +53846,8 @@ mod tests {
                     b"bad",
                     b"+inf",
                     90,
-                    &mut Vec::new()
+                    &mut Vec::new(),
+                    None,
                 )
                 .is_none()
         );
@@ -53899,7 +53963,7 @@ mod tests {
         ]) {
             let mut out = Vec::new();
             direct
-                .execute_plain_zrange_bylex_borrowed_into(key, min, max, ts, &mut out)
+                .execute_plain_zrange_bylex_borrowed_into(key, min, max, ts, &mut out, None)
                 .expect("ZRANGE BYLEX _into");
             let mut want = Vec::new();
             generic
@@ -53912,7 +53976,7 @@ mod tests {
         }
         assert!(
             direct
-                .execute_plain_zrange_bylex_borrowed_into(b"z", b"bad", b"+", 90, &mut Vec::new())
+                .execute_plain_zrange_bylex_borrowed_into(b"z", b"bad", b"+", 90, &mut Vec::new(), None)
                 .is_none()
         );
         assert_eq!(
@@ -54000,6 +54064,7 @@ mod tests {
             direct
                 .execute_plain_zrangebyscore_limit_borrowed_into(
                     key, min, max, off, cnt, ts, &mut out,
+                    None,
                 )
                 .expect("ZRANGEBYSCORE LIMIT _into");
             assert_eq!(
@@ -54055,6 +54120,7 @@ mod tests {
             direct
                 .execute_plain_zrevrangebyscore_limit_borrowed_into(
                     key, max, min, off, cnt, ts, &mut out,
+                    None,
                 )
                 .expect("ZREVRANGEBYSCORE LIMIT _into");
             assert_eq!(
@@ -54078,7 +54144,8 @@ mod tests {
                     b"-1",
                     b"5",
                     90,
-                    &mut Vec::new()
+                    &mut Vec::new(),
+                    None,
                 )
                 .is_none()
         );
@@ -54215,6 +54282,7 @@ mod tests {
             direct
                 .execute_plain_zrevrangebylex_limit_borrowed_into(
                     key, max, min, off, cnt, ts, &mut out,
+                    None,
                 )
                 .expect("ZREVRANGEBYLEX LIMIT _into");
             assert_eq!(
@@ -54267,9 +54335,9 @@ mod tests {
     fn plain_zscore_borrowed_fast_path_disabled_in_non_default_states() {
         let mut rt = Runtime::default_strict();
         rt.execute_frame(command(&[b"ZADD", b"z", b"1", b"a"]), 1);
-        assert!(rt.execute_plain_zscore_borrowed(b"z", b"a", 2).is_some());
+        assert!(rt.execute_plain_zscore_borrowed(b"z", b"a", 2, None).is_some());
         rt.execute_frame(command(&[b"SUBSCRIBE", b"ch"]), 3);
-        assert!(rt.execute_plain_zscore_borrowed(b"z", b"a", 4).is_none());
+        assert!(rt.execute_plain_zscore_borrowed(b"z", b"a", 4, None).is_none());
     }
 
     #[test]
