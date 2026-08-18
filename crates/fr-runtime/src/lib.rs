@@ -49145,6 +49145,57 @@ mod tests {
     /// TWICE — once live, once from the static default table — and the second copy would
     /// carry the WRONG (default) value. A caller-side dedup means a wildcard sweep would hide
     /// that, so this asserts on LITERAL patterns, where the emitted count is exact.
+    /// (frankenredis-getexgate) PINS the enum seam's mapping.
+    ///
+    /// `record_slot_with_kind(cmd.hist_slot())` replaced `record_canonical_with_kind(
+    /// cmd.name_lower())` at six generic-dispatch sites. A mis-mapped arm -- say
+    /// `Zrevrank => HistSlot::zrank` -- compiles, passes every other test, and silently records
+    /// one command into ANOTHER command's `INFO commandstats` bucket. The generated guard in
+    /// `fr-store` covers the direct-field LIST; nothing covered the MAPPING until this.
+    ///
+    /// The invariant is exact: a slot's name IS the command's canonical lowercase name.
+    #[test]
+    fn every_hist_slot_arm_matches_its_name_lower_getexgate() {
+        macro_rules! pin {
+            ($($variant:expr),* $(,)?) => {
+                $(assert_eq!(
+                    $variant.hist_slot().name(),
+                    $variant.name_lower(),
+                    "hist_slot() and name_lower() disagree for {}; this command would record \
+                     into the wrong INFO commandstats bucket",
+                    stringify!($variant)
+                );)*
+            };
+        }
+        pin!(
+            crate::PlainKeyedValuesCmd::Sadd,
+            crate::PlainKeyedValuesCmd::Lpush,
+            crate::PlainKeyedValuesCmd::Rpush,
+            crate::PlainKeyedValuesCmd::Pfadd,
+            crate::PlainKeyedValuesCmd::Hdel,
+            crate::PlainKeyedValuesCmd::Srem,
+            crate::PlainKeyedValuesCmd::Zrem,
+            crate::PlainKeyedValuesCmd::Lpushx,
+            crate::PlainKeyedValuesCmd::Rpushx,
+            crate::PlainKeyedPopCmd::Lpop,
+            crate::PlainKeyedPopCmd::Rpop,
+            crate::PlainKeyedPopCmd::Spop,
+            crate::PlainKeyedPopCmd::Zpopmin,
+            crate::PlainKeyedPopCmd::Zpopmax,
+            crate::PlainCardinalityCmd::Zcard,
+            crate::PlainCardinalityCmd::Hlen,
+            crate::PlainCardinalityCmd::Xlen,
+            crate::PlainCardinalityCmd::Pfcount,
+            crate::PlainRandMemberCmd::Srandmember,
+            crate::PlainRandMemberCmd::Hrandfield,
+            crate::PlainRandMemberCmd::Zrandmember,
+            crate::PlainRankCmd::Zrank,
+            crate::PlainRankCmd::Zrevrank,
+            crate::PlainObjectStatCmd::Idletime,
+            crate::PlainObjectStatCmd::Freq,
+        );
+    }
+
     #[test]
     fn config_get_literal_emits_each_key_exactly_once_e6c9t() {
         let rt = Runtime::new(RuntimePolicy::default());

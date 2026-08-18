@@ -5422,6 +5422,27 @@ macro_rules! declare_hist_slots {
 }
 with_direct_histogram_fields!(declare_hist_slots);
 
+impl HistSlot {
+    /// The canonical lowercase command name this slot records under.
+    ///
+    /// (frankenredis-getexgate) Exists so the enum seam's mapping can be PINNED by a test:
+    /// `cmd.hist_slot().name()` must equal `cmd.name_lower()` for every variant. Without it a
+    /// mis-mapped arm compiles, passes every test, and silently records one command into
+    /// another command's histogram.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        macro_rules! slot_name {
+            ($($n:literal => $field:ident),* $(,)?) => {
+                match self {
+                    $(HistSlot::$field => $n,)*
+                    HistSlot::Other(name) => name,
+                }
+            };
+        }
+        with_direct_histogram_fields!(slot_name)
+    }
+}
+
 /// Tracks per-command latency histograms.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CommandHistogramTracker {
