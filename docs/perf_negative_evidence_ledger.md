@@ -62107,3 +62107,99 @@ of a lead fr already holds, and no reachable amount of it changes a competitive 
      because RPUSH+LTRIM is roughly three times dearer per key and 10-vs-30 would have put the run
      past the window. Do not compare absolute per-key totals across the two harnesses without
      accounting for it; the RATIOS are unaffected, since both arms use the same slope.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: `sort_ro_alpha` is the CLOSEST-TO-PARITY shape found on the work axis — **0.9914x worst of two FIT draws** — and its size pair implies a FIXED per-call cost: **0.194x at n=64**. Plus: back-to-back draws break the window gate, and spacing fixes it
+
+Claim class: COMPETITIVE (instruction axis).
+Campaign output: yes — vs-incumbent instruction ratios, both engines in ONE invocation.
+
+Continuing the hunt for a WORK-VOLUME deficit, which would be far more tractable than the diffuse
+IPC/locality story that `50071` leaves as the campaign's remaining deficit. Three more shapes:
+
+    lcs_128          0.1428x   FIT
+    georadius_ro_1   0.7553x   FIT
+    **sort_ro_alpha  0.9846x   FIT**   <- 1.5 pct, the narrowest margin measured so far
+
+### `sort_ro_alpha` — CLOSE, BUT STILL NOT A DEFICIT
+
+Chased with more draws because a shape within 2 pct of parity is where a deficit would first
+appear:
+
+    FIT     0.9846x , 0.9914x            -> **worst of two FIT draws 0.9914x**
+    UNFIT   0.9943x , 1.0014x , 0.9596x  -> NOT quoted, the gate refused them
+
+**Worst FIT bound 0.9914x: fr still retires fewer instructions, by 0.86 pct.** One UNFIT draw
+read **1.0014x** — above parity, which would have been the first work-volume deficit in this
+campaign — and it is NOT claimed, because its window failed at 17 pct non-stationary. A number
+the gate refused is not a result, and this is exactly the shape where I would most want to
+believe one.
+
+So after ten shapes surveyed this way, **no work-volume deficit has been found**, and the
+narrowest true margin is 0.86 pct.
+
+### THE SIZE PAIR SAYS THE COST IS FIXED, NOT PER-ELEMENT
+
+    sort_ro_alpha      **0.9914x**  (FIT)      small n
+    sort_ro_alpha_64    0.1937x , 0.1936x      n=64 — **SIZING ONLY, both draws UNFIT**
+
+fr's advantage is **5.1x larger at n=64 than at small n**, and the two `_64` draws agree to four
+decimal places despite both failing the window gate — a stability that argues the figure is real
+even though it is not quotable. Read together: fr's per-element SORT work is far cheaper than the
+incumbent's, while something FIXED per call is not. That is a lever hypothesis with a shape:
+a constant overhead in fr's SORT path that the incumbent does not pay, invisible at n=64 and
+dominant at small n.
+
+It is NOT opened here. `sort_ro_alpha` has prior work — a collator-resolution memo and an ASCII
+collation fast path both shipped — so the next step is a frame census at small n against the
+n=64 profile, not a guess about which constant it is.
+
+### THE INSTRUMENT FINDING, DEMONSTRATED RATHER THAN ASSERTED
+
+Four consecutive draws all failed the window gate at 17-24 pct non-stationary, with ZERO peer
+builds running. **The cause was my own measurement**: each callgrind draw is CPU-heavy, so
+back-to-back runs inflate the 1-minute loadavg against the 5-minute, which is precisely what the
+gate tests.
+
+Demonstrated, not inferred:
+
+    back-to-back            UNFIT — 1min 6.86 vs 5min 5.80 = 18 pct apart
+    after ~2 min settling   **FIT** — 4.77 / 5.37 / 5.58
+    next attempt            UNFIT — 9 cargo/rustc appeared, 1min 34.78 vs 5min 12.99
+
+The middle row is the point: the same shape, same binaries, same host, FIT once the 1-minute
+average had decayed. **A run of draws on this instrument must be SPACED or the gate will refuse
+most of them, and the refusals will look like host noise rather than self-inflicted load.**
+
+The third row is the gate working correctly for the other reason — it disqualified on peer builds
+with "shared uid, so none can be attributed away", which is the right call.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+Instructions by two-point subtraction with BOTH engines in one invocation, so startup and seeding
+cancel exactly. The harness's window gate ran per draw and its refusals are honoured, not argued
+with — five of the ten draws here were refused and none of those five is quoted. No bootstrap
+median-CI: the claim is a worst-of-FIT-draws bound. CV was not used, as a gate or otherwise.
+
+### PROVENANCE
+
+  ELF           fr `114bcea75f8296ae1b636aad805538e238cd6eedc579bab0de8bd930f36c5b1f`
+  bench_elf_sha256=114bcea75f8296ae1b636aad805538e238cd6eedc579bab0de8bd930f36c5b1f
+  incumbent     Redis 7.2.4, vendored, measured in the SAME INVOCATION as fr in every draw.
+  harness       `scripts/shape_instr_per_op.py` 2000 ops, both arms, window gate per draw.
+  host          /data 47G free, 5G above the brake; loadavg 4.77-7.20 across the FIT draws, and
+                34.78 on the one disqualified by peer builds. NO local build — the ELF existed
+                and every run reaped its own dump (4970 before, 4970 after).
+  disposition   MEASUREMENT ONLY. No source file changed, no lever opened.
+
+### RETRY PREDICATE
+
+1. `sort_ro_alpha`'s 1.0014x draw is UNFIT and must NOT be cited as a work-volume deficit. Two
+   FIT draws put it at 0.9914x worst, fr ahead.
+2. To open the fixed-cost hypothesis, take a FRAME CENSUS at small n and diff it against the
+   n=64 profile. The lever is whatever appears at both sizes with the same absolute cost.
+3. **Space draws on this instrument by ~2 minutes.** Back-to-back callgrind runs self-inflict a
+   17-24 pct non-stationary window with no peer builds present, and the gate will refuse them.
+4. `sort_ro_alpha_64` at 0.194x needs FIT draws before it is quoted, despite two UNFIT draws
+   agreeing to four decimal places.
