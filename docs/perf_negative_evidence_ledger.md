@@ -50927,6 +50927,7 @@ RETRY PREDICATE:
      line this row promises not to cross.
 
 --------------------------------------------------------------------------------
+
 ## 2026-08-18 CrimsonHawk: CORRECTION — half my volatile-key lever is not a parity gap: the incumbent reads the clock 2.01x PER COMMAND too. The EXPIRE-CADENCE half is confirmed and starker (redis 0.00-0.01/op against fr 1.01-2.02)
 
 WITHDRAWN from `cdbc69ebf`: the framing of a clock-cache lever as closing a gap with upstream,
@@ -50992,3 +50993,97 @@ volatile-arm instr/op falling by at least 90, measured two-point on these same s
 CORRECTNESS-SENSITIVE for the reason `cdbc69ebf` gave: expiry timing is observable through TTL,
 notifications and replica propagation, and `propagate_expired_key_deletions` runs 2.00 times per
 op here.
+
+--------------------------------------------------------------------------------
+## 2026-08-18 CrimsonHawk: WITHDRAWN — the RPUSH adopt-fill "−0.095 pct" is REFUTED by its own contract: the SAME-invocation A/A null is 0.22 pct, nine times the separate-invocation one, and the A/B median-CI straddles zero (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir, slope method), TWO-BINARY A/B
+with the A/A and the A/B in ONE invocation and the candidate arm BRACKETED by control arms. CV
+was NOT used, as a gate or otherwise — no coefficient of variation appears in this row's decision
+path and none was computed. The verdict gate here is a percentile bootstrap MEDIAN-CI over the
+draws, reported below. No source change and no build.
+
+Claim class: SELF-SPEEDUP. Campaign output: no. This row WITHDRAWS a number; it banks nothing.
+
+`cc2a132c2` measured the RPUSH adopt-fill ordering at worst bound −0.095 pct, declined to bank it
+as a KEEP because its A/A null came from a SEPARATE invocation, and left predicate 0: build the
+one-invocation form and take enough draws for a bootstrap CI. Built. THE NUMBER DOES NOT SURVIVE.
+
+### THE SAME-INVOCATION NULL IS NINE TIMES LARGER
+
+    draw   BEFORE_a     BEFORE_b     AFTER        A/B        A/A
+      1    295,918.15   296,394.90   295,298.10   −0.2899    −0.1608
+      2    296,604.05   295,774.60   295,701.15   −0.1648    +0.2804
+      3    295,649.90   296,537.40   296,504.40   +0.1387    −0.2993
+      4    296,396.20   296,444.35   296,436.05   +0.0053    −0.0162
+      5    296,238.40   295,762.15   295,673.25   −0.1105    +0.1610
+      6    295,046.50   296,519.65   296,813.25   +0.3483    −0.4968
+
+    A/B  median −0.0526 pct   95 pct CI [−0.2273, +0.2435]   n=6 draws
+    A/A  median  0.2207 pct   95 pct CI [ 0.0885,  0.3981]   (absolute)
+    worst single draw  +0.3483 pct   -- a COST, not a win
+    MEDIAN-CI GATE: excludes zero = FALSE
+
+  `cc2a132c2` reported an A/A null of 0.024 pct from two separate runs. Measured INSIDE one
+  invocation the same null is 0.2207 pct — NINE TIMES larger. The separate-invocation figure was
+  not the instrument's resolution; it was two runs that happened to land close together.
+
+    SO THE LEVER IS UNRESOLVED. Its A/B median is −0.05 pct against a 0.22 pct null, the CI
+    straddles zero, and the worst of six draws is a 0.35 pct COST. The two draws behind the
+    −0.095 pct worst bound were, on this evidence, the favourable tail of a distribution that
+    reaches +0.35 pct.
+
+### THE CONTRACT CAUGHT A FALSE POSITIVE, WHICH IS WHAT IT IS FOR
+
+`cc2a132c2` declined the KEEP on a procedural ground — the null was from another process — and
+noted the alternative was a loophole it would not use. That decision is now vindicated by
+measurement rather than by principle: banking that row would have published a win that six draws
+say is not there.
+
+  THE REUSABLE IS THE SIZE OF THE ERROR, NOT THE VERDICT. A separate-invocation A/A on this
+  harness under-reports the null by ~9x. Any row on this bead — or any other — that quotes a null
+  from a different invocation than its A/B is quoting a floor that may be an order of magnitude
+  too low. `feedback_a_flaky_gate_is_not_a_passed_gate` covers the two-reading case; this is the
+  same failure with a statistic attached.
+
+### WHAT HAPPENS TO THE CODE
+
+`cc2a132c2` STAYS, and is now correctly labelled: it is an ORDERING FIX with NO measured
+performance effect. Its justification is that upstream configures the quicklist with the server's
+`list-max-listpack-size` BEFORE pushing into it, that the identical late-fill ordering caused a
+real parity bug on the LPUSH side (`8c3376c09`), and that its parity is verified unchanged —
+workload sweep 4 of 42, and the node table for a 300-element bulk RPUSH at fill 128 is
+[2183, 2183, 755] before, after and in redis. NONE of that rests on the withdrawn number.
+
+  It is NOT reverted, because a latent inconsistency that already produced one parity bug is
+  worth removing on its own terms. But nobody should cite it as a speedup.
+
+### PROVENANCE
+
+  ELFs          BEFORE bench_elf_sha256 = d7ca6e28f844845b5a45e12ba5011fefb93cab72078900244fe1e7ff93cb2bf5
+                AFTER  bench_elf_sha256 = f7f311cfc3628a21b00c120c04496f9e1aab63ee38fd1a776cb048d335435484
+                are the `cc2a132c2` pair, unchanged. NO BUILD was run for this row.
+  harness       scratchpad `dump_paired.py`, NEW: per draw it runs BEFORE_a, AFTER, BEFORE_b in
+                one process, so the candidate is bracketed by controls and a monotone drift
+                cancels to first order; the A/A is BEFORE_a vs BEFORE_b from that same draw. 10 vs
+                30 keys (`cc2a132c2` used 20 vs 60 — halved to afford six draws; the measurand is
+                per-key either way). Percentile bootstrap, 20,000 resamples, resample unit = the
+                DRAW, seeded for reproducibility.
+  incumbent     not exercised in this row; no ratio is claimed.
+  host          thinkstation1, 64 cores OBSERVED, powersave governor, uptime 2 days 19:56.
+                PER-DRAW idle/loadavg/MHz recorded inline above: idle 86.6-90.8 pct, loadavg
+                8.34-9.03 / 10.16-10.48 / 10.10-10.20, MHz mean 1971-2482, max 4297, min 1429.
+                Every idle figure measured from a `/proc/stat` delta, not quoted. The window was
+                STABLE across all six draws, which is what makes the 0.22 pct null a property of
+                the instrument rather than of the host.
+
+RETRY PREDICATE:
+  1. Do NOT re-take this lever expecting a win. Six bracketed draws put it at −0.05 pct against a
+     0.22 pct floor. If someone wants it resolved, the instrument needs to get ~10x quieter
+     first, not the lever to get another draw.
+  2. USE `dump_paired.py`, NOT `dump_slope.py`, for any future A/B on this path. The latter's
+     separate-invocation null under-reports by ~9x and is the reason this row exists.
+  3. The 47.4 pct DUMP share from `cc2a132c2` was measured with the same separate-invocation
+     harness. It is a RATIO of two large numbers rather than a small difference, so it is far
+     less exposed to this error — but it has not been re-taken under the bracketed form and
+     should not be quoted to more than its first two digits.
