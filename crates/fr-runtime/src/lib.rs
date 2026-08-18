@@ -51951,7 +51951,7 @@ mod tests {
         let keys: [&[u8]; 1] = [b"a"];
         assert!(rt.execute_plain_exists_borrowed(&keys, 2, None).is_some());
         rt.execute_frame(command(&[b"SELECT", b"1"]), 3);
-        assert!(rt.execute_plain_exists_borrowed(&keys, 4).is_none());
+        assert!(rt.execute_plain_exists_borrowed(&keys, 4, None).is_none());
 
         let mut out = Vec::new();
         assert!(
