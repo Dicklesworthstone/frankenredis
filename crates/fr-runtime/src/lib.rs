@@ -34420,11 +34420,16 @@ impl Runtime {
         }
     }
 
+    /// (frankenredis-getexgate) `default_read_allowed` is the CACHED read gate when the
+    /// caller holds one for this buffered pass, `None` to evaluate it. The gate is a flat
+    /// 175.0 instr/op when re-derived per packet; `hget` shows the cache working at 0.0005
+    /// calls/op, i.e. once per ~2000-op pass.
     fn can_execute_plain_lindex_borrowed(
         &mut self,
         key: &[u8],
         index_arg: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> bool {
         if self.policy.gate.max_array_len < 3
             || self.policy.gate.max_bulk_len < b"LINDEX".len()
@@ -34433,7 +34438,8 @@ impl Runtime {
         {
             return false;
         }
-        self.plain_borrowed_default_key_read_allows(now_ms)
+        default_read_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_read_allows(now_ms))
     }
 
     /// Conservative borrowed runtime fast path for `LINDEX key index`: mirrors
@@ -34448,8 +34454,9 @@ impl Runtime {
         key: &[u8],
         index_arg: &[u8],
         now_ms: u64,
+        default_read_allowed: Option<bool>,
     ) -> Option<RespFrame> {
-        if !self.can_execute_plain_lindex_borrowed(key, index_arg, now_ms) {
+        if !self.can_execute_plain_lindex_borrowed(key, index_arg, now_ms, default_read_allowed) {
             return None;
         }
         // Only fast-path well-formed integer indices; defer the
@@ -34524,8 +34531,9 @@ impl Runtime {
         now_ms: u64,
         resp3: bool,
         out: &mut Vec<u8>,
+        default_read_allowed: Option<bool>,
     ) -> Option<()> {
-        if !self.can_execute_plain_lindex_borrowed(key, index_arg, now_ms) {
+        if !self.can_execute_plain_lindex_borrowed(key, index_arg, now_ms, default_read_allowed) {
             return None;
         }
         let index = parse_i64_arg(index_arg).ok()?;
@@ -52433,7 +52441,7 @@ mod tests {
 
         for idx in [b"0".as_slice(), b"2", b"-1", b"-3", b"5", b"-9"] {
             let f = fast
-                .execute_plain_lindex_borrowed(b"l", idx, 2)
+                .execute_plain_lindex_borrowed(b"l", idx, 2, None)
                 .expect("well-formed LINDEX should take fast path");
             let g = generic.execute_frame(command(&[b"LINDEX", b"l", idx]), 2);
             assert_eq!(f, g, "idx={idx:?}");
@@ -52441,7 +52449,7 @@ mod tests {
 
         // missing key -> nil
         let miss = fast
-            .execute_plain_lindex_borrowed(b"nokey", b"0", 3)
+            .execute_plain_lindex_borrowed(b"nokey", b"0", 3, None)
             .expect("missing-key LINDEX should take fast path");
         assert_eq!(
             miss,
@@ -52451,7 +52459,7 @@ mod tests {
 
         // wrong-type key -> WRONGTYPE
         let wt = fast
-            .execute_plain_lindex_borrowed(b"str", b"0", 4)
+            .execute_plain_lindex_borrowed(b"str", b"0", 4, None)
             .expect("wrong-type LINDEX should take fast path");
         assert_eq!(
             wt,
@@ -52460,7 +52468,7 @@ mod tests {
         assert!(matches!(wt, RespFrame::Error(_)));
 
         // non-integer index -> fast path defers (None), generic emits the error
-        assert!(fast.execute_plain_lindex_borrowed(b"l", b"x", 5).is_none());
+        assert!(fast.execute_plain_lindex_borrowed(b"l", b"x", 5, None).is_none());
 
         assert_eq!(
             fast.server.store.stat_total_commands_processed,
@@ -52488,9 +52496,9 @@ mod tests {
     fn plain_lindex_borrowed_fast_path_disabled_in_non_default_states() {
         let mut rt = Runtime::default_strict();
         rt.execute_frame(command(&[b"RPUSH", b"l", b"a"]), 1);
-        assert!(rt.execute_plain_lindex_borrowed(b"l", b"0", 2).is_some());
+        assert!(rt.execute_plain_lindex_borrowed(b"l", b"0", 2, None).is_some());
         rt.execute_frame(command(&[b"SELECT", b"1"]), 3);
-        assert!(rt.execute_plain_lindex_borrowed(b"l", b"0", 4).is_none());
+        assert!(rt.execute_plain_lindex_borrowed(b"l", b"0", 4, None).is_none());
     }
 
     #[test]

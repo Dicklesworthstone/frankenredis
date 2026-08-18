@@ -8828,6 +8828,7 @@ fn process_buffered_frames(
                             ts,
                             client_resp3,
                             &mut conn.write_buf,
+                            None,
                         )
                         .is_some()
                     {
@@ -14130,7 +14131,7 @@ fn parse_borrowed_multibulk_action(
                         }
                         if let Some((key, index)) = borrowed_plain_lindex_args(&borrowed_args)
                             && let Some(response) =
-                                runtime.execute_plain_lindex_borrowed(key, index, ts)
+                                runtime.execute_plain_lindex_borrowed(key, index, ts, None)
                         {
                             return Ok(BorrowedMultibulkAction::FastReply {
                                 consumed: parsed.consumed,
@@ -20078,6 +20079,15 @@ fn try_dispatch_floor_classified_action(
             }
         }
         BorrowedDispatchFloorClass::Lindex => {
+            // (frankenredis-getexgate) The cached READ gate, taken exactly as the three arms
+            // converted under ozrro take it. `get_or_insert_with` keeps the closure's borrow of
+            // `runtime` inside the call, so it composes with the executor call that follows.
+            // MEASURED before this change: lindex paid 1.0000 calls/op of
+            // `plain_borrowed_default_key_read_allows` at a flat 175.0 instr/op.
+            let default_read_allowed = Some(
+                *read_gate_cache
+                    .get_or_insert_with(|| runtime.plain_borrowed_default_key_read_gate(ts)),
+            );
             let client_resp3 = runtime.client_session().resp_protocol_version() == 3;
             if let Some(packet) = parse_borrowed_plain_lindex_packet(unparsed, &parser_config)
                 && runtime
@@ -20087,6 +20097,7 @@ fn try_dispatch_floor_classified_action(
                         ts,
                         client_resp3,
                         out,
+                        default_read_allowed,
                     )
                     .is_some()
             {
