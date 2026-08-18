@@ -50209,3 +50209,77 @@ RETRY PREDICATE:
      falls to the same builder fix, which would leave ONLY the queue/history family.
   3. When a refusal or invariant turns out to be wrong, GREP FOR IT before writing the retry
      predicate. This row exists because I did not.
+
+--------------------------------------------------------------------------------
+## 2026-08-18 CrimsonHawk: CORRECTION — "TWO NEW DEFICITS" overstated what a control-normalised figure says: fr uses FEWER cycles than the incumbent on `pttl` on two hardware draws. And the implied-IPC method I called validated is off by 21 pct here
+
+TWO CLAIMS OF MINE ARE WITHDRAWN, both from rows landed within the last two turns.
+
+  fr    bench_elf_sha256=e2f1a5544bc94dcdda9af8485bf8323b9af4666e848fda8915f21e9dd7072399
+  redis bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+  `perf stat` on the server pid for the duration of `redis-benchmark -n 1000000 -P 16 PTTL bb`,
+  seeded `SET bb abcdefghijklmnop` + `PEXPIRE bb 900000000`, the shape's exact definition in both
+  harnesses. Per-arm loadavg 5.92-7.10, CPU MHz 1429-2509.
+
+### 1. `fd28c5948` said "fr 11.1 pct BEHIND" on `pttl`. fr is FASTER than the incumbent there.
+
+  event/op        draw 1 fr/redis   draw 2 fr/redis
+  instructions        0.7499x           0.7772x     fr retires ~23 pct FEWER
+  CYCLES              0.9281x           0.9621x     fr burns 4-7 pct FEWER
+  cache-misses        0.9708x           1.1606x
+  branch-misses       0.9457x           0.9845x
+
+fr uses FEWER CYCLES on both draws, and the raw throughput ratio agrees: 1.0468x and 1.0474x,
+fr ahead by ~4.7 pct. `pttl` is a shape fr WINS.
+
+WHAT THE 0.8891 ACTUALLY MEANS. `balanced_square_ab.py:1295` computes
+`point = row_ratio / control_ratio`. With `pttl` at 1.0468 and `get_control` at 1.1242, the
+normalised figure is 0.9312: fr's advantage over the incumbent is SMALLER on `pttl` than on GET.
+That is a real and useful signal -- it points at commands that do not get fr's usual margin, and
+it is why the screen was worth running -- but it is NOT "fr is behind Redis", and my row said
+exactly that, in its title and four more times in its body. The harness's own verdict word is
+"BEHIND" and I passed it through without asking behind WHAT.
+
+The same correction applies to `publish` at 0.9043 and to the `expiretime`/`getbit` candidates:
+none of them has been shown slower than the incumbent, and I have not measured their cycles.
+
+### 2. `adc35c949` called the implied-IPC method validated. On `pttl` it is 21 pct out.
+
+That row inferred an IPC gap as (1/raw throughput) / (callgrind instruction ratio) and said the
+method "reproduces" because `geosearch_2`'s inferred 1.3159-1.3374 matched a measured
+1.2984-1.3229. On `pttl`:
+
+  inferred (1/1.0468) / 0.6362 = 1.502        measured on hardware = 1.2377 and 1.2379
+
+THE TWO INSTRUMENTS DISAGREE ON THE INPUT. callgrind puts `pttl` at fr 2218.6 / redis 3487.1 =
+0.6362x; hardware puts it at 4038.7 / 5386.0 = 0.7499x and 0.7772x. callgrind counts simulated
+user-space instructions; `perf` counts everything the process retires including syscall work, and
+on a command this cheap that difference is a fifth of the total. Feeding a callgrind ratio into a
+native throughput ratio mixes them. `geosearch_2` agreeing was luck on a shape where the two
+instruments happened to be close, and I reported one agreement as validation of a method.
+
+The inferred IPC column in `adc35c949` should be read as unmeasured for `pttl` and `expiretime`.
+`geosearch_2`'s 1.32 stands because it was measured directly in `2ff051637`.
+
+### What survives, and it is not nothing
+
+The MEASUREMENTS in `fd28c5948` are unaffected: `pttl` normalised worst bound 0.8891 and
+`publish` 0.9043, each replicated across two admissible draws with points agreeing to 0.74 and
+2.59 pct, with A/A nulls at 1.89 and 0.71 pct worst bias. Read as "these shapes earn less of fr's
+usual margin than GET does", they are exactly the pointer they were meant to be.
+
+The screening result is untouched and is the durable part: `cascade` at rounds=36 certified 10 of
+10 rows with 0 null-failures where `frontclass` at the default rounds=9 certified 0 of 5.
+
+And `pttl`'s IPC gap is REAL and now measured rather than inferred: 1.2377 and 1.2379, agreeing
+to 0.02 pct across two draws. fr executes a smaller instruction stream at a materially lower
+rate, and nets out slightly ahead. That is a genuine efficiency gap; it is simply not a deficit
+against the incumbent.
+
+RETRY PREDICATE: before quoting any control-normalised figure as a competitive claim, check the
+RAW ratio in the same run -- normalised-BEHIND with raw-AHEAD means the shape underperforms fr's
+own baseline, not the incumbent, and the two readings differ by the control's ~12 pct on every
+row in these groups. Do NOT use the inferred-IPC arithmetic across instruments; measure cycles
+directly with the `perf stat` invocation in `2ff051637`, which costs one run. `publish`,
+`expiretime` and `getbit` still have NO cycle measurement and should not be described as deficits
+until they do.
