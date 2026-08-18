@@ -40948,26 +40948,44 @@ impl Runtime {
             // Drop any pair whose key was already in `seen`; record
             // newly-seen keys for subsequent patterns. Walk the tail
             // added by this pattern only.
-            let mut idx = before;
-            let mut deduped = Vec::with_capacity(entries.len() - before);
-            while idx + 1 < entries.len() {
-                let key_lc = match &entries[idx] {
-                    RespFrame::BulkString(Some(name)) => name.to_ascii_lowercase(),
-                    _ => {
-                        deduped.push(entries[idx].clone());
-                        deduped.push(entries[idx + 1].clone());
-                        idx += 2;
-                        continue;
-                    }
+            // (frankenredis-e6c9t) RETAIN IN PLACE. This loop used to build a SECOND vector
+            // and CLONE both frames of every surviving pair into it, then shrink the tail and
+            // re-extend from the copy. Each `RespFrame::BulkString(Some(Vec<u8>))` clone is a
+            // fresh heap allocation, so the cost scaled with the size of the REPLY rather than
+            // with the work of deciding what to keep.
+            //
+            // MEASURED before the change, fr ELF 9ee284252bfad7cf, two-point callgrind:
+            //     CONFIG GET maxmemory     7,844.0 instr/op    13.01 allocs/op    1 pair
+            //     CONFIG GET *           479,669.7 instr/op   939.01 allocs/op  195 pairs
+            // giving (939.01 - 13.01) / (195 - 1) = 4.77 ALLOCATIONS PER EMITTED PAIR, with
+            // the one-pair literal as a near-zero-unit control. Two of those 4.77 were these
+            // clones, and they are what this removes.
+            //
+            // Survivors are SWAPPED forward instead, which moves the `Vec<u8>` rather than
+            // copying it; discarded pairs fall past `write` and are cut off at the end.
+            // Output is identical: the old code kept the FIRST occurrence of a key
+            // (`seen.insert` returns false thereafter) in encounter order, and so does this.
+            // A trailing odd element was dropped before -- the old code shrank to `before`
+            // and re-extended with whole pairs only -- and is still dropped, because `write`
+            // only ever advances by two.
+            let mut read = before;
+            let mut write = before;
+            while read + 1 < entries.len() {
+                let keep = match &entries[read] {
+                    RespFrame::BulkString(Some(name)) => seen.insert(name.to_ascii_lowercase()),
+                    // A non-bulk key cannot be deduped, so it is always kept -- same as before.
+                    _ => true,
                 };
-                if seen.insert(key_lc) {
-                    deduped.push(entries[idx].clone());
-                    deduped.push(entries[idx + 1].clone());
+                if keep {
+                    if write != read {
+                        entries.swap(write, read);
+                        entries.swap(write + 1, read + 1);
+                    }
+                    write += 2;
                 }
-                idx += 2;
+                read += 2;
             }
-            entries.truncate(before);
-            entries.extend(deduped);
+            entries.truncate(write);
         }
         // RESP3 callers receive a Map (key → value); RESP2 callers
         // continue to receive the alternating-key/value Array form.
@@ -67073,6 +67091,113 @@ mod tests {
             assert!(
                 names.iter().any(|n| n == must_contain),
                 "CONFIG GET {pattern} lost {must_contain}; got {names:?}"
+            );
+        }
+    }
+
+    /// (frankenredis-e6c9t) THE IN-PLACE DEDUP MUST KEEP THE FIRST OCCURRENCE, IN ORDER.
+    ///
+    /// The dedup stopped cloning survivors into a second vector and now SWAPS them forward,
+    /// which is where a retain-by-swap goes wrong: swapping the wrong slot, or advancing the
+    /// write cursor on a dropped pair, silently REORDERS the reply or pairs a key with
+    /// another key's value. Both look fine to a test that only asks "is this name present".
+    ///
+    /// `dynamic-hz` is the probe, because `CONFIG_STATIC_PARAMS` genuinely lists it TWICE
+    /// (:1841 and :1896). It is the only name in the table that exercises the drop branch on
+    /// a default server, so it is the only one that can catch a write cursor that advances
+    /// when it should not.
+    #[test]
+    fn config_get_glob_dedup_keeps_first_occurrence_and_pairs_stay_aligned_e6c9t() {
+        let mut rt = Runtime::default_strict();
+        let reply = rt.execute_frame(
+            command_owned(vec![b"CONFIG".to_vec(), b"GET".to_vec(), b"*".to_vec()]),
+            0,
+        );
+        let RespFrame::Array(Some(entries)) = reply else {
+            panic!("CONFIG GET * did not return an array");
+        };
+        assert_eq!(entries.len() % 2, 0, "CONFIG GET * returned an odd frame count");
+        let names: Vec<String> = entries
+            .chunks(2)
+            .filter_map(|pair| match &pair[0] {
+                RespFrame::BulkString(Some(n)) => Some(String::from_utf8_lossy(n).into_owned()),
+                _ => None,
+            })
+            .collect();
+
+        // The drop branch actually fired, and dropped exactly the duplicate.
+        let hz = names.iter().filter(|n| *n == "dynamic-hz").count();
+        assert_eq!(hz, 1, "dynamic-hz appears {hz} times; it is listed twice in the table, \
+                   so exactly one copy must survive the dedup");
+
+        // No key survives twice: the whole point of the pass.
+        let mut sorted = names.clone();
+        sorted.sort();
+        let before_dedup = sorted.len();
+        sorted.dedup();
+        assert_eq!(before_dedup, sorted.len(), "CONFIG GET * returned duplicate keys");
+
+        // ORDER IS PRESERVED across the drop. `requirepass` is emitted by the chain ABOVE the
+        // literal early-exit checkpoint and `tcp-backlog` only by the CONFIG_STATIC_PARAMS
+        // loop below it, so their relative order is fixed by construction — and a swap that
+        // moved a survivor backwards past a dropped pair would invert it.
+        let ri = names.iter().position(|n| n == "requirepass");
+        let ti = names.iter().position(|n| n == "tcp-backlog");
+        let (ri, ti) = (ri.expect("requirepass missing"), ti.expect("tcp-backlog missing"));
+        assert!(ri < ti, "CONFIG GET * reordered: requirepass at {ri}, tcp-backlog at {ti}");
+
+        // KEYS AND VALUES DID NOT GET OUT OF STEP, checked where it can actually go wrong.
+        //
+        // This assertion exists because the FIRST version of this test did not have it and a
+        // deliberate mutation walked straight past: swapping `(write + 1, read)` instead of
+        // `(write + 1, read + 1)` misaligns every pair AFTER the first drop, and 17 config
+        // tests still passed. The reason is positional — while nothing has been dropped yet
+        // `write == read` and the swap is skipped entirely, so corruption starts only past
+        // the duplicate, which sits at table position 88 of 186. Anything asserted before
+        // that point is blind to it.
+        //
+        // Comparing the glob's value against the LITERAL lookup for the same name keeps this
+        // honest without hardcoding defaults that would drift the moment someone retunes one.
+        for probe in [
+            "activedefrag",
+            "active-defrag-threshold-upper",
+            "active-defrag-cycle-max",
+            "active-expire-effort",
+        ] {
+            let want = {
+                let reply = rt.execute_frame(
+                    command_owned(vec![
+                        b"CONFIG".to_vec(),
+                        b"GET".to_vec(),
+                        probe.as_bytes().to_vec(),
+                    ]),
+                    0,
+                );
+                let RespFrame::Array(Some(pair)) = reply else {
+                    panic!("CONFIG GET {probe} did not return an array");
+                };
+                assert_eq!(pair.len(), 2, "CONFIG GET {probe} returned {} frames", pair.len());
+                match &pair[1] {
+                    RespFrame::BulkString(Some(v)) => v.clone(),
+                    other => panic!("CONFIG GET {probe} value frame was {other:?}"),
+                }
+            };
+            let got = entries
+                .chunks(2)
+                .find(|c| matches!(&c[0], RespFrame::BulkString(Some(n))
+                                   if n.as_slice() == probe.as_bytes()))
+                .map(|c| match &c[1] {
+                    RespFrame::BulkString(Some(v)) => v.clone(),
+                    other => panic!("CONFIG GET * value frame for {probe} was {other:?}"),
+                })
+                .unwrap_or_else(|| panic!("CONFIG GET * lost {probe}"));
+            assert_eq!(
+                got,
+                want,
+                "CONFIG GET * paired {probe} with {:?} but the literal lookup says {:?} — the \
+                 in-place dedup has misaligned keys against values past the first dropped pair",
+                String::from_utf8_lossy(&got),
+                String::from_utf8_lossy(&want)
             );
         }
     }

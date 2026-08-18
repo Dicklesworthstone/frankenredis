@@ -43340,3 +43340,101 @@ claim is made.
    executors so it exercises the multi-executor case, and it needs no discriminant reasoning.
 4. Run the name enumeration in this row before any future gate conversion, read or write. It
    costs no build, and it would have caught this on the write side too had I run it there.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: KEEP (SELF-SPEEDUP) — CONFIG GET deduped its reply by CLONING every surviving pair into a second vector; retaining in place removes 356 of 939 allocations on `CONFIG GET *` and 15.70 pct of the command (`frankenredis-e6c9t`)
+
+Claim class: SELF-SPEEDUP. Campaign output: no. This is an fr-side allocation and instruction
+reduction measured fr-against-fr, with NO live Redis arm in this invocation.
+
+  BEFORE server ELF sha-256: 9ee284252bfad7cfd6d045a22084d0dd918d0e499f681f26a1ea1eea2aff1211
+  AFTER  server ELF sha-256: 13b4f066cc9487d1288f86f0f5c30d9404de8fc774a738885706576f510e37fc
+
+The harness emits these per arm and re-verifies after each arm, as
+bench_elf_sha256=9ee284252bfad7cfd6d045a22084d0dd918d0e499f681f26a1ea1eea2aff1211 and
+bench_elf_sha256=13b4f066cc9487d1288f86f0f5c30d9404de8fc774a738885706576f510e37fc.
+Both built in a private tree from `git archive HEAD` so no peer WIP entered either arm.
+Measurement was taken on the AFTER ELF before its test was added; the two differ only in
+non-executable sections, and their `.text` is BYTE-IDENTICAL (sha 82dca5cb2592dab6, size
+0x635f42), so the figures transfer exactly rather than by assumption.
+
+### The mechanism, counted before it was changed
+
+`handle_config_get` deduped by building a SECOND vector and cloning both frames of every
+surviving pair into it, then shrinking the tail and re-extending. Each
+`RespFrame::BulkString(Some(Vec<u8>))` clone is a heap allocation, so the dedup's cost scaled
+with the size of the REPLY rather than with the work of deciding what to keep.
+
+  arm                     instr/op BEFORE   instr/op AFTER      allocs BEFORE   allocs AFTER
+  CONFIG GET maxmemory           7,895.9          7,323.2              13.02          10.01
+  CONFIG GET *                 480,042.6        404,673.0             939.02         583.02
+
+  -7.253 pct and -15.701 pct on instructions; -23.12 pct and -37.91 pct on allocations.
+  ALLOCATIONS PER EMITTED PAIR: 4.77 -> 2.95, measured as (glob - literal) / (195 - 1) with
+  the one-pair literal as a near-zero-unit control.
+
+### MY OWN PREDICTED NULL WAS WRONG, AND THAT IS THE CORRECTION IN THIS ROW
+
+The exit condition I banked on this bead said the literal arm's 13.01 allocs/op would be
+UNCHANGED and would serve as the null. It moved, to 10.01. The reason is that the discarded
+second vector was allocated once per PATTERN, not once per pair, so even a one-pair reply paid
+for it -- 3 allocations for one pair, being 2 clones plus that vector. The prediction was
+wrong; the mechanism it was derived from was right. A row that quietly reframes a failed null
+as a second result is the failure mode here, so it is stated plainly instead.
+
+### The nulls that DO hold, on the instrument the claim is actually about
+
+Three commands that never enter `handle_config_get`:
+
+  command          instr BEFORE   instr AFTER    delta      allocs delta
+  PING                    969.4         935.0   -3.555 pct       +0.0140
+  GET nosuchkey         1,033.5       1,015.3   -1.759 pct       -0.0100
+  DBSIZE                1,390.8       1,390.5   -0.023 pct       +0.0000
+
+INSTRUCTION COUNTS ON A NULL ARM ARE NOT CLEAN AND THIS ROW SAYS SO: removing ~20 lines from a
+3 MB function shifts code layout, and PING moved 3.56 pct on a change it cannot execute. The
+right comparison is absolute, since PING is a cheap command: the largest null excursion is
+34.4 instr/op against effects of 572.7 and 75,369.6, i.e. margins of 17x and 2,000x. The
+literal arm's instruction claim is the weakly separated one and should be read as such.
+
+ALLOCATION COUNTS ARE THE CLEAN INSTRUMENT and they are what this lever claims. An allocation
+is a call the program either makes or does not; code layout cannot move it. The three null
+arms move by at most 0.014 allocs/op against effects of -3.01 and -356.00 -- margins of 215x
+and 25,000x.
+
+A/A NULL on the shipping ELF, same instrument, same arm, same binary on both sides, draws
+alternated so host drift lands on both, gives a median ratio 0.999740, bootstrapped 95% median
+CI [0.996258, 1.000038]. Raw draws, arm A 7317.5 / 7320.0 / 7320.5 / 7293.3 and arm B 7319.7 /
+7321.0 / 7320.3 / 7322.7. Every arm and the null were taken within one top-level invocation of
+the same harness on the same host. THE VERDICT IS GATED ON THAT BOOTSTRAP MEDIAN-CI and on the
+null-arm margins above, nothing else. CV is provenance only and was not used as a gate
+anywhere in this row; no CV was computed. Host state is provenance: loadavg 59.8-74.6 and CPU
+MHz 2884-3918 across the arms, and the counts did not track either -- an instruction-count
+instrument is immune to both, which is why these arms are admissible on a busy host while a
+vs-Redis ratio is not.
+
+### Correctness
+
+241-case CONFIG GET differential between the two ELFs, byte-for-byte identical: 198 literal
+names, 15 globs including `*`, 8 edge cases, 8 multi-pattern requests, 12 post-`CONFIG SET`
+re-reads. 633/633 `fr-runtime` pass.
+
+THE NEW TEST WAS MUTATION-TESTED AND ITS FIRST VERSION FAILED THAT. Swapping
+`(write + 1, read)` instead of `(write + 1, read + 1)` misaligns every pair after the first
+drop, and 17 config tests including my new one PASSED it. The reason is positional: until
+something is dropped `write == read` and the swap is skipped, so corruption begins only past
+the duplicate, which sits at table position 88 of 186. The test now compares the glob's VALUE
+for four names emitted after that point against the literal lookup for the same name, and all
+three mutations -- drop disabled, misaligned swap, write cursor always advancing -- now fail
+it while the pristine tree passes. Mutation testing was done in a PRIVATE tree, never the
+shared checkout.
+
+RETRY PREDICATE: `CONFIG GET *` is still 404,673.0 instr/op at 583.02 allocs/op, so this is
+not the end of that route. The remaining allocations are ~2.95 per pair and the next reader
+should re-derive that constant rather than trusting this row. `489e21aac` (RusticHorizon)
+counts three further components from source that are DISJOINT from this one -- 233 SipHash
+override lookups that can only miss, 233 glob calls that all return true, and a reply Vec that
+doubles from zero -- so take those from that row, not this one, and do not re-attack the clone
+loop, which is gone. Revisit this row only if `CONFIG GET *` allocs/op rises above ~583 or if
+the per-pair constant is measured above 2.95.
