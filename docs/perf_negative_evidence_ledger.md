@@ -47406,3 +47406,79 @@ RETRY PREDICATE:
      redis's own reproducibility is 1.6-1.9 pct inside a FIT window on THIS shape, no route's
      ratio should be published to a tighter precision than its own denominator null, and I do
      not know that floor for any other shape yet.
+
+## 2026-08-18 BrownIbis: REJECT — the generic-path histogram key really does get cheaper (`keys_star` **-43.3 instr/op** against a 3.2 spread) and I am not shipping it, because an UNTOUCHED borrowed path moved **+18.3 against a 1.9 spread** (`frankenredis-iqicb`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no
+
+LEVER: in `ServerState::record_command_histogram_outcome`, replace
+`String::from_utf8_lossy(parent)` with the reused `dispatch_fullname_scratch` +
+`push_ascii_lowercase_lossy` + `record_command_histogram_canonical_with_kind`, exactly as the
+CONTAINER branch two lines above already does. NOT SHIPPED; nothing was applied to the repo.
+
+THE MOTIVATION WAS SOUND AND IS WORTH KEEPING. `from_utf8_lossy` VALIDATES UTF-8 to build a key
+the recorder then lowercases AGAIN. Measured on a geosearch profile: `Utf8Chunks::next` at
+**87.0 instr/op, 1.000 calls/op**, called from `String::from_utf8_lossy` (20,002 calls for
+20,000 ops), called from `record_command_histogram_outcome`. Both fixes already exist in the
+file, are used by the sibling branch, and are documented as skipping exactly this work
+("byte-identical bucket").
+
+MEASURED, `shape_instr_per_op.py --fr-only`, N=20,000, two interleaved rounds per arm, both
+arms built from a worktree pinned at HEAD `7d9178ab8`.
+`bench_elf_sha256=1e9ad2ea25dccb8164ed0e5549ec0fe4d4fa527446b6970ae64c9ea587d749b4` (before), `bench_elf_sha256=8bcfd0d4142d85eeebae4725a6465d35f4436bdbf7b36c34beccef33fd9c168e` (after).
+Host: load 10.79/10.33/9.59, CPU idle 86.5 pct measured from `/proc/stat`, iowait 0 pct, mean
+2075 MHz across 64 cores, /data 125G.
+
+| shape | before draws | after draws | median delta | before spread | role |
+|---|---|---|---|---|---|
+| keys_star | 2668.0 / 2671.2 | 2627.7 / 2627.9 | **-43.3** | 3.2 | dosed (generic) |
+| geosearch_1 | 11865.7 / 11579.1 | 11619.1 / 11728.7 | -137.0 | **286.6** | dosed (generic) |
+| get_control | 968.8 / 942.0 | 997.3 / 968.0 | **+28.5** | 26.8 | NULL (borrowed) |
+| ttl_nonvolatile | 1653.4 / 1651.5 | 1662.1 / 1671.7 | **+18.3** | **1.9** | NULL (borrowed) |
+
+**THE LEVER WORKS ON ITS TARGET.** `keys_star` is generic-dispatched, its own before-arm spread
+is 3.2 instr/op, and it moved -43.3 — an effect thirteen times its noise. That is a real saving
+and the mechanism is understood.
+
+**AND I AM NOT SHIPPING IT, BECAUSE A SHAPE THE CHANGE CANNOT TOUCH MOVED FURTHER THAN ITS OWN
+NOISE.** `ttl_nonvolatile` goes through `record_plain_keymeta_borrowed_metrics`, which calls
+`record_command_histogram_canonical_with_kind(cmd.name_lower(), ...)` — the canonical recorder,
+with an already-lowercase name, on a path this diff never edits. Its before-arm spread is 1.9
+instr/op and it moved **+18.3**. `get_control` is the same story at +28.5 against 26.8, marginal
+on its own but the SAME SIGN. Two untouched paths, both slower.
+
+**WHY THAT IS DISQUALIFYING RATHER THAN A CURIOSITY.** The shapes that GAIN are generic-
+dispatched commands; the shapes that PAY are the borrowed fast paths, which are the common ones.
+A change that saves 43 on the rare route and costs 18-28 on the hot ones is negative on any
+realistic mix, and the direction of the null movement makes that the likely reading rather than
+a coincidence.
+
+**THE REUSABLE FINDING, and it is bigger than this lever: `fr-runtime` edits appear far more
+layout-sensitive than `fr-server` ones.** My four-ELF comparison on 2026-08-17 put layout noise
+at **~1 instr/op** for `main.rs` changes (get_control -1.3, zadd_base +1.0, sadd_existing -0.1,
+dispatch identical). This ten-line addition to `fr-runtime` moved two untouched borrowed shapes
+by **+18.3 and +28.5**. **Do not carry the ~1 instr/op layout figure across crates**, and for
+any `fr-runtime` change include a tight-spread borrowed null such as `ttl_nonvolatile` — it was
+the only shape sensitive enough to catch this.
+
+Also recorded: **`geosearch_1` cannot adjudicate anything at this size.** Its own before-arm
+spread is 286.6 instr/op, larger than the effect measured on it, so the -137.0 there is not
+evidence in either direction. Anyone measuring a sub-300 instr/op effect on that shape is
+reading noise.
+
+CORRECTNESS was verified before the measurement and is recorded so a retry need not redo it: all
+nine `INFO commandstats` rows are byte-identical between arms including the container form
+(`memory|usage`, `object|encoding`) and a NON-ASCII command name (`cmdstat_<fffd><fffd>bad`), and
+`LATENCY HISTOGRAM` key names are identical (`calls | get | histogram_usec | memory|usage | ping
+| set | ttl | <fffd><fffd>bad`). The reply differed by ONE byte in a numeric bucket, which is a
+timing digit, not a key.
+
+RETRY PREDICATE: reopen only if the same diff can be shown to leave `ttl_nonvolatile` inside its
+own ~2 instr/op spread — for instance by landing it alongside other `fr-runtime` work so the
+layout shift is paid once rather than for this alone, or by measuring on an instrument that
+isolates the histogram call (a `fr-store` bench in the style of
+`crates/fr-protocol/benches/encode_bulk_payload_small.rs`, which is how a ~15 instruction encode
+effect was finally resolved after a whole-server profile could not see it). **Do not re-derive
+the prize from `Utf8Chunks::next` alone**: 87.0 instr/op is what the validation costs, not what
+removing it nets, and the measured net on the target shape was -43.3.
