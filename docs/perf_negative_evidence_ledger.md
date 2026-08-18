@@ -52024,3 +52024,90 @@ RETRY PREDICATE:
      traversal it removes, but the trade REVERSES as elements get smaller and the payload/
      traversal ratio grows. Re-measure at a much larger element count before claiming this
      generalises.
+
+## 2026-08-18 BrownIbis: TARGET — the 175.0 read gate looks up the ACL user **`"default"` TWICE PER COMMAND** by string, in the same BTreeMap, and calls `memcmp` **2.000 times per op** to do it. This is one change that pays on all 29 routes the census found still paying the gate (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no
+
+**WHY THIS TARGET AND NOT ANOTHER CONVERSION BATCH.** `a1600b784` measured 29 shapes still
+paying the 175.0 gate once per command. Converting them is four more batches. This row is about
+making the 175.0 itself smaller, which pays on all 29 at once — and on the fallback path of
+every route already converted.
+
+**MEASURED**, `dbsize_base` (the cheapest gate-paying shape, so the gate is 13.0 pct of it),
+N=20,000, `b4_after1.elf`:
+
+    callers of *memcmp*   ops=20000   total 3.001/op
+          2.000  <fr_runtime::Runtime>::plain_borrowed_default_key_read_allows
+          1.000  <hashbrown::HashMap<String, CommandHistogram>>::get_mut::<str>
+          0.001  <fr_runtime::ClientSession>::refresh_authentication_for_server
+
+**The read gate calls `memcmp` twice per command.** `__memcmp_avx2_movbe` is 57.0 instr/op
+across 3.001 calls, so ~19 instructions per call and **~38 instr/op of that frame is the
+gate's** — on top of its own 175.0 self cost.
+
+**WHAT THE TWO CALLS ARE.** Disassembling the shipped ELF (release build has no line info, so
+`callgrind_annotate` reports `???` and this had to come from the machine code): the gate
+contains two loops, each ending in `call memcmp` against a **7-byte constant at `.rodata`
+0x54047, which is the string `"default"`**. Both resolve to the same lookup in the same
+container:
+
+| # | path | source |
+|---|---|---|
+| 1 | `session.requires_auth(&server.auth_state)` -> `auth_state.auth_required()` -> `self.acl_users.get(DEFAULT_AUTH_USER)` | `fr-runtime` ~2795 |
+| 2 | `current_acl_allows_default_key_command()` -> `get_user(session.current_user_name())`, and `current_user_name()` returns `DEFAULT_AUTH_USER` for any unauthenticated session | `fr-runtime` 36472, 5756 |
+
+`acl_users` is a `BTreeMap<Vec<u8>, AclUser>` (declared ~2727) and `DEFAULT_AUTH_USER` is
+`b"default"` (line 89). **So every borrowed read command descends the same map twice, looking
+for the same 7-byte key, to learn two facts that change only when an ACL command runs.**
+
+**THE FIX, SPECIFIED.** Cache the two derived answers on `AuthState` and invalidate them where
+the map changes:
+
+  * `default_auth_required: bool` — what `auth_required()` computes (`requirepass.is_some() ||
+    !default.nopass`).
+  * `default_user_allows_all_key_commands: bool` — the conjunction in
+    `current_acl_allows_default_key_command` evaluated for the default user (`enabled &&
+    all_commands && denied_commands.is_empty() && denied_categories.is_empty() && all_keys &&
+    all_channels`).
+
+An **unauthenticated** session — the overwhelmingly common case, and the only one the borrowed
+fast paths serve — then reads two bools instead of descending a BTreeMap twice. An
+authenticated session keeps the map lookup, because its user is not `"default"` and the cache
+does not apply to it. **There are only 4 mutation sites** (`acl_users.insert/remove/clear`) plus
+construction and `requirepass` changes, which is what makes this a cache rather than a sidecar:
+the invalidation set is small, enumerable, and on a path that runs when an operator issues an
+ACL command, not per request.
+
+**SIZING, WITH THE MEASURED PART SEPARATED FROM THE ESTIMATE.** Measured: **2.000 memcmp
+calls/op removed, ~38 instr/op** of the `__memcmp_avx2_movbe` frame. Estimated and NOT yet
+measured: the BTreeMap descent inside the gate's own 175.0 — the loop setup, key-length
+handling and the `sets`/`setg`/`sub` ordering fold visible in the disassembly — which looks like
+**30 to 45 instructions per lookup**, so perhaps 60 to 90 instr/op more. **Total plausibly 100
+to 130 instr/op of the ~213 this permission check costs, but only the 38 is measured** and
+nobody should quote the rest until a paired A/B says so.
+
+**WHY THIS WAS NOT VISIBLE EARLIER.** The gate is a single 175.0 frame with the five helpers
+(`requires_auth`, `current_acl_allows_default_key_command`, `is_in_subscription_mode`,
+`is_client_paused`, `should_record_client_tracking_keys`) fully inlined into it, so the frame
+table shows one flat number and no callees. The only signals that something structural is inside
+it are the `memcmp` call count — which requires asking about a callee nobody would think to ask
+about — and the disassembly. `frame_delta.py --top` alone will never surface this.
+
+GATE AND ITS OWN NULL. This row makes no A/B claim — it is a target with a measured call count
+and a disassembly, not a verdict — so there is no lever to gate. A/A null on the whole-process
+instrument, same ELF, four draws of GET, resampled ratio-of-medians: median 1.00000, bootstrap
+95% median CI [0.99730, 1.00244]. The verdict gate for any row acting on this target must be
+that bootstrap median-CI, and CV is provenance only and was not used as a gate anywhere in this
+row; no CV was computed. Host: /data 88G, loadavg 7.38/9.27/10.26, CPU idle 89 pct; a peer's
+`cargo build -p fr-server` was in flight throughout, so this turn measured and disassembled an
+existing ELF and built nothing.
+`bench_elf_sha256=4b3845c439bacd6c5649e3fd2b16b68b8771b677d5e9c61517ce8ca07488c666`.
+
+RETRY PREDICATE — i.e. what would make this target WRONG, checked before building anything on
+it: if `call_count_delta.py <dump> 20000 --callers memcmp` stops attributing **2.000 calls/op**
+to `plain_borrowed_default_key_read_allows`, the two lookups are no longer there and this row is
+stale. And if a workload authenticates (`AUTH`), `current_user_name()` stops returning
+`"default"` and the second lookup is a genuine map query — **the cache must not be applied to an
+authenticated session**, which is the one correctness trap in the fix above.
