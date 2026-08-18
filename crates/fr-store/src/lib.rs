@@ -76421,6 +76421,58 @@ mod tests {
     }
 
     #[test]
+    fn has_pending_pubsub_sees_shard_messages_not_just_the_outbox_pubsubdrain() {
+        // (frankenredis-pubsubdrain) THE GUARD ON THE "ASK BEFORE DRAINING" OPTIMISATION.
+        //
+        // drain_pending_pubsub_to_connection now early-returns on
+        // Runtime::has_pending_pubsub(), which ORs the runtime's per-client outbox with THIS
+        // store queue. That saved 40.0 instr/op on every command, but it made an emptiness
+        // predicate LOAD-BEARING FOR CORRECTNESS: drop either source from the OR and the drain
+        // is skipped while messages are pending, so they are silently LOST -- a missing reply,
+        // not a crash and not a slow path.
+        //
+        // Shard pub/sub is the half that goes through the STORE queue, so it is exactly the
+        // half that a predicate written as "is the outbox empty?" would lose. The optimisation
+        // shipped with NO test: nothing in the tree referenced has_pending_pubsub, so a
+        // simplification of it would have been caught by nothing at all.
+        //
+        // ASSERTION ORDER IS DELIBERATE. Asserting only "pending after spublish" would pass
+        // even if the predicate ignored this queue and answered true unconditionally, so the
+        // empty cases are asserted first to prove the predicate can say NO, and the SMessage
+        // case second to prove it says YES for the source that lives here rather than in the
+        // outbox.
+        let mut store = Store::new();
+        assert!(
+            !store.has_pending_pubsub(),
+            "a fresh store has nothing pending; without this the later assertion proves nothing"
+        );
+
+        // A shard publish with NO subscriber must queue nothing, so the predicate must still be
+        // false. This is what separates "queued something" from "says yes to everything".
+        assert_eq!(store.spublish(b"sc:none", b"payload"), 0);
+        assert!(
+            !store.has_pending_pubsub(),
+            "spublish with no shard subscriber queues nothing, so nothing is pending"
+        );
+
+        store.ssubscribe(b"sc:one".to_vec());
+        assert_eq!(store.spublish(b"sc:one", b"payload"), 1);
+        assert!(
+            store.has_pending_pubsub(),
+            "a queued SMessage MUST make has_pending_pubsub true, or the drain is skipped and \
+             shard pub/sub is silently dropped"
+        );
+
+        // Draining must clear it, so the next command's early return is correct again.
+        let drained = store.drain_pending_pubsub();
+        assert_eq!(drained.len(), 1, "exactly the one queued SMessage");
+        assert!(
+            !store.has_pending_pubsub(),
+            "after draining nothing is pending, so the early return is correct again"
+        );
+    }
+
+    #[test]
     fn function_load_rejects_a_function_name_another_library_already_registered() {
         // (frankenredis-niu8g) Pinned against live vendored Redis 7.2.4, which
         // answers `-ERR Function myfunc already exists` to the second load. fr
