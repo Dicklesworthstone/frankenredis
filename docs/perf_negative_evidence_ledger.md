@@ -61943,3 +61943,92 @@ figure is the worst of two FIT draws. CV was not used, as a gate or otherwise.
    count, which is already at parity.
 3. **Before opening any lever on a normalised figure, check the raw ratio.** `publish` reads
    0.9558 normalised and 1.1209 raw. The normaliser is retired; the raw number is the standing.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 BrownIbis: MY OWN next-measurement predicate is NOT ANSWERABLE as written — a per-op syscall count cannot compare these two engines, because fr offloads writes to a writer thread and redis does not (`frankenredis-ozrro`)
+
+Claim class: METHOD, closing out a predicate I registered one row earlier. No ratio is claimed
+and no number from this row should be quoted as a comparison.
+Campaign output: no — it stops the next person spending a window on a comparison that cannot mean
+what it looks like.
+
+### WHAT I SET OUT TO DO
+
+`2af375961` established that `geosearch_64`'s throughput straddle is not server CPU — fr leads on
+instructions (0.7299x worst) AND cycles (0.8591x worst) and still only ties. Its retry predicate
+named the follow-up: *"Count syscalls (or event-loop passes) per op for both engines under `-P
+16` and see whether the 1.29-1.65x asymmetry reproduces and scales."*
+
+### WHY IT DOES NOT WORK
+
+Callgrind counts calls to the libc syscall wrappers for both engines deterministically, which
+looked like the clean instrument: no permissions, no perturbation, 2N-N differenced like every
+other number in this campaign. The first result even looked like an answer — total wrapper calls
+per op **fr 0.0075 against redis 0.0295**, fr apparently issuing a quarter of redis's syscalls.
+
+**That number is not a comparison and I am not banking it.** Listing io-related symbols
+unfiltered rather than through a whitelist shows why:
+
+    fr      0.0050  __syscall_cancel_arch        redis   0.0375  __syscall_cancel
+            0.0050  __syscall_cancel                     0.0350  __syscall_cancel_arch
+            0.0025  recv                                 0.0105  read
+            0.0025  TcpStream::read                      2.0340  __gettimeofday_syscall
+            0.0015  drain_writer_completions
+            0.0015  mpmc::Channel<WriterCompletion>::try_recv
+
+**fr has no write syscall in its profile at all**, and the two entries that explain it are the
+last two: `crates/fr-server/src/main.rs` carries `WriterJob`, `WriterCompletion`,
+`flush_writer_job` and an mpsc completion channel. fr can hand a flush to a WRITER THREAD; redis
+is single-threaded and issues its writes inline. So "syscalls per op on the profiled path"
+measures a different quantity for each engine, and the 0.2542x ratio is an artefact of
+architecture, not a finding about wakeups.
+
+My first pass compounded this by filtering symbols through a whitelist of syscall names, which
+silently dropped fr's Rust/mio wrappers into a shape that looked like a clean win. The unfiltered
+listing is what exposed it. **A whitelist is a hypothesis about what exists; on a codebase whose
+I/O path you have not read, it will confirm itself.**
+
+### THE TWO ALTERNATIVES, AND WHY NEITHER RESCUES IT HERE
+
+  * **Tracepoints.** `syscalls:sys_enter_*` requires reading `/sys/kernel/tracing`, which is not
+    permitted for this user. `perf_event_paranoid` is -1, so this is a filesystem permission and
+    not a perf setting; nothing I can do from here changes it.
+  * **strace.** Available, and it counts every thread. But it PERTURBS THE VARIABLE UNDER TEST:
+    slowing the server lets the client's pipeline fill, which changes how many bytes each read
+    drains and therefore how many syscalls per op the server makes. Under `-P 16` that is
+    precisely the quantity in question, so an strace count would answer a different question than
+    the one asked.
+
+### ONE OBSERVATION THAT SURVIVES THIS
+
+`__gettimeofday_syscall` at **2.0340 calls/op in redis**, differenced the same way as everything
+else. That is the incumbent's own per-op cost, measured on the incumbent's own profile, and it
+needs no cross-engine comparison to be true. It is recorded because it is countable and someone
+may want it; it says nothing about fr.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No A/B, no null, no ratio claimed. One FIT ratio draw (`WINDOW: FIT`, load 5.10 / 5.38 / 5.64,
+MHz 3258 max, builds 0) whose dumps were kept with `--keep-dumps` and read afterwards; the
+instruction ratio on that draw was 0.6903x, consistent with the three FIT draws in `fe76a4034`.
+CV was not used, as a gate or otherwise.
+
+### PROVENANCE
+
+  ELF           fr `4b2dd580cfaa158c...` at `643df0862`; vendored redis 7.2.4.
+  host          /data 47G, 5G above the brake. No build. One callgrind dump kept deliberately
+                (`/data/tmp/fr_instr_lq1eyy_z`) since the analysis needed it after the run.
+  disposition   METHOD. No source file changed, no instrument shipped.
+
+### RETRY PREDICATE
+
+1. **Do not re-run a per-op syscall comparison between fr and redis from callgrind.** The writer
+   thread makes the two counts incommensurable regardless of how carefully the symbols are
+   matched.
+2. If the wakeup question is worth answering, it needs a method that counts ALL THREADS of both
+   engines at MATCHED THROUGHPUT — otherwise batching depth differs between the arms and the
+   count moves with it. Getting `/sys/kernel/tracing` readable would be the cheap unlock.
+3. The event-loop-passes number in `e2481acc4` (fr 0.010-0.013 vs redis 0.008) is from the
+   harness's own per-engine instrumentation, not from syscall counts, and is untouched by this
+   row. It remains a lead and remains unconfirmed.
