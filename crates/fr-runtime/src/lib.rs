@@ -38138,8 +38138,18 @@ impl Runtime {
         }
 
         // When inside MULTI, queue commands that can be deferred to EXEC.
-        // Only transaction-control commands (MULTI/EXEC/DISCARD/WATCH/UNWATCH)
-        // and connection commands (QUIT/RESET) execute immediately.
+        // Only transaction-control commands (MULTI/EXEC/DISCARD/WATCH) and
+        // connection commands (QUIT/RESET) execute immediately.
+        //
+        // (frankenredis-ozrro) UNWATCH IS NOT ONE OF THEM, and used to be listed here. Upstream
+        // server.c::processCommand names its exemptions explicitly --
+        //     c->cmd->proc != execCommand && != discardCommand && != multiCommand &&
+        //     != watchCommand && != quitCommand && != resetCommand
+        // -- and unwatchCommand is absent, so Redis QUEUES it like any other command. MEASURED
+        // against vendored 7.2.4: `MULTI / UNWATCH / PING / EXEC` answers `+QUEUED` and then a
+        // TWO-element EXEC array; fr answered `+OK` and a one-element array, silently dropping
+        // the UNWATCH from the transaction. WATCH is genuinely exempt (it errors inside MULTI)
+        // and the asymmetry is easy to mistake for a pair.
         if self.session.transaction_state.in_transaction {
             let must_execute_now = matches!(
                 special_command,
@@ -38147,7 +38157,6 @@ impl Runtime {
                     | Some(RuntimeSpecialCommand::Exec)
                     | Some(RuntimeSpecialCommand::Discard)
                     | Some(RuntimeSpecialCommand::Watch)
-                    | Some(RuntimeSpecialCommand::Unwatch)
                     | Some(RuntimeSpecialCommand::Quit)
                     | Some(RuntimeSpecialCommand::Reset)
             );
@@ -47923,7 +47932,26 @@ replica_announced:1\r\n",
             let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
             let dirty_before = self.server.store.dirty;
             let start = Instant::now();
-            let result = self.execute_db_scoped_command(argv, now_ms);
+            // (frankenredis-ozrro) UNWATCH queues like any other command (upstream
+            // processCommand does not exempt it), but the replay dispatcher only knows
+            // db-scoped commands, so replaying it answered "unknown command 'UNWATCH'".
+            // At this point EXEC has ALREADY cleared `watched_keys` above, so the queued
+            // UNWATCH has nothing left to do and answers +OK -- which is exactly what
+            // vendored Redis 7.2.4 returns as that element of the EXEC array.
+            let result = if argv
+                .first()
+                .is_some_and(|name| name.eq_ignore_ascii_case(b"UNWATCH"))
+            {
+                if argv.len() == 1 {
+                    Ok(RespFrame::SimpleString("OK".to_string()))
+                } else {
+                    Ok(RespFrame::Error(
+                        "ERR wrong number of arguments for 'unwatch' command".to_string(),
+                    ))
+                }
+            } else {
+                self.execute_db_scoped_command(argv, now_ms)
+            };
             let elapsed_us = start.elapsed().as_micros() as u64;
             let dirty_after = self.server.store.dirty;
             self.record_slowlog(argv, elapsed_us, now_ms);
@@ -59468,6 +59496,40 @@ mod tests {
     }
 
     #[test]
+    // (frankenredis-ozrro) UNWATCH inside MULTI is QUEUED and replayed by EXEC, matching
+    // vendored Redis 7.2.4. fr previously executed it immediately, answering +OK and returning a
+    // ONE-element EXEC array -- the UNWATCH silently vanished from the transaction. Two separate
+    // seams had to agree for this to work, and each failed on its own first: the queueing
+    // decision (`must_execute_now` wrongly listed Unwatch) and the replay dispatcher (which only
+    // knows db-scoped commands and answered "unknown command 'UNWATCH'"). Pin BOTH, because
+    // fixing only the first turns a wrong reply into an error reply.
+    #[test]
+    fn unwatch_queues_inside_multi_and_replays_in_exec_ozrro() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"MULTI"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"UNWATCH"]), 2),
+            RespFrame::SimpleString("QUEUED".to_string()),
+            "UNWATCH must QUEUE inside MULTI: upstream processCommand exempts exec/discard/multi/\
+             watch/quit/reset, and unwatchCommand is not among them"
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"PING"]), 3),
+            RespFrame::SimpleString("QUEUED".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"EXEC"]), 4),
+            RespFrame::Array(Some(vec![
+                RespFrame::SimpleString("OK".to_string()),
+                RespFrame::SimpleString("PONG".to_string()),
+            ])),
+            "EXEC must replay the queued UNWATCH as its own +OK element, not drop it"
+        );
+    }
+
     fn transaction_activity_invariant_tracks_all_control_transitions() {
         let mut rt = Runtime::default_strict();
         assert!(rt.session.transaction_state.is_pristine());
@@ -59487,9 +59549,14 @@ mod tests {
             rt.execute_frame(command(&[b"MULTI"]), 3),
             RespFrame::SimpleString("OK".to_string())
         );
+        // (frankenredis-ozrro) QUEUED, not OK. This assertion used to expect OK, which pinned
+        // fr's own behaviour rather than the incumbent's: upstream processCommand does not
+        // exempt unwatchCommand from queueing, and vendored Redis 7.2.4 answers +QUEUED here,
+        // then returns UNWATCH's +OK as an element of the EXEC array. A test written from the
+        // implementation cannot discover that the implementation is wrong.
         assert_eq!(
             rt.execute_frame(command(&[b"UNWATCH"]), 4),
-            RespFrame::SimpleString("OK".to_string())
+            RespFrame::SimpleString("QUEUED".to_string())
         );
         assert!(!rt.session.transaction_state.is_pristine());
         assert_eq!(
