@@ -2200,6 +2200,12 @@ struct Parser {
     /// "no loop to break near '<eof>'" message. Incremented on
     /// while/repeat/for entry, decremented on exit.
     loop_depth: usize,
+    /// Syntactic nesting depth, mirroring upstream's `L->nCcalls` as
+    /// maintained by `enterlevel`/`leavelevel` in `lparser.c`. Without it the
+    /// recursive-descent parser recurses once per nesting level with no bound,
+    /// and a Rust stack overflow ABORTS the process rather than unwinding — so
+    /// an unbounded nest is a remotely reachable kill, not a parse error.
+    syntax_depth: usize,
 }
 
 impl Parser {
@@ -2217,7 +2223,34 @@ impl Parser {
             lines,
             pos: 0,
             loop_depth: 0,
+            syntax_depth: 0,
         }
+    }
+
+    /// Upstream's `LUAI_MAXCCALLS` (deps/lua/src/luaconf.h:468), the bound
+    /// `enterlevel` applies to syntactic nesting. Kept at upstream's value so
+    /// fr refuses exactly the chunks 7.2.4 refuses: raising it would accept
+    /// scripts the incumbent rejects, and lowering it would reject scripts the
+    /// incumbent accepts.
+    const MAX_SYNTAX_LEVELS: usize = 200;
+
+    /// Port of upstream `enterlevel` (lparser.c:276). Call on entry to a
+    /// construct that can nest, and pair with `leave_syntax_level`.
+    ///
+    /// The error text is upstream's verbatim: `luaX_lexerror` is invoked with a
+    /// token of 0, which suppresses the usual `near '<token>'` suffix, so the
+    /// message carries no such suffix here either.
+    fn enter_syntax_level(&mut self) -> Result<(), String> {
+        self.syntax_depth += 1;
+        if self.syntax_depth > Self::MAX_SYNTAX_LEVELS {
+            return Err("chunk has too many syntax levels".to_string());
+        }
+        Ok(())
+    }
+
+    /// Port of upstream `leavelevel` (lparser.c:282).
+    fn leave_syntax_level(&mut self) {
+        self.syntax_depth = self.syntax_depth.saturating_sub(1);
     }
 
     /// 1-based source line of the token at the parser cursor. (m7oy8)
@@ -2283,6 +2316,15 @@ impl Parser {
     }
 
     fn parse_block(&mut self) -> Result<Block, String> {
+        // Upstream calls enterlevel() from chunk() as well as subexpr(), so a
+        // nest of `do ... end` bodies is bounded by the same counter.
+        self.enter_syntax_level()?;
+        let parsed = self.parse_block_inner();
+        self.leave_syntax_level();
+        parsed
+    }
+
+    fn parse_block_inner(&mut self) -> Result<Block, String> {
         let mut stmts: Block = Vec::new();
         loop {
             // Skip semicolons
@@ -2630,7 +2672,13 @@ impl Parser {
 
     // Expression parsing with precedence climbing
     fn parse_expr(&mut self) -> Result<Expr, String> {
-        self.parse_or_expr()
+        // One level per re-entry into the expression grammar — parenthesised
+        // subexpressions, call arguments and table fields all arrive here,
+        // which is where upstream's subexpr() calls enterlevel().
+        self.enter_syntax_level()?;
+        let parsed = self.parse_or_expr();
+        self.leave_syntax_level();
+        parsed
     }
 
     fn parse_or_expr(&mut self) -> Result<Expr, String> {
@@ -2677,8 +2725,11 @@ impl Parser {
         // .. is right-associative
         if self.check(&Token::DotDot) {
             self.advance();
-            let right = self.parse_concat()?;
-            Ok(Expr::BinOp(Box::new(left), BinOp::Concat, Box::new(right)))
+            // `..` is right-associative, so each operator is a nesting level.
+            self.enter_syntax_level()?;
+            let right = self.parse_concat();
+            self.leave_syntax_level();
+            Ok(Expr::BinOp(Box::new(left), BinOp::Concat, Box::new(right?)))
         } else {
             Ok(left)
         }
@@ -2719,13 +2770,17 @@ impl Parser {
         match self.peek().clone() {
             Token::Not => {
                 self.advance();
-                let expr = self.parse_unary()?;
-                Ok(Expr::UnaryOp(UnaryOp::Not, Box::new(expr)))
+                self.enter_syntax_level()?;
+                let expr = self.parse_unary();
+                self.leave_syntax_level();
+                Ok(Expr::UnaryOp(UnaryOp::Not, Box::new(expr?)))
             }
             Token::Minus => {
                 self.advance();
-                let expr = self.parse_unary()?;
-                Ok(Expr::UnaryOp(UnaryOp::Neg, Box::new(expr)))
+                self.enter_syntax_level()?;
+                let expr = self.parse_unary();
+                self.leave_syntax_level();
+                Ok(Expr::UnaryOp(UnaryOp::Neg, Box::new(expr?)))
             }
             Token::Hash => {
                 self.advance();
@@ -15804,7 +15859,7 @@ mod tests {
         Env, LuaGlobals, LuaMap, LuaState, LuaTable, LuaValue, RegisterFunctionArgError,
         RegisterFunctionSpec, SCRIPT_NOSCRIPT_ERROR, compile_check, eval_script, json_to_lua_value,
         lua_base_globals_template, lua_raw_equal, lua_test_live_tables, lua_value_to_json,
-        overlay_filter_bit, parse_register_function_args,
+        overlay_filter_bit, parse_lua_chunk_located, parse_register_function_args,
     };
 
     /// (frankenredis-9hori) flags and description must be captured from the RUNTIME table.
@@ -21494,6 +21549,7 @@ end
             0,
         )
         .expect("a script that has ALREADY written must not be stopped mid-way");
+
     }
 
     #[test]
@@ -21962,6 +22018,90 @@ end
     /// The self-referential case is the reason this is a bug and not a nit. Without a bound it has
     /// no terminating condition at all -- fr recursed until the native stack was exhausted, which
     /// kills the process, and any client that can run EVAL can construct it in three tokens.
+    /// A recursive-descent parser with no depth bound recurses once per nesting
+    /// level, and a Rust stack overflow ABORTS the process rather than
+    /// unwinding — so before this guard, any client permitted to run EVAL could
+    /// kill the server with a script of nested punctuation. Upstream refuses
+    /// instead: `enterlevel` (lparser.c:276) raises "chunk has too many syntax
+    /// levels" once `L->nCcalls` passes `LUAI_MAXCCALLS` (200).
+    ///
+    /// Measured motivation: `parse_unary` self-recurses at 336 bytes per level
+    /// in the shipping release binary, so ~6,241 `not` tokens exhaust a 2 MiB
+    /// worker stack. The four nesting forms below are the four recursion
+    /// cycles the parser actually has.
+    #[test]
+    fn lua_parser_bounds_syntax_nesting_like_upstream_lparser() {
+        const DEEP: usize = 500; // comfortably past upstream's 200
+        let cases: [(&str, String); 4] = [
+            (
+                "parenthesised subexpressions (parse_expr re-entry)",
+                format!("return {}1{}", "(".repeat(DEEP), ")".repeat(DEEP)),
+            ),
+            (
+                "unary chain (parse_unary self-recursion)",
+                format!("return {}1", "not ".repeat(DEEP)),
+            ),
+            (
+                "right-associative concat (parse_concat self-recursion)",
+                format!("return {}'x'", "'x'..".repeat(DEEP)),
+            ),
+            (
+                "nested blocks (parse_block, upstream guards chunk() too)",
+                format!("{}{}", "do ".repeat(DEEP), "end ".repeat(DEEP)),
+            ),
+        ];
+        for (what, script) in &cases {
+            let err = parse_lua_chunk_located(script.as_bytes())
+                .err()
+                .unwrap_or_else(|| panic!("{what}: nesting {DEEP} deep was accepted, so the \
+                                           parser is still unbounded on this cycle"));
+            assert!(
+                err.1.contains("chunk has too many syntax levels"),
+                "{what}: expected upstream's message, got {:?}",
+                err.1
+            );
+        }
+
+        // ANTI-OVER-REJECTION. The bound is only correct if it refuses what
+        // upstream refuses and nothing more — a guard that also rejected
+        // ordinary scripts would trade a crash for a parity break, which is the
+        // trade zo5ac's tests exist to prevent. 50 levels is well inside 200.
+        const SHALLOW: usize = 50;
+        for (what, script) in [
+            (
+                "shallow parens",
+                format!("return {}1{}", "(".repeat(SHALLOW), ")".repeat(SHALLOW)),
+            ),
+            ("shallow unary chain", format!("return {}1", "not ".repeat(SHALLOW))),
+            (
+                "shallow concat",
+                format!("return {}'x'", "'x'..".repeat(SHALLOW)),
+            ),
+            (
+                "shallow blocks",
+                format!("{}{}", "do ".repeat(SHALLOW), "end ".repeat(SHALLOW)),
+            ),
+        ] {
+            assert!(
+                parse_lua_chunk_located(script.as_bytes()).is_ok(),
+                "{what}: {SHALLOW} levels is inside upstream's limit and must still parse"
+            );
+        }
+
+        // The counter must UNWIND: many sequential shallow nests in one chunk
+        // are not a deep nest. Without `leave_syntax_level` this accumulates
+        // and trips the bound, which is the obvious way to get this wrong.
+        let sequential = "return ".to_string()
+            + &(0..300)
+                .map(|_| "((1))".to_string())
+                .collect::<Vec<_>>()
+                .join(" + ");
+        assert!(
+            parse_lua_chunk_located(sequential.as_bytes()).is_ok(),
+            "300 sequential shallow nests must parse: depth is nesting, not a running total"
+        );
+    }
+
     #[test]
     fn cjson_encode_bounds_nesting_at_upstreams_limit_zo5ac() {
         // (frankenredis-cjson-encode-depth-zo5ac) EXPLICIT STACK, and the size is the finding.
