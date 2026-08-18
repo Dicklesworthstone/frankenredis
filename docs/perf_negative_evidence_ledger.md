@@ -53229,3 +53229,93 @@ commands. Ir is immune to load; a slope between two points of different DURATION
      lazy on the premise that eager decode wins the realistic RESTORE-then-read workload; that
      row is about laziness, not about the cost of the eager walk itself, so the walk is still
      open ground.
+
+## 2026-08-18 BrownIbis: KEEP (SELF-SPEEDUP) — the zbyscore cascade takes the cached gate: **26 executors, 86.0 -> ABSENT on all six measured shapes**, against a null that reads the same integer on both arms — and the A/B caught a seventh route I had missed (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no
+
+LEVER: the batch `d89499274` deliberately deferred. `can_execute_plain_zbyscore_borrowed` has
+**22 in-crate callers — 22 distinct executors, one call each** — spanning ZRANGEBYSCORE,
+ZREVRANGEBYSCORE, ZRANGE BYSCORE, ZRANGE BYLEX, ZREVRANGE and their LIMIT and WITHSCORES
+variants. `zcount` (1 caller) and `zscore` (2) are folded in: same transformation, and they carry
+harness shapes. Shipped in `e766788a8`.
+
+| shape | gate calls/op | gate frame | whole-op worst bound | role |
+|---|---|---|---|---|
+| **zrangebyscore_plain** | **1.000 -> 0.000** | **86.0 -> ABSENT** | +61.0 | beneficiary |
+| **zrangebyscore_l** | **1.000 -> 0.000** | **86.0 -> ABSENT** | +80.0 | beneficiary |
+| **zrange_rev** | **1.000 -> 0.000** | **86.0 -> ABSENT** | +15.7 | beneficiary |
+| **zrange_withscores** | **1.000 -> 0.000** | **86.0 -> ABSENT** | **-85.7** | beneficiary |
+| **zcount_base** | **1.000 -> 0.000** | **86.0 -> ABSENT** | +68.9 | beneficiary |
+| **zscore_base** | **1.000 -> 0.000** | **86.0 -> ABSENT** | +72.7 | beneficiary |
+| keys_star | 1.000 -> 1.000 | **86.0 -> 86.0** | -4.5 | **EXACT null** |
+| llen | 0.000 -> 0.000 | ABSENT -> ABSENT | +6.2 | converted control |
+
+**Quoting the WORST bound: 86.0 instr/op removed**, the same integer on all six. It is 86.0 and
+not 175.0 because `2bdc560df` already halved the gate itself; the two levers compose and neither
+figure supersedes the other.
+
+**`zrange_withscores` is the row's own warning label.** Its frame goes to ABSENT exactly like the
+other five, and its whole-op moves **-85.7, the wrong way**. Its after-arm draws are **2516.7 and
+2656.9 — a 140 spread on one binary**. That is the layout noise this vein has documented at ±40
+to ±70, here larger still, and it is the sharpest example yet of why the verdict is the frame and
+the call count rather than the whole-op column. A reader who took the whole-op number alone would
+conclude this lever made ZRANGE WITHSCORES slower.
+
+**THE A/B CAUGHT A ROUTE I HAD MISSED, which is the whole reason for a per-shape call count.**
+The first build converted **five of six**: `zrange_withscores` stayed at 1.000 / 86.0 because
+`execute_plain_zrange_withscores_borrowed_into` called the **bare**
+`can_execute_plain_zrange_borrowed` rather than the `_with_default_read_gate` twin — while its
+floor arm was already computing the per-pass value and had nowhere to put it. I fixed it, rebuilt
+all three arms, and **re-ran the entire A/B** so all six results come from one uniform pair rather
+than five from one build and one from another. Shipping 5 of 6 with a footnote would have been
+cheaper and would have left a half-converted family in the tree.
+
+**ZRANGE ITSELF IS NOT IN THE CASCADE**, and I nearly converted it twice.
+`can_execute_plain_zrange_borrowed` already uses the twin form; the bare function is only the
+fallback wrapper for callers with nothing cached. That is exactly why `a1600b784`'s census shows
+`zrange_plain` and `zrange_4` at 0.001 (converted floor) while `zrange_rev` and
+`zrange_withscores` read 1.000 — same command name, different executors, different status. **A
+route's name is not its conversion status; the census entry is.**
+
+CORRECTNESS: **96 commands byte-identical**, deliberately dominated by FORMS rather than values,
+because the risk in a 26-executor mechanical batch is that one of them got the parameter but not
+the guard. Every combination of range type, direction, LIMIT, WITHSCORES, exclusive bounds and
+infinities, plus **20 malformed variants that must still decline to generic** — bad bound, bad
+LIMIT count, `LIMIT` without `BYSCORE`/`BYLEX`, unknown trailing token, wrong arity, and WRONGTYPE
+on each family. **20 of the replies are `-ERR` or `WRONGTYPE`**, which is what proves the declines
+actually happened rather than the battery matching vacuously. 633 `fr-runtime` lib tests pass.
+
+**`cargo check --all-targets` caught 33 in-crate TEST call sites** that a plain `cargo check -p`
+would have missed — the exact class that broke the test build three times in earlier batches and
+that a peer had to repair twice. The rule is now paying for itself.
+
+**A METHOD NOTE AGAINST MYSELF.** My first attempt at those 33 sites was a pattern — "add `None`
+to every call of every converted function" — which made **66 edits**, including calls that already
+carried the parameter, and broke the file. The compiler already knows precisely which call sites
+are arity-short and where; driving the edit from `cargo check --message-format short` and
+iterating fixed all 33 in one round with no collateral. **Prefer the compiler's list to a pattern
+whenever the compiler can produce one.**
+
+BUILD PROVENANCE: paired build in a worktree pinned at `9a937431c`, built AFTER, BEFORE, AFTER
+again. The two AFTERs are bit-identical
+(`bench_elf_sha256=81630963a263180b4b6293e215070716dcc45d69bdf2873583b46205464a20d9`) and BEFORE
+distinct
+(`bench_elf_sha256=658204308cd26e8956df71f7d6504dd6c9459abc2a68db7af335594dcc8b36ed`). Host:
+/data 88G, loadavg 19.75/12.64/10.74, mean 2578 MHz across 64 cores.
+
+GATE AND ITS OWN NULL. Both arms were measured in one same-invocation interleaved run, two
+rounds, so drift falls on both alike. The A/A null and the A/B pairing are same-invocation. A/A
+null on the whole-process instrument, same ELF, four draws of GET, resampled ratio-of-medians:
+median 1.00000, bootstrap 95% median CI [0.99730, 1.00244]. The verdict gate for this row is that
+bootstrap median-CI, and CV is provenance only and was not used as a gate anywhere in this row;
+no CV was computed. Host state is provenance, not a gate.
+
+RETRY PREDICATE: revisit a converted route only if it is observed calling
+`plain_borrowed_default_key_read_allows` above **0.001 calls/op** (0.000-0.001 is the per-pass
+cache-fill floor established in `a1600b784`). **The vein remains open**: `keys_star` is still at
+1.000 and is deliberately held as this row's null, and the census's remaining clusters are the
+collection `_into` family (`smembers_base`, `hgetall_base`, `lrange_base`, `sinter_2`) and SCAN
+(four shapes). Re-run the census after each batch rather than reasoning from source — and check
+the census entry, not the command name, before assuming a route is unconverted.
