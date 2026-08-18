@@ -8765,7 +8765,9 @@ fn process_buffered_frames(
                     b"*2\r\n$3\r\n",
                     b"DEL",
                 ) {
-                    if let Some(response) = runtime.execute_plain_del_borrowed(&[packet.key], ts) {
+                    let default_write_allowed =
+                        Some(cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts));
+                    if let Some(response) = runtime.execute_plain_del_borrowed(&[packet.key], ts, default_write_allowed) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
                             response,
@@ -12093,8 +12095,10 @@ fn process_buffered_frames(
                     b"*3\r\n$6\r\n",
                     b"UNLINK",
                 ) {
+                    let default_write_allowed =
+                        Some(cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts));
                     if let Some(response) =
-                        runtime.execute_plain_unlink_borrowed(&[packet.key, packet.arg], ts)
+                        runtime.execute_plain_unlink_borrowed(&[packet.key, packet.arg], ts, default_write_allowed)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -12116,8 +12120,10 @@ fn process_buffered_frames(
                     b"*4\r\n$6\r\n",
                     b"UNLINK",
                 ) {
+                    let default_write_allowed =
+                        Some(cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts));
                     if let Some(response) =
-                        runtime.execute_plain_unlink_borrowed(&[packet.key, packet.a, packet.b], ts)
+                        runtime.execute_plain_unlink_borrowed(&[packet.key, packet.a, packet.b], ts, default_write_allowed)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -12139,9 +12145,12 @@ fn process_buffered_frames(
                     b"*5\r\n$6\r\n",
                     b"UNLINK",
                 ) {
+                    let default_write_allowed =
+                        Some(cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts));
                     if let Some(response) = runtime.execute_plain_unlink_borrowed(
                         &[packet.key, packet.a, packet.b, packet.c],
                         ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -12163,9 +12172,12 @@ fn process_buffered_frames(
                     b"*6\r\n$6\r\n",
                     b"UNLINK",
                 ) {
+                    let default_write_allowed =
+                        Some(cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts));
                     if let Some(response) = runtime.execute_plain_unlink_borrowed(
                         &[packet.key, packet.a, packet.b, packet.c, packet.d],
                         ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -12188,8 +12200,10 @@ fn process_buffered_frames(
                     b"DEL",
                 ) {
                     // 2-key DEL: key + arg are the two keys.
+                    let default_write_allowed =
+                        Some(cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts));
                     if let Some(response) =
-                        runtime.execute_plain_del_borrowed(&[packet.key, packet.arg], ts)
+                        runtime.execute_plain_del_borrowed(&[packet.key, packet.arg], ts, default_write_allowed)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -12212,8 +12226,10 @@ fn process_buffered_frames(
                     b"DEL",
                 ) {
                     // 3-key DEL: key + a + b are the three keys.
+                    let default_write_allowed =
+                        Some(cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts));
                     if let Some(response) =
-                        runtime.execute_plain_del_borrowed(&[packet.key, packet.a, packet.b], ts)
+                        runtime.execute_plain_del_borrowed(&[packet.key, packet.a, packet.b], ts, default_write_allowed)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -12236,8 +12252,10 @@ fn process_buffered_frames(
                     b"DEL",
                 ) {
                     // 4-key DEL: key + a + b + c are the four keys.
+                    let default_write_allowed =
+                        Some(cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts));
                     if let Some(response) = runtime
-                        .execute_plain_del_borrowed(&[packet.key, packet.a, packet.b, packet.c], ts)
+                        .execute_plain_del_borrowed(&[packet.key, packet.a, packet.b, packet.c], ts, default_write_allowed)
                     {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -12260,9 +12278,12 @@ fn process_buffered_frames(
                     b"DEL",
                 ) {
                     // 5-key DEL: key + a + b + c + d are the five keys.
+                    let default_write_allowed =
+                        Some(cached_plain_write_gate(&mut plain_write_gate_cache, runtime, ts));
                     if let Some(response) = runtime.execute_plain_del_borrowed(
                         &[packet.key, packet.a, packet.b, packet.c, packet.d],
                         ts,
+                        default_write_allowed,
                     ) {
                         Ok(BorrowedMultibulkAction::FastReply {
                             consumed: packet.consumed,
@@ -17981,6 +18002,10 @@ fn dispatch_floor_fast_del(
     parser_config: &ParserConfig,
     runtime: &mut Runtime,
     ts: u64,
+    // (frankenredis-ozrro) The floor already threads a per-pass write-gate cache into
+    // `try_dispatch_floor_classified_action`; it stopped one call short of here, so DEL and
+    // UNLINK re-derived the gate at 98.0 instr/op while every other floor WRITE arm amortised it.
+    write_gate_cache: &mut Option<bool>,
 ) -> Option<(usize, RespFrame)> {
     // The RESP prefix encodes the command token's length, so it moves with the
     // name: 3 for DEL, 6 for the async-free sibling.
@@ -18072,10 +18097,13 @@ fn dispatch_floor_fast_del(
         _ => return None,
     };
     let slice = &keys[..count];
+    // (frankenredis-ozrro) One hoist covers both arms: `cached_plain_write_gate` needs
+    // `&mut Runtime` and so does the executor, so reading the cache inline is a borrow conflict.
+    let default_write_allowed = Some(cached_plain_write_gate(write_gate_cache, runtime, ts));
     let response = if async_free {
-        runtime.execute_plain_unlink_borrowed(slice, ts)
+        runtime.execute_plain_unlink_borrowed(slice, ts, default_write_allowed)
     } else {
-        runtime.execute_plain_del_borrowed(slice, ts)
+        runtime.execute_plain_del_borrowed(slice, ts, default_write_allowed)
     }?;
     Some((consumed, response))
 }
@@ -19068,7 +19096,7 @@ fn try_dispatch_floor_classified_action(
         }
         BorrowedDispatchFloorClass::Unlink(nkeys) => {
             if let Some((consumed, response)) =
-                dispatch_floor_fast_del(true, nkeys, unparsed, &parser_config, runtime, ts)
+                dispatch_floor_fast_del(true, nkeys, unparsed, &parser_config, runtime, ts, write_gate_cache)
             {
                 Ok(BorrowedMultibulkAction::FastReply { consumed, response })
             } else {
@@ -19084,7 +19112,7 @@ fn try_dispatch_floor_classified_action(
         }
         BorrowedDispatchFloorClass::Del(nkeys) => {
             if let Some((consumed, response)) =
-                dispatch_floor_fast_del(false, nkeys, unparsed, &parser_config, runtime, ts)
+                dispatch_floor_fast_del(false, nkeys, unparsed, &parser_config, runtime, ts, write_gate_cache)
             {
                 Ok(BorrowedMultibulkAction::FastReply { consumed, response })
             } else {

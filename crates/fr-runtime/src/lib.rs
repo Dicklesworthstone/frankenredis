@@ -29132,14 +29132,16 @@ impl Runtime {
     /// Integer(count). Callers pass the 2- or 3-key slice; 1-key and 4+ forms fall
     /// through to generic. (DEL does not record keyspace_hits/misses — matches the
     /// generic.)
-    pub fn execute_plain_del_borrowed(&mut self, keys: &[&[u8]], now_ms: u64) -> Option<RespFrame> {
+    pub fn execute_plain_del_borrowed(&mut self, keys: &[&[u8]], now_ms: u64, default_write_allowed: Option<bool>) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < keys.len() + 1
             || self.policy.gate.max_bulk_len < b"DEL".len()
             || keys.iter().any(|k| k.len() > self.policy.gate.max_bulk_len)
         {
             return None;
         }
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_write_allows(now_ms))
+        {
             return None;
         }
         let argv_len_sum = b"DEL".len() + keys.iter().map(|k| k.len()).sum::<usize>();
@@ -29185,6 +29187,7 @@ impl Runtime {
         &mut self,
         keys: &[&[u8]],
         now_ms: u64,
+        default_write_allowed: Option<bool>,
     ) -> Option<RespFrame> {
         if self.policy.gate.max_array_len < keys.len() + 1
             || self.policy.gate.max_bulk_len < b"UNLINK".len()
@@ -29192,7 +29195,9 @@ impl Runtime {
         {
             return None;
         }
-        if !self.plain_borrowed_default_key_write_allows(now_ms) {
+        if !default_write_allowed
+            .unwrap_or_else(|| self.plain_borrowed_default_key_write_allows(now_ms))
+        {
             return None;
         }
         let argv_len_sum = b"UNLINK".len() + keys.iter().map(|k| k.len()).sum::<usize>();
@@ -64367,7 +64372,7 @@ mod tests {
         rt.execute_frame(command(&[b"SET", b"d1", b"v"]), 1_000);
         rt.execute_frame(command(&[b"SET", b"d2", b"v"]), 1_000);
         let deleted = rt
-            .execute_plain_del_borrowed(&[&b"d1"[..], &b"d2"[..]], 1_000)
+            .execute_plain_del_borrowed(&[&b"d1"[..], &b"d2"[..]], 1_000, None)
             .expect("del fast path should serve this shape");
         assert_eq!(
             deleted,
@@ -64381,7 +64386,7 @@ mod tests {
 
         rt.execute_frame(command(&[b"SET", b"u1", b"v"]), 1_000);
         let unlinked = rt
-            .execute_plain_unlink_borrowed(&[&b"u1"[..], &b"u:absent"[..]], 1_000)
+            .execute_plain_unlink_borrowed(&[&b"u1"[..], &b"u:absent"[..]], 1_000, None)
             .expect("unlink fast path should serve this shape");
         assert_eq!(
             unlinked,
