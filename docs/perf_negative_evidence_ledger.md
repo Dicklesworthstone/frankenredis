@@ -59980,3 +59980,78 @@ otherwise.
    will delete a dump a peer is mid-read on.
 3. Re-count with `ls -d /data/tmp/fr_instr_* | wc -l` before blaming the volume on builds. It was
    4,964 at 15:20Z on 2026-08-18.
+
+## SHIPPED (SELF-SPEEDUP) e28b7b114 — LZF SLICE 6: TWO-TIER THE MATCH-PATH BUDGET TEST, -320 instr/op (-1.91 pct), AND A PER-MATCH LEVER BEHAVES OPPOSITE TO A PER-POSITION ONE
+
+Claim class: SELF-SPEEDUP. Campaign output: no. fr against fr in one binary. It serves the one
+COMPETITIVE gap still running against fr (the LZF compressor, last priced at 1.5867x in
+`564597af6`) but does not re-price it and claims nothing about the incumbent.
+bench_elf_sha256=eb0a972f859c5fe5db3a5edda5b14b528e1c613bb363ec8a3c8ff4d57ad1fce4
+
+Second lever in a row found by READING THE INCUMBENT rather than profiling fr. Vendored `lzf_c.c`
+guards its match path in two tiers and computes the exact test only when the cheap one trips:
+
+    if (expect_false (op + 3 + 1 >= out_end))   /* faster conservative */
+      if (op - !lit + 3 + 1 >= out_end)         /* exact but rare */
+
+fr evaluated the exact form on EVERY match. The exact form is the expensive one:
+`usize::from(lit == 0)` is a compare and a materialise, plus a subtraction, once per match.
+
+The filter is sound because it is WEAKER, not because it is approximate. It drops the
+`- (lit == 0)` term, and subtracting 0 or 1 only makes the left side smaller, so exact implies
+conservative, and therefore not-conservative implies not-exact. Where the cheap test does fire the
+exact test still runs and decides, so the bail point is bit-identical. The subtraction is now
+evaluated strictly LESS often than before, so it cannot underflow where the old form did not.
+
+    payload                                     exact       tier    delta      pct
+    listpack (the shape DUMP feeds it)          16736      16416     -320    -1.91
+    random   (incompressible)                  117967     117875      -92    -0.08
+    runs     (match-heavy)                      11221      11149      -72    -0.64
+
+### A PER-MATCH LEVER IS WORTH WHAT THE MATCH COUNT MAKES IT WORTH
+
+This is a smaller-looking change than slice 5 and a bigger win (-320 against -240), and the two
+payload extremes say why. On incompressible input there are almost no matches, so a per-match saving
+has almost nothing to multiply against: **-0.08 pct**. On listpack there are enough matches for two
+instructions each to add up to 1.91 pct.
+
+Every previous slice in this kernel was PER POSITION or PER LITERAL BYTE, where the incompressible
+payload is the BEST case because every position takes that path. This one inverts that, and the
+inversion is the diagnostic: a lever whose win grows with compressibility is acting on matches, and
+one whose win grows with incompressibility is acting on positions or literals. Read the three
+payloads as a shape, not as three chances to find a win.
+
+The A/A null, measured in a single invocation of the same harness on one ELF and one shape, has ratio median 1.0000 with a bootstrapped 95% median CI of [1.0000, 1.0000].
+
+Degenerate, as in slices 3 through 5, and for the same reason: a pure compute kernel in a
+short-lived process has no cron, no epoll and no clock-dependent work, so all three draws of every
+arm returned bit-identical counts. Read it as "no observed noise on this kernel", not as unlimited
+precision. The bootstrap median-CI gate determined this verdict. CV is provenance only and never
+influenced it.
+
+### THE ARGUMENT LIVES AT ONE BUDGET, SO THE TEST SWEEPS RATHER THAN SAMPLES
+
+The two tests can only disagree at the budgets where the conservative one fires and the exact one
+does not — a single value per payload. A sampled budget steps straight over it and the test passes
+for a change that moved the bail point.
+
+`lzf_two_tier_match_budget_matches_exact_arm_byte_for_byte` therefore sweeps `0..=len+8` densely for
+every equivalence payload, asserts the arms are byte-identical, asserts the output round-trips, and
+asserts it never overruns the budget it was given. A moved bail is observable, not cosmetic: `None`
+is what makes DUMP fall back to the raw encoding, so it changes bytes on the wire. 261 fr-persist
+tests pass.
+
+### RETRY PREDICATE
+
+  1. The compressor ratio is now stale by slices 5 AND 6 together (about 3.3 pct on listpack).
+     Re-price with `scripts/lzf_compressor_ratio.py` when `certification_window.py --for ratio`
+     returns FIT. Arithmetic suggests near 1.535x; that is not a measurement and must not be quoted
+     as one.
+  2. The remaining known asymmetry in this kernel is the LITERAL STORE. C writes `*op++ = *ip++`
+     with no check, having pre-validated; fr calls `Vec::push`, which re-tests capacity and stores
+     the length on every literal byte. That is per-literal-byte, so expect the incompressible
+     payload to be its best case — the mirror of this row. It needs a restructure of the output
+     buffer, which is exactly the shape of change slice 4 lost on, so measure before believing.
+  3. Do not read "two-tier is faster" as general. It won here because the exact test carried a
+     materialise and the conservative one did not, and because matches are frequent on the payload
+     that matters. On the incompressible payload the same change is worth 0.08 pct.
