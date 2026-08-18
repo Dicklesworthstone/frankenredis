@@ -81,10 +81,6 @@ DECLARED_ABSENT = {
     "loading_loaded_perc": "loading",
     "loading_eta_seconds": "loading",
     # `# Debug` -- an opt-in section (INFO debug / everything) fr does not emit at all.
-    "eventloop_duration_aof_sum": "INFO debug section",
-    "eventloop_duration_cron_sum": "INFO debug section",
-    "eventloop_duration_max": "INFO debug section",
-    "eventloop_cmd_per_cycle_max": "INFO debug section",
     # `# Server`, only when a unix socket is configured.
     "unixsocket": "unixsocket configured",
     # `# Server`, only during a graceful shutdown pause.
