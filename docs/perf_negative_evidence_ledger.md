@@ -42858,3 +42858,122 @@ E0061. Not my change and not mine to fix; IvoryPike is notified. Recorded becaus
 build is invisible to a log grep that only matches rch refusals: mine "succeeded" and produced
 a binary whose sha was byte-identical to an ELF from five hours earlier, which is the only
 reason I noticed.
+
+## 2026-08-18 CrimsonHawk: REJECT — the read-gate conversion FAILED its own registered acceptance test, 1 of 8 shapes converted and SCARD REGRESSED to 2.0000 calls/op. The read side is NOT a mirror of the write side (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — this row ships nothing and records a lever that did not work.
+
+I registered the prediction and a BINARY acceptance test in `90ec27f52` before writing a line
+of code, specifically so this could not be argued away afterwards. It failed. Recording it at
+the same length I would have recorded a win.
+
+### THE ACCEPTANCE TEST, AND THE RESULT
+
+Registered: every converted shape must go from **1.0000 to 0.0000** calls/op on
+`plain_borrowed_default_key_read_allows`. Noise cannot produce that, and a neighbouring frame
+moving cannot fake it. Reject under 140 instr/op saved, since the gate is a fixed 175.
+
+Measured on the built ELF, six predicates threaded and fourteen floor arms hoisted:
+
+  shape        after instr/op   gate calls/op   verdict
+  llen             1689.4          1.0000       NOT converted
+  hlen             1700.8          1.0000       NOT converted
+  strlen           1731.8          1.0000       NOT converted
+  zcard            1724.5          1.0000       NOT converted
+  hexists          1947.8          1.0000       NOT converted
+  sismember        2070.1          1.0000       NOT converted
+  scard            1950.4          2.0000       REGRESSED
+  lindex           1825.3          0.0000       converted
+
+**1 of 8.** Against a registered prediction of eight conversions and ~175 instr/op each. No
+part of this ships.
+
+### TWO DEFECTS, BOTH NAMED BY CALL-COUNT ATTRIBUTION
+
+Not guessed. `call_count_delta.py --callers` on the failing shapes:
+
+  llen   1.000  plain_borrowed_default_key_read_gate        <- MY hoist, and nothing else
+  scard  1.000  plain_borrowed_default_key_read_gate        <- my hoist
+         1.000  execute_plain_scard_borrowed                <- a SECOND, unthreaded executor
+
+**Defect 1 — the read cache does not persist across packets on this path.** On `llen` the
+executor no longer calls the gate at all, so the threading itself worked; but the hoist that
+replaced it calls `plain_borrowed_default_key_read_gate` **1.000 times per op**. A cache that
+amortised across the buffered pass would read ~0.0005 at ~2000 ops per pass, which is exactly
+what the WRITE side produced. So the conversion traded one per-packet call for another and the
+net is zero. Whether `read_gate_cache` is reset on the per-packet path (there are five
+`plain_get_read_gate_cache = None` sites) or the floor dispatcher is entered with a fresh cache
+is NOT yet determined, and I am not guessing a mechanism I have not counted.
+
+**Defect 2 — `execute_plain_scard_borrowed` exists separately** from
+`execute_plain_cardinality_borrowed` and was never threaded, so SCARD now evaluates the gate
+TWICE: once in my hoist and once in its own executor. That is a regression, and it is the
+direct cost of my having assumed the `PlainCardinalityCmd` discriminant covered SCARD/ZCARD/HLEN
+end-to-end. It covers the PREDICATE. It does not cover every executor that reaches it.
+
+### THE REUSABLE LESSON
+
+**The read side is not a mirror of the write side, and I planned it as though it were.** The
+write-gate work converted cleanly because each family had ONE executor reaching ONE predicate;
+`call_count_delta` confirmed 1.0000 -> 0.0000 on every batch. The read side has **96 functions
+calling the gate directly**, several commands have more than one executor path, and its cache
+demonstrably behaves differently from the write cache on the floor path.
+
+I verified the predicate structure by reading (`executor -> predicate -> gate`, none of the six
+executors calling the gate directly) and treated that as sufficient. It was not: I checked the
+six executors I had NAMED and never asked whether other executors reached the same predicate.
+The check that would have caught it is the one I already had — **count the gate's callers per
+shape BEFORE editing, not after**. `scard` would have shown its second executor immediately.
+
+### WHAT SURVIVES
+
+The threading itself is sound and behaviour-preserving: `cargo check -p fr-runtime
+--all-targets` clean, `cargo test -p fr-runtime` 632+44+8+1+9 passed, `cargo test -p fr-server`
+380+12+2+1+3 passed. Every call site passes `None`, meaning "evaluate the predicate", so no
+route changes what it computes.
+
+The working tree is left in that compiling no-op state rather than with the failing hoists in
+it. The failed phase-2 patch is preserved at
+`scratchpad/readgate_phase2_main_FAILED.patch` (397 lines) so the diagnosis can be resumed
+without redoing the edit.
+
+The differ corpus landed ahead of this in `290058945` — 573 cases, 0 disagreements — and is
+unaffected: it pins behaviour these commands still have.
+
+### COUNTED MECHANISM
+
+Eight shapes, two-point callgrind subtraction at N=2000 and 2N=4000, startup and seeding
+cancelled. Call counts are exact integers: 1.0000 on six shapes, 2.0000 on one, 0.0000 on one.
+Deterministic, no confidence interval.
+
+CV was not used, as a gate or otherwise.
+
+### PROVENANCE
+
+  ELFs          before `e02764982bfe8509` (HEAD `4a5f7913a`); after `c5ea5aeb6e82159a`, the same
+                tree plus this change. Both plain `--release`, no feature flags, built locally
+                with RCH_CARGO_WRAPPER_BYPASS=1, path from `--message-format=json`, copied to a
+                private path and sha256'd there.
+  bench_elf_sha256=c5ea5aeb6e82159abbc3da21c5ae289e0668daeb84252fd6281d028aa538fa5c
+  incumbent     NOT RUN. Every number is an fr-side count; no ratio against the incumbent is
+                claimed, and none would be meaningful for a change that does not ship.
+  harness       `scripts/shape_instr_per_op.py --fr-only`, `scripts/call_count_delta.py`
+                (including `--callers`), `scripts/frame_delta.py`.
+  host          thinkstation1, 64 cores observed, powersave governor, /data 124G free.
+  PER-ARM loadavg   acceptance run load 24.46 21.11 14.92; attribution run load ~21-24.
+  admissibility Call counts are deterministic and load-immune. No timed row is claimed.
+
+### RETRY PREDICATE
+
+1. **Count the gate's CALLERS per shape before editing.** `call_count_delta.py --callers
+   plain_borrowed_default_key_read_allows` on each target names every executor that reaches it.
+   `scard`'s second executor would have appeared in one command and cost nothing to find.
+2. **Diagnose why `read_gate_cache` does not persist on the floor path before threading
+   anything else.** Until that is understood the conversion cannot pay, because it swaps a
+   per-packet executor call for a per-packet hoist call. The write cache persists and the read
+   cache does not; the five `plain_get_read_gate_cache = None` sites are where to look, and the
+   already-converted GET/HGET/TYPE arms read 0.0000, so it is path-dependent rather than global.
+3. Do NOT re-attempt the eight-shape batch as one unit. Convert LINDEX alone — it already
+   reaches 0.0000 — measure it end to end, and only then widen.
+4. The prediction in `90ec27f52` stands UNMET and should be treated as open, not as history.
