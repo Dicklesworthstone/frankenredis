@@ -49363,3 +49363,54 @@ if someone measures the control admissible 3 of 3 at rounds=9 in a comparably fl
 contradicts it and the rounds recommendation should be revisited. The obvious follow-on, which I
 have NOT done, is whether some rounds between 9 and 36 suffices -- 18 would halve the cost again
 if it holds, and nothing here rules it in or out.
+
+--------------------------------------------------------------------------------
+## 2026-08-18 CrimsonHawk: INSTRUMENT — rounds=18 does NOT halve the cost: it is 1 of 3 admissible, indistinguishable from rounds=9, because admissibility tracks the NULLS and the nulls do not narrow with rounds the way the CI does
+
+CLOSES THE GAP `8983321cd` FLAGGED and closes it NEGATIVELY. That row recommended rounds=36 over
+the harness default of 9 and named the untested middle: "whether rounds=18 suffices, which would
+halve the cost again". It does not.
+
+fr ELF bench_elf_sha256=e2f1a5544bc94dcdda9af8485bf8323b9af4666e848fda8915f21e9dd7072399. All
+draws `--only get_control`, isolated so no other shape can be blamed, loadavg 7.87-8.54 with the
+1-min within 2 pct of the 5-min throughout, 0 cargo/rustc.
+
+  rounds=18   nulls 0.9485 / 1.0091   CI 6.50 pct   worst null dev 5.15 pct   NULL-FAILED
+  rounds=18   nulls 1.0094 / 1.0306   CI 4.82 pct   worst null dev 3.06 pct   NULL-FAILED
+  rounds=18   nulls 1.0049 / 0.9872   CI 5.65 pct   worst null dev 1.28 pct   ADMISSIBLE
+
+  ISOLATED admissibility:  rounds=9  1 of 3   rounds=18  1 of 3   rounds=36  2 of 2
+
+### The interesting part: the CI and the nulls do not improve together
+
+  setting     mean CI width     worst null deviation across draws
+  rounds=9        8.4 pct                3.44 pct
+  rounds=18       5.6 pct                5.15 pct
+  rounds=36       4.0 pct                1.76 pct
+
+The CI narrows almost exactly as 1/sqrt(rounds) -- 8.4, 5.9 predicted against 5.6 measured, 4.2
+predicted against 4.0 measured. THE NULLS DO NOT FOLLOW IT. rounds=18's worst null excursion
+(5.15 pct) is LARGER than anything seen at rounds=9, on a setting with a visibly tighter
+interval. Admissibility is gated on the nulls, not on the CI, so a setting can buy a better
+interval and remain a coin flip -- which is exactly what rounds=18 does.
+
+That is worth carrying beyond this harness: reporting a narrower confidence interval as evidence
+that a configuration is "more precise" says nothing about whether its verdicts will be
+admissible, because the two quantities are measured differently and, here, move differently.
+
+### What to use, and the honest weight of the evidence
+
+Use rounds=36. But the isolated evidence for it is 2 of 2, not 8 of 8: `8983321cd` reached 8 of 8
+by pooling six IN-GROUP `sizepairs` runs with the two isolated ones, and in-group is a different
+context. The defensible statement is that rounds=36 is admissible in 8 of 8 draws ACROSS BOTH
+CONTEXTS, and 2 of 2 isolated, against 1 of 3 at both 9 and 18 isolated. Eight draws total at 36
+and six at the lower settings is thin, and I am not claiming a threshold location from it -- only
+that 18 buys nothing over 9 on the quantity that decides.
+
+RETRY PREDICATE: do not use rounds=18 expecting rounds=36 behaviour; on this evidence it is a
+rounds=9 result with a prettier interval. If someone wants the cost back, the thing to vary is
+NOT rounds -- vary `--ops`, which feeds the same total sample into the CI without changing the
+interleaving, and check the NULLS rather than the CI when judging whether it worked. Reopen the
+rounds question only IF a setting below 36 is measured admissible in at least 5 consecutive
+isolated draws, which is the smallest count that would distinguish it from the 1-in-3 behaviour
+seen at 9 and 18.
