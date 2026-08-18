@@ -4432,6 +4432,8 @@ fn lua_array_table(values: Vec<Vec<u8>>) -> LuaValue {
 /// looks the name up and calls the stored ref. This function is fr's equivalent: run the body so
 /// the real `redis.register_function` builtin collects the callbacks, then call the one asked for.
 ///
+/// Returns a `RespFrame` rather than raw values so both FCALL paths share one conversion.
+///
 /// The body is re-executed per call, which is what fr already does today (it re-transforms the
 /// whole library on every FCALL) and is NOT a regression -- but it is also not upstream's
 /// behaviour, which compiles once at load. That cost is tracked separately as
@@ -4443,7 +4445,7 @@ pub fn function_call_execute(
     function_name: &[u8],
     keys: Vec<Vec<u8>>,
     args: Vec<Vec<u8>>,
-) -> Result<Vec<LuaValue>, (u32, String)> {
+) -> Result<RespFrame, (u32, String)> {
     let source = lua_execution_source(code);
     let mut state = LuaState::new_for_function_load(store, now_ms);
     if let Err(err) = state.execute(source.as_ref()) {
@@ -4467,7 +4469,13 @@ pub fn function_call_execute(
 
     let mut call_args = [lua_array_table(keys), lua_array_table(args)];
     match state.call_registered_function(&callback, &mut call_args) {
-        Ok(values) => Ok(values),
+        // A Lua function returns a LIST; upstream takes the first value and treats an empty
+        // return as nil. Converted with the same call `eval_compiled_script` uses, so this path
+        // and the rewriting path cannot disagree about how a reply is shaped.
+        Ok(values) => {
+            let result = values.into_iter().next().unwrap_or(LuaValue::Nil);
+            Ok(lua_to_resp(&result, state.resp_version == 3))
+        }
         Err(err) => Err((state.current_line, err)),
     }
 }
