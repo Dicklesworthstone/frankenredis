@@ -17,9 +17,11 @@ there is no cache at all and `None` is correct.
 
 So this bounds the convertible subset, from source only, with no build:
 
-  CONVERTIBLE     an fr-server caller's enclosing function holds a write-gate cache
-  NO-CACHE        every fr-server caller is somewhere with no cache in scope
-  NO-SERVER-CALL  reached only from inside fr-runtime, so the question is one level deeper
+  CONVERTIBLE   an fr-server caller's enclosing function holds a write-gate cache
+  VIA-WRAPPER   no fr-server caller, but an in-runtime caller takes the parameter or is itself
+                reachable, so the cache can arrive one hop further in
+  NO-CACHE      every fr-server caller is somewhere with no cache in scope
+  UNREACHABLE   no fr-server caller and no in-runtime caller that could forward a value
 
 The read-gate sibling (`read_gate_coverage.py`) does more than this — three derivation forms,
 shape coverage, unclassified detection — and is left alone rather than refactored, because it is
@@ -102,26 +104,88 @@ def main() -> int:
 
     supplied = len(re.findall(re.escape(SUPPLIED_PARAM), rt))
 
-    # which fr-server functions hold a cache
+    # which fr-server functions hold a cache -- and which can RECEIVE one.
+    #
+    # Holding is not the whole story. `dispatch_floor_fast_del` did not hold a cache until
+    # `bc05733bf` threaded one in from `try_dispatch_floor_classified_action`, which did. Three
+    # more floor helpers -- xack_missing, xdel_missing, xtrim_minid_noop -- are in exactly that
+    # position now, and classifying them as blocked would have hidden three levers behind a
+    # word. So cache-reachability propagates through fr-server callers the same way it does
+    # through fr-runtime ones.
     cache_fns = set()
     for a, b, n in sv_spans:
-        body = sv[a:b]
-        if any(c in body for c in CACHE_NAMES):
+        if any(c in sv[a:b] for c in CACHE_NAMES):
             cache_fns.add(n)
+
+    sv_names = {n for _, _, n in sv_spans}
+    sv_callers = {}
+    for n in sv_names:
+        callers = set()
+        for m in re.finditer(r"(?<![\w])" + re.escape(n) + r"\(", sv):
+            owner = enclosing(sv_spans, m.start())
+            if owner and owner != n:
+                callers.add(owner)
+        sv_callers[n] = callers
+
+    cache_reachable_sv = set(cache_fns)
+    changed = True
+    while changed:
+        changed = False
+        for n in sv_names:
+            if n not in cache_reachable_sv and (sv_callers[n] & cache_reachable_sv):
+                cache_reachable_sv.add(n)
+                changed = True
+
+    # ---- cache reachability over EVERY runtime fn, not just the derivers.
+    #
+    # The first version of this propagation only followed callers that were themselves derivers,
+    # and so reported VIA-WRAPPER 0 / UNREACHABLE 21. That was wrong: a wrapper can neither
+    # derive nor take the parameter and still be called from a cache-holding fn.
+    # `can_execute_plain_append_borrowed` is the case that exposed it -- its only in-runtime
+    # caller is `execute_plain_append_borrowed`, which IS called from `process_buffered_frames`
+    # and `try_dispatch_floor_classified_action`. Reachability is a property of the CALL GRAPH,
+    # so it has to be computed over all of it.
+    rt_names = {n for _, _, n in rt_spans}
+    server_cache_reached = set()
+    for _, _, n in rt_spans:
+        for m in re.finditer(r"(?<![\w])" + re.escape(n) + r"\(", sv):
+            if enclosing(sv_spans, m.start()) in cache_reachable_sv:
+                server_cache_reached.add(n)
+                break
+
+    rt_callers = {}
+    for n in rt_names:
+        callers = set()
+        for m in re.finditer(r"(?<![\w])" + re.escape(n) + r"\(", rt):
+            owner = enclosing(rt_spans, m.start())
+            if owner and owner != n:
+                callers.add(owner)
+        rt_callers[n] = callers
+
+    reachable = set(server_cache_reached)
+    changed = True
+    while changed:
+        changed = False
+        for n in rt_names:
+            if n in reachable:
+                continue
+            if rt_callers[n] & reachable:
+                reachable.add(n)
+                changed = True
 
     verdicts = {}
     for fn in derivers:
-        callers = set()
-        for m in re.finditer(r"(?<![\w])" + re.escape(fn) + r"\(", sv):
-            owner = enclosing(sv_spans, m.start())
-            if owner:
-                callers.add(owner)
-        if not callers:
-            verdicts[fn] = ("NO-SERVER-CALL", callers)
-        elif callers & cache_fns:
-            verdicts[fn] = ("CONVERTIBLE", callers & cache_fns)
+        sv_callers = {enclosing(sv_spans, m.start())
+                      for m in re.finditer(r"(?<![\w])" + re.escape(fn) + r"\(", sv)}
+        sv_callers.discard(None)
+        if sv_callers & cache_reachable_sv:
+            verdicts[fn] = ("CONVERTIBLE", sv_callers & cache_reachable_sv)
+        elif fn in reachable:
+            verdicts[fn] = ("VIA-WRAPPER", rt_callers[fn] & reachable)
+        elif sv_callers:
+            verdicts[fn] = ("NO-CACHE", sv_callers)
         else:
-            verdicts[fn] = ("NO-CACHE", callers)
+            verdicts[fn] = ("UNREACHABLE", rt_callers[fn])
 
     counts = {}
     for v, _ in verdicts.values():
@@ -131,9 +195,10 @@ def main() -> int:
     print(f"routes taking the param (converted, call remains as fallback): {len(takers)}")
     print(f"distinct executors deriving : {len(derivers)}")
     print(f"routes already supplied     : {supplied}")
-    print(f"fr-server fns holding a cache: {len(cache_fns)}  {sorted(cache_fns)}")
+    print(f"fr-server fns HOLDING a cache   : {len(cache_fns)}  {sorted(cache_fns)}")
+    print(f"fr-server fns that can RECEIVE one: {len(cache_reachable_sv)}")
     print()
-    for v in ("CONVERTIBLE", "NO-CACHE", "NO-SERVER-CALL"):
+    for v in ("CONVERTIBLE", "VIA-WRAPPER", "NO-CACHE", "UNREACHABLE"):
         print(f"  {v:16s} {counts.get(v, 0):>4}")
     if args.list:
         print()
