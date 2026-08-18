@@ -55315,3 +55315,84 @@ them — `call_count_delta.py --callers plain_borrowed_default_key_read_allows` 
 AND a source scan for the three derivation forms — and add a shape for any route the scan finds
 that the census cannot see. A total quoted from either alone has been wrong four times out of
 four.
+
+## 2026-08-18 CrimsonHawk: REJECT — rendering an integer span into the vector's storage removed the copy and added a CALL: the helper did not inline, and every composition got slower (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic per-frame SELF costs and deterministic whole-shape SELF-cost totals
+(callgrind Ir, slope method) on THREE compositions, plus a static store count from the
+disassembly of both arms. CV was NOT used, as a gate or otherwise — no coefficient of variation
+appears in this row's decision path and none was computed. No timing verdict is claimed: the
+measurand is a retired-instruction COUNT. The candidate is REVERTED.
+
+Claim class: not applicable — nothing is kept.
+
+### THE PREMISE, FROM THE DISASSEMBLY
+
+`36a66d696` left `decode_value_spans` as the largest term on the integer RESTORE path at 70.68
+instructions per element. Its 7-bit integer arm reads, after the backlen fold that row landed:
+
+    xorps/movaps/movl $0                 <- zero the 20-byte buffer (needed: derived PartialEq)
+    call  write_u64_digits               <- render into stack slot A
+    movaps A -> B ; mov A.tail -> B.tail <- FOUR instructions moving 20 bytes A to B
+    ... capacity check ...
+    movb/movups/mov/mov                  <- store B into the vector
+
+`write_u64_digits` writes into slot A, the enum temporary is built in slot B, and the push copies
+B into the vector. The A-to-B hop is pure: the bytes are already the right bytes. Pushing a zeroed
+span FIRST and rendering into `last_mut()` should have removed it — the buffer that gets written
+becomes the buffer that stays.
+
+### WHAT ACTUALLY HAPPENED
+
+The hop WAS removed. In the same instruction window the integer arm's stores fell from 7 to 3. And
+every composition got SLOWER:
+
+    deterministic whole-shape totals, RESTORE+DUMP, 300 elements, fill 128
+      shape          BEFORE      AFTER       delta       pct
+      all-integer    75,398.9    77,013.9    +1,615.0    +2.14
+      50/50 mixed    66,830.1    70,502.2    +3,672.1    +5.49
+      all-string     59,925.9    60,200.9      +275.0    +0.46
+
+  The frames say why, and it is not subtle:
+
+      decode_value_spans (self)   21,204.0 -> 13,995.0    (70.68 -> 46.65 /elem)
+      push_integer_span            ABSENT  ->  9,300.0    (31.00 /elem)
+
+  `push_integer_span` DID NOT INLINE, despite `#[inline]`. It is a separate frame costing 31.00
+  instructions per integer entry where the construction it replaced cost about 24 inline. Every
+  integer entry now pays a call and a frame to avoid a four-instruction copy.
+
+  The reason is visible in what the helper contains: a `Vec::push` — which carries a capacity
+  check and an out-of-line growth path — and a `match` on `last_mut()` with an `unreachable!` arm.
+  That is a function LLVM declines to paste into a loop body it is already trying to keep small,
+  and the previous form was small precisely because the construction had no `Vec::push` of its own
+  in the middle of it.
+
+  Also worth recording because it is the opposite of the intuition: the ALL-STRING shape got
+  slower too (+0.46 pct) even though a string entry never calls this helper. The decoder's layout
+  moved again, exactly as in `36a66d696`. Any edit inside `decode_value_spans` reaches every arm
+  through code layout, whether or not it touches their code.
+
+### WHY THIS IS NOT THE SAME LESSON AS `36a66d696`
+
+That row's finding was "split the CALL SITE, not the function body", and the fix was to give the
+folding callers their own helper. This one is the reverse failure: a helper was ADDED for one
+caller class and the compiler declined to inline it, so the split cost a call instead of saving
+one. The two together give the actual rule — a helper only pays when the compiler will fold it
+into the caller, and `#[inline]` does not make that decision. Check the frame, not the attribute.
+
+### RETRY PREDICATES
+
+  1. Do NOT retry this by adding `#[inline(always)]`. That forces the paste but brings the
+     `Vec::push` growth path with it into the loop body, which is the thing the compiler was
+     avoiding; and `feedback_inline_never_split_is_a_trade_measure_both_shapes` is on record about
+     forcing inline decisions on shapes that did not ask for them. Reopen ONLY IF a candidate
+     removes the A-to-B hop WITHOUT introducing a function whose body contains a `Vec::push` —
+     e.g. by reserving capacity outside the loop and writing through an index, if that can be done
+     without `unsafe`, which this workspace forbids.
+  2. The A-to-B hop is four instructions per integer entry, about 1.3 pct of the integer shape.
+     That is the whole prize here. Do not spend a build on it again unless the mechanism above is
+     answered first.
+  3. `decode_value_spans` remains the largest term at 70.68 instructions per element and this row
+     did not move it. `write_u64_digits`, called from inside it, is 57.09 of that and has now
+     resisted two attempts (four-digits-per-step, REJECTED; this).
