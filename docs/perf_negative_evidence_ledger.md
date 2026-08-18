@@ -64219,3 +64219,69 @@ than being quietly dropped from the table.
   3. The open scope the bead names is the interpreter's own call depth, which is bounded in FRAMES
      by `MAX_CALL_DEPTH` rather than in BYTES. The same prologue read would price it, and it is not
      priced here.
+
+## 2026-08-18 CrimsonHawk: FOUND AND FIXED — the same prologue instrument that cleared the cjson stack question found a P0 two functions away: fr's Lua parser has NO recursion bound at all, so a ~25 KB EVAL script ABORTS the process (`frankenredis-5h2lu`)
+
+EVIDENCE CLASS: static read of the shipping release ELF's prologues, plus source reading of fr's
+parser and of vendored `deps/lua/src/lparser.c`. No build, no server, no crash induced — the disk
+throttle forbids cargo and none was needed. CV was NOT used and no timing verdict is claimed.
+
+Claim class: CORRECTNESS/AVAILABILITY, not a perf claim. Campaign output: no.
+
+### HOW IT WAS FOUND, WHICH IS THE TRANSFERABLE PART
+
+The row above priced cjson/cmsgpack and cleared them at 5.2x headroom. `1tlyh`'s scope note asked
+one more question — whether the INTERPRETER's own recursion was bounded in BYTES rather than in
+FRAMES — and `MAX_CALL_DEPTH` (128) turned out to bound CALLS while seeing neither expression nor
+block nesting. Grepping for any other bound returned NOTHING: no `LUAI_MAXCCALLS` analogue, no
+script size cap, no token cap.
+
+**Clearing a hazard is not the same as clearing its class.** The encoder was fine; the parser two
+functions away was not, and it was found by finishing the bead's own scope list rather than by
+stopping at the reassuring answer.
+
+### THE DEFECT
+
+Four recursion cycles are reachable from script text, none counted:
+
+    parse_unary      self-recurses on `not` / `-`     336 B/level (2 self-calls)  ~6,241 levels
+    parse_concat     self-recurses on `..`            368 B/level (1 self-call)   ~5,698 levels
+    parse_primary    re-enters parse_expr on `(`      ~2.8 KB per nesting level   ~750 levels
+    parse_statement  re-enters parse_block on `do`
+
+A Rust stack overflow ABORTS the process — it does not unwind and cannot be caught. Commands run on
+spawned reactor threads, which take Rust's default 2 MiB rather than the main thread's 8 MiB. So a
+script of roughly 25 KB of nested punctuation, from any client permitted to run EVAL, is an
+availability kill rather than a parse error.
+
+### THE INCUMBENT REFUSES, SO THIS IS ALSO A PARITY GAP
+
+`deps/lua/src/lparser.c:276-282`, called from `subexpr()` and `chunk()`, with `LUAI_MAXCCALLS` 200:
+
+    if (++ls->L->nCcalls > LUAI_MAXCCALLS)
+      luaX_lexerror(ls, "chunk has too many syntax levels", 0);
+
+7.2.4 returns that error and stays up.
+
+### THE FIX, AND THE ONE DECISION IN IT
+
+`9f016ba19`, a direct port of `enterlevel`/`leavelevel`. The limit is upstream's 200 exactly —
+raising it accepts chunks the incumbent rejects, lowering it rejects chunks the incumbent accepts.
+
+The decision worth recording is PLACEMENT: the counter is charged on the RECURSIVE CALLS, not on
+function entry. fr's precedence ladder is split across nine functions where upstream's `subexpr` is
+one, so charging entry would cost two or more levels per parenthesis and refuse scripts upstream
+accepts — trading a crash for a parity break, which is the trade `zo5ac`'s tests exist to prevent.
+The test therefore pins BOTH directions: four cycles refused at 500 deep, and 50 levels still
+accepted.
+
+### WHAT IS OWED
+
+  1. A BUILD. Neither the guard nor its test has been compiled. UNBUILT is stated in the commit
+     subject so it cannot be mistaken for a verified fix.
+  2. The 300-SEQUENTIAL-NEST case in the test is the one that catches the obvious way to get this
+     wrong: a missing `leave_syntax_level` turns the counter into a running total rather than a
+     depth, and every one of the four deep cases would still pass.
+  3. The paren-cycle figure (~2.8 KB/level) is a SUM over the ladder and some of those frames are
+     inlined into each other, so it is an estimate with the sign known but not the exact value. The
+     `parse_unary` and `parse_concat` figures are exact — each has a confirmed direct self-call.
