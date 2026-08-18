@@ -70042,6 +70042,122 @@ mod tests {
     }
 
     #[test]
+    fn sort_get_hash_is_refused_like_every_other_get_yx1wa() {
+        // (frankenredis-yx1wa) `GET #` returns the element itself and dereferences no other key,
+        // which makes exempting it look safe. It is not what upstream CHECKS: sort.c:254-264
+        // refuses on any `get` token BEFORE the operation is recorded, and `#` only becomes
+        // special later in `lookupKeyByPattern`. An exemption here ACCEPTS a call 7.2.4 refuses,
+        // which is the direction that matters in a security fix -- and it is invisible without
+        // this row, because the reply to an accepted `SORT k GET #` is a perfectly ordinary
+        // sorted list.
+        let mut store = Store::new();
+        store.dispatch_client_ctx = DispatchClientContext {
+            authenticated_user: b"restricted".to_vec(),
+            acl_permissions: Some(DispatchAclPermissions {
+                all_commands: true,
+                // The list itself is inside the user's patterns, so the ordinary key check
+                // passes and what this test observes is the OPTION rule, not a NOPERM key.
+                key_patterns: vec![AclKeyPattern {
+                    pattern: b"mylist".to_vec(),
+                    read: true,
+                    write: true,
+                }],
+                all_keys: false,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let reply = dispatch_argv(
+            &[
+                b"SORT".to_vec(),
+                b"mylist".to_vec(),
+                b"GET".to_vec(),
+                b"#".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("the refusal is a reply, not a CommandError");
+        assert_eq!(
+            reply,
+            RespFrame::Error(
+                "ERR GET option of SORT denied due to insufficient ACL permissions.".to_string()
+            ),
+            "GET # must be refused for a user without full key access, exactly as GET pattern is"
+        );
+    }
+
+    #[test]
+    fn sort_full_key_access_is_satisfied_by_a_selector_not_only_the_root_set_yx1wa() {
+        // (frankenredis-yx1wa) Upstream's ACLUserCheckCmdWithUnrestrictedKeyAccess (acl.c:1757)
+        // walks EVERY selector and succeeds as soon as one both admits the command and carries
+        // unrestricted keys; in redis the root set is simply the first selector in that list, so
+        // reading `all_keys` off the root alone is that loop stopped after one iteration.
+        //
+        // Both halves are asserted because they fail in opposite directions and a single-sided
+        // fix passes one of them:
+        //
+        //   * a selector WITH unrestricted keys that grants SORT must ALLOW the option --
+        //     refusing it loses a legal call, the 9hori direction, which no differ built from
+        //     denied cases would ever report;
+        //   * a selector with unrestricted keys that does NOT grant SORT must still REFUSE --
+        //     a bare `all_keys` scan over selectors would hand out the access this check exists
+        //     to withhold.
+        let granting = DispatchAclPermissions {
+            all_commands: true,
+            all_keys: true,
+            ..Default::default()
+        };
+        let unrelated = DispatchAclPermissions {
+            all_commands: false,
+            allowed_commands: ["get".to_string()].into_iter().collect(),
+            all_keys: true,
+            ..Default::default()
+        };
+
+        for (selector, expect_allowed) in [(granting, true), (unrelated, false)] {
+            let mut store = Store::new();
+            store.dispatch_client_ctx = DispatchClientContext {
+                authenticated_user: b"selectored".to_vec(),
+                acl_permissions: Some(DispatchAclPermissions {
+                    all_commands: true,
+                    key_patterns: vec![AclKeyPattern {
+                        pattern: b"mylist".to_vec(),
+                        read: true,
+                        write: true,
+                    }],
+                    all_keys: false,
+                    selectors: vec![selector],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+
+            let reply = dispatch_argv(
+                &[
+                    b"SORT".to_vec(),
+                    b"mylist".to_vec(),
+                    b"BY".to_vec(),
+                    b"weight_*".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .expect("SORT over a missing key is an empty reply, not an error");
+            let refused = reply
+                == RespFrame::Error(
+                    "ERR BY option of SORT denied due to insufficient ACL permissions.".to_string(),
+                );
+            assert_eq!(
+                !refused, expect_allowed,
+                "selector-granted unrestricted key access decides this, not the root set: \
+                 expect_allowed={expect_allowed}, got reply={reply:?}"
+            );
+        }
+    }
+
+    #[test]
     fn acl_command_selectors_prefer_known_subcommands() {
         assert!(is_known_acl_command_selector("client|info"));
         assert!(is_known_acl_command_selector("get"));
