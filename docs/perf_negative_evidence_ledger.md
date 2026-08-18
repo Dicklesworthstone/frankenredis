@@ -59648,3 +59648,64 @@ and is untouched — the trick depends on the 24-bit precondition the packed rep
      0` is one line of C and it named a lever that four rounds of profiling fr alone had missed. The
      next question of the same kind is what else fr does per probe or per position that `lzf_c.c`
      skips outright.
+
+## 2026-08-18 CrimsonHawk: MEASURED — both regression shapes I flagged on my own `pop_front` lever are CLEAN: LPOP/RPOP thrash reads −0.91 pct and the drained single-chunk queue −0.13 pct, so nothing was traded away (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir) differenced across CYCLE COUNTS at
+a FIXED key count, two draws per shape. CV was NOT used, as a gate or otherwise; none was computed.
+No timing verdict is claimed: the measurand is a retired-instruction COUNT. No code changed and NO
+BUILD was run — /data is 10G above the brake and the brief asks for artifact reuse, so both arms
+are the ELFs `e32cc8b71` already recorded.
+
+Claim class: not applicable — nothing is kept. This row closes two retry predicates I wrote against
+my own shipped change.
+
+  BEFORE `5275985dc3c20363006cff32eb60347fc4614c8e1558cc2f38e3765c1f2067bb`
+  AFTER  `99e32657383c8a9ef60468534a02f92f6e7afe76a4f8c68424a2e803ffd1b81b`
+
+### WHAT `e32cc8b71` LEFT UNMEASURED, AND WHY IT MATTERED
+
+That lever makes a front pop LEAVE the chunk in reversed physical order. Two shapes could have paid
+for that, and the row said so rather than assuming:
+
+  * `pop_back` still goes through `make_mut()`, which UN-REVERSES a front-biased chunk. An
+    alternating LPOP/RPOP workload on one chunk would reverse it on every other operation.
+  * a chunked list popped back DOWN to a single chunk, then alternating LPOP and RPUSH — the case
+    the 100-element null did NOT cover, because a 100-element list is PACKED and never reaches the
+    chunked path at all.
+
+### BOTH ARE CLEAN
+
+    instructions per cycle, 15-byte elements, BEFORE -> AFTER
+      A  400-element chunked, LPOP+RPOP+RPUSH+LPUSH   20,675.8 -> 20,601.3   −0.36 pct
+                                                      20,638.2 -> 20,615.2   −0.11 pct
+      B  400 built, 330 drained, LPOP+RPUSH           12,507.1 -> 12,511.3   +0.03 pct
+                                                      12,526.8 -> 12,510.4   −0.13 pct
+      C  400 built, 330 drained, LPOP+RPOP+push pair  23,680.6 -> 23,464.9   −0.91 pct
+                                                      23,684.9 -> 23,465.6   −0.93 pct
+
+    91-93 pct idle, loadavg 6.19-7.10 throughout.
+
+  No shape regresses; C — the one built specifically to provoke the un-reverse — is 0.9 pct FASTER.
+  Nothing was traded away.
+
+### WHAT I CANNOT CLAIM ABOUT THESE SHAPES
+
+The drained cases were built to leave ONE chunk (400 pushed, 330 popped, 70 remaining, and a list
+does not convert back to the packed representation once chunked). **I could not verify the chunk
+count from outside the process**, so what B and C actually establish is "a drained chunked list of
+about 70 entries", not "provably one chunk". If a future row needs the single-chunk case pinned, it
+needs an instrumented build or a `DEBUG`-surface chunk count, neither of which exists today.
+
+Nor is the ABSENCE of thrash explained. A plausible reading is that 70 remaining entries make the
+un-reverse cheap enough to disappear into the per-command floor, but that is a hypothesis and this
+row does not test it. What is measured is that the cost does not appear at this size.
+
+### RETRY PREDICATES
+
+  1. The `pop_back` mirror fix stays UNWRITTEN. Its motivating shape now reads −0.91 pct, so there
+     is no measured cost to remove. Reopen ONLY IF a shape is found where the un-reverse is
+     visible — the candidate is a LARGE single chunk, i.e. an alternating workload on a list that
+     is chunked but has just crossed 129, where the chunk still holds ~128 entries.
+  2. Do not treat B and C as covering the single-chunk case by name until the chunk count can be
+     observed. The measurement is sound; the label would be an overstatement.
