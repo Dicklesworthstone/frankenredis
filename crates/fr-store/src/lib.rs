@@ -34499,7 +34499,7 @@ impl Store {
         // wording and same `Error registering functions: ` prefix as the scanning path, which is
         // what keeps the two distinguishable from the bare-header path on the wire.
         // (frankenredis-fnreg)
-        for entry in registrations {
+        for (index, entry) in registrations.iter().enumerate() {
             if entry.name.is_empty()
                 || !entry
                     .name
@@ -34509,6 +34509,25 @@ impl Store {
                 return Err(StoreError::GenericError(
                     "ERR Error registering functions: ERR Library names can only contain \
                      letters, numbers, or underscores(_) and must be at least one character long"
+                        .to_string(),
+                ));
+            }
+            // (frankenredis-9hori) A name may not repeat WITHIN its own library. Upstream
+            // functions.c::functionLibCreateFunction does `dictFetchValue(li->functions, name)`
+            // immediately after the charset check and refuses with this exact text, so the two
+            // tests run in that order here too.
+            //
+            // `finish_function_load` below cannot cover this: it deliberately skips the library
+            // being loaded (`other_name != &lib_name`) because a REPLACE re-registers every name
+            // the old copy had. The scanning path has always had this check; the executed path
+            // never did, so since the migration a library registering one name twice LOADED,
+            // leaving two entries FUNCTION LIST would report and FCALL would resolve by position.
+            if registrations[..index]
+                .iter()
+                .any(|prior| prior.name == entry.name)
+            {
+                return Err(StoreError::GenericError(
+                    "ERR Error registering functions: ERR Function already exists in the library"
                         .to_string(),
                 ));
             }
@@ -78523,6 +78542,60 @@ mod tests {
         assert!(
             !store.function_libraries.contains_key("lib1"),
             "library must not be registered when duplicate fname is rejected"
+        );
+    }
+
+    #[test]
+    fn function_load_with_registrations_rejects_duplicate_name_within_library() {
+        // (frankenredis-9hori) THE SAME REFUSAL AS
+        // `function_load_rejects_duplicate_function_name_within_library`, on the path FUNCTION
+        // LOAD actually uses. That test calls the SCANNING `function_load`, which is why it kept
+        // passing while the executed path accepted duplicates: a test bound to one store API
+        // cannot observe the command switching to another.
+        //
+        // Upstream functions.c::functionLibCreateFunction does `dictFetchValue(li->functions,
+        // name)` after the charset check; wording confirmed against 7.2.4 under
+        // frankenredis-fnfdup.
+        // Qualified: this module imports names explicitly rather than by glob, and no existing
+        // test constructs a FunctionEntry.
+        use crate::FunctionEntry;
+
+        let mut store = Store::new();
+        let code = b"#!lua name=lib1\n\
+                     redis.register_function('dupe', function() return 1 end)\n\
+                     redis.register_function('dupe', function() return 2 end)";
+        let dupe = |name: &str| FunctionEntry {
+            name: name.to_string(),
+            description: None,
+            flags: Vec::new(),
+        };
+        let err = store
+            .function_load_with_registrations(code, false, &[dupe("dupe"), dupe("dupe")])
+            .expect_err("duplicate fname must error on the executed path too");
+        assert_eq!(
+            err,
+            StoreError::GenericError(
+                "ERR Error registering functions: ERR Function already exists in the library"
+                    .to_string()
+            )
+        );
+        assert!(
+            !store.function_libraries.contains_key("lib1"),
+            "library must not be registered when duplicate fname is rejected"
+        );
+
+        // Two DIFFERENT names in one library still load, so the check cannot be a blanket refusal.
+        store
+            .function_load_with_registrations(code, false, &[dupe("one"), dupe("two")])
+            .expect("distinct names must still load");
+        assert_eq!(
+            store
+                .function_libraries
+                .get("lib1")
+                .expect("library present")
+                .functions
+                .len(),
+            2
         );
     }
 
