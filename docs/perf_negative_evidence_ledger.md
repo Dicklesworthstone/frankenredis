@@ -48109,3 +48109,60 @@ be judged on the THROUGHPUT harness against 0.8578, or on `cache-misses`, whose 
 2.3006x clears its 18.26 pct null by 7x and is the one microarchitectural quantity here that
 four runs agree on. Before quoting any A/B counter from this harness, measure its A/B spread
 across at least four runs; its A/A null will understate that spread, on this evidence by 6x.
+
+--------------------------------------------------------------------------------
+
+## 2026-08-18 CrimsonHawk: CLOSING THE ATTRIBUTION LINE — `geosearch_2`'s 2.3006x cache-miss excess is DIFFUSE: seven hypotheses eliminated with numbers, including identical 88-byte listpacks and an identical ≤9-box scan in both engines (`frankenredis-eh2ct`)
+
+NO LEVER IS PROPOSED AND NO RATIO IS CLAIMED. This records where the attribution stops, so the
+next reader starts where I stopped rather than where I started. The certified position is
+unchanged: `geosearch_2` is BEHIND at 0.8578 control-normalised (`f8067cba3`, two draws agreeing
+to 0.15 pct), fr retires ~21 pct FEWER instructions, and the one resolved microarchitectural
+quantity is cache misses at 2.3006x worst-of-four against an 18.26 pct A/A null (`03b4afefd`).
+
+### Seven hypotheses, each eliminated with a number
+
+  1. WORK VOLUME. fr retires 0.7857-0.7923x the incumbent's instructions across four hardware
+     runs, spread 0.84 pct. Any instruction-reduction lever attacks a dimension fr wins by a
+     fifth. (`e96a9b03b`, `03b4afefd`)
+  2. ALLOCATOR. jemalloc cuts fr's simulated D1 misses >=31.68 pct, but the throughput effect
+     (+1.74 pct normalised, +0.96 pct raw) is SMALLER than the jemalloc arm's own between-draw
+     spread (3.64 pct / 2.43 pct). Rejected on magnitude, not class. (`c4a2f6e91`, `a277535d7`)
+  3. DATA-WRITE VOLUME. fr/redis writes are 0.9955x at -P16. The 1.3738x I first measured, and
+     the memset in `handle_readable` I traced it to, were an artifact of my own harness
+     pipelining 100 deep. (`ee11062ab`)
+  4. BRANCH MISPREDICTS. Unresolved, not eliminated: worst-of-four 1.0396x against a 3.00 pct
+     A/A null is a 1.3x margin. Simulated `--branch-sim` reverses the sign and may not be used.
+     (`8c4f86a63`, `03b4afefd`)
+  5. FRAME CONCENTRATION. A per-frame D1-read-miss profile at -P16 is FLAT: 39.4 misses per op
+     total, largest single frame `execute_frame_internal` at 5.64 pct. No frame holds the 2.3x.
+  6. VALUE REPRESENTATION. MEASURED THIS ROW, and it is the one I most expected to pay. Both
+     engines report `OBJECT ENCODING g` = **listpack** and `MEMORY USAGE g` = **88 bytes** for
+     the identical two-member geo zset, with `zset-max-listpack-entries` 128 on both. At n=200
+     both report `skiplist` and fr uses LESS memory, 14,576 against 17,880. The value fr reads
+     is byte-for-byte the same size as the incumbent's, so the 1.53-1.73x cache-REFERENCE excess
+     is not the stored data.
+  7. CELL-SCAN COUNT. Also measured this row, from upstream source. I hypothesised redis merges
+     contiguous geohash boxes where `geo_cells_for_steps` does not. It does not:
+     `geo.c::membersOfAllNeighbors` walks all 9 neighbours and skips only a box identical to the
+     IMMEDIATELY PREVIOUS one (`last_processed`), for the huge-radius duplicate case. fr's
+     `seen[..nseen]` dedup is if anything slightly STRONGER, being against all cells so far.
+     Both engines perform up to 9 box scans. No lever there.
+
+### What that leaves, stated plainly rather than dressed as a lead
+
+Same encoding, same 88 bytes, same scan count, fewer instructions, equal writes -- and fr still
+issues 1.53-1.73x the cache REFERENCES and takes 2.3006x the misses. The excess is therefore
+spread across fr's command machinery rather than concentrated in the data, the algorithm, or any
+one frame. Nothing in the instruments used here can attribute it further: callgrind gives
+per-frame costs and `perf stat` gives per-process totals, and a diffuse excess is exactly what
+neither resolves.
+
+RETRY PREDICATE: do NOT re-derive the seven above; each carries its number and its commit. The
+next instrument, not the next hypothesis, is what this needs -- `perf mem` or `perf c2c` to
+attribute misses to DATA ADDRESSES rather than to code frames, which would say whether fr's
+excess references land on many small objects or on repeated passes over few. Reopen a targeted
+lever only IF such an attribution names a structure holding more than about 20 pct of the miss
+excess; below that a lever cannot move 2.3006x. And judge any candidate on the THROUGHPUT
+harness against 0.8578 or on cache-misses, never on cycles or instructions, which `03b4afefd`
+showed are respectively unresolvable and already won.
