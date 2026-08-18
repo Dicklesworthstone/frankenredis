@@ -50359,3 +50359,63 @@ RETRY PREDICATE:
      because back-chunking against too large a budget still yields boundaries the DUMP path
      accepts — but "does not show" is not "is not there", and `rpush_owned` calls
      `note_rpush_command_grow` after its loop exactly as `lpush_impl` did.
+
+--------------------------------------------------------------------------------
+## 2026-08-18 CrimsonHawk: MEASURED — all four `cascade` candidates use FEWER cycles than the incumbent, and only TWO have a genuine server-CPU shortfall: `publish`'s is NOT CPU at all (0.9980x against its own control)
+
+DISCHARGES the obligation in `80044f42c`, which withdrew "deficit" language from `pttl`/`publish`
+and said `publish`, `expiretime` and `getbit` "have NO cycle measurement and should not be
+described as deficits until they do". They do now.
+
+  fr    bench_elf_sha256=e2f1a5544bc94dcdda9af8485bf8323b9af4666e848fda8915f21e9dd7072399
+  redis bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7
+  `perf stat` on the server pid for the duration of `redis-benchmark -n 1000000 -P 16`, shape
+  definitions copied verbatim from `balanced_square_ab.py:554`, and CRUCIALLY `get_control`
+  re-measured in the SAME invocation as each shape so the comparison is not against a control
+  from another run. loadavg 10.20-10.48, CPU MHz 2395-2994. One draw per shape.
+
+  shape        cycles fr/redis   control fr/redis   cycles vs control   throughput-normalised
+  publish          0.8615x           0.8632x            0.9980x            0.9558 / 0.9317
+  expiretime       0.9318x           0.8679x            1.0736x            0.9291
+  getbit           0.8858x           0.8688x            1.0196x            0.9419
+  pttl             0.9281x           0.8660x            1.0717x            0.9312 / 0.9244
+
+### Two things this settles
+
+FIRST: `cycles fr/redis` is BELOW 1.0 on all four. fr uses 7-14 pct FEWER cycles than the
+incumbent on every one of them. NONE of these shapes is behind Redis, which is what
+`80044f42c` corrected and this now confirms on the remaining three rather than just on `pttl`.
+
+SECOND, and it is the new part: the four SPLIT once each is compared against a control measured
+beside it. `expiretime` (1.0736x) and `pttl` (1.0717x) earn materially less of fr's usual margin
+on CPU. `getbit` is marginal at 1.0196x. `publish` is 0.9980x -- IDENTICAL to its own control to
+within two parts in a thousand.
+
+### `publish`'s shortfall is real in throughput and absent in cycles
+
+Its throughput-normalised figure is 0.9558 and 0.9317 across two admissible draws, a 4-7 pct
+shortfall against the control. Its CYCLE ratio matches the control at 0.9980x. Those cannot both
+be server-CPU statements, so `publish`'s shortfall is NOT server CPU: it lives in syscalls,
+wakeups, or the reply path -- a `PUBLISH` with no subscribers returns `:0` and does almost no
+work, so per-op fixed costs dominate it. Anyone opening a `publish` lever should measure
+SYSCALLS, not cycles, and `perf stat -e` with syscall tracepoints or `strace -c` is the
+instrument, not callgrind and not `perf stat` cycles.
+
+That also means the throughput-normalised screen and the cycle measurement disagree for one
+shape in four. The screen is not wrong -- it measured a real throughput shortfall -- but it does
+not tell you WHERE the shortfall is, and I would have assumed CPU for all four without this.
+
+### Weight of the evidence, stated because it is thin
+
+ONE DRAW PER SHAPE. The control being re-measured in the same invocation removes the largest
+confound (host state between runs) and the four control readings agree closely with each other
+-- 0.8632, 0.8679, 0.8688 -- which is itself a consistency check on the method. But no A/A null
+was taken on this instrument in this row, and the 1.0196x on `getbit` is well inside the range
+where a second draw could move it either side of parity.
+
+RETRY PREDICATE: take a second draw on `expiretime` and `pttl` before treating their CPU
+shortfall as standing; they are the only two above 1.07x and the only two worth a lever. Do NOT
+open a `publish` lever against cycles -- 0.9980x against its own control says the cost is not
+there; measure syscalls first. `getbit` at 1.0196x is not yet distinguishable from its control
+and needs a second draw before it is called anything. And note none of these four may be
+described as behind the INCUMBENT: all four use fewer cycles than Redis.
