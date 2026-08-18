@@ -4683,10 +4683,26 @@ impl ServerState {
     /// master generates these — a replica receives the master's DEL over the
     /// replication stream and must not synthesize its own (it would leak a
     /// spurious DEL to its sub-replicas).
+    /// (frankenredis-getexgate) OUTLINED. Every borrowed fast-path executor ends with
+    /// `propagate_expired_key_deletions(&take_lazy_expired_propagation())`, and on a route where
+    /// nothing expired the slice is EMPTY — counted at 1.0000 calls/op on `ttl_nonvolatile`,
+    /// where the whole body is one `is_empty()` test and a return. Out of line, that empty case
+    /// still costs a call and return on EVERY command.
+    ///
+    /// The body is far too large to `#[inline]` wholesale at 217 call sites, so only the
+    /// emptiness test is inlined and the real work stays behind an `#[inline(never)]` boundary.
+    #[inline]
     fn propagate_expired_key_deletions(&mut self, evicted_db_keys: &[Vec<u8>]) {
         if evicted_db_keys.is_empty() {
             return;
         }
+        self.propagate_expired_key_deletions_nonempty(evicted_db_keys);
+    }
+
+    /// (frankenredis-getexgate) The propagation itself. `#[inline(never)]` is LOAD-BEARING: it
+    /// keeps this body out of all 217 call sites, which is the entire point of the split.
+    #[inline(never)]
+    fn propagate_expired_key_deletions_nonempty(&mut self, evicted_db_keys: &[Vec<u8>]) {
         if !matches!(
             self.replication_runtime_state.role,
             ReplicationRoleState::Master

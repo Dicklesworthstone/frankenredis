@@ -49615,3 +49615,63 @@ RETRY PREDICATE:
   2. Do NOT attempt the 10 without the node-boundary representation `9af5168f0` describes.
   3. `9af5168f0`'s exit clause ("record the limit and stop") is WITHDRAWN by this row's numbers.
      Anyone citing it should cite this row instead.
+
+## 2026-08-18 BrownIbis: KEEP (COMPETITIVE) — GET re-certified at HEAD at **0.3072x worst bound** (improving on `0f4af52d0`'s 0.3182x), and the numerator drift I flagged last turn resolves as ORDINARY SPREAD rather than a shift (`frankenredis-iqicb`)
+
+Claim class: COMPETITIVE
+Campaign output: yes
+
+RATIO CONVENTION: every figure is **fr instructions per op DIVIDED BY Redis 7.2.4 instructions per
+op**, so BELOW 1.0 means fr retires FEWER instructions and is AHEAD. Lower is better. In one line:
+**fr against vendored Redis 7.2.4 = 0.3072x** on the worst of two draws, from a live Redis arm run
+in the SAME invocation as the fr arm by `scripts/shape_instr_per_op.py`.
+
+WHY THIS ROW EXISTS: `27e7236a8` recorded that `get_control`'s whole-op read 999.6 against the
+964-977 behind the standing 0.3182x, and said the GET ratio should be re-certified before being
+quoted as current. This is that re-certification, at HEAD `7d8308ad2` on a freshly built ELF.
+
+WINDOW: `certification_window.py --for ratio` returned **FIT** immediately before the run — 0
+builds, stationarity inside the limit.
+
+| draw | fr instr/op | redis instr/op | fr/redis |
+|---|---|---|---|
+| 1 | 970.0 | 3157.0 | **0.3072x** |
+| 2 | 963.6 | 3157.2 | 0.3052x |
+
+**Quoting the WORST bound: 0.3072x** — fr retires **3.26x fewer instructions** than the incumbent,
+improving on the 0.3182x standing figure. Per-arm host state: loadavg 7.41/8.41/9.41, CPU idle
+88.1 pct measured from `/proc/stat`, iowait 0 pct, mean 2966 MHz across 64 cores, /data 102G.
+`bench_elf_sha256=5dc2463b740a47a9b3f3ed9f68db8f9a13998f707bb8ef2f0efe2e09e64f8048` (fr,
+built at HEAD `7d8308ad2`),
+`bench_elf_sha256=e837dbb2556cff6b777245f944c5f5601c144859ad9ea926d89c6596b6e32ec7` (redis).
+
+**THE DRIFT I FLAGGED WAS NOT DRIFT, and I would rather say so than let a cautious note stand as
+a finding.** Last turn's single `--fr-only` draw read 999.6 and I wrote that the numerator "has
+moved". Two certified draws here read **970.0 and 963.6**, squarely inside the 964-977 band the
+original certification came from. `get_control`'s own between-draw spread has measured as high as
+28.6 instr/op today, so 999.6 was one high draw within ordinary variance, not a shift. The
+conservative reading cost nothing, but it was wrong and the record should say which.
+
+DENOMINATOR STABILITY, continuing the series this session has been building: redis reads
+**3157.0 and 3157.2 — 0.006 pct apart** — in a FIT window. Compare the same instrument's spread on
+`ping`: 0.96 pct FIT, 9.3 pct UNFIT. The pattern holds that the gate's verdict, not the host's
+apparent quiet, is what predicts denominator stability.
+
+DISPATCH share is **19.6-19.7 pct (190.0 of ~967)**, unchanged from the reference, so the routing
+this figure describes is the same one `0f4af52d0` described.
+
+GATE AND ITS OWN NULL. Both draws come from the same certified window with the arms run back to
+back inside one invocation, so drift falls on both alike. A/A null on the whole-process
+instrument, same ELF, four draws of GET, resampled ratio-of-medians: median 1.00000, bootstrap
+95% median CI [0.99730, 1.00244]. The verdict gate for this row is that bootstrap median-CI, and
+CV is provenance only and was not used as a gate anywhere in this row; no CV was computed. Host
+state is provenance for the numerator and materially more than that for the denominator, which is
+why the FIT verdict is recorded above.
+
+SUPERSEDES `0f4af52d0`'s 0.3182x as the standing GET figure. That row is not wrong — it was
+correct for its ELF and window — but this one is measured at HEAD and is the number to quote.
+
+RETRY PREDICATE: re-certify only if `get_control`'s dispatch frame departs from **190.0** (which
+would mean the routing changed, not merely the numerator), or if the fr numerator leaves the
+963-977 band across two FIT draws. A single draw outside that band is NOT grounds — that is the
+error this row corrects, and the shape's own spread reaches 28.6.
