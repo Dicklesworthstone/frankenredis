@@ -56830,3 +56830,362 @@ reads it.
      elements — about 130 and 107 per element emitted. `encode_bulk_string_slice` is 58.00 of that
      and is the only term above 20. It is the next thing on this path, and it is on the UNIVERSAL
      reply path, so it needs a null on a small-reply non-list shape before anything lands.
+
+--------------------------------------------------------------------------------
+
+## VERIFIED — the map conversion does not double-count: zero duplicate `cmdstat_` keys, zero set difference against Redis 7.2.4, zero count mismatches over 44 commands
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — a correctness verification, closing the last unchecked batch of the
+commandstats vein.
+
+68 literal call sites were routed to `record_map_with_kind`, which SKIPS the direct-field match
+entirely. **The failure mode is specific and is not a wrong number — it is a DUPLICATE.** If a
+command with a direct field reached the map path, it would be recorded in both places, `all()`
+would emit two tuples under the same name, and `INFO commandstats` would print two
+`cmdstat_llen:` lines. That is the signature, and it is what this checks.
+
+Two prior batches of this vein were already verified behaviourally — the ten new direct fields,
+and the 25 `hist_slot()` enum arms. This was the batch with no behavioural check.
+
+### STATIC HALF
+
+The map-converted set is 67 distinct commands, extracted from HEAD. Its intersection with the
+25-command direct-field set is **empty**. That is necessary and not sufficient: a runtime-named
+caller could in principle reach the map path with a direct-field name, which source inspection
+cannot exclude.
+
+### BEHAVIOURAL HALF
+
+A workload spanning BOTH groups — 24 map-converted commands and 20 direct-field commands — driven
+three times each on both engines after `CONFIG RESETSTAT`:
+
+    duplicate cmdstat_ keys in frankenredis .................. NONE
+    commands one engine reports and the other does not ....... NONE
+    per-command calls= mismatches over 44 commands ........... 0
+
+The set difference is the check that catches the mirror failure: a command that stopped being
+recorded at all would be absent from fr and present in Redis, and `comm -3` returned empty in
+both directions.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No timing, no ratio, no instruction count — integer counters compared between two engines, so no
+A/A, no bootstrap interval and no quiet window apply and none is claimed. The structural control
+is that the 20 direct-field commands must ALSO read equal: they stayed on the match/field path,
+so a run where the map group passed and the direct group did not would indict the conversion
+rather than the harness.
+
+### PROVENANCE
+
+  ELF           fr `b4b4fd25a9df9d04...` (built from HEAD earlier this session)
+  bench_elf_sha256=b4b4fd25a9df9d04
+  incumbent     vendored `legacy_redis_code/redis/src/redis-server` (Redis 7.2.4), same harness
+                invocation, identical command sequence, as the ORACLE — not a performance arm.
+  harness       `map_parity.sh`, three runs of each of 44 commands after `CONFIG RESETSTAT`.
+  host          /data 62G free. NO BUILD was started — three cargo and three rustc were running
+                for this project when the window opened and the slot never freed; this reuses an
+                ELF already built.
+  disposition   VERIFICATION ONLY. No source file changed.
+
+### RETRY PREDICATE
+
+1. Re-run whenever a call site moves between `record_map_with_kind`,
+   `record_canonical_with_kind` and `record_slot_with_kind`. All three write the same buckets and
+   only the duplicate check distinguishes a wrong route from a right one.
+2. Check for DUPLICATE keys, not only wrong counts. A double-count leaves both entries at the
+   right value in some orderings and shows only as a repeated key.
+3. Diff the full key SET in both directions. A command that silently stopped recording is the
+   mirror failure and does not show up as a mismatch on any command you thought to list.
+
+## 2026-08-18 CrimsonHawk: KEEP (SELF-SPEEDUP) — the read re-answered "which kind of chunk is this" once per ELEMENT; hoisting the match to the chunk loop is −9.27 pct worst and −14.52 pct off one LRANGE — and the restore-shape instrument turns out to have a ±1 pct spread I have been quoting past (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir), whole-shape SELF-cost totals
+differenced across READ COUNTS at a fixed key count, and TWO-BINARY A/B with the A/A and the A/B in
+ONE INVOCATION and the candidate arm BRACKETED by control arms, on two element kinds. CV was NOT
+used, as a gate or otherwise — no coefficient of variation appears in this row's decision path and
+none was computed. No timing verdict is claimed: the measurand is a retired-instruction COUNT.
+
+THE SAME-INVOCATION A/A null median is 1.004210, bootstrap 95% CI [0.994819, 1.006524] on the
+string read shape and 0.998632, CI [0.994772, 1.003030] on the integer one, each taken in the same
+invocation as the A/B it gates. The bootstrap median-CI is the verdict gate and it excludes zero on
+both.
+
+Claim class: SELF-SPEEDUP. Campaign output: no — no vs-incumbent ratio is banked; the incumbent
+appears only as the parity oracle that must NOT move.
+
+### PROVENANCE
+
+  ELF           AFTER `4eceae6c624c670fb4111eceae3068632e8b9223b0ef822440b5015f9c89fce5`,
+                BEFORE `3a297c35ab840675731b37e776119c4960e644bfd21b0eff6527d9cb5b4f3f8b`.
+  bench_elf_sha256=4eceae6c624c670fb4111eceae3068632e8b9223b0ef822440b5015f9c89fce5
+
+  Booted and hashed from `/proc/<pid>/exe`. Peers moved `fr-protocol` and `fr-runtime` since the
+  previous row's arms, so both arms here were rebuilt together and carry those changes equally.
+
+### THE LOOP RE-ANSWERED A QUESTION THAT CANNOT CHANGE INSIDE A CHUNK
+
+`6fb775b43` left `emit_list_range` at 42.51 instructions per element. Its loop, disassembled:
+
+    mov 0x8(%rsp),%rdx ; cmp $-2 ; jne     <- the iterator discriminant, from the STACK
+    mov 0x10(%rsp),%rsi                    <- and three more state fields
+    mov 0x20(%rsp),%rcx
+    mov 0x28(%rsp),%rax
+    cmp $-1,%rdx ; je ; test ; je ; cmp $1 <- a FOUR-WAY dispatch on the chunk kind
+    mov 0x18(%rsp),%rdx ; cmp ; je
+
+  About ten instructions of state shuffling and a four-way dispatch, per element, to re-answer
+  WHICH KIND OF CHUNK IS THIS — whose answer cannot change inside a chunk. The state is on the
+  stack rather than in registers because the iterator is an enum of chunk-iterators nested inside
+  another enum, and the whole thing is too big to keep in registers.
+
+  `ListValue::for_each_borrowed` hoists the match to the CHUNK loop, so each inner loop walks one
+  concrete container. Order is identical to `iter()` by construction: the same chunk order, the
+  same `front_biased` reversal, the same `as_bytes` for a retained span.
+
+    <ListValue>::for_each_borrowed   42.51 -> 23.41 instructions per element
+
+  ORACLE: `for_each_borrowed_matches_iter_for_every_repr_qj6jn` compares against `iter()` for
+  Packed, retained-listpack Deque and owned Deque, at seven lengths across the 128-element chunk
+  boundary, over lists built by pushing at the BACK, at the FRONT, and at BOTH ends. The
+  front-built corpus is the point: `ListChunk::Owned` carries a `front_biased` flag that REVERSES
+  physical order, and an implementation that forgot it would pass a back-built corpus and return
+  the head-inserted region backwards.
+
+### THE MEASUREMENT
+
+    deterministic, per LRANGE(0,-1), differenced across read counts at a fixed key count
+      all-string    39,044.8 -> 33,376.3    −5,668.5    −14.52 pct
+      all-integer   32,164.4 -> 26,939.8    −5,224.6    −16.24 pct
+
+    whole-op A/B, RESTORE + THREE reads per key, slope 10 vs 30 keys
+      ALL-STRING   median −10.7258 pct, CI [−10.8998, −10.2614], n=5; null ratio 1.004210
+        WORST SINGLE DRAW −10.2614 pct
+      ALL-INTEGER  median −9.6952 pct, CI [−10.0720, −9.2701], n=4; null ratio 0.998632
+        WORST SINGLE DRAW −9.2701 pct  <- the figure this row claims
+
+    85-92 pct idle, loadavg 11.9-14.8, MHz mean 1900-2500 against a 1429-4292 spread.
+
+### A CORRECTION TO MY OWN INSTRUMENT DISCIPLINE
+
+The RESTORE+DUMP regression check first read +0.96 pct on strings, which would have been the
+largest cost any of these read levers had shown. Re-running the SAME pair of binaries twice more
+gave +0.13 pct and −0.08 pct. So the number is not a cost — and more usefully, the instrument is
+not what I have been calling it:
+
+    restore_annot totals, SAME binary, three runs:  BEFORE spread 189.7 (0.33 pct)
+                                                    AFTER  spread 623.2 (1.07 pct)
+    the three deltas from the same pair:            +0.96, +0.13, −0.08 pct
+
+  I have described this instrument as "deterministic" and quoted single-run deltas from it at
+  +0.26 pct (`84fca03ad`), +0.10 / −0.21 pct (`6fb775b43`) and +0.26 / +0.09 pct (`36a66d696`).
+  Those magnitudes are INSIDE its spread and should not have been quoted as costs or as their
+  absence. The reason is structural: `restore_annot` differences two KEY COUNTS in separate
+  valgrind runs, so it inherits the slope-duration exposure recorded on `308db786f`, while
+  `lrange_annot` differences two READ COUNTS at a FIXED key count and does not. Nothing in those
+  rows' headline claims depended on the small numbers, but the word "deterministic" did too much
+  work and this row withdraws it for that instrument.
+
+  What can be said here: the RESTORE+DUMP shape shows NO cost above the instrument's own ~1 pct
+  spread, and the read saves 5,669 instructions per read on strings, so the trade is not close at
+  any read count the break-even (`48eb38749`: 0.105 reads/RESTORE) makes relevant.
+
+### PARITY
+
+    LRANGE / LINDEX / LLEN over str, int, mixed and 200-byte pools, x fills −2/−1/4/128/300,
+    x n 3..300, x built-vs-RESTORED — BEFORE vs AFTER:                0 of 160 diverging
+      the same 160 vs redis 7.2.4:                                    0 of 160 diverging
+    workload sweep vs redis 7.2.4:                                    4 of 42, UNCHANGED
+    fr-store 943, 0 failures; clippy clean; fmt unchanged by this change.
+
+### RETRY PREDICATES
+
+  1. `for_each_borrowed` serves the FULL-RANGE arm only. A partial `LRANGE 5 17` still goes through
+     `iter_from(s).take(n)` and still pays the per-element dispatch. Reopen ONLY IF a profile shows
+     partial ranges are a real workload share — they are cheap in absolute terms precisely because
+     they emit fewer elements, so the per-element cost matters less.
+  2. `encode_bulk_string_slice` is now 58.00 of the read's remaining ~111 instructions per element
+     and is the only term above 20. A peer (`frankenredis-getexgate`) is ACTIVE in that file this
+     turn on `push_i64`; coordinate before editing it. Their finding there is directly relevant: a
+     runtime-length `extend_from_slice` lowers to a `memcpy` CALL whose size dispatch dwarfs a
+     short copy, which is exactly the shape of this encoder's payload path for a 15-byte element.
+  3. Do NOT quote these as incumbent gains. `d8a1861d9` measured redis's marginal read at 3.64x
+     (strings) and 6.61x (integers) fr's BEFORE this lever; the read side is a lead being widened.
+
+## 2026-08-18 CrimsonHawk: REJECT — const-length arms on `push_usize` are PROVABLY INERT: its 19 call sites are a grep count, its surviving hot callers reach it only for values >= 100, and the arms cover < 100 (`frankenredis-getexgate`)
+
+Claim class: SELF-SPEEDUP
+Campaign output: no — the change was written and round-trip verified, then NOT built. Rejected on
+measurement and source before spending the build. No fr/Redis ratio is claimed.
+
+### THE CANDIDATE, AND WHY IT LOOKED LIKE THE BEST OF THE FAMILY
+
+Three siblings in `fr-protocol` have now been given const-length arms and each paid:
+`encode_integer_reply` (`9a937431c`, `a8fab1da6`), `push_len_header` (`6c76dfe52`), `push_i64`
+(`c5153c727`, ZSCAN +47.1). `push_usize` is the fourth, still ending in
+`extend_from_slice(&buf[pos..])` — a runtime-variable length that lowers to a `memcpy` CALL — and
+`grep -c 'push_usize('` reports **19 call sites**, the widest reach of the four.
+
+That reasoning was source enumeration, and it is wrong.
+
+### THE MEASUREMENT: ZERO CALLS PER OP, EVERYWHERE
+
+`push_usize` calls/op on one ELF, across nine shapes chosen for heavy reply framing:
+
+  xrevrange_base 0.0000   zrange_withscores 0.0000   mget_3 0.0000   sinter_9 0.0000
+  hscan_zero 0.0000       zscan_zero 0.0000          get_control 0.0000
+
+Zero on all of them, and its self cost differences to 0 instr/op. It is a small private `fn`, so
+rustc INLINES it: the body still runs, but it never appears as a frame and its memcpy is
+attributed to whichever caller absorbed it.
+
+I first theorised that my own `encode_into` fix (`f0ea19ff6`) had removed its hot caller. That is
+ALSO wrong, and the check refuted it: `push_usize` reads 0.0000 on `xrevrange_base` on the ELF
+from BEFORE that fix as well.
+
+### THE SOURCE SETTLES IT: THE ARMS CANNOT FIRE
+
+Both surviving call sites sit in the `else` branch of a small-value fast path:
+
+  * `push_len_header` — reached only after its own `if n < 100` arms decline (`6c76dfe52`).
+  * `encode_bulk_string_slice_impl` — reached only after its `SMALL_FAST` `len < 10` and
+    `len < 100` arms decline (`frankenredis-vlis9`).
+
+So every caller that still reaches `push_usize` does so **because the value is 100 or more**. The
+arms I wrote cover `n < 10` and `n < 100`. They can never fire, by construction, for any caller
+that exists.
+
+The 19 grep hits are the definition, comments, and calls that were ALREADY fast-pathed by the
+three sibling fixes. Reach was captured by those levers, not left for this one.
+
+### WHAT IS AND IS NOT CLAIMED
+
+CLAIMED: `push_usize` is 0.0000 calls/op on nine shapes; both surviving call sites are
+post-fast-path `else` branches gated on the value being >= 100.
+
+NOT CLAIMED: that `push_usize` never executes. It does, inlined, whenever a length or count is
+>= 100. A workload with large collections or long bulk values would run its general path — which
+these arms do not touch either.
+
+NOT CLAIMED: that a >= 100 fast path is worthless. It is unmeasured; no shape here produces such
+a value often enough to show it, and adding one would be the honest way to test it.
+
+### NULL CONTROL AND TIMING CONTRACT
+
+No timed quantity and no ratio are claimed. The call counts are exact integers from two-point
+differencing at N=2000 and 2N=4000 on one ELF, and nine shapes agreeing at 0.0000 is the result.
+
+For the instrument generally, measured in a single invocation of the same harness on one ELF and
+one shape: A/A null median 1.000002, bootstrapped over 20,000 resamples, 95% median CI
+[0.996069, 1.003947], from six draws and 30 pairwise ratios, banked in `0bf781d57`.
+
+CV was not used, as a gate or otherwise; the gate is the bootstrap 95% median CI quoted above,
+and an effect inside that interval is not claimed.
+
+### PROVENANCE
+
+  ELF           `3a297c35ab840675731b37e776119c4960e644bfd21b0eff6527d9cb5b4f3f8b` (current) and
+                `ce52bdf37fbee4ed1544bb92b1c0209531c46255c2b622d95aa079cc5013841c` (pre-`f0ea19ff6`)
+                for the refuted theory. NO build was run for the candidate.
+  bench_elf_sha256=3a297c35ab840675731b37e776119c4960e644bfd21b0eff6527d9cb5b4f3f8b
+  incumbent     NOT RUN — no ratio is claimed by this row.
+  harness       `scripts/shape_instr_per_op.py`, `scripts/call_count_delta.py`.
+  host          /data 61G free. loadavg 14.21 13.46 11.92, CPU idle 87 pct. The paired build was
+                REFUSED by the harness's new builder guard — three frankenredis `rustc` processes
+                had started since the check at the top of the turn — which is why the reach was
+                measured instead, and why the wasted build never happened.
+  disposition   NO CODE CHANGED. `crates/fr-protocol/src/lib.rs` is byte-identical to HEAD.
+
+### RETRY PREDICATE
+
+1. Do NOT add `n < 100` arms to `push_usize`. Its callers only arrive there when `n >= 100`.
+2. If a large-collection shape is ever added (an array header or bulk length in the hundreds or
+   thousands), re-open with a `>= 100` fast path INSTEAD — the general path's digit loop and its
+   memcpy are what such a workload would pay, and neither is addressed here.
+3. The reusable check, which cost two minutes and saved a build: before optimising a helper
+   because grep reports many call sites, measure its calls/op on the shapes you care about. A
+   count of call sites is not reach. This is the second time in this campaign that a source
+   enumeration named a target the binary never executes.
+
+## 2026-08-18 CrimsonHawk: REJECT (premise) — the const-length payload fusion stops paying at M = 10 and is 18 instructions per element WORSE there than not fusing; the `len <= 8` arm should be `len <= 7`, and widening it to 16 is refuted before it costs a build (`frankenredis-qj6jn`)
+
+EVIDENCE CLASS: deterministic instruction counts (callgrind Ir) differenced across READ COUNTS at a
+FIXED key count — the tight form, per `feedback_a_key_count_slope_is_not_deterministic` — plus a
+disassembly of both arms. CV was NOT used, as a gate or otherwise; none was computed. No timing
+verdict is claimed: the measurand is a retired-instruction COUNT. NOTHING WAS BUILT: another agent
+held this project's build slot for the whole window.
+
+Claim class: not applicable — nothing is kept.
+
+### THE PREMISE
+
+`84fca03ad`'s retry predicate named `encode_bulk_string_slice` as the largest remaining read term at
+58.00 instructions per element and required any candidate to show below that. The obvious candidate
+was to widen `frankenredis-iqicb`'s const-length payload fusion — which fuses payload+CRLF into ONE
+const-size store for `len <= 8` — up to 16, so the 15-byte elements a list read actually carries
+would stop calling `memcpy`.
+
+Before spending a build on eight more match arms, the fusion was measured AT ITS OWN BOUNDARY. If
+it is worth widening, cost per element must rise sharply the moment the fallback takes over.
+
+### WHAT THE STEP ACTUALLY LOOKS LIKE
+
+    per-element cost of ONE LRANGE(0,-1), 300 elements, by ELEMENT LENGTH
+      len   encoder   memcpy    TOTAL
+        5     53.00     1.61    93.11
+        6     55.00     1.60    95.44
+        7     53.00     1.59    92.83
+        8     51.00    14.62   130.35     <- INSIDE the const path, and the worst point measured
+        9     59.00    14.60   112.33
+       12     58.00    14.61   110.73
+       15     58.00    14.61   111.60
+       16     58.00    12.61   109.10
+       17     58.00    12.61   109.35
+       24     58.00    12.61   109.45
+       32     58.00    13.61   109.76
+
+    len 8 re-measured: 129.90. len 6 re-measured: 95.11. The step is reproducible.
+
+  The boundary is NOT at 8. It is between 7 and 8, and it is INSIDE the const path. At `len = 8`
+  the fused form costs 130 instructions per element where the generic fallback one byte later costs
+  112 — the const arm is about EIGHTEEN INSTRUCTIONS PER ELEMENT WORSE THAN NOT FUSING AT ALL.
+
+### THE DISASSEMBLY SAYS WHY, AND IT KILLS THE WIDENING IDEA
+
+    the len == 8 arm                    the generic fallback
+      cmp $0x8,%r12 ; jne                 ... capacity check ...
+      mov (%r15),%rax                     call *memcpy@GLIBC   (len bytes)
+      mov %rax,(%rsp)      <- STACK       movw $0xa0d,(%rbp,%r14,1)   <- CRLF as a 2-byte IMMEDIATE
+      ... build [u8; 10] ...
+      call *memcpy@GLIBC   (10 bytes)
+
+  `encode_small_payload::<N, M>` builds an `[u8; M]` and hands it to `extend_from_slice`. That is
+  only free while `M` is small enough for the compiler to emit as inline stores. At `M <= 9`
+  (`len <= 7`) it does, and memcpy costs 1.6 instructions per element. At `M = 10` it does NOT: the
+  array is materialised on the STACK and then copied out with a `memcpy` CALL — so the fused arm
+  pays a stack round-trip AND copies 10 bytes where the fallback copies 8 and writes CRLF as an
+  immediate.
+
+  THAT REFUTES THE WIDENING. Extending the fusion to `len <= 16` would give every arm `M >= 11`,
+  i.e. the losing shape, eight more times. The idea is not "more of a good thing"; it is more of the
+  one arm that already fails.
+
+### WHAT SHOULD HAPPEN INSTEAD, SPECIFIED NOT BUILT
+
+  * `len <= 8` becomes `len <= 7`, and the `<8, 10>` arm goes. One character and one line.
+  * Expected: about 18 instructions per element on exactly-8-byte elements, nothing elsewhere,
+    because no other length changes path.
+  * This touches the UNIVERSAL reply path, so it needs what `84fca03ad`'s predicate demanded of any
+    change here: a null on a small-reply shape that touches no lists, alongside the list numbers.
+
+### RETRY PREDICATES
+
+  1. Do NOT widen the const-payload fusion. Reopen ONLY IF a candidate keeps `M <= 9` — for
+     instance by fusing the LENGTH HEADER with a short payload rather than the payload with CRLF,
+     which is a different partition of the same bytes and may keep the store register-sized.
+  2. The `len <= 7` narrowing is worth one build and is the only change this row endorses. Gate it
+     on the same instrument: the `len = 8` point must fall from ~130 to the ~112 plateau, and the
+     `len <= 7` points must not move.
+  3. `frankenredis-iqicb` introduced arms 1..8 together and measured the family, not the arms. This
+     row does not overturn its result for the arms that pay — 5, 6 and 7 sit ~17 instructions per
+     element below the plateau, which is the fusion working. It overturns the top of its range.

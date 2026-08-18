@@ -44,6 +44,24 @@ export RCH_CARGO_WRAPPER_BYPASS=1
 build() { env -u CARGO_TARGET_DIR cargo build --release -p fr-server --bin frankenredis 2>&1 | tail -1; }
 sha() { sha256sum "$1" | cut -d' ' -f1; }
 
+# (frankenredis-getexgate) REFUSE WHILE ANOTHER BUILD IS RUNNING. Two cargo processes
+# writing this one ./target interleave artifacts, and the arms come out with different
+# SHAs even though HEAD held and no peer file changed. MEASURED: a pair produced
+# 844d8cc11371a711 then 0072d4db319d664e with git reporting a clean tree throughout, and
+# a later clean run reproduced 0072d4db... exactly -- so that mismatch was the race, not
+# a code difference. This is what "ONE build per project at a time" protects, and the
+# cost of breaking it is silent.
+#
+# Match the rustup TOOLCHAIN BINARY, not any command line containing "rustc": a peer's
+# shell wrapper mentions both "rustc" and "frankenredis" and produced a false positive
+# that would have blocked a clean window.
+builders=$(ps -eo args --no-headers | grep -c '^/home/ubuntu/\.rustup/[^ ]*/bin/rustc .*frankenredis' || true)
+if [ "$builders" -gt 0 ]; then
+  echo "REFUSING: $builders frankenredis rustc process(es) already building." >&2
+  echo "A shared target dir makes a paired build non-deterministic. Wait for the slot." >&2
+  exit 2
+fi
+
 free_g=$(df -BG --output=avail /data | tail -1 | tr -dc '0-9')
 if [ "$free_g" -lt 42 ]; then
   echo "REFUSING: /data has ${free_g}G free, below the 42G hard stop" >&2
@@ -89,7 +107,11 @@ echo "   after' = $A2"
 
 if [ "$A1" != "$A2" ]; then
   echo
-  echo "CONTAMINATED: a peer edit landed between the arms ($A1 then $A2)." >&2
+  echo "CONTAMINATED: the arms differ ($A1 then $A2)." >&2
+  echo "TWO causes, and the second is the one that fooled me: (a) a peer edit landed" >&2
+  echo "between the arms, or (b) another cargo process was writing this same ./target," >&2
+  echo "which produces this symptom with HEAD unchanged and git reporting a clean tree." >&2
+  echo "The guard at the top of this script now refuses (b) up front." >&2
   echo "DISCARD this pair and re-run; the arms differ by more than your patch." >&2
   exit 1
 fi
