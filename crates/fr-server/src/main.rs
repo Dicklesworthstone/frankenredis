@@ -5159,6 +5159,10 @@ fn main() -> ExitCode {
         let timestamp = now_unix_time();
         let ts = timestamp.ms;
         let ts_us = timestamp.us;
+        // (frankenredis-w1djx) Cycle-start command count, differenced at the bottom of the loop
+        // for `eventloop_cmd_per_cycle_max`. Sampled here beside the cycle's other start-of-pass
+        // reading so the two cannot drift apart.
+        let commands_at_cycle_start = runtime.total_commands_processed();
 
         #[cfg(feature = "io-uring-writes")]
         if let Some(writer) = uring_writer.as_mut() {
@@ -5302,6 +5306,13 @@ fn main() -> ExitCode {
             &mut sharded_staging,
         );
 
+        // (frankenredis-w1djx) Bracket the periodic maintenance so INFO's `# Debug` can report
+        // `eventloop_duration_cron_sum` from real data. Upstream times ONE function,
+        // `serverCron`; fr has no such function and spreads the same work across the three
+        // calls below, so this sums them. The mapping is approximate BY CONSTRUCTION and is
+        // documented on the field rather than hidden here.
+        let cron_started_us = now_unix_time().us;
+
         // Run active expiry cycle once per tick (fast cycle).
         let _ = runtime.run_active_expire_cycle(ts, fr_eventloop::ActiveExpireCycleKind::Fast);
 
@@ -5314,6 +5325,8 @@ fn main() -> ExitCode {
 
         // Check for completed background child processes
         runtime.check_child_processes(ts);
+
+        let cron_duration_us = now_unix_time().us.saturating_sub(cron_started_us);
 
         // Drive the primary link from the main loop so replicas can sustain
         // online deltas, ACK traffic, and reconnect after link loss.
@@ -5409,7 +5422,12 @@ fn main() -> ExitCode {
         // records to the on-disk AOF file and fsync per appendfsync policy.
         // Without this, writes between full rewrites (SAVE/BGREWRITEAOF) were
         // never persisted and were lost on restart.
+        // (frankenredis-w1djx) `eventloop_duration_aof_sum`: upstream's
+        // `duration_stats[EL_DURATION_TYPE_AOF]` covers the AOF work done inside the loop, which
+        // for fr is exactly this flush.
+        let aof_started_us = now_unix_time().us;
         runtime.flush_aof_to_disk(ts);
+        let aof_duration_us = now_unix_time().us.saturating_sub(aof_started_us);
 
         // Deliver pending Pub/Sub messages to subscribed clients.
         deliver_pubsub_messages(
@@ -5568,6 +5586,16 @@ fn main() -> ExitCode {
 
         let eventloop_duration_us = eventloop_cycle_duration_us(ts_us, now_unix_time().us);
         runtime.record_eventloop_cycle(eventloop_duration_us);
+
+        // (frankenredis-w1djx) `eventloop_cmd_per_cycle_max`. The runtime has no notion of a
+        // cycle boundary, so the DELTA is computed here, where one exists, and only the maximum
+        // is kept. `saturating_sub` rather than a plain subtraction because the counter is
+        // reset by CONFIG RESETSTAT, which would otherwise make this underflow into a
+        // permanently unbeatable maximum.
+        let commands_this_cycle = runtime
+            .total_commands_processed()
+            .saturating_sub(commands_at_cycle_start);
+        runtime.record_eventloop_breakdown(aof_duration_us, cron_duration_us, commands_this_cycle);
 
         // Check for graceful shutdown request
         if runtime.server.shutdown_requested {

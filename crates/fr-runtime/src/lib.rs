@@ -4401,6 +4401,22 @@ pub struct ServerState {
     /// `Runtime` is per-connection, so a max stored there would silently report only the
     /// cycles that happened to run under one client's runtime.
     pub eventloop_duration_max_usec: u64,
+    /// (frankenredis-w1djx) Total microseconds spent flushing the AOF inside the event loop.
+    /// Upstream's `server.duration_stats[EL_DURATION_TYPE_AOF].sum`.
+    pub eventloop_duration_aof_sum_usec: u64,
+    /// (frankenredis-w1djx) Total microseconds spent in periodic maintenance inside the event
+    /// loop. Upstream's `server.duration_stats[EL_DURATION_TYPE_CRON].sum`.
+    ///
+    /// fr HAS NO SINGLE `serverCron`, so this is not a one-to-one port: upstream times one
+    /// function, while fr spreads the same work across the active-expire cycle, the ops/sec
+    /// sample and the child-process check. Those three are summed, and the mapping is stated
+    /// here rather than implied, because a reader comparing this field against redis is
+    /// comparing "fr's periodic maintenance" with "the body of serverCron" -- close, and not
+    /// identical.
+    pub eventloop_duration_cron_sum_usec: u64,
+    /// (frankenredis-w1djx) Most commands processed in any single event-loop cycle.
+    /// Upstream's `server.el_cmd_cnt_max`, reported as `eventloop_cmd_per_cycle_max`.
+    pub eventloop_cmd_per_cycle_max: u64,
     /// Upstream Redis 7.2's `enable-debug-command` knob (no | local |
     /// yes). Default `"no"` denies DEBUG with the canonical lockout
     /// error. Settable at startup via `--enable-debug-command` or the
@@ -4619,6 +4635,9 @@ impl Default for ServerState {
             applying_master_stream: false,
             replica_priority: 100,
             eventloop_duration_max_usec: 0,
+            eventloop_duration_aof_sum_usec: 0,
+            eventloop_duration_cron_sum_usec: 0,
+            eventloop_cmd_per_cycle_max: 0,
             enable_debug_command: "no".to_string(),
             repl_diskless_sync: true,
             repl_diskless_sync_delay_sec: 5,
@@ -7922,6 +7941,39 @@ impl Runtime {
     /// cheap differential agrees" defect filed as `frankenredis-edwnn`.
     pub fn eventloop_duration_max_usec(&self) -> u64 {
         self.server.eventloop_duration_max_usec
+    }
+
+    /// Record the per-cycle breakdown upstream's `# Debug` section reports.
+    ///
+    /// (frankenredis-w1djx) Called once per event-loop iteration by the server loop, which is
+    /// the only place that can see where a cycle's time went. `commands_this_cycle` is a DELTA
+    /// the caller computes from `stat_total_commands_processed`, not a counter kept here: the
+    /// runtime has no notion of a cycle boundary.
+    pub fn record_eventloop_breakdown(
+        &mut self,
+        aof_usec: u64,
+        cron_usec: u64,
+        commands_this_cycle: u64,
+    ) {
+        self.server.eventloop_duration_aof_sum_usec = self
+            .server
+            .eventloop_duration_aof_sum_usec
+            .saturating_add(aof_usec);
+        self.server.eventloop_duration_cron_sum_usec = self
+            .server
+            .eventloop_duration_cron_sum_usec
+            .saturating_add(cron_usec);
+        if commands_this_cycle > self.server.eventloop_cmd_per_cycle_max {
+            self.server.eventloop_cmd_per_cycle_max = commands_this_cycle;
+        }
+    }
+
+    /// Commands processed so far, for the server loop to difference across a cycle.
+    ///
+    /// (frankenredis-w1djx) The counter lives on the store; this exposes it so the loop does not
+    /// have to reach through `server.store` and couple itself to that layout.
+    pub fn total_commands_processed(&self) -> u64 {
+        self.server.store.stat_total_commands_processed
     }
 
     /// Track a rejected connection (maxclients exceeded).
@@ -46754,6 +46806,36 @@ impl Runtime {
         // only — never after the last — so trim a single trailing
         // "\r\n" pair (i.e. the final empty-line separator) before
         // returning the bulk reply.
+        // (frankenredis-w1djx) `# Debug`, which fr did not render at all -- its absence is why
+        // fr's section list is shorter than upstream's.
+        //
+        // GATED ON AN EXPLICIT SECTION NAME, deliberately, and NOT on `section_requested`.
+        // Upstream guards this block with `dictFind(section_dict, "debug")` ALONE
+        // (server.c:6238). `all` and `everything` only set flags -- `genInfoSectionDict` never
+        // adds "debug" to the dict -- so INFO, INFO all and INFO everything all omit it, and it
+        // appears only when named. `section_requested` returns true for all/everything/default,
+        // so using it here would emit the section in three cases upstream does not.
+        if sections
+            .iter()
+            .any(|section| section.eq_ignore_ascii_case("debug"))
+        {
+            // Built with `format!` + `extend_from_slice` rather than `write!`, because that is
+            // how this function already appends section text and it needs no `io::Write` in
+            // scope; the `write!(info, ...)` calls elsewhere in INFO live in other functions.
+            let debug_section = format!(
+                "# Debug\r\n\
+eventloop_duration_aof_sum:{}\r\n\
+eventloop_duration_cron_sum:{}\r\n\
+eventloop_duration_max:{}\r\n\
+eventloop_cmd_per_cycle_max:{}\r\n\r\n",
+                self.server.eventloop_duration_aof_sum_usec,
+                self.server.eventloop_duration_cron_sum_usec,
+                self.server.eventloop_duration_max_usec,
+                self.server.eventloop_cmd_per_cycle_max,
+            );
+            info.extend_from_slice(debug_section.as_bytes());
+        }
+
         if info.ends_with(b"\r\n\r\n") {
             info.truncate(info.len() - 2);
         }
